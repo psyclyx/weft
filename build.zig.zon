@@ -1,0 +1,23 @@
+.{
+    .name = .scion,
+    .version = "0.0.0",
+    // Generated once by the Zig toolchain; never changes.
+    .fingerprint = 0x5eaafe7710ee4c9f,
+    .minimum_zig_version = "0.16.0",
+    // Path deps into the monorepo checkout (the phasekeep app pattern):
+    // local development never round-trips through GitHub. Once
+    // psyclyx/stemma exists these become url+hash pins so the repo builds
+    // standalone from a clone (see README, "Dependencies").
+    .dependencies = .{
+        .snail = .{ .path = "../../lib/snail" },
+        .stemma = .{ .path = "../../lib/stemma" },
+    },
+    .paths = .{
+        "build.zig",
+        "build.zig.zon",
+        "src",
+        "config",
+        "README.md",
+        "LICENSE",
+    },
+}
