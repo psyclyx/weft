@@ -38,6 +38,9 @@ pub const secure = @import("secure.zig");
 pub const session = @import("session.zig");
 pub const Pick = pick.Pick;
 pub const file = @import("file.zig");
+pub const ShellFs = @import("ShellFs.zig");
+pub const backing = @import("backing.zig");
+pub const Backing = backing.Backing;
 
 test {
     @import("std").testing.refAllDecls(@This());

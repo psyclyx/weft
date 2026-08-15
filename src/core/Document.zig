@@ -244,10 +244,14 @@ pub fn addPeer(self: *Document, gpa: Allocator, name: []const u8) AddPeerError!P
         if (slot) |p| if (std.mem.eql(u8, p.name, name)) return error.DuplicatePeer;
     }
 
-    const history = try self.doc.serialize(gpa);
+    const history = self.doc.serialize(gpa) catch |e| switch (e) {
+        error.Unrealized => unreachable, // editing replicas are always realized
+        else => |err| return err,
+    };
     defer gpa.free(history);
     var replica = TextDoc.open(gpa, history) catch |e| switch (e) {
         error.Corrupt, error.MissingDependency => unreachable, // trusted local encode
+        error.Unrealized => unreachable, // editing replicas are always realized
         else => |err| return err,
     };
     errdefer replica.deinit(gpa);
@@ -292,6 +296,7 @@ pub fn peerPull(self: *Document, gpa: Allocator, id: PeerId) Error![]Edit {
     defer gpa.free(batch);
     return peer.replica.merge(gpa, batch) catch |e| switch (e) {
         error.Corrupt, error.MissingDependency => unreachable, // trusted local sync
+        error.Unrealized => unreachable, // editing replicas are always realized
         else => |err| return err,
     };
 }
@@ -336,12 +341,41 @@ pub fn peerCommit(self: *Document, gpa: Allocator, id: PeerId) Error!bool {
     defer pre.deinit(gpa);
     const edits = self.doc.merge(gpa, batch) catch |e| switch (e) {
         error.Corrupt, error.MissingDependency => unreachable, // trusted local sync
+        error.Unrealized => unreachable, // editing replicas are always realized
         else => |err| return err,
     };
     defer gpa.free(edits);
     if (edits.len == 0) return false;
     try self.commitEdits(gpa, id, edits, &pre);
     return true;
+}
+
+/// Sync a peer's replica to an exact (possibly past) version of the
+/// main replica: merge exactly the events in `version_token`'s causal
+/// past that the shadow lacks — never the head's extras. The backing
+/// peer's save flow needs this: after a save the disk holds the *saved*
+/// version's content even when the head has already moved on.
+pub fn peerSyncTo(self: *Document, gpa: Allocator, id: PeerId, version_token: []const u8) Error!void {
+    const peer = self.peerAt(id);
+    const shadow_v = try peer.replica.version(gpa);
+    defer gpa.free(shadow_v);
+    const batch = self.doc.eventsBetween(gpa, shadow_v, version_token) catch |e| switch (e) {
+        error.Corrupt, error.MissingDependency => unreachable, // trusted local tokens
+        error.Unrealized => unreachable, // editing replicas are always realized
+        else => |err| return err,
+    };
+    defer gpa.free(batch);
+    const edits = peer.replica.merge(gpa, batch) catch |e| switch (e) {
+        error.Corrupt, error.MissingDependency => unreachable, // trusted local sync
+        error.Unrealized => unreachable, // editing replicas are always realized
+        else => |err| return err,
+    };
+    gpa.free(edits);
+}
+
+/// Read access to a peer replica's text (the backing mirror's diff base).
+pub fn peerText(self: *const Document, id: PeerId) *const Rope {
+    return self.peers.items[id.index()].?.replica.text();
 }
 
 // ── Commit log / subscription ───────────────────────────────────────
@@ -483,5 +517,8 @@ pub fn eventsSince(self: *const Document, gpa: Allocator, remote_version: []cons
 
 /// The whole history (bootstrap batch for a peer with no frontier).
 pub fn serialize(self: *const Document, gpa: Allocator) Error![]u8 {
-    return self.doc.serialize(gpa);
+    return self.doc.serialize(gpa) catch |e| switch (e) {
+        error.Unrealized => unreachable, // editing replicas are always realized
+        else => |err| return err,
+    };
 }

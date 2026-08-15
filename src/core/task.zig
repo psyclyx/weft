@@ -30,6 +30,21 @@ fn futexWait(word: *const std.atomic.Value(u32), expected: u32) void {
 /// `max_waiters` must be ≤ maxInt(i32): the kernel takes a *signed*
 /// count, and a negative one wakes exactly one waiter instead of all
 /// (found the hard way — three parked workers, one wake, a hung join).
+/// Futex mutex (std.Thread.Mutex left std in 0.16). Short critical
+/// sections between a few threads; never on the input hot section.
+pub const Mutex = struct {
+    state: std.atomic.Value(u32) = .init(0),
+
+    pub fn lock(self: *Mutex) void {
+        while (self.state.swap(1, .acquire) != 0) futexWait(&self.state, 1);
+    }
+
+    pub fn unlock(self: *Mutex) void {
+        self.state.store(0, .release);
+        futexWake(&self.state, 1);
+    }
+};
+
 fn futexWake(word: *const std.atomic.Value(u32), max_waiters: i32) void {
     _ = linux.futex_3arg(&word.raw, .{ .cmd = .WAKE, .private = true }, @intCast(max_waiters));
 }

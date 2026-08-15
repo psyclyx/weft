@@ -169,3 +169,42 @@ to the multi-buffer milestone: backing as the four-case interface;
 buffer-local mode save/restore on focus switch; plugin API
 scion.buffer-create + scion.layer-publish (+ section lookup helper)
 so tool buffers are writable in fennel.
+
+## Revision 4: the backing file is a peer (2026-08-15)
+
+Question posed: two scions on the same remote file with no connection
+between them; or scion remote + nvim local on that box. At the file
+tier the disk is the only shared state — a last-writer-wins register —
+and naive save loses whoever wrote first. mtime checks à la vim only
+warn; they do not merge.
+
+**Model: the backing is a peer.** The backing peer's replica records
+the disk content we last synchronized with (open, load, save, or
+merge). Concurrency then has one mechanism:
+
+- **External change** (another editor saved): detected by polling a
+  content hash through the persistent shell (capability-detected:
+  sha256sum → cksum → mtime+size). The new disk state is diffed
+  against the backing peer's replica and committed *as that peer's
+  ops* — it merges into the buffer like any remote collaborator.
+  Unsaved local work and the external write coexist; anchors shift;
+  the external edits are not in local undo (peer-model invariant).
+- **Save is a guarded test-and-set**, never a blind write: upload to a
+  temp file, then one shell round-trip — hash the target; if it still
+  matches the state our merge is based on, `mv` (atomic); else STALE.
+  On STALE: merge the new disk state as a backing-peer commit, retry.
+  No lost updates; bounded retry. `flock` used when present; without
+  it the check-then-mv race window is vim's own, documented.
+
+Two unconnected scions converge *through the file* (per-save merges,
+not real time — connecting the editors is what real time is for).
+scion + nvim: nvim's write is an external commit like any other; in
+the reverse direction nvim's own stale-file warning fires, which is
+the best available for an editor we don't control.
+
+Honest limits: diff-import is positional heuristics, not identity —
+moves/duplications may be attributed differently than authored (all
+replicas still converge on content). The mtime+size fallback widens
+the race. Never guess by content equality across *documents* (rev-2
+rule) — this diff-import is within one document's backing peer, where
+the shared root is already established.
