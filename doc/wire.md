@@ -57,3 +57,22 @@ the normal frontier exchange.
     S→C  accept  { session_resume_token }   (encrypted from here on)
 
 MAC failure on either side closes the link before any document data.
+
+## Shared buffers (v1.1, additive)
+
+Channels are allocated in **quads**: `base` carries op batches,
+`base+1` the presence feed, `base+2` the diagnostics feed, `base+3`
+blob requests. The pre-sharing protocol is exactly quad 0 (ops 0,
+presence 1, diagnostics 2, blob 3), bound by convention on both ends —
+nothing changed on the wire for the primary document.
+
+A buffer is shared with an op-class `share` frame (kind 2) on channel
+0: payload = `uv base | uv name_len | name`. Base allocation is
+role-split so both sides can share concurrently without coordination:
+servers allocate 16, 24, 32, …; clients 20, 28, 36, …. The receiver
+records the offer; opening it is local (bind a Collab at that base and
+announce a frontier — the ordinary exchange bootstraps content, since
+an empty frontier elicits the full history). Frames on unbound quads
+drop harmlessly; re-announcing a known base is a no-op (reconnects
+re-announce all shares). There is no unshare frame yet: closing a
+shared buffer simply stops answering its quad.

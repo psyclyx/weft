@@ -405,11 +405,24 @@ pub const Session = struct {
 
 /// Batches carry the sender's frontier token so each side always knows
 /// what the peer holds: payload = uv token_len | token | stemma bytes.
+///
+/// One Collab syncs ONE document over one channel quad: ops on `base`,
+/// presence feed on `base+1`, diagnostics feed on `base+2`, blob
+/// requests on `base+3`. The pre-sharing protocol is exactly quad 0.
+/// Multiple Collabs on one Session are dispatched by `Conn` (which
+/// owns the drain); a lone Collab may still `tick` itself.
 pub const Collab = struct {
     gpa: Allocator,
     session: *Session,
     doc: *Document,
     name: []u8,
+    /// First channel of this document's quad (multiple of 4).
+    base: u64 = 0,
+    /// Caller-owned bookkeeping (the editor stores its buffer id).
+    tag: u64 = 0,
+    /// Our cursor in this document, published as presence (the caller
+    /// updates it before each tick).
+    cursor_offset: usize = 0,
     their_frontier: ?[]u8 = null,
     last_sent_version: ?[]u8 = null,
     presence_layer: ?*layers_mod.Layer = null,
@@ -465,24 +478,36 @@ pub const Collab = struct {
         self.last_presence_offset = std.math.maxInt(usize);
     }
 
-    /// Per-frame: drain inbound frames (merge op batches, answer
-    /// frontier requests, fold presence), then push our changes.
-    /// Returns true when the document or presence changed.
+    /// Per-frame (solo use): drain inbound frames, handle the ones in
+    /// our quad, then push our changes. Under `Conn` the drain/dispatch
+    /// happens once for all Collabs instead.
     pub fn tick(self: *Collab, cursor_offset: usize) !bool {
         const gpa = self.gpa;
         var changed = false;
-
         var frames: std.ArrayList(wire.Decoder.Decoded) = .empty;
         defer frames.deinit(gpa);
         try self.session.drain(gpa, &frames);
         for (frames.items) |frame| {
             defer gpa.free(frame.payload);
-            switch (frame.class) {
-                .op => switch (@as(wire.OpKind, @enumFromInt(frame.kind))) {
+            changed = (self.handleFrame(frame) catch false) or changed;
+        }
+        self.cursor_offset = cursor_offset;
+        return (try self.push()) or changed;
+    }
+
+    /// Fold one inbound frame belonging to this quad. Frames outside
+    /// the quad are ignored (returns false). Payload stays caller-owned.
+    pub fn handleFrame(self: *Collab, frame: wire.Decoder.Decoded) !bool {
+        const gpa = self.gpa;
+        if (frame.channel < self.base or frame.channel > self.base + 3) return false;
+        var changed = false;
+        switch (frame.class) {
+            .op => if (frame.channel == self.base) {
+                switch (std.enums.fromInt(wire.OpKind, frame.kind) orelse return false) {
                     .batch => {
                         var cur: []const u8 = frame.payload;
-                        const tlen = wire.getUv(&cur) catch continue;
-                        if (tlen > cur.len) continue;
+                        const tlen = wire.getUv(&cur) catch return false;
+                        if (tlen > cur.len) return false;
                         const token = cur[0..tlen];
                         const batch = cur[tlen..];
                         try self.setTheirFrontier(token);
@@ -498,116 +523,121 @@ pub const Collab = struct {
                         try self.setTheirFrontier(frame.payload);
                         try self.sendBatch();
                     },
-                },
-                .feed => if (frame.channel == 2) {
-                    // Host-scoped diagnostics forwarded off the host:
-                    // repeated uv start | uv end | uv kind | uv mlen | msg.
-                    if (self.import_diag_layer) |layer| {
-                        var spans: std.ArrayList(layers_mod.SpanIn) = .empty;
-                        defer spans.deinit(gpa);
-                        var cur: []const u8 = frame.payload;
-                        while (cur.len > 0) {
-                            const s = wire.getUv(&cur) catch break;
-                            const e = wire.getUv(&cur) catch break;
-                            const k = wire.getUv(&cur) catch break;
-                            const ml = wire.getUv(&cur) catch break;
-                            if (ml > cur.len) break;
-                            const limit = self.doc.text().byteLen();
-                            spans.append(gpa, .{
-                                .start = @min(@as(usize, @intCast(s)), limit),
-                                .end = @min(@as(usize, @intCast(e)), limit),
-                                .kind = @intCast(k),
-                                .message = cur[0..ml],
-                            }) catch break;
-                            cur = cur[ml..];
-                        }
-                        try layer.publishSpans(gpa, spans.items);
-                        changed = true;
-                    }
-                } else {
-                    // Presence: uv name_len | name | uv offset. Fold into
-                    // the per-peer set, republish the whole set, and (in
-                    // hub role) relay to the other sessions.
+                    .share => {}, // connection-level; Conn consumes these
+                }
+            },
+            .feed => if (frame.channel == self.base + 2) {
+                // Host-scoped diagnostics forwarded off the host:
+                // repeated uv start | uv end | uv kind | uv mlen | msg.
+                if (self.import_diag_layer) |layer| {
+                    var spans: std.ArrayList(layers_mod.SpanIn) = .empty;
+                    defer spans.deinit(gpa);
                     var cur: []const u8 = frame.payload;
-                    const nlen = wire.getUv(&cur) catch continue;
-                    if (nlen > cur.len) continue;
-                    const peer_name = cur[0..nlen];
-                    cur = cur[nlen..];
-                    const off = wire.getUv(&cur) catch continue;
-                    try self.updatePeerPresence(peer_name, @intCast(off));
-                    try self.republishPresence();
+                    while (cur.len > 0) {
+                        const s = wire.getUv(&cur) catch break;
+                        const e = wire.getUv(&cur) catch break;
+                        const k = wire.getUv(&cur) catch break;
+                        const ml = wire.getUv(&cur) catch break;
+                        if (ml > cur.len) break;
+                        const limit = self.doc.text().byteLen();
+                        spans.append(gpa, .{
+                            .start = @min(@as(usize, @intCast(s)), limit),
+                            .end = @min(@as(usize, @intCast(e)), limit),
+                            .kind = @intCast(k),
+                            .message = cur[0..ml],
+                        }) catch break;
+                        cur = cur[ml..];
+                    }
+                    try layer.publishSpans(gpa, spans.items);
                     changed = true;
-                    if (self.relay) |r| r(self.relay_ctx, nameKey(peer_name), frame.payload);
-                },
-                .request => switch (@as(wire.RequestKind, @enumFromInt(frame.kind))) {
-                    .call => if (frame.channel == blob_channel) {
-                        if (self.blob_server) |bs| {
-                            const reply = bs.handle(gpa, frame.payload) catch continue;
-                            defer gpa.free(reply);
-                            try self.session.post(.request, @intFromEnum(wire.RequestKind.ok), blob_channel, reply);
-                        }
+                }
+            } else if (frame.channel == self.base + 1) {
+                // Presence: uv name_len | name | uv offset. Fold into
+                // the per-peer set, republish the whole set, and (in
+                // hub role) relay to the other sessions.
+                var cur: []const u8 = frame.payload;
+                const nlen = wire.getUv(&cur) catch return false;
+                if (nlen > cur.len) return false;
+                const peer_name = cur[0..nlen];
+                cur = cur[nlen..];
+                const off = wire.getUv(&cur) catch return false;
+                try self.updatePeerPresence(peer_name, @intCast(off));
+                try self.republishPresence();
+                changed = true;
+                if (self.relay) |r| r(self.relay_ctx, nameKey(peer_name), frame.payload);
+            },
+            .request => if (frame.channel == self.base + 3) {
+                switch (std.enums.fromInt(wire.RequestKind, frame.kind) orelse return false) {
+                    .call => if (self.blob_server) |bs| {
+                        const reply = bs.handle(gpa, frame.payload) catch return changed;
+                        defer gpa.free(reply);
+                        try self.session.post(.request, @intFromEnum(wire.RequestKind.ok), self.base + 3, reply);
                     },
-                    .ok => if (frame.channel == blob_channel) {
-                        if (self.remote_file) |rf| {
-                            const c = rf.onReply(frame.payload) catch false;
-                            changed = changed or c;
-                        }
+                    .ok => if (self.remote_file) |rf| {
+                        const c = rf.onReply(frame.payload) catch false;
+                        changed = changed or c;
                     },
                     else => {},
-                },
-                .control => {},
-            }
-        }
-
-        // Announce once, then push whenever our head moved.
-        if (self.session.liveness() == .connected or self.session.liveness() == .degraded) {
-            if (!self.announced) {
-                self.announced = true;
-                const v = try self.doc.version(gpa);
-                defer gpa.free(v);
-                try self.session.post(.op, @intFromEnum(wire.OpKind.frontier), 0, v);
-            }
-            const head = try self.doc.version(gpa);
-            defer gpa.free(head);
-            const moved = self.last_sent_version == null or
-                !std.mem.eql(u8, self.last_sent_version.?, head);
-            if (moved) try self.sendBatch();
-
-            // Forward host-scoped diagnostics when they changed.
-            if (self.export_diag_layer) |layer| {
-                const gen = layer.spanCount() +% blk: {
-                    var acc: usize = 0;
-                    for (0..layer.spanCount()) |i| acc +%= layer.resolvedSpan(i).start;
-                    break :blk acc;
-                };
-                if (gen != self.export_diag_gen) {
-                    self.export_diag_gen = gen;
-                    var payload: std.ArrayList(u8) = .empty;
-                    defer payload.deinit(gpa);
-                    for (0..layer.spanCount()) |i| {
-                        const d = layer.resolvedSpan(i);
-                        try wire.putUv(gpa, &payload, d.start);
-                        try wire.putUv(gpa, &payload, d.end);
-                        try wire.putUv(gpa, &payload, d.kind);
-                        try wire.putUv(gpa, &payload, d.message.len);
-                        try payload.appendSlice(gpa, d.message);
-                    }
-                    try self.session.postFeed(2, 0, payload.items);
                 }
-            }
-
-            if (self.publish_presence and cursor_offset != self.last_presence_offset) {
-                self.last_presence_offset = cursor_offset;
-                var payload: std.ArrayList(u8) = .empty;
-                defer payload.deinit(gpa);
-                try wire.putUv(gpa, &payload, self.name.len);
-                try payload.appendSlice(gpa, self.name);
-                try wire.putUv(gpa, &payload, cursor_offset);
-                // Coalescing key is per-peer: N cursors never collapse.
-                try self.session.postFeed(1, nameKey(self.name), payload.items);
-            }
+            },
+            .control => {},
         }
         return changed;
+    }
+
+    /// Announce once, then push whenever our head moved; forward
+    /// diagnostics and presence. Call after the frames of a tick.
+    pub fn push(self: *Collab) !bool {
+        const gpa = self.gpa;
+        const live = self.session.liveness();
+        if (live != .connected and live != .degraded) return false;
+
+        if (!self.announced) {
+            self.announced = true;
+            const v = try self.doc.version(gpa);
+            defer gpa.free(v);
+            try self.session.post(.op, @intFromEnum(wire.OpKind.frontier), self.base, v);
+        }
+        const head = try self.doc.version(gpa);
+        defer gpa.free(head);
+        const moved = self.last_sent_version == null or
+            !std.mem.eql(u8, self.last_sent_version.?, head);
+        if (moved) try self.sendBatch();
+
+        // Forward host-scoped diagnostics when they changed.
+        if (self.export_diag_layer) |layer| {
+            const gen = layer.spanCount() +% blk: {
+                var acc: usize = 0;
+                for (0..layer.spanCount()) |i| acc +%= layer.resolvedSpan(i).start;
+                break :blk acc;
+            };
+            if (gen != self.export_diag_gen) {
+                self.export_diag_gen = gen;
+                var payload: std.ArrayList(u8) = .empty;
+                defer payload.deinit(gpa);
+                for (0..layer.spanCount()) |i| {
+                    const d = layer.resolvedSpan(i);
+                    try wire.putUv(gpa, &payload, d.start);
+                    try wire.putUv(gpa, &payload, d.end);
+                    try wire.putUv(gpa, &payload, d.kind);
+                    try wire.putUv(gpa, &payload, d.message.len);
+                    try payload.appendSlice(gpa, d.message);
+                }
+                try self.session.postFeed(self.base + 2, 0, payload.items);
+            }
+        }
+
+        if (self.publish_presence and self.cursor_offset != self.last_presence_offset) {
+            self.last_presence_offset = self.cursor_offset;
+            var payload: std.ArrayList(u8) = .empty;
+            defer payload.deinit(gpa);
+            try wire.putUv(gpa, &payload, self.name.len);
+            try payload.appendSlice(gpa, self.name);
+            try wire.putUv(gpa, &payload, self.cursor_offset);
+            // Coalescing key is per-peer: N cursors never collapse.
+            try self.session.postFeed(self.base + 1, nameKey(self.name), payload.items);
+        }
+        return false;
     }
 
     fn nameKey(name: []const u8) u64 {
@@ -668,10 +698,187 @@ pub const Collab = struct {
         try wire.putUv(gpa, &payload, head.len);
         try payload.appendSlice(gpa, head);
         try payload.appendSlice(gpa, batch);
-        try self.session.post(.op, @intFromEnum(wire.OpKind.batch), 0, payload.items);
+        try self.session.post(.op, @intFromEnum(wire.OpKind.batch), self.base, payload.items);
 
         if (self.last_sent_version) |v| gpa.free(v);
         self.last_sent_version = head;
+    }
+};
+
+// ── Connection: N shared buffers over one session ───────────────────
+
+/// One authenticated connection carrying any number of shared buffers
+/// (rev 2: editors connect to editors; a buffer is shared over a
+/// connection). Owns the session drain and routes frames to per-buffer
+/// Collabs by channel quad (`base = channel & ~3`); `share` announces a
+/// buffer on channel 0, the peer's announcements surface as `offers`
+/// until opened. Base allocation is role-split (server ≡ 0, client ≡ 4
+/// mod 8, starting at 16) so both sides can share concurrently; quad 0
+/// is the legacy primary document (`bindPrimary`), which needs no
+/// announcement — both ends bind it by convention.
+pub const Conn = struct {
+    gpa: Allocator,
+    session: *Session,
+    name: []u8,
+    role: secure.Role,
+    collabs: std.ArrayList(*Collab) = .empty,
+    offers: std.ArrayList(Offer) = .empty,
+    /// Our shares' display names by base (owned) — re-announced on
+    /// rebind.
+    share_names: std.AutoHashMapUnmanaged(u64, []u8) = .empty,
+    next_base: u64,
+
+    pub const Offer = struct {
+        base: u64,
+        name: []u8,
+        opened: bool = false,
+    };
+
+    pub fn init(gpa: Allocator, session: *Session, name: []const u8, role: secure.Role) !Conn {
+        return .{
+            .gpa = gpa,
+            .session = session,
+            .name = try gpa.dupe(u8, name),
+            .role = role,
+            .next_base = if (role == .server) 16 else 20,
+        };
+    }
+
+    pub fn deinit(self: *Conn) void {
+        for (self.collabs.items) |c| {
+            c.deinit();
+            self.gpa.destroy(c);
+        }
+        self.collabs.deinit(self.gpa);
+        for (self.offers.items) |o| self.gpa.free(o.name);
+        self.offers.deinit(self.gpa);
+        var it = self.share_names.valueIterator();
+        while (it.next()) |v| self.gpa.free(v.*);
+        self.share_names.deinit(self.gpa);
+        self.gpa.free(self.name);
+    }
+
+    /// Unbind every Collab tagged `tag` (buffer close): the peer's
+    /// frames on that quad drop harmlessly afterwards. The offer, if
+    /// any, stays consumed — re-sharing allocates a fresh quad.
+    pub fn unbindTag(self: *Conn, tag: u64) void {
+        var i: usize = 0;
+        while (i < self.collabs.items.len) {
+            if (self.collabs.items[i].tag == tag) {
+                const c = self.collabs.swapRemove(i);
+                c.deinit();
+                self.gpa.destroy(c);
+            } else i += 1;
+        }
+    }
+
+    pub fn findBase(self: *Conn, base: u64) ?*Collab {
+        for (self.collabs.items) |c| {
+            if (c.base == base) return c;
+        }
+        return null;
+    }
+
+    fn bind(self: *Conn, doc: *Document, base: u64, tag: u64) !*Collab {
+        const c = try self.gpa.create(Collab);
+        errdefer self.gpa.destroy(c);
+        c.* = try Collab.init(self.gpa, self.session, doc, self.name);
+        c.base = base;
+        c.tag = tag;
+        try self.collabs.append(self.gpa, c);
+        return c;
+    }
+
+    /// The legacy quad-0 document (the --listen/--connect flow): both
+    /// ends bind it by convention, no announcement on the wire.
+    pub fn bindPrimary(self: *Conn, doc: *Document, tag: u64) !*Collab {
+        assert(self.findBase(0) == null);
+        return self.bind(doc, 0, tag);
+    }
+
+    /// Share a buffer over this connection: allocate a quad, announce
+    /// it, start syncing. Returns the bound Collab.
+    pub fn share(self: *Conn, doc: *Document, display_name: []const u8, tag: u64) !*Collab {
+        const base = self.next_base;
+        self.next_base += 8;
+        const c = try self.bind(doc, base, tag);
+        const owned = try self.gpa.dupe(u8, display_name);
+        errdefer self.gpa.free(owned);
+        try self.share_names.put(self.gpa, base, owned);
+        try self.announceShare(base, display_name);
+        return c;
+    }
+
+    fn announceShare(self: *Conn, base: u64, display_name: []const u8) !void {
+        var payload: std.ArrayList(u8) = .empty;
+        defer payload.deinit(self.gpa);
+        try wire.putUv(self.gpa, &payload, base);
+        try wire.putUv(self.gpa, &payload, display_name.len);
+        try payload.appendSlice(self.gpa, display_name);
+        try self.session.post(.op, @intFromEnum(wire.OpKind.share), 0, payload.items);
+    }
+
+    /// Open one of the peer's announced buffers into `doc` (typically a
+    /// fresh empty document: the frontier exchange bootstraps content).
+    pub fn openOffer(self: *Conn, index: usize, doc: *Document, tag: u64) !*Collab {
+        const o = &self.offers.items[index];
+        assert(!o.opened);
+        const c = try self.bind(doc, o.base, tag);
+        o.opened = true;
+        return c;
+    }
+
+    /// Point every bound buffer at a fresh session after a reconnect
+    /// and re-announce our shares (idempotent for the peer: an already
+    /// known base is a no-op offer).
+    pub fn rebind(self: *Conn, new_session: *Session) !void {
+        self.session = new_session;
+        for (self.collabs.items) |c| {
+            c.rebind(new_session);
+            if (self.share_names.get(c.base)) |dn| try self.announceShare(c.base, dn);
+        }
+    }
+
+    /// Drain the session once, route frames, push every bound buffer.
+    /// Callers update each Collab's `cursor_offset` beforehand.
+    pub fn tick(self: *Conn) !bool {
+        const gpa = self.gpa;
+        var changed = false;
+        var frames: std.ArrayList(wire.Decoder.Decoded) = .empty;
+        defer frames.deinit(gpa);
+        try self.session.drain(gpa, &frames);
+        for (frames.items) |frame| {
+            defer gpa.free(frame.payload);
+            if (frame.class == .op and frame.channel == 0 and
+                (std.enums.fromInt(wire.OpKind, frame.kind) orelse .batch) == .share)
+            {
+                self.acceptOffer(frame.payload) catch {};
+                continue;
+            }
+            const base = frame.channel - (frame.channel % 4);
+            if (self.findBase(base)) |c| {
+                changed = (c.handleFrame(frame) catch false) or changed;
+            }
+        }
+        for (self.collabs.items) |c| {
+            changed = (c.push() catch false) or changed;
+        }
+        return changed;
+    }
+
+    fn acceptOffer(self: *Conn, payload: []const u8) !void {
+        var cur: []const u8 = payload;
+        const base = try wire.getUv(&cur);
+        const nlen = try wire.getUv(&cur);
+        if (nlen > cur.len or nlen > 512) return error.Corrupt;
+        if (base % 4 != 0 or base < 16) return error.Corrupt;
+        for (self.offers.items) |o| {
+            if (o.base == base) return; // duplicate announce (reconnect)
+        }
+        if (self.findBase(base) != null) return; // already bound
+        const name = try self.gpa.dupe(u8, cur[0..nlen]);
+        errdefer self.gpa.free(name);
+        try self.offers.append(self.gpa, .{ .base = base, .name = name });
     }
 };
 
@@ -750,6 +957,125 @@ test "session+collab: two instances converge over an encrypted link with presenc
     }
     try t.expect(saw_presence);
     try t.expectEqualStrings("alice", cb.presence_layer.?.resolvedSpan(0).message);
+}
+
+test "conn: shared buffers both ways over one link — offers, open, converge, presence per quad" {
+    const gpa = t.allocator;
+    const fds = try socketPair();
+    var la: FdLink = .{ .fd = fds[0] };
+    var lb: FdLink = .{ .fd = fds[1] };
+
+    // Primary docs (quad 0, the legacy flow) plus one extra each side.
+    var a0 = try Document.init(gpa, "alice");
+    defer a0.deinit(gpa);
+    var b0 = try Document.init(gpa, "bob");
+    defer b0.deinit(gpa);
+    try a0.insert(gpa, 0, "primary\n");
+    var a_notes = try Document.init(gpa, "alice");
+    defer a_notes.deinit(gpa);
+    try a_notes.insert(gpa, 0, "alice's notes\n");
+    var b_todo = try Document.init(gpa, "bob");
+    defer b_todo.deinit(gpa);
+    try b_todo.insert(gpa, 0, "bob's todo\n");
+
+    const sa = try Session.create(gpa, la.link(), .server, "tok");
+    defer sa.destroy();
+    const sb = try Session.create(gpa, lb.link(), .client, "tok");
+    defer sb.destroy();
+    var ca = try Conn.init(gpa, sa, "alice", .server);
+    defer ca.deinit();
+    var cb = try Conn.init(gpa, sb, "bob", .client);
+    defer cb.deinit();
+    _ = try ca.bindPrimary(&a0, 0);
+    _ = try cb.bindPrimary(&b0, 0);
+
+    // Both sides share concurrently (role-split bases cannot collide).
+    _ = try ca.share(&a_notes, "notes", 1);
+    _ = try cb.share(&b_todo, "todo", 1);
+
+    // Pump until both offers arrive (deadline-based: the handshake
+    // threads need real time, not spin rounds).
+    const offer_deadline = task.nowNs() + 5 * std.time.ns_per_s;
+    while (task.nowNs() < offer_deadline and (ca.offers.items.len == 0 or cb.offers.items.len == 0)) {
+        _ = try ca.tick();
+        _ = try cb.tick();
+        futexWaitTimed(&sa.out_wake, sa.out_wake.load(.acquire), std.time.ns_per_ms);
+    }
+    try t.expect(ca.offers.items.len > 0 and cb.offers.items.len > 0);
+    try t.expectEqualStrings("todo", ca.offers.items[0].name);
+    try t.expectEqualStrings("notes", cb.offers.items[0].name);
+    try t.expect(ca.offers.items[0].base != cb.offers.items[0].base);
+
+    // Open both offers into fresh docs; bootstrap + convergence.
+    var a_todo = try Document.init(gpa, "alice");
+    defer a_todo.deinit(gpa);
+    var b_notes = try Document.init(gpa, "bob");
+    defer b_notes.deinit(gpa);
+    _ = try ca.openOffer(0, &a_todo, 2);
+    _ = try cb.openOffer(0, &b_notes, 2);
+
+    // Concurrent edits on every document, all four streams at once.
+    try a0.insert(gpa, 0, "A0>");
+    try b0.insert(gpa, b0.text().byteLen(), "<B0");
+    try a_notes.insert(gpa, 0, "more ");
+    try b_todo.insert(gpa, 0, "urgent ");
+
+    const converge_deadline = task.nowNs() + 10 * std.time.ns_per_s;
+    var converged = false;
+    while (!converged and task.nowNs() < converge_deadline) {
+        _ = try ca.tick();
+        _ = try cb.tick();
+        const p_a = try a0.text().toOwnedSlice(gpa);
+        defer gpa.free(p_a);
+        const p_b = try b0.text().toOwnedSlice(gpa);
+        defer gpa.free(p_b);
+        const n_a = try a_notes.text().toOwnedSlice(gpa);
+        defer gpa.free(n_a);
+        const n_b = try b_notes.text().toOwnedSlice(gpa);
+        defer gpa.free(n_b);
+        const t_a = try a_todo.text().toOwnedSlice(gpa);
+        defer gpa.free(t_a);
+        const t_b = try b_todo.text().toOwnedSlice(gpa);
+        defer gpa.free(t_b);
+        const done = std.mem.eql(u8, p_a, p_b) and
+            std.mem.indexOf(u8, p_a, "A0>") != null and std.mem.indexOf(u8, p_a, "<B0") != null and
+            std.mem.eql(u8, n_a, n_b) and std.mem.indexOf(u8, n_b, "more ") != null and
+            std.mem.eql(u8, t_a, t_b) and std.mem.indexOf(u8, t_a, "urgent ") != null;
+        converged = done;
+        if (!done) std.Thread.yield() catch {};
+    }
+    try t.expect(converged);
+
+    // Presence rides per-quad: alice's cursor in the notes doc shows up
+    // only in bob's notes presence layer.
+    var layers: layers_mod.Layers = .empty;
+    defer layers.deinit(gpa);
+    const notes_layer = try layers.claim(gpa, &b_notes, "presence", .replicated, "collab");
+    const todo_layer = try layers.claim(gpa, &b_todo, "presence", .replicated, "collab");
+    cb.findBase(cb.offers.items[0].base).?.presence_layer = notes_layer;
+    for (cb.collabs.items) |c| {
+        if (c.doc == &b_todo) c.presence_layer = todo_layer;
+    }
+    // Move alice's cursor in notes only.
+    for (ca.collabs.items) |c| {
+        if (c.doc == &a_notes) c.cursor_offset = 3;
+    }
+    const presence_deadline = task.nowNs() + 5 * std.time.ns_per_s;
+    while (task.nowNs() < presence_deadline) {
+        _ = try ca.tick();
+        _ = try cb.tick();
+        if (notes_layer.spanCount() > 0 and notes_layer.resolvedSpan(0).start == 3) break;
+        futexWaitTimed(&sb.out_wake, sb.out_wake.load(.acquire), std.time.ns_per_ms);
+    }
+    // Quad isolation: the notes layer sees alice AT HER NOTES CURSOR
+    // (3); the todo layer only ever sees her todo cursor (0) — the two
+    // streams never bleed into each other.
+    try t.expect(notes_layer.spanCount() > 0);
+    try t.expectEqualStrings("alice", notes_layer.resolvedSpan(0).message);
+    try t.expectEqual(@as(usize, 3), notes_layer.resolvedSpan(0).start);
+    if (todo_layer.spanCount() > 0) {
+        try t.expectEqual(@as(usize, 0), todo_layer.resolvedSpan(0).start);
+    }
 }
 
 test "session: wrong token never establishes" {

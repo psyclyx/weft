@@ -199,12 +199,12 @@ pub fn main(init: std.process.Init) !void {
         .data = &attach_deps,
     });
 
-    // ── Collab session (wire v1) ──
+    // ── Connection (wire v1.1: N shared buffers over one session) ──
     var fd_link: core.session.FdLink = undefined;
     var collab_session: ?*core.session.Session = null;
     defer if (collab_session) |s| s.destroy();
-    var collab: ?core.session.Collab = null;
-    defer if (collab) |*c| c.deinit();
+    var conn: ?core.session.Conn = null;
+    defer if (conn) |*c| c.deinit();
     if (args.listen != null or args.connect != null) {
         const fd = if (args.listen) |port| blk: {
             std.log.info("collab: listening on port {d} — waiting for a peer", .{port});
@@ -213,13 +213,30 @@ pub fn main(init: std.process.Init) !void {
         fd_link = .{ .fd = fd };
         const role: core.secure.Role = if (args.listen != null) .server else .client;
         collab_session = try core.session.Session.create(gpa, fd_link.link(), role, args.token);
-        collab = try core.session.Collab.init(gpa, collab_session.?, &ed0.doc, args.user);
-        collab.?.presence_layer = try caps.layers.claim(gpa, &ed0.doc, "presence", .replicated, "collab");
+        conn = try core.session.Conn.init(gpa, collab_session.?, args.user, role);
+        const col = try conn.?.bindPrimary(&ed0.doc, 0);
+        col.presence_layer = try caps.layers.claim(gpa, &ed0.doc, "presence", .replicated, "collab");
         if (args.connect != null) {
             // Host-scoped feeds (diagnostics) arrive over the wire.
-            collab.?.import_diag_layer = try caps.layers.claim(gpa, &ed0.doc, "diagnostics", .host, "remote-host");
+            col.import_diag_layer = try caps.layers.claim(gpa, &ed0.doc, "diagnostics", .host, "remote-host");
         }
     }
+    var share_ctx: ShareCtx = .{ .conn = &conn, .caps = &caps };
+    attach_deps.share = &share_ctx;
+    _ = try commands.bind(gpa, "share", .{
+        .name = "share",
+        .summary = "Share the active buffer over the connection.",
+        .args = &.{},
+        .handler = shareHandler,
+        .data = &share_ctx,
+    });
+    _ = try commands.bind(gpa, "open-shared", .{
+        .name = "open-shared",
+        .summary = "Pick one of the peer's shared buffers and open it.",
+        .args = &.{},
+        .handler = openSharedHandler,
+        .data = &share_ctx,
+    });
 
     // ── Window + Vulkan ──
     const window = try wayland.Window.init(1280, 800, "scion", "dev.psyclyx.scion");
@@ -327,8 +344,14 @@ pub fn main(init: std.process.Init) !void {
         if (try completion_ui.tick(&cmd_ctx)) view_dirty = true;
         if (try def_ui.tick(&cmd_ctx)) view_dirty = true;
         if (try sym_ui.tick(&cmd_ctx)) view_dirty = true;
-        if (collab) |*c| {
-            if (try c.tick(ed0.cursorOffset())) view_dirty = true;
+        if (conn) |*c| {
+            // Each bound buffer publishes its own cursor as presence.
+            for (c.collabs.items) |col| {
+                if (buffers.get(@intCast(col.tag))) |b| {
+                    col.cursor_offset = b.editor.cursorOffset();
+                }
+            }
+            if (try c.tick()) view_dirty = true;
             const live = collab_session.?.liveness();
             if (live != last_liveness) {
                 last_liveness = live;
@@ -336,7 +359,7 @@ pub fn main(init: std.process.Init) !void {
             }
             // A flapping link reconnects itself (client role): pooled
             // connect attempts every 3s, rebind on success — the resync
-            // is the ordinary frontier exchange.
+            // is the ordinary frontier exchange (+ share re-announce).
             if (live == .offline and args.connect != null) {
                 if (reconnect) |*h| {
                     if (h.poll()) |res| {
@@ -345,7 +368,7 @@ pub fn main(init: std.process.Init) !void {
                             collab_session.?.destroy();
                             fd_link = .{ .fd = fd };
                             collab_session = try core.session.Session.create(gpa, fd_link.link(), .client, args.token);
-                            c.rebind(collab_session.?);
+                            try c.rebind(collab_session.?);
                             std.log.info("collab: reconnected", .{});
                             view_dirty = true;
                         } else |_| {
@@ -652,6 +675,9 @@ const AttachDeps = struct {
     caps: *core.Caps,
     environ: std.process.Environ,
     local_lsp: bool,
+    /// Set once the connection exists: buffer close unbinds shares
+    /// before the document dies.
+    share: ?*ShareCtx = null,
     /// Persistent shells per remote host (ssh spawner), created on
     /// first `open host:path` and reused for every buffer on that host.
     shells: std.StringHashMapUnmanaged(*core.ShellFs) = .empty,
@@ -774,11 +800,83 @@ fn openBufferHandler(ctx: *core.command.Context, data: ?*anyopaque, args: []cons
     return .{ .integer = @intCast(id) };
 }
 
+// ── Buffer sharing over the connection ──────────────────────────────
+
+const ShareCtx = struct {
+    conn: *?core.session.Conn,
+    caps: *core.Caps,
+};
+
+/// `share` — announce the active buffer on the connection; the peer
+/// sees it via `open-shared`. One history root; the peer's frontier
+/// exchange bootstraps content.
+fn shareHandler(ctx: *core.command.Context, data: ?*anyopaque, args: []const core.command.Value) anyerror!core.command.Value {
+    const sc: *ShareCtx = @ptrCast(@alignCast(data.?));
+    if (args.len != 0) return error.ArityMismatch;
+    const c = if (sc.conn.*) |*c| c else return .{ .string = "not connected" };
+    const buf = ctx.buffer();
+    for (c.collabs.items) |col| {
+        if (col.tag == buf.id) return .{ .string = "already shared" };
+    }
+    const doc = &buf.editor.doc;
+    const col = try c.share(doc, buf.name, buf.id);
+    col.presence_layer = try sc.caps.layers.claim(ctx.gpa, doc, "presence", .replicated, "collab");
+    col.export_diag_layer = sc.caps.layers.find(doc, "diagnostics");
+    std.log.info("shared buffer {s} on channel {d}", .{ buf.name, col.base });
+    return .nil;
+}
+
+/// `open-shared` — pick over the peer's unopened announcements; accept
+/// opens it into a fresh buffer (no local backing: the sharer saves).
+fn openSharedHandler(ctx: *core.command.Context, data: ?*anyopaque, args: []const core.command.Value) anyerror!core.command.Value {
+    const sc: *ShareCtx = @ptrCast(@alignCast(data.?));
+    if (args.len != 0) return error.ArityMismatch;
+    const c = if (sc.conn.*) |*c| c else return .{ .string = "not connected" };
+    var items: std.ArrayList([]u8) = .empty;
+    defer {
+        for (items.items) |it| ctx.gpa.free(it);
+        items.deinit(ctx.gpa);
+    }
+    for (c.offers.items, 0..) |o, i| {
+        if (o.opened) continue;
+        try items.append(ctx.gpa, try std.fmt.allocPrint(ctx.gpa, "{d}: @{s}", .{ i, o.name }));
+    }
+    if (items.items.len == 0) return .{ .string = "no shared buffers offered" };
+    const borrowed = try ctx.gpa.alloc([]const u8, items.items.len);
+    defer ctx.gpa.free(borrowed);
+    for (items.items, borrowed) |line, *slot| slot.* = line;
+    try ctx.pick.open(ctx, "shared", borrowed, .{ .handler = openSharedAccept, .data = sc });
+    return .nil;
+}
+
+fn openSharedAccept(ctx: *core.command.Context, data: ?*anyopaque, choice: []const u8) anyerror!void {
+    const sc: *ShareCtx = @ptrCast(@alignCast(data.?));
+    const c = if (sc.conn.*) |*c| c else return;
+    const colon = std.mem.indexOfScalar(u8, choice, ':') orelse return;
+    const index = std.fmt.parseInt(usize, choice[0..colon], 10) catch return;
+    if (index >= c.offers.items.len or c.offers.items[index].opened) return;
+    const o = c.offers.items[index];
+
+    const display = try std.fmt.allocPrint(ctx.gpa, "@{s}", .{o.name});
+    defer ctx.gpa.free(display);
+    const id = try ctx.buffers.create(ctx.gpa, display);
+    const buf = ctx.buffers.get(id).?;
+    const doc = &buf.editor.doc;
+    const col = try c.openOffer(index, doc, id);
+    col.presence_layer = try sc.caps.layers.claim(ctx.gpa, doc, "presence", .replicated, "collab");
+    col.import_diag_layer = try sc.caps.layers.claim(ctx.gpa, doc, "diagnostics", .host, "remote-host");
+    try ctx.buffers.switchTo(ctx.gpa, id, ctx.keymap);
+}
+
 fn closeBufferHandler(ctx: *core.command.Context, data: ?*anyopaque, args: []const core.command.Value) anyerror!core.command.Value {
     const deps: *AttachDeps = @ptrCast(@alignCast(data.?));
     if (args.len != 0) return error.ArityMismatch;
     const b = ctx.buffer();
     if (b.editor.isDirty(ctx.gpa) catch true) return .{ .string = "dirty" };
+    // Order matters: shares reference the doc and its layers.
+    if (deps.share) |sc| {
+        if (sc.conn.*) |*c| c.unbindTag(b.id);
+    }
     detachProviders(deps, b);
     try ctx.buffers.close(ctx.gpa, b.id, ctx.keymap);
     return .nil;

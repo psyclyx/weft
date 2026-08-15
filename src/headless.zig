@@ -105,7 +105,7 @@ pub fn run(gpa: std.mem.Allocator, args: Args, environ: std.process.Environ) !vo
         var i: usize = 0;
         while (i < hub.clients.items.len) {
             const c = hub.clients.items[i];
-            _ = c.collab.tick(0) catch {};
+            _ = c.conn.tick() catch {};
             if (c.sess.liveness() == .offline) {
                 std.log.info("headless: peer departed ({d} left)", .{hub.clients.items.len - 1});
                 hub.remove(i);
@@ -131,7 +131,7 @@ const Client = struct {
     hub: *Hub,
     fd_link: session.FdLink,
     sess: *session.Session,
-    collab: session.Collab,
+    conn: session.Conn,
 };
 
 const Hub = struct {
@@ -141,7 +141,7 @@ const Hub = struct {
 
     fn deinit(self: *Hub) void {
         for (self.clients.items) |c| {
-            c.collab.deinit();
+            c.conn.deinit();
             c.sess.destroy();
             self.gpa.destroy(c);
         }
@@ -165,22 +165,24 @@ const Hub = struct {
         const gpa = self.gpa;
         const c = try gpa.create(Client);
         errdefer gpa.destroy(c);
-        c.* = .{ .hub = self, .fd_link = .{ .fd = fd }, .sess = undefined, .collab = undefined };
+        c.* = .{ .hub = self, .fd_link = .{ .fd = fd }, .sess = undefined, .conn = undefined };
         c.sess = try session.Session.create(gpa, c.fd_link.link(), .server, token);
         errdefer c.sess.destroy();
-        c.collab = try session.Collab.init(gpa, c.sess, doc, "host");
-        c.collab.export_diag_layer = caps.layers.find(doc, "diagnostics");
-        c.collab.blob_server = blob;
-        c.collab.publish_presence = false; // a hub has no cursor
-        c.collab.relay = relayPresence;
-        c.collab.relay_ctx = c;
+        c.conn = try session.Conn.init(gpa, c.sess, "host", .server);
+        errdefer c.conn.deinit();
+        const collab = try c.conn.bindPrimary(doc, 0);
+        collab.export_diag_layer = caps.layers.find(doc, "diagnostics");
+        collab.blob_server = blob;
+        collab.publish_presence = false; // a hub has no cursor
+        collab.relay = relayPresence;
+        collab.relay_ctx = c;
         try self.clients.append(gpa, c);
         std.log.info("headless: peer joined ({d} connected)", .{self.clients.items.len});
     }
 
     fn remove(self: *Hub, i: usize) void {
         const c = self.clients.swapRemove(i);
-        c.collab.deinit();
+        c.conn.deinit();
         c.sess.destroy();
         self.gpa.destroy(c);
     }
