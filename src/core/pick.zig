@@ -273,3 +273,28 @@ test "matchSpan: subsequence with tightness" {
 test {
     std.testing.refAllDecls(@This());
 }
+
+/// Replace the item set of a live pick, preserving query and selection
+/// (race-and-refine consumers call this as results land).
+pub fn refresh(p: *Pick, gpa: Allocator, items: []const []const u8) !void {
+    if (!p.active) return;
+    const keep = p.selection();
+    const keep_owned = if (keep) |k| try gpa.dupe(u8, k) else null;
+    defer if (keep_owned) |k| gpa.free(k);
+    for (p.items.items) |it| gpa.free(it);
+    p.items.clearRetainingCapacity();
+    for (items) |it| {
+        const owned = try gpa.dupe(u8, it);
+        errdefer gpa.free(owned);
+        try p.items.append(gpa, owned);
+    }
+    try p.refilter(gpa);
+    if (keep_owned) |k| {
+        for (p.filtered.items, 0..) |idx, i| {
+            if (std.mem.eql(u8, p.items.items[idx], k)) {
+                p.selected = i;
+                break;
+            }
+        }
+    }
+}

@@ -5,14 +5,8 @@
 
 const std = @import("std");
 
-/// Monotonic clock read via the raw syscall (std.time.Timer is gone in
-/// 0.16 and the std.Io clock would thread an Io instance through the
-/// hot loop for one register read).
-pub fn nowNs() u64 {
-    var ts: std.os.linux.timespec = undefined;
-    _ = std.os.linux.clock_gettime(.MONOTONIC, &ts);
-    return @as(u64, @intCast(ts.sec)) * std.time.ns_per_s + @as(u64, @intCast(ts.nsec));
-}
+/// Monotonic clock (shared with core; std.time.Timer is gone in 0.16).
+pub const nowNs = @import("../core/task.zig").nowNs;
 
 pub const Ring = struct {
     buf: [512]u64 = undefined,

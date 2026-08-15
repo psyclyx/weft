@@ -77,12 +77,7 @@ pub const Decoder = struct {
 
 // ── Client ──────────────────────────────────────────────────────────
 
-pub const Diag = struct {
-    start: usize,
-    end: usize,
-    severity: u8, // 1 error … 4 hint
-    message: []u8,
-};
+const layers_mod = @import("layers.zig");
 
 const Node = struct {
     next: ?*Node = null,
@@ -111,7 +106,9 @@ pub const Lsp = struct {
     pending_definition: ?i64 = null,
     sync_kind: SyncKind = .full,
     ready: bool = false, // initialize handshake + didOpen done
-    diags: std.ArrayList(Diag) = .empty,
+    /// Diagnostics publish here (a `host`-scoped feed layer claimed by
+    /// the host session). Feeds are droppable: no layer, no publish.
+    diag_layer: ?*layers_mod.Layer = null,
     diags_changed: bool = false,
     ui_changed: bool = false,
 
@@ -180,21 +177,14 @@ pub const Lsp = struct {
         _ = self.child.wait(io) catch {};
         freeList(gpa, self.inbox.swap(null, .acquire));
         freeList(gpa, self.outbox.swap(null, .acquire));
-        self.clearDiags();
-        self.diags.deinit(gpa);
         self.mirror.deinit(gpa);
         gpa.free(self.uri);
         self.threaded.deinit();
         gpa.destroy(self);
     }
 
-    fn clearDiags(self: *Lsp) void {
-        for (self.diags.items) |d| self.gpa.free(d.message);
-        self.diags.clearRetainingCapacity();
-    }
-
-    pub fn diagnostics(self: *const Lsp) []const Diag {
-        return self.diags.items;
+    pub fn attachDiagnostics(self: *Lsp, layer: *layers_mod.Layer) void {
+        self.diag_layer = layer;
     }
 
     // ── Outgoing ────────────────────────────────────────────────
@@ -383,37 +373,44 @@ pub const Lsp = struct {
 
     // ── Incoming features ───────────────────────────────────────
 
+    const SpanIn = layers_mod.SpanIn;
+
     fn onDiagnostics(self: *Lsp, doc: *const Document, params: ?std.json.Value) !void {
         const gpa = self.gpa;
+        const layer = self.diag_layer orelse return; // feed dropped
         const p = params orelse return;
         if (p != .object) return;
         // Only our document.
         if (p.object.get("uri")) |u| {
             if (u != .string or !std.mem.eql(u8, u.string, self.uri)) return;
         }
-        self.clearDiags();
         self.diags_changed = true;
-        const list = p.object.get("diagnostics") orelse return;
-        if (list != .array) return;
-        const rope = doc.text();
-        for (list.array.items) |item| {
-            if (item != .object) continue;
-            const range = item.object.get("range") orelse continue;
-            const msg = item.object.get("message") orelse continue;
-            const sev: u8 = if (item.object.get("severity")) |s|
-                (if (s == .integer) @intCast(std.math.clamp(s.integer, 1, 4)) else 1)
-            else
-                1;
-            if (range != .object or msg != .string) continue;
-            const start = positionToOffset(rope, range.object.get("start")) orelse continue;
-            const end = positionToOffset(rope, range.object.get("end")) orelse start;
-            try self.diags.append(gpa, .{
-                .start = start,
-                .end = @max(start, end),
-                .severity = sev,
-                .message = try gpa.dupe(u8, msg.string),
-            });
+        var spans: std.ArrayList(SpanIn) = .empty;
+        defer spans.deinit(gpa);
+        blk: {
+            const list = p.object.get("diagnostics") orelse break :blk;
+            if (list != .array) break :blk;
+            const rope = doc.text();
+            for (list.array.items) |item| {
+                if (item != .object) continue;
+                const range = item.object.get("range") orelse continue;
+                const msg = item.object.get("message") orelse continue;
+                const sev: u8 = if (item.object.get("severity")) |s|
+                    (if (s == .integer) @intCast(std.math.clamp(s.integer, 1, 4)) else 1)
+                else
+                    1;
+                if (range != .object or msg != .string) continue;
+                const start = positionToOffset(rope, range.object.get("start")) orelse continue;
+                const end = positionToOffset(rope, range.object.get("end")) orelse start;
+                try spans.append(gpa, .{
+                    .start = start,
+                    .end = @max(start, end),
+                    .kind = sev,
+                    .message = msg.string,
+                });
+            }
         }
+        try layer.publishSpans(gpa, spans.items);
     }
 
     fn onCompletion(self: *Lsp, ctx: *command.Context, result: ?std.json.Value) !void {

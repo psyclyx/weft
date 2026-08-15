@@ -425,6 +425,7 @@ const TestHost = struct {
     commands: core.command.Commands,
     keymap: core.Keymap,
     pick: core.Pick,
+    caps: core.Caps,
     quit: bool,
     ctx: core.command.Context,
 
@@ -434,6 +435,7 @@ const TestHost = struct {
         host.commands = .empty;
         host.keymap = .empty;
         host.pick = .empty;
+        host.caps = core.Caps.init(gpa, core.task.nowNs);
         host.quit = false;
         host.ctx = .{
             .gpa = gpa,
@@ -441,12 +443,14 @@ const TestHost = struct {
             .commands = &host.commands,
             .keymap = &host.keymap,
             .pick = &host.pick,
+            .caps = &host.caps,
             .quit = &host.quit,
         };
         try core.builtins.install(gpa, &host.commands, &host.keymap);
     }
 
     fn deinit(host: *TestHost, gpa: Allocator) void {
+        host.caps.deinit();
         host.pick.deinit(gpa);
         host.keymap.deinit(gpa);
         host.commands.deinit(gpa);
@@ -584,4 +588,125 @@ test "syntax: incremental highlight tracks edits and peer merges" {
     try t.expectEqual(core.syntax.Class.keyword, classes[const_at]);
     const str_at = std.mem.indexOf(u8, text, "\"str\"").?;
     try t.expectEqual(core.syntax.Class.string, classes[str_at + 1]);
+}
+
+// ── Capabilities (phase 2, milestone 1) ─────────────────────────────
+
+const capability = core.capability;
+
+fn instantWords(data: ?*anyopaque, caps: *core.Caps, req: *const capability.Request) anyerror!void {
+    _ = data;
+    var items = [_]capability.CompletionItem{
+        .{ .text = @constCast("alpha"), .rank = 1 },
+        .{ .text = @constCast("beta"), .rank = 2 },
+    };
+    try caps.push(req.session, .{ .id = "test.instant", .latency = .instant }, .{ .completion = &items });
+}
+
+fn neverAnswers(data: ?*anyopaque, caps: *core.Caps, req: *const capability.Request) anyerror!void {
+    _ = data;
+    _ = caps;
+    _ = req;
+    // A dead provider: no push, no decline — the deadline reaps it.
+}
+
+test "capability: race, refine, merge-ranked composition, dead provider" {
+    const gpa = t.allocator;
+    var host: TestHost = undefined;
+    try TestHost.init(gpa, &host);
+    defer host.deinit(gpa);
+    try host.editor.insertText(gpa, "alpha beta gamma");
+
+    try host.caps.register(.{ .capability = "edit/completion", .id = "test.instant", .latency = .instant, .handler = instantWords });
+    try host.caps.register(.{ .capability = "edit/completion", .id = "test.dead", .latency = .slow, .handler = neverAnswers });
+
+    const id = (try host.caps.fire(.completion, &host.editor.doc, null, .{ .text = "a", .timeout_ns = 0 })).?;
+    defer host.caps.finish(id);
+    const s = host.caps.session(id).?;
+
+    // Instant results landed during fire; the dead provider is still
+    // outstanding but the deadline (0) already reaps the session.
+    const fresh = s.poll();
+    try t.expectEqual(@as(usize, 1), fresh.len);
+    try t.expectEqual(capability.Latency.instant, fresh[0].latency);
+    try t.expect(s.done(core.task.nowNs()));
+
+    // A slow provider pushing later refines; merge dedups by text and
+    // keeps instant-class items first.
+    var late = [_]capability.CompletionItem{
+        .{ .text = @constCast("alpha"), .rank = 0 }, // duplicate: first wins
+        .{ .text = @constCast("zeta"), .rank = 1 },
+    };
+    try host.caps.push(id, .{ .id = "test.late", .latency = .slow }, .{ .completion = &late });
+    const merged = try host.caps.mergedCompletion(gpa, id);
+    defer gpa.free(merged);
+    try t.expectEqual(@as(usize, 3), merged.len);
+    try t.expectEqualStrings("alpha", merged[0].text);
+    try t.expectEqualStrings("beta", merged[1].text);
+    try t.expectEqualStrings("zeta", merged[2].text);
+}
+
+fn definesHere(data: ?*anyopaque, caps: *core.Caps, req: *const capability.Request) anyerror!void {
+    _ = data;
+    // "Definition" = the first byte of the document, stamped at the
+    // fire version by the core (restamp).
+    var locs = [_]capability.Location{
+        .{ .range = core.position.StampedRange.at(req.version, 2, 7) },
+    };
+    try caps.push(req.session, .{ .id = "test.def", .priority = 3 }, .{ .locations = &locs });
+}
+
+test "capability: stamped results rebase through later edits or discard" {
+    const gpa = t.allocator;
+    var host: TestHost = undefined;
+    try TestHost.init(gpa, &host);
+    defer host.deinit(gpa);
+    try host.editor.insertText(gpa, "xx target yy");
+
+    try host.caps.register(.{ .capability = "edit/definition", .id = "test.def", .priority = 3, .handler = definesHere });
+    const id = (try host.caps.fire(.definition, &host.editor.doc, null, .{ .offset = 0 })).?;
+    defer host.caps.finish(id);
+
+    // The document moves on before the consumer looks.
+    try host.editor.doc.insert(gpa, 0, ">>>> ");
+    const best = host.caps.session(id).?.best().?;
+    const range = best.payload.locations[0].range.rebase(&host.editor.doc).?;
+    try t.expectEqual(@as(usize, 7), range.start);
+    try t.expectEqual(@as(usize, 12), range.end);
+
+    // A stamp the document never produced → discard arm.
+    const bogus = core.position.StampedRange.at("not-a-version", 0, 1);
+    try t.expectEqual(@as(?stemma.Range, null), bogus.rebase(&host.editor.doc));
+}
+
+test "capability: feed layer spans shift with edits; scripted provider races" {
+    const gpa = t.allocator;
+    var host: TestHost = undefined;
+    try TestHost.init(gpa, &host);
+    defer host.deinit(gpa);
+    try host.editor.insertText(gpa, "warn here later");
+
+    // Feed: publish an anchored span, then edit in front of it.
+    const layer = try host.caps.registerFeed(&host.editor.doc, "edit/diagnostics", "diagnostics", .host, "test.feed");
+    try layer.publishSpans(gpa, &.{.{ .start = 5, .end = 9, .kind = 2, .message = "hm" }});
+    try host.editor.doc.insert(gpa, 0, "____");
+    const d = layer.resolvedSpan(0);
+    try t.expectEqual(@as(usize, 9), d.start);
+    try t.expectEqual(@as(usize, 13), d.end);
+    try t.expectEqual(@as(u32, 2), d.kind);
+
+    // Scripted provider through the same registry (the only coupling).
+    const p = try core.Plugin.create(gpa, &host.ctx, "capdemo");
+    defer p.destroy();
+    const reg = try p.eval(gpa,
+        \\(scion.provide "edit/completion" (fn [prefix] [(.. prefix "_scripted")]))
+        \\true
+    , "capdemo");
+    defer gpa.free(reg);
+    const id = (try host.caps.fire(.completion, &host.editor.doc, null, .{ .text = "wa" })).?;
+    defer host.caps.finish(id);
+    const merged = try host.caps.mergedCompletion(gpa, id);
+    defer gpa.free(merged);
+    try t.expectEqual(@as(usize, 1), merged.len);
+    try t.expectEqualStrings("wa_scripted", merged[0].text);
 }

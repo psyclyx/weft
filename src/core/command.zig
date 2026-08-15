@@ -39,6 +39,7 @@ pub const Context = struct {
     commands: *Commands,
     keymap: *Keymap,
     pick: *@import("pick.zig").Pick,
+    caps: *@import("capability.zig").Caps,
     quit: *bool,
 
     pub fn document(self: *Context) *Document {
@@ -160,6 +161,8 @@ test "command: schema derivation, validation, late-bound run" {
     defer keymap.deinit(gpa);
     var pick: @import("pick.zig").Pick = .empty;
     defer pick.deinit(gpa);
+    var caps = @import("capability.zig").Caps.init(gpa, @import("task.zig").nowNs);
+    defer caps.deinit();
     var quit = false;
 
     var commands: Commands = .empty;
@@ -170,6 +173,7 @@ test "command: schema derivation, validation, late-bound run" {
         .commands = &commands,
         .keymap = &keymap,
         .pick = &pick,
+        .caps = &caps,
         .quit = &quit,
     };
 

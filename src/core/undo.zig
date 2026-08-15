@@ -32,28 +32,9 @@ const patch = @import("patch.zig");
 const Patch = patch.Patch;
 const Bias = stemma.Bias;
 
-/// Map an offset through one commit's composed patches (old-space →
-/// new-space). `bias` resolves positions at insertion boundaries
-/// (`.left` stays before text inserted at the position, `.right` goes
-/// after); positions in a removed range collapse to its replacement
-/// start.
-fn mapOffset(patches: []const Patch, x: usize, bias: Bias) usize {
-    var delta: isize = 0;
-    for (patches) |p| {
-        if (x < p.offset) break;
-        if (x == p.offset) {
-            if (p.removed > 0) return @intCast(@as(isize, @intCast(p.offset)) + delta);
-            if (bias == .left) break;
-            delta += @as(isize, @intCast(p.inserted));
-            continue;
-        }
-        if (x < p.offset + p.removed) {
-            return @intCast(@as(isize, @intCast(p.offset)) + delta);
-        }
-        delta += @as(isize, @intCast(p.inserted)) - @as(isize, @intCast(p.removed));
-    }
-    return @intCast(@as(isize, @intCast(x)) + delta);
-}
+/// The offset-mapping kernel lives in position.zig (shared with the
+/// capability system's stamped-position rebasing).
+const mapOffset = @import("position.zig").mapOffset;
 
 const Group = struct {
     /// Log indices of the commits in this unit, ascending.

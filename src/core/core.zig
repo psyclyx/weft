@@ -27,6 +27,11 @@ pub const pick = @import("pick.zig");
 pub const Mirror = @import("mirror.zig");
 pub const syntax = @import("syntax.zig");
 pub const lsp = @import("lsp.zig");
+pub const position = @import("position.zig");
+pub const layers = @import("layers.zig");
+pub const capability = @import("capability.zig");
+pub const Caps = capability.Caps;
+pub const complete_ui = @import("complete_ui.zig");
 pub const Pick = pick.Pick;
 pub const file = @import("file.zig");
 

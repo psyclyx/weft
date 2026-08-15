@@ -79,3 +79,22 @@
 ;; ── LSP (when a server is attached) ──
 (bind "insert" "C-n" "complete")
 (bind "normal" "C-bracketright" "goto-definition")   ;; C-] à la vim tags
+
+;; ── Capabilities: buffer-words completion (instant tier) ──
+;; A scripted provider against the capability name — proof the registry
+;; is the only coupling. Scans this plugin's replica snapshot for words
+;; sharing the prefix.
+(scion.provide "edit/completion"
+  (fn [prefix]
+    (if (= (length prefix) 0)
+        []
+        (let [text (scion.snapshot)
+              seen {}
+              out []]
+          (each [word (string.gmatch text "[%w_]+")]
+            (when (and (> (length word) (length prefix))
+                       (= (string.sub word 1 (length prefix)) prefix)
+                       (not (. seen word)))
+              (tset seen word true)
+              (table.insert out word)))
+          out))))

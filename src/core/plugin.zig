@@ -55,6 +55,7 @@ pub const Plugin = struct {
     peer: Document.PeerId,
     ctx: *command.Context,
     cmds: std.ArrayList(*LuaCommand) = .empty,
+    provs: std.ArrayList(*LuaProvider) = .empty,
     /// Owns string results returned across the trampoline until the
     /// next scripted-command invocation.
     result_buf: ?[]u8 = null,
@@ -99,6 +100,7 @@ pub const Plugin = struct {
         registerFn(L, self, "fallback", lFallback);
         registerFn(L, self, "textinput", lTextinput);
         registerFn(L, self, "pick", lPick);
+        registerFn(L, self, "provide", lProvide);
         registerFn(L, self, "cursor", lCursor);
         registerFn(L, self, "log", lLog);
         c.lua_setglobal(L, "scion");
@@ -118,6 +120,16 @@ pub const Plugin = struct {
             gpa.destroy(lc);
         }
         self.cmds.deinit(gpa);
+        // Capability providers this VM registered die with it.
+        var prefix_buf: [128]u8 = undefined;
+        if (std.fmt.bufPrint(&prefix_buf, "plugin.{s}/", .{self.name})) |prefix| {
+            self.ctx.caps.unregisterByIdPrefix(prefix);
+        } else |_| {}
+        for (self.provs.items) |lp| {
+            gpa.free(lp.id);
+            gpa.destroy(lp);
+        }
+        self.provs.deinit(gpa);
         if (self.result_buf) |b| gpa.free(b);
         c.lua_close(self.L);
         self.ctx.document().removePeer(gpa, self.peer);
@@ -370,6 +382,97 @@ fn luaPickCleanup(data: ?*anyopaque, gpa: Allocator) void {
     const lp: *LuaPick = @ptrCast(@alignCast(data.?));
     c.luaL_unref(lp.plugin.L, c.LUA_REGISTRYINDEX, lp.ref);
     gpa.destroy(lp);
+}
+
+const capability = @import("capability.zig");
+
+const LuaProvider = struct {
+    plugin: *Plugin,
+    ref: c_int,
+    id: []u8,
+};
+
+/// scion.provide(capability, fn) — register a scripted capability
+/// provider (instant class, all documents). v1 scope: edit/completion;
+/// the handler receives the word prefix and returns a list of strings
+/// (or {text=..., label=...} tables).
+fn lProvide(L: ?*c.lua_State) callconv(.c) c_int {
+    const self = pluginOf(L);
+    var nl: usize = 0;
+    const cap = c.luaL_checklstring(L, 1, &nl);
+    c.luaL_checktype(L, 2, c.LUA_TFUNCTION);
+    if (!std.mem.eql(u8, cap[0..nl], "edit/completion")) {
+        return raise(L, error.UnsupportedCapability);
+    }
+    const gpa = self.gpa;
+    c.lua_pushvalue(L, 2);
+    const ref = c.luaL_ref(L, c.LUA_REGISTRYINDEX);
+    const lp = gpa.create(LuaProvider) catch |e| return raise(L, e);
+    lp.* = .{
+        .plugin = self,
+        .ref = ref,
+        .id = std.fmt.allocPrint(gpa, "plugin.{s}/{s}", .{ self.name, cap[0..nl] }) catch |e| return raise(L, e),
+    };
+    self.provs.append(gpa, lp) catch |e| return raise(L, e);
+    self.ctx.caps.register(.{
+        .capability = cap[0..nl],
+        .id = lp.id,
+        .latency = .instant,
+        .data = lp,
+        .handler = luaProviderQuery,
+    }) catch |e| return raise(L, e);
+    return 0;
+}
+
+fn luaProviderQuery(data: ?*anyopaque, caps: *capability.Caps, req: *const capability.Request) anyerror!void {
+    const lp: *LuaProvider = @ptrCast(@alignCast(data.?));
+    if (req.kind != .completion) {
+        caps.decline(req.session);
+        return;
+    }
+    const L = lp.plugin.L;
+    const base = c.lua_gettop(L);
+    defer c.lua_settop(L, base);
+    _ = c.lua_rawgeti(L, c.LUA_REGISTRYINDEX, lp.ref);
+    _ = c.lua_pushlstring(L, req.text.ptr, req.text.len);
+    if (c.lua_pcallk(L, 1, 1, 0, 0, null) != c.LUA_OK) {
+        logLuaError(L, "capability provider");
+        caps.decline(req.session);
+        return error.Script;
+    }
+    if (c.lua_type(L, -1) != c.LUA_TTABLE) {
+        caps.decline(req.session);
+        return;
+    }
+    const gpa = lp.plugin.gpa;
+    var items: std.ArrayList(capability.CompletionItem) = .empty;
+    defer items.deinit(gpa);
+    const n = c.lua_rawlen(L, -1);
+    for (1..n + 1) |i| {
+        _ = c.lua_rawgeti(L, -1, @intCast(i));
+        var text: ?[]const u8 = null;
+        if (c.lua_type(L, -1) == c.LUA_TSTRING) {
+            var sl: usize = 0;
+            const s = c.lua_tolstring(L, -1, &sl);
+            text = s[0..sl];
+        } else if (c.lua_type(L, -1) == c.LUA_TTABLE) {
+            _ = c.lua_getfield(L, -1, "text");
+            if (c.lua_type(L, -1) == c.LUA_TSTRING) {
+                var sl: usize = 0;
+                const s = c.lua_tolstring(L, -1, &sl);
+                text = s[0..sl];
+            }
+            c.lua_pop(L, 1);
+        }
+        if (text) |t_| {
+            try items.append(gpa, .{
+                .text = @constCast(t_), // borrowed; push() deep-copies
+                .rank = @intCast(i),
+            });
+        }
+        c.lua_pop(L, 1);
+    }
+    try caps.push(req.session, .{ .id = lp.id, .latency = .instant }, .{ .completion = items.items });
 }
 
 fn lCursor(L: ?*c.lua_State) callconv(.c) c_int {

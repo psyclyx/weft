@@ -394,3 +394,15 @@ fn readRange(gpa: Allocator, rope: *const stemma.Rope, r: Range) Allocator.Error
 test {
     std.testing.refAllDecls(@This());
 }
+
+/// The word fragment immediately before the cursor (completion prefix);
+/// caller frees. Empty when the cursor doesn't follow a word char.
+pub fn wordPrefix(self: *const Editor, gpa: Allocator) Allocator.Error![]u8 {
+    const off = self.cursorOffset();
+    const start = off -| 128;
+    const buf = try readRange(gpa, self.text(), .{ .start = start, .end = off });
+    defer gpa.free(buf);
+    var i = buf.len;
+    while (i > 0 and wordChar(buf[i - 1])) i -= 1;
+    return gpa.dupe(u8, buf[i..]);
+}

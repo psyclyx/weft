@@ -325,3 +325,10 @@ test "hot-section fence flags" {
     try t.expect(!inHotSection());
     assertMayBlock();
 }
+
+/// Monotonic clock (raw syscall — no Io plumbing on hot paths).
+pub fn nowNs() u64 {
+    var ts: linux.timespec = undefined;
+    _ = linux.clock_gettime(.MONOTONIC, &ts);
+    return @as(u64, @intCast(ts.sec)) * std.time.ns_per_s + @as(u64, @intCast(ts.nsec));
+}

@@ -80,6 +80,8 @@ pub fn main(init: std.process.Init) !void {
     defer keymap.deinit(gpa);
     var pick_state: core.Pick = .empty;
     defer pick_state.deinit(gpa);
+    var caps = core.Caps.init(gpa, core.task.nowNs);
+    defer caps.deinit();
     var quit = false;
     var cmd_ctx: core.command.Context = .{
         .gpa = gpa,
@@ -87,9 +89,14 @@ pub fn main(init: std.process.Init) !void {
         .commands = &commands,
         .keymap = &keymap,
         .pick = &pick_state,
+        .caps = &caps,
         .quit = &quit,
     };
     try core.builtins.install(gpa, &commands, &keymap);
+    // Completion is a capability consumer: race-and-refine over every
+    // registered edit/completion provider.
+    var completion_ui: core.complete_ui.CompletionUi = .empty;
+    _ = try commands.bind(gpa, "complete", completion_ui.commandSpec());
     var syntax: ?*core.syntax.Syntax = null;
     defer if (syntax) |s| s.destroy();
     if (editor.path) |p| {
@@ -109,7 +116,10 @@ pub fn main(init: std.process.Init) !void {
                 break :blk null;
             };
             if (lsp) |l| {
-                _ = try commands.bind(gpa, "complete", core.lsp.completeCommand(l));
+                // Diagnostics flow through the capability feed layer
+                // (host-scoped); the view reads the layer, not the plugin.
+                const diag_layer = try caps.registerFeed(&editor.doc, "edit/diagnostics", "diagnostics", .host, "lsp.zls");
+                l.attachDiagnostics(diag_layer);
                 _ = try commands.bind(gpa, "goto-definition", core.lsp.definitionCommand(l));
             }
         }
@@ -193,6 +203,7 @@ pub fn main(init: std.process.Init) !void {
         if (lsp) |l| {
             if (try l.tick(&cmd_ctx)) view_dirty = true;
         }
+        if (try completion_ui.tick(&cmd_ctx)) view_dirty = true;
         if (editor.doc.commitCount() != seen_commits) {
             seen_commits = editor.doc.commitCount();
             view_dirty = true;
@@ -213,14 +224,16 @@ pub fn main(init: std.process.Init) !void {
                 .save_failed = editor.save_state == .failed,
                 .pick = if (pick_state.active) &pick_state else null,
                 .syntax = syntax,
-                .diags = if (lsp) |l| l.diagnostics() else &.{},
-                .cursor_diag = if (lsp) |l| blk: {
+                .diag_layer = caps.layers.find("diagnostics"),
+                .cursor_diag = blk: {
+                    const dl = caps.layers.find("diagnostics") orelse break :blk null;
                     const cur = editor.cursorOffset();
-                    for (l.diagnostics()) |d| {
+                    for (0..dl.spanCount()) |i| {
+                        const d = dl.resolvedSpan(i);
                         if (cur >= d.start and cur <= d.end) break :blk d.message;
                     }
                     break :blk null;
-                } else null,
+                },
             };
             var arena_state = std.heap.ArenaAllocator.init(gpa);
             defer arena_state.deinit();

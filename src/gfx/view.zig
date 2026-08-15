@@ -79,7 +79,8 @@ pub const Hud = struct {
     save_failed: bool = false,
     pick: ?*const core.Pick = null,
     syntax: ?*core.syntax.Syntax = null,
-    diags: []const core.lsp.Diag = &.{},
+    /// The diagnostics feed layer (anchored spans, kind = severity).
+    diag_layer: ?*const core.layers.Layer = null,
     /// Message of a diagnostic at the cursor, for the status line.
     cursor_diag: ?[]const u8 = null,
 
@@ -231,18 +232,21 @@ pub const View = struct {
         // Diagnostic tint over the visible byte range: 0 none, else
         // severity (1 error, 2 warning …). Lower severity number wins.
         var diag_tint: ?[]u8 = null;
-        if (hud.diags.len > 0 and rows_visible > 0 and self.top_row < total_rows) {
+        const diag_count = if (hud.diag_layer) |dl| dl.spanCount() else 0;
+        if (diag_count > 0 and rows_visible > 0 and self.top_row < total_rows) {
+            const dl = hud.diag_layer.?;
             const last = @min(total_rows, self.top_row + rows_visible);
             const vis_start = rope.lineRange(self.top_row).start;
             const vis_end = rope.lineRange(last - 1).end;
             const tint = try scratch.alloc(u8, vis_end - vis_start);
             @memset(tint, 0);
-            for (hud.diags) |d| {
+            for (0..dl.spanCount()) |di| {
+                const d = dl.resolvedSpan(di);
                 const s = @max(d.start, vis_start);
                 const e = @min(@max(d.end, d.start + 1), vis_end);
                 if (s >= e) continue;
                 for (tint[s - vis_start .. e - vis_start]) |*b| {
-                    if (b.* == 0 or d.severity < b.*) b.* = d.severity;
+                    if (b.* == 0 or d.kind < b.*) b.* = @intCast(@min(d.kind, 255));
                 }
             }
             diag_tint = tint;
@@ -436,8 +440,9 @@ pub const View = struct {
     ) !void {
         if (rows_total == 0) return;
         var diag_part_buf: [96]u8 = undefined;
-        const diag_part = if (hud.diags.len > 0)
-            std.fmt.bufPrint(&diag_part_buf, "  !{d}", .{hud.diags.len}) catch ""
+        const status_diag_count = if (hud.diag_layer) |dl| dl.spanCount() else 0;
+        const diag_part = if (status_diag_count > 0)
+            std.fmt.bufPrint(&diag_part_buf, "  !{d}", .{status_diag_count}) catch ""
         else
             "";
         const status = try std.fmt.allocPrint(scratch, " {s}  {s}{s}{s}{s}{s}{s}", .{
