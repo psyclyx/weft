@@ -68,9 +68,11 @@ peers: std.ArrayList(?Peer) = .empty,
 log: std.ArrayList(Commit) = .empty,
 
 /// `user` is the interactive peer (the authoritative replica's own
-/// agent); other values are handles from `addPeer`.
+/// agent); other values are handles from `addPeer` — except `remote`,
+/// the reserved author for batches merged off the wire.
 pub const PeerId = enum(u32) {
     user = 0,
+    remote = std.math.maxInt(u32),
     _,
 
     fn index(self: PeerId) usize {
@@ -456,4 +458,30 @@ pub fn textAt(self: *const Document, gpa: Allocator, version_token: []const u8) 
 
 test {
     std.testing.refAllDecls(@This());
+}
+
+// ── Remote sync (the wire's entry points) ───────────────────────────
+
+/// Merge a remote peer's encoded event batch (stemma wire bytes) into
+/// the document; commits log under the reserved `remote` author (never
+/// undoable locally, never re-broadcast as ours). Returns whether text
+/// changed. Duplicate events are no-ops — blind retransmit is safe.
+pub fn mergeRemote(self: *Document, gpa: Allocator, batch: []const u8) TextDoc.MergeError!bool {
+    var pre = self.doc.text().snapshot();
+    defer pre.deinit(gpa);
+    const edits = try self.doc.merge(gpa, batch);
+    defer gpa.free(edits);
+    if (edits.len == 0) return false;
+    try self.commitEdits(gpa, .remote, edits, &pre);
+    return true;
+}
+
+/// Wire-encode everything a peer holding `remote_version` lacks.
+pub fn eventsSince(self: *const Document, gpa: Allocator, remote_version: []const u8) ![]u8 {
+    return self.doc.eventsSince(gpa, remote_version);
+}
+
+/// The whole history (bootstrap batch for a peer with no frontier).
+pub fn serialize(self: *const Document, gpa: Allocator) Error![]u8 {
+    return self.doc.serialize(gpa);
 }

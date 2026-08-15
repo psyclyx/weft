@@ -84,6 +84,10 @@ pub const Hud = struct {
     diag_layer: ?*const core.layers.Layer = null,
     /// Message of a diagnostic at the cursor, for the status line.
     cursor_diag: ?[]const u8 = null,
+    /// Remote peers' cursors (replicated feed layer).
+    presence_layer: ?*const core.layers.Layer = null,
+    /// Collab link liveness for the status line.
+    link: ?[]const u8 = null,
 
     const max_pick_rows = 8;
 
@@ -276,6 +280,18 @@ pub const View = struct {
                     }
                 }
             }
+            // Remote peer cursors (best-effort presence).
+            if (hud.presence_layer) |pl| {
+                for (0..pl.spanCount()) |pi| {
+                    const span = pl.resolvedSpan(pi);
+                    if (span.start >= line.start and span.start <= line.end) {
+                        const pcol = rope.offsetToScalar(@min(span.start, line.end)) - rope.offsetToScalar(line.start);
+                        if (pcol < cols_visible) {
+                            try block_cols.append(scratch, .{ .col = @intCast(pcol), .color = self.theme.accent });
+                        }
+                    }
+                }
+            }
             const cursor_here = cursor_pt.row == row;
             const cursor_col = if (cursor_here)
                 rope.offsetToScalar(@min(cursor_off, line.end)) - rope.offsetToScalar(line.start)
@@ -453,12 +469,14 @@ pub const View = struct {
             std.fmt.bufPrint(&diag_part_buf, "  !{d}", .{status_diag_count}) catch ""
         else
             "";
-        const status = try std.fmt.allocPrint(scratch, " {s}  {s}{s}{s}{s}{s}{s}", .{
+        const status = try std.fmt.allocPrint(scratch, " {s}  {s}{s}{s}{s}{s}{s}{s}{s}", .{
             hud.mode,
             hud.file orelse "[scratch]",
             if (hud.dirty) " [+]" else "",
             if (hud.save_failed) " [save failed]" else "",
             diag_part,
+            if (hud.link != null) "  link:" else "",
+            hud.link orelse "",
             if (hud.cursor_diag != null) "  " else "",
             hud.cursor_diag orelse "",
         });

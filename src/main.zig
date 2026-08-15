@@ -25,6 +25,10 @@ const Args = struct {
     font: ?[]const u8 = null,
     config: ?[]const u8 = null,
     em: f32 = 15,
+    listen: ?u16 = null,
+    connect: ?[]const u8 = null, // host:port
+    token: []const u8 = "scion-dev",
+    user: []const u8 = "user",
 };
 
 fn parseArgs(process_args: std.process.Args) Args {
@@ -38,6 +42,14 @@ fn parseArgs(process_args: std.process.Args) Args {
             out.config = it.next() orelse out.config;
         } else if (std.mem.eql(u8, a, "--em")) {
             if (it.next()) |v| out.em = std.fmt.parseFloat(f32, v) catch out.em;
+        } else if (std.mem.eql(u8, a, "--listen")) {
+            if (it.next()) |v| out.listen = std.fmt.parseInt(u16, v, 10) catch null;
+        } else if (std.mem.eql(u8, a, "--connect")) {
+            out.connect = it.next() orelse out.connect;
+        } else if (std.mem.eql(u8, a, "--token")) {
+            out.token = it.next() orelse out.token;
+        } else if (std.mem.eql(u8, a, "--user")) {
+            out.user = it.next() orelse out.user;
         } else {
             out.file = a;
         }
@@ -61,7 +73,7 @@ pub fn main(init: std.process.Init) !void {
     // ── Core ──
     var pool = try core.task.Pool.init(gpa, .{});
     defer pool.deinit();
-    var editor = try core.Editor.init(gpa, pool, "user");
+    var editor = try core.Editor.init(gpa, pool, args.user);
     defer editor.deinit(gpa);
     if (args.file) |path| {
         editor.openFile(gpa, path) catch |err| switch (err) {
@@ -153,6 +165,21 @@ pub fn main(init: std.process.Init) !void {
         }
     }
 
+    // ── Collab session (wire v1) ──
+    var fd_link: core.session.FdLink = undefined;
+    var collab_session: ?*core.session.Session = null;
+    defer if (collab_session) |s| s.destroy();
+    var collab: ?core.session.Collab = null;
+    defer if (collab) |*c| c.deinit();
+    if (args.listen != null or args.connect != null) {
+        const fd = if (args.listen) |port| try tcpListen(port) else try tcpConnect(args.connect.?);
+        fd_link = .{ .fd = fd };
+        const role: core.secure.Role = if (args.listen != null) .server else .client;
+        collab_session = try core.session.Session.create(gpa, fd_link.link(), role, args.token);
+        collab = try core.session.Collab.init(gpa, collab_session.?, &editor.doc, args.user);
+        collab.?.presence_layer = try caps.layers.claim(gpa, &editor.doc, "presence", .replicated, "collab");
+    }
+
     // ── Window + Vulkan ──
     const window = try wayland.Window.init(1280, 800, "scion", "dev.psyclyx.scion");
     defer window.deinit();
@@ -230,6 +257,9 @@ pub fn main(init: std.process.Init) !void {
         if (try completion_ui.tick(&cmd_ctx)) view_dirty = true;
         if (try def_ui.tick(&cmd_ctx)) view_dirty = true;
         if (try sym_ui.tick(&cmd_ctx)) view_dirty = true;
+        if (collab) |*c| {
+            if (try c.tick(editor.cursorOffset())) view_dirty = true;
+        }
         if (editor.doc.commitCount() != seen_commits) {
             seen_commits = editor.doc.commitCount();
             view_dirty = true;
@@ -267,6 +297,8 @@ pub fn main(init: std.process.Init) !void {
                 .pick = if (pick_state.active) &pick_state else null,
                 .highlight_layer = caps.layers.find("highlight"),
                 .diag_layer = caps.layers.find("diagnostics"),
+                .presence_layer = caps.layers.find("presence"),
+                .link = if (collab_session) |s| @tagName(s.liveness()) else null,
                 .cursor_diag = blk: {
                     const dl = caps.layers.find("diagnostics") orelse break :blk null;
                     const cur = editor.cursorOffset();
@@ -497,4 +529,51 @@ fn lspAddHandler(ctx: *core.command.Context, data: ?*anyopaque, args: []const co
     };
     try servers.list.append(gpa, e);
     return .nil;
+}
+
+// ── Collab transport bootstrap (TCP, IPv4) ──────────────────────────
+
+fn tcpListen(port: u16) !i32 {
+    const linux = std.os.linux;
+    const fd_rc = linux.socket(linux.AF.INET, linux.SOCK.STREAM, 0);
+    if (linux.errno(fd_rc) != .SUCCESS) return error.Socket;
+    const fd: i32 = @intCast(fd_rc);
+    var one: i32 = 1;
+    _ = linux.setsockopt(fd, linux.SOL.SOCKET, linux.SO.REUSEADDR, @ptrCast(&one), 4);
+    var addr: linux.sockaddr.in = .{ .port = std.mem.nativeToBig(u16, port), .addr = 0 };
+    if (linux.errno(linux.bind(fd, @ptrCast(&addr), @sizeOf(linux.sockaddr.in))) != .SUCCESS) return error.Bind;
+    if (linux.errno(linux.listen(fd, 1)) != .SUCCESS) return error.Listen;
+    std.log.info("collab: listening on port {d} — waiting for a peer", .{port});
+    const conn_rc = linux.accept4(fd, null, null, 0);
+    if (linux.errno(conn_rc) != .SUCCESS) return error.Accept;
+    _ = linux.close(fd);
+    return @intCast(conn_rc);
+}
+
+fn tcpConnect(hostport: []const u8) !i32 {
+    const linux = std.os.linux;
+    const colon = std.mem.lastIndexOfScalar(u8, hostport, ':') orelse return error.BadAddress;
+    const host = hostport[0..colon];
+    const port = std.fmt.parseInt(u16, hostport[colon + 1 ..], 10) catch return error.BadAddress;
+    // IPv4 dotted quad only (name resolution is the agent milestone's
+    // problem); "localhost" convenience-mapped.
+    const ip = if (std.mem.eql(u8, host, "localhost")) "127.0.0.1" else host;
+    var octets: [4]u8 = undefined;
+    var it = std.mem.splitScalar(u8, ip, '.');
+    for (&octets) |*o| {
+        const part = it.next() orelse return error.BadAddress;
+        o.* = std.fmt.parseInt(u8, part, 10) catch return error.BadAddress;
+    }
+    const fd_rc = linux.socket(linux.AF.INET, linux.SOCK.STREAM, 0);
+    if (linux.errno(fd_rc) != .SUCCESS) return error.Socket;
+    const fd: i32 = @intCast(fd_rc);
+    var addr: linux.sockaddr.in = .{
+        .port = std.mem.nativeToBig(u16, port),
+        .addr = std.mem.bytesToValue(u32, &octets),
+    };
+    if (linux.errno(linux.connect(fd, @ptrCast(&addr), @sizeOf(linux.sockaddr.in))) != .SUCCESS) {
+        _ = linux.close(fd);
+        return error.Connect;
+    }
+    return fd;
 }
