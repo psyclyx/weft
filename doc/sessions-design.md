@@ -146,3 +146,26 @@ deployment — the LSP child process can be `ssh box zls`: our adapter
 already speaks child stdio, so the server runs where the code lives
 with zero installed bytes. That covers project-aware analysis on
 coreutils-tier boxes that happen to have a language server.
+
+## Revision 3: tool buffers (magit-class) (2026-08-15)
+
+Everything is a Document; the differences are bindings, not kinds:
+
+- **Backing = authority, not path**: file | shell-remote file | tool |
+  none (scratch). A tool backing regenerates content by being a plugin
+  PEER (replica commits — refresh merges like any concurrent editor;
+  no special refresh machinery). No save unless the tool defines one.
+- **Interaction = keymap mode**: a magit buffer sets mode "magit"
+  (bindings → commands, text swallowed) — the vim-normal mechanism
+  reused. read_only flag as belt-and-braces.
+- **Structure = a layer**: the generator publishes sections (hunks,
+  files, entries) as anchored spans with tool-defined kinds; commands
+  resolve the cursor against the section layer. Faces likewise.
+- **Sharing falls out**: tool buffers are documents; sharing one
+  (pair-driving a rebase) is the tool's policy call, not the core's.
+
+Dired/compilation/grep/REPL = same recipe, different tool. Additions
+to the multi-buffer milestone: backing as the four-case interface;
+buffer-local mode save/restore on focus switch; plugin API
+scion.buffer-create + scion.layer-publish (+ section lookup helper)
+so tool buffers are writable in fennel.
