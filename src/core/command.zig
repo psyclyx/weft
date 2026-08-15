@@ -10,6 +10,8 @@ const Allocator = std.mem.Allocator;
 
 const registry = @import("registry.zig");
 const Document = @import("Document.zig");
+const Editor = @import("Editor.zig");
+const Keymap = @import("Keymap.zig");
 
 /// The portable argument/result ABI. Mirrors what a Lua boundary can
 /// carry; strings are borrowed for the duration of the call.
@@ -28,20 +30,29 @@ pub const ArgSpec = struct {
     type: Type,
 };
 
-/// Everything a handler may touch. Grows with the editor; commands only
-/// ever see this, never core internals.
+/// Everything a handler may touch — the whole editor surface, because
+/// commands ARE the editor's features. Commands only ever see this,
+/// never core internals.
 pub const Context = struct {
     gpa: Allocator,
-    document: *Document,
-};
+    editor: *Editor,
+    commands: *Commands,
+    keymap: *Keymap,
+    quit: *bool,
 
-pub const InvokeError = error{ ArityMismatch, TypeMismatch } || anyerror;
+    pub fn document(self: *Context) *Document {
+        return &self.editor.doc;
+    }
+};
 
 pub const Command = struct {
     name: []const u8,
     summary: []const u8,
     args: []const ArgSpec,
-    handler: *const fn (ctx: *Context, args: []const Value) anyerror!Value,
+    /// `data` is the command's closure payload (null for comptime-typed
+    /// commands; a VM trampoline for scripted ones).
+    handler: *const fn (ctx: *Context, data: ?*anyopaque, args: []const Value) anyerror!Value,
+    data: ?*anyopaque = null,
 };
 
 pub const Commands = registry.Registry(Command);
@@ -53,7 +64,7 @@ pub const RunError = error{UnknownCommand} || anyerror;
 /// runs.
 pub fn run(commands: *const Commands, ctx: *Context, name: []const u8, args: []const Value) RunError!Value {
     const cmd = commands.resolve(name) orelse return error.UnknownCommand;
-    return cmd.handler(ctx, args);
+    return cmd.handler(ctx, cmd.data, args);
 }
 
 /// Derive a `Command` from a typed function at comptime. `f` must be
@@ -79,7 +90,8 @@ pub fn define(
     };
 
     const Wrap = struct {
-        fn call(ctx: *Context, args: []const Value) anyerror!Value {
+        fn call(ctx: *Context, data: ?*anyopaque, args: []const Value) anyerror!Value {
+            _ = data;
             if (args.len != fields.len) return error.ArityMismatch;
             var typed: Args = undefined;
             inline for (fields, 0..) |fld, i| {
@@ -132,18 +144,30 @@ fn unpack(comptime T: type, v: Value) error{TypeMismatch}!T {
 const t = std.testing;
 
 fn insertText(ctx: *Context, args: struct { offset: i64, text: []const u8 }) anyerror!Value {
-    try ctx.document.insert(ctx.gpa, @intCast(args.offset), args.text);
-    return .{ .integer = @intCast(ctx.document.text().byteLen()) };
+    try ctx.document().insert(ctx.gpa, @intCast(args.offset), args.text);
+    return .{ .integer = @intCast(ctx.document().text().byteLen()) };
 }
 
 test "command: schema derivation, validation, late-bound run" {
     const gpa = t.allocator;
-    var doc = try Document.init(gpa, "user");
-    defer doc.deinit(gpa);
-    var ctx: Context = .{ .gpa = gpa, .document = &doc };
+    const task = @import("task.zig");
+    var pool = try task.Pool.init(gpa, .{ .threads = 1 });
+    defer pool.deinit();
+    var editor = try Editor.init(gpa, pool, "user");
+    defer editor.deinit(gpa);
+    var keymap: Keymap = .empty;
+    defer keymap.deinit(gpa);
+    var quit = false;
 
     var commands: Commands = .empty;
     defer commands.deinit(gpa);
+    var ctx: Context = .{
+        .gpa = gpa,
+        .editor = &editor,
+        .commands = &commands,
+        .keymap = &keymap,
+        .quit = &quit,
+    };
 
     // Late binding: invoked-by-name before it exists → UnknownCommand.
     try t.expectError(error.UnknownCommand, run(&commands, &ctx, "insert-text", &.{}));
@@ -160,11 +184,11 @@ test "command: schema derivation, validation, late-bound run" {
     try t.expectError(error.TypeMismatch, run(&commands, &ctx, "insert-text", &.{
         .{ .string = "oops" }, .{ .string = "hi" },
     }));
-    try t.expectEqual(@as(usize, 0), doc.text().byteLen());
+    try t.expectEqual(@as(usize, 0), editor.text().byteLen());
 
     const res = try run(&commands, &ctx, "insert-text", &.{
         .{ .integer = 0 }, .{ .string = "graft" },
     });
     try t.expectEqual(Value{ .integer = 5 }, res);
-    try t.expectEqual(@as(usize, 5), doc.text().byteLen());
+    try t.expectEqual(@as(usize, 5), editor.text().byteLen());
 }

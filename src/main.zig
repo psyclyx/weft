@@ -22,6 +22,7 @@ const embedded_font = @embedFile("font_mono");
 const Args = struct {
     file: ?[]const u8 = null,
     font: ?[]const u8 = null,
+    config: ?[]const u8 = null,
     em: f32 = 15,
 };
 
@@ -32,6 +33,8 @@ fn parseArgs(process_args: std.process.Args) Args {
     while (it.next()) |a| {
         if (std.mem.eql(u8, a, "--font")) {
             out.font = it.next() orelse out.font;
+        } else if (std.mem.eql(u8, a, "--config")) {
+            out.config = it.next() orelse out.config;
         } else if (std.mem.eql(u8, a, "--em")) {
             if (it.next()) |v| out.em = std.fmt.parseFloat(f32, v) catch out.em;
         } else {
@@ -63,6 +66,25 @@ pub fn main(init: std.process.Init) !void {
             else => |e| return e,
         };
     }
+
+    // ── Command surface + config plugin ──
+    var commands: core.command.Commands = .empty;
+    defer commands.deinit(gpa);
+    var keymap: core.Keymap = .empty;
+    defer keymap.deinit(gpa);
+    var quit = false;
+    var cmd_ctx: core.command.Context = .{
+        .gpa = gpa,
+        .editor = &editor,
+        .commands = &commands,
+        .keymap = &keymap,
+        .quit = &quit,
+    };
+    try core.builtins.install(gpa, &commands, &keymap);
+    const config_plugin = try core.Plugin.create(gpa, &cmd_ctx, "config");
+    defer config_plugin.destroy();
+    _ = try commands.bind(gpa, "eval", core.plugin.evalCommand(config_plugin));
+    try loadConfig(gpa, config_plugin, args.config, init.minimal.environ);
 
     // ── Window + Vulkan ──
     const window = try wayland.Window.init(1280, 800, "scion", "dev.psyclyx.scion");
@@ -113,7 +135,7 @@ pub fn main(init: std.process.Init) !void {
 
     std.log.info("scion: rendering — {d} bytes open, em {d}", .{ editor.text().byteLen(), args.em });
 
-    while (!window.shouldClose()) {
+    while (!window.shouldClose() and !quit) {
         const frame_start = stats_mod.nowNs();
         window.pumpEvents();
 
@@ -129,7 +151,7 @@ pub fn main(init: std.process.Init) !void {
         while (window.nextKeyEvent()) |ev| {
             if (!ev.pressed) continue;
             had_input = true;
-            try handleKey(gpa, &editor, &view, ev, fb[1]);
+            try dispatchKey(&cmd_ctx, &view, ev, fb[1]);
         }
         core.task.endHotSection();
         if (window.shouldClose()) break;
@@ -202,47 +224,69 @@ pub fn main(init: std.process.Init) !void {
     ctx.waitIdle();
 }
 
-/// Translate one key event into editor ops. Runs inside the hot
-/// section: everything here is allocation-only.
-fn handleKey(gpa: std.mem.Allocator, editor: *core.Editor, view: *view_mod.View, ev: wayland.KeyEvent, fb_h: u32) !void {
+/// One key event → keymap lookup → command. Runs inside the hot
+/// section: dispatch is a table lookup plus the command itself,
+/// allocation-only. Unbound printable input becomes `insert-text` —
+/// itself a command; there is no editing path around the ABI.
+fn dispatchKey(ctx: *core.command.Context, view: *view_mod.View, ev: wayland.KeyEvent, fb_h: u32) !void {
     const c = wayland.c;
-    if (ev.mods.ctrl) {
-        switch (ev.keysym) {
-            c.XKB_KEY_s => try editor.requestSave(gpa),
-            c.XKB_KEY_z => _ = try editor.undo(gpa),
-            c.XKB_KEY_y => _ = try editor.redo(gpa),
-            c.XKB_KEY_a => editor.moveLineStart(),
-            c.XKB_KEY_e => editor.moveLineEnd(),
-            c.XKB_KEY_space => try editor.setMark(gpa),
-            c.XKB_KEY_g => editor.clearSelection(),
-            else => {},
+    // Paging needs viewport geometry the core doesn't know; view-aware
+    // dispatch stays here.
+    if (ev.keysym == c.XKB_KEY_Page_Up or ev.keysym == c.XKB_KEY_Page_Down) {
+        const rows = view.visibleRows(fb_h);
+        for (0..rows) |_| {
+            if (ev.keysym == c.XKB_KEY_Page_Up) ctx.editor.moveUp() else ctx.editor.moveDown();
         }
         return;
     }
-    switch (ev.keysym) {
-        c.XKB_KEY_BackSpace => try editor.deleteBackward(gpa),
-        c.XKB_KEY_Delete => try editor.deleteForward(gpa),
-        c.XKB_KEY_Return => try editor.insertText(gpa, "\n"),
-        c.XKB_KEY_Tab => try editor.insertText(gpa, "\t"),
-        c.XKB_KEY_Left => editor.moveLeft(),
-        c.XKB_KEY_Right => editor.moveRight(),
-        c.XKB_KEY_Up => editor.moveUp(),
-        c.XKB_KEY_Down => editor.moveDown(),
-        c.XKB_KEY_Home => editor.moveLineStart(),
-        c.XKB_KEY_End => editor.moveLineEnd(),
-        c.XKB_KEY_Page_Up => {
-            const rows = view.visibleRows(fb_h);
-            for (0..rows) |_| editor.moveUp();
-        },
-        c.XKB_KEY_Page_Down => {
-            const rows = view.visibleRows(fb_h);
-            for (0..rows) |_| editor.moveDown();
-        },
-        else => {
-            const text = ev.text();
-            if (text.len > 0 and !(text.len == 1 and text[0] < 0x20)) {
-                try editor.insertText(gpa, text);
-            }
-        },
+
+    var name_buf: [64]u8 = undefined;
+    const n = c.xkb_keysym_get_name(ev.keysym, &name_buf, name_buf.len);
+    if (n > 0) {
+        var spec_buf: [80]u8 = undefined;
+        const spec = core.Keymap.keyspec(&spec_buf, ev.mods.ctrl, ev.mods.alt, name_buf[0..@intCast(n)]);
+        if (ctx.keymap.lookup(spec)) |cmd_name| {
+            _ = core.command.run(ctx.commands, ctx, cmd_name, &.{}) catch |err| {
+                std.log.warn("command {s} failed: {t}", .{ cmd_name, err });
+            };
+            return;
+        }
     }
+    if (ev.mods.ctrl or ev.mods.alt) return;
+    const text = ev.text();
+    if (text.len > 0 and !(text.len == 1 and text[0] < 0x20)) {
+        _ = core.command.run(ctx.commands, ctx, "insert-text", &.{.{ .string = text }}) catch |err| {
+            std.log.warn("insert-text failed: {t}", .{err});
+        };
+    }
+}
+
+/// Resolve and evaluate the user config: `--config` wins, else
+/// $XDG_CONFIG_HOME/scion/init.fnl, else ~/.config/scion/init.fnl.
+/// Read-only; a missing default config means built-in defaults.
+fn loadConfig(gpa: std.mem.Allocator, plugin: *core.Plugin, override: ?[]const u8, environ: std.process.Environ) !void {
+    var buf: [512]u8 = undefined;
+    const path = override orelse blk: {
+        if (environ.getPosix("XDG_CONFIG_HOME")) |x| {
+            break :blk std.fmt.bufPrint(&buf, "{s}/scion/init.fnl", .{x}) catch return;
+        }
+        if (environ.getPosix("HOME")) |h| {
+            break :blk std.fmt.bufPrint(&buf, "{s}/.config/scion/init.fnl", .{h}) catch return;
+        }
+        return;
+    };
+    const src = core.file.readAlloc(gpa, path) catch |err| switch (err) {
+        error.FileNotFound => {
+            if (override != null) std.log.warn("config not found: {s}", .{path});
+            return;
+        },
+        else => |e| return e,
+    };
+    defer gpa.free(src);
+    const out = plugin.eval(gpa, src, "init.fnl") catch {
+        std.log.err("config failed (see above): {s}", .{path});
+        return;
+    };
+    gpa.free(out);
+    std.log.info("config loaded: {s}", .{path});
 }

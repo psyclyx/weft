@@ -416,3 +416,124 @@ test "editor: save request round trip + dirty tracking" {
     // The load is not undoable (host mutation, not user).
     try t.expect(!try ed2.undo(gpa));
 }
+
+// ── Plugins (milestone 5) ───────────────────────────────────────────
+
+const TestHost = struct {
+    pool: *task.Pool,
+    editor: Editor,
+    commands: core.command.Commands,
+    keymap: core.Keymap,
+    quit: bool,
+    ctx: core.command.Context,
+
+    fn init(gpa: Allocator, host: *TestHost) !void {
+        host.pool = try task.Pool.init(gpa, .{ .threads = 1 });
+        host.editor = try Editor.init(gpa, host.pool, "user");
+        host.commands = .empty;
+        host.keymap = .empty;
+        host.quit = false;
+        host.ctx = .{
+            .gpa = gpa,
+            .editor = &host.editor,
+            .commands = &host.commands,
+            .keymap = &host.keymap,
+            .quit = &host.quit,
+        };
+        try core.builtins.install(gpa, &host.commands, &host.keymap);
+    }
+
+    fn deinit(host: *TestHost, gpa: Allocator) void {
+        host.keymap.deinit(gpa);
+        host.commands.deinit(gpa);
+        host.editor.deinit(gpa);
+        host.pool.deinit();
+    }
+};
+
+test "plugin: fennel eval, scripted command, peer edits converge" {
+    const gpa = t.allocator;
+    var host: TestHost = undefined;
+    try TestHost.init(gpa, &host);
+    defer host.deinit(gpa);
+
+    const p = try core.Plugin.create(gpa, &host.ctx, "test-plugin");
+    defer p.destroy();
+
+    // Fennel is alive.
+    const three = try p.eval(gpa, "(+ 1 2)", "test");
+    defer gpa.free(three);
+    try t.expectEqualStrings("3", three);
+
+    // The plugin edits through its own replica and commits — a peer.
+    try host.editor.insertText(gpa, "hello world");
+    const banner = try p.eval(gpa,
+        \\(local text (scion.snapshot))
+        \\(scion.insert 0 ";; ")
+        \\(scion.commit)
+        \\(string.len text)
+    , "test");
+    defer gpa.free(banner);
+    try t.expectEqualStrings("11", banner);
+    {
+        const s = try host.editor.text().toOwnedSlice(gpa);
+        defer gpa.free(s);
+        try t.expectEqualStrings(";; hello world", s);
+    }
+
+    // A scripted command registered through the same registry
+    // everything else uses, invocable from Zig by name.
+    const reg = try p.eval(gpa,
+        \\(scion.command "shout" "Upper-case a string."
+        \\  (fn [s] (string.upper s)))
+        \\true
+    , "test");
+    defer gpa.free(reg);
+    const res = try core.command.run(&host.commands, &host.ctx, "shout", &.{
+        .{ .string = "graft" },
+    });
+    try t.expectEqualStrings("GRAFT", res.string);
+
+    // Scripted commands can call built-ins back through scion.run.
+    const undo_res = try p.eval(gpa, "(scion.run \"undo\")", "test");
+    defer gpa.free(undo_res);
+    {
+        const s = try host.editor.text().toOwnedSlice(gpa);
+        defer gpa.free(s);
+        // The user's insert is undone; the plugin's banner survives
+        // (selective undo does not touch other peers' work).
+        try t.expectEqualStrings(";; ", s);
+    }
+}
+
+test "plugin: fennel config binds keys and switches modes" {
+    const gpa = t.allocator;
+    var host: TestHost = undefined;
+    try TestHost.init(gpa, &host);
+    defer host.deinit(gpa);
+
+    const p = try core.Plugin.create(gpa, &host.ctx, "config");
+    defer p.destroy();
+
+    const out = try p.eval(gpa,
+        \\(scion.bind "default" "C-t" "doc-start")
+        \\(scion.bind "extra" "q" "quit")
+        \\(scion.mode)
+    , "init.fnl");
+    defer gpa.free(out);
+    try t.expectEqualStrings("default", out);
+
+    try t.expectEqualStrings("doc-start", host.keymap.lookup("C-t").?);
+    try t.expectEqual(@as(?[]const u8, null), host.keymap.lookup("q"));
+
+    const sw = try p.eval(gpa, "(scion.mode \"extra\")", "init.fnl");
+    defer gpa.free(sw);
+    try t.expectEqualStrings("quit", host.keymap.lookup("q").?);
+
+    // Dispatch a key end-to-end: lookup → run.
+    var buf: [32]u8 = undefined;
+    const spec = core.Keymap.keyspec(&buf, false, false, "q");
+    const cmd_name = host.keymap.lookup(spec).?;
+    _ = try core.command.run(&host.commands, &host.ctx, cmd_name, &.{});
+    try t.expect(host.quit);
+}

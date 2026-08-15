@@ -28,6 +28,7 @@ pub fn build(b: *std.Build) void {
     exe_mod.linkSystemLibrary("xkbcommon", .{});
     exe_mod.linkSystemLibrary("vulkan", .{});
     addWaylandProtocols(b, exe_mod);
+    addScripting(b, exe_mod);
 
     const exe = b.addExecutable(.{
         .name = "scion",
@@ -52,10 +53,23 @@ pub fn build(b: *std.Build) void {
     });
     test_mod.addImport("snail", snail_dep.module("snail"));
     test_mod.addImport("stemma", stemma_dep.module("stemma"));
+    addScripting(b, test_mod);
     const unit_tests = b.addTest(.{ .root_module = test_mod });
     const run_tests = b.addRunArtifact(unit_tests);
     const test_step = b.step("test", "Run unit tests");
     test_step.dependOn(&run_tests.step);
+}
+
+/// Lua 5.4 + the embedded fennel compiler (milestone 5). The fennel.lua
+/// path comes from the nix shell (pinned package) — hermetic without a
+/// vendored copy.
+fn addScripting(b: *std.Build, mod: *std.Build.Module) void {
+    mod.linkSystemLibrary("lua", .{});
+    const fennel = b.graph.environ_map.get("SCION_FENNEL_LUA") orelse
+        @panic("SCION_FENNEL_LUA not set — build inside the nix shell");
+    mod.addAnonymousImport("fennel.lua", .{
+        .root_source_file = .{ .cwd_relative = fennel },
+    });
 }
 
 /// Generate the xdg-shell client glue with wayland-scanner and add it to

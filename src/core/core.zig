@@ -19,6 +19,10 @@ pub const task = @import("task.zig");
 pub const undo = @import("undo.zig");
 pub const UndoLog = undo.UndoLog;
 pub const Editor = @import("Editor.zig");
+pub const Keymap = @import("Keymap.zig");
+pub const builtins = @import("builtins.zig");
+pub const plugin = @import("plugin.zig");
+pub const Plugin = plugin.Plugin;
 pub const file = @import("file.zig");
 
 test {
