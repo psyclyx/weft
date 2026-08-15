@@ -43,6 +43,74 @@ pub fn writeRopeAtomic(gpa: Allocator, path: []u8, rope: stemma.Rope) WriteError
     try std.Io.Dir.rename(cwd, tmp, cwd, path, io);
 }
 
+pub const GuardedWriteError = WriteError || ReadError || error{Stale};
+
+/// Guarded atomic save (design rev 4): write beside the target, then
+/// rename only if the target still hashes to `expected` (null = the
+/// file must not exist). Returns the new content token. `error.Stale`
+/// means an external writer got there first — merge, retry.
+pub fn writeRopeGuarded(
+    gpa: Allocator,
+    path: []u8,
+    rope: stemma.Rope,
+    expected: ?[]u8,
+) GuardedWriteError![]u8 {
+    defer gpa.free(path);
+    defer if (expected) |e| gpa.free(e);
+    var snapshot = rope;
+    defer snapshot.deinit(gpa);
+    const bytes = try snapshot.toOwnedSlice(gpa);
+    defer gpa.free(bytes);
+
+    // Test: the disk still matches the state the caller merged with.
+    // (Check-then-rename — vim's own race window; see sessions-design.)
+    if (expected) |token| {
+        const disk = readAlloc(gpa, path) catch |e| switch (e) {
+            error.FileNotFound => return error.Stale, // deleted under us
+            else => |err| return err,
+        };
+        defer gpa.free(disk);
+        const have = backing_mod.localToken(disk);
+        if (!std.mem.eql(u8, &have, token)) return error.Stale;
+    } else {
+        if (readAlloc(gpa, path)) |disk| {
+            gpa.free(disk);
+            return error.Stale; // exists but caller expected creation
+        } else |_| {}
+    }
+
+    const tmp = try std.fmt.allocPrint(gpa, "{s}.scion-tmp", .{path});
+    defer gpa.free(tmp);
+    var threaded: std.Io.Threaded = .init(gpa, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+    const cwd = std.Io.Dir.cwd();
+    try cwd.writeFile(io, .{ .sub_path = tmp, .data = bytes });
+    try std.Io.Dir.rename(cwd, tmp, cwd, path, io);
+    const token = backing_mod.localToken(bytes);
+    return gpa.dupe(u8, &token);
+}
+
+/// Backing poll worker: null when the disk still matches `expected`,
+/// else the new content + token (both gpa-owned, token first-freed by
+/// the caller).
+pub const Fetched = struct { bytes: []u8, token: []u8 };
+
+pub fn pollFile(gpa: Allocator, path: []u8, expected: []u8) (ReadError || Allocator.Error)!?Fetched {
+    defer gpa.free(path);
+    defer gpa.free(expected);
+    const disk = try readAlloc(gpa, path);
+    errdefer gpa.free(disk);
+    const token = backing_mod.localToken(disk);
+    if (std.mem.eql(u8, &token, expected)) {
+        gpa.free(disk);
+        return null;
+    }
+    return .{ .bytes = disk, .token = try gpa.dupe(u8, &token) };
+}
+
+const backing_mod = @import("backing.zig");
+
 // ── Tests ───────────────────────────────────────────────────────────
 
 const t = std.testing;

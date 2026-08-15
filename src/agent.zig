@@ -58,7 +58,7 @@ pub fn main(init: std.process.Init) !void {
     defer editor.deinit(gpa);
     if (args.file) |p| {
         editor.openFile(gpa, p) catch |err| switch (err) {
-            error.FileNotFound => editor.path = try gpa.dupe(u8, p),
+            error.FileNotFound => try editor.adoptPath(gpa, p),
             else => |e| return e,
         };
         std.log.info("agent: hosting {s} ({d} bytes)", .{ p, editor.text().byteLen() });
@@ -88,7 +88,7 @@ pub fn main(init: std.process.Init) !void {
     var lsp: ?*lsp_mod.Lsp = null;
     defer if (lsp) |l| l.destroy();
     if (args.lsp_cmd) |cmd_str| {
-        if (editor.path) |p| {
+        if (editor.backingPath()) |p| {
             var argv: std.ArrayList([]const u8) = .empty;
             defer argv.deinit(gpa);
             var words = std.mem.tokenizeScalar(u8, cmd_str, ' ');
@@ -106,7 +106,7 @@ pub fn main(init: std.process.Init) !void {
 
     var blob: ?session.BlobServer = null;
     defer if (blob) |*b| b.close();
-    if (editor.path) |p| blob = session.BlobServer.openPath(p) catch null;
+    if (editor.backingPath()) |p| blob = session.BlobServer.openPath(p) catch null;
 
     // ── Hub: accept forever, serve N peers on the one document ──
     std.log.info("agent: listening on {d}", .{args.listen});
@@ -150,7 +150,7 @@ pub fn main(init: std.process.Init) !void {
         }
         if (last_change_ns != 0 and task.nowNs() - last_change_ns > 2 * std.time.ns_per_s) {
             last_change_ns = 0;
-            if (editor.path != null) try editor.requestSave(gpa);
+            if (editor.backingPath() != null) try editor.requestSave(gpa);
         }
         parkNs(&park, 15 * std.time.ns_per_ms);
     }

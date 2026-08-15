@@ -18,6 +18,8 @@ const Document = @import("Document.zig");
 const undo_mod = @import("undo.zig");
 const task = @import("task.zig");
 const file = @import("file.zig");
+const backing_mod = @import("backing.zig");
+const ShellFs = @import("ShellFs.zig");
 const Range = stemma.Range;
 
 const Editor = @This();
@@ -31,18 +33,33 @@ cursor: stemma.AnchorSet.Handle,
 mark: ?stemma.AnchorSet.Handle = null,
 /// Byte column vertical movement aims for (sticky across short lines).
 goal_col: ?usize = null,
-path: ?[]u8 = null,
+/// Where the bytes live (design rev 4): the authority for save/load
+/// and the peer that merges external writes.
+backing: backing_mod.Backing = .none,
 /// Version token of the last content known to be on disk.
 saved_version: ?[]u8 = null,
 pool: *task.Pool,
 save_state: SaveState = .idle,
+poll_state: PollState = .idle,
+
+pub const SaveError = file.GuardedWriteError || ShellFs.WriteError;
+pub const PollError = file.ReadError || ShellFs.Error || Allocator.Error;
 
 pub const SaveState = union(enum) {
     idle,
-    /// A save is in flight; the version it snapshots.
-    saving: struct { handle: task.Handle(file.WriteError!void), version: []u8 },
+    /// A save is in flight; the version it snapshots. The worker
+    /// returns the written content's token.
+    saving: struct { handle: task.Handle(SaveError![]u8), version: []u8 },
+    /// The disk moved under us — poll the backing (merges the external
+    /// write), then request again. Cleared by `pollBacking`.
+    stale,
     /// Terminal state of the last save attempt, until the next request.
-    failed: file.WriteError,
+    failed: SaveError,
+};
+
+pub const PollState = union(enum) {
+    idle,
+    polling: task.Handle(PollError!?file.Fetched),
 };
 
 pub fn init(gpa: Allocator, pool: *task.Pool, user_agent: []const u8) Allocator.Error!Editor {
@@ -53,19 +70,54 @@ pub fn init(gpa: Allocator, pool: *task.Pool, user_agent: []const u8) Allocator.
 }
 
 pub fn deinit(self: *Editor, gpa: Allocator) void {
-    // A save in flight owns its snapshot; let it finish (pool deinit
-    // completes queued work) — here we only detach bookkeeping.
+    // Work in flight owns snapshots and returns gpa-owned tokens; wait
+    // it out (shutdown path, blocking allowed) so nothing leaks.
     switch (self.save_state) {
         .saving => |*s| {
             var h = s.handle;
-            h.detach();
+            while (true) {
+                if (h.poll()) |result| {
+                    if (result) |token| gpa.free(token) else |_| {}
+                    break;
+                }
+                std.atomic.spinLoopHint();
+            }
             gpa.free(s.version);
         },
         else => {},
     }
+    switch (self.poll_state) {
+        .polling => |*h| {
+            var handle = h.*;
+            while (true) {
+                if (handle.poll()) |result| {
+                    if (result) |maybe| {
+                        if (maybe) |f| {
+                            gpa.free(f.bytes);
+                            gpa.free(f.token);
+                        }
+                    } else |_| {}
+                    break;
+                }
+                std.atomic.spinLoopHint();
+            }
+        },
+        else => {},
+    }
+    switch (self.backing) {
+        .none => {},
+        .file => |*f| {
+            f.sync.deinit(gpa, &self.doc);
+            gpa.free(f.path);
+        },
+        .shell => |*s| {
+            s.sync.deinit(gpa, &self.doc);
+            gpa.free(s.path);
+        },
+        .tool => |t_| gpa.free(t_.name),
+    }
     self.history.deinit(gpa);
     self.doc.deinit(gpa);
-    if (self.path) |p| gpa.free(p);
     if (self.saved_version) |v| gpa.free(v);
     self.* = undefined;
 }
@@ -78,65 +130,212 @@ pub fn cursorOffset(self: *const Editor) usize {
     return self.doc.anchorOffset(self.cursor);
 }
 
-// ── Files ───────────────────────────────────────────────────────────
+// ── Files & backings ────────────────────────────────────────────────
 
-/// Load a file's content into the document, delivered by the `host.fs`
-/// peer (loading is a mutation by the filesystem host, not by the
-/// user — it is not undoable). Startup path, allowed to block.
-pub fn openFile(self: *Editor, gpa: Allocator, path: []const u8) (Allocator.Error || file.ReadError || Document.AddPeerError)!void {
-    task.assertMayBlock();
-    const bytes = try file.readAlloc(gpa, path);
-    defer gpa.free(bytes);
-    const host = try self.doc.addPeer(gpa, "host.fs");
-    defer self.doc.removePeer(gpa, host);
-    try self.doc.peerInsert(gpa, host, 0, bytes);
-    _ = try self.doc.peerCommit(gpa, host);
-    // Freshly loaded == on disk.
-    if (self.path) |p| gpa.free(p);
-    self.path = try gpa.dupe(u8, path);
+/// The display/save path, when the backing has one.
+pub fn backingPath(self: *const Editor) ?[]const u8 {
+    return switch (self.backing) {
+        .file => |f| f.path,
+        .shell => |s| s.path,
+        else => null,
+    };
+}
+
+fn setBackingLoaded(self: *Editor, gpa: Allocator) Allocator.Error!void {
     if (self.saved_version) |v| gpa.free(v);
     self.saved_version = try self.doc.version(gpa);
     // The load is not part of undo history, and the cursor starts at
-    // the top (the host's insert at 0 pushed the bias-right anchor to
-    // the end).
+    // the top (the mirror's insert at 0 pushed the bias-right anchor
+    // to the end).
     try self.history.ingest(gpa, &self.doc);
     self.history.barrier();
     self.doc.anchors.set(self.cursor, .{ .offset = 0, .bias = .right });
 }
 
-/// Request a save: O(1) rope snapshot + version token, written by a
-/// pool worker (temp file + rename). Never blocks; poll `saveState`
-/// via `pollSave`. A request while one is in flight is dropped (poll
-/// first; the editor loop does).
+/// Open a local file as this buffer's backing: content arrives as the
+/// backing peer's commit (not undoable). Startup path, allowed to
+/// block. The document must not already have a backing.
+pub fn openFile(self: *Editor, gpa: Allocator, path: []const u8) (Allocator.Error || file.ReadError || Document.AddPeerError)!void {
+    task.assertMayBlock();
+    assert(self.backing == .none);
+    const bytes = try file.readAlloc(gpa, path);
+    defer gpa.free(bytes);
+    var sync = try backing_mod.Sync.init(gpa, &self.doc);
+    errdefer sync.deinit(gpa, &self.doc);
+    const token = backing_mod.localToken(bytes);
+    try sync.load(gpa, &self.doc, bytes, &token);
+    self.backing = .{ .file = .{ .path = try gpa.dupe(u8, path), .sync = sync } };
+    try self.setBackingLoaded(gpa);
+}
+
+/// Open a remote file over a persistent shell (coreutils tier). Blocks
+/// (two shell round-trips); startup/open path.
+pub fn openShell(self: *Editor, gpa: Allocator, fs: *ShellFs, path: []const u8) (Allocator.Error || ShellFs.Error || Document.AddPeerError)!void {
+    task.assertMayBlock();
+    assert(self.backing == .none);
+    const bytes = try fs.readAll(gpa, path);
+    defer gpa.free(bytes);
+    const token = try fs.hashToken(gpa, path);
+    defer gpa.free(token);
+    var sync = try backing_mod.Sync.init(gpa, &self.doc);
+    errdefer sync.deinit(gpa, &self.doc);
+    try sync.load(gpa, &self.doc, bytes, token);
+    self.backing = .{ .shell = .{ .fs = fs, .path = try gpa.dupe(u8, path), .sync = sync } };
+    try self.setBackingLoaded(gpa);
+}
+
+/// Point a fresh buffer at a path that need not exist yet (save
+/// creates it, guarded on non-existence).
+pub fn adoptPath(self: *Editor, gpa: Allocator, path: []const u8) (Allocator.Error || Document.AddPeerError)!void {
+    assert(self.backing == .none);
+    const sync = try backing_mod.Sync.init(gpa, &self.doc);
+    self.backing = .{ .file = .{ .path = try gpa.dupe(u8, path), .sync = sync } };
+}
+
+fn backingSync(self: *Editor) ?*backing_mod.Sync {
+    return switch (self.backing) {
+        .file => |*f| &f.sync,
+        .shell => |*s| &s.sync,
+        else => null,
+    };
+}
+
+fn fileSaveWorker(gpa: Allocator, path: []u8, rope: stemma.Rope, expected: ?[]u8) SaveError![]u8 {
+    return file.writeRopeGuarded(gpa, path, rope, expected);
+}
+
+fn filePollWorker(gpa: Allocator, path: []u8, expected: []u8) PollError!?file.Fetched {
+    return file.pollFile(gpa, path, expected);
+}
+
+fn shellSaveWorker(gpa: Allocator, fs: *ShellFs, path: []u8, bytes: []u8, expected: ?[]u8) SaveError![]u8 {
+    defer gpa.free(path);
+    defer gpa.free(bytes);
+    defer if (expected) |e| gpa.free(e);
+    return fs.writeGuarded(gpa, path, bytes, expected);
+}
+
+fn shellPollWorker(gpa: Allocator, fs: *ShellFs, path: []u8, expected: []u8) PollError!?file.Fetched {
+    defer gpa.free(path);
+    defer gpa.free(expected);
+    const token = try fs.hashToken(gpa, path);
+    if (std.mem.eql(u8, token, expected)) {
+        gpa.free(token);
+        return null;
+    }
+    errdefer gpa.free(token);
+    const bytes = try fs.readAll(gpa, path);
+    return .{ .bytes = bytes, .token = token };
+}
+
+/// Request a guarded save: O(1) rope snapshot + version token, written
+/// by a pool worker (upload/temp + test-and-set rename). Never blocks;
+/// fold with `pollSave`. A request while one is in flight is dropped
+/// (poll first; the editor loop does). `.stale` means the disk moved —
+/// poll the backing (which merges), then request again.
 pub fn requestSave(self: *Editor, gpa: Allocator) Allocator.Error!void {
     if (self.save_state == .saving) return;
-    const path = self.path orelse return; // nothing to save to
     const version = try self.doc.version(gpa);
     errdefer gpa.free(version);
-    const handle = try self.pool.spawn(file.writeRopeAtomic, .{
-        gpa, try gpa.dupe(u8, path), self.doc.text().snapshot(),
-    });
+    const handle: task.Handle(SaveError![]u8) = switch (self.backing) {
+        .none, .tool => {
+            gpa.free(version);
+            return;
+        },
+        .file => |f| try self.pool.spawn(fileSaveWorker, .{
+            gpa,
+            try gpa.dupe(u8, f.path),
+            self.doc.text().snapshot(),
+            if (f.sync.token) |tk| try gpa.dupe(u8, tk) else null,
+        }),
+        .shell => |s| blk: {
+            var snap = self.doc.text().snapshot();
+            defer snap.deinit(gpa);
+            const bytes = try snap.toOwnedSlice(gpa);
+            errdefer gpa.free(bytes);
+            break :blk try self.pool.spawn(shellSaveWorker, .{
+                gpa,
+                s.fs,
+                try gpa.dupe(u8, s.path),
+                bytes,
+                if (s.sync.token) |tk| try gpa.dupe(u8, tk) else null,
+            });
+        },
+    };
     self.save_state = .{ .saving = .{ .handle = handle, .version = version } };
 }
 
 /// Non-blocking: fold a finished save into state. Returns true when a
-/// save completed successfully since the last poll.
+/// save completed successfully since the last poll. On success the
+/// backing mirror advances to exactly the saved version.
 pub fn pollSave(self: *Editor, gpa: Allocator) bool {
     switch (self.save_state) {
         .saving => |*s| {
             var h = s.handle;
             const result = h.poll() orelse return false;
             const version = s.version;
-            if (result) |_| {
+            if (result) |token| {
+                defer gpa.free(token);
+                if (self.backingSync()) |sync| {
+                    sync.markSaved(gpa, &self.doc, version, token) catch {};
+                }
                 if (self.saved_version) |v| gpa.free(v);
                 self.saved_version = version;
                 self.save_state = .idle;
                 return true;
             } else |err| {
                 gpa.free(version);
-                self.save_state = .{ .failed = err };
+                self.save_state = if (err == error.Stale) .stale else .{ .failed = err };
                 return false;
             }
+        },
+        else => return false,
+    }
+}
+
+/// Request an external-change poll of the backing (cheap: one hash
+/// round-trip when unchanged). Never blocks; fold with `pollBacking`.
+pub fn requestBackingPoll(self: *Editor, gpa: Allocator) Allocator.Error!void {
+    if (self.poll_state == .polling or self.save_state == .saving) return;
+    switch (self.backing) {
+        .none, .tool => {},
+        .file => |f| {
+            const tk = f.sync.token orelse return;
+            self.poll_state = .{ .polling = try self.pool.spawn(filePollWorker, .{
+                gpa, try gpa.dupe(u8, f.path), try gpa.dupe(u8, tk),
+            }) };
+        },
+        .shell => |s| {
+            const tk = s.sync.token orelse return;
+            self.poll_state = .{ .polling = try self.pool.spawn(shellPollWorker, .{
+                gpa, s.fs, try gpa.dupe(u8, s.path), try gpa.dupe(u8, tk),
+            }) };
+        },
+    }
+}
+
+/// Non-blocking: fold a finished backing poll. When the disk changed,
+/// the external write is committed by the backing peer (merges with
+/// unsaved local work — rev 4) and a stalled `.stale` save is cleared
+/// for retry. Returns true when the buffer changed.
+pub fn pollBacking(self: *Editor, gpa: Allocator) Allocator.Error!bool {
+    switch (self.poll_state) {
+        .polling => |*h| {
+            var handle = h.*;
+            const result = handle.poll() orelse return false;
+            self.poll_state = .idle;
+            const fetched = result catch return false; // transient; next poll retries
+            const f = fetched orelse {
+                if (self.save_state == .stale) self.save_state = .idle;
+                return false;
+            };
+            defer gpa.free(f.bytes);
+            defer gpa.free(f.token);
+            const sync = self.backingSync().?;
+            const changed = try sync.mergeExternal(gpa, &self.doc, f.bytes, f.token);
+            if (changed) try self.history.ingest(gpa, &self.doc);
+            if (self.save_state == .stale) self.save_state = .idle;
+            return changed;
         },
         else => return false,
     }

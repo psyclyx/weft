@@ -80,11 +80,11 @@ pub fn main(init: std.process.Init) !void {
             // Remote document: the path is a NAME (language routing,
             // status line); content arrives over the wire from the
             // host. Nothing is read locally.
-            editor.path = try gpa.dupe(u8, path);
+            try editor.adoptPath(gpa, path);
         } else editor.openFile(gpa, path) catch |err| switch (err) {
             error.FileNotFound => {
                 // New file: adopt the path, save creates it.
-                editor.path = try gpa.dupe(u8, path);
+                try editor.adoptPath(gpa, path);
             },
             else => |e| return e,
         };
@@ -139,7 +139,7 @@ pub fn main(init: std.process.Init) !void {
 
     var syntax: ?*core.syntax.Syntax = null;
     defer if (syntax) |s| s.destroy();
-    if (editor.path) |p| {
+    if (editor.backingPath()) |p| {
         if (grammars.forPath(p)) |spec| {
             syntax = core.syntax.Syntax.create(gpa, spec, &editor.doc) catch |err| blk: {
                 std.log.warn("syntax {s} unavailable: {t}", .{ spec.name, err });
@@ -157,7 +157,7 @@ pub fn main(init: std.process.Init) !void {
     // Placement routing: LSP providers are `host`-placed — for a
     // remote-hosted document the server runs on the host peer (the
     // agent) and its diagnostics arrive as the imported host feed.
-    if (args.connect == null) if (editor.path) |p| {
+    if (args.connect == null) if (editor.backingPath()) |p| {
         if (lsp_servers.match(p)) |entry| {
             lsp = core.lsp.Lsp.create(gpa, entry.argv, p, &editor.doc, init.minimal.environ) catch |err| blk: {
                 std.log.warn("lsp unavailable: {t}", .{err});
@@ -338,7 +338,7 @@ pub fn main(init: std.process.Init) !void {
             }
             const hud: view_mod.Hud = .{
                 .mode = keymap.currentMode(),
-                .file = editor.path,
+                .file = editor.backingPath(),
                 .dirty = editor.isDirty(gpa) catch true,
                 .save_failed = editor.save_state == .failed,
                 .pick = if (pick_state.active) &pick_state else null,

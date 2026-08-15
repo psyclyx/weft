@@ -264,14 +264,16 @@ pub fn hashToken(self: *ShellFs, gpa: Allocator, path: []const u8) Error![]u8 {
 /// Guarded atomic write: upload beside the target, then test-and-set —
 /// rename only if the target still hashes to `expected` (null = the
 /// file must not exist yet). `error.Stale` means an external writer got
-/// there first: merge the new disk state, retry.
+/// there first: merge the new disk state, retry. Returns the written
+/// content's token (hashed from the uploaded temp, so it is exactly our
+/// bytes). Caller owns.
 pub fn writeGuarded(
     self: *ShellFs,
     gpa: Allocator,
     path: []const u8,
     bytes: []const u8,
     expected: ?[]const u8,
-) WriteError!void {
+) WriteError![]u8 {
     const q = try quote(gpa, path);
     defer gpa.free(q);
     const tmp = try std.fmt.allocPrint(gpa, "{s}.scion-tmp", .{path});
@@ -290,26 +292,27 @@ pub fn writeGuarded(
     const guard = if (expected) |token|
         try std.fmt.allocPrint(
             gpa,
-            "if [ \"$({s} < {s} 2>/dev/null | tr -d ' \\t-')\" = \"{s}\" ]; then mv {s} {s}; else rm -f {s}; echo scion-stale; false; fi",
-            .{ self.hash_cmd, q, token, qtmp, q, qtmp },
+            "tok=$({s} < {s} | tr -d ' \\t-')\nif [ \"$({s} < {s} 2>/dev/null | tr -d ' \\t-')\" = \"{s}\" ]; then mv {s} {s} && echo \"scion-ok $tok\"; else rm -f {s}; echo scion-stale; false; fi",
+            .{ self.hash_cmd, qtmp, self.hash_cmd, q, token, qtmp, q, qtmp },
         )
     else
         try std.fmt.allocPrint(
             gpa,
-            "if [ -e {s} ]; then rm -f {s}; echo scion-stale; false; else mv {s} {s}; fi",
-            .{ q, qtmp, qtmp, q },
+            "tok=$({s} < {s} | tr -d ' \\t-')\nif [ -e {s} ]; then rm -f {s}; echo scion-stale; false; else mv {s} {s} && echo \"scion-ok $tok\"; fi",
+            .{ self.hash_cmd, qtmp, q, qtmp, qtmp, q },
         );
     defer gpa.free(guard);
     try script.appendSlice(gpa, guard);
     const r = try self.run(gpa, script.items);
     defer gpa.free(r.out);
-    if (r.status == 0) return;
+    if (r.status == 0) return parseOkToken(gpa, r.out);
     if (std.mem.indexOf(u8, r.out, "scion-stale") != null) return error.Stale;
     return error.Failed;
 }
 
-/// Unguarded write (save-as onto a path the caller owns the policy for).
-pub fn writeAtomic(self: *ShellFs, gpa: Allocator, path: []const u8, bytes: []const u8) WriteError!void {
+/// Unguarded write (save-as onto a path the caller owns the policy
+/// for). Returns the written content's token; caller owns.
+pub fn writeAtomic(self: *ShellFs, gpa: Allocator, path: []const u8, bytes: []const u8) WriteError![]u8 {
     const q = try quote(gpa, path);
     defer gpa.free(q);
     const tmp = try std.fmt.allocPrint(gpa, "{s}.scion-tmp", .{path});
@@ -322,12 +325,26 @@ pub fn writeAtomic(self: *ShellFs, gpa: Allocator, path: []const u8, bytes: []co
     var script: std.ArrayList(u8) = .empty;
     defer script.deinit(gpa);
     try appendUpload(gpa, &script, qtmp, b64);
-    const mv = try std.fmt.allocPrint(gpa, "mv {s} {s}", .{ qtmp, q });
+    const mv = try std.fmt.allocPrint(
+        gpa,
+        "tok=$({s} < {s} | tr -d ' \\t-')\nmv {s} {s} && echo \"scion-ok $tok\"",
+        .{ self.hash_cmd, qtmp, qtmp, q },
+    );
     defer gpa.free(mv);
     try script.appendSlice(gpa, mv);
     const r = try self.run(gpa, script.items);
     defer gpa.free(r.out);
     if (r.status != 0) return error.Failed;
+    return parseOkToken(gpa, r.out);
+}
+
+fn parseOkToken(gpa: Allocator, out: []const u8) Error![]u8 {
+    const at = std.mem.indexOf(u8, out, "scion-ok ") orelse return error.Shell;
+    const rest = out[at + "scion-ok ".len ..];
+    const end = std.mem.indexOfScalar(u8, rest, '\n') orelse rest.len;
+    const tok = std.mem.trim(u8, rest[0..end], " \r");
+    if (tok.len == 0) return error.Shell;
+    return gpa.dupe(u8, tok);
 }
 
 /// Directory listing via `ls -la` parsing (tramp's mechanism). Names
@@ -406,7 +423,7 @@ test "shellfs: write/read/size/hash round-trip through a local sh" {
     defer gpa.free(path);
 
     // Create (guarded on non-existence), then read back.
-    try fs.writeGuarded(gpa, path, "hello over the wire\n", null);
+    gpa.free(try fs.writeGuarded(gpa, path, "hello over the wire\n", null));
     const back = try fs.readAll(gpa, path);
     defer gpa.free(back);
     try t.expectEqualStrings("hello over the wire\n", back);
@@ -425,7 +442,13 @@ test "shellfs: write/read/size/hash round-trip through a local sh" {
     try t.expectEqualStrings(h1, h2);
 
     // Guarded overwrite with the right token succeeds…
-    try fs.writeGuarded(gpa, path, "second version\n", h1);
+    {
+        const wtok = try fs.writeGuarded(gpa, path, "second version\n", h1);
+        defer gpa.free(wtok);
+        const fresh = try fs.hashToken(gpa, path);
+        defer gpa.free(fresh);
+        try t.expectEqualStrings(fresh, wtok); // returned token == on-disk content
+    }
     const h3 = try fs.hashToken(gpa, path);
     defer gpa.free(h3);
     try t.expect(!std.mem.eql(u8, h1, h3));
@@ -449,7 +472,7 @@ test "shellfs: binary-safe content and quoted paths" {
     defer gpa.free(path);
     var payload: [513]u8 = undefined;
     for (&payload, 0..) |*b, i| b.* = @truncate(i * 31 + 7);
-    try fs.writeGuarded(gpa, path, &payload, null);
+    gpa.free(try fs.writeGuarded(gpa, path, &payload, null));
     const back = try fs.readAll(gpa, path);
     defer gpa.free(back);
     try t.expectEqualSlices(u8, &payload, back);
@@ -465,7 +488,7 @@ test "shellfs: list parses names, kinds, sizes" {
     defer gpa.free(dir);
     const f1 = try std.fmt.allocPrint(gpa, "{s}/plain name.txt", .{dir});
     defer gpa.free(f1);
-    try fs.writeGuarded(gpa, f1, "12345", null);
+    gpa.free(try fs.writeGuarded(gpa, f1, "12345", null));
     const mk = try std.fmt.allocPrint(gpa, "mkdir '{s}/subdir'", .{dir});
     defer gpa.free(mk);
     const mk_r = try fs.run(gpa, mk);

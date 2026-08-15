@@ -393,7 +393,7 @@ test "editor: save request round trip + dirty tracking" {
     try t.expect(try ed.isDirty(gpa));
 
     // Adopt a path by saving through the file host: write, then open.
-    ed.path = try gpa.dupe(u8, path);
+    try ed.adoptPath(gpa, path);
     try ed.requestSave(gpa);
     while (!ed.pollSave(gpa)) std.Thread.yield() catch {};
     try t.expect(!try ed.isDirty(gpa));
@@ -718,7 +718,7 @@ test "syntax: instant-tier definition + symbols providers race through registry"
     var host: TestHost = undefined;
     try TestHost.init(gpa, &host);
     defer host.deinit(gpa);
-    host.editor.path = try gpa.dupe(u8, "demo.zig");
+    try host.editor.adoptPath(gpa, "demo.zig");
     try host.editor.insertText(gpa,
         \\fn alpha() void {}
         \\fn beta() void {
@@ -733,7 +733,7 @@ test "syntax: instant-tier definition + symbols providers race through registry"
 
     // Symbols: both functions, stamped ranges rebase to themselves.
     {
-        const id = (try host.caps.fire(.symbols, &host.editor.doc, host.editor.path, .{})).?;
+        const id = (try host.caps.fire(.symbols, &host.editor.doc, host.editor.backingPath(), .{})).?;
         defer host.caps.finish(id);
         const best = host.caps.session(id).?.best().?;
         try t.expectEqual(@as(usize, 2), best.payload.symbols.len);
@@ -747,7 +747,7 @@ test "syntax: instant-tier definition + symbols providers race through registry"
     defer gpa.free(text);
     const call_at = std.mem.lastIndexOf(u8, text, "alpha").? + 2;
     {
-        const id = (try host.caps.fire(.definition, &host.editor.doc, host.editor.path, .{ .offset = call_at })).?;
+        const id = (try host.caps.fire(.definition, &host.editor.doc, host.editor.backingPath(), .{ .offset = call_at })).?;
         defer host.caps.finish(id);
         try host.editor.doc.insert(gpa, 0, "// lead\n");
         const best = host.caps.session(id).?.best().?;
@@ -796,4 +796,68 @@ test "syntax: holey document parses the realized prefix, never crashes" {
     defer gpa.free(classes);
     try t.expectEqual(core.capability.HighlightClass.keyword, classes[0]); // fn
     try t.expectEqual(core.capability.HighlightClass.none, classes[40]);
+}
+
+test "editor: shell backing — guarded save, external change poll, stale retry" {
+    const gpa = t.allocator;
+    var tmp_dir = t.tmpDir(.{});
+    defer tmp_dir.cleanup();
+    const path = try std.fmt.allocPrint(gpa, ".zig-cache/tmp/{s}/remote.txt", .{tmp_dir.sub_path});
+    defer gpa.free(path);
+    {
+        var threaded: std.Io.Threaded = .init(gpa, .{});
+        defer threaded.deinit();
+        try std.Io.Dir.cwd().writeFile(threaded.io(), .{ .sub_path = path, .data = "remote content\n" });
+    }
+
+    var fs = try core.ShellFs.spawn(gpa, &.{"/bin/sh"}, .{ .block = .{ .slice = std.mem.span(std.c.environ) } });
+    defer fs.deinit();
+    var pool = try task.Pool.init(gpa, .{ .threads = 1 });
+    defer pool.deinit();
+    var ed = try Editor.init(gpa, pool, "user");
+    defer ed.deinit(gpa);
+
+    try ed.openShell(gpa, &fs, path);
+    try t.expectEqualStrings(path, ed.backingPath().?);
+    try t.expect(!try ed.isDirty(gpa));
+
+    // Edit + guarded save through the shell.
+    ed.moveDocEnd();
+    try ed.insertText(gpa, "typed locally\n");
+    try ed.requestSave(gpa);
+    while (!ed.pollSave(gpa)) std.Thread.yield() catch {};
+    try t.expect(!try ed.isDirty(gpa));
+
+    // An external writer (nvim) rewrites the file; the poll merges it
+    // with fresh unsaved local work.
+    try ed.insertText(gpa, "unsaved\n");
+    {
+        var threaded: std.Io.Threaded = .init(gpa, .{});
+        defer threaded.deinit();
+        try std.Io.Dir.cwd().writeFile(threaded.io(), .{ .sub_path = path, .data = "remote content\ntyped locally\nEXTERNAL\n" });
+    }
+    try ed.requestBackingPoll(gpa);
+    var changed = false;
+    while (true) {
+        if (ed.poll_state == .idle and changed) break;
+        changed = try ed.pollBacking(gpa) or changed;
+        if (ed.poll_state == .idle and !changed) {
+            // Race with the worker: re-request until the change lands.
+            try ed.requestBackingPoll(gpa);
+        }
+        std.Thread.yield() catch {};
+    }
+    const merged = try ed.text().toOwnedSlice(gpa);
+    defer gpa.free(merged);
+    try t.expect(std.mem.indexOf(u8, merged, "EXTERNAL") != null);
+    try t.expect(std.mem.indexOf(u8, merged, "unsaved") != null);
+
+    // Save now succeeds against the merged token (no lost update).
+    try ed.requestSave(gpa);
+    while (!ed.pollSave(gpa)) {
+        if (ed.save_state == .stale) break;
+        std.Thread.yield() catch {};
+    }
+    try t.expect(ed.save_state == .idle);
+    try t.expect(!try ed.isDirty(gpa));
 }

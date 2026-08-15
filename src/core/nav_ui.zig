@@ -35,7 +35,7 @@ pub const DefinitionUi = struct {
         _ = args;
         const self: *DefinitionUi = @ptrCast(@alignCast(data.?));
         if (self.session) |old| ctx.caps.finish(old);
-        self.session = try ctx.caps.fire(.definition, &ctx.editor.doc, ctx.editor.path, .{
+        self.session = try ctx.caps.fire(.definition, &ctx.editor.doc, ctx.editor.backingPath(), .{
             .offset = ctx.editor.cursorOffset(),
         });
         self.first_result_ns = 0;
@@ -117,7 +117,7 @@ pub const SymbolsUi = struct {
         _ = args;
         const self: *SymbolsUi = @ptrCast(@alignCast(data.?));
         if (self.session) |old| ctx.caps.finish(old);
-        self.session = try ctx.caps.fire(.symbols, &ctx.editor.doc, ctx.editor.path, .{});
+        self.session = try ctx.caps.fire(.symbols, &ctx.editor.doc, ctx.editor.backingPath(), .{});
         _ = try self.tick(ctx);
         return .nil;
     }

@@ -264,8 +264,7 @@ test "backing: two unconnected editors converge through one file over /bin/sh" {
         defer gpa.free(av);
         const bytes = try docBytes(gpa, &a);
         defer gpa.free(bytes);
-        try fs.writeGuarded(gpa, path, bytes, null);
-        const tk = try fs.hashToken(gpa, path);
+        const tk = try fs.writeGuarded(gpa, path, bytes, null);
         defer gpa.free(tk);
         try sa.markSaved(gpa, &a, av, tk);
     }
@@ -291,8 +290,7 @@ test "backing: two unconnected editors converge through one file over /bin/sh" {
         defer gpa.free(av);
         const bytes = try docBytes(gpa, &a);
         defer gpa.free(bytes);
-        try fs.writeGuarded(gpa, path, bytes, sa.token.?);
-        const tk = try fs.hashToken(gpa, path);
+        const tk = try fs.writeGuarded(gpa, path, bytes, sa.token.?);
         defer gpa.free(tk);
         try sa.markSaved(gpa, &a, av, tk);
     }
@@ -314,8 +312,7 @@ test "backing: two unconnected editors converge through one file over /bin/sh" {
         defer gpa.free(merged);
         const bv2 = try b.version(gpa);
         defer gpa.free(bv2);
-        try fs.writeGuarded(gpa, path, merged, sb.token.?);
-        const tk2 = try fs.hashToken(gpa, path);
+        const tk2 = try fs.writeGuarded(gpa, path, merged, sb.token.?);
         defer gpa.free(tk2);
         try sb.markSaved(gpa, &b, bv2, tk2);
     }
