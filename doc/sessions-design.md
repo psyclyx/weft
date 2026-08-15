@@ -75,3 +75,36 @@ The buffer list is the union across sessions; `buffers` is a pick.
    per-buffer syntax/lsp/collab bindings.
 4. fs capability family + save-to + share/publish + divergent-checkout
    adoption flow.
+
+## Revision: no agent assumed (2026-08-15)
+
+Constraint from review: remote editing must work on a box with only a
+shell and coreutils — no agent binary pushable.
+
+**Split "home host" into two independent bindings:**
+- **Storage target** = (fs provider, path): where saves land. An fs
+  provider need not be a wire peer. The bottom-tier provider is a
+  **remote-shell fs**: it drives one persistent remote shell (spawned
+  by any command — ssh is the default spawner, not a dependency: adb,
+  serial, container exec all fit) and implements fs/read via dd+base64
+  (ranged — partial checkout works, slowly), fs/write via base64 -d >
+  tmp && mv (atomic), fs/list via ls -la parsing, size via wc -c.
+  This is tramp's mechanism as a first-class provider.
+- **Collaboration topology** = which peers replicate the CRDT. A
+  dumb-host file is homed in the opener's editor; multiplayer on it
+  still works (editor↔editor session) with storage routed to the shell
+  provider — collaboration and storage are orthogonal.
+
+**Host capability ladder** (auto-detected at open, surfaced in the
+status line): shell+coreutils → scion-agent. The agent adds: a
+persistent CRDT peer (document outlives your session), host-placement
+compute (LSP where the code lives), efficient blob serving, and hub
+multiplayer. Everything above the fs family degrades gracefully when
+absent — LSP falls back to a local server over the shell fs (correct
+for single-file; project-aware needs the agent) or to tree-sitter
+only.
+
+Build-order insert: the remote-shell fs provider lands WITH the fs
+capability family (step 5 → becomes step 3.5, before or alongside the
+agent worktree work), so the tramp story never depends on agent
+availability.
