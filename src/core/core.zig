@@ -16,6 +16,10 @@ pub const Registry = registry.Registry;
 pub const command = @import("command.zig");
 pub const Command = command.Command;
 pub const task = @import("task.zig");
+pub const undo = @import("undo.zig");
+pub const UndoLog = undo.UndoLog;
+pub const Editor = @import("Editor.zig");
+pub const file = @import("file.zig");
 
 test {
     @import("std").testing.refAllDecls(@This());

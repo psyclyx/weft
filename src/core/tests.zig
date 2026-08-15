@@ -287,3 +287,132 @@ test "document: peer lifecycle — duplicates rejected, slots reused" {
     defer gpa.free(text);
     try t.expectEqualStrings("hi", text);
 }
+
+// ── Editor (milestone 4) ────────────────────────────────────────────
+
+const Editor = core.Editor;
+const task = core.task;
+
+test "editor: typing, movement, selection, vim-flavored undo units" {
+    const gpa = t.allocator;
+    var pool = try task.Pool.init(gpa, .{ .threads = 1 });
+    defer pool.deinit();
+    var ed = try Editor.init(gpa, pool, "user");
+    defer ed.deinit(gpa);
+
+    try ed.insertText(gpa, "hello world");
+    try t.expectEqual(@as(usize, 11), ed.cursorOffset());
+
+    // Move to line start, type — the motion is an undo barrier.
+    ed.moveLineStart();
+    try ed.insertText(gpa, ">> ");
+    {
+        const s = try ed.text().toOwnedSlice(gpa);
+        defer gpa.free(s);
+        try t.expectEqualStrings(">> hello world", s);
+    }
+    try t.expect(try ed.undo(gpa));
+    {
+        const s = try ed.text().toOwnedSlice(gpa);
+        defer gpa.free(s);
+        try t.expectEqualStrings("hello world", s);
+    }
+    try t.expect(try ed.undo(gpa));
+    try t.expectEqual(@as(usize, 0), ed.text().byteLen());
+    try t.expect(try ed.redo(gpa));
+    try t.expect(try ed.redo(gpa));
+
+    // Selection replace is one undoable unit.
+    ed.moveDocStart();
+    try ed.setMark(gpa);
+    ed.moveRight();
+    ed.moveRight();
+    ed.moveRight();
+    try ed.insertText(gpa, "**");
+    {
+        const s = try ed.text().toOwnedSlice(gpa);
+        defer gpa.free(s);
+        try t.expectEqualStrings("**hello world", s);
+    }
+    try t.expect(try ed.undo(gpa));
+    {
+        const s = try ed.text().toOwnedSlice(gpa);
+        defer gpa.free(s);
+        try t.expectEqualStrings(">> hello world", s);
+    }
+}
+
+test "editor: vertical movement with goal column, word motions, utf-8 safe" {
+    const gpa = t.allocator;
+    var pool = try task.Pool.init(gpa, .{ .threads = 1 });
+    defer pool.deinit();
+    var ed = try Editor.init(gpa, pool, "user");
+    defer ed.deinit(gpa);
+
+    try ed.insertText(gpa, "first_long line α\nab\nthird θθ line");
+    ed.moveDocStart();
+    ed.moveLineEnd(); // col past short line's length
+    ed.moveDown(); // clamps to "ab" end
+    const p1 = ed.text().offsetToPoint(ed.cursorOffset());
+    try t.expectEqual(@as(usize, 1), p1.row);
+    try t.expectEqual(@as(usize, 2), p1.col);
+    ed.moveDown(); // goal column sticks, snaps to scalar boundary
+    const p2 = ed.text().offsetToPoint(ed.cursorOffset());
+    try t.expectEqual(@as(usize, 2), p2.row);
+
+    ed.moveDocStart();
+    try ed.moveWordForward(gpa);
+    const w = ed.text().offsetToPoint(ed.cursorOffset());
+    try t.expectEqual(@as(usize, 11), w.col); // start of "line"
+    try ed.moveWordBackward(gpa);
+    try t.expectEqual(@as(usize, 0), ed.cursorOffset());
+
+    // Backspace across a multi-byte scalar.
+    ed.moveDocEnd();
+    try ed.deleteBackward(gpa);
+    try ed.deleteBackward(gpa);
+    const s = try ed.text().toOwnedSlice(gpa);
+    defer gpa.free(s);
+    try t.expect(std.unicode.utf8ValidateSlice(s));
+}
+
+test "editor: save request round trip + dirty tracking" {
+    const gpa = t.allocator;
+    var tmp_dir = t.tmpDir(.{});
+    defer tmp_dir.cleanup();
+    const path = try std.fmt.allocPrint(gpa, ".zig-cache/tmp/{s}/doc.txt", .{tmp_dir.sub_path});
+    defer gpa.free(path);
+
+    var pool = try task.Pool.init(gpa, .{ .threads = 1 });
+    defer pool.deinit();
+    var ed = try Editor.init(gpa, pool, "user");
+    defer ed.deinit(gpa);
+
+    // Fresh empty editor: no file, not dirty in any meaningful sense.
+    try ed.insertText(gpa, "content to keep\n");
+    try t.expect(try ed.isDirty(gpa));
+
+    // Adopt a path by saving through the file host: write, then open.
+    ed.path = try gpa.dupe(u8, path);
+    try ed.requestSave(gpa);
+    while (!ed.pollSave(gpa)) std.Thread.yield() catch {};
+    try t.expect(!try ed.isDirty(gpa));
+
+    const on_disk = try core.file.readAlloc(gpa, path);
+    defer gpa.free(on_disk);
+    try t.expectEqualStrings("content to keep\n", on_disk);
+
+    try ed.insertText(gpa, "more");
+    try t.expect(try ed.isDirty(gpa));
+
+    // A second editor opens the file via the host.fs peer.
+    var ed2 = try Editor.init(gpa, pool, "user2");
+    defer ed2.deinit(gpa);
+    try ed2.openFile(gpa, path);
+    try t.expect(!try ed2.isDirty(gpa));
+    const s = try ed2.text().toOwnedSlice(gpa);
+    defer gpa.free(s);
+    try t.expectEqualStrings("content to keep\n", s);
+    // The load is not undoable (host mutation, not user).
+    try t.expect(!try ed2.undo(gpa));
+}

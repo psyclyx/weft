@@ -85,13 +85,17 @@ const Peer = struct {
 };
 
 /// One materialized mutation: `patches` (ascending, non-overlapping,
-/// old-space) with their inserted bytes concatenated in `bytes`, plus
-/// the post-commit version token. Everything owned by the log.
+/// old-space) with their inserted bytes concatenated in `bytes` and
+/// their removed bytes concatenated in `removed_bytes`, plus the
+/// post-commit version token. Carrying both sides makes every commit
+/// *invertible* — the currency of per-peer op-inverse undo — and the
+/// log self-contained for subscribers. Everything owned by the log.
 pub const Commit = struct {
     author: PeerId,
     version: []u8,
     patches: []Patch,
     bytes: []u8,
+    removed_bytes: []u8,
 
     /// Inserted content of `patches[i]`.
     pub fn insertedBytes(self: *const Commit, i: usize) []const u8 {
@@ -100,10 +104,18 @@ pub const Commit = struct {
         return self.bytes[start..][0..self.patches[i].inserted];
     }
 
+    /// Removed (pre-commit) content of `patches[i]`.
+    pub fn removedBytes(self: *const Commit, i: usize) []const u8 {
+        var start: usize = 0;
+        for (self.patches[0..i]) |p| start += p.removed;
+        return self.removed_bytes[start..][0..self.patches[i].removed];
+    }
+
     fn deinit(self: *Commit, gpa: Allocator) void {
         gpa.free(self.version);
         gpa.free(self.patches);
         gpa.free(self.bytes);
+        gpa.free(self.removed_bytes);
     }
 };
 
@@ -174,13 +186,45 @@ pub fn snapshot(self: *const Document, gpa: Allocator) Error!Snapshot {
 // the rope, log the commit. Allocation is the only system interaction.
 
 pub fn insert(self: *Document, gpa: Allocator, byte_offset: usize, bytes: []const u8) Error!void {
+    var pre = self.doc.text().snapshot();
+    defer pre.deinit(gpa);
     const edit = try self.doc.insert(gpa, byte_offset, bytes);
-    try self.commitEdits(gpa, .user, &.{edit});
+    try self.commitEdits(gpa, .user, &.{edit}, &pre);
 }
 
 pub fn delete(self: *Document, gpa: Allocator, range: Range) Error!void {
+    var pre = self.doc.text().snapshot();
+    defer pre.deinit(gpa);
     const edit = try self.doc.delete(gpa, range);
-    try self.commitEdits(gpa, .user, &.{edit});
+    try self.commitEdits(gpa, .user, &.{edit}, &pre);
+}
+
+pub const Replacement = struct {
+    range: Range,
+    bytes: []const u8,
+};
+
+/// Apply several non-overlapping replacements (ascending by offset) as
+/// ONE user commit — the currency of undo/redo and of any command that
+/// must be a single undoable unit. Applied descending so earlier
+/// offsets stay valid while later ones mutate.
+pub fn replaceAll(self: *Document, gpa: Allocator, items: []const Replacement) Error!void {
+    var pre = self.doc.text().snapshot();
+    defer pre.deinit(gpa);
+    var edits: std.ArrayList(Edit) = .empty;
+    defer edits.deinit(gpa);
+    var i = items.len;
+    while (i > 0) {
+        i -= 1;
+        const r = items[i];
+        if (!r.range.isEmpty()) {
+            try edits.append(gpa, try self.doc.delete(gpa, r.range));
+        }
+        if (r.bytes.len > 0) {
+            try edits.append(gpa, try self.doc.insert(gpa, r.range.start, r.bytes));
+        }
+    }
+    try self.commitEdits(gpa, .user, edits.items, &pre);
 }
 
 // ── Peers ───────────────────────────────────────────────────────────
@@ -286,13 +330,15 @@ pub fn peerCommit(self: *Document, gpa: Allocator, id: PeerId) Error!bool {
         else => |err| return err,
     };
     defer gpa.free(batch);
+    var pre = self.doc.text().snapshot();
+    defer pre.deinit(gpa);
     const edits = self.doc.merge(gpa, batch) catch |e| switch (e) {
         error.Corrupt, error.MissingDependency => unreachable, // trusted local sync
         else => |err| return err,
     };
     defer gpa.free(edits);
     if (edits.len == 0) return false;
-    try self.commitEdits(gpa, id, edits);
+    try self.commitEdits(gpa, id, edits, &pre);
     return true;
 }
 
@@ -309,9 +355,14 @@ pub fn commitCount(self: *const Document) usize {
     return self.log.items.len;
 }
 
+pub fn commitAt(self: *const Document, index: usize) *const Commit {
+    return &self.log.items[index];
+}
+
 /// Shift anchors through the edit stream, compose it into patches,
-/// slice their inserted bytes from the post-commit rope, and log.
-fn commitEdits(self: *Document, gpa: Allocator, author: PeerId, edits: []const Edit) Error!void {
+/// slice inserted bytes from the post-commit rope and removed bytes
+/// from the pre-commit snapshot, and log.
+fn commitEdits(self: *Document, gpa: Allocator, author: PeerId, edits: []const Edit, pre: *const Rope) Error!void {
     var comp: patch.Composer = .empty;
     defer comp.deinit(gpa);
     for (edits) |e| {
@@ -324,6 +375,8 @@ fn commitEdits(self: *Document, gpa: Allocator, author: PeerId, edits: []const E
     errdefer gpa.free(patches);
     var bytes: std.ArrayList(u8) = .empty;
     errdefer bytes.deinit(gpa);
+    var removed: std.ArrayList(u8) = .empty;
+    errdefer removed.deinit(gpa);
     const rope = self.doc.text();
     var delta: isize = 0;
     for (patches) |p| {
@@ -332,6 +385,11 @@ fn commitEdits(self: *Document, gpa: Allocator, author: PeerId, edits: []const E
             const dest = try bytes.addManyAsSlice(gpa, p.inserted);
             var sr = rope.streamReader(.{ .start = new_off, .end = new_off + p.inserted }, &.{});
             sr.interface.readSliceAll(dest) catch unreachable; // range is in bounds
+        }
+        if (p.removed > 0) {
+            const dest = try removed.addManyAsSlice(gpa, p.removed);
+            var sr = pre.streamReader(.{ .start = p.offset, .end = p.offset + p.removed }, &.{});
+            sr.interface.readSliceAll(dest) catch unreachable; // old-space, in bounds
         }
         delta += @as(isize, @intCast(p.inserted)) - @as(isize, @intCast(p.removed));
     }
@@ -343,6 +401,7 @@ fn commitEdits(self: *Document, gpa: Allocator, author: PeerId, edits: []const E
         .version = token,
         .patches = patches,
         .bytes = try bytes.toOwnedSlice(gpa),
+        .removed_bytes = try removed.toOwnedSlice(gpa),
     });
 }
 
