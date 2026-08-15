@@ -1056,6 +1056,95 @@ test "bundled plugin: buffers/status/help built in fennel over introspection" {
     _ = try run(&host.commands, &host.ctx, "pick-cancel", &.{});
 }
 
+test "plugin: scion.pick with a native file source streams candidates" {
+    const gpa = t.allocator;
+    // A known tree under the test's writable cache dir (same mechanism
+    // the ShellFs/fs_source tests rely on), so the assertion is
+    // cwd-independent.
+    var tmp = t.tmpDir(.{});
+    defer tmp.cleanup();
+    {
+        var threaded: std.Io.Threaded = .init(gpa, .{});
+        defer threaded.deinit();
+        const io = threaded.io();
+        try tmp.dir.writeFile(io, .{ .sub_path = "one.zig", .data = "" });
+        try tmp.dir.createDirPath(io, "sub");
+        try tmp.dir.writeFile(io, .{ .sub_path = "sub/two.zig", .data = "" });
+    }
+    const root = try std.fmt.allocPrint(gpa, ".zig-cache/tmp/{s}", .{tmp.sub_path});
+    defer gpa.free(root);
+
+    var host: TestHost = undefined;
+    try TestHost.init(gpa, &host);
+    const p = try core.Plugin.create(gpa, &host.ctx, "std");
+    // Teardown order (LIFO): close any open pick FIRST (its Lua cleanup
+    // needs a live VM + ctx), then destroy the plugin (needs live
+    // ctx.caps), then the host. Robust even if an assertion returns
+    // early with the pick still open.
+    defer host.deinit(gpa);
+    defer p.destroy();
+    defer if (host.pick.active) {
+        _ = core.command.run(&host.commands, &host.ctx, "pick-cancel", &.{}) catch {};
+    };
+
+    // The LocalFinder walks on the pool; pick.tick folds candidates in.
+    const src = try std.fmt.allocPrint(gpa,
+        \\(scion.pick "file" nil (fn [_] nil) {{:source "files" :root "{s}" :free_text true}})
+    , .{root});
+    defer gpa.free(src);
+    gpa.free(try p.eval(gpa, src, "t"));
+    try t.expect(host.pick.active);
+
+    var folded = false;
+    for (0..2000) |_| {
+        if (try host.pick.tick(&host.ctx)) folded = true;
+        if (folded and host.pick.items.items.len > 0) break;
+        std.Thread.yield() catch {};
+    }
+    try t.expectEqual(@as(usize, 2), host.pick.items.items.len);
+    var saw_nested = false;
+    for (host.pick.items.items) |it| {
+        if (std.mem.endsWith(u8, it, "two.zig")) saw_nested = true;
+    }
+    try t.expect(saw_nested);
+
+    // Close (runs the source's cancel + the accept-ref cleanup) before
+    // teardown so the worker drains cleanly under the pool.
+    _ = try core.command.run(&host.commands, &host.ctx, "pick-cancel", &.{});
+    try t.expect(!host.pick.active);
+}
+
+test "completion UI: source-driven fold into the pick; accept replaces the prefix" {
+    const gpa = t.allocator;
+    var host: TestHost = undefined;
+    try TestHost.init(gpa, &host);
+    defer host.deinit(gpa);
+
+    var comp: core.complete_ui.CompletionUi = .empty;
+    _ = try host.commands.bind(gpa, "complete", comp.commandSpec());
+    try host.caps.register(.{
+        .capability = "edit/completion",
+        .id = "test.instant",
+        .latency = .instant,
+        .handler = instantWords,
+    });
+
+    // A word prefix at the cursor; the instant provider offers alpha/beta.
+    try host.editor().insertText(gpa, "al");
+    _ = try core.command.run(&host.commands, &host.ctx, "complete", &.{});
+    try t.expect(host.pick.active);
+    // Instant-tier results were folded during fire (source path); the
+    // pick already carries them, no bespoke tick needed.
+    try t.expect(host.pick.items.items.len >= 2);
+
+    _ = try core.command.run(&host.commands, &host.ctx, "pick-input", &.{.{ .string = "alp" }});
+    _ = try core.command.run(&host.commands, &host.ctx, "pick-accept", &.{});
+    try t.expect(!host.pick.active);
+    const text = try host.editor().text().toOwnedSlice(gpa);
+    defer gpa.free(text);
+    try t.expectEqualStrings("alpha", text);
+}
+
 test "editor: compactNow keeps the backing mirror and saves working" {
     const gpa = t.allocator;
     var tmp_dir = t.tmpDir(.{});

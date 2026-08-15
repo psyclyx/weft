@@ -16,8 +16,14 @@
 //!   scion.mode([name])          → get/set keymap mode
 //!   scion.fallback(mode, parent) → keymap mode inheritance
 //!   scion.textinput(mode, cmd|nil) → unbound-text command for a mode
-//!   scion.pick(prompt, items, fn) → fuzzy-select, callback on accept;
-//!                                 items are strings or {text, doc}
+//!   scion.pick(prompt, items, fn[, opts]) → fuzzy-select, callback on
+//!                                 accept; items are strings or
+//!                                 {text, doc} (or nil with a source).
+//!                                 opts: {free_text, source="files"|
+//!                                 "dir", root, min_query, debounce_ms}
+//!   scion.read(prompt, opts, fn) → read a line; opts {candidates,
+//!                                 source, root, allow_new=true} — accept
+//!                                 the typed text (C-j) or a candidate
 //!   scion.cursor()              → the user cursor's current offset
 //!   scion.log(msg)              → editor log
 //!   scion.buffers()             → open-buffer introspection (tables)
@@ -111,6 +117,7 @@ pub const Plugin = struct {
         registerFn(L, self, "fallback", lFallback);
         registerFn(L, self, "textinput", lTextinput);
         registerFn(L, self, "pick", lPick);
+        registerFn(L, self, "read", lRead);
         registerFn(L, self, "provide", lProvide);
         registerFn(L, self, "cursor", lCursor);
         registerFn(L, self, "log", lLog);
@@ -335,8 +342,11 @@ fn lBuffers(L: ?*c.lua_State) callconv(.c) c_int {
     return 1;
 }
 
-/// scion.commands() → array of {name, summary} — registry
-/// introspection for palettes/help built in plugins.
+/// scion.commands() → array of {name, summary, args={{name, type}...}}
+/// — registry introspection for palettes/help built in plugins. The arg
+/// schema drives argument-aware invocation (inline parse / per-arg
+/// prompts); `type` is one of "nil"|"boolean"|"integer"|"number"|
+/// "string".
 fn lCommands(L: ?*c.lua_State) callconv(.c) c_int {
     const self = pluginOf(L);
     const cmds = self.ctx.commands;
@@ -345,12 +355,23 @@ fn lCommands(L: ?*c.lua_State) callconv(.c) c_int {
     for (0..cmds.count()) |i| {
         const n: command.Commands.Name = @enumFromInt(i);
         const cmd = cmds.lookup(n) orelse continue;
-        c.lua_createtable(L, 2, 0);
+        c.lua_createtable(L, 0, 3);
         const name = cmds.nameOf(n);
         _ = c.lua_pushlstring(L, name.ptr, name.len);
-        c.lua_rawseti(L, -2, 1);
+        c.lua_setfield(L, -2, "name");
         _ = c.lua_pushlstring(L, cmd.summary.ptr, cmd.summary.len);
-        c.lua_rawseti(L, -2, 2);
+        c.lua_setfield(L, -2, "summary");
+        c.lua_createtable(L, @intCast(cmd.args.len), 0);
+        for (cmd.args, 0..) |a, ai| {
+            c.lua_createtable(L, 0, 2);
+            _ = c.lua_pushlstring(L, a.name.ptr, a.name.len);
+            c.lua_setfield(L, -2, "name");
+            const tn = @tagName(a.type);
+            _ = c.lua_pushlstring(L, tn.ptr, tn.len);
+            c.lua_setfield(L, -2, "type");
+            c.lua_rawseti(L, -2, @intCast(ai + 1));
+        }
+        c.lua_setfield(L, -2, "args");
         c.lua_rawseti(L, -2, out_i);
         out_i += 1;
     }
@@ -535,19 +556,91 @@ fn lTextinput(L: ?*c.lua_State) callconv(.c) c_int {
 }
 
 const pick_mod = @import("pick.zig");
+const fs_source = @import("fs_source.zig");
 
 const LuaPick = struct {
     plugin: *Plugin,
     ref: c_int,
 };
 
-fn lPick(L: ?*c.lua_State) callconv(.c) c_int {
-    const self = pluginOf(L);
-    var pl: usize = 0;
-    const prompt = c.luaL_checklstring(L, 1, &pl);
-    c.luaL_checktype(L, 2, c.LUA_TTABLE);
-    c.luaL_checktype(L, 3, c.LUA_TFUNCTION);
+fn optBool(L: ?*c.lua_State, idx: c_int, key: [:0]const u8) bool {
+    if (idx == 0) return false;
+    _ = c.lua_getfield(L, idx, key);
+    defer c.lua_pop(L, 1);
+    return c.lua_toboolean(L, -1) != 0;
+}
+
+fn optInt(L: ?*c.lua_State, idx: c_int, key: [:0]const u8, default: i64) i64 {
+    if (idx == 0) return default;
+    _ = c.lua_getfield(L, idx, key);
+    defer c.lua_pop(L, 1);
+    if (c.lua_isinteger(L, -1) != 0) return c.lua_tointegerx(L, -1, null);
+    if (c.lua_type(L, -1) == c.LUA_TNUMBER) return @intFromFloat(c.lua_tonumberx(L, -1, null));
+    return default;
+}
+
+/// Build a native candidate source from an opts table's `source` field
+/// ("files" | "dir", with `root`, `min_query`, `debounce_ms`). Producers
+/// walk on the shared thread pool and stream in; the pick's fuzzy filter
+/// narrows. Returns null when no source is requested.
+fn buildSource(self: *Plugin, L: ?*c.lua_State, opts_idx: c_int) !?pick_mod.Source {
+    if (opts_idx == 0 or c.lua_type(L, opts_idx) != c.LUA_TTABLE) return null;
+    _ = c.lua_getfield(L, opts_idx, "source");
+    if (c.lua_type(L, -1) != c.LUA_TSTRING) {
+        c.lua_pop(L, 1);
+        return null;
+    }
+    var kl: usize = 0;
+    const ks = c.lua_tolstring(L, -1, &kl);
+    const kind = ks[0..kl];
+    _ = c.lua_getfield(L, opts_idx, "root");
+    var rl: usize = 0;
+    const root: []const u8 = if (c.lua_type(L, -1) == c.LUA_TSTRING) blk: {
+        const rs = c.lua_tolstring(L, -1, &rl);
+        break :blk rs[0..rl];
+    } else ".";
+    const gpa = self.ctx.gpa;
+    const pool = self.ctx.buffers.pool;
+    var src: ?pick_mod.Source = null;
+    if (std.mem.eql(u8, kind, "files")) {
+        const f = fs_source.LocalFinder.create(gpa, pool, root) catch |e| {
+            c.lua_pop(L, 2);
+            return e;
+        };
+        src = f.source();
+    } else if (std.mem.eql(u8, kind, "dir")) {
+        const d = fs_source.LocalDir.create(gpa, pool, root) catch |e| {
+            c.lua_pop(L, 2);
+            return e;
+        };
+        src = d.source();
+    }
+    c.lua_pop(L, 2); // root, source
+    if (src) |*s| {
+        s.min_query = @intCast(@max(0, optInt(L, opts_idx, "min_query", 0)));
+        s.debounce_ns = @intCast(@max(0, optInt(L, opts_idx, "debounce_ms", 0)) * std.time.ns_per_ms);
+    }
+    return src;
+}
+
+/// The shared open path for `scion.pick` / `scion.read`. `items_idx` /
+/// `opts_idx` are absolute stack indices (0 = absent); `free_text` is
+/// resolved by the caller (pick reads opts.free_text; read maps
+/// allow_new). Refs the accept fn, builds the source last (no fallible
+/// step between it and `openWith`), then opens.
+fn openPick(
+    self: *Plugin,
+    L: ?*c.lua_State,
+    prompt_idx: c_int,
+    items_idx: c_int,
+    accept_idx: c_int,
+    opts_idx: c_int,
+    free_text: bool,
+) c_int {
     const gpa = self.gpa;
+    var pl: usize = 0;
+    const prompt = c.luaL_checklstring(L, prompt_idx, &pl);
+    c.luaL_checktype(L, accept_idx, c.LUA_TFUNCTION);
 
     // Collect entries: each element is a string, or a table whose [1]
     // is the text and [2] (or .doc) the docstring.
@@ -559,60 +652,103 @@ fn lPick(L: ?*c.lua_State) callconv(.c) c_int {
         }
         items.deinit(gpa);
     }
-    const n = c.lua_rawlen(L, 2);
-    for (1..n + 1) |i| {
-        _ = c.lua_rawgeti(L, 2, @intCast(i));
-        var text: []u8 = undefined;
-        var doc: []const u8 = "";
-        if (c.lua_type(L, -1) == c.LUA_TTABLE) {
-            _ = c.lua_rawgeti(L, -1, 1);
-            var tl: usize = 0;
-            const ts = c.luaL_tolstring(L, -1, &tl);
-            text = gpa.dupe(u8, ts[0..tl]) catch |e| return raise(L, e);
-            c.lua_pop(L, 2);
-            _ = c.lua_rawgeti(L, -1, 2);
-            if (c.lua_type(L, -1) == c.LUA_TNIL) {
-                c.lua_pop(L, 1);
-                _ = c.lua_getfield(L, -1, "doc");
-            }
-            if (c.lua_type(L, -1) != c.LUA_TNIL) {
-                var dl: usize = 0;
-                const ds = c.luaL_tolstring(L, -1, &dl);
-                doc = gpa.dupe(u8, ds[0..dl]) catch |e| {
-                    gpa.free(text);
-                    return raise(L, e);
-                };
+    if (items_idx != 0 and c.lua_type(L, items_idx) == c.LUA_TTABLE) {
+        const n = c.lua_rawlen(L, items_idx);
+        for (1..n + 1) |i| {
+            _ = c.lua_rawgeti(L, items_idx, @intCast(i));
+            var text: []u8 = undefined;
+            var doc: []const u8 = "";
+            if (c.lua_type(L, -1) == c.LUA_TTABLE) {
+                _ = c.lua_rawgeti(L, -1, 1);
+                var tl: usize = 0;
+                const ts = c.luaL_tolstring(L, -1, &tl);
+                text = gpa.dupe(u8, ts[0..tl]) catch |e| return raise(L, e);
+                c.lua_pop(L, 2);
+                _ = c.lua_rawgeti(L, -1, 2);
+                if (c.lua_type(L, -1) == c.LUA_TNIL) {
+                    c.lua_pop(L, 1);
+                    _ = c.lua_getfield(L, -1, "doc");
+                }
+                if (c.lua_type(L, -1) != c.LUA_TNIL) {
+                    var dl: usize = 0;
+                    const ds = c.luaL_tolstring(L, -1, &dl);
+                    doc = gpa.dupe(u8, ds[0..dl]) catch |e| {
+                        gpa.free(text);
+                        return raise(L, e);
+                    };
+                    c.lua_pop(L, 1); // tolstring's copy
+                }
+                c.lua_pop(L, 1); // the doc value / nil
+            } else {
+                var sl: usize = 0;
+                const s = c.luaL_tolstring(L, -1, &sl);
+                text = gpa.dupe(u8, s[0..sl]) catch |e| return raise(L, e);
                 c.lua_pop(L, 1); // tolstring's copy
             }
-            c.lua_pop(L, 1); // the doc value / nil
-        } else {
-            var sl: usize = 0;
-            const s = c.luaL_tolstring(L, -1, &sl);
-            text = gpa.dupe(u8, s[0..sl]) catch |e| return raise(L, e);
-            c.lua_pop(L, 1); // tolstring's copy
+            c.lua_pop(L, 1); // the raw element
+            items.append(gpa, .{ .text = text, .doc = doc }) catch |e| {
+                gpa.free(text);
+                if (doc.len > 0) gpa.free(@constCast(doc));
+                return raise(L, e);
+            };
         }
-        c.lua_pop(L, 1); // the raw element
-        items.append(gpa, .{ .text = text, .doc = doc }) catch |e| {
-            gpa.free(text);
-            if (doc.len > 0) gpa.free(@constCast(doc));
-            return raise(L, e);
-        };
     }
 
-    c.lua_pushvalue(L, 3);
+    c.lua_pushvalue(L, accept_idx);
     const ref = c.luaL_ref(L, c.LUA_REGISTRYINDEX);
-    const lp = gpa.create(LuaPick) catch |e| return raise(L, e);
+    const lp = gpa.create(LuaPick) catch |e| {
+        c.luaL_unref(L, c.LUA_REGISTRYINDEX, ref);
+        return raise(L, e);
+    };
     lp.* = .{ .plugin = self, .ref = ref };
-    self.ctx.pick.open(self.ctx, prompt[0..pl], items.items, .{
+    // Build the source immediately before openWith: on openWith failure
+    // it closes the source itself, so we only unwind the ref + LuaPick.
+    const src = buildSource(self, L, opts_idx) catch |e| {
+        c.luaL_unref(L, c.LUA_REGISTRYINDEX, ref);
+        gpa.destroy(lp);
+        return raise(L, e);
+    };
+    self.ctx.pick.openWith(self.ctx, prompt[0..pl], items.items, .{
         .handler = luaPickAccept,
         .cleanup = luaPickCleanup,
         .data = lp,
-    }) catch |e| {
+    }, .{ .allow_free_text = free_text, .source = src }) catch |e| {
         c.luaL_unref(L, c.LUA_REGISTRYINDEX, ref);
         gpa.destroy(lp);
         return raise(L, e);
     };
     return 0;
+}
+
+fn lPick(L: ?*c.lua_State) callconv(.c) c_int {
+    const self = pluginOf(L);
+    const opts_idx: c_int = if (c.lua_gettop(L) >= 4 and c.lua_type(L, 4) == c.LUA_TTABLE) 4 else 0;
+    const free_text = optBool(L, opts_idx, "free_text");
+    return openPick(self, L, 1, 2, 3, opts_idx, free_text);
+}
+
+/// scion.read(prompt, opts, fn) — a line reader. `opts.candidates` seeds
+/// the list; `opts.source`/`root` attach a native producer;
+/// `opts.allow_new` (default true) permits accepting the typed text.
+fn lRead(L: ?*c.lua_State) callconv(.c) c_int {
+    const self = pluginOf(L);
+    const opts_idx: c_int = if (c.lua_type(L, 2) == c.LUA_TTABLE) 2 else 0;
+    // candidates → items: push the nested table and use its stack index.
+    var items_idx: c_int = 0;
+    if (opts_idx != 0) {
+        _ = c.lua_getfield(L, opts_idx, "candidates");
+        if (c.lua_type(L, -1) == c.LUA_TTABLE) {
+            items_idx = c.lua_gettop(L);
+        } else c.lua_pop(L, 1);
+    }
+    // allow_new defaults to true (a reader accepts free text).
+    const allow_new = if (opts_idx == 0) true else blk: {
+        _ = c.lua_getfield(L, opts_idx, "allow_new");
+        defer c.lua_pop(L, 1);
+        if (c.lua_type(L, -1) == c.LUA_TBOOLEAN) break :blk c.lua_toboolean(L, -1) != 0;
+        break :blk true;
+    };
+    return openPick(self, L, 1, items_idx, 3, opts_idx, allow_new);
 }
 
 fn luaPickAccept(ctx: *command.Context, data: ?*anyopaque, choice: []const u8) anyerror!void {

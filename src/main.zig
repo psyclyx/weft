@@ -220,6 +220,16 @@ pub fn main(init: std.process.Init) !void {
         .handler = closeBufferHandler,
         .data = &attach_deps,
     });
+    _ = try commands.bind(gpa, "browse-remote", .{
+        .name = "browse-remote",
+        .summary = "Browse a remote directory (host, path) over the host's shell.",
+        .args = &.{
+            .{ .name = "host", .type = .string },
+            .{ .name = "path", .type = .string },
+        },
+        .handler = browseRemoteHandler,
+        .data = &attach_deps,
+    });
 
     // ── Connection (wire v1.1: N shared buffers over one session) ──
     var fd_link: core.session.FdLink = undefined;
@@ -391,9 +401,12 @@ pub fn main(init: std.process.Init) !void {
         if (attach.lsp) |l| {
             if (try l.tick(&cmd_ctx)) view_dirty = true;
         }
-        if (try completion_ui.tick(&cmd_ctx)) view_dirty = true;
         if (try def_ui.tick(&cmd_ctx)) view_dirty = true;
         if (try sym_ui.tick(&cmd_ctx)) view_dirty = true;
+        // Drive any async pick source (completion race-and-refine, file
+        // finder, dir browser) — a no-op for a static or source-less
+        // pick. Completion now rides this instead of a bespoke tick.
+        if (try pick_state.tick(&cmd_ctx)) view_dirty = true;
         // Apply connection intents recorded by commands (outside the
         // hot section: connect blocks on TCP, disconnect joins threads).
         if (share_ctx.disconnect_requested) {
@@ -946,6 +959,95 @@ fn openBufferHandler(ctx: *core.command.Context, data: ?*anyopaque, args: []cons
     try attachProviders(deps, buf);
     try ctx.buffers.switchTo(ctx.gpa, id, ctx.keymap);
     return .{ .integer = @intCast(id) };
+}
+
+// ── Remote directory browsing (fs_source over the host's shell) ─────
+
+/// One remote-browse pick's navigation state: the host and the current
+/// directory. Accepting descends (dir), ascends (`../`), or opens a
+/// file — each re-runs `browse-remote` or `open` by name.
+const RemoteBrowse = struct {
+    host: []u8,
+    path: []u8,
+};
+
+/// `browse-remote <host> <path>` — list a remote directory over the
+/// persistent ssh shell and pick over it (streamed by fs_source).
+fn browseRemoteHandler(ctx: *core.command.Context, data: ?*anyopaque, args: []const core.command.Value) anyerror!core.command.Value {
+    const deps: *AttachDeps = @ptrCast(@alignCast(data.?));
+    if (args.len != 2 or args[0] != .string or args[1] != .string) return error.TypeMismatch;
+    const host = args[0].string;
+    const path = args[1].string;
+    const gpa = ctx.gpa;
+    const fs = try deps.shellFor(host);
+
+    const rb = try gpa.create(RemoteBrowse);
+    errdefer gpa.destroy(rb);
+    rb.host = try gpa.dupe(u8, host);
+    errdefer gpa.free(rb.host);
+    rb.path = try gpa.dupe(u8, path);
+    errdefer gpa.free(rb.path);
+    const prompt = try std.fmt.allocPrint(gpa, "dir {s}:{s}", .{ host, path });
+    defer gpa.free(prompt);
+    // Source built last: openWith closes it on failure, so the only
+    // unwinding left is rb (its errdefers above).
+    const rd = try core.fs_source.RemoteDir.create(gpa, ctx.buffers.pool, fs, path);
+    try ctx.pick.openWith(ctx, prompt, &.{}, .{
+        .handler = browseRemoteAccept,
+        .cleanup = browseRemoteCleanup,
+        .data = rb,
+    }, .{ .allow_free_text = true, .source = rd.source() });
+    return .nil;
+}
+
+fn browseRemoteAccept(ctx: *core.command.Context, data: ?*anyopaque, choice: []const u8) anyerror!void {
+    const rb: *RemoteBrowse = @ptrCast(@alignCast(data.?));
+    const gpa = ctx.gpa;
+    if (std.mem.eql(u8, choice, "../")) {
+        const up = parentPath(rb.path);
+        _ = try core.command.run(ctx.commands, ctx, "browse-remote", &.{
+            .{ .string = rb.host }, .{ .string = up },
+        });
+        return;
+    }
+    if (std.mem.endsWith(u8, choice, "/")) {
+        const child = try joinPath(gpa, rb.path, choice[0 .. choice.len - 1]);
+        defer gpa.free(child);
+        _ = try core.command.run(ctx.commands, ctx, "browse-remote", &.{
+            .{ .string = rb.host }, .{ .string = child },
+        });
+        return;
+    }
+    const child = try joinPath(gpa, rb.path, choice);
+    defer gpa.free(child);
+    const spec = try std.fmt.allocPrint(gpa, "{s}:{s}", .{ rb.host, child });
+    defer gpa.free(spec);
+    _ = try core.command.run(ctx.commands, ctx, "open", &.{.{ .string = spec }});
+}
+
+fn browseRemoteCleanup(data: ?*anyopaque, gpa: std.mem.Allocator) void {
+    const rb: *RemoteBrowse = @ptrCast(@alignCast(data.?));
+    gpa.free(rb.host);
+    gpa.free(rb.path);
+    gpa.destroy(rb);
+}
+
+/// Directory portion of `p` (trailing slashes stripped), or "." at the
+/// root — a borrowed subslice, valid for `p`'s lifetime.
+fn parentPath(p: []const u8) []const u8 {
+    var end = p.len;
+    while (end > 0 and p[end - 1] == '/') end -= 1;
+    if (std.mem.lastIndexOfScalar(u8, p[0..end], '/')) |i| {
+        return if (i == 0) "/" else p[0..i];
+    }
+    return ".";
+}
+
+fn joinPath(gpa: std.mem.Allocator, base: []const u8, name: []const u8) ![]u8 {
+    if (std.mem.eql(u8, base, ".")) return gpa.dupe(u8, name);
+    var b = base;
+    while (b.len > 0 and b[b.len - 1] == '/') b = b[0 .. b.len - 1];
+    return std.fmt.allocPrint(gpa, "{s}/{s}", .{ b, name });
 }
 
 // ── Buffer sharing over the connection ──────────────────────────────

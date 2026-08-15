@@ -6,6 +6,10 @@
 //! nothing here waits. Accepting replaces the word prefix the session
 //! was fired with.
 //!
+//! The refresh is a `pick.Source`: the picker's own per-frame `tick`
+//! folds new results in and closing the pick cancels the caps session —
+//! one drive loop, no bespoke tick call in the frame loop.
+//!
 //! Stale policy (declared): completion items are plain text — if peer
 //! commits land while the popup is open, accepted text still inserts at
 //! the *current* cursor, which is the only honest interpretation; range
@@ -22,6 +26,9 @@ const task = @import("task.zig");
 pub const CompletionUi = struct {
     session: ?u64 = null,
     prefix_len: usize = 0,
+    /// Stashed at fire time so the source's `close` (which gets no ctx)
+    /// can cancel the session when the pick is dismissed.
+    caps: ?*capability.Caps = null,
 
     pub const empty: CompletionUi = .{};
 
@@ -42,34 +49,42 @@ pub const CompletionUi = struct {
             ctx.caps.finish(old);
             self.session = null;
         }
+        self.caps = ctx.caps;
         const prefix = try ctx.editor().wordPrefix(ctx.gpa);
         defer ctx.gpa.free(prefix);
         const id = try ctx.caps.fire(.completion, &ctx.editor().doc, ctx.editor().backingPath(), .{
             .offset = ctx.editor().cursorOffset(),
             .text = prefix,
         }) orelse return .nil;
+        errdefer ctx.caps.finish(id);
+        const plen = prefix.len;
+        // Open with the source BEFORE recording the session, so a failed
+        // open (which closes the source) sees session == null and the
+        // errdefer above is the sole owner that finishes it.
+        try ctx.pick.openWith(ctx, "complete", &.{}, .{
+            .handler = accept,
+            .data = self,
+        }, .{ .source = self.source() });
         self.session = id;
-        self.prefix_len = prefix.len;
-        try ctx.pick.open(ctx, "complete", &.{}, .{ .handler = accept, .data = self });
-        // Instant-tier providers answered during fire; surface them now.
-        _ = try self.tick(ctx);
+        self.prefix_len = plen;
+        // Surface instant-tier results (they answered during fire) now.
+        _ = try poll(self, ctx);
         return .nil;
     }
 
-    /// Per-frame: fold newly arrived results into the live pick.
-    /// Returns true when the UI changed.
-    pub fn tick(self: *CompletionUi, ctx: *command.Context) !bool {
+    pub fn source(self: *CompletionUi) pick_mod.Source {
+        return .{ .data = self, .poll = poll, .close = close };
+    }
+
+    /// Per-frame: fold newly arrived results into the live pick; finish
+    /// the session once every provider has answered (or timed out).
+    fn poll(data: ?*anyopaque, ctx: *command.Context) anyerror!bool {
+        const self: *CompletionUi = @ptrCast(@alignCast(data.?));
         const id = self.session orelse return false;
         const s = ctx.caps.session(id) orelse {
             self.session = null;
             return false;
         };
-        if (!ctx.pick.active) {
-            // User dismissed the popup; the race is moot.
-            ctx.caps.finish(id);
-            self.session = null;
-            return false;
-        }
         const fresh = s.poll();
         var changed = false;
         if (fresh.len > 0) {
@@ -82,11 +97,21 @@ pub const CompletionUi = struct {
             changed = true;
         }
         if (s.done(task.nowNs())) {
-            // Items live in the pick now; the session can go.
             ctx.caps.finish(id);
             self.session = null;
         }
         return changed;
+    }
+
+    /// The pick closed (accepted or dismissed): the race is moot, drop
+    /// the session. No ctx here, so cancel through the stashed caps.
+    fn close(data: ?*anyopaque, gpa: Allocator) void {
+        _ = gpa;
+        const self: *CompletionUi = @ptrCast(@alignCast(data.?));
+        if (self.session) |id| {
+            if (self.caps) |caps| caps.finish(id);
+            self.session = null;
+        }
     }
 
     fn accept(ctx: *command.Context, data: ?*anyopaque, choice: []const u8) anyerror!void {
