@@ -568,6 +568,12 @@ pub fn compact(self: *Document, gpa: Allocator, stable_token: []const u8) TextDo
     try self.doc.compact(gpa, stable_token);
 }
 
+/// Raw stemma event count since the last compaction (or since genesis,
+/// uncompacted) — the walker's replay cost scales with this.
+pub fn eventCount(self: *const Document) usize {
+    return self.doc.history.eventCount();
+}
+
 /// Per-agent compaction watermarks for serving `adoptPartial` peers.
 /// Names borrow from the document; caller frees the slice only.
 pub fn agentWatermarks(self: *const Document, gpa: Allocator) Error![]AgentWatermark {

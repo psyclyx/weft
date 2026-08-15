@@ -208,6 +208,13 @@ pub fn adoptPath(self: *Editor, gpa: Allocator, path: []const u8) (Allocator.Err
     self.backing = .{ .file = .{ .path = try gpa.dupe(u8, path), .sync = sync } };
 }
 
+/// Event count (since the last compaction) past which a clean save
+/// triggers another compaction — bounds walker replay cost for
+/// long-lived sessions without compacting away undo-adjacent history
+/// on every trivial save (undo is unaffected either way: it replays
+/// the commit log, not the stemma graph).
+const compact_event_threshold = 4096;
+
 /// Compact all history at the current head (must be clean: content ==
 /// disk) and rebuild the backing mirror on the new base — the two move
 /// together; compacting a document out from under its mirror strands
@@ -229,6 +236,19 @@ pub fn compactNow(self: *Editor, gpa: Allocator) !void {
         gpa.free(self.saved_version.?);
         self.saved_version = try self.doc.version(gpa);
     }
+}
+
+/// Compact once history has grown past `compact_event_threshold` since
+/// the last compaction, called right after a save lands (the one point
+/// a normal edit session is guaranteed momentarily clean). Best-effort:
+/// a race with fresh typing (still dirty by the time the async save
+/// resolves) or a transient compact failure just defers to the next
+/// save — never surfaced, never fatal.
+fn compactIfGrown(self: *Editor, gpa: Allocator) void {
+    if (self.doc.eventCount() < compact_event_threshold) return;
+    const dirty = self.isDirty(gpa) catch return;
+    if (dirty) return;
+    self.compactNow(gpa) catch {};
 }
 
 fn backingSync(self: *Editor) ?*backing_mod.Sync {
@@ -321,6 +341,7 @@ pub fn pollSave(self: *Editor, gpa: Allocator) bool {
                 if (self.saved_version) |v| gpa.free(v);
                 self.saved_version = version;
                 self.save_state = .idle;
+                self.compactIfGrown(gpa);
                 return true;
             } else |err| {
                 gpa.free(version);
