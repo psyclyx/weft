@@ -208,3 +208,20 @@ replicas still converge on content). The mtime+size fallback widens
 the race. Never guess by content equality across *documents* (rev-2
 rule) — this diff-import is within one document's backing peer, where
 the shared root is already established.
+
+## Status (2026-08-15)
+
+Landed, in build order: stemma run-RLE (wire v3) + partial bases
+(openPartial/realizeBase) + eventsBetween; shell-fs backings (ShellFs +
+backing.Sync, rev 4's backing-is-a-peer with guarded saves and
+external-write merges); multi-buffer editor (Buffers, four-case
+Backing, per-buffer providers with foreign-doc declines, (doc, name)
+layer index, buffer-local modes, read-only tool buffers,
+scion.layer_publish/section_at + per-document plugin peers);
+`scion --headless --listen` replacing scion-agent (deleted — the old
+dep-graph isolation is now review discipline in src/headless.zig).
+
+Still open beyond this document: per-buffer wire channels / shared
+buffer lists over a connection (today: wire v1's one document per
+connection, bound to the startup buffer), resume-token fast path, QUIC,
+stemma hole-bases wired into scion's remote viewer (stemma side ready).

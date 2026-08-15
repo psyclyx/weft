@@ -134,10 +134,12 @@ the seat keymap), `grim` captures frames for inspection.
 
 ## Remote workflow (phase 2)
 
-Every scion is a peer. Host a document from a headless machine:
+Every scion is a peer — there is no separate agent binary. Host a
+document from a headless machine with the same executable (the
+window/Vulkan half is simply never initialized):
 
 ```sh
-scion-agent --listen 7777 --token SECRET --lsp zls path/to/file.zig
+scion --headless --listen 7777 --token SECRET --lsp zls path/to/file.zig
 ```
 
 and open it from anywhere (`file.zig` is a name hint — nothing is read

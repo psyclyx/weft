@@ -20,6 +20,8 @@ const vk = @import("vk.zig").c;
 
 const embedded_font = @embedFile("font_mono");
 
+const headless = @import("headless.zig");
+
 const Args = struct {
     file: ?[]const u8 = null,
     font: ?[]const u8 = null,
@@ -29,6 +31,8 @@ const Args = struct {
     connect: ?[]const u8 = null, // host:port
     token: []const u8 = "scion-dev",
     user: []const u8 = "user",
+    headless: bool = false,
+    lsp_cmd: ?[]const u8 = null, // --headless host-side server
 };
 
 fn parseArgs(process_args: std.process.Args) Args {
@@ -50,6 +54,10 @@ fn parseArgs(process_args: std.process.Args) Args {
             out.token = it.next() orelse out.token;
         } else if (std.mem.eql(u8, a, "--user")) {
             out.user = it.next() orelse out.user;
+        } else if (std.mem.eql(u8, a, "--headless")) {
+            out.headless = true;
+        } else if (std.mem.eql(u8, a, "--lsp")) {
+            out.lsp_cmd = it.next() orelse out.lsp_cmd;
         } else {
             out.file = a;
         }
@@ -70,25 +78,44 @@ pub fn main(init: std.process.Init) !void {
     // POSIX argv is static; the parsed slices stay valid for the run.
     const args = parseArgs(init.minimal.args);
 
+    // Persistent host: same binary, window half never initialized.
+    if (args.headless) {
+        return headless.run(gpa, .{
+            .listen = args.listen orelse 7777,
+            .token = args.token,
+            .lsp_cmd = args.lsp_cmd,
+            .file = args.file,
+        }, init.minimal.environ);
+    }
+
     // ── Core ──
+    // Registered before everything so it runs LAST: shells must outlive
+    // the buffers whose backings (and in-flight save workers) use them.
+    var attach_deps_ptr: ?*AttachDeps = null;
+    defer if (attach_deps_ptr) |d| d.deinitShells();
     var pool = try core.task.Pool.init(gpa, .{});
     defer pool.deinit();
-    var editor = try core.Editor.init(gpa, pool, args.user);
-    defer editor.deinit(gpa);
+    var buffers = try core.Buffers.init(gpa, pool, args.user);
+    defer buffers.deinit(gpa);
     if (args.file) |path| {
+        const b0 = buffers.active();
+        gpa.free(b0.name);
+        b0.name = try gpa.dupe(u8, std.fs.path.basename(path));
         if (args.connect != null) {
             // Remote document: the path is a NAME (language routing,
             // status line); content arrives over the wire from the
             // host. Nothing is read locally.
-            try editor.adoptPath(gpa, path);
-        } else editor.openFile(gpa, path) catch |err| switch (err) {
+            try b0.editor.adoptPath(gpa, path);
+        } else b0.editor.openFile(gpa, path) catch |err| switch (err) {
             error.FileNotFound => {
                 // New file: adopt the path, save creates it.
-                try editor.adoptPath(gpa, path);
+                try b0.editor.adoptPath(gpa, path);
             },
             else => |e| return e,
         };
     }
+    // Stable: buffer 0 outlives the run; wire v1 collab binds to it.
+    const ed0 = &buffers.active().editor;
 
     // ── Command surface + config plugin ──
     var commands: core.command.Commands = .empty;
@@ -102,7 +129,7 @@ pub fn main(init: std.process.Init) !void {
     var quit = false;
     var cmd_ctx: core.command.Context = .{
         .gpa = gpa,
-        .editor = &editor,
+        .buffers = &buffers,
         .commands = &commands,
         .keymap = &keymap,
         .pick = &pick_state,
@@ -137,41 +164,40 @@ pub fn main(init: std.process.Init) !void {
     _ = try commands.bind(gpa, "eval", core.plugin.evalCommand(config_plugin));
     try loadConfig(gpa, config_plugin, args.config, init.minimal.environ);
 
-    var syntax: ?*core.syntax.Syntax = null;
-    defer if (syntax) |s| s.destroy();
-    if (editor.backingPath()) |p| {
-        if (grammars.forPath(p)) |spec| {
-            syntax = core.syntax.Syntax.create(gpa, spec, &editor.doc) catch |err| blk: {
-                std.log.warn("syntax {s} unavailable: {t}", .{ spec.name, err });
-                break :blk null;
-            };
-        }
-    }
-    if (syntax) |syn| {
-        try core.syntax.registerProviders(&caps, syn);
-        _ = try caps.registerFeed(&editor.doc, "edit/highlight", "highlight", .local, "treesitter");
-    }
-
-    var lsp: ?*core.lsp.Lsp = null;
-    defer if (lsp) |l| l.destroy();
-    // Placement routing: LSP providers are `host`-placed — for a
-    // remote-hosted document the server runs on the host peer (the
-    // agent) and its diagnostics arrive as the imported host feed.
-    if (args.connect == null) if (editor.backingPath()) |p| {
-        if (lsp_servers.match(p)) |entry| {
-            lsp = core.lsp.Lsp.create(gpa, entry.argv, p, &editor.doc, init.minimal.environ) catch |err| blk: {
-                std.log.warn("lsp unavailable: {t}", .{err});
-                break :blk null;
-            };
-            if (lsp) |l| {
-                // Diagnostics flow through the capability feed layer
-                // (host-scoped); the view reads the layer, not the plugin.
-                const diag_layer = try caps.registerFeed(&editor.doc, "edit/diagnostics", "diagnostics", .host, "lsp/server");
-                l.attachDiagnostics(diag_layer);
-                l.attachCaps(&caps, entry.extSlice());
-            }
-        }
+    // ── Per-buffer providers (syntax + LSP hang off Buffer.frontend) ──
+    var attach_deps: AttachDeps = .{
+        .gpa = gpa,
+        .grammars = &grammars,
+        .lsp_servers = &lsp_servers,
+        .caps = &caps,
+        .environ = init.minimal.environ,
+        // Placement routing: for a remote-hosted document the server
+        // runs on the host peer and diagnostics arrive as the imported
+        // host feed — no local LSP.
+        .local_lsp = args.connect == null,
     };
+    attach_deps_ptr = &attach_deps;
+    defer {
+        var det_it = buffers.iterator();
+        while (det_it.next()) |b| detachProviders(&attach_deps, b);
+    }
+    try attachProviders(&attach_deps, buffers.active());
+    // The graphical shell's open/close know about providers and remote
+    // shells; they shadow the core versions (registry last-wins).
+    _ = try commands.bind(gpa, "open", .{
+        .name = "open",
+        .summary = "Open a local file or host:path over a shell, with providers.",
+        .args = &.{.{ .name = "path", .type = .string }},
+        .handler = openBufferHandler,
+        .data = &attach_deps,
+    });
+    _ = try commands.bind(gpa, "buffer-close", .{
+        .name = "buffer-close",
+        .summary = "Close the active buffer (refuses when dirty), detaching providers.",
+        .args = &.{},
+        .handler = closeBufferHandler,
+        .data = &attach_deps,
+    });
 
     // ── Collab session (wire v1) ──
     var fd_link: core.session.FdLink = undefined;
@@ -187,11 +213,11 @@ pub fn main(init: std.process.Init) !void {
         fd_link = .{ .fd = fd };
         const role: core.secure.Role = if (args.listen != null) .server else .client;
         collab_session = try core.session.Session.create(gpa, fd_link.link(), role, args.token);
-        collab = try core.session.Collab.init(gpa, collab_session.?, &editor.doc, args.user);
-        collab.?.presence_layer = try caps.layers.claim(gpa, &editor.doc, "presence", .replicated, "collab");
+        collab = try core.session.Collab.init(gpa, collab_session.?, &ed0.doc, args.user);
+        collab.?.presence_layer = try caps.layers.claim(gpa, &ed0.doc, "presence", .replicated, "collab");
         if (args.connect != null) {
             // Host-scoped feeds (diagnostics) arrive over the wire.
-            collab.?.import_diag_layer = try caps.layers.claim(gpa, &editor.doc, "diagnostics", .host, "remote-host");
+            collab.?.import_diag_layer = try caps.layers.claim(gpa, &ed0.doc, "diagnostics", .host, "remote-host");
         }
     }
 
@@ -233,7 +259,6 @@ pub fn main(init: std.process.Init) !void {
     try snail_vk.uploadAndWait(gpa, vctx, resources, ctx.command_pool, &cache, &.{&view.atlas}, &binding);
 
     var stats: stats_mod.Stats = .{};
-    var seen_commits: usize = 0;
     var built: ?view_mod.Built = null;
     defer if (built) |*b| b.deinit(gpa);
     var instances: std.ArrayList(snail.render.records.Instance) = .empty;
@@ -245,8 +270,10 @@ pub fn main(init: std.process.Init) !void {
     var reconnect: ?core.task.Handle(anyerror!i32) = null;
     defer if (reconnect) |*h| h.detach();
     var next_reconnect_ns: u64 = 0;
+    var next_backing_poll_ns: u64 = 0;
+    var last_active: core.Buffers.Id = buffers.active_id;
 
-    std.log.info("scion: rendering — {d} bytes open, em {d}", .{ editor.text().byteLen(), args.em });
+    std.log.info("scion: rendering — {d} bytes open, em {d}", .{ ed0.text().byteLen(), args.em });
 
     while (!window.shouldClose() and !quit) {
         const frame_start = stats_mod.nowNs();
@@ -269,15 +296,39 @@ pub fn main(init: std.process.Init) !void {
         core.task.endHotSection();
         if (window.shouldClose()) break;
 
-        _ = editor.pollSave(gpa);
-        if (lsp) |l| {
+        // Commands may have created/switched buffers; lazily attach
+        // providers and damage the view on focus change.
+        const abuf = buffers.active();
+        try attachProviders(&attach_deps, abuf);
+        const editor = &abuf.editor;
+        const attach: *Attach = @ptrCast(@alignCast(abuf.frontend.?));
+        if (buffers.active_id != last_active) {
+            last_active = buffers.active_id;
+            view_dirty = true;
+        }
+
+        // Backing maintenance for every buffer: fold saves, merge
+        // external writes, retry stale saves, schedule polls.
+        {
+            const poll_due = stats_mod.nowNs() >= next_backing_poll_ns;
+            if (poll_due) next_backing_poll_ns = stats_mod.nowNs() + 2 * std.time.ns_per_s;
+            var mit = buffers.iterator();
+            while (mit.next()) |b| {
+                if (b.editor.pollSave(gpa) and b == abuf) view_dirty = true;
+                const was_stale = b.editor.save_state == .stale;
+                if (try b.editor.pollBacking(gpa) and b == abuf) view_dirty = true;
+                if (was_stale and b.editor.save_state == .idle) try b.editor.requestSave(gpa);
+                if (poll_due or b.editor.save_state == .stale) try b.editor.requestBackingPoll(gpa);
+            }
+        }
+        if (attach.lsp) |l| {
             if (try l.tick(&cmd_ctx)) view_dirty = true;
         }
         if (try completion_ui.tick(&cmd_ctx)) view_dirty = true;
         if (try def_ui.tick(&cmd_ctx)) view_dirty = true;
         if (try sym_ui.tick(&cmd_ctx)) view_dirty = true;
         if (collab) |*c| {
-            if (try c.tick(editor.cursorOffset())) view_dirty = true;
+            if (try c.tick(ed0.cursorOffset())) view_dirty = true;
             const live = collab_session.?.liveness();
             if (live != last_liveness) {
                 last_liveness = live;
@@ -307,8 +358,8 @@ pub fn main(init: std.process.Init) !void {
                 }
             }
         }
-        if (editor.doc.commitCount() != seen_commits) {
-            seen_commits = editor.doc.commitCount();
+        if (editor.doc.commitCount() != attach.seen_commits) {
+            attach.seen_commits = editor.doc.commitCount();
             view_dirty = true;
         }
         if (had_input) view_dirty = true; // cursor moves damage the view
@@ -319,9 +370,9 @@ pub fn main(init: std.process.Init) !void {
             const projection = snail.Mat4.ortho(0, @floatFromInt(fb[0]), @floatFromInt(fb[1]), 0, -1, 1);
             const world_to_pixel = snail.mvpToScenePixel(projection, @floatFromInt(fb[0]), @floatFromInt(fb[1])) orelse unreachable;
 
-            if (syntax) |syn| {
+            if (attach.syntax) |syn| {
                 _ = try syn.sync(gpa, &editor.doc);
-                if (caps.layers.find("highlight")) |hl| {
+                if (caps.layers.find(&editor.doc, "highlight")) |hl| {
                     // Whole doc when small; a generous window around the
                     // viewport otherwise (republshed every damage frame).
                     const rope = editor.text();
@@ -338,16 +389,16 @@ pub fn main(init: std.process.Init) !void {
             }
             const hud: view_mod.Hud = .{
                 .mode = keymap.currentMode(),
-                .file = editor.backingPath(),
+                .file = editor.backingPath() orelse abuf.name,
                 .dirty = editor.isDirty(gpa) catch true,
                 .save_failed = editor.save_state == .failed,
                 .pick = if (pick_state.active) &pick_state else null,
-                .highlight_layer = caps.layers.find("highlight"),
-                .diag_layer = caps.layers.find("diagnostics"),
-                .presence_layer = caps.layers.find("presence"),
+                .highlight_layer = caps.layers.find(&editor.doc, "highlight"),
+                .diag_layer = caps.layers.find(&editor.doc, "diagnostics"),
+                .presence_layer = caps.layers.find(&editor.doc, "presence"),
                 .link = if (collab_session) |s| @tagName(s.liveness()) else null,
                 .cursor_diag = blk: {
-                    const dl = caps.layers.find("diagnostics") orelse break :blk null;
+                    const dl = caps.layers.find(&editor.doc, "diagnostics") orelse break :blk null;
                     const cur = editor.cursorOffset();
                     for (0..dl.spanCount()) |i| {
                         const d = dl.resolvedSpan(i);
@@ -358,7 +409,7 @@ pub fn main(init: std.process.Init) !void {
             };
             var arena_state = std.heap.ArenaAllocator.init(gpa);
             defer arena_state.deinit();
-            const b = try view.build(arena_state.allocator(), &editor, hud, fb[0], fb[1], world_to_pixel);
+            const b = try view.build(arena_state.allocator(), editor, hud, fb[0], fb[1], world_to_pixel);
             if (built) |*old| old.deinit(gpa);
             built = b;
             if (b.records_added != 0) {
@@ -421,7 +472,7 @@ fn dispatchKey(ctx: *core.command.Context, view: *view_mod.View, ev: wayland.Key
     if (ev.keysym == c.XKB_KEY_Page_Up or ev.keysym == c.XKB_KEY_Page_Down) {
         const rows = view.visibleRows(fb_h);
         for (0..rows) |_| {
-            if (ev.keysym == c.XKB_KEY_Page_Up) ctx.editor.moveUp() else ctx.editor.moveDown();
+            if (ev.keysym == c.XKB_KEY_Page_Up) ctx.editor().moveUp() else ctx.editor().moveDown();
         }
         return;
     }
@@ -580,4 +631,155 @@ fn lspAddHandler(ctx: *core.command.Context, data: ?*anyopaque, args: []const co
 
 fn reconnectTask(hostport: []const u8) anyerror!i32 {
     return core.session.tcpConnect(hostport);
+}
+
+// ── Per-buffer provider attachments ─────────────────────────────────
+// Syntax and LSP are per-buffer instances hanging off Buffer.frontend;
+// their capability providers decline foreign documents, so per-buffer
+// registrations race correctly. Highlight/diagnostic layers key by
+// (doc, name) in the shared store.
+
+const Attach = struct {
+    syntax: ?*core.syntax.Syntax = null,
+    lsp: ?*core.lsp.Lsp = null,
+    seen_commits: usize = 0,
+};
+
+const AttachDeps = struct {
+    gpa: std.mem.Allocator,
+    grammars: *core.syntax.Runtime,
+    lsp_servers: *LspServers,
+    caps: *core.Caps,
+    environ: std.process.Environ,
+    local_lsp: bool,
+    /// Persistent shells per remote host (ssh spawner), created on
+    /// first `open host:path` and reused for every buffer on that host.
+    shells: std.StringHashMapUnmanaged(*core.ShellFs) = .empty,
+
+    fn deinitShells(self: *AttachDeps) void {
+        var it = self.shells.iterator();
+        while (it.next()) |e| {
+            e.value_ptr.*.deinit();
+            self.gpa.destroy(e.value_ptr.*);
+            self.gpa.free(e.key_ptr.*);
+        }
+        self.shells.deinit(self.gpa);
+    }
+
+    fn shellFor(self: *AttachDeps, host: []const u8) !*core.ShellFs {
+        if (self.shells.get(host)) |fs| return fs;
+        const fs = try self.gpa.create(core.ShellFs);
+        errdefer self.gpa.destroy(fs);
+        fs.* = try core.ShellFs.spawn(self.gpa, &.{ "ssh", host, "sh" }, self.environ);
+        errdefer fs.deinit();
+        try self.shells.put(self.gpa, try self.gpa.dupe(u8, host), fs);
+        return fs;
+    }
+};
+
+/// Idempotent: give a buffer its provider bundle (syntax by extension,
+/// LSP when locally placed). Buffers without a path get an empty
+/// bundle (tool/scratch).
+fn attachProviders(deps: *AttachDeps, buf: *core.Buffers.Buffer) !void {
+    if (buf.frontend != null) return;
+    const gpa = deps.gpa;
+    const at = try gpa.create(Attach);
+    at.* = .{};
+    buf.frontend = at;
+    const p = buf.editor.backingPath() orelse return;
+    const doc = &buf.editor.doc;
+
+    if (deps.grammars.forPath(p)) |spec| {
+        at.syntax = core.syntax.Syntax.create(gpa, spec, doc) catch |err| blk: {
+            std.log.warn("syntax {s} unavailable: {t}", .{ spec.name, err });
+            break :blk null;
+        };
+    }
+    if (at.syntax) |syn| {
+        try core.syntax.registerProviders(deps.caps, syn);
+        _ = try deps.caps.registerFeed(doc, "edit/highlight", "highlight", .local, "treesitter");
+    }
+    if (deps.local_lsp) {
+        if (deps.lsp_servers.match(p)) |entry| {
+            at.lsp = core.lsp.Lsp.create(gpa, entry.argv, p, doc, deps.environ) catch |err| blk: {
+                std.log.warn("lsp unavailable: {t}", .{err});
+                break :blk null;
+            };
+            if (at.lsp) |l| {
+                const diag_layer = try deps.caps.registerFeed(doc, "edit/diagnostics", "diagnostics", .host, "lsp/server");
+                l.attachDiagnostics(diag_layer);
+                l.attachCaps(deps.caps, entry.extSlice());
+            }
+        }
+    }
+}
+
+fn detachProviders(deps: *AttachDeps, buf: *core.Buffers.Buffer) void {
+    const at: *Attach = @ptrCast(@alignCast(buf.frontend orelse return));
+    if (at.lsp) |l| l.destroy();
+    if (at.syntax) |s| s.destroy();
+    deps.caps.layers.dropDoc(deps.gpa, &buf.editor.doc);
+    deps.gpa.destroy(at);
+    buf.frontend = null;
+}
+
+/// `open <path>` — dedupe by path; `host:path` opens over a persistent
+/// ssh shell (the coreutils tier); providers attach either way.
+fn openBufferHandler(ctx: *core.command.Context, data: ?*anyopaque, args: []const core.command.Value) anyerror!core.command.Value {
+    const deps: *AttachDeps = @ptrCast(@alignCast(data.?));
+    if (args.len != 1 or args[0] != .string) return error.TypeMismatch;
+    const spec = args[0].string;
+    if (ctx.buffers.findByPath(spec)) |id| {
+        try ctx.buffers.switchTo(ctx.gpa, id, ctx.keymap);
+        return .{ .integer = @intCast(id) };
+    }
+
+    // scp-style remote: host:path (no '/' before the first ':').
+    const remote: ?struct { host: []const u8, path: []const u8 } = blk: {
+        const colon = std.mem.indexOfScalar(u8, spec, ':') orelse break :blk null;
+        if (std.mem.indexOfScalar(u8, spec[0..colon], '/') != null) break :blk null;
+        if (colon == 0 or colon + 1 >= spec.len) break :blk null;
+        break :blk .{ .host = spec[0..colon], .path = spec[colon + 1 ..] };
+    };
+
+    if (remote) |r| {
+        // Dedupe remote opens by (shell, remote path).
+        const fs0 = deps.shells.get(r.host);
+        var rit = ctx.buffers.iterator();
+        while (rit.next()) |b| {
+            switch (b.editor.backing) {
+                .shell => |s| if (s.fs == fs0 and std.mem.eql(u8, s.path, r.path)) {
+                    try ctx.buffers.switchTo(ctx.gpa, b.id, ctx.keymap);
+                    return .{ .integer = @intCast(b.id) };
+                },
+                else => {},
+            }
+        }
+    }
+
+    const id = try ctx.buffers.create(ctx.gpa, std.fs.path.basename(spec));
+    errdefer ctx.buffers.close(ctx.gpa, id, ctx.keymap) catch {};
+    const buf = ctx.buffers.get(id).?;
+    if (remote) |r| {
+        const fs = try deps.shellFor(r.host);
+        try buf.editor.openShell(ctx.gpa, fs, r.path);
+    } else {
+        buf.editor.openFile(ctx.gpa, spec) catch |err| switch (err) {
+            error.FileNotFound => try buf.editor.adoptPath(ctx.gpa, spec),
+            else => |e| return e,
+        };
+    }
+    try attachProviders(deps, buf);
+    try ctx.buffers.switchTo(ctx.gpa, id, ctx.keymap);
+    return .{ .integer = @intCast(id) };
+}
+
+fn closeBufferHandler(ctx: *core.command.Context, data: ?*anyopaque, args: []const core.command.Value) anyerror!core.command.Value {
+    const deps: *AttachDeps = @ptrCast(@alignCast(data.?));
+    if (args.len != 0) return error.ArityMismatch;
+    const b = ctx.buffer();
+    if (b.editor.isDirty(ctx.gpa) catch true) return .{ .string = "dirty" };
+    detachProviders(deps, b);
+    try ctx.buffers.close(ctx.gpa, b.id, ctx.keymap);
+    return .nil;
 }

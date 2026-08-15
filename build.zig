@@ -37,22 +37,10 @@ pub fn build(b: *std.Build) void {
     });
     b.installArtifact(exe);
 
-    // ── Headless host agent ──
-    // Dep-graph enforcement is structural: this module gets stemma and
-    // libc only. Importing snail/wayland/vulkan/lua/tree-sitter code
-    // from src/agent.zig fails to resolve — the build IS the check.
-    const agent_mod = b.createModule(.{
-        .root_source_file = b.path("src/agent.zig"),
-        .target = target,
-        .optimize = optimize,
-        .link_libc = true,
-    });
-    agent_mod.addImport("stemma", stemma_dep.module("stemma"));
-    const agent = b.addExecutable(.{
-        .name = "scion-agent",
-        .root_module = agent_mod,
-    });
-    b.installArtifact(agent);
+    // The former scion-agent is folded into `scion --headless`
+    // (src/headless.zig): one binary, every scion a peer. The old
+    // build-time dep-graph isolation went with it — headless.zig's
+    // discipline is that it imports core/ only, reviewed not enforced.
 
     const run_step = b.step("run", "Run scion");
     const run_cmd = b.addRunArtifact(exe);

@@ -29,6 +29,7 @@ const assert = std.debug.assert;
 
 const command = @import("command.zig");
 const Document = @import("Document.zig");
+const layers_mod = @import("layers.zig");
 const Value = command.Value;
 
 pub const c = @cImport({
@@ -52,7 +53,11 @@ pub const Plugin = struct {
     gpa: Allocator,
     name: []u8,
     L: *c.lua_State,
-    peer: Document.PeerId,
+    /// One peer per document, registered lazily: a plugin edits
+    /// whichever buffer is active (or the tool buffer it created) and
+    /// each document sees it as its own collaborator. Entries are
+    /// validated on use (a closed buffer's address may be reused).
+    peers: std.AutoHashMapUnmanaged(*Document, Document.PeerId) = .empty,
     ctx: *command.Context,
     cmds: std.ArrayList(*LuaCommand) = .empty,
     provs: std.ArrayList(*LuaProvider) = .empty,
@@ -70,7 +75,6 @@ pub const Plugin = struct {
             .gpa = gpa,
             .name = try gpa.dupe(u8, name),
             .L = L,
-            .peer = undefined,
             .ctx = ctx,
         };
         errdefer gpa.free(self.name);
@@ -103,10 +107,40 @@ pub const Plugin = struct {
         registerFn(L, self, "provide", lProvide);
         registerFn(L, self, "cursor", lCursor);
         registerFn(L, self, "log", lLog);
+        registerFn(L, self, "layer_publish", lLayerPublish);
+        registerFn(L, self, "section_at", lSectionAt);
         c.lua_setglobal(L, "scion");
-
-        self.peer = try ctx.document().addPeer(gpa, name);
         return self;
+    }
+
+    /// The plugin's peer on `doc`, registered on first use and
+    /// re-validated against buffer-close address reuse.
+    fn peerFor(self: *Plugin, doc: *Document) (Error || Document.AddPeerError)!Document.PeerId {
+        const gop = try self.peers.getOrPut(self.gpa, doc);
+        if (gop.found_existing) {
+            const idx = @intFromEnum(gop.value_ptr.*) - 1;
+            if (idx < doc.peers.items.len) {
+                if (doc.peers.items[idx]) |p| {
+                    if (std.mem.eql(u8, p.name, self.name)) return gop.value_ptr.*;
+                }
+            }
+            // Stale entry (the old document died); fall through.
+        }
+        gop.value_ptr.* = doc.addPeer(self.gpa, self.name) catch |e| switch (e) {
+            error.DuplicatePeer => blk: {
+                // The doc already has our peer; recover its id.
+                for (doc.peers.items, 0..) |slot, i| {
+                    if (slot) |p| {
+                        if (std.mem.eql(u8, p.name, self.name)) {
+                            break :blk @enumFromInt(i + 1);
+                        }
+                    }
+                }
+                unreachable;
+            },
+            else => |err| return err,
+        };
+        return gop.value_ptr.*;
     }
 
     pub fn destroy(self: *Plugin) void {
@@ -132,7 +166,22 @@ pub const Plugin = struct {
         self.provs.deinit(gpa);
         if (self.result_buf) |b| gpa.free(b);
         c.lua_close(self.L);
-        self.ctx.document().removePeer(gpa, self.peer);
+        // Deregister our peers from documents that still live (closed
+        // buffers took theirs down with them).
+        var bit = self.ctx.buffers.iterator();
+        while (bit.next()) |buf| {
+            if (self.peers.get(&buf.editor.doc)) |peer| {
+                const idx = @intFromEnum(peer) - 1;
+                if (idx < buf.editor.doc.peers.items.len) {
+                    if (buf.editor.doc.peers.items[idx]) |p| {
+                        if (std.mem.eql(u8, p.name, self.name)) {
+                            buf.editor.doc.removePeer(gpa, peer);
+                        }
+                    }
+                }
+            }
+        }
+        self.peers.deinit(gpa);
         gpa.free(self.name);
         gpa.destroy(self);
     }
@@ -190,7 +239,9 @@ fn raise(L: ?*c.lua_State, err: anyerror) c_int {
 
 fn lSnapshot(L: ?*c.lua_State) callconv(.c) c_int {
     const self = pluginOf(L);
-    var snap = self.ctx.document().peerSnapshot(self.ctx.gpa, self.peer) catch |e| return raise(L, e);
+    const doc = self.ctx.document();
+    const peer = self.peerFor(doc) catch |e| return raise(L, e);
+    var snap = doc.peerSnapshot(self.ctx.gpa, peer) catch |e| return raise(L, e);
     defer snap.deinit(self.ctx.gpa);
     const bytes = snap.rope.toOwnedSlice(self.ctx.gpa) catch |e| return raise(L, e);
     defer self.ctx.gpa.free(bytes);
@@ -204,7 +255,9 @@ fn lInsert(L: ?*c.lua_State) callconv(.c) c_int {
     var len: usize = 0;
     const s = c.luaL_checklstring(L, 2, &len);
     if (off < 0) return raise(L, error.NegativeOffset);
-    self.ctx.document().peerInsert(self.ctx.gpa, self.peer, @intCast(off), s[0..len]) catch |e| return raise(L, e);
+    const doc = self.ctx.document();
+    const peer = self.peerFor(doc) catch |e| return raise(L, e);
+    doc.peerInsert(self.ctx.gpa, peer, @intCast(off), s[0..len]) catch |e| return raise(L, e);
     return 0;
 }
 
@@ -213,7 +266,9 @@ fn lDelete(L: ?*c.lua_State) callconv(.c) c_int {
     const start = c.luaL_checkinteger(L, 1);
     const end = c.luaL_checkinteger(L, 2);
     if (start < 0 or end < start) return raise(L, error.BadRange);
-    self.ctx.document().peerDelete(self.ctx.gpa, self.peer, .{
+    const doc = self.ctx.document();
+    const peer = self.peerFor(doc) catch |e| return raise(L, e);
+    doc.peerDelete(self.ctx.gpa, peer, .{
         .start = @intCast(start),
         .end = @intCast(end),
     }) catch |e| return raise(L, e);
@@ -222,9 +277,97 @@ fn lDelete(L: ?*c.lua_State) callconv(.c) c_int {
 
 fn lCommit(L: ?*c.lua_State) callconv(.c) c_int {
     const self = pluginOf(L);
-    const changed = self.ctx.document().peerCommit(self.ctx.gpa, self.peer) catch |e| return raise(L, e);
+    const doc = self.ctx.document();
+    const peer = self.peerFor(doc) catch |e| return raise(L, e);
+    const changed = doc.peerCommit(self.ctx.gpa, peer) catch |e| return raise(L, e);
     c.lua_pushboolean(L, @intFromBool(changed));
     return 1;
+}
+
+/// scion.layer_publish(name, spans) — publish anchored sections/faces
+/// on the active buffer as a local layer owned by this plugin. `spans`
+/// is an array of {start, end, kind, message?} tables (byte offsets at
+/// the current head; kind integer; message optional string). Tool
+/// buffers use this for their section structure (rev 3).
+fn lLayerPublish(L: ?*c.lua_State) callconv(.c) c_int {
+    const self = pluginOf(L);
+    const gpa = self.ctx.gpa;
+    var nlen: usize = 0;
+    const name_c = c.luaL_checklstring(L, 1, &nlen);
+    c.luaL_checktype(L, 2, c.LUA_TTABLE);
+    const doc = self.ctx.document();
+
+    var spans: std.ArrayList(layers_mod.SpanIn) = .empty;
+    defer spans.deinit(gpa);
+    const n = c.lua_rawlen(L, 2);
+    const max = doc.text().byteLen();
+    var i: c.lua_Integer = 1;
+    while (i <= n) : (i += 1) {
+        _ = c.lua_rawgeti(L, 2, i); // spans[i]
+        if (c.lua_type(L, -1) != c.LUA_TTABLE) {
+            c.lua_pop(L, 1);
+            return raise(L, error.BadSpan);
+        }
+        _ = c.lua_rawgeti(L, -1, 1);
+        _ = c.lua_rawgeti(L, -2, 2);
+        _ = c.lua_rawgeti(L, -3, 3);
+        _ = c.lua_rawgeti(L, -4, 4);
+        const start = c.lua_tointegerx(L, -4, null);
+        const stop = c.lua_tointegerx(L, -3, null);
+        const kind = c.lua_tointegerx(L, -2, null);
+        var mlen: usize = 0;
+        const msg = if (c.lua_type(L, -1) == c.LUA_TSTRING) c.lua_tolstring(L, -1, &mlen) else null;
+        const bad = start < 0 or stop < start or @as(usize, @intCast(stop)) > max;
+        if (!bad) {
+            spans.append(gpa, .{
+                .start = @intCast(start),
+                .end = @intCast(stop),
+                .kind = @intCast(@max(0, kind)),
+                .message = if (msg) |m| m[0..mlen] else "",
+            }) catch |e| {
+                c.lua_pop(L, 5);
+                return raise(L, e);
+            };
+        }
+        c.lua_pop(L, 5); // fields + spans[i]
+        if (bad) return raise(L, error.BadSpan);
+    }
+    const layer = self.ctx.caps.layers.claim(gpa, doc, name_c[0..nlen], .local, self.name) catch |e| return raise(L, e);
+    layer.publishSpans(gpa, spans.items) catch |e| return raise(L, e);
+    return 0;
+}
+
+/// scion.section_at(name, offset) → start, end, kind, message | nil —
+/// the innermost span of the named layer containing `offset` (cursor →
+/// section resolution for tool buffers).
+fn lSectionAt(L: ?*c.lua_State) callconv(.c) c_int {
+    const self = pluginOf(L);
+    var nlen: usize = 0;
+    const name_c = c.luaL_checklstring(L, 1, &nlen);
+    const off_i = c.luaL_checkinteger(L, 2);
+    if (off_i < 0) return raise(L, error.NegativeOffset);
+    const off: usize = @intCast(off_i);
+    const doc = self.ctx.document();
+    const layer = self.ctx.caps.layers.find(doc, name_c[0..nlen]) orelse {
+        c.lua_pushnil(L);
+        return 1;
+    };
+    var best: ?layers_mod.Layer.ResolvedSpan = null;
+    for (0..layer.spanCount()) |i| {
+        const s = layer.resolvedSpan(i);
+        if (off >= s.start and off <= s.end) {
+            if (best == null or (s.end - s.start) < (best.?.end - best.?.start)) best = s;
+        }
+    }
+    const s = best orelse {
+        c.lua_pushnil(L);
+        return 1;
+    };
+    c.lua_pushinteger(L, @intCast(s.start));
+    c.lua_pushinteger(L, @intCast(s.end));
+    c.lua_pushinteger(L, @intCast(s.kind));
+    _ = c.lua_pushlstring(L, s.message.ptr, s.message.len);
+    return 4;
 }
 
 fn lRun(L: ?*c.lua_State) callconv(.c) c_int {
@@ -477,7 +620,7 @@ fn luaProviderQuery(data: ?*anyopaque, caps: *capability.Caps, req: *const capab
 
 fn lCursor(L: ?*c.lua_State) callconv(.c) c_int {
     const self = pluginOf(L);
-    c.lua_pushinteger(L, @intCast(self.ctx.editor.cursorOffset()));
+    c.lua_pushinteger(L, @intCast(self.ctx.editor().cursorOffset()));
     return 1;
 }
 

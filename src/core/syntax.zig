@@ -211,6 +211,9 @@ pub const Syntax = struct {
     classes: []Class,
     enabled: []bool,
     spec: LanguageSpec,
+    /// The document this instance mirrors (providers decline others;
+    /// per-buffer instances race under the capability model).
+    doc: *const Document,
     /// TSInput chunk buffer (parse-time only).
     read_buf: [4096]u8 = undefined,
     read_rope: ?*const stemma.Rope = null,
@@ -295,6 +298,7 @@ pub const Syntax = struct {
             .classes = classes,
             .enabled = enabled,
             .spec = spec.*,
+            .doc = doc,
         };
 
         // Adopt the current text and parse it whole.
@@ -532,6 +536,11 @@ fn tsProvider(data: ?*anyopaque, caps: *capability.Caps, req: *const capability.
             caps.decline(req.session);
             return;
         },
+    }
+    if (req.doc != self.doc) {
+        // Another buffer's instance will answer (per-buffer race).
+        caps.decline(req.session);
+        return;
     }
     var syms: std.ArrayList(Syntax.Sym) = .empty;
     defer {

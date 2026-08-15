@@ -421,7 +421,7 @@ test "editor: save request round trip + dirty tracking" {
 
 const TestHost = struct {
     pool: *task.Pool,
-    editor: Editor,
+    buffers: core.Buffers,
     commands: core.command.Commands,
     keymap: core.Keymap,
     pick: core.Pick,
@@ -431,7 +431,7 @@ const TestHost = struct {
 
     fn init(gpa: Allocator, host: *TestHost) !void {
         host.pool = try task.Pool.init(gpa, .{ .threads = 1 });
-        host.editor = try Editor.init(gpa, host.pool, "user");
+        host.buffers = try core.Buffers.init(gpa, host.pool, "user");
         host.commands = .empty;
         host.keymap = .empty;
         host.pick = .empty;
@@ -439,7 +439,7 @@ const TestHost = struct {
         host.quit = false;
         host.ctx = .{
             .gpa = gpa,
-            .editor = &host.editor,
+            .buffers = &host.buffers,
             .commands = &host.commands,
             .keymap = &host.keymap,
             .pick = &host.pick,
@@ -449,12 +449,16 @@ const TestHost = struct {
         try core.builtins.install(gpa, &host.commands, &host.keymap);
     }
 
+    fn editor(host: *TestHost) *Editor {
+        return &host.buffers.active().editor;
+    }
+
     fn deinit(host: *TestHost, gpa: Allocator) void {
         host.caps.deinit();
         host.pick.deinit(gpa);
         host.keymap.deinit(gpa);
         host.commands.deinit(gpa);
-        host.editor.deinit(gpa);
+        host.buffers.deinit(gpa);
         host.pool.deinit();
     }
 };
@@ -474,7 +478,7 @@ test "plugin: fennel eval, scripted command, peer edits converge" {
     try t.expectEqualStrings("3", three);
 
     // The plugin edits through its own replica and commits — a peer.
-    try host.editor.insertText(gpa, "hello world");
+    try host.editor().insertText(gpa, "hello world");
     const banner = try p.eval(gpa,
         \\(local text (scion.snapshot))
         \\(scion.insert 0 ";; ")
@@ -484,7 +488,7 @@ test "plugin: fennel eval, scripted command, peer edits converge" {
     defer gpa.free(banner);
     try t.expectEqualStrings("11", banner);
     {
-        const s = try host.editor.text().toOwnedSlice(gpa);
+        const s = try host.editor().text().toOwnedSlice(gpa);
         defer gpa.free(s);
         try t.expectEqualStrings(";; hello world", s);
     }
@@ -506,7 +510,7 @@ test "plugin: fennel eval, scripted command, peer edits converge" {
     const undo_res = try p.eval(gpa, "(scion.run \"undo\")", "test");
     defer gpa.free(undo_res);
     {
-        const s = try host.editor.text().toOwnedSlice(gpa);
+        const s = try host.editor().text().toOwnedSlice(gpa);
         defer gpa.free(s);
         // The user's insert is undone; the plugin's banner survives
         // (selective undo does not touch other peers' work).
@@ -615,12 +619,12 @@ test "capability: race, refine, merge-ranked composition, dead provider" {
     var host: TestHost = undefined;
     try TestHost.init(gpa, &host);
     defer host.deinit(gpa);
-    try host.editor.insertText(gpa, "alpha beta gamma");
+    try host.editor().insertText(gpa, "alpha beta gamma");
 
     try host.caps.register(.{ .capability = "edit/completion", .id = "test.instant", .latency = .instant, .handler = instantWords });
     try host.caps.register(.{ .capability = "edit/completion", .id = "test.dead", .latency = .slow, .handler = neverAnswers });
 
-    const id = (try host.caps.fire(.completion, &host.editor.doc, null, .{ .text = "a", .timeout_ns = 0 })).?;
+    const id = (try host.caps.fire(.completion, &host.editor().doc, null, .{ .text = "a", .timeout_ns = 0 })).?;
     defer host.caps.finish(id);
     const s = host.caps.session(id).?;
 
@@ -661,22 +665,22 @@ test "capability: stamped results rebase through later edits or discard" {
     var host: TestHost = undefined;
     try TestHost.init(gpa, &host);
     defer host.deinit(gpa);
-    try host.editor.insertText(gpa, "xx target yy");
+    try host.editor().insertText(gpa, "xx target yy");
 
     try host.caps.register(.{ .capability = "edit/definition", .id = "test.def", .priority = 3, .handler = definesHere });
-    const id = (try host.caps.fire(.definition, &host.editor.doc, null, .{ .offset = 0 })).?;
+    const id = (try host.caps.fire(.definition, &host.editor().doc, null, .{ .offset = 0 })).?;
     defer host.caps.finish(id);
 
     // The document moves on before the consumer looks.
-    try host.editor.doc.insert(gpa, 0, ">>>> ");
+    try host.editor().doc.insert(gpa, 0, ">>>> ");
     const best = host.caps.session(id).?.best().?;
-    const range = best.payload.locations[0].range.rebase(&host.editor.doc).?;
+    const range = best.payload.locations[0].range.rebase(&host.editor().doc).?;
     try t.expectEqual(@as(usize, 7), range.start);
     try t.expectEqual(@as(usize, 12), range.end);
 
     // A stamp the document never produced → discard arm.
     const bogus = core.position.StampedRange.at("not-a-version", 0, 1);
-    try t.expectEqual(@as(?stemma.Range, null), bogus.rebase(&host.editor.doc));
+    try t.expectEqual(@as(?stemma.Range, null), bogus.rebase(&host.editor().doc));
 }
 
 test "capability: feed layer spans shift with edits; scripted provider races" {
@@ -684,12 +688,12 @@ test "capability: feed layer spans shift with edits; scripted provider races" {
     var host: TestHost = undefined;
     try TestHost.init(gpa, &host);
     defer host.deinit(gpa);
-    try host.editor.insertText(gpa, "warn here later");
+    try host.editor().insertText(gpa, "warn here later");
 
     // Feed: publish an anchored span, then edit in front of it.
-    const layer = try host.caps.registerFeed(&host.editor.doc, "edit/diagnostics", "diagnostics", .host, "test.feed");
+    const layer = try host.caps.registerFeed(&host.editor().doc, "edit/diagnostics", "diagnostics", .host, "test.feed");
     try layer.publishSpans(gpa, &.{.{ .start = 5, .end = 9, .kind = 2, .message = "hm" }});
-    try host.editor.doc.insert(gpa, 0, "____");
+    try host.editor().doc.insert(gpa, 0, "____");
     const d = layer.resolvedSpan(0);
     try t.expectEqual(@as(usize, 9), d.start);
     try t.expectEqual(@as(usize, 13), d.end);
@@ -703,7 +707,7 @@ test "capability: feed layer spans shift with edits; scripted provider races" {
         \\true
     , "capdemo");
     defer gpa.free(reg);
-    const id = (try host.caps.fire(.completion, &host.editor.doc, null, .{ .text = "wa" })).?;
+    const id = (try host.caps.fire(.completion, &host.editor().doc, null, .{ .text = "wa" })).?;
     defer host.caps.finish(id);
     const merged = try host.caps.mergedCompletion(gpa, id);
     defer gpa.free(merged);
@@ -718,8 +722,8 @@ test "syntax: instant-tier definition + symbols providers race through registry"
     var host: TestHost = undefined;
     try TestHost.init(gpa, &host);
     defer host.deinit(gpa);
-    try host.editor.adoptPath(gpa, "demo.zig");
-    try host.editor.insertText(gpa,
+    try host.editor().adoptPath(gpa, "demo.zig");
+    try host.editor().insertText(gpa,
         \\fn alpha() void {}
         \\fn beta() void {
         \\    alpha();
@@ -727,13 +731,13 @@ test "syntax: instant-tier definition + symbols providers race through registry"
     );
 
     const spec = core.syntax.forPath("demo.zig").?;
-    const syn = try core.syntax.Syntax.create(gpa, spec, &host.editor.doc);
+    const syn = try core.syntax.Syntax.create(gpa, spec, &host.editor().doc);
     defer syn.destroy();
     try core.syntax.registerProviders(&host.caps, syn);
 
     // Symbols: both functions, stamped ranges rebase to themselves.
     {
-        const id = (try host.caps.fire(.symbols, &host.editor.doc, host.editor.backingPath(), .{})).?;
+        const id = (try host.caps.fire(.symbols, &host.editor().doc, host.editor().backingPath(), .{})).?;
         defer host.caps.finish(id);
         const best = host.caps.session(id).?.best().?;
         try t.expectEqual(@as(usize, 2), best.payload.symbols.len);
@@ -743,16 +747,16 @@ test "syntax: instant-tier definition + symbols providers race through registry"
 
     // Definition: fire at the `alpha()` call site; instant answer, and
     // its stamped range survives a later edit.
-    const text = try host.editor.text().toOwnedSlice(gpa);
+    const text = try host.editor().text().toOwnedSlice(gpa);
     defer gpa.free(text);
     const call_at = std.mem.lastIndexOf(u8, text, "alpha").? + 2;
     {
-        const id = (try host.caps.fire(.definition, &host.editor.doc, host.editor.backingPath(), .{ .offset = call_at })).?;
+        const id = (try host.caps.fire(.definition, &host.editor().doc, host.editor().backingPath(), .{ .offset = call_at })).?;
         defer host.caps.finish(id);
-        try host.editor.doc.insert(gpa, 0, "// lead\n");
+        try host.editor().doc.insert(gpa, 0, "// lead\n");
         const best = host.caps.session(id).?.best().?;
         try t.expect(best.payload.locations.len > 0);
-        const range = best.payload.locations[0].range.rebase(&host.editor.doc).?;
+        const range = best.payload.locations[0].range.rebase(&host.editor().doc).?;
         try t.expectEqual(@as(usize, 8), range.start); // "fn alpha" after the lead
     }
 }
@@ -762,13 +766,13 @@ test "syntax: highlight feed publishes stamped bulk into its layer" {
     var host: TestHost = undefined;
     try TestHost.init(gpa, &host);
     defer host.deinit(gpa);
-    try host.editor.insertText(gpa, "const x = 1;\n");
+    try host.editor().insertText(gpa, "const x = 1;\n");
 
     const spec = core.syntax.forPath("a.zig").?;
-    const syn = try core.syntax.Syntax.create(gpa, spec, &host.editor.doc);
+    const syn = try core.syntax.Syntax.create(gpa, spec, &host.editor().doc);
     defer syn.destroy();
-    const layer = try host.caps.registerFeed(&host.editor.doc, "edit/highlight", "highlight", .local, "treesitter");
-    try syn.publishHighlight(gpa, &host.editor.doc, layer, .{ .start = 0, .end = host.editor.text().byteLen() });
+    const layer = try host.caps.registerFeed(&host.editor().doc, "edit/highlight", "highlight", .local, "treesitter");
+    try syn.publishHighlight(gpa, &host.editor().doc, layer, .{ .start = 0, .end = host.editor().text().byteLen() });
 
     const b = layer.bulk.?;
     try t.expectEqual(@as(usize, 0), b.start);
@@ -860,4 +864,102 @@ test "editor: shell backing — guarded save, external change poll, stale retry"
     }
     try t.expect(ed.save_state == .idle);
     try t.expect(!try ed.isDirty(gpa));
+}
+
+// ── Multi-buffer (phase 3) ──────────────────────────────────────────
+
+test "buffers: switch restores modes, close/create keep the set sane" {
+    const gpa = t.allocator;
+    var host: TestHost = undefined;
+    try TestHost.init(gpa, &host);
+    defer host.deinit(gpa);
+    const run = core.command.run;
+
+    try host.keymap.setMode(gpa, "normal");
+    try t.expectEqual(@as(usize, 1), host.buffers.count());
+    const scratch_id = host.buffers.active().id;
+
+    // Create+focus a second buffer; give it its own mode.
+    _ = try run(&host.commands, &host.ctx, "buffer-create", &.{.{ .string = "*tool*" }});
+    try t.expectEqual(@as(usize, 2), host.buffers.count());
+    try t.expectEqualStrings("*tool*", host.buffers.active().name);
+    try host.keymap.setMode(gpa, "magit");
+
+    // Switching away saves "magit" on the tool buffer and restores the
+    // scratch buffer's "normal"; switching back restores "magit".
+    _ = try run(&host.commands, &host.ctx, "buffer-switch", &.{.{ .integer = @intCast(scratch_id) }});
+    try t.expectEqualStrings("normal", host.keymap.currentMode());
+    _ = try run(&host.commands, &host.ctx, "buffer-next", &.{});
+    try t.expectEqualStrings("*tool*", host.buffers.active().name);
+    try t.expectEqualStrings("magit", host.keymap.currentMode());
+
+    // Read-only swallows text commands but not others.
+    _ = try run(&host.commands, &host.ctx, "buffer-read-only", &.{.{ .boolean = true }});
+    _ = try run(&host.commands, &host.ctx, "insert-text", &.{.{ .string = "nope" }});
+    try t.expectEqual(@as(usize, 0), host.editor().text().byteLen());
+    _ = try run(&host.commands, &host.ctx, "buffer-read-only", &.{.{ .boolean = false }});
+    _ = try run(&host.commands, &host.ctx, "insert-text", &.{.{ .string = "yes" }});
+    try t.expectEqual(@as(usize, 3), host.editor().text().byteLen());
+
+    // Dirty close refuses; a clean one proceeds and refocuses.
+    const res = try run(&host.commands, &host.ctx, "buffer-close", &.{});
+    try t.expect(res == .string); // "dirty"
+    try host.editor().doc.delete(gpa, .{ .start = 0, .end = 3 });
+    // Deleting back to empty is still a diverged version — dirty by
+    // design. Fresh scratch buffers close cleanly instead.
+    _ = try run(&host.commands, &host.ctx, "buffer-switch", &.{.{ .integer = @intCast(scratch_id) }});
+    _ = try run(&host.commands, &host.ctx, "buffer-close", &.{});
+    try t.expectEqual(@as(usize, 1), host.buffers.count());
+    try t.expectEqualStrings("*tool*", host.buffers.active().name);
+
+    // Open dedupes by path.
+    var tmp_dir = t.tmpDir(.{});
+    defer tmp_dir.cleanup();
+    const path = try std.fmt.allocPrint(gpa, ".zig-cache/tmp/{s}/file.txt", .{tmp_dir.sub_path});
+    defer gpa.free(path);
+    const id1 = try run(&host.commands, &host.ctx, "open", &.{.{ .string = path }});
+    const id2 = try run(&host.commands, &host.ctx, "open", &.{.{ .string = path }});
+    try t.expectEqual(id1.integer, id2.integer);
+}
+
+test "tool buffer: plugin peer + sections + read-only (magit-class recipe)" {
+    const gpa = t.allocator;
+    var host: TestHost = undefined;
+    try TestHost.init(gpa, &host);
+    defer host.deinit(gpa);
+
+    const p = try core.Plugin.create(gpa, &host.ctx, "status-tool");
+    defer p.destroy();
+
+    // The whole rev-3 recipe from fennel: create a buffer, generate
+    // content as a plugin peer, publish sections, mark read-only.
+    const out = try p.eval(gpa,
+        \\(scion.run "buffer-create" "*status*")
+        \\(scion.insert 0 "== staged ==\nfile-a\n== unstaged ==\nfile-b\n")
+        \\(scion.commit)
+        \\(scion.layer_publish "sections" [[0 12 1 "staged"] [13 19 2 "entry"] [20 34 1 "unstaged"] [35 41 2 "entry"]])
+        \\(scion.run "buffer-read-only" true)
+        \\(scion.section_at "sections" 15)
+    , "tool.fnl");
+    defer gpa.free(out);
+
+    const buf = host.buffers.active();
+    try t.expectEqualStrings("*status*", buf.name);
+    try t.expect(buf.read_only);
+    try t.expect(std.mem.startsWith(u8, out, "13")); // innermost section at 15
+
+    // Refresh = the peer committing again; merges like any collaborator.
+    const out2 = try p.eval(gpa,
+        \\(scion.insert 7 "!")
+        \\(scion.commit)
+    , "tool2.fnl");
+    gpa.free(out2);
+    const text = try host.editor().text().toOwnedSlice(gpa);
+    defer gpa.free(text);
+    try t.expect(std.mem.indexOf(u8, text, "!") != null);
+
+    // Sections survive the edit (anchored spans shift).
+    const out3 = try p.eval(gpa, "(scion.section_at \"sections\" 0)", "tool3.fnl");
+    defer gpa.free(out3);
+    try t.expect(std.mem.startsWith(u8, out3, "0"));
 }

@@ -11,6 +11,7 @@ const Allocator = std.mem.Allocator;
 const registry = @import("registry.zig");
 const Document = @import("Document.zig");
 const Editor = @import("Editor.zig");
+const Buffers = @import("Buffers.zig");
 const Keymap = @import("Keymap.zig");
 
 /// The portable argument/result ABI. Mirrors what a Lua boundary can
@@ -32,18 +33,28 @@ pub const ArgSpec = struct {
 
 /// Everything a handler may touch — the whole editor surface, because
 /// commands ARE the editor's features. Commands only ever see this,
-/// never core internals.
+/// never core internals. `editor()`/`document()` always mean the
+/// ACTIVE buffer — a buffer switch mid-command redirects the rest of
+/// the command, which is the honest semantics.
 pub const Context = struct {
     gpa: Allocator,
-    editor: *Editor,
+    buffers: *Buffers,
     commands: *Commands,
     keymap: *Keymap,
     pick: *@import("pick.zig").Pick,
     caps: *@import("capability.zig").Caps,
     quit: *bool,
 
+    pub fn buffer(self: *Context) *Buffers.Buffer {
+        return self.buffers.active();
+    }
+
+    pub fn editor(self: *Context) *Editor {
+        return &self.buffers.active().editor;
+    }
+
     pub fn document(self: *Context) *Document {
-        return &self.editor.doc;
+        return &self.buffers.active().editor.doc;
     }
 };
 
@@ -155,8 +166,8 @@ test "command: schema derivation, validation, late-bound run" {
     const task = @import("task.zig");
     var pool = try task.Pool.init(gpa, .{ .threads = 1 });
     defer pool.deinit();
-    var editor = try Editor.init(gpa, pool, "user");
-    defer editor.deinit(gpa);
+    var buffers = try Buffers.init(gpa, pool, "user");
+    defer buffers.deinit(gpa);
     var keymap: Keymap = .empty;
     defer keymap.deinit(gpa);
     var pick: @import("pick.zig").Pick = .empty;
@@ -169,7 +180,7 @@ test "command: schema derivation, validation, late-bound run" {
     defer commands.deinit(gpa);
     var ctx: Context = .{
         .gpa = gpa,
-        .editor = &editor,
+        .buffers = &buffers,
         .commands = &commands,
         .keymap = &keymap,
         .pick = &pick,
@@ -192,11 +203,11 @@ test "command: schema derivation, validation, late-bound run" {
     try t.expectError(error.TypeMismatch, run(&commands, &ctx, "insert-text", &.{
         .{ .string = "oops" }, .{ .string = "hi" },
     }));
-    try t.expectEqual(@as(usize, 0), editor.text().byteLen());
+    try t.expectEqual(@as(usize, 0), buffers.active().editor.text().byteLen());
 
     const res = try run(&commands, &ctx, "insert-text", &.{
         .{ .integer = 0 }, .{ .string = "graft" },
     });
     try t.expectEqual(Value{ .integer = 5 }, res);
-    try t.expectEqual(@as(usize, 5), editor.text().byteLen());
+    try t.expectEqual(@as(usize, 5), buffers.active().editor.text().byteLen());
 }

@@ -1,82 +1,51 @@
-//! scion-agent — the headless host peer. Hosts a worktree document,
-//! serves the wire protocol (ops/requests/feeds), spawns the language
-//! server on the host side (placement `host` made literal), serves
-//! range reads for partial checkout, and autosaves.
+//! scion --headless — the persistent host peer, same binary as the
+//! editor (design rev 2: no dedicated agent). Hosts a document, serves
+//! the wire protocol (ops/requests/feeds) to N peers as a hub, spawns
+//! the language server on the host side (placement `host` made
+//! literal), serves range reads for partial checkout, and autosaves.
+//! The window/Vulkan half of scion is simply never initialized.
 //!
-//! Dependency graph is the enforcement: this root imports core files
-//! only — no snail, no Vulkan, no Wayland, no Lua, no tree-sitter. A
-//! stray import fails the build because those modules/libraries are
-//! simply not wired into this target.
-//!
-//!   scion-agent --listen PORT [--token T] [--lsp "zls"] [file]
+//!   scion --headless --listen PORT [--token T] [--lsp "zls"] [file]
 
 const std = @import("std");
-const Editor = @import("core/Editor.zig");
-const Document = @import("core/Document.zig");
-const task = @import("core/task.zig");
-const session = @import("core/session.zig");
-const secure = @import("core/secure.zig");
-const capability = @import("core/capability.zig");
-const command = @import("core/command.zig");
-const Keymap = @import("core/Keymap.zig");
-const pick = @import("core/pick.zig");
-const lsp_mod = @import("core/lsp.zig");
+const core = @import("core/core.zig");
+const session = core.session;
+const capability = core.capability;
 
-const Args = struct {
+pub const Args = struct {
     listen: u16 = 7777,
     token: []const u8 = "scion-dev",
     lsp_cmd: ?[]const u8 = null,
     file: ?[]const u8 = null,
 };
 
-pub fn main(init: std.process.Init) !void {
-    const debug_alloc = @import("builtin").mode == .Debug;
-    var gpa_state: std.heap.DebugAllocator(.{}) = .init;
-    defer if (debug_alloc) {
-        _ = gpa_state.deinit();
-    };
-    const gpa = if (debug_alloc) gpa_state.allocator() else std.heap.c_allocator;
-
-    var args: Args = .{};
-    var it = std.process.Args.Iterator.init(init.minimal.args);
-    _ = it.skip();
-    while (it.next()) |a| {
-        if (std.mem.eql(u8, a, "--listen")) {
-            if (it.next()) |v| args.listen = std.fmt.parseInt(u16, v, 10) catch args.listen;
-        } else if (std.mem.eql(u8, a, "--token")) {
-            args.token = it.next() orelse args.token;
-        } else if (std.mem.eql(u8, a, "--lsp")) {
-            args.lsp_cmd = it.next() orelse args.lsp_cmd;
-        } else {
-            args.file = a;
-        }
-    }
-
-    var pool = try task.Pool.init(gpa, .{ .threads = 2 });
+pub fn run(gpa: std.mem.Allocator, args: Args, environ: std.process.Environ) !void {
+    var pool = try core.task.Pool.init(gpa, .{ .threads = 2 });
     defer pool.deinit();
-    var editor = try Editor.init(gpa, pool, "agent");
-    defer editor.deinit(gpa);
+    var buffers = try core.Buffers.init(gpa, pool, "host");
+    defer buffers.deinit(gpa);
+    const editor = &buffers.active().editor;
     if (args.file) |p| {
         editor.openFile(gpa, p) catch |err| switch (err) {
             error.FileNotFound => try editor.adoptPath(gpa, p),
             else => |e| return e,
         };
-        std.log.info("agent: hosting {s} ({d} bytes)", .{ p, editor.text().byteLen() });
+        std.log.info("headless: hosting {s} ({d} bytes)", .{ p, editor.text().byteLen() });
     }
 
     // The minimal command surface the LSP adapter's tick needs.
-    var commands: command.Commands = .empty;
+    var commands: core.command.Commands = .empty;
     defer commands.deinit(gpa);
-    var keymap: Keymap = .empty;
+    var keymap: core.Keymap = .empty;
     defer keymap.deinit(gpa);
-    var pick_state: pick.Pick = .empty;
+    var pick_state: core.Pick = .empty;
     defer pick_state.deinit(gpa);
-    var caps = capability.Caps.init(gpa, task.nowNs);
+    var caps = capability.Caps.init(gpa, core.task.nowNs);
     defer caps.deinit();
     var quit = false;
-    var ctx: command.Context = .{
+    var ctx: core.command.Context = .{
         .gpa = gpa,
-        .editor = &editor,
+        .buffers = &buffers,
         .commands = &commands,
         .keymap = &keymap,
         .pick = &pick_state,
@@ -85,7 +54,7 @@ pub fn main(init: std.process.Init) !void {
     };
 
     // Host-side LSP: the server runs WHERE THE DOCUMENT LIVES.
-    var lsp: ?*lsp_mod.Lsp = null;
+    var lsp: ?*core.lsp.Lsp = null;
     defer if (lsp) |l| l.destroy();
     if (args.lsp_cmd) |cmd_str| {
         if (editor.backingPath()) |p| {
@@ -93,8 +62,8 @@ pub fn main(init: std.process.Init) !void {
             defer argv.deinit(gpa);
             var words = std.mem.tokenizeScalar(u8, cmd_str, ' ');
             while (words.next()) |w| try argv.append(gpa, w);
-            lsp = lsp_mod.Lsp.create(gpa, argv.items, p, &editor.doc, init.minimal.environ) catch |err| blk: {
-                std.log.warn("agent: lsp unavailable: {t}", .{err});
+            lsp = core.lsp.Lsp.create(gpa, argv.items, p, &editor.doc, environ) catch |err| blk: {
+                std.log.warn("headless: lsp unavailable: {t}", .{err});
                 break :blk null;
             };
             if (lsp) |l| {
@@ -109,7 +78,7 @@ pub fn main(init: std.process.Init) !void {
     if (editor.backingPath()) |p| blob = session.BlobServer.openPath(p) catch null;
 
     // ── Hub: accept forever, serve N peers on the one document ──
-    std.log.info("agent: listening on {d}", .{args.listen});
+    std.log.info("headless: listening on {d}", .{args.listen});
     const listener = try session.tcpListener(args.listen);
     var hub: Hub = .{ .gpa = gpa };
     defer hub.deinit();
@@ -119,7 +88,7 @@ pub fn main(init: std.process.Init) !void {
     var park: std.atomic.Value(u32) = .init(0);
     var last_change_ns: u64 = 0;
     var seen_commits: usize = 0;
-    while (true) {
+    while (!quit) {
         // Adopt newly accepted connections.
         var pending = hub.incoming.swap(null, .acquire);
         while (pending) |node| {
@@ -127,7 +96,7 @@ pub fn main(init: std.process.Init) !void {
             const fd = node.fd;
             gpa.destroy(node);
             hub.adopt(fd, args.token, &editor.doc, &caps, if (blob != null) &blob.? else null) catch |err| {
-                std.log.warn("agent: peer setup failed: {t}", .{err});
+                std.log.warn("headless: peer setup failed: {t}", .{err});
             };
         }
         // Tick everyone; broadcast falls out of per-peer frontier
@@ -138,7 +107,7 @@ pub fn main(init: std.process.Init) !void {
             const c = hub.clients.items[i];
             _ = c.collab.tick(0) catch {};
             if (c.sess.liveness() == .offline) {
-                std.log.info("agent: peer departed ({d} left)", .{hub.clients.items.len - 1});
+                std.log.info("headless: peer departed ({d} left)", .{hub.clients.items.len - 1});
                 hub.remove(i);
             } else i += 1;
         }
@@ -146,9 +115,9 @@ pub fn main(init: std.process.Init) !void {
         _ = editor.pollSave(gpa);
         if (editor.doc.commitCount() != seen_commits) {
             seen_commits = editor.doc.commitCount();
-            last_change_ns = task.nowNs();
+            last_change_ns = core.task.nowNs();
         }
-        if (last_change_ns != 0 and task.nowNs() - last_change_ns > 2 * std.time.ns_per_s) {
+        if (last_change_ns != 0 and core.task.nowNs() - last_change_ns > 2 * std.time.ns_per_s) {
             last_change_ns = 0;
             if (editor.backingPath() != null) try editor.requestSave(gpa);
         }
@@ -189,7 +158,7 @@ const Hub = struct {
         self: *Hub,
         fd: i32,
         token: []const u8,
-        doc: *Document,
+        doc: *core.Document,
         caps: *capability.Caps,
         blob: ?*session.BlobServer,
     ) !void {
@@ -199,14 +168,14 @@ const Hub = struct {
         c.* = .{ .hub = self, .fd_link = .{ .fd = fd }, .sess = undefined, .collab = undefined };
         c.sess = try session.Session.create(gpa, c.fd_link.link(), .server, token);
         errdefer c.sess.destroy();
-        c.collab = try session.Collab.init(gpa, c.sess, doc, "agent");
-        c.collab.export_diag_layer = caps.layers.find("diagnostics");
+        c.collab = try session.Collab.init(gpa, c.sess, doc, "host");
+        c.collab.export_diag_layer = caps.layers.find(doc, "diagnostics");
         c.collab.blob_server = blob;
         c.collab.publish_presence = false; // a hub has no cursor
         c.collab.relay = relayPresence;
         c.collab.relay_ctx = c;
         try self.clients.append(gpa, c);
-        std.log.info("agent: peer joined ({d} connected)", .{self.clients.items.len});
+        std.log.info("headless: peer joined ({d} connected)", .{self.clients.items.len});
     }
 
     fn remove(self: *Hub, i: usize) void {

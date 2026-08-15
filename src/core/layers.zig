@@ -129,9 +129,9 @@ pub const Layer = struct {
     }
 };
 
-/// All layers of one editor session, looked up by (name). One document
-/// per store for now (matches the editor); multi-document indexing
-/// arrives with remote documents.
+/// All layers of one editor session, keyed by (document, name) — the
+/// multi-buffer index: each buffer's providers claim under its own
+/// document; the view reads the active document's layers.
 pub const Layers = struct {
     list: std.ArrayList(*Layer) = .empty,
 
@@ -146,12 +146,13 @@ pub const Layers = struct {
         self.* = .{};
     }
 
-    /// Get-or-create the layer `name` owned by `provider`. Re-claiming
-    /// a name from a different provider replaces its content ownership
-    /// (last registration wins, like the command registry).
+    /// Get-or-create the layer `(doc, name)` owned by `provider`.
+    /// Re-claiming a name from a different provider replaces its
+    /// content ownership (last registration wins, like the command
+    /// registry).
     pub fn claim(self: *Layers, gpa: Allocator, doc: *Document, name: []const u8, scope: Scope, provider: []const u8) !*Layer {
         for (self.list.items) |l| {
-            if (std.mem.eql(u8, l.name, name)) {
+            if (l.doc == doc and std.mem.eql(u8, l.name, name)) {
                 if (!std.mem.eql(u8, l.provider, provider)) {
                     gpa.free(l.provider);
                     l.provider = try gpa.dupe(u8, provider);
@@ -173,11 +174,24 @@ pub const Layers = struct {
         return l;
     }
 
-    pub fn find(self: *const Layers, name: []const u8) ?*Layer {
+    pub fn find(self: *const Layers, doc: *const Document, name: []const u8) ?*Layer {
         for (self.list.items) |l| {
-            if (std.mem.eql(u8, l.name, name)) return l;
+            if (l.doc == doc and std.mem.eql(u8, l.name, name)) return l;
         }
         return null;
+    }
+
+    /// Drop every layer of `doc` (buffer close).
+    pub fn dropDoc(self: *Layers, gpa: Allocator, doc: *const Document) void {
+        var i: usize = 0;
+        while (i < self.list.items.len) {
+            const l = self.list.items[i];
+            if (l.doc == doc) {
+                l.deinit(gpa);
+                gpa.destroy(l);
+                _ = self.list.swapRemove(i);
+            } else i += 1;
+        }
     }
 };
 

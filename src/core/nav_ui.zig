@@ -35,8 +35,8 @@ pub const DefinitionUi = struct {
         _ = args;
         const self: *DefinitionUi = @ptrCast(@alignCast(data.?));
         if (self.session) |old| ctx.caps.finish(old);
-        self.session = try ctx.caps.fire(.definition, &ctx.editor.doc, ctx.editor.backingPath(), .{
-            .offset = ctx.editor.cursorOffset(),
+        self.session = try ctx.caps.fire(.definition, &ctx.editor().doc, ctx.editor().backingPath(), .{
+            .offset = ctx.editor().cursorOffset(),
         });
         self.first_result_ns = 0;
         _ = try self.tick(ctx);
@@ -76,9 +76,9 @@ pub const DefinitionUi = struct {
             return true;
         }
         // Rebase-or-discard: the stamp machinery is the only path.
-        const range = loc.range.rebase(&ctx.editor.doc) orelse return false;
-        ctx.editor.doc.anchors.set(ctx.editor.cursor, .{ .offset = range.start, .bias = .right });
-        ctx.editor.history.barrier();
+        const range = loc.range.rebase(&ctx.editor().doc) orelse return false;
+        ctx.editor().doc.anchors.set(ctx.editor().cursor, .{ .offset = range.start, .bias = .right });
+        ctx.editor().history.barrier();
         return true;
     }
 };
@@ -117,7 +117,7 @@ pub const SymbolsUi = struct {
         _ = args;
         const self: *SymbolsUi = @ptrCast(@alignCast(data.?));
         if (self.session) |old| ctx.caps.finish(old);
-        self.session = try ctx.caps.fire(.symbols, &ctx.editor.doc, ctx.editor.backingPath(), .{});
+        self.session = try ctx.caps.fire(.symbols, &ctx.editor().doc, ctx.editor().backingPath(), .{});
         _ = try self.tick(ctx);
         return .nil;
     }
@@ -142,7 +142,7 @@ pub const SymbolsUi = struct {
         var labels: std.ArrayList([]const u8) = .empty;
         defer labels.deinit(gpa);
         for (best.payload.symbols) |sym| {
-            const range = sym.range.rebase(&ctx.editor.doc) orelse continue;
+            const range = sym.range.rebase(&ctx.editor().doc) orelse continue;
             const name = try gpa.dupe(u8, sym.name);
             errdefer gpa.free(name);
             try self.names.append(gpa, name);
@@ -158,9 +158,9 @@ pub const SymbolsUi = struct {
         const self: *SymbolsUi = @ptrCast(@alignCast(data.?));
         for (self.names.items, self.offsets.items) |n, off| {
             if (std.mem.eql(u8, n, choice)) {
-                const clamped = @min(off, ctx.editor.text().byteLen());
-                ctx.editor.doc.anchors.set(ctx.editor.cursor, .{ .offset = clamped, .bias = .right });
-                ctx.editor.history.barrier();
+                const clamped = @min(off, ctx.editor().text().byteLen());
+                ctx.editor().doc.anchors.set(ctx.editor().cursor, .{ .offset = clamped, .bias = .right });
+                ctx.editor().history.barrier();
                 return;
             }
         }

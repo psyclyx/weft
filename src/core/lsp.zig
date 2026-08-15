@@ -120,6 +120,9 @@ pub const Lsp = struct {
     /// Owned copy of the server command (restarts respawn from it).
     argv: [][]u8,
     environ: std.process.Environ,
+    /// The one document this adapter mirrors; capability queries for
+    /// other documents are declined (per-buffer instances race).
+    doc: *const Document,
     mirror: Mirror = .empty,
     version: i64 = 0,
     next_id: i64 = 1,
@@ -185,6 +188,7 @@ pub const Lsp = struct {
             .uri = uri,
             .argv = argv_owned,
             .environ = environ,
+            .doc = doc,
         };
 
         // Adopt the current text; didOpen sends the shadow later.
@@ -578,7 +582,7 @@ pub const Lsp = struct {
             .hover => self.server_can.hover,
             else => false,
         };
-        if (!supported or !self.ready or self.degraded) {
+        if (!supported or !self.ready or self.degraded or req.doc != self.doc) {
             caps.decline(req.session);
             return;
         }

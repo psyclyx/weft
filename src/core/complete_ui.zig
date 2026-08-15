@@ -42,10 +42,10 @@ pub const CompletionUi = struct {
             ctx.caps.finish(old);
             self.session = null;
         }
-        const prefix = try ctx.editor.wordPrefix(ctx.gpa);
+        const prefix = try ctx.editor().wordPrefix(ctx.gpa);
         defer ctx.gpa.free(prefix);
-        const id = try ctx.caps.fire(.completion, &ctx.editor.doc, ctx.editor.backingPath(), .{
-            .offset = ctx.editor.cursorOffset(),
+        const id = try ctx.caps.fire(.completion, &ctx.editor().doc, ctx.editor().backingPath(), .{
+            .offset = ctx.editor().cursorOffset(),
             .text = prefix,
         }) orelse return .nil;
         self.session = id;
@@ -91,14 +91,14 @@ pub const CompletionUi = struct {
 
     fn accept(ctx: *command.Context, data: ?*anyopaque, choice: []const u8) anyerror!void {
         const self: *CompletionUi = @ptrCast(@alignCast(data.?));
-        const cur = ctx.editor.cursorOffset();
+        const cur = ctx.editor().cursorOffset();
         const start = cur -| self.prefix_len;
-        try ctx.editor.doc.replaceAll(ctx.gpa, &.{.{
+        try ctx.editor().doc.replaceAll(ctx.gpa, &.{.{
             .range = .{ .start = start, .end = cur },
             .bytes = choice,
         }});
-        try ctx.editor.history.ingest(ctx.gpa, &ctx.editor.doc);
-        ctx.editor.history.barrier();
+        try ctx.editor().history.ingest(ctx.gpa, &ctx.editor().doc);
+        ctx.editor().history.barrier();
     }
 };
 

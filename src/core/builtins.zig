@@ -13,113 +13,117 @@ const Value = command.Value;
 const ok: Value = .nil;
 
 fn cInsertText(ctx: *Context, args: struct { text: []const u8 }) anyerror!Value {
-    try ctx.editor.insertText(ctx.gpa, args.text);
+    if (ctx.buffer().read_only) return ok;
+    try ctx.editor().insertText(ctx.gpa, args.text);
     return ok;
 }
 
 fn cDeleteBackward(ctx: *Context, args: struct {}) anyerror!Value {
     _ = args;
-    try ctx.editor.deleteBackward(ctx.gpa);
+    if (ctx.buffer().read_only) return ok;
+    try ctx.editor().deleteBackward(ctx.gpa);
     return ok;
 }
 
 fn cDeleteForward(ctx: *Context, args: struct {}) anyerror!Value {
     _ = args;
-    try ctx.editor.deleteForward(ctx.gpa);
+    if (ctx.buffer().read_only) return ok;
+    try ctx.editor().deleteForward(ctx.gpa);
     return ok;
 }
 
 fn cUndo(ctx: *Context, args: struct {}) anyerror!Value {
     _ = args;
-    return .{ .boolean = try ctx.editor.undo(ctx.gpa) };
+    return .{ .boolean = try ctx.editor().undo(ctx.gpa) };
 }
 
 fn cRedo(ctx: *Context, args: struct {}) anyerror!Value {
     _ = args;
-    return .{ .boolean = try ctx.editor.redo(ctx.gpa) };
+    return .{ .boolean = try ctx.editor().redo(ctx.gpa) };
 }
 
 fn cSave(ctx: *Context, args: struct {}) anyerror!Value {
     _ = args;
-    try ctx.editor.requestSave(ctx.gpa);
+    try ctx.editor().requestSave(ctx.gpa);
     return ok;
 }
 
 fn cCursorLeft(ctx: *Context, args: struct {}) anyerror!Value {
     _ = args;
-    ctx.editor.moveLeft();
+    ctx.editor().moveLeft();
     return ok;
 }
 
 fn cCursorRight(ctx: *Context, args: struct {}) anyerror!Value {
     _ = args;
-    ctx.editor.moveRight();
+    ctx.editor().moveRight();
     return ok;
 }
 
 fn cCursorUp(ctx: *Context, args: struct {}) anyerror!Value {
     _ = args;
-    ctx.editor.moveUp();
+    ctx.editor().moveUp();
     return ok;
 }
 
 fn cCursorDown(ctx: *Context, args: struct {}) anyerror!Value {
     _ = args;
-    ctx.editor.moveDown();
+    ctx.editor().moveDown();
     return ok;
 }
 
 fn cLineStart(ctx: *Context, args: struct {}) anyerror!Value {
     _ = args;
-    ctx.editor.moveLineStart();
+    ctx.editor().moveLineStart();
     return ok;
 }
 
 fn cLineEnd(ctx: *Context, args: struct {}) anyerror!Value {
     _ = args;
-    ctx.editor.moveLineEnd();
+    ctx.editor().moveLineEnd();
     return ok;
 }
 
 fn cDocStart(ctx: *Context, args: struct {}) anyerror!Value {
     _ = args;
-    ctx.editor.moveDocStart();
+    ctx.editor().moveDocStart();
     return ok;
 }
 
 fn cDocEnd(ctx: *Context, args: struct {}) anyerror!Value {
     _ = args;
-    ctx.editor.moveDocEnd();
+    ctx.editor().moveDocEnd();
     return ok;
 }
 
 fn cWordForward(ctx: *Context, args: struct {}) anyerror!Value {
     _ = args;
-    try ctx.editor.moveWordForward(ctx.gpa);
+    try ctx.editor().moveWordForward(ctx.gpa);
     return ok;
 }
 
 fn cWordBackward(ctx: *Context, args: struct {}) anyerror!Value {
     _ = args;
-    try ctx.editor.moveWordBackward(ctx.gpa);
+    try ctx.editor().moveWordBackward(ctx.gpa);
     return ok;
 }
 
 fn cSetMark(ctx: *Context, args: struct {}) anyerror!Value {
     _ = args;
-    try ctx.editor.setMark(ctx.gpa);
+    try ctx.editor().setMark(ctx.gpa);
     return ok;
 }
 
 fn cClearSelection(ctx: *Context, args: struct {}) anyerror!Value {
     _ = args;
-    ctx.editor.clearSelection();
+    ctx.editor().clearSelection();
     return ok;
 }
 
 fn cDeleteSelection(ctx: *Context, args: struct {}) anyerror!Value {
     _ = args;
-    if (ctx.editor.selectedRange()) |r| try ctx.editor.deleteRange(ctx.gpa, r);
+    if (ctx.buffer().read_only) return ok;
+    if (ctx.editor().selectedRange()) |r| try ctx.editor().deleteRange(ctx.gpa, r);
     return ok;
 }
 
@@ -136,18 +140,119 @@ fn cQuit(ctx: *Context, args: struct {}) anyerror!Value {
 
 fn cInsertNewline(ctx: *Context, args: struct {}) anyerror!Value {
     _ = args;
-    try ctx.editor.insertText(ctx.gpa, "\n");
+    if (ctx.buffer().read_only) return ok;
+    try ctx.editor().insertText(ctx.gpa, "\n");
     return ok;
 }
 
 fn cInsertTab(ctx: *Context, args: struct {}) anyerror!Value {
     _ = args;
-    try ctx.editor.insertText(ctx.gpa, "\t");
+    if (ctx.buffer().read_only) return ok;
+    try ctx.editor().insertText(ctx.gpa, "\t");
     return ok;
+}
+
+// ── Buffers ─────────────────────────────────────────────────────────
+
+fn cBufferNext(ctx: *Context, args: struct {}) anyerror!Value {
+    _ = args;
+    try ctx.buffers.switchTo(ctx.gpa, ctx.buffers.nextId(), ctx.keymap);
+    return ok;
+}
+
+fn cBufferSwitch(ctx: *Context, args: struct { id: i64 }) anyerror!Value {
+    if (args.id < 0) return error.TypeMismatch;
+    try ctx.buffers.switchTo(ctx.gpa, @intCast(args.id), ctx.keymap);
+    return ok;
+}
+
+fn cBufferCreate(ctx: *Context, args: struct { name: []const u8 }) anyerror!Value {
+    const id = try ctx.buffers.create(ctx.gpa, args.name);
+    try ctx.buffers.switchTo(ctx.gpa, id, ctx.keymap);
+    return .{ .integer = @intCast(id) };
+}
+
+/// Mark the active buffer read-only (tool buffers): text input is
+/// swallowed; commands still run.
+fn cBufferReadOnly(ctx: *Context, args: struct { on: bool }) anyerror!Value {
+    ctx.buffer().read_only = args.on;
+    return ok;
+}
+
+/// Close the active buffer; a dirty buffer refuses (save or use a
+/// force-close from config).
+fn cBufferClose(ctx: *Context, args: struct {}) anyerror!Value {
+    _ = args;
+    const b = ctx.buffer();
+    if (b.editor.isDirty(ctx.gpa) catch true) return .{ .string = "dirty" };
+    try ctx.buffers.close(ctx.gpa, b.id, ctx.keymap);
+    return ok;
+}
+
+/// Open a local file in a buffer (existing buffer wins — dedupe by
+/// path). The graphical shell rebinds this with a provider-aware,
+/// remote-capable version; this core one keeps headless hosts honest.
+fn cOpen(ctx: *Context, args: struct { path: []const u8 }) anyerror!Value {
+    if (ctx.buffers.findByPath(args.path)) |id| {
+        try ctx.buffers.switchTo(ctx.gpa, id, ctx.keymap);
+        return .{ .integer = @intCast(id) };
+    }
+    const id = try ctx.buffers.create(ctx.gpa, std.fs.path.basename(args.path));
+    const ed = &ctx.buffers.get(id).?.editor;
+    ed.openFile(ctx.gpa, args.path) catch |err| switch (err) {
+        error.FileNotFound => try ed.adoptPath(ctx.gpa, args.path),
+        else => |e| {
+            try ctx.buffers.close(ctx.gpa, id, ctx.keymap);
+            return e;
+        },
+    };
+    try ctx.buffers.switchTo(ctx.gpa, id, ctx.keymap);
+    return .{ .integer = @intCast(id) };
+}
+
+/// Pick over the open buffers; accepting switches.
+fn cBuffers(ctx: *Context, args: struct {}) anyerror!Value {
+    _ = args;
+    var items: std.ArrayList([]u8) = .empty;
+    defer {
+        for (items.items) |it| ctx.gpa.free(it);
+        items.deinit(ctx.gpa);
+    }
+    var it = ctx.buffers.iterator();
+    while (it.next()) |b| {
+        const dirty = b.editor.isDirty(ctx.gpa) catch true;
+        const line = try std.fmt.allocPrint(ctx.gpa, "{d}: {s}{s}{s}{s}", .{
+            b.id,
+            b.name,
+            if (dirty) " [+]" else "",
+            if (b.editor.backingPath() != null) " — " else "",
+            b.editor.backingPath() orelse "",
+        });
+        try items.append(ctx.gpa, line);
+    }
+    const borrowed = try ctx.gpa.alloc([]const u8, items.items.len);
+    defer ctx.gpa.free(borrowed);
+    for (items.items, borrowed) |line, *slot| slot.* = line;
+    try ctx.pick.open(ctx, "buffer", borrowed, .{ .handler = buffersAccept });
+    return ok;
+}
+
+fn buffersAccept(ctx: *Context, data: ?*anyopaque, choice: []const u8) anyerror!void {
+    _ = data;
+    const colon = std.mem.indexOfScalar(u8, choice, ':') orelse return;
+    const id = std.fmt.parseInt(u32, choice[0..colon], 10) catch return;
+    try ctx.buffers.switchTo(ctx.gpa, id, ctx.keymap);
 }
 
 const table = [_]command.Command{
     command.define("insert-text", "Insert text at the cursor (replaces the selection).", cInsertText),
+    command.define("buffer-next", "Focus the next buffer (cyclic).", cBufferNext),
+    command.define("buffer-switch", "Focus the buffer with the given id.", cBufferSwitch),
+    command.define("buffer-create", "Create (and focus) a named scratch buffer.", cBufferCreate),
+    command.define("buffer-close", "Close the active buffer (refuses when dirty).", cBufferClose),
+    command.define("buffer-read-only", "Set/clear the active buffer's read-only flag.", cBufferReadOnly),
+    command.define("open", "Open a file in a buffer (dedupes by path).", cOpen),
+    command.define("buffers", "Pick over the open buffers; accept to switch.", cBuffers),
     command.define("delete-backward", "Delete the selection or the character before the cursor.", cDeleteBackward),
     command.define("delete-forward", "Delete the selection or the character after the cursor.", cDeleteForward),
     command.define("delete-selection", "Delete the selected range.", cDeleteSelection),
@@ -202,6 +307,8 @@ pub fn install(gpa: std.mem.Allocator, commands: *command.Commands, keymap: *@im
         .{ "C-Home", "doc-start" },
         .{ "C-End", "doc-end" },
         .{ "C-q", "quit" },
+        .{ "C-b", "buffers" },
+        .{ "C-Tab", "buffer-next" },
     };
     for (binds) |b| try keymap.bind(gpa, "default", b[0], b[1]);
     try keymap.setTextCommand(gpa, "default", "insert-text");
