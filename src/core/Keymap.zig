@@ -17,6 +17,14 @@ const Bindings = std.StringArrayHashMapUnmanaged([]u8);
 
 modes: std.StringArrayHashMapUnmanaged(Bindings) = .empty,
 mode: []u8 = &.{},
+/// mode → parent mode: `lookup` walks the chain (vim's visual falls
+/// back to normal falls back to default).
+parents: std.StringArrayHashMapUnmanaged([]u8) = .empty,
+/// mode → command run for unbound printable input (one string arg).
+/// Unset modes swallow text — vim's normal mode is exactly "no text
+/// command"; insert-flavored modes set "insert-text"; a picker sets
+/// its query-append command.
+text_commands: std.StringArrayHashMapUnmanaged([]u8) = .empty,
 
 pub const empty: Keymap = .{};
 
@@ -30,6 +38,16 @@ pub fn deinit(self: *Keymap, gpa: Allocator) void {
         bindings.deinit(gpa);
     }
     self.modes.deinit(gpa);
+    for (self.parents.keys(), self.parents.values()) |k, v| {
+        gpa.free(k);
+        gpa.free(v);
+    }
+    self.parents.deinit(gpa);
+    for (self.text_commands.keys(), self.text_commands.values()) |k, v| {
+        gpa.free(k);
+        gpa.free(v);
+    }
+    self.text_commands.deinit(gpa);
     gpa.free(self.mode);
     self.* = .{};
 }
@@ -51,10 +69,57 @@ pub fn bind(self: *Keymap, gpa: Allocator, mode: []const u8, key: []const u8, co
     bgop.value_ptr.* = try gpa.dupe(u8, command);
 }
 
-/// The command bound to `keyspec` in the current mode, if any.
+/// The command bound to `keyspec` in the current mode or its fallback
+/// chain, if any.
 pub fn lookup(self: *const Keymap, key: []const u8) ?[]const u8 {
-    const bindings = self.modes.getPtr(self.mode) orelse return null;
-    return bindings.get(key);
+    var mode: []const u8 = self.mode;
+    var depth: usize = 0;
+    while (depth < 8) : (depth += 1) {
+        if (self.modes.getPtr(mode)) |bindings| {
+            if (bindings.get(key)) |cmd| return cmd;
+        }
+        mode = self.parents.get(mode) orelse return null;
+    }
+    return null;
+}
+
+/// Make `mode` inherit `parent`'s bindings (chain-walked at lookup).
+pub fn setFallback(self: *Keymap, gpa: Allocator, mode: []const u8, parent: []const u8) Allocator.Error!void {
+    const gop = try self.parents.getOrPut(gpa, mode);
+    if (gop.found_existing) {
+        gpa.free(gop.value_ptr.*);
+    } else {
+        gop.key_ptr.* = try gpa.dupe(u8, mode);
+    }
+    gop.value_ptr.* = try gpa.dupe(u8, parent);
+}
+
+/// Set the command unbound printable input runs in `mode`. `null`
+/// records an *explicit* "swallow text" (the modal posture) — it stops
+/// the fallback walk, so a normal mode inheriting bindings from an
+/// insert-flavored parent does not inherit its text insertion.
+pub fn setTextCommand(self: *Keymap, gpa: Allocator, mode: []const u8, cmd: ?[]const u8) Allocator.Error!void {
+    const gop = try self.text_commands.getOrPut(gpa, mode);
+    if (gop.found_existing) {
+        gpa.free(gop.value_ptr.*);
+    } else {
+        gop.key_ptr.* = try gpa.dupe(u8, mode);
+    }
+    gop.value_ptr.* = try gpa.dupe(u8, cmd orelse "");
+}
+
+/// The current mode's text command (chain-walked like `lookup`; an
+/// explicit none stops the walk).
+pub fn textCommand(self: *const Keymap) ?[]const u8 {
+    var mode: []const u8 = self.mode;
+    var depth: usize = 0;
+    while (depth < 8) : (depth += 1) {
+        if (self.text_commands.get(mode)) |cmd| {
+            return if (cmd.len == 0) null else cmd;
+        }
+        mode = self.parents.get(mode) orelse return null;
+    }
+    return null;
 }
 
 pub fn setMode(self: *Keymap, gpa: Allocator, mode: []const u8) Allocator.Error!void {

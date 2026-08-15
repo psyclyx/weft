@@ -38,6 +38,7 @@ pub const Context = struct {
     editor: *Editor,
     commands: *Commands,
     keymap: *Keymap,
+    pick: *@import("pick.zig").Pick,
     quit: *bool,
 
     pub fn document(self: *Context) *Document {
@@ -157,6 +158,8 @@ test "command: schema derivation, validation, late-bound run" {
     defer editor.deinit(gpa);
     var keymap: Keymap = .empty;
     defer keymap.deinit(gpa);
+    var pick: @import("pick.zig").Pick = .empty;
+    defer pick.deinit(gpa);
     var quit = false;
 
     var commands: Commands = .empty;
@@ -166,6 +169,7 @@ test "command: schema derivation, validation, late-bound run" {
         .editor = &editor,
         .commands = &commands,
         .keymap = &keymap,
+        .pick = &pick,
         .quit = &quit,
     };
 

@@ -14,6 +14,9 @@
 //!   scion.command(name, summary, fn) → register a command
 //!   scion.bind(mode, key, command)   → keymap binding
 //!   scion.mode([name])          → get/set keymap mode
+//!   scion.fallback(mode, parent) → keymap mode inheritance
+//!   scion.textinput(mode, cmd|nil) → unbound-text command for a mode
+//!   scion.pick(prompt, items, fn) → fuzzy-select, callback on accept
 //!   scion.cursor()              → the user cursor's current offset
 //!   scion.log(msg)              → editor log
 //!
@@ -93,6 +96,9 @@ pub const Plugin = struct {
         registerFn(L, self, "command", lCommand);
         registerFn(L, self, "bind", lBind);
         registerFn(L, self, "mode", lMode);
+        registerFn(L, self, "fallback", lFallback);
+        registerFn(L, self, "textinput", lTextinput);
+        registerFn(L, self, "pick", lPick);
         registerFn(L, self, "cursor", lCursor);
         registerFn(L, self, "log", lLog);
         c.lua_setglobal(L, "scion");
@@ -274,6 +280,96 @@ fn lMode(L: ?*c.lua_State) callconv(.c) c_int {
     const mode = c.luaL_checklstring(L, 1, &ml);
     self.ctx.keymap.setMode(self.ctx.gpa, mode[0..ml]) catch |e| return raise(L, e);
     return 0;
+}
+
+fn lFallback(L: ?*c.lua_State) callconv(.c) c_int {
+    const self = pluginOf(L);
+    var ml: usize = 0;
+    const mode = c.luaL_checklstring(L, 1, &ml);
+    var pl: usize = 0;
+    const parent = c.luaL_checklstring(L, 2, &pl);
+    self.ctx.keymap.setFallback(self.ctx.gpa, mode[0..ml], parent[0..pl]) catch |e| return raise(L, e);
+    return 0;
+}
+
+fn lTextinput(L: ?*c.lua_State) callconv(.c) c_int {
+    const self = pluginOf(L);
+    var ml: usize = 0;
+    const mode = c.luaL_checklstring(L, 1, &ml);
+    var cmd: ?[]const u8 = null;
+    if (c.lua_type(L, 2) == c.LUA_TSTRING) {
+        var cl: usize = 0;
+        const s = c.lua_tolstring(L, 2, &cl);
+        cmd = s[0..cl];
+    }
+    self.ctx.keymap.setTextCommand(self.ctx.gpa, mode[0..ml], cmd) catch |e| return raise(L, e);
+    return 0;
+}
+
+const pick_mod = @import("pick.zig");
+
+const LuaPick = struct {
+    plugin: *Plugin,
+    ref: c_int,
+};
+
+fn lPick(L: ?*c.lua_State) callconv(.c) c_int {
+    const self = pluginOf(L);
+    var pl: usize = 0;
+    const prompt = c.luaL_checklstring(L, 1, &pl);
+    c.luaL_checktype(L, 2, c.LUA_TTABLE);
+    c.luaL_checktype(L, 3, c.LUA_TFUNCTION);
+    const gpa = self.gpa;
+
+    // Collect the item strings from the sequence table.
+    var items: std.ArrayList([]const u8) = .empty;
+    defer {
+        for (items.items) |it| gpa.free(it);
+        items.deinit(gpa);
+    }
+    const n = c.lua_rawlen(L, 2);
+    for (1..n + 1) |i| {
+        _ = c.lua_rawgeti(L, 2, @intCast(i));
+        var sl: usize = 0;
+        const s = c.luaL_tolstring(L, -1, &sl);
+        items.append(gpa, gpa.dupe(u8, s[0..sl]) catch |e| return raise(L, e)) catch |e| return raise(L, e);
+        c.lua_pop(L, 2); // tolstring's copy + the raw value
+    }
+
+    c.lua_pushvalue(L, 3);
+    const ref = c.luaL_ref(L, c.LUA_REGISTRYINDEX);
+    const lp = gpa.create(LuaPick) catch |e| return raise(L, e);
+    lp.* = .{ .plugin = self, .ref = ref };
+    self.ctx.pick.open(self.ctx, prompt[0..pl], items.items, .{
+        .handler = luaPickAccept,
+        .cleanup = luaPickCleanup,
+        .data = lp,
+    }) catch |e| {
+        c.luaL_unref(L, c.LUA_REGISTRYINDEX, ref);
+        gpa.destroy(lp);
+        return raise(L, e);
+    };
+    return 0;
+}
+
+fn luaPickAccept(ctx: *command.Context, data: ?*anyopaque, choice: []const u8) anyerror!void {
+    _ = ctx;
+    const lp: *LuaPick = @ptrCast(@alignCast(data.?));
+    const L = lp.plugin.L;
+    const base = c.lua_gettop(L);
+    defer c.lua_settop(L, base);
+    _ = c.lua_rawgeti(L, c.LUA_REGISTRYINDEX, lp.ref);
+    _ = c.lua_pushlstring(L, choice.ptr, choice.len);
+    if (c.lua_pcallk(L, 1, 0, 0, 0, null) != c.LUA_OK) {
+        logLuaError(L, "pick callback");
+        return error.Script;
+    }
+}
+
+fn luaPickCleanup(data: ?*anyopaque, gpa: Allocator) void {
+    const lp: *LuaPick = @ptrCast(@alignCast(data.?));
+    c.luaL_unref(lp.plugin.L, c.LUA_REGISTRYINDEX, lp.ref);
+    gpa.destroy(lp);
 }
 
 fn lCursor(L: ?*c.lua_State) callconv(.c) c_int {

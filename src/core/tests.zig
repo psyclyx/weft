@@ -424,6 +424,7 @@ const TestHost = struct {
     editor: Editor,
     commands: core.command.Commands,
     keymap: core.Keymap,
+    pick: core.Pick,
     quit: bool,
     ctx: core.command.Context,
 
@@ -432,18 +433,21 @@ const TestHost = struct {
         host.editor = try Editor.init(gpa, host.pool, "user");
         host.commands = .empty;
         host.keymap = .empty;
+        host.pick = .empty;
         host.quit = false;
         host.ctx = .{
             .gpa = gpa,
             .editor = &host.editor,
             .commands = &host.commands,
             .keymap = &host.keymap,
+            .pick = &host.pick,
             .quit = &host.quit,
         };
         try core.builtins.install(gpa, &host.commands, &host.keymap);
     }
 
     fn deinit(host: *TestHost, gpa: Allocator) void {
+        host.pick.deinit(gpa);
         host.keymap.deinit(gpa);
         host.commands.deinit(gpa);
         host.editor.deinit(gpa);

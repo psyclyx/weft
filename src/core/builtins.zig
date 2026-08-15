@@ -204,6 +204,9 @@ pub fn install(gpa: std.mem.Allocator, commands: *command.Commands, keymap: *@im
         .{ "C-q", "quit" },
     };
     for (binds) |b| try keymap.bind(gpa, "default", b[0], b[1]);
+    try keymap.setTextCommand(gpa, "default", "insert-text");
+
+    try @import("pick.zig").install(gpa, commands, keymap);
 }
 
 test {

@@ -1,11 +1,12 @@
-//! scion — milestone 3: the editor rendered. A Wayland window presents
-//! a real `core.Editor` through snail's analytic glyph pipeline (curve/
-//! band flat buffers, one pipeline per shape family); the frame loop's
-//! only wait is the swapchain (FIFO vsync), and the input→commit→render
-//! path is bracketed by the hot-section fence. Frame + input latency
-//! percentiles log continuously.
+//! scion — the assembled editor: a Wayland window presenting a
+//! `core.Editor` through snail's analytic glyph pipeline, all behavior
+//! routed key → keymap → command ABI (built-ins and config/plugin
+//! commands through the same door). The frame loop's only wait is the
+//! swapchain (FIFO vsync); the input→commit→render path is bracketed by
+//! the hot-section fence; frame + input latency percentiles log
+//! continuously.
 //!
-//!   scion [file] [--font path.ttf] [--em N]
+//!   scion [file] [--font path.ttf] [--em N] [--config init.fnl]
 
 const std = @import("std");
 const wayland = @import("platform/wayland.zig");
@@ -72,12 +73,15 @@ pub fn main(init: std.process.Init) !void {
     defer commands.deinit(gpa);
     var keymap: core.Keymap = .empty;
     defer keymap.deinit(gpa);
+    var pick_state: core.Pick = .empty;
+    defer pick_state.deinit(gpa);
     var quit = false;
     var cmd_ctx: core.command.Context = .{
         .gpa = gpa,
         .editor = &editor,
         .commands = &commands,
         .keymap = &keymap,
+        .pick = &pick_state,
         .quit = &quit,
     };
     try core.builtins.install(gpa, &commands, &keymap);
@@ -166,13 +170,19 @@ pub fn main(init: std.process.Init) !void {
         // ── Rebuild + upload on damage ──
         if (view_dirty) {
             view_dirty = false;
-            view.scrollToCursor(&editor, fb[1]);
             const projection = snail.Mat4.ortho(0, @floatFromInt(fb[0]), @floatFromInt(fb[1]), 0, -1, 1);
             const world_to_pixel = snail.mvpToScenePixel(projection, @floatFromInt(fb[0]), @floatFromInt(fb[1])) orelse unreachable;
 
+            const hud: view_mod.Hud = .{
+                .mode = keymap.currentMode(),
+                .file = editor.path,
+                .dirty = editor.isDirty(gpa) catch true,
+                .save_failed = editor.save_state == .failed,
+                .pick = if (pick_state.active) &pick_state else null,
+            };
             var arena_state = std.heap.ArenaAllocator.init(gpa);
             defer arena_state.deinit();
-            const b = try view.build(arena_state.allocator(), &editor, fb[0], fb[1], world_to_pixel);
+            const b = try view.build(arena_state.allocator(), &editor, hud, fb[0], fb[1], world_to_pixel);
             if (built) |*old| old.deinit(gpa);
             built = b;
             if (b.records_added != 0) {
@@ -255,8 +265,11 @@ fn dispatchKey(ctx: *core.command.Context, view: *view_mod.View, ev: wayland.Key
     if (ev.mods.ctrl or ev.mods.alt) return;
     const text = ev.text();
     if (text.len > 0 and !(text.len == 1 and text[0] < 0x20)) {
-        _ = core.command.run(ctx.commands, ctx, "insert-text", &.{.{ .string = text }}) catch |err| {
-            std.log.warn("insert-text failed: {t}", .{err});
+        // Unbound printable input runs the mode's text command (the
+        // modal posture: normal mode has none and swallows it).
+        const tc = ctx.keymap.textCommand() orelse return;
+        _ = core.command.run(ctx.commands, ctx, tc, &.{.{ .string = text }}) catch |err| {
+            std.log.warn("{s} failed: {t}", .{ tc, err });
         };
     }
 }

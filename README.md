@@ -29,29 +29,49 @@ degenerate case (one replica, no sync). Structurally, not by discipline:
 
 ## Status
 
-Milestone 2 of 6: the core ABI (`src/core/`), living under the
-milestone-1 shell (window + cleared frames + xkb input; typing edits a
-real Document, rendering waits for milestone 3).
+MVP complete — all six milestones landed.
 
-- `Document` — the inversion, implemented literally: plugin peers hold
-  shadow CRDT replicas; snapshot → edit own replica → commit merges the
-  batch like a remote collaborator's. Commit log of composed patches
-  (with content) + version tokens; pull-based causal subscription;
-  auto-shifted local anchors and portable identity anchors.
-- `registry` — late-binding interned names (bind after reference,
-  rebind through held handles).
-- `command` — typed commands whose schema + validation wrapper are
-  derived at comptime from ordinary Zig functions, over a Lua-ready
-  value ABI.
-- `task` — no-await-on-hot-path enforced mechanically: handles are
-  poll-only (no wait/join exists), spawn is lock-free (Treiber injector
-  + futex parking), plus a Debug hot-section fence.
+**Core ABI (`src/core/`).** `Document`: the inversion implemented
+literally — plugin peers hold shadow CRDT replicas; snapshot → edit own
+replica → commit merges the batch like a remote collaborator's. Commit
+log of composed patches (inserted *and* removed bytes: every commit is
+invertible) + version tokens; pull-based causal subscription;
+auto-shifted local anchors and portable identity anchors. `undo`:
+per-peer selective undo by op inverse, rebased over concurrent traffic
+(balanced undo/redo pairs skip transforms — linear undo is exact).
+`Editor`: cursor/selection as anchors, scalar-step motion, saving as a
+fallible poll-only task (temp+rename), loads via a `host.fs` peer.
+`command`: typed commands (comptime-derived schemas) over a Lua-ready
+value ABI, with late-binding names. `Keymap`: modal string tables with
+fallback chains and per-mode text commands. `task`: no-await-on-hot-path
+enforced mechanically (poll-only handles, lock-free injector, futex
+parking, Debug hot-section fence). `pick`: the fuzzy-select primitive
+(the command palette is one client; configs get `scion.pick`).
+
+**Render (`src/gfx/`).** snail's analytic glyph pipeline on Vulkan
+(flat curve/band texel buffers, one pipeline per shape family; SPIR-V
+from `snail-shaders-vk`, contract from the committed reflection ABI).
+Monospace cell grid with pixel-exact columns; cursor/selection/HUD are
+block-glyph runs behind the text — one atlas, no extra pipelines.
+Damage-driven rebuilds; frame + input-latency percentiles log
+continuously. Measured (ReleaseFast, sustained typing): 60fps
+vsync-locked, RSS < 100MB.
+
+**Scripting.** Each plugin is its own Lua 5.4 VM (fennel compiled in)
+and its own Document peer. The config is a plugin named "config" with
+no special powers. Everything user-visible routes key → keymap →
+command ABI; built-ins are registered commands like everything else.
+
+**Vim, as config.** `config/init.fnl` implements modal editing —
+normal/insert/visual, operators as scripted compounds, space-leader
+command palette — entirely through the public ABI. The core does not
+know vim exists.
 
 Property-tested (display-free, `zig build test`): 2-peer convergence
 under stale-snapshot batches, identity anchors under adversarial
 concurrency, subscription patch-replay reconstructing every version,
-and a patch-composition oracle. Upcoming: render path, editing +
-per-peer undo, Lua/Fennel scripting, vim-as-config.
+patch-composition oracle, solo + concurrent selective undo round trips,
+plugin VM integration, keymap modality, save/load round trips.
 
 ## Dependencies
 
@@ -74,12 +94,24 @@ System libraries (wayland, libxkbcommon, vulkan-loader, harfbuzz, and the
 build-time wayland-scanner/pkg-config/slangc) come from the npins-pinned
 nixpkgs via `shell.nix` — never the ambient PATH.
 
-## Development config (from milestone 5)
+## Config
 
-The binary will look up `~/.config/scion/init.fnl` (XDG) read-only; a
-missing config means built-in defaults. The in-repo sample config
-(`config/init.fnl`) is the development entry point:
+The binary looks up `$XDG_CONFIG_HOME/scion/init.fnl` (else
+`~/.config/scion/init.fnl`) read-only; a missing config means built-in
+modeless defaults. `--config` overrides the lookup. The in-repo sample
+config — vim implemented as config — is the development entry point:
 
 ```sh
-zig build run -- --config config/init.fnl
+zig build run -- --config config/init.fnl README.md
 ```
+
+Without a config: plain editing, arrows/Home/End, `C-s` save, `C-z`/`C-y`
+undo/redo, `C-space` mark, `C-q` quit. With the sample config: vim
+normal/insert/visual, `space` opens the command palette.
+
+## Headless testing
+
+The render path is verified without touching a desktop: a headless sway
+(`WLR_BACKENDS=headless`) hosts the window, `wtype` injects input
+(single invocation per sequence — per-invocation virtual keyboards churn
+the seat keymap), `grim` captures frames for inspection.

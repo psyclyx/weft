@@ -30,15 +30,33 @@ pub const Theme = struct {
     cursor: [4]f32 = .{ 0.95, 0.75, 0.30, 1 },
     cursor_text: [4]f32 = .{ 0.086, 0.09, 0.102, 1 },
     selection: [4]f32 = .{ 0.25, 0.34, 0.47, 1 },
+    status: [4]f32 = .{ 0.55, 0.58, 0.62, 1 },
+    accent: [4]f32 = .{ 0.55, 0.78, 0.55, 1 },
 
     fn linearized(self: Theme) Theme {
-        return .{
-            .background = snail.color.srgbToLinearColor(self.background),
-            .foreground = snail.color.srgbToLinearColor(self.foreground),
-            .cursor = snail.color.srgbToLinearColor(self.cursor),
-            .cursor_text = snail.color.srgbToLinearColor(self.cursor_text),
-            .selection = snail.color.srgbToLinearColor(self.selection),
-        };
+        var out: Theme = undefined;
+        inline for (@typeInfo(Theme).@"struct".fields) |f| {
+            @field(out, f.name) = snail.color.srgbToLinearColor(@field(self, f.name));
+        }
+        return out;
+    }
+};
+
+/// What the frame shows besides the buffer: mode, file, dirtiness, and
+/// the picker when one is open. Plain data — the caller assembles it,
+/// the view renders it.
+pub const Hud = struct {
+    mode: []const u8,
+    file: ?[]const u8 = null,
+    dirty: bool = false,
+    save_failed: bool = false,
+    pick: ?*const core.Pick = null,
+
+    const max_pick_rows = 8;
+
+    fn rows(self: *const Hud) usize {
+        const p = self.pick orelse return 1;
+        return 2 + @min(p.filtered.items.len, max_pick_rows);
     }
 };
 
@@ -124,12 +142,11 @@ pub const View = struct {
         return @intFromFloat(@max(1, @floor(usable / self.cell_w)));
     }
 
-    /// Keep the cursor's row inside the viewport (call before build).
-    pub fn scrollToCursor(self: *View, editor: *const core.Editor, fb_h: u32) void {
-        const rows = self.visibleRows(fb_h);
+    /// Keep the cursor's row inside the body viewport.
+    fn scrollToCursor(self: *View, editor: *const core.Editor, body_rows: usize) void {
         const cur = editor.text().offsetToPoint(editor.cursorOffset()).row;
         if (cur < self.top_row) self.top_row = cur;
-        if (cur >= self.top_row + rows) self.top_row = cur + 1 - rows;
+        if (cur >= self.top_row + body_rows) self.top_row = cur + 1 - body_rows;
     }
 
     const Run = struct {
@@ -139,18 +156,22 @@ pub const View = struct {
     };
 
     /// Build the visible picture: selection/cursor block runs first (they
-    /// draw behind), then one text run per non-empty visible line.
+    /// draw behind), then one text run per non-empty visible line, then
+    /// the HUD (status line; pick panel when open) in the bottom rows.
     pub fn build(
         self: *View,
         scratch: Allocator,
         editor: *const core.Editor,
+        hud: Hud,
         fb_w: u32,
         fb_h: u32,
         world_to_pixel: snail.Transform2D,
     ) !Built {
         const rope = editor.text();
-        const rows_visible = self.visibleRows(fb_h);
+        const rows_total = self.visibleRows(fb_h);
+        const rows_visible = rows_total -| hud.rows();
         const cols_visible = self.visibleCols(fb_w);
+        self.scrollToCursor(editor, @max(1, rows_visible));
         const total_rows = rope.lineCount();
         const cursor_off = editor.cursorOffset();
         const cursor_pt = rope.offsetToPoint(cursor_off);
@@ -208,6 +229,8 @@ pub const View = struct {
                 );
             }
         }
+
+        try self.buildHud(scratch, &runs, hud, rows_total, cols_visible);
 
         // Prepare all runs' glyphs into the atlas (idempotent for
         // resident records), then place.
@@ -314,6 +337,93 @@ pub const View = struct {
         }
         if (cells.items.len == 0) return;
 
+        const shaped = try snail.shape(scratch, &self.faces, text[0..byte], .{});
+        try runs.append(scratch, .{
+            .shaped = shaped,
+            .cells = cells.items,
+            .baseline_y = baseline_y,
+        });
+    }
+
+    fn baselineFor(self: *const View, row_from_top: usize) f32 {
+        return margin + self.ascent + @as(f32, @floatFromInt(row_from_top)) * self.line_h;
+    }
+
+    /// Status line at the bottom row; when a pick is open, its query
+    /// and top matches stack directly above (selected match
+    /// highlighted).
+    fn buildHud(
+        self: *View,
+        scratch: Allocator,
+        runs: *std.ArrayList(Run),
+        hud: Hud,
+        rows_total: usize,
+        cols_visible: usize,
+    ) !void {
+        if (rows_total == 0) return;
+        const status = try std.fmt.allocPrint(scratch, " {s}  {s}{s}{s}", .{
+            hud.mode,
+            hud.file orelse "[scratch]",
+            if (hud.dirty) " [+]" else "",
+            if (hud.save_failed) " [save failed]" else "",
+        });
+        try self.appendPlainRun(scratch, runs, status, self.baselineFor(rows_total - 1), cols_visible, self.theme.status, null);
+
+        const p = hud.pick orelse return;
+        const shown = @min(p.filtered.items.len, Hud.max_pick_rows);
+        if (rows_total < shown + 2) return;
+        const query_row = rows_total - 2 - shown;
+
+        const query = try std.fmt.allocPrint(scratch, "{s}> {s}_", .{ p.prompt, p.query.items });
+        try self.appendPlainRun(scratch, runs, query, self.baselineFor(query_row), cols_visible, self.theme.foreground, null);
+
+        for (0..shown) |i| {
+            const item = p.items.items[p.filtered.items[i]];
+            const line = try std.fmt.allocPrint(scratch, "  {s}", .{item});
+            const selected = i == p.selected;
+            try self.appendPlainRun(
+                scratch,
+                runs,
+                line,
+                self.baselineFor(query_row + 1 + i),
+                cols_visible,
+                if (selected) self.theme.accent else self.theme.status,
+                if (selected) self.theme.selection else null,
+            );
+        }
+    }
+
+    /// A HUD text run: cells per scalar, truncated at the viewport
+    /// width, optionally with a full-width block background behind it.
+    fn appendPlainRun(
+        self: *View,
+        scratch: Allocator,
+        runs: *std.ArrayList(Run),
+        text: []const u8,
+        baseline_y: f32,
+        cols_visible: usize,
+        color: [4]f32,
+        bg: ?[4]f32,
+    ) !void {
+        if (bg) |bgc| {
+            const blocks = try scratch.alloc(BlockCell, cols_visible);
+            for (blocks, 0..) |*b, i| b.* = .{ .col = @intCast(i), .color = bgc };
+            try self.appendBlockRun(scratch, runs, blocks, baseline_y);
+        }
+        var cells: std.ArrayList(snail.Cell) = .empty;
+        var it = (std.unicode.Utf8View.init(text) catch return error.InvalidUtf8).iterator();
+        var col: usize = 0;
+        var byte: usize = 0;
+        while (it.nextCodepointSlice()) |s| : (col += 1) {
+            if (col >= cols_visible) break;
+            try cells.append(scratch, .{
+                .source = .{ .start = @intCast(byte), .end = @intCast(byte + s.len) },
+                .column = @intCast(col),
+                .color = color,
+            });
+            byte += s.len;
+        }
+        if (cells.items.len == 0) return;
         const shaped = try snail.shape(scratch, &self.faces, text[0..byte], .{});
         try runs.append(scratch, .{
             .shaped = shaped,
