@@ -98,3 +98,7 @@
               (tset seen word true)
               (table.insert out word)))
           out))))
+
+;; ── Language servers as data (two, per phase 2) ──
+(scion.run "lsp-add" ".zig" "zls")
+(scion.run "lsp-add" ".fnl" "fennel-ls")

@@ -27,6 +27,10 @@ pkgs.mkShell {
     # Syntax (milestone 7): incremental parsing + highlighting.
     tree-sitter
 
+    # Language servers for the sample config (phase 2: zls is already
+    # above for dev; fennel-ls is the second-server demonstration).
+    fennel-ls
+
     # Formatting / dev ergonomics (treefmt.toml drives nixfmt + zig fmt).
     treefmt
     nixfmt

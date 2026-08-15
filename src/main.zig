@@ -107,25 +107,14 @@ pub fn main(init: std.process.Init) !void {
     defer grammars.deinit(gpa);
     _ = try commands.bind(gpa, "grammar-add", grammarAddCommand(&grammars));
 
-    var lsp: ?*core.lsp.Lsp = null;
-    defer if (lsp) |l| l.destroy();
-    if (editor.path) |p| {
-        if (std.mem.endsWith(u8, p, ".zig")) {
-            lsp = core.lsp.Lsp.create(gpa, &.{"zls"}, p, &editor.doc, init.minimal.environ) catch |err| blk: {
-                std.log.warn("lsp unavailable: {t}", .{err});
-                break :blk null;
-            };
-            if (lsp) |l| {
-                // Diagnostics flow through the capability feed layer
-                // (host-scoped); the view reads the layer, not the plugin.
-                const diag_layer = try caps.registerFeed(&editor.doc, "edit/diagnostics", "diagnostics", .host, "lsp.zls");
-                l.attachDiagnostics(diag_layer);
-            }
-        }
-    }
+    // Language servers are data: config registers (extension, command)
+    // pairs; nothing here names a server.
+    var lsp_servers: LspServers = .empty;
+    defer lsp_servers.deinit(gpa);
+    _ = try commands.bind(gpa, "lsp-add", lspAddCommand(&lsp_servers));
 
-    // Config runs before language attach so `grammar-add` applies to
-    // the file being opened.
+    // Config runs before language attach so `grammar-add`/`lsp-add`
+    // apply to the file being opened.
     const config_plugin = try core.Plugin.create(gpa, &cmd_ctx, "config");
     defer config_plugin.destroy();
     _ = try commands.bind(gpa, "eval", core.plugin.evalCommand(config_plugin));
@@ -144,6 +133,24 @@ pub fn main(init: std.process.Init) !void {
     if (syntax) |syn| {
         try core.syntax.registerProviders(&caps, syn);
         _ = try caps.registerFeed(&editor.doc, "edit/highlight", "highlight", .local, "treesitter");
+    }
+
+    var lsp: ?*core.lsp.Lsp = null;
+    defer if (lsp) |l| l.destroy();
+    if (editor.path) |p| {
+        if (lsp_servers.match(p)) |entry| {
+            lsp = core.lsp.Lsp.create(gpa, entry.argv, p, &editor.doc, init.minimal.environ) catch |err| blk: {
+                std.log.warn("lsp unavailable: {t}", .{err});
+                break :blk null;
+            };
+            if (lsp) |l| {
+                // Diagnostics flow through the capability feed layer
+                // (host-scoped); the view reads the layer, not the plugin.
+                const diag_layer = try caps.registerFeed(&editor.doc, "edit/diagnostics", "diagnostics", .host, "lsp/server");
+                l.attachDiagnostics(diag_layer);
+                l.attachCaps(&caps, entry.extSlice());
+            }
+        }
     }
 
     // ── Window + Vulkan ──
@@ -416,5 +423,78 @@ fn grammarAddHandler(ctx: *core.command.Context, data: ?*anyopaque, args: []cons
         if (a != .string) return error.TypeMismatch;
     }
     try runtime.add(ctx.gpa, args[0].string, args[1].string, args[2].string);
+    return .nil;
+}
+
+/// Language-server registrations: (extension → argv), config-supplied.
+const LspServers = struct {
+    const Entry = struct {
+        ext: []u8,
+        argv: [][]u8,
+        exts: [1][]const u8,
+
+        fn extSlice(self: *Entry) []const []const u8 {
+            self.exts[0] = self.ext;
+            return &self.exts;
+        }
+    };
+
+    list: std.ArrayList(*Entry) = .empty,
+
+    const empty: LspServers = .{};
+
+    fn deinit(self: *LspServers, gpa: std.mem.Allocator) void {
+        for (self.list.items) |e| {
+            gpa.free(e.ext);
+            for (e.argv) |a| gpa.free(a);
+            gpa.free(e.argv);
+            gpa.destroy(e);
+        }
+        self.list.deinit(gpa);
+    }
+
+    fn match(self: *LspServers, path: []const u8) ?*Entry {
+        var i = self.list.items.len;
+        while (i > 0) {
+            i -= 1;
+            if (std.mem.endsWith(u8, path, self.list.items[i].ext)) return self.list.items[i];
+        }
+        return null;
+    }
+};
+
+fn lspAddCommand(servers: *LspServers) core.command.Command {
+    return .{
+        .name = "lsp-add",
+        .summary = "Register a language server command for an extension.",
+        .args = &.{
+            .{ .name = "ext", .type = .string },
+            .{ .name = "cmd", .type = .string },
+        },
+        .handler = lspAddHandler,
+        .data = servers,
+    };
+}
+
+fn lspAddHandler(ctx: *core.command.Context, data: ?*anyopaque, args: []const core.command.Value) anyerror!core.command.Value {
+    const servers: *LspServers = @ptrCast(@alignCast(data.?));
+    if (args.len != 2 or args[0] != .string or args[1] != .string) return error.TypeMismatch;
+    const gpa = ctx.gpa;
+    var argv: std.ArrayList([]u8) = .empty;
+    errdefer {
+        for (argv.items) |a| gpa.free(a);
+        argv.deinit(gpa);
+    }
+    var it = std.mem.tokenizeScalar(u8, args[1].string, ' ');
+    while (it.next()) |word| try argv.append(gpa, try gpa.dupe(u8, word));
+    if (argv.items.len == 0) return error.TypeMismatch;
+    const e = try gpa.create(LspServers.Entry);
+    errdefer gpa.destroy(e);
+    e.* = .{
+        .ext = try gpa.dupe(u8, args[0].string),
+        .argv = try argv.toOwnedSlice(gpa),
+        .exts = undefined,
+    };
+    try servers.list.append(gpa, e);
     return .nil;
 }
