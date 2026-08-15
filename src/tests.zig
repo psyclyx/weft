@@ -8,6 +8,12 @@ const t = std.testing;
 const stemma = @import("stemma");
 const snail = @import("snail");
 
+test {
+    // The core ABI (milestone 2) and its property tests.
+    t.refAllDecls(@import("core/core.zig"));
+    _ = @import("core/tests.zig");
+}
+
 test "stemma path dep: rope round-trips" {
     const gpa = t.allocator;
     var r = try stemma.Rope.fromSlice(gpa, "scion grafts onto stemma");

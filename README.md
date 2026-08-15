@@ -29,12 +29,29 @@ degenerate case (one replica, no sync). Structurally, not by discipline:
 
 ## Status
 
-Milestone 1 of 6: wiring. The binary opens a Wayland window (xdg-shell,
-hidpi-aware), presents cleared Vulkan frames (FIFO), and logs
-xkb-translated key events (keysym + UTF-8 + modifiers — real keymap
-handling, no toolkit). stemma and snail resolve and pass smoke tests.
-Upcoming milestones: core ABI (Document/Registry/Command/Task), render
-path, editing + per-peer undo, Lua/Fennel scripting, vim-as-config.
+Milestone 2 of 6: the core ABI (`src/core/`), living under the
+milestone-1 shell (window + cleared frames + xkb input; typing edits a
+real Document, rendering waits for milestone 3).
+
+- `Document` — the inversion, implemented literally: plugin peers hold
+  shadow CRDT replicas; snapshot → edit own replica → commit merges the
+  batch like a remote collaborator's. Commit log of composed patches
+  (with content) + version tokens; pull-based causal subscription;
+  auto-shifted local anchors and portable identity anchors.
+- `registry` — late-binding interned names (bind after reference,
+  rebind through held handles).
+- `command` — typed commands whose schema + validation wrapper are
+  derived at comptime from ordinary Zig functions, over a Lua-ready
+  value ABI.
+- `task` — no-await-on-hot-path enforced mechanically: handles are
+  poll-only (no wait/join exists), spawn is lock-free (Treiber injector
+  + futex parking), plus a Debug hot-section fence.
+
+Property-tested (display-free, `zig build test`): 2-peer convergence
+under stale-snapshot batches, identity anchors under adversarial
+concurrency, subscription patch-replay reconstructing every version,
+and a patch-composition oracle. Upcoming: render path, editing +
+per-peer undo, Lua/Fennel scripting, vim-as-config.
 
 ## Dependencies
 

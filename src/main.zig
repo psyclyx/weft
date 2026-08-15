@@ -1,18 +1,17 @@
-//! scion — milestone 1: a Wayland window, a Vulkan swapchain, a cleared
-//! frame, and xkb-translated key events on the log. The editor grows from
-//! here; the frame loop's only wait is the swapchain (FIFO vsync).
+//! scion — milestone 2: the core ABI under a milestone-1 shell. Typing
+//! edits a real `core.Document` (the user is a peer committing ops);
+//! rendering is still a cleared frame until milestone 3. The frame
+//! loop's only wait is the swapchain (FIFO vsync).
 
 const std = @import("std");
 const wayland = @import("platform/wayland.zig");
 const Context = @import("gfx/context.zig").Context;
+const core = @import("core/core.zig");
 
-// Dependency wiring proof: the core (milestone 2) builds Document on
-// stemma and the renderer (milestone 3) on snail. Referenced here so the
-// build graph exercises both path deps from day one.
-const stemma = @import("stemma");
+// The renderer (milestone 3) builds on snail; referenced so the build
+// graph keeps exercising the path dep.
 const snail = @import("snail");
 comptime {
-    _ = stemma.TextDoc;
     _ = snail;
 }
 
@@ -31,7 +30,10 @@ pub fn main() !void {
     }, fb[0], fb[1], "scion");
     defer ctx.deinit();
 
-    std.log.info("scion: window up ({d}x{d}), stemma + snail wired", .{ fb[0], fb[1] });
+    var doc = try core.Document.init(gpa, "user");
+    defer doc.deinit(gpa);
+
+    std.log.info("scion: window up ({d}x{d}), core ABI live — type to edit", .{ fb[0], fb[1] });
 
     while (!window.shouldClose()) {
         window.pumpEvents();
@@ -46,10 +48,24 @@ pub fn main() !void {
 
         while (window.nextKeyEvent()) |ev| {
             if (!ev.pressed) continue;
-            std.log.info("key: sym=0x{x} text=\"{s}\" ctrl={} alt={}", .{
-                ev.keysym, ev.text(), ev.mods.ctrl, ev.mods.alt,
-            });
             if (ev.keysym == wayland.c.XKB_KEY_Escape) return;
+            // The user peer's hot path: translate the key, commit the op.
+            // Allocation is the only system interaction on this path.
+            if (ev.keysym == wayland.c.XKB_KEY_BackSpace) {
+                const rope = doc.text();
+                const len = rope.byteLen();
+                if (len > 0) {
+                    const start = rope.scalarToOffset(rope.scalarLen() - 1);
+                    try doc.delete(gpa, .{ .start = start, .end = len });
+                }
+            } else if (ev.text().len > 0) {
+                try doc.insert(gpa, doc.text().byteLen(), ev.text());
+            } else {
+                continue;
+            }
+            std.log.info("doc: {d} bytes, {d} commits", .{
+                doc.text().byteLen(), doc.commitCount(),
+            });
         }
 
         const cmd = try ctx.beginFrame() orelse continue;
