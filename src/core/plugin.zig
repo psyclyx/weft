@@ -16,12 +16,19 @@
 //!   scion.mode([name])          → get/set keymap mode
 //!   scion.fallback(mode, parent) → keymap mode inheritance
 //!   scion.textinput(mode, cmd|nil) → unbound-text command for a mode
-//!   scion.pick(prompt, items, fn) → fuzzy-select, callback on accept
+//!   scion.pick(prompt, items, fn) → fuzzy-select, callback on accept;
+//!                                 items are strings or {text, doc}
 //!   scion.cursor()              → the user cursor's current offset
 //!   scion.log(msg)              → editor log
+//!   scion.buffers()             → open-buffer introspection (tables)
+//!   scion.commands()            → command registry ({name, summary})
+//!   scion.layer_publish(name, spans) → anchored sections/faces
+//!   scion.section_at(name, off) → innermost span at an offset
 //!
 //! The user's config IS a plugin (named "config") — it gets no special
-//! powers, which is the point.
+//! powers, which is the point. The BUNDLED plugin (src/bundled.fnl,
+//! named "std") builds the buffers picker / status / help on these
+//! same mechanisms — UI policy stays scriptable and rebindable.
 
 const std = @import("std");
 const Allocator = std.mem.Allocator;
@@ -109,6 +116,8 @@ pub const Plugin = struct {
         registerFn(L, self, "log", lLog);
         registerFn(L, self, "layer_publish", lLayerPublish);
         registerFn(L, self, "section_at", lSectionAt);
+        registerFn(L, self, "buffers", lBuffers);
+        registerFn(L, self, "commands", lCommands);
         c.lua_setglobal(L, "scion");
         return self;
     }
@@ -281,6 +290,70 @@ fn lCommit(L: ?*c.lua_State) callconv(.c) c_int {
     const peer = self.peerFor(doc) catch |e| return raise(L, e);
     const changed = doc.peerCommit(self.ctx.gpa, peer) catch |e| return raise(L, e);
     c.lua_pushboolean(L, @intFromBool(changed));
+    return 1;
+}
+
+/// scion.buffers() → array of {id, name, path?, dirty, read_only,
+/// active, backing, unfetched} — the open-buffer set, for pickers and
+/// status lines built in config/plugins (mechanism here, policy there).
+fn lBuffers(L: ?*c.lua_State) callconv(.c) c_int {
+    const self = pluginOf(L);
+    const bufs = self.ctx.buffers;
+    c.lua_createtable(L, @intCast(bufs.count()), 0);
+    var it = bufs.iterator();
+    var i: c.lua_Integer = 1;
+    while (it.next()) |b| : (i += 1) {
+        c.lua_createtable(L, 0, 8);
+        c.lua_pushinteger(L, @intCast(b.id));
+        c.lua_setfield(L, -2, "id");
+        _ = c.lua_pushlstring(L, b.name.ptr, b.name.len);
+        c.lua_setfield(L, -2, "name");
+        if (b.editor.backingPath()) |p| {
+            _ = c.lua_pushlstring(L, p.ptr, p.len);
+            c.lua_setfield(L, -2, "path");
+        }
+        c.lua_pushboolean(L, @intFromBool(b.editor.isDirty(self.ctx.gpa) catch true));
+        c.lua_setfield(L, -2, "dirty");
+        c.lua_pushboolean(L, @intFromBool(b.read_only));
+        c.lua_setfield(L, -2, "read_only");
+        c.lua_pushboolean(L, @intFromBool(b == bufs.active()));
+        c.lua_setfield(L, -2, "active");
+        const backing: []const u8 = switch (b.editor.backing) {
+            .none => "scratch",
+            .file => "file",
+            .shell => "shell",
+            .tool => "tool",
+        };
+        _ = c.lua_pushlstring(L, backing.ptr, backing.len);
+        c.lua_setfield(L, -2, "backing");
+        var unfetched: usize = 0;
+        for (b.editor.doc.unrealizedBase()) |h| unfetched += h.bytes;
+        c.lua_pushinteger(L, @intCast(unfetched));
+        c.lua_setfield(L, -2, "unfetched");
+        c.lua_rawseti(L, -2, i);
+    }
+    return 1;
+}
+
+/// scion.commands() → array of {name, summary} — registry
+/// introspection for palettes/help built in plugins.
+fn lCommands(L: ?*c.lua_State) callconv(.c) c_int {
+    const self = pluginOf(L);
+    const cmds = self.ctx.commands;
+    c.lua_createtable(L, @intCast(cmds.count()), 0);
+    var out_i: c.lua_Integer = 1;
+    for (0..cmds.count()) |i| {
+        const n: command.Commands.Name = @enumFromInt(i);
+        const cmd = cmds.lookup(n) orelse continue;
+        c.lua_createtable(L, 2, 0);
+        const name = cmds.nameOf(n);
+        _ = c.lua_pushlstring(L, name.ptr, name.len);
+        c.lua_rawseti(L, -2, 1);
+        _ = c.lua_pushlstring(L, cmd.summary.ptr, cmd.summary.len);
+        c.lua_rawseti(L, -2, 2);
+        c.lua_rawseti(L, -2, out_i);
+        out_i += 1;
+    }
     return 1;
 }
 
@@ -476,19 +549,54 @@ fn lPick(L: ?*c.lua_State) callconv(.c) c_int {
     c.luaL_checktype(L, 3, c.LUA_TFUNCTION);
     const gpa = self.gpa;
 
-    // Collect the item strings from the sequence table.
-    var items: std.ArrayList([]const u8) = .empty;
+    // Collect entries: each element is a string, or a table whose [1]
+    // is the text and [2] (or .doc) the docstring.
+    var items: std.ArrayList(pick_mod.Entry) = .empty;
     defer {
-        for (items.items) |it| gpa.free(it);
+        for (items.items) |e| {
+            gpa.free(@constCast(e.text));
+            if (e.doc.len > 0) gpa.free(@constCast(e.doc));
+        }
         items.deinit(gpa);
     }
     const n = c.lua_rawlen(L, 2);
     for (1..n + 1) |i| {
         _ = c.lua_rawgeti(L, 2, @intCast(i));
-        var sl: usize = 0;
-        const s = c.luaL_tolstring(L, -1, &sl);
-        items.append(gpa, gpa.dupe(u8, s[0..sl]) catch |e| return raise(L, e)) catch |e| return raise(L, e);
-        c.lua_pop(L, 2); // tolstring's copy + the raw value
+        var text: []u8 = undefined;
+        var doc: []const u8 = "";
+        if (c.lua_type(L, -1) == c.LUA_TTABLE) {
+            _ = c.lua_rawgeti(L, -1, 1);
+            var tl: usize = 0;
+            const ts = c.luaL_tolstring(L, -1, &tl);
+            text = gpa.dupe(u8, ts[0..tl]) catch |e| return raise(L, e);
+            c.lua_pop(L, 2);
+            _ = c.lua_rawgeti(L, -1, 2);
+            if (c.lua_type(L, -1) == c.LUA_TNIL) {
+                c.lua_pop(L, 1);
+                _ = c.lua_getfield(L, -1, "doc");
+            }
+            if (c.lua_type(L, -1) != c.LUA_TNIL) {
+                var dl: usize = 0;
+                const ds = c.luaL_tolstring(L, -1, &dl);
+                doc = gpa.dupe(u8, ds[0..dl]) catch |e| {
+                    gpa.free(text);
+                    return raise(L, e);
+                };
+                c.lua_pop(L, 1); // tolstring's copy
+            }
+            c.lua_pop(L, 1); // the doc value / nil
+        } else {
+            var sl: usize = 0;
+            const s = c.luaL_tolstring(L, -1, &sl);
+            text = gpa.dupe(u8, s[0..sl]) catch |e| return raise(L, e);
+            c.lua_pop(L, 1); // tolstring's copy
+        }
+        c.lua_pop(L, 1); // the raw element
+        items.append(gpa, .{ .text = text, .doc = doc }) catch |e| {
+            gpa.free(text);
+            if (doc.len > 0) gpa.free(@constCast(doc));
+            return raise(L, e);
+        };
     }
 
     c.lua_pushvalue(L, 3);

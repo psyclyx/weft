@@ -77,6 +77,18 @@ pub const Hud = struct {
     file: ?[]const u8 = null,
     dirty: bool = false,
     save_failed: bool = false,
+    /// "2/3" — position in the buffer list.
+    buffer_pos: ?[]const u8 = null,
+    /// Backing kind chip: "file" | "shell" | "tool" | "@shared" | null.
+    backing: ?[]const u8 = null,
+    /// Save progress chip: "saving…" | "save stale" | null.
+    save_note: ?[]const u8 = null,
+    /// Partial checkout: percent NOT yet fetched (0 = complete).
+    unfetched_pct: ?u8 = null,
+    /// Remote peers with presence in this buffer.
+    peers: usize = 0,
+    /// Transient `echo` message (wins the right-hand slot).
+    echo: ?[]const u8 = null,
     pick: ?*const core.Pick = null,
     /// The highlight feed layer (stamped bulk paint).
     highlight_layer: ?*const core.layers.Layer = null,
@@ -463,37 +475,79 @@ pub const View = struct {
         cols_visible: usize,
     ) !void {
         if (rows_total == 0) return;
-        var diag_part_buf: [96]u8 = undefined;
+        var parts: std.ArrayList(u8) = .empty;
+        try parts.appendSlice(scratch, " ");
+        try parts.appendSlice(scratch, hud.mode);
+        try parts.appendSlice(scratch, "  ");
+        if (hud.buffer_pos) |bp| {
+            try parts.appendSlice(scratch, bp);
+            try parts.appendSlice(scratch, " ");
+        }
+        try parts.appendSlice(scratch, hud.file orelse "[scratch]");
+        if (hud.dirty) try parts.appendSlice(scratch, " [+]");
+        if (hud.backing) |b| {
+            try parts.appendSlice(scratch, " (");
+            try parts.appendSlice(scratch, b);
+            try parts.appendSlice(scratch, ")");
+        }
+        if (hud.save_note) |s| {
+            try parts.appendSlice(scratch, " [");
+            try parts.appendSlice(scratch, s);
+            try parts.appendSlice(scratch, "]");
+        }
+        if (hud.save_failed) try parts.appendSlice(scratch, " [save failed]");
+        if (hud.unfetched_pct) |pct| {
+            if (pct > 0) {
+                const fetched = try std.fmt.allocPrint(scratch, " [{d}% fetched]", .{100 - @as(u32, pct)});
+                try parts.appendSlice(scratch, fetched);
+            }
+        }
+        if (hud.peers > 0) {
+            const peers = try std.fmt.allocPrint(scratch, "  ✦{d}", .{hud.peers});
+            try parts.appendSlice(scratch, peers);
+        }
         const status_diag_count = if (hud.diag_layer) |dl| dl.spanCount() else 0;
-        const diag_part = if (status_diag_count > 0)
-            std.fmt.bufPrint(&diag_part_buf, "  !{d}", .{status_diag_count}) catch ""
-        else
-            "";
-        const status = try std.fmt.allocPrint(scratch, " {s}  {s}{s}{s}{s}{s}{s}{s}{s}", .{
-            hud.mode,
-            hud.file orelse "[scratch]",
-            if (hud.dirty) " [+]" else "",
-            if (hud.save_failed) " [save failed]" else "",
-            diag_part,
-            if (hud.link != null) "  link:" else "",
-            hud.link orelse "",
-            if (hud.cursor_diag != null) "  " else "",
-            hud.cursor_diag orelse "",
-        });
-        try self.appendPlainRun(scratch, runs, status, self.baselineFor(rows_total - 1), cols_visible, self.theme.status, null);
+        if (status_diag_count > 0) {
+            const dp = try std.fmt.allocPrint(scratch, "  !{d}", .{status_diag_count});
+            try parts.appendSlice(scratch, dp);
+        }
+        if (hud.link) |l| {
+            try parts.appendSlice(scratch, "  link:");
+            try parts.appendSlice(scratch, l);
+        }
+        // Right-hand message slot: echo wins, else the diagnostic at
+        // the cursor.
+        if (hud.echo orelse hud.cursor_diag) |msg| {
+            try parts.appendSlice(scratch, "  ·  ");
+            try parts.appendSlice(scratch, msg);
+        }
+        try self.appendPlainRun(scratch, runs, parts.items, self.baselineFor(rows_total - 1), cols_visible, self.theme.status, null);
 
         const p = hud.pick orelse return;
-        const shown = @min(p.filtered.items.len, Hud.max_pick_rows);
+        const total = p.filtered.items.len;
+        const shown = @min(total, Hud.max_pick_rows);
         if (rows_total < shown + 2) return;
         const query_row = rows_total - 2 - shown;
 
-        const query = try std.fmt.allocPrint(scratch, "{s}> {s}_", .{ p.prompt, p.query.items });
+        const query = try std.fmt.allocPrint(scratch, "{s}> {s}_   [{d}/{d}]", .{
+            p.prompt,
+            p.query.items,
+            if (total == 0) 0 else p.selected + 1,
+            total,
+        });
         try self.appendPlainRun(scratch, runs, query, self.baselineFor(query_row), cols_visible, self.theme.foreground, null);
 
+        // Scroll window: the selection stays visible.
+        const start = if (p.selected >= shown) p.selected + 1 - shown else 0;
         for (0..shown) |i| {
-            const item = p.items.items[p.filtered.items[i]];
-            const line = try std.fmt.allocPrint(scratch, "  {s}", .{item});
-            const selected = i == p.selected;
+            const fi = start + i;
+            const item = p.items.items[p.filtered.items[fi]];
+            const doc = p.docOf(fi);
+            const line = if (doc.len > 0)
+                try std.fmt.allocPrint(scratch, "  {s}  · {s}", .{ item, doc })
+            else
+                try std.fmt.allocPrint(scratch, "  {s}", .{item});
+            const selected = fi == p.selected;
             try self.appendPlainRun(
                 scratch,
                 runs,

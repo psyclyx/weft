@@ -133,6 +133,8 @@ pub fn main(init: std.process.Init) !void {
     var caps = core.Caps.init(gpa, core.task.nowNs);
     defer caps.deinit();
     var quit = false;
+    var echo_line: std.ArrayList(u8) = .empty;
+    defer echo_line.deinit(gpa);
     var cmd_ctx: core.command.Context = .{
         .gpa = gpa,
         .buffers = &buffers,
@@ -141,6 +143,7 @@ pub fn main(init: std.process.Init) !void {
         .pick = &pick_state,
         .caps = &caps,
         .quit = &quit,
+        .echo = &echo_line,
     };
     try core.builtins.install(gpa, &commands, &keymap);
     // Capability consumers — written against capability names only.
@@ -162,6 +165,19 @@ pub fn main(init: std.process.Init) !void {
     var lsp_servers: LspServers = .empty;
     defer lsp_servers.deinit(gpa);
     _ = try commands.bind(gpa, "lsp-add", lspAddCommand(&lsp_servers));
+
+    // The bundled plugin: UI policy (buffers picker, status, help) in
+    // fennel over core mechanisms — loaded before user config so the
+    // same names can be rebound there.
+    const std_plugin = try core.Plugin.create(gpa, &cmd_ctx, "std");
+    defer std_plugin.destroy();
+    {
+        const out = std_plugin.eval(gpa, @embedFile("bundled.fnl"), "bundled.fnl") catch blk: {
+            std.log.err("bundled plugin failed to load", .{});
+            break :blk try gpa.dupe(u8, "");
+        };
+        gpa.free(out);
+    }
 
     // Config runs before language attach so `grammar-add`/`lsp-add`
     // apply to the file being opened.
@@ -233,8 +249,30 @@ pub fn main(init: std.process.Init) !void {
             }
         }
     }
-    var share_ctx: ShareCtx = .{ .conn = &conn, .caps = &caps };
+    var share_ctx: ShareCtx = .{ .conn = &conn, .caps = &caps, .partial = &partial_state };
     attach_deps.share = &share_ctx;
+    defer if (share_ctx.pending_connect) |hp| gpa.free(hp);
+    _ = try commands.bind(gpa, "connect", .{
+        .name = "connect",
+        .summary = "Connect to a host at runtime; its document opens as a buffer.",
+        .args = &.{.{ .name = "hostport", .type = .string }},
+        .handler = connectHandler,
+        .data = &share_ctx,
+    });
+    _ = try commands.bind(gpa, "disconnect", .{
+        .name = "disconnect",
+        .summary = "Drop the connection; shared buffers stay as local copies.",
+        .args = &.{},
+        .handler = disconnectHandler,
+        .data = &share_ctx,
+    });
+    _ = try commands.bind(gpa, "realize-all", .{
+        .name = "realize-all",
+        .summary = "Fetch the whole partial checkout.",
+        .args = &.{},
+        .handler = realizeAllHandler,
+        .data = &share_ctx,
+    });
     _ = try commands.bind(gpa, "share", .{
         .name = "share",
         .summary = "Share the active buffer over the connection.",
@@ -356,6 +394,46 @@ pub fn main(init: std.process.Init) !void {
         if (try completion_ui.tick(&cmd_ctx)) view_dirty = true;
         if (try def_ui.tick(&cmd_ctx)) view_dirty = true;
         if (try sym_ui.tick(&cmd_ctx)) view_dirty = true;
+        // Apply connection intents recorded by commands (outside the
+        // hot section: connect blocks on TCP, disconnect joins threads).
+        if (share_ctx.disconnect_requested) {
+            share_ctx.disconnect_requested = false;
+            if (conn) |*c| {
+                c.deinit();
+                conn = null;
+            }
+            if (partial_state) |*p| {
+                p.deinit();
+                partial_state = null;
+            }
+            if (collab_session) |s| {
+                s.destroy();
+                collab_session = null;
+            }
+            view_dirty = true;
+        }
+        if (share_ctx.pending_connect) |hostport| {
+            share_ctx.pending_connect = null;
+            defer gpa.free(hostport);
+            if (collab_session == null) runtimeConnect(
+                gpa,
+                &cmd_ctx,
+                &collab_session,
+                &conn,
+                &fd_link,
+                hostport,
+                args.token,
+                args.user,
+                &caps,
+            ) catch |err| {
+                echo_line.clearRetainingCapacity();
+                const msg = std.fmt.allocPrint(gpa, "connect failed: {t}", .{err}) catch "";
+                defer if (msg.len > 0) gpa.free(msg);
+                echo_line.appendSlice(gpa, msg) catch {};
+            };
+            view_dirty = true;
+        }
+
         if (conn) |*c| {
             // Each bound buffer publishes its own cursor as presence.
             for (c.collabs.items) |col| {
@@ -438,11 +516,53 @@ pub fn main(init: std.process.Init) !void {
                     try syn.publishHighlight(gpa, &editor.doc, hl, range);
                 }
             }
+            var pos_buf: [24]u8 = undefined;
+            const buffer_pos = blk: {
+                var index: usize = 0;
+                var nth: usize = 0;
+                var bit2 = buffers.iterator();
+                while (bit2.next()) |b| {
+                    nth += 1;
+                    if (b == abuf) index = nth;
+                }
+                break :blk std.fmt.bufPrint(&pos_buf, "{d}/{d}", .{ index, buffers.count() }) catch null;
+            };
+            const shared_here = blk: {
+                const c = if (conn) |*c| c else break :blk false;
+                for (c.collabs.items) |col| {
+                    if (col.tag == abuf.id) break :blk true;
+                }
+                break :blk false;
+            };
+            const backing_chip: ?[]const u8 = switch (editor.backing) {
+                .none => if (shared_here) "@shared" else null,
+                .file => if (shared_here) "file+shared" else "file",
+                .shell => if (shared_here) "shell+shared" else "shell",
+                .tool => "tool",
+            };
+            const unfetched_pct: ?u8 = blk: {
+                var unfetched: usize = 0;
+                for (editor.doc.unrealizedBase()) |h| unfetched += h.bytes;
+                if (unfetched == 0) break :blk null;
+                const total_len = editor.text().byteLen();
+                if (total_len == 0) break :blk null;
+                break :blk @intCast(@min(99, unfetched * 100 / total_len));
+            };
             const hud: view_mod.Hud = .{
                 .mode = keymap.currentMode(),
                 .file = editor.backingPath() orelse abuf.name,
                 .dirty = editor.isDirty(gpa) catch true,
                 .save_failed = editor.save_state == .failed,
+                .buffer_pos = buffer_pos,
+                .backing = backing_chip,
+                .save_note = switch (editor.save_state) {
+                    .saving => "saving…",
+                    .stale => "save stale",
+                    else => null,
+                },
+                .unfetched_pct = unfetched_pct,
+                .peers = if (caps.layers.find(&editor.doc, "presence")) |pl| pl.spanCount() else 0,
+                .echo = if (echo_line.items.len > 0) echo_line.items else null,
                 .pick = if (pick_state.active) &pick_state else null,
                 .highlight_layer = caps.layers.find(&editor.doc, "highlight"),
                 .diag_layer = caps.layers.find(&editor.doc, "diagnostics"),
@@ -833,7 +953,49 @@ fn openBufferHandler(ctx: *core.command.Context, data: ?*anyopaque, args: []cons
 const ShareCtx = struct {
     conn: *?core.session.Conn,
     caps: *core.Caps,
+    partial: *?core.session.PartialDoc,
+    /// Commands record INTENTS here; the frame loop applies them
+    /// outside the input hot section (connect blocks on TCP, disconnect
+    /// joins session threads).
+    pending_connect: ?[]u8 = null,
+    disconnect_requested: bool = false,
 };
+
+/// `connect host:port` — join a host at runtime (the remote primary
+/// opens as a new buffer). No auto-reconnect for runtime connections.
+fn connectHandler(ctx: *core.command.Context, data: ?*anyopaque, args: []const core.command.Value) anyerror!core.command.Value {
+    const sc: *ShareCtx = @ptrCast(@alignCast(data.?));
+    if (args.len != 1 or args[0] != .string) return error.TypeMismatch;
+    if (sc.conn.* != null) return .{ .string = "already connected (disconnect first)" };
+    if (sc.pending_connect) |old| ctx.gpa.free(old);
+    sc.pending_connect = try ctx.gpa.dupe(u8, args[0].string);
+    return ok_echo(ctx, "connecting…");
+}
+
+/// `disconnect` — drop the connection; shared buffers stay as local
+/// copies.
+fn disconnectHandler(ctx: *core.command.Context, data: ?*anyopaque, args: []const core.command.Value) anyerror!core.command.Value {
+    const sc: *ShareCtx = @ptrCast(@alignCast(data.?));
+    if (args.len != 0) return error.ArityMismatch;
+    if (sc.conn.* == null) return .{ .string = "not connected" };
+    sc.disconnect_requested = true;
+    return ok_echo(ctx, "disconnecting…");
+}
+
+/// `realize-all` — fetch the whole partial checkout.
+fn realizeAllHandler(ctx: *core.command.Context, data: ?*anyopaque, args: []const core.command.Value) anyerror!core.command.Value {
+    const sc: *ShareCtx = @ptrCast(@alignCast(data.?));
+    if (args.len != 0) return error.ArityMismatch;
+    const p = if (sc.partial.*) |*p| p else return .{ .string = "not a partial checkout" };
+    p.fetch_all = true;
+    return ok_echo(ctx, "fetching the whole document…");
+}
+
+fn ok_echo(ctx: *core.command.Context, msg: []const u8) !core.command.Value {
+    ctx.echo.clearRetainingCapacity();
+    try ctx.echo.appendSlice(ctx.gpa, msg);
+    return .nil;
+}
 
 /// `share` — announce the active buffer on the connection; the peer
 /// sees it via `open-shared`. One history root; the peer's frontier
@@ -860,20 +1022,21 @@ fn openSharedHandler(ctx: *core.command.Context, data: ?*anyopaque, args: []cons
     const sc: *ShareCtx = @ptrCast(@alignCast(data.?));
     if (args.len != 0) return error.ArityMismatch;
     const c = if (sc.conn.*) |*c| c else return .{ .string = "not connected" };
-    var items: std.ArrayList([]u8) = .empty;
+    var texts: std.ArrayList([]u8) = .empty;
     defer {
-        for (items.items) |it| ctx.gpa.free(it);
-        items.deinit(ctx.gpa);
+        for (texts.items) |it| ctx.gpa.free(it);
+        texts.deinit(ctx.gpa);
     }
+    var entries: std.ArrayList(core.pick.Entry) = .empty;
+    defer entries.deinit(ctx.gpa);
     for (c.offers.items, 0..) |o, i| {
         if (o.opened) continue;
-        try items.append(ctx.gpa, try std.fmt.allocPrint(ctx.gpa, "{d}: @{s}", .{ i, o.name }));
+        const text = try std.fmt.allocPrint(ctx.gpa, "{d}: @{s}", .{ i, o.name });
+        try texts.append(ctx.gpa, text);
+        try entries.append(ctx.gpa, .{ .text = text, .doc = "shared by the peer — open to collaborate" });
     }
-    if (items.items.len == 0) return .{ .string = "no shared buffers offered" };
-    const borrowed = try ctx.gpa.alloc([]const u8, items.items.len);
-    defer ctx.gpa.free(borrowed);
-    for (items.items, borrowed) |line, *slot| slot.* = line;
-    try ctx.pick.open(ctx, "shared", borrowed, .{ .handler = openSharedAccept, .data = sc });
+    if (entries.items.len == 0) return .{ .string = "no shared buffers offered" };
+    try ctx.pick.open(ctx, "shared", entries.items, .{ .handler = openSharedAccept, .data = sc });
     return .nil;
 }
 
@@ -894,6 +1057,39 @@ fn openSharedAccept(ctx: *core.command.Context, data: ?*anyopaque, choice: []con
     col.presence_layer = try sc.caps.layers.claim(ctx.gpa, doc, "presence", .replicated, "collab");
     col.import_diag_layer = try sc.caps.layers.claim(ctx.gpa, doc, "diagnostics", .host, "remote-host");
     try ctx.buffers.switchTo(ctx.gpa, id, ctx.keymap);
+}
+
+/// Runtime connect: fresh buffer for the remote primary, client
+/// session + Conn bound to it.
+fn runtimeConnect(
+    gpa: std.mem.Allocator,
+    ctx: *core.command.Context,
+    session_slot: *?*core.session.Session,
+    conn_slot: *?core.session.Conn,
+    fd_link: *core.session.FdLink,
+    hostport: []const u8,
+    token: []const u8,
+    user: []const u8,
+    caps: *core.Caps,
+) !void {
+    const fd = try core.session.tcpConnect(hostport);
+    fd_link.* = .{ .fd = fd };
+    const sess = try core.session.Session.create(gpa, fd_link.link(), .client, token);
+    errdefer sess.destroy();
+    var c = try core.session.Conn.init(gpa, sess, user, .client);
+    errdefer c.deinit();
+
+    const display = try std.fmt.allocPrint(gpa, "@{s}", .{hostport});
+    defer gpa.free(display);
+    const id = try ctx.buffers.create(gpa, display);
+    const buf = ctx.buffers.get(id).?;
+    const col = try c.bindPrimary(&buf.editor.doc, id);
+    col.presence_layer = try caps.layers.claim(gpa, &buf.editor.doc, "presence", .replicated, "collab");
+    col.import_diag_layer = try caps.layers.claim(gpa, &buf.editor.doc, "diagnostics", .host, "remote-host");
+    session_slot.* = sess;
+    conn_slot.* = c;
+    try ctx.buffers.switchTo(gpa, id, ctx.keymap);
+    std.log.info("connected to {s}", .{hostport});
 }
 
 fn closeBufferHandler(ctx: *core.command.Context, data: ?*anyopaque, args: []const core.command.Value) anyerror!core.command.Value {

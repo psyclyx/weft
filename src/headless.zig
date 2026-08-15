@@ -52,6 +52,8 @@ pub fn run(gpa: std.mem.Allocator, args: Args, environ: std.process.Environ) !vo
     var caps = capability.Caps.init(gpa, core.task.nowNs);
     defer caps.deinit();
     var quit = false;
+    var echo_line: std.ArrayList(u8) = .empty;
+    defer echo_line.deinit(gpa);
     var ctx: core.command.Context = .{
         .gpa = gpa,
         .buffers = &buffers,
@@ -60,6 +62,7 @@ pub fn run(gpa: std.mem.Allocator, args: Args, environ: std.process.Environ) !vo
         .pick = &pick_state,
         .caps = &caps,
         .quit = &quit,
+        .echo = &echo_line,
     };
 
     // Host-side LSP: the server runs WHERE THE DOCUMENT LIVES.

@@ -10,6 +10,7 @@ const Allocator = std.mem.Allocator;
 const command = @import("command.zig");
 const capability = @import("capability.zig");
 const task = @import("task.zig");
+const pick_mod = @import("pick.zig");
 
 /// After the first result arrives, wait this long for a better-priority
 /// one before jumping.
@@ -139,7 +140,7 @@ pub const SymbolsUi = struct {
 
         const gpa = ctx.gpa;
         self.clearTargets(gpa);
-        var labels: std.ArrayList([]const u8) = .empty;
+        var labels: std.ArrayList(pick_mod.Entry) = .empty;
         defer labels.deinit(gpa);
         for (best.payload.symbols) |sym| {
             const range = sym.range.rebase(&ctx.editor().doc) orelse continue;
@@ -147,7 +148,7 @@ pub const SymbolsUi = struct {
             errdefer gpa.free(name);
             try self.names.append(gpa, name);
             try self.offsets.append(gpa, range.start);
-            try labels.append(gpa, name);
+            try labels.append(gpa, .{ .text = name });
         }
         if (labels.items.len == 0) return false;
         try ctx.pick.open(ctx, "symbol", labels.items, .{ .handler = jump, .data = self });

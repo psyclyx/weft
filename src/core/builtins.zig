@@ -210,38 +210,34 @@ fn cOpen(ctx: *Context, args: struct { path: []const u8 }) anyerror!Value {
     return .{ .integer = @intCast(id) };
 }
 
-/// Pick over the open buffers; accepting switches.
-fn cBuffers(ctx: *Context, args: struct {}) anyerror!Value {
-    _ = args;
-    var items: std.ArrayList([]u8) = .empty;
-    defer {
-        for (items.items) |it| ctx.gpa.free(it);
-        items.deinit(ctx.gpa);
+/// Re-point the buffer at a new local path and save. Refuses to
+/// clobber an existing file (create-guarded) — open it instead if you
+/// mean to overwrite its history.
+fn cSaveAs(ctx: *Context, args: struct { path: []const u8 }) anyerror!Value {
+    const ed = ctx.editor();
+    switch (ed.backing) {
+        .none => try ed.adoptPath(ctx.gpa, args.path),
+        .file => |*f| {
+            const dup = try ctx.gpa.dupe(u8, args.path);
+            ctx.gpa.free(f.path);
+            f.path = dup;
+            if (f.sync.token) |tk| {
+                ctx.gpa.free(tk);
+                f.sync.token = null; // guard on non-existence at the new path
+            }
+        },
+        .shell, .tool => return .{ .string = "unsupported backing for save-as" },
     }
-    var it = ctx.buffers.iterator();
-    while (it.next()) |b| {
-        const dirty = b.editor.isDirty(ctx.gpa) catch true;
-        const line = try std.fmt.allocPrint(ctx.gpa, "{d}: {s}{s}{s}{s}", .{
-            b.id,
-            b.name,
-            if (dirty) " [+]" else "",
-            if (b.editor.backingPath() != null) " — " else "",
-            b.editor.backingPath() orelse "",
-        });
-        try items.append(ctx.gpa, line);
-    }
-    const borrowed = try ctx.gpa.alloc([]const u8, items.items.len);
-    defer ctx.gpa.free(borrowed);
-    for (items.items, borrowed) |line, *slot| slot.* = line;
-    try ctx.pick.open(ctx, "buffer", borrowed, .{ .handler = buffersAccept });
+    try ed.requestSave(ctx.gpa);
     return ok;
 }
 
-fn buffersAccept(ctx: *Context, data: ?*anyopaque, choice: []const u8) anyerror!void {
-    _ = data;
-    const colon = std.mem.indexOfScalar(u8, choice, ':') orelse return;
-    const id = std.fmt.parseInt(u32, choice[0..colon], 10) catch return;
-    try ctx.buffers.switchTo(ctx.gpa, id, ctx.keymap);
+/// Show a transient message on the status line — the generic surface
+/// plugins and commands report through (cleared by the next echo).
+fn cEcho(ctx: *Context, args: struct { text: []const u8 }) anyerror!Value {
+    ctx.echo.clearRetainingCapacity();
+    try ctx.echo.appendSlice(ctx.gpa, args.text);
+    return ok;
 }
 
 const table = [_]command.Command{
@@ -252,7 +248,8 @@ const table = [_]command.Command{
     command.define("buffer-close", "Close the active buffer (refuses when dirty).", cBufferClose),
     command.define("buffer-read-only", "Set/clear the active buffer's read-only flag.", cBufferReadOnly),
     command.define("open", "Open a file in a buffer (dedupes by path).", cOpen),
-    command.define("buffers", "Pick over the open buffers; accept to switch.", cBuffers),
+    command.define("echo", "Show a message on the status line.", cEcho),
+    command.define("save-as", "Save to a new path (refuses to clobber an existing file).", cSaveAs),
     command.define("delete-backward", "Delete the selection or the character before the cursor.", cDeleteBackward),
     command.define("delete-forward", "Delete the selection or the character after the cursor.", cDeleteForward),
     command.define("delete-selection", "Delete the selected range.", cDeleteSelection),

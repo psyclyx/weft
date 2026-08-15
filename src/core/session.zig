@@ -1584,6 +1584,9 @@ pub const PartialDoc = struct {
     /// A batch that bounced off unrealized spans; retried after every
     /// realization (idempotent — duplicate events are no-ops).
     pending_batch: ?[]u8 = null,
+    /// Fetch everything (`realize-all`): pump keeps requesting until
+    /// the base is fully realized.
+    fetch_all: bool = false,
 
     const Req = union(enum) { open, read: u64 };
     const max_inflight_reads = 8;
@@ -1628,10 +1631,13 @@ pub const PartialDoc = struct {
         self.pending_batch = dup;
     }
 
-    /// Keep realization moving: while a merge is stalled, fetch every
-    /// hole (bounded concurrency); each arrival retries the merge.
+    /// Keep realization moving: while a merge is stalled (or fetch_all
+    /// is set), fetch every hole (bounded concurrency); each arrival
+    /// retries the merge.
     pub fn pump(self: *PartialDoc, session: *Session, base: u64) !void {
-        if (self.state != .open or self.pending_batch == null) return;
+        if (self.state != .open) return;
+        if (self.pending_batch == null and !self.fetch_all) return;
+        if (self.fetch_all and self.doc.baseRealized()) self.fetch_all = false;
         for (self.doc.unrealizedBase()) |h| {
             try self.requestRead(session, base, h.base_offset, h.bytes);
         }

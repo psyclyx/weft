@@ -422,6 +422,7 @@ test "editor: save request round trip + dirty tracking" {
 const TestHost = struct {
     pool: *task.Pool,
     buffers: core.Buffers,
+    echo_line: std.ArrayList(u8),
     commands: core.command.Commands,
     keymap: core.Keymap,
     pick: core.Pick,
@@ -432,6 +433,7 @@ const TestHost = struct {
     fn init(gpa: Allocator, host: *TestHost) !void {
         host.pool = try task.Pool.init(gpa, .{ .threads = 1 });
         host.buffers = try core.Buffers.init(gpa, host.pool, "user");
+        host.echo_line = .empty;
         host.commands = .empty;
         host.keymap = .empty;
         host.pick = .empty;
@@ -445,6 +447,7 @@ const TestHost = struct {
             .pick = &host.pick,
             .caps = &host.caps,
             .quit = &host.quit,
+            .echo = &host.echo_line,
         };
         try core.builtins.install(gpa, &host.commands, &host.keymap);
     }
@@ -458,6 +461,7 @@ const TestHost = struct {
         host.pick.deinit(gpa);
         host.keymap.deinit(gpa);
         host.commands.deinit(gpa);
+        host.echo_line.deinit(gpa);
         host.buffers.deinit(gpa);
         host.pool.deinit();
     }
@@ -994,4 +998,60 @@ test "editor: bulk load — big file opens as a compacted base, edits and saves"
     try ed.requestSave(gpa);
     while (!ed.pollSave(gpa)) std.Thread.yield() catch {};
     try t.expect(!try ed.isDirty(gpa));
+}
+
+test "bundled plugin: buffers/status/help built in fennel over introspection" {
+    const gpa = t.allocator;
+    var host: TestHost = undefined;
+    try TestHost.init(gpa, &host);
+    defer host.deinit(gpa);
+    const run = core.command.run;
+
+    const std_plugin = try core.Plugin.create(gpa, &host.ctx, "std");
+    defer std_plugin.destroy();
+    gpa.free(try std_plugin.eval(gpa, @embedFile("../bundled.fnl"), "bundled.fnl"));
+
+    // A second buffer with content so dirty/label logic has teeth.
+    _ = try run(&host.commands, &host.ctx, "buffer-create", &.{.{ .string = "notes" }});
+    try host.editor().insertText(gpa, "hello");
+
+    // status → echo describes the active buffer.
+    _ = try run(&host.commands, &host.ctx, "status", &.{});
+    try t.expect(std.mem.indexOf(u8, host.echo_line.items, "notes") != null);
+    try t.expect(std.mem.indexOf(u8, host.echo_line.items, "modified") != null);
+
+    // buffers → a live pick whose entries carry docstrings; accepting
+    // the scratch row switches buffers.
+    _ = try run(&host.commands, &host.ctx, "buffers", &.{});
+    try t.expect(host.pick.active);
+    try t.expect(host.pick.filtered.items.len == 2);
+    var saw_doc = false;
+    for (0..host.pick.filtered.items.len) |i| {
+        if (host.pick.docOf(i).len > 0) saw_doc = true;
+    }
+    try t.expect(saw_doc);
+    // Filter to the scratch buffer and accept.
+    _ = try run(&host.commands, &host.ctx, "pick-input", &.{.{ .string = "scratch" }});
+    _ = try run(&host.commands, &host.ctx, "pick-accept", &.{});
+    try t.expect(!host.pick.active);
+    try t.expectEqualStrings("*scratch*", host.buffers.active().name);
+
+    // help → pick over commands with summaries as docs; frecency: the
+    // accepted command ranks first on the next empty-query open.
+    _ = try run(&host.commands, &host.ctx, "help", &.{});
+    try t.expect(host.pick.active);
+    _ = try run(&host.commands, &host.ctx, "pick-input", &.{.{ .string = "buffer-next" }});
+    _ = try run(&host.commands, &host.ctx, "pick-accept", &.{}); // runs buffer-next
+    try t.expectEqualStrings("notes", host.buffers.active().name);
+    _ = try run(&host.commands, &host.ctx, "help", &.{});
+    try t.expectEqualStrings("buffer-next", host.pick.selection().?);
+    _ = try run(&host.commands, &host.ctx, "pick-cancel", &.{});
+
+    // Tab completion: a query that is a strict subsequence completes to
+    // the full command name (sole match).
+    _ = try run(&host.commands, &host.ctx, "help", &.{});
+    _ = try run(&host.commands, &host.ctx, "pick-input", &.{.{ .string = "svas" }});
+    _ = try run(&host.commands, &host.ctx, "pick-complete", &.{});
+    try t.expectEqualStrings("save-as", host.pick.query.items);
+    _ = try run(&host.commands, &host.ctx, "pick-cancel", &.{});
 }

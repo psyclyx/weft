@@ -44,6 +44,9 @@ pub const Context = struct {
     pick: *@import("pick.zig").Pick,
     caps: *@import("capability.zig").Caps,
     quit: *bool,
+    /// Transient status-line message (`echo` writes it, the view shows
+    /// it) — the generic report-back surface for commands and plugins.
+    echo: *std.ArrayList(u8),
 
     pub fn buffer(self: *Context) *Buffers.Buffer {
         return self.buffers.active();
@@ -175,6 +178,8 @@ test "command: schema derivation, validation, late-bound run" {
     var caps = @import("capability.zig").Caps.init(gpa, @import("task.zig").nowNs);
     defer caps.deinit();
     var quit = false;
+    var echo_line: std.ArrayList(u8) = .empty;
+    defer echo_line.deinit(gpa);
 
     var commands: Commands = .empty;
     defer commands.deinit(gpa);
@@ -186,6 +191,7 @@ test "command: schema derivation, validation, late-bound run" {
         .pick = &pick,
         .caps = &caps,
         .quit = &quit,
+        .echo = &echo_line,
     };
 
     // Late binding: invoked-by-name before it exists → UnknownCommand.

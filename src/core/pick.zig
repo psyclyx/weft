@@ -6,8 +6,14 @@
 //! keymap mode, with `pick-input` as the mode's text command — the
 //! picker adds no new input machinery at all.
 //!
-//! Filtering is subsequence match (case-insensitive), ranked by
-//! tightness (span of the match), then by item order.
+//! Entries carry an optional docstring the view renders beside the
+//! text (the palette shows command summaries). Filtering is
+//! subsequence match (case-insensitive) over the text, ranked by
+//! tightness (span of the match), then by FRECENCY — what you accepted
+//! recently under this prompt floats up, so an empty-query palette is
+//! your recent-commands list. Recency is an ordinal use counter, not a
+//! clock. Tab completes the query (common prefix of the matches, else
+//! the selection).
 
 const std = @import("std");
 const Allocator = std.mem.Allocator;
@@ -22,21 +28,39 @@ pub const Acceptor = struct {
     data: ?*anyopaque = null,
 };
 
+/// One selectable item: the text is what matching and acceptance see;
+/// the doc is display-only.
+pub const Entry = struct {
+    text: []const u8,
+    doc: []const u8 = "",
+};
+
 pub const Pick = struct {
     active: bool = false,
     prompt: []u8 = &.{},
     items: std.ArrayList([]u8) = .empty,
+    /// Parallel to `items`: display-only docstrings ("" when none).
+    docs: std.ArrayList([]u8) = .empty,
     query: std.ArrayList(u8) = .empty,
     /// Indices into `items`, filtered by `query`, rank order.
     filtered: std.ArrayList(u32) = .empty,
     selected: usize = 0,
     acceptor: ?Acceptor = null,
     prev_mode: []u8 = &.{},
+    /// "prompt\x00text" → use record; survives across opens (session
+    /// scope). Keys owned.
+    frecency: std.StringHashMapUnmanaged(Frec) = .empty,
+    use_counter: u64 = 0,
+
+    const Frec = struct { uses: u32, last: u64 };
 
     pub const empty: Pick = .{};
 
     pub fn deinit(self: *Pick, gpa: Allocator) void {
         self.clear(gpa);
+        var it = self.frecency.keyIterator();
+        while (it.next()) |k| gpa.free(k.*);
+        self.frecency.deinit(gpa);
         self.* = .{};
     }
 
@@ -50,6 +74,9 @@ pub const Pick = struct {
         for (self.items.items) |it| gpa.free(it);
         self.items.deinit(gpa);
         self.items = .empty;
+        for (self.docs.items) |d| gpa.free(d);
+        self.docs.deinit(gpa);
+        self.docs = .empty;
         self.query.deinit(gpa);
         self.query = .empty;
         self.filtered.deinit(gpa);
@@ -60,21 +87,24 @@ pub const Pick = struct {
         self.active = false;
     }
 
-    /// Open a pick session: copies `items`, switches to "pick" mode.
+    /// Open a pick session: copies `entries`, switches to "pick" mode.
     pub fn open(
         self: *Pick,
         ctx: *command.Context,
         prompt: []const u8,
-        items: []const []const u8,
+        entries: []const Entry,
         acceptor: Acceptor,
     ) !void {
         const gpa = ctx.gpa;
         if (self.active) self.clear(gpa);
         self.prompt = try gpa.dupe(u8, prompt);
-        for (items) |it| {
-            const owned = try gpa.dupe(u8, it);
+        for (entries) |e| {
+            const owned = try gpa.dupe(u8, e.text);
             errdefer gpa.free(owned);
             try self.items.append(gpa, owned);
+            const doc = try gpa.dupe(u8, e.doc);
+            errdefer gpa.free(doc);
+            try self.docs.append(gpa, doc);
         }
         self.acceptor = acceptor;
         self.prev_mode = try gpa.dupe(u8, ctx.keymap.currentMode());
@@ -90,19 +120,45 @@ pub const Pick = struct {
         try ctx.keymap.setMode(ctx.gpa, prev);
     }
 
+    fn frecOf(self: *const Pick, text: []const u8) Frec {
+        var key_buf: [512]u8 = undefined;
+        const key = std.fmt.bufPrint(&key_buf, "{s}\x00{s}", .{ self.prompt, text }) catch return .{ .uses = 0, .last = 0 };
+        return self.frecency.get(key) orelse .{ .uses = 0, .last = 0 };
+    }
+
+    /// Record an acceptance for frecency ranking.
+    fn recordUse(self: *Pick, gpa: Allocator, text: []const u8) void {
+        var key_buf: [512]u8 = undefined;
+        const key = std.fmt.bufPrint(&key_buf, "{s}\x00{s}", .{ self.prompt, text }) catch return;
+        self.use_counter += 1;
+        if (self.frecency.getPtr(key)) |f| {
+            f.uses +|= 1;
+            f.last = self.use_counter;
+            return;
+        }
+        const owned = gpa.dupe(u8, key) catch return;
+        self.frecency.put(gpa, owned, .{ .uses = 1, .last = self.use_counter }) catch gpa.free(owned);
+    }
+
     fn refilter(self: *Pick, gpa: Allocator) !void {
         self.filtered.clearRetainingCapacity();
-        const Scored = struct { index: u32, span: usize };
+        const Scored = struct { index: u32, span: usize, frec: Frec };
         var scored: std.ArrayList(Scored) = .empty;
         defer scored.deinit(gpa);
         for (self.items.items, 0..) |it, i| {
             if (matchSpan(self.query.items, it)) |span| {
-                try scored.append(gpa, .{ .index = @intCast(i), .span = span });
+                try scored.append(gpa, .{
+                    .index = @intCast(i),
+                    .span = span,
+                    .frec = self.frecOf(it),
+                });
             }
         }
         std.mem.sort(Scored, scored.items, {}, struct {
             fn lt(_: void, a: Scored, b: Scored) bool {
                 if (a.span != b.span) return a.span < b.span;
+                if (a.frec.last != b.frec.last) return a.frec.last > b.frec.last;
+                if (a.frec.uses != b.frec.uses) return a.frec.uses > b.frec.uses;
                 return a.index < b.index;
             }
         }.lt);
@@ -114,6 +170,11 @@ pub const Pick = struct {
     pub fn selection(self: *const Pick) ?[]const u8 {
         if (self.filtered.items.len == 0) return null;
         return self.items.items[self.filtered.items[self.selected]];
+    }
+
+    /// The docstring of the `i`-th filtered row.
+    pub fn docOf(self: *const Pick, filtered_index: usize) []const u8 {
+        return self.docs.items[self.filtered.items[filtered_index]];
     }
 };
 
@@ -187,6 +248,26 @@ fn cCancel(ctx: *command.Context, args: struct {}) anyerror!Value {
     return .nil;
 }
 
+/// Tab: complete the query — to the longest common prefix of the
+/// matches when that extends it, else to the selected item.
+fn cComplete(ctx: *command.Context, args: struct {}) anyerror!Value {
+    _ = args;
+    const p = pickOf(ctx);
+    if (!p.active or p.filtered.items.len == 0) return .nil;
+    var lcp = p.items.items[p.filtered.items[0]];
+    for (p.filtered.items[1..]) |idx| {
+        const it = p.items.items[idx];
+        var n: usize = 0;
+        while (n < @min(lcp.len, it.len) and std.ascii.toLower(lcp[n]) == std.ascii.toLower(it[n])) n += 1;
+        lcp = lcp[0..n];
+    }
+    const target = if (lcp.len > p.query.items.len) lcp else p.selection().?;
+    p.query.clearRetainingCapacity();
+    try p.query.appendSlice(ctx.gpa, target);
+    try p.refilter(ctx.gpa);
+    return .nil;
+}
+
 fn cAccept(ctx: *command.Context, args: struct {}) anyerror!Value {
     _ = args;
     const p = pickOf(ctx);
@@ -199,6 +280,7 @@ fn cAccept(ctx: *command.Context, args: struct {}) anyerror!Value {
     // close first.
     const choice = try ctx.gpa.dupe(u8, choice_src);
     defer ctx.gpa.free(choice);
+    p.recordUse(ctx.gpa, choice_src);
     const acceptor = p.acceptor.?;
     p.acceptor = null; // close() must not run cleanup before the call
     try p.close(ctx);
@@ -207,18 +289,19 @@ fn cAccept(ctx: *command.Context, args: struct {}) anyerror!Value {
     return .nil;
 }
 
-/// The command palette: pick over every command name, run the choice.
+/// The command palette: pick over every command (summary as the
+/// docstring), run the choice.
 fn cPalette(ctx: *command.Context, args: struct {}) anyerror!Value {
     _ = args;
-    var names: std.ArrayList([]const u8) = .empty;
-    defer names.deinit(ctx.gpa);
+    var entries: std.ArrayList(Entry) = .empty;
+    defer entries.deinit(ctx.gpa);
     for (0..ctx.commands.count()) |i| {
         const n: command.Commands.Name = @enumFromInt(i);
-        if (ctx.commands.lookup(n) != null) {
-            try names.append(ctx.gpa, ctx.commands.nameOf(n));
+        if (ctx.commands.lookup(n)) |cmd| {
+            try entries.append(ctx.gpa, .{ .text = ctx.commands.nameOf(n), .doc = cmd.summary });
         }
     }
-    try ctx.pick.open(ctx, "command", names.items, .{ .handler = runChoice });
+    try ctx.pick.open(ctx, "command", entries.items, .{ .handler = runChoice });
     return .nil;
 }
 
@@ -238,6 +321,7 @@ pub fn install(gpa: Allocator, commands: *command.Commands, keymap: *@import("Ke
         command.define("pick-prev", "Select the previous match.", cPrev),
         command.define("pick-accept", "Accept the selected match.", cAccept),
         command.define("pick-cancel", "Close the picker.", cCancel),
+        command.define("pick-complete", "Complete the query (common prefix, else selection).", cComplete),
         command.define("pick-commands", "Open the command palette.", cPalette),
     };
     for (defs) |cmd| _ = try commands.bind(gpa, cmd.name, cmd);
@@ -251,7 +335,7 @@ pub fn install(gpa: Allocator, commands: *command.Commands, keymap: *@import("Ke
         .{ "Up", "pick-prev" },
         .{ "C-n", "pick-next" },
         .{ "C-p", "pick-prev" },
-        .{ "Tab", "pick-next" },
+        .{ "Tab", "pick-complete" },
     };
     for (binds) |b| try keymap.bind(gpa, "pick", b[0], b[1]);
     try keymap.setTextCommand(gpa, "pick", "pick-input");
@@ -283,10 +367,15 @@ pub fn refresh(p: *Pick, gpa: Allocator, items: []const []const u8) !void {
     defer if (keep_owned) |k| gpa.free(k);
     for (p.items.items) |it| gpa.free(it);
     p.items.clearRetainingCapacity();
+    for (p.docs.items) |d| gpa.free(d);
+    p.docs.clearRetainingCapacity();
     for (items) |it| {
         const owned = try gpa.dupe(u8, it);
         errdefer gpa.free(owned);
         try p.items.append(gpa, owned);
+        const doc = try gpa.dupe(u8, "");
+        errdefer gpa.free(doc);
+        try p.docs.append(gpa, doc);
     }
     try p.refilter(gpa);
     if (keep_owned) |k| {
