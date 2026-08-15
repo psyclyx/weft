@@ -1055,3 +1055,33 @@ test "bundled plugin: buffers/status/help built in fennel over introspection" {
     try t.expectEqualStrings("save-as", host.pick.query.items);
     _ = try run(&host.commands, &host.ctx, "pick-cancel", &.{});
 }
+
+test "editor: compactNow keeps the backing mirror and saves working" {
+    const gpa = t.allocator;
+    var tmp_dir = t.tmpDir(.{});
+    defer tmp_dir.cleanup();
+    const path = try std.fmt.allocPrint(gpa, ".zig-cache/tmp/{s}/host.txt", .{tmp_dir.sub_path});
+    defer gpa.free(path);
+    {
+        var threaded: std.Io.Threaded = .init(gpa, .{});
+        defer threaded.deinit();
+        try std.Io.Dir.cwd().writeFile(threaded.io(), .{ .sub_path = path, .data = "served content\n" });
+    }
+    var pool = try task.Pool.init(gpa, .{ .threads = 1 });
+    defer pool.deinit();
+    var ed = try Editor.init(gpa, pool, "host");
+    defer ed.deinit(gpa);
+    try ed.openFile(gpa, path);
+    try ed.compactNow(gpa);
+    try t.expectEqual(@as(usize, 0), ed.doc.doc.history.eventCount());
+    try t.expect(!try ed.isDirty(gpa));
+
+    // The panic case: edit + save AFTER compaction — markSaved's
+    // peerSyncTo must work against the rebuilt mirror.
+    ed.moveDocEnd();
+    try ed.insertText(gpa, "post-compact edit\n");
+    try ed.requestSave(gpa);
+    while (!ed.pollSave(gpa)) std.Thread.yield() catch {};
+    try t.expect(ed.save_state == .idle);
+    try t.expect(!try ed.isDirty(gpa));
+}

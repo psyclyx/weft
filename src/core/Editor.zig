@@ -208,6 +208,29 @@ pub fn adoptPath(self: *Editor, gpa: Allocator, path: []const u8) (Allocator.Err
     self.backing = .{ .file = .{ .path = try gpa.dupe(u8, path), .sync = sync } };
 }
 
+/// Compact all history at the current head (must be clean: content ==
+/// disk) and rebuild the backing mirror on the new base — the two move
+/// together; compacting a document out from under its mirror strands
+/// the mirror behind the compaction horizon.
+pub fn compactNow(self: *Editor, gpa: Allocator) !void {
+    assert(!(self.isDirty(gpa) catch true));
+    const stable = try self.doc.version(gpa);
+    defer gpa.free(stable);
+    try self.doc.compact(gpa, stable);
+    if (self.backingSync()) |sync| {
+        // Same content, fresh replica bootstrapped from the compacted
+        // base; the disk token is unchanged (content is unchanged).
+        self.doc.removePeer(gpa, sync.peer);
+        sync.peer = try self.doc.addPeer(gpa, backing_mod.Sync.peer_name);
+    }
+    // The frontier token changed shape (compacted history leaves it
+    // empty); re-stamp the clean point so dirtiness stays truthful.
+    if (self.saved_version != null) {
+        gpa.free(self.saved_version.?);
+        self.saved_version = try self.doc.version(gpa);
+    }
+}
+
 fn backingSync(self: *Editor) ?*backing_mod.Sync {
     return switch (self.backing) {
         .file => |*f| &f.sync,

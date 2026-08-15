@@ -32,11 +32,10 @@ pub fn run(gpa: std.mem.Allocator, args: Args, environ: std.process.Environ) !vo
         };
         std.log.info("headless: hosting {s} ({d} bytes)", .{ p, editor.text().byteLen() });
         // Compact at the freshly loaded point: bounds graph growth and
-        // makes the content servable as a partial-checkout base.
+        // makes the content servable as a partial-checkout base (the
+        // backing mirror is rebuilt on the new base alongside).
         if (editor.doc.commitCount() > 0) {
-            const stable = try editor.doc.version(gpa);
-            defer gpa.free(stable);
-            editor.doc.compact(gpa, stable) catch |e| {
+            editor.compactNow(gpa) catch |e| {
                 std.log.warn("headless: compaction skipped: {t}", .{e});
             };
         }
