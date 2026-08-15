@@ -100,6 +100,20 @@ pub fn main(init: std.process.Init) !void {
             };
         }
     }
+    var lsp: ?*core.lsp.Lsp = null;
+    defer if (lsp) |l| l.destroy();
+    if (editor.path) |p| {
+        if (std.mem.endsWith(u8, p, ".zig")) {
+            lsp = core.lsp.Lsp.create(gpa, &.{"zls"}, p, &editor.doc, init.minimal.environ) catch |err| blk: {
+                std.log.warn("lsp unavailable: {t}", .{err});
+                break :blk null;
+            };
+            if (lsp) |l| {
+                _ = try commands.bind(gpa, "complete", core.lsp.completeCommand(l));
+                _ = try commands.bind(gpa, "goto-definition", core.lsp.definitionCommand(l));
+            }
+        }
+    }
     const config_plugin = try core.Plugin.create(gpa, &cmd_ctx, "config");
     defer config_plugin.destroy();
     _ = try commands.bind(gpa, "eval", core.plugin.evalCommand(config_plugin));
@@ -176,6 +190,9 @@ pub fn main(init: std.process.Init) !void {
         if (window.shouldClose()) break;
 
         _ = editor.pollSave(gpa);
+        if (lsp) |l| {
+            if (try l.tick(&cmd_ctx)) view_dirty = true;
+        }
         if (editor.doc.commitCount() != seen_commits) {
             seen_commits = editor.doc.commitCount();
             view_dirty = true;
@@ -196,6 +213,14 @@ pub fn main(init: std.process.Init) !void {
                 .save_failed = editor.save_state == .failed,
                 .pick = if (pick_state.active) &pick_state else null,
                 .syntax = syntax,
+                .diags = if (lsp) |l| l.diagnostics() else &.{},
+                .cursor_diag = if (lsp) |l| blk: {
+                    const cur = editor.cursorOffset();
+                    for (l.diagnostics()) |d| {
+                        if (cur >= d.start and cur <= d.end) break :blk d.message;
+                    }
+                    break :blk null;
+                } else null,
             };
             var arena_state = std.heap.ArenaAllocator.init(gpa);
             defer arena_state.deinit();

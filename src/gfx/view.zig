@@ -42,6 +42,8 @@ pub const Theme = struct {
     syn_constant: [4]f32 = .{ 0.85, 0.65, 0.45, 1 },
     syn_operator: [4]f32 = .{ 0.70, 0.72, 0.75, 1 },
     syn_attribute: [4]f32 = .{ 0.86, 0.80, 0.55, 1 },
+    diag_error: [4]f32 = .{ 0.92, 0.45, 0.45, 1 },
+    diag_warn: [4]f32 = .{ 0.88, 0.72, 0.42, 1 },
 
     fn linearized(self: Theme) Theme {
         var out: Theme = undefined;
@@ -77,6 +79,9 @@ pub const Hud = struct {
     save_failed: bool = false,
     pick: ?*const core.Pick = null,
     syntax: ?*core.syntax.Syntax = null,
+    diags: []const core.lsp.Diag = &.{},
+    /// Message of a diagnostic at the cursor, for the status line.
+    cursor_diag: ?[]const u8 = null,
 
     const max_pick_rows = 8;
 
@@ -223,6 +228,27 @@ pub const View = struct {
             break :blk try syn.paint(scratch, .{ .start = paint_base, .end = end });
         };
 
+        // Diagnostic tint over the visible byte range: 0 none, else
+        // severity (1 error, 2 warning …). Lower severity number wins.
+        var diag_tint: ?[]u8 = null;
+        if (hud.diags.len > 0 and rows_visible > 0 and self.top_row < total_rows) {
+            const last = @min(total_rows, self.top_row + rows_visible);
+            const vis_start = rope.lineRange(self.top_row).start;
+            const vis_end = rope.lineRange(last - 1).end;
+            const tint = try scratch.alloc(u8, vis_end - vis_start);
+            @memset(tint, 0);
+            for (hud.diags) |d| {
+                const s = @max(d.start, vis_start);
+                const e = @min(@max(d.end, d.start + 1), vis_end);
+                if (s >= e) continue;
+                for (tint[s - vis_start .. e - vis_start]) |*b| {
+                    if (b.* == 0 or d.severity < b.*) b.* = d.severity;
+                }
+            }
+            diag_tint = tint;
+            paint_base = vis_start;
+        }
+
         var row = self.top_row;
         while (row < total_rows and row < self.top_row + rows_visible) : (row += 1) {
             const baseline = margin + self.ascent +
@@ -267,6 +293,7 @@ pub const View = struct {
                     baseline,
                     if (cursor_here) cursor_col else null,
                     if (paint) |pt| pt[line.start - paint_base ..] else null,
+                    if (diag_tint) |dt| dt[line.start - paint_base ..] else null,
                 );
             }
         }
@@ -339,6 +366,7 @@ pub const View = struct {
         baseline_y: f32,
         cursor_col: ?usize,
         hl: ?[]const core.syntax.Class,
+        diag: ?[]const u8,
     ) !void {
         // Enough bytes for the visible columns even if all are 4-byte
         // scalars; boundary-snap the cut.
@@ -368,6 +396,8 @@ pub const View = struct {
             if (col >= cols_visible) break;
             const color = if (cursor_col != null and col == cursor_col.?)
                 self.theme.cursor_text
+            else if (diag != null and diag.?[byte] != 0)
+                (if (diag.?[byte] == 1) self.theme.diag_error else self.theme.diag_warn)
             else if (hl) |h|
                 self.theme.classColor(h[byte])
             else
@@ -405,11 +435,19 @@ pub const View = struct {
         cols_visible: usize,
     ) !void {
         if (rows_total == 0) return;
-        const status = try std.fmt.allocPrint(scratch, " {s}  {s}{s}{s}", .{
+        var diag_part_buf: [96]u8 = undefined;
+        const diag_part = if (hud.diags.len > 0)
+            std.fmt.bufPrint(&diag_part_buf, "  !{d}", .{hud.diags.len}) catch ""
+        else
+            "";
+        const status = try std.fmt.allocPrint(scratch, " {s}  {s}{s}{s}{s}{s}{s}", .{
             hud.mode,
             hud.file orelse "[scratch]",
             if (hud.dirty) " [+]" else "",
             if (hud.save_failed) " [save failed]" else "",
+            diag_part,
+            if (hud.cursor_diag != null) "  " else "",
+            hud.cursor_diag orelse "",
         });
         try self.appendPlainRun(scratch, runs, status, self.baselineFor(rows_total - 1), cols_visible, self.theme.status, null);
 

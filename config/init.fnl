@@ -75,3 +75,7 @@
 ;; Boot into normal mode.
 (scion.mode "normal")
 (scion.log "vim config loaded")
+
+;; ── LSP (when a server is attached) ──
+(bind "insert" "C-n" "complete")
+(bind "normal" "C-bracketright" "goto-definition")   ;; C-] à la vim tags

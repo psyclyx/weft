@@ -67,6 +67,22 @@ normal/insert/visual, operators as scripted compounds, space-leader
 command palette — entirely through the public ABI. The core does not
 know vim exists.
 
+**Syntax (tree-sitter).** Grammars are pinned nixpkgs packages (parser
+`.so` dlopened at runtime, highlight query embedded at build). The
+commit log drives `ts_tree_edit` through a shared mirror (shadow rope =
+old coordinates per patch) plus one incremental reparse; the view gets
+class-per-byte paint over the visible range. Zig and Fennel wired;
+languages register by extension.
+
+**LSP.** A language server is a child process behind lock-free
+reader/writer threads; all protocol work happens in a per-frame tick on
+the main thread — the editor never waits on the server. The same mirror
+feed becomes incremental `didChange` (UTF-16 ranges against the
+pre-patch shadow; full-sync fallback honors the server's capability).
+Diagnostics tint the text and surface in the status line (count +
+message under cursor); completion opens the `pick`; goto-definition
+moves the cursor. `.zig` files attach `zls` from the dev shell.
+
 Property-tested (display-free, `zig build test`): 2-peer convergence
 under stale-snapshot batches, identity anchors under adversarial
 concurrency, subscription patch-replay reconstructing every version,
