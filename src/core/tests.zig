@@ -541,3 +541,47 @@ test "plugin: fennel config binds keys and switches modes" {
     _ = try core.command.run(&host.commands, &host.ctx, cmd_name, &.{});
     try t.expect(host.quit);
 }
+
+// ── Syntax (milestone 7) ────────────────────────────────────────────
+
+test "syntax: incremental highlight tracks edits and peer merges" {
+    const gpa = t.allocator;
+    var doc = try Document.init(gpa, "user");
+    defer doc.deinit(gpa);
+    try doc.insert(gpa, 0, "const x = 42; // note\n");
+
+    const spec = core.syntax.forPath("demo.zig").?;
+    const syn = try core.syntax.Syntax.create(gpa, spec, &doc);
+    defer syn.destroy();
+
+    const whole: stemma.Range = .{ .start = 0, .end = doc.text().byteLen() };
+    {
+        const classes = try syn.paint(gpa, whole);
+        defer gpa.free(classes);
+        // "const" is a keyword; "42" a number; the comment a comment.
+        try t.expectEqual(core.syntax.Class.keyword, classes[0]);
+        try t.expectEqual(core.syntax.Class.number, classes[10]);
+        try t.expectEqual(core.syntax.Class.comment, classes[15]);
+    }
+
+    // Edit through the document (user + a peer) and resync.
+    try doc.insert(gpa, 0, "// lead\n");
+    const p = try doc.addPeer(gpa, "plug");
+    var s = try doc.peerSnapshot(gpa, p);
+    s.deinit(gpa);
+    try doc.peerInsert(gpa, p, doc.text().byteLen(), "var y = \"str\";\n");
+    _ = try doc.peerCommit(gpa, p);
+    try t.expect(try syn.sync(gpa, &doc));
+
+    const all: stemma.Range = .{ .start = 0, .end = doc.text().byteLen() };
+    const classes = try syn.paint(gpa, all);
+    defer gpa.free(classes);
+    const text = try doc.text().toOwnedSlice(gpa);
+    defer gpa.free(text);
+    // The leading comment, the shifted keyword, and the peer's string.
+    try t.expectEqual(core.syntax.Class.comment, classes[0]);
+    const const_at = std.mem.indexOf(u8, text, "const").?;
+    try t.expectEqual(core.syntax.Class.keyword, classes[const_at]);
+    const str_at = std.mem.indexOf(u8, text, "\"str\"").?;
+    try t.expectEqual(core.syntax.Class.string, classes[str_at + 1]);
+}

@@ -32,6 +32,16 @@ pub const Theme = struct {
     selection: [4]f32 = .{ 0.25, 0.34, 0.47, 1 },
     status: [4]f32 = .{ 0.55, 0.58, 0.62, 1 },
     accent: [4]f32 = .{ 0.55, 0.78, 0.55, 1 },
+    // Syntax classes.
+    syn_keyword: [4]f32 = .{ 0.78, 0.56, 0.88, 1 },
+    syn_string: [4]f32 = .{ 0.62, 0.79, 0.55, 1 },
+    syn_comment: [4]f32 = .{ 0.45, 0.49, 0.54, 1 },
+    syn_number: [4]f32 = .{ 0.85, 0.65, 0.45, 1 },
+    syn_type: [4]f32 = .{ 0.45, 0.78, 0.78, 1 },
+    syn_function: [4]f32 = .{ 0.53, 0.70, 0.92, 1 },
+    syn_constant: [4]f32 = .{ 0.85, 0.65, 0.45, 1 },
+    syn_operator: [4]f32 = .{ 0.70, 0.72, 0.75, 1 },
+    syn_attribute: [4]f32 = .{ 0.86, 0.80, 0.55, 1 },
 
     fn linearized(self: Theme) Theme {
         var out: Theme = undefined;
@@ -39,6 +49,21 @@ pub const Theme = struct {
             @field(out, f.name) = snail.color.srgbToLinearColor(@field(self, f.name));
         }
         return out;
+    }
+
+    fn classColor(self: *const Theme, class: core.syntax.Class) [4]f32 {
+        return switch (class) {
+            .none, .variable => self.foreground,
+            .keyword => self.syn_keyword,
+            .string => self.syn_string,
+            .comment => self.syn_comment,
+            .number => self.syn_number,
+            .type => self.syn_type,
+            .function => self.syn_function,
+            .constant => self.syn_constant,
+            .operator, .punctuation => self.syn_operator,
+            .attribute, .label => self.syn_attribute,
+        };
     }
 };
 
@@ -51,6 +76,7 @@ pub const Hud = struct {
     dirty: bool = false,
     save_failed: bool = false,
     pick: ?*const core.Pick = null,
+    syntax: ?*core.syntax.Syntax = null,
 
     const max_pick_rows = 8;
 
@@ -94,10 +120,13 @@ pub const View = struct {
         });
         errdefer faces.deinit();
 
+        // Sized for Latin mono text (the demo's CJK-heavy tuning costs
+        // ~17MB of CPU-side pool). Exhaustion surfaces as OutOfLayers
+        // on prepare — raise these when non-Latin coverage lands.
         const pool = try snail.PagePool.init(gpa, .{
-            .max_pages = 16,
-            .curve_words_per_page = 1 << 19,
-            .band_words_per_page = 1 << 15,
+            .max_pages = 8,
+            .curve_words_per_page = 1 << 17,
+            .band_words_per_page = 1 << 14,
         });
         errdefer pool.deinit();
         var atlas = try snail.Atlas.init(gpa, pool);
@@ -183,6 +212,17 @@ pub const View = struct {
             runs.deinit(scratch);
         }
 
+        // Syntax paint over exactly the visible byte range.
+        var paint_base: usize = 0;
+        const paint: ?[]const core.syntax.Class = blk: {
+            const syn = hud.syntax orelse break :blk null;
+            if (rows_visible == 0 or self.top_row >= total_rows) break :blk null;
+            const last = @min(total_rows, self.top_row + rows_visible);
+            paint_base = rope.lineRange(self.top_row).start;
+            const end = rope.lineRange(last - 1).end;
+            break :blk try syn.paint(scratch, .{ .start = paint_base, .end = end });
+        };
+
         var row = self.top_row;
         while (row < total_rows and row < self.top_row + rows_visible) : (row += 1) {
             const baseline = margin + self.ascent +
@@ -226,6 +266,7 @@ pub const View = struct {
                     cols_visible,
                     baseline,
                     if (cursor_here) cursor_col else null,
+                    if (paint) |pt| pt[line.start - paint_base ..] else null,
                 );
             }
         }
@@ -297,6 +338,7 @@ pub const View = struct {
         cols_visible: usize,
         baseline_y: f32,
         cursor_col: ?usize,
+        hl: ?[]const core.syntax.Class,
     ) !void {
         // Enough bytes for the visible columns even if all are 4-byte
         // scalars; boundary-snap the cut.
@@ -326,6 +368,8 @@ pub const View = struct {
             if (col >= cols_visible) break;
             const color = if (cursor_col != null and col == cursor_col.?)
                 self.theme.cursor_text
+            else if (hl) |h|
+                self.theme.classColor(h[byte])
             else
                 self.theme.foreground;
             try cells.append(scratch, .{

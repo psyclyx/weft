@@ -87,7 +87,9 @@ pub const Pool = struct {
     shutdown: std.atomic.Value(bool) = .init(false),
 
     pub const Options = struct {
-        /// 0 = one per logical CPU (minus one for the hot thread).
+        /// 0 = a small editor-shaped default: enough for concurrent
+        /// saves/plugins without a per-core army (whose thread stacks
+        /// and allocator arenas cost real RSS).
         threads: usize = 0,
     };
 
@@ -98,7 +100,7 @@ pub const Pool = struct {
         const want = if (opts.threads > 0)
             opts.threads
         else
-            @max(1, (std.Thread.getCpuCount() catch 2) -| 1);
+            @min(4, @max(1, (std.Thread.getCpuCount() catch 2) -| 1));
         self.threads = try gpa.alloc(std.Thread, want);
         errdefer gpa.free(self.threads);
         var spawned: usize = 0;

@@ -29,6 +29,7 @@ pub fn build(b: *std.Build) void {
     exe_mod.linkSystemLibrary("vulkan", .{});
     addWaylandProtocols(b, exe_mod);
     addScripting(b, exe_mod);
+    addSyntax(b, exe_mod);
 
     const exe = b.addExecutable(.{
         .name = "scion",
@@ -54,6 +55,7 @@ pub fn build(b: *std.Build) void {
     test_mod.addImport("snail", snail_dep.module("snail"));
     test_mod.addImport("stemma", stemma_dep.module("stemma"));
     addScripting(b, test_mod);
+    addSyntax(b, test_mod);
     const unit_tests = b.addTest(.{ .root_module = test_mod });
     const run_tests = b.addRunArtifact(unit_tests);
     const test_step = b.step("test", "Run unit tests");
@@ -70,6 +72,40 @@ fn addScripting(b: *std.Build, mod: *std.Build.Module) void {
     mod.addAnonymousImport("fennel.lua", .{
         .root_source_file = .{ .cwd_relative = fennel },
     });
+}
+
+/// Tree-sitter (milestone 7): the library links normally; grammar
+/// packages contribute a runtime dlopen path (baked via build options)
+/// and an embedded highlight query, both from pinned store paths.
+fn addSyntax(b: *std.Build, mod: *std.Build.Module) void {
+    mod.linkSystemLibrary("tree-sitter", .{});
+    const opts = b.addOptions();
+    const grammars = [_]struct {
+        env: []const u8,
+        opt: []const u8,
+        import: []const u8,
+        /// In-repo query for grammar packages that ship none.
+        local_query: ?[]const u8 = null,
+    }{
+        .{ .env = "SCION_TS_ZIG", .opt = "ts_zig", .import = "ts_zig_highlights" },
+        .{
+            .env = "SCION_TS_FENNEL",
+            .opt = "ts_fennel",
+            .import = "ts_fennel_highlights",
+            .local_query = "assets/fennel-highlights.scm",
+        },
+    };
+    inline for (grammars) |g| {
+        const dir = b.graph.environ_map.get(g.env) orelse
+            @panic(g.env ++ " not set — build inside the nix shell");
+        opts.addOption([]const u8, g.opt, dir);
+        const query: std.Build.LazyPath = if (g.local_query) |lq|
+            b.path(lq)
+        else
+            .{ .cwd_relative = b.pathJoin(&.{ dir, "queries", "highlights.scm" }) };
+        mod.addAnonymousImport(g.import, .{ .root_source_file = query });
+    }
+    mod.addOptions("build_options", opts);
 }
 
 /// Generate the xdg-shell client glue with wayland-scanner and add it to

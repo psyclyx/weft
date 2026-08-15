@@ -46,9 +46,14 @@ fn parseArgs(process_args: std.process.Args) Args {
 }
 
 pub fn main(init: std.process.Init) !void {
+    // Debug builds get leak checking; release builds get the lean
+    // allocator (DebugAllocator's bookkeeping costs real RSS).
+    const debug_alloc = @import("builtin").mode == .Debug;
     var gpa_state: std.heap.DebugAllocator(.{}) = .init;
-    defer _ = gpa_state.deinit();
-    const gpa = gpa_state.allocator();
+    defer if (debug_alloc) {
+        _ = gpa_state.deinit();
+    };
+    const gpa = if (debug_alloc) gpa_state.allocator() else std.heap.c_allocator;
 
     // POSIX argv is static; the parsed slices stay valid for the run.
     const args = parseArgs(init.minimal.args);
@@ -85,6 +90,16 @@ pub fn main(init: std.process.Init) !void {
         .quit = &quit,
     };
     try core.builtins.install(gpa, &commands, &keymap);
+    var syntax: ?*core.syntax.Syntax = null;
+    defer if (syntax) |s| s.destroy();
+    if (editor.path) |p| {
+        if (core.syntax.forPath(p)) |spec| {
+            syntax = core.syntax.Syntax.create(gpa, spec, &editor.doc) catch |err| blk: {
+                std.log.warn("syntax {s} unavailable: {t}", .{ spec.name, err });
+                break :blk null;
+            };
+        }
+    }
     const config_plugin = try core.Plugin.create(gpa, &cmd_ctx, "config");
     defer config_plugin.destroy();
     _ = try commands.bind(gpa, "eval", core.plugin.evalCommand(config_plugin));
@@ -173,12 +188,14 @@ pub fn main(init: std.process.Init) !void {
             const projection = snail.Mat4.ortho(0, @floatFromInt(fb[0]), @floatFromInt(fb[1]), 0, -1, 1);
             const world_to_pixel = snail.mvpToScenePixel(projection, @floatFromInt(fb[0]), @floatFromInt(fb[1])) orelse unreachable;
 
+            if (syntax) |syn| _ = try syn.sync(gpa, &editor.doc);
             const hud: view_mod.Hud = .{
                 .mode = keymap.currentMode(),
                 .file = editor.path,
                 .dirty = editor.isDirty(gpa) catch true,
                 .save_failed = editor.save_state == .failed,
                 .pick = if (pick_state.active) &pick_state else null,
+                .syntax = syntax,
             };
             var arena_state = std.heap.ArenaAllocator.init(gpa);
             defer arena_state.deinit();

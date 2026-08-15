@@ -24,6 +24,8 @@ pub const builtins = @import("builtins.zig");
 pub const plugin = @import("plugin.zig");
 pub const Plugin = plugin.Plugin;
 pub const pick = @import("pick.zig");
+pub const Mirror = @import("mirror.zig");
+pub const syntax = @import("syntax.zig");
 pub const Pick = pick.Pick;
 pub const file = @import("file.zig");
 
