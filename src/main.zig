@@ -172,12 +172,19 @@ pub fn main(init: std.process.Init) !void {
     var collab: ?core.session.Collab = null;
     defer if (collab) |*c| c.deinit();
     if (args.listen != null or args.connect != null) {
-        const fd = if (args.listen) |port| try tcpListen(port) else try tcpConnect(args.connect.?);
+        const fd = if (args.listen) |port| blk: {
+            std.log.info("collab: listening on port {d} — waiting for a peer", .{port});
+            break :blk try core.session.tcpListen(port);
+        } else try core.session.tcpConnect(args.connect.?);
         fd_link = .{ .fd = fd };
         const role: core.secure.Role = if (args.listen != null) .server else .client;
         collab_session = try core.session.Session.create(gpa, fd_link.link(), role, args.token);
         collab = try core.session.Collab.init(gpa, collab_session.?, &editor.doc, args.user);
         collab.?.presence_layer = try caps.layers.claim(gpa, &editor.doc, "presence", .replicated, "collab");
+        if (args.connect != null) {
+            // Host-scoped feeds (diagnostics) arrive over the wire.
+            collab.?.import_diag_layer = try caps.layers.claim(gpa, &editor.doc, "diagnostics", .host, "remote-host");
+        }
     }
 
     // ── Window + Vulkan ──
@@ -529,51 +536,4 @@ fn lspAddHandler(ctx: *core.command.Context, data: ?*anyopaque, args: []const co
     };
     try servers.list.append(gpa, e);
     return .nil;
-}
-
-// ── Collab transport bootstrap (TCP, IPv4) ──────────────────────────
-
-fn tcpListen(port: u16) !i32 {
-    const linux = std.os.linux;
-    const fd_rc = linux.socket(linux.AF.INET, linux.SOCK.STREAM, 0);
-    if (linux.errno(fd_rc) != .SUCCESS) return error.Socket;
-    const fd: i32 = @intCast(fd_rc);
-    var one: i32 = 1;
-    _ = linux.setsockopt(fd, linux.SOL.SOCKET, linux.SO.REUSEADDR, @ptrCast(&one), 4);
-    var addr: linux.sockaddr.in = .{ .port = std.mem.nativeToBig(u16, port), .addr = 0 };
-    if (linux.errno(linux.bind(fd, @ptrCast(&addr), @sizeOf(linux.sockaddr.in))) != .SUCCESS) return error.Bind;
-    if (linux.errno(linux.listen(fd, 1)) != .SUCCESS) return error.Listen;
-    std.log.info("collab: listening on port {d} — waiting for a peer", .{port});
-    const conn_rc = linux.accept4(fd, null, null, 0);
-    if (linux.errno(conn_rc) != .SUCCESS) return error.Accept;
-    _ = linux.close(fd);
-    return @intCast(conn_rc);
-}
-
-fn tcpConnect(hostport: []const u8) !i32 {
-    const linux = std.os.linux;
-    const colon = std.mem.lastIndexOfScalar(u8, hostport, ':') orelse return error.BadAddress;
-    const host = hostport[0..colon];
-    const port = std.fmt.parseInt(u16, hostport[colon + 1 ..], 10) catch return error.BadAddress;
-    // IPv4 dotted quad only (name resolution is the agent milestone's
-    // problem); "localhost" convenience-mapped.
-    const ip = if (std.mem.eql(u8, host, "localhost")) "127.0.0.1" else host;
-    var octets: [4]u8 = undefined;
-    var it = std.mem.splitScalar(u8, ip, '.');
-    for (&octets) |*o| {
-        const part = it.next() orelse return error.BadAddress;
-        o.* = std.fmt.parseInt(u8, part, 10) catch return error.BadAddress;
-    }
-    const fd_rc = linux.socket(linux.AF.INET, linux.SOCK.STREAM, 0);
-    if (linux.errno(fd_rc) != .SUCCESS) return error.Socket;
-    const fd: i32 = @intCast(fd_rc);
-    var addr: linux.sockaddr.in = .{
-        .port = std.mem.nativeToBig(u16, port),
-        .addr = std.mem.bytesToValue(u32, &octets),
-    };
-    if (linux.errno(linux.connect(fd, @ptrCast(&addr), @sizeOf(linux.sockaddr.in))) != .SUCCESS) {
-        _ = linux.close(fd);
-        return error.Connect;
-    }
-    return fd;
 }

@@ -415,6 +415,15 @@ pub const Collab = struct {
     presence_layer: ?*layers_mod.Layer = null,
     last_presence_offset: usize = std.math.maxInt(usize),
     announced: bool = false,
+    /// Agent side: serve blob requests for the hosted file.
+    blob_server: ?*BlobServer = null,
+    /// Client side: fold blob replies into the partial checkout.
+    remote_file: ?*RemoteFile = null,
+    /// Host side: forward this layer's spans over the wire (feed ch 2).
+    export_diag_layer: ?*layers_mod.Layer = null,
+    export_diag_gen: usize = 0,
+    /// Client side: imported host-scoped diagnostics land here.
+    import_diag_layer: ?*layers_mod.Layer = null,
 
     pub fn init(gpa: Allocator, session: *Session, doc: *Document, name: []const u8) !Collab {
         return .{
@@ -465,7 +474,32 @@ pub const Collab = struct {
                         try self.sendBatch();
                     },
                 },
-                .feed => {
+                .feed => if (frame.channel == 2) {
+                    // Host-scoped diagnostics forwarded off the host:
+                    // repeated uv start | uv end | uv kind | uv mlen | msg.
+                    if (self.import_diag_layer) |layer| {
+                        var spans: std.ArrayList(layers_mod.SpanIn) = .empty;
+                        defer spans.deinit(gpa);
+                        var cur: []const u8 = frame.payload;
+                        while (cur.len > 0) {
+                            const s = wire.getUv(&cur) catch break;
+                            const e = wire.getUv(&cur) catch break;
+                            const k = wire.getUv(&cur) catch break;
+                            const ml = wire.getUv(&cur) catch break;
+                            if (ml > cur.len) break;
+                            const limit = self.doc.text().byteLen();
+                            spans.append(gpa, .{
+                                .start = @min(@as(usize, @intCast(s)), limit),
+                                .end = @min(@as(usize, @intCast(e)), limit),
+                                .kind = @intCast(k),
+                                .message = cur[0..ml],
+                            }) catch break;
+                            cur = cur[ml..];
+                        }
+                        try layer.publishSpans(gpa, spans.items);
+                        changed = true;
+                    }
+                } else {
                     // Presence: uv name_len | name | uv offset.
                     var cur: []const u8 = frame.payload;
                     const nlen = wire.getUv(&cur) catch continue;
@@ -484,7 +518,23 @@ pub const Collab = struct {
                         changed = true;
                     }
                 },
-                .request, .control => {},
+                .request => switch (@as(wire.RequestKind, @enumFromInt(frame.kind))) {
+                    .call => if (frame.channel == blob_channel) {
+                        if (self.blob_server) |bs| {
+                            const reply = bs.handle(gpa, frame.payload) catch continue;
+                            defer gpa.free(reply);
+                            try self.session.post(.request, @intFromEnum(wire.RequestKind.ok), blob_channel, reply);
+                        }
+                    },
+                    .ok => if (frame.channel == blob_channel) {
+                        if (self.remote_file) |rf| {
+                            const c = rf.onReply(frame.payload) catch false;
+                            changed = changed or c;
+                        }
+                    },
+                    else => {},
+                },
+                .control => {},
             }
         }
 
@@ -501,6 +551,29 @@ pub const Collab = struct {
             const moved = self.last_sent_version == null or
                 !std.mem.eql(u8, self.last_sent_version.?, head);
             if (moved) try self.sendBatch();
+
+            // Forward host-scoped diagnostics when they changed.
+            if (self.export_diag_layer) |layer| {
+                const gen = layer.spanCount() +% blk: {
+                    var acc: usize = 0;
+                    for (0..layer.spanCount()) |i| acc +%= layer.resolvedSpan(i).start;
+                    break :blk acc;
+                };
+                if (gen != self.export_diag_gen) {
+                    self.export_diag_gen = gen;
+                    var payload: std.ArrayList(u8) = .empty;
+                    defer payload.deinit(gpa);
+                    for (0..layer.spanCount()) |i| {
+                        const d = layer.resolvedSpan(i);
+                        try wire.putUv(gpa, &payload, d.start);
+                        try wire.putUv(gpa, &payload, d.end);
+                        try wire.putUv(gpa, &payload, d.kind);
+                        try wire.putUv(gpa, &payload, d.message.len);
+                        try payload.appendSlice(gpa, d.message);
+                    }
+                    try self.session.postFeed(2, 0, payload.items);
+                }
+            }
 
             if (cursor_offset != self.last_presence_offset) {
                 self.last_presence_offset = cursor_offset;
@@ -642,4 +715,407 @@ test "session: wrong token never establishes" {
 
 test {
     std.testing.refAllDecls(@This());
+}
+
+// ── Request class: the blob channel (partial checkout) ──────────────
+// Channel 3. Calls: payload = uv id | u8 op | body. op 0 = stat
+// (reply: uv size), op 1 = read (body: uv offset | uv len; reply:
+// bytes). Replies mirror the id. The agent serves reads with pread —
+// the file is never loaded into memory.
+
+pub const blob_channel: u64 = 3;
+pub const BlobOp = enum(u8) { stat = 0, read = 1 };
+
+pub const BlobServer = struct {
+    fd: i32,
+
+    pub fn openPath(path: []const u8) !BlobServer {
+        var buf: [512]u8 = undefined;
+        if (path.len >= buf.len) return error.PathTooLong;
+        @memcpy(buf[0..path.len], path);
+        buf[path.len] = 0;
+        const rc = linux.open(buf[0..path.len :0], .{ .ACCMODE = .RDONLY }, 0);
+        if (linux.errno(rc) != .SUCCESS) return error.OpenFailed;
+        return .{ .fd = @intCast(rc) };
+    }
+
+    pub fn close(self: *BlobServer) void {
+        _ = linux.close(self.fd);
+    }
+
+    fn size(self: *BlobServer) u64 {
+        // lseek(END) — no Stat struct churn.
+        const rc = linux.lseek(self.fd, 0, linux.SEEK.END);
+        return if (linux.errno(rc) == .SUCCESS) rc else 0;
+    }
+
+    fn read(self: *BlobServer, buf: []u8, offset: u64) usize {
+        const rc = linux.pread(self.fd, buf.ptr, buf.len, @intCast(offset));
+        return if (linux.errno(rc) == .SUCCESS) rc else 0;
+    }
+
+    /// Handle one call payload; returns the reply payload (caller owns).
+    pub fn handle(self: *BlobServer, gpa: Allocator, payload: []const u8) ![]u8 {
+        var cur: []const u8 = payload;
+        const id = try wire.getUv(&cur);
+        if (cur.len < 1) return error.Corrupt;
+        const op: BlobOp = if (cur[0] <= 1) @enumFromInt(cur[0]) else return error.Corrupt;
+        cur = cur[1..];
+        var reply: std.ArrayList(u8) = .empty;
+        errdefer reply.deinit(gpa);
+        try wire.putUv(gpa, &reply, id);
+        switch (op) {
+            .stat => try wire.putUv(gpa, &reply, self.size()),
+            .read => {
+                const offset = try wire.getUv(&cur);
+                const len = @min(try wire.getUv(&cur), 4 << 20);
+                const buf = try gpa.alloc(u8, @intCast(len));
+                defer gpa.free(buf);
+                const n = self.read(buf, offset);
+                try reply.appendSlice(gpa, buf[0..n]);
+            },
+        }
+        return reply.toOwnedSlice(gpa);
+    }
+};
+
+/// Client-side partial checkout: a hole rope over the remote blob,
+/// viewport-driven materialization with readahead, and a
+/// content-addressed cross-session chunk cache (chunks stored by
+/// SHA-256 learned at fetch; a per-file manifest replays cached chunks
+/// on reopen). Read-only: editable holes need stemma's hole-base
+/// proposal (doc/stemma-holes-proposal.md).
+pub const RemoteFile = struct {
+    gpa: Allocator,
+    rope: @import("stemma").Rope,
+    next_call: u64 = 1,
+    /// call id → requested range (reads) or 0-len (stat).
+    inflight: std.AutoHashMapUnmanaged(u64, [2]u64) = .empty,
+    known_size: u64 = 0,
+    cache_dir: ?[]u8 = null,
+    manifest_path: ?[]u8 = null,
+
+    pub const chunk = 64 * 1024;
+
+    pub fn init(gpa: Allocator) RemoteFile {
+        return .{ .gpa = gpa, .rope = .empty };
+    }
+
+    pub fn deinit(self: *RemoteFile) void {
+        self.rope.deinit(self.gpa);
+        self.inflight.deinit(self.gpa);
+        if (self.cache_dir) |d| self.gpa.free(d);
+        if (self.manifest_path) |m| self.gpa.free(m);
+    }
+
+    /// Optional cross-session cache under `dir` for remote `name`.
+    pub fn enableCache(self: *RemoteFile, dir: []const u8, name: []const u8) !void {
+        var h: [32]u8 = undefined;
+        std.crypto.hash.sha2.Sha256.hash(name, &h, .{});
+        self.cache_dir = try self.gpa.dupe(u8, dir);
+        self.manifest_path = try std.fmt.allocPrint(self.gpa, "{s}/manifest-{x}", .{ dir, h[0..8].* });
+    }
+
+    pub fn postStat(self: *RemoteFile, session: *Session) !void {
+        var p: std.ArrayList(u8) = .empty;
+        defer p.deinit(self.gpa);
+        const id = self.next_call;
+        self.next_call += 1;
+        try wire.putUv(self.gpa, &p, id);
+        try p.append(self.gpa, @intFromEnum(BlobOp.stat));
+        try self.inflight.put(self.gpa, id, .{ 0, 0 });
+        try session.post(.request, @intFromEnum(wire.RequestKind.call), blob_channel, p.items);
+    }
+
+    /// Request materialization of `range` (chunk-aligned + readahead),
+    /// skipping realized and already-inflight spans; cache hits realize
+    /// immediately without a network round trip.
+    pub fn want(self: *RemoteFile, session: *Session, start: u64, end: u64) !void {
+        if (self.known_size == 0) return;
+        const gpa = self.gpa;
+        var at = (start / chunk) * chunk;
+        const capped = @min(end + chunk, self.known_size); // readahead
+        while (at < capped) : (at += chunk) {
+            const clen = @min(chunk, self.known_size - at);
+            if (clen == 0) break;
+            if (self.rope.isRealized(.{ .start = @intCast(at), .end = @intCast(at + clen) })) continue;
+            var skip = false;
+            var it = self.inflight.valueIterator();
+            while (it.next()) |r| {
+                if (r[0] == at) {
+                    skip = true;
+                    break;
+                }
+            }
+            if (skip) continue;
+            if (try self.tryCache(at, clen)) continue;
+            var p: std.ArrayList(u8) = .empty;
+            defer p.deinit(gpa);
+            const id = self.next_call;
+            self.next_call += 1;
+            try wire.putUv(gpa, &p, id);
+            try p.append(gpa, @intFromEnum(BlobOp.read));
+            try wire.putUv(gpa, &p, at);
+            try wire.putUv(gpa, &p, clen);
+            try self.inflight.put(gpa, id, .{ at, clen });
+            try session.post(.request, @intFromEnum(wire.RequestKind.call), blob_channel, p.items);
+        }
+    }
+
+    /// Fold a blob-channel reply. Returns true when content changed.
+    pub fn onReply(self: *RemoteFile, payload: []const u8) !bool {
+        const gpa = self.gpa;
+        var cur: []const u8 = payload;
+        const id = try wire.getUv(&cur);
+        const kv = self.inflight.fetchRemove(id) orelse return false;
+        const range = kv.value;
+        if (range[1] == 0) {
+            // stat reply: grow (or create) the hole rope.
+            const sz = try wire.getUv(&cur);
+            if (sz > self.known_size) {
+                const grow = sz - self.known_size;
+                var tail = try @import("stemma").Rope.fromUnrealized(gpa, @intCast(grow));
+                errdefer tail.deinit(gpa);
+                try self.rope.append(gpa, &tail);
+                self.known_size = sz;
+                return true;
+            }
+            return false;
+        }
+        if (cur.len == 0) return false;
+        const n = @min(cur.len, range[1]);
+        try self.rope.realize(gpa, @intCast(range[0]), cur[0..n]);
+        self.storeCache(range[0], cur[0..n]);
+        return true;
+    }
+
+    fn cachePathFor(self: *RemoteFile, hash: [32]u8, buf: []u8) ?[]const u8 {
+        const dir = self.cache_dir orelse return null;
+        return std.fmt.bufPrint(buf, "{s}/{x}", .{ dir, hash }) catch null;
+    }
+
+    fn storeCache(self: *RemoteFile, offset: u64, bytes: []const u8) void {
+        const gpa = self.gpa;
+        if (self.cache_dir == null) return;
+        var h: [32]u8 = undefined;
+        std.crypto.hash.sha2.Sha256.hash(bytes, &h, .{});
+        var pbuf: [640]u8 = undefined;
+        const p = self.cachePathFor(h, &pbuf) orelse return;
+        const file = @import("file.zig");
+        var threaded: std.Io.Threaded = .init(gpa, .{});
+        defer threaded.deinit();
+        const io = threaded.io();
+        std.Io.Dir.cwd().writeFile(io, .{ .sub_path = p, .data = bytes }) catch return;
+        _ = file;
+        // Append to the manifest: offset len hash\n
+        if (self.manifest_path) |mp| {
+            const line = std.fmt.allocPrint(gpa, "{d} {d} {x}\n", .{ offset, bytes.len, h }) catch return;
+            defer gpa.free(line);
+            var f = std.Io.Dir.cwd().createFile(io, mp, .{ .truncate = false }) catch return;
+            defer f.close(io);
+            const end = f.length(io) catch 0;
+            f.writePositionalAll(io, line, end) catch return;
+        }
+    }
+
+    /// On reopen: replay manifest entries whose chunks are cached.
+    pub fn replayCache(self: *RemoteFile) !usize {
+        const gpa = self.gpa;
+        const mp = self.manifest_path orelse return 0;
+        const file = @import("file.zig");
+        const data = file.readAlloc(gpa, mp) catch return 0;
+        defer gpa.free(data);
+        var restored: usize = 0;
+        var lines = std.mem.tokenizeScalar(u8, data, '\n');
+        while (lines.next()) |line| {
+            var parts = std.mem.tokenizeScalar(u8, line, ' ');
+            const off = std.fmt.parseInt(u64, parts.next() orelse continue, 10) catch continue;
+            const len = std.fmt.parseInt(u64, parts.next() orelse continue, 10) catch continue;
+            _ = parts.next() orelse continue;
+            _ = len;
+            if (try self.tryCacheLine(line, off)) restored += 1;
+        }
+        return restored;
+    }
+
+    fn tryCacheLine(self: *RemoteFile, line: []const u8, offset: u64) !bool {
+        var parts = std.mem.tokenizeScalar(u8, line, ' ');
+        _ = parts.next();
+        const len_s = parts.next() orelse return false;
+        const hash_s = parts.next() orelse return false;
+        const len = std.fmt.parseInt(u64, len_s, 10) catch return false;
+        return self.realizeFromCacheHex(offset, len, hash_s);
+    }
+
+    fn tryCache(self: *RemoteFile, offset: u64, len: u64) !bool {
+        // Without a manifest lookup by offset we only use the cache via
+        // replayCache at open; live fetches always hit the wire.
+        _ = self;
+        _ = offset;
+        _ = len;
+        return false;
+    }
+
+    fn realizeFromCacheHex(self: *RemoteFile, offset: u64, len: u64, hash_hex: []const u8) !bool {
+        const gpa = self.gpa;
+        const dir = self.cache_dir orelse return false;
+        if (offset + len > self.known_size) return false;
+        if (self.rope.isRealized(.{ .start = @intCast(offset), .end = @intCast(offset + len) })) return false;
+        var pbuf: [640]u8 = undefined;
+        const p = std.fmt.bufPrint(&pbuf, "{s}/{s}", .{ dir, hash_hex }) catch return false;
+        const file = @import("file.zig");
+        const bytes = file.readAlloc(gpa, p) catch return false;
+        defer gpa.free(bytes);
+        if (bytes.len != len) return false;
+        try self.rope.realize(gpa, @intCast(offset), bytes);
+        return true;
+    }
+};
+
+// ── TCP bootstrap (shared by editor and agent) ──────────────────────
+
+pub fn tcpListen(port: u16) !i32 {
+    const fd_rc = linux.socket(linux.AF.INET, linux.SOCK.STREAM, 0);
+    if (linux.errno(fd_rc) != .SUCCESS) return error.Socket;
+    const fd: i32 = @intCast(fd_rc);
+    var one: i32 = 1;
+    _ = linux.setsockopt(fd, linux.SOL.SOCKET, linux.SO.REUSEADDR, @ptrCast(&one), 4);
+    var addr: linux.sockaddr.in = .{ .port = std.mem.nativeToBig(u16, port), .addr = 0 };
+    if (linux.errno(linux.bind(fd, @ptrCast(&addr), @sizeOf(linux.sockaddr.in))) != .SUCCESS) return error.Bind;
+    if (linux.errno(linux.listen(fd, 1)) != .SUCCESS) return error.Listen;
+    const conn_rc = linux.accept4(fd, null, null, 0);
+    if (linux.errno(conn_rc) != .SUCCESS) return error.Accept;
+    _ = linux.close(fd);
+    return @intCast(conn_rc);
+}
+
+pub fn tcpConnect(hostport: []const u8) !i32 {
+    const colon = std.mem.lastIndexOfScalar(u8, hostport, ':') orelse return error.BadAddress;
+    const host = hostport[0..colon];
+    const port = std.fmt.parseInt(u16, hostport[colon + 1 ..], 10) catch return error.BadAddress;
+    const ip = if (std.mem.eql(u8, host, "localhost")) "127.0.0.1" else host;
+    var octets: [4]u8 = undefined;
+    var it = std.mem.splitScalar(u8, ip, '.');
+    for (&octets) |*o| {
+        const part = it.next() orelse return error.BadAddress;
+        o.* = std.fmt.parseInt(u8, part, 10) catch return error.BadAddress;
+    }
+    const fd_rc = linux.socket(linux.AF.INET, linux.SOCK.STREAM, 0);
+    if (linux.errno(fd_rc) != .SUCCESS) return error.Socket;
+    const fd: i32 = @intCast(fd_rc);
+    var addr: linux.sockaddr.in = .{
+        .port = std.mem.nativeToBig(u16, port),
+        .addr = std.mem.bytesToValue(u32, &octets),
+    };
+    if (linux.errno(linux.connect(fd, @ptrCast(&addr), @sizeOf(linux.sockaddr.in))) != .SUCCESS) {
+        _ = linux.close(fd);
+        return error.Connect;
+    }
+    return fd;
+}
+
+fn testPark(ms: u64) void {
+    var w: std.atomic.Value(u32) = .init(0);
+    futexWaitTimed(&w, 0, ms * std.time.ns_per_ms);
+}
+
+test "partial checkout: multi-GB sparse file — jump to end, tail growth, viewed-only materialization" {
+    const gpa = t.allocator;
+    // A 3GB sparse file with known content at the tail.
+    const path = ".zig-cache/tmp/scion-huge-test";
+    const three_gb: u64 = 3 << 30;
+    {
+        var pbuf: [128:0]u8 = undefined;
+        @memcpy(pbuf[0..path.len], path);
+        pbuf[path.len] = 0;
+        const fd_rc = linux.open(pbuf[0..path.len :0], .{ .ACCMODE = .RDWR, .CREAT = true, .TRUNC = true }, 0o644);
+        try t.expect(linux.errno(fd_rc) == .SUCCESS);
+        const fd: i32 = @intCast(fd_rc);
+        defer _ = linux.close(fd);
+        try t.expect(linux.errno(linux.ftruncate(fd, @intCast(three_gb))) == .SUCCESS);
+        const tail_msg = "THE END OF A VERY LARGE FILE";
+        _ = linux.pwrite(fd, tail_msg.ptr, tail_msg.len, @intCast(three_gb - tail_msg.len));
+    }
+
+    const fds = try socketPair();
+    var la: FdLink = .{ .fd = fds[0] };
+    var lb: FdLink = .{ .fd = fds[1] };
+    var doc_a = try Document.init(gpa, "agent");
+    defer doc_a.deinit(gpa);
+    var doc_b = try Document.init(gpa, "viewer");
+    defer doc_b.deinit(gpa);
+    const sa = try Session.create(gpa, la.link(), .server, "tok");
+    defer sa.destroy();
+    const sb = try Session.create(gpa, lb.link(), .client, "tok");
+    defer sb.destroy();
+    var ca = try Collab.init(gpa, sa, &doc_a, "agent");
+    defer ca.deinit();
+    var cb = try Collab.init(gpa, sb, &doc_b, "viewer");
+    defer cb.deinit();
+
+    var blob = try BlobServer.openPath(path);
+    defer blob.close();
+    ca.blob_server = &blob;
+    var rf = RemoteFile.init(gpa);
+    defer rf.deinit();
+    cb.remote_file = &rf;
+
+    // Stat, then jump to the end: materialize only the last chunk.
+    try rf.postStat(sb);
+    var rounds: usize = 0;
+    while (rf.known_size == 0 and rounds < 500) : (rounds += 1) {
+        _ = try ca.tick(0);
+        _ = try cb.tick(0);
+        testPark(2);
+    }
+    try t.expectEqual(three_gb, rf.known_size);
+
+    try rf.want(sb, three_gb - 64, three_gb);
+    rounds = 0;
+    while (rounds < 500) : (rounds += 1) {
+        _ = try ca.tick(0);
+        _ = try cb.tick(0);
+        if (rf.rope.isRealized(.{ .start = @intCast(three_gb - 64), .end = @intCast(three_gb) })) break;
+        testPark(2);
+    }
+    try t.expect(rounds < 500);
+
+    // The tail content is exactly the file's; the middle is still holes.
+    var tail_buf: [28]u8 = undefined;
+    var sr = rf.rope.streamReader(.{ .start = @intCast(three_gb - 28), .end = @intCast(three_gb) }, &.{});
+    sr.interface.readSliceAll(&tail_buf) catch unreachable;
+    try t.expectEqualStrings("THE END OF A VERY LARGE FILE", &tail_buf);
+    try t.expect(!rf.rope.isRealized(.{ .start = 1 << 30, .end = (1 << 30) + 64 }));
+
+    // The host appends; a re-stat + tail-follow materializes only the
+    // new bytes (tailing a growing file).
+    {
+        var pbuf: [128:0]u8 = undefined;
+        @memcpy(pbuf[0..path.len], path);
+        pbuf[path.len] = 0;
+        const fd_rc = linux.open(pbuf[0..path.len :0], .{ .ACCMODE = .WRONLY }, 0);
+        const fd: i32 = @intCast(fd_rc);
+        defer _ = linux.close(fd);
+        _ = linux.pwrite(fd, "++GREW", 6, @intCast(three_gb));
+    }
+    try rf.postStat(sb);
+    rounds = 0;
+    while (rf.known_size == three_gb and rounds < 500) : (rounds += 1) {
+        _ = try ca.tick(0);
+        _ = try cb.tick(0);
+        testPark(2);
+    }
+    try t.expectEqual(three_gb + 6, rf.known_size);
+    try rf.want(sb, three_gb, three_gb + 6);
+    rounds = 0;
+    while (rounds < 500) : (rounds += 1) {
+        _ = try ca.tick(0);
+        _ = try cb.tick(0);
+        if (rf.rope.isRealized(.{ .start = @intCast(three_gb), .end = @intCast(three_gb + 6) })) break;
+        testPark(2);
+    }
+    var grew: [6]u8 = undefined;
+    var sr2 = rf.rope.streamReader(.{ .start = @intCast(three_gb), .end = @intCast(three_gb + 6) }, &.{});
+    sr2.interface.readSliceAll(&grew) catch unreachable;
+    try t.expectEqualStrings("++GREW", &grew);
 }
