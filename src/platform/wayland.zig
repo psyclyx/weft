@@ -543,16 +543,49 @@ fn keyboardKey(
     const keycode: c.xkb_keycode_t = key + 8;
     const pressed = state == c.WL_KEYBOARD_KEY_STATE_PRESSED;
 
+    const mods = self.currentMods();
+    // Keyspec consistency: under Ctrl/Alt, name the BASE (unshifted) key
+    // and carry shift explicitly (`C-S-b`, never `C-B`) — a chord is a
+    // physical key plus modifiers. Without Ctrl/Alt, keep the shifted
+    // keysym so typing bindings read naturally (`G`, `dollar`), and only
+    // an UNCONSUMED shift (a key with no shifted level, e.g. Return/Tab)
+    // becomes an explicit `S-`.
+    const chorded = mods.ctrl or mods.alt;
     var ev = KeyEvent{
-        .keysym = c.xkb_state_key_get_one_sym(xkb_state, keycode),
-        .mods = self.currentMods(),
+        .keysym = if (chorded)
+            baseKeysym(xkb_state, keycode)
+        else
+            c.xkb_state_key_get_one_sym(xkb_state, keycode),
+        .mods = mods,
         .pressed = pressed,
     };
+    ev.mods.shift = mods.shift and (chorded or !shiftConsumed(xkb_state, keycode));
     if (pressed) {
         const n = c.xkb_state_key_get_utf8(xkb_state, keycode, @ptrCast(&ev.utf8), ev.utf8.len);
         if (n > 0 and n < ev.utf8.len) ev.utf8_len = @intCast(n);
     }
     self.pushKeyEvent(ev);
+}
+
+/// The keysym at the unshifted level of the current layout — the
+/// physical key's identity, for naming Ctrl/Alt chords.
+fn baseKeysym(state: *c.xkb_state, keycode: c.xkb_keycode_t) c.xkb_keysym_t {
+    const keymap = c.xkb_state_get_keymap(state) orelse return c.xkb_state_key_get_one_sym(state, keycode);
+    const layout = c.xkb_state_key_get_layout(state, keycode);
+    var syms: [*c]const c.xkb_keysym_t = undefined;
+    const n = c.xkb_keymap_key_get_syms_by_level(keymap, keycode, layout, 0, &syms);
+    if (n >= 1) return syms[0];
+    return c.xkb_state_key_get_one_sym(state, keycode);
+}
+
+/// Was Shift used to pick this key's level (a→A)? If so it is already in
+/// the keysym and not a binding modifier; if not (Return, Tab), it is.
+fn shiftConsumed(state: *c.xkb_state, keycode: c.xkb_keycode_t) bool {
+    const keymap = c.xkb_state_get_keymap(state) orelse return false;
+    const idx = c.xkb_keymap_mod_get_index(keymap, c.XKB_MOD_NAME_SHIFT);
+    if (idx == c.XKB_MOD_INVALID) return false;
+    const consumed = c.xkb_state_key_get_consumed_mods2(state, keycode, c.XKB_CONSUMED_MODE_XKB);
+    return (consumed & (@as(c.xkb_mod_mask_t, 1) << @intCast(idx))) != 0;
 }
 
 fn keyboardModifiers(

@@ -733,7 +733,7 @@ fn dispatchKey(ctx: *core.command.Context, view: *view_mod.View, ev: wayland.Key
     const n = c.xkb_keysym_get_name(ev.keysym, &name_buf, name_buf.len);
     if (n > 0) {
         var spec_buf: [80]u8 = undefined;
-        const spec = core.Keymap.keyspec(&spec_buf, ev.mods.ctrl, ev.mods.alt, name_buf[0..@intCast(n)]);
+        const spec = core.Keymap.keyspec(&spec_buf, ev.mods.ctrl, ev.mods.alt, ev.mods.shift, name_buf[0..@intCast(n)]);
         if (ctx.keymap.lookup(spec)) |cmd_name| {
             _ = core.command.run(ctx.commands, ctx, cmd_name, &.{}) catch |err| {
                 std.log.warn("command {s} failed: {t}", .{ cmd_name, err });

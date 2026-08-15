@@ -548,7 +548,7 @@ test "plugin: fennel config binds keys and switches modes" {
 
     // Dispatch a key end-to-end: lookup → run.
     var buf: [32]u8 = undefined;
-    const spec = core.Keymap.keyspec(&buf, false, false, "q");
+    const spec = core.Keymap.keyspec(&buf, false, false, false, "q");
     const cmd_name = host.keymap.lookup(spec).?;
     _ = try core.command.run(&host.commands, &host.ctx, cmd_name, &.{});
     try t.expect(host.quit);

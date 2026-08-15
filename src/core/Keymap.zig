@@ -1,6 +1,8 @@
 //! Keymap — modal key → command-name tables. Pure string domain: a
-//! keyspec is `[C-][M-]<xkb keysym name>` (shift lives in the keysym:
-//! `a` vs `A`, specials keep their names — `Escape`, `Tab`, `Return`).
+//! keyspec is `[C-][M-][S-]<xkb keysym name>`. Shift usually lives in
+//! the keysym (`a` vs `A`); the explicit `S-` is only for keys with no
+//! shifted keysym — `S-Return`, `S-Tab` (specials keep their names —
+//! `Escape`, `Tab`, `Return`).
 //! The platform layer translates its events into keyspecs; the keymap
 //! neither knows xkb nor the commands it names (late binding — a bind
 //! may name a command a plugin provides later).
@@ -132,8 +134,11 @@ pub fn currentMode(self: *const Keymap) []const u8 {
     return self.mode;
 }
 
-/// Compose a keyspec from modifiers + a keysym name into `buf`.
-pub fn keyspec(buf: []u8, ctrl: bool, alt: bool, keysym_name: []const u8) []const u8 {
+/// Compose a keyspec from modifiers + a keysym name into `buf`. `shift`
+/// is the BINDING-relevant shift only — held but not consumed to produce
+/// the keysym (so `Return`+Shift → "S-Return", while `a`+Shift is the
+/// keysym "A" with no S- prefix). The platform layer resolves that.
+pub fn keyspec(buf: []u8, ctrl: bool, alt: bool, shift: bool, keysym_name: []const u8) []const u8 {
     var i: usize = 0;
     if (ctrl) {
         @memcpy(buf[i..][0..2], "C-");
@@ -141,6 +146,10 @@ pub fn keyspec(buf: []u8, ctrl: bool, alt: bool, keysym_name: []const u8) []cons
     }
     if (alt) {
         @memcpy(buf[i..][0..2], "M-");
+        i += 2;
+    }
+    if (shift) {
+        @memcpy(buf[i..][0..2], "S-");
         i += 2;
     }
     const n = @min(keysym_name.len, buf.len - i);
@@ -175,6 +184,8 @@ test "keymap: modal binding, rebinding, keyspec composition" {
     try t.expectEqualStrings("custom-escape", km.lookup("Escape").?);
 
     var buf: [32]u8 = undefined;
-    try t.expectEqualStrings("C-M-x", keyspec(&buf, true, true, "x"));
-    try t.expectEqualStrings("Escape", keyspec(&buf, false, false, "Escape"));
+    try t.expectEqualStrings("C-M-x", keyspec(&buf, true, true, false, "x"));
+    try t.expectEqualStrings("Escape", keyspec(&buf, false, false, false, "Escape"));
+    try t.expectEqualStrings("S-Return", keyspec(&buf, false, false, true, "Return"));
+    try t.expectEqualStrings("C-M-S-Tab", keyspec(&buf, true, true, true, "Tab"));
 }
