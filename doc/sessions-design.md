@@ -221,7 +221,21 @@ scion.layer_publish/section_at + per-document plugin peers);
 `scion --headless --listen` replacing scion-agent (deleted — the old
 dep-graph isolation is now review discipline in src/headless.zig).
 
-Still open beyond this document: per-buffer wire channels / shared
-buffer lists over a connection (today: wire v1's one document per
-connection, bound to the startup buffer), resume-token fast path, QUIC,
-stemma hole-bases wired into scion's remote viewer (stemma side ready).
+Second wave (same day): **shared buffers over connections** (wire
+v1.1 channel quads, `Conn` dispatcher, share/open-shared commands,
+role-split base allocation, per-quad presence/diags/blobs); **editable
+partial checkout** (BlobOp base_open/base_read serving a compacted
+base + chunk table; PartialDoc adopts, realizes from the viewport,
+bounce-realize-converge on merges into unfetched spans; `--partial`
+client flag; render gated on realized window); **bulk file loads**
+(stemma openFromContent: content IS the compacted base, zero events —
+4MB host went from minutes to 0.2 s; content-hash base head means
+independent loads of identical bytes share a history root).
+**Resume tokens: rejected** and **QUIC: deferred** — reasoned in
+doc/wire.md (fresh handshake is already ~free; no hand-rolled
+transport; Link vtable is the seam).
+
+Still open: divergent-checkout adoption as a command (the shared-root
+mechanism now exists via content-hash bases), unshare frames,
+multi-file headless workspaces, syntax/LSP for partial checkouts
+(language detection keys off backing paths).

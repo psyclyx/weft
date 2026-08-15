@@ -45,18 +45,37 @@ prefetch-class requests. One writer, strict class order per drain.
 
 **Liveness**: heartbeats every second each way; peer state machine
 connected → degraded (>3s silent) → offline (>10s), surfaced in the
-status line. Reconnect with a resume token (issued in hello-ack)
-reauths and re-subscribes in one round trip; the op resync happens via
-the normal frontier exchange.
+status line. Reconnect is a fresh handshake: share announcements
+replay (idempotent) and the op resync is the normal frontier
+exchange — nothing else needs resuming.
 
 ## Handshake sequence
 
-    C→S  hello   { version, client_eph_pub, resume_token? }
-    S→C  hello2  { version, server_eph_pub, mac_s = MAC(k_s, transcript) }
-    C→S  finish  { mac_c = MAC(k_c, transcript) }
-    S→C  accept  { session_resume_token }   (encrypted from here on)
+    C→S  hello   { client_eph_pub }
+    S→C  hello2  { server_eph_pub, mac_s = MAC(k_s, transcript) }
+    C→S  finish  { mac_c = MAC(k_c, transcript) }   (encrypted from here on)
 
 MAC failure on either side closes the link before any document data.
+
+**Resume tokens: rejected.** An earlier draft promised a resume-token
+fast path. It is deliberately not implemented: the fresh handshake is
+~1.5 RTT with one X25519 (dwarfed by TCP setup and the 3 s reconnect
+cadence), resync is the frontier exchange, and re-subscription is the
+idempotent share re-announce — a second authentication path would add
+attack surface and connection states for no measurable latency win.
+Revisit only if a 0-RTT transport (below) changes the arithmetic.
+
+## Transport (QUIC: deferred, deliberately)
+
+The session layer is written against the `Link` vtable precisely so a
+stream transport can be swapped in. QUIC is NOT hand-rolled here: a
+from-scratch QUIC+TLS stack is a security liability that would dwarf
+this codebase, and the wire already provides its own encryption,
+multiplexing (channel quads), and loss-tolerant semantics (idempotent
+ops, latest-wins feeds) over any reliable stream. When a pinnable Zig
+QUIC implementation is worth adopting, it slots in behind `Link`
+stream-for-stream; until then TCP (or anything ssh/tailscale can
+carry) is the transport.
 
 ## Shared buffers (v1.1, additive)
 

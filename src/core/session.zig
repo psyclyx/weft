@@ -148,8 +148,6 @@ pub const Session = struct {
     rx: secure.Channel = undefined,
 
     last_rx_ns: std.atomic.Value(u64) = .init(0),
-    /// Server-issued on accept; presented on reconnect.
-    resume_token: [16]u8 = @splat(0),
 
     pub fn create(gpa: Allocator, link: Link, role: secure.Role, token: []const u8) !*Session {
         const self = try gpa.create(Session);
