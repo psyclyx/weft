@@ -96,9 +96,12 @@ pub fn openFile(self: *Editor, gpa: Allocator, path: []const u8) (Allocator.Erro
     self.path = try gpa.dupe(u8, path);
     if (self.saved_version) |v| gpa.free(v);
     self.saved_version = try self.doc.version(gpa);
-    // The load is not part of undo history.
+    // The load is not part of undo history, and the cursor starts at
+    // the top (the host's insert at 0 pushed the bias-right anchor to
+    // the end).
     try self.history.ingest(gpa, &self.doc);
     self.history.barrier();
+    self.doc.anchors.set(self.cursor, .{ .offset = 0, .bias = .right });
 }
 
 /// Request a save: O(1) rope snapshot + version token, written by a

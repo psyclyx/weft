@@ -12,6 +12,8 @@ test {
     // The core ABI (milestone 2) and its property tests.
     t.refAllDecls(@import("core/core.zig"));
     _ = @import("core/tests.zig");
+    _ = @import("gfx/stats.zig");
+    _ = @import("gfx/view.zig");
 }
 
 test "stemma path dep: rope round-trips" {

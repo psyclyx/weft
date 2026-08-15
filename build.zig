@@ -15,7 +15,15 @@ pub fn build(b: *std.Build) void {
         .link_libc = true,
     });
     exe_mod.addImport("snail", snail_dep.module("snail"));
+    // SPIR-V-only shader scope: slangc runs inside snail's build; scion
+    // consumes blobs + the reflection ABI through this module.
+    exe_mod.addImport("snail_shaders", snail_dep.module("snail-shaders-vk"));
     exe_mod.addImport("stemma", stemma_dep.module("stemma"));
+    // Default monospace face, embedded from snail's asset set (DejaVu:
+    // free license, full box-drawing coverage). `--font` overrides.
+    exe_mod.addAnonymousImport("font_mono", .{
+        .root_source_file = snail_dep.path("assets/DejaVuSansMono.ttf"),
+    });
     exe_mod.linkSystemLibrary("wayland-client", .{});
     exe_mod.linkSystemLibrary("xkbcommon", .{});
     exe_mod.linkSystemLibrary("vulkan", .{});
