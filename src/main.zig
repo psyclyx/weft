@@ -93,20 +93,20 @@ pub fn main(init: std.process.Init) !void {
         .quit = &quit,
     };
     try core.builtins.install(gpa, &commands, &keymap);
-    // Completion is a capability consumer: race-and-refine over every
-    // registered edit/completion provider.
+    // Capability consumers — written against capability names only.
     var completion_ui: core.complete_ui.CompletionUi = .empty;
     _ = try commands.bind(gpa, "complete", completion_ui.commandSpec());
-    var syntax: ?*core.syntax.Syntax = null;
-    defer if (syntax) |s| s.destroy();
-    if (editor.path) |p| {
-        if (core.syntax.forPath(p)) |spec| {
-            syntax = core.syntax.Syntax.create(gpa, spec, &editor.doc) catch |err| blk: {
-                std.log.warn("syntax {s} unavailable: {t}", .{ spec.name, err });
-                break :blk null;
-            };
-        }
-    }
+    var def_ui: core.nav_ui.DefinitionUi = .empty;
+    _ = try commands.bind(gpa, "goto-definition", def_ui.commandSpec());
+    var sym_ui: core.nav_ui.SymbolsUi = .empty;
+    defer sym_ui.deinit(gpa);
+    _ = try commands.bind(gpa, "symbols", sym_ui.commandSpec());
+
+    // Grammars are data: builtins seeded, config extends via command.
+    var grammars = try core.syntax.Runtime.initBuiltins(gpa);
+    defer grammars.deinit(gpa);
+    _ = try commands.bind(gpa, "grammar-add", grammarAddCommand(&grammars));
+
     var lsp: ?*core.lsp.Lsp = null;
     defer if (lsp) |l| l.destroy();
     if (editor.path) |p| {
@@ -120,14 +120,31 @@ pub fn main(init: std.process.Init) !void {
                 // (host-scoped); the view reads the layer, not the plugin.
                 const diag_layer = try caps.registerFeed(&editor.doc, "edit/diagnostics", "diagnostics", .host, "lsp.zls");
                 l.attachDiagnostics(diag_layer);
-                _ = try commands.bind(gpa, "goto-definition", core.lsp.definitionCommand(l));
             }
         }
     }
+
+    // Config runs before language attach so `grammar-add` applies to
+    // the file being opened.
     const config_plugin = try core.Plugin.create(gpa, &cmd_ctx, "config");
     defer config_plugin.destroy();
     _ = try commands.bind(gpa, "eval", core.plugin.evalCommand(config_plugin));
     try loadConfig(gpa, config_plugin, args.config, init.minimal.environ);
+
+    var syntax: ?*core.syntax.Syntax = null;
+    defer if (syntax) |s| s.destroy();
+    if (editor.path) |p| {
+        if (grammars.forPath(p)) |spec| {
+            syntax = core.syntax.Syntax.create(gpa, spec, &editor.doc) catch |err| blk: {
+                std.log.warn("syntax {s} unavailable: {t}", .{ spec.name, err });
+                break :blk null;
+            };
+        }
+    }
+    if (syntax) |syn| {
+        try core.syntax.registerProviders(&caps, syn);
+        _ = try caps.registerFeed(&editor.doc, "edit/highlight", "highlight", .local, "treesitter");
+    }
 
     // ── Window + Vulkan ──
     const window = try wayland.Window.init(1280, 800, "scion", "dev.psyclyx.scion");
@@ -204,6 +221,8 @@ pub fn main(init: std.process.Init) !void {
             if (try l.tick(&cmd_ctx)) view_dirty = true;
         }
         if (try completion_ui.tick(&cmd_ctx)) view_dirty = true;
+        if (try def_ui.tick(&cmd_ctx)) view_dirty = true;
+        if (try sym_ui.tick(&cmd_ctx)) view_dirty = true;
         if (editor.doc.commitCount() != seen_commits) {
             seen_commits = editor.doc.commitCount();
             view_dirty = true;
@@ -216,14 +235,30 @@ pub fn main(init: std.process.Init) !void {
             const projection = snail.Mat4.ortho(0, @floatFromInt(fb[0]), @floatFromInt(fb[1]), 0, -1, 1);
             const world_to_pixel = snail.mvpToScenePixel(projection, @floatFromInt(fb[0]), @floatFromInt(fb[1])) orelse unreachable;
 
-            if (syntax) |syn| _ = try syn.sync(gpa, &editor.doc);
+            if (syntax) |syn| {
+                _ = try syn.sync(gpa, &editor.doc);
+                if (caps.layers.find("highlight")) |hl| {
+                    // Whole doc when small; a generous window around the
+                    // viewport otherwise (republshed every damage frame).
+                    const rope = editor.text();
+                    const total = rope.byteLen();
+                    const range = stemma_range: {
+                        if (total <= 256 * 1024) break :stemma_range @import("stemma").Range{ .start = 0, .end = total };
+                        const rows = rope.lineCount();
+                        const first = view.top_row -| 100;
+                        const last = @min(rows - 1, view.top_row + 200);
+                        break :stemma_range @import("stemma").Range{ .start = rope.lineRange(first).start, .end = rope.lineRange(last).end };
+                    };
+                    try syn.publishHighlight(gpa, &editor.doc, hl, range);
+                }
+            }
             const hud: view_mod.Hud = .{
                 .mode = keymap.currentMode(),
                 .file = editor.path,
                 .dirty = editor.isDirty(gpa) catch true,
                 .save_failed = editor.save_state == .failed,
                 .pick = if (pick_state.active) &pick_state else null,
-                .syntax = syntax,
+                .highlight_layer = caps.layers.find("highlight"),
                 .diag_layer = caps.layers.find("diagnostics"),
                 .cursor_diag = blk: {
                     const dl = caps.layers.find("diagnostics") orelse break :blk null;
@@ -357,4 +392,29 @@ fn loadConfig(gpa: std.mem.Allocator, plugin: *core.Plugin, override: ?[]const u
     };
     gpa.free(out);
     std.log.info("config loaded: {s}", .{path});
+}
+
+/// `grammar-add <ext> <package-dir> <symbol>` — grammars as data.
+fn grammarAddCommand(runtime: *core.syntax.Runtime) core.command.Command {
+    return .{
+        .name = "grammar-add",
+        .summary = "Register a tree-sitter grammar package for an extension.",
+        .args = &.{
+            .{ .name = "ext", .type = .string },
+            .{ .name = "dir", .type = .string },
+            .{ .name = "symbol", .type = .string },
+        },
+        .handler = grammarAddHandler,
+        .data = runtime,
+    };
+}
+
+fn grammarAddHandler(ctx: *core.command.Context, data: ?*anyopaque, args: []const core.command.Value) anyerror!core.command.Value {
+    const runtime: *core.syntax.Runtime = @ptrCast(@alignCast(data.?));
+    if (args.len != 3) return error.ArityMismatch;
+    for (args) |a| {
+        if (a != .string) return error.TypeMismatch;
+    }
+    try runtime.add(ctx.gpa, args[0].string, args[1].string, args[2].string);
+    return .nil;
 }

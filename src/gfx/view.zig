@@ -53,7 +53,7 @@ pub const Theme = struct {
         return out;
     }
 
-    fn classColor(self: *const Theme, class: core.syntax.Class) [4]f32 {
+    fn classColor(self: *const Theme, class: core.capability.HighlightClass) [4]f32 {
         return switch (class) {
             .none, .variable => self.foreground,
             .keyword => self.syn_keyword,
@@ -78,7 +78,8 @@ pub const Hud = struct {
     dirty: bool = false,
     save_failed: bool = false,
     pick: ?*const core.Pick = null,
-    syntax: ?*core.syntax.Syntax = null,
+    /// The highlight feed layer (stamped bulk paint).
+    highlight_layer: ?*const core.layers.Layer = null,
     /// The diagnostics feed layer (anchored spans, kind = severity).
     diag_layer: ?*const core.layers.Layer = null,
     /// Message of a diagnostic at the cursor, for the status line.
@@ -218,16 +219,17 @@ pub const View = struct {
             runs.deinit(scratch);
         }
 
-        // Syntax paint over exactly the visible byte range.
+        // Highlight paint comes from the feed layer (stamped bulk; a
+        // stale frame paints slightly-old truth, corrected on the next
+        // publish — correct and invisible for highlights).
         var paint_base: usize = 0;
-        const paint: ?[]const core.syntax.Class = blk: {
-            const syn = hud.syntax orelse break :blk null;
-            if (rows_visible == 0 or self.top_row >= total_rows) break :blk null;
-            const last = @min(total_rows, self.top_row + rows_visible);
-            paint_base = rope.lineRange(self.top_row).start;
-            const end = rope.lineRange(last - 1).end;
-            break :blk try syn.paint(scratch, .{ .start = paint_base, .end = end });
-        };
+        var paint: ?[]const core.capability.HighlightClass = null;
+        if (hud.highlight_layer) |hl| {
+            if (hl.bulk) |b| {
+                paint = @ptrCast(b.classes);
+                paint_base = b.start;
+            }
+        }
 
         // Diagnostic tint over the visible byte range: 0 none, else
         // severity (1 error, 2 warning …). Lower severity number wins.
@@ -296,7 +298,13 @@ pub const View = struct {
                     cols_visible,
                     baseline,
                     if (cursor_here) cursor_col else null,
-                    if (paint) |pt| pt[line.start - paint_base ..] else null,
+                    if (paint) |pt|
+                        (if (line.start >= paint_base and line.end <= paint_base + pt.len)
+                            pt[line.start - paint_base ..]
+                        else
+                            null)
+                    else
+                        null,
                     if (diag_tint) |dt| dt[line.start - paint_base ..] else null,
                 );
             }
@@ -369,7 +377,7 @@ pub const View = struct {
         cols_visible: usize,
         baseline_y: f32,
         cursor_col: ?usize,
-        hl: ?[]const core.syntax.Class,
+        hl: ?[]const core.capability.HighlightClass,
         diag: ?[]const u8,
     ) !void {
         // Enough bytes for the visible columns even if all are 4-byte

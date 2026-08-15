@@ -27,6 +27,25 @@ const layers_mod = @import("layers.zig");
 const position = @import("position.zig");
 
 pub const Shape = enum { query, feed, action };
+
+/// The `edit/highlight` schema's class vocabulary (one byte per
+/// document byte in bulk layer paint). Part of the ABI: consumers map
+/// classes to presentation, providers map their analyses to classes.
+pub const HighlightClass = enum(u8) {
+    none,
+    keyword,
+    string,
+    comment,
+    number,
+    type,
+    function,
+    variable,
+    constant,
+    operator,
+    punctuation,
+    attribute,
+    label,
+};
 pub const Composition = enum { merge_ranked, union_all, first_wins };
 pub const Latency = enum { instant, fast, slow };
 pub const Placement = enum { local, host };

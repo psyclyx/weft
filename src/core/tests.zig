@@ -710,3 +710,90 @@ test "capability: feed layer spans shift with edits; scripted provider races" {
     try t.expectEqual(@as(usize, 1), merged.len);
     try t.expectEqualStrings("wa_scripted", merged[0].text);
 }
+
+// ── Tree-sitter over capabilities (phase 2, milestone 2) ────────────
+
+test "syntax: instant-tier definition + symbols providers race through registry" {
+    const gpa = t.allocator;
+    var host: TestHost = undefined;
+    try TestHost.init(gpa, &host);
+    defer host.deinit(gpa);
+    host.editor.path = try gpa.dupe(u8, "demo.zig");
+    try host.editor.insertText(gpa,
+        \\fn alpha() void {}
+        \\fn beta() void {
+        \\    alpha();
+        \\}
+    );
+
+    const spec = core.syntax.forPath("demo.zig").?;
+    const syn = try core.syntax.Syntax.create(gpa, spec, &host.editor.doc);
+    defer syn.destroy();
+    try core.syntax.registerProviders(&host.caps, syn);
+
+    // Symbols: both functions, stamped ranges rebase to themselves.
+    {
+        const id = (try host.caps.fire(.symbols, &host.editor.doc, host.editor.path, .{})).?;
+        defer host.caps.finish(id);
+        const best = host.caps.session(id).?.best().?;
+        try t.expectEqual(@as(usize, 2), best.payload.symbols.len);
+        try t.expectEqualStrings("alpha", best.payload.symbols[0].name);
+        try t.expectEqualStrings("beta", best.payload.symbols[1].name);
+    }
+
+    // Definition: fire at the `alpha()` call site; instant answer, and
+    // its stamped range survives a later edit.
+    const text = try host.editor.text().toOwnedSlice(gpa);
+    defer gpa.free(text);
+    const call_at = std.mem.lastIndexOf(u8, text, "alpha").? + 2;
+    {
+        const id = (try host.caps.fire(.definition, &host.editor.doc, host.editor.path, .{ .offset = call_at })).?;
+        defer host.caps.finish(id);
+        try host.editor.doc.insert(gpa, 0, "// lead\n");
+        const best = host.caps.session(id).?.best().?;
+        try t.expect(best.payload.locations.len > 0);
+        const range = best.payload.locations[0].range.rebase(&host.editor.doc).?;
+        try t.expectEqual(@as(usize, 8), range.start); // "fn alpha" after the lead
+    }
+}
+
+test "syntax: highlight feed publishes stamped bulk into its layer" {
+    const gpa = t.allocator;
+    var host: TestHost = undefined;
+    try TestHost.init(gpa, &host);
+    defer host.deinit(gpa);
+    try host.editor.insertText(gpa, "const x = 1;\n");
+
+    const spec = core.syntax.forPath("a.zig").?;
+    const syn = try core.syntax.Syntax.create(gpa, spec, &host.editor.doc);
+    defer syn.destroy();
+    const layer = try host.caps.registerFeed(&host.editor.doc, "edit/highlight", "highlight", .local, "treesitter");
+    try syn.publishHighlight(gpa, &host.editor.doc, layer, .{ .start = 0, .end = host.editor.text().byteLen() });
+
+    const b = layer.bulk.?;
+    try t.expectEqual(@as(usize, 0), b.start);
+    const classes: []const core.capability.HighlightClass = @ptrCast(b.classes);
+    try t.expectEqual(core.capability.HighlightClass.keyword, classes[0]); // const
+    try t.expectEqual(core.capability.HighlightClass.number, classes[10]); // 1
+}
+
+test "syntax: holey document parses the realized prefix, never crashes" {
+    const gpa = t.allocator;
+    var doc = try Document.init(gpa, "user");
+    defer doc.deinit(gpa);
+    try doc.insert(gpa, 0, "fn seed() void {}\n");
+    const spec = core.syntax.forPath("h.zig").?;
+    const syn = try core.syntax.Syntax.create(gpa, spec, &doc);
+    defer syn.destroy();
+
+    // A synthetic partially-materialized rope: realized prefix, hole tail.
+    var holey = try stemma.Rope.fromUnrealized(gpa, 4096);
+    defer holey.deinit(gpa);
+    try holey.realize(gpa, 0, "fn top() void {}\n_");
+    syn.reparseRope(&holey);
+    // Paint over the realized region works; the hole region stays .none.
+    const classes = try syn.paint(gpa, .{ .start = 0, .end = 64 });
+    defer gpa.free(classes);
+    try t.expectEqual(core.capability.HighlightClass.keyword, classes[0]); // fn
+    try t.expectEqual(core.capability.HighlightClass.none, classes[40]);
+}

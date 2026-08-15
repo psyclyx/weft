@@ -32,6 +32,7 @@ pub const layers = @import("layers.zig");
 pub const capability = @import("capability.zig");
 pub const Caps = capability.Caps;
 pub const complete_ui = @import("complete_ui.zig");
+pub const nav_ui = @import("nav_ui.zig");
 pub const Pick = pick.Pick;
 pub const file = @import("file.zig");
 

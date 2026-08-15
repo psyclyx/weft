@@ -55,6 +55,8 @@ pkgs.mkShell {
   # embedded at build time. Pinned store paths, not ambient state.
   SCION_TS_ZIG = "${pkgs.tree-sitter-grammars.tree-sitter-zig}";
   SCION_TS_FENNEL = "${pkgs.tree-sitter-grammars.tree-sitter-fennel}";
+  SCION_TS_LUA = "${pkgs.tree-sitter-grammars.tree-sitter-lua}";
+  SCION_TS_NIX = "${pkgs.tree-sitter-grammars.tree-sitter-nix}";
 
   # Let the Vulkan loader find the host ICDs on NixOS.
   XDG_DATA_DIRS = "/run/opengl-driver/share";

@@ -94,6 +94,8 @@ fn addSyntax(b: *std.Build, mod: *std.Build.Module) void {
             .import = "ts_fennel_highlights",
             .local_query = "assets/fennel-highlights.scm",
         },
+        .{ .env = "SCION_TS_LUA", .opt = "ts_lua", .import = "ts_lua_highlights" },
+        .{ .env = "SCION_TS_NIX", .opt = "ts_nix", .import = "ts_nix_highlights" },
     };
     inline for (grammars) |g| {
         const dir = b.graph.environ_map.get(g.env) orelse

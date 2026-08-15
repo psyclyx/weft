@@ -29,23 +29,10 @@ pub const c = @cImport({
     @cInclude("tree_sitter/api.h");
 });
 
-/// Semantic classes the view can color. Capture names map by their
-/// first dotted segment ("punctuation.bracket" → .punctuation).
-pub const Class = enum(u8) {
-    none,
-    keyword,
-    string,
-    comment,
-    number,
-    type,
-    function,
-    variable,
-    constant,
-    operator,
-    punctuation,
-    attribute,
-    label,
-};
+/// Class vocabulary comes from the edit/highlight capability schema;
+/// capture names map by their first dotted segment
+/// ("punctuation.bracket" → .punctuation).
+pub const Class = @import("capability.zig").HighlightClass;
 
 pub const LanguageSpec = struct {
     name: []const u8,
@@ -53,8 +40,14 @@ pub const LanguageSpec = struct {
     parser_dir: []const u8,
     symbol: [:0]const u8,
     highlights: []const u8,
+    /// Node kinds that define document symbols (name = first identifier
+    /// child). Data, not code — a grammar registration supplies its own.
+    symbol_kinds: []const []const u8 = &.{},
 };
 
+/// Built-in grammar registrations (pinned store paths via build
+/// options). Runtime additions go through `Runtime.add` — a config/data
+/// change, not code.
 pub const languages = [_]LanguageSpec{
     .{
         .name = "zig",
@@ -62,6 +55,7 @@ pub const languages = [_]LanguageSpec{
         .parser_dir = build_options.ts_zig,
         .symbol = "tree_sitter_zig",
         .highlights = @embedFile("ts_zig_highlights"),
+        .symbol_kinds = &.{ "function_declaration", "variable_declaration", "struct_declaration" },
     },
     .{
         .name = "fennel",
@@ -70,6 +64,100 @@ pub const languages = [_]LanguageSpec{
         .symbol = "tree_sitter_fennel",
         .highlights = @embedFile("ts_fennel_highlights"),
     },
+    .{
+        .name = "lua",
+        .extensions = &.{".lua"},
+        .parser_dir = build_options.ts_lua,
+        .symbol = "tree_sitter_lua",
+        .highlights = @embedFile("ts_lua_highlights"),
+        .symbol_kinds = &.{ "function_declaration", "function_definition" },
+    },
+    .{
+        .name = "nix",
+        .extensions = &.{".nix"},
+        .parser_dir = build_options.ts_nix,
+        .symbol = "tree_sitter_nix",
+        .highlights = @embedFile("ts_nix_highlights"),
+    },
+};
+
+/// The runtime grammar registry: seeded with the built-ins, extended by
+/// config through the `grammar-add` command (extension, package dir,
+/// symbol — the highlight query is read from the package).
+pub const Runtime = struct {
+    const Owned = struct {
+        spec: LanguageSpec,
+        owned: bool,
+    };
+
+    specs: std.ArrayList(Owned) = .empty,
+
+    pub const empty: Runtime = .{};
+
+    pub fn initBuiltins(gpa: Allocator) !Runtime {
+        var self: Runtime = .empty;
+        errdefer self.deinit(gpa);
+        for (&languages) |*spec| {
+            try self.specs.append(gpa, .{ .spec = spec.*, .owned = false });
+        }
+        return self;
+    }
+
+    pub fn deinit(self: *Runtime, gpa: Allocator) void {
+        for (self.specs.items) |*o| {
+            if (o.owned) {
+                gpa.free(@constCast(o.spec.name));
+                gpa.free(@constCast(o.spec.extensions[0]));
+                gpa.free(@constCast(o.spec.extensions));
+                gpa.free(@constCast(o.spec.parser_dir));
+                gpa.free(@constCast(o.spec.symbol[0 .. o.spec.symbol.len + 1]));
+                gpa.free(@constCast(o.spec.highlights));
+            }
+        }
+        self.specs.deinit(gpa);
+        self.* = .{};
+    }
+
+    /// Register a grammar from a package directory laid out like the
+    /// nixpkgs tree-sitter grammars (`parser` + `queries/highlights.scm`).
+    pub fn add(self: *Runtime, gpa: Allocator, ext: []const u8, dir: []const u8, symbol: []const u8) !void {
+        const file = @import("file.zig");
+        var qpath_buf: [512]u8 = undefined;
+        const qpath = try std.fmt.bufPrint(&qpath_buf, "{s}/queries/highlights.scm", .{dir});
+        const highlights = try file.readAlloc(gpa, qpath);
+        errdefer gpa.free(highlights);
+        const name = try gpa.dupe(u8, std.mem.trimStart(u8, ext, "."));
+        errdefer gpa.free(name);
+        const ext_owned = try gpa.dupe(u8, ext);
+        errdefer gpa.free(ext_owned);
+        const exts = try gpa.alloc([]const u8, 1);
+        errdefer gpa.free(exts);
+        exts[0] = ext_owned;
+        const dir_owned = try gpa.dupe(u8, dir);
+        errdefer gpa.free(dir_owned);
+        const sym = try gpa.dupeZ(u8, symbol);
+        errdefer gpa.free(sym[0 .. sym.len + 1]);
+        try self.specs.append(gpa, .{ .owned = true, .spec = .{
+            .name = name,
+            .extensions = exts,
+            .parser_dir = dir_owned,
+            .symbol = sym,
+            .highlights = highlights,
+        } });
+    }
+
+    pub fn forPath(self: *const Runtime, path: []const u8) ?*const LanguageSpec {
+        // Later registrations shadow earlier (config over builtin).
+        var i = self.specs.items.len;
+        while (i > 0) {
+            i -= 1;
+            const spec = &self.specs.items[i].spec;
+            for (spec.extensions) |ext| {
+                if (std.mem.endsWith(u8, path, ext)) return spec;
+            }
+        }
+        return null;
+    }
 };
 
 pub fn forPath(path: []const u8) ?*const LanguageSpec {
@@ -122,6 +210,7 @@ pub const Syntax = struct {
     /// capture id → class; pattern id → enabled.
     classes: []Class,
     enabled: []bool,
+    spec: LanguageSpec,
     /// TSInput chunk buffer (parse-time only).
     read_buf: [4096]u8 = undefined,
     read_rope: ?*const stemma.Rope = null,
@@ -205,6 +294,7 @@ pub const Syntax = struct {
             .qcursor = qcursor,
             .classes = classes,
             .enabled = enabled,
+            .spec = spec.*,
         };
 
         // Adopt the current text and parse it whole.
@@ -279,11 +369,103 @@ pub const Syntax = struct {
             bytes_read.* = 0;
             return null;
         }
-        const n = @min(self.read_buf.len, len - byte_index);
+        var n = @min(self.read_buf.len, len - byte_index);
+        // Hole-aware: a partially materialized document (remote partial
+        // checkout) reads as EOF at the first unrealized byte — the
+        // parse degrades to the materialized prefix; it never forces a
+        // fetch and never crashes. Halving finds a realized prefix.
+        while (n > 0 and !rope.isRealized(.{ .start = byte_index, .end = byte_index + n })) {
+            n /= 2;
+        }
+        if (n == 0) {
+            bytes_read.* = 0;
+            return null;
+        }
         var sr = rope.streamReader(.{ .start = byte_index, .end = byte_index + n }, &.{});
         sr.interface.readSliceAll(self.read_buf[0..n]) catch unreachable;
         bytes_read.* = @intCast(n);
         return &self.read_buf;
+    }
+
+    /// Parse an arbitrary rope with this grammar (holey-document
+    /// robustness testing; the live path goes through `sync`).
+    pub fn reparseRope(self: *Syntax, rope: *const stemma.Rope) void {
+        const new_tree = self.parse(rope, null);
+        if (self.tree) |old| c.ts_tree_delete(old);
+        self.tree = new_tree;
+    }
+
+    /// Publish paint over `range` into a highlight feed layer, stamped
+    /// with the document's head version.
+    pub fn publishHighlight(
+        self: *Syntax,
+        gpa: Allocator,
+        doc: *const Document,
+        layer: *@import("layers.zig").Layer,
+        range: stemma.Range,
+    ) !void {
+        const classes = try self.paint(gpa, range);
+        defer gpa.free(classes);
+        const token = try doc.version(gpa);
+        defer gpa.free(token);
+        try layer.publishBulk(gpa, token, range.start, @ptrCast(classes));
+    }
+
+    // ── Instant-tier providers ──────────────────────────────────
+
+    pub const Sym = struct { name: []u8, start: usize, end: usize };
+
+    /// Walk the tree for `symbol_kinds` nodes (depth ≤ 3); names are
+    /// gpa-owned by the caller.
+    pub fn collectSymbols(self: *Syntax, gpa: Allocator, doc: *const Document, out: *std.ArrayList(Sym)) !void {
+        const tree = self.tree orelse return;
+        try self.walkSymbols(gpa, doc, c.ts_tree_root_node(tree), 0, out);
+    }
+
+    fn walkSymbols(self: *Syntax, gpa: Allocator, doc: *const Document, node: c.TSNode, depth: u8, out: *std.ArrayList(Sym)) !void {
+        if (depth > 3) return;
+        const count = c.ts_node_named_child_count(node);
+        for (0..count) |i| {
+            const child = c.ts_node_named_child(node, @intCast(i));
+            const kind = std.mem.span(c.ts_node_type(child));
+            var is_symbol = false;
+            for (self.spec.symbol_kinds) |k| {
+                if (std.mem.eql(u8, kind, k)) {
+                    is_symbol = true;
+                    break;
+                }
+            }
+            if (is_symbol) {
+                if (identifierOf(child)) |id_node| {
+                    const s = c.ts_node_start_byte(id_node);
+                    const e = c.ts_node_end_byte(id_node);
+                    if (e > s and e - s <= 256 and e <= doc.text().byteLen()) {
+                        const name = try gpa.alloc(u8, e - s);
+                        errdefer gpa.free(name);
+                        var sr = doc.text().streamReader(.{ .start = s, .end = e }, &.{});
+                        sr.interface.readSliceAll(name) catch unreachable;
+                        try out.append(gpa, .{
+                            .name = name,
+                            .start = c.ts_node_start_byte(child),
+                            .end = c.ts_node_end_byte(child),
+                        });
+                    }
+                }
+            }
+            try self.walkSymbols(gpa, doc, child, depth + 1, out);
+        }
+    }
+
+    fn identifierOf(node: c.TSNode) ?c.TSNode {
+        const count = c.ts_node_named_child_count(node);
+        for (0..count) |i| {
+            const child = c.ts_node_named_child(node, @intCast(i));
+            const kind = std.mem.span(c.ts_node_type(child));
+            if (std.mem.indexOf(u8, kind, "identifier") != null or std.mem.eql(u8, kind, "name")) {
+                return child;
+            }
+        }
+        return null;
     }
 
     /// Class-per-byte over `range` (caller frees). Captures paint in
@@ -316,4 +498,100 @@ pub const Syntax = struct {
 
 test {
     std.testing.refAllDecls(@This());
+}
+
+// ── Capability wiring ───────────────────────────────────────────────
+
+const capability = @import("capability.zig");
+
+/// Register the instant tier: same-file definition + document symbols,
+/// scoped to this grammar's extensions. This is the cheap tier that
+/// races the LSP providers.
+pub fn registerProviders(caps: *capability.Caps, self: *Syntax) !void {
+    var id_buf: [64]u8 = undefined;
+    const id = try std.fmt.bufPrint(&id_buf, "treesitter/{s}", .{self.spec.name});
+    for ([_][]const u8{ "edit/definition", "edit/symbols-document" }) |cap| {
+        try caps.register(.{
+            .capability = cap,
+            .id = id,
+            .latency = .instant,
+            .priority = 1,
+            .extensions = self.spec.extensions,
+            .data = self,
+            .handler = tsProvider,
+        });
+    }
+}
+
+fn tsProvider(data: ?*anyopaque, caps: *capability.Caps, req: *const capability.Request) anyerror!void {
+    const self: *Syntax = @ptrCast(@alignCast(data.?));
+    const gpa = self.gpa;
+    switch (req.kind) {
+        .symbols, .definition => {},
+        else => {
+            caps.decline(req.session);
+            return;
+        },
+    }
+    var syms: std.ArrayList(Syntax.Sym) = .empty;
+    defer {
+        for (syms.items) |s| gpa.free(s.name);
+        syms.deinit(gpa);
+    }
+    try self.collectSymbols(gpa, req.doc, &syms);
+
+    if (req.kind == .symbols) {
+        const out = try gpa.alloc(capability.Symbol, syms.items.len);
+        defer gpa.free(out);
+        for (syms.items, 0..) |s, i| {
+            out[i] = .{
+                .name = s.name,
+                .kind = 0,
+                .range = @import("position.zig").StampedRange.at(req.version, s.start, s.end),
+            };
+        }
+        try caps.push(req.session, .{ .id = "treesitter", .priority = 1 }, .{ .symbols = out });
+        return;
+    }
+
+    // Definition: the identifier under the cursor, matched against
+    // collected symbol names.
+    const word = try wordAt(gpa, req.doc, req.offset);
+    defer gpa.free(word);
+    var locs: std.ArrayList(capability.Location) = .empty;
+    defer locs.deinit(gpa);
+    if (word.len > 0) {
+        for (syms.items) |s| {
+            if (std.mem.eql(u8, s.name, word)) {
+                try locs.append(gpa, .{
+                    .range = @import("position.zig").StampedRange.at(req.version, s.start, s.end),
+                });
+                break;
+            }
+        }
+    }
+    try caps.push(req.session, .{ .id = "treesitter", .priority = 1 }, .{ .locations = locs.items });
+}
+
+/// The word (ASCII-classed, non-ASCII counts in) containing `offset`.
+fn wordAt(gpa: Allocator, doc: *const Document, offset: usize) ![]u8 {
+    const rope = doc.text();
+    const len = rope.byteLen();
+    const start = offset -| 64;
+    const end = @min(len, offset + 64);
+    if (start >= end) return gpa.alloc(u8, 0);
+    const buf = try gpa.alloc(u8, end - start);
+    defer gpa.free(buf);
+    var sr = rope.streamReader(.{ .start = start, .end = end }, &.{});
+    sr.interface.readSliceAll(buf) catch unreachable;
+    const rel = offset - start;
+    var a = rel;
+    while (a > 0 and isWord(buf[a - 1])) a -= 1;
+    var b = rel;
+    while (b < buf.len and isWord(buf[b])) b += 1;
+    return gpa.dupe(u8, buf[a..b]);
+}
+
+fn isWord(ch: u8) bool {
+    return std.ascii.isAlphanumeric(ch) or ch == '_' or ch >= 0x80;
 }
