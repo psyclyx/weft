@@ -231,7 +231,7 @@ pub fn replaceAll(self: *Document, gpa: Allocator, items: []const Replacement) E
 
 // ── Peers ───────────────────────────────────────────────────────────
 
-pub const AddPeerError = Error || error{DuplicatePeer};
+pub const AddPeerError = Error || error{ DuplicatePeer, Unrealized };
 
 /// Register a mutator as a peer: a full shadow replica bootstrapped from
 /// the main replica's history. `name` must be unique among live peers
@@ -244,10 +244,9 @@ pub fn addPeer(self: *Document, gpa: Allocator, name: []const u8) AddPeerError!P
         if (slot) |p| if (std.mem.eql(u8, p.name, name)) return error.DuplicatePeer;
     }
 
-    const history = self.doc.serialize(gpa) catch |e| switch (e) {
-        error.Unrealized => unreachable, // editing replicas are always realized
-        else => |err| return err,
-    };
+    // A partial base cannot bootstrap a peer replica until realized —
+    // peers (plugins, backings) wait for the content they would edit.
+    const history = try self.doc.serialize(gpa);
     defer gpa.free(history);
     var replica = TextDoc.open(gpa, history) catch |e| switch (e) {
         error.Corrupt, error.MissingDependency => unreachable, // trusted local encode
@@ -492,6 +491,87 @@ pub fn textAt(self: *const Document, gpa: Allocator, version_token: []const u8) 
 
 test {
     std.testing.refAllDecls(@This());
+}
+
+// ── Partial checkout (stemma hole-bases) ────────────────────────────
+// A huge remote document arrives as a compacted base described by a
+// chunk table; unfetched spans are holes. Sync works immediately;
+// content follows the viewport (`realizeBase` per span). Merges that
+// land inside unrealized spans reject whole with `error.Unrealized`
+// (via `mergeRemote`) — realize, then merge the same batch again.
+
+pub const BaseChunk = TextDoc.BaseChunk;
+pub const AgentWatermark = TextDoc.AgentWatermark;
+pub const BaseHole = TextDoc.BaseHole;
+
+/// Replace this (still virgin: no events, no peers, empty rope)
+/// document with a partially realized replica of a compacted remote
+/// document. The user agent is re-registered on the new history.
+pub fn adoptPartial(
+    self: *Document,
+    gpa: Allocator,
+    base_version: []const u8,
+    watermarks: []const AgentWatermark,
+    chunks: []const BaseChunk,
+) (Error || error{Corrupt})!void {
+    assert(self.doc.history.eventCount() == 0);
+    assert(self.log.items.len == 0);
+    for (self.peers.items) |slot| assert(slot == null);
+    var fresh = try TextDoc.openPartial(gpa, base_version, watermarks, chunks);
+    errdefer fresh.deinit(gpa);
+    try fresh.setAgent(gpa, self.user_name);
+    self.doc.deinit(gpa);
+    self.doc = fresh;
+}
+
+/// Replace this (still virgin) document's content wholesale with a
+/// compacted base — the bulk-load path (O(content), zero events; a
+/// per-scalar event load of a 4MB file costs 4M events). Identity
+/// anchors into the loaded content resolve as `error.Compacted`; use
+/// for large files where that trade is right.
+pub fn adoptContent(self: *Document, gpa: Allocator, content: []const u8) Error!void {
+    assert(self.doc.history.eventCount() == 0);
+    assert(self.log.items.len == 0);
+    for (self.peers.items) |slot| assert(slot == null);
+    var fresh = TextDoc.openFromContent(gpa, content) catch |e| switch (e) {
+        error.Corrupt => unreachable, // self-produced token
+        else => |err| return err,
+    };
+    errdefer fresh.deinit(gpa);
+    try fresh.setAgent(gpa, self.user_name);
+    self.doc.deinit(gpa);
+    self.doc = fresh;
+}
+
+/// The unrealized base spans (fetch list; `base_offset` keys pristine
+/// base coordinates, `cur_offset` tracks the rope). Borrows.
+pub fn unrealizedBase(self: *const Document) []const BaseHole {
+    return self.doc.unrealizedBase();
+}
+
+pub fn baseRealized(self: *const Document) bool {
+    return self.doc.baseRealized();
+}
+
+/// Supply one unrealized span's pristine content. Not an edit: no
+/// commit, offsets and anchors unaffected.
+pub fn realizeBase(self: *Document, gpa: Allocator, base_offset: usize, content: []const u8) (Error || error{Corrupt})!void {
+    return self.doc.realizeBase(gpa, base_offset, content);
+}
+
+/// Compact all history at-or-before `stable_token` into a frozen base
+/// (host-side: makes a freshly loaded file servable as a partial base
+/// and bounds graph growth). The commit log is retained — its version
+/// tokens may reference the compacted horizon; consumers compare token
+/// bytes before causal comparison.
+pub fn compact(self: *Document, gpa: Allocator, stable_token: []const u8) TextDoc.CompactError!void {
+    try self.doc.compact(gpa, stable_token);
+}
+
+/// Per-agent compaction watermarks for serving `adoptPartial` peers.
+/// Names borrow from the document; caller frees the slice only.
+pub fn agentWatermarks(self: *const Document, gpa: Allocator) Error![]AgentWatermark {
+    return self.doc.agentWatermarks(gpa);
 }
 
 // ── Remote sync (the wire's entry points) ───────────────────────────

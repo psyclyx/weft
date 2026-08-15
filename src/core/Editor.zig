@@ -152,18 +152,34 @@ fn setBackingLoaded(self: *Editor, gpa: Allocator) Allocator.Error!void {
     self.doc.anchors.set(self.cursor, .{ .offset = 0, .bias = .right });
 }
 
+/// Above this, loads go through the bulk path (content becomes the
+/// compacted base, zero events) instead of per-scalar events. The
+/// trade: identity anchors into the loaded content report Compacted.
+pub const bulk_load_bytes = 1 << 20;
+
 /// Open a local file as this buffer's backing: content arrives as the
-/// backing peer's commit (not undoable). Startup path, allowed to
-/// block. The document must not already have a backing.
+/// backing peer's commit (not undoable) — or, for large files, as a
+/// compacted base. Startup path, allowed to block. The document must
+/// not already have a backing.
 pub fn openFile(self: *Editor, gpa: Allocator, path: []const u8) (Allocator.Error || file.ReadError || Document.AddPeerError)!void {
     task.assertMayBlock();
     assert(self.backing == .none);
     const bytes = try file.readAlloc(gpa, path);
     defer gpa.free(bytes);
-    var sync = try backing_mod.Sync.init(gpa, &self.doc);
-    errdefer sync.deinit(gpa, &self.doc);
     const token = backing_mod.localToken(bytes);
-    try sync.load(gpa, &self.doc, bytes, &token);
+    var sync = if (bytes.len >= bulk_load_bytes) blk: {
+        try self.doc.adoptContent(gpa, bytes);
+        var sync = try backing_mod.Sync.init(gpa, &self.doc);
+        errdefer sync.deinit(gpa, &self.doc);
+        try sync.loadBased(gpa, &self.doc, &token);
+        break :blk sync;
+    } else blk: {
+        var sync = try backing_mod.Sync.init(gpa, &self.doc);
+        errdefer sync.deinit(gpa, &self.doc);
+        try sync.load(gpa, &self.doc, bytes, &token);
+        break :blk sync;
+    };
+    errdefer sync.deinit(gpa, &self.doc);
     self.backing = .{ .file = .{ .path = try gpa.dupe(u8, path), .sync = sync } };
     try self.setBackingLoaded(gpa);
 }
@@ -348,6 +364,10 @@ pub fn isDirty(self: *const Editor, gpa: Allocator) Allocator.Error!bool {
     const saved = self.saved_version orelse return self.doc.commitCount() > 0;
     const head = try self.doc.version(gpa);
     defer gpa.free(head);
+    // Identical tokens are equal without causal comparison — which also
+    // stays correct when the saved point sits below a compaction
+    // horizon (causal comparison would refuse to look there).
+    if (std.mem.eql(u8, saved, head)) return false;
     const order = self.doc.compareVersions(gpa, saved, head) catch return true;
     return order != .equal;
 }

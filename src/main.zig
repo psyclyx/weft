@@ -33,6 +33,9 @@ const Args = struct {
     user: []const u8 = "user",
     headless: bool = false,
     lsp_cmd: ?[]const u8 = null, // --headless host-side server
+    /// With --connect: open the host's document as an editable partial
+    /// checkout (content follows the cursor; huge files open instantly).
+    partial: bool = false,
 };
 
 fn parseArgs(process_args: std.process.Args) Args {
@@ -56,6 +59,8 @@ fn parseArgs(process_args: std.process.Args) Args {
             out.user = it.next() orelse out.user;
         } else if (std.mem.eql(u8, a, "--headless")) {
             out.headless = true;
+        } else if (std.mem.eql(u8, a, "--partial")) {
+            out.partial = true;
         } else if (std.mem.eql(u8, a, "--lsp")) {
             out.lsp_cmd = it.next() orelse out.lsp_cmd;
         } else {
@@ -104,8 +109,9 @@ pub fn main(init: std.process.Init) !void {
         if (args.connect != null) {
             // Remote document: the path is a NAME (language routing,
             // status line); content arrives over the wire from the
-            // host. Nothing is read locally.
-            try b0.editor.adoptPath(gpa, path);
+            // host. Nothing is read locally. A partial checkout keeps
+            // the document virgin (adoptPartial replaces it wholesale).
+            if (!args.partial) try b0.editor.adoptPath(gpa, path);
         } else b0.editor.openFile(gpa, path) catch |err| switch (err) {
             error.FileNotFound => {
                 // New file: adopt the path, save creates it.
@@ -205,6 +211,8 @@ pub fn main(init: std.process.Init) !void {
     defer if (collab_session) |s| s.destroy();
     var conn: ?core.session.Conn = null;
     defer if (conn) |*c| c.deinit();
+    var partial_state: ?core.session.PartialDoc = null;
+    defer if (partial_state) |*p| p.deinit();
     if (args.listen != null or args.connect != null) {
         const fd = if (args.listen) |port| blk: {
             std.log.info("collab: listening on port {d} — waiting for a peer", .{port});
@@ -219,6 +227,10 @@ pub fn main(init: std.process.Init) !void {
         if (args.connect != null) {
             // Host-scoped feeds (diagnostics) arrive over the wire.
             col.import_diag_layer = try caps.layers.claim(gpa, &ed0.doc, "diagnostics", .host, "remote-host");
+            if (args.partial) {
+                partial_state = core.session.PartialDoc.init(gpa, &ed0.doc);
+                col.partial = &partial_state.?;
+            }
         }
     }
     var share_ctx: ShareCtx = .{ .conn = &conn, .caps = &caps };
@@ -351,6 +363,12 @@ pub fn main(init: std.process.Init) !void {
                     col.cursor_offset = b.editor.cursorOffset();
                 }
             }
+            // Partial checkout: realize content around the cursor (the
+            // requests dedupe against realized + inflight spans).
+            if (partial_state) |*p| {
+                const cur = ed0.cursorOffset();
+                p.want(collab_session.?, 0, cur -| (64 << 10), cur + (128 << 10)) catch {};
+            }
             if (try c.tick()) view_dirty = true;
             const live = collab_session.?.liveness();
             if (live != last_liveness) {
@@ -388,7 +406,17 @@ pub fn main(init: std.process.Init) !void {
         if (had_input) view_dirty = true; // cursor moves damage the view
 
         // ── Rebuild + upload on damage ──
-        if (view_dirty) {
+        // A partial checkout defers content rendering until the window
+        // around the cursor is realized (rope holes panic on content
+        // reads — the deterministic single choke point). The dirty flag
+        // stays set, so the frame after realization repaints.
+        const partial_blocked = if (partial_state) |*p| blk: {
+            if (p.state != .open) break :blk false; // virgin/empty doc renders fine
+            const cur = ed0.cursorOffset();
+            const end = @min(ed0.text().byteLen(), cur + (64 << 10));
+            break :blk !ed0.text().isRealized(.{ .start = cur -| (64 << 10), .end = end });
+        } else false;
+        if (view_dirty and !partial_blocked) {
             view_dirty = false;
             const projection = snail.Mat4.ortho(0, @floatFromInt(fb[0]), @floatFromInt(fb[1]), 0, -1, 1);
             const world_to_pixel = snail.mvpToScenePixel(projection, @floatFromInt(fb[0]), @floatFromInt(fb[1])) orelse unreachable;

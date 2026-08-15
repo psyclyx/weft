@@ -439,8 +439,10 @@ pub const Collab = struct {
     relay_ctx: ?*anyopaque = null,
     /// Agent side: serve blob requests for the hosted file.
     blob_server: ?*BlobServer = null,
-    /// Client side: fold blob replies into the partial checkout.
+    /// Client side: fold blob replies into the read-only viewer.
     remote_file: ?*RemoteFile = null,
+    /// Client side: editable partial checkout (stemma hole-bases).
+    partial: ?*PartialDoc = null,
     /// Host side: forward this layer's spans over the wire (feed ch 2).
     export_diag_layer: ?*layers_mod.Layer = null,
     export_diag_gen: usize = 0,
@@ -500,6 +502,12 @@ pub const Collab = struct {
     pub fn handleFrame(self: *Collab, frame: wire.Decoder.Decoded) !bool {
         const gpa = self.gpa;
         if (frame.channel < self.base or frame.channel > self.base + 3) return false;
+        // A partial client holds off ALL op traffic until the base is
+        // adopted — answering a frontier announce now would elicit a
+        // full-history bootstrap and defeat the partial checkout.
+        if (self.partial) |p| {
+            if (p.state != .open and p.state != .unsupported and frame.class == .op) return false;
+        }
         var changed = false;
         switch (frame.class) {
             .op => if (frame.channel == self.base) {
@@ -513,7 +521,15 @@ pub const Collab = struct {
                         try self.setTheirFrontier(token);
                         if (batch.len > 0) {
                             const merged = self.doc.mergeRemote(gpa, batch) catch |err| blk: {
-                                std.log.warn("collab: batch rejected: {t}", .{err});
+                                if (err == error.Unrealized) {
+                                    // Remote edits landed inside spans we
+                                    // have not fetched: stash the batch,
+                                    // realize (push() pumps the reads),
+                                    // merge again on arrival.
+                                    if (self.partial) |p| try p.stash(batch);
+                                } else {
+                                    std.log.warn("collab: batch rejected: {t}", .{err});
+                                }
                                 break :blk false;
                             };
                             changed = changed or merged;
@@ -568,12 +584,25 @@ pub const Collab = struct {
             },
             .request => if (frame.channel == self.base + 3) {
                 switch (std.enums.fromInt(wire.RequestKind, frame.kind) orelse return false) {
-                    .call => if (self.blob_server) |bs| {
-                        const reply = bs.handle(gpa, frame.payload) catch return changed;
+                    .call => {
+                        // Peek the op: file ops go to the blob server,
+                        // base ops are served from our document's base.
+                        var peek: []const u8 = frame.payload;
+                        _ = wire.getUv(&peek) catch return changed;
+                        if (peek.len == 0) return changed;
+                        const reply = if (peek[0] >= @intFromEnum(BlobOp.base_open))
+                            serveBase(gpa, self.doc, frame.payload) catch return changed
+                        else if (self.blob_server) |bs|
+                            bs.handle(gpa, frame.payload) catch return changed
+                        else
+                            return changed;
                         defer gpa.free(reply);
                         try self.session.post(.request, @intFromEnum(wire.RequestKind.ok), self.base + 3, reply);
                     },
-                    .ok => if (self.remote_file) |rf| {
+                    .ok => if (self.partial) |p| {
+                        const c = p.onReply(self.session, self.base, frame.payload) catch false;
+                        changed = changed or c;
+                    } else if (self.remote_file) |rf| {
                         const c = rf.onReply(frame.payload) catch false;
                         changed = changed or c;
                     },
@@ -591,6 +620,12 @@ pub const Collab = struct {
         const gpa = self.gpa;
         const live = self.session.liveness();
         if (live != .connected and live != .degraded) return false;
+
+        if (self.partial) |p| {
+            try p.requestOpen(self.session, self.base);
+            if (p.state != .open and p.state != .unsupported) return false;
+            try p.pump(self.session, self.base);
+        }
 
         if (!self.announced) {
             self.announced = true;
@@ -685,6 +720,10 @@ pub const Collab = struct {
     /// their side are no-ops — retransmit-safe.
     fn sendBatch(self: *Collab) !void {
         const gpa = self.gpa;
+        // The no-frontier fallback serializes the whole document as a
+        // bootstrap — impossible (and wrong) from a partial checkout;
+        // wait for the host's announce and send the delta instead.
+        if (self.their_frontier == null and self.partial != null) return;
         const head = try self.doc.version(gpa);
         errdefer gpa.free(head);
         const batch = if (self.their_frontier) |f|
@@ -1078,6 +1117,108 @@ test "conn: shared buffers both ways over one link — offers, open, converge, p
     }
 }
 
+test "partial checkout: adopt base over the wire, edit around holes, bounce-realize-converge" {
+    const gpa = t.allocator;
+    const fds = try socketPair();
+    var la: FdLink = .{ .fd = fds[0] };
+    var lb: FdLink = .{ .fd = fds[1] };
+
+    // Host: a biggish document, compacted so the content IS the base.
+    var host = try Document.init(gpa, "host");
+    defer host.deinit(gpa);
+    {
+        var content: std.ArrayList(u8) = .empty;
+        defer content.deinit(gpa);
+        for (0..6000) |i| {
+            const line = try std.fmt.allocPrint(gpa, "line {d} with some ballast text\n", .{i});
+            defer gpa.free(line);
+            try content.appendSlice(gpa, line);
+        }
+        try host.insert(gpa, 0, content.items);
+        const stable = try host.version(gpa);
+        defer gpa.free(stable);
+        try host.compact(gpa, stable);
+    }
+    const total = host.text().byteLen();
+    try t.expect(total > 2 * RemoteFile.chunk); // several chunks
+
+    var client = try Document.init(gpa, "client");
+    defer client.deinit(gpa);
+
+    const sa = try Session.create(gpa, la.link(), .server, "tok");
+    defer sa.destroy();
+    const sb = try Session.create(gpa, lb.link(), .client, "tok");
+    defer sb.destroy();
+    var ch = try Collab.init(gpa, sa, &host, "host");
+    defer ch.deinit();
+    var cc = try Collab.init(gpa, sb, &client, "client");
+    defer cc.deinit();
+    var partial = PartialDoc.init(gpa, &client);
+    defer partial.deinit();
+    cc.partial = &partial;
+
+    // The partial gate holds op traffic (both ways) until the base is
+    // adopted — a virgin doc announcing its frontier would get the
+    // full history instead.
+    const open_deadline = task.nowNs() + 5 * std.time.ns_per_s;
+    while (partial.state != .open and task.nowNs() < open_deadline) {
+        _ = ch.tick(0) catch {};
+        _ = cc.tick(0) catch {};
+        futexWaitTimed(&sb.out_wake, sb.out_wake.load(.acquire), std.time.ns_per_ms);
+    }
+    try t.expect(partial.state == .open);
+    try t.expectEqual(total, client.text().byteLen()); // holes carry length
+    try t.expect(!client.baseRealized());
+
+    // Realize the viewport (the first chunk) and edit inside it; the
+    // edit syncs to the host like any collaborative edit.
+    try partial.want(sb, 0, 0, 100);
+    const edit_deadline = task.nowNs() + 10 * std.time.ns_per_s;
+    var did_edit = false;
+    var converged = false;
+    while (!converged and task.nowNs() < edit_deadline) {
+        _ = ch.tick(0) catch {};
+        _ = cc.tick(0) catch {};
+        if (!did_edit and client.text().isRealized(.{ .start = 0, .end = 100 })) {
+            did_edit = true;
+            try client.insert(gpa, 0, "CLIENT-EDIT ");
+        }
+        if (did_edit) {
+            const h = try host.text().toOwnedSlice(gpa);
+            defer gpa.free(h);
+            converged = std.mem.startsWith(u8, h, "CLIENT-EDIT ");
+        }
+        futexWaitTimed(&sb.out_wake, sb.out_wake.load(.acquire), std.time.ns_per_ms);
+    }
+    try t.expect(converged);
+
+    // Host edits DEEP inside a span the client never fetched: the batch
+    // bounces (error.Unrealized), pump realizes, the retry converges.
+    try host.insert(gpa, total / 2, "HOST-DEEP-EDIT ");
+    const deep_deadline = task.nowNs() + 15 * std.time.ns_per_s;
+    var deep_ok = false;
+    while (!deep_ok and task.nowNs() < deep_deadline) {
+        _ = ch.tick(0) catch {};
+        _ = cc.tick(0) catch {};
+        if (client.baseRealized()) {
+            // Content reads are only legal once the holes are gone.
+            const c_text = try client.text().toOwnedSlice(gpa);
+            defer gpa.free(c_text);
+            deep_ok = std.mem.indexOf(u8, c_text, "HOST-DEEP-EDIT ") != null and
+                std.mem.startsWith(u8, c_text, "CLIENT-EDIT ");
+        }
+        futexWaitTimed(&sb.out_wake, sb.out_wake.load(.acquire), std.time.ns_per_ms);
+    }
+    try t.expect(deep_ok);
+
+    // Full convergence, byte for byte.
+    const h_text = try host.text().toOwnedSlice(gpa);
+    defer gpa.free(h_text);
+    const c_text = try client.text().toOwnedSlice(gpa);
+    defer gpa.free(c_text);
+    try t.expectEqualStrings(h_text, c_text);
+}
+
 test "session: wrong token never establishes" {
     const gpa = t.allocator;
     const fds = try socketPair();
@@ -1107,7 +1248,11 @@ test {
 // the file is never loaded into memory.
 
 pub const blob_channel: u64 = 3;
-pub const BlobOp = enum(u8) { stat = 0, read = 1 };
+/// `stat`/`read` serve the on-disk file (read-only viewer). `base_open`
+/// and `base_read` serve a compacted document's PRISTINE BASE — stable
+/// under concurrent edits, which is what editable partial checkout
+/// realizes against (stemma hole-bases).
+pub const BlobOp = enum(u8) { stat = 0, read = 1, base_open = 2, base_read = 3 };
 
 pub const BlobServer = struct {
     fd: i32,
@@ -1157,6 +1302,7 @@ pub const BlobServer = struct {
                 const n = self.read(buf, offset);
                 try reply.appendSlice(gpa, buf[0..n]);
             },
+            .base_open, .base_read => return error.Corrupt, // served by the document, not the file
         }
         return reply.toOwnedSlice(gpa);
     }
@@ -1356,6 +1502,242 @@ pub const RemoteFile = struct {
 };
 
 // ── TCP bootstrap (shared by editor and agent) ──────────────────────
+
+// ── Editable partial checkout (stemma hole-bases) ───────────────────
+// Host: a compacted document's base is immutable under edits; ops
+// base_open (reply: base_version + agent watermarks + a chunk table
+// snapped to scalar boundaries) and base_read (pristine base bytes)
+// serve it. Client: PartialDoc adopts the table as an all-holes
+// document, realizes spans on demand, and retries merges that bounced
+// off unrealized spans. Sync itself is the ordinary frontier exchange.
+
+/// Serve a base_open / base_read call from `doc`'s compacted base.
+/// Reply: uv id | u8 ok, then op-specific body. A doc that is not
+/// compacted answers ok=0 (client falls back to full sync).
+fn serveBase(gpa: Allocator, doc: *Document, payload: []const u8) ![]u8 {
+    var cur: []const u8 = payload;
+    const id = try wire.getUv(&cur);
+    if (cur.len == 0) return error.Corrupt;
+    const op = std.enums.fromInt(BlobOp, cur[0]) orelse return error.Corrupt;
+    cur = cur[1..];
+    var reply: std.ArrayList(u8) = .empty;
+    errdefer reply.deinit(gpa);
+    try wire.putUv(gpa, &reply, id);
+
+    const base_version = doc.doc.base_version;
+    const base_bytes = doc.doc.base_bytes;
+    if (base_version.len == 0 or !doc.baseRealized()) {
+        try reply.append(gpa, 0);
+        return reply.toOwnedSlice(gpa);
+    }
+    try reply.append(gpa, 1);
+    switch (op) {
+        .base_open => {
+            try wire.putUv(gpa, &reply, base_version.len);
+            try reply.appendSlice(gpa, base_version);
+            const wm = try doc.agentWatermarks(gpa);
+            defer gpa.free(wm);
+            try wire.putUv(gpa, &reply, wm.len);
+            for (wm) |w| {
+                try wire.putUv(gpa, &reply, w.name.len);
+                try reply.appendSlice(gpa, w.name);
+                try wire.putUv(gpa, &reply, w.seq_base);
+            }
+            // Chunk table: ~64K spans snapped to UTF-8 boundaries, each
+            // with its scalar count (one scan of the base, once per
+            // open).
+            var counts: std.ArrayList([2]u64) = .empty;
+            defer counts.deinit(gpa);
+            var at: usize = 0;
+            while (at < base_bytes.len) {
+                var end = @min(at + RemoteFile.chunk, base_bytes.len);
+                while (end > at and end < base_bytes.len and base_bytes[end] & 0xC0 == 0x80) end -= 1;
+                const scalars = std.unicode.utf8CountCodepoints(base_bytes[at..end]) catch return error.Corrupt;
+                try counts.append(gpa, .{ end - at, scalars });
+                at = end;
+            }
+            try wire.putUv(gpa, &reply, counts.items.len);
+            for (counts.items) |c| {
+                try wire.putUv(gpa, &reply, c[0]);
+                try wire.putUv(gpa, &reply, c[1]);
+            }
+        },
+        .base_read => {
+            const offset = try wire.getUv(&cur);
+            const len = @min(try wire.getUv(&cur), 4 << 20);
+            if (offset > base_bytes.len) return error.Corrupt;
+            const end = @min(base_bytes.len, offset + len);
+            try reply.appendSlice(gpa, base_bytes[@intCast(offset)..@intCast(end)]);
+        },
+        else => return error.Corrupt,
+    }
+    return reply.toOwnedSlice(gpa);
+}
+
+/// Client side of editable partial checkout: request the base table,
+/// adopt it into the (virgin) document, realize spans on demand — from
+/// the viewport (`want`) or because a merge bounced (`stash` + `pump`).
+pub const PartialDoc = struct {
+    gpa: Allocator,
+    doc: *Document,
+    next_call: u64 = 1,
+    inflight: std.AutoHashMapUnmanaged(u64, Req) = .empty,
+    state: enum { idle, opening, open, unsupported } = .idle,
+    /// A batch that bounced off unrealized spans; retried after every
+    /// realization (idempotent — duplicate events are no-ops).
+    pending_batch: ?[]u8 = null,
+
+    const Req = union(enum) { open, read: u64 };
+    const max_inflight_reads = 8;
+
+    pub fn init(gpa: Allocator, doc: *Document) PartialDoc {
+        return .{ .gpa = gpa, .doc = doc };
+    }
+
+    pub fn deinit(self: *PartialDoc) void {
+        self.inflight.deinit(self.gpa);
+        if (self.pending_batch) |b| self.gpa.free(b);
+    }
+
+    /// Ask the host for its base table (once).
+    pub fn requestOpen(self: *PartialDoc, session: *Session, base: u64) !void {
+        if (self.state != .idle) return;
+        self.state = .opening;
+        var p: std.ArrayList(u8) = .empty;
+        defer p.deinit(self.gpa);
+        const id = self.next_call;
+        self.next_call += 1;
+        try wire.putUv(self.gpa, &p, id);
+        try p.append(self.gpa, @intFromEnum(BlobOp.base_open));
+        try self.inflight.put(self.gpa, id, .open);
+        try session.post(.request, @intFromEnum(wire.RequestKind.call), base + 3, p.items);
+    }
+
+    /// Request realization of the unrealized spans intersecting the
+    /// current byte range `[start, end)` (the viewport).
+    pub fn want(self: *PartialDoc, session: *Session, base: u64, start: usize, end: usize) !void {
+        if (self.state != .open) return;
+        for (self.doc.unrealizedBase()) |h| {
+            if (h.cur_offset >= end or h.cur_offset + h.bytes <= start) continue;
+            try self.requestRead(session, base, h.base_offset, h.bytes);
+        }
+    }
+
+    /// Remember a batch that bounced off unrealized spans.
+    pub fn stash(self: *PartialDoc, batch: []const u8) !void {
+        const dup = try self.gpa.dupe(u8, batch);
+        if (self.pending_batch) |old| self.gpa.free(old);
+        self.pending_batch = dup;
+    }
+
+    /// Keep realization moving: while a merge is stalled, fetch every
+    /// hole (bounded concurrency); each arrival retries the merge.
+    pub fn pump(self: *PartialDoc, session: *Session, base: u64) !void {
+        if (self.state != .open or self.pending_batch == null) return;
+        for (self.doc.unrealizedBase()) |h| {
+            try self.requestRead(session, base, h.base_offset, h.bytes);
+        }
+    }
+
+    fn requestRead(self: *PartialDoc, session: *Session, base: u64, base_offset: usize, len: usize) !void {
+        var reads: usize = 0;
+        var it = self.inflight.valueIterator();
+        while (it.next()) |r| {
+            if (r.* == .read) {
+                if (r.read == base_offset) return; // already inflight
+                reads += 1;
+            }
+        }
+        if (reads >= max_inflight_reads) return;
+        var p: std.ArrayList(u8) = .empty;
+        defer p.deinit(self.gpa);
+        const id = self.next_call;
+        self.next_call += 1;
+        try wire.putUv(self.gpa, &p, id);
+        try p.append(self.gpa, @intFromEnum(BlobOp.base_read));
+        try wire.putUv(self.gpa, &p, base_offset);
+        try wire.putUv(self.gpa, &p, len);
+        try self.inflight.put(self.gpa, id, .{ .read = base_offset });
+        try session.post(.request, @intFromEnum(wire.RequestKind.call), base + 3, p.items);
+    }
+
+    /// Fold a base reply. Returns true when the document changed.
+    pub fn onReply(self: *PartialDoc, session: *Session, base: u64, payload: []const u8) !bool {
+        _ = session;
+        _ = base;
+        const gpa = self.gpa;
+        var cur: []const u8 = payload;
+        const id = try wire.getUv(&cur);
+        const kv = self.inflight.fetchRemove(id) orelse return false;
+        if (cur.len == 0) return false;
+        const ok = cur[0] == 1;
+        cur = cur[1..];
+        switch (kv.value) {
+            .open => {
+                if (!ok) {
+                    self.state = .unsupported; // host not compacted: full sync
+                    return false;
+                }
+                const vlen = try wire.getUv(&cur);
+                if (vlen > cur.len) return error.Corrupt;
+                const version = cur[0..@intCast(vlen)];
+                cur = cur[@intCast(vlen)..];
+                const wm_count = try wire.getUv(&cur);
+                if (wm_count > 4096) return error.Corrupt;
+                var wms: std.ArrayList(Document.AgentWatermark) = .empty;
+                defer wms.deinit(gpa);
+                for (0..@intCast(wm_count)) |_| {
+                    const nlen = try wire.getUv(&cur);
+                    if (nlen > cur.len) return error.Corrupt;
+                    const name = cur[0..@intCast(nlen)];
+                    cur = cur[@intCast(nlen)..];
+                    const seq_base = try wire.getUv(&cur);
+                    try wms.append(gpa, .{ .name = name, .seq_base = seq_base });
+                }
+                const chunk_count = try wire.getUv(&cur);
+                if (chunk_count > 1 << 24) return error.Corrupt;
+                var chunks: std.ArrayList(Document.BaseChunk) = .empty;
+                defer chunks.deinit(gpa);
+                for (0..@intCast(chunk_count)) |_| {
+                    const bytes = try wire.getUv(&cur);
+                    const scalars = try wire.getUv(&cur);
+                    try chunks.append(gpa, .{ .hole = .{
+                        .bytes = @intCast(bytes),
+                        .scalars = @intCast(scalars),
+                    } });
+                }
+                self.doc.adoptPartial(gpa, version, wms.items, chunks.items) catch |e| switch (e) {
+                    error.Corrupt => {
+                        self.state = .unsupported;
+                        return false;
+                    },
+                    else => |err| return err,
+                };
+                self.state = .open;
+                return true;
+            },
+            .read => |base_offset| {
+                if (!ok or cur.len == 0) return false;
+                self.doc.realizeBase(gpa, @intCast(base_offset), cur) catch |e| switch (e) {
+                    error.Corrupt => return false, // stale/duplicate span
+                    else => |err| return err,
+                };
+                // A realization may unblock the stalled merge.
+                if (self.pending_batch) |b| {
+                    if (self.doc.mergeRemote(gpa, b)) |_| {
+                        gpa.free(b);
+                        self.pending_batch = null;
+                    } else |err| if (err != error.Unrealized) {
+                        std.log.warn("partial: stashed batch rejected: {t}", .{err});
+                        gpa.free(b);
+                        self.pending_batch = null;
+                    }
+                }
+                return true;
+            },
+        }
+    }
+};
 
 pub fn tcpListener(port: u16) !i32 {
     const fd_rc = linux.socket(linux.AF.INET, linux.SOCK.STREAM, 0);

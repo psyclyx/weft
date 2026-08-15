@@ -31,6 +31,15 @@ pub fn run(gpa: std.mem.Allocator, args: Args, environ: std.process.Environ) !vo
             else => |e| return e,
         };
         std.log.info("headless: hosting {s} ({d} bytes)", .{ p, editor.text().byteLen() });
+        // Compact at the freshly loaded point: bounds graph growth and
+        // makes the content servable as a partial-checkout base.
+        if (editor.doc.commitCount() > 0) {
+            const stable = try editor.doc.version(gpa);
+            defer gpa.free(stable);
+            editor.doc.compact(gpa, stable) catch |e| {
+                std.log.warn("headless: compaction skipped: {t}", .{e});
+            };
+        }
     }
 
     // The minimal command surface the LSP adapter's tick needs.

@@ -82,6 +82,15 @@ pub const Sync = struct {
         try self.setToken(gpa, token);
     }
 
+    /// Adopt an already base-loaded document (bulk load: the content IS
+    /// the compacted base, zero events — see `Document.adoptContent`).
+    /// The mirror peer bootstraps from the base, so it equals the disk
+    /// without any insert.
+    pub fn loadBased(self: *Sync, gpa: Allocator, doc: *Document, token: []const u8) Allocator.Error!void {
+        assert(doc.peerText(self.peer).eql(doc.text().*));
+        try self.setToken(gpa, token);
+    }
+
     /// An external writer changed the disk: commit the difference as
     /// the mirror's ops (merges into the buffer like a remote
     /// collaborator's edits) and adopt the new token. Returns whether

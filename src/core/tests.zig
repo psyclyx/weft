@@ -963,3 +963,35 @@ test "tool buffer: plugin peer + sections + read-only (magit-class recipe)" {
     defer gpa.free(out3);
     try t.expect(std.mem.startsWith(u8, out3, "0"));
 }
+
+test "editor: bulk load — big file opens as a compacted base, edits and saves" {
+    const gpa = t.allocator;
+    var tmp_dir = t.tmpDir(.{});
+    defer tmp_dir.cleanup();
+    const path = try std.fmt.allocPrint(gpa, ".zig-cache/tmp/{s}/big.txt", .{tmp_dir.sub_path});
+    defer gpa.free(path);
+    {
+        const big = try gpa.alloc(u8, core.Editor.bulk_load_bytes + 4096);
+        defer gpa.free(big);
+        for (big, 0..) |*b, i| b.* = if (i % 64 == 63) '\n' else 'x';
+        var threaded: std.Io.Threaded = .init(gpa, .{});
+        defer threaded.deinit();
+        try std.Io.Dir.cwd().writeFile(threaded.io(), .{ .sub_path = path, .data = big });
+    }
+
+    var pool = try task.Pool.init(gpa, .{ .threads = 1 });
+    defer pool.deinit();
+    var ed = try Editor.init(gpa, pool, "user");
+    defer ed.deinit(gpa);
+    try ed.openFile(gpa, path);
+    // Zero events: the content is the base.
+    try t.expectEqual(@as(usize, 0), ed.doc.doc.history.eventCount());
+    try t.expect(!try ed.isDirty(gpa));
+
+    // Ordinary editing + guarded save on top of the base.
+    try ed.insertText(gpa, "EDIT ");
+    try t.expect(try ed.isDirty(gpa));
+    try ed.requestSave(gpa);
+    while (!ed.pollSave(gpa)) std.Thread.yield() catch {};
+    try t.expect(!try ed.isDirty(gpa));
+}
