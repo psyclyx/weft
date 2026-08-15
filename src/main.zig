@@ -239,29 +239,41 @@ pub fn main(init: std.process.Init) !void {
     defer if (conn) |*c| c.deinit();
     var partial_state: ?core.session.PartialDoc = null;
     defer if (partial_state) |*p| p.deinit();
-    if (args.listen != null or args.connect != null) {
-        const fd = if (args.listen) |port| blk: {
-            std.log.info("collab: listening on port {d} — waiting for a peer", .{port});
-            break :blk try core.session.tcpListen(port);
-        } else try core.session.tcpConnect(args.connect.?);
-        fd_link = .{ .fd = fd };
-        const role: core.secure.Role = if (args.listen != null) .server else .client;
-        collab_session = try core.session.Session.create(gpa, fd_link.link(), role, args.token);
-        conn = try core.session.Conn.init(gpa, collab_session.?, args.user, role);
+    // Inbound hosting is a separate, additive role: the outbound client
+    // state above (conn/collab_session/partial) is untouched; `hub`
+    // accepts N peers, started at boot (--listen) or at runtime (listen).
+    var hub: ?core.hub.Hub = null;
+    defer if (hub) |*h| h.deinit();
+    if (args.connect) |hostport| {
+        fd_link = .{ .fd = try core.session.tcpConnect(hostport) };
+        collab_session = try core.session.Session.create(gpa, fd_link.link(), .client, args.token);
+        conn = try core.session.Conn.init(gpa, collab_session.?, args.user, .client);
         const col = try conn.?.bindPrimary(&ed0.doc, 0);
         col.presence_layer = try caps.layers.claim(gpa, &ed0.doc, "presence", .replicated, "collab");
-        if (args.connect != null) {
-            // Host-scoped feeds (diagnostics) arrive over the wire.
-            col.import_diag_layer = try caps.layers.claim(gpa, &ed0.doc, "diagnostics", .host, "remote-host");
-            if (args.partial) {
-                partial_state = core.session.PartialDoc.init(gpa, &ed0.doc);
-                col.partial = &partial_state.?;
-            }
+        // Host-scoped feeds (diagnostics) arrive over the wire.
+        col.import_diag_layer = try caps.layers.claim(gpa, &ed0.doc, "diagnostics", .host, "remote-host");
+        if (args.partial) {
+            partial_state = core.session.PartialDoc.init(gpa, &ed0.doc);
+            col.partial = &partial_state.?;
         }
     }
-    var share_ctx: ShareCtx = .{ .conn = &conn, .caps = &caps, .partial = &partial_state };
+    var share_ctx: ShareCtx = .{
+        .conn = &conn,
+        .hub = &hub,
+        .caps = &caps,
+        .gpa = gpa,
+        .buffers = &buffers,
+        .partial = &partial_state,
+    };
     attach_deps.share = &share_ctx;
     defer if (share_ctx.pending_connect) |hp| gpa.free(hp);
+    defer {
+        for (share_ctx.shared.items) |s| gpa.free(s.name);
+        share_ctx.shared.deinit(gpa);
+    }
+    // Boot --listen folds onto the runtime listen path (one code path):
+    // seed the intent; the first frame boots the hub.
+    if (args.listen) |port| share_ctx.pending_listen = port;
     _ = try commands.bind(gpa, "connect", .{
         .name = "connect",
         .summary = "Connect to a host at runtime; its document opens as a buffer.",
@@ -295,6 +307,20 @@ pub fn main(init: std.process.Init) !void {
         .summary = "Pick one of the peer's shared buffers and open it.",
         .args = &.{},
         .handler = openSharedHandler,
+        .data = &share_ctx,
+    });
+    _ = try commands.bind(gpa, "listen", .{
+        .name = "listen",
+        .summary = "Start hosting on a port; peers connect and share buffers.",
+        .args = &.{.{ .name = "port", .type = .string }},
+        .handler = listenHandler,
+        .data = &share_ctx,
+    });
+    _ = try commands.bind(gpa, "stop-listening", .{
+        .name = "stop-listening",
+        .summary = "Stop accepting new peers (connected peers stay).",
+        .args = &.{},
+        .handler = stopListeningHandler,
         .data = &share_ctx,
     });
 
@@ -446,6 +472,37 @@ pub fn main(init: std.process.Init) !void {
             };
             view_dirty = true;
         }
+        // Listen intents (same out-of-hot-section region): bind/listen
+        // are immediate, accept runs on the hub's own thread.
+        if (share_ctx.pending_listen) |port| {
+            share_ctx.pending_listen = null;
+            if (hub == null) startListen(gpa, &hub, &share_ctx, &buffers, &caps, port, args.token, &echo_line);
+            view_dirty = true;
+        }
+        if (share_ctx.stop_listen_requested) {
+            share_ctx.stop_listen_requested = false;
+            if (hub) |*h| h.stopAccepting();
+            view_dirty = true;
+        }
+        if (hub) |*h| {
+            // Adopt new peers (binds the primary + replays shares), then
+            // publish the local cursor to every peer and tick.
+            h.acceptPending(&share_ctx, guiConfigure);
+            for (h.clients.items) |peer| {
+                for (peer.conn.collabs.items) |col| {
+                    if (buffers.get(@intCast(col.tag))) |b| col.cursor_offset = b.editor.cursorOffset();
+                }
+            }
+            if (h.tick()) view_dirty = true;
+            // Merge every peer's cursor into each shared doc's presence
+            // layer for local display (per-peer collabs keep it null).
+            if (share_ctx.primary_doc) |pd| {
+                if (caps.layers.find(pd, "presence")) |pl| core.hub.unionPresence(h, pd, pl, gpa) catch {};
+            }
+            for (share_ctx.shared.items) |s| {
+                if (caps.layers.find(s.doc, "presence")) |pl| core.hub.unionPresence(h, s.doc, pl, gpa) catch {};
+            }
+        }
 
         if (conn) |*c| {
             // Each bound buffer publishes its own cursor as presence.
@@ -541,9 +598,13 @@ pub fn main(init: std.process.Init) !void {
                 break :blk std.fmt.bufPrint(&pos_buf, "{d}/{d}", .{ index, buffers.count() }) catch null;
             };
             const shared_here = blk: {
-                const c = if (conn) |*c| c else break :blk false;
-                for (c.collabs.items) |col| {
-                    if (col.tag == abuf.id) break :blk true;
+                if (conn) |*c| {
+                    for (c.collabs.items) |col| if (col.tag == abuf.id) break :blk true;
+                }
+                if (hub) |*h| {
+                    for (h.clients.items) |peer| {
+                        for (peer.conn.collabs.items) |col| if (col.tag == abuf.id) break :blk true;
+                    }
                 }
                 break :blk false;
             };
@@ -561,6 +622,13 @@ pub fn main(init: std.process.Init) !void {
                 if (total_len == 0) break :blk null;
                 break :blk @intCast(@min(99, unfetched * 100 / total_len));
             };
+            var listen_buf: [24]u8 = undefined;
+            const link_note: ?[]const u8 = if (collab_session) |s|
+                @tagName(s.liveness())
+            else if (hub) |*h|
+                (std.fmt.bufPrint(&listen_buf, "listening {d}", .{h.clients.items.len}) catch "listening")
+            else
+                null;
             const hud: view_mod.Hud = .{
                 .mode = keymap.currentMode(),
                 .file = editor.backingPath() orelse abuf.name,
@@ -580,7 +648,7 @@ pub fn main(init: std.process.Init) !void {
                 .highlight_layer = caps.layers.find(&editor.doc, "highlight"),
                 .diag_layer = caps.layers.find(&editor.doc, "diagnostics"),
                 .presence_layer = caps.layers.find(&editor.doc, "presence"),
-                .link = if (collab_session) |s| @tagName(s.liveness()) else null,
+                .link = link_note,
                 .cursor_diag = blk: {
                     const dl = caps.layers.find(&editor.doc, "diagnostics") orelse break :blk null;
                     const cur = editor.cursorOffset();
@@ -1052,16 +1120,119 @@ fn joinPath(gpa: std.mem.Allocator, base: []const u8, name: []const u8) ![]u8 {
 
 // ── Buffer sharing over the connection ──────────────────────────────
 
+/// A buffer shared over the hub, remembered so late-joining peers can be
+/// caught up (the hub analog of `Conn.share_names`). `name` is owned.
+const SharedDoc = struct {
+    doc: *core.Document,
+    name: []u8,
+    tag: u64,
+};
+
 const ShareCtx = struct {
+    gpa: std.mem.Allocator,
+    buffers: *core.Buffers,
+    /// Outbound client connection (connect/--connect); single.
     conn: *?core.session.Conn,
+    /// Inbound hosting: N peers (listen/--listen); additive.
+    hub: *?core.hub.Hub,
     caps: *core.Caps,
     partial: *?core.session.PartialDoc,
+    /// Buffers shared over the hub — replayed to late joiners.
+    shared: std.ArrayList(SharedDoc) = .empty,
+    /// The doc bound at quad 0 for every hub peer (the buffer active
+    /// when listening began); set by the listen apply block.
+    primary_doc: ?*core.Document = null,
+    primary_tag: u64 = 0,
     /// Commands record INTENTS here; the frame loop applies them
     /// outside the input hot section (connect blocks on TCP, disconnect
     /// joins session threads).
     pending_connect: ?[]u8 = null,
     disconnect_requested: bool = false,
+    pending_listen: ?u16 = null,
+    stop_listen_requested: bool = false,
 };
+
+/// Wire a hub-side collab as a participant-and-relay: no local presence
+/// layer (the frame loop unions all peers into one), publish our own
+/// cursor, relay peers to each other.
+fn wireHubShare(sc: *ShareCtx, peer: *core.hub.Peer, col: *core.session.Collab, doc: *core.Document) !void {
+    col.presence_layer = null;
+    col.export_diag_layer = sc.caps.layers.find(doc, "diagnostics");
+    col.publish_presence = true;
+    col.relay = core.hub.relayPresence;
+    col.relay_ctx = try peer.relayFor(doc);
+}
+
+/// Bind a newly joined hub peer: the primary doc at quad 0, then replay
+/// every already-shared buffer so late joiners are caught up.
+fn guiConfigure(ctx: ?*anyopaque, peer: *core.hub.Peer) anyerror!void {
+    const sc: *ShareCtx = @ptrCast(@alignCast(ctx.?));
+    const pd = sc.primary_doc orelse return error.NoPrimary;
+    const col = try peer.conn.bindPrimary(pd, sc.primary_tag);
+    try wireHubShare(sc, peer, col, pd);
+    _ = sc.caps.layers.claim(sc.gpa, pd, "presence", .replicated, "collab") catch {};
+    for (sc.shared.items) |s| {
+        const scol = try peer.conn.share(s.doc, s.name, s.tag);
+        try wireHubShare(sc, peer, scol, s.doc);
+        _ = sc.caps.layers.claim(sc.gpa, s.doc, "presence", .replicated, "collab") catch {};
+    }
+}
+
+/// Start the hub: assign into the slot FIRST, then `listen` against the
+/// slot's stable address (the accept thread captures it).
+fn startListen(
+    gpa: std.mem.Allocator,
+    hub_slot: *?core.hub.Hub,
+    sc: *ShareCtx,
+    buffers: *core.Buffers,
+    caps: *core.Caps,
+    port: u16,
+    token: []const u8,
+    echo: *std.ArrayList(u8),
+) void {
+    sc.primary_doc = &buffers.active().editor.doc;
+    sc.primary_tag = buffers.active_id;
+    hub_slot.* = core.hub.Hub.init(gpa, token) catch {
+        setEcho(echo, gpa, "listen: out of memory");
+        return;
+    };
+    const h = &hub_slot.*.?;
+    h.listen(port) catch |err| {
+        var buf: [64]u8 = undefined;
+        setEcho(echo, gpa, std.fmt.bufPrint(&buf, "listen failed: {t}", .{err}) catch "listen failed");
+        h.deinit();
+        hub_slot.* = null;
+        return;
+    };
+    _ = caps.layers.claim(gpa, sc.primary_doc.?, "presence", .replicated, "collab") catch {};
+    var buf: [32]u8 = undefined;
+    setEcho(echo, gpa, std.fmt.bufPrint(&buf, "listening on {d}", .{port}) catch "listening");
+}
+
+fn setEcho(echo: *std.ArrayList(u8), gpa: std.mem.Allocator, msg: []const u8) void {
+    echo.clearRetainingCapacity();
+    echo.appendSlice(gpa, msg) catch {};
+}
+
+/// `listen <port>` — start hosting at runtime (records the intent; the
+/// frame loop starts the hub outside the hot section).
+fn listenHandler(ctx: *core.command.Context, data: ?*anyopaque, args: []const core.command.Value) anyerror!core.command.Value {
+    const sc: *ShareCtx = @ptrCast(@alignCast(data.?));
+    if (args.len != 1 or args[0] != .string) return error.TypeMismatch;
+    if (sc.hub.* != null) return .{ .string = "already listening (stop-listening first)" };
+    const port = std.fmt.parseInt(u16, args[0].string, 10) catch return .{ .string = "bad port" };
+    sc.pending_listen = port;
+    return ok_echo(ctx, "listening…");
+}
+
+/// `stop-listening` — stop accepting new peers; connected peers stay.
+fn stopListeningHandler(ctx: *core.command.Context, data: ?*anyopaque, args: []const core.command.Value) anyerror!core.command.Value {
+    const sc: *ShareCtx = @ptrCast(@alignCast(data.?));
+    if (args.len != 0) return error.ArityMismatch;
+    if (sc.hub.* == null) return .{ .string = "not listening" };
+    sc.stop_listen_requested = true;
+    return ok_echo(ctx, "no longer accepting peers");
+}
 
 /// `connect host:port` — join a host at runtime (the remote primary
 /// opens as a new buffer). No auto-reconnect for runtime connections.
@@ -1099,31 +1270,97 @@ fn ok_echo(ctx: *core.command.Context, msg: []const u8) !core.command.Value {
     return .nil;
 }
 
-/// `share` — announce the active buffer on the connection; the peer
-/// sees it via `open-shared`. One history root; the peer's frontier
-/// exchange bootstraps content.
+/// `share` — announce the active buffer to the peer(s): over the
+/// outbound connection AND to every hub peer, remembering it for late
+/// joiners. One history root; the peer's frontier exchange bootstraps
+/// content. The hub's primary buffer is already served, so it is skipped.
 fn shareHandler(ctx: *core.command.Context, data: ?*anyopaque, args: []const core.command.Value) anyerror!core.command.Value {
     const sc: *ShareCtx = @ptrCast(@alignCast(data.?));
     if (args.len != 0) return error.ArityMismatch;
-    const c = if (sc.conn.*) |*c| c else return .{ .string = "not connected" };
+    if (sc.conn.* == null and sc.hub.* == null) return .{ .string = "not connected" };
     const buf = ctx.buffer();
-    for (c.collabs.items) |col| {
-        if (col.tag == buf.id) return .{ .string = "already shared" };
-    }
     const doc = &buf.editor.doc;
-    const col = try c.share(doc, buf.name, buf.id);
-    col.presence_layer = try sc.caps.layers.claim(ctx.gpa, doc, "presence", .replicated, "collab");
-    col.export_diag_layer = sc.caps.layers.find(doc, "diagnostics");
-    std.log.info("shared buffer {s} on channel {d}", .{ buf.name, col.base });
+    var did = false;
+
+    if (sc.conn.*) |*c| {
+        var already = false;
+        for (c.collabs.items) |col| if (col.tag == buf.id) {
+            already = true;
+            break;
+        };
+        if (!already) {
+            const col = try c.share(doc, buf.name, buf.id);
+            col.presence_layer = try sc.caps.layers.claim(ctx.gpa, doc, "presence", .replicated, "collab");
+            col.export_diag_layer = sc.caps.layers.find(doc, "diagnostics");
+            did = true;
+        }
+    }
+
+    if (sc.hub.*) |*h| {
+        const is_primary = if (sc.primary_doc) |pd| pd == doc else false;
+        var recorded = false;
+        for (sc.shared.items) |s| if (s.tag == buf.id) {
+            recorded = true;
+            break;
+        };
+        if (!is_primary and !recorded) {
+            const name_owned = try sc.gpa.dupe(u8, buf.name);
+            errdefer sc.gpa.free(name_owned);
+            try sc.shared.append(sc.gpa, .{ .doc = doc, .name = name_owned, .tag = buf.id });
+            _ = sc.caps.layers.claim(ctx.gpa, doc, "presence", .replicated, "collab") catch {};
+            for (h.clients.items) |peer| {
+                var has = false;
+                for (peer.conn.collabs.items) |col| if (col.tag == buf.id) {
+                    has = true;
+                    break;
+                };
+                if (has) continue;
+                const scol = peer.conn.share(doc, buf.name, buf.id) catch continue;
+                wireHubShare(sc, peer, scol, doc) catch continue;
+            }
+            did = true;
+        }
+    }
+
+    if (!did) return .{ .string = "already shared" };
+    std.log.info("shared buffer {s}", .{buf.name});
     return .nil;
 }
 
-/// `open-shared` — pick over the peer's unopened announcements; accept
-/// opens it into a fresh buffer (no local backing: the sharer saves).
+/// One openable offer across all connections: the owning Conn, the hub
+/// peer it belongs to (null for the outbound connection), the Conn-local
+/// offer index, and its display name (borrowed).
+const OfferRef = struct {
+    conn: *core.session.Conn,
+    peer: ?*core.hub.Peer,
+    index: usize,
+    name: []const u8,
+};
+
+fn collectOffers(sc: *ShareCtx, gpa: std.mem.Allocator, out: *std.ArrayList(OfferRef)) !void {
+    if (sc.conn.*) |*c| {
+        for (c.offers.items, 0..) |o, i| {
+            if (!o.opened) try out.append(gpa, .{ .conn = c, .peer = null, .index = i, .name = o.name });
+        }
+    }
+    if (sc.hub.*) |*h| {
+        for (h.clients.items) |peer| {
+            for (peer.conn.offers.items, 0..) |o, i| {
+                if (!o.opened) try out.append(gpa, .{ .conn = &peer.conn, .peer = peer, .index = i, .name = o.name });
+            }
+        }
+    }
+}
+
+/// `open-shared` — pick over every peer's unopened announcements
+/// (outbound host + all hub peers); accept opens it into a fresh buffer.
 fn openSharedHandler(ctx: *core.command.Context, data: ?*anyopaque, args: []const core.command.Value) anyerror!core.command.Value {
     const sc: *ShareCtx = @ptrCast(@alignCast(data.?));
     if (args.len != 0) return error.ArityMismatch;
-    const c = if (sc.conn.*) |*c| c else return .{ .string = "not connected" };
+    var refs: std.ArrayList(OfferRef) = .empty;
+    defer refs.deinit(ctx.gpa);
+    try collectOffers(sc, ctx.gpa, &refs);
+    if (refs.items.len == 0) return .{ .string = "no shared buffers offered" };
     var texts: std.ArrayList([]u8) = .empty;
     defer {
         for (texts.items) |it| ctx.gpa.free(it);
@@ -1131,33 +1368,41 @@ fn openSharedHandler(ctx: *core.command.Context, data: ?*anyopaque, args: []cons
     }
     var entries: std.ArrayList(core.pick.Entry) = .empty;
     defer entries.deinit(ctx.gpa);
-    for (c.offers.items, 0..) |o, i| {
-        if (o.opened) continue;
-        const text = try std.fmt.allocPrint(ctx.gpa, "{d}: @{s}", .{ i, o.name });
+    for (refs.items, 0..) |r, i| {
+        const text = try std.fmt.allocPrint(ctx.gpa, "{d}: @{s}", .{ i, r.name });
         try texts.append(ctx.gpa, text);
-        try entries.append(ctx.gpa, .{ .text = text, .doc = "shared by the peer — open to collaborate" });
+        try entries.append(ctx.gpa, .{ .text = text, .doc = "shared by a peer — open to collaborate" });
     }
-    if (entries.items.len == 0) return .{ .string = "no shared buffers offered" };
     try ctx.pick.open(ctx, "shared", entries.items, .{ .handler = openSharedAccept, .data = sc });
     return .nil;
 }
 
 fn openSharedAccept(ctx: *core.command.Context, data: ?*anyopaque, choice: []const u8) anyerror!void {
     const sc: *ShareCtx = @ptrCast(@alignCast(data.?));
-    const c = if (sc.conn.*) |*c| c else return;
     const colon = std.mem.indexOfScalar(u8, choice, ':') orelse return;
-    const index = std.fmt.parseInt(usize, choice[0..colon], 10) catch return;
-    if (index >= c.offers.items.len or c.offers.items[index].opened) return;
-    const o = c.offers.items[index];
+    const list_idx = std.fmt.parseInt(usize, choice[0..colon], 10) catch return;
+    var refs: std.ArrayList(OfferRef) = .empty;
+    defer refs.deinit(ctx.gpa);
+    collectOffers(sc, ctx.gpa, &refs) catch return;
+    if (list_idx >= refs.items.len) return;
+    const ref = refs.items[list_idx];
+    if (ref.index >= ref.conn.offers.items.len or ref.conn.offers.items[ref.index].opened) return;
 
-    const display = try std.fmt.allocPrint(ctx.gpa, "@{s}", .{o.name});
+    const display = try std.fmt.allocPrint(ctx.gpa, "@{s}", .{ref.name});
     defer ctx.gpa.free(display);
     const id = try ctx.buffers.create(ctx.gpa, display);
     const buf = ctx.buffers.get(id).?;
     const doc = &buf.editor.doc;
-    const col = try c.openOffer(index, doc, id);
-    col.presence_layer = try sc.caps.layers.claim(ctx.gpa, doc, "presence", .replicated, "collab");
-    col.import_diag_layer = try sc.caps.layers.claim(ctx.gpa, doc, "diagnostics", .host, "remote-host");
+    const col = try ref.conn.openOffer(ref.index, doc, id);
+    if (ref.peer) |peer| {
+        // A hub peer shared a buffer to us: participate + relay it.
+        try wireHubShare(sc, peer, col, doc);
+        _ = sc.caps.layers.claim(ctx.gpa, doc, "presence", .replicated, "collab") catch {};
+    } else {
+        // Offered by the host we connected out to.
+        col.presence_layer = try sc.caps.layers.claim(ctx.gpa, doc, "presence", .replicated, "collab");
+        col.import_diag_layer = try sc.caps.layers.claim(ctx.gpa, doc, "diagnostics", .host, "remote-host");
+    }
     try ctx.buffers.switchTo(ctx.gpa, id, ctx.keymap);
 }
 
@@ -1202,6 +1447,14 @@ fn closeBufferHandler(ctx: *core.command.Context, data: ?*anyopaque, args: []con
     // Order matters: shares reference the doc and its layers.
     if (deps.share) |sc| {
         if (sc.conn.*) |*c| c.unbindTag(b.id);
+        if (sc.hub.*) |*h| for (h.clients.items) |peer| peer.conn.unbindTag(b.id);
+        var i: usize = 0;
+        while (i < sc.shared.items.len) {
+            if (sc.shared.items[i].tag == b.id) {
+                sc.gpa.free(sc.shared.items[i].name);
+                _ = sc.shared.swapRemove(i);
+            } else i += 1;
+        }
     }
     detachProviders(deps, b);
     try ctx.buffers.close(ctx.gpa, b.id, ctx.keymap);

@@ -90,38 +90,25 @@ pub fn run(gpa: std.mem.Allocator, args: Args, environ: std.process.Environ) !vo
 
     // ── Hub: accept forever, serve N peers on the one document ──
     std.log.info("headless: listening on {d}", .{args.listen});
-    const listener = try session.tcpListener(args.listen);
-    var hub: Hub = .{ .gpa = gpa };
+    var hub = try core.hub.Hub.init(gpa, args.token);
     defer hub.deinit();
-    const accept_thread = try std.Thread.spawn(.{}, acceptMain, .{ &hub, listener });
-    accept_thread.detach(); // dies with the process (accept has no clean cancel)
+    try hub.listen(args.listen);
+    var cfg: HeadlessCfg = .{
+        .doc = &editor.doc,
+        .caps = &caps,
+        .blob = if (blob != null) &blob.? else null,
+    };
 
     var park: std.atomic.Value(u32) = .init(0);
     var last_change_ns: u64 = 0;
     var seen_commits: usize = 0;
     while (!quit) {
-        // Adopt newly accepted connections.
-        var pending = hub.incoming.swap(null, .acquire);
-        while (pending) |node| {
-            pending = node.next;
-            const fd = node.fd;
-            gpa.destroy(node);
-            hub.adopt(fd, args.token, &editor.doc, &caps, if (blob != null) &blob.? else null) catch |err| {
-                std.log.warn("headless: peer setup failed: {t}", .{err});
-            };
-        }
-        // Tick everyone; broadcast falls out of per-peer frontier
-        // tracking (a batch merged from one peer moves the head, so
-        // every other Collab sends on its next tick).
-        var i: usize = 0;
-        while (i < hub.clients.items.len) {
-            const c = hub.clients.items[i];
-            _ = c.conn.tick() catch {};
-            if (c.sess.liveness() == .offline) {
-                std.log.info("headless: peer departed ({d} left)", .{hub.clients.items.len - 1});
-                hub.remove(i);
-            } else i += 1;
-        }
+        // Adopt newly accepted connections, then tick everyone;
+        // broadcast falls out of per-peer frontier tracking (a batch
+        // merged from one peer moves the head, so every other Collab
+        // sends on its next tick).
+        hub.acceptPending(&cfg, headlessConfigure);
+        _ = hub.tick();
         if (lsp) |l| _ = try l.tick(&ctx);
         _ = editor.pollSave(gpa);
         if (editor.doc.commitCount() != seen_commits) {
@@ -136,92 +123,23 @@ pub fn run(gpa: std.mem.Allocator, args: Args, environ: std.process.Environ) !vo
     }
 }
 
-const FdNode = struct { next: ?*FdNode = null, fd: i32 };
-
-const Client = struct {
-    hub: *Hub,
-    fd_link: session.FdLink,
-    sess: *session.Session,
-    conn: session.Conn,
+/// Binding policy for a new peer: the headless host serves ONE document
+/// (the hosted file) on quad 0, has no cursor of its own (relay only),
+/// and serves blobs + host-scoped diagnostics.
+const HeadlessCfg = struct {
+    doc: *core.Document,
+    caps: *capability.Caps,
+    blob: ?*session.BlobServer,
 };
 
-const Hub = struct {
-    gpa: std.mem.Allocator,
-    clients: std.ArrayList(*Client) = .empty,
-    incoming: std.atomic.Value(?*FdNode) = .init(null),
-
-    fn deinit(self: *Hub) void {
-        for (self.clients.items) |c| {
-            c.conn.deinit();
-            c.sess.destroy();
-            self.gpa.destroy(c);
-        }
-        self.clients.deinit(self.gpa);
-        var cur = self.incoming.swap(null, .acquire);
-        while (cur) |n| {
-            cur = n.next;
-            _ = std.os.linux.close(n.fd);
-            self.gpa.destroy(n);
-        }
-    }
-
-    fn adopt(
-        self: *Hub,
-        fd: i32,
-        token: []const u8,
-        doc: *core.Document,
-        caps: *capability.Caps,
-        blob: ?*session.BlobServer,
-    ) !void {
-        const gpa = self.gpa;
-        const c = try gpa.create(Client);
-        errdefer gpa.destroy(c);
-        c.* = .{ .hub = self, .fd_link = .{ .fd = fd }, .sess = undefined, .conn = undefined };
-        c.sess = try session.Session.create(gpa, c.fd_link.link(), .server, token);
-        errdefer c.sess.destroy();
-        c.conn = try session.Conn.init(gpa, c.sess, "host", .server);
-        errdefer c.conn.deinit();
-        const collab = try c.conn.bindPrimary(doc, 0);
-        collab.export_diag_layer = caps.layers.find(doc, "diagnostics");
-        collab.blob_server = blob;
-        collab.publish_presence = false; // a hub has no cursor
-        collab.relay = relayPresence;
-        collab.relay_ctx = c;
-        try self.clients.append(gpa, c);
-        std.log.info("headless: peer joined ({d} connected)", .{self.clients.items.len});
-    }
-
-    fn remove(self: *Hub, i: usize) void {
-        const c = self.clients.swapRemove(i);
-        c.conn.deinit();
-        c.sess.destroy();
-        self.gpa.destroy(c);
-    }
-};
-
-/// Presence relay: what one peer publishes, every other peer receives.
-fn relayPresence(ctx: ?*anyopaque, key: u64, payload: []const u8) void {
-    const sender: *Client = @ptrCast(@alignCast(ctx.?));
-    for (sender.hub.clients.items) |c| {
-        if (c == sender) continue;
-        c.sess.postFeed(1, key, payload) catch {};
-    }
-}
-
-fn acceptMain(hub: *Hub, listener: i32) void {
-    while (true) {
-        const fd = session.tcpAccept(listener) catch return;
-        const node = hub.gpa.create(FdNode) catch {
-            _ = std.os.linux.close(fd);
-            continue;
-        };
-        node.* = .{ .fd = fd };
-        var head = hub.incoming.load(.monotonic);
-        while (true) {
-            node.next = head;
-            head = hub.incoming.cmpxchgWeak(head, node, .release, .monotonic) orelse break;
-        }
-    }
+fn headlessConfigure(ctx: ?*anyopaque, peer: *core.hub.Peer) anyerror!void {
+    const cfg: *HeadlessCfg = @ptrCast(@alignCast(ctx.?));
+    const collab = try peer.conn.bindPrimary(cfg.doc, 0);
+    collab.export_diag_layer = cfg.caps.layers.find(cfg.doc, "diagnostics");
+    collab.blob_server = cfg.blob;
+    collab.publish_presence = false; // a hub has no cursor
+    collab.relay = core.hub.relayPresence;
+    collab.relay_ctx = try peer.relayFor(cfg.doc);
 }
 
 fn parkNs(word: *std.atomic.Value(u32), ns: u64) void {
