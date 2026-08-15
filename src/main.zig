@@ -76,7 +76,12 @@ pub fn main(init: std.process.Init) !void {
     var editor = try core.Editor.init(gpa, pool, args.user);
     defer editor.deinit(gpa);
     if (args.file) |path| {
-        editor.openFile(gpa, path) catch |err| switch (err) {
+        if (args.connect != null) {
+            // Remote document: the path is a NAME (language routing,
+            // status line); content arrives over the wire from the
+            // host. Nothing is read locally.
+            editor.path = try gpa.dupe(u8, path);
+        } else editor.openFile(gpa, path) catch |err| switch (err) {
             error.FileNotFound => {
                 // New file: adopt the path, save creates it.
                 editor.path = try gpa.dupe(u8, path);
@@ -149,7 +154,10 @@ pub fn main(init: std.process.Init) !void {
 
     var lsp: ?*core.lsp.Lsp = null;
     defer if (lsp) |l| l.destroy();
-    if (editor.path) |p| {
+    // Placement routing: LSP providers are `host`-placed — for a
+    // remote-hosted document the server runs on the host peer (the
+    // agent) and its diagnostics arrive as the imported host feed.
+    if (args.connect == null) if (editor.path) |p| {
         if (lsp_servers.match(p)) |entry| {
             lsp = core.lsp.Lsp.create(gpa, entry.argv, p, &editor.doc, init.minimal.environ) catch |err| blk: {
                 std.log.warn("lsp unavailable: {t}", .{err});
@@ -163,7 +171,7 @@ pub fn main(init: std.process.Init) !void {
                 l.attachCaps(&caps, entry.extSlice());
             }
         }
-    }
+    };
 
     // ── Collab session (wire v1) ──
     var fd_link: core.session.FdLink = undefined;

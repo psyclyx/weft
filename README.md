@@ -131,3 +131,27 @@ The render path is verified without touching a desktop: a headless sway
 (`WLR_BACKENDS=headless`) hosts the window, `wtype` injects input
 (single invocation per sequence — per-invocation virtual keyboards churn
 the seat keymap), `grim` captures frames for inspection.
+
+## Remote workflow (phase 2)
+
+Every scion is a peer. Host a document from a headless machine:
+
+```sh
+scion-agent --listen 7777 --token SECRET --lsp zls path/to/file.zig
+```
+
+and open it from anywhere (`file.zig` is a name hint — nothing is read
+locally; content, ops, and the host's LSP diagnostics arrive over the
+encrypted wire; tree-sitter runs locally on your replica):
+
+```sh
+scion --connect host:7777 --token SECRET file.zig
+```
+
+Two editors can also pair directly (`--listen` in one, `--connect` in
+the other). The status line shows link liveness (connected/degraded/
+offline); partitions heal as one frontier exchange. Protocol spec:
+doc/wire.md (trust model included — shared token, my-machines-only).
+Huge files open as a partial-checkout viewer (chunked range fetches,
+content-addressed cache); editable holes await the stemma proposal in
+doc/stemma-holes-proposal.md.

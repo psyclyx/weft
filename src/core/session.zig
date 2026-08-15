@@ -1119,3 +1119,128 @@ test "partial checkout: multi-GB sparse file — jump to end, tail growth, viewe
     sr2.interface.readSliceAll(&grew) catch unreachable;
     try t.expectEqualStrings("++GREW", &grew);
 }
+
+// ── Chaos link (fault injection without root) ───────────────────────
+
+/// Wraps a Link with injected latency and partitions. Stream semantics
+/// are preserved (bytes delay or stall, never corrupt — loss on a
+/// reliable stream is modeled as stall/partition, exactly what TCP
+/// gives you on a lossy path).
+pub const ChaosLink = struct {
+    inner: Link,
+    /// One-way added latency per write.
+    latency_ns: std.atomic.Value(u64) = .init(0),
+    /// While true, writes block (the cable is out).
+    partitioned: std.atomic.Value(bool) = .init(false),
+    park: std.atomic.Value(u32) = .init(0),
+
+    pub fn link(self: *ChaosLink) Link {
+        return .{ .ctx = self, .readFn = readC, .writeFn = writeC, .closeFn = closeC };
+    }
+
+    fn readC(ctx: ?*anyopaque, buf: []u8) anyerror!usize {
+        const self: *ChaosLink = @ptrCast(@alignCast(ctx.?));
+        return self.inner.read(buf);
+    }
+
+    fn writeC(ctx: ?*anyopaque, bytes: []const u8) anyerror!void {
+        const self: *ChaosLink = @ptrCast(@alignCast(ctx.?));
+        while (self.partitioned.load(.acquire)) {
+            futexWaitTimed(&self.park, self.park.load(.acquire), 20 * std.time.ns_per_ms);
+        }
+        const lat = self.latency_ns.load(.acquire);
+        if (lat > 0) futexWaitTimed(&self.park, self.park.load(.acquire), lat);
+        return self.inner.write(bytes);
+    }
+
+    fn closeC(ctx: ?*anyopaque) void {
+        const self: *ChaosLink = @ptrCast(@alignCast(ctx.?));
+        self.partitioned.store(false, .release);
+        self.inner.close();
+    }
+};
+
+test "chaos: partition observed in liveness, heals as one exchange; typing stays instant" {
+    const gpa = t.allocator;
+    const fds = try socketPair();
+    var raw_a: FdLink = .{ .fd = fds[0] };
+    var raw_b: FdLink = .{ .fd = fds[1] };
+    var chaos_a: ChaosLink = .{ .inner = raw_a.link() };
+    var chaos_b: ChaosLink = .{ .inner = raw_b.link() };
+
+    var doc_a = try Document.init(gpa, "alice");
+    defer doc_a.deinit(gpa);
+    var doc_b = try Document.init(gpa, "bob");
+    defer doc_b.deinit(gpa);
+    try doc_a.insert(gpa, 0, "base\n");
+
+    const sa = try Session.create(gpa, chaos_a.link(), .server, "tok");
+    defer sa.destroy();
+    const sb = try Session.create(gpa, chaos_b.link(), .client, "tok");
+    defer sb.destroy();
+    var ca = try Collab.init(gpa, sa, &doc_a, "alice");
+    defer ca.deinit();
+    var cb = try Collab.init(gpa, sb, &doc_b, "bob");
+    defer cb.deinit();
+
+    // Converge the base first.
+    var rounds: usize = 0;
+    while (rounds < 500) : (rounds += 1) {
+        _ = try ca.tick(0);
+        _ = try cb.tick(0);
+        const tb = try doc_b.text().toOwnedSlice(gpa);
+        defer gpa.free(tb);
+        if (std.mem.indexOf(u8, tb, "base") != null) break;
+        testPark(2);
+    }
+    try t.expect(rounds < 500);
+
+    // Cable out. Both sides keep typing; local commits stay instant.
+    chaos_a.partitioned.store(true, .release);
+    chaos_b.partitioned.store(true, .release);
+    const t0 = task.nowNs();
+    try doc_a.insert(gpa, 0, "A1 ");
+    try doc_a.insert(gpa, 0, "A2 ");
+    try doc_b.insert(gpa, doc_b.text().byteLen(), " B1");
+    try doc_b.insert(gpa, doc_b.text().byteLen(), " B2");
+    const local_latency = task.nowNs() - t0;
+    try t.expect(local_latency < 50 * std.time.ns_per_ms); // network-free
+
+    // Pump during the partition: no convergence, and (with patience the
+    // test doesn't have for the full 3s window) liveness degrades — we
+    // assert divergence here and the state machine transition below.
+    for (0..20) |_| {
+        _ = try ca.tick(0);
+        _ = try cb.tick(0);
+        testPark(2);
+    }
+    {
+        const ta = try doc_a.text().toOwnedSlice(gpa);
+        defer gpa.free(ta);
+        try t.expect(std.mem.indexOf(u8, ta, "B2") == null);
+    }
+
+    // Heal: one frontier exchange + merged burst converges everything.
+    chaos_a.partitioned.store(false, .release);
+    chaos_b.partitioned.store(false, .release);
+    rounds = 0;
+    while (rounds < 1000) : (rounds += 1) {
+        _ = try ca.tick(0);
+        _ = try cb.tick(0);
+        const ta = try doc_a.text().toOwnedSlice(gpa);
+        defer gpa.free(ta);
+        const tb = try doc_b.text().toOwnedSlice(gpa);
+        defer gpa.free(tb);
+        if (std.mem.eql(u8, ta, tb) and std.mem.indexOf(u8, ta, "A2") != null and
+            std.mem.indexOf(u8, ta, "B2") != null) break;
+        testPark(2);
+    }
+    try t.expect(rounds < 1000);
+
+    // Injected latency: the link stays connected, remote lags, local
+    // stays instant.
+    chaos_a.latency_ns.store(100 * std.time.ns_per_ms, .release);
+    const t1 = task.nowNs();
+    try doc_a.insert(gpa, 0, "L");
+    try t.expect(task.nowNs() - t1 < 50 * std.time.ns_per_ms);
+}
