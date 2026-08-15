@@ -104,28 +104,44 @@ pub fn main(init: std.process.Init) !void {
         }
     }
 
-    std.log.info("agent: listening on {d}", .{args.listen});
-    const fd = try session.tcpListen(args.listen);
-    var fd_link: session.FdLink = .{ .fd = fd };
-    const sess = try session.Session.create(gpa, fd_link.link(), .server, args.token);
-    defer sess.destroy();
-    var collab = try session.Collab.init(gpa, sess, &editor.doc, "agent");
-    defer collab.deinit();
-    collab.export_diag_layer = caps.layers.find("diagnostics");
-
     var blob: ?session.BlobServer = null;
     defer if (blob) |*b| b.close();
-    if (editor.path) |p| {
-        blob = session.BlobServer.openPath(p) catch null;
-        if (blob != null) collab.blob_server = &blob.?;
-    }
+    if (editor.path) |p| blob = session.BlobServer.openPath(p) catch null;
 
-    // Serve until the link dies. 15ms cadence; autosave 2s after quiet.
+    // ── Hub: accept forever, serve N peers on the one document ──
+    std.log.info("agent: listening on {d}", .{args.listen});
+    const listener = try session.tcpListener(args.listen);
+    var hub: Hub = .{ .gpa = gpa };
+    defer hub.deinit();
+    const accept_thread = try std.Thread.spawn(.{}, acceptMain, .{ &hub, listener });
+    accept_thread.detach(); // dies with the process (accept has no clean cancel)
+
     var park: std.atomic.Value(u32) = .init(0);
     var last_change_ns: u64 = 0;
     var seen_commits: usize = 0;
-    while (sess.liveness() != .offline) {
-        _ = try collab.tick(0);
+    while (true) {
+        // Adopt newly accepted connections.
+        var pending = hub.incoming.swap(null, .acquire);
+        while (pending) |node| {
+            pending = node.next;
+            const fd = node.fd;
+            gpa.destroy(node);
+            hub.adopt(fd, args.token, &editor.doc, &caps, if (blob != null) &blob.? else null) catch |err| {
+                std.log.warn("agent: peer setup failed: {t}", .{err});
+            };
+        }
+        // Tick everyone; broadcast falls out of per-peer frontier
+        // tracking (a batch merged from one peer moves the head, so
+        // every other Collab sends on its next tick).
+        var i: usize = 0;
+        while (i < hub.clients.items.len) {
+            const c = hub.clients.items[i];
+            _ = c.collab.tick(0) catch {};
+            if (c.sess.liveness() == .offline) {
+                std.log.info("agent: peer departed ({d} left)", .{hub.clients.items.len - 1});
+                hub.remove(i);
+            } else i += 1;
+        }
         if (lsp) |l| _ = try l.tick(&ctx);
         _ = editor.pollSave(gpa);
         if (editor.doc.commitCount() != seen_commits) {
@@ -138,7 +154,92 @@ pub fn main(init: std.process.Init) !void {
         }
         parkNs(&park, 15 * std.time.ns_per_ms);
     }
-    std.log.info("agent: peer gone; exiting", .{});
+}
+
+const FdNode = struct { next: ?*FdNode = null, fd: i32 };
+
+const Client = struct {
+    hub: *Hub,
+    fd_link: session.FdLink,
+    sess: *session.Session,
+    collab: session.Collab,
+};
+
+const Hub = struct {
+    gpa: std.mem.Allocator,
+    clients: std.ArrayList(*Client) = .empty,
+    incoming: std.atomic.Value(?*FdNode) = .init(null),
+
+    fn deinit(self: *Hub) void {
+        for (self.clients.items) |c| {
+            c.collab.deinit();
+            c.sess.destroy();
+            self.gpa.destroy(c);
+        }
+        self.clients.deinit(self.gpa);
+        var cur = self.incoming.swap(null, .acquire);
+        while (cur) |n| {
+            cur = n.next;
+            _ = std.os.linux.close(n.fd);
+            self.gpa.destroy(n);
+        }
+    }
+
+    fn adopt(
+        self: *Hub,
+        fd: i32,
+        token: []const u8,
+        doc: *Document,
+        caps: *capability.Caps,
+        blob: ?*session.BlobServer,
+    ) !void {
+        const gpa = self.gpa;
+        const c = try gpa.create(Client);
+        errdefer gpa.destroy(c);
+        c.* = .{ .hub = self, .fd_link = .{ .fd = fd }, .sess = undefined, .collab = undefined };
+        c.sess = try session.Session.create(gpa, c.fd_link.link(), .server, token);
+        errdefer c.sess.destroy();
+        c.collab = try session.Collab.init(gpa, c.sess, doc, "agent");
+        c.collab.export_diag_layer = caps.layers.find("diagnostics");
+        c.collab.blob_server = blob;
+        c.collab.publish_presence = false; // a hub has no cursor
+        c.collab.relay = relayPresence;
+        c.collab.relay_ctx = c;
+        try self.clients.append(gpa, c);
+        std.log.info("agent: peer joined ({d} connected)", .{self.clients.items.len});
+    }
+
+    fn remove(self: *Hub, i: usize) void {
+        const c = self.clients.swapRemove(i);
+        c.collab.deinit();
+        c.sess.destroy();
+        self.gpa.destroy(c);
+    }
+};
+
+/// Presence relay: what one peer publishes, every other peer receives.
+fn relayPresence(ctx: ?*anyopaque, key: u64, payload: []const u8) void {
+    const sender: *Client = @ptrCast(@alignCast(ctx.?));
+    for (sender.hub.clients.items) |c| {
+        if (c == sender) continue;
+        c.sess.postFeed(1, key, payload) catch {};
+    }
+}
+
+fn acceptMain(hub: *Hub, listener: i32) void {
+    while (true) {
+        const fd = session.tcpAccept(listener) catch return;
+        const node = hub.gpa.create(FdNode) catch {
+            _ = std.os.linux.close(fd);
+            continue;
+        };
+        node.* = .{ .fd = fd };
+        var head = hub.incoming.load(.monotonic);
+        while (true) {
+            node.next = head;
+            head = hub.incoming.cmpxchgWeak(head, node, .release, .monotonic) orelse break;
+        }
+    }
 }
 
 fn parkNs(word: *std.atomic.Value(u32), ns: u64) void {

@@ -415,6 +415,15 @@ pub const Collab = struct {
     presence_layer: ?*layers_mod.Layer = null,
     last_presence_offset: usize = std.math.maxInt(usize),
     announced: bool = false,
+    /// Peer cursors by name; the FULL set republishes into the layer on
+    /// every change, so any number of peers coexist.
+    presence_names: std.ArrayList([]u8) = .empty,
+    presence_offsets: std.ArrayList(usize) = .empty,
+    /// Publish our own cursor (a headless hub has none — it relays).
+    publish_presence: bool = true,
+    /// Hub relay: re-publish received presence to the other sessions.
+    relay: ?*const fn (?*anyopaque, key: u64, payload: []const u8) void = null,
+    relay_ctx: ?*anyopaque = null,
     /// Agent side: serve blob requests for the hosted file.
     blob_server: ?*BlobServer = null,
     /// Client side: fold blob replies into the partial checkout.
@@ -437,7 +446,23 @@ pub const Collab = struct {
     pub fn deinit(self: *Collab) void {
         if (self.their_frontier) |f| self.gpa.free(f);
         if (self.last_sent_version) |v| self.gpa.free(v);
+        for (self.presence_names.items) |n| self.gpa.free(n);
+        self.presence_names.deinit(self.gpa);
+        self.presence_offsets.deinit(self.gpa);
         self.gpa.free(self.name);
+    }
+
+    /// Point at a fresh session after a reconnect: the announce +
+    /// frontier exchange replays from scratch (idempotent by design —
+    /// duplicate events are no-ops), presence republishes.
+    pub fn rebind(self: *Collab, new_session: *Session) void {
+        self.session = new_session;
+        self.announced = false;
+        if (self.their_frontier) |f| self.gpa.free(f);
+        self.their_frontier = null;
+        if (self.last_sent_version) |v| self.gpa.free(v);
+        self.last_sent_version = null;
+        self.last_presence_offset = std.math.maxInt(usize);
     }
 
     /// Per-frame: drain inbound frames (merge op batches, answer
@@ -500,23 +525,19 @@ pub const Collab = struct {
                         changed = true;
                     }
                 } else {
-                    // Presence: uv name_len | name | uv offset.
+                    // Presence: uv name_len | name | uv offset. Fold into
+                    // the per-peer set, republish the whole set, and (in
+                    // hub role) relay to the other sessions.
                     var cur: []const u8 = frame.payload;
                     const nlen = wire.getUv(&cur) catch continue;
                     if (nlen > cur.len) continue;
                     const peer_name = cur[0..nlen];
                     cur = cur[nlen..];
                     const off = wire.getUv(&cur) catch continue;
-                    if (self.presence_layer) |layer| {
-                        const clamped = @min(@as(usize, @intCast(off)), self.doc.text().byteLen());
-                        try layer.publishSpans(gpa, &.{.{
-                            .start = clamped,
-                            .end = @min(clamped + 1, self.doc.text().byteLen()),
-                            .kind = 1,
-                            .message = peer_name,
-                        }});
-                        changed = true;
-                    }
+                    try self.updatePeerPresence(peer_name, @intCast(off));
+                    try self.republishPresence();
+                    changed = true;
+                    if (self.relay) |r| r(self.relay_ctx, nameKey(peer_name), frame.payload);
                 },
                 .request => switch (@as(wire.RequestKind, @enumFromInt(frame.kind))) {
                     .call => if (frame.channel == blob_channel) {
@@ -575,17 +596,53 @@ pub const Collab = struct {
                 }
             }
 
-            if (cursor_offset != self.last_presence_offset) {
+            if (self.publish_presence and cursor_offset != self.last_presence_offset) {
                 self.last_presence_offset = cursor_offset;
                 var payload: std.ArrayList(u8) = .empty;
                 defer payload.deinit(gpa);
                 try wire.putUv(gpa, &payload, self.name.len);
                 try payload.appendSlice(gpa, self.name);
                 try wire.putUv(gpa, &payload, cursor_offset);
-                try self.session.postFeed(1, 1, payload.items);
+                // Coalescing key is per-peer: N cursors never collapse.
+                try self.session.postFeed(1, nameKey(self.name), payload.items);
             }
         }
         return changed;
+    }
+
+    fn nameKey(name: []const u8) u64 {
+        return std.hash.Fnv1a_64.hash(name);
+    }
+
+    fn updatePeerPresence(self: *Collab, peer_name: []const u8, offset: usize) !void {
+        for (self.presence_names.items, 0..) |n, i| {
+            if (std.mem.eql(u8, n, peer_name)) {
+                self.presence_offsets.items[i] = offset;
+                return;
+            }
+        }
+        const owned = try self.gpa.dupe(u8, peer_name);
+        errdefer self.gpa.free(owned);
+        try self.presence_names.append(self.gpa, owned);
+        try self.presence_offsets.append(self.gpa, offset);
+    }
+
+    fn republishPresence(self: *Collab) !void {
+        const layer = self.presence_layer orelse return;
+        const gpa = self.gpa;
+        var spans: std.ArrayList(layers_mod.SpanIn) = .empty;
+        defer spans.deinit(gpa);
+        const limit = self.doc.text().byteLen();
+        for (self.presence_names.items, self.presence_offsets.items) |n, off| {
+            const clamped = @min(off, limit);
+            try spans.append(gpa, .{
+                .start = clamped,
+                .end = @min(clamped + 1, limit),
+                .kind = 1,
+                .message = n,
+            });
+        }
+        try layer.publishSpans(gpa, spans.items);
     }
 
     fn setTheirFrontier(self: *Collab, token: []const u8) !void {
@@ -974,7 +1031,7 @@ pub const RemoteFile = struct {
 
 // ── TCP bootstrap (shared by editor and agent) ──────────────────────
 
-pub fn tcpListen(port: u16) !i32 {
+pub fn tcpListener(port: u16) !i32 {
     const fd_rc = linux.socket(linux.AF.INET, linux.SOCK.STREAM, 0);
     if (linux.errno(fd_rc) != .SUCCESS) return error.Socket;
     const fd: i32 = @intCast(fd_rc);
@@ -982,11 +1039,22 @@ pub fn tcpListen(port: u16) !i32 {
     _ = linux.setsockopt(fd, linux.SOL.SOCKET, linux.SO.REUSEADDR, @ptrCast(&one), 4);
     var addr: linux.sockaddr.in = .{ .port = std.mem.nativeToBig(u16, port), .addr = 0 };
     if (linux.errno(linux.bind(fd, @ptrCast(&addr), @sizeOf(linux.sockaddr.in))) != .SUCCESS) return error.Bind;
-    if (linux.errno(linux.listen(fd, 1)) != .SUCCESS) return error.Listen;
-    const conn_rc = linux.accept4(fd, null, null, 0);
+    if (linux.errno(linux.listen(fd, 8)) != .SUCCESS) return error.Listen;
+    return fd;
+}
+
+pub fn tcpAccept(listener: i32) !i32 {
+    const conn_rc = linux.accept4(listener, null, null, 0);
     if (linux.errno(conn_rc) != .SUCCESS) return error.Accept;
-    _ = linux.close(fd);
     return @intCast(conn_rc);
+}
+
+/// Single-peer convenience (editor pairing): accept one, close the
+/// listener.
+pub fn tcpListen(port: u16) !i32 {
+    const listener = try tcpListener(port);
+    defer _ = linux.close(listener);
+    return tcpAccept(listener);
 }
 
 pub fn tcpConnect(hostport: []const u8) !i32 {
@@ -1243,4 +1311,127 @@ test "chaos: partition observed in liveness, heals as one exchange; typing stays
     const t1 = task.nowNs();
     try doc_a.insert(gpa, 0, "L");
     try t.expect(task.nowNs() - t1 < 50 * std.time.ns_per_ms);
+}
+
+test "hub: three-way convergence, presence relay, reconnect rebind" {
+    const gpa = t.allocator;
+    var doc_h = try Document.init(gpa, "hub");
+    defer doc_h.deinit(gpa);
+    var doc_a = try Document.init(gpa, "alice");
+    defer doc_a.deinit(gpa);
+    var doc_b = try Document.init(gpa, "bob");
+    defer doc_b.deinit(gpa);
+    try doc_h.insert(gpa, 0, "hub base\n");
+
+    const fa = try socketPair();
+    const fb = try socketPair();
+    var la_h: FdLink = .{ .fd = fa[0] };
+    var la_c: FdLink = .{ .fd = fa[1] };
+    var lb_h: FdLink = .{ .fd = fb[0] };
+    var lb_c: FdLink = .{ .fd = fb[1] };
+
+    const sh_a = try Session.create(gpa, la_h.link(), .server, "tok");
+    defer sh_a.destroy();
+    const sh_b = try Session.create(gpa, lb_h.link(), .server, "tok");
+    defer sh_b.destroy();
+    var sa = try Session.create(gpa, la_c.link(), .client, "tok");
+    var sb = try Session.create(gpa, lb_c.link(), .client, "tok");
+    defer sb.destroy();
+
+    var ch_a = try Collab.init(gpa, sh_a, &doc_h, "hub");
+    defer ch_a.deinit();
+    ch_a.publish_presence = false;
+    var ch_b = try Collab.init(gpa, sh_b, &doc_h, "hub");
+    defer ch_b.deinit();
+    ch_b.publish_presence = false;
+    var ca = try Collab.init(gpa, sa, &doc_a, "alice");
+    defer ca.deinit();
+    var cb = try Collab.init(gpa, sb, &doc_b, "bob");
+    defer cb.deinit();
+
+    // Presence relay through the hub (manual two-client wiring).
+    const Relay = struct {
+        var other: ?*Session = null;
+        fn go(_: ?*anyopaque, key: u64, payload: []const u8) void {
+            if (other) |o| o.postFeed(1, key, payload) catch {};
+        }
+    };
+    Relay.other = sh_b;
+    ch_a.relay = Relay.go;
+    var layers: layers_mod.Layers = .empty;
+    defer layers.deinit(gpa);
+    cb.presence_layer = try layers.claim(gpa, &doc_b, "presence", .replicated, "collab");
+
+    // Concurrent edits on both leaves; converge all three.
+    try doc_a.insert(gpa, 0, "A! ");
+    try doc_b.insert(gpa, 0, "B! ");
+    var rounds: usize = 0;
+    while (rounds < 800) : (rounds += 1) {
+        _ = try ch_a.tick(0);
+        _ = try ch_b.tick(0);
+        _ = try ca.tick(5);
+        _ = try cb.tick(0);
+        const ta = try doc_a.text().toOwnedSlice(gpa);
+        defer gpa.free(ta);
+        const tb = try doc_b.text().toOwnedSlice(gpa);
+        defer gpa.free(tb);
+        const th = try doc_h.text().toOwnedSlice(gpa);
+        defer gpa.free(th);
+        if (std.mem.eql(u8, ta, tb) and std.mem.eql(u8, tb, th) and
+            std.mem.indexOf(u8, ta, "A!") != null and std.mem.indexOf(u8, ta, "B!") != null and
+            std.mem.indexOf(u8, ta, "hub base") != null) break;
+        testPark(2);
+    }
+    try t.expect(rounds < 800);
+
+    // Alice's presence reached bob through the hub relay.
+    var saw = false;
+    for (0..300) |_| {
+        _ = try ch_a.tick(0);
+        _ = try ch_b.tick(0);
+        _ = try ca.tick(5);
+        _ = try cb.tick(0);
+        var has_alice = false;
+        for (0..cb.presence_layer.?.spanCount()) |si| {
+            if (std.mem.eql(u8, cb.presence_layer.?.resolvedSpan(si).message, "alice")) has_alice = true;
+        }
+        if (has_alice) {
+            saw = true;
+            break;
+        }
+        testPark(2);
+    }
+    try t.expect(saw);
+    var found_alice = false;
+    for (0..cb.presence_layer.?.spanCount()) |si| {
+        if (std.mem.eql(u8, cb.presence_layer.?.resolvedSpan(si).message, "alice")) found_alice = true;
+    }
+    try t.expect(found_alice);
+
+    // Reconnect: alice's link dies; a fresh pair rebinjds both ends and
+    // a post-reconnect edit converges (resync = frontier exchange).
+    sa.destroy();
+    const fa2 = try socketPair();
+    var la2_h: FdLink = .{ .fd = fa2[0] };
+    var la2_c: FdLink = .{ .fd = fa2[1] };
+    const sh_a2 = try Session.create(gpa, la2_h.link(), .server, "tok");
+    defer sh_a2.destroy();
+    sa = try Session.create(gpa, la2_c.link(), .client, "tok");
+    defer sa.destroy();
+    ch_a.rebind(sh_a2);
+    ca.rebind(sa);
+
+    try doc_a.insert(gpa, 0, "again! ");
+    rounds = 0;
+    while (rounds < 800) : (rounds += 1) {
+        _ = try ch_a.tick(0);
+        _ = try ch_b.tick(0);
+        _ = try ca.tick(5);
+        _ = try cb.tick(0);
+        const tb = try doc_b.text().toOwnedSlice(gpa);
+        defer gpa.free(tb);
+        if (std.mem.indexOf(u8, tb, "again!") != null) break;
+        testPark(2);
+    }
+    try t.expect(rounds < 800);
 }

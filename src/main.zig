@@ -241,6 +241,10 @@ pub fn main(init: std.process.Init) !void {
     var batches: std.ArrayList(snail.render.records.DrawBatch) = .empty;
     defer batches.deinit(gpa);
     var view_dirty = true;
+    var last_liveness: core.session.Liveness = .connecting;
+    var reconnect: ?core.task.Handle(anyerror!i32) = null;
+    defer if (reconnect) |*h| h.detach();
+    var next_reconnect_ns: u64 = 0;
 
     std.log.info("scion: rendering — {d} bytes open, em {d}", .{ editor.text().byteLen(), args.em });
 
@@ -274,6 +278,34 @@ pub fn main(init: std.process.Init) !void {
         if (try sym_ui.tick(&cmd_ctx)) view_dirty = true;
         if (collab) |*c| {
             if (try c.tick(editor.cursorOffset())) view_dirty = true;
+            const live = collab_session.?.liveness();
+            if (live != last_liveness) {
+                last_liveness = live;
+                view_dirty = true;
+            }
+            // A flapping link reconnects itself (client role): pooled
+            // connect attempts every 3s, rebind on success — the resync
+            // is the ordinary frontier exchange.
+            if (live == .offline and args.connect != null) {
+                if (reconnect) |*h| {
+                    if (h.poll()) |res| {
+                        reconnect = null;
+                        if (res) |fd| {
+                            collab_session.?.destroy();
+                            fd_link = .{ .fd = fd };
+                            collab_session = try core.session.Session.create(gpa, fd_link.link(), .client, args.token);
+                            c.rebind(collab_session.?);
+                            std.log.info("collab: reconnected", .{});
+                            view_dirty = true;
+                        } else |_| {
+                            next_reconnect_ns = stats_mod.nowNs() + 3 * std.time.ns_per_s;
+                        }
+                    }
+                } else if (stats_mod.nowNs() >= next_reconnect_ns) {
+                    next_reconnect_ns = stats_mod.nowNs() + 3 * std.time.ns_per_s;
+                    reconnect = try pool.spawn(reconnectTask, .{args.connect.?});
+                }
+            }
         }
         if (editor.doc.commitCount() != seen_commits) {
             seen_commits = editor.doc.commitCount();
@@ -544,4 +576,8 @@ fn lspAddHandler(ctx: *core.command.Context, data: ?*anyopaque, args: []const co
     };
     try servers.list.append(gpa, e);
     return .nil;
+}
+
+fn reconnectTask(hostport: []const u8) anyerror!i32 {
+    return core.session.tcpConnect(hostport);
 }
