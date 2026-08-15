@@ -108,3 +108,34 @@ Build-order insert: the remote-shell fs provider lands WITH the fs
 capability family (step 5 → becomes step 3.5, before or alongside the
 agent worktree work), so the tramp story never depends on agent
 availability.
+
+## Revision 2: editor-shaped, no dedicated agent (2026-08-15)
+
+Review: the session/directory/hosting-tier formalism was agent-centric
+and un-editor-like. Simplified model, superseding the above where they
+conflict:
+
+- **Buffers have backings.** A backing = where the bytes live: a local
+  path, or a remote path over a shell (coreutils tier). `save` writes
+  the backing; `save-as` re-points it. No "storage targets", no
+  "home hosts" — just backings.
+- **Editors connect to editors.** A buffer may be **shared** over a
+  connection: the peer sees it in their buffer list and opens it;
+  edits converge (one history root per shared buffer; a joiner whose
+  local file diverges imports the diff as their ops or opens private).
+  Implementation: a per-connection shared-buffer list, per-buffer wire
+  channels — no session directory abstraction.
+- **No dedicated agent.** scion IS the peer. A persistent/headless
+  host = `scion --headless --listen` (window optional; same binary).
+  Fold scion-agent into that and delete the separate target; its one
+  real advantage (loading without wayland/vulkan userspace) applies
+  only to boxes that get the coreutils tier anyway. Host-placed LSP =
+  "the LSP runs in whichever editor shares the buffer from its
+  checkout" — which is just the M3 provider registered in that
+  process, no placement machinery beyond what exists.
+
+Kept from earlier revisions: the peer model, wire v1, the shell-fs
+tier (ssh as default spawner, not a coupling), one-history-root
+sharing, stemma RLE + hole-bases (approved). Build order becomes:
+stemma work → shell-fs backings → multi-buffer editor (buffers +
+backings + share) → --headless, delete scion-agent.
