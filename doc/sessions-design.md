@@ -139,3 +139,25 @@ tier (ssh as default spawner, not a coupling), one-history-root
 sharing, stemma RLE + hole-bases (approved). Build order becomes:
 stemma work → shell-fs backings → multi-buffer editor (buffers +
 backings + share) → --headless, delete scion-agent.
+
+## Revision 2: no dedicated agent (2026-08-15)
+
+Review verdict: the agent binary is unnecessary as a concept. There is
+ONE program. Every running scion is a peer; remote machines need
+nothing installed.
+
+- Hub/persistent-peer duties: any scion can listen (exists); hub logic
+  moves from the agent into the session layer; "leave a peer running"
+  = headless scion (same binary, no window init), not a second binary.
+- Host-side LSP without deployment: the LSP child process is simply
+  `ssh box zls` — stdio over the pipe, server where the code lives.
+- Remote files: the remote-shell fs provider (coreutils tier) is THE
+  remote story, not a fallback tier.
+- The scion-agent target gets retired once its hub code is absorbed;
+  the build-graph purity it enforced becomes a headless-init concern,
+  not a link-graph one.
+
+Editor-shaped restatement of the whole design: you open files (local
+or behind a shell), you start or join sessions with other scions, one
+of them hosts each shared document, saves go where the file lives
+unless you aim them elsewhere. Nothing else to explain.
