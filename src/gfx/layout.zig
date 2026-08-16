@@ -162,11 +162,20 @@ pub const RowMetrics = struct {
     height: f32,
 };
 
+/// Columns a tab advances to (tab stops every 4). Kept in step with the
+/// view's mono line builder so on-screen and off-screen motion agree.
+pub const tab_width: usize = 4;
+
+/// The next tab stop strictly after column `col`.
+pub fn tabStopAfter(col: usize) usize {
+    return (col / tab_width + 1) * tab_width;
+}
+
 /// Shape one source row and emit its `VisualLine`. The single primitive
 /// behind both the frame `Layout` and off-screen vertical motion. `arena`
 /// owns the returned stops (and the transient shaping); pass a per-call
-/// or per-frame arena. Tabs render as a single space column, matching the
-/// text run builder — a display substitution, the document is untouched.
+/// or per-frame arena. Tabs render as blank space advancing to the next
+/// tab stop — a display substitution, the document is untouched.
 pub fn buildRowStops(
     arena: Allocator,
     faces: *snail.Faces,
@@ -181,25 +190,39 @@ pub fn buildRowStops(
         const raw = try arena.alloc(u8, src.len());
         var sr = rope.streamReader(.{ .start = src.start, .end = src.end }, &.{});
         sr.interface.readSliceAll(raw) catch unreachable;
-        for (raw) |*b| {
+        // Shape a tab→space copy (so tabs occupy a blank glyph); keep `raw`
+        // to detect tabs and expand their advance to the next tab stop.
+        const shbuf = try arena.dupe(u8, raw);
+        for (shbuf) |*b| {
             if (b.* == '\t') b.* = ' ';
         }
-        const shaped = try snail.shape(arena, faces, raw, .{});
+        const shaped = try snail.shape(arena, faces, shbuf, .{});
         // A glyph's absolute pen x in em units is `x_offset`; world x is
-        // `margin + em*x_offset`. Its source cluster starts at
-        // `src.start + source_start`.
+        // `margin + em*x_offset`, plus the accumulated tab shift. Its
+        // source cluster starts at `src.start + source_start`.
+        var shift: f32 = 0;
         for (shaped.glyphs) |g| {
+            const base_x = m.margin + m.em * g.x_offset;
             try stops.append(arena, .{
                 .off = @intCast(src.start + g.source_start),
-                .x = m.margin + m.em * g.x_offset,
+                .x = base_x + shift,
             });
+            if (g.source_start < raw.len and raw[g.source_start] == '\t') {
+                const cell = m.em * g.x_advance; // one mono cell (the space advance)
+                if (cell > 0) {
+                    const col: usize = @intFromFloat(@round((base_x + shift - m.margin) / cell));
+                    const target = m.margin + @as(f32, @floatFromInt(tabStopAfter(col))) * cell;
+                    const natural_next = m.margin + m.em * (g.x_offset + g.x_advance) + shift;
+                    shift += target - natural_next;
+                }
+            }
         }
         // End-of-line caret: past the last glyph by its advance.
         if (shaped.glyphs.len > 0) {
             const last = shaped.glyphs[shaped.glyphs.len - 1];
             try stops.append(arena, .{
                 .off = @intCast(src.end),
-                .x = m.margin + m.em * (last.x_offset + last.x_advance),
+                .x = m.margin + m.em * (last.x_offset + last.x_advance) + shift,
             });
         }
     }

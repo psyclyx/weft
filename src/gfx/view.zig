@@ -566,6 +566,9 @@ pub const View = struct {
                 (if (d[abs - styles.diag_base] == 1) self.theme.diag_error else self.theme.diag_warn)
             else
                 self.hlColor(styles, abs)) else self.hlColor(styles, abs);
+            // A tab's glyph (a space, substituted below) sits at its own
+            // column; the NEXT cell jumps to the tab stop, so the tab reads
+            // as blank whitespace. Offset↔stop stays 1:1 — the caret is exact.
             try cells.append(scratch, .{
                 .source = .{ .start = @intCast(byte), .end = @intCast(byte + s.len) },
                 .column = @intCast(col),
@@ -573,11 +576,16 @@ pub const View = struct {
             });
             try stops.append(la, .{ .off = @intCast(abs), .x = margin + @as(f32, @floatFromInt(col)) * self.cell_w });
             byte += s.len;
+            if (s.len == 1 and s[0] == '\t') col = layout.tabStopAfter(col) - 1; // loop's +1 lands on the stop
         }
         try stops.append(la, .{ .off = @intCast(line.start + byte), .x = margin + @as(f32, @floatFromInt(col)) * self.cell_w });
 
         if (cells.items.len > 0) {
-            const shaped = try snail.shape(scratch, &self.face_set.mono, text[0..byte], .{});
+            const shbuf = try scratch.dupe(u8, text[0..byte]);
+            for (shbuf) |*b| {
+                if (b.* == '\t') b.* = ' ';
+            }
+            const shaped = try snail.shape(scratch, &self.face_set.mono, shbuf, .{});
             try runs.append(scratch, .{ .shaped = shaped, .baseline_y = baseline_y, .place = .{ .cell = cells.items } });
         }
         return .{
@@ -1074,6 +1082,25 @@ fn nextScalar(text: []const u8, base: usize, off: usize) usize {
 // ── Tests ──
 
 const testing = std.testing;
+
+test "literal tabs: a tab advances to the next tab stop; offsets stay exact" {
+    const gpa = testing.allocator;
+    var view = try View.init(gpa, @embedFile("font_mono"), 16);
+    defer view.deinit();
+    // "a\tb": 'a' at col 0, the tab starts at col 1 and advances 'b' to the
+    // next tab stop (col 4). Empty frame_layout → the motion path
+    // (buildRowStops) computes x; the on-screen mono builder mirrors it.
+    var rope = try stemma.Rope.fromSlice(gpa, "a\tb");
+    defer rope.deinit(gpa);
+    const cw = view.cell_w;
+    try testing.expectApproxEqAbs(margin, try view.xOfOffsetOnRow(&rope, 0), 0.5);
+    try testing.expectApproxEqAbs(margin + cw, try view.xOfOffsetOnRow(&rope, 1), 0.5);
+    try testing.expectApproxEqAbs(margin + 4 * cw, try view.xOfOffsetOnRow(&rope, 2), 0.5);
+    // Two leading tabs → 8 columns of indent before the text.
+    var rope2 = try stemma.Rope.fromSlice(gpa, "\t\tx");
+    defer rope2.deinit(gpa);
+    try testing.expectApproxEqAbs(margin + 8 * cw, try view.xOfOffsetOnRow(&rope2, 2), 0.5);
+}
 
 test "buildTabStrip: active bracketed, separated, truncated to width" {
     const tabs = [_]Tab{
