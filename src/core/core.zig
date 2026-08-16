@@ -39,6 +39,7 @@ pub const nav_ui = @import("nav_ui.zig");
 pub const wire = @import("wire.zig");
 pub const secure = @import("secure.zig");
 pub const identity = @import("identity.zig");
+pub const known_peers = @import("known_peers.zig");
 pub const session = @import("session.zig");
 pub const hub = @import("hub.zig");
 pub const Pick = pick.Pick;

@@ -40,6 +40,10 @@ pub const Peer = struct {
     fd_link: session.FdLink,
     sess: *session.Session,
     conn: session.Conn,
+    /// Set once this peer's identity (fingerprint + SAS + trust) has been
+    /// noted to the store/log — the handshake completes asynchronously, so
+    /// the host checks each tick until the fingerprint is available.
+    identity_noted: bool = false,
     /// One RelayCtx per bound document (owned).
     relays: std.ArrayList(*RelayCtx) = .empty,
 

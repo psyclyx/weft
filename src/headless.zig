@@ -97,6 +97,12 @@ pub fn run(gpa: std.mem.Allocator, args: Args, environ: std.process.Environ) !vo
     };
     std.log.info("headless identity {s}", .{&host_identity.fingerprint()});
 
+    // Who we've talked to before (TOFU): first contact is accepted but
+    // logged as unverified with its SAS, so an operator can confirm it out
+    // of band; a returning verified peer is auto-trusted.
+    var known = try core.known_peers.KnownPeers.load(gpa, environ);
+    defer known.deinit();
+
     // ── Hub: accept forever, serve N peers on the one document ──
     std.log.info("headless: listening on {d} ({s} access)", .{ args.listen, args.access.label() });
     var hub = try core.hub.Hub.init(gpa, args.token, args.access, &host_identity);
@@ -118,6 +124,7 @@ pub fn run(gpa: std.mem.Allocator, args: Args, environ: std.process.Environ) !vo
         // sends on its next tick).
         hub.acceptPending(&cfg, headlessConfigure);
         _ = hub.tick();
+        notePeerIdentities(&hub, &known);
         if (lsp) |l| _ = try l.tick(&ctx);
         _ = editor.pollSave(gpa);
         if (editor.doc.commitCount() != seen_commits) {
@@ -149,6 +156,33 @@ fn headlessConfigure(ctx: ?*anyopaque, peer: *core.hub.Peer) anyerror!void {
     collab.publish_presence = false; // a hub has no cursor
     collab.relay = core.hub.relayPresence;
     collab.relay_ctx = try peer.relayFor(cfg.doc);
+}
+
+/// Note each freshly-established peer's identity exactly once: record the
+/// TOFU entry and log its fingerprint, SAS, and trust so an operator can
+/// verify a newcomer out of band. Cheap to call every tick (the flag
+/// gates the work; the fingerprint is only available post-handshake).
+fn notePeerIdentities(hub: *core.hub.Hub, known: *core.known_peers.KnownPeers) void {
+    for (hub.clients.items) |p| {
+        if (p.identity_noted) continue;
+        const fp = p.sess.peerFingerprint() orelse continue; // not established yet
+        const sas = p.sess.sas() orelse continue;
+        p.identity_noted = true;
+        const prior = known.remember(fp) catch |err| blk: {
+            std.log.warn("known_peers: {t}", .{err});
+            break :blk core.known_peers.Trust.unknown;
+        };
+        if (prior == .verified) {
+            std.log.info("headless: verified peer {s} reconnected", .{&fp});
+        } else if (prior == .unverified) {
+            std.log.info("headless: peer {s} reconnected (unverified) — SAS {s}", .{ &fp, &sas });
+        } else {
+            std.log.info(
+                "headless: NEW peer {s} — SAS {s} — unverified; confirm out of band",
+                .{ &fp, &sas },
+            );
+        }
+    }
 }
 
 fn parkNs(word: *std.atomic.Value(u32), ns: u64) void {

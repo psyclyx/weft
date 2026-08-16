@@ -198,6 +198,10 @@ pub fn main(init: std.process.Init) !void {
         break :blk core.identity.Identity.generate();
     };
     std.log.info("weft identity {s}", .{&my_identity.fingerprint()});
+    // TOFU store: remembers whom we've verified out of band (see the
+    // status line's peer trust; first contact is accepted but unverified).
+    var known_peers = try core.known_peers.KnownPeers.load(gpa, init.minimal.environ);
+    defer known_peers.deinit();
     _ = try commands.bind(gpa, "identity", .{
         .name = "identity",
         .summary = "Show this machine's identity fingerprint.",
@@ -413,6 +417,9 @@ pub fn main(init: std.process.Init) !void {
     defer batches.deinit(gpa);
     var view_dirty = true;
     var last_liveness: core.session.Liveness = .connecting;
+    // The fingerprint we last announced for the outbound host, so a
+    // reconnect to a different key re-announces (and TOFU-records) it.
+    var noted_host_fp: ?[24]u8 = null;
     var reconnect: ?core.task.Handle(anyerror!i32) = null;
     defer if (reconnect) |*h| h.detach();
     var next_reconnect_ns: u64 = 0;
@@ -621,6 +628,24 @@ pub fn main(init: std.process.Init) !void {
                 p.want(collab_session.?, 0, cur -| (64 << 10), cur + (128 << 10)) catch {};
             }
             if (try c.tick()) view_dirty = true;
+            // Note the host's identity once per handshake: TOFU-record it
+            // and echo its fingerprint + SAS + trust so the user can verify
+            // the four words out of band before trusting a new host.
+            if (collab_session.?.peerFingerprint()) |fp| {
+                if (noted_host_fp == null or !std.mem.eql(u8, &noted_host_fp.?, &fp)) {
+                    noted_host_fp = fp;
+                    const prior = known_peers.remember(fp) catch core.known_peers.Trust.unknown;
+                    const sas = collab_session.?.sas().?; // established ⇒ present
+                    var buf: [96]u8 = undefined;
+                    const msg = if (prior == .verified)
+                        std.fmt.bufPrint(&buf, "host {s} · verified", .{&fp}) catch "host verified"
+                    else
+                        std.fmt.bufPrint(&buf, "host {s} · unverified · SAS {s}", .{ &fp, &sas }) catch "host unverified";
+                    setEcho(&echo_line, gpa, msg);
+                    std.log.info("collab: {s}", .{msg});
+                    view_dirty = true;
+                }
+            }
             const live = collab_session.?.liveness();
             if (live != last_liveness) {
                 last_liveness = live;

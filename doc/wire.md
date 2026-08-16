@@ -9,15 +9,38 @@ A byte stream (TCP; the session layer is written against a `Link`
 vtable so a QUIC implementation can replace it stream-for-stream).
 Everything after the handshake is encrypted.
 
-**Security.** Noise-style, built from std.crypto primitives only:
-ephemeral X25519 from both sides; keys = HKDF-SHA256(ikm = DH shared
-secret, salt = session token, info = transcript hash); per-direction
-XChaCha20-Poly1305 with counter nonces; the handshake finishes with
-transcript MACs both ways, so a wrong token fails before any payload.
-**Trust model**: possession of the shared session token = full peer
-rights on the served worktree. No identity, no authorization tiers, no
-forward secrecy beyond the ephemeral DH. Fine for "my machines, my
-tailnet"; not fine for hostile networks with long-lived tokens.
+**Security.** Noise-style, built from std.crypto primitives only. Each
+side contributes an ephemeral X25519 key *and* its long-term identity
+X25519 key. Two Diffie-Hellmans feed the schedule: the ephemeral one
+(forward secrecy) and the static identity one, `ss` (authentication).
+keys = HKDF-SHA256(ikm = ee ‖ ss, salt = session token, info =
+transcript hash), where the transcript is both ephemerals ‖ both
+identity keys; per-direction XChaCha20-Poly1305 with counter nonces; the
+handshake finishes with transcript MACs both ways, so a wrong token — or
+a party that does not hold the identity secret behind the key it
+presented — fails before any payload.
+
+**Trust model.** Three layers, kept distinct:
+
+- *Authentication* — possession of the session token gates connection;
+  mixing `ss` additionally proves each side holds its claimed identity
+  key, so a returning peer is cryptographically the same weft.
+- *Identity & TOFU* — a peer is named by its identity key's fingerprint
+  (five base32 groups). First contact with an unknown fingerprint is
+  accepted but recorded UNVERIFIED (`known_peers`, the SSH known_hosts
+  model). Because there is no CA, a man in the middle is caught by a
+  **Short Authentication String**: four spoken words derived from the
+  transcript (identity keys included). A MITM runs a separate exchange
+  with each side, so the two ends compute different words; reading them
+  aloud over any authentic channel exposes it. Confirming the SAS once
+  marks the fingerprint verified and future sessions auto-trust.
+- *Authorization* — an independent per-peer grade (view/edit/own),
+  enforced by the host at op admission; the token/crypto say you *may
+  connect*, the grade says what you *may do*.
+
+Forward secrecy is the ephemeral DH's. Fine for "my machines, my
+tailnet"; the SAS extends it to "someone I can call and read four words
+to" without a CA.
 
 ## Frames
 
@@ -51,11 +74,17 @@ exchange — nothing else needs resuming.
 
 ## Handshake sequence
 
-    C→S  hello   { client_eph_pub }
-    S→C  hello2  { server_eph_pub, mac_s = MAC(k_s, transcript) }
+    C→S  hello   { client_eph_pub, client_id_pub }
+    S→C  hello2  { server_eph_pub, server_id_pub, mac_s = MAC(k_s, transcript) }
     C→S  finish  { mac_c = MAC(k_c, transcript) }   (encrypted from here on)
 
 MAC failure on either side closes the link before any document data.
+Identity keys are sent in the clear (public keys are public); this
+leaks *who* is connecting to a passive observer but not the session
+contents — acceptable for the current threat model, and the point where
+a Noise_XX-style encrypted-identity flow would slot in if that changes.
+The four-word SAS is derived from the same transcript and shown on both
+ends for out-of-band comparison.
 
 **Resume tokens: rejected.** An earlier draft promised a resume-token
 fast path. It is deliberately not implemented: the fresh handshake is
