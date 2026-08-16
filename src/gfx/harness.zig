@@ -75,18 +75,22 @@ pub fn rasterize(
         .raster = .{ .subpixel_order = .none },
     };
 
+    // Accumulate every pane into ONE instance/batch stream, one draw —
+    // exactly as the exe does (carried emit cursors + a per-pane translate).
+    var total: usize = 0;
+    for (shape_lists) |shapes| total += shapes.len;
+    const inst = try gpa.alloc(records.Instance, @max(total, 1));
+    defer gpa.free(inst);
+    const bat = try gpa.alloc(records.DrawBatch, @max(total, 1));
+    defer gpa.free(bat);
+    var ilen: usize = 0;
+    var blen: usize = 0;
     for (shape_lists, x_offsets) |shapes, x_off| {
         if (shapes.len == 0) continue;
-        const inst = try gpa.alloc(records.Instance, shapes.len);
-        defer gpa.free(inst);
-        const bat = try gpa.alloc(records.DrawBatch, shapes.len);
-        defer gpa.free(bat);
-        var ilen: usize = 0;
-        var blen: usize = 0;
         const xform: snail.Transform2D = .{ .xx = 1, .yy = 1, .tx = x_off, .ty = 0 };
         _ = try snail.emit.emit(inst, bat, &ilen, &blen, bindings[0], &view.atlas, shapes, xform, .{ 1, 1, 1, 1 });
-        try raster.draw(&renderer, ds, .{ .instances = inst[0..ilen], .batches = bat[0..blen] }, &.{&cache}, null);
     }
+    try raster.draw(&renderer, ds, .{ .instances = inst[0..ilen], .batches = bat[0..blen] }, &.{&cache}, null);
     return pixels;
 }
 

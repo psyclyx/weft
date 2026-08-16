@@ -78,6 +78,17 @@
   (fn [] (set-mode "normal") (run "pick-commands")))
 (weft.textinput "leader-collab" nil)
 
+;; ── Windows (vim C-w prefix): split / focus / close ──
+(cmd "window" "Window submenu." (fn [] (set-mode "window")))
+(cmd "vim-split" "Split vertically, then normal."
+  (fn [] (set-mode "normal") (run "split")))
+(cmd "vim-focus-other" "Focus the other pane, then normal."
+  (fn [] (set-mode "normal") (run "focus-other")))
+(cmd "vim-unsplit" "Close the split, then normal."
+  (fn [] (set-mode "normal") (run "unsplit")))
+(weft.textinput "window" nil)
+(weft.menu_mode "window")
+
 ;; ── Normal ──
 (bind "normal" "h" "cursor-left")
 (bind "normal" "j" "cursor-down")
@@ -100,7 +111,15 @@
 (bind "normal" "v" "vim-visual")
 (bind "normal" "colon" "pick-commands")   ;; : → command palette
 (bind "normal" "space" "leader")          ;; space → leader chord
+(bind "normal" "C-w" "window")            ;; C-w → window (split) prefix
 (bind "default" "C-g" "cancel")           ;; C-g → abort a pending connect
+
+;; Window prefix: v/s split, w focus-other, o close split.
+(bind "window" "v" "vim-split")
+(bind "window" "s" "vim-split")
+(bind "window" "w" "vim-focus-other")
+(bind "window" "o" "vim-unsplit")
+(bind "window" "Escape" "leader-cancel")
 
 ;; Picker: orderless by default; narrow/widen/cycle-style live (space is
 ;; a query separator for orderless, so narrowing uses Alt keys).
