@@ -61,6 +61,18 @@
 (weft.textinput "leader" nil)
 (weft.textinput "leader-file" nil)
 
+;; ── Collaboration ──
+;; Host and join are palette commands — `:listen` prompts for a port and,
+;; deliberately, the access grade (view|edit|own, defaulting to safe
+;; read-only view); `:connect host:port` joins. Sharing the active buffer
+;; over a running host is a keystroke, since it takes no arguments.
+(cmd "collab" "Collaboration submenu." (fn [] (set-mode "leader-collab")))
+(cmd "vim-share" "Share the active buffer, then normal mode."
+  (fn [] (set-mode "normal") (run "share")))
+(cmd "vim-palette" "Open the palette (for arg-taking commands), then normal."
+  (fn [] (set-mode "normal") (run "pick-commands")))
+(weft.textinput "leader-collab" nil)
+
 ;; ── Normal ──
 (bind "normal" "h" "cursor-left")
 (bind "normal" "j" "cursor-down")
@@ -86,10 +98,17 @@
 
 ;; Leader chords: space f f → find file; space space → palette.
 (bind "leader" "f" "leader-file")
+(bind "leader" "c" "collab")
 (bind "leader" "space" "pick-commands")
 (bind "leader" "Escape" "leader-cancel")
 (bind "leader-file" "f" "vim-find-file")
 (bind "leader-file" "Escape" "leader-cancel")
+
+;; space c s → share active buffer; space c h → palette (host: `listen`
+;; prompts port + access; join: `connect host:port`).
+(bind "leader-collab" "s" "vim-share")
+(bind "leader-collab" "h" "vim-palette")
+(bind "leader-collab" "Escape" "leader-cancel")
 
 ;; ── Visual ──
 (bind "visual" "d" "vim-visual-delete")

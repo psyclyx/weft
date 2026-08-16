@@ -57,6 +57,10 @@
       {:source "files" :root "." :allow_new true}
       (= cmd-name "buffer-switch")
       {:candidates (buffer-ids) :allow_new true}
+      ;; Access grades are a closed set — pick from the list (no typos),
+      ;; so granting write access is a deliberate, visible choice.
+      (= a.name "access")
+      {:candidates ["view" "edit" "own"] :allow_new false}
       {:allow_new true}))
 
 (fn run-safe [name args]
