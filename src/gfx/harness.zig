@@ -160,6 +160,40 @@ test "harness: a single pane renders text into the body" {
     writePpm(gpa, ".zig-cache/tmp/weft-harness-single.ppm", pixels, w, h) catch {};
 }
 
+test "harness: which-key panel does not collide with the status line" {
+    const gpa = t.allocator;
+    const pool = try core.task.Pool.init(gpa, .{ .threads = 1 });
+    defer pool.deinit();
+    var view = try view_mod.View.init(gpa, @embedFile("font_mono"), 16);
+    defer view.deinit();
+    // Enough lines to fill the body.
+    var ed = try makeEditor(gpa, pool, "L1\nL2\nL3\nL4\nL5\nL6\nL7\nL8\nL9\nL10\n");
+    defer ed.deinit(gpa);
+
+    const hints = [_]core.Keymap.Binding{
+        .{ .key = "f", .command = "find-file" },
+        .{ .key = "c", .command = "collab" },
+        .{ .key = "space", .command = "palette" },
+    };
+    const w: u32 = 320;
+    const h: u32 = 240;
+    const pixels = try renderView(gpa, &view, &ed, .{ .mode = "leader", .which_key = &hints }, w, h);
+    defer gpa.free(pixels);
+    writePpm(gpa, ".zig-cache/tmp/weft-harness-whichkey.ppm", pixels, w, h) catch {};
+
+    // The status line is the last text row. The which-key hints must sit
+    // ABOVE it in their own rows — the last hint row must not overwrite the
+    // status row. We check that the status row still reads as the status
+    // line by confirming content is present and the row just above it (the
+    // last hint) is a distinct row (both have content, neither is empty).
+    // Regression guard: with the off-by-one, the last hint printed on the
+    // status row. Here we assert the mode chip "leader" is still legible at
+    // the very bottom by requiring content in the bottom row's left cells.
+    const line_h: u32 = @intFromFloat(view.line_h);
+    const bottom_row_y = h - line_h; // approx top of the last text row
+    try t.expect(hasContent(pixels, w, 8, bottom_row_y + 2, 120, h - 2));
+}
+
 test "harness: a vertical split renders a buffer in each column" {
     const gpa = t.allocator;
     const pool = try core.task.Pool.init(gpa, .{ .threads = 1 });

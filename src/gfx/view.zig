@@ -148,10 +148,19 @@ pub const Hud = struct {
     const max_pick_rows = 8;
     const max_wk_rows = 10;
 
+    /// Rows the bottom panel (pick or which-key) needs ABOVE the status
+    /// line — the single source of truth both the body reservation
+    /// (`rows`) and the render use, so they cannot drift out of step.
+    fn panelRows(self: *const Hud) usize {
+        if (self.pick) |p| return 1 + @min(p.filtered.items.len, max_pick_rows); // query + list
+        if (self.which_key) |wk| return 1 + @min(wk.len, max_wk_rows); // header + hints
+        return 0;
+    }
+
+    /// Total bottom chrome rows the body must leave free: the status line
+    /// plus any panel above it.
     fn rows(self: *const Hud) usize {
-        if (self.pick) |p| return 2 + @min(p.filtered.items.len, max_pick_rows);
-        if (self.which_key) |wk| return 1 + @min(wk.len, max_wk_rows);
-        return 1;
+        return 1 + self.panelRows();
     }
 };
 
@@ -961,20 +970,26 @@ pub const View = struct {
             try parts.appendSlice(scratch, "  ·  ");
             try parts.appendSlice(scratch, msg);
         }
+        // The status line is always the bottom row; the panel (pick or
+        // which-key) fills the `panelRows()` rows directly above it. Both
+        // this render and the body reservation (`hud.rows()`) derive from
+        // `panelRows()`, so a panel can never overwrite the status line or
+        // the body — the collision this replaced was two independent
+        // offset calculations drifting apart.
         try self.appendPlainRun(scratch, runs, rects, parts.items, self.baselineFor(rows_total - 1), cols_visible, self.theme.status, null);
+        if (rows_total <= hud.panelRows()) return;
+        const panel_top = rows_total - 1 - hud.panelRows(); // first row of the panel
 
         // which-key: a chord is pending and no pick is open — list the
         // prefix mode's bindings above the status line.
         if (hud.pick == null) {
             if (hud.which_key) |wk| {
                 const shown = @min(wk.len, Hud.max_wk_rows);
-                if (rows_total < shown + 1) return;
-                const head_row = rows_total - 1 - shown;
                 const header = try std.fmt.allocPrint(scratch, "  {s} —", .{hud.mode});
-                try self.appendPlainRun(scratch, runs, rects, header, self.baselineFor(head_row), cols_visible, self.theme.accent, null);
+                try self.appendPlainRun(scratch, runs, rects, header, self.baselineFor(panel_top), cols_visible, self.theme.accent, null);
                 for (0..shown) |i| {
                     const l = try std.fmt.allocPrint(scratch, "  {s}  {s}", .{ wk[i].key, wk[i].command });
-                    try self.appendPlainRun(scratch, runs, rects, l, self.baselineFor(head_row + 1 + i), cols_visible, self.theme.status, null);
+                    try self.appendPlainRun(scratch, runs, rects, l, self.baselineFor(panel_top + 1 + i), cols_visible, self.theme.status, null);
                 }
             }
             return;
@@ -983,8 +998,7 @@ pub const View = struct {
         const p = hud.pick orelse return;
         const total = p.filtered.items.len;
         const shown = @min(total, Hud.max_pick_rows);
-        if (rows_total < shown + 2) return;
-        const query_row = rows_total - 2 - shown;
+        const query_row = panel_top;
 
         const narrow_chip = if (p.narrow.items.len > 0)
             try std.fmt.allocPrint(scratch, "[{s}]", .{p.narrow.items})
@@ -1109,6 +1123,29 @@ test "literal tabs: a tab advances to the next tab stop; offsets stay exact" {
     var rope2 = try stemma.Rope.fromSlice(gpa, "\t\tx");
     defer rope2.deinit(gpa);
     try testing.expectApproxEqAbs(margin + 8 * cw, try view.xOfOffsetOnRow(&rope2, 2), 0.5);
+}
+
+test "hud: the panel reserves exactly what it renders (no status overlap)" {
+    // The bug this guards: `rows()` (body reservation) and the panel render
+    // computed offsets independently and drifted, so which-key's last hint
+    // landed on the status row. Both now derive from `panelRows()`.
+    const hints = [_]core.Keymap.Binding{
+        .{ .key = "f", .command = "find-file" },
+        .{ .key = "c", .command = "collab" },
+        .{ .key = "space", .command = "palette" },
+    };
+    const hud: Hud = .{ .mode = "leader", .which_key = &hints };
+    try testing.expectEqual(@as(usize, 4), hud.panelRows()); // header + 3 hints
+    try testing.expectEqual(@as(usize, 5), hud.rows()); // + the status line
+
+    // For any frame tall enough, the panel's last row is strictly above the
+    // status row — the render places header at panel_top and hints below it.
+    const rows_total: usize = 20;
+    const panel_top = rows_total - 1 - hud.panelRows();
+    const last_panel_row = panel_top + hud.panelRows() - 1; // header + hints
+    try testing.expect(last_panel_row < rows_total - 1); // never the status row
+    // And the body reservation leaves the panel_top clear of the body.
+    try testing.expectEqual(panel_top, rows_total - hud.rows());
 }
 
 test "buildTabStrip: active bracketed, separated, truncated to width" {
