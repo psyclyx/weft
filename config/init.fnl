@@ -129,7 +129,7 @@
 (bind "normal" "o" "vim-open-below")
 (bind "normal" "O" "vim-open-above")
 (bind "normal" "x" "delete-forward")
-(bind "normal" "d" "delete-line")   ;; dd-style linewise delete (fills register)
+;; d/c/y are operators (see below); D/C/S remain the to-end/line shortcuts.
 (bind "normal" "u" "undo")
 (bind "normal" "C-r" "redo")
 (bind "normal" "v" "vim-visual")
@@ -157,22 +157,57 @@
 (bind "normal" "X" "delete-backward")
 (bind "normal" "J" "join-lines")
 
-;; Yank / paste. yy/Y/dd are linewise; visual y is charwise; p/P paste
-;; below/above (linewise) or at the cursor (charwise).
+;; Yank / paste. Visual y is charwise; Y is linewise; p/P paste below/
+;; above (linewise) or at the cursor (charwise).
 (cmd "vim-visual-yank" "Yank the selection, back to normal."
   (fn [] (run "yank-selection") (set-mode "normal")))
-(cmd "yank" "y prefix (yy = yank line)." (fn [] (set-mode "yank")))
-(cmd "vim-yank-line" "Yank the line, back to normal."
-  (fn [] (set-mode "normal") (run "yank-line")))
-(weft.textinput "yank" nil)
-(weft.menu_mode "yank")
-(bind "normal" "y" "yank")
-(bind "yank" "y" "vim-yank-line")
-(bind "yank" "Escape" "leader-cancel")
+(bind "visual" "y" "vim-visual-yank")
 (bind "normal" "Y" "yank-line")
 (bind "normal" "p" "paste")
 (bind "normal" "P" "paste-before")
-(bind "visual" "y" "vim-visual-yank")
+
+;; ── Operators are just modes (no state machine) ──
+;; d/c/y set the mark and enter an operator MODE; a motion in that mode
+;; extends the selection and the operator applies. Because each is a real
+;; menu mode, which-key shows the available motions after the operator —
+;; the thing nvim/emacs can't do cleanly.
+;;
+;; Motions offered to an operator: key → [motion-command friendly-label].
+(local op-motions
+  {:w ["word-forward" "word"] :W ["WORD-forward" "WORD"]
+   :b ["word-backward" "back-word"] :B ["WORD-backward" "back-WORD"]
+   :e ["word-end" "word-end"] :E ["WORD-end" "WORD-end"]
+   :dollar ["line-end" "line-end"] :0 ["line-start" "line-start"]
+   :asciicircum ["first-non-blank" "first-non-blank"]
+   :G ["doc-end" "to-end"] :percent ["match-bracket" "match"]})
+
+;; op enter-key → [mode finish-command after-mode line-command double-key]
+(fn make-operator [enter-key mode finish after line-cmd]
+  ;; Enter: set the mark here, switch to the operator mode (which-key on).
+  (cmd (.. "enter-" mode) (.. "Start " mode ".")
+    (fn [] (run "set-mark") (set-mode mode)))
+  (bind "normal" enter-key (.. "enter-" mode))
+  (weft.textinput mode nil)
+  (weft.menu_mode mode)
+  ;; Cancel drops the pending selection.
+  (cmd (.. mode "-cancel") "Cancel the operator."
+    (fn [] (run "clear-selection") (set-mode "normal")))
+  (bind mode "Escape" (.. mode "-cancel"))
+  ;; The doubled operator key is the linewise whole-line form (dd/cc/yy).
+  (cmd (.. mode "-line") "Operate on the whole line."
+    (fn [] (run "clear-selection") (set-mode after) (run line-cmd)))
+  (bind mode enter-key (.. mode "-line"))
+  ;; Each motion: run the motion (extends the selection), apply, leave.
+  ;; The command name is per-mode (which-key shows "w  op-delete-word").
+  (each [mkey spec (pairs op-motions)]
+    (let [wname (.. mode "-" (. spec 2))]
+      (cmd wname (. spec 2)
+        (fn [] (run (. spec 1)) (run finish) (set-mode after)))
+      (bind mode mkey wname))))
+
+(make-operator "d" "op-delete" "delete-selection" "normal" "delete-line")
+(make-operator "c" "op-change" "delete-selection" "insert" "vim-change-line")
+(make-operator "y" "op-yank"   "yank-selection"   "normal" "yank-line")
 
 ;; f / F / t / T — find a character on the line (one-shot capture modes).
 (fn find-cmd [name dir]
