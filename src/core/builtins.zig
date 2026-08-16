@@ -108,6 +108,58 @@ fn cWordBackward(ctx: *Context, args: struct {}) anyerror!Value {
     return ok;
 }
 
+fn cWordEnd(ctx: *Context, args: struct {}) anyerror!Value {
+    _ = args;
+    try ctx.editor().moveWordEnd(ctx.gpa);
+    return ok;
+}
+
+fn cFirstNonBlank(ctx: *Context, args: struct {}) anyerror!Value {
+    _ = args;
+    try ctx.editor().moveFirstNonBlank(ctx.gpa);
+    return ok;
+}
+
+fn cMatchBracket(ctx: *Context, args: struct {}) anyerror!Value {
+    _ = args;
+    try ctx.editor().matchBracket(ctx.gpa);
+    return ok;
+}
+
+fn cJoinLines(ctx: *Context, args: struct {}) anyerror!Value {
+    _ = args;
+    if (ctx.buffer().read_only) return ok;
+    try ctx.editor().joinLine(ctx.gpa);
+    return ok;
+}
+
+fn cYankSelection(ctx: *Context, args: struct {}) anyerror!Value {
+    _ = args;
+    try ctx.editor().yankSelection(ctx.gpa);
+    ctx.editor().clearSelection();
+    return ok;
+}
+
+fn cPaste(ctx: *Context, args: struct {}) anyerror!Value {
+    _ = args;
+    if (ctx.buffer().read_only) return ok;
+    try ctx.editor().paste(ctx.gpa);
+    return ok;
+}
+
+/// Move to a character on the current line. `to` is the (single) target
+/// character; `dir` is "f"/"F" (find, land on it) or "t"/"T" (till, land
+/// one short); uppercase means backward.
+fn cFindChar(ctx: *Context, args: struct { dir: []const u8, to: []const u8 }) anyerror!Value {
+    if (args.to.len == 0 or args.dir.len == 0) return ok;
+    const target = args.to[0]; // first byte (ASCII targets)
+    const d = args.dir[0];
+    const forward = d == 'f' or d == 't';
+    const till = d == 't' or d == 'T';
+    try ctx.editor().findChar(ctx.gpa, target, forward, till);
+    return ok;
+}
+
 fn cSetMark(ctx: *Context, args: struct {}) anyerror!Value {
     _ = args;
     try ctx.editor().setMark(ctx.gpa);
@@ -266,6 +318,13 @@ const table = [_]command.Command{
     command.define("doc-end", "Move to the end of the document.", cDocEnd),
     command.define("word-forward", "Move to the next word start.", cWordForward),
     command.define("word-backward", "Move to the previous word start.", cWordBackward),
+    command.define("word-end", "Move to the end of the next word.", cWordEnd),
+    command.define("first-non-blank", "Move to the first non-blank on the line.", cFirstNonBlank),
+    command.define("match-bracket", "Jump to the matching bracket.", cMatchBracket),
+    command.define("join-lines", "Join this line with the next.", cJoinLines),
+    command.define("yank-selection", "Copy the selection to the yank register.", cYankSelection),
+    command.define("paste", "Insert the yank register at the cursor.", cPaste),
+    command.define("find-char", "Move to a character on the line (dir f|F|t|T, to <char>).", cFindChar),
     command.define("set-mark", "Start a selection at the cursor.", cSetMark),
     command.define("clear-selection", "Drop the selection.", cClearSelection),
     command.define("set-mode", "Switch the keymap mode.", cSetMode),

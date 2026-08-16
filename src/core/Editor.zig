@@ -31,6 +31,8 @@ history: undo_mod.UndoLog = .empty,
 cursor: stemma.AnchorSet.Handle,
 /// Selection = mark..cursor (either order), when a mark is set.
 mark: ?stemma.AnchorSet.Handle = null,
+/// Yank register: the last yanked/deleted text, for paste. Owned.
+register: std.ArrayList(u8) = .empty,
 /// Byte column the *headless/fallback* vertical motion aims for (sticky
 /// across short lines). Used when there is no view to consult — see
 /// `moveVertical`. The interactive path uses `goal_x` instead.
@@ -126,6 +128,7 @@ pub fn deinit(self: *Editor, gpa: Allocator) void {
     }
     self.history.deinit(gpa);
     self.doc.deinit(gpa);
+    self.register.deinit(gpa);
     if (self.saved_version) |v| gpa.free(v);
     self.* = undefined;
 }
@@ -465,8 +468,10 @@ pub fn deleteForward(self: *Editor, gpa: Allocator) Allocator.Error!void {
 }
 
 /// Delete an arbitrary range as one undoable unit (motions, operators).
+/// The removed text lands in the yank register (vim: `d` fills it).
 pub fn deleteRange(self: *Editor, gpa: Allocator, r: Range) Allocator.Error!void {
     if (r.isEmpty()) return;
+    try self.yankRange(gpa, r);
     try self.doc.delete(gpa, r);
     self.clearSelection();
     self.clearGoal();
@@ -641,6 +646,177 @@ pub fn moveWordBackward(self: *Editor, gpa: Allocator) Allocator.Error!void {
     self.clearGoal();
 }
 
+/// Forward to the END of the current/next word (vim `e`): the last word
+/// byte of the next word run.
+pub fn moveWordEnd(self: *Editor, gpa: Allocator) Allocator.Error!void {
+    const rope = self.text();
+    const len = rope.byteLen();
+    const off = self.cursorOffset();
+    if (off >= len) return;
+    const end = @min(len, off + 4096);
+    const buf = try readRange(gpa, rope, .{ .start = off, .end = end });
+    defer gpa.free(buf);
+    var i: usize = 1; // always advance at least one
+    while (i < buf.len and !wordChar(buf[i])) i += 1; // skip to a word
+    while (i + 1 < buf.len and wordChar(buf[i + 1])) i += 1; // to its last byte
+    self.moveTo(snapBoundary(rope, off + @min(i, buf.len -| 1)));
+    self.clearGoal();
+}
+
+/// The first non-blank byte on the current line (vim `^`).
+pub fn moveFirstNonBlank(self: *Editor, gpa: Allocator) Allocator.Error!void {
+    const rope = self.text();
+    const line = rope.lineRange(rope.offsetToPoint(self.cursorOffset()).row);
+    const buf = try readRange(gpa, rope, line);
+    defer gpa.free(buf);
+    var i: usize = 0;
+    while (i < buf.len and (buf[i] == ' ' or buf[i] == '\t')) i += 1;
+    self.moveTo(line.start + i);
+    self.clearGoal();
+}
+
+/// Jump to the bracket matching the first bracket at/after the cursor on
+/// the line, honoring nesting (bounded scan). No-op if none is found.
+pub fn matchBracket(self: *Editor, gpa: Allocator) Allocator.Error!void {
+    const rope = self.text();
+    const len = rope.byteLen();
+    const start = self.cursorOffset();
+    // Find the first bracket from the cursor to the line end.
+    const line_end = rope.lineRange(rope.offsetToPoint(start).row).end;
+    const head = try readRange(gpa, rope, .{ .start = start, .end = line_end });
+    defer gpa.free(head);
+    var bi: usize = 0;
+    while (bi < head.len and bracketOf(head[bi]) == null) bi += 1;
+    if (bi >= head.len) return;
+    const open = head[bi];
+    const bpos = start + bi;
+    const b = bracketOf(open).?;
+    const window = 1 << 16;
+    if (b.forward) {
+        const scan_end = @min(len, bpos + window);
+        const buf = try readRange(gpa, rope, .{ .start = bpos, .end = scan_end });
+        defer gpa.free(buf);
+        var depth: i32 = 0;
+        for (buf, 0..) |c, k| {
+            if (c == open) depth += 1 else if (c == b.match) {
+                depth -= 1;
+                if (depth == 0) {
+                    self.moveTo(snapBoundary(rope, bpos + k));
+                    self.clearGoal();
+                    return;
+                }
+            }
+        }
+    } else {
+        const scan_start = bpos + 1 -| window;
+        const buf = try readRange(gpa, rope, .{ .start = scan_start, .end = bpos + 1 });
+        defer gpa.free(buf);
+        var depth: i32 = 0;
+        var k: usize = buf.len;
+        while (k > 0) {
+            k -= 1;
+            const c = buf[k];
+            if (c == open) depth += 1 else if (c == b.match) {
+                depth -= 1;
+                if (depth == 0) {
+                    self.moveTo(snapBoundary(rope, scan_start + k));
+                    self.clearGoal();
+                    return;
+                }
+            }
+        }
+    }
+}
+
+const Bracket = struct { match: u8, forward: bool };
+
+fn bracketOf(c: u8) ?Bracket {
+    return switch (c) {
+        '(' => .{ .match = ')', .forward = true },
+        '[' => .{ .match = ']', .forward = true },
+        '{' => .{ .match = '}', .forward = true },
+        ')' => .{ .match = '(', .forward = false },
+        ']' => .{ .match = '[', .forward = false },
+        '}' => .{ .match = '{', .forward = false },
+        else => null,
+    };
+}
+
+/// Move to `target` on the current line, forward or backward. `till`
+/// stops one byte short (vim `t`/`T`). No-op if not found on the line.
+pub fn findChar(self: *Editor, gpa: Allocator, target: u8, forward: bool, till: bool) Allocator.Error!void {
+    const rope = self.text();
+    const off = self.cursorOffset();
+    const line = rope.lineRange(rope.offsetToPoint(off).row);
+    const buf = try readRange(gpa, rope, line);
+    defer gpa.free(buf);
+    const rel = off - line.start; // cursor's byte index within the line
+    if (forward) {
+        var i = rel + 1;
+        while (i < buf.len) : (i += 1) {
+            if (buf[i] == target) {
+                self.moveTo(line.start + (if (till) i - 1 else i));
+                self.clearGoal();
+                return;
+            }
+        }
+    } else {
+        var i = rel;
+        while (i > 0) {
+            i -= 1;
+            if (buf[i] == target) {
+                self.moveTo(line.start + (if (till) i + 1 else i));
+                self.clearGoal();
+                return;
+            }
+        }
+    }
+}
+
+/// Join the current line with the next: the trailing newline and the next
+/// line's leading blanks collapse to a single space (vim `J`).
+pub fn joinLine(self: *Editor, gpa: Allocator) Allocator.Error!void {
+    const rope = self.text();
+    const row = rope.offsetToPoint(self.cursorOffset()).row;
+    if (row + 1 >= rope.lineCount()) return;
+    const line = rope.lineRange(row);
+    if (line.end >= rope.byteLen()) return; // no newline to remove
+    const next = rope.lineRange(row + 1);
+    // Absorb the newline plus the next line's leading spaces/tabs.
+    const buf = try readRange(gpa, rope, next);
+    defer gpa.free(buf);
+    var skip: usize = 0;
+    while (skip < buf.len and (buf[skip] == ' ' or buf[skip] == '\t')) skip += 1;
+    const r: Range = .{ .start = line.end, .end = next.start + skip };
+    try self.doc.replaceAll(gpa, &.{.{ .range = r, .bytes = " " }});
+    self.moveTo(line.end);
+    self.clearSelection();
+    self.clearGoal();
+    try self.history.ingest(gpa, &self.doc);
+}
+
+// ── Yank / paste register ───────────────────────────────────────────
+
+fn yankRange(self: *Editor, gpa: Allocator, r: Range) Allocator.Error!void {
+    const bytes = try readRange(gpa, self.text(), r);
+    defer gpa.free(bytes);
+    self.register.clearRetainingCapacity();
+    try self.register.appendSlice(gpa, bytes);
+}
+
+/// Copy the selection into the register (no edit).
+pub fn yankSelection(self: *Editor, gpa: Allocator) Allocator.Error!void {
+    if (self.selectedRange()) |r| try self.yankRange(gpa, r);
+}
+
+/// Insert the register at the cursor (replacing the selection). `before`
+/// leaves the cursor before the inserted text (vim `P` vs `p` nuance is
+/// approximated: both insert at the cursor here).
+pub fn paste(self: *Editor, gpa: Allocator) Allocator.Error!void {
+    if (self.register.items.len == 0) return;
+    try self.insertText(gpa, self.register.items);
+}
+
 const WordDir = enum { forward, backward };
 
 /// Word scan over a bounded window around the cursor (a line-ish span
@@ -699,6 +875,58 @@ fn readRange(gpa: Allocator, rope: *const stemma.Rope, r: Range) Allocator.Error
 
 test {
     std.testing.refAllDecls(@This());
+}
+
+test "vim primitives: word-end, ^, %, f/t, J, yank/paste" {
+    const gpa = std.testing.allocator;
+    const pool = try task.Pool.init(gpa, .{ .threads = 1 });
+    defer pool.deinit();
+    var ed = try Editor.init(gpa, pool, "t");
+    defer ed.deinit(gpa);
+    try ed.insertText(gpa, "  ab (c)\ny\n"); // sp sp a b sp ( c ) \n y \n
+
+    // ^ → first non-blank (index 2, 'a').
+    ed.placeCursor(0);
+    try ed.moveFirstNonBlank(gpa);
+    try std.testing.expectEqual(@as(usize, 2), ed.cursorOffset());
+    // e → end of "ab" (index 3, 'b').
+    try ed.moveWordEnd(gpa);
+    try std.testing.expectEqual(@as(usize, 3), ed.cursorOffset());
+    // f( → the '(' at index 5.
+    ed.placeCursor(2);
+    try ed.findChar(gpa, '(', true, false);
+    try std.testing.expectEqual(@as(usize, 5), ed.cursorOffset());
+    // t) → one short of ')' (index 6).
+    try ed.findChar(gpa, ')', true, true);
+    try std.testing.expectEqual(@as(usize, 6), ed.cursorOffset());
+    // % → matching ')' at index 7 from the '(' at 5.
+    ed.placeCursor(5);
+    try ed.matchBracket(gpa);
+    try std.testing.expectEqual(@as(usize, 7), ed.cursorOffset());
+
+    // yank "ab" [2,4) then paste at doc end.
+    ed.placeCursor(2);
+    try ed.setMark(gpa);
+    ed.placeCursor(4);
+    try ed.yankSelection(gpa);
+    try std.testing.expectEqualStrings("ab", ed.register.items);
+    ed.clearSelection();
+    ed.moveDocEnd();
+    try ed.paste(gpa);
+    {
+        const txt = try ed.text().toOwnedSlice(gpa);
+        defer gpa.free(txt);
+        try std.testing.expect(std.mem.endsWith(u8, txt, "ab"));
+    }
+
+    // J → join line 0 with line 1 ("  ab (c)" + " " + "y").
+    ed.placeCursor(2);
+    try ed.joinLine(gpa);
+    {
+        const txt = try ed.text().toOwnedSlice(gpa);
+        defer gpa.free(txt);
+        try std.testing.expect(std.mem.startsWith(u8, txt, "  ab (c) y"));
+    }
 }
 
 /// The word fragment immediately before the cursor (completion prefix);

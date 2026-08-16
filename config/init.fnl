@@ -143,11 +143,12 @@
 (bind "normal" "z" "zed")                 ;; z → z prefix (zz = center)
 (bind "default" "C-g" "cancel")           ;; C-g → abort a pending connect
 
-;; More motions (WORD ≈ word here; ^ ≈ line start).
+;; More motions.
 (bind "normal" "W" "word-forward")
 (bind "normal" "B" "word-backward")
-(bind "normal" "e" "word-forward")
-(bind "normal" "asciicircum" "line-start") ;; ^
+(bind "normal" "e" "word-end")
+(bind "normal" "asciicircum" "first-non-blank") ;; ^
+(bind "normal" "percent" "match-bracket")       ;; %
 
 ;; Insert entries + line operators.
 (bind "normal" "A" "vim-append-line")
@@ -156,6 +157,39 @@
 (bind "normal" "C" "vim-change-eol")
 (bind "normal" "S" "vim-change-line")
 (bind "normal" "X" "delete-backward")
+(bind "normal" "J" "join-lines")
+
+;; Yank / paste (charwise register).
+(cmd "vim-yank-line" "Yank the current line."
+  (fn [] (run "line-start") (run "set-mark") (run "line-end")
+         (run "yank-selection")))
+(cmd "vim-visual-yank" "Yank the selection, back to normal."
+  (fn [] (run "yank-selection") (set-mode "normal")))
+(bind "normal" "Y" "vim-yank-line")
+(bind "normal" "p" "paste")
+(bind "normal" "P" "paste")
+(bind "visual" "y" "vim-visual-yank")
+
+;; f / F / t / T — find a character on the line (one-shot capture modes).
+(fn find-cmd [name dir]
+  (cmd name (.. "Find '" dir "' target.")
+    (fn [c] (set-mode "normal") (weft.run "find-char" dir c))))
+(find-cmd "do-find-f" "f")
+(find-cmd "do-find-F" "F")
+(find-cmd "do-find-t" "t")
+(find-cmd "do-find-T" "T")
+(each [mode capture (pairs {:find-f "do-find-f" :find-F "do-find-F"
+                            :find-t "do-find-t" :find-T "do-find-T"})]
+  (weft.textinput mode capture)
+  (bind mode "Escape" "leader-cancel"))
+(cmd "find-f" "f prefix." (fn [] (set-mode "find-f")))
+(cmd "find-F" "F prefix." (fn [] (set-mode "find-F")))
+(cmd "find-t" "t prefix." (fn [] (set-mode "find-t")))
+(cmd "find-T" "T prefix." (fn [] (set-mode "find-T")))
+(bind "normal" "f" "find-f")
+(bind "normal" "F" "find-F")
+(bind "normal" "t" "find-t")
+(bind "normal" "T" "find-T")
 
 ;; Scrolling (vim C-d/C-u/C-f/C-b/C-e/C-y).
 (bind "normal" "C-d" "scroll-half-down")
@@ -167,7 +201,6 @@
 
 ;; g / z prefix contents.
 (bind "goto" "g" "vim-goto-top")
-(bind "goto" "e" "doc-end")
 (bind "goto" "Escape" "leader-cancel")
 (bind "zed" "z" "vim-center")
 (bind "zed" "Escape" "leader-cancel")
