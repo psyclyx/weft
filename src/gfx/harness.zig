@@ -38,7 +38,7 @@ pub fn renderView(
     var built = try view.build(arena.allocator(), editor, hud, &top_row, w, h, w2p);
     defer built.deinit(gpa);
 
-    return try rasterize(gpa, view, &.{built.shapes}, &.{0}, w, h);
+    return try rasterize(gpa, view, &.{built.shapes}, &.{.{ 0, 0 }}, w, h);
 }
 
 /// Rasterize already-built shape lists (one per pane) into one buffer,
@@ -48,7 +48,7 @@ pub fn rasterize(
     gpa: std.mem.Allocator,
     view: *view_mod.View,
     shape_lists: []const []snail.Shape,
-    x_offsets: []const f32,
+    offsets: []const [2]f32,
     w: u32,
     h: u32,
 ) ![]u8 {
@@ -85,9 +85,9 @@ pub fn rasterize(
     defer gpa.free(bat);
     var ilen: usize = 0;
     var blen: usize = 0;
-    for (shape_lists, x_offsets) |shapes, x_off| {
+    for (shape_lists, offsets) |shapes, off| {
         if (shapes.len == 0) continue;
-        const xform: snail.Transform2D = .{ .xx = 1, .yy = 1, .tx = x_off, .ty = 0 };
+        const xform: snail.Transform2D = .{ .xx = 1, .yy = 1, .tx = off[0], .ty = off[1] };
         _ = try snail.emit.emit(inst, bat, &ilen, &blen, bindings[0], &view.atlas, shapes, xform, .{ 1, 1, 1, 1 });
     }
     try raster.draw(&renderer, ds, .{ .instances = inst[0..ilen], .batches = bat[0..blen] }, &.{&cache}, null);
@@ -190,7 +190,7 @@ test "harness: a vertical split renders a buffer in each column" {
     const right_layout = view.frame_layout;
     try t.expect(left_layout.lines.len > 0 and right_layout.lines.len > 0);
 
-    const pixels = try rasterize(gpa, &view, &.{ lb.shapes, rb.shapes }, &.{ 0, @floatFromInt(half) }, w, h);
+    const pixels = try rasterize(gpa, &view, &.{ lb.shapes, rb.shapes }, &.{ .{ 0, 0 }, .{ @floatFromInt(half), 0 } }, w, h);
     defer gpa.free(pixels);
     defer {
         var b1 = lb;
@@ -205,4 +205,47 @@ test "harness: a vertical split renders a buffer in each column" {
     try t.expect(hasContent(pixels, w, half + 8, 8, w - 4, 40)); // right body
     try t.expect(!hasContent(pixels, w, half - 3, 8, half, 40)); // seam gap
     writePpm(gpa, ".zig-cache/tmp/weft-harness-split.ppm", pixels, w, h) catch {};
+}
+
+test "harness: a horizontal split stacks a buffer in each row" {
+    const gpa = t.allocator;
+    const pool = try core.task.Pool.init(gpa, .{ .threads = 1 });
+    defer pool.deinit();
+    var view = try view_mod.View.init(gpa, @embedFile("font_mono"), 16);
+    defer view.deinit();
+    var top = try makeEditor(gpa, pool, "TOP PANE\nalpha bravo\n");
+    defer top.deinit(gpa);
+    var bot = try makeEditor(gpa, pool, "BOTTOM PANE\ncharlie delta\n");
+    defer bot.deinit(gpa);
+
+    const w: u32 = 320;
+    const h: u32 = 320;
+    const half: u32 = h / 2;
+    const projection = snail.Mat4.ortho(0, @floatFromInt(w), @floatFromInt(h), 0, -1, 1);
+    const w2p = snail.mvpToScenePixel(projection, @floatFromInt(w), @floatFromInt(h)) orelse unreachable;
+    var arena = std.heap.ArenaAllocator.init(gpa);
+    defer arena.deinit();
+
+    view.resetFrame();
+    var tt: usize = 0;
+    var bt: usize = 0;
+    const tb = try view.build(arena.allocator(), &top, .{ .mode = "normal" }, &tt, w, half, w2p);
+    const tl = view.frame_layout;
+    const bb = try view.build(arena.allocator(), &bot, .{ .mode = "normal" }, &bt, w, half, w2p);
+    const bl = view.frame_layout;
+    try t.expect(tl.lines.len > 0 and bl.lines.len > 0);
+    defer {
+        var b1 = tb;
+        b1.deinit(gpa);
+        var b2 = bb;
+        b2.deinit(gpa);
+    }
+
+    const pixels = try rasterize(gpa, &view, &.{ tb.shapes, bb.shapes }, &.{ .{ 0, 0 }, .{ 0, @floatFromInt(half) } }, w, h);
+    defer gpa.free(pixels);
+    // Content in both rows' body tops; the bottom pane's first text row sits
+    // just below the seam.
+    try t.expect(hasContent(pixels, w, 8, 8, w - 4, 40)); // top pane body
+    try t.expect(hasContent(pixels, w, 8, half + 8, w - 4, half + 40)); // bottom pane body
+    writePpm(gpa, ".zig-cache/tmp/weft-harness-hsplit.ppm", pixels, w, h) catch {};
 }

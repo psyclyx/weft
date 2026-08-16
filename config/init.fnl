@@ -80,14 +80,42 @@
 
 ;; ── Windows (vim C-w prefix): split / focus / close ──
 (cmd "window" "Window submenu." (fn [] (set-mode "window")))
-(cmd "vim-split" "Split vertically, then normal."
+(cmd "vim-split" "Horizontal split, then normal."
   (fn [] (set-mode "normal") (run "split")))
+(cmd "vim-vsplit" "Vertical split, then normal."
+  (fn [] (set-mode "normal") (run "vsplit")))
 (cmd "vim-focus-other" "Focus the other pane, then normal."
   (fn [] (set-mode "normal") (run "focus-other")))
 (cmd "vim-unsplit" "Close the split, then normal."
   (fn [] (set-mode "normal") (run "unsplit")))
 (weft.textinput "window" nil)
 (weft.menu_mode "window")
+
+;; ── More operators / insert entries (compounds of built-ins) ──
+(cmd "vim-append-line" "Insert at end of line."
+  (fn [] (run "line-end") (set-mode "insert")))
+(cmd "vim-insert-line" "Insert at start of line."
+  (fn [] (run "line-start") (set-mode "insert")))
+(cmd "vim-delete-eol" "Delete to end of line."
+  (fn [] (run "set-mark") (run "line-end") (run "delete-selection")))
+(cmd "vim-change-eol" "Change to end of line."
+  (fn [] (run "set-mark") (run "line-end") (run "delete-selection")
+         (set-mode "insert")))
+(cmd "vim-change-line" "Change the whole line."
+  (fn [] (run "line-start") (run "set-mark") (run "line-end")
+         (run "delete-selection") (set-mode "insert")))
+
+;; ── g prefix (gg → top) ──
+(cmd "goto" "g prefix." (fn [] (set-mode "goto")))
+(cmd "vim-goto-top" "Go to the first line." (fn [] (set-mode "normal") (run "doc-start")))
+(weft.textinput "goto" nil)
+(weft.menu_mode "goto")
+
+;; ── z prefix (zz → center) ──
+(cmd "zed" "z prefix." (fn [] (set-mode "zed")))
+(cmd "vim-center" "Center the current line." (fn [] (set-mode "normal") (run "center-line")))
+(weft.textinput "zed" nil)
+(weft.menu_mode "zed")
 
 ;; ── Normal ──
 (bind "normal" "h" "cursor-left")
@@ -98,7 +126,6 @@
 (bind "normal" "b" "word-backward")
 (bind "normal" "0" "line-start")
 (bind "normal" "dollar" "line-end")
-(bind "normal" "g" "doc-start")
 (bind "normal" "G" "doc-end")
 (bind "normal" "i" "vim-insert")
 (bind "normal" "a" "vim-append")
@@ -112,13 +139,47 @@
 (bind "normal" "colon" "pick-commands")   ;; : → command palette
 (bind "normal" "space" "leader")          ;; space → leader chord
 (bind "normal" "C-w" "window")            ;; C-w → window (split) prefix
+(bind "normal" "g" "goto")                ;; g → g prefix (gg = top)
+(bind "normal" "z" "zed")                 ;; z → z prefix (zz = center)
 (bind "default" "C-g" "cancel")           ;; C-g → abort a pending connect
 
-;; Window prefix: v/s split, w focus-other, o close split.
-(bind "window" "v" "vim-split")
+;; More motions (WORD ≈ word here; ^ ≈ line start).
+(bind "normal" "W" "word-forward")
+(bind "normal" "B" "word-backward")
+(bind "normal" "e" "word-forward")
+(bind "normal" "asciicircum" "line-start") ;; ^
+
+;; Insert entries + line operators.
+(bind "normal" "A" "vim-append-line")
+(bind "normal" "I" "vim-insert-line")
+(bind "normal" "D" "vim-delete-eol")
+(bind "normal" "C" "vim-change-eol")
+(bind "normal" "S" "vim-change-line")
+(bind "normal" "X" "delete-backward")
+
+;; Scrolling (vim C-d/C-u/C-f/C-b/C-e/C-y).
+(bind "normal" "C-d" "scroll-half-down")
+(bind "normal" "C-u" "scroll-half-up")
+(bind "normal" "C-f" "scroll-page-down")
+(bind "normal" "C-b" "scroll-page-up")
+(bind "normal" "C-e" "scroll-line-down")
+(bind "normal" "C-y" "scroll-line-up")
+
+;; g / z prefix contents.
+(bind "goto" "g" "vim-goto-top")
+(bind "goto" "e" "doc-end")
+(bind "goto" "Escape" "leader-cancel")
+(bind "zed" "z" "vim-center")
+(bind "zed" "Escape" "leader-cancel")
+
+;; Window prefix: s horizontal split, v vertical split, w/C-w focus other,
+;; o/q close split.
 (bind "window" "s" "vim-split")
+(bind "window" "v" "vim-vsplit")
 (bind "window" "w" "vim-focus-other")
+(bind "window" "C-w" "vim-focus-other")
 (bind "window" "o" "vim-unsplit")
+(bind "window" "q" "vim-unsplit")
 (bind "window" "Escape" "leader-cancel")
 
 ;; Picker: orderless by default; narrow/widen/cycle-style live (space is
