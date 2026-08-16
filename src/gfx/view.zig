@@ -23,6 +23,7 @@ const stemma = @import("stemma");
 const core = @import("../core/core.zig");
 const prepare = @import("prepare.zig");
 const layout = @import("layout.zig");
+const region = @import("region.zig");
 const fonts = @import("fonts.zig");
 
 const InlineAttr = core.capability.InlineAttr;
@@ -263,6 +264,14 @@ pub const View = struct {
     /// between frames reads last frame's map (one-frame latency, unseen).
     layout_arena: std.heap.ArenaAllocator,
     frame_layout: layout.Layout = .{ .lines = &.{} },
+    /// The current build's content origin (its frame inset by `margin`) — a
+    /// pane renders into its own region, so layout and HUD baselines derive
+    /// from here rather than the whole framebuffer. Defaults to the
+    /// single-pane, frame-at-origin case.
+    origin_x: f32 = margin,
+    origin_y: f32 = margin,
+    /// The last build's body region height, for scroll commands (`bodyRows`).
+    body_h: f32 = 0,
 
     pub fn init(gpa: Allocator, font_bytes: []const u8, em: f32) !View {
         var face_set = try fonts.FaceSet.init(gpa, font_bytes);
@@ -328,20 +337,25 @@ pub const View = struct {
         self.* = undefined;
     }
 
-    pub fn visibleRows(self: *const View, fb_h: u32) usize {
-        const usable = @as(f32, @floatFromInt(fb_h)) - 2 * margin;
-        return @intFromFloat(@max(1, @floor(usable / self.line_h)));
+    /// Rows that fit in a rect of pixel height `h` (its usable body height).
+    pub fn rowsIn(self: *const View, h: f32) usize {
+        return @intFromFloat(@max(1, @floor((h - 2 * margin) / self.line_h)));
     }
 
-    pub fn visibleCols(self: *const View, fb_w: u32) usize {
-        const usable = @as(f32, @floatFromInt(fb_w)) - 2 * margin;
-        return @intFromFloat(@max(1, @floor(usable / self.cell_w)));
+    pub fn colsIn(self: *const View, w: f32) usize {
+        return @intFromFloat(@max(1, @floor((w - 2 * margin) / self.cell_w)));
+    }
+
+    /// Rows in the focused pane's body (for the scroll commands, which run
+    /// between frames and read the last build's body region).
+    pub fn bodyRows(self: *const View) usize {
+        return @intFromFloat(@max(1, @floor(self.body_h / self.line_h)));
     }
 
     fn rowMetrics(self: *const View, baseline_y: f32) layout.RowMetrics {
         return .{
             .em = self.em,
-            .margin = margin,
+            .margin = self.origin_x,
             .baseline_y = baseline_y,
             .ascent = self.ascent,
             .descent = self.line_h - self.ascent,
@@ -410,17 +424,41 @@ pub const View = struct {
         editor: *const core.Editor,
         hud: Hud,
         top_row: *usize,
-        fb_w: u32,
-        fb_h: u32,
+        frame: region.Rect,
         world_to_pixel: snail.Transform2D,
     ) !Built {
         const rope = editor.text();
-        const rows_total = self.visibleRows(fb_h);
-        // A top tab strip (when present) reserves the first body row.
-        const top_rows: usize = if (hud.tabs != null) 1 else 0;
-        const rows_visible = rows_total -| hud.rows() -| top_rows;
-        const cols_visible = self.visibleCols(fb_w);
-        scrollToCursor(editor, top_row, @max(1, rows_visible));
+        // Carve the pane's frame into regions (no element computes an offset
+        // against another): content is the frame inset by `margin`; a top
+        // tab strip and a bottom HUD (status line + optional panel) are cut
+        // off it, and the body is what remains. Everything below renders
+        // into its own rect.
+        const content: region.Rect = .{
+            .x = frame.x + margin,
+            .y = frame.y + margin,
+            .w = frame.w - 2 * margin,
+            .h = frame.h - 2 * margin,
+        };
+        self.origin_x = content.x;
+        self.origin_y = content.y;
+        const cols_visible: usize = @intFromFloat(@max(1, @floor(content.w / self.cell_w)));
+
+        var stack = content;
+        var tab_rect: ?region.Rect = null;
+        if (hud.tabs != null) {
+            const c = stack.cutTop(self.line_h);
+            tab_rect = c.strip;
+            stack = c.rest;
+        }
+        const status_cut = stack.cutBottom(self.line_h);
+        const status_rect = status_cut.strip;
+        const panel_cut = status_cut.rest.cutBottom(@as(f32, @floatFromInt(hud.panelRows())) * self.line_h);
+        const panel_rect = panel_cut.strip;
+        const body_rect = panel_cut.rest;
+        self.body_h = body_rect.h;
+
+        const rows_visible: usize = @intFromFloat(@max(1, @floor(body_rect.h / self.line_h)));
+        scrollToCursor(editor, top_row, rows_visible);
         const total_rows = rope.lineCount();
         if (top_row.* >= total_rows) top_row.* = total_rows -| 1;
         const cursor_off = editor.cursorOffset();
@@ -441,17 +479,13 @@ pub const View = struct {
         const flip_off: ?usize =
             if (hud.cursor_on and hud.cursor_style == .block) cursor_off else null;
 
-        // Lay out visible rows, stacking y by each line's height, into the
-        // frame arena (the geometry map outlives the frame for hit-testing).
-        // The caller resets the arena once per frame (resetFrame) so split
-        // panes' maps coexist; each build appends its own lines.
+        // Lay out the body's visible rows into the frame arena (the geometry
+        // map outlives the frame for hit-testing). The caller resets the
+        // arena once per frame (resetFrame) so split panes' maps coexist.
         const la = self.layout_arena.allocator();
         var lines: std.ArrayList(layout.VisualLine) = .empty;
-        const body_top = margin + @as(f32, @floatFromInt(top_rows)) * self.line_h;
-        var y_top: f32 = body_top;
-        // Pixel gate: variable-height lines (headings) can't spill into the
-        // HUD/picker region, which begins where the body row budget ends.
-        const body_limit_y = body_top + @as(f32, @floatFromInt(rows_visible)) * self.line_h;
+        var y_top: f32 = body_rect.y;
+        const body_limit_y = body_rect.y + body_rect.h;
         var row = top_row.*;
         while (row < total_rows and row < top_row.* + rows_visible and y_top < body_limit_y) : (row += 1) {
             const vl = try self.layoutLine(scratch, la, &runs, rope, row, y_top, cols_visible, hud.md_inline, styles, flip_off);
@@ -479,14 +513,14 @@ pub const View = struct {
             }
         }
 
-        // Top buffer-tab strip (reserved the first body row above).
+        // Top buffer-tab strip, into its own region.
         if (hud.tabs) |tabs| {
             var tbuf: [1024]u8 = undefined;
             const strip = buildTabStrip(&tbuf, tabs);
-            try self.appendPlainRun(scratch, &runs, &rects, strip, self.baselineFor(0), cols_visible, self.theme.status, null);
+            try self.appendPlainRun(scratch, &runs, &rects, strip, tab_rect.?.y + self.ascent, cols_visible, self.theme.status, null);
         }
 
-        try self.buildHud(scratch, &runs, &rects, hud, rows_total, cols_visible);
+        try self.buildHud(scratch, &runs, &rects, hud, status_rect, panel_rect, cols_visible);
 
         return try self.render(world_to_pixel, runs.items, rects.items);
     }
@@ -592,11 +626,11 @@ pub const View = struct {
                 .column = @intCast(col),
                 .color = color,
             });
-            try stops.append(la, .{ .off = @intCast(abs), .x = margin + @as(f32, @floatFromInt(col)) * self.cell_w });
+            try stops.append(la, .{ .off = @intCast(abs), .x = self.origin_x + @as(f32, @floatFromInt(col)) * self.cell_w });
             byte += s.len;
             if (s.len == 1 and s[0] == '\t') col = layout.tabStopAfter(col) - 1; // loop's +1 lands on the stop
         }
-        try stops.append(la, .{ .off = @intCast(line.start + byte), .x = margin + @as(f32, @floatFromInt(col)) * self.cell_w });
+        try stops.append(la, .{ .off = @intCast(line.start + byte), .x = self.origin_x + @as(f32, @floatFromInt(col)) * self.cell_w });
 
         if (cells.items.len > 0) {
             const shbuf = try scratch.dupe(u8, text[0..byte]);
@@ -613,7 +647,7 @@ pub const View = struct {
             .ascent = self.ascent,
             .descent = self.line_h - self.ascent,
             .height = self.line_h,
-            .x0 = margin,
+            .x0 = self.origin_x,
             .stops = stops.items,
         };
     }
@@ -664,7 +698,7 @@ pub const View = struct {
         const baseline_y = y_top + ascent;
 
         var stops: std.ArrayList(layout.Stop) = .empty;
-        var pen: f32 = margin;
+        var pen: f32 = self.origin_x;
         var i: usize = 0;
         while (i < text.len) {
             const st = self.effStyle(md, line.start + i, caret_lo, caret_hi);
@@ -691,7 +725,7 @@ pub const View = struct {
             .ascent = ascent,
             .descent = self.line_h * max_scale - ascent,
             .height = self.line_h * max_scale,
-            .x0 = margin,
+            .x0 = self.origin_x,
             .stops = stops.items,
         };
     }
@@ -866,7 +900,7 @@ pub const View = struct {
 
     fn cellPlacement(self: *const View, baseline_y: f32, world_to_pixel: snail.Transform2D) snail.CellRunPlacement {
         return .{
-            .baseline = .{ .x = margin, .y = baseline_y },
+            .baseline = .{ .x = self.origin_x, .y = baseline_y },
             .cell_width = self.cell_w,
             .em = self.em,
             .snap = .grid,
@@ -908,8 +942,9 @@ pub const View = struct {
 
     // ── HUD (status line + picker; always mono) ──────────────────────
 
-    fn baselineFor(self: *const View, row_from_top: usize) f32 {
-        return margin + self.ascent + @as(f32, @floatFromInt(row_from_top)) * self.line_h;
+    /// Baseline for local row `i` within a region whose top is `rect_y`.
+    fn baseIn(self: *const View, rect_y: f32, i: usize) f32 {
+        return rect_y + self.ascent + @as(f32, @floatFromInt(i)) * self.line_h;
     }
 
     fn buildHud(
@@ -918,10 +953,10 @@ pub const View = struct {
         runs: *std.ArrayList(Run),
         rects: *std.ArrayList(Rect),
         hud: Hud,
-        rows_total: usize,
+        status_rect: region.Rect,
+        panel_rect: region.Rect,
         cols_visible: usize,
     ) !void {
-        if (rows_total == 0) return;
         var parts: std.ArrayList(u8) = .empty;
         try parts.appendSlice(scratch, " ");
         try parts.appendSlice(scratch, hud.mode);
@@ -970,26 +1005,23 @@ pub const View = struct {
             try parts.appendSlice(scratch, "  ·  ");
             try parts.appendSlice(scratch, msg);
         }
-        // The status line is always the bottom row; the panel (pick or
-        // which-key) fills the `panelRows()` rows directly above it. Both
-        // this render and the body reservation (`hud.rows()`) derive from
-        // `panelRows()`, so a panel can never overwrite the status line or
-        // the body — the collision this replaced was two independent
-        // offset calculations drifting apart.
-        try self.appendPlainRun(scratch, runs, rects, parts.items, self.baselineFor(rows_total - 1), cols_visible, self.theme.status, null);
-        if (rows_total <= hud.panelRows()) return;
-        const panel_top = rows_total - 1 - hud.panelRows(); // first row of the panel
+        // The status line owns `status_rect`; the panel (pick or which-key)
+        // owns `panel_rect` directly above it. Both rects were cut from the
+        // frame by one carving (build), so a panel physically cannot land on
+        // the status line or the body — the class of bug the old
+        // rows_total-N arithmetic allowed.
+        try self.appendPlainRun(scratch, runs, rects, parts.items, self.baseIn(status_rect.y, 0), cols_visible, self.theme.status, null);
 
         // which-key: a chord is pending and no pick is open — list the
-        // prefix mode's bindings above the status line.
+        // prefix mode's bindings in the panel region.
         if (hud.pick == null) {
             if (hud.which_key) |wk| {
                 const shown = @min(wk.len, Hud.max_wk_rows);
                 const header = try std.fmt.allocPrint(scratch, "  {s} —", .{hud.mode});
-                try self.appendPlainRun(scratch, runs, rects, header, self.baselineFor(panel_top), cols_visible, self.theme.accent, null);
+                try self.appendPlainRun(scratch, runs, rects, header, self.baseIn(panel_rect.y, 0), cols_visible, self.theme.accent, null);
                 for (0..shown) |i| {
                     const l = try std.fmt.allocPrint(scratch, "  {s}  {s}", .{ wk[i].key, wk[i].command });
-                    try self.appendPlainRun(scratch, runs, rects, l, self.baselineFor(panel_top + 1 + i), cols_visible, self.theme.status, null);
+                    try self.appendPlainRun(scratch, runs, rects, l, self.baseIn(panel_rect.y, 1 + i), cols_visible, self.theme.status, null);
                 }
             }
             return;
@@ -998,7 +1030,6 @@ pub const View = struct {
         const p = hud.pick orelse return;
         const total = p.filtered.items.len;
         const shown = @min(total, Hud.max_pick_rows);
-        const query_row = panel_top;
 
         const narrow_chip = if (p.narrow.items.len > 0)
             try std.fmt.allocPrint(scratch, "[{s}]", .{p.narrow.items})
@@ -1012,7 +1043,7 @@ pub const View = struct {
             total,
             @tagName(p.style),
         });
-        try self.appendPlainRun(scratch, runs, rects, query, self.baselineFor(query_row), cols_visible, self.theme.foreground, null);
+        try self.appendPlainRun(scratch, runs, rects, query, self.baseIn(panel_rect.y, 0), cols_visible, self.theme.foreground, null);
 
         const start = if (p.selected >= shown) p.selected + 1 - shown else 0;
         for (0..shown) |i| {
@@ -1029,7 +1060,7 @@ pub const View = struct {
                 runs,
                 rects,
                 l,
-                self.baselineFor(query_row + 1 + i),
+                self.baseIn(panel_rect.y, 1 + i),
                 cols_visible,
                 if (selected) self.theme.accent else self.theme.status,
                 if (selected) self.theme.selection else null,
@@ -1052,7 +1083,7 @@ pub const View = struct {
     ) !void {
         if (bg) |bgc| {
             try rects.append(scratch, .{
-                .x = margin,
+                .x = self.origin_x,
                 .y = baseline_y - self.ascent,
                 .w = @as(f32, @floatFromInt(cols_visible)) * self.cell_w,
                 .h = self.line_h,

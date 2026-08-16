@@ -11,8 +11,13 @@ const raster = @import("snail-raster");
 const stemma = @import("stemma");
 const core = @import("../core/core.zig");
 const view_mod = @import("view.zig");
+const region = @import("region.zig");
 
 const records = snail.render.records;
+
+fn fullFrame(w: u32, h: u32) region.Rect {
+    return .{ .x = 0, .y = 0, .w = @floatFromInt(w), .h = @floatFromInt(h) };
+}
 
 /// The theme background as sRGB bytes (the app clears to this before it
 /// draws; the harness fills it so composited text reads correctly).
@@ -35,20 +40,20 @@ pub fn renderView(
     defer arena.deinit();
     view.resetFrame();
     var top_row: usize = 0;
-    var built = try view.build(arena.allocator(), editor, hud, &top_row, w, h, w2p);
+    var built = try view.build(arena.allocator(), editor, hud, &top_row, fullFrame(w, h), w2p);
     defer built.deinit(gpa);
 
-    return try rasterize(gpa, view, &.{built.shapes}, &.{.{ 0, 0 }}, w, h);
+    return try rasterize(gpa, view, &.{built.shapes}, w, h);
 }
 
-/// Rasterize already-built shape lists (one per pane) into one buffer,
-/// each translated right by its x offset (0 for a single pane). `view.atlas`
-/// holds the glyph records from the preceding build() calls.
+/// Rasterize already-built shape lists (one per pane) into one buffer.
+/// Panes are built into their own region rects (absolute coords), so every
+/// list emits with the identity transform. `view.atlas` holds the glyph
+/// records from the preceding build() calls.
 pub fn rasterize(
     gpa: std.mem.Allocator,
     view: *view_mod.View,
     shape_lists: []const []snail.Shape,
-    offsets: []const [2]f32,
     w: u32,
     h: u32,
 ) ![]u8 {
@@ -85,10 +90,9 @@ pub fn rasterize(
     defer gpa.free(bat);
     var ilen: usize = 0;
     var blen: usize = 0;
-    for (shape_lists, offsets) |shapes, off| {
+    for (shape_lists) |shapes| {
         if (shapes.len == 0) continue;
-        const xform: snail.Transform2D = .{ .xx = 1, .yy = 1, .tx = off[0], .ty = off[1] };
-        _ = try snail.emit.emit(inst, bat, &ilen, &blen, bindings[0], &view.atlas, shapes, xform, .{ 1, 1, 1, 1 });
+        _ = try snail.emit.emit(inst, bat, &ilen, &blen, bindings[0], &view.atlas, shapes, .identity, .{ 1, 1, 1, 1 });
     }
     try raster.draw(&renderer, ds, .{ .instances = inst[0..ilen], .batches = bat[0..blen] }, &.{&cache}, null);
     return pixels;
@@ -218,13 +222,15 @@ test "harness: a vertical split renders a buffer in each column" {
     view.resetFrame();
     var lt: usize = 0;
     var rt: usize = 0;
-    const lb = try view.build(arena.allocator(), &left, .{ .mode = "normal" }, &lt, half, h, w2p);
+    const lrect: region.Rect = .{ .x = 0, .y = 0, .w = @floatFromInt(half), .h = @floatFromInt(h) };
+    const rrect: region.Rect = .{ .x = @floatFromInt(half), .y = 0, .w = @floatFromInt(w - half), .h = @floatFromInt(h) };
+    const lb = try view.build(arena.allocator(), &left, .{ .mode = "normal" }, &lt, lrect, w2p);
     const left_layout = view.frame_layout; // capture before the next build overwrites it
-    const rb = try view.build(arena.allocator(), &right, .{ .mode = "normal" }, &rt, half, h, w2p);
+    const rb = try view.build(arena.allocator(), &right, .{ .mode = "normal" }, &rt, rrect, w2p);
     const right_layout = view.frame_layout;
     try t.expect(left_layout.lines.len > 0 and right_layout.lines.len > 0);
 
-    const pixels = try rasterize(gpa, &view, &.{ lb.shapes, rb.shapes }, &.{ .{ 0, 0 }, .{ @floatFromInt(half), 0 } }, w, h);
+    const pixels = try rasterize(gpa, &view, &.{ lb.shapes, rb.shapes }, w, h);
     defer gpa.free(pixels);
     defer {
         var b1 = lb;
@@ -263,9 +269,11 @@ test "harness: a horizontal split stacks a buffer in each row" {
     view.resetFrame();
     var tt: usize = 0;
     var bt: usize = 0;
-    const tb = try view.build(arena.allocator(), &top, .{ .mode = "normal" }, &tt, w, half, w2p);
+    const trect: region.Rect = .{ .x = 0, .y = 0, .w = @floatFromInt(w), .h = @floatFromInt(half) };
+    const brect: region.Rect = .{ .x = 0, .y = @floatFromInt(half), .w = @floatFromInt(w), .h = @floatFromInt(h - half) };
+    const tb = try view.build(arena.allocator(), &top, .{ .mode = "normal" }, &tt, trect, w2p);
     const tl = view.frame_layout;
-    const bb = try view.build(arena.allocator(), &bot, .{ .mode = "normal" }, &bt, w, half, w2p);
+    const bb = try view.build(arena.allocator(), &bot, .{ .mode = "normal" }, &bt, brect, w2p);
     const bl = view.frame_layout;
     try t.expect(tl.lines.len > 0 and bl.lines.len > 0);
     defer {
@@ -275,7 +283,7 @@ test "harness: a horizontal split stacks a buffer in each row" {
         b2.deinit(gpa);
     }
 
-    const pixels = try rasterize(gpa, &view, &.{ tb.shapes, bb.shapes }, &.{ .{ 0, 0 }, .{ 0, @floatFromInt(half) } }, w, h);
+    const pixels = try rasterize(gpa, &view, &.{ tb.shapes, bb.shapes }, w, h);
     defer gpa.free(pixels);
     // Content in both rows' body tops; the bottom pane's first text row sits
     // just below the seam.

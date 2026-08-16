@@ -13,6 +13,7 @@ const wayland = @import("platform/wayland.zig");
 const Context = @import("gfx/context.zig").Context;
 const core = @import("core/core.zig");
 const view_mod = @import("gfx/view.zig");
+const region = @import("gfx/region.zig");
 const stats_mod = @import("gfx/stats.zig");
 const snail = @import("snail");
 const snail_vk = @import("gfx/snail_vk/root.zig");
@@ -511,8 +512,7 @@ pub fn main(init: std.process.Init) !void {
     var split_top: usize = 0; // the other pane's scroll
     var split_buf: core.Buffers.Id = buffers.active_id; // the other pane's buffer
     var focus_first = true; // focused pane is the left/top one
-    var focused_x_off: f32 = 0; // focused pane origin, for click routing
-    var focused_y_off: f32 = 0;
+    var focused_rect: region.Rect = .{}; // focused pane's rect, for click routing
     var built_other: ?view_mod.Built = null;
     defer if (built_other) |*b| b.deinit(gpa);
     var last_liveness: core.session.Liveness = .connecting;
@@ -587,24 +587,17 @@ pub fn main(init: std.process.Init) !void {
         const scale: f32 = @floatFromInt(@max(window.buffer_scale, 1));
         const px = @as(f32, @floatCast(window.mouse_x)) * scale;
         const py = @as(f32, @floatCast(window.mouse_y)) * scale;
-        // Split routing: a click in the peek region focuses it (next frame);
-        // otherwise the click maps into the focused pane's local coords.
-        const half_wf: f32 = @floatFromInt(fb[0] / 2);
-        const half_hf: f32 = @floatFromInt(fb[1] / 2);
-        const click_in_peek = switch (split_dir) {
-            .none => false,
-            .vertical => (px < half_wf) != focus_first,
-            .horizontal => (py < half_hf) != focus_first,
-        };
-        const pane_px = px - focused_x_off;
-        const pane_py = py - focused_y_off;
+        // Split routing: a click outside the focused pane's rect focuses the
+        // peek pane; inside, the click maps directly (panes render into their
+        // rects, so the geometry map is already in absolute coords).
+        const click_in_peek = split_dir != .none and !focused_rect.contains(px, py);
         if (window.consumeMousePressed(0)) {
             if (click_in_peek) {
                 split_ctx.focus_other = true;
                 had_input = true;
                 view_dirty = true;
             } else {
-                const off = view.offsetAtPoint(pane_px, pane_py);
+                const off = view.offsetAtPoint(px, py);
                 editor.clearSelection();
                 editor.placeCursor(off);
                 drag_anchor = off;
@@ -614,7 +607,7 @@ pub fn main(init: std.process.Init) !void {
             }
         } else if (window.mouse_down[0] and !click_in_peek) {
             if (drag_anchor) |anchor| {
-                const off = view.offsetAtPoint(pane_px, pane_py);
+                const off = view.offsetAtPoint(px, py);
                 if (off != editor.cursorOffset()) {
                     if (!drag_selecting) {
                         // First motion: anchor the mark, then drag the caret.
@@ -1036,37 +1029,24 @@ pub fn main(init: std.process.Init) !void {
             var arena_state = std.heap.ArenaAllocator.init(gpa);
             defer arena_state.deinit();
             view.resetFrame();
-            // Pane geometry: full frame, two columns (vertical), or two rows
-            // (horizontal). The focused pane (the active buffer) is built LAST
-            // so `frame_layout` ends on it for click routing; the peek pane is
-            // placed by an emit translate into the other region.
-            const half_w: u32 = fb[0] / 2;
-            const half_h: u32 = fb[1] / 2;
-            const right_x: f32 = @floatFromInt(fb[0] - half_w);
-            const bottom_y: f32 = @floatFromInt(fb[1] - half_h);
-            var foc_w = fb[0];
-            var foc_h = fb[1];
-            var foc_x: f32 = 0;
-            var foc_y: f32 = 0;
-            var oth_w = fb[0];
-            var oth_h = fb[1];
-            var oth_x: f32 = 0;
-            var oth_y: f32 = 0;
-            switch (split_dir) {
-                .none => {},
-                .vertical => {
-                    foc_w = half_w;
-                    oth_w = half_w;
-                    if (focus_first) oth_x = right_x else foc_x = right_x;
-                },
-                .horizontal => {
-                    foc_h = half_h;
-                    oth_h = half_h;
-                    if (focus_first) oth_y = bottom_y else foc_y = bottom_y;
-                },
-            }
-            focused_x_off = foc_x;
-            focused_y_off = foc_y;
+            // Pane layout is a region tree: slot 0 is the focused pane (the
+            // active buffer), slot 1 the peek pane. Each pane builds into its
+            // own rect (absolute coords) — no emit translate, and click
+            // routing is the tree's hit-test. The focused pane builds LAST so
+            // `frame_layout` ends on it.
+            const frame_rect: region.Rect = .{ .x = 0, .y = 0, .w = @floatFromInt(fb[0]), .h = @floatFromInt(fb[1]) };
+            const foc_leaf: region.Tree = .{ .leaf = 0 };
+            const peek_leaf: region.Tree = .{ .leaf = 1 };
+            const pane_tree: region.Tree = switch (split_dir) {
+                .none => foc_leaf,
+                .vertical, .horizontal => .{ .split = .{
+                    .axis = if (split_dir == .vertical) .vertical else .horizontal,
+                    .frac = 0.5,
+                    .first = if (focus_first) &foc_leaf else &peek_leaf,
+                    .second = if (focus_first) &peek_leaf else &foc_leaf,
+                } },
+            };
+            focused_rect = pane_tree.rectOf(frame_rect, 0).?;
 
             if (built_other) |*old| {
                 old.deinit(gpa);
@@ -1079,21 +1059,21 @@ pub fn main(init: std.process.Init) !void {
                         .file = ob.editor.backingPath() orelse ob.name,
                         .cursor_on = false, // the caret belongs to the focused pane
                     };
-                    const bo = try view.build(arena_state.allocator(), &ob.editor, other_hud, &split_top, oth_w, oth_h, world_to_pixel);
+                    const bo = try view.build(arena_state.allocator(), &ob.editor, other_hud, &split_top, pane_tree.rectOf(frame_rect, 1).?, world_to_pixel);
                     built_other = bo;
                     if (bo.records_added != 0)
                         binding[0] = try snail_vk.uploadDeltaAndWait(gpa, vctx, resources, ctx.command_pool, &cache, binding[0], &view.atlas);
                 }
             }
-            const b = try view.build(arena_state.allocator(), editor, hud, &view.top_row, foc_w, foc_h, world_to_pixel);
+            const b = try view.build(arena_state.allocator(), editor, hud, &view.top_row, focused_rect, world_to_pixel);
             if (built) |*old| old.deinit(gpa);
             built = b;
             if (b.records_added != 0) {
                 binding[0] = try snail_vk.uploadDeltaAndWait(gpa, vctx, resources, ctx.command_pool, &cache, binding[0], &view.atlas);
             }
 
-            // Emit the instance/batch stream: peek pane (translated), then
-            // the focused pane, accumulating into the shared buffers.
+            // Both panes render into their own rects, so every pane emits
+            // with identity — accumulate into one stream, one draw.
             instances.clearRetainingCapacity();
             batches.clearRetainingCapacity();
             const total_shapes = b.shapes.len + if (built_other) |bo| bo.shapes.len else 0;
@@ -1102,9 +1082,9 @@ pub fn main(init: std.process.Init) !void {
             var ilen: usize = 0;
             var blen: usize = 0;
             if (built_other) |bo| {
-                _ = try snail.emit.emit(instances.items, batches.items, &ilen, &blen, binding[0], &view.atlas, bo.shapes, .{ .xx = 1, .yy = 1, .tx = oth_x, .ty = oth_y }, .{ 1, 1, 1, 1 });
+                _ = try snail.emit.emit(instances.items, batches.items, &ilen, &blen, binding[0], &view.atlas, bo.shapes, .identity, .{ 1, 1, 1, 1 });
             }
-            _ = try snail.emit.emit(instances.items, batches.items, &ilen, &blen, binding[0], &view.atlas, b.shapes, .{ .xx = 1, .yy = 1, .tx = foc_x, .ty = foc_y }, .{ 1, 1, 1, 1 });
+            _ = try snail.emit.emit(instances.items, batches.items, &ilen, &blen, binding[0], &view.atlas, b.shapes, .identity, .{ 1, 1, 1, 1 });
             instances.items.len = ilen;
             batches.items.len = blen;
         }
@@ -1252,7 +1232,8 @@ fn scrollOf(data: ?*anyopaque) *ScrollCtx {
 }
 
 fn viewportRows(sc: *ScrollCtx) usize {
-    return sc.view.visibleRows(sc.fb[1]);
+    _ = sc.fb;
+    return sc.view.bodyRows(); // the focused pane's body height, split-aware
 }
 
 /// Move the focused pane's viewport by `delta` rows, optionally carrying
@@ -1446,7 +1427,8 @@ fn dispatchKey(ctx: *core.command.Context, view: *view_mod.View, ev: wayland.Key
     // Paging needs viewport geometry the core doesn't know; view-aware
     // dispatch stays here.
     if (ev.keysym == c.XKB_KEY_Page_Up or ev.keysym == c.XKB_KEY_Page_Down) {
-        const rows = view.visibleRows(fb_h);
+        _ = fb_h;
+        const rows = view.bodyRows();
         const dir: i32 = if (ev.keysym == c.XKB_KEY_Page_Up) -1 else 1;
         for (0..rows) |_| try visualVertical(ctx.editor(), view, dir);
         return;
