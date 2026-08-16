@@ -1142,10 +1142,17 @@ fn attachProviders(deps: *AttachDeps, buf: *core.Buffers.Buffer) !void {
     const at = try gpa.create(Attach);
     at.* = .{};
     buf.frontend = at;
-    const p = buf.editor.backingPath() orelse return;
     const doc = &buf.editor.doc;
 
-    if (deps.grammars.forPath(p)) |spec| {
+    // The buffer's *language* is identified by its name/path hint —
+    // independent of where the bytes live. A shared (remote) buffer holds
+    // its content in our replica, so tree-sitter highlights it locally
+    // even with no local file backing. (Local) LSP is different: the
+    // server needs the file on this machine, so it attaches only to a
+    // locally-backed buffer, below.
+    const lang_path = buf.editor.backingPath() orelse buf.name;
+
+    if (deps.grammars.forPath(lang_path)) |spec| {
         at.syntax = core.syntax.Syntax.create(gpa, spec, doc) catch |err| blk: {
             std.log.warn("syntax {s} unavailable: {t}", .{ spec.name, err });
             break :blk null;
@@ -1156,15 +1163,17 @@ fn attachProviders(deps: *AttachDeps, buf: *core.Buffers.Buffer) !void {
         _ = try deps.caps.registerFeed(doc, "edit/highlight", "highlight", .local, "treesitter");
     }
     if (deps.local_lsp) {
-        if (deps.lsp_servers.match(p)) |entry| {
-            at.lsp = core.lsp.Lsp.create(gpa, entry.argv, p, doc, deps.environ) catch |err| blk: {
-                std.log.warn("lsp unavailable: {t}", .{err});
-                break :blk null;
-            };
-            if (at.lsp) |l| {
-                const diag_layer = try deps.caps.registerFeed(doc, "edit/diagnostics", "diagnostics", .host, "lsp/server");
-                l.attachDiagnostics(diag_layer);
-                l.attachCaps(deps.caps, entry.extSlice());
+        if (buf.editor.backingPath()) |p| {
+            if (deps.lsp_servers.match(p)) |entry| {
+                at.lsp = core.lsp.Lsp.create(gpa, entry.argv, p, doc, deps.environ) catch |err| blk: {
+                    std.log.warn("lsp unavailable: {t}", .{err});
+                    break :blk null;
+                };
+                if (at.lsp) |l| {
+                    const diag_layer = try deps.caps.registerFeed(doc, "edit/diagnostics", "diagnostics", .host, "lsp/server");
+                    l.attachDiagnostics(diag_layer);
+                    l.attachCaps(deps.caps, entry.extSlice());
+                }
             }
         }
     }
