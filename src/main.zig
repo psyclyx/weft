@@ -393,6 +393,13 @@ pub fn main(init: std.process.Init) !void {
         .handler = peersHandler,
         .data = &share_ctx,
     });
+    _ = try commands.bind(gpa, "cancel", .{
+        .name = "cancel",
+        .summary = "Abort a pending/in-flight connect and drop queued host intents.",
+        .args = &.{},
+        .handler = cancelHandler,
+        .data = &share_ctx,
+    });
 
     // ── Window + Vulkan ──
     const window = try wayland.Window.init(1280, 800, "weft", "dev.psyclyx.weft");
@@ -446,6 +453,14 @@ pub fn main(init: std.process.Init) !void {
     var noted_host_fp: ?[24]u8 = null;
     var reconnect: ?core.task.Handle(anyerror!i32) = null;
     defer if (reconnect) |*h| h.detach();
+    // Interactive `connect`: the TCP connect runs on the pool (it can take
+    // seconds, or time out) so the frame thread never blocks. The hostport
+    // is owned and borrowed by the worker until the handle is polled; on
+    // shutdown with a connect in flight we detach and leak it (the worker
+    // may still be reading it — a bounded, one-shot leak).
+    var connect_task: ?core.task.Handle(anyerror!i32) = null;
+    var connect_hostport: ?[]u8 = null;
+    defer if (connect_task) |*h| h.detach();
     var next_reconnect_ns: u64 = 0;
     var next_backing_poll_ns: u64 = 0;
     var last_active: core.Buffers.Id = buffers.active_id;
@@ -584,27 +599,58 @@ pub fn main(init: std.process.Init) !void {
             }
             view_dirty = true;
         }
+        if (share_ctx.cancel_requested) {
+            share_ctx.cancel_requested = false;
+            if (share_ctx.pending_connect) |hp| {
+                gpa.free(hp);
+                share_ctx.pending_connect = null;
+            }
+            share_ctx.pending_listen = null;
+            if (connect_task) |*h| {
+                h.detach(); // worker still borrows connect_hostport → leak it
+                connect_task = null;
+                connect_hostport = null;
+                setEcho(&echo_line, gpa, "canceled");
+            }
+            view_dirty = true;
+        }
         if (share_ctx.pending_connect) |hostport| {
             share_ctx.pending_connect = null;
-            defer gpa.free(hostport);
-            if (collab_session == null) runtimeConnect(
-                gpa,
-                &cmd_ctx,
-                &collab_session,
-                &conn,
-                &fd_link,
-                hostport,
-                args.token,
-                args.user,
-                &caps,
-                &my_identity,
-            ) catch |err| {
-                echo_line.clearRetainingCapacity();
-                const msg = std.fmt.allocPrint(gpa, "connect failed: {t}", .{err}) catch "";
-                defer if (msg.len > 0) gpa.free(msg);
-                echo_line.appendSlice(gpa, msg) catch {};
-            };
+            // Already connected or connecting → drop the request. Otherwise
+            // kick the TCP connect onto the pool (never on the frame thread).
+            if (collab_session != null or connect_task != null) {
+                gpa.free(hostport);
+            } else if (pool.spawn(reconnectTask, .{hostport})) |h| {
+                connect_task = h;
+                connect_hostport = hostport; // freed when the handle is polled
+                setEcho(&echo_line, gpa, "connecting…");
+            } else |_| {
+                gpa.free(hostport);
+                setEcho(&echo_line, gpa, "connect: out of memory");
+            }
             view_dirty = true;
+        }
+        // Finish an in-flight interactive connect once the socket is up.
+        if (connect_task) |*h| {
+            if (h.poll()) |res| {
+                connect_task = null;
+                const hp = connect_hostport.?;
+                defer {
+                    gpa.free(hp);
+                    connect_hostport = null;
+                }
+                if (res) |fd| {
+                    runtimeConnectFinish(gpa, &cmd_ctx, &collab_session, &conn, &fd_link, fd, hp, args.token, args.user, &caps, &my_identity) catch |err| {
+                        _ = std.os.linux.close(fd);
+                        var buf: [96]u8 = undefined;
+                        setEcho(&echo_line, gpa, std.fmt.bufPrint(&buf, "connect failed: {t}", .{err}) catch "connect failed");
+                    };
+                } else |err| {
+                    var buf: [96]u8 = undefined;
+                    setEcho(&echo_line, gpa, std.fmt.bufPrint(&buf, "connect failed: {t}", .{err}) catch "connect failed");
+                }
+                view_dirty = true;
+            }
         }
         // Listen intents (same out-of-hot-section region): bind/listen
         // are immediate, accept runs on the hub's own thread.
@@ -991,6 +1037,15 @@ fn peersHandler(ctx: *core.command.Context, data: ?*anyopaque, args: []const cor
     return ok_echo(ctx, std.fmt.bufPrint(&buf, "{d} peers (see log for SAS)", .{count}) catch "peers");
 }
 
+/// `cancel` (C-g) — records the intent; the frame loop drops queued
+/// connect/listen requests and detaches an in-flight connect.
+fn cancelHandler(ctx: *core.command.Context, data: ?*anyopaque, args: []const core.command.Value) anyerror!core.command.Value {
+    _ = args;
+    const sc: *ShareCtx = @ptrCast(@alignCast(data.?));
+    sc.cancel_requested = true;
+    return ok_echo(ctx, "canceled");
+}
+
 /// Status-line chip for a peer's trust grade (null = don't show).
 fn hostTrustChip(trust: core.known_peers.Trust) ?[]const u8 {
     return switch (trust) {
@@ -1293,7 +1348,15 @@ const AttachDeps = struct {
         if (self.shells.get(host)) |fs| return fs;
         const fs = try self.gpa.create(core.ShellFs);
         errdefer self.gpa.destroy(fs);
-        fs.* = try core.ShellFs.spawn(self.gpa, &.{ "ssh", host, "sh" }, self.environ);
+        // BatchMode=yes: never block on an interactive password prompt (a
+        // classic hang); ConnectTimeout bounds an unreachable host. The
+        // spawn is still synchronous on the frame thread, but now it fails
+        // fast instead of wedging the editor.
+        fs.* = try core.ShellFs.spawn(self.gpa, &.{
+            "ssh", "-o",               "BatchMode=yes",
+            "-o",  "ConnectTimeout=8", host,
+            "sh",
+        }, self.environ);
         errdefer fs.deinit();
         try self.shells.put(self.gpa, try self.gpa.dupe(u8, host), fs);
         return fs;
@@ -1533,6 +1596,9 @@ const ShareCtx = struct {
     /// Access grade for the next `listen` (safe default: view).
     pending_access: core.session.Access = .view,
     stop_listen_requested: bool = false,
+    /// C-g: drop queued connect/listen intents and abort an in-flight
+    /// connect. Applied in the frame loop (which owns the connect handle).
+    cancel_requested: bool = false,
 };
 
 /// Wire a hub-side collab as a participant-and-relay: no local presence
@@ -1797,19 +1863,22 @@ fn openSharedAccept(ctx: *core.command.Context, data: ?*anyopaque, choice: []con
 
 /// Runtime connect: fresh buffer for the remote primary, client
 /// session + Conn bound to it.
-fn runtimeConnect(
+/// Finish a runtime connect from an already-open socket `fd` (the TCP
+/// connect ran on the pool). Builds the client session + Conn and a
+/// buffer for the remote primary.
+fn runtimeConnectFinish(
     gpa: std.mem.Allocator,
     ctx: *core.command.Context,
     session_slot: *?*core.session.Session,
     conn_slot: *?core.session.Conn,
     fd_link: *core.session.FdLink,
+    fd: i32,
     hostport: []const u8,
     token: []const u8,
     user: []const u8,
     caps: *core.Caps,
     my_identity: *const core.identity.Identity,
 ) !void {
-    const fd = try core.session.tcpConnect(hostport);
     fd_link.* = .{ .fd = fd };
     const sess = try core.session.Session.create(gpa, fd_link.link(), .client, token, .own, my_identity);
     errdefer sess.destroy();

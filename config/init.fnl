@@ -95,6 +95,7 @@
 (bind "normal" "v" "vim-visual")
 (bind "normal" "colon" "pick-commands")   ;; : → command palette
 (bind "normal" "space" "leader")          ;; space → leader chord
+(bind "default" "C-g" "cancel")           ;; C-g → abort a pending connect
 
 ;; Leader chords: space f f → find file; space space → palette.
 (bind "leader" "f" "leader-file")

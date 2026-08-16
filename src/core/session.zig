@@ -2066,6 +2066,15 @@ pub fn tcpListen(port: u16) !i32 {
     return tcpAccept(listener);
 }
 
+/// How long a TCP connect may take before we give up. Bounds every
+/// connect path (boot, runtime, reconnect) so an unreachable host can
+/// never wedge the caller — the editor's frame thread included.
+pub const connect_timeout_ms: i32 = 8000;
+
+/// O_NONBLOCK as a file-status flag (Linux x86_64/arm64); numerically the
+/// same as SOCK.NONBLOCK, which is why socket(...|SOCK.NONBLOCK) sets it.
+const o_nonblock: usize = 0o4000;
+
 pub fn tcpConnect(hostport: []const u8) !i32 {
     const colon = std.mem.lastIndexOfScalar(u8, hostport, ':') orelse return error.BadAddress;
     const host = hostport[0..colon];
@@ -2077,23 +2086,85 @@ pub fn tcpConnect(hostport: []const u8) !i32 {
         const part = it.next() orelse return error.BadAddress;
         o.* = std.fmt.parseInt(u8, part, 10) catch return error.BadAddress;
     }
-    const fd_rc = linux.socket(linux.AF.INET, linux.SOCK.STREAM, 0);
+    // Non-blocking connect + a bounded poll, so a dead host times out
+    // instead of blocking indefinitely in the connect syscall.
+    const fd_rc = linux.socket(linux.AF.INET, linux.SOCK.STREAM | linux.SOCK.NONBLOCK, 0);
     if (linux.errno(fd_rc) != .SUCCESS) return error.Socket;
     const fd: i32 = @intCast(fd_rc);
+    errdefer _ = linux.close(fd);
     var addr: linux.sockaddr.in = .{
         .port = std.mem.nativeToBig(u16, port),
         .addr = std.mem.bytesToValue(u32, &octets),
     };
-    if (linux.errno(linux.connect(fd, @ptrCast(&addr), @sizeOf(linux.sockaddr.in))) != .SUCCESS) {
-        _ = linux.close(fd);
-        return error.Connect;
+    switch (linux.errno(linux.connect(fd, @ptrCast(&addr), @sizeOf(linux.sockaddr.in)))) {
+        .SUCCESS => {}, // connected immediately (e.g. localhost)
+        .INPROGRESS, .INTR, .AGAIN => {
+            // Wait until writable (or the deadline), then read SO_ERROR.
+            var pfd: linux.pollfd = .{ .fd = fd, .events = linux.POLL.OUT, .revents = 0 };
+            const prc = linux.poll(@ptrCast(&pfd), 1, connect_timeout_ms);
+            if (linux.errno(prc) != .SUCCESS) return error.Connect;
+            if (prc == 0) return error.ConnectTimeout;
+            var sockerr: i32 = 0;
+            var len: linux.socklen_t = @sizeOf(i32);
+            _ = linux.getsockopt(fd, linux.SOL.SOCKET, linux.SO.ERROR, @ptrCast(&sockerr), &len);
+            if (sockerr != 0) return error.Connect;
+        },
+        else => return error.Connect,
     }
+    // Back to blocking: the reader/writer threads expect blocking I/O.
+    const flags = linux.fcntl(fd, linux.F.GETFL, 0);
+    _ = linux.fcntl(fd, linux.F.SETFL, flags & ~o_nonblock);
     return fd;
 }
 
 fn testPark(ms: u64) void {
     var w: std.atomic.Value(u32) = .init(0);
     futexWaitTimed(&w, 0, ms * std.time.ns_per_ms);
+}
+
+test "tcpConnect: a refused connection fails fast, never hangs" {
+    // Nothing listens on 127.0.0.1:1; the non-blocking connect must return
+    // an error well within the connect timeout (loopback RSTs at once).
+    const t0 = task.nowNs();
+    try t.expectError(error.Connect, tcpConnect("127.0.0.1:1"));
+    try t.expect(task.nowNs() - t0 < 3 * std.time.ns_per_s);
+}
+
+test "tcpConnect: connects to a live listener and the fd is blocking again" {
+    // Bind an ephemeral loopback port; skip if the sandbox forbids it.
+    const listener = tcpListener(0) catch return;
+    defer _ = linux.close(listener);
+    var addr: linux.sockaddr.in = undefined;
+    var alen: linux.socklen_t = @sizeOf(linux.sockaddr.in);
+    if (linux.errno(linux.getsockname(listener, @ptrCast(&addr), &alen)) != .SUCCESS) return;
+    const port = std.mem.bigToNative(u16, addr.port);
+
+    const hostport = try std.fmt.allocPrint(t.allocator, "127.0.0.1:{d}", .{port});
+    defer t.allocator.free(hostport);
+
+    const Accept = struct {
+        fn go(l: i32) void {
+            const cfd = tcpAccept(l) catch return;
+            defer _ = linux.close(cfd);
+            _ = linux.write(cfd, "hi", 2); // prove the connected fd carries data
+            testPark(50);
+        }
+    };
+    var th = try std.Thread.spawn(.{}, Accept.go, .{listener});
+    defer th.join();
+
+    const fd = try tcpConnect(hostport);
+    defer _ = linux.close(fd);
+    // A blocking read (O_NONBLOCK must have been cleared, else this EAGAINs).
+    var buf: [2]u8 = undefined;
+    var got: usize = 0;
+    while (got < 2) {
+        const rc = linux.read(fd, buf[got..].ptr, buf.len - got);
+        if (linux.errno(rc) != .SUCCESS) return error.ReadFailed; // e.g. EAGAIN
+        if (rc == 0) break;
+        got += rc;
+    }
+    try t.expectEqualStrings("hi", buf[0..got]);
 }
 
 test "partial checkout: multi-GB sparse file — jump to end, tail growth, viewed-only materialization" {
