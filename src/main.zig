@@ -191,6 +191,21 @@ pub fn main(init: std.process.Init) !void {
         .data = &cursor_cfg,
     });
 
+    // This machine's long-term identity (generated + persisted on first
+    // run). Names us to peers; the fingerprint is what a human verifies.
+    var my_identity = core.identity.loadOrGenerate(gpa, init.minimal.environ) catch |err| blk: {
+        std.log.warn("identity: {t} — using an ephemeral one this run", .{err});
+        break :blk core.identity.Identity.generate();
+    };
+    std.log.info("weft identity {s}", .{&my_identity.fingerprint()});
+    _ = try commands.bind(gpa, "identity", .{
+        .name = "identity",
+        .summary = "Show this machine's identity fingerprint.",
+        .args = &.{},
+        .handler = identityHandler,
+        .data = &my_identity,
+    });
+
     // The bundled plugin: UI policy (buffers picker, status, help) in
     // fennel over core mechanisms — loaded before user config so the
     // same names can be rebound there.
@@ -881,6 +896,13 @@ fn cursorBlinkHandler(ctx: *core.command.Context, data: ?*anyopaque, args: []con
 
 fn isMarkdownPath(path: []const u8) bool {
     return std.mem.endsWith(u8, path, ".md") or std.mem.endsWith(u8, path, ".markdown");
+}
+
+fn identityHandler(ctx: *core.command.Context, data: ?*anyopaque, args: []const core.command.Value) anyerror!core.command.Value {
+    _ = args;
+    const id: *core.identity.Identity = @ptrCast(@alignCast(data.?));
+    var buf: [48]u8 = undefined;
+    return ok_echo(ctx, std.fmt.bufPrint(&buf, "identity {s}", .{&id.fingerprint()}) catch "identity");
 }
 
 /// One view-computed vertical step. The goal-x (world px) is taken from

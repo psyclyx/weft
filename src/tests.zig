@@ -16,6 +16,7 @@ test {
     _ = @import("gfx/view.zig");
     _ = @import("gfx/layout.zig");
     _ = @import("core/markdown.zig");
+    _ = @import("core/identity.zig");
 }
 
 test "stemma path dep: rope round-trips" {
