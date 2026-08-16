@@ -286,7 +286,7 @@ pub fn main(init: std.process.Init) !void {
     defer if (hub) |*h| h.deinit();
     if (args.connect) |hostport| {
         fd_link = .{ .fd = try core.session.tcpConnect(hostport) };
-        collab_session = try core.session.Session.create(gpa, fd_link.link(), .client, args.token, .own);
+        collab_session = try core.session.Session.create(gpa, fd_link.link(), .client, args.token, .own, &my_identity);
         conn = try core.session.Conn.init(gpa, collab_session.?, args.user, .client);
         const col = try conn.?.bindPrimary(&ed0.doc, 0);
         col.presence_layer = try caps.layers.claim(gpa, &ed0.doc, "presence", .replicated, "collab");
@@ -566,6 +566,7 @@ pub fn main(init: std.process.Init) !void {
                 args.token,
                 args.user,
                 &caps,
+                &my_identity,
             ) catch |err| {
                 echo_line.clearRetainingCapacity();
                 const msg = std.fmt.allocPrint(gpa, "connect failed: {t}", .{err}) catch "";
@@ -578,7 +579,7 @@ pub fn main(init: std.process.Init) !void {
         // are immediate, accept runs on the hub's own thread.
         if (share_ctx.pending_listen) |port| {
             share_ctx.pending_listen = null;
-            if (hub == null) startListen(gpa, &hub, &share_ctx, &buffers, &caps, port, args.token, share_ctx.pending_access, &echo_line);
+            if (hub == null) startListen(gpa, &hub, &share_ctx, &buffers, &caps, port, args.token, share_ctx.pending_access, &my_identity, &echo_line);
             view_dirty = true;
         }
         if (share_ctx.stop_listen_requested) {
@@ -635,7 +636,7 @@ pub fn main(init: std.process.Init) !void {
                         if (res) |fd| {
                             collab_session.?.destroy();
                             fd_link = .{ .fd = fd };
-                            collab_session = try core.session.Session.create(gpa, fd_link.link(), .client, args.token, .own);
+                            collab_session = try core.session.Session.create(gpa, fd_link.link(), .client, args.token, .own, &my_identity);
                             try c.rebind(collab_session.?);
                             std.log.info("collab: reconnected", .{});
                             view_dirty = true;
@@ -1423,11 +1424,12 @@ fn startListen(
     port: u16,
     token: []const u8,
     access: core.session.Access,
+    my_identity: *const core.identity.Identity,
     echo: *std.ArrayList(u8),
 ) void {
     sc.primary_doc = &buffers.active().editor.doc;
     sc.primary_tag = buffers.active_id;
-    hub_slot.* = core.hub.Hub.init(gpa, token, access) catch {
+    hub_slot.* = core.hub.Hub.init(gpa, token, access, my_identity) catch {
         setEcho(echo, gpa, "listen: out of memory");
         return;
     };
@@ -1657,10 +1659,11 @@ fn runtimeConnect(
     token: []const u8,
     user: []const u8,
     caps: *core.Caps,
+    my_identity: *const core.identity.Identity,
 ) !void {
     const fd = try core.session.tcpConnect(hostport);
     fd_link.* = .{ .fd = fd };
-    const sess = try core.session.Session.create(gpa, fd_link.link(), .client, token, .own);
+    const sess = try core.session.Session.create(gpa, fd_link.link(), .client, token, .own, my_identity);
     errdefer sess.destroy();
     var c = try core.session.Conn.init(gpa, sess, user, .client);
     errdefer c.deinit();

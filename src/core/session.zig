@@ -24,6 +24,7 @@ const linux = std.os.linux;
 
 const wire = @import("wire.zig");
 const secure = @import("secure.zig");
+const identity = @import("identity.zig");
 const task = @import("task.zig");
 const Document = @import("Document.zig");
 const layers_mod = @import("layers.zig");
@@ -174,12 +175,29 @@ pub const Session = struct {
     // Crypto state (reader owns until established; writer reads tx
     // only after `established` with acquire ordering).
     eph: secure.Ephemeral,
+    /// Our long-term identity (names us to the peer). Ephemeral when the
+    /// caller had none — the channel is still encrypted, but the peer's
+    /// fingerprint is then meaningless (a fresh key each run).
+    id: identity.Identity,
+    /// The peer's identity public key, learned in the handshake. Valid
+    /// once `established`; the peer's fingerprint/color derive from it.
+    their_id: [secure.pub_len]u8 = undefined,
+    /// Short Authentication String seed for this session (see secure.zig).
+    /// Valid once `established`; rendered by `sas()`.
+    sas_bytes: [secure.sas_len]u8 = undefined,
     tx: secure.Channel = undefined,
     rx: secure.Channel = undefined,
 
     last_rx_ns: std.atomic.Value(u64) = .init(0),
 
-    pub fn create(gpa: Allocator, link: Link, role: secure.Role, token: []const u8, access: Access) !*Session {
+    pub fn create(
+        gpa: Allocator,
+        link: Link,
+        role: secure.Role,
+        token: []const u8,
+        access: Access,
+        id: ?*const identity.Identity,
+    ) !*Session {
         const self = try gpa.create(Session);
         errdefer gpa.destroy(self);
         self.* = .{
@@ -189,11 +207,33 @@ pub const Session = struct {
             .token = try gpa.dupe(u8, token),
             .access = access,
             .eph = secure.Ephemeral.generate(),
+            .id = if (id) |i| i.* else identity.Identity.generate(),
         };
         self.last_rx_ns.store(task.nowNs(), .release);
         self.reader_thread = try std.Thread.spawn(.{}, readerMain, .{self});
         self.writer_thread = try std.Thread.spawn(.{}, writerMain, .{self});
         return self;
+    }
+
+    /// The peer's fingerprint (who is on the other end), or null before
+    /// the handshake completes. This is what a human verifies out of band.
+    pub fn peerFingerprint(self: *const Session) ?[24]u8 {
+        if (!self.established.load(.acquire)) return null;
+        return identity.fingerprintOf(self.their_id);
+    }
+
+    /// The peer's identity hue seed (for a stable per-peer color), or null
+    /// before the handshake completes.
+    pub fn peerHue(self: *const Session) ?f32 {
+        if (!self.established.load(.acquire)) return null;
+        return identity.hueOf(self.their_id);
+    }
+
+    /// This session's Short Authentication String — the four words to read
+    /// aloud against the peer — or null before the handshake completes.
+    pub fn sas(self: *const Session) ?[identity.sas_len]u8 {
+        if (!self.established.load(.acquire)) return null;
+        return identity.sasWords(self.sas_bytes);
     }
 
     pub fn destroy(self: *Session) void {
@@ -344,7 +384,11 @@ pub const Session = struct {
         }
     }
 
-    /// Plaintext fixed-size handshake, then keys + MAC verification.
+    /// Plaintext fixed-size handshake, then keys + MAC verification. Each
+    /// side sends its ephemeral public key followed by its long-term
+    /// identity public key; both feed `derive`, which mixes the static
+    /// identity DH into the key schedule (authentication) and both
+    /// identity keys into the transcript (so the SAS binds them).
     fn handshake(self: *Session) !void {
         const P = secure.pub_len;
         const M = secure.mac_len;
@@ -352,25 +396,51 @@ pub const Session = struct {
         switch (self.role) {
             .client => {
                 try self.link.write(&self.eph.public);
+                try self.link.write(&self.id.public);
                 try self.readExact(&their_pub);
-                const keys = try secure.derive(self.eph, their_pub, self.token, self.eph.public, their_pub);
+                try self.readExact(&self.their_id);
+                const keys = try secure.derive(
+                    self.eph,
+                    their_pub,
+                    self.token,
+                    self.eph.public,
+                    their_pub,
+                    self.id.secret,
+                    self.their_id,
+                    self.id.public,
+                    self.their_id,
+                );
                 var mac_s: [M]u8 = undefined;
                 try self.readExact(&mac_s);
                 if (!secure.macEql(mac_s, keys.mac_s)) return error.AuthFailed;
                 try self.link.write(&keys.mac_c);
                 self.tx = .{ .key = keys.c2s };
                 self.rx = .{ .key = keys.s2c };
+                self.sas_bytes = keys.sas;
             },
             .server => {
                 try self.readExact(&their_pub);
+                try self.readExact(&self.their_id);
                 try self.link.write(&self.eph.public);
-                const keys = try secure.derive(self.eph, their_pub, self.token, their_pub, self.eph.public);
+                try self.link.write(&self.id.public);
+                const keys = try secure.derive(
+                    self.eph,
+                    their_pub,
+                    self.token,
+                    their_pub,
+                    self.eph.public,
+                    self.id.secret,
+                    self.their_id,
+                    self.their_id,
+                    self.id.public,
+                );
                 try self.link.write(&keys.mac_s);
                 var mac_c: [M]u8 = undefined;
                 try self.readExact(&mac_c);
                 if (!secure.macEql(mac_c, keys.mac_c)) return error.AuthFailed;
                 self.tx = .{ .key = keys.s2c };
                 self.rx = .{ .key = keys.c2s };
+                self.sas_bytes = keys.sas;
             },
         }
         self.established.store(true, .release);
@@ -988,9 +1058,9 @@ test "session: a view-only peer's ops are dropped by the host" {
     try doc_host.insert(gpa, 0, "base\n");
 
     // The host grants this peer view-only; the peer trusts the host (.own).
-    const sh = try Session.create(gpa, lh.link(), .server, "tok", .view);
+    const sh = try Session.create(gpa, lh.link(), .server, "tok", .view, null);
     defer sh.destroy();
-    const sp = try Session.create(gpa, lp.link(), .client, "tok", .own);
+    const sp = try Session.create(gpa, lp.link(), .client, "tok", .own, null);
     defer sp.destroy();
 
     var ch = try Collab.init(gpa, sh, &doc_host, "host");
@@ -1055,9 +1125,9 @@ test "session+collab: two instances converge over an encrypted link with presenc
     defer doc_b.deinit(gpa);
     try doc_a.insert(gpa, 0, "shared ground\n");
 
-    const sa = try Session.create(gpa, la.link(), .server, "tok", .own);
+    const sa = try Session.create(gpa, la.link(), .server, "tok", .own, null);
     defer sa.destroy();
-    const sb = try Session.create(gpa, lb.link(), .client, "tok", .own);
+    const sb = try Session.create(gpa, lb.link(), .client, "tok", .own, null);
     defer sb.destroy();
 
     var ca = try Collab.init(gpa, sa, &doc_a, "alice");
@@ -1128,9 +1198,9 @@ test "conn: shared buffers both ways over one link — offers, open, converge, p
     defer b_todo.deinit(gpa);
     try b_todo.insert(gpa, 0, "bob's todo\n");
 
-    const sa = try Session.create(gpa, la.link(), .server, "tok", .own);
+    const sa = try Session.create(gpa, la.link(), .server, "tok", .own, null);
     defer sa.destroy();
-    const sb = try Session.create(gpa, lb.link(), .client, "tok", .own);
+    const sb = try Session.create(gpa, lb.link(), .client, "tok", .own, null);
     defer sb.destroy();
     var ca = try Conn.init(gpa, sa, "alice", .server);
     defer ca.deinit();
@@ -1256,9 +1326,9 @@ test "partial checkout: adopt base over the wire, edit around holes, bounce-real
     var client = try Document.init(gpa, "client");
     defer client.deinit(gpa);
 
-    const sa = try Session.create(gpa, la.link(), .server, "tok", .own);
+    const sa = try Session.create(gpa, la.link(), .server, "tok", .own, null);
     defer sa.destroy();
-    const sb = try Session.create(gpa, lb.link(), .client, "tok", .own);
+    const sb = try Session.create(gpa, lb.link(), .client, "tok", .own, null);
     defer sb.destroy();
     var ch = try Collab.init(gpa, sa, &host, "host");
     defer ch.deinit();
@@ -1335,9 +1405,9 @@ test "session: wrong token never establishes" {
     const fds = try socketPair();
     var la: FdLink = .{ .fd = fds[0] };
     var lb: FdLink = .{ .fd = fds[1] };
-    const sa = try Session.create(gpa, la.link(), .server, "right", .own);
+    const sa = try Session.create(gpa, la.link(), .server, "right", .own, null);
     defer sa.destroy();
-    const sb = try Session.create(gpa, lb.link(), .client, "wrong", .own);
+    const sb = try Session.create(gpa, lb.link(), .client, "wrong", .own, null);
     defer sb.destroy();
     var waited: usize = 0;
     while (waited < 100) : (waited += 1) {
@@ -1346,6 +1416,33 @@ test "session: wrong token never establishes" {
         futexWaitTimed(&sa.out_wake, sa.out_wake.load(.acquire), 10 * std.time.ns_per_ms);
     }
     try t.expect(!sa.established.load(.acquire) or !sb.established.load(.acquire));
+}
+
+test "session: peers learn each other's fingerprint and agree on the SAS" {
+    const gpa = t.allocator;
+    const fds = try socketPair();
+    var la: FdLink = .{ .fd = fds[0] };
+    var lb: FdLink = .{ .fd = fds[1] };
+    const id_a = identity.Identity.forTest(0xa1);
+    const id_b = identity.Identity.forTest(0xb2);
+    const sa = try Session.create(gpa, la.link(), .server, "tok", .own, &id_a);
+    defer sa.destroy();
+    const sb = try Session.create(gpa, lb.link(), .client, "tok", .own, &id_b);
+    defer sb.destroy();
+
+    var waited: usize = 0;
+    while (waited < 2000) : (waited += 1) {
+        if (sa.established.load(.acquire) and sb.established.load(.acquire)) break;
+        napUs(300);
+    }
+    try t.expect(sa.established.load(.acquire) and sb.established.load(.acquire));
+
+    // Before establishment the accessors are null; after, each side names
+    // the OTHER end by its fingerprint.
+    try t.expectEqualSlices(u8, &id_b.fingerprint(), &sa.peerFingerprint().?);
+    try t.expectEqualSlices(u8, &id_a.fingerprint(), &sb.peerFingerprint().?);
+    // Untampered: both ends compute the same Short Authentication String.
+    try t.expectEqualSlices(u8, &sa.sas().?, &sb.sas().?);
 }
 
 test {
@@ -1937,9 +2034,9 @@ test "partial checkout: multi-GB sparse file — jump to end, tail growth, viewe
     defer doc_a.deinit(gpa);
     var doc_b = try Document.init(gpa, "viewer");
     defer doc_b.deinit(gpa);
-    const sa = try Session.create(gpa, la.link(), .server, "tok", .own);
+    const sa = try Session.create(gpa, la.link(), .server, "tok", .own, null);
     defer sa.destroy();
-    const sb = try Session.create(gpa, lb.link(), .client, "tok", .own);
+    const sb = try Session.create(gpa, lb.link(), .client, "tok", .own, null);
     defer sb.destroy();
     var ca = try Collab.init(gpa, sa, &doc_a, "agent");
     defer ca.deinit();
@@ -2067,9 +2164,9 @@ test "chaos: partition observed in liveness, heals as one exchange; typing stays
     defer doc_b.deinit(gpa);
     try doc_a.insert(gpa, 0, "base\n");
 
-    const sa = try Session.create(gpa, chaos_a.link(), .server, "tok", .own);
+    const sa = try Session.create(gpa, chaos_a.link(), .server, "tok", .own, null);
     defer sa.destroy();
-    const sb = try Session.create(gpa, chaos_b.link(), .client, "tok", .own);
+    const sb = try Session.create(gpa, chaos_b.link(), .client, "tok", .own, null);
     defer sb.destroy();
     var ca = try Collab.init(gpa, sa, &doc_a, "alice");
     defer ca.deinit();
@@ -2155,12 +2252,12 @@ test "hub: three-way convergence, presence relay, reconnect rebind" {
     var lb_h: FdLink = .{ .fd = fb[0] };
     var lb_c: FdLink = .{ .fd = fb[1] };
 
-    const sh_a = try Session.create(gpa, la_h.link(), .server, "tok", .own);
+    const sh_a = try Session.create(gpa, la_h.link(), .server, "tok", .own, null);
     defer sh_a.destroy();
-    const sh_b = try Session.create(gpa, lb_h.link(), .server, "tok", .own);
+    const sh_b = try Session.create(gpa, lb_h.link(), .server, "tok", .own, null);
     defer sh_b.destroy();
-    var sa = try Session.create(gpa, la_c.link(), .client, "tok", .own);
-    var sb = try Session.create(gpa, lb_c.link(), .client, "tok", .own);
+    var sa = try Session.create(gpa, la_c.link(), .client, "tok", .own, null);
+    var sb = try Session.create(gpa, lb_c.link(), .client, "tok", .own, null);
     defer sb.destroy();
 
     var ch_a = try Collab.init(gpa, sh_a, &doc_h, "hub");
@@ -2239,9 +2336,9 @@ test "hub: three-way convergence, presence relay, reconnect rebind" {
     const fa2 = try socketPair();
     var la2_h: FdLink = .{ .fd = fa2[0] };
     var la2_c: FdLink = .{ .fd = fa2[1] };
-    const sh_a2 = try Session.create(gpa, la2_h.link(), .server, "tok", .own);
+    const sh_a2 = try Session.create(gpa, la2_h.link(), .server, "tok", .own, null);
     defer sh_a2.destroy();
-    sa = try Session.create(gpa, la2_c.link(), .client, "tok", .own);
+    sa = try Session.create(gpa, la2_c.link(), .client, "tok", .own, null);
     defer sa.destroy();
     ch_a.rebind(sh_a2);
     ca.rebind(sa);

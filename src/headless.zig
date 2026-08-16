@@ -89,9 +89,17 @@ pub fn run(gpa: std.mem.Allocator, args: Args, environ: std.process.Environ) !vo
     defer if (blob) |*b| b.close();
     if (editor.backingPath()) |p| blob = session.BlobServer.openPath(p) catch null;
 
+    // This host's long-term identity (generated + persisted on first run,
+    // headless included), so peers can name and verify us.
+    var host_identity = core.identity.loadOrGenerate(gpa, environ) catch |err| blk: {
+        std.log.warn("identity: {t} — using an ephemeral one this run", .{err});
+        break :blk core.identity.Identity.generate();
+    };
+    std.log.info("headless identity {s}", .{&host_identity.fingerprint()});
+
     // ── Hub: accept forever, serve N peers on the one document ──
     std.log.info("headless: listening on {d} ({s} access)", .{ args.listen, args.access.label() });
-    var hub = try core.hub.Hub.init(gpa, args.token, args.access);
+    var hub = try core.hub.Hub.init(gpa, args.token, args.access, &host_identity);
     defer hub.deinit();
     try hub.listen(args.listen);
     var cfg: HeadlessCfg = .{

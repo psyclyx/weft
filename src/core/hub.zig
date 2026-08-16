@@ -21,6 +21,7 @@ const Allocator = std.mem.Allocator;
 
 const session = @import("session.zig");
 const layers = @import("layers.zig");
+const identity = @import("identity.zig");
 const Document = @import("Document.zig");
 
 const FdNode = struct { next: ?*FdNode = null, fd: i32 };
@@ -58,6 +59,10 @@ pub const Hub = struct {
     token: []u8,
     /// Access grade granted to every peer that connects to this endpoint.
     access: session.Access = .view,
+    /// This host's long-term identity, presented to every peer that joins
+    /// (so they can name/verify us). Null → each peer session mints an
+    /// ephemeral identity, as in tests.
+    id: ?identity.Identity = null,
     clients: std.ArrayList(*Peer) = .empty,
     incoming: std.atomic.Value(?*FdNode) = .init(null),
     listener: ?i32 = null,
@@ -65,9 +70,15 @@ pub const Hub = struct {
 
     /// A hub with no listener yet — call `listen` once it is stored at a
     /// stable address (the accept thread captures `self`). `access` is the
-    /// grade every peer on this endpoint is granted (safe default: view).
-    pub fn init(gpa: Allocator, token: []const u8, access: session.Access) !Hub {
-        return .{ .gpa = gpa, .token = try gpa.dupe(u8, token), .access = access };
+    /// grade every peer on this endpoint is granted (safe default: view);
+    /// `id` is the host identity presented to peers (null in tests).
+    pub fn init(gpa: Allocator, token: []const u8, access: session.Access, id: ?*const identity.Identity) !Hub {
+        return .{
+            .gpa = gpa,
+            .token = try gpa.dupe(u8, token),
+            .access = access,
+            .id = if (id) |i| i.* else null,
+        };
     }
 
     /// Bind the port and start accepting (non-blocking: bind/listen are
@@ -151,7 +162,7 @@ pub const Hub = struct {
         const p = try gpa.create(Peer);
         errdefer gpa.destroy(p);
         p.* = .{ .hub = self, .fd_link = .{ .fd = fd }, .sess = undefined, .conn = undefined };
-        p.sess = try session.Session.create(gpa, p.fd_link.link(), .server, self.token, self.access);
+        p.sess = try session.Session.create(gpa, p.fd_link.link(), .server, self.token, self.access, if (self.id) |*i| i else null);
         errdefer p.sess.destroy();
         p.conn = try session.Conn.init(gpa, p.sess, "host", .server);
         errdefer p.conn.deinit();
@@ -276,7 +287,7 @@ test "hub: two peers converge; presence relays and unions" {
     defer store.deinit(gpa);
     try doc_p.insert(gpa, 0, "base\n");
 
-    var hub = try Hub.init(gpa, "tok", .edit);
+    var hub = try Hub.init(gpa, "tok", .edit, null);
     defer hub.deinit();
 
     const pa = try socketPair();
@@ -293,9 +304,9 @@ test "hub: two peers converge; presence relays and unions" {
 
     var la: session.FdLink = .{ .fd = pa[1] };
     var lb: session.FdLink = .{ .fd = pb[1] };
-    var sa = try session.Session.create(gpa, la.link(), .client, "tok", .own);
+    var sa = try session.Session.create(gpa, la.link(), .client, "tok", .own, null);
     defer sa.destroy();
-    var sb = try session.Session.create(gpa, lb.link(), .client, "tok", .own);
+    var sb = try session.Session.create(gpa, lb.link(), .client, "tok", .own, null);
     defer sb.destroy();
     var ca = try session.Collab.init(gpa, sa, &doc_a, "alice");
     defer ca.deinit();
