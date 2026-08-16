@@ -15,7 +15,7 @@ pub fn build(b: *std.Build) void {
         .link_libc = true,
     });
     exe_mod.addImport("snail", snail_dep.module("snail"));
-    // SPIR-V-only shader scope: slangc runs inside snail's build; scion
+    // SPIR-V-only shader scope: slangc runs inside snail's build; weft
     // consumes blobs + the reflection ABI through this module.
     exe_mod.addImport("snail_shaders", snail_dep.module("snail-shaders-vk"));
     exe_mod.addImport("stemma", stemma_dep.module("stemma"));
@@ -27,22 +27,25 @@ pub fn build(b: *std.Build) void {
     exe_mod.linkSystemLibrary("wayland-client", .{});
     exe_mod.linkSystemLibrary("xkbcommon", .{});
     exe_mod.linkSystemLibrary("vulkan", .{});
+    // Runtime font-family resolution (sans/mono, weight, slant). System
+    // fonts, not pinned — see src/gfx/fonts.zig.
+    exe_mod.linkSystemLibrary("fontconfig", .{});
     addWaylandProtocols(b, exe_mod);
     addScripting(b, exe_mod);
     addSyntax(b, exe_mod);
 
     const exe = b.addExecutable(.{
-        .name = "scion",
+        .name = "weft",
         .root_module = exe_mod,
     });
     b.installArtifact(exe);
 
-    // The former scion-agent is folded into `scion --headless`
-    // (src/headless.zig): one binary, every scion a peer. The old
+    // The former weft-agent is folded into `weft --headless`
+    // (src/headless.zig): one binary, every weft a peer. The old
     // build-time dep-graph isolation went with it — headless.zig's
     // discipline is that it imports core/ only, reviewed not enforced.
 
-    const run_step = b.step("run", "Run scion");
+    const run_step = b.step("run", "Run weft");
     const run_cmd = b.addRunArtifact(exe);
     run_cmd.step.dependOn(b.getInstallStep());
     if (b.args) |args| run_cmd.addArgs(args);
@@ -59,6 +62,12 @@ pub fn build(b: *std.Build) void {
     });
     test_mod.addImport("snail", snail_dep.module("snail"));
     test_mod.addImport("stemma", stemma_dep.module("stemma"));
+    // Same embedded mono face the exe uses — lets layout tests prove the
+    // monospace-as-degenerate-case parity (stop.x == margin + col*cell_w).
+    test_mod.addAnonymousImport("font_mono", .{
+        .root_source_file = snail_dep.path("assets/DejaVuSansMono.ttf"),
+    });
+    test_mod.linkSystemLibrary("fontconfig", .{}); // View tests resolve faces
     addScripting(b, test_mod);
     addSyntax(b, test_mod);
     const unit_tests = b.addTest(.{ .root_module = test_mod });
@@ -72,8 +81,8 @@ pub fn build(b: *std.Build) void {
 /// vendored copy.
 fn addScripting(b: *std.Build, mod: *std.Build.Module) void {
     mod.linkSystemLibrary("lua", .{});
-    const fennel = b.graph.environ_map.get("SCION_FENNEL_LUA") orelse
-        @panic("SCION_FENNEL_LUA not set — build inside the nix shell");
+    const fennel = b.graph.environ_map.get("WEFT_FENNEL_LUA") orelse
+        @panic("WEFT_FENNEL_LUA not set — build inside the nix shell");
     mod.addAnonymousImport("fennel.lua", .{
         .root_source_file = .{ .cwd_relative = fennel },
     });
@@ -92,15 +101,15 @@ fn addSyntax(b: *std.Build, mod: *std.Build.Module) void {
         /// In-repo query for grammar packages that ship none.
         local_query: ?[]const u8 = null,
     }{
-        .{ .env = "SCION_TS_ZIG", .opt = "ts_zig", .import = "ts_zig_highlights" },
+        .{ .env = "WEFT_TS_ZIG", .opt = "ts_zig", .import = "ts_zig_highlights" },
         .{
-            .env = "SCION_TS_FENNEL",
+            .env = "WEFT_TS_FENNEL",
             .opt = "ts_fennel",
             .import = "ts_fennel_highlights",
             .local_query = "assets/fennel-highlights.scm",
         },
-        .{ .env = "SCION_TS_LUA", .opt = "ts_lua", .import = "ts_lua_highlights" },
-        .{ .env = "SCION_TS_NIX", .opt = "ts_nix", .import = "ts_nix_highlights" },
+        .{ .env = "WEFT_TS_LUA", .opt = "ts_lua", .import = "ts_lua_highlights" },
+        .{ .env = "WEFT_TS_NIX", .opt = "ts_nix", .import = "ts_nix_highlights" },
     };
     inline for (grammars) |g| {
         const dir = b.graph.environ_map.get(g.env) orelse

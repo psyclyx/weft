@@ -9,6 +9,14 @@
 //! surfaced from the compositor for milestone 4's input layer).
 
 const std = @import("std");
+const linux = std.os.linux;
+
+/// Monotonic clock in nanoseconds (raw syscall; matches core/task.zig).
+fn nowNs() u64 {
+    var ts: linux.timespec = undefined;
+    _ = linux.clock_gettime(.MONOTONIC, &ts);
+    return @as(u64, @intCast(ts.sec)) * std.time.ns_per_s + @as(u64, @intCast(ts.nsec));
+}
 
 pub const c = @cImport({
     @cInclude("wayland-client.h");
@@ -83,6 +91,13 @@ pub const Window = struct {
     key_head: usize = 0,
     key_tail: usize = 0,
     key_dropped: usize = 0,
+
+    // Key repeat: Wayland delivers only down/up, so the client synthesizes
+    // repeats for the most-recently-held key that the xkb keymap marks
+    // repeatable. Reuses the press-time event (mods + utf8).
+    repeat_ev: ?KeyEvent = null,
+    repeat_code: u32 = 0,
+    repeat_next_ns: u64 = 0,
 
     // Pointer state (sampled; fine for scroll/click).
     mouse_x: f64 = 0,
@@ -187,7 +202,24 @@ pub const Window = struct {
             _ = c.wl_display_cancel_read(self.display);
         }
         _ = c.wl_display_dispatch_pending(self.display);
+        self.emitKeyRepeats();
         self.refreshBufferScale();
+    }
+
+    /// Synthesize repeat events for a held key, paced by the compositor's
+    /// rate/delay. Bounded per frame so a stall can't dump a burst.
+    fn emitKeyRepeats(self: *Window) void {
+        const rk = self.repeat_ev orelse return;
+        if (self.repeat_rate <= 0 or !self.focused) return;
+        const interval: u64 = std.time.ns_per_s / @as(u64, @intCast(self.repeat_rate));
+        const now = nowNs();
+        var guard: u32 = 0;
+        while (now >= self.repeat_next_ns and guard < 8) : (guard += 1) {
+            self.pushKeyEvent(rk);
+            self.repeat_next_ns += interval;
+        }
+        // Resync after a long stall instead of catching up all at once.
+        if (now > self.repeat_next_ns + interval * 8) self.repeat_next_ns = now + interval;
     }
 
     pub fn shouldClose(self: *const Window) bool {
@@ -526,7 +558,9 @@ fn keyboardEnter(data: ?*anyopaque, _: ?*c.wl_keyboard, _: u32, _: ?*c.wl_surfac
 }
 
 fn keyboardLeave(data: ?*anyopaque, _: ?*c.wl_keyboard, _: u32, _: ?*c.wl_surface) callconv(.c) void {
-    selfFrom(data).focused = false;
+    const self = selfFrom(data);
+    self.focused = false;
+    self.repeat_ev = null; // no stuck repeat when focus leaves
 }
 
 fn keyboardKey(
@@ -565,6 +599,21 @@ fn keyboardKey(
         if (n > 0 and n < ev.utf8.len) ev.utf8_len = @intCast(n);
     }
     self.pushKeyEvent(ev);
+
+    // Arm/disarm key repeat. A new repeatable press becomes the target
+    // (holding a second key takes over); releasing the held key stops it.
+    if (pressed) {
+        const keymap = c.xkb_state_get_keymap(xkb_state);
+        if (self.repeat_rate > 0 and keymap != null and
+            c.xkb_keymap_key_repeats(keymap, keycode) == 1)
+        {
+            self.repeat_ev = ev;
+            self.repeat_code = key;
+            self.repeat_next_ns = nowNs() + @as(u64, @intCast(self.repeat_delay_ms)) * std.time.ns_per_ms;
+        }
+    } else if (key == self.repeat_code) {
+        self.repeat_ev = null;
+    }
 }
 
 /// The keysym at the unshifted level of the current layout — the

@@ -14,24 +14,26 @@ test {
     _ = @import("core/tests.zig");
     _ = @import("gfx/stats.zig");
     _ = @import("gfx/view.zig");
+    _ = @import("gfx/layout.zig");
+    _ = @import("core/markdown.zig");
 }
 
 test "stemma path dep: rope round-trips" {
     const gpa = t.allocator;
-    var r = try stemma.Rope.fromSlice(gpa, "scion grafts onto stemma");
+    var r = try stemma.Rope.fromSlice(gpa, "weft weaves through stemma");
     defer r.deinit(gpa);
-    try t.expectEqual(@as(usize, 24), r.byteLen());
+    try t.expectEqual(@as(usize, 26), r.byteLen());
     _ = try r.insert(gpa, 0, "» ");
     const got = try r.toOwnedSlice(gpa);
     defer gpa.free(got);
-    try t.expectEqualStrings("» scion grafts onto stemma", got);
+    try t.expectEqualStrings("» weft weaves through stemma", got);
 }
 
 test "stemma path dep: a document with history" {
     const gpa = t.allocator;
     var doc: stemma.TextDoc = .empty;
     defer doc.deinit(gpa);
-    try doc.setAgent(gpa, "scion-test");
+    try doc.setAgent(gpa, "weft-test");
     _ = try doc.insert(gpa, 0, "peer zero");
     try t.expectEqual(@as(usize, 9), doc.text().byteLen());
 }

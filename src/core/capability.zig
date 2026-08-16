@@ -46,6 +46,24 @@ pub const HighlightClass = enum(u8) {
     attribute,
     label,
 };
+
+/// Inline markdown role — the size/face family for a byte's span.
+pub const InlineRole = enum(u3) { normal, h1, h2, h3, h4, h5, h6, code };
+
+/// Per-byte markdown styling — the rich analogue of `HighlightClass`,
+/// packed to one byte so it rides the same `Bulk.classes` storage (the
+/// consumer bitcasts `[]u8` → `[]InlineAttr`). `role` picks size + base
+/// family; `bold`/`italic` pick the sans variant; `link` recolors; a
+/// `marker` byte is a syntax delimiter (dimmed but still rendered, so the
+/// source-offset→geometry map stays total). One spare bit.
+pub const InlineAttr = packed struct(u8) {
+    role: InlineRole = .normal,
+    bold: bool = false,
+    italic: bool = false,
+    link: bool = false,
+    marker: bool = false,
+    _pad: u1 = 0,
+};
 pub const Composition = enum { merge_ranked, union_all, first_wins };
 pub const Latency = enum { instant, fast, slow };
 pub const Placement = enum { local, host };

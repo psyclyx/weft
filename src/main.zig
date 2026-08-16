@@ -1,4 +1,4 @@
-//! scion — the assembled editor: a Wayland window presenting a
+//! weft — the assembled editor: a Wayland window presenting a
 //! `core.Editor` through snail's analytic glyph pipeline, all behavior
 //! routed key → keymap → command ABI (built-ins and config/plugin
 //! commands through the same door). The frame loop's only wait is the
@@ -6,7 +6,7 @@
 //! the hot-section fence; frame + input latency percentiles log
 //! continuously.
 //!
-//!   scion [file] [--font path.ttf] [--em N] [--config init.fnl]
+//!   weft [file] [--font path.ttf] [--em N] [--config init.fnl]
 
 const std = @import("std");
 const wayland = @import("platform/wayland.zig");
@@ -29,7 +29,7 @@ const Args = struct {
     em: f32 = 15,
     listen: ?u16 = null,
     connect: ?[]const u8 = null, // host:port
-    token: []const u8 = "scion-dev",
+    token: []const u8 = "weft-dev",
     user: []const u8 = "user",
     headless: bool = false,
     lsp_cmd: ?[]const u8 = null, // --headless host-side server
@@ -165,6 +165,25 @@ pub fn main(init: std.process.Init) !void {
     var lsp_servers: LspServers = .empty;
     defer lsp_servers.deinit(gpa);
     _ = try commands.bind(gpa, "lsp-add", lspAddCommand(&lsp_servers));
+
+    // Caret config commands, registered before the config runs so it can
+    // set per-mode styles at load time.
+    var cursor_cfg = CursorConfig{ .gpa = gpa };
+    defer cursor_cfg.deinit();
+    _ = try commands.bind(gpa, "set-cursor", .{
+        .name = "set-cursor",
+        .summary = "Set the caret style (block|bar|underline) for a mode.",
+        .args = &.{ .{ .name = "mode", .type = .string }, .{ .name = "style", .type = .string } },
+        .handler = setCursorHandler,
+        .data = &cursor_cfg,
+    });
+    _ = try commands.bind(gpa, "cursor-blink", .{
+        .name = "cursor-blink",
+        .summary = "Toggle caret blink (on|off) for a mode.",
+        .args = &.{ .{ .name = "mode", .type = .string }, .{ .name = "state", .type = .string } },
+        .handler = cursorBlinkHandler,
+        .data = &cursor_cfg,
+    });
 
     // The bundled plugin: UI policy (buffers picker, status, help) in
     // fennel over core mechanisms — loaded before user config so the
@@ -325,13 +344,13 @@ pub fn main(init: std.process.Init) !void {
     });
 
     // ── Window + Vulkan ──
-    const window = try wayland.Window.init(1280, 800, "scion", "dev.psyclyx.scion");
+    const window = try wayland.Window.init(1280, 800, "weft", "dev.psyclyx.weft");
     defer window.deinit();
     var fb = window.framebufferSize();
     const ctx = try Context.init(gpa, .{
         .display = window.display,
         .surface = window.surface,
-    }, fb[0], fb[1], "scion");
+    }, fb[0], fb[1], "weft");
     defer ctx.deinit();
 
     const vctx: snail_vk.VulkanContext = .{
@@ -375,8 +394,18 @@ pub fn main(init: std.process.Init) !void {
     var next_reconnect_ns: u64 = 0;
     var next_backing_poll_ns: u64 = 0;
     var last_active: core.Buffers.Id = buffers.active_id;
+    // Left-button drag: the source offset the press landed on. A plain
+    // click just moves the caret; motion with the button held extends a
+    // selection from this anchor.
+    var drag_anchor: ?usize = null;
+    var drag_selecting = false;
+    // Caret blink: solid on any input, then toggle on a fixed period. Each
+    // phase flip damages the view so an idle caret still blinks.
+    var blink_on = true;
+    var blink_next_ns: u64 = 0;
+    const blink_period_ns: u64 = 530 * std.time.ns_per_ms;
 
-    std.log.info("scion: rendering — {d} bytes open, em {d}", .{ ed0.text().byteLen(), args.em });
+    std.log.info("weft: rendering — {d} bytes open, em {d}", .{ ed0.text().byteLen(), args.em });
 
     while (!window.shouldClose() and !quit) {
         const frame_start = stats_mod.nowNs();
@@ -388,15 +417,18 @@ pub fn main(init: std.process.Init) !void {
             view_dirty = true;
         }
 
-        // ── Input → commit (hot section: no blocking API compiles in) ──
+        // ── Input → commit ──
+        // The hot-section fence (no-blocking guarantee) is entered
+        // narrowly inside dispatchKey around the typing/commit path, not
+        // here: a bound key can also trigger a deliberately-blocking
+        // control command (open a file, save), and those must be allowed
+        // to block. See dispatchKey.
         var had_input = false;
-        core.task.beginHotSection();
         while (window.nextKeyEvent()) |ev| {
             if (!ev.pressed) continue;
             had_input = true;
             try dispatchKey(&cmd_ctx, &view, ev, fb[1]);
         }
-        core.task.endHotSection();
         if (window.shouldClose()) break;
 
         // Commands may have created/switched buffers; lazily attach
@@ -407,6 +439,52 @@ pub fn main(init: std.process.Init) !void {
         const attach: *Attach = @ptrCast(@alignCast(abuf.frontend.?));
         if (buffers.active_id != last_active) {
             last_active = buffers.active_id;
+            view_dirty = true;
+        }
+
+        // ── Pointer → caret (click-to-place; drag extends a selection) ──
+        // World space is framebuffer pixels; the surface-space pointer
+        // scales by buffer_scale (HiDPI-correct, single multiply here).
+        const scale: f32 = @floatFromInt(@max(window.buffer_scale, 1));
+        const px = @as(f32, @floatCast(window.mouse_x)) * scale;
+        const py = @as(f32, @floatCast(window.mouse_y)) * scale;
+        if (window.consumeMousePressed(0)) {
+            const off = view.offsetAtPoint(px, py);
+            editor.clearSelection();
+            editor.placeCursor(off);
+            drag_anchor = off;
+            drag_selecting = false;
+            had_input = true;
+            view_dirty = true;
+        } else if (window.mouse_down[0]) {
+            if (drag_anchor) |anchor| {
+                const off = view.offsetAtPoint(px, py);
+                if (off != editor.cursorOffset()) {
+                    if (!drag_selecting) {
+                        // First motion: anchor the mark, then drag the caret.
+                        editor.placeCursor(anchor);
+                        try editor.setMark(gpa);
+                        drag_selecting = true;
+                    }
+                    editor.placeCursor(off);
+                    had_input = true;
+                    view_dirty = true;
+                }
+            }
+        } else {
+            drag_anchor = null;
+            drag_selecting = false;
+        }
+
+        // Caret blink: any input shows a solid caret and restarts the
+        // timer; otherwise, when the current mode blinks, flip on each
+        // period and damage the view.
+        if (had_input) {
+            blink_on = true;
+            blink_next_ns = frame_start + blink_period_ns;
+        } else if (cursor_cfg.blinkFor(keymap.currentMode()) and frame_start >= blink_next_ns) {
+            blink_on = !blink_on;
+            blink_next_ns = frame_start + blink_period_ns;
             view_dirty = true;
         }
 
@@ -586,6 +664,29 @@ pub fn main(init: std.process.Init) !void {
                     try syn.publishHighlight(gpa, &editor.doc, hl, range);
                 }
             }
+
+            // Markdown styling for .md buffers: analyze a window (whole doc
+            // when small) into per-byte attributes each damage frame — a
+            // stale paint is slightly-old truth, like highlight bulk.
+            var md_arena = std.heap.ArenaAllocator.init(gpa);
+            defer md_arena.deinit();
+            const md_inline: ?view_mod.MdInline = blk: {
+                const path = editor.backingPath() orelse abuf.name;
+                if (!isMarkdownPath(path)) break :blk null;
+                const rope = editor.text();
+                const total = rope.byteLen();
+                const range = if (total <= 256 * 1024)
+                    @import("stemma").Range{ .start = 0, .end = total }
+                else rng: {
+                    const rows = rope.lineCount();
+                    const first = view.top_row -| 100;
+                    const last = @min(rows -| 1, view.top_row + 200);
+                    break :rng @import("stemma").Range{ .start = rope.lineRange(first).start, .end = rope.lineRange(last).end };
+                };
+                const attrs = core.markdown.analyze(md_arena.allocator(), rope, range) catch break :blk null;
+                break :blk .{ .base = range.start, .attrs = attrs };
+            };
+
             var pos_buf: [24]u8 = undefined;
             const buffer_pos = blk: {
                 var index: usize = 0;
@@ -631,6 +732,9 @@ pub fn main(init: std.process.Init) !void {
                 null;
             const hud: view_mod.Hud = .{
                 .mode = keymap.currentMode(),
+                .md_inline = md_inline,
+                .cursor_style = cursor_cfg.styleFor(keymap.currentMode()),
+                .cursor_on = if (cursor_cfg.blinkFor(keymap.currentMode())) blink_on else true,
                 .file = editor.backingPath() orelse abuf.name,
                 .dirty = editor.isDirty(gpa) catch true,
                 .save_failed = editor.save_state == .failed,
@@ -717,15 +821,88 @@ pub fn main(init: std.process.Init) !void {
 /// section: dispatch is a table lookup plus the command itself,
 /// allocation-only. Unbound printable input becomes `insert-text` —
 /// itself a command; there is no editing path around the ABI.
+/// Per-mode caret style + blink, set from config via `set-cursor` and
+/// `cursor-blink` and read into the Hud each frame. Blink is per mode so
+/// the sample config can blink in insert and stay solid in normal.
+const CursorConfig = struct {
+    const Entry = struct { mode: []u8, style: view_mod.CursorStyle = .block, blink: bool = false };
+    gpa: std.mem.Allocator,
+    entries: std.ArrayList(Entry) = .empty,
+
+    fn deinit(self: *CursorConfig) void {
+        for (self.entries.items) |e| self.gpa.free(e.mode);
+        self.entries.deinit(self.gpa);
+    }
+    fn styleFor(self: *const CursorConfig, mode: []const u8) view_mod.CursorStyle {
+        for (self.entries.items) |e| if (std.mem.eql(u8, e.mode, mode)) return e.style;
+        return .block;
+    }
+    fn blinkFor(self: *const CursorConfig, mode: []const u8) bool {
+        for (self.entries.items) |e| if (std.mem.eql(u8, e.mode, mode)) return e.blink;
+        return false;
+    }
+    fn entry(self: *CursorConfig, mode: []const u8) !*Entry {
+        for (self.entries.items) |*e| if (std.mem.eql(u8, e.mode, mode)) return e;
+        try self.entries.append(self.gpa, .{ .mode = try self.gpa.dupe(u8, mode) });
+        return &self.entries.items[self.entries.items.len - 1];
+    }
+};
+
+fn parseCursorStyle(s: []const u8) ?view_mod.CursorStyle {
+    if (std.mem.eql(u8, s, "block")) return .block;
+    if (std.mem.eql(u8, s, "bar")) return .bar;
+    if (std.mem.eql(u8, s, "underline")) return .underline;
+    return null;
+}
+
+fn setCursorHandler(ctx: *core.command.Context, data: ?*anyopaque, args: []const core.command.Value) anyerror!core.command.Value {
+    _ = ctx;
+    const cfg: *CursorConfig = @ptrCast(@alignCast(data.?));
+    const style = parseCursorStyle(args[1].string) orelse return error.InvalidArgument;
+    (try cfg.entry(args[0].string)).style = style;
+    return .nil;
+}
+
+fn cursorBlinkHandler(ctx: *core.command.Context, data: ?*anyopaque, args: []const core.command.Value) anyerror!core.command.Value {
+    _ = ctx;
+    const cfg: *CursorConfig = @ptrCast(@alignCast(data.?));
+    (try cfg.entry(args[0].string)).blink = std.mem.eql(u8, args[1].string, "on");
+    return .nil;
+}
+
+fn isMarkdownPath(path: []const u8) bool {
+    return std.mem.endsWith(u8, path, ".md") or std.mem.endsWith(u8, path, ".markdown");
+}
+
+/// One view-computed vertical step. The goal-x (world px) is taken from
+/// the editor (sticky across a run of up/down) or seeded from the current
+/// caret's rendered x; the target offset is the nearest caret to it on
+/// the adjacent row. This is the interactive replacement for the core's
+/// scalar-column `moveVertical` — monospace stays exact (uniform
+/// advances), proportional text tracks the visual column.
+fn visualVertical(ed: *core.Editor, view: *view_mod.View, dir: i32) !void {
+    const rope = ed.text();
+    const cur = ed.cursorOffset();
+    const gx = ed.goalX() orelse try view.xOfOffsetOnRow(rope, cur);
+    ed.setGoalX(gx); // persists even at the doc edges, for the next step
+    const pt = rope.offsetToPoint(cur);
+    const rows = rope.lineCount();
+    const target_row = if (dir < 0)
+        (if (pt.row == 0) return else pt.row - 1)
+    else
+        (if (pt.row + 1 >= rows) return else pt.row + 1);
+    const target = try view.xToOffsetOnRow(rope, target_row, gx);
+    ed.moveToVisual(target, gx);
+}
+
 fn dispatchKey(ctx: *core.command.Context, view: *view_mod.View, ev: wayland.KeyEvent, fb_h: u32) !void {
     const c = wayland.c;
     // Paging needs viewport geometry the core doesn't know; view-aware
     // dispatch stays here.
     if (ev.keysym == c.XKB_KEY_Page_Up or ev.keysym == c.XKB_KEY_Page_Down) {
         const rows = view.visibleRows(fb_h);
-        for (0..rows) |_| {
-            if (ev.keysym == c.XKB_KEY_Page_Up) ctx.editor().moveUp() else ctx.editor().moveDown();
-        }
+        const dir: i32 = if (ev.keysym == c.XKB_KEY_Page_Up) -1 else 1;
+        for (0..rows) |_| try visualVertical(ctx.editor(), view, dir);
         return;
     }
 
@@ -735,6 +912,17 @@ fn dispatchKey(ctx: *core.command.Context, view: *view_mod.View, ev: wayland.Key
         var spec_buf: [80]u8 = undefined;
         const spec = core.Keymap.keyspec(&spec_buf, ev.mods.ctrl, ev.mods.alt, ev.mods.shift, name_buf[0..@intCast(n)]);
         if (ctx.keymap.lookup(spec)) |cmd_name| {
+            // Vertical motion is view-computed (goal-x over rendered
+            // geometry), not the core's column fallback — the interactive
+            // override of these commands. Same precedent as Page above.
+            if (std.mem.eql(u8, cmd_name, "cursor-up")) {
+                try visualVertical(ctx.editor(), view, -1);
+                return;
+            }
+            if (std.mem.eql(u8, cmd_name, "cursor-down")) {
+                try visualVertical(ctx.editor(), view, 1);
+                return;
+            }
             _ = core.command.run(ctx.commands, ctx, cmd_name, &.{}) catch |err| {
                 std.log.warn("command {s} failed: {t}", .{ cmd_name, err });
             };
@@ -745,8 +933,12 @@ fn dispatchKey(ctx: *core.command.Context, view: *view_mod.View, ev: wayland.Key
     const text = ev.text();
     if (text.len > 0 and !(text.len == 1 and text[0] < 0x20)) {
         // Unbound printable input runs the mode's text command (the
-        // modal posture: normal mode has none and swallows it).
+        // modal posture: normal mode has none and swallows it). This IS
+        // the hot typing→commit path — fence it so an accidental blocking
+        // API here trips in Debug.
         const tc = ctx.keymap.textCommand() orelse return;
+        core.task.beginHotSection();
+        defer core.task.endHotSection();
         _ = core.command.run(ctx.commands, ctx, tc, &.{.{ .string = text }}) catch |err| {
             std.log.warn("{s} failed: {t}", .{ tc, err });
         };
@@ -754,16 +946,16 @@ fn dispatchKey(ctx: *core.command.Context, view: *view_mod.View, ev: wayland.Key
 }
 
 /// Resolve and evaluate the user config: `--config` wins, else
-/// $XDG_CONFIG_HOME/scion/init.fnl, else ~/.config/scion/init.fnl.
+/// $XDG_CONFIG_HOME/weft/init.fnl, else ~/.config/weft/init.fnl.
 /// Read-only; a missing default config means built-in defaults.
 fn loadConfig(gpa: std.mem.Allocator, plugin: *core.Plugin, override: ?[]const u8, environ: std.process.Environ) !void {
     var buf: [512]u8 = undefined;
     const path = override orelse blk: {
         if (environ.getPosix("XDG_CONFIG_HOME")) |x| {
-            break :blk std.fmt.bufPrint(&buf, "{s}/scion/init.fnl", .{x}) catch return;
+            break :blk std.fmt.bufPrint(&buf, "{s}/weft/init.fnl", .{x}) catch return;
         }
         if (environ.getPosix("HOME")) |h| {
-            break :blk std.fmt.bufPrint(&buf, "{s}/.config/scion/init.fnl", .{h}) catch return;
+            break :blk std.fmt.bufPrint(&buf, "{s}/.config/weft/init.fnl", .{h}) catch return;
         }
         return;
     };

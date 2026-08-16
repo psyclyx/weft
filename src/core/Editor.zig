@@ -31,8 +31,16 @@ history: undo_mod.UndoLog = .empty,
 cursor: stemma.AnchorSet.Handle,
 /// Selection = mark..cursor (either order), when a mark is set.
 mark: ?stemma.AnchorSet.Handle = null,
-/// Byte column vertical movement aims for (sticky across short lines).
+/// Byte column the *headless/fallback* vertical motion aims for (sticky
+/// across short lines). Used when there is no view to consult — see
+/// `moveVertical`. The interactive path uses `goal_x` instead.
 goal_col: ?usize = null,
+/// Pixel-x the *interactive* vertical motion aims for (world px, sticky
+/// across short lines). The view computes it from rendered geometry, so
+/// j/k track visual columns even on proportional text — not scalar
+/// columns (that column assumption was the monospace tech debt). Both
+/// goals reset together on any horizontal/edit motion.
+goal_x: ?f32 = null,
 /// Where the bytes live (design rev 4): the authority for save/load
 /// and the peer that merges external writes.
 backing: backing_mod.Backing = .none,
@@ -426,7 +434,7 @@ pub fn insertText(self: *Editor, gpa: Allocator, bytes: []const u8) Allocator.Er
     } else {
         try self.doc.insert(gpa, self.cursorOffset(), bytes);
     }
-    self.goal_col = null;
+    self.clearGoal();
     try self.history.ingest(gpa, &self.doc);
 }
 
@@ -439,7 +447,7 @@ pub fn deleteBackward(self: *Editor, gpa: Allocator) Allocator.Error!void {
     };
     try self.doc.delete(gpa, r);
     self.clearSelection();
-    self.goal_col = null;
+    self.clearGoal();
     try self.history.ingest(gpa, &self.doc);
 }
 
@@ -452,7 +460,7 @@ pub fn deleteForward(self: *Editor, gpa: Allocator) Allocator.Error!void {
     };
     try self.doc.delete(gpa, r);
     self.clearSelection();
-    self.goal_col = null;
+    self.clearGoal();
     try self.history.ingest(gpa, &self.doc);
 }
 
@@ -461,19 +469,19 @@ pub fn deleteRange(self: *Editor, gpa: Allocator, r: Range) Allocator.Error!void
     if (r.isEmpty()) return;
     try self.doc.delete(gpa, r);
     self.clearSelection();
-    self.goal_col = null;
+    self.clearGoal();
     try self.history.ingest(gpa, &self.doc);
 }
 
 pub fn undo(self: *Editor, gpa: Allocator) Allocator.Error!bool {
     const did = try self.history.undo(gpa, &self.doc);
-    self.goal_col = null;
+    self.clearGoal();
     return did;
 }
 
 pub fn redo(self: *Editor, gpa: Allocator) Allocator.Error!bool {
     const did = try self.history.redo(gpa, &self.doc);
-    self.goal_col = null;
+    self.clearGoal();
     return did;
 }
 
@@ -508,6 +516,41 @@ fn moveTo(self: *Editor, offset: usize) void {
     self.history.barrier();
 }
 
+/// Both vertical goals reset together: any horizontal or edit motion
+/// abandons the column/x the user was aiming for.
+fn clearGoal(self: *Editor) void {
+    self.goal_col = null;
+    self.goal_x = null;
+}
+
+// ── Geometry seam ────────────────────────────────────────────────────
+// The view owns rendered geometry (which pixel a source offset lands on);
+// the Editor stays geometry-free and is the sole writer of cursor state.
+// The view computes a target offset + goal-x and hands them here.
+
+/// Place the cursor at an absolute offset (a click, or any geometry-free
+/// jump). Clears both vertical goals — a click is a fresh aim point.
+pub fn placeCursor(self: *Editor, offset: usize) void {
+    self.moveTo(offset);
+    self.clearGoal();
+}
+
+/// Vertical motion resolved by the view: move to `offset` while keeping
+/// `goal_x` (world px) sticky for the next up/down. The view found
+/// `offset` as the nearest caret to `goal_x` on the target row.
+pub fn moveToVisual(self: *Editor, offset: usize, goal_x: f32) void {
+    self.moveTo(offset);
+    self.goal_x = goal_x; // survives the motion (moveTo clears nothing)
+}
+
+pub fn goalX(self: *const Editor) ?f32 {
+    return self.goal_x;
+}
+
+pub fn setGoalX(self: *Editor, x: f32) void {
+    self.goal_x = x;
+}
+
 fn prevBoundary(self: *const Editor, off: usize) usize {
     const rope = self.text();
     const s = rope.offsetToScalar(off);
@@ -523,13 +566,13 @@ fn nextBoundary(self: *const Editor, off: usize) usize {
 pub fn moveLeft(self: *Editor) void {
     const off = self.cursorOffset();
     if (off > 0) self.moveTo(self.prevBoundary(off));
-    self.goal_col = null;
+    self.clearGoal();
 }
 
 pub fn moveRight(self: *Editor) void {
     const off = self.cursorOffset();
     if (off < self.text().byteLen()) self.moveTo(self.nextBoundary(off));
-    self.goal_col = null;
+    self.clearGoal();
 }
 
 pub fn moveUp(self: *Editor) void {
@@ -559,24 +602,24 @@ pub fn moveLineStart(self: *Editor) void {
     const rope = self.text();
     const p = rope.offsetToPoint(self.cursorOffset());
     self.moveTo(rope.lineRange(p.row).start);
-    self.goal_col = null;
+    self.clearGoal();
 }
 
 pub fn moveLineEnd(self: *Editor) void {
     const rope = self.text();
     const p = rope.offsetToPoint(self.cursorOffset());
     self.moveTo(rope.lineRange(p.row).end);
-    self.goal_col = null;
+    self.clearGoal();
 }
 
 pub fn moveDocStart(self: *Editor) void {
     self.moveTo(0);
-    self.goal_col = null;
+    self.clearGoal();
 }
 
 pub fn moveDocEnd(self: *Editor) void {
     self.moveTo(self.text().byteLen());
-    self.goal_col = null;
+    self.clearGoal();
 }
 
 fn wordChar(b: u8) bool {
@@ -588,14 +631,14 @@ fn wordChar(b: u8) bool {
 pub fn moveWordForward(self: *Editor, gpa: Allocator) Allocator.Error!void {
     const off = try self.scanWord(gpa, self.cursorOffset(), .forward);
     self.moveTo(off);
-    self.goal_col = null;
+    self.clearGoal();
 }
 
 /// Backward to the start of the previous word.
 pub fn moveWordBackward(self: *Editor, gpa: Allocator) Allocator.Error!void {
     const off = try self.scanWord(gpa, self.cursorOffset(), .backward);
     self.moveTo(off);
-    self.goal_col = null;
+    self.clearGoal();
 }
 
 const WordDir = enum { forward, backward };

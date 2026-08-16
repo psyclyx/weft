@@ -1,4 +1,4 @@
-//! `core` — scion's public ABI. Everything user-visible is built through
+//! `core` — weft's public ABI. Everything user-visible is built through
 //! this module: built-in features are clients of the same surface plugins
 //! get. The pieces:
 //!
@@ -28,6 +28,7 @@ pub const pick = @import("pick.zig");
 pub const fs_source = @import("fs_source.zig");
 pub const Mirror = @import("mirror.zig");
 pub const syntax = @import("syntax.zig");
+pub const markdown = @import("markdown.zig");
 pub const lsp = @import("lsp.zig");
 pub const position = @import("position.zig");
 pub const layers = @import("layers.zig");
