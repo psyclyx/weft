@@ -118,11 +118,11 @@
 ;; ── Insert ──
 (bind "insert" "Escape" "vim-normal")
 
-;; ── Cursor: solid block in normal/visual, blinking bar in insert ──
-(weft.run "set-cursor" "normal" "block")
-(weft.run "set-cursor" "visual" "block")
+;; ── Cursor: a bar in every mode; blinking in insert ──
+(weft.run "set-cursor" "normal" "bar")
+(weft.run "set-cursor" "visual" "bar")
 (weft.run "set-cursor" "insert" "bar")
-(weft.run "cursor-blink" "insert" "on")   ;; normal/visual stay solid
+(weft.run "cursor-blink" "insert" "on")   ;; steady elsewhere
 
 ;; Boot into normal mode.
 (weft.mode "normal")
