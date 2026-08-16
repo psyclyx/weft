@@ -967,6 +967,14 @@ fn socketPair() ![2]i32 {
     return fds;
 }
 
+/// Yield for roughly `us` microseconds of real wall-clock time — enough
+/// to let the session's reader/writer threads make progress (a tight spin
+/// would starve them; `std.Thread.sleep` is gone in 0.16).
+fn napUs(us: u64) void {
+    const deadline = task.nowNs() + us * std.time.ns_per_us;
+    while (task.nowNs() < deadline) std.Thread.yield() catch {};
+}
+
 test "session: a view-only peer's ops are dropped by the host" {
     const gpa = t.allocator;
     const fds = try socketPair();
@@ -994,14 +1002,17 @@ test "session: a view-only peer's ops are dropped by the host" {
     // sides; returns false on timeout.
     const H = struct {
         fn until(a: Allocator, host: *Collab, peer: *Collab, doc: *Document, needle: []const u8) !bool {
+            // Bounded by wall-clock, not iterations: the session's reader/
+            // writer threads need real time for the handshake + socketpair
+            // transfer, which a tight spin-loop would starve.
             var round: usize = 0;
-            while (round < 4000) : (round += 1) {
+            while (round < 6000) : (round += 1) {
                 _ = try host.tick(0);
                 _ = try peer.tick(0);
                 const txt = try doc.text().toOwnedSlice(a);
                 defer a.free(txt);
                 if (std.mem.indexOf(u8, txt, needle) != null) return true;
-                std.Thread.yield() catch {};
+                napUs(300);
             }
             return false;
         }
@@ -1019,10 +1030,10 @@ test "session: a view-only peer's ops are dropped by the host" {
 
     // Pump well past a round trip so the viewer's op would have landed on
     // the host if it were ever going to.
-    for (0..1000) |_| {
+    for (0..300) |_| {
         _ = try ch.tick(0);
         _ = try cp.tick(0);
-        std.Thread.yield() catch {};
+        napUs(300);
     }
 
     const th = try doc_host.text().toOwnedSlice(gpa);
