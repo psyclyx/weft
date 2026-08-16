@@ -920,7 +920,8 @@ pub fn main(init: std.process.Init) !void {
             };
             var arena_state = std.heap.ArenaAllocator.init(gpa);
             defer arena_state.deinit();
-            const b = try view.build(arena_state.allocator(), editor, hud, fb[0], fb[1], world_to_pixel);
+            view.resetFrame();
+            const b = try view.build(arena_state.allocator(), editor, hud, &view.top_row, fb[0], fb[1], world_to_pixel);
             if (built) |*old| old.deinit(gpa);
             built = b;
             if (b.records_added != 0) {

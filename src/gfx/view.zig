@@ -368,19 +368,26 @@ pub const View = struct {
         return self.frame_layout.offsetAtPoint(x, y);
     }
 
-    /// Scroll by whole rows (wheel). Clamped to the document next `build()`.
-    pub fn scrollBy(self: *View, delta_rows: i32) void {
+    /// Scroll a pane by whole rows (wheel). Clamped to the document next
+    /// `build()`.
+    pub fn scrollBy(top_row: *usize, delta_rows: i32) void {
         if (delta_rows < 0)
-            self.top_row -|= @intCast(-delta_rows)
+            top_row.* -|= @intCast(-delta_rows)
         else
-            self.top_row += @intCast(delta_rows);
+            top_row.* += @intCast(delta_rows);
     }
 
-    /// Keep the cursor's row inside the body viewport.
-    fn scrollToCursor(self: *View, editor: *const core.Editor, body_rows: usize) void {
+    /// Reset the per-frame layout arena. With split panes the caller resets
+    /// once, then builds each pane (their geometry maps coexist in it).
+    pub fn resetFrame(self: *View) void {
+        _ = self.layout_arena.reset(.retain_capacity);
+    }
+
+    /// Keep the cursor's row inside a pane's body viewport.
+    fn scrollToCursor(editor: *const core.Editor, top_row: *usize, body_rows: usize) void {
         const cur = editor.text().offsetToPoint(editor.cursorOffset()).row;
-        if (cur < self.top_row) self.top_row = cur;
-        if (cur >= self.top_row + body_rows) self.top_row = cur + 1 - body_rows;
+        if (cur < top_row.*) top_row.* = cur;
+        if (cur >= top_row.* + body_rows) top_row.* = cur + 1 - body_rows;
     }
 
     // ── Frame assembly ───────────────────────────────────────────────
@@ -393,6 +400,7 @@ pub const View = struct {
         scratch: Allocator,
         editor: *const core.Editor,
         hud: Hud,
+        top_row: *usize,
         fb_w: u32,
         fb_h: u32,
         world_to_pixel: snail.Transform2D,
@@ -403,9 +411,9 @@ pub const View = struct {
         const top_rows: usize = if (hud.tabs != null) 1 else 0;
         const rows_visible = rows_total -| hud.rows() -| top_rows;
         const cols_visible = self.visibleCols(fb_w);
-        self.scrollToCursor(editor, @max(1, rows_visible));
+        scrollToCursor(editor, top_row, @max(1, rows_visible));
         const total_rows = rope.lineCount();
-        if (self.top_row >= total_rows) self.top_row = total_rows -| 1;
+        if (top_row.* >= total_rows) top_row.* = total_rows -| 1;
         const cursor_off = editor.cursorOffset();
         const selection = editor.selectedRange();
 
@@ -426,7 +434,8 @@ pub const View = struct {
 
         // Lay out visible rows, stacking y by each line's height, into the
         // frame arena (the geometry map outlives the frame for hit-testing).
-        _ = self.layout_arena.reset(.retain_capacity);
+        // The caller resets the arena once per frame (resetFrame) so split
+        // panes' maps coexist; each build appends its own lines.
         const la = self.layout_arena.allocator();
         var lines: std.ArrayList(layout.VisualLine) = .empty;
         const body_top = margin + @as(f32, @floatFromInt(top_rows)) * self.line_h;
@@ -434,8 +443,8 @@ pub const View = struct {
         // Pixel gate: variable-height lines (headings) can't spill into the
         // HUD/picker region, which begins where the body row budget ends.
         const body_limit_y = body_top + @as(f32, @floatFromInt(rows_visible)) * self.line_h;
-        var row = self.top_row;
-        while (row < total_rows and row < self.top_row + rows_visible and y_top < body_limit_y) : (row += 1) {
+        var row = top_row.*;
+        while (row < total_rows and row < top_row.* + rows_visible and y_top < body_limit_y) : (row += 1) {
             const vl = try self.layoutLine(scratch, la, &runs, rope, row, y_top, cols_visible, hud.md_inline, styles, flip_off);
             try lines.append(la, vl);
             y_top += vl.height;

@@ -33,18 +33,22 @@ pub fn renderView(
 
     var arena = std.heap.ArenaAllocator.init(gpa);
     defer arena.deinit();
-    var built = try view.build(arena.allocator(), editor, hud, w, h, w2p);
+    view.resetFrame();
+    var top_row: usize = 0;
+    var built = try view.build(arena.allocator(), editor, hud, &top_row, w, h, w2p);
     defer built.deinit(gpa);
 
-    return try rasterize(gpa, view, &.{built.shapes}, w, h);
+    return try rasterize(gpa, view, &.{built.shapes}, &.{0}, w, h);
 }
 
-/// Rasterize already-built shape lists (one per pane) into one buffer.
-/// `view.atlas` holds the glyph records from the preceding build() calls.
+/// Rasterize already-built shape lists (one per pane) into one buffer,
+/// each translated right by its x offset (0 for a single pane). `view.atlas`
+/// holds the glyph records from the preceding build() calls.
 pub fn rasterize(
     gpa: std.mem.Allocator,
     view: *view_mod.View,
     shape_lists: []const []snail.Shape,
+    x_offsets: []const f32,
     w: u32,
     h: u32,
 ) ![]u8 {
@@ -71,7 +75,7 @@ pub fn rasterize(
         .raster = .{ .subpixel_order = .none },
     };
 
-    for (shape_lists) |shapes| {
+    for (shape_lists, x_offsets) |shapes, x_off| {
         if (shapes.len == 0) continue;
         const inst = try gpa.alloc(records.Instance, shapes.len);
         defer gpa.free(inst);
@@ -79,7 +83,8 @@ pub fn rasterize(
         defer gpa.free(bat);
         var ilen: usize = 0;
         var blen: usize = 0;
-        _ = try snail.emit.emit(inst, bat, &ilen, &blen, bindings[0], &view.atlas, shapes, .identity, .{ 1, 1, 1, 1 });
+        const xform: snail.Transform2D = .{ .xx = 1, .yy = 1, .tx = x_off, .ty = 0 };
+        _ = try snail.emit.emit(inst, bat, &ilen, &blen, bindings[0], &view.atlas, shapes, xform, .{ 1, 1, 1, 1 });
         try raster.draw(&renderer, ds, .{ .instances = inst[0..ilen], .batches = bat[0..blen] }, &.{&cache}, null);
     }
     return pixels;
@@ -149,4 +154,51 @@ test "harness: a single pane renders text into the body" {
     try t.expect(hasContent(pixels, w, 8, 8, 200, 40));
     // Dump for eyeballing (best-effort; ignored if the dir is missing).
     writePpm(gpa, ".zig-cache/tmp/weft-harness-single.ppm", pixels, w, h) catch {};
+}
+
+test "harness: a vertical split renders a buffer in each column" {
+    const gpa = t.allocator;
+    const pool = try core.task.Pool.init(gpa, .{ .threads = 1 });
+    defer pool.deinit();
+    var view = try view_mod.View.init(gpa, @embedFile("font_mono"), 16);
+    defer view.deinit();
+    var left = try makeEditor(gpa, pool, "LEFT PANE\nalpha bravo\n");
+    defer left.deinit(gpa);
+    var right = try makeEditor(gpa, pool, "RIGHT PANE\ncharlie delta\n");
+    defer right.deinit(gpa);
+
+    const w: u32 = 400;
+    const h: u32 = 160;
+    const half: u32 = w / 2;
+
+    const projection = snail.Mat4.ortho(0, @floatFromInt(w), @floatFromInt(h), 0, -1, 1);
+    const w2p = snail.mvpToScenePixel(projection, @floatFromInt(w), @floatFromInt(h)) orelse unreachable;
+    var arena = std.heap.ArenaAllocator.init(gpa);
+    defer arena.deinit();
+
+    // Two panes: each laid out for half width, sharing the frame arena.
+    view.resetFrame();
+    var lt: usize = 0;
+    var rt: usize = 0;
+    const lb = try view.build(arena.allocator(), &left, .{ .mode = "normal" }, &lt, half, h, w2p);
+    const left_layout = view.frame_layout; // capture before the next build overwrites it
+    const rb = try view.build(arena.allocator(), &right, .{ .mode = "normal" }, &rt, half, h, w2p);
+    const right_layout = view.frame_layout;
+    try t.expect(left_layout.lines.len > 0 and right_layout.lines.len > 0);
+
+    const pixels = try rasterize(gpa, &view, &.{ lb.shapes, rb.shapes }, &.{ 0, @floatFromInt(half) }, w, h);
+    defer gpa.free(pixels);
+    defer {
+        var b1 = lb;
+        b1.deinit(gpa);
+        var b2 = rb;
+        b2.deinit(gpa);
+    }
+
+    // Both columns' bodies have content; the seam column just before the
+    // right pane's margin is background (the panes don't bleed together).
+    try t.expect(hasContent(pixels, w, 8, 8, half - 4, 40)); // left body
+    try t.expect(hasContent(pixels, w, half + 8, 8, w - 4, 40)); // right body
+    try t.expect(!hasContent(pixels, w, half - 3, 8, half, 40)); // seam gap
+    writePpm(gpa, ".zig-cache/tmp/weft-harness-split.ppm", pixels, w, h) catch {};
 }
