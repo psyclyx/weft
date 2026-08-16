@@ -27,6 +27,10 @@ parents: std.StringArrayHashMapUnmanaged([]u8) = .empty,
 /// command"; insert-flavored modes set "insert-text"; a picker sets
 /// its query-append command.
 text_commands: std.StringArrayHashMapUnmanaged([]u8) = .empty,
+/// Modes the config declared as prefix menus (leader/chord tables) — the
+/// which-key hint shows their bindings. Policy lives in config; this is
+/// just the mechanism that remembers the declaration.
+menu_modes: std.StringArrayHashMapUnmanaged(void) = .empty,
 
 pub const empty: Keymap = .{};
 
@@ -50,6 +54,8 @@ pub fn deinit(self: *Keymap, gpa: Allocator) void {
         gpa.free(v);
     }
     self.text_commands.deinit(gpa);
+    for (self.menu_modes.keys()) |k| gpa.free(k);
+    self.menu_modes.deinit(gpa);
     gpa.free(self.mode);
     self.* = .{};
 }
@@ -134,6 +140,27 @@ pub fn currentMode(self: *const Keymap) []const u8 {
     return self.mode;
 }
 
+pub const Binding = struct { key: []const u8, command: []const u8 };
+
+/// Declare `mode` a prefix menu (config policy — the leader/chord tables).
+/// which-key shows its bindings while it is active.
+pub fn markMenuMode(self: *Keymap, gpa: Allocator, mode: []const u8) Allocator.Error!void {
+    const gop = try self.menu_modes.getOrPut(gpa, mode);
+    if (!gop.found_existing) gop.key_ptr.* = try gpa.dupe(u8, mode);
+}
+
+/// Whether `mode` was declared a prefix menu (see `markMenuMode`).
+pub fn isMenuMode(self: *const Keymap, mode: []const u8) bool {
+    return self.menu_modes.contains(mode);
+}
+
+/// Append `mode`'s own bindings (key → command) to `out`, in bind order.
+/// For which-key: a leaf menu mode's whole table.
+pub fn ownBindings(self: *const Keymap, gpa: Allocator, mode: []const u8, out: *std.ArrayList(Binding)) Allocator.Error!void {
+    const b = self.modes.getPtr(mode) orelse return;
+    for (b.keys(), b.values()) |k, v| try out.append(gpa, .{ .key = k, .command = v });
+}
+
 /// Compose a keyspec from modifiers + a keysym name into `buf`. `shift`
 /// is the BINDING-relevant shift only — held but not consumed to produce
 /// the keysym (so `Return`+Shift → "S-Return", while `a`+Shift is the
@@ -188,4 +215,28 @@ test "keymap: modal binding, rebinding, keyspec composition" {
     try t.expectEqualStrings("Escape", keyspec(&buf, false, false, false, "Escape"));
     try t.expectEqualStrings("S-Return", keyspec(&buf, false, false, true, "Return"));
     try t.expectEqualStrings("C-M-S-Tab", keyspec(&buf, true, true, true, "Tab"));
+}
+
+test "keymap: menu modes are leaf prefix tables, with enumerable bindings" {
+    const gpa = t.allocator;
+    var km: Keymap = .empty;
+    defer km.deinit(gpa);
+
+    try km.bind(gpa, "normal", "i", "insert");
+    try km.bind(gpa, "leader", "f", "find-file");
+    try km.bind(gpa, "leader", "c", "collab");
+
+    // which-key shows only for modes the config declared as menus.
+    try t.expect(!km.isMenuMode("leader")); // not declared yet
+    try km.markMenuMode(gpa, "leader");
+    try t.expect(km.isMenuMode("leader"));
+    try t.expect(!km.isMenuMode("normal")); // never declared
+    try t.expect(!km.isMenuMode("nope"));
+
+    var hints: std.ArrayList(Binding) = .empty;
+    defer hints.deinit(gpa);
+    try km.ownBindings(gpa, "leader", &hints);
+    try t.expectEqual(@as(usize, 2), hints.items.len);
+    try t.expectEqualStrings("f", hints.items[0].key);
+    try t.expectEqualStrings("find-file", hints.items[0].command);
 }

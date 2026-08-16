@@ -7,11 +7,14 @@
 //! picker adds no new input machinery at all.
 //!
 //! Entries carry an optional docstring the view renders beside the
-//! text (the palette shows command summaries). Filtering is
-//! subsequence match (case-insensitive) over the text, ranked by
-//! tightness (span of the match), then by FRECENCY — what you accepted
-//! recently under this prompt floats up, so an empty-query palette is
-//! your recent-commands list. Recency is an ordinal use counter, not a
+//! text (the palette shows command summaries). Filtering runs a
+//! selectable completion `Style` (default ORDERLESS — space-split tokens,
+//! each a case-insensitive subsequence, matched in any order; also flex,
+//! substring, prefix), ranked by word-boundary hits, then span tightness,
+//! then earliest match, then FRECENCY — what you accepted recently under
+//! this prompt floats up, so an empty-query palette is your recent list.
+//! A sticky NARROWING filter (`pick-narrow`) pre-restricts the set, the
+//! live query ranking within it. Recency is an ordinal use counter, not a
 //! clock. Tab completes the query (common prefix of the matches, else
 //! the selection).
 
@@ -52,11 +55,31 @@ pub const Source = struct {
     debounce_ns: u64 = 0,
 };
 
+/// How the query filters candidates.
+pub const Style = enum {
+    /// Space-split tokens, each a case-insensitive subsequence, matched in
+    /// ANY order (Emacs "orderless"). The default — "open file" finds
+    /// "file-open" and "open-file" alike.
+    orderless,
+    /// One case-insensitive subsequence over the whole query.
+    flex,
+    /// One contiguous case-insensitive run.
+    substring,
+    /// The item begins with the query (case-insensitive).
+    prefix,
+
+    pub fn parse(s: []const u8) ?Style {
+        return std.meta.stringToEnum(Style, s);
+    }
+};
+
 pub const Options = struct {
     /// Accept the typed query itself (new filename, rename, freeform),
     /// not only an existing candidate. See `pick-accept-input`.
     allow_free_text: bool = false,
     source: ?Source = null,
+    /// Completion style for this pick (default orderless).
+    style: Style = .orderless,
 };
 
 /// One selectable item: the text is what matching and acceptance see;
@@ -91,6 +114,13 @@ pub const Pick = struct {
     /// scope). Keys owned.
     frecency: std.StringHashMapUnmanaged(Frec) = .empty,
     use_counter: u64 = 0,
+    /// Completion style for the live query (default orderless).
+    style: Style = .orderless,
+    /// Sticky narrowing filter (space-joined tokens): a candidate must
+    /// match it (orderless) IN ADDITION to the live query. `pick-narrow`
+    /// promotes the current query into it and clears the query; a further
+    /// `pick-narrow` ANDs another facet; `pick-widen` clears it.
+    narrow: std.ArrayList(u8) = .empty,
 
     const Frec = struct { uses: u32, last: u64 };
 
@@ -133,6 +163,9 @@ pub const Pick = struct {
         self.filtered.deinit(gpa);
         self.filtered = .empty;
         self.selected = 0;
+        self.style = .orderless;
+        self.narrow.deinit(gpa);
+        self.narrow = .empty;
         gpa.free(self.prev_mode);
         self.prev_mode = &.{};
         self.active = false;
@@ -187,6 +220,7 @@ pub const Pick = struct {
         // live only once the pick is fully open.
         self.acceptor = acceptor;
         self.allow_free_text = opts.allow_free_text;
+        self.style = opts.style;
         self.source = opts.source;
         self.query_epoch = 0;
         self.source_epoch = 0;
@@ -282,21 +316,30 @@ pub const Pick = struct {
 
     fn refilter(self: *Pick, gpa: Allocator) !void {
         self.filtered.clearRetainingCapacity();
-        const Scored = struct { index: u32, span: usize, frec: Frec };
+        const Scored = struct { index: u32, m: Match, frec: Frec };
         var scored: std.ArrayList(Scored) = .empty;
         defer scored.deinit(gpa);
+        const narrowing = self.narrow.items.len > 0;
         for (self.items.items, 0..) |it, i| {
-            if (matchSpan(self.query.items, it)) |span| {
+            // Narrowing is a sticky pre-filter (orderless over text or doc);
+            // the live query then ranks within the narrowed set.
+            if (narrowing and orderlessMatch(self.narrow.items, it) == null and
+                orderlessMatch(self.narrow.items, self.docs.items[i]) == null) continue;
+            if (matchScore(self.style, self.query.items, it)) |m| {
                 try scored.append(gpa, .{
                     .index = @intCast(i),
-                    .span = span,
+                    .m = m,
                     .frec = self.frecOf(it),
                 });
             }
         }
         std.mem.sort(Scored, scored.items, {}, struct {
             fn lt(_: void, a: Scored, b: Scored) bool {
-                if (a.span != b.span) return a.span < b.span;
+                // Word-boundary hits first (acronyms / word starts), then a
+                // tighter span, then an earlier first match, then frecency.
+                if (a.m.boundaries != b.m.boundaries) return a.m.boundaries > b.m.boundaries;
+                if (a.m.span != b.m.span) return a.m.span < b.m.span;
+                if (a.m.start != b.m.start) return a.m.start < b.m.start;
                 if (a.frec.last != b.frec.last) return a.frec.last > b.frec.last;
                 if (a.frec.uses != b.frec.uses) return a.frec.uses > b.frec.uses;
                 return a.index < b.index;
@@ -318,28 +361,139 @@ pub const Pick = struct {
     }
 };
 
-/// Byte span of the tightest greedy case-insensitive subsequence match,
-/// or null. Empty query matches everything with span 0.
-fn matchSpan(query: []const u8, item: []const u8) ?usize {
-    if (query.len == 0) return 0;
+/// A match: byte span (tightness), first-match index, and how many matched
+/// characters landed on a word boundary (start-of-word bonus).
+const Match = struct { span: usize, start: usize, boundaries: usize };
+
+fn isSep(c: u8) bool {
+    return switch (c) {
+        ' ', '-', '_', '/', '.', ':', '\\' => true,
+        else => false,
+    };
+}
+
+fn ciEql(a: []const u8, b: []const u8) bool {
+    if (a.len != b.len) return false;
+    for (a, b) |x, y| if (std.ascii.toLower(x) != std.ascii.toLower(y)) return false;
+    return true;
+}
+
+/// The empty query matches everything at the top.
+const empty_match: Match = .{ .span = 0, .start = 0, .boundaries = 0 };
+
+/// Greedy case-insensitive subsequence, scoring word-boundary hits.
+fn flexMatch(query: []const u8, item: []const u8) ?Match {
+    if (query.len == 0) return empty_match;
     var qi: usize = 0;
     var first: ?usize = null;
     var last: usize = 0;
+    var boundaries: usize = 0;
     for (item, 0..) |ch, i| {
         if (std.ascii.toLower(ch) == std.ascii.toLower(query[qi])) {
             if (first == null) first = i;
             last = i;
+            if (i == 0 or isSep(item[i - 1])) boundaries += 1;
             qi += 1;
-            if (qi == query.len) return last - first.? + 1;
+            if (qi == query.len) return .{ .span = last - first.? + 1, .start = first.?, .boundaries = boundaries };
         }
     }
     return null;
+}
+
+fn substringMatch(query: []const u8, item: []const u8) ?Match {
+    if (query.len == 0) return empty_match;
+    if (item.len < query.len) return null;
+    var i: usize = 0;
+    while (i + query.len <= item.len) : (i += 1) {
+        if (ciEql(item[i .. i + query.len], query)) {
+            const at_boundary = i == 0 or isSep(item[i - 1]);
+            return .{ .span = query.len, .start = i, .boundaries = @intFromBool(at_boundary) };
+        }
+    }
+    return null;
+}
+
+fn prefixMatch(query: []const u8, item: []const u8) ?Match {
+    if (query.len == 0) return empty_match;
+    if (item.len < query.len or !ciEql(item[0..query.len], query)) return null;
+    return .{ .span = query.len, .start = 0, .boundaries = 1 };
+}
+
+/// Space-split tokens, each a flex match, matched in any order; scores
+/// combine (summed spans/boundaries, earliest start).
+fn orderlessMatch(query: []const u8, item: []const u8) ?Match {
+    var toks = std.mem.tokenizeScalar(u8, query, ' ');
+    var span: usize = 0;
+    var start: usize = std.math.maxInt(usize);
+    var boundaries: usize = 0;
+    var any = false;
+    while (toks.next()) |tok| {
+        any = true;
+        const m = flexMatch(tok, item) orelse return null;
+        span += m.span;
+        start = @min(start, m.start);
+        boundaries += m.boundaries;
+    }
+    if (!any) return empty_match; // whitespace-only query
+    return .{ .span = span, .start = start, .boundaries = boundaries };
+}
+
+fn matchScore(style: Style, query: []const u8, item: []const u8) ?Match {
+    return switch (style) {
+        .orderless => orderlessMatch(query, item),
+        .flex => flexMatch(query, item),
+        .substring => substringMatch(query, item),
+        .prefix => prefixMatch(query, item),
+    };
+}
+
+/// Back-compat thin wrapper (flex span) for the tightness test.
+fn matchSpan(query: []const u8, item: []const u8) ?usize {
+    return if (flexMatch(query, item)) |m| m.span else null;
 }
 
 // ── Commands ────────────────────────────────────────────────────────
 
 fn pickOf(ctx: *command.Context) *Pick {
     return ctx.pick;
+}
+
+/// Promote the current query into the sticky narrowing filter and clear
+/// the query — a consult-style live narrow. Repeated calls AND facets.
+fn cNarrow(ctx: *command.Context, _: struct {}) anyerror!Value {
+    const p = pickOf(ctx);
+    if (!p.active) return .nil;
+    const q = std.mem.trim(u8, p.query.items, " ");
+    if (q.len == 0) return .nil;
+    if (p.narrow.items.len > 0) try p.narrow.append(ctx.gpa, ' ');
+    try p.narrow.appendSlice(ctx.gpa, q);
+    p.query.clearRetainingCapacity();
+    try p.refilter(ctx.gpa); // local: narrowing does not re-run the source
+    return .nil;
+}
+
+/// Drop the narrowing filter.
+fn cWiden(ctx: *command.Context, _: struct {}) anyerror!Value {
+    const p = pickOf(ctx);
+    if (!p.active) return .nil;
+    if (p.narrow.items.len == 0) return .nil;
+    p.narrow.clearRetainingCapacity();
+    try p.refilter(ctx.gpa);
+    return .nil;
+}
+
+/// Cycle the completion style (orderless → flex → substring → prefix → …).
+fn cStyleCycle(ctx: *command.Context, _: struct {}) anyerror!Value {
+    const p = pickOf(ctx);
+    if (!p.active) return .nil;
+    p.style = switch (p.style) {
+        .orderless => .flex,
+        .flex => .substring,
+        .substring => .prefix,
+        .prefix => .orderless,
+    };
+    try p.refilter(ctx.gpa);
+    return .nil;
 }
 
 fn cInput(ctx: *command.Context, args: struct { text: []const u8 }) anyerror!Value {
@@ -488,6 +642,9 @@ pub fn install(gpa: Allocator, commands: *command.Commands, keymap: *@import("Ke
         command.define("pick-cancel", "Close the picker.", cCancel),
         command.define("pick-complete", "Complete the query (common prefix, else selection).", cComplete),
         command.define("pick-commands", "Open the command palette.", cPalette),
+        command.define("pick-narrow", "Promote the query into a sticky narrowing filter.", cNarrow),
+        command.define("pick-widen", "Drop the narrowing filter.", cWiden),
+        command.define("pick-style-cycle", "Cycle the completion style (orderless/flex/substring/prefix).", cStyleCycle),
     };
     for (defs) |cmd| _ = try commands.bind(gpa, cmd.name, cmd);
 
@@ -519,6 +676,66 @@ test "matchSpan: subsequence with tightness" {
     try t.expectEqual(@as(?usize, 4), matchSpan("save", "save"));
     try t.expect(matchSpan("cl", "cursor-left") != null);
     try t.expect(matchSpan("CL", "cursor-left") != null);
+}
+
+test "match styles: orderless, prefix, substring, boundary bonus" {
+    // orderless — tokens in any order, each a subsequence.
+    try t.expect(orderlessMatch("file open", "open-file") != null);
+    try t.expect(orderlessMatch("open file", "open-file") != null);
+    try t.expect(orderlessMatch("file open", "file-open") != null);
+    try t.expect(orderlessMatch("open", "profile") == null); // no "open"
+
+    // prefix — anchored at the start.
+    try t.expect(prefixMatch("open", "open-file") != null);
+    try t.expect(prefixMatch("open", "file-open") == null);
+
+    // substring — one contiguous run.
+    try t.expect(substringMatch("en-f", "open-file") != null);
+    try t.expect(substringMatch("enf", "open-file") == null);
+
+    // boundary bonus: "of" hits two word-starts in open-file, none in profile.
+    try t.expect(flexMatch("of", "open-file").?.boundaries > flexMatch("of", "profile").?.boundaries);
+}
+
+test "pick refilter: boundary ranking and sticky narrowing" {
+    const gpa = t.allocator;
+    var p: Pick = .empty;
+    defer p.deinit(gpa);
+    const items = [_][]const u8{ "profile", "open-file", "file-open", "close-buffer" };
+    for (items) |s| {
+        try p.items.append(gpa, try gpa.dupe(u8, s));
+        try p.docs.append(gpa, try gpa.dupe(u8, ""));
+    }
+
+    const H = struct {
+        fn has(pk: *const Pick, s: []const u8) bool {
+            for (pk.filtered.items) |fi| if (std.mem.eql(u8, pk.items.items[fi], s)) return true;
+            return false;
+        }
+    };
+
+    // flex "of": open-file ranks above profile (two word-boundary hits).
+    p.style = .flex;
+    try p.query.appendSlice(gpa, "of");
+    try p.refilter(gpa);
+    try t.expect(p.filtered.items.len >= 2);
+    try t.expectEqualStrings("open-file", p.items.items[p.filtered.items[0]]);
+
+    // orderless "file open" → both -file/-open words, never profile.
+    p.style = .orderless;
+    p.query.clearRetainingCapacity();
+    try p.query.appendSlice(gpa, "file open");
+    try p.refilter(gpa);
+    try t.expectEqual(@as(usize, 2), p.filtered.items.len);
+    try t.expect(H.has(&p, "open-file") and H.has(&p, "file-open"));
+
+    // Narrow to "file", then query "open": the sticky filter AND the query.
+    p.query.clearRetainingCapacity();
+    try p.narrow.appendSlice(gpa, "file");
+    try p.query.appendSlice(gpa, "open");
+    try p.refilter(gpa);
+    try t.expect(H.has(&p, "open-file") and H.has(&p, "file-open"));
+    try t.expect(!H.has(&p, "close-buffer")); // no "file"
 }
 
 test {

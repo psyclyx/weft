@@ -61,6 +61,11 @@
 (weft.textinput "leader" nil)
 (weft.textinput "leader-file" nil)
 
+;; which-key: show these prefix modes' bindings while a chord is pending.
+(weft.menu_mode "leader")
+(weft.menu_mode "leader-file")
+(weft.menu_mode "leader-collab")
+
 ;; ── Collaboration ──
 ;; Host and join are palette commands — `:listen` prompts for a port and,
 ;; deliberately, the access grade (view|edit|own, defaulting to safe
@@ -96,6 +101,12 @@
 (bind "normal" "colon" "pick-commands")   ;; : → command palette
 (bind "normal" "space" "leader")          ;; space → leader chord
 (bind "default" "C-g" "cancel")           ;; C-g → abort a pending connect
+
+;; Picker: orderless by default; narrow/widen/cycle-style live (space is
+;; a query separator for orderless, so narrowing uses Alt keys).
+(bind "pick" "M-n" "pick-narrow")
+(bind "pick" "M-u" "pick-widen")
+(bind "pick" "M-s" "pick-style-cycle")
 
 ;; Leader chords: space f f → find file; space space → palette.
 (bind "leader" "f" "leader-file")

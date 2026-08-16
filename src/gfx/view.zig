@@ -134,6 +134,9 @@ pub const Hud = struct {
     /// Peer trust chip: "✓ verified" | "⚠ unverified" | null (the host we
     /// connected out to; see known_peers / the SAS).
     trust: ?[]const u8 = null,
+    /// which-key: the current prefix mode's bindings, shown as a panel
+    /// while a chord is pending (null when not in a menu mode).
+    which_key: ?[]const core.Keymap.Binding = null,
     /// Per-byte markdown styling for the active buffer (null = not md).
     md_inline: ?MdInline = null,
     /// Caret shape and blink phase (false = hidden this frame).
@@ -141,10 +144,12 @@ pub const Hud = struct {
     cursor_on: bool = true,
 
     const max_pick_rows = 8;
+    const max_wk_rows = 10;
 
     fn rows(self: *const Hud) usize {
-        const p = self.pick orelse return 1;
-        return 2 + @min(p.filtered.items.len, max_pick_rows);
+        if (self.pick) |p| return 2 + @min(p.filtered.items.len, max_pick_rows);
+        if (self.which_key) |wk| return 1 + @min(wk.len, max_wk_rows);
+        return 1;
     }
 };
 
@@ -901,17 +906,40 @@ pub const View = struct {
         }
         try self.appendPlainRun(scratch, runs, rects, parts.items, self.baselineFor(rows_total - 1), cols_visible, self.theme.status, null);
 
+        // which-key: a chord is pending and no pick is open — list the
+        // prefix mode's bindings above the status line.
+        if (hud.pick == null) {
+            if (hud.which_key) |wk| {
+                const shown = @min(wk.len, Hud.max_wk_rows);
+                if (rows_total < shown + 1) return;
+                const head_row = rows_total - 1 - shown;
+                const header = try std.fmt.allocPrint(scratch, "  {s} —", .{hud.mode});
+                try self.appendPlainRun(scratch, runs, rects, header, self.baselineFor(head_row), cols_visible, self.theme.accent, null);
+                for (0..shown) |i| {
+                    const l = try std.fmt.allocPrint(scratch, "  {s}  {s}", .{ wk[i].key, wk[i].command });
+                    try self.appendPlainRun(scratch, runs, rects, l, self.baselineFor(head_row + 1 + i), cols_visible, self.theme.status, null);
+                }
+            }
+            return;
+        }
+
         const p = hud.pick orelse return;
         const total = p.filtered.items.len;
         const shown = @min(total, Hud.max_pick_rows);
         if (rows_total < shown + 2) return;
         const query_row = rows_total - 2 - shown;
 
-        const query = try std.fmt.allocPrint(scratch, "{s}> {s}_   [{d}/{d}]", .{
+        const narrow_chip = if (p.narrow.items.len > 0)
+            try std.fmt.allocPrint(scratch, "[{s}]", .{p.narrow.items})
+        else
+            "";
+        const query = try std.fmt.allocPrint(scratch, "{s}{s}> {s}_   [{d}/{d}] ·{s}", .{
             p.prompt,
+            narrow_chip,
             p.query.items,
             if (total == 0) 0 else p.selected + 1,
             total,
+            @tagName(p.style),
         });
         try self.appendPlainRun(scratch, runs, rects, query, self.baselineFor(query_row), cols_visible, self.theme.foreground, null);
 

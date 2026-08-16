@@ -15,6 +15,7 @@
 //!   weft.bind(mode, key, command)   → keymap binding
 //!   weft.mode([name])          → get/set keymap mode
 //!   weft.fallback(mode, parent) → keymap mode inheritance
+//!   weft.menu_mode(mode) → declare a prefix/leader mode (which-key shows it)
 //!   weft.textinput(mode, cmd|nil) → unbound-text command for a mode
 //!   weft.pick(prompt, items, fn[, opts]) → fuzzy-select, callback on
 //!                                 accept; items are strings or
@@ -115,6 +116,7 @@ pub const Plugin = struct {
         registerFn(L, self, "bind", lBind);
         registerFn(L, self, "mode", lMode);
         registerFn(L, self, "fallback", lFallback);
+        registerFn(L, self, "menu_mode", lMenuMode);
         registerFn(L, self, "textinput", lTextinput);
         registerFn(L, self, "pick", lPick);
         registerFn(L, self, "read", lRead);
@@ -541,6 +543,14 @@ fn lFallback(L: ?*c.lua_State) callconv(.c) c_int {
     return 0;
 }
 
+fn lMenuMode(L: ?*c.lua_State) callconv(.c) c_int {
+    const self = pluginOf(L);
+    var ml: usize = 0;
+    const mode = c.luaL_checklstring(L, 1, &ml);
+    self.ctx.keymap.markMenuMode(self.ctx.gpa, mode[0..ml]) catch |e| return raise(L, e);
+    return 0;
+}
+
 fn lTextinput(L: ?*c.lua_State) callconv(.c) c_int {
     const self = pluginOf(L);
     var ml: usize = 0;
@@ -577,6 +587,18 @@ fn optInt(L: ?*c.lua_State, idx: c_int, key: [:0]const u8, default: i64) i64 {
     if (c.lua_isinteger(L, -1) != 0) return c.lua_tointegerx(L, -1, null);
     if (c.lua_type(L, -1) == c.LUA_TNUMBER) return @intFromFloat(c.lua_tonumberx(L, -1, null));
     return default;
+}
+
+/// Read `opts.style` ("orderless"|"flex"|"substring"|"prefix"); default
+/// orderless.
+fn optStyle(L: ?*c.lua_State, idx: c_int) pick_mod.Style {
+    if (idx == 0) return .orderless;
+    _ = c.lua_getfield(L, idx, "style");
+    defer c.lua_pop(L, 1);
+    if (c.lua_type(L, -1) != c.LUA_TSTRING) return .orderless;
+    var sl: usize = 0;
+    const s = c.lua_tolstring(L, -1, &sl);
+    return pick_mod.Style.parse(s[0..sl]) orelse .orderless;
 }
 
 /// Build a native candidate source from an opts table's `source` field
@@ -712,7 +734,7 @@ fn openPick(
         .handler = luaPickAccept,
         .cleanup = luaPickCleanup,
         .data = lp,
-    }, .{ .allow_free_text = free_text, .source = src }) catch |e| {
+    }, .{ .allow_free_text = free_text, .source = src, .style = optStyle(L, opts_idx) }) catch |e| {
         c.luaL_unref(L, c.LUA_REGISTRYINDEX, ref);
         gpa.destroy(lp);
         return raise(L, e);

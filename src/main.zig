@@ -861,8 +861,16 @@ pub fn main(init: std.process.Init) !void {
                 (std.fmt.bufPrint(&listen_buf, "listening {d} ({s})", .{ h.clients.items.len, h.access.label() }) catch "listening")
             else
                 null;
+            // which-key: while a leader/chord prefix is active (a leaf menu
+            // mode) and no picker is open, list that mode's bindings.
+            var wk_hints: std.ArrayList(core.Keymap.Binding) = .empty;
+            defer wk_hints.deinit(gpa);
+            if (!pick_state.active and keymap.isMenuMode(keymap.currentMode())) {
+                keymap.ownBindings(gpa, keymap.currentMode(), &wk_hints) catch {};
+            }
             const hud: view_mod.Hud = .{
                 .mode = keymap.currentMode(),
+                .which_key = if (wk_hints.items.len > 0) wk_hints.items else null,
                 .md_inline = md_inline,
                 .cursor_style = cursor_cfg.styleFor(keymap.currentMode()),
                 .cursor_on = if (cursor_cfg.blinkFor(keymap.currentMode())) blink_on else true,
