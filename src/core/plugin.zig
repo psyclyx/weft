@@ -26,6 +26,10 @@
 //!                                 source, root, allow_new=true} — accept
 //!                                 the typed text (C-j) or a candidate
 //!   weft.cursor()              → the user cursor's current offset
+//!   weft.jump(offset)          → place the cursor at a byte offset
+//!   weft.selection()           → {start, end} of the selection, or nil
+//!   weft.slice(start, end)     → read a byte range of the buffer
+//!   weft.line([offset])        → {start, end, row} of a line (cursor's)
 //!   weft.log(msg)              → editor log
 //!   weft.buffers()             → open-buffer introspection (tables)
 //!   weft.commands()            → command registry ({name, summary})
@@ -122,6 +126,10 @@ pub const Plugin = struct {
         registerFn(L, self, "read", lRead);
         registerFn(L, self, "provide", lProvide);
         registerFn(L, self, "cursor", lCursor);
+        registerFn(L, self, "jump", lGoto);
+        registerFn(L, self, "selection", lSelection);
+        registerFn(L, self, "slice", lSlice);
+        registerFn(L, self, "line", lLine);
         registerFn(L, self, "log", lLog);
         registerFn(L, self, "layer_publish", lLayerPublish);
         registerFn(L, self, "section_at", lSectionAt);
@@ -887,6 +895,78 @@ fn luaProviderQuery(data: ?*anyopaque, caps: *capability.Caps, req: *const capab
 fn lCursor(L: ?*c.lua_State) callconv(.c) c_int {
     const self = pluginOf(L);
     c.lua_pushinteger(L, @intCast(self.ctx.editor().cursorOffset()));
+    return 1;
+}
+
+/// weft.jump(offset) — place the live cursor at a byte offset (clamped to
+/// the document). The motion primitive: a plugin scans text and jumps.
+fn lGoto(L: ?*c.lua_State) callconv(.c) c_int {
+    const self = pluginOf(L);
+    const off = c.luaL_checkinteger(L, 1);
+    const ed = self.ctx.editor();
+    const clamped: usize = if (off < 0) 0 else @min(@as(usize, @intCast(off)), ed.text().byteLen());
+    ed.placeCursor(clamped);
+    return 0;
+}
+
+/// weft.selection() — {start, end} of the current selection, or nil.
+fn lSelection(L: ?*c.lua_State) callconv(.c) c_int {
+    const self = pluginOf(L);
+    if (self.ctx.editor().selectedRange()) |r| {
+        c.lua_newtable(L);
+        c.lua_pushinteger(L, @intCast(r.start));
+        c.lua_setfield(L, -2, "start");
+        c.lua_pushinteger(L, @intCast(r.end));
+        c.lua_setfield(L, -2, "end");
+    } else {
+        c.lua_pushnil(L);
+    }
+    return 1;
+}
+
+/// weft.slice(start, end) — read a byte range of the buffer (clamped). The
+/// efficient text-access primitive for motions/operators (vs snapshotting
+/// the whole document).
+fn lSlice(L: ?*c.lua_State) callconv(.c) c_int {
+    const self = pluginOf(L);
+    const start_i = c.luaL_checkinteger(L, 1);
+    const end_i = c.luaL_checkinteger(L, 2);
+    const rope = self.ctx.editor().text();
+    const len = rope.byteLen();
+    const s: usize = if (start_i < 0) 0 else @min(@as(usize, @intCast(start_i)), len);
+    const e: usize = if (end_i < 0) 0 else @min(@as(usize, @intCast(end_i)), len);
+    if (e <= s) {
+        _ = c.lua_pushlstring(L, "", 0);
+        return 1;
+    }
+    const buf = self.ctx.gpa.alloc(u8, e - s) catch |err| return raise(L, err);
+    defer self.ctx.gpa.free(buf);
+    var sr = rope.streamReader(.{ .start = s, .end = e }, &.{});
+    sr.interface.readSliceAll(buf) catch return raise(L, error.ReadFailed);
+    _ = c.lua_pushlstring(L, buf.ptr, buf.len);
+    return 1;
+}
+
+/// weft.line([offset]) — {start, end, row} of the line containing `offset`
+/// (default: the cursor). `end` is before the newline. The line-motion
+/// primitive.
+fn lLine(L: ?*c.lua_State) callconv(.c) c_int {
+    const self = pluginOf(L);
+    const ed = self.ctx.editor();
+    const off: usize = if (c.lua_gettop(L) >= 1 and c.lua_isnumber(L, 1) != 0)
+        @min(@as(usize, @intCast(@max(0, c.lua_tointegerx(L, 1, null)))), ed.text().byteLen())
+    else
+        ed.cursorOffset();
+    const rope = ed.text();
+    const row = rope.offsetToPoint(off).row;
+    const line = rope.lineRange(row);
+    c.lua_newtable(L);
+    c.lua_pushinteger(L, @intCast(line.start));
+    c.lua_setfield(L, -2, "start");
+    c.lua_pushinteger(L, @intCast(line.end));
+    c.lua_setfield(L, -2, "end");
+    c.lua_pushinteger(L, @intCast(row));
+    c.lua_setfield(L, -2, "row");
     return 1;
 }
 

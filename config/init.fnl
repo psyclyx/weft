@@ -140,6 +140,68 @@
 (bind "normal" "z" "zed")                 ;; z → z prefix (zz = center)
 (bind "default" "C-g" "cancel")           ;; C-g → abort a pending connect
 
+;; ── Editing policy composed in fennel ──
+;; The core gives us primitives — weft.cursor/jump/selection/slice/line and
+;; the raw edit commands (insert-text, delete-selection, set-mark). The
+;; vim-flavored REGISTER, paste, ^, J, and f/t are composed HERE; the core
+;; has no notion of a yank register or these motions. (word/WORD boundaries
+;; and % stay core — they're structural text scans, not vim policy.)
+(var reg "")          ;; yank register contents
+(var reg-line false)  ;; is the register linewise?
+
+(fn capture-sel []    ;; read the selection into the register (charwise)
+  (let [s (weft.selection)]
+    (when s (set reg (weft.slice s.start s.end)) (set reg-line false))))
+
+(cmd "yank-selection" "Copy the selection (charwise)."
+  (fn [] (capture-sel) (run "clear-selection")))
+(cmd "cut-selection" "Yank then delete the selection."
+  (fn [] (capture-sel) (run "delete-selection")))
+(cmd "yank-line" "Yank the current line (linewise)."
+  (fn [] (let [l (weft.line)] (set reg (weft.slice l.start l.end)) (set reg-line true))))
+(cmd "delete-line" "Delete the current line (linewise, into the register)."
+  (fn [] (let [l (weft.line)]
+           (set reg (weft.slice l.start l.end)) (set reg-line true)
+           (weft.jump l.start) (run "set-mark") (weft.jump (+ l.end 1))
+           (run "delete-selection"))))
+(cmd "paste" "Paste the register after the cursor/line."
+  (fn [] (if reg-line
+             (let [l (weft.line)] (weft.jump l.end) (run "insert-text" (.. "\n" reg)) (weft.jump (+ l.end 1)))
+             (run "insert-text" reg))))
+(cmd "paste-before" "Paste the register before the cursor/line."
+  (fn [] (if reg-line
+             (let [l (weft.line)] (weft.jump l.start) (run "insert-text" (.. reg "\n")) (weft.jump l.start))
+             (run "insert-text" reg))))
+
+(cmd "first-non-blank" "Move to the first non-blank on the line."
+  (fn [] (let [l (weft.line) text (weft.slice l.start l.end) i (string.find text "[^ \t]")]
+           (weft.jump (+ l.start (if i (- i 1) 0))))))
+
+(cmd "join-lines" "Join this line with the next (single space)."
+  (fn [] (let [l (weft.line) nxt (weft.line (+ l.end 1))]
+           (when (> nxt.start l.start)   ;; a next line exists
+             (let [ntext (weft.slice nxt.start nxt.end)
+                   nb (string.find ntext "[^ \t]")
+                   drop (if nb (- nb 1) (length ntext))]
+               (weft.jump l.end) (run "set-mark")
+               (weft.jump (+ nxt.start drop)) (run "delete-selection")
+               (run "insert-text" " ") (weft.jump l.end))))))
+
+;; f/F/t/T — target-character search on the current line.
+(cmd "find-char" "Move to a character on the line (dir f|F|t|T, to <char>)."
+  (fn [dir ch]
+    (let [cur (weft.cursor) l (weft.line) text (weft.slice l.start l.end)
+          rel (- cur l.start)
+          fwd (or (= dir "f") (= dir "t"))
+          till (or (= dir "t") (= dir "T"))]
+      (if fwd
+          (let [i (string.find text ch (+ rel 2) true)]
+            (when i (weft.jump (+ l.start (- i 1) (if till -1 0)))))
+          (do (var found nil)
+              (for [k rel 1 -1]
+                (when (and (not found) (= (string.sub text k k) ch)) (set found k)))
+              (when found (weft.jump (+ l.start (- found 1) (if till 1 0)))))))))
+
 ;; More motions. w/b/e are word-char; W/B/E are WORD (whitespace-delimited).
 (bind "normal" "W" "WORD-forward")
 (bind "normal" "B" "WORD-backward")
@@ -205,9 +267,9 @@
         (fn [] (run (. spec 1)) (run finish) (set-mode after)))
       (bind mode mkey wname))))
 
-(make-operator "d" "op-delete" "delete-selection" "normal" "delete-line")
-(make-operator "c" "op-change" "delete-selection" "insert" "vim-change-line")
-(make-operator "y" "op-yank"   "yank-selection"   "normal" "yank-line")
+(make-operator "d" "op-delete" "cut-selection"  "normal" "delete-line")
+(make-operator "c" "op-change" "cut-selection"  "insert" "vim-change-line")
+(make-operator "y" "op-yank"   "yank-selection" "normal" "yank-line")
 
 ;; f / F / t / T — find a character on the line (one-shot capture modes).
 (fn find-cmd [name dir]

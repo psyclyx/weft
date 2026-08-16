@@ -522,6 +522,56 @@ test "plugin: fennel eval, scripted command, peer edits converge" {
     }
 }
 
+test "plugin ABI: motion/text primitives enable fennel-composed motions" {
+    const gpa = t.allocator;
+    var host: TestHost = undefined;
+    try TestHost.init(gpa, &host);
+    defer host.deinit(gpa);
+    const p = try core.Plugin.create(gpa, &host.ctx, "test");
+    defer p.destroy();
+    try host.editor().insertText(gpa, "foo bar baz"); // f0 o1 o2 sp3 b4 …
+
+    // slice reads a byte range.
+    {
+        const r = try p.eval(gpa, "(weft.slice 4 7)", "t");
+        defer gpa.free(r);
+        try t.expectEqualStrings("bar", r);
+    }
+    // jump places the live cursor; cursor() reads it back.
+    {
+        const r = try p.eval(gpa, "(weft.jump 4) (tostring (weft.cursor))", "t");
+        defer gpa.free(r);
+        try t.expectEqualStrings("4", r);
+    }
+    try t.expectEqual(@as(usize, 4), host.editor().cursorOffset());
+    // line() reports the current line bounds (single line → 0..11, row 0).
+    {
+        const r = try p.eval(gpa, "(let [l (weft.line)] (.. l.start \"/\" l.end \"/\" l.row))", "t");
+        defer gpa.free(r);
+        try t.expectEqualStrings("0/11/0", r);
+    }
+    // selection() is nil with no mark; after set-mark it's the range.
+    {
+        const none = try p.eval(gpa, "(if (weft.selection) \"y\" \"n\")", "t");
+        defer gpa.free(none);
+        try t.expectEqualStrings("n", none);
+    }
+    gpa.free(try p.eval(gpa, "(weft.jump 4) (weft.run \"set-mark\") (weft.jump 7)", "t"));
+    {
+        const sel = try p.eval(gpa, "(let [s (weft.selection)] (weft.slice s.start s.end))", "t");
+        defer gpa.free(sel);
+        try t.expectEqualStrings("bar", sel);
+    }
+    // The composition the config now uses (find-char's heart): slice the
+    // line, string.find the target, jump to it — all in fennel.
+    gpa.free(try p.eval(gpa,
+        \\(let [text (weft.slice 0 11)
+        \\      i (string.find text "z" 1 true)]
+        \\  (weft.jump (- i 1)))
+    , "t"));
+    try t.expectEqual(@as(usize, 10), host.editor().cursorOffset()); // 'z' at index 10
+}
+
 test "plugin: fennel config binds keys and switches modes" {
     const gpa = t.allocator;
     var host: TestHost = undefined;
