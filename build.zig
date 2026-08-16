@@ -61,6 +61,10 @@ pub fn build(b: *std.Build) void {
         .link_libc = true,
     });
     test_mod.addImport("snail", snail_dep.module("snail"));
+    // CPU rasterizer — a display-free render-to-pixels harness for the
+    // view (gfx/harness.zig), so layout/decoration output can be asserted
+    // and dumped to an image without a compositor.
+    test_mod.addImport("snail-raster", snail_dep.module("snail-raster"));
     test_mod.addImport("stemma", stemma_dep.module("stemma"));
     // Same embedded mono face the exe uses — lets layout tests prove the
     // monospace-as-degenerate-case parity (stop.x == margin + col*cell_w).

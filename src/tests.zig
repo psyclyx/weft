@@ -15,6 +15,7 @@ test {
     _ = @import("gfx/stats.zig");
     _ = @import("gfx/view.zig");
     _ = @import("gfx/layout.zig");
+    _ = @import("gfx/harness.zig");
     _ = @import("core/markdown.zig");
     _ = @import("core/identity.zig");
 }
