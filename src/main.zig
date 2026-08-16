@@ -400,6 +400,13 @@ pub fn main(init: std.process.Init) !void {
         .handler = cancelHandler,
         .data = &share_ctx,
     });
+    _ = try commands.bind(gpa, "grant", .{
+        .name = "grant",
+        .summary = "Set a connected peer's grade by fingerprint (view|edit|own).",
+        .args = &.{ .{ .name = "fingerprint", .type = .string }, .{ .name = "grade", .type = .string } },
+        .handler = grantHandler,
+        .data = &share_ctx,
+    });
 
     // ── Window + Vulkan ──
     const window = try wayland.Window.init(1280, 800, "weft", "dev.psyclyx.weft");
@@ -1035,6 +1042,25 @@ fn peersHandler(ctx: *core.command.Context, data: ?*anyopaque, args: []const cor
     if (count == 1 and first_line != null) return ok_echo(ctx, first_line.?);
     var buf: [48]u8 = undefined;
     return ok_echo(ctx, std.fmt.bufPrint(&buf, "{d} peers (see log for SAS)", .{count}) catch "peers");
+}
+
+/// `grant <fingerprint> <grade>` — authorize a connected peer by identity
+/// (host side). The grade takes effect immediately for a live peer and is
+/// remembered for future reconnects of that fingerprint.
+fn grantHandler(ctx: *core.command.Context, data: ?*anyopaque, args: []const core.command.Value) anyerror!core.command.Value {
+    const sc: *ShareCtx = @ptrCast(@alignCast(data.?));
+    if (args.len != 2 or args[0] != .string or args[1] != .string) return error.TypeMismatch;
+    const fp = parseFingerprint(args[0].string) orelse
+        return ok_echo(ctx, "grant: expected a fingerprint like k7q2-9fh3-...");
+    const grade = core.session.Access.parse(args[1].string) orelse
+        return ok_echo(ctx, "grant: grade must be view|edit|own");
+    const h = &(sc.hub.* orelse return ok_echo(ctx, "grant: not hosting (start listen first)"));
+    h.setPeerAccess(fp, grade) catch |err| {
+        var buf: [64]u8 = undefined;
+        return ok_echo(ctx, std.fmt.bufPrint(&buf, "grant failed: {t}", .{err}) catch "grant failed");
+    };
+    var buf: [64]u8 = undefined;
+    return ok_echo(ctx, std.fmt.bufPrint(&buf, "granted {s} to {s}", .{ grade.label(), &fp }) catch "granted");
 }
 
 /// `cancel` (C-g) — records the intent; the frame loop drops queued

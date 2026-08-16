@@ -44,6 +44,9 @@ pub const Peer = struct {
     /// noted to the store/log — the handshake completes asynchronously, so
     /// the host checks each tick until the fingerprint is available.
     identity_noted: bool = false,
+    /// Set once a per-fingerprint grade override has been applied (also
+    /// post-handshake, when the fingerprint is first known).
+    graded: bool = false,
     /// One RelayCtx per bound document (owned).
     relays: std.ArrayList(*RelayCtx) = .empty,
 
@@ -67,6 +70,11 @@ pub const Hub = struct {
     /// (so they can name/verify us). Null → each peer session mints an
     /// ephemeral identity, as in tests.
     id: ?identity.Identity = null,
+    /// Per-fingerprint access overrides. A peer whose fingerprint is here
+    /// gets this grade instead of the endpoint default (`access`) — the
+    /// authorization-by-identity seam. Applied on handshake completion and
+    /// live via `setPeerAccess`.
+    overrides: std.AutoHashMapUnmanaged([24]u8, session.Access) = .empty,
     clients: std.ArrayList(*Peer) = .empty,
     incoming: std.atomic.Value(?*FdNode) = .init(null),
     listener: ?i32 = null,
@@ -110,6 +118,7 @@ pub const Hub = struct {
 
     pub fn deinit(self: *Hub) void {
         self.stopAccepting();
+        self.overrides.deinit(self.gpa);
         for (self.clients.items) |p| destroyPeer(self.gpa, p);
         self.clients.deinit(self.gpa);
         var cur = self.incoming.swap(null, .acquire);
@@ -145,9 +154,34 @@ pub const Hub = struct {
         }
     }
 
+    /// Apply per-fingerprint grade overrides to peers whose handshake has
+    /// just completed (the default grade was set at Session.create; this
+    /// only moves the ones with an override). Idempotent per peer.
+    fn applyGrades(self: *Hub) void {
+        if (self.overrides.count() == 0) return;
+        for (self.clients.items) |p| {
+            if (p.graded) continue;
+            const fp = p.sess.peerFingerprint() orelse continue;
+            p.graded = true;
+            if (self.overrides.get(fp)) |grade| p.sess.access = grade;
+        }
+    }
+
+    /// Set a peer's grade by fingerprint: remembered for future connects
+    /// and applied immediately to any live peer with that identity. This
+    /// is authorization keyed by identity, not endpoint.
+    pub fn setPeerAccess(self: *Hub, fp: [24]u8, grade: session.Access) !void {
+        try self.overrides.put(self.gpa, fp, grade);
+        for (self.clients.items) |p| {
+            const pfp = p.sess.peerFingerprint() orelse continue;
+            if (std.mem.eql(u8, &pfp, &fp)) p.sess.access = grade;
+        }
+    }
+
     /// Tick every peer; reap those gone offline. Returns whether any
     /// peer changed a document (→ repaint).
     pub fn tick(self: *Hub) bool {
+        self.applyGrades();
         var changed = false;
         var i: usize = 0;
         while (i < self.clients.items.len) {
@@ -373,6 +407,66 @@ test "hub: two peers converge; presence relays and unions" {
         if (std.mem.eql(u8, cb.presence_layer.?.resolvedSpan(i).message, "alice")) bob_saw_alice = true;
     }
     try t.expect(bob_saw_alice);
+}
+
+test "hub: a per-fingerprint grant elevates a peer from view to edit" {
+    const gpa = t.allocator;
+    var doc_h = try Document.init(gpa, "host");
+    defer doc_h.deinit(gpa);
+    var doc_c = try Document.init(gpa, "client");
+    defer doc_c.deinit(gpa);
+    try doc_h.insert(gpa, 0, "base\n");
+
+    // Endpoint default is view (safe); the peer starts read-only.
+    var hub = try Hub.init(gpa, "tok", .view, null);
+    defer hub.deinit();
+
+    const pair = try socketPair();
+    const peer = try hub.adopt(pair[0]);
+    _ = try peer.conn.bindPrimary(&doc_h, 1);
+
+    const id_client = identity.Identity.forTest(0x5c);
+    var lc: session.FdLink = .{ .fd = pair[1] };
+    const sc = try session.Session.create(gpa, lc.link(), .client, "tok", .own, &id_client);
+    defer sc.destroy();
+    var cc = try session.Collab.init(gpa, sc, &doc_c, "client");
+    defer cc.deinit();
+
+    const H = struct {
+        fn until(h: *Hub, c: *session.Collab, doc: *Document, needle: []const u8, a: Allocator) !bool {
+            var round: usize = 0;
+            while (round < 4000) : (round += 1) {
+                _ = h.tick();
+                _ = try c.tick(0);
+                const txt = try doc.text().toOwnedSlice(a);
+                defer a.free(txt);
+                if (std.mem.indexOf(u8, txt, needle) != null) return true;
+                park(1);
+            }
+            return false;
+        }
+    };
+
+    // Link is live: the host's base reaches the client.
+    try t.expect(try H.until(&hub, &cc, &doc_c, "base", gpa));
+
+    // While view-only, the client's edit is dropped by the host.
+    try doc_c.insert(gpa, doc_c.text().byteLen(), "VIEW");
+    for (0..300) |_| {
+        _ = hub.tick();
+        _ = try cc.tick(0);
+        park(1);
+    }
+    {
+        const th = try doc_h.text().toOwnedSlice(gpa);
+        defer gpa.free(th);
+        try t.expect(std.mem.indexOf(u8, th, "VIEW") == null);
+    }
+
+    // Grant edit to the client's fingerprint; now its edits land.
+    try hub.setPeerAccess(id_client.fingerprint(), .edit);
+    try doc_c.insert(gpa, doc_c.text().byteLen(), "EDIT");
+    try t.expect(try H.until(&hub, &cc, &doc_h, "EDIT", gpa));
 }
 
 test {
