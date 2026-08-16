@@ -159,7 +159,7 @@ from a headless machine with the same executable (the window/Vulkan half
 is simply never initialized):
 
 ```sh
-weft --headless --listen 7777 --token SECRET --lsp zls path/to/file.zig
+weft --headless --listen 7777 --token SECRET --access edit --lsp zls file.zig
 ```
 
 and open it from anywhere (`file.zig` is a name hint — nothing is read
@@ -171,8 +171,21 @@ weft --connect host:7777 --token SECRET file.zig
 ```
 
 Two editors can also pair directly (`--listen` in one, `--connect` in the
-other). The status line shows link liveness; partitions heal as one
-frontier exchange. Protocol spec: doc/wire.md.
+other). The status line shows link liveness and the granted access;
+partitions heal as one frontier exchange. Protocol spec: doc/wire.md.
+
+**Authentication vs authorization.** The token proves you *may connect*
+(it derives the link encryption); the **access grade** proves what you
+*may do*, and the two are separate. A host grants an endpoint one of
+`view` (read-only — the peer receives every edit but its own ops are never
+admitted to the shared document, enforced at the wire, not by trust),
+`edit`, or `own` (edit plus reserved administrative authority). The
+default is **view** — a new user cannot accidentally hand out write
+access; granting it is one explicit `--access edit` (or `listen PORT
+edit`). Reaching *out* to an ssh file is the other direction entirely:
+there you are the principal with full authority, and remoteness is just
+where the bytes and toolchain live — a separate axis from a guest's grade
+in your session.
 
 ## Not yet
 

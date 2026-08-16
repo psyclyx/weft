@@ -28,6 +28,9 @@ const Args = struct {
     config: ?[]const u8 = null,
     em: f32 = 15,
     listen: ?u16 = null,
+    /// Access granted to peers on --listen (safe default: view). Peers
+    /// cannot write unless the host explicitly grants edit/own.
+    access: core.session.Access = .view,
     connect: ?[]const u8 = null, // host:port
     token: []const u8 = "weft-dev",
     user: []const u8 = "user",
@@ -51,6 +54,8 @@ fn parseArgs(process_args: std.process.Args) Args {
             if (it.next()) |v| out.em = std.fmt.parseFloat(f32, v) catch out.em;
         } else if (std.mem.eql(u8, a, "--listen")) {
             if (it.next()) |v| out.listen = std.fmt.parseInt(u16, v, 10) catch null;
+        } else if (std.mem.eql(u8, a, "--access")) {
+            if (it.next()) |v| out.access = core.session.Access.parse(v) orelse out.access;
         } else if (std.mem.eql(u8, a, "--connect")) {
             out.connect = it.next() orelse out.connect;
         } else if (std.mem.eql(u8, a, "--token")) {
@@ -87,6 +92,7 @@ pub fn main(init: std.process.Init) !void {
     if (args.headless) {
         return headless.run(gpa, .{
             .listen = args.listen orelse 7777,
+            .access = args.access,
             .token = args.token,
             .lsp_cmd = args.lsp_cmd,
             .file = args.file,
@@ -265,7 +271,7 @@ pub fn main(init: std.process.Init) !void {
     defer if (hub) |*h| h.deinit();
     if (args.connect) |hostport| {
         fd_link = .{ .fd = try core.session.tcpConnect(hostport) };
-        collab_session = try core.session.Session.create(gpa, fd_link.link(), .client, args.token);
+        collab_session = try core.session.Session.create(gpa, fd_link.link(), .client, args.token, .own);
         conn = try core.session.Conn.init(gpa, collab_session.?, args.user, .client);
         const col = try conn.?.bindPrimary(&ed0.doc, 0);
         col.presence_layer = try caps.layers.claim(gpa, &ed0.doc, "presence", .replicated, "collab");
@@ -292,7 +298,10 @@ pub fn main(init: std.process.Init) !void {
     }
     // Boot --listen folds onto the runtime listen path (one code path):
     // seed the intent; the first frame boots the hub.
-    if (args.listen) |port| share_ctx.pending_listen = port;
+    if (args.listen) |port| {
+        share_ctx.pending_listen = port;
+        share_ctx.pending_access = args.access;
+    }
     _ = try commands.bind(gpa, "connect", .{
         .name = "connect",
         .summary = "Connect to a host at runtime; its document opens as a buffer.",
@@ -330,8 +339,8 @@ pub fn main(init: std.process.Init) !void {
     });
     _ = try commands.bind(gpa, "listen", .{
         .name = "listen",
-        .summary = "Start hosting on a port; peers connect and share buffers.",
-        .args = &.{.{ .name = "port", .type = .string }},
+        .summary = "Host on a port at an access grade (view|edit|own); peers connect and share buffers.",
+        .args = &.{ .{ .name = "port", .type = .string }, .{ .name = "access", .type = .string } },
         .handler = listenHandler,
         .data = &share_ctx,
     });
@@ -554,7 +563,7 @@ pub fn main(init: std.process.Init) !void {
         // are immediate, accept runs on the hub's own thread.
         if (share_ctx.pending_listen) |port| {
             share_ctx.pending_listen = null;
-            if (hub == null) startListen(gpa, &hub, &share_ctx, &buffers, &caps, port, args.token, &echo_line);
+            if (hub == null) startListen(gpa, &hub, &share_ctx, &buffers, &caps, port, args.token, share_ctx.pending_access, &echo_line);
             view_dirty = true;
         }
         if (share_ctx.stop_listen_requested) {
@@ -611,7 +620,7 @@ pub fn main(init: std.process.Init) !void {
                         if (res) |fd| {
                             collab_session.?.destroy();
                             fd_link = .{ .fd = fd };
-                            collab_session = try core.session.Session.create(gpa, fd_link.link(), .client, args.token);
+                            collab_session = try core.session.Session.create(gpa, fd_link.link(), .client, args.token, .own);
                             try c.rebind(collab_session.?);
                             std.log.info("collab: reconnected", .{});
                             view_dirty = true;
@@ -723,11 +732,11 @@ pub fn main(init: std.process.Init) !void {
                 if (total_len == 0) break :blk null;
                 break :blk @intCast(@min(99, unfetched * 100 / total_len));
             };
-            var listen_buf: [24]u8 = undefined;
+            var listen_buf: [40]u8 = undefined;
             const link_note: ?[]const u8 = if (collab_session) |s|
                 @tagName(s.liveness())
             else if (hub) |*h|
-                (std.fmt.bufPrint(&listen_buf, "listening {d}", .{h.clients.items.len}) catch "listening")
+                (std.fmt.bufPrint(&listen_buf, "listening {d} ({s})", .{ h.clients.items.len, h.access.label() }) catch "listening")
             else
                 null;
             const hud: view_mod.Hud = .{
@@ -1341,6 +1350,8 @@ const ShareCtx = struct {
     pending_connect: ?[]u8 = null,
     disconnect_requested: bool = false,
     pending_listen: ?u16 = null,
+    /// Access grade for the next `listen` (safe default: view).
+    pending_access: core.session.Access = .view,
     stop_listen_requested: bool = false,
 };
 
@@ -1380,11 +1391,12 @@ fn startListen(
     caps: *core.Caps,
     port: u16,
     token: []const u8,
+    access: core.session.Access,
     echo: *std.ArrayList(u8),
 ) void {
     sc.primary_doc = &buffers.active().editor.doc;
     sc.primary_tag = buffers.active_id;
-    hub_slot.* = core.hub.Hub.init(gpa, token) catch {
+    hub_slot.* = core.hub.Hub.init(gpa, token, access) catch {
         setEcho(echo, gpa, "listen: out of memory");
         return;
     };
@@ -1410,11 +1422,15 @@ fn setEcho(echo: *std.ArrayList(u8), gpa: std.mem.Allocator, msg: []const u8) vo
 /// frame loop starts the hub outside the hot section).
 fn listenHandler(ctx: *core.command.Context, data: ?*anyopaque, args: []const core.command.Value) anyerror!core.command.Value {
     const sc: *ShareCtx = @ptrCast(@alignCast(data.?));
-    if (args.len != 1 or args[0] != .string) return error.TypeMismatch;
+    if (args.len != 2 or args[0] != .string or args[1] != .string) return error.TypeMismatch;
     if (sc.hub.* != null) return .{ .string = "already listening (stop-listening first)" };
     const port = std.fmt.parseInt(u16, args[0].string, 10) catch return .{ .string = "bad port" };
+    const access = core.session.Access.parse(args[1].string) orelse
+        return .{ .string = "access must be view|edit|own" };
     sc.pending_listen = port;
-    return ok_echo(ctx, "listening…");
+    sc.pending_access = access;
+    var buf: [48]u8 = undefined;
+    return ok_echo(ctx, std.fmt.bufPrint(&buf, "listening ({s} access)…", .{access.label()}) catch "listening…");
 }
 
 /// `stop-listening` — stop accepting new peers; connected peers stay.
@@ -1613,7 +1629,7 @@ fn runtimeConnect(
 ) !void {
     const fd = try core.session.tcpConnect(hostport);
     fd_link.* = .{ .fd = fd };
-    const sess = try core.session.Session.create(gpa, fd_link.link(), .client, token);
+    const sess = try core.session.Session.create(gpa, fd_link.link(), .client, token, .own);
     errdefer sess.destroy();
     var c = try core.session.Conn.init(gpa, sess, user, .client);
     errdefer c.deinit();

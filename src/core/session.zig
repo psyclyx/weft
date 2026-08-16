@@ -119,6 +119,32 @@ pub const FdLink = struct {
 
 pub const Liveness = enum { connecting, connected, degraded, offline };
 
+/// Authorization grade for the peer at the other end of a link — distinct
+/// from authentication (the token/crypto proves you *may connect*; the
+/// access grade proves what you *may do*). Enforced by the host at op
+/// admission: a `view` peer's ops never enter the shared document, so they
+/// cannot write no matter what they send. Defaults are safe: a new peer is
+/// a viewer until explicitly granted more.
+pub const Access = enum {
+    /// Read-only: receives everyone's edits, but its own ops are dropped.
+    view,
+    /// May edit the shared document.
+    edit,
+    /// Edit plus administrative authority (reserved; treated as edit for
+    /// op admission today, the hook for privileged capabilities later).
+    own,
+
+    pub fn canEdit(self: Access) bool {
+        return self != .view;
+    }
+    pub fn label(self: Access) []const u8 {
+        return @tagName(self);
+    }
+    pub fn parse(s: []const u8) ?Access {
+        return std.meta.stringToEnum(Access, s);
+    }
+};
+
 const InNode = struct {
     next: ?*InNode = null,
     frame: wire.Decoder.Decoded,
@@ -129,6 +155,10 @@ pub const Session = struct {
     link: Link,
     role: secure.Role,
     token: []u8,
+    /// What the peer on the other end may do to our shared state. On a
+    /// host this is the grade granted to that peer; on a client it is
+    /// `.own` (we trust the host we chose to reach out to).
+    access: Access,
 
     reader_thread: ?std.Thread = null,
     writer_thread: ?std.Thread = null,
@@ -149,7 +179,7 @@ pub const Session = struct {
 
     last_rx_ns: std.atomic.Value(u64) = .init(0),
 
-    pub fn create(gpa: Allocator, link: Link, role: secure.Role, token: []const u8) !*Session {
+    pub fn create(gpa: Allocator, link: Link, role: secure.Role, token: []const u8, access: Access) !*Session {
         const self = try gpa.create(Session);
         errdefer gpa.destroy(self);
         self.* = .{
@@ -157,6 +187,7 @@ pub const Session = struct {
             .link = link,
             .role = role,
             .token = try gpa.dupe(u8, token),
+            .access = access,
             .eph = secure.Ephemeral.generate(),
         };
         self.last_rx_ns.store(task.nowNs(), .release);
@@ -517,6 +548,12 @@ pub const Collab = struct {
                         const token = cur[0..tlen];
                         const batch = cur[tlen..];
                         try self.setTheirFrontier(token);
+                        // Authorization: a view-only peer's ops are never
+                        // admitted to the shared document (and thus never
+                        // propagate to other peers). We still track their
+                        // frontier so sync stays consistent and they keep
+                        // receiving everyone else's edits.
+                        if (!self.session.access.canEdit()) return changed;
                         if (batch.len > 0) {
                             const merged = self.doc.mergeRemote(gpa, batch) catch |err| blk: {
                                 if (err == error.Unrealized) {
@@ -930,6 +967,71 @@ fn socketPair() ![2]i32 {
     return fds;
 }
 
+test "session: a view-only peer's ops are dropped by the host" {
+    const gpa = t.allocator;
+    const fds = try socketPair();
+    var lh: FdLink = .{ .fd = fds[0] };
+    var lp: FdLink = .{ .fd = fds[1] };
+
+    var doc_host = try Document.init(gpa, "host");
+    defer doc_host.deinit(gpa);
+    var doc_peer = try Document.init(gpa, "peer");
+    defer doc_peer.deinit(gpa);
+    try doc_host.insert(gpa, 0, "base\n");
+
+    // The host grants this peer view-only; the peer trusts the host (.own).
+    const sh = try Session.create(gpa, lh.link(), .server, "tok", .view);
+    defer sh.destroy();
+    const sp = try Session.create(gpa, lp.link(), .client, "tok", .own);
+    defer sp.destroy();
+
+    var ch = try Collab.init(gpa, sh, &doc_host, "host");
+    defer ch.deinit();
+    var cp = try Collab.init(gpa, sp, &doc_peer, "peer");
+    defer cp.deinit();
+
+    // Wait (adaptively) for a milestone in the peer's doc, pumping both
+    // sides; returns false on timeout.
+    const H = struct {
+        fn until(a: Allocator, host: *Collab, peer: *Collab, doc: *Document, needle: []const u8) !bool {
+            var round: usize = 0;
+            while (round < 4000) : (round += 1) {
+                _ = try host.tick(0);
+                _ = try peer.tick(0);
+                const txt = try doc.text().toOwnedSlice(a);
+                defer a.free(txt);
+                if (std.mem.indexOf(u8, txt, needle) != null) return true;
+                std.Thread.yield() catch {};
+            }
+            return false;
+        }
+    };
+
+    // The link is live: the host's base reaches the viewer.
+    try t.expect(try H.until(gpa, &ch, &cp, &doc_peer, "base"));
+
+    // Concurrent edits: host writes; the viewer tries to.
+    try doc_host.insert(gpa, 0, "HOST");
+    try doc_peer.insert(gpa, doc_peer.text().byteLen(), "PEER");
+
+    // The host's edit reaches the viewer (read access works).
+    try t.expect(try H.until(gpa, &ch, &cp, &doc_peer, "HOST"));
+
+    // Pump well past a round trip so the viewer's op would have landed on
+    // the host if it were ever going to.
+    for (0..1000) |_| {
+        _ = try ch.tick(0);
+        _ = try cp.tick(0);
+        std.Thread.yield() catch {};
+    }
+
+    const th = try doc_host.text().toOwnedSlice(gpa);
+    defer gpa.free(th);
+    // The host applied its own edit but never admitted the viewer's.
+    try t.expect(std.mem.indexOf(u8, th, "HOST") != null);
+    try t.expect(std.mem.indexOf(u8, th, "PEER") == null);
+}
+
 test "session+collab: two instances converge over an encrypted link with presence" {
     const gpa = t.allocator;
     const fds = try socketPair();
@@ -942,9 +1044,9 @@ test "session+collab: two instances converge over an encrypted link with presenc
     defer doc_b.deinit(gpa);
     try doc_a.insert(gpa, 0, "shared ground\n");
 
-    const sa = try Session.create(gpa, la.link(), .server, "tok");
+    const sa = try Session.create(gpa, la.link(), .server, "tok", .own);
     defer sa.destroy();
-    const sb = try Session.create(gpa, lb.link(), .client, "tok");
+    const sb = try Session.create(gpa, lb.link(), .client, "tok", .own);
     defer sb.destroy();
 
     var ca = try Collab.init(gpa, sa, &doc_a, "alice");
@@ -1015,9 +1117,9 @@ test "conn: shared buffers both ways over one link — offers, open, converge, p
     defer b_todo.deinit(gpa);
     try b_todo.insert(gpa, 0, "bob's todo\n");
 
-    const sa = try Session.create(gpa, la.link(), .server, "tok");
+    const sa = try Session.create(gpa, la.link(), .server, "tok", .own);
     defer sa.destroy();
-    const sb = try Session.create(gpa, lb.link(), .client, "tok");
+    const sb = try Session.create(gpa, lb.link(), .client, "tok", .own);
     defer sb.destroy();
     var ca = try Conn.init(gpa, sa, "alice", .server);
     defer ca.deinit();
@@ -1143,9 +1245,9 @@ test "partial checkout: adopt base over the wire, edit around holes, bounce-real
     var client = try Document.init(gpa, "client");
     defer client.deinit(gpa);
 
-    const sa = try Session.create(gpa, la.link(), .server, "tok");
+    const sa = try Session.create(gpa, la.link(), .server, "tok", .own);
     defer sa.destroy();
-    const sb = try Session.create(gpa, lb.link(), .client, "tok");
+    const sb = try Session.create(gpa, lb.link(), .client, "tok", .own);
     defer sb.destroy();
     var ch = try Collab.init(gpa, sa, &host, "host");
     defer ch.deinit();
@@ -1222,9 +1324,9 @@ test "session: wrong token never establishes" {
     const fds = try socketPair();
     var la: FdLink = .{ .fd = fds[0] };
     var lb: FdLink = .{ .fd = fds[1] };
-    const sa = try Session.create(gpa, la.link(), .server, "right");
+    const sa = try Session.create(gpa, la.link(), .server, "right", .own);
     defer sa.destroy();
-    const sb = try Session.create(gpa, lb.link(), .client, "wrong");
+    const sb = try Session.create(gpa, lb.link(), .client, "wrong", .own);
     defer sb.destroy();
     var waited: usize = 0;
     while (waited < 100) : (waited += 1) {
@@ -1824,9 +1926,9 @@ test "partial checkout: multi-GB sparse file — jump to end, tail growth, viewe
     defer doc_a.deinit(gpa);
     var doc_b = try Document.init(gpa, "viewer");
     defer doc_b.deinit(gpa);
-    const sa = try Session.create(gpa, la.link(), .server, "tok");
+    const sa = try Session.create(gpa, la.link(), .server, "tok", .own);
     defer sa.destroy();
-    const sb = try Session.create(gpa, lb.link(), .client, "tok");
+    const sb = try Session.create(gpa, lb.link(), .client, "tok", .own);
     defer sb.destroy();
     var ca = try Collab.init(gpa, sa, &doc_a, "agent");
     defer ca.deinit();
@@ -1954,9 +2056,9 @@ test "chaos: partition observed in liveness, heals as one exchange; typing stays
     defer doc_b.deinit(gpa);
     try doc_a.insert(gpa, 0, "base\n");
 
-    const sa = try Session.create(gpa, chaos_a.link(), .server, "tok");
+    const sa = try Session.create(gpa, chaos_a.link(), .server, "tok", .own);
     defer sa.destroy();
-    const sb = try Session.create(gpa, chaos_b.link(), .client, "tok");
+    const sb = try Session.create(gpa, chaos_b.link(), .client, "tok", .own);
     defer sb.destroy();
     var ca = try Collab.init(gpa, sa, &doc_a, "alice");
     defer ca.deinit();
@@ -2042,12 +2144,12 @@ test "hub: three-way convergence, presence relay, reconnect rebind" {
     var lb_h: FdLink = .{ .fd = fb[0] };
     var lb_c: FdLink = .{ .fd = fb[1] };
 
-    const sh_a = try Session.create(gpa, la_h.link(), .server, "tok");
+    const sh_a = try Session.create(gpa, la_h.link(), .server, "tok", .own);
     defer sh_a.destroy();
-    const sh_b = try Session.create(gpa, lb_h.link(), .server, "tok");
+    const sh_b = try Session.create(gpa, lb_h.link(), .server, "tok", .own);
     defer sh_b.destroy();
-    var sa = try Session.create(gpa, la_c.link(), .client, "tok");
-    var sb = try Session.create(gpa, lb_c.link(), .client, "tok");
+    var sa = try Session.create(gpa, la_c.link(), .client, "tok", .own);
+    var sb = try Session.create(gpa, lb_c.link(), .client, "tok", .own);
     defer sb.destroy();
 
     var ch_a = try Collab.init(gpa, sh_a, &doc_h, "hub");
@@ -2126,9 +2228,9 @@ test "hub: three-way convergence, presence relay, reconnect rebind" {
     const fa2 = try socketPair();
     var la2_h: FdLink = .{ .fd = fa2[0] };
     var la2_c: FdLink = .{ .fd = fa2[1] };
-    const sh_a2 = try Session.create(gpa, la2_h.link(), .server, "tok");
+    const sh_a2 = try Session.create(gpa, la2_h.link(), .server, "tok", .own);
     defer sh_a2.destroy();
-    sa = try Session.create(gpa, la2_c.link(), .client, "tok");
+    sa = try Session.create(gpa, la2_c.link(), .client, "tok", .own);
     defer sa.destroy();
     ch_a.rebind(sh_a2);
     ca.rebind(sa);

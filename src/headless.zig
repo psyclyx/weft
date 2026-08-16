@@ -14,6 +14,7 @@ const capability = core.capability;
 
 pub const Args = struct {
     listen: u16 = 7777,
+    access: session.Access = .view,
     token: []const u8 = "weft-dev",
     lsp_cmd: ?[]const u8 = null,
     file: ?[]const u8 = null,
@@ -89,8 +90,8 @@ pub fn run(gpa: std.mem.Allocator, args: Args, environ: std.process.Environ) !vo
     if (editor.backingPath()) |p| blob = session.BlobServer.openPath(p) catch null;
 
     // ── Hub: accept forever, serve N peers on the one document ──
-    std.log.info("headless: listening on {d}", .{args.listen});
-    var hub = try core.hub.Hub.init(gpa, args.token);
+    std.log.info("headless: listening on {d} ({s} access)", .{ args.listen, args.access.label() });
+    var hub = try core.hub.Hub.init(gpa, args.token, args.access);
     defer hub.deinit();
     try hub.listen(args.listen);
     var cfg: HeadlessCfg = .{

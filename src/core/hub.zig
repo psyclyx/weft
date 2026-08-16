@@ -56,15 +56,18 @@ pub const Peer = struct {
 pub const Hub = struct {
     gpa: Allocator,
     token: []u8,
+    /// Access grade granted to every peer that connects to this endpoint.
+    access: session.Access = .view,
     clients: std.ArrayList(*Peer) = .empty,
     incoming: std.atomic.Value(?*FdNode) = .init(null),
     listener: ?i32 = null,
     accept_thread: ?std.Thread = null,
 
     /// A hub with no listener yet — call `listen` once it is stored at a
-    /// stable address (the accept thread captures `self`).
-    pub fn init(gpa: Allocator, token: []const u8) !Hub {
-        return .{ .gpa = gpa, .token = try gpa.dupe(u8, token) };
+    /// stable address (the accept thread captures `self`). `access` is the
+    /// grade every peer on this endpoint is granted (safe default: view).
+    pub fn init(gpa: Allocator, token: []const u8, access: session.Access) !Hub {
+        return .{ .gpa = gpa, .token = try gpa.dupe(u8, token), .access = access };
     }
 
     /// Bind the port and start accepting (non-blocking: bind/listen are
@@ -148,7 +151,7 @@ pub const Hub = struct {
         const p = try gpa.create(Peer);
         errdefer gpa.destroy(p);
         p.* = .{ .hub = self, .fd_link = .{ .fd = fd }, .sess = undefined, .conn = undefined };
-        p.sess = try session.Session.create(gpa, p.fd_link.link(), .server, self.token);
+        p.sess = try session.Session.create(gpa, p.fd_link.link(), .server, self.token, self.access);
         errdefer p.sess.destroy();
         p.conn = try session.Conn.init(gpa, p.sess, "host", .server);
         errdefer p.conn.deinit();
@@ -273,7 +276,7 @@ test "hub: two peers converge; presence relays and unions" {
     defer store.deinit(gpa);
     try doc_p.insert(gpa, 0, "base\n");
 
-    var hub = try Hub.init(gpa, "tok");
+    var hub = try Hub.init(gpa, "tok", .edit);
     defer hub.deinit();
 
     const pa = try socketPair();
@@ -290,9 +293,9 @@ test "hub: two peers converge; presence relays and unions" {
 
     var la: session.FdLink = .{ .fd = pa[1] };
     var lb: session.FdLink = .{ .fd = pb[1] };
-    var sa = try session.Session.create(gpa, la.link(), .client, "tok");
+    var sa = try session.Session.create(gpa, la.link(), .client, "tok", .own);
     defer sa.destroy();
-    var sb = try session.Session.create(gpa, lb.link(), .client, "tok");
+    var sb = try session.Session.create(gpa, lb.link(), .client, "tok", .own);
     defer sb.destroy();
     var ca = try session.Collab.init(gpa, sa, &doc_a, "alice");
     defer ca.deinit();
