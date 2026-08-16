@@ -308,6 +308,8 @@ pub fn main(init: std.process.Init) !void {
         .gpa = gpa,
         .buffers = &buffers,
         .partial = &partial_state,
+        .session = &collab_session,
+        .known = &known_peers,
     };
     attach_deps.share = &share_ctx;
     defer if (share_ctx.pending_connect) |hp| gpa.free(hp);
@@ -370,6 +372,27 @@ pub fn main(init: std.process.Init) !void {
         .handler = stopListeningHandler,
         .data = &share_ctx,
     });
+    _ = try commands.bind(gpa, "verify-peer", .{
+        .name = "verify-peer",
+        .summary = "Mark a peer fingerprint verified (after comparing its SAS out of band).",
+        .args = &.{.{ .name = "fingerprint", .type = .string }},
+        .handler = verifyPeerHandler,
+        .data = &known_peers,
+    });
+    _ = try commands.bind(gpa, "forget-peer", .{
+        .name = "forget-peer",
+        .summary = "Revoke trust in a peer fingerprint (removes it from known_peers).",
+        .args = &.{.{ .name = "fingerprint", .type = .string }},
+        .handler = forgetPeerHandler,
+        .data = &known_peers,
+    });
+    _ = try commands.bind(gpa, "peers", .{
+        .name = "peers",
+        .summary = "List connected peers with fingerprint, SAS words, and trust.",
+        .args = &.{},
+        .handler = peersHandler,
+        .data = &share_ctx,
+    });
 
     // ── Window + Vulkan ──
     const window = try wayland.Window.init(1280, 800, "weft", "dev.psyclyx.weft");
@@ -418,7 +441,8 @@ pub fn main(init: std.process.Init) !void {
     var view_dirty = true;
     var last_liveness: core.session.Liveness = .connecting;
     // The fingerprint we last announced for the outbound host, so a
-    // reconnect to a different key re-announces (and TOFU-records) it.
+    // reconnect to a different key re-announces (and TOFU-records) it. The
+    // status-line trust chip reads its live grade from `known_peers`.
     var noted_host_fp: ?[24]u8 = null;
     var reconnect: ?core.task.Handle(anyerror!i32) = null;
     defer if (reconnect) |*h| h.detach();
@@ -600,7 +624,10 @@ pub fn main(init: std.process.Init) !void {
             h.acceptPending(&share_ctx, guiConfigure);
             for (h.clients.items) |peer| {
                 for (peer.conn.collabs.items) |col| {
-                    if (buffers.get(@intCast(col.tag))) |b| col.cursor_offset = b.editor.cursorOffset();
+                    if (buffers.get(@intCast(col.tag))) |b| {
+                        col.cursor_offset = b.editor.cursorOffset();
+                        col.selection_anchor = selectionAnchorOf(&b.editor);
+                    }
                 }
             }
             if (h.tick()) view_dirty = true;
@@ -615,10 +642,11 @@ pub fn main(init: std.process.Init) !void {
         }
 
         if (conn) |*c| {
-            // Each bound buffer publishes its own cursor as presence.
+            // Each bound buffer publishes its own cursor + selection.
             for (c.collabs.items) |col| {
                 if (buffers.get(@intCast(col.tag))) |b| {
                     col.cursor_offset = b.editor.cursorOffset();
+                    col.selection_anchor = selectionAnchorOf(&b.editor);
                 }
             }
             // Partial checkout: realize content around the cursor (the
@@ -803,6 +831,10 @@ pub fn main(init: std.process.Init) !void {
                 .diag_layer = caps.layers.find(&editor.doc, "diagnostics"),
                 .presence_layer = caps.layers.find(&editor.doc, "presence"),
                 .link = link_note,
+                .trust = if (collab_session != null) blk: {
+                    const fp = noted_host_fp orelse break :blk null;
+                    break :blk hostTrustChip(known_peers.trust(fp));
+                } else null,
                 .cursor_diag = blk: {
                     const dl = caps.layers.find(&editor.doc, "diagnostics") orelse break :blk null;
                     const cur = editor.cursorOffset();
@@ -924,11 +956,98 @@ fn isMarkdownPath(path: []const u8) bool {
     return std.mem.endsWith(u8, path, ".md") or std.mem.endsWith(u8, path, ".markdown");
 }
 
+/// `peers` — echo/log every connected peer's fingerprint, four-word SAS,
+/// and trust grade, so a user can compare the SAS out of band and then
+/// `verify-peer <fingerprint>`. The full detail goes to the log (many
+/// peers won't fit the status line); the echo is a one-line summary.
+fn peersHandler(ctx: *core.command.Context, data: ?*anyopaque, args: []const core.command.Value) anyerror!core.command.Value {
+    _ = args;
+    const sc: *ShareCtx = @ptrCast(@alignCast(data.?));
+    var count: usize = 0;
+    var first_line: ?[]const u8 = null;
+    var line_buf: [160]u8 = undefined;
+
+    const report = struct {
+        fn one(kp: *core.known_peers.KnownPeers, sess: *core.session.Session, role: []const u8, n: *usize, fl: *?[]const u8, lb: []u8) void {
+            const fp = sess.peerFingerprint() orelse return;
+            const sas = sess.sas() orelse return;
+            n.* += 1;
+            const trust = kp.trust(fp);
+            std.log.info("peer {s}: {s} · SAS {s} · {s}", .{ role, &fp, &sas, trust.label() });
+            if (fl.* == null) {
+                fl.* = std.fmt.bufPrint(lb, "{s} {s} · {s}", .{ role, &fp, trust.label() }) catch null;
+            }
+        }
+    };
+
+    if (sc.session.*) |host| report.one(sc.known, host, "host", &count, &first_line, &line_buf);
+    if (sc.hub.*) |*h| {
+        for (h.clients.items) |p| report.one(sc.known, p.sess, "guest", &count, &first_line, &line_buf);
+    }
+
+    if (count == 0) return ok_echo(ctx, "no peers connected");
+    if (count == 1 and first_line != null) return ok_echo(ctx, first_line.?);
+    var buf: [48]u8 = undefined;
+    return ok_echo(ctx, std.fmt.bufPrint(&buf, "{d} peers (see log for SAS)", .{count}) catch "peers");
+}
+
+/// Status-line chip for a peer's trust grade (null = don't show).
+fn hostTrustChip(trust: core.known_peers.Trust) ?[]const u8 {
+    return switch (trust) {
+        .verified => "✓ verified",
+        .unverified => "⚠ unverified",
+        .unknown => "⚠ unknown",
+    };
+}
+
+/// The far end of the editor's selection (the end that is not the caret),
+/// or the caret itself when nothing is selected — what presence publishes
+/// so peers can render our selection, not just our cursor.
+fn selectionAnchorOf(ed: *const core.Editor) usize {
+    const cur = ed.cursorOffset();
+    if (ed.selectedRange()) |r| return if (cur == r.start) r.end else r.start;
+    return cur;
+}
+
 fn identityHandler(ctx: *core.command.Context, data: ?*anyopaque, args: []const core.command.Value) anyerror!core.command.Value {
     _ = args;
     const id: *core.identity.Identity = @ptrCast(@alignCast(data.?));
     var buf: [48]u8 = undefined;
     return ok_echo(ctx, std.fmt.bufPrint(&buf, "identity {s}", .{&id.fingerprint()}) catch "identity");
+}
+
+/// Parse a 24-char fingerprint argument (five base32 groups) into bytes.
+fn parseFingerprint(s: []const u8) ?[24]u8 {
+    if (s.len != 24) return null;
+    var fp: [24]u8 = undefined;
+    @memcpy(&fp, s);
+    return fp;
+}
+
+fn verifyPeerHandler(ctx: *core.command.Context, data: ?*anyopaque, args: []const core.command.Value) anyerror!core.command.Value {
+    const kp: *core.known_peers.KnownPeers = @ptrCast(@alignCast(data.?));
+    if (args.len != 1 or args[0] != .string) return error.TypeMismatch;
+    const fp = parseFingerprint(args[0].string) orelse
+        return ok_echo(ctx, "verify-peer: expected a fingerprint like k7q2-9fh3-...");
+    kp.verify(fp) catch |err| {
+        var buf: [64]u8 = undefined;
+        return ok_echo(ctx, std.fmt.bufPrint(&buf, "verify-peer failed: {t}", .{err}) catch "verify-peer failed");
+    };
+    var buf: [48]u8 = undefined;
+    return ok_echo(ctx, std.fmt.bufPrint(&buf, "verified {s}", .{&fp}) catch "verified");
+}
+
+fn forgetPeerHandler(ctx: *core.command.Context, data: ?*anyopaque, args: []const core.command.Value) anyerror!core.command.Value {
+    const kp: *core.known_peers.KnownPeers = @ptrCast(@alignCast(data.?));
+    if (args.len != 1 or args[0] != .string) return error.TypeMismatch;
+    const fp = parseFingerprint(args[0].string) orelse
+        return ok_echo(ctx, "forget-peer: expected a fingerprint like k7q2-9fh3-...");
+    kp.forget(fp) catch |err| {
+        var buf: [64]u8 = undefined;
+        return ok_echo(ctx, std.fmt.bufPrint(&buf, "forget-peer failed: {t}", .{err}) catch "forget-peer failed");
+    };
+    var buf: [48]u8 = undefined;
+    return ok_echo(ctx, std.fmt.bufPrint(&buf, "forgot {s}", .{&fp}) catch "forgot");
 }
 
 /// One view-computed vertical step. The goal-x (world px) is taken from
@@ -1395,6 +1514,10 @@ const ShareCtx = struct {
     hub: *?core.hub.Hub,
     caps: *core.Caps,
     partial: *?core.session.PartialDoc,
+    /// Outbound host session (for the `peers` command's fp/SAS/trust).
+    session: *?*core.session.Session = undefined,
+    /// TOFU store, for trust lookups in the `peers` command.
+    known: *core.known_peers.KnownPeers = undefined,
     /// Buffers shared over the hub — replayed to late joiners.
     shared: std.ArrayList(SharedDoc) = .empty,
     /// The doc bound at quad 0 for every hub peer (the buffer active

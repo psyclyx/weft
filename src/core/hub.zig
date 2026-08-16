@@ -233,7 +233,12 @@ pub fn unionPresence(self: *Hub, doc: *Document, layer: *layers.Layer, gpa: Allo
     for (self.clients.items) |peer| {
         for (peer.conn.collabs.items) |col| {
             if (col.doc != doc) continue;
-            for (col.presence_names.items, col.presence_offsets.items) |n, off| {
+            for (
+                col.presence_names.items,
+                col.presence_offsets.items,
+                col.presence_anchors.items,
+                col.presence_hues.items,
+            ) |n, head, anchor, hue16| {
                 var dup = false;
                 for (spans.items) |s| {
                     if (std.mem.eql(u8, s.message, n)) {
@@ -242,11 +247,12 @@ pub fn unionPresence(self: *Hub, doc: *Document, layer: *layers.Layer, gpa: Allo
                     }
                 }
                 if (dup) continue;
-                const clamped = @min(off, limit);
+                const h = @min(head, limit);
+                const a = @min(anchor, limit);
                 try spans.append(gpa, .{
-                    .start = clamped,
-                    .end = @min(clamped + 1, limit),
-                    .kind = 1,
+                    .start = @min(h, a),
+                    .end = @max(h, a),
+                    .kind = session.Collab.packPresenceKind(hue16, h <= a),
                     .message = n,
                 });
             }

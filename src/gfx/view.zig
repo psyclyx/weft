@@ -131,6 +131,9 @@ pub const Hud = struct {
     presence_layer: ?*const core.layers.Layer = null,
     /// Collab link liveness for the status line.
     link: ?[]const u8 = null,
+    /// Peer trust chip: "✓ verified" | "⚠ unverified" | null (the host we
+    /// connected out to; see known_peers / the SAS).
+    trust: ?[]const u8 = null,
     /// Per-byte markdown styling for the active buffer (null = not md).
     md_inline: ?MdInline = null,
     /// Caret shape and blink phase (false = hidden this frame).
@@ -402,13 +405,21 @@ pub const View = struct {
         self.frame_layout = .{ .lines = try lines.toOwnedSlice(la) };
 
         // Decorations, from the geometry map: selection behind, then caret,
-        // then remote peer carets.
-        if (selection) |sel| try self.selectionRects(scratch, &rects, sel);
+        // then each remote peer's selection + caret in its own color.
+        if (selection) |sel| try self.selectionRects(scratch, &rects, sel, self.theme.selection);
         if (hud.cursor_on) try self.caretRect(scratch, &rects, cursor_off, hud.cursor_style, self.theme.cursor);
         if (hud.presence_layer) |pl| {
             for (0..pl.spanCount()) |i| {
                 const span = pl.resolvedSpan(i);
-                try self.caretRect(scratch, &rects, span.start, .bar, self.theme.accent);
+                // A peer span packs its identity hue in kind's low 16 bits;
+                // bit 16 marks which end holds the caret (see session.zig
+                // republishPresence). start==end ⇒ a caret with no selection.
+                const hue = @as(f32, @floatFromInt(span.kind & 0xffff)) / 65535.0;
+                if (span.end > span.start) {
+                    try self.selectionRects(scratch, &rects, .{ .start = span.start, .end = span.end }, peerColor(hue, 0.55, 0.28));
+                }
+                const head = if (span.kind & 0x10000 == 0) span.start else span.end;
+                try self.caretRect(scratch, &rects, head, .bar, peerColor(hue, 0.62, 1.0));
             }
         }
 
@@ -659,7 +670,7 @@ pub const View = struct {
 
     // ── Decorations ──────────────────────────────────────────────────
 
-    fn selectionRects(self: *View, scratch: Allocator, rects: *std.ArrayList(Rect), sel: stemma.Range) !void {
+    fn selectionRects(self: *View, scratch: Allocator, rects: *std.ArrayList(Rect), sel: stemma.Range, color: [4]f32) !void {
         for (self.frame_layout.lines) |*vl| {
             const s = @max(sel.start, vl.src.start);
             const e = @min(sel.end, vl.src.end);
@@ -671,9 +682,47 @@ pub const View = struct {
                 .y = vl.baseline_y - vl.ascent,
                 .w = @max(1, x1 - x0),
                 .h = vl.height,
-                .color = self.theme.selection,
+                .color = color,
             });
         }
+    }
+
+    /// A peer's caret/selection color from its identity hue (fixed
+    /// saturation, caller-chosen lightness/alpha so a caret reads solid and
+    /// a selection reads as a translucent wash). Authored in sRGB, returned
+    /// linear like the rest of the theme.
+    fn peerColor(hue: f32, light: f32, alpha: f32) [4]f32 {
+        return snail.color.srgbToLinearColor(hslToSrgb(hue, 0.65, light, alpha));
+    }
+
+    fn hslToSrgb(h: f32, s: f32, l: f32, a: f32) [4]f32 {
+        const c = (1 - @abs(2 * l - 1)) * s;
+        const hp = h * 6;
+        const x = c * (1 - @abs(@mod(hp, 2) - 1));
+        var r: f32 = 0;
+        var g: f32 = 0;
+        var b: f32 = 0;
+        if (hp < 1) {
+            r = c;
+            g = x;
+        } else if (hp < 2) {
+            r = x;
+            g = c;
+        } else if (hp < 3) {
+            g = c;
+            b = x;
+        } else if (hp < 4) {
+            g = x;
+            b = c;
+        } else if (hp < 5) {
+            r = x;
+            b = c;
+        } else {
+            r = c;
+            b = x;
+        }
+        const m = l - c / 2;
+        return .{ r + m, g + m, b + m, a };
     }
 
     fn caretRect(self: *View, scratch: Allocator, rects: *std.ArrayList(Rect), off: usize, style: CursorStyle, color: [4]f32) !void {
@@ -841,6 +890,10 @@ pub const View = struct {
         if (hud.link) |l| {
             try parts.appendSlice(scratch, "  link:");
             try parts.appendSlice(scratch, l);
+        }
+        if (hud.trust) |tr| {
+            try parts.appendSlice(scratch, "  ");
+            try parts.appendSlice(scratch, tr);
         }
         if (hud.echo orelse hud.cursor_diag) |msg| {
             try parts.appendSlice(scratch, "  ·  ");

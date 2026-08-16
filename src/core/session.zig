@@ -522,15 +522,23 @@ pub const Collab = struct {
     /// Our cursor in this document, published as presence (the caller
     /// updates it before each tick).
     cursor_offset: usize = 0,
+    /// The other end of our selection (== cursor_offset when nothing is
+    /// selected). Published so peers render our selection, not just our
+    /// caret; the caller sets it alongside cursor_offset.
+    selection_anchor: usize = 0,
     their_frontier: ?[]u8 = null,
     last_sent_version: ?[]u8 = null,
     presence_layer: ?*layers_mod.Layer = null,
     last_presence_offset: usize = std.math.maxInt(usize),
+    last_presence_anchor: usize = std.math.maxInt(usize),
     announced: bool = false,
-    /// Peer cursors by name; the FULL set republishes into the layer on
-    /// every change, so any number of peers coexist.
+    /// Peer presence by name; the FULL set republishes into the layer on
+    /// every change, so any number of peers coexist. Parallel arrays:
+    /// caret (head), selection anchor, and identity hue quantized to u16.
     presence_names: std.ArrayList([]u8) = .empty,
     presence_offsets: std.ArrayList(usize) = .empty,
+    presence_anchors: std.ArrayList(usize) = .empty,
+    presence_hues: std.ArrayList(u32) = .empty,
     /// Publish our own cursor (a headless hub has none — it relays).
     publish_presence: bool = true,
     /// Hub relay: re-publish received presence to the other sessions.
@@ -563,6 +571,8 @@ pub const Collab = struct {
         for (self.presence_names.items) |n| self.gpa.free(n);
         self.presence_names.deinit(self.gpa);
         self.presence_offsets.deinit(self.gpa);
+        self.presence_anchors.deinit(self.gpa);
+        self.presence_hues.deinit(self.gpa);
         self.gpa.free(self.name);
     }
 
@@ -577,6 +587,7 @@ pub const Collab = struct {
         if (self.last_sent_version) |v| self.gpa.free(v);
         self.last_sent_version = null;
         self.last_presence_offset = std.math.maxInt(usize);
+        self.last_presence_anchor = std.math.maxInt(usize);
     }
 
     /// Per-frame (solo use): drain inbound frames, handle the ones in
@@ -593,6 +604,7 @@ pub const Collab = struct {
             changed = (self.handleFrame(frame) catch false) or changed;
         }
         self.cursor_offset = cursor_offset;
+        self.selection_anchor = cursor_offset; // solo tick: no selection
         return (try self.push()) or changed;
     }
 
@@ -673,16 +685,20 @@ pub const Collab = struct {
                     changed = true;
                 }
             } else if (frame.channel == self.base + 1) {
-                // Presence: uv name_len | name | uv offset. Fold into
-                // the per-peer set, republish the whole set, and (in
-                // hub role) relay to the other sessions.
+                // Presence: uv name_len | name | uv head | uv anchor | uv
+                // hue16 (the last two additive — an older peer sends only
+                // head, so anchor defaults to head and the hue to a stable
+                // per-name fallback). Fold, republish, and (in hub role)
+                // relay to the other sessions.
                 var cur: []const u8 = frame.payload;
                 const nlen = wire.getUv(&cur) catch return false;
                 if (nlen > cur.len) return false;
                 const peer_name = cur[0..nlen];
                 cur = cur[nlen..];
-                const off = wire.getUv(&cur) catch return false;
-                try self.updatePeerPresence(peer_name, @intCast(off));
+                const head = wire.getUv(&cur) catch return false;
+                const anchor = wire.getUv(&cur) catch head;
+                const hue16 = wire.getUv(&cur) catch (nameKey(peer_name) & 0xffff);
+                try self.updatePeerPresence(peer_name, @intCast(head), @intCast(anchor), @intCast(hue16 & 0xffff));
                 try self.republishPresence();
                 changed = true;
                 if (self.relay) |r| r(self.relay_ctx, nameKey(peer_name), frame.payload);
@@ -767,13 +783,22 @@ pub const Collab = struct {
             }
         }
 
-        if (self.publish_presence and self.cursor_offset != self.last_presence_offset) {
+        if (self.publish_presence and
+            (self.cursor_offset != self.last_presence_offset or self.selection_anchor != self.last_presence_anchor))
+        {
             self.last_presence_offset = self.cursor_offset;
+            self.last_presence_anchor = self.selection_anchor;
             var payload: std.ArrayList(u8) = .empty;
             defer payload.deinit(gpa);
+            // uv name_len | name | uv head | uv anchor | uv hue16. The
+            // trailing fields are additive: an older peer's decoder reads
+            // name+head and ignores the rest (frame length-delimited).
             try wire.putUv(gpa, &payload, self.name.len);
             try payload.appendSlice(gpa, self.name);
             try wire.putUv(gpa, &payload, self.cursor_offset);
+            try wire.putUv(gpa, &payload, self.selection_anchor);
+            const hue16: u32 = @intFromFloat(self.session.id.hue() * 65535.0);
+            try wire.putUv(gpa, &payload, hue16);
             // Coalescing key is per-peer: N cursors never collapse.
             try self.session.postFeed(self.base + 1, nameKey(self.name), payload.items);
         }
@@ -784,35 +809,58 @@ pub const Collab = struct {
         return std.hash.Fnv1a_64.hash(name);
     }
 
-    fn updatePeerPresence(self: *Collab, peer_name: []const u8, offset: usize) !void {
+    fn updatePeerPresence(self: *Collab, peer_name: []const u8, head: usize, anchor: usize, hue16: u32) !void {
         for (self.presence_names.items, 0..) |n, i| {
             if (std.mem.eql(u8, n, peer_name)) {
-                self.presence_offsets.items[i] = offset;
+                self.presence_offsets.items[i] = head;
+                self.presence_anchors.items[i] = anchor;
+                self.presence_hues.items[i] = hue16;
                 return;
             }
         }
         const owned = try self.gpa.dupe(u8, peer_name);
         errdefer self.gpa.free(owned);
         try self.presence_names.append(self.gpa, owned);
-        try self.presence_offsets.append(self.gpa, offset);
+        errdefer _ = self.presence_names.pop();
+        try self.presence_offsets.append(self.gpa, head);
+        errdefer _ = self.presence_offsets.pop();
+        try self.presence_anchors.append(self.gpa, anchor);
+        errdefer _ = self.presence_anchors.pop();
+        try self.presence_hues.append(self.gpa, hue16);
     }
 
+    /// Build one presence span per peer: [lo,hi) is the selection (a bare
+    /// caret when head==anchor), kind carries the identity hue in its low
+    /// 16 bits plus a bit-16 flag for which end holds the caret. The view
+    /// decodes both. See `packPresenceKind`.
     fn republishPresence(self: *Collab) !void {
         const layer = self.presence_layer orelse return;
         const gpa = self.gpa;
         var spans: std.ArrayList(layers_mod.SpanIn) = .empty;
         defer spans.deinit(gpa);
         const limit = self.doc.text().byteLen();
-        for (self.presence_names.items, self.presence_offsets.items) |n, off| {
-            const clamped = @min(off, limit);
+        for (
+            self.presence_names.items,
+            self.presence_offsets.items,
+            self.presence_anchors.items,
+            self.presence_hues.items,
+        ) |n, head, anchor, hue16| {
+            const h = @min(head, limit);
+            const a = @min(anchor, limit);
             try spans.append(gpa, .{
-                .start = clamped,
-                .end = @min(clamped + 1, limit),
-                .kind = 1,
+                .start = @min(h, a),
+                .end = @max(h, a),
+                .kind = packPresenceKind(hue16, h <= a),
                 .message = n,
             });
         }
         try layer.publishSpans(gpa, spans.items);
+    }
+
+    /// Presence span kind: identity hue in bits 0..15, "caret is at the
+    /// lower end" in bit 16. Shared with the hub's local union display.
+    pub fn packPresenceKind(hue16: u32, head_is_start: bool) u32 {
+        return (hue16 & 0xffff) | (@as(u32, if (head_is_start) 0 else 1) << 16);
     }
 
     fn setTheirFrontier(self: *Collab, token: []const u8) !void {
@@ -1276,9 +1324,13 @@ test "conn: shared buffers both ways over one link — offers, open, converge, p
     for (cb.collabs.items) |c| {
         if (c.doc == &b_todo) c.presence_layer = todo_layer;
     }
-    // Move alice's cursor in notes only.
+    // Move alice's cursor in notes only (no selection: anchor == caret,
+    // so the presence span is a bare caret at 3).
     for (ca.collabs.items) |c| {
-        if (c.doc == &a_notes) c.cursor_offset = 3;
+        if (c.doc == &a_notes) {
+            c.cursor_offset = 3;
+            c.selection_anchor = 3;
+        }
     }
     const presence_deadline = task.nowNs() + 5 * std.time.ns_per_s;
     while (task.nowNs() < presence_deadline) {
@@ -1443,6 +1495,41 @@ test "session: peers learn each other's fingerprint and agree on the SAS" {
     try t.expectEqualSlices(u8, &id_a.fingerprint(), &sb.peerFingerprint().?);
     // Untampered: both ends compute the same Short Authentication String.
     try t.expectEqualSlices(u8, &sa.sas().?, &sb.sas().?);
+}
+
+test "presence: a peer selection publishes a colored range with the caret side" {
+    const gpa = t.allocator;
+    var doc = try Document.init(gpa, "d");
+    defer doc.deinit(gpa);
+    try doc.insert(gpa, 0, "0123456789");
+    var layers: layers_mod.Layers = .empty;
+    defer layers.deinit(gpa);
+    const layer = try layers.claim(gpa, &doc, "presence", .replicated, "collab");
+
+    // Drive a Collab's presence bookkeeping directly (republish/update
+    // never touch the session, so it can be undefined here).
+    var c = try Collab.init(gpa, undefined, &doc, "me");
+    defer c.deinit();
+    c.presence_layer = layer;
+
+    // Peer "bob": caret at 2, selection anchor at 7, hue index 100.
+    try c.updatePeerPresence("bob", 2, 7, 100);
+    try c.republishPresence();
+    try t.expectEqual(@as(usize, 1), layer.spanCount());
+    const s = layer.resolvedSpan(0);
+    try t.expectEqual(@as(usize, 2), s.start);
+    try t.expectEqual(@as(usize, 7), s.end);
+    try t.expectEqualStrings("bob", s.message);
+    try t.expectEqual(@as(u32, 100), s.kind & 0xffff); // hue in low 16 bits
+    try t.expectEqual(@as(u32, 0), s.kind >> 16); // caret at lower end (2<=7)
+
+    // Backward selection: caret at 7, anchor at 2 → same range, caret flag set.
+    try c.updatePeerPresence("bob", 7, 2, 100);
+    try c.republishPresence();
+    const s2 = layer.resolvedSpan(0);
+    try t.expectEqual(@as(usize, 2), s2.start);
+    try t.expectEqual(@as(usize, 7), s2.end);
+    try t.expectEqual(@as(u32, 1), s2.kind >> 16); // caret at upper end
 }
 
 test {
