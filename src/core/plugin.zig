@@ -4,32 +4,32 @@
 //! expressible). Fennel is compiled in: plugin and config sources are
 //! Fennel, evaluated through the embedded fennel.lua.
 //!
-//! The VM sees one global, `scion`:
-//!   scion.snapshot()            → sync own replica to head, return text
-//!   scion.insert(off, text)     → edit own replica (offsets valid at
-//!   scion.delete(start, end)      the last snapshot)
-//!   scion.commit()              → merge own ops into the document
-//!   scion.run(name, ...)        → invoke any command (the same ABI
+//! The VM sees one global, `weft`:
+//!   weft.snapshot()            → sync own replica to head, return text
+//!   weft.insert(off, text)     → edit own replica (offsets valid at
+//!   weft.delete(start, end)      the last snapshot)
+//!   weft.commit()              → merge own ops into the document
+//!   weft.run(name, ...)        → invoke any command (the same ABI
 //!                                 keys and built-ins use)
-//!   scion.command(name, summary, fn) → register a command
-//!   scion.bind(mode, key, command)   → keymap binding
-//!   scion.mode([name])          → get/set keymap mode
-//!   scion.fallback(mode, parent) → keymap mode inheritance
-//!   scion.textinput(mode, cmd|nil) → unbound-text command for a mode
-//!   scion.pick(prompt, items, fn[, opts]) → fuzzy-select, callback on
+//!   weft.command(name, summary, fn) → register a command
+//!   weft.bind(mode, key, command)   → keymap binding
+//!   weft.mode([name])          → get/set keymap mode
+//!   weft.fallback(mode, parent) → keymap mode inheritance
+//!   weft.textinput(mode, cmd|nil) → unbound-text command for a mode
+//!   weft.pick(prompt, items, fn[, opts]) → fuzzy-select, callback on
 //!                                 accept; items are strings or
 //!                                 {text, doc} (or nil with a source).
 //!                                 opts: {free_text, source="files"|
 //!                                 "dir", root, min_query, debounce_ms}
-//!   scion.read(prompt, opts, fn) → read a line; opts {candidates,
+//!   weft.read(prompt, opts, fn) → read a line; opts {candidates,
 //!                                 source, root, allow_new=true} — accept
 //!                                 the typed text (C-j) or a candidate
-//!   scion.cursor()              → the user cursor's current offset
-//!   scion.log(msg)              → editor log
-//!   scion.buffers()             → open-buffer introspection (tables)
-//!   scion.commands()            → command registry ({name, summary})
-//!   scion.layer_publish(name, spans) → anchored sections/faces
-//!   scion.section_at(name, off) → innermost span at an offset
+//!   weft.cursor()              → the user cursor's current offset
+//!   weft.log(msg)              → editor log
+//!   weft.buffers()             → open-buffer introspection (tables)
+//!   weft.commands()            → command registry ({name, summary})
+//!   weft.layer_publish(name, spans) → anchored sections/faces
+//!   weft.section_at(name, off) → innermost span at an offset
 //!
 //! The user's config IS a plugin (named "config") — it gets no special
 //! powers, which is the point. The BUNDLED plugin (src/bundled.fnl,
@@ -102,9 +102,9 @@ pub const Plugin = struct {
             logLuaError(L, "initializing fennel");
             return error.Script;
         }
-        c.lua_setfield(L, c.LUA_REGISTRYINDEX, "scion_fennel");
+        c.lua_setfield(L, c.LUA_REGISTRYINDEX, "weft_fennel");
 
-        // The scion table: every entry closes over this plugin.
+        // The weft table: every entry closes over this plugin.
         c.lua_createtable(L, 0, 12);
         registerFn(L, self, "snapshot", lSnapshot);
         registerFn(L, self, "insert", lInsert);
@@ -125,7 +125,7 @@ pub const Plugin = struct {
         registerFn(L, self, "section_at", lSectionAt);
         registerFn(L, self, "buffers", lBuffers);
         registerFn(L, self, "commands", lCommands);
-        c.lua_setglobal(L, "scion");
+        c.lua_setglobal(L, "weft");
         return self;
     }
 
@@ -209,7 +209,7 @@ pub const Plugin = struct {
         const base = c.lua_gettop(L);
         defer c.lua_settop(L, base);
 
-        _ = c.lua_getfield(L, c.LUA_REGISTRYINDEX, "scion_fennel");
+        _ = c.lua_getfield(L, c.LUA_REGISTRYINDEX, "weft_fennel");
         _ = c.lua_getfield(L, -1, "eval");
         _ = c.lua_pushlstring(L, source.ptr, source.len);
         // opts: {filename = chunk_name}
@@ -251,7 +251,7 @@ fn raise(L: ?*c.lua_State, err: anyerror) c_int {
     return c.lua_error(L);
 }
 
-// ── scion.* implementations ─────────────────────────────────────────
+// ── weft.* implementations ─────────────────────────────────────────
 
 fn lSnapshot(L: ?*c.lua_State) callconv(.c) c_int {
     const self = pluginOf(L);
@@ -300,7 +300,7 @@ fn lCommit(L: ?*c.lua_State) callconv(.c) c_int {
     return 1;
 }
 
-/// scion.buffers() → array of {id, name, path?, dirty, read_only,
+/// weft.buffers() → array of {id, name, path?, dirty, read_only,
 /// active, backing, unfetched} — the open-buffer set, for pickers and
 /// status lines built in config/plugins (mechanism here, policy there).
 fn lBuffers(L: ?*c.lua_State) callconv(.c) c_int {
@@ -342,7 +342,7 @@ fn lBuffers(L: ?*c.lua_State) callconv(.c) c_int {
     return 1;
 }
 
-/// scion.commands() → array of {name, summary, args={{name, type}...}}
+/// weft.commands() → array of {name, summary, args={{name, type}...}}
 /// — registry introspection for palettes/help built in plugins. The arg
 /// schema drives argument-aware invocation (inline parse / per-arg
 /// prompts); `type` is one of "nil"|"boolean"|"integer"|"number"|
@@ -378,7 +378,7 @@ fn lCommands(L: ?*c.lua_State) callconv(.c) c_int {
     return 1;
 }
 
-/// scion.layer_publish(name, spans) — publish anchored sections/faces
+/// weft.layer_publish(name, spans) — publish anchored sections/faces
 /// on the active buffer as a local layer owned by this plugin. `spans`
 /// is an array of {start, end, kind, message?} tables (byte offsets at
 /// the current head; kind integer; message optional string). Tool
@@ -431,7 +431,7 @@ fn lLayerPublish(L: ?*c.lua_State) callconv(.c) c_int {
     return 0;
 }
 
-/// scion.section_at(name, offset) → start, end, kind, message | nil —
+/// weft.section_at(name, offset) → start, end, kind, message | nil —
 /// the innermost span of the named layer containing `offset` (cursor →
 /// section resolution for tool buffers).
 fn lSectionAt(L: ?*c.lua_State) callconv(.c) c_int {
@@ -623,7 +623,7 @@ fn buildSource(self: *Plugin, L: ?*c.lua_State, opts_idx: c_int) !?pick_mod.Sour
     return src;
 }
 
-/// The shared open path for `scion.pick` / `scion.read`. `items_idx` /
+/// The shared open path for `weft.pick` / `weft.read`. `items_idx` /
 /// `opts_idx` are absolute stack indices (0 = absent); `free_text` is
 /// resolved by the caller (pick reads opts.free_text; read maps
 /// allow_new). Refs the accept fn, builds the source last (no fallible
@@ -727,7 +727,7 @@ fn lPick(L: ?*c.lua_State) callconv(.c) c_int {
     return openPick(self, L, 1, 2, 3, opts_idx, free_text);
 }
 
-/// scion.read(prompt, opts, fn) — a line reader. `opts.candidates` seeds
+/// weft.read(prompt, opts, fn) — a line reader. `opts.candidates` seeds
 /// the list; `opts.source`/`root` attach a native producer;
 /// `opts.allow_new` (default true) permits accepting the typed text.
 fn lRead(L: ?*c.lua_State) callconv(.c) c_int {
@@ -779,7 +779,7 @@ const LuaProvider = struct {
     id: []u8,
 };
 
-/// scion.provide(capability, fn) — register a scripted capability
+/// weft.provide(capability, fn) — register a scripted capability
 /// provider (instant class, all documents). v1 scope: edit/completion;
 /// the handler receives the word prefix and returns a list of strings
 /// (or {text=..., label=...} tables).

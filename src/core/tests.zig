@@ -484,9 +484,9 @@ test "plugin: fennel eval, scripted command, peer edits converge" {
     // The plugin edits through its own replica and commits — a peer.
     try host.editor().insertText(gpa, "hello world");
     const banner = try p.eval(gpa,
-        \\(local text (scion.snapshot))
-        \\(scion.insert 0 ";; ")
-        \\(scion.commit)
+        \\(local text (weft.snapshot))
+        \\(weft.insert 0 ";; ")
+        \\(weft.commit)
         \\(string.len text)
     , "test");
     defer gpa.free(banner);
@@ -500,7 +500,7 @@ test "plugin: fennel eval, scripted command, peer edits converge" {
     // A scripted command registered through the same registry
     // everything else uses, invocable from Zig by name.
     const reg = try p.eval(gpa,
-        \\(scion.command "shout" "Upper-case a string."
+        \\(weft.command "shout" "Upper-case a string."
         \\  (fn [s] (string.upper s)))
         \\true
     , "test");
@@ -510,8 +510,8 @@ test "plugin: fennel eval, scripted command, peer edits converge" {
     });
     try t.expectEqualStrings("GRAFT", res.string);
 
-    // Scripted commands can call built-ins back through scion.run.
-    const undo_res = try p.eval(gpa, "(scion.run \"undo\")", "test");
+    // Scripted commands can call built-ins back through weft.run.
+    const undo_res = try p.eval(gpa, "(weft.run \"undo\")", "test");
     defer gpa.free(undo_res);
     {
         const s = try host.editor().text().toOwnedSlice(gpa);
@@ -532,9 +532,9 @@ test "plugin: fennel config binds keys and switches modes" {
     defer p.destroy();
 
     const out = try p.eval(gpa,
-        \\(scion.bind "default" "C-t" "doc-start")
-        \\(scion.bind "extra" "q" "quit")
-        \\(scion.mode)
+        \\(weft.bind "default" "C-t" "doc-start")
+        \\(weft.bind "extra" "q" "quit")
+        \\(weft.mode)
     , "init.fnl");
     defer gpa.free(out);
     try t.expectEqualStrings("default", out);
@@ -542,7 +542,7 @@ test "plugin: fennel config binds keys and switches modes" {
     try t.expectEqualStrings("doc-start", host.keymap.lookup("C-t").?);
     try t.expectEqual(@as(?[]const u8, null), host.keymap.lookup("q"));
 
-    const sw = try p.eval(gpa, "(scion.mode \"extra\")", "init.fnl");
+    const sw = try p.eval(gpa, "(weft.mode \"extra\")", "init.fnl");
     defer gpa.free(sw);
     try t.expectEqualStrings("quit", host.keymap.lookup("q").?);
 
@@ -707,7 +707,7 @@ test "capability: feed layer spans shift with edits; scripted provider races" {
     const p = try core.Plugin.create(gpa, &host.ctx, "capdemo");
     defer p.destroy();
     const reg = try p.eval(gpa,
-        \\(scion.provide "edit/completion" (fn [prefix] [(.. prefix "_scripted")]))
+        \\(weft.provide "edit/completion" (fn [prefix] [(.. prefix "_scripted")]))
         \\true
     , "capdemo");
     defer gpa.free(reg);
@@ -938,12 +938,12 @@ test "tool buffer: plugin peer + sections + read-only (magit-class recipe)" {
     // The whole rev-3 recipe from fennel: create a buffer, generate
     // content as a plugin peer, publish sections, mark read-only.
     const out = try p.eval(gpa,
-        \\(scion.run "buffer-create" "*status*")
-        \\(scion.insert 0 "== staged ==\nfile-a\n== unstaged ==\nfile-b\n")
-        \\(scion.commit)
-        \\(scion.layer_publish "sections" [[0 12 1 "staged"] [13 19 2 "entry"] [20 34 1 "unstaged"] [35 41 2 "entry"]])
-        \\(scion.run "buffer-read-only" true)
-        \\(scion.section_at "sections" 15)
+        \\(weft.run "buffer-create" "*status*")
+        \\(weft.insert 0 "== staged ==\nfile-a\n== unstaged ==\nfile-b\n")
+        \\(weft.commit)
+        \\(weft.layer_publish "sections" [[0 12 1 "staged"] [13 19 2 "entry"] [20 34 1 "unstaged"] [35 41 2 "entry"]])
+        \\(weft.run "buffer-read-only" true)
+        \\(weft.section_at "sections" 15)
     , "tool.fnl");
     defer gpa.free(out);
 
@@ -954,8 +954,8 @@ test "tool buffer: plugin peer + sections + read-only (magit-class recipe)" {
 
     // Refresh = the peer committing again; merges like any collaborator.
     const out2 = try p.eval(gpa,
-        \\(scion.insert 7 "!")
-        \\(scion.commit)
+        \\(weft.insert 7 "!")
+        \\(weft.commit)
     , "tool2.fnl");
     gpa.free(out2);
     const text = try host.editor().text().toOwnedSlice(gpa);
@@ -963,7 +963,7 @@ test "tool buffer: plugin peer + sections + read-only (magit-class recipe)" {
     try t.expect(std.mem.indexOf(u8, text, "!") != null);
 
     // Sections survive the edit (anchored spans shift).
-    const out3 = try p.eval(gpa, "(scion.section_at \"sections\" 0)", "tool3.fnl");
+    const out3 = try p.eval(gpa, "(weft.section_at \"sections\" 0)", "tool3.fnl");
     defer gpa.free(out3);
     try t.expect(std.mem.startsWith(u8, out3, "0"));
 }
@@ -1056,7 +1056,7 @@ test "bundled plugin: buffers/status/help built in fennel over introspection" {
     _ = try run(&host.commands, &host.ctx, "pick-cancel", &.{});
 }
 
-test "plugin: scion.pick with a native file source streams candidates" {
+test "plugin: weft.pick with a native file source streams candidates" {
     const gpa = t.allocator;
     // A known tree under the test's writable cache dir (same mechanism
     // the ShellFs/fs_source tests rely on), so the assertion is
@@ -1089,7 +1089,7 @@ test "plugin: scion.pick with a native file source streams candidates" {
 
     // The LocalFinder walks on the pool; pick.tick folds candidates in.
     const src = try std.fmt.allocPrint(gpa,
-        \\(scion.pick "file" nil (fn [_] nil) {{:source "files" :root "{s}" :free_text true}})
+        \\(weft.pick "file" nil (fn [_] nil) {{:source "files" :root "{s}" :free_text true}})
     , .{root});
     defer gpa.free(src);
     gpa.free(try p.eval(gpa, src, "t"));

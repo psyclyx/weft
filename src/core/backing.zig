@@ -165,8 +165,8 @@ fn ropeBytes(gpa: Allocator, rope: *const stemma.Rope) Allocator.Error![]u8 {
 
 // ── Tests ───────────────────────────────────────────────────────────
 // The concurrency scenarios from design rev 4, end to end through a
-// real file and a real /bin/sh: scion + external writer (the nvim
-// case), and two unconnected scions converging through the disk.
+// real file and a real /bin/sh: weft + external writer (the nvim
+// case), and two unconnected wefts converging through the disk.
 
 const t = std.testing;
 

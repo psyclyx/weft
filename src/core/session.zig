@@ -1802,7 +1802,7 @@ fn testPark(ms: u64) void {
 test "partial checkout: multi-GB sparse file — jump to end, tail growth, viewed-only materialization" {
     const gpa = t.allocator;
     // A 3GB sparse file with known content at the tail.
-    const path = ".zig-cache/tmp/scion-huge-test";
+    const path = ".zig-cache/tmp/weft-huge-test";
     const three_gb: u64 = 3 << 30;
     {
         var pbuf: [128:0]u8 = undefined;

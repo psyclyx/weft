@@ -1,6 +1,6 @@
 //! Pick — the fuzzy-select primitive. One core mechanism, many uses:
 //! the command palette is `pick-commands` over the registry's names, a
-//! config can `scion.pick` its own items with a Fennel callback. State
+//! config can `weft.pick` its own items with a Fennel callback. State
 //! is plain data the view renders (prompt, query, filtered items,
 //! selection); interaction is ordinary commands bound in the "pick"
 //! keymap mode, with `pick-input` as the mode's text command — the

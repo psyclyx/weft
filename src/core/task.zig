@@ -17,7 +17,7 @@ const Allocator = std.mem.Allocator;
 const assert = std.debug.assert;
 const linux = std.os.linux;
 
-// Parking uses the raw Linux futex (scion is Wayland/Linux-native;
+// Parking uses the raw Linux futex (weft is Wayland/Linux-native;
 // std.Thread.Futex is gone in 0.16 and the std.Io replacement would drag
 // an Io instance through the ABI for two syscalls). Waking never blocks;
 // waiting happens only on worker threads.

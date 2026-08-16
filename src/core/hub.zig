@@ -1,7 +1,7 @@
 //! The collaboration hub: accept N peers on a listener and serve them
 //! shared documents, as a background-accept thread + per-peer session.
 //! Extracted from the headless host so the windowed editor can host too
-//! (design rev 2: scion IS the peer; there is no dedicated agent).
+//! (design rev 2: weft IS the peer; there is no dedicated agent).
 //!
 //! The hub is doc-policy-free. It owns only peer lifecycle — the
 //! listener, the async accept loop, and each peer's Session/Conn — and a

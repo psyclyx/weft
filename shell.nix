@@ -11,7 +11,7 @@ pkgs.mkShell {
     wayland-scanner
     shader-slang # slangc, for snail shader compilation (render milestone)
 
-    # Libraries scion (and snail through it) links against.
+    # Libraries weft (and snail through it) links against.
     wayland
     wayland-protocols
     libxkbcommon
@@ -19,6 +19,7 @@ pkgs.mkShell {
     vulkan-headers
     vulkan-validation-layers
     harfbuzz
+    fontconfig # runtime font-family resolution (sans/mono, weight, slant)
 
     # Scripting (milestone 5): per-plugin Lua VMs, fennel compiled in.
     lua5_4
@@ -46,21 +47,22 @@ pkgs.mkShell {
       libxkbcommon
       vulkan-loader
       harfbuzz
+      fontconfig
       lua5_4
     ]
   );
 
   # build.zig embeds fennel.lua from the pinned package (hermetic: the
   # path always comes from the npins nixpkgs, never ambient state).
-  SCION_FENNEL_LUA = "${pkgs.lua54Packages.fennel}/share/lua/5.4/fennel.lua";
+  WEFT_FENNEL_LUA = "${pkgs.lua54Packages.fennel}/share/lua/5.4/fennel.lua";
 
   # Grammar packages (parser shared object + queries/highlights.scm).
   # The parser paths are baked in for runtime dlopen; the queries are
   # embedded at build time. Pinned store paths, not ambient state.
-  SCION_TS_ZIG = "${pkgs.tree-sitter-grammars.tree-sitter-zig}";
-  SCION_TS_FENNEL = "${pkgs.tree-sitter-grammars.tree-sitter-fennel}";
-  SCION_TS_LUA = "${pkgs.tree-sitter-grammars.tree-sitter-lua}";
-  SCION_TS_NIX = "${pkgs.tree-sitter-grammars.tree-sitter-nix}";
+  WEFT_TS_ZIG = "${pkgs.tree-sitter-grammars.tree-sitter-zig}";
+  WEFT_TS_FENNEL = "${pkgs.tree-sitter-grammars.tree-sitter-fennel}";
+  WEFT_TS_LUA = "${pkgs.tree-sitter-grammars.tree-sitter-lua}";
+  WEFT_TS_NIX = "${pkgs.tree-sitter-grammars.tree-sitter-nix}";
 
   # Let the Vulkan loader find the host ICDs on NixOS.
   XDG_DATA_DIRS = "/run/opengl-driver/share";

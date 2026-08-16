@@ -100,7 +100,7 @@ pub const Context = struct {
             .sType = vk.VK_STRUCTURE_TYPE_APPLICATION_INFO,
             .pApplicationName = app_name,
             .applicationVersion = vk.VK_MAKE_VERSION(0, 1, 0),
-            .pEngineName = "scion",
+            .pEngineName = "weft",
             .engineVersion = vk.VK_MAKE_VERSION(0, 1, 0),
             // SPIR-V 1.3 (slangc -profile spirv_1_3) requires Vulkan 1.1.
             .apiVersion = vk.VK_API_VERSION_1_1,

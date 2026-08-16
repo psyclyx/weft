@@ -1,11 +1,11 @@
-//! scion --headless — the persistent host peer, same binary as the
+//! weft --headless — the persistent host peer, same binary as the
 //! editor (design rev 2: no dedicated agent). Hosts a document, serves
 //! the wire protocol (ops/requests/feeds) to N peers as a hub, spawns
 //! the language server on the host side (placement `host` made
 //! literal), serves range reads for partial checkout, and autosaves.
-//! The window/Vulkan half of scion is simply never initialized.
+//! The window/Vulkan half of weft is simply never initialized.
 //!
-//!   scion --headless --listen PORT [--token T] [--lsp "zls"] [file]
+//!   weft --headless --listen PORT [--token T] [--lsp "zls"] [file]
 
 const std = @import("std");
 const core = @import("core/core.zig");
@@ -14,7 +14,7 @@ const capability = core.capability;
 
 pub const Args = struct {
     listen: u16 = 7777,
-    token: []const u8 = "scion-dev",
+    token: []const u8 = "weft-dev",
     lsp_cmd: ?[]const u8 = null,
     file: ?[]const u8 = null,
 };

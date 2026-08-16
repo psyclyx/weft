@@ -32,7 +32,7 @@ pub fn writeRopeAtomic(gpa: Allocator, path: []u8, rope: stemma.Rope) WriteError
 
     const bytes = try snapshot.toOwnedSlice(gpa);
     defer gpa.free(bytes);
-    const tmp = try std.fmt.allocPrint(gpa, "{s}.scion-tmp", .{path});
+    const tmp = try std.fmt.allocPrint(gpa, "{s}.weft-tmp", .{path});
     defer gpa.free(tmp);
 
     var threaded: std.Io.Threaded = .init(gpa, .{});
@@ -79,7 +79,7 @@ pub fn writeRopeGuarded(
         } else |_| {}
     }
 
-    const tmp = try std.fmt.allocPrint(gpa, "{s}.scion-tmp", .{path});
+    const tmp = try std.fmt.allocPrint(gpa, "{s}.weft-tmp", .{path});
     defer gpa.free(tmp);
     var threaded: std.Io.Threaded = .init(gpa, .{});
     defer threaded.deinit();

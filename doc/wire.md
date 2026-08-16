@@ -1,4 +1,4 @@
-# scion wire protocol v1 (ABI)
+# weft wire protocol v1 (ABI)
 
 Version-negotiated in the handshake; this document is normative, the
 conformance tests in `src/core/wire.zig` are the executable spec.

@@ -96,7 +96,7 @@ shell and coreutils — no agent binary pushable.
   provider — collaboration and storage are orthogonal.
 
 **Host capability ladder** (auto-detected at open, surfaced in the
-status line): shell+coreutils → scion-agent. The agent adds: a
+status line): shell+coreutils → weft-agent. The agent adds: a
 persistent CRDT peer (document outlives your session), host-placement
 compute (LSP where the code lives), efficient blob serving, and hub
 multiplayer. Everything above the fs family degrades gracefully when
@@ -125,9 +125,9 @@ conflict:
   local file diverges imports the diff as their ops or opens private).
   Implementation: a per-connection shared-buffer list, per-buffer wire
   channels — no session directory abstraction.
-- **No dedicated agent.** scion IS the peer. A persistent/headless
-  host = `scion --headless --listen` (window optional; same binary).
-  Fold scion-agent into that and delete the separate target; its one
+- **No dedicated agent.** weft IS the peer. A persistent/headless
+  host = `weft --headless --listen` (window optional; same binary).
+  Fold weft-agent into that and delete the separate target; its one
   real advantage (loading without wayland/vulkan userspace) applies
   only to boxes that get the coreutils tier anyway. Host-placed LSP =
   "the LSP runs in whichever editor shares the buffer from its
@@ -138,7 +138,7 @@ Kept from earlier revisions: the peer model, wire v1, the shell-fs
 tier (ssh as default spawner, not a coupling), one-history-root
 sharing, stemma RLE + hole-bases (approved). Build order becomes:
 stemma work → shell-fs backings → multi-buffer editor (buffers +
-backings + share) → --headless, delete scion-agent.
+backings + share) → --headless, delete weft-agent.
 
 **Addendum (merged from a duplicated revision):** for a solo remote
 file (no sharing editor on that box), host-run LSP still needs no
@@ -167,13 +167,13 @@ Everything is a Document; the differences are bindings, not kinds:
 Dired/compilation/grep/REPL = same recipe, different tool. Additions
 to the multi-buffer milestone: backing as the four-case interface;
 buffer-local mode save/restore on focus switch; plugin API
-scion.buffer-create + scion.layer-publish (+ section lookup helper)
+weft.buffer-create + weft.layer-publish (+ section lookup helper)
 so tool buffers are writable in fennel.
 
 ## Revision 4: the backing file is a peer (2026-08-15)
 
-Question posed: two scions on the same remote file with no connection
-between them; or scion remote + nvim local on that box. At the file
+Question posed: two wefts on the same remote file with no connection
+between them; or weft remote + nvim local on that box. At the file
 tier the disk is the only shared state — a last-writer-wins register —
 and naive save loses whoever wrote first. mtime checks à la vim only
 warn; they do not merge.
@@ -196,9 +196,9 @@ merge). Concurrency then has one mechanism:
   No lost updates; bounded retry. `flock` used when present; without
   it the check-then-mv race window is vim's own, documented.
 
-Two unconnected scions converge *through the file* (per-save merges,
+Two unconnected wefts converge *through the file* (per-save merges,
 not real time — connecting the editors is what real time is for).
-scion + nvim: nvim's write is an external commit like any other; in
+weft + nvim: nvim's write is an external commit like any other; in
 the reverse direction nvim's own stale-file warning fires, which is
 the best available for an editor we don't control.
 
@@ -217,8 +217,8 @@ backing.Sync, rev 4's backing-is-a-peer with guarded saves and
 external-write merges); multi-buffer editor (Buffers, four-case
 Backing, per-buffer providers with foreign-doc declines, (doc, name)
 layer index, buffer-local modes, read-only tool buffers,
-scion.layer_publish/section_at + per-document plugin peers);
-`scion --headless --listen` replacing scion-agent (deleted — the old
+weft.layer_publish/section_at + per-document plugin peers);
+`weft --headless --listen` replacing weft-agent (deleted — the old
 dep-graph isolation is now review discipline in src/headless.zig).
 
 Second wave (same day): **shared buffers over connections** (wire

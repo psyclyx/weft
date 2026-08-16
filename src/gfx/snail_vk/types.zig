@@ -1,11 +1,11 @@
-//! Shared Vulkan types for the snail render path. `vk` re-uses scion's
+//! Shared Vulkan types for the snail render path. `vk` re-uses weft's
 //! single program-wide @cImport (separate cImports of the same header
 //! produce distinct opaque types).
 
 pub const vk = @import("../../vk.zig").c;
 
 /// Plain handle bundle the copied snail reference renderer consumes. It
-/// owns no resources; scion's gfx.Context retains every referenced
+/// owns no resources; weft's gfx.Context retains every referenced
 /// object and all synchronization responsibility.
 pub const VulkanContext = struct {
     physical_device: vk.VkPhysicalDevice,

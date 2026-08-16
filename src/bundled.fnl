@@ -1,7 +1,7 @@
-;; scion's bundled plugin — UI policy over core mechanisms, in the same
+;; weft's bundled plugin — UI policy over core mechanisms, in the same
 ;; language and through the same ABI as user config. Core provides
-;; introspection (scion.buffers, scion.commands with arg schema), the
-;; picker (scion.pick / scion.read: free-text accept, native file/dir
+;; introspection (weft.buffers, weft.commands with arg schema), the
+;; picker (weft.pick / weft.read: free-text accept, native file/dir
 ;; sources), and echo; what to show and how to phrase it lives here,
 ;; replaceable by rebinding the same command names.
 
@@ -22,14 +22,14 @@
       (if b.active " *" "")))
 
 ;; ── Command introspection + argument-aware invocation ──
-;; scion.commands() carries each command's arg schema; the palette parses
+;; weft.commands() carries each command's arg schema; the palette parses
 ;; inline args when typed, else prompts for each argument in turn with
 ;; completion suited to its type. This is the vertico/consult shape built
-;; entirely on scion.read.
+;; entirely on weft.read.
 
 (fn command-index []
   (let [idx {}]
-    (each [_ c (ipairs (scion.commands))]
+    (each [_ c (ipairs (weft.commands))]
       (tset idx c.name c))
     idx))
 
@@ -46,7 +46,7 @@
 
 (fn buffer-ids []
   (let [out []]
-    (each [_ b (ipairs (scion.buffers))] (table.insert out (tostring b.id)))
+    (each [_ b (ipairs (weft.buffers))] (table.insert out (tostring b.id)))
     out))
 
 ;; Read options for one argument: files for path-ish args, the open
@@ -60,9 +60,9 @@
       {:allow_new true}))
 
 (fn run-safe [name args]
-  (let [(ok err) (pcall (fn [] (scion.run name (table.unpack args))))]
+  (let [(ok err) (pcall (fn [] (weft.run name (table.unpack args))))]
     (when (not ok)
-      (scion.run "echo" (.. name ": " (tostring err))))))
+      (weft.run "echo" (.. name ": " (tostring err))))))
 
 ;; Prompt for arguments i..N in turn (continuation-passing: each accept
 ;; opens the next), then run the command with the collected values.
@@ -70,7 +70,7 @@
   (if (> i (length specs))
       (run-safe name acc)
       (let [a (. specs i)]
-        (scion.read (.. name "  " a.name " <" a.type ">")
+        (weft.read (.. name "  " a.name " <" a.type ">")
                     (arg-opts name a)
                     (fn [val]
                       (table.insert acc (coerce a.type val))
@@ -83,7 +83,7 @@
         name (. toks 1)
         spec (and name (. idx name))]
     (if (not name) nil
-        (not spec) (scion.run "echo" (.. "unknown command: " (or name "")))
+        (not spec) (weft.run "echo" (.. "unknown command: " (or name "")))
         (> (length toks) 1)
         (let [args []]
           (for [k 2 (length toks)]
@@ -93,43 +93,43 @@
         (> (length spec.args) 0) (read-args name spec.args 1 [])
         (run-safe name []))))
 
-(scion.command "pick-commands" "Command palette: run a command (inline args or per-arg prompts)."
+(weft.command "pick-commands" "Command palette: run a command (inline args or per-arg prompts)."
   (fn []
     (let [idx (command-index)
           entries []]
       (each [name c (pairs idx)]
         (table.insert entries [name c.summary]))
-      (scion.pick "command" entries
+      (weft.pick "command" entries
                   (fn [choice] (run-line idx choice))
                   {:free_text true}))))
 
-(scion.command "help" "Pick over every command; accept to run it (prompts for args)."
+(weft.command "help" "Pick over every command; accept to run it (prompts for args)."
   (fn []
     (let [idx (command-index)
           entries []]
       (each [name c (pairs idx)]
         (table.insert entries [name c.summary]))
-      (scion.pick "help" entries
+      (weft.pick "help" entries
                   (fn [choice] (run-line idx choice))
                   {:free_text true}))))
 
 ;; ── Buffers ──
 
-(scion.command "buffers" "Pick over the open buffers; accept to switch."
+(weft.command "buffers" "Pick over the open buffers; accept to switch."
   (fn []
     (let [entries []]
-      (each [_ b (ipairs (scion.buffers))]
+      (each [_ b (ipairs (weft.buffers))]
         (table.insert entries [(buffer-label b) (buffer-doc b)]))
-      (scion.pick "buffer" entries
+      (weft.pick "buffer" entries
         (fn [choice]
           (let [id (tonumber (string.match choice "^(%d+):"))]
-            (when id (scion.run "buffer-switch" id))))))))
+            (when id (weft.run "buffer-switch" id))))))))
 
-(scion.command "status" "Echo where you are: buffer, backing, sync state."
+(weft.command "status" "Echo where you are: buffer, backing, sync state."
   (fn []
-    (each [_ b (ipairs (scion.buffers))]
+    (each [_ b (ipairs (weft.buffers))]
       (when b.active
-        (scion.run "echo"
+        (weft.run "echo"
           (.. b.name "  [" b.backing "]"
               (if b.path (.. "  " b.path) "")
               (if b.dirty "  modified" "  saved")
@@ -159,22 +159,22 @@
          (let [slash (string.find s "/")]
            (or (not slash) (< colon slash))))))
 
-(scion.command "find-file" "Fuzzy-find a file under the project; accept to open."
+(weft.command "find-file" "Fuzzy-find a file under the project; accept to open."
   (fn []
-    (scion.pick "file" nil
-      (fn [p] (scion.run "open" p))
+    (weft.pick "file" nil
+      (fn [p] (weft.run "open" p))
       {:source "files" :root "." :free_text true})))
 
 (fn browse-path [spec]
   (if (remote-spec? spec)
       (let [(host path) (string.match spec "^([^:]+):(.*)$")]
-        (scion.run "browse-remote" host (if (= path "") "." path)))
-      (scion.pick (.. "dir " spec) nil
+        (weft.run "browse-remote" host (if (= path "") "." path)))
+      (weft.pick (.. "dir " spec) nil
         (fn [choice]
           (if (= choice "../") (browse-path (parent-path spec))
               (string.match choice "/$") (browse-path (join-path spec (strip-slash choice)))
-              (scion.run "open" (join-path spec choice))))
+              (weft.run "open" (join-path spec choice))))
         {:source "dir" :root spec :free_text true})))
 
-(scion.command "browse" "Browse a directory (local, or host:path over a shell)."
+(weft.command "browse" "Browse a directory (local, or host:path over a shell)."
   (fn [] (browse-path ".")))

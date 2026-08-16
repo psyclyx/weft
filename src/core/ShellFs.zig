@@ -119,7 +119,7 @@ fn run(self: *ShellFs, gpa: Allocator, cmd: []const u8) Error!Reply {
 
     const script = try std.fmt.allocPrint(
         gpa,
-        "{s}\nprintf '\\n\\036scion {d} %d\\n' \"$?\"\n",
+        "{s}\nprintf '\\n\\036weft {d} %d\\n' \"$?\"\n",
         .{ cmd, self.seq },
     );
     defer gpa.free(script);
@@ -130,7 +130,7 @@ fn run(self: *ShellFs, gpa: Allocator, cmd: []const u8) Error!Reply {
     var acc: std.ArrayList(u8) = .empty;
     errdefer acc.deinit(gpa);
     var needle_buf: [64]u8 = undefined;
-    const needle = std.fmt.bufPrint(&needle_buf, "\n\x1escion {d} ", .{self.seq}) catch unreachable;
+    const needle = std.fmt.bufPrint(&needle_buf, "\n\x1eweft {d} ", .{self.seq}) catch unreachable;
     var buf: [16384]u8 = undefined;
     while (true) {
         if (std.mem.indexOf(u8, acc.items, needle)) |at| {
@@ -156,7 +156,7 @@ fn run(self: *ShellFs, gpa: Allocator, cmd: []const u8) Error!Reply {
 /// Heredoc upload of base64 text into `qtmp` (already quoted). Lines
 /// wrapped — some base64 -d implementations dislike unbounded lines.
 fn appendUpload(gpa: Allocator, script: *std.ArrayList(u8), qtmp: []const u8, b64: []const u8) Allocator.Error!void {
-    const head = try std.fmt.allocPrint(gpa, "base64 -d > {s} <<'SCION_B64'\n", .{qtmp});
+    const head = try std.fmt.allocPrint(gpa, "base64 -d > {s} <<'WEFT_B64'\n", .{qtmp});
     defer gpa.free(head);
     try script.appendSlice(gpa, head);
     var i: usize = 0;
@@ -164,7 +164,7 @@ fn appendUpload(gpa: Allocator, script: *std.ArrayList(u8), qtmp: []const u8, b6
         try script.appendSlice(gpa, b64[i..@min(b64.len, i + 4096)]);
         try script.append(gpa, '\n');
     }
-    try script.appendSlice(gpa, "SCION_B64\n");
+    try script.appendSlice(gpa, "WEFT_B64\n");
 }
 
 /// Single-quote for sh: safe for every byte except NUL.
@@ -276,7 +276,7 @@ pub fn writeGuarded(
 ) WriteError![]u8 {
     const q = try quote(gpa, path);
     defer gpa.free(q);
-    const tmp = try std.fmt.allocPrint(gpa, "{s}.scion-tmp", .{path});
+    const tmp = try std.fmt.allocPrint(gpa, "{s}.weft-tmp", .{path});
     defer gpa.free(tmp);
     const qtmp = try quote(gpa, tmp);
     defer gpa.free(qtmp);
@@ -292,13 +292,13 @@ pub fn writeGuarded(
     const guard = if (expected) |token|
         try std.fmt.allocPrint(
             gpa,
-            "tok=$({s} < {s} | tr -d ' \\t-')\nif [ \"$({s} < {s} 2>/dev/null | tr -d ' \\t-')\" = \"{s}\" ]; then mv {s} {s} && echo \"scion-ok $tok\"; else rm -f {s}; echo scion-stale; false; fi",
+            "tok=$({s} < {s} | tr -d ' \\t-')\nif [ \"$({s} < {s} 2>/dev/null | tr -d ' \\t-')\" = \"{s}\" ]; then mv {s} {s} && echo \"weft-ok $tok\"; else rm -f {s}; echo weft-stale; false; fi",
             .{ self.hash_cmd, qtmp, self.hash_cmd, q, token, qtmp, q, qtmp },
         )
     else
         try std.fmt.allocPrint(
             gpa,
-            "tok=$({s} < {s} | tr -d ' \\t-')\nif [ -e {s} ]; then rm -f {s}; echo scion-stale; false; else mv {s} {s} && echo \"scion-ok $tok\"; fi",
+            "tok=$({s} < {s} | tr -d ' \\t-')\nif [ -e {s} ]; then rm -f {s}; echo weft-stale; false; else mv {s} {s} && echo \"weft-ok $tok\"; fi",
             .{ self.hash_cmd, qtmp, q, qtmp, qtmp, q },
         );
     defer gpa.free(guard);
@@ -306,7 +306,7 @@ pub fn writeGuarded(
     const r = try self.run(gpa, script.items);
     defer gpa.free(r.out);
     if (r.status == 0) return parseOkToken(gpa, r.out);
-    if (std.mem.indexOf(u8, r.out, "scion-stale") != null) return error.Stale;
+    if (std.mem.indexOf(u8, r.out, "weft-stale") != null) return error.Stale;
     return error.Failed;
 }
 
@@ -315,7 +315,7 @@ pub fn writeGuarded(
 pub fn writeAtomic(self: *ShellFs, gpa: Allocator, path: []const u8, bytes: []const u8) WriteError![]u8 {
     const q = try quote(gpa, path);
     defer gpa.free(q);
-    const tmp = try std.fmt.allocPrint(gpa, "{s}.scion-tmp", .{path});
+    const tmp = try std.fmt.allocPrint(gpa, "{s}.weft-tmp", .{path});
     defer gpa.free(tmp);
     const qtmp = try quote(gpa, tmp);
     defer gpa.free(qtmp);
@@ -327,7 +327,7 @@ pub fn writeAtomic(self: *ShellFs, gpa: Allocator, path: []const u8, bytes: []co
     try appendUpload(gpa, &script, qtmp, b64);
     const mv = try std.fmt.allocPrint(
         gpa,
-        "tok=$({s} < {s} | tr -d ' \\t-')\nmv {s} {s} && echo \"scion-ok $tok\"",
+        "tok=$({s} < {s} | tr -d ' \\t-')\nmv {s} {s} && echo \"weft-ok $tok\"",
         .{ self.hash_cmd, qtmp, qtmp, q },
     );
     defer gpa.free(mv);
@@ -339,8 +339,8 @@ pub fn writeAtomic(self: *ShellFs, gpa: Allocator, path: []const u8, bytes: []co
 }
 
 fn parseOkToken(gpa: Allocator, out: []const u8) Error![]u8 {
-    const at = std.mem.indexOf(u8, out, "scion-ok ") orelse return error.Shell;
-    const rest = out[at + "scion-ok ".len ..];
+    const at = std.mem.indexOf(u8, out, "weft-ok ") orelse return error.Shell;
+    const rest = out[at + "weft-ok ".len ..];
     const end = std.mem.indexOfScalar(u8, rest, '\n') orelse rest.len;
     const tok = std.mem.trim(u8, rest[0..end], " \r");
     if (tok.len == 0) return error.Shell;
