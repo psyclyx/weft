@@ -137,6 +137,8 @@ pub const Hud = struct {
     /// which-key: the current prefix mode's bindings, shown as a panel
     /// while a chord is pending (null when not in a menu mode).
     which_key: ?[]const core.Keymap.Binding = null,
+    /// Open buffers for the top tab strip (null → no strip, one buffer).
+    tabs: ?[]const Tab = null,
     /// Per-byte markdown styling for the active buffer (null = not md).
     md_inline: ?MdInline = null,
     /// Caret shape and blink phase (false = hidden this frame).
@@ -152,6 +154,34 @@ pub const Hud = struct {
         return 1;
     }
 };
+
+/// One entry in the top buffer-tab strip.
+pub const Tab = struct { name: []const u8, active: bool };
+
+/// Build the tab strip text into `buf`: the active buffer bracketed,
+/// others plain, separated by " │ ". Whole parts only, so the result is
+/// always valid UTF-8 (the view truncates it to the column width when it
+/// renders — `appendPlainRun` stops at `cols_visible` codepoints). Pure;
+/// the geometry (which row) is the view's.
+fn buildTabStrip(buf: []u8, tabs: []const Tab) []const u8 {
+    var w: usize = 0;
+    const put = struct {
+        fn part(b: []u8, at: usize, s: []const u8) ?usize {
+            if (at + s.len > b.len) return null; // whole part or nothing
+            @memcpy(b[at .. at + s.len], s);
+            return at + s.len;
+        }
+    }.part;
+    var first = true;
+    for (tabs) |tabinfo| {
+        w = put(buf, w, if (first) " " else " │ ") orelse return buf[0..w];
+        first = false;
+        if (tabinfo.active) w = put(buf, w, "[") orelse return buf[0..w];
+        w = put(buf, w, tabinfo.name) orelse return buf[0..w];
+        if (tabinfo.active) w = put(buf, w, "]") orelse return buf[0..w];
+    }
+    return buf[0..w];
+}
 
 pub const Built = struct {
     shapes: []snail.Shape,
@@ -369,7 +399,9 @@ pub const View = struct {
     ) !Built {
         const rope = editor.text();
         const rows_total = self.visibleRows(fb_h);
-        const rows_visible = rows_total -| hud.rows();
+        // A top tab strip (when present) reserves the first body row.
+        const top_rows: usize = if (hud.tabs != null) 1 else 0;
+        const rows_visible = rows_total -| hud.rows() -| top_rows;
         const cols_visible = self.visibleCols(fb_w);
         self.scrollToCursor(editor, @max(1, rows_visible));
         const total_rows = rope.lineCount();
@@ -397,10 +429,11 @@ pub const View = struct {
         _ = self.layout_arena.reset(.retain_capacity);
         const la = self.layout_arena.allocator();
         var lines: std.ArrayList(layout.VisualLine) = .empty;
-        var y_top: f32 = margin;
+        const body_top = margin + @as(f32, @floatFromInt(top_rows)) * self.line_h;
+        var y_top: f32 = body_top;
         // Pixel gate: variable-height lines (headings) can't spill into the
         // HUD/picker region, which begins where the body row budget ends.
-        const body_limit_y = margin + @as(f32, @floatFromInt(rows_visible)) * self.line_h;
+        const body_limit_y = body_top + @as(f32, @floatFromInt(rows_visible)) * self.line_h;
         var row = self.top_row;
         while (row < total_rows and row < self.top_row + rows_visible and y_top < body_limit_y) : (row += 1) {
             const vl = try self.layoutLine(scratch, la, &runs, rope, row, y_top, cols_visible, hud.md_inline, styles, flip_off);
@@ -426,6 +459,13 @@ pub const View = struct {
                 const head = if (span.kind & 0x10000 == 0) span.start else span.end;
                 try self.caretRect(scratch, &rects, head, .bar, peerColor(hue, 0.62, 1.0));
             }
+        }
+
+        // Top buffer-tab strip (reserved the first body row above).
+        if (hud.tabs) |tabs| {
+            var tbuf: [1024]u8 = undefined;
+            const strip = buildTabStrip(&tbuf, tabs);
+            try self.appendPlainRun(scratch, &runs, &rects, strip, self.baselineFor(0), cols_visible, self.theme.status, null);
         }
 
         try self.buildHud(scratch, &runs, &rects, hud, rows_total, cols_visible);
@@ -1034,6 +1074,22 @@ fn nextScalar(text: []const u8, base: usize, off: usize) usize {
 // ── Tests ──
 
 const testing = std.testing;
+
+test "buildTabStrip: active bracketed, separated, truncated to width" {
+    const tabs = [_]Tab{
+        .{ .name = "a.zig", .active = false },
+        .{ .name = "b.md", .active = true },
+        .{ .name = "c.txt", .active = false },
+    };
+    var buf: [128]u8 = undefined;
+    try testing.expectEqualStrings(" a.zig │ [b.md] │ c.txt", buildTabStrip(&buf, &tabs));
+    // A tight buffer stops on whole parts — always valid UTF-8, never a
+    // split codepoint.
+    var tiny: [7]u8 = undefined;
+    const short = buildTabStrip(&tiny, &tabs);
+    try testing.expectEqualStrings(" a.zig", short);
+    try testing.expect(std.unicode.utf8ValidateSlice(short));
+}
 
 test "monospace parity gate: view-computed vertical target == old column target" {
     // The column-debt fix must not change plain-code editing. For a mono

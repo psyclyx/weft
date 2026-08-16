@@ -868,9 +868,21 @@ pub fn main(init: std.process.Init) !void {
             if (!pick_state.active and keymap.isMenuMode(keymap.currentMode())) {
                 keymap.ownBindings(gpa, keymap.currentMode(), &wk_hints) catch {};
             }
+            // Buffer tab strip (only with more than one buffer open). Name
+            // slices borrow the buffers' own strings — valid this frame.
+            var tab_list: std.ArrayList(view_mod.Tab) = .empty;
+            defer tab_list.deinit(gpa);
+            if (buffers.count() > 1) {
+                var bit3 = buffers.iterator();
+                while (bit3.next()) |b| {
+                    const nm = b.editor.backingPath() orelse b.name;
+                    tab_list.append(gpa, .{ .name = std.fs.path.basename(nm), .active = b == abuf }) catch {};
+                }
+            }
             const hud: view_mod.Hud = .{
                 .mode = keymap.currentMode(),
                 .which_key = if (wk_hints.items.len > 0) wk_hints.items else null,
+                .tabs = if (tab_list.items.len > 1) tab_list.items else null,
                 .md_inline = md_inline,
                 .cursor_style = cursor_cfg.styleFor(keymap.currentMode()),
                 .cursor_on = if (cursor_cfg.blinkFor(keymap.currentMode())) blink_on else true,
