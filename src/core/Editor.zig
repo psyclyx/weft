@@ -33,6 +33,9 @@ cursor: stemma.AnchorSet.Handle,
 mark: ?stemma.AnchorSet.Handle = null,
 /// Yank register: the last yanked/deleted text, for paste. Owned.
 register: std.ArrayList(u8) = .empty,
+/// Whether the register holds whole lines (yy/dd/Y) — pasted as new lines
+/// below/above — versus characters (charwise, pasted at the cursor).
+register_linewise: bool = false,
 /// Byte column the *headless/fallback* vertical motion aims for (sticky
 /// across short lines). Used when there is no view to consult — see
 /// `moveVertical`. The interactive path uses `goal_x` instead.
@@ -663,6 +666,55 @@ pub fn moveWordEnd(self: *Editor, gpa: Allocator) Allocator.Error!void {
     self.clearGoal();
 }
 
+fn isSpaceByte(b: u8) bool {
+    return b == ' ' or b == '\t' or b == '\n' or b == '\r';
+}
+
+/// Forward to the next WORD start — whitespace-delimited (vim `W`).
+pub fn moveWORDForward(self: *Editor, gpa: Allocator) Allocator.Error!void {
+    const rope = self.text();
+    const len = rope.byteLen();
+    const off = self.cursorOffset();
+    if (off >= len) return;
+    const buf = try readRange(gpa, rope, .{ .start = off, .end = @min(len, off + 4096) });
+    defer gpa.free(buf);
+    var i: usize = 0;
+    while (i < buf.len and !isSpaceByte(buf[i])) i += 1; // over this WORD
+    while (i < buf.len and isSpaceByte(buf[i])) i += 1; // over the gap
+    self.moveTo(snapBoundary(rope, off + i));
+    self.clearGoal();
+}
+
+/// Backward to the previous WORD start — whitespace-delimited (vim `B`).
+pub fn moveWORDBackward(self: *Editor, gpa: Allocator) Allocator.Error!void {
+    const rope = self.text();
+    const off = self.cursorOffset();
+    if (off == 0) return;
+    const start = off -| 4096;
+    const buf = try readRange(gpa, rope, .{ .start = start, .end = off });
+    defer gpa.free(buf);
+    var i: usize = buf.len;
+    while (i > 0 and isSpaceByte(buf[i - 1])) i -= 1; // over the gap
+    while (i > 0 and !isSpaceByte(buf[i - 1])) i -= 1; // over the WORD
+    self.moveTo(snapBoundary(rope, start + i));
+    self.clearGoal();
+}
+
+/// Forward to the end of the next WORD — whitespace-delimited (vim `E`).
+pub fn moveWORDEnd(self: *Editor, gpa: Allocator) Allocator.Error!void {
+    const rope = self.text();
+    const len = rope.byteLen();
+    const off = self.cursorOffset();
+    if (off >= len) return;
+    const buf = try readRange(gpa, rope, .{ .start = off, .end = @min(len, off + 4096) });
+    defer gpa.free(buf);
+    var i: usize = 1;
+    while (i < buf.len and isSpaceByte(buf[i])) i += 1; // to a WORD
+    while (i + 1 < buf.len and !isSpaceByte(buf[i + 1])) i += 1; // to its last byte
+    self.moveTo(snapBoundary(rope, off + @min(i, buf.len -| 1)));
+    self.clearGoal();
+}
+
 /// The first non-blank byte on the current line (vim `^`).
 pub fn moveFirstNonBlank(self: *Editor, gpa: Allocator) Allocator.Error!void {
     const rope = self.text();
@@ -797,24 +849,92 @@ pub fn joinLine(self: *Editor, gpa: Allocator) Allocator.Error!void {
 
 // ── Yank / paste register ───────────────────────────────────────────
 
+fn setRegister(self: *Editor, gpa: Allocator, bytes: []const u8, linewise: bool) Allocator.Error!void {
+    self.register.clearRetainingCapacity();
+    try self.register.appendSlice(gpa, bytes);
+    self.register_linewise = linewise;
+}
+
 fn yankRange(self: *Editor, gpa: Allocator, r: Range) Allocator.Error!void {
     const bytes = try readRange(gpa, self.text(), r);
     defer gpa.free(bytes);
-    self.register.clearRetainingCapacity();
-    try self.register.appendSlice(gpa, bytes);
+    try self.setRegister(gpa, bytes, false); // charwise
 }
 
-/// Copy the selection into the register (no edit).
+/// Copy the selection into the register, charwise (no edit).
 pub fn yankSelection(self: *Editor, gpa: Allocator) Allocator.Error!void {
     if (self.selectedRange()) |r| try self.yankRange(gpa, r);
 }
 
-/// Insert the register at the cursor (replacing the selection). `before`
-/// leaves the cursor before the inserted text (vim `P` vs `p` nuance is
-/// approximated: both insert at the cursor here).
+fn currentLine(self: *const Editor) Range {
+    const rope = self.text();
+    return rope.lineRange(rope.offsetToPoint(self.cursorOffset()).row);
+}
+
+/// Yank the current line, linewise (vim `Y`/`yy`). Cursor unchanged.
+pub fn yankLine(self: *Editor, gpa: Allocator) Allocator.Error!void {
+    const line = self.currentLine();
+    const bytes = try readRange(gpa, self.text(), line); // content, no newline
+    defer gpa.free(bytes);
+    try self.setRegister(gpa, bytes, true);
+}
+
+/// Delete the current line into the register, linewise (vim `dd`).
+pub fn deleteLine(self: *Editor, gpa: Allocator) Allocator.Error!void {
+    const rope = self.text();
+    const line = self.currentLine();
+    const bytes = try readRange(gpa, rope, line);
+    defer gpa.free(bytes);
+    try self.setRegister(gpa, bytes, true);
+    const total = rope.byteLen();
+    // Remove the line and one adjoining newline (trailing, or leading on
+    // the last line), so a line truly disappears.
+    const del: Range = if (line.end < total)
+        .{ .start = line.start, .end = line.end + 1 }
+    else if (line.start > 0)
+        .{ .start = line.start - 1, .end = line.end }
+    else
+        .{ .start = line.start, .end = line.end };
+    try self.doc.delete(gpa, del);
+    self.clearSelection();
+    self.moveTo(@min(del.start, self.text().byteLen()));
+    self.clearGoal();
+    try self.history.ingest(gpa, &self.doc);
+}
+
+/// Insert the register AFTER the cursor line (linewise) or at the cursor
+/// (charwise) — vim `p`.
 pub fn paste(self: *Editor, gpa: Allocator) Allocator.Error!void {
     if (self.register.items.len == 0) return;
-    try self.insertText(gpa, self.register.items);
+    if (!self.register_linewise) {
+        try self.insertText(gpa, self.register.items);
+        return;
+    }
+    self.moveLineEnd();
+    const buf = try gpa.alloc(u8, self.register.items.len + 1);
+    defer gpa.free(buf);
+    buf[0] = '\n';
+    @memcpy(buf[1..], self.register.items);
+    try self.insertText(gpa, buf);
+    self.moveLineStart(); // land on the pasted line
+}
+
+/// Insert the register BEFORE the cursor line (linewise) or at the cursor
+/// (charwise) — vim `P`.
+pub fn pasteBefore(self: *Editor, gpa: Allocator) Allocator.Error!void {
+    if (self.register.items.len == 0) return;
+    if (!self.register_linewise) {
+        try self.insertText(gpa, self.register.items);
+        return;
+    }
+    self.moveLineStart();
+    const buf = try gpa.alloc(u8, self.register.items.len + 1);
+    defer gpa.free(buf);
+    @memcpy(buf[0..self.register.items.len], self.register.items);
+    buf[self.register.items.len] = '\n';
+    try self.insertText(gpa, buf);
+    self.moveUp(); // insert left the cursor on the old line; go to the pasted one
+    self.moveLineStart();
 }
 
 const WordDir = enum { forward, backward };
@@ -927,6 +1047,48 @@ test "vim primitives: word-end, ^, %, f/t, J, yank/paste" {
         defer gpa.free(txt);
         try std.testing.expect(std.mem.startsWith(u8, txt, "  ab (c) y"));
     }
+}
+
+test "vim: linewise yank/paste, delete-line, WORD motions" {
+    const gpa = std.testing.allocator;
+    const pool = try task.Pool.init(gpa, .{ .threads = 1 });
+    defer pool.deinit();
+    var ed = try Editor.init(gpa, pool, "t");
+    defer ed.deinit(gpa);
+    try ed.insertText(gpa, "one\ntwo\nthree\n");
+
+    // Y on "two" → linewise register "two".
+    ed.placeCursor(4);
+    try ed.yankLine(gpa);
+    try std.testing.expectEqualStrings("two", ed.register.items);
+    try std.testing.expect(ed.register_linewise);
+    // p → a new "two" line below.
+    try ed.paste(gpa);
+    {
+        const txt = try ed.text().toOwnedSlice(gpa);
+        defer gpa.free(txt);
+        try std.testing.expectEqualStrings("one\ntwo\ntwo\nthree\n", txt);
+    }
+    // dd on that pasted line removes exactly one line (and refills the reg).
+    try ed.deleteLine(gpa);
+    {
+        const txt = try ed.text().toOwnedSlice(gpa);
+        defer gpa.free(txt);
+        try std.testing.expectEqualStrings("one\ntwo\nthree\n", txt);
+    }
+
+    // WORD vs word: on "foo.bar baz", W skips the dot to the next WORD.
+    var ed2 = try Editor.init(gpa, pool, "t");
+    defer ed2.deinit(gpa);
+    try ed2.insertText(gpa, "foo.bar baz");
+    ed2.placeCursor(0);
+    try ed2.moveWordForward(gpa); // w stops at 'bar' (past the dot)
+    try std.testing.expectEqual(@as(usize, 4), ed2.cursorOffset());
+    ed2.placeCursor(0);
+    try ed2.moveWORDForward(gpa); // W skips "foo.bar" entirely → 'baz'
+    try std.testing.expectEqual(@as(usize, 8), ed2.cursorOffset());
+    try ed2.moveWORDEnd(gpa); // E → last byte of "baz"
+    try std.testing.expectEqual(@as(usize, 10), ed2.cursorOffset());
 }
 
 /// The word fragment immediately before the cursor (completion prefix);

@@ -114,6 +114,44 @@ fn cWordEnd(ctx: *Context, args: struct {}) anyerror!Value {
     return ok;
 }
 
+fn cWORDForward(ctx: *Context, args: struct {}) anyerror!Value {
+    _ = args;
+    try ctx.editor().moveWORDForward(ctx.gpa);
+    return ok;
+}
+
+fn cWORDBackward(ctx: *Context, args: struct {}) anyerror!Value {
+    _ = args;
+    try ctx.editor().moveWORDBackward(ctx.gpa);
+    return ok;
+}
+
+fn cWORDEnd(ctx: *Context, args: struct {}) anyerror!Value {
+    _ = args;
+    try ctx.editor().moveWORDEnd(ctx.gpa);
+    return ok;
+}
+
+fn cYankLine(ctx: *Context, args: struct {}) anyerror!Value {
+    _ = args;
+    try ctx.editor().yankLine(ctx.gpa);
+    return ok;
+}
+
+fn cDeleteLine(ctx: *Context, args: struct {}) anyerror!Value {
+    _ = args;
+    if (ctx.buffer().read_only) return ok;
+    try ctx.editor().deleteLine(ctx.gpa);
+    return ok;
+}
+
+fn cPasteBefore(ctx: *Context, args: struct {}) anyerror!Value {
+    _ = args;
+    if (ctx.buffer().read_only) return ok;
+    try ctx.editor().pasteBefore(ctx.gpa);
+    return ok;
+}
+
 fn cFirstNonBlank(ctx: *Context, args: struct {}) anyerror!Value {
     _ = args;
     try ctx.editor().moveFirstNonBlank(ctx.gpa);
@@ -319,11 +357,17 @@ const table = [_]command.Command{
     command.define("word-forward", "Move to the next word start.", cWordForward),
     command.define("word-backward", "Move to the previous word start.", cWordBackward),
     command.define("word-end", "Move to the end of the next word.", cWordEnd),
+    command.define("WORD-forward", "Move to the next WORD (whitespace-delimited).", cWORDForward),
+    command.define("WORD-backward", "Move to the previous WORD (whitespace-delimited).", cWORDBackward),
+    command.define("WORD-end", "Move to the end of the next WORD (whitespace-delimited).", cWORDEnd),
     command.define("first-non-blank", "Move to the first non-blank on the line.", cFirstNonBlank),
     command.define("match-bracket", "Jump to the matching bracket.", cMatchBracket),
     command.define("join-lines", "Join this line with the next.", cJoinLines),
-    command.define("yank-selection", "Copy the selection to the yank register.", cYankSelection),
-    command.define("paste", "Insert the yank register at the cursor.", cPaste),
+    command.define("yank-selection", "Copy the selection to the yank register (charwise).", cYankSelection),
+    command.define("yank-line", "Yank the current line (linewise).", cYankLine),
+    command.define("delete-line", "Delete the current line (linewise).", cDeleteLine),
+    command.define("paste", "Paste the register after the cursor/line.", cPaste),
+    command.define("paste-before", "Paste the register before the cursor/line.", cPasteBefore),
     command.define("find-char", "Move to a character on the line (dir f|F|t|T, to <char>).", cFindChar),
     command.define("set-mark", "Start a selection at the cursor.", cSetMark),
     command.define("clear-selection", "Drop the selection.", cClearSelection),

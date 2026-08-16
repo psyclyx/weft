@@ -32,9 +32,6 @@
 (cmd "vim-open-above" "Open a line above, enter insert mode."
   (fn [] (run "line-start") (run "insert-newline") (run "cursor-up")
          (set-mode "insert")))
-(cmd "vim-delete-line" "Delete the current line."
-  (fn [] (run "line-start") (run "set-mark") (run "line-end")
-         (run "delete-selection") (run "delete-forward")))
 (cmd "vim-visual" "Start a character-wise selection."
   (fn [] (run "set-mark") (set-mode "visual")))
 (cmd "vim-visual-delete" "Delete the selection, back to normal."
@@ -132,7 +129,7 @@
 (bind "normal" "o" "vim-open-below")
 (bind "normal" "O" "vim-open-above")
 (bind "normal" "x" "delete-forward")
-(bind "normal" "d" "vim-delete-line")
+(bind "normal" "d" "delete-line")   ;; dd-style linewise delete (fills register)
 (bind "normal" "u" "undo")
 (bind "normal" "C-r" "redo")
 (bind "normal" "v" "vim-visual")
@@ -143,10 +140,11 @@
 (bind "normal" "z" "zed")                 ;; z → z prefix (zz = center)
 (bind "default" "C-g" "cancel")           ;; C-g → abort a pending connect
 
-;; More motions.
-(bind "normal" "W" "word-forward")
-(bind "normal" "B" "word-backward")
+;; More motions. w/b/e are word-char; W/B/E are WORD (whitespace-delimited).
+(bind "normal" "W" "WORD-forward")
+(bind "normal" "B" "WORD-backward")
 (bind "normal" "e" "word-end")
+(bind "normal" "E" "WORD-end")
 (bind "normal" "asciicircum" "first-non-blank") ;; ^
 (bind "normal" "percent" "match-bracket")       ;; %
 
@@ -159,15 +157,21 @@
 (bind "normal" "X" "delete-backward")
 (bind "normal" "J" "join-lines")
 
-;; Yank / paste (charwise register).
-(cmd "vim-yank-line" "Yank the current line."
-  (fn [] (run "line-start") (run "set-mark") (run "line-end")
-         (run "yank-selection")))
+;; Yank / paste. yy/Y/dd are linewise; visual y is charwise; p/P paste
+;; below/above (linewise) or at the cursor (charwise).
 (cmd "vim-visual-yank" "Yank the selection, back to normal."
   (fn [] (run "yank-selection") (set-mode "normal")))
-(bind "normal" "Y" "vim-yank-line")
+(cmd "yank" "y prefix (yy = yank line)." (fn [] (set-mode "yank")))
+(cmd "vim-yank-line" "Yank the line, back to normal."
+  (fn [] (set-mode "normal") (run "yank-line")))
+(weft.textinput "yank" nil)
+(weft.menu_mode "yank")
+(bind "normal" "y" "yank")
+(bind "yank" "y" "vim-yank-line")
+(bind "yank" "Escape" "leader-cancel")
+(bind "normal" "Y" "yank-line")
 (bind "normal" "p" "paste")
-(bind "normal" "P" "paste")
+(bind "normal" "P" "paste-before")
 (bind "visual" "y" "vim-visual-yank")
 
 ;; f / F / t / T — find a character on the line (one-shot capture modes).
