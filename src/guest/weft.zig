@@ -88,6 +88,7 @@ extern "weft" fn wl_node_children(off: u32) i32;
 extern "weft" fn wl_claim_subbuffer(start: u32, end: u32) i32;
 extern "weft" fn wl_subbuffer_put_fact(handle: u32, k: u32, kl: u32, v: u32, vl: u32) void;
 extern "weft" fn wl_shell_insert(ptr: u32, len: u32) void;
+extern "weft" fn wl_proc_to_buffer(cmd: u32, cmd_len: u32, name: u32, name_len: u32) void;
 
 /// Shared scratch for host→guest byte returns. A read wrapper (`slice`,
 /// `path`, `kvGet`) returns a slice INTO this buffer, valid until the next
@@ -469,4 +470,11 @@ pub fn subbufferPutFact(handle: u32, key: []const u8, value: []const u8) void {
 /// when it finishes, rebased. Perms: proc + timer (declared in `describe`).
 pub fn shellInsert(cmd: []const u8) void {
     wl_shell_insert(p(cmd.ptr), @intCast(cmd.len));
+}
+
+/// Run `cmd` off the frame thread and replace the scratch buffer named `name`
+/// (found or created) with its stdout — tool output → a buffer (git status,
+/// grep, compile). Perms: proc + timer (declared in `describe`).
+pub fn procToBuffer(cmd: []const u8, name: []const u8) void {
+    wl_proc_to_buffer(p(cmd.ptr), @intCast(cmd.len), p(name.ptr), @intCast(name.len));
 }

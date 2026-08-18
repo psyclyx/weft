@@ -122,6 +122,7 @@ pub fn defineImports(linker: *wasm.Linker, p: *WasmPlugin) !void {
     // Effects (perm-gated): shell insert — the membrane form of editLater
     // with a host-side proc body (the guest can't run off-thread itself).
     try d(linker, "wl_shell_insert", 2, 0, hShellInsert, p);
+    try d(linker, "wl_proc_to_buffer", 4, 0, hProcToBuffer, p);
 }
 
 pub const perm_proc = 3;
@@ -207,6 +208,89 @@ fn shellFree(ctx: ?*anyopaque) void {
     const gpa = job.ctx.gpa;
     gpa.free(job.name);
     gpa.free(job.version);
+    gpa.free(job.cmd);
+    gpa.destroy(job);
+}
+
+/// A deferred proc-to-buffer: run a command off-thread and replace a named
+/// scratch buffer with its output. Like ShellJob it holds NO plugin pointer —
+/// it re-resolves the buffer + peer by name at delivery, so it survives the
+/// plugin unloading mid-flight (no use-after-free from a guest callback).
+const ProcJob = struct {
+    ctx: *command.Context,
+    plugin: []u8, // authors the buffer content
+    buf: []u8, // target buffer name (found-or-created)
+    cmd: []u8,
+};
+
+/// Perm-gated (proc + timer): run `<cmd>` off the frame thread and replace the
+/// scratch buffer named `<name>` with its stdout, authored as this plugin's
+/// peer — the "tool output → a buffer" pattern (git status, grep, compile).
+fn hProcToBuffer(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32, results: []i32) void {
+    _ = results;
+    const p: *WasmPlugin = @ptrCast(@alignCast(data.?));
+    if (!p.perms[perm_proc] or !p.perms[perm_timer]) return;
+    const loop = p.loop orelse return;
+    const gpa = p.gpa;
+    const cmd = caller.readMemory(gpa, @intCast(args[0]), @intCast(args[1])) catch return;
+    errdefer gpa.free(cmd);
+    const name = caller.readMemory(gpa, @intCast(args[2]), @intCast(args[3])) catch return;
+    errdefer gpa.free(name);
+    const job = gpa.create(ProcJob) catch return;
+    job.* = .{
+        .ctx = p.ctx,
+        .plugin = gpa.dupe(u8, p.name) catch {
+            gpa.destroy(job);
+            gpa.free(cmd);
+            gpa.free(name);
+            return;
+        },
+        .buf = name,
+        .cmd = cmd,
+    };
+    _ = loop.spawn(procWork, job, .{ .ctx = job, .call = procDeliver, .deinit = procFree }) catch procFree(job);
+}
+
+fn procWork(gpa: Allocator, ctx: ?*anyopaque) anyerror![]u8 {
+    const job: *ProcJob = @ptrCast(@alignCast(ctx.?));
+    var res = proc.run(gpa, &.{ "/bin/sh", "-c", job.cmd }, .{}) catch return gpa.alloc(u8, 0);
+    defer res.deinit(gpa);
+    return gpa.dupe(u8, std.mem.trimEnd(u8, res.stdout, "\n"));
+}
+
+/// Frame-thread delivery: find-or-create the named buffer and replace its whole
+/// content with the output, authored as the plugin peer (grade-gated).
+fn procDeliver(ctx: ?*anyopaque, result: ?[]const u8) void {
+    const job: *ProcJob = @ptrCast(@alignCast(ctx.?));
+    const out = result orelse return;
+    const gpa = job.ctx.gpa;
+    const bufs = job.ctx.buffers;
+    var target: ?*Buffers.Buffer = null;
+    var it = bufs.iterator();
+    while (it.next()) |b| {
+        if (std.mem.eql(u8, b.name, job.buf)) {
+            target = b;
+            break;
+        }
+    }
+    if (target == null) {
+        const id = bufs.create(gpa, job.buf) catch return;
+        target = bufs.get(id);
+        if (target) |b| b.read_only = true; // a tool buffer
+    }
+    const b = target orelse return;
+    const doc = &b.editor.doc;
+    if (!authority.gradeMin(doc.my_grant, .edit).canEdit()) return;
+    const pid = doc.peerNamed(gpa, job.plugin) catch return;
+    const end = b.editor.text().byteLen();
+    doc.peerReplaceAll(gpa, pid, &.{.{ .range = .{ .start = 0, .end = end }, .bytes = out }}) catch {};
+}
+
+fn procFree(ctx: ?*anyopaque) void {
+    const job: *ProcJob = @ptrCast(@alignCast(ctx.?));
+    const gpa = job.ctx.gpa;
+    gpa.free(job.plugin);
+    gpa.free(job.buf);
     gpa.free(job.cmd);
     gpa.destroy(job);
 }

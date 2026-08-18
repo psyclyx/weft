@@ -31,7 +31,8 @@ weft.plugin("comment");     // toggle line comments
 weft.plugin("whitespace");  // trim trailing whitespace
 weft.plugin("numbers");     // increment/decrement the number under the cursor
 weft.plugin("autopair");    // auto-close ( { [ " in insert mode
-weft.plugin("consult");     // fuzzy-jump navigation (consult-line)
+weft.plugin("consult");     // fuzzy-jump navigation (consult-line, imenu)
+weft.plugin("git");         // git status/log/diff into tool buffers (proc)
 
 // Leader (space) bindings for the edit-domain operators — each name is a real
 // command one of the plugins above registered.
@@ -46,6 +47,9 @@ weft.bind("normal", "space s", "consult-imenu");
 weft.bind("normal", "space n", "ts-select-node");
 weft.bind("normal", "space e", "ts-expand-selection");
 weft.bind("normal", "space F", "ts-select-function");
+
+// Git (in vim's leader mode: space g → status). More via the palette.
+weft.bind("leader", "g", "git-status");
 
 // Numbers: vim-style increment/decrement.
 weft.bind("normal", "C-a", "increment-number");

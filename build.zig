@@ -30,6 +30,7 @@ const guests = [_]Guest{
     .{ .src = "src/guest/numbers.zig", .import = "guest_numbers_wasm", .install = true },
     .{ .src = "src/guest/autopair.zig", .import = "guest_autopair_wasm", .install = true },
     .{ .src = "src/guest/consult.zig", .import = "guest_consult_wasm", .install = true },
+    .{ .src = "src/guest/git.zig", .import = "guest_git_wasm", .install = true },
 };
 
 pub fn build(b: *std.Build) void {

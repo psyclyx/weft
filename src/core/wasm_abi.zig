@@ -964,6 +964,48 @@ test "wasm plugin: shell insert is a no-op when the async service is absent" {
     try t.expect(ed.text().byteLen() == 1); // nothing inserted
 }
 
+test "wasm plugin: git-status runs git into a focused tool buffer (async)" {
+    const gpa = t.allocator;
+    var env: Env = undefined;
+    try Env.init(gpa, &env);
+    defer env.deinit(gpa);
+    try @import("builtins.zig").install(gpa, &env.commands, &env.keymap); // buffer-create
+
+    var loop = async_loop.Loop.init(gpa, env.pool, @import("task.zig").nowNs);
+    defer loop.deinit();
+
+    var engine = try wasm.Engine.init();
+    defer engine.deinit();
+    const plugin = try loadPlugin(&engine, &env.ctx, "git", @embedFile("guest_git_wasm"), .{ .loop = &loop });
+    defer plugin.deinit();
+    try t.expect(plugin.perms[wasm_host.perm_proc] and plugin.perms[wasm_host.perm_timer]);
+
+    _ = try command.run(&env.commands, &env.ctx, "git-status", &.{});
+    // The tool buffer was created + focused synchronously (before any output).
+    const buf = blk: {
+        var it = env.buffers.iterator();
+        while (it.next()) |b| if (std.mem.eql(u8, b.name, "*git-status*")) break :blk b;
+        break :blk null;
+    };
+    try t.expect(buf != null);
+
+    // Drive the async loop until git's output lands (bounded; this repo is a
+    // git checkout). If git is unavailable the buffer stays empty — the
+    // structural checks above still hold.
+    var rounds: usize = 0;
+    while (rounds < 20_000_000 and buf.?.editor.text().byteLen() == 0) : (rounds += 1) {
+        _ = loop.tick();
+        std.Thread.yield() catch {};
+    }
+    if (buf.?.editor.text().byteLen() > 0) {
+        const s = try buf.?.editor.text().toOwnedSlice(gpa);
+        defer gpa.free(s);
+        try t.expect(std.mem.indexOfScalar(u8, s, '#') != null); // "## <branch>"
+        const doc = &buf.?.editor.doc;
+        try t.expect(doc.commitAt(doc.commitCount() - 1).author != .user); // the plugin peer
+    }
+}
+
 test "wasm plugin: vim wires the modal keymap and runs motions/operators as .wasm" {
     const gpa = t.allocator;
     var env: Env = undefined;
