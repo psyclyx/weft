@@ -42,6 +42,8 @@ weft.plugin("buffers");     // buf-pick (fuzzy buffer switch), buf-scratch
 weft.plugin("windows");     // win-split/vsplit/focus/close/center
 weft.plugin("modes");       // language activation (on focus) + lang-run
 weft.plugin("snippets");    // expand named templates from a file (fs read)
+weft.plugin("direnv");      // direnv status/allow/reload into a tool buffer
+weft.plugin("llm");         // ask an llm CLI (minimal agent, proc + fs)
 
 // Leader (space) bindings for the edit-domain operators — each name is a real
 // command one of the plugins above registered.
@@ -67,6 +69,7 @@ weft.bind("leader", "n", "notes-open"); // open the notes file (capture via pale
 weft.bind("leader", "equal", "format-buffer"); // format the buffer by extension
 weft.bind("leader", "comma", "buf-pick"); // fuzzy-switch buffers
 weft.bind("leader", "r", "lang-run"); // run the current file by its language
+weft.bind("leader", "a", "llm-ask-line"); // ask an llm CLI with the current line
 
 // Numbers: vim-style increment/decrement.
 weft.bind("normal", "C-a", "increment-number");

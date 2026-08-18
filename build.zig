@@ -40,6 +40,8 @@ const guests = [_]Guest{
     .{ .src = "src/guest/windows.zig", .import = "guest_windows_wasm", .install = true },
     .{ .src = "src/guest/modes.zig", .import = "guest_modes_wasm", .install = true },
     .{ .src = "src/guest/snippets.zig", .import = "guest_snippets_wasm", .install = true },
+    .{ .src = "src/guest/direnv.zig", .import = "guest_direnv_wasm", .install = true },
+    .{ .src = "src/guest/llm.zig", .import = "guest_llm_wasm", .install = true },
 };
 
 pub fn build(b: *std.Build) void {
