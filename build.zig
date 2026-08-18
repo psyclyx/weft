@@ -31,6 +31,9 @@ const guests = [_]Guest{
     .{ .src = "src/guest/autopair.zig", .import = "guest_autopair_wasm", .install = true },
     .{ .src = "src/guest/consult.zig", .import = "guest_consult_wasm", .install = true },
     .{ .src = "src/guest/git.zig", .import = "guest_git_wasm", .install = true },
+    .{ .src = "src/guest/grep.zig", .import = "guest_grep_wasm", .install = true },
+    .{ .src = "src/guest/run.zig", .import = "guest_run_wasm", .install = true },
+    .{ .src = "src/guest/make.zig", .import = "guest_make_wasm", .install = true },
 };
 
 pub fn build(b: *std.Build) void {
@@ -156,6 +159,7 @@ fn embedGuests(b: *std.Build, mod: *std.Build.Module) void {
 /// `lib/weft/plugins/`. These are what a user loads with `--plugin`; weft
 /// carries no catalog in-process.
 fn installPlugins(b: *std.Build) void {
+    @setEvalBranchQuota(10_000); // the guest list grows; comptime `stem` per entry
     inline for (guests) |g| {
         if (!g.install) continue;
         const guest = buildGuest(b, g.src);

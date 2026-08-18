@@ -1006,6 +1006,40 @@ test "wasm plugin: git-status runs git into a focused tool buffer (async)" {
     }
 }
 
+test "wasm plugin: run-command runs a shell command into a tool buffer (async)" {
+    const gpa = t.allocator;
+    var env: Env = undefined;
+    try Env.init(gpa, &env);
+    defer env.deinit(gpa);
+    try @import("builtins.zig").install(gpa, &env.commands, &env.keymap);
+
+    var loop = async_loop.Loop.init(gpa, env.pool, @import("task.zig").nowNs);
+    defer loop.deinit();
+    var engine = try wasm.Engine.init();
+    defer engine.deinit();
+    const plugin = try loadPlugin(&engine, &env.ctx, "run", @embedFile("guest_run_wasm"), .{ .loop = &loop });
+    defer plugin.deinit();
+
+    // A deterministic command (echo) — proves the proc→buffer path end to end.
+    _ = try command.run(&env.commands, &env.ctx, "run-command", &.{.{ .string = "echo weft-ok" }});
+    const buf = blk: {
+        var it = env.buffers.iterator();
+        while (it.next()) |b| if (std.mem.eql(u8, b.name, "*output*")) break :blk b;
+        break :blk null;
+    };
+    try t.expect(buf != null);
+    var rounds: usize = 0;
+    while (rounds < 20_000_000 and buf.?.editor.text().byteLen() == 0) : (rounds += 1) {
+        _ = loop.tick();
+        std.Thread.yield() catch {};
+    }
+    const s = try buf.?.editor.text().toOwnedSlice(gpa);
+    defer gpa.free(s);
+    try t.expectEqualStrings("weft-ok", s); // stdout, trailing newline trimmed
+    const doc = &buf.?.editor.doc;
+    try t.expect(doc.commitAt(doc.commitCount() - 1).author != .user); // the plugin peer
+}
+
 test "wasm plugin: vim wires the modal keymap and runs motions/operators as .wasm" {
     const gpa = t.allocator;
     var env: Env = undefined;
