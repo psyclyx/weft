@@ -97,6 +97,113 @@ export fn on_command(id: u32) void {
     if (id < cmds.len) cmds[id].handler();
 }
 
+// ── Styling: color the tool buffers like magit ──────────────────────────
+// The host fires `on_fill` once a tool buffer's async output has landed, with
+// that buffer active — so we read + paint the ACTIVE buffer (byteLen/slice/
+// style all target it, like edit does). We classify line by line into
+// StyleClass spans; the view renders them through the theme.
+var name_buf: [256]u8 = undefined;
+
+/// The active buffer's name, copied out of the shared read scratch (so it
+/// survives the `slice` reads below), or "" if none.
+fn activeName() []const u8 {
+    const count = weft.bufferCount();
+    var i: usize = 0;
+    while (i < count) : (i += 1) {
+        if (!weft.bufferActive(i)) continue;
+        const bn = weft.bufferName(i) orelse return "";
+        const n = @min(bn.len, name_buf.len);
+        @memcpy(name_buf[0..n], bn[0..n]);
+        return name_buf[0..n];
+    }
+    return "";
+}
+
+export fn on_fill() void {
+    const name = activeName();
+    if (std.mem.eql(u8, name, "*git-diff*") or std.mem.eql(u8, name, "*git-diff-staged*")) {
+        classify(styleDiffLine);
+    } else if (std.mem.eql(u8, name, "*git-status*")) {
+        classify(styleStatusLine);
+    } else if (std.mem.eql(u8, name, "*git-log*")) {
+        classify(styleLogLine);
+    }
+}
+
+/// Drive a per-line classifier over the (scratch-clamped) buffer text: baseline
+/// with `styleClear`, then hand each line its absolute start + bytes. Offsets
+/// index the slice from 0, so a slice index IS the absolute document offset.
+fn classify(line_fn: *const fn (base: usize, line: []const u8) void) void {
+    weft.styleClear();
+    const text = weft.slice(0, weft.byteLen()); // clamped to the read scratch
+    var i: usize = 0;
+    while (i < text.len) {
+        var e = i;
+        while (e < text.len and text[e] != '\n') e += 1;
+        line_fn(i, text[i..e]);
+        i = e + 1;
+    }
+}
+
+/// A unified-diff line: hunk headers, +/- content, and the file/index preamble.
+fn styleDiffLine(base: usize, line: []const u8) void {
+    if (line.len == 0) return;
+    const cls: weft.StyleClass = if (std.mem.startsWith(u8, line, "diff --git") or
+        std.mem.startsWith(u8, line, "index "))
+        .muted
+    else if (std.mem.startsWith(u8, line, "+++ ") or std.mem.startsWith(u8, line, "--- "))
+        .muted // the file markers, not content adds/removes
+    else if (std.mem.startsWith(u8, line, "@@"))
+        .header
+    else switch (line[0]) {
+        '+' => .added,
+        '-' => .removed,
+        else => .normal,
+    };
+    if (cls != .normal) weft.style(base, base + line.len, cls);
+}
+
+/// A `git status --short --branch` line: the `##` branch header, staged (index
+/// column set) vs unstaged (worktree column) vs untracked (`??`).
+fn styleStatusLine(base: usize, line: []const u8) void {
+    if (line.len < 2) return;
+    const cls: weft.StyleClass = if (line[0] == '#' and line[1] == '#')
+        .header
+    else if (line[0] == '?' and line[1] == '?')
+        .muted // untracked
+    else if (line[0] != ' ')
+        .added // staged: the index column carries a change
+    else
+        .removed; // unstaged worktree change
+    weft.style(base, base + line.len, cls);
+}
+
+/// A `git log --oneline --graph` line: skip the graph gutter, color the short
+/// hash as a location and any `(refs)` decoration as a header.
+fn styleLogLine(base: usize, line: []const u8) void {
+    var i: usize = 0;
+    while (i < line.len and isGraph(line[i])) i += 1;
+    var h = i;
+    while (h < line.len and isHex(line[h])) h += 1;
+    if (h == i) return; // no hash on this line (a pure graph connector)
+    weft.style(base + i, base + h, .location);
+    var j = h;
+    while (j < line.len and line[j] == ' ') j += 1;
+    if (j < line.len and line[j] == '(') {
+        var k = j;
+        while (k < line.len and line[k] != ')') k += 1;
+        if (k < line.len) k += 1; // include the ')'
+        weft.style(base + j, base + k, .header);
+    }
+}
+
+fn isGraph(c: u8) bool {
+    return c == '*' or c == '|' or c == '/' or c == '\\' or c == ' ' or c == '_' or c == '.';
+}
+fn isHex(c: u8) bool {
+    return (c >= '0' and c <= '9') or (c >= 'a' and c <= 'f');
+}
+
 /// The path on the current *git-status* line: `git status --short` prints
 /// "XY path" (status in cols 0-1, path from col 3), so drop the leading status
 /// field. Returns "" for a header line (e.g. the `## branch` line). Copied out

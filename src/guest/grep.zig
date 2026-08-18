@@ -11,6 +11,11 @@ const weft = @import("weft.zig");
 
 /// Scratch for the assembled shell command line (pattern + rg flags).
 var cmd_buf: [1 << 12]u8 = undefined;
+/// The last pattern searched, kept so `on_fill` can emphasize its literal
+/// occurrences in each result line (regex patterns simply won't match — a
+/// graceful no-op, still colored file:line locations).
+var pattern_buf: [1 << 10]u8 = undefined;
+var pattern_len: usize = 0;
 
 const Cmd = struct { name: []const u8, handler: *const fn () void };
 const cmds = [_]Cmd{
@@ -42,6 +47,8 @@ fn isWord(ch: u8) bool {
 /// `--` ends rg's options so a leading `-` in the pattern isn't read as a flag.
 fn runGrep(pattern: []const u8) void {
     if (pattern.len == 0) return; // empty pattern → no-op
+    pattern_len = @min(pattern.len, pattern_buf.len);
+    @memcpy(pattern_buf[0..pattern_len], pattern[0..pattern_len]);
     const cmd = std.fmt.bufPrint(
         &cmd_buf,
         "rg --line-number --no-heading --color=never -- '{s}'",
@@ -55,6 +62,55 @@ fn runGrep(pattern: []const u8) void {
 fn grep() void {
     const pattern = weft.argStr(0) orelse return;
     runGrep(pattern);
+}
+
+// ── Styling: color the `*grep*` results (file:line locations + match) ───────
+// The host fires `on_fill` once rg's async output has landed, with `*grep*`
+// active, so we read + paint the active buffer. Each `rg --no-heading
+// --line-number` line is `path:line:content`; color the `path:line:` prefix as
+// a location and a literal match of the pattern in the content as emphasis.
+export fn on_fill() void {
+    const name = activeName();
+    if (!std.mem.eql(u8, name, "*grep*")) return;
+    weft.styleClear();
+    const text = weft.slice(0, weft.byteLen()); // clamped to the read scratch
+    var i: usize = 0;
+    while (i < text.len) {
+        var e = i;
+        while (e < text.len and text[e] != '\n') e += 1;
+        styleGrepLine(i, text[i..e]);
+        i = e + 1;
+    }
+}
+
+var name_buf: [256]u8 = undefined;
+/// The active buffer's name, copied out of the shared read scratch.
+fn activeName() []const u8 {
+    const count = weft.bufferCount();
+    var i: usize = 0;
+    while (i < count) : (i += 1) {
+        if (!weft.bufferActive(i)) continue;
+        const bn = weft.bufferName(i) orelse return "";
+        const n = @min(bn.len, name_buf.len);
+        @memcpy(name_buf[0..n], bn[0..n]);
+        return name_buf[0..n];
+    }
+    return "";
+}
+
+fn styleGrepLine(base: usize, line: []const u8) void {
+    const c1 = std.mem.indexOfScalar(u8, line, ':') orelse return;
+    var j = c1 + 1;
+    const ds = j;
+    while (j < line.len and line[j] >= '0' and line[j] <= '9') j += 1;
+    if (j == ds or j >= line.len or line[j] != ':') return; // not path:line:
+    const prefix_end = j + 1;
+    weft.style(base, base + prefix_end, .location);
+    if (pattern_len > 0) {
+        const content = line[prefix_end..];
+        if (std.mem.indexOf(u8, content, pattern_buf[0..pattern_len])) |off|
+            weft.style(base + prefix_end + off, base + prefix_end + off + pattern_len, .emphasis);
+    }
 }
 
 /// Search for the identifier run surrounding the cursor.
