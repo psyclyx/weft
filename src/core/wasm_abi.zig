@@ -1103,6 +1103,35 @@ test "wasm plugin: fmt filters a range through a command (async, in-place tmp)" 
     try t.expect(ed.doc.commitAt(ed.doc.commitCount() - 1).author != .user); // plugin peer
 }
 
+test "wasm plugin: console-send runs the current line and appends output" {
+    const gpa = t.allocator;
+    var env: Env = undefined;
+    try Env.init(gpa, &env);
+    defer env.deinit(gpa);
+    try @import("builtins.zig").install(gpa, &env.commands, &env.keymap); // buffer-create
+
+    var loop = async_loop.Loop.init(gpa, env.pool, @import("task.zig").nowNs);
+    defer loop.deinit();
+    var engine = try wasm.Engine.init();
+    defer engine.deinit();
+    const plugin = try loadPlugin(&engine, &env.ctx, "console", @embedFile("guest_console_wasm"), .{ .loop = &loop });
+    defer plugin.deinit();
+
+    _ = try command.run(&env.commands, &env.ctx, "console-open", &.{}); // focus *console*
+    const ed = &env.buffers.active().editor;
+    try ed.insertText(gpa, "echo con-ok"); // type a command line
+    const before = ed.doc.commitCount();
+    _ = try command.run(&env.commands, &env.ctx, "console-send", &.{});
+    var rounds: usize = 0;
+    while (rounds < 20_000_000 and ed.doc.commitCount() == before) : (rounds += 1) {
+        _ = loop.tick();
+        std.Thread.yield() catch {};
+    }
+    const s = try ed.text().toOwnedSlice(gpa);
+    defer gpa.free(s);
+    try t.expectEqualStrings("echo con-ok\ncon-ok", s); // output appended below the input
+}
+
 test "wasm plugin: vim wires the modal keymap and runs motions/operators as .wasm" {
     const gpa = t.allocator;
     var env: Env = undefined;

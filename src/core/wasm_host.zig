@@ -125,6 +125,7 @@ pub fn defineImports(linker: *wasm.Linker, p: *WasmPlugin) !void {
     // with a host-side proc body (the guest can't run off-thread itself).
     try d(linker, "wl_shell_insert", 2, 0, hShellInsert, p);
     try d(linker, "wl_proc_to_buffer", 4, 0, hProcToBuffer, p);
+    try d(linker, "wl_proc_append_buffer", 4, 0, hProcAppendBuffer, p);
     try d(linker, "wl_proc_filter", 4, 0, hProcFilter, p);
     // fs read/write (perm-gated) — design §4 Group B/C. Local, cwd-relative.
     try d(linker, "wl_fs_read", 4, 1, hFsRead, p);
@@ -313,6 +314,7 @@ const ProcJob = struct {
     plugin: []u8, // authors the buffer content
     buf: []u8, // target buffer name (found-or-created)
     cmd: []u8,
+    append: bool = false, // append the output (a console) vs replace (a view)
 };
 
 /// Perm-gated (proc + timer): run `<cmd>` off the frame thread and replace the
@@ -339,6 +341,34 @@ fn hProcToBuffer(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32, res
         },
         .buf = name,
         .cmd = cmd,
+    };
+    _ = loop.spawn(procWork, job, .{ .ctx = job, .call = procDeliver, .deinit = procFree }) catch procFree(job);
+}
+
+/// Like `wl_proc_to_buffer` but APPENDS the output (a console/comint log) rather
+/// than replacing the buffer.
+fn hProcAppendBuffer(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32, results: []i32) void {
+    _ = results;
+    const p: *WasmPlugin = @ptrCast(@alignCast(data.?));
+    if (!p.perms[perm_proc] or !p.perms[perm_timer]) return;
+    const loop = p.loop orelse return;
+    const gpa = p.gpa;
+    const cmd = caller.readMemory(gpa, @intCast(args[0]), @intCast(args[1])) catch return;
+    errdefer gpa.free(cmd);
+    const name = caller.readMemory(gpa, @intCast(args[2]), @intCast(args[3])) catch return;
+    errdefer gpa.free(name);
+    const job = gpa.create(ProcJob) catch return;
+    job.* = .{
+        .ctx = p.ctx,
+        .plugin = gpa.dupe(u8, p.name) catch {
+            gpa.destroy(job);
+            gpa.free(cmd);
+            gpa.free(name);
+            return;
+        },
+        .buf = name,
+        .cmd = cmd,
+        .append = true,
     };
     _ = loop.spawn(procWork, job, .{ .ctx = job, .call = procDeliver, .deinit = procFree }) catch procFree(job);
 }
@@ -375,7 +405,19 @@ fn procDeliver(ctx: ?*anyopaque, result: ?[]const u8) void {
     if (!authority.gradeMin(doc.my_grant, .edit).canEdit()) return;
     const pid = doc.peerNamed(gpa, job.plugin) catch return;
     const end = b.editor.text().byteLen();
-    doc.peerReplaceAll(gpa, pid, &.{.{ .range = .{ .start = 0, .end = end }, .bytes = out }}) catch {};
+    if (job.append) {
+        // Append below the existing content (a console log), separated by a
+        // newline once there is prior output.
+        if (end > 0) {
+            const sep = std.fmt.allocPrint(gpa, "\n{s}", .{out}) catch return;
+            defer gpa.free(sep);
+            doc.peerReplaceAll(gpa, pid, &.{.{ .range = .{ .start = end, .end = end }, .bytes = sep }}) catch {};
+        } else {
+            doc.peerReplaceAll(gpa, pid, &.{.{ .range = .{ .start = end, .end = end }, .bytes = out }}) catch {};
+        }
+    } else {
+        doc.peerReplaceAll(gpa, pid, &.{.{ .range = .{ .start = 0, .end = end }, .bytes = out }}) catch {};
+    }
 }
 
 fn procFree(ctx: ?*anyopaque) void {

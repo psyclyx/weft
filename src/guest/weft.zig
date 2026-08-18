@@ -90,6 +90,7 @@ extern "weft" fn wl_claim_subbuffer(start: u32, end: u32) i32;
 extern "weft" fn wl_subbuffer_put_fact(handle: u32, k: u32, kl: u32, v: u32, vl: u32) void;
 extern "weft" fn wl_shell_insert(ptr: u32, len: u32) void;
 extern "weft" fn wl_proc_to_buffer(cmd: u32, cmd_len: u32, name: u32, name_len: u32) void;
+extern "weft" fn wl_proc_append_buffer(cmd: u32, cmd_len: u32, name: u32, name_len: u32) void;
 extern "weft" fn wl_proc_filter(cmd: u32, cmd_len: u32, start: u32, end: u32) void;
 extern "weft" fn wl_fs_read(path: u32, path_len: u32, out_ptr: u32, out_cap: u32) i32;
 extern "weft" fn wl_fs_write(path: u32, path_len: u32, ptr: u32, len: u32) i32;
@@ -490,6 +491,10 @@ pub fn shellInsert(cmd: []const u8) void {
 /// grep, compile). Perms: proc + timer (declared in `describe`).
 pub fn procToBuffer(cmd: []const u8, name: []const u8) void {
     wl_proc_to_buffer(p(cmd.ptr), @intCast(cmd.len), p(name.ptr), @intCast(name.len));
+}
+/// Like `procToBuffer` but APPENDS the output — a console/comint log.
+pub fn procAppendBuffer(cmd: []const u8, name: []const u8) void {
+    wl_proc_append_buffer(p(cmd.ptr), @intCast(cmd.len), p(name.ptr), @intCast(name.len));
 }
 
 /// Filter `[r.start, r.end)` through `cmd` (a `{}` placeholder gets a temp file
