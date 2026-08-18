@@ -21,12 +21,14 @@ pkgs.mkShell {
     harfbuzz
     fontconfig # runtime font-family resolution (sans/mono, weight, slant)
 
-    # Scripting (milestone 5): per-plugin Lua VMs, fennel compiled in.
-    lua5_4
-    lua54Packages.fennel
-
     # Syntax (milestone 7): incremental parsing + highlighting.
     tree-sitter
+
+    # Wasm plugin runtime (milestone 5): wasmtime's C embedding API. The CLI
+    # here compiles/inspects guest .wasm; build.zig links libwasmtime via the
+    # dev/lib outputs below (wasmtime ships no pkg-config, so we point at the
+    # paths directly — the same idiom as the grammar packages).
+    wasmtime
 
     # Language servers for the sample config (phase 2: zls is already
     # above for dev; fennel-ls is the second-server demonstration).
@@ -48,13 +50,20 @@ pkgs.mkShell {
       vulkan-loader
       harfbuzz
       fontconfig
-      lua5_4
+      wasmtime.lib # libwasmtime.so at runtime (test + run)
     ]
   );
 
-  # build.zig embeds fennel.lua from the pinned package (hermetic: the
-  # path always comes from the npins nixpkgs, never ambient state).
-  WEFT_FENNEL_LUA = "${pkgs.lua54Packages.fennel}/share/lua/5.4/fennel.lua";
+  # Wasmtime C embedding API: headers (dev) + libwasmtime.so (lib). No
+  # pkg-config is shipped, so build.zig consumes these paths directly.
+  WEFT_WASMTIME_DEV = "${pkgs.wasmtime.dev}";
+  WEFT_WASMTIME_LIB = "${pkgs.wasmtime.lib}";
+
+  # QuickJS-ng source (milestone 5 / 06B): user config runs as `config.js` in
+  # `quickjs.wasm`. build.zig compiles the engine to a wasm32-wasi reactor with
+  # `zig cc` from this unpacked source (srcOnly → the .c/.h tree), then embeds
+  # the module. Pinned store path, same env-var idiom as the grammars.
+  WEFT_QUICKJS_NG_SRC = "${pkgs.srcOnly pkgs.quickjs-ng}";
 
   # Grammar packages (parser shared object + queries/highlights.scm).
   # The parser paths are baked in for runtime dlopen; the queries are

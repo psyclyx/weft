@@ -467,141 +467,26 @@ const TestHost = struct {
     }
 };
 
-test "plugin: fennel eval, scripted command, peer edits converge" {
+// ── Authority: attribution + the grade gate (plan 01, phases 1–2) ───
+
+test "authority: a view grade refuses edits, forms no ghost, and echoes" {
     const gpa = t.allocator;
     var host: TestHost = undefined;
     try TestHost.init(gpa, &host);
     defer host.deinit(gpa);
 
-    const p = try core.Plugin.create(gpa, &host.ctx, "test-plugin");
-    defer p.destroy();
+    host.editor().doc.my_grant = .view;
+    const before = host.editor().text().byteLen();
+    // The user path (default principal) is refused; the replica is untouched
+    // and an honest echo is set — no divergent local ghost.
+    _ = try core.command.run(&host.commands, &host.ctx, "insert-text", &.{.{ .string = "x" }});
+    try t.expectEqual(before, host.editor().text().byteLen());
+    try t.expect(host.echo_line.items.len > 0);
 
-    // Fennel is alive.
-    const three = try p.eval(gpa, "(+ 1 2)", "test");
-    defer gpa.free(three);
-    try t.expectEqualStrings("3", three);
-
-    // The plugin edits through its own replica and commits — a peer.
-    try host.editor().insertText(gpa, "hello world");
-    const banner = try p.eval(gpa,
-        \\(local text (weft.snapshot))
-        \\(weft.insert 0 ";; ")
-        \\(weft.commit)
-        \\(string.len text)
-    , "test");
-    defer gpa.free(banner);
-    try t.expectEqualStrings("11", banner);
-    {
-        const s = try host.editor().text().toOwnedSlice(gpa);
-        defer gpa.free(s);
-        try t.expectEqualStrings(";; hello world", s);
-    }
-
-    // A scripted command registered through the same registry
-    // everything else uses, invocable from Zig by name.
-    const reg = try p.eval(gpa,
-        \\(weft.command "shout" "Upper-case a string."
-        \\  (fn [s] (string.upper s)))
-        \\true
-    , "test");
-    defer gpa.free(reg);
-    const res = try core.command.run(&host.commands, &host.ctx, "shout", &.{
-        .{ .string = "graft" },
-    });
-    try t.expectEqualStrings("GRAFT", res.string);
-
-    // Scripted commands can call built-ins back through weft.run.
-    const undo_res = try p.eval(gpa, "(weft.run \"undo\")", "test");
-    defer gpa.free(undo_res);
-    {
-        const s = try host.editor().text().toOwnedSlice(gpa);
-        defer gpa.free(s);
-        // The user's insert is undone; the plugin's banner survives
-        // (selective undo does not touch other peers' work).
-        try t.expectEqualStrings(";; ", s);
-    }
-}
-
-test "plugin ABI: motion/text primitives enable fennel-composed motions" {
-    const gpa = t.allocator;
-    var host: TestHost = undefined;
-    try TestHost.init(gpa, &host);
-    defer host.deinit(gpa);
-    const p = try core.Plugin.create(gpa, &host.ctx, "test");
-    defer p.destroy();
-    try host.editor().insertText(gpa, "foo bar baz"); // f0 o1 o2 sp3 b4 …
-
-    // slice reads a byte range.
-    {
-        const r = try p.eval(gpa, "(weft.slice 4 7)", "t");
-        defer gpa.free(r);
-        try t.expectEqualStrings("bar", r);
-    }
-    // jump places the live cursor; cursor() reads it back.
-    {
-        const r = try p.eval(gpa, "(weft.jump 4) (tostring (weft.cursor))", "t");
-        defer gpa.free(r);
-        try t.expectEqualStrings("4", r);
-    }
-    try t.expectEqual(@as(usize, 4), host.editor().cursorOffset());
-    // line() reports the current line bounds (single line → 0..11, row 0).
-    {
-        const r = try p.eval(gpa, "(let [l (weft.line)] (.. l.start \"/\" l.end \"/\" l.row))", "t");
-        defer gpa.free(r);
-        try t.expectEqualStrings("0/11/0", r);
-    }
-    // selection() is nil with no mark; after set-mark it's the range.
-    {
-        const none = try p.eval(gpa, "(if (weft.selection) \"y\" \"n\")", "t");
-        defer gpa.free(none);
-        try t.expectEqualStrings("n", none);
-    }
-    gpa.free(try p.eval(gpa, "(weft.jump 4) (weft.run \"set-mark\") (weft.jump 7)", "t"));
-    {
-        const sel = try p.eval(gpa, "(let [s (weft.selection)] (weft.slice s.start s.end))", "t");
-        defer gpa.free(sel);
-        try t.expectEqualStrings("bar", sel);
-    }
-    // The composition the config now uses (find-char's heart): slice the
-    // line, string.find the target, jump to it — all in fennel.
-    gpa.free(try p.eval(gpa,
-        \\(let [text (weft.slice 0 11)
-        \\      i (string.find text "z" 1 true)]
-        \\  (weft.jump (- i 1)))
-    , "t"));
-    try t.expectEqual(@as(usize, 10), host.editor().cursorOffset()); // 'z' at index 10
-}
-
-test "plugin: fennel config binds keys and switches modes" {
-    const gpa = t.allocator;
-    var host: TestHost = undefined;
-    try TestHost.init(gpa, &host);
-    defer host.deinit(gpa);
-
-    const p = try core.Plugin.create(gpa, &host.ctx, "config");
-    defer p.destroy();
-
-    const out = try p.eval(gpa,
-        \\(weft.bind "default" "C-t" "doc-start")
-        \\(weft.bind "extra" "q" "quit")
-        \\(weft.mode)
-    , "init.fnl");
-    defer gpa.free(out);
-    try t.expectEqualStrings("default", out);
-
-    try t.expectEqualStrings("doc-start", host.keymap.lookup("C-t").?);
-    try t.expectEqual(@as(?[]const u8, null), host.keymap.lookup("q"));
-
-    const sw = try p.eval(gpa, "(weft.mode \"extra\")", "init.fnl");
-    defer gpa.free(sw);
-    try t.expectEqualStrings("quit", host.keymap.lookup("q").?);
-
-    // Dispatch a key end-to-end: lookup → run.
-    var buf: [32]u8 = undefined;
-    const spec = core.Keymap.keyspec(&buf, false, false, false, "q");
-    const cmd_name = host.keymap.lookup(spec).?;
-    _ = try core.command.run(&host.commands, &host.ctx, cmd_name, &.{});
-    try t.expect(host.quit);
+    // With edit grade restored, the same command applies.
+    host.editor().doc.my_grant = .own;
+    _ = try core.command.run(&host.commands, &host.ctx, "insert-text", &.{.{ .string = "x" }});
+    try t.expectEqual(before + 1, host.editor().text().byteLen());
 }
 
 // ── Syntax (milestone 7) ────────────────────────────────────────────
@@ -646,6 +531,48 @@ test "syntax: incremental highlight tracks edits and peer merges" {
     try t.expectEqual(core.syntax.Class.keyword, classes[const_at]);
     const str_at = std.mem.indexOf(u8, text, "\"str\"").?;
     try t.expectEqual(core.syntax.Class.string, classes[str_at + 1]);
+}
+
+test "syntax: tree queries — node-at-offset, ancestors, and captures" {
+    const gpa = t.allocator;
+    var doc = try Document.init(gpa, "user");
+    defer doc.deinit(gpa);
+    try doc.insert(gpa, 0, "const x = 42;\n");
+
+    const spec = core.syntax.forPath("demo.zig").?;
+    const syn = try core.syntax.Syntax.create(gpa, spec, &doc);
+    defer syn.destroy();
+
+    // node-at-offset: the "42" literal is a number node.
+    const num_at = std.mem.indexOf(u8, "const x = 42;\n", "42").?;
+    const node = syn.nodeAt(num_at).?;
+    try t.expectEqual(num_at, node.start);
+    try t.expectEqual(num_at + 2, node.end);
+    try t.expect(std.mem.indexOf(u8, node.kind, "integer") != null or
+        std.mem.indexOf(u8, node.kind, "number") != null);
+
+    // ancestors are outermost-first (root ... → the leaf at the offset).
+    const chain = try syn.ancestorsAt(gpa, num_at);
+    defer gpa.free(chain);
+    try t.expect(chain.len >= 2);
+    try t.expectEqualStrings("source_file", chain[0].kind); // zig grammar root
+    try t.expect(chain[chain.len - 1].start <= num_at and chain[chain.len - 1].end >= num_at + 2);
+
+    // an arbitrary query captures what it names — build it from the real
+    // grammar node kind so the test is grammar-version agnostic.
+    var qbuf: [64]u8 = undefined;
+    const scm = try std.fmt.bufPrint(&qbuf, "({s}) @n", .{node.kind});
+    const caps = try syn.queryCaptures(gpa, scm, .{ .start = 0, .end = doc.text().byteLen() });
+    defer {
+        for (caps) |cp| gpa.free(cp.name);
+        gpa.free(caps);
+    }
+    try t.expectEqual(@as(usize, 1), caps.len);
+    try t.expectEqualStrings("n", caps[0].name);
+    try t.expectEqual(num_at, caps[0].start);
+
+    // a malformed query traps (never a silent empty result).
+    try t.expectError(error.QueryLoad, syn.queryCaptures(gpa, "(nonsense_node", .{ .start = 0, .end = 1 }));
 }
 
 // ── Capabilities (phase 2, milestone 1) ─────────────────────────────
@@ -735,38 +662,6 @@ test "capability: stamped results rebase through later edits or discard" {
     // A stamp the document never produced → discard arm.
     const bogus = core.position.StampedRange.at("not-a-version", 0, 1);
     try t.expectEqual(@as(?stemma.Range, null), bogus.rebase(&host.editor().doc));
-}
-
-test "capability: feed layer spans shift with edits; scripted provider races" {
-    const gpa = t.allocator;
-    var host: TestHost = undefined;
-    try TestHost.init(gpa, &host);
-    defer host.deinit(gpa);
-    try host.editor().insertText(gpa, "warn here later");
-
-    // Feed: publish an anchored span, then edit in front of it.
-    const layer = try host.caps.registerFeed(&host.editor().doc, "edit/diagnostics", "diagnostics", .host, "test.feed");
-    try layer.publishSpans(gpa, &.{.{ .start = 5, .end = 9, .kind = 2, .message = "hm" }});
-    try host.editor().doc.insert(gpa, 0, "____");
-    const d = layer.resolvedSpan(0);
-    try t.expectEqual(@as(usize, 9), d.start);
-    try t.expectEqual(@as(usize, 13), d.end);
-    try t.expectEqual(@as(u32, 2), d.kind);
-
-    // Scripted provider through the same registry (the only coupling).
-    const p = try core.Plugin.create(gpa, &host.ctx, "capdemo");
-    defer p.destroy();
-    const reg = try p.eval(gpa,
-        \\(weft.provide "edit/completion" (fn [prefix] [(.. prefix "_scripted")]))
-        \\true
-    , "capdemo");
-    defer gpa.free(reg);
-    const id = (try host.caps.fire(.completion, &host.editor().doc, null, .{ .text = "wa" })).?;
-    defer host.caps.finish(id);
-    const merged = try host.caps.mergedCompletion(gpa, id);
-    defer gpa.free(merged);
-    try t.expectEqual(@as(usize, 1), merged.len);
-    try t.expectEqualStrings("wa_scripted", merged[0].text);
 }
 
 // ── Tree-sitter over capabilities (phase 2, milestone 2) ────────────
@@ -976,48 +871,6 @@ test "buffers: switch restores modes, close/create keep the set sane" {
     try t.expectEqual(id1.integer, id2.integer);
 }
 
-test "tool buffer: plugin peer + sections + read-only (magit-class recipe)" {
-    const gpa = t.allocator;
-    var host: TestHost = undefined;
-    try TestHost.init(gpa, &host);
-    defer host.deinit(gpa);
-
-    const p = try core.Plugin.create(gpa, &host.ctx, "status-tool");
-    defer p.destroy();
-
-    // The whole rev-3 recipe from fennel: create a buffer, generate
-    // content as a plugin peer, publish sections, mark read-only.
-    const out = try p.eval(gpa,
-        \\(weft.run "buffer-create" "*status*")
-        \\(weft.insert 0 "== staged ==\nfile-a\n== unstaged ==\nfile-b\n")
-        \\(weft.commit)
-        \\(weft.layer_publish "sections" [[0 12 1 "staged"] [13 19 2 "entry"] [20 34 1 "unstaged"] [35 41 2 "entry"]])
-        \\(weft.run "buffer-read-only" true)
-        \\(weft.section_at "sections" 15)
-    , "tool.fnl");
-    defer gpa.free(out);
-
-    const buf = host.buffers.active();
-    try t.expectEqualStrings("*status*", buf.name);
-    try t.expect(buf.read_only);
-    try t.expect(std.mem.startsWith(u8, out, "13")); // innermost section at 15
-
-    // Refresh = the peer committing again; merges like any collaborator.
-    const out2 = try p.eval(gpa,
-        \\(weft.insert 7 "!")
-        \\(weft.commit)
-    , "tool2.fnl");
-    gpa.free(out2);
-    const text = try host.editor().text().toOwnedSlice(gpa);
-    defer gpa.free(text);
-    try t.expect(std.mem.indexOf(u8, text, "!") != null);
-
-    // Sections survive the edit (anchored spans shift).
-    const out3 = try p.eval(gpa, "(weft.section_at \"sections\" 0)", "tool3.fnl");
-    defer gpa.free(out3);
-    try t.expect(std.mem.startsWith(u8, out3, "0"));
-}
-
 test "editor: bulk load — big file opens as a compacted base, edits and saves" {
     const gpa = t.allocator;
     var tmp_dir = t.tmpDir(.{});
@@ -1048,120 +901,6 @@ test "editor: bulk load — big file opens as a compacted base, edits and saves"
     try ed.requestSave(gpa);
     while (!ed.pollSave(gpa)) std.Thread.yield() catch {};
     try t.expect(!try ed.isDirty(gpa));
-}
-
-test "bundled plugin: buffers/status/help built in fennel over introspection" {
-    const gpa = t.allocator;
-    var host: TestHost = undefined;
-    try TestHost.init(gpa, &host);
-    defer host.deinit(gpa);
-    const run = core.command.run;
-
-    const std_plugin = try core.Plugin.create(gpa, &host.ctx, "std");
-    defer std_plugin.destroy();
-    gpa.free(try std_plugin.eval(gpa, @embedFile("../bundled.fnl"), "bundled.fnl"));
-
-    // A second buffer with content so dirty/label logic has teeth.
-    _ = try run(&host.commands, &host.ctx, "buffer-create", &.{.{ .string = "notes" }});
-    try host.editor().insertText(gpa, "hello");
-
-    // status → echo describes the active buffer.
-    _ = try run(&host.commands, &host.ctx, "status", &.{});
-    try t.expect(std.mem.indexOf(u8, host.echo_line.items, "notes") != null);
-    try t.expect(std.mem.indexOf(u8, host.echo_line.items, "modified") != null);
-
-    // buffers → a live pick whose entries carry docstrings; accepting
-    // the scratch row switches buffers.
-    _ = try run(&host.commands, &host.ctx, "buffers", &.{});
-    try t.expect(host.pick.active);
-    try t.expect(host.pick.filtered.items.len == 2);
-    var saw_doc = false;
-    for (0..host.pick.filtered.items.len) |i| {
-        if (host.pick.docOf(i).len > 0) saw_doc = true;
-    }
-    try t.expect(saw_doc);
-    // Filter to the scratch buffer and accept.
-    _ = try run(&host.commands, &host.ctx, "pick-input", &.{.{ .string = "scratch" }});
-    _ = try run(&host.commands, &host.ctx, "pick-accept", &.{});
-    try t.expect(!host.pick.active);
-    try t.expectEqualStrings("*scratch*", host.buffers.active().name);
-
-    // help → pick over commands with summaries as docs; frecency: the
-    // accepted command ranks first on the next empty-query open.
-    _ = try run(&host.commands, &host.ctx, "help", &.{});
-    try t.expect(host.pick.active);
-    _ = try run(&host.commands, &host.ctx, "pick-input", &.{.{ .string = "buffer-next" }});
-    _ = try run(&host.commands, &host.ctx, "pick-accept", &.{}); // runs buffer-next
-    try t.expectEqualStrings("notes", host.buffers.active().name);
-    _ = try run(&host.commands, &host.ctx, "help", &.{});
-    try t.expectEqualStrings("buffer-next", host.pick.selection().?);
-    _ = try run(&host.commands, &host.ctx, "pick-cancel", &.{});
-
-    // Tab completion: a query that is a strict subsequence completes to
-    // the full command name (sole match).
-    _ = try run(&host.commands, &host.ctx, "help", &.{});
-    _ = try run(&host.commands, &host.ctx, "pick-input", &.{.{ .string = "svas" }});
-    _ = try run(&host.commands, &host.ctx, "pick-complete", &.{});
-    try t.expectEqualStrings("save-as", host.pick.query.items);
-    _ = try run(&host.commands, &host.ctx, "pick-cancel", &.{});
-}
-
-test "plugin: weft.pick with a native file source streams candidates" {
-    const gpa = t.allocator;
-    // A known tree under the test's writable cache dir (same mechanism
-    // the ShellFs/fs_source tests rely on), so the assertion is
-    // cwd-independent.
-    var tmp = t.tmpDir(.{});
-    defer tmp.cleanup();
-    {
-        var threaded: std.Io.Threaded = .init(gpa, .{});
-        defer threaded.deinit();
-        const io = threaded.io();
-        try tmp.dir.writeFile(io, .{ .sub_path = "one.zig", .data = "" });
-        try tmp.dir.createDirPath(io, "sub");
-        try tmp.dir.writeFile(io, .{ .sub_path = "sub/two.zig", .data = "" });
-    }
-    const root = try std.fmt.allocPrint(gpa, ".zig-cache/tmp/{s}", .{tmp.sub_path});
-    defer gpa.free(root);
-
-    var host: TestHost = undefined;
-    try TestHost.init(gpa, &host);
-    const p = try core.Plugin.create(gpa, &host.ctx, "std");
-    // Teardown order (LIFO): close any open pick FIRST (its Lua cleanup
-    // needs a live VM + ctx), then destroy the plugin (needs live
-    // ctx.caps), then the host. Robust even if an assertion returns
-    // early with the pick still open.
-    defer host.deinit(gpa);
-    defer p.destroy();
-    defer if (host.pick.active) {
-        _ = core.command.run(&host.commands, &host.ctx, "pick-cancel", &.{}) catch {};
-    };
-
-    // The LocalFinder walks on the pool; pick.tick folds candidates in.
-    const src = try std.fmt.allocPrint(gpa,
-        \\(weft.pick "file" nil (fn [_] nil) {{:source "files" :root "{s}" :free_text true}})
-    , .{root});
-    defer gpa.free(src);
-    gpa.free(try p.eval(gpa, src, "t"));
-    try t.expect(host.pick.active);
-
-    var folded = false;
-    for (0..2000) |_| {
-        if (try host.pick.tick(&host.ctx)) folded = true;
-        if (folded and host.pick.items.items.len > 0) break;
-        std.Thread.yield() catch {};
-    }
-    try t.expectEqual(@as(usize, 2), host.pick.items.items.len);
-    var saw_nested = false;
-    for (host.pick.items.items) |it| {
-        if (std.mem.endsWith(u8, it, "two.zig")) saw_nested = true;
-    }
-    try t.expect(saw_nested);
-
-    // Close (runs the source's cancel + the accept-ref cleanup) before
-    // teardown so the worker drains cleanly under the pool.
-    _ = try core.command.run(&host.commands, &host.ctx, "pick-cancel", &.{});
-    try t.expect(!host.pick.active);
 }
 
 test "completion UI: source-driven fold into the pick; accept replaces the prefix" {

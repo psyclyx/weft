@@ -31,8 +31,10 @@ pub fn build(b: *std.Build) void {
     // fonts, not pinned — see src/gfx/fonts.zig.
     exe_mod.linkSystemLibrary("fontconfig", .{});
     addWaylandProtocols(b, exe_mod);
-    addScripting(b, exe_mod);
     addSyntax(b, exe_mod);
+    addWasm(b, exe_mod);
+    addGuests(b, exe_mod);
+    addQuickjs(b, exe_mod);
 
     const exe = b.addExecutable(.{
         .name = "weft",
@@ -72,29 +74,104 @@ pub fn build(b: *std.Build) void {
         .root_source_file = snail_dep.path("assets/DejaVuSansMono.ttf"),
     });
     test_mod.linkSystemLibrary("fontconfig", .{}); // View tests resolve faces
-    addScripting(b, test_mod);
     addSyntax(b, test_mod);
+    addWasm(b, test_mod);
+    addGuests(b, test_mod);
+    addQuickjs(b, test_mod);
     const unit_tests = b.addTest(.{ .root_module = test_mod });
     const run_tests = b.addRunArtifact(unit_tests);
     const test_step = b.step("test", "Run unit tests");
     test_step.dependOn(&run_tests.step);
 }
 
-/// Lua 5.4 + the embedded fennel compiler (milestone 5). The fennel.lua
-/// path comes from the nix shell (pinned package) — hermetic without a
-/// vendored copy.
-fn addScripting(b: *std.Build, mod: *std.Build.Module) void {
-    mod.linkSystemLibrary("lua", .{});
-    const fennel = b.graph.environ_map.get("WEFT_FENNEL_LUA") orelse
-        @panic("WEFT_FENNEL_LUA not set — build inside the nix shell");
-    mod.addAnonymousImport("fennel.lua", .{
-        .root_source_file = .{ .cwd_relative = fennel },
-    });
-}
-
 /// Tree-sitter (milestone 7): the library links normally; grammar
 /// packages contribute a runtime dlopen path (baked via build options)
 /// and an embedded highlight query, both from pinned store paths.
+/// Compile the reference wasm GUEST plugins (src/guest/*.zig) to
+/// `wasm32-freestanding` and embed their `.wasm` bytes so the host can run
+/// them under wasmtime (milestone 5: the catalog recompiled as `.wasm`). A
+/// reactor module — no `_start`, exported functions + memory via rdynamic.
+fn addGuests(b: *std.Build, host_mod: *std.Build.Module) void {
+    const wasm_target = b.resolveTargetQuery(.{ .cpu_arch = .wasm32, .os_tag = .freestanding });
+    const guests = [_]struct { src: []const u8, import: []const u8 }{
+        .{ .src = "src/guest/hello.zig", .import = "guest_hello_wasm" },
+        .{ .src = "src/guest/plugin.zig", .import = "guest_plugin_wasm" },
+        .{ .src = "src/guest/edit.zig", .import = "guest_edit_wasm" },
+        .{ .src = "src/guest/complete.zig", .import = "guest_complete_wasm" },
+        .{ .src = "src/guest/demo_config.zig", .import = "guest_demo_config_wasm" },
+        .{ .src = "src/guest/project.zig", .import = "guest_project_wasm" },
+        .{ .src = "src/guest/palette.zig", .import = "guest_palette_wasm" },
+        .{ .src = "src/guest/structural.zig", .import = "guest_structural_wasm" },
+        .{ .src = "src/guest/region.zig", .import = "guest_region_wasm" },
+        .{ .src = "src/guest/shell.zig", .import = "guest_shell_wasm" },
+        .{ .src = "src/guest/vim.zig", .import = "guest_vim_wasm" },
+        .{ .src = "src/guest/rogue.zig", .import = "guest_rogue_wasm" },
+    };
+    inline for (guests) |g| {
+        const guest = b.addExecutable(.{
+            .name = std.fs.path.stem(g.src),
+            .root_module = b.createModule(.{
+                .root_source_file = b.path(g.src),
+                .target = wasm_target,
+                .optimize = .ReleaseSmall,
+            }),
+        });
+        guest.entry = .disabled; // reactor: called through exports, not _start
+        guest.rdynamic = true; // export the `export fn`s + memory
+        host_mod.addAnonymousImport(g.import, .{ .root_source_file = guest.getEmittedBin() });
+    }
+}
+
+/// QuickJS-ng compiled to a `wasm32-wasi` reactor (milestone 5 / 06B): the
+/// runtime behind user `config.js`. We invoke the same `zig cc` that builds
+/// weft on the pinned quickjs-ng source (`WEFT_QUICKJS_NG_SRC`, an unpacked
+/// srcOnly tree) plus our embedding shim (src/quickjs/weft_qjs.c), following
+/// quickjs-ng's own WASI recipe, and embed the resulting module. Reactor
+/// model: exports `weft_eval`/`malloc`/`free`/`memory`, imports only
+/// `wasi_snapshot_preview1` (the host provides those through wasmtime).
+fn addQuickjs(b: *std.Build, host_mod: *std.Build.Module) void {
+    const ng = b.graph.environ_map.get("WEFT_QUICKJS_NG_SRC") orelse
+        @panic("WEFT_QUICKJS_NG_SRC not set — build inside the nix shell");
+    const cc = b.addSystemCommand(&.{
+        b.graph.zig_exe,           "cc",
+        "-target",                 "wasm32-wasi",
+        "-mexec-model=reactor",    "-Os",
+        "-D_GNU_SOURCE",           "-D_WASI_EMULATED_PROCESS_CLOCKS",
+        "-D_WASI_EMULATED_SIGNAL",
+    });
+    cc.addArg(b.fmt("-I{s}", .{ng}));
+    // The engine core (quickjs-ng's `qjs` library sources).
+    inline for (.{ "dtoa.c", "libregexp.c", "libunicode.c", "quickjs.c" }) |f| {
+        cc.addArg(b.pathJoin(&.{ ng, f }));
+    }
+    // Our embedding shim (tracked — rebuilds when it changes).
+    cc.addFileArg(b.path("src/quickjs/weft_qjs.c"));
+    cc.addArgs(&.{
+        "-lwasi-emulated-process-clocks",
+        "-lwasi-emulated-signal",
+        "-Wl,--export=weft_eval",
+        "-Wl,--export=malloc",
+        "-Wl,--export=free",
+        "-o",
+    });
+    const out = cc.addOutputFileArg("quickjs.wasm");
+    host_mod.addAnonymousImport("quickjs_wasm", .{ .root_source_file = out });
+}
+
+/// Wasmtime C embedding API (milestone 5): the plugin sandbox runtime.
+/// Wasmtime ships no pkg-config, so — like the grammar packages — we take
+/// the dev (headers) and lib (libwasmtime.so) store paths from the nix shell
+/// and wire them explicitly, then link the library.
+fn addWasm(b: *std.Build, mod: *std.Build.Module) void {
+    const dev = b.graph.environ_map.get("WEFT_WASMTIME_DEV") orelse
+        @panic("WEFT_WASMTIME_DEV not set — build inside the nix shell");
+    const lib = b.graph.environ_map.get("WEFT_WASMTIME_LIB") orelse
+        @panic("WEFT_WASMTIME_LIB not set — build inside the nix shell");
+    mod.addIncludePath(.{ .cwd_relative = b.pathJoin(&.{ dev, "include" }) });
+    mod.addLibraryPath(.{ .cwd_relative = b.pathJoin(&.{ lib, "lib" }) });
+    mod.linkSystemLibrary("wasmtime", .{});
+}
+
 fn addSyntax(b: *std.Build, mod: *std.Build.Module) void {
     mod.linkSystemLibrary("tree-sitter", .{});
     const opts = b.addOptions();

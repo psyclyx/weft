@@ -6,7 +6,7 @@
 //! the hot-section fence; frame + input latency percentiles log
 //! continuously.
 //!
-//!   weft [file] [--font path.ttf] [--em N] [--config init.fnl]
+//!   weft [file] [--font path.ttf] [--em N] [--config config.js]
 
 const std = @import("std");
 const wayland = @import("platform/wayland.zig");
@@ -211,25 +211,35 @@ pub fn main(init: std.process.Init) !void {
         .data = &my_identity,
     });
 
-    // The bundled plugin: UI policy (buffers picker, status, help) in
-    // fennel over core mechanisms — loaded before user config so the
-    // same names can be rebound there.
-    const std_plugin = try core.Plugin.create(gpa, &cmd_ctx, "std");
-    defer std_plugin.destroy();
+    // ── Config: the Zig catalog IS the config (plan 06C, Lua removed) ──
+    // The keymap (`vim`), the UI policy (`std`: palette/buffers/status), and
+    // the feature plugins are Zig modules over `abi.zig` — each exactly what
+    // a user could write against the same door, no core privilege. This is
+    // the reborn `bundled.fnl` + `init.fnl`. The effect services the ABI's
+    // Group D/E need are wired here.
+    var abi_kv: core.kv.Store = .empty;
+    defer abi_kv.deinit(gpa);
+    var abi_subs: core.subbuffer.SubBuffers = .empty;
+    defer abi_subs.deinit(gpa);
+    var abi_loop = core.async_loop.Loop.init(gpa, pool, core.task.nowNs);
+    defer abi_loop.deinit();
+    var abi_host = core.abi.Host.init(&cmd_ctx, .{ .kv = &abi_kv, .loop = &abi_loop, .subbuffers = &abi_subs, .syntax_of = resolveSyntax });
+    defer abi_host.deinit();
     {
-        const out = std_plugin.eval(gpa, @embedFile("bundled.fnl"), "bundled.fnl") catch blk: {
-            std.log.err("bundled plugin failed to load", .{});
-            break :blk try gpa.dupe(u8, "");
-        };
-        gpa.free(out);
+        var catalog_buf: [core.catalog.count]core.abi.Plugin = undefined;
+        for (core.catalog.all(&catalog_buf)) |p| abi_host.load(p) catch |e|
+            std.log.warn("catalog: {s} failed to load: {t}", .{ p.describe().name, e });
     }
 
-    // Config runs before language attach so `grammar-add`/`lsp-add`
-    // apply to the file being opened.
-    const config_plugin = try core.Plugin.create(gpa, &cmd_ctx, "config");
-    defer config_plugin.destroy();
-    _ = try commands.bind(gpa, "eval", core.plugin.evalCommand(config_plugin));
-    try loadConfig(gpa, config_plugin, args.config, init.minimal.environ);
+    // ── User config: config.js in the quickjs.wasm sandbox (plan 06B) ──
+    // The std catalog above provides the commands; the user's `config.js`
+    // (via --config) layers personal bindings/actions on top, reaching the
+    // editor only through the `weft.*` grants. Absent or broken config is a
+    // warning, never fatal — the editor still runs on the std defaults.
+    if (args.config) |config_path| {
+        loadJsConfig(gpa, &cmd_ctx, config_path) catch |e|
+            std.log.warn("config: {s} failed to load: {t}", .{ config_path, e });
+    }
 
     // ── Per-buffer providers (syntax + LSP hang off Buffer.frontend) ──
     var attach_deps: AttachDeps = .{
@@ -660,6 +670,9 @@ pub fn main(init: std.process.Init) !void {
         // finder, dir browser) — a no-op for a static or source-less
         // pick. Completion now rides this instead of a bespoke tick.
         if (try pick_state.tick(&cmd_ctx)) view_dirty = true;
+        // Deliver native async completions (subprocess/timer output, deferred
+        // edits) on the frame thread; a completion repaints.
+        if (abi_loop.tick()) view_dirty = true;
         // Apply connection intents recorded by commands (outside the
         // hot section: connect blocks on TCP, disconnect joins threads).
         if (share_ctx.disconnect_requested) {
@@ -1367,6 +1380,18 @@ fn identityHandler(ctx: *core.command.Context, data: ?*anyopaque, args: []const 
     return ok_echo(ctx, std.fmt.bufPrint(&buf, "identity {s}", .{&id.fingerprint()}) catch "identity");
 }
 
+/// Load and run the user's `config.js` in the quickjs.wasm sandbox (plan
+/// 06B). Reads the file, spins a one-shot wasm engine, and evals — the config
+/// wires the editor only through the `weft.*` grants. The engine is scoped to
+/// the eval: config is a startup declaration, not a resident runtime.
+fn loadJsConfig(gpa: std.mem.Allocator, ctx: *core.command.Context, path: []const u8) !void {
+    const src = try core.file.readAlloc(gpa, path);
+    defer gpa.free(src);
+    var engine = try core.wasm.Engine.init();
+    defer engine.deinit();
+    try core.quickjs.evalConfig(&engine, ctx, src);
+}
+
 /// Parse a 24-char fingerprint argument (five base32 groups) into bytes.
 fn parseFingerprint(s: []const u8) ?[24]u8 {
     if (s.len != 24) return null;
@@ -1471,36 +1496,6 @@ fn dispatchKey(ctx: *core.command.Context, view: *view_mod.View, ev: wayland.Key
             std.log.warn("{s} failed: {t}", .{ tc, err });
         };
     }
-}
-
-/// Resolve and evaluate the user config: `--config` wins, else
-/// $XDG_CONFIG_HOME/weft/init.fnl, else ~/.config/weft/init.fnl.
-/// Read-only; a missing default config means built-in defaults.
-fn loadConfig(gpa: std.mem.Allocator, plugin: *core.Plugin, override: ?[]const u8, environ: std.process.Environ) !void {
-    var buf: [512]u8 = undefined;
-    const path = override orelse blk: {
-        if (environ.getPosix("XDG_CONFIG_HOME")) |x| {
-            break :blk std.fmt.bufPrint(&buf, "{s}/weft/init.fnl", .{x}) catch return;
-        }
-        if (environ.getPosix("HOME")) |h| {
-            break :blk std.fmt.bufPrint(&buf, "{s}/.config/weft/init.fnl", .{h}) catch return;
-        }
-        return;
-    };
-    const src = core.file.readAlloc(gpa, path) catch |err| switch (err) {
-        error.FileNotFound => {
-            if (override != null) std.log.warn("config not found: {s}", .{path});
-            return;
-        },
-        else => |e| return e,
-    };
-    defer gpa.free(src);
-    const out = plugin.eval(gpa, src, "init.fnl") catch {
-        std.log.err("config failed (see above): {s}", .{path});
-        return;
-    };
-    gpa.free(out);
-    std.log.info("config loaded: {s}", .{path});
 }
 
 /// `grammar-add <ext> <package-dir> <symbol>` — grammars as data.
@@ -1616,6 +1611,13 @@ const Attach = struct {
     lsp: ?*core.lsp.Lsp = null,
     seen_commits: usize = 0,
 };
+
+/// The `abi.SyntaxResolver` the catalog uses: reach a buffer's live grammar
+/// through the shell-owned frontend slot (core cannot; the host can).
+fn resolveSyntax(buf: *core.Buffers.Buffer) ?*core.syntax.Syntax {
+    const at: *Attach = @ptrCast(@alignCast(buf.frontend orelse return null));
+    return at.syntax;
+}
 
 const AttachDeps = struct {
     gpa: std.mem.Allocator,
