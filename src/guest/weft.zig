@@ -111,6 +111,7 @@ extern "weft" fn wl_fs_read(path: u32, path_len: u32, out_ptr: u32, out_cap: u32
 extern "weft" fn wl_fs_write(path: u32, path_len: u32, ptr: u32, len: u32) i32;
 extern "weft" fn wl_fs_append(path: u32, path_len: u32, ptr: u32, len: u32) i32;
 extern "weft" fn wl_fs_list(auth: u32, auth_len: u32, path: u32, path_len: u32, out_ptr: u32, out_cap: u32) i32;
+extern "weft" fn wl_fs_list_async(auth: u32, auth_len: u32, path: u32, path_len: u32, dest: u32, dest_len: u32) i32;
 
 /// Shared scratch for host→guest byte returns. A read wrapper (`slice`,
 /// `path`, `kvGet`) returns a slice INTO this buffer, valid until the next
@@ -684,4 +685,11 @@ pub fn fsList(authority: []const u8, dir: []const u8) ?[]const u8 {
     const n = wl_fs_list(p(authority.ptr), @intCast(authority.len), p(dir.ptr), @intCast(dir.len), p(&scratch), scratch.len);
     if (n < 0) return null;
     return scratch[0..@intCast(n)];
+}
+/// Asynchronously list a REMOTE directory ("peer"): the listing is delivered
+/// into the `dest` buffer a few frames later (no blocking round-trip). Returns
+/// true if queued (a connected session exists), false otherwise. For local
+/// listings use the synchronous `fsList("here", …)`.
+pub fn fsListAsync(authority: []const u8, dir: []const u8, dest: []const u8) bool {
+    return wl_fs_list_async(p(authority.ptr), @intCast(authority.len), p(dir.ptr), @intCast(dir.len), p(dest.ptr), @intCast(dest.len)) == 0;
 }

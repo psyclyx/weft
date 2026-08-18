@@ -13,6 +13,10 @@ const dired_buf = "*dired*";
 /// The directory currently listed (paths are built relative to it).
 var cwd_buf: [1024]u8 = undefined;
 var cwd_len: usize = 0;
+/// Which locus we're browsing: local ("here") or the connected peer's shared
+/// root. `dired` opens local; `dired-peer` opens the peer (dired on a coworker's
+/// tree — the locus-respect the design wants).
+var peer_mode: bool = false;
 
 fn cwd() []const u8 {
     return cwd_buf[0..cwd_len];
@@ -25,6 +29,7 @@ fn setCwd(path: []const u8) void {
 const Cmd = struct { name: []const u8, handler: *const fn () void };
 const cmds = [_]Cmd{
     .{ .name = "dired", .handler = open },
+    .{ .name = "dired-peer", .handler = openPeer },
     .{ .name = "dired-open", .handler = openEntry },
     .{ .name = "dired-up", .handler = up },
     .{ .name = "dired-refresh", .handler = refresh },
@@ -52,15 +57,25 @@ export fn on_command(id: u32) void {
 /// `/` — the marker `openEntry` uses to decide descend vs open.
 fn list(dir: []const u8) void {
     setCwd(dir);
-    const listing = weft.fsList("here", dir) orelse return; // borrows the shared scratch
-    weft.runStr("buffer-create", dired_buf); // create/focus the tool buffer (static name, scratch intact)
-    // Replace the whole buffer with the fresh listing (handles refresh too).
-    weft.edit(.{ .start = 0, .end = weft.byteLen() }, listing);
-    weft.jump(0);
+    weft.runStr("buffer-create", dired_buf); // create/focus the tool buffer
+    if (peer_mode) {
+        // Remote (peer) listing is async: it lands in *dired* a few frames
+        // later via the session's RemoteFs; no blocking round-trip here.
+        _ = weft.fsListAsync("peer", dir, dired_buf);
+    } else {
+        const listing = weft.fsList("here", dir) orelse return; // borrows scratch
+        weft.edit(.{ .start = 0, .end = weft.byteLen() }, listing);
+        weft.jump(0);
+    }
     weft.setMode("dired");
 }
 
 fn open() void {
+    peer_mode = false;
+    list(".");
+}
+fn openPeer() void {
+    peer_mode = true;
     list(".");
 }
 fn refresh() void {

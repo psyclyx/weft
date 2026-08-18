@@ -45,6 +45,14 @@ const Args = struct {
     /// With --connect: open the host's document as an editable partial
     /// checkout (content follows the cursor; huge files open instantly).
     partial: bool = false,
+    /// --share-root <dir>: opt in to serving a filesystem root to peers over
+    /// collab (dired-on-a-peer, remote fs). Null = don't serve any fs — the
+    /// SAFE default (a peer gets nothing). fs access is separate from --access
+    /// (that gates the document).
+    share_root: ?[]const u8 = null,
+    /// --share-fs <none|read|rw>: the access peers get to --share-root. Default
+    /// none (deny) even when a root is set, so sharing is a deliberate choice.
+    share_fs: core.peer_fs.Access = .none,
 };
 
 fn parseArgs(process_args: std.process.Args) Args {
@@ -67,6 +75,15 @@ fn parseArgs(process_args: std.process.Args) Args {
             if (it.next()) |v| out.listen = std.fmt.parseInt(u16, v, 10) catch null;
         } else if (std.mem.eql(u8, a, "--access")) {
             if (it.next()) |v| out.access = core.session.Access.parse(v) orelse out.access;
+        } else if (std.mem.eql(u8, a, "--share-root")) {
+            out.share_root = it.next() orelse out.share_root;
+        } else if (std.mem.eql(u8, a, "--share-fs")) {
+            if (it.next()) |v| out.share_fs = if (std.mem.eql(u8, v, "read"))
+                .read
+            else if (std.mem.eql(u8, v, "rw") or std.mem.eql(u8, v, "read_write"))
+                .read_write
+            else
+                .none;
         } else if (std.mem.eql(u8, a, "--connect")) {
             out.connect = it.next() orelse out.connect;
         } else if (std.mem.eql(u8, a, "--token")) {
@@ -344,6 +361,33 @@ pub fn main(init: std.process.Init) !void {
     // accepts N peers, started at boot (--listen) or at runtime (listen).
     var hub: ?core.hub.Hub = null;
     defer if (hub) |*h| h.deinit();
+    // Opt-in filesystem sharing (host side): a confined root served to peers.
+    // Default off — a peer gets nothing unless the host passed --share-root.
+    var peer_fs_root: ?core.rooted_fs.RootedFs = null;
+    defer if (peer_fs_root) |*r| r.close();
+    if (args.share_root) |root_dir| {
+        if (gpa.dupeZ(u8, root_dir)) |rz| {
+            defer gpa.free(rz);
+            peer_fs_root = core.rooted_fs.RootedFs.open(rz.ptr) catch blk: {
+                std.log.warn("share-root: cannot open '{s}'", .{root_dir});
+                break :blk null;
+            };
+        } else |_| {}
+    }
+    // Client side: correlate .peer fs replies for a connected session, and the
+    // bridge the guest queues async LIST requests through (dired-on-a-peer).
+    var remote_fs = core.session.RemoteFs.init(gpa);
+    defer remote_fs.deinit();
+    var peer_fs_bridge = core.wasm_host.PeerFsBridge{ .gpa = gpa };
+    core.wasm_host.setPeerFsBridge(&peer_fs_bridge);
+    defer peer_fs_bridge.deinit();
+    defer core.wasm_host.setPeerFsBridge(null);
+    var peer_fs_inflight: std.AutoHashMapUnmanaged(u64, []u8) = .empty;
+    defer {
+        var pit = peer_fs_inflight.valueIterator();
+        while (pit.next()) |v| gpa.free(v.*);
+        peer_fs_inflight.deinit(gpa);
+    }
     if (args.connect) |hostport| {
         fd_link = .{ .fd = try core.session.tcpConnect(hostport) };
         collab_session = try core.session.Session.create(gpa, fd_link.link(), .client, args.token, .own, &my_identity);
@@ -352,6 +396,7 @@ pub fn main(init: std.process.Init) !void {
         col.presence_layer = try caps.layers.claim(gpa, &ed0.doc, "presence", .replicated, "collab");
         // Host-scoped feeds (diagnostics) arrive over the wire.
         col.import_diag_layer = try caps.layers.claim(gpa, &ed0.doc, "diagnostics", .host, "remote-host");
+        col.remote_fs = &remote_fs; // client can list/read the host's shared root
         if (args.partial) {
             partial_state = core.session.PartialDoc.init(gpa, &ed0.doc);
             col.partial = &partial_state.?;
@@ -366,6 +411,8 @@ pub fn main(init: std.process.Init) !void {
         .partial = &partial_state,
         .session = &collab_session,
         .known = &known_peers,
+        .peer_fs_root = if (peer_fs_root) |*r| r else null,
+        .fs_grant = .{ .access = args.share_fs },
     };
     var split_ctx: SplitCtx = .{};
     attach_deps.share = &share_ctx;
@@ -953,6 +1000,41 @@ pub fn main(init: std.process.Init) !void {
                 p.want(collab_session.?, 0, cur -| (64 << 10), cur + (128 << 10)) catch {};
             }
             if (try c.tick()) view_dirty = true;
+            // Async .peer fs: post the guest's queued LIST requests over the
+            // session, then deliver any completed listings into their buffers.
+            if (collab_session) |sess| {
+                for (peer_fs_bridge.requests.items) |req| {
+                    defer gpa.free(req.path);
+                    const enc = core.peer_fs.encodeList(gpa, req.path) catch {
+                        gpa.free(req.dest);
+                        continue;
+                    };
+                    defer gpa.free(enc);
+                    if (remote_fs.request(sess, 0, enc)) |id| {
+                        peer_fs_inflight.put(gpa, id, req.dest) catch gpa.free(req.dest);
+                    } else |_| gpa.free(req.dest);
+                }
+                peer_fs_bridge.requests.clearRetainingCapacity();
+                var done: [16]u64 = undefined;
+                var dn: usize = 0;
+                var pit = peer_fs_inflight.iterator();
+                while (pit.next()) |e| {
+                    if (remote_fs.take(e.key_ptr.*)) |resp| {
+                        defer gpa.free(resp);
+                        if (core.peer_fs.decodeResponse(resp)) |dec| {
+                            if (dec.status == .ok)
+                                core.wasm_host.deliverToBuffer(&cmd_ctx, e.value_ptr.*, "peer-fs", dec.payload);
+                        }
+                        gpa.free(e.value_ptr.*);
+                        if (dn < done.len) {
+                            done[dn] = e.key_ptr.*;
+                            dn += 1;
+                        }
+                        view_dirty = true;
+                    }
+                }
+                for (done[0..dn]) |id| _ = peer_fs_inflight.remove(id);
+            }
             // Note the host's identity once per handshake: TOFU-record it
             // and echo its fingerprint + SAS + trust so the user can verify
             // the four words out of band before trusting a new host.
@@ -2168,6 +2250,10 @@ const ShareCtx = struct {
     /// when listening began); set by the listen apply block.
     primary_doc: ?*core.Document = null,
     primary_tag: u64 = 0,
+    /// Opt-in filesystem sharing (--share-root/--share-fs): a confined root
+    /// served to peers, and the grant. Null root ⇒ serve no fs (default).
+    peer_fs_root: ?*core.rooted_fs.RootedFs = null,
+    fs_grant: core.peer_fs.Grant = .{},
     /// Commands record INTENTS here; the frame loop applies them
     /// outside the input hot section (connect blocks on TCP, disconnect
     /// joins session threads).
@@ -2191,6 +2277,10 @@ fn wireHubShare(sc: *ShareCtx, peer: *core.hub.Peer, col: *core.session.Collab, 
     col.publish_presence = true;
     col.relay = core.hub.relayPresence;
     col.relay_ctx = try peer.relayFor(doc);
+    // Serve the opt-in shared filesystem root to this peer (default: none, so a
+    // peer gets nothing unless the host passed --share-root/--share-fs).
+    col.peer_fs_root = sc.peer_fs_root;
+    col.fs_grant = sc.fs_grant;
 }
 
 /// Bind a newly joined hub peer: the primary doc at quad 0, then replay
