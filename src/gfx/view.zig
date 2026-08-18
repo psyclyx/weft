@@ -184,6 +184,8 @@ pub const Hud = struct {
     /// vim-goggles: a byte range to flash this frame (e.g. a yanked region),
     /// drawn as a transient highlight. Null when nothing is flashing.
     flash: ?stemma.Range = null,
+    /// Hover info (LSP) to show as a popup at the caret, or null.
+    hover: ?struct { text: []const u8, offset: usize } = null,
     /// Caret shape and blink phase (false = hidden this frame).
     cursor_style: CursorStyle = .block,
     cursor_on: bool = true,
@@ -193,6 +195,7 @@ pub const Hud = struct {
     surfaces: []const *const core.surface.Surface = &.{},
 
     const max_pick_rows = 8;
+    const max_hover_rows = 16;
     const max_wk_rows = 10;
 
     /// Rows the bottom panel (the host which-key fallback) needs ABOVE the
@@ -638,6 +641,8 @@ pub const View = struct {
             else
                 try self.drawPickInto(scratch, &runs, &rects, p, pick_dock);
         }
+        // Hover info floats at the caret, above everything else.
+        if (hud.hover) |hv| try self.drawHoverAtCaret(scratch, &runs, &rects, hv.text, hv.offset, body_rect);
 
         return try self.render(world_to_pixel, runs.items, rects.items);
     }
@@ -1241,6 +1246,49 @@ pub const View = struct {
             const selected = fi == p.selected;
             if (selected) try rects.append(scratch, .{ .x = box_x, .y = row_y, .w = box_w, .h = self.line_h, .color = self.theme.accent });
             try self.propLine(scratch, runs, item, box_x + self.cell_w, row_y + self.ascent, if (selected) self.theme.background else self.theme.foreground);
+        }
+    }
+
+    /// Draw hover text (LSP) as an outlined box anchored below the caret at
+    /// `off` (flipping above when it would overflow the body). Multi-line: the
+    /// text is split on '\n', capped to `max_hover_rows`, each line rendered as
+    /// a mono run. Off-screen caret ⇒ nothing (same rule as the caret popup).
+    fn drawHoverAtCaret(
+        self: *View,
+        scratch: Allocator,
+        runs: *std.ArrayList(Run),
+        rects: *std.ArrayList(Rect),
+        text: []const u8,
+        off: usize,
+        body: region.Rect,
+    ) !void {
+        if (text.len == 0) return;
+        const li = self.frame_layout.lineForOffset(off) orelse return; // off-screen
+        const c = self.frame_layout.lines[li].caretAt(off);
+
+        var rows: usize = 0;
+        var max_cols: usize = 8;
+        var it = std.mem.splitScalar(u8, text, '\n');
+        while (it.next()) |line| : (rows += 1) {
+            if (rows >= Hud.max_hover_rows) break;
+            max_cols = @max(max_cols, std.unicode.utf8CountCodepoints(line) catch line.len);
+        }
+        if (rows == 0) return;
+
+        const box_w = @as(f32, @floatFromInt(max_cols + 2)) * self.cell_w;
+        const box_h = @as(f32, @floatFromInt(rows)) * self.line_h;
+        const box_x = std.math.clamp(c.x, body.x, @max(body.x, body.x + body.w - box_w));
+        var box_y = c.y_top + c.height; // just below the caret line
+        if (box_y + box_h > body.y + body.h) box_y = c.y_top - box_h; // flip above
+        box_y = std.math.clamp(box_y, body.y, @max(body.y, body.y + body.h - box_h));
+        try self.outlinedBox(scratch, rects, box_x, box_y, box_w, box_h, self.theme.selection, self.theme.accent);
+
+        var line_it = std.mem.splitScalar(u8, text, '\n');
+        var i: usize = 0;
+        while (line_it.next()) |line| : (i += 1) {
+            if (i >= rows) break;
+            const row_y = box_y + @as(f32, @floatFromInt(i)) * self.line_h;
+            try self.propLine(scratch, runs, line, box_x + self.cell_w, row_y + self.ascent, self.theme.foreground);
         }
     }
 

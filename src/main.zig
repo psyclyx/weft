@@ -201,6 +201,9 @@ pub fn main(init: std.process.Init) !void {
     var sym_ui: core.nav_ui.SymbolsUi = .empty;
     defer sym_ui.deinit(gpa);
     _ = try commands.bind(gpa, "symbols", sym_ui.commandSpec());
+    var hover_ui: core.nav_ui.HoverUi = .empty;
+    defer hover_ui.deinit(gpa);
+    _ = try commands.bind(gpa, "hover", hover_ui.commandSpec());
 
     // Grammars are data: builtins seeded, config extends via command.
     var grammars = try core.syntax.Runtime.initBuiltins(gpa);
@@ -845,6 +848,12 @@ pub fn main(init: std.process.Init) !void {
         }
         if (try def_ui.tick(&cmd_ctx)) view_dirty = true;
         if (try sym_ui.tick(&cmd_ctx)) view_dirty = true;
+        if (try hover_ui.tick(&cmd_ctx)) view_dirty = true;
+        // Hover dismisses when the cursor leaves the point it was requested at.
+        if (hover_ui.active and buffers.active().editor.cursorOffset() != hover_ui.offset) {
+            hover_ui.clear();
+            view_dirty = true;
+        }
         // Drive any async pick source (completion race-and-refine, file
         // finder, dir browser) — a no-op for a static or source-less
         // pick. Completion now rides this instead of a bespoke tick.
@@ -1291,6 +1300,7 @@ pub fn main(init: std.process.Init) !void {
                 .which_key = if (wk_hints.items.len > 0) wk_hints.items else null,
                 .surfaces = surface_buf[0..surface_n],
                 .flash = flash_range,
+                .hover = if (hover_ui.active) .{ .text = hover_ui.text.items, .offset = hover_ui.offset } else null,
                 .tabs = if (tab_list.items.len > 1) tab_list.items else null,
                 .md_inline = md_inline,
                 .cursor_style = cursor_cfg.styleFor(cursor_cfg.resolveMode(&keymap, keymap.currentMode())),

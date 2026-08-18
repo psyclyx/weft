@@ -124,12 +124,18 @@ weft.bind("leader-project", "slash", "grep");
 // SPC c — code
 weft.bind("leader-code", "c", "comment-line");
 weft.bind("leader-code", "f", "format-buffer");
+weft.bind("leader-code", "d", "goto-definition");
+weft.bind("leader-code", "h", "hover");
+weft.bind("leader-code", "s", "symbols");
 weft.bind("leader-code", "e", "ts-expand-selection");
 weft.bind("leader-code", "n", "ts-select-node");
 weft.bind("leader-code", "b", "make-build");
 weft.bind("leader-code", "t", "make-test");
 weft.bind("leader-code", "r", "lang-run");
 weft.bind("leader-code", "x", "run-line");
+
+// vim-style: K shows hover, gd goes to definition, gs lists symbols
+weft.bind("normal", "K", "hover");
 
 // SPC o — open / tools
 weft.bind("leader-open", "d", "dired");

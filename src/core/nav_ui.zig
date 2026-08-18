@@ -84,6 +84,82 @@ pub const DefinitionUi = struct {
     }
 };
 
+/// Hover: info about the symbol under the cursor, from the `.hover` capability
+/// (LSP today). `fire` requests it; `tick` folds the winning provider's text in;
+/// the app draws it as a caret popup while `active`, until the cursor moves.
+pub const HoverUi = struct {
+    session: ?u64 = null,
+    first_result_ns: u64 = 0,
+    text: std.ArrayList(u8) = .empty,
+    offset: usize = 0,
+    active: bool = false,
+
+    pub const empty: HoverUi = .{};
+
+    pub fn deinit(self: *HoverUi, gpa: std.mem.Allocator) void {
+        self.text.deinit(gpa);
+    }
+
+    pub fn commandSpec(self: *HoverUi) command.Command {
+        return .{
+            .name = "hover",
+            .summary = "Show info about the symbol under the cursor.",
+            .args = &.{},
+            .handler = fireHover,
+            .data = self,
+        };
+    }
+
+    fn fireHover(ctx: *command.Context, data: ?*anyopaque, args: []const command.Value) anyerror!command.Value {
+        _ = args;
+        const self: *HoverUi = @ptrCast(@alignCast(data.?));
+        if (self.session) |old| ctx.caps.finish(old);
+        self.offset = ctx.editor().cursorOffset();
+        self.active = false;
+        self.session = try ctx.caps.fire(.hover, &ctx.editor().doc, ctx.editor().backingPath(), .{
+            .offset = self.offset,
+        });
+        self.first_result_ns = 0;
+        _ = try self.tick(ctx);
+        return .nil;
+    }
+
+    pub fn tick(self: *HoverUi, ctx: *command.Context) !bool {
+        const id = self.session orelse return false;
+        const s = ctx.caps.session(id) orelse {
+            self.session = null;
+            return false;
+        };
+        _ = s.poll();
+        const now = task.nowNs();
+        const have = for (s.all()) |*r| {
+            if (r.payload == .text and r.payload.text.len > 0) break true;
+        } else false;
+        if (have and self.first_result_ns == 0) self.first_result_ns = now;
+        const settled = s.done(now) or
+            (self.first_result_ns != 0 and now - self.first_result_ns >= grace_ns);
+        if (!settled) return false;
+        defer {
+            ctx.caps.finish(id);
+            self.session = null;
+        }
+        var best: ?*const capability.Result = null;
+        for (s.all()) |*r| {
+            if (r.payload != .text or r.payload.text.len == 0) continue;
+            if (best == null or r.priority > best.?.priority) best = r;
+        }
+        const winner = best orelse return false;
+        self.text.clearRetainingCapacity();
+        try self.text.appendSlice(ctx.gpa, winner.payload.text);
+        self.active = true;
+        return true;
+    }
+
+    pub fn clear(self: *HoverUi) void {
+        self.active = false;
+    }
+};
+
 pub const SymbolsUi = struct {
     session: ?u64 = null,
     /// Jump targets for the open pick (label index-aligned).
