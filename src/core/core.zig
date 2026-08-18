@@ -35,6 +35,7 @@ pub const Buffers = @import("Buffers.zig");
 pub const Keymap = @import("Keymap.zig");
 pub const builtins = @import("builtins.zig");
 pub const pick = @import("pick.zig");
+pub const surface = @import("surface.zig");
 pub const fs_source = @import("fs_source.zig");
 pub const Mirror = @import("mirror.zig");
 pub const syntax = @import("syntax.zig");

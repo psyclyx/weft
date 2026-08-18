@@ -76,6 +76,11 @@ extern "weft" fn wl_pick_end() void;
 extern "weft" fn wl_open_file_pick(prompt_ptr: u32, prompt_len: u32, root_ptr: u32, root_len: u32, pick_id: u32) void;
 extern "weft" fn wl_pick_choice(out_ptr: u32, out_cap: u32) i32;
 extern "weft" fn wl_pick_choice_index() i32;
+extern "weft" fn wl_surface_begin(placement: u32) void;
+extern "weft" fn wl_surface_row() void;
+extern "weft" fn wl_surface_span(t: u32, tl: u32, role: u32) void;
+extern "weft" fn wl_surface_end(selected: i32) void;
+extern "weft" fn wl_surface_close() void;
 extern "weft" fn wl_provide_completion() void;
 extern "weft" fn wl_completion_prefix(out_ptr: u32, out_cap: u32) u32;
 extern "weft" fn wl_push_completion(ptr: u32, len: u32) void;
@@ -443,6 +448,36 @@ pub fn pickEnd() void {
 /// accept dispatches to `on_pick_accept` with the chosen path.
 pub fn openFilePick(prompt: []const u8, root: []const u8, pick_id: u32) void {
     wl_open_file_pick(p(prompt.ptr), @intCast(prompt.len), p(root.ptr), @intCast(root.len), pick_id);
+}
+
+// ── Surface (retained overlay: build begin→row→span…→end, then close) ────
+/// Where a surface docks. Mirrors core.surface.Placement.
+pub const Placement = enum(u32) { bottom = 0, corner = 1, center = 2 };
+/// A span's semantic color role. Mirrors core.surface.Role — the theme resolves
+/// each to a real color, so a colorscheme restyles the surface for free.
+pub const Role = enum(u32) { normal = 0, accent = 1, group = 2, leaf = 3, effect = 4, muted = 5 };
+
+/// Begin (re)building this plugin's overlay at `placement`. Not shown until
+/// `surfaceEnd`; the previously-drawn surface stays live until then.
+pub fn surfaceBegin(placement: Placement) void {
+    wl_surface_begin(@intFromEnum(placement));
+}
+/// Start a new row.
+pub fn surfaceRow() void {
+    wl_surface_row();
+}
+/// Append a styled span to the current row.
+pub fn surfaceSpan(text: []const u8, role: Role) void {
+    wl_surface_span(p(text.ptr), @intCast(text.len), @intFromEnum(role));
+}
+/// Commit the built rows and show the surface. `selected` highlights a row
+/// (a picker/dired cursor), or -1 for none.
+pub fn surfaceEnd(selected: i32) void {
+    wl_surface_end(selected);
+}
+/// Hide the surface (done with it).
+pub fn surfaceClose() void {
+    wl_surface_close();
 }
 /// The accepted choice (valid during `on_pick_accept`), into `scratch`.
 pub fn pickChoice() []const u8 {

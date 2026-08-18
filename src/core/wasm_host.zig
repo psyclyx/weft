@@ -27,6 +27,7 @@ const Editor = @import("Editor.zig");
 // The lifecycle side owns these; we operate on them.
 const wasm_abi = @import("wasm_abi.zig");
 const WasmPlugin = wasm_abi.WasmPlugin;
+const surface_mod = @import("surface.zig");
 const WasmCmd = wasm_abi.WasmCmd;
 const PendingItem = wasm_abi.PendingItem;
 const WasmBoundPick = wasm_abi.WasmBoundPick;
@@ -108,6 +109,12 @@ pub fn defineImports(linker: *wasm.Linker, p: *WasmPlugin) !void {
     try d(linker, "wl_open_file_pick", 5, 0, hOpenFilePick, p);
     try d(linker, "wl_pick_choice", 2, 1, hPickChoice, p);
     try d(linker, "wl_pick_choice_index", 0, 1, hPickChoiceIndex, p);
+    // Surface (retained overlay: which-key/dired/magit render through this).
+    try d(linker, "wl_surface_begin", 1, 0, hSurfaceBegin, p);
+    try d(linker, "wl_surface_row", 0, 0, hSurfaceRow, p);
+    try d(linker, "wl_surface_span", 3, 0, hSurfaceSpan, p);
+    try d(linker, "wl_surface_end", 1, 0, hSurfaceEnd, p);
+    try d(linker, "wl_surface_close", 0, 0, hSurfaceClose, p);
     // Completion provider (host↔guest data-gather).
     try d(linker, "wl_provide_completion", 0, 0, hProvideCompletion, p);
     try d(linker, "wl_completion_prefix", 2, 1, hCompletionPrefix, p);
@@ -1355,6 +1362,48 @@ fn hBufferReadonly(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32, r
 }
 
 // Pick — accumulate items between begin/end, then open with an accept
+// ── Surface membrane: a guest builds its retained overlay begin→row→span→end,
+// then the view draws it every frame until close. Mirrors the pick membrane. ──
+fn hSurfaceBegin(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32, results: []i32) void {
+    _ = caller;
+    _ = results;
+    const p: *WasmPlugin = @ptrCast(@alignCast(data.?));
+    const placement: surface_mod.Placement = switch (@as(u32, @bitCast(args[0]))) {
+        1 => .corner,
+        2 => .center,
+        else => .bottom,
+    };
+    p.surface.begin(p.gpa, placement);
+}
+fn hSurfaceRow(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32, results: []i32) void {
+    _ = caller;
+    _ = args;
+    _ = results;
+    const p: *WasmPlugin = @ptrCast(@alignCast(data.?));
+    p.surface.addRow(p.gpa);
+}
+fn hSurfaceSpan(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32, results: []i32) void {
+    _ = results;
+    const p: *WasmPlugin = @ptrCast(@alignCast(data.?));
+    const text = caller.readMemory(p.gpa, @intCast(args[0]), @intCast(args[1])) catch return;
+    defer p.gpa.free(text);
+    p.surface.addSpan(p.gpa, text, surface_mod.Role.fromInt(@bitCast(args[2])));
+}
+fn hSurfaceEnd(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32, results: []i32) void {
+    _ = caller;
+    _ = results;
+    const p: *WasmPlugin = @ptrCast(@alignCast(data.?));
+    const selected: ?usize = if (args[0] < 0) null else @intCast(args[0]);
+    p.surface.end(p.gpa, selected);
+}
+fn hSurfaceClose(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32, results: []i32) void {
+    _ = caller;
+    _ = args;
+    _ = results;
+    const p: *WasmPlugin = @ptrCast(@alignCast(data.?));
+    p.surface.close(p.gpa);
+}
+
 // trampoline that dispatches to the guest's on_pick_accept.
 fn hPickBegin(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32, results: []i32) void {
     _ = results;

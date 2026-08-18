@@ -89,6 +89,7 @@ const pick_mod = @import("pick.zig");
 const Buffers = @import("Buffers.zig");
 const syntax = @import("syntax.zig");
 const subbuffer = @import("subbuffer.zig");
+const surface_mod = @import("surface.zig");
 const async_loop = @import("async.zig");
 /// The host-import table + trampolines (the `weft.*` marshalling) live in a
 /// sibling file to keep this one focused on the plugin lifecycle. They operate
@@ -203,6 +204,11 @@ pub const WasmPlugin = struct {
     /// The accepted choice, valid only during an `on_pick_accept` call.
     cur_choice: []const u8 = &.{},
 
+    // ── Surface (retained overlay: which-key/dired/magit render here) ──
+    /// This plugin's retained overlay, populated via the surface membrane and
+    /// drawn every frame by the view while active. One per plugin.
+    surface: surface_mod.Surface = .{},
+
     // ── Completion provider (host→guest data-gather) ──
     /// The caps provider id this plugin registered (owned), torn down on
     /// unload. Null until it calls `provideCompletion`.
@@ -284,6 +290,7 @@ pub const WasmPlugin = struct {
             gpa.free(it.doc);
         }
         self.pick_items.deinit(gpa);
+        self.surface.deinit(gpa);
         self.subs.deinit(gpa); // the SubBuffers service owns the entries
         for (self.declared.items) |d| gpa.free(d);
         self.declared.deinit(gpa);
