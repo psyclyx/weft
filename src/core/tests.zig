@@ -303,8 +303,8 @@ test "editor: typing, movement, selection, vim-flavored undo units" {
     try ed.insertText(gpa, "hello world");
     try t.expectEqual(@as(usize, 11), ed.cursorOffset());
 
-    // Move to line start, type — the motion is an undo barrier.
-    ed.moveLineStart();
+    // Move to line start, type — the placement is an undo barrier.
+    ed.placeCursor(0);
     try ed.insertText(gpa, ">> ");
     {
         const s = try ed.text().toOwnedSlice(gpa);
@@ -323,7 +323,7 @@ test "editor: typing, movement, selection, vim-flavored undo units" {
     try t.expect(try ed.redo(gpa));
 
     // Selection replace is one undoable unit.
-    ed.moveDocStart();
+    ed.placeCursor(0);
     try ed.setMark(gpa);
     ed.moveRight();
     ed.moveRight();
@@ -342,16 +342,17 @@ test "editor: typing, movement, selection, vim-flavored undo units" {
     }
 }
 
-test "editor: vertical movement with goal column, word motions, utf-8 safe" {
+test "editor: vertical movement with goal column, utf-8 safe" {
     const gpa = t.allocator;
     var pool = try task.Pool.init(gpa, .{ .threads = 1 });
     defer pool.deinit();
     var ed = try Editor.init(gpa, pool, "user");
     defer ed.deinit(gpa);
 
+    // Word/line motions now live in the `motions` plugin; core keeps only the
+    // vertical goal-column step (moveDown/moveVertical) and utf-8 safety.
     try ed.insertText(gpa, "first_long line α\nab\nthird θθ line");
-    ed.moveDocStart();
-    ed.moveLineEnd(); // col past short line's length
+    ed.placeCursor(ed.text().lineRange(0).end); // col past short line's length
     ed.moveDown(); // clamps to "ab" end
     const p1 = ed.text().offsetToPoint(ed.cursorOffset());
     try t.expectEqual(@as(usize, 1), p1.row);
@@ -360,15 +361,8 @@ test "editor: vertical movement with goal column, word motions, utf-8 safe" {
     const p2 = ed.text().offsetToPoint(ed.cursorOffset());
     try t.expectEqual(@as(usize, 2), p2.row);
 
-    ed.moveDocStart();
-    try ed.moveWordForward(gpa);
-    const w = ed.text().offsetToPoint(ed.cursorOffset());
-    try t.expectEqual(@as(usize, 11), w.col); // start of "line"
-    try ed.moveWordBackward(gpa);
-    try t.expectEqual(@as(usize, 0), ed.cursorOffset());
-
     // Backspace across a multi-byte scalar.
-    ed.moveDocEnd();
+    ed.placeCursor(ed.text().byteLen());
     try ed.deleteBackward(gpa);
     try ed.deleteBackward(gpa);
     const s = try ed.text().toOwnedSlice(gpa);
@@ -775,7 +769,7 @@ test "editor: shell backing — guarded save, external change poll, stale retry"
     try t.expect(!try ed.isDirty(gpa));
 
     // Edit + guarded save through the shell.
-    ed.moveDocEnd();
+    ed.placeCursor(ed.text().byteLen());
     try ed.insertText(gpa, "typed locally\n");
     try ed.requestSave(gpa);
     while (!ed.pollSave(gpa)) std.Thread.yield() catch {};
@@ -956,7 +950,7 @@ test "editor: compactNow keeps the backing mirror and saves working" {
 
     // The panic case: edit + save AFTER compaction — markSaved's
     // peerSyncTo must work against the rebuilt mirror.
-    ed.moveDocEnd();
+    ed.placeCursor(ed.text().byteLen());
     try ed.insertText(gpa, "post-compact edit\n");
     try ed.requestSave(gpa);
     while (!ed.pollSave(gpa)) std.Thread.yield() catch {};
