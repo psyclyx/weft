@@ -644,7 +644,12 @@ pub const View = struct {
         try self.buildHud(scratch, &runs, &rects, hud, status_rect, panel_rect, cols_visible);
         // Floating surfaces (which-key popup, dired/magit) float within the BODY
         // region — never over the status/tab/panel rects, which are carved out.
-        try self.drawSurfaces(scratch, &runs, &rects, hud, body_rect);
+        // Hand the caret's y so a corner surface can flip away from it.
+        const caret_y: ?f32 = if (self.frame_layout.lineForOffset(cursor_off)) |li|
+            self.frame_layout.lines[li].caretAt(cursor_off).y_top
+        else
+            null;
+        try self.drawSurfaces(scratch, &runs, &rects, hud, body_rect, caret_y);
         // The picker draws into its carved window-bottom dock (main cut it off
         // the window with cutBottom, so it cannot overlap panes or a status
         // line). A completion pick anchors at the caret instead — a popup.
@@ -1353,6 +1358,7 @@ pub const View = struct {
         rects: *std.ArrayList(Rect),
         hud: Hud,
         body: region.Rect,
+        caret_y: ?f32,
     ) !void {
         // A surface floats within `body`; cap the row count to what fits, so a
         // popup can never extend past the region it was handed.
@@ -1379,8 +1385,19 @@ pub const View = struct {
             // Positioned within `body`, then clamped so the box stays inside it
             // (its own background reads as a popup over the text, never over the
             // status/tab strips, which live outside `body`).
+            // A corner surface docks top-right by default, but gets out of the
+            // way of the caret: if the caret sits in the top half of the body
+            // (where the box would land), it flips to the bottom-right instead,
+            // so a which-key popup never covers the line you're editing.
+            const corner_top = if (caret_y) |cy|
+                cy > body.y + body.h / 2
+            else
+                true;
             const raw_x, const raw_y = switch (surf.placement) {
-                .corner => .{ body.x + body.w - box_w - pad_x, body.y + pad_x },
+                .corner => .{
+                    body.x + body.w - box_w - pad_x,
+                    if (corner_top) body.y + pad_x else body.y + body.h - box_h - pad_x,
+                },
                 .center => .{ body.x + (body.w - box_w) / 2, body.y + (body.h - box_h) / 2 },
                 .bottom => unreachable,
             };
