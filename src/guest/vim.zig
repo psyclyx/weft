@@ -175,6 +175,14 @@ const static_cmds = [_]Cmd{
     .{ .name = "vim-vsplit", .handler = vimVsplit },
     .{ .name = "vim-focus-other", .handler = vimFocusOther },
     .{ .name = "vim-unsplit", .handler = vimUnsplit },
+    .{ .name = "vim-win-left", .handler = vimWinLeft },
+    .{ .name = "vim-win-right", .handler = vimWinRight },
+    .{ .name = "vim-win-up", .handler = vimWinUp },
+    .{ .name = "vim-win-down", .handler = vimWinDown },
+    .{ .name = "vim-win-move-left", .handler = vimWinMoveLeft },
+    .{ .name = "vim-win-move-right", .handler = vimWinMoveRight },
+    .{ .name = "vim-win-move-up", .handler = vimWinMoveUp },
+    .{ .name = "vim-win-move-down", .handler = vimWinMoveDown },
     .{ .name = "goto", .handler = enterGoto },
     .{ .name = "vim-goto-top", .handler = vimGotoTop },
     .{ .name = "zed", .handler = enterZed },
@@ -312,9 +320,22 @@ export fn init() void {
     weft.bindKey("leader-file", "f", "vim-find-file");
     weft.bindKey("leader-collab", "s", "vim-share");
     weft.bindKey("leader-collab", "h", "vim-palette");
+    // C-w …: split/close, focus (h/j/k/l or arrows), move/swap (H/J/K/L or
+    // shifted arrows). Shift lives in the letter keysym (H), not `S-h`;
+    // arrows have no shifted keysym so they take an explicit `S-`.
     const win = [_][2][]const u8{
-        .{ "s", "vim-split" },         .{ "v", "vim-vsplit" },  .{ "w", "vim-focus-other" },
-        .{ "C-w", "vim-focus-other" }, .{ "o", "vim-unsplit" }, .{ "q", "vim-unsplit" },
+        .{ "s", "vim-split" },                .{ "v", "vim-vsplit" },
+        .{ "c", "vim-unsplit" },              .{ "q", "vim-unsplit" },
+        .{ "o", "vim-unsplit" },              .{ "w", "vim-focus-other" },
+        .{ "C-w", "vim-focus-other" },        .{ "h", "vim-win-left" },
+        .{ "j", "vim-win-down" },             .{ "k", "vim-win-up" },
+        .{ "l", "vim-win-right" },            .{ "Left", "vim-win-left" },
+        .{ "Down", "vim-win-down" },          .{ "Up", "vim-win-up" },
+        .{ "Right", "vim-win-right" },        .{ "H", "vim-win-move-left" },
+        .{ "J", "vim-win-move-down" },        .{ "K", "vim-win-move-up" },
+        .{ "L", "vim-win-move-right" },       .{ "S-Left", "vim-win-move-left" },
+        .{ "S-Down", "vim-win-move-down" },   .{ "S-Up", "vim-win-move-up" },
+        .{ "S-Right", "vim-win-move-right" },
     };
     for (win) |b| weft.bindKey("window", b[0], b[1]);
     weft.bindKey("goto", "g", "vim-goto-top");
@@ -524,16 +545,42 @@ fn enterWindow() void {
     weft.setMode("window");
 }
 fn vimSplit() void {
-    thenNormal("split");
+    thenNormal("window-split");
 }
 fn vimVsplit() void {
-    thenNormal("vsplit");
+    thenNormal("window-vsplit");
 }
 fn vimFocusOther() void {
-    thenNormal("focus-other");
+    thenNormal("focus-other"); // cycle to the next window
 }
 fn vimUnsplit() void {
-    thenNormal("unsplit");
+    thenNormal("window-close");
+}
+// Directional focus (C-w h/j/k/l or the arrows) and move/swap (C-w H/J/K/L
+// or shifted arrows), each a one-shot out of the `window` menu mode.
+fn vimWinLeft() void {
+    thenNormal("window-focus-left");
+}
+fn vimWinRight() void {
+    thenNormal("window-focus-right");
+}
+fn vimWinUp() void {
+    thenNormal("window-focus-up");
+}
+fn vimWinDown() void {
+    thenNormal("window-focus-down");
+}
+fn vimWinMoveLeft() void {
+    thenNormal("window-move-left");
+}
+fn vimWinMoveRight() void {
+    thenNormal("window-move-right");
+}
+fn vimWinMoveUp() void {
+    thenNormal("window-move-up");
+}
+fn vimWinMoveDown() void {
+    thenNormal("window-move-down");
 }
 fn enterGoto() void {
     weft.setMode("goto");

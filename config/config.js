@@ -148,13 +148,24 @@ weft.bind("leader-open", "a", "llm-ask-line");
 weft.bind("leader-notes", "n", "notes-open");
 weft.bind("leader-notes", "c", "notes-capture");
 
-// SPC w — window
+// SPC w — window. Split/close via the windows plugin; focus + move go
+// straight to the core window-layout commands (a real recursive split
+// tree), so h/j/k/l walk panes and H/J/K/L swap them, vim-style.
 weft.bind("leader-window", "v", "win-vsplit");
 weft.bind("leader-window", "s", "win-split");
 weft.bind("leader-window", "w", "win-focus");
 weft.bind("leader-window", "d", "win-close");
 weft.bind("leader-window", "c", "win-center");
 weft.bind("leader-window", "o", "win-close");
+weft.bind("leader-window", "q", "window-close");
+weft.bind("leader-window", "h", "window-focus-left");
+weft.bind("leader-window", "j", "window-focus-down");
+weft.bind("leader-window", "k", "window-focus-up");
+weft.bind("leader-window", "l", "window-focus-right");
+weft.bind("leader-window", "H", "window-move-left");
+weft.bind("leader-window", "J", "window-move-down");
+weft.bind("leader-window", "K", "window-move-up");
+weft.bind("leader-window", "L", "window-move-right");
 
 // SPC q — quit
 weft.bind("leader-quit", "q", "quit");
