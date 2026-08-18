@@ -75,6 +75,7 @@ extern "weft" fn wl_pick_add(t: u32, tl: u32, d: u32, dl: u32) void;
 extern "weft" fn wl_pick_end() void;
 extern "weft" fn wl_open_file_pick(prompt_ptr: u32, prompt_len: u32, root_ptr: u32, root_len: u32, pick_id: u32) void;
 extern "weft" fn wl_pick_choice(out_ptr: u32, out_cap: u32) i32;
+extern "weft" fn wl_pick_choice_index() i32;
 extern "weft" fn wl_provide_completion() void;
 extern "weft" fn wl_completion_prefix(out_ptr: u32, out_cap: u32) u32;
 extern "weft" fn wl_push_completion(ptr: u32, len: u32) void;
@@ -377,6 +378,13 @@ pub fn openFilePick(prompt: []const u8, root: []const u8, pick_id: u32) void {
 pub fn pickChoice() []const u8 {
     const n = wl_pick_choice(p(&scratch), scratch.len);
     return scratch[0..@intCast(n)];
+}
+/// The add-order index of the accepted candidate (the position in your
+/// `pickAdd` sequence), or null for free text — resolve it against your own
+/// parallel data to get the real target, robust under duplicate rows.
+pub fn pickChoiceIndex() ?usize {
+    const i = wl_pick_choice_index();
+    return if (i < 0) null else @intCast(i);
 }
 
 // ── Completion provider (the sel/completion domain) ──────────────────

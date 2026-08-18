@@ -105,6 +105,7 @@ pub fn defineImports(linker: *wasm.Linker, p: *WasmPlugin) !void {
     try d(linker, "wl_pick_end", 0, 0, hPickEnd, p);
     try d(linker, "wl_open_file_pick", 5, 0, hOpenFilePick, p);
     try d(linker, "wl_pick_choice", 2, 1, hPickChoice, p);
+    try d(linker, "wl_pick_choice_index", 0, 1, hPickChoiceIndex, p);
     // Completion provider (host↔guest data-gather).
     try d(linker, "wl_provide_completion", 0, 0, hProvideCompletion, p);
     try d(linker, "wl_completion_prefix", 2, 1, hCompletionPrefix, p);
@@ -916,6 +917,16 @@ fn hOpenFilePick(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32, res
 fn hPickChoice(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32, results: []i32) void {
     const p: *WasmPlugin = @ptrCast(@alignCast(data.?));
     results[0] = @intCast(caller.writeMemory(@intCast(args[0]), @intCast(args[1]), p.cur_choice) catch 0);
+}
+
+/// The add-order index of the accepted candidate (as the guest supplied them
+/// via `pickAdd`), or -1 for free-text. Lets a source resolve the choice to a
+/// position it recorded at add time, unambiguous under duplicate rows.
+fn hPickChoiceIndex(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32, results: []i32) void {
+    _ = caller;
+    _ = args;
+    const p: *WasmPlugin = @ptrCast(@alignCast(data.?));
+    results[0] = if (p.ctx.pick.accepted_index) |i| @intCast(i) else -1;
 }
 
 /// Pick accept: stash the choice, dispatch to the guest's on_pick_accept.

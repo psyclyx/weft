@@ -100,6 +100,11 @@ pub const Pick = struct {
     /// Indices into `items`, filtered by `query`, rank order.
     filtered: std.ArrayList(u32) = .empty,
     selected: usize = 0,
+    /// The add-order index of the accepted candidate, captured at accept time
+    /// (before `close` clears `filtered`/`selected`). Null when the typed text
+    /// was accepted (free-text). A source plugin reads it to resolve the choice
+    /// to a position it stamped at add time — robust even with duplicate rows.
+    accepted_index: ?usize = null,
     acceptor: ?Acceptor = null,
     prev_mode: []u8 = &.{},
     /// Accept the typed query, not only a candidate (see `Options`).
@@ -731,8 +736,10 @@ fn cAccept(ctx: *command.Context, args: struct {}) anyerror!Value {
     const p = pickOf(ctx);
     if (!p.active) return .nil;
     if (p.selection()) |sel| {
+        p.accepted_index = p.filtered.items[p.selected]; // capture before close clears it
         try acceptText(p, ctx, sel);
     } else if (p.allow_free_text and p.query.items.len > 0) {
+        p.accepted_index = null; // free text — no candidate
         try acceptText(p, ctx, p.query.items);
     } else {
         try p.close(ctx);
@@ -748,6 +755,7 @@ fn cAcceptInput(ctx: *command.Context, args: struct {}) anyerror!Value {
     const p = pickOf(ctx);
     if (!p.active) return .nil;
     if (p.allow_free_text and p.query.items.len > 0) {
+        p.accepted_index = null; // verbatim typed text — no candidate
         try acceptText(p, ctx, p.query.items);
         return .nil;
     }

@@ -724,6 +724,32 @@ test "wasm plugin: palette opens a command pick; accept dispatches back and runs
     try t.expectEqualStrings(env.buffers.active().name, env.echo.items);
 }
 
+test "wasm plugins: consult-line jumps to the accepted row by its add index" {
+    const gpa = t.allocator;
+    var env: Env = undefined;
+    try Env.init(gpa, &env);
+    defer env.deinit(gpa);
+    try @import("pick.zig").install(gpa, &env.commands, &env.keymap);
+
+    var engine = try wasm.Engine.init();
+    defer engine.deinit();
+    const plugin = try loadPlugin(&engine, &env.ctx, "consult", @embedFile("guest_consult_wasm"), .{});
+    defer plugin.deinit();
+
+    const ed = &env.buffers.active().editor;
+    try ed.insertText(gpa, "aaa\nbbb\nccc");
+    ed.placeCursor(0);
+
+    // Open the line pick, narrow to the third line, accept: the guest resolves
+    // the accepted ROW INDEX (2) to the offset it recorded, jumping to line 3.
+    _ = try command.run(&env.commands, &env.ctx, "consult-line", &.{});
+    try t.expect(env.pick.active);
+    _ = try command.run(&env.commands, &env.ctx, "pick-input", &.{.{ .string = "ccc" }});
+    _ = try command.run(&env.commands, &env.ctx, "pick-accept", &.{});
+    try t.expect(!env.pick.active);
+    try t.expectEqual(@as(usize, 8), ed.cursorOffset()); // start of "ccc"
+}
+
 test "wasm plugin: structural node-kind/delete-node degrade honestly with no grammar" {
     const gpa = t.allocator;
     var env: Env = undefined;

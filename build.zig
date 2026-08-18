@@ -29,6 +29,7 @@ const guests = [_]Guest{
     .{ .src = "src/guest/whitespace.zig", .import = "guest_whitespace_wasm", .install = true },
     .{ .src = "src/guest/numbers.zig", .import = "guest_numbers_wasm", .install = true },
     .{ .src = "src/guest/autopair.zig", .import = "guest_autopair_wasm", .install = true },
+    .{ .src = "src/guest/consult.zig", .import = "guest_consult_wasm", .install = true },
 };
 
 pub fn build(b: *std.Build) void {
