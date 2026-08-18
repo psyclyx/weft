@@ -111,6 +111,18 @@ pub const Theme = struct {
         return .{ @as(f32, @floatFromInt(r)) * s, @as(f32, @floatFromInt(g)) * s, @as(f32, @floatFromInt(b)) * s, 1 };
     }
 
+    /// Map a surface span's semantic role to a color, so a colorscheme restyles
+    /// every overlay. Groups (submenu entries) and effects read distinctly from
+    /// plain leaf commands — the which-key color-coding ask.
+    fn roleColor(self: *const Theme, role: core.surface.Role) [4]f32 {
+        return switch (role) {
+            .accent, .group => self.accent,
+            .effect => self.md_link,
+            .muted => self.status,
+            else => self.foreground, // .normal, .leaf, unknown
+        };
+    }
+
     fn classColor(self: *const Theme, class: HighlightClass) [4]f32 {
         return switch (class) {
             .none, .variable => self.foreground,
@@ -171,6 +183,10 @@ pub const Hud = struct {
     /// Caret shape and blink phase (false = hidden this frame).
     cursor_style: CursorStyle = .block,
     cursor_on: bool = true,
+    /// Retained plugin overlays (which-key/dired/magit) to draw this frame.
+    /// corner/center placements overlay the body; bottom is reserved for the
+    /// dock (the picker/which-key path).
+    surfaces: []const *const core.surface.Surface = &.{},
 
     const max_pick_rows = 8;
     const max_wk_rows = 10;
@@ -558,6 +574,7 @@ pub const View = struct {
         }
 
         try self.buildHud(scratch, &runs, &rects, hud, status_rect, panel_rect, cols_visible);
+        try self.drawSurfaces(scratch, &runs, &rects, hud, frame);
 
         return try self.render(world_to_pixel, runs.items, rects.items);
     }
@@ -1107,6 +1124,69 @@ pub const View = struct {
 
     /// A HUD text run: mono cells truncated at the viewport, optionally over
     /// a full-width background rect.
+    /// Draw retained plugin overlays (surfaces) as floating boxes. corner docks
+    /// top-right of the pane, center is centered; bottom is left to the dock
+    /// (buildHud) and skipped here. Each row's spans render at their own color
+    /// (by Role), and a `selected` row gets a highlight behind it. Overlays are
+    /// drawn last, so they sit above the body — and, being boxes with their own
+    /// background, they don't reflow it.
+    fn drawSurfaces(
+        self: *View,
+        scratch: Allocator,
+        runs: *std.ArrayList(Run),
+        rects: *std.ArrayList(Rect),
+        hud: Hud,
+        frame: region.Rect,
+    ) !void {
+        const max_rows = 16;
+        for (hud.surfaces) |surf| {
+            if (!surf.active or surf.rows.items.len == 0) continue;
+            if (surf.placement == .bottom) continue; // dock handled by buildHud
+
+            const nrows = @min(surf.rows.items.len, max_rows);
+            // Width = widest row, in cells (one space between spans).
+            var max_cols: usize = 0;
+            for (surf.rows.items[0..nrows]) |row| {
+                var cols: usize = 0;
+                for (row.spans.items, 0..) |sp, si| {
+                    if (si != 0) cols += 1;
+                    cols += std.unicode.utf8CountCodepoints(sp.text) catch sp.text.len;
+                }
+                max_cols = @max(max_cols, cols);
+            }
+            const pad_x: f32 = self.cell_w;
+            const pad_y: f32 = self.line_h * 0.25;
+            const box_w = @as(f32, @floatFromInt(max_cols)) * self.cell_w + 2 * pad_x;
+            const box_h = @as(f32, @floatFromInt(nrows)) * self.line_h + 2 * pad_y;
+            const box_x, const box_y = switch (surf.placement) {
+                .corner => .{ frame.x + frame.w - box_w - pad_x, frame.y + pad_x },
+                .center => .{ frame.x + (frame.w - box_w) / 2, frame.y + (frame.h - box_h) / 2 },
+                .bottom => unreachable,
+            };
+            // Panel background (a muted box so the overlay reads as a popup).
+            try rects.append(scratch, .{ .x = box_x, .y = box_y, .w = box_w, .h = box_h, .color = self.theme.selection });
+
+            for (surf.rows.items[0..nrows], 0..) |row, i| {
+                const row_y = box_y + pad_y + @as(f32, @floatFromInt(i)) * self.line_h;
+                if (surf.selected != null and surf.selected.? == i) {
+                    try rects.append(scratch, .{ .x = box_x, .y = row_y, .w = box_w, .h = self.line_h, .color = self.theme.accent });
+                }
+                var x = box_x + pad_x;
+                const baseline = row_y + self.ascent;
+                for (row.spans.items, 0..) |sp, si| {
+                    if (si != 0) x += self.cell_w; // gap between spans
+                    const shaped = try snail.shape(scratch, &self.face_set.mono, sp.text, .{});
+                    try runs.append(scratch, .{
+                        .shaped = shaped,
+                        .baseline_y = baseline,
+                        .place = .{ .prop = .{ .x = x, .em = self.em, .color = self.theme.roleColor(sp.role) } },
+                    });
+                    x += shaped.advanceX() * self.em;
+                }
+            }
+        }
+    }
+
     fn appendPlainRun(
         self: *View,
         scratch: Allocator,

@@ -81,6 +81,9 @@ extern "weft" fn wl_surface_row() void;
 extern "weft" fn wl_surface_span(t: u32, tl: u32, role: u32) void;
 extern "weft" fn wl_surface_end(selected: i32) void;
 extern "weft" fn wl_surface_close() void;
+extern "weft" fn wl_menu_binding_count() i32;
+extern "weft" fn wl_menu_binding_key(i: u32, out: u32, cap: u32) i32;
+extern "weft" fn wl_menu_binding_cmd(i: u32, out: u32, cap: u32) i32;
 extern "weft" fn wl_provide_completion() void;
 extern "weft" fn wl_completion_prefix(out_ptr: u32, out_cap: u32) u32;
 extern "weft" fn wl_push_completion(ptr: u32, len: u32) void;
@@ -478,6 +481,22 @@ pub fn surfaceEnd(selected: i32) void {
 /// Hide the surface (done with it).
 pub fn surfaceClose() void {
     wl_surface_close();
+}
+
+// ── Menu bindings (for a which-key-style overlay): enumerate the CURRENT menu
+// mode's table. Valid during on_menu(open). key → scratch, cmd → arg_scratch,
+// so a caller can hold both of one binding at once. ──
+pub fn menuBindingCount() usize {
+    const n = wl_menu_binding_count();
+    return if (n < 0) 0 else @intCast(n);
+}
+pub fn menuBindingKey(i: usize) []const u8 {
+    const n = wl_menu_binding_key(@intCast(i), p(&scratch), scratch.len);
+    return if (n < 0) "" else scratch[0..@intCast(n)];
+}
+pub fn menuBindingCmd(i: usize) []const u8 {
+    const n = wl_menu_binding_cmd(@intCast(i), p(&arg_scratch), arg_scratch.len);
+    return if (n < 0) "" else arg_scratch[0..@intCast(n)];
 }
 /// The accepted choice (valid during `on_pick_accept`), into `scratch`.
 pub fn pickChoice() []const u8 {

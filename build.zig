@@ -46,6 +46,7 @@ const guests = [_]Guest{
     .{ .src = "src/guest/repl.zig", .import = "guest_repl_wasm", .install = true },
     .{ .src = "src/guest/net.zig", .import = "guest_net_wasm", .install = true },
     .{ .src = "src/guest/http.zig", .import = "guest_http_wasm", .install = true },
+    .{ .src = "src/guest/which_key.zig", .import = "guest_which_key_wasm", .install = true },
 };
 
 pub fn build(b: *std.Build) void {

@@ -229,6 +229,21 @@ pub fn ownBindings(self: *const Keymap, gpa: Allocator, mode: []const u8, out: *
     for (b.keys(), b.values()) |k, v| try out.append(gpa, .{ .key = k, .command = v.command });
 }
 
+/// Number of bindings in `mode`'s own table (for which-key enumeration via the
+/// membrane — the guest reads them by index without a host allocation).
+pub fn bindingCount(self: *const Keymap, mode: []const u8) usize {
+    const b = self.modes.getPtr(mode) orelse return 0;
+    return b.count();
+}
+
+/// The `i`-th binding of `mode` (bind order), borrowed — valid until the next
+/// keymap mutation. Null for an out-of-range index or unknown mode.
+pub fn bindingAt(self: *const Keymap, mode: []const u8, i: usize) ?Binding {
+    const b = self.modes.getPtr(mode) orelse return null;
+    if (i >= b.count()) return null;
+    return .{ .key = b.keys()[i], .command = b.values()[i].command };
+}
+
 /// Compose a keyspec from modifiers + a keysym name into `buf`. `shift`
 /// is the BINDING-relevant shift only — held but not consumed to produce
 /// the keysym (so `Return`+Shift → "S-Return", while `a`+Shift is the

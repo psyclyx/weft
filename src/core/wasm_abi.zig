@@ -610,6 +610,40 @@ test "wasm: compiled-module image serialize→deserialize round-trips; garbage r
     try t.expect(engine.deserialize("not a real .cwasm image") == null);
 }
 
+test "which-key: on_menu builds a corner surface from the current menu's bindings" {
+    const gpa = t.allocator;
+    var env: Env = undefined;
+    try Env.init(gpa, &env);
+    defer env.deinit(gpa);
+
+    var engine = try wasm.Engine.init();
+    defer engine.deinit();
+    const plugin = try loadPlugin(&engine, &env.ctx, "which_key", @embedFile("guest_which_key_wasm"), .{});
+    defer plugin.deinit();
+
+    const Keymap = @import("Keymap.zig");
+    try env.keymap.markMenuMode(gpa, "leader");
+    try env.keymap.bind(gpa, "leader", "f", "find-file", Keymap.prio_plugin, "test");
+    try env.keymap.bind(gpa, "leader", "g", "git-status", Keymap.prio_plugin, "test");
+    try env.keymap.setMode(gpa, "leader");
+
+    // Core fires on_menu(open) at the frame boundary; the guest reads the
+    // current menu's bindings and paints a surface.
+    wasm_host.notifyMenu(plugin, true);
+    try t.expect(plugin.surface.active);
+    try t.expectEqual(surface_mod.Placement.corner, plugin.surface.placement);
+    try t.expectEqual(@as(usize, 2), plugin.surface.rows.items.len);
+    // Each row: a group-colored key span then a leaf-colored command span.
+    try t.expectEqualStrings("f", plugin.surface.rows.items[0].spans.items[0].text);
+    try t.expectEqual(surface_mod.Role.group, plugin.surface.rows.items[0].spans.items[0].role);
+    try t.expectEqualStrings("find-file", plugin.surface.rows.items[0].spans.items[1].text);
+    try t.expectEqual(surface_mod.Role.leaf, plugin.surface.rows.items[0].spans.items[1].role);
+
+    // Leaving the menu closes the surface.
+    wasm_host.notifyMenu(plugin, false);
+    try t.expect(!plugin.surface.active);
+}
+
 test "wasm plugin: upcase-line edits in place across the membrane" {
     const gpa = t.allocator;
     var env: Env = undefined;

@@ -601,6 +601,12 @@ pub fn main(init: std.process.Init) !void {
     var next_reconnect_ns: u64 = 0;
     var next_backing_poll_ns: u64 = 0;
     var last_active: core.Buffers.Id = buffers.active_id;
+    // Menu-overlay (on_menu) edge detection: fire at the frame boundary when the
+    // active menu mode changes, so a which-key plugin re-renders exactly on
+    // enter/leave (and never nested inside another guest call).
+    var menu_open = false;
+    var last_menu_mode: [64]u8 = undefined;
+    var last_menu_len: usize = 0;
     // Left-button drag: the source offset the press landed on. A plain
     // click just moves the caret; motion with the button held extends a
     // selection from this anchor.
@@ -755,6 +761,27 @@ pub fn main(init: std.process.Init) !void {
                 const n = @min(cur_path.len, last_activate_path.len);
                 @memcpy(last_activate_path[0..n], cur_path[0..n]);
                 last_activate_len = n;
+            }
+        }
+        // Menu overlay edges: on_menu(open) when a (different) menu mode becomes
+        // active, on_menu(close) when we leave menus. Fired here at the frame
+        // boundary — top-level, so a menu-owner guest can't re-enter its store.
+        {
+            const cur = keymap.currentMode();
+            const is_menu = keymap.isMenuMode(cur);
+            const same = is_menu and menu_open and std.mem.eql(u8, cur, last_menu_mode[0..last_menu_len]);
+            if (!same) {
+                if (is_menu) {
+                    for (plugins.items) |pl| core.wasm_host.notifyMenu(pl, true);
+                } else if (menu_open) {
+                    for (plugins.items) |pl| core.wasm_host.notifyMenu(pl, false);
+                }
+                menu_open = is_menu;
+                if (is_menu) {
+                    last_menu_len = @min(cur.len, last_menu_mode.len);
+                    @memcpy(last_menu_mode[0..last_menu_len], cur[0..last_menu_len]);
+                }
+                view_dirty = true;
             }
         }
         // Apply connection intents recorded by commands (outside the
@@ -1066,11 +1093,24 @@ pub fn main(init: std.process.Init) !void {
                 (std.fmt.bufPrint(&listen_buf, "listening {d} ({s})", .{ h.clients.items.len, h.access.label() }) catch "listening")
             else
                 null;
+            // Collect the plugins' live overlays for this frame (which-key,
+            // dired, magit … render through the retained surface door).
+            var surface_buf: [64]*const core.surface.Surface = undefined;
+            var surface_n: usize = 0;
+            for (plugins.items) |pl| {
+                if (pl.surface.active and surface_n < surface_buf.len) {
+                    surface_buf[surface_n] = &pl.surface;
+                    surface_n += 1;
+                }
+            }
             // which-key: while a leader/chord prefix is active (a leaf menu
-            // mode) and no picker is open, list that mode's bindings.
+            // mode) and no picker is open, list that mode's bindings. This is
+            // the host FALLBACK — if a which-key plugin is loaded it renders a
+            // surface (surface_n > 0) and the host render steps aside, so the
+            // menu is never drawn twice.
             var wk_hints: std.ArrayList(core.Keymap.Binding) = .empty;
             defer wk_hints.deinit(gpa);
-            if (!pick_state.active and keymap.isMenuMode(keymap.currentMode())) {
+            if (surface_n == 0 and !pick_state.active and keymap.isMenuMode(keymap.currentMode())) {
                 keymap.ownBindings(gpa, keymap.currentMode(), &wk_hints) catch {};
             }
             // Buffer tab strip (only with more than one buffer open). Name
@@ -1087,6 +1127,7 @@ pub fn main(init: std.process.Init) !void {
             const hud: view_mod.Hud = .{
                 .mode = keymap.currentMode(),
                 .which_key = if (wk_hints.items.len > 0) wk_hints.items else null,
+                .surfaces = surface_buf[0..surface_n],
                 .tabs = if (tab_list.items.len > 1) tab_list.items else null,
                 .md_inline = md_inline,
                 .cursor_style = cursor_cfg.styleFor(cursor_cfg.resolveMode(&keymap, keymap.currentMode())),
