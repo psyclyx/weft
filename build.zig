@@ -1,5 +1,4 @@
 const std = @import("std");
-
 /// The reference wasm guest plugins (src/guest/*.zig). `install` plugins are
 /// the shippable reference catalog: built to `.wasm` and installed to
 /// `lib/weft/plugins/` as external artifacts a user loads with `--plugin` —

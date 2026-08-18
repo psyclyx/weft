@@ -322,8 +322,11 @@ export fn init() void {
     weft.bindKey("pick", "M-u", "pick-widen");
     weft.bindKey("pick", "M-s", "pick-style-cycle");
 
-    for ([_][]const u8{ "normal", "visual", "insert" }) |m|
-        weft.runStr2("set-cursor", m, "bar");
+    // Block caret in normal/visual (where the cursor sits ON a cell), bar in
+    // insert (between cells) — the vim convention.
+    weft.runStr2("set-cursor", "normal", "block");
+    weft.runStr2("set-cursor", "visual", "block");
+    weft.runStr2("set-cursor", "insert", "bar");
     weft.runStr2("cursor-blink", "insert", "on");
     weft.runStr2("lsp-add", ".zig", "zls");
 

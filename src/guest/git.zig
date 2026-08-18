@@ -32,13 +32,19 @@ export fn describe() void {
 }
 export fn init() void {
     for (cmds) |c| _ = weft.register(c.name);
-    // The magit-style keymap: rich, cleanly, over the plugin API. Falls back to
-    // normal so vim motions still navigate the status list.
-    weft.setFallback("magit", "normal");
+    // The magit-style keymap is navigation-only: it swallows typing (the status
+    // list isn't editable) and binds movement + its verbs — no fallback to
+    // normal, so there's no insert leak into the tool buffer.
+    weft.textInput("magit", null);
+    weft.bindKey("magit", "j", "cursor-down");
+    weft.bindKey("magit", "k", "cursor-up");
+    weft.bindKey("magit", "Down", "cursor-down");
+    weft.bindKey("magit", "Up", "cursor-up");
     weft.bindKey("magit", "s", "git-stage");
     weft.bindKey("magit", "u", "git-unstage");
     weft.bindKey("magit", "g", "git-refresh");
     weft.bindKey("magit", "Return", "git-open");
+    weft.bindKey("magit", "q", "buf-scratch");
 }
 export fn on_command(id: u32) void {
     if (id < cmds.len) cmds[id].handler();

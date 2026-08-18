@@ -41,11 +41,18 @@ export fn describe() void {
 }
 export fn init() void {
     for (cmds) |c| _ = weft.register(c.name);
-    // The dired keymap: its own verbs, vim motions inherited from normal.
-    weft.setFallback("dired", "normal");
+    // The dired keymap is navigation-only: it swallows typing (a listing isn't
+    // editable) and binds just movement + its verbs — no fallback to normal, so
+    // there's no `i`/`a` insert leak into the tool buffer.
+    weft.textInput("dired", null);
+    weft.bindKey("dired", "j", "cursor-down");
+    weft.bindKey("dired", "k", "cursor-up");
+    weft.bindKey("dired", "Down", "cursor-down");
+    weft.bindKey("dired", "Up", "cursor-up");
     weft.bindKey("dired", "Return", "dired-open");
     weft.bindKey("dired", "minus", "dired-up");
     weft.bindKey("dired", "g", "dired-refresh");
+    weft.bindKey("dired", "q", "buf-scratch");
 }
 export fn on_command(id: u32) void {
     if (id < cmds.len) cmds[id].handler();

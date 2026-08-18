@@ -8,7 +8,16 @@
 //! placement is the "popup in the corner" layout the user preferred over a
 //! full-width vertical stack.
 
+const std = @import("std");
 const weft = @import("weft.zig");
+
+/// A menu's own leave/cancel bindings are noise in the hint popup — every menu
+/// has them. Filter Escape/C-g and the commands that just leave the menu.
+fn isNoise(key: []const u8, cmd: []const u8) bool {
+    return std.mem.eql(u8, key, "Escape") or std.mem.eql(u8, key, "C-g") or
+        std.mem.eql(u8, cmd, "menu-escape") or std.mem.eql(u8, cmd, "leader-cancel") or
+        std.mem.eql(u8, cmd, "op-cancel");
+}
 
 export fn describe() void {}
 export fn init() void {}
@@ -27,15 +36,24 @@ export fn on_menu(open: u32) void {
     }
     weft.surfaceBegin(.corner);
     var i: usize = 0;
+    var rows: usize = 0;
     while (i < n) : (i += 1) {
         const key = weft.menuBindingKey(i);
         const cmd = weft.menuBindingCmd(i);
+        // Don't clutter the popup with the menu's own housekeeping keys
+        // (Escape/C-g leave the menu; every menu has them, so they're noise).
+        if (isNoise(key, cmd)) continue;
         const group = weft.menuBindingIsGroup(i);
         weft.surfaceRow();
         weft.surfaceSpan(key, .accent); // the key always stands out
         // A group (opens a submenu) reads distinctly from a terminal command —
         // the user's 'differentiate groups from terminal commands' ask.
         weft.surfaceSpan(cmd, if (group) .group else .leaf);
+        rows += 1;
+    }
+    if (rows == 0) {
+        weft.surfaceClose();
+        return;
     }
     weft.surfaceEnd(-1);
 }
