@@ -36,6 +36,8 @@ const guests = [_]Guest{
     .{ .src = "src/guest/make.zig", .import = "guest_make_wasm", .install = true },
     .{ .src = "src/guest/notes.zig", .import = "guest_notes_wasm", .install = true },
     .{ .src = "src/guest/fmt.zig", .import = "guest_fmt_wasm", .install = true },
+    .{ .src = "src/guest/buffers.zig", .import = "guest_buffers_wasm", .install = true },
+    .{ .src = "src/guest/windows.zig", .import = "guest_windows_wasm", .install = true },
 };
 
 pub fn build(b: *std.Build) void {

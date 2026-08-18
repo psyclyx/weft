@@ -783,6 +783,31 @@ test "wasm plugins: consult-imenu picks a definition and jumps to it" {
     try t.expectEqual(std.mem.indexOf(u8, src, "fn bar").?, ed.cursorOffset());
 }
 
+test "wasm plugins: buf-pick switches to the accepted buffer by recorded id" {
+    const gpa = t.allocator;
+    var env: Env = undefined;
+    try Env.init(gpa, &env);
+    defer env.deinit(gpa);
+    try @import("builtins.zig").install(gpa, &env.commands, &env.keymap); // buffer-switch
+    try @import("pick.zig").install(gpa, &env.commands, &env.keymap);
+
+    // Two more buffers beyond the initial scratch (ids 1 and 2).
+    _ = try env.buffers.create(gpa, "alpha");
+    _ = try env.buffers.create(gpa, "beta");
+
+    var engine = try wasm.Engine.init();
+    defer engine.deinit();
+    const plugin = try loadPlugin(&engine, &env.ctx, "buffers", @embedFile("guest_buffers_wasm"), .{});
+    defer plugin.deinit();
+
+    _ = try command.run(&env.commands, &env.ctx, "buf-pick", &.{});
+    try t.expect(env.pick.active);
+    _ = try command.run(&env.commands, &env.ctx, "pick-input", &.{.{ .string = "beta" }});
+    _ = try command.run(&env.commands, &env.ctx, "pick-accept", &.{});
+    // The accepted row resolved to beta's id → it is now the active buffer.
+    try t.expectEqualStrings("beta", env.buffers.active().name);
+}
+
 test "wasm plugin: structural node-kind/delete-node degrade honestly with no grammar" {
     const gpa = t.allocator;
     var env: Env = undefined;

@@ -38,6 +38,8 @@ weft.plugin("run");         // run a shell command / the current line (proc)
 weft.plugin("make");        // zig build / test into tool buffers (proc)
 weft.plugin("notes");       // capture/open notes over fs read+write
 weft.plugin("fmt");         // format-buffer (by extension) + filter (proc)
+weft.plugin("buffers");     // buf-pick (fuzzy buffer switch), buf-scratch
+weft.plugin("windows");     // win-split/vsplit/focus/close/center
 
 // Leader (space) bindings for the edit-domain operators — each name is a real
 // command one of the plugins above registered.
@@ -61,6 +63,7 @@ weft.bind("leader", "slash", "grep-word"); // ripgrep the word under the cursor
 weft.bind("leader", "x", "run-line"); // run the current line as a command
 weft.bind("leader", "n", "notes-open"); // open the notes file (capture via palette)
 weft.bind("leader", "equal", "format-buffer"); // format the buffer by extension
+weft.bind("leader", "comma", "buf-pick"); // fuzzy-switch buffers
 
 // Numbers: vim-style increment/decrement.
 weft.bind("normal", "C-a", "increment-number");
