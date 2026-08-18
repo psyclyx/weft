@@ -36,6 +36,7 @@ weft.plugin("git");         // git status/log/diff into tool buffers (proc)
 weft.plugin("grep");        // ripgrep the project into a tool buffer (proc)
 weft.plugin("run");         // run a shell command / the current line (proc)
 weft.plugin("make");        // zig build / test into tool buffers (proc)
+weft.plugin("notes");       // capture/open notes over fs read+write
 
 // Leader (space) bindings for the edit-domain operators — each name is a real
 // command one of the plugins above registered.
@@ -57,6 +58,7 @@ weft.bind("leader", "b", "make-build");
 weft.bind("leader", "t", "make-test");
 weft.bind("leader", "slash", "grep-word"); // ripgrep the word under the cursor
 weft.bind("leader", "x", "run-line"); // run the current line as a command
+weft.bind("leader", "n", "notes-open"); // open the notes file (capture via palette)
 
 // Numbers: vim-style increment/decrement.
 weft.bind("normal", "C-a", "increment-number");

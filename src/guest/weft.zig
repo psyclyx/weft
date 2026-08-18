@@ -89,6 +89,9 @@ extern "weft" fn wl_claim_subbuffer(start: u32, end: u32) i32;
 extern "weft" fn wl_subbuffer_put_fact(handle: u32, k: u32, kl: u32, v: u32, vl: u32) void;
 extern "weft" fn wl_shell_insert(ptr: u32, len: u32) void;
 extern "weft" fn wl_proc_to_buffer(cmd: u32, cmd_len: u32, name: u32, name_len: u32) void;
+extern "weft" fn wl_fs_read(path: u32, path_len: u32, out_ptr: u32, out_cap: u32) i32;
+extern "weft" fn wl_fs_write(path: u32, path_len: u32, ptr: u32, len: u32) i32;
+extern "weft" fn wl_fs_append(path: u32, path_len: u32, ptr: u32, len: u32) i32;
 
 /// Shared scratch for host→guest byte returns. A read wrapper (`slice`,
 /// `path`, `kvGet`) returns a slice INTO this buffer, valid until the next
@@ -477,4 +480,21 @@ pub fn shellInsert(cmd: []const u8) void {
 /// grep, compile). Perms: proc + timer (declared in `describe`).
 pub fn procToBuffer(cmd: []const u8, name: []const u8) void {
     wl_proc_to_buffer(p(cmd.ptr), @intCast(cmd.len), p(name.ptr), @intCast(name.len));
+}
+
+// ── fs (perm-gated fs_read / fs_write) — local, cwd-relative ──────────
+/// Read a file into `scratch` (valid until the next read call), or null (denied
+/// / not found / too big). Perm: fs_read.
+pub fn fsRead(fpath: []const u8) ?[]const u8 {
+    const n = wl_fs_read(p(fpath.ptr), @intCast(fpath.len), p(&scratch), scratch.len);
+    if (n < 0) return null;
+    return scratch[0..@intCast(n)];
+}
+/// Replace a file with `bytes`. Perm: fs_write. Returns success.
+pub fn fsWrite(fpath: []const u8, bytes: []const u8) bool {
+    return wl_fs_write(p(fpath.ptr), @intCast(fpath.len), p(bytes.ptr), @intCast(bytes.len)) == 0;
+}
+/// Append `bytes` to a file (created if absent). Perm: fs_write. Returns success.
+pub fn fsAppend(fpath: []const u8, bytes: []const u8) bool {
+    return wl_fs_append(p(fpath.ptr), @intCast(fpath.len), p(bytes.ptr), @intCast(bytes.len)) == 0;
 }

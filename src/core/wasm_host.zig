@@ -123,8 +123,88 @@ pub fn defineImports(linker: *wasm.Linker, p: *WasmPlugin) !void {
     // with a host-side proc body (the guest can't run off-thread itself).
     try d(linker, "wl_shell_insert", 2, 0, hShellInsert, p);
     try d(linker, "wl_proc_to_buffer", 4, 0, hProcToBuffer, p);
+    // fs read/write (perm-gated) — design §4 Group B/C. Local, cwd-relative.
+    try d(linker, "wl_fs_read", 4, 1, hFsRead, p);
+    try d(linker, "wl_fs_write", 4, 1, hFsWrite, p);
+    try d(linker, "wl_fs_append", 4, 1, hFsAppend, p);
 }
 
+const file = @import("file.zig");
+
+/// `fs.read(path)` (perm fs_read): read a file into the guest, returning the
+/// byte count, or -1 (denied / not found / too big for the buffer).
+fn hFsRead(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32, results: []i32) void {
+    const p: *WasmPlugin = @ptrCast(@alignCast(data.?));
+    if (!p.perms[perm_fs_read]) {
+        results[0] = -1;
+        return;
+    }
+    const path = caller.readMemory(p.gpa, @intCast(args[0]), @intCast(args[1])) catch {
+        results[0] = -1;
+        return;
+    };
+    defer p.gpa.free(path);
+    const bytes = file.readAlloc(p.gpa, path) catch {
+        results[0] = -1;
+        return;
+    };
+    defer p.gpa.free(bytes);
+    results[0] = @intCast(caller.writeMemory(@intCast(args[2]), @intCast(args[3]), bytes) catch {
+        results[0] = -1;
+        return;
+    });
+}
+
+/// `fs.write(path, bytes)` (perm fs_write): replace a file. 0 ok / -1 denied.
+fn hFsWrite(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32, results: []i32) void {
+    const p: *WasmPlugin = @ptrCast(@alignCast(data.?));
+    if (!p.perms[perm_fs_write]) {
+        results[0] = -1;
+        return;
+    }
+    const path = caller.readMemory(p.gpa, @intCast(args[0]), @intCast(args[1])) catch {
+        results[0] = -1;
+        return;
+    };
+    defer p.gpa.free(path);
+    const bytes = caller.readMemory(p.gpa, @intCast(args[2]), @intCast(args[3])) catch {
+        results[0] = -1;
+        return;
+    };
+    defer p.gpa.free(bytes);
+    file.writeBytes(p.gpa, path, bytes) catch {
+        results[0] = -1;
+        return;
+    };
+    results[0] = 0;
+}
+
+/// `fs.append(path, bytes)` (perm fs_write): append to a file (capture). 0/-1.
+fn hFsAppend(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32, results: []i32) void {
+    const p: *WasmPlugin = @ptrCast(@alignCast(data.?));
+    if (!p.perms[perm_fs_write]) {
+        results[0] = -1;
+        return;
+    }
+    const path = caller.readMemory(p.gpa, @intCast(args[0]), @intCast(args[1])) catch {
+        results[0] = -1;
+        return;
+    };
+    defer p.gpa.free(path);
+    const bytes = caller.readMemory(p.gpa, @intCast(args[2]), @intCast(args[3])) catch {
+        results[0] = -1;
+        return;
+    };
+    defer p.gpa.free(bytes);
+    file.appendBytes(p.gpa, path, bytes) catch {
+        results[0] = -1;
+        return;
+    };
+    results[0] = 0;
+}
+
+pub const perm_fs_read = 0;
+pub const perm_fs_write = 1;
 pub const perm_proc = 3;
 pub const perm_timer = 4;
 

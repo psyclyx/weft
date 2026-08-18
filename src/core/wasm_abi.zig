@@ -1342,6 +1342,40 @@ test "wasm plugin: autopair inserts a matched pair around the cursor" {
     try t.expectEqual(@as(usize, 1), ed.cursorOffset());
 }
 
+test "wasm plugin: notes capture appends via fs and open reads it back" {
+    const gpa = t.allocator;
+    var env: Env = undefined;
+    try Env.init(gpa, &env);
+    defer env.deinit(gpa);
+    try @import("builtins.zig").install(gpa, &env.commands, &env.keymap); // buffer-create
+
+    const tmp = "weft-notes-test.md"; // cwd-relative; cleaned up below
+    const file = @import("file.zig");
+    file.deleteFile(gpa, tmp);
+    defer file.deleteFile(gpa, tmp);
+
+    var engine = try wasm.Engine.init();
+    defer engine.deinit();
+    const plugin = try loadPlugin(&engine, &env.ctx, "notes", @embedFile("guest_notes_wasm"), .{});
+    defer plugin.deinit();
+    try t.expect(plugin.perms[wasm_host.perm_fs_read] and plugin.perms[wasm_host.perm_fs_write]);
+
+    // Two captures append to the file; open reads it into *notes*.
+    _ = try command.run(&env.commands, &env.ctx, "notes-capture", &.{ .{ .string = "todo x" }, .{ .string = tmp } });
+    _ = try command.run(&env.commands, &env.ctx, "notes-capture", &.{ .{ .string = "todo y" }, .{ .string = tmp } });
+    _ = try command.run(&env.commands, &env.ctx, "notes-open", &.{.{ .string = tmp }});
+
+    const buf = blk: {
+        var it = env.buffers.iterator();
+        while (it.next()) |b| if (std.mem.eql(u8, b.name, "*notes*")) break :blk b;
+        break :blk null;
+    };
+    try t.expect(buf != null);
+    const s = try buf.?.editor.text().toOwnedSlice(gpa);
+    defer gpa.free(s);
+    try t.expectEqualStrings("todo x\ntodo y\n", s);
+}
+
 test "wasm plugin: kv admin round-trips across the membrane, namespaced" {
     const gpa = t.allocator;
     var env: Env = undefined;

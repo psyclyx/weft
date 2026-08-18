@@ -25,6 +25,37 @@ pub fn readAlloc(gpa: Allocator, path: []const u8) (ReadError || Allocator.Error
 /// target. Takes ownership of `path` (gpa-owned) and of the rope
 /// snapshot — the shape a task-pool spawn needs (the caller's editor
 /// state can move on while this runs).
+/// Delete a cwd-relative file (ignores "not found"). For tests + cleanup.
+pub fn deleteFile(gpa: Allocator, path: []const u8) void {
+    var threaded: std.Io.Threaded = .init(gpa, .{});
+    defer threaded.deinit();
+    std.Io.Dir.cwd().deleteFile(threaded.io(), path) catch {};
+}
+
+/// Write `bytes` to `path` (cwd-relative), replacing it. The plain-bytes
+/// counterpart to `writeRopeAtomic`, for plugin `fs.write`.
+pub fn writeBytes(gpa: Allocator, path: []const u8, bytes: []const u8) WriteError!void {
+    var threaded: std.Io.Threaded = .init(gpa, .{});
+    defer threaded.deinit();
+    try std.Io.Dir.cwd().writeFile(threaded.io(), .{ .sub_path = path, .data = bytes });
+}
+
+/// Append `bytes` to `path` (created if absent) via read-concat-write — small
+/// files only, which is the notes/capture use. For plugin `fs.append`.
+pub fn appendBytes(gpa: Allocator, path: []const u8, bytes: []const u8) (ReadError || WriteError)!void {
+    const existing: ?[]u8 = readAlloc(gpa, path) catch |e| switch (e) {
+        error.FileNotFound => null,
+        else => return e,
+    };
+    defer if (existing) |x| gpa.free(x);
+    const prefix = existing orelse "";
+    const combined = try gpa.alloc(u8, prefix.len + bytes.len);
+    defer gpa.free(combined);
+    @memcpy(combined[0..prefix.len], prefix);
+    @memcpy(combined[prefix.len..], bytes);
+    try writeBytes(gpa, path, combined);
+}
+
 pub fn writeRopeAtomic(gpa: Allocator, path: []u8, rope: stemma.Rope) WriteError!void {
     defer gpa.free(path);
     var snapshot = rope;
