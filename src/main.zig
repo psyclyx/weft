@@ -1197,13 +1197,13 @@ pub fn main(init: std.process.Init) !void {
                         .file = ob.editor.backingPath() orelse ob.name,
                         .cursor_on = false, // the caret belongs to the focused pane
                     };
-                    const bo = try view.build(arena_state.allocator(), &ob.editor, other_hud, &split_top, pane_tree.rectOf(frame_rect, 1).?, world_to_pixel);
+                    const bo = try view.build(arena_state.allocator(), &ob.editor, other_hud, &split_top, pane_tree.rectOf(frame_rect, 1).?, frame_rect, world_to_pixel);
                     built_other = bo;
                     if (bo.records_added != 0)
                         binding[0] = try snail_vk.uploadDeltaAndWait(gpa, vctx, resources, ctx.command_pool, &cache, binding[0], &view.atlas);
                 }
             }
-            const b = try view.build(arena_state.allocator(), editor, hud, &view.top_row, focused_rect, world_to_pixel);
+            const b = try view.build(arena_state.allocator(), editor, hud, &view.top_row, focused_rect, frame_rect, world_to_pixel);
             if (built) |*old| old.deinit(gpa);
             built = b;
             if (b.records_added != 0) {

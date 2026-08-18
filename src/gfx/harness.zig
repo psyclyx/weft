@@ -40,7 +40,7 @@ pub fn renderView(
     defer arena.deinit();
     view.resetFrame();
     var top_row: usize = 0;
-    var built = try view.build(arena.allocator(), editor, hud, &top_row, fullFrame(w, h), w2p);
+    var built = try view.build(arena.allocator(), editor, hud, &top_row, fullFrame(w, h), fullFrame(w, h), w2p);
     defer built.deinit(gpa);
 
     return try rasterize(gpa, view, &.{built.shapes}, w, h);
@@ -224,9 +224,9 @@ test "harness: a vertical split renders a buffer in each column" {
     var rt: usize = 0;
     const lrect: region.Rect = .{ .x = 0, .y = 0, .w = @floatFromInt(half), .h = @floatFromInt(h) };
     const rrect: region.Rect = .{ .x = @floatFromInt(half), .y = 0, .w = @floatFromInt(w - half), .h = @floatFromInt(h) };
-    const lb = try view.build(arena.allocator(), &left, .{ .mode = "normal" }, &lt, lrect, w2p);
+    const lb = try view.build(arena.allocator(), &left, .{ .mode = "normal" }, &lt, lrect, lrect, w2p);
     const left_layout = view.frame_layout; // capture before the next build overwrites it
-    const rb = try view.build(arena.allocator(), &right, .{ .mode = "normal" }, &rt, rrect, w2p);
+    const rb = try view.build(arena.allocator(), &right, .{ .mode = "normal" }, &rt, rrect, rrect, w2p);
     const right_layout = view.frame_layout;
     try t.expect(left_layout.lines.len > 0 and right_layout.lines.len > 0);
 
@@ -271,9 +271,9 @@ test "harness: a horizontal split stacks a buffer in each row" {
     var bt: usize = 0;
     const trect: region.Rect = .{ .x = 0, .y = 0, .w = @floatFromInt(w), .h = @floatFromInt(half) };
     const brect: region.Rect = .{ .x = 0, .y = @floatFromInt(half), .w = @floatFromInt(w), .h = @floatFromInt(h - half) };
-    const tb = try view.build(arena.allocator(), &top, .{ .mode = "normal" }, &tt, trect, w2p);
+    const tb = try view.build(arena.allocator(), &top, .{ .mode = "normal" }, &tt, trect, trect, w2p);
     const tl = view.frame_layout;
-    const bb = try view.build(arena.allocator(), &bot, .{ .mode = "normal" }, &bt, brect, w2p);
+    const bb = try view.build(arena.allocator(), &bot, .{ .mode = "normal" }, &bt, brect, brect, w2p);
     const bl = view.frame_layout;
     try t.expect(tl.lines.len > 0 and bl.lines.len > 0);
     defer {

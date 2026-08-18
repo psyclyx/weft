@@ -192,11 +192,12 @@ pub const Hud = struct {
     const max_pick_rows = 8;
     const max_wk_rows = 10;
 
-    /// Rows the bottom panel (pick or which-key) needs ABOVE the status
-    /// line — the single source of truth both the body reservation
-    /// (`rows`) and the render use, so they cannot drift out of step.
+    /// Rows the bottom panel (the host which-key fallback) needs ABOVE the
+    /// status line — the single source of truth both the body reservation
+    /// (`rows`) and the render use, so they cannot drift out of step. The picker
+    /// no longer reserves: it is a window-bottom OVERLAY (vertico-style), drawn
+    /// full-width over the panes so splits never shrink it.
     fn panelRows(self: *const Hud) usize {
-        if (self.pick) |p| return 1 + @min(p.filtered.items.len, max_pick_rows); // query + list
         if (self.which_key) |wk| return 1 + @min(wk.len, max_wk_rows); // header + hints
         return 0;
     }
@@ -468,6 +469,7 @@ pub const View = struct {
         hud: Hud,
         top_row: *usize,
         frame: region.Rect,
+        window: region.Rect,
         world_to_pixel: snail.Transform2D,
     ) !Built {
         const rope = editor.text();
@@ -576,6 +578,9 @@ pub const View = struct {
 
         try self.buildHud(scratch, &runs, &rects, hud, status_rect, panel_rect, cols_visible);
         try self.drawSurfaces(scratch, &runs, &rects, hud, frame);
+        // The picker is a window-bottom overlay (drawn full-width over the panes),
+        // not a pane dock — so splits don't shrink it.
+        if (hud.pick) |p| try self.drawPickOverlay(scratch, &runs, &rects, p, window);
 
         return try self.render(world_to_pixel, runs.items, rects.items);
     }
@@ -1067,38 +1072,50 @@ pub const View = struct {
         // rows_total-N arithmetic allowed.
         try self.appendPlainRun(scratch, runs, rects, parts.items, self.baseIn(status_rect.y, 0), cols_visible, self.theme.status, null);
 
-        // which-key: a chord is pending and no pick is open — list the
-        // prefix mode's bindings in the panel region.
-        if (hud.pick == null) {
-            if (hud.which_key) |wk| {
-                const shown = @min(wk.len, Hud.max_wk_rows);
-                const header = try std.fmt.allocPrint(scratch, "  {s} —", .{hud.mode});
-                try self.appendPlainRun(scratch, runs, rects, header, self.baseIn(panel_rect.y, 0), cols_visible, self.theme.accent, null);
-                for (0..shown) |i| {
-                    const l = try std.fmt.allocPrint(scratch, "  {s}  {s}", .{ wk[i].key, wk[i].command });
-                    try self.appendPlainRun(scratch, runs, rects, l, self.baseIn(panel_rect.y, 1 + i), cols_visible, self.theme.status, null);
-                }
+        // which-key host fallback: a chord is pending and no pick is open — list
+        // the prefix mode's bindings in the reserved panel region. (The picker is
+        // drawn separately as a window-bottom overlay, so it isn't here.)
+        if (hud.which_key) |wk| {
+            const shown = @min(wk.len, Hud.max_wk_rows);
+            const header = try std.fmt.allocPrint(scratch, "  {s} —", .{hud.mode});
+            try self.appendPlainRun(scratch, runs, rects, header, self.baseIn(panel_rect.y, 0), cols_visible, self.theme.accent, null);
+            for (0..shown) |i| {
+                const l = try std.fmt.allocPrint(scratch, "  {s}  {s}", .{ wk[i].key, wk[i].command });
+                try self.appendPlainRun(scratch, runs, rects, l, self.baseIn(panel_rect.y, 1 + i), cols_visible, self.theme.status, null);
             }
-            return;
         }
+    }
 
-        const p = hud.pick orelse return;
+    /// Draw the picker as a window-bottom OVERLAY (vertico-style): a full-width
+    /// box docked at the bottom of `window`, so splits never shrink it (the
+    /// user's ask). Query line on top, then the filtered rows with the selected
+    /// one highlighted. `.prop` runs at an explicit x, so it isn't tied to a
+    /// pane's content origin.
+    fn drawPickOverlay(
+        self: *View,
+        scratch: Allocator,
+        runs: *std.ArrayList(Run),
+        rects: *std.ArrayList(Rect),
+        p: *const core.Pick,
+        window: region.Rect,
+    ) !void {
         const total = p.filtered.items.len;
         const shown = @min(total, Hud.max_pick_rows);
+        const nrows = 1 + shown; // query + list
+        const box_h = @as(f32, @floatFromInt(nrows)) * self.line_h;
+        const box_y = window.y + window.h - box_h;
+        // Backdrop across the full window width.
+        try rects.append(scratch, .{ .x = window.x, .y = box_y, .w = window.w, .h = box_h, .color = self.theme.selection });
 
         const narrow_chip = if (p.narrow.items.len > 0)
             try std.fmt.allocPrint(scratch, "[{s}]", .{p.narrow.items})
         else
             "";
-        const query = try std.fmt.allocPrint(scratch, "{s}{s}> {s}_   [{d}/{d}] ·{s}", .{
-            p.prompt,
-            narrow_chip,
-            p.query.items,
-            if (total == 0) 0 else p.selected + 1,
-            total,
-            @tagName(p.style),
+        const query = try std.fmt.allocPrint(scratch, "  {s}{s}> {s}_   [{d}/{d}] ·{s}", .{
+            p.prompt,                              narrow_chip, p.query.items,
+            if (total == 0) 0 else p.selected + 1, total,       @tagName(p.style),
         });
-        try self.appendPlainRun(scratch, runs, rects, query, self.baseIn(panel_rect.y, 0), cols_visible, self.theme.foreground, null);
+        try self.propLine(scratch, runs, query, window.x, box_y + self.ascent, self.theme.foreground);
 
         const start = if (p.selected >= shown) p.selected + 1 - shown else 0;
         for (0..shown) |i| {
@@ -1109,18 +1126,18 @@ pub const View = struct {
                 try std.fmt.allocPrint(scratch, "  {s}  · {s}", .{ item, doc })
             else
                 try std.fmt.allocPrint(scratch, "  {s}", .{item});
+            const row_y = box_y + @as(f32, @floatFromInt(1 + i)) * self.line_h;
             const selected = fi == p.selected;
-            try self.appendPlainRun(
-                scratch,
-                runs,
-                rects,
-                l,
-                self.baseIn(panel_rect.y, 1 + i),
-                cols_visible,
-                if (selected) self.theme.accent else self.theme.status,
-                if (selected) self.theme.selection else null,
-            );
+            if (selected) try rects.append(scratch, .{ .x = window.x, .y = row_y, .w = window.w, .h = self.line_h, .color = self.theme.accent });
+            try self.propLine(scratch, runs, l, window.x, row_y + self.ascent, if (selected) self.theme.background else self.theme.status);
         }
+    }
+
+    /// Shape `text` as one mono run at an explicit world x/baseline + color (a
+    /// `.prop` placement — independent of the pane's content origin).
+    fn propLine(self: *View, scratch: Allocator, runs: *std.ArrayList(Run), text: []const u8, x: f32, baseline_y: f32, color: [4]f32) !void {
+        const shaped = try snail.shape(scratch, &self.face_set.mono, text, .{});
+        try runs.append(scratch, .{ .shaped = shaped, .baseline_y = baseline_y, .place = .{ .prop = .{ .x = x, .em = self.em, .color = color } } });
     }
 
     /// A HUD text run: mono cells truncated at the viewport, optionally over
