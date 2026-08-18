@@ -16,6 +16,7 @@ test {
     _ = @import("gfx/view.zig");
     _ = @import("gfx/layout.zig");
     _ = @import("gfx/region.zig");
+    _ = @import("gfx/window_layout.zig");
     _ = @import("gfx/harness.zig");
     _ = @import("workflow.zig");
     _ = @import("core/markdown.zig");

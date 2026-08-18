@@ -13,6 +13,17 @@ pub const Axis = enum {
     vertical,
 };
 
+/// Which edges of a pane's rect are internal (shared with a neighbor) and
+/// so should get a divider line — an edge is internal exactly when it does
+/// not lie on the outer frame boundary. Pure geometry: the window layout
+/// computes it, the view draws a 1px line on the marked edges.
+pub const Edges = packed struct {
+    left: bool = false,
+    top: bool = false,
+    right: bool = false,
+    bottom: bool = false,
+};
+
 pub const Rect = struct {
     x: f32 = 0,
     y: f32 = 0,
