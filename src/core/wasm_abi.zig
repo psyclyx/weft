@@ -750,6 +750,39 @@ test "wasm plugins: consult-line jumps to the accepted row by its add index" {
     try t.expectEqual(@as(usize, 8), ed.cursorOffset()); // start of "ccc"
 }
 
+test "wasm plugins: consult-imenu picks a definition and jumps to it" {
+    const gpa = t.allocator;
+    var env: Env = undefined;
+    try Env.init(gpa, &env);
+    defer env.deinit(gpa);
+    try @import("pick.zig").install(gpa, &env.commands, &env.keymap);
+
+    const src = "fn foo() void {}\nfn bar() void {}";
+    const ed = &env.buffers.active().editor;
+    try ed.insertText(gpa, src);
+    const sx = @import("syntax.zig");
+    const syn = try sx.Syntax.create(gpa, sx.forPath("t.zig").?, &ed.doc);
+    defer syn.destroy();
+    env.buffers.active().frontend = syn;
+    const R = struct {
+        fn resolve(buf: *@import("Buffers.zig").Buffer) ?*sx.Syntax {
+            return @ptrCast(@alignCast(buf.frontend orelse return null));
+        }
+    };
+
+    var engine = try wasm.Engine.init();
+    defer engine.deinit();
+    const plugin = try loadPlugin(&engine, &env.ctx, "consult", @embedFile("guest_consult_wasm"), .{ .syntax_of = R.resolve });
+    defer plugin.deinit();
+
+    ed.placeCursor(0);
+    _ = try command.run(&env.commands, &env.ctx, "consult-imenu", &.{});
+    try t.expect(env.pick.active);
+    _ = try command.run(&env.commands, &env.ctx, "pick-input", &.{.{ .string = "bar" }});
+    _ = try command.run(&env.commands, &env.ctx, "pick-accept", &.{});
+    try t.expectEqual(std.mem.indexOf(u8, src, "fn bar").?, ed.cursorOffset());
+}
+
 test "wasm plugin: structural node-kind/delete-node degrade honestly with no grammar" {
     const gpa = t.allocator;
     var env: Env = undefined;

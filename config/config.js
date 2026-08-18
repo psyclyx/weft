@@ -42,6 +42,7 @@ weft.bind("normal", "space w", "trim-trailing-line");
 
 // Tree-sitter structural selection.
 weft.bind("normal", "space l", "consult-line");
+weft.bind("normal", "space s", "consult-imenu");
 weft.bind("normal", "space n", "ts-select-node");
 weft.bind("normal", "space e", "ts-expand-selection");
 weft.bind("normal", "space F", "ts-select-function");
