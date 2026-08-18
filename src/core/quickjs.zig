@@ -69,6 +69,7 @@ pub fn evalConfig(engine: *wasm.Engine, ctx: *command.Context, loader: ?PluginLo
     try linker.defineFn("weft", "qjs_log", 2, 0, cLog, &bridge);
     try linker.defineFn("weft", "qjs_plugin", 2, 0, cPlugin, &bridge);
     try linker.defineFn("weft", "qjs_set", 6, 0, cSet, &bridge);
+    try linker.defineFn("weft", "qjs_menu", 2, 0, cMenu, &bridge);
 
     var instance = try linker.instantiateWasi(&module);
     defer instance.deinit();
@@ -142,6 +143,24 @@ fn cSet(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32, results: []i
     const blob = readStr(br, caller, args[4], args[5]) orelse return;
     defer br.ctx.gpa.free(blob);
     store.put(br.ctx.gpa, plugin, key, blob) catch {};
+}
+
+/// weft.menu(name) — declare `name` as a prefix-menu keymap mode: a which-key
+/// submenu. It swallows text (a modal menu, not typing) and Escape/C-g leave it
+/// via `menu-escape`. A leader key bound to `name` enters it (the dispatch
+/// treats a bound command that names a menu mode as "enter that submenu").
+fn cMenu(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32, results: []i32) void {
+    _ = results;
+    const br: *Bridge = @ptrCast(@alignCast(data.?));
+    const gpa = br.ctx.gpa;
+    const name = readStr(br, caller, args[0], args[1]) orelse return;
+    defer gpa.free(name);
+    const km = br.ctx.keymap;
+    const Keymap = @import("Keymap.zig");
+    km.markMenuMode(gpa, name) catch {};
+    km.setTextCommand(gpa, name, null) catch {}; // swallow text — a menu, not typing
+    km.bind(gpa, name, "Escape", "menu-escape", Keymap.prio_config, "config") catch {};
+    km.bind(gpa, name, "C-g", "menu-escape", Keymap.prio_config, "config") catch {};
 }
 
 fn cEcho(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32, results: []i32) void {
@@ -377,6 +396,38 @@ test "quickjs: deferred load — weft.set before the plugin line reaches its ini
     const s = try env.buffers.active().editor.text().toOwnedSlice(gpa);
     defer gpa.free(s);
     try t.expectEqualStrings("``", s);
+}
+
+test "quickjs: weft.menu declares a submenu the leader tree enters (doom-style)" {
+    const gpa = t.allocator;
+    var env: Env = undefined;
+    try Env.init(gpa, &env);
+    defer env.deinit(gpa);
+
+    var engine = try wasm.Engine.init();
+    defer engine.deinit();
+
+    const cfg =
+        \\weft.menu("leader-file");
+        \\weft.bind("leader", "f", "leader-file");
+        \\weft.bind("leader-file", "s", "save");
+    ;
+    try evalConfig(&engine, &env.ctx, null, null, cfg);
+
+    // The submenu is a menu mode: which-key shows it, and the dispatch enters it
+    // when a leader key's command names it (that's why "f" → "leader-file" is a
+    // group, not a leaf).
+    try t.expect(env.keymap.isMenuMode("leader-file"));
+
+    // In the leader menu, "f" resolves to the submenu name (a group entry).
+    try env.keymap.setMode(gpa, "leader");
+    try t.expectEqualStrings("leader-file", env.keymap.lookup("f").?);
+
+    // Inside the submenu: its own keys bind, and Escape/C-g leave via menu-escape.
+    try env.keymap.setMode(gpa, "leader-file");
+    try t.expectEqualStrings("save", env.keymap.lookup("s").?);
+    try t.expectEqualStrings("menu-escape", env.keymap.lookup("Escape").?);
+    try t.expectEqualStrings("menu-escape", env.keymap.lookup("C-g").?);
 }
 
 test {

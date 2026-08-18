@@ -35,6 +35,8 @@ __attribute__((import_module("weft"), import_name("qjs_set")))
 extern void host_set(const char *plugin, int plugin_len,
                      const char *key, int key_len,
                      const char *blob, int blob_len);
+__attribute__((import_module("weft"), import_name("qjs_menu")))
+extern void host_menu(const char *name, int name_len);
 
 // ── JS → host trampolines. Each pulls its string args out of the JS values
 // and forwards to the host import. ──
@@ -157,6 +159,20 @@ static JSValue js_set(JSContext *ctx, JSValueConst this_val,
     return JS_UNDEFINED;
 }
 
+// weft.menu(name) — declare a prefix-menu keymap mode (a which-key submenu). A
+// leader key bound to `name` (a menu mode) enters it; the menu swallows text and
+// Escape/C-g leave it. This is what makes the doom-style leader tree config, not
+// baked into a plugin.
+static JSValue js_menu(JSContext *ctx, JSValueConst this_val,
+                       int argc, JSValueConst *argv) {
+    if (argc < 1) return JS_ThrowTypeError(ctx, "menu(name)");
+    size_t l;
+    const char *s = JS_ToCStringLen(ctx, &l, argv[0]);
+    if (s) host_menu(s, (int)l);
+    JS_FreeCString(ctx, s);
+    return JS_UNDEFINED;
+}
+
 // Install the `weft` global: the config surface config.js calls.
 static void install_weft(JSContext *ctx) {
     JSValue global = JS_GetGlobalObject(ctx);
@@ -167,6 +183,7 @@ static void install_weft(JSContext *ctx) {
     JS_SetPropertyStr(ctx, weft, "log", JS_NewCFunction(ctx, js_log, "log", 1));
     JS_SetPropertyStr(ctx, weft, "plugin", JS_NewCFunction(ctx, js_plugin, "plugin", 1));
     JS_SetPropertyStr(ctx, weft, "set", JS_NewCFunction(ctx, js_set, "set", 3));
+    JS_SetPropertyStr(ctx, weft, "menu", JS_NewCFunction(ctx, js_menu, "menu", 1));
     JS_SetPropertyStr(ctx, global, "weft", weft);
     JS_FreeValue(ctx, global);
 }

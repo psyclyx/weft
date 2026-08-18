@@ -7,6 +7,8 @@
 // Available:
 //   weft.plugin(name)              — load a reference plugin (or a .wasm path)
 //   weft.bind(mode, key, command)  — bind a key in a keymap mode
+//   weft.menu(name)                — declare a which-key submenu (a prefix mode)
+//   weft.set(plugin, key, value)   — hand a plugin config data (overrides defaults)
 //   weft.run(command)              — invoke a command now (startup actions)
 //   weft.echo(message)             — a transient status-line message
 //   weft.log(message)              — a line to the editor log
@@ -50,36 +52,109 @@ weft.plugin("net");         // raw TCP/TLS transport (net.connect)
 weft.plugin("which_key");   // menu-hint overlay, as a plugin over the surface door
 weft.plugin("dired");       // directory editor (proc ls + its own keymap mode)
 
-// Leader (space) bindings for the edit-domain operators — each name is a real
-// command one of the plugins above registered.
-weft.bind("normal", "space d", "duplicate-line");
-weft.bind("normal", "space u", "upcase-line");
-weft.bind("normal", "space c", "comment-line");
-weft.bind("normal", "space w", "trim-trailing-line");
+// ── Doom-Emacs-style leader (SPC). vim provides the `leader` menu mode (SPC
+// enters it in normal); which_key shows the tree. Each SPC <group> opens a
+// which-key submenu; a group binding whose command NAMES a menu mode enters it.
+// weft.menu(name) declares a submenu — the leader tree is config, not baked in.
 
-// Tree-sitter structural selection.
-weft.bind("normal", "space l", "consult-line");
-weft.bind("normal", "space s", "consult-imenu");
-weft.bind("normal", "space n", "ts-select-node");
-weft.bind("normal", "space e", "ts-expand-selection");
-weft.bind("normal", "space F", "ts-select-function");
+// Declare the submenu modes first (so the leader keys below can enter them).
+[
+  "leader-file", "leader-buffer", "leader-git", "leader-search",
+  "leader-project", "leader-code", "leader-open", "leader-notes",
+  "leader-window", "leader-quit", "leader-help", "leader-toggle",
+].forEach((m) => weft.menu(m));
 
-// Git / build / search (vim's leader mode). More verbs via the palette.
-weft.bind("leader", "g", "git-status");
-weft.bind("leader", "b", "make-build");
-weft.bind("leader", "t", "make-test");
-weft.bind("leader", "slash", "grep-word"); // ripgrep the word under the cursor
-weft.bind("leader", "x", "run-line"); // run the current line as a command
-weft.bind("leader", "n", "notes-open"); // open the notes file (capture via palette)
-weft.bind("leader", "equal", "format-buffer"); // format the buffer by extension
-weft.bind("leader", "comma", "buf-pick"); // fuzzy-switch buffers
-weft.bind("leader", "r", "lang-run"); // run the current file by its language
-weft.bind("leader", "a", "llm-ask-line"); // ask an llm CLI with the current line
-weft.bind("leader", "exclam", "console-open"); // open the command console
-weft.bind("leader", "semicolon", "console-send"); // run the current line there
-weft.bind("leader", "R", "repl-start"); // start a shell REPL (persistent)
-weft.bind("leader", "minus", "dired"); // open the directory editor (dired)
-weft.bind("leader", "e", "repl-send-line"); // eval the current line in the REPL
+// Top-level leader: quick actions + the group prefixes (doom's SPC map).
+weft.bind("leader", "space", "find-file");       // SPC SPC — find file
+weft.bind("leader", "colon", "pick-commands");   // SPC :   — M-x (run a command)
+weft.bind("leader", "period", "find-file");      // SPC .   — find file
+weft.bind("leader", "comma", "buf-pick");        // SPC ,   — switch buffer
+weft.bind("leader", "f", "leader-file");         // SPC f   — files
+weft.bind("leader", "b", "leader-buffer");       // SPC b   — buffers
+weft.bind("leader", "g", "leader-git");          // SPC g   — git
+weft.bind("leader", "s", "leader-search");       // SPC s   — search
+weft.bind("leader", "p", "leader-project");      // SPC p   — project
+weft.bind("leader", "c", "leader-code");         // SPC c   — code
+weft.bind("leader", "o", "leader-open");         // SPC o   — open
+weft.bind("leader", "n", "leader-notes");        // SPC n   — notes
+weft.bind("leader", "w", "leader-window");       // SPC w   — window
+weft.bind("leader", "q", "leader-quit");         // SPC q   — quit
+weft.bind("leader", "h", "leader-help");         // SPC h   — help
+weft.bind("leader", "t", "leader-toggle");       // SPC t   — toggle
+
+// SPC f — files
+weft.bind("leader-file", "f", "find-file");
+weft.bind("leader-file", "s", "save");
+weft.bind("leader-file", "S", "save-as");
+weft.bind("leader-file", "r", "project-recent");
+weft.bind("leader-file", "d", "dired");
+
+// SPC b — buffers
+weft.bind("leader-buffer", "b", "buf-pick");
+weft.bind("leader-buffer", "d", "buffer-close");
+weft.bind("leader-buffer", "k", "buffer-close");
+weft.bind("leader-buffer", "n", "buffer-next");
+weft.bind("leader-buffer", "s", "save");
+weft.bind("leader-buffer", "N", "buf-scratch");
+
+// SPC g — git (magit-style status has its own s/u/g binds once open)
+weft.bind("leader-git", "g", "git-status");
+weft.bind("leader-git", "l", "git-log");
+weft.bind("leader-git", "d", "git-diff");
+weft.bind("leader-git", "D", "git-diff-staged");
+weft.bind("leader-git", "b", "git-blame");
+
+// SPC s — search
+weft.bind("leader-search", "s", "consult-line");
+weft.bind("leader-search", "i", "consult-imenu");
+weft.bind("leader-search", "p", "grep");
+weft.bind("leader-search", "w", "grep-word");
+
+// SPC p — project
+weft.bind("leader-project", "p", "project-recent");
+weft.bind("leader-project", "f", "find-file");
+weft.bind("leader-project", "r", "project-recent");
+weft.bind("leader-project", "slash", "grep");
+
+// SPC c — code
+weft.bind("leader-code", "c", "comment-line");
+weft.bind("leader-code", "f", "format-buffer");
+weft.bind("leader-code", "e", "ts-expand-selection");
+weft.bind("leader-code", "n", "ts-select-node");
+weft.bind("leader-code", "b", "make-build");
+weft.bind("leader-code", "t", "make-test");
+weft.bind("leader-code", "r", "lang-run");
+weft.bind("leader-code", "x", "run-line");
+
+// SPC o — open / tools
+weft.bind("leader-open", "d", "dired");
+weft.bind("leader-open", "r", "repl-start");
+weft.bind("leader-open", "c", "console-open");
+weft.bind("leader-open", "e", "direnv-status");
+weft.bind("leader-open", "a", "llm-ask-line");
+
+// SPC n — notes
+weft.bind("leader-notes", "n", "notes-open");
+weft.bind("leader-notes", "c", "notes-capture");
+
+// SPC w — window
+weft.bind("leader-window", "v", "win-vsplit");
+weft.bind("leader-window", "s", "win-split");
+weft.bind("leader-window", "w", "win-focus");
+weft.bind("leader-window", "d", "win-close");
+weft.bind("leader-window", "c", "win-center");
+weft.bind("leader-window", "o", "win-close");
+
+// SPC q — quit
+weft.bind("leader-quit", "q", "quit");
+
+// SPC h — help (execute/describe a command via the palette)
+weft.bind("leader-help", "c", "pick-commands");
+weft.bind("leader-help", "h", "pick-commands");
+
+// SPC t — toggle
+weft.bind("leader-toggle", "w", "trim-trailing-buffer");
+weft.bind("leader-toggle", "c", "comment-line");
 
 // Numbers: vim-style increment/decrement.
 weft.bind("normal", "C-a", "increment-number");

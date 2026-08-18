@@ -216,6 +216,13 @@ pub fn main(init: std.process.Init) !void {
     // set per-mode styles at load time.
     var cursor_cfg = CursorConfig{ .gpa = gpa };
     defer cursor_cfg.deinit();
+    _ = try commands.bind(gpa, "menu-escape", .{
+        .name = "menu-escape",
+        .summary = "Leave a menu, back to its return mode.",
+        .args = &.{},
+        .handler = menuEscapeHandler,
+        .data = null,
+    });
     _ = try commands.bind(gpa, "set-cursor", .{
         .name = "set-cursor",
         .summary = "Set the caret style (block|bar|underline) for a mode.",
@@ -1409,6 +1416,17 @@ fn setColorHandler(ctx: *core.command.Context, data: ?*anyopaque, args: []const 
     return .nil;
 }
 
+/// `menu-escape` (Escape / C-g in a menu) — leave the current menu mode back to
+/// its recorded return target (the root non-menu mode), or `normal`.
+fn menuEscapeHandler(ctx: *core.command.Context, data: ?*anyopaque, args: []const core.command.Value) anyerror!core.command.Value {
+    _ = data;
+    _ = args;
+    const km = ctx.keymap;
+    const ret = km.menuReturn(km.currentMode()) orelse "normal";
+    km.setMode(ctx.gpa, ret) catch {};
+    return .nil;
+}
+
 /// Decode the first record of a framed config blob (uvarint count, then per
 /// record uvarint(len)++bytes — the encoding the config shim produces). Used to
 /// read a single-value `weft.set` (e.g. a theme color) host-side.
@@ -1818,6 +1836,14 @@ fn dispatchKey(ctx: *core.command.Context, view: *view_mod.View, ev: wayland.Key
             }
             if (std.mem.eql(u8, cmd_name, "cursor-down")) {
                 try visualVertical(ctx.editor(), view, 1);
+                return;
+            }
+            // A bound key whose command NAMES a menu mode enters that submenu
+            // (the which-key / doom leader tree). Config declares submenus with
+            // `weft.menu` and binds leader keys to them; entering records the
+            // one-shot return target. No per-submenu entry command is needed.
+            if (ctx.keymap.isMenuMode(cmd_name)) {
+                ctx.keymap.enterMode(ctx.gpa, cmd_name) catch {};
                 return;
             }
             // Snapshot a menu mode so a one-shot key can pop back to its return
