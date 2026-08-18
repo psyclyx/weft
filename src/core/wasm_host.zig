@@ -63,6 +63,10 @@ pub fn defineImports(linker: *wasm.Linker, p: *WasmPlugin) !void {
     try d(linker, "wl_register", 2, 1, hRegister, p);
     try d(linker, "wl_jump", 1, 0, hJump, p);
     try d(linker, "wl_flash", 2, 0, hFlash, p);
+    // Styles feed: a plugin paints per-byte StyleClass over its (active) tool
+    // buffer; the view renders it through Theme.styleColor (git/grep coloring).
+    try d(linker, "wl_style_clear", 0, 0, hStyleClear, p);
+    try d(linker, "wl_style", 3, 0, hStyle, p);
     // Stamped ranges ([FIX 1/3]): a motion returns one, an operator awaits +
     // applies it. Handles cross; the version token stays host-side.
     try d(linker, "wl_stamp_range", 2, 1, hStampRange, p);
@@ -345,6 +349,49 @@ fn hFlash(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32, results: [
     g_flash = .{ .start = @min(start, end), .end = @max(start, end), .gen = g_flash.gen + 1 };
 }
 
+/// The single per-buffer styles feed layer name (one styler per tool buffer,
+/// last claim wins — the registry discipline). Read by the view as bulk paint.
+const styles_layer_name = "styles";
+
+/// `style.clear()`: (re)claim the ACTIVE buffer's styles layer for this plugin
+/// and baseline it to `.normal` — a zeroed class-per-byte bulk spanning the
+/// whole buffer. The guest calls this before repainting spans with `wl_style`.
+/// Targets the active document, exactly like `wl_edit`.
+fn hStyleClear(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32, results: []i32) void {
+    _ = caller;
+    _ = args;
+    _ = results;
+    const p: *WasmPlugin = @ptrCast(@alignCast(data.?));
+    const gpa = p.gpa;
+    const doc = p.ctx.document();
+    const len = p.ctx.editor().text().byteLen();
+    const layer = p.ctx.caps.layers.claim(gpa, doc, styles_layer_name, .local, p.name) catch return;
+    const zeros = gpa.alloc(u8, len) catch return;
+    defer gpa.free(zeros);
+    @memset(zeros, 0);
+    const version = doc.version(gpa) catch return;
+    defer gpa.free(version);
+    layer.publishBulk(gpa, version, 0, zeros) catch {};
+}
+
+/// `style(start, end, class)`: paint the active buffer's styles bulk with
+/// `class` over `[start, end)` (clamped), mutating the published array in place
+/// so a whole classify pass is O(bytes), not O(spans²). A no-op when
+/// `wl_style_clear` hasn't run this round (no bulk to paint into).
+fn hStyle(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32, results: []i32) void {
+    _ = caller;
+    _ = results;
+    const p: *WasmPlugin = @ptrCast(@alignCast(data.?));
+    const layer = p.ctx.caps.layers.find(p.ctx.document(), styles_layer_name) orelse return;
+    if (layer.bulk) |*b| {
+        const start = @min(@as(usize, @intCast(@as(u32, @bitCast(args[0])))), b.classes.len);
+        const end = @min(@as(usize, @intCast(@as(u32, @bitCast(args[1])))), b.classes.len);
+        if (start >= end) return;
+        const class: u8 = @truncate(@as(u32, @bitCast(args[2])));
+        @memset(b.classes[start..end], class);
+    }
+}
+
 var g_environ: std.process.Environ = .empty;
 pub fn setEnviron(env: std.process.Environ) void {
     g_environ = env;
@@ -435,11 +482,16 @@ fn shellFree(ctx: ?*anyopaque) void {
 }
 
 /// A deferred proc-to-buffer: run a command off-thread and replace a named
-/// scratch buffer with its output. Like ShellJob it holds NO plugin pointer —
-/// it re-resolves the buffer + peer by name at delivery, so it survives the
-/// plugin unloading mid-flight (no use-after-free from a guest callback).
+/// scratch buffer with its output. The buffer + author peer re-resolve by name
+/// at delivery (surviving anything that moved them). `styler` is an optional
+/// callback door: after the output lands and if the target is still the active
+/// buffer, we fire the issuing plugin's `on_fill` export so it can classify the
+/// fresh text into style spans. The plugin pointer is safe to hold — plugins
+/// are resident for the app's life (the same residency `notifyActivate` relies
+/// on); it is only ever called on the normal delivery path, never at teardown.
 const ProcJob = struct {
     ctx: *command.Context,
+    styler: *WasmPlugin, // fires on_fill after delivery (resident)
     plugin: []u8, // authors the buffer content
     buf: []u8, // target buffer name (found-or-created)
     cmd: []u8,
@@ -462,6 +514,7 @@ fn hProcToBuffer(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32, res
     const job = gpa.create(ProcJob) catch return;
     job.* = .{
         .ctx = p.ctx,
+        .styler = p,
         .plugin = gpa.dupe(u8, p.name) catch {
             gpa.destroy(job);
             gpa.free(cmd);
@@ -489,6 +542,7 @@ fn hProcAppendBuffer(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32,
     const job = gpa.create(ProcJob) catch return;
     job.* = .{
         .ctx = p.ctx,
+        .styler = p,
         .plugin = gpa.dupe(u8, p.name) catch {
             gpa.destroy(job);
             gpa.free(cmd);
@@ -547,6 +601,16 @@ fn procDeliver(ctx: ?*anyopaque, result: ?[]const u8) void {
     } else {
         doc.peerReplaceAll(gpa, pid, &.{.{ .range = .{ .start = 0, .end = end }, .bytes = out }}) catch {};
     }
+
+    // The text has landed: give the issuing plugin a chance to classify it into
+    // style spans (git/grep coloring). The guest's `on_fill` reads + paints the
+    // ACTIVE buffer through the read/style membrane, so this only fires when the
+    // just-filled buffer is still the focused one (the common case — a tool verb
+    // focuses its buffer, then fills it). If focus moved on, we skip rather than
+    // let the guest paint the wrong buffer; it renders plain, exactly as before.
+    // A plugin without `on_fill` (grep-less builds, other tools) is a no-op.
+    if (bufs.active() == b)
+        job.styler.instance.callVoid("on_fill", &.{}) catch {}; // MissingExport → skip
 }
 
 fn procFree(ctx: ?*anyopaque) void {

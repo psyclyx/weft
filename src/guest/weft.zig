@@ -30,6 +30,8 @@ extern "weft" fn wl_edit(start: u32, end: u32, ptr: u32, len: u32) void;
 extern "weft" fn wl_register(ptr: u32, len: u32) u32;
 extern "weft" fn wl_jump(offset: u32) void;
 extern "weft" fn wl_flash(start: u32, end: u32) void;
+extern "weft" fn wl_style_clear() void;
+extern "weft" fn wl_style(start: u32, end: u32, class: u32) void;
 // Native `editor` surface + stamped ranges ([FIX 1/3]). A range crosses as an
 // opaque u32 handle into a host-side table (the version token stays host-side).
 extern "weft" fn wl_editor_step(from: u32, dir: u32, kind: u32) u32;
@@ -205,6 +207,32 @@ pub fn jump(offset: usize) void {
 /// yank just copied), a visual confirmation of what an operator affected.
 pub fn flash(start: usize, end: usize) void {
     wl_flash(@intCast(start), @intCast(end));
+}
+
+// ── Styles (tool-buffer coloring): publish per-byte-range StyleClass spans over
+// the ACTIVE buffer, painted by the view through the theme (same door as
+// `edit` for which buffer it targets). `styleClear` first, then a `style` per
+// classified range — the classic magit/grep coloring pattern. Cleared with the
+// buffer on close. Mirrors core.capability.StyleClass. ──
+pub const StyleClass = enum(u32) {
+    normal = 0,
+    added = 1,
+    removed = 2,
+    header = 3,
+    location = 4,
+    emphasis = 5,
+    muted = 6,
+};
+
+/// Drop the active buffer's style spans and re-baseline them to `.normal` over
+/// the whole buffer — call before repopulating with `style`.
+pub fn styleClear() void {
+    wl_style_clear();
+}
+/// Paint `[start, end)` of the active buffer with `class` (clamped to the buffer;
+/// a no-op if `styleClear` wasn't called first this round).
+pub fn style(start: usize, end: usize, class: StyleClass) void {
+    wl_style(@intCast(start), @intCast(end), @intFromEnum(class));
 }
 
 // ── Native editor surface + stamped ranges (motions/operators) ────────

@@ -47,6 +47,24 @@ pub const HighlightClass = enum(u8) {
     label,
 };
 
+/// Semantic style classes for tool-buffer output (git/grep/make …), published
+/// by a plugin through the `styles` feed and painted by the view via
+/// `Theme.styleColor`. Kept SEPARATE from `HighlightClass`: tool styling is a
+/// distinct concern from tree-sitter syntax, keyed on a plugin's own analysis
+/// rather than a grammar, and the two never collide (tool buffers have no
+/// grammar → no highlight bulk). `.normal` = 0 so a zeroed class array (the
+/// styleClear baseline) reads as unstyled foreground. Rides the same
+/// `Bulk.classes` one-byte-per-doc-byte storage as highlight.
+pub const StyleClass = enum(u8) {
+    normal,
+    added,
+    removed,
+    header,
+    location,
+    emphasis,
+    muted,
+};
+
 /// Inline markdown role — the size/face family for a byte's span.
 pub const InlineRole = enum(u3) { normal, h1, h2, h3, h4, h5, h6, code };
 
