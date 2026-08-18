@@ -108,8 +108,10 @@ const otable = [_]OB{
     .{ .key = "bracketleft", .obj = "bracket" },   .{ .key = "bracketright", .obj = "bracket" },
     .{ .key = "braceleft", .obj = "brace" },       .{ .key = "braceright", .obj = "brace" },
     .{ .key = "B", .obj = "brace" },               .{ .key = "p", .obj = "paragraph" },
+    .{ .key = "f", .obj = "function" },            .{ .key = "c", .obj = "class" },
+    .{ .key = "m", .obj = "call" },
 };
-const to_objs = [_][]const u8{ "word", "WORD", "quote-double", "quote-single", "quote-back", "paren", "bracket", "brace", "paragraph" };
+const to_objs = [_][]const u8{ "word", "WORD", "quote-double", "quote-single", "quote-back", "paren", "bracket", "brace", "paragraph", "function", "class", "call" };
 
 /// Run textobj.<variant>-<obj> (variant chosen by i/a) and apply the pending
 /// operator over its range — the same path motions take.

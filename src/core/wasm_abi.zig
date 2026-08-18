@@ -787,6 +787,45 @@ test "wasm plugin: ts expands selection to the enclosing node + runs a query" {
     try t.expect(n == .integer and n.integer >= 1);
 }
 
+test "wasm plugins: a tree text object (a-function) an operator deletes (daf)" {
+    const gpa = t.allocator;
+    var env: Env = undefined;
+    try Env.init(gpa, &env);
+    defer env.deinit(gpa);
+
+    const src = "fn foo() void {}\nconst x = 1;";
+    const ed = &env.buffers.active().editor;
+    try ed.insertText(gpa, src);
+
+    const sx = @import("syntax.zig");
+    const syn = try sx.Syntax.create(gpa, sx.forPath("t.zig").?, &ed.doc);
+    defer syn.destroy();
+    env.buffers.active().frontend = syn;
+    const R = struct {
+        fn resolve(buf: *@import("Buffers.zig").Buffer) ?*sx.Syntax {
+            return @ptrCast(@alignCast(buf.frontend orelse return null));
+        }
+    };
+
+    var engine = try wasm.Engine.init();
+    defer engine.deinit();
+    const textobjects = try loadPlugin(&engine, &env.ctx, "textobjects", @embedFile("guest_textobjects_wasm"), .{ .syntax_of = R.resolve });
+    defer textobjects.deinit();
+    const operators = try loadPlugin(&engine, &env.ctx, "operators", @embedFile("guest_operators_wasm"), .{ .syntax_of = R.resolve });
+    defer operators.deinit();
+
+    // Cursor inside the function; a-function selects the whole function node,
+    // the operator deletes it — a tree object composed with the SAME operator.
+    ed.placeCursor(std.mem.indexOf(u8, src, "foo").?);
+    const rv = try command.run(&env.commands, &env.ctx, "textobj.a-function", &.{});
+    try t.expect(rv == .range);
+    _ = try command.run(&env.commands, &env.ctx, "op.delete", &.{rv});
+    const s = try ed.text().toOwnedSlice(gpa);
+    defer gpa.free(s);
+    try t.expect(std.mem.indexOf(u8, s, "foo") == null); // the function is gone
+    try t.expect(std.mem.indexOf(u8, s, "const x") != null); // the rest remains
+}
+
 test "wasm plugin: region claims a subbuffer + attaches a fact across the membrane" {
     const gpa = t.allocator;
     var env: Env = undefined;

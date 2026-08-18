@@ -18,9 +18,9 @@ fn retObj(o: ?Obj) void {
 // One command per (variant, object). Registration order == on_command id; the
 // table is generated so vim can name `textobj.inner-<obj>` / `textobj.a-<obj>`.
 const object_names = [_][]const u8{
-    "word",       "WORD",  "quote-double", "quote-single",
-    "quote-back", "paren", "bracket",      "brace",
-    "paragraph",
+    "word",       "WORD",     "quote-double", "quote-single",
+    "quote-back", "paren",    "bracket",      "brace",
+    "paragraph",  "function", "class",        "call",
 };
 const Cmd = struct { name: []const u8, handler: *const fn () void };
 const cmds = blk: {
@@ -64,6 +64,28 @@ fn compute(comptime obj: []const u8, around: bool) ?Obj {
     if (comptime std.mem.eql(u8, obj, "bracket")) return pairObj('[', ']', around);
     if (comptime std.mem.eql(u8, obj, "brace")) return pairObj('{', '}', around);
     if (comptime std.mem.eql(u8, obj, "paragraph")) return paraObj(around);
+    // Tree-backed objects (need a grammar; degrade to null without one). Both
+    // inner and `a` return the enclosing node for now — precise inner bodies
+    // want per-language modes. `around` is accepted but not yet distinguished.
+    if (comptime std.mem.eql(u8, obj, "function")) return treeObj(&.{ "function", "fn_", "method" });
+    if (comptime std.mem.eql(u8, obj, "class")) return treeObj(&.{ "class", "struct", "enum", "interface", "trait" });
+    if (comptime std.mem.eql(u8, obj, "call")) return treeObj(&.{ "call", "invocation" });
+    return null;
+}
+
+/// The nearest enclosing tree-sitter node whose KIND contains any needle
+/// (grammar-agnostic), as a range. Null without a grammar / no match.
+fn treeObj(comptime needles: []const []const u8) ?Obj {
+    const cur = weft.cursor();
+    var r = weft.Range{ .start = cur, .end = cur };
+    var i: usize = 0;
+    while (i < 64) : (i += 1) {
+        const n = weft.nodeEnclosing(r) orelse return null;
+        inline for (needles) |needle| {
+            if (std.mem.indexOf(u8, n.kind, needle) != null) return .{ .s = n.start, .e = n.end };
+        }
+        r = .{ .start = n.start, .end = n.end };
+    }
     return null;
 }
 
