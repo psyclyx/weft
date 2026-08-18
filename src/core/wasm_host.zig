@@ -55,6 +55,7 @@ pub fn defineImports(linker: *wasm.Linker, p: *WasmPlugin) !void {
     try d(linker, "wl_path", 2, 1, hPath, p);
     // Group B: the native `editor` surface (pure step primitive).
     try d(linker, "wl_editor_step", 3, 1, hEditorStep, p);
+    try d(linker, "wl_set_selection", 2, 0, hSetSelection, p);
     // Group C: write.
     try d(linker, "wl_edit", 4, 0, hEdit, p);
     try d(linker, "wl_register", 2, 1, hRegister, p);
@@ -110,6 +111,10 @@ pub fn defineImports(linker: *wasm.Linker, p: *WasmPlugin) !void {
     try d(linker, "wl_push_completion", 2, 0, hPushCompletion, p);
     // Structural read + subbuffers.
     try d(linker, "wl_node_at", 4, 1, hNodeAt, p);
+    // syntax.query (design §4): the tree stays host-side; captures/nodes cross.
+    try d(linker, "wl_node_enclosing", 5, 1, hNodeEnclosing, p);
+    try d(linker, "wl_query", 4, 1, hQuery, p);
+    try d(linker, "wl_query_capture", 4, 1, hQueryCapture, p);
     try d(linker, "wl_claim_subbuffer", 2, 1, hClaimSubbuffer, p);
     try d(linker, "wl_subbuffer_put_fact", 5, 0, hSubbufferPutFact, p);
     // Effects (perm-gated): shell insert — the membrane form of editLater
@@ -399,6 +404,20 @@ fn hEditorStep(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32, resul
     const dir: Editor.StepDir = @enumFromInt(@as(u32, @intCast(args[1])));
     const kind: Editor.StepKind = @enumFromInt(@as(u32, @intCast(args[2])));
     results[0] = @intCast(p.ctx.editor().stepOffset(from, dir, kind));
+}
+
+/// `editor.setSelection(start, end)`: select `[start, end)` (mark at start,
+/// cursor at end). The native selection write-half, composed from placeCursor
+/// + setMark.
+fn hSetSelection(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32, results: []i32) void {
+    _ = caller;
+    _ = results;
+    const p: *WasmPlugin = @ptrCast(@alignCast(data.?));
+    const ed = p.ctx.editor();
+    const len = ed.text().byteLen();
+    ed.placeCursor(@min(@as(usize, @intCast(args[0])), len));
+    ed.setMark(p.gpa) catch {};
+    ed.placeCursor(@min(@as(usize, @intCast(args[1])), len));
 }
 
 /// Stamp `[start, end)` at the current document version and return an opaque
@@ -1019,6 +1038,85 @@ fn hNodeAt(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32, results: 
     const span = [2]u32{ @intCast(node.start), @intCast(node.end) };
     _ = caller.writeMemory(@intCast(args[3]), 8, std.mem.asBytes(&span)) catch {};
     results[0] = @intCast(caller.writeMemory(@intCast(args[1]), @intCast(args[2]), node.kind) catch 0);
+}
+
+/// The smallest NAMED node that STRICTLY encloses `[start, end)` — the
+/// expand-selection primitive (call repeatedly to grow to the next scope).
+/// Writes kind + [start,end] span; returns the kind length, or -1.
+fn hNodeEnclosing(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32, results: []i32) void {
+    const p: *WasmPlugin = @ptrCast(@alignCast(data.?));
+    const resolve = p.syntax_of orelse {
+        results[0] = -1;
+        return;
+    };
+    const syn = resolve(p.ctx.buffer()) orelse {
+        results[0] = -1;
+        return;
+    };
+    const start: usize = @intCast(args[0]);
+    const end: usize = @intCast(args[1]);
+    const anc = syn.ancestorsAt(p.gpa, start) catch {
+        results[0] = -1;
+        return;
+    };
+    defer p.gpa.free(anc);
+    // Innermost first (reverse of root→leaf): the first node strictly bigger.
+    var k = anc.len;
+    while (k > 0) {
+        k -= 1;
+        const n = anc[k];
+        if (n.start <= start and n.end >= end and !(n.start == start and n.end == end)) {
+            const span = [2]u32{ @intCast(n.start), @intCast(n.end) };
+            _ = caller.writeMemory(@intCast(args[4]), 8, std.mem.asBytes(&span)) catch {};
+            results[0] = @intCast(caller.writeMemory(@intCast(args[2]), @intCast(args[3]), n.kind) catch 0);
+            return;
+        }
+    }
+    results[0] = -1;
+}
+
+/// Run a tree-sitter query (`scm`) over `[start, end)`; stash its captures on
+/// the plugin (read back via `wl_query_capture`) and return the count, or -1.
+fn hQuery(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32, results: []i32) void {
+    const p: *WasmPlugin = @ptrCast(@alignCast(data.?));
+    p.queryCapsClear();
+    const resolve = p.syntax_of orelse {
+        results[0] = -1;
+        return;
+    };
+    const syn = resolve(p.ctx.buffer()) orelse {
+        results[0] = -1;
+        return;
+    };
+    const scm = caller.readMemory(p.gpa, @intCast(args[0]), @intCast(args[1])) catch {
+        results[0] = -1;
+        return;
+    };
+    defer p.gpa.free(scm);
+    const caps = syn.queryCaptures(p.gpa, scm, .{ .start = @intCast(args[2]), .end = @intCast(args[3]) }) catch {
+        results[0] = -1;
+        return;
+    };
+    defer p.gpa.free(caps); // names transfer into query_caps below
+    for (caps) |c| p.query_caps.append(p.gpa, .{ .name = c.name, .start = c.start, .end = c.end }) catch {
+        p.gpa.free(c.name);
+    };
+    results[0] = @intCast(p.query_caps.items.len);
+}
+
+/// Read the `i`-th capture from the last `wl_query`: writes name + [start,end]
+/// span, returns the name length, or -1.
+fn hQueryCapture(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32, results: []i32) void {
+    const p: *WasmPlugin = @ptrCast(@alignCast(data.?));
+    const i: usize = @intCast(args[0]);
+    if (i >= p.query_caps.items.len) {
+        results[0] = -1;
+        return;
+    }
+    const q = p.query_caps.items[i];
+    const span = [2]u32{ @intCast(q.start), @intCast(q.end) };
+    _ = caller.writeMemory(@intCast(args[3]), 8, std.mem.asBytes(&span)) catch {};
+    results[0] = @intCast(caller.writeMemory(@intCast(args[1]), @intCast(args[2]), q.name) catch 0);
 }
 
 fn hClaimSubbuffer(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32, results: []i32) void {

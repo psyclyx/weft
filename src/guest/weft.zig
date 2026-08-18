@@ -32,6 +32,7 @@ extern "weft" fn wl_jump(offset: u32) void;
 // Native `editor` surface + stamped ranges ([FIX 1/3]). A range crosses as an
 // opaque u32 handle into a host-side table (the version token stays host-side).
 extern "weft" fn wl_editor_step(from: u32, dir: u32, kind: u32) u32;
+extern "weft" fn wl_set_selection(start: u32, end: u32) void;
 extern "weft" fn wl_stamp_range(start: u32, end: u32) i32;
 extern "weft" fn wl_set_result_range(handle: u32) void;
 extern "weft" fn wl_run_range(ptr: u32, len: u32) i32;
@@ -79,6 +80,9 @@ extern "weft" fn wl_completion_prefix(out_ptr: u32, out_cap: u32) u32;
 extern "weft" fn wl_push_completion(ptr: u32, len: u32) void;
 // Structural (tree-sitter) read + subbuffers.
 extern "weft" fn wl_node_at(offset: u32, kind_out: u32, kind_cap: u32, span_out: u32) i32;
+extern "weft" fn wl_node_enclosing(start: u32, end: u32, kind_out: u32, kind_cap: u32, span_out: u32) i32;
+extern "weft" fn wl_query(scm_ptr: u32, scm_len: u32, start: u32, end: u32) i32;
+extern "weft" fn wl_query_capture(i: u32, name_out: u32, name_cap: u32, span_out: u32) i32;
 extern "weft" fn wl_claim_subbuffer(start: u32, end: u32) i32;
 extern "weft" fn wl_subbuffer_put_fact(handle: u32, k: u32, kl: u32, v: u32, vl: u32) void;
 extern "weft" fn wl_shell_insert(ptr: u32, len: u32) void;
@@ -180,6 +184,11 @@ pub const Kind = enum(u32) { char = 0, line = 1 };
 pub fn step(from: usize, dir: Dir, kind: Kind) usize {
     return wl_editor_step(@intCast(from), @intFromEnum(dir), @intFromEnum(kind));
 }
+/// Select `[r.start, r.end)` (mark at start, cursor at end).
+pub fn setSelection(r: Range) void {
+    wl_set_selection(@intCast(r.start), @intCast(r.end));
+}
+
 /// Stamp `[r.start, r.end)` at the current version → an opaque range handle
 /// (valid for this dispatch), or null on failure. The one way to build a range.
 pub fn stampRange(r: Range) ?u32 {
@@ -402,6 +411,30 @@ pub fn nodeAt(offset: usize) ?Node {
     const n = wl_node_at(@intCast(offset), p(&scratch), scratch.len, p(&span));
     if (n < 0) return null;
     return .{ .kind = scratch[0..@intCast(n)], .start = span[0], .end = span[1] };
+}
+
+/// The smallest named tree-sitter node STRICTLY enclosing `[r.start, r.end)`
+/// — repeat to grow a selection to the next scope. Kind is in `scratch`.
+pub fn nodeEnclosing(r: Range) ?Node {
+    var span: [2]u32 = undefined;
+    const n = wl_node_enclosing(@intCast(r.start), @intCast(r.end), p(&scratch), scratch.len, p(&span));
+    if (n < 0) return null;
+    return .{ .kind = scratch[0..@intCast(n)], .start = span[0], .end = span[1] };
+}
+
+pub const Capture = struct { name: []const u8, start: usize, end: usize };
+/// Run a tree-sitter query (`.scm`) over `[r.start, r.end)`; returns the
+/// capture count, read back with `queryCapture(i)`. 0 if no grammar/error.
+pub fn query(scm: []const u8, r: Range) usize {
+    const n = wl_query(p(scm.ptr), @intCast(scm.len), @intCast(r.start), @intCast(r.end));
+    return if (n < 0) 0 else @intCast(n);
+}
+/// The `i`-th capture of the last `query` (name into `scratch`), or null.
+pub fn queryCapture(i: usize) ?Capture {
+    var span: [2]u32 = undefined;
+    const n = wl_query_capture(@intCast(i), p(&scratch), scratch.len, p(&span));
+    if (n < 0) return null;
+    return .{ .name = scratch[0..@intCast(n)], .start = span[0], .end = span[1] };
 }
 
 /// Claim `[start, end)` as a subbuffer (an anchored range with its own facts)

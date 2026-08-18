@@ -26,6 +26,7 @@ weft.plugin("motions");     // word/WORD/line/doc motions — each returns a ran
 weft.plugin("textobjects"); // iw/i"/i(/ip … — each returns a range
 weft.plugin("operators");   // op.delete/upcase/lowercase — await a range
 weft.plugin("vim");         // modal editing — composes motions + textobjects + operators
+weft.plugin("ts");          // tree-sitter navigation: expand-selection, select-function
 weft.plugin("comment");     // toggle line comments
 weft.plugin("whitespace");  // trim trailing whitespace
 weft.plugin("numbers");     // increment/decrement the number under the cursor
@@ -37,6 +38,11 @@ weft.bind("normal", "space d", "duplicate-line");
 weft.bind("normal", "space u", "upcase-line");
 weft.bind("normal", "space c", "comment-line");
 weft.bind("normal", "space w", "trim-trailing-line");
+
+// Tree-sitter structural selection.
+weft.bind("normal", "space n", "ts-select-node");
+weft.bind("normal", "space e", "ts-expand-selection");
+weft.bind("normal", "space F", "ts-select-function");
 
 // Numbers: vim-style increment/decrement.
 weft.bind("normal", "C-a", "increment-number");

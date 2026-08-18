@@ -117,6 +117,10 @@ const Phase = enum { describing, active };
 /// The slot owns `version` (the token the range is stamped against).
 pub const StampSlot = struct { range: position.StampedRange, version: []u8 };
 
+/// A materialized tree-sitter query capture the guest reads by index (design
+/// §4 `syntax.query` — the tree stays host-side, captures cross). `name` owned.
+pub const QueryCap = struct { name: []u8, start: usize, end: usize };
+
 pub const WasmPlugin = struct {
     gpa: Allocator,
     ctx: *command.Context,
@@ -165,6 +169,10 @@ pub const WasmPlugin = struct {
     /// each slot owns its version bytes.
     stamps: std.ArrayList(StampSlot) = .empty,
 
+    /// The captures from the guest's most recent `syntax.query`, read back by
+    /// index. Reset at the start of each query; each entry owns its name.
+    query_caps: std.ArrayList(QueryCap) = .empty,
+
     // ── Pick (built incrementally between begin/end, then opened) ──
     pick_prompt: std.ArrayList(u8) = .empty,
     pick_id: u32 = 0,
@@ -196,6 +204,12 @@ pub const WasmPlugin = struct {
     pub fn stampsClear(self: *WasmPlugin) void {
         for (self.stamps.items) |s| self.gpa.free(s.version);
         self.stamps.clearRetainingCapacity();
+    }
+
+    /// Reset the query-capture buffer, freeing each capture's name.
+    pub fn queryCapsClear(self: *WasmPlugin) void {
+        for (self.query_caps.items) |q| self.gpa.free(q.name);
+        self.query_caps.clearRetainingCapacity();
     }
 
     pub fn declaresCommand(self: *WasmPlugin, name: []const u8) bool {
@@ -234,6 +248,8 @@ pub const WasmPlugin = struct {
         self.commands.deinit(gpa);
         self.stampsClear();
         self.stamps.deinit(gpa);
+        self.queryCapsClear();
+        self.query_caps.deinit(gpa);
         self.result_buf.deinit(gpa);
         self.pick_prompt.deinit(gpa);
         for (self.pick_items.items) |it| {
@@ -727,6 +743,48 @@ test "wasm plugin: structural node-kind/delete-node degrade honestly with no gra
     const r2 = try command.run(&env.commands, &env.ctx, "delete-node", &.{});
     try t.expectEqual(command.Value{ .integer = 0 }, r2);
     try t.expect(ed.text().byteLen() == 3); // nothing deleted
+}
+
+test "wasm plugin: ts expands selection to the enclosing node + runs a query" {
+    const gpa = t.allocator;
+    var env: Env = undefined;
+    try Env.init(gpa, &env);
+    defer env.deinit(gpa);
+
+    const src = "const x = 42;";
+    const ed = &env.buffers.active().editor;
+    try ed.insertText(gpa, src);
+
+    // Attach a real zig grammar via the buffer's frontend slot; a resolver hands
+    // it to the membrane (the host owns that slot).
+    const sx = @import("syntax.zig");
+    const syn = try sx.Syntax.create(gpa, sx.forPath("t.zig").?, &ed.doc);
+    defer syn.destroy();
+    env.buffers.active().frontend = syn;
+    const R = struct {
+        fn resolve(buf: *@import("Buffers.zig").Buffer) ?*sx.Syntax {
+            return @ptrCast(@alignCast(buf.frontend orelse return null));
+        }
+    };
+
+    var engine = try wasm.Engine.init();
+    defer engine.deinit();
+    const plugin = try loadPlugin(&engine, &env.ctx, "ts", @embedFile("guest_ts_wasm"), .{ .syntax_of = R.resolve });
+    defer plugin.deinit();
+
+    // Cursor on "42": select-node selects the literal; expand grows to a
+    // strictly larger enclosing node (design §6.2, via native syntax reads).
+    ed.placeCursor(std.mem.indexOf(u8, src, "42").?);
+    _ = try command.run(&env.commands, &env.ctx, "ts-select-node", &.{});
+    const leaf = ed.selectedRange().?;
+    _ = try command.run(&env.commands, &env.ctx, "ts-expand-selection", &.{});
+    const parent = ed.selectedRange().?;
+    try t.expect(parent.end - parent.start > leaf.end - leaf.start);
+
+    // A query over the buffer materializes captures across the membrane: the
+    // identifier "x" is found (>= 1 capture).
+    const n = try command.run(&env.commands, &env.ctx, "ts-query", &.{.{ .string = "(identifier) @i" }});
+    try t.expect(n == .integer and n.integer >= 1);
 }
 
 test "wasm plugin: region claims a subbuffer + attaches a fact across the membrane" {
