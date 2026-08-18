@@ -249,7 +249,7 @@ pub fn main(init: std.process.Init) !void {
         .gpa = gpa,
         .engine = &wasm_engine,
         .ctx = &cmd_ctx,
-        .opts = .{ .kv = &plugin_kv, .loop = &plugin_loop, .subbuffers = &plugin_subs, .syntax_of = resolveSyntax },
+        .opts = .{ .kv = &plugin_kv, .loop = &plugin_loop, .subbuffers = &plugin_subs, .syntax_of = resolveSyntax, .pool = pool },
         .list = &plugins,
         .dir = plugin_dir,
     };
@@ -703,6 +703,10 @@ pub fn main(init: std.process.Init) !void {
         // Deliver native async completions (subprocess/timer output, deferred
         // edits) on the frame thread; a completion repaints.
         if (plugin_loop.tick()) view_dirty = true;
+        // Stream any interactive REPL output into its comint buffer.
+        for (plugins.items) |pl| {
+            if (core.wasm_host.drainReplSessions(pl)) view_dirty = true;
+        }
         // Fire the activation event when the focused buffer's path changes, so
         // language-aware plugins (`modes`) can attach keymaps/facts.
         {

@@ -43,6 +43,7 @@ const guests = [_]Guest{
     .{ .src = "src/guest/direnv.zig", .import = "guest_direnv_wasm", .install = true },
     .{ .src = "src/guest/llm.zig", .import = "guest_llm_wasm", .install = true },
     .{ .src = "src/guest/console.zig", .import = "guest_console_wasm", .install = true },
+    .{ .src = "src/guest/repl.zig", .import = "guest_repl_wasm", .install = true },
 };
 
 pub fn build(b: *std.Build) void {

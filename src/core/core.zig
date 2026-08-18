@@ -24,6 +24,7 @@ pub const task = @import("task.zig");
 pub const async_loop = @import("async.zig");
 pub const kv = @import("kv.zig");
 pub const proc = @import("proc.zig");
+pub const repl_session = @import("repl_session.zig");
 pub const subbuffer = @import("subbuffer.zig");
 pub const watch = @import("watch.zig");
 pub const undo = @import("undo.zig");

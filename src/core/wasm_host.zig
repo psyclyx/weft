@@ -124,6 +124,10 @@ pub fn defineImports(linker: *wasm.Linker, p: *WasmPlugin) !void {
     // Effects (perm-gated): shell insert — the membrane form of editLater
     // with a host-side proc body (the guest can't run off-thread itself).
     try d(linker, "wl_shell_insert", 2, 0, hShellInsert, p);
+    // Interactive REPL sessions (design §6.3): a persistent child + comint.
+    try d(linker, "wl_repl_start", 4, 1, hReplStart, p);
+    try d(linker, "wl_repl_send", 3, 0, hReplSend, p);
+    try d(linker, "wl_repl_quit", 1, 0, hReplQuit, p);
     try d(linker, "wl_proc_to_buffer", 4, 0, hProcToBuffer, p);
     try d(linker, "wl_proc_append_buffer", 4, 0, hProcAppendBuffer, p);
     try d(linker, "wl_proc_filter", 4, 0, hProcFilter, p);
@@ -545,6 +549,80 @@ pub fn notifyActivate(p: *WasmPlugin, path: []const u8) void {
 fn hActivatePath(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32, results: []i32) void {
     const p: *WasmPlugin = @ptrCast(@alignCast(data.?));
     results[0] = @intCast(caller.writeMemory(@intCast(args[0]), @intCast(args[1]), p.cur_activate_path) catch 0);
+}
+
+const repl_session = @import("repl_session.zig");
+
+/// Start a persistent REPL: `<cmd>` runs under /bin/sh, its output streaming
+/// into the named comint buffer. Returns a session handle, or -1.
+fn hReplStart(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32, results: []i32) void {
+    const p: *WasmPlugin = @ptrCast(@alignCast(data.?));
+    if (!p.perms[perm_proc] or !p.perms[perm_timer]) {
+        results[0] = -1;
+        return;
+    }
+    const pool = p.pool orelse {
+        results[0] = -1;
+        return;
+    };
+    const gpa = p.gpa;
+    const cmd = caller.readMemory(gpa, @intCast(args[0]), @intCast(args[1])) catch {
+        results[0] = -1;
+        return;
+    };
+    defer gpa.free(cmd);
+    const buf = caller.readMemory(gpa, @intCast(args[2]), @intCast(args[3])) catch {
+        results[0] = -1;
+        return;
+    };
+    defer gpa.free(buf);
+    const s = repl_session.Session.start(gpa, pool, p.ctx, p.name, buf, &.{ "/bin/sh", "-c", cmd }, g_environ) catch {
+        results[0] = -1;
+        return;
+    };
+    p.sessions.append(gpa, s) catch {
+        s.deinit();
+        results[0] = -1;
+        return;
+    };
+    results[0] = @intCast(p.sessions.items.len - 1);
+}
+
+/// Write a line to a REPL session's stdin.
+fn hReplSend(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32, results: []i32) void {
+    _ = results;
+    const p: *WasmPlugin = @ptrCast(@alignCast(data.?));
+    const h: usize = @intCast(args[0]);
+    if (h >= p.sessions.items.len) return;
+    const s = p.sessions.items[h] orelse return;
+    const line = caller.readMemory(p.gpa, @intCast(args[1]), @intCast(args[2])) catch return;
+    defer p.gpa.free(line);
+    s.send(line);
+}
+
+/// Quit a REPL session (kill + join); its handle stays valid but dead.
+fn hReplQuit(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32, results: []i32) void {
+    _ = caller;
+    _ = results;
+    const p: *WasmPlugin = @ptrCast(@alignCast(data.?));
+    const h: usize = @intCast(args[0]);
+    if (h >= p.sessions.items.len) return;
+    if (p.sessions.items[h]) |s| {
+        s.deinit();
+        p.sessions.items[h] = null;
+    }
+}
+
+/// Frame-thread: drain every session's streamed output into its buffer.
+/// Returns true if anything was written (the view repaints).
+pub fn drainReplSessions(p: *WasmPlugin) bool {
+    var any = false;
+    for (p.sessions.items) |maybe| {
+        if (maybe) |s| {
+            if (s.drain()) any = true;
+        }
+    }
+    return any;
 }
 
 pub fn resolvePeerWp(ctx: *anyopaque, doc: *Document) Document.AddPeerError!Document.PeerId {

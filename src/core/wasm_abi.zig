@@ -13,6 +13,8 @@ const wasm = @import("wasm.zig");
 const command = @import("command.zig");
 const Document = @import("Document.zig");
 const position = @import("position.zig");
+const repl_session = @import("repl_session.zig");
+const Pool = @import("task.zig").Pool;
 
 /// The embedded reference guest (compiled from `src/guest/hello.zig` to
 /// wasm32 by build.zig, embedded like `font_mono`).
@@ -177,6 +179,14 @@ pub const WasmPlugin = struct {
     /// `on_activate` dispatch, readable by the guest via `wl_activate_path`.
     cur_activate_path: []const u8 = &.{},
 
+    /// The task pool interactive REPL sessions run their reader on (design
+    /// §6.3). Null → repl-start is unavailable.
+    pool: ?*Pool = null,
+    /// Live persistent subprocess sessions this plugin started, indexed by the
+    /// handle the guest holds (null once quit — the slot stays for handle
+    /// stability). The frame loop drains their output; `deinit` tears them down.
+    sessions: std.ArrayList(?*repl_session.Session) = .empty,
+
     // ── Pick (built incrementally between begin/end, then opened) ──
     pick_prompt: std.ArrayList(u8) = .empty,
     pick_id: u32 = 0,
@@ -250,6 +260,8 @@ pub const WasmPlugin = struct {
             gpa.destroy(wc);
         }
         self.commands.deinit(gpa);
+        for (self.sessions.items) |maybe| if (maybe) |s| s.deinit(); // kill + join
+        self.sessions.deinit(gpa);
         self.stampsClear();
         self.stamps.deinit(gpa);
         self.queryCapsClear();
@@ -286,6 +298,8 @@ pub const LoadOptions = struct {
     /// The async loop `shellInsert` schedules its off-thread work on. Null =
     /// shell effects are unavailable (dropped).
     loop: ?*async_loop.Loop = null,
+    /// The task pool interactive REPL sessions run on. Null = repl-start drops.
+    pool: ?*Pool = null,
 };
 
 /// Load a `.wasm` plugin under the perm handshake: bind the `weft.*` import
@@ -332,6 +346,7 @@ fn construct(engine: *wasm.Engine, ctx: *command.Context, name: []const u8, opts
         .ctx = ctx,
         .name = name_dup,
         .store = opts.kv,
+        .pool = opts.pool,
         .syntax_of = opts.syntax_of,
         .subbuffers = opts.subbuffers,
         .loop = opts.loop,
@@ -1101,6 +1116,44 @@ test "wasm plugin: fmt filters a range through a command (async, in-place tmp)" 
     // the transform is exercised at runtime where main wires the real environ.
     try t.expect(std.mem.eql(u8, s, "foo foo") or std.mem.indexOf(u8, s, "bar") != null);
     try t.expect(ed.doc.commitAt(ed.doc.commitCount() - 1).author != .user); // plugin peer
+}
+
+test "wasm plugin: repl runs a persistent process and streams its output back" {
+    const gpa = t.allocator;
+    var env: Env = undefined;
+    try Env.init(gpa, &env);
+    defer env.deinit(gpa);
+    try @import("builtins.zig").install(gpa, &env.commands, &env.keymap); // buffer-create
+
+    var loop = async_loop.Loop.init(gpa, env.pool, @import("task.zig").nowNs);
+    defer loop.deinit();
+    var engine = try wasm.Engine.init();
+    defer engine.deinit();
+    // `cat` is a persistent echo REPL — stateful proof the child stays alive.
+    const plugin = try loadPlugin(&engine, &env.ctx, "repl", @embedFile("guest_repl_wasm"), .{ .loop = &loop, .pool = env.pool });
+    defer plugin.deinit(); // kills cat + JOINS the reader — no hang, no leak
+
+    // A shell read-loop is a persistent echo REPL whose `echo` flushes
+    // immediately (unlike `cat`, which block-buffers stdout on a pipe).
+    _ = try command.run(&env.commands, &env.ctx, "repl-start", &.{.{ .string = "while read l; do echo \"$l\"; done" }});
+    const buf = blk: {
+        var it = env.buffers.iterator();
+        while (it.next()) |b| if (std.mem.eql(u8, b.name, "*repl*")) break :blk b;
+        break :blk null;
+    };
+    try t.expect(buf != null);
+    _ = try command.run(&env.commands, &env.ctx, "repl-send", &.{.{ .string = "ping" }});
+
+    // Drive the frame drain until cat's echo streams into *repl* (bounded — a
+    // timeout fails the assert rather than hanging).
+    var rounds: usize = 0;
+    while (rounds < 5_000_000 and buf.?.editor.text().byteLen() == 0) : (rounds += 1) {
+        _ = wasm_host.drainReplSessions(plugin);
+        std.Thread.yield() catch {};
+    }
+    const s = try buf.?.editor.text().toOwnedSlice(gpa);
+    defer gpa.free(s);
+    try t.expect(std.mem.indexOf(u8, s, "ping") != null); // the echoed line
 }
 
 test "wasm plugin: console-send runs the current line and appends output" {

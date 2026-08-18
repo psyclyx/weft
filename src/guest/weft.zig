@@ -89,6 +89,9 @@ extern "weft" fn wl_activate_path(out_ptr: u32, out_cap: u32) i32;
 extern "weft" fn wl_claim_subbuffer(start: u32, end: u32) i32;
 extern "weft" fn wl_subbuffer_put_fact(handle: u32, k: u32, kl: u32, v: u32, vl: u32) void;
 extern "weft" fn wl_shell_insert(ptr: u32, len: u32) void;
+extern "weft" fn wl_repl_start(cmd: u32, cmd_len: u32, name: u32, name_len: u32) i32;
+extern "weft" fn wl_repl_send(handle: u32, ptr: u32, len: u32) void;
+extern "weft" fn wl_repl_quit(handle: u32) void;
 extern "weft" fn wl_proc_to_buffer(cmd: u32, cmd_len: u32, name: u32, name_len: u32) void;
 extern "weft" fn wl_proc_append_buffer(cmd: u32, cmd_len: u32, name: u32, name_len: u32) void;
 extern "weft" fn wl_proc_filter(cmd: u32, cmd_len: u32, start: u32, end: u32) void;
@@ -484,6 +487,22 @@ pub fn subbufferPutFact(handle: u32, key: []const u8, value: []const u8) void {
 /// when it finishes, rebased. Perms: proc + timer (declared in `describe`).
 pub fn shellInsert(cmd: []const u8) void {
     wl_shell_insert(p(cmd.ptr), @intCast(cmd.len));
+}
+
+// ── Interactive REPL sessions (persistent child + comint buffer) ──────
+/// Start a persistent REPL running `cmd` under a shell, streaming its output
+/// into buffer `name`. Returns a session handle, or null. Perms: proc + timer.
+pub fn replStart(cmd: []const u8, name: []const u8) ?u32 {
+    const h = wl_repl_start(p(cmd.ptr), @intCast(cmd.len), p(name.ptr), @intCast(name.len));
+    return if (h < 0) null else @intCast(h);
+}
+/// Write a line to a REPL session's stdin (a newline is appended if absent).
+pub fn replSend(handle: u32, line: []const u8) void {
+    wl_repl_send(handle, p(line.ptr), @intCast(line.len));
+}
+/// Terminate a REPL session.
+pub fn replQuit(handle: u32) void {
+    wl_repl_quit(handle);
 }
 
 /// Run `cmd` off the frame thread and replace the scratch buffer named `name`
