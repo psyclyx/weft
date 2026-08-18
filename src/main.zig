@@ -1394,6 +1394,7 @@ pub fn main(init: std.process.Init) !void {
                 .echo = if (echo_line.items.len > 0) echo_line.items else null,
                 .pick = if (pick_state.active) &pick_state else null,
                 .highlight_layer = caps.layers.find(&editor.doc, "highlight"),
+                .styles_layer = caps.layers.find(&editor.doc, "styles"),
                 .diag_layer = caps.layers.find(&editor.doc, "diagnostics"),
                 .presence_layer = caps.layers.find(&editor.doc, "presence"),
                 .link = link_note,
@@ -1451,6 +1452,8 @@ pub fn main(init: std.process.Init) !void {
                     .file = ob.editor.backingPath() orelse ob.name,
                     .cursor_on = false, // the caret belongs to the focused pane
                     .pane_border = slot.border,
+                    // A peeked tool buffer keeps its colors: thread its styles feed too.
+                    .styles_layer = caps.layers.find(&ob.editor.doc, "styles"),
                 };
                 const bo = try view.build(arena_state.allocator(), &ob.editor, other_hud, &slot.pane.top_row, slot.rect, .{}, world_to_pixel);
                 try built_panes.append(gpa, bo);

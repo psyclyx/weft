@@ -28,6 +28,7 @@ const fonts = @import("fonts.zig");
 
 const InlineAttr = core.capability.InlineAttr;
 const HighlightClass = core.capability.HighlightClass;
+const StyleClass = core.capability.StyleClass;
 
 const font_id_mono = fonts.font_id_mono;
 const margin: f32 = 8;
@@ -151,6 +152,23 @@ pub const Theme = struct {
             .attribute, .label => self.syn_attribute,
         };
     }
+
+    /// Map a tool-buffer style class to a color, reusing the existing theme
+    /// palette so a colorscheme restyles tool output for free (no new fields):
+    /// added→string-green, removed→error-red, header→type, location→function-
+    /// blue (file:line), emphasis→attribute-yellow (a grep match), muted→status.
+    /// `.normal` is plain foreground, so an unstyled byte reads as today.
+    fn styleColor(self: *const Theme, class: StyleClass) [4]f32 {
+        return switch (class) {
+            .normal => self.foreground,
+            .added => self.syn_string,
+            .removed => self.diag_error,
+            .header => self.syn_type,
+            .location => self.syn_function,
+            .emphasis => self.syn_attribute,
+            .muted => self.status,
+        };
+    }
 };
 
 /// What the frame shows besides the buffer: mode, file, dirtiness, and
@@ -176,6 +194,11 @@ pub const Hud = struct {
     pick: ?*const core.Pick = null,
     /// The highlight feed layer (stamped bulk paint).
     highlight_layer: ?*const core.layers.Layer = null,
+    /// The styles feed layer (plugin-published bulk paint over a tool buffer:
+    /// class-per-byte StyleClass). Read the same way as `highlight_layer`;
+    /// highlight wins where both exist (tool buffers have no grammar, so in
+    /// practice they never collide).
+    styles_layer: ?*const core.layers.Layer = null,
     /// The diagnostics feed layer (anchored spans, kind = severity).
     diag_layer: ?*const core.layers.Layer = null,
     /// Message of a diagnostic at the cursor, for the status line.
@@ -288,6 +311,10 @@ const Rect = struct { x: f32, y: f32, w: f32, h: f32, color: [4]f32 };
 const StyleInputs = struct {
     hl: ?[]const HighlightClass = null,
     hl_base: usize = 0,
+    /// Plugin styles feed (tool buffers): class-per-byte from `hl_base`-style
+    /// bulk, consulted only where there is no syntax highlight.
+    st: ?[]const StyleClass = null,
+    st_base: usize = 0,
     diag: ?[]const u8 = null,
     diag_base: usize = 0,
 };
@@ -698,6 +725,12 @@ pub const View = struct {
                 s.hl_base = b.start;
             }
         }
+        if (hud.styles_layer) |sl| {
+            if (sl.bulk) |b| {
+                s.st = @ptrCast(b.classes);
+                s.st_base = b.start;
+            }
+        }
         const diag_count = if (hud.diag_layer) |dl| dl.spanCount() else 0;
         if (diag_count > 0 and rows_visible > 0 and self.top_row < total_rows) {
             const dl = hud.diag_layer.?;
@@ -809,10 +842,18 @@ pub const View = struct {
         };
     }
 
+    /// Per-byte non-caret, non-diagnostic color. Precedence: syntax highlight
+    /// wins for code; the plugin styles feed paints tool buffers where there is
+    /// no highlight. Tool buffers never have a grammar, so the two never overlap
+    /// in practice — the order just fixes a defined winner if they ever did.
     fn hlColor(self: *const View, styles: StyleInputs, abs: usize) [4]f32 {
         if (styles.hl) |h| {
             if (abs >= styles.hl_base and abs - styles.hl_base < h.len)
                 return self.theme.classColor(h[abs - styles.hl_base]);
+        }
+        if (styles.st) |st| {
+            if (abs >= styles.st_base and abs - styles.st_base < st.len)
+                return self.theme.styleColor(st[abs - styles.st_base]);
         }
         return self.theme.foreground;
     }
@@ -1669,4 +1710,62 @@ test "theme: setColor updates a named field from hex; rejects bad input" {
     try testing.expect(!th.setColor("accent", "zzzzzz"));
     try testing.expect(!th.setColor("accent", "#12"));
     try testing.expectApproxEqAbs(@as(f32, 1.0), th.accent[0], 0.001);
+}
+
+test "styles: a published styles bulk resolves to StyleClass colors; highlight wins" {
+    const gpa = testing.allocator;
+    var view = try View.init(gpa, @embedFile("font_mono"), 16);
+    defer view.deinit();
+
+    // A styles feed (as the host publishes it): one class byte per doc byte.
+    var classes = [_]u8{
+        @intFromEnum(StyleClass.added),
+        @intFromEnum(StyleClass.removed),
+        @intFromEnum(StyleClass.location),
+        @intFromEnum(StyleClass.normal),
+    };
+    const si: StyleInputs = .{ .st = @ptrCast(classes[0..]), .st_base = 0 };
+    try testing.expectEqual(view.theme.styleColor(.added), view.hlColor(si, 0));
+    try testing.expectEqual(view.theme.styleColor(.removed), view.hlColor(si, 1));
+    try testing.expectEqual(view.theme.styleColor(.location), view.hlColor(si, 2));
+    try testing.expectEqual(view.theme.foreground, view.hlColor(si, 3)); // .normal
+    try testing.expectEqual(view.theme.foreground, view.hlColor(si, 99)); // out of range
+
+    // Where both feeds cover a byte, syntax highlight wins (a code buffer never
+    // has styles, but the precedence is defined).
+    var hl = [_]u8{@intFromEnum(HighlightClass.keyword)};
+    const si2: StyleInputs = .{ .hl = @ptrCast(hl[0..]), .st = @ptrCast(classes[0..]) };
+    try testing.expectEqual(view.theme.classColor(.keyword), view.hlColor(si2, 0));
+}
+
+test "styles: Hud.styles_layer flows through resolveStyleInputs (the render seam)" {
+    const gpa = testing.allocator;
+    var view = try View.init(gpa, @embedFile("font_mono"), 16);
+    defer view.deinit();
+
+    // A plugin-published styles layer, exactly as the host writes it: a zeroed
+    // class-per-byte baseline over the buffer, then two painted bytes.
+    var doc = try core.Document.init(gpa, "user");
+    defer doc.deinit(gpa);
+    try doc.insert(gpa, 0, "+add\n-del\n");
+    var store: core.layers.Layers = .empty;
+    defer store.deinit(gpa);
+    const layer = try store.claim(gpa, &doc, "styles", .local, "git");
+    var classes = [_]u8{0} ** 10;
+    classes[0] = @intFromEnum(StyleClass.added); // the '+'
+    classes[5] = @intFromEnum(StyleClass.removed); // the '-'
+    const version = try doc.version(gpa);
+    defer gpa.free(version);
+    try layer.publishBulk(gpa, version, 0, &classes);
+
+    // The Hud carries the layer (as main.zig threads it); resolveStyleInputs
+    // lifts its bulk into StyleInputs.st, and the per-cell path resolves colors.
+    var arena = std.heap.ArenaAllocator.init(gpa);
+    defer arena.deinit();
+    const hud: Hud = .{ .mode = "normal", .styles_layer = layer };
+    const si = try view.resolveStyleInputs(arena.allocator(), hud, doc.text(), 2, 2);
+    try testing.expect(si.st != null);
+    try testing.expectEqual(view.theme.styleColor(.added), view.hlColor(si, 0));
+    try testing.expectEqual(view.theme.styleColor(.removed), view.hlColor(si, 5));
+    try testing.expectEqual(view.theme.foreground, view.hlColor(si, 1)); // unpainted
 }
