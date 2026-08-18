@@ -20,6 +20,8 @@ const guests = [_]Guest{
     .{ .src = "src/guest/structural.zig", .import = "guest_structural_wasm", .install = true },
     .{ .src = "src/guest/region.zig", .import = "guest_region_wasm", .install = true },
     .{ .src = "src/guest/shell.zig", .import = "guest_shell_wasm", .install = true },
+    .{ .src = "src/guest/motions.zig", .import = "guest_motions_wasm", .install = true },
+    .{ .src = "src/guest/operators.zig", .import = "guest_operators_wasm", .install = true },
     .{ .src = "src/guest/vim.zig", .import = "guest_vim_wasm", .install = true },
 };
 

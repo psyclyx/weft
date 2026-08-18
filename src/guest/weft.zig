@@ -29,6 +29,16 @@ extern "weft" fn wl_path(out_ptr: u32, out_cap: u32) i32;
 extern "weft" fn wl_edit(start: u32, end: u32, ptr: u32, len: u32) void;
 extern "weft" fn wl_register(ptr: u32, len: u32) u32;
 extern "weft" fn wl_jump(offset: u32) void;
+// Native `editor` surface + stamped ranges ([FIX 1/3]). A range crosses as an
+// opaque u32 handle into a host-side table (the version token stays host-side).
+extern "weft" fn wl_editor_step(from: u32, dir: u32, kind: u32) u32;
+extern "weft" fn wl_stamp_range(start: u32, end: u32) i32;
+extern "weft" fn wl_set_result_range(handle: u32) void;
+extern "weft" fn wl_run_range(ptr: u32, len: u32) i32;
+extern "weft" fn wl_range_ends(handle: u32, out_ptr: u32) i32;
+extern "weft" fn wl_run_range_arg(ptr: u32, len: u32, handle: u32) void;
+extern "weft" fn wl_arg_range(i: u32) i32;
+extern "weft" fn wl_edit_range(handle: u32, ptr: u32, len: u32) void;
 extern "weft" fn wl_kv_get(kptr: u32, klen: u32, out_ptr: u32, out_cap: u32) i32;
 extern "weft" fn wl_kv_put(kptr: u32, klen: u32, vptr: u32, vlen: u32) void;
 extern "weft" fn wl_echo(ptr: u32, len: u32) void;
@@ -159,6 +169,54 @@ pub fn register(name: []const u8) u32 {
 /// Place the live cursor at a byte offset (clamped).
 pub fn jump(offset: usize) void {
     wl_jump(@intCast(offset));
+}
+
+// ── Native editor surface + stamped ranges (motions/operators) ────────
+pub const Dir = enum(u32) { back = 0, fwd = 1 };
+pub const Kind = enum(u32) { char = 0, line = 1 };
+
+/// The target offset one char (grapheme) or line from `from` in `dir`, without
+/// moving the cursor. The native primitive a motion composes (design §6.1).
+pub fn step(from: usize, dir: Dir, kind: Kind) usize {
+    return wl_editor_step(@intCast(from), @intFromEnum(dir), @intFromEnum(kind));
+}
+/// Stamp `[r.start, r.end)` at the current version → an opaque range handle
+/// (valid for this dispatch), or null on failure. The one way to build a range.
+pub fn stampRange(r: Range) ?u32 {
+    const h = wl_stamp_range(@intCast(r.start), @intCast(r.end));
+    return if (h < 0) null else @intCast(h);
+}
+/// Return the stamped range `handle` as this command's result (the motion
+/// contract): an operator awaiting it via `runRange` gets a version-stamped
+/// range, never a bare offset.
+pub fn setResultRange(handle: u32) void {
+    wl_set_result_range(handle);
+}
+/// Run `cmd` (a motion) and take its returned range as an opaque handle, or
+/// null if it produced none. The handle is valid for the rest of this dispatch.
+pub fn runRange(cmd: []const u8) ?u32 {
+    const h = wl_run_range(p(cmd.ptr), @intCast(cmd.len));
+    return if (h < 0) null else @intCast(h);
+}
+/// Resolve a range handle to its current `[start, end)`, or null if stale.
+pub fn rangeEnds(handle: u32) ?Range {
+    var pair: [2]u32 = undefined;
+    if (wl_range_ends(handle, p(&pair)) < 0) return null;
+    return .{ .start = pair[0], .end = pair[1] };
+}
+/// Run `cmd` (an operator) passing a range `handle` as its single arg.
+pub fn runRangeArg(cmd: []const u8, handle: u32) void {
+    wl_run_range_arg(p(cmd.ptr), @intCast(cmd.len), handle);
+}
+/// The `i`-th arg as a stamped-range handle, or null if it is not a range.
+pub fn argRange(i: usize) ?u32 {
+    const h = wl_arg_range(@intCast(i));
+    return if (h < 0) null else @intCast(h);
+}
+/// Replace the stamped range `handle` with `bytes`, authored as this plugin's
+/// peer through the grade gate (rebased to head first).
+pub fn editRange(handle: u32, bytes: []const u8) void {
+    wl_edit_range(handle, p(bytes.ptr), @intCast(bytes.len));
 }
 
 // ── Group E: admin (kv) ──────────────────────────────────────────────

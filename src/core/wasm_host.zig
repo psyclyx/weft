@@ -22,6 +22,7 @@ const proc = @import("proc.zig");
 const authority = @import("authority.zig");
 const position = @import("position.zig");
 const Document = @import("Document.zig");
+const Editor = @import("Editor.zig");
 
 // The lifecycle side owns these; we operate on them.
 const wasm_abi = @import("wasm_abi.zig");
@@ -52,10 +53,21 @@ pub fn defineImports(linker: *wasm.Linker, p: *WasmPlugin) !void {
     try d(linker, "wl_line_at", 2, 0, hLineAt, p);
     try d(linker, "wl_selection", 1, 1, hSelection, p);
     try d(linker, "wl_path", 2, 1, hPath, p);
+    // Group B: the native `editor` surface (pure step primitive).
+    try d(linker, "wl_editor_step", 3, 1, hEditorStep, p);
     // Group C: write.
     try d(linker, "wl_edit", 4, 0, hEdit, p);
     try d(linker, "wl_register", 2, 1, hRegister, p);
     try d(linker, "wl_jump", 1, 0, hJump, p);
+    // Stamped ranges ([FIX 1/3]): a motion returns one, an operator awaits +
+    // applies it. Handles cross; the version token stays host-side.
+    try d(linker, "wl_stamp_range", 2, 1, hStampRange, p);
+    try d(linker, "wl_set_result_range", 1, 0, hSetResultRange, p);
+    try d(linker, "wl_run_range", 2, 1, hRunRange, p);
+    try d(linker, "wl_range_ends", 2, 1, hRangeEnds, p);
+    try d(linker, "wl_run_range_arg", 3, 0, hRunRangeArg, p);
+    try d(linker, "wl_arg_range", 1, 1, hArgRange, p);
+    try d(linker, "wl_edit_range", 3, 0, hEditRange, p);
     // Group E: admin (kv).
     try d(linker, "wl_kv_get", 4, 1, hKvGet, p);
     try d(linker, "wl_kv_put", 4, 0, hKvPut, p);
@@ -374,6 +386,161 @@ fn hJump(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32, results: []
     const p: *WasmPlugin = @ptrCast(@alignCast(data.?));
     const ed = p.ctx.editor();
     ed.placeCursor(@min(@as(usize, @intCast(args[0])), ed.text().byteLen()));
+}
+
+// ── The native `editor` surface + stamped-range membrane ([FIX 1/3]) ──
+
+/// `editor.step(from, dir, kind) -> offset`: the pure step primitive a motion
+/// plugin composes (char boundary or byte-column line motion), no cursor move.
+fn hEditorStep(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32, results: []i32) void {
+    _ = caller;
+    const p: *WasmPlugin = @ptrCast(@alignCast(data.?));
+    const from: usize = @intCast(args[0]);
+    const dir: Editor.StepDir = @enumFromInt(@as(u32, @intCast(args[1])));
+    const kind: Editor.StepKind = @enumFromInt(@as(u32, @intCast(args[2])));
+    results[0] = @intCast(p.ctx.editor().stepOffset(from, dir, kind));
+}
+
+/// Stamp `[start, end)` at the current document version and return an opaque
+/// handle into this plugin's per-dispatch table. The one way a guest builds a
+/// range (a motion's target, or a linewise op's line span). -1 on failure.
+fn hStampRange(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32, results: []i32) void {
+    _ = caller;
+    const p: *WasmPlugin = @ptrCast(@alignCast(data.?));
+    const v = p.ctx.document().version(p.gpa) catch {
+        results[0] = -1;
+        return;
+    };
+    const h = p.pushRange(v, @intCast(args[0]), @intCast(args[1])) catch {
+        p.gpa.free(v);
+        results[0] = -1;
+        return;
+    };
+    results[0] = @intCast(h);
+}
+
+/// A motion sets its result to a `range` Value from a handle it stamped.
+fn hSetResultRange(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32, results: []i32) void {
+    _ = caller;
+    _ = results;
+    const p: *WasmPlugin = @ptrCast(@alignCast(data.?));
+    const h: usize = @intCast(args[0]);
+    if (h >= p.stamps.items.len) return;
+    p.result = .{ .range = p.stamps.items[h].range };
+}
+
+/// Run a command by name; if it returns a `range` Value (a motion), rebase it
+/// to the current head, re-stamp into THIS plugin's table, and return the
+/// handle. -1 if the command produced no range. This is how an operator (or
+/// vim) "awaits a motion by name" (design §6.1). Synchronous motions only for
+/// now — a pending/async range would preserve the original version instead.
+fn hRunRange(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32, results: []i32) void {
+    const p: *WasmPlugin = @ptrCast(@alignCast(data.?));
+    const cmd = caller.readMemory(p.gpa, @intCast(args[0]), @intCast(args[1])) catch {
+        results[0] = -1;
+        return;
+    };
+    defer p.gpa.free(cmd);
+    const rv = command.run(p.ctx.commands, p.ctx, cmd, &.{}) catch {
+        results[0] = -1;
+        return;
+    };
+    if (rv != .range) {
+        results[0] = -1;
+        return;
+    }
+    const cur = rv.range.rebase(p.ctx.document()) orelse {
+        results[0] = -1;
+        return;
+    };
+    const v = p.ctx.document().version(p.gpa) catch {
+        results[0] = -1;
+        return;
+    };
+    const h = p.pushRange(v, cur.start, cur.end) catch {
+        p.gpa.free(v);
+        results[0] = -1;
+        return;
+    };
+    results[0] = @intCast(h);
+}
+
+/// Resolve a stamped-range handle to its current `[start, end)` (two u32 into
+/// the guest). -1 if the handle is unknown or the range rebased away.
+fn hRangeEnds(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32, results: []i32) void {
+    const p: *WasmPlugin = @ptrCast(@alignCast(data.?));
+    const h: usize = @intCast(args[0]);
+    if (h >= p.stamps.items.len) {
+        results[0] = -1;
+        return;
+    }
+    const cur = p.stamps.items[h].range.rebase(p.ctx.document()) orelse {
+        results[0] = -1;
+        return;
+    };
+    const pair = [2]u32{ @intCast(cur.start), @intCast(cur.end) };
+    _ = caller.writeMemory(@intCast(args[1]), 8, std.mem.asBytes(&pair)) catch {
+        results[0] = -1;
+        return;
+    };
+    results[0] = 0;
+}
+
+/// Run a command passing a stamped range (by handle) as its single arg — how
+/// vim hands a motion's range to an operator (`op.delete`, …).
+fn hRunRangeArg(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32, results: []i32) void {
+    _ = results;
+    const p: *WasmPlugin = @ptrCast(@alignCast(data.?));
+    const cmd = caller.readMemory(p.gpa, @intCast(args[0]), @intCast(args[1])) catch return;
+    defer p.gpa.free(cmd);
+    const h: usize = @intCast(args[2]);
+    if (h >= p.stamps.items.len) return;
+    const rv = command.Value{ .range = p.stamps.items[h].range };
+    _ = command.run(p.ctx.commands, p.ctx, cmd, &.{rv}) catch {};
+}
+
+/// An operator reads its `range` arg: rebase to head, re-stamp into this
+/// plugin's table, return the handle. -1 if arg `i` is not a range.
+fn hArgRange(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32, results: []i32) void {
+    _ = caller;
+    const p: *WasmPlugin = @ptrCast(@alignCast(data.?));
+    const i: usize = @intCast(args[0]);
+    if (i >= p.cur_args.len or p.cur_args[i] != .range) {
+        results[0] = -1;
+        return;
+    }
+    const cur = p.cur_args[i].range.rebase(p.ctx.document()) orelse {
+        results[0] = -1;
+        return;
+    };
+    const v = p.ctx.document().version(p.gpa) catch {
+        results[0] = -1;
+        return;
+    };
+    const h = p.pushRange(v, cur.start, cur.end) catch {
+        p.gpa.free(v);
+        results[0] = -1;
+        return;
+    };
+    results[0] = @intCast(h);
+}
+
+/// Apply an edit over a stamped-range handle: rebase to head, then the gated
+/// `ctx.edit` door authored as this plugin's peer (same gate/attribution as
+/// `wl_edit`). A `view` grade fails inside `ctx.edit` — zero permission code
+/// in the operator.
+fn hEditRange(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32, results: []i32) void {
+    _ = results;
+    const p: *WasmPlugin = @ptrCast(@alignCast(data.?));
+    const h: usize = @intCast(args[0]);
+    if (h >= p.stamps.items.len) return;
+    const cur = p.stamps.items[h].range.rebase(p.ctx.document()) orelse return;
+    const bytes = caller.readMemory(p.gpa, @intCast(args[1]), @intCast(args[2])) catch return;
+    defer p.gpa.free(bytes);
+    const saved = p.ctx.principal;
+    p.ctx.principal = p.principal();
+    defer p.ctx.principal = saved;
+    p.ctx.edit(.{ .start = cur.start, .end = cur.end }, bytes) catch {};
 }
 
 // Group E: admin (kv), namespaced by plugin name.
@@ -893,6 +1060,7 @@ fn wpCmdTrampoline(ctx: *command.Context, data: ?*anyopaque, args: []const comma
     const p = wc.plugin;
     p.cur_args = args;
     p.result = .nil;
+    p.stampsClear(); // fresh per-dispatch stamp table
     defer p.cur_args = &.{};
     try p.instance.callVoid("on_command", &.{@intCast(wc.id)});
     return p.result;

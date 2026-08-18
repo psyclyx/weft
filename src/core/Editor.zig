@@ -584,6 +584,38 @@ fn nextBoundary(self: *const Editor, off: usize) usize {
     return rope.scalarToOffset(s + 1);
 }
 
+pub const StepDir = enum(u32) { back = 0, fwd = 1 };
+pub const StepKind = enum(u32) { char = 0, line = 1 };
+
+/// The native `editor.step` primitive (design §6.1, carve rule b): the target
+/// offset one grapheme/scalar (char) or one line (byte-column) from `from`, in
+/// `dir`, WITHOUT moving the live cursor. Pure — a plugin motion composes it and
+/// returns a range; the Editor's stateful cursor motions (`moveLeft` etc.) are
+/// thin wrappers left for the core key path. Line motion is byte-column here
+/// (headless-correct); layout goal-x vertical motion lives in the view.
+pub fn stepOffset(self: *const Editor, from: usize, dir: StepDir, kind: StepKind) usize {
+    const rope = self.text();
+    const len = rope.byteLen();
+    const f = @min(from, len);
+    switch (kind) {
+        .char => return switch (dir) {
+            .back => if (f == 0) 0 else self.prevBoundary(f),
+            .fwd => if (f >= len) len else self.nextBoundary(f),
+        },
+        .line => {
+            const pt = rope.offsetToPoint(f);
+            const rows = rope.lineCount();
+            const target_row = switch (dir) {
+                .back => if (pt.row == 0) return f else pt.row - 1,
+                .fwd => if (pt.row + 1 >= rows) return f else pt.row + 1,
+            };
+            const line = rope.lineRange(target_row);
+            const col = @min(pt.col, line.len());
+            return snapBoundary(rope, line.start + col);
+        },
+    }
+}
+
 pub fn moveLeft(self: *Editor) void {
     const off = self.cursorOffset();
     if (off > 0) self.moveTo(self.prevBoundary(off));

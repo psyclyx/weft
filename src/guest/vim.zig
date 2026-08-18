@@ -1,26 +1,19 @@
-//! vim (wasm twin) — modal editing (src/core/catalog/vim.zig) recompiled as
-//! `.wasm`. The whole keymap policy — modes, motions, operators, registers,
-//! leader/window/goto chords, f/F/t/T search — expressed against the guest
-//! shim. The core knows nothing of vim; this is exactly the surface a user's
-//! config.js reaches, one tier down. Delete it and weft is modeless again.
-//!
-//! Commands register in the SAME order as `cmds`, so the per-plugin id the
-//! host hands back to `on_command` indexes straight into the handler table.
+//! vim — modal editing (design §6.1) as a `.wasm` plugin, perms `{}` grant_max
+//! edit. PURE KEYMAP POLICY: it owns modes, registers, and chords, and composes
+//! the `motions` and `operators` plugins BY LATE-BOUND NAME — it contains no
+//! motion or edit logic of its own. A motion returns a stamped `range`; in
+//! normal mode vim moves the cursor to the target, in operator-pending mode it
+//! hands the range to `op.delete` ([FIX 3] — no shared-cursor side channel).
+//! The core knows nothing of vim; delete it and weft is modeless.
 
 const std = @import("std");
 const weft = @import("weft.zig");
 
-// ── Module state (single instance, frame thread) ─────────────────────
+// ── Register (charwise/linewise), owned in guest memory ──────────────
 var reg_buf: [1 << 16]u8 = undefined;
 var reg_len: usize = 0;
 var reg_line: bool = false;
 var paste_buf: [(1 << 16) + 1]u8 = undefined;
-/// The pending operator (set on d/c/y enter; consumed by a motion).
-var op_finish: []const u8 = "";
-var op_after: []const u8 = "";
-
-const file_pick = 0;
-
 fn setReg(bytes: []const u8, linewise: bool) void {
     reg_len = @min(bytes.len, reg_buf.len);
     @memcpy(reg_buf[0..reg_len], bytes[0..reg_len]);
@@ -30,10 +23,82 @@ fn reg() []const u8 {
     return reg_buf[0..reg_len];
 }
 
-// ── Command table (registration order == on_command id) ──────────────
-const Handler = *const fn () void;
-const Cmd = struct { name: []const u8, handler: Handler };
-const cmds = [_]Cmd{
+// ── Pending-operator state (set on d/c/y; consumed by the next motion) ─
+var op_is_yank: bool = false;
+var op_after: []const u8 = "normal"; // mode to enter after the operator
+
+const file_pick = 0;
+
+fn lineStartOff() usize {
+    return weft.lineAt(weft.cursor()).start;
+}
+fn lineEndOff() usize {
+    return weft.lineAt(weft.cursor()).end;
+}
+
+// ── Motion keys: each drives the `motions` plugin by name. `in_op` keys are
+// also valid after an operator (dw, de, d$, …). ──
+const MB = struct { key: []const u8, motion: []const u8, in_op: bool };
+const mtable = [_]MB{
+    .{ .key = "h", .motion = "motion.left", .in_op = false },
+    .{ .key = "l", .motion = "motion.right", .in_op = false },
+    .{ .key = "j", .motion = "motion.down", .in_op = false },
+    .{ .key = "k", .motion = "motion.up", .in_op = false },
+    .{ .key = "w", .motion = "motion.word-fwd", .in_op = true },
+    .{ .key = "b", .motion = "motion.word-back", .in_op = true },
+    .{ .key = "e", .motion = "motion.word-end", .in_op = true },
+    .{ .key = "W", .motion = "motion.WORD-fwd", .in_op = true },
+    .{ .key = "B", .motion = "motion.WORD-back", .in_op = true },
+    .{ .key = "E", .motion = "motion.WORD-end", .in_op = true },
+    .{ .key = "0", .motion = "motion.line-start", .in_op = true },
+    .{ .key = "dollar", .motion = "motion.line-end", .in_op = true },
+    .{ .key = "asciicircum", .motion = "motion.first-non-blank", .in_op = true },
+    .{ .key = "G", .motion = "motion.doc-end", .in_op = true },
+    .{ .key = "percent", .motion = "motion.match-pair", .in_op = true },
+};
+
+/// Normal-mode motion: run the motion, jump to its target (the range end that
+/// isn't the current cursor — the motion is direction-carrying that way).
+fn moveByMotion(comptime motion: []const u8) fn () void {
+    return struct {
+        fn h() void {
+            const cur = weft.cursor();
+            const hnd = weft.runRange(motion) orelse return;
+            const r = weft.rangeEnds(hnd) orelse return;
+            weft.jump(if (r.end == cur) r.start else r.end);
+        }
+    }.h;
+}
+/// Operator-pending motion: run the motion, apply the pending operator over its
+/// range.
+fn opByMotion(comptime motion: []const u8) fn () void {
+    return struct {
+        fn h() void {
+            const hnd = weft.runRange(motion) orelse return opCancel();
+            applyOpRange(hnd);
+        }
+    }.h;
+}
+
+/// Apply the pending operator over a stamped range: d/c/y all yank into the
+/// register; d/c additionally delete via `op.delete` (the operators plugin's
+/// gated edit) and enter the after-mode (normal for d, insert for c).
+fn applyOpRange(hnd: u32) void {
+    const r = weft.rangeEnds(hnd) orelse return opCancel();
+    setReg(weft.slice(r.start, r.end), false);
+    if (op_is_yank) {
+        weft.jump(r.start);
+        weft.setMode("normal");
+        return;
+    }
+    weft.runRangeArg("op.delete", hnd);
+    weft.jump(r.start);
+    weft.setMode(op_after);
+}
+
+// ── The static command table (registration order == on_command id) ────
+const Cmd = struct { name: []const u8, handler: *const fn () void };
+const static_cmds = [_]Cmd{
     .{ .name = "vim-insert", .handler = insert },
     .{ .name = "vim-append", .handler = append },
     .{ .name = "vim-open-below", .handler = openBelow },
@@ -47,26 +112,15 @@ const cmds = [_]Cmd{
     .{ .name = "vim-delete-eol", .handler = deleteEol },
     .{ .name = "vim-change-eol", .handler = changeEol },
     .{ .name = "vim-change-line", .handler = changeLine },
-    .{ .name = "yank-selection", .handler = yankSelection },
-    .{ .name = "cut-selection", .handler = cutSelection },
     .{ .name = "yank-line", .handler = yankLine },
-    .{ .name = "delete-line", .handler = deleteLine },
     .{ .name = "paste", .handler = paste },
     .{ .name = "paste-before", .handler = pasteBefore },
-    .{ .name = "first-non-blank", .handler = firstNonBlank },
     .{ .name = "join-lines", .handler = joinLines },
     .{ .name = "enter-op-delete", .handler = enterOpDelete },
     .{ .name = "enter-op-change", .handler = enterOpChange },
     .{ .name = "enter-op-yank", .handler = enterOpYank },
     .{ .name = "op-cancel", .handler = opCancel },
     .{ .name = "op-line", .handler = opLine },
-    .{ .name = "op-motion-word-forward", .handler = opWordForward },
-    .{ .name = "op-motion-word-backward", .handler = opWordBackward },
-    .{ .name = "op-motion-word-end", .handler = opWordEnd },
-    .{ .name = "op-motion-line-end", .handler = opLineEnd },
-    .{ .name = "op-motion-line-start", .handler = opLineStart },
-    .{ .name = "op-motion-doc-end", .handler = opDocEnd },
-    .{ .name = "op-motion-match-bracket", .handler = opMatchBracket },
     .{ .name = "find-file", .handler = findFile },
     .{ .name = "leader", .handler = enterLeader },
     .{ .name = "leader-file", .handler = enterLeaderFile },
@@ -94,20 +148,42 @@ const cmds = [_]Cmd{
     .{ .name = "do-find-T", .handler = doFindBigT },
 };
 
+/// Generated normal- and op-mode motion commands (one `vim/n/*` per motion, plus
+/// a `vim/o/*` for operator-valid motions). Names are only for key binding.
+const n_gen = blk: {
+    var n: usize = 0;
+    for (mtable) |m| {
+        n += 1;
+        if (m.in_op) n += 1;
+    }
+    break :blk n;
+};
+const gen_cmds: [n_gen]Cmd = blk: {
+    var arr: [n_gen]Cmd = undefined;
+    var i: usize = 0;
+    for (mtable) |m| {
+        arr[i] = .{ .name = "vim/n/" ++ m.motion, .handler = moveByMotion(m.motion) };
+        i += 1;
+        if (m.in_op) {
+            arr[i] = .{ .name = "vim/o/" ++ m.motion, .handler = opByMotion(m.motion) };
+            i += 1;
+        }
+    }
+    break :blk arr;
+};
+const cmds = static_cmds ++ gen_cmds;
+
 export fn describe() void {
     for (cmds) |c| weft.declareCommand(c.name);
 }
-
 export fn on_command(id: u32) void {
     if (id < cmds.len) cmds[id].handler();
 }
-
 export fn on_pick_accept(pick_id: u32) void {
     if (pick_id == file_pick) openChosen(weft.pickChoice());
 }
 
 export fn init() void {
-    // Modes: normal/visual swallow unbound text; insert keeps text input.
     weft.setFallback("normal", "default");
     weft.setFallback("visual", "normal");
     weft.setFallback("insert", "default");
@@ -116,44 +192,32 @@ export fn init() void {
 
     for (cmds) |c| _ = weft.register(c.name);
 
+    // Normal-mode motion keys → the generated wrappers (drive `motions`).
+    inline for (mtable) |m| weft.bindKey("normal", m.key, "vim/n/" ++ m.motion);
+
+    // Normal-mode non-motion keys (edit primitives + vim compounds).
     const nb = [_][2][]const u8{
-        .{ "h", "cursor-left" },         .{ "j", "cursor-down" },
-        .{ "k", "cursor-up" },           .{ "l", "cursor-right" },
-        .{ "w", "word-forward" },        .{ "b", "word-backward" },
-        .{ "e", "word-end" },            .{ "W", "WORD-forward" },
-        .{ "B", "WORD-backward" },       .{ "E", "WORD-end" },
-        .{ "0", "line-start" },          .{ "dollar", "line-end" },
-        .{ "G", "doc-end" },             .{ "asciicircum", "first-non-blank" },
-        .{ "percent", "match-bracket" }, .{ "i", "vim-insert" },
-        .{ "a", "vim-append" },          .{ "o", "vim-open-below" },
-        .{ "O", "vim-open-above" },      .{ "x", "delete-forward" },
-        .{ "X", "delete-backward" },     .{ "A", "vim-append-line" },
-        .{ "I", "vim-insert-line" },     .{ "D", "vim-delete-eol" },
-        .{ "C", "vim-change-eol" },      .{ "S", "vim-change-line" },
-        .{ "J", "join-lines" },          .{ "u", "undo" },
-        .{ "C-r", "redo" },              .{ "v", "vim-visual" },
-        .{ "Y", "yank-line" },           .{ "p", "paste" },
-        .{ "P", "paste-before" },        .{ "d", "enter-op-delete" },
-        .{ "c", "enter-op-change" },     .{ "y", "enter-op-yank" },
+        .{ "i", "vim-insert" },      .{ "a", "vim-append" },
+        .{ "o", "vim-open-below" },  .{ "O", "vim-open-above" },
+        .{ "x", "delete-forward" },  .{ "X", "delete-backward" },
+        .{ "A", "vim-append-line" }, .{ "I", "vim-insert-line" },
+        .{ "D", "vim-delete-eol" },  .{ "C", "vim-change-eol" },
+        .{ "S", "vim-change-line" }, .{ "J", "join-lines" },
+        .{ "u", "undo" },            .{ "C-r", "redo" },
+        .{ "v", "vim-visual" },      .{ "Y", "yank-line" },
+        .{ "p", "paste" },           .{ "P", "paste-before" },
+        .{ "d", "enter-op-delete" }, .{ "c", "enter-op-change" },
+        .{ "y", "enter-op-yank" },
     };
     for (nb) |b| weft.bindKey("normal", b[0], b[1]);
 
-    for ([_][]const u8{ "op-delete", "op-change", "op-yank" }) |m| {
-        weft.textInput(m, null);
-        weft.menuMode(m);
-        weft.setFallback(m, "default");
-        weft.bindKey(m, "Escape", "op-cancel");
-        const om = [_][2][]const u8{
-            .{ "w", "op-motion-word-forward" }, .{ "b", "op-motion-word-backward" },
-            .{ "e", "op-motion-word-end" },     .{ "dollar", "op-motion-line-end" },
-            .{ "0", "op-motion-line-start" },   .{ "asciicircum", "op-motion-line-start" },
-            .{ "G", "op-motion-doc-end" },      .{ "percent", "op-motion-match-bracket" },
-        };
-        for (om) |b| weft.bindKey(m, b[0], b[1]);
-    }
-    weft.bindKey("op-delete", "d", "op-line");
-    weft.bindKey("op-change", "c", "op-line");
-    weft.bindKey("op-yank", "y", "op-line");
+    // One operator-pending mode; d/c/y set the pending operator + enter it.
+    weft.textInput("op-pending", null);
+    weft.menuMode("op-pending");
+    weft.setFallback("op-pending", "default");
+    weft.bindKey("op-pending", "Escape", "op-cancel");
+    inline for (mtable) |m| if (m.in_op) weft.bindKey("op-pending", m.key, "vim/o/" ++ m.motion);
+    for ([_][]const u8{ "d", "c", "y" }) |k| weft.bindKey("op-pending", k, "op-line");
 
     weft.bindKey("visual", "d", "vim-visual-delete");
     weft.bindKey("visual", "x", "vim-visual-delete");
@@ -206,7 +270,6 @@ export fn init() void {
     weft.bindKey("pick", "M-u", "pick-widen");
     weft.bindKey("pick", "M-s", "pick-style-cycle");
 
-    // App-only environment setup (best-effort; absent in tests).
     for ([_][]const u8{ "normal", "visual", "insert" }) |m|
         weft.runStr2("set-cursor", m, "bar");
     weft.runStr2("cursor-blink", "insert", "on");
@@ -224,22 +287,22 @@ fn append() void {
     weft.setMode("insert");
 }
 fn openBelow() void {
-    weft.run("line-end");
+    weft.jump(lineEndOff());
     weft.run("insert-newline");
     weft.setMode("insert");
 }
 fn openAbove() void {
-    weft.run("line-start");
+    weft.jump(lineStartOff());
     weft.run("insert-newline");
     weft.run("cursor-up");
     weft.setMode("insert");
 }
 fn appendLine() void {
-    weft.run("line-end");
+    weft.jump(lineEndOff());
     weft.setMode("insert");
 }
 fn insertLine() void {
-    weft.run("line-start");
+    weft.jump(lineStartOff());
     weft.setMode("insert");
 }
 fn visual() void {
@@ -247,11 +310,16 @@ fn visual() void {
     weft.setMode("visual");
 }
 fn visualDelete() void {
-    weft.run("delete-selection");
+    if (weft.selection()) |s| {
+        setReg(weft.slice(s.start, s.end), false);
+        if (weft.stampRange(.{ .start = s.start, .end = s.end })) |h| weft.runRangeArg("op.delete", h);
+    }
+    weft.run("clear-selection");
     weft.setMode("normal");
 }
 fn visualYank() void {
-    yankSelection();
+    if (weft.selection()) |s| setReg(weft.slice(s.start, s.end), false);
+    weft.run("clear-selection");
     weft.setMode("normal");
 }
 fn normal() void {
@@ -259,43 +327,27 @@ fn normal() void {
     weft.setMode("normal");
 }
 fn deleteEol() void {
-    weft.run("set-mark");
-    weft.run("line-end");
-    weft.run("delete-selection");
+    const cur = weft.cursor();
+    const e = lineEndOff();
+    setReg(weft.slice(cur, e), false);
+    weft.edit(.{ .start = cur, .end = e }, "");
 }
 fn changeEol() void {
     deleteEol();
     weft.setMode("insert");
 }
 fn changeLine() void {
-    weft.run("line-start");
-    weft.run("set-mark");
-    weft.run("line-end");
-    weft.run("delete-selection");
+    const l = weft.lineAt(weft.cursor());
+    setReg(weft.slice(l.start, l.end), false);
+    weft.edit(.{ .start = l.start, .end = l.end }, "");
+    weft.jump(l.start);
     weft.setMode("insert");
 }
 
 // ── Register + paste ─────────────────────────────────────────────────
-fn captureSel() void {
-    if (weft.selection()) |s| setReg(weft.slice(s.start, s.end), false);
-}
-fn yankSelection() void {
-    captureSel();
-    weft.run("clear-selection");
-}
-fn cutSelection() void {
-    captureSel();
-    weft.run("delete-selection");
-}
 fn yankLine() void {
     const l = weft.lineAt(weft.cursor());
     setReg(weft.slice(l.start, l.end), true);
-}
-fn deleteLine() void {
-    const l = weft.lineAt(weft.cursor());
-    setReg(weft.slice(l.start, l.end), true);
-    const end = @min(l.end + 1, weft.byteLen()); // line + trailing newline
-    weft.edit(.{ .start = l.start, .end = end }, "");
 }
 fn paste() void {
     if (reg_line) {
@@ -321,17 +373,10 @@ fn pasteBefore() void {
         weft.edit(.{ .start = off, .end = off }, reg());
     }
 }
-fn firstNonBlank() void {
-    const l = weft.lineAt(weft.cursor());
-    const text = weft.slice(l.start, l.end);
-    var i: usize = 0;
-    while (i < text.len and (text[i] == ' ' or text[i] == '\t')) i += 1;
-    weft.jump(l.start + i);
-}
 fn joinLines() void {
     const l = weft.lineAt(weft.cursor());
     const nxt = weft.lineAt(l.end + 1);
-    if (nxt.start <= l.start) return; // no next line
+    if (nxt.start <= l.start) return;
     const ntext = weft.slice(nxt.start, nxt.end);
     var drop: usize = 0;
     while (drop < ntext.len and (ntext[drop] == ' ' or ntext[drop] == '\t')) drop += 1;
@@ -339,71 +384,48 @@ fn joinLines() void {
     weft.jump(l.end);
 }
 
-// ── Operators (generic over the pending finish/after) ────────────────
-fn enterOp(finish: []const u8, after: []const u8) void {
-    weft.run("set-mark");
-    op_finish = finish;
-    op_after = after;
-    weft.setMode(if (std.mem.eql(u8, finish, "cut-selection") and std.mem.eql(u8, after, "normal"))
-        "op-delete"
-    else if (std.mem.eql(u8, after, "insert"))
-        "op-change"
-    else
-        "op-yank");
-}
+// ── Operators ─────────────────────────────────────────────────────────
 fn enterOpDelete() void {
-    enterOp("cut-selection", "normal");
+    op_is_yank = false;
+    op_after = "normal";
+    weft.setMode("op-pending");
 }
 fn enterOpChange() void {
-    enterOp("cut-selection", "insert");
+    op_is_yank = false;
+    op_after = "insert";
+    weft.setMode("op-pending");
 }
 fn enterOpYank() void {
-    enterOp("yank-selection", "normal");
+    op_is_yank = true;
+    op_after = "normal";
+    weft.setMode("op-pending");
 }
 fn opCancel() void {
-    weft.run("clear-selection");
     weft.setMode("normal");
 }
-fn applyOp(motion: []const u8) void {
-    weft.run(motion);
-    weft.run(op_finish);
-    weft.setMode(op_after);
-}
+/// dd / cc / yy — linewise. The operator char repeated (bound in op-pending).
 fn opLine() void {
-    weft.run("clear-selection");
-    if (std.mem.eql(u8, op_after, "insert")) {
-        changeLine();
-    } else if (std.mem.eql(u8, op_finish, "yank-selection")) {
-        yankLine();
+    const l = weft.lineAt(weft.cursor());
+    setReg(weft.slice(l.start, l.end), true);
+    if (op_is_yank) {
         weft.setMode("normal");
+        return;
+    }
+    if (std.mem.eql(u8, op_after, "insert")) {
+        // cc: clear the line's text, keep the line, enter insert at its start.
+        if (weft.stampRange(.{ .start = l.start, .end = l.end })) |h| weft.runRangeArg("op.delete", h);
+        weft.jump(l.start);
+        weft.setMode("insert");
     } else {
-        deleteLine();
+        // dd: delete the line and its trailing newline.
+        const end = @min(l.end + 1, weft.byteLen());
+        if (weft.stampRange(.{ .start = l.start, .end = end })) |h| weft.runRangeArg("op.delete", h);
+        weft.jump(l.start);
         weft.setMode("normal");
     }
 }
-fn opWordForward() void {
-    applyOp("word-forward");
-}
-fn opWordBackward() void {
-    applyOp("word-backward");
-}
-fn opWordEnd() void {
-    applyOp("word-end");
-}
-fn opLineEnd() void {
-    applyOp("line-end");
-}
-fn opLineStart() void {
-    applyOp("line-start");
-}
-fn opDocEnd() void {
-    applyOp("doc-end");
-}
-fn opMatchBracket() void {
-    applyOp("match-bracket");
-}
 
-// ── Files ────────────────────────────────────────────────────────────
+// ── Files ──────────────────────────────────────────────────────────────
 fn findFile() void {
     weft.openFilePick("open", ".", file_pick);
 }
@@ -457,7 +479,8 @@ fn enterGoto() void {
     weft.setMode("goto");
 }
 fn vimGotoTop() void {
-    thenNormal("doc-start");
+    weft.setMode("normal");
+    weft.jump(0);
 }
 fn enterZed() void {
     weft.setMode("zed");
@@ -495,8 +518,6 @@ fn doFind(dir: u8) void {
     weft.setMode("normal");
     if (weft.argStr(0)) |ch| findCharImpl(dir, ch);
 }
-/// Jump to the target char on the current line — f/t forward, F/T backward,
-/// t/T stop one short (vim `till`).
 fn findCharImpl(dir: u8, ch_s: []const u8) void {
     if (ch_s.len == 0) return;
     const ch = ch_s[0];

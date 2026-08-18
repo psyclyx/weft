@@ -12,6 +12,7 @@ const std = @import("std");
 const wasm = @import("wasm.zig");
 const command = @import("command.zig");
 const Document = @import("Document.zig");
+const position = @import("position.zig");
 
 /// The embedded reference guest (compiled from `src/guest/hello.zig` to
 /// wasm32 by build.zig, embedded like `font_mono`).
@@ -112,6 +113,10 @@ pub const WasmBoundPick = struct { plugin: *WasmPlugin, pick_id: u32 };
 
 const Phase = enum { describing, active };
 
+/// A stamped range the guest holds by handle (index into `WasmPlugin.stamps`).
+/// The slot owns `version` (the token the range is stamped against).
+pub const StampSlot = struct { range: position.StampedRange, version: []u8 };
+
 pub const WasmPlugin = struct {
     gpa: Allocator,
     ctx: *command.Context,
@@ -152,6 +157,14 @@ pub const WasmPlugin = struct {
     result: command.Value = .nil,
     result_buf: std.ArrayList(u8) = .empty,
 
+    /// Per-dispatch table of stamped ranges the guest names by `u32` handle
+    /// ([FIX 1/3]): a motion stamps a range here and returns its handle, an
+    /// operator receives one as an arg and applies an edit through it. The
+    /// version token stays host-side (opaque-handle ABI, design §2) — only the
+    /// handle crosses the membrane. Reset at the top of every command dispatch;
+    /// each slot owns its version bytes.
+    stamps: std.ArrayList(StampSlot) = .empty,
+
     // ── Pick (built incrementally between begin/end, then opened) ──
     pick_prompt: std.ArrayList(u8) = .empty,
     pick_id: u32 = 0,
@@ -167,6 +180,23 @@ pub const WasmPlugin = struct {
     /// request's prefix, and the sink the guest's `pushCompletion` fills.
     cur_prefix: []const u8 = &.{},
     completion_out: ?*std.ArrayList([]const u8) = null,
+
+    /// Stamp `[start, end)` against the current document version and hand the
+    /// guest an opaque handle into `stamps`. Takes ownership of `version_owned`
+    /// (freed when the table is reset). Returns the handle.
+    pub fn pushRange(self: *WasmPlugin, version_owned: []u8, start: usize, end: usize) !u32 {
+        try self.stamps.append(self.gpa, .{
+            .range = position.StampedRange.at(version_owned, start, end),
+            .version = version_owned,
+        });
+        return @intCast(self.stamps.items.len - 1);
+    }
+
+    /// Reset the per-dispatch stamp table, freeing each slot's version token.
+    pub fn stampsClear(self: *WasmPlugin) void {
+        for (self.stamps.items) |s| self.gpa.free(s.version);
+        self.stamps.clearRetainingCapacity();
+    }
 
     pub fn declaresCommand(self: *WasmPlugin, name: []const u8) bool {
         for (self.declared.items) |d| if (std.mem.eql(u8, d, name)) return true;
@@ -202,6 +232,8 @@ pub const WasmPlugin = struct {
             gpa.destroy(wc);
         }
         self.commands.deinit(gpa);
+        self.stampsClear();
+        self.stamps.deinit(gpa);
         self.result_buf.deinit(gpa);
         self.pick_prompt.deinit(gpa);
         for (self.pick_items.items) |it| {
@@ -809,6 +841,132 @@ test "wasm plugin: vim wires the modal keymap and runs motions/operators as .was
     defer gpa.free(s);
     try t.expectEqualStrings("hello\nhello", s);
     try t.expect(ed.doc.commitAt(ed.doc.commitCount() - 1).author != .user);
+}
+
+test "wasm plugins: a motion returns a range an operator awaits + applies (dw)" {
+    const gpa = t.allocator;
+    var env: Env = undefined;
+    try Env.init(gpa, &env);
+    defer env.deinit(gpa);
+
+    var engine = try wasm.Engine.init();
+    defer engine.deinit();
+    const motions = try loadPlugin(&engine, &env.ctx, "motions", @embedFile("guest_motions_wasm"), .{});
+    defer motions.deinit();
+    const operators = try loadPlugin(&engine, &env.ctx, "operators", @embedFile("guest_operators_wasm"), .{});
+    defer operators.deinit();
+
+    const ed = &env.buffers.active().editor;
+    try ed.insertText(gpa, "foo bar");
+    ed.placeCursor(0);
+
+    // The motion returns a version-stamped RANGE Value across the membrane —
+    // never a bare offset. Cursor is one end (0), the target the other (4).
+    const rv = try command.run(&env.commands, &env.ctx, "motion.word-fwd", &.{});
+    try t.expect(rv == .range);
+
+    // The operator awaits that range (as its arg) and applies the gated edit —
+    // authored as the operators plugin's peer, not the user.
+    _ = try command.run(&env.commands, &env.ctx, "op.delete", &.{rv});
+    const s = try ed.text().toOwnedSlice(gpa);
+    defer gpa.free(s);
+    try t.expectEqualStrings("bar", s);
+    try t.expect(ed.doc.commitAt(ed.doc.commitCount() - 1).author != .user);
+}
+
+test "wasm plugins: an awaited range rebases through a concurrent edit" {
+    const gpa = t.allocator;
+    var env: Env = undefined;
+    try Env.init(gpa, &env);
+    defer env.deinit(gpa);
+
+    var engine = try wasm.Engine.init();
+    defer engine.deinit();
+    const motions = try loadPlugin(&engine, &env.ctx, "motions", @embedFile("guest_motions_wasm"), .{});
+    defer motions.deinit();
+    const operators = try loadPlugin(&engine, &env.ctx, "operators", @embedFile("guest_operators_wasm"), .{});
+    defer operators.deinit();
+
+    const ed = &env.buffers.active().editor;
+    try ed.insertText(gpa, "foo bar");
+    ed.placeCursor(0);
+
+    // Compute a word-forward range [0,4) stamped at the current version.
+    const rv = try command.run(&env.commands, &env.ctx, "motion.word-fwd", &.{});
+    try t.expect(rv == .range);
+
+    // A concurrent edit lands BEFORE the operator applies: insert "XX" at 0.
+    // The stamped range must rebase to [2,6) — "Buffer changed" is inexpressible.
+    ed.placeCursor(0);
+    try ed.insertText(gpa, "XX");
+
+    _ = try command.run(&env.commands, &env.ctx, "op.delete", &.{rv});
+    const s = try ed.text().toOwnedSlice(gpa);
+    defer gpa.free(s);
+    try t.expectEqualStrings("XXbar", s); // "foo " deleted at its rebased site
+}
+
+test "wasm plugins: vim composes motions + operators — dw through the keymap" {
+    const gpa = t.allocator;
+    var env: Env = undefined;
+    try Env.init(gpa, &env);
+    defer env.deinit(gpa);
+
+    var engine = try wasm.Engine.init();
+    defer engine.deinit();
+    const motions = try loadPlugin(&engine, &env.ctx, "motions", @embedFile("guest_motions_wasm"), .{});
+    defer motions.deinit();
+    const operators = try loadPlugin(&engine, &env.ctx, "operators", @embedFile("guest_operators_wasm"), .{});
+    defer operators.deinit();
+    const vim = try loadPlugin(&engine, &env.ctx, "vim", @embedFile("guest_vim_wasm"), .{});
+    defer vim.deinit();
+
+    const ed = &env.buffers.active().editor;
+    try ed.insertText(gpa, "foo bar");
+    ed.placeCursor(0);
+
+    // `d` enters operator-pending; the `w` binding there is vim's op wrapper,
+    // which runs motion.word-fwd and hands its range to op.delete.
+    _ = try command.run(&env.commands, &env.ctx, "enter-op-delete", &.{});
+    try t.expectEqualStrings("op-pending", env.keymap.currentMode());
+    try t.expectEqualStrings("vim/o/motion.word-fwd", env.keymap.lookup("w").?);
+    _ = try command.run(&env.commands, &env.ctx, env.keymap.lookup("w").?, &.{});
+    try t.expectEqualStrings("normal", env.keymap.currentMode());
+
+    const s = try ed.text().toOwnedSlice(gpa);
+    defer gpa.free(s);
+    try t.expectEqualStrings("bar", s);
+}
+
+test "wasm plugins: a view-grade peer's op.delete refuses (zero permission code)" {
+    const gpa = t.allocator;
+    var env: Env = undefined;
+    try Env.init(gpa, &env);
+    defer env.deinit(gpa);
+
+    var engine = try wasm.Engine.init();
+    defer engine.deinit();
+    const motions = try loadPlugin(&engine, &env.ctx, "motions", @embedFile("guest_motions_wasm"), .{});
+    defer motions.deinit();
+    const operators = try loadPlugin(&engine, &env.ctx, "operators", @embedFile("guest_operators_wasm"), .{});
+    defer operators.deinit();
+
+    const ed = &env.buffers.active().editor;
+    try ed.insertText(gpa, "foo bar");
+    ed.placeCursor(0);
+    ed.doc.my_grant = .view; // the document is read-only for us
+
+    // The motion (read-only) still computes a range — reads are never gated.
+    const rv = try command.run(&env.commands, &env.ctx, "motion.word-fwd", &.{});
+    try t.expect(rv == .range);
+    // But the operator's edit dies at the gate: the buffer is unchanged, and no
+    // ghost commit was authored.
+    const before = ed.doc.commitCount();
+    _ = try command.run(&env.commands, &env.ctx, "op.delete", &.{rv});
+    const s = try ed.text().toOwnedSlice(gpa);
+    defer gpa.free(s);
+    try t.expectEqualStrings("foo bar", s);
+    try t.expectEqual(before, ed.doc.commitCount());
 }
 
 test "wasm plugin: kv admin round-trips across the membrane, namespaced" {

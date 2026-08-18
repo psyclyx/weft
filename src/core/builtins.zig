@@ -85,71 +85,10 @@ fn cCursorDown(ctx: *Context, args: struct {}) anyerror!Value {
     return ok;
 }
 
-fn cLineStart(ctx: *Context, args: struct {}) anyerror!Value {
-    _ = args;
-    ctx.editor().moveLineStart();
-    return ok;
-}
-
-fn cLineEnd(ctx: *Context, args: struct {}) anyerror!Value {
-    _ = args;
-    ctx.editor().moveLineEnd();
-    return ok;
-}
-
-fn cDocStart(ctx: *Context, args: struct {}) anyerror!Value {
-    _ = args;
-    ctx.editor().moveDocStart();
-    return ok;
-}
-
-fn cDocEnd(ctx: *Context, args: struct {}) anyerror!Value {
-    _ = args;
-    ctx.editor().moveDocEnd();
-    return ok;
-}
-
-fn cWordForward(ctx: *Context, args: struct {}) anyerror!Value {
-    _ = args;
-    try ctx.editor().moveWordForward(ctx.gpa);
-    return ok;
-}
-
-fn cWordBackward(ctx: *Context, args: struct {}) anyerror!Value {
-    _ = args;
-    try ctx.editor().moveWordBackward(ctx.gpa);
-    return ok;
-}
-
-fn cWordEnd(ctx: *Context, args: struct {}) anyerror!Value {
-    _ = args;
-    try ctx.editor().moveWordEnd(ctx.gpa);
-    return ok;
-}
-
-fn cWORDForward(ctx: *Context, args: struct {}) anyerror!Value {
-    _ = args;
-    try ctx.editor().moveWORDForward(ctx.gpa);
-    return ok;
-}
-
-fn cWORDBackward(ctx: *Context, args: struct {}) anyerror!Value {
-    _ = args;
-    try ctx.editor().moveWORDBackward(ctx.gpa);
-    return ok;
-}
-
-fn cWORDEnd(ctx: *Context, args: struct {}) anyerror!Value {
-    _ = args;
-    try ctx.editor().moveWORDEnd(ctx.gpa);
-    return ok;
-}
-
-fn cMatchBracket(ctx: *Context, args: struct {}) anyerror!Value {
-    _ = args;
-    try ctx.editor().matchBracket(ctx.gpa);
-    return ok;
-}
+// Word/WORD/line/doc motions and match-bracket moved to the `motions` plugin
+// (design §6.1 — they return a `range` an operator awaits). Core keeps only the
+// grapheme/line step primitive (`editor.step`, exposed via cursor-*) and the
+// selection write-half (set-mark/clear-selection) below.
 
 fn cSetMark(ctx: *Context, args: struct {}) anyerror!Value {
     _ = args;
@@ -160,14 +99,6 @@ fn cSetMark(ctx: *Context, args: struct {}) anyerror!Value {
 fn cClearSelection(ctx: *Context, args: struct {}) anyerror!Value {
     _ = args;
     ctx.editor().clearSelection();
-    return ok;
-}
-
-fn cDeleteSelection(ctx: *Context, args: struct {}) anyerror!Value {
-    _ = args;
-    if (ctx.buffer().read_only) return ok;
-    const r = ctx.editor().selectedRange() orelse return ok;
-    ctx.edit(r, "") catch |e| return editErr(ctx, e);
     return ok;
 }
 
@@ -296,7 +227,6 @@ const table = [_]command.Command{
     command.define("save-as", "Save to a new path (refuses to clobber an existing file).", cSaveAs),
     command.define("delete-backward", "Delete the selection or the character before the cursor.", cDeleteBackward),
     command.define("delete-forward", "Delete the selection or the character after the cursor.", cDeleteForward),
-    command.define("delete-selection", "Delete the selected range.", cDeleteSelection),
     command.define("undo", "Undo the newest own edit unit.", cUndo),
     command.define("redo", "Redo the newest undone unit.", cRedo),
     command.define("save", "Request an asynchronous save of the current file.", cSave),
@@ -304,17 +234,6 @@ const table = [_]command.Command{
     command.define("cursor-right", "Move the cursor one character right.", cCursorRight),
     command.define("cursor-up", "Move the cursor up one line.", cCursorUp),
     command.define("cursor-down", "Move the cursor down one line.", cCursorDown),
-    command.define("line-start", "Move to the start of the line.", cLineStart),
-    command.define("line-end", "Move to the end of the line.", cLineEnd),
-    command.define("doc-start", "Move to the start of the document.", cDocStart),
-    command.define("doc-end", "Move to the end of the document.", cDocEnd),
-    command.define("word-forward", "Move to the next word start.", cWordForward),
-    command.define("word-backward", "Move to the previous word start.", cWordBackward),
-    command.define("word-end", "Move to the end of the next word.", cWordEnd),
-    command.define("WORD-forward", "Move to the next WORD (whitespace-delimited).", cWORDForward),
-    command.define("WORD-backward", "Move to the previous WORD (whitespace-delimited).", cWORDBackward),
-    command.define("WORD-end", "Move to the end of the next WORD (whitespace-delimited).", cWORDEnd),
-    command.define("match-bracket", "Jump to the matching bracket.", cMatchBracket),
     command.define("set-mark", "Start a selection at the cursor.", cSetMark),
     command.define("clear-selection", "Drop the selection.", cClearSelection),
     command.define("set-mode", "Switch the keymap mode.", cSetMode),
@@ -339,19 +258,11 @@ pub fn install(gpa: std.mem.Allocator, commands: *command.Commands, keymap: *@im
         .{ "Right", "cursor-right" },
         .{ "Up", "cursor-up" },
         .{ "Down", "cursor-down" },
-        .{ "Home", "line-start" },
-        .{ "End", "line-end" },
-        .{ "C-a", "line-start" },
-        .{ "C-e", "line-end" },
         .{ "C-s", "save" },
         .{ "C-z", "undo" },
         .{ "C-y", "redo" },
         .{ "C-space", "set-mark" },
         .{ "C-g", "clear-selection" },
-        .{ "C-Right", "word-forward" },
-        .{ "C-Left", "word-backward" },
-        .{ "C-Home", "doc-start" },
-        .{ "C-End", "doc-end" },
         .{ "C-q", "quit" },
         .{ "C-b", "buffers" },
         .{ "C-Tab", "buffer-next" },
