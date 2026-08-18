@@ -14,6 +14,7 @@ const command = @import("command.zig");
 const Document = @import("Document.zig");
 const position = @import("position.zig");
 const repl_session = @import("repl_session.zig");
+const net_session = @import("net_session.zig");
 const Pool = @import("task.zig").Pool;
 
 /// The embedded reference guest (compiled from `src/guest/hello.zig` to
@@ -186,6 +187,9 @@ pub const WasmPlugin = struct {
     /// handle the guest holds (null once quit — the slot stays for handle
     /// stability). The frame loop drains their output; `deinit` tears them down.
     sessions: std.ArrayList(?*repl_session.Session) = .empty,
+    /// Live network connections this plugin opened (design §6.5), same handle/
+    /// lifecycle model as `sessions`.
+    net_sessions: std.ArrayList(?*net_session.Session) = .empty,
 
     // ── Pick (built incrementally between begin/end, then opened) ──
     pick_prompt: std.ArrayList(u8) = .empty,
@@ -262,6 +266,8 @@ pub const WasmPlugin = struct {
         self.commands.deinit(gpa);
         for (self.sessions.items) |maybe| if (maybe) |s| s.deinit(); // kill + join
         self.sessions.deinit(gpa);
+        for (self.net_sessions.items) |maybe| if (maybe) |s| s.deinit(); // shut + join
+        self.net_sessions.deinit(gpa);
         self.stampsClear();
         self.stamps.deinit(gpa);
         self.queryCapsClear();
@@ -1569,6 +1575,45 @@ test "wasm plugin: snippets-expand inserts a template body from an fs file" {
     const s = try ed.text().toOwnedSlice(gpa);
     defer gpa.free(s);
     try t.expectEqualStrings("fn foo() {\n}", s); // literal \n expanded to a newline
+}
+
+test "net_session: streams a socket into a buffer, teardown clean" {
+    const gpa = t.allocator;
+    var env: Env = undefined;
+    try Env.init(gpa, &env);
+    defer env.deinit(gpa);
+
+    const linux = std.os.linux;
+    var fds: [2]i32 = undefined;
+    if (linux.errno(linux.socketpair(linux.AF.UNIX, linux.SOCK.STREAM, 0, &fds)) != .SUCCESS) return;
+    var peer_open = true;
+    defer if (peer_open) {
+        _ = linux.close(fds[1]);
+    };
+
+    const s = try net_session.Session.startFd(gpa, env.pool, &env.ctx, "netplug", "*net*", fds[0]);
+    // The "server" end writes; the reader streams it into *net* via drain.
+    _ = linux.write(fds[1], "net-ok", 6);
+    const buf = blk: {
+        var rounds: usize = 0;
+        while (rounds < 5_000_000) : (rounds += 1) {
+            _ = s.drain();
+            var it = env.buffers.iterator();
+            while (it.next()) |b| if (std.mem.eql(u8, b.name, "*net*")) {
+                if (b.editor.text().byteLen() > 0) break :blk b;
+            };
+            std.Thread.yield() catch {};
+        }
+        break :blk null;
+    };
+    // deinit shuts fds[0] + joins the reader + closes — no hang, no leak.
+    s.deinit();
+    _ = linux.close(fds[1]);
+    peer_open = false;
+    try t.expect(buf != null);
+    const str = try buf.?.editor.text().toOwnedSlice(gpa);
+    defer gpa.free(str);
+    try t.expectEqualStrings("net-ok", str);
 }
 
 test "wasm plugin: kv admin round-trips across the membrane, namespaced" {

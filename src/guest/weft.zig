@@ -92,6 +92,9 @@ extern "weft" fn wl_shell_insert(ptr: u32, len: u32) void;
 extern "weft" fn wl_repl_start(cmd: u32, cmd_len: u32, name: u32, name_len: u32) i32;
 extern "weft" fn wl_repl_send(handle: u32, ptr: u32, len: u32) void;
 extern "weft" fn wl_repl_quit(handle: u32) void;
+extern "weft" fn wl_net_connect(host: u32, host_len: u32, name: u32, name_len: u32, sni: u32, sni_len: u32) i32;
+extern "weft" fn wl_net_send(handle: u32, ptr: u32, len: u32) void;
+extern "weft" fn wl_net_close(handle: u32) void;
 extern "weft" fn wl_proc_to_buffer(cmd: u32, cmd_len: u32, name: u32, name_len: u32) void;
 extern "weft" fn wl_proc_append_buffer(cmd: u32, cmd_len: u32, name: u32, name_len: u32) void;
 extern "weft" fn wl_proc_filter(cmd: u32, cmd_len: u32, start: u32, end: u32) void;
@@ -503,6 +506,22 @@ pub fn replSend(handle: u32, line: []const u8) void {
 /// Terminate a REPL session.
 pub fn replQuit(handle: u32) void {
     wl_repl_quit(handle);
+}
+
+// ── net.connect (TCP / TLS) — perm net ───────────────────────────────
+/// Dial `hostport`, streaming the socket into buffer `name`. If `sni` is
+/// non-empty, run TLS verifying that host name. Returns a handle, or null.
+pub fn netConnect(hostport: []const u8, name: []const u8, sni: []const u8) ?u32 {
+    const h = wl_net_connect(p(hostport.ptr), @intCast(hostport.len), p(name.ptr), @intCast(name.len), p(sni.ptr), @intCast(sni.len));
+    return if (h < 0) null else @intCast(h);
+}
+/// Send bytes on a connection.
+pub fn netSend(handle: u32, bytes: []const u8) void {
+    wl_net_send(handle, p(bytes.ptr), @intCast(bytes.len));
+}
+/// Close a connection.
+pub fn netClose(handle: u32) void {
+    wl_net_close(handle);
 }
 
 /// Run `cmd` off the frame thread and replace the scratch buffer named `name`

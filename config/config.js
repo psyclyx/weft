@@ -46,6 +46,7 @@ weft.plugin("direnv");      // direnv status/allow/reload into a tool buffer
 weft.plugin("llm");         // ask an llm CLI (minimal agent, proc + fs)
 weft.plugin("console");     // a command console — run a line, append output
 weft.plugin("repl");        // a stateful interactive REPL (persistent subprocess)
+weft.plugin("net");         // raw TCP/TLS transport (net.connect)
 
 // Leader (space) bindings for the edit-domain operators — each name is a real
 // command one of the plugins above registered.
