@@ -208,6 +208,15 @@ pub const perm_fs_write = 1;
 pub const perm_proc = 3;
 pub const perm_timer = 4;
 
+/// The parent process's environment, so a `proc` child inherits PATH (nix
+/// tools like `rg`/`zig` are NOT on /bin/sh's built-in path). Set once at
+/// startup from `main`; empty in tests (the child falls back to sh's default
+/// PATH, which finds common tools like `git`).
+var g_environ: std.process.Environ = .empty;
+pub fn setEnviron(env: std.process.Environ) void {
+    g_environ = env;
+}
+
 /// A deferred shell insert, owned across the frame→pool→frame hop. Holds no
 /// plugin pointer — it re-resolves the doc + peer by name at delivery, so it
 /// survives the plugin being unloaded mid-flight (mirrors abi.zig's
@@ -265,7 +274,7 @@ fn hShellInsert(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32, resu
 /// worker — proc.run synchronous there, no frame block.
 fn shellWork(gpa: Allocator, ctx: ?*anyopaque) anyerror![]u8 {
     const job: *ShellJob = @ptrCast(@alignCast(ctx.?));
-    var res = proc.run(gpa, &.{ "/bin/sh", "-c", job.cmd }, .{}) catch return gpa.alloc(u8, 0);
+    var res = proc.run(gpa, &.{ "/bin/sh", "-c", job.cmd }, .{ .environ = g_environ }) catch return gpa.alloc(u8, 0);
     defer res.deinit(gpa);
     return gpa.dupe(u8, std.mem.trimEnd(u8, res.stdout, "\n"));
 }
@@ -333,7 +342,7 @@ fn hProcToBuffer(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32, res
 
 fn procWork(gpa: Allocator, ctx: ?*anyopaque) anyerror![]u8 {
     const job: *ProcJob = @ptrCast(@alignCast(ctx.?));
-    var res = proc.run(gpa, &.{ "/bin/sh", "-c", job.cmd }, .{}) catch return gpa.alloc(u8, 0);
+    var res = proc.run(gpa, &.{ "/bin/sh", "-c", job.cmd }, .{ .environ = g_environ }) catch return gpa.alloc(u8, 0);
     defer res.deinit(gpa);
     return gpa.dupe(u8, std.mem.trimEnd(u8, res.stdout, "\n"));
 }

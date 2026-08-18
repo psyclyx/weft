@@ -234,6 +234,8 @@ pub fn main(init: std.process.Init) !void {
     defer plugin_subs.deinit(gpa);
     var plugin_loop = core.async_loop.Loop.init(gpa, pool, core.task.nowNs);
     defer plugin_loop.deinit();
+    // Give plugin `proc` children the parent PATH (nix tools like rg/zig).
+    core.wasm_host.setEnviron(init.minimal.environ);
     var wasm_engine = try core.wasm.Engine.init();
     defer wasm_engine.deinit();
     var plugins: std.ArrayList(*core.wasm_abi.WasmPlugin) = .empty;
