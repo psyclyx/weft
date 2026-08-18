@@ -13,6 +13,11 @@ const Document = @import("Document.zig");
 const Editor = @import("Editor.zig");
 const Buffers = @import("Buffers.zig");
 const Keymap = @import("Keymap.zig");
+const authority = @import("authority.zig");
+const position = @import("position.zig");
+
+pub const Principal = authority.Principal;
+pub const Grade = authority.Grade;
 
 /// The portable argument/result ABI. Mirrors what a Lua boundary can
 /// carry; strings are borrowed for the duration of the call.
@@ -22,6 +27,15 @@ pub const Value = union(enum) {
     integer: i64,
     number: f64,
     string: []const u8,
+    /// A version-stamped position ([FIX 1]): the honest way a position
+    /// crosses the ABI. It rebases through the commit log to a current
+    /// offset or to null — never a bare offset that silently breaks under
+    /// concurrent edits. Backed by position.zig; borrowed for the call
+    /// (its version token, like `string`). The prerequisite for
+    /// motions-that-return-ranges and the pick pool's anchor column.
+    anchor: position.StampedOffset,
+    /// A version-stamped range — a stamped `(start, end)`.
+    range: position.StampedRange,
 };
 
 pub const Type = std.meta.Tag(Value);
@@ -47,6 +61,10 @@ pub const Context = struct {
     /// Transient status-line message (`echo` writes it, the view shows
     /// it) — the generic report-back surface for commands and plugins.
     echo: *std.ArrayList(u8),
+    /// Who is invoking right now (default: the interactive user). Plugins
+    /// swap this in around their trampolines so their edits author as the
+    /// plugin peer, not launder as the user's — see `plugin.zig`.
+    principal: Principal = Principal.user,
 
     pub fn buffer(self: *Context) *Buffers.Buffer {
         return self.buffers.active();
@@ -58,6 +76,45 @@ pub const Context = struct {
 
     pub fn document(self: *Context) *Document {
         return &self.buffers.active().editor.doc;
+    }
+
+    pub const EditError = Document.AddPeerError || error{Unauthorized};
+
+    /// The invoking principal's grade on `doc`. The user inherits the
+    /// document's own grade; a plugin/agent may not exceed `.edit` (nor the
+    /// user's grade), per the design's `min(owner_grant, manifest_max)`
+    /// until per-plugin manifests bound it more tightly.
+    pub fn gradeOn(self: *Context, doc: *Document) Grade {
+        const local = doc.my_grant;
+        return switch (self.principal.role) {
+            .user, .remote => local,
+            .plugin, .agent => authority.gradeMin(local, .edit),
+        };
+    }
+
+    /// The one door a command mutates text through: delete `r` and insert
+    /// `bytes` on the ACTIVE document, authored by the invoking principal
+    /// and gated by its grade. The user path is one undoable unit; a plugin
+    /// peer path syncs the plugin's shadow to head, applies at head-valid
+    /// offsets, and commits as that peer (its own selective-undo unit).
+    /// Cursor/selection are the caller's concern (they are local UI, not
+    /// edits). Refuses with `error.Unauthorized` when the principal's grade
+    /// cannot edit — the replica is left untouched, so no ghost can form.
+    pub fn edit(self: *Context, r: Document.Range, bytes: []const u8) EditError!void {
+        const doc = self.document();
+        if (!self.gradeOn(doc).canEdit()) return error.Unauthorized;
+        if (self.principal.role == .user) {
+            try self.editor().applyUserEdit(self.gpa, r, bytes);
+            return;
+        }
+        const pid = try self.principal.peerOn(doc);
+        // Sync the peer's shadow to head so `r` (in head coordinates) is
+        // valid against it, then delete-then-insert and merge as one commit.
+        var snap = try doc.peerSnapshot(self.gpa, pid);
+        snap.deinit(self.gpa);
+        if (!r.isEmpty()) try doc.peerDelete(self.gpa, pid, r);
+        if (bytes.len > 0) try doc.peerInsert(self.gpa, pid, r.start, bytes);
+        _ = try doc.peerCommit(self.gpa, pid);
     }
 };
 
@@ -139,6 +196,8 @@ fn typeOf(comptime T: type) Type {
         i64 => .integer,
         f64 => .number,
         []const u8 => .string,
+        position.StampedOffset => .anchor,
+        position.StampedRange => .range,
         Value => .nil, // untyped: schema says nil-able, wrapper passes through
         else => @compileError("unsupported command arg type " ++ @typeName(T)),
     };
@@ -151,6 +210,8 @@ fn unpack(comptime T: type, v: Value) error{TypeMismatch}!T {
         i64 => if (v == .integer) v.integer else error.TypeMismatch,
         f64 => if (v == .number) v.number else error.TypeMismatch,
         []const u8 => if (v == .string) v.string else error.TypeMismatch,
+        position.StampedOffset => if (v == .anchor) v.anchor else error.TypeMismatch,
+        position.StampedRange => if (v == .range) v.range else error.TypeMismatch,
         else => unreachable,
     };
 }
@@ -162,6 +223,30 @@ const t = std.testing;
 fn insertText(ctx: *Context, args: struct { offset: i64, text: []const u8 }) anyerror!Value {
     try ctx.document().insert(ctx.gpa, @intCast(args.offset), args.text);
     return .{ .integer = @intCast(ctx.document().text().byteLen()) };
+}
+
+test "command Value: a stamped range rebases through a concurrent edit or nulls" {
+    const gpa = t.allocator;
+    var doc = try Document.init(gpa, "user");
+    defer doc.deinit(gpa);
+    try doc.insert(gpa, 0, "hello");
+    const v0 = try doc.version(gpa);
+    defer gpa.free(v0);
+
+    // Carry a stamped range as an ABI Value; a concurrent head insert shifts
+    // it, and it rebases to the current offsets (never a bare stale offset).
+    const val: Value = .{ .range = position.StampedRange.at(v0, 0, 5) };
+    try doc.insert(gpa, 0, "XYZ");
+    const r = val.range.rebase(&doc).?;
+    try t.expectEqual(@as(usize, 3), r.start);
+    try t.expectEqual(@as(usize, 8), r.end);
+
+    // An unknown version rebases to null — rebase or discard, no third result.
+    const bogus: Value = .{ .range = position.StampedRange.at("nope", 0, 5) };
+    try t.expectEqual(@as(?Document.Range, null), bogus.range.rebase(&doc));
+
+    // The value survives the typed-arg door too (unpack round-trips it).
+    try t.expectEqual(Type.range, comptime typeOf(position.StampedRange));
 }
 
 test "command: schema derivation, validation, late-bound run" {

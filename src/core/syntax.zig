@@ -472,6 +472,123 @@ pub const Syntax = struct {
         return null;
     }
 
+    // ── Tree queries (plan 02 P7) ───────────────────────────────
+    // Structural navigation the tree already holds, exposed for
+    // textobjects/folding/imenu/structural edits. The tree stays
+    // host-side (lifetime + one-impl safety, footgun rule b); only
+    // MATERIALIZED node descriptors and query captures cross — nothing
+    // holds a live `TSNode` across a reparse, so there is no dangling
+    // handle. Offsets are read against the CURRENT tree (the caller reads
+    // synchronously between edits); the durable version-stamped handle is
+    // the wasm ABI's job, deferred with the sandbox.
+
+    /// A materialized node: its grammar kind and byte span at the current
+    /// tree. `kind` borrows from the grammar (valid while this Syntax
+    /// lives); the span is plain data.
+    pub const Node = struct {
+        kind: []const u8,
+        start: usize,
+        end: usize,
+        named: bool,
+    };
+
+    /// A query capture: the capture name and the matched byte span. `name`
+    /// is gpa-owned (the temporary query it came from is already gone).
+    pub const Capture = struct {
+        name: []u8,
+        start: usize,
+        end: usize,
+    };
+
+    fn nodeInfo(node: c.TSNode) Node {
+        return .{
+            .kind = std.mem.span(c.ts_node_type(node)),
+            .start = c.ts_node_start_byte(node),
+            .end = c.ts_node_end_byte(node),
+            .named = c.ts_node_is_named(node),
+        };
+    }
+
+    /// The smallest NAMED node covering `off`, or null (offset out of the
+    /// tree, or no tree). The node-at-point primitive.
+    pub fn nodeAt(self: *Syntax, off: usize) ?Node {
+        const tree = self.tree orelse return null;
+        const root = c.ts_tree_root_node(tree);
+        const n = c.ts_node_named_descendant_for_byte_range(root, @intCast(off), @intCast(off));
+        if (c.ts_node_is_null(n)) return null;
+        return nodeInfo(n);
+    }
+
+    /// Named ancestors of the node at `off`, OUTERMOST-first (root → the
+    /// node). The parent/enclosing-scope primitive without a live handle.
+    /// Caller frees the slice.
+    pub fn ancestorsAt(self: *Syntax, gpa: Allocator, off: usize) ![]Node {
+        var chain: std.ArrayList(Node) = .empty;
+        defer chain.deinit(gpa);
+        if (self.tree) |tree| {
+            const root = c.ts_tree_root_node(tree);
+            var n = c.ts_node_named_descendant_for_byte_range(root, @intCast(off), @intCast(off));
+            while (!c.ts_node_is_null(n)) {
+                try chain.append(gpa, nodeInfo(n));
+                n = c.ts_node_parent(n);
+            }
+            std.mem.reverse(Node, chain.items); // leaf→root becomes root→leaf
+        }
+        return chain.toOwnedSlice(gpa);
+    }
+
+    /// The named children of the smallest node at `off` (its immediate
+    /// structural constituents — siblings of one another). Caller frees.
+    pub fn childrenAt(self: *Syntax, gpa: Allocator, off: usize) ![]Node {
+        var out: std.ArrayList(Node) = .empty;
+        defer out.deinit(gpa);
+        if (self.tree) |tree| {
+            const root = c.ts_tree_root_node(tree);
+            const parent = c.ts_node_named_descendant_for_byte_range(root, @intCast(off), @intCast(off));
+            if (!c.ts_node_is_null(parent)) {
+                const count = c.ts_node_named_child_count(parent);
+                for (0..count) |i| try out.append(gpa, nodeInfo(c.ts_node_named_child(parent, @intCast(i))));
+            }
+        }
+        return out.toOwnedSlice(gpa);
+    }
+
+    /// Run an arbitrary tree-sitter query (`.scm`) over `range` and return
+    /// its captures, materialized so the tree never crosses the boundary.
+    /// The one primitive folding/textobjects/imenu are all expressible in.
+    /// Caller frees the slice and every `.name`.
+    pub fn queryCaptures(self: *Syntax, gpa: Allocator, scm: []const u8, range: stemma.Range) Error![]Capture {
+        var out: std.ArrayList(Capture) = .empty;
+        errdefer {
+            for (out.items) |cap| gpa.free(cap.name);
+            out.deinit(gpa);
+        }
+        const tree = self.tree orelse return out.toOwnedSlice(gpa);
+        const lang = c.ts_parser_language(self.parser);
+        var err_offset: u32 = 0;
+        var err_type: c.TSQueryError = c.TSQueryErrorNone;
+        const q = c.ts_query_new(lang, scm.ptr, @intCast(scm.len), &err_offset, &err_type) orelse
+            return error.QueryLoad;
+        defer c.ts_query_delete(q);
+        const cursor = c.ts_query_cursor_new() orelse return error.OutOfMemory;
+        defer c.ts_query_cursor_delete(cursor);
+        _ = c.ts_query_cursor_set_byte_range(cursor, @intCast(range.start), @intCast(range.end));
+        c.ts_query_cursor_exec(cursor, q, c.ts_tree_root_node(tree));
+        var match: c.TSQueryMatch = undefined;
+        while (c.ts_query_cursor_next_match(cursor, &match)) {
+            for (match.captures[0..match.capture_count]) |cap| {
+                var nlen: u32 = 0;
+                const name = c.ts_query_capture_name_for_id(q, cap.index, &nlen);
+                try out.append(gpa, .{
+                    .name = try gpa.dupe(u8, name[0..nlen]),
+                    .start = c.ts_node_start_byte(cap.node),
+                    .end = c.ts_node_end_byte(cap.node),
+                });
+            }
+        }
+        return out.toOwnedSlice(gpa);
+    }
+
     /// Class-per-byte over `range` (caller frees). Captures paint in
     /// match order, later matches overwriting — the conventional
     /// highlight precedence.
