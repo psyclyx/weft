@@ -647,6 +647,29 @@ test "which-key: on_menu builds a corner surface from the current menu's binding
     try t.expect(!plugin.surface.active);
 }
 
+test "helix: a second modal editor loads in its OWN mode namespace" {
+    const gpa = t.allocator;
+    var env: Env = undefined;
+    try Env.init(gpa, &env);
+    defer env.deinit(gpa);
+
+    var engine = try wasm.Engine.init();
+    defer engine.deinit();
+    const plugin = try loadPlugin(&engine, &env.ctx, "helix", @embedFile("guest_helix_wasm"), .{});
+    defer plugin.deinit();
+
+    // helix.init sets its OWN initial mode and binds in its OWN namespace —
+    // nothing here assumes vim's "normal". If core privileged vim, this breaks.
+    try t.expectEqualStrings("helix-normal", env.keymap.currentMode());
+    try t.expectEqualStrings("hx-insert", env.keymap.lookup("i").?);
+    try t.expectEqualStrings("cursor-left", env.keymap.lookup("h").?);
+    // Word motion is bound to helix's generated move wrapper (shared `motions`).
+    try t.expectEqualStrings("hx/n/motion.word-fwd", env.keymap.lookup("w").?);
+    // Its leader/op menus are their own menu modes (which-key renders them).
+    try t.expect(env.keymap.isMenuMode("helix-leader"));
+    try t.expect(env.keymap.isMenuMode("helix-op"));
+}
+
 test "wasm plugin: upcase-line edits in place across the membrane" {
     const gpa = t.allocator;
     var env: Env = undefined;
