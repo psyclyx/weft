@@ -85,6 +85,32 @@ pub const Theme = struct {
         return out;
     }
 
+    /// Set the named color from an sRGB hex string ("#rrggbb" or "rrggbb"),
+    /// re-linearizing just that field — the mutation owns the sRGB→linear cost,
+    /// so the per-span draw path stays a plain lookup. Config's `weft.color` and
+    /// the `set-color` command both route here; theme is DATA, not a constant.
+    /// Returns false on an unknown name or malformed hex (caller may warn).
+    pub fn setColor(self: *Theme, name: []const u8, hex: []const u8) bool {
+        const srgb = parseHexColor(hex) orelse return false;
+        inline for (@typeInfo(Theme).@"struct".fields) |f| {
+            if (std.mem.eql(u8, f.name, name)) {
+                @field(self, f.name) = snail.color.srgbToLinearColor(srgb);
+                return true;
+            }
+        }
+        return false;
+    }
+
+    fn parseHexColor(hex: []const u8) ?[4]f32 {
+        const h = if (hex.len > 0 and hex[0] == '#') hex[1..] else hex;
+        if (h.len != 6) return null;
+        const r = std.fmt.parseInt(u8, h[0..2], 16) catch return null;
+        const g = std.fmt.parseInt(u8, h[2..4], 16) catch return null;
+        const b = std.fmt.parseInt(u8, h[4..6], 16) catch return null;
+        const s = 1.0 / 255.0;
+        return .{ @as(f32, @floatFromInt(r)) * s, @as(f32, @floatFromInt(g)) * s, @as(f32, @floatFromInt(b)) * s, 1 };
+    }
+
     fn classColor(self: *const Theme, class: HighlightClass) [4]f32 {
         return switch (class) {
             .none, .variable => self.foreground,
@@ -1239,4 +1265,21 @@ test "monospace parity gate: view-computed vertical target == old column target"
             };
         }
     }
+}
+
+test "theme: setColor updates a named field from hex; rejects bad input" {
+    var th: Theme = .{};
+    // sRGB #ff0000 → stored linearized: red ~1.0, green/blue 0.
+    try testing.expect(th.setColor("accent", "#ff0000"));
+    try testing.expectApproxEqAbs(@as(f32, 1.0), th.accent[0], 0.001);
+    try testing.expectApproxEqAbs(@as(f32, 0.0), th.accent[1], 0.001);
+    try testing.expectApproxEqAbs(@as(f32, 1.0), th.accent[3], 0.001); // alpha
+    // Works without the leading '#', too.
+    try testing.expect(th.setColor("background", "000000"));
+    try testing.expectApproxEqAbs(@as(f32, 0.0), th.background[0], 0.001);
+    // Unknown field and malformed hex are rejected (and leave the field alone).
+    try testing.expect(!th.setColor("nope", "#ffffff"));
+    try testing.expect(!th.setColor("accent", "zzzzzz"));
+    try testing.expect(!th.setColor("accent", "#12"));
+    try testing.expectApproxEqAbs(@as(f32, 1.0), th.accent[0], 0.001);
 }

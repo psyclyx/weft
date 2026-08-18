@@ -88,4 +88,10 @@ weft.bind("insert", "braceleft", "pair-brace");
 weft.bind("insert", "bracketleft", "pair-bracket");
 weft.bind("insert", "quotedbl", "pair-quote");
 
+// Theme is data: override any Theme field by name with an sRGB hex. (A full
+// colorscheme is just a block of these; `set-color` does the same at runtime.)
+weft.set("theme", "accent", "#8ec07c");
+weft.set("theme", "cursor", "#fabd2f");
+weft.set("theme", "selection", "#3c4a5e");
+
 weft.echo("weft: config.js loaded");

@@ -530,6 +530,23 @@ pub fn main(init: std.process.Init) !void {
         });
     }
 
+    // Theme is DATA: a runtime/bindable `set-color <name> <#hex>`, plus colors
+    // the config staged declaratively via weft.set("theme", "<field>", "#hex").
+    // Re-linearized per-field on mutation (Theme.setColor), so the draw path
+    // stays a plain lookup.
+    _ = try commands.bind(gpa, "set-color", .{
+        .name = "set-color",
+        .summary = "Set a theme color (name, #rrggbb).",
+        .args = &.{ .{ .name = "name", .type = .string }, .{ .name = "hex", .type = .string } },
+        .handler = setColorHandler,
+        .data = &view,
+    });
+    inline for (@typeInfo(view_mod.Theme).@"struct".fields) |f| {
+        if (config_kv.get("theme", f.name)) |blob| {
+            if (firstConfigRecord(blob)) |hex| _ = view.theme.setColor(f.name, hex);
+        }
+    }
+
     var layout: snail_vk.VulkanResourceLayout = undefined;
     try layout.init(vctx);
     defer layout.deinit();
@@ -1238,6 +1255,37 @@ fn parseCursorStyle(s: []const u8) ?view_mod.CursorStyle {
     if (std.mem.eql(u8, s, "block")) return .block;
     if (std.mem.eql(u8, s, "bar")) return .bar;
     if (std.mem.eql(u8, s, "underline")) return .underline;
+    return null;
+}
+
+fn setColorHandler(ctx: *core.command.Context, data: ?*anyopaque, args: []const core.command.Value) anyerror!core.command.Value {
+    _ = ctx;
+    const v: *view_mod.View = @ptrCast(@alignCast(data.?));
+    if (!v.theme.setColor(args[0].string, args[1].string)) return error.InvalidArgument;
+    return .nil;
+}
+
+/// Decode the first record of a framed config blob (uvarint count, then per
+/// record uvarint(len)++bytes — the encoding the config shim produces). Used to
+/// read a single-value `weft.set` (e.g. a theme color) host-side.
+fn firstConfigRecord(blob: []const u8) ?[]const u8 {
+    var cur = blob;
+    _ = getConfigUvarint(&cur) orelse return null; // record count
+    const n = getConfigUvarint(&cur) orelse return null;
+    if (n > cur.len) return null;
+    return cur[0..@intCast(n)];
+}
+fn getConfigUvarint(cur: *[]const u8) ?u64 {
+    var shift: u6 = 0;
+    var v: u64 = 0;
+    while (cur.len > 0) {
+        const b = cur.*[0];
+        cur.* = cur.*[1..];
+        v |= @as(u64, b & 0x7f) << shift;
+        if (b & 0x80 == 0) return v;
+        if (shift >= 57) return null;
+        shift += 7;
+    }
     return null;
 }
 
