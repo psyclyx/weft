@@ -115,6 +115,7 @@ pub fn defineImports(linker: *wasm.Linker, p: *WasmPlugin) !void {
     try d(linker, "wl_node_enclosing", 5, 1, hNodeEnclosing, p);
     try d(linker, "wl_query", 4, 1, hQuery, p);
     try d(linker, "wl_query_capture", 4, 1, hQueryCapture, p);
+    try d(linker, "wl_node_children", 1, 1, hNodeChildren, p);
     try d(linker, "wl_claim_subbuffer", 2, 1, hClaimSubbuffer, p);
     try d(linker, "wl_subbuffer_put_fact", 5, 0, hSubbufferPutFact, p);
     // Effects (perm-gated): shell insert — the membrane form of editLater
@@ -1101,6 +1102,33 @@ fn hQuery(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32, results: [
     for (caps) |c| p.query_caps.append(p.gpa, .{ .name = c.name, .start = c.start, .end = c.end }) catch {
         p.gpa.free(c.name);
     };
+    results[0] = @intCast(p.query_caps.items.len);
+}
+
+/// The named children of the smallest node at `off` (structural descent).
+/// Materialized into the same capture buffer (kind as the "name"), read back
+/// with `wl_query_capture`. Returns the child count, or -1.
+fn hNodeChildren(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32, results: []i32) void {
+    _ = caller;
+    const p: *WasmPlugin = @ptrCast(@alignCast(data.?));
+    p.queryCapsClear();
+    const resolve = p.syntax_of orelse {
+        results[0] = -1;
+        return;
+    };
+    const syn = resolve(p.ctx.buffer()) orelse {
+        results[0] = -1;
+        return;
+    };
+    const kids = syn.childrenAt(p.gpa, @intCast(args[0])) catch {
+        results[0] = -1;
+        return;
+    };
+    defer p.gpa.free(kids);
+    for (kids) |k| {
+        const name = p.gpa.dupe(u8, k.kind) catch continue;
+        p.query_caps.append(p.gpa, .{ .name = name, .start = k.start, .end = k.end }) catch p.gpa.free(name);
+    }
     results[0] = @intCast(p.query_caps.items.len);
 }
 

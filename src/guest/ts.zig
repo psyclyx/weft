@@ -20,6 +20,8 @@ const cmds = [_]Cmd{
     .{ .name = "ts-select-call", .handler = selectCall },
     .{ .name = "ts-select-block", .handler = selectBlock },
     .{ .name = "ts-select-comment", .handler = selectComment },
+    .{ .name = "ts-goto-first-child", .handler = gotoFirstChild },
+    .{ .name = "ts-select-child", .handler = selectChild },
     .{ .name = "ts-query", .handler = queryCount },
 };
 
@@ -88,6 +90,19 @@ fn selectBlock() void {
 }
 fn selectComment() void {
     selectKind(&.{"comment"});
+}
+
+/// Descend: move the cursor to the first named child of the node at point.
+fn gotoFirstChild() void {
+    if (weft.nodeChildren(weft.cursor()) == 0) return;
+    const c = weft.queryCapture(0) orelse return;
+    weft.jump(c.start);
+}
+/// Descend + select: select the first named child of the node at point.
+fn selectChild() void {
+    if (weft.nodeChildren(weft.cursor()) == 0) return;
+    const c = weft.queryCapture(0) orelse return;
+    weft.setSelection(.{ .start = c.start, .end = c.end });
 }
 
 /// Run a caller-supplied tree-sitter query over the whole buffer and return the

@@ -83,6 +83,7 @@ extern "weft" fn wl_node_at(offset: u32, kind_out: u32, kind_cap: u32, span_out:
 extern "weft" fn wl_node_enclosing(start: u32, end: u32, kind_out: u32, kind_cap: u32, span_out: u32) i32;
 extern "weft" fn wl_query(scm_ptr: u32, scm_len: u32, start: u32, end: u32) i32;
 extern "weft" fn wl_query_capture(i: u32, name_out: u32, name_cap: u32, span_out: u32) i32;
+extern "weft" fn wl_node_children(off: u32) i32;
 extern "weft" fn wl_claim_subbuffer(start: u32, end: u32) i32;
 extern "weft" fn wl_subbuffer_put_fact(handle: u32, k: u32, kl: u32, v: u32, vl: u32) void;
 extern "weft" fn wl_shell_insert(ptr: u32, len: u32) void;
@@ -429,12 +430,19 @@ pub fn query(scm: []const u8, r: Range) usize {
     const n = wl_query(p(scm.ptr), @intCast(scm.len), @intCast(r.start), @intCast(r.end));
     return if (n < 0) 0 else @intCast(n);
 }
-/// The `i`-th capture of the last `query` (name into `scratch`), or null.
+/// The `i`-th capture of the last `query`/`nodeChildren` (name/kind into
+/// `scratch`), or null.
 pub fn queryCapture(i: usize) ?Capture {
     var span: [2]u32 = undefined;
     const n = wl_query_capture(@intCast(i), p(&scratch), scratch.len, p(&span));
     if (n < 0) return null;
     return .{ .name = scratch[0..@intCast(n)], .start = span[0], .end = span[1] };
+}
+/// The named children of the smallest node at `off` (structural descent);
+/// returns the count, read back with `queryCapture(i)`. 0 if none/no grammar.
+pub fn nodeChildren(off: usize) usize {
+    const n = wl_node_children(@intCast(off));
+    return if (n < 0) 0 else @intCast(n);
 }
 
 /// Claim `[start, end)` as a subbuffer (an anchored range with its own facts)
