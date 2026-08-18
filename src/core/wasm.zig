@@ -70,6 +70,20 @@ pub const Engine = struct {
         try checkErr(c.wasmtime_module_new(self.engine, wasm.ptr, wasm.len, &module), error.Compile);
         return .{ .module = module.? };
     }
+
+    /// Reconstruct a module from a serialized compiled image (a `.cwasm` cache
+    /// entry). Returns null on an incompatible/stale image — wasmtime validates
+    /// the engine + version, so a cross-version cache is rejected safely and the
+    /// caller falls back to a fresh `compile`. A miss is expected, not logged.
+    pub fn deserialize(self: *Engine, image: []const u8) ?Module {
+        var module: ?*c.wasmtime_module_t = null;
+        const err = c.wasmtime_module_deserialize(self.engine, image.ptr, image.len, &module);
+        if (err != null) {
+            c.wasmtime_error_delete(err);
+            return null;
+        }
+        return .{ .module = module.? };
+    }
 };
 
 pub const Module = struct {
@@ -78,6 +92,20 @@ pub const Module = struct {
     pub fn deinit(self: *Module) void {
         c.wasmtime_module_delete(self.module);
         self.* = undefined;
+    }
+
+    /// Serialize this module's compiled image into an owned byte slice, for the
+    /// `.cwasm` cache. Caller frees. Errors are best-effort at the call site
+    /// (a failed serialize just means we recompile next start).
+    pub fn serialize(self: *const Module, gpa: Allocator) Error![]u8 {
+        var vec: c.wasm_byte_vec_t = undefined;
+        const err = c.wasmtime_module_serialize(self.module, &vec);
+        if (err != null) {
+            c.wasmtime_error_delete(err);
+            return error.Compile;
+        }
+        defer c.wasm_byte_vec_delete(&vec);
+        return gpa.dupe(u8, vec.data[0..vec.size]);
     }
 };
 

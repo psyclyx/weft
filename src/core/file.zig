@@ -40,6 +40,17 @@ pub fn writeBytes(gpa: Allocator, path: []const u8, bytes: []const u8) WriteErro
     try std.Io.Dir.cwd().writeFile(threaded.io(), .{ .sub_path = path, .data = bytes });
 }
 
+/// Write `bytes` to `path`, creating `dir` (and any missing parents) first.
+/// `dir` should be `path`'s directory. Used for the compiled-module cache,
+/// where the cache directory may not exist yet. Absolute paths are fine.
+pub fn writeBytesMakingDirs(gpa: Allocator, dir: []const u8, path: []const u8, bytes: []const u8) WriteError!void {
+    var threaded: std.Io.Threaded = .init(gpa, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+    std.Io.Dir.cwd().createDirPath(io, dir) catch {};
+    try std.Io.Dir.cwd().writeFile(io, .{ .sub_path = path, .data = bytes });
+}
+
 /// Append `bytes` to `path` (created if absent) via read-concat-write — small
 /// files only, which is the notes/capture use. For plugin `fs.append`.
 pub fn appendBytes(gpa: Allocator, path: []const u8, bytes: []const u8) (ReadError || WriteError)!void {

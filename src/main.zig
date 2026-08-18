@@ -249,11 +249,13 @@ pub fn main(init: std.process.Init) !void {
     }
     const plugin_dir = pluginDir(gpa);
     defer gpa.free(plugin_dir);
+    const module_cache_dir = moduleCacheDir(gpa);
+    defer if (module_cache_dir) |d| gpa.free(d);
     var plugin_host: PluginHost = .{
         .gpa = gpa,
         .engine = &wasm_engine,
         .ctx = &cmd_ctx,
-        .opts = .{ .kv = &plugin_kv, .config = &config_kv, .loop = &plugin_loop, .subbuffers = &plugin_subs, .syntax_of = resolveSyntax, .pool = pool },
+        .opts = .{ .kv = &plugin_kv, .config = &config_kv, .loop = &plugin_loop, .subbuffers = &plugin_subs, .syntax_of = resolveSyntax, .pool = pool, .module_cache_dir = module_cache_dir },
         .list = &plugins,
         .dir = plugin_dir,
     };
@@ -1530,6 +1532,19 @@ fn pluginDir(gpa: std.mem.Allocator) []const u8 {
     defer gpa.free(exe_dir);
     return std.fs.path.join(gpa, &.{ exe_dir, "..", "lib", "weft", "plugins" }) catch
         gpa.dupe(u8, "plugins") catch "plugins";
+}
+
+/// The compiled-module (`.cwasm`) cache directory: `$WEFT_CACHE_DIR`, else
+/// `$XDG_CACHE_HOME/weft/modules`, else `$HOME/.cache/weft/modules`. Null when
+/// no writable base can be resolved (caching disabled — the editor still runs,
+/// just recompiles each start). Caller owns the result.
+fn moduleCacheDir(gpa: std.mem.Allocator) ?[]const u8 {
+    if (std.c.getenv("WEFT_CACHE_DIR")) |d| return gpa.dupe(u8, std.mem.span(d)) catch null;
+    if (std.c.getenv("XDG_CACHE_HOME")) |d|
+        return std.fs.path.join(gpa, &.{ std.mem.span(d), "weft", "modules" }) catch null;
+    if (std.c.getenv("HOME")) |d|
+        return std.fs.path.join(gpa, &.{ std.mem.span(d), ".cache", "weft", "modules" }) catch null;
+    return null;
 }
 
 /// The resident wasm-plugin loader: holds the engine, the editor context, the

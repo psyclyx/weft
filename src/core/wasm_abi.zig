@@ -83,6 +83,7 @@ pub fn runGuest(engine: *wasm.Engine, ctx: *command.Context, name: []const u8, w
 
 const Allocator = std.mem.Allocator;
 const kv = @import("kv.zig");
+const file = @import("file.zig");
 const capability = @import("capability.zig");
 const pick_mod = @import("pick.zig");
 const Buffers = @import("Buffers.zig");
@@ -314,6 +315,12 @@ pub const LoadOptions = struct {
     loop: ?*async_loop.Loop = null,
     /// The task pool interactive REPL sessions run on. Null = repl-start drops.
     pool: ?*Pool = null,
+    /// Directory for the compiled-module (`.cwasm`) cache. Null = no caching
+    /// (always compile fresh — the default, and what tests use). When set, a
+    /// module is keyed by content hash: deserialize on a hit, else compile +
+    /// serialize + persist. wasmtime validates engine/version on deserialize,
+    /// so a stale image is rejected and recompiled safely.
+    module_cache_dir: ?[]const u8 = null,
 };
 
 /// Load a `.wasm` plugin under the perm handshake: bind the `weft.*` import
@@ -341,6 +348,30 @@ pub fn loadPlugin(engine: *wasm.Engine, ctx: *command.Context, name: []const u8,
     return p;
 }
 
+/// Compile `wasm_bytes`, using an on-disk `.cwasm` cache under `cache_dir` when
+/// set. Keyed by content hash (auto-invalidates on any plugin/build change);
+/// a stale image (different wasmtime) is rejected on deserialize and recompiled.
+/// All cache I/O is best-effort — a miss or a failed read/write just costs a
+/// fresh compile, never a load failure.
+fn compileCached(engine: *wasm.Engine, gpa: Allocator, cache_dir: ?[]const u8, wasm_bytes: []const u8) !wasm.Module {
+    const dir = cache_dir orelse return engine.compile(wasm_bytes);
+    const hash = std.hash.Wyhash.hash(0, wasm_bytes);
+    var path_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const path = std.fmt.bufPrint(&path_buf, "{s}/{x}.cwasm", .{ dir, hash }) catch
+        return engine.compile(wasm_bytes);
+    if (file.readAlloc(gpa, path)) |image| {
+        defer gpa.free(image);
+        if (engine.deserialize(image)) |m| return m;
+    } else |_| {}
+    // Miss or stale: compile fresh, then persist the image for next start.
+    var module = try engine.compile(wasm_bytes);
+    if (module.serialize(gpa)) |image| {
+        defer gpa.free(image);
+        file.writeBytesMakingDirs(gpa, dir, path, image) catch {};
+    } else |_| {}
+    return module;
+}
+
 /// Build the plugin up through instantiation. Every step's errdefer frees
 /// exactly what preceded it, and `p` is destroyed WITHOUT `deinit` on failure
 /// — so no resource is released twice. On success the returned `p` is fully
@@ -351,7 +382,7 @@ fn construct(engine: *wasm.Engine, ctx: *command.Context, name: []const u8, opts
     errdefer gpa.destroy(p);
     const name_dup = try gpa.dupe(u8, name);
     errdefer gpa.free(name_dup);
-    var module = try engine.compile(wasm_bytes);
+    var module = try compileCached(engine, gpa, opts.module_cache_dir, wasm_bytes);
     errdefer module.deinit();
     var linker = try wasm.Linker.init(engine);
     errdefer linker.deinit();
@@ -550,6 +581,26 @@ test "wasm plugin: the edit catalog plugin runs identically as .wasm (duplicate-
     try t.expectEqualStrings("hello\nhello\nworld", s);
     // Authored as the plugin's peer, across the membrane, through the gate.
     try t.expect(ed.doc.commitAt(ed.doc.commitCount() - 1).author != .user);
+}
+
+test "wasm: compiled-module image serialize→deserialize round-trips; garbage rejected" {
+    var engine = try wasm.Engine.init();
+    defer engine.deinit();
+
+    var module = try engine.compile(@embedFile("guest_edit_wasm"));
+    defer module.deinit();
+
+    // Serialize the compiled image (the .cwasm cache write) and rebuild from it
+    // (the cache read) — the round-trip the fast startup path depends on.
+    const image = try module.serialize(t.allocator);
+    defer t.allocator.free(image);
+    try t.expect(image.len > 0);
+    var restored = engine.deserialize(image) orelse return error.DeserializeFailed;
+    restored.deinit();
+
+    // A stale/garbage image is rejected (null), never a crash — so a
+    // cross-version cache falls back to a fresh compile.
+    try t.expect(engine.deserialize("not a real .cwasm image") == null);
 }
 
 test "wasm plugin: upcase-line edits in place across the membrane" {
@@ -1510,7 +1561,6 @@ test "wasm plugin: notes capture appends via fs and open reads it back" {
     try @import("builtins.zig").install(gpa, &env.commands, &env.keymap); // buffer-create
 
     const tmp = "weft-notes-test.md"; // cwd-relative; cleaned up below
-    const file = @import("file.zig");
     file.deleteFile(gpa, tmp);
     defer file.deleteFile(gpa, tmp);
 
@@ -1568,7 +1618,6 @@ test "wasm plugin: snippets-expand inserts a template body from an fs file" {
     defer env.deinit(gpa);
 
     const tmp = "weft-snippets-test.txt";
-    const file = @import("file.zig");
     try file.writeBytes(gpa, tmp, "fn\tfn foo() {\\n}\nlog\tstd.log.info(\"\", .{});");
     defer file.deleteFile(gpa, tmp);
 
