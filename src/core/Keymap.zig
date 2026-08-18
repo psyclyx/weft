@@ -41,6 +41,14 @@ text_commands: std.StringArrayHashMapUnmanaged([]u8) = .empty,
 /// which-key hint shows their bindings. Policy lives in config; this is
 /// just the mechanism that remembers the declaration.
 menu_modes: std.StringArrayHashMapUnmanaged(void) = .empty,
+/// menu mode → the mode to return to when a one-shot menu key fires. Distinct
+/// from `parents` (the key-lookup fallback chain): a menu's return target is
+/// where the *modal posture* goes after the menu closes, not where its unbound
+/// keys fall through. Recorded only on GUEST-initiated menu entry (`enterMode`),
+/// never on host-side save/restore (the picker), so the picker can't poison it.
+/// Already resolved to the root non-menu mode at record time, so nested menus
+/// (leader→leader-file) collapse to one hop back to normal.
+menu_return: std.StringArrayHashMapUnmanaged([]u8) = .empty,
 
 pub const empty: Keymap = .{};
 
@@ -67,6 +75,11 @@ pub fn deinit(self: *Keymap, gpa: Allocator) void {
     self.text_commands.deinit(gpa);
     for (self.menu_modes.keys()) |k| gpa.free(k);
     self.menu_modes.deinit(gpa);
+    for (self.menu_return.keys(), self.menu_return.values()) |k, v| {
+        gpa.free(k);
+        gpa.free(v);
+    }
+    self.menu_return.deinit(gpa);
     gpa.free(self.mode);
     self.* = .{};
 }
@@ -158,6 +171,37 @@ pub fn setMode(self: *Keymap, gpa: Allocator, mode: []const u8) Allocator.Error!
     const owned = try gpa.dupe(u8, mode);
     gpa.free(self.mode);
     self.mode = owned;
+}
+
+/// Guest-initiated mode set. Identical to `setMode`, except that entering a
+/// *menu* mode records its return target — the root non-menu mode we came from
+/// — so a one-shot menu key can pop back (see `menuReturn`). Only guests route
+/// through here; host-side mode save/restore (the picker) uses plain `setMode`,
+/// so a restore-into-a-menu never records a bogus return target.
+pub fn enterMode(self: *Keymap, gpa: Allocator, mode: []const u8) Allocator.Error!void {
+    if (self.isMenuMode(mode) and !std.mem.eql(u8, self.mode, mode)) {
+        // If we came from another menu, inherit *its* return target so a chain
+        // of menus collapses to a single hop back to the root non-menu mode;
+        // otherwise return to exactly where we were.
+        const root = self.menuReturn(self.mode) orelse self.mode;
+        const owned_root = try gpa.dupe(u8, root); // dupe before setMode frees self.mode
+        errdefer gpa.free(owned_root);
+        const gop = try self.menu_return.getOrPut(gpa, mode);
+        if (gop.found_existing) {
+            gpa.free(gop.value_ptr.*);
+        } else {
+            errdefer _ = self.menu_return.swapRemove(mode);
+            gop.key_ptr.* = try gpa.dupe(u8, mode);
+        }
+        gop.value_ptr.* = owned_root;
+    }
+    try self.setMode(gpa, mode);
+}
+
+/// The mode a one-shot key should pop `mode` back to (the root non-menu mode),
+/// or null if `mode` isn't a menu with a recorded return target.
+pub fn menuReturn(self: *const Keymap, mode: []const u8) ?[]const u8 {
+    return self.menu_return.get(mode);
 }
 
 pub fn currentMode(self: *const Keymap) []const u8 {
@@ -287,4 +331,44 @@ test "keymap: menu modes are leaf prefix tables, with enumerable bindings" {
     try t.expectEqual(@as(usize, 2), hints.items.len);
     try t.expectEqualStrings("f", hints.items[0].key);
     try t.expectEqualStrings("find-file", hints.items[0].command);
+}
+
+test "keymap: menu return targets — guest entry records, nesting collapses to root" {
+    const gpa = t.allocator;
+    var km: Keymap = .empty;
+    defer km.deinit(gpa);
+
+    try km.markMenuMode(gpa, "leader");
+    try km.markMenuMode(gpa, "leader-file");
+    try km.setMode(gpa, "normal");
+
+    // Guest enters leader from normal → return target is normal.
+    try km.enterMode(gpa, "leader");
+    try t.expectEqualStrings("leader", km.currentMode());
+    try t.expectEqualStrings("normal", km.menuReturn("leader").?);
+
+    // Nested: enter leader-file from leader → collapses to the root (normal),
+    // not one hop back to leader.
+    try km.enterMode(gpa, "leader-file");
+    try t.expectEqualStrings("normal", km.menuReturn("leader-file").?);
+
+    // A non-menu mode has no return target.
+    try t.expectEqual(@as(?[]const u8, null), km.menuReturn("normal"));
+}
+
+test "keymap: host-side setMode restore does NOT poison menu return targets" {
+    const gpa = t.allocator;
+    var km: Keymap = .empty;
+    defer km.deinit(gpa);
+
+    try km.markMenuMode(gpa, "leader");
+    try km.setMode(gpa, "normal");
+    try km.enterMode(gpa, "leader"); // return target: normal
+
+    // The picker saves prev="leader", sets "pick" (plain setMode, not a menu),
+    // then on close restores "leader" via plain setMode. That restore must not
+    // rewrite leader's return target to "pick".
+    try km.setMode(gpa, "pick");
+    try km.setMode(gpa, "leader");
+    try t.expectEqualStrings("normal", km.menuReturn("leader").?);
 }

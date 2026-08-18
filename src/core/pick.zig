@@ -297,6 +297,16 @@ pub const Pick = struct {
         const prev = try ctx.gpa.dupe(u8, self.prev_mode);
         defer ctx.gpa.free(prev);
         self.clear(ctx.gpa);
+        // If the pick was opened from a menu (e.g. the palette from leader),
+        // restoring prev_mode would leave the user stuck in the menu. Pop to the
+        // menu's one-shot return target instead — the pick bypasses the keymap
+        // dispatch site, so this is where that class of stickiness is fixed.
+        if (ctx.keymap.isMenuMode(prev)) {
+            if (ctx.keymap.menuReturn(prev)) |ret| {
+                try ctx.keymap.setMode(ctx.gpa, ret);
+                return;
+            }
+        }
         try ctx.keymap.setMode(ctx.gpa, prev);
     }
 

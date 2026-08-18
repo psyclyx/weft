@@ -1168,7 +1168,10 @@ fn hSetMode(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32, results:
     const p: *WasmPlugin = @ptrCast(@alignCast(data.?));
     const mode = caller.readMemory(p.gpa, @intCast(args[0]), @intCast(args[1])) catch return;
     defer p.gpa.free(mode);
-    p.ctx.keymap.setMode(p.gpa, mode) catch {};
+    // Guest-initiated: route through enterMode so entering a menu mode records
+    // its one-shot return target. Host-side mode save/restore (the picker) uses
+    // plain setMode and never records.
+    p.ctx.keymap.enterMode(p.gpa, mode) catch {};
 }
 
 fn hSetFallback(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32, results: []i32) void {

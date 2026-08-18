@@ -1050,8 +1050,8 @@ pub fn main(init: std.process.Init) !void {
                 .which_key = if (wk_hints.items.len > 0) wk_hints.items else null,
                 .tabs = if (tab_list.items.len > 1) tab_list.items else null,
                 .md_inline = md_inline,
-                .cursor_style = cursor_cfg.styleFor(keymap.currentMode()),
-                .cursor_on = if (cursor_cfg.blinkFor(keymap.currentMode())) blink_on else true,
+                .cursor_style = cursor_cfg.styleFor(cursor_cfg.resolveMode(&keymap, keymap.currentMode())),
+                .cursor_on = if (cursor_cfg.blinkFor(cursor_cfg.resolveMode(&keymap, keymap.currentMode()))) blink_on else true,
                 .file = editor.backingPath() orelse abuf.name,
                 .dirty = editor.isDirty(gpa) catch true,
                 .save_failed = editor.save_state == .failed,
@@ -1185,6 +1185,19 @@ const CursorConfig = struct {
     fn deinit(self: *CursorConfig) void {
         for (self.entries.items) |e| self.gpa.free(e.mode);
         self.entries.deinit(self.gpa);
+    }
+    fn hasEntry(self: *const CursorConfig, mode: []const u8) bool {
+        for (self.entries.items) |e| if (std.mem.eql(u8, e.mode, mode)) return true;
+        return false;
+    }
+    /// The mode whose caret should render for `mode`. A menu mode with no caret
+    /// of its own inherits its return target's — so `leader` keeps normal's bar
+    /// instead of flipping to a block. (Uses the menu-return relation, NOT the
+    /// key-lookup `parents` chain, so no bindings leak into the menu.)
+    fn resolveMode(self: *const CursorConfig, keymap: *const core.Keymap, mode: []const u8) []const u8 {
+        if (self.hasEntry(mode)) return mode;
+        if (keymap.isMenuMode(mode)) if (keymap.menuReturn(mode)) |ret| return ret;
+        return mode;
     }
     fn styleFor(self: *const CursorConfig, mode: []const u8) view_mod.CursorStyle {
         for (self.entries.items) |e| if (std.mem.eql(u8, e.mode, mode)) return e.style;
@@ -1582,9 +1595,36 @@ fn dispatchKey(ctx: *core.command.Context, view: *view_mod.View, ev: wayland.Key
                 try visualVertical(ctx.editor(), view, 1);
                 return;
             }
-            _ = core.command.run(ctx.commands, ctx, cmd_name, &.{}) catch |err| {
+            // Snapshot a menu mode so a one-shot key can pop back to its return
+            // target after the command runs — but only if the command didn't
+            // itself change the mode (submenu entry and explicit mode sets are
+            // preserved). Recorded/resolved by Keymap.enterMode on guest entry.
+            const menu_before: ?[]u8 = if (ctx.keymap.isMenuMode(ctx.keymap.currentMode()))
+                ctx.gpa.dupe(u8, ctx.keymap.currentMode()) catch null
+            else
+                null;
+            defer if (menu_before) |m| ctx.gpa.free(m);
+
+            const result = core.command.run(ctx.commands, ctx, cmd_name, &.{}) catch |err| blk: {
                 std.log.warn("command {s} failed: {t}", .{ cmd_name, err });
+                break :blk core.command.Value.nil;
             };
+            // Surface a returned string as transient feedback so command results
+            // (e.g. share's "not connected") aren't silently dropped.
+            switch (result) {
+                .string => |s| if (s.len > 0) {
+                    ctx.echo.clearRetainingCapacity();
+                    ctx.echo.appendSlice(ctx.gpa, s) catch {};
+                },
+                else => {},
+            }
+            // One-shot menu: still in the menu we entered on ⇒ pop to its return
+            // target (the root non-menu mode). setMode dupes internally.
+            if (menu_before) |m| {
+                if (std.mem.eql(u8, ctx.keymap.currentMode(), m)) {
+                    if (ctx.keymap.menuReturn(m)) |ret| ctx.keymap.setMode(ctx.gpa, ret) catch {};
+                }
+            }
             return;
         }
     }
