@@ -102,7 +102,10 @@ weft.bind("leader-buffer", "n", "buffer-next");
 weft.bind("leader-buffer", "s", "save");
 weft.bind("leader-buffer", "N", "buf-scratch");
 
-// SPC g — git (magit-style status has its own s/u/g binds once open)
+// SPC g — git. `git-status` opens the *magit* model buffer, which runs its own
+// `magit` keymap: j/k move, TAB folds, s/u stage/unstage (file/hunk/region), x
+// discards (confirmed), S/U stage-all, c commit, P/F/f push/pull/fetch, g
+// refresh, RET visits, q leaves.
 weft.bind("leader-git", "g", "git-status");
 weft.bind("leader-git", "l", "git-log");
 weft.bind("leader-git", "d", "git-diff");
