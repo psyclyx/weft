@@ -1,5 +1,28 @@
 const std = @import("std");
 
+/// The reference wasm guest plugins (src/guest/*.zig). `install` plugins are
+/// the shippable reference catalog: built to `.wasm` and installed to
+/// `lib/weft/plugins/` as external artifacts a user loads with `--plugin` —
+/// NOT baked into the binary. weft itself ships modeless. The non-`install`
+/// guests are test fixtures (a bare hello, a perm-violating rogue, a demo
+/// config) exercised only by the wasm-membrane suite, embedded into the test
+/// module below.
+const Guest = struct { src: []const u8, import: []const u8, install: bool };
+const guests = [_]Guest{
+    .{ .src = "src/guest/hello.zig", .import = "guest_hello_wasm", .install = false },
+    .{ .src = "src/guest/plugin.zig", .import = "guest_plugin_wasm", .install = false },
+    .{ .src = "src/guest/rogue.zig", .import = "guest_rogue_wasm", .install = false },
+    .{ .src = "src/guest/demo_config.zig", .import = "guest_demo_config_wasm", .install = false },
+    .{ .src = "src/guest/edit.zig", .import = "guest_edit_wasm", .install = true },
+    .{ .src = "src/guest/complete.zig", .import = "guest_complete_wasm", .install = true },
+    .{ .src = "src/guest/project.zig", .import = "guest_project_wasm", .install = true },
+    .{ .src = "src/guest/palette.zig", .import = "guest_palette_wasm", .install = true },
+    .{ .src = "src/guest/structural.zig", .import = "guest_structural_wasm", .install = true },
+    .{ .src = "src/guest/region.zig", .import = "guest_region_wasm", .install = true },
+    .{ .src = "src/guest/shell.zig", .import = "guest_shell_wasm", .install = true },
+    .{ .src = "src/guest/vim.zig", .import = "guest_vim_wasm", .install = true },
+};
+
 pub fn build(b: *std.Build) void {
     const target = b.standardTargetOptions(.{});
     const optimize = b.standardOptimizeOption(.{});
@@ -33,7 +56,6 @@ pub fn build(b: *std.Build) void {
     addWaylandProtocols(b, exe_mod);
     addSyntax(b, exe_mod);
     addWasm(b, exe_mod);
-    addGuests(b, exe_mod);
     addQuickjs(b, exe_mod);
 
     const exe = b.addExecutable(.{
@@ -41,6 +63,11 @@ pub fn build(b: *std.Build) void {
         .root_module = exe_mod,
     });
     b.installArtifact(exe);
+
+    // The reference plugins ship as external `.wasm` under lib/weft/plugins/,
+    // not embedded — weft's binary carries no catalog. Load one with e.g.
+    // `--plugin zig-out/lib/weft/plugins/vim.wasm`.
+    installPlugins(b);
 
     // The former weft-agent is folded into `weft --headless`
     // (src/headless.zig): one binary, every weft a peer. The old
@@ -76,7 +103,7 @@ pub fn build(b: *std.Build) void {
     test_mod.linkSystemLibrary("fontconfig", .{}); // View tests resolve faces
     addSyntax(b, test_mod);
     addWasm(b, test_mod);
-    addGuests(b, test_mod);
+    embedGuests(b, test_mod);
     addQuickjs(b, test_mod);
     const unit_tests = b.addTest(.{ .root_module = test_mod });
     const run_tests = b.addRunArtifact(unit_tests);
@@ -87,38 +114,44 @@ pub fn build(b: *std.Build) void {
 /// Tree-sitter (milestone 7): the library links normally; grammar
 /// packages contribute a runtime dlopen path (baked via build options)
 /// and an embedded highlight query, both from pinned store paths.
-/// Compile the reference wasm GUEST plugins (src/guest/*.zig) to
-/// `wasm32-freestanding` and embed their `.wasm` bytes so the host can run
-/// them under wasmtime (milestone 5: the catalog recompiled as `.wasm`). A
-/// reactor module — no `_start`, exported functions + memory via rdynamic.
-fn addGuests(b: *std.Build, host_mod: *std.Build.Module) void {
+/// Compile one guest plugin (src/guest/*.zig) to a `wasm32-freestanding`
+/// reactor module — no `_start`, exported functions + memory via rdynamic —
+/// so the host can instantiate it under wasmtime.
+fn buildGuest(b: *std.Build, src: []const u8) *std.Build.Step.Compile {
     const wasm_target = b.resolveTargetQuery(.{ .cpu_arch = .wasm32, .os_tag = .freestanding });
-    const guests = [_]struct { src: []const u8, import: []const u8 }{
-        .{ .src = "src/guest/hello.zig", .import = "guest_hello_wasm" },
-        .{ .src = "src/guest/plugin.zig", .import = "guest_plugin_wasm" },
-        .{ .src = "src/guest/edit.zig", .import = "guest_edit_wasm" },
-        .{ .src = "src/guest/complete.zig", .import = "guest_complete_wasm" },
-        .{ .src = "src/guest/demo_config.zig", .import = "guest_demo_config_wasm" },
-        .{ .src = "src/guest/project.zig", .import = "guest_project_wasm" },
-        .{ .src = "src/guest/palette.zig", .import = "guest_palette_wasm" },
-        .{ .src = "src/guest/structural.zig", .import = "guest_structural_wasm" },
-        .{ .src = "src/guest/region.zig", .import = "guest_region_wasm" },
-        .{ .src = "src/guest/shell.zig", .import = "guest_shell_wasm" },
-        .{ .src = "src/guest/vim.zig", .import = "guest_vim_wasm" },
-        .{ .src = "src/guest/rogue.zig", .import = "guest_rogue_wasm" },
-    };
+    const guest = b.addExecutable(.{
+        .name = std.fs.path.stem(src),
+        .root_module = b.createModule(.{
+            .root_source_file = b.path(src),
+            .target = wasm_target,
+            .optimize = .ReleaseSmall,
+        }),
+    });
+    guest.entry = .disabled; // reactor: called through exports, not _start
+    guest.rdynamic = true; // export the `export fn`s + memory
+    return guest;
+}
+
+/// Embed every guest's `.wasm` bytes into a module. Used only by the test
+/// module: the wasm-membrane suite loads the reference plugins and the perm
+/// fixtures from `@embedFile`. The shipped binary embeds none of them.
+fn embedGuests(b: *std.Build, mod: *std.Build.Module) void {
     inline for (guests) |g| {
-        const guest = b.addExecutable(.{
-            .name = std.fs.path.stem(g.src),
-            .root_module = b.createModule(.{
-                .root_source_file = b.path(g.src),
-                .target = wasm_target,
-                .optimize = .ReleaseSmall,
-            }),
-        });
-        guest.entry = .disabled; // reactor: called through exports, not _start
-        guest.rdynamic = true; // export the `export fn`s + memory
-        host_mod.addAnonymousImport(g.import, .{ .root_source_file = guest.getEmittedBin() });
+        const guest = buildGuest(b, g.src);
+        mod.addAnonymousImport(g.import, .{ .root_source_file = guest.getEmittedBin() });
+    }
+}
+
+/// Install the reference plugins as external `.wasm` artifacts under
+/// `lib/weft/plugins/`. These are what a user loads with `--plugin`; weft
+/// carries no catalog in-process.
+fn installPlugins(b: *std.Build) void {
+    inline for (guests) |g| {
+        if (!g.install) continue;
+        const guest = buildGuest(b, g.src);
+        const name = comptime std.fs.path.stem(g.src);
+        const inst = b.addInstallFileWithDir(guest.getEmittedBin(), .lib, "weft/plugins/" ++ name ++ ".wasm");
+        b.getInstallStep().dependOn(&inst.step);
     }
 }
 

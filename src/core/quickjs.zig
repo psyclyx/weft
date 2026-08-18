@@ -20,9 +20,19 @@ pub const quickjs_wasm: []const u8 = @embedFile("quickjs_wasm");
 
 pub const EvalError = error{ConfigException} || wasm.Error;
 
-/// Host state behind the `weft.*` config imports: the editor the config wires.
+/// How `weft.plugin(name)` reaches the host's plugin loader. Kept as an
+/// opaque callback so this file stays free of the wasm-plugin lifecycle
+/// (main.zig owns the resident engine + plugin list + name resolution).
+pub const PluginLoader = struct {
+    ctx: *anyopaque,
+    load: *const fn (ctx: *anyopaque, name: []const u8) void,
+};
+
+/// Host state behind the `weft.*` config imports: the editor the config wires,
+/// and (optionally) the plugin loader `weft.plugin` calls.
 const Bridge = struct {
     ctx: *command.Context,
+    loader: ?PluginLoader,
 };
 
 /// Evaluate `src` as the user config: instantiate `quickjs.wasm` under WASI
@@ -30,8 +40,8 @@ const Bridge = struct {
 /// marshal the source into the guest, and eval it. A JS exception surfaces as
 /// `error.ConfigException` (the shim logs its message) — never a partial,
 /// silent half-applied config. Each call is a fresh JS runtime.
-pub fn evalConfig(engine: *wasm.Engine, ctx: *command.Context, src: []const u8) EvalError!void {
-    var bridge: Bridge = .{ .ctx = ctx };
+pub fn evalConfig(engine: *wasm.Engine, ctx: *command.Context, loader: ?PluginLoader, src: []const u8) EvalError!void {
+    var bridge: Bridge = .{ .ctx = ctx, .loader = loader };
 
     var module = try engine.compile(quickjs_wasm);
     defer module.deinit();
@@ -42,6 +52,7 @@ pub fn evalConfig(engine: *wasm.Engine, ctx: *command.Context, src: []const u8) 
     try linker.defineFn("weft", "qjs_run", 2, 0, cRun, &bridge);
     try linker.defineFn("weft", "qjs_echo", 2, 0, cEcho, &bridge);
     try linker.defineFn("weft", "qjs_log", 2, 0, cLog, &bridge);
+    try linker.defineFn("weft", "qjs_plugin", 2, 0, cPlugin, &bridge);
 
     var instance = try linker.instantiateWasi(&module);
     defer instance.deinit();
@@ -110,6 +121,15 @@ fn cLog(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32, results: []i
     std.log.info("config: {s}", .{msg});
 }
 
+fn cPlugin(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32, results: []i32) void {
+    _ = results;
+    const br: *Bridge = @ptrCast(@alignCast(data.?));
+    const loader = br.loader orelse return; // no loader wired → weft.plugin is a no-op
+    const name = readStr(br, caller, args[0], args[1]) orelse return;
+    defer br.ctx.gpa.free(name);
+    loader.load(loader.ctx, name);
+}
+
 // ── Tests ───────────────────────────────────────────────────────────
 
 const t = std.testing;
@@ -171,7 +191,7 @@ test "quickjs: config.js drives the weft ABI — binds a key and echoes" {
         \\weft.bind("normal", "k", "cursor-up");
         \\weft.echo("config loaded (" + (1 + 1) + " keys)");
     ;
-    try evalConfig(&engine, &env.ctx, cfg);
+    try evalConfig(&engine, &env.ctx, null, cfg);
 
     // The JS ran real logic (string concat + arithmetic) and reached the host:
     try env.keymap.setMode(gpa, "normal");
@@ -199,7 +219,7 @@ test "quickjs: config.js can run a registered command through weft.run" {
 
     var engine = try wasm.Engine.init();
     defer engine.deinit();
-    try evalConfig(&engine, &env.ctx, "weft.run(\"mark\");");
+    try evalConfig(&engine, &env.ctx, null, "weft.run(\"mark\");");
     try t.expectEqualStrings("ran!", env.echo.items);
 }
 
@@ -212,8 +232,57 @@ test "quickjs: a config syntax error surfaces as ConfigException, not silent" {
     var engine = try wasm.Engine.init();
     defer engine.deinit();
     // Malformed JS: the eval must fail loudly, and nothing was bound.
-    try t.expectError(error.ConfigException, evalConfig(&engine, &env.ctx, "this is (not valid javascript"));
+    try t.expectError(error.ConfigException, evalConfig(&engine, &env.ctx, null, "this is (not valid javascript"));
     try t.expectEqual(@as(usize, 0), env.echo.items.len);
+}
+
+test "quickjs: weft.plugin loads a real .wasm, then its command runs" {
+    const gpa = t.allocator;
+    var env: Env = undefined;
+    try Env.init(gpa, &env);
+    defer env.deinit(gpa);
+
+    var engine = try wasm.Engine.init();
+    defer engine.deinit();
+
+    // A minimal loader over the resident engine: resolve the guest "edit"
+    // plugin from its embedded bytes and load it under the perm handshake —
+    // the same shape main.zig's PluginHost has, minus disk/name resolution.
+    const wasm_abi = @import("wasm_abi.zig");
+    const Loader = struct {
+        engine: *wasm.Engine,
+        ctx: *command.Context,
+        held: ?*wasm_abi.WasmPlugin = null,
+        fn load(cx: *anyopaque, name: []const u8) void {
+            const self: *@This() = @ptrCast(@alignCast(cx));
+            std.debug.assert(std.mem.eql(u8, name, "edit"));
+            self.held = wasm_abi.loadPlugin(self.engine, self.ctx, "edit", @embedFile("guest_edit_wasm"), .{}) catch null;
+        }
+    };
+    var loader: Loader = .{ .engine = &engine, .ctx = &env.ctx };
+    defer if (loader.held) |p| p.deinit();
+
+    // config.js loads the plugin, then binds one of its commands — the bind
+    // only resolves if the plugin registered synchronously first.
+    const cfg =
+        \\weft.plugin("edit");
+        \\weft.bind("normal", "D", "duplicate-line");
+    ;
+    try evalConfig(&engine, &env.ctx, .{ .ctx = &loader, .load = Loader.load }, cfg);
+
+    // The plugin loaded and registered its command; the config's bind took.
+    try t.expect(loader.held != null);
+    try t.expect(env.commands.find("duplicate-line") != null);
+    try env.keymap.setMode(gpa, "normal");
+    try t.expectEqualStrings("duplicate-line", env.keymap.lookup("D").?);
+
+    // And the command actually runs through the membrane: duplicate a line.
+    try env.buffers.active().editor.insertText(gpa, "hi");
+    env.buffers.active().editor.placeCursor(0);
+    _ = try command.run(&env.commands, &env.ctx, "duplicate-line", &.{});
+    const s = try env.buffers.active().editor.text().toOwnedSlice(gpa);
+    defer gpa.free(s);
+    try t.expectEqualStrings("hi\nhi", s);
 }
 
 test {

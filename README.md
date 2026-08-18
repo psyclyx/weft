@@ -69,27 +69,31 @@ with no authority, the host approves, then `init()` runs and every runtime
 registration is cross-checked against the manifest. An undeclared
 registration fails the load.
 
-The reference catalog (`src/core/catalog/`) is authored in Zig against that
-ABI with no core privilege: modal editing (`vim`), buffer-word completion,
-a command/buffer palette and status line (`std`), structural
-(tree-sitter) edits, subbuffer regions, shell-output insertion, and
-project history. The catalog loads at startup — so modal editing is the
-default — and the core knows nothing of vim; delete the plugin and weft is
-modeless.
+Every plugin runs as **wasm**, sandboxed under wasmtime — nothing is linked
+or trusted in-process. A guest reaches the editor only through host imports
+granted after the manifest handshake (`src/core/wasm*.zig`; guest shim
+`src/guest/weft.zig`); its edits land on the same grade gate, authored as
+the plugin's peer. weft's binary carries **no catalog**: it ships modeless,
+and knows nothing of vim.
 
-Plugins are delivered two ways behind the same ABI:
+The reference catalog (`src/guest/`) is authored in Zig against the ABI with
+no core privilege — modal editing (`vim`), buffer-word completion, a
+command/buffer palette and status line (`std`), structural (tree-sitter)
+edits, subbuffer regions, shell-output insertion, and project history — and
+built to `.wasm` artifacts installed under `lib/weft/plugins/`, external
+files a user loads by name. Nothing is baked in; delete them and weft is a
+bare modeless editor.
 
-- **In-process Zig** — the catalog, linked and trusted.
-- **wasm** — the same plugins recompiled to wasm32 and run under wasmtime
-  (`src/core/wasm*.zig`; guest shim `src/guest/weft.zig`). A guest reaches
-  the editor only through host imports granted after the manifest
-  handshake; its edits still land on the same grade gate, authored as the
-  plugin's peer. Each catalog plugin has a byte-faithful `.wasm` twin.
+Plugins load two ways, both behind the same handshake:
+
+- `--plugin <name|path.wasm>` on the command line (repeatable).
+- `weft.plugin(name)` from `config.js` — so a config brings up its own
+  catalog with no flags.
 
 User config is JavaScript. `config.js` runs in QuickJS-ng (compiled to
 wasm32-wasi under wasmtime) and drives the editor through the `weft.*`
-globals the embedding installs — the config plane crossing the same
-membrane, one tier down.
+globals the embedding installs — including `weft.plugin` to load plugins —
+the config plane crossing the same membrane, one tier down.
 
 ## Render (`src/gfx/`)
 
@@ -144,14 +148,19 @@ zig build test     # display-free tests
 
 ## Config
 
-`config.js` (JavaScript, evaluated in QuickJS) wires keys and commands
-through the `weft.*` globals. Pass it with `--config`; without it, the
-built-in catalog (vim modal editing, the palette, …) is the default. The
-in-repo sample is the development entry point:
+`config.js` (JavaScript, evaluated in QuickJS) loads plugins and wires keys
+and commands through the `weft.*` globals. A bare `zig build run` is
+modeless; the in-repo sample config loads the reference catalog itself
+(vim, the palette, …) via `weft.plugin`, so it is the development entry
+point — no `--plugin` flags needed:
 
 ```sh
 zig build run -- --config config/config.js README.md
 ```
+
+Plugins resolve by name against the install dir (`lib/weft/plugins/`,
+overridable with `$WEFT_PLUGIN_DIR`); a path ending in `.wasm` loads
+literally. `--plugin vim` (repeatable) loads without a config at all.
 
 Open a `.md` file for live markdown; a `.zig` file for tree-sitter
 highlighting over the monospace grid.

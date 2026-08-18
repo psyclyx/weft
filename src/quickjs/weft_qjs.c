@@ -28,6 +28,8 @@ __attribute__((import_module("weft"), import_name("qjs_echo")))
 extern void host_echo(const char *msg, int msg_len);
 __attribute__((import_module("weft"), import_name("qjs_log")))
 extern void host_log(const char *msg, int msg_len);
+__attribute__((import_module("weft"), import_name("qjs_plugin")))
+extern void host_plugin(const char *name, int name_len);
 
 // ── JS → host trampolines. Each pulls its string args out of the JS values
 // and forwards to the host import. ──
@@ -76,6 +78,19 @@ static JSValue js_log(JSContext *ctx, JSValueConst this_val,
     return JS_UNDEFINED;
 }
 
+// Load a plugin by name (resolved against the host's plugin dir) or path.
+// Synchronous: the plugin's commands are registered by the time this returns,
+// so a following weft.bind can reference them.
+static JSValue js_plugin(JSContext *ctx, JSValueConst this_val,
+                         int argc, JSValueConst *argv) {
+    if (argc < 1) return JS_ThrowTypeError(ctx, "plugin(name)");
+    size_t l;
+    const char *s = JS_ToCStringLen(ctx, &l, argv[0]);
+    if (s) host_plugin(s, (int)l);
+    JS_FreeCString(ctx, s);
+    return JS_UNDEFINED;
+}
+
 // Install the `weft` global: the config surface config.js calls.
 static void install_weft(JSContext *ctx) {
     JSValue global = JS_GetGlobalObject(ctx);
@@ -84,6 +99,7 @@ static void install_weft(JSContext *ctx) {
     JS_SetPropertyStr(ctx, weft, "run", JS_NewCFunction(ctx, js_run, "run", 1));
     JS_SetPropertyStr(ctx, weft, "echo", JS_NewCFunction(ctx, js_echo, "echo", 1));
     JS_SetPropertyStr(ctx, weft, "log", JS_NewCFunction(ctx, js_log, "log", 1));
+    JS_SetPropertyStr(ctx, weft, "plugin", JS_NewCFunction(ctx, js_plugin, "plugin", 1));
     JS_SetPropertyStr(ctx, global, "weft", weft);
     JS_FreeValue(ctx, global);
 }

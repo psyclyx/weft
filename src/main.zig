@@ -6,7 +6,7 @@
 //! the hot-section fence; frame + input latency percentiles log
 //! continuously.
 //!
-//!   weft [file] [--font path.ttf] [--em N] [--config config.js]
+//!   weft [file] [--font path.ttf] [--em N] [--plugin p.wasm]... [--config config.js]
 
 const std = @import("std");
 const wayland = @import("platform/wayland.zig");
@@ -27,6 +27,11 @@ const Args = struct {
     file: ?[]const u8 = null,
     font: ?[]const u8 = null,
     config: ?[]const u8 = null,
+    /// `.wasm` plugin paths to load at startup, in order (repeatable
+    /// `--plugin`). weft ships modeless; a plugin is loaded only when named.
+    /// argv is static, so these slices stay valid for the run.
+    plugins: [32][]const u8 = undefined,
+    plugin_count: usize = 0,
     em: f32 = 15,
     listen: ?u16 = null,
     /// Access granted to peers on --listen (safe default: view). Peers
@@ -51,6 +56,11 @@ fn parseArgs(process_args: std.process.Args) Args {
             out.font = it.next() orelse out.font;
         } else if (std.mem.eql(u8, a, "--config")) {
             out.config = it.next() orelse out.config;
+        } else if (std.mem.eql(u8, a, "--plugin")) {
+            if (it.next()) |v| if (out.plugin_count < out.plugins.len) {
+                out.plugins[out.plugin_count] = v;
+                out.plugin_count += 1;
+            };
         } else if (std.mem.eql(u8, a, "--em")) {
             if (it.next()) |v| out.em = std.fmt.parseFloat(f32, v) catch out.em;
         } else if (std.mem.eql(u8, a, "--listen")) {
@@ -211,33 +221,48 @@ pub fn main(init: std.process.Init) !void {
         .data = &my_identity,
     });
 
-    // ── Config: the Zig catalog IS the config (plan 06C, Lua removed) ──
-    // The keymap (`vim`), the UI policy (`std`: palette/buffers/status), and
-    // the feature plugins are Zig modules over `abi.zig` — each exactly what
-    // a user could write against the same door, no core privilege. This is
-    // the reborn `bundled.fnl` + `init.fnl`. The effect services the ABI's
-    // Group D/E need are wired here.
-    var abi_kv: core.kv.Store = .empty;
-    defer abi_kv.deinit(gpa);
-    var abi_subs: core.subbuffer.SubBuffers = .empty;
-    defer abi_subs.deinit(gpa);
-    var abi_loop = core.async_loop.Loop.init(gpa, pool, core.task.nowNs);
-    defer abi_loop.deinit();
-    var abi_host = core.abi.Host.init(&cmd_ctx, .{ .kv = &abi_kv, .loop = &abi_loop, .subbuffers = &abi_subs, .syntax_of = resolveSyntax });
-    defer abi_host.deinit();
-    {
-        var catalog_buf: [core.catalog.count]core.abi.Plugin = undefined;
-        for (core.catalog.all(&catalog_buf)) |p| abi_host.load(p) catch |e|
-            std.log.warn("catalog: {s} failed to load: {t}", .{ p.describe().name, e });
+    // ── Plugins: external .wasm, sandboxed under wasmtime (no in-process
+    //    trust). weft ships MODELESS — nothing here unless the user asks with
+    //    --plugin. The reference catalog (vim, palette, edit, …) lives as
+    //    `.wasm` under lib/weft/plugins/; each runs behind the perm handshake,
+    //    reaching the editor only through the `weft.*` membrane and authoring
+    //    every edit as its own peer. The effect services the ABI's Group D/E
+    //    need are wired here and forwarded across the membrane.
+    var plugin_kv: core.kv.Store = .empty;
+    defer plugin_kv.deinit(gpa);
+    var plugin_subs: core.subbuffer.SubBuffers = .empty;
+    defer plugin_subs.deinit(gpa);
+    var plugin_loop = core.async_loop.Loop.init(gpa, pool, core.task.nowNs);
+    defer plugin_loop.deinit();
+    var wasm_engine = try core.wasm.Engine.init();
+    defer wasm_engine.deinit();
+    var plugins: std.ArrayList(*core.wasm_abi.WasmPlugin) = .empty;
+    defer {
+        for (plugins.items) |p| p.deinit();
+        plugins.deinit(gpa);
     }
+    const plugin_dir = pluginDir(gpa);
+    defer gpa.free(plugin_dir);
+    var plugin_host: PluginHost = .{
+        .gpa = gpa,
+        .engine = &wasm_engine,
+        .ctx = &cmd_ctx,
+        .opts = .{ .kv = &plugin_kv, .loop = &plugin_loop, .subbuffers = &plugin_subs, .syntax_of = resolveSyntax },
+        .list = &plugins,
+        .dir = plugin_dir,
+    };
+    // Explicit --plugin flags load first, in order.
+    for (args.plugins[0..args.plugin_count]) |name| plugin_host.load(name);
 
     // ── User config: config.js in the quickjs.wasm sandbox (plan 06B) ──
-    // The std catalog above provides the commands; the user's `config.js`
-    // (via --config) layers personal bindings/actions on top, reaching the
-    // editor only through the `weft.*` grants. Absent or broken config is a
-    // warning, never fatal — the editor still runs on the std defaults.
+    // The local plane, one tier down: `config.js` (via --config) wires keys
+    // and actions, reaching the editor only through the `weft.*` grants — the
+    // same door a plugin uses. It can also load plugins itself (`weft.plugin`),
+    // so the sample config brings up its own vim/palette without --plugin. A
+    // bare weft with no plugins is modeless. Absent or broken config is a
+    // warning, never fatal.
     if (args.config) |config_path| {
-        loadJsConfig(gpa, &cmd_ctx, config_path) catch |e|
+        loadJsConfig(gpa, &cmd_ctx, config_path, plugin_host.loader()) catch |e|
             std.log.warn("config: {s} failed to load: {t}", .{ config_path, e });
     }
 
@@ -672,7 +697,7 @@ pub fn main(init: std.process.Init) !void {
         if (try pick_state.tick(&cmd_ctx)) view_dirty = true;
         // Deliver native async completions (subprocess/timer output, deferred
         // edits) on the frame thread; a completion repaints.
-        if (abi_loop.tick()) view_dirty = true;
+        if (plugin_loop.tick()) view_dirty = true;
         // Apply connection intents recorded by commands (outside the
         // hot section: connect blocks on TCP, disconnect joins threads).
         if (share_ctx.disconnect_requested) {
@@ -1384,13 +1409,74 @@ fn identityHandler(ctx: *core.command.Context, data: ?*anyopaque, args: []const 
 /// 06B). Reads the file, spins a one-shot wasm engine, and evals — the config
 /// wires the editor only through the `weft.*` grants. The engine is scoped to
 /// the eval: config is a startup declaration, not a resident runtime.
-fn loadJsConfig(gpa: std.mem.Allocator, ctx: *core.command.Context, path: []const u8) !void {
+fn loadJsConfig(gpa: std.mem.Allocator, ctx: *core.command.Context, path: []const u8, loader: ?core.quickjs.PluginLoader) !void {
     const src = try core.file.readAlloc(gpa, path);
     defer gpa.free(src);
     var engine = try core.wasm.Engine.init();
     defer engine.deinit();
-    try core.quickjs.evalConfig(&engine, ctx, src);
+    try core.quickjs.evalConfig(&engine, ctx, loader, src);
 }
+
+/// Resolve the reference-plugin directory: `$WEFT_PLUGIN_DIR` if set, else
+/// `<exe>/../lib/weft/plugins` (where `zig build` installs them). Falls back to
+/// a bare "plugins" if the exe path can't be found. Caller owns the result.
+fn pluginDir(gpa: std.mem.Allocator) []const u8 {
+    if (std.c.getenv("WEFT_PLUGIN_DIR")) |d| return gpa.dupe(u8, std.mem.span(d)) catch "plugins";
+    var threaded: std.Io.Threaded = .init(gpa, .{});
+    defer threaded.deinit();
+    const exe_dir = std.process.executableDirPathAlloc(threaded.io(), gpa) catch
+        return gpa.dupe(u8, "plugins") catch "plugins";
+    defer gpa.free(exe_dir);
+    return std.fs.path.join(gpa, &.{ exe_dir, "..", "lib", "weft", "plugins" }) catch
+        gpa.dupe(u8, "plugins") catch "plugins";
+}
+
+/// The resident wasm-plugin loader: holds the engine, the editor context, the
+/// effect services, and the live plugin list. Both `--plugin` and the config's
+/// `weft.plugin(name)` funnel through `load`, so name resolution and lifetime
+/// are one path. Plugins stay resident for the session (their registered
+/// commands hold pointers into the WasmPlugin); the list frees them at exit.
+const PluginHost = struct {
+    gpa: std.mem.Allocator,
+    engine: *core.wasm.Engine,
+    ctx: *core.command.Context,
+    opts: core.wasm_abi.LoadOptions,
+    list: *std.ArrayList(*core.wasm_abi.WasmPlugin),
+    dir: []const u8,
+
+    /// A bare name ("vim") resolves to `<dir>/vim.wasm`; anything with a path
+    /// separator or a `.wasm` suffix is taken literally (explicit --plugin
+    /// paths). Writes into `buf`, returns the slice.
+    fn resolve(self: *PluginHost, buf: []u8, name: []const u8) ?[]const u8 {
+        if (std.mem.indexOfScalar(u8, name, '/') != null or std.mem.endsWith(u8, name, ".wasm"))
+            return name;
+        return std.fmt.bufPrint(buf, "{s}/{s}.wasm", .{ self.dir, name }) catch null;
+    }
+
+    fn load(self: *PluginHost, name: []const u8) void {
+        var path_buf: [std.fs.max_path_bytes]u8 = undefined;
+        const path = self.resolve(&path_buf, name) orelse return;
+        // Compilation copies the module, so the file bytes free right after.
+        const bytes = core.file.readAlloc(self.gpa, path) catch |e| {
+            std.log.warn("plugin: {s} failed to read: {t}", .{ path, e });
+            return;
+        };
+        defer self.gpa.free(bytes);
+        const p = core.wasm_abi.loadPlugin(self.engine, self.ctx, std.fs.path.stem(name), bytes, self.opts) catch |e| {
+            std.log.warn("plugin: {s} failed to load: {t}", .{ path, e });
+            return;
+        };
+        self.list.append(self.gpa, p) catch p.deinit();
+    }
+
+    fn loader(self: *PluginHost) core.quickjs.PluginLoader {
+        return .{ .ctx = self, .load = trampoline };
+    }
+    fn trampoline(ctx: *anyopaque, name: []const u8) void {
+        const self: *PluginHost = @ptrCast(@alignCast(ctx));
+        self.load(name);
+    }
+};
 
 /// Parse a 24-char fingerprint argument (five base32 groups) into bytes.
 fn parseFingerprint(s: []const u8) ?[24]u8 {
