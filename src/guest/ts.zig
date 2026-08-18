@@ -16,6 +16,10 @@ const cmds = [_]Cmd{
     .{ .name = "ts-expand-selection", .handler = expandSelection },
     .{ .name = "ts-goto-parent", .handler = gotoParent },
     .{ .name = "ts-select-function", .handler = selectFunction },
+    .{ .name = "ts-select-class", .handler = selectClass },
+    .{ .name = "ts-select-call", .handler = selectCall },
+    .{ .name = "ts-select-block", .handler = selectBlock },
+    .{ .name = "ts-select-comment", .handler = selectComment },
     .{ .name = "ts-query", .handler = queryCount },
 };
 
@@ -56,21 +60,34 @@ fn gotoParent() void {
     weft.jump(n.start);
 }
 
-/// Grow to the nearest enclosing function-like node (kind contains "function",
-/// "fn", or "method" — grammar-agnostic).
-fn selectFunction() void {
+/// Grow to the nearest enclosing node whose KIND contains ANY of `needles`
+/// (grammar-agnostic — no language node names are hardcoded).
+fn selectKind(comptime needles: []const []const u8) void {
     var r = sel();
     var i: usize = 0;
     while (i < 64) : (i += 1) {
         const n = weft.nodeEnclosing(r) orelse return;
-        if (isFn(n.kind)) return weft.setSelection(.{ .start = n.start, .end = n.end });
+        inline for (needles) |needle| {
+            if (std.mem.indexOf(u8, n.kind, needle) != null)
+                return weft.setSelection(.{ .start = n.start, .end = n.end });
+        }
         r = .{ .start = n.start, .end = n.end };
     }
 }
-fn isFn(kind: []const u8) bool {
-    return std.mem.indexOf(u8, kind, "function") != null or
-        std.mem.indexOf(u8, kind, "fn_") != null or
-        std.mem.indexOf(u8, kind, "method") != null;
+fn selectFunction() void {
+    selectKind(&.{ "function", "fn_", "method" });
+}
+fn selectClass() void {
+    selectKind(&.{ "class", "struct", "enum", "interface", "trait" });
+}
+fn selectCall() void {
+    selectKind(&.{ "call", "invocation" });
+}
+fn selectBlock() void {
+    selectKind(&.{ "block", "body", "compound" });
+}
+fn selectComment() void {
+    selectKind(&.{"comment"});
 }
 
 /// Run a caller-supplied tree-sitter query over the whole buffer and return the
