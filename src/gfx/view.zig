@@ -316,6 +316,10 @@ pub const View = struct {
     origin_y: f32 = margin,
     /// The last build's body region height, for scroll commands (`bodyRows`).
     body_h: f32 = 0,
+    /// Whether the active buffer is markdown (from the last build). Off-screen
+    /// vertical-motion goal-x uses this to shape rows with the proportional body
+    /// face at their heading scale, instead of the mono approximation.
+    md_active: bool = false,
 
     pub fn init(gpa: Allocator, font_bytes: []const u8, em: f32) !View {
         var face_set = try fonts.FaceSet.init(gpa, font_bytes);
@@ -397,14 +401,53 @@ pub const View = struct {
     }
 
     fn rowMetrics(self: *const View, baseline_y: f32) layout.RowMetrics {
+        return self.rowMetricsEm(self.em, baseline_y);
+    }
+    fn rowMetricsEm(self: *const View, em: f32, baseline_y: f32) layout.RowMetrics {
         return .{
-            .em = self.em,
+            .em = em,
             .margin = self.origin_x,
             .baseline_y = baseline_y,
             .ascent = self.ascent,
             .descent = self.line_h - self.ascent,
             .height = self.line_h,
         };
+    }
+
+    /// The heading em-scale of a row, from its leading `#`s (matching
+    /// `inlineStyle`), or 1.0 for a non-heading. Used to shape an OFF-SCREEN
+    /// markdown row at the right size without the published per-byte styling.
+    fn headingScale(self: *const View, rope: *const stemma.Rope, row: usize) f32 {
+        _ = self;
+        const line = rope.lineRange(row);
+        var buf: [8]u8 = undefined;
+        const n = @min(line.len(), buf.len);
+        if (n == 0) return 1.0;
+        var sr = rope.streamReader(.{ .start = line.start, .end = line.start + n }, &.{});
+        sr.interface.readSliceAll(buf[0..n]) catch return 1.0;
+        var h: usize = 0;
+        while (h < n and buf[h] == '#') h += 1;
+        if (h == 0 or h > 6) return 1.0;
+        if (h < n and buf[h] != ' ') return 1.0; // `#foo` is not a heading
+        return switch (h) {
+            1 => 2.0,
+            2 => 1.6,
+            3 => 1.3,
+            4 => 1.15,
+            else => 1.05,
+        };
+    }
+
+    /// Build stops for an OFF-SCREEN row (not in the frame map). For markdown,
+    /// shape with the proportional body face at the row's heading scale — so
+    /// vertical motion into an off-screen heading/paragraph lands at the right
+    /// column, not the mono approximation. Plain buffers use the mono grid.
+    fn offRowStops(self: *View, la: Allocator, rope: *const stemma.Rope, row: usize) !layout.VisualLine {
+        if (self.md_active) {
+            const em = self.em * self.headingScale(rope, row);
+            return layout.buildRowStops(la, &self.face_set.body, rope, row, self.rowMetricsEm(em, 0));
+        }
+        return layout.buildRowStops(la, &self.face_set.mono, rope, row, self.rowMetrics(0));
     }
 
     /// World-x of the caret at `off`. Prefers the frame's real geometry
@@ -415,7 +458,7 @@ pub const View = struct {
         for (self.frame_layout.lines) |*l| if (l.row == row) return l.xAt(off);
         var arena = std.heap.ArenaAllocator.init(self.gpa);
         defer arena.deinit();
-        const line = try layout.buildRowStops(arena.allocator(), &self.face_set.mono, rope, row, self.rowMetrics(0));
+        const line = try self.offRowStops(arena.allocator(), rope, row);
         return line.xAt(off);
     }
 
@@ -425,7 +468,7 @@ pub const View = struct {
         for (self.frame_layout.lines) |*l| if (l.row == row) return l.offsetAt(goal_x);
         var arena = std.heap.ArenaAllocator.init(self.gpa);
         defer arena.deinit();
-        const line = try layout.buildRowStops(arena.allocator(), &self.face_set.mono, rope, row, self.rowMetrics(0));
+        const line = try self.offRowStops(arena.allocator(), rope, row);
         return line.offsetAt(goal_x);
     }
 
@@ -501,6 +544,7 @@ pub const View = struct {
         const panel_rect = panel_cut.strip;
         const body_rect = panel_cut.rest;
         self.body_h = body_rect.h;
+        self.md_active = hud.md_inline != null;
 
         const rows_visible: usize = @intFromFloat(@max(1, @floor(body_rect.h / self.line_h)));
         scrollToCursor(editor, top_row, rows_visible);
