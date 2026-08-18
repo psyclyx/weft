@@ -488,6 +488,11 @@ pub fn main(init: std.process.Init) !void {
         .surface = window.surface,
     }, fb[0], fb[1], "weft");
     defer ctx.deinit();
+    // The swapchain's actual extent is authoritative: a server-side-deco or
+    // tiling compositor can force it to differ from the requested framebuffer
+    // size. Drive all render geometry (layout, MVP, surface size) from it — from
+    // frame one — so nothing mis-scales.
+    fb = .{ ctx.extent.width, ctx.extent.height };
 
     const vctx: snail_vk.VulkanContext = .{
         .physical_device = ctx.physical_device,
@@ -595,8 +600,19 @@ pub fn main(init: std.process.Init) !void {
         window.pumpEvents();
 
         if (window.consumeResized() or ctx.swapchain_stale) {
-            fb = window.framebufferSize();
-            try ctx.recreateSwapchain(fb[0], fb[1]);
+            const req = window.framebufferSize();
+            ctx.recreateSwapchain(req[0], req[1]) catch |e| switch (e) {
+                // Minimized / zero-size surface: the swapchain is torn down and
+                // can't be recreated yet. Skip this frame and retry next one
+                // (don't render into a destroyed swapchain).
+                error.ZeroExtent => {
+                    ctx.swapchain_stale = true;
+                    continue;
+                },
+                else => return e,
+            };
+            // Geometry follows the swapchain's actual extent, not the request.
+            fb = .{ ctx.extent.width, ctx.extent.height };
             view_dirty = true;
         }
 

@@ -488,7 +488,18 @@ pub const View = struct {
         const body_limit_y = body_rect.y + body_rect.h;
         var row = top_row.*;
         while (row < total_rows and row < top_row.* + rows_visible and y_top < body_limit_y) : (row += 1) {
+            const runs_mark = runs.items.len;
             const vl = try self.layoutLine(scratch, la, &runs, rope, row, y_top, cols_visible, hud.md_inline, styles, flip_off);
+            // A proportional/heading row can be taller than a mono line, so a
+            // row whose top is in-bounds can still paint past the body onto the
+            // status bar. Gate on the ACTUAL scaled height: discard an
+            // overflowing row's glyphs (truncate the arena-backed runs) rather
+            // than draw them out of region. Always keep the first row so an
+            // absurdly short window still shows something.
+            if (row != top_row.* and y_top + vl.height > body_limit_y) {
+                runs.items.len = runs_mark;
+                break;
+            }
             try lines.append(la, vl);
             y_top += vl.height;
         }
