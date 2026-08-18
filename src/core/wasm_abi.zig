@@ -1027,6 +1027,89 @@ test "wasm plugins: a view-grade peer's op.delete refuses (zero permission code)
     try t.expectEqual(before, ed.doc.commitCount());
 }
 
+test "wasm plugin: comment toggles a line comment, preserving indent" {
+    const gpa = t.allocator;
+    var env: Env = undefined;
+    try Env.init(gpa, &env);
+    defer env.deinit(gpa);
+    var engine = try wasm.Engine.init();
+    defer engine.deinit();
+    const plugin = try loadPlugin(&engine, &env.ctx, "comment", @embedFile("guest_comment_wasm"), .{});
+    defer plugin.deinit();
+
+    const ed = &env.buffers.active().editor;
+    try ed.insertText(gpa, "  hi");
+    ed.placeCursor(4);
+    _ = try command.run(&env.commands, &env.ctx, "comment-line", &.{});
+    {
+        const s = try ed.text().toOwnedSlice(gpa);
+        defer gpa.free(s);
+        try t.expectEqualStrings("  // hi", s);
+    }
+    _ = try command.run(&env.commands, &env.ctx, "comment-line", &.{});
+    const s = try ed.text().toOwnedSlice(gpa);
+    defer gpa.free(s);
+    try t.expectEqualStrings("  hi", s);
+}
+
+test "wasm plugin: whitespace trims trailing spaces on the line" {
+    const gpa = t.allocator;
+    var env: Env = undefined;
+    try Env.init(gpa, &env);
+    defer env.deinit(gpa);
+    var engine = try wasm.Engine.init();
+    defer engine.deinit();
+    const plugin = try loadPlugin(&engine, &env.ctx, "whitespace", @embedFile("guest_whitespace_wasm"), .{});
+    defer plugin.deinit();
+
+    const ed = &env.buffers.active().editor;
+    try ed.insertText(gpa, "hi   \nok");
+    ed.placeCursor(0);
+    _ = try command.run(&env.commands, &env.ctx, "trim-trailing-line", &.{});
+    const s = try ed.text().toOwnedSlice(gpa);
+    defer gpa.free(s);
+    try t.expectEqualStrings("hi\nok", s);
+}
+
+test "wasm plugin: numbers increments the integer under the cursor" {
+    const gpa = t.allocator;
+    var env: Env = undefined;
+    try Env.init(gpa, &env);
+    defer env.deinit(gpa);
+    var engine = try wasm.Engine.init();
+    defer engine.deinit();
+    const plugin = try loadPlugin(&engine, &env.ctx, "numbers", @embedFile("guest_numbers_wasm"), .{});
+    defer plugin.deinit();
+
+    const ed = &env.buffers.active().editor;
+    try ed.insertText(gpa, "x 41 y");
+    ed.placeCursor(2); // on the '4'
+    _ = try command.run(&env.commands, &env.ctx, "increment-number", &.{});
+    const s = try ed.text().toOwnedSlice(gpa);
+    defer gpa.free(s);
+    try t.expectEqualStrings("x 42 y", s);
+}
+
+test "wasm plugin: autopair inserts a matched pair around the cursor" {
+    const gpa = t.allocator;
+    var env: Env = undefined;
+    try Env.init(gpa, &env);
+    defer env.deinit(gpa);
+    var engine = try wasm.Engine.init();
+    defer engine.deinit();
+    const plugin = try loadPlugin(&engine, &env.ctx, "autopair", @embedFile("guest_autopair_wasm"), .{});
+    defer plugin.deinit();
+
+    const ed = &env.buffers.active().editor;
+    try ed.insertText(gpa, "ab");
+    ed.placeCursor(0);
+    _ = try command.run(&env.commands, &env.ctx, "pair-paren", &.{});
+    const s = try ed.text().toOwnedSlice(gpa);
+    defer gpa.free(s);
+    try t.expectEqualStrings("()ab", s);
+    try t.expectEqual(@as(usize, 1), ed.cursorOffset());
+}
+
 test "wasm plugin: kv admin round-trips across the membrane, namespaced" {
     const gpa = t.allocator;
     var env: Env = undefined;
