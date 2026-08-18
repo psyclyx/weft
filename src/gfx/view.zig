@@ -206,6 +206,9 @@ pub const Hud = struct {
     /// corner/center placements overlay the body; bottom is reserved for the
     /// dock (the picker/which-key path).
     surfaces: []const *const core.surface.Surface = &.{},
+    /// Which edges of this pane's frame are internal (shared with a
+    /// neighbor) and get a 1px divider line. Empty for a single pane.
+    pane_border: region.Edges = .{},
 
     const max_pick_rows = 8;
     const max_hover_rows = 16;
@@ -661,6 +664,20 @@ pub const View = struct {
         }
         // Hover info floats at the caret, above everything else.
         if (hud.hover) |hv| try self.drawHoverAtCaret(scratch, &runs, &rects, hv.text, hv.offset, body_rect);
+
+        // Thin pane dividers: a 1px line on each internal (shared) edge of
+        // the pane's frame. Drawn on the frame boundary — outside the
+        // `content` inset — so it never touches a glyph. Subtle: the dim
+        // status grey, like the very slight lines between vim splits.
+        {
+            const bd = hud.pane_border;
+            const c = self.theme.status;
+            const th: f32 = 1;
+            if (bd.left) try rects.append(scratch, .{ .x = frame.x, .y = frame.y, .w = th, .h = frame.h, .color = c });
+            if (bd.right) try rects.append(scratch, .{ .x = frame.x + frame.w - th, .y = frame.y, .w = th, .h = frame.h, .color = c });
+            if (bd.top) try rects.append(scratch, .{ .x = frame.x, .y = frame.y, .w = frame.w, .h = th, .color = c });
+            if (bd.bottom) try rects.append(scratch, .{ .x = frame.x, .y = frame.y + frame.h - th, .w = frame.w, .h = th, .color = c });
+        }
 
         return try self.render(world_to_pixel, runs.items, rects.items);
     }
