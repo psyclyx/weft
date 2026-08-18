@@ -223,6 +223,17 @@ pub fn main(init: std.process.Init) !void {
         .handler = menuEscapeHandler,
         .data = null,
     });
+    // which-key: show the hint popup immediately (bypass the idle delay). If not
+    // already in a menu, open the leader menu — so a help key (F1) surfaces it
+    // from anywhere.
+    var which_key_now = false;
+    _ = try commands.bind(gpa, "which-key-now", .{
+        .name = "which-key-now",
+        .summary = "Show the which-key popup now (open the leader menu if idle).",
+        .args = &.{},
+        .handler = whichKeyNowHandler,
+        .data = &which_key_now,
+    });
     _ = try commands.bind(gpa, "set-cursor", .{
         .name = "set-cursor",
         .summary = "Set the caret style (block|bar|underline) for a mode.",
@@ -671,8 +682,21 @@ pub fn main(init: std.process.Init) !void {
     // active menu mode changes, so a which-key plugin re-renders exactly on
     // enter/leave (and never nested inside another guest call).
     var menu_open = false;
+    var menu_shown = false; // has on_menu(open) fired for the current menu?
+    var menu_open_ns: u64 = 0; // when the current menu was entered (idle timer)
     var last_menu_mode: [64]u8 = undefined;
     var last_menu_len: usize = 0;
+    // which-key idle delay (doom-style): don't pop the hint until the menu has
+    // been held this long — unless which-key-now (F1) forces it. Config sets it
+    // via weft.set("editor", "which-key-delay-ms", "200").
+    const which_key_delay_ns: u64 = blk: {
+        if (config_kv.get("editor", "which-key-delay-ms")) |raw| {
+            if (firstConfigRecord(raw)) |s| {
+                if (std.fmt.parseInt(u64, s, 10)) |ms| break :blk ms * std.time.ns_per_ms else |_| {}
+            }
+        }
+        break :blk 200 * std.time.ns_per_ms;
+    };
     // Left-button drag: the source offset the press landed on. A plain
     // click just moves the caret; motion with the button held extends a
     // selection from this anchor.
@@ -837,18 +861,27 @@ pub fn main(init: std.process.Init) !void {
             const is_menu = keymap.isMenuMode(cur);
             const same = is_menu and menu_open and std.mem.eql(u8, cur, last_menu_mode[0..last_menu_len]);
             if (!same) {
-                if (is_menu) {
-                    for (plugins.items) |pl| core.wasm_host.notifyMenu(pl, true);
-                } else if (menu_open) {
+                // Entered/left/switched menu: close a shown popup; (re)start the
+                // idle timer. Do NOT show yet — the delay gates that below.
+                if (menu_open and menu_shown) {
                     for (plugins.items) |pl| core.wasm_host.notifyMenu(pl, false);
                 }
                 menu_open = is_menu;
+                menu_shown = false;
                 if (is_menu) {
+                    menu_open_ns = frame_start;
                     last_menu_len = @min(cur.len, last_menu_mode.len);
                     @memcpy(last_menu_mode[0..last_menu_len], cur[0..last_menu_len]);
                 }
                 view_dirty = true;
             }
+            // Pop the hint once held past the idle delay (or F1 forced it now).
+            if (menu_open and !menu_shown and (which_key_now or frame_start -| menu_open_ns >= which_key_delay_ns)) {
+                for (plugins.items) |pl| core.wasm_host.notifyMenu(pl, true);
+                menu_shown = true;
+                view_dirty = true;
+            }
+            which_key_now = false;
         }
         // Apply connection intents recorded by commands (outside the
         // hot section: connect blocks on TCP, disconnect joins threads).
@@ -1424,6 +1457,17 @@ fn menuEscapeHandler(ctx: *core.command.Context, data: ?*anyopaque, args: []cons
     const km = ctx.keymap;
     const ret = km.menuReturn(km.currentMode()) orelse "normal";
     km.setMode(ctx.gpa, ret) catch {};
+    return .nil;
+}
+
+/// `which-key-now` — flag an immediate popup (bypassing the idle delay), and if
+/// not already in a menu, open the leader menu so a help key shows it anywhere.
+fn whichKeyNowHandler(ctx: *core.command.Context, data: ?*anyopaque, args: []const core.command.Value) anyerror!core.command.Value {
+    _ = args;
+    const flag: *bool = @ptrCast(@alignCast(data.?));
+    flag.* = true;
+    const km = ctx.keymap;
+    if (!km.isMenuMode(km.currentMode())) km.enterMode(ctx.gpa, "leader") catch {};
     return .nil;
 }
 

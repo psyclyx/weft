@@ -161,6 +161,7 @@ fn cMenu(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32, results: []
     km.setTextCommand(gpa, name, null) catch {}; // swallow text — a menu, not typing
     km.bind(gpa, name, "Escape", "menu-escape", Keymap.prio_config, "config") catch {};
     km.bind(gpa, name, "C-g", "menu-escape", Keymap.prio_config, "config") catch {};
+    km.bind(gpa, name, "F1", "which-key-now", Keymap.prio_config, "config") catch {}; // force the hint now
 }
 
 fn cEcho(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32, results: []i32) void {

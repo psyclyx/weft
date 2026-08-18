@@ -64,6 +64,11 @@ weft.plugin("dired");       // directory editor (proc ls + its own keymap mode)
   "leader-window", "leader-quit", "leader-help", "leader-toggle",
 ].forEach((m) => weft.menu(m));
 
+// which-key: hold a prefix for this long before the hint pops (doom-style idle
+// delay). F1 forces it now, and opens the leader menu from normal.
+weft.set("editor", "which-key-delay-ms", "200");
+weft.bind("normal", "F1", "which-key-now");
+
 // Top-level leader: quick actions + the group prefixes (doom's SPC map).
 weft.bind("leader", "space", "find-file");       // SPC SPC — find file
 weft.bind("leader", "colon", "pick-commands");   // SPC :   — M-x (run a command)

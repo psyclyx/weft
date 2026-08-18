@@ -15,6 +15,7 @@ const weft = @import("weft.zig");
 /// has them. Filter Escape/C-g and the commands that just leave the menu.
 fn isNoise(key: []const u8, cmd: []const u8) bool {
     return std.mem.eql(u8, key, "Escape") or std.mem.eql(u8, key, "C-g") or
+        std.mem.eql(u8, key, "F1") or std.mem.eql(u8, cmd, "which-key-now") or
         std.mem.eql(u8, cmd, "menu-escape") or std.mem.eql(u8, cmd, "leader-cancel") or
         std.mem.eql(u8, cmd, "op-cancel");
 }
