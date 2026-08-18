@@ -938,6 +938,64 @@ test "wasm plugins: vim composes motions + operators — dw through the keymap" 
     try t.expectEqualStrings("bar", s);
 }
 
+test "wasm plugins: a text object returns a range an operator applies (di\")" {
+    const gpa = t.allocator;
+    var env: Env = undefined;
+    try Env.init(gpa, &env);
+    defer env.deinit(gpa);
+
+    var engine = try wasm.Engine.init();
+    defer engine.deinit();
+    const textobjects = try loadPlugin(&engine, &env.ctx, "textobjects", @embedFile("guest_textobjects_wasm"), .{});
+    defer textobjects.deinit();
+    const operators = try loadPlugin(&engine, &env.ctx, "operators", @embedFile("guest_operators_wasm"), .{});
+    defer operators.deinit();
+
+    const ed = &env.buffers.active().editor;
+    try ed.insertText(gpa, "say \"hi\" ok");
+    ed.placeCursor(5); // inside the quotes
+
+    // inner-quote-double yields the span between the quotes ("hi"); the operator
+    // deletes it — the range is absolute (the construct), not cursor-relative.
+    const rv = try command.run(&env.commands, &env.ctx, "textobj.inner-quote-double", &.{});
+    try t.expect(rv == .range);
+    _ = try command.run(&env.commands, &env.ctx, "op.delete", &.{rv});
+    const s = try ed.text().toOwnedSlice(gpa);
+    defer gpa.free(s);
+    try t.expectEqualStrings("say \"\" ok", s);
+}
+
+test "wasm plugins: vim di( through the keymap (operator + text object)" {
+    const gpa = t.allocator;
+    var env: Env = undefined;
+    try Env.init(gpa, &env);
+    defer env.deinit(gpa);
+
+    var engine = try wasm.Engine.init();
+    defer engine.deinit();
+    const textobjects = try loadPlugin(&engine, &env.ctx, "textobjects", @embedFile("guest_textobjects_wasm"), .{});
+    defer textobjects.deinit();
+    const operators = try loadPlugin(&engine, &env.ctx, "operators", @embedFile("guest_operators_wasm"), .{});
+    defer operators.deinit();
+    const vim = try loadPlugin(&engine, &env.ctx, "vim", @embedFile("guest_vim_wasm"), .{});
+    defer vim.deinit();
+
+    const ed = &env.buffers.active().editor;
+    try ed.insertText(gpa, "f(a, b)");
+    ed.placeCursor(4); // inside the parens
+
+    // di( : d → op-pending, i → op-to (inner), ( → the paren object.
+    _ = try command.run(&env.commands, &env.ctx, "enter-op-delete", &.{});
+    _ = try command.run(&env.commands, &env.ctx, env.keymap.lookup("i").?, &.{});
+    try t.expectEqualStrings("op-to", env.keymap.currentMode());
+    _ = try command.run(&env.commands, &env.ctx, env.keymap.lookup("parenleft").?, &.{});
+    try t.expectEqualStrings("normal", env.keymap.currentMode());
+
+    const s = try ed.text().toOwnedSlice(gpa);
+    defer gpa.free(s);
+    try t.expectEqualStrings("f()", s);
+}
+
 test "wasm plugins: a view-grade peer's op.delete refuses (zero permission code)" {
     const gpa = t.allocator;
     var env: Env = undefined;

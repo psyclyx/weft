@@ -23,8 +23,9 @@ weft.plugin("region");      // subbuffer regions
 weft.plugin("shell");       // insert shell-command output
 weft.plugin("palette");     // "std" UI: command/buffer palette, status line
 weft.plugin("motions");     // word/WORD/line/doc motions — each returns a range
-weft.plugin("operators");   // op.delete/upcase/lowercase — await a motion's range
-weft.plugin("vim");         // modal editing — composes motions + operators
+weft.plugin("textobjects"); // iw/i"/i(/ip … — each returns a range
+weft.plugin("operators");   // op.delete/upcase/lowercase — await a range
+weft.plugin("vim");         // modal editing — composes motions + textobjects + operators
 
 // Leader (space) bindings for the edit-domain operators — each name is a real
 // command one of the plugins above registered.

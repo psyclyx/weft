@@ -96,6 +96,42 @@ fn applyOpRange(hnd: u32) void {
     weft.setMode(op_after);
 }
 
+// ── Text objects: `i`/`a` in operator-pending enter a text-object mode with a
+// pending inner/a variant; the object key drives the `textobjects` plugin. ──
+var to_variant: []const u8 = "inner";
+const OB = struct { key: []const u8, obj: []const u8 };
+const otable = [_]OB{
+    .{ .key = "w", .obj = "word" },                .{ .key = "W", .obj = "WORD" },
+    .{ .key = "quotedbl", .obj = "quote-double" }, .{ .key = "apostrophe", .obj = "quote-single" },
+    .{ .key = "grave", .obj = "quote-back" },      .{ .key = "parenleft", .obj = "paren" },
+    .{ .key = "parenright", .obj = "paren" },      .{ .key = "b", .obj = "paren" },
+    .{ .key = "bracketleft", .obj = "bracket" },   .{ .key = "bracketright", .obj = "bracket" },
+    .{ .key = "braceleft", .obj = "brace" },       .{ .key = "braceright", .obj = "brace" },
+    .{ .key = "B", .obj = "brace" },               .{ .key = "p", .obj = "paragraph" },
+};
+const to_objs = [_][]const u8{ "word", "WORD", "quote-double", "quote-single", "quote-back", "paren", "bracket", "brace", "paragraph" };
+
+/// Run textobj.<variant>-<obj> (variant chosen by i/a) and apply the pending
+/// operator over its range — the same path motions take.
+fn objWrap(comptime obj: []const u8) fn () void {
+    return struct {
+        fn h() void {
+            var buf: [64]u8 = undefined;
+            const name = std.fmt.bufPrint(&buf, "textobj.{s}-{s}", .{ to_variant, obj }) catch return opCancel();
+            const hnd = weft.runRange(name) orelse return opCancel();
+            applyOpRange(hnd);
+        }
+    }.h;
+}
+fn enterOpInner() void {
+    to_variant = "inner";
+    weft.setMode("op-to");
+}
+fn enterOpAround() void {
+    to_variant = "a";
+    weft.setMode("op-to");
+}
+
 // ── The static command table (registration order == on_command id) ────
 const Cmd = struct { name: []const u8, handler: *const fn () void };
 const static_cmds = [_]Cmd{
@@ -121,6 +157,8 @@ const static_cmds = [_]Cmd{
     .{ .name = "enter-op-yank", .handler = enterOpYank },
     .{ .name = "op-cancel", .handler = opCancel },
     .{ .name = "op-line", .handler = opLine },
+    .{ .name = "enter-op-inner", .handler = enterOpInner },
+    .{ .name = "enter-op-around", .handler = enterOpAround },
     .{ .name = "find-file", .handler = findFile },
     .{ .name = "leader", .handler = enterLeader },
     .{ .name = "leader-file", .handler = enterLeaderFile },
@@ -151,7 +189,7 @@ const static_cmds = [_]Cmd{
 /// Generated normal- and op-mode motion commands (one `vim/n/*` per motion, plus
 /// a `vim/o/*` for operator-valid motions). Names are only for key binding.
 const n_gen = blk: {
-    var n: usize = 0;
+    var n: usize = to_objs.len; // one text-object wrapper per unique object
     for (mtable) |m| {
         n += 1;
         if (m.in_op) n += 1;
@@ -168,6 +206,10 @@ const gen_cmds: [n_gen]Cmd = blk: {
             arr[i] = .{ .name = "vim/o/" ++ m.motion, .handler = opByMotion(m.motion) };
             i += 1;
         }
+    }
+    for (to_objs) |obj| {
+        arr[i] = .{ .name = "vim/to/" ++ obj, .handler = objWrap(obj) };
+        i += 1;
     }
     break :blk arr;
 };
@@ -218,6 +260,14 @@ export fn init() void {
     weft.bindKey("op-pending", "Escape", "op-cancel");
     inline for (mtable) |m| if (m.in_op) weft.bindKey("op-pending", m.key, "vim/o/" ++ m.motion);
     for ([_][]const u8{ "d", "c", "y" }) |k| weft.bindKey("op-pending", k, "op-line");
+    // i/a in operator-pending select a text object (di", ca(, yiw, …).
+    weft.bindKey("op-pending", "i", "enter-op-inner");
+    weft.bindKey("op-pending", "a", "enter-op-around");
+    weft.textInput("op-to", null);
+    weft.menuMode("op-to");
+    weft.setFallback("op-to", "default");
+    weft.bindKey("op-to", "Escape", "op-cancel");
+    inline for (otable) |o| weft.bindKey("op-to", o.key, "vim/to/" ++ o.obj);
 
     weft.bindKey("visual", "d", "vim-visual-delete");
     weft.bindKey("visual", "x", "vim-visual-delete");
