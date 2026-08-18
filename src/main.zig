@@ -14,6 +14,7 @@ const Context = @import("gfx/context.zig").Context;
 const core = @import("core/core.zig");
 const view_mod = @import("gfx/view.zig");
 const region = @import("gfx/region.zig");
+const window_layout = @import("gfx/window_layout.zig");
 const stats_mod = @import("gfx/stats.zig");
 const snail = @import("snail");
 const stemma = @import("stemma");
@@ -436,7 +437,6 @@ pub fn main(init: std.process.Init) !void {
         .peer_fs_root = if (peer_fs_root) |*r| r else null,
         .fs_grant = .{ .access = args.share_fs },
     };
-    var split_ctx: SplitCtx = .{};
     attach_deps.share = &share_ctx;
     defer if (share_ctx.pending_connect) |hp| gpa.free(hp);
     defer {
@@ -533,34 +533,42 @@ pub fn main(init: std.process.Init) !void {
         .handler = grantHandler,
         .data = &share_ctx,
     });
-    _ = try commands.bind(gpa, "split", .{
-        .name = "split",
-        .summary = "Toggle a horizontal split (a second pane below this one).",
-        .args = &.{},
-        .handler = splitHandler,
-        .data = &split_ctx,
-    });
-    _ = try commands.bind(gpa, "vsplit", .{
-        .name = "vsplit",
-        .summary = "Toggle a vertical split (a second pane beside this one).",
-        .args = &.{},
-        .handler = vsplitHandler,
-        .data = &split_ctx,
-    });
-    _ = try commands.bind(gpa, "unsplit", .{
-        .name = "unsplit",
-        .summary = "Close the split, back to a single pane.",
-        .args = &.{},
-        .handler = unsplitHandler,
-        .data = &split_ctx,
-    });
-    _ = try commands.bind(gpa, "focus-other", .{
-        .name = "focus-other",
-        .summary = "Move focus to the other split pane.",
-        .args = &.{},
-        .handler = focusOtherHandler,
-        .data = &split_ctx,
-    });
+    // Window layout: a recursive split tree over the region geometry. Core
+    // commands only RECORD intent on `win_ctx`; the frame loop applies them
+    // (splitFocused/closeFocused/focus/move by pane geometry) and keeps the
+    // focused pane == the active buffer. The legacy names
+    // (split/vsplit/unsplit/focus-other) alias onto the same intents so the
+    // prebuilt `windows` .wasm plugin and older configs keep working.
+    var win_ctx: WindowCtx = .{};
+    const window_cmd_table = [_]struct { name: []const u8, action: WindowAction, summary: []const u8 }{
+        .{ .name = "window-split", .action = .split, .summary = "Split the focused window horizontally (a pane below)." },
+        .{ .name = "window-vsplit", .action = .vsplit, .summary = "Split the focused window vertically (a pane beside)." },
+        .{ .name = "window-close", .action = .close, .summary = "Close the focused window, collapsing its split." },
+        .{ .name = "window-focus-left", .action = .focus_left, .summary = "Focus the window to the left." },
+        .{ .name = "window-focus-right", .action = .focus_right, .summary = "Focus the window to the right." },
+        .{ .name = "window-focus-up", .action = .focus_up, .summary = "Focus the window above." },
+        .{ .name = "window-focus-down", .action = .focus_down, .summary = "Focus the window below." },
+        .{ .name = "window-move-left", .action = .move_left, .summary = "Swap the focused window with its left neighbor." },
+        .{ .name = "window-move-right", .action = .move_right, .summary = "Swap the focused window with its right neighbor." },
+        .{ .name = "window-move-up", .action = .move_up, .summary = "Swap the focused window with the one above." },
+        .{ .name = "window-move-down", .action = .move_down, .summary = "Swap the focused window with the one below." },
+        .{ .name = "split", .action = .split, .summary = "Split the focused window horizontally." },
+        .{ .name = "vsplit", .action = .vsplit, .summary = "Split the focused window vertically." },
+        .{ .name = "unsplit", .action = .close, .summary = "Close the focused window." },
+        .{ .name = "focus-other", .action = .focus_next, .summary = "Focus the next window." },
+    };
+    // Stable storage so each command's `data` pointer stays valid for the run.
+    var window_action_ctx: [window_cmd_table.len]WindowActionCtx = undefined;
+    inline for (window_cmd_table, 0..) |wc, i| {
+        window_action_ctx[i] = .{ .win = &win_ctx, .action = wc.action };
+        _ = try commands.bind(gpa, wc.name, .{
+            .name = wc.name,
+            .summary = wc.summary,
+            .args = &.{},
+            .handler = windowActionHandler,
+            .data = &window_action_ctx[i],
+        });
+    }
 
     // ── Window + Vulkan ──
     const window = try wayland.Window.init(1280, 800, "weft", "dev.psyclyx.weft");
@@ -644,8 +652,13 @@ pub fn main(init: std.process.Init) !void {
     try snail_vk.uploadAndWait(gpa, vctx, resources, ctx.command_pool, &cache, &.{&view.atlas}, &binding);
 
     var stats: stats_mod.Stats = .{};
-    var built: ?view_mod.Built = null;
-    defer if (built) |*b| b.deinit(gpa);
+    // One `Built` per rendered pane, kept alive for the frame (its shapes
+    // feed the instance stream) and freed at the top of the next render.
+    var built_panes: std.ArrayList(view_mod.Built) = .empty;
+    defer {
+        for (built_panes.items) |*b| b.deinit(gpa);
+        built_panes.deinit(gpa);
+    }
     var instances: std.ArrayList(snail.render.records.Instance) = .empty;
     defer instances.deinit(gpa);
     var batches: std.ArrayList(snail.render.records.DrawBatch) = .empty;
@@ -654,16 +667,14 @@ pub fn main(init: std.process.Init) !void {
     // Last activated buffer path (copied — the borrowed slice would dangle).
     var last_activate_path: [std.fs.max_path_bytes]u8 = undefined;
     var last_activate_len: usize = 0;
-    // Vertical split: a second pane peeking another buffer with its own
-    // scroll. The focused pane is always `buffers.active()` (so editing and
-    // input flow unchanged); `focus-other` swaps which buffer is active.
-    var split_dir: SplitDir = .none; // none | vertical (columns) | horizontal (rows)
-    var split_top: usize = 0; // the other pane's scroll
-    var split_buf: core.Buffers.Id = buffers.active_id; // the other pane's buffer
-    var focus_first = true; // focused pane is the left/top one
-    var focused_rect: region.Rect = .{}; // focused pane's rect, for click routing
-    var built_other: ?view_mod.Built = null;
-    defer if (built_other) |*b| b.deinit(gpa);
+    // Window layout: a recursive tree of panes over the region geometry. A
+    // single leaf is the ordinary unsplit case; splitFocused adds leaves.
+    // The focused pane is always `buffers.active()` (so editing/input flow
+    // through the active buffer unchanged), and each pane keeps its own
+    // scroll (the focused pane's mirrors `view.top_row`).
+    var win_layout = try window_layout.Layout.init(gpa, buffers.active_id);
+    defer win_layout.deinit();
+    var last_frame_rect: region.Rect = .{}; // last render's pane frame, for click routing
     var last_liveness: core.session.Liveness = .connecting;
     // The fingerprint we last announced for the outbound host, so a
     // reconnect to a different key re-announces (and TOFU-records) it. The
@@ -779,13 +790,17 @@ pub fn main(init: std.process.Init) !void {
         const scale: f32 = @floatFromInt(@max(window.buffer_scale, 1));
         const px = @as(f32, @floatCast(window.mouse_x)) * scale;
         const py = @as(f32, @floatCast(window.mouse_y)) * scale;
-        // Split routing: a click outside the focused pane's rect focuses the
-        // peek pane; inside, the click maps directly (panes render into their
-        // rects, so the geometry map is already in absolute coords).
-        const click_in_peek = split_dir != .none and !focused_rect.contains(px, py);
+        // Pane routing: a click outside the focused pane's rect focuses the
+        // pane under the cursor (the intent is applied below, against the
+        // layout); inside, the click maps directly (panes render into their
+        // own rects, so the geometry map is already in absolute coords). The
+        // frame rect is last render's — one-frame latency, unseen.
+        const click_in_peek = win_layout.count() > 1 and !win_layout.focusedRect(last_frame_rect).contains(px, py);
         if (window.consumeMousePressed(0)) {
             if (click_in_peek) {
-                split_ctx.focus_other = true;
+                win_ctx.click_focus = true;
+                win_ctx.click_x = px;
+                win_ctx.click_y = py;
                 had_input = true;
                 view_dirty = true;
             } else {
@@ -989,42 +1004,70 @@ pub fn main(init: std.process.Init) !void {
             if (hub) |*h| h.stopAccepting();
             view_dirty = true;
         }
-        // ── Split-pane intents (outside the input hot section) ──
-        if (split_ctx.want) |dir| {
-            split_ctx.want = null;
-            if (split_dir == dir) {
-                split_dir = .none; // same direction again → toggle off
-            } else {
-                if (split_dir == .none) {
-                    split_buf = buffers.active_id; // peek the current buffer
-                    split_top = view.top_row;
-                    focus_first = true;
-                }
-                split_dir = dir; // switch orientation (keeps the peer buffer)
-            }
+        // ── Window-layout intents (outside the input hot section) ──
+        // Each op saves the focused pane's scroll first, then mutates the
+        // tree; a focus/content change makes the active buffer follow the
+        // focused pane (applyWindowFocus). Geometry uses last render's frame.
+        if (win_ctx.split) |axis| {
+            win_ctx.split = null;
+            win_layout.focusedPane().top_row = view.top_row; // carried into the surviving half
+            win_layout.splitFocused(axis) catch {};
             view_dirty = true;
         }
-        if (split_ctx.unsplit) {
-            split_ctx.unsplit = false;
-            split_dir = .none;
-            view_dirty = true;
-        }
-        if (split_ctx.focus_other) {
-            split_ctx.focus_other = false;
-            if (split_dir != .none and buffers.get(split_buf) != null) {
-                // Swap roles: the peek buffer becomes active (focused), the
-                // active becomes the peek. Editing/input follow the active
-                // buffer, so nothing downstream changes.
-                const cur = buffers.active_id;
-                if (split_buf != cur) buffers.switchTo(gpa, split_buf, &keymap) catch {};
-                split_buf = cur;
-                std.mem.swap(usize, &view.top_row, &split_top);
-                focus_first = !focus_first;
+        if (win_ctx.close) {
+            win_ctx.close = false;
+            if (win_layout.count() > 1) {
+                win_layout.closeFocused();
+                applyWindowFocus(&win_layout, &view, &buffers, gpa, &keymap);
                 view_dirty = true;
             }
         }
-        // A closed buffer can't remain a peek pane.
-        if (split_dir != .none and buffers.get(split_buf) == null) split_dir = .none;
+        if (win_ctx.focus_dir) |dir| {
+            win_ctx.focus_dir = null;
+            win_layout.focusedPane().top_row = view.top_row;
+            if (win_layout.focusNeighbor(last_frame_rect, dir)) {
+                applyWindowFocus(&win_layout, &view, &buffers, gpa, &keymap);
+                view_dirty = true;
+            }
+        }
+        if (win_ctx.move_dir) |dir| {
+            win_ctx.move_dir = null;
+            win_layout.focusedPane().top_row = view.top_row;
+            // Swap contents with the neighbor; focus stays put but now shows
+            // the neighbor's buffer, so the active buffer follows it.
+            if (win_layout.swapNeighbor(last_frame_rect, dir)) {
+                applyWindowFocus(&win_layout, &view, &buffers, gpa, &keymap);
+                view_dirty = true;
+            }
+        }
+        if (win_ctx.focus_next) {
+            win_ctx.focus_next = false;
+            win_layout.focusedPane().top_row = view.top_row;
+            if (win_layout.focusNext()) {
+                applyWindowFocus(&win_layout, &view, &buffers, gpa, &keymap);
+                view_dirty = true;
+            }
+        }
+        if (win_ctx.click_focus) {
+            win_ctx.click_focus = false;
+            win_layout.focusedPane().top_row = view.top_row;
+            if (win_layout.focusAt(last_frame_rect, win_ctx.click_x, win_ctx.click_y)) {
+                applyWindowFocus(&win_layout, &view, &buffers, gpa, &keymap);
+                view_dirty = true;
+            }
+        }
+        // The focused pane always shows the active buffer (buffer switches
+        // via open/tabs/etc. land here); a pane whose buffer was closed
+        // falls back to the active one so no leaf dangles.
+        win_layout.focusedPane().buffer_id = buffers.active_id;
+        {
+            const PruneCtx = struct { active: core.Buffers.Id, bufs: *core.Buffers };
+            win_layout.eachPane(PruneCtx{ .active = buffers.active_id, .bufs = &buffers }, struct {
+                fn visit(c: PruneCtx, p: *window_layout.Pane) void {
+                    if (c.bufs.get(p.buffer_id) == null) p.buffer_id = c.active;
+                }
+            }.visit);
+        }
         if (hub) |*h| {
             // Adopt new peers (binds the primary + replays shares), then
             // publish the local cursor to every peer and tick.
@@ -1057,10 +1100,24 @@ pub fn main(init: std.process.Init) !void {
                 }
             }
             // Partial checkout: realize content around the cursor (the
-            // requests dedupe against realized + inflight spans).
+            // requests dedupe against realized + inflight spans). Also want
+            // the scroll window of every pane rendering the partial buffer
+            // (buffer 0, wire v1) — a split peeking it elsewhere must not
+            // read an unrealized hole (see partial_blocked below).
             if (partial_state) |*p| {
                 const cur = ed0.cursorOffset();
                 p.want(collab_session.?, 0, cur -| (64 << 10), cur + (128 << 10)) catch {};
+                const WantCtx = struct { p: *core.session.PartialDoc, sess: *core.session.Session, ed0: *core.Editor };
+                win_layout.eachPane(WantCtx{ .p = p, .sess = collab_session.?, .ed0 = ed0 }, struct {
+                    fn visit(wc: WantCtx, pane: *window_layout.Pane) void {
+                        if (pane.buffer_id != 0) return; // the partial doc is buffer 0
+                        const rope = wc.ed0.text();
+                        const rows = rope.lineCount();
+                        if (rows == 0) return;
+                        const start = rope.lineRange(@min(pane.top_row, rows - 1)).start;
+                        wc.p.want(wc.sess, 0, start -| (8 << 10), start + (128 << 10)) catch {};
+                    }
+                }.visit);
             }
             if (try c.tick()) view_dirty = true;
             // Async .peer fs: post the guest's queued LIST requests over the
@@ -1156,11 +1213,28 @@ pub fn main(init: std.process.Init) !void {
         // around the cursor is realized (rope holes panic on content
         // reads — the deterministic single choke point). The dirty flag
         // stays set, so the frame after realization repaints.
+        // Gate on ALL rendered panes on the partial buffer, not just the
+        // focused one: any pane's visible window (its scroll .. a screenful)
+        // must be realized before we read it.
         const partial_blocked = if (partial_state) |*p| blk: {
             if (p.state != .open) break :blk false; // virgin/empty doc renders fine
             const cur = ed0.cursorOffset();
             const end = @min(ed0.text().byteLen(), cur + (64 << 10));
-            break :blk !ed0.text().isRealized(.{ .start = cur -| (64 << 10), .end = end });
+            if (!ed0.text().isRealized(.{ .start = cur -| (64 << 10), .end = end })) break :blk true;
+            const CheckCtx = struct { ed0: *core.Editor, blocked: bool = false };
+            var cc = CheckCtx{ .ed0 = ed0 };
+            win_layout.eachPane(&cc, struct {
+                fn visit(c: *CheckCtx, pane: *window_layout.Pane) void {
+                    if (pane.buffer_id != 0) return; // only the partial doc holes
+                    const rope = c.ed0.text();
+                    const rows = rope.lineCount();
+                    if (rows == 0) return;
+                    const start = rope.lineRange(@min(pane.top_row, rows - 1)).start;
+                    const e = @min(rope.byteLen(), start + (48 << 10));
+                    if (!rope.isRealized(.{ .start = start, .end = e })) c.blocked = true;
+                }
+            }.visit);
+            break :blk cc.blocked;
         } else false;
         if (view_dirty and !partial_blocked) {
             view_dirty = false;
@@ -1340,11 +1414,12 @@ pub fn main(init: std.process.Init) !void {
             var arena_state = std.heap.ArenaAllocator.init(gpa);
             defer arena_state.deinit();
             view.resetFrame();
-            // Pane layout is a region tree: slot 0 is the focused pane (the
-            // active buffer), slot 1 the peek pane. Each pane builds into its
-            // own rect (absolute coords) — no emit translate, and click
-            // routing is the tree's hit-test. The focused pane builds LAST so
-            // `frame_layout` ends on it.
+            // Panes tile the frame via the window layout; each leaf builds
+            // into its own rect (absolute coords) — no emit translate, and
+            // click routing is the layout's hit-test. Non-focused panes build
+            // FIRST (their own scroll, no caret/dock); the focused pane builds
+            // LAST so `view.frame_layout` ends on it (caret + between-frame
+            // hit-testing) and carries the caret + picker dock.
             const window_rect: region.Rect = .{ .x = 0, .y = 0, .w = @floatFromInt(fb[0]), .h = @floatFromInt(fb[1]) };
             // Carve the picker's window-bottom dock off the window FIRST, so the
             // panes lay out in what remains — the picker is a real region, not an
@@ -1353,56 +1428,59 @@ pub fn main(init: std.process.Init) !void {
             const dock_cut = window_rect.cutBottom(view.pickDockHeight(if (pick_state.active) &pick_state else null));
             const pick_dock = dock_cut.strip;
             const frame_rect = dock_cut.rest;
-            const foc_leaf: region.Tree = .{ .leaf = 0 };
-            const peek_leaf: region.Tree = .{ .leaf = 1 };
-            const pane_tree: region.Tree = switch (split_dir) {
-                .none => foc_leaf,
-                .vertical, .horizontal => .{ .split = .{
-                    .axis = if (split_dir == .vertical) .vertical else .horizontal,
-                    .frac = 0.5,
-                    .first = if (focus_first) &foc_leaf else &peek_leaf,
-                    .second = if (focus_first) &peek_leaf else &foc_leaf,
-                } },
-            };
-            focused_rect = pane_tree.rectOf(frame_rect, 0).?;
+            last_frame_rect = frame_rect;
 
-            if (built_other) |*old| {
-                old.deinit(gpa);
-                built_other = null;
-            }
-            if (split_dir != .none) {
-                if (buffers.get(split_buf)) |ob| {
-                    const other_hud: view_mod.Hud = .{
-                        .mode = keymap.currentMode(),
-                        .file = ob.editor.backingPath() orelse ob.name,
-                        .cursor_on = false, // the caret belongs to the focused pane
-                    };
-                    const bo = try view.build(arena_state.allocator(), &ob.editor, other_hud, &split_top, pane_tree.rectOf(frame_rect, 1).?, .{}, world_to_pixel);
-                    built_other = bo;
-                    if (bo.records_added != 0)
-                        binding[0] = try snail_vk.uploadDeltaAndWait(gpa, vctx, resources, ctx.command_pool, &cache, binding[0], &view.atlas);
+            var slots: [window_layout.max_panes]window_layout.Slot = undefined;
+            const nslots = win_layout.collect(frame_rect, &slots);
+
+            // Free last frame's builds; each pane appends a fresh one below.
+            for (built_panes.items) |*old| old.deinit(gpa);
+            built_panes.clearRetainingCapacity();
+
+            var foc_rect = frame_rect;
+            var foc_border: region.Edges = .{};
+            for (slots[0..nslots]) |slot| {
+                if (slot.focused) {
+                    foc_rect = slot.rect;
+                    foc_border = slot.border;
+                    continue; // the focused pane builds last, below
                 }
-            }
-            const b = try view.build(arena_state.allocator(), editor, hud, &view.top_row, focused_rect, pick_dock, world_to_pixel);
-            if (built) |*old| old.deinit(gpa);
-            built = b;
-            if (b.records_added != 0) {
-                binding[0] = try snail_vk.uploadDeltaAndWait(gpa, vctx, resources, ctx.command_pool, &cache, binding[0], &view.atlas);
+                const ob = buffers.get(slot.pane.buffer_id) orelse continue;
+                const other_hud: view_mod.Hud = .{
+                    .mode = keymap.currentMode(),
+                    .file = ob.editor.backingPath() orelse ob.name,
+                    .cursor_on = false, // the caret belongs to the focused pane
+                    .pane_border = slot.border,
+                };
+                const bo = try view.build(arena_state.allocator(), &ob.editor, other_hud, &slot.pane.top_row, slot.rect, .{}, world_to_pixel);
+                try built_panes.append(gpa, bo);
+                if (bo.records_added != 0)
+                    binding[0] = try snail_vk.uploadDeltaAndWait(gpa, vctx, resources, ctx.command_pool, &cache, binding[0], &view.atlas);
             }
 
-            // Both panes render into their own rects, so every pane emits
-            // with identity — accumulate into one stream, one draw.
+            // The focused pane: active buffer, full HUD, caret, picker dock.
+            var fhud = hud;
+            fhud.pane_border = foc_border;
+            const b = try view.build(arena_state.allocator(), editor, fhud, &view.top_row, foc_rect, pick_dock, world_to_pixel);
+            try built_panes.append(gpa, b);
+            if (b.records_added != 0)
+                binding[0] = try snail_vk.uploadDeltaAndWait(gpa, vctx, resources, ctx.command_pool, &cache, binding[0], &view.atlas);
+            win_layout.focusedPane().top_row = view.top_row; // scrollToCursor may have moved it
+
+            // Every pane rendered into its own rect (identity transform), so
+            // all panes accumulate into one instance stream, one draw. The
+            // focused pane is last in `built_panes` → its caret draws on top.
             instances.clearRetainingCapacity();
             batches.clearRetainingCapacity();
-            const total_shapes = b.shapes.len + if (built_other) |bo| bo.shapes.len else 0;
+            var total_shapes: usize = 0;
+            for (built_panes.items) |bp| total_shapes += bp.shapes.len;
             try instances.resize(gpa, @max(total_shapes, 1));
             try batches.resize(gpa, @max(total_shapes, 1));
             var ilen: usize = 0;
             var blen: usize = 0;
-            if (built_other) |bo| {
-                _ = try snail.emit.emit(instances.items, batches.items, &ilen, &blen, binding[0], &view.atlas, bo.shapes, .identity, .{ 1, 1, 1, 1 });
+            for (built_panes.items) |bp| {
+                _ = try snail.emit.emit(instances.items, batches.items, &ilen, &blen, binding[0], &view.atlas, bp.shapes, .identity, .{ 1, 1, 1, 1 });
             }
-            _ = try snail.emit.emit(instances.items, batches.items, &ilen, &blen, binding[0], &view.atlas, b.shapes, .identity, .{ 1, 1, 1, 1 });
             instances.items.len = ilen;
             batches.items.len = blen;
         }
@@ -1677,44 +1755,70 @@ fn centerLine(ctx: *core.command.Context, data: ?*anyopaque, _: []const core.com
     return .nil;
 }
 
-/// Split orientation: side-by-side columns, stacked rows, or none.
-const SplitDir = enum { none, vertical, horizontal };
-
-/// Split intents; applied in the frame loop (which owns the pane
-/// scroll/build state). `want` requests an orientation (toggled off if
-/// already that direction).
-const SplitCtx = struct {
-    want: ?SplitDir = null,
-    focus_other: bool = false,
-    unsplit: bool = false,
+/// Window-layout intents; applied in the frame loop (which owns the pane
+/// tree + scroll/build state). Commands only record intent — the loop
+/// mutates the layout and keeps the focused pane == the active buffer.
+const WindowCtx = struct {
+    split: ?region.Axis = null, // request a split of the focused pane
+    close: bool = false,
+    focus_dir: ?window_layout.Dir = null,
+    move_dir: ?window_layout.Dir = null,
+    focus_next: bool = false, // cycle focus (legacy `focus-other`)
+    click_focus: bool = false, // focus the pane at (click_x, click_y)
+    click_x: f32 = 0,
+    click_y: f32 = 0,
 };
 
-fn vsplitHandler(ctx: *core.command.Context, data: ?*anyopaque, args: []const core.command.Value) anyerror!core.command.Value {
+/// Which window operation a bound command requests (mapped to a WindowCtx
+/// field in windowActionHandler). vim `:split` is a horizontal divider
+/// (stacked rows); `:vsplit` a vertical one (side-by-side columns).
+const WindowAction = enum {
+    split,
+    vsplit,
+    close,
+    focus_next,
+    focus_left,
+    focus_right,
+    focus_up,
+    focus_down,
+    move_left,
+    move_right,
+    move_up,
+    move_down,
+};
+
+/// A command → intent binding: which WindowCtx to poke and how. Held in a
+/// stable array so `command.bind`'s data pointer stays valid for the run.
+const WindowActionCtx = struct { win: *WindowCtx, action: WindowAction };
+
+fn windowActionHandler(ctx: *core.command.Context, data: ?*anyopaque, args: []const core.command.Value) anyerror!core.command.Value {
     _ = args;
-    const s: *SplitCtx = @ptrCast(@alignCast(data.?));
-    s.want = .vertical;
-    return ok_echo(ctx, "vsplit");
+    const a: *WindowActionCtx = @ptrCast(@alignCast(data.?));
+    switch (a.action) {
+        .split => a.win.split = .horizontal, // stacked rows (vim :split)
+        .vsplit => a.win.split = .vertical, // side-by-side columns (vim :vsplit)
+        .close => a.win.close = true,
+        .focus_next => a.win.focus_next = true,
+        .focus_left => a.win.focus_dir = .left,
+        .focus_right => a.win.focus_dir = .right,
+        .focus_up => a.win.focus_dir = .up,
+        .focus_down => a.win.focus_dir = .down,
+        .move_left => a.win.move_dir = .left,
+        .move_right => a.win.move_dir = .right,
+        .move_up => a.win.move_dir = .up,
+        .move_down => a.win.move_dir = .down,
+    }
+    return ok_echo(ctx, "window");
 }
 
-fn splitHandler(ctx: *core.command.Context, data: ?*anyopaque, args: []const core.command.Value) anyerror!core.command.Value {
-    _ = args;
-    const s: *SplitCtx = @ptrCast(@alignCast(data.?));
-    s.want = .horizontal;
-    return ok_echo(ctx, "split");
-}
-
-fn unsplitHandler(ctx: *core.command.Context, data: ?*anyopaque, args: []const core.command.Value) anyerror!core.command.Value {
-    _ = args;
-    const s: *SplitCtx = @ptrCast(@alignCast(data.?));
-    s.unsplit = true;
-    return ok_echo(ctx, "unsplit");
-}
-
-fn focusOtherHandler(ctx: *core.command.Context, data: ?*anyopaque, args: []const core.command.Value) anyerror!core.command.Value {
-    _ = args;
-    const s: *SplitCtx = @ptrCast(@alignCast(data.?));
-    s.focus_other = true;
-    return ok_echo(ctx, "focus");
+/// After a window op moved focus (or changed the focused pane's content),
+/// make the active buffer follow the focused pane and restore that pane's
+/// scroll — the invariant "focused pane == active buffer".
+fn applyWindowFocus(win_layout: *window_layout.Layout, view: *view_mod.View, buffers: *core.Buffers, gpa: std.mem.Allocator, keymap: *core.Keymap) void {
+    const fp = win_layout.focusedPane();
+    if (buffers.get(fp.buffer_id) != null and buffers.active_id != fp.buffer_id)
+        buffers.switchTo(gpa, fp.buffer_id, keymap) catch {};
+    view.top_row = fp.top_row;
 }
 
 /// `cancel` (C-g) — records the intent; the frame loop drops queued
