@@ -46,6 +46,11 @@ const Group = struct {
 };
 
 pub const UndoLog = struct {
+    /// Whose commits this log owns. `.user` is the interactive default;
+    /// a spawned peer (`Document.spawnPeer`) gets its own log keyed to its
+    /// PeerId, so each identity's undo is truly independent — the design's
+    /// per-peer selective undo. Set at construction, never changed.
+    author: Document.PeerId = .user,
     cursor: usize = 0,
     undoable: std.ArrayList(Group) = .empty,
     redoable: std.ArrayList(Group) = .empty,
@@ -86,7 +91,7 @@ pub const UndoLog = struct {
         const total = doc.commitCount();
         while (self.cursor < total) : (self.cursor += 1) {
             const c = doc.commitAt(self.cursor);
-            if (c.author != .user) continue;
+            if (c.author != self.author) continue;
             self.clearRedo(gpa);
             if (!self.open) {
                 try self.undoable.append(gpa, .{});
@@ -196,7 +201,13 @@ pub const UndoLog = struct {
         // Replacements can lose ascending order or overlap only if later
         // commits collapsed ranges together; merge conservatively.
         normalize(&repls);
-        try doc.replaceAll(gpa, repls.items);
+        // Author the inverse as THIS log's identity so it is that peer's
+        // own unit (a spawned peer's undo never lands as the user's edit).
+        if (self.author == .user) {
+            try doc.replaceAll(gpa, repls.items);
+        } else {
+            try doc.peerReplaceAll(gpa, self.author, repls.items);
+        }
     }
 };
 
@@ -357,6 +368,54 @@ test "undo: selective — own edits unwind, concurrent peer edits survive" {
         defer gpa.free(s);
         try t.expectEqualStrings("<<>>", s);
     }
+}
+
+test "undo: spawned peers each undo only their own edits" {
+    const gpa = t.allocator;
+    var doc = try Document.init(gpa, "user");
+    defer doc.deinit(gpa);
+    try doc.insert(gpa, 0, "base");
+
+    // Two spawned sub-identities, each with its own undo log.
+    const a = try doc.spawnPeer(gpa, "agent.a", .edit);
+    const b = try doc.spawnPeer(gpa, "repl.b", .edit);
+    try t.expectEqual(@import("authority.zig").Grade.edit, a.grade); // min(own, edit)
+    var log_a: UndoLog = .{ .author = a.id };
+    defer log_a.deinit(gpa);
+    var log_b: UndoLog = .{ .author = b.id };
+    defer log_b.deinit(gpa);
+
+    // A appends "-A-", then B appends "-B-".
+    try doc.peerReplaceAll(gpa, a.id, &.{.{ .range = .{ .start = 4, .end = 4 }, .bytes = "-A-" }});
+    try log_a.ingest(gpa, &doc);
+    log_a.barrier();
+    const end = doc.text().byteLen();
+    try doc.peerReplaceAll(gpa, b.id, &.{.{ .range = .{ .start = end, .end = end }, .bytes = "-B-" }});
+    try log_b.ingest(gpa, &doc);
+    log_b.barrier();
+    {
+        const s = try doc.text().toOwnedSlice(gpa);
+        defer gpa.free(s);
+        try t.expectEqualStrings("base-A--B-", s);
+    }
+
+    // A undoes: only A's insertion unwinds; B's survives (distinct undo).
+    try t.expect(try log_a.undo(gpa, &doc));
+    {
+        const s = try doc.text().toOwnedSlice(gpa);
+        defer gpa.free(s);
+        try t.expectEqualStrings("base-B-", s);
+    }
+    // B undoes: only B's insertion unwinds.
+    try t.expect(try log_b.undo(gpa, &doc));
+    {
+        const s = try doc.text().toOwnedSlice(gpa);
+        defer gpa.free(s);
+        try t.expectEqualStrings("base", s);
+    }
+    // A's log cannot undo B's work and vice versa — each is empty now.
+    try t.expect(!try log_a.undo(gpa, &doc));
+    try t.expect(!try log_b.undo(gpa, &doc));
 }
 
 test "undo: new own commit clears redo" {

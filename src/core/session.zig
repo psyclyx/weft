@@ -528,6 +528,15 @@ pub const Collab = struct {
     selection_anchor: usize = 0,
     their_frontier: ?[]u8 = null,
     last_sent_version: ?[]u8 = null,
+    /// Host side: the grade last announced to this peer for this document,
+    /// so `push` re-emits a `grant` only when it changes (initial + on any
+    /// `setPeerAccess`). Unused on the client (which receives, never sends).
+    last_sent_grant: ?Access = null,
+    /// Set when a client-role bind lowered this doc's `my_grant` to `.view`
+    /// (fail-safe join). On teardown we restore `.own` so the doc, kept as a
+    /// local file after disconnect, is editable again. A plain flag — never
+    /// read `self.session` at deinit (tests bind with an `undefined` one).
+    client_bound: bool = false,
     presence_layer: ?*layers_mod.Layer = null,
     last_presence_offset: usize = std.math.maxInt(usize),
     last_presence_anchor: usize = std.math.maxInt(usize),
@@ -566,6 +575,10 @@ pub const Collab = struct {
     }
 
     pub fn deinit(self: *Collab) void {
+        // A joined doc reverts to solo-owned when its collab goes away
+        // (disconnect keeps the buffer as a local file; buffer-close unbinds
+        // before the doc is freed — the doc always outlives this).
+        if (self.client_bound) self.doc.my_grant = .own;
         if (self.their_frontier) |f| self.gpa.free(f);
         if (self.last_sent_version) |v| self.gpa.free(v);
         for (self.presence_names.items) |n| self.gpa.free(n);
@@ -586,6 +599,9 @@ pub const Collab = struct {
         self.their_frontier = null;
         if (self.last_sent_version) |v| self.gpa.free(v);
         self.last_sent_version = null;
+        // Re-announce the grant after a reconnect (host side); the client
+        // keeps its current my_grant so there is no read-only flash.
+        self.last_sent_grant = null;
         self.last_presence_offset = std.math.maxInt(usize);
         self.last_presence_anchor = std.math.maxInt(usize);
     }
@@ -657,6 +673,18 @@ pub const Collab = struct {
                         try self.sendBatch();
                     },
                     .share => {}, // connection-level; Conn consumes these
+                    .grant => {
+                        // The host tells us our grade on this document. Only
+                        // a client accepts it — a host is the authority and
+                        // is never granted by a peer (closes the reverse
+                        // vector where a client would gag the host's user).
+                        if (self.session.role == .client and frame.payload.len >= 1) {
+                            if (std.enums.fromInt(Access, frame.payload[0])) |g| {
+                                self.doc.my_grant = g;
+                                changed = true;
+                            }
+                        }
+                    },
                 }
             },
             .feed => if (frame.channel == self.base + 2) {
@@ -753,6 +781,18 @@ pub const Collab = struct {
             const v = try self.doc.version(gpa);
             defer gpa.free(v);
             try self.session.post(.op, @intFromEnum(wire.OpKind.frontier), self.base, v);
+        }
+
+        // Host side: announce the grade we grant this peer on this document
+        // (initial + whenever it changes via setPeerAccess/applyGrades), so
+        // the client gates its own edits instead of forming a ghost our op
+        // admission would silently drop. The client never emits this.
+        if (self.session.role == .server and
+            (self.last_sent_grant == null or self.last_sent_grant.? != self.session.access))
+        {
+            self.last_sent_grant = self.session.access;
+            const grade: [1]u8 = .{@intFromEnum(self.session.access)};
+            try self.session.post(.op, @intFromEnum(wire.OpKind.grant), self.base, &grade);
         }
         const head = try self.doc.version(gpa);
         defer gpa.free(head);
@@ -977,6 +1017,14 @@ pub const Conn = struct {
         c.* = try Collab.init(self.gpa, self.session, doc, self.name);
         c.base = base;
         c.tag = tag;
+        // Fail safe: a client-role side of a shared document holds off local
+        // edits until the host's grant arrives (the host admits our ops by
+        // our grade, so editing before we know it would only make a ghost).
+        // The server role owns its replica and keeps `.own`.
+        if (self.role == .client) {
+            doc.my_grant = .view;
+            c.client_bound = true;
+        }
         try self.collabs.append(self.gpa, c);
         return c;
     }
@@ -1187,10 +1235,14 @@ test "session+collab: two instances converge over an encrypted link with presenc
     defer layers.deinit(gpa);
     cb.presence_layer = try layers.claim(gpa, &doc_b, "presence", .replicated, "collab");
 
-    // Pump both sides; concurrent edits mid-stream.
+    // Pump both sides; concurrent edits mid-stream. The bound is a generous
+    // yield-spin timeout, not the expected cost: convergence is a couple of
+    // socket round-trips, but the reader/writer threads share CPU with the
+    // rest of the (now wasmtime-carrying) test binary, so we give the
+    // scheduler ample turns before declaring a hang.
     var round: usize = 0;
     var edited = false;
-    while (round < 400) : (round += 1) {
+    while (round < 2000) : (round += 1) {
         _ = try ca.tick(3);
         _ = try cb.tick(0);
         if (round == 40 and !edited) {
@@ -1205,7 +1257,7 @@ test "session+collab: two instances converge over an encrypted link with presenc
         if (edited and ta.len > 16 and std.mem.eql(u8, ta, tb)) break;
         std.Thread.yield() catch {};
     }
-    try t.expect(round < 400);
+    try t.expect(round < 2000);
 
     const ta = try doc_a.text().toOwnedSlice(gpa);
     defer gpa.free(ta);

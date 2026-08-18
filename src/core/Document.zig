@@ -51,7 +51,9 @@ const patch = @import("patch.zig");
 pub const Patch = patch.Patch;
 const Rope = stemma.Rope;
 const Edit = stemma.Edit;
-const Range = stemma.Range;
+/// A byte range `[start, end)`. Public so command/authority callers can
+/// name the unit `Context.edit` and the peer API operate on.
+pub const Range = stemma.Range;
 const Bias = stemma.Bias;
 const TextDoc = stemma.TextDoc;
 
@@ -66,6 +68,13 @@ anchors: stemma.AnchorSet = .empty,
 user_name: []u8 = &.{},
 peers: std.ArrayList(?Peer) = .empty,
 log: std.ArrayList(Commit) = .empty,
+/// The local peer's granted grade on THIS replica. `.own` for solo/owned
+/// buffers; set to the host's grant by the collab wire handler when we
+/// join a shared document (`.view` until the grant arrives — fail safe).
+/// Document never consults it: it is storage the authority gate
+/// (`command.Context.gradeOn`) reads. It lives here, not on `Buffer`,
+/// because the collab handler can reach the Document but not the Buffer.
+my_grant: @import("authority.zig").Grade = .own,
 
 /// `user` is the interactive peer (the authoritative replica's own
 /// agent); other values are handles from `addPeer` — except `remote`,
@@ -269,6 +278,42 @@ pub fn addPeer(self: *Document, gpa: Allocator, name: []const u8) AddPeerError!P
     return @enumFromInt(self.peers.items.len);
 }
 
+/// A named sub-identity spawned on this document: its own CRDT peer (so
+/// its edits are its own selective-undo unit — distinct from the user and
+/// from every other spawned peer) capped at a grade. The public promotion
+/// of the internal plugin-peer pattern: REPL comint output, agent session
+/// peers, and any tool that must author as *itself*, not the user.
+pub const Spawned = struct {
+    id: PeerId,
+    /// `min(owner_grant, grant_max)` — authority flows down from the
+    /// document owner, never up.
+    grade: @import("authority.zig").Grade,
+};
+
+/// Register `name` as a peer on this document, its grade capped at
+/// `min(my_grant, grant_max)`. Thin, gated public wrapper over `addPeer`.
+pub fn spawnPeer(self: *Document, gpa: Allocator, name: []const u8, grant_max: @import("authority.zig").Grade) AddPeerError!Spawned {
+    const id = try self.addPeer(gpa, name);
+    return .{ .id = id, .grade = @import("authority.zig").gradeMin(self.my_grant, grant_max) };
+}
+
+/// Get-or-create the peer named `name` (idempotent). The core of the
+/// per-document "my peer on this doc" pattern that both the Lua bridge and
+/// the Zig ABI need: re-adding a live name recovers its id rather than
+/// erroring, so a plugin can resolve its peer against whatever doc is
+/// active without bookkeeping.
+pub fn peerNamed(self: *Document, gpa: Allocator, name: []const u8) AddPeerError!PeerId {
+    return self.addPeer(gpa, name) catch |e| switch (e) {
+        error.DuplicatePeer => {
+            for (self.peers.items, 0..) |slot, i| {
+                if (slot) |p| if (std.mem.eql(u8, p.name, name)) return @enumFromInt(i + 1);
+            }
+            unreachable; // DuplicatePeer means the name is live
+        },
+        else => |err| return err,
+    };
+}
+
 pub fn removePeer(self: *Document, gpa: Allocator, id: PeerId) void {
     const slot = &self.peers.items[id.index()];
     var p = slot.*.?;
@@ -347,6 +392,24 @@ pub fn peerCommit(self: *Document, gpa: Allocator, id: PeerId) Error!bool {
     if (edits.len == 0) return false;
     try self.commitEdits(gpa, id, edits, &pre);
     return true;
+}
+
+/// Apply several non-overlapping replacements (ascending by offset) as ONE
+/// commit authored by peer `id` — the peer-authored analogue of
+/// `replaceAll`. Syncs the peer's shadow to head first, so `items` offsets
+/// (head coordinates) are valid, then applies descending and merges as the
+/// peer. The currency of a spawned peer's own undoable unit.
+pub fn peerReplaceAll(self: *Document, gpa: Allocator, id: PeerId, items: []const Replacement) Error!void {
+    const edits = try self.peerPull(gpa, id); // shadow ← head; nothing else edits it
+    gpa.free(edits);
+    var i = items.len;
+    while (i > 0) {
+        i -= 1;
+        const r = items[i];
+        if (!r.range.isEmpty()) try self.peerDelete(gpa, id, r.range);
+        if (r.bytes.len > 0) try self.peerInsert(gpa, id, r.range.start, r.bytes);
+    }
+    _ = try self.peerCommit(gpa, id);
 }
 
 /// Sync a peer's replica to an exact (possibly past) version of the

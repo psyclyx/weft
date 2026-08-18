@@ -426,51 +426,72 @@ pub fn isDirty(self: *const Editor, gpa: Allocator) Allocator.Error!bool {
 
 // ── Editing ─────────────────────────────────────────────────────────
 
-/// Type at the cursor (replacing the selection if one is active).
-pub fn insertText(self: *Editor, gpa: Allocator, bytes: []const u8) Allocator.Error!void {
-    if (self.selectedRange()) |r| {
-        try self.doc.replaceAll(gpa, &.{.{ .range = r, .bytes = bytes }});
-        self.clearSelection();
-    } else {
-        try self.doc.insert(gpa, self.cursorOffset(), bytes);
-    }
+/// The user peer's single mutation seam: delete `r` and insert `bytes` as
+/// one commit, drop the selection and vertical goal, ingest into undo
+/// history. Every interactive edit — typing, backspace, motion-operators —
+/// funnels here, and so does `command.Context.edit`'s user fast-path, so
+/// the two can never diverge on undo/goal/selection semantics. Peer edits
+/// (plugins/agents) do NOT come here — they are that peer's own undo unit,
+/// applied through the Document's peer API.
+pub fn applyUserEdit(self: *Editor, gpa: Allocator, r: Range, bytes: []const u8) Allocator.Error!void {
+    try self.doc.replaceAll(gpa, &.{.{ .range = r, .bytes = bytes }});
+    self.clearSelection();
     self.clearGoal();
     try self.history.ingest(gpa, &self.doc);
+}
+
+// ── Edit ranges (pure: compute where an edit lands, mutate nothing) ──
+// The command builtins share these with the Editor methods below so the
+// boundary logic (what "the scalar before the cursor" means) has one home,
+// whether the edit is routed as the user (here) or a plugin peer (via
+// command.Context.edit).
+
+/// Where typed text lands: the selection it replaces, or an empty range
+/// at the cursor.
+pub fn insertRange(self: *const Editor) Range {
+    const off = self.cursorOffset();
+    return self.selectedRange() orelse .{ .start = off, .end = off };
+}
+
+/// What a backspace removes: the selection, or the scalar before the
+/// cursor. Null when there is nothing to delete (cursor at start).
+pub fn backspaceRange(self: *const Editor) ?Range {
+    if (self.selectedRange()) |r| return r;
+    const off = self.cursorOffset();
+    if (off == 0) return null;
+    return .{ .start = self.prevBoundary(off), .end = off };
+}
+
+/// What a forward-delete removes: the selection, or the scalar after the
+/// cursor. Null when the cursor is at the document end.
+pub fn forwardRange(self: *const Editor) ?Range {
+    if (self.selectedRange()) |r| return r;
+    const off = self.cursorOffset();
+    if (off == self.text().byteLen()) return null;
+    return .{ .start = off, .end = self.nextBoundary(off) };
+}
+
+/// Type at the cursor (replacing the selection if one is active).
+pub fn insertText(self: *Editor, gpa: Allocator, bytes: []const u8) Allocator.Error!void {
+    try self.applyUserEdit(gpa, self.insertRange(), bytes);
 }
 
 /// Backspace: delete the selection, or the scalar before the cursor.
 pub fn deleteBackward(self: *Editor, gpa: Allocator) Allocator.Error!void {
-    const r = self.selectedRange() orelse blk: {
-        const off = self.cursorOffset();
-        if (off == 0) return;
-        break :blk Range{ .start = self.prevBoundary(off), .end = off };
-    };
-    try self.doc.delete(gpa, r);
-    self.clearSelection();
-    self.clearGoal();
-    try self.history.ingest(gpa, &self.doc);
+    const r = self.backspaceRange() orelse return;
+    try self.applyUserEdit(gpa, r, "");
 }
 
 /// Delete: the selection, or the scalar after the cursor.
 pub fn deleteForward(self: *Editor, gpa: Allocator) Allocator.Error!void {
-    const r = self.selectedRange() orelse blk: {
-        const off = self.cursorOffset();
-        if (off == self.text().byteLen()) return;
-        break :blk Range{ .start = off, .end = self.nextBoundary(off) };
-    };
-    try self.doc.delete(gpa, r);
-    self.clearSelection();
-    self.clearGoal();
-    try self.history.ingest(gpa, &self.doc);
+    const r = self.forwardRange() orelse return;
+    try self.applyUserEdit(gpa, r, "");
 }
 
 /// Delete an arbitrary range as one undoable unit (motions, operators).
 pub fn deleteRange(self: *Editor, gpa: Allocator, r: Range) Allocator.Error!void {
     if (r.isEmpty()) return;
-    try self.doc.delete(gpa, r);
-    self.clearSelection();
-    self.clearGoal();
-    try self.history.ingest(gpa, &self.doc);
+    try self.applyUserEdit(gpa, r, "");
 }
 
 pub fn undo(self: *Editor, gpa: Allocator) Allocator.Error!bool {

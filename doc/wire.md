@@ -124,3 +124,18 @@ an empty frontier elicits the full history). Frames on unbound quads
 drop harmlessly; re-announcing a known base is a no-op (reconnects
 re-announce all shares). There is no unshare frame yet: closing a
 shared buffer simply stops answering its quad.
+
+## Access grants (v1.2, additive)
+
+Authorization is host-decided: a peer's grade (`view` < `edit` < `own`)
+governs whether its ops are admitted to the shared document. The host
+announces that grade to the peer with an op-class **`grant` frame (kind
+3)** on a quad's `base`: payload = one byte, the `Access` value. It is
+sent once the grade is known and re-sent whenever it changes
+(`setPeerAccess`), so the client learns what it may do and refuses local
+edits its ops would only be dropped for — no divergent ghost. The frame
+flows host→client only: a client ignores an inbound `grant` (it is the
+one being graded, never the grader), which keeps a peer from gagging the
+host's own user. A peer built before v1.2 ignores kind 3 (unknown op
+kinds are skipped), so the addition is backward-tolerant; the wire
+version is unchanged.

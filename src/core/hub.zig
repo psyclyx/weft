@@ -469,6 +469,53 @@ test "hub: a per-fingerprint grant elevates a peer from view to edit" {
     try t.expect(try H.until(&hub, &cc, &doc_h, "EDIT", gpa));
 }
 
+test "hub: the host's granted grade reaches the client as my_grant" {
+    const gpa = t.allocator;
+    var doc_h = try Document.init(gpa, "host");
+    defer doc_h.deinit(gpa);
+    var doc_c = try Document.init(gpa, "client");
+    defer doc_c.deinit(gpa);
+    try doc_h.insert(gpa, 0, "base\n");
+
+    // Safe endpoint default: a fresh peer is a viewer until granted more.
+    var hub = try Hub.init(gpa, "tok", .view, null);
+    defer hub.deinit();
+
+    const pair = try socketPair();
+    const peer = try hub.adopt(pair[0]);
+    _ = try peer.conn.bindPrimary(&doc_h, 1);
+
+    const id_client = identity.Identity.forTest(0x5c);
+    var lc: session.FdLink = .{ .fd = pair[1] };
+    const sc = try session.Session.create(gpa, lc.link(), .client, "tok", .own, &id_client);
+    defer sc.destroy();
+    var cc = try session.Collab.init(gpa, sc, &doc_c, "client");
+    defer cc.deinit();
+
+    const H = struct {
+        fn untilGrant(h: *Hub, c: *session.Collab, doc: *Document, want: session.Access) !bool {
+            var round: usize = 0;
+            while (round < 4000) : (round += 1) {
+                _ = h.tick();
+                _ = try c.tick(0);
+                if (doc.my_grant == want) return true;
+                park(1);
+            }
+            return false;
+        }
+    };
+
+    // On connect the host announces the endpoint default (view) — the
+    // client now KNOWS it is read-only and can refuse a local ghost.
+    try t.expect(try H.untilGrant(&hub, &cc, &doc_c, .view));
+    // A live elevation propagates to the client…
+    try hub.setPeerAccess(id_client.fingerprint(), .edit);
+    try t.expect(try H.untilGrant(&hub, &cc, &doc_c, .edit));
+    // …and so does a downgrade.
+    try hub.setPeerAccess(id_client.fingerprint(), .view);
+    try t.expect(try H.untilGrant(&hub, &cc, &doc_c, .view));
+}
+
 test {
     std.testing.refAllDecls(@This());
 }

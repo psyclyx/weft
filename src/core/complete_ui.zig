@@ -118,11 +118,14 @@ pub const CompletionUi = struct {
         const self: *CompletionUi = @ptrCast(@alignCast(data.?));
         const cur = ctx.editor().cursorOffset();
         const start = cur -| self.prefix_len;
-        try ctx.editor().doc.replaceAll(ctx.gpa, &.{.{
-            .range = .{ .start = start, .end = cur },
-            .bytes = choice,
-        }});
-        try ctx.editor().history.ingest(ctx.gpa, &ctx.editor().doc);
+        // The one edit door: authored by the invoking principal and grade
+        // -gated (a view peer's accept is refused, leaving no ghost). The
+        // user path owns undo ingest, so we only mark the unit boundary.
+        ctx.edit(.{ .start = start, .end = cur }, choice) catch |e| {
+            if (e == error.Unauthorized) return;
+            return e;
+        };
+        // Completion is its own undo unit — the next typing starts fresh.
         ctx.editor().history.barrier();
     }
 };

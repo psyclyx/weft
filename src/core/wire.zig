@@ -23,7 +23,11 @@ pub const ControlKind = enum(u8) { hello = 0, hello2 = 1, finish = 2, accept = 3
 /// uv base_channel | uv name_len | name. The announced quad
 /// [base, base+3] carries that buffer's ops / presence / diagnostics /
 /// blobs; the legacy single-document flow is exactly quad 0.
-pub const OpKind = enum(u8) { batch = 0, frontier = 1, share = 2 };
+/// `grant` (host→client, on the quad's base) carries the grade the host
+/// has assigned this peer for the quad's document: a single byte
+/// (`Access`). The client sets `Document.my_grant` from it so it can refuse
+/// a local edit its ops would only be dropped for — see session.zig.
+pub const OpKind = enum(u8) { batch = 0, frontier = 1, share = 2, grant = 3 };
 pub const RequestKind = enum(u8) { call = 0, ok = 1, err = 2, cancel = 3 };
 pub const FeedKind = enum(u8) { publish = 0 };
 

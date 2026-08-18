@@ -12,23 +12,36 @@ const Value = command.Value;
 
 const ok: Value = .nil;
 
+/// Map an edit refusal to a visible status echo. Keymap dispatch only
+/// `log.warn`s command errors, so a grade refusal would be silent; surface
+/// it honestly and swallow it (a `view` peer editing is not an error, just
+/// not allowed). Other errors propagate.
+fn editErr(ctx: *Context, e: anyerror) anyerror!Value {
+    if (e != error.Unauthorized) return e;
+    ctx.echo.clearRetainingCapacity();
+    try ctx.echo.appendSlice(ctx.gpa, "read-only: view access");
+    return ok;
+}
+
 fn cInsertText(ctx: *Context, args: struct { text: []const u8 }) anyerror!Value {
     if (ctx.buffer().read_only) return ok;
-    try ctx.editor().insertText(ctx.gpa, args.text);
+    ctx.edit(ctx.editor().insertRange(), args.text) catch |e| return editErr(ctx, e);
     return ok;
 }
 
 fn cDeleteBackward(ctx: *Context, args: struct {}) anyerror!Value {
     _ = args;
     if (ctx.buffer().read_only) return ok;
-    try ctx.editor().deleteBackward(ctx.gpa);
+    const r = ctx.editor().backspaceRange() orelse return ok;
+    ctx.edit(r, "") catch |e| return editErr(ctx, e);
     return ok;
 }
 
 fn cDeleteForward(ctx: *Context, args: struct {}) anyerror!Value {
     _ = args;
     if (ctx.buffer().read_only) return ok;
-    try ctx.editor().deleteForward(ctx.gpa);
+    const r = ctx.editor().forwardRange() orelse return ok;
+    ctx.edit(r, "") catch |e| return editErr(ctx, e);
     return ok;
 }
 
@@ -153,7 +166,8 @@ fn cClearSelection(ctx: *Context, args: struct {}) anyerror!Value {
 fn cDeleteSelection(ctx: *Context, args: struct {}) anyerror!Value {
     _ = args;
     if (ctx.buffer().read_only) return ok;
-    if (ctx.editor().selectedRange()) |r| try ctx.editor().deleteRange(ctx.gpa, r);
+    const r = ctx.editor().selectedRange() orelse return ok;
+    ctx.edit(r, "") catch |e| return editErr(ctx, e);
     return ok;
 }
 
@@ -171,14 +185,14 @@ fn cQuit(ctx: *Context, args: struct {}) anyerror!Value {
 fn cInsertNewline(ctx: *Context, args: struct {}) anyerror!Value {
     _ = args;
     if (ctx.buffer().read_only) return ok;
-    try ctx.editor().insertText(ctx.gpa, "\n");
+    ctx.edit(ctx.editor().insertRange(), "\n") catch |e| return editErr(ctx, e);
     return ok;
 }
 
 fn cInsertTab(ctx: *Context, args: struct {}) anyerror!Value {
     _ = args;
     if (ctx.buffer().read_only) return ok;
-    try ctx.editor().insertText(ctx.gpa, "\t");
+    ctx.edit(ctx.editor().insertRange(), "\t") catch |e| return editErr(ctx, e);
     return ok;
 }
 

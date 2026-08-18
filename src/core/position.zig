@@ -53,8 +53,12 @@ fn indexOfVersion(doc: *const Document, version_token: []const u8) ?usize {
 /// Map `offset` (valid at `version_token`) to the current head, or
 /// null when the version is unknown — the discard arm.
 pub fn rebaseOffset(doc: *const Document, version_token: []const u8, offset: usize, bias: Bias) ?usize {
-    const idx = indexOfVersion(doc, version_token) orelse return null;
-    return rebaseFrom(doc, idx + 1, offset, bias);
+    if (indexOfVersion(doc, version_token)) |idx| return rebaseFrom(doc, idx + 1, offset, bias);
+    // The version is in no commit. When the log is EMPTY (a stamp taken on a
+    // document with no history — an empty buffer), nothing has moved, so the
+    // offset is still valid. Otherwise it is a foreign/trimmed token → discard.
+    if (doc.commitCount() == 0) return offset;
+    return null;
 }
 
 /// Map through commits `[first_index..head]`.

@@ -29,7 +29,44 @@ const Document = @import("Document.zig");
 
 pub const Scope = enum { local, host, replicated };
 
-pub const SpanIn = struct { start: usize, end: usize, kind: u32, message: []const u8 };
+/// How a span presents (plan 02 P8). `range` (default) is the classic
+/// anchored face painted over `[start, end)`. The rest are decorations
+/// anchored at `start`, drawn beside the text rather than over it, with
+/// `message` as their display string: `virtual_before`/`virtual_after`
+/// insert display-only text at the offset (never in the document, so no
+/// commit, no sync — pure local overlay), `eol` floats it at the line end
+/// (inlay hints, blame), `gutter` shows it in the margin (breakpoints,
+/// diagnostics severity, fold arrows). One anchored-annotation type covers
+/// all of them — the density split is spans-vs-bulk, not a third store.
+pub const Placement = enum(u8) { range, virtual_before, virtual_after, eol, gutter };
+
+/// Presentation attributes orthogonal to the `kind` a span carries: does
+/// the range fold, is it hidden (folded/concealed), does it respond to a
+/// click. Packed to one byte so it rides every span for free.
+pub const Face = packed struct(u8) {
+    foldable: bool = false,
+    invisible: bool = false,
+    clickable: bool = false,
+    _pad: u5 = 0,
+};
+
+/// The one sanctioned `replicated` layer: presence. Its relay across the
+/// wire IS built (session/hub); every other replicated layer is unwired and
+/// must trap (see `Layers.claim` and design [FIX 10]) until the replicated
+/// feed is grant-keyed end-to-end.
+pub const presence_layer = "presence";
+
+pub const SpanIn = struct {
+    start: usize,
+    end: usize,
+    kind: u32,
+    message: []const u8,
+    /// How to present it (default: a face over the range). Decorations
+    /// (virtual text / gutter) anchor at `start` and use `message` as text.
+    placement: Placement = .range,
+    /// Presentation flags (fold/hide/click), independent of `kind`.
+    face: Face = .{},
+};
 
 pub const Span = struct {
     start: stemma.AnchorSet.Handle,
@@ -39,6 +76,8 @@ pub const Span = struct {
     kind: u32,
     /// Owned by the layer.
     message: []u8 = &.{},
+    placement: Placement = .range,
+    face: Face = .{},
 };
 
 pub const Bulk = struct {
@@ -97,6 +136,8 @@ pub const Layer = struct {
                 .end = b,
                 .kind = s.kind,
                 .message = try gpa.dupe(u8, s.message),
+                .placement = s.placement,
+                .face = s.face,
             });
         }
     }
@@ -111,7 +152,14 @@ pub const Layer = struct {
         self.bulk = .{ .version = v, .start = start, .classes = c };
     }
 
-    pub const ResolvedSpan = struct { start: usize, end: usize, kind: u32, message: []const u8 };
+    pub const ResolvedSpan = struct {
+        start: usize,
+        end: usize,
+        kind: u32,
+        message: []const u8,
+        placement: Placement = .range,
+        face: Face = .{},
+    };
 
     /// Spans at the current head (anchors already shifted).
     pub fn resolvedSpan(self: *const Layer, i: usize) ResolvedSpan {
@@ -121,6 +169,8 @@ pub const Layer = struct {
             .end = self.doc.anchorOffset(s.end),
             .kind = s.kind,
             .message = s.message,
+            .placement = s.placement,
+            .face = s.face,
         };
     }
 
@@ -150,7 +200,16 @@ pub const Layers = struct {
     /// Re-claiming a name from a different provider replaces its
     /// content ownership (last registration wins, like the command
     /// registry).
-    pub fn claim(self: *Layers, gpa: Allocator, doc: *Document, name: []const u8, scope: Scope, provider: []const u8) !*Layer {
+    pub const ClaimError = Allocator.Error || error{Unimplemented};
+
+    pub fn claim(self: *Layers, gpa: Allocator, doc: *Document, name: []const u8, scope: Scope, provider: []const u8) ClaimError!*Layer {
+        // [FIX 10] Replicated state is not yet grant-keyed on the wire. Only
+        // presence (whose relay is wired) may claim `replicated`; any other
+        // replicated claim traps rather than silently degrading to a local
+        // layer nobody else will ever see — a speced-but-unwired feature
+        // must fail loudly, not no-op.
+        if (scope == .replicated and !std.mem.eql(u8, name, presence_layer))
+            return error.Unimplemented;
         for (self.list.items) |l| {
             if (l.doc == doc and std.mem.eql(u8, l.name, name)) {
                 if (!std.mem.eql(u8, l.provider, provider)) {
@@ -197,4 +256,51 @@ pub const Layers = struct {
 
 test {
     std.testing.refAllDecls(@This());
+}
+
+test "layers: virtual-text and gutter decorations anchor and rebase" {
+    const gpa = std.testing.allocator;
+    var doc = try Document.init(gpa, "user");
+    defer doc.deinit(gpa);
+    try doc.insert(gpa, 0, "let x = 1\n");
+    var store: Layers = .empty;
+    defer store.deinit(gpa);
+
+    const layer = try store.claim(gpa, &doc, "inlay", .local, "lsp");
+    // An inlay hint after "x" (offset 5), and a gutter mark on line start.
+    try layer.publishSpans(gpa, &.{
+        .{ .start = 5, .end = 5, .kind = 0, .message = ": int", .placement = .virtual_after },
+        .{ .start = 0, .end = 0, .kind = 2, .message = "●", .placement = .gutter, .face = .{ .clickable = true } },
+    });
+    try std.testing.expectEqual(@as(usize, 2), layer.spanCount());
+    {
+        const inlay = layer.resolvedSpan(0);
+        try std.testing.expectEqual(Placement.virtual_after, inlay.placement);
+        try std.testing.expectEqual(@as(usize, 5), inlay.start);
+        try std.testing.expectEqualStrings(": int", inlay.message);
+        const mark = layer.resolvedSpan(1);
+        try std.testing.expectEqual(Placement.gutter, mark.placement);
+        try std.testing.expect(mark.face.clickable);
+    }
+
+    // Insert two chars at the head: the anchored decorations rebase.
+    try doc.insert(gpa, 0, "  ");
+    try std.testing.expectEqual(@as(usize, 7), layer.resolvedSpan(0).start); // 5 → 7
+    try std.testing.expectEqual(@as(usize, 2), layer.resolvedSpan(1).start); // 0 → 2
+}
+
+test "layers: replicated scope traps except for presence (FIX 10)" {
+    const gpa = std.testing.allocator;
+    var doc = try Document.init(gpa, "user");
+    defer doc.deinit(gpa);
+    var store: Layers = .empty;
+    defer store.deinit(gpa);
+
+    // Presence is the one wired replicated feature — allowed.
+    _ = try store.claim(gpa, &doc, presence_layer, .replicated, "collab");
+    // Any other replicated claim traps loudly instead of localizing.
+    try std.testing.expectError(error.Unimplemented, store.claim(gpa, &doc, "notes", .replicated, "plugin.x"));
+    // Local and host scopes are unaffected.
+    _ = try store.claim(gpa, &doc, "notes", .local, "plugin.x");
+    _ = try store.claim(gpa, &doc, "diagnostics", .host, "lsp");
 }
