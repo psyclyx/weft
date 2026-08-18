@@ -17,6 +17,7 @@ test {
     _ = @import("gfx/layout.zig");
     _ = @import("gfx/region.zig");
     _ = @import("gfx/harness.zig");
+    _ = @import("workflow.zig");
     _ = @import("core/markdown.zig");
     _ = @import("core/identity.zig");
 }
