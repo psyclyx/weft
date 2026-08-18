@@ -1179,10 +1179,10 @@ test "wasm plugin: git-status runs git into a focused tool buffer (async)" {
     try t.expect(plugin.perms[wasm_host.perm_proc] and plugin.perms[wasm_host.perm_timer]);
 
     _ = try command.run(&env.commands, &env.ctx, "git-status", &.{});
-    // The tool buffer was created + focused synchronously (before any output).
+    // The magit model buffer was created + focused synchronously (before output).
     const buf = blk: {
         var it = env.buffers.iterator();
-        while (it.next()) |b| if (std.mem.eql(u8, b.name, "*git-status*")) break :blk b;
+        while (it.next()) |b| if (std.mem.eql(u8, b.name, "*magit*")) break :blk b;
         break :blk null;
     };
     try t.expect(buf != null);
@@ -1196,9 +1196,12 @@ test "wasm plugin: git-status runs git into a focused tool buffer (async)" {
         std.Thread.yield() catch {};
     }
     if (buf.?.editor.text().byteLen() > 0) {
+        // on_fill parsed the raw git output and re-rendered the model: the
+        // buffer now holds the pretty projection, not the porcelain, so we
+        // assert the rendered branch header, not a `#`.
         const s = try buf.?.editor.text().toOwnedSlice(gpa);
         defer gpa.free(s);
-        try t.expect(std.mem.indexOfScalar(u8, s, '#') != null); // "## <branch>"
+        try t.expect(std.mem.indexOf(u8, s, "Branch:") != null);
         const doc = &buf.?.editor.doc;
         try t.expect(doc.commitAt(doc.commitCount() - 1).author != .user); // the plugin peer
     }
