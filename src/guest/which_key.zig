@@ -23,6 +23,18 @@ fn isNoise(key: []const u8, cmd: []const u8) bool {
 export fn describe() void {}
 export fn init() void {}
 
+/// Where the hint popup docks, from config: weft.set("which_key","placement",
+/// "corner"|"center"). Corner (top-right) by default.
+fn placement() weft.Placement {
+    if (weft.configList("placement")) |list| {
+        var it = list;
+        if (it.next()) |p| {
+            if (std.mem.eql(u8, p, "center")) return .center;
+        }
+    }
+    return .corner;
+}
+
 /// Core fires this when a menu mode is entered (open=1) or left (open=0). On
 /// open, the current mode IS the menu, so we enumerate its bindings directly.
 export fn on_menu(open: u32) void {
@@ -35,7 +47,7 @@ export fn on_menu(open: u32) void {
         weft.surfaceClose();
         return;
     }
-    weft.surfaceBegin(.corner);
+    weft.surfaceBegin(placement());
     var i: usize = 0;
     var rows: usize = 0;
     while (i < n) : (i += 1) {

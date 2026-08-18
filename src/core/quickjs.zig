@@ -431,6 +431,33 @@ test "quickjs: weft.menu declares a submenu the leader tree enters (doom-style)"
     try t.expectEqualStrings("menu-escape", env.keymap.lookup("C-g").?);
 }
 
+test "quickjs: every shipped example config evals without a JS error" {
+    const gpa = t.allocator;
+    // Each config's JS must parse and drive the weft.* surface cleanly. Plugins
+    // no-op here (no loader), so this checks syntax + the bind/menu/set calls —
+    // a typo or a bad API use surfaces as ConfigException. Read from the repo's
+    // config/ (the test runs with cwd at the project root).
+    const file = @import("file.zig");
+    const paths = [_][]const u8{
+        "config/config.js", "config/vim-minimal.js", "config/helix.js", "config/dual.js",
+    };
+    var engine = try wasm.Engine.init();
+    defer engine.deinit();
+    for (paths) |path| {
+        const src = file.readAlloc(gpa, path) catch continue; // skip if run outside the repo
+        defer gpa.free(src);
+        var env: Env = undefined;
+        try Env.init(gpa, &env);
+        defer env.deinit(gpa);
+        var cfgstore: kv.Store = .empty;
+        defer cfgstore.deinit(gpa);
+        evalConfig(&engine, &env.ctx, null, &cfgstore, src) catch |e| {
+            std.debug.print("config {s} failed: {t}\n", .{ path, e });
+            return e;
+        };
+    }
+}
+
 test {
     std.testing.refAllDecls(@This());
 }
