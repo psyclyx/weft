@@ -181,6 +181,9 @@ pub const Hud = struct {
     tabs: ?[]const Tab = null,
     /// Per-byte markdown styling for the active buffer (null = not md).
     md_inline: ?MdInline = null,
+    /// vim-goggles: a byte range to flash this frame (e.g. a yanked region),
+    /// drawn as a transient highlight. Null when nothing is flashing.
+    flash: ?stemma.Range = null,
     /// Caret shape and blink phase (false = hidden this frame).
     cursor_style: CursorStyle = .block,
     cursor_on: bool = true,
@@ -597,6 +600,8 @@ pub const View = struct {
         // Decorations, from the geometry map: selection behind, then caret,
         // then each remote peer's selection + caret in its own color.
         if (selection) |sel| try self.selectionRects(scratch, &rects, sel, self.theme.selection);
+        // vim-goggles: a transient flash over a just-operated range (e.g. yank).
+        if (hud.flash) |fl| try self.selectionRects(scratch, &rects, fl, self.theme.accent);
         if (hud.cursor_on) try self.caretRect(scratch, &rects, cursor_off, hud.cursor_style, self.theme.cursor);
         if (hud.presence_layer) |pl| {
             for (0..pl.spanCount()) |i| {

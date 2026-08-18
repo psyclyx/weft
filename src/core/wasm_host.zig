@@ -62,6 +62,7 @@ pub fn defineImports(linker: *wasm.Linker, p: *WasmPlugin) !void {
     try d(linker, "wl_edit", 4, 0, hEdit, p);
     try d(linker, "wl_register", 2, 1, hRegister, p);
     try d(linker, "wl_jump", 1, 0, hJump, p);
+    try d(linker, "wl_flash", 2, 0, hFlash, p);
     // Stamped ranges ([FIX 1/3]): a motion returns one, an operator awaits +
     // applies it. Handles cross; the version token stays host-side.
     try d(linker, "wl_stamp_range", 2, 1, hStampRange, p);
@@ -326,6 +327,24 @@ pub const perm_timer = 4;
 /// tools like `rg`/`zig` are NOT on /bin/sh's built-in path). Set once at
 /// startup from `main`; empty in tests (the child falls back to sh's default
 /// PATH, which finds common tools like `git`).
+/// vim-goggles: a guest (an operator) flashes the range it just acted on
+/// (`wl_flash(start, end)`). The range + a generation counter live here; the
+/// frame loop times the fade and the view draws it. Name-based/global, like the
+/// other host↔frame-loop bridges.
+var g_flash: struct { start: u32 = 0, end: u32 = 0, gen: u64 = 0 } = .{};
+pub const Flash = struct { start: usize, end: usize, gen: u64 };
+pub fn flashState() Flash {
+    return .{ .start = g_flash.start, .end = g_flash.end, .gen = g_flash.gen };
+}
+fn hFlash(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32, results: []i32) void {
+    _ = data;
+    _ = caller;
+    _ = results;
+    const start: u32 = @bitCast(args[0]);
+    const end: u32 = @bitCast(args[1]);
+    g_flash = .{ .start = @min(start, end), .end = @max(start, end), .gen = g_flash.gen + 1 };
+}
+
 var g_environ: std.process.Environ = .empty;
 pub fn setEnviron(env: std.process.Environ) void {
     g_environ = env;

@@ -87,6 +87,7 @@ fn applyOpRange(hnd: u32) void {
     const r = weft.rangeEnds(hnd) orelse return opCancel();
     setReg(weft.slice(r.start, r.end), false);
     if (op_is_yank) {
+        weft.flash(r.start, r.end); // vim-goggles: flash the yanked region
         weft.jump(r.start);
         weft.setMode("normal");
         return;
@@ -373,7 +374,10 @@ fn visualDelete() void {
     weft.setMode("normal");
 }
 fn visualYank() void {
-    if (weft.selection()) |s| setReg(weft.slice(s.start, s.end), false);
+    if (weft.selection()) |s| {
+        setReg(weft.slice(s.start, s.end), false);
+        weft.flash(s.start, s.end); // vim-goggles
+    }
     weft.run("clear-selection");
     weft.setMode("normal");
 }
@@ -403,6 +407,7 @@ fn changeLine() void {
 fn yankLine() void {
     const l = weft.lineAt(weft.cursor());
     setReg(weft.slice(l.start, l.end), true);
+    weft.flash(l.start, l.end); // vim-goggles
 }
 fn paste() void {
     if (reg_line) {

@@ -16,6 +16,7 @@ const view_mod = @import("gfx/view.zig");
 const region = @import("gfx/region.zig");
 const stats_mod = @import("gfx/stats.zig");
 const snail = @import("snail");
+const stemma = @import("stemma");
 const snail_vk = @import("gfx/snail_vk/root.zig");
 const vk = @import("vk.zig").c;
 
@@ -697,6 +698,19 @@ pub fn main(init: std.process.Init) !void {
         }
         break :blk 200 * std.time.ns_per_ms;
     };
+    // vim-goggles flash timing: a guest sets a range via wl_flash; we draw it
+    // for `flash-ms` then clear it. Duration is config (default 150ms).
+    var flash_gen: u64 = 0;
+    var flash_start_ns: u64 = 0;
+    var flash_was_active = false;
+    const flash_duration_ns: u64 = blk: {
+        if (config_kv.get("editor", "flash-ms")) |raw| {
+            if (firstConfigRecord(raw)) |s| {
+                if (std.fmt.parseInt(u64, s, 10)) |ms| break :blk ms * std.time.ns_per_ms else |_| {}
+            }
+        }
+        break :blk 150 * std.time.ns_per_ms;
+    };
     // Left-button drag: the source offset the press landed on. A plain
     // click just moves the caret; motion with the button held extends a
     // selection from this anchor.
@@ -1258,10 +1272,25 @@ pub fn main(init: std.process.Init) !void {
                     tab_list.append(gpa, .{ .name = std.fs.path.basename(nm), .active = b == abuf }) catch {};
                 }
             }
+            // vim-goggles: a guest set a flash range; show it for the duration.
+            const flash_range: ?stemma.Range = fblk: {
+                const fs = core.wasm_host.flashState();
+                if (fs.gen != flash_gen) {
+                    flash_gen = fs.gen;
+                    flash_start_ns = frame_start;
+                }
+                const active = fs.gen > 0 and (frame_start -| flash_start_ns) < flash_duration_ns;
+                if (active or flash_was_active) view_dirty = true; // draw it, then clear it
+                flash_was_active = active;
+                if (!active) break :fblk null;
+                const len = editor.text().byteLen();
+                break :fblk .{ .start = @min(fs.start, len), .end = @min(fs.end, len) };
+            };
             const hud: view_mod.Hud = .{
                 .mode = keymap.currentMode(),
                 .which_key = if (wk_hints.items.len > 0) wk_hints.items else null,
                 .surfaces = surface_buf[0..surface_n],
+                .flash = flash_range,
                 .tabs = if (tab_list.items.len > 1) tab_list.items else null,
                 .md_inline = md_inline,
                 .cursor_style = cursor_cfg.styleFor(cursor_cfg.resolveMode(&keymap, keymap.currentMode())),
