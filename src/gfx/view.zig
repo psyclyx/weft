@@ -1158,7 +1158,9 @@ pub const View = struct {
         if (dock.h <= 0) return;
         const total = p.filtered.items.len;
         const shown = @min(total, Hud.max_pick_rows);
+        // A thin top rule sets the picker dock off from the panes above it.
         try rects.append(scratch, .{ .x = dock.x, .y = dock.y, .w = dock.w, .h = dock.h, .color = self.theme.selection });
+        try rects.append(scratch, .{ .x = dock.x, .y = dock.y, .w = dock.w, .h = 1, .color = self.theme.accent });
 
         const narrow_chip = if (p.narrow.items.len > 0)
             try std.fmt.allocPrint(scratch, "[{s}]", .{p.narrow.items})
@@ -1184,6 +1186,14 @@ pub const View = struct {
             if (selected) try rects.append(scratch, .{ .x = dock.x, .y = row_y, .w = dock.w, .h = self.line_h, .color = self.theme.accent });
             try self.propLine(scratch, runs, l, dock.x, row_y + self.ascent, if (selected) self.theme.background else self.theme.status);
         }
+    }
+
+    /// A filled box with a 1px outline: the border rect (1px larger all round)
+    /// drawn first, the fill on top, so the border reads as a thin frame.
+    fn outlinedBox(self: *View, scratch: Allocator, rects: *std.ArrayList(Rect), x: f32, y: f32, w: f32, h: f32, fill: [4]f32, border: [4]f32) !void {
+        _ = self;
+        try rects.append(scratch, .{ .x = x - 1, .y = y - 1, .w = w + 2, .h = h + 2, .color = border });
+        try rects.append(scratch, .{ .x = x, .y = y, .w = w, .h = h, .color = fill });
     }
 
     /// Shape `text` as one mono run at an explicit world x/baseline + color (a
@@ -1241,8 +1251,9 @@ pub const View = struct {
             };
             const box_x = std.math.clamp(raw_x, body.x, @max(body.x, body.x + body.w - box_w));
             const box_y = std.math.clamp(raw_y, body.y, @max(body.y, body.y + body.h - box_h));
-            // Panel background (a muted box so the overlay reads as a popup).
-            try rects.append(scratch, .{ .x = box_x, .y = box_y, .w = box_w, .h = box_h, .color = self.theme.selection });
+            // Panel background with a thin accent outline, so the popup reads
+            // as a distinct floating box (not text bleeding over the buffer).
+            try self.outlinedBox(scratch, rects, box_x, box_y, box_w, box_h, self.theme.selection, self.theme.accent);
 
             for (surf.rows.items[0..nrows], 0..) |row, i| {
                 const row_y = box_y + pad_y + @as(f32, @floatFromInt(i)) * self.line_h;
