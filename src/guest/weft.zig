@@ -85,6 +85,7 @@ extern "weft" fn wl_node_enclosing(start: u32, end: u32, kind_out: u32, kind_cap
 extern "weft" fn wl_query(scm_ptr: u32, scm_len: u32, start: u32, end: u32) i32;
 extern "weft" fn wl_query_capture(i: u32, name_out: u32, name_cap: u32, span_out: u32) i32;
 extern "weft" fn wl_node_children(off: u32) i32;
+extern "weft" fn wl_activate_path(out_ptr: u32, out_cap: u32) i32;
 extern "weft" fn wl_claim_subbuffer(start: u32, end: u32) i32;
 extern "weft" fn wl_subbuffer_put_fact(handle: u32, k: u32, kl: u32, v: u32, vl: u32) void;
 extern "weft" fn wl_shell_insert(ptr: u32, len: u32) void;
@@ -413,6 +414,14 @@ pub fn completionPrefix() []const u8 {
 /// Offer `text` as a completion candidate for the current request.
 pub fn pushCompletion(text: []const u8) void {
     wl_push_completion(p(text.ptr), @intCast(text.len));
+}
+
+// ── Activation (the buffer taking focus; valid during on_activate) ────
+/// The path of the buffer that just took focus (into `scratch`). Empty for an
+/// unbacked/scratch buffer. Call from an exported `on_activate` fn.
+pub fn activatePath() []const u8 {
+    const n = wl_activate_path(p(&scratch), scratch.len);
+    return scratch[0..@intCast(n)];
 }
 
 // ── Structural read + subbuffers ─────────────────────────────────────

@@ -542,6 +542,9 @@ pub fn main(init: std.process.Init) !void {
     var batches: std.ArrayList(snail.render.records.DrawBatch) = .empty;
     defer batches.deinit(gpa);
     var view_dirty = true;
+    // Last activated buffer path (copied — the borrowed slice would dangle).
+    var last_activate_path: [std.fs.max_path_bytes]u8 = undefined;
+    var last_activate_len: usize = 0;
     // Vertical split: a second pane peeking another buffer with its own
     // scroll. The focused pane is always `buffers.active()` (so editing and
     // input flow unchanged); `focus-other` swaps which buffer is active.
@@ -700,6 +703,17 @@ pub fn main(init: std.process.Init) !void {
         // Deliver native async completions (subprocess/timer output, deferred
         // edits) on the frame thread; a completion repaints.
         if (plugin_loop.tick()) view_dirty = true;
+        // Fire the activation event when the focused buffer's path changes, so
+        // language-aware plugins (`modes`) can attach keymaps/facts.
+        {
+            const cur_path = buffers.active().editor.backingPath() orelse "";
+            if (!std.mem.eql(u8, cur_path, last_activate_path[0..last_activate_len])) {
+                for (plugins.items) |pl| core.wasm_host.notifyActivate(pl, cur_path);
+                const n = @min(cur_path.len, last_activate_path.len);
+                @memcpy(last_activate_path[0..n], cur_path[0..n]);
+                last_activate_len = n;
+            }
+        }
         // Apply connection intents recorded by commands (outside the
         // hot section: connect blocks on TCP, disconnect joins threads).
         if (share_ctx.disconnect_requested) {

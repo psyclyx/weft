@@ -40,6 +40,7 @@ weft.plugin("notes");       // capture/open notes over fs read+write
 weft.plugin("fmt");         // format-buffer (by extension) + filter (proc)
 weft.plugin("buffers");     // buf-pick (fuzzy buffer switch), buf-scratch
 weft.plugin("windows");     // win-split/vsplit/focus/close/center
+weft.plugin("modes");       // language activation (on focus) + lang-run
 
 // Leader (space) bindings for the edit-domain operators — each name is a real
 // command one of the plugins above registered.
@@ -64,6 +65,7 @@ weft.bind("leader", "x", "run-line"); // run the current line as a command
 weft.bind("leader", "n", "notes-open"); // open the notes file (capture via palette)
 weft.bind("leader", "equal", "format-buffer"); // format the buffer by extension
 weft.bind("leader", "comma", "buf-pick"); // fuzzy-switch buffers
+weft.bind("leader", "r", "lang-run"); // run the current file by its language
 
 // Numbers: vim-style increment/decrement.
 weft.bind("normal", "C-a", "increment-number");

@@ -173,6 +173,10 @@ pub const WasmPlugin = struct {
     /// index. Reset at the start of each query; each entry owns its name.
     query_caps: std.ArrayList(QueryCap) = .empty,
 
+    /// The path of the buffer being activated (design §3): valid only during an
+    /// `on_activate` dispatch, readable by the guest via `wl_activate_path`.
+    cur_activate_path: []const u8 = &.{},
+
     // ── Pick (built incrementally between begin/end, then opened) ──
     pick_prompt: std.ArrayList(u8) = .empty,
     pick_id: u32 = 0,
@@ -1433,6 +1437,31 @@ test "wasm plugin: notes capture appends via fs and open reads it back" {
     const s = try buf.?.editor.text().toOwnedSlice(gpa);
     defer gpa.free(s);
     try t.expectEqualStrings("todo x\ntodo y\n", s);
+}
+
+test "wasm plugin: modes reacts to the activation event by language" {
+    const gpa = t.allocator;
+    var env: Env = undefined;
+    try Env.init(gpa, &env);
+    defer env.deinit(gpa);
+
+    var engine = try wasm.Engine.init();
+    defer engine.deinit();
+    const plugin = try loadPlugin(&engine, &env.ctx, "modes", @embedFile("guest_modes_wasm"), .{});
+    defer plugin.deinit();
+
+    // Fire activation for a python file: on_activate detects the language and
+    // echoes it — the host→guest reactive event (design §3).
+    wasm_host.notifyActivate(plugin, "src/main.py");
+    try t.expectEqualStrings("mode: python", env.echo.items);
+
+    // A zig file re-detects; an unknown extension is a silent no-op.
+    env.echo.clearRetainingCapacity();
+    wasm_host.notifyActivate(plugin, "build.zig");
+    try t.expectEqualStrings("mode: zig", env.echo.items);
+    env.echo.clearRetainingCapacity();
+    wasm_host.notifyActivate(plugin, "LICENSE");
+    try t.expectEqual(@as(usize, 0), env.echo.items.len);
 }
 
 test "wasm plugin: kv admin round-trips across the membrane, namespaced" {
