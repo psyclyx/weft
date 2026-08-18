@@ -30,9 +30,12 @@ export fn on_menu(open: u32) void {
     while (i < n) : (i += 1) {
         const key = weft.menuBindingKey(i);
         const cmd = weft.menuBindingCmd(i);
+        const group = weft.menuBindingIsGroup(i);
         weft.surfaceRow();
-        weft.surfaceSpan(key, .group); // the key stands out (accent)
-        weft.surfaceSpan(cmd, .leaf); // the command in the plain color
+        weft.surfaceSpan(key, .accent); // the key always stands out
+        // A group (opens a submenu) reads distinctly from a terminal command —
+        // the user's 'differentiate groups from terminal commands' ask.
+        weft.surfaceSpan(cmd, if (group) .group else .leaf);
     }
     weft.surfaceEnd(-1);
 }

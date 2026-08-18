@@ -84,6 +84,7 @@ extern "weft" fn wl_surface_close() void;
 extern "weft" fn wl_menu_binding_count() i32;
 extern "weft" fn wl_menu_binding_key(i: u32, out: u32, cap: u32) i32;
 extern "weft" fn wl_menu_binding_cmd(i: u32, out: u32, cap: u32) i32;
+extern "weft" fn wl_menu_binding_is_group(i: u32) i32;
 extern "weft" fn wl_provide_completion() void;
 extern "weft" fn wl_completion_prefix(out_ptr: u32, out_cap: u32) u32;
 extern "weft" fn wl_push_completion(ptr: u32, len: u32) void;
@@ -497,6 +498,10 @@ pub fn menuBindingKey(i: usize) []const u8 {
 pub fn menuBindingCmd(i: usize) []const u8 {
     const n = wl_menu_binding_cmd(@intCast(i), p(&arg_scratch), arg_scratch.len);
     return if (n < 0) "" else arg_scratch[0..@intCast(n)];
+}
+/// Whether the `i`-th binding opens a submenu (a group) vs a leaf command.
+pub fn menuBindingIsGroup(i: usize) bool {
+    return wl_menu_binding_is_group(@intCast(i)) != 0;
 }
 /// The accepted choice (valid during `on_pick_accept`), into `scratch`.
 pub fn pickChoice() []const u8 {

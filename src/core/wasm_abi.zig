@@ -622,8 +622,10 @@ test "which-key: on_menu builds a corner surface from the current menu's binding
     defer plugin.deinit();
 
     const Keymap = @import("Keymap.zig");
+    // "f" opens a submenu (its command IS a menu mode) → a GROUP; "g" is a leaf.
     try env.keymap.markMenuMode(gpa, "leader");
-    try env.keymap.bind(gpa, "leader", "f", "find-file", Keymap.prio_plugin, "test");
+    try env.keymap.markMenuMode(gpa, "leader-file");
+    try env.keymap.bind(gpa, "leader", "f", "leader-file", Keymap.prio_plugin, "test");
     try env.keymap.bind(gpa, "leader", "g", "git-status", Keymap.prio_plugin, "test");
     try env.keymap.setMode(gpa, "leader");
 
@@ -633,11 +635,12 @@ test "which-key: on_menu builds a corner surface from the current menu's binding
     try t.expect(plugin.surface.active);
     try t.expectEqual(surface_mod.Placement.corner, plugin.surface.placement);
     try t.expectEqual(@as(usize, 2), plugin.surface.rows.items.len);
-    // Each row: a group-colored key span then a leaf-colored command span.
+    // Each row: the key in accent, then the command colored by group vs leaf.
     try t.expectEqualStrings("f", plugin.surface.rows.items[0].spans.items[0].text);
-    try t.expectEqual(surface_mod.Role.group, plugin.surface.rows.items[0].spans.items[0].role);
-    try t.expectEqualStrings("find-file", plugin.surface.rows.items[0].spans.items[1].text);
-    try t.expectEqual(surface_mod.Role.leaf, plugin.surface.rows.items[0].spans.items[1].role);
+    try t.expectEqual(surface_mod.Role.accent, plugin.surface.rows.items[0].spans.items[0].role);
+    try t.expectEqualStrings("leader-file", plugin.surface.rows.items[0].spans.items[1].text);
+    try t.expectEqual(surface_mod.Role.group, plugin.surface.rows.items[0].spans.items[1].role); // a submenu
+    try t.expectEqual(surface_mod.Role.leaf, plugin.surface.rows.items[1].spans.items[1].role); // git-status: leaf
 
     // Leaving the menu closes the surface.
     wasm_host.notifyMenu(plugin, false);

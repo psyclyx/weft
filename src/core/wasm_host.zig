@@ -114,6 +114,7 @@ pub fn defineImports(linker: *wasm.Linker, p: *WasmPlugin) !void {
     try d(linker, "wl_menu_binding_count", 0, 1, hMenuBindingCount, p);
     try d(linker, "wl_menu_binding_key", 3, 1, hMenuBindingKey, p);
     try d(linker, "wl_menu_binding_cmd", 3, 1, hMenuBindingCmd, p);
+    try d(linker, "wl_menu_binding_is_group", 1, 1, hMenuBindingIsGroup, p);
     // Surface (retained overlay: which-key/dired/magit render through this).
     try d(linker, "wl_surface_begin", 1, 0, hSurfaceBegin, p);
     try d(linker, "wl_surface_row", 0, 0, hSurfaceRow, p);
@@ -1393,6 +1394,21 @@ fn hMenuBindingCmd(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32, r
         return;
     };
     results[0] = @intCast(caller.writeMemory(@intCast(args[1]), @intCast(args[2]), b.command) catch 0);
+}
+
+/// Whether the `i`-th binding is a GROUP (opens a submenu) rather than a leaf
+/// command. Convention (see vim): a submenu-entry binds a key to a command
+/// named the same as the menu mode it enters — so a binding is a group exactly
+/// when its command is itself a registered menu mode. No bind-ABI change needed.
+fn hMenuBindingIsGroup(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32, results: []i32) void {
+    _ = caller;
+    const p: *WasmPlugin = @ptrCast(@alignCast(data.?));
+    const km = p.ctx.keymap;
+    const b = km.bindingAt(km.currentMode(), @intCast(args[0])) orelse {
+        results[0] = 0;
+        return;
+    };
+    results[0] = if (km.isMenuMode(b.command)) 1 else 0;
 }
 
 /// Fire a guest's `on_menu(open)` — a menu mode was entered (open=1) or left

@@ -116,7 +116,8 @@ pub const Theme = struct {
     /// plain leaf commands — the which-key color-coding ask.
     fn roleColor(self: *const Theme, role: core.surface.Role) [4]f32 {
         return switch (role) {
-            .accent, .group => self.accent,
+            .accent => self.accent,
+            .group => self.heading, // a submenu — distinct from a leaf command
             .effect => self.md_link,
             .muted => self.status,
             else => self.foreground, // .normal, .leaf, unknown
