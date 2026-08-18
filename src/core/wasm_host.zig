@@ -72,6 +72,8 @@ pub fn defineImports(linker: *wasm.Linker, p: *WasmPlugin) !void {
     // Group E: admin (kv).
     try d(linker, "wl_kv_get", 4, 1, hKvGet, p);
     try d(linker, "wl_kv_put", 4, 0, hKvPut, p);
+    // Read-only config data the config plane staged (weft.set), distinct store.
+    try d(linker, "wl_config_get", 4, 1, hConfigGet, p);
     // Config surface.
     try d(linker, "wl_echo", 2, 0, hEcho, p);
     // Command args in + result out (during on_command).
@@ -1054,6 +1056,33 @@ fn hEditRange(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32, result
 }
 
 // Group E: admin (kv), namespaced by plugin name.
+/// `wl_config_get(key_ptr, key_len, out_ptr, out_cap) → n` — read this plugin's
+/// staged config value for `key` into guest memory, returning bytes written or
+/// -1 if absent. Reads the DISTINCT config store (never runtime kv scratch).
+/// The blob is the framed encoding the config shim produced (see guest
+/// weft.configList); the guest decoder detects a short buffer.
+fn hConfigGet(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32, results: []i32) void {
+    const p: *WasmPlugin = @ptrCast(@alignCast(data.?));
+    const store = p.config_store orelse {
+        results[0] = -1;
+        return;
+    };
+    const key = caller.readMemory(p.gpa, @intCast(args[0]), @intCast(args[1])) catch {
+        results[0] = -1;
+        return;
+    };
+    defer p.gpa.free(key);
+    const val = store.get(p.name, key) orelse {
+        results[0] = -1;
+        return;
+    };
+    const n = caller.writeMemory(@intCast(args[2]), @intCast(args[3]), val) catch {
+        results[0] = -1;
+        return;
+    };
+    results[0] = @intCast(n);
+}
+
 fn hKvGet(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32, results: []i32) void {
     const p: *WasmPlugin = @ptrCast(@alignCast(data.?));
     const store = p.store orelse {

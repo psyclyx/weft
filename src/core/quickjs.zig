@@ -29,19 +29,34 @@ pub const PluginLoader = struct {
 };
 
 /// Host state behind the `weft.*` config imports: the editor the config wires,
-/// and (optionally) the plugin loader `weft.plugin` calls.
+/// the plugin loader, the config-data store `weft.set` writes into, and the
+/// deferred work lists. Plugin loads and `weft.run`s are RECORDED during eval
+/// and replayed after it — so `weft.set` for a plugin always lands before that
+/// plugin is instantiated (its `init` reads config), regardless of line order,
+/// even across plugins.
 const Bridge = struct {
     ctx: *command.Context,
     loader: ?PluginLoader,
+    config: ?*kv.Store,
+    pending_plugins: std.ArrayList([]u8) = .empty,
+    pending_runs: std.ArrayList([]u8) = .empty,
 };
+
+const kv = @import("kv.zig");
 
 /// Evaluate `src` as the user config: instantiate `quickjs.wasm` under WASI
 /// with the `weft.*` config surface bound over `ctx`, run its reactor init,
 /// marshal the source into the guest, and eval it. A JS exception surfaces as
 /// `error.ConfigException` (the shim logs its message) — never a partial,
 /// silent half-applied config. Each call is a fresh JS runtime.
-pub fn evalConfig(engine: *wasm.Engine, ctx: *command.Context, loader: ?PluginLoader, src: []const u8) EvalError!void {
-    var bridge: Bridge = .{ .ctx = ctx, .loader = loader };
+pub fn evalConfig(engine: *wasm.Engine, ctx: *command.Context, loader: ?PluginLoader, config: ?*kv.Store, src: []const u8) EvalError!void {
+    var bridge: Bridge = .{ .ctx = ctx, .loader = loader, .config = config };
+    defer {
+        for (bridge.pending_plugins.items) |s| ctx.gpa.free(s);
+        bridge.pending_plugins.deinit(ctx.gpa);
+        for (bridge.pending_runs.items) |s| ctx.gpa.free(s);
+        bridge.pending_runs.deinit(ctx.gpa);
+    }
 
     var module = try engine.compile(quickjs_wasm);
     defer module.deinit();
@@ -53,6 +68,7 @@ pub fn evalConfig(engine: *wasm.Engine, ctx: *command.Context, loader: ?PluginLo
     try linker.defineFn("weft", "qjs_echo", 2, 0, cEcho, &bridge);
     try linker.defineFn("weft", "qjs_log", 2, 0, cLog, &bridge);
     try linker.defineFn("weft", "qjs_plugin", 2, 0, cPlugin, &bridge);
+    try linker.defineFn("weft", "qjs_set", 6, 0, cSet, &bridge);
 
     var instance = try linker.instantiateWasi(&module);
     defer instance.deinit();
@@ -73,6 +89,12 @@ pub fn evalConfig(engine: *wasm.Engine, ctx: *command.Context, loader: ?PluginLo
 
     const rc = try instance.callI32("weft_eval", &.{ ptr, @intCast(src.len) });
     if (rc != 0) return error.ConfigException;
+
+    // Deferred phase: config eval fully populated the config store and the
+    // load/run lists. Now instantiate plugins (each reads its config at init),
+    // then run the queued startup actions (FIFO) — after every plugin exists.
+    if (bridge.loader) |ld| for (bridge.pending_plugins.items) |name| ld.load(ld.ctx, name);
+    for (bridge.pending_runs.items) |cmd| _ = command.run(ctx.commands, ctx, cmd, &.{}) catch {};
 }
 
 // ── The `weft.*` config imports: read the guest's strings, drive the ctx.
@@ -101,8 +123,25 @@ fn cRun(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32, results: []i
     _ = results;
     const br: *Bridge = @ptrCast(@alignCast(data.?));
     const cmd = readStr(br, caller, args[0], args[1]) orelse return;
-    defer br.ctx.gpa.free(cmd);
-    _ = command.run(br.ctx.commands, br.ctx, cmd, &.{}) catch {};
+    // Queue: run after all plugins load, so a config `weft.run("<plugin cmd>")`
+    // works even if written before the plugin's `weft.plugin(...)` line.
+    br.pending_runs.append(br.ctx.gpa, cmd) catch br.ctx.gpa.free(cmd);
+}
+
+/// weft.set(plugin, key, blob) — stage config data for a plugin (read at its
+/// init via wl_config_get). The blob is already framed by the shim; store it
+/// verbatim in the DISTINCT config store, namespaced by plugin name.
+fn cSet(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32, results: []i32) void {
+    _ = results;
+    const br: *Bridge = @ptrCast(@alignCast(data.?));
+    const store = br.config orelse return;
+    const plugin = readStr(br, caller, args[0], args[1]) orelse return;
+    defer br.ctx.gpa.free(plugin);
+    const key = readStr(br, caller, args[2], args[3]) orelse return;
+    defer br.ctx.gpa.free(key);
+    const blob = readStr(br, caller, args[4], args[5]) orelse return;
+    defer br.ctx.gpa.free(blob);
+    store.put(br.ctx.gpa, plugin, key, blob) catch {};
 }
 
 fn cEcho(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32, results: []i32) void {
@@ -125,10 +164,11 @@ fn cLog(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32, results: []i
 fn cPlugin(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32, results: []i32) void {
     _ = results;
     const br: *Bridge = @ptrCast(@alignCast(data.?));
-    const loader = br.loader orelse return; // no loader wired → weft.plugin is a no-op
+    if (br.loader == null) return; // no loader wired → weft.plugin is a no-op
     const name = readStr(br, caller, args[0], args[1]) orelse return;
-    defer br.ctx.gpa.free(name);
-    loader.load(loader.ctx, name);
+    // Defer instantiation to after eval: config data staged by weft.set (on any
+    // line) is then in place before the plugin's init reads it.
+    br.pending_plugins.append(br.ctx.gpa, name) catch br.ctx.gpa.free(name);
 }
 
 // ── Tests ───────────────────────────────────────────────────────────
@@ -192,7 +232,7 @@ test "quickjs: config.js drives the weft ABI — binds a key and echoes" {
         \\weft.bind("normal", "k", "cursor-up");
         \\weft.echo("config loaded (" + (1 + 1) + " keys)");
     ;
-    try evalConfig(&engine, &env.ctx, null, cfg);
+    try evalConfig(&engine, &env.ctx, null, null, cfg);
 
     // The JS ran real logic (string concat + arithmetic) and reached the host:
     try env.keymap.setMode(gpa, "normal");
@@ -220,7 +260,7 @@ test "quickjs: config.js can run a registered command through weft.run" {
 
     var engine = try wasm.Engine.init();
     defer engine.deinit();
-    try evalConfig(&engine, &env.ctx, null, "weft.run(\"mark\");");
+    try evalConfig(&engine, &env.ctx, null, null, "weft.run(\"mark\");");
     try t.expectEqualStrings("ran!", env.echo.items);
 }
 
@@ -233,7 +273,7 @@ test "quickjs: a config syntax error surfaces as ConfigException, not silent" {
     var engine = try wasm.Engine.init();
     defer engine.deinit();
     // Malformed JS: the eval must fail loudly, and nothing was bound.
-    try t.expectError(error.ConfigException, evalConfig(&engine, &env.ctx, null, "this is (not valid javascript"));
+    try t.expectError(error.ConfigException, evalConfig(&engine, &env.ctx, null, null, "this is (not valid javascript"));
     try t.expectEqual(@as(usize, 0), env.echo.items.len);
 }
 
@@ -263,13 +303,14 @@ test "quickjs: weft.plugin loads a real .wasm, then its command runs" {
     var loader: Loader = .{ .engine = &engine, .ctx = &env.ctx };
     defer if (loader.held) |p| p.deinit();
 
-    // config.js loads the plugin, then binds one of its commands — the bind
-    // only resolves if the plugin registered synchronously first.
+    // config.js loads the plugin and binds one of its commands. Load is now
+    // deferred to after eval, but still completes inside evalConfig, so by the
+    // time it returns the plugin is registered and the (late-bound) bind resolves.
     const cfg =
         \\weft.plugin("edit");
         \\weft.bind("normal", "D", "duplicate-line");
     ;
-    try evalConfig(&engine, &env.ctx, .{ .ctx = &loader, .load = Loader.load }, cfg);
+    try evalConfig(&engine, &env.ctx, .{ .ctx = &loader, .load = Loader.load }, null, cfg);
 
     // The plugin loaded and registered its command; the config's bind took.
     try t.expect(loader.held != null);
@@ -284,6 +325,58 @@ test "quickjs: weft.plugin loads a real .wasm, then its command runs" {
     const s = try env.buffers.active().editor.text().toOwnedSlice(gpa);
     defer gpa.free(s);
     try t.expectEqualStrings("hi\nhi", s);
+}
+
+test "quickjs: deferred load — weft.set before the plugin line reaches its init" {
+    const gpa = t.allocator;
+    var env: Env = undefined;
+    try Env.init(gpa, &env);
+    defer env.deinit(gpa);
+
+    var engine = try wasm.Engine.init();
+    defer engine.deinit();
+
+    var config: kv.Store = .empty;
+    defer config.deinit(gpa);
+
+    const wasm_abi = @import("wasm_abi.zig");
+    const Loader = struct {
+        engine: *wasm.Engine,
+        ctx: *command.Context,
+        config: *kv.Store,
+        held: ?*wasm_abi.WasmPlugin = null,
+        fn load(cx: *anyopaque, name: []const u8) void {
+            const self: *@This() = @ptrCast(@alignCast(cx));
+            std.debug.assert(std.mem.eql(u8, name, "autopair"));
+            self.held = wasm_abi.loadPlugin(self.engine, self.ctx, "autopair", @embedFile("guest_autopair_wasm"), .{ .config = self.config }) catch null;
+        }
+    };
+    var loader: Loader = .{ .engine = &engine, .ctx = &env.ctx, .config = &config };
+    defer if (loader.held) |p| p.deinit();
+
+    // weft.set and a bind are written BEFORE the plugin line. Deferred load
+    // makes both land: config is staged before the plugin instantiates (its
+    // init reads `pairs`), and the late-bound key resolves after load.
+    const cfg =
+        \\weft.set("autopair", "pairs", ["pair-tick\t`\t`"]);
+        \\weft.bind("insert", "grave", "pair-tick");
+        \\weft.plugin("autopair");
+    ;
+    try evalConfig(&engine, &env.ctx, .{ .ctx = &loader, .load = Loader.load }, &config, cfg);
+
+    // The plugin read its config at init: it registered the CONFIG pair command,
+    // not the shipped defaults.
+    try t.expect(loader.held != null);
+    try t.expect(env.commands.find("pair-tick") != null);
+    try t.expect(env.commands.find("pair-paren") == null);
+    try env.keymap.setMode(gpa, "insert");
+    try t.expectEqualStrings("pair-tick", env.keymap.lookup("grave").?);
+
+    // And it runs through the membrane: inserts the configured backtick pair.
+    _ = try command.run(&env.commands, &env.ctx, "pair-tick", &.{});
+    const s = try env.buffers.active().editor.text().toOwnedSlice(gpa);
+    defer gpa.free(s);
+    try t.expectEqualStrings("``", s);
 }
 
 test {

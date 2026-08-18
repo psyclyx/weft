@@ -255,6 +255,63 @@ pub fn kvPut(key: []const u8, value: []const u8) void {
     wl_kv_put(p(key.ptr), @intCast(key.len), p(value.ptr), @intCast(value.len));
 }
 
+// ── Config data (weft.set): declarative tables that override a plugin's
+// shipped defaults; read at init. Uses a DEDICATED buffer (never the shared
+// `scratch`), so a plugin can hold its decoded config while walking the buffer
+// via `slice`/`kvGet`. Framed as uvarint(count) then count×(uvarint(len) ++
+// bytes) — the same LEB128 style the shim encodes; the decoder returns null on
+// a short/truncated buffer rather than silently dropping tail records. ──
+var config_scratch: [1 << 16]u8 = undefined;
+extern "weft" fn wl_config_get(kptr: u32, klen: u32, out_ptr: u32, out_cap: u32) i32;
+
+fn getUv(cur: *[]const u8) ?u64 {
+    var shift: u6 = 0;
+    var v: u64 = 0;
+    while (cur.len > 0) {
+        const b = cur.*[0];
+        cur.* = cur.*[1..];
+        v |= @as(u64, b & 0x7f) << shift;
+        if (b & 0x80 == 0) return v;
+        if (shift >= 57) return null;
+        shift += 7;
+    }
+    return null;
+}
+
+/// Iterates the records of a config list. `next` returns null when exhausted,
+/// or on a malformed/truncated buffer (so a short read never yields a partial
+/// record silently).
+pub const ConfigIter = struct {
+    cur: []const u8,
+    remaining: u64,
+    pub fn next(self: *ConfigIter) ?[]const u8 {
+        if (self.remaining == 0) return null;
+        const n = getUv(&self.cur) orelse {
+            self.remaining = 0;
+            return null;
+        };
+        if (n > self.cur.len) {
+            self.remaining = 0;
+            return null;
+        }
+        const rec = self.cur[0..@intCast(n)];
+        self.cur = self.cur[@intCast(n)..];
+        self.remaining -= 1;
+        return rec;
+    }
+};
+
+/// This plugin's config list for `key` (from `weft.set`), or null if unset. The
+/// iterator borrows `config_scratch` — valid until the next config read; safe
+/// to hold across `slice`/`kvGet` (its own buffer).
+pub fn configList(key: []const u8) ?ConfigIter {
+    const n = wl_config_get(p(key.ptr), @intCast(key.len), p(&config_scratch), config_scratch.len);
+    if (n < 0) return null;
+    var cur: []const u8 = config_scratch[0..@intCast(n)];
+    const count = getUv(&cur) orelse return null;
+    return .{ .cur = cur, .remaining = count };
+}
+
 /// Show a transient status-line message.
 pub fn echo(msg: []const u8) void {
     wl_echo(p(msg.ptr), @intCast(msg.len));

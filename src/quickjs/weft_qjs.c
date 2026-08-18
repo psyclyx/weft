@@ -14,6 +14,7 @@
 #include "quickjs.h"
 #include <stdlib.h>
 #include <string.h>
+#include <stdint.h>
 
 // ── Host imports (grants), module "weft" — the same membrane the Zig plugin
 // shim uses. Strings cross as (ptr,len) into this module's linear memory,
@@ -30,6 +31,10 @@ __attribute__((import_module("weft"), import_name("qjs_log")))
 extern void host_log(const char *msg, int msg_len);
 __attribute__((import_module("weft"), import_name("qjs_plugin")))
 extern void host_plugin(const char *name, int name_len);
+__attribute__((import_module("weft"), import_name("qjs_set")))
+extern void host_set(const char *plugin, int plugin_len,
+                     const char *key, int key_len,
+                     const char *blob, int blob_len);
 
 // ── JS → host trampolines. Each pulls its string args out of the JS values
 // and forwards to the host import. ──
@@ -91,6 +96,67 @@ static JSValue js_plugin(JSContext *ctx, JSValueConst this_val,
     return JS_UNDEFINED;
 }
 
+// ── Config-data framing. weft.set(plugin, key, value) hands a plugin a small
+// declarative table (its keymap, pairs, formatters, languages) that overrides
+// the plugin's shipped defaults. `value` is a string (one record) or an array
+// of strings (records). We frame it as uvarint(count) then count×(uvarint(len)
+// ++ bytes) — the same LEB128 style kv/guest use — so the guest decoder can
+// detect a short/truncated buffer rather than silently dropping tail records. ──
+
+static int put_uv(unsigned char *buf, size_t *used, size_t cap, unsigned long v) {
+    for (;;) {
+        if (*used >= cap) return 0;
+        unsigned char b = (unsigned char)(v & 0x7f);
+        v >>= 7;
+        if (v) { buf[(*used)++] = b | 0x80; } else { buf[(*used)++] = b; return 1; }
+    }
+}
+static int put_rec(unsigned char *buf, size_t *used, size_t cap, const char *s, size_t n) {
+    if (!put_uv(buf, used, cap, (unsigned long)n)) return 0;
+    if (*used + n > cap) return 0;
+    memcpy(buf + *used, s, n);
+    *used += n;
+    return 1;
+}
+
+static JSValue js_set(JSContext *ctx, JSValueConst this_val,
+                      int argc, JSValueConst *argv) {
+    if (argc < 3) return JS_ThrowTypeError(ctx, "set(plugin, key, value)");
+    size_t pl, kl;
+    const char *p = JS_ToCStringLen(ctx, &pl, argv[0]);
+    const char *k = JS_ToCStringLen(ctx, &kl, argv[1]);
+    static unsigned char buf[65536];
+    size_t used = 0;
+    int ok = 1;
+    if (p && k) {
+        if (JS_IsArray(argv[2])) {
+            JSValue lenv = JS_GetPropertyStr(ctx, argv[2], "length");
+            uint32_t len = 0;
+            JS_ToUint32(ctx, &len, lenv);
+            JS_FreeValue(ctx, lenv);
+            ok = put_uv(buf, &used, sizeof buf, len);
+            for (uint32_t i = 0; ok && i < len; i++) {
+                JSValue ev = JS_GetPropertyUint32(ctx, argv[2], i);
+                size_t el;
+                const char *es = JS_ToCStringLen(ctx, &el, ev);
+                if (es) ok = put_rec(buf, &used, sizeof buf, es, el);
+                JS_FreeCString(ctx, es);
+                JS_FreeValue(ctx, ev);
+            }
+        } else {
+            size_t vl;
+            const char *vs = JS_ToCStringLen(ctx, &vl, argv[2]);
+            ok = put_uv(buf, &used, sizeof buf, 1);
+            if (ok && vs) ok = put_rec(buf, &used, sizeof buf, vs, vl);
+            JS_FreeCString(ctx, vs);
+        }
+        if (ok) host_set(p, (int)pl, k, (int)kl, (const char *)buf, (int)used);
+    }
+    JS_FreeCString(ctx, p);
+    JS_FreeCString(ctx, k);
+    return JS_UNDEFINED;
+}
+
 // Install the `weft` global: the config surface config.js calls.
 static void install_weft(JSContext *ctx) {
     JSValue global = JS_GetGlobalObject(ctx);
@@ -100,6 +166,7 @@ static void install_weft(JSContext *ctx) {
     JS_SetPropertyStr(ctx, weft, "echo", JS_NewCFunction(ctx, js_echo, "echo", 1));
     JS_SetPropertyStr(ctx, weft, "log", JS_NewCFunction(ctx, js_log, "log", 1));
     JS_SetPropertyStr(ctx, weft, "plugin", JS_NewCFunction(ctx, js_plugin, "plugin", 1));
+    JS_SetPropertyStr(ctx, weft, "set", JS_NewCFunction(ctx, js_set, "set", 3));
     JS_SetPropertyStr(ctx, global, "weft", weft);
     JS_FreeValue(ctx, global);
 }

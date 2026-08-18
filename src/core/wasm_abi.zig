@@ -129,6 +129,10 @@ pub const WasmPlugin = struct {
     ctx: *command.Context,
     name: []u8,
     store: ?*kv.Store,
+    /// Read-only config data the config plane staged for this plugin (namespaced
+    /// by plugin name), a store DISTINCT from `store` so runtime kv scratch can
+    /// never stomp injected config (and vice versa). Read via `wl_config_get`.
+    config_store: ?*kv.Store,
     /// Host effect services the membrane forwards to (mirrors abi.Services).
     syntax_of: ?SyntaxResolver,
     subbuffers: ?*subbuffer.SubBuffers,
@@ -296,6 +300,10 @@ pub const LoadOptions = struct {
     /// The kv store this plugin's Group-E admin calls persist into (namespaced
     /// by plugin name). Null = kv unavailable (kvGet→absent, kvPut→dropped).
     kv: ?*kv.Store = null,
+    /// Read-only config data (from the config plane's `weft.set`), namespaced by
+    /// plugin name. A distinct store from `kv` — structural isolation, so config
+    /// and runtime scratch never collide. Null = no config (configGet→absent).
+    config: ?*kv.Store = null,
     /// Resolves a buffer's grammar for `nodeAt`. Null = structural reads
     /// return "no node" (the honest degrade).
     syntax_of: ?SyntaxResolver = null,
@@ -352,6 +360,7 @@ fn construct(engine: *wasm.Engine, ctx: *command.Context, name: []const u8, opts
         .ctx = ctx,
         .name = name_dup,
         .store = opts.kv,
+        .config_store = opts.config,
         .pool = opts.pool,
         .syntax_of = opts.syntax_of,
         .subbuffers = opts.subbuffers,

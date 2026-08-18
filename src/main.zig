@@ -230,6 +230,10 @@ pub fn main(init: std.process.Init) !void {
     //    need are wired here and forwarded across the membrane.
     var plugin_kv: core.kv.Store = .empty;
     defer plugin_kv.deinit(gpa);
+    // Config data the config plane stages via weft.set — a DISTINCT store from
+    // plugin_kv so runtime scratch and injected config can never collide.
+    var config_kv: core.kv.Store = .empty;
+    defer config_kv.deinit(gpa);
     var plugin_subs: core.subbuffer.SubBuffers = .empty;
     defer plugin_subs.deinit(gpa);
     var plugin_loop = core.async_loop.Loop.init(gpa, pool, core.task.nowNs);
@@ -249,7 +253,7 @@ pub fn main(init: std.process.Init) !void {
         .gpa = gpa,
         .engine = &wasm_engine,
         .ctx = &cmd_ctx,
-        .opts = .{ .kv = &plugin_kv, .loop = &plugin_loop, .subbuffers = &plugin_subs, .syntax_of = resolveSyntax, .pool = pool },
+        .opts = .{ .kv = &plugin_kv, .config = &config_kv, .loop = &plugin_loop, .subbuffers = &plugin_subs, .syntax_of = resolveSyntax, .pool = pool },
         .list = &plugins,
         .dir = plugin_dir,
     };
@@ -264,7 +268,7 @@ pub fn main(init: std.process.Init) !void {
     // bare weft with no plugins is modeless. Absent or broken config is a
     // warning, never fatal.
     if (args.config) |config_path| {
-        loadJsConfig(gpa, &cmd_ctx, config_path, plugin_host.loader()) catch |e|
+        loadJsConfig(gpa, &cmd_ctx, config_path, plugin_host.loader(), &config_kv) catch |e|
             std.log.warn("config: {s} failed to load: {t}", .{ config_path, e });
     }
 
@@ -1442,12 +1446,12 @@ fn identityHandler(ctx: *core.command.Context, data: ?*anyopaque, args: []const 
 /// 06B). Reads the file, spins a one-shot wasm engine, and evals — the config
 /// wires the editor only through the `weft.*` grants. The engine is scoped to
 /// the eval: config is a startup declaration, not a resident runtime.
-fn loadJsConfig(gpa: std.mem.Allocator, ctx: *core.command.Context, path: []const u8, loader: ?core.quickjs.PluginLoader) !void {
+fn loadJsConfig(gpa: std.mem.Allocator, ctx: *core.command.Context, path: []const u8, loader: ?core.quickjs.PluginLoader, config: *core.kv.Store) !void {
     const src = try core.file.readAlloc(gpa, path);
     defer gpa.free(src);
     var engine = try core.wasm.Engine.init();
     defer engine.deinit();
-    try core.quickjs.evalConfig(&engine, ctx, loader, src);
+    try core.quickjs.evalConfig(&engine, ctx, loader, config, src);
 }
 
 /// Resolve the reference-plugin directory: `$WEFT_PLUGIN_DIR` if set, else
