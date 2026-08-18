@@ -137,6 +137,18 @@ pub fn main(init: std.process.Init) !void {
             else => |e| return e,
         };
     }
+    // Connecting as a peer without a --file: the shared document still binds to
+    // buffer 0 (wire v1), but don't leave it named "*scratch*" — name it after
+    // the host so the peer clearly lands in the shared session, not a scratchpad.
+    if (args.connect) |hostport| {
+        if (args.file == null) {
+            if (std.fmt.allocPrint(gpa, "@{s}", .{hostport})) |nm| {
+                const b0 = buffers.active();
+                gpa.free(b0.name);
+                b0.name = nm;
+            } else |_| {}
+        }
+    }
     // Stable: buffer 0 outlives the run; wire v1 collab binds to it.
     const ed0 = &buffers.active().editor;
 
