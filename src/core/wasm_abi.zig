@@ -647,6 +647,27 @@ test "which-key: on_menu builds a corner surface from the current menu's binding
     try t.expect(!plugin.surface.active);
 }
 
+test "dired: lists a directory via the locus-routed fs.list door" {
+    const gpa = t.allocator;
+    var env: Env = undefined;
+    try Env.init(gpa, &env);
+    defer env.deinit(gpa);
+
+    var engine = try wasm.Engine.init();
+    defer engine.deinit();
+    // dired requests fs_read in describe() → granted; its `dired` command lists
+    // "." (the test's cwd) through wl_fs_list("here", …).
+    const plugin = try loadPlugin(&engine, &env.ctx, "dired", @embedFile("guest_dired_wasm"), .{});
+    defer plugin.deinit();
+
+    _ = try command.run(&env.commands, &env.ctx, "dired", &.{});
+    // It entered the dired mode and inserted a non-empty listing (buffer-create
+    // isn't registered in this bare Env, so the listing lands in the active
+    // buffer — the point under test is that fs.list returned real entries).
+    try t.expectEqualStrings("dired", env.keymap.currentMode());
+    try t.expect(env.buffers.active().editor.text().byteLen() > 0);
+}
+
 test "helix: a second modal editor loads in its OWN mode namespace" {
     const gpa = t.allocator;
     var env: Env = undefined;

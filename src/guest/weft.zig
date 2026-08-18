@@ -110,6 +110,7 @@ extern "weft" fn wl_proc_filter(cmd: u32, cmd_len: u32, start: u32, end: u32) vo
 extern "weft" fn wl_fs_read(path: u32, path_len: u32, out_ptr: u32, out_cap: u32) i32;
 extern "weft" fn wl_fs_write(path: u32, path_len: u32, ptr: u32, len: u32) i32;
 extern "weft" fn wl_fs_append(path: u32, path_len: u32, ptr: u32, len: u32) i32;
+extern "weft" fn wl_fs_list(auth: u32, auth_len: u32, path: u32, path_len: u32, out_ptr: u32, out_cap: u32) i32;
 
 /// Shared scratch for host→guest byte returns. A read wrapper (`slice`,
 /// `path`, `kvGet`) returns a slice INTO this buffer, valid until the next
@@ -674,4 +675,13 @@ pub fn fsWrite(fpath: []const u8, bytes: []const u8) bool {
 /// Append `bytes` to a file (created if absent). Perm: fs_write. Returns success.
 pub fn fsAppend(fpath: []const u8, bytes: []const u8) bool {
     return wl_fs_append(p(fpath.ptr), @intCast(fpath.len), p(bytes.ptr), @intCast(bytes.len)) == 0;
+}
+/// List a directory at `authority` (locus): "here" for the local fs; a peer/
+/// shell authority once the collab transport is wired. Entries newline-joined,
+/// directories with a trailing `/`, into `scratch` (valid until the next read).
+/// null = denied / unresolved authority / not a directory. Perm: fs_read.
+pub fn fsList(authority: []const u8, dir: []const u8) ?[]const u8 {
+    const n = wl_fs_list(p(authority.ptr), @intCast(authority.len), p(dir.ptr), @intCast(dir.len), p(&scratch), scratch.len);
+    if (n < 0) return null;
+    return scratch[0..@intCast(n)];
 }

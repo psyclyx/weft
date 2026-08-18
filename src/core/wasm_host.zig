@@ -28,6 +28,7 @@ const Editor = @import("Editor.zig");
 const wasm_abi = @import("wasm_abi.zig");
 const WasmPlugin = wasm_abi.WasmPlugin;
 const surface_mod = @import("surface.zig");
+const rooted_fs = @import("rooted_fs.zig");
 const WasmCmd = wasm_abi.WasmCmd;
 const PendingItem = wasm_abi.PendingItem;
 const WasmBoundPick = wasm_abi.WasmBoundPick;
@@ -154,6 +155,7 @@ pub fn defineImports(linker: *wasm.Linker, p: *WasmPlugin) !void {
     try d(linker, "wl_fs_read", 4, 1, hFsRead, p);
     try d(linker, "wl_fs_write", 4, 1, hFsWrite, p);
     try d(linker, "wl_fs_append", 4, 1, hFsAppend, p);
+    try d(linker, "wl_fs_list", 6, 1, hFsList, p);
 }
 
 const file = @import("file.zig");
@@ -228,6 +230,51 @@ fn hFsAppend(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32, results
         return;
     };
     results[0] = 0;
+}
+
+/// `fs.list(authority, path, out, cap)` (perm fs_read) → n or -1. Locus-routed:
+/// `"here"` lists the LOCAL path via rooted_fs (confined to that dir); `.shell`/
+/// `.peer` authorities route to ShellFs / the peer_fs client once the collab
+/// transport is wired (they return -1 here, so a guest degrades, never reads the
+/// wrong locus). Directories keep a trailing `/`; entries are newline-joined.
+fn hFsList(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32, results: []i32) void {
+    const p: *WasmPlugin = @ptrCast(@alignCast(data.?));
+    if (!p.perms[perm_fs_read]) {
+        results[0] = -1;
+        return;
+    }
+    const auth = caller.readMemory(p.gpa, @intCast(args[0]), @intCast(args[1])) catch {
+        results[0] = -1;
+        return;
+    };
+    defer p.gpa.free(auth);
+    const path = caller.readMemory(p.gpa, @intCast(args[2]), @intCast(args[3])) catch {
+        results[0] = -1;
+        return;
+    };
+    defer p.gpa.free(path);
+    // Only the local tier is served here; a remote authority degrades to -1
+    // (the path carries the locus — we never silently fall back to local).
+    if (!std.mem.eql(u8, auth, "here")) {
+        results[0] = -1;
+        return;
+    }
+    const pz = p.gpa.dupeZ(u8, path) catch {
+        results[0] = -1;
+        return;
+    };
+    defer p.gpa.free(pz);
+    var fs = rooted_fs.RootedFs.open(pz.ptr) catch {
+        results[0] = -1;
+        return;
+    };
+    defer fs.close();
+    const listing = fs.list(p.gpa, ".") catch {
+        results[0] = -1;
+        return;
+    };
+    defer p.gpa.free(listing);
+    results[0] = @intCast(caller.writeMemory(@intCast(args[4]), @intCast(args[5]), listing) catch 0);
 }
 
 pub const perm_fs_read = 0;

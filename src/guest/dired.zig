@@ -13,7 +13,6 @@ const dired_buf = "*dired*";
 /// The directory currently listed (paths are built relative to it).
 var cwd_buf: [1024]u8 = undefined;
 var cwd_len: usize = 0;
-var cmd_buf: [1200]u8 = undefined;
 
 fn cwd() []const u8 {
     return cwd_buf[0..cwd_len];
@@ -33,7 +32,7 @@ const cmds = [_]Cmd{
 
 export fn describe() void {
     for (cmds) |c| weft.declareCommand(c.name);
-    weft.requestPerm(.proc);
+    weft.requestPerm(.fs_read);
 }
 export fn init() void {
     for (cmds) |c| _ = weft.register(c.name);
@@ -47,14 +46,17 @@ export fn on_command(id: u32) void {
     if (id < cmds.len) cmds[id].handler();
 }
 
-/// List `dir` into `*dired*` (async via `ls`) and enter the dired mode.
-/// `ls -1Ap`: one entry per line, almost-all (no . / ..), directories get a
-/// trailing `/` — the marker `openEntry` uses to decide descend vs open.
+/// List `dir` into `*dired*` and enter the dired mode. Locus-routed via
+/// `fs.list` ("here" = local): no subprocess, and the same call lists a peer's
+/// shared root once the collab transport is wired. Directories keep a trailing
+/// `/` — the marker `openEntry` uses to decide descend vs open.
 fn list(dir: []const u8) void {
     setCwd(dir);
-    const cmd = std.fmt.bufPrint(&cmd_buf, "ls -1Ap {s}", .{dir}) catch return;
-    weft.runStr("buffer-create", dired_buf); // create + focus an empty tool buffer
-    weft.procToBuffer(cmd, dired_buf);
+    const listing = weft.fsList("here", dir) orelse return; // borrows the shared scratch
+    weft.runStr("buffer-create", dired_buf); // create/focus the tool buffer (static name, scratch intact)
+    // Replace the whole buffer with the fresh listing (handles refresh too).
+    weft.edit(.{ .start = 0, .end = weft.byteLen() }, listing);
+    weft.jump(0);
     weft.setMode("dired");
 }
 
