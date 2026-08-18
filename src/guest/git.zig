@@ -18,6 +18,11 @@ const cmds = [_]Cmd{
     .{ .name = "git-diff", .handler = gitDiff },
     .{ .name = "git-diff-staged", .handler = gitDiffStaged },
     .{ .name = "git-blame", .handler = gitBlame },
+    // magit-style verbs, live in the *git-status* buffer's own mode.
+    .{ .name = "git-stage", .handler = gitStage },
+    .{ .name = "git-unstage", .handler = gitUnstage },
+    .{ .name = "git-refresh", .handler = gitStatus },
+    .{ .name = "git-open", .handler = gitOpen },
 };
 
 export fn describe() void {
@@ -27,9 +32,53 @@ export fn describe() void {
 }
 export fn init() void {
     for (cmds) |c| _ = weft.register(c.name);
+    // The magit-style keymap: rich, cleanly, over the plugin API. Falls back to
+    // normal so vim motions still navigate the status list.
+    weft.setFallback("magit", "normal");
+    weft.bindKey("magit", "s", "git-stage");
+    weft.bindKey("magit", "u", "git-unstage");
+    weft.bindKey("magit", "g", "git-refresh");
+    weft.bindKey("magit", "Return", "git-open");
 }
 export fn on_command(id: u32) void {
     if (id < cmds.len) cmds[id].handler();
+}
+
+/// The path on the current *git-status* line: `git status --short` prints
+/// "XY path" (status in cols 0-1, path from col 3), so drop the leading status
+/// field. Returns "" for a header line (e.g. the `## branch` line). Copied out
+/// of the shared scratch into `path_buf` before any further membrane call.
+var path_buf: [512]u8 = undefined;
+fn currentPath() []const u8 {
+    const line = weft.lineAt(weft.cursor());
+    const raw = weft.slice(line.start, line.end);
+    if (raw.len < 4 or (raw[0] == '#' and raw[1] == '#')) return "";
+    const rel = std.mem.trim(u8, raw[3..], " \t\r\n");
+    const n = @min(rel.len, path_buf.len);
+    @memcpy(path_buf[0..n], rel[0..n]);
+    return path_buf[0..n];
+}
+
+/// Stage / unstage the file under the cursor, then refresh — chained in one
+/// shell command so the status re-reads AFTER the index change (no async race).
+fn gitStage() void {
+    const path = currentPath();
+    if (path.len == 0) return;
+    const cmd = std.fmt.bufPrint(&cmd_buf, "git add -- '{s}' && git status --short --branch", .{path}) catch return;
+    show(cmd, "*git-status*");
+    weft.setMode("magit");
+}
+fn gitUnstage() void {
+    const path = currentPath();
+    if (path.len == 0) return;
+    const cmd = std.fmt.bufPrint(&cmd_buf, "git reset -q HEAD -- '{s}' && git status --short --branch", .{path}) catch return;
+    show(cmd, "*git-status*");
+    weft.setMode("magit");
+}
+fn gitOpen() void {
+    const path = currentPath();
+    if (path.len == 0) return;
+    weft.runStr("open", path);
 }
 
 /// Create+focus the tool buffer, then fill it with `cmd`'s output async.
@@ -39,6 +88,7 @@ fn show(cmd: []const u8, name: []const u8) void {
 }
 fn gitStatus() void {
     show("git status --short --branch", "*git-status*");
+    weft.setMode("magit"); // rich status buffer: s stage, u unstage, g refresh
 }
 fn gitLog() void {
     show("git log --oneline --graph -30", "*git-log*");
