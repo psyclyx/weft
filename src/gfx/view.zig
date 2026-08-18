@@ -124,6 +124,19 @@ pub const Theme = struct {
         };
     }
 
+    /// Background color for the status-line mode chip, keyed by mode family so
+    /// the editor's current state reads at a glance (green normal, blue insert,
+    /// purple visual/select, amber operator/menu).
+    fn modeChipColor(self: *const Theme, mode: []const u8) [4]f32 {
+        if (std.mem.startsWith(u8, mode, "insert")) return self.syn_function;
+        if (std.mem.startsWith(u8, mode, "visual") or std.mem.startsWith(u8, mode, "select")) return self.syn_keyword;
+        if (std.mem.startsWith(u8, mode, "normal")) return self.accent;
+        if (std.mem.startsWith(u8, mode, "op") or std.mem.startsWith(u8, mode, "leader") or
+            std.mem.startsWith(u8, mode, "menu") or std.mem.startsWith(u8, mode, "pick"))
+            return self.diag_warn;
+        return self.status;
+    }
+
     fn classColor(self: *const Theme, class: HighlightClass) [4]f32 {
         return switch (class) {
             .none, .variable => self.foreground,
@@ -1079,60 +1092,78 @@ pub const View = struct {
         panel_rect: region.Rect,
         cols_visible: usize,
     ) !void {
-        var parts: std.ArrayList(u8) = .empty;
-        try parts.appendSlice(scratch, " ");
-        try parts.appendSlice(scratch, hud.mode);
-        try parts.appendSlice(scratch, "  ");
-        if (hud.buffer_pos) |bp| {
-            try parts.appendSlice(scratch, bp);
-            try parts.appendSlice(scratch, " ");
-        }
-        try parts.appendSlice(scratch, hud.file orelse "[scratch]");
-        if (hud.dirty) try parts.appendSlice(scratch, " [+]");
-        if (hud.backing) |b| {
-            try parts.appendSlice(scratch, " (");
-            try parts.appendSlice(scratch, b);
-            try parts.appendSlice(scratch, ")");
-        }
-        if (hud.save_note) |s| {
-            try parts.appendSlice(scratch, " [");
-            try parts.appendSlice(scratch, s);
-            try parts.appendSlice(scratch, "]");
-        }
-        if (hud.save_failed) try parts.appendSlice(scratch, " [save failed]");
-        if (hud.unfetched_pct) |pct| {
-            if (pct > 0) {
-                const fetched = try std.fmt.allocPrint(scratch, " [{d}% fetched]", .{100 - @as(u32, pct)});
-                try parts.appendSlice(scratch, fetched);
-            }
-        }
-        if (hud.peers > 0) {
-            const peers = try std.fmt.allocPrint(scratch, "  ✦{d}", .{hud.peers});
-            try parts.appendSlice(scratch, peers);
-        }
-        const status_diag_count = if (hud.diag_layer) |dl| dl.spanCount() else 0;
-        if (status_diag_count > 0) {
-            const dp = try std.fmt.allocPrint(scratch, "  !{d}", .{status_diag_count});
-            try parts.appendSlice(scratch, dp);
-        }
-        if (hud.link) |l| {
-            try parts.appendSlice(scratch, "  link:");
-            try parts.appendSlice(scratch, l);
-        }
-        if (hud.trust) |tr| {
-            try parts.appendSlice(scratch, "  ");
-            try parts.appendSlice(scratch, tr);
-        }
-        if (hud.echo orelse hud.cursor_diag) |msg| {
-            try parts.appendSlice(scratch, "  ·  ");
-            try parts.appendSlice(scratch, msg);
-        }
         // The status line owns `status_rect`; the panel (pick or which-key)
         // owns `panel_rect` directly above it. Both rects were cut from the
         // frame by one carving (build), so a panel physically cannot land on
         // the status line or the body — the class of bug the old
-        // rows_total-N arithmetic allowed.
-        try self.appendPlainRun(scratch, runs, rects, parts.items, self.baseIn(status_rect.y, 0), cols_visible, self.theme.status, null);
+        // rows_total-N arithmetic allowed. Segments are color-coded and chain
+        // left-to-right from `segRun`; a right-anchored cluster (peers, diag
+        // count) is measured backwards from the right edge.
+        const base_y = self.baseIn(status_rect.y, 0);
+        // Full-width status background so the chips read as one bar.
+        try rects.append(scratch, .{
+            .x = self.origin_x,
+            .y = base_y - self.ascent,
+            .w = @as(f32, @floatFromInt(cols_visible)) * self.cell_w,
+            .h = self.line_h,
+            .color = self.theme.selection,
+        });
+
+        var col: usize = 0;
+        // Mode chip: colored background, dark text — the loudest indicator.
+        const chip = try std.fmt.allocPrint(scratch, " {s} ", .{hud.mode});
+        col = try self.segRun(scratch, runs, rects, chip, col, base_y, cols_visible, self.theme.background, self.theme.modeChipColor(hud.mode));
+        col += 1;
+        if (hud.buffer_pos) |bp| {
+            col = try self.segRun(scratch, runs, rects, bp, col, base_y, cols_visible, self.theme.status, null);
+            col += 1;
+        }
+        col = try self.segRun(scratch, runs, rects, hud.file orelse "[scratch]", col, base_y, cols_visible, self.theme.foreground, null);
+        if (hud.dirty) col = try self.segRun(scratch, runs, rects, " ●", col, base_y, cols_visible, self.theme.diag_warn, null);
+        if (hud.backing) |b| {
+            const bk = try std.fmt.allocPrint(scratch, " ({s})", .{b});
+            col = try self.segRun(scratch, runs, rects, bk, col, base_y, cols_visible, self.theme.status, null);
+        }
+        if (hud.save_note) |s| {
+            const sn = try std.fmt.allocPrint(scratch, " [{s}]", .{s});
+            col = try self.segRun(scratch, runs, rects, sn, col, base_y, cols_visible, self.theme.diag_warn, null);
+        }
+        if (hud.save_failed) col = try self.segRun(scratch, runs, rects, " [save failed]", col, base_y, cols_visible, self.theme.diag_error, null);
+        if (hud.unfetched_pct) |pct| {
+            if (pct > 0) {
+                const fetched = try std.fmt.allocPrint(scratch, " [{d}% fetched]", .{100 - @as(u32, pct)});
+                col = try self.segRun(scratch, runs, rects, fetched, col, base_y, cols_visible, self.theme.diag_warn, null);
+            }
+        }
+        if (hud.link) |l| {
+            const lk = try std.fmt.allocPrint(scratch, "  link:{s}", .{l});
+            col = try self.segRun(scratch, runs, rects, lk, col, base_y, cols_visible, self.theme.md_link, null);
+        }
+        if (hud.trust) |tr| {
+            const tt = try std.fmt.allocPrint(scratch, "  {s}", .{tr});
+            col = try self.segRun(scratch, runs, rects, tt, col, base_y, cols_visible, self.theme.status, null);
+        }
+        if (hud.echo orelse hud.cursor_diag) |msg| {
+            const em = try std.fmt.allocPrint(scratch, "  ·  {s}", .{msg});
+            col = try self.segRun(scratch, runs, rects, em, col, base_y, cols_visible, self.theme.foreground, null);
+        }
+
+        // Right-anchored cluster: peers then diagnostics, measured backward.
+        const status_diag_count = if (hud.diag_layer) |dl| dl.spanCount() else 0;
+        var right_segs: std.ArrayList(struct { text: []const u8, color: [4]f32 }) = .empty;
+        if (hud.peers > 0)
+            try right_segs.append(scratch, .{ .text = try std.fmt.allocPrint(scratch, "✦{d} ", .{hud.peers}), .color = self.theme.accent });
+        if (status_diag_count > 0)
+            try right_segs.append(scratch, .{ .text = try std.fmt.allocPrint(scratch, "!{d} ", .{status_diag_count}), .color = self.theme.diag_error });
+        var right_w: usize = 0;
+        for (right_segs.items) |seg| right_w += std.unicode.utf8CountCodepoints(seg.text) catch seg.text.len;
+        if (right_w > 0 and right_w < cols_visible) {
+            var rcol = cols_visible - right_w;
+            if (rcol > col) { // only if it doesn't collide with the left cluster
+                for (right_segs.items) |seg|
+                    rcol = try self.segRun(scratch, runs, rects, seg.text, rcol, base_y, cols_visible, seg.color, null);
+            }
+        }
 
         // which-key host fallback: a chord is pending and no pick is open — list
         // the prefix mode's bindings in the reserved panel region. (The picker is
@@ -1378,6 +1409,55 @@ pub const View = struct {
                 }
             }
         }
+    }
+
+    /// Render one status segment as colored mono cells starting at column
+    /// `start_col` (from `origin_x`), optionally over a background chip that
+    /// spans exactly the segment's width. Returns the column just past it, so
+    /// segments chain left-to-right. Clips at `cols_visible`.
+    fn segRun(
+        self: *View,
+        scratch: Allocator,
+        runs: *std.ArrayList(Run),
+        rects: *std.ArrayList(Rect),
+        text: []const u8,
+        start_col: usize,
+        baseline_y: f32,
+        cols_visible: usize,
+        color: [4]f32,
+        bg: ?[4]f32,
+    ) !usize {
+        if (start_col >= cols_visible or text.len == 0) return start_col;
+        const w_cols = std.unicode.utf8CountCodepoints(text) catch text.len;
+        if (bg) |bgc| {
+            const draw_cols = @min(w_cols, cols_visible - start_col);
+            try rects.append(scratch, .{
+                .x = self.origin_x + @as(f32, @floatFromInt(start_col)) * self.cell_w,
+                .y = baseline_y - self.ascent,
+                .w = @as(f32, @floatFromInt(draw_cols)) * self.cell_w,
+                .h = self.line_h,
+                .color = bgc,
+            });
+        }
+        var cells: std.ArrayList(snail.Cell) = .empty;
+        var it = (std.unicode.Utf8View.init(text) catch return start_col).iterator();
+        var col = start_col;
+        var byte: usize = 0;
+        var last_byte: usize = 0;
+        while (it.nextCodepointSlice()) |s| : (col += 1) {
+            if (col >= cols_visible) break;
+            try cells.append(scratch, .{
+                .source = .{ .start = @intCast(byte), .end = @intCast(byte + s.len) },
+                .column = @intCast(col),
+                .color = color,
+            });
+            byte += s.len;
+            last_byte = byte;
+        }
+        if (cells.items.len == 0) return start_col;
+        const shaped = try snail.shape(scratch, &self.face_set.mono, text[0..last_byte], .{});
+        try runs.append(scratch, .{ .shaped = shaped, .baseline_y = baseline_y, .place = .{ .cell = cells.items } });
+        return col;
     }
 
     fn appendPlainRun(
