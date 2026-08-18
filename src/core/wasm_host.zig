@@ -123,6 +123,7 @@ pub fn defineImports(linker: *wasm.Linker, p: *WasmPlugin) !void {
     // with a host-side proc body (the guest can't run off-thread itself).
     try d(linker, "wl_shell_insert", 2, 0, hShellInsert, p);
     try d(linker, "wl_proc_to_buffer", 4, 0, hProcToBuffer, p);
+    try d(linker, "wl_proc_filter", 4, 0, hProcFilter, p);
     // fs read/write (perm-gated) — design §4 Group B/C. Local, cwd-relative.
     try d(linker, "wl_fs_read", 4, 1, hFsRead, p);
     try d(linker, "wl_fs_write", 4, 1, hFsWrite, p);
@@ -381,6 +382,109 @@ fn procFree(ctx: ?*anyopaque) void {
     gpa.free(job.plugin);
     gpa.free(job.buf);
     gpa.free(job.cmd);
+    gpa.destroy(job);
+}
+
+/// A deferred proc FILTER: run `[start,end)` through a command (which rewrites
+/// a temp file in place, `{}` = its path) and replace the range with the
+/// result. The edit is stamped at the version read and lands as the plugin
+/// peer, so it rebases + merges like a concurrent editor (design §6.2 fmt).
+const FilterJob = struct {
+    ctx: *command.Context,
+    plugin: []u8,
+    version: []u8,
+    start: usize,
+    end: usize,
+    cmd: []u8, // contains "{}" → the temp path
+    content: []u8, // the captured input (owned)
+    tmp: []u8,
+};
+
+var filter_counter: usize = 0;
+
+/// Perm-gated (proc + timer): filter `[start,end)` through `<cmd>` (a `{}`
+/// placeholder receives a temp file the range is written to, transformed in
+/// place, and read back). Formatters (`zig fmt {}`, `prettier --write {}`) and
+/// `vim !`-style filters both fit.
+fn hProcFilter(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32, results: []i32) void {
+    _ = results;
+    const p: *WasmPlugin = @ptrCast(@alignCast(data.?));
+    if (!p.perms[perm_proc] or !p.perms[perm_timer]) return;
+    const loop = p.loop orelse return;
+    const gpa = p.gpa;
+    const cmd = caller.readMemory(gpa, @intCast(args[0]), @intCast(args[1])) catch return;
+    errdefer gpa.free(cmd);
+    const rope = p.ctx.editor().text();
+    const len = rope.byteLen();
+    const s = @min(@as(usize, @intCast(args[2])), len);
+    const e = @min(@as(usize, @intCast(args[3])), len);
+    if (e < s) return;
+    const content = gpa.alloc(u8, e - s) catch return;
+    errdefer gpa.free(content);
+    if (e > s) {
+        var sr = rope.streamReader(.{ .start = s, .end = e }, &.{});
+        sr.interface.readSliceAll(content) catch return;
+    }
+    const version = p.ctx.document().version(gpa) catch return;
+    errdefer gpa.free(version);
+    filter_counter += 1;
+    const tmp = std.fmt.allocPrint(gpa, "/tmp/weft-filter-{d}-{d}", .{ filter_counter, s }) catch return;
+    errdefer gpa.free(tmp);
+    const job = gpa.create(FilterJob) catch return;
+    job.* = .{
+        .ctx = p.ctx,
+        .plugin = gpa.dupe(u8, p.name) catch {
+            gpa.destroy(job);
+            return;
+        },
+        .version = version,
+        .start = s,
+        .end = e,
+        .cmd = cmd,
+        .content = content,
+        .tmp = tmp,
+    };
+    _ = loop.spawn(filterWork, job, .{ .ctx = job, .call = filterDeliver, .deinit = filterFree }) catch filterFree(job);
+}
+
+fn filterWork(gpa: Allocator, ctx: ?*anyopaque) anyerror![]u8 {
+    const job: *FilterJob = @ptrCast(@alignCast(ctx.?));
+    // Write the input, run the command over it, read the result back. On ANY
+    // failure return the ORIGINAL content, so the range is replaced with an
+    // identical copy — never corrupted or emptied.
+    file.writeBytes(gpa, job.tmp, job.content) catch return gpa.dupe(u8, job.content);
+    const cmd = std.mem.replaceOwned(u8, gpa, job.cmd, "{}", job.tmp) catch return gpa.dupe(u8, job.content);
+    defer gpa.free(cmd);
+    var res = proc.run(gpa, &.{ "/bin/sh", "-c", cmd }, .{ .environ = g_environ }) catch {
+        file.deleteFile(gpa, job.tmp);
+        return gpa.dupe(u8, job.content);
+    };
+    res.deinit(gpa); // in-place transform: the result is the file, not stdout
+    const out = file.readAlloc(gpa, job.tmp) catch gpa.dupe(u8, job.content);
+    file.deleteFile(gpa, job.tmp);
+    return out;
+}
+
+fn filterDeliver(ctx: ?*anyopaque, result: ?[]const u8) void {
+    const job: *FilterJob = @ptrCast(@alignCast(ctx.?));
+    const out = result orelse return;
+    const gpa = job.ctx.gpa;
+    const doc = job.ctx.document();
+    if (!authority.gradeMin(doc.my_grant, .edit).canEdit()) return;
+    const rs = position.rebaseOffset(doc, job.version, job.start, .right) orelse return;
+    const re = position.rebaseOffset(doc, job.version, job.end, .left) orelse return;
+    const pid = doc.peerNamed(gpa, job.plugin) catch return;
+    doc.peerReplaceAll(gpa, pid, &.{.{ .range = .{ .start = @min(rs, re), .end = @max(rs, re) }, .bytes = out }}) catch {};
+}
+
+fn filterFree(ctx: ?*anyopaque) void {
+    const job: *FilterJob = @ptrCast(@alignCast(ctx.?));
+    const gpa = job.ctx.gpa;
+    gpa.free(job.plugin);
+    gpa.free(job.version);
+    gpa.free(job.cmd);
+    gpa.free(job.content);
+    gpa.free(job.tmp);
     gpa.destroy(job);
 }
 
