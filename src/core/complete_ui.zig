@@ -65,6 +65,8 @@ pub const CompletionUi = struct {
             .handler = accept,
             .data = self,
         }, .{ .source = self.source() });
+        // Draw the completion list as a popup AT the caret, not the bottom dock.
+        ctx.pick.caret_anchor = ctx.editor().cursorOffset();
         self.session = id;
         self.prefix_len = plen;
         // Surface instant-tier results (they answered during fire) now.

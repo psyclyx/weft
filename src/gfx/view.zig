@@ -630,8 +630,14 @@ pub const View = struct {
         // region — never over the status/tab/panel rects, which are carved out.
         try self.drawSurfaces(scratch, &runs, &rects, hud, body_rect);
         // The picker draws into its carved window-bottom dock (main cut it off
-        // the window with cutBottom, so it cannot overlap panes or a status line).
-        if (hud.pick) |p| try self.drawPickInto(scratch, &runs, &rects, p, pick_dock);
+        // the window with cutBottom, so it cannot overlap panes or a status
+        // line). A completion pick anchors at the caret instead — a popup.
+        if (hud.pick) |p| {
+            if (p.caret_anchor) |off|
+                try self.drawPickAtCaret(scratch, &runs, &rects, p, off, body_rect)
+            else
+                try self.drawPickInto(scratch, &runs, &rects, p, pick_dock);
+        }
 
         return try self.render(world_to_pixel, runs.items, rects.items);
     }
@@ -1143,6 +1149,7 @@ pub const View = struct {
     /// same discipline `panelRows` uses. Zero when no pick is open.
     pub fn pickDockHeight(self: *const View, pick: ?*const core.Pick) f32 {
         const p = pick orelse return 0;
+        if (p.caret_anchor != null) return 0; // a caret popup (completion), not a dock
         const shown = @min(p.filtered.items.len, Hud.max_pick_rows);
         return @as(f32, @floatFromInt(1 + shown)) * self.line_h;
     }
@@ -1190,6 +1197,50 @@ pub const View = struct {
             const selected = fi == p.selected;
             if (selected) try rects.append(scratch, .{ .x = dock.x, .y = row_y, .w = dock.w, .h = self.line_h, .color = self.theme.accent });
             try self.propLine(scratch, runs, l, dock.x, row_y + self.ascent, if (selected) self.theme.background else self.theme.status);
+        }
+    }
+
+    /// Draw a completion pick as a popup anchored at the caret (byte offset
+    /// `off`): a small outlined box of candidates just below the caret line
+    /// (flipped above if it would overflow the body), the selected row
+    /// highlighted. No query line — the query is what you're typing in the
+    /// buffer. Skips if the anchor line is off-screen or there are no rows.
+    fn drawPickAtCaret(
+        self: *View,
+        scratch: Allocator,
+        runs: *std.ArrayList(Run),
+        rects: *std.ArrayList(Rect),
+        p: *const core.Pick,
+        off: usize,
+        body: region.Rect,
+    ) !void {
+        const total = p.filtered.items.len;
+        if (total == 0) return;
+        const li = self.frame_layout.lineForOffset(off) orelse return; // off-screen
+        const c = self.frame_layout.lines[li].caretAt(off);
+
+        const shown = @min(total, Hud.max_pick_rows);
+        const start = if (p.selected >= shown) p.selected + 1 - shown else 0;
+        var max_cols: usize = 8;
+        for (0..shown) |i| {
+            const item = p.items.items[p.filtered.items[start + i]];
+            max_cols = @max(max_cols, std.unicode.utf8CountCodepoints(item) catch item.len);
+        }
+        const box_w = @as(f32, @floatFromInt(max_cols + 2)) * self.cell_w;
+        const box_h = @as(f32, @floatFromInt(shown)) * self.line_h;
+        const box_x = std.math.clamp(c.x, body.x, @max(body.x, body.x + body.w - box_w));
+        var box_y = c.y_top + c.height; // just below the caret line
+        if (box_y + box_h > body.y + body.h) box_y = c.y_top - box_h; // flip above
+        box_y = std.math.clamp(box_y, body.y, @max(body.y, body.y + body.h - box_h));
+        try self.outlinedBox(scratch, rects, box_x, box_y, box_w, box_h, self.theme.selection, self.theme.accent);
+
+        for (0..shown) |i| {
+            const fi = start + i;
+            const item = p.items.items[p.filtered.items[fi]];
+            const row_y = box_y + @as(f32, @floatFromInt(i)) * self.line_h;
+            const selected = fi == p.selected;
+            if (selected) try rects.append(scratch, .{ .x = box_x, .y = row_y, .w = box_w, .h = self.line_h, .color = self.theme.accent });
+            try self.propLine(scratch, runs, item, box_x + self.cell_w, row_y + self.ascent, if (selected) self.theme.background else self.theme.foreground);
         }
     }
 

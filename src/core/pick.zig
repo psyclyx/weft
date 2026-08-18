@@ -122,6 +122,10 @@ pub const Pick = struct {
     use_counter: u64 = 0,
     /// Completion style for the live query (default orderless).
     style: Style = .orderless,
+    /// A byte offset to anchor the popup AT (completion): the view draws the
+    /// list just below that caret line instead of the window-bottom dock. Null =
+    /// the ordinary bottom dock (command palette, buffer switch, file find).
+    caret_anchor: ?usize = null,
     /// Sticky narrowing filter (space-joined tokens): a candidate must
     /// match it (orderless) IN ADDITION to the live query. `pick-narrow`
     /// promotes the current query into it and clears the query; a further
@@ -149,6 +153,7 @@ pub const Pick = struct {
         }
         self.source = null;
         self.allow_free_text = false;
+        self.caret_anchor = null;
         self.query_epoch = 0;
         self.source_epoch = 0;
         self.last_query_ns = 0;
