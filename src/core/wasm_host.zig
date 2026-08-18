@@ -1,0 +1,899 @@
+//! wasm_host — the `weft.*` host-import table: one small function per abi.Abi
+//! method the guest shim (src/guest/weft.zig) imports, each marshalling to
+//! command.Context across the sandbox membrane, plus the trampolines that
+//! dispatch back into the guest (commands, pick accept, completion provider)
+//! and the deferred shell-insert machinery. Split from wasm_abi.zig — which
+//! owns the WasmPlugin lifecycle + handshake — to keep each file focused on
+//! one concern; the two @import each other (Zig permits the cycle).
+
+const std = @import("std");
+const Allocator = std.mem.Allocator;
+
+const wasm = @import("wasm.zig");
+const command = @import("command.zig");
+const capability = @import("capability.zig");
+const pick_mod = @import("pick.zig");
+const fs_source = @import("fs_source.zig");
+const Buffers = @import("Buffers.zig");
+const syntax = @import("syntax.zig");
+const subbuffer = @import("subbuffer.zig");
+const async_loop = @import("async.zig");
+const proc = @import("proc.zig");
+const authority = @import("authority.zig");
+const position = @import("position.zig");
+const Document = @import("Document.zig");
+
+// The lifecycle side owns these; we operate on them.
+const wasm_abi = @import("wasm_abi.zig");
+const WasmPlugin = wasm_abi.WasmPlugin;
+const WasmCmd = wasm_abi.WasmCmd;
+const PendingItem = wasm_abi.PendingItem;
+const WasmBoundPick = wasm_abi.WasmBoundPick;
+
+/// Bind the full `weft.*` host-import membrane (the guest-side surface in
+/// src/guest/weft.zig). One import per abi.Abi method the shim exposes; each
+/// is small and tagged with the plugin so the callback recovers its state.
+pub fn defineImports(linker: *wasm.Linker, p: *WasmPlugin) !void {
+    const d = struct {
+        fn f(l: *wasm.Linker, comptime nm: []const u8, np: usize, nr: usize, func: wasm.Linker.HostFn, data: *WasmPlugin) !void {
+            try l.defineFn("weft", nm, np, nr, func, data);
+        }
+    }.f;
+    // Group A: core.
+    try d(linker, "wl_log", 3, 0, hLog, p);
+    // Describe phase: declarations.
+    try d(linker, "wl_declare_command", 2, 0, hDeclareCommand, p);
+    try d(linker, "wl_declare_capability", 2, 0, hDeclareCapability, p);
+    try d(linker, "wl_request_perm", 1, 0, hRequestPerm, p);
+    // Group B: read-only.
+    try d(linker, "wl_cursor", 0, 1, hCursor, p);
+    try d(linker, "wl_byte_len", 0, 1, hByteLen, p);
+    try d(linker, "wl_slice", 4, 1, hSlice, p);
+    try d(linker, "wl_line_at", 2, 0, hLineAt, p);
+    try d(linker, "wl_selection", 1, 1, hSelection, p);
+    try d(linker, "wl_path", 2, 1, hPath, p);
+    // Group C: write.
+    try d(linker, "wl_edit", 4, 0, hEdit, p);
+    try d(linker, "wl_register", 2, 1, hRegister, p);
+    try d(linker, "wl_jump", 1, 0, hJump, p);
+    // Group E: admin (kv).
+    try d(linker, "wl_kv_get", 4, 1, hKvGet, p);
+    try d(linker, "wl_kv_put", 4, 0, hKvPut, p);
+    // Config surface.
+    try d(linker, "wl_echo", 2, 0, hEcho, p);
+    // Command args in + result out (during on_command).
+    try d(linker, "wl_arg_count", 0, 1, hArgCount, p);
+    try d(linker, "wl_arg_int", 1, 1, hArgInt, p);
+    try d(linker, "wl_arg_str", 3, 1, hArgStr, p);
+    try d(linker, "wl_set_result_int", 1, 0, hSetResultInt, p);
+    try d(linker, "wl_set_result_str", 2, 0, hSetResultStr, p);
+    // Config surface (the local plane).
+    try d(linker, "wl_bind_key", 6, 0, hBindKey, p);
+    try d(linker, "wl_set_mode", 2, 0, hSetMode, p);
+    try d(linker, "wl_set_fallback", 4, 0, hSetFallback, p);
+    try d(linker, "wl_text_input", 5, 0, hTextInput, p);
+    try d(linker, "wl_menu_mode", 2, 0, hMenuMode, p);
+    try d(linker, "wl_run", 2, 0, hRun, p);
+    try d(linker, "wl_run_int", 3, 0, hRunInt, p);
+    try d(linker, "wl_run_str", 4, 0, hRunStr, p);
+    try d(linker, "wl_run_str2", 6, 0, hRunStr2, p);
+    // Introspection.
+    try d(linker, "wl_command_count", 0, 1, hCommandCount, p);
+    try d(linker, "wl_command_name", 3, 1, hCommandName, p);
+    try d(linker, "wl_command_summary", 3, 1, hCommandSummary, p);
+    try d(linker, "wl_buffer_count", 0, 1, hBufferCount, p);
+    try d(linker, "wl_buffer_id", 1, 1, hBufferId, p);
+    try d(linker, "wl_buffer_name", 3, 1, hBufferName, p);
+    try d(linker, "wl_buffer_active", 1, 1, hBufferActive, p);
+    try d(linker, "wl_buffer_readonly", 1, 1, hBufferReadonly, p);
+    // Pick.
+    try d(linker, "wl_pick_begin", 3, 0, hPickBegin, p);
+    try d(linker, "wl_pick_add", 4, 0, hPickAdd, p);
+    try d(linker, "wl_pick_end", 0, 0, hPickEnd, p);
+    try d(linker, "wl_open_file_pick", 5, 0, hOpenFilePick, p);
+    try d(linker, "wl_pick_choice", 2, 1, hPickChoice, p);
+    // Completion provider (host↔guest data-gather).
+    try d(linker, "wl_provide_completion", 0, 0, hProvideCompletion, p);
+    try d(linker, "wl_completion_prefix", 2, 1, hCompletionPrefix, p);
+    try d(linker, "wl_push_completion", 2, 0, hPushCompletion, p);
+    // Structural read + subbuffers.
+    try d(linker, "wl_node_at", 4, 1, hNodeAt, p);
+    try d(linker, "wl_claim_subbuffer", 2, 1, hClaimSubbuffer, p);
+    try d(linker, "wl_subbuffer_put_fact", 5, 0, hSubbufferPutFact, p);
+    // Effects (perm-gated): shell insert — the membrane form of editLater
+    // with a host-side proc body (the guest can't run off-thread itself).
+    try d(linker, "wl_shell_insert", 2, 0, hShellInsert, p);
+}
+
+pub const perm_proc = 3;
+pub const perm_timer = 4;
+
+/// A deferred shell insert, owned across the frame→pool→frame hop. Holds no
+/// plugin pointer — it re-resolves the doc + peer by name at delivery, so it
+/// survives the plugin being unloaded mid-flight (mirrors abi.zig's
+/// DeferredEdit). Freed in every terminal case by the sink's deinit.
+const ShellJob = struct {
+    ctx: *command.Context,
+    name: []u8,
+    version: []u8, // the version `offset` is stamped against
+    offset: usize,
+    cmd: []u8, // the shell command line
+};
+
+/// Perm-gated (proc + timer): run `<cmd>` off the frame thread and insert its
+/// stdout at the cursor when it finishes — rebased if the buffer moved,
+/// authored as this plugin's peer. The membrane form of shell.zig's
+/// `editLater(runCmd, cmd)`: same async + rebase + authority, but the proc
+/// body runs host-side (the design's "route proc through the host import").
+fn hShellInsert(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32, results: []i32) void {
+    _ = results;
+    const p: *WasmPlugin = @ptrCast(@alignCast(data.?));
+    // The perm model: dropped (no ghost) unless the plugin declared proc+timer.
+    if (!p.perms[perm_proc] or !p.perms[perm_timer]) return;
+    const loop = p.loop orelse return;
+    const gpa = p.gpa;
+    const cmd = caller.readMemory(gpa, @intCast(args[0]), @intCast(args[1])) catch return;
+    errdefer gpa.free(cmd);
+    const doc = p.ctx.document();
+    const job = gpa.create(ShellJob) catch {
+        gpa.free(cmd);
+        return;
+    };
+    job.* = .{
+        .ctx = p.ctx,
+        .name = gpa.dupe(u8, p.name) catch {
+            gpa.destroy(job);
+            gpa.free(cmd);
+            return;
+        },
+        .version = doc.version(gpa) catch {
+            gpa.free(job.name);
+            gpa.destroy(job);
+            gpa.free(cmd);
+            return;
+        },
+        .offset = p.ctx.editor().cursorOffset(),
+        .cmd = cmd,
+    };
+    _ = loop.spawn(shellWork, job, .{ .ctx = job, .call = shellDeliver, .deinit = shellFree }) catch {
+        shellFree(job);
+    };
+}
+
+/// Off-thread: run `/bin/sh -c <cmd>`, return stdout trimmed of a trailing
+/// newline. Failure yields empty (nothing inserted). Runs on the async pool
+/// worker — proc.run synchronous there, no frame block.
+fn shellWork(gpa: Allocator, ctx: ?*anyopaque) anyerror![]u8 {
+    const job: *ShellJob = @ptrCast(@alignCast(ctx.?));
+    var res = proc.run(gpa, &.{ "/bin/sh", "-c", job.cmd }, .{}) catch return gpa.alloc(u8, 0);
+    defer res.deinit(gpa);
+    return gpa.dupe(u8, std.mem.trimEnd(u8, res.stdout, "\n"));
+}
+
+/// Frame-thread delivery: rebase the captured offset and insert as the plugin
+/// peer (grade-gated). A dead version or a view grade drops silently.
+fn shellDeliver(ctx: ?*anyopaque, result: ?[]const u8) void {
+    const job: *ShellJob = @ptrCast(@alignCast(ctx.?));
+    const bytes = result orelse return;
+    const gpa = job.ctx.gpa;
+    const doc = job.ctx.document();
+    if (!authority.gradeMin(doc.my_grant, .edit).canEdit()) return;
+    const at = position.rebaseOffset(doc, job.version, job.offset, .right) orelse return;
+    const pid = doc.peerNamed(gpa, job.name) catch return;
+    doc.peerReplaceAll(gpa, pid, &.{.{ .range = .{ .start = at, .end = at }, .bytes = bytes }}) catch {};
+}
+
+fn shellFree(ctx: ?*anyopaque) void {
+    const job: *ShellJob = @ptrCast(@alignCast(ctx.?));
+    const gpa = job.ctx.gpa;
+    gpa.free(job.name);
+    gpa.free(job.version);
+    gpa.free(job.cmd);
+    gpa.destroy(job);
+}
+
+pub fn resolvePeerWp(ctx: *anyopaque, doc: *Document) Document.AddPeerError!Document.PeerId {
+    const p: *WasmPlugin = @ptrCast(@alignCast(ctx));
+    return doc.peerNamed(p.gpa, p.name);
+}
+
+// ── Host import table: one small function per abi.Abi method ──────────
+
+// Group A: core.
+fn hLog(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32, results: []i32) void {
+    _ = results;
+    const p: *WasmPlugin = @ptrCast(@alignCast(data.?));
+    const msg = caller.readMemory(p.gpa, @intCast(args[1]), @intCast(args[2])) catch return;
+    defer p.gpa.free(msg);
+    switch (args[0]) {
+        2 => std.log.warn("{s}", .{msg}),
+        3 => std.log.err("{s}", .{msg}),
+        else => std.log.info("{s}", .{msg}),
+    }
+}
+
+// Describe phase: declarations recorded only while describing.
+fn hDeclareCommand(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32, results: []i32) void {
+    _ = results;
+    const p: *WasmPlugin = @ptrCast(@alignCast(data.?));
+    if (p.phase != .describing) return;
+    const name = caller.readMemory(p.gpa, @intCast(args[0]), @intCast(args[1])) catch return;
+    p.declared.append(p.gpa, name) catch {
+        p.gpa.free(name);
+        return;
+    };
+}
+
+fn hDeclareCapability(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32, results: []i32) void {
+    _ = results;
+    const p: *WasmPlugin = @ptrCast(@alignCast(data.?));
+    if (p.phase != .describing) return;
+    const name = caller.readMemory(p.gpa, @intCast(args[0]), @intCast(args[1])) catch return;
+    p.declared_caps.append(p.gpa, name) catch {
+        p.gpa.free(name);
+        return;
+    };
+}
+
+fn hRequestPerm(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32, results: []i32) void {
+    _ = caller;
+    _ = results;
+    const p: *WasmPlugin = @ptrCast(@alignCast(data.?));
+    if (p.phase != .describing) return;
+    const idx: usize = @intCast(args[0]);
+    if (idx < wasm_abi.perm_count) p.perms[idx] = true;
+}
+
+// Group B: read-only.
+fn hCursor(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32, results: []i32) void {
+    _ = caller;
+    _ = args;
+    const p: *WasmPlugin = @ptrCast(@alignCast(data.?));
+    results[0] = @intCast(p.ctx.editor().cursorOffset());
+}
+
+fn hByteLen(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32, results: []i32) void {
+    _ = caller;
+    _ = args;
+    const p: *WasmPlugin = @ptrCast(@alignCast(data.?));
+    results[0] = @intCast(p.ctx.editor().text().byteLen());
+}
+
+fn hSlice(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32, results: []i32) void {
+    const p: *WasmPlugin = @ptrCast(@alignCast(data.?));
+    const rope = p.ctx.editor().text();
+    const len = rope.byteLen();
+    const s = @min(@as(usize, @intCast(args[0])), len);
+    const e = @min(@as(usize, @intCast(args[1])), len);
+    if (e <= s) {
+        results[0] = 0;
+        return;
+    }
+    const buf = p.gpa.alloc(u8, e - s) catch {
+        results[0] = 0;
+        return;
+    };
+    defer p.gpa.free(buf);
+    var sr = rope.streamReader(.{ .start = s, .end = e }, &.{});
+    sr.interface.readSliceAll(buf) catch {
+        results[0] = 0;
+        return;
+    };
+    const n = caller.writeMemory(@intCast(args[2]), @intCast(args[3]), buf) catch 0;
+    results[0] = @intCast(n);
+}
+
+fn hLineAt(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32, results: []i32) void {
+    _ = results;
+    const p: *WasmPlugin = @ptrCast(@alignCast(data.?));
+    const rope = p.ctx.editor().text();
+    const row = rope.offsetToPoint(@min(@as(usize, @intCast(args[0])), rope.byteLen())).row;
+    const line = rope.lineRange(row);
+    const pair = [2]u32{ @intCast(line.start), @intCast(line.end) };
+    _ = caller.writeMemory(@intCast(args[1]), 8, std.mem.asBytes(&pair)) catch {};
+}
+
+fn hSelection(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32, results: []i32) void {
+    const p: *WasmPlugin = @ptrCast(@alignCast(data.?));
+    const sel = p.ctx.editor().selectedRange() orelse {
+        results[0] = 0;
+        return;
+    };
+    const pair = [2]u32{ @intCast(sel.start), @intCast(sel.end) };
+    _ = caller.writeMemory(@intCast(args[0]), 8, std.mem.asBytes(&pair)) catch {};
+    results[0] = 1;
+}
+
+fn hPath(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32, results: []i32) void {
+    const p: *WasmPlugin = @ptrCast(@alignCast(data.?));
+    const path = p.ctx.editor().backingPath() orelse {
+        results[0] = -1;
+        return;
+    };
+    const n = caller.writeMemory(@intCast(args[0]), @intCast(args[1]), path) catch {
+        results[0] = -1;
+        return;
+    };
+    results[0] = @intCast(n);
+}
+
+// Group C: write.
+fn hEdit(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32, results: []i32) void {
+    _ = results;
+    const p: *WasmPlugin = @ptrCast(@alignCast(data.?));
+    const bytes = caller.readMemory(p.gpa, @intCast(args[2]), @intCast(args[3])) catch return;
+    defer p.gpa.free(bytes);
+    const saved = p.ctx.principal;
+    p.ctx.principal = p.principal();
+    defer p.ctx.principal = saved;
+    p.ctx.edit(.{ .start = @intCast(args[0]), .end = @intCast(args[1]) }, bytes) catch {};
+}
+
+fn hRegister(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32, results: []i32) void {
+    const p: *WasmPlugin = @ptrCast(@alignCast(data.?));
+    const gpa = p.gpa;
+    const cname = caller.readMemory(gpa, @intCast(args[0]), @intCast(args[1])) catch {
+        results[0] = -1;
+        return;
+    };
+    // Cross-check against the manifest: an undeclared command fails the load.
+    if (!p.declaresCommand(cname)) {
+        gpa.free(cname);
+        p.load_error = error.UndeclaredCommand;
+        results[0] = -1;
+        return;
+    }
+    const wc = gpa.create(WasmCmd) catch {
+        gpa.free(cname);
+        results[0] = -1;
+        return;
+    };
+    wc.* = .{ .plugin = p, .id = @intCast(p.commands.items.len), .name = cname };
+    p.commands.append(gpa, wc) catch {
+        gpa.free(cname);
+        gpa.destroy(wc);
+        results[0] = -1;
+        return;
+    };
+    _ = p.ctx.commands.bind(gpa, wc.name, .{
+        .name = wc.name,
+        .summary = "",
+        .args = &.{},
+        .handler = wpCmdTrampoline,
+        .data = wc,
+    }) catch {
+        results[0] = -1;
+        return;
+    };
+    results[0] = @intCast(wc.id);
+}
+
+fn hJump(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32, results: []i32) void {
+    _ = caller;
+    _ = results;
+    const p: *WasmPlugin = @ptrCast(@alignCast(data.?));
+    const ed = p.ctx.editor();
+    ed.placeCursor(@min(@as(usize, @intCast(args[0])), ed.text().byteLen()));
+}
+
+// Group E: admin (kv), namespaced by plugin name.
+fn hKvGet(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32, results: []i32) void {
+    const p: *WasmPlugin = @ptrCast(@alignCast(data.?));
+    const store = p.store orelse {
+        results[0] = -1;
+        return;
+    };
+    const key = caller.readMemory(p.gpa, @intCast(args[0]), @intCast(args[1])) catch {
+        results[0] = -1;
+        return;
+    };
+    defer p.gpa.free(key);
+    const val = store.get(p.name, key) orelse {
+        results[0] = -1;
+        return;
+    };
+    const n = caller.writeMemory(@intCast(args[2]), @intCast(args[3]), val) catch {
+        results[0] = -1;
+        return;
+    };
+    results[0] = @intCast(n);
+}
+
+fn hKvPut(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32, results: []i32) void {
+    _ = results;
+    const p: *WasmPlugin = @ptrCast(@alignCast(data.?));
+    const store = p.store orelse return;
+    const key = caller.readMemory(p.gpa, @intCast(args[0]), @intCast(args[1])) catch return;
+    defer p.gpa.free(key);
+    const val = caller.readMemory(p.gpa, @intCast(args[2]), @intCast(args[3])) catch return;
+    defer p.gpa.free(val);
+    store.put(p.gpa, p.name, key, val) catch {};
+}
+
+// Config surface.
+fn hEcho(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32, results: []i32) void {
+    _ = results;
+    const p: *WasmPlugin = @ptrCast(@alignCast(data.?));
+    const msg = caller.readMemory(p.gpa, @intCast(args[0]), @intCast(args[1])) catch return;
+    defer p.gpa.free(msg);
+    p.ctx.echo.clearRetainingCapacity();
+    p.ctx.echo.appendSlice(p.gpa, msg) catch {};
+}
+
+// Command args in + result out. Integers cross as i32 — the membrane word.
+fn hArgCount(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32, results: []i32) void {
+    _ = caller;
+    _ = args;
+    const p: *WasmPlugin = @ptrCast(@alignCast(data.?));
+    results[0] = @intCast(p.cur_args.len);
+}
+
+fn hArgInt(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32, results: []i32) void {
+    _ = caller;
+    const p: *WasmPlugin = @ptrCast(@alignCast(data.?));
+    const i: usize = @intCast(args[0]);
+    results[0] = if (i < p.cur_args.len and p.cur_args[i] == .integer)
+        @truncate(p.cur_args[i].integer)
+    else
+        0;
+}
+
+fn hArgStr(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32, results: []i32) void {
+    const p: *WasmPlugin = @ptrCast(@alignCast(data.?));
+    const i: usize = @intCast(args[0]);
+    if (i >= p.cur_args.len or p.cur_args[i] != .string) {
+        results[0] = -1;
+        return;
+    }
+    const n = caller.writeMemory(@intCast(args[1]), @intCast(args[2]), p.cur_args[i].string) catch {
+        results[0] = -1;
+        return;
+    };
+    results[0] = @intCast(n);
+}
+
+fn hSetResultInt(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32, results: []i32) void {
+    _ = caller;
+    _ = results;
+    const p: *WasmPlugin = @ptrCast(@alignCast(data.?));
+    p.result = .{ .integer = args[0] };
+}
+
+fn hSetResultStr(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32, results: []i32) void {
+    _ = results;
+    const p: *WasmPlugin = @ptrCast(@alignCast(data.?));
+    const bytes = caller.readMemory(p.gpa, @intCast(args[0]), @intCast(args[1])) catch return;
+    defer p.gpa.free(bytes);
+    p.result_buf.clearRetainingCapacity();
+    p.result_buf.appendSlice(p.gpa, bytes) catch return;
+    p.result = .{ .string = p.result_buf.items };
+}
+
+// Config surface (the local plane) — each mirrors an abi.Abi config method.
+fn hBindKey(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32, results: []i32) void {
+    _ = results;
+    const p: *WasmPlugin = @ptrCast(@alignCast(data.?));
+    const gpa = p.gpa;
+    const mode = caller.readMemory(gpa, @intCast(args[0]), @intCast(args[1])) catch return;
+    defer gpa.free(mode);
+    const key = caller.readMemory(gpa, @intCast(args[2]), @intCast(args[3])) catch return;
+    defer gpa.free(key);
+    const cmd = caller.readMemory(gpa, @intCast(args[4]), @intCast(args[5])) catch return;
+    defer gpa.free(cmd);
+    p.ctx.keymap.bind(gpa, mode, key, cmd) catch {};
+}
+
+fn hSetMode(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32, results: []i32) void {
+    _ = results;
+    const p: *WasmPlugin = @ptrCast(@alignCast(data.?));
+    const mode = caller.readMemory(p.gpa, @intCast(args[0]), @intCast(args[1])) catch return;
+    defer p.gpa.free(mode);
+    p.ctx.keymap.setMode(p.gpa, mode) catch {};
+}
+
+fn hSetFallback(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32, results: []i32) void {
+    _ = results;
+    const p: *WasmPlugin = @ptrCast(@alignCast(data.?));
+    const gpa = p.gpa;
+    const mode = caller.readMemory(gpa, @intCast(args[0]), @intCast(args[1])) catch return;
+    defer gpa.free(mode);
+    const parent = caller.readMemory(gpa, @intCast(args[2]), @intCast(args[3])) catch return;
+    defer gpa.free(parent);
+    p.ctx.keymap.setFallback(gpa, mode, parent) catch {};
+}
+
+fn hTextInput(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32, results: []i32) void {
+    _ = results;
+    const p: *WasmPlugin = @ptrCast(@alignCast(data.?));
+    const gpa = p.gpa;
+    const mode = caller.readMemory(gpa, @intCast(args[0]), @intCast(args[1])) catch return;
+    defer gpa.free(mode);
+    if (args[4] == 0) {
+        p.ctx.keymap.setTextCommand(gpa, mode, null) catch {};
+        return;
+    }
+    const cmd = caller.readMemory(gpa, @intCast(args[2]), @intCast(args[3])) catch return;
+    defer gpa.free(cmd);
+    p.ctx.keymap.setTextCommand(gpa, mode, cmd) catch {};
+}
+
+fn hMenuMode(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32, results: []i32) void {
+    _ = results;
+    const p: *WasmPlugin = @ptrCast(@alignCast(data.?));
+    const mode = caller.readMemory(p.gpa, @intCast(args[0]), @intCast(args[1])) catch return;
+    defer p.gpa.free(mode);
+    p.ctx.keymap.markMenuMode(p.gpa, mode) catch {};
+}
+
+fn hRun(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32, results: []i32) void {
+    _ = results;
+    const p: *WasmPlugin = @ptrCast(@alignCast(data.?));
+    const cmd = caller.readMemory(p.gpa, @intCast(args[0]), @intCast(args[1])) catch return;
+    defer p.gpa.free(cmd);
+    _ = command.run(p.ctx.commands, p.ctx, cmd, &.{}) catch {};
+}
+
+fn hRunInt(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32, results: []i32) void {
+    _ = results;
+    const p: *WasmPlugin = @ptrCast(@alignCast(data.?));
+    const cmd = caller.readMemory(p.gpa, @intCast(args[0]), @intCast(args[1])) catch return;
+    defer p.gpa.free(cmd);
+    _ = command.run(p.ctx.commands, p.ctx, cmd, &.{.{ .integer = args[2] }}) catch {};
+}
+
+fn hRunStr(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32, results: []i32) void {
+    _ = results;
+    const p: *WasmPlugin = @ptrCast(@alignCast(data.?));
+    const gpa = p.gpa;
+    const cmd = caller.readMemory(gpa, @intCast(args[0]), @intCast(args[1])) catch return;
+    defer gpa.free(cmd);
+    const s = caller.readMemory(gpa, @intCast(args[2]), @intCast(args[3])) catch return;
+    defer gpa.free(s);
+    _ = command.run(p.ctx.commands, p.ctx, cmd, &.{.{ .string = s }}) catch {};
+}
+
+fn hRunStr2(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32, results: []i32) void {
+    _ = results;
+    const p: *WasmPlugin = @ptrCast(@alignCast(data.?));
+    const gpa = p.gpa;
+    const cmd = caller.readMemory(gpa, @intCast(args[0]), @intCast(args[1])) catch return;
+    defer gpa.free(cmd);
+    const a = caller.readMemory(gpa, @intCast(args[2]), @intCast(args[3])) catch return;
+    defer gpa.free(a);
+    const b = caller.readMemory(gpa, @intCast(args[4]), @intCast(args[5])) catch return;
+    defer gpa.free(b);
+    _ = command.run(p.ctx.commands, p.ctx, cmd, &.{ .{ .string = a }, .{ .string = b } }) catch {};
+}
+
+// Introspection — command registry + open buffers.
+fn hCommandCount(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32, results: []i32) void {
+    _ = caller;
+    _ = args;
+    const p: *WasmPlugin = @ptrCast(@alignCast(data.?));
+    results[0] = @intCast(p.ctx.commands.count());
+}
+
+fn hCommandName(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32, results: []i32) void {
+    const p: *WasmPlugin = @ptrCast(@alignCast(data.?));
+    const n: command.Commands.Name = @enumFromInt(@as(usize, @intCast(args[0])));
+    if (p.ctx.commands.lookup(n) == null) {
+        results[0] = -1;
+        return;
+    }
+    const name = p.ctx.commands.nameOf(n);
+    results[0] = @intCast(caller.writeMemory(@intCast(args[1]), @intCast(args[2]), name) catch 0);
+}
+
+fn hCommandSummary(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32, results: []i32) void {
+    const p: *WasmPlugin = @ptrCast(@alignCast(data.?));
+    const n: command.Commands.Name = @enumFromInt(@as(usize, @intCast(args[0])));
+    const cmd = p.ctx.commands.lookup(n) orelse {
+        results[0] = -1;
+        return;
+    };
+    results[0] = @intCast(caller.writeMemory(@intCast(args[1]), @intCast(args[2]), cmd.summary) catch 0);
+}
+
+/// The i-th open buffer, or null (O(i) walk — the introspection path).
+fn bufferAtIndex(p: *WasmPlugin, i: usize) ?*@import("Buffers.zig").Buffer {
+    var it = p.ctx.buffers.iterator();
+    var j: usize = 0;
+    while (it.next()) |b| : (j += 1) if (j == i) return b;
+    return null;
+}
+
+fn hBufferCount(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32, results: []i32) void {
+    _ = caller;
+    _ = args;
+    const p: *WasmPlugin = @ptrCast(@alignCast(data.?));
+    results[0] = @intCast(p.ctx.buffers.count());
+}
+
+fn hBufferId(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32, results: []i32) void {
+    _ = caller;
+    const p: *WasmPlugin = @ptrCast(@alignCast(data.?));
+    const b = bufferAtIndex(p, @intCast(args[0])) orelse {
+        results[0] = -1;
+        return;
+    };
+    results[0] = @intCast(b.id);
+}
+
+fn hBufferName(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32, results: []i32) void {
+    const p: *WasmPlugin = @ptrCast(@alignCast(data.?));
+    const b = bufferAtIndex(p, @intCast(args[0])) orelse {
+        results[0] = -1;
+        return;
+    };
+    results[0] = @intCast(caller.writeMemory(@intCast(args[1]), @intCast(args[2]), b.name) catch 0);
+}
+
+fn hBufferActive(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32, results: []i32) void {
+    _ = caller;
+    const p: *WasmPlugin = @ptrCast(@alignCast(data.?));
+    const b = bufferAtIndex(p, @intCast(args[0]));
+    results[0] = if (b != null and b == p.ctx.buffers.active()) 1 else 0;
+}
+
+fn hBufferReadonly(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32, results: []i32) void {
+    _ = caller;
+    const p: *WasmPlugin = @ptrCast(@alignCast(data.?));
+    const b = bufferAtIndex(p, @intCast(args[0]));
+    results[0] = if (b != null and b.?.read_only) 1 else 0;
+}
+
+// Pick — accumulate items between begin/end, then open with an accept
+// trampoline that dispatches to the guest's on_pick_accept.
+fn hPickBegin(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32, results: []i32) void {
+    _ = results;
+    const p: *WasmPlugin = @ptrCast(@alignCast(data.?));
+    const gpa = p.gpa;
+    for (p.pick_items.items) |it| {
+        gpa.free(it.text);
+        gpa.free(it.doc);
+    }
+    p.pick_items.clearRetainingCapacity();
+    const prompt = caller.readMemory(gpa, @intCast(args[0]), @intCast(args[1])) catch return;
+    defer gpa.free(prompt);
+    p.pick_prompt.clearRetainingCapacity();
+    p.pick_prompt.appendSlice(gpa, prompt) catch {};
+    p.pick_id = @intCast(args[2]);
+}
+
+fn hPickAdd(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32, results: []i32) void {
+    _ = results;
+    const p: *WasmPlugin = @ptrCast(@alignCast(data.?));
+    const gpa = p.gpa;
+    const text = caller.readMemory(gpa, @intCast(args[0]), @intCast(args[1])) catch return;
+    errdefer gpa.free(text);
+    const doc = caller.readMemory(gpa, @intCast(args[2]), @intCast(args[3])) catch {
+        gpa.free(text);
+        return;
+    };
+    p.pick_items.append(gpa, .{ .text = text, .doc = doc }) catch {
+        gpa.free(text);
+        gpa.free(doc);
+    };
+}
+
+fn hPickEnd(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32, results: []i32) void {
+    _ = caller;
+    _ = args;
+    _ = results;
+    const p: *WasmPlugin = @ptrCast(@alignCast(data.?));
+    const gpa = p.gpa;
+    const bp = gpa.create(WasmBoundPick) catch return;
+    bp.* = .{ .plugin = p, .pick_id = p.pick_id };
+    const entries = gpa.alloc(pick_mod.Entry, p.pick_items.items.len) catch {
+        gpa.destroy(bp);
+        return;
+    };
+    defer gpa.free(entries);
+    for (p.pick_items.items, entries) |it, *e| e.* = .{ .text = it.text, .doc = it.doc };
+    p.ctx.pick.open(p.ctx, p.pick_prompt.items, entries, .{
+        .handler = wpPickAccept,
+        .cleanup = wpPickCleanup,
+        .data = bp,
+    }) catch {
+        gpa.destroy(bp);
+    };
+}
+
+fn hOpenFilePick(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32, results: []i32) void {
+    _ = results;
+    const p: *WasmPlugin = @ptrCast(@alignCast(data.?));
+    const gpa = p.gpa;
+    const prompt = caller.readMemory(gpa, @intCast(args[0]), @intCast(args[1])) catch return;
+    defer gpa.free(prompt);
+    const root = caller.readMemory(gpa, @intCast(args[2]), @intCast(args[3])) catch return;
+    defer gpa.free(root);
+    const bp = gpa.create(WasmBoundPick) catch return;
+    bp.* = .{ .plugin = p, .pick_id = @intCast(args[4]) };
+    const finder = fs_source.LocalFinder.create(gpa, p.ctx.buffers.pool, root) catch {
+        gpa.destroy(bp);
+        return;
+    };
+    // openWith closes the source on failure; only the BoundPick is ours.
+    p.ctx.pick.openWith(p.ctx, prompt, &.{}, .{
+        .handler = wpPickAccept,
+        .cleanup = wpPickCleanup,
+        .data = bp,
+    }, .{ .source = finder.source(), .allow_free_text = true }) catch {
+        gpa.destroy(bp);
+    };
+}
+
+fn hPickChoice(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32, results: []i32) void {
+    const p: *WasmPlugin = @ptrCast(@alignCast(data.?));
+    results[0] = @intCast(caller.writeMemory(@intCast(args[0]), @intCast(args[1]), p.cur_choice) catch 0);
+}
+
+/// Pick accept: stash the choice, dispatch to the guest's on_pick_accept.
+fn wpPickAccept(ctx: *command.Context, data: ?*anyopaque, choice: []const u8) anyerror!void {
+    _ = ctx;
+    const bp: *WasmBoundPick = @ptrCast(@alignCast(data.?));
+    const p = bp.plugin;
+    p.cur_choice = choice;
+    defer p.cur_choice = &.{};
+    try p.instance.callVoid("on_pick_accept", &.{@intCast(bp.pick_id)});
+}
+
+fn wpPickCleanup(data: ?*anyopaque, gpa: Allocator) void {
+    const bp: *WasmBoundPick = @ptrCast(@alignCast(data.?));
+    gpa.destroy(bp);
+}
+
+// Completion provider (host↔guest data-gather): the guest registers a
+// provider in `init`; the host binds it into the caps registry with a
+// trampoline that calls the guest's `on_complete` export per request, during
+// which the guest pulls the prefix and pushes candidates back.
+fn hProvideCompletion(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32, results: []i32) void {
+    _ = caller;
+    _ = args;
+    _ = results;
+    const p: *WasmPlugin = @ptrCast(@alignCast(data.?));
+    // Cross-check: must be declared as the matching capability.
+    if (!p.declaresCapability("edit/completion")) {
+        p.load_error = error.UndeclaredCapability;
+        return;
+    }
+    if (p.provider_id != null) return; // idempotent
+    const gpa = p.gpa;
+    const id = std.fmt.allocPrint(gpa, "plugin.{s}/edit/completion", .{p.name}) catch {
+        p.load_error = error.OutOfMemory;
+        return;
+    };
+    p.ctx.caps.register(.{
+        .capability = "edit/completion",
+        .id = id,
+        .latency = .instant,
+        .data = p,
+        .handler = wpCompletionProvider,
+    }) catch |e| {
+        gpa.free(id);
+        p.load_error = e;
+        return;
+    };
+    p.provider_id = id;
+}
+
+fn hCompletionPrefix(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32, results: []i32) void {
+    const p: *WasmPlugin = @ptrCast(@alignCast(data.?));
+    const n = caller.writeMemory(@intCast(args[0]), @intCast(args[1]), p.cur_prefix) catch 0;
+    results[0] = @intCast(n);
+}
+
+fn hPushCompletion(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32, results: []i32) void {
+    _ = results;
+    const p: *WasmPlugin = @ptrCast(@alignCast(data.?));
+    const out = p.completion_out orelse return;
+    const gpa = p.gpa;
+    const cand = caller.readMemory(gpa, @intCast(args[0]), @intCast(args[1])) catch return;
+    // Dedup on collection (the in-process provider dedups too), so the
+    // observable candidate set matches the Zig catalog plugin's.
+    for (out.items) |w| if (std.mem.eql(u8, w, cand)) {
+        gpa.free(cand);
+        return;
+    };
+    out.append(gpa, cand) catch gpa.free(cand);
+}
+
+/// Caps trampoline: gather the guest's candidates for one request and push
+/// them (the host deep-copies + re-stamps). Mirrors abi.zig's in-process
+/// completionProvider — same shape, guest across the membrane.
+fn wpCompletionProvider(data: ?*anyopaque, caps: *capability.Caps, req: *const capability.Request) anyerror!void {
+    const p: *WasmPlugin = @ptrCast(@alignCast(data.?));
+    if (req.kind != .completion) {
+        caps.decline(req.session);
+        return;
+    }
+    const gpa = p.gpa;
+    var out: std.ArrayList([]const u8) = .empty;
+    defer {
+        for (out.items) |s| gpa.free(s);
+        out.deinit(gpa);
+    }
+    p.cur_prefix = req.text;
+    p.completion_out = &out;
+    defer {
+        p.completion_out = null;
+        p.cur_prefix = &.{};
+    }
+    p.instance.callVoid("on_complete", &.{}) catch {
+        caps.decline(req.session);
+        return;
+    };
+    var items: std.ArrayList(capability.CompletionItem) = .empty;
+    defer items.deinit(gpa);
+    for (out.items, 0..) |txt, i| {
+        try items.append(gpa, .{ .text = @constCast(txt), .rank = @intCast(i) });
+    }
+    try caps.push(req.session, .{ .id = p.provider_id.?, .latency = .instant }, .{ .completion = items.items });
+}
+
+// Structural read (tree-sitter) + subbuffers.
+fn hNodeAt(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32, results: []i32) void {
+    const p: *WasmPlugin = @ptrCast(@alignCast(data.?));
+    const resolve = p.syntax_of orelse {
+        results[0] = -1;
+        return;
+    };
+    const syn = resolve(p.ctx.buffer()) orelse {
+        results[0] = -1;
+        return;
+    };
+    const node = syn.nodeAt(@intCast(args[0])) orelse {
+        results[0] = -1;
+        return;
+    };
+    const span = [2]u32{ @intCast(node.start), @intCast(node.end) };
+    _ = caller.writeMemory(@intCast(args[3]), 8, std.mem.asBytes(&span)) catch {};
+    results[0] = @intCast(caller.writeMemory(@intCast(args[1]), @intCast(args[2]), node.kind) catch 0);
+}
+
+fn hClaimSubbuffer(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32, results: []i32) void {
+    _ = caller;
+    const p: *WasmPlugin = @ptrCast(@alignCast(data.?));
+    const subs = p.subbuffers orelse {
+        results[0] = -1;
+        return;
+    };
+    const ed = p.ctx.editor();
+    const sub = subs.claim(p.gpa, &ed.doc, .{ .start = @intCast(args[0]), .end = @intCast(args[1]) }) catch {
+        results[0] = -1;
+        return;
+    };
+    p.subs.append(p.gpa, sub) catch {
+        results[0] = -1;
+        return;
+    };
+    results[0] = @intCast(p.subs.items.len - 1);
+}
+
+fn hSubbufferPutFact(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32, results: []i32) void {
+    _ = results;
+    const p: *WasmPlugin = @ptrCast(@alignCast(data.?));
+    const handle: usize = @intCast(args[0]);
+    if (handle >= p.subs.items.len) return;
+    const gpa = p.gpa;
+    const key = caller.readMemory(gpa, @intCast(args[1]), @intCast(args[2])) catch return;
+    defer gpa.free(key);
+    const val = caller.readMemory(gpa, @intCast(args[3]), @intCast(args[4])) catch return;
+    defer gpa.free(val);
+    p.subs.items[handle].putFact(gpa, key, val) catch {};
+}
+
+/// Command dispatch back into the guest: stash the args (readable via
+/// `wl_arg_*`), reset the result, run `on_command(id)`, and return whatever
+/// result the guest set (`wl_set_result_*`, default nil). String results
+/// borrow the plugin's `result_buf` until the next dispatch.
+fn wpCmdTrampoline(ctx: *command.Context, data: ?*anyopaque, args: []const command.Value) anyerror!command.Value {
+    _ = ctx;
+    const wc: *WasmCmd = @ptrCast(@alignCast(data.?));
+    const p = wc.plugin;
+    p.cur_args = args;
+    p.result = .nil;
+    defer p.cur_args = &.{};
+    try p.instance.callVoid("on_command", &.{@intCast(wc.id)});
+    return p.result;
+}
