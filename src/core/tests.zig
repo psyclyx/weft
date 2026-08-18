@@ -370,6 +370,36 @@ test "editor: vertical movement with goal column, utf-8 safe" {
     try t.expect(std.unicode.utf8ValidateSlice(s));
 }
 
+test "editor: folded rows are hidden and vertical motion skips them" {
+    const gpa = t.allocator;
+    var pool = try task.Pool.init(gpa, .{ .threads = 1 });
+    defer pool.deinit();
+    var ed = try Editor.init(gpa, pool, "user");
+    defer ed.deinit(gpa);
+
+    // Four rows; fold the whole body of row 1 ("bbb").
+    try ed.insertText(gpa, "aaa\nbbb\nccc\nddd");
+    const r1 = ed.text().lineRange(1);
+
+    var store: core.layers.Layers = .empty;
+    defer store.deinit(gpa);
+    const layer = try store.claim(gpa, &ed.doc, "folds", .local, "test");
+    try layer.appendSpan(gpa, .{ .start = r1.start, .end = r1.end, .kind = 0, .message = "", .face = .{ .invisible = true } });
+    ed.fold_layer = layer;
+
+    try t.expect(ed.rowHidden(1));
+    try t.expect(!ed.rowHidden(0));
+    try t.expect(!ed.rowHidden(2));
+    // Down from row 0 skips the folded row 1, landing on row 2.
+    try t.expectEqual(@as(?usize, 2), ed.nextVisibleRow(0, 1, ed.text().lineCount()));
+    ed.placeCursor(ed.text().lineRange(0).start);
+    ed.moveDown();
+    try t.expectEqual(@as(usize, 2), ed.text().offsetToPoint(ed.cursorOffset()).row);
+    // stepOffset (the guest line-step primitive) skips it too.
+    const stepped = ed.stepOffset(ed.text().lineRange(0).start, .fwd, .line);
+    try t.expectEqual(@as(usize, 2), ed.text().offsetToPoint(stepped).row);
+}
+
 test "editor: save request round trip + dirty tracking" {
     const gpa = t.allocator;
     var tmp_dir = t.tmpDir(.{});

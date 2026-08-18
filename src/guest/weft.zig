@@ -32,6 +32,8 @@ extern "weft" fn wl_jump(offset: u32) void;
 extern "weft" fn wl_flash(start: u32, end: u32) void;
 extern "weft" fn wl_style_clear() void;
 extern "weft" fn wl_style(start: u32, end: u32, class: u32) void;
+extern "weft" fn wl_fold_clear() void;
+extern "weft" fn wl_fold(start: u32, end: u32) void;
 // Native `editor` surface + stamped ranges ([FIX 1/3]). A range crosses as an
 // opaque u32 handle into a host-side table (the version token stays host-side).
 extern "weft" fn wl_editor_step(from: u32, dir: u32, kind: u32) u32;
@@ -233,6 +235,19 @@ pub fn styleClear() void {
 /// a no-op if `styleClear` wasn't called first this round).
 pub fn style(start: usize, end: usize, class: StyleClass) void {
     wl_style(@intCast(start), @intCast(end), @intFromEnum(class));
+}
+
+// ── Folding: hide byte ranges of the active buffer (rows collapse; vertical
+// motion skips them). A general primitive — status/dired/grep/outline plugins
+// fold sections. `foldClear` then a `fold` per hidden range; republish on every
+// re-render (offsets move). `start` should be just past a header line's newline
+// so the header stays visible. ──
+pub fn foldClear() void {
+    wl_fold_clear();
+}
+/// Hide `[start, end)` — collapse those rows until the next `foldClear`.
+pub fn fold(start: usize, end: usize) void {
+    wl_fold(@intCast(start), @intCast(end));
 }
 
 // ── Native editor surface + stamped ranges (motions/operators) ────────

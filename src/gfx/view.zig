@@ -625,7 +625,11 @@ pub const View = struct {
         var y_top: f32 = body_rect.y;
         const body_limit_y = body_rect.y + body_rect.h;
         var row = top_row.*;
-        while (row < total_rows and row < top_row.* + rows_visible and y_top < body_limit_y) : (row += 1) {
+        var shown: usize = 0; // VISIBLE rows emitted (folded rows are skipped)
+        while (row < total_rows and shown < rows_visible and y_top < body_limit_y) : (row += 1) {
+            // Fold: a hidden row isn't drawn (and vertical motion skips it), so
+            // the folded body collapses to nothing while its header stays.
+            if (editor.rowHidden(row)) continue;
             const runs_mark = runs.items.len;
             const vl = try self.layoutLine(scratch, la, &runs, rope, row, y_top, cols_visible, hud.md_inline, styles, flip_off);
             // A proportional/heading row can be taller than a mono line, so a
@@ -634,12 +638,13 @@ pub const View = struct {
             // overflowing row's glyphs (truncate the arena-backed runs) rather
             // than draw them out of region. Always keep the first row so an
             // absurdly short window still shows something.
-            if (row != top_row.* and y_top + vl.height > body_limit_y) {
+            if (shown != 0 and y_top + vl.height > body_limit_y) {
                 runs.items.len = runs_mark;
                 break;
             }
             try lines.append(la, vl);
             y_top += vl.height;
+            shown += 1;
         }
         self.frame_layout = .{ .lines = try lines.toOwnedSlice(la) };
 

@@ -142,6 +142,24 @@ pub const Layer = struct {
         }
     }
 
+    /// Append ONE anchored span to the existing set (unlike publishSpans,
+    /// which replaces). For feeds a plugin streams incrementally after a
+    /// clear — e.g. folds: `clear` then one `appendSpan` per hidden range.
+    pub fn appendSpan(self: *Layer, gpa: Allocator, s: SpanIn) !void {
+        const a = try self.doc.addAnchor(gpa, s.start, .right);
+        errdefer self.doc.removeAnchor(a);
+        const b = try self.doc.addAnchor(gpa, @max(s.start, s.end), .left);
+        errdefer self.doc.removeAnchor(b);
+        try self.spans.append(gpa, .{
+            .start = a,
+            .end = b,
+            .kind = s.kind,
+            .message = try gpa.dupe(u8, s.message),
+            .placement = s.placement,
+            .face = s.face,
+        });
+    }
+
     /// Replace the bulk region (takes ownership of nothing; copies).
     pub fn publishBulk(self: *Layer, gpa: Allocator, version_token: []const u8, start: usize, classes: []const u8) !void {
         const v = try gpa.dupe(u8, version_token);

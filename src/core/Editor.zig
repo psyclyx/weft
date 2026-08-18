@@ -15,6 +15,7 @@ const assert = std.debug.assert;
 
 const stemma = @import("stemma");
 const Document = @import("Document.zig");
+const layers = @import("layers.zig");
 const undo_mod = @import("undo.zig");
 const task = @import("task.zig");
 const file = @import("file.zig");
@@ -49,6 +50,12 @@ saved_version: ?[]u8 = null,
 pool: *task.Pool,
 save_state: SaveState = .idle,
 poll_state: PollState = .idle,
+/// The buffer's fold feed (invisible spans), or null. A stable pointer into
+/// the session's `Layers` (which outlives frames), set by the app each frame
+/// from `caps.layers.find(doc, "folds")`. The view elides rows whose line-start
+/// falls inside an invisible span; vertical motion skips them. Null in headless
+/// use, so folding is inert unless the app wires it.
+fold_layer: ?*const layers.Layer = null,
 
 pub const SaveError = file.GuardedWriteError || ShellFs.WriteError;
 pub const PollError = file.ReadError || ShellFs.Error || Allocator.Error;
@@ -605,10 +612,7 @@ pub fn stepOffset(self: *const Editor, from: usize, dir: StepDir, kind: StepKind
         .line => {
             const pt = rope.offsetToPoint(f);
             const rows = rope.lineCount();
-            const target_row = switch (dir) {
-                .back => if (pt.row == 0) return f else pt.row - 1,
-                .fwd => if (pt.row + 1 >= rows) return f else pt.row + 1,
-            };
+            const target_row = self.nextVisibleRow(pt.row, if (dir == .back) -1 else 1, rows) orelse return f;
             const line = rope.lineRange(target_row);
             const col = @min(pt.col, line.len());
             return snapBoundary(rope, line.start + col);
@@ -641,14 +645,43 @@ fn moveVertical(self: *Editor, dir: i2) void {
     const p = rope.offsetToPoint(self.cursorOffset());
     const goal = self.goal_col orelse p.col;
     const rows = rope.lineCount();
-    const target_row = if (dir < 0)
-        (if (p.row == 0) return else p.row - 1)
-    else
-        (if (p.row + 1 >= rows) return else p.row + 1);
+    const target_row = self.nextVisibleRow(p.row, dir, rows) orelse return;
     const line = rope.lineRange(target_row);
     const col = @min(goal, line.len());
     self.moveTo(snapBoundary(rope, line.start + col));
     self.goal_col = goal; // survives the motion (moveTo clears nothing)
+}
+
+/// Is document `row` hidden by a fold (its line-start inside an invisible
+/// span)? Resolves the fold layer on demand — cheap: folds are few and this
+/// is called per visible row + per vertical step.
+pub fn rowHidden(self: *const Editor, row: usize) bool {
+    const layer = self.fold_layer orelse return false;
+    const n = layer.spanCount();
+    if (n == 0) return false;
+    const line = self.text().lineRange(row);
+    for (0..n) |i| {
+        const s = layer.resolvedSpan(i);
+        if (s.face.invisible and line.start >= s.start and line.start < s.end) return true;
+    }
+    return false;
+}
+
+/// The next VISIBLE row from `row` stepping by `dir` (±1), skipping folded
+/// rows, or null at the document edge. The single fold-aware successor the
+/// motion + render paths share (see design: no per-call row math elsewhere).
+pub fn nextVisibleRow(self: *const Editor, row: usize, dir: i2, rows: usize) ?usize {
+    var r = row;
+    while (true) {
+        if (dir < 0) {
+            if (r == 0) return null;
+            r -= 1;
+        } else {
+            if (r + 1 >= rows) return null;
+            r += 1;
+        }
+        if (!self.rowHidden(r)) return r;
+    }
 }
 
 // Word/WORD/line/doc motions and match-bracket moved to the `motions` plugin

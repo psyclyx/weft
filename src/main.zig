@@ -1447,6 +1447,7 @@ pub fn main(init: std.process.Init) !void {
                     continue; // the focused pane builds last, below
                 }
                 const ob = buffers.get(slot.pane.buffer_id) orelse continue;
+                ob.editor.fold_layer = caps.layers.find(&ob.editor.doc, "folds");
                 const other_hud: view_mod.Hud = .{
                     .mode = keymap.currentMode(),
                     .file = ob.editor.backingPath() orelse ob.name,
@@ -1464,6 +1465,7 @@ pub fn main(init: std.process.Init) !void {
             // The focused pane: active buffer, full HUD, caret, picker dock.
             var fhud = hud;
             fhud.pane_border = foc_border;
+            editor.fold_layer = caps.layers.find(&editor.doc, "folds");
             const b = try view.build(arena_state.allocator(), editor, fhud, &view.top_row, foc_rect, pick_dock, world_to_pixel);
             try built_panes.append(gpa, b);
             if (b.records_added != 0)
@@ -1991,10 +1993,9 @@ fn visualVertical(ed: *core.Editor, view: *view_mod.View, dir: i32) !void {
     ed.setGoalX(gx); // persists even at the doc edges, for the next step
     const pt = rope.offsetToPoint(cur);
     const rows = rope.lineCount();
-    const target_row = if (dir < 0)
-        (if (pt.row == 0) return else pt.row - 1)
-    else
-        (if (pt.row + 1 >= rows) return else pt.row + 1);
+    // Skip folded rows (shared fold-aware successor — the magit status buffer's
+    // j/k bind to cursor-up/down, which land here).
+    const target_row = ed.nextVisibleRow(pt.row, if (dir < 0) -1 else 1, rows) orelse return;
     const target = try view.xToOffsetOnRow(rope, target_row, gx);
     ed.moveToVisual(target, gx);
 }

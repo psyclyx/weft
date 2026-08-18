@@ -67,6 +67,8 @@ pub fn defineImports(linker: *wasm.Linker, p: *WasmPlugin) !void {
     // buffer; the view renders it through Theme.styleColor (git/grep coloring).
     try d(linker, "wl_style_clear", 0, 0, hStyleClear, p);
     try d(linker, "wl_style", 3, 0, hStyle, p);
+    try d(linker, "wl_fold_clear", 0, 0, hFoldClear, p);
+    try d(linker, "wl_fold", 2, 0, hFold, p);
     // Stamped ranges ([FIX 1/3]): a motion returns one, an operator awaits +
     // applies it. Handles cross; the version token stays host-side.
     try d(linker, "wl_stamp_range", 2, 1, hStampRange, p);
@@ -390,6 +392,41 @@ fn hStyle(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32, results: [
         const class: u8 = @truncate(@as(u32, @bitCast(args[2])));
         @memset(b.classes[start..end], class);
     }
+}
+
+const folds_layer_name = "folds";
+
+/// `fold.clear()`: (re)claim the ACTIVE buffer's fold layer for this plugin and
+/// empty it — the guest republishes its full fold set (a `fold` per range)
+/// after. Targets the active document, like `wl_style_clear`.
+fn hFoldClear(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32, results: []i32) void {
+    _ = caller;
+    _ = args;
+    _ = results;
+    const p: *WasmPlugin = @ptrCast(@alignCast(data.?));
+    const layer = p.ctx.caps.layers.claim(p.gpa, p.ctx.document(), folds_layer_name, .local, p.name) catch return;
+    layer.publishSpans(p.gpa, &.{}) catch {};
+}
+
+/// `fold(start, end)`: hide `[start, end)` as an invisible span — the view
+/// elides those rows and vertical motion skips them. Accumulates onto the
+/// layer (call `fold.clear` first to reset); a no-op if the layer wasn't
+/// claimed this round.
+fn hFold(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32, results: []i32) void {
+    _ = caller;
+    _ = results;
+    const p: *WasmPlugin = @ptrCast(@alignCast(data.?));
+    const layer = p.ctx.caps.layers.find(p.ctx.document(), folds_layer_name) orelse return;
+    const start: usize = @intCast(@as(u32, @bitCast(args[0])));
+    const end: usize = @intCast(@as(u32, @bitCast(args[1])));
+    if (end <= start) return;
+    layer.appendSpan(p.gpa, .{
+        .start = start,
+        .end = end,
+        .kind = 0,
+        .message = "",
+        .face = .{ .invisible = true, .foldable = true },
+    }) catch {};
 }
 
 var g_environ: std.process.Environ = .empty;
