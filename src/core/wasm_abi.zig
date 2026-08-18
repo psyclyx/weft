@@ -1464,6 +1464,31 @@ test "wasm plugin: modes reacts to the activation event by language" {
     try t.expectEqual(@as(usize, 0), env.echo.items.len);
 }
 
+test "wasm plugin: snippets-expand inserts a template body from an fs file" {
+    const gpa = t.allocator;
+    var env: Env = undefined;
+    try Env.init(gpa, &env);
+    defer env.deinit(gpa);
+
+    const tmp = "weft-snippets-test.txt";
+    const file = @import("file.zig");
+    try file.writeBytes(gpa, tmp, "fn\tfn foo() {\\n}\nlog\tstd.log.info(\"\", .{});");
+    defer file.deleteFile(gpa, tmp);
+
+    var engine = try wasm.Engine.init();
+    defer engine.deinit();
+    const plugin = try loadPlugin(&engine, &env.ctx, "snippets", @embedFile("guest_snippets_wasm"), .{});
+    defer plugin.deinit();
+    try t.expect(plugin.perms[wasm_host.perm_fs_read]);
+
+    const ed = &env.buffers.active().editor;
+    ed.placeCursor(0);
+    _ = try command.run(&env.commands, &env.ctx, "snippets-expand", &.{ .{ .string = "fn" }, .{ .string = tmp } });
+    const s = try ed.text().toOwnedSlice(gpa);
+    defer gpa.free(s);
+    try t.expectEqualStrings("fn foo() {\n}", s); // literal \n expanded to a newline
+}
+
 test "wasm plugin: kv admin round-trips across the membrane, namespaced" {
     const gpa = t.allocator;
     var env: Env = undefined;

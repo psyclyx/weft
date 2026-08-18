@@ -41,6 +41,7 @@ weft.plugin("fmt");         // format-buffer (by extension) + filter (proc)
 weft.plugin("buffers");     // buf-pick (fuzzy buffer switch), buf-scratch
 weft.plugin("windows");     // win-split/vsplit/focus/close/center
 weft.plugin("modes");       // language activation (on focus) + lang-run
+weft.plugin("snippets");    // expand named templates from a file (fs read)
 
 // Leader (space) bindings for the edit-domain operators — each name is a real
 // command one of the plugins above registered.
