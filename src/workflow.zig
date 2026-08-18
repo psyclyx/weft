@@ -40,6 +40,9 @@ pub const Editor = struct {
     loop: core.async_loop.Loop,
     subs: core.subbuffer.SubBuffers = .empty,
     view: ?view_mod.View = null,
+    /// Last active buffer id — so a buffer switch (open, buffer-next) fires
+    /// `on_activate` to plugins, exactly as main's loop does.
+    last_active: core.Buffers.Id = 0,
 
     pub fn init(gpa: Allocator, self: *Editor) !void {
         self.quit = false;
@@ -69,6 +72,18 @@ pub const Editor = struct {
             .echo = &self.echo,
         };
         try core.builtins.install(gpa, &self.commands, &self.keymap);
+        self.last_active = self.buffers.active_id;
+    }
+
+    /// Mirror main's loop: when the active buffer changes, fire `on_activate`
+    /// to every plugin with the new buffer's path — this is what lets the
+    /// `modes` plugin detect a file's language the moment you open it.
+    fn syncActivate(self: *Editor) void {
+        if (self.buffers.active_id == self.last_active) return;
+        self.last_active = self.buffers.active_id;
+        const b = self.buffers.active();
+        const path = b.editor.backingPath() orelse b.name;
+        for (self.plugins.items) |p| core.wasm_host.notifyActivate(p, path);
     }
 
     pub fn deinit(self: *Editor) void {
@@ -123,6 +138,7 @@ pub const Editor = struct {
                     if (self.keymap.menuReturn(b)) |ret| self.keymap.setMode(self.gpa, ret) catch {};
                 }
             }
+            self.syncActivate();
             return;
         }
         if (text.len == 0) return;
@@ -142,6 +158,28 @@ pub const Editor = struct {
     /// Run a command by name (a startup action, or a "menu leaf" invoked directly).
     pub fn run(self: *Editor, cmd: []const u8) void {
         _ = command.run(&self.commands, &self.ctx, cmd, &.{}) catch {};
+        self.syncActivate();
+    }
+
+    /// Run a command with one string argument (e.g. `open <path>`).
+    pub fn runStr(self: *Editor, cmd: []const u8, arg: []const u8) void {
+        _ = command.run(&self.commands, &self.ctx, cmd, &.{.{ .string = arg }}) catch {};
+        self.syncActivate();
+    }
+
+    /// The current transient echo line (what a plugin last reported to the user).
+    pub fn echoText(self: *Editor) []const u8 {
+        return self.echo.items;
+    }
+
+    /// Drive the active buffer's async save to completion (bounded spin), the
+    /// same poll main's loop does — deterministic, no sleep-and-hope.
+    pub fn waitSave(self: *Editor) void {
+        var i: usize = 0;
+        while (i < 10_000) : (i += 1) {
+            if (self.buffers.active().editor.pollSave(self.gpa)) return;
+            std.Thread.yield() catch {};
+        }
     }
 
     /// Pump async plugin work (proc output, fs listings) to completion-ish:
@@ -201,6 +239,10 @@ const guest = struct {
     const comment = @embedFile("guest_comment_wasm");
     const dired = @embedFile("guest_dired_wasm");
     const buffers = @embedFile("guest_buffers_wasm");
+    const modes = @embedFile("guest_modes_wasm");
+    const notes = @embedFile("guest_notes_wasm");
+    const git = @embedFile("guest_git_wasm");
+    const whitespace = @embedFile("guest_whitespace_wasm");
 };
 
 /// A standard vim editing set (synchronous plugins only — no subprocess).
@@ -212,6 +254,25 @@ fn loadVim(ed: *Editor) !void {
     try ed.load("comment", guest.comment);
     try ed.load("autopair", guest.autopair);
     try ed.load("vim", guest.vim);
+}
+
+/// The vim set plus the buffer/language/notes/git tools — a fuller "IDE"
+/// surface for the multi-step project workflows. proc-backed plugins (git)
+/// only do subprocess work when their commands are actually invoked.
+fn loadWorkspace(ed: *Editor) !void {
+    try loadVim(ed);
+    try ed.load("whitespace", guest.whitespace);
+    try ed.load("buffers", guest.buffers);
+    try ed.load("modes", guest.modes);
+    try ed.load("notes", guest.notes);
+    try ed.load("git", guest.git);
+}
+
+/// A writable path inside the test's tmpdir (which lives under
+/// `.zig-cache/tmp/<sub_path>/`, the codebase's convention — see
+/// core/tests.zig). Caller frees.
+fn tmpPath(gpa: Allocator, sub_path: []const u8, name: []const u8) ![]u8 {
+    return std.fmt.allocPrint(gpa, ".zig-cache/tmp/{s}/{s}", .{ sub_path, name });
 }
 
 // ── Tests: granular editor workflows ────────────────────────────────
@@ -275,6 +336,187 @@ test "workflow: autopair — typing an open paren inserts the matched pair" {
     defer gpa.free(got);
     try t.expectEqualStrings("()", got);
 }
+
+test "workflow: vim — x deletes the char under the cursor" {
+    const gpa = t.allocator;
+    var ed: Editor = undefined;
+    try Editor.init(gpa, &ed);
+    defer ed.deinit();
+    try loadVim(&ed);
+    ed.press("i", "");
+    ed.typeText("abc");
+    ed.press("Escape", "");
+    ed.press("0", ""); // to line start
+    ed.press("x", ""); // delete-forward
+    const got = try ed.textAlloc();
+    defer gpa.free(got);
+    try t.expectEqualStrings("bc", got);
+}
+
+test "workflow: vim — o opens a line below and enters insert" {
+    const gpa = t.allocator;
+    var ed: Editor = undefined;
+    try Editor.init(gpa, &ed);
+    defer ed.deinit();
+    try loadVim(&ed);
+    ed.press("i", "");
+    ed.typeText("one");
+    ed.press("Escape", "");
+    ed.press("o", ""); // open below → insert
+    try t.expectEqualStrings("insert", ed.mode());
+    ed.typeText("two");
+    ed.press("Escape", "");
+    const got = try ed.textAlloc();
+    defer gpa.free(got);
+    try t.expectEqualStrings("one\ntwo", got);
+}
+
+test "workflow: vim — u undoes the last insert as one unit" {
+    const gpa = t.allocator;
+    var ed: Editor = undefined;
+    try Editor.init(gpa, &ed);
+    defer ed.deinit();
+    try loadVim(&ed);
+    ed.press("i", "");
+    ed.typeText("scratch");
+    ed.press("Escape", "");
+    ed.press("u", ""); // undo the whole insert
+    const got = try ed.textAlloc();
+    defer gpa.free(got);
+    try t.expectEqualStrings("", got);
+}
+
+test "workflow: vim — Y yanks a line, p pastes it below" {
+    const gpa = t.allocator;
+    var ed: Editor = undefined;
+    try Editor.init(gpa, &ed);
+    defer ed.deinit();
+    try loadVim(&ed);
+    ed.press("i", "");
+    ed.typeText("line");
+    ed.press("Escape", "");
+    ed.press("Y", ""); // yank-line
+    ed.press("p", ""); // paste below
+    const got = try ed.textAlloc();
+    defer gpa.free(got);
+    try t.expectEqualStrings("line\nline", got);
+}
+
+test "workflow: vim — cw changes a word then re-inserts" {
+    const gpa = t.allocator;
+    var ed: Editor = undefined;
+    try Editor.init(gpa, &ed);
+    defer ed.deinit();
+    try loadVim(&ed);
+    ed.press("i", "");
+    ed.typeText("foo bar");
+    ed.press("Escape", "");
+    ed.press("0", "");
+    ed.press("c", ""); // enter operator-change
+    ed.press("w", ""); // word → change; lands in insert
+    try t.expectEqualStrings("insert", ed.mode());
+    ed.typeText("baz");
+    ed.press("Escape", "");
+    const got = try ed.textAlloc();
+    defer gpa.free(got);
+    // "foo" became "baz"; "bar" survives (cw doesn't eat the trailing space).
+    try t.expect(std.mem.startsWith(u8, got, "baz"));
+    try t.expect(std.mem.indexOf(u8, got, "bar") != null);
+}
+
+test "workflow: modes — opening a file detects its language on activate" {
+    const gpa = t.allocator;
+    var ed: Editor = undefined;
+    try Editor.init(gpa, &ed);
+    defer ed.deinit();
+    try loadWorkspace(&ed);
+
+    // The natural way to "work on a zig file" is to open it. modes' on_activate
+    // fires (harness mirrors main) and echoes the detected language.
+    ed.runStr("open", "/tmp/weft-nonexistent-main.zig");
+    try t.expect(std.mem.indexOf(u8, ed.echoText(), "zig") != null);
+
+    ed.runStr("open", "/tmp/weft-nonexistent-app.js");
+    try t.expect(std.mem.indexOf(u8, ed.echoText(), "javascript") != null);
+}
+
+// ── Project-level e2e: build a tiny app the way a person would ───────
+//
+// This is the test we keep growing. It drives weft through the natural motions
+// of starting a project in a scratch dir: open a file, write code, save it to
+// disk, and confirm the language is recognized. Each granular step is its own
+// test so a failure names exactly what broke. Capabilities we don't have yet
+// are recorded as gaps (the difficulty is the signal), not faked as passes.
+
+test "e2e/project: weft `save` writes the buffer to disk" {
+    const gpa = t.allocator;
+    var td = t.tmpDir(.{});
+    defer td.cleanup();
+    const path = try tmpPath(gpa, &td.sub_path, "main.zig");
+    defer gpa.free(path);
+
+    var ed: Editor = undefined;
+    try Editor.init(gpa, &ed);
+    defer ed.deinit();
+    try loadWorkspace(&ed);
+
+    // The natural way: open the path, type code, save.
+    ed.runStr("open", path); // new file → adopts the path
+    ed.press("i", "");
+    ed.typeText("const x = 41;\n");
+    ed.press("Escape", "");
+    ed.run("save");
+    ed.waitSave(); // drive the async save to completion, deterministically
+
+    const on_disk = try core.file.readAlloc(gpa, path);
+    defer gpa.free(on_disk);
+    try t.expect(std.mem.indexOf(u8, on_disk, "const x = 41;") != null);
+}
+
+test "e2e/project: opening the saved file recognizes its language" {
+    const gpa = t.allocator;
+    var td = t.tmpDir(.{});
+    defer td.cleanup();
+    const zig_path = try tmpPath(gpa, &td.sub_path, "app.zig");
+    defer gpa.free(zig_path);
+    const js_path = try tmpPath(gpa, &td.sub_path, "app.js");
+    defer gpa.free(js_path);
+
+    var ed: Editor = undefined;
+    try Editor.init(gpa, &ed);
+    defer ed.deinit();
+    try loadWorkspace(&ed);
+
+    ed.runStr("open", zig_path);
+    try t.expect(std.mem.indexOf(u8, ed.echoText(), "zig") != null);
+    ed.runStr("open", js_path); // switching buffers re-fires on_activate
+    try t.expect(std.mem.indexOf(u8, ed.echoText(), "javascript") != null);
+}
+
+// ── Documented gaps (the difficulty IS the signal) ──────────────────
+//
+// The project brief calls for the e2e to also drive *git*, *a debugger*, and
+// *a coworker* (multiplayer). Those steps aren't cleanly expressible as unit
+// tests yet, so they're recorded here rather than written as flaky/green fakes.
+// When each gains the missing piece, promote it into a granular test above.
+//
+//   • git (magit) workflow: the git plugin shells out via `proc` and operates
+//     on the process CWD, so a real staged/committed assertion needs (a) a
+//     tmpdir made the process CWD and (b) driving the async proc to completion
+//     in-harness. This Zig's churned subprocess/`Io.Dir` API made a robust,
+//     non-flaky version more trouble than signal for now; the magit commands
+//     themselves are unit-covered on the plugin side. A small "run a child in
+//     a tmpdir + pump the loop until proc drains" harness would unlock it.
+//   • debugger: there is no debug/DAP plugin or `debug-*` command surface, so
+//     "set a breakpoint and step" has no keys to press — the biggest missing
+//     IDE capability the e2e wants.
+//   • coworker (multiplayer): the collab session/hub needs a socket transport
+//     to stand up two peers; the headless harness has no in-process loopback
+//     yet, so a two-editor "pair on the same buffer" scenario can't be driven.
+//     A loopback session pair on the harness would unlock it.
+//   • per-language build/test/run: `lang-run`/`make-*` shell out via `proc`;
+//     exercising them for several languages needs those toolchains in the test
+//     environment, so they're left to the manual/CI matrix, not the unit suite.
 
 test {
     std.testing.refAllDecls(@This());
