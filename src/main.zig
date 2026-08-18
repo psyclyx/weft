@@ -1266,7 +1266,14 @@ pub fn main(init: std.process.Init) !void {
             // own rect (absolute coords) — no emit translate, and click
             // routing is the tree's hit-test. The focused pane builds LAST so
             // `frame_layout` ends on it.
-            const frame_rect: region.Rect = .{ .x = 0, .y = 0, .w = @floatFromInt(fb[0]), .h = @floatFromInt(fb[1]) };
+            const window_rect: region.Rect = .{ .x = 0, .y = 0, .w = @floatFromInt(fb[0]), .h = @floatFromInt(fb[1]) };
+            // Carve the picker's window-bottom dock off the window FIRST, so the
+            // panes lay out in what remains — the picker is a real region, not an
+            // overlay, and cannot overlap a pane or status line (region.zig's
+            // contract). Zero-height when no pick is open ⇒ panes fill the window.
+            const dock_cut = window_rect.cutBottom(view.pickDockHeight(if (pick_state.active) &pick_state else null));
+            const pick_dock = dock_cut.strip;
+            const frame_rect = dock_cut.rest;
             const foc_leaf: region.Tree = .{ .leaf = 0 };
             const peek_leaf: region.Tree = .{ .leaf = 1 };
             const pane_tree: region.Tree = switch (split_dir) {
@@ -1291,13 +1298,13 @@ pub fn main(init: std.process.Init) !void {
                         .file = ob.editor.backingPath() orelse ob.name,
                         .cursor_on = false, // the caret belongs to the focused pane
                     };
-                    const bo = try view.build(arena_state.allocator(), &ob.editor, other_hud, &split_top, pane_tree.rectOf(frame_rect, 1).?, frame_rect, world_to_pixel);
+                    const bo = try view.build(arena_state.allocator(), &ob.editor, other_hud, &split_top, pane_tree.rectOf(frame_rect, 1).?, .{}, world_to_pixel);
                     built_other = bo;
                     if (bo.records_added != 0)
                         binding[0] = try snail_vk.uploadDeltaAndWait(gpa, vctx, resources, ctx.command_pool, &cache, binding[0], &view.atlas);
                 }
             }
-            const b = try view.build(arena_state.allocator(), editor, hud, &view.top_row, focused_rect, frame_rect, world_to_pixel);
+            const b = try view.build(arena_state.allocator(), editor, hud, &view.top_row, focused_rect, pick_dock, world_to_pixel);
             if (built) |*old| old.deinit(gpa);
             built = b;
             if (b.records_added != 0) {

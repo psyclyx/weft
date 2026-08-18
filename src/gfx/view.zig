@@ -512,7 +512,7 @@ pub const View = struct {
         hud: Hud,
         top_row: *usize,
         frame: region.Rect,
-        window: region.Rect,
+        pick_dock: region.Rect,
         world_to_pixel: snail.Transform2D,
     ) !Built {
         const rope = editor.text();
@@ -621,10 +621,12 @@ pub const View = struct {
         }
 
         try self.buildHud(scratch, &runs, &rects, hud, status_rect, panel_rect, cols_visible);
-        try self.drawSurfaces(scratch, &runs, &rects, hud, frame);
-        // The picker is a window-bottom overlay (drawn full-width over the panes),
-        // not a pane dock — so splits don't shrink it.
-        if (hud.pick) |p| try self.drawPickOverlay(scratch, &runs, &rects, p, window);
+        // Floating surfaces (which-key popup, dired/magit) float within the BODY
+        // region — never over the status/tab/panel rects, which are carved out.
+        try self.drawSurfaces(scratch, &runs, &rects, hud, body_rect);
+        // The picker draws into its carved window-bottom dock (main cut it off
+        // the window with cutBottom, so it cannot overlap panes or a status line).
+        if (hud.pick) |p| try self.drawPickInto(scratch, &runs, &rects, p, pick_dock);
 
         return try self.render(world_to_pixel, runs.items, rects.items);
     }
@@ -1130,26 +1132,33 @@ pub const View = struct {
         }
     }
 
-    /// Draw the picker as a window-bottom OVERLAY (vertico-style): a full-width
-    /// box docked at the bottom of `window`, so splits never shrink it (the
-    /// user's ask). Query line on top, then the filtered rows with the selected
-    /// one highlighted. `.prop` runs at an explicit x, so it isn't tied to a
-    /// pane's content origin.
-    fn drawPickOverlay(
+    /// Pixel height the picker dock needs: the query line + one row per shown
+    /// result. The SINGLE source of truth for both the dock carve (main cuts
+    /// exactly this off the window) and the render, so they cannot drift — the
+    /// same discipline `panelRows` uses. Zero when no pick is open.
+    pub fn pickDockHeight(self: *const View, pick: ?*const core.Pick) f32 {
+        const p = pick orelse return 0;
+        const shown = @min(p.filtered.items.len, Hud.max_pick_rows);
+        return @as(f32, @floatFromInt(1 + shown)) * self.line_h;
+    }
+
+    /// Draw the picker INTO its carved `dock` region (a window-bottom strip cut
+    /// off the frame with `cutBottom`, so it never overlaps the panes or a
+    /// status line — the region system's whole point). Every position is
+    /// relative to `dock`, whose height is exactly `pickDockHeight`, so nothing
+    /// spills. It receives its OWN rect, never the whole window.
+    fn drawPickInto(
         self: *View,
         scratch: Allocator,
         runs: *std.ArrayList(Run),
         rects: *std.ArrayList(Rect),
         p: *const core.Pick,
-        window: region.Rect,
+        dock: region.Rect,
     ) !void {
+        if (dock.h <= 0) return;
         const total = p.filtered.items.len;
         const shown = @min(total, Hud.max_pick_rows);
-        const nrows = 1 + shown; // query + list
-        const box_h = @as(f32, @floatFromInt(nrows)) * self.line_h;
-        const box_y = window.y + window.h - box_h;
-        // Backdrop across the full window width.
-        try rects.append(scratch, .{ .x = window.x, .y = box_y, .w = window.w, .h = box_h, .color = self.theme.selection });
+        try rects.append(scratch, .{ .x = dock.x, .y = dock.y, .w = dock.w, .h = dock.h, .color = self.theme.selection });
 
         const narrow_chip = if (p.narrow.items.len > 0)
             try std.fmt.allocPrint(scratch, "[{s}]", .{p.narrow.items})
@@ -1159,7 +1168,7 @@ pub const View = struct {
             p.prompt,                              narrow_chip, p.query.items,
             if (total == 0) 0 else p.selected + 1, total,       @tagName(p.style),
         });
-        try self.propLine(scratch, runs, query, window.x, box_y + self.ascent, self.theme.foreground);
+        try self.propLine(scratch, runs, query, dock.x, dock.y + self.ascent, self.theme.foreground);
 
         const start = if (p.selected >= shown) p.selected + 1 - shown else 0;
         for (0..shown) |i| {
@@ -1170,10 +1179,10 @@ pub const View = struct {
                 try std.fmt.allocPrint(scratch, "  {s}  · {s}", .{ item, doc })
             else
                 try std.fmt.allocPrint(scratch, "  {s}", .{item});
-            const row_y = box_y + @as(f32, @floatFromInt(1 + i)) * self.line_h;
+            const row_y = dock.y + @as(f32, @floatFromInt(1 + i)) * self.line_h;
             const selected = fi == p.selected;
-            if (selected) try rects.append(scratch, .{ .x = window.x, .y = row_y, .w = window.w, .h = self.line_h, .color = self.theme.accent });
-            try self.propLine(scratch, runs, l, window.x, row_y + self.ascent, if (selected) self.theme.background else self.theme.status);
+            if (selected) try rects.append(scratch, .{ .x = dock.x, .y = row_y, .w = dock.w, .h = self.line_h, .color = self.theme.accent });
+            try self.propLine(scratch, runs, l, dock.x, row_y + self.ascent, if (selected) self.theme.background else self.theme.status);
         }
     }
 
@@ -1198,9 +1207,11 @@ pub const View = struct {
         runs: *std.ArrayList(Run),
         rects: *std.ArrayList(Rect),
         hud: Hud,
-        frame: region.Rect,
+        body: region.Rect,
     ) !void {
-        const max_rows = 16;
+        // A surface floats within `body`; cap the row count to what fits, so a
+        // popup can never extend past the region it was handed.
+        const max_rows = @max(1, @as(usize, @intFromFloat(@max(0, body.h) / self.line_h)) -| 1);
         for (hud.surfaces) |surf| {
             if (!surf.active or surf.rows.items.len == 0) continue;
             if (surf.placement == .bottom) continue; // dock handled by buildHud
@@ -1220,11 +1231,16 @@ pub const View = struct {
             const pad_y: f32 = self.line_h * 0.25;
             const box_w = @as(f32, @floatFromInt(max_cols)) * self.cell_w + 2 * pad_x;
             const box_h = @as(f32, @floatFromInt(nrows)) * self.line_h + 2 * pad_y;
-            const box_x, const box_y = switch (surf.placement) {
-                .corner => .{ frame.x + frame.w - box_w - pad_x, frame.y + pad_x },
-                .center => .{ frame.x + (frame.w - box_w) / 2, frame.y + (frame.h - box_h) / 2 },
+            // Positioned within `body`, then clamped so the box stays inside it
+            // (its own background reads as a popup over the text, never over the
+            // status/tab strips, which live outside `body`).
+            const raw_x, const raw_y = switch (surf.placement) {
+                .corner => .{ body.x + body.w - box_w - pad_x, body.y + pad_x },
+                .center => .{ body.x + (body.w - box_w) / 2, body.y + (body.h - box_h) / 2 },
                 .bottom => unreachable,
             };
+            const box_x = std.math.clamp(raw_x, body.x, @max(body.x, body.x + body.w - box_w));
+            const box_y = std.math.clamp(raw_y, body.y, @max(body.y, body.y + body.h - box_h));
             // Panel background (a muted box so the overlay reads as a popup).
             try rects.append(scratch, .{ .x = box_x, .y = box_y, .w = box_w, .h = box_h, .color = self.theme.selection });
 

@@ -40,7 +40,7 @@ pub fn renderView(
     defer arena.deinit();
     view.resetFrame();
     var top_row: usize = 0;
-    var built = try view.build(arena.allocator(), editor, hud, &top_row, fullFrame(w, h), fullFrame(w, h), w2p);
+    var built = try view.build(arena.allocator(), editor, hud, &top_row, fullFrame(w, h), .{}, w2p);
     defer built.deinit(gpa);
 
     return try rasterize(gpa, view, &.{built.shapes}, w, h);
@@ -198,6 +198,59 @@ test "harness: which-key panel does not collide with the status line" {
     try t.expect(hasContent(pixels, w, 8, bottom_row_y + 2, 120, h - 2));
 }
 
+test "harness: the picker docks below the panes — cannot overlap body or status" {
+    const gpa = t.allocator;
+    const pool = try core.task.Pool.init(gpa, .{ .threads = 1 });
+    defer pool.deinit();
+    var view = try view_mod.View.init(gpa, @embedFile("font_mono"), 16);
+    defer view.deinit();
+    var ed = try makeEditor(gpa, pool, "body line one\nbody line two\nbody line three\n");
+    defer ed.deinit(gpa);
+
+    // A picker with three results (built directly — no matcher needed here).
+    var pick: core.Pick = .empty;
+    defer pick.deinit(gpa);
+    pick.prompt = try gpa.dupe(u8, "P");
+    pick.active = true;
+    for ([_][]const u8{ "alpha", "bravo", "charlie" }) |it| {
+        try pick.items.append(gpa, try gpa.dupe(u8, it));
+        try pick.docs.append(gpa, try gpa.dupe(u8, ""));
+        try pick.filtered.append(gpa, @intCast(pick.items.items.len - 1));
+    }
+
+    const w: u32 = 320;
+    const h: u32 = 240;
+    const window: region.Rect = .{ .x = 0, .y = 0, .w = @floatFromInt(w), .h = @floatFromInt(h) };
+    // The exact carve main does: the picker's dock is cut off the WINDOW with
+    // cutBottom; the pane fills the rest. Disjoint by construction, so the
+    // picker can never paint over a pane body or status line — the class of
+    // bug this guards (it recurred when the picker was an absolute overlay).
+    const cut = window.cutBottom(view.pickDockHeight(&pick));
+    const dock = cut.strip;
+    const panes = cut.rest;
+    // The dock and the panes touch exactly — no overlap, no gap.
+    try t.expectApproxEqAbs(panes.y + panes.h, dock.y, 0.5);
+
+    const projection = snail.Mat4.ortho(0, @floatFromInt(w), @floatFromInt(h), 0, -1, 1);
+    const w2p = snail.mvpToScenePixel(projection, @floatFromInt(w), @floatFromInt(h)) orelse unreachable;
+    var arena = std.heap.ArenaAllocator.init(gpa);
+    defer arena.deinit();
+    view.resetFrame();
+    var tr: usize = 0;
+    var built = try view.build(arena.allocator(), &ed, .{ .mode = "normal", .pick = &pick }, &tr, panes, dock, w2p);
+    defer built.deinit(gpa);
+    const pixels = try rasterize(gpa, &view, &.{built.shapes}, w, h);
+    defer gpa.free(pixels);
+    writePpm(gpa, ".zig-cache/tmp/weft-harness-pick.ppm", pixels, w, h) catch {};
+
+    // The picker is drawn INTO its dock (the bottom strip has content).
+    const dy: u32 = @intFromFloat(dock.y);
+    try t.expect(hasContent(pixels, w, 4, dy + 2, w - 4, h - 2));
+    // And the pane body above the dock still shows the buffer (it was not
+    // covered — the picker stayed in its region).
+    try t.expect(hasContent(pixels, w, 8, 8, 200, 40));
+}
+
 test "harness: a vertical split renders a buffer in each column" {
     const gpa = t.allocator;
     const pool = try core.task.Pool.init(gpa, .{ .threads = 1 });
@@ -224,9 +277,9 @@ test "harness: a vertical split renders a buffer in each column" {
     var rt: usize = 0;
     const lrect: region.Rect = .{ .x = 0, .y = 0, .w = @floatFromInt(half), .h = @floatFromInt(h) };
     const rrect: region.Rect = .{ .x = @floatFromInt(half), .y = 0, .w = @floatFromInt(w - half), .h = @floatFromInt(h) };
-    const lb = try view.build(arena.allocator(), &left, .{ .mode = "normal" }, &lt, lrect, lrect, w2p);
+    const lb = try view.build(arena.allocator(), &left, .{ .mode = "normal" }, &lt, lrect, .{}, w2p);
     const left_layout = view.frame_layout; // capture before the next build overwrites it
-    const rb = try view.build(arena.allocator(), &right, .{ .mode = "normal" }, &rt, rrect, rrect, w2p);
+    const rb = try view.build(arena.allocator(), &right, .{ .mode = "normal" }, &rt, rrect, .{}, w2p);
     const right_layout = view.frame_layout;
     try t.expect(left_layout.lines.len > 0 and right_layout.lines.len > 0);
 
@@ -271,9 +324,9 @@ test "harness: a horizontal split stacks a buffer in each row" {
     var bt: usize = 0;
     const trect: region.Rect = .{ .x = 0, .y = 0, .w = @floatFromInt(w), .h = @floatFromInt(half) };
     const brect: region.Rect = .{ .x = 0, .y = @floatFromInt(half), .w = @floatFromInt(w), .h = @floatFromInt(h - half) };
-    const tb = try view.build(arena.allocator(), &top, .{ .mode = "normal" }, &tt, trect, trect, w2p);
+    const tb = try view.build(arena.allocator(), &top, .{ .mode = "normal" }, &tt, trect, .{}, w2p);
     const tl = view.frame_layout;
-    const bb = try view.build(arena.allocator(), &bot, .{ .mode = "normal" }, &bt, brect, brect, w2p);
+    const bb = try view.build(arena.allocator(), &bot, .{ .mode = "normal" }, &bt, brect, .{}, w2p);
     const bl = view.frame_layout;
     try t.expect(tl.lines.len > 0 and bl.lines.len > 0);
     defer {
