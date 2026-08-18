@@ -28,7 +28,10 @@ pub const ControlKind = enum(u8) { hello = 0, hello2 = 1, finish = 2, accept = 3
 /// (`Access`). The client sets `Document.my_grant` from it so it can refuse
 /// a local edit its ops would only be dropped for — see session.zig.
 pub const OpKind = enum(u8) { batch = 0, frontier = 1, share = 2, grant = 3 };
-pub const RequestKind = enum(u8) { call = 0, ok = 1, err = 2, cancel = 3 };
+// call/ok/err/cancel are the blob (partial-checkout) request cycle; fs_call/
+// fs_ok are the .peer filesystem cycle (peer_fs) — a DISTINCT kind, so fs ops
+// never collide with the blob op-space (which routes by op-byte value).
+pub const RequestKind = enum(u8) { call = 0, ok = 1, err = 2, cancel = 3, fs_call = 4, fs_ok = 5 };
 pub const FeedKind = enum(u8) { publish = 0 };
 
 pub const Frame = struct {

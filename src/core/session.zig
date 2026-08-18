@@ -555,6 +555,13 @@ pub const Collab = struct {
     relay_ctx: ?*anyopaque = null,
     /// Agent side: serve blob requests for the hosted file.
     blob_server: ?*BlobServer = null,
+    /// Host side: serve .peer filesystem requests, confined to a shared root,
+    /// gated by `fs_grant` (default deny — a peer gets nothing unless the host
+    /// opened a root and granted access).
+    peer_fs_root: ?*@import("rooted_fs.zig").RootedFs = null,
+    fs_grant: @import("peer_fs.zig").Grant = .{},
+    /// Client side: correlate .peer fs replies (LIST/READ/WRITE).
+    remote_fs: ?*RemoteFs = null,
     /// Client side: fold blob replies into the read-only viewer.
     remote_file: ?*RemoteFile = null,
     /// Client side: editable partial checkout (stemma hole-bases).
@@ -754,6 +761,25 @@ pub const Collab = struct {
                     } else if (self.remote_file) |rf| {
                         const c = rf.onReply(frame.payload) catch false;
                         changed = changed or c;
+                    },
+                    // .peer filesystem: serve a client's request against the
+                    // shared root (confined + granted), reply mirroring the id.
+                    .fs_call => {
+                        const peer_fs = @import("peer_fs.zig");
+                        var cur: []const u8 = frame.payload;
+                        const id = wire.getUv(&cur) catch return changed;
+                        const root = self.peer_fs_root orelse return changed;
+                        const resp = peer_fs.handle(gpa, root, self.fs_grant, cur) catch return changed;
+                        defer gpa.free(resp);
+                        var reply: std.ArrayList(u8) = .empty;
+                        defer reply.deinit(gpa);
+                        wire.putUv(gpa, &reply, id) catch return changed;
+                        reply.appendSlice(gpa, resp) catch return changed;
+                        try self.session.post(.request, @intFromEnum(wire.RequestKind.fs_ok), self.base + 3, reply.items);
+                    },
+                    .fs_ok => if (self.remote_fs) |rf| {
+                        rf.onReply(gpa, frame.payload) catch {};
+                        changed = true;
                     },
                     else => {},
                 }
@@ -1504,6 +1530,74 @@ test "partial checkout: adopt base over the wire, edit around holes, bounce-real
     try t.expectEqualStrings(h_text, c_text);
 }
 
+test "peer_fs over the wire: a client lists a host's confined shared root" {
+    const gpa = t.allocator;
+    const rooted_fs = @import("rooted_fs.zig");
+    const peer_fs = @import("peer_fs.zig");
+
+    // Host shared root: a temp dir with a file.
+    var pbuf: [128]u8 = undefined;
+    const root_path = try std.fmt.bufPrintZ(&pbuf, "/tmp/weft-peerwire-{d}", .{linux.getpid()});
+    _ = linux.rmdir(root_path.ptr);
+    if (linux.errno(linux.mkdir(root_path.ptr, 0o755)) != .SUCCESS) return error.Mkdir;
+    var root = try rooted_fs.RootedFs.open(root_path.ptr);
+    defer root.close();
+    defer {
+        _ = linux.unlinkat(root.root_fd, "hello.txt", 0);
+        _ = linux.rmdir(root_path.ptr);
+    }
+    try root.write("hello.txt", "shared bytes");
+
+    const fds = try socketPair();
+    var la: FdLink = .{ .fd = fds[0] };
+    var lb: FdLink = .{ .fd = fds[1] };
+    var host = try Document.init(gpa, "host");
+    defer host.deinit(gpa);
+    var client = try Document.init(gpa, "client");
+    defer client.deinit(gpa);
+    const sa = try Session.create(gpa, la.link(), .server, "tok", .own, null);
+    defer sa.destroy();
+    const sb = try Session.create(gpa, lb.link(), .client, "tok", .own, null);
+    defer sb.destroy();
+    var ch = try Collab.init(gpa, sa, &host, "host");
+    defer ch.deinit();
+    var cc = try Collab.init(gpa, sb, &client, "client");
+    defer cc.deinit();
+
+    // Host serves its root with a read grant; client drives a RemoteFs.
+    ch.peer_fs_root = &root;
+    ch.fs_grant = .{ .access = .read };
+    var rfs = RemoteFs.init(gpa);
+    defer rfs.deinit();
+    cc.remote_fs = &rfs;
+
+    // Settle the encrypted handshake, then LIST the shared root over the wire.
+    var settle: usize = 0;
+    while (settle < 80) : (settle += 1) {
+        _ = ch.tick(0) catch {};
+        _ = cc.tick(0) catch {};
+        futexWaitTimed(&sb.out_wake, sb.out_wake.load(.acquire), std.time.ns_per_ms);
+    }
+    const list_req = try peer_fs.encodeList(gpa, ".");
+    defer gpa.free(list_req);
+    const id = try rfs.request(sb, cc.base, list_req);
+
+    const deadline = task.nowNs() + 10 * std.time.ns_per_s;
+    var resp: ?[]u8 = null;
+    while (resp == null and task.nowNs() < deadline) {
+        _ = ch.tick(0) catch {};
+        _ = cc.tick(0) catch {};
+        resp = rfs.take(id);
+        if (resp == null) futexWaitTimed(&sb.out_wake, sb.out_wake.load(.acquire), std.time.ns_per_ms);
+    }
+    try t.expect(resp != null);
+    defer gpa.free(resp.?);
+    const decoded = peer_fs.decodeResponse(resp.?).?;
+    try t.expectEqual(peer_fs.Status.ok, decoded.status);
+    // The listing the host served, confined to its root, crossed the wire.
+    try t.expect(std.mem.indexOf(u8, decoded.payload, "hello.txt") != null);
+}
+
 test "session: wrong token never establishes" {
     const gpa = t.allocator;
     const fds = try socketPair();
@@ -1845,6 +1939,57 @@ pub const RemoteFile = struct {
         if (bytes.len != len) return false;
         try self.rope.realize(gpa, @intCast(offset), bytes);
         return true;
+    }
+};
+
+/// Client-side `.peer` filesystem: post LIST/READ/WRITE/STAT requests to a host
+/// over the collab request channel and collect the replies. Each reply is a
+/// `peer_fs` response (status + payload); the caller drains completed ones (a
+/// dired-style plugin folds a listing into a buffer). Async by construction —
+/// no blocking round-trip on the frame thread (round-2 D1).
+pub const RemoteFs = struct {
+    gpa: Allocator,
+    next_call: u64 = 1,
+    /// Completed replies by call id (owned `peer_fs` response bytes).
+    replies: std.AutoHashMapUnmanaged(u64, []u8) = .empty,
+
+    pub fn init(gpa: Allocator) RemoteFs {
+        return .{ .gpa = gpa };
+    }
+    pub fn deinit(self: *RemoteFs) void {
+        var it = self.replies.valueIterator();
+        while (it.next()) |v| self.gpa.free(v.*);
+        self.replies.deinit(self.gpa);
+    }
+
+    /// Post a `peer_fs`-encoded request on `base+3`; returns the call id the
+    /// reply will mirror. `req` is from `peer_fs.encodeList/Read/Write/Stat`.
+    pub fn request(self: *RemoteFs, session: *Session, base: u64, req: []const u8) !u64 {
+        const id = self.next_call;
+        self.next_call += 1;
+        var p: std.ArrayList(u8) = .empty;
+        defer p.deinit(self.gpa);
+        try wire.putUv(self.gpa, &p, id);
+        try p.appendSlice(self.gpa, req);
+        try session.post(.request, @intFromEnum(wire.RequestKind.fs_call), base + 3, p.items);
+        return id;
+    }
+
+    /// A reply frame arrived (`uv id | response`): store the response by id.
+    fn onReply(self: *RemoteFs, gpa: Allocator, payload: []const u8) !void {
+        var cur: []const u8 = payload;
+        const id = wire.getUv(&cur) catch return;
+        const owned = try gpa.dupe(u8, cur);
+        const gop = try self.replies.getOrPut(gpa, id);
+        if (gop.found_existing) gpa.free(gop.value_ptr.*);
+        gop.value_ptr.* = owned;
+    }
+
+    /// Take the completed response for `id` (owned; caller frees), or null if it
+    /// has not arrived yet.
+    pub fn take(self: *RemoteFs, id: u64) ?[]u8 {
+        if (self.replies.fetchRemove(id)) |kv| return kv.value;
+        return null;
     }
 };
 
