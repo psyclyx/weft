@@ -21,7 +21,41 @@ const defaults = [_]Pair{
     .{ .name = "pair-brace", .open = "{", .close = "}" },
     .{ .name = "pair-bracket", .open = "[", .close = "]" },
     .{ .name = "pair-quote", .open = "\"", .close = "\"" },
+    .{ .name = "pair-quote-single", .open = "'", .close = "'" },
 };
+
+/// Extensions where `'` (a quote pair — open==close) is a QUOTE, not an
+/// auto-pair: the lisps. This is the answer to "how do we handle `'`" — a quote
+/// pair auto-closes everywhere EXCEPT these languages, where it inserts a single
+/// character. Overridable via config `weft.set("autopair","quote-langs",[…])`.
+const default_quote_langs = [_][]const u8{ ".el", ".lisp", ".cl", ".clj", ".cljs", ".cljc", ".scm", ".rkt", ".fnl" };
+var quote_langs: [64][]const u8 = undefined;
+var quote_langs_n: usize = 0;
+/// The active buffer's extension (tracked on focus, for the quote-lang check).
+var cur_ext: [24]u8 = undefined;
+var cur_ext_len: usize = 0;
+
+fn loadQuoteLangs() void {
+    if (quote_langs_n != 0) return;
+    if (weft.configList("quote-langs")) |list| {
+        var it = list;
+        while (it.next()) |rec| {
+            if (quote_langs_n >= quote_langs.len) break;
+            quote_langs[quote_langs_n] = dup(rec); // dup shares the pair arena
+            quote_langs_n += 1;
+        }
+    }
+    if (quote_langs_n == 0) for (default_quote_langs) |e| {
+        quote_langs[quote_langs_n] = e;
+        quote_langs_n += 1;
+    };
+}
+
+fn inQuoteLang() bool {
+    if (cur_ext_len == 0) return false;
+    for (quote_langs[0..quote_langs_n]) |e| if (std.mem.eql(u8, e, cur_ext[0..cur_ext_len])) return true;
+    return false;
+}
 
 /// The resolved pair set (defaults ⊕ config), parsed once. `on_command`'s id is
 /// this array's index, matching declare/register order.
@@ -66,20 +100,36 @@ fn loadPairs() void {
 
 export fn describe() void {
     loadPairs();
+    loadQuoteLangs();
     for (pairs[0..pairs_len]) |pr| weft.declareCommand(pr.name);
 }
 export fn init() void {
     loadPairs();
+    loadQuoteLangs();
     for (pairs[0..pairs_len]) |pr| _ = weft.register(pr.name);
 }
 export fn on_command(id: u32) void {
     if (id < pairs_len) insertPair(pairs[id]);
 }
+/// Track the focused buffer's extension, for the quote-language check.
+export fn on_activate() void {
+    const path = weft.activatePath();
+    if (std.mem.lastIndexOfScalar(u8, path, '.')) |i| {
+        cur_ext_len = @min(path.len - i, cur_ext.len);
+        @memcpy(cur_ext[0..cur_ext_len], path[i..][0..cur_ext_len]);
+    } else cur_ext_len = 0;
+}
 
 /// Insert the delimiter pair at the cursor and place the cursor after the open
-/// run (between the two runs).
+/// run. A quote pair (open==close) in a lisp is a QUOTE, not a pair — insert the
+/// open char alone and leave the cursor after it (no auto-close to delete).
 fn insertPair(pr: Pair) void {
     const off = weft.cursor();
+    if (std.mem.eql(u8, pr.open, pr.close) and inQuoteLang()) {
+        weft.edit(.{ .start = off, .end = off }, pr.open);
+        weft.jump(off + pr.open.len);
+        return;
+    }
     var buf: [32]u8 = undefined;
     const n = pr.open.len + pr.close.len;
     if (n > buf.len) return;

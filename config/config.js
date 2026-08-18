@@ -90,6 +90,7 @@ weft.bind("insert", "parenleft", "pair-paren");
 weft.bind("insert", "braceleft", "pair-brace");
 weft.bind("insert", "bracketleft", "pair-bracket");
 weft.bind("insert", "quotedbl", "pair-quote");
+weft.bind("insert", "apostrophe", "pair-quote-single"); // ' pairs, except in lisps (a quote)
 
 // Theme is data: override any Theme field by name with an sRGB hex. (A full
 // colorscheme is just a block of these; `set-color` does the same at runtime.)
