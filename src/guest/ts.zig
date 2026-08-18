@@ -22,8 +22,11 @@ const cmds = [_]Cmd{
     .{ .name = "ts-select-comment", .handler = selectComment },
     .{ .name = "ts-goto-first-child", .handler = gotoFirstChild },
     .{ .name = "ts-select-child", .handler = selectChild },
+    .{ .name = "ts-raise", .handler = raise },
     .{ .name = "ts-query", .handler = queryCount },
 };
+
+var raise_buf: [1 << 15]u8 = undefined;
 
 export fn describe() void {
     for (cmds) |c| weft.declareCommand(c.name);
@@ -103,6 +106,19 @@ fn selectChild() void {
     if (weft.nodeChildren(weft.cursor()) == 0) return;
     const c = weft.queryCapture(0) orelse return;
     weft.setSelection(.{ .start = c.start, .end = c.end });
+}
+
+/// Raise: replace the enclosing parent node with the node at point (unwrap —
+/// e.g. `(x + y)` → `x + y`, or lift an expression out of its wrapper). One
+/// grade-gated edit.
+fn raise() void {
+    const cur = weft.nodeAt(weft.cursor()) orelse return;
+    const parent = weft.nodeEnclosing(.{ .start = cur.start, .end = cur.end }) orelse return;
+    const txt = weft.slice(cur.start, cur.end); // borrows shim scratch
+    const n = @min(txt.len, raise_buf.len);
+    @memcpy(raise_buf[0..n], txt[0..n]);
+    weft.edit(.{ .start = parent.start, .end = parent.end }, raise_buf[0..n]);
+    weft.jump(parent.start);
 }
 
 /// Run a caller-supplied tree-sitter query over the whole buffer and return the
