@@ -1,15 +1,27 @@
 //! git — a magit-lite over the git subprocess (design §6.6), a `.wasm` plugin.
-//! Each command creates+focuses a tool buffer and fills it asynchronously with
-//! the output of a git invocation via the native `proc` surface — the output
-//! lands authored as this plugin's peer, off the frame thread. perms
-//! `{proc, timer}`; grant_max edit (it only writes its own tool buffers).
-//! Read-only views for now; staging/commit verbs arrive with an interactive
-//! proc channel.
+//! Read verbs (status/log/diff/blame) create+focus a tool buffer and fill it
+//! asynchronously with a git invocation via the native `proc` surface — the
+//! output lands authored as this plugin's peer, off the frame thread. The
+//! *git-status* buffer runs its own `magit` keymap mode: navigation-only, plus
+//! the interactive verbs (stage/unstage/commit/push/pull/…). Each index-mutating
+//! verb chains its git call with a status re-read in ONE shell command, so the
+//! buffer always reflects the post-mutation index (no async read/write race).
+//! perms `{proc, timer, fs_write}` — fs_write only to drop the commit message in
+//! a temp file for `git commit -F`. grant_max edit (it authors its own buffers).
 
 const std = @import("std");
 const weft = @import("weft.zig");
 
 var cmd_buf: [1 << 12]u8 = undefined;
+/// Copy target for the commit message read out of the *git-commit* buffer,
+/// before the temp-file write (keeps the bytes out of the shared read scratch).
+var msg_buf: [1 << 16]u8 = undefined;
+
+/// The temp file the commit message lands in for `git commit -F` — cwd-relative,
+/// the same locus the shell command runs in. Removed right after the commit.
+const commit_tmp = ".weft-commit-msg";
+
+const status_cmd = "git status --short --branch";
 
 const Cmd = struct { name: []const u8, handler: *const fn () void };
 const cmds = [_]Cmd{
@@ -21,14 +33,27 @@ const cmds = [_]Cmd{
     // magit-style verbs, live in the *git-status* buffer's own mode.
     .{ .name = "git-stage", .handler = gitStage },
     .{ .name = "git-unstage", .handler = gitUnstage },
+    .{ .name = "git-stage-all", .handler = gitStageAll },
+    .{ .name = "git-unstage-all", .handler = gitUnstageAll },
     .{ .name = "git-refresh", .handler = gitStatus },
     .{ .name = "git-open", .handler = gitOpen },
+    .{ .name = "git-diff-file", .handler = gitDiffFile },
+    // sync verbs → *git-output* (async; stderr folded in so progress shows).
+    .{ .name = "git-push", .handler = gitPush },
+    .{ .name = "git-pull", .handler = gitPull },
+    .{ .name = "git-fetch", .handler = gitFetch },
+    // commit: an editable *git-commit* buffer + a C-c prefix to finish/abort.
+    .{ .name = "git-commit", .handler = gitCommit },
+    .{ .name = "git-commit-finish", .handler = gitCommitFinish },
+    .{ .name = "git-commit-abort", .handler = gitCommitAbort },
+    .{ .name = "git-commit-resume", .handler = gitCommitResume },
 };
 
 export fn describe() void {
     for (cmds) |c| weft.declareCommand(c.name);
     weft.requestPerm(.proc);
     weft.requestPerm(.timer);
+    weft.requestPerm(.fs_write); // only to stage the commit message for `-F`
 }
 export fn init() void {
     for (cmds) |c| _ = weft.register(c.name);
@@ -42,9 +67,31 @@ export fn init() void {
     weft.bindKey("magit", "Up", "cursor-up");
     weft.bindKey("magit", "s", "git-stage");
     weft.bindKey("magit", "u", "git-unstage");
+    weft.bindKey("magit", "S", "git-stage-all");
+    weft.bindKey("magit", "U", "git-unstage-all");
+    weft.bindKey("magit", "c", "git-commit");
+    weft.bindKey("magit", "d", "git-diff-file");
+    weft.bindKey("magit", "P", "git-push");
+    weft.bindKey("magit", "F", "git-pull");
+    weft.bindKey("magit", "f", "git-fetch");
     weft.bindKey("magit", "g", "git-refresh");
     weft.bindKey("magit", "Return", "git-open");
     weft.bindKey("magit", "q", "buf-scratch");
+
+    // The commit message buffer is an EDITABLE mode: fall back to `default` so
+    // it inherits the core text command (insert-text) + editing keys, then layer
+    // a C-c prefix on top. The keymap is single-keyspec, so the C-c C-c / C-c C-k
+    // chords are a one-shot prefix menu-mode: C-c enters `git-commit-menu`
+    // (recording git-commit as its return target), and its keys finish/abort/
+    // resume. finish/abort switch the mode themselves, so the menu's auto-return
+    // stays out of the way.
+    weft.setFallback("git-commit", "default");
+    weft.bindKey("git-commit", "C-c", "git-commit-menu");
+    weft.menuMode("git-commit-menu"); // C-c prefix: swallows stray text
+    weft.bindKey("git-commit-menu", "C-c", "git-commit-finish");
+    weft.bindKey("git-commit-menu", "C-k", "git-commit-abort");
+    weft.bindKey("git-commit-menu", "Escape", "git-commit-resume");
+    weft.bindKey("git-commit-menu", "C-g", "git-commit-resume");
 }
 export fn on_command(id: u32) void {
     if (id < cmds.len) cmds[id].handler();
@@ -65,26 +112,111 @@ fn currentPath() []const u8 {
     return path_buf[0..n];
 }
 
-/// Stage / unstage the file under the cursor, then refresh — chained in one
-/// shell command so the status re-reads AFTER the index change (no async race).
+/// Run `idx_cmd` (a git index mutation) then re-read the status into the
+/// *git-status* buffer — one shell command so the status reflects the mutation
+/// (no async race) — and stay in the magit mode.
+fn stageThenRefresh(idx_cmd: []const u8) void {
+    const cmd = std.fmt.bufPrint(&cmd_buf, "{s} && " ++ status_cmd, .{idx_cmd}) catch return;
+    show(cmd, "*git-status*");
+    weft.setMode("magit");
+}
+
+/// Stage / unstage the file under the cursor, then refresh.
 fn gitStage() void {
     const path = currentPath();
     if (path.len == 0) return;
-    const cmd = std.fmt.bufPrint(&cmd_buf, "git add -- '{s}' && git status --short --branch", .{path}) catch return;
+    const cmd = std.fmt.bufPrint(&cmd_buf, "git add -- '{s}' && " ++ status_cmd, .{path}) catch return;
     show(cmd, "*git-status*");
     weft.setMode("magit");
 }
 fn gitUnstage() void {
     const path = currentPath();
     if (path.len == 0) return;
-    const cmd = std.fmt.bufPrint(&cmd_buf, "git reset -q HEAD -- '{s}' && git status --short --branch", .{path}) catch return;
+    const cmd = std.fmt.bufPrint(&cmd_buf, "git reset -q HEAD -- '{s}' && " ++ status_cmd, .{path}) catch return;
     show(cmd, "*git-status*");
     weft.setMode("magit");
+}
+fn gitStageAll() void {
+    stageThenRefresh("git add -A");
+}
+fn gitUnstageAll() void {
+    stageThenRefresh("git reset -q HEAD");
 }
 fn gitOpen() void {
     const path = currentPath();
     if (path.len == 0) return;
     weft.runStr("open", path);
+}
+/// Diff the file under the cursor into *git-diff*.
+fn gitDiffFile() void {
+    const path = currentPath();
+    if (path.len == 0) return;
+    const cmd = std.fmt.bufPrint(&cmd_buf, "git diff -- '{s}'", .{path}) catch return;
+    show(cmd, "*git-diff*");
+}
+
+// ── sync verbs: async into *git-output* (2>&1 so git's stderr progress shows) ──
+fn gitPush() void {
+    show("git push 2>&1", "*git-output*");
+}
+fn gitPull() void {
+    show("git pull 2>&1", "*git-output*");
+}
+fn gitFetch() void {
+    show("git fetch 2>&1", "*git-output*");
+}
+
+// ── commit ────────────────────────────────────────────────────────────
+/// Focus the existing buffer named `name`, if any (avoids piling up duplicate
+/// *git-commit* buffers across commits). Returns whether one was found.
+fn focusBuffer(name: []const u8) bool {
+    const count = weft.bufferCount();
+    var i: usize = 0;
+    while (i < count) : (i += 1) {
+        const bn = weft.bufferName(i) orelse continue;
+        if (std.mem.eql(u8, bn, name)) {
+            const id = weft.bufferId(i) orelse return false;
+            weft.runInt("buffer-switch", id);
+            return true;
+        }
+    }
+    return false;
+}
+
+/// Open an editable *git-commit* buffer for the message. C-c C-c commits,
+/// C-c C-k aborts.
+fn gitCommit() void {
+    if (!focusBuffer("*git-commit*")) weft.runStr("buffer-create", "*git-commit*");
+    weft.edit(.{ .start = 0, .end = weft.byteLen() }, ""); // start from a blank message
+    weft.jump(0);
+    weft.setMode("git-commit");
+    weft.echo("commit: C-c C-c to commit, C-c C-k to abort");
+}
+/// Write the message buffer to a temp file, `git commit -F` it, then refresh the
+/// status. Uses `-F <file>` (not `-m`) so multi-line messages and quotes need no
+/// escaping. Commit stdout/stderr is discarded so the *git-status* buffer stays
+/// a clean, parseable status; the branch header reflects the new HEAD.
+fn gitCommitFinish() void {
+    const text = weft.slice(0, weft.byteLen());
+    const n = @min(text.len, msg_buf.len);
+    @memcpy(msg_buf[0..n], text[0..n]);
+    _ = weft.fsWrite(commit_tmp, msg_buf[0..n]);
+    const cmd = std.fmt.bufPrint(
+        &cmd_buf,
+        "git commit -F {s} >/dev/null 2>&1; rm -f {s}; " ++ status_cmd,
+        .{ commit_tmp, commit_tmp },
+    ) catch return;
+    show(cmd, "*git-status*");
+    weft.setMode("magit");
+}
+/// Cancel the commit: drop the message, back to a fresh status view.
+fn gitCommitAbort() void {
+    show(status_cmd, "*git-status*");
+    weft.setMode("magit");
+}
+/// Leave the C-c prefix, back to editing the commit message.
+fn gitCommitResume() void {
+    weft.setMode("git-commit");
 }
 
 /// Create+focus the tool buffer, then fill it with `cmd`'s output async.
@@ -93,7 +225,7 @@ fn show(cmd: []const u8, name: []const u8) void {
     weft.procToBuffer(cmd, name);
 }
 fn gitStatus() void {
-    show("git status --short --branch", "*git-status*");
+    show(status_cmd, "*git-status*");
     weft.setMode("magit"); // rich status buffer: s stage, u unstage, g refresh
 }
 fn gitLog() void {
