@@ -93,7 +93,8 @@ fn cBindKey(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32, results:
     defer gpa.free(key);
     const cmd = readStr(br, caller, args[4], args[5]) orelse return;
     defer gpa.free(cmd);
-    br.ctx.keymap.bind(gpa, mode, key, cmd) catch {};
+    // User config shadows plugins and core defaults (highest tier).
+    br.ctx.keymap.bind(gpa, mode, key, cmd, @import("Keymap.zig").prio_config, "config") catch {};
 }
 
 fn cRun(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32, results: []i32) void {

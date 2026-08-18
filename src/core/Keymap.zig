@@ -15,7 +15,17 @@ const Allocator = std.mem.Allocator;
 
 const Keymap = @This();
 
-const Bindings = std.StringArrayHashMapUnmanaged([]u8);
+/// A key's winning binding + the (priority, owner) that won it. Layering
+/// ([FIX 9]): a bind only takes the slot when its priority ≥ the incumbent's,
+/// so the resolved keymap is a pure function of the declaration set — never
+/// load-order-dependent. Precedence tiers: core defaults (−100) < plugins (0)
+/// < user config (100).
+const BindEntry = struct { command: []u8, priority: i32, owner: []u8 };
+const Bindings = std.StringArrayHashMapUnmanaged(BindEntry);
+
+pub const prio_core = -100;
+pub const prio_plugin = 0;
+pub const prio_config = 100;
 
 modes: std.StringArrayHashMapUnmanaged(Bindings) = .empty,
 mode: []u8 = &.{},
@@ -39,7 +49,8 @@ pub fn deinit(self: *Keymap, gpa: Allocator) void {
         gpa.free(mode_name);
         for (bindings.keys(), bindings.values()) |k, v| {
             gpa.free(k);
-            gpa.free(v);
+            gpa.free(v.command);
+            gpa.free(v.owner);
         }
         bindings.deinit(gpa);
     }
@@ -60,9 +71,13 @@ pub fn deinit(self: *Keymap, gpa: Allocator) void {
     self.* = .{};
 }
 
-/// Bind `keyspec` to `command` in `mode` (created on first use).
-/// Rebinding replaces — a config shadowing a built-in binding.
-pub fn bind(self: *Keymap, gpa: Allocator, mode: []const u8, key: []const u8, command: []const u8) Allocator.Error!void {
+/// Bind `keyspec` to `command` in `mode` at `priority`, owned by `owner`
+/// (the binder — a plugin name, "config", or "core"). The binding takes the
+/// slot only when its priority ≥ the current holder's, so a higher tier
+/// (config > plugin > core) always wins regardless of bind order. An
+/// equal-priority bind from a *different* owner is a collision — surfaced as a
+/// warning; last one wins.
+pub fn bind(self: *Keymap, gpa: Allocator, mode: []const u8, key: []const u8, command: []const u8, priority: i32, owner: []const u8) Allocator.Error!void {
     const gop = try self.modes.getOrPut(gpa, mode);
     if (!gop.found_existing) {
         gop.key_ptr.* = try gpa.dupe(u8, mode);
@@ -70,11 +85,20 @@ pub fn bind(self: *Keymap, gpa: Allocator, mode: []const u8, key: []const u8, co
     }
     const bgop = try gop.value_ptr.getOrPut(gpa, key);
     if (bgop.found_existing) {
-        gpa.free(bgop.value_ptr.*);
+        const cur = bgop.value_ptr.*;
+        if (priority < cur.priority) return; // a lower tier can't shadow a higher one
+        if (priority == cur.priority and !std.mem.eql(u8, cur.owner, owner))
+            std.log.warn("keymap: '{s}' in mode '{s}' bound by both '{s}' and '{s}' at priority {d}", .{ key, mode, cur.owner, owner, priority });
+        gpa.free(cur.command);
+        gpa.free(cur.owner);
     } else {
         bgop.key_ptr.* = try gpa.dupe(u8, key);
     }
-    bgop.value_ptr.* = try gpa.dupe(u8, command);
+    bgop.value_ptr.* = .{
+        .command = try gpa.dupe(u8, command),
+        .priority = priority,
+        .owner = try gpa.dupe(u8, owner),
+    };
 }
 
 /// The command bound to `keyspec` in the current mode or its fallback
@@ -84,7 +108,7 @@ pub fn lookup(self: *const Keymap, key: []const u8) ?[]const u8 {
     var depth: usize = 0;
     while (depth < 8) : (depth += 1) {
         if (self.modes.getPtr(mode)) |bindings| {
-            if (bindings.get(key)) |cmd| return cmd;
+            if (bindings.get(key)) |entry| return entry.command;
         }
         mode = self.parents.get(mode) orelse return null;
     }
@@ -158,7 +182,7 @@ pub fn isMenuMode(self: *const Keymap, mode: []const u8) bool {
 /// For which-key: a leaf menu mode's whole table.
 pub fn ownBindings(self: *const Keymap, gpa: Allocator, mode: []const u8, out: *std.ArrayList(Binding)) Allocator.Error!void {
     const b = self.modes.getPtr(mode) orelse return;
-    for (b.keys(), b.values()) |k, v| try out.append(gpa, .{ .key = k, .command = v });
+    for (b.keys(), b.values()) |k, v| try out.append(gpa, .{ .key = k, .command = v.command });
 }
 
 /// Compose a keyspec from modifiers + a keysym name into `buf`. `shift`
@@ -194,9 +218,9 @@ test "keymap: modal binding, rebinding, keyspec composition" {
     defer km.deinit(gpa);
 
     try km.setMode(gpa, "normal");
-    try km.bind(gpa, "normal", "i", "enter-insert");
-    try km.bind(gpa, "normal", "C-s", "save");
-    try km.bind(gpa, "insert", "Escape", "enter-normal");
+    try km.bind(gpa, "normal", "i", "enter-insert", prio_plugin, "vim");
+    try km.bind(gpa, "normal", "C-s", "save", prio_plugin, "vim");
+    try km.bind(gpa, "insert", "Escape", "enter-normal", prio_plugin, "vim");
 
     try t.expectEqualStrings("enter-insert", km.lookup("i").?);
     try t.expectEqualStrings("save", km.lookup("C-s").?);
@@ -206,8 +230,8 @@ test "keymap: modal binding, rebinding, keyspec composition" {
     try t.expectEqualStrings("enter-normal", km.lookup("Escape").?);
     try t.expectEqual(@as(?[]const u8, null), km.lookup("i"));
 
-    // Rebinding shadows.
-    try km.bind(gpa, "insert", "Escape", "custom-escape");
+    // Same-owner rebinding replaces.
+    try km.bind(gpa, "insert", "Escape", "custom-escape", prio_plugin, "vim");
     try t.expectEqualStrings("custom-escape", km.lookup("Escape").?);
 
     var buf: [32]u8 = undefined;
@@ -217,14 +241,38 @@ test "keymap: modal binding, rebinding, keyspec composition" {
     try t.expectEqualStrings("C-M-S-Tab", keyspec(&buf, true, true, true, "Tab"));
 }
 
+test "keymap: layering is order-independent — higher priority always wins" {
+    const gpa = t.allocator;
+    try t.expectEqual(true, prio_core < prio_plugin and prio_plugin < prio_config);
+
+    // Core default, then a plugin shadows it, then user config shadows that.
+    var a: Keymap = .empty;
+    defer a.deinit(gpa);
+    try a.bind(gpa, "default", "j", "cursor-down", prio_core, "core");
+    try a.bind(gpa, "default", "j", "motion.down", prio_plugin, "vim");
+    try a.bind(gpa, "default", "j", "my-thing", prio_config, "config");
+    try a.setMode(gpa, "default");
+    try t.expectEqualStrings("my-thing", a.lookup("j").?);
+
+    // Same binds in the OPPOSITE order resolve identically — a lower tier can
+    // never displace a higher one, so the result is a pure function of the set.
+    var b: Keymap = .empty;
+    defer b.deinit(gpa);
+    try b.bind(gpa, "default", "j", "my-thing", prio_config, "config");
+    try b.bind(gpa, "default", "j", "motion.down", prio_plugin, "vim");
+    try b.bind(gpa, "default", "j", "cursor-down", prio_core, "core");
+    try b.setMode(gpa, "default");
+    try t.expectEqualStrings("my-thing", b.lookup("j").?);
+}
+
 test "keymap: menu modes are leaf prefix tables, with enumerable bindings" {
     const gpa = t.allocator;
     var km: Keymap = .empty;
     defer km.deinit(gpa);
 
-    try km.bind(gpa, "normal", "i", "insert");
-    try km.bind(gpa, "leader", "f", "find-file");
-    try km.bind(gpa, "leader", "c", "collab");
+    try km.bind(gpa, "normal", "i", "insert", prio_plugin, "vim");
+    try km.bind(gpa, "leader", "f", "find-file", prio_plugin, "vim");
+    try km.bind(gpa, "leader", "c", "collab", prio_plugin, "vim");
 
     // which-key shows only for modes the config declared as menus.
     try t.expect(!km.isMenuMode("leader")); // not declared yet

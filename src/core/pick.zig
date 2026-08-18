@@ -808,7 +808,8 @@ pub fn install(gpa: Allocator, commands: *command.Commands, keymap: *@import("Ke
         .{ "C-j", "pick-accept-input" },
         .{ "S-Return", "pick-accept-input" },
     };
-    for (binds) |b| try keymap.bind(gpa, "pick", b[0], b[1]);
+    const Keymap = @import("Keymap.zig");
+    for (binds) |b| try keymap.bind(gpa, "pick", b[0], b[1], Keymap.prio_core, "core");
     try keymap.setTextCommand(gpa, "pick", "pick-input");
     _ = try commands.bind(gpa, "palette", (comptime command.define("palette", "Open the command palette.", cPalette)));
 }

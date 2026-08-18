@@ -267,7 +267,8 @@ pub fn install(gpa: std.mem.Allocator, commands: *command.Commands, keymap: *@im
         .{ "C-b", "buffers" },
         .{ "C-Tab", "buffer-next" },
     };
-    for (binds) |b| try keymap.bind(gpa, "default", b[0], b[1]);
+    const Keymap = @import("Keymap.zig");
+    for (binds) |b| try keymap.bind(gpa, "default", b[0], b[1], Keymap.prio_core, "core");
     try keymap.setTextCommand(gpa, "default", "insert-text");
 
     try @import("pick.zig").install(gpa, commands, keymap);

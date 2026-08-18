@@ -647,7 +647,10 @@ fn hBindKey(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32, results:
     defer gpa.free(key);
     const cmd = caller.readMemory(gpa, @intCast(args[4]), @intCast(args[5])) catch return;
     defer gpa.free(cmd);
-    p.ctx.keymap.bind(gpa, mode, key, cmd) catch {};
+    // A plugin binds at the plugin tier, owned by its name (so a config bind
+    // shadows it and equal-tier collisions between two plugins are surfaced).
+    const Keymap = @import("Keymap.zig");
+    p.ctx.keymap.bind(gpa, mode, key, cmd, Keymap.prio_plugin, p.name) catch {};
 }
 
 fn hSetMode(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32, results: []i32) void {
