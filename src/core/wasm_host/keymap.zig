@@ -23,6 +23,45 @@ pub fn hBindKey(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32, resu
     p.ctx.keymap.bind(gpa, mode, key, cmd, Keymap.prio_plugin, p.name) catch {};
 }
 
+/// wl_declare_action(name) — a plugin declares an abstract intent + its
+/// trampoline command, so a key can bind to `name` and dispatch by context.
+pub fn hDeclareAction(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32, results: []i32) void {
+    _ = results;
+    const p: *WasmPlugin = @ptrCast(@alignCast(data.?));
+    const gpa = p.gpa;
+    const name = caller.readMemory(gpa, @intCast(args[0]), @intCast(args[1])) catch return;
+    defer gpa.free(name);
+    const command = @import("../command.zig");
+    command.registerAction(gpa, p.ctx.commands, p.ctx.actions, name, .pick) catch {};
+}
+
+/// wl_provide(action, mode, lang, cmd, prio) — a plugin registers a provider
+/// for `action`, owned by its name (so teardown drops it and equal-tier
+/// collisions are attributable). Empty mode/lang = "don't care".
+pub fn hProvide(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32, results: []i32) void {
+    _ = results;
+    const p: *WasmPlugin = @ptrCast(@alignCast(data.?));
+    const gpa = p.gpa;
+    const action = caller.readMemory(gpa, @intCast(args[0]), @intCast(args[1])) catch return;
+    defer gpa.free(action);
+    const mode = caller.readMemory(gpa, @intCast(args[2]), @intCast(args[3])) catch return;
+    defer gpa.free(mode);
+    const lang = caller.readMemory(gpa, @intCast(args[4]), @intCast(args[5])) catch return;
+    defer gpa.free(lang);
+    const cmd = caller.readMemory(gpa, @intCast(args[6]), @intCast(args[7])) catch return;
+    defer gpa.free(cmd);
+    p.ctx.actions.provide(.{
+        .action = action,
+        .when = .{
+            .mode = if (mode.len > 0) mode else null,
+            .lang = if (lang.len > 0) lang else null,
+        },
+        .command = cmd,
+        .priority = args[8],
+        .owner = p.name,
+    }) catch {};
+}
+
 pub fn hSetMode(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32, results: []i32) void {
     _ = results;
     const p: *WasmPlugin = @ptrCast(@alignCast(data.?));

@@ -193,6 +193,10 @@ pub fn deinit(self: *WasmPlugin) void {
         self.ctx.caps.unregisterByIdPrefix(id);
         gpa.free(id);
     }
+    // Action providers this plugin registered (weft.provide) die with it, owned
+    // by its name. The declared actions themselves persist (cheap names; another
+    // plugin/config may still provide for them).
+    self.ctx.actions.unregisterByOwnerPrefix(self.name);
     for (self.commands.items) |wc| {
         if (self.ctx.commands.find(wc.name)) |n| {
             if (self.ctx.commands.lookup(n)) |cmd| {

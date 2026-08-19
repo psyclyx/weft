@@ -60,6 +60,8 @@ extern "weft" fn wl_set_mode(ptr: u32, len: u32) void;
 extern "weft" fn wl_set_fallback(m: u32, ml: u32, par: u32, pl: u32) void;
 extern "weft" fn wl_text_input(m: u32, ml: u32, c: u32, cl: u32, has: u32) void;
 extern "weft" fn wl_menu_mode(ptr: u32, len: u32) void;
+extern "weft" fn wl_declare_action(ptr: u32, len: u32) void;
+extern "weft" fn wl_provide(a: u32, al: u32, m: u32, ml: u32, l: u32, ll: u32, c: u32, cl: u32, prio: i32) void;
 extern "weft" fn wl_sticky_menu(ptr: u32, len: u32) void;
 extern "weft" fn wl_run(ptr: u32, len: u32) void;
 extern "weft" fn wl_run_int(ptr: u32, len: u32, n: i32) void;
@@ -437,6 +439,43 @@ pub fn menuMode(mode: []const u8) void {
 /// transients) instead of one-shot auto-popping. Implies `menuMode`.
 pub fn stickyMenu(mode: []const u8) void {
     wl_sticky_menu(p(mode.ptr), @intCast(mode.len));
+}
+
+/// A provider's context predicate — the ambient facts that must hold for it to
+/// win. An absent field is "don't care". Mirrors core.action.When.
+pub const When = struct {
+    /// Keymap mode that must be active.
+    mode: ?[]const u8 = null,
+    /// Buffer language — the active buffer name's extension (`zig`, `py`).
+    lang: ?[]const u8 = null,
+};
+
+/// Declare an abstract intent `name` a key can bind to (and register its
+/// trampoline command). Providers registered with `provide` resolve it by
+/// context at fire time — the synthetic bind. Late-bound like `declareCommand`.
+pub fn declareAction(name: []const u8) void {
+    wl_declare_action(p(name.ptr), @intCast(name.len));
+}
+
+/// Register `cmd` as a provider for `action` under the predicate `when`, at
+/// `prio` (higher wins; ties break toward the more specific `when`). Auto-
+/// declares the action if `declareAction` hasn't run — a language plugin can
+/// `provide("eval", .{ .lang = "zig" }, "zig-eval", 0)` and the key bound to
+/// `eval` dispatches here in a .zig buffer, for free.
+pub fn provide(action: []const u8, when: When, cmd: []const u8, prio: i32) void {
+    const m = when.mode orelse "";
+    const l = when.lang orelse "";
+    wl_provide(
+        p(action.ptr),
+        @intCast(action.len),
+        p(m.ptr),
+        @intCast(m.len),
+        p(l.ptr),
+        @intCast(l.len),
+        p(cmd.ptr),
+        @intCast(cmd.len),
+        prio,
+    );
 }
 /// Invoke a command by name (no args), late-bound.
 pub fn run(cmd: []const u8) void {
