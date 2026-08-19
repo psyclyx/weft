@@ -6,28 +6,12 @@
 //! owns the WasmPlugin lifecycle + handshake — to keep each file focused on
 //! one concern; the two @import each other (Zig permits the cycle).
 
-const std = @import("std");
-const Allocator = std.mem.Allocator;
-
 const wasm = @import("wasm.zig");
-const command = @import("command.zig");
-const capability = @import("capability.zig");
-const pick_mod = @import("pick.zig");
-const fs_source = @import("fs_source.zig");
-const Buffers = @import("Buffers.zig");
-const syntax = @import("syntax.zig");
-const subbuffer = @import("subbuffer.zig");
-const async_loop = @import("async.zig");
-const proc = @import("proc.zig");
-const authority = @import("authority.zig");
-const position = @import("position.zig");
-const Document = @import("Document.zig");
-const Editor = @import("Editor.zig");
 
-// The lifecycle side owns these; we operate on them.
+// The lifecycle side owns the plugin type; `defineImports` binds over it. The
+// two @import each other (Zig permits the file-level cycle).
 const wasm_abi = @import("wasm_abi.zig");
 const WasmPlugin = wasm_abi.WasmPlugin;
-const surface_mod = @import("surface.zig");
 
 // The shared leaf every handler group imports (WasmPlugin, perms, environ,
 // the peer resolver). Re-exported below so `core.wasm_host.X` is unchanged.
@@ -70,10 +54,6 @@ const dispatch = @import("wasm_host/dispatch.zig");
 const keymap = @import("wasm_host/keymap.zig");
 const commands = @import("wasm_host/commands.zig");
 const edit = @import("wasm_host/edit.zig");
-const rooted_fs = @import("rooted_fs.zig");
-const WasmCmd = wasm_abi.WasmCmd;
-const PendingItem = wasm_abi.PendingItem;
-const WasmBoundPick = wasm_abi.WasmBoundPick;
 
 /// Bind the full `weft.*` host-import membrane (the guest-side surface in
 /// src/guest/weft.zig). One import per abi.Abi method the shim exposes; each
