@@ -718,6 +718,58 @@ test "quickjs: a JS plugin drives a duplex subprocess and reads its output" {
     try t.expect(std.mem.indexOf(u8, env.echo.items, "ping") != null);
 }
 
+test "quickjs: the ACP plugin drives a mock agent's message into the transcript" {
+    const gpa = t.allocator;
+    var env: Env = undefined;
+    try Env.init(gpa, &env);
+    defer env.deinit(gpa);
+    var engine = try wasm.Engine.init();
+    defer engine.deinit();
+
+    // A fire-and-forget mock ACP agent (sh builtins only — printf): emits the
+    // initialize + session/new results, a session/update carrying an agent
+    // message, and the prompt result. This is the client-side round-trip the
+    // plugin parses: JSON-RPC in, agent_message_chunk → transcript.
+    var tmp = t.tmpDir(.{});
+    defer tmp.cleanup();
+    const mock_path = try std.fmt.allocPrint(gpa, ".zig-cache/tmp/{s}/mock.sh", .{tmp.sub_path});
+    defer gpa.free(mock_path);
+    const mock =
+        \\printf '{"jsonrpc":"2.0","id":0,"result":{"protocolVersion":1,"agentCapabilities":{}}}\n'
+        \\printf '{"jsonrpc":"2.0","id":1,"result":{"sessionId":"s1"}}\n'
+        \\printf '{"jsonrpc":"2.0","method":"session/update","params":{"sessionId":"s1","update":{"sessionUpdate":"agent_message_chunk","content":{"type":"text","text":"hello from agent"}}}}\n'
+        \\printf '{"jsonrpc":"2.0","id":2,"result":{"stopReason":"end_turn"}}\n'
+    ;
+    try @import("file.zig").writeBytes(gpa, mock_path, mock);
+
+    // The real ACP client plugin (read from the repo) + a start line pointing
+    // at the mock. `/bin/sh <path>` needs no PATH (hermetic .empty env).
+    const acp = try @import("file.zig").readAlloc(gpa, "config/plugins/acp.js");
+    defer gpa.free(acp);
+    const src = try std.fmt.allocPrint(gpa, "{s}\nstartAgent(\"/bin/sh {s}\", \"hi\");\n", .{ acp, mock_path });
+    defer gpa.free(src);
+
+    var plugin = try JsPlugin.load(gpa, &engine, &env.ctx, env.pool, .empty, src);
+    defer plugin.deinit();
+
+    // Pump the frame-boundary output dispatch until the agent's message lands
+    // in the transcript buffer.
+    const deadline = task.nowNs() + 3 * std.time.ns_per_s;
+    var found = false;
+    while (!found and task.nowNs() < deadline) {
+        _ = plugin.tick();
+        var it = env.buffers.iterator();
+        while (it.next()) |b| {
+            if (!std.mem.eql(u8, b.name, "*agent*")) continue;
+            const txt = try b.editor.text().toOwnedSlice(gpa);
+            defer gpa.free(txt);
+            if (std.mem.indexOf(u8, txt, "hello from agent") != null) found = true;
+        }
+        std.atomic.spinLoopHint();
+    }
+    try t.expect(found);
+}
+
 test "quickjs: a config syntax error surfaces as ConfigException, not silent" {
     const gpa = t.allocator;
     var env: Env = undefined;
