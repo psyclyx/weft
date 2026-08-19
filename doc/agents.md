@@ -112,11 +112,15 @@ The ACP client works end-to-end and is launchable in the running editor:
   reads + writes your files + streams responses. Launchable: `weft.set("acp",
   "cmd",…)` + `weft.plugin("acp.js")` + `agent-start`.
 
+**Multi-turn:** `weft.lineText()` + the `agent-send` command send the current
+line as the next prompt on the running session (a real conversation), and
+`sendPrompt` echoes it into the transcript. Bind `SPC o s`.
+
 **Remaining (refinements on the working agent):**
-- A prompt INPUT per turn (the command-arg or text-input membrane into JS) —
-  today the opening prompt is config data (one turn).
-- `session/request_permission` → the pick membrane (currently default-deny,
-  which is safe — it gates non-fs tool calls like shell exec).
+- `session/request_permission` → a pick (currently default-deny, which is safe
+  — it only gates non-fs tool calls like shell exec; file read/write/edit work
+  directly). Needs the async pick round-trip forwarded to a `JsPlugin` (a
+  parallel pick-binding path + a `weft_on_pick` callback) — its own chunk.
 - Per-conversation agent identity (fs writes author as a single `agent` peer
   for now) and usage tracking.
 - UI polish: transcript folding/styling, the status-line "● agent" segment, the
