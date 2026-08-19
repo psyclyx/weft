@@ -84,30 +84,18 @@ pub const RenderState = struct {
         self.win_layout = try window_layout.Layout.init(gpa, active_id);
     }
 
-    /// Backend-independent frame BUILD: gate on damage + partial-checkout
-    /// realization, sync syntax highlight, assemble the whole-app `Hud`, then
-    /// lay out and build every pane into the instance stream. No swapchain or
-    /// command-buffer work happens here — EXCEPT the atlas-delta GPU uploads
-    /// that still ride inside `renderPanes` (the noted seam). A clean,
-    /// unblocked frame keeps last frame's instance stream and returns early.
-    pub fn buildFrame(self: *RenderState, fx: *const FrameCtx, act: Active) !void {
-        const gpa = fx.gpa;
-        const editor = act.editor;
-        const abuf = act.abuf;
-        const attach = act.attach;
-        const fb = act.fb;
-
-        // A partial checkout defers content rendering until the window around
-        // the cursor is realized (rope holes panic on content reads — the
-        // deterministic single choke point). The dirty flag stays set, so the
-        // frame after realization repaints. Gate on ALL rendered panes on the
-        // partial buffer, not just the focused one: any pane's visible window
-        // (its scroll .. a screenful) must be realized before we read it.
-        const partial_blocked = if (fx.partial_state.*) |*p| blk: {
-            if (p.state != .open) break :blk false; // virgin/empty doc renders fine
+    /// True when a partial checkout can't be read yet: content rendering is
+    /// deferred until the window around the cursor is realized (rope holes
+    /// panic on content reads — the deterministic single choke point). The
+    /// dirty flag stays set, so the frame after realization repaints. Gate on
+    /// ALL rendered panes on the partial buffer, not just the focused one: any
+    /// pane's visible window (its scroll .. a screenful) must be realized.
+    fn partialBlocked(self: *RenderState, fx: *const FrameCtx) bool {
+        if (fx.partial_state.*) |*p| {
+            if (p.state != .open) return false; // virgin/empty doc renders fine
             const cur = fx.ed0.cursorOffset();
             const end = @min(fx.ed0.text().byteLen(), cur + (64 << 10));
-            if (!fx.ed0.text().isRealized(.{ .start = cur -| (64 << 10), .end = end })) break :blk true;
+            if (!fx.ed0.text().isRealized(.{ .start = cur -| (64 << 10), .end = end })) return true;
             const CheckCtx = struct { ed0: *core.Editor, blocked: bool = false };
             var cc = CheckCtx{ .ed0 = fx.ed0 };
             self.win_layout.eachPane(&cc, struct {
@@ -121,9 +109,25 @@ pub const RenderState = struct {
                     if (!rope.isRealized(.{ .start = start, .end = e })) c.blocked = true;
                 }
             }.visit);
-            break :blk cc.blocked;
-        } else false;
-        if (!(fx.view_dirty.* and !partial_blocked)) return;
+            return cc.blocked;
+        }
+        return false;
+    }
+
+    /// Backend-independent frame BUILD: gate on damage + partial-checkout
+    /// realization, sync syntax highlight, assemble the whole-app `Hud`, then
+    /// lay out and build every pane into the instance stream. No swapchain or
+    /// command-buffer work happens here — EXCEPT the atlas-delta GPU uploads
+    /// that still ride inside `renderPanes` (the noted seam). A clean,
+    /// unblocked frame keeps last frame's instance stream and returns early.
+    pub fn buildFrame(self: *RenderState, fx: *const FrameCtx, act: Active) !void {
+        const gpa = fx.gpa;
+        const editor = act.editor;
+        const abuf = act.abuf;
+        const attach = act.attach;
+        const fb = act.fb;
+
+        if (!(fx.view_dirty.* and !self.partialBlocked(fx))) return;
         fx.view_dirty.* = false;
 
         const projection = snail.Mat4.ortho(0, @floatFromInt(fb[0]), @floatFromInt(fb[1]), 0, -1, 1);
