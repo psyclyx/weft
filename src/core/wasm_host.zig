@@ -64,6 +64,7 @@ const surface_host = @import("wasm_host/surface.zig");
 const menu = @import("wasm_host/menu.zig");
 pub const notifyMenu = menu.notifyMenu;
 const buffers_host = @import("wasm_host/buffers.zig");
+const declare = @import("wasm_host/declare.zig");
 const rooted_fs = @import("rooted_fs.zig");
 const WasmCmd = wasm_abi.WasmCmd;
 const PendingItem = wasm_abi.PendingItem;
@@ -79,11 +80,11 @@ pub fn defineImports(linker: *wasm.Linker, p: *WasmPlugin) !void {
         }
     }.f;
     // Group A: core.
-    try d(linker, "wl_log", 3, 0, hLog, p);
+    try d(linker, "wl_log", 3, 0, declare.hLog, p);
     // Describe phase: declarations.
-    try d(linker, "wl_declare_command", 2, 0, hDeclareCommand, p);
-    try d(linker, "wl_declare_capability", 2, 0, hDeclareCapability, p);
-    try d(linker, "wl_request_perm", 1, 0, hRequestPerm, p);
+    try d(linker, "wl_declare_command", 2, 0, declare.hDeclareCommand, p);
+    try d(linker, "wl_declare_capability", 2, 0, declare.hDeclareCapability, p);
+    try d(linker, "wl_request_perm", 1, 0, declare.hRequestPerm, p);
     // Group B: read-only.
     try d(linker, "wl_cursor", 0, 1, hCursor, p);
     try d(linker, "wl_byte_len", 0, 1, hByteLen, p);
@@ -204,51 +205,6 @@ pub fn defineImports(linker: *wasm.Linker, p: *WasmPlugin) !void {
 }
 
 // ── Host import table: one small function per abi.Abi method ──────────
-
-// Group A: core.
-fn hLog(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32, results: []i32) void {
-    _ = results;
-    const p: *WasmPlugin = @ptrCast(@alignCast(data.?));
-    const msg = caller.readMemory(p.gpa, @intCast(args[1]), @intCast(args[2])) catch return;
-    defer p.gpa.free(msg);
-    switch (args[0]) {
-        2 => std.log.warn("{s}", .{msg}),
-        3 => std.log.err("{s}", .{msg}),
-        else => std.log.info("{s}", .{msg}),
-    }
-}
-
-// Describe phase: declarations recorded only while describing.
-fn hDeclareCommand(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32, results: []i32) void {
-    _ = results;
-    const p: *WasmPlugin = @ptrCast(@alignCast(data.?));
-    if (p.phase != .describing) return;
-    const name = caller.readMemory(p.gpa, @intCast(args[0]), @intCast(args[1])) catch return;
-    p.declared.append(p.gpa, name) catch {
-        p.gpa.free(name);
-        return;
-    };
-}
-
-fn hDeclareCapability(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32, results: []i32) void {
-    _ = results;
-    const p: *WasmPlugin = @ptrCast(@alignCast(data.?));
-    if (p.phase != .describing) return;
-    const name = caller.readMemory(p.gpa, @intCast(args[0]), @intCast(args[1])) catch return;
-    p.declared_caps.append(p.gpa, name) catch {
-        p.gpa.free(name);
-        return;
-    };
-}
-
-fn hRequestPerm(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32, results: []i32) void {
-    _ = caller;
-    _ = results;
-    const p: *WasmPlugin = @ptrCast(@alignCast(data.?));
-    if (p.phase != .describing) return;
-    const idx: usize = @intCast(args[0]);
-    if (idx < wasm_abi.perm_count) p.perms[idx] = true;
-}
 
 // Group B: read-only.
 fn hCursor(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32, results: []i32) void {
