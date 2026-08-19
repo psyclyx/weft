@@ -21,6 +21,7 @@ test {
     _ = @import("workflow.zig");
     _ = @import("core/markdown.zig");
     _ = @import("core/identity.zig");
+    _ = @import("app/frame.zig"); // which-key menu-overlay timing
 }
 
 test "stemma path dep: rope round-trips" {

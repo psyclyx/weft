@@ -47,15 +47,21 @@ pub const MenuOverlay = struct {
         const is_menu = keymap.isMenuMode(cur);
         const same = is_menu and self.open and std.mem.eql(u8, cur, self.last_mode[0..self.last_len]);
         if (!same) {
-            // Entered/left/switched menu: close a shown popup; (re)start the
-            // idle timer. Do NOT show yet — the delay gates that below.
+            // Entered/left/switched menu: close a shown popup; the idle timer
+            // is CONTINUOUS across a menu→menu hop — drilling into a submenu
+            // after the popup is up (or after most of the delay) inherits the
+            // wait we already paid, so it appears immediately instead of
+            // re-delaying. Only entering a menu from a NON-menu starts the timer
+            // fresh. Do NOT show yet — the delay gates that below.
             if (self.open and self.shown) {
                 for (plugins.items) |pl| core.wasm_host.notifyMenu(pl, false);
             }
+            const was_in_menu = self.open;
+            const prev_open_ns = self.open_ns;
             self.open = is_menu;
             self.shown = false;
             if (is_menu) {
-                self.open_ns = frame_start;
+                self.open_ns = if (was_in_menu) prev_open_ns else frame_start;
                 self.last_len = @min(cur.len, self.last_mode.len);
                 @memcpy(self.last_mode[0..self.last_len], cur[0..self.last_len]);
             }
@@ -204,4 +210,92 @@ pub fn tickAsync(
     // menu-owner guest can't re-enter its store).
     if (menu.update(fx.keymap, fx.plugins, frame_start, which_key_now, which_key_delay_ns)) dirty = true;
     return dirty;
+}
+
+// ── Tests ───────────────────────────────────────────────────────────
+
+const t = std.testing;
+
+test "menu overlay: drilling into a submenu doesn't re-delay once the popup is up" {
+    const gpa = t.allocator;
+    var km: core.Keymap = .empty;
+    defer km.deinit(gpa);
+    try km.markMenuMode(gpa, "leader");
+    try km.markMenuMode(gpa, "leader-file");
+    var plugins: std.ArrayList(*core.wasm_abi.WasmPlugin) = .empty;
+    defer plugins.deinit(gpa);
+
+    var mo: MenuOverlay = .{};
+    var wkn = false;
+    const delay: u64 = 200;
+
+    // Normal: nothing open.
+    try km.setMode(gpa, "normal");
+    _ = mo.update(&km, &plugins, 0, &wkn, delay);
+    try t.expect(!mo.open and !mo.shown);
+
+    // Enter leader at t=100: open, not yet shown (0 < delay).
+    try km.setMode(gpa, "leader");
+    _ = mo.update(&km, &plugins, 100, &wkn, delay);
+    try t.expect(mo.open and !mo.shown);
+
+    // t=350: held past the delay → the popup appears.
+    _ = mo.update(&km, &plugins, 350, &wkn, delay);
+    try t.expect(mo.shown);
+
+    // Drill into leader-file at t=360: the idle timer is continuous (measured
+    // from the first menu entry, t=100), so 360−100 ≥ delay → the submenu hint
+    // shows THIS frame, no re-delay. This is the bug fix.
+    try km.setMode(gpa, "leader-file");
+    _ = mo.update(&km, &plugins, 360, &wkn, delay);
+    try t.expect(mo.shown);
+}
+
+test "menu overlay: entering a menu from a non-menu still waits the idle delay" {
+    const gpa = t.allocator;
+    var km: core.Keymap = .empty;
+    defer km.deinit(gpa);
+    try km.markMenuMode(gpa, "leader");
+    try km.markMenuMode(gpa, "leader-file");
+    var plugins: std.ArrayList(*core.wasm_abi.WasmPlugin) = .empty;
+    defer plugins.deinit(gpa);
+
+    var mo: MenuOverlay = .{};
+    var wkn = false;
+    const delay: u64 = 200;
+
+    // Fresh entry from normal: the timer starts now — the first popup waits.
+    try km.setMode(gpa, "normal");
+    _ = mo.update(&km, &plugins, 1000, &wkn, delay);
+    try km.setMode(gpa, "leader-file");
+    _ = mo.update(&km, &plugins, 1000, &wkn, delay);
+    try t.expect(mo.open and !mo.shown);
+    _ = mo.update(&km, &plugins, 1150, &wkn, delay); // 150 < delay
+    try t.expect(!mo.shown);
+    _ = mo.update(&km, &plugins, 1201, &wkn, delay); // 201 ≥ delay
+    try t.expect(mo.shown);
+
+    // Leaving menus entirely closes the overlay; a later re-entry starts fresh.
+    try km.setMode(gpa, "normal");
+    _ = mo.update(&km, &plugins, 1300, &wkn, delay);
+    try t.expect(!mo.open and !mo.shown);
+    try km.setMode(gpa, "leader");
+    _ = mo.update(&km, &plugins, 1300, &wkn, delay);
+    try t.expect(!mo.shown); // fresh timer, not instant
+}
+
+test "menu overlay: F1 forces the popup immediately, bypassing the delay" {
+    const gpa = t.allocator;
+    var km: core.Keymap = .empty;
+    defer km.deinit(gpa);
+    try km.markMenuMode(gpa, "leader");
+    var plugins: std.ArrayList(*core.wasm_abi.WasmPlugin) = .empty;
+    defer plugins.deinit(gpa);
+
+    var mo: MenuOverlay = .{};
+    var wkn = true; // F1 pressed
+    try km.setMode(gpa, "leader");
+    _ = mo.update(&km, &plugins, 5, &wkn, 10_000);
+    try t.expect(mo.shown); // shown despite 5 ≪ delay
+    try t.expect(!wkn); // the flag was consumed
 }
