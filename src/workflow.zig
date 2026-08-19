@@ -427,8 +427,12 @@ pub const Loopback = struct {
     /// real time) until `pred` holds or the timeout elapses. Returns whether it
     /// converged.
     pub fn pumpUntil(self: *Loopback, ctx: anytype, comptime pred: fn (@TypeOf(ctx)) bool) !bool {
-        var round: usize = 0;
-        while (round < 6000) : (round += 1) {
+        // Wall-clock bounded, not round-counted: the session reader/writer
+        // threads need real time, and under load (parallel test jobs) a fixed
+        // round budget starves. Returns the instant `pred` holds, so the common
+        // path is fast; only a genuine non-convergence waits the full deadline.
+        const deadline = core.task.nowNs() + 15 * std.time.ns_per_s;
+        while (core.task.nowNs() < deadline) {
             try self.tickOnce();
             if (pred(ctx)) return true;
             napUs(300);
