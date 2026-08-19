@@ -28,6 +28,17 @@ const Editor = @import("Editor.zig");
 const wasm_abi = @import("wasm_abi.zig");
 const WasmPlugin = wasm_abi.WasmPlugin;
 const surface_mod = @import("surface.zig");
+
+// The shared leaf every handler group imports (WasmPlugin, perms, environ,
+// the peer resolver). Re-exported below so `core.wasm_host.X` is unchanged.
+const plugin = @import("wasm_host/plugin.zig");
+pub const perm_fs_read = plugin.perm_fs_read;
+pub const perm_fs_write = plugin.perm_fs_write;
+pub const perm_net = plugin.perm_net;
+pub const perm_proc = plugin.perm_proc;
+pub const perm_timer = plugin.perm_timer;
+pub const setEnviron = plugin.setEnviron;
+pub const resolvePeerWp = plugin.resolvePeerWp;
 const rooted_fs = @import("rooted_fs.zig");
 const WasmCmd = wasm_abi.WasmCmd;
 const PendingItem = wasm_abi.PendingItem;
@@ -324,16 +335,6 @@ fn hFsListAsync(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32, resu
     results[0] = 0;
 }
 
-pub const perm_fs_read = 0;
-pub const perm_fs_write = 1;
-pub const perm_net = 2;
-pub const perm_proc = 3;
-pub const perm_timer = 4;
-
-/// The parent process's environment, so a `proc` child inherits PATH (nix
-/// tools like `rg`/`zig` are NOT on /bin/sh's built-in path). Set once at
-/// startup from `main`; empty in tests (the child falls back to sh's default
-/// PATH, which finds common tools like `git`).
 /// vim-goggles: a guest (an operator) flashes the range it just acted on
 /// (`wl_flash(start, end)`). The range + a generation counter live here; the
 /// frame loop times the fade and the view draws it. Name-based/global, like the
@@ -430,11 +431,6 @@ fn hFold(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32, results: []
     }) catch {};
 }
 
-var g_environ: std.process.Environ = .empty;
-pub fn setEnviron(env: std.process.Environ) void {
-    g_environ = env;
-}
-
 /// A deferred shell insert, owned across the frame→pool→frame hop. Holds no
 /// plugin pointer — it re-resolves the doc + peer by name at delivery, so it
 /// survives the plugin being unloaded mid-flight (mirrors abi.zig's
@@ -492,7 +488,7 @@ fn hShellInsert(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32, resu
 /// worker — proc.run synchronous there, no frame block.
 fn shellWork(gpa: Allocator, ctx: ?*anyopaque) anyerror![]u8 {
     const job: *ShellJob = @ptrCast(@alignCast(ctx.?));
-    var res = proc.run(gpa, &.{ "/bin/sh", "-c", job.cmd }, .{ .environ = g_environ }) catch return gpa.alloc(u8, 0);
+    var res = proc.run(gpa, &.{ "/bin/sh", "-c", job.cmd }, .{ .environ = plugin.g_environ }) catch return gpa.alloc(u8, 0);
     defer res.deinit(gpa);
     return gpa.dupe(u8, std.mem.trimEnd(u8, res.stdout, "\n"));
 }
@@ -596,7 +592,7 @@ fn hProcAppendBuffer(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32,
 
 fn procWork(gpa: Allocator, ctx: ?*anyopaque) anyerror![]u8 {
     const job: *ProcJob = @ptrCast(@alignCast(ctx.?));
-    var res = proc.run(gpa, &.{ "/bin/sh", "-c", job.cmd }, .{ .environ = g_environ }) catch return gpa.alloc(u8, 0);
+    var res = proc.run(gpa, &.{ "/bin/sh", "-c", job.cmd }, .{ .environ = plugin.g_environ }) catch return gpa.alloc(u8, 0);
     defer res.deinit(gpa);
     return gpa.dupe(u8, std.mem.trimEnd(u8, res.stdout, "\n"));
 }
@@ -791,7 +787,7 @@ fn filterWork(gpa: Allocator, ctx: ?*anyopaque) anyerror![]u8 {
     file.writeBytes(gpa, job.tmp, job.content) catch return gpa.dupe(u8, job.content);
     const cmd = std.mem.replaceOwned(u8, gpa, job.cmd, "{}", job.tmp) catch return gpa.dupe(u8, job.content);
     defer gpa.free(cmd);
-    var res = proc.run(gpa, &.{ "/bin/sh", "-c", cmd }, .{ .environ = g_environ }) catch {
+    var res = proc.run(gpa, &.{ "/bin/sh", "-c", cmd }, .{ .environ = plugin.g_environ }) catch {
         file.deleteFile(gpa, job.tmp);
         return gpa.dupe(u8, job.content);
     };
@@ -864,7 +860,7 @@ fn hReplStart(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32, result
         return;
     };
     defer gpa.free(buf);
-    const s = repl_session.Session.start(gpa, pool, p.ctx, p.name, buf, &.{ "/bin/sh", "-c", cmd }, g_environ) catch {
+    const s = repl_session.Session.start(gpa, pool, p.ctx, p.name, buf, &.{ "/bin/sh", "-c", cmd }, plugin.g_environ) catch {
         results[0] = -1;
         return;
     };
@@ -981,11 +977,6 @@ fn hNetClose(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32, results
         s.deinit();
         p.net_sessions.items[h] = null;
     }
-}
-
-pub fn resolvePeerWp(ctx: *anyopaque, doc: *Document) Document.AddPeerError!Document.PeerId {
-    const p: *WasmPlugin = @ptrCast(@alignCast(ctx));
-    return doc.peerNamed(p.gpa, p.name);
 }
 
 // ── Host import table: one small function per abi.Abi method ──────────
