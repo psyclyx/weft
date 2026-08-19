@@ -34,13 +34,18 @@ export fn on_command(id: u32) void {
     if (id == id_remember) remember() else if (id == id_recent) recent();
 }
 
-/// Push the active buffer's path onto the recent list; result is the count
-/// (or -1 when the buffer has no path). Deduped and capped.
-fn remember() void {
-    const pth = weft.path() orelse {
-        weft.setResultInt(-1);
-        return;
-    };
+/// Every buffer focus records the file — this is what actually POPULATES the
+/// recent list in normal use (the `project-remember` command exists but nothing
+/// invoked it, so recents were always empty). A tool buffer (no path) is a
+/// no-op, and re-visiting an entry just moves it to the front (dedup).
+export fn on_activate() void {
+    _ = recordActive();
+}
+
+/// Push the active buffer's path onto the recent list (front, deduped, capped).
+/// Returns the new count, or -1 when the buffer has no path (a tool buffer).
+fn recordActive() i32 {
+    const pth = weft.path() orelse return -1;
     const pn = @min(pth.len, path_buf.len);
     @memcpy(path_buf[0..pn], pth[0..pn]);
     const path = path_buf[0..pn];
@@ -51,7 +56,12 @@ fn remember() void {
 
     const list = prepend(existing_buf[0..en], path);
     weft.kvPut(recent_key, list);
-    weft.setResultInt(@intCast(countLines(list)));
+    return @intCast(countLines(list));
+}
+
+/// The `project-remember` command: record + report the count.
+fn remember() void {
+    weft.setResultInt(recordActive());
 }
 
 /// The recent list as a newline-joined blob (a picker splits it).
