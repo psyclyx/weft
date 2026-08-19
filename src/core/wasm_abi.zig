@@ -11,18 +11,17 @@
 const std = @import("std");
 
 // The bulk lives in leaves: WasmPlugin + membrane handle types in
-// `wasm_abi/plugin.zig`, the runGuest/load path in `wasm_abi/runtime.zig`, and
+// `wasm_abi/WasmPlugin.zig`, the runGuest/load path in `wasm_abi/runtime.zig`, and
 // the membrane test suite in `wasm_abi/tests.zig`. This facade re-exports the
 // public surface so `core.wasm_abi.X` is unchanged, and pulls the tests in.
-const plugin_mod = @import("wasm_abi/plugin.zig");
-pub const WasmPlugin = plugin_mod.WasmPlugin;
-pub const SyntaxResolver = plugin_mod.SyntaxResolver;
-pub const perm_count = plugin_mod.perm_count;
-pub const WasmCmd = plugin_mod.WasmCmd;
-pub const PendingItem = plugin_mod.PendingItem;
-pub const WasmBoundPick = plugin_mod.WasmBoundPick;
-pub const StampSlot = plugin_mod.StampSlot;
-pub const QueryCap = plugin_mod.QueryCap;
+pub const WasmPlugin = @import("wasm_abi/WasmPlugin.zig");
+pub const SyntaxResolver = WasmPlugin.SyntaxResolver;
+pub const perm_count = WasmPlugin.perm_count;
+pub const WasmCmd = WasmPlugin.WasmCmd;
+pub const PendingItem = WasmPlugin.PendingItem;
+pub const WasmBoundPick = WasmPlugin.WasmBoundPick;
+pub const StampSlot = WasmPlugin.StampSlot;
+pub const QueryCap = WasmPlugin.QueryCap;
 
 const runtime = @import("wasm_abi/runtime.zig");
 pub const guest_hello = runtime.guest_hello;

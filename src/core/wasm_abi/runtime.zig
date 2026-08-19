@@ -23,9 +23,8 @@ const async_loop = @import("../async.zig");
 const Pool = @import("../task.zig").Pool;
 
 const wasm_host = @import("../wasm_host.zig");
-const plugin_mod = @import("plugin.zig");
-const WasmPlugin = plugin_mod.WasmPlugin;
-const SyntaxResolver = plugin_mod.SyntaxResolver;
+const WasmPlugin = @import("WasmPlugin.zig");
+const SyntaxResolver = WasmPlugin.SyntaxResolver;
 
 /// The embedded reference guest (compiled from `src/guest/hello.zig` to
 /// wasm32 by build.zig, embedded like `font_mono`).
