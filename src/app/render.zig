@@ -18,6 +18,7 @@ const view_mod = @import("../gfx/view.zig");
 const window_layout = @import("../gfx/window_layout.zig");
 const stats_mod = @import("../gfx/stats.zig");
 const context = @import("../gfx/context.zig");
+const Context = context.Context;
 
 pub const RenderState = struct {
     gpa: std.mem.Allocator,
@@ -73,6 +74,32 @@ pub const RenderState = struct {
         self.instances = .empty;
         self.batches = .empty;
         self.win_layout = try window_layout.Layout.init(gpa, active_id);
+    }
+
+    /// The GPU present: acquire a swapchain image, record the accumulated
+    /// instance stream into the render pass, submit, and present — then record
+    /// the frame's latency stats. This is the ONLY method that touches the
+    /// swapchain/command buffer; a headless harness skips it. A stale/zero
+    /// swapchain (`beginFrame` returns null) drops the frame (was `continue`).
+    pub fn present(self: *RenderState, ctx: *Context, fb: [2]u32, frame_start: u64, had_input: bool) !void {
+        const cmd = try ctx.beginFrame() orelse return;
+        ctx.beginRenderPass(cmd, self.view.theme.background);
+        self.renderer.beginFrame(ctx.current_frame);
+        const draw_state: snail.render.target.DrawState = .{
+            .mvp = snail.Mat4.ortho(0, @floatFromInt(fb[0]), @floatFromInt(fb[1]), 0, -1, 1),
+            .surface = .{
+                .pixel_width = fb[0],
+                .pixel_height = fb[1],
+                .encoding = if (ctx.surfaceEncodesSrgb()) .srgb else .linear,
+            },
+        };
+        try self.renderer.render(cmd, &self.cache, draw_state, self.instances.items, self.batches.items);
+        try ctx.endFrame();
+
+        const frame_ns = stats_mod.nowNs() - frame_start;
+        self.stats.recordFrame(frame_ns);
+        if (had_input) self.stats.recordInput(frame_ns);
+        _ = self.stats.maybeLog(600);
     }
 
     /// Free in the exact reverse order `main()`'s defers used to run:

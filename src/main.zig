@@ -396,12 +396,10 @@ pub fn main(init: std.process.Init) !void {
     const view = &render.view;
     const win_layout = &render.win_layout;
     const cache = &render.cache;
-    const renderer = &render.renderer;
     const binding = &render.binding;
     const built_panes = &render.built_panes;
     const instances = &render.instances;
     const batches = &render.batches;
-    const stats = &render.stats;
     const resources = render.resources;
 
     // Scrolling commands need the view + framebuffer (which core commands
@@ -1107,25 +1105,8 @@ pub fn main(init: std.process.Init) !void {
             batches.items.len = blen;
         }
 
-        // ── Draw ──
-        const cmd = try ctx.beginFrame() orelse continue;
-        ctx.beginRenderPass(cmd, view.theme.background);
-        renderer.beginFrame(ctx.current_frame);
-        const draw_state: snail.render.target.DrawState = .{
-            .mvp = snail.Mat4.ortho(0, @floatFromInt(fb[0]), @floatFromInt(fb[1]), 0, -1, 1),
-            .surface = .{
-                .pixel_width = fb[0],
-                .pixel_height = fb[1],
-                .encoding = if (ctx.surfaceEncodesSrgb()) .srgb else .linear,
-            },
-        };
-        try renderer.render(cmd, cache, draw_state, instances.items, batches.items);
-        try ctx.endFrame();
-
-        const frame_ns = stats_mod.nowNs() - frame_start;
-        stats.recordFrame(frame_ns);
-        if (had_input) stats.recordInput(frame_ns);
-        _ = stats.maybeLog(600);
+        // ── Draw ── (the only GPU/swapchain touch; headless skips it)
+        try render.present(ctx, fb, frame_start, had_input);
     }
     ctx.waitIdle();
 }
