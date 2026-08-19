@@ -53,6 +53,9 @@ const proc_host = @import("wasm_host/proc.zig");
 
 const activation = @import("wasm_host/activation.zig");
 pub const notifyActivate = activation.notifyActivate;
+
+const sessions = @import("wasm_host/sessions.zig");
+pub const drainReplSessions = sessions.drainReplSessions;
 const rooted_fs = @import("rooted_fs.zig");
 const WasmCmd = wasm_abi.WasmCmd;
 const PendingItem = wasm_abi.PendingItem;
@@ -174,13 +177,13 @@ pub fn defineImports(linker: *wasm.Linker, p: *WasmPlugin) !void {
     // with a host-side proc body (the guest can't run off-thread itself).
     try d(linker, "wl_shell_insert", 2, 0, proc_host.hShellInsert, p);
     // Interactive REPL sessions (design §6.3): a persistent child + comint.
-    try d(linker, "wl_repl_start", 4, 1, hReplStart, p);
-    try d(linker, "wl_repl_send", 3, 0, hReplSend, p);
-    try d(linker, "wl_repl_quit", 1, 0, hReplQuit, p);
+    try d(linker, "wl_repl_start", 4, 1, sessions.hReplStart, p);
+    try d(linker, "wl_repl_send", 3, 0, sessions.hReplSend, p);
+    try d(linker, "wl_repl_quit", 1, 0, sessions.hReplQuit, p);
     // net.connect (design §4 Group D / §6.5): TCP or TLS, streamed to a buffer.
-    try d(linker, "wl_net_connect", 6, 1, hNetConnect, p);
-    try d(linker, "wl_net_send", 3, 0, hNetSend, p);
-    try d(linker, "wl_net_close", 1, 0, hNetClose, p);
+    try d(linker, "wl_net_connect", 6, 1, sessions.hNetConnect, p);
+    try d(linker, "wl_net_send", 3, 0, sessions.hNetSend, p);
+    try d(linker, "wl_net_close", 1, 0, sessions.hNetClose, p);
     try d(linker, "wl_proc_to_buffer", 4, 0, proc_host.hProcToBuffer, p);
     try d(linker, "wl_proc_append_buffer", 4, 0, proc_host.hProcAppendBuffer, p);
     try d(linker, "wl_proc_filter", 4, 0, proc_host.hProcFilter, p);
@@ -190,150 +193,6 @@ pub fn defineImports(linker: *wasm.Linker, p: *WasmPlugin) !void {
     try d(linker, "wl_fs_append", 4, 1, fs.hFsAppend, p);
     try d(linker, "wl_fs_list", 6, 1, fs.hFsList, p);
     try d(linker, "wl_fs_list_async", 6, 1, fs.hFsListAsync, p);
-}
-
-const repl_session = @import("repl_session.zig");
-
-/// Start a persistent REPL: `<cmd>` runs under /bin/sh, its output streaming
-/// into the named comint buffer. Returns a session handle, or -1.
-fn hReplStart(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32, results: []i32) void {
-    const p: *WasmPlugin = @ptrCast(@alignCast(data.?));
-    if (!p.perms[perm_proc] or !p.perms[perm_timer]) {
-        results[0] = -1;
-        return;
-    }
-    const pool = p.pool orelse {
-        results[0] = -1;
-        return;
-    };
-    const gpa = p.gpa;
-    const cmd = caller.readMemory(gpa, @intCast(args[0]), @intCast(args[1])) catch {
-        results[0] = -1;
-        return;
-    };
-    defer gpa.free(cmd);
-    const buf = caller.readMemory(gpa, @intCast(args[2]), @intCast(args[3])) catch {
-        results[0] = -1;
-        return;
-    };
-    defer gpa.free(buf);
-    const s = repl_session.Session.start(gpa, pool, p.ctx, p.name, buf, &.{ "/bin/sh", "-c", cmd }, plugin.g_environ) catch {
-        results[0] = -1;
-        return;
-    };
-    p.sessions.append(gpa, s) catch {
-        s.deinit();
-        results[0] = -1;
-        return;
-    };
-    results[0] = @intCast(p.sessions.items.len - 1);
-}
-
-/// Write a line to a REPL session's stdin.
-fn hReplSend(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32, results: []i32) void {
-    _ = results;
-    const p: *WasmPlugin = @ptrCast(@alignCast(data.?));
-    const h: usize = @intCast(args[0]);
-    if (h >= p.sessions.items.len) return;
-    const s = p.sessions.items[h] orelse return;
-    const line = caller.readMemory(p.gpa, @intCast(args[1]), @intCast(args[2])) catch return;
-    defer p.gpa.free(line);
-    s.send(line);
-}
-
-/// Quit a REPL session (kill + join); its handle stays valid but dead.
-fn hReplQuit(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32, results: []i32) void {
-    _ = caller;
-    _ = results;
-    const p: *WasmPlugin = @ptrCast(@alignCast(data.?));
-    const h: usize = @intCast(args[0]);
-    if (h >= p.sessions.items.len) return;
-    if (p.sessions.items[h]) |s| {
-        s.deinit();
-        p.sessions.items[h] = null;
-    }
-}
-
-/// Frame-thread: drain every session's streamed output into its buffer.
-/// Returns true if anything was written (the view repaints).
-pub fn drainReplSessions(p: *WasmPlugin) bool {
-    var any = false;
-    for (p.sessions.items) |maybe| {
-        if (maybe) |s| {
-            if (s.drain()) any = true;
-        }
-    }
-    for (p.net_sessions.items) |maybe| {
-        if (maybe) |s| {
-            if (s.drain()) any = true;
-        }
-    }
-    return any;
-}
-
-const net_session = @import("net_session.zig");
-
-/// net.connect (perm net): dial `host:port` — TLS verifying `sni` when non-empty
-/// — streaming the socket into buffer `name`. Returns a handle, or -1.
-fn hNetConnect(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32, results: []i32) void {
-    const p: *WasmPlugin = @ptrCast(@alignCast(data.?));
-    if (!p.perms[perm_net]) {
-        results[0] = -1;
-        return;
-    }
-    const pool = p.pool orelse {
-        results[0] = -1;
-        return;
-    };
-    const gpa = p.gpa;
-    const hostport = caller.readMemory(gpa, @intCast(args[0]), @intCast(args[1])) catch {
-        results[0] = -1;
-        return;
-    };
-    defer gpa.free(hostport);
-    const name = caller.readMemory(gpa, @intCast(args[2]), @intCast(args[3])) catch {
-        results[0] = -1;
-        return;
-    };
-    defer gpa.free(name);
-    const sni = caller.readMemory(gpa, @intCast(args[4]), @intCast(args[5])) catch {
-        results[0] = -1;
-        return;
-    };
-    defer gpa.free(sni);
-    const s = net_session.Session.start(gpa, pool, p.ctx, p.name, name, hostport, if (sni.len > 0) sni else null) catch {
-        results[0] = -1;
-        return;
-    };
-    p.net_sessions.append(gpa, s) catch {
-        s.deinit();
-        results[0] = -1;
-        return;
-    };
-    results[0] = @intCast(p.net_sessions.items.len - 1);
-}
-
-fn hNetSend(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32, results: []i32) void {
-    _ = results;
-    const p: *WasmPlugin = @ptrCast(@alignCast(data.?));
-    const h: usize = @intCast(args[0]);
-    if (h >= p.net_sessions.items.len) return;
-    const s = p.net_sessions.items[h] orelse return;
-    const bytes = caller.readMemory(p.gpa, @intCast(args[1]), @intCast(args[2])) catch return;
-    defer p.gpa.free(bytes);
-    s.send(bytes);
-}
-
-fn hNetClose(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32, results: []i32) void {
-    _ = caller;
-    _ = results;
-    const p: *WasmPlugin = @ptrCast(@alignCast(data.?));
-    const h: usize = @intCast(args[0]);
-    if (h >= p.net_sessions.items.len) return;
-    if (p.net_sessions.items[h]) |s| {
-        s.deinit();
-        p.net_sessions.items[h] = null;
-    }
 }
 
 // ── Host import table: one small function per abi.Abi method ──────────
