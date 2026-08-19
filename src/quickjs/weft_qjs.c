@@ -37,6 +37,13 @@ extern void host_set(const char *plugin, int plugin_len,
                      const char *blob, int blob_len);
 __attribute__((import_module("weft"), import_name("qjs_menu")))
 extern void host_menu(const char *name, int name_len);
+__attribute__((import_module("weft"), import_name("qjs_action")))
+extern void host_action(const char *name, int name_len);
+__attribute__((import_module("weft"), import_name("qjs_provide")))
+extern void host_provide(const char *action, int action_len,
+                         const char *mode, int mode_len,
+                         const char *lang, int lang_len,
+                         const char *cmd, int cmd_len, int prio);
 
 // ── JS → host trampolines. Each pulls its string args out of the JS values
 // and forwards to the host import. ──
@@ -173,6 +180,54 @@ static JSValue js_menu(JSContext *ctx, JSValueConst this_val,
     return JS_UNDEFINED;
 }
 
+// weft.action(name) — declare an abstract intent a key can bind to; providers
+// registered with weft.provide resolve it by context at fire time. Policy is
+// `pick` (the config plane drives synchronous, command-shaped actions).
+static JSValue js_action(JSContext *ctx, JSValueConst this_val,
+                         int argc, JSValueConst *argv) {
+    if (argc < 1) return JS_ThrowTypeError(ctx, "action(name)");
+    size_t l;
+    const char *s = JS_ToCStringLen(ctx, &l, argv[0]);
+    if (s) host_action(s, (int)l);
+    JS_FreeCString(ctx, s);
+    return JS_UNDEFINED;
+}
+
+// weft.provide(action, when, cmd[, prio]) — register a provider for `action`.
+// `when` is an object {mode?, lang?}; an absent field is "don't care". The
+// highest-priority provider whose `when` holds in the current context wins when
+// the action fires (ties break toward the more specific `when`).
+static JSValue js_provide(JSContext *ctx, JSValueConst this_val,
+                          int argc, JSValueConst *argv) {
+    if (argc < 3) return JS_ThrowTypeError(ctx, "provide(action, when, cmd[, prio])");
+    size_t al, cl;
+    const char *a = JS_ToCStringLen(ctx, &al, argv[0]);
+    const char *c = JS_ToCStringLen(ctx, &cl, argv[2]);
+    const char *mode = NULL;
+    size_t ml = 0;
+    const char *lang = NULL;
+    size_t ll = 0;
+    JSValue jmode = JS_UNDEFINED, jlang = JS_UNDEFINED;
+    if (JS_IsObject(argv[1])) {
+        jmode = JS_GetPropertyStr(ctx, argv[1], "mode");
+        if (!JS_IsUndefined(jmode) && !JS_IsNull(jmode)) mode = JS_ToCStringLen(ctx, &ml, jmode);
+        jlang = JS_GetPropertyStr(ctx, argv[1], "lang");
+        if (!JS_IsUndefined(jlang) && !JS_IsNull(jlang)) lang = JS_ToCStringLen(ctx, &ll, jlang);
+    }
+    int32_t prio = 0;
+    if (argc >= 4) JS_ToInt32(ctx, &prio, argv[3]);
+    if (a && c)
+        host_provide(a, (int)al, mode ? mode : "", (int)ml,
+                     lang ? lang : "", (int)ll, c, (int)cl, prio);
+    JS_FreeCString(ctx, a);
+    JS_FreeCString(ctx, c);
+    if (mode) JS_FreeCString(ctx, mode);
+    if (lang) JS_FreeCString(ctx, lang);
+    JS_FreeValue(ctx, jmode);
+    JS_FreeValue(ctx, jlang);
+    return JS_UNDEFINED;
+}
+
 // Install the `weft` global: the config surface config.js calls.
 static void install_weft(JSContext *ctx) {
     JSValue global = JS_GetGlobalObject(ctx);
@@ -184,6 +239,8 @@ static void install_weft(JSContext *ctx) {
     JS_SetPropertyStr(ctx, weft, "plugin", JS_NewCFunction(ctx, js_plugin, "plugin", 1));
     JS_SetPropertyStr(ctx, weft, "set", JS_NewCFunction(ctx, js_set, "set", 3));
     JS_SetPropertyStr(ctx, weft, "menu", JS_NewCFunction(ctx, js_menu, "menu", 1));
+    JS_SetPropertyStr(ctx, weft, "action", JS_NewCFunction(ctx, js_action, "action", 1));
+    JS_SetPropertyStr(ctx, weft, "provide", JS_NewCFunction(ctx, js_provide, "provide", 3));
     JS_SetPropertyStr(ctx, global, "weft", weft);
     JS_FreeValue(ctx, global);
 }

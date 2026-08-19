@@ -354,8 +354,8 @@ fn finalizeBoxed(env: ?*anyopaque) callconv(.c) void {
 /// Build a `wasm_functype_t` of `nparams` i32 params → `nresults` i32
 /// results (the only shape the membrane needs at this layer).
 fn funcType(nparams: usize, nresults: usize) *c.wasm_functype_t {
-    var pbuf: [8]?*c.wasm_valtype_t = undefined;
-    var rbuf: [8]?*c.wasm_valtype_t = undefined;
+    var pbuf: [16]?*c.wasm_valtype_t = undefined;
+    var rbuf: [16]?*c.wasm_valtype_t = undefined;
     for (0..nparams) |i| pbuf[i] = c.wasm_valtype_new(c.WASM_I32);
     for (0..nresults) |i| rbuf[i] = c.wasm_valtype_new(c.WASM_I32);
     var params: c.wasm_valtype_vec_t = undefined;

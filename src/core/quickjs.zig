@@ -70,6 +70,8 @@ pub fn evalConfig(engine: *wasm.Engine, ctx: *command.Context, loader: ?PluginLo
     try linker.defineFn("weft", "qjs_plugin", 2, 0, cPlugin, &bridge);
     try linker.defineFn("weft", "qjs_set", 6, 0, cSet, &bridge);
     try linker.defineFn("weft", "qjs_menu", 2, 0, cMenu, &bridge);
+    try linker.defineFn("weft", "qjs_action", 2, 0, cAction, &bridge);
+    try linker.defineFn("weft", "qjs_provide", 9, 0, cProvide, &bridge);
 
     var instance = try linker.instantiateWasi(&module);
     defer instance.deinit();
@@ -162,6 +164,47 @@ fn cMenu(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32, results: []
     km.bind(gpa, name, "Escape", "menu-escape", Keymap.prio_config, "config") catch {};
     km.bind(gpa, name, "C-g", "menu-escape", Keymap.prio_config, "config") catch {};
     km.bind(gpa, name, "F1", "which-key-now", Keymap.prio_config, "config") catch {}; // force the hint now
+}
+
+/// weft.action(name) — declare a `pick` action (an abstract intent) and bind
+/// its same-named trampoline command, so a config `weft.bind(mode, key, name)`
+/// dispatches it. Idempotent.
+fn cAction(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32, results: []i32) void {
+    _ = results;
+    const br: *Bridge = @ptrCast(@alignCast(data.?));
+    const gpa = br.ctx.gpa;
+    const name = readStr(br, caller, args[0], args[1]) orelse return;
+    defer gpa.free(name);
+    command.registerAction(gpa, br.ctx.commands, br.ctx.actions, name, .pick) catch {};
+}
+
+/// weft.provide(action, mode, lang, cmd, prio) — register a provider. Empty
+/// mode/lang strings mean "don't care" (an unconstrained provider). Auto-
+/// declares the action if `weft.action` hasn't run yet (load order is free),
+/// but does NOT bind a trampoline command — a provider alone isn't a key
+/// target; declare (or another config's declare) owns the command bind.
+fn cProvide(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32, results: []i32) void {
+    _ = results;
+    const br: *Bridge = @ptrCast(@alignCast(data.?));
+    const gpa = br.ctx.gpa;
+    const action = readStr(br, caller, args[0], args[1]) orelse return;
+    defer gpa.free(action);
+    const mode = readStr(br, caller, args[2], args[3]) orelse return;
+    defer gpa.free(mode);
+    const lang = readStr(br, caller, args[4], args[5]) orelse return;
+    defer gpa.free(lang);
+    const cmd = readStr(br, caller, args[6], args[7]) orelse return;
+    defer gpa.free(cmd);
+    br.ctx.actions.provide(.{
+        .action = action,
+        .when = .{
+            .mode = if (mode.len > 0) mode else null,
+            .lang = if (lang.len > 0) lang else null,
+        },
+        .command = cmd,
+        .priority = args[8],
+        .owner = "config",
+    }) catch {};
 }
 
 fn cEcho(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32, results: []i32) void {
@@ -286,6 +329,39 @@ test "quickjs: config.js can run a registered command through weft.run" {
     defer engine.deinit();
     try evalConfig(&engine, &env.ctx, null, null, "weft.run(\"mark\");");
     try t.expectEqualStrings("ran!", env.echo.items);
+}
+
+test "quickjs: weft.action + weft.provide wire the pick dispatch layer" {
+    const gpa = t.allocator;
+    var env: Env = undefined;
+    try Env.init(gpa, &env);
+    defer env.deinit(gpa);
+
+    var engine = try wasm.Engine.init();
+    defer engine.deinit();
+    // Declare an abstract intent, provide language-specific and default
+    // implementations, and bind a key to the intent — the synthetic bind.
+    const cfg =
+        \\weft.action("eval");
+        \\weft.provide("eval", { lang: "zig" }, "zig-eval");
+        \\weft.provide("eval", { lang: "py" }, "python-repl");
+        \\weft.provide("eval", {}, "eval-line", -10);
+        \\weft.bind("normal", "space", "eval");
+    ;
+    try evalConfig(&engine, &env.ctx, null, null, cfg);
+
+    // The action registered its trampoline command (a key can bind to it), and
+    // the key resolves to the action name through the normal keymap door.
+    try t.expect(env.commands.resolve("eval") != null);
+    try t.expect(env.ctx.actions.isAction("eval"));
+    try env.keymap.setMode(gpa, "normal");
+    try t.expectEqualStrings("eval", env.keymap.lookup("space").?);
+
+    // The `when` predicates crossed the JS→host membrane intact: eval resolves
+    // per language, and the unconstrained default covers everything else.
+    try t.expectEqualStrings("zig-eval", env.ctx.actions.resolve("eval", .{ .mode = "normal", .lang = "zig" }).?);
+    try t.expectEqualStrings("python-repl", env.ctx.actions.resolve("eval", .{ .mode = "normal", .lang = "py" }).?);
+    try t.expectEqualStrings("eval-line", env.ctx.actions.resolve("eval", .{ .mode = "normal", .lang = "md" }).?);
 }
 
 test "quickjs: a config syntax error surfaces as ConfigException, not silent" {
