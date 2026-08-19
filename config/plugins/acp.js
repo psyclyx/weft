@@ -60,6 +60,10 @@ function onMessage(msg) {
     return;
   }
   if (msg.method === "fs/write_text_file") {
+    // Apply as an attributed agent-peer edit (gated + undoable) — not a raw
+    // disk write. weft is the harness.
+    const p = msg.params || {};
+    weft.fileWrite(p.path || "", p.content || "");
     respond(msg.id, {});
     return;
   }

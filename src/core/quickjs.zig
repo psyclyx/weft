@@ -110,6 +110,7 @@ pub fn evalConfig(engine: *wasm.Engine, ctx: *command.Context, loader: ?PluginLo
     try linker.defineFn("weft", "qjs_buffer_append", 4, 0, cStubVoid, &bridge);
     try linker.defineFn("weft", "qjs_config", 4, 1, cStubI32, &bridge);
     try linker.defineFn("weft", "qjs_file_read", 4, 1, cStubI32, &bridge);
+    try linker.defineFn("weft", "qjs_file_write", 4, 0, cStubVoid, &bridge);
 
     var instance = try linker.instantiateWasi(&module);
     defer instance.deinit();
@@ -208,6 +209,7 @@ pub const JsPlugin = struct {
         try self.linker.defineFn("weft", "qjs_buffer_append", 4, 0, cBufferAppend, self);
         try self.linker.defineFn("weft", "qjs_config", 4, 1, cConfig, self);
         try self.linker.defineFn("weft", "qjs_file_read", 4, 1, cFileRead, self);
+        try self.linker.defineFn("weft", "qjs_file_write", 4, 0, cAgentWrite, self);
 
         self.instance = try self.linker.instantiateWasi(&self.module);
         errdefer self.instance.deinit();
@@ -420,6 +422,38 @@ fn cFileRead(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32, results
     };
     defer gpa.free(bytes);
     results[0] = @intCast(caller.writeMemory(@intCast(args[2]), @intCast(args[3]), bytes) catch 0);
+}
+
+/// The CRDT peer an agent's file writes author as (a single agent identity for
+/// now; per-conversation naming is a refinement).
+const agent_peer = "agent";
+
+/// weft.fileWrite(path, content) → the agent's fs/write_text_file: replace the
+/// buffer for `path` with `content`, authored as the agent peer — a gated,
+/// attributed, selectively-undoable edit (the harness payoff), not a raw disk
+/// write. Opens (binds) the path if it isn't already a buffer; the user saves.
+/// A whole-file write, so the buffer's whole content is replaced.
+fn cAgentWrite(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32, results: []i32) void {
+    _ = results;
+    const self: *JsPlugin = @ptrCast(@alignCast(data.?));
+    const gpa = self.gpa;
+    const path = caller.readMemory(gpa, @intCast(args[0]), @intCast(args[1])) catch return;
+    defer gpa.free(path);
+    const content = caller.readMemory(gpa, @intCast(args[2]), @intCast(args[3])) catch return;
+    defer gpa.free(content);
+    const bufs = self.ctx.buffers;
+    const id = bufs.findByPath(path) orelse blk: {
+        const new_id = bufs.create(gpa, std.fs.path.basename(path)) catch return;
+        const nb = bufs.get(new_id) orelse return;
+        nb.editor.adoptPath(gpa, path) catch return; // bind the path (save creates it)
+        break :blk new_id;
+    };
+    const b = bufs.get(id) orelse return;
+    const doc = &b.editor.doc;
+    if (!authority.gradeMin(doc.my_grant, .edit).canEdit()) return;
+    const pid = doc.peerNamed(gpa, agent_peer) catch return;
+    const end = b.editor.text().byteLen();
+    doc.peerReplaceAll(gpa, pid, &.{.{ .range = .{ .start = 0, .end = end }, .bytes = content }}) catch {};
 }
 
 /// Decode the first record of a framed config blob (uvarint count, then
@@ -883,6 +917,33 @@ test "quickjs: a JS plugin reads a file through weft.fileRead" {
 
     _ = try command.run(&env.commands, &env.ctx, "r", &.{});
     try t.expectEqualStrings("file contents here", env.echo.items);
+}
+
+test "quickjs: a JS plugin writes a file as an attributed agent peer edit" {
+    const gpa = t.allocator;
+    var env: Env = undefined;
+    try Env.init(gpa, &env);
+    defer env.deinit(gpa);
+    var engine = try wasm.Engine.init();
+    defer engine.deinit();
+
+    // fs/write to a path that isn't open → weft binds a buffer to it and applies
+    // the content as the agent peer (gated + attributed), not a raw disk write.
+    const src =
+        \\weft.command("w", () => weft.fileWrite("/tmp/weft-agent-out.zig", "const x = 1;"));
+    ;
+    var plugin = try JsPlugin.load(gpa, &engine, &env.ctx, env.pool, .empty, "test", null, src);
+    defer plugin.deinit();
+    _ = try command.run(&env.commands, &env.ctx, "w", &.{});
+
+    const id = env.buffers.findByPath("/tmp/weft-agent-out.zig") orelse return error.NoAgentBuffer;
+    const b = env.buffers.get(id).?;
+    const txt = try b.editor.text().toOwnedSlice(gpa);
+    defer gpa.free(txt);
+    try t.expectEqualStrings("const x = 1;", txt);
+    // Authored by a non-user peer — the agent, not the user's undo history.
+    const doc = &b.editor.doc;
+    try t.expect(doc.commitAt(doc.commitCount() - 1).author != .user);
 }
 
 test "quickjs: a config syntax error surfaces as ConfigException, not silent" {

@@ -63,6 +63,10 @@ extern int host_config(const char *key, int key_len, char *out, int cap);
 // agent's fs/read_text_file, answered by the harness. Config stubs it.
 __attribute__((import_module("weft"), import_name("qjs_file_read")))
 extern int host_file_read(const char *path, int path_len, char *out, int cap);
+// Write a file's content as an attributed AGENT peer edit to its buffer (opened
+// if needed) — the agent's fs/write_text_file, so the edit is gated + undoable.
+__attribute__((import_module("weft"), import_name("qjs_file_write")))
+extern void host_file_write(const char *path, int path_len, const char *content, int content_len);
 __attribute__((import_module("weft"), import_name("qjs_action")))
 extern void host_action(const char *name, int name_len);
 __attribute__((import_module("weft"), import_name("qjs_provide")))
@@ -389,6 +393,19 @@ static JSValue js_file_read(JSContext *ctx, JSValueConst this_val,
     return JS_NewStringLen(ctx, g_read_buf, (size_t)n);
 }
 
+// weft.fileWrite(path, content): apply a whole-file write as an agent peer edit.
+static JSValue js_file_write(JSContext *ctx, JSValueConst this_val,
+                             int argc, JSValueConst *argv) {
+    if (argc < 2) return JS_UNDEFINED;
+    size_t pl, cl;
+    const char *path = JS_ToCStringLen(ctx, &pl, argv[0]);
+    const char *content = JS_ToCStringLen(ctx, &cl, argv[1]);
+    if (path && content) host_file_write(path, (int)pl, content, (int)cl);
+    JS_FreeCString(ctx, path);
+    JS_FreeCString(ctx, content);
+    return JS_UNDEFINED;
+}
+
 // weft.onOutput(fn): register the handler the host fires (with a stream handle)
 // when that stream has new bytes to read.
 static JSValue js_on_output(JSContext *ctx, JSValueConst this_val,
@@ -436,6 +453,7 @@ int weft_plugin_init(const char *src, int len) {
     JS_SetPropertyStr(g_ctx, weft, "bufferAppend", JS_NewCFunction(g_ctx, js_buffer_append, "bufferAppend", 2));
     JS_SetPropertyStr(g_ctx, weft, "config", JS_NewCFunction(g_ctx, js_config, "config", 1));
     JS_SetPropertyStr(g_ctx, weft, "fileRead", JS_NewCFunction(g_ctx, js_file_read, "fileRead", 1));
+    JS_SetPropertyStr(g_ctx, weft, "fileWrite", JS_NewCFunction(g_ctx, js_file_write, "fileWrite", 2));
     JS_SetPropertyStr(g_ctx, weft, "onOutput", JS_NewCFunction(g_ctx, js_on_output, "onOutput", 1));
     JS_FreeValue(g_ctx, weft);
     JS_FreeValue(g_ctx, global);
