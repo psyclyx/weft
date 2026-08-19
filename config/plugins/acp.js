@@ -21,6 +21,7 @@ let nextId = 0; // JSON-RPC request id counter
 let pending = null; // the prompt to send once the session exists
 let buf = ""; // partial-line accumulator for the NDJSON stream
 let pendingPerm = null; // an outstanding session/request_permission: {id, optionIds}
+let agentName = "agent"; // the CRDT peer this agent's edits attribute to
 
 function rpc(method, params) {
   const id = nextId++;
@@ -72,7 +73,7 @@ function onMessage(msg) {
     // Apply as an attributed agent-peer edit (gated + undoable) — not a raw
     // disk write. weft is the harness.
     const p = msg.params || {};
-    weft.fileWrite(p.path || "", p.content || "");
+    weft.fileWrite(p.path || "", p.content || "", agentName);
     respond(msg.id, {});
     return;
   }
@@ -136,6 +137,10 @@ weft.onOutput((h) => {
 // wiring (so the prompt comes from an input line and `cmd` from weft.agent) is
 // the remaining integration.
 function startAgent(cmd, prompt) {
+  // The identity this agent's edits attribute to (a distinct CRDT peer): a
+  // configured name, else the launch command's first word. So "claude"/"codex"
+  // edits are attributable + selectively-undoable per agent.
+  agentName = weft.config("name") || cmd.split(/\s+/)[0].split("/").pop() || "agent";
   pending = prompt;
   transcript(""); // ensure the transcript buffer exists
   agent = weft.procSpawn(cmd);

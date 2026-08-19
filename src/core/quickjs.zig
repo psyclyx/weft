@@ -111,7 +111,7 @@ pub fn evalConfig(engine: *wasm.Engine, ctx: *command.Context, loader: ?PluginLo
     try linker.defineFn("weft", "qjs_buffer_append", 4, 0, cStubVoid, &bridge);
     try linker.defineFn("weft", "qjs_config", 4, 1, cStubI32, &bridge);
     try linker.defineFn("weft", "qjs_file_read", 4, 1, cStubI32, &bridge);
-    try linker.defineFn("weft", "qjs_file_write", 4, 0, cStubVoid, &bridge);
+    try linker.defineFn("weft", "qjs_file_write", 6, 0, cStubVoid, &bridge);
     try linker.defineFn("weft", "qjs_line_text", 2, 1, cStubI32, &bridge);
     try linker.defineFn("weft", "qjs_pick", 4, 0, cStubVoid, &bridge);
 
@@ -212,7 +212,7 @@ pub const JsPlugin = struct {
         try self.linker.defineFn("weft", "qjs_buffer_append", 4, 0, cBufferAppend, self);
         try self.linker.defineFn("weft", "qjs_config", 4, 1, cConfig, self);
         try self.linker.defineFn("weft", "qjs_file_read", 4, 1, cFileRead, self);
-        try self.linker.defineFn("weft", "qjs_file_write", 4, 0, cAgentWrite, self);
+        try self.linker.defineFn("weft", "qjs_file_write", 6, 0, cAgentWrite, self);
         try self.linker.defineFn("weft", "qjs_line_text", 2, 1, cLineText, self);
         try self.linker.defineFn("weft", "qjs_pick", 4, 0, cPick, self);
 
@@ -509,6 +509,9 @@ fn cAgentWrite(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32, resul
     defer gpa.free(path);
     const content = caller.readMemory(gpa, @intCast(args[2]), @intCast(args[3])) catch return;
     defer gpa.free(content);
+    const agent = caller.readMemory(gpa, @intCast(args[4]), @intCast(args[5])) catch return;
+    defer gpa.free(agent);
+    const peer = if (agent.len > 0) agent else agent_peer;
     const bufs = self.ctx.buffers;
     const id = bufs.findByPath(path) orelse blk: {
         const new_id = bufs.create(gpa, std.fs.path.basename(path)) catch return;
@@ -519,7 +522,7 @@ fn cAgentWrite(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32, resul
     const b = bufs.get(id) orelse return;
     const doc = &b.editor.doc;
     if (!authority.gradeMin(doc.my_grant, .edit).canEdit()) return;
-    const pid = doc.peerNamed(gpa, agent_peer) catch return;
+    const pid = doc.peerNamed(gpa, peer) catch return;
     const end = b.editor.text().byteLen();
     doc.peerReplaceAll(gpa, pid, &.{.{ .range = .{ .start = 0, .end = end }, .bytes = content }}) catch {};
 }
