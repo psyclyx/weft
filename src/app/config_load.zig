@@ -81,19 +81,26 @@ pub const PluginHost = struct {
     ctx: *core.command.Context,
     opts: core.wasm_abi.LoadOptions,
     list: *std.ArrayList(*core.wasm_abi.WasmPlugin),
+    /// JS plugins (a `.js` name) — a distinct type from the wasm list; ticked
+    /// each frame for their proc-stream output.
+    js_list: *std.ArrayList(*core.quickjs.JsPlugin),
     dir: []const u8,
 
-    /// A bare name ("vim") resolves to `<dir>/vim.wasm`; anything with a path
-    /// separator or a `.wasm` suffix is taken literally (explicit --plugin
-    /// paths). Writes into `buf`, returns the slice.
+    /// A bare name ("vim") resolves to `<dir>/vim.wasm` (or `<dir>/acp.js` for a
+    /// `.js` name); anything with a path separator or a `.wasm`/`.js` suffix is
+    /// taken literally (explicit --plugin paths). Writes into `buf`.
     fn resolve(self: *PluginHost, buf: []u8, name: []const u8) ?[]const u8 {
-        if (std.mem.indexOfScalar(u8, name, '/') != null or std.mem.endsWith(u8, name, ".wasm"))
+        if (std.mem.indexOfScalar(u8, name, '/') != null or
+            std.mem.endsWith(u8, name, ".wasm") or std.mem.endsWith(u8, name, ".js"))
             return name;
         return std.fmt.bufPrint(buf, "{s}/{s}.wasm", .{ self.dir, name }) catch null;
     }
 
     pub fn load(self: *PluginHost, name: []const u8) void {
         var path_buf: [std.fs.max_path_bytes]u8 = undefined;
+        // A `.js` name (or path) loads as a JS plugin — a resident quickjs
+        // instance — rather than a `.wasm` guest.
+        if (std.mem.endsWith(u8, name, ".js")) return self.loadJs(&path_buf, name);
         const path = self.resolve(&path_buf, name) orelse return;
         // Compilation copies the module, so the file bytes free right after.
         const bytes = core.file.readAlloc(self.gpa, path) catch |e| {
@@ -106,6 +113,30 @@ pub const PluginHost = struct {
             return;
         };
         self.list.append(self.gpa, p) catch p.deinit();
+    }
+
+    /// Load a JS plugin: read its source and stand up a resident quickjs
+    /// instance driving weft through the `weft.*` membrane. A bare `foo.js`
+    /// resolves against the plugin dir; a path is literal.
+    fn loadJs(self: *PluginHost, buf: []u8, name: []const u8) void {
+        const path = if (std.mem.indexOfScalar(u8, name, '/') != null)
+            name
+        else
+            std.fmt.bufPrint(buf, "{s}/{s}", .{ self.dir, name }) catch return;
+        const src = core.file.readAlloc(self.gpa, path) catch |e| {
+            std.log.warn("plugin: {s} failed to read: {t}", .{ path, e });
+            return;
+        };
+        defer self.gpa.free(src);
+        const pool = self.opts.pool orelse {
+            std.log.warn("plugin: {s} needs a task pool (agent subprocesses)", .{path});
+            return;
+        };
+        const p = core.quickjs.JsPlugin.load(self.gpa, self.engine, self.ctx, pool, core.wasm_host.hostEnviron(), src) catch |e| {
+            std.log.warn("plugin: {s} failed to load: {t}", .{ path, e });
+            return;
+        };
+        self.js_list.append(self.gpa, p) catch p.deinit();
     }
 
     pub fn loader(self: *PluginHost) core.quickjs.PluginLoader {

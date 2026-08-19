@@ -189,6 +189,12 @@ pub fn main(init: std.process.Init) !void {
         for (plugins.items) |p| p.deinit();
         plugins.deinit(gpa);
     }
+    // JS plugins (resident quickjs instances — e.g. the ACP agent client).
+    var js_plugins: std.ArrayList(*core.quickjs.JsPlugin) = .empty;
+    defer {
+        for (js_plugins.items) |p| p.deinit();
+        js_plugins.deinit(gpa);
+    }
     const plugin_dir = config_load.pluginDir(gpa);
     defer gpa.free(plugin_dir);
     const module_cache_dir = config_load.moduleCacheDir(gpa);
@@ -199,6 +205,7 @@ pub fn main(init: std.process.Init) !void {
         .ctx = &session.cmd_ctx,
         .opts = .{ .kv = &plugin_kv, .config = &config_kv, .loop = &plugin_loop, .subbuffers = &plugin_subs, .syntax_of = resolveSyntax, .pool = pool, .module_cache_dir = module_cache_dir },
         .list = &plugins,
+        .js_list = &js_plugins,
         .dir = plugin_dir,
     };
     // Explicit --plugin flags load first, in order.
@@ -467,6 +474,11 @@ pub fn main(init: std.process.Init) !void {
         // ── Async housekeeping tick (backing/LSP/nav/pick/plugins/activate/menu) ──
         if (try frame_mod.tickAsync(&fx, abuf, attach, &session.cmd_ctx, &session.def_ui, &session.sym_ui, &plugin_loop, &next_backing_poll_ns, &last_activate_path, &last_activate_len, &menu_overlay, &which_key_now, which_key_delay_ns, frame_start))
             view_dirty = true;
+        // JS plugins: fire each resident quickjs instance's proc-stream output
+        // handler for streams with new bytes (agent transcripts stream in here).
+        for (js_plugins.items) |jp| if (jp.tick()) {
+            view_dirty = true;
+        };
         // ── Connect/disconnect/listen intents (outside the hot section:
         // connect blocks on TCP, disconnect joins threads). ──
         if (collab.applyIntents(&collab_state.share_ctx, &session.cmd_ctx, pool, &collab_state.connect_task, &collab_state.connect_hostport, &collab_state.fd_link, &session.echo, &my_identity, args.token, args.user))

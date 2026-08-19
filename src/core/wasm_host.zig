@@ -22,6 +22,9 @@ pub const perm_net = plugin.perm_net;
 pub const perm_proc = plugin.perm_proc;
 pub const perm_timer = plugin.perm_timer;
 pub const setEnviron = plugin.setEnviron;
+pub fn hostEnviron() @import("std").process.Environ {
+    return plugin.g_environ;
+}
 pub const resolvePeerWp = plugin.resolvePeerWp;
 
 const layers = @import("wasm_host/layers.zig");
