@@ -13,6 +13,13 @@
 
 const std = @import("std");
 const weft = @import("weft.zig");
+const ex_mod = @import("ex.zig");
+
+/// The `:` command line, in helix's own mode namespace (`helix-normal` resting,
+/// `helix-ex` the command line). Same shared engine vim uses: helix gets the
+/// classic builtins (write/quit/open/vsplit/hsplit + w/q/wq/s abbrevs) and the
+/// SAME fall-through to the weft registry (`:name arg…`).
+const ex = ex_mod.Ex("helix-normal", "helix-ex");
 
 /// Motion keys shared with the `motions` plugin. `sel` motions also get a
 /// delete-verb form (d<key>/c<key>) via the operator wrappers.
@@ -61,6 +68,13 @@ const base_cmds = [_]Cmd{
     .{ .name = "hx-open-below", .handler = hxOpenBelow },
     .{ .name = "hx-normal", .handler = hxNormal },
     .{ .name = "hx-delete-op", .handler = enterDeleteOp },
+    // The `:` ex command line (shared engine; helix mode namespace).
+    .{ .name = "helix-ex", .handler = ex.enter },
+    .{ .name = "hx-ex-type", .handler = ex.onType },
+    .{ .name = "hx-ex-backspace", .handler = ex.onBackspace },
+    .{ .name = "hx-ex-clear", .handler = ex.onClear },
+    .{ .name = "hx-ex-run", .handler = ex.onRun },
+    .{ .name = "hx-ex-cancel", .handler = ex.onCancel },
 };
 
 /// Generated: `hx/n/<motion>` (move) for every motion, `hx/d/<motion>` (delete)
@@ -90,15 +104,15 @@ export fn init() void {
 
     // Movement.
     const nb = [_][2][]const u8{
-        .{ "h", "cursor-left" },       .{ "l", "cursor-right" },
-        .{ "j", "cursor-down" },       .{ "k", "cursor-up" },
-        .{ "Left", "cursor-left" },    .{ "Right", "cursor-right" },
-        .{ "Up", "cursor-up" },        .{ "Down", "cursor-down" },
-        .{ "i", "hx-insert" },         .{ "a", "hx-append" },
-        .{ "o", "hx-open-below" },     .{ "x", "delete-forward" },
-        .{ "d", "hx-delete-op" },      .{ "u", "undo" },
-        .{ "C-r", "redo" },            .{ "p", "paste" },
-        .{ "colon", "pick-commands" }, .{ "space", "helix-leader" },
+        .{ "h", "cursor-left" },    .{ "l", "cursor-right" },
+        .{ "j", "cursor-down" },    .{ "k", "cursor-up" },
+        .{ "Left", "cursor-left" }, .{ "Right", "cursor-right" },
+        .{ "Up", "cursor-up" },     .{ "Down", "cursor-down" },
+        .{ "i", "hx-insert" },      .{ "a", "hx-append" },
+        .{ "o", "hx-open-below" },  .{ "x", "delete-forward" },
+        .{ "d", "hx-delete-op" },   .{ "u", "undo" },
+        .{ "C-r", "redo" },         .{ "p", "paste" },
+        .{ "colon", "helix-ex" },   .{ "space", "helix-leader" },
         .{ "g", "helix-goto" },
     };
     for (nb) |b| weft.bindKey("helix-normal", b[0], b[1]);
@@ -130,6 +144,19 @@ export fn init() void {
     weft.bindKey("helix-goto", "Escape", "hx-normal");
     weft.bindKey("helix-goto", "g", "cursor-doc-start"); // core: moves to doc start
     weft.bindKey("helix-goto", "e", "cursor-doc-end");
+
+    // `:` no longer opens the palette — keep it on SPC : (the leader), vim-style.
+    weft.bindKey("helix-leader", "colon", "pick-commands");
+
+    // The `:` command line (helix mode namespace). Same shape as vim's `ex`:
+    // printable → hx-ex-type, Backspace/Enter/Escape edit/run/cancel.
+    weft.textInput("helix-ex", "hx-ex-type");
+    weft.bindKey("helix-ex", "Return", "hx-ex-run");
+    weft.bindKey("helix-ex", "KP_Enter", "hx-ex-run");
+    weft.bindKey("helix-ex", "BackSpace", "hx-ex-backspace");
+    weft.bindKey("helix-ex", "Escape", "hx-ex-cancel");
+    weft.bindKey("helix-ex", "C-c", "hx-ex-cancel");
+    weft.bindKey("helix-ex", "C-u", "hx-ex-clear");
 
     // Cursor: block in normal, bar in insert — helix's own config, by ITS mode
     // names (proving set-cursor doesn't assume vim's).

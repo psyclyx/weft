@@ -8,6 +8,12 @@
 
 const std = @import("std");
 const weft = @import("weft.zig");
+const ex_mod = @import("ex.zig");
+
+/// The `:` command line: vim's resting mode is `normal`, its command-line
+/// keymap mode is `ex`. Owns the classic abbreviated ex commands (w/q/s/…) and
+/// falls everything else through to the weft command registry (see ex.zig).
+const ex = ex_mod.Ex("normal", "ex");
 
 // ── Register (charwise/linewise), owned in guest memory ──────────────
 var reg_buf: [1 << 16]u8 = undefined;
@@ -195,6 +201,13 @@ const static_cmds = [_]Cmd{
     .{ .name = "do-find-F", .handler = doFindBigF },
     .{ .name = "do-find-t", .handler = doFindT },
     .{ .name = "do-find-T", .handler = doFindBigT },
+    // The `:` ex command line (see ex.zig).
+    .{ .name = "vim-ex", .handler = ex.enter },
+    .{ .name = "ex-type", .handler = ex.onType },
+    .{ .name = "ex-backspace", .handler = ex.onBackspace },
+    .{ .name = "ex-clear", .handler = ex.onClear },
+    .{ .name = "ex-run", .handler = ex.onRun },
+    .{ .name = "ex-cancel", .handler = ex.onCancel },
 };
 
 /// Generated normal- and op-mode motion commands (one `vim/n/*` per motion, plus
@@ -300,15 +313,27 @@ export fn init() void {
         weft.bindKey(f[0], "Escape", "leader-cancel");
     }
 
+    // The `:` command line. `ex` is a text-input mode: unbound printable keys
+    // route to `ex-type` (accumulate into the line buffer, re-echoed as ":…");
+    // Backspace edits, Enter executes, Escape/C-c cancel, C-u clears. No
+    // fallback, so stray control keys are swallowed (a real command line).
+    weft.textInput("ex", "ex-type");
+    weft.bindKey("ex", "Return", "ex-run");
+    weft.bindKey("ex", "KP_Enter", "ex-run");
+    weft.bindKey("ex", "BackSpace", "ex-backspace");
+    weft.bindKey("ex", "Escape", "ex-cancel");
+    weft.bindKey("ex", "C-c", "ex-cancel");
+    weft.bindKey("ex", "C-u", "ex-clear");
+
     const np = [_][2][]const u8{
-        .{ "colon", "pick-commands" }, .{ "space", "leader" },
-        .{ "C-w", "window" },          .{ "g", "goto" },
-        .{ "z", "zed" },               .{ "f", "find-f" },
-        .{ "F", "find-F" },            .{ "t", "find-t" },
-        .{ "T", "find-T" },            .{ "C-d", "scroll-half-down" },
-        .{ "C-u", "scroll-half-up" },  .{ "C-f", "scroll-page-down" },
-        .{ "C-b", "scroll-page-up" },  .{ "C-e", "scroll-line-down" },
-        .{ "C-y", "scroll-line-up" },  .{ "C-bracketright", "goto-definition" },
+        .{ "colon", "vim-ex" },       .{ "space", "leader" },
+        .{ "C-w", "window" },         .{ "g", "goto" },
+        .{ "z", "zed" },              .{ "f", "find-f" },
+        .{ "F", "find-F" },           .{ "t", "find-t" },
+        .{ "T", "find-T" },           .{ "C-d", "scroll-half-down" },
+        .{ "C-u", "scroll-half-up" }, .{ "C-f", "scroll-page-down" },
+        .{ "C-b", "scroll-page-up" }, .{ "C-e", "scroll-line-down" },
+        .{ "C-y", "scroll-line-up" }, .{ "C-bracketright", "goto-definition" },
     };
     for (np) |b| weft.bindKey("normal", b[0], b[1]);
     weft.bindKey("default", "C-g", "cancel");
