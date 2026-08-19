@@ -20,19 +20,18 @@
 //!
 //! This file is the public facade; the implementation lives in `pick/`:
 //! - `match.zig`  — the pure matcher (styles + scoring functions).
-//! - `pool.zig`   — the append-only candidate pool + its bulk `rank`.
+//! - `Pool.zig`   — the append-only candidate pool + its bulk `rank`.
 //! - `types.zig`  — the configuration/callback value types.
 //! - `Pick.zig`   — the `Pick` state machine, commands, and `install`.
 
 const match = @import("pick/match.zig");
-const pool = @import("pick/pool.zig");
 const types = @import("pick/types.zig");
 
 /// How the query filters candidates.
 pub const Style = match.Style;
 
 /// The append-only, columnar candidate pool + its bulk `rank`.
-pub const Pool = pool.Pool;
+pub const Pool = @import("pick/Pool.zig");
 
 /// The accept callback handed to `open`.
 pub const Acceptor = types.Acceptor;
@@ -54,7 +53,7 @@ pub const refresh = Pick.refresh;
 // discovers the matcher, pool, and state tests through this facade.
 comptime {
     _ = match;
-    _ = pool;
+    _ = Pool;
     _ = types;
     _ = Pick;
 }
