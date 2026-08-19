@@ -18,6 +18,7 @@ const window_layout = @import("../gfx/window_layout.zig");
 const stats_mod = @import("../gfx/stats.zig");
 const core = @import("../core/core.zig");
 const cursor_config = @import("cursor_config.zig");
+const providers = @import("providers.zig");
 const collab = @import("collab.zig");
 const frame = @import("frame.zig");
 const FrameCtx = frame.FrameCtx;
@@ -102,6 +103,44 @@ pub const FrameBuilder = struct {
     /// by the `records_added`/`rebuilt` signals this sets. A clean, unblocked
     /// frame keeps last frame's build and returns early (leaving `rebuilt`
     /// false, so `present` skips the re-upload/re-emit).
+    /// Reparse + publish a buffer's syntax highlight over a window around
+    /// `top_row` (whole doc when small). Runs for EVERY visible pane's buffer,
+    /// not just the focused one — so all splits highlight, not one at a time.
+    fn publishHighlight(self: *FrameBuilder, gpa: std.mem.Allocator, editor: *core.Editor, syn: *core.syntax.Syntax, caps: *core.Caps, top_row: usize) !void {
+        _ = self;
+        _ = try syn.sync(gpa, &editor.doc);
+        const hl = caps.layers.find(&editor.doc, "highlight") orelse return;
+        const rope = editor.text();
+        const total = rope.byteLen();
+        const range = blk: {
+            if (total <= 256 * 1024) break :blk stemma.Range{ .start = 0, .end = total };
+            const rows = rope.lineCount();
+            const first = top_row -| 100;
+            const last = @min(rows - 1, top_row + 200);
+            break :blk stemma.Range{ .start = rope.lineRange(first).start, .end = rope.lineRange(last).end };
+        };
+        try syn.publishHighlight(gpa, &editor.doc, hl, range);
+    }
+
+    /// Per-byte markdown attributes for a `.md` buffer over a window around
+    /// `top_row`, into `arena` (must outlive the pane build). Null for non-md.
+    /// Shared by the focused pane and every peeked split.
+    fn mdInlineFor(arena: std.mem.Allocator, editor: *core.Editor, name: []const u8, top_row: usize) ?view_mod.MdInline {
+        if (!cursor_config.isMarkdownPath(name)) return null;
+        const rope = editor.text();
+        const total = rope.byteLen();
+        const range = if (total <= 256 * 1024)
+            stemma.Range{ .start = 0, .end = total }
+        else rng: {
+            const rows = rope.lineCount();
+            const first = top_row -| 100;
+            const last = @min(rows -| 1, top_row + 200);
+            break :rng stemma.Range{ .start = rope.lineRange(first).start, .end = rope.lineRange(last).end };
+        };
+        const attrs = core.markdown.analyze(arena, rope, range) catch return null;
+        return .{ .base = range.start, .attrs = attrs };
+    }
+
     pub fn buildFrame(self: *FrameBuilder, fx: *const FrameCtx, act: Active) !void {
         const gpa = fx.gpa;
         const editor = act.editor;
@@ -115,45 +154,14 @@ pub const FrameBuilder = struct {
         const projection = snail.Mat4.ortho(0, @floatFromInt(fb[0]), @floatFromInt(fb[1]), 0, -1, 1);
         const world_to_pixel = snail.mvpToScenePixel(projection, @floatFromInt(fb[0]), @floatFromInt(fb[1])) orelse unreachable;
 
-        if (attach.syntax) |syn| {
-            _ = try syn.sync(gpa, &editor.doc);
-            if (fx.caps.layers.find(&editor.doc, "highlight")) |hl| {
-                // Whole doc when small; a generous window around the
-                // viewport otherwise (republshed every damage frame).
-                const rope = editor.text();
-                const total = rope.byteLen();
-                const range = stemma_range: {
-                    if (total <= 256 * 1024) break :stemma_range stemma.Range{ .start = 0, .end = total };
-                    const rows = rope.lineCount();
-                    const first = self.view.top_row -| 100;
-                    const last = @min(rows - 1, self.view.top_row + 200);
-                    break :stemma_range stemma.Range{ .start = rope.lineRange(first).start, .end = rope.lineRange(last).end };
-                };
-                try syn.publishHighlight(gpa, &editor.doc, hl, range);
-            }
-        }
+        if (attach.syntax) |syn| try self.publishHighlight(gpa, editor, syn, fx.caps, self.view.top_row);
 
         // Markdown styling for .md buffers: analyze a window (whole doc
         // when small) into per-byte attributes each damage frame — a
         // stale paint is slightly-old truth, like highlight bulk.
         var md_arena = std.heap.ArenaAllocator.init(gpa);
         defer md_arena.deinit();
-        const md_inline: ?view_mod.MdInline = blk: {
-            const path = editor.backingPath() orelse abuf.name;
-            if (!cursor_config.isMarkdownPath(path)) break :blk null;
-            const rope = editor.text();
-            const total = rope.byteLen();
-            const range = if (total <= 256 * 1024)
-                stemma.Range{ .start = 0, .end = total }
-            else rng: {
-                const rows = rope.lineCount();
-                const first = self.view.top_row -| 100;
-                const last = @min(rows -| 1, self.view.top_row + 200);
-                break :rng stemma.Range{ .start = rope.lineRange(first).start, .end = rope.lineRange(last).end };
-            };
-            const attrs = core.markdown.analyze(md_arena.allocator(), rope, range) catch break :blk null;
-            break :blk .{ .base = range.start, .attrs = attrs };
-        };
+        const md_inline = mdInlineFor(md_arena.allocator(), editor, editor.backingPath() orelse abuf.name, self.view.top_row);
 
         var pos_buf: [24]u8 = undefined;
         const buffer_pos = blk: {
@@ -334,13 +342,21 @@ pub const FrameBuilder = struct {
             }
             const ob = fx.buffers.get(slot.pane.buffer_id) orelse continue;
             ob.editor.fold_layer = fx.caps.layers.find(&ob.editor.doc, "folds");
+            // Highlight this split too — reparse + publish its syntax (was
+            // focused-pane-only, hence "one split at a time"). Its buffer is
+            // attached by main's visible-pane loop, so resolveSyntax finds it.
+            if (providers.resolveSyntax(ob)) |syn|
+                self.publishHighlight(gpa, &ob.editor, syn, fx.caps, slot.pane.top_row) catch {};
             const other_hud: view_mod.Hud = .{
                 .mode = fx.keymap.currentMode(),
                 .file = ob.editor.backingPath() orelse ob.name,
                 .cursor_on = false, // the caret belongs to the focused pane
                 .pane_border = slot.border,
-                // A peeked tool buffer keeps its colors: thread its styles feed too.
+                // A peeked pane keeps its syntax + markdown + tool colors + diagnostics.
+                .highlight_layer = fx.caps.layers.find(&ob.editor.doc, "highlight"),
+                .md_inline = mdInlineFor(arena_state.allocator(), &ob.editor, ob.editor.backingPath() orelse ob.name, slot.pane.top_row),
                 .styles_layer = fx.caps.layers.find(&ob.editor.doc, "styles"),
+                .diag_layer = fx.caps.layers.find(&ob.editor.doc, "diagnostics"),
             };
             const bo = try self.view.build(arena_state.allocator(), &ob.editor, other_hud, &slot.pane.top_row, slot.rect, .{}, world_to_pixel);
             try self.built_panes.append(gpa, bo);

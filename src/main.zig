@@ -448,6 +448,19 @@ pub fn main(init: std.process.Init) !void {
         // providers and damage the view on focus change.
         const abuf = buffers.active();
         try attachProviders(attach_deps, abuf);
+        // Attach providers to EVERY visible pane's buffer, not just the active
+        // one — so each split gets its own syntax grammar and highlights (the
+        // frame builder reparses each visible pane; without an attachment its
+        // resolveSyntax is null and the split stays unhighlighted).
+        const PaneAttach = struct {
+            deps: @TypeOf(attach_deps),
+            bufs: @TypeOf(buffers),
+            fn visit(pa: *const @This(), pane: *window_layout.Pane) void {
+                if (pa.bufs.get(pane.buffer_id)) |b| attachProviders(pa.deps, b) catch {};
+            }
+        };
+        var pane_attach = PaneAttach{ .deps = attach_deps, .bufs = buffers };
+        win_layout.eachPane(&pane_attach, PaneAttach.visit);
         const editor = &abuf.editor;
         const attach: *Attach = @ptrCast(@alignCast(abuf.frontend.?));
         if (buffers.active_id != last_active) {
