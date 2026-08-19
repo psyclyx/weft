@@ -446,11 +446,7 @@ pub fn main(init: std.process.Init) !void {
     // Menu-overlay (on_menu) edge detection: fire at the frame boundary when the
     // active menu mode changes, so a which-key plugin re-renders exactly on
     // enter/leave (and never nested inside another guest call).
-    var menu_open = false;
-    var menu_shown = false; // has on_menu(open) fired for the current menu?
-    var menu_open_ns: u64 = 0; // when the current menu was entered (idle timer)
-    var last_menu_mode: [64]u8 = undefined;
-    var last_menu_len: usize = 0;
+    var menu_overlay: frame_mod.MenuOverlay = .{};
     // which-key idle delay (doom-style): don't pop the hint until the menu has
     // been held this long — unless which-key-now (F1) forces it. Config sets it
     // via weft.set("editor", "which-key-delay-ms", "200").
@@ -579,83 +575,9 @@ pub fn main(init: std.process.Init) !void {
             view_dirty = true;
         }
 
-        // Backing maintenance for every buffer: fold saves, merge
-        // external writes, retry stale saves, schedule polls.
-        {
-            const poll_due = stats_mod.nowNs() >= next_backing_poll_ns;
-            if (poll_due) next_backing_poll_ns = stats_mod.nowNs() + 2 * std.time.ns_per_s;
-            var mit = buffers.iterator();
-            while (mit.next()) |b| {
-                if (b.editor.pollSave(gpa) and b == abuf) view_dirty = true;
-                const was_stale = b.editor.save_state == .stale;
-                if (try b.editor.pollBacking(gpa) and b == abuf) view_dirty = true;
-                if (was_stale and b.editor.save_state == .idle) try b.editor.requestSave(gpa);
-                if (poll_due or b.editor.save_state == .stale) try b.editor.requestBackingPoll(gpa);
-            }
-        }
-        if (attach.lsp) |l| {
-            if (try l.tick(&cmd_ctx)) view_dirty = true;
-        }
-        if (try def_ui.tick(&cmd_ctx)) view_dirty = true;
-        if (try sym_ui.tick(&cmd_ctx)) view_dirty = true;
-        if (try hover_ui.tick(&cmd_ctx)) view_dirty = true;
-        // Hover dismisses when the cursor leaves the point it was requested at.
-        if (hover_ui.active and buffers.active().editor.cursorOffset() != hover_ui.offset) {
-            hover_ui.clear();
+        // ── Async housekeeping tick (backing/LSP/nav/pick/plugins/activate/menu) ──
+        if (try frame_mod.tickAsync(&fx, abuf, attach, &cmd_ctx, &def_ui, &sym_ui, &plugin_loop, &next_backing_poll_ns, &last_activate_path, &last_activate_len, &menu_overlay, &which_key_now, which_key_delay_ns, frame_start))
             view_dirty = true;
-        }
-        // Drive any async pick source (completion race-and-refine, file
-        // finder, dir browser) — a no-op for a static or source-less
-        // pick. Completion now rides this instead of a bespoke tick.
-        if (try pick_state.tick(&cmd_ctx)) view_dirty = true;
-        // Deliver native async completions (subprocess/timer output, deferred
-        // edits) on the frame thread; a completion repaints.
-        if (plugin_loop.tick()) view_dirty = true;
-        // Stream any interactive REPL output into its comint buffer.
-        for (plugins.items) |pl| {
-            if (core.wasm_host.drainReplSessions(pl)) view_dirty = true;
-        }
-        // Fire the activation event when the focused buffer's path changes, so
-        // language-aware plugins (`modes`) can attach keymaps/facts.
-        {
-            const cur_path = buffers.active().editor.backingPath() orelse "";
-            if (!std.mem.eql(u8, cur_path, last_activate_path[0..last_activate_len])) {
-                for (plugins.items) |pl| core.wasm_host.notifyActivate(pl, cur_path);
-                const n = @min(cur_path.len, last_activate_path.len);
-                @memcpy(last_activate_path[0..n], cur_path[0..n]);
-                last_activate_len = n;
-            }
-        }
-        // Menu overlay edges: on_menu(open) when a (different) menu mode becomes
-        // active, on_menu(close) when we leave menus. Fired here at the frame
-        // boundary — top-level, so a menu-owner guest can't re-enter its store.
-        {
-            const cur = keymap.currentMode();
-            const is_menu = keymap.isMenuMode(cur);
-            const same = is_menu and menu_open and std.mem.eql(u8, cur, last_menu_mode[0..last_menu_len]);
-            if (!same) {
-                // Entered/left/switched menu: close a shown popup; (re)start the
-                // idle timer. Do NOT show yet — the delay gates that below.
-                if (menu_open and menu_shown) {
-                    for (plugins.items) |pl| core.wasm_host.notifyMenu(pl, false);
-                }
-                menu_open = is_menu;
-                menu_shown = false;
-                if (is_menu) {
-                    menu_open_ns = frame_start;
-                    last_menu_len = @min(cur.len, last_menu_mode.len);
-                    @memcpy(last_menu_mode[0..last_menu_len], cur[0..last_menu_len]);
-                }
-                view_dirty = true;
-            }
-            // Pop the hint once held past the idle delay (or F1 forced it now).
-            if (menu_open and !menu_shown and (which_key_now or frame_start -| menu_open_ns >= which_key_delay_ns)) {
-                for (plugins.items) |pl| core.wasm_host.notifyMenu(pl, true);
-                menu_shown = true;
-                view_dirty = true;
-            }
-            which_key_now = false;
-        }
         // ── Connect/disconnect/listen intents (outside the hot section:
         // connect blocks on TCP, disconnect joins threads). ──
         if (collab.applyIntents(&share_ctx, &cmd_ctx, pool, &connect_task, &connect_hostport, &fd_link, &echo_line, &my_identity, args.token, args.user))
