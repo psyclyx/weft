@@ -116,15 +116,24 @@ The ACP client works end-to-end and is launchable in the running editor:
 line as the next prompt on the running session (a real conversation), and
 `sendPrompt` echoes it into the transcript. Bind `SPC o s`.
 
-**Remaining (refinements on the working agent):**
-- `session/request_permission` → a pick (currently default-deny, which is safe
-  — it only gates non-fs tool calls like shell exec; file read/write/edit work
-  directly). Needs the async pick round-trip forwarded to a `JsPlugin` (a
-  parallel pick-binding path + a `weft_on_pick` callback) — its own chunk.
-- Per-conversation agent identity (fs writes author as a single `agent` peer
-  for now) and usage tracking.
-- UI polish: transcript folding/styling, the status-line "● agent" segment, the
-  sessions dashboard.
+**Permission:** `session/request_permission` → a pick — `weft.pick(prompt,
+options)` (bound to the JsPlugin) + `weft.onPick` answer the agent with the
+chosen `optionId`, so tool calls needing approval prompt you.
+
+**Per-agent identity:** `weft.fileWrite(path, content, agent)` authors as the
+named agent peer (derived from `weft.config("name")` or the launch command), so
+each agent's edits attribute to a distinct CRDT peer.
+
+The agent is now functionally complete: reads + writes your files (attributed,
+undoable, per-agent), streams responses, converses (multi-turn), and prompts
+for tool permission.
+
+**Remaining — UI chrome (needs Hud/membrane plumbing, not functional):**
+- A status-line "● agent — waiting/thinking" segment (a plugin-published status
+  feed → a Hud field). The single most-wanted indicator.
+- Transcript folding + role styling (forward `weft.fold`/`weft.style` to JS).
+- Usage/cost readout (agent-reported; ACP doesn't standardize it — parse
+  defensively per agent) + a sessions dashboard.
 
 ## Build order (each phase committable, independently useful)
 
