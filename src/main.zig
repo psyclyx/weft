@@ -34,10 +34,11 @@ const cursor_config = @import("app/cursor_config.zig");
 const config_load = @import("app/config_load.zig");
 const dispatch = @import("app/dispatch.zig");
 const collab = @import("app/collab.zig");
+const collab_cmds = @import("app/collab_cmds.zig");
 const ShareCtx = collab.ShareCtx;
 const hostTrustChip = collab.hostTrustChip;
 const selectionAnchorOf = collab.selectionAnchorOf;
-const identityHandler = collab.identityHandler;
+const identityHandler = collab_cmds.identityHandler;
 const guiConfigure = collab.guiConfigure;
 const providers = @import("app/providers.zig");
 const Attach = providers.Attach;
@@ -402,7 +403,7 @@ pub fn main(init: std.process.Init) !void {
         share_ctx.pending_listen = port;
         share_ctx.pending_access = args.access;
     }
-    try collab.registerCommands(gpa, &commands, &share_ctx, &known_peers);
+    try collab_cmds.registerCommands(gpa, &commands, &share_ctx, &known_peers);
     // Window layout: a recursive split tree over the region geometry. Core
     // commands only RECORD intent on `win_ctx`; the frame loop applies them
     // (splitFocused/closeFocused/focus/move by pane geometry) and keeps the
