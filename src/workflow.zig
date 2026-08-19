@@ -160,6 +160,8 @@ pub const Editor = struct {
     /// main.zig's dispatch: a bound command runs (a menu-mode name enters the
     /// submenu; a one-shot menu key pops back), else printable text is inserted.
     pub fn press(self: *Editor, spec: []const u8, text: []const u8) void {
+        self.ctx.user_initiated = true; // a keystroke: helper-plugin edits are the user's
+        defer self.ctx.user_initiated = false;
         if (self.keymap.lookup(spec)) |cmd| {
             if (self.keymap.isMenuMode(cmd)) {
                 self.keymap.enterMode(self.gpa, cmd) catch {};
@@ -188,6 +190,8 @@ pub const Editor = struct {
     /// Type a run of printable text through the active mode's text command
     /// (bulk insert; use `press` for keys that trigger bindings like autopair).
     pub fn typeText(self: *Editor, s: []const u8) void {
+        self.ctx.user_initiated = true;
+        defer self.ctx.user_initiated = false;
         if (self.keymap.textCommand()) |tc| {
             _ = command.run(&self.commands, &self.ctx, tc, &.{.{ .string = s }}) catch {};
         }
@@ -598,6 +602,31 @@ test "workflow: vim — u undoes the last insert as one unit" {
     const got = try ed.textAlloc();
     defer gpa.free(got);
     try t.expectEqualStrings("", got);
+}
+
+test "workflow: vim — undo after dw undoes the dw, not the typing" {
+    const gpa = t.allocator;
+    var ed: Editor = undefined;
+    try Editor.init(gpa, &ed);
+    defer ed.deinit();
+    try loadVim(&ed);
+    ed.press("i", "");
+    ed.typeText("foo bar baz");
+    ed.press("Escape", "");
+    ed.press("0", ""); // line start
+    ed.press("d", "");
+    ed.press("w", ""); // dw deletes "foo "
+    {
+        const after = try ed.textAlloc();
+        defer gpa.free(after);
+        try t.expectEqualStrings("bar baz", after);
+    }
+    // The dw is applied by the operators PLUGIN, but you initiated it — so it
+    // joins YOUR undo history. Undo must restore "foo ", not undo the typing.
+    ed.press("u", "");
+    const undone = try ed.textAlloc();
+    defer gpa.free(undone);
+    try t.expectEqualStrings("foo bar baz", undone);
 }
 
 test "workflow: vim — Y yanks a line, p pastes it below" {

@@ -123,6 +123,11 @@ fn visualVertical(ed: *core.Editor, view: *view_mod.View, dir: i32) !void {
 }
 
 pub fn dispatchKey(ctx: *core.command.Context, view: *view_mod.View, ev: wayland.KeyEvent, fb_h: u32) !void {
+    // This whole dispatch is the synchronous handling of a user keystroke:
+    // any edit made here — directly or by a helper plugin (dw/autopair) — is
+    // the user's, so it joins the user's undo history (see command.edit).
+    ctx.user_initiated = true;
+    defer ctx.user_initiated = false;
     const c = wayland.c;
     // Paging needs viewport geometry the core doesn't know; view-aware
     // dispatch stays here.

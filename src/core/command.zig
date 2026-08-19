@@ -62,9 +62,16 @@ pub const Context = struct {
     /// it) — the generic report-back surface for commands and plugins.
     echo: *std.ArrayList(u8),
     /// Who is invoking right now (default: the interactive user). Plugins
-    /// swap this in around their trampolines so their edits author as the
-    /// plugin peer, not launder as the user's — see `plugin.zig`.
+    /// swap this in around their trampolines so their edits GRADE-gate as the
+    /// plugin peer — see `plugin.zig`.
     principal: Principal = Principal.user,
+    /// Set for the synchronous handling of a user keystroke/command. A helper
+    /// plugin (dw, autopair, comment) editing under this flag is the USER's
+    /// edit — it joins the user's single undo history (still grade-gated as the
+    /// plugin). Cleared for AUTONOMOUS plugin/agent activity (async ticks,
+    /// streaming), whose edits stay their own peer — the per-principal
+    /// selective-undo property we keep for collaborators and agents.
+    user_initiated: bool = false,
 
     pub fn buffer(self: *Context) *Buffers.Buffer {
         return self.buffers.active();
@@ -103,7 +110,12 @@ pub const Context = struct {
     pub fn edit(self: *Context, r: Document.Range, bytes: []const u8) EditError!void {
         const doc = self.document();
         if (!self.gradeOn(doc).canEdit()) return error.Unauthorized;
-        if (self.principal.role == .user) {
+        // The user typing, OR a helper plugin (dw/autopair/comment) executing
+        // the user's keystroke, is the USER's edit → one undo history. The
+        // grade was still checked as the plugin above, so an over-grade plugin
+        // is refused. A plugin/agent editing AUTONOMOUSLY (not `user_initiated`)
+        // commits as its own peer — its own selective-undo unit.
+        if (self.principal.role == .user or self.user_initiated) {
             try self.editor().applyUserEdit(self.gpa, r, bytes);
             return;
         }
