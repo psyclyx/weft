@@ -496,6 +496,7 @@ pub fn main(init: std.process.Init) !void {
             .frame_start = frame_start,
             .fb = fb,
             .blink_on = blink_on,
+            .menu_shown = menu_overlay.shown,
         });
 
         // ── Draw ── (the only GPU/swapchain touch; headless skips it)

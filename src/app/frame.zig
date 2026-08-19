@@ -124,6 +124,10 @@ pub const Active = struct {
     frame_start: u64,
     fb: [2]u32,
     blink_on: bool,
+    /// Whether the which-key hint is due this frame (past the idle delay).
+    /// The host-side fallback hint gates on this too, so it doesn't flash in
+    /// the panel during the delay before a which-key plugin's surface appears.
+    menu_shown: bool,
 };
 
 /// The async housekeeping tick (run each frame, after input): backing

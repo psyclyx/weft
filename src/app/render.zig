@@ -243,10 +243,13 @@ pub const RenderState = struct {
         // mode) and no picker is open, list that mode's bindings. This is
         // the host FALLBACK — if a which-key plugin is loaded it renders a
         // surface (surface_n > 0) and the host render steps aside, so the
-        // menu is never drawn twice.
+        // menu is never drawn twice. It also honors the idle delay
+        // (`menu_shown`): without that, this fallback flashed in the panel
+        // during the delay window BEFORE a plugin's (e.g. centered) surface
+        // appeared — the "corner first, then middle" jump.
         var wk_hints: std.ArrayList(core.Keymap.Binding) = .empty;
         defer wk_hints.deinit(gpa);
-        if (surface_n == 0 and !fx.pick.active and fx.keymap.isMenuMode(fx.keymap.currentMode())) {
+        if (act.menu_shown and surface_n == 0 and !fx.pick.active and fx.keymap.isMenuMode(fx.keymap.currentMode())) {
             fx.keymap.ownBindings(gpa, fx.keymap.currentMode(), &wk_hints) catch {};
         }
         // Buffer tab strip (only with more than one buffer open). Name
