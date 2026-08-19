@@ -103,9 +103,19 @@ weft.bind("leader-buffer", "s", "save");
 weft.bind("leader-buffer", "N", "buf-scratch");
 
 // SPC g — git. `git-status` opens the *magit* model buffer, which runs its own
-// `magit` keymap: j/k move, TAB folds, s/u stage/unstage (file/hunk/region), x
-// discards (confirmed), S/U stage-all, c commit, P/F/f push/pull/fetch, g
-// refresh, RET visits, q leaves.
+// `magit` keymap: j/k move, TAB folds, s/u stage/unstage (file/hunk/region),
+// S/U stage-all, g refresh, RET visits a file (or shows a commit), q leaves.
+// The Phase-2b/2c transients (which-key renders each menu mode):
+//   c  commit dispatch  — c commit · a amend · e extend · w reword ·
+//                          f fixup · s squash (fixup/squash target the commit
+//                          under point; amend/reword reuse the *git-commit* buffer)
+//   b  branch  — b checkout · c create+checkout · n new · d delete · r rename
+//   z  stash   — z save · p pop · a apply · l list · k drop
+//   l  log     — l oneline graph · a --all
+//   r  rebase  — i interactive (edits a *git-rebase* todo) · c/a/s continue/abort/skip
+//   x  on a file/hunk discards (confirmed); on a commit opens the reset transient
+//   A/V  cherry-pick / revert the commit under point
+//   P/F/f  push/pull/fetch — flag transients (toggle -f/-u, --rebase, --all/--prune)
 weft.bind("leader-git", "g", "git-status");
 weft.bind("leader-git", "l", "git-log");
 weft.bind("leader-git", "d", "git-diff");

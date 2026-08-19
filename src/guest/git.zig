@@ -41,6 +41,37 @@ var body_out: [PATCH_CAP]u8 = undefined;
 /// the same command that consumes them.
 const commit_tmp = ".weft-commit-msg";
 const patch_tmp = ".weft-magit.patch";
+const rebase_tmp = ".weft-rebase.todo";
+
+// ── Phase 2b/2c transient state (all bounded; see the caps note above) ──
+/// The commit hash under point, captured when a commit-scoped verb (show/fixup/
+/// squash/cherry-pick/revert/reset) fires — survives the mode hop into a submenu.
+var pending_hash: [64]u8 = undefined;
+var pending_hash_len: usize = 0;
+/// A full mutation staged behind the generic y/n confirm (branch delete, stash
+/// drop, reset --hard) — run verbatim by `git-confirm-yes`.
+var confirm_cmd: [1 << 12]u8 = undefined;
+var confirm_len: usize = 0;
+/// Name typed into the `*git-input*` prompt (branch names, the rebase depth).
+var input_name: [256]u8 = undefined;
+var input_name_len: usize = 0;
+const InputAction = enum(u8) { none, branch_checkout, branch_create, branch_new, branch_rename, branch_delete, rebase_start };
+var input_action: InputAction = .none;
+/// Extra flags the commit-finish path passes to `git commit` (amend/reword),
+/// so the ONE editable `*git-commit*` buffer serves commit AND amend/reword.
+var commit_flags: []const u8 = "";
+/// The rebase base ref (`HEAD~N`), used for both the todo listing and the finish.
+var rebase_base: [64]u8 = undefined;
+var rebase_base_len: usize = 0;
+/// Buffer for building `*git-rebase*` todo lines + the transient op command.
+var op_buf: [1 << 14]u8 = undefined;
+// Push/pull/fetch flags accumulated in the (persistent, surface-rendered)
+// transient modes; reset each time the transient is (re)opened.
+var push_force = false;
+var push_upstream = false;
+var pull_rebase = false;
+var fetch_all = false;
+var fetch_prune = false;
 
 /// ONE gather command: porcelain status (+ branch), the unstaged diff, the
 /// staged diff, and recent commits, delimited by RS-prefixed sentinel lines we
@@ -146,9 +177,69 @@ const cmds = [_]Cmd{
     .{ .name = "git-commit-finish", .handler = gitCommitFinish },
     .{ .name = "git-commit-abort", .handler = gitCommitAbort },
     .{ .name = "git-commit-resume", .handler = gitCommitResume },
+    // Commit dispatch (the `c` transient): amend/extend/reword reuse the editable
+    // `*git-commit*` buffer; fixup/squash resolve the commit under point.
+    .{ .name = "git-amend", .handler = gitAmend },
+    .{ .name = "git-extend", .handler = gitExtend },
+    .{ .name = "git-reword", .handler = gitReword },
+    .{ .name = "git-fixup", .handler = gitFixup },
+    .{ .name = "git-squash", .handler = gitSquash },
+    // Commit-scoped verbs on a recent-commit node.
+    .{ .name = "git-show", .handler = gitShow },
+    .{ .name = "git-cherry-pick", .handler = gitCherryPick },
+    .{ .name = "git-revert", .handler = gitRevert },
+    .{ .name = "git-reset-soft", .handler = gitResetSoft },
+    .{ .name = "git-reset-mixed", .handler = gitResetMixed },
+    .{ .name = "git-reset-hard", .handler = gitResetHard },
+    // Branch transient.
+    .{ .name = "git-branch-checkout", .handler = gitBranchCheckout },
+    .{ .name = "git-branch-create", .handler = gitBranchCreate },
+    .{ .name = "git-branch-new", .handler = gitBranchNew },
+    .{ .name = "git-branch-delete", .handler = gitBranchDelete },
+    .{ .name = "git-branch-rename", .handler = gitBranchRename },
+    // Stash transient.
+    .{ .name = "git-stash-save", .handler = gitStashSave },
+    .{ .name = "git-stash-pop", .handler = gitStashPop },
+    .{ .name = "git-stash-apply", .handler = gitStashApply },
+    .{ .name = "git-stash-list", .handler = gitStashList },
+    .{ .name = "git-stash-drop", .handler = gitStashDrop },
+    // Log transient.
+    .{ .name = "git-log-all", .handler = gitLogAll },
+    // The `*git-input*` prompt (branch names / rebase depth).
+    .{ .name = "git-input-finish", .handler = gitInputFinish },
+    .{ .name = "git-input-abort", .handler = gitInputAbort },
+    .{ .name = "git-input-resume", .handler = gitInputResume },
+    // Push/pull/fetch flag transients (toggle flags, then execute).
     .{ .name = "git-push", .handler = gitPush },
     .{ .name = "git-pull", .handler = gitPull },
     .{ .name = "git-fetch", .handler = gitFetch },
+    .{ .name = "git-push-toggle-force", .handler = gitPushToggleForce },
+    .{ .name = "git-push-toggle-upstream", .handler = gitPushToggleUpstream },
+    .{ .name = "git-push-do", .handler = gitPushDo },
+    .{ .name = "git-pull-toggle-rebase", .handler = gitPullToggleRebase },
+    .{ .name = "git-pull-do", .handler = gitPullDo },
+    .{ .name = "git-fetch-toggle-all", .handler = gitFetchToggleAll },
+    .{ .name = "git-fetch-toggle-prune", .handler = gitFetchTogglePrune },
+    .{ .name = "git-fetch-do", .handler = gitFetchDo },
+    // Interactive rebase (Phase 2c).
+    .{ .name = "git-rebase-interactive", .handler = gitRebaseInteractive },
+    .{ .name = "git-rebase-continue", .handler = gitRebaseContinue },
+    .{ .name = "git-rebase-abort", .handler = gitRebaseAbort },
+    .{ .name = "git-rebase-skip", .handler = gitRebaseSkip },
+    .{ .name = "git-rebase-pick", .handler = gitRebasePick },
+    .{ .name = "git-rebase-squash", .handler = gitRebaseSquash },
+    .{ .name = "git-rebase-edit", .handler = gitRebaseEdit },
+    .{ .name = "git-rebase-reword", .handler = gitRebaseReword },
+    .{ .name = "git-rebase-fixup", .handler = gitRebaseFixup },
+    .{ .name = "git-rebase-drop", .handler = gitRebaseDrop },
+    .{ .name = "git-rebase-finish", .handler = gitRebaseFinish },
+    .{ .name = "git-rebase-cancel", .handler = gitRebaseCancel },
+    .{ .name = "git-rebase-resume", .handler = gitRebaseResume },
+    // Generic y/n confirm + menu-leave helpers.
+    .{ .name = "git-confirm-yes", .handler = gitConfirmYes },
+    .{ .name = "git-confirm-no", .handler = gitConfirmNo },
+    .{ .name = "git-menu-cancel", .handler = gitMenuCancel },
+    .{ .name = "git-menu-cancel-surface", .handler = gitMenuCancelSurface },
     // Kept for the SPC-g leader menu: read-only views into their own buffers.
     .{ .name = "git-log", .handler = gitLog },
     .{ .name = "git-diff", .handler = gitDiff },
@@ -161,6 +252,8 @@ export fn describe() void {
     weft.requestPerm(.proc);
     weft.requestPerm(.timer);
     weft.requestPerm(.fs_write);
+    // fs_read: detect an in-progress rebase (.git/rebase-{merge,apply}).
+    weft.requestPerm(.fs_read);
 }
 export fn init() void {
     for (cmds) |c| _ = weft.register(c.name);
@@ -178,12 +271,22 @@ export fn init() void {
     weft.bindKey("magit", "U", "git-unstage-all");
     // Discard is destructive; `x` (not magit's `k`, which we spend on vim-style
     // up-motion) enters the y/n confirm before anything is thrown away.
+    // `x` dispatches by node kind (file/hunk → discard; commit → reset menu).
     weft.bindKey("magit", "x", "git-discard");
-    weft.bindKey("magit", "c", "git-commit");
+    // `c` opens the commit dispatch transient (which-key renders it).
+    weft.bindKey("magit", "c", "git-commit-dispatch");
+    weft.bindKey("magit", "b", "git-branch-menu");
+    weft.bindKey("magit", "z", "git-stash-menu");
+    weft.bindKey("magit", "l", "git-log-menu");
+    weft.bindKey("magit", "r", "git-rebase-menu");
+    // Cherry-pick / revert the commit under point (resolve the hash live).
+    weft.bindKey("magit", "A", "git-cherry-pick");
+    weft.bindKey("magit", "V", "git-revert");
     weft.bindKey("magit", "P", "git-push");
     weft.bindKey("magit", "F", "git-pull");
     weft.bindKey("magit", "f", "git-fetch");
     weft.bindKey("magit", "g", "git-refresh");
+    // RET dispatches: file/hunk → visit; commit → show.
     weft.bindKey("magit", "Return", "git-visit");
     weft.bindKey("magit", "q", "buf-scratch");
 
@@ -194,6 +297,14 @@ export fn init() void {
     weft.bindKey("git-confirm", "Escape", "git-discard-cancel");
     weft.bindKey("git-confirm", "C-g", "git-discard-cancel");
 
+    // A GENERIC y/n confirm (branch delete, stash drop, reset --hard): y runs the
+    // staged `confirm_cmd`, n/Escape backs out. One menu, many destructive verbs.
+    weft.menuMode("git-confirm2");
+    weft.bindKey("git-confirm2", "y", "git-confirm-yes");
+    weft.bindKey("git-confirm2", "n", "git-confirm-no");
+    weft.bindKey("git-confirm2", "Escape", "git-confirm-no");
+    weft.bindKey("git-confirm2", "C-g", "git-confirm-no");
+
     // The commit message buffer is EDITABLE: fall back to `default` for the text
     // command + editing keys, then layer a C-c prefix (finish/abort/resume).
     weft.setFallback("git-commit", "default");
@@ -203,6 +314,129 @@ export fn init() void {
     weft.bindKey("git-commit-menu", "C-k", "git-commit-abort");
     weft.bindKey("git-commit-menu", "Escape", "git-commit-resume");
     weft.bindKey("git-commit-menu", "C-g", "git-commit-resume");
+
+    // Commit dispatch (`c`): a which-key transient. Each key is terminal, so the
+    // core's one-shot menu auto-return lands back in magit for free.
+    weft.menuMode("git-commit-dispatch");
+    weft.bindKey("git-commit-dispatch", "c", "git-commit");
+    weft.bindKey("git-commit-dispatch", "a", "git-amend");
+    weft.bindKey("git-commit-dispatch", "e", "git-extend");
+    weft.bindKey("git-commit-dispatch", "w", "git-reword");
+    weft.bindKey("git-commit-dispatch", "f", "git-fixup");
+    weft.bindKey("git-commit-dispatch", "s", "git-squash");
+    weft.bindKey("git-commit-dispatch", "Escape", "git-menu-cancel");
+    weft.bindKey("git-commit-dispatch", "C-g", "git-menu-cancel");
+
+    // Reset transient (entered by `x` on a commit): soft/mixed, hard→confirm.
+    weft.menuMode("git-reset-menu");
+    weft.bindKey("git-reset-menu", "s", "git-reset-soft");
+    weft.bindKey("git-reset-menu", "m", "git-reset-mixed");
+    weft.bindKey("git-reset-menu", "h", "git-reset-hard");
+    weft.bindKey("git-reset-menu", "Escape", "git-menu-cancel");
+    weft.bindKey("git-reset-menu", "C-g", "git-menu-cancel");
+
+    // Branch transient (`b`).
+    weft.menuMode("git-branch-menu");
+    weft.bindKey("git-branch-menu", "b", "git-branch-checkout");
+    weft.bindKey("git-branch-menu", "c", "git-branch-create");
+    weft.bindKey("git-branch-menu", "n", "git-branch-new");
+    weft.bindKey("git-branch-menu", "d", "git-branch-delete");
+    weft.bindKey("git-branch-menu", "r", "git-branch-rename");
+    weft.bindKey("git-branch-menu", "Escape", "git-menu-cancel");
+    weft.bindKey("git-branch-menu", "C-g", "git-menu-cancel");
+
+    // Stash transient (`z`).
+    weft.menuMode("git-stash-menu");
+    weft.bindKey("git-stash-menu", "z", "git-stash-save");
+    weft.bindKey("git-stash-menu", "p", "git-stash-pop");
+    weft.bindKey("git-stash-menu", "a", "git-stash-apply");
+    weft.bindKey("git-stash-menu", "l", "git-stash-list");
+    weft.bindKey("git-stash-menu", "k", "git-stash-drop");
+    weft.bindKey("git-stash-menu", "Escape", "git-menu-cancel");
+    weft.bindKey("git-stash-menu", "C-g", "git-menu-cancel");
+
+    // Log transient (`l`) — the inline Recent section covers most needs.
+    weft.menuMode("git-log-menu");
+    weft.bindKey("git-log-menu", "l", "git-log");
+    weft.bindKey("git-log-menu", "a", "git-log-all");
+    weft.bindKey("git-log-menu", "Escape", "git-menu-cancel");
+    weft.bindKey("git-log-menu", "C-g", "git-menu-cancel");
+
+    // Rebase transient (`r`): interactive + in-progress continue/abort/skip. The
+    // right verb is chosen per state; the wrong one just no-ops with a git error.
+    weft.menuMode("git-rebase-menu");
+    weft.bindKey("git-rebase-menu", "i", "git-rebase-interactive");
+    weft.bindKey("git-rebase-menu", "c", "git-rebase-continue");
+    weft.bindKey("git-rebase-menu", "a", "git-rebase-abort");
+    weft.bindKey("git-rebase-menu", "s", "git-rebase-skip");
+    weft.bindKey("git-rebase-menu", "Escape", "git-menu-cancel");
+    weft.bindKey("git-rebase-menu", "C-g", "git-menu-cancel");
+
+    // A generic single-line prompt buffer (branch names, rebase depth). Same
+    // editable shape as the commit buffer; the pending `input_action` routes it.
+    weft.setFallback("git-input", "default");
+    weft.bindKey("git-input", "C-c", "git-input-menu");
+    weft.menuMode("git-input-menu");
+    weft.bindKey("git-input-menu", "C-c", "git-input-finish");
+    weft.bindKey("git-input-menu", "C-k", "git-input-abort");
+    weft.bindKey("git-input-menu", "Escape", "git-input-resume");
+    weft.bindKey("git-input-menu", "C-g", "git-input-resume");
+
+    // Push/pull/fetch flag transients: PLAIN modes (NOT menu modes) so toggles
+    // DON'T auto-return — the transient stays open while flags accumulate. State
+    // is painted by our OWN surface (see renderPushSurface & co.), not which-key.
+    weft.textInput("git-push-menu", null);
+    weft.bindKey("git-push-menu", "f", "git-push-toggle-force");
+    weft.bindKey("git-push-menu", "u", "git-push-toggle-upstream");
+    weft.bindKey("git-push-menu", "p", "git-push-do");
+    weft.bindKey("git-push-menu", "Return", "git-push-do");
+    weft.bindKey("git-push-menu", "Escape", "git-menu-cancel-surface");
+    weft.bindKey("git-push-menu", "C-g", "git-menu-cancel-surface");
+    weft.bindKey("git-push-menu", "q", "git-menu-cancel-surface");
+
+    weft.textInput("git-pull-menu", null);
+    weft.bindKey("git-pull-menu", "r", "git-pull-toggle-rebase");
+    weft.bindKey("git-pull-menu", "p", "git-pull-do");
+    weft.bindKey("git-pull-menu", "Return", "git-pull-do");
+    weft.bindKey("git-pull-menu", "Escape", "git-menu-cancel-surface");
+    weft.bindKey("git-pull-menu", "C-g", "git-menu-cancel-surface");
+    weft.bindKey("git-pull-menu", "q", "git-menu-cancel-surface");
+
+    weft.textInput("git-fetch-menu", null);
+    weft.bindKey("git-fetch-menu", "a", "git-fetch-toggle-all");
+    weft.bindKey("git-fetch-menu", "p", "git-fetch-toggle-prune");
+    weft.bindKey("git-fetch-menu", "f", "git-fetch-do");
+    weft.bindKey("git-fetch-menu", "Return", "git-fetch-do");
+    weft.bindKey("git-fetch-menu", "Escape", "git-menu-cancel-surface");
+    weft.bindKey("git-fetch-menu", "C-g", "git-menu-cancel-surface");
+    weft.bindKey("git-fetch-menu", "q", "git-menu-cancel-surface");
+
+    // The rebase-todo buffer is EDITABLE (reorder lines via `default`); the
+    // action letters set the todo verb on the current line, C-c finishes/aborts.
+    weft.setFallback("git-rebase", "default");
+    weft.bindKey("git-rebase", "p", "git-rebase-pick");
+    weft.bindKey("git-rebase", "s", "git-rebase-squash");
+    weft.bindKey("git-rebase", "e", "git-rebase-edit");
+    weft.bindKey("git-rebase", "r", "git-rebase-reword");
+    weft.bindKey("git-rebase", "f", "git-rebase-fixup");
+    weft.bindKey("git-rebase", "d", "git-rebase-drop");
+    weft.bindKey("git-rebase", "k", "git-rebase-drop");
+    weft.bindKey("git-rebase", "C-c", "git-rebase-cc");
+    weft.menuMode("git-rebase-cc");
+    weft.bindKey("git-rebase-cc", "C-c", "git-rebase-finish");
+    weft.bindKey("git-rebase-cc", "C-k", "git-rebase-cancel");
+    weft.bindKey("git-rebase-cc", "Escape", "git-rebase-resume");
+    weft.bindKey("git-rebase-cc", "C-g", "git-rebase-resume");
+
+    // A shared read-only view mode for the show/log/stash buffers (own their own
+    // buffers, so magit's mutating keys never fire against a stale model).
+    weft.textInput("git-view", null);
+    weft.bindKey("git-view", "j", "cursor-down");
+    weft.bindKey("git-view", "k", "cursor-up");
+    weft.bindKey("git-view", "Down", "cursor-down");
+    weft.bindKey("git-view", "Up", "cursor-up");
+    weft.bindKey("git-view", "g", "git-status");
+    weft.bindKey("git-view", "q", "git-status");
 }
 export fn on_command(id: u32) void {
     if (id < cmds.len) cmds[id].handler();
@@ -213,10 +447,16 @@ export fn on_fill() void {
     const name = activeName();
     if (std.mem.eql(u8, name, buf_name)) {
         parseAndRender();
-    } else if (std.mem.eql(u8, name, "*git-diff*") or std.mem.eql(u8, name, "*git-diff-staged*")) {
+    } else if (std.mem.eql(u8, name, "*git-diff*") or std.mem.eql(u8, name, "*git-diff-staged*") or
+        std.mem.eql(u8, name, "*git-show*"))
+    {
         classify(styleDiffLine);
     } else if (std.mem.eql(u8, name, "*git-log*")) {
         classify(styleLogLine);
+    } else if (std.mem.eql(u8, name, "*git-rebase*")) {
+        // The `git log` listing landed; turn `<hash> <subject>` into an editable
+        // `pick <hash> <subject>` todo (git's own todo, generated by us).
+        rebaseTodoFill();
     }
 }
 
@@ -687,6 +927,11 @@ fn gitVisit() void {
     const fi: usize = switch (n.kind) {
         .file => n.idx,
         .hunk => hunks[n.idx].file,
+        // RET on a recent commit → show it (a diff-colored read-only buffer).
+        .section => if (@as(Section, @enumFromInt(n.idx)) == .recent) {
+            gitShow();
+            return;
+        } else return,
         else => return,
     };
     weft.runStr("open", files[fi].path_());
@@ -788,6 +1033,17 @@ fn gitDiscard() void {
             weft.setMode("git-confirm");
         },
         .section => {
+            // `x` on the Recent section → reset transient to the commit under
+            // point; other sections → the whole-section discard confirm.
+            if (@as(Section, @enumFromInt(n.idx)) == .recent) {
+                if (recentHashAt() == null) {
+                    weft.echo("no commit under point");
+                    return;
+                }
+                weft.echo("reset: s soft  m mixed  h hard");
+                weft.setMode("git-reset-menu");
+                return;
+            }
             weft.echo("discard the whole section? y/n");
             weft.setMode("git-confirm");
         },
@@ -1010,13 +1266,51 @@ fn overlaps(r: weft.Range, s: usize, e: usize) bool {
     return r.start < e and r.end > s;
 }
 
-// ── Commit (kept from magit-lite; refreshes into *magit*) ───────────────────
-fn gitCommit() void {
+// ── Commit + the commit-dispatch transient (all reuse the ONE editable
+// `*git-commit*` buffer; `commit_flags` selects plain/amend/reword at finish) ─
+/// Open the editable commit buffer. `prefill` (or "") is a shell command whose
+/// stdout pre-populates the message — `git log -1 --format=%B` for amend/reword.
+fn openCommit(flags: []const u8, prefill: []const u8) void {
+    commit_flags = flags;
     if (!focusBuffer("*git-commit*")) weft.runStr("buffer-create", "*git-commit*");
     weft.edit(.{ .start = 0, .end = weft.byteLen() }, "");
+    if (prefill.len > 0) {
+        // Async: the message lands via proc; no on_fill handler for this buffer,
+        // so it simply becomes the editable seed text.
+        weft.procToBuffer(prefill, "*git-commit*");
+    }
     weft.jump(0);
     weft.setMode("git-commit");
     weft.echo("commit: C-c C-c to commit, C-c C-k to abort");
+}
+fn gitCommit() void {
+    openCommit("", "");
+}
+/// Amend: edit the current message (pre-filled), include staged changes.
+fn gitAmend() void {
+    openCommit("--amend", "git log -1 --format=%B 2>/dev/null");
+}
+/// Reword: amend the MESSAGE ONLY (`--only`) — staged changes stay staged.
+fn gitReword() void {
+    openCommit("--amend --only", "git log -1 --format=%B 2>/dev/null");
+}
+/// Extend: fold staged changes into HEAD, keep the message (no editor).
+fn gitExtend() void {
+    gatherAfterSeq("git commit --amend --no-edit");
+}
+fn gitFixup() void {
+    const h = recentHashAt() orelse {
+        weft.echo("fixup: no commit under point");
+        return;
+    };
+    gatherAfterSeq1("git commit --fixup={s}", h);
+}
+fn gitSquash() void {
+    const h = recentHashAt() orelse {
+        weft.echo("squash: no commit under point");
+        return;
+    };
+    gatherAfterSeq1("git commit --squash={s}", h);
 }
 fn gitCommitFinish() void {
     const text = weft.slice(0, weft.byteLen());
@@ -1025,8 +1319,8 @@ fn gitCommitFinish() void {
     _ = weft.fsWrite(commit_tmp, msg_buf[0..n]);
     const cmd = std.fmt.bufPrint(
         &cmd_buf,
-        "git commit -F {s} >/dev/null 2>&1; rm -f {s}; " ++ GATHER,
-        .{ commit_tmp, commit_tmp },
+        "git commit {s} -F {s} >/dev/null 2>&1; rm -f {s}; " ++ GATHER,
+        .{ commit_flags, commit_tmp, commit_tmp },
     ) catch return;
     restore_cursor = false;
     show(cmd, buf_name);
@@ -1055,15 +1349,118 @@ fn focusBuffer(name: []const u8) bool {
     return false;
 }
 
-// ── push/pull/fetch → *git-output* (stderr folded in for progress) ──────────
+// ── push/pull/fetch: flag transients (persistent mode + our own surface) ─────
+// Flags accumulate in globals; a single key executes. On execute we refresh
+// *magit* (the branch header's ahead/behind reflects the result) rather than
+// dumping normal output. NOTE: `procToBuffer` captures only stdout, so op
+// output is suppressed for a clean re-gather — the post-op magit state IS the
+// feedback; hard errors surface via the host log, not a buffer (see report).
+fn flagRow(key: []const u8, label: []const u8, on: bool) void {
+    weft.surfaceRow();
+    weft.surfaceSpan(key, .accent);
+    weft.surfaceSpan(label, .leaf);
+    weft.surfaceSpan(if (on) "on" else "off", if (on) .effect else .muted);
+}
+fn actRow(key: []const u8, label: []const u8) void {
+    weft.surfaceRow();
+    weft.surfaceSpan(key, .accent);
+    weft.surfaceSpan(label, .leaf);
+}
+
 fn gitPush() void {
-    show("git push 2>&1", "*git-output*");
+    push_force = false;
+    push_upstream = false;
+    weft.setMode("git-push-menu");
+    renderPushSurface();
 }
+fn renderPushSurface() void {
+    weft.surfaceBegin(.corner);
+    weft.surfaceRow();
+    weft.surfaceSpan("Push", .accent);
+    flagRow("f", "--force-with-lease", push_force);
+    flagRow("u", "--set-upstream", push_upstream);
+    actRow("p", "push");
+    weft.surfaceEnd(-1);
+}
+fn gitPushToggleForce() void {
+    push_force = !push_force;
+    renderPushSurface();
+}
+fn gitPushToggleUpstream() void {
+    push_upstream = !push_upstream;
+    renderPushSurface();
+}
+fn gitPushDo() void {
+    weft.surfaceClose();
+    var w: usize = 0;
+    w += (std.fmt.bufPrint(op_buf[w..], "git push", .{}) catch return).len;
+    if (push_force) w += (std.fmt.bufPrint(op_buf[w..], " --force-with-lease", .{}) catch return).len;
+    if (push_upstream) w += (std.fmt.bufPrint(op_buf[w..], " --set-upstream origin HEAD", .{}) catch return).len;
+    weft.echo("pushing…");
+    gatherAfterSeq(op_buf[0..w]);
+}
+
 fn gitPull() void {
-    show("git pull 2>&1", "*git-output*");
+    pull_rebase = false;
+    weft.setMode("git-pull-menu");
+    renderPullSurface();
 }
+fn renderPullSurface() void {
+    weft.surfaceBegin(.corner);
+    weft.surfaceRow();
+    weft.surfaceSpan("Pull", .accent);
+    flagRow("r", "--rebase", pull_rebase);
+    actRow("p", "pull");
+    weft.surfaceEnd(-1);
+}
+fn gitPullToggleRebase() void {
+    pull_rebase = !pull_rebase;
+    renderPullSurface();
+}
+fn gitPullDo() void {
+    weft.surfaceClose();
+    weft.echo("pulling…");
+    if (pull_rebase) gatherAfterSeq("git pull --rebase") else gatherAfterSeq("git pull");
+}
+
 fn gitFetch() void {
-    show("git fetch 2>&1", "*git-output*");
+    fetch_all = false;
+    fetch_prune = false;
+    weft.setMode("git-fetch-menu");
+    renderFetchSurface();
+}
+fn renderFetchSurface() void {
+    weft.surfaceBegin(.corner);
+    weft.surfaceRow();
+    weft.surfaceSpan("Fetch", .accent);
+    flagRow("a", "--all", fetch_all);
+    flagRow("p", "--prune", fetch_prune);
+    actRow("f", "fetch");
+    weft.surfaceEnd(-1);
+}
+fn gitFetchToggleAll() void {
+    fetch_all = !fetch_all;
+    renderFetchSurface();
+}
+fn gitFetchTogglePrune() void {
+    fetch_prune = !fetch_prune;
+    renderFetchSurface();
+}
+fn gitFetchDo() void {
+    weft.surfaceClose();
+    var w: usize = 0;
+    w += (std.fmt.bufPrint(op_buf[w..], "git fetch", .{}) catch return).len;
+    if (fetch_all) w += (std.fmt.bufPrint(op_buf[w..], " --all", .{}) catch return).len;
+    if (fetch_prune) w += (std.fmt.bufPrint(op_buf[w..], " --prune", .{}) catch return).len;
+    weft.echo("fetching…");
+    gatherAfterSeq(op_buf[0..w]);
+}
+fn gitMenuCancelSurface() void {
+    weft.surfaceClose();
+    weft.setMode("magit");
+}
+fn gitMenuCancel() void {
+    weft.setMode("magit");
 }
 
 // ── The SPC-g read-only views (unchanged behavior) ──────────────────────────
@@ -1112,6 +1509,24 @@ fn gatherAfter1(comptime fmt: []const u8, pth: []const u8) void {
     show(cmd, buf_name);
     weft.setMode("magit");
 }
+/// Like `gatherAfter` but SEQUENCES with `;` (not `&&`) and swallows the op's
+/// stdout — the op runs, then we ALWAYS re-gather so *magit* reflects the real
+/// post-op state even when the op "failed" (a cherry-pick conflict, a reset, a
+/// push that left us still-ahead). Used by every Phase-2b/2c mutation.
+fn gatherAfterSeq(mutation: []const u8) void {
+    markRestore();
+    const cmd = std.fmt.bufPrint(&cmd_buf, "{s} >/dev/null 2>&1; " ++ GATHER, .{mutation}) catch return;
+    show(cmd, buf_name);
+    weft.setMode("magit");
+}
+/// Same, with a single `{s}` arg (a hash or a quoted name) in `fmt`.
+fn gatherAfterSeq1(comptime fmt: []const u8, arg: []const u8) void {
+    markRestore();
+    const cmd = std.fmt.bufPrint(&cmd_buf, fmt ++ " >/dev/null 2>&1; " ++ GATHER, .{arg}) catch return;
+    show(cmd, buf_name);
+    weft.setMode("magit");
+}
+
 /// `git apply <flags> <patch>` (optionally also reverse it from the worktree for
 /// a staged-hunk discard), rm the temp patch, then re-gather.
 fn gatherAfterPatch(flags: []const u8, also_worktree: bool) void {
@@ -1122,6 +1537,287 @@ fn gatherAfterPatch(flags: []const u8, also_worktree: bool) void {
         std.fmt.bufPrint(&cmd_buf, "git apply {s} {s}; rm -f {s}; " ++ GATHER, .{ flags, patch_tmp, patch_tmp }) catch return;
     show(cmd, buf_name);
     weft.setMode("magit");
+}
+
+// ── Commit-node resolution: the hash on the rendered line under point ───────
+/// The commit hash of the recent-commits line the cursor is on, copied into
+/// `pending_hash` (so it survives a mode hop), or null when the cursor isn't on
+/// a commit line. `render_buf[0..out]` IS the buffer we authored, so buffer
+/// offsets index it directly (the `nodeAt` invariant).
+fn recentHashAt() ?[]const u8 {
+    const idx = @intFromEnum(Section.recent);
+    if (!sec_present[idx]) return null;
+    const cur = weft.cursor();
+    if (cur < sec_body[idx] or cur >= sec_rend[idx]) return null;
+    const ln = weft.lineAt(cur);
+    var s = ln.start;
+    while (s < ln.end and s < out and render_buf[s] == ' ') s += 1;
+    var e = s;
+    while (e < ln.end and e < out and render_buf[e] != ' ') e += 1;
+    if (e == s) return null;
+    pending_hash_len = @min(e - s, pending_hash.len);
+    @memcpy(pending_hash[0..pending_hash_len], render_buf[s .. s + pending_hash_len]);
+    return pending_hash[0..pending_hash_len];
+}
+
+// ── Generic destructive confirm (branch delete / stash drop / reset --hard) ──
+/// Stage a full mutation behind the y/n `git-confirm2` menu.
+fn confirmThen(cmd: []const u8, prompt: []const u8) void {
+    confirm_len = @min(cmd.len, confirm_cmd.len);
+    @memcpy(confirm_cmd[0..confirm_len], cmd[0..confirm_len]);
+    weft.echo(prompt);
+    weft.setMode("git-confirm2");
+}
+fn gitConfirmYes() void {
+    gatherAfterSeq(confirm_cmd[0..confirm_len]);
+}
+fn gitConfirmNo() void {
+    weft.setMode("magit");
+    weft.echo("cancelled");
+}
+
+// ── Show / cherry-pick / revert / reset on the commit under point ───────────
+fn gitShow() void {
+    const h = recentHashAt() orelse {
+        weft.echo("show: no commit under point");
+        return;
+    };
+    const cmd = std.fmt.bufPrint(&cmd_buf, "git show {s}", .{h}) catch return;
+    show(cmd, "*git-show*");
+    weft.setMode("git-view");
+}
+fn gitCherryPick() void {
+    const h = recentHashAt() orelse {
+        weft.echo("cherry-pick: no commit under point");
+        return;
+    };
+    gatherAfterSeq1("git cherry-pick {s}", h);
+}
+fn gitRevert() void {
+    const h = recentHashAt() orelse {
+        weft.echo("revert: no commit under point");
+        return;
+    };
+    gatherAfterSeq1("git revert --no-edit {s}", h);
+}
+fn gitResetSoft() void {
+    resetTo("--soft");
+}
+fn gitResetMixed() void {
+    resetTo("--mixed");
+}
+fn resetTo(kind: []const u8) void {
+    const m = std.fmt.bufPrint(&op_buf, "git reset {s} {s}", .{ kind, pending_hash[0..pending_hash_len] }) catch return;
+    gatherAfterSeq(m);
+}
+fn gitResetHard() void {
+    const m = std.fmt.bufPrint(&op_buf, "git reset --hard {s}", .{pending_hash[0..pending_hash_len]}) catch return;
+    confirmThen(m, "reset --hard (loses changes)? y/n");
+}
+
+// ── Branch transient (names come from the `*git-input*` prompt) ─────────────
+fn gitBranchCheckout() void {
+    openInput(.branch_checkout, "checkout branch: (C-c C-c)");
+}
+fn gitBranchCreate() void {
+    openInput(.branch_create, "create & checkout branch: (C-c C-c)");
+}
+fn gitBranchNew() void {
+    openInput(.branch_new, "new branch: (C-c C-c)");
+}
+fn gitBranchDelete() void {
+    openInput(.branch_delete, "delete branch: (C-c C-c)");
+}
+fn gitBranchRename() void {
+    openInput(.branch_rename, "rename current branch to: (C-c C-c)");
+}
+
+// ── Stash transient ─────────────────────────────────────────────────────────
+fn gitStashSave() void {
+    gatherAfterSeq("git stash push");
+}
+fn gitStashPop() void {
+    gatherAfterSeq("git stash pop");
+}
+fn gitStashApply() void {
+    gatherAfterSeq("git stash apply");
+}
+fn gitStashList() void {
+    show("git stash list", "*git-stash*");
+    weft.setMode("git-view");
+}
+fn gitStashDrop() void {
+    confirmThen("git stash drop", "drop stash@{0}? y/n");
+}
+
+// ── Log transient (the inline Recent section covers the common case) ────────
+fn gitLogAll() void {
+    show("git log --oneline --graph --all -50", "*git-log*");
+    weft.setMode("git-view");
+}
+
+// ── The `*git-input*` single-line prompt ────────────────────────────────────
+fn openInput(action: InputAction, prompt: []const u8) void {
+    input_action = action;
+    if (!focusBuffer("*git-input*")) weft.runStr("buffer-create", "*git-input*");
+    weft.edit(.{ .start = 0, .end = weft.byteLen() }, "");
+    weft.jump(0);
+    weft.setMode("git-input");
+    weft.echo(prompt);
+}
+fn gitInputAbort() void {
+    input_action = .none;
+    weft.setMode("magit");
+    weft.echo("cancelled");
+}
+fn gitInputResume() void {
+    weft.setMode("git-input");
+}
+fn gitInputFinish() void {
+    // First line, trimmed — the typed name/depth. Copy off the shared scratch
+    // before any further host read reuses it.
+    const text = weft.slice(0, weft.byteLen());
+    var e: usize = 0;
+    while (e < text.len and text[e] != '\n') e += 1;
+    const line = std.mem.trim(u8, text[0..e], " \t\r");
+    input_name_len = @min(line.len, input_name.len);
+    @memcpy(input_name[0..input_name_len], line[0..input_name_len]);
+    const name = input_name[0..input_name_len];
+    if (name.len == 0) {
+        gitInputAbort();
+        return;
+    }
+    const act = input_action;
+    input_action = .none;
+    switch (act) {
+        .branch_checkout => gatherAfterSeq1("git checkout '{s}'", name),
+        .branch_create => gatherAfterSeq1("git checkout -b '{s}'", name),
+        .branch_new => gatherAfterSeq1("git branch '{s}'", name),
+        .branch_rename => gatherAfterSeq1("git branch -m '{s}'", name),
+        .branch_delete => {
+            const cmd = std.fmt.bufPrint(&op_buf, "git branch -d '{s}'", .{name}) catch return;
+            confirmThen(cmd, "delete branch? y/n");
+        },
+        .rebase_start => startRebase(name),
+        .none => weft.setMode("magit"),
+    }
+}
+
+// ── Interactive rebase (Phase 2c) ───────────────────────────────────────────
+/// A rebase is mid-flight iff `.git/rebase-merge` or `.git/rebase-apply` exists.
+fn rebaseInProgress() bool {
+    const entries = weft.fsList("here", ".git") orelse return false;
+    return std.mem.indexOf(u8, entries, "rebase-merge") != null or
+        std.mem.indexOf(u8, entries, "rebase-apply") != null;
+}
+fn gitRebaseInteractive() void {
+    if (rebaseInProgress()) {
+        weft.echo("rebase in progress — c continue / a abort / s skip");
+        weft.setMode("git-rebase-menu");
+        return;
+    }
+    openInput(.rebase_start, "interactive rebase last N commits: (C-c C-c)");
+}
+/// Kick off the todo: list `HEAD~N..HEAD` oldest-first into `*git-rebase*`;
+/// `on_fill` rewrites those lines into an editable `pick …` todo.
+fn startRebase(nstr: []const u8) void {
+    for (nstr) |c| if (c < '0' or c > '9') {
+        weft.echo("rebase: expected a number");
+        weft.setMode("magit");
+        return;
+    };
+    const base = std.fmt.bufPrint(&rebase_base, "HEAD~{s}", .{nstr}) catch return;
+    rebase_base_len = base.len;
+    const cmd = std.fmt.bufPrint(&cmd_buf, "git log --reverse --format='%h %s' {s}..HEAD 2>/dev/null", .{base}) catch return;
+    show(cmd, "*git-rebase*");
+    weft.setMode("git-rebase");
+    weft.echo("rebase todo: p/s/e/r/f/d set verb, edit to reorder, C-c C-c to run");
+}
+/// The `git log` listing landed → rewrite `<hash> <subject>` lines into
+/// `pick <hash> <subject>` in-place (git's todo, authored by us).
+fn rebaseTodoFill() void {
+    const text = weft.slice(0, weft.byteLen());
+    var w: usize = 0;
+    var i: usize = 0;
+    while (i < text.len) {
+        var le = i;
+        while (le < text.len and text[le] != '\n') le += 1;
+        if (le > i) {
+            const seg = std.fmt.bufPrint(op_buf[w..], "pick {s}\n", .{text[i..le]}) catch break;
+            w += seg.len;
+        }
+        i = le + 1;
+    }
+    weft.edit(.{ .start = 0, .end = weft.byteLen() }, op_buf[0..w]);
+    weft.jump(0);
+}
+fn gitRebasePick() void {
+    setRebaseAction("pick");
+}
+fn gitRebaseSquash() void {
+    setRebaseAction("squash");
+}
+fn gitRebaseEdit() void {
+    setRebaseAction("edit");
+}
+fn gitRebaseReword() void {
+    setRebaseAction("reword");
+}
+fn gitRebaseFixup() void {
+    setRebaseAction("fixup");
+}
+fn gitRebaseDrop() void {
+    setRebaseAction("drop");
+}
+/// Replace the first whitespace-delimited token (the verb) of the current todo
+/// line with `word`; keep the cursor on the line.
+fn setRebaseAction(word: []const u8) void {
+    const ln = weft.lineAt(weft.cursor());
+    const line = weft.slice(ln.start, ln.end);
+    var e: usize = 0;
+    while (e < line.len and line[e] != ' ') e += 1;
+    weft.edit(.{ .start = ln.start, .end = ln.start + e }, word);
+    weft.jump(ln.start);
+}
+fn gitRebaseResume() void {
+    weft.setMode("git-rebase");
+}
+fn gitRebaseCancel() void {
+    // Nothing was started (we only drafted the todo) — just return to magit.
+    restore_cursor = false;
+    show(GATHER, buf_name);
+    weft.setMode("magit");
+}
+/// Finish: write the edited todo to a temp file and run the rebase with a
+/// sequence editor that `cp`s our todo over git's generated one. GIT_EDITOR=true
+/// keeps squash/fixup/reword non-interactive (no mid-session editor round-trip);
+/// an `edit` stop just leaves a rebase-in-progress the `r` menu then drives.
+fn gitRebaseFinish() void {
+    const text = weft.slice(0, weft.byteLen());
+    const n = @min(text.len, msg_buf.len);
+    @memcpy(msg_buf[0..n], text[0..n]);
+    if (!weft.fsWrite(rebase_tmp, msg_buf[0..n])) {
+        weft.echo("rebase: could not write todo");
+        weft.setMode("magit");
+        return;
+    }
+    const cmd = std.fmt.bufPrint(
+        &cmd_buf,
+        "GIT_SEQUENCE_EDITOR='cp {s}' GIT_EDITOR=true git rebase -i {s} >/dev/null 2>&1; rm -f {s}; " ++ GATHER,
+        .{ rebase_tmp, rebase_base[0..rebase_base_len], rebase_tmp },
+    ) catch return;
+    restore_cursor = false;
+    show(cmd, buf_name);
+    weft.setMode("magit");
+}
+fn gitRebaseContinue() void {
+    gatherAfterSeq("GIT_EDITOR=true git rebase --continue");
+}
+fn gitRebaseAbort() void {
+    gatherAfterSeq("git rebase --abort");
+}
+fn gitRebaseSkip() void {
+    gatherAfterSeq("GIT_EDITOR=true git rebase --skip");
 }
 
 // ── Styling for the plain read-only views (diff/log) ────────────────────────
