@@ -68,6 +68,7 @@ const declare = @import("wasm_host/declare.zig");
 const config_kv = @import("wasm_host/config_kv.zig");
 const dispatch = @import("wasm_host/dispatch.zig");
 const keymap = @import("wasm_host/keymap.zig");
+const commands = @import("wasm_host/commands.zig");
 const rooted_fs = @import("rooted_fs.zig");
 const WasmCmd = wasm_abi.WasmCmd;
 const PendingItem = wasm_abi.PendingItem;
@@ -100,7 +101,7 @@ pub fn defineImports(linker: *wasm.Linker, p: *WasmPlugin) !void {
     try d(linker, "wl_set_selection", 2, 0, hSetSelection, p);
     // Group C: write.
     try d(linker, "wl_edit", 4, 0, hEdit, p);
-    try d(linker, "wl_register", 2, 1, hRegister, p);
+    try d(linker, "wl_register", 2, 1, commands.hRegister, p);
     try d(linker, "wl_jump", 1, 0, hJump, p);
     try d(linker, "wl_flash", 2, 0, layers.hFlash, p);
     // Styles feed: a plugin paints per-byte StyleClass over its (active) tool
@@ -138,14 +139,14 @@ pub fn defineImports(linker: *wasm.Linker, p: *WasmPlugin) !void {
     try d(linker, "wl_text_input", 5, 0, keymap.hTextInput, p);
     try d(linker, "wl_menu_mode", 2, 0, keymap.hMenuMode, p);
     try d(linker, "wl_sticky_menu", 2, 0, keymap.hStickyMenu, p);
-    try d(linker, "wl_run", 2, 0, hRun, p);
-    try d(linker, "wl_run_int", 3, 0, hRunInt, p);
-    try d(linker, "wl_run_str", 4, 0, hRunStr, p);
-    try d(linker, "wl_run_str2", 6, 0, hRunStr2, p);
+    try d(linker, "wl_run", 2, 0, commands.hRun, p);
+    try d(linker, "wl_run_int", 3, 0, commands.hRunInt, p);
+    try d(linker, "wl_run_str", 4, 0, commands.hRunStr, p);
+    try d(linker, "wl_run_str2", 6, 0, commands.hRunStr2, p);
     // Introspection.
-    try d(linker, "wl_command_count", 0, 1, hCommandCount, p);
-    try d(linker, "wl_command_name", 3, 1, hCommandName, p);
-    try d(linker, "wl_command_summary", 3, 1, hCommandSummary, p);
+    try d(linker, "wl_command_count", 0, 1, commands.hCommandCount, p);
+    try d(linker, "wl_command_name", 3, 1, commands.hCommandName, p);
+    try d(linker, "wl_command_summary", 3, 1, commands.hCommandSummary, p);
     try d(linker, "wl_buffer_count", 0, 1, buffers_host.hBufferCount, p);
     try d(linker, "wl_buffer_id", 1, 1, buffers_host.hBufferId, p);
     try d(linker, "wl_buffer_name", 3, 1, buffers_host.hBufferName, p);
@@ -292,45 +293,6 @@ fn hEdit(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32, results: []
     p.ctx.principal = p.principal();
     defer p.ctx.principal = saved;
     p.ctx.edit(.{ .start = @intCast(args[0]), .end = @intCast(args[1]) }, bytes) catch {};
-}
-
-fn hRegister(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32, results: []i32) void {
-    const p: *WasmPlugin = @ptrCast(@alignCast(data.?));
-    const gpa = p.gpa;
-    const cname = caller.readMemory(gpa, @intCast(args[0]), @intCast(args[1])) catch {
-        results[0] = -1;
-        return;
-    };
-    // Cross-check against the manifest: an undeclared command fails the load.
-    if (!p.declaresCommand(cname)) {
-        gpa.free(cname);
-        p.load_error = error.UndeclaredCommand;
-        results[0] = -1;
-        return;
-    }
-    const wc = gpa.create(WasmCmd) catch {
-        gpa.free(cname);
-        results[0] = -1;
-        return;
-    };
-    wc.* = .{ .plugin = p, .id = @intCast(p.commands.items.len), .name = cname };
-    p.commands.append(gpa, wc) catch {
-        gpa.free(cname);
-        gpa.destroy(wc);
-        results[0] = -1;
-        return;
-    };
-    _ = p.ctx.commands.bind(gpa, wc.name, .{
-        .name = wc.name,
-        .summary = "",
-        .args = &.{},
-        .handler = wpCmdTrampoline,
-        .data = wc,
-    }) catch {
-        results[0] = -1;
-        return;
-    };
-    results[0] = @intCast(wc.id);
 }
 
 fn hJump(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32, results: []i32) void {
@@ -508,89 +470,4 @@ fn hEditRange(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32, result
     p.ctx.principal = p.principal();
     defer p.ctx.principal = saved;
     p.ctx.edit(.{ .start = cur.start, .end = cur.end }, bytes) catch {};
-}
-
-fn hRun(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32, results: []i32) void {
-    _ = results;
-    const p: *WasmPlugin = @ptrCast(@alignCast(data.?));
-    const cmd = caller.readMemory(p.gpa, @intCast(args[0]), @intCast(args[1])) catch return;
-    defer p.gpa.free(cmd);
-    _ = command.run(p.ctx.commands, p.ctx, cmd, &.{}) catch {};
-}
-
-fn hRunInt(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32, results: []i32) void {
-    _ = results;
-    const p: *WasmPlugin = @ptrCast(@alignCast(data.?));
-    const cmd = caller.readMemory(p.gpa, @intCast(args[0]), @intCast(args[1])) catch return;
-    defer p.gpa.free(cmd);
-    _ = command.run(p.ctx.commands, p.ctx, cmd, &.{.{ .integer = args[2] }}) catch {};
-}
-
-fn hRunStr(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32, results: []i32) void {
-    _ = results;
-    const p: *WasmPlugin = @ptrCast(@alignCast(data.?));
-    const gpa = p.gpa;
-    const cmd = caller.readMemory(gpa, @intCast(args[0]), @intCast(args[1])) catch return;
-    defer gpa.free(cmd);
-    const s = caller.readMemory(gpa, @intCast(args[2]), @intCast(args[3])) catch return;
-    defer gpa.free(s);
-    _ = command.run(p.ctx.commands, p.ctx, cmd, &.{.{ .string = s }}) catch {};
-}
-
-fn hRunStr2(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32, results: []i32) void {
-    _ = results;
-    const p: *WasmPlugin = @ptrCast(@alignCast(data.?));
-    const gpa = p.gpa;
-    const cmd = caller.readMemory(gpa, @intCast(args[0]), @intCast(args[1])) catch return;
-    defer gpa.free(cmd);
-    const a = caller.readMemory(gpa, @intCast(args[2]), @intCast(args[3])) catch return;
-    defer gpa.free(a);
-    const b = caller.readMemory(gpa, @intCast(args[4]), @intCast(args[5])) catch return;
-    defer gpa.free(b);
-    _ = command.run(p.ctx.commands, p.ctx, cmd, &.{ .{ .string = a }, .{ .string = b } }) catch {};
-}
-
-// Introspection — command registry + open buffers.
-fn hCommandCount(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32, results: []i32) void {
-    _ = caller;
-    _ = args;
-    const p: *WasmPlugin = @ptrCast(@alignCast(data.?));
-    results[0] = @intCast(p.ctx.commands.count());
-}
-
-fn hCommandName(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32, results: []i32) void {
-    const p: *WasmPlugin = @ptrCast(@alignCast(data.?));
-    const n: command.Commands.Name = @enumFromInt(@as(usize, @intCast(args[0])));
-    if (p.ctx.commands.lookup(n) == null) {
-        results[0] = -1;
-        return;
-    }
-    const name = p.ctx.commands.nameOf(n);
-    results[0] = @intCast(caller.writeMemory(@intCast(args[1]), @intCast(args[2]), name) catch 0);
-}
-
-fn hCommandSummary(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32, results: []i32) void {
-    const p: *WasmPlugin = @ptrCast(@alignCast(data.?));
-    const n: command.Commands.Name = @enumFromInt(@as(usize, @intCast(args[0])));
-    const cmd = p.ctx.commands.lookup(n) orelse {
-        results[0] = -1;
-        return;
-    };
-    results[0] = @intCast(caller.writeMemory(@intCast(args[1]), @intCast(args[2]), cmd.summary) catch 0);
-}
-
-/// Command dispatch back into the guest: stash the args (readable via
-/// `wl_arg_*`), reset the result, run `on_command(id)`, and return whatever
-/// result the guest set (`wl_set_result_*`, default nil). String results
-/// borrow the plugin's `result_buf` until the next dispatch.
-fn wpCmdTrampoline(ctx: *command.Context, data: ?*anyopaque, args: []const command.Value) anyerror!command.Value {
-    _ = ctx;
-    const wc: *WasmCmd = @ptrCast(@alignCast(data.?));
-    const p = wc.plugin;
-    p.cur_args = args;
-    p.result = .nil;
-    p.stampsClear(); // fresh per-dispatch stamp table
-    defer p.cur_args = &.{};
-    try p.instance.callVoid("on_command", &.{@intCast(wc.id)});
-    return p.result;
 }
