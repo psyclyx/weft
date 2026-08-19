@@ -141,8 +141,10 @@ var recent_end: usize = 0;
 
 /// Section fold state PERSISTS across gathers (indexed by Section) — so a
 /// collapsed Recent stays collapsed through a refresh/stage. Files rebuild each
-/// gather (default expanded); only the section posture is remembered.
-var sec_folded = [_]bool{ false, false, false, true };
+/// gather (default expanded); only the section posture is remembered. Recent
+/// defaults EXPANDED so a commit is directly actionable (RET/A/V/x/fixup) on a
+/// fresh `*magit*` without a TAB first; TAB still toggles it.
+var sec_folded = [_]bool{ false, false, false, false };
 var sec_present = [_]bool{ false, false, false, false };
 var sec_rstart = [_]usize{ 0, 0, 0, 0 };
 var sec_rend = [_]usize{ 0, 0, 0, 0 };
