@@ -216,6 +216,10 @@ pub fn main(init: std.process.Init) !void {
         config_load.loadJsConfig(gpa, &session.cmd_ctx, config_path, plugin_host.loader(), &config_kv) catch |e|
             std.log.warn("config: {s} failed to load: {t}", .{ config_path, e });
     }
+    // The config's editor plugin (vim/helix) has set the base editing mode by
+    // now; capture it as the mode fresh buffers open in, so a tool buffer's
+    // mode (dired/magit) can never leak into a file opened from it.
+    session.buffers.setDefaultMode(gpa, session.keymap.currentMode()) catch {};
 
     // ── Per-buffer providers (syntax + LSP hang off Buffer.frontend) ──
     // Phase two of `providers_state`: build attach_deps in place (it borrows the

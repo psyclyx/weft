@@ -895,6 +895,33 @@ test "buffers: switch restores modes, close/create keep the set sane" {
     try t.expectEqual(id1.integer, id2.integer);
 }
 
+test "buffers: a fresh buffer opens in default_mode — a tool mode never leaks" {
+    const gpa = t.allocator;
+    var host: TestHost = undefined;
+    try TestHost.init(gpa, &host);
+    defer host.deinit(gpa);
+    const run = core.command.run;
+
+    // The config base editing mode, captured once.
+    try host.keymap.setMode(gpa, "normal");
+    try host.buffers.setDefaultMode(gpa, "normal");
+
+    // Enter a tool buffer and put it in its own (tool) mode, as dired/magit do.
+    _ = try run(&host.commands, &host.ctx, "buffer-create", &.{.{ .string = "*dired*" }});
+    try host.keymap.setMode(gpa, "dired");
+    try t.expectEqualStrings("dired", host.keymap.currentMode());
+
+    // Open a file FROM the tool buffer — a fresh buffer. Structurally it must
+    // start in default_mode, never inherit "dired" (the bug this makes
+    // impossible to express: a tool mode sticking after you open a file).
+    _ = try run(&host.commands, &host.ctx, "open", &.{.{ .string = "/tmp/weft-mode-test.zig" }});
+    try t.expectEqualStrings("normal", host.keymap.currentMode());
+
+    // Going back to the tool buffer still restores its mode (per-buffer intact).
+    _ = try run(&host.commands, &host.ctx, "buffer-switch", &.{.{ .integer = 1 }});
+    try t.expectEqualStrings("dired", host.keymap.currentMode());
+}
+
 test "editor: bulk load — big file opens as a compacted base, edits and saves" {
     const gpa = t.allocator;
     var tmp_dir = t.tmpDir(.{});

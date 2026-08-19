@@ -25,6 +25,12 @@ pool: *task.Pool,
 user_agent: []u8,
 slots: std.ArrayList(?*Buffer) = .empty,
 active_id: Id = 0,
+/// The mode a FRESH buffer (no saved mode) starts in — the config's base
+/// editing mode ("normal"/"helix-normal"), captured once after config load.
+/// A fresh buffer NEVER inherits the current keymap mode: that let a tool
+/// buffer's mode (dired/magit) leak into a file opened from it. Captured from
+/// the base — never from a buffer switch — so no tool mode can pollute it.
+default_mode: []u8 = &.{},
 
 pub const Id = u32;
 
@@ -61,7 +67,17 @@ pub fn deinit(self: *Buffers, gpa: Allocator) void {
     }
     self.slots.deinit(gpa);
     gpa.free(self.user_agent);
+    gpa.free(self.default_mode);
     self.* = undefined;
+}
+
+/// Set the base mode fresh buffers start in (the config's editing mode).
+/// Called once after config load; not per-switch, so it can't be polluted
+/// by a tool buffer's mode.
+pub fn setDefaultMode(self: *Buffers, gpa: Allocator, mode: []const u8) Error!void {
+    const owned = try gpa.dupe(u8, mode);
+    gpa.free(self.default_mode);
+    self.default_mode = owned;
 }
 
 fn destroyBuffer(self: *Buffers, gpa: Allocator, b: *Buffer) void {
@@ -140,8 +156,11 @@ pub fn findByPath(self: *const Buffers, path: []const u8) ?Id {
     return null;
 }
 
-/// Focus `id`: the outgoing buffer keeps the current keymap mode, the
-/// incoming buffer's saved mode is restored (empty = inherit).
+/// Focus `id`: the outgoing buffer saves the current keymap mode; the incoming
+/// buffer's mode is restored (its saved mode, or — when it's fresh — the base
+/// `default_mode`). A fresh buffer does NOT inherit the outgoing mode: that is
+/// what let a tool buffer's mode (dired/magit) stick when you opened a file
+/// from it. The mode a buffer shows is always determined by the buffer.
 pub fn switchTo(self: *Buffers, gpa: Allocator, id: Id, keymap: *Keymap) Error!void {
     const target = self.get(id) orelse return;
     if (id == self.active_id) return;
@@ -149,7 +168,11 @@ pub fn switchTo(self: *Buffers, gpa: Allocator, id: Id, keymap: *Keymap) Error!v
     const held = try gpa.dupe(u8, keymap.currentMode());
     gpa.free(old.mode);
     old.mode = held;
-    if (target.mode.len > 0) try keymap.setMode(gpa, target.mode);
+    if (target.mode.len > 0) {
+        try keymap.setMode(gpa, target.mode);
+    } else if (self.default_mode.len > 0) {
+        try keymap.setMode(gpa, self.default_mode);
+    }
     self.active_id = id;
 }
 
