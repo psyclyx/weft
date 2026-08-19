@@ -111,7 +111,17 @@ function startAgent(cmd, prompt) {
 }
 globalThis.startAgent = startAgent;
 
-// A command so the plugin registers something under the ABI: open (create) the
-// transcript buffer. The real entry points (agent-new picking a configured
-// agent, a prompt input) arrive with the command-arg + config-read membrane.
-weft.command("agent-transcript", () => transcript(""));
+// agent-start: launch the configured agent and run one turn. The launch
+// command is config data (weft.set("acp", "cmd", "…") — never baked), and the
+// opening prompt is weft.set("acp", "prompt", "…") (default "Hello"). A prompt
+// INPUT (type your own each turn) needs the command-arg / text-input membrane
+// and lands next; this proves the live round-trip against a real agent.
+weft.command("agent-start", () => {
+  const cmd = weft.config("cmd");
+  if (!cmd) {
+    weft.echo('acp: set an agent command first — weft.set("acp","cmd","codex-acp")');
+    return;
+  }
+  startAgent(cmd, weft.config("prompt") || "Hello");
+  weft.echo("acp: started " + cmd);
+});

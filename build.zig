@@ -193,7 +193,17 @@ fn installPlugins(b: *std.Build) void {
         const inst = b.addInstallFileWithDir(guest.getEmittedBin(), .lib, "weft/plugins/" ++ name ++ ".wasm");
         b.getInstallStep().dependOn(&inst.step);
     }
+    // JS plugins (config/plugins/*.js) — resident quickjs plugins (e.g. the ACP
+    // agent client) — install verbatim beside the .wasm catalog, loadable by
+    // name (`weft.plugin("acp.js")`).
+    inline for (js_plugins) |name| {
+        const inst = b.addInstallFileWithDir(b.path("config/plugins/" ++ name), .lib, "weft/plugins/" ++ name);
+        b.getInstallStep().dependOn(&inst.step);
+    }
 }
+
+/// JS plugins shipped in the reference catalog (config/plugins/*.js).
+const js_plugins = [_][]const u8{"acp.js"};
 
 /// QuickJS-ng compiled to a `wasm32-wasi` reactor (milestone 5 / 06B): the
 /// runtime behind user `config.js`. We invoke the same `zig cc` that builds

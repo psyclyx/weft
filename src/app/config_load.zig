@@ -132,7 +132,7 @@ pub const PluginHost = struct {
             std.log.warn("plugin: {s} needs a task pool (agent subprocesses)", .{path});
             return;
         };
-        const p = core.quickjs.JsPlugin.load(self.gpa, self.engine, self.ctx, pool, core.wasm_host.hostEnviron(), src) catch |e| {
+        const p = core.quickjs.JsPlugin.load(self.gpa, self.engine, self.ctx, pool, core.wasm_host.hostEnviron(), std.fs.path.stem(std.fs.path.basename(name)), self.opts.config, src) catch |e| {
             std.log.warn("plugin: {s} failed to load: {t}", .{ path, e });
             return;
         };

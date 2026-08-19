@@ -173,6 +173,15 @@ weft.provide("format", {}, "format-buffer");
 // vim-style: K shows hover, gd goes to definition, gs lists symbols
 weft.bind("normal", "K", "hover");
 
+// ── Coding agents (ACP). Uncomment + point at your agent adapter to enable.
+// weft is the harness: the agent's file I/O and tool approvals cross the ABI,
+// so each edit is a gated, attributed peer commit. The launch command is YOURS
+// (weft assumes nothing about how it's installed — NixOS-friendly):
+//   weft.set("acp", "cmd", "codex-acp");   // or claude-agent-acp / gemini --experimental-acp / …
+//   weft.set("acp", "prompt", "Summarize this project.");
+//   weft.plugin("acp.js");                 // the ACP client (a JS plugin)
+//   weft.bind("leader-open", "A", "agent-start"); // SPC o A — start the agent
+
 // SPC o — open / tools
 weft.bind("leader-open", "d", "dired");
 weft.bind("leader-open", "r", "repl-start");

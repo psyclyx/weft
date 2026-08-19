@@ -56,6 +56,9 @@ extern void host_proc_close(int handle);
 // the plugin owns, targeted by name so it need not be focused. Config stubs it.
 __attribute__((import_module("weft"), import_name("qjs_buffer_append")))
 extern void host_buffer_append(const char *name, int name_len, const char *text, int text_len);
+// Read this plugin's config value for `key` (staged by weft.set) into `out`.
+__attribute__((import_module("weft"), import_name("qjs_config")))
+extern int host_config(const char *key, int key_len, char *out, int cap);
 __attribute__((import_module("weft"), import_name("qjs_action")))
 extern void host_action(const char *name, int name_len);
 __attribute__((import_module("weft"), import_name("qjs_provide")))
@@ -354,6 +357,20 @@ static JSValue js_buffer_append(JSContext *ctx, JSValueConst this_val,
     return JS_UNDEFINED;
 }
 
+// weft.config(key) -> string: this plugin's config value (weft.set), or "".
+static char g_config_buf[8192];
+static JSValue js_config(JSContext *ctx, JSValueConst this_val,
+                         int argc, JSValueConst *argv) {
+    if (argc < 1) return JS_NewStringLen(ctx, "", 0);
+    size_t kl;
+    const char *key = JS_ToCStringLen(ctx, &kl, argv[0]);
+    int n = 0;
+    if (key) n = host_config(key, (int)kl, g_config_buf, (int)sizeof g_config_buf);
+    JS_FreeCString(ctx, key);
+    if (n <= 0) return JS_NewStringLen(ctx, "", 0);
+    return JS_NewStringLen(ctx, g_config_buf, (size_t)n);
+}
+
 // weft.onOutput(fn): register the handler the host fires (with a stream handle)
 // when that stream has new bytes to read.
 static JSValue js_on_output(JSContext *ctx, JSValueConst this_val,
@@ -399,6 +416,7 @@ int weft_plugin_init(const char *src, int len) {
     JS_SetPropertyStr(g_ctx, weft, "procRead", JS_NewCFunction(g_ctx, js_proc_read, "procRead", 1));
     JS_SetPropertyStr(g_ctx, weft, "procClose", JS_NewCFunction(g_ctx, js_proc_close, "procClose", 1));
     JS_SetPropertyStr(g_ctx, weft, "bufferAppend", JS_NewCFunction(g_ctx, js_buffer_append, "bufferAppend", 2));
+    JS_SetPropertyStr(g_ctx, weft, "config", JS_NewCFunction(g_ctx, js_config, "config", 1));
     JS_SetPropertyStr(g_ctx, weft, "onOutput", JS_NewCFunction(g_ctx, js_on_output, "onOutput", 1));
     JS_FreeValue(g_ctx, weft);
     JS_FreeValue(g_ctx, global);

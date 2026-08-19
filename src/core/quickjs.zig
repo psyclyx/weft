@@ -108,6 +108,7 @@ pub fn evalConfig(engine: *wasm.Engine, ctx: *command.Context, loader: ?PluginLo
     try linker.defineFn("weft", "qjs_proc_read", 3, 1, cStubI32, &bridge);
     try linker.defineFn("weft", "qjs_proc_close", 1, 0, cStubVoid, &bridge);
     try linker.defineFn("weft", "qjs_buffer_append", 4, 0, cStubVoid, &bridge);
+    try linker.defineFn("weft", "qjs_config", 4, 1, cStubI32, &bridge);
 
     var instance = try linker.instantiateWasi(&module);
     defer instance.deinit();
@@ -149,6 +150,12 @@ pub const JsPlugin = struct {
     gpa: Allocator,
     ctx: *command.Context,
     pool: *task.Pool,
+    /// This plugin's name (its config namespace — what `weft.set(name, …)` and
+    /// `weft.config(key)` key on).
+    name: []u8,
+    /// Read-only config data the config plane staged for this plugin, read via
+    /// `weft.config(key)`. Null in tests.
+    config_store: ?*kv.Store,
     /// The child environment agent subprocesses inherit (so they resolve PATH).
     environ: std.process.Environ,
     bridge: Bridge,
@@ -169,20 +176,25 @@ pub const JsPlugin = struct {
     /// membrane's `&self.bridge` and the trampolines' `plugin` pointers stay
     /// valid (the instance is resident for the plugin's life). `pool`/`environ`
     /// back the proc-stream membrane (agent subprocesses).
-    pub fn load(gpa: Allocator, engine: *wasm.Engine, ctx: *command.Context, pool: *task.Pool, environ: std.process.Environ, src: []const u8) !*JsPlugin {
+    pub fn load(gpa: Allocator, engine: *wasm.Engine, ctx: *command.Context, pool: *task.Pool, environ: std.process.Environ, name: []const u8, config_store: ?*kv.Store, src: []const u8) !*JsPlugin {
         const self = try gpa.create(JsPlugin);
         errdefer gpa.destroy(self);
         self.* = .{
             .gpa = gpa,
             .ctx = ctx,
             .pool = pool,
+            .name = try gpa.dupe(u8, name),
+            .config_store = config_store,
             .environ = environ,
             .bridge = .{ .ctx = ctx, .loader = null, .config = null },
             .module = try engine.compile(quickjs_wasm),
             .linker = undefined,
             .instance = undefined,
         };
-        errdefer self.module.deinit();
+        errdefer {
+            gpa.free(self.name);
+            self.module.deinit();
+        }
         self.linker = try wasm.Linker.init(engine);
         errdefer self.linker.deinit();
         try self.linker.defineWasi();
@@ -193,6 +205,7 @@ pub const JsPlugin = struct {
         try self.linker.defineFn("weft", "qjs_proc_read", 3, 1, cProcRead, self);
         try self.linker.defineFn("weft", "qjs_proc_close", 1, 0, cProcClose, self);
         try self.linker.defineFn("weft", "qjs_buffer_append", 4, 0, cBufferAppend, self);
+        try self.linker.defineFn("weft", "qjs_config", 4, 1, cConfig, self);
 
         self.instance = try self.linker.instantiateWasi(&self.module);
         errdefer self.instance.deinit();
@@ -234,6 +247,7 @@ pub const JsPlugin = struct {
 
     pub fn deinit(self: *JsPlugin) void {
         const gpa = self.gpa;
+        gpa.free(self.name);
         for (self.streams.items) |maybe| if (maybe) |s| s.deinit();
         self.streams.deinit(gpa);
         for (self.cmds.items) |c| {
@@ -353,6 +367,55 @@ fn cBufferAppend(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32, res
     const text = caller.readMemory(gpa, @intCast(args[2]), @intCast(args[3])) catch return;
     defer gpa.free(text);
     appendNamed(self.ctx, gpa, name, text);
+}
+
+/// weft.config(key) -> string: this plugin's config value for `key` (what the
+/// config plane staged via `weft.set(<plugin>, key, value)`), or "". The stored
+/// blob is framed (uvarint count, then uvarint(len)++bytes per record); a
+/// single value is its first record.
+fn cConfig(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32, results: []i32) void {
+    const self: *JsPlugin = @ptrCast(@alignCast(data.?));
+    const store = self.config_store orelse {
+        results[0] = 0;
+        return;
+    };
+    const key = caller.readMemory(self.gpa, @intCast(args[0]), @intCast(args[1])) catch {
+        results[0] = 0;
+        return;
+    };
+    defer self.gpa.free(key);
+    const blob = store.get(self.name, key) orelse {
+        results[0] = 0;
+        return;
+    };
+    const value = firstFramedRecord(blob) orelse {
+        results[0] = 0;
+        return;
+    };
+    results[0] = @intCast(caller.writeMemory(@intCast(args[2]), @intCast(args[3]), value) catch 0);
+}
+
+/// Decode the first record of a framed config blob (uvarint count, then
+/// uvarint(len)++bytes). Core-local copy of the app-side decoder.
+fn firstFramedRecord(blob: []const u8) ?[]const u8 {
+    var cur = blob;
+    _ = framedUvarint(&cur) orelse return null; // record count
+    const n = framedUvarint(&cur) orelse return null;
+    if (n > cur.len) return null;
+    return cur[0..@intCast(n)];
+}
+fn framedUvarint(cur: *[]const u8) ?u64 {
+    var shift: u6 = 0;
+    var v: u64 = 0;
+    while (cur.len > 0) {
+        const b = cur.*[0];
+        cur.* = cur.*[1..];
+        v |= @as(u64, b & 0x7f) << shift;
+        if (b & 0x80 == 0) return v;
+        if (shift >= 57) return null;
+        shift += 7;
+    }
+    return null;
 }
 
 /// The command handler a `weft.command` registers under: dispatch back into the
@@ -679,7 +742,7 @@ test "quickjs: a JS plugin registers a command dispatched back into JS" {
     const src =
         \\weft.command("greet", () => weft.echo("hi from js"));
     ;
-    var plugin = try JsPlugin.load(gpa, &engine, &env.ctx, env.pool, .empty, src);
+    var plugin = try JsPlugin.load(gpa, &engine, &env.ctx, env.pool, .empty, "test", null, src);
     defer plugin.deinit();
 
     try t.expect(env.commands.resolve("greet") != null);
@@ -705,7 +768,7 @@ test "quickjs: a JS plugin drives a duplex subprocess and reads its output" {
         \\  weft.procSend(h, "ping\n");
         \\});
     ;
-    var plugin = try JsPlugin.load(gpa, &engine, &env.ctx, env.pool, .empty, src);
+    var plugin = try JsPlugin.load(gpa, &engine, &env.ctx, env.pool, .empty, "test", null, src);
     defer plugin.deinit();
 
     _ = try command.run(&env.commands, &env.ctx, "go", &.{});
@@ -749,7 +812,7 @@ test "quickjs: the ACP plugin drives a mock agent's message into the transcript"
     const src = try std.fmt.allocPrint(gpa, "{s}\nstartAgent(\"/bin/sh {s}\", \"hi\");\n", .{ acp, mock_path });
     defer gpa.free(src);
 
-    var plugin = try JsPlugin.load(gpa, &engine, &env.ctx, env.pool, .empty, src);
+    var plugin = try JsPlugin.load(gpa, &engine, &env.ctx, env.pool, .empty, "test", null, src);
     defer plugin.deinit();
 
     // Pump the frame-boundary output dispatch until the agent's message lands
