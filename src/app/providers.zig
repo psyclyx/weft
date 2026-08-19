@@ -227,3 +227,68 @@ pub fn detachProviders(deps: *AttachDeps, buf: *core.Buffers.Buffer) void {
     deps.gpa.destroy(at);
     buf.frontend = null;
 }
+
+/// The provider cluster, owned as one unit: the config-extended registries
+/// (`grammars`, `lsp_servers`) plus the per-buffer attach bundle (`attach_deps`).
+/// It mirrors how `RenderState`/`Session` own their clusters — `main()` holds one
+/// `providers` object instead of three loose provider locals.
+///
+/// Two-phase, because the pieces are born at different times: the registries
+/// exist BEFORE the session (its capability consumers bind `grammar-add`/
+/// `lsp-add` onto them), while `attach_deps` borrows the session's caps + the
+/// connect placement, so it is built AFTER the session.
+///
+/// CRITICAL TEARDOWN ORDER — the whole reason this is a distinct cluster:
+/// `attach_deps.deinitShells()` must run AFTER the buffers die (in-flight save
+/// workers still use shell backings at shutdown) AND after the task pool joins
+/// (a pool worker may still hold a shell). `main()` guarantees this by
+/// registering `Providers.deinit` FIRST (so it runs LAST) — after both
+/// `Session.deinit` and `pool.deinit`. Grammars/LSP are independent data, freed
+/// here too (their syntax instances were already destroyed by `detachProviders`,
+/// which `main()` runs before this).
+pub const Providers = struct {
+    grammars: core.syntax.Runtime,
+    lsp_servers: LspServers,
+    attach_deps: AttachDeps,
+    /// `attach_deps` is filled in phase two; until then `deinit` must not touch
+    /// it (an early error between the two phases would otherwise free garbage).
+    attached: bool,
+
+    /// Phase one: the config-extended registries, built before the session.
+    pub fn initRegistries(self: *Providers, gpa: std.mem.Allocator) !void {
+        self.grammars = try core.syntax.Runtime.initBuiltins(gpa);
+        errdefer self.grammars.deinit(gpa);
+        self.lsp_servers = .empty;
+        self.attached = false;
+    }
+
+    /// Phase two: the per-buffer attach bundle, built once the session's caps
+    /// and the connect placement are known. It borrows into `self` (grammars/
+    /// lsp_servers), so it must run IN PLACE (self already at its final
+    /// address). `share` is wired by `main()` once the collab state exists.
+    pub fn initAttach(
+        self: *Providers,
+        gpa: std.mem.Allocator,
+        caps: *core.Caps,
+        environ: std.process.Environ,
+        local_lsp: bool,
+    ) void {
+        self.attach_deps = .{
+            .gpa = gpa,
+            .grammars = &self.grammars,
+            .lsp_servers = &self.lsp_servers,
+            .caps = caps,
+            .environ = environ,
+            .local_lsp = local_lsp,
+        };
+        self.attached = true;
+    }
+
+    /// Free in the order `main()`'s defers used to run: lsp_servers, grammars,
+    /// then the persistent remote shells LAST (they outlive buffers + pool).
+    pub fn deinit(self: *Providers, gpa: std.mem.Allocator) void {
+        self.lsp_servers.deinit(gpa);
+        self.grammars.deinit(gpa);
+        if (self.attached) self.attach_deps.deinitShells();
+    }
+};

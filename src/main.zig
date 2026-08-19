@@ -86,22 +86,19 @@ pub fn main(init: std.process.Init) !void {
     }
 
     // ── Core ──
-    // Registered before everything so it runs LAST: shells must outlive
-    // the buffers whose backings (and in-flight save workers) use them.
-    var attach_deps_ptr: ?*AttachDeps = null;
-    defer if (attach_deps_ptr) |d| d.deinitShells();
+    // Providers owns the config-extended registries (grammars, lsp_servers) and
+    // the per-buffer attach bundle. Its deinit is registered FIRST so it runs
+    // LAST: the persistent remote shells must outlive the buffers whose backings
+    // + in-flight save workers use them, and the pool whose workers may still
+    // hold one. The registries exist now (before the session) so the session's
+    // capability consumers can bind grammar-add/lsp-add onto them; attach_deps is
+    // built later, once caps + the connect placement are known.
+    var providers_state: providers.Providers = undefined;
+    try providers_state.initRegistries(gpa);
+    defer providers_state.deinit(gpa);
     var pool = try core.task.Pool.init(gpa, .{});
     defer pool.deinit();
 
-    // Grammars are data: builtins seeded, config extends via command.
-    var grammars = try core.syntax.Runtime.initBuiltins(gpa);
-    defer grammars.deinit(gpa);
-    // Language servers are data: config registers (extension, command)
-    // pairs; nothing here names a server. Both registries exist before the
-    // session so its capability consumers can bind grammar-add/lsp-add onto
-    // them; they move into `Providers` next.
-    var lsp_servers: LspServers = .empty;
-    defer lsp_servers.deinit(gpa);
     // which-key: show the hint popup immediately (bypass the idle delay). If not
     // already in a menu, open the leader menu — so a help key (F1) surfaces it
     // from anywhere. Dispatch reads it; the session's caret commands bind it.
@@ -115,7 +112,7 @@ pub fn main(init: std.process.Init) !void {
     // registration order; its deinit frees them in the reverse order main()
     // used to.
     var session: Session = undefined;
-    try session.init(gpa, pool, args.user, &grammars, &lsp_servers, &which_key_now);
+    try session.init(gpa, pool, args.user, &providers_state.grammars, &providers_state.lsp_servers, &which_key_now);
     defer session.deinit(gpa);
     const buffers = &session.buffers;
     if (args.file) |path| {
@@ -224,26 +221,22 @@ pub fn main(init: std.process.Init) !void {
     }
 
     // ── Per-buffer providers (syntax + LSP hang off Buffer.frontend) ──
-    var attach_deps: AttachDeps = .{
-        .gpa = gpa,
-        .grammars = &grammars,
-        .lsp_servers = &lsp_servers,
-        .caps = &session.caps,
-        .environ = init.minimal.environ,
-        // Placement routing: for a remote-hosted document the server
-        // runs on the host peer and diagnostics arrive as the imported
-        // host feed — no local LSP.
-        .local_lsp = args.connect == null,
-    };
-    attach_deps_ptr = &attach_deps;
+    // Phase two of `providers_state`: build attach_deps in place (it borrows the
+    // session caps + the connect placement — for a remote-hosted document the
+    // server runs on the host peer and diagnostics arrive as the imported host
+    // feed, so no local LSP). detachProviders runs here (before Session.deinit,
+    // while caps + buffers' docs are alive); the shells live on, freed last by
+    // providers_state.deinit.
+    providers_state.initAttach(gpa, &session.caps, init.minimal.environ, args.connect == null);
+    const attach_deps = &providers_state.attach_deps;
     defer {
         var det_it = buffers.iterator();
-        while (det_it.next()) |b| detachProviders(&attach_deps, b);
+        while (det_it.next()) |b| detachProviders(attach_deps, b);
     }
-    try attachProviders(&attach_deps, buffers.active());
+    try attachProviders(attach_deps, buffers.active());
     // The graphical shell's open/close know about providers and remote
     // shells; they shadow the core versions (registry last-wins).
-    try buffers_cmds.registerCommands(gpa, &session.commands, &attach_deps);
+    try buffers_cmds.registerCommands(gpa, &session.commands, attach_deps);
 
     // ── Connection (wire v1.1: N shared buffers over one session) ──
     var fd_link: core.session.FdLink = undefined;
@@ -525,7 +518,7 @@ pub fn main(init: std.process.Init) !void {
         // Commands may have created/switched buffers; lazily attach
         // providers and damage the view on focus change.
         const abuf = buffers.active();
-        try attachProviders(&attach_deps, abuf);
+        try attachProviders(attach_deps, abuf);
         const editor = &abuf.editor;
         const attach: *Attach = @ptrCast(@alignCast(abuf.frontend.?));
         if (buffers.active_id != last_active) {
