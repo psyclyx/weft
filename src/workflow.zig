@@ -493,6 +493,24 @@ test "e2e/project: opening the saved file recognizes its language" {
     try t.expect(std.mem.indexOf(u8, ed.echoText(), "javascript") != null);
 }
 
+test "e2e/project: magit push/pull/fetch transients are sticky menus" {
+    const gpa = t.allocator;
+    var ed: Editor = undefined;
+    try Editor.init(gpa, &ed);
+    defer ed.deinit();
+    try loadWorkspace(&ed);
+
+    // The flag transients must be sticky (stay open while flags accumulate) —
+    // sticky implies menu-mode, so which-key also lists their keys. The reset
+    // transient (a plain one-shot menu) must NOT be sticky.
+    try t.expect(ed.keymap.isStickyMenu("git-push-menu"));
+    try t.expect(ed.keymap.isStickyMenu("git-pull-menu"));
+    try t.expect(ed.keymap.isStickyMenu("git-fetch-menu"));
+    try t.expect(ed.keymap.isMenuMode("git-push-menu"));
+    try t.expect(!ed.keymap.isStickyMenu("git-reset-menu"));
+    try t.expect(ed.keymap.isMenuMode("git-reset-menu"));
+}
+
 // ── Documented gaps (the difficulty IS the signal) ──────────────────
 //
 // The project brief calls for the e2e to also drive *git*, *a debugger*, and
