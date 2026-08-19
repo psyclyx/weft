@@ -63,6 +63,7 @@ const pick_host = @import("wasm_host/pick.zig");
 const surface_host = @import("wasm_host/surface.zig");
 const menu = @import("wasm_host/menu.zig");
 pub const notifyMenu = menu.notifyMenu;
+const buffers_host = @import("wasm_host/buffers.zig");
 const rooted_fs = @import("rooted_fs.zig");
 const WasmCmd = wasm_abi.WasmCmd;
 const PendingItem = wasm_abi.PendingItem;
@@ -141,11 +142,11 @@ pub fn defineImports(linker: *wasm.Linker, p: *WasmPlugin) !void {
     try d(linker, "wl_command_count", 0, 1, hCommandCount, p);
     try d(linker, "wl_command_name", 3, 1, hCommandName, p);
     try d(linker, "wl_command_summary", 3, 1, hCommandSummary, p);
-    try d(linker, "wl_buffer_count", 0, 1, hBufferCount, p);
-    try d(linker, "wl_buffer_id", 1, 1, hBufferId, p);
-    try d(linker, "wl_buffer_name", 3, 1, hBufferName, p);
-    try d(linker, "wl_buffer_active", 1, 1, hBufferActive, p);
-    try d(linker, "wl_buffer_readonly", 1, 1, hBufferReadonly, p);
+    try d(linker, "wl_buffer_count", 0, 1, buffers_host.hBufferCount, p);
+    try d(linker, "wl_buffer_id", 1, 1, buffers_host.hBufferId, p);
+    try d(linker, "wl_buffer_name", 3, 1, buffers_host.hBufferName, p);
+    try d(linker, "wl_buffer_active", 1, 1, buffers_host.hBufferActive, p);
+    try d(linker, "wl_buffer_readonly", 1, 1, buffers_host.hBufferReadonly, p);
     // Pick.
     try d(linker, "wl_pick_begin", 3, 0, pick_host.hPickBegin, p);
     try d(linker, "wl_pick_add", 4, 0, pick_host.hPickAdd, p);
@@ -809,54 +810,6 @@ fn hCommandSummary(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32, r
         return;
     };
     results[0] = @intCast(caller.writeMemory(@intCast(args[1]), @intCast(args[2]), cmd.summary) catch 0);
-}
-
-/// The i-th open buffer, or null (O(i) walk — the introspection path).
-fn bufferAtIndex(p: *WasmPlugin, i: usize) ?*@import("Buffers.zig").Buffer {
-    var it = p.ctx.buffers.iterator();
-    var j: usize = 0;
-    while (it.next()) |b| : (j += 1) if (j == i) return b;
-    return null;
-}
-
-fn hBufferCount(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32, results: []i32) void {
-    _ = caller;
-    _ = args;
-    const p: *WasmPlugin = @ptrCast(@alignCast(data.?));
-    results[0] = @intCast(p.ctx.buffers.count());
-}
-
-fn hBufferId(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32, results: []i32) void {
-    _ = caller;
-    const p: *WasmPlugin = @ptrCast(@alignCast(data.?));
-    const b = bufferAtIndex(p, @intCast(args[0])) orelse {
-        results[0] = -1;
-        return;
-    };
-    results[0] = @intCast(b.id);
-}
-
-fn hBufferName(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32, results: []i32) void {
-    const p: *WasmPlugin = @ptrCast(@alignCast(data.?));
-    const b = bufferAtIndex(p, @intCast(args[0])) orelse {
-        results[0] = -1;
-        return;
-    };
-    results[0] = @intCast(caller.writeMemory(@intCast(args[1]), @intCast(args[2]), b.name) catch 0);
-}
-
-fn hBufferActive(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32, results: []i32) void {
-    _ = caller;
-    const p: *WasmPlugin = @ptrCast(@alignCast(data.?));
-    const b = bufferAtIndex(p, @intCast(args[0]));
-    results[0] = if (b != null and b == p.ctx.buffers.active()) 1 else 0;
-}
-
-fn hBufferReadonly(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32, results: []i32) void {
-    _ = caller;
-    const p: *WasmPlugin = @ptrCast(@alignCast(data.?));
-    const b = bufferAtIndex(p, @intCast(args[0]));
-    results[0] = if (b != null and b.?.read_only) 1 else 0;
 }
 
 /// Command dispatch back into the guest: stash the args (readable via
