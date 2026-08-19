@@ -22,12 +22,11 @@
 //! - `match.zig`  — the pure matcher (styles + scoring functions).
 //! - `pool.zig`   — the append-only candidate pool + its bulk `rank`.
 //! - `types.zig`  — the configuration/callback value types.
-//! - `state.zig`  — the `Pick` state machine, commands, and `install`.
+//! - `Pick.zig`   — the `Pick` state machine, commands, and `install`.
 
 const match = @import("pick/match.zig");
 const pool = @import("pick/pool.zig");
 const types = @import("pick/types.zig");
-const state = @import("pick/state.zig");
 
 /// How the query filters candidates.
 pub const Style = match.Style;
@@ -45,11 +44,11 @@ pub const Options = types.Options;
 pub const Entry = types.Entry;
 
 /// The fuzzy-select state machine (prompt, query, filtered items, selection).
-pub const Pick = state.Pick;
+pub const Pick = @import("pick/Pick.zig");
 /// Register the pick commands + the "pick" mode bindings.
-pub const install = state.install;
+pub const install = Pick.install;
 /// Replace the item set of a live pick, preserving query and selection.
-pub const refresh = state.refresh;
+pub const refresh = Pick.refresh;
 
 // Pull every implementation file into the test graph so `zig build test`
 // discovers the matcher, pool, and state tests through this facade.
@@ -57,5 +56,5 @@ comptime {
     _ = match;
     _ = pool;
     _ = types;
-    _ = state;
+    _ = Pick;
 }

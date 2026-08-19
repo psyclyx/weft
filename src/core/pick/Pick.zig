@@ -24,297 +24,297 @@ const Source = types.Source;
 const Options = types.Options;
 const Entry = types.Entry;
 
-pub const Pick = struct {
-    active: bool = false,
-    prompt: []u8 = &.{},
-    items: std.ArrayList([]u8) = .empty,
-    /// Parallel to `items`: display-only docstrings ("" when none).
-    docs: std.ArrayList([]u8) = .empty,
-    query: std.ArrayList(u8) = .empty,
-    /// Indices into `items`, filtered by `query`, rank order.
-    filtered: std.ArrayList(u32) = .empty,
-    selected: usize = 0,
-    /// The add-order index of the accepted candidate, captured at accept time
-    /// (before `close` clears `filtered`/`selected`). Null when the typed text
-    /// was accepted (free-text). A source plugin reads it to resolve the choice
-    /// to a position it stamped at add time — robust even with duplicate rows.
-    accepted_index: ?usize = null,
-    acceptor: ?Acceptor = null,
-    prev_mode: []u8 = &.{},
-    /// Accept the typed query, not only a candidate (see `Options`).
-    allow_free_text: bool = false,
-    /// Async candidate producer for this pick (null = static list).
-    source: ?Source = null,
-    /// Bumped on every query mutation; the source acts when it lags.
-    query_epoch: u64 = 0,
-    source_epoch: u64 = 0,
-    /// `task.nowNs()` of the last query mutation (debounce baseline).
-    last_query_ns: u64 = 0,
-    /// "prompt\x00text" → use record; survives across opens (session
-    /// scope). Keys owned.
-    frecency: std.StringHashMapUnmanaged(Frec) = .empty,
-    use_counter: u64 = 0,
-    /// Completion style for the live query (default orderless).
-    style: Style = .orderless,
-    /// A byte offset to anchor the popup AT (completion): the view draws the
-    /// list just below that caret line instead of the window-bottom dock. Null =
-    /// the ordinary bottom dock (command palette, buffer switch, file find).
-    caret_anchor: ?usize = null,
-    /// Sticky narrowing filter (space-joined tokens): a candidate must
-    /// match it (orderless) IN ADDITION to the live query. `pick-narrow`
-    /// promotes the current query into it and clears the query; a further
-    /// `pick-narrow` ANDs another facet; `pick-widen` clears it.
-    narrow: std.ArrayList(u8) = .empty,
+const Pick = @This();
 
-    const Frec = struct { uses: u32, last: u64 };
+active: bool = false,
+prompt: []u8 = &.{},
+items: std.ArrayList([]u8) = .empty,
+/// Parallel to `items`: display-only docstrings ("" when none).
+docs: std.ArrayList([]u8) = .empty,
+query: std.ArrayList(u8) = .empty,
+/// Indices into `items`, filtered by `query`, rank order.
+filtered: std.ArrayList(u32) = .empty,
+selected: usize = 0,
+/// The add-order index of the accepted candidate, captured at accept time
+/// (before `close` clears `filtered`/`selected`). Null when the typed text
+/// was accepted (free-text). A source plugin reads it to resolve the choice
+/// to a position it stamped at add time — robust even with duplicate rows.
+accepted_index: ?usize = null,
+acceptor: ?Acceptor = null,
+prev_mode: []u8 = &.{},
+/// Accept the typed query, not only a candidate (see `Options`).
+allow_free_text: bool = false,
+/// Async candidate producer for this pick (null = static list).
+source: ?Source = null,
+/// Bumped on every query mutation; the source acts when it lags.
+query_epoch: u64 = 0,
+source_epoch: u64 = 0,
+/// `task.nowNs()` of the last query mutation (debounce baseline).
+last_query_ns: u64 = 0,
+/// "prompt\x00text" → use record; survives across opens (session
+/// scope). Keys owned.
+frecency: std.StringHashMapUnmanaged(Frec) = .empty,
+use_counter: u64 = 0,
+/// Completion style for the live query (default orderless).
+style: Style = .orderless,
+/// A byte offset to anchor the popup AT (completion): the view draws the
+/// list just below that caret line instead of the window-bottom dock. Null =
+/// the ordinary bottom dock (command palette, buffer switch, file find).
+caret_anchor: ?usize = null,
+/// Sticky narrowing filter (space-joined tokens): a candidate must
+/// match it (orderless) IN ADDITION to the live query. `pick-narrow`
+/// promotes the current query into it and clears the query; a further
+/// `pick-narrow` ANDs another facet; `pick-widen` clears it.
+narrow: std.ArrayList(u8) = .empty,
 
-    pub const empty: Pick = .{};
+const Frec = struct { uses: u32, last: u64 };
 
-    pub fn deinit(self: *Pick, gpa: Allocator) void {
-        self.clear(gpa);
-        var it = self.frecency.keyIterator();
-        while (it.next()) |k| gpa.free(k.*);
-        self.frecency.deinit(gpa);
-        self.* = .{};
+pub const empty: Pick = .{};
+
+pub fn deinit(self: *Pick, gpa: Allocator) void {
+    self.clear(gpa);
+    var it = self.frecency.keyIterator();
+    while (it.next()) |k| gpa.free(k.*);
+    self.frecency.deinit(gpa);
+    self.* = .{};
+}
+
+fn clear(self: *Pick, gpa: Allocator) void {
+    // Stop the async source first: it hands off ownership (refcount)
+    // and never blocks, so this is legal inside the input hot
+    // section. Then run the acceptor's cleanup.
+    if (self.source) |s| {
+        if (s.close) |f| f(s.data, gpa);
     }
-
-    fn clear(self: *Pick, gpa: Allocator) void {
-        // Stop the async source first: it hands off ownership (refcount)
-        // and never blocks, so this is legal inside the input hot
-        // section. Then run the acceptor's cleanup.
-        if (self.source) |s| {
-            if (s.close) |f| f(s.data, gpa);
-        }
-        self.source = null;
-        self.allow_free_text = false;
-        self.caret_anchor = null;
-        self.query_epoch = 0;
-        self.source_epoch = 0;
-        self.last_query_ns = 0;
-        if (self.acceptor) |a| {
-            if (a.cleanup) |f| f(a.data, gpa);
-        }
-        self.acceptor = null;
-        gpa.free(self.prompt);
-        self.prompt = &.{};
-        for (self.items.items) |it| gpa.free(it);
-        self.items.deinit(gpa);
-        self.items = .empty;
-        for (self.docs.items) |d| gpa.free(d);
-        self.docs.deinit(gpa);
-        self.docs = .empty;
-        self.query.deinit(gpa);
-        self.query = .empty;
-        self.filtered.deinit(gpa);
-        self.filtered = .empty;
-        self.selected = 0;
-        self.style = .orderless;
-        self.narrow.deinit(gpa);
-        self.narrow = .empty;
-        gpa.free(self.prev_mode);
-        self.prev_mode = &.{};
-        self.active = false;
+    self.source = null;
+    self.allow_free_text = false;
+    self.caret_anchor = null;
+    self.query_epoch = 0;
+    self.source_epoch = 0;
+    self.last_query_ns = 0;
+    if (self.acceptor) |a| {
+        if (a.cleanup) |f| f(a.data, gpa);
     }
+    self.acceptor = null;
+    gpa.free(self.prompt);
+    self.prompt = &.{};
+    for (self.items.items) |it| gpa.free(it);
+    self.items.deinit(gpa);
+    self.items = .empty;
+    for (self.docs.items) |d| gpa.free(d);
+    self.docs.deinit(gpa);
+    self.docs = .empty;
+    self.query.deinit(gpa);
+    self.query = .empty;
+    self.filtered.deinit(gpa);
+    self.filtered = .empty;
+    self.selected = 0;
+    self.style = .orderless;
+    self.narrow.deinit(gpa);
+    self.narrow = .empty;
+    gpa.free(self.prev_mode);
+    self.prev_mode = &.{};
+    self.active = false;
+}
 
-    /// Open a static pick session: copies `entries`, switches to "pick"
-    /// mode. The common case; `openWith` adds free-text/async options.
-    pub fn open(
-        self: *Pick,
-        ctx: *command.Context,
-        prompt: []const u8,
-        entries: []const Entry,
-        acceptor: Acceptor,
-    ) !void {
-        return self.openWith(ctx, prompt, entries, acceptor, .{});
+/// Open a static pick session: copies `entries`, switches to "pick"
+/// mode. The common case; `openWith` adds free-text/async options.
+pub fn open(
+    self: *Pick,
+    ctx: *command.Context,
+    prompt: []const u8,
+    entries: []const Entry,
+    acceptor: Acceptor,
+) !void {
+    return self.openWith(ctx, prompt, entries, acceptor, .{});
+}
+
+/// Open a pick session with options (free-text accept, an async
+/// candidate source). On error the source's `close` is invoked so a
+/// producer created by the caller is never leaked.
+pub fn openWith(
+    self: *Pick,
+    ctx: *command.Context,
+    prompt: []const u8,
+    entries: []const Entry,
+    acceptor: Acceptor,
+    opts: Options,
+) !void {
+    const gpa = ctx.gpa;
+    // On any failure the source is closed (never leaked) and the
+    // acceptor is left UNSET — so a caller that owns a callback
+    // handle (the plugin's LuaPick) can clean it up without risking
+    // a later `clear()` running cleanup on a freed handle.
+    errdefer if (opts.source) |s| {
+        if (s.close) |f| f(s.data, gpa);
+    };
+    if (self.active) self.clear(gpa);
+    self.prompt = try gpa.dupe(u8, prompt);
+    for (entries) |e| {
+        const owned = try gpa.dupe(u8, e.text);
+        errdefer gpa.free(owned);
+        try self.items.append(gpa, owned);
+        const doc = try gpa.dupe(u8, e.doc);
+        errdefer gpa.free(doc);
+        try self.docs.append(gpa, doc);
     }
+    try self.refilter(gpa);
+    const prev = try gpa.dupe(u8, ctx.keymap.currentMode());
+    errdefer gpa.free(prev);
+    try ctx.keymap.setMode(gpa, "pick");
+    // Commit — infallible from here, so the acceptor/source become
+    // live only once the pick is fully open.
+    self.acceptor = acceptor;
+    self.allow_free_text = opts.allow_free_text;
+    self.style = opts.style;
+    self.source = opts.source;
+    self.query_epoch = 0;
+    self.source_epoch = 0;
+    self.last_query_ns = 0;
+    self.prev_mode = prev;
+    self.active = true;
+}
 
-    /// Open a pick session with options (free-text accept, an async
-    /// candidate source). On error the source's `close` is invoked so a
-    /// producer created by the caller is never leaked.
-    pub fn openWith(
-        self: *Pick,
-        ctx: *command.Context,
-        prompt: []const u8,
-        entries: []const Entry,
-        acceptor: Acceptor,
-        opts: Options,
-    ) !void {
-        const gpa = ctx.gpa;
-        // On any failure the source is closed (never leaked) and the
-        // acceptor is left UNSET — so a caller that owns a callback
-        // handle (the plugin's LuaPick) can clean it up without risking
-        // a later `clear()` running cleanup on a freed handle.
-        errdefer if (opts.source) |s| {
-            if (s.close) |f| f(s.data, gpa);
-        };
-        if (self.active) self.clear(gpa);
-        self.prompt = try gpa.dupe(u8, prompt);
-        for (entries) |e| {
-            const owned = try gpa.dupe(u8, e.text);
-            errdefer gpa.free(owned);
-            try self.items.append(gpa, owned);
-            const doc = try gpa.dupe(u8, e.doc);
-            errdefer gpa.free(doc);
-            try self.docs.append(gpa, doc);
-        }
-        try self.refilter(gpa);
-        const prev = try gpa.dupe(u8, ctx.keymap.currentMode());
-        errdefer gpa.free(prev);
-        try ctx.keymap.setMode(gpa, "pick");
-        // Commit — infallible from here, so the acceptor/source become
-        // live only once the pick is fully open.
-        self.acceptor = acceptor;
-        self.allow_free_text = opts.allow_free_text;
-        self.style = opts.style;
-        self.source = opts.source;
-        self.query_epoch = 0;
-        self.source_epoch = 0;
-        self.last_query_ns = 0;
-        self.prev_mode = prev;
-        self.active = true;
+/// Per-frame driver for the async source: (re)generate on a settled
+/// query change, then fold whatever is ready into the live pick.
+/// Returns whether the UI changed (→ repaint). No-op without a
+/// source, so it is cheap to call every frame.
+pub fn tick(self: *Pick, ctx: *command.Context) anyerror!bool {
+    if (!self.active) return false;
+    const src = if (self.source) |*s| s else return false;
+    var changed = false;
+    if (self.source_epoch != self.query_epoch and
+        self.query.items.len >= src.min_query and
+        task.nowNs() - self.last_query_ns >= src.debounce_ns)
+    {
+        self.source_epoch = self.query_epoch;
+        if (src.onQuery) |f| try f(src.data, ctx, self.query.items, self.query_epoch);
     }
+    if (src.poll) |f| changed = (try f(src.data, ctx)) or changed;
+    return changed;
+}
 
-    /// Per-frame driver for the async source: (re)generate on a settled
-    /// query change, then fold whatever is ready into the live pick.
-    /// Returns whether the UI changed (→ repaint). No-op without a
-    /// source, so it is cheap to call every frame.
-    pub fn tick(self: *Pick, ctx: *command.Context) anyerror!bool {
-        if (!self.active) return false;
-        const src = if (self.source) |*s| s else return false;
-        var changed = false;
-        if (self.source_epoch != self.query_epoch and
-            self.query.items.len >= src.min_query and
-            task.nowNs() - self.last_query_ns >= src.debounce_ns)
-        {
-            self.source_epoch = self.query_epoch;
-            if (src.onQuery) |f| try f(src.data, ctx, self.query.items, self.query_epoch);
-        }
-        if (src.poll) |f| changed = (try f(src.data, ctx)) or changed;
-        return changed;
+/// Note a query mutation (drives debounce + source regeneration).
+fn queryChanged(self: *Pick) void {
+    self.query_epoch +%= 1;
+    self.last_query_ns = task.nowNs();
+}
+
+/// Stream more candidates into a live pick, preserving the query and
+/// the current selection (matched back by text). Unlike `refresh`,
+/// this APPENDS — the streaming counterpart for async producers.
+pub fn appendItems(
+    p: *Pick,
+    gpa: Allocator,
+    texts: []const []const u8,
+    docs: ?[]const []const u8,
+) !void {
+    if (!p.active or texts.len == 0) return;
+    const keep = p.selection();
+    const keep_owned = if (keep) |k| try gpa.dupe(u8, k) else null;
+    defer if (keep_owned) |k| gpa.free(k);
+    for (texts, 0..) |it, i| {
+        const owned = try gpa.dupe(u8, it);
+        errdefer gpa.free(owned);
+        try p.items.append(gpa, owned);
+        const d = if (docs) |ds| ds[i] else "";
+        const doc = try gpa.dupe(u8, d);
+        errdefer gpa.free(doc);
+        try p.docs.append(gpa, doc);
     }
-
-    /// Note a query mutation (drives debounce + source regeneration).
-    fn queryChanged(self: *Pick) void {
-        self.query_epoch +%= 1;
-        self.last_query_ns = task.nowNs();
-    }
-
-    /// Stream more candidates into a live pick, preserving the query and
-    /// the current selection (matched back by text). Unlike `refresh`,
-    /// this APPENDS — the streaming counterpart for async producers.
-    pub fn appendItems(
-        p: *Pick,
-        gpa: Allocator,
-        texts: []const []const u8,
-        docs: ?[]const []const u8,
-    ) !void {
-        if (!p.active or texts.len == 0) return;
-        const keep = p.selection();
-        const keep_owned = if (keep) |k| try gpa.dupe(u8, k) else null;
-        defer if (keep_owned) |k| gpa.free(k);
-        for (texts, 0..) |it, i| {
-            const owned = try gpa.dupe(u8, it);
-            errdefer gpa.free(owned);
-            try p.items.append(gpa, owned);
-            const d = if (docs) |ds| ds[i] else "";
-            const doc = try gpa.dupe(u8, d);
-            errdefer gpa.free(doc);
-            try p.docs.append(gpa, doc);
-        }
-        try p.refilter(gpa);
-        if (keep_owned) |k| {
-            for (p.filtered.items, 0..) |idx, i| {
-                if (std.mem.eql(u8, p.items.items[idx], k)) {
-                    p.selected = i;
-                    break;
-                }
+    try p.refilter(gpa);
+    if (keep_owned) |k| {
+        for (p.filtered.items, 0..) |idx, i| {
+            if (std.mem.eql(u8, p.items.items[idx], k)) {
+                p.selected = i;
+                break;
             }
         }
     }
+}
 
-    fn close(self: *Pick, ctx: *command.Context) !void {
-        const prev = try ctx.gpa.dupe(u8, self.prev_mode);
-        defer ctx.gpa.free(prev);
-        self.clear(ctx.gpa);
-        // If the pick was opened from a menu (e.g. the palette from leader),
-        // restoring prev_mode would leave the user stuck in the menu. Pop to the
-        // menu's one-shot return target instead — the pick bypasses the keymap
-        // dispatch site, so this is where that class of stickiness is fixed.
-        if (ctx.keymap.isMenuMode(prev)) {
-            if (ctx.keymap.menuReturn(prev)) |ret| {
-                try ctx.keymap.setMode(ctx.gpa, ret);
-                return;
-            }
-        }
-        try ctx.keymap.setMode(ctx.gpa, prev);
-    }
-
-    fn frecOf(self: *const Pick, text: []const u8) Frec {
-        var key_buf: [512]u8 = undefined;
-        const key = std.fmt.bufPrint(&key_buf, "{s}\x00{s}", .{ self.prompt, text }) catch return .{ .uses = 0, .last = 0 };
-        return self.frecency.get(key) orelse .{ .uses = 0, .last = 0 };
-    }
-
-    /// Record an acceptance for frecency ranking.
-    fn recordUse(self: *Pick, gpa: Allocator, text: []const u8) void {
-        var key_buf: [512]u8 = undefined;
-        const key = std.fmt.bufPrint(&key_buf, "{s}\x00{s}", .{ self.prompt, text }) catch return;
-        self.use_counter += 1;
-        if (self.frecency.getPtr(key)) |f| {
-            f.uses +|= 1;
-            f.last = self.use_counter;
+fn close(self: *Pick, ctx: *command.Context) !void {
+    const prev = try ctx.gpa.dupe(u8, self.prev_mode);
+    defer ctx.gpa.free(prev);
+    self.clear(ctx.gpa);
+    // If the pick was opened from a menu (e.g. the palette from leader),
+    // restoring prev_mode would leave the user stuck in the menu. Pop to the
+    // menu's one-shot return target instead — the pick bypasses the keymap
+    // dispatch site, so this is where that class of stickiness is fixed.
+    if (ctx.keymap.isMenuMode(prev)) {
+        if (ctx.keymap.menuReturn(prev)) |ret| {
+            try ctx.keymap.setMode(ctx.gpa, ret);
             return;
         }
-        const owned = gpa.dupe(u8, key) catch return;
-        self.frecency.put(gpa, owned, .{ .uses = 1, .last = self.use_counter }) catch gpa.free(owned);
     }
+    try ctx.keymap.setMode(ctx.gpa, prev);
+}
 
-    fn refilter(self: *Pick, gpa: Allocator) !void {
-        self.filtered.clearRetainingCapacity();
-        const Scored = struct { index: u32, m: Match, frec: Frec };
-        var scored: std.ArrayList(Scored) = .empty;
-        defer scored.deinit(gpa);
-        const narrowing = self.narrow.items.len > 0;
-        for (self.items.items, 0..) |it, i| {
-            // Narrowing is a sticky pre-filter (orderless over text or doc);
-            // the live query then ranks within the narrowed set.
-            if (narrowing and orderlessMatch(self.narrow.items, it) == null and
-                orderlessMatch(self.narrow.items, self.docs.items[i]) == null) continue;
-            if (matchScore(self.style, self.query.items, it)) |m| {
-                try scored.append(gpa, .{
-                    .index = @intCast(i),
-                    .m = m,
-                    .frec = self.frecOf(it),
-                });
-            }
+fn frecOf(self: *const Pick, text: []const u8) Frec {
+    var key_buf: [512]u8 = undefined;
+    const key = std.fmt.bufPrint(&key_buf, "{s}\x00{s}", .{ self.prompt, text }) catch return .{ .uses = 0, .last = 0 };
+    return self.frecency.get(key) orelse .{ .uses = 0, .last = 0 };
+}
+
+/// Record an acceptance for frecency ranking.
+fn recordUse(self: *Pick, gpa: Allocator, text: []const u8) void {
+    var key_buf: [512]u8 = undefined;
+    const key = std.fmt.bufPrint(&key_buf, "{s}\x00{s}", .{ self.prompt, text }) catch return;
+    self.use_counter += 1;
+    if (self.frecency.getPtr(key)) |f| {
+        f.uses +|= 1;
+        f.last = self.use_counter;
+        return;
+    }
+    const owned = gpa.dupe(u8, key) catch return;
+    self.frecency.put(gpa, owned, .{ .uses = 1, .last = self.use_counter }) catch gpa.free(owned);
+}
+
+fn refilter(self: *Pick, gpa: Allocator) !void {
+    self.filtered.clearRetainingCapacity();
+    const Scored = struct { index: u32, m: Match, frec: Frec };
+    var scored: std.ArrayList(Scored) = .empty;
+    defer scored.deinit(gpa);
+    const narrowing = self.narrow.items.len > 0;
+    for (self.items.items, 0..) |it, i| {
+        // Narrowing is a sticky pre-filter (orderless over text or doc);
+        // the live query then ranks within the narrowed set.
+        if (narrowing and orderlessMatch(self.narrow.items, it) == null and
+            orderlessMatch(self.narrow.items, self.docs.items[i]) == null) continue;
+        if (matchScore(self.style, self.query.items, it)) |m| {
+            try scored.append(gpa, .{
+                .index = @intCast(i),
+                .m = m,
+                .frec = self.frecOf(it),
+            });
         }
-        std.mem.sort(Scored, scored.items, {}, struct {
-            fn lt(_: void, a: Scored, b: Scored) bool {
-                // Word-boundary hits first (acronyms / word starts), then a
-                // tighter span, then an earlier first match, then frecency.
-                if (a.m.boundaries != b.m.boundaries) return a.m.boundaries > b.m.boundaries;
-                if (a.m.span != b.m.span) return a.m.span < b.m.span;
-                if (a.m.start != b.m.start) return a.m.start < b.m.start;
-                if (a.frec.last != b.frec.last) return a.frec.last > b.frec.last;
-                if (a.frec.uses != b.frec.uses) return a.frec.uses > b.frec.uses;
-                return a.index < b.index;
-            }
-        }.lt);
-        for (scored.items) |s| try self.filtered.append(gpa, s.index);
-        if (self.selected >= self.filtered.items.len) self.selected = 0;
     }
+    std.mem.sort(Scored, scored.items, {}, struct {
+        fn lt(_: void, a: Scored, b: Scored) bool {
+            // Word-boundary hits first (acronyms / word starts), then a
+            // tighter span, then an earlier first match, then frecency.
+            if (a.m.boundaries != b.m.boundaries) return a.m.boundaries > b.m.boundaries;
+            if (a.m.span != b.m.span) return a.m.span < b.m.span;
+            if (a.m.start != b.m.start) return a.m.start < b.m.start;
+            if (a.frec.last != b.frec.last) return a.frec.last > b.frec.last;
+            if (a.frec.uses != b.frec.uses) return a.frec.uses > b.frec.uses;
+            return a.index < b.index;
+        }
+    }.lt);
+    for (scored.items) |s| try self.filtered.append(gpa, s.index);
+    if (self.selected >= self.filtered.items.len) self.selected = 0;
+}
 
-    /// Current choice's text, if any.
-    pub fn selection(self: *const Pick) ?[]const u8 {
-        if (self.filtered.items.len == 0) return null;
-        return self.items.items[self.filtered.items[self.selected]];
-    }
+/// Current choice's text, if any.
+pub fn selection(self: *const Pick) ?[]const u8 {
+    if (self.filtered.items.len == 0) return null;
+    return self.items.items[self.filtered.items[self.selected]];
+}
 
-    /// The docstring of the `i`-th filtered row.
-    pub fn docOf(self: *const Pick, filtered_index: usize) []const u8 {
-        return self.docs.items[self.filtered.items[filtered_index]];
-    }
-};
+/// The docstring of the `i`-th filtered row.
+pub fn docOf(self: *const Pick, filtered_index: usize) []const u8 {
+    return self.docs.items[self.filtered.items[filtered_index]];
+}
 
 // ── Commands ────────────────────────────────────────────────────────
 
