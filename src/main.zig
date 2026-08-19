@@ -25,6 +25,10 @@ const embedded_font = @embedFile("font_mono");
 
 const headless = @import("headless.zig");
 
+const handler = @import("app/handler.zig");
+const ok_echo = handler.ok_echo;
+const setEcho = handler.setEcho;
+
 const Args = struct {
     file: ?[]const u8 = null,
     font: ?[]const u8 = null,
@@ -2557,11 +2561,6 @@ fn startListen(
     setEcho(echo, gpa, std.fmt.bufPrint(&buf, "listening on {d}", .{port}) catch "listening");
 }
 
-fn setEcho(echo: *std.ArrayList(u8), gpa: std.mem.Allocator, msg: []const u8) void {
-    echo.clearRetainingCapacity();
-    echo.appendSlice(gpa, msg) catch {};
-}
-
 /// `listen <port>` — start hosting at runtime (records the intent; the
 /// frame loop starts the hub outside the hot section).
 fn listenHandler(ctx: *core.command.Context, data: ?*anyopaque, args: []const core.command.Value) anyerror!core.command.Value {
@@ -2614,12 +2613,6 @@ fn realizeAllHandler(ctx: *core.command.Context, data: ?*anyopaque, args: []cons
     const p = if (sc.partial.*) |*p| p else return .{ .string = "not a partial checkout" };
     p.fetch_all = true;
     return ok_echo(ctx, "fetching the whole document…");
-}
-
-fn ok_echo(ctx: *core.command.Context, msg: []const u8) !core.command.Value {
-    ctx.echo.clearRetainingCapacity();
-    try ctx.echo.appendSlice(ctx.gpa, msg);
-    return .nil;
 }
 
 /// `share` — announce the active buffer to the peer(s): over the
