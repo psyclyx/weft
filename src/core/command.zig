@@ -138,8 +138,24 @@ pub const Context = struct {
     /// interactive-edit path at all — no mode, split, or plugin can corrupt it
     /// as text. Refusal leaves the replica untouched (no ghost commit).
     pub fn edit(self: *Context, r: Document.Range, bytes: []const u8) EditError!void {
-        if (self.buffer().read_only) return error.Unauthorized;
+        if (self.buffer().read_only or self.readOnlyOverlaps(r)) return error.Unauthorized;
         return self.applyEdit(r, bytes, self.user_initiated);
+    }
+
+    /// Whether `r` overlaps a read-only SPAN of the active buffer — the
+    /// span-level guard (a comint's produced output is read-only, its input line
+    /// editable). A caret AT a span boundary may still type (insert adjacent);
+    /// only a range that actually reaches into read-only content is refused.
+    fn readOnlyOverlaps(self: *Context, r: Document.Range) bool {
+        const layer = self.buffer().editor.readonly_layer orelse return false;
+        var i: usize = 0;
+        const n = layer.spanCount();
+        while (i < n) : (i += 1) {
+            const s = layer.resolvedSpan(i);
+            if (r.start < s.end and s.start < r.end) return true; // ranges overlap
+            if (r.isEmpty() and r.start > s.start and r.start < s.end) return true; // insert INSIDE
+        }
+        return false;
     }
 
     /// CONTENT PRODUCTION: draw a derived/streamed projection (magit's status
@@ -535,4 +551,21 @@ test "command: read-only refuses interactive edit, allows render (in depth)" {
     const out = try ctx.document().text().toOwnedSlice(gpa);
     defer gpa.free(out);
     try t.expectEqualStrings("TREE", out);
+
+    // ── Span-level: a read-only SPAN (a comint's output) refuses edits inside
+    // it, while the rest of the buffer (its input line) stays editable.
+    ctx.buffer().read_only = false;
+    ctx.principal = .user;
+    ctx.user_initiated = true;
+    const doc2 = ctx.document();
+    const ro = try ctx.caps.layers.claim(gpa, doc2, "readonly", .local, "test");
+    try ro.appendSpan(gpa, .{ .start = 0, .end = 2, .kind = 0, .message = "", .face = .{} });
+    ctx.buffer().editor.readonly_layer = ctx.caps.layers.find(doc2, "readonly");
+    // "TREE": [0,2) is read-only; an edit reaching into it is refused, an edit
+    // past it (the "input line") is allowed.
+    try t.expectError(error.Unauthorized, ctx.edit(.{ .start = 1, .end = 2 }, "x"));
+    try ctx.edit(.{ .start = 4, .end = 4 }, "!"); // append after the RO span → ok
+    const out2 = try ctx.document().text().toOwnedSlice(gpa);
+    defer gpa.free(out2);
+    try t.expectEqualStrings("TREE!", out2);
 }

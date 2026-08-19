@@ -70,6 +70,33 @@ pub fn hStyle(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32, result
 }
 
 const folds_layer_name = "folds";
+pub const readonly_layer_name = "readonly";
+
+/// `readOnlyClear()`: (re)claim the ACTIVE buffer's read-only-span layer and
+/// empty it — the guest republishes its full set after (a comint marking its
+/// produced output read-only while the input line stays editable).
+pub fn hReadOnlyClear(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32, results: []i32) void {
+    _ = caller;
+    _ = args;
+    _ = results;
+    const p: *WasmPlugin = @ptrCast(@alignCast(data.?));
+    const layer = p.ctx.caps.layers.claim(p.gpa, p.ctx.document(), readonly_layer_name, .local, p.name) catch return;
+    layer.publishSpans(p.gpa, &.{}) catch {};
+}
+
+/// `readOnlySpan(start, end)`: mark `[start, end)` read-only — an interactive
+/// edit overlapping it is refused at the edit door (span-level defense in
+/// depth). Accumulates; a no-op if the layer wasn't claimed this round.
+pub fn hReadOnlySpan(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32, results: []i32) void {
+    _ = caller;
+    _ = results;
+    const p: *WasmPlugin = @ptrCast(@alignCast(data.?));
+    const layer = p.ctx.caps.layers.find(p.ctx.document(), readonly_layer_name) orelse return;
+    const start: usize = @intCast(@as(u32, @bitCast(args[0])));
+    const end: usize = @intCast(@as(u32, @bitCast(args[1])));
+    if (end <= start) return;
+    layer.appendSpan(p.gpa, .{ .start = start, .end = end, .kind = 0, .message = "", .face = .{} }) catch {};
+}
 
 /// `fold.clear()`: (re)claim the ACTIVE buffer's fold layer for this plugin and
 /// empty it — the guest republishes its full fold set (a `fold` per range)

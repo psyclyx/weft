@@ -36,6 +36,8 @@ extern "weft" fn wl_style_clear() void;
 extern "weft" fn wl_style(start: u32, end: u32, class: u32) void;
 extern "weft" fn wl_fold_clear() void;
 extern "weft" fn wl_fold(start: u32, end: u32) void;
+extern "weft" fn wl_readonly_clear() void;
+extern "weft" fn wl_readonly_span(start: u32, end: u32) void;
 // Native `editor` surface + stamped ranges ([FIX 1/3]). A range crosses as an
 // opaque u32 handle into a host-side table (the version token stays host-side).
 extern "weft" fn wl_editor_step(from: u32, dir: u32, kind: u32) u32;
@@ -269,6 +271,15 @@ pub fn foldClear() void {
 /// Hide `[start, end)` — collapse those rows until the next `foldClear`.
 pub fn fold(start: usize, end: usize) void {
     wl_fold(@intCast(start), @intCast(end));
+}
+/// Reclaim + empty the read-only-span layer (republish the full set after).
+pub fn readOnlyClear() void {
+    wl_readonly_clear();
+}
+/// Mark `[start, end)` read-only: an interactive edit overlapping it is refused
+/// at the edit door (a comint's produced output vs its editable input line).
+pub fn readOnlySpan(start: usize, end: usize) void {
+    wl_readonly_span(@intCast(start), @intCast(end));
 }
 
 // ── Native editor surface + stamped ranges (motions/operators) ────────

@@ -56,6 +56,10 @@ poll_state: PollState = .idle,
 /// falls inside an invisible span; vertical motion skips them. Null in headless
 /// use, so folding is inert unless the app wires it.
 fold_layer: ?*const layers.Layer = null,
+/// The read-only SPAN layer (if any): ranges an interactive edit is refused in
+/// (a comint's produced output vs its editable input line). Set per frame like
+/// `fold_layer`; consulted at the edit door.
+readonly_layer: ?*const layers.Layer = null,
 
 pub const SaveError = file.GuardedWriteError || ShellFs.WriteError;
 pub const PollError = file.ReadError || ShellFs.Error || Allocator.Error;

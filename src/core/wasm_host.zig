@@ -96,6 +96,8 @@ pub fn defineImports(linker: *wasm.Linker, p: *WasmPlugin) !void {
     try d(linker, "wl_style", 3, 0, layers.hStyle, p);
     try d(linker, "wl_fold_clear", 0, 0, layers.hFoldClear, p);
     try d(linker, "wl_fold", 2, 0, layers.hFold, p);
+    try d(linker, "wl_readonly_clear", 0, 0, layers.hReadOnlyClear, p);
+    try d(linker, "wl_readonly_span", 2, 0, layers.hReadOnlySpan, p);
     // Stamped ranges ([FIX 1/3]): a motion returns one, an operator awaits +
     // applies it. Handles cross; the version token stays host-side.
     try d(linker, "wl_stamp_range", 2, 1, edit.hStampRange, p);

@@ -343,6 +343,7 @@ pub const FrameBuilder = struct {
             }
             const ob = fx.buffers.get(slot.pane.buffer_id) orelse continue;
             ob.editor.fold_layer = fx.caps.layers.find(&ob.editor.doc, "folds");
+            ob.editor.readonly_layer = fx.caps.layers.find(&ob.editor.doc, "readonly");
             // Highlight this split too — reparse + publish its syntax (was
             // focused-pane-only, hence "one split at a time"). Its buffer is
             // attached by main's visible-pane loop, so resolveSyntax finds it.
@@ -368,6 +369,7 @@ pub const FrameBuilder = struct {
         var fhud = hud;
         fhud.pane_border = foc_border;
         editor.fold_layer = fx.caps.layers.find(&editor.doc, "folds");
+        editor.readonly_layer = fx.caps.layers.find(&editor.doc, "readonly");
         const b = try self.view.build(arena_state.allocator(), editor, fhud, &self.view.top_row, foc_rect, pick_dock, world_to_pixel);
         try self.built_panes.append(gpa, b);
         records += b.records_added;
