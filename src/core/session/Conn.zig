@@ -13,7 +13,7 @@ const secure = @import("../secure.zig");
 const Document = @import("../Document.zig");
 
 const Session = @import("handshake.zig").Session;
-const Collab = @import("collab.zig").Collab;
+const Collab = @import("Collab.zig");
 
 const Conn = @This();
 

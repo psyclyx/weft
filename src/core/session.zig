@@ -51,7 +51,7 @@ pub const RemoteFile = remote_fs.RemoteFile;
 pub const RemoteFs = remote_fs.RemoteFs;
 
 pub const PartialDoc = @import("session/PartialDoc.zig");
-pub const Collab = @import("session/collab.zig").Collab;
+pub const Collab = @import("session/Collab.zig");
 pub const Conn = @import("session/Conn.zig");
 
 // ── Tests: two live sessions over a socketpair ──────────────────────
