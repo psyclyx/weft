@@ -135,6 +135,7 @@ weft.bind("leader-search", "w", "grep-word");
 weft.bind("leader-project", "p", "project-recent");
 weft.bind("leader-project", "f", "find-file");
 weft.bind("leader-project", "r", "project-recent");
+weft.bind("leader-project", "R", "project-root"); // echo the VCS root (projectile-style)
 weft.bind("leader-project", "slash", "grep");
 
 // SPC c — code
