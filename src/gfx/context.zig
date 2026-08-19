@@ -5,6 +5,7 @@
 const std = @import("std");
 const vkmod = @import("../vk.zig");
 const vk = vkmod.c;
+const build_options = @import("build_options");
 
 pub const max_frames_in_flight = 2;
 
@@ -29,6 +30,10 @@ pub const Context = struct {
     device: vk.VkDevice = null,
     queue: vk.VkQueue = null,
     queue_family: u32 = 0,
+    /// Whether `pickDevice` found a real (non-software, non-CPU) GPU. The Skia
+    /// backend consults this to choose Ganesh (GPU) vs its CPU raster path;
+    /// snail ignores it. False ⇒ only lavapipe/llvmpipe/CPU was available.
+    has_real_gpu: bool = false,
 
     surface_format: vk.VkSurfaceFormatKHR = undefined,
     swapchain: vk.VkSwapchainKHR = null,
@@ -131,6 +136,10 @@ pub const Context = struct {
         defer self.allocator.free(devices);
         try check(vk.vkEnumeratePhysicalDevices(self.instance, &count, devices.ptr));
 
+        // Prefer a dedicated GPU; treat software rasterizers (lavapipe/
+        // llvmpipe) and CPU devices as last resort. A software device matches
+        // either by VK_PHYSICAL_DEVICE_TYPE_CPU or by name, since Mesa reports
+        // llvmpipe as a "CPU" type but lavapipe sometimes as other types.
         var best: ?vk.VkPhysicalDevice = null;
         var best_family: u32 = 0;
         var best_score: u32 = 0;
@@ -138,10 +147,17 @@ pub const Context = struct {
             const family = self.findQueueFamily(device) orelse continue;
             var props: vk.VkPhysicalDeviceProperties = undefined;
             vk.vkGetPhysicalDeviceProperties(device, &props);
-            const score: u32 = switch (props.deviceType) {
-                vk.VK_PHYSICAL_DEVICE_TYPE_DISCRETE_GPU => 3,
-                vk.VK_PHYSICAL_DEVICE_TYPE_INTEGRATED_GPU => 2,
-                else => 1,
+            const name = std.mem.sliceTo(&props.deviceName, 0);
+            const software = props.deviceType == vk.VK_PHYSICAL_DEVICE_TYPE_CPU or
+                containsIgnoreCase(name, "llvmpipe") or containsIgnoreCase(name, "lavapipe") or
+                containsIgnoreCase(name, "softpipe") or containsIgnoreCase(name, "swiftshader");
+            // Real GPUs score above every software device (which floors at 1),
+            // so a real GPU is always chosen when one is present.
+            const score: u32 = if (software) 1 else switch (props.deviceType) {
+                vk.VK_PHYSICAL_DEVICE_TYPE_DISCRETE_GPU => 5,
+                vk.VK_PHYSICAL_DEVICE_TYPE_INTEGRATED_GPU => 4,
+                vk.VK_PHYSICAL_DEVICE_TYPE_VIRTUAL_GPU => 3,
+                else => 2,
             };
             if (best == null or score > best_score) {
                 best = device;
@@ -151,6 +167,11 @@ pub const Context = struct {
         }
         self.physical_device = best orelse return error.NoSuitableDevice;
         self.queue_family = best_family;
+        self.has_real_gpu = best_score >= 2; // >1 means not a software fallback
+    }
+
+    fn containsIgnoreCase(haystack: []const u8, needle: []const u8) bool {
+        return std.ascii.indexOfIgnoreCase(haystack, needle) != null;
     }
 
     fn findQueueFamily(self: *Context, device: vk.VkPhysicalDevice) ?u32 {
@@ -285,7 +306,11 @@ pub const Context = struct {
             .imageColorSpace = self.surface_format.colorSpace,
             .imageExtent = extent,
             .imageArrayLayers = 1,
-            .imageUsage = vk.VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT,
+            // Skia rasterizes into its own surface and copies the result into
+            // the swapchain image, so it needs TRANSFER_DST. snail draws
+            // straight into it as a color attachment (unchanged).
+            .imageUsage = vk.VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT |
+                (if (build_options.renderer == .skia) vk.VK_IMAGE_USAGE_TRANSFER_DST_BIT else 0),
             .imageSharingMode = vk.VK_SHARING_MODE_EXCLUSIVE,
             .preTransform = caps.currentTransform,
             .compositeAlpha = vk.VK_COMPOSITE_ALPHA_OPAQUE_BIT_KHR,
@@ -441,9 +466,18 @@ pub const Context = struct {
     }
 
     pub fn endFrame(self: *Context) !void {
-        const frame = self.current_frame;
-        const cmd = self.command_buffers[frame];
+        const cmd = self.command_buffers[self.current_frame];
         vk.vkCmdEndRenderPass(cmd);
+        try self.submitPresent(cmd);
+    }
+
+    /// Finish, submit and present a frame's command buffer WITHOUT ending a
+    /// render pass — the path a renderer that records raw transfer/blit work
+    /// (Skia copies its rasterized surface into the swapchain image) uses in
+    /// place of `endFrame`. Waits on `image_available`, signals the image's
+    /// `render_finished`, and advances the frame index exactly like `endFrame`.
+    pub fn submitPresent(self: *Context, cmd: vk.VkCommandBuffer) !void {
+        const frame = self.current_frame;
         try check(vk.vkEndCommandBuffer(cmd));
 
         const wait_stage: vk.VkPipelineStageFlags = vk.VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT;

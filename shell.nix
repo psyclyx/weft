@@ -21,6 +21,12 @@ pkgs.mkShell {
     harfbuzz
     fontconfig # runtime font-family resolution (sans/mono, weight, slant)
 
+    # Skia (default renderer): the C++ 2D library. The C++ shim is compiled
+    # with g++ against these headers/libs and linked into the exe; see
+    # build.zig's addSkia (env-var idiom, like wasmtime/grammars — Skia's
+    # pkg-config lists only -lskia, so we point at the store path directly).
+    skia
+
     # Syntax (milestone 7): incremental parsing + highlighting.
     tree-sitter
 
@@ -51,8 +57,14 @@ pkgs.mkShell {
       harfbuzz
       fontconfig
       wasmtime.lib # libwasmtime.so at runtime (test + run)
+      skia # libskia.so at runtime (the default renderer's shim links it)
+      stdenv.cc.cc.lib # libstdc++.so.6 for the Skia C++ shim at runtime
     ]
   );
+
+  # Skia store path (default renderer). build.zig points g++ at
+  # `${WEFT_SKIA}/include/skia` and links `${WEFT_SKIA}/lib/libskia.so`.
+  WEFT_SKIA = "${pkgs.skia}";
 
   # Wasmtime C embedding API: headers (dev) + libwasmtime.so (lib). No
   # pkg-config is shipped, so build.zig consumes these paths directly.

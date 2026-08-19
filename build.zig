@@ -1,4 +1,12 @@
 const std = @import("std");
+
+/// Which renderer to compile+link. Mutually exclusive: exactly one backend's
+/// code and deps are pulled in. `skia` (default) links the C++ Skia shim and
+/// libskia; `snail` links snail's own Vulkan pipeline + SPIR-V shaders. The
+/// choice is surfaced to Zig as `build_options.renderer`, and `app/render.zig`
+/// comptime-switches on it so the unselected backend is never analyzed.
+const Renderer = enum { skia, snail };
+
 /// The reference wasm guest plugins (src/guest/*.zig). `install` plugins are
 /// the shippable reference catalog: built to `.wasm` and installed to
 /// `lib/weft/plugins/` as external artifacts a user loads with `--plugin` —
@@ -53,6 +61,7 @@ const guests = [_]Guest{
 pub fn build(b: *std.Build) void {
     const target = b.standardTargetOptions(.{});
     const optimize = b.standardOptimizeOption(.{});
+    const renderer = b.option(Renderer, "renderer", "GPU renderer backend (skia|snail); default skia") orelse .skia;
 
     const snail_dep = b.dependency("snail", .{ .target = target, .optimize = optimize });
     const stemma_dep = b.dependency("stemma", .{ .target = target, .optimize = optimize });
@@ -66,8 +75,10 @@ pub fn build(b: *std.Build) void {
     });
     exe_mod.addImport("snail", snail_dep.module("snail"));
     // SPIR-V-only shader scope: slangc runs inside snail's build; weft
-    // consumes blobs + the reflection ABI through this module.
-    exe_mod.addImport("snail_shaders", snail_dep.module("snail-shaders-vk"));
+    // consumes blobs + the reflection ABI through this module. Snail-renderer
+    // only — a Skia build never analyzes snail_vk, so it must not pull the
+    // shader compile either (mutual exclusivity, requirement 1).
+    if (renderer == .snail) exe_mod.addImport("snail_shaders", snail_dep.module("snail-shaders-vk"));
     exe_mod.addImport("stemma", stemma_dep.module("stemma"));
     // Default monospace face, embedded from snail's asset set (DejaVu:
     // free license, full box-drawing coverage). `--font` overrides.
@@ -81,9 +92,10 @@ pub fn build(b: *std.Build) void {
     // fonts, not pinned — see src/gfx/fonts.zig.
     exe_mod.linkSystemLibrary("fontconfig", .{});
     addWaylandProtocols(b, exe_mod);
-    addSyntax(b, exe_mod);
+    addSyntax(b, exe_mod, renderer);
     addWasm(b, exe_mod);
     addQuickjs(b, exe_mod);
+    if (renderer == .skia) addSkia(b, exe_mod);
 
     const exe = b.addExecutable(.{
         .name = "weft",
@@ -128,7 +140,7 @@ pub fn build(b: *std.Build) void {
         .root_source_file = snail_dep.path("assets/DejaVuSansMono.ttf"),
     });
     test_mod.linkSystemLibrary("fontconfig", .{}); // View tests resolve faces
-    addSyntax(b, test_mod);
+    addSyntax(b, test_mod, renderer);
     addWasm(b, test_mod);
     embedGuests(b, test_mod);
     addQuickjs(b, test_mod);
@@ -233,9 +245,44 @@ fn addWasm(b: *std.Build, mod: *std.Build.Module) void {
     mod.linkSystemLibrary("wasmtime", .{});
 }
 
-fn addSyntax(b: *std.Build, mod: *std.Build.Module) void {
+/// Skia (default renderer): compile the C++ shim (src/gfx/skia/shim.cpp) with
+/// g++ against the pinned Skia headers, then link the object + libskia +
+/// libstdc++ into the Zig exe. g++ (not Zig's clang) builds the shim per the
+/// integration contract; the boundary is a small C ABI (shim.h), so only C
+/// types cross — Skia and the shim share GNU libstdc++ internally. Skia ships
+/// no useful pkg-config (only `-lskia`), so — like wasmtime/the grammars — we
+/// take the store path from `WEFT_SKIA` and wire include/lib explicitly.
+fn addSkia(b: *std.Build, mod: *std.Build.Module) void {
+    const skia = b.graph.environ_map.get("WEFT_SKIA") orelse
+        @panic("WEFT_SKIA not set — build inside the nix shell (skia is the default renderer)");
+    const include = b.pathJoin(&.{ skia, "include", "skia" });
+
+    // Separate g++ compile → object, then link it into the exe (the shim
+    // uses Skia's C++ API; only the C ABI in shim.h crosses to Zig).
+    const cc = b.addSystemCommand(&.{ "g++", "-std=c++17", "-c", "-O2", "-fPIC", "-fno-rtti" });
+    cc.addArg(b.fmt("-I{s}", .{include}));
+    cc.addFileArg(b.path("src/gfx/skia/shim.cpp"));
+    cc.addArg("-o");
+    const obj = cc.addOutputFileArg("weft_skia_shim.o");
+    mod.addObjectFile(obj);
+
+    // Link libskia and GNU libstdc++ (matching Skia's own C++ runtime).
+    mod.addLibraryPath(.{ .cwd_relative = b.pathJoin(&.{ skia, "lib" }) });
+    mod.linkSystemLibrary("skia", .{});
+    // libstdc++'s link path from the active g++ (its dir also holds the
+    // runtime .so, resolved at load time via the shell's LD_LIBRARY_PATH).
+    const libstdcpp = std.mem.trim(u8, b.run(&.{ "g++", "-print-file-name=libstdc++.so" }), " \t\r\n");
+    if (std.fs.path.dirname(libstdcpp)) |dir| mod.addLibraryPath(.{ .cwd_relative = dir });
+    mod.linkSystemLibrary("stdc++", .{});
+}
+
+fn addSyntax(b: *std.Build, mod: *std.Build.Module, renderer: Renderer) void {
     mod.linkSystemLibrary("tree-sitter", .{});
     const opts = b.addOptions();
+    // The selected renderer, read by gfx/context.zig + app/render.zig to
+    // comptime-switch backends (skia vs snail_vk). Shares the one
+    // `build_options` module the grammar paths already ride on.
+    opts.addOption(Renderer, "renderer", renderer);
     const grammars = [_]struct {
         env: []const u8,
         opt: []const u8,
