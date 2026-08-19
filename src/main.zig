@@ -33,6 +33,7 @@ const window_cmds = @import("app/window_cmds.zig");
 const cursor_config = @import("app/cursor_config.zig");
 const config_load = @import("app/config_load.zig");
 const dispatch = @import("app/dispatch.zig");
+const setup = @import("app/setup.zig");
 const collab = @import("app/collab.zig");
 const collab_cmds = @import("app/collab_cmds.zig");
 const ShareCtx = collab.ShareCtx;
@@ -145,65 +146,33 @@ pub fn main(init: std.process.Init) !void {
         .echo = &echo_line,
     };
     try core.builtins.install(gpa, &commands, &keymap);
-    // Capability consumers — written against capability names only.
+    // Capability consumers — written against capability names only. The
+    // vars live here (used by the frame loop + their defers); `setup`
+    // runs the mechanical bind sequence in registration order.
     var completion_ui: core.complete_ui.CompletionUi = .empty;
-    _ = try commands.bind(gpa, "complete", completion_ui.commandSpec());
     var def_ui: core.nav_ui.DefinitionUi = .empty;
-    _ = try commands.bind(gpa, "goto-definition", def_ui.commandSpec());
     var sym_ui: core.nav_ui.SymbolsUi = .empty;
     defer sym_ui.deinit(gpa);
-    _ = try commands.bind(gpa, "symbols", sym_ui.commandSpec());
     var hover_ui: core.nav_ui.HoverUi = .empty;
     defer hover_ui.deinit(gpa);
-    _ = try commands.bind(gpa, "hover", hover_ui.commandSpec());
-
     // Grammars are data: builtins seeded, config extends via command.
     var grammars = try core.syntax.Runtime.initBuiltins(gpa);
     defer grammars.deinit(gpa);
-    _ = try commands.bind(gpa, "grammar-add", grammarAddCommand(&grammars));
-
     // Language servers are data: config registers (extension, command)
     // pairs; nothing here names a server.
     var lsp_servers: LspServers = .empty;
     defer lsp_servers.deinit(gpa);
-    _ = try commands.bind(gpa, "lsp-add", lspAddCommand(&lsp_servers));
+    try setup.registerCapabilityConsumers(gpa, &commands, &completion_ui, &def_ui, &sym_ui, &hover_ui, &grammars, &lsp_servers);
 
     // Caret config commands, registered before the config runs so it can
     // set per-mode styles at load time.
     var cursor_cfg = cursor_config.CursorConfig{ .gpa = gpa };
     defer cursor_cfg.deinit();
-    _ = try commands.bind(gpa, "menu-escape", .{
-        .name = "menu-escape",
-        .summary = "Leave a menu, back to its return mode.",
-        .args = &.{},
-        .handler = dispatch.menuEscapeHandler,
-        .data = null,
-    });
     // which-key: show the hint popup immediately (bypass the idle delay). If not
     // already in a menu, open the leader menu — so a help key (F1) surfaces it
     // from anywhere.
     var which_key_now = false;
-    _ = try commands.bind(gpa, "which-key-now", .{
-        .name = "which-key-now",
-        .summary = "Show the which-key popup now (open the leader menu if idle).",
-        .args = &.{},
-        .handler = dispatch.whichKeyNowHandler,
-        .data = &which_key_now,
-    });
-    _ = try commands.bind(gpa, "set-cursor", .{
-        .name = "set-cursor",
-        .summary = "Set the caret style (block|bar|underline) for a mode.",
-        .args = &.{ .{ .name = "mode", .type = .string }, .{ .name = "style", .type = .string } },
-        .handler = cursor_config.setCursorHandler,
-        .data = &cursor_cfg,
-    });
-    _ = try commands.bind(gpa, "cursor-blink", .{
-        .name = "cursor-blink",
-        .summary = "Toggle caret blink (on|off) for a mode.",
-        .args = &.{ .{ .name = "mode", .type = .string }, .{ .name = "state", .type = .string } },
-        .handler = cursor_config.cursorBlinkHandler,
-        .data = &cursor_cfg,
-    });
+    try setup.registerCursorCommands(gpa, &commands, &cursor_cfg, &which_key_now);
 
     // This machine's long-term identity (generated + persisted on first
     // run). Names us to peers; the fingerprint is what a human verifies.

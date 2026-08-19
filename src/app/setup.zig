@@ -1,0 +1,81 @@
+//! Cross-cutting command registration pulled out of `main()`. These helpers
+//! bind sequences of commands that span more than one concern module (the
+//! capability-consumer UIs, the cursor/which-key/menu commands) onto the
+//! command surface. `main()` keeps ownership of every `var` they point at;
+//! these only run the mechanical `commands.bind` sequences, in the same
+//! order they had inline (registration is last-wins — order is load-bearing).
+
+const std = @import("std");
+const core = @import("../core/core.zig");
+const cursor_config = @import("cursor_config.zig");
+const dispatch = @import("dispatch.zig");
+const providers = @import("providers.zig");
+
+/// Bind the capability consumers (complete, goto-definition, symbols, hover)
+/// plus the data-driven grammar/LSP registries (grammar-add, lsp-add) onto
+/// `commands`. Each UI/registry is caller-owned (declared in `main()` with its
+/// own defer); this only wires the command specs, in registration order.
+pub fn registerCapabilityConsumers(
+    gpa: std.mem.Allocator,
+    commands: *core.command.Commands,
+    completion_ui: *core.complete_ui.CompletionUi,
+    def_ui: *core.nav_ui.DefinitionUi,
+    sym_ui: *core.nav_ui.SymbolsUi,
+    hover_ui: *core.nav_ui.HoverUi,
+    grammars: *core.syntax.Runtime,
+    lsp_servers: *providers.LspServers,
+) !void {
+    _ = try commands.bind(gpa, "complete", completion_ui.commandSpec());
+    _ = try commands.bind(gpa, "goto-definition", def_ui.commandSpec());
+    _ = try commands.bind(gpa, "symbols", sym_ui.commandSpec());
+    _ = try commands.bind(gpa, "hover", hover_ui.commandSpec());
+    // Grammars are data: builtins seeded, config extends via command.
+    _ = try commands.bind(gpa, "grammar-add", providers.grammarAddCommand(grammars));
+    // Language servers are data: config registers (extension, command)
+    // pairs; nothing here names a server.
+    _ = try commands.bind(gpa, "lsp-add", providers.lspAddCommand(lsp_servers));
+}
+
+/// Bind the caret/which-key/menu commands, registered before the config runs
+/// so it can set per-mode styles at load time. `cursor_cfg` and the
+/// `which_key_now` flag are caller-owned; `which-key-now` and `menu-escape`
+/// use the dispatch handlers, `set-cursor`/`cursor-blink` the cursor-config
+/// ones.
+pub fn registerCursorCommands(
+    gpa: std.mem.Allocator,
+    commands: *core.command.Commands,
+    cursor_cfg: *cursor_config.CursorConfig,
+    which_key_now: *bool,
+) !void {
+    _ = try commands.bind(gpa, "menu-escape", .{
+        .name = "menu-escape",
+        .summary = "Leave a menu, back to its return mode.",
+        .args = &.{},
+        .handler = dispatch.menuEscapeHandler,
+        .data = null,
+    });
+    // which-key: show the hint popup immediately (bypass the idle delay). If not
+    // already in a menu, open the leader menu — so a help key (F1) surfaces it
+    // from anywhere.
+    _ = try commands.bind(gpa, "which-key-now", .{
+        .name = "which-key-now",
+        .summary = "Show the which-key popup now (open the leader menu if idle).",
+        .args = &.{},
+        .handler = dispatch.whichKeyNowHandler,
+        .data = which_key_now,
+    });
+    _ = try commands.bind(gpa, "set-cursor", .{
+        .name = "set-cursor",
+        .summary = "Set the caret style (block|bar|underline) for a mode.",
+        .args = &.{ .{ .name = "mode", .type = .string }, .{ .name = "style", .type = .string } },
+        .handler = cursor_config.setCursorHandler,
+        .data = cursor_cfg,
+    });
+    _ = try commands.bind(gpa, "cursor-blink", .{
+        .name = "cursor-blink",
+        .summary = "Toggle caret blink (on|off) for a mode.",
+        .args = &.{ .{ .name = "mode", .type = .string }, .{ .name = "state", .type = .string } },
+        .handler = cursor_config.cursorBlinkHandler,
+        .data = cursor_cfg,
+    });
+}
