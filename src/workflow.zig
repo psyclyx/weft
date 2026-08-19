@@ -12,12 +12,21 @@
 //! a failure names the exact step.
 
 const std = @import("std");
+const snail = @import("snail");
 const core = @import("core/core.zig");
 const view_mod = @import("gfx/view.zig");
 const harness = @import("gfx/harness.zig");
+const window_layout = @import("gfx/window_layout.zig");
+const window_cmds = @import("app/window_cmds.zig");
+const region = @import("gfx/region.zig");
 
 const Allocator = std.mem.Allocator;
 const command = core.command;
+
+/// Headless framebuffer geometry for the App harness's composite snapshots.
+const app_w: u32 = 640;
+const app_h: u32 = 400;
+const app_em: f32 = 16;
 
 /// A full editor, headless. Owns the buffers/commands/keymap/caps and a live
 /// plugin set; drives them through the same command + keymap surface main.zig
@@ -43,6 +52,17 @@ pub const Editor = struct {
     /// Last active buffer id — so a buffer switch (open, buffer-next) fires
     /// `on_activate` to plugins, exactly as main's loop does.
     last_active: core.Buffers.Id = 0,
+
+    // ── Window layout (multi-pane) ──
+    /// The recursive pane tree, driven by the REAL window-layout commands
+    /// (window-split/focus/move) through `window_cmds.applyIntents`, exactly as
+    /// main's frame loop drives it.
+    win_layout: window_layout.Layout = undefined,
+    win_ctx: window_cmds.WindowCtx = .{},
+    /// Stable backing for the window commands' data pointers (registerCommands).
+    win_actions: [window_cmds.cmd_count]window_cmds.WindowActionCtx = undefined,
+    /// Last render's pane frame — geometry for focus/move-by-direction intents.
+    last_frame_rect: region.Rect = .{ .x = 0, .y = 0, .w = app_w, .h = app_h },
 
     pub fn init(gpa: Allocator, self: *Editor) !void {
         self.quit = false;
@@ -72,6 +92,13 @@ pub const Editor = struct {
             .echo = &self.echo,
         };
         try core.builtins.install(gpa, &self.commands, &self.keymap);
+        // Window layout: own the real pane tree and bind the real window
+        // commands onto our command surface (window-split/focus/move → intents
+        // applied by window_cmds.applyIntents), exactly like main().
+        self.win_ctx = .{};
+        self.last_frame_rect = .{ .x = 0, .y = 0, .w = app_w, .h = app_h };
+        self.win_layout = try window_layout.Layout.init(gpa, self.buffers.active_id);
+        try window_cmds.registerCommands(gpa, &self.commands, &self.win_ctx, &self.win_actions);
         self.last_active = self.buffers.active_id;
     }
 
@@ -88,6 +115,7 @@ pub const Editor = struct {
 
     pub fn deinit(self: *Editor) void {
         const gpa = self.gpa;
+        self.win_layout.deinit();
         for (self.plugins.items) |p| p.deinit();
         self.plugins.deinit(gpa);
         if (self.view) |*v| v.deinit();
@@ -207,23 +235,93 @@ pub const Editor = struct {
         self.keymap.setMode(self.gpa, m) catch {};
     }
 
+    /// Lazily create the harness's persistent View (glyph atlas + metrics),
+    /// shared by the single-pane snapshot and the multi-pane composite.
+    fn ensureView(self: *Editor) !*view_mod.View {
+        if (self.view == null) self.view = try view_mod.View.init(self.gpa, @embedFile("font_mono"), app_em);
+        return &self.view.?;
+    }
+
     /// Write a PPM screenshot of the current frame under `.zig-cache/tmp/` (an
     /// artifact to eyeball; best-effort, never asserts).
     pub fn snapshot(self: *Editor, name: []const u8) void {
-        if (self.view == null) self.view = view_mod.View.init(self.gpa, @embedFile("font_mono"), 16) catch return;
-        const v = &self.view.?;
+        const v = self.ensureView() catch return;
         const hud: view_mod.Hud = .{
             .mode = self.keymap.currentMode(),
             .file = self.buffers.active().name,
             .pick = if (self.pick.active) &self.pick else null,
         };
-        const w: u32 = 640;
-        const h: u32 = 400;
-        const pixels = harness.renderView(self.gpa, v, &self.buffers.active().editor, hud, w, h) catch return;
+        const pixels = harness.renderView(self.gpa, v, &self.buffers.active().editor, hud, app_w, app_h) catch return;
         defer self.gpa.free(pixels);
         var buf: [128]u8 = undefined;
         const path = std.fmt.bufPrint(&buf, ".zig-cache/tmp/weft-e2e-{s}.ppm", .{name}) catch return;
-        harness.writePpm(self.gpa, path, pixels, w, h) catch {};
+        harness.writePpm(self.gpa, path, pixels, app_w, app_h) catch {};
+    }
+
+    // ── Window layout (multi-pane), driven through the REAL commands ──
+
+    /// Apply any pending window-layout intents (window-split/focus/move recorded
+    /// by the bound commands) through the REAL frame-loop applier — mutating the
+    /// pane tree and keeping the focused pane on the active buffer. Mirrors
+    /// main()'s `window_cmds.applyIntents` call.
+    pub fn applyWindow(self: *Editor) void {
+        const v = self.ensureView() catch return;
+        _ = window_cmds.applyIntents(&self.win_ctx, &self.win_layout, v, &self.buffers, self.gpa, &self.keymap, self.last_frame_rect);
+    }
+
+    /// Number of panes currently tiled.
+    pub fn paneCount(self: *Editor) usize {
+        return self.win_layout.count();
+    }
+
+    /// Render EVERY pane headlessly and composite into one RGBA8 framebuffer
+    /// (caller frees) — the headless analogue of the frame loop's `renderPanes`
+    /// + `present`. Panes are laid out by the real window layout; each builds its
+    /// own buffer into its slot rect (identity transform); the focused pane uses
+    /// the shared view scroll + caret, the others their own scroll. Records
+    /// `last_frame_rect` so subsequent focus/move-by-direction intents resolve
+    /// against real geometry.
+    pub fn renderComposite(self: *Editor) ![]u8 {
+        const gpa = self.gpa;
+        const v = try self.ensureView();
+        const frame: region.Rect = .{ .x = 0, .y = 0, .w = @floatFromInt(app_w), .h = @floatFromInt(app_h) };
+        self.last_frame_rect = frame;
+        var slots: [window_layout.max_panes]window_layout.Slot = undefined;
+        const n = self.win_layout.collect(frame, &slots);
+
+        const projection = snail.Mat4.ortho(0, @floatFromInt(app_w), @floatFromInt(app_h), 0, -1, 1);
+        const w2p = snail.mvpToScenePixel(projection, @floatFromInt(app_w), @floatFromInt(app_h)) orelse unreachable;
+        var arena = std.heap.ArenaAllocator.init(gpa);
+        defer arena.deinit();
+        v.resetFrame();
+
+        var built: std.ArrayList(view_mod.Built) = .empty;
+        defer {
+            for (built.items) |*b| b.deinit(gpa);
+            built.deinit(gpa);
+        }
+        for (slots[0..n]) |slot| {
+            const b = self.buffers.get(slot.pane.buffer_id) orelse self.buffers.active();
+            const hud: view_mod.Hud = .{
+                .mode = self.keymap.currentMode(),
+                .file = b.editor.backingPath() orelse b.name,
+                .cursor_on = slot.focused, // the caret belongs to the focused pane
+                .pane_border = slot.border,
+            };
+            const top_row: *usize = if (slot.focused) &v.top_row else &slot.pane.top_row;
+            const bp = try v.build(arena.allocator(), &b.editor, hud, top_row, slot.rect, .{}, w2p);
+            try built.append(gpa, bp);
+        }
+        return harness.renderBuilt(gpa, v, built.items, app_w, app_h);
+    }
+
+    /// Composite all panes and write a PPM artifact (best-effort; never asserts).
+    pub fn snapshotPanes(self: *Editor, name: []const u8) void {
+        const pixels = self.renderComposite() catch return;
+        defer self.gpa.free(pixels);
+        var buf: [128]u8 = undefined;
+        const path = std.fmt.bufPrint(&buf, ".zig-cache/tmp/weft-app-{s}.ppm", .{name}) catch return;
+        harness.writePpm(self.gpa, path, pixels, app_w, app_h) catch {};
     }
 };
 
@@ -438,6 +536,84 @@ test "workflow: modes — opening a file detects its language on activate" {
 
     ed.runStr("open", "/tmp/weft-nonexistent-app.js");
     try t.expect(std.mem.indexOf(u8, ed.echoText(), "javascript") != null);
+}
+
+// ── Multi-pane: split the window and render every pane headlessly ───
+
+test "app/window: vsplit into two panes, each renders its own buffer" {
+    const gpa = t.allocator;
+    var ed: Editor = undefined;
+    try Editor.init(gpa, &ed);
+    defer ed.deinit();
+    try loadVim(&ed);
+
+    // Buffer A (the scratch buffer): type into it.
+    ed.press("i", "");
+    ed.typeText("ALPHA pane\nleft body\n");
+    ed.press("Escape", "");
+    try t.expectEqual(@as(usize, 1), ed.paneCount());
+
+    // Split via the REAL window command → intent → applyIntents. Both panes
+    // start on buffer A; focus stays on the original (left) half.
+    ed.run("window-vsplit");
+    ed.applyWindow();
+    try t.expectEqual(@as(usize, 2), ed.paneCount());
+
+    // Move focus to the right pane and open a second buffer there — the real
+    // "focused pane follows the active buffer" invariant carries it.
+    ed.run("window-focus-right");
+    ed.applyWindow();
+    ed.runStr("buffer-create", "*bravo*");
+    ed.applyWindow();
+    try t.expectEqualStrings("*bravo*", ed.bufferName());
+    ed.press("i", "");
+    ed.typeText("BRAVO pane\nright body\n");
+    ed.press("Escape", "");
+
+    // The two panes show distinct buffers.
+    const frame: region.Rect = .{ .x = 0, .y = 0, .w = @floatFromInt(app_w), .h = @floatFromInt(app_h) };
+    var slots: [window_layout.max_panes]window_layout.Slot = undefined;
+    const n = ed.win_layout.collect(frame, &slots);
+    try t.expectEqual(@as(usize, 2), n);
+    try t.expect(slots[0].pane.buffer_id != slots[1].pane.buffer_id);
+
+    // Composite every pane headlessly and assert each pane's body drew content
+    // (its buffer rendered into its own slot rect), then emit the artifact.
+    const pixels = try ed.renderComposite();
+    defer gpa.free(pixels);
+    for (slots[0..n]) |slot| {
+        const x0: u32 = @intFromFloat(slot.rect.x + 10);
+        const y0: u32 = @intFromFloat(slot.rect.y + 10);
+        const x1: u32 = @intFromFloat(slot.rect.x + slot.rect.w - 10);
+        const y1: u32 = @intFromFloat(slot.rect.y + 40);
+        try t.expect(harness.hasContent(pixels, app_w, x0, y0, x1, y1));
+    }
+    ed.snapshotPanes("vsplit-two");
+}
+
+test "app/window: a further split tiles three panes and still composites" {
+    const gpa = t.allocator;
+    var ed: Editor = undefined;
+    try Editor.init(gpa, &ed);
+    defer ed.deinit();
+    try loadVim(&ed);
+    ed.press("i", "");
+    ed.typeText("root buffer\n");
+    ed.press("Escape", "");
+
+    // vsplit, then split the focused half horizontally → three panes.
+    ed.run("window-vsplit");
+    ed.applyWindow();
+    ed.run("window-split");
+    ed.applyWindow();
+    try t.expectEqual(@as(usize, 3), ed.paneCount());
+
+    const pixels = try ed.renderComposite();
+    defer gpa.free(pixels);
+    // Something was drawn somewhere in the frame (all three panes share the
+    // root buffer here; the point is the tiling + composite path holds up).
+    try t.expect(harness.hasContent(pixels, app_w, 0, 0, app_w, app_h));
+    ed.snapshotPanes("tri-pane");
 }
 
 // ── Project-level e2e: build a tiny app the way a person would ───────
