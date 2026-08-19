@@ -768,6 +768,16 @@ test "app/collab: peer A types, it converges into peer B's buffer + cursor" {
             return std.mem.indexOf(u8, txt, "hello from alice") != null;
         }
     }.pred);
+    if (!converged) {
+        const at0 = a.buffers.active().editor.text().toOwnedSlice(gpa) catch &.{};
+        defer gpa.free(at0);
+        const bt0 = b.buffers.active().editor.text().toOwnedSlice(gpa) catch &.{};
+        defer gpa.free(bt0);
+        std.debug.print("\n[CONVERGE-FAIL] host_live={} peer_live={} alice='{s}' bob='{s}' host_announced={} peer_announced={}\n", .{
+            link.host_sess.liveness(), link.peer_sess.liveness(), at0, bt0,
+            link.host_col.announced,   link.peer_col.announced,
+        });
+    }
     try t.expect(converged);
 
     // Both replicas hold identical text — convergence, not just delivery.
