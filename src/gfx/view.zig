@@ -44,7 +44,7 @@ const buildTabStrip = hud_mod.buildTabStrip;
 
 /// The view's color palette (data + role→color lookups). Split into
 /// `view/theme.zig`; re-exported here so `view_mod.Theme` is unchanged.
-pub const Theme = @import("view/theme.zig").Theme;
+pub const Theme = @import("view/Theme.zig");
 
 pub const Built = struct {
     shapes: []snail.Shape,
@@ -477,7 +477,7 @@ test {
     // Pull the extracted submodules' own tests into this file's test set (it
     // is the one referenced by src/tests.zig, so re-exports alone would not
     // guarantee their discovery).
-    _ = @import("view/theme.zig");
+    _ = @import("view/Theme.zig");
     _ = @import("view/hud.zig");
     _ = @import("view/statusline.zig");
     _ = @import("view/popup.zig");
