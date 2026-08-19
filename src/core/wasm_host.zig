@@ -69,6 +69,7 @@ const config_kv = @import("wasm_host/config_kv.zig");
 const dispatch = @import("wasm_host/dispatch.zig");
 const keymap = @import("wasm_host/keymap.zig");
 const commands = @import("wasm_host/commands.zig");
+const edit = @import("wasm_host/edit.zig");
 const rooted_fs = @import("rooted_fs.zig");
 const WasmCmd = wasm_abi.WasmCmd;
 const PendingItem = wasm_abi.PendingItem;
@@ -90,19 +91,19 @@ pub fn defineImports(linker: *wasm.Linker, p: *WasmPlugin) !void {
     try d(linker, "wl_declare_capability", 2, 0, declare.hDeclareCapability, p);
     try d(linker, "wl_request_perm", 1, 0, declare.hRequestPerm, p);
     // Group B: read-only.
-    try d(linker, "wl_cursor", 0, 1, hCursor, p);
-    try d(linker, "wl_byte_len", 0, 1, hByteLen, p);
-    try d(linker, "wl_slice", 4, 1, hSlice, p);
-    try d(linker, "wl_line_at", 2, 0, hLineAt, p);
-    try d(linker, "wl_selection", 1, 1, hSelection, p);
-    try d(linker, "wl_path", 2, 1, hPath, p);
+    try d(linker, "wl_cursor", 0, 1, edit.hCursor, p);
+    try d(linker, "wl_byte_len", 0, 1, edit.hByteLen, p);
+    try d(linker, "wl_slice", 4, 1, edit.hSlice, p);
+    try d(linker, "wl_line_at", 2, 0, edit.hLineAt, p);
+    try d(linker, "wl_selection", 1, 1, edit.hSelection, p);
+    try d(linker, "wl_path", 2, 1, edit.hPath, p);
     // Group B: the native `editor` surface (pure step primitive).
-    try d(linker, "wl_editor_step", 3, 1, hEditorStep, p);
-    try d(linker, "wl_set_selection", 2, 0, hSetSelection, p);
+    try d(linker, "wl_editor_step", 3, 1, edit.hEditorStep, p);
+    try d(linker, "wl_set_selection", 2, 0, edit.hSetSelection, p);
     // Group C: write.
-    try d(linker, "wl_edit", 4, 0, hEdit, p);
+    try d(linker, "wl_edit", 4, 0, edit.hEdit, p);
     try d(linker, "wl_register", 2, 1, commands.hRegister, p);
-    try d(linker, "wl_jump", 1, 0, hJump, p);
+    try d(linker, "wl_jump", 1, 0, edit.hJump, p);
     try d(linker, "wl_flash", 2, 0, layers.hFlash, p);
     // Styles feed: a plugin paints per-byte StyleClass over its (active) tool
     // buffer; the view renders it through Theme.styleColor (git/grep coloring).
@@ -112,13 +113,13 @@ pub fn defineImports(linker: *wasm.Linker, p: *WasmPlugin) !void {
     try d(linker, "wl_fold", 2, 0, layers.hFold, p);
     // Stamped ranges ([FIX 1/3]): a motion returns one, an operator awaits +
     // applies it. Handles cross; the version token stays host-side.
-    try d(linker, "wl_stamp_range", 2, 1, hStampRange, p);
-    try d(linker, "wl_set_result_range", 1, 0, hSetResultRange, p);
-    try d(linker, "wl_run_range", 2, 1, hRunRange, p);
-    try d(linker, "wl_range_ends", 2, 1, hRangeEnds, p);
-    try d(linker, "wl_run_range_arg", 3, 0, hRunRangeArg, p);
-    try d(linker, "wl_arg_range", 1, 1, hArgRange, p);
-    try d(linker, "wl_edit_range", 3, 0, hEditRange, p);
+    try d(linker, "wl_stamp_range", 2, 1, edit.hStampRange, p);
+    try d(linker, "wl_set_result_range", 1, 0, edit.hSetResultRange, p);
+    try d(linker, "wl_run_range", 2, 1, edit.hRunRange, p);
+    try d(linker, "wl_range_ends", 2, 1, edit.hRangeEnds, p);
+    try d(linker, "wl_run_range_arg", 3, 0, edit.hRunRangeArg, p);
+    try d(linker, "wl_arg_range", 1, 1, edit.hArgRange, p);
+    try d(linker, "wl_edit_range", 3, 0, edit.hEditRange, p);
     // Group E: admin (kv).
     try d(linker, "wl_kv_get", 4, 1, config_kv.hKvGet, p);
     try d(linker, "wl_kv_put", 4, 0, config_kv.hKvPut, p);
@@ -206,268 +207,4 @@ pub fn defineImports(linker: *wasm.Linker, p: *WasmPlugin) !void {
     try d(linker, "wl_fs_append", 4, 1, fs.hFsAppend, p);
     try d(linker, "wl_fs_list", 6, 1, fs.hFsList, p);
     try d(linker, "wl_fs_list_async", 6, 1, fs.hFsListAsync, p);
-}
-
-// ── Host import table: one small function per abi.Abi method ──────────
-
-// Group B: read-only.
-fn hCursor(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32, results: []i32) void {
-    _ = caller;
-    _ = args;
-    const p: *WasmPlugin = @ptrCast(@alignCast(data.?));
-    results[0] = @intCast(p.ctx.editor().cursorOffset());
-}
-
-fn hByteLen(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32, results: []i32) void {
-    _ = caller;
-    _ = args;
-    const p: *WasmPlugin = @ptrCast(@alignCast(data.?));
-    results[0] = @intCast(p.ctx.editor().text().byteLen());
-}
-
-fn hSlice(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32, results: []i32) void {
-    const p: *WasmPlugin = @ptrCast(@alignCast(data.?));
-    const rope = p.ctx.editor().text();
-    const len = rope.byteLen();
-    const s = @min(@as(usize, @intCast(args[0])), len);
-    const e = @min(@as(usize, @intCast(args[1])), len);
-    if (e <= s) {
-        results[0] = 0;
-        return;
-    }
-    const buf = p.gpa.alloc(u8, e - s) catch {
-        results[0] = 0;
-        return;
-    };
-    defer p.gpa.free(buf);
-    var sr = rope.streamReader(.{ .start = s, .end = e }, &.{});
-    sr.interface.readSliceAll(buf) catch {
-        results[0] = 0;
-        return;
-    };
-    const n = caller.writeMemory(@intCast(args[2]), @intCast(args[3]), buf) catch 0;
-    results[0] = @intCast(n);
-}
-
-fn hLineAt(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32, results: []i32) void {
-    _ = results;
-    const p: *WasmPlugin = @ptrCast(@alignCast(data.?));
-    const rope = p.ctx.editor().text();
-    const row = rope.offsetToPoint(@min(@as(usize, @intCast(args[0])), rope.byteLen())).row;
-    const line = rope.lineRange(row);
-    const pair = [2]u32{ @intCast(line.start), @intCast(line.end) };
-    _ = caller.writeMemory(@intCast(args[1]), 8, std.mem.asBytes(&pair)) catch {};
-}
-
-fn hSelection(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32, results: []i32) void {
-    const p: *WasmPlugin = @ptrCast(@alignCast(data.?));
-    const sel = p.ctx.editor().selectedRange() orelse {
-        results[0] = 0;
-        return;
-    };
-    const pair = [2]u32{ @intCast(sel.start), @intCast(sel.end) };
-    _ = caller.writeMemory(@intCast(args[0]), 8, std.mem.asBytes(&pair)) catch {};
-    results[0] = 1;
-}
-
-fn hPath(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32, results: []i32) void {
-    const p: *WasmPlugin = @ptrCast(@alignCast(data.?));
-    const path = p.ctx.editor().backingPath() orelse {
-        results[0] = -1;
-        return;
-    };
-    const n = caller.writeMemory(@intCast(args[0]), @intCast(args[1]), path) catch {
-        results[0] = -1;
-        return;
-    };
-    results[0] = @intCast(n);
-}
-
-// Group C: write.
-fn hEdit(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32, results: []i32) void {
-    _ = results;
-    const p: *WasmPlugin = @ptrCast(@alignCast(data.?));
-    const bytes = caller.readMemory(p.gpa, @intCast(args[2]), @intCast(args[3])) catch return;
-    defer p.gpa.free(bytes);
-    const saved = p.ctx.principal;
-    p.ctx.principal = p.principal();
-    defer p.ctx.principal = saved;
-    p.ctx.edit(.{ .start = @intCast(args[0]), .end = @intCast(args[1]) }, bytes) catch {};
-}
-
-fn hJump(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32, results: []i32) void {
-    _ = caller;
-    _ = results;
-    const p: *WasmPlugin = @ptrCast(@alignCast(data.?));
-    const ed = p.ctx.editor();
-    ed.placeCursor(@min(@as(usize, @intCast(args[0])), ed.text().byteLen()));
-}
-
-// ── The native `editor` surface + stamped-range membrane ([FIX 1/3]) ──
-
-/// `editor.step(from, dir, kind) -> offset`: the pure step primitive a motion
-/// plugin composes (char boundary or byte-column line motion), no cursor move.
-fn hEditorStep(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32, results: []i32) void {
-    _ = caller;
-    const p: *WasmPlugin = @ptrCast(@alignCast(data.?));
-    const from: usize = @intCast(args[0]);
-    const dir: Editor.StepDir = @enumFromInt(@as(u32, @intCast(args[1])));
-    const kind: Editor.StepKind = @enumFromInt(@as(u32, @intCast(args[2])));
-    results[0] = @intCast(p.ctx.editor().stepOffset(from, dir, kind));
-}
-
-/// `editor.setSelection(start, end)`: select `[start, end)` (mark at start,
-/// cursor at end). The native selection write-half, composed from placeCursor
-/// + setMark.
-fn hSetSelection(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32, results: []i32) void {
-    _ = caller;
-    _ = results;
-    const p: *WasmPlugin = @ptrCast(@alignCast(data.?));
-    const ed = p.ctx.editor();
-    const len = ed.text().byteLen();
-    ed.placeCursor(@min(@as(usize, @intCast(args[0])), len));
-    ed.setMark(p.gpa) catch {};
-    ed.placeCursor(@min(@as(usize, @intCast(args[1])), len));
-}
-
-/// Stamp `[start, end)` at the current document version and return an opaque
-/// handle into this plugin's per-dispatch table. The one way a guest builds a
-/// range (a motion's target, or a linewise op's line span). -1 on failure.
-fn hStampRange(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32, results: []i32) void {
-    _ = caller;
-    const p: *WasmPlugin = @ptrCast(@alignCast(data.?));
-    const v = p.ctx.document().version(p.gpa) catch {
-        results[0] = -1;
-        return;
-    };
-    const h = p.pushRange(v, @intCast(args[0]), @intCast(args[1])) catch {
-        p.gpa.free(v);
-        results[0] = -1;
-        return;
-    };
-    results[0] = @intCast(h);
-}
-
-/// A motion sets its result to a `range` Value from a handle it stamped.
-fn hSetResultRange(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32, results: []i32) void {
-    _ = caller;
-    _ = results;
-    const p: *WasmPlugin = @ptrCast(@alignCast(data.?));
-    const h: usize = @intCast(args[0]);
-    if (h >= p.stamps.items.len) return;
-    p.result = .{ .range = p.stamps.items[h].range };
-}
-
-/// Run a command by name; if it returns a `range` Value (a motion), rebase it
-/// to the current head, re-stamp into THIS plugin's table, and return the
-/// handle. -1 if the command produced no range. This is how an operator (or
-/// vim) "awaits a motion by name" (design §6.1). Synchronous motions only for
-/// now — a pending/async range would preserve the original version instead.
-fn hRunRange(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32, results: []i32) void {
-    const p: *WasmPlugin = @ptrCast(@alignCast(data.?));
-    const cmd = caller.readMemory(p.gpa, @intCast(args[0]), @intCast(args[1])) catch {
-        results[0] = -1;
-        return;
-    };
-    defer p.gpa.free(cmd);
-    const rv = command.run(p.ctx.commands, p.ctx, cmd, &.{}) catch {
-        results[0] = -1;
-        return;
-    };
-    if (rv != .range) {
-        results[0] = -1;
-        return;
-    }
-    const cur = rv.range.rebase(p.ctx.document()) orelse {
-        results[0] = -1;
-        return;
-    };
-    const v = p.ctx.document().version(p.gpa) catch {
-        results[0] = -1;
-        return;
-    };
-    const h = p.pushRange(v, cur.start, cur.end) catch {
-        p.gpa.free(v);
-        results[0] = -1;
-        return;
-    };
-    results[0] = @intCast(h);
-}
-
-/// Resolve a stamped-range handle to its current `[start, end)` (two u32 into
-/// the guest). -1 if the handle is unknown or the range rebased away.
-fn hRangeEnds(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32, results: []i32) void {
-    const p: *WasmPlugin = @ptrCast(@alignCast(data.?));
-    const h: usize = @intCast(args[0]);
-    if (h >= p.stamps.items.len) {
-        results[0] = -1;
-        return;
-    }
-    const cur = p.stamps.items[h].range.rebase(p.ctx.document()) orelse {
-        results[0] = -1;
-        return;
-    };
-    const pair = [2]u32{ @intCast(cur.start), @intCast(cur.end) };
-    _ = caller.writeMemory(@intCast(args[1]), 8, std.mem.asBytes(&pair)) catch {
-        results[0] = -1;
-        return;
-    };
-    results[0] = 0;
-}
-
-/// Run a command passing a stamped range (by handle) as its single arg — how
-/// vim hands a motion's range to an operator (`op.delete`, …).
-fn hRunRangeArg(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32, results: []i32) void {
-    _ = results;
-    const p: *WasmPlugin = @ptrCast(@alignCast(data.?));
-    const cmd = caller.readMemory(p.gpa, @intCast(args[0]), @intCast(args[1])) catch return;
-    defer p.gpa.free(cmd);
-    const h: usize = @intCast(args[2]);
-    if (h >= p.stamps.items.len) return;
-    const rv = command.Value{ .range = p.stamps.items[h].range };
-    _ = command.run(p.ctx.commands, p.ctx, cmd, &.{rv}) catch {};
-}
-
-/// An operator reads its `range` arg: rebase to head, re-stamp into this
-/// plugin's table, return the handle. -1 if arg `i` is not a range.
-fn hArgRange(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32, results: []i32) void {
-    _ = caller;
-    const p: *WasmPlugin = @ptrCast(@alignCast(data.?));
-    const i: usize = @intCast(args[0]);
-    if (i >= p.cur_args.len or p.cur_args[i] != .range) {
-        results[0] = -1;
-        return;
-    }
-    const cur = p.cur_args[i].range.rebase(p.ctx.document()) orelse {
-        results[0] = -1;
-        return;
-    };
-    const v = p.ctx.document().version(p.gpa) catch {
-        results[0] = -1;
-        return;
-    };
-    const h = p.pushRange(v, cur.start, cur.end) catch {
-        p.gpa.free(v);
-        results[0] = -1;
-        return;
-    };
-    results[0] = @intCast(h);
-}
-
-/// Apply an edit over a stamped-range handle: rebase to head, then the gated
-/// `ctx.edit` door authored as this plugin's peer (same gate/attribution as
-/// `wl_edit`). A `view` grade fails inside `ctx.edit` — zero permission code
-/// in the operator.
-fn hEditRange(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32, results: []i32) void {
-    _ = results;
-    const p: *WasmPlugin = @ptrCast(@alignCast(data.?));
-    const h: usize = @intCast(args[0]);
-    if (h >= p.stamps.items.len) return;
-    const cur = p.stamps.items[h].range.rebase(p.ctx.document()) orelse return;
-    const bytes = caller.readMemory(p.gpa, @intCast(args[1]), @intCast(args[2])) catch return;
-    defer p.gpa.free(bytes);
-    const saved = p.ctx.principal;
-    p.ctx.principal = p.principal();
-    defer p.ctx.principal = saved;
-    p.ctx.edit(.{ .start = cur.start, .end = cur.end }, bytes) catch {};
 }
