@@ -40,18 +40,15 @@ const render_mod = @import("app/render.zig");
 const frame_mod = @import("app/frame.zig");
 const collab = @import("app/collab.zig");
 const collab_cmds = @import("app/collab_cmds.zig");
-const ShareCtx = collab.ShareCtx;
 const hostTrustChip = collab.hostTrustChip;
 const selectionAnchorOf = collab.selectionAnchorOf;
 const identityHandler = collab_cmds.identityHandler;
 const guiConfigure = collab.guiConfigure;
 const providers = @import("app/providers.zig");
 const Attach = providers.Attach;
-const AttachDeps = providers.AttachDeps;
 const attachProviders = providers.attachProviders;
 const detachProviders = providers.detachProviders;
 const resolveSyntax = providers.resolveSyntax;
-const LspServers = providers.LspServers;
 const lspAddCommand = providers.lspAddCommand;
 const grammarAddCommand = providers.grammarAddCommand;
 const reconnectTask = providers.reconnectTask;
@@ -239,84 +236,25 @@ pub fn main(init: std.process.Init) !void {
     try buffers_cmds.registerCommands(gpa, &session.commands, attach_deps);
 
     // ── Connection (wire v1.1: N shared buffers over one session) ──
-    var fd_link: core.session.FdLink = undefined;
-    var collab_session: ?*core.session.Session = null;
-    defer if (collab_session) |s| s.destroy();
-    var conn: ?core.session.Conn = null;
-    defer if (conn) |*c| c.deinit();
-    var partial_state: ?core.session.PartialDoc = null;
-    defer if (partial_state) |*p| p.deinit();
-    // Inbound hosting is a separate, additive role: the outbound client
-    // state above (conn/collab_session/partial) is untouched; `hub`
-    // accepts N peers, started at boot (--listen) or at runtime (listen).
-    var hub: ?core.hub.Hub = null;
-    defer if (hub) |*h| h.deinit();
-    // Opt-in filesystem sharing (host side): a confined root served to peers.
-    // Default off — a peer gets nothing unless the host passed --share-root.
-    var peer_fs_root: ?core.rooted_fs.RootedFs = null;
-    defer if (peer_fs_root) |*r| r.close();
-    if (args.share_root) |root_dir| {
-        if (gpa.dupeZ(u8, root_dir)) |rz| {
-            defer gpa.free(rz);
-            peer_fs_root = core.rooted_fs.RootedFs.open(rz.ptr) catch blk: {
-                std.log.warn("share-root: cannot open '{s}'", .{root_dir});
-                break :blk null;
-            };
-        } else |_| {}
-    }
-    // Client side: correlate .peer fs replies for a connected session, and the
-    // bridge the guest queues async LIST requests through (dired-on-a-peer).
-    var remote_fs = core.session.RemoteFs.init(gpa);
-    defer remote_fs.deinit();
-    var peer_fs_bridge = core.wasm_host.PeerFsBridge{ .gpa = gpa };
-    core.wasm_host.setPeerFsBridge(&peer_fs_bridge);
-    defer peer_fs_bridge.deinit();
-    defer core.wasm_host.setPeerFsBridge(null);
-    var peer_fs_inflight: std.AutoHashMapUnmanaged(u64, []u8) = .empty;
-    defer {
-        var pit = peer_fs_inflight.valueIterator();
-        while (pit.next()) |v| gpa.free(v.*);
-        peer_fs_inflight.deinit(gpa);
-    }
-    if (args.connect) |hostport| {
-        fd_link = .{ .fd = try core.session.tcpConnect(hostport) };
-        collab_session = try core.session.Session.create(gpa, fd_link.link(), .client, args.token, .own, &my_identity);
-        conn = try core.session.Conn.init(gpa, collab_session.?, args.user, .client);
-        const col = try conn.?.bindPrimary(&ed0.doc, 0);
-        col.presence_layer = try session.caps.layers.claim(gpa, &ed0.doc, "presence", .replicated, "collab");
-        // Host-scoped feeds (diagnostics) arrive over the wire.
-        col.import_diag_layer = try session.caps.layers.claim(gpa, &ed0.doc, "diagnostics", .host, "remote-host");
-        col.remote_fs = &remote_fs; // client can list/read the host's shared root
-        if (args.partial) {
-            partial_state = core.session.PartialDoc.init(gpa, &ed0.doc);
-            col.partial = &partial_state.?;
-        }
-    }
-    var share_ctx: ShareCtx = .{
-        .conn = &conn,
-        .hub = &hub,
-        .caps = &session.caps,
-        .gpa = gpa,
-        .buffers = buffers,
-        .partial = &partial_state,
-        .session = &collab_session,
-        .known = &known_peers,
-        .peer_fs_root = if (peer_fs_root) |*r| r else null,
-        .fs_grant = .{ .access = args.share_fs },
-    };
-    attach_deps.share = &share_ctx;
-    defer if (share_ctx.pending_connect) |hp| gpa.free(hp);
-    defer {
-        for (share_ctx.shared.items) |s| gpa.free(s.name);
-        share_ctx.shared.deinit(gpa);
-    }
-    // Boot --listen folds onto the runtime listen path (one code path):
-    // seed the intent; the first frame boots the hub.
-    if (args.listen) |port| {
-        share_ctx.pending_listen = port;
-        share_ctx.pending_access = args.access;
-    }
-    try collab_cmds.registerCommands(gpa, &session.commands, &share_ctx, &known_peers);
+    // `Collab` owns the whole connection cluster (outbound conn/session/partial,
+    // inbound hub, the opt-in shared fs + .peer bridge, the ShareCtx intent
+    // surface, and the frame-loop liveness/reconnect state). initBase lays the
+    // skeleton in place (share_ctx points at sibling fields) and is infallible,
+    // so its deinit is registered right after — before `connect` fills the
+    // outbound optionals, so a connect error cleans partial state (exactly how
+    // main() used to pre-defer the optionals). Registered here (after the
+    // provider detach defer) it tears down BEFORE detach — conn/hub must unbind
+    // before the doc layers drop — and before Session (it reads the session caps).
+    // (known_peers + my_identity stay main() locals: built early for the identity
+    // command; Collab borrows them.)
+    var collab_state: collab.Collab = undefined;
+    collab_state.initBase(gpa, buffers, &session.caps, &known_peers, args.share_root, args.share_fs, args.listen, args.access);
+    defer collab_state.deinit(gpa);
+    try collab_state.connect(gpa, ed0, &session.caps, &my_identity, args.connect, args.token, args.user, args.partial);
+    // The buffer close path unbinds shares before the doc dies (Providers borrows
+    // the share surface).
+    attach_deps.share = &collab_state.share_ctx;
+    try collab_cmds.registerCommands(gpa, &session.commands, &collab_state.share_ctx, &known_peers);
     // Window layout: a recursive split tree over the region geometry. Core
     // commands only RECORD intent on `win_ctx`; the frame loop applies them
     // (splitFocused/closeFocused/focus/move by pane geometry) and keeps the
@@ -393,22 +331,11 @@ pub fn main(init: std.process.Init) !void {
     var last_activate_path: [std.fs.max_path_bytes]u8 = undefined;
     var last_activate_len: usize = 0;
     var last_frame_rect: region.Rect = .{}; // last render's pane frame, for click routing
-    var last_liveness: core.session.Liveness = .connecting;
-    // The fingerprint we last announced for the outbound host, so a
-    // reconnect to a different key re-announces (and TOFU-records) it. The
-    // status-line trust chip reads its live grade from `known_peers`.
-    var noted_host_fp: ?[24]u8 = null;
-    var reconnect: ?core.task.Handle(anyerror!i32) = null;
-    defer if (reconnect) |*h| h.detach();
-    // Interactive `connect`: the TCP connect runs on the pool (it can take
-    // seconds, or time out) so the frame thread never blocks. The hostport
-    // is owned and borrowed by the worker until the handle is polled; on
-    // shutdown with a connect in flight we detach and leak it (the worker
-    // may still be reading it — a bounded, one-shot leak).
-    var connect_task: ?core.task.Handle(anyerror!i32) = null;
-    var connect_hostport: ?[]u8 = null;
-    defer if (connect_task) |*h| h.detach();
-    var next_reconnect_ns: u64 = 0;
+    // Liveness, the last-announced host fingerprint, the self-reconnect handle,
+    // and the interactive-connect handle/hostport all live on `collab_state` now
+    // (its deinit detaches the in-flight handles — a bounded, one-shot leak if a
+    // connect worker still borrows the hostport). The status-line trust chip
+    // reads its live grade from `known_peers`.
     var next_backing_poll_ns: u64 = 0;
     var last_active: core.Buffers.Id = buffers.active_id;
     // Menu-overlay (on_menu) edge detection: fire at the frame boundary when the
@@ -463,13 +390,13 @@ pub fn main(init: std.process.Init) !void {
         .hover_ui = &session.hover_ui,
         .cursor_cfg = &session.cursor_cfg,
         .plugins = &plugins,
-        .conn = &conn,
-        .hub = &hub,
-        .collab_session = &collab_session,
-        .partial_state = &partial_state,
+        .conn = &collab_state.conn,
+        .hub = &collab_state.hub,
+        .collab_session = &collab_state.collab_session,
+        .partial_state = &collab_state.partial_state,
         .ed0 = ed0,
         .known_peers = &known_peers,
-        .noted_host_fp = &noted_host_fp,
+        .noted_host_fp = &collab_state.noted_host_fp,
         .view_dirty = &view_dirty,
         .last_frame_rect = &last_frame_rect,
         .flash_gen = &flash_gen,
@@ -547,13 +474,13 @@ pub fn main(init: std.process.Init) !void {
             view_dirty = true;
         // ── Connect/disconnect/listen intents (outside the hot section:
         // connect blocks on TCP, disconnect joins threads). ──
-        if (collab.applyIntents(&share_ctx, &session.cmd_ctx, pool, &connect_task, &connect_hostport, &fd_link, &session.echo, &my_identity, args.token, args.user))
+        if (collab.applyIntents(&collab_state.share_ctx, &session.cmd_ctx, pool, &collab_state.connect_task, &collab_state.connect_hostport, &collab_state.fd_link, &session.echo, &my_identity, args.token, args.user))
             view_dirty = true;
         // ── Window-layout intents (outside the input hot section) ──
         if (window_cmds.applyIntents(&win_ctx, win_layout, view, buffers, gpa, &session.keymap, last_frame_rect))
             view_dirty = true;
         // ── Collab tick (adopt/publish/relay, partial fetch, peer-fs, reconnect) ──
-        if (try collab.tickCollab(&share_ctx, &session.cmd_ctx, ed0, win_layout, &peer_fs_bridge, &remote_fs, &peer_fs_inflight, &noted_host_fp, &last_liveness, &reconnect, &next_reconnect_ns, &fd_link, &my_identity, pool, args.connect, args.token, &session.echo))
+        if (try collab.tickCollab(&collab_state.share_ctx, &session.cmd_ctx, ed0, win_layout, &collab_state.peer_fs_bridge, &collab_state.remote_fs, &collab_state.peer_fs_inflight, &collab_state.noted_host_fp, &collab_state.last_liveness, &collab_state.reconnect, &collab_state.next_reconnect_ns, &collab_state.fd_link, &my_identity, pool, args.connect, args.token, &session.echo))
             view_dirty = true;
         if (editor.doc.commitCount() != attach.seen_commits) {
             attach.seen_commits = editor.doc.commitCount();

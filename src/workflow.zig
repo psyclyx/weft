@@ -20,6 +20,7 @@ const window_layout = @import("gfx/window_layout.zig");
 const window_cmds = @import("app/window_cmds.zig");
 const app_session = @import("app/session.zig");
 const app_providers = @import("app/providers.zig");
+const app_collab = @import("app/collab.zig");
 const region = @import("gfx/region.zig");
 
 const Allocator = std.mem.Allocator;
@@ -980,6 +981,38 @@ test "app/teardown: shells outlive buffers through an in-flight shell save" {
     // 4. Providers LAST — frees the shells, safely after every buffer + worker
     //    that referenced them. (A leak/double-free trips the allocator.)
     prov.deinit(gpa);
+}
+
+// The default modeless path (no --connect/--listen): Collab still owns the async
+// `.peer` fs bridge, the reply-correlation map, and the share intent surface.
+// Its deinit must free them and clear the process-global bridge pointer without
+// leak or double-free. (The CONNECTED teardown — conn/hub/session/partial —
+// needs a live socket + GUI, so it can't run here; Collab.deinit mirrors the
+// prior main() defers line-for-line, verified by inspection. This covers the
+// path every bare launch hits, under the leak-checking allocator.)
+test "app/teardown: unconnected Collab constructs + tears down clean" {
+    const gpa = t.allocator;
+    const pool = try core.task.Pool.init(gpa, .{});
+    defer pool.deinit();
+    var prov: app_providers.Providers = undefined;
+    try prov.initRegistries(gpa);
+    defer prov.deinit(gpa);
+    var which_key_now = false;
+    var sess: app_session.Session = undefined;
+    try sess.init(gpa, pool, "collab-user", &prov.grammars, &prov.lsp_servers, &which_key_now);
+    defer sess.deinit(gpa);
+    // known_peers + my_identity stay main() locals (Collab borrows them); an empty
+    // in-memory store keeps this hermetic (no config-home read/write).
+    var known: core.known_peers.KnownPeers = .{ .gpa = gpa };
+    defer known.deinit();
+    var id = core.identity.Identity.generate();
+
+    var col: app_collab.Collab = undefined;
+    col.initBase(gpa, &sess.buffers, &sess.caps, &known, null, .none, null, .view);
+    try col.connect(gpa, &sess.buffers.active().editor, &sess.caps, &id, null, "tok", "user", false);
+    // main()'s order: Collab before Session (it reads the session caps + must
+    // unbind before the doc layers drop).
+    col.deinit(gpa);
 }
 
 test {

@@ -75,6 +75,185 @@ pub const ShareCtx = struct {
     cancel_requested: bool = false,
 };
 
+/// `Collab` — the cohesive owner of the connection cluster: the outbound client
+/// (`conn`/`collab_session`/`partial_state`), the inbound host (`hub`), the
+/// opt-in shared filesystem + async `.peer` fs bridge, the `ShareCtx` intent
+/// surface, and the frame-loop liveness/reconnect/interactive-connect state.
+/// `main()` holds ONE `collab` object instead of ~16 loose connection locals.
+///
+/// Built IN PLACE (like `Session`/`RenderState`): `share_ctx` points at sibling
+/// fields (`&self.conn`, `&self.hub`, `&self.partial_state`, …) and the async
+/// `.peer` bridge registers its own address as a process-global, so `self` must
+/// already sit at its final `main()` address. `initBase` lays the skeleton (all
+/// optionals null, the fs bridge, the share surface) and registers the deinit;
+/// `connect` then fills the outbound optionals when `--connect` was given, with
+/// the pre-registered deinit cleaning any partial state on error (mirroring how
+/// `main()` deferred the optionals before the connect block filled them).
+///
+/// `deinit` frees in the EXACT reverse order `main()`'s ~13 connection defers
+/// used to run — the whole reason this is a distinct, carefully-ordered cluster.
+/// It runs BEFORE the provider detach (conn/hub teardown must precede the doc
+/// layer drop) and before `Session` (it reads the session caps), which `main()`
+/// guarantees by registering it right after the detach defer.
+///
+/// NOT owned here (deliberately): `known_peers` and `my_identity` stay `main()`
+/// locals — they are built early (the `identity` command binds `my_identity`,
+/// registered before config for last-wins order) and their teardown is
+/// independent, so folding them in would either regress early-error leak-safety
+/// or force conn/hub teardown past the detach. `share_ctx.known` borrows the
+/// former; `connect` borrows the latter.
+pub const Collab = struct {
+    gpa: std.mem.Allocator,
+
+    // ── Outbound client (--connect) + inbound host (--listen) + partial ──
+    fd_link: core.session.FdLink,
+    collab_session: ?*core.session.Session,
+    conn: ?core.session.Conn,
+    partial_state: ?core.session.PartialDoc,
+    hub: ?core.hub.Hub,
+
+    // ── Opt-in filesystem sharing + the async .peer fs bridge ──
+    peer_fs_root: ?core.rooted_fs.RootedFs,
+    remote_fs: core.session.RemoteFs,
+    peer_fs_bridge: core.wasm_host.PeerFsBridge,
+    peer_fs_inflight: std.AutoHashMapUnmanaged(u64, []u8),
+
+    // ── The share intent surface (self-referential: points at siblings) ──
+    share_ctx: ShareCtx,
+
+    // ── Frame-loop liveness / reconnect / interactive-connect state ──
+    last_liveness: core.session.Liveness,
+    noted_host_fp: ?[24]u8,
+    reconnect: ?core.task.Handle(anyerror!i32),
+    connect_task: ?core.task.Handle(anyerror!i32),
+    connect_hostport: ?[]u8,
+    next_reconnect_ns: u64,
+
+    /// Lay the skeleton IN PLACE: all optionals null, the fs bridge registered as
+    /// the process-global, the share surface pointing at sibling fields, the boot
+    /// --listen intent seeded. Infallible — nothing here can leak — so `main()`
+    /// registers `deinit` immediately after, then runs `connect`.
+    pub fn initBase(
+        self: *Collab,
+        gpa: std.mem.Allocator,
+        buffers: *core.Buffers,
+        caps: *core.Caps,
+        known: *core.known_peers.KnownPeers,
+        share_root: ?[]const u8,
+        share_fs: core.peer_fs.Access,
+        listen: ?u16,
+        access: core.session.Access,
+    ) void {
+        self.gpa = gpa;
+        self.fd_link = undefined;
+        self.collab_session = null;
+        self.conn = null;
+        self.partial_state = null;
+        self.hub = null;
+        // Opt-in filesystem sharing (host side): a confined root served to peers.
+        // Default off — a peer gets nothing unless the host passed --share-root.
+        self.peer_fs_root = null;
+        if (share_root) |root_dir| {
+            if (gpa.dupeZ(u8, root_dir)) |rz| {
+                defer gpa.free(rz);
+                self.peer_fs_root = core.rooted_fs.RootedFs.open(rz.ptr) catch blk: {
+                    std.log.warn("share-root: cannot open '{s}'", .{root_dir});
+                    break :blk null;
+                };
+            } else |_| {}
+        }
+        // Client side: correlate .peer fs replies, and the bridge the guest queues
+        // async LIST requests through (dired-on-a-peer).
+        self.remote_fs = core.session.RemoteFs.init(gpa);
+        self.peer_fs_bridge = .{ .gpa = gpa };
+        core.wasm_host.setPeerFsBridge(&self.peer_fs_bridge);
+        self.peer_fs_inflight = .empty;
+        self.share_ctx = .{
+            .conn = &self.conn,
+            .hub = &self.hub,
+            .caps = caps,
+            .gpa = gpa,
+            .buffers = buffers,
+            .partial = &self.partial_state,
+            .session = &self.collab_session,
+            .known = known,
+            .peer_fs_root = if (self.peer_fs_root) |*r| r else null,
+            .fs_grant = .{ .access = share_fs },
+        };
+        // Boot --listen folds onto the runtime listen path (one code path): seed
+        // the intent; the first frame boots the hub.
+        if (listen) |port| {
+            self.share_ctx.pending_listen = port;
+            self.share_ctx.pending_access = access;
+        }
+        self.last_liveness = .connecting;
+        self.noted_host_fp = null;
+        self.reconnect = null;
+        self.connect_task = null;
+        self.connect_hostport = null;
+        self.next_reconnect_ns = 0;
+    }
+
+    /// Fill the outbound optionals when `--connect` was given: TCP-connect, build
+    /// the client session + Conn, bind buffer 0 (wire v1) and claim its presence
+    /// + host-diagnostics layers. A partial checkout keeps the doc virgin.
+    /// Runs after `initBase` (so the pre-registered `deinit` cleans partial state
+    /// on error, exactly as `main()`'s pre-deferred optionals did).
+    pub fn connect(
+        self: *Collab,
+        gpa: std.mem.Allocator,
+        ed0: *core.Editor,
+        caps: *core.Caps,
+        my_identity: *const core.identity.Identity,
+        hostport: ?[]const u8,
+        token: []const u8,
+        user: []const u8,
+        partial: bool,
+    ) !void {
+        const hp = hostport orelse return;
+        self.fd_link = .{ .fd = try core.session.tcpConnect(hp) };
+        self.collab_session = try core.session.Session.create(gpa, self.fd_link.link(), .client, token, .own, my_identity);
+        self.conn = try core.session.Conn.init(gpa, self.collab_session.?, user, .client);
+        const col = try self.conn.?.bindPrimary(&ed0.doc, 0);
+        col.presence_layer = try caps.layers.claim(gpa, &ed0.doc, "presence", .replicated, "collab");
+        // Host-scoped feeds (diagnostics) arrive over the wire.
+        col.import_diag_layer = try caps.layers.claim(gpa, &ed0.doc, "diagnostics", .host, "remote-host");
+        col.remote_fs = &self.remote_fs; // client can list/read the host's shared root
+        if (partial) {
+            self.partial_state = core.session.PartialDoc.init(gpa, &ed0.doc);
+            col.partial = &self.partial_state.?;
+        }
+    }
+
+    /// Free in the EXACT reverse order `main()`'s connection defers used to run:
+    /// detach the in-flight connect handles; drop the share intents; free the
+    /// pending peer-fs listings; clear the process-global bridge then free it;
+    /// remote_fs; the shared fs root; then hub, partial, conn, session. Runs
+    /// before the provider detach + Session teardown (main() orders it so).
+    pub fn deinit(self: *Collab, gpa: std.mem.Allocator) void {
+        // In-flight interactive connect / self-reconnect: detach (a worker may
+        // still borrow connect_hostport → a bounded, one-shot leak).
+        if (self.connect_task) |*h| h.detach();
+        if (self.reconnect) |*h| h.detach();
+        for (self.share_ctx.shared.items) |s| gpa.free(s.name);
+        self.share_ctx.shared.deinit(gpa);
+        if (self.share_ctx.pending_connect) |hp| gpa.free(hp);
+        {
+            var pit = self.peer_fs_inflight.valueIterator();
+            while (pit.next()) |v| gpa.free(v.*);
+            self.peer_fs_inflight.deinit(gpa);
+        }
+        core.wasm_host.setPeerFsBridge(null);
+        self.peer_fs_bridge.deinit();
+        self.remote_fs.deinit();
+        if (self.peer_fs_root) |*r| r.close();
+        if (self.hub) |*h| h.deinit();
+        if (self.partial_state) |*p| p.deinit();
+        if (self.conn) |*c| c.deinit();
+        if (self.collab_session) |s| s.destroy();
+    }
+};
+
 /// Wire a hub-side collab as a participant-and-relay: no local presence
 /// layer (the frame loop unions all peers into one), publish our own
 /// cursor, relay peers to each other.
