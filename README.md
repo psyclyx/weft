@@ -97,9 +97,31 @@ the config plane crossing the same membrane, one tier down.
 
 ## Render (`src/gfx/`)
 
-snail's analytic glyph pipeline on Vulkan (curve/band texel buffers,
-SPIR-V from `snail-shaders-vk`). `view.zig` owns the layout model above;
-`layout.zig` is the offset ↔ geometry map. Fonts resolve at runtime via
+Two interchangeable renderers, chosen at build time by
+`-Drenderer={skia,snail}` (default **skia**; exactly one is compiled and
+linked). Both share the Vulkan backend in `context.zig` (device, queue,
+swapchain, present) and the backend-neutral `FrameBuilder` (View + pane
+tree). The seam is per-pane draw content: `view.build` lowers each pane to
+snail `Shape`s (affine-placed glyph records keyed by font_id/glyph_id, plus
+unit-square fill rects) — already renderer-neutral geometry that each
+backend consumes.
+
+- **skia** — a C++ shim (`src/gfx/skia/shim.cpp`, built with g++, linked
+  against libskia) draws the decoded shapes onto an `SkCanvas`
+  (`SkFont`/glyph ids + `SkPaint` rects, reusing the same font bytes so
+  metrics match). GPU path: Skia's Ganesh Vulkan backend
+  (`GrDirectContexts::MakeVulkan`) sharing weft's `VkInstance`/device/queue;
+  the result is copied into the swapchain image. When there is no dedicated
+  GPU — or `WEFT_SKIA_CPU=1` is set — it falls back to Skia's CPU raster
+  (`SkSurfaces::WrapPixels`), still presented through Vulkan. `WEFT_SKIA_DUMP=<path>`
+  writes the first frame to a PPM for debugging.
+- **snail** — snail's analytic glyph pipeline on Vulkan (curve/band texel
+  buffers, SPIR-V from `snail-shaders-vk`), the original path, byte-for-byte
+  unchanged.
+
+`view.zig` owns the layout model above; `layout.zig` is the offset ↔
+geometry map. `pickDevice` prefers a dedicated GPU and treats
+llvmpipe/lavapipe/CPU as a last resort. Fonts resolve at runtime via
 fontconfig — a mono face for code, a sans family
 (regular/bold/italic/bold-italic) for prose. Rebuilds are damage-driven;
 frame and input-latency percentiles log continuously.
@@ -131,9 +153,10 @@ offset↔geometry map, and the markdown analyzer.
 
 Zig deps are path deps into the monorepo checkout (`../../lib/snail`,
 `../../lib/stemma`). System libraries — wayland, libxkbcommon,
-vulkan-loader, harfbuzz, tree-sitter, wasmtime, the QuickJS-ng source, and
-the build-time wayland-scanner/pkg-config/slangc — come from npins-pinned
-nixpkgs via `shell.nix`, not the ambient PATH.
+vulkan-loader, harfbuzz, tree-sitter, wasmtime, skia (default renderer, via
+`WEFT_SKIA`; its C++ shim is built with the shell's g++), the QuickJS-ng
+source, and the build-time wayland-scanner/pkg-config/slangc — come from
+npins-pinned nixpkgs via `shell.nix`, not the ambient PATH.
 
 Fonts are the deliberate exception: weft resolves faces through fontconfig
 against the *system's* installed fonts, so rendered frames depend on what
@@ -142,7 +165,8 @@ overrides the mono face.
 
 ```sh
 nix-shell          # or direnv allow
-zig build run      # open the window
+zig build run      # open the window (skia renderer)
+zig build run -Drenderer=snail   # snail's analytic-glyph pipeline instead
 zig build test     # display-free tests
 ```
 
