@@ -38,6 +38,10 @@ pub const RenderState = struct {
     /// A frame has been rasterized and is ready to copy (guards the first
     /// present before any build has run).
     have_frame: bool,
+    /// Output byte order (true = BGRA to match a B8G8R8A8 swapchain).
+    bgra: bool,
+    /// One-shot: the WEFT_SKIA_DUMP debug dump has fired.
+    dumped: bool,
 
     pub fn init(
         self: *RenderState,
@@ -82,6 +86,8 @@ pub const RenderState = struct {
 
         self.staging = .{};
         self.have_frame = false;
+        self.bgra = bgra;
+        self.dumped = false;
     }
 
     pub fn deinit(self: *RenderState) void {
@@ -110,6 +116,13 @@ pub const RenderState = struct {
         try self.staging.ensure(ctx, total);
         @memcpy(self.staging.mapped[0..total], f.pixels[0..total]);
         self.have_frame = true;
+
+        // Debug: WEFT_SKIA_DUMP=<path> writes the first rasterized frame to a
+        // PPM so the shape→Skia decode can be eyeballed without a screenshot.
+        if (!self.dumped) {
+            self.dumped = true;
+            if (std.c.getenv("WEFT_SKIA_DUMP")) |path| dumpPpm(self.gpa, std.mem.sliceTo(path, 0), f, self.bgra) catch {};
+        }
     }
 
     /// Present: (re)rasterize on damage, then acquire a swapchain image, copy the
@@ -182,6 +195,31 @@ pub const RenderState = struct {
         });
     }
 };
+
+/// Write a rasterized Skia frame to a binary P6 PPM (debug aid; best-effort).
+fn dumpPpm(gpa: std.mem.Allocator, path: []const u8, f: skia.Frame, bgra: bool) !void {
+    const header = try std.fmt.allocPrint(gpa, "P6\n{d} {d}\n255\n", .{ f.width, f.height });
+    defer gpa.free(header);
+    const out = try gpa.alloc(u8, header.len + @as(usize, f.width) * f.height * 3);
+    defer gpa.free(out);
+    @memcpy(out[0..header.len], header);
+    var di = header.len;
+    var row: usize = 0;
+    while (row < f.height) : (row += 1) {
+        const base = row * f.row_bytes;
+        var x: usize = 0;
+        while (x < f.width) : (x += 1) {
+            const p = base + x * 4;
+            out[di] = if (bgra) f.pixels[p + 2] else f.pixels[p]; // R
+            out[di + 1] = f.pixels[p + 1]; // G
+            out[di + 2] = if (bgra) f.pixels[p] else f.pixels[p + 2]; // B
+            di += 3;
+        }
+    }
+    var threaded: std.Io.Threaded = .init(gpa, .{});
+    defer threaded.deinit();
+    try std.Io.Dir.cwd().writeFile(threaded.io(), .{ .sub_path = path, .data = out[0..di] });
+}
 
 const BarrierSpec = struct {
     old_layout: vk.VkImageLayout,
