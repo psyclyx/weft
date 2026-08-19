@@ -60,14 +60,24 @@ record (affine transform + color); the caret style is per-mode
 
 ## Extensibility
 
-Everything user-visible is built through the plugin ABI
-(`src/core/abi.zig`) — a single door grouped by permission: read
-(cursor/slice/tree/introspection), write (`edit`, grade-gated), effects
-(async/proc/net, gated by declared perms), admin (kv). A plugin declares
-its commands, capabilities, and perms in a manifest; `describe()` runs
-with no authority, the host approves, then `init()` runs and every runtime
-registration is cross-checked against the manifest. An undeclared
-registration fails the load.
+Everything user-visible is built through the plugin ABI (guest shim
+`src/guest/weft.zig`, host membrane `src/core/wasm*.zig`) — a single door
+grouped by permission: read (cursor/slice/tree/introspection), write
+(`edit`, grade-gated), effects (async/proc/net, gated by declared perms),
+admin (kv). A plugin declares its commands, capabilities, and perms in a
+manifest; `describe()` runs with no authority, the host approves, then
+`init()` runs and every runtime registration is cross-checked against the
+manifest. An undeclared registration fails the load.
+
+Dispatch is three tiers over one idea — resolve the best entry by context
+and priority: a layered **keymap** (key → name; priority tiers, a fallback
+chain, and a `global` layer that applies under every mode) → **actions** (an
+abstract intent like `eval`/`format` that many plugins *provide* for, each
+with a `when` predicate, resolved to a concrete command in the current
+buffer) → the **command** registry (name → handler). Binding a key to an
+action gives context-sensitive dispatch for free; the async capability
+system (completion/hover/definition) is the same idea at a different
+latency. See `doc/dispatch.md`.
 
 Every plugin runs as **wasm**, sandboxed under wasmtime — nothing is linked
 or trusted in-process. A guest reaches the editor only through host imports
@@ -76,13 +86,15 @@ granted after the manifest handshake (`src/core/wasm*.zig`; guest shim
 the plugin's peer. weft's binary carries **no catalog**: it ships modeless,
 and knows nothing of vim.
 
-The reference catalog (`src/guest/`) is authored in Zig against the ABI with
-no core privilege — modal editing (`vim`), buffer-word completion, a
-command/buffer palette and status line (`std`), structural (tree-sitter)
-edits, subbuffer regions, shell-output insertion, and project history — and
-built to `.wasm` artifacts installed under `lib/weft/plugins/`, external
-files a user loads by name. Nothing is baked in; delete them and weft is a
-bare modeless editor.
+The reference catalog (`src/guest/`, ~40 plugins) is authored in Zig against
+the ABI with no core privilege — modal editing (`vim`, `helix`) with `:` ex
+commands, motions/text-objects/operators, buffer-word completion, a
+command/buffer palette and status line, a magit-style `git` and an editable
+`dired` (both foldable model buffers), `grep`/`make`/`run`/`repl`/`console`,
+tree-sitter (`structural`, `ts`) edits, autopair/comment/format, a
+`which-key` overlay, notes, and project history — built to `.wasm` artifacts
+installed under `lib/weft/plugins/`, external files a user loads by name.
+Nothing is baked in; delete them and weft is a bare modeless editor.
 
 Plugins load two ways, both behind the same handshake:
 
@@ -153,10 +165,10 @@ offset↔geometry map, and the markdown analyzer.
 
 Zig deps are path deps into the monorepo checkout (`../../lib/snail`,
 `../../lib/stemma`). System libraries — wayland, libxkbcommon,
-vulkan-loader, harfbuzz, tree-sitter, wasmtime, skia (default renderer, via
-`WEFT_SKIA`; its C++ shim is built with the shell's g++), the QuickJS-ng
-source, and the build-time wayland-scanner/pkg-config/slangc — come from
-npins-pinned nixpkgs via `shell.nix`, not the ambient PATH.
+vulkan-loader, harfbuzz, tree-sitter, wasmtime, skia (default renderer,
+resolved through `pkg-config`; its C++ shim is built with the shell's g++),
+the QuickJS-ng source, and the build-time wayland-scanner/pkg-config/slangc
+— come from npins-pinned nixpkgs via `shell.nix`, not the ambient PATH.
 
 Fonts are the deliberate exception: weft resolves faces through fontconfig
 against the *system's* installed fonts, so rendered frames depend on what
@@ -229,6 +241,12 @@ there you are the principal with full authority, and remoteness is just
 where the bytes and toolchain live. Protocol spec: `doc/wire.md`.
 
 ## Not yet
+
+Coding-agent support (ACP) is designed and in progress — as plugins, not
+core: an agent is a peer, a conversation is a foldable model buffer, and
+agents are declared as config data (`weft.agent`), so weft makes no
+assumptions about how the adapters are launched. Design and build plan in
+`doc/agents.md`.
 
 Markdown tables and images need 2D block layout (column measuring, image
 decode) beyond the per-byte inline model.
