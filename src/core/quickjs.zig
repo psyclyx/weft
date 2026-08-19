@@ -44,6 +44,30 @@ const Bridge = struct {
 
 const kv = @import("kv.zig");
 
+/// The shared `weft.*` membrane, bound over a `Bridge` — used by both the
+/// config eval plane and a JS plugin (they drive the editor identically; a
+/// plugin additionally registers commands via `qjs_register`).
+fn defineConfigFns(linker: *wasm.Linker, bridge: *Bridge) !void {
+    try linker.defineFn("weft", "qjs_bind_key", 6, 0, cBindKey, bridge);
+    try linker.defineFn("weft", "qjs_run", 2, 0, cRun, bridge);
+    try linker.defineFn("weft", "qjs_echo", 2, 0, cEcho, bridge);
+    try linker.defineFn("weft", "qjs_log", 2, 0, cLog, bridge);
+    try linker.defineFn("weft", "qjs_plugin", 2, 0, cPlugin, bridge);
+    try linker.defineFn("weft", "qjs_set", 6, 0, cSet, bridge);
+    try linker.defineFn("weft", "qjs_menu", 2, 0, cMenu, bridge);
+    try linker.defineFn("weft", "qjs_action", 2, 0, cAction, bridge);
+    try linker.defineFn("weft", "qjs_provide", 9, 0, cProvide, bridge);
+}
+
+/// qjs_register for the config plane: a no-op that rejects (config declares no
+/// commands). The plugin plane replaces this with the real registrar.
+fn cRegisterStub(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32, results: []i32) void {
+    _ = data;
+    _ = caller;
+    _ = args;
+    results[0] = -1;
+}
+
 /// Evaluate `src` as the user config: instantiate `quickjs.wasm` under WASI
 /// with the `weft.*` config surface bound over `ctx`, run its reactor init,
 /// marshal the source into the guest, and eval it. A JS exception surfaces as
@@ -63,15 +87,11 @@ pub fn evalConfig(engine: *wasm.Engine, ctx: *command.Context, loader: ?PluginLo
     var linker = try wasm.Linker.init(engine);
     defer linker.deinit();
     try linker.defineWasi();
-    try linker.defineFn("weft", "qjs_bind_key", 6, 0, cBindKey, &bridge);
-    try linker.defineFn("weft", "qjs_run", 2, 0, cRun, &bridge);
-    try linker.defineFn("weft", "qjs_echo", 2, 0, cEcho, &bridge);
-    try linker.defineFn("weft", "qjs_log", 2, 0, cLog, &bridge);
-    try linker.defineFn("weft", "qjs_plugin", 2, 0, cPlugin, &bridge);
-    try linker.defineFn("weft", "qjs_set", 6, 0, cSet, &bridge);
-    try linker.defineFn("weft", "qjs_menu", 2, 0, cMenu, &bridge);
-    try linker.defineFn("weft", "qjs_action", 2, 0, cAction, &bridge);
-    try linker.defineFn("weft", "qjs_provide", 9, 0, cProvide, &bridge);
+    try defineConfigFns(&linker, &bridge);
+    // The config plane never registers commands, but quickjs.wasm imports
+    // qjs_register (the plugin plane uses it) — satisfy it with a stub so the
+    // shared binary instantiates.
+    try linker.defineFn("weft", "qjs_register", 2, 1, cRegisterStub, &bridge);
 
     var instance = try linker.instantiateWasi(&module);
     defer instance.deinit();
@@ -98,6 +118,134 @@ pub fn evalConfig(engine: *wasm.Engine, ctx: *command.Context, loader: ?PluginLo
     // then run the queued startup actions (FIFO) — after every plugin exists.
     if (bridge.loader) |ld| for (bridge.pending_plugins.items) |name| ld.load(ld.ctx, name);
     for (bridge.pending_runs.items) |cmd| _ = command.run(ctx.commands, ctx, cmd, &.{}) catch {};
+}
+
+// ── The plugin plane: a PERSISTENT quickjs.wasm instance as a weft plugin ──
+
+/// A JS plugin — a resident `quickjs.wasm` instance driving weft through the
+/// same `weft.*` membrane the config uses, plus command registration and
+/// `on_command` dispatch (the describe/init/on_command lifecycle a `.wasm`
+/// plugin has, one layer up under the JS engine). One instance per plugin, so
+/// its runtime + globals are private; the host resolves its commands to
+/// `weft_on_command(id)` calls back into the same instance. The membrane's
+/// `Bridge` reuses the config bridge (loader/config unused here).
+pub const JsPlugin = struct {
+    gpa: Allocator,
+    ctx: *command.Context,
+    bridge: Bridge,
+    module: wasm.Module,
+    linker: wasm.Linker,
+    instance: wasm.Instance,
+    /// Owned command trampolines (one per `weft.command`), kept for teardown;
+    /// each carries the id the host dispatches by and owns its command name.
+    cmds: std.ArrayList(*Cmd) = .empty,
+
+    const Cmd = struct { plugin: *JsPlugin, id: i32, name: []u8 };
+
+    /// Instantiate `quickjs.wasm`, wire the membrane + registrar, and run the
+    /// plugin body (`src`), which registers its commands. Heap-owned so the
+    /// membrane's `&self.bridge` and the trampolines' `plugin` pointers stay
+    /// valid (the instance is resident for the plugin's life).
+    pub fn load(gpa: Allocator, engine: *wasm.Engine, ctx: *command.Context, src: []const u8) !*JsPlugin {
+        const self = try gpa.create(JsPlugin);
+        errdefer gpa.destroy(self);
+        self.* = .{
+            .gpa = gpa,
+            .ctx = ctx,
+            .bridge = .{ .ctx = ctx, .loader = null, .config = null },
+            .module = try engine.compile(quickjs_wasm),
+            .linker = undefined,
+            .instance = undefined,
+        };
+        errdefer self.module.deinit();
+        self.linker = try wasm.Linker.init(engine);
+        errdefer self.linker.deinit();
+        try self.linker.defineWasi();
+        try defineConfigFns(&self.linker, &self.bridge);
+        try self.linker.defineFn("weft", "qjs_register", 2, 1, cRegister, self);
+
+        self.instance = try self.linker.instantiateWasi(&self.module);
+        errdefer self.instance.deinit();
+        self.instance.callVoid("_initialize", &.{}) catch |e| {
+            if (e != error.MissingExport) return e;
+        };
+
+        const size: i32 = @intCast(src.len + 1);
+        const ptr = try self.instance.callI32("malloc", &.{size});
+        if (ptr == 0) return error.OutOfMemory;
+        defer self.instance.callVoid("free", &.{ptr}) catch {};
+        const at: usize = @intCast(ptr);
+        try self.instance.writeGuest(at, src);
+        try self.instance.writeGuest(at + src.len, &.{0});
+        const rc = try self.instance.callI32("weft_plugin_init", &.{ ptr, @intCast(src.len) });
+        if (rc != 0) return error.ConfigException;
+        return self;
+    }
+
+    /// Dispatch command `id` into the JS handler registered for it.
+    pub fn onCommand(self: *JsPlugin, id: i32) void {
+        self.instance.callVoid("weft_on_command", &.{id}) catch {};
+    }
+
+    pub fn deinit(self: *JsPlugin) void {
+        const gpa = self.gpa;
+        for (self.cmds.items) |c| {
+            gpa.free(c.name);
+            gpa.destroy(c);
+        }
+        self.cmds.deinit(gpa);
+        self.instance.deinit();
+        self.linker.deinit();
+        self.module.deinit();
+        gpa.destroy(self);
+    }
+};
+
+/// The command handler a `weft.command` registers under: dispatch back into the
+/// owning JS plugin by id.
+fn jsCmdTramp(ctx: *command.Context, data: ?*anyopaque, args: []const command.Value) anyerror!command.Value {
+    _ = ctx;
+    _ = args;
+    const c: *JsPlugin.Cmd = @ptrCast(@alignCast(data.?));
+    c.plugin.onCommand(c.id);
+    return .nil;
+}
+
+/// qjs_register(name) for the plugin plane: bind a command whose handler
+/// dispatches to the JS plugin, and return its id (the array index the JS side
+/// keys its handler by, and the host passes to weft_on_command).
+fn cRegister(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32, results: []i32) void {
+    const self: *JsPlugin = @ptrCast(@alignCast(data.?));
+    const gpa = self.gpa;
+    const name = caller.readMemory(gpa, @intCast(args[0]), @intCast(args[1])) catch {
+        results[0] = -1;
+        return;
+    };
+    // `name` is owned by the Cmd (the command registry borrows the field).
+    const id: i32 = @intCast(self.cmds.items.len);
+    const c = gpa.create(JsPlugin.Cmd) catch {
+        gpa.free(name);
+        results[0] = -1;
+        return;
+    };
+    c.* = .{ .plugin = self, .id = id, .name = name };
+    self.cmds.append(gpa, c) catch {
+        gpa.free(name);
+        gpa.destroy(c);
+        results[0] = -1;
+        return;
+    };
+    _ = self.ctx.commands.bind(gpa, name, .{
+        .name = c.name,
+        .summary = "js",
+        .args = &.{},
+        .handler = jsCmdTramp,
+        .data = c,
+    }) catch {
+        results[0] = -1;
+        return;
+    };
+    results[0] = id;
 }
 
 // ── The `weft.*` config imports: read the guest's strings, drive the ctx.
@@ -362,6 +510,28 @@ test "quickjs: weft.action + weft.provide wire the pick dispatch layer" {
     try t.expectEqualStrings("zig-eval", env.ctx.actions.resolve("eval", .{ .mode = "normal", .lang = "zig" }).?);
     try t.expectEqualStrings("python-repl", env.ctx.actions.resolve("eval", .{ .mode = "normal", .lang = "py" }).?);
     try t.expectEqualStrings("eval-line", env.ctx.actions.resolve("eval", .{ .mode = "normal", .lang = "md" }).?);
+}
+
+test "quickjs: a JS plugin registers a command dispatched back into JS" {
+    const gpa = t.allocator;
+    var env: Env = undefined;
+    try Env.init(gpa, &env);
+    defer env.deinit(gpa);
+    var engine = try wasm.Engine.init();
+    defer engine.deinit();
+
+    // The plugin plane: a PERSISTENT quickjs instance that registers a command
+    // and receives its dispatch back — the JS-plugin reactor, proving the
+    // describe/init/on_command lifecycle works one layer up under the engine.
+    const src =
+        \\weft.command("greet", () => weft.echo("hi from js"));
+    ;
+    var plugin = try JsPlugin.load(gpa, &engine, &env.ctx, src);
+    defer plugin.deinit();
+
+    try t.expect(env.commands.resolve("greet") != null);
+    _ = try command.run(&env.commands, &env.ctx, "greet", &.{});
+    try t.expectEqualStrings("hi from js", env.echo.items);
 }
 
 test "quickjs: a config syntax error surfaces as ConfigException, not silent" {

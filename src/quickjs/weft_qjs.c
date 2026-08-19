@@ -37,6 +37,11 @@ extern void host_set(const char *plugin, int plugin_len,
                      const char *blob, int blob_len);
 __attribute__((import_module("weft"), import_name("qjs_menu")))
 extern void host_menu(const char *name, int name_len);
+// Plugin plane (persistent runtime): register a command, get a host-assigned id
+// (the value the host passes back to weft_on_command). Config satisfies this
+// import with a stub (it never registers commands).
+__attribute__((import_module("weft"), import_name("qjs_register")))
+extern int host_register(const char *name, int name_len);
 __attribute__((import_module("weft"), import_name("qjs_action")))
 extern void host_action(const char *name, int name_len);
 __attribute__((import_module("weft"), import_name("qjs_provide")))
@@ -243,6 +248,84 @@ static void install_weft(JSContext *ctx) {
     JS_SetPropertyStr(ctx, weft, "provide", JS_NewCFunction(ctx, js_provide, "provide", 3));
     JS_SetPropertyStr(ctx, global, "weft", weft);
     JS_FreeValue(ctx, global);
+}
+
+// ── Plugin plane: a PERSISTENT runtime (distinct from the per-eval config
+// path above). One quickjs.wasm instance per JS plugin, so these statics are
+// per-plugin. The plugin's JS registers command handlers via weft.command and
+// the host dispatches them by id through weft_on_command — the same
+// describe/init/on_command lifecycle a .wasm plugin has, one layer up. ──
+static JSRuntime *g_rt = NULL;
+static JSContext *g_ctx = NULL;
+static JSValue g_cmds; // JS array: id -> handler fn
+
+// weft.command(name, fn): register a command and remember its handler by the
+// host-assigned id.
+static JSValue js_command(JSContext *ctx, JSValueConst this_val,
+                          int argc, JSValueConst *argv) {
+    if (argc < 2 || !JS_IsFunction(ctx, argv[1]))
+        return JS_ThrowTypeError(ctx, "command(name, fn)");
+    size_t nl;
+    const char *name = JS_ToCStringLen(ctx, &nl, argv[0]);
+    if (!name) return JS_EXCEPTION;
+    int id = host_register(name, (int)nl);
+    JS_FreeCString(ctx, name);
+    if (id >= 0) JS_SetPropertyUint32(ctx, g_cmds, (uint32_t)id, JS_DupValue(ctx, argv[1]));
+    return JS_UNDEFINED;
+}
+
+static void log_exception(JSContext *ctx) {
+    JSValue exc = JS_GetException(ctx);
+    const char *msg = JS_ToCString(ctx, exc);
+    if (msg) {
+        host_log(msg, (int)strlen(msg));
+        JS_FreeCString(ctx, msg);
+    }
+    JS_FreeValue(ctx, exc);
+}
+
+// weft_plugin_init(src, len): stand up the persistent runtime, install the
+// weft globals + weft.command, and eval the plugin body (which registers its
+// commands and does setup — the describe()+init() of a JS plugin). 0 / -1.
+__attribute__((export_name("weft_plugin_init")))
+int weft_plugin_init(const char *src, int len) {
+    if (g_rt) return -1; // one plugin per instance
+    g_rt = JS_NewRuntime();
+    if (!g_rt) return -1;
+    g_ctx = JS_NewContext(g_rt);
+    if (!g_ctx) {
+        JS_FreeRuntime(g_rt);
+        g_rt = NULL;
+        return -1;
+    }
+    install_weft(g_ctx);
+    g_cmds = JS_NewArray(g_ctx);
+    JSValue global = JS_GetGlobalObject(g_ctx);
+    JSValue weft = JS_GetPropertyStr(g_ctx, global, "weft");
+    JS_SetPropertyStr(g_ctx, weft, "command", JS_NewCFunction(g_ctx, js_command, "command", 2));
+    JS_FreeValue(g_ctx, weft);
+    JS_FreeValue(g_ctx, global);
+    JSValue val = JS_Eval(g_ctx, src, (size_t)len, "<plugin>", JS_EVAL_TYPE_GLOBAL);
+    int rc = 0;
+    if (JS_IsException(val)) {
+        log_exception(g_ctx);
+        rc = -1;
+    }
+    JS_FreeValue(g_ctx, val);
+    return rc;
+}
+
+// weft_on_command(id): dispatch to the JS handler registered under `id`.
+__attribute__((export_name("weft_on_command")))
+void weft_on_command(int id) {
+    if (!g_ctx) return;
+    JSValue fn = JS_GetPropertyUint32(g_ctx, g_cmds, (uint32_t)id);
+    if (JS_IsFunction(g_ctx, fn)) {
+        JSValue r = JS_Call(g_ctx, fn, JS_UNDEFINED, 0, NULL);
+        if (JS_IsException(r)) log_exception(g_ctx);
+        JS_FreeValue(g_ctx, r);
+    }
+    JS_FreeValue(g_ctx, fn);
 }
 
 // Evaluate `len` bytes of JS at `src` (owned by the host, in linear memory)
