@@ -70,6 +70,10 @@ extern void host_file_write(const char *path, int path_len, const char *content,
 // The text of the active buffer's current line (at the cursor) — a prompt line.
 __attribute__((import_module("weft"), import_name("qjs_line_text")))
 extern int host_line_text(char *out, int cap);
+// Open a pick (prompt + newline-joined options); the accepted index comes back
+// via weft_on_pick. An async approve/deny for a permission request.
+__attribute__((import_module("weft"), import_name("qjs_pick")))
+extern void host_pick(const char *prompt, int plen, const char *opts, int olen);
 __attribute__((import_module("weft"), import_name("qjs_action")))
 extern void host_action(const char *name, int name_len);
 __attribute__((import_module("weft"), import_name("qjs_provide")))
@@ -287,6 +291,7 @@ static JSRuntime *g_rt = NULL;
 static JSContext *g_ctx = NULL;
 static JSValue g_cmds; // JS array: id -> handler fn
 static JSValue g_on_output; // handler (handle) => void for proc-stream output
+static JSValue g_on_pick; // handler (index) => void for a pick accept
 
 // weft.command(name, fn): register a command and remember its handler by the
 // host-assigned id.
@@ -429,6 +434,29 @@ static JSValue js_on_output(JSContext *ctx, JSValueConst this_val,
     return JS_UNDEFINED;
 }
 
+// weft.pick(prompt, options): options is a newline-joined list; the accepted
+// index (or -1 for free text) comes back to weft.onPick's handler.
+static JSValue js_pick(JSContext *ctx, JSValueConst this_val,
+                       int argc, JSValueConst *argv) {
+    if (argc < 2) return JS_UNDEFINED;
+    size_t pl, ol;
+    const char *prompt = JS_ToCStringLen(ctx, &pl, argv[0]);
+    const char *opts = JS_ToCStringLen(ctx, &ol, argv[1]);
+    if (prompt && opts) host_pick(prompt, (int)pl, opts, (int)ol);
+    JS_FreeCString(ctx, prompt);
+    JS_FreeCString(ctx, opts);
+    return JS_UNDEFINED;
+}
+
+// weft.onPick(fn): register the handler fired with the accepted option index.
+static JSValue js_on_pick(JSContext *ctx, JSValueConst this_val,
+                          int argc, JSValueConst *argv) {
+    if (argc < 1 || !JS_IsFunction(ctx, argv[0])) return JS_UNDEFINED;
+    JS_FreeValue(ctx, g_on_pick);
+    g_on_pick = JS_DupValue(ctx, argv[0]);
+    return JS_UNDEFINED;
+}
+
 static void log_exception(JSContext *ctx) {
     JSValue exc = JS_GetException(ctx);
     const char *msg = JS_ToCString(ctx, exc);
@@ -456,6 +484,7 @@ int weft_plugin_init(const char *src, int len) {
     install_weft(g_ctx);
     g_cmds = JS_NewArray(g_ctx);
     g_on_output = JS_UNDEFINED;
+    g_on_pick = JS_UNDEFINED;
     JSValue global = JS_GetGlobalObject(g_ctx);
     JSValue weft = JS_GetPropertyStr(g_ctx, global, "weft");
     JS_SetPropertyStr(g_ctx, weft, "command", JS_NewCFunction(g_ctx, js_command, "command", 2));
@@ -468,6 +497,8 @@ int weft_plugin_init(const char *src, int len) {
     JS_SetPropertyStr(g_ctx, weft, "fileRead", JS_NewCFunction(g_ctx, js_file_read, "fileRead", 1));
     JS_SetPropertyStr(g_ctx, weft, "fileWrite", JS_NewCFunction(g_ctx, js_file_write, "fileWrite", 2));
     JS_SetPropertyStr(g_ctx, weft, "lineText", JS_NewCFunction(g_ctx, js_line_text, "lineText", 0));
+    JS_SetPropertyStr(g_ctx, weft, "pick", JS_NewCFunction(g_ctx, js_pick, "pick", 2));
+    JS_SetPropertyStr(g_ctx, weft, "onPick", JS_NewCFunction(g_ctx, js_on_pick, "onPick", 1));
     JS_SetPropertyStr(g_ctx, weft, "onOutput", JS_NewCFunction(g_ctx, js_on_output, "onOutput", 1));
     JS_FreeValue(g_ctx, weft);
     JS_FreeValue(g_ctx, global);
@@ -487,6 +518,17 @@ void weft_on_output(int handle) {
     if (!g_ctx || !JS_IsFunction(g_ctx, g_on_output)) return;
     JSValue arg = JS_NewInt32(g_ctx, handle);
     JSValue r = JS_Call(g_ctx, g_on_output, JS_UNDEFINED, 1, &arg);
+    if (JS_IsException(r)) log_exception(g_ctx);
+    JS_FreeValue(g_ctx, r);
+    JS_FreeValue(g_ctx, arg);
+}
+
+// weft_on_pick(index): dispatch the accepted pick option index (-1 = free text).
+__attribute__((export_name("weft_on_pick")))
+void weft_on_pick(int index) {
+    if (!g_ctx || !JS_IsFunction(g_ctx, g_on_pick)) return;
+    JSValue arg = JS_NewInt32(g_ctx, index);
+    JSValue r = JS_Call(g_ctx, g_on_pick, JS_UNDEFINED, 1, &arg);
     if (JS_IsException(r)) log_exception(g_ctx);
     JS_FreeValue(g_ctx, r);
     JS_FreeValue(g_ctx, arg);

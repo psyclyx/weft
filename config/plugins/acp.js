@@ -20,6 +20,7 @@ let sid = null; // the ACP session id, once session/new returns
 let nextId = 0; // JSON-RPC request id counter
 let pending = null; // the prompt to send once the session exists
 let buf = ""; // partial-line accumulator for the NDJSON stream
+let pendingPerm = null; // an outstanding session/request_permission: {id, optionIds}
 
 function rpc(method, params) {
   const id = nextId++;
@@ -76,8 +77,16 @@ function onMessage(msg) {
     return;
   }
   if (msg.method === "session/request_permission") {
-    // Default-deny until the pick membrane is wired (never silently allow).
-    respond(msg.id, { outcome: { outcome: "cancelled" } });
+    const p = msg.params || {};
+    const opts = p.options || [];
+    if (!opts.length) {
+      respond(msg.id, { outcome: { outcome: "cancelled" } });
+      return;
+    }
+    // Ask the user (a pick); the choice comes back via weft.onPick below.
+    pendingPerm = { id: msg.id, optionIds: opts.map((o) => o.optionId) };
+    const title = (p.toolCall && (p.toolCall.title || p.toolCall.toolCallId)) || "permission";
+    weft.pick("agent · " + title, opts.map((o) => o.name).join("\n"));
     return;
   }
 
@@ -90,6 +99,19 @@ function onMessage(msg) {
   }
   // msg.id === 2: the turn finished (a stopReason) — nothing to do here yet.
 }
+
+// A permission pick was accepted: answer the agent with the chosen option (or
+// cancelled for an out-of-range / dismissed choice).
+weft.onPick((index) => {
+  if (!pendingPerm) return;
+  const p = pendingPerm;
+  pendingPerm = null;
+  if (index < 0 || index >= p.optionIds.length) {
+    respond(p.id, { outcome: { outcome: "cancelled" } });
+  } else {
+    respond(p.id, { outcome: { outcome: "selected", optionId: p.optionIds[index] } });
+  }
+});
 
 weft.onOutput((h) => {
   buf += weft.procRead(h);

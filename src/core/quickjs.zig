@@ -18,6 +18,7 @@ const task = @import("task.zig");
 const proc_stream = @import("proc_stream.zig");
 const Buffers = @import("Buffers.zig");
 const authority = @import("authority.zig");
+const pick_mod = @import("pick.zig");
 
 /// The embedded engine+shim (built from quickjs-ng + weft_qjs.c by build.zig).
 pub const quickjs_wasm: []const u8 = @embedFile("quickjs_wasm");
@@ -112,6 +113,7 @@ pub fn evalConfig(engine: *wasm.Engine, ctx: *command.Context, loader: ?PluginLo
     try linker.defineFn("weft", "qjs_file_read", 4, 1, cStubI32, &bridge);
     try linker.defineFn("weft", "qjs_file_write", 4, 0, cStubVoid, &bridge);
     try linker.defineFn("weft", "qjs_line_text", 2, 1, cStubI32, &bridge);
+    try linker.defineFn("weft", "qjs_pick", 4, 0, cStubVoid, &bridge);
 
     var instance = try linker.instantiateWasi(&module);
     defer instance.deinit();
@@ -212,6 +214,7 @@ pub const JsPlugin = struct {
         try self.linker.defineFn("weft", "qjs_file_read", 4, 1, cFileRead, self);
         try self.linker.defineFn("weft", "qjs_file_write", 4, 0, cAgentWrite, self);
         try self.linker.defineFn("weft", "qjs_line_text", 2, 1, cLineText, self);
+        try self.linker.defineFn("weft", "qjs_pick", 4, 0, cPick, self);
 
         self.instance = try self.linker.instantiateWasi(&self.module);
         errdefer self.instance.deinit();
@@ -424,6 +427,47 @@ fn cFileRead(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32, results
     };
     defer gpa.free(bytes);
     results[0] = @intCast(caller.writeMemory(@intCast(args[2]), @intCast(args[3]), bytes) catch 0);
+}
+
+/// A JS plugin's open pick — dispatches the accepted index back into the
+/// instance via `weft_on_pick`. Freed by `jsPickCleanup`.
+const JsBoundPick = struct { plugin: *JsPlugin };
+
+/// weft.pick(prompt, options): open a pick over the newline-joined options,
+/// bound to this JS plugin; the accepted index returns via `weft_on_pick` (the
+/// async approve/deny round-trip — an agent's permission request).
+fn cPick(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32, results: []i32) void {
+    _ = results;
+    const self: *JsPlugin = @ptrCast(@alignCast(data.?));
+    const gpa = self.gpa;
+    const prompt = caller.readMemory(gpa, @intCast(args[0]), @intCast(args[1])) catch return;
+    defer gpa.free(prompt);
+    const opts = caller.readMemory(gpa, @intCast(args[2]), @intCast(args[3])) catch return;
+    defer gpa.free(opts);
+    var entries: std.ArrayList(pick_mod.Entry) = .empty;
+    defer entries.deinit(gpa);
+    var it = std.mem.splitScalar(u8, opts, '\n');
+    while (it.next()) |o| if (o.len > 0) entries.append(gpa, .{ .text = o, .doc = "" }) catch {};
+    const bp = gpa.create(JsBoundPick) catch return;
+    bp.* = .{ .plugin = self };
+    // pick.open copies the entry text/doc, so `opts` may free after this.
+    self.ctx.pick.open(self.ctx, prompt, entries.items, .{
+        .handler = jsPickAccept,
+        .cleanup = jsPickCleanup,
+        .data = bp,
+    }) catch gpa.destroy(bp);
+}
+
+fn jsPickAccept(ctx: *command.Context, data: ?*anyopaque, choice: []const u8) anyerror!void {
+    _ = choice;
+    const bp: *JsBoundPick = @ptrCast(@alignCast(data.?));
+    const idx: i32 = if (ctx.pick.accepted_index) |i| @intCast(i) else -1;
+    bp.plugin.instance.callVoid("weft_on_pick", &.{idx}) catch {};
+}
+
+fn jsPickCleanup(data: ?*anyopaque, gpa: Allocator) void {
+    const bp: *JsBoundPick = @ptrCast(@alignCast(data.?));
+    gpa.destroy(bp);
 }
 
 /// weft.lineText() → the active buffer's current line (at the cursor), for a
