@@ -97,6 +97,7 @@ pub fn defineImports(linker: *wasm.Linker, p: *WasmPlugin) !void {
     try d(linker, "wl_set_fallback", 4, 0, hSetFallback, p);
     try d(linker, "wl_text_input", 5, 0, hTextInput, p);
     try d(linker, "wl_menu_mode", 2, 0, hMenuMode, p);
+    try d(linker, "wl_sticky_menu", 2, 0, hStickyMenu, p);
     try d(linker, "wl_run", 2, 0, hRun, p);
     try d(linker, "wl_run_int", 3, 0, hRunInt, p);
     try d(linker, "wl_run_str", 4, 0, hRunStr, p);
@@ -1515,6 +1516,16 @@ fn hMenuMode(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32, results
     const mode = caller.readMemory(p.gpa, @intCast(args[0]), @intCast(args[1])) catch return;
     defer p.gpa.free(mode);
     p.ctx.keymap.markMenuMode(p.gpa, mode) catch {};
+}
+
+/// `sticky_menu(mode)`: mark a menu mode STICKY — it stays open after a leaf
+/// key (flag-accumulating transients) instead of one-shot auto-popping.
+fn hStickyMenu(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32, results: []i32) void {
+    _ = results;
+    const p: *WasmPlugin = @ptrCast(@alignCast(data.?));
+    const mode = caller.readMemory(p.gpa, @intCast(args[0]), @intCast(args[1])) catch return;
+    defer p.gpa.free(mode);
+    p.ctx.keymap.markStickyMenu(p.gpa, mode) catch {};
 }
 
 fn hRun(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32, results: []i32) void {

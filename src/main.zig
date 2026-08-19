@@ -2061,9 +2061,11 @@ fn dispatchKey(ctx: *core.command.Context, view: *view_mod.View, ev: wayland.Key
                 else => {},
             }
             // One-shot menu: still in the menu we entered on ⇒ pop to its return
-            // target (the root non-menu mode). setMode dupes internally.
+            // target (the root non-menu mode). setMode dupes internally. A STICKY
+            // menu is exempt — it stays open so flag toggles accumulate; it
+            // leaves only via an explicit mode change (execute) or Escape.
             if (menu_before) |m| {
-                if (std.mem.eql(u8, ctx.keymap.currentMode(), m)) {
+                if (!ctx.keymap.isStickyMenu(m) and std.mem.eql(u8, ctx.keymap.currentMode(), m)) {
                     if (ctx.keymap.menuReturn(m)) |ret| ctx.keymap.setMode(ctx.gpa, ret) catch {};
                 }
             }

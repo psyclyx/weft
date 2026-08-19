@@ -49,6 +49,12 @@ menu_modes: std.StringArrayHashMapUnmanaged(void) = .empty,
 /// Already resolved to the root non-menu mode at record time, so nested menus
 /// (leader→leader-file) collapse to one hop back to normal.
 menu_return: std.StringArrayHashMapUnmanaged([]u8) = .empty,
+/// Menu modes that STAY OPEN after a leaf key (the one-shot auto-pop is
+/// suppressed) — flag-accumulating transients (magit's push/fetch option
+/// popups): toggle keys mutate state and re-render while the menu persists;
+/// only an explicit mode change (execute, or Escape → the return target)
+/// leaves. A subset of `menu_modes`, so which-key still lists the keys.
+sticky_menus: std.StringArrayHashMapUnmanaged(void) = .empty,
 
 pub const empty: Keymap = .{};
 
@@ -75,6 +81,8 @@ pub fn deinit(self: *Keymap, gpa: Allocator) void {
     self.text_commands.deinit(gpa);
     for (self.menu_modes.keys()) |k| gpa.free(k);
     self.menu_modes.deinit(gpa);
+    for (self.sticky_menus.keys()) |k| gpa.free(k);
+    self.sticky_menus.deinit(gpa);
     for (self.menu_return.keys(), self.menu_return.values()) |k, v| {
         gpa.free(k);
         gpa.free(v);
@@ -222,6 +230,20 @@ pub fn isMenuMode(self: *const Keymap, mode: []const u8) bool {
     return self.menu_modes.contains(mode);
 }
 
+/// Declare `mode` a STICKY menu: it stays open after a leaf key instead of
+/// auto-popping to its return target (flag-accumulating transients). Implies
+/// menu-mode, so which-key still lists its keys.
+pub fn markStickyMenu(self: *Keymap, gpa: Allocator, mode: []const u8) Allocator.Error!void {
+    try self.markMenuMode(gpa, mode);
+    const gop = try self.sticky_menus.getOrPut(gpa, mode);
+    if (!gop.found_existing) gop.key_ptr.* = try gpa.dupe(u8, mode);
+}
+
+/// Whether `mode` stays open after a leaf key (see `markStickyMenu`).
+pub fn isStickyMenu(self: *const Keymap, mode: []const u8) bool {
+    return self.sticky_menus.contains(mode);
+}
+
 /// Append `mode`'s own bindings (key → command) to `out`, in bind order.
 /// For which-key: a leaf menu mode's whole table.
 pub fn ownBindings(self: *const Keymap, gpa: Allocator, mode: []const u8, out: *std.ArrayList(Binding)) Allocator.Error!void {
@@ -346,6 +368,20 @@ test "keymap: menu modes are leaf prefix tables, with enumerable bindings" {
     try t.expectEqual(@as(usize, 2), hints.items.len);
     try t.expectEqualStrings("f", hints.items[0].key);
     try t.expectEqualStrings("find-file", hints.items[0].command);
+}
+
+test "keymap: sticky menus stay open (implies menu-mode)" {
+    const gpa = t.allocator;
+    var km: Keymap = .empty;
+    defer km.deinit(gpa);
+
+    try t.expect(!km.isStickyMenu("git-push-menu"));
+    try km.markStickyMenu(gpa, "git-push-menu");
+    try t.expect(km.isStickyMenu("git-push-menu"));
+    try t.expect(km.isMenuMode("git-push-menu")); // sticky implies menu-mode
+    // A plain menu isn't sticky — it still one-shot auto-pops.
+    try km.markMenuMode(gpa, "leader");
+    try t.expect(!km.isStickyMenu("leader"));
 }
 
 test "keymap: menu return targets — guest entry records, nesting collapses to root" {

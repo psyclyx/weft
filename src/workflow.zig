@@ -134,7 +134,7 @@ pub const Editor = struct {
             defer if (before) |b| self.gpa.free(b);
             _ = command.run(&self.commands, &self.ctx, cmd, &.{}) catch {};
             if (before) |b| {
-                if (std.mem.eql(u8, self.keymap.currentMode(), b)) {
+                if (!self.keymap.isStickyMenu(b) and std.mem.eql(u8, self.keymap.currentMode(), b)) {
                     if (self.keymap.menuReturn(b)) |ret| self.keymap.setMode(self.gpa, ret) catch {};
                 }
             }
