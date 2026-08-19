@@ -34,6 +34,8 @@ const cursor_config = @import("app/cursor_config.zig");
 const config_load = @import("app/config_load.zig");
 const dispatch = @import("app/dispatch.zig");
 const setup = @import("app/setup.zig");
+const session_mod = @import("app/session.zig");
+const Session = session_mod.Session;
 const render_mod = @import("app/render.zig");
 const frame_mod = @import("app/frame.zig");
 const collab = @import("app/collab.zig");
@@ -90,8 +92,32 @@ pub fn main(init: std.process.Init) !void {
     defer if (attach_deps_ptr) |d| d.deinitShells();
     var pool = try core.task.Pool.init(gpa, .{});
     defer pool.deinit();
-    var buffers = try core.Buffers.init(gpa, pool, args.user);
-    defer buffers.deinit(gpa);
+
+    // Grammars are data: builtins seeded, config extends via command.
+    var grammars = try core.syntax.Runtime.initBuiltins(gpa);
+    defer grammars.deinit(gpa);
+    // Language servers are data: config registers (extension, command)
+    // pairs; nothing here names a server. Both registries exist before the
+    // session so its capability consumers can bind grammar-add/lsp-add onto
+    // them; they move into `Providers` next.
+    var lsp_servers: LspServers = .empty;
+    defer lsp_servers.deinit(gpa);
+    // which-key: show the hint popup immediately (bypass the idle delay). If not
+    // already in a menu, open the leader menu — so a help key (F1) surfaces it
+    // from anywhere. Dispatch reads it; the session's caret commands bind it.
+    var which_key_now = false;
+
+    // ── Core editing state ──
+    // `Session` owns the buffers, the command/keymap/pick surfaces, the caps
+    // store, the echo line + quit flag, the capability-consumer UIs and the
+    // caret config. Built IN PLACE (cmd_ctx borrows its siblings), it installs
+    // the built-ins and binds the capability + caret/which-key commands in
+    // registration order; its deinit frees them in the reverse order main()
+    // used to.
+    var session: Session = undefined;
+    try session.init(gpa, pool, args.user, &grammars, &lsp_servers, &which_key_now);
+    defer session.deinit(gpa);
+    const buffers = &session.buffers;
     if (args.file) |path| {
         const b0 = buffers.active();
         gpa.free(b0.name);
@@ -125,57 +151,6 @@ pub fn main(init: std.process.Init) !void {
     // Stable: buffer 0 outlives the run; wire v1 collab binds to it.
     const ed0 = &buffers.active().editor;
 
-    // ── Command surface + config plugin ──
-    var commands: core.command.Commands = .empty;
-    defer commands.deinit(gpa);
-    var keymap: core.Keymap = .empty;
-    defer keymap.deinit(gpa);
-    var pick_state: core.Pick = .empty;
-    defer pick_state.deinit(gpa);
-    var caps = core.Caps.init(gpa, core.task.nowNs);
-    defer caps.deinit();
-    var quit = false;
-    var echo_line: std.ArrayList(u8) = .empty;
-    defer echo_line.deinit(gpa);
-    var cmd_ctx: core.command.Context = .{
-        .gpa = gpa,
-        .buffers = &buffers,
-        .commands = &commands,
-        .keymap = &keymap,
-        .pick = &pick_state,
-        .caps = &caps,
-        .quit = &quit,
-        .echo = &echo_line,
-    };
-    try core.builtins.install(gpa, &commands, &keymap);
-    // Capability consumers — written against capability names only. The
-    // vars live here (used by the frame loop + their defers); `setup`
-    // runs the mechanical bind sequence in registration order.
-    var completion_ui: core.complete_ui.CompletionUi = .empty;
-    var def_ui: core.nav_ui.DefinitionUi = .empty;
-    var sym_ui: core.nav_ui.SymbolsUi = .empty;
-    defer sym_ui.deinit(gpa);
-    var hover_ui: core.nav_ui.HoverUi = .empty;
-    defer hover_ui.deinit(gpa);
-    // Grammars are data: builtins seeded, config extends via command.
-    var grammars = try core.syntax.Runtime.initBuiltins(gpa);
-    defer grammars.deinit(gpa);
-    // Language servers are data: config registers (extension, command)
-    // pairs; nothing here names a server.
-    var lsp_servers: LspServers = .empty;
-    defer lsp_servers.deinit(gpa);
-    try setup.registerCapabilityConsumers(gpa, &commands, &completion_ui, &def_ui, &sym_ui, &hover_ui, &grammars, &lsp_servers);
-
-    // Caret config commands, registered before the config runs so it can
-    // set per-mode styles at load time.
-    var cursor_cfg = cursor_config.CursorConfig{ .gpa = gpa };
-    defer cursor_cfg.deinit();
-    // which-key: show the hint popup immediately (bypass the idle delay). If not
-    // already in a menu, open the leader menu — so a help key (F1) surfaces it
-    // from anywhere.
-    var which_key_now = false;
-    try setup.registerCursorCommands(gpa, &commands, &cursor_cfg, &which_key_now);
-
     // This machine's long-term identity (generated + persisted on first
     // run). Names us to peers; the fingerprint is what a human verifies.
     var my_identity = core.identity.loadOrGenerate(gpa, init.minimal.environ) catch |err| blk: {
@@ -187,7 +162,7 @@ pub fn main(init: std.process.Init) !void {
     // status line's peer trust; first contact is accepted but unverified).
     var known_peers = try core.known_peers.KnownPeers.load(gpa, init.minimal.environ);
     defer known_peers.deinit();
-    _ = try commands.bind(gpa, "identity", .{
+    _ = try session.commands.bind(gpa, "identity", .{
         .name = "identity",
         .summary = "Show this machine's identity fingerprint.",
         .args = &.{},
@@ -228,7 +203,7 @@ pub fn main(init: std.process.Init) !void {
     var plugin_host: config_load.PluginHost = .{
         .gpa = gpa,
         .engine = &wasm_engine,
-        .ctx = &cmd_ctx,
+        .ctx = &session.cmd_ctx,
         .opts = .{ .kv = &plugin_kv, .config = &config_kv, .loop = &plugin_loop, .subbuffers = &plugin_subs, .syntax_of = resolveSyntax, .pool = pool, .module_cache_dir = module_cache_dir },
         .list = &plugins,
         .dir = plugin_dir,
@@ -244,7 +219,7 @@ pub fn main(init: std.process.Init) !void {
     // bare weft with no plugins is modeless. Absent or broken config is a
     // warning, never fatal.
     if (args.config) |config_path| {
-        config_load.loadJsConfig(gpa, &cmd_ctx, config_path, plugin_host.loader(), &config_kv) catch |e|
+        config_load.loadJsConfig(gpa, &session.cmd_ctx, config_path, plugin_host.loader(), &config_kv) catch |e|
             std.log.warn("config: {s} failed to load: {t}", .{ config_path, e });
     }
 
@@ -253,7 +228,7 @@ pub fn main(init: std.process.Init) !void {
         .gpa = gpa,
         .grammars = &grammars,
         .lsp_servers = &lsp_servers,
-        .caps = &caps,
+        .caps = &session.caps,
         .environ = init.minimal.environ,
         // Placement routing: for a remote-hosted document the server
         // runs on the host peer and diagnostics arrive as the imported
@@ -268,7 +243,7 @@ pub fn main(init: std.process.Init) !void {
     try attachProviders(&attach_deps, buffers.active());
     // The graphical shell's open/close know about providers and remote
     // shells; they shadow the core versions (registry last-wins).
-    try buffers_cmds.registerCommands(gpa, &commands, &attach_deps);
+    try buffers_cmds.registerCommands(gpa, &session.commands, &attach_deps);
 
     // ── Connection (wire v1.1: N shared buffers over one session) ──
     var fd_link: core.session.FdLink = undefined;
@@ -315,9 +290,9 @@ pub fn main(init: std.process.Init) !void {
         collab_session = try core.session.Session.create(gpa, fd_link.link(), .client, args.token, .own, &my_identity);
         conn = try core.session.Conn.init(gpa, collab_session.?, args.user, .client);
         const col = try conn.?.bindPrimary(&ed0.doc, 0);
-        col.presence_layer = try caps.layers.claim(gpa, &ed0.doc, "presence", .replicated, "collab");
+        col.presence_layer = try session.caps.layers.claim(gpa, &ed0.doc, "presence", .replicated, "collab");
         // Host-scoped feeds (diagnostics) arrive over the wire.
-        col.import_diag_layer = try caps.layers.claim(gpa, &ed0.doc, "diagnostics", .host, "remote-host");
+        col.import_diag_layer = try session.caps.layers.claim(gpa, &ed0.doc, "diagnostics", .host, "remote-host");
         col.remote_fs = &remote_fs; // client can list/read the host's shared root
         if (args.partial) {
             partial_state = core.session.PartialDoc.init(gpa, &ed0.doc);
@@ -327,9 +302,9 @@ pub fn main(init: std.process.Init) !void {
     var share_ctx: ShareCtx = .{
         .conn = &conn,
         .hub = &hub,
-        .caps = &caps,
+        .caps = &session.caps,
         .gpa = gpa,
-        .buffers = &buffers,
+        .buffers = buffers,
         .partial = &partial_state,
         .session = &collab_session,
         .known = &known_peers,
@@ -348,7 +323,7 @@ pub fn main(init: std.process.Init) !void {
         share_ctx.pending_listen = port;
         share_ctx.pending_access = args.access;
     }
-    try collab_cmds.registerCommands(gpa, &commands, &share_ctx, &known_peers);
+    try collab_cmds.registerCommands(gpa, &session.commands, &share_ctx, &known_peers);
     // Window layout: a recursive split tree over the region geometry. Core
     // commands only RECORD intent on `win_ctx`; the frame loop applies them
     // (splitFocused/closeFocused/focus/move by pane geometry) and keeps the
@@ -358,7 +333,7 @@ pub fn main(init: std.process.Init) !void {
     var win_ctx: window_cmds.WindowCtx = .{};
     // Stable storage so each command's `data` pointer stays valid for the run.
     var window_action_ctx: [window_cmds.cmd_count]window_cmds.WindowActionCtx = undefined;
-    try window_cmds.registerCommands(gpa, &commands, &win_ctx, &window_action_ctx);
+    try window_cmds.registerCommands(gpa, &session.commands, &win_ctx, &window_action_ctx);
 
     // ── Window + Vulkan ──
     const window = try wayland.Window.init(1280, 800, "weft", "dev.psyclyx.weft");
@@ -401,13 +376,13 @@ pub fn main(init: std.process.Init) !void {
     // don't see), so they're registered here. `view.top_row` is always the
     // focused pane's scroll.
     var scroll_ctx: scroll.ScrollCtx = .{ .view = view, .fb = &fb };
-    try scroll.registerCommands(gpa, &commands, &scroll_ctx);
+    try scroll.registerCommands(gpa, &session.commands, &scroll_ctx);
 
     // Theme is DATA: a runtime/bindable `set-color <name> <#hex>`, plus colors
     // the config staged declaratively via weft.set("theme", "<field>", "#hex").
     // Re-linearized per-field on mutation (Theme.setColor), so the draw path
     // stays a plain lookup.
-    _ = try commands.bind(gpa, "set-color", .{
+    _ = try session.commands.bind(gpa, "set-color", .{
         .name = "set-color",
         .summary = "Set a theme color (name, #rrggbb).",
         .args = &.{ .{ .name = "name", .type = .string }, .{ .name = "hex", .type = .string } },
@@ -487,13 +462,13 @@ pub fn main(init: std.process.Init) !void {
     // clock are passed as `frame.Active`). Owns nothing.
     const fx: frame_mod.FrameCtx = .{
         .gpa = gpa,
-        .buffers = &buffers,
-        .caps = &caps,
-        .keymap = &keymap,
-        .pick = &pick_state,
-        .echo = &echo_line,
-        .hover_ui = &hover_ui,
-        .cursor_cfg = &cursor_cfg,
+        .buffers = buffers,
+        .caps = &session.caps,
+        .keymap = &session.keymap,
+        .pick = &session.pick,
+        .echo = &session.echo,
+        .hover_ui = &session.hover_ui,
+        .cursor_cfg = &session.cursor_cfg,
         .plugins = &plugins,
         .conn = &conn,
         .hub = &hub,
@@ -512,7 +487,7 @@ pub fn main(init: std.process.Init) !void {
 
     std.log.info("weft: rendering — {d} bytes open, em {d}", .{ ed0.text().byteLen(), args.em });
 
-    while (!window.shouldClose() and !quit) {
+    while (!window.shouldClose() and !session.quit) {
         const frame_start = stats_mod.nowNs();
         window.pumpEvents();
 
@@ -543,7 +518,7 @@ pub fn main(init: std.process.Init) !void {
         while (window.nextKeyEvent()) |ev| {
             if (!ev.pressed) continue;
             had_input = true;
-            try dispatch.dispatchKey(&cmd_ctx, view, ev, fb[1]);
+            try dispatch.dispatchKey(&session.cmd_ctx, view, ev, fb[1]);
         }
         if (window.shouldClose()) break;
 
@@ -568,24 +543,24 @@ pub fn main(init: std.process.Init) !void {
         if (had_input) {
             blink_on = true;
             blink_next_ns = frame_start + blink_period_ns;
-        } else if (cursor_cfg.blinkFor(keymap.currentMode()) and frame_start >= blink_next_ns) {
+        } else if (session.cursor_cfg.blinkFor(session.keymap.currentMode()) and frame_start >= blink_next_ns) {
             blink_on = !blink_on;
             blink_next_ns = frame_start + blink_period_ns;
             view_dirty = true;
         }
 
         // ── Async housekeeping tick (backing/LSP/nav/pick/plugins/activate/menu) ──
-        if (try frame_mod.tickAsync(&fx, abuf, attach, &cmd_ctx, &def_ui, &sym_ui, &plugin_loop, &next_backing_poll_ns, &last_activate_path, &last_activate_len, &menu_overlay, &which_key_now, which_key_delay_ns, frame_start))
+        if (try frame_mod.tickAsync(&fx, abuf, attach, &session.cmd_ctx, &session.def_ui, &session.sym_ui, &plugin_loop, &next_backing_poll_ns, &last_activate_path, &last_activate_len, &menu_overlay, &which_key_now, which_key_delay_ns, frame_start))
             view_dirty = true;
         // ── Connect/disconnect/listen intents (outside the hot section:
         // connect blocks on TCP, disconnect joins threads). ──
-        if (collab.applyIntents(&share_ctx, &cmd_ctx, pool, &connect_task, &connect_hostport, &fd_link, &echo_line, &my_identity, args.token, args.user))
+        if (collab.applyIntents(&share_ctx, &session.cmd_ctx, pool, &connect_task, &connect_hostport, &fd_link, &session.echo, &my_identity, args.token, args.user))
             view_dirty = true;
         // ── Window-layout intents (outside the input hot section) ──
-        if (window_cmds.applyIntents(&win_ctx, win_layout, view, &buffers, gpa, &keymap, last_frame_rect))
+        if (window_cmds.applyIntents(&win_ctx, win_layout, view, buffers, gpa, &session.keymap, last_frame_rect))
             view_dirty = true;
         // ── Collab tick (adopt/publish/relay, partial fetch, peer-fs, reconnect) ──
-        if (try collab.tickCollab(&share_ctx, &cmd_ctx, ed0, win_layout, &peer_fs_bridge, &remote_fs, &peer_fs_inflight, &noted_host_fp, &last_liveness, &reconnect, &next_reconnect_ns, &fd_link, &my_identity, pool, args.connect, args.token, &echo_line))
+        if (try collab.tickCollab(&share_ctx, &session.cmd_ctx, ed0, win_layout, &peer_fs_bridge, &remote_fs, &peer_fs_inflight, &noted_host_fp, &last_liveness, &reconnect, &next_reconnect_ns, &fd_link, &my_identity, pool, args.connect, args.token, &session.echo))
             view_dirty = true;
         if (editor.doc.commitCount() != attach.seen_commits) {
             attach.seen_commits = editor.doc.commitCount();
