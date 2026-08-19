@@ -406,10 +406,13 @@ export fn init() void {
     weft.bindKey("git-input-menu", "Escape", "git-input-resume");
     weft.bindKey("git-input-menu", "C-g", "git-input-resume");
 
-    // Push/pull/fetch flag transients: PLAIN modes (NOT menu modes) so toggles
-    // DON'T auto-return — the transient stays open while flags accumulate. State
-    // is painted by our OWN surface (see renderPushSurface & co.), not which-key.
-    weft.textInput("git-push-menu", null);
+    // Push/pull/fetch flag transients: STICKY menu modes. Sticky means a leaf key
+    // does NOT one-shot auto-pop — the transient stays open while flags
+    // accumulate (a toggle re-renders and we're still in the mode); only the
+    // execute key (p/RET, which re-gathers into magit) or Escape/q leaves. Being
+    // menu modes, which-key lists the keys, AND our own surface paints the live
+    // flag state (see renderPushSurface & co.).
+    weft.stickyMenu("git-push-menu");
     weft.bindKey("git-push-menu", "f", "git-push-toggle-force");
     weft.bindKey("git-push-menu", "u", "git-push-toggle-upstream");
     weft.bindKey("git-push-menu", "p", "git-push-do");
@@ -418,7 +421,7 @@ export fn init() void {
     weft.bindKey("git-push-menu", "C-g", "git-menu-cancel-surface");
     weft.bindKey("git-push-menu", "q", "git-menu-cancel-surface");
 
-    weft.textInput("git-pull-menu", null);
+    weft.stickyMenu("git-pull-menu");
     weft.bindKey("git-pull-menu", "r", "git-pull-toggle-rebase");
     weft.bindKey("git-pull-menu", "p", "git-pull-do");
     weft.bindKey("git-pull-menu", "Return", "git-pull-do");
@@ -426,7 +429,7 @@ export fn init() void {
     weft.bindKey("git-pull-menu", "C-g", "git-menu-cancel-surface");
     weft.bindKey("git-pull-menu", "q", "git-menu-cancel-surface");
 
-    weft.textInput("git-fetch-menu", null);
+    weft.stickyMenu("git-fetch-menu");
     weft.bindKey("git-fetch-menu", "a", "git-fetch-toggle-all");
     weft.bindKey("git-fetch-menu", "p", "git-fetch-toggle-prune");
     weft.bindKey("git-fetch-menu", "f", "git-fetch-do");
@@ -1414,7 +1417,7 @@ fn focusBuffer(name: []const u8) bool {
     return false;
 }
 
-// ── push/pull/fetch: flag transients (persistent mode + our own surface) ─────
+// ── push/pull/fetch: flag transients (sticky menu + our own surface) ─────────
 // Flags accumulate in globals; a single key executes. On execute we refresh
 // *magit* (the branch header's ahead/behind reflects the result) rather than
 // dumping normal output. NOTE: `procToBuffer` captures only stdout, so op
