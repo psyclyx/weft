@@ -50,6 +50,11 @@ pub const Hud = struct {
     peers: usize = 0,
     /// Transient `echo` message (wins the right-hand slot).
     echo: ?[]const u8 = null,
+    /// A generic plugin-published status chip, PERSISTENT (unlike `echo`) —
+    /// the same kind of slot as `echo`, one tier up in lifetime. The core knows
+    /// nothing of what it says; a plugin publishes via `weft.status` (a task
+    /// progress, a repl state, an agent's "waiting"). Null = no chip.
+    plugin_status: ?[]const u8 = null,
     pick: ?*const core.Pick = null,
     /// The highlight feed layer (stamped bulk paint).
     highlight_layer: ?*const core.layers.Layer = null,

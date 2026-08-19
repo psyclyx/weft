@@ -90,6 +90,8 @@ pub fn buildHud(
     // Right-anchored cluster: peers then diagnostics, measured backward.
     const status_diag_count = if (hud.diag_layer) |dl| dl.spanCount() else 0;
     var right_segs: std.ArrayList(struct { text: []const u8, color: [4]f32 }) = .empty;
+    if (hud.plugin_status) |st|
+        try right_segs.append(scratch, .{ .text = try std.fmt.allocPrint(scratch, "{s}  ", .{st}), .color = v.theme.accent });
     if (hud.peers > 0)
         try right_segs.append(scratch, .{ .text = try std.fmt.allocPrint(scratch, "✦{d} ", .{hud.peers}), .color = v.theme.accent });
     if (status_diag_count > 0)

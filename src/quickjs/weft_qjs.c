@@ -74,6 +74,9 @@ extern int host_line_text(char *out, int cap);
 // via weft_on_pick. An async approve/deny for a permission request.
 __attribute__((import_module("weft"), import_name("qjs_pick")))
 extern void host_pick(const char *prompt, int plen, const char *opts, int olen);
+// Set the status-line chip (the "● agent · waiting" indicator). "" clears it.
+__attribute__((import_module("weft"), import_name("qjs_status")))
+extern void host_status(const char *text, int len);
 __attribute__((import_module("weft"), import_name("qjs_action")))
 extern void host_action(const char *name, int name_len);
 __attribute__((import_module("weft"), import_name("qjs_provide")))
@@ -451,6 +454,17 @@ static JSValue js_pick(JSContext *ctx, JSValueConst this_val,
     return JS_UNDEFINED;
 }
 
+// weft.status(text): set the status-line chip ("" clears it).
+static JSValue js_status(JSContext *ctx, JSValueConst this_val,
+                         int argc, JSValueConst *argv) {
+    if (argc < 1) return JS_UNDEFINED;
+    size_t l;
+    const char *s = JS_ToCStringLen(ctx, &l, argv[0]);
+    if (s) host_status(s, (int)l);
+    JS_FreeCString(ctx, s);
+    return JS_UNDEFINED;
+}
+
 // weft.onPick(fn): register the handler fired with the accepted option index.
 static JSValue js_on_pick(JSContext *ctx, JSValueConst this_val,
                           int argc, JSValueConst *argv) {
@@ -502,6 +516,7 @@ int weft_plugin_init(const char *src, int len) {
     JS_SetPropertyStr(g_ctx, weft, "lineText", JS_NewCFunction(g_ctx, js_line_text, "lineText", 0));
     JS_SetPropertyStr(g_ctx, weft, "pick", JS_NewCFunction(g_ctx, js_pick, "pick", 2));
     JS_SetPropertyStr(g_ctx, weft, "onPick", JS_NewCFunction(g_ctx, js_on_pick, "onPick", 1));
+    JS_SetPropertyStr(g_ctx, weft, "status", JS_NewCFunction(g_ctx, js_status, "status", 1));
     JS_SetPropertyStr(g_ctx, weft, "onOutput", JS_NewCFunction(g_ctx, js_on_output, "onOutput", 1));
     JS_FreeValue(g_ctx, weft);
     JS_FreeValue(g_ctx, global);

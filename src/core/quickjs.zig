@@ -19,6 +19,7 @@ const proc_stream = @import("proc_stream.zig");
 const Buffers = @import("Buffers.zig");
 const authority = @import("authority.zig");
 const pick_mod = @import("pick.zig");
+const status_feed = @import("status_feed.zig");
 
 /// The embedded engine+shim (built from quickjs-ng + weft_qjs.c by build.zig).
 pub const quickjs_wasm: []const u8 = @embedFile("quickjs_wasm");
@@ -114,6 +115,7 @@ pub fn evalConfig(engine: *wasm.Engine, ctx: *command.Context, loader: ?PluginLo
     try linker.defineFn("weft", "qjs_file_write", 6, 0, cStubVoid, &bridge);
     try linker.defineFn("weft", "qjs_line_text", 2, 1, cStubI32, &bridge);
     try linker.defineFn("weft", "qjs_pick", 4, 0, cStubVoid, &bridge);
+    try linker.defineFn("weft", "qjs_status", 2, 0, cStubVoid, &bridge);
 
     var instance = try linker.instantiateWasi(&module);
     defer instance.deinit();
@@ -215,6 +217,7 @@ pub const JsPlugin = struct {
         try self.linker.defineFn("weft", "qjs_file_write", 6, 0, cAgentWrite, self);
         try self.linker.defineFn("weft", "qjs_line_text", 2, 1, cLineText, self);
         try self.linker.defineFn("weft", "qjs_pick", 4, 0, cPick, self);
+        try self.linker.defineFn("weft", "qjs_status", 2, 0, cStatus, self);
 
         self.instance = try self.linker.instantiateWasi(&self.module);
         errdefer self.instance.deinit();
@@ -468,6 +471,15 @@ fn jsPickAccept(ctx: *command.Context, data: ?*anyopaque, choice: []const u8) an
 fn jsPickCleanup(data: ?*anyopaque, gpa: Allocator) void {
     const bp: *JsBoundPick = @ptrCast(@alignCast(data.?));
     gpa.destroy(bp);
+}
+
+/// weft.status(text): set the generic plugin status chip (empty clears it).
+fn cStatus(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32, results: []i32) void {
+    _ = results;
+    const self: *JsPlugin = @ptrCast(@alignCast(data.?));
+    const text = caller.readMemory(self.gpa, @intCast(args[0]), @intCast(args[1])) catch return;
+    defer self.gpa.free(text);
+    status_feed.set(text);
 }
 
 /// weft.lineText() → the active buffer's current line (at the cursor), for a

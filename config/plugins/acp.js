@@ -37,11 +37,17 @@ function transcript(text) {
   weft.bufferAppend(TRANSCRIPT, text);
 }
 
+// The status-line chip — visible even when the transcript isn't focused.
+function setStatus(dot, state) {
+  weft.status(dot + " " + agentName + " · " + state);
+}
+
 // Send a prompt on the existing session (a subsequent turn). Renders the prompt
 // into the transcript so the conversation reads as a whole.
 function sendPrompt(text) {
   if (!agent || !sid || !text) return;
   transcript("\n\n› " + text + "\n");
+  setStatus("●", "thinking");
   rpc("session/prompt", { sessionId: sid, prompt: [{ type: "text", text: text }] });
 }
 
@@ -51,6 +57,7 @@ function onMessage(msg) {
   if (msg.method === "session/update") {
     const u = (msg.params && msg.params.update) || {};
     if (u.sessionUpdate === "agent_message_chunk" && u.content) {
+      setStatus("●", "streaming");
       transcript(u.content.text || "");
     } else if (u.sessionUpdate === "agent_thought_chunk" && u.content) {
       transcript(u.content.text || ""); // thoughts render inline for now
@@ -87,10 +94,16 @@ function onMessage(msg) {
     // Ask the user (a pick); the choice comes back via weft.onPick below.
     pendingPerm = { id: msg.id, optionIds: opts.map((o) => o.optionId) };
     const title = (p.toolCall && (p.toolCall.title || p.toolCall.toolCallId)) || "permission";
+    setStatus("◌", "waiting");
     weft.pick("agent · " + title, opts.map((o) => o.name).join("\n"));
     return;
   }
 
+  // A prompt result carries a stopReason → the turn finished.
+  if (msg.result && msg.result.stopReason) {
+    setStatus("○", "idle");
+    return;
+  }
   // Responses to our own requests, keyed by the sequential id.
   if (msg.id === 0 && msg.result) {
     rpc("session/new", { cwd: ".", mcpServers: [] });
@@ -98,7 +111,6 @@ function onMessage(msg) {
     sid = msg.result.sessionId;
     sendPrompt(pending);
   }
-  // msg.id === 2: the turn finished (a stopReason) — nothing to do here yet.
 }
 
 // A permission pick was accepted: answer the agent with the chosen option (or
@@ -142,6 +154,7 @@ function startAgent(cmd, prompt) {
   // edits are attributable + selectively-undoable per agent.
   agentName = weft.config("name") || cmd.split(/\s+/)[0].split("/").pop() || "agent";
   pending = prompt;
+  setStatus("●", "starting");
   transcript(""); // ensure the transcript buffer exists
   agent = weft.procSpawn(cmd);
   rpc("initialize", {

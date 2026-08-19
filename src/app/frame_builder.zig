@@ -277,6 +277,7 @@ pub const FrameBuilder = struct {
             .unfetched_pct = unfetched_pct,
             .peers = if (fx.caps.layers.find(&editor.doc, "presence")) |pl| pl.spanCount() else 0,
             .echo = if (fx.echo.items.len > 0) fx.echo.items else null,
+            .plugin_status = core.status_feed.get(),
             .pick = if (fx.pick.active) fx.pick else null,
             .highlight_layer = fx.caps.layers.find(&editor.doc, "highlight"),
             .styles_layer = fx.caps.layers.find(&editor.doc, "styles"),
