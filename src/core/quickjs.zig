@@ -14,6 +14,8 @@ const std = @import("std");
 const Allocator = std.mem.Allocator;
 const wasm = @import("wasm.zig");
 const command = @import("command.zig");
+const task = @import("task.zig");
+const proc_stream = @import("proc_stream.zig");
 
 /// The embedded engine+shim (built from quickjs-ng + weft_qjs.c by build.zig).
 pub const quickjs_wasm: []const u8 = @embedFile("quickjs_wasm");
@@ -59,13 +61,19 @@ fn defineConfigFns(linker: *wasm.Linker, bridge: *Bridge) !void {
     try linker.defineFn("weft", "qjs_provide", 9, 0, cProvide, bridge);
 }
 
-/// qjs_register for the config plane: a no-op that rejects (config declares no
-/// commands). The plugin plane replaces this with the real registrar.
-fn cRegisterStub(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32, results: []i32) void {
+/// Plugin-plane import stubs for the config linker (never called there): an
+/// i32-returning one that rejects, and a void no-op.
+fn cStubI32(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32, results: []i32) void {
     _ = data;
     _ = caller;
     _ = args;
     results[0] = -1;
+}
+fn cStubVoid(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32, results: []i32) void {
+    _ = data;
+    _ = caller;
+    _ = args;
+    _ = results;
 }
 
 /// Evaluate `src` as the user config: instantiate `quickjs.wasm` under WASI
@@ -88,10 +96,15 @@ pub fn evalConfig(engine: *wasm.Engine, ctx: *command.Context, loader: ?PluginLo
     defer linker.deinit();
     try linker.defineWasi();
     try defineConfigFns(&linker, &bridge);
-    // The config plane never registers commands, but quickjs.wasm imports
-    // qjs_register (the plugin plane uses it) — satisfy it with a stub so the
-    // shared binary instantiates.
-    try linker.defineFn("weft", "qjs_register", 2, 1, cRegisterStub, &bridge);
+    // The config plane uses none of the plugin-plane imports, but quickjs.wasm
+    // imports them all (one shared binary) — satisfy each with a stub so it
+    // instantiates. They are never called on the config path (the JS globals
+    // that would call them aren't installed for config).
+    try linker.defineFn("weft", "qjs_register", 2, 1, cStubI32, &bridge);
+    try linker.defineFn("weft", "qjs_proc_spawn", 4, 1, cStubI32, &bridge);
+    try linker.defineFn("weft", "qjs_proc_send", 3, 0, cStubVoid, &bridge);
+    try linker.defineFn("weft", "qjs_proc_read", 3, 1, cStubI32, &bridge);
+    try linker.defineFn("weft", "qjs_proc_close", 1, 0, cStubVoid, &bridge);
 
     var instance = try linker.instantiateWasi(&module);
     defer instance.deinit();
@@ -132,6 +145,9 @@ pub fn evalConfig(engine: *wasm.Engine, ctx: *command.Context, loader: ?PluginLo
 pub const JsPlugin = struct {
     gpa: Allocator,
     ctx: *command.Context,
+    pool: *task.Pool,
+    /// The child environment agent subprocesses inherit (so they resolve PATH).
+    environ: std.process.Environ,
     bridge: Bridge,
     module: wasm.Module,
     linker: wasm.Linker,
@@ -139,19 +155,25 @@ pub const JsPlugin = struct {
     /// Owned command trampolines (one per `weft.command`), kept for teardown;
     /// each carries the id the host dispatches by and owns its command name.
     cmds: std.ArrayList(*Cmd) = .empty,
+    /// Proc streams this plugin spawned, indexed by the handle the JS holds.
+    /// A closed slot is left null so handles stay stable (never reused).
+    streams: std.ArrayList(?*proc_stream.ProcStream) = .empty,
 
     const Cmd = struct { plugin: *JsPlugin, id: i32, name: []u8 };
 
     /// Instantiate `quickjs.wasm`, wire the membrane + registrar, and run the
     /// plugin body (`src`), which registers its commands. Heap-owned so the
     /// membrane's `&self.bridge` and the trampolines' `plugin` pointers stay
-    /// valid (the instance is resident for the plugin's life).
-    pub fn load(gpa: Allocator, engine: *wasm.Engine, ctx: *command.Context, src: []const u8) !*JsPlugin {
+    /// valid (the instance is resident for the plugin's life). `pool`/`environ`
+    /// back the proc-stream membrane (agent subprocesses).
+    pub fn load(gpa: Allocator, engine: *wasm.Engine, ctx: *command.Context, pool: *task.Pool, environ: std.process.Environ, src: []const u8) !*JsPlugin {
         const self = try gpa.create(JsPlugin);
         errdefer gpa.destroy(self);
         self.* = .{
             .gpa = gpa,
             .ctx = ctx,
+            .pool = pool,
+            .environ = environ,
             .bridge = .{ .ctx = ctx, .loader = null, .config = null },
             .module = try engine.compile(quickjs_wasm),
             .linker = undefined,
@@ -163,6 +185,10 @@ pub const JsPlugin = struct {
         try self.linker.defineWasi();
         try defineConfigFns(&self.linker, &self.bridge);
         try self.linker.defineFn("weft", "qjs_register", 2, 1, cRegister, self);
+        try self.linker.defineFn("weft", "qjs_proc_spawn", 4, 1, cProcSpawn, self);
+        try self.linker.defineFn("weft", "qjs_proc_send", 3, 0, cProcSend, self);
+        try self.linker.defineFn("weft", "qjs_proc_read", 3, 1, cProcRead, self);
+        try self.linker.defineFn("weft", "qjs_proc_close", 1, 0, cProcClose, self);
 
         self.instance = try self.linker.instantiateWasi(&self.module);
         errdefer self.instance.deinit();
@@ -187,8 +213,25 @@ pub const JsPlugin = struct {
         self.instance.callVoid("weft_on_command", &.{id}) catch {};
     }
 
+    /// Frame boundary: fire the JS output handler for every stream with new
+    /// bytes waiting, so the plugin drains + parses this frame. Top-level (never
+    /// nested in another guest call) — the wasm-store re-entrancy rule. Returns
+    /// whether anything was dispatched (the view may need a rebuild).
+    pub fn tick(self: *JsPlugin) bool {
+        var fired = false;
+        for (self.streams.items, 0..) |maybe, h| {
+            const s = maybe orelse continue;
+            if (s.pending() == 0) continue;
+            self.instance.callVoid("weft_on_output", &.{@intCast(h)}) catch {};
+            fired = true;
+        }
+        return fired;
+    }
+
     pub fn deinit(self: *JsPlugin) void {
         const gpa = self.gpa;
+        for (self.streams.items) |maybe| if (maybe) |s| s.deinit();
+        self.streams.deinit(gpa);
         for (self.cmds.items) |c| {
             gpa.free(c.name);
             gpa.destroy(c);
@@ -200,6 +243,76 @@ pub const JsPlugin = struct {
         gpa.destroy(self);
     }
 };
+
+// ── The proc-stream membrane (plugin plane): spawn/send/read/close a duplex
+// child, handles indexing the plugin's `streams`. ──
+
+fn cProcSpawn(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32, results: []i32) void {
+    const self: *JsPlugin = @ptrCast(@alignCast(data.?));
+    const gpa = self.gpa;
+    const cmd = caller.readMemory(gpa, @intCast(args[0]), @intCast(args[1])) catch {
+        results[0] = -1;
+        return;
+    };
+    defer gpa.free(cmd);
+    const cwd = caller.readMemory(gpa, @intCast(args[2]), @intCast(args[3])) catch {
+        results[0] = -1;
+        return;
+    };
+    defer gpa.free(cwd);
+    const s = proc_stream.ProcStream.start(gpa, self.pool, cmd, if (cwd.len > 0) cwd else null, self.environ) catch {
+        results[0] = -1;
+        return;
+    };
+    const h: i32 = @intCast(self.streams.items.len);
+    self.streams.append(gpa, s) catch {
+        s.deinit();
+        results[0] = -1;
+        return;
+    };
+    results[0] = h;
+}
+
+fn streamAt(self: *JsPlugin, h: i32) ?*proc_stream.ProcStream {
+    if (h < 0 or @as(usize, @intCast(h)) >= self.streams.items.len) return null;
+    return self.streams.items[@intCast(h)];
+}
+
+fn cProcSend(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32, results: []i32) void {
+    _ = results;
+    const self: *JsPlugin = @ptrCast(@alignCast(data.?));
+    const s = streamAt(self, args[0]) orelse return;
+    const bytes = caller.readMemory(self.gpa, @intCast(args[1]), @intCast(args[2])) catch return;
+    defer self.gpa.free(bytes);
+    s.send(bytes);
+}
+
+fn cProcRead(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32, results: []i32) void {
+    const self: *JsPlugin = @ptrCast(@alignCast(data.?));
+    const s = streamAt(self, args[0]) orelse {
+        results[0] = 0;
+        return;
+    };
+    const cap: usize = @intCast(args[2]);
+    const buf = self.gpa.alloc(u8, cap) catch {
+        results[0] = 0;
+        return;
+    };
+    defer self.gpa.free(buf);
+    const n = s.read(buf);
+    results[0] = @intCast(caller.writeMemory(@intCast(args[1]), @intCast(cap), buf[0..n]) catch 0);
+}
+
+fn cProcClose(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32, results: []i32) void {
+    _ = caller;
+    _ = results;
+    const self: *JsPlugin = @ptrCast(@alignCast(data.?));
+    const h = args[0];
+    if (streamAt(self, h)) |s| {
+        s.deinit();
+        self.streams.items[@intCast(h)] = null; // slot kept null so handles stay stable
+    }
+}
 
 /// The command handler a `weft.command` registers under: dispatch back into the
 /// owning JS plugin by id.
@@ -399,7 +512,6 @@ const Env = struct {
     ctx: command.Context,
 
     fn init(gpa: Allocator, self: *Env) !void {
-        const task = @import("task.zig");
         self.pool = try task.Pool.init(gpa, .{ .threads = 1 });
         self.buffers = try @import("Buffers.zig").init(gpa, self.pool, "user");
         self.commands = .empty;
@@ -526,12 +638,43 @@ test "quickjs: a JS plugin registers a command dispatched back into JS" {
     const src =
         \\weft.command("greet", () => weft.echo("hi from js"));
     ;
-    var plugin = try JsPlugin.load(gpa, &engine, &env.ctx, src);
+    var plugin = try JsPlugin.load(gpa, &engine, &env.ctx, env.pool, .empty, src);
     defer plugin.deinit();
 
     try t.expect(env.commands.resolve("greet") != null);
     _ = try command.run(&env.commands, &env.ctx, "greet", &.{});
     try t.expectEqualStrings("hi from js", env.echo.items);
+}
+
+test "quickjs: a JS plugin drives a duplex subprocess and reads its output" {
+    const gpa = t.allocator;
+    var env: Env = undefined;
+    try Env.init(gpa, &env);
+    defer env.deinit(gpa);
+    var engine = try wasm.Engine.init();
+    defer engine.deinit();
+
+    // The plugin spawns a child (sh builtins, hermetic .empty env), sends it a
+    // line, and its onOutput handler reads the echoed reply — the whole
+    // agent-transport shape (spawn + stdin + streamed stdout) in JS.
+    const src =
+        \\weft.onOutput((h) => { weft.echo("got:" + weft.procRead(h)); });
+        \\weft.command("go", () => {
+        \\  let h = weft.procSpawn("read x; printf '%s\n' \"$x\"");
+        \\  weft.procSend(h, "ping\n");
+        \\});
+    ;
+    var plugin = try JsPlugin.load(gpa, &engine, &env.ctx, env.pool, .empty, src);
+    defer plugin.deinit();
+
+    _ = try command.run(&env.commands, &env.ctx, "go", &.{});
+    // Pump the frame-boundary output dispatch until the reply arrives.
+    const deadline = task.nowNs() + 2 * std.time.ns_per_s;
+    while (std.mem.indexOf(u8, env.echo.items, "ping") == null and task.nowNs() < deadline) {
+        _ = plugin.tick();
+        std.atomic.spinLoopHint();
+    }
+    try t.expect(std.mem.indexOf(u8, env.echo.items, "ping") != null);
 }
 
 test "quickjs: a config syntax error surfaces as ConfigException, not silent" {

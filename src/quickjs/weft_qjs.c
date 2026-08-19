@@ -42,6 +42,16 @@ extern void host_menu(const char *name, int name_len);
 // import with a stub (it never registers commands).
 __attribute__((import_module("weft"), import_name("qjs_register")))
 extern int host_register(const char *name, int name_len);
+// Plugin proc-stream membrane: a persistent duplex child whose stdout the guest
+// reads (an ACP agent, an LSP-shaped tool). Config satisfies these with stubs.
+__attribute__((import_module("weft"), import_name("qjs_proc_spawn")))
+extern int host_proc_spawn(const char *cmd, int cmd_len, const char *cwd, int cwd_len);
+__attribute__((import_module("weft"), import_name("qjs_proc_send")))
+extern void host_proc_send(int handle, const char *ptr, int len);
+__attribute__((import_module("weft"), import_name("qjs_proc_read")))
+extern int host_proc_read(int handle, char *out, int cap);
+__attribute__((import_module("weft"), import_name("qjs_proc_close")))
+extern void host_proc_close(int handle);
 __attribute__((import_module("weft"), import_name("qjs_action")))
 extern void host_action(const char *name, int name_len);
 __attribute__((import_module("weft"), import_name("qjs_provide")))
@@ -258,6 +268,7 @@ static void install_weft(JSContext *ctx) {
 static JSRuntime *g_rt = NULL;
 static JSContext *g_ctx = NULL;
 static JSValue g_cmds; // JS array: id -> handler fn
+static JSValue g_on_output; // handler (handle) => void for proc-stream output
 
 // weft.command(name, fn): register a command and remember its handler by the
 // host-assigned id.
@@ -271,6 +282,68 @@ static JSValue js_command(JSContext *ctx, JSValueConst this_val,
     int id = host_register(name, (int)nl);
     JS_FreeCString(ctx, name);
     if (id >= 0) JS_SetPropertyUint32(ctx, g_cmds, (uint32_t)id, JS_DupValue(ctx, argv[1]));
+    return JS_UNDEFINED;
+}
+
+// weft.procSpawn(cmd[, cwd]) -> handle (or -1): a persistent duplex child.
+static JSValue js_proc_spawn(JSContext *ctx, JSValueConst this_val,
+                             int argc, JSValueConst *argv) {
+    if (argc < 1) return JS_ThrowTypeError(ctx, "procSpawn(cmd[, cwd])");
+    size_t cl, wl = 0;
+    const char *cmd = JS_ToCStringLen(ctx, &cl, argv[0]);
+    const char *cwd = NULL;
+    if (argc >= 2 && !JS_IsUndefined(argv[1]) && !JS_IsNull(argv[1]))
+        cwd = JS_ToCStringLen(ctx, &wl, argv[1]);
+    int h = -1;
+    if (cmd) h = host_proc_spawn(cmd, (int)cl, cwd ? cwd : "", (int)wl);
+    JS_FreeCString(ctx, cmd);
+    if (cwd) JS_FreeCString(ctx, cwd);
+    return JS_NewInt32(ctx, h);
+}
+
+// weft.procSend(handle, str): write to the child's stdin verbatim.
+static JSValue js_proc_send(JSContext *ctx, JSValueConst this_val,
+                            int argc, JSValueConst *argv) {
+    if (argc < 2) return JS_UNDEFINED;
+    int h;
+    JS_ToInt32(ctx, &h, argv[0]);
+    size_t l;
+    const char *s = JS_ToCStringLen(ctx, &l, argv[1]);
+    if (s) host_proc_send(h, s, (int)l);
+    JS_FreeCString(ctx, s);
+    return JS_UNDEFINED;
+}
+
+// weft.procRead(handle) -> string: newly-arrived stdout, "" if none. The
+// handler loops this to drain, splitting on newlines to recover NDJSON lines.
+static char g_read_buf[262144];
+static JSValue js_proc_read(JSContext *ctx, JSValueConst this_val,
+                            int argc, JSValueConst *argv) {
+    if (argc < 1) return JS_NewStringLen(ctx, "", 0);
+    int h;
+    JS_ToInt32(ctx, &h, argv[0]);
+    int n = host_proc_read(h, g_read_buf, (int)sizeof g_read_buf);
+    if (n <= 0) return JS_NewStringLen(ctx, "", 0);
+    return JS_NewStringLen(ctx, g_read_buf, (size_t)n);
+}
+
+// weft.procClose(handle): kill + free the child.
+static JSValue js_proc_close(JSContext *ctx, JSValueConst this_val,
+                             int argc, JSValueConst *argv) {
+    if (argc < 1) return JS_UNDEFINED;
+    int h;
+    JS_ToInt32(ctx, &h, argv[0]);
+    host_proc_close(h);
+    return JS_UNDEFINED;
+}
+
+// weft.onOutput(fn): register the handler the host fires (with a stream handle)
+// when that stream has new bytes to read.
+static JSValue js_on_output(JSContext *ctx, JSValueConst this_val,
+                            int argc, JSValueConst *argv) {
+    if (argc < 1 || !JS_IsFunction(ctx, argv[0])) return JS_UNDEFINED;
+    JS_FreeValue(ctx, g_on_output);
+    g_on_output = JS_DupValue(ctx, argv[0]);
     return JS_UNDEFINED;
 }
 
@@ -300,9 +373,15 @@ int weft_plugin_init(const char *src, int len) {
     }
     install_weft(g_ctx);
     g_cmds = JS_NewArray(g_ctx);
+    g_on_output = JS_UNDEFINED;
     JSValue global = JS_GetGlobalObject(g_ctx);
     JSValue weft = JS_GetPropertyStr(g_ctx, global, "weft");
     JS_SetPropertyStr(g_ctx, weft, "command", JS_NewCFunction(g_ctx, js_command, "command", 2));
+    JS_SetPropertyStr(g_ctx, weft, "procSpawn", JS_NewCFunction(g_ctx, js_proc_spawn, "procSpawn", 2));
+    JS_SetPropertyStr(g_ctx, weft, "procSend", JS_NewCFunction(g_ctx, js_proc_send, "procSend", 2));
+    JS_SetPropertyStr(g_ctx, weft, "procRead", JS_NewCFunction(g_ctx, js_proc_read, "procRead", 1));
+    JS_SetPropertyStr(g_ctx, weft, "procClose", JS_NewCFunction(g_ctx, js_proc_close, "procClose", 1));
+    JS_SetPropertyStr(g_ctx, weft, "onOutput", JS_NewCFunction(g_ctx, js_on_output, "onOutput", 1));
     JS_FreeValue(g_ctx, weft);
     JS_FreeValue(g_ctx, global);
     JSValue val = JS_Eval(g_ctx, src, (size_t)len, "<plugin>", JS_EVAL_TYPE_GLOBAL);
@@ -313,6 +392,17 @@ int weft_plugin_init(const char *src, int len) {
     }
     JS_FreeValue(g_ctx, val);
     return rc;
+}
+
+// weft_on_output(handle): dispatch to the registered proc-stream output handler.
+__attribute__((export_name("weft_on_output")))
+void weft_on_output(int handle) {
+    if (!g_ctx || !JS_IsFunction(g_ctx, g_on_output)) return;
+    JSValue arg = JS_NewInt32(g_ctx, handle);
+    JSValue r = JS_Call(g_ctx, g_on_output, JS_UNDEFINED, 1, &arg);
+    if (JS_IsException(r)) log_exception(g_ctx);
+    JS_FreeValue(g_ctx, r);
+    JS_FreeValue(g_ctx, arg);
 }
 
 // weft_on_command(id): dispatch to the JS handler registered under `id`.
