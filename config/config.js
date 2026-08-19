@@ -8,6 +8,9 @@
 //   weft.plugin(name)              — load a reference plugin (or a .wasm path)
 //   weft.bind(mode, key, command)  — bind a key in a keymap mode
 //   weft.menu(name)                — declare a which-key submenu (a prefix mode)
+//   weft.action(name)              — declare an abstract intent a key can bind to
+//   weft.provide(name, when, cmd[, prio]) — a provider for an action, chosen by
+//                                    {mode, lang} at fire time (the synthetic bind)
 //   weft.set(plugin, key, value)   — hand a plugin config data (overrides defaults)
 //   weft.run(command)              — invoke a command now (startup actions)
 //   weft.echo(message)             — a transient status-line message
@@ -136,7 +139,7 @@ weft.bind("leader-project", "slash", "grep");
 
 // SPC c — code
 weft.bind("leader-code", "c", "comment-line");
-weft.bind("leader-code", "f", "format-buffer");
+weft.bind("leader-code", "f", "format"); // the format action (see above)
 weft.bind("leader-code", "d", "goto-definition");
 weft.bind("leader-code", "h", "hover");
 weft.bind("leader-code", "s", "symbols");
@@ -146,6 +149,25 @@ weft.bind("leader-code", "b", "make-build");
 weft.bind("leader-code", "t", "make-test");
 weft.bind("leader-code", "r", "lang-run");
 weft.bind("leader-code", "x", "run-line");
+
+// ── Actions: abstract intents resolved by CONTEXT (the dispatch middle tier).
+// weft.action(name) declares an intent a key binds to; weft.provide(name, when,
+// cmd[, prio]) registers a provider chosen by {mode, lang} when it fires. Bind
+// the key ONCE — a .zig buffer and a shell script run different commands, and
+// any language plugin can weft.provide a new provider without touching this
+// keymap. `eval` unifies the old SPC-c r/x split (lang-run vs run-line) into one
+// language-aware key; a buffer with no provider echoes "no eval provider here".
+weft.action("eval");
+weft.provide("eval", {}, "run-line");                 // default: run the current line
+weft.provide("eval", { lang: "zig" }, "make-build");  // a .zig buffer builds the project
+weft.provide("eval", { lang: "py" }, "lang-run");     // python: the language runner
+weft.bind("leader", "e", "eval");                     // SPC e — eval/run, by language
+
+// format is likewise an action: fmt handles most languages by extension, but a
+// language plugin can weft.provide("format", {lang:"…"}, "…") to override. The
+// SPC c f binding below targets this action instead of format-buffer directly.
+weft.action("format");
+weft.provide("format", {}, "format-buffer");
 
 // vim-style: K shows hover, gd goes to definition, gs lists symbols
 weft.bind("normal", "K", "hover");
