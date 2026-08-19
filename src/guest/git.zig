@@ -149,6 +149,16 @@ var sec_rend = [_]usize{ 0, 0, 0, 0 };
 var sec_body = [_]usize{ 0, 0, 0, 0 }; // fold start: just past the header newline
 var sec_count = [_]usize{ 0, 0, 0, 0 };
 
+/// FILE fold state also persists — but files rebuild each gather, so we can't
+/// carry a bool on the struct. Instead remember a bounded set of COLLAPSED file
+/// paths; a file the user folds stays folded through refreshes. Past the cap we
+/// echo and stop recording (degrade loud, never silently drop). Keyed by path
+/// only, so the same path partially staged in two sections shares fold state.
+const MAX_COLLAPSED = 64;
+var collapsed_paths: [MAX_COLLAPSED][256]u8 = undefined;
+var collapsed_plen: [MAX_COLLAPSED]usize = undefined;
+var collapsed_count: usize = 0;
+
 // Cursor restoration across a re-gather. Rather than a clamped byte offset
 // (which drifts when a file hops sections), we capture the IDENTITY of the node
 // under point before a mutation — section + file path + hunk ordinal, or a
@@ -557,6 +567,8 @@ fn parse() void {
         recent_start = ri + MARK_R.len;
         recent_end = data.len;
     }
+    // Re-apply the remembered file-fold state (files rebuilt default-expanded).
+    for (files[0..file_count]) |*f| f.folded = isCollapsed(f.path_());
     // Present iff non-empty (recent by commit lines).
     for (render_order) |sec| {
         const idx = @intFromEnum(sec);
@@ -670,6 +682,38 @@ fn closeHunk(hstart: *?usize, cur: ?usize, end: usize) void {
 fn pathFromDiffGit(line: []const u8) []const u8 {
     if (std.mem.indexOf(u8, line, " b/")) |bi| return std.mem.trimEnd(u8, line[bi + 3 ..], " \t\r");
     return "";
+}
+
+// ── Persisted file-fold set (collapsed paths survive a re-gather) ───────────
+fn collapsedIndex(pth: []const u8) ?usize {
+    var i: usize = 0;
+    while (i < collapsed_count) : (i += 1) {
+        if (std.mem.eql(u8, collapsed_paths[i][0..collapsed_plen[i]], pth)) return i;
+    }
+    return null;
+}
+fn isCollapsed(pth: []const u8) bool {
+    return collapsedIndex(pth) != null;
+}
+/// Remember (or forget) a file's collapsed state. Bounded — a full set echoes
+/// and refuses the new entry rather than dropping silently.
+fn setCollapsed(pth: []const u8, on: bool) void {
+    if (on) {
+        if (collapsedIndex(pth) != null) return;
+        if (collapsed_count >= MAX_COLLAPSED) {
+            weft.echo("magit: >64 folded files — this fold won't persist");
+            return;
+        }
+        const n = @min(pth.len, collapsed_paths[collapsed_count].len);
+        @memcpy(collapsed_paths[collapsed_count][0..n], pth[0..n]);
+        collapsed_plen[collapsed_count] = n;
+        collapsed_count += 1;
+    } else if (collapsedIndex(pth)) |i| {
+        // swap-remove (order doesn't matter).
+        collapsed_count -= 1;
+        collapsed_paths[i] = collapsed_paths[collapsed_count];
+        collapsed_plen[i] = collapsed_plen[collapsed_count];
+    }
 }
 
 fn findFile(sec: Section, pth: []const u8) ?usize {
@@ -922,12 +966,14 @@ fn gitToggleFold() void {
         },
         .file => {
             files[n.idx].folded = !files[n.idx].folded;
+            setCollapsed(files[n.idx].path_(), files[n.idx].folded); // persist
             head = files[n.idx].r_start;
         },
         .hunk => {
             // Fold the parent file (hunk-granularity folds are a later phase).
             const fi = hunks[n.idx].file;
             files[fi].folded = !files[fi].folded;
+            setCollapsed(files[fi].path_(), files[fi].folded); // persist
             head = files[fi].r_start;
         },
         .none => return,
