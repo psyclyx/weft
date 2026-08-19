@@ -34,6 +34,7 @@ const cursor_config = @import("app/cursor_config.zig");
 const config_load = @import("app/config_load.zig");
 const dispatch = @import("app/dispatch.zig");
 const setup = @import("app/setup.zig");
+const render_mod = @import("app/render.zig");
 const collab = @import("app/collab.zig");
 const collab_cmds = @import("app/collab_cmds.zig");
 const ShareCtx = collab.ShareCtx;
@@ -384,13 +385,29 @@ pub fn main(init: std.process.Init) !void {
     // ── Snail render path ──
     const font_bytes: []const u8 = if (args.font) |p| try core.file.readAlloc(gpa, p) else embedded_font;
     defer if (args.font != null) gpa.free(@constCast(font_bytes));
-    var view = try view_mod.View.init(gpa, font_bytes, args.em);
-    defer view.deinit();
+    // All render resources + the pane tree are OWNED by `render`; it builds
+    // them in place (no move hazard) and frees them in the reverse order
+    // main() used to. ctx (the device) is declared earlier, so it outlives
+    // render's Vulkan frees. The aliases below are non-owning borrows so the
+    // frame loop reads `view`/`cache`/etc. unchanged.
+    var render: render_mod.RenderState = undefined;
+    try render.init(gpa, vctx, ctx.command_pool, font_bytes, args.em, buffers.active_id);
+    defer render.deinit();
+    const view = &render.view;
+    const win_layout = &render.win_layout;
+    const cache = &render.cache;
+    const renderer = &render.renderer;
+    const binding = &render.binding;
+    const built_panes = &render.built_panes;
+    const instances = &render.instances;
+    const batches = &render.batches;
+    const stats = &render.stats;
+    const resources = render.resources;
 
     // Scrolling commands need the view + framebuffer (which core commands
     // don't see), so they're registered here. `view.top_row` is always the
     // focused pane's scroll.
-    var scroll_ctx: scroll.ScrollCtx = .{ .view = &view, .fb = &fb };
+    var scroll_ctx: scroll.ScrollCtx = .{ .view = view, .fb = &fb };
     try scroll.registerCommands(gpa, &commands, &scroll_ctx);
 
     // Theme is DATA: a runtime/bindable `set-color <name> <#hex>`, plus colors
@@ -402,7 +419,7 @@ pub fn main(init: std.process.Init) !void {
         .summary = "Set a theme color (name, #rrggbb).",
         .args = &.{ .{ .name = "name", .type = .string }, .{ .name = "hex", .type = .string } },
         .handler = cursor_config.setColorHandler,
-        .data = &view,
+        .data = view,
     });
     inline for (@typeInfo(view_mod.Theme).@"struct".fields) |f| {
         if (config_kv.get("theme", f.name)) |blob| {
@@ -410,42 +427,10 @@ pub fn main(init: std.process.Init) !void {
         }
     }
 
-    var layout: snail_vk.VulkanResourceLayout = undefined;
-    try layout.init(vctx);
-    defer layout.deinit();
-    const resources = snail_vk.cacheResourceContext(vctx, &layout);
-    var cache = try snail_vk.VulkanDeviceAtlas.init(gpa, view.pool, resources, .{});
-    defer cache.deinit();
-    var renderer = try snail_vk.Renderer.init(vctx, layout.desc_set_layout, 2 << 20, @import("gfx/context.zig").max_frames_in_flight, .disabled);
-    defer renderer.deinit();
-
-    // Initial (empty) upload establishes the live binding.
-    var binding: [1]snail.render.records.Binding = undefined;
-    try snail_vk.uploadAndWait(gpa, vctx, resources, ctx.command_pool, &cache, &.{&view.atlas}, &binding);
-
-    var stats: stats_mod.Stats = .{};
-    // One `Built` per rendered pane, kept alive for the frame (its shapes
-    // feed the instance stream) and freed at the top of the next render.
-    var built_panes: std.ArrayList(view_mod.Built) = .empty;
-    defer {
-        for (built_panes.items) |*b| b.deinit(gpa);
-        built_panes.deinit(gpa);
-    }
-    var instances: std.ArrayList(snail.render.records.Instance) = .empty;
-    defer instances.deinit(gpa);
-    var batches: std.ArrayList(snail.render.records.DrawBatch) = .empty;
-    defer batches.deinit(gpa);
     var view_dirty = true;
     // Last activated buffer path (copied — the borrowed slice would dangle).
     var last_activate_path: [std.fs.max_path_bytes]u8 = undefined;
     var last_activate_len: usize = 0;
-    // Window layout: a recursive tree of panes over the region geometry. A
-    // single leaf is the ordinary unsplit case; splitFocused adds leaves.
-    // The focused pane is always `buffers.active()` (so editing/input flow
-    // through the active buffer unchanged), and each pane keeps its own
-    // scroll (the focused pane's mirrors `view.top_row`).
-    var win_layout = try window_layout.Layout.init(gpa, buffers.active_id);
-    defer win_layout.deinit();
     var last_frame_rect: region.Rect = .{}; // last render's pane frame, for click routing
     var last_liveness: core.session.Liveness = .connecting;
     // The fingerprint we last announced for the outbound host, so a
@@ -541,7 +526,7 @@ pub fn main(init: std.process.Init) !void {
         while (window.nextKeyEvent()) |ev| {
             if (!ev.pressed) continue;
             had_input = true;
-            try dispatch.dispatchKey(&cmd_ctx, &view, ev, fb[1]);
+            try dispatch.dispatchKey(&cmd_ctx, view, ev, fb[1]);
         }
         if (window.shouldClose()) break;
 
@@ -698,7 +683,7 @@ pub fn main(init: std.process.Init) !void {
         if (collab.applyIntents(&share_ctx, &cmd_ctx, pool, &connect_task, &connect_hostport, &fd_link, &echo_line, &my_identity, args.token, args.user))
             view_dirty = true;
         // ── Window-layout intents (outside the input hot section) ──
-        if (window_cmds.applyIntents(&win_ctx, &win_layout, &view, &buffers, gpa, &keymap, last_frame_rect))
+        if (window_cmds.applyIntents(&win_ctx, win_layout, view, &buffers, gpa, &keymap, last_frame_rect))
             view_dirty = true;
         if (hub) |*h| {
             // Adopt new peers (binds the primary + replays shares), then
@@ -1091,7 +1076,7 @@ pub fn main(init: std.process.Init) !void {
                 const bo = try view.build(arena_state.allocator(), &ob.editor, other_hud, &slot.pane.top_row, slot.rect, .{}, world_to_pixel);
                 try built_panes.append(gpa, bo);
                 if (bo.records_added != 0)
-                    binding[0] = try snail_vk.uploadDeltaAndWait(gpa, vctx, resources, ctx.command_pool, &cache, binding[0], &view.atlas);
+                    binding[0] = try snail_vk.uploadDeltaAndWait(gpa, vctx, resources, ctx.command_pool, cache, binding[0], &view.atlas);
             }
 
             // The focused pane: active buffer, full HUD, caret, picker dock.
@@ -1101,7 +1086,7 @@ pub fn main(init: std.process.Init) !void {
             const b = try view.build(arena_state.allocator(), editor, fhud, &view.top_row, foc_rect, pick_dock, world_to_pixel);
             try built_panes.append(gpa, b);
             if (b.records_added != 0)
-                binding[0] = try snail_vk.uploadDeltaAndWait(gpa, vctx, resources, ctx.command_pool, &cache, binding[0], &view.atlas);
+                binding[0] = try snail_vk.uploadDeltaAndWait(gpa, vctx, resources, ctx.command_pool, cache, binding[0], &view.atlas);
             win_layout.focusedPane().top_row = view.top_row; // scrollToCursor may have moved it
 
             // Every pane rendered into its own rect (identity transform), so
@@ -1134,7 +1119,7 @@ pub fn main(init: std.process.Init) !void {
                 .encoding = if (ctx.surfaceEncodesSrgb()) .srgb else .linear,
             },
         };
-        try renderer.render(cmd, &cache, draw_state, instances.items, batches.items);
+        try renderer.render(cmd, cache, draw_state, instances.items, batches.items);
         try ctx.endFrame();
 
         const frame_ns = stats_mod.nowNs() - frame_start;
