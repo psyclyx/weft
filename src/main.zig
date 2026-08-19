@@ -29,6 +29,7 @@ const handler = @import("app/handler.zig");
 const ok_echo = handler.ok_echo;
 const setEcho = handler.setEcho;
 const scroll = @import("app/scroll.zig");
+const window_cmds = @import("app/window_cmds.zig");
 
 const arg_parse = @import("app/args.zig");
 const Args = arg_parse.Args;
@@ -468,8 +469,8 @@ pub fn main(init: std.process.Init) !void {
     // focused pane == the active buffer. The legacy names
     // (split/vsplit/unsplit/focus-other) alias onto the same intents so the
     // prebuilt `windows` .wasm plugin and older configs keep working.
-    var win_ctx: WindowCtx = .{};
-    const window_cmd_table = [_]struct { name: []const u8, action: WindowAction, summary: []const u8 }{
+    var win_ctx: window_cmds.WindowCtx = .{};
+    const window_cmd_table = [_]struct { name: []const u8, action: window_cmds.WindowAction, summary: []const u8 }{
         .{ .name = "window-split", .action = .split, .summary = "Split the focused window horizontally (a pane below)." },
         .{ .name = "window-vsplit", .action = .vsplit, .summary = "Split the focused window vertically (a pane beside)." },
         .{ .name = "window-close", .action = .close, .summary = "Close the focused window, collapsing its split." },
@@ -487,14 +488,14 @@ pub fn main(init: std.process.Init) !void {
         .{ .name = "focus-other", .action = .focus_next, .summary = "Focus the next window." },
     };
     // Stable storage so each command's `data` pointer stays valid for the run.
-    var window_action_ctx: [window_cmd_table.len]WindowActionCtx = undefined;
+    var window_action_ctx: [window_cmd_table.len]window_cmds.WindowActionCtx = undefined;
     inline for (window_cmd_table, 0..) |wc, i| {
         window_action_ctx[i] = .{ .win = &win_ctx, .action = wc.action };
         _ = try commands.bind(gpa, wc.name, .{
             .name = wc.name,
             .summary = wc.summary,
             .args = &.{},
-            .handler = windowActionHandler,
+            .handler = window_cmds.windowActionHandler,
             .data = &window_action_ctx[i],
         });
     }
@@ -947,7 +948,7 @@ pub fn main(init: std.process.Init) !void {
             win_ctx.close = false;
             if (win_layout.count() > 1) {
                 win_layout.closeFocused();
-                applyWindowFocus(&win_layout, &view, &buffers, gpa, &keymap);
+                window_cmds.applyWindowFocus(&win_layout, &view, &buffers, gpa, &keymap);
                 view_dirty = true;
             }
         }
@@ -955,7 +956,7 @@ pub fn main(init: std.process.Init) !void {
             win_ctx.focus_dir = null;
             win_layout.focusedPane().top_row = view.top_row;
             if (win_layout.focusNeighbor(last_frame_rect, dir)) {
-                applyWindowFocus(&win_layout, &view, &buffers, gpa, &keymap);
+                window_cmds.applyWindowFocus(&win_layout, &view, &buffers, gpa, &keymap);
                 view_dirty = true;
             }
         }
@@ -965,7 +966,7 @@ pub fn main(init: std.process.Init) !void {
             // Swap contents with the neighbor; focus stays put but now shows
             // the neighbor's buffer, so the active buffer follows it.
             if (win_layout.swapNeighbor(last_frame_rect, dir)) {
-                applyWindowFocus(&win_layout, &view, &buffers, gpa, &keymap);
+                window_cmds.applyWindowFocus(&win_layout, &view, &buffers, gpa, &keymap);
                 view_dirty = true;
             }
         }
@@ -973,7 +974,7 @@ pub fn main(init: std.process.Init) !void {
             win_ctx.focus_next = false;
             win_layout.focusedPane().top_row = view.top_row;
             if (win_layout.focusNext()) {
-                applyWindowFocus(&win_layout, &view, &buffers, gpa, &keymap);
+                window_cmds.applyWindowFocus(&win_layout, &view, &buffers, gpa, &keymap);
                 view_dirty = true;
             }
         }
@@ -981,7 +982,7 @@ pub fn main(init: std.process.Init) !void {
             win_ctx.click_focus = false;
             win_layout.focusedPane().top_row = view.top_row;
             if (win_layout.focusAt(last_frame_rect, win_ctx.click_x, win_ctx.click_y)) {
-                applyWindowFocus(&win_layout, &view, &buffers, gpa, &keymap);
+                window_cmds.applyWindowFocus(&win_layout, &view, &buffers, gpa, &keymap);
                 view_dirty = true;
             }
         }
@@ -1617,72 +1618,6 @@ fn grantHandler(ctx: *core.command.Context, data: ?*anyopaque, args: []const cor
     };
     var buf: [64]u8 = undefined;
     return ok_echo(ctx, std.fmt.bufPrint(&buf, "granted {s} to {s}", .{ grade.label(), &fp }) catch "granted");
-}
-
-/// Window-layout intents; applied in the frame loop (which owns the pane
-/// tree + scroll/build state). Commands only record intent — the loop
-/// mutates the layout and keeps the focused pane == the active buffer.
-const WindowCtx = struct {
-    split: ?region.Axis = null, // request a split of the focused pane
-    close: bool = false,
-    focus_dir: ?window_layout.Dir = null,
-    move_dir: ?window_layout.Dir = null,
-    focus_next: bool = false, // cycle focus (legacy `focus-other`)
-    click_focus: bool = false, // focus the pane at (click_x, click_y)
-    click_x: f32 = 0,
-    click_y: f32 = 0,
-};
-
-/// Which window operation a bound command requests (mapped to a WindowCtx
-/// field in windowActionHandler). vim `:split` is a horizontal divider
-/// (stacked rows); `:vsplit` a vertical one (side-by-side columns).
-const WindowAction = enum {
-    split,
-    vsplit,
-    close,
-    focus_next,
-    focus_left,
-    focus_right,
-    focus_up,
-    focus_down,
-    move_left,
-    move_right,
-    move_up,
-    move_down,
-};
-
-/// A command → intent binding: which WindowCtx to poke and how. Held in a
-/// stable array so `command.bind`'s data pointer stays valid for the run.
-const WindowActionCtx = struct { win: *WindowCtx, action: WindowAction };
-
-fn windowActionHandler(ctx: *core.command.Context, data: ?*anyopaque, args: []const core.command.Value) anyerror!core.command.Value {
-    _ = args;
-    const a: *WindowActionCtx = @ptrCast(@alignCast(data.?));
-    switch (a.action) {
-        .split => a.win.split = .horizontal, // stacked rows (vim :split)
-        .vsplit => a.win.split = .vertical, // side-by-side columns (vim :vsplit)
-        .close => a.win.close = true,
-        .focus_next => a.win.focus_next = true,
-        .focus_left => a.win.focus_dir = .left,
-        .focus_right => a.win.focus_dir = .right,
-        .focus_up => a.win.focus_dir = .up,
-        .focus_down => a.win.focus_dir = .down,
-        .move_left => a.win.move_dir = .left,
-        .move_right => a.win.move_dir = .right,
-        .move_up => a.win.move_dir = .up,
-        .move_down => a.win.move_dir = .down,
-    }
-    return ok_echo(ctx, "window");
-}
-
-/// After a window op moved focus (or changed the focused pane's content),
-/// make the active buffer follow the focused pane and restore that pane's
-/// scroll — the invariant "focused pane == active buffer".
-fn applyWindowFocus(win_layout: *window_layout.Layout, view: *view_mod.View, buffers: *core.Buffers, gpa: std.mem.Allocator, keymap: *core.Keymap) void {
-    const fp = win_layout.focusedPane();
-    if (buffers.get(fp.buffer_id) != null and buffers.active_id != fp.buffer_id)
-        buffers.switchTo(gpa, fp.buffer_id, keymap) catch {};
-    view.top_row = fp.top_row;
 }
 
 /// `cancel` (C-g) — records the intent; the frame loop drops queued
