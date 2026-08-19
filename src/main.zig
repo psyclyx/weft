@@ -39,8 +39,6 @@ const hostTrustChip = collab.hostTrustChip;
 const selectionAnchorOf = collab.selectionAnchorOf;
 const identityHandler = collab.identityHandler;
 const guiConfigure = collab.guiConfigure;
-const startListen = collab.startListen;
-const runtimeConnectFinish = collab.runtimeConnectFinish;
 const providers = @import("app/providers.zig");
 const Attach = providers.Attach;
 const AttachDeps = providers.AttachDeps;
@@ -793,89 +791,10 @@ pub fn main(init: std.process.Init) !void {
             }
             which_key_now = false;
         }
-        // Apply connection intents recorded by commands (outside the
-        // hot section: connect blocks on TCP, disconnect joins threads).
-        if (share_ctx.disconnect_requested) {
-            share_ctx.disconnect_requested = false;
-            if (conn) |*c| {
-                c.deinit();
-                conn = null;
-            }
-            if (partial_state) |*p| {
-                p.deinit();
-                partial_state = null;
-            }
-            if (collab_session) |s| {
-                s.destroy();
-                collab_session = null;
-            }
+        // ── Connect/disconnect/listen intents (outside the hot section:
+        // connect blocks on TCP, disconnect joins threads). ──
+        if (collab.applyIntents(&share_ctx, &cmd_ctx, pool, &connect_task, &connect_hostport, &fd_link, &echo_line, &my_identity, args.token, args.user))
             view_dirty = true;
-        }
-        if (share_ctx.cancel_requested) {
-            share_ctx.cancel_requested = false;
-            if (share_ctx.pending_connect) |hp| {
-                gpa.free(hp);
-                share_ctx.pending_connect = null;
-            }
-            share_ctx.pending_listen = null;
-            if (connect_task) |*h| {
-                h.detach(); // worker still borrows connect_hostport → leak it
-                connect_task = null;
-                connect_hostport = null;
-                setEcho(&echo_line, gpa, "canceled");
-            }
-            view_dirty = true;
-        }
-        if (share_ctx.pending_connect) |hostport| {
-            share_ctx.pending_connect = null;
-            // Already connected or connecting → drop the request. Otherwise
-            // kick the TCP connect onto the pool (never on the frame thread).
-            if (collab_session != null or connect_task != null) {
-                gpa.free(hostport);
-            } else if (pool.spawn(reconnectTask, .{hostport})) |h| {
-                connect_task = h;
-                connect_hostport = hostport; // freed when the handle is polled
-                setEcho(&echo_line, gpa, "connecting…");
-            } else |_| {
-                gpa.free(hostport);
-                setEcho(&echo_line, gpa, "connect: out of memory");
-            }
-            view_dirty = true;
-        }
-        // Finish an in-flight interactive connect once the socket is up.
-        if (connect_task) |*h| {
-            if (h.poll()) |res| {
-                connect_task = null;
-                const hp = connect_hostport.?;
-                defer {
-                    gpa.free(hp);
-                    connect_hostport = null;
-                }
-                if (res) |fd| {
-                    runtimeConnectFinish(gpa, &cmd_ctx, &collab_session, &conn, &fd_link, fd, hp, args.token, args.user, &caps, &my_identity) catch |err| {
-                        _ = std.os.linux.close(fd);
-                        var buf: [96]u8 = undefined;
-                        setEcho(&echo_line, gpa, std.fmt.bufPrint(&buf, "connect failed: {t}", .{err}) catch "connect failed");
-                    };
-                } else |err| {
-                    var buf: [96]u8 = undefined;
-                    setEcho(&echo_line, gpa, std.fmt.bufPrint(&buf, "connect failed: {t}", .{err}) catch "connect failed");
-                }
-                view_dirty = true;
-            }
-        }
-        // Listen intents (same out-of-hot-section region): bind/listen
-        // are immediate, accept runs on the hub's own thread.
-        if (share_ctx.pending_listen) |port| {
-            share_ctx.pending_listen = null;
-            if (hub == null) startListen(gpa, &hub, &share_ctx, &buffers, &caps, port, args.token, share_ctx.pending_access, &my_identity, &echo_line);
-            view_dirty = true;
-        }
-        if (share_ctx.stop_listen_requested) {
-            share_ctx.stop_listen_requested = false;
-            if (hub) |*h| h.stopAccepting();
-            view_dirty = true;
-        }
         // ── Window-layout intents (outside the input hot section) ──
         if (window_cmds.applyIntents(&win_ctx, &win_layout, &view, &buffers, gpa, &keymap, last_frame_rect))
             view_dirty = true;

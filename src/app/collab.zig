@@ -526,6 +526,116 @@ fn openSharedAccept(ctx: *core.command.Context, data: ?*anyopaque, choice: []con
     try ctx.buffers.switchTo(ctx.gpa, id, ctx.keymap);
 }
 
+/// Pooled TCP connect (a copy of providers.reconnectTask, kept local so
+/// collab need not import providers — providers already imports collab).
+fn reconnectTask(hostport: []const u8) anyerror!i32 {
+    return core.session.tcpConnect(hostport);
+}
+
+/// Apply the connect/disconnect/listen intents recorded by commands. Run in
+/// the frame loop, OUTSIDE the input hot section: connect blocks on TCP,
+/// disconnect joins session threads. Operates through `sc` (which bundles
+/// conn/hub/partial/session/caps/buffers/gpa); the in-flight connect handle,
+/// its borrowed hostport, and the fd_link live in the frame loop and are
+/// threaded by pointer. Returns whether the view was damaged.
+pub fn applyIntents(
+    sc: *ShareCtx,
+    cmd_ctx: *core.command.Context,
+    pool: *core.task.Pool,
+    connect_task: *?core.task.Handle(anyerror!i32),
+    connect_hostport: *?[]u8,
+    fd_link: *core.session.FdLink,
+    echo: *std.ArrayList(u8),
+    my_identity: *const core.identity.Identity,
+    token: []const u8,
+    user: []const u8,
+) bool {
+    const gpa = sc.gpa;
+    var dirty = false;
+    if (sc.disconnect_requested) {
+        sc.disconnect_requested = false;
+        if (sc.conn.*) |*c| {
+            c.deinit();
+            sc.conn.* = null;
+        }
+        if (sc.partial.*) |*p| {
+            p.deinit();
+            sc.partial.* = null;
+        }
+        if (sc.session.*) |s| {
+            s.destroy();
+            sc.session.* = null;
+        }
+        dirty = true;
+    }
+    if (sc.cancel_requested) {
+        sc.cancel_requested = false;
+        if (sc.pending_connect) |hp| {
+            gpa.free(hp);
+            sc.pending_connect = null;
+        }
+        sc.pending_listen = null;
+        if (connect_task.*) |*h| {
+            h.detach(); // worker still borrows connect_hostport → leak it
+            connect_task.* = null;
+            connect_hostport.* = null;
+            setEcho(echo, gpa, "canceled");
+        }
+        dirty = true;
+    }
+    if (sc.pending_connect) |hostport| {
+        sc.pending_connect = null;
+        // Already connected or connecting → drop the request. Otherwise
+        // kick the TCP connect onto the pool (never on the frame thread).
+        if (sc.session.* != null or connect_task.* != null) {
+            gpa.free(hostport);
+        } else if (pool.spawn(reconnectTask, .{hostport})) |h| {
+            connect_task.* = h;
+            connect_hostport.* = hostport; // freed when the handle is polled
+            setEcho(echo, gpa, "connecting…");
+        } else |_| {
+            gpa.free(hostport);
+            setEcho(echo, gpa, "connect: out of memory");
+        }
+        dirty = true;
+    }
+    // Finish an in-flight interactive connect once the socket is up.
+    if (connect_task.*) |*h| {
+        if (h.poll()) |res| {
+            connect_task.* = null;
+            const hp = connect_hostport.*.?;
+            defer {
+                gpa.free(hp);
+                connect_hostport.* = null;
+            }
+            if (res) |fd| {
+                runtimeConnectFinish(gpa, cmd_ctx, sc.session, sc.conn, fd_link, fd, hp, token, user, sc.caps, my_identity) catch |err| {
+                    _ = std.os.linux.close(fd);
+                    var buf: [96]u8 = undefined;
+                    setEcho(echo, gpa, std.fmt.bufPrint(&buf, "connect failed: {t}", .{err}) catch "connect failed");
+                };
+            } else |err| {
+                var buf: [96]u8 = undefined;
+                setEcho(echo, gpa, std.fmt.bufPrint(&buf, "connect failed: {t}", .{err}) catch "connect failed");
+            }
+            dirty = true;
+        }
+    }
+    // Listen intents (same out-of-hot-section region): bind/listen
+    // are immediate, accept runs on the hub's own thread.
+    if (sc.pending_listen) |port| {
+        sc.pending_listen = null;
+        if (sc.hub.* == null) startListen(gpa, sc.hub, sc, sc.buffers, sc.caps, port, token, sc.pending_access, my_identity, echo);
+        dirty = true;
+    }
+    if (sc.stop_listen_requested) {
+        sc.stop_listen_requested = false;
+        if (sc.hub.*) |*h| h.stopAccepting();
+        dirty = true;
+    }
+    return dirty;
+}
+
 /// Runtime connect: fresh buffer for the remote primary, client
 /// session + Conn bound to it.
 /// Finish a runtime connect from an already-open socket `fd` (the TCP
