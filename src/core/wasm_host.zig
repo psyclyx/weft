@@ -56,6 +56,8 @@ pub const notifyActivate = activation.notifyActivate;
 
 const sessions = @import("wasm_host/sessions.zig");
 pub const drainReplSessions = sessions.drainReplSessions;
+
+const syntax_host = @import("wasm_host/syntax.zig");
 const rooted_fs = @import("rooted_fs.zig");
 const WasmCmd = wasm_abi.WasmCmd;
 const PendingItem = wasm_abi.PendingItem;
@@ -163,16 +165,16 @@ pub fn defineImports(linker: *wasm.Linker, p: *WasmPlugin) !void {
     try d(linker, "wl_completion_prefix", 2, 1, hCompletionPrefix, p);
     try d(linker, "wl_push_completion", 2, 0, hPushCompletion, p);
     // Structural read + subbuffers.
-    try d(linker, "wl_node_at", 4, 1, hNodeAt, p);
+    try d(linker, "wl_node_at", 4, 1, syntax_host.hNodeAt, p);
     // syntax.query (design §4): the tree stays host-side; captures/nodes cross.
-    try d(linker, "wl_node_enclosing", 5, 1, hNodeEnclosing, p);
-    try d(linker, "wl_query", 4, 1, hQuery, p);
-    try d(linker, "wl_query_capture", 4, 1, hQueryCapture, p);
-    try d(linker, "wl_node_children", 1, 1, hNodeChildren, p);
+    try d(linker, "wl_node_enclosing", 5, 1, syntax_host.hNodeEnclosing, p);
+    try d(linker, "wl_query", 4, 1, syntax_host.hQuery, p);
+    try d(linker, "wl_query_capture", 4, 1, syntax_host.hQueryCapture, p);
+    try d(linker, "wl_node_children", 1, 1, syntax_host.hNodeChildren, p);
     // Activation (design §3): the path of the buffer taking focus.
     try d(linker, "wl_activate_path", 2, 1, activation.hActivatePath, p);
-    try d(linker, "wl_claim_subbuffer", 2, 1, hClaimSubbuffer, p);
-    try d(linker, "wl_subbuffer_put_fact", 5, 0, hSubbufferPutFact, p);
+    try d(linker, "wl_claim_subbuffer", 2, 1, syntax_host.hClaimSubbuffer, p);
+    try d(linker, "wl_subbuffer_put_fact", 5, 0, syntax_host.hSubbufferPutFact, p);
     // Effects (perm-gated): shell insert — the membrane form of editLater
     // with a host-side proc body (the guest can't run off-thread itself).
     try d(linker, "wl_shell_insert", 2, 0, proc_host.hShellInsert, p);
@@ -1142,164 +1144,6 @@ fn wpCompletionProvider(data: ?*anyopaque, caps: *capability.Caps, req: *const c
         try items.append(gpa, .{ .text = @constCast(txt), .rank = @intCast(i) });
     }
     try caps.push(req.session, .{ .id = p.provider_id.?, .latency = .instant }, .{ .completion = items.items });
-}
-
-// Structural read (tree-sitter) + subbuffers.
-fn hNodeAt(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32, results: []i32) void {
-    const p: *WasmPlugin = @ptrCast(@alignCast(data.?));
-    const resolve = p.syntax_of orelse {
-        results[0] = -1;
-        return;
-    };
-    const syn = resolve(p.ctx.buffer()) orelse {
-        results[0] = -1;
-        return;
-    };
-    const node = syn.nodeAt(@intCast(args[0])) orelse {
-        results[0] = -1;
-        return;
-    };
-    const span = [2]u32{ @intCast(node.start), @intCast(node.end) };
-    _ = caller.writeMemory(@intCast(args[3]), 8, std.mem.asBytes(&span)) catch {};
-    results[0] = @intCast(caller.writeMemory(@intCast(args[1]), @intCast(args[2]), node.kind) catch 0);
-}
-
-/// The smallest NAMED node that STRICTLY encloses `[start, end)` — the
-/// expand-selection primitive (call repeatedly to grow to the next scope).
-/// Writes kind + [start,end] span; returns the kind length, or -1.
-fn hNodeEnclosing(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32, results: []i32) void {
-    const p: *WasmPlugin = @ptrCast(@alignCast(data.?));
-    const resolve = p.syntax_of orelse {
-        results[0] = -1;
-        return;
-    };
-    const syn = resolve(p.ctx.buffer()) orelse {
-        results[0] = -1;
-        return;
-    };
-    const start: usize = @intCast(args[0]);
-    const end: usize = @intCast(args[1]);
-    const anc = syn.ancestorsAt(p.gpa, start) catch {
-        results[0] = -1;
-        return;
-    };
-    defer p.gpa.free(anc);
-    // Innermost first (reverse of root→leaf): the first node strictly bigger.
-    var k = anc.len;
-    while (k > 0) {
-        k -= 1;
-        const n = anc[k];
-        if (n.start <= start and n.end >= end and !(n.start == start and n.end == end)) {
-            const span = [2]u32{ @intCast(n.start), @intCast(n.end) };
-            _ = caller.writeMemory(@intCast(args[4]), 8, std.mem.asBytes(&span)) catch {};
-            results[0] = @intCast(caller.writeMemory(@intCast(args[2]), @intCast(args[3]), n.kind) catch 0);
-            return;
-        }
-    }
-    results[0] = -1;
-}
-
-/// Run a tree-sitter query (`scm`) over `[start, end)`; stash its captures on
-/// the plugin (read back via `wl_query_capture`) and return the count, or -1.
-fn hQuery(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32, results: []i32) void {
-    const p: *WasmPlugin = @ptrCast(@alignCast(data.?));
-    p.queryCapsClear();
-    const resolve = p.syntax_of orelse {
-        results[0] = -1;
-        return;
-    };
-    const syn = resolve(p.ctx.buffer()) orelse {
-        results[0] = -1;
-        return;
-    };
-    const scm = caller.readMemory(p.gpa, @intCast(args[0]), @intCast(args[1])) catch {
-        results[0] = -1;
-        return;
-    };
-    defer p.gpa.free(scm);
-    const caps = syn.queryCaptures(p.gpa, scm, .{ .start = @intCast(args[2]), .end = @intCast(args[3]) }) catch {
-        results[0] = -1;
-        return;
-    };
-    defer p.gpa.free(caps); // names transfer into query_caps below
-    for (caps) |c| p.query_caps.append(p.gpa, .{ .name = c.name, .start = c.start, .end = c.end }) catch {
-        p.gpa.free(c.name);
-    };
-    results[0] = @intCast(p.query_caps.items.len);
-}
-
-/// The named children of the smallest node at `off` (structural descent).
-/// Materialized into the same capture buffer (kind as the "name"), read back
-/// with `wl_query_capture`. Returns the child count, or -1.
-fn hNodeChildren(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32, results: []i32) void {
-    _ = caller;
-    const p: *WasmPlugin = @ptrCast(@alignCast(data.?));
-    p.queryCapsClear();
-    const resolve = p.syntax_of orelse {
-        results[0] = -1;
-        return;
-    };
-    const syn = resolve(p.ctx.buffer()) orelse {
-        results[0] = -1;
-        return;
-    };
-    const kids = syn.childrenAt(p.gpa, @intCast(args[0])) catch {
-        results[0] = -1;
-        return;
-    };
-    defer p.gpa.free(kids);
-    for (kids) |k| {
-        const name = p.gpa.dupe(u8, k.kind) catch continue;
-        p.query_caps.append(p.gpa, .{ .name = name, .start = k.start, .end = k.end }) catch p.gpa.free(name);
-    }
-    results[0] = @intCast(p.query_caps.items.len);
-}
-
-/// Read the `i`-th capture from the last `wl_query`: writes name + [start,end]
-/// span, returns the name length, or -1.
-fn hQueryCapture(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32, results: []i32) void {
-    const p: *WasmPlugin = @ptrCast(@alignCast(data.?));
-    const i: usize = @intCast(args[0]);
-    if (i >= p.query_caps.items.len) {
-        results[0] = -1;
-        return;
-    }
-    const q = p.query_caps.items[i];
-    const span = [2]u32{ @intCast(q.start), @intCast(q.end) };
-    _ = caller.writeMemory(@intCast(args[3]), 8, std.mem.asBytes(&span)) catch {};
-    results[0] = @intCast(caller.writeMemory(@intCast(args[1]), @intCast(args[2]), q.name) catch 0);
-}
-
-fn hClaimSubbuffer(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32, results: []i32) void {
-    _ = caller;
-    const p: *WasmPlugin = @ptrCast(@alignCast(data.?));
-    const subs = p.subbuffers orelse {
-        results[0] = -1;
-        return;
-    };
-    const ed = p.ctx.editor();
-    const sub = subs.claim(p.gpa, &ed.doc, .{ .start = @intCast(args[0]), .end = @intCast(args[1]) }) catch {
-        results[0] = -1;
-        return;
-    };
-    p.subs.append(p.gpa, sub) catch {
-        results[0] = -1;
-        return;
-    };
-    results[0] = @intCast(p.subs.items.len - 1);
-}
-
-fn hSubbufferPutFact(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32, results: []i32) void {
-    _ = results;
-    const p: *WasmPlugin = @ptrCast(@alignCast(data.?));
-    const handle: usize = @intCast(args[0]);
-    if (handle >= p.subs.items.len) return;
-    const gpa = p.gpa;
-    const key = caller.readMemory(gpa, @intCast(args[1]), @intCast(args[2])) catch return;
-    defer gpa.free(key);
-    const val = caller.readMemory(gpa, @intCast(args[3]), @intCast(args[4])) catch return;
-    defer gpa.free(val);
-    p.subs.items[handle].putFact(gpa, key, val) catch {};
 }
 
 /// Command dispatch back into the guest: stash the args (readable via
