@@ -16,6 +16,8 @@ const wasm = @import("wasm.zig");
 const command = @import("command.zig");
 const task = @import("task.zig");
 const proc_stream = @import("proc_stream.zig");
+const Buffers = @import("Buffers.zig");
+const authority = @import("authority.zig");
 
 /// The embedded engine+shim (built from quickjs-ng + weft_qjs.c by build.zig).
 pub const quickjs_wasm: []const u8 = @embedFile("quickjs_wasm");
@@ -105,6 +107,7 @@ pub fn evalConfig(engine: *wasm.Engine, ctx: *command.Context, loader: ?PluginLo
     try linker.defineFn("weft", "qjs_proc_send", 3, 0, cStubVoid, &bridge);
     try linker.defineFn("weft", "qjs_proc_read", 3, 1, cStubI32, &bridge);
     try linker.defineFn("weft", "qjs_proc_close", 1, 0, cStubVoid, &bridge);
+    try linker.defineFn("weft", "qjs_buffer_append", 4, 0, cStubVoid, &bridge);
 
     var instance = try linker.instantiateWasi(&module);
     defer instance.deinit();
@@ -189,6 +192,7 @@ pub const JsPlugin = struct {
         try self.linker.defineFn("weft", "qjs_proc_send", 3, 0, cProcSend, self);
         try self.linker.defineFn("weft", "qjs_proc_read", 3, 1, cProcRead, self);
         try self.linker.defineFn("weft", "qjs_proc_close", 1, 0, cProcClose, self);
+        try self.linker.defineFn("weft", "qjs_buffer_append", 4, 0, cBufferAppend, self);
 
         self.instance = try self.linker.instantiateWasi(&self.module);
         errdefer self.instance.deinit();
@@ -312,6 +316,43 @@ fn cProcClose(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32, result
         s.deinit();
         self.streams.items[@intCast(h)] = null; // slot kept null so handles stay stable
     }
+}
+
+/// The CRDT peer JS-plugin transcript/tool-buffer output authors as.
+const transcript_peer = "agent-ui";
+
+/// Append `text` to the end of the buffer named `name` (created if absent),
+/// authored as a fixed tool peer — the streamed-transcript path, targeting a
+/// buffer by name so it need not be focused (mirrors repl_session.drain).
+fn appendNamed(ctx: *command.Context, gpa: Allocator, name: []const u8, text: []const u8) void {
+    const bufs = ctx.buffers;
+    var target: ?*Buffers.Buffer = null;
+    var it = bufs.iterator();
+    while (it.next()) |b| if (std.mem.eql(u8, b.name, name)) {
+        target = b;
+        break;
+    };
+    if (target == null) {
+        const id = bufs.create(gpa, name) catch return;
+        target = bufs.get(id);
+    }
+    const b = target orelse return;
+    const doc = &b.editor.doc;
+    if (!authority.gradeMin(doc.my_grant, .edit).canEdit()) return;
+    const pid = doc.peerNamed(gpa, transcript_peer) catch return;
+    const end = b.editor.text().byteLen();
+    doc.peerReplaceAll(gpa, pid, &.{.{ .range = .{ .start = end, .end = end }, .bytes = text }}) catch {};
+}
+
+fn cBufferAppend(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32, results: []i32) void {
+    _ = results;
+    const self: *JsPlugin = @ptrCast(@alignCast(data.?));
+    const gpa = self.gpa;
+    const name = caller.readMemory(gpa, @intCast(args[0]), @intCast(args[1])) catch return;
+    defer gpa.free(name);
+    const text = caller.readMemory(gpa, @intCast(args[2]), @intCast(args[3])) catch return;
+    defer gpa.free(text);
+    appendNamed(self.ctx, gpa, name, text);
 }
 
 /// The command handler a `weft.command` registers under: dispatch back into the

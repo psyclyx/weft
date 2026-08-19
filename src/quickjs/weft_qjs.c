@@ -52,6 +52,10 @@ __attribute__((import_module("weft"), import_name("qjs_proc_read")))
 extern int host_proc_read(int handle, char *out, int cap);
 __attribute__((import_module("weft"), import_name("qjs_proc_close")))
 extern void host_proc_close(int handle);
+// Append text to a named buffer (created if absent) — a transcript/tool buffer
+// the plugin owns, targeted by name so it need not be focused. Config stubs it.
+__attribute__((import_module("weft"), import_name("qjs_buffer_append")))
+extern void host_buffer_append(const char *name, int name_len, const char *text, int text_len);
 __attribute__((import_module("weft"), import_name("qjs_action")))
 extern void host_action(const char *name, int name_len);
 __attribute__((import_module("weft"), import_name("qjs_provide")))
@@ -337,6 +341,19 @@ static JSValue js_proc_close(JSContext *ctx, JSValueConst this_val,
     return JS_UNDEFINED;
 }
 
+// weft.bufferAppend(name, text): append to a named buffer (created if absent).
+static JSValue js_buffer_append(JSContext *ctx, JSValueConst this_val,
+                                int argc, JSValueConst *argv) {
+    if (argc < 2) return JS_UNDEFINED;
+    size_t nl, tl;
+    const char *name = JS_ToCStringLen(ctx, &nl, argv[0]);
+    const char *text = JS_ToCStringLen(ctx, &tl, argv[1]);
+    if (name && text) host_buffer_append(name, (int)nl, text, (int)tl);
+    JS_FreeCString(ctx, name);
+    JS_FreeCString(ctx, text);
+    return JS_UNDEFINED;
+}
+
 // weft.onOutput(fn): register the handler the host fires (with a stream handle)
 // when that stream has new bytes to read.
 static JSValue js_on_output(JSContext *ctx, JSValueConst this_val,
@@ -381,6 +398,7 @@ int weft_plugin_init(const char *src, int len) {
     JS_SetPropertyStr(g_ctx, weft, "procSend", JS_NewCFunction(g_ctx, js_proc_send, "procSend", 2));
     JS_SetPropertyStr(g_ctx, weft, "procRead", JS_NewCFunction(g_ctx, js_proc_read, "procRead", 1));
     JS_SetPropertyStr(g_ctx, weft, "procClose", JS_NewCFunction(g_ctx, js_proc_close, "procClose", 1));
+    JS_SetPropertyStr(g_ctx, weft, "bufferAppend", JS_NewCFunction(g_ctx, js_buffer_append, "bufferAppend", 2));
     JS_SetPropertyStr(g_ctx, weft, "onOutput", JS_NewCFunction(g_ctx, js_on_output, "onOutput", 1));
     JS_FreeValue(g_ctx, weft);
     JS_FreeValue(g_ctx, global);
