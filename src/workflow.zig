@@ -65,6 +65,13 @@ pub const Editor = struct {
     last_frame_rect: region.Rect = .{ .x = 0, .y = 0, .w = app_w, .h = app_h },
 
     pub fn init(gpa: Allocator, self: *Editor) !void {
+        return initNamed(gpa, self, "user");
+    }
+
+    /// Like `init`, but names the user/agent — so two harnesses sharing a
+    /// document over the collab loopback are DISTINCT CRDT replicas (identical
+    /// agent names would collide event ids and corrupt the merge).
+    pub fn initNamed(gpa: Allocator, self: *Editor, user: []const u8) !void {
         self.quit = false;
         self.echo = .empty;
         self.plugins = .empty;
@@ -80,7 +87,7 @@ pub const Editor = struct {
         self.caps = core.Caps.init(gpa, core.task.nowNs);
         self.engine = try core.wasm.Engine.init();
         self.loop = core.async_loop.Loop.init(gpa, self.pool, core.task.nowNs);
-        self.buffers = try core.Buffers.init(gpa, self.pool, "user");
+        self.buffers = try core.Buffers.init(gpa, self.pool, user);
         self.ctx = .{
             .gpa = gpa,
             .buffers = &self.buffers,
@@ -322,6 +329,108 @@ pub const Editor = struct {
         var buf: [128]u8 = undefined;
         const path = std.fmt.bufPrint(&buf, ".zig-cache/tmp/weft-app-{s}.ppm", .{name}) catch return;
         harness.writePpm(self.gpa, path, pixels, app_w, app_h) catch {};
+    }
+};
+
+// ── In-process multiplayer loopback ─────────────────────────────────
+//
+// Two live encrypted Sessions over a socketpair, each syncing one editor's
+// document through a real `Collab`. This is the harness analogue of two peers
+// connected over TCP — it drives the REAL session sync path (Session handshake
+// + Collab drain/handleFrame/push), the same code `collab.tickCollab` calls
+// under the hood, without standing up a socket server. It closes the "no
+// in-process collab loopback" gap the project notes called out.
+
+const linux = std.os.linux;
+const session = core.session;
+
+fn socketPair() ![2]i32 {
+    var fds: [2]i32 = undefined;
+    const rc = linux.socketpair(linux.AF.UNIX, linux.SOCK.STREAM, 0, &fds);
+    if (linux.errno(rc) != .SUCCESS) return error.SocketPair;
+    return fds;
+}
+
+/// Yield for roughly `us` microseconds of wall-clock — enough to let each
+/// session's reader/writer threads make progress (a tight spin would starve
+/// them). Mirrors session.zig's own test helper.
+fn napUs(us: u64) void {
+    const deadline = core.task.nowNs() + us * std.time.ns_per_us;
+    while (core.task.nowNs() < deadline) std.Thread.yield() catch {};
+}
+
+/// A two-peer, in-process collab pair binding two editors' active documents.
+/// `host` is the server role, `peer` the client; both are granted `.own` so
+/// edits converge in either direction. Presence layers are claimed on both
+/// docs so cursors replicate too.
+pub const Loopback = struct {
+    gpa: Allocator,
+    host_ed: *Editor,
+    peer_ed: *Editor,
+    // FdLinks live here at stable addresses: each Session's Link borrows &fd.
+    host_fd: session.FdLink,
+    peer_fd: session.FdLink,
+    host_sess: *session.Session,
+    peer_sess: *session.Session,
+    host_col: session.Collab,
+    peer_col: session.Collab,
+
+    /// Init in place (the FdLinks must not move after the sessions capture
+    /// their addresses). Binds the two harnesses' active documents on quad 0.
+    pub fn init(
+        self: *Loopback,
+        gpa: Allocator,
+        host_ed: *Editor,
+        peer_ed: *Editor,
+        host_name: []const u8,
+        peer_name: []const u8,
+    ) !void {
+        const fds = try socketPair();
+        self.gpa = gpa;
+        self.host_ed = host_ed;
+        self.peer_ed = peer_ed;
+        self.host_fd = .{ .fd = fds[0] };
+        self.peer_fd = .{ .fd = fds[1] };
+        const host_doc = &host_ed.buffers.active().editor.doc;
+        const peer_doc = &peer_ed.buffers.active().editor.doc;
+        self.host_sess = try session.Session.create(gpa, self.host_fd.link(), .server, "loopback", .own, null);
+        errdefer self.host_sess.destroy();
+        self.peer_sess = try session.Session.create(gpa, self.peer_fd.link(), .client, "loopback", .own, null);
+        errdefer self.peer_sess.destroy();
+        self.host_col = try session.Collab.init(gpa, self.host_sess, host_doc, host_name);
+        errdefer self.host_col.deinit();
+        self.peer_col = try session.Collab.init(gpa, self.peer_sess, peer_doc, peer_name);
+        // Replicate cursors: each side folds the other's presence into its own
+        // "presence" layer (claimed via the harness caps), exactly as the collab
+        // wiring does. Publishing is on by default.
+        self.host_col.presence_layer = try host_ed.caps.layers.claim(gpa, host_doc, "presence", .replicated, "collab");
+        self.peer_col.presence_layer = try peer_ed.caps.layers.claim(gpa, peer_doc, "presence", .replicated, "collab");
+    }
+
+    pub fn deinit(self: *Loopback) void {
+        self.host_sess.destroy();
+        self.peer_sess.destroy();
+        self.host_col.deinit();
+        self.peer_col.deinit();
+    }
+
+    /// One sync round: drain+handle+push each side, publishing live cursors.
+    fn tickOnce(self: *Loopback) !void {
+        _ = try self.host_col.tick(self.host_ed.buffers.active().editor.cursorOffset());
+        _ = try self.peer_col.tick(self.peer_ed.buffers.active().editor.cursorOffset());
+    }
+
+    /// Pump sync rounds (bounded by wall clock, since the session threads need
+    /// real time) until `pred` holds or the timeout elapses. Returns whether it
+    /// converged.
+    pub fn pumpUntil(self: *Loopback, ctx: anytype, comptime pred: fn (@TypeOf(ctx)) bool) !bool {
+        var round: usize = 0;
+        while (round < 6000) : (round += 1) {
+            try self.tickOnce();
+            if (pred(ctx)) return true;
+            napUs(300);
+        }
+        return false;
     }
 };
 
@@ -614,6 +723,75 @@ test "app/window: a further split tiles three panes and still composites" {
     // root buffer here; the point is the tiling + composite path holds up).
     try t.expect(harness.hasContent(pixels, app_w, 0, 0, app_w, app_h));
     ed.snapshotPanes("tri-pane");
+}
+
+// ── Multiplayer: two harnesses pair on a document over the loopback ──
+//
+// Exercises the REAL session sync layer: two live encrypted Sessions over a
+// socketpair, document sync via `Collab.tick` (drain → handleFrame → push) —
+// the same code `collab.tickCollab` calls under the hood. Peer A types through
+// the real keymap/command path; the pump converges it into peer B's buffer.
+
+test "app/collab: peer A types, it converges into peer B's buffer + cursor" {
+    const gpa = t.allocator;
+    var a: Editor = undefined;
+    try Editor.initNamed(gpa, &a, "alice");
+    defer a.deinit();
+    var b: Editor = undefined;
+    try Editor.initNamed(gpa, &b, "bob");
+    defer b.deinit();
+    try loadVim(&a);
+    try loadVim(&b);
+
+    var link: Loopback = undefined;
+    try Loopback.init(&link, gpa, &a, &b, "alice", "bob");
+    defer link.deinit();
+
+    // Alice types through the real vim path (i → text → Esc).
+    a.press("i", "");
+    a.typeText("hello from alice");
+    a.press("Escape", "");
+
+    // Pump the loopback until Bob's document carries Alice's text.
+    const Ctx = struct { b: *Editor };
+    const converged = try link.pumpUntil(Ctx{ .b = &b }, struct {
+        fn pred(c: Ctx) bool {
+            const txt = c.b.buffers.active().editor.text().toOwnedSlice(c.b.gpa) catch return false;
+            defer c.b.gpa.free(txt);
+            return std.mem.indexOf(u8, txt, "hello from alice") != null;
+        }
+    }.pred);
+    try t.expect(converged);
+
+    // Both replicas hold identical text — convergence, not just delivery.
+    const at = try a.buffers.active().editor.text().toOwnedSlice(gpa);
+    defer gpa.free(at);
+    const bt = try b.buffers.active().editor.text().toOwnedSlice(gpa);
+    defer gpa.free(bt);
+    try t.expectEqualStrings(at, bt);
+
+    // Cursor/presence: Alice's caret replicated into Bob's presence layer.
+    try t.expect(link.peer_col.presence_names.items.len >= 1);
+    var saw_alice = false;
+    for (link.peer_col.presence_names.items) |name| {
+        if (std.mem.eql(u8, name, "alice")) saw_alice = true;
+    }
+    try t.expect(saw_alice);
+
+    // Round-trip the other way: Bob edits, it lands back on Alice.
+    b.press("A", ""); // append at line end (vim)
+    b.press("i", ""); // ensure insert (A may already switch; harmless)
+    b.typeText(" + bob");
+    b.press("Escape", "");
+    const Ctx2 = struct { a: *Editor };
+    const back = try link.pumpUntil(Ctx2{ .a = &a }, struct {
+        fn pred(c: Ctx2) bool {
+            const txt = c.a.buffers.active().editor.text().toOwnedSlice(c.a.gpa) catch return false;
+            defer c.a.gpa.free(txt);
+            return std.mem.indexOf(u8, txt, "bob") != null;
+        }
+    }.pred);
+    try t.expect(back);
 }
 
 // ── Project-level e2e: build a tiny app the way a person would ───────
