@@ -135,6 +135,97 @@ pub fn forgetPeerHandler(ctx: *core.command.Context, data: ?*anyopaque, args: []
     return ok_echo(ctx, std.fmt.bufPrint(&buf, "forgot {s}", .{&fp}) catch "forgot");
 }
 
+/// Bind every collaboration command against the shared state. Called after
+/// plugins/config load (so a plugin binding the same name still wins,
+/// last-wins) — preserving the exact order these were registered inline.
+/// `sc` and `known` are borrowed as command `data` and must outlive the run.
+pub fn registerCommands(gpa: std.mem.Allocator, commands: *core.command.Commands, sc: *ShareCtx, known: *core.known_peers.KnownPeers) !void {
+    _ = try commands.bind(gpa, "connect", .{
+        .name = "connect",
+        .summary = "Connect to a host at runtime; its document opens as a buffer.",
+        .args = &.{.{ .name = "hostport", .type = .string }},
+        .handler = connectHandler,
+        .data = sc,
+    });
+    _ = try commands.bind(gpa, "disconnect", .{
+        .name = "disconnect",
+        .summary = "Drop the connection; shared buffers stay as local copies.",
+        .args = &.{},
+        .handler = disconnectHandler,
+        .data = sc,
+    });
+    _ = try commands.bind(gpa, "realize-all", .{
+        .name = "realize-all",
+        .summary = "Fetch the whole partial checkout.",
+        .args = &.{},
+        .handler = realizeAllHandler,
+        .data = sc,
+    });
+    _ = try commands.bind(gpa, "share", .{
+        .name = "share",
+        .summary = "Share the active buffer over the connection.",
+        .args = &.{},
+        .handler = shareHandler,
+        .data = sc,
+    });
+    _ = try commands.bind(gpa, "open-shared", .{
+        .name = "open-shared",
+        .summary = "Pick one of the peer's shared buffers and open it.",
+        .args = &.{},
+        .handler = openSharedHandler,
+        .data = sc,
+    });
+    _ = try commands.bind(gpa, "listen", .{
+        .name = "listen",
+        .summary = "Host on a port at an access grade (view|edit|own); peers connect and share buffers.",
+        .args = &.{ .{ .name = "port", .type = .string }, .{ .name = "access", .type = .string } },
+        .handler = listenHandler,
+        .data = sc,
+    });
+    _ = try commands.bind(gpa, "stop-listening", .{
+        .name = "stop-listening",
+        .summary = "Stop accepting new peers (connected peers stay).",
+        .args = &.{},
+        .handler = stopListeningHandler,
+        .data = sc,
+    });
+    _ = try commands.bind(gpa, "verify-peer", .{
+        .name = "verify-peer",
+        .summary = "Mark a peer fingerprint verified (after comparing its SAS out of band).",
+        .args = &.{.{ .name = "fingerprint", .type = .string }},
+        .handler = verifyPeerHandler,
+        .data = known,
+    });
+    _ = try commands.bind(gpa, "forget-peer", .{
+        .name = "forget-peer",
+        .summary = "Revoke trust in a peer fingerprint (removes it from known_peers).",
+        .args = &.{.{ .name = "fingerprint", .type = .string }},
+        .handler = forgetPeerHandler,
+        .data = known,
+    });
+    _ = try commands.bind(gpa, "peers", .{
+        .name = "peers",
+        .summary = "List connected peers with fingerprint, SAS words, and trust.",
+        .args = &.{},
+        .handler = peersHandler,
+        .data = sc,
+    });
+    _ = try commands.bind(gpa, "cancel", .{
+        .name = "cancel",
+        .summary = "Abort a pending/in-flight connect and drop queued host intents.",
+        .args = &.{},
+        .handler = cancelHandler,
+        .data = sc,
+    });
+    _ = try commands.bind(gpa, "grant", .{
+        .name = "grant",
+        .summary = "Set a connected peer's grade by fingerprint (view|edit|own).",
+        .args = &.{ .{ .name = "fingerprint", .type = .string }, .{ .name = "grade", .type = .string } },
+        .handler = grantHandler,
+        .data = sc,
+    });
+}
+
 // ── Buffer sharing over the connection ──────────────────────────────
 
 /// A buffer shared over the hub, remembered so late-joining peers can be

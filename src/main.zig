@@ -35,23 +35,11 @@ const config_load = @import("app/config_load.zig");
 const dispatch = @import("app/dispatch.zig");
 const collab = @import("app/collab.zig");
 const ShareCtx = collab.ShareCtx;
-const peersHandler = collab.peersHandler;
-const grantHandler = collab.grantHandler;
-const cancelHandler = collab.cancelHandler;
 const hostTrustChip = collab.hostTrustChip;
 const selectionAnchorOf = collab.selectionAnchorOf;
 const identityHandler = collab.identityHandler;
-const verifyPeerHandler = collab.verifyPeerHandler;
-const forgetPeerHandler = collab.forgetPeerHandler;
 const guiConfigure = collab.guiConfigure;
 const startListen = collab.startListen;
-const listenHandler = collab.listenHandler;
-const stopListeningHandler = collab.stopListeningHandler;
-const connectHandler = collab.connectHandler;
-const disconnectHandler = collab.disconnectHandler;
-const realizeAllHandler = collab.realizeAllHandler;
-const shareHandler = collab.shareHandler;
-const openSharedHandler = collab.openSharedHandler;
 const runtimeConnectFinish = collab.runtimeConnectFinish;
 const providers = @import("app/providers.zig");
 const Attach = providers.Attach;
@@ -416,90 +404,7 @@ pub fn main(init: std.process.Init) !void {
         share_ctx.pending_listen = port;
         share_ctx.pending_access = args.access;
     }
-    _ = try commands.bind(gpa, "connect", .{
-        .name = "connect",
-        .summary = "Connect to a host at runtime; its document opens as a buffer.",
-        .args = &.{.{ .name = "hostport", .type = .string }},
-        .handler = connectHandler,
-        .data = &share_ctx,
-    });
-    _ = try commands.bind(gpa, "disconnect", .{
-        .name = "disconnect",
-        .summary = "Drop the connection; shared buffers stay as local copies.",
-        .args = &.{},
-        .handler = disconnectHandler,
-        .data = &share_ctx,
-    });
-    _ = try commands.bind(gpa, "realize-all", .{
-        .name = "realize-all",
-        .summary = "Fetch the whole partial checkout.",
-        .args = &.{},
-        .handler = realizeAllHandler,
-        .data = &share_ctx,
-    });
-    _ = try commands.bind(gpa, "share", .{
-        .name = "share",
-        .summary = "Share the active buffer over the connection.",
-        .args = &.{},
-        .handler = shareHandler,
-        .data = &share_ctx,
-    });
-    _ = try commands.bind(gpa, "open-shared", .{
-        .name = "open-shared",
-        .summary = "Pick one of the peer's shared buffers and open it.",
-        .args = &.{},
-        .handler = openSharedHandler,
-        .data = &share_ctx,
-    });
-    _ = try commands.bind(gpa, "listen", .{
-        .name = "listen",
-        .summary = "Host on a port at an access grade (view|edit|own); peers connect and share buffers.",
-        .args = &.{ .{ .name = "port", .type = .string }, .{ .name = "access", .type = .string } },
-        .handler = listenHandler,
-        .data = &share_ctx,
-    });
-    _ = try commands.bind(gpa, "stop-listening", .{
-        .name = "stop-listening",
-        .summary = "Stop accepting new peers (connected peers stay).",
-        .args = &.{},
-        .handler = stopListeningHandler,
-        .data = &share_ctx,
-    });
-    _ = try commands.bind(gpa, "verify-peer", .{
-        .name = "verify-peer",
-        .summary = "Mark a peer fingerprint verified (after comparing its SAS out of band).",
-        .args = &.{.{ .name = "fingerprint", .type = .string }},
-        .handler = verifyPeerHandler,
-        .data = &known_peers,
-    });
-    _ = try commands.bind(gpa, "forget-peer", .{
-        .name = "forget-peer",
-        .summary = "Revoke trust in a peer fingerprint (removes it from known_peers).",
-        .args = &.{.{ .name = "fingerprint", .type = .string }},
-        .handler = forgetPeerHandler,
-        .data = &known_peers,
-    });
-    _ = try commands.bind(gpa, "peers", .{
-        .name = "peers",
-        .summary = "List connected peers with fingerprint, SAS words, and trust.",
-        .args = &.{},
-        .handler = peersHandler,
-        .data = &share_ctx,
-    });
-    _ = try commands.bind(gpa, "cancel", .{
-        .name = "cancel",
-        .summary = "Abort a pending/in-flight connect and drop queued host intents.",
-        .args = &.{},
-        .handler = cancelHandler,
-        .data = &share_ctx,
-    });
-    _ = try commands.bind(gpa, "grant", .{
-        .name = "grant",
-        .summary = "Set a connected peer's grade by fingerprint (view|edit|own).",
-        .args = &.{ .{ .name = "fingerprint", .type = .string }, .{ .name = "grade", .type = .string } },
-        .handler = grantHandler,
-        .data = &share_ctx,
-    });
+    try collab.registerCommands(gpa, &commands, &share_ctx, &known_peers);
     // Window layout: a recursive split tree over the region geometry. Core
     // commands only RECORD intent on `win_ctx`; the frame loop applies them
     // (splitFocused/closeFocused/focus/move by pane geometry) and keeps the
