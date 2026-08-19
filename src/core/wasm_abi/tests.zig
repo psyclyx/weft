@@ -290,6 +290,55 @@ test "dired: gathers a directory tree via proc and renders the model (async)" {
         try t.expect(std.mem.indexOf(u8, s, "Directory:") != null);
         try t.expect(std.mem.indexOf(u8, s, "\x1e\x1e") == null); // sentinels repainted away
     }
+
+    // ── Editable-buffer file management (mini.files), DRY RUN ────────────────
+    // The sandbox `ls` yields no entries, so drive the guest deterministically:
+    // author a synthetic marked `ls -l` block into *dired* and fire `on_fill`
+    // directly (the same export the proc bridge calls), so the guest parses a
+    // real 2-entry tree (a file + a dir).
+    const synth =
+        "\x1e\x1e.\n" ++
+        "total 8\n" ++
+        "-rw-r--r-- 1 alice alice 42 2024-01-01 12:00 alpha.txt\n" ++
+        "drwxr-xr-x 2 alice alice 4096 2024-01-01 12:00 subdir\n";
+    try buf.?.editor.applyUserEdit(gpa, .{ .start = 0, .end = buf.?.editor.text().byteLen() }, synth);
+    try plugin.instance.callVoid("on_fill", &.{});
+
+    // Enter edit mode: the buffer becomes the simple editable projection and the
+    // keymap enters the distinct `dired-edit` posture.
+    _ = try command.run(&env.commands, &env.ctx, "dired-edit", &.{});
+    try t.expectEqualStrings("dired-edit", env.keymap.currentMode());
+    {
+        // The editable projection is just indented names — no header/perms/glyphs.
+        const s = try buf.?.editor.text().toOwnedSlice(gpa);
+        defer gpa.free(s);
+        try t.expect(std.mem.indexOf(u8, s, "alpha.txt") != null);
+        try t.expect(std.mem.indexOf(u8, s, "subdir/") != null);
+        try t.expect(std.mem.indexOf(u8, s, "Directory:") == null);
+    }
+
+    // Append a NEW line — an inferred CREATE — plus rename an existing entry.
+    const probe = "weft_dryrun_probe.txt";
+    try buf.?.editor.applyUserEdit(
+        gpa,
+        .{ .start = 0, .end = buf.?.editor.text().byteLen() },
+        "renamed.txt\nsubdir/\n" ++ probe ++ "\n",
+    );
+
+    // Reconcile: computes + PRINTS the plan into *dired-plan*. Its only doors are
+    // buffer writes — no proc/fs — so the probe file is never actually created.
+    _ = try command.run(&env.commands, &env.ctx, "dired-reconcile", &.{});
+    const plan = blk: {
+        var it = env.buffers.iterator();
+        while (it.next()) |b| if (std.mem.eql(u8, b.name, "*dired-plan*")) break :blk b;
+        break :blk null;
+    };
+    try t.expect(plan != null);
+    const ps = try plan.?.editor.text().toOwnedSlice(gpa);
+    defer gpa.free(ps);
+    try t.expect(std.mem.indexOf(u8, ps, "DRY RUN") != null);
+    try t.expect(std.mem.indexOf(u8, ps, "rename  alpha.txt -> renamed.txt") != null);
+    try t.expect(std.mem.indexOf(u8, ps, "create  " ++ probe) != null);
 }
 
 test "helix: a second modal editor loads in its OWN mode namespace" {

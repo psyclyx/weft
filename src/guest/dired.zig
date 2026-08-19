@@ -20,6 +20,13 @@
 //! (`ls` via proc → the rich tree), `dired-peer` lists a peer's shared root flat
 //! via `fsListAsync` (the old behavior — no proc reaches a remote fs).
 //!
+//! An editable posture (mini.files) overlays this: `dired-edit` snapshots the
+//! tree and re-renders `*dired*` as a simple editable projection; the user renames/
+//! creates/deletes/moves by editing lines; `dired-reconcile` diffs the edited text
+//! against the snapshot and PRINTS the inferred ops into `*dired-plan*`. This first
+//! cut is a DRY RUN — it computes + previews only, NEVER executing a file op (that,
+//! behind a confirm, is a deliberately-separate later pass).
+//!
 //! perms `{proc, timer, fs_read, fs_write}` — proc runs `ls`/the ops, fs_read for
 //! the peer listing, fs_write is unused today but reserved for temp-file ops.
 
@@ -41,6 +48,10 @@ const DEPTH_CAP = 32; // guard the parse recursion (nested expands)
 
 const dired_buf = "*dired*";
 const input_buf = "*dired-input*";
+/// The dry-run reconcile PREVIEW target (mini.files-style editable buffer). We
+/// only ever COMPUTE + PRINT the inferred file ops here — nothing is executed
+/// (execution + confirmation is a deliberately-separate later pass).
+const plan_buf = "*dired-plan*";
 /// The gather sentinel: `printf` emits `\x1e\x1e<dirpath>\n` before each dir's
 /// `ls` block, so we can split the combined output and key each block to its dir.
 /// We repaint from the parse, so the markers never reach the user's eyes.
@@ -188,6 +199,59 @@ var op_args_len: usize = 0;
 var confirm_cmd: [CMD_CAP]u8 = undefined;
 var confirm_len: usize = 0;
 
+// ── Editable-buffer file management (mini.files) — DRY RUN ONLY ──────────────
+// The tree buffer becomes an editable text buffer; the user renames/creates/
+// deletes/moves by editing lines; on "reconcile" we DIFF the edited text against
+// a SNAPSHOT of the original tree and PRINT the inferred ops into `*dired-plan*`.
+// CRUCIAL: this first cut NEVER touches the filesystem — it only computes + shows
+// the plan. No `proc`/`fs_write`/`gatherAfter` path is reachable from here; the
+// only host writes are to BUFFERS (`edit`/`style`/`echo`/`setMode`). Execution
+// (behind a confirm) is a separate later pass.
+var edit_mode_active: bool = false;
+
+/// A snapshot row: the original tree entry we diff the edited buffer against.
+/// Identity in this first cut is heuristic (path + position/parent); precise
+/// identity via hidden per-line ids is deferred to the execution pass.
+const Snap = struct {
+    path: [PATH_CAP]u8 = undefined,
+    plen: usize = 0,
+    is_dir: bool = false,
+    depth: usize = 0,
+    matched: bool = false, // consumed by an edited line (unchanged/rename/move)
+    deleted: bool = false, // no surviving edited line ⇒ inferred DELETE
+    fn pathS(self: *const Snap) []const u8 {
+        return self.path[0..self.plen];
+    }
+};
+var snap: [MAX_ENTRIES]Snap = undefined;
+var snap_count: usize = 0;
+
+/// The inferred category of an edited line after the diff.
+const EditCat = enum(u8) { unchanged, rename_to, move_to, create };
+/// One parsed line of the edited buffer (indent→depth, name→path, trailing `/`).
+const EditLine = struct {
+    path: [PATH_CAP]u8 = undefined,
+    plen: usize = 0,
+    is_dir: bool = false,
+    depth: usize = 0,
+    matched: bool = false,
+    cat: EditCat = .unchanged,
+    partner: usize = 0, // snap index for rename_to/move_to
+    fn pathS(self: *const EditLine) []const u8 {
+        return self.path[0..self.plen];
+    }
+};
+var elines: [MAX_ENTRIES]EditLine = undefined;
+var el_count: usize = 0;
+var el_overflow: bool = false;
+
+// Indent→parent-chain reconstruction scratch (module-level: DEPTH_CAP×PATH_CAP
+// would blow the wasm stack as a local). `ep_path[d]` is the last line seen at
+// depth d — a depth-(d+1) child hangs off it.
+var ep_path: [DEPTH_CAP][PATH_CAP]u8 = undefined;
+var ep_len: [DEPTH_CAP]usize = undefined;
+var ep_have: [DEPTH_CAP]bool = undefined;
+
 // ── Commands ──────────────────────────────────────────────────────────────
 const Cmd = struct { name: []const u8, handler: *const fn () void };
 const cmds = [_]Cmd{
@@ -209,6 +273,10 @@ const cmds = [_]Cmd{
     .{ .name = "dired-copy", .handler = diredCopy },
     .{ .name = "dired-delete", .handler = diredDelete },
     .{ .name = "dired-shell", .handler = diredShell },
+    // Editable-buffer file management (mini.files) — DRY RUN (compute + print only).
+    .{ .name = "dired-edit", .handler = diredEdit },
+    .{ .name = "dired-reconcile", .handler = diredReconcile },
+    .{ .name = "dired-revert", .handler = diredRevert },
     // The input prompt + the delete confirm.
     .{ .name = "dired-input-finish", .handler = inputFinish },
     .{ .name = "dired-input-abort", .handler = inputAbort },
@@ -253,6 +321,20 @@ export fn init() void {
     // Hidden-file toggle (`.` or `H`).
     weft.bindKey("dired", "period", "dired-toggle-hidden");
     weft.bindKey("dired", "H", "dired-toggle-hidden");
+    // Enter mini.files-style editable mode (`i`/`E`).
+    weft.bindKey("dired", "i", "dired-edit");
+    weft.bindKey("dired", "E", "dired-edit");
+
+    // Edit posture: a DISTINCT mode that FALLS BACK to vim `normal`, so ordinary
+    // editing (j/k, cw, dd, i→insert…) works while the reconcile/revert keys live
+    // in their own namespace instead of clobbering global `normal`. Reconcile is a
+    // DRY RUN. Caveat: vim's insert-Escape returns to plain `normal` (not here), so
+    // after an insert edit the keys below aren't live — invoke the commands by name
+    // (palette/`:`), or re-enter with `dired-edit`. A save-hook interception would
+    // be cleaner but needs a core primitive we intentionally didn't add.
+    weft.setFallback("dired-edit", "normal");
+    weft.bindKey("dired-edit", "Z", "dired-reconcile");
+    weft.bindKey("dired-edit", "Q", "dired-revert");
 
     // The prompt buffer is EDITABLE: fall back to `default` for text + editing,
     // then a C-c prefix (finish/abort/resume) — the git-input shape.
@@ -389,6 +471,7 @@ fn focusBuffer(name: []const u8) bool {
 /// Re-gather the local tree (root + expanded dirs) into `*dired*`. `restore`
 /// keeps point on the node it was on across the async re-render.
 fn regather(restore: bool) void {
+    edit_mode_active = false; // a re-gather rebuilds the real tree → edits discarded
     if (restore) markRestore() else restore_cursor = false;
     const w = emitGather(0);
     show(cmd_buf[0..w]);
@@ -994,6 +1077,326 @@ fn resolveDst(dst: []u8, src: []const u8, typed: []const u8) usize {
     return copyInto(dst, typed);
 }
 
+// ── Editable-buffer file management (mini.files) — DRY RUN ONLY ──────────────
+// SAFETY INVARIANT: none of the functions below execute a file operation. They
+// read the buffer, diff against the snapshot, and WRITE A PREVIEW into a buffer.
+// The only host doors used are buffer writes (`edit`/`style`/`echo`/`setMode`).
+
+fn dirnameOf(pth: []const u8) []const u8 {
+    if (std.mem.lastIndexOfScalar(u8, pth, '/')) |k| return pth[0..k];
+    return ""; // a root-level (depth-0, cwd-relative) name has no parent segment
+}
+fn basenameOf(pth: []const u8) []const u8 {
+    if (std.mem.lastIndexOfScalar(u8, pth, '/')) |k| return pth[k + 1 ..];
+    return pth;
+}
+
+/// `dired-edit` (`i`/`E`): SNAPSHOT the current tree model, then re-render the
+/// `*dired*` buffer as a SIMPLE editable projection (indent = depth, one name per
+/// line, dirs trail `/`) and switch to the editable `dired-edit` posture. The
+/// simple projection (no header/perms/marks/fold glyphs) is what the reconcile
+/// parser reads back — far more robust than re-parsing the rich render.
+fn diredEdit() void {
+    if (peer_mode) {
+        weft.echo("dired: edit is local-only");
+        return;
+    }
+    if (!std.mem.eql(u8, activeName(), dired_buf)) {
+        weft.echo("dired: not in *dired*");
+        return;
+    }
+    if (entry_count == 0) {
+        weft.echo("dired: nothing to edit");
+        return;
+    }
+    snapshot();
+    renderEditable();
+    edit_mode_active = true;
+    // `normal` (via the mode's fallback) — real vim editing; also the mode-leak
+    // fix, so opening a file elsewhere doesn't strand you in a dired mode.
+    weft.setMode("dired-edit");
+    weft.echo("dired edit (dry run): edit names; Z=reconcile preview, Q=revert");
+}
+
+/// Copy the live tree model into the snapshot arrays (path/kind/depth). The
+/// snapshot and the initial editable buffer are 1:1, so an immediate reconcile
+/// yields zero ops.
+fn snapshot() void {
+    snap_count = @min(entry_count, MAX_ENTRIES);
+    var i: usize = 0;
+    while (i < snap_count) : (i += 1) {
+        snap[i] = .{};
+        snap[i].plen = copyInto(&snap[i].path, entries[i].pathS());
+        snap[i].is_dir = entries[i].kind == .dir;
+        snap[i].depth = entries[i].depth;
+    }
+}
+
+/// Author the editable projection over `*dired*`: `<depth*2 spaces><name>[/]`.
+/// Styles/folds are cleared so it reads/edits as plain text.
+fn renderEditable() void {
+    out = 0;
+    var i: usize = 0;
+    while (i < entry_count) : (i += 1) {
+        const e = &entries[i];
+        var d: usize = 0;
+        while (d < e.depth) : (d += 1) put("  ");
+        put(e.nameS());
+        if (e.kind == .dir) put("/");
+        put("\n");
+    }
+    weft.edit(.{ .start = 0, .end = weft.byteLen() }, render_buf[0..out]);
+    weft.styleClear();
+    weft.foldClear();
+    weft.jump(0);
+}
+
+/// `dired-reconcile` (`Z`): parse the edited buffer, diff it against the
+/// snapshot, and PRINT the inferred op plan into `*dired-plan*`. DRY RUN — this
+/// never mutates the filesystem; the real tree/buffer is left untouched so the
+/// user can keep editing, revert, or (later) confirm-execute.
+fn diredReconcile() void {
+    if (!edit_mode_active) {
+        weft.echo("dired: not in edit mode (press i/E first)");
+        return;
+    }
+    if (!std.mem.eql(u8, activeName(), dired_buf)) {
+        weft.echo("dired: reconcile runs from *dired*");
+        return;
+    }
+    loadRaw(); // page the EDITED buffer text in (active buffer is *dired*)
+    parseEdit();
+    diff();
+    const n = buildPlan();
+    showPlan();
+    if (el_overflow) weft.echo("dired: >1024 edited lines — plan truncated");
+    var mb: [64]u8 = undefined;
+    weft.echo(std.fmt.bufPrint(&mb, "dired: dry run — {d} op(s), nothing applied", .{n}) catch "dired: dry run");
+}
+
+/// Parse the editable buffer (in `raw`) into `elines`: leading spaces → depth,
+/// the rest is the name, a trailing `/` marks a directory. Full paths are rebuilt
+/// from the indent→parent chain (depth d hangs off the last depth-(d-1) line).
+fn parseEdit() void {
+    el_count = 0;
+    el_overflow = false;
+    for (&ep_have) |*h| h.* = false;
+    var i: usize = 0;
+    while (i < raw_len) {
+        var le = i;
+        while (le < raw_len and raw[le] != '\n') le += 1;
+        const line = raw[i..le];
+        i = le + 1;
+        var s: usize = 0;
+        while (s < line.len and line[s] == ' ') s += 1;
+        var d: usize = s / 2;
+        if (d >= DEPTH_CAP) d = DEPTH_CAP - 1;
+        var rest = std.mem.trimEnd(u8, line[s..], " \t\r");
+        if (rest.len == 0) continue; // blank line
+        var is_dir = false;
+        if (rest[rest.len - 1] == '/') {
+            is_dir = true;
+            rest = rest[0 .. rest.len - 1];
+        }
+        if (rest.len == 0) continue;
+        // Clamp to the deepest established parent (tolerate malformed indent).
+        while (d > 0 and !ep_have[d - 1]) d -= 1;
+        const parent: []const u8 = if (d == 0) cwd() else ep_path[d - 1][0..ep_len[d - 1]];
+        if (el_count >= MAX_ENTRIES) {
+            el_overflow = true;
+            break;
+        }
+        var e = &elines[el_count];
+        e.* = .{};
+        e.depth = d;
+        e.is_dir = is_dir;
+        e.plen = joinPath(&e.path, parent, rest);
+        // This line becomes the parent for depth d+1; a dedent invalidates deeper.
+        const pn = @min(e.plen, PATH_CAP);
+        @memcpy(ep_path[d][0..pn], e.path[0..pn]);
+        ep_len[d] = pn;
+        ep_have[d] = true;
+        var k = d + 1;
+        while (k < DEPTH_CAP) : (k += 1) ep_have[k] = false;
+        el_count += 1;
+    }
+}
+
+/// Infer ops by matching edited lines against the snapshot. HEURISTIC (first cut,
+/// no hidden ids): (1) exact path+kind ⇒ unchanged; (2) an unmatched original and
+/// an unmatched edit under the SAME parent ⇒ RENAME (positional); (3) an unmatched
+/// original and edit sharing a BASENAME under DIFFERENT parents ⇒ MOVE; (4)
+/// leftover originals ⇒ DELETE, leftover edits ⇒ CREATE (dir if `name/`).
+/// Limits: reordering-with-rename, or renaming a non-empty directory (its children
+/// re-parent and show as moves/creates), can misclassify — precise identity via
+/// per-line ids is the follow-up.
+fn diff() void {
+    var i: usize = 0;
+    while (i < snap_count) : (i += 1) {
+        snap[i].matched = false;
+        snap[i].deleted = false;
+    }
+    var j: usize = 0;
+    while (j < el_count) : (j += 1) {
+        elines[j].matched = false;
+        elines[j].cat = .unchanged;
+    }
+
+    // (1) exact path + kind → unchanged.
+    j = 0;
+    while (j < el_count) : (j += 1) {
+        i = 0;
+        while (i < snap_count) : (i += 1) {
+            if (snap[i].matched) continue;
+            if (snap[i].is_dir == elines[j].is_dir and
+                std.mem.eql(u8, snap[i].pathS(), elines[j].pathS()))
+            {
+                snap[i].matched = true;
+                elines[j].matched = true;
+                break;
+            }
+        }
+    }
+
+    // (2) rename: unmatched original ↔ unmatched edit under the SAME parent.
+    i = 0;
+    while (i < snap_count) : (i += 1) {
+        if (snap[i].matched) continue;
+        const parent = dirnameOf(snap[i].pathS());
+        j = 0;
+        while (j < el_count) : (j += 1) {
+            if (elines[j].matched) continue;
+            if (std.mem.eql(u8, dirnameOf(elines[j].pathS()), parent)) {
+                snap[i].matched = true;
+                elines[j].matched = true;
+                elines[j].cat = .rename_to;
+                elines[j].partner = i;
+                break;
+            }
+        }
+    }
+
+    // (3) move: unmatched original ↔ unmatched edit sharing a basename elsewhere.
+    i = 0;
+    while (i < snap_count) : (i += 1) {
+        if (snap[i].matched) continue;
+        const base = basenameOf(snap[i].pathS());
+        j = 0;
+        while (j < el_count) : (j += 1) {
+            if (elines[j].matched) continue;
+            if (std.mem.eql(u8, basenameOf(elines[j].pathS()), base)) {
+                snap[i].matched = true;
+                elines[j].matched = true;
+                elines[j].cat = .move_to;
+                elines[j].partner = i;
+                break;
+            }
+        }
+    }
+
+    // (4) leftovers: originals → DELETE, edits → CREATE.
+    i = 0;
+    while (i < snap_count) : (i += 1) if (!snap[i].matched) {
+        snap[i].deleted = true;
+    };
+    j = 0;
+    while (j < el_count) : (j += 1) if (!elines[j].matched) {
+        elines[j].cat = .create;
+    };
+}
+
+/// Render the op plan into `render_buf`; returns the op count. Order: renames,
+/// moves, creates, deletes (each grouped). Text only — see `showPlan`.
+fn buildPlan() usize {
+    out = 0;
+    put("dired reconcile — DRY RUN (nothing applied; execution not wired yet)\n\n");
+    var n: usize = 0;
+    var j: usize = 0;
+    while (j < el_count) : (j += 1) if (elines[j].cat == .rename_to) {
+        put("rename  ");
+        put(snap[elines[j].partner].pathS());
+        put(" -> ");
+        put(elines[j].pathS());
+        put("\n");
+        n += 1;
+    };
+    j = 0;
+    while (j < el_count) : (j += 1) if (elines[j].cat == .move_to) {
+        put("move    ");
+        put(snap[elines[j].partner].pathS());
+        put(" -> ");
+        put(elines[j].pathS());
+        put("\n");
+        n += 1;
+    };
+    j = 0;
+    while (j < el_count) : (j += 1) if (elines[j].cat == .create) {
+        if (elines[j].is_dir) {
+            put("mkdir   ");
+            put(elines[j].pathS());
+            put("/\n");
+        } else {
+            put("create  ");
+            put(elines[j].pathS());
+            put("\n");
+        }
+        n += 1;
+    };
+    var i: usize = 0;
+    while (i < snap_count) : (i += 1) if (snap[i].deleted) {
+        put("delete  ");
+        put(snap[i].pathS());
+        put("\n");
+        n += 1;
+    };
+    if (n == 0) put("(no changes detected)\n");
+    put("\n");
+    var mb: [96]u8 = undefined;
+    put(std.fmt.bufPrint(&mb, "{d} op(s) — DRY RUN, nothing executed. Q reverts; keep editing to revise.", .{n}) catch "DRY RUN — nothing executed.");
+    put("\n");
+    return n;
+}
+
+/// Publish the plan text (from `render_buf`) into `*dired-plan*` and color it.
+/// Switching focus makes it the active buffer, which is what `edit`/`style` target.
+fn showPlan() void {
+    if (!focusBuffer(plan_buf)) weft.runStr("buffer-create", plan_buf);
+    weft.edit(.{ .start = 0, .end = weft.byteLen() }, render_buf[0..out]);
+    weft.jump(0);
+    stylePlan();
+}
+fn planClass(line: []const u8) ?weft.StyleClass {
+    if (std.mem.startsWith(u8, line, "rename")) return .emphasis;
+    if (std.mem.startsWith(u8, line, "move")) return .location;
+    if (std.mem.startsWith(u8, line, "create")) return .added;
+    if (std.mem.startsWith(u8, line, "mkdir")) return .added;
+    if (std.mem.startsWith(u8, line, "delete")) return .removed;
+    if (std.mem.startsWith(u8, line, "dired reconcile")) return .header;
+    return null; // blanks / footer / "(no changes)" — default
+}
+fn stylePlan() void {
+    weft.styleClear();
+    var i: usize = 0;
+    while (i < out) {
+        var le = i;
+        while (le < out and render_buf[le] != '\n') le += 1;
+        if (planClass(render_buf[i..le])) |c| weft.style(i, le, c);
+        i = le + 1;
+    }
+}
+
+/// `dired-revert` (`Q`): discard the edits and re-gather the REAL tree (also the
+/// natural exit from the dry-run preview). Ordinary undo / `:e!` revert too — it's
+/// a plain buffer now.
+fn diredRevert() void {
+    if (peer_mode) {
+        listPeer(cwd());
+        return;
+    }
+    regather(false); // rebuilds from the live fs → edits vanish; also clears edit mode
+    weft.echo("dired: reverted — edits discarded (dry run applied nothing)");
+}
+
 // ── Peer locus: flat `fsListAsync` listing (the old behavior, preserved) ─────
 fn openPeer() void {
     peer_mode = true;
@@ -1003,6 +1406,7 @@ fn openPeer() void {
 /// RemoteFs a few frames later). Plain names, dirs trailing `/` — read directly
 /// by the line-based peer navigation below (no model, no proc).
 fn listPeer(dir: []const u8) void {
+    edit_mode_active = false;
     setCwd(dir);
     if (!focusBuffer(dired_buf)) weft.runStr("buffer-create", dired_buf);
     _ = weft.fsListAsync("peer", dir, dired_buf);
