@@ -55,7 +55,7 @@ extern void host_proc_close(int handle);
 // Append text to a named buffer (created if absent) — a transcript/tool buffer
 // the plugin owns, targeted by name so it need not be focused. Config stubs it.
 __attribute__((import_module("weft"), import_name("qjs_buffer_append")))
-extern void host_buffer_append(const char *name, int name_len, const char *text, int text_len);
+extern void host_buffer_append(const char *name, int name_len, const char *text, int text_len, int style_class);
 // Read this plugin's config value for `key` (staged by weft.set) into `out`.
 __attribute__((import_module("weft"), import_name("qjs_config")))
 extern int host_config(const char *key, int key_len, char *out, int cap);
@@ -363,14 +363,17 @@ static JSValue js_proc_close(JSContext *ctx, JSValueConst this_val,
     return JS_UNDEFINED;
 }
 
-// weft.bufferAppend(name, text): append to a named buffer (created if absent).
+// weft.bufferAppend(name, text[, class]): append to a named buffer (created if
+// absent); `class` is a StyleClass (0 = none) painted over the appended range.
 static JSValue js_buffer_append(JSContext *ctx, JSValueConst this_val,
                                 int argc, JSValueConst *argv) {
     if (argc < 2) return JS_UNDEFINED;
     size_t nl, tl;
     const char *name = JS_ToCStringLen(ctx, &nl, argv[0]);
     const char *text = JS_ToCStringLen(ctx, &tl, argv[1]);
-    if (name && text) host_buffer_append(name, (int)nl, text, (int)tl);
+    int32_t cls = 0;
+    if (argc >= 3) JS_ToInt32(ctx, &cls, argv[2]);
+    if (name && text) host_buffer_append(name, (int)nl, text, (int)tl, cls);
     JS_FreeCString(ctx, name);
     JS_FreeCString(ctx, text);
     return JS_UNDEFINED;

@@ -33,8 +33,12 @@ function respond(id, result) {
   weft.procSend(agent, JSON.stringify({ jsonrpc: "2.0", id, result }) + "\n");
 }
 
-function transcript(text) {
-  weft.bufferAppend(TRANSCRIPT, text);
+// StyleClass values (core.capability.StyleClass), painted over the appended
+// range so the transcript reads by role: prompts, thoughts, tool calls.
+const ST = { normal: 0, location: 4, emphasis: 5, muted: 6 };
+
+function transcript(text, cls) {
+  weft.bufferAppend(TRANSCRIPT, text, cls || 0);
 }
 
 // The status-line chip — visible even when the transcript isn't focused.
@@ -46,13 +50,36 @@ function setStatus(dot, state) {
 // into the transcript so the conversation reads as a whole.
 function sendPrompt(text) {
   if (!agent || !sid || !text) return;
-  transcript("\n\n› " + text + "\n");
+  transcript("\n\n› " + text + "\n", ST.emphasis);
   setStatus("●", "thinking");
   rpc("session/prompt", { sessionId: sid, prompt: [{ type: "text", text: text }] });
 }
 
+// Usage/cost, wherever an agent puts it (ACP doesn't standardize it) — parsed
+// defensively and rendered dimmed into the transcript.
+function usageOf(msg) {
+  return (
+    (msg.params && msg.params.update && msg.params.update.usage) ||
+    (msg.result && msg.result.usage) ||
+    msg.usage ||
+    null
+  );
+}
+function showUsage(u) {
+  const inTok = u.input_tokens ?? u.inputTokens ?? u.prompt_tokens;
+  const outTok = u.output_tokens ?? u.outputTokens ?? u.completion_tokens;
+  const cost = u.total_cost_usd ?? u.cost ?? u.costUSD;
+  let s = "· usage";
+  if (inTok != null) s += " ↑" + inTok;
+  if (outTok != null) s += " ↓" + outTok;
+  if (cost != null) s += " $" + (typeof cost === "number" ? cost.toFixed(4) : cost);
+  if (s !== "· usage") transcript("\n" + s + "\n", ST.muted);
+}
+
 // One decoded JSON-RPC message from the agent.
 function onMessage(msg) {
+  const u = usageOf(msg);
+  if (u) showUsage(u);
   // Streaming notifications (the turn's content).
   if (msg.method === "session/update") {
     const u = (msg.params && msg.params.update) || {};
@@ -60,9 +87,9 @@ function onMessage(msg) {
       setStatus("●", "streaming");
       transcript(u.content.text || "");
     } else if (u.sessionUpdate === "agent_thought_chunk" && u.content) {
-      transcript(u.content.text || ""); // thoughts render inline for now
+      transcript(u.content.text || "", ST.muted); // thoughts, dimmed
     } else if (u.sessionUpdate === "tool_call") {
-      transcript("\n[" + (u.kind || "tool") + "] " + (u.title || u.toolCallId || "") + "\n");
+      transcript("\n[" + (u.kind || "tool") + "] " + (u.title || u.toolCallId || "") + "\n", ST.location);
     }
     return;
   }

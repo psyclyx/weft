@@ -109,7 +109,7 @@ pub fn evalConfig(engine: *wasm.Engine, ctx: *command.Context, loader: ?PluginLo
     try linker.defineFn("weft", "qjs_proc_send", 3, 0, cStubVoid, &bridge);
     try linker.defineFn("weft", "qjs_proc_read", 3, 1, cStubI32, &bridge);
     try linker.defineFn("weft", "qjs_proc_close", 1, 0, cStubVoid, &bridge);
-    try linker.defineFn("weft", "qjs_buffer_append", 4, 0, cStubVoid, &bridge);
+    try linker.defineFn("weft", "qjs_buffer_append", 5, 0, cStubVoid, &bridge);
     try linker.defineFn("weft", "qjs_config", 4, 1, cStubI32, &bridge);
     try linker.defineFn("weft", "qjs_file_read", 4, 1, cStubI32, &bridge);
     try linker.defineFn("weft", "qjs_file_write", 6, 0, cStubVoid, &bridge);
@@ -211,7 +211,7 @@ pub const JsPlugin = struct {
         try self.linker.defineFn("weft", "qjs_proc_send", 3, 0, cProcSend, self);
         try self.linker.defineFn("weft", "qjs_proc_read", 3, 1, cProcRead, self);
         try self.linker.defineFn("weft", "qjs_proc_close", 1, 0, cProcClose, self);
-        try self.linker.defineFn("weft", "qjs_buffer_append", 4, 0, cBufferAppend, self);
+        try self.linker.defineFn("weft", "qjs_buffer_append", 5, 0, cBufferAppend, self);
         try self.linker.defineFn("weft", "qjs_config", 4, 1, cConfig, self);
         try self.linker.defineFn("weft", "qjs_file_read", 4, 1, cFileRead, self);
         try self.linker.defineFn("weft", "qjs_file_write", 6, 0, cAgentWrite, self);
@@ -350,7 +350,7 @@ const transcript_peer = "agent-ui";
 /// Append `text` to the end of the buffer named `name` (created if absent),
 /// authored as a fixed tool peer — the streamed-transcript path, targeting a
 /// buffer by name so it need not be focused (mirrors repl_session.drain).
-fn appendNamed(ctx: *command.Context, gpa: Allocator, name: []const u8, text: []const u8) void {
+fn appendNamed(ctx: *command.Context, gpa: Allocator, name: []const u8, text: []const u8, class: u8) void {
     const bufs = ctx.buffers;
     var target: ?*Buffers.Buffer = null;
     var it = bufs.iterator();
@@ -366,8 +366,32 @@ fn appendNamed(ctx: *command.Context, gpa: Allocator, name: []const u8, text: []
     const doc = &b.editor.doc;
     if (!authority.gradeMin(doc.my_grant, .edit).canEdit()) return;
     const pid = doc.peerNamed(gpa, transcript_peer) catch return;
-    const end = b.editor.text().byteLen();
-    doc.peerReplaceAll(gpa, pid, &.{.{ .range = .{ .start = end, .end = end }, .bytes = text }}) catch {};
+    const start = b.editor.text().byteLen();
+    doc.peerReplaceAll(gpa, pid, &.{.{ .range = .{ .start = start, .end = start }, .bytes = text }}) catch {};
+    if (class != 0) paintStyle(ctx, gpa, doc, start, start + text.len, class);
+}
+
+/// Paint `[start, end)` with StyleClass `class` on `doc`'s styles feed, growing
+/// the class-per-byte bulk to the buffer's new length and PRESERVING prior
+/// classes (so a streamed transcript keeps each chunk's color). The styles
+/// layer is claimed once (find, else claim) and republished with the extended
+/// array — the whole-buffer bulk the view paints from.
+fn paintStyle(ctx: *command.Context, gpa: Allocator, doc: *@import("Document.zig"), start: usize, end: usize, class: u8) void {
+    const total = end; // the append put the new end here
+    const layer = ctx.caps.layers.find(doc, "styles") orelse
+        (ctx.caps.layers.claim(gpa, doc, "styles", .local, transcript_peer) catch return);
+    const classes = gpa.alloc(u8, total) catch return;
+    defer gpa.free(classes);
+    @memset(classes, 0);
+    if (layer.bulk) |b0| {
+        const keep = @min(b0.classes.len, total);
+        @memcpy(classes[0..keep], b0.classes[0..keep]);
+    }
+    const s = @min(start, total);
+    @memset(classes[s..total], class);
+    const version = doc.version(gpa) catch return;
+    defer gpa.free(version);
+    layer.publishBulk(gpa, version, 0, classes) catch {};
 }
 
 fn cBufferAppend(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32, results: []i32) void {
@@ -378,7 +402,7 @@ fn cBufferAppend(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32, res
     defer gpa.free(name);
     const text = caller.readMemory(gpa, @intCast(args[2]), @intCast(args[3])) catch return;
     defer gpa.free(text);
-    appendNamed(self.ctx, gpa, name, text);
+    appendNamed(self.ctx, gpa, name, text, @truncate(@as(u32, @bitCast(args[4]))));
 }
 
 /// weft.config(key) -> string: this plugin's config value for `key` (what the
