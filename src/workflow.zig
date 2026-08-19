@@ -788,11 +788,19 @@ test "app/collab: peer A types, it converges into peer B's buffer + cursor" {
     try t.expectEqualStrings(at, bt);
 
     // Cursor/presence: Alice's caret replicated into Bob's presence layer.
-    try t.expect(link.peer_col.presence_names.items.len >= 1);
-    var saw_alice = false;
-    for (link.peer_col.presence_names.items) |name| {
-        if (std.mem.eql(u8, name, "alice")) saw_alice = true;
-    }
+    // Presence rides a SEPARATE feed (channel base+1) from the text ops, so it
+    // can land a tick or two after the text converges — pump for it rather than
+    // asserting immediately (asserting bare here is a race that flakes under
+    // load). This was the actual cause of the collab test's intermittent fail.
+    const PCtx = struct { link: *Loopback };
+    const saw_alice = try link.pumpUntil(PCtx{ .link = &link }, struct {
+        fn pred(c: PCtx) bool {
+            for (c.link.peer_col.presence_names.items) |name| {
+                if (std.mem.eql(u8, name, "alice")) return true;
+            }
+            return false;
+        }
+    }.pred);
     try t.expect(saw_alice);
 
     // Round-trip the other way: Bob edits, it lands back on Alice.
