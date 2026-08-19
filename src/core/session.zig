@@ -1,29 +1,26 @@
-//! Session — one encrypted, multiplexed peer link (wire v1), plus the
-//! document-sync driver (`Collab`) that rides it.
+//! `session` — the encrypted, multiplexed peer link (wire v1) and the
+//! document-sync stack that rides it. This is the public facade: every
+//! `core.session.X` name is re-exported here, while the implementations
+//! live in focused files under `session/`:
 //!
-//! Threading mirrors the LSP transport: a reader thread decodes the
-//! outer envelope (u32le sealed length | AEAD-sealed frame), opens it,
-//! and pushes frames into a lock-free inbox; a writer thread drains the
-//! class-priority outbox (wire.Outbox under a tiny futex mutex — the
-//! writer thread and the main tick are the only contenders; the input
-//! hot section never touches the session), seals, and writes. The
-//! writer's futex wait doubles as the heartbeat timer.
+//! - `session/link.zig`     — `Link`/`FdLink`/`ChaosLink` transport +
+//!                            the futex `Mutex`.
+//! - `session/handshake.zig`— `Session` (reader/writer threads,
+//!                            handshake, liveness, crypto), `Access`,
+//!                            `Liveness`.
+//! - `session/remote_fs.zig`— `BlobServer`/`serveBase` (host serving),
+//!                            `RemoteFile`/`RemoteFs` (client), `BlobOp`.
+//! - `session/partial.zig`  — `PartialDoc` (editable partial checkout).
+//! - `session/collab.zig`   — `Collab` (per-document sync driver).
+//! - `session/conn.zig`     — `Conn` (N shared buffers over one session).
 //!
-//! Handshake runs on the reader thread (plaintext control frames, then
-//! keys derived, then everything sealed); `established` flips when the
-//! transcript MACs verify. Liveness is computed from the last-receive
-//! clock: connected → degraded (>3s) → offline (>10s). Reconnect =
-//! new link + same token (+ resume token when held): re-auth is one
-//! round trip and the op resync is the ordinary frontier exchange —
-//! offline-then-reconnect has no other path.
+//! Retained here directly: the TCP bootstrap helpers and the
+//! cross-cutting integration tests that exercise two live sessions.
 
 const std = @import("std");
 const Allocator = std.mem.Allocator;
-const assert = std.debug.assert;
 const linux = std.os.linux;
 
-const wire = @import("wire.zig");
-const secure = @import("secure.zig");
 const identity = @import("identity.zig");
 const task = @import("task.zig");
 const Document = @import("Document.zig");
