@@ -67,6 +67,7 @@ const buffers_host = @import("wasm_host/buffers.zig");
 const declare = @import("wasm_host/declare.zig");
 const config_kv = @import("wasm_host/config_kv.zig");
 const dispatch = @import("wasm_host/dispatch.zig");
+const keymap = @import("wasm_host/keymap.zig");
 const rooted_fs = @import("rooted_fs.zig");
 const WasmCmd = wasm_abi.WasmCmd;
 const PendingItem = wasm_abi.PendingItem;
@@ -131,12 +132,12 @@ pub fn defineImports(linker: *wasm.Linker, p: *WasmPlugin) !void {
     try d(linker, "wl_set_result_int", 1, 0, dispatch.hSetResultInt, p);
     try d(linker, "wl_set_result_str", 2, 0, dispatch.hSetResultStr, p);
     // Config surface (the local plane).
-    try d(linker, "wl_bind_key", 6, 0, hBindKey, p);
-    try d(linker, "wl_set_mode", 2, 0, hSetMode, p);
-    try d(linker, "wl_set_fallback", 4, 0, hSetFallback, p);
-    try d(linker, "wl_text_input", 5, 0, hTextInput, p);
-    try d(linker, "wl_menu_mode", 2, 0, hMenuMode, p);
-    try d(linker, "wl_sticky_menu", 2, 0, hStickyMenu, p);
+    try d(linker, "wl_bind_key", 6, 0, keymap.hBindKey, p);
+    try d(linker, "wl_set_mode", 2, 0, keymap.hSetMode, p);
+    try d(linker, "wl_set_fallback", 4, 0, keymap.hSetFallback, p);
+    try d(linker, "wl_text_input", 5, 0, keymap.hTextInput, p);
+    try d(linker, "wl_menu_mode", 2, 0, keymap.hMenuMode, p);
+    try d(linker, "wl_sticky_menu", 2, 0, keymap.hStickyMenu, p);
     try d(linker, "wl_run", 2, 0, hRun, p);
     try d(linker, "wl_run_int", 3, 0, hRunInt, p);
     try d(linker, "wl_run_str", 4, 0, hRunStr, p);
@@ -507,78 +508,6 @@ fn hEditRange(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32, result
     p.ctx.principal = p.principal();
     defer p.ctx.principal = saved;
     p.ctx.edit(.{ .start = cur.start, .end = cur.end }, bytes) catch {};
-}
-
-// Config surface (the local plane) — each mirrors an abi.Abi config method.
-fn hBindKey(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32, results: []i32) void {
-    _ = results;
-    const p: *WasmPlugin = @ptrCast(@alignCast(data.?));
-    const gpa = p.gpa;
-    const mode = caller.readMemory(gpa, @intCast(args[0]), @intCast(args[1])) catch return;
-    defer gpa.free(mode);
-    const key = caller.readMemory(gpa, @intCast(args[2]), @intCast(args[3])) catch return;
-    defer gpa.free(key);
-    const cmd = caller.readMemory(gpa, @intCast(args[4]), @intCast(args[5])) catch return;
-    defer gpa.free(cmd);
-    // A plugin binds at the plugin tier, owned by its name (so a config bind
-    // shadows it and equal-tier collisions between two plugins are surfaced).
-    const Keymap = @import("Keymap.zig");
-    p.ctx.keymap.bind(gpa, mode, key, cmd, Keymap.prio_plugin, p.name) catch {};
-}
-
-fn hSetMode(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32, results: []i32) void {
-    _ = results;
-    const p: *WasmPlugin = @ptrCast(@alignCast(data.?));
-    const mode = caller.readMemory(p.gpa, @intCast(args[0]), @intCast(args[1])) catch return;
-    defer p.gpa.free(mode);
-    // Guest-initiated: route through enterMode so entering a menu mode records
-    // its one-shot return target. Host-side mode save/restore (the picker) uses
-    // plain setMode and never records.
-    p.ctx.keymap.enterMode(p.gpa, mode) catch {};
-}
-
-fn hSetFallback(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32, results: []i32) void {
-    _ = results;
-    const p: *WasmPlugin = @ptrCast(@alignCast(data.?));
-    const gpa = p.gpa;
-    const mode = caller.readMemory(gpa, @intCast(args[0]), @intCast(args[1])) catch return;
-    defer gpa.free(mode);
-    const parent = caller.readMemory(gpa, @intCast(args[2]), @intCast(args[3])) catch return;
-    defer gpa.free(parent);
-    p.ctx.keymap.setFallback(gpa, mode, parent) catch {};
-}
-
-fn hTextInput(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32, results: []i32) void {
-    _ = results;
-    const p: *WasmPlugin = @ptrCast(@alignCast(data.?));
-    const gpa = p.gpa;
-    const mode = caller.readMemory(gpa, @intCast(args[0]), @intCast(args[1])) catch return;
-    defer gpa.free(mode);
-    if (args[4] == 0) {
-        p.ctx.keymap.setTextCommand(gpa, mode, null) catch {};
-        return;
-    }
-    const cmd = caller.readMemory(gpa, @intCast(args[2]), @intCast(args[3])) catch return;
-    defer gpa.free(cmd);
-    p.ctx.keymap.setTextCommand(gpa, mode, cmd) catch {};
-}
-
-fn hMenuMode(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32, results: []i32) void {
-    _ = results;
-    const p: *WasmPlugin = @ptrCast(@alignCast(data.?));
-    const mode = caller.readMemory(p.gpa, @intCast(args[0]), @intCast(args[1])) catch return;
-    defer p.gpa.free(mode);
-    p.ctx.keymap.markMenuMode(p.gpa, mode) catch {};
-}
-
-/// `sticky_menu(mode)`: mark a menu mode STICKY — it stays open after a leaf
-/// key (flag-accumulating transients) instead of one-shot auto-popping.
-fn hStickyMenu(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32, results: []i32) void {
-    _ = results;
-    const p: *WasmPlugin = @ptrCast(@alignCast(data.?));
-    const mode = caller.readMemory(p.gpa, @intCast(args[0]), @intCast(args[1])) catch return;
-    defer p.gpa.free(mode);
-    p.ctx.keymap.markStickyMenu(p.gpa, mode) catch {};
 }
 
 fn hRun(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32, results: []i32) void {
