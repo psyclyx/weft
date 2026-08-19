@@ -82,6 +82,7 @@ pub fn defineImports(linker: *wasm.Linker, p: *WasmPlugin) !void {
     try d(linker, "wl_set_selection", 2, 0, edit.hSetSelection, p);
     // Group C: write.
     try d(linker, "wl_edit", 4, 0, edit.hEdit, p);
+    try d(linker, "wl_edit_as", 6, 0, edit.hEditAs, p);
     try d(linker, "wl_register", 2, 1, commands.hRegister, p);
     try d(linker, "wl_jump", 1, 0, edit.hJump, p);
     try d(linker, "wl_flash", 2, 0, layers.hFlash, p);

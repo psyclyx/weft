@@ -96,6 +96,31 @@ pub fn hEdit(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32, results
     p.ctx.edit(.{ .start = @intCast(args[0]), .end = @intCast(args[1]) }, bytes) catch {};
 }
 
+/// `edit_as(agent, start, end, bytes)` (perm edit): the gated `ctx.edit` door,
+/// but authored as the named `role=.agent` sub-peer rather than the plugin's
+/// own peer — so an agent plugin's edits attribute to "claude"/"codex" and get
+/// their own per-agent selective-undo unit. Single-shot: the override is set
+/// only around this one edit (no persistent leak). An `.agent` author never
+/// joins the user's undo history (see command.Context.edit), so this is always
+/// a peer commit. An empty agent name falls back to the plugin's own peer.
+pub fn hEditAs(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32, results: []i32) void {
+    _ = results;
+    const p: *WasmPlugin = @ptrCast(@alignCast(data.?));
+    const agent = caller.readMemory(p.gpa, @intCast(args[0]), @intCast(args[1])) catch return;
+    defer p.gpa.free(agent);
+    const bytes = caller.readMemory(p.gpa, @intCast(args[4]), @intCast(args[5])) catch return;
+    defer p.gpa.free(bytes);
+    const saved_prin = p.ctx.principal;
+    const saved_override = p.author_override;
+    p.author_override = if (agent.len > 0) agent else null;
+    p.ctx.principal = p.principal();
+    defer {
+        p.ctx.principal = saved_prin;
+        p.author_override = saved_override;
+    }
+    p.ctx.edit(.{ .start = @intCast(args[2]), .end = @intCast(args[3]) }, bytes) catch {};
+}
+
 pub fn hJump(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32, results: []i32) void {
     _ = caller;
     _ = results;

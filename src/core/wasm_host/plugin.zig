@@ -31,5 +31,8 @@ pub fn setEnviron(env: std.process.Environ) void {
 
 pub fn resolvePeerWp(ctx: *anyopaque, doc: *Document) Document.AddPeerError!Document.PeerId {
     const p: *WasmPlugin = @ptrCast(@alignCast(ctx));
-    return doc.peerNamed(p.gpa, p.name);
+    // Author as the overridden agent identity when one is set (a wl_edit_as
+    // call), else as the plugin's own peer. The peer name IS the CRDT identity,
+    // so a distinct name → a distinct sub-peer → per-agent selective undo.
+    return doc.peerNamed(p.gpa, p.author_override orelse p.name);
 }

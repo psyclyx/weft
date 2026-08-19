@@ -58,6 +58,13 @@ pub const QueryCap = struct { name: []u8, start: usize, end: usize };
 gpa: Allocator,
 ctx: *command.Context,
 name: []u8,
+/// A transient author identity, set only for the duration of a single
+/// `wl_edit_as` call: subsequent edits (and the peer resolver) author as this
+/// named `role=.agent` sub-peer instead of the plugin's own peer. Borrowed (the
+/// name being applied), never persisted — an agent plugin edits on behalf of a
+/// distinct identity per conversation ("claude", "codex") so attribution and
+/// per-peer selective undo are per-agent, not blurred into one plugin peer.
+author_override: ?[]const u8 = null,
 store: ?*kv.Store,
 /// Read-only config data the config plane staged for this plugin (namespaced
 /// by plugin name), a store DISTINCT from `store` so runtime kv scratch can
@@ -180,8 +187,13 @@ pub fn declaresCapability(self: *WasmPlugin, name: []const u8) bool {
 }
 
 /// This plugin as an edit principal: authors as its own peer on whatever
-/// document is active at edit time (resolved, never captured).
+/// document is active at edit time (resolved, never captured). With an
+/// `author_override` set (inside a `wl_edit_as` call) it authors as that named
+/// `role=.agent` sub-peer instead — the resolver keys on the same name.
 pub fn principal(self: *WasmPlugin) command.Principal {
+    if (self.author_override) |agent_name| {
+        return .{ .role = .agent, .name = agent_name, .ctx = self, .resolve = wasm_host.resolvePeerWp };
+    }
     return .{ .role = .plugin, .name = self.name, .ctx = self, .resolve = wasm_host.resolvePeerWp };
 }
 

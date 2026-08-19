@@ -145,8 +145,14 @@ pub const Context = struct {
         // the user's keystroke, is the USER's edit → one undo history. The
         // grade was still checked as the plugin above, so an over-grade plugin
         // is refused. A plugin/agent editing AUTONOMOUSLY (not `user_initiated`)
-        // commits as its own peer — its own selective-undo unit.
-        if (self.principal.role == .user or self.user_initiated) {
+        // commits as its own peer — its own selective-undo unit. An `.agent`
+        // (or `.remote`) NEVER joins the user's undo history even when a
+        // keystroke synchronously triggered it: an agent authors as itself by
+        // nature, so only `.user` and a helper `.plugin` acting on the user's
+        // keystroke take the shared-undo path.
+        const joins_user_undo = self.principal.role == .user or
+            (self.user_initiated and self.principal.role == .plugin);
+        if (joins_user_undo) {
             try self.editor().applyUserEdit(self.gpa, r, bytes);
             return;
         }
@@ -391,4 +397,64 @@ test "command: schema derivation, validation, late-bound run" {
     });
     try t.expectEqual(Value{ .integer = 5 }, res);
     try t.expectEqual(@as(usize, 5), buffers.active().editor.text().byteLen());
+}
+
+test "command: an agent principal authors as its own peer even under a keystroke" {
+    const gpa = t.allocator;
+    const task = @import("task.zig");
+    var pool = try task.Pool.init(gpa, .{ .threads = 1 });
+    defer pool.deinit();
+    var buffers = try Buffers.init(gpa, pool, "user");
+    defer buffers.deinit(gpa);
+    var keymap: Keymap = .empty;
+    defer keymap.deinit(gpa);
+    var pick: @import("pick.zig").Pick = .empty;
+    defer pick.deinit(gpa);
+    var caps = @import("capability.zig").Caps.init(gpa, task.nowNs);
+    defer caps.deinit();
+    var actions = Actions.init(gpa);
+    defer actions.deinit();
+    var quit = false;
+    var echo_line: std.ArrayList(u8) = .empty;
+    defer echo_line.deinit(gpa);
+    var commands: Commands = .empty;
+    defer commands.deinit(gpa);
+    var ctx: Context = .{
+        .gpa = gpa,
+        .buffers = &buffers,
+        .commands = &commands,
+        .keymap = &keymap,
+        .actions = &actions,
+        .pick = &pick,
+        .caps = &caps,
+        .quit = &quit,
+        .echo = &echo_line,
+    };
+    const doc = ctx.document();
+
+    // Seed as the user (a keystroke): realizes the base + a user-authored commit.
+    ctx.user_initiated = true;
+    try ctx.edit(.{ .start = 0, .end = 0 }, "hello");
+    const after_user = doc.commitCount();
+    try t.expect(after_user >= 1);
+    try t.expectEqual(Document.PeerId.user, doc.commitAt(after_user - 1).author);
+
+    // An AGENT edit, STILL under the keystroke (user_initiated stays true). The
+    // refinement: an .agent never folds into the user's undo history — it
+    // commits as its own peer, so the new commit's author is not `.user`. (A
+    // helper .plugin under the same flag WOULD join the user's history.)
+    const AgentCtx = struct {
+        gpa: std.mem.Allocator,
+        name: []const u8,
+        fn resolve(actx: *anyopaque, d: *Document) Document.AddPeerError!Document.PeerId {
+            const a: *@This() = @ptrCast(@alignCast(actx));
+            return d.peerNamed(a.gpa, a.name);
+        }
+    };
+    var actx = AgentCtx{ .gpa = gpa, .name = "claude" };
+    ctx.principal = .{ .role = .agent, .name = "claude", .ctx = &actx, .resolve = AgentCtx.resolve };
+    try ctx.edit(.{ .start = 5, .end = 5 }, "!");
+    const after_agent = doc.commitCount();
+    try t.expect(after_agent > after_user);
+    try t.expect(doc.commitAt(after_agent - 1).author != Document.PeerId.user);
 }
