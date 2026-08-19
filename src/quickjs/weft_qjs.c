@@ -56,6 +56,12 @@ extern void host_proc_close(int handle);
 // the plugin owns, targeted by name so it need not be focused. Config stubs it.
 __attribute__((import_module("weft"), import_name("qjs_buffer_append")))
 extern void host_buffer_append(const char *name, int name_len, const char *text, int text_len, int style_class);
+// Collapse [start,end) of a named buffer (fold a tool-call's content).
+__attribute__((import_module("weft"), import_name("qjs_buffer_fold")))
+extern void host_buffer_fold(const char *name, int name_len, int start, int end);
+// A named buffer's byte length — for computing fold offsets.
+__attribute__((import_module("weft"), import_name("qjs_buffer_len")))
+extern int host_buffer_len(const char *name, int name_len);
 // Read this plugin's config value for `key` (staged by weft.set) into `out`.
 __attribute__((import_module("weft"), import_name("qjs_config")))
 extern int host_config(const char *key, int key_len, char *out, int cap);
@@ -379,6 +385,31 @@ static JSValue js_buffer_append(JSContext *ctx, JSValueConst this_val,
     return JS_UNDEFINED;
 }
 
+// weft.bufferFold(name, start, end): collapse a range of a named buffer.
+static JSValue js_buffer_fold(JSContext *ctx, JSValueConst this_val,
+                              int argc, JSValueConst *argv) {
+    if (argc < 3) return JS_UNDEFINED;
+    size_t nl;
+    const char *name = JS_ToCStringLen(ctx, &nl, argv[0]);
+    int32_t start = 0, end = 0;
+    JS_ToInt32(ctx, &start, argv[1]);
+    JS_ToInt32(ctx, &end, argv[2]);
+    if (name) host_buffer_fold(name, (int)nl, start, end);
+    JS_FreeCString(ctx, name);
+    return JS_UNDEFINED;
+}
+
+// weft.bufferLen(name) -> int: a named buffer's byte length.
+static JSValue js_buffer_len(JSContext *ctx, JSValueConst this_val,
+                             int argc, JSValueConst *argv) {
+    if (argc < 1) return JS_NewInt32(ctx, 0);
+    size_t nl;
+    const char *name = JS_ToCStringLen(ctx, &nl, argv[0]);
+    int n = name ? host_buffer_len(name, (int)nl) : 0;
+    JS_FreeCString(ctx, name);
+    return JS_NewInt32(ctx, n);
+}
+
 // weft.config(key) -> string: this plugin's config value (weft.set), or "".
 static char g_config_buf[8192];
 static JSValue js_config(JSContext *ctx, JSValueConst this_val,
@@ -513,6 +544,8 @@ int weft_plugin_init(const char *src, int len) {
     JS_SetPropertyStr(g_ctx, weft, "procRead", JS_NewCFunction(g_ctx, js_proc_read, "procRead", 1));
     JS_SetPropertyStr(g_ctx, weft, "procClose", JS_NewCFunction(g_ctx, js_proc_close, "procClose", 1));
     JS_SetPropertyStr(g_ctx, weft, "bufferAppend", JS_NewCFunction(g_ctx, js_buffer_append, "bufferAppend", 2));
+    JS_SetPropertyStr(g_ctx, weft, "bufferFold", JS_NewCFunction(g_ctx, js_buffer_fold, "bufferFold", 3));
+    JS_SetPropertyStr(g_ctx, weft, "bufferLen", JS_NewCFunction(g_ctx, js_buffer_len, "bufferLen", 1));
     JS_SetPropertyStr(g_ctx, weft, "config", JS_NewCFunction(g_ctx, js_config, "config", 1));
     JS_SetPropertyStr(g_ctx, weft, "fileRead", JS_NewCFunction(g_ctx, js_file_read, "fileRead", 1));
     JS_SetPropertyStr(g_ctx, weft, "fileWrite", JS_NewCFunction(g_ctx, js_file_write, "fileWrite", 2));

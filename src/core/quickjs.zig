@@ -110,6 +110,8 @@ pub fn evalConfig(engine: *wasm.Engine, ctx: *command.Context, loader: ?PluginLo
     try linker.defineFn("weft", "qjs_proc_read", 3, 1, cStubI32, &bridge);
     try linker.defineFn("weft", "qjs_proc_close", 1, 0, cStubVoid, &bridge);
     try linker.defineFn("weft", "qjs_buffer_append", 5, 0, cStubVoid, &bridge);
+    try linker.defineFn("weft", "qjs_buffer_fold", 4, 0, cStubVoid, &bridge);
+    try linker.defineFn("weft", "qjs_buffer_len", 2, 1, cStubI32, &bridge);
     try linker.defineFn("weft", "qjs_config", 4, 1, cStubI32, &bridge);
     try linker.defineFn("weft", "qjs_file_read", 4, 1, cStubI32, &bridge);
     try linker.defineFn("weft", "qjs_file_write", 6, 0, cStubVoid, &bridge);
@@ -212,6 +214,8 @@ pub const JsPlugin = struct {
         try self.linker.defineFn("weft", "qjs_proc_read", 3, 1, cProcRead, self);
         try self.linker.defineFn("weft", "qjs_proc_close", 1, 0, cProcClose, self);
         try self.linker.defineFn("weft", "qjs_buffer_append", 5, 0, cBufferAppend, self);
+        try self.linker.defineFn("weft", "qjs_buffer_fold", 4, 0, cBufferFold, self);
+        try self.linker.defineFn("weft", "qjs_buffer_len", 2, 1, cBufferLen, self);
         try self.linker.defineFn("weft", "qjs_config", 4, 1, cConfig, self);
         try self.linker.defineFn("weft", "qjs_file_read", 4, 1, cFileRead, self);
         try self.linker.defineFn("weft", "qjs_file_write", 6, 0, cAgentWrite, self);
@@ -392,6 +396,50 @@ fn paintStyle(ctx: *command.Context, gpa: Allocator, doc: *@import("Document.zig
     const version = doc.version(gpa) catch return;
     defer gpa.free(version);
     layer.publishBulk(gpa, version, 0, classes) catch {};
+}
+
+/// Find the buffer named `name` (created if absent), or null on failure.
+fn namedBuffer(ctx: *command.Context, gpa: Allocator, name: []const u8) ?*Buffers.Buffer {
+    var it = ctx.buffers.iterator();
+    while (it.next()) |b| if (std.mem.eql(u8, b.name, name)) return b;
+    const id = ctx.buffers.create(gpa, name) catch return null;
+    return ctx.buffers.get(id);
+}
+
+/// Collapse `[start, end)` of a named buffer (an invisible+foldable span on its
+/// fold layer) — folding a tool-call's verbose content under its header, even
+/// when the transcript isn't focused. Accumulates (claims on first use).
+fn foldNamed(ctx: *command.Context, gpa: Allocator, name: []const u8, start: usize, end: usize) void {
+    if (end <= start) return;
+    const b = namedBuffer(ctx, gpa, name) orelse return;
+    const doc = &b.editor.doc;
+    const layer = ctx.caps.layers.find(doc, "folds") orelse
+        (ctx.caps.layers.claim(gpa, doc, "folds", .local, transcript_peer) catch return);
+    layer.appendSpan(gpa, .{ .start = start, .end = end, .kind = 0, .message = "", .face = .{ .invisible = true, .foldable = true } }) catch {};
+}
+
+fn cBufferFold(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32, results: []i32) void {
+    _ = results;
+    const self: *JsPlugin = @ptrCast(@alignCast(data.?));
+    const gpa = self.gpa;
+    const name = caller.readMemory(gpa, @intCast(args[0]), @intCast(args[1])) catch return;
+    defer gpa.free(name);
+    foldNamed(self.ctx, gpa, name, @intCast(@as(u32, @bitCast(args[2]))), @intCast(@as(u32, @bitCast(args[3]))));
+}
+
+/// weft.bufferLen(name) → a named buffer's byte length (for fold offsets).
+fn cBufferLen(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32, results: []i32) void {
+    const self: *JsPlugin = @ptrCast(@alignCast(data.?));
+    const name = caller.readMemory(self.gpa, @intCast(args[0]), @intCast(args[1])) catch {
+        results[0] = 0;
+        return;
+    };
+    defer self.gpa.free(name);
+    const b = namedBuffer(self.ctx, self.gpa, name) orelse {
+        results[0] = 0;
+        return;
+    };
+    results[0] = @intCast(b.editor.text().byteLen());
 }
 
 fn cBufferAppend(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32, results: []i32) void {

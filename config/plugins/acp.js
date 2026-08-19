@@ -76,6 +76,34 @@ function showUsage(u) {
   if (s !== "· usage") transcript("\n" + s + "\n", ST.muted);
 }
 
+// Render a tool_call_update's content (diffs, output) then FOLD it, so the
+// verbose bits collapse under the tool header. Byte offsets come from the host
+// (weft.bufferLen) so folds are correct under multibyte text.
+function prefixLines(s, p) {
+  return (
+    s
+      .split("\n")
+      .map((l) => "    " + p + l)
+      .join("\n") + "\n"
+  );
+}
+function renderToolContent(u) {
+  const items = u.content || [];
+  if (!items.length) return;
+  const start = weft.bufferLen(TRANSCRIPT);
+  for (const it of items) {
+    if (it.type === "diff") {
+      transcript("    " + (it.path || "") + "\n", ST.muted);
+      if (it.oldText) transcript(prefixLines(it.oldText, "- "), ST.muted);
+      if (it.newText) transcript(prefixLines(it.newText, "+ "), ST.muted);
+    } else if (it.type === "content" && it.content) {
+      transcript("    " + (it.content.text || "") + "\n", ST.muted);
+    }
+  }
+  const end = weft.bufferLen(TRANSCRIPT);
+  if (end > start) weft.bufferFold(TRANSCRIPT, start, end);
+}
+
 // One decoded JSON-RPC message from the agent.
 function onMessage(msg) {
   const u = usageOf(msg);
@@ -90,6 +118,8 @@ function onMessage(msg) {
       transcript(u.content.text || "", ST.muted); // thoughts, dimmed
     } else if (u.sessionUpdate === "tool_call") {
       transcript("\n[" + (u.kind || "tool") + "] " + (u.title || u.toolCallId || "") + "\n", ST.location);
+    } else if (u.sessionUpdate === "tool_call_update") {
+      renderToolContent(u); // the verbose content, folded under the header
     }
     return;
   }
