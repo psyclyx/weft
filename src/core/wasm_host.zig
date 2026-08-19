@@ -50,6 +50,9 @@ pub const setPeerFsBridge = fs.setPeerFsBridge;
 pub const deliverToBuffer = fs.deliverToBuffer;
 
 const proc_host = @import("wasm_host/proc.zig");
+
+const activation = @import("wasm_host/activation.zig");
+pub const notifyActivate = activation.notifyActivate;
 const rooted_fs = @import("rooted_fs.zig");
 const WasmCmd = wasm_abi.WasmCmd;
 const PendingItem = wasm_abi.PendingItem;
@@ -164,7 +167,7 @@ pub fn defineImports(linker: *wasm.Linker, p: *WasmPlugin) !void {
     try d(linker, "wl_query_capture", 4, 1, hQueryCapture, p);
     try d(linker, "wl_node_children", 1, 1, hNodeChildren, p);
     // Activation (design §3): the path of the buffer taking focus.
-    try d(linker, "wl_activate_path", 2, 1, hActivatePath, p);
+    try d(linker, "wl_activate_path", 2, 1, activation.hActivatePath, p);
     try d(linker, "wl_claim_subbuffer", 2, 1, hClaimSubbuffer, p);
     try d(linker, "wl_subbuffer_put_fact", 5, 0, hSubbufferPutFact, p);
     // Effects (perm-gated): shell insert — the membrane form of editLater
@@ -187,21 +190,6 @@ pub fn defineImports(linker: *wasm.Linker, p: *WasmPlugin) !void {
     try d(linker, "wl_fs_append", 4, 1, fs.hFsAppend, p);
     try d(linker, "wl_fs_list", 6, 1, fs.hFsList, p);
     try d(linker, "wl_fs_list_async", 6, 1, fs.hFsListAsync, p);
-}
-
-/// Fire the activation event (design §3): tell a plugin a buffer with `path`
-/// took focus, so it can attach language keymaps/facts. A no-op for a plugin
-/// that doesn't export `on_activate`. The plugin is resident, so this host→
-/// guest call can never use-after-free. The path is borrowed for the call.
-pub fn notifyActivate(p: *WasmPlugin, path: []const u8) void {
-    p.cur_activate_path = path;
-    defer p.cur_activate_path = &.{};
-    p.instance.callVoid("on_activate", &.{}) catch {}; // MissingExport → skip
-}
-
-fn hActivatePath(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32, results: []i32) void {
-    const p: *WasmPlugin = @ptrCast(@alignCast(data.?));
-    results[0] = @intCast(caller.writeMemory(@intCast(args[0]), @intCast(args[1]), p.cur_activate_path) catch 0);
 }
 
 const repl_session = @import("repl_session.zig");
