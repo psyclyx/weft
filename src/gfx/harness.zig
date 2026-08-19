@@ -12,6 +12,7 @@ const stemma = @import("stemma");
 const core = @import("../core/core.zig");
 const view_mod = @import("view.zig");
 const region = @import("region.zig");
+const window_layout = @import("window_layout.zig");
 
 const records = snail.render.records;
 
@@ -44,6 +45,24 @@ pub fn renderView(
     defer built.deinit(gpa);
 
     return try rasterize(gpa, view, &.{built.shapes}, w, h);
+}
+
+/// Rasterize a set of panes already built into their own absolute sub-rects
+/// (via `view.build`, one `Built` per pane) into ONE composited RGBA8
+/// framebuffer — the headless analogue of `RenderState.present`'s emit + draw.
+/// `view.atlas` must still hold the glyph records the builds appended. Caller
+/// owns the returned pixels.
+pub fn renderBuilt(
+    gpa: std.mem.Allocator,
+    view: *view_mod.View,
+    built: []const view_mod.Built,
+    w: u32,
+    h: u32,
+) ![]u8 {
+    const lists = try gpa.alloc([]snail.Shape, built.len);
+    defer gpa.free(lists);
+    for (built, 0..) |b, i| lists[i] = b.shapes;
+    return rasterize(gpa, view, lists, w, h);
 }
 
 /// Rasterize already-built shape lists (one per pane) into one buffer.
@@ -298,6 +317,57 @@ test "harness: a vertical split renders a buffer in each column" {
     try t.expect(hasContent(pixels, w, half + 8, 8, w - 4, 40)); // right body
     try t.expect(!hasContent(pixels, w, half - 3, 8, half, 40)); // seam gap
     writePpm(gpa, ".zig-cache/tmp/weft-harness-split.ppm", pixels, w, h) catch {};
+}
+
+test "harness: renderBuilt composites panes laid out by the real window layout" {
+    const gpa = t.allocator;
+    const pool = try core.task.Pool.init(gpa, .{ .threads = 1 });
+    defer pool.deinit();
+    var view = try view_mod.View.init(gpa, @embedFile("font_mono"), 16);
+    defer view.deinit();
+    var left = try makeEditor(gpa, pool, "LEFT PANE\nalpha\n");
+    defer left.deinit(gpa);
+    var right = try makeEditor(gpa, pool, "RIGHT PANE\nbravo\n");
+    defer right.deinit(gpa);
+
+    // Drive the REAL window layout: one vsplit → two side-by-side slots.
+    var layout = try window_layout.Layout.init(gpa, 1);
+    defer layout.deinit();
+    try layout.splitFocused(.vertical);
+
+    const w: u32 = 400;
+    const h: u32 = 160;
+    const frame: region.Rect = .{ .x = 0, .y = 0, .w = @floatFromInt(w), .h = @floatFromInt(h) };
+    var slots: [window_layout.max_panes]window_layout.Slot = undefined;
+    const n = layout.collect(frame, &slots);
+    try t.expectEqual(@as(usize, 2), n);
+
+    const projection = snail.Mat4.ortho(0, @floatFromInt(w), @floatFromInt(h), 0, -1, 1);
+    const w2p = snail.mvpToScenePixel(projection, @floatFromInt(w), @floatFromInt(h)) orelse unreachable;
+    var arena = std.heap.ArenaAllocator.init(gpa);
+    defer arena.deinit();
+    view.resetFrame();
+
+    // Build each pane into its layout slot rect (identity transform), exactly
+    // as renderPanes does — then composite through renderBuilt (headless present).
+    var built: [2]view_mod.Built = undefined;
+    const editors = [_]*core.Editor{ &left, &right };
+    var trs = [_]usize{ 0, 0 };
+    for (slots[0..n], 0..) |slot, i| {
+        built[i] = try view.build(arena.allocator(), editors[i], .{ .mode = "normal", .pane_border = slot.border }, &trs[i], slot.rect, .{}, w2p);
+    }
+    defer for (&built) |*b| b.deinit(gpa);
+
+    const pixels = try renderBuilt(gpa, &view, &built, w, h);
+    defer gpa.free(pixels);
+    writePpm(gpa, ".zig-cache/tmp/weft-harness-renderbuilt.ppm", pixels, w, h) catch {};
+
+    // Both slots painted their buffer body, and the real layout's internal
+    // border drew a divider at the seam (proving slot.border geometry rendered).
+    const half = w / 2;
+    try t.expect(hasContent(pixels, w, 8, 8, half - 4, 40));
+    try t.expect(hasContent(pixels, w, half + 8, 8, w - 4, 40));
+    try t.expect(hasContent(pixels, w, half - 2, 8, half + 2, h - 8)); // divider
 }
 
 test "harness: a horizontal split stacks a buffer in each row" {
