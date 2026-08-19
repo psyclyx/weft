@@ -149,11 +149,23 @@ var sec_rend = [_]usize{ 0, 0, 0, 0 };
 var sec_body = [_]usize{ 0, 0, 0, 0 }; // fold start: just past the header newline
 var sec_count = [_]usize{ 0, 0, 0, 0 };
 
-// Cursor restoration across a re-gather (byte offset is best-effort; content
-// reshuffles when files change sections). `home_off` is where a fresh open lands.
+// Cursor restoration across a re-gather. Rather than a clamped byte offset
+// (which drifts when a file hops sections), we capture the IDENTITY of the node
+// under point before a mutation — section + file path + hunk ordinal, or a
+// recent commit's hash — and `on_fill` re-finds it in the NEW model, landing on
+// its rendered start. `pending_cursor` is the fallback when the node is gone
+// (e.g. the file was fully staged away). `home_off` is where a fresh open lands.
 var restore_cursor = false;
 var pending_cursor: usize = 0;
 var home_off: usize = 0;
+const RestoreKind = enum { none, section, file, hunk, commit };
+var restore_kind: RestoreKind = .none;
+var restore_section: Section = .untracked;
+var restore_path: [256]u8 = undefined;
+var restore_plen: usize = 0;
+var restore_hunk_ord: usize = 0; // the hunk's ordinal within its file
+var restore_hash: [64]u8 = undefined;
+var restore_hlen: usize = 0;
 
 var dropped_files = false;
 var dropped_hunks = false;
@@ -500,10 +512,16 @@ fn parseAndRender() void {
     weft.edit(.{ .start = 0, .end = weft.byteLen() }, render_buf[0..out]);
     publishStyles();
     publishFolds();
-    // Land the cursor: restore near the prior spot after a mutation, else home.
-    const target = if (restore_cursor) @min(pending_cursor, out) else home_off;
+    // Land the cursor: re-find the captured node identity after a mutation (so
+    // point tracks the file/hunk/commit even when it moved), else the clamped
+    // offset, else home.
+    const target = if (restore_cursor)
+        (findIdentityOffset() orelse @min(pending_cursor, out))
+    else
+        home_off;
     weft.jump(weft.lineAt(target).start);
     restore_cursor = false;
+    restore_kind = .none;
     noteDrops();
 }
 
@@ -887,8 +905,7 @@ fn gitStatus() void {
     weft.setMode("magit");
 }
 fn gitRefresh() void {
-    restore_cursor = true;
-    pending_cursor = weft.cursor();
+    markRestore();
     show(GATHER, buf_name);
     weft.setMode("magit");
 }
@@ -1488,10 +1505,12 @@ fn show(cmd: []const u8, name: []const u8) void {
     weft.procToBuffer(cmd, name);
 }
 
-/// Preserve the cursor spot across the coming re-render.
+/// Preserve the cursor spot across the coming re-render: capture the node
+/// identity (re-found in the new model) plus the raw offset as a fallback.
 fn markRestore() void {
     restore_cursor = true;
     pending_cursor = weft.cursor();
+    captureIdentity();
 }
 
 /// `mutation && GATHER` into *magit* — the index reflects the mutation with no
@@ -1545,6 +1564,14 @@ fn gatherAfterPatch(flags: []const u8, also_worktree: bool) void {
 /// a commit line. `render_buf[0..out]` IS the buffer we authored, so buffer
 /// offsets index it directly (the `nodeAt` invariant).
 fn recentHashAt() ?[]const u8 {
+    pending_hash_len = recentHashToken(&pending_hash) orelse return null;
+    return pending_hash[0..pending_hash_len];
+}
+
+/// Copy the commit-hash token on the recent line under point into `dst`,
+/// returning its length, or null when the cursor isn't on a commit line. Shared
+/// by the commit verbs (`recentHashAt`) and identity capture.
+fn recentHashToken(dst: []u8) ?usize {
     const idx = @intFromEnum(Section.recent);
     if (!sec_present[idx]) return null;
     const cur = weft.cursor();
@@ -1555,9 +1582,89 @@ fn recentHashAt() ?[]const u8 {
     var e = s;
     while (e < ln.end and e < out and render_buf[e] != ' ') e += 1;
     if (e == s) return null;
-    pending_hash_len = @min(e - s, pending_hash.len);
-    @memcpy(pending_hash[0..pending_hash_len], render_buf[s .. s + pending_hash_len]);
-    return pending_hash[0..pending_hash_len];
+    const n = @min(e - s, dst.len);
+    @memcpy(dst[0..n], render_buf[s .. s + n]);
+    return n;
+}
+
+// ── Node identity capture/lookup (survives a re-gather; see the restore block) ─
+/// Snapshot the identity of the node under point BEFORE a mutation, so `on_fill`
+/// can re-find it in the freshly-gathered model.
+fn captureIdentity() void {
+    restore_kind = .none;
+    const n = nodeAt(weft.cursor());
+    switch (n.kind) {
+        .none => {},
+        .file => {
+            const f = &files[n.idx];
+            restore_kind = .file;
+            restore_section = f.section;
+            restore_plen = @min(f.plen, restore_path.len);
+            @memcpy(restore_path[0..restore_plen], f.path[0..restore_plen]);
+        },
+        .hunk => {
+            const h = &hunks[n.idx];
+            const f = &files[h.file];
+            restore_kind = .hunk;
+            restore_section = f.section;
+            restore_plen = @min(f.plen, restore_path.len);
+            @memcpy(restore_path[0..restore_plen], f.path[0..restore_plen]);
+            restore_hunk_ord = n.idx - f.first_hunk;
+        },
+        .section => {
+            const sec: Section = @enumFromInt(n.idx);
+            // A recent-commit line is a section node — remember it by hash so it
+            // tracks even after commits above it churn.
+            if (sec == .recent) {
+                if (recentHashToken(&restore_hash)) |hn| {
+                    restore_kind = .commit;
+                    restore_hlen = hn;
+                    return;
+                }
+            }
+            restore_kind = .section;
+            restore_section = sec;
+        },
+    }
+}
+
+/// Re-find the captured identity in the freshly-rendered model → its rendered
+/// start offset, or null when it's gone (caller falls back to the clamped offset).
+fn findIdentityOffset() ?usize {
+    switch (restore_kind) {
+        .none => return null,
+        .section => {
+            const idx = @intFromEnum(restore_section);
+            return if (sec_present[idx]) sec_rstart[idx] else null;
+        },
+        .file => {
+            const fi = findFile(restore_section, restore_path[0..restore_plen]) orelse return null;
+            return files[fi].r_start;
+        },
+        .hunk => {
+            const fi = findFile(restore_section, restore_path[0..restore_plen]) orelse return null;
+            const f = &files[fi];
+            if (f.n_hunks == 0) return f.r_start; // hunks gone → the file header
+            return hunks[f.first_hunk + @min(restore_hunk_ord, f.n_hunks - 1)].r_start;
+        },
+        .commit => {
+            const idx = @intFromEnum(Section.recent);
+            if (!sec_present[idx]) return null;
+            const want = restore_hash[0..restore_hlen];
+            var i = sec_body[idx];
+            const e = sec_rend[idx];
+            while (i < e) {
+                var le = i;
+                while (le < e and render_buf[le] != '\n') le += 1;
+                const hs = @min(i + 2, le); // skip the "  " indent
+                var he = hs;
+                while (he < le and render_buf[he] != ' ') he += 1;
+                if (he > hs and std.mem.eql(u8, render_buf[hs..he], want)) return i;
+                i = le + 1;
+            }
+            return null;
+        },
+    }
 }
 
 // ── Generic destructive confirm (branch delete / stash drop / reset --hard) ──
