@@ -42,6 +42,7 @@ pub const Editor = struct {
     keymap: core.Keymap,
     pick: core.pick.Pick,
     caps: core.Caps,
+    actions: core.Actions,
     quit: bool = false,
     echo: std.ArrayList(u8) = .empty,
     ctx: command.Context = undefined,
@@ -88,6 +89,7 @@ pub const Editor = struct {
         self.keymap = .empty;
         self.pick = .empty;
         self.caps = core.Caps.init(gpa, core.task.nowNs);
+        self.actions = core.Actions.init(gpa);
         self.engine = try core.wasm.Engine.init();
         self.loop = core.async_loop.Loop.init(gpa, self.pool, core.task.nowNs);
         self.buffers = try core.Buffers.init(gpa, self.pool, user);
@@ -96,6 +98,7 @@ pub const Editor = struct {
             .buffers = &self.buffers,
             .commands = &self.commands,
             .keymap = &self.keymap,
+            .actions = &self.actions,
             .pick = &self.pick,
             .caps = &self.caps,
             .quit = &self.quit,
@@ -131,6 +134,7 @@ pub const Editor = struct {
         if (self.view) |*v| v.deinit();
         self.loop.deinit();
         self.subs.deinit(gpa);
+        self.actions.deinit();
         self.caps.deinit();
         self.pick.deinit(gpa);
         self.keymap.deinit(gpa);

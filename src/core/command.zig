@@ -13,6 +13,7 @@ const Document = @import("Document.zig");
 const Editor = @import("Editor.zig");
 const Buffers = @import("Buffers.zig");
 const Keymap = @import("Keymap.zig");
+const Actions = @import("action.zig");
 const authority = @import("authority.zig");
 const position = @import("position.zig");
 
@@ -55,6 +56,7 @@ pub const Context = struct {
     buffers: *Buffers,
     commands: *Commands,
     keymap: *Keymap,
+    actions: *Actions,
     pick: *@import("pick.zig").Pick,
     caps: *@import("capability.zig").Caps,
     quit: *bool,
@@ -75,6 +77,16 @@ pub const Context = struct {
 
     pub fn buffer(self: *Context) *Buffers.Buffer {
         return self.buffers.active();
+    }
+
+    /// Snapshot the ambient facts an action's `when` predicate resolves
+    /// against: the active keymap mode + the active buffer's language (its
+    /// name's extension). Borrowed for the duration of the call.
+    pub fn actionCtx(self: *Context) Actions.Ctx {
+        return .{
+            .mode = self.keymap.currentMode(),
+            .lang = Actions.langOfName(self.buffers.active().name),
+        };
     }
 
     pub fn editor(self: *Context) *Editor {
@@ -150,6 +162,50 @@ pub const RunError = error{UnknownCommand} || anyerror;
 pub fn run(commands: *const Commands, ctx: *Context, name: []const u8, args: []const Value) RunError!Value {
     const cmd = commands.resolve(name) orelse return error.UnknownCommand;
     return cmd.handler(ctx, cmd.data, args);
+}
+
+/// The trampoline a declared action is registered under (see `registerAction`):
+/// resolve the action name against the live context and tail-call the winning
+/// provider's command with the same args. A `pick` action with no applicable
+/// provider is a graceful no-op with feedback (never an error — pressing an
+/// action key in the wrong buffer should explain, not fail). A `race` action's
+/// synchronous trampoline resolves nothing (its providers answer over time
+/// through `Caps`); it's a no-op here by design, surfaced as such.
+pub fn actionTrampoline(ctx: *Context, data: ?*anyopaque, args: []const Value) anyerror!Value {
+    const tr: *Actions.Trampoline = @ptrCast(@alignCast(data.?));
+    if (ctx.actions.resolve(tr.name, ctx.actionCtx())) |cmd| {
+        return run(ctx.commands, ctx, cmd, args);
+    }
+    ctx.echo.clearRetainingCapacity();
+    const lang = Actions.langOfName(ctx.buffers.active().name);
+    var buf: [128]u8 = undefined;
+    const msg = if (lang.len > 0)
+        std.fmt.bufPrint(&buf, "no {s} provider for .{s}", .{ tr.name, lang }) catch tr.name
+    else
+        std.fmt.bufPrint(&buf, "no {s} provider here", .{tr.name}) catch tr.name;
+    ctx.echo.appendSlice(ctx.gpa, msg) catch {};
+    return .nil;
+}
+
+/// Declare an action and bind its same-named trampoline `Command`, so the
+/// keymap, ex, palette, and `command.run` all dispatch it uniformly. Idempotent
+/// per the underlying `Actions.declare`; a re-declare just binds another
+/// trampoline for the same name (they resolve identically).
+pub fn registerAction(
+    gpa: Allocator,
+    commands: *Commands,
+    actions: *Actions,
+    name: []const u8,
+    policy: Actions.Policy,
+) !void {
+    const tr = try actions.declare(name, policy);
+    _ = try commands.bind(gpa, name, .{
+        .name = name,
+        .summary = "action",
+        .args = &.{},
+        .handler = actionTrampoline,
+        .data = tr,
+    });
 }
 
 /// Derive a `Command` from a typed function at comptime. `f` must be
@@ -274,6 +330,8 @@ test "command: schema derivation, validation, late-bound run" {
     defer pick.deinit(gpa);
     var caps = @import("capability.zig").Caps.init(gpa, @import("task.zig").nowNs);
     defer caps.deinit();
+    var actions = Actions.init(gpa);
+    defer actions.deinit();
     var quit = false;
     var echo_line: std.ArrayList(u8) = .empty;
     defer echo_line.deinit(gpa);
@@ -285,6 +343,7 @@ test "command: schema derivation, validation, late-bound run" {
         .buffers = &buffers,
         .commands = &commands,
         .keymap = &keymap,
+        .actions = &actions,
         .pick = &pick,
         .caps = &caps,
         .quit = &quit,

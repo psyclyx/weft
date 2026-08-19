@@ -51,6 +51,8 @@ pub fn run(gpa: std.mem.Allocator, args: Args, environ: std.process.Environ) !vo
     defer pick_state.deinit(gpa);
     var caps = capability.Caps.init(gpa, core.task.nowNs);
     defer caps.deinit();
+    var actions = core.Actions.init(gpa);
+    defer actions.deinit();
     var quit = false;
     var echo_line: std.ArrayList(u8) = .empty;
     defer echo_line.deinit(gpa);
@@ -59,6 +61,7 @@ pub fn run(gpa: std.mem.Allocator, args: Args, environ: std.process.Environ) !vo
         .buffers = &buffers,
         .commands = &commands,
         .keymap = &keymap,
+        .actions = &actions,
         .pick = &pick_state,
         .caps = &caps,
         .quit = &quit,

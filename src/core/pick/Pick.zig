@@ -622,6 +622,7 @@ const TestEnv = struct {
     commands: command.Commands = .empty,
     keymap: @import("../Keymap.zig") = .empty,
     caps: @import("../capability.zig").Caps,
+    actions: @import("../action.zig"),
     quit: bool = false,
     echo: std.ArrayList(u8) = .empty,
     pick: Pick = .empty,
@@ -634,6 +635,7 @@ const TestEnv = struct {
             .pool = pool,
             .buffers = try @import("../Buffers.zig").init(gpa, pool, "user"),
             .caps = @import("../capability.zig").Caps.init(gpa, task.nowNs),
+            .actions = @import("../action.zig").init(gpa),
         };
         return self;
     }
@@ -644,6 +646,7 @@ const TestEnv = struct {
             .buffers = &self.buffers,
             .commands = &self.commands,
             .keymap = &self.keymap,
+            .actions = &self.actions,
             .pick = &self.pick,
             .caps = &self.caps,
             .quit = &self.quit,
@@ -655,6 +658,7 @@ const TestEnv = struct {
         const gpa = self.gpa;
         self.pick.deinit(gpa);
         self.echo.deinit(gpa);
+        self.actions.deinit();
         self.caps.deinit();
         self.keymap.deinit(gpa);
         self.commands.deinit(gpa);

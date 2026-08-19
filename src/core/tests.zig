@@ -451,6 +451,7 @@ const TestHost = struct {
     keymap: core.Keymap,
     pick: core.Pick,
     caps: core.Caps,
+    actions: core.Actions,
     quit: bool,
     ctx: core.command.Context,
 
@@ -462,12 +463,14 @@ const TestHost = struct {
         host.keymap = .empty;
         host.pick = .empty;
         host.caps = core.Caps.init(gpa, core.task.nowNs);
+        host.actions = core.Actions.init(gpa);
         host.quit = false;
         host.ctx = .{
             .gpa = gpa,
             .buffers = &host.buffers,
             .commands = &host.commands,
             .keymap = &host.keymap,
+            .actions = &host.actions,
             .pick = &host.pick,
             .caps = &host.caps,
             .quit = &host.quit,
@@ -481,6 +484,7 @@ const TestHost = struct {
     }
 
     fn deinit(host: *TestHost, gpa: Allocator) void {
+        host.actions.deinit();
         host.caps.deinit();
         host.pick.deinit(gpa);
         host.keymap.deinit(gpa);

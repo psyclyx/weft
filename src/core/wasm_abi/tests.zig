@@ -39,6 +39,8 @@ test "wasm plugin: a .wasm guest edits the buffer through the host ABI, as its p
     defer pick.deinit(gpa);
     var caps = @import("../capability.zig").Caps.init(gpa, task.nowNs);
     defer caps.deinit();
+    var actions = @import("../action.zig").init(gpa);
+    defer actions.deinit();
     var quit = false;
     var echo: std.ArrayList(u8) = .empty;
     defer echo.deinit(gpa);
@@ -47,6 +49,7 @@ test "wasm plugin: a .wasm guest edits the buffer through the host ABI, as its p
         .buffers = &buffers,
         .commands = &commands,
         .keymap = &keymap,
+        .actions = &actions,
         .pick = &pick,
         .caps = &caps,
         .quit = &quit,
@@ -85,6 +88,8 @@ test "wasm plugin: init registers a command that dispatches back into the guest"
     defer pick.deinit(gpa);
     var caps = @import("../capability.zig").Caps.init(gpa, task.nowNs);
     defer caps.deinit();
+    var actions = @import("../action.zig").init(gpa);
+    defer actions.deinit();
     var quit = false;
     var echo: std.ArrayList(u8) = .empty;
     defer echo.deinit(gpa);
@@ -93,6 +98,7 @@ test "wasm plugin: init registers a command that dispatches back into the guest"
         .buffers = &buffers,
         .commands = &commands,
         .keymap = &keymap,
+        .actions = &actions,
         .pick = &pick,
         .caps = &caps,
         .quit = &quit,
@@ -127,6 +133,7 @@ const Env = struct {
     keymap: @import("../Keymap.zig"),
     pick: @import("../pick.zig").Pick,
     caps: @import("../capability.zig").Caps,
+    actions: @import("../action.zig"),
     quit: bool,
     echo: std.ArrayList(u8),
     ctx: command.Context,
@@ -139,6 +146,7 @@ const Env = struct {
         self.keymap = .empty;
         self.pick = .empty;
         self.caps = @import("../capability.zig").Caps.init(gpa, task.nowNs);
+        self.actions = @import("../action.zig").init(gpa);
         self.quit = false;
         self.echo = .empty;
         self.ctx = .{
@@ -146,6 +154,7 @@ const Env = struct {
             .buffers = &self.buffers,
             .commands = &self.commands,
             .keymap = &self.keymap,
+            .actions = &self.actions,
             .pick = &self.pick,
             .caps = &self.caps,
             .quit = &self.quit,
@@ -153,6 +162,7 @@ const Env = struct {
         };
     }
     fn deinit(self: *Env, gpa: Allocator) void {
+        self.actions.deinit();
         self.caps.deinit();
         self.pick.deinit(gpa);
         self.keymap.deinit(gpa);

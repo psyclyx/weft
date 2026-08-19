@@ -32,6 +32,7 @@ pub const Session = struct {
     keymap: core.Keymap,
     pick: core.Pick,
     caps: core.Caps,
+    actions: core.Actions,
     quit: bool,
     echo: std.ArrayList(u8),
     /// Self-referential: points at the fields above — built in place.
@@ -67,6 +68,7 @@ pub const Session = struct {
         self.keymap = .empty;
         self.pick = .empty;
         self.caps = core.Caps.init(gpa, core.task.nowNs);
+        self.actions = core.Actions.init(gpa);
         self.quit = false;
         self.echo = .empty;
         self.cmd_ctx = .{
@@ -74,6 +76,7 @@ pub const Session = struct {
             .buffers = &self.buffers,
             .commands = &self.commands,
             .keymap = &self.keymap,
+            .actions = &self.actions,
             .pick = &self.pick,
             .caps = &self.caps,
             .quit = &self.quit,
@@ -101,6 +104,7 @@ pub const Session = struct {
         self.hover_ui.deinit(gpa);
         self.sym_ui.deinit(gpa);
         self.echo.deinit(gpa);
+        self.actions.deinit();
         self.caps.deinit();
         self.pick.deinit(gpa);
         self.keymap.deinit(gpa);
