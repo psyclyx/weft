@@ -7,6 +7,7 @@
 
 const std = @import("std");
 const core = @import("../core/core.zig");
+const window_layout = @import("../gfx/window_layout.zig");
 const setEcho = @import("handler.zig").setEcho;
 
 /// Status-line chip for a peer's trust grade (null = don't show).
@@ -243,6 +244,171 @@ pub fn applyIntents(
         sc.stop_listen_requested = false;
         if (sc.hub.*) |*h| h.stopAccepting();
         dirty = true;
+    }
+    return dirty;
+}
+
+/// The collab TICK (run each frame, after intents are applied): adopt new hub
+/// peers and publish/relay their cursors; publish our own cursors on the
+/// outbound conn; drive the partial checkout's fetch window per pane; pump the
+/// async .peer filesystem; note the host's identity once per handshake; and
+/// self-reconnect a flapping client link. Most state comes from `sc`; the
+/// remaining frame-loop locals are threaded by pointer (they live in `main()`,
+/// which owns them). Returns whether the view was damaged.
+pub fn tickCollab(
+    sc: *ShareCtx,
+    cmd_ctx: *core.command.Context,
+    ed0: *core.Editor,
+    win_layout: *window_layout.Layout,
+    peer_fs_bridge: *core.wasm_host.PeerFsBridge,
+    remote_fs: *core.session.RemoteFs,
+    peer_fs_inflight: *std.AutoHashMapUnmanaged(u64, []u8),
+    noted_host_fp: *?[24]u8,
+    last_liveness: *core.session.Liveness,
+    reconnect: *?core.task.Handle(anyerror!i32),
+    next_reconnect_ns: *u64,
+    fd_link: *core.session.FdLink,
+    my_identity: *const core.identity.Identity,
+    pool: *core.task.Pool,
+    connect: ?[]const u8,
+    token: []const u8,
+    echo: *std.ArrayList(u8),
+) !bool {
+    const gpa = sc.gpa;
+    var dirty = false;
+    if (sc.hub.*) |*h| {
+        // Adopt new peers (binds the primary + replays shares), then
+        // publish the local cursor to every peer and tick.
+        h.acceptPending(sc, guiConfigure);
+        for (h.clients.items) |peer| {
+            for (peer.conn.collabs.items) |col| {
+                if (sc.buffers.get(@intCast(col.tag))) |b| {
+                    col.cursor_offset = b.editor.cursorOffset();
+                    col.selection_anchor = selectionAnchorOf(&b.editor);
+                }
+            }
+        }
+        if (h.tick()) dirty = true;
+        // Merge every peer's cursor into each shared doc's presence
+        // layer for local display (per-peer collabs keep it null).
+        if (sc.primary_doc) |pd| {
+            if (sc.caps.layers.find(pd, "presence")) |pl| core.hub.unionPresence(h, pd, pl, gpa) catch {};
+        }
+        for (sc.shared.items) |s| {
+            if (sc.caps.layers.find(s.doc, "presence")) |pl| core.hub.unionPresence(h, s.doc, pl, gpa) catch {};
+        }
+    }
+
+    if (sc.conn.*) |*c| {
+        // Each bound buffer publishes its own cursor + selection.
+        for (c.collabs.items) |col| {
+            if (sc.buffers.get(@intCast(col.tag))) |b| {
+                col.cursor_offset = b.editor.cursorOffset();
+                col.selection_anchor = selectionAnchorOf(&b.editor);
+            }
+        }
+        // Partial checkout: realize content around the cursor (the
+        // requests dedupe against realized + inflight spans). Also want
+        // the scroll window of every pane rendering the partial buffer
+        // (buffer 0, wire v1) — a split peeking it elsewhere must not
+        // read an unrealized hole (see partial_blocked below).
+        if (sc.partial.*) |*p| {
+            const cur = ed0.cursorOffset();
+            p.want(sc.session.*.?, 0, cur -| (64 << 10), cur + (128 << 10)) catch {};
+            const WantCtx = struct { p: *core.session.PartialDoc, sess: *core.session.Session, ed0: *core.Editor };
+            win_layout.eachPane(WantCtx{ .p = p, .sess = sc.session.*.?, .ed0 = ed0 }, struct {
+                fn visit(wc: WantCtx, pane: *window_layout.Pane) void {
+                    if (pane.buffer_id != 0) return; // the partial doc is buffer 0
+                    const rope = wc.ed0.text();
+                    const rows = rope.lineCount();
+                    if (rows == 0) return;
+                    const start = rope.lineRange(@min(pane.top_row, rows - 1)).start;
+                    wc.p.want(wc.sess, 0, start -| (8 << 10), start + (128 << 10)) catch {};
+                }
+            }.visit);
+        }
+        if (try c.tick()) dirty = true;
+        // Async .peer fs: post the guest's queued LIST requests over the
+        // session, then deliver any completed listings into their buffers.
+        if (sc.session.*) |sess| {
+            for (peer_fs_bridge.requests.items) |req| {
+                defer gpa.free(req.path);
+                const enc = core.peer_fs.encodeList(gpa, req.path) catch {
+                    gpa.free(req.dest);
+                    continue;
+                };
+                defer gpa.free(enc);
+                if (remote_fs.request(sess, 0, enc)) |id| {
+                    peer_fs_inflight.put(gpa, id, req.dest) catch gpa.free(req.dest);
+                } else |_| gpa.free(req.dest);
+            }
+            peer_fs_bridge.requests.clearRetainingCapacity();
+            var done: [16]u64 = undefined;
+            var dn: usize = 0;
+            var pit = peer_fs_inflight.iterator();
+            while (pit.next()) |e| {
+                if (remote_fs.take(e.key_ptr.*)) |resp| {
+                    defer gpa.free(resp);
+                    if (core.peer_fs.decodeResponse(resp)) |dec| {
+                        if (dec.status == .ok)
+                            core.wasm_host.deliverToBuffer(cmd_ctx, e.value_ptr.*, "peer-fs", dec.payload);
+                    }
+                    gpa.free(e.value_ptr.*);
+                    if (dn < done.len) {
+                        done[dn] = e.key_ptr.*;
+                        dn += 1;
+                    }
+                    dirty = true;
+                }
+            }
+            for (done[0..dn]) |id| _ = peer_fs_inflight.remove(id);
+        }
+        // Note the host's identity once per handshake: TOFU-record it
+        // and echo its fingerprint + SAS + trust so the user can verify
+        // the four words out of band before trusting a new host.
+        if (sc.session.*.?.peerFingerprint()) |fp| {
+            if (noted_host_fp.* == null or !std.mem.eql(u8, &noted_host_fp.*.?, &fp)) {
+                noted_host_fp.* = fp;
+                const prior = sc.known.remember(fp) catch core.known_peers.Trust.unknown;
+                const sas = sc.session.*.?.sas().?; // established ⇒ present
+                var buf: [96]u8 = undefined;
+                const msg = if (prior == .verified)
+                    std.fmt.bufPrint(&buf, "host {s} · verified", .{&fp}) catch "host verified"
+                else
+                    std.fmt.bufPrint(&buf, "host {s} · unverified · SAS {s}", .{ &fp, &sas }) catch "host unverified";
+                setEcho(echo, gpa, msg);
+                std.log.info("collab: {s}", .{msg});
+                dirty = true;
+            }
+        }
+        const live = sc.session.*.?.liveness();
+        if (live != last_liveness.*) {
+            last_liveness.* = live;
+            dirty = true;
+        }
+        // A flapping link reconnects itself (client role): pooled
+        // connect attempts every 3s, rebind on success — the resync
+        // is the ordinary frontier exchange (+ share re-announce).
+        if (live == .offline and connect != null) {
+            if (reconnect.*) |*h| {
+                if (h.poll()) |res| {
+                    reconnect.* = null;
+                    if (res) |fd| {
+                        sc.session.*.?.destroy();
+                        fd_link.* = .{ .fd = fd };
+                        sc.session.* = try core.session.Session.create(gpa, fd_link.link(), .client, token, .own, my_identity);
+                        try c.rebind(sc.session.*.?);
+                        std.log.info("collab: reconnected", .{});
+                        dirty = true;
+                    } else |_| {
+                        next_reconnect_ns.* = core.task.nowNs() + 3 * std.time.ns_per_s;
+                    }
+                }
+            } else if (core.task.nowNs() >= next_reconnect_ns.*) {
+                next_reconnect_ns.* = core.task.nowNs() + 3 * std.time.ns_per_s;
+                reconnect.* = try pool.spawn(reconnectTask, .{connect.?});
+            }
+        }
     }
     return dirty;
 }
