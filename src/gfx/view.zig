@@ -26,6 +26,7 @@ const layout = @import("layout.zig");
 const region = @import("region.zig");
 const fonts = @import("fonts.zig");
 const statusline = @import("view/statusline.zig");
+const popup = @import("view/popup.zig");
 
 const InlineAttr = core.capability.InlineAttr;
 const HighlightClass = core.capability.HighlightClass;
@@ -453,18 +454,18 @@ pub const View = struct {
             self.frame_layout.lines[li].caretAt(cursor_off).y_top
         else
             null;
-        try self.drawSurfaces(scratch, &runs, &rects, hud, body_rect, caret_y);
+        try popup.drawSurfaces(self, scratch, &runs, &rects, hud, body_rect, caret_y);
         // The picker draws into its carved window-bottom dock (main cut it off
         // the window with cutBottom, so it cannot overlap panes or a status
         // line). A completion pick anchors at the caret instead — a popup.
         if (hud.pick) |p| {
             if (p.caret_anchor) |off|
-                try self.drawPickAtCaret(scratch, &runs, &rects, p, off, body_rect)
+                try popup.drawPickAtCaret(self, scratch, &runs, &rects, p, off, body_rect)
             else
-                try self.drawPickInto(scratch, &runs, &rects, p, pick_dock);
+                try popup.drawPickInto(self, scratch, &runs, &rects, p, pick_dock);
         }
         // Hover info floats at the caret, above everything else.
-        if (hud.hover) |hv| try self.drawHoverAtCaret(scratch, &runs, &rects, hv.text, hv.offset, body_rect);
+        if (hud.hover) |hv| try popup.drawHoverAtCaret(self, scratch, &runs, &rects, hv.text, hv.offset, body_rect);
 
         // Thin pane dividers: a 1px line on each internal (shared) edge of
         // the pane's frame. Drawn on the frame boundary — outside the
@@ -924,237 +925,6 @@ pub const View = struct {
         const shown = @min(p.filtered.items.len, Hud.max_pick_rows);
         return @as(f32, @floatFromInt(1 + shown)) * self.line_h;
     }
-
-    /// Draw the picker INTO its carved `dock` region (a window-bottom strip cut
-    /// off the frame with `cutBottom`, so it never overlaps the panes or a
-    /// status line — the region system's whole point). Every position is
-    /// relative to `dock`, whose height is exactly `pickDockHeight`, so nothing
-    /// spills. It receives its OWN rect, never the whole window.
-    fn drawPickInto(
-        self: *View,
-        scratch: Allocator,
-        runs: *std.ArrayList(Run),
-        rects: *std.ArrayList(Rect),
-        p: *const core.Pick,
-        dock: region.Rect,
-    ) !void {
-        if (dock.h <= 0) return;
-        const total = p.filtered.items.len;
-        const shown = @min(total, Hud.max_pick_rows);
-        // A thin top rule sets the picker dock off from the panes above it.
-        try rects.append(scratch, .{ .x = dock.x, .y = dock.y, .w = dock.w, .h = dock.h, .color = self.theme.selection });
-        try rects.append(scratch, .{ .x = dock.x, .y = dock.y, .w = dock.w, .h = 1, .color = self.theme.accent });
-
-        const narrow_chip = if (p.narrow.items.len > 0)
-            try std.fmt.allocPrint(scratch, "[{s}]", .{p.narrow.items})
-        else
-            "";
-        const query = try std.fmt.allocPrint(scratch, "  {s}{s}> {s}_   [{d}/{d}] ·{s}", .{
-            p.prompt,                              narrow_chip, p.query.items,
-            if (total == 0) 0 else p.selected + 1, total,       @tagName(p.style),
-        });
-        try self.propLine(scratch, runs, query, dock.x, dock.y + self.ascent, self.theme.foreground);
-
-        const start = if (p.selected >= shown) p.selected + 1 - shown else 0;
-        for (0..shown) |i| {
-            const fi = start + i;
-            const item = p.items.items[p.filtered.items[fi]];
-            const doc = p.docOf(fi);
-            const l = if (doc.len > 0)
-                try std.fmt.allocPrint(scratch, "  {s}  · {s}", .{ item, doc })
-            else
-                try std.fmt.allocPrint(scratch, "  {s}", .{item});
-            const row_y = dock.y + @as(f32, @floatFromInt(1 + i)) * self.line_h;
-            const selected = fi == p.selected;
-            if (selected) try rects.append(scratch, .{ .x = dock.x, .y = row_y, .w = dock.w, .h = self.line_h, .color = self.theme.accent });
-            try self.propLine(scratch, runs, l, dock.x, row_y + self.ascent, if (selected) self.theme.background else self.theme.status);
-        }
-    }
-
-    /// Draw a completion pick as a popup anchored at the caret (byte offset
-    /// `off`): a small outlined box of candidates just below the caret line
-    /// (flipped above if it would overflow the body), the selected row
-    /// highlighted. No query line — the query is what you're typing in the
-    /// buffer. Skips if the anchor line is off-screen or there are no rows.
-    fn drawPickAtCaret(
-        self: *View,
-        scratch: Allocator,
-        runs: *std.ArrayList(Run),
-        rects: *std.ArrayList(Rect),
-        p: *const core.Pick,
-        off: usize,
-        body: region.Rect,
-    ) !void {
-        const total = p.filtered.items.len;
-        if (total == 0) return;
-        const li = self.frame_layout.lineForOffset(off) orelse return; // off-screen
-        const c = self.frame_layout.lines[li].caretAt(off);
-
-        const shown = @min(total, Hud.max_pick_rows);
-        const start = if (p.selected >= shown) p.selected + 1 - shown else 0;
-        var max_cols: usize = 8;
-        for (0..shown) |i| {
-            const item = p.items.items[p.filtered.items[start + i]];
-            max_cols = @max(max_cols, std.unicode.utf8CountCodepoints(item) catch item.len);
-        }
-        const box_w = @as(f32, @floatFromInt(max_cols + 2)) * self.cell_w;
-        const box_h = @as(f32, @floatFromInt(shown)) * self.line_h;
-        const box_x = std.math.clamp(c.x, body.x, @max(body.x, body.x + body.w - box_w));
-        var box_y = c.y_top + c.height; // just below the caret line
-        if (box_y + box_h > body.y + body.h) box_y = c.y_top - box_h; // flip above
-        box_y = std.math.clamp(box_y, body.y, @max(body.y, body.y + body.h - box_h));
-        try self.outlinedBox(scratch, rects, box_x, box_y, box_w, box_h, self.theme.selection, self.theme.accent);
-
-        for (0..shown) |i| {
-            const fi = start + i;
-            const item = p.items.items[p.filtered.items[fi]];
-            const row_y = box_y + @as(f32, @floatFromInt(i)) * self.line_h;
-            const selected = fi == p.selected;
-            if (selected) try rects.append(scratch, .{ .x = box_x, .y = row_y, .w = box_w, .h = self.line_h, .color = self.theme.accent });
-            try self.propLine(scratch, runs, item, box_x + self.cell_w, row_y + self.ascent, if (selected) self.theme.background else self.theme.foreground);
-        }
-    }
-
-    /// Draw hover text (LSP) as an outlined box anchored below the caret at
-    /// `off` (flipping above when it would overflow the body). Multi-line: the
-    /// text is split on '\n', capped to `max_hover_rows`, each line rendered as
-    /// a mono run. Off-screen caret ⇒ nothing (same rule as the caret popup).
-    fn drawHoverAtCaret(
-        self: *View,
-        scratch: Allocator,
-        runs: *std.ArrayList(Run),
-        rects: *std.ArrayList(Rect),
-        text: []const u8,
-        off: usize,
-        body: region.Rect,
-    ) !void {
-        if (text.len == 0) return;
-        const li = self.frame_layout.lineForOffset(off) orelse return; // off-screen
-        const c = self.frame_layout.lines[li].caretAt(off);
-
-        var rows: usize = 0;
-        var max_cols: usize = 8;
-        var it = std.mem.splitScalar(u8, text, '\n');
-        while (it.next()) |line| : (rows += 1) {
-            if (rows >= Hud.max_hover_rows) break;
-            max_cols = @max(max_cols, std.unicode.utf8CountCodepoints(line) catch line.len);
-        }
-        if (rows == 0) return;
-
-        const box_w = @as(f32, @floatFromInt(max_cols + 2)) * self.cell_w;
-        const box_h = @as(f32, @floatFromInt(rows)) * self.line_h;
-        const box_x = std.math.clamp(c.x, body.x, @max(body.x, body.x + body.w - box_w));
-        var box_y = c.y_top + c.height; // just below the caret line
-        if (box_y + box_h > body.y + body.h) box_y = c.y_top - box_h; // flip above
-        box_y = std.math.clamp(box_y, body.y, @max(body.y, body.y + body.h - box_h));
-        try self.outlinedBox(scratch, rects, box_x, box_y, box_w, box_h, self.theme.selection, self.theme.accent);
-
-        var line_it = std.mem.splitScalar(u8, text, '\n');
-        var i: usize = 0;
-        while (line_it.next()) |line| : (i += 1) {
-            if (i >= rows) break;
-            const row_y = box_y + @as(f32, @floatFromInt(i)) * self.line_h;
-            try self.propLine(scratch, runs, line, box_x + self.cell_w, row_y + self.ascent, self.theme.foreground);
-        }
-    }
-
-    /// A filled box with a 1px outline: the border rect (1px larger all round)
-    /// drawn first, the fill on top, so the border reads as a thin frame.
-    fn outlinedBox(self: *View, scratch: Allocator, rects: *std.ArrayList(Rect), x: f32, y: f32, w: f32, h: f32, fill: [4]f32, border: [4]f32) !void {
-        _ = self;
-        try rects.append(scratch, .{ .x = x - 1, .y = y - 1, .w = w + 2, .h = h + 2, .color = border });
-        try rects.append(scratch, .{ .x = x, .y = y, .w = w, .h = h, .color = fill });
-    }
-
-    /// Shape `text` as one mono run at an explicit world x/baseline + color (a
-    /// `.prop` placement — independent of the pane's content origin).
-    fn propLine(self: *View, scratch: Allocator, runs: *std.ArrayList(Run), text: []const u8, x: f32, baseline_y: f32, color: [4]f32) !void {
-        const shaped = try snail.shape(scratch, &self.face_set.mono, text, .{});
-        try runs.append(scratch, .{ .shaped = shaped, .baseline_y = baseline_y, .place = .{ .prop = .{ .x = x, .em = self.em, .color = color } } });
-    }
-
-    /// Draw retained plugin overlays (surfaces) as floating boxes. corner docks
-    /// top-right of the pane, center is centered; bottom is left to the dock
-    /// (buildHud) and skipped here. Each row's spans render at their own color
-    /// (by Role), and a `selected` row gets a highlight behind it. Overlays are
-    /// drawn last, so they sit above the body — and, being boxes with their own
-    /// background, they don't reflow it.
-    fn drawSurfaces(
-        self: *View,
-        scratch: Allocator,
-        runs: *std.ArrayList(Run),
-        rects: *std.ArrayList(Rect),
-        hud: Hud,
-        body: region.Rect,
-        caret_y: ?f32,
-    ) !void {
-        // A surface floats within `body`; cap the row count to what fits, so a
-        // popup can never extend past the region it was handed.
-        const max_rows = @max(1, @as(usize, @intFromFloat(@max(0, body.h) / self.line_h)) -| 1);
-        for (hud.surfaces) |surf| {
-            if (!surf.active or surf.rows.items.len == 0) continue;
-            if (surf.placement == .bottom) continue; // dock handled by buildHud
-
-            const nrows = @min(surf.rows.items.len, max_rows);
-            // Width = widest row, in cells (one space between spans).
-            var max_cols: usize = 0;
-            for (surf.rows.items[0..nrows]) |row| {
-                var cols: usize = 0;
-                for (row.spans.items, 0..) |sp, si| {
-                    if (si != 0) cols += 1;
-                    cols += std.unicode.utf8CountCodepoints(sp.text) catch sp.text.len;
-                }
-                max_cols = @max(max_cols, cols);
-            }
-            const pad_x: f32 = self.cell_w;
-            const pad_y: f32 = self.line_h * 0.25;
-            const box_w = @as(f32, @floatFromInt(max_cols)) * self.cell_w + 2 * pad_x;
-            const box_h = @as(f32, @floatFromInt(nrows)) * self.line_h + 2 * pad_y;
-            // Positioned within `body`, then clamped so the box stays inside it
-            // (its own background reads as a popup over the text, never over the
-            // status/tab strips, which live outside `body`).
-            // A corner surface docks top-right by default, but gets out of the
-            // way of the caret: if the caret sits in the top half of the body
-            // (where the box would land), it flips to the bottom-right instead,
-            // so a which-key popup never covers the line you're editing.
-            const corner_top = if (caret_y) |cy|
-                cy > body.y + body.h / 2
-            else
-                true;
-            const raw_x, const raw_y = switch (surf.placement) {
-                .corner => .{
-                    body.x + body.w - box_w - pad_x,
-                    if (corner_top) body.y + pad_x else body.y + body.h - box_h - pad_x,
-                },
-                .center => .{ body.x + (body.w - box_w) / 2, body.y + (body.h - box_h) / 2 },
-                .bottom => unreachable,
-            };
-            const box_x = std.math.clamp(raw_x, body.x, @max(body.x, body.x + body.w - box_w));
-            const box_y = std.math.clamp(raw_y, body.y, @max(body.y, body.y + body.h - box_h));
-            // Panel background with a thin accent outline, so the popup reads
-            // as a distinct floating box (not text bleeding over the buffer).
-            try self.outlinedBox(scratch, rects, box_x, box_y, box_w, box_h, self.theme.selection, self.theme.accent);
-
-            for (surf.rows.items[0..nrows], 0..) |row, i| {
-                const row_y = box_y + pad_y + @as(f32, @floatFromInt(i)) * self.line_h;
-                if (surf.selected != null and surf.selected.? == i) {
-                    try rects.append(scratch, .{ .x = box_x, .y = row_y, .w = box_w, .h = self.line_h, .color = self.theme.accent });
-                }
-                var x = box_x + pad_x;
-                const baseline = row_y + self.ascent;
-                for (row.spans.items, 0..) |sp, si| {
-                    if (si != 0) x += self.cell_w; // gap between spans
-                    const shaped = try snail.shape(scratch, &self.face_set.mono, sp.text, .{});
-                    try runs.append(scratch, .{
-                        .shaped = shaped,
-                        .baseline_y = baseline,
-                        .place = .{ .prop = .{ .x = x, .em = self.em, .color = self.theme.roleColor(sp.role) } },
-                    });
-                    x += shaped.advanceX() * self.em;
-                }
-            }
-        }
-    }
 };
 
 // ── Helpers ──
@@ -1192,6 +962,7 @@ test {
     _ = @import("view/theme.zig");
     _ = @import("view/hud.zig");
     _ = @import("view/statusline.zig");
+    _ = @import("view/popup.zig");
 }
 
 test "literal tabs: a tab advances to the next tab stop; offsets stay exact" {
