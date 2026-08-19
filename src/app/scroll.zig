@@ -11,6 +11,29 @@ const view_mod = @import("../gfx/view.zig");
 /// in the view (core commands can't see it).
 pub const ScrollCtx = struct { view: *view_mod.View, fb: *[2]u32 };
 
+/// Bind the scrolling commands onto `commands`, all pointing at the
+/// caller-owned `scroll_ctx` (which borrows the view + framebuffer). Kept
+/// here beside the handlers; `view.top_row` is the focused pane's scroll.
+pub fn registerCommands(gpa: std.mem.Allocator, commands: *core.command.Commands, scroll_ctx: *ScrollCtx) !void {
+    inline for (.{
+        .{ "scroll-line-down", "Scroll down one line.", scrollLineDown },
+        .{ "scroll-line-up", "Scroll up one line.", scrollLineUp },
+        .{ "scroll-half-down", "Scroll down half a page (moves the cursor).", scrollHalfDown },
+        .{ "scroll-half-up", "Scroll up half a page (moves the cursor).", scrollHalfUp },
+        .{ "scroll-page-down", "Scroll down a page (moves the cursor).", scrollPageDown },
+        .{ "scroll-page-up", "Scroll up a page (moves the cursor).", scrollPageUp },
+        .{ "center-line", "Center the current line in the viewport.", centerLine },
+    }) |spec| {
+        _ = try commands.bind(gpa, spec[0], .{
+            .name = spec[0],
+            .summary = spec[1],
+            .args = &.{},
+            .handler = spec[2],
+            .data = scroll_ctx,
+        });
+    }
+}
+
 fn scrollOf(data: ?*anyopaque) *ScrollCtx {
     return @ptrCast(@alignCast(data.?));
 }

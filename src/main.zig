@@ -448,23 +448,7 @@ pub fn main(init: std.process.Init) !void {
     // don't see), so they're registered here. `view.top_row` is always the
     // focused pane's scroll.
     var scroll_ctx: scroll.ScrollCtx = .{ .view = &view, .fb = &fb };
-    inline for (.{
-        .{ "scroll-line-down", "Scroll down one line.", scroll.scrollLineDown },
-        .{ "scroll-line-up", "Scroll up one line.", scroll.scrollLineUp },
-        .{ "scroll-half-down", "Scroll down half a page (moves the cursor).", scroll.scrollHalfDown },
-        .{ "scroll-half-up", "Scroll up half a page (moves the cursor).", scroll.scrollHalfUp },
-        .{ "scroll-page-down", "Scroll down a page (moves the cursor).", scroll.scrollPageDown },
-        .{ "scroll-page-up", "Scroll up a page (moves the cursor).", scroll.scrollPageUp },
-        .{ "center-line", "Center the current line in the viewport.", scroll.centerLine },
-    }) |spec| {
-        _ = try commands.bind(gpa, spec[0], .{
-            .name = spec[0],
-            .summary = spec[1],
-            .args = &.{},
-            .handler = spec[2],
-            .data = &scroll_ctx,
-        });
-    }
+    try scroll.registerCommands(gpa, &commands, &scroll_ctx);
 
     // Theme is DATA: a runtime/bindable `set-color <name> <#hex>`, plus colors
     // the config staged declaratively via weft.set("theme", "<field>", "#hex").
