@@ -39,6 +39,10 @@ pub const perm_proc = plugin.perm_proc;
 pub const perm_timer = plugin.perm_timer;
 pub const setEnviron = plugin.setEnviron;
 pub const resolvePeerWp = plugin.resolvePeerWp;
+
+const layers = @import("wasm_host/layers.zig");
+pub const Flash = layers.Flash;
+pub const flashState = layers.flashState;
 const rooted_fs = @import("rooted_fs.zig");
 const WasmCmd = wasm_abi.WasmCmd;
 const PendingItem = wasm_abi.PendingItem;
@@ -73,13 +77,13 @@ pub fn defineImports(linker: *wasm.Linker, p: *WasmPlugin) !void {
     try d(linker, "wl_edit", 4, 0, hEdit, p);
     try d(linker, "wl_register", 2, 1, hRegister, p);
     try d(linker, "wl_jump", 1, 0, hJump, p);
-    try d(linker, "wl_flash", 2, 0, hFlash, p);
+    try d(linker, "wl_flash", 2, 0, layers.hFlash, p);
     // Styles feed: a plugin paints per-byte StyleClass over its (active) tool
     // buffer; the view renders it through Theme.styleColor (git/grep coloring).
-    try d(linker, "wl_style_clear", 0, 0, hStyleClear, p);
-    try d(linker, "wl_style", 3, 0, hStyle, p);
-    try d(linker, "wl_fold_clear", 0, 0, hFoldClear, p);
-    try d(linker, "wl_fold", 2, 0, hFold, p);
+    try d(linker, "wl_style_clear", 0, 0, layers.hStyleClear, p);
+    try d(linker, "wl_style", 3, 0, layers.hStyle, p);
+    try d(linker, "wl_fold_clear", 0, 0, layers.hFoldClear, p);
+    try d(linker, "wl_fold", 2, 0, layers.hFold, p);
     // Stamped ranges ([FIX 1/3]): a motion returns one, an operator awaits +
     // applies it. Handles cross; the version token stays host-side.
     try d(linker, "wl_stamp_range", 2, 1, hStampRange, p);
@@ -333,102 +337,6 @@ fn hFsListAsync(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32, resu
     }
     bridge.enqueue(path, dest);
     results[0] = 0;
-}
-
-/// vim-goggles: a guest (an operator) flashes the range it just acted on
-/// (`wl_flash(start, end)`). The range + a generation counter live here; the
-/// frame loop times the fade and the view draws it. Name-based/global, like the
-/// other host↔frame-loop bridges.
-var g_flash: struct { start: u32 = 0, end: u32 = 0, gen: u64 = 0 } = .{};
-pub const Flash = struct { start: usize, end: usize, gen: u64 };
-pub fn flashState() Flash {
-    return .{ .start = g_flash.start, .end = g_flash.end, .gen = g_flash.gen };
-}
-fn hFlash(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32, results: []i32) void {
-    _ = data;
-    _ = caller;
-    _ = results;
-    const start: u32 = @bitCast(args[0]);
-    const end: u32 = @bitCast(args[1]);
-    g_flash = .{ .start = @min(start, end), .end = @max(start, end), .gen = g_flash.gen + 1 };
-}
-
-/// The single per-buffer styles feed layer name (one styler per tool buffer,
-/// last claim wins — the registry discipline). Read by the view as bulk paint.
-const styles_layer_name = "styles";
-
-/// `style.clear()`: (re)claim the ACTIVE buffer's styles layer for this plugin
-/// and baseline it to `.normal` — a zeroed class-per-byte bulk spanning the
-/// whole buffer. The guest calls this before repainting spans with `wl_style`.
-/// Targets the active document, exactly like `wl_edit`.
-fn hStyleClear(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32, results: []i32) void {
-    _ = caller;
-    _ = args;
-    _ = results;
-    const p: *WasmPlugin = @ptrCast(@alignCast(data.?));
-    const gpa = p.gpa;
-    const doc = p.ctx.document();
-    const len = p.ctx.editor().text().byteLen();
-    const layer = p.ctx.caps.layers.claim(gpa, doc, styles_layer_name, .local, p.name) catch return;
-    const zeros = gpa.alloc(u8, len) catch return;
-    defer gpa.free(zeros);
-    @memset(zeros, 0);
-    const version = doc.version(gpa) catch return;
-    defer gpa.free(version);
-    layer.publishBulk(gpa, version, 0, zeros) catch {};
-}
-
-/// `style(start, end, class)`: paint the active buffer's styles bulk with
-/// `class` over `[start, end)` (clamped), mutating the published array in place
-/// so a whole classify pass is O(bytes), not O(spans²). A no-op when
-/// `wl_style_clear` hasn't run this round (no bulk to paint into).
-fn hStyle(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32, results: []i32) void {
-    _ = caller;
-    _ = results;
-    const p: *WasmPlugin = @ptrCast(@alignCast(data.?));
-    const layer = p.ctx.caps.layers.find(p.ctx.document(), styles_layer_name) orelse return;
-    if (layer.bulk) |*b| {
-        const start = @min(@as(usize, @intCast(@as(u32, @bitCast(args[0])))), b.classes.len);
-        const end = @min(@as(usize, @intCast(@as(u32, @bitCast(args[1])))), b.classes.len);
-        if (start >= end) return;
-        const class: u8 = @truncate(@as(u32, @bitCast(args[2])));
-        @memset(b.classes[start..end], class);
-    }
-}
-
-const folds_layer_name = "folds";
-
-/// `fold.clear()`: (re)claim the ACTIVE buffer's fold layer for this plugin and
-/// empty it — the guest republishes its full fold set (a `fold` per range)
-/// after. Targets the active document, like `wl_style_clear`.
-fn hFoldClear(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32, results: []i32) void {
-    _ = caller;
-    _ = args;
-    _ = results;
-    const p: *WasmPlugin = @ptrCast(@alignCast(data.?));
-    const layer = p.ctx.caps.layers.claim(p.gpa, p.ctx.document(), folds_layer_name, .local, p.name) catch return;
-    layer.publishSpans(p.gpa, &.{}) catch {};
-}
-
-/// `fold(start, end)`: hide `[start, end)` as an invisible span — the view
-/// elides those rows and vertical motion skips them. Accumulates onto the
-/// layer (call `fold.clear` first to reset); a no-op if the layer wasn't
-/// claimed this round.
-fn hFold(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32, results: []i32) void {
-    _ = caller;
-    _ = results;
-    const p: *WasmPlugin = @ptrCast(@alignCast(data.?));
-    const layer = p.ctx.caps.layers.find(p.ctx.document(), folds_layer_name) orelse return;
-    const start: usize = @intCast(@as(u32, @bitCast(args[0])));
-    const end: usize = @intCast(@as(u32, @bitCast(args[1])));
-    if (end <= start) return;
-    layer.appendSpan(p.gpa, .{
-        .start = start,
-        .end = end,
-        .kind = 0,
-        .message = "",
-        .face = .{ .invisible = true, .foldable = true },
-    }) catch {};
 }
 
 /// A deferred shell insert, owned across the frame→pool→frame hop. Holds no
