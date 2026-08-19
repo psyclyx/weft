@@ -36,10 +36,9 @@ pub const ChaosLink = link_mod.ChaosLink;
 
 // ── Session: handshake, liveness, crypto (see session/handshake.zig) ─
 
-const handshake = @import("session/handshake.zig");
-pub const Liveness = handshake.Liveness;
-pub const Access = handshake.Access;
-pub const Session = handshake.Session;
+pub const Session = @import("session/Session.zig");
+pub const Liveness = Session.Liveness;
+pub const Access = Session.Access;
 
 // ── Blob/base protocol + remote filesystem (see session/remote_fs.zig) ─
 

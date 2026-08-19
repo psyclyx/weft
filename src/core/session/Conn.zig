@@ -12,7 +12,7 @@ const wire = @import("../wire.zig");
 const secure = @import("../secure.zig");
 const Document = @import("../Document.zig");
 
-const Session = @import("handshake.zig").Session;
+const Session = @import("Session.zig");
 const Collab = @import("Collab.zig");
 
 const Conn = @This();

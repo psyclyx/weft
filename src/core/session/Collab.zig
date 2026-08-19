@@ -11,9 +11,8 @@ const wire = @import("../wire.zig");
 const Document = @import("../Document.zig");
 const layers_mod = @import("../layers.zig");
 
-const handshake = @import("handshake.zig");
-const Session = handshake.Session;
-const Access = handshake.Access;
+const Session = @import("Session.zig");
+const Access = Session.Access;
 
 const remote_fs_mod = @import("remote_fs.zig");
 const BlobOp = remote_fs_mod.BlobOp;

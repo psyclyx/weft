@@ -10,7 +10,7 @@ const linux = std.os.linux;
 
 const wire = @import("../wire.zig");
 const Document = @import("../Document.zig");
-const Session = @import("handshake.zig").Session;
+const Session = @import("Session.zig");
 
 // ── Request class: the blob channel (partial checkout) ──────────────
 // Channel 3. Calls: payload = uv id | u8 op | body. op 0 = stat

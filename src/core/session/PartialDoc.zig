@@ -12,7 +12,7 @@ const Allocator = std.mem.Allocator;
 
 const wire = @import("../wire.zig");
 const Document = @import("../Document.zig");
-const Session = @import("handshake.zig").Session;
+const Session = @import("Session.zig");
 const BlobOp = @import("remote_fs.zig").BlobOp;
 
 const PartialDoc = @This();
