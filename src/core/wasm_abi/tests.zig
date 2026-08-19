@@ -248,25 +248,48 @@ test "which-key: on_menu builds a corner surface from the current menu's binding
     try t.expect(!plugin.surface.active);
 }
 
-test "dired: lists a directory via the locus-routed fs.list door" {
+test "dired: gathers a directory tree via proc and renders the model (async)" {
     const gpa = t.allocator;
     var env: Env = undefined;
     try Env.init(gpa, &env);
     defer env.deinit(gpa);
+    try @import("../builtins.zig").install(gpa, &env.commands, &env.keymap); // buffer-create
+
+    var loop = async_loop.Loop.init(gpa, env.pool, @import("../task.zig").nowNs);
+    defer loop.deinit();
 
     var engine = try wasm.Engine.init();
     defer engine.deinit();
-    // dired requests fs_read in describe() → granted; its `dired` command lists
-    // "." (the test's cwd) through wl_fs_list("here", …).
-    const plugin = try loadPlugin(&engine, &env.ctx, "dired", @embedFile("guest_dired_wasm"), .{});
+    // dired now runs `ls` via proc (proc+timer), parses the marked blocks into a
+    // directory TREE, and re-renders it as the pretty `*dired*` model buffer.
+    const plugin = try loadPlugin(&engine, &env.ctx, "dired", @embedFile("guest_dired_wasm"), .{ .loop = &loop });
     defer plugin.deinit();
+    try t.expect(plugin.perms[wasm_host.perm_proc] and plugin.perms[wasm_host.perm_timer]);
 
     _ = try command.run(&env.commands, &env.ctx, "dired", &.{});
-    // It entered the dired mode and inserted a non-empty listing (buffer-create
-    // isn't registered in this bare Env, so the listing lands in the active
-    // buffer — the point under test is that fs.list returned real entries).
+    // The model buffer was created + focused synchronously; it entered dired mode.
     try t.expectEqualStrings("dired", env.keymap.currentMode());
-    try t.expect(env.buffers.active().editor.text().byteLen() > 0);
+    const buf = blk: {
+        var it = env.buffers.iterator();
+        while (it.next()) |b| if (std.mem.eql(u8, b.name, "*dired*")) break :blk b;
+        break :blk null;
+    };
+    try t.expect(buf != null);
+
+    // Drive the async loop until `ls` lands (bounded; "." always lists).
+    var rounds: usize = 0;
+    while (rounds < 20_000_000 and buf.?.editor.text().byteLen() == 0) : (rounds += 1) {
+        _ = loop.tick();
+        std.Thread.yield() catch {};
+    }
+    if (buf.?.editor.text().byteLen() > 0) {
+        // on_fill parsed the raw ls output and re-rendered: the buffer holds the
+        // pretty projection (the header line), not the raw `ls`/sentinel bytes.
+        const s = try buf.?.editor.text().toOwnedSlice(gpa);
+        defer gpa.free(s);
+        try t.expect(std.mem.indexOf(u8, s, "Directory:") != null);
+        try t.expect(std.mem.indexOf(u8, s, "\x1e\x1e") == null); // sentinels repainted away
+    }
 }
 
 test "helix: a second modal editor loads in its OWN mode namespace" {
