@@ -31,6 +31,7 @@ const setEcho = handler.setEcho;
 const scroll = @import("app/scroll.zig");
 const window_cmds = @import("app/window_cmds.zig");
 const cursor_config = @import("app/cursor_config.zig");
+const config_load = @import("app/config_load.zig");
 
 const arg_parse = @import("app/args.zig");
 const Args = arg_parse.Args;
@@ -230,11 +231,11 @@ pub fn main(init: std.process.Init) !void {
         for (plugins.items) |p| p.deinit();
         plugins.deinit(gpa);
     }
-    const plugin_dir = pluginDir(gpa);
+    const plugin_dir = config_load.pluginDir(gpa);
     defer gpa.free(plugin_dir);
-    const module_cache_dir = moduleCacheDir(gpa);
+    const module_cache_dir = config_load.moduleCacheDir(gpa);
     defer if (module_cache_dir) |d| gpa.free(d);
-    var plugin_host: PluginHost = .{
+    var plugin_host: config_load.PluginHost = .{
         .gpa = gpa,
         .engine = &wasm_engine,
         .ctx = &cmd_ctx,
@@ -253,7 +254,7 @@ pub fn main(init: std.process.Init) !void {
     // bare weft with no plugins is modeless. Absent or broken config is a
     // warning, never fatal.
     if (args.config) |config_path| {
-        loadJsConfig(gpa, &cmd_ctx, config_path, plugin_host.loader(), &config_kv) catch |e|
+        config_load.loadJsConfig(gpa, &cmd_ctx, config_path, plugin_host.loader(), &config_kv) catch |e|
             std.log.warn("config: {s} failed to load: {t}", .{ config_path, e });
     }
 
@@ -565,7 +566,7 @@ pub fn main(init: std.process.Init) !void {
     });
     inline for (@typeInfo(view_mod.Theme).@"struct".fields) |f| {
         if (config_kv.get("theme", f.name)) |blob| {
-            if (firstConfigRecord(blob)) |hex| _ = view.theme.setColor(f.name, hex);
+            if (config_load.firstConfigRecord(blob)) |hex| _ = view.theme.setColor(f.name, hex);
         }
     }
 
@@ -637,7 +638,7 @@ pub fn main(init: std.process.Init) !void {
     // via weft.set("editor", "which-key-delay-ms", "200").
     const which_key_delay_ns: u64 = blk: {
         if (config_kv.get("editor", "which-key-delay-ms")) |raw| {
-            if (firstConfigRecord(raw)) |s| {
+            if (config_load.firstConfigRecord(raw)) |s| {
                 if (std.fmt.parseInt(u64, s, 10)) |ms| break :blk ms * std.time.ns_per_ms else |_| {}
             }
         }
@@ -650,7 +651,7 @@ pub fn main(init: std.process.Init) !void {
     var flash_was_active = false;
     const flash_duration_ns: u64 = blk: {
         if (config_kv.get("editor", "flash-ms")) |raw| {
-            if (firstConfigRecord(raw)) |s| {
+            if (config_load.firstConfigRecord(raw)) |s| {
                 if (std.fmt.parseInt(u64, s, 10)) |ms| break :blk ms * std.time.ns_per_ms else |_| {}
             }
         }
@@ -1466,30 +1467,6 @@ fn whichKeyNowHandler(ctx: *core.command.Context, data: ?*anyopaque, args: []con
     return .nil;
 }
 
-/// Decode the first record of a framed config blob (uvarint count, then per
-/// record uvarint(len)++bytes — the encoding the config shim produces). Used to
-/// read a single-value `weft.set` (e.g. a theme color) host-side.
-fn firstConfigRecord(blob: []const u8) ?[]const u8 {
-    var cur = blob;
-    _ = getConfigUvarint(&cur) orelse return null; // record count
-    const n = getConfigUvarint(&cur) orelse return null;
-    if (n > cur.len) return null;
-    return cur[0..@intCast(n)];
-}
-fn getConfigUvarint(cur: *[]const u8) ?u64 {
-    var shift: u6 = 0;
-    var v: u64 = 0;
-    while (cur.len > 0) {
-        const b = cur.*[0];
-        cur.* = cur.*[1..];
-        v |= @as(u64, b & 0x7f) << shift;
-        if (b & 0x80 == 0) return v;
-        if (shift >= 57) return null;
-        shift += 7;
-    }
-    return null;
-}
-
 /// `peers` — echo/log every connected peer's fingerprint, four-word SAS,
 /// and trust grade, so a user can compare the SAS out of band and then
 /// `verify-peer <fingerprint>`. The full detail goes to the log (many
@@ -1577,92 +1554,6 @@ fn identityHandler(ctx: *core.command.Context, data: ?*anyopaque, args: []const 
     var buf: [48]u8 = undefined;
     return ok_echo(ctx, std.fmt.bufPrint(&buf, "identity {s}", .{&id.fingerprint()}) catch "identity");
 }
-
-/// Load and run the user's `config.js` in the quickjs.wasm sandbox (plan
-/// 06B). Reads the file, spins a one-shot wasm engine, and evals — the config
-/// wires the editor only through the `weft.*` grants. The engine is scoped to
-/// the eval: config is a startup declaration, not a resident runtime.
-fn loadJsConfig(gpa: std.mem.Allocator, ctx: *core.command.Context, path: []const u8, loader: ?core.quickjs.PluginLoader, config: *core.kv.Store) !void {
-    const src = try core.file.readAlloc(gpa, path);
-    defer gpa.free(src);
-    var engine = try core.wasm.Engine.init();
-    defer engine.deinit();
-    try core.quickjs.evalConfig(&engine, ctx, loader, config, src);
-}
-
-/// Resolve the reference-plugin directory: `$WEFT_PLUGIN_DIR` if set, else
-/// `<exe>/../lib/weft/plugins` (where `zig build` installs them). Falls back to
-/// a bare "plugins" if the exe path can't be found. Caller owns the result.
-fn pluginDir(gpa: std.mem.Allocator) []const u8 {
-    if (std.c.getenv("WEFT_PLUGIN_DIR")) |d| return gpa.dupe(u8, std.mem.span(d)) catch "plugins";
-    var threaded: std.Io.Threaded = .init(gpa, .{});
-    defer threaded.deinit();
-    const exe_dir = std.process.executableDirPathAlloc(threaded.io(), gpa) catch
-        return gpa.dupe(u8, "plugins") catch "plugins";
-    defer gpa.free(exe_dir);
-    return std.fs.path.join(gpa, &.{ exe_dir, "..", "lib", "weft", "plugins" }) catch
-        gpa.dupe(u8, "plugins") catch "plugins";
-}
-
-/// The compiled-module (`.cwasm`) cache directory: `$WEFT_CACHE_DIR`, else
-/// `$XDG_CACHE_HOME/weft/modules`, else `$HOME/.cache/weft/modules`. Null when
-/// no writable base can be resolved (caching disabled — the editor still runs,
-/// just recompiles each start). Caller owns the result.
-fn moduleCacheDir(gpa: std.mem.Allocator) ?[]const u8 {
-    if (std.c.getenv("WEFT_CACHE_DIR")) |d| return gpa.dupe(u8, std.mem.span(d)) catch null;
-    if (std.c.getenv("XDG_CACHE_HOME")) |d|
-        return std.fs.path.join(gpa, &.{ std.mem.span(d), "weft", "modules" }) catch null;
-    if (std.c.getenv("HOME")) |d|
-        return std.fs.path.join(gpa, &.{ std.mem.span(d), ".cache", "weft", "modules" }) catch null;
-    return null;
-}
-
-/// The resident wasm-plugin loader: holds the engine, the editor context, the
-/// effect services, and the live plugin list. Both `--plugin` and the config's
-/// `weft.plugin(name)` funnel through `load`, so name resolution and lifetime
-/// are one path. Plugins stay resident for the session (their registered
-/// commands hold pointers into the WasmPlugin); the list frees them at exit.
-const PluginHost = struct {
-    gpa: std.mem.Allocator,
-    engine: *core.wasm.Engine,
-    ctx: *core.command.Context,
-    opts: core.wasm_abi.LoadOptions,
-    list: *std.ArrayList(*core.wasm_abi.WasmPlugin),
-    dir: []const u8,
-
-    /// A bare name ("vim") resolves to `<dir>/vim.wasm`; anything with a path
-    /// separator or a `.wasm` suffix is taken literally (explicit --plugin
-    /// paths). Writes into `buf`, returns the slice.
-    fn resolve(self: *PluginHost, buf: []u8, name: []const u8) ?[]const u8 {
-        if (std.mem.indexOfScalar(u8, name, '/') != null or std.mem.endsWith(u8, name, ".wasm"))
-            return name;
-        return std.fmt.bufPrint(buf, "{s}/{s}.wasm", .{ self.dir, name }) catch null;
-    }
-
-    fn load(self: *PluginHost, name: []const u8) void {
-        var path_buf: [std.fs.max_path_bytes]u8 = undefined;
-        const path = self.resolve(&path_buf, name) orelse return;
-        // Compilation copies the module, so the file bytes free right after.
-        const bytes = core.file.readAlloc(self.gpa, path) catch |e| {
-            std.log.warn("plugin: {s} failed to read: {t}", .{ path, e });
-            return;
-        };
-        defer self.gpa.free(bytes);
-        const p = core.wasm_abi.loadPlugin(self.engine, self.ctx, std.fs.path.stem(name), bytes, self.opts) catch |e| {
-            std.log.warn("plugin: {s} failed to load: {t}", .{ path, e });
-            return;
-        };
-        self.list.append(self.gpa, p) catch p.deinit();
-    }
-
-    fn loader(self: *PluginHost) core.quickjs.PluginLoader {
-        return .{ .ctx = self, .load = trampoline };
-    }
-    fn trampoline(ctx: *anyopaque, name: []const u8) void {
-        const self: *PluginHost = @ptrCast(@alignCast(ctx));
-        self.load(name);
-    }
-};
 
 /// Parse a 24-char fingerprint argument (five base32 groups) into bytes.
 fn parseFingerprint(s: []const u8) ?[24]u8 {
