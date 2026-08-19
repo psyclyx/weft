@@ -54,7 +54,9 @@ function onMessage(msg) {
   // answers for now; fs/write → weft.editAs and request_permission → the pick
   // membrane land in the next pass.
   if (msg.method === "fs/read_text_file") {
-    respond(msg.id, { content: "" });
+    // Answer from the live buffer (or disk) — weft is the harness, so the agent
+    // sees the honest current state, not stale bytes.
+    respond(msg.id, { content: weft.fileRead((msg.params && msg.params.path) || "") });
     return;
   }
   if (msg.method === "fs/write_text_file") {

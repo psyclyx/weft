@@ -59,6 +59,10 @@ extern void host_buffer_append(const char *name, int name_len, const char *text,
 // Read this plugin's config value for `key` (staged by weft.set) into `out`.
 __attribute__((import_module("weft"), import_name("qjs_config")))
 extern int host_config(const char *key, int key_len, char *out, int cap);
+// Read a file's content (the live buffer if open, else disk) into `out` — the
+// agent's fs/read_text_file, answered by the harness. Config stubs it.
+__attribute__((import_module("weft"), import_name("qjs_file_read")))
+extern int host_file_read(const char *path, int path_len, char *out, int cap);
 __attribute__((import_module("weft"), import_name("qjs_action")))
 extern void host_action(const char *name, int name_len);
 __attribute__((import_module("weft"), import_name("qjs_provide")))
@@ -371,6 +375,20 @@ static JSValue js_config(JSContext *ctx, JSValueConst this_val,
     return JS_NewStringLen(ctx, g_config_buf, (size_t)n);
 }
 
+// weft.fileRead(path) -> string: a file's content (live buffer or disk), "" if
+// unreadable. Shares g_read_buf (large; capped at its size for a first cut).
+static JSValue js_file_read(JSContext *ctx, JSValueConst this_val,
+                            int argc, JSValueConst *argv) {
+    if (argc < 1) return JS_NewStringLen(ctx, "", 0);
+    size_t pl;
+    const char *path = JS_ToCStringLen(ctx, &pl, argv[0]);
+    int n = 0;
+    if (path) n = host_file_read(path, (int)pl, g_read_buf, (int)sizeof g_read_buf);
+    JS_FreeCString(ctx, path);
+    if (n <= 0) return JS_NewStringLen(ctx, "", 0);
+    return JS_NewStringLen(ctx, g_read_buf, (size_t)n);
+}
+
 // weft.onOutput(fn): register the handler the host fires (with a stream handle)
 // when that stream has new bytes to read.
 static JSValue js_on_output(JSContext *ctx, JSValueConst this_val,
@@ -417,6 +435,7 @@ int weft_plugin_init(const char *src, int len) {
     JS_SetPropertyStr(g_ctx, weft, "procClose", JS_NewCFunction(g_ctx, js_proc_close, "procClose", 1));
     JS_SetPropertyStr(g_ctx, weft, "bufferAppend", JS_NewCFunction(g_ctx, js_buffer_append, "bufferAppend", 2));
     JS_SetPropertyStr(g_ctx, weft, "config", JS_NewCFunction(g_ctx, js_config, "config", 1));
+    JS_SetPropertyStr(g_ctx, weft, "fileRead", JS_NewCFunction(g_ctx, js_file_read, "fileRead", 1));
     JS_SetPropertyStr(g_ctx, weft, "onOutput", JS_NewCFunction(g_ctx, js_on_output, "onOutput", 1));
     JS_FreeValue(g_ctx, weft);
     JS_FreeValue(g_ctx, global);

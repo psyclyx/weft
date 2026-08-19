@@ -109,6 +109,7 @@ pub fn evalConfig(engine: *wasm.Engine, ctx: *command.Context, loader: ?PluginLo
     try linker.defineFn("weft", "qjs_proc_close", 1, 0, cStubVoid, &bridge);
     try linker.defineFn("weft", "qjs_buffer_append", 4, 0, cStubVoid, &bridge);
     try linker.defineFn("weft", "qjs_config", 4, 1, cStubI32, &bridge);
+    try linker.defineFn("weft", "qjs_file_read", 4, 1, cStubI32, &bridge);
 
     var instance = try linker.instantiateWasi(&module);
     defer instance.deinit();
@@ -206,6 +207,7 @@ pub const JsPlugin = struct {
         try self.linker.defineFn("weft", "qjs_proc_close", 1, 0, cProcClose, self);
         try self.linker.defineFn("weft", "qjs_buffer_append", 4, 0, cBufferAppend, self);
         try self.linker.defineFn("weft", "qjs_config", 4, 1, cConfig, self);
+        try self.linker.defineFn("weft", "qjs_file_read", 4, 1, cFileRead, self);
 
         self.instance = try self.linker.instantiateWasi(&self.module);
         errdefer self.instance.deinit();
@@ -393,6 +395,31 @@ fn cConfig(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32, results: 
         return;
     };
     results[0] = @intCast(caller.writeMemory(@intCast(args[2]), @intCast(args[3]), value) catch 0);
+}
+
+/// weft.fileRead(path) → the file's content for the agent's fs/read: the LIVE
+/// buffer text if the file is open (uncommitted edits included — the honest
+/// current state, not stale disk), else the disk file. Capped at the guest's
+/// receive buffer for now.
+fn cFileRead(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32, results: []i32) void {
+    const self: *JsPlugin = @ptrCast(@alignCast(data.?));
+    const gpa = self.gpa;
+    const path = caller.readMemory(gpa, @intCast(args[0]), @intCast(args[1])) catch {
+        results[0] = 0;
+        return;
+    };
+    defer gpa.free(path);
+    var content: ?[]u8 = null;
+    if (self.ctx.buffers.findByPath(path)) |id| {
+        if (self.ctx.buffers.get(id)) |b| content = b.editor.text().toOwnedSlice(gpa) catch null;
+    }
+    if (content == null) content = @import("file.zig").readAlloc(gpa, path) catch null;
+    const bytes = content orelse {
+        results[0] = 0;
+        return;
+    };
+    defer gpa.free(bytes);
+    results[0] = @intCast(caller.writeMemory(@intCast(args[2]), @intCast(args[3]), bytes) catch 0);
 }
 
 /// Decode the first record of a framed config blob (uvarint count, then
@@ -831,6 +858,31 @@ test "quickjs: the ACP plugin drives a mock agent's message into the transcript"
         std.atomic.spinLoopHint();
     }
     try t.expect(found);
+}
+
+test "quickjs: a JS plugin reads a file through weft.fileRead" {
+    const gpa = t.allocator;
+    var env: Env = undefined;
+    try Env.init(gpa, &env);
+    defer env.deinit(gpa);
+    var engine = try wasm.Engine.init();
+    defer engine.deinit();
+
+    var tmp = t.tmpDir(.{});
+    defer tmp.cleanup();
+    const fpath = try std.fmt.allocPrint(gpa, ".zig-cache/tmp/{s}/read.txt", .{tmp.sub_path});
+    defer gpa.free(fpath);
+    try @import("file.zig").writeBytes(gpa, fpath, "file contents here");
+
+    // fs/read is answered from disk (no open buffer here) — the harness reading
+    // a file for the agent.
+    const src = try std.fmt.allocPrint(gpa, "weft.command(\"r\", () => weft.echo(weft.fileRead(\"{s}\")));", .{fpath});
+    defer gpa.free(src);
+    var plugin = try JsPlugin.load(gpa, &engine, &env.ctx, env.pool, .empty, "test", null, src);
+    defer plugin.deinit();
+
+    _ = try command.run(&env.commands, &env.ctx, "r", &.{});
+    try t.expectEqualStrings("file contents here", env.echo.items);
 }
 
 test "quickjs: a config syntax error surfaces as ConfigException, not silent" {
