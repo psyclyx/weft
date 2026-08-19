@@ -86,6 +86,39 @@ approve/deny (a two-item pick), which also gives dired-reconcile its confirmatio
 3. **Status segment** — a global "● claude waiting" chip (visible when the
    conversation is unfocused) + usage.
 
+## Status (what's built)
+
+The ACP client works end-to-end and is launchable in the running editor:
+
+- **Phase 0 primitives** — all in: proc spawn `cwd`; `fs.exists`; `project-root`
+  detection; `edit_as` (named agent sub-peer authorship, with `Context.edit`
+  refined so an `.agent` never joins the user's undo).
+- **Phase 1 — JS plugin host** — done: `quickjs.wasm` is a first-class plugin
+  (persistent reactor: `weft_plugin_init` + `weft_on_command`, `weft.command`
+  via `qjs_register`); `JsPlugin` shares the config membrane + registers
+  trampoline commands. `.js` plugins load via `weft.plugin("acp.js")` and are
+  ticked each frame.
+- **Phase 2 — stream-to-guest** — done: `core/proc_stream` (a duplex child the
+  guest reads) + the JS membrane `weft.procSpawn/procSend/procRead` +
+  `weft.onOutput` (fired at the frame boundary), and `weft.bufferAppend` /
+  `weft.config` for the transcript + config-driven launch.
+- **Phase 3 — the ACP client** — `config/plugins/acp.js`: JSON-RPC over stdio,
+  the initialize → session/new → session/prompt handshake, `session/update`
+  parsing → transcript. Verified end-to-end against a mock ACP agent (a test
+  drives the whole client-side round-trip; no agent binary or display needed).
+  Launchable: `weft.set("acp","cmd",…)` + `weft.plugin("acp.js")` +
+  `agent-start`.
+
+**Remaining (additive on the working client):**
+- A prompt INPUT per turn (needs the command-arg or text-input membrane into
+  JS) — today the opening prompt is config data.
+- The client-side edit/permission callbacks: `fs/write_text_file` →
+  `weft.editAs` against the target buffer (so agent edits are gated, attributed
+  peer commits — the harness payoff), `session/request_permission` → the pick
+  membrane. Currently answered default-deny / no-op.
+- UI polish: transcript folding/styling, the status-line "● agent" segment, the
+  sessions dashboard.
+
 ## Build order (each phase committable, independently useful)
 
 - **Phase 0 — generic primitives:** spawn `cwd`; `fs.exists`/`stat`; named-agent
