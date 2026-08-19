@@ -18,7 +18,6 @@ const window_layout = @import("gfx/window_layout.zig");
 const stats_mod = @import("gfx/stats.zig");
 const snail = @import("snail");
 const stemma = @import("stemma");
-const snail_vk = @import("gfx/snail_vk/root.zig");
 const vk = @import("vk.zig").c;
 
 const embedded_font = @embedFile("font_mono");
@@ -285,15 +284,7 @@ pub fn main(init: std.process.Init) !void {
     // frame one — so nothing mis-scales.
     fb = .{ ctx.extent.width, ctx.extent.height };
 
-    const vctx: snail_vk.VulkanContext = .{
-        .physical_device = ctx.physical_device,
-        .device = ctx.device,
-        .graphics_queue = ctx.queue,
-        .queue_family_index = ctx.queue_family,
-        .render_pass = ctx.render_pass,
-    };
-
-    // ── Snail render path ──
+    // ── Render path (backend chosen by -Drenderer; both share `ctx`) ──
     const font_bytes: []const u8 = if (args.font) |p| try core.file.readAlloc(gpa, p) else embedded_font;
     defer if (args.font != null) gpa.free(@constCast(font_bytes));
     // All render resources + the pane tree are OWNED by `render`; it builds
@@ -302,10 +293,10 @@ pub fn main(init: std.process.Init) !void {
     // render's Vulkan frees. The aliases below are non-owning borrows so the
     // frame loop reads `view`/`cache`/etc. unchanged.
     var render: render_mod.RenderState = undefined;
-    try render.init(gpa, vctx, ctx.command_pool, font_bytes, args.em, buffers.active_id);
+    try render.init(gpa, ctx, font_bytes, args.em, buffers.active_id);
     defer render.deinit();
-    const view = &render.view;
-    const win_layout = &render.win_layout;
+    const view = &render.fb.view;
+    const win_layout = &render.fb.win_layout;
 
     // Scrolling commands need the view + framebuffer (which core commands
     // don't see), so they're registered here. `view.top_row` is always the

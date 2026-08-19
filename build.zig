@@ -259,21 +259,24 @@ fn addSkia(b: *std.Build, mod: *std.Build.Module) void {
 
     // Separate g++ compile → object, then link it into the exe (the shim
     // uses Skia's C++ API; only the C ABI in shim.h crosses to Zig).
-    const cc = b.addSystemCommand(&.{ "g++", "-std=c++17", "-c", "-O2", "-fPIC", "-fno-rtti" });
+    // -fno-exceptions/-fno-rtti match how nixpkgs builds Skia and keep the
+    // shim from pulling libgcc's unwinder (_Unwind_Resume) into the Zig link.
+    const cc = b.addSystemCommand(&.{ "g++", "-std=c++17", "-c", "-O2", "-fPIC", "-fno-rtti", "-fno-exceptions" });
     cc.addArg(b.fmt("-I{s}", .{include}));
     cc.addFileArg(b.path("src/gfx/skia/shim.cpp"));
     cc.addArg("-o");
     const obj = cc.addOutputFileArg("weft_skia_shim.o");
     mod.addObjectFile(obj);
 
-    // Link libskia and GNU libstdc++ (matching Skia's own C++ runtime).
+    // Link libskia and GNU libstdc++ (Skia's own C++ runtime).
     mod.addLibraryPath(.{ .cwd_relative = b.pathJoin(&.{ skia, "lib" }) });
     mod.linkSystemLibrary("skia", .{});
-    // libstdc++'s link path from the active g++ (its dir also holds the
-    // runtime .so, resolved at load time via the shell's LD_LIBRARY_PATH).
+    // Skia + the shim need GNU libstdc++, but Zig intercepts `-lstdc++` and
+    // substitutes LLVM libc++ (missing the GNU symbols). Link the real .so by
+    // absolute path instead — lld adds it as a DT_NEEDED, resolved at run time
+    // via the shell's LD_LIBRARY_PATH (stdenv.cc.cc.lib).
     const libstdcpp = std.mem.trim(u8, b.run(&.{ "g++", "-print-file-name=libstdc++.so" }), " \t\r\n");
-    if (std.fs.path.dirname(libstdcpp)) |dir| mod.addLibraryPath(.{ .cwd_relative = dir });
-    mod.linkSystemLibrary("stdc++", .{});
+    mod.addObjectFile(.{ .cwd_relative = libstdcpp });
 }
 
 fn addSyntax(b: *std.Build, mod: *std.Build.Module, renderer: Renderer) void {
