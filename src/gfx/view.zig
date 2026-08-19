@@ -27,6 +27,7 @@ const region = @import("region.zig");
 const fonts = @import("fonts.zig");
 const statusline = @import("view/statusline.zig");
 const popup = @import("view/popup.zig");
+const decoration = @import("view/decoration.zig");
 
 const InlineAttr = core.capability.InlineAttr;
 const HighlightClass = core.capability.HighlightClass;
@@ -420,10 +421,10 @@ pub const View = struct {
 
         // Decorations, from the geometry map: selection behind, then caret,
         // then each remote peer's selection + caret in its own color.
-        if (selection) |sel| try self.selectionRects(scratch, &rects, sel, self.theme.selection);
+        if (selection) |sel| try decoration.selectionRects(self, scratch, &rects, sel, self.theme.selection);
         // vim-goggles: a transient flash over a just-operated range (e.g. yank).
-        if (hud.flash) |fl| try self.selectionRects(scratch, &rects, fl, self.theme.accent);
-        if (hud.cursor_on) try self.caretRect(scratch, &rects, cursor_off, hud.cursor_style, self.theme.cursor);
+        if (hud.flash) |fl| try decoration.selectionRects(self, scratch, &rects, fl, self.theme.accent);
+        if (hud.cursor_on) try decoration.caretRect(self, scratch, &rects, cursor_off, hud.cursor_style, self.theme.cursor);
         if (hud.presence_layer) |pl| {
             for (0..pl.spanCount()) |i| {
                 const span = pl.resolvedSpan(i);
@@ -432,10 +433,10 @@ pub const View = struct {
                 // republishPresence). start==end ⇒ a caret with no selection.
                 const hue = @as(f32, @floatFromInt(span.kind & 0xffff)) / 65535.0;
                 if (span.end > span.start) {
-                    try self.selectionRects(scratch, &rects, .{ .start = span.start, .end = span.end }, peerColor(hue, 0.55, 0.28));
+                    try decoration.selectionRects(self, scratch, &rects, .{ .start = span.start, .end = span.end }, decoration.peerColor(hue, 0.55, 0.28));
                 }
                 const head = if (span.kind & 0x10000 == 0) span.start else span.end;
-                try self.caretRect(scratch, &rects, head, .bar, peerColor(hue, 0.62, 1.0));
+                try decoration.caretRect(self, scratch, &rects, head, .bar, decoration.peerColor(hue, 0.62, 1.0));
             }
         }
 
@@ -746,85 +747,6 @@ pub const View = struct {
         return st;
     }
 
-    // ── Decorations ──────────────────────────────────────────────────
-
-    fn selectionRects(self: *View, scratch: Allocator, rects: *std.ArrayList(Rect), sel: stemma.Range, color: [4]f32) !void {
-        for (self.frame_layout.lines) |*vl| {
-            const s = @max(sel.start, vl.src.start);
-            const e = @min(sel.end, vl.src.end);
-            if (s >= e) continue;
-            const x0 = vl.xAt(s);
-            const x1 = vl.xAt(e);
-            try rects.append(scratch, .{
-                .x = x0,
-                .y = vl.baseline_y - vl.ascent,
-                .w = @max(1, x1 - x0),
-                .h = vl.height,
-                .color = color,
-            });
-        }
-    }
-
-    /// A peer's caret/selection color from its identity hue (fixed
-    /// saturation, caller-chosen lightness/alpha so a caret reads solid and
-    /// a selection reads as a translucent wash). Authored in sRGB, returned
-    /// linear like the rest of the theme.
-    fn peerColor(hue: f32, light: f32, alpha: f32) [4]f32 {
-        return snail.color.srgbToLinearColor(hslToSrgb(hue, 0.65, light, alpha));
-    }
-
-    fn hslToSrgb(h: f32, s: f32, l: f32, a: f32) [4]f32 {
-        const c = (1 - @abs(2 * l - 1)) * s;
-        const hp = h * 6;
-        const x = c * (1 - @abs(@mod(hp, 2) - 1));
-        var r: f32 = 0;
-        var g: f32 = 0;
-        var b: f32 = 0;
-        if (hp < 1) {
-            r = c;
-            g = x;
-        } else if (hp < 2) {
-            r = x;
-            g = c;
-        } else if (hp < 3) {
-            g = c;
-            b = x;
-        } else if (hp < 4) {
-            g = x;
-            b = c;
-        } else if (hp < 5) {
-            r = x;
-            b = c;
-        } else {
-            r = c;
-            b = x;
-        }
-        const m = l - c / 2;
-        return .{ r + m, g + m, b + m, a };
-    }
-
-    fn caretRect(self: *View, scratch: Allocator, rects: *std.ArrayList(Rect), off: usize, style: CursorStyle, color: [4]f32) !void {
-        const li = self.frame_layout.lineForOffset(off) orelse return;
-        const vl = &self.frame_layout.lines[li];
-        const c = vl.caretAt(off);
-        const w = self.caretWidth(vl, off);
-        const rect: Rect = switch (style) {
-            .block => .{ .x = c.x, .y = c.y_top, .w = w, .h = c.height, .color = color },
-            .bar => .{ .x = c.x - 1, .y = c.y_top, .w = 2, .h = c.height, .color = color },
-            .underline => .{ .x = c.x, .y = c.y_top + c.height - 2, .w = w, .h = 2, .color = color },
-        };
-        try rects.append(scratch, rect);
-    }
-
-    /// Caret cell width: to the next caret stop, or one em-ish at line end.
-    fn caretWidth(self: *const View, vl: *const layout.VisualLine, off: usize) f32 {
-        const x0 = vl.xAt(off);
-        for (vl.stops) |s| {
-            if (s.off > off and s.x > x0) return s.x - x0;
-        }
-        return self.cell_w;
-    }
-
     // ── Rendering (prepare + place) ──────────────────────────────────
 
     fn render(self: *View, world_to_pixel: snail.Transform2D, runs: []Run, rects: []const Rect) !Built {
@@ -963,6 +885,7 @@ test {
     _ = @import("view/hud.zig");
     _ = @import("view/statusline.zig");
     _ = @import("view/popup.zig");
+    _ = @import("view/decoration.zig");
 }
 
 test "literal tabs: a tab advances to the next tab stop; offsets stay exact" {
