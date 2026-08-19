@@ -9,7 +9,76 @@
 const std = @import("std");
 const core = @import("../core/core.zig");
 const view_mod = @import("../gfx/view.zig");
+const region = @import("../gfx/region.zig");
+const window_layout = @import("../gfx/window_layout.zig");
+const window_cmds = @import("window_cmds.zig");
 const wayland = @import("../platform/wayland.zig");
+
+/// Pointer → caret: a plain left click places the caret (and arms a drag
+/// anchor); motion with the button held extends a selection from that anchor.
+/// A click outside the focused pane's rect records a pane-focus intent on
+/// `win_ctx` (applied later against the layout) instead. World space is
+/// framebuffer pixels; the surface-space pointer scales by buffer_scale
+/// (HiDPI-correct). Sets `had_input` and returns whether the view was damaged.
+pub fn handlePointer(
+    window: *wayland.Window,
+    win_layout: *window_layout.Layout,
+    view: *view_mod.View,
+    editor: *core.Editor,
+    win_ctx: *window_cmds.WindowCtx,
+    gpa: std.mem.Allocator,
+    last_frame_rect: region.Rect,
+    drag_anchor: *?usize,
+    drag_selecting: *bool,
+    had_input: *bool,
+) !bool {
+    var dirty = false;
+    const scale: f32 = @floatFromInt(@max(window.buffer_scale, 1));
+    const px = @as(f32, @floatCast(window.mouse_x)) * scale;
+    const py = @as(f32, @floatCast(window.mouse_y)) * scale;
+    // Pane routing: a click outside the focused pane's rect focuses the
+    // pane under the cursor (the intent is applied below, against the
+    // layout); inside, the click maps directly (panes render into their
+    // own rects, so the geometry map is already in absolute coords). The
+    // frame rect is last render's — one-frame latency, unseen.
+    const click_in_peek = win_layout.count() > 1 and !win_layout.focusedRect(last_frame_rect).contains(px, py);
+    if (window.consumeMousePressed(0)) {
+        if (click_in_peek) {
+            win_ctx.click_focus = true;
+            win_ctx.click_x = px;
+            win_ctx.click_y = py;
+            had_input.* = true;
+            dirty = true;
+        } else {
+            const off = view.offsetAtPoint(px, py);
+            editor.clearSelection();
+            editor.placeCursor(off);
+            drag_anchor.* = off;
+            drag_selecting.* = false;
+            had_input.* = true;
+            dirty = true;
+        }
+    } else if (window.mouse_down[0] and !click_in_peek) {
+        if (drag_anchor.*) |anchor| {
+            const off = view.offsetAtPoint(px, py);
+            if (off != editor.cursorOffset()) {
+                if (!drag_selecting.*) {
+                    // First motion: anchor the mark, then drag the caret.
+                    editor.placeCursor(anchor);
+                    try editor.setMark(gpa);
+                    drag_selecting.* = true;
+                }
+                editor.placeCursor(off);
+                had_input.* = true;
+                dirty = true;
+            }
+        }
+    } else {
+        drag_anchor.* = null;
+        drag_selecting.* = false;
+    }
+    return dirty;
+}
 
 /// `menu-escape` (Escape / C-g in a menu) — leave the current menu mode back to
 /// its recorded return target (the root non-menu mode), or `normal`.
