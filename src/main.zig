@@ -411,35 +411,9 @@ pub fn main(init: std.process.Init) !void {
     // (split/vsplit/unsplit/focus-other) alias onto the same intents so the
     // prebuilt `windows` .wasm plugin and older configs keep working.
     var win_ctx: window_cmds.WindowCtx = .{};
-    const window_cmd_table = [_]struct { name: []const u8, action: window_cmds.WindowAction, summary: []const u8 }{
-        .{ .name = "window-split", .action = .split, .summary = "Split the focused window horizontally (a pane below)." },
-        .{ .name = "window-vsplit", .action = .vsplit, .summary = "Split the focused window vertically (a pane beside)." },
-        .{ .name = "window-close", .action = .close, .summary = "Close the focused window, collapsing its split." },
-        .{ .name = "window-focus-left", .action = .focus_left, .summary = "Focus the window to the left." },
-        .{ .name = "window-focus-right", .action = .focus_right, .summary = "Focus the window to the right." },
-        .{ .name = "window-focus-up", .action = .focus_up, .summary = "Focus the window above." },
-        .{ .name = "window-focus-down", .action = .focus_down, .summary = "Focus the window below." },
-        .{ .name = "window-move-left", .action = .move_left, .summary = "Swap the focused window with its left neighbor." },
-        .{ .name = "window-move-right", .action = .move_right, .summary = "Swap the focused window with its right neighbor." },
-        .{ .name = "window-move-up", .action = .move_up, .summary = "Swap the focused window with the one above." },
-        .{ .name = "window-move-down", .action = .move_down, .summary = "Swap the focused window with the one below." },
-        .{ .name = "split", .action = .split, .summary = "Split the focused window horizontally." },
-        .{ .name = "vsplit", .action = .vsplit, .summary = "Split the focused window vertically." },
-        .{ .name = "unsplit", .action = .close, .summary = "Close the focused window." },
-        .{ .name = "focus-other", .action = .focus_next, .summary = "Focus the next window." },
-    };
     // Stable storage so each command's `data` pointer stays valid for the run.
-    var window_action_ctx: [window_cmd_table.len]window_cmds.WindowActionCtx = undefined;
-    inline for (window_cmd_table, 0..) |wc, i| {
-        window_action_ctx[i] = .{ .win = &win_ctx, .action = wc.action };
-        _ = try commands.bind(gpa, wc.name, .{
-            .name = wc.name,
-            .summary = wc.summary,
-            .args = &.{},
-            .handler = window_cmds.windowActionHandler,
-            .data = &window_action_ctx[i],
-        });
-    }
+    var window_action_ctx: [window_cmds.cmd_count]window_cmds.WindowActionCtx = undefined;
+    try window_cmds.registerCommands(gpa, &commands, &win_ctx, &window_action_ctx);
 
     // ── Window + Vulkan ──
     const window = try wayland.Window.init(1280, 800, "weft", "dev.psyclyx.weft");
