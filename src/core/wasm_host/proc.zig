@@ -202,13 +202,13 @@ fn procDeliver(ctx: ?*anyopaque, result: ?[]const u8) void {
     if (target == null) {
         const id = bufs.create(gpa, job.buf) catch return;
         target = bufs.get(id);
+        // A buffer proc CREATES is a plain tool sink (grep/make output) →
+        // read-only. A PRE-created buffer keeps whatever the plugin declared
+        // (a projection marks itself read-only via weft.readOnly; an editable
+        // one like *git-commit* stays writable) — proc doesn't override it.
+        if (target) |b| b.read_only = true;
     }
     const b = target orelse return;
-    // A proc-output buffer is a tool buffer: read-only, owned by the plugin that
-    // renders it (its peer) — so only that renderer may edit it, and a user/vim
-    // edit is refused at the edit door regardless of mode or split. Marked
-    // unconditionally (not just on create) since dired/magit pre-create it.
-    b.markReadOnly(gpa, job.plugin) catch {};
     const doc = &b.editor.doc;
     if (!authority.gradeMin(doc.my_grant, .edit).canEdit()) return;
     const pid = doc.peerNamed(gpa, job.plugin) catch return;

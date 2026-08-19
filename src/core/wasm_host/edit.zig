@@ -121,6 +121,21 @@ pub fn hEditAs(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32, resul
     p.ctx.edit(.{ .start = @intCast(args[2]), .end = @intCast(args[3]) }, bytes) catch {};
 }
 
+/// `render(start, end, bytes)` (perm edit): produce derived/streamed content
+/// (a magit/dired listing, a transcript) into a buffer — a DISTINCT operation
+/// from `edit`. Bypasses read-only (the text is output, not user-editable) and
+/// authors as the plugin's own peer (never the user's undo). Grade-gated.
+pub fn hRender(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32, results: []i32) void {
+    _ = results;
+    const p: *WasmPlugin = @ptrCast(@alignCast(data.?));
+    const bytes = caller.readMemory(p.gpa, @intCast(args[2]), @intCast(args[3])) catch return;
+    defer p.gpa.free(bytes);
+    const saved = p.ctx.principal;
+    p.ctx.principal = p.principal();
+    defer p.ctx.principal = saved;
+    p.ctx.render(.{ .start = @intCast(args[0]), .end = @intCast(args[1]) }, bytes) catch {};
+}
+
 pub fn hJump(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32, results: []i32) void {
     _ = caller;
     _ = results;

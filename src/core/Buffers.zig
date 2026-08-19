@@ -42,32 +42,14 @@ pub const Buffer = struct {
     /// Keymap mode restored when this buffer takes focus. Empty =
     /// never visited — inherits whatever mode is current.
     mode: []u8 = &.{},
-    /// Text input is swallowed (tool buffers; commands still run).
+    /// Interactive text edits (`Context.edit` — typing, vim operators) are
+    /// refused: the buffer is a projection whose text is PRODUCED (`Context.
+    /// render`), not user-editable. Not a permission on an owner — a distinction
+    /// between operations. An editable projection (mini.files dired) is simply
+    /// NOT read-only and takes `edit`.
     read_only: bool = false,
-    /// When `read_only`, the ONE peer name allowed to edit it — its owning
-    /// renderer (magit/dired/proc output authors as its own peer). Every other
-    /// principal (the user, a vim operator, an agent) is refused at the edit
-    /// door, so a tool buffer can't be corrupted as text from any mode or split
-    /// (guard in depth). Empty ⇒ locked to nobody.
-    owner: []u8 = &.{},
     /// The shell's per-buffer attachments (providers); opaque to core.
     frontend: ?*anyopaque = null,
-
-    /// Mark this buffer read-only, owned by `owner_name` (the only peer that may
-    /// still edit it — its renderer). Idempotent; replaces any prior owner.
-    pub fn markReadOnly(self: *Buffer, gpa: Allocator, owner_name: []const u8) Allocator.Error!void {
-        const owned = try gpa.dupe(u8, owner_name);
-        gpa.free(self.owner);
-        self.owner = owned;
-        self.read_only = true;
-    }
-
-    /// Lift read-only (and drop the owner). For a `set-read-only off`.
-    pub fn clearReadOnly(self: *Buffer, gpa: Allocator) void {
-        gpa.free(self.owner);
-        self.owner = &.{};
-        self.read_only = false;
-    }
 };
 
 pub const Error = Allocator.Error;
@@ -107,7 +89,6 @@ fn destroyBuffer(self: *Buffers, gpa: Allocator, b: *Buffer) void {
     b.editor.deinit(gpa);
     gpa.free(b.name);
     gpa.free(b.mode);
-    gpa.free(b.owner);
     gpa.destroy(b);
 }
 
@@ -184,6 +165,24 @@ pub fn findByPath(self: *const Buffers, path: []const u8) ?Id {
 /// `default_mode`). A fresh buffer does NOT inherit the outgoing mode: that is
 /// what let a tool buffer's mode (dired/magit) stick when you opened a file
 /// from it. The mode a buffer shows is always determined by the buffer.
+/// Keep the active buffer's resting mode in sync with the keymap — called each
+/// frame. A buffer's mode is INTRINSIC (magit is always magit, a code file is
+/// normal), so it must follow the buffer into any split, not be captured only
+/// on switch-away (which left it stale: a tool buffer set its mode via
+/// `setMode`, but `.mode` wasn't updated until you switched away, so opening it
+/// in another split restored the wrong — usually `normal` — mode, exposing
+/// text-editing operators on a projection). Transient MENU modes (leader/…) are
+/// skipped so returning to a buffer never lands you back in a menu.
+pub fn captureActiveMode(self: *Buffers, gpa: Allocator, keymap: *const Keymap) Error!void {
+    const mode = keymap.currentMode();
+    if (keymap.isMenuMode(mode)) return;
+    const b = self.active();
+    if (std.mem.eql(u8, b.mode, mode)) return;
+    const owned = try gpa.dupe(u8, mode);
+    gpa.free(b.mode);
+    b.mode = owned;
+}
+
 pub fn switchTo(self: *Buffers, gpa: Allocator, id: Id, keymap: *Keymap) Error!void {
     const target = self.get(id) orelse return;
     if (id == self.active_id) return;

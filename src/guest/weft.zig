@@ -27,6 +27,7 @@ extern "weft" fn wl_line_at(offset: u32, out_ptr: u32) void;
 extern "weft" fn wl_selection(out_ptr: u32) u32;
 extern "weft" fn wl_path(out_ptr: u32, out_cap: u32) i32;
 extern "weft" fn wl_edit(start: u32, end: u32, ptr: u32, len: u32) void;
+extern "weft" fn wl_render(start: u32, end: u32, ptr: u32, len: u32) void;
 extern "weft" fn wl_edit_as(agent: u32, agent_len: u32, start: u32, end: u32, ptr: u32, len: u32) void;
 extern "weft" fn wl_register(ptr: u32, len: u32) u32;
 extern "weft" fn wl_jump(offset: u32) void;
@@ -200,6 +201,14 @@ pub fn path() ?[]const u8 {
 /// as this plugin's peer through the host's grade gate.
 pub fn edit(r: Range, bytes: []const u8) void {
     wl_edit(@intCast(r.start), @intCast(r.end), p(bytes.ptr), @intCast(bytes.len));
+}
+/// CONTENT PRODUCTION door: draw a derived/streamed projection (a tool buffer's
+/// listing, a transcript) into `[r.start, r.end)`. Distinct from `edit`: it
+/// BYPASSES read-only (the text is output, regenerated from a model — not
+/// user-editable) and authors as the plugin's own peer (not the user's undo).
+/// Tool/model buffers render with this; `edit` is for interactive text.
+pub fn render(r: Range, bytes: []const u8) void {
+    wl_render(@intCast(r.start), @intCast(r.end), p(bytes.ptr), @intCast(bytes.len));
 }
 /// Like `edit`, but authored as the named `role=.agent` sub-peer `agent`
 /// (e.g. "claude", "codex") instead of this plugin's own peer — so an agent

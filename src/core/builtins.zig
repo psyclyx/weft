@@ -150,13 +150,7 @@ fn cBufferCreate(ctx: *Context, args: struct { name: []const u8 }) anyerror!Valu
 /// Mark the active buffer read-only (tool buffers): text input is
 /// swallowed; commands still run.
 fn cBufferReadOnly(ctx: *Context, args: struct { on: bool }) anyerror!Value {
-    if (args.on) {
-        // Owned by whoever marks it (a tool plugin marking its own buffer, or
-        // the user/config) — that peer stays the sole permitted editor.
-        try ctx.buffer().markReadOnly(ctx.gpa, ctx.principal.name);
-    } else {
-        ctx.buffer().clearReadOnly(ctx.gpa);
-    }
+    ctx.buffer().read_only = args.on;
     return ok;
 }
 

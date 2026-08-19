@@ -130,44 +130,46 @@ pub const Context = struct {
         };
     }
 
-    /// The one door a command mutates text through: delete `r` and insert
-    /// `bytes` on the ACTIVE document, authored by the invoking principal
-    /// and gated by its grade. The user path is one undoable unit; a plugin
-    /// peer path syncs the plugin's shadow to head, applies at head-valid
-    /// offsets, and commits as that peer (its own selective-undo unit).
-    /// Cursor/selection are the caller's concern (they are local UI, not
-    /// edits). Refuses with `error.Unauthorized` when the principal's grade
-    /// cannot edit — the replica is left untouched, so no ghost can form.
+    /// INTERACTIVE edit: delete `r`, insert `bytes` on the ACTIVE document as a
+    /// direct user/tool text mutation. This is the door for typing, vim
+    /// operators, autopair, comment — anything that edits text AS text. It is
+    /// refused on a read-only span/buffer (§`render` is the door for producing
+    /// derived content there), so a projection like magit/dired has NO
+    /// interactive-edit path at all — no mode, split, or plugin can corrupt it
+    /// as text. Refusal leaves the replica untouched (no ghost commit).
     pub fn edit(self: *Context, r: Document.Range, bytes: []const u8) EditError!void {
-        // Read-only guard, IN DEPTH: a read-only buffer (magit/dired/proc output)
-        // admits edits only from its owning renderer — never the user, a vim
-        // operator, or an agent. Enforced at the one edit door, so no mode,
-        // split, or plugin path can corrupt a tool buffer as text (a `dw` in a
-        // magit buffer opened in another split is refused here, not merely
-        // unbound). The owner authors as its own peer; its name is the key.
-        const buf = self.buffer();
-        if (buf.read_only and !std.mem.eql(u8, self.principal.name, buf.owner))
-            return error.Unauthorized;
+        if (self.buffer().read_only) return error.Unauthorized;
+        return self.applyEdit(r, bytes, self.user_initiated);
+    }
+
+    /// CONTENT PRODUCTION: draw a derived/streamed projection (magit's status
+    /// tree, dired's listing, an agent transcript) into a buffer. A DISTINCT
+    /// operation from `edit` — it BYPASSES read-only (that's the point: the text
+    /// is output, regenerated from a model, not user-editable), and it authors
+    /// as the plugin's OWN peer (never the user's undo — a re-render isn't a
+    /// user edit). Any plugin may render (no single owner); still grade-gated.
+    /// A read-only buffer's content is thus editable only by re-rendering, while
+    /// an EDITABLE projection (mini.files dired) simply isn't marked read-only
+    /// and takes `edit`.
+    pub fn render(self: *Context, r: Document.Range, bytes: []const u8) EditError!void {
+        return self.applyEdit(r, bytes, false); // never joins user undo
+    }
+
+    /// The shared apply: grade-gate, then route to the user's single undo
+    /// history (the user, or a helper plugin acting on the user's keystroke) or
+    /// to the principal's own selective-undo peer. `join_user` is the caller's
+    /// intent — set for interactive edits, cleared for renders/autonomous work.
+    /// An `.agent`/`.remote` NEVER joins the user's undo even under a keystroke.
+    fn applyEdit(self: *Context, r: Document.Range, bytes: []const u8, join_user: bool) EditError!void {
         const doc = self.document();
         if (!self.gradeOn(doc).canEdit()) return error.Unauthorized;
-        // The user typing, OR a helper plugin (dw/autopair/comment) executing
-        // the user's keystroke, is the USER's edit → one undo history. The
-        // grade was still checked as the plugin above, so an over-grade plugin
-        // is refused. A plugin/agent editing AUTONOMOUSLY (not `user_initiated`)
-        // commits as its own peer — its own selective-undo unit. An `.agent`
-        // (or `.remote`) NEVER joins the user's undo history even when a
-        // keystroke synchronously triggered it: an agent authors as itself by
-        // nature, so only `.user` and a helper `.plugin` acting on the user's
-        // keystroke take the shared-undo path.
         const joins_user_undo = self.principal.role == .user or
-            (self.user_initiated and self.principal.role == .plugin);
+            (join_user and self.principal.role == .plugin);
         if (joins_user_undo) {
             try self.editor().applyUserEdit(self.gpa, r, bytes);
             return;
         }
         const pid = try self.principal.peerOn(doc);
-        // Sync the peer's shadow to head so `r` (in head coordinates) is
-        // valid against it, then delete-then-insert and merge as one commit.
         var snap = try doc.peerSnapshot(self.gpa, pid);
         snap.deinit(self.gpa);
         if (!r.isEmpty()) try doc.peerDelete(self.gpa, pid, r);
@@ -468,7 +470,7 @@ test "command: an agent principal authors as its own peer even under a keystroke
     try t.expect(doc.commitAt(after_agent - 1).author != Document.PeerId.user);
 }
 
-test "command: a read-only buffer admits only its owner (guard in depth)" {
+test "command: read-only refuses interactive edit, allows render (in depth)" {
     const gpa = t.allocator;
     const task = @import("task.zig");
     var pool = try task.Pool.init(gpa, .{ .threads = 1 });
@@ -500,16 +502,12 @@ test "command: a read-only buffer admits only its owner (guard in depth)" {
         .echo = &echo_line,
     };
 
-    // Seed as the user (realizes the doc), THEN mark read-only owned by "dired".
+    // Seed via render (content production), THEN mark the buffer read-only.
     ctx.user_initiated = true;
     try ctx.edit(.{ .start = 0, .end = 0 }, "tree");
-    try ctx.buffer().markReadOnly(gpa, "dired");
+    ctx.buffer().read_only = true;
 
-    // The user is refused — no ghost commit; a vim operator (a plugin acting on
-    // the keystroke) is refused too. This is the corruption the split bug caused.
-    ctx.principal = .user; // name "user"
-    try t.expectError(error.Unauthorized, ctx.edit(.{ .start = 0, .end = 1 }, ""));
-    const OwnerCtx = struct {
+    const Peer = struct {
         gpa: std.mem.Allocator,
         name: []const u8,
         fn resolve(o: *anyopaque, d: *Document) Document.AddPeerError!Document.PeerId {
@@ -517,17 +515,23 @@ test "command: a read-only buffer admits only its owner (guard in depth)" {
             return d.peerNamed(a.gpa, a.name);
         }
     };
-    var ops = OwnerCtx{ .gpa = gpa, .name = "operators" };
-    ctx.principal = .{ .role = .plugin, .name = "operators", .ctx = &ops, .resolve = OwnerCtx.resolve };
+
+    // INTERACTIVE edit is refused for EVERYONE — the user, and a vim-operator
+    // plugin (no owner exception). No ghost commit; the text is untouched.
+    ctx.principal = .user; // name "user"
     try t.expectError(error.Unauthorized, ctx.edit(.{ .start = 0, .end = 1 }, ""));
-    const mid = try ctx.document().text().toOwnedSlice(gpa); // untouched by the refusals
+    var ops = Peer{ .gpa = gpa, .name = "operators" };
+    ctx.principal = .{ .role = .plugin, .name = "operators", .ctx = &ops, .resolve = Peer.resolve };
+    try t.expectError(error.Unauthorized, ctx.edit(.{ .start = 0, .end = 1 }, ""));
+    const mid = try ctx.document().text().toOwnedSlice(gpa);
     defer gpa.free(mid);
     try t.expectEqualStrings("tree", mid);
 
-    // The OWNER (its renderer, authoring as the "dired" peer) may still edit it.
-    var owner = OwnerCtx{ .gpa = gpa, .name = "dired" };
-    ctx.principal = .{ .role = .plugin, .name = "dired", .ctx = &owner, .resolve = OwnerCtx.resolve };
-    try ctx.edit(.{ .start = 0, .end = 4 }, "TREE");
+    // RENDER (content production) is a DIFFERENT door — it bypasses read-only,
+    // so a projection's renderer (ANY plugin, not one owner) can redraw it.
+    var dired = Peer{ .gpa = gpa, .name = "dired" };
+    ctx.principal = .{ .role = .plugin, .name = "dired", .ctx = &dired, .resolve = Peer.resolve };
+    try ctx.render(.{ .start = 0, .end = 4 }, "TREE");
     const out = try ctx.document().text().toOwnedSlice(gpa);
     defer gpa.free(out);
     try t.expectEqualStrings("TREE", out);
