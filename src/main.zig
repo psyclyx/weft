@@ -487,7 +487,6 @@ pub fn main(init: std.process.Init) !void {
     // clock are passed as `frame.Active`). Owns nothing.
     const fx: frame_mod.FrameCtx = .{
         .gpa = gpa,
-        .ctx = ctx,
         .buffers = &buffers,
         .caps = &caps,
         .keymap = &keymap,

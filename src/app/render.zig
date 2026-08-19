@@ -4,12 +4,14 @@
 //! self-referential move hazard) and its `deinit` frees them in the exact
 //! reverse order `main()` used to, so the shutdown sequence is unchanged.
 //!
-//! The seam this sets up: `buildFrame` is backend-independent (per-pane
-//! `view.build` → shapes + the HUD assembly), while `present` is the only
-//! method that touches the swapchain/command-buffer. A headless harness can
-//! drive `buildFrame` and skip `present`. NOTE: the atlas-delta GPU uploads
-//! (`uploadDeltaAndWait`) still ride inside the per-pane build loop — that is
-//! the one place Vulkan leaks into the build, and the seam to lift later.
+//! The seam: `buildFrame`/`renderPanes` are backend-independent (per-pane
+//! `view.build` → shapes + the HUD assembly), touching NO `vk`/`snail_vk`/
+//! swapchain. `present` is the only method that touches the GPU: it uploads the
+//! frame's atlas delta, emits the built panes into the instance stream, and
+//! records the render pass. The build reports a `records_added` signal + a
+//! `rebuilt` flag; `present` consumes them. A headless harness drives
+//! `buildFrame` and skips `present`, rasterizing the built shapes on the CPU
+//! instead (see `gfx/harness.zig`).
 
 const std = @import("std");
 const snail = @import("snail");
@@ -48,6 +50,14 @@ pub const RenderState = struct {
     built_panes: std.ArrayList(view_mod.Built),
     instances: std.ArrayList(snail.render.records.Instance),
     batches: std.ArrayList(snail.render.records.DrawBatch),
+    /// Total glyph records the last build appended to `view.atlas`. Drives the
+    /// backend atlas upload in `present` (0 ⇒ nothing new to upload). Set by the
+    /// backend-independent `renderPanes`; consumed by the backend-only `present`.
+    records_added: u32,
+    /// True when `buildFrame` rebuilt the panes this frame, so `present` knows to
+    /// re-run the backend atlas upload + instance emit. A clean (undamaged) frame
+    /// leaves it false and `present` reuses last frame's instance stream.
+    rebuilt: bool,
     /// The recursive pane tree over the region geometry (a single leaf is the
     /// ordinary unsplit case). The focused pane is always the active buffer.
     win_layout: window_layout.Layout,
@@ -81,6 +91,8 @@ pub const RenderState = struct {
         self.built_panes = .empty;
         self.instances = .empty;
         self.batches = .empty;
+        self.records_added = 0;
+        self.rebuilt = false;
         self.win_layout = try window_layout.Layout.init(gpa, active_id);
     }
 
@@ -116,10 +128,11 @@ pub const RenderState = struct {
 
     /// Backend-independent frame BUILD: gate on damage + partial-checkout
     /// realization, sync syntax highlight, assemble the whole-app `Hud`, then
-    /// lay out and build every pane into the instance stream. No swapchain or
-    /// command-buffer work happens here — EXCEPT the atlas-delta GPU uploads
-    /// that still ride inside `renderPanes` (the noted seam). A clean,
-    /// unblocked frame keeps last frame's instance stream and returns early.
+    /// lay out and build every pane's shapes. NO swapchain, command-buffer, or
+    /// GPU atlas work happens here — that is `present`'s job, driven by the
+    /// `records_added`/`rebuilt` signals this sets. A clean, unblocked frame
+    /// keeps last frame's instance stream and returns early (leaving `rebuilt`
+    /// false, so `present` skips the re-upload/re-emit).
     pub fn buildFrame(self: *RenderState, fx: *const FrameCtx, act: Active) !void {
         const gpa = fx.gpa;
         const editor = act.editor;
@@ -312,12 +325,15 @@ pub const RenderState = struct {
     /// caret/dock); the focused pane builds LAST so `view.frame_layout` ends on
     /// it (caret + between-frame hit-testing) and carries the caret + picker
     /// dock. Each pane renders into its own rect (identity transform), so all
-    /// panes accumulate into one instance stream, one draw. NOTE: the
-    /// `uploadDeltaAndWait` calls are the one place Vulkan leaks into the build.
+    /// panes accumulate into one instance stream, one draw. Backend-independent:
+    /// it builds shapes and reports how many atlas records the builds added
+    /// (`records_added`); the GPU atlas upload and the instance emit now live in
+    /// the backend-only `present`.
     fn renderPanes(self: *RenderState, fx: *const FrameCtx, act: Active, hud: view_mod.Hud, world_to_pixel: snail.Transform2D) !void {
         const gpa = fx.gpa;
         const editor = act.editor;
         const fb = act.fb;
+        var records: u32 = 0;
         var arena_state = std.heap.ArenaAllocator.init(gpa);
         defer arena_state.deinit();
         self.view.resetFrame();
@@ -358,8 +374,7 @@ pub const RenderState = struct {
             };
             const bo = try self.view.build(arena_state.allocator(), &ob.editor, other_hud, &slot.pane.top_row, slot.rect, .{}, world_to_pixel);
             try self.built_panes.append(gpa, bo);
-            if (bo.records_added != 0)
-                self.binding[0] = try snail_vk.uploadDeltaAndWait(gpa, self.vctx, self.resources, fx.ctx.command_pool, &self.cache, self.binding[0], &self.view.atlas);
+            records += bo.records_added;
         }
 
         // The focused pane: active buffer, full HUD, caret, picker dock.
@@ -368,13 +383,24 @@ pub const RenderState = struct {
         editor.fold_layer = fx.caps.layers.find(&editor.doc, "folds");
         const b = try self.view.build(arena_state.allocator(), editor, fhud, &self.view.top_row, foc_rect, pick_dock, world_to_pixel);
         try self.built_panes.append(gpa, b);
-        if (b.records_added != 0)
-            self.binding[0] = try snail_vk.uploadDeltaAndWait(gpa, self.vctx, self.resources, fx.ctx.command_pool, &self.cache, self.binding[0], &self.view.atlas);
+        records += b.records_added;
         self.win_layout.focusedPane().top_row = self.view.top_row; // scrollToCursor may have moved it
 
-        // Every pane rendered into its own rect (identity transform), so
-        // all panes accumulate into one instance stream, one draw. The
-        // focused pane is last in `built_panes` → its caret draws on top.
+        // Signal the backend path: how many glyph records the builds added (so
+        // `present` uploads the atlas delta) and that the panes were rebuilt (so
+        // `present` re-emits the instance stream). No GPU work happens here.
+        self.records_added = records;
+        self.rebuilt = true;
+    }
+
+    /// Emit every built pane into ONE instance/batch stream (carried emit
+    /// cursors + the identity transform, since each pane built into its own
+    /// absolute rect). The focused pane is last in `built_panes`, so its caret
+    /// draws on top. Pure CPU (no vk), but it stamps instances with the live
+    /// atlas `binding`, so it must run AFTER the atlas upload — hence it lives on
+    /// the backend path, called only by `present`.
+    fn emitBuiltPanes(self: *RenderState) !void {
+        const gpa = self.gpa;
         self.instances.clearRetainingCapacity();
         self.batches.clearRetainingCapacity();
         var total_shapes: usize = 0;
@@ -390,12 +416,28 @@ pub const RenderState = struct {
         self.batches.items.len = blen;
     }
 
-    /// The GPU present: acquire a swapchain image, record the accumulated
-    /// instance stream into the render pass, submit, and present — then record
-    /// the frame's latency stats. This is the ONLY method that touches the
-    /// swapchain/command buffer; a headless harness skips it. A stale/zero
-    /// swapchain (`beginFrame` returns null) drops the frame (was `continue`).
+    /// The GPU present: upload the frame's atlas delta, emit the built panes into
+    /// the instance stream, then acquire a swapchain image, record the stream
+    /// into the render pass, submit, and present — then record the frame's
+    /// latency stats. This is the ONLY method that touches the swapchain/command
+    /// buffer or the GPU atlas; a headless harness skips it. A stale/zero
+    /// swapchain (`beginFrame` returns null) drops the DRAW, but the atlas upload
+    /// + emit still ran (as they did when they lived inside the build), so the
+    /// next frame draws the up-to-date stream.
     pub fn present(self: *RenderState, ctx: *Context, fb: [2]u32, frame_start: u64, had_input: bool) !void {
+        // Backend-only atlas upload + instance emit, lifted out of the
+        // backend-independent build. Runs on every rebuilt frame regardless of
+        // swapchain availability; a clean frame reuses last frame's stream. The
+        // per-frame atlas delta upload preserves the exact ordering the build
+        // used (upload before emit → instances stamp the fresh binding).
+        if (self.rebuilt) {
+            self.rebuilt = false;
+            if (self.records_added != 0) {
+                self.records_added = 0;
+                self.binding[0] = try snail_vk.uploadDeltaAndWait(self.gpa, self.vctx, self.resources, ctx.command_pool, &self.cache, self.binding[0], &self.view.atlas);
+            }
+            try self.emitBuiltPanes();
+        }
         const cmd = try ctx.beginFrame() orelse return;
         ctx.beginRenderPass(cmd, self.view.theme.background);
         self.renderer.beginFrame(ctx.current_frame);

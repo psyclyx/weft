@@ -16,7 +16,6 @@
 const std = @import("std");
 const core = @import("../core/core.zig");
 const region = @import("../gfx/region.zig");
-const Context = @import("../gfx/context.zig").Context;
 const cursor_config = @import("cursor_config.zig");
 const providers = @import("providers.zig");
 
@@ -75,9 +74,6 @@ pub const MenuOverlay = struct {
 
 pub const FrameCtx = struct {
     gpa: std.mem.Allocator,
-    /// Only `command_pool` is read here — the atlas-delta uploads during the
-    /// per-pane build submit one-shots on it (the noted GPU-in-build seam).
-    ctx: *Context,
 
     // ── Editor/session core ──
     buffers: *core.Buffers,
