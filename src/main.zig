@@ -877,69 +877,8 @@ pub fn main(init: std.process.Init) !void {
             view_dirty = true;
         }
         // ── Window-layout intents (outside the input hot section) ──
-        // Each op saves the focused pane's scroll first, then mutates the
-        // tree; a focus/content change makes the active buffer follow the
-        // focused pane (applyWindowFocus). Geometry uses last render's frame.
-        if (win_ctx.split) |axis| {
-            win_ctx.split = null;
-            win_layout.focusedPane().top_row = view.top_row; // carried into the surviving half
-            win_layout.splitFocused(axis) catch {};
+        if (window_cmds.applyIntents(&win_ctx, &win_layout, &view, &buffers, gpa, &keymap, last_frame_rect))
             view_dirty = true;
-        }
-        if (win_ctx.close) {
-            win_ctx.close = false;
-            if (win_layout.count() > 1) {
-                win_layout.closeFocused();
-                window_cmds.applyWindowFocus(&win_layout, &view, &buffers, gpa, &keymap);
-                view_dirty = true;
-            }
-        }
-        if (win_ctx.focus_dir) |dir| {
-            win_ctx.focus_dir = null;
-            win_layout.focusedPane().top_row = view.top_row;
-            if (win_layout.focusNeighbor(last_frame_rect, dir)) {
-                window_cmds.applyWindowFocus(&win_layout, &view, &buffers, gpa, &keymap);
-                view_dirty = true;
-            }
-        }
-        if (win_ctx.move_dir) |dir| {
-            win_ctx.move_dir = null;
-            win_layout.focusedPane().top_row = view.top_row;
-            // Swap contents with the neighbor; focus stays put but now shows
-            // the neighbor's buffer, so the active buffer follows it.
-            if (win_layout.swapNeighbor(last_frame_rect, dir)) {
-                window_cmds.applyWindowFocus(&win_layout, &view, &buffers, gpa, &keymap);
-                view_dirty = true;
-            }
-        }
-        if (win_ctx.focus_next) {
-            win_ctx.focus_next = false;
-            win_layout.focusedPane().top_row = view.top_row;
-            if (win_layout.focusNext()) {
-                window_cmds.applyWindowFocus(&win_layout, &view, &buffers, gpa, &keymap);
-                view_dirty = true;
-            }
-        }
-        if (win_ctx.click_focus) {
-            win_ctx.click_focus = false;
-            win_layout.focusedPane().top_row = view.top_row;
-            if (win_layout.focusAt(last_frame_rect, win_ctx.click_x, win_ctx.click_y)) {
-                window_cmds.applyWindowFocus(&win_layout, &view, &buffers, gpa, &keymap);
-                view_dirty = true;
-            }
-        }
-        // The focused pane always shows the active buffer (buffer switches
-        // via open/tabs/etc. land here); a pane whose buffer was closed
-        // falls back to the active one so no leaf dangles.
-        win_layout.focusedPane().buffer_id = buffers.active_id;
-        {
-            const PruneCtx = struct { active: core.Buffers.Id, bufs: *core.Buffers };
-            win_layout.eachPane(PruneCtx{ .active = buffers.active_id, .bufs = &buffers }, struct {
-                fn visit(c: PruneCtx, p: *window_layout.Pane) void {
-                    if (c.bufs.get(p.buffer_id) == null) p.buffer_id = c.active;
-                }
-            }.visit);
-        }
         if (hub) |*h| {
             // Adopt new peers (binds the primary + replays shares), then
             // publish the local cursor to every peer and tick.
