@@ -52,7 +52,7 @@ pub const CompletionUi = struct {
         self.caps = ctx.caps;
         const prefix = try ctx.editor().wordPrefix(ctx.gpa);
         defer ctx.gpa.free(prefix);
-        const id = try ctx.caps.fire(.completion, &ctx.editor().doc, ctx.editor().backingPath(), .{
+        const id = try ctx.fireRace(.completion, &ctx.editor().doc, ctx.editor().backingPath(), .{
             .offset = ctx.editor().cursorOffset(),
             .text = prefix,
         }) orelse return .nil;

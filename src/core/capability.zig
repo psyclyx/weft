@@ -108,6 +108,14 @@ pub const Kind = enum {
         };
     }
 
+    /// The action-registry name for this capability kind — its semantic
+    /// identity in the unified dispatch registry (a `race`-policy action). The
+    /// trigger COMMAND may differ (`goto-definition` runs the `definition`
+    /// intent); this is the intent.
+    pub fn actionName(self: Kind) []const u8 {
+        return @tagName(self);
+    }
+
     pub fn composition(self: Kind) Composition {
         return switch (self) {
             .completion => .merge_ranked,

@@ -14,6 +14,7 @@ const Editor = @import("Editor.zig");
 const Buffers = @import("Buffers.zig");
 const Keymap = @import("Keymap.zig");
 const Actions = @import("action.zig");
+const capability = @import("capability.zig");
 const authority = @import("authority.zig");
 const position = @import("position.zig");
 
@@ -87,6 +88,24 @@ pub const Context = struct {
             .mode = self.keymap.currentMode(),
             .lang = Actions.langOfName(self.buffers.active().name),
         };
+    }
+
+    /// Fire a `race`-policy intent (completion/hover/definition/…): the capability
+    /// system's async fan-out. This is the seam the capability call sites route
+    /// through instead of touching `caps` directly — it records the kind as a
+    /// race action in the registry (so every intent, pick and race, is
+    /// enumerable in one place) and then drives `Caps`, returning the session id
+    /// to poll (or null when no provider matches). The consumer UIs own the
+    /// session/poll lifecycle; this owns the dispatch entry.
+    pub fn fireRace(
+        self: *Context,
+        kind: capability.Kind,
+        doc: *Document,
+        path: ?[]const u8,
+        opts: capability.Caps.FireOptions,
+    ) !?u64 {
+        self.actions.noteRace(kind.actionName());
+        return self.caps.fire(kind, doc, path, opts);
     }
 
     pub fn editor(self: *Context) *Editor {

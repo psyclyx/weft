@@ -135,6 +135,22 @@ pub fn deinit(self: *Actions) void {
     self.trampolines.deinit(gpa);
 }
 
+/// Record action `name` with a dispatch `policy`, idempotently, WITHOUT binding
+/// a trampoline command. First declaration sets the policy; a later one keeps
+/// it (a policy mismatch is a warning, not a change — the name's identity is
+/// fixed by whoever declared it first). Used by `provide` (auto-declare) and by
+/// `noteRace` (register a capability intent); `declare` layers a trampoline on.
+pub fn ensure(self: *Actions, name: []const u8, policy: Policy) !void {
+    const gpa = self.gpa;
+    const gop = try self.actions.getOrPut(gpa, name);
+    if (!gop.found_existing) {
+        gop.key_ptr.* = try gpa.dupe(u8, name);
+        gop.value_ptr.* = .{ .policy = policy };
+    } else if (gop.value_ptr.policy != policy) {
+        std.log.warn("action '{s}': declared {s} but re-declared {s}; keeping the first", .{ name, @tagName(gop.value_ptr.policy), @tagName(policy) });
+    }
+}
+
 /// Declare an action `name` with a dispatch `policy`, idempotently. Returns the
 /// trampoline payload the caller binds a `Command` of the same name to (see
 /// command.registerAction) — stable for the registry's lifetime. Re-declaring
@@ -142,11 +158,7 @@ pub fn deinit(self: *Actions) void {
 /// declaration order across plugins/config doesn't matter.
 pub fn declare(self: *Actions, name: []const u8, policy: Policy) !*Trampoline {
     const gpa = self.gpa;
-    const gop = try self.actions.getOrPut(gpa, name);
-    if (!gop.found_existing) {
-        gop.key_ptr.* = try gpa.dupe(u8, name);
-        gop.value_ptr.* = .{ .policy = policy };
-    }
+    try self.ensure(name, policy);
     // A trampoline per declaration site is cheap and lets re-declaration stay
     // idempotent without deduping command binds; they all resolve the same name.
     const tr = try gpa.create(Trampoline);
@@ -154,6 +166,14 @@ pub fn declare(self: *Actions, name: []const u8, policy: Policy) !*Trampoline {
     tr.* = .{ .name = try gpa.dupe(u8, name) };
     try self.trampolines.append(gpa, tr);
     return tr;
+}
+
+/// Register a capability kind as a `race`-policy action (idempotent), so the
+/// registry enumerates every intent — pick AND race — in one place. Race
+/// resolution is the capability system's async fan-out (`Caps`), NOT the pick
+/// provider list; `Context.fireRace` records the intent here and drives `Caps`.
+pub fn noteRace(self: *Actions, name: []const u8) void {
+    self.ensure(name, .race) catch {};
 }
 
 pub fn isAction(self: *const Actions, name: []const u8) bool {
@@ -180,11 +200,18 @@ pub const ProvideSpec = struct {
 /// (so `provide` before `declare` is fine). Owns copies of every string.
 pub fn provide(self: *Actions, spec: ProvideSpec) !void {
     const gpa = self.gpa;
-    const gop = try self.actions.getOrPut(gpa, spec.action);
-    if (!gop.found_existing) {
-        gop.key_ptr.* = try gpa.dupe(u8, spec.action);
-        gop.value_ptr.* = .{ .policy = spec.declare_policy };
+    // A race action's providers are the async capability providers (registered
+    // through the capability ABI, not here) — a `pick` command provider on one
+    // would never be consulted, so refuse it loudly rather than silently drop.
+    if (self.actions.getPtr(spec.action)) |a| {
+        if (a.policy == .race) {
+            std.log.warn("action '{s}' is race-policy; provide() (a pick provider) is ignored — register a capability provider instead", .{spec.action});
+            return;
+        }
+    } else {
+        try self.ensure(spec.action, spec.declare_policy); // auto-declare (load order is free)
     }
+    const gop = self.actions.getOrPut(gpa, spec.action) catch unreachable; // present now
     var p: Provider = .{
         .when = .{},
         .priority = spec.priority,
@@ -290,6 +317,26 @@ test "action: owner-prefix teardown drops a plugin's providers" {
     acts.unregisterByOwnerPrefix("zig-tools#");
     // The plugin's provider is gone; the config default remains.
     try t.expectEqualStrings("eval-default", acts.resolve("eval", .{ .mode = "normal", .lang = "zig" }).?);
+}
+
+test "action: race intents are enumerable, and reject pick providers" {
+    var acts = Actions.init(t.allocator);
+    defer acts.deinit();
+
+    // A capability kind noted as a race intent joins the one registry.
+    acts.noteRace("hover");
+    try t.expect(acts.isAction("hover"));
+    try t.expectEqual(Policy.race, acts.policyOf("hover").?);
+
+    // A pick provider on a race action is refused (its providers are the async
+    // capability providers, registered elsewhere) — resolve stays empty.
+    try acts.provide(.{ .action = "hover", .command = "fake-hover" });
+    try t.expectEqual(@as(?[]const u8, null), acts.resolve("hover", .{ .mode = "normal", .lang = "zig" }));
+
+    // noteRace is idempotent and doesn't disturb a real pick action.
+    try acts.provide(.{ .action = "eval", .when = .{ .lang = "zig" }, .command = "zig-eval" });
+    acts.noteRace("hover");
+    try t.expectEqualStrings("zig-eval", acts.resolve("eval", .{ .mode = "normal", .lang = "zig" }).?);
 }
 
 test "action: langOfName extracts the extension, or empty" {

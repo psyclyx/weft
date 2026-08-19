@@ -69,13 +69,17 @@ registration. Pure function of the provider set and the context.
   default — and a new language plugin just registers another provider, no
   rebinding. No applicable provider ⇒ a graceful echo (`no eval provider for
   .md`), never a failure.
-- **`race`** (reserved) — the async fan-out already embodied by the **capability
-  system** (`src/core/capability.zig`): completion/hover/definition fire every
-  matching provider and merge results over time against a stamped document
-  version. This is the *same* "resolve by context + priority" idea at a
-  different latency. `race` actions are declared here and their (few, UI-bound)
-  call sites drive `Caps` directly today; they fold onto this registry
-  incrementally rather than in one risky migration.
+- **`race`** — the async fan-out embodied by the **capability system**
+  (`src/core/capability.zig`): completion/hover/definition fire every matching
+  provider and merge results over time against a stamped document version. This
+  is the *same* "resolve by context + priority" idea at a different latency. The
+  capability call sites route through `Context.fireRace`, which records the kind
+  as a race action here (so every intent, pick and race, is enumerable in one
+  registry) and drives `Caps`. Race *resolution* stays the capability system's
+  job, not the pick provider list — so a `provide()` (a pick command provider)
+  on a race action is refused; register a capability provider through the
+  capability ABI instead. The consumer UIs own the session/poll lifecycle;
+  `fireRace` owns the dispatch entry.
 
 **Actions ride the command door.** Declaring an action registers a same-named
 *trampoline* `Command` (`command.registerAction`) that resolves the provider
@@ -128,8 +132,8 @@ action name persists (cheap, another provider may still target it).
 
 ## Open increments
 
-- Fold the capability call sites (`complete_ui`, `nav_ui`) onto `race`-policy
-  actions, so completion/hover/definition are declared and resolved through the
-  same registry as `pick`.
 - Grow the `when` vocabulary as real needs appear (buffer read-only, a named
   capability's presence, disjunction) — additively, never a rewrite.
+- Optionally let a race action's providers be `when`-scoped at the action tier
+  (e.g. a markdown buffer's `hover` renders the link; code's is LSP), layering
+  the pick predicate over the capability fan-out.

@@ -36,7 +36,7 @@ pub const DefinitionUi = struct {
         _ = args;
         const self: *DefinitionUi = @ptrCast(@alignCast(data.?));
         if (self.session) |old| ctx.caps.finish(old);
-        self.session = try ctx.caps.fire(.definition, &ctx.editor().doc, ctx.editor().backingPath(), .{
+        self.session = try ctx.fireRace(.definition, &ctx.editor().doc, ctx.editor().backingPath(), .{
             .offset = ctx.editor().cursorOffset(),
         });
         self.first_result_ns = 0;
@@ -116,7 +116,7 @@ pub const HoverUi = struct {
         if (self.session) |old| ctx.caps.finish(old);
         self.offset = ctx.editor().cursorOffset();
         self.active = false;
-        self.session = try ctx.caps.fire(.hover, &ctx.editor().doc, ctx.editor().backingPath(), .{
+        self.session = try ctx.fireRace(.hover, &ctx.editor().doc, ctx.editor().backingPath(), .{
             .offset = self.offset,
         });
         self.first_result_ns = 0;
@@ -194,7 +194,7 @@ pub const SymbolsUi = struct {
         _ = args;
         const self: *SymbolsUi = @ptrCast(@alignCast(data.?));
         if (self.session) |old| ctx.caps.finish(old);
-        self.session = try ctx.caps.fire(.symbols, &ctx.editor().doc, ctx.editor().backingPath(), .{});
+        self.session = try ctx.fireRace(.symbols, &ctx.editor().doc, ctx.editor().backingPath(), .{});
         _ = try self.tick(ctx);
         return .nil;
     }
