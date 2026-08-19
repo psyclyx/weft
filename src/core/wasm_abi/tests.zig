@@ -315,6 +315,52 @@ test "helix: a second modal editor loads in its OWN mode namespace" {
     try t.expect(env.keymap.isMenuMode("helix-op"));
 }
 
+test "vim ex: `:` opens a command line; :N gotos, :%s substitutes, unknown falls through" {
+    const gpa = t.allocator;
+    var env: Env = undefined;
+    try Env.init(gpa, &env);
+    defer env.deinit(gpa);
+
+    var engine = try wasm.Engine.init();
+    defer engine.deinit();
+    const plugin = try loadPlugin(&engine, &env.ctx, "vim", @embedFile("guest_vim_wasm"), .{});
+    defer plugin.deinit();
+
+    // `:` is now the ex command line (the palette moved to SPC :), and `ex` is a
+    // text-input mode routing keystrokes to `ex-type`.
+    try t.expectEqualStrings("vim-ex", env.keymap.lookup("colon").?);
+
+    const ed = &env.buffers.active().editor;
+    try ed.insertText(gpa, "l1\nl2\nl3\nl4\nl5");
+    ed.placeCursor(0);
+
+    // `:3` — open the command line, type "3", Enter → cursor at the start of L3.
+    _ = try command.run(&env.commands, &env.ctx, "vim-ex", &.{});
+    try t.expectEqualStrings("ex", env.keymap.currentMode());
+    _ = try command.run(&env.commands, &env.ctx, "ex-type", &.{.{ .string = "3" }});
+    _ = try command.run(&env.commands, &env.ctx, "ex-run", &.{});
+    try t.expectEqualStrings("normal", env.keymap.currentMode()); // back in normal
+    try t.expectEqual(@as(usize, 6), ed.cursorOffset());
+
+    // `:%s/l/X/g` — a whole-file literal substitute, one user edit.
+    _ = try command.run(&env.commands, &env.ctx, "vim-ex", &.{});
+    _ = try command.run(&env.commands, &env.ctx, "ex-type", &.{.{ .string = "%s/l/X/g" }});
+    _ = try command.run(&env.commands, &env.ctx, "ex-run", &.{});
+    {
+        const s = try ed.text().toOwnedSlice(gpa);
+        defer gpa.free(s);
+        try t.expectEqualStrings("X1\nX2\nX3\nX4\nX5", s);
+    }
+
+    // Composition: an unknown `:name` falls through to the registry and, when no
+    // such command exists, reports it (vim's E492) rather than silently no-op.
+    env.echo.clearRetainingCapacity();
+    _ = try command.run(&env.commands, &env.ctx, "vim-ex", &.{});
+    _ = try command.run(&env.commands, &env.ctx, "ex-type", &.{.{ .string = "definitely-not-a-command" }});
+    _ = try command.run(&env.commands, &env.ctx, "ex-run", &.{});
+    try t.expect(std.mem.indexOf(u8, env.echo.items, "not an editor command") != null);
+}
+
 test "wasm plugin: upcase-line edits in place across the membrane" {
     const gpa = t.allocator;
     var env: Env = undefined;
