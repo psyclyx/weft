@@ -61,6 +61,8 @@ const syntax_host = @import("wasm_host/syntax.zig");
 const capability_host = @import("wasm_host/capability.zig");
 const pick_host = @import("wasm_host/pick.zig");
 const surface_host = @import("wasm_host/surface.zig");
+const menu = @import("wasm_host/menu.zig");
+pub const notifyMenu = menu.notifyMenu;
 const rooted_fs = @import("rooted_fs.zig");
 const WasmCmd = wasm_abi.WasmCmd;
 const PendingItem = wasm_abi.PendingItem;
@@ -153,10 +155,10 @@ pub fn defineImports(linker: *wasm.Linker, p: *WasmPlugin) !void {
     try d(linker, "wl_pick_choice_index", 0, 1, pick_host.hPickChoiceIndex, p);
     // Menu bindings: enumerate the CURRENT menu mode's table (for which-key,
     // read by index during on_menu — no host allocation).
-    try d(linker, "wl_menu_binding_count", 0, 1, hMenuBindingCount, p);
-    try d(linker, "wl_menu_binding_key", 3, 1, hMenuBindingKey, p);
-    try d(linker, "wl_menu_binding_cmd", 3, 1, hMenuBindingCmd, p);
-    try d(linker, "wl_menu_binding_is_group", 1, 1, hMenuBindingIsGroup, p);
+    try d(linker, "wl_menu_binding_count", 0, 1, menu.hMenuBindingCount, p);
+    try d(linker, "wl_menu_binding_key", 3, 1, menu.hMenuBindingKey, p);
+    try d(linker, "wl_menu_binding_cmd", 3, 1, menu.hMenuBindingCmd, p);
+    try d(linker, "wl_menu_binding_is_group", 1, 1, menu.hMenuBindingIsGroup, p);
     // Surface (retained overlay: which-key/dired/magit render through this).
     try d(linker, "wl_surface_begin", 1, 0, surface_host.hSurfaceBegin, p);
     try d(linker, "wl_surface_row", 0, 0, surface_host.hSurfaceRow, p);
@@ -855,58 +857,6 @@ fn hBufferReadonly(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32, r
     const p: *WasmPlugin = @ptrCast(@alignCast(data.?));
     const b = bufferAtIndex(p, @intCast(args[0]));
     results[0] = if (b != null and b.?.read_only) 1 else 0;
-}
-
-// Pick — accumulate items between begin/end, then open with an accept
-// ── Menu bindings + on_menu: which-key (a guest) reads the current menu mode's
-// table by index during its on_menu(open) and renders it into a surface. Core
-// owns WHEN (fired at the frame boundary, top-level — see notifyMenu). ──
-fn hMenuBindingCount(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32, results: []i32) void {
-    _ = caller;
-    _ = args;
-    const p: *WasmPlugin = @ptrCast(@alignCast(data.?));
-    results[0] = @intCast(p.ctx.keymap.bindingCount(p.ctx.keymap.currentMode()));
-}
-fn hMenuBindingKey(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32, results: []i32) void {
-    const p: *WasmPlugin = @ptrCast(@alignCast(data.?));
-    const km = p.ctx.keymap;
-    const b = km.bindingAt(km.currentMode(), @intCast(args[0])) orelse {
-        results[0] = -1;
-        return;
-    };
-    results[0] = @intCast(caller.writeMemory(@intCast(args[1]), @intCast(args[2]), b.key) catch 0);
-}
-fn hMenuBindingCmd(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32, results: []i32) void {
-    const p: *WasmPlugin = @ptrCast(@alignCast(data.?));
-    const km = p.ctx.keymap;
-    const b = km.bindingAt(km.currentMode(), @intCast(args[0])) orelse {
-        results[0] = -1;
-        return;
-    };
-    results[0] = @intCast(caller.writeMemory(@intCast(args[1]), @intCast(args[2]), b.command) catch 0);
-}
-
-/// Whether the `i`-th binding is a GROUP (opens a submenu) rather than a leaf
-/// command. Convention (see vim): a submenu-entry binds a key to a command
-/// named the same as the menu mode it enters — so a binding is a group exactly
-/// when its command is itself a registered menu mode. No bind-ABI change needed.
-fn hMenuBindingIsGroup(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32, results: []i32) void {
-    _ = caller;
-    const p: *WasmPlugin = @ptrCast(@alignCast(data.?));
-    const km = p.ctx.keymap;
-    const b = km.bindingAt(km.currentMode(), @intCast(args[0])) orelse {
-        results[0] = 0;
-        return;
-    };
-    results[0] = if (km.isMenuMode(b.command)) 1 else 0;
-}
-
-/// Fire a guest's `on_menu(open)` — a menu mode was entered (open=1) or left
-/// (open=0). Called at the FRAME boundary (top-level, never nested inside
-/// another guest call), so a menu-owner plugin re-entering its own wasmtime
-/// store is impossible. Guests without the export are skipped.
-pub fn notifyMenu(p: *WasmPlugin, open: bool) void {
-    p.instance.callVoid("on_menu", &.{@as(i32, if (open) 1 else 0)}) catch {};
 }
 
 /// Command dispatch back into the guest: stash the args (readable via
