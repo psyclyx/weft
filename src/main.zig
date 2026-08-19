@@ -30,6 +30,7 @@ const ok_echo = handler.ok_echo;
 const setEcho = handler.setEcho;
 const scroll = @import("app/scroll.zig");
 const window_cmds = @import("app/window_cmds.zig");
+const cursor_config = @import("app/cursor_config.zig");
 
 const arg_parse = @import("app/args.zig");
 const Args = arg_parse.Args;
@@ -149,7 +150,7 @@ pub fn main(init: std.process.Init) !void {
 
     // Caret config commands, registered before the config runs so it can
     // set per-mode styles at load time.
-    var cursor_cfg = CursorConfig{ .gpa = gpa };
+    var cursor_cfg = cursor_config.CursorConfig{ .gpa = gpa };
     defer cursor_cfg.deinit();
     _ = try commands.bind(gpa, "menu-escape", .{
         .name = "menu-escape",
@@ -173,14 +174,14 @@ pub fn main(init: std.process.Init) !void {
         .name = "set-cursor",
         .summary = "Set the caret style (block|bar|underline) for a mode.",
         .args = &.{ .{ .name = "mode", .type = .string }, .{ .name = "style", .type = .string } },
-        .handler = setCursorHandler,
+        .handler = cursor_config.setCursorHandler,
         .data = &cursor_cfg,
     });
     _ = try commands.bind(gpa, "cursor-blink", .{
         .name = "cursor-blink",
         .summary = "Toggle caret blink (on|off) for a mode.",
         .args = &.{ .{ .name = "mode", .type = .string }, .{ .name = "state", .type = .string } },
-        .handler = cursorBlinkHandler,
+        .handler = cursor_config.cursorBlinkHandler,
         .data = &cursor_cfg,
     });
 
@@ -559,7 +560,7 @@ pub fn main(init: std.process.Init) !void {
         .name = "set-color",
         .summary = "Set a theme color (name, #rrggbb).",
         .args = &.{ .{ .name = "name", .type = .string }, .{ .name = "hex", .type = .string } },
-        .handler = setColorHandler,
+        .handler = cursor_config.setColorHandler,
         .data = &view,
     });
     inline for (@typeInfo(view_mod.Theme).@"struct".fields) |f| {
@@ -1196,7 +1197,7 @@ pub fn main(init: std.process.Init) !void {
             defer md_arena.deinit();
             const md_inline: ?view_mod.MdInline = blk: {
                 const path = editor.backingPath() orelse abuf.name;
-                if (!isMarkdownPath(path)) break :blk null;
+                if (!cursor_config.isMarkdownPath(path)) break :blk null;
                 const rope = editor.text();
                 const total = rope.byteLen();
                 const range = if (total <= 256 * 1024)
@@ -1443,64 +1444,6 @@ pub fn main(init: std.process.Init) !void {
     ctx.waitIdle();
 }
 
-/// One key event → keymap lookup → command. Runs inside the hot
-/// section: dispatch is a table lookup plus the command itself,
-/// allocation-only. Unbound printable input becomes `insert-text` —
-/// itself a command; there is no editing path around the ABI.
-/// Per-mode caret style + blink, set from config via `set-cursor` and
-/// `cursor-blink` and read into the Hud each frame. Blink is per mode so
-/// the sample config can blink in insert and stay solid in normal.
-const CursorConfig = struct {
-    const Entry = struct { mode: []u8, style: view_mod.CursorStyle = .block, blink: bool = false };
-    gpa: std.mem.Allocator,
-    entries: std.ArrayList(Entry) = .empty,
-
-    fn deinit(self: *CursorConfig) void {
-        for (self.entries.items) |e| self.gpa.free(e.mode);
-        self.entries.deinit(self.gpa);
-    }
-    fn hasEntry(self: *const CursorConfig, mode: []const u8) bool {
-        for (self.entries.items) |e| if (std.mem.eql(u8, e.mode, mode)) return true;
-        return false;
-    }
-    /// The mode whose caret should render for `mode`. A menu mode with no caret
-    /// of its own inherits its return target's — so `leader` keeps normal's bar
-    /// instead of flipping to a block. (Uses the menu-return relation, NOT the
-    /// key-lookup `parents` chain, so no bindings leak into the menu.)
-    fn resolveMode(self: *const CursorConfig, keymap: *const core.Keymap, mode: []const u8) []const u8 {
-        if (self.hasEntry(mode)) return mode;
-        if (keymap.isMenuMode(mode)) if (keymap.menuReturn(mode)) |ret| return ret;
-        return mode;
-    }
-    fn styleFor(self: *const CursorConfig, mode: []const u8) view_mod.CursorStyle {
-        for (self.entries.items) |e| if (std.mem.eql(u8, e.mode, mode)) return e.style;
-        return .block;
-    }
-    fn blinkFor(self: *const CursorConfig, mode: []const u8) bool {
-        for (self.entries.items) |e| if (std.mem.eql(u8, e.mode, mode)) return e.blink;
-        return false;
-    }
-    fn entry(self: *CursorConfig, mode: []const u8) !*Entry {
-        for (self.entries.items) |*e| if (std.mem.eql(u8, e.mode, mode)) return e;
-        try self.entries.append(self.gpa, .{ .mode = try self.gpa.dupe(u8, mode) });
-        return &self.entries.items[self.entries.items.len - 1];
-    }
-};
-
-fn parseCursorStyle(s: []const u8) ?view_mod.CursorStyle {
-    if (std.mem.eql(u8, s, "block")) return .block;
-    if (std.mem.eql(u8, s, "bar")) return .bar;
-    if (std.mem.eql(u8, s, "underline")) return .underline;
-    return null;
-}
-
-fn setColorHandler(ctx: *core.command.Context, data: ?*anyopaque, args: []const core.command.Value) anyerror!core.command.Value {
-    _ = ctx;
-    const v: *view_mod.View = @ptrCast(@alignCast(data.?));
-    if (!v.theme.setColor(args[0].string, args[1].string)) return error.InvalidArgument;
-    return .nil;
-}
-
 /// `menu-escape` (Escape / C-g in a menu) — leave the current menu mode back to
 /// its recorded return target (the root non-menu mode), or `normal`.
 fn menuEscapeHandler(ctx: *core.command.Context, data: ?*anyopaque, args: []const core.command.Value) anyerror!core.command.Value {
@@ -1545,25 +1488,6 @@ fn getConfigUvarint(cur: *[]const u8) ?u64 {
         shift += 7;
     }
     return null;
-}
-
-fn setCursorHandler(ctx: *core.command.Context, data: ?*anyopaque, args: []const core.command.Value) anyerror!core.command.Value {
-    _ = ctx;
-    const cfg: *CursorConfig = @ptrCast(@alignCast(data.?));
-    const style = parseCursorStyle(args[1].string) orelse return error.InvalidArgument;
-    (try cfg.entry(args[0].string)).style = style;
-    return .nil;
-}
-
-fn cursorBlinkHandler(ctx: *core.command.Context, data: ?*anyopaque, args: []const core.command.Value) anyerror!core.command.Value {
-    _ = ctx;
-    const cfg: *CursorConfig = @ptrCast(@alignCast(data.?));
-    (try cfg.entry(args[0].string)).blink = std.mem.eql(u8, args[1].string, "on");
-    return .nil;
-}
-
-fn isMarkdownPath(path: []const u8) bool {
-    return std.mem.endsWith(u8, path, ".md") or std.mem.endsWith(u8, path, ".markdown");
 }
 
 /// `peers` — echo/log every connected peer's fingerprint, four-word SAS,
