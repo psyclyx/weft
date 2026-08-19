@@ -865,13 +865,27 @@ test "e2e/project: magit push/pull/fetch transients are sticky menus" {
     try t.expect(ed.keymap.isMenuMode("git-reset-menu"));
 }
 
-// ── Documented gaps (the difficulty IS the signal) ──────────────────
+// ── Coverage + documented gaps (the difficulty IS the signal) ───────
 //
-// The project brief calls for the e2e to also drive *git*, *a debugger*, and
-// *a coworker* (multiplayer). Those steps aren't cleanly expressible as unit
-// tests yet, so they're recorded here rather than written as flaky/green fakes.
-// When each gains the missing piece, promote it into a granular test above.
+// NOW COVERED (promoted from gaps into the granular tests above):
+//   • multi-pane rendering: the App harness owns a real window_layout.Layout,
+//     drives the real window commands through window_cmds.applyIntents, and
+//     renders EVERY pane headlessly via renderComposite → harness.renderBuilt
+//     (the headless analogue of the frame loop's renderPanes + present). See
+//     "app/window: …". The GPU-in-build seam is gone too: the atlas upload was
+//     lifted out of the backend-independent build into render.zig's `present`,
+//     so the same view.build path the exe uses now rasterizes on the CPU.
+//   • coworker (multiplayer): the in-process collab loopback (Loopback above)
+//     stands up two encrypted Sessions over a socketpair, each syncing an
+//     editor's document via a real Collab. "app/collab: …" types through the
+//     real vim path on peer A and asserts convergence into peer B's buffer +
+//     cursor. This drives the REAL session sync layer (Session handshake +
+//     Collab.tick — the same code collab.tickCollab calls); it does NOT drive
+//     the full tickCollab frame-loop wrapper (partial-checkout / peer-fs /
+//     reconnect / hub adoption), which still needs the ShareCtx plumbing.
 //
+// STILL OPEN — recorded here rather than written as flaky/green fakes; promote
+// each into a granular test when it gains the missing piece:
 //   • git (magit) workflow: the git plugin shells out via `proc` and operates
 //     on the process CWD, so a real staged/committed assertion needs (a) a
 //     tmpdir made the process CWD and (b) driving the async proc to completion
@@ -882,10 +896,10 @@ test "e2e/project: magit push/pull/fetch transients are sticky menus" {
 //   • debugger: there is no debug/DAP plugin or `debug-*` command surface, so
 //     "set a breakpoint and step" has no keys to press — the biggest missing
 //     IDE capability the e2e wants.
-//   • coworker (multiplayer): the collab session/hub needs a socket transport
-//     to stand up two peers; the headless harness has no in-process loopback
-//     yet, so a two-editor "pair on the same buffer" scenario can't be driven.
-//     A loopback session pair on the harness would unlock it.
+//   • full collab frame-loop path: the loopback exercises the session/Collab
+//     sync layer directly; wrapping it in collab.tickCollab (to also cover the
+//     hub multi-peer adoption, partial checkout, and reconnect branches) needs
+//     the ShareCtx + main() frame-loop locals stood up headlessly.
 //   • per-language build/test/run: `lang-run`/`make-*` shell out via `proc`;
 //     exercising them for several languages needs those toolchains in the test
 //     environment, so they're left to the manual/CI matrix, not the unit suite.
