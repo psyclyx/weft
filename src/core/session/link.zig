@@ -91,6 +91,13 @@ pub const FdLink = struct {
 
     fn closeFd(ctx: ?*anyopaque) void {
         const self: *FdLink = @ptrCast(@alignCast(ctx.?));
+        // shutdown() forces a read()/write() ALREADY blocked on this fd to
+        // return at once — close() alone does not (the underlying file
+        // description outlives the fd number, so a thread parked in read()
+        // stays parked until the peer sends or closes). Without this, the
+        // reader thread hangs in destroy() until the peer's next ~1s
+        // heartbeat. Sockets only; ENOTSOCK on a non-socket fd is harmless.
+        _ = linux.shutdown(self.fd, 2); // SHUT_RDWR
         _ = linux.close(self.fd);
     }
 };

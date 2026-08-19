@@ -427,11 +427,11 @@ pub const Loopback = struct {
     /// real time) until `pred` holds or the timeout elapses. Returns whether it
     /// converged.
     pub fn pumpUntil(self: *Loopback, ctx: anytype, comptime pred: fn (@TypeOf(ctx)) bool) !bool {
-        // Wall-clock bounded, not round-counted: the session reader/writer
-        // threads need real time, and under load (parallel test jobs) a fixed
-        // round budget starves. Returns the instant `pred` holds, so the common
-        // path is fast; only a genuine non-convergence waits the full deadline.
-        const deadline = core.task.nowNs() + 15 * std.time.ns_per_s;
+        // Wall-clock bounded (the session reader/writer threads deliver on real
+        // time). Convergence is ~3ms in practice; the generous deadline is just
+        // a safety bound for a genuine failure, and `pred` returns the instant
+        // it holds, so the happy path is fast.
+        const deadline = core.task.nowNs() + 5 * std.time.ns_per_s;
         while (core.task.nowNs() < deadline) {
             try self.tickOnce();
             if (pred(ctx)) return true;
@@ -799,6 +799,53 @@ test "app/collab: peer A types, it converges into peer B's buffer + cursor" {
         }
     }.pred);
     try t.expect(back);
+}
+
+// Regression guard for the session teardown hang: `Session.destroy` must WAKE
+// its blocked reader (via shutdown()), not park on it. Before the fix, close()
+// alone left the reader blocked in read() until the peer's next ~1s heartbeat,
+// so every teardown took ~1000ms — real dead time that starved other threads
+// under load. This runs the isolated session sync (no wasm) and asserts each
+// teardown is prompt AND the doc converged.
+test "regression: session teardown is prompt (no reader-park hang)" {
+    const gpa = t.allocator;
+    var iter: usize = 0;
+    while (iter < 12) : (iter += 1) {
+        var da = try core.Document.init(gpa, "alice");
+        defer da.deinit(gpa);
+        var db = try core.Document.init(gpa, "bob");
+        defer db.deinit(gpa);
+        const fds = try socketPair();
+        var fa = session.FdLink{ .fd = fds[0] };
+        var fb = session.FdLink{ .fd = fds[1] };
+        const sa = try session.Session.create(gpa, fa.link(), .server, "t", .own, null);
+        const sb = try session.Session.create(gpa, fb.link(), .client, "t", .own, null);
+        var ca = try session.Collab.init(gpa, sa, &da, "alice");
+        var cb = try session.Collab.init(gpa, sb, &db, "bob");
+
+        try da.insert(gpa, 0, "hello");
+        var ok = false;
+        const deadline = core.task.nowNs() + 5 * std.time.ns_per_s;
+        while (core.task.nowNs() < deadline) {
+            _ = try ca.tick(0);
+            _ = try cb.tick(0);
+            if (db.text().byteLen() >= 5) {
+                ok = true;
+                break;
+            }
+            napUs(200);
+        }
+        try t.expect(ok);
+
+        // Teardown must be prompt — the whole point. A regressed destroy() that
+        // parks on the blocked reader would blow well past this (~1s each).
+        const t1 = core.task.nowNs();
+        ca.deinit();
+        cb.deinit();
+        sb.destroy();
+        sa.destroy();
+        try t.expect(core.task.nowNs() - t1 < 300 * std.time.ns_per_ms);
+    }
 }
 
 // ── Project-level e2e: build a tiny app the way a person would ───────
