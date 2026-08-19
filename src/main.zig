@@ -28,6 +28,7 @@ const headless = @import("headless.zig");
 const handler = @import("app/handler.zig");
 const ok_echo = handler.ok_echo;
 const setEcho = handler.setEcho;
+const scroll = @import("app/scroll.zig");
 
 const arg_parse = @import("app/args.zig");
 const Args = arg_parse.Args;
@@ -530,15 +531,15 @@ pub fn main(init: std.process.Init) !void {
     // Scrolling commands need the view + framebuffer (which core commands
     // don't see), so they're registered here. `view.top_row` is always the
     // focused pane's scroll.
-    var scroll_ctx: ScrollCtx = .{ .view = &view, .fb = &fb };
+    var scroll_ctx: scroll.ScrollCtx = .{ .view = &view, .fb = &fb };
     inline for (.{
-        .{ "scroll-line-down", "Scroll down one line.", scrollLineDown },
-        .{ "scroll-line-up", "Scroll up one line.", scrollLineUp },
-        .{ "scroll-half-down", "Scroll down half a page (moves the cursor).", scrollHalfDown },
-        .{ "scroll-half-up", "Scroll up half a page (moves the cursor).", scrollHalfUp },
-        .{ "scroll-page-down", "Scroll down a page (moves the cursor).", scrollPageDown },
-        .{ "scroll-page-up", "Scroll up a page (moves the cursor).", scrollPageUp },
-        .{ "center-line", "Center the current line in the viewport.", centerLine },
+        .{ "scroll-line-down", "Scroll down one line.", scroll.scrollLineDown },
+        .{ "scroll-line-up", "Scroll up one line.", scroll.scrollLineUp },
+        .{ "scroll-half-down", "Scroll down half a page (moves the cursor).", scroll.scrollHalfDown },
+        .{ "scroll-half-up", "Scroll up half a page (moves the cursor).", scroll.scrollHalfUp },
+        .{ "scroll-page-down", "Scroll down a page (moves the cursor).", scroll.scrollPageDown },
+        .{ "scroll-page-up", "Scroll up a page (moves the cursor).", scroll.scrollPageUp },
+        .{ "center-line", "Center the current line in the viewport.", scroll.centerLine },
     }) |spec| {
         _ = try commands.bind(gpa, spec[0], .{
             .name = spec[0],
@@ -1616,76 +1617,6 @@ fn grantHandler(ctx: *core.command.Context, data: ?*anyopaque, args: []const cor
     };
     var buf: [64]u8 = undefined;
     return ok_echo(ctx, std.fmt.bufPrint(&buf, "granted {s} to {s}", .{ grade.label(), &fp }) catch "granted");
-}
-
-/// Scrolling commands operate on the focused pane's viewport, which lives
-/// in the view (core commands can't see it).
-const ScrollCtx = struct { view: *view_mod.View, fb: *[2]u32 };
-
-fn scrollOf(data: ?*anyopaque) *ScrollCtx {
-    return @ptrCast(@alignCast(data.?));
-}
-
-fn viewportRows(sc: *ScrollCtx) usize {
-    _ = sc.fb;
-    return sc.view.bodyRows(); // the focused pane's body height, split-aware
-}
-
-/// Move the focused pane's viewport by `delta` rows, optionally carrying
-/// the cursor with it (vim C-d/C-u/C-f/C-b move the cursor; C-e/C-y do not).
-fn doScroll(ctx: *core.command.Context, sc: *ScrollCtx, delta: i64, move_cursor: bool) void {
-    const ed = ctx.editor();
-    const rope = ed.text();
-    const last = rope.lineCount() -| 1;
-    if (delta >= 0)
-        sc.view.top_row = @min(sc.view.top_row + @as(usize, @intCast(delta)), last)
-    else
-        sc.view.top_row -|= @intCast(-delta);
-    if (move_cursor) {
-        const cur_row = rope.offsetToPoint(ed.cursorOffset()).row;
-        const nr = if (delta >= 0)
-            @min(cur_row + @as(usize, @intCast(delta)), last)
-        else
-            cur_row -| @as(usize, @intCast(-delta));
-        ed.clearSelection();
-        ed.placeCursor(rope.lineRange(nr).start);
-    }
-}
-
-fn scrollLineDown(ctx: *core.command.Context, data: ?*anyopaque, _: []const core.command.Value) anyerror!core.command.Value {
-    doScroll(ctx, scrollOf(data), 1, false);
-    return .nil;
-}
-fn scrollLineUp(ctx: *core.command.Context, data: ?*anyopaque, _: []const core.command.Value) anyerror!core.command.Value {
-    doScroll(ctx, scrollOf(data), -1, false);
-    return .nil;
-}
-fn scrollHalfDown(ctx: *core.command.Context, data: ?*anyopaque, _: []const core.command.Value) anyerror!core.command.Value {
-    const sc = scrollOf(data);
-    doScroll(ctx, sc, @intCast(viewportRows(sc) / 2), true);
-    return .nil;
-}
-fn scrollHalfUp(ctx: *core.command.Context, data: ?*anyopaque, _: []const core.command.Value) anyerror!core.command.Value {
-    const sc = scrollOf(data);
-    doScroll(ctx, sc, -@as(i64, @intCast(viewportRows(sc) / 2)), true);
-    return .nil;
-}
-fn scrollPageDown(ctx: *core.command.Context, data: ?*anyopaque, _: []const core.command.Value) anyerror!core.command.Value {
-    const sc = scrollOf(data);
-    doScroll(ctx, sc, @intCast(viewportRows(sc) -| 2), true);
-    return .nil;
-}
-fn scrollPageUp(ctx: *core.command.Context, data: ?*anyopaque, _: []const core.command.Value) anyerror!core.command.Value {
-    const sc = scrollOf(data);
-    doScroll(ctx, sc, -@as(i64, @intCast(viewportRows(sc) -| 2)), true);
-    return .nil;
-}
-fn centerLine(ctx: *core.command.Context, data: ?*anyopaque, _: []const core.command.Value) anyerror!core.command.Value {
-    const sc = scrollOf(data);
-    const ed = ctx.editor();
-    const cur_row = ed.text().offsetToPoint(ed.cursorOffset()).row;
-    sc.view.top_row = cur_row -| (viewportRows(sc) / 2);
-    return .nil;
 }
 
 /// Window-layout intents; applied in the frame loop (which owns the pane
