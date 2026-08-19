@@ -111,6 +111,7 @@ pub fn evalConfig(engine: *wasm.Engine, ctx: *command.Context, loader: ?PluginLo
     try linker.defineFn("weft", "qjs_config", 4, 1, cStubI32, &bridge);
     try linker.defineFn("weft", "qjs_file_read", 4, 1, cStubI32, &bridge);
     try linker.defineFn("weft", "qjs_file_write", 4, 0, cStubVoid, &bridge);
+    try linker.defineFn("weft", "qjs_line_text", 2, 1, cStubI32, &bridge);
 
     var instance = try linker.instantiateWasi(&module);
     defer instance.deinit();
@@ -210,6 +211,7 @@ pub const JsPlugin = struct {
         try self.linker.defineFn("weft", "qjs_config", 4, 1, cConfig, self);
         try self.linker.defineFn("weft", "qjs_file_read", 4, 1, cFileRead, self);
         try self.linker.defineFn("weft", "qjs_file_write", 4, 0, cAgentWrite, self);
+        try self.linker.defineFn("weft", "qjs_line_text", 2, 1, cLineText, self);
 
         self.instance = try self.linker.instantiateWasi(&self.module);
         errdefer self.instance.deinit();
@@ -422,6 +424,28 @@ fn cFileRead(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32, results
     };
     defer gpa.free(bytes);
     results[0] = @intCast(caller.writeMemory(@intCast(args[2]), @intCast(args[3]), bytes) catch 0);
+}
+
+/// weft.lineText() → the active buffer's current line (at the cursor), for a
+/// prompt line. Written into the guest's receive buffer.
+fn cLineText(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32, results: []i32) void {
+    const self: *JsPlugin = @ptrCast(@alignCast(data.?));
+    const ed = self.ctx.editor();
+    const rope = ed.text();
+    const row = rope.offsetToPoint(@min(ed.cursorOffset(), rope.byteLen())).row;
+    const line = rope.lineRange(row);
+    const gpa = self.gpa;
+    const buf = gpa.alloc(u8, line.end - line.start) catch {
+        results[0] = 0;
+        return;
+    };
+    defer gpa.free(buf);
+    var sr = rope.streamReader(.{ .start = line.start, .end = line.end }, &.{});
+    sr.interface.readSliceAll(buf) catch {
+        results[0] = 0;
+        return;
+    };
+    results[0] = @intCast(caller.writeMemory(@intCast(args[0]), @intCast(args[1]), buf) catch 0);
 }
 
 /// The CRDT peer an agent's file writes author as (a single agent identity for

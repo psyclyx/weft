@@ -181,6 +181,7 @@ weft.bind("normal", "K", "hover");
 //   weft.set("acp", "prompt", "Summarize this project.");
 //   weft.plugin("acp.js");                 // the ACP client (a JS plugin)
 //   weft.bind("leader-open", "A", "agent-start"); // SPC o A — start the agent
+//   weft.bind("leader-open", "s", "agent-send");  // SPC o s — send this line as a prompt
 
 // SPC o — open / tools
 weft.bind("leader-open", "d", "dired");

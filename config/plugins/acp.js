@@ -35,6 +35,14 @@ function transcript(text) {
   weft.bufferAppend(TRANSCRIPT, text);
 }
 
+// Send a prompt on the existing session (a subsequent turn). Renders the prompt
+// into the transcript so the conversation reads as a whole.
+function sendPrompt(text) {
+  if (!agent || !sid || !text) return;
+  transcript("\n\n› " + text + "\n");
+  rpc("session/prompt", { sessionId: sid, prompt: [{ type: "text", text: text }] });
+}
+
 // One decoded JSON-RPC message from the agent.
 function onMessage(msg) {
   // Streaming notifications (the turn's content).
@@ -78,7 +86,7 @@ function onMessage(msg) {
     rpc("session/new", { cwd: ".", mcpServers: [] });
   } else if (msg.id === 1 && msg.result) {
     sid = msg.result.sessionId;
-    rpc("session/prompt", { sessionId: sid, prompt: [{ type: "text", text: pending }] });
+    sendPrompt(pending);
   }
   // msg.id === 2: the turn finished (a stopReason) — nothing to do here yet.
 }
@@ -130,4 +138,20 @@ weft.command("agent-start", () => {
   }
   startAgent(cmd, weft.config("prompt") || "Hello");
   weft.echo("acp: started " + cmd);
+});
+
+// agent-send: send the current line as the next prompt (a multi-turn
+// conversation). Type a request on any line and run this (bind a key) — it
+// reuses the running session.
+weft.command("agent-send", () => {
+  const line = weft.lineText().trim();
+  if (!line) {
+    weft.echo("acp: nothing on this line to send");
+    return;
+  }
+  if (!sid) {
+    weft.echo("acp: no session — run agent-start first");
+    return;
+  }
+  sendPrompt(line);
 });
