@@ -25,6 +25,7 @@ const prepare = @import("prepare.zig");
 const layout = @import("layout.zig");
 const region = @import("region.zig");
 const fonts = @import("fonts.zig");
+const statusline = @import("view/statusline.zig");
 
 const InlineAttr = core.capability.InlineAttr;
 const HighlightClass = core.capability.HighlightClass;
@@ -59,7 +60,9 @@ pub const Built = struct {
 
 /// A shaped glyph run to render, placed either on the mono cell grid
 /// (uniform advances) or proportionally at a pen origin (markdown).
-const Run = struct {
+/// `pub` only so the extracted render/layout submodules can name it — it is
+/// not part of the module's public surface (view.zig re-exports none of it).
+pub const Run = struct {
     shaped: snail.ShapedText,
     baseline_y: f32,
     place: union(enum) {
@@ -69,8 +72,9 @@ const Run = struct {
 };
 
 /// A solid rectangle painted through the unit-square record: selection
-/// backgrounds, caret, peer carets, HUD row highlights.
-const Rect = struct { x: f32, y: f32, w: f32, h: f32, color: [4]f32 };
+/// backgrounds, caret, peer carets, HUD row highlights. `pub` for the
+/// extracted submodules only (see `Run`).
+pub const Rect = struct { x: f32, y: f32, w: f32, h: f32, color: [4]f32 };
 
 /// Bulk style feeds resolved once per frame for the visible range.
 const StyleInputs = struct {
@@ -438,10 +442,10 @@ pub const View = struct {
         if (hud.tabs) |tabs| {
             var tbuf: [1024]u8 = undefined;
             const strip = buildTabStrip(&tbuf, tabs);
-            try self.appendPlainRun(scratch, &runs, &rects, strip, tab_rect.?.y + self.ascent, cols_visible, self.theme.status, null);
+            try statusline.appendPlainRun(self, scratch, &runs, &rects, strip, tab_rect.?.y + self.ascent, cols_visible, self.theme.status, null);
         }
 
-        try self.buildHud(scratch, &runs, &rects, hud, status_rect, panel_rect, cols_visible);
+        try statusline.buildHud(self, scratch, &runs, &rects, hud, status_rect, panel_rect, cols_visible);
         // Floating surfaces (which-key popup, dired/magit) float within the BODY
         // region — never over the status/tab/panel rects, which are carved out.
         // Hand the caret's y so a corner surface can flip away from it.
@@ -910,108 +914,6 @@ pub const View = struct {
 
     // ── HUD (status line + picker; always mono) ──────────────────────
 
-    /// Baseline for local row `i` within a region whose top is `rect_y`.
-    fn baseIn(self: *const View, rect_y: f32, i: usize) f32 {
-        return rect_y + self.ascent + @as(f32, @floatFromInt(i)) * self.line_h;
-    }
-
-    fn buildHud(
-        self: *View,
-        scratch: Allocator,
-        runs: *std.ArrayList(Run),
-        rects: *std.ArrayList(Rect),
-        hud: Hud,
-        status_rect: region.Rect,
-        panel_rect: region.Rect,
-        cols_visible: usize,
-    ) !void {
-        // The status line owns `status_rect`; the panel (pick or which-key)
-        // owns `panel_rect` directly above it. Both rects were cut from the
-        // frame by one carving (build), so a panel physically cannot land on
-        // the status line or the body — the class of bug the old
-        // rows_total-N arithmetic allowed. Segments are color-coded and chain
-        // left-to-right from `segRun`; a right-anchored cluster (peers, diag
-        // count) is measured backwards from the right edge.
-        const base_y = self.baseIn(status_rect.y, 0);
-        // Full-width status background so the chips read as one bar.
-        try rects.append(scratch, .{
-            .x = self.origin_x,
-            .y = base_y - self.ascent,
-            .w = @as(f32, @floatFromInt(cols_visible)) * self.cell_w,
-            .h = self.line_h,
-            .color = self.theme.selection,
-        });
-
-        var col: usize = 0;
-        // Mode chip: colored background, dark text — the loudest indicator.
-        const chip = try std.fmt.allocPrint(scratch, " {s} ", .{hud.mode});
-        col = try self.segRun(scratch, runs, rects, chip, col, base_y, cols_visible, self.theme.background, self.theme.modeChipColor(hud.mode));
-        col += 1;
-        if (hud.buffer_pos) |bp| {
-            col = try self.segRun(scratch, runs, rects, bp, col, base_y, cols_visible, self.theme.status, null);
-            col += 1;
-        }
-        col = try self.segRun(scratch, runs, rects, hud.file orelse "[scratch]", col, base_y, cols_visible, self.theme.foreground, null);
-        if (hud.dirty) col = try self.segRun(scratch, runs, rects, " ●", col, base_y, cols_visible, self.theme.diag_warn, null);
-        if (hud.backing) |b| {
-            const bk = try std.fmt.allocPrint(scratch, " ({s})", .{b});
-            col = try self.segRun(scratch, runs, rects, bk, col, base_y, cols_visible, self.theme.status, null);
-        }
-        if (hud.save_note) |s| {
-            const sn = try std.fmt.allocPrint(scratch, " [{s}]", .{s});
-            col = try self.segRun(scratch, runs, rects, sn, col, base_y, cols_visible, self.theme.diag_warn, null);
-        }
-        if (hud.save_failed) col = try self.segRun(scratch, runs, rects, " [save failed]", col, base_y, cols_visible, self.theme.diag_error, null);
-        if (hud.unfetched_pct) |pct| {
-            if (pct > 0) {
-                const fetched = try std.fmt.allocPrint(scratch, " [{d}% fetched]", .{100 - @as(u32, pct)});
-                col = try self.segRun(scratch, runs, rects, fetched, col, base_y, cols_visible, self.theme.diag_warn, null);
-            }
-        }
-        if (hud.link) |l| {
-            const lk = try std.fmt.allocPrint(scratch, "  link:{s}", .{l});
-            col = try self.segRun(scratch, runs, rects, lk, col, base_y, cols_visible, self.theme.md_link, null);
-        }
-        if (hud.trust) |tr| {
-            const tt = try std.fmt.allocPrint(scratch, "  {s}", .{tr});
-            col = try self.segRun(scratch, runs, rects, tt, col, base_y, cols_visible, self.theme.status, null);
-        }
-        if (hud.echo orelse hud.cursor_diag) |msg| {
-            const em = try std.fmt.allocPrint(scratch, "  ·  {s}", .{msg});
-            col = try self.segRun(scratch, runs, rects, em, col, base_y, cols_visible, self.theme.foreground, null);
-        }
-
-        // Right-anchored cluster: peers then diagnostics, measured backward.
-        const status_diag_count = if (hud.diag_layer) |dl| dl.spanCount() else 0;
-        var right_segs: std.ArrayList(struct { text: []const u8, color: [4]f32 }) = .empty;
-        if (hud.peers > 0)
-            try right_segs.append(scratch, .{ .text = try std.fmt.allocPrint(scratch, "✦{d} ", .{hud.peers}), .color = self.theme.accent });
-        if (status_diag_count > 0)
-            try right_segs.append(scratch, .{ .text = try std.fmt.allocPrint(scratch, "!{d} ", .{status_diag_count}), .color = self.theme.diag_error });
-        var right_w: usize = 0;
-        for (right_segs.items) |seg| right_w += std.unicode.utf8CountCodepoints(seg.text) catch seg.text.len;
-        if (right_w > 0 and right_w < cols_visible) {
-            var rcol = cols_visible - right_w;
-            if (rcol > col) { // only if it doesn't collide with the left cluster
-                for (right_segs.items) |seg|
-                    rcol = try self.segRun(scratch, runs, rects, seg.text, rcol, base_y, cols_visible, seg.color, null);
-            }
-        }
-
-        // which-key host fallback: a chord is pending and no pick is open — list
-        // the prefix mode's bindings in the reserved panel region. (The picker is
-        // drawn separately as a window-bottom overlay, so it isn't here.)
-        if (hud.which_key) |wk| {
-            const shown = @min(wk.len, Hud.max_wk_rows);
-            const header = try std.fmt.allocPrint(scratch, "  {s} —", .{hud.mode});
-            try self.appendPlainRun(scratch, runs, rects, header, self.baseIn(panel_rect.y, 0), cols_visible, self.theme.accent, null);
-            for (0..shown) |i| {
-                const l = try std.fmt.allocPrint(scratch, "  {s}  {s}", .{ wk[i].key, wk[i].command });
-                try self.appendPlainRun(scratch, runs, rects, l, self.baseIn(panel_rect.y, 1 + i), cols_visible, self.theme.status, null);
-            }
-        }
-    }
-
     /// Pixel height the picker dock needs: the query line + one row per shown
     /// result. The SINGLE source of truth for both the dock carve (main cuts
     /// exactly this off the window) and the render, so they cannot drift — the
@@ -1171,8 +1073,6 @@ pub const View = struct {
         try runs.append(scratch, .{ .shaped = shaped, .baseline_y = baseline_y, .place = .{ .prop = .{ .x = x, .em = self.em, .color = color } } });
     }
 
-    /// A HUD text run: mono cells truncated at the viewport, optionally over
-    /// a full-width background rect.
     /// Draw retained plugin overlays (surfaces) as floating boxes. corner docks
     /// top-right of the pane, center is centered; bottom is left to the dock
     /// (buildHud) and skipped here. Each row's spans render at their own color
@@ -1255,93 +1155,6 @@ pub const View = struct {
             }
         }
     }
-
-    /// Render one status segment as colored mono cells starting at column
-    /// `start_col` (from `origin_x`), optionally over a background chip that
-    /// spans exactly the segment's width. Returns the column just past it, so
-    /// segments chain left-to-right. Clips at `cols_visible`.
-    fn segRun(
-        self: *View,
-        scratch: Allocator,
-        runs: *std.ArrayList(Run),
-        rects: *std.ArrayList(Rect),
-        text: []const u8,
-        start_col: usize,
-        baseline_y: f32,
-        cols_visible: usize,
-        color: [4]f32,
-        bg: ?[4]f32,
-    ) !usize {
-        if (start_col >= cols_visible or text.len == 0) return start_col;
-        const w_cols = std.unicode.utf8CountCodepoints(text) catch text.len;
-        if (bg) |bgc| {
-            const draw_cols = @min(w_cols, cols_visible - start_col);
-            try rects.append(scratch, .{
-                .x = self.origin_x + @as(f32, @floatFromInt(start_col)) * self.cell_w,
-                .y = baseline_y - self.ascent,
-                .w = @as(f32, @floatFromInt(draw_cols)) * self.cell_w,
-                .h = self.line_h,
-                .color = bgc,
-            });
-        }
-        var cells: std.ArrayList(snail.Cell) = .empty;
-        var it = (std.unicode.Utf8View.init(text) catch return start_col).iterator();
-        var col = start_col;
-        var byte: usize = 0;
-        var last_byte: usize = 0;
-        while (it.nextCodepointSlice()) |s| : (col += 1) {
-            if (col >= cols_visible) break;
-            try cells.append(scratch, .{
-                .source = .{ .start = @intCast(byte), .end = @intCast(byte + s.len) },
-                .column = @intCast(col),
-                .color = color,
-            });
-            byte += s.len;
-            last_byte = byte;
-        }
-        if (cells.items.len == 0) return start_col;
-        const shaped = try snail.shape(scratch, &self.face_set.mono, text[0..last_byte], .{});
-        try runs.append(scratch, .{ .shaped = shaped, .baseline_y = baseline_y, .place = .{ .cell = cells.items } });
-        return col;
-    }
-
-    fn appendPlainRun(
-        self: *View,
-        scratch: Allocator,
-        runs: *std.ArrayList(Run),
-        rects: *std.ArrayList(Rect),
-        text: []const u8,
-        baseline_y: f32,
-        cols_visible: usize,
-        color: [4]f32,
-        bg: ?[4]f32,
-    ) !void {
-        if (bg) |bgc| {
-            try rects.append(scratch, .{
-                .x = self.origin_x,
-                .y = baseline_y - self.ascent,
-                .w = @as(f32, @floatFromInt(cols_visible)) * self.cell_w,
-                .h = self.line_h,
-                .color = bgc,
-            });
-        }
-        var cells: std.ArrayList(snail.Cell) = .empty;
-        var it = (std.unicode.Utf8View.init(text) catch return error.InvalidUtf8).iterator();
-        var col: usize = 0;
-        var byte: usize = 0;
-        while (it.nextCodepointSlice()) |s| : (col += 1) {
-            if (col >= cols_visible) break;
-            try cells.append(scratch, .{
-                .source = .{ .start = @intCast(byte), .end = @intCast(byte + s.len) },
-                .column = @intCast(col),
-                .color = color,
-            });
-            byte += s.len;
-        }
-        if (cells.items.len == 0) return;
-        const shaped = try snail.shape(scratch, &self.face_set.mono, text[0..byte], .{});
-        try runs.append(scratch, .{ .shaped = shaped, .baseline_y = baseline_y, .place = .{ .cell = cells.items } });
-    }
 };
 
 // ── Helpers ──
@@ -1378,6 +1191,7 @@ test {
     // guarantee their discovery).
     _ = @import("view/theme.zig");
     _ = @import("view/hud.zig");
+    _ = @import("view/statusline.zig");
 }
 
 test "literal tabs: a tab advances to the next tab stop; offsets stay exact" {
