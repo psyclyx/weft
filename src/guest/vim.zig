@@ -326,16 +326,19 @@ export fn init() void {
     weft.bindKey("ex", "C-u", "ex-clear");
 
     const np = [_][2][]const u8{
-        .{ "colon", "vim-ex" },       .{ "space", "leader" },
-        .{ "C-w", "window" },         .{ "g", "goto" },
-        .{ "z", "zed" },              .{ "f", "find-f" },
-        .{ "F", "find-F" },           .{ "t", "find-t" },
-        .{ "T", "find-T" },           .{ "C-d", "scroll-half-down" },
-        .{ "C-u", "scroll-half-up" }, .{ "C-f", "scroll-page-down" },
-        .{ "C-b", "scroll-page-up" }, .{ "C-e", "scroll-line-down" },
-        .{ "C-y", "scroll-line-up" }, .{ "C-bracketright", "goto-definition" },
+        .{ "colon", "vim-ex" },                   .{ "space", "leader" },
+        .{ "g", "goto" },                         .{ "z", "zed" },
+        .{ "f", "find-f" },                       .{ "F", "find-F" },
+        .{ "t", "find-t" },                       .{ "T", "find-T" },
+        .{ "C-d", "scroll-half-down" },           .{ "C-u", "scroll-half-up" },
+        .{ "C-f", "scroll-page-down" },           .{ "C-b", "scroll-page-up" },
+        .{ "C-e", "scroll-line-down" },           .{ "C-y", "scroll-line-up" },
+        .{ "C-bracketright", "goto-definition" },
     };
     for (np) |b| weft.bindKey("normal", b[0], b[1]);
+    // The window prefix works EVERYWHERE (the global layer), not just normal —
+    // C-w to split/focus from insert, dired, magit, a menu, etc.
+    weft.bindKey("global", "C-w", "window");
     weft.bindKey("default", "C-g", "cancel");
     weft.bindKey("insert", "C-n", "complete");
 

@@ -122,8 +122,15 @@ pub fn bind(self: *Keymap, gpa: Allocator, mode: []const u8, key: []const u8, co
     };
 }
 
+/// The reserved layer consulted under EVERY mode, after its own fallback
+/// chain — so a truly universal key (which-key on F1, the C-w window prefix)
+/// works everywhere without being duplicated into each mode (or leaking a whole
+/// mode's bindings in via a fallback). A mode still overrides a global key by
+/// binding it locally; global is never a fallback target, only the final check.
+pub const global_mode = "global";
+
 /// The command bound to `keyspec` in the current mode or its fallback
-/// chain, if any.
+/// chain, then the `global` layer, if any.
 pub fn lookup(self: *const Keymap, key: []const u8) ?[]const u8 {
     var mode: []const u8 = self.mode;
     var depth: usize = 0;
@@ -131,7 +138,11 @@ pub fn lookup(self: *const Keymap, key: []const u8) ?[]const u8 {
         if (self.modes.getPtr(mode)) |bindings| {
             if (bindings.get(key)) |entry| return entry.command;
         }
-        mode = self.parents.get(mode) orelse return null;
+        mode = self.parents.get(mode) orelse break;
+    }
+    // Universal fallback: `global` binds apply under every mode.
+    if (self.modes.getPtr(global_mode)) |bindings| {
+        if (bindings.get(key)) |entry| return entry.command;
     }
     return null;
 }
@@ -382,6 +393,27 @@ test "keymap: sticky menus stay open (implies menu-mode)" {
     // A plain menu isn't sticky — it still one-shot auto-pops.
     try km.markMenuMode(gpa, "leader");
     try t.expect(!km.isStickyMenu("leader"));
+}
+
+test "keymap: the global layer applies under every mode, overridable locally" {
+    const gpa = t.allocator;
+    var km: Keymap = .empty;
+    defer km.deinit(gpa);
+
+    // F1 bound only in the global layer (config's which-key key).
+    try km.bind(gpa, Keymap.global_mode, "F1", "which-key-now", prio_plugin, "cfg");
+    try km.bind(gpa, "normal", "i", "insert", prio_plugin, "vim");
+
+    // In normal (which has no F1 of its own) F1 falls through to global.
+    try km.setMode(gpa, "normal");
+    try t.expectEqualStrings("which-key-now", km.lookup("F1").?);
+    // In a standalone tool mode with NO fallback chain, F1 still works —
+    // that's the whole point (before, tool modes were islands).
+    try km.setMode(gpa, "dired");
+    try t.expectEqualStrings("which-key-now", km.lookup("F1").?);
+    // A mode still overrides a global key by binding it locally.
+    try km.bind(gpa, "dired", "F1", "dired-help", prio_plugin, "dired");
+    try t.expectEqualStrings("dired-help", km.lookup("F1").?);
 }
 
 test "keymap: menu return targets — guest entry records, nesting collapses to root" {

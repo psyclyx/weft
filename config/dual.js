@@ -22,8 +22,7 @@ weft.bind("normal", "backslash", "helix-mode"); // vim  -> helix
 weft.bind("helix-normal", "backslash", "vim-normal"); // helix -> vim
 
 weft.set("editor", "which-key-delay-ms", "200");
-weft.bind("normal", "F1", "which-key-now");
-weft.bind("helix-normal", "F1", "which-key-now");
+weft.bind("global", "F1", "which-key-now");
 
 // One doom leader tree, applied to BOTH editors' leader menus.
 [
