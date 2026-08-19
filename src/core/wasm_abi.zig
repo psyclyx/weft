@@ -1178,6 +1178,14 @@ test "wasm plugin: git-status runs git into a focused tool buffer (async)" {
     defer plugin.deinit();
     try t.expect(plugin.perms[wasm_host.perm_proc] and plugin.perms[wasm_host.perm_timer]);
 
+    // Phase 2b/2c: the transient verbs are declared + registered (menu modes are
+    // keymap state, but each terminal action is a real command).
+    for ([_][]const u8{
+        "git-amend",            "git-fixup",         "git-cherry-pick", "git-revert",
+        "git-reset-hard",       "git-branch-create", "git-stash-pop",   "git-push-do",
+        "git-fetch-toggle-all", "git-rebase-finish", "git-confirm-yes",
+    }) |name| try t.expect(env.commands.find(name) != null);
+
     _ = try command.run(&env.commands, &env.ctx, "git-status", &.{});
     // The magit model buffer was created + focused synchronously (before output).
     const buf = blk: {
