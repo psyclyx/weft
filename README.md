@@ -5,10 +5,9 @@
 >    make cloth.
 > 2. a thing woven together from many threads.
 
-An editor built over two libraries — [stemma](https://github.com/psyclyx/stemma)
-(CRDT rope) and [snail](https://github.com/psyclyx/snail) (GPU text
-rendering) — presented on Wayland + Vulkan. stemma and snail are the warp;
-weft binds them into an editor.
+An editor built over [stemma](https://github.com/psyclyx/stemma) (CRDT rope),
+presented on Wayland + Vulkan. stemma is the warp; weft weaves it into an
+editor.
 
 ## Model
 
