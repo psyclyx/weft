@@ -66,6 +66,7 @@ pub const notifyMenu = menu.notifyMenu;
 const buffers_host = @import("wasm_host/buffers.zig");
 const declare = @import("wasm_host/declare.zig");
 const config_kv = @import("wasm_host/config_kv.zig");
+const dispatch = @import("wasm_host/dispatch.zig");
 const rooted_fs = @import("rooted_fs.zig");
 const WasmCmd = wasm_abi.WasmCmd;
 const PendingItem = wasm_abi.PendingItem;
@@ -122,13 +123,13 @@ pub fn defineImports(linker: *wasm.Linker, p: *WasmPlugin) !void {
     // Read-only config data the config plane staged (weft.set), distinct store.
     try d(linker, "wl_config_get", 4, 1, config_kv.hConfigGet, p);
     // Config surface.
-    try d(linker, "wl_echo", 2, 0, hEcho, p);
+    try d(linker, "wl_echo", 2, 0, dispatch.hEcho, p);
     // Command args in + result out (during on_command).
-    try d(linker, "wl_arg_count", 0, 1, hArgCount, p);
-    try d(linker, "wl_arg_int", 1, 1, hArgInt, p);
-    try d(linker, "wl_arg_str", 3, 1, hArgStr, p);
-    try d(linker, "wl_set_result_int", 1, 0, hSetResultInt, p);
-    try d(linker, "wl_set_result_str", 2, 0, hSetResultStr, p);
+    try d(linker, "wl_arg_count", 0, 1, dispatch.hArgCount, p);
+    try d(linker, "wl_arg_int", 1, 1, dispatch.hArgInt, p);
+    try d(linker, "wl_arg_str", 3, 1, dispatch.hArgStr, p);
+    try d(linker, "wl_set_result_int", 1, 0, dispatch.hSetResultInt, p);
+    try d(linker, "wl_set_result_str", 2, 0, dispatch.hSetResultStr, p);
     // Config surface (the local plane).
     try d(linker, "wl_bind_key", 6, 0, hBindKey, p);
     try d(linker, "wl_set_mode", 2, 0, hSetMode, p);
@@ -506,65 +507,6 @@ fn hEditRange(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32, result
     p.ctx.principal = p.principal();
     defer p.ctx.principal = saved;
     p.ctx.edit(.{ .start = cur.start, .end = cur.end }, bytes) catch {};
-}
-
-// Config surface.
-fn hEcho(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32, results: []i32) void {
-    _ = results;
-    const p: *WasmPlugin = @ptrCast(@alignCast(data.?));
-    const msg = caller.readMemory(p.gpa, @intCast(args[0]), @intCast(args[1])) catch return;
-    defer p.gpa.free(msg);
-    p.ctx.echo.clearRetainingCapacity();
-    p.ctx.echo.appendSlice(p.gpa, msg) catch {};
-}
-
-// Command args in + result out. Integers cross as i32 — the membrane word.
-fn hArgCount(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32, results: []i32) void {
-    _ = caller;
-    _ = args;
-    const p: *WasmPlugin = @ptrCast(@alignCast(data.?));
-    results[0] = @intCast(p.cur_args.len);
-}
-
-fn hArgInt(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32, results: []i32) void {
-    _ = caller;
-    const p: *WasmPlugin = @ptrCast(@alignCast(data.?));
-    const i: usize = @intCast(args[0]);
-    results[0] = if (i < p.cur_args.len and p.cur_args[i] == .integer)
-        @truncate(p.cur_args[i].integer)
-    else
-        0;
-}
-
-fn hArgStr(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32, results: []i32) void {
-    const p: *WasmPlugin = @ptrCast(@alignCast(data.?));
-    const i: usize = @intCast(args[0]);
-    if (i >= p.cur_args.len or p.cur_args[i] != .string) {
-        results[0] = -1;
-        return;
-    }
-    const n = caller.writeMemory(@intCast(args[1]), @intCast(args[2]), p.cur_args[i].string) catch {
-        results[0] = -1;
-        return;
-    };
-    results[0] = @intCast(n);
-}
-
-fn hSetResultInt(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32, results: []i32) void {
-    _ = caller;
-    _ = results;
-    const p: *WasmPlugin = @ptrCast(@alignCast(data.?));
-    p.result = .{ .integer = args[0] };
-}
-
-fn hSetResultStr(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32, results: []i32) void {
-    _ = results;
-    const p: *WasmPlugin = @ptrCast(@alignCast(data.?));
-    const bytes = caller.readMemory(p.gpa, @intCast(args[0]), @intCast(args[1])) catch return;
-    defer p.gpa.free(bytes);
-    p.result_buf.clearRetainingCapacity();
-    p.result_buf.appendSlice(p.gpa, bytes) catch return;
-    p.result = .{ .string = p.result_buf.items };
 }
 
 // Config surface (the local plane) — each mirrors an abi.Abi config method.
