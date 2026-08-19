@@ -35,6 +35,7 @@ const config_load = @import("app/config_load.zig");
 const dispatch = @import("app/dispatch.zig");
 const setup = @import("app/setup.zig");
 const render_mod = @import("app/render.zig");
+const frame_mod = @import("app/frame.zig");
 const collab = @import("app/collab.zig");
 const collab_cmds = @import("app/collab_cmds.zig");
 const ShareCtx = collab.ShareCtx;
@@ -395,12 +396,6 @@ pub fn main(init: std.process.Init) !void {
     defer render.deinit();
     const view = &render.view;
     const win_layout = &render.win_layout;
-    const cache = &render.cache;
-    const binding = &render.binding;
-    const built_panes = &render.built_panes;
-    const instances = &render.instances;
-    const batches = &render.batches;
-    const resources = render.resources;
 
     // Scrolling commands need the view + framebuffer (which core commands
     // don't see), so they're registered here. `view.top_row` is always the
@@ -490,6 +485,35 @@ pub fn main(init: std.process.Init) !void {
     var blink_on = true;
     var blink_next_ns: u64 = 0;
     const blink_period_ns: u64 = 530 * std.time.ns_per_ms;
+
+    // The frame BUILD's read/borrow surface — pointers to the stable state the
+    // HUD + pane build read each frame (the per-frame active editor/buffer and
+    // clock are passed as `frame.Active`). Owns nothing.
+    const fx: frame_mod.FrameCtx = .{
+        .gpa = gpa,
+        .ctx = ctx,
+        .buffers = &buffers,
+        .caps = &caps,
+        .keymap = &keymap,
+        .pick = &pick_state,
+        .echo = &echo_line,
+        .hover_ui = &hover_ui,
+        .cursor_cfg = &cursor_cfg,
+        .plugins = &plugins,
+        .conn = &conn,
+        .hub = &hub,
+        .collab_session = &collab_session,
+        .partial_state = &partial_state,
+        .ed0 = ed0,
+        .known_peers = &known_peers,
+        .noted_host_fp = &noted_host_fp,
+        .view_dirty = &view_dirty,
+        .last_frame_rect = &last_frame_rect,
+        .flash_gen = &flash_gen,
+        .flash_start_ns = &flash_start_ns,
+        .flash_was_active = &flash_was_active,
+        .flash_duration_ns = flash_duration_ns,
+    };
 
     std.log.info("weft: rendering — {d} bytes open, em {d}", .{ ed0.text().byteLen(), args.em });
 
@@ -823,287 +847,15 @@ pub fn main(init: std.process.Init) !void {
         }
         if (had_input) view_dirty = true; // cursor moves damage the view
 
-        // ── Rebuild + upload on damage ──
-        // A partial checkout defers content rendering until the window
-        // around the cursor is realized (rope holes panic on content
-        // reads — the deterministic single choke point). The dirty flag
-        // stays set, so the frame after realization repaints.
-        // Gate on ALL rendered panes on the partial buffer, not just the
-        // focused one: any pane's visible window (its scroll .. a screenful)
-        // must be realized before we read it.
-        const partial_blocked = if (partial_state) |*p| blk: {
-            if (p.state != .open) break :blk false; // virgin/empty doc renders fine
-            const cur = ed0.cursorOffset();
-            const end = @min(ed0.text().byteLen(), cur + (64 << 10));
-            if (!ed0.text().isRealized(.{ .start = cur -| (64 << 10), .end = end })) break :blk true;
-            const CheckCtx = struct { ed0: *core.Editor, blocked: bool = false };
-            var cc = CheckCtx{ .ed0 = ed0 };
-            win_layout.eachPane(&cc, struct {
-                fn visit(c: *CheckCtx, pane: *window_layout.Pane) void {
-                    if (pane.buffer_id != 0) return; // only the partial doc holes
-                    const rope = c.ed0.text();
-                    const rows = rope.lineCount();
-                    if (rows == 0) return;
-                    const start = rope.lineRange(@min(pane.top_row, rows - 1)).start;
-                    const e = @min(rope.byteLen(), start + (48 << 10));
-                    if (!rope.isRealized(.{ .start = start, .end = e })) c.blocked = true;
-                }
-            }.visit);
-            break :blk cc.blocked;
-        } else false;
-        if (view_dirty and !partial_blocked) {
-            view_dirty = false;
-            const projection = snail.Mat4.ortho(0, @floatFromInt(fb[0]), @floatFromInt(fb[1]), 0, -1, 1);
-            const world_to_pixel = snail.mvpToScenePixel(projection, @floatFromInt(fb[0]), @floatFromInt(fb[1])) orelse unreachable;
-
-            if (attach.syntax) |syn| {
-                _ = try syn.sync(gpa, &editor.doc);
-                if (caps.layers.find(&editor.doc, "highlight")) |hl| {
-                    // Whole doc when small; a generous window around the
-                    // viewport otherwise (republshed every damage frame).
-                    const rope = editor.text();
-                    const total = rope.byteLen();
-                    const range = stemma_range: {
-                        if (total <= 256 * 1024) break :stemma_range @import("stemma").Range{ .start = 0, .end = total };
-                        const rows = rope.lineCount();
-                        const first = view.top_row -| 100;
-                        const last = @min(rows - 1, view.top_row + 200);
-                        break :stemma_range @import("stemma").Range{ .start = rope.lineRange(first).start, .end = rope.lineRange(last).end };
-                    };
-                    try syn.publishHighlight(gpa, &editor.doc, hl, range);
-                }
-            }
-
-            // Markdown styling for .md buffers: analyze a window (whole doc
-            // when small) into per-byte attributes each damage frame — a
-            // stale paint is slightly-old truth, like highlight bulk.
-            var md_arena = std.heap.ArenaAllocator.init(gpa);
-            defer md_arena.deinit();
-            const md_inline: ?view_mod.MdInline = blk: {
-                const path = editor.backingPath() orelse abuf.name;
-                if (!cursor_config.isMarkdownPath(path)) break :blk null;
-                const rope = editor.text();
-                const total = rope.byteLen();
-                const range = if (total <= 256 * 1024)
-                    @import("stemma").Range{ .start = 0, .end = total }
-                else rng: {
-                    const rows = rope.lineCount();
-                    const first = view.top_row -| 100;
-                    const last = @min(rows -| 1, view.top_row + 200);
-                    break :rng @import("stemma").Range{ .start = rope.lineRange(first).start, .end = rope.lineRange(last).end };
-                };
-                const attrs = core.markdown.analyze(md_arena.allocator(), rope, range) catch break :blk null;
-                break :blk .{ .base = range.start, .attrs = attrs };
-            };
-
-            var pos_buf: [24]u8 = undefined;
-            const buffer_pos = blk: {
-                var index: usize = 0;
-                var nth: usize = 0;
-                var bit2 = buffers.iterator();
-                while (bit2.next()) |b| {
-                    nth += 1;
-                    if (b == abuf) index = nth;
-                }
-                break :blk std.fmt.bufPrint(&pos_buf, "{d}/{d}", .{ index, buffers.count() }) catch null;
-            };
-            const shared_here = blk: {
-                if (conn) |*c| {
-                    for (c.collabs.items) |col| if (col.tag == abuf.id) break :blk true;
-                }
-                if (hub) |*h| {
-                    for (h.clients.items) |peer| {
-                        for (peer.conn.collabs.items) |col| if (col.tag == abuf.id) break :blk true;
-                    }
-                }
-                break :blk false;
-            };
-            const backing_chip: ?[]const u8 = switch (editor.backing) {
-                .none => if (shared_here) "@shared" else null,
-                .file => if (shared_here) "file+shared" else "file",
-                .shell => if (shared_here) "shell+shared" else "shell",
-                .tool => "tool",
-            };
-            const unfetched_pct: ?u8 = blk: {
-                var unfetched: usize = 0;
-                for (editor.doc.unrealizedBase()) |h| unfetched += h.bytes;
-                if (unfetched == 0) break :blk null;
-                const total_len = editor.text().byteLen();
-                if (total_len == 0) break :blk null;
-                break :blk @intCast(@min(99, unfetched * 100 / total_len));
-            };
-            var listen_buf: [40]u8 = undefined;
-            const link_note: ?[]const u8 = if (collab_session) |s|
-                @tagName(s.liveness())
-            else if (hub) |*h|
-                (std.fmt.bufPrint(&listen_buf, "listening {d} ({s})", .{ h.clients.items.len, h.access.label() }) catch "listening")
-            else
-                null;
-            // Collect the plugins' live overlays for this frame (which-key,
-            // dired, magit … render through the retained surface door).
-            var surface_buf: [64]*const core.surface.Surface = undefined;
-            var surface_n: usize = 0;
-            for (plugins.items) |pl| {
-                if (pl.surface.active and surface_n < surface_buf.len) {
-                    surface_buf[surface_n] = &pl.surface;
-                    surface_n += 1;
-                }
-            }
-            // which-key: while a leader/chord prefix is active (a leaf menu
-            // mode) and no picker is open, list that mode's bindings. This is
-            // the host FALLBACK — if a which-key plugin is loaded it renders a
-            // surface (surface_n > 0) and the host render steps aside, so the
-            // menu is never drawn twice.
-            var wk_hints: std.ArrayList(core.Keymap.Binding) = .empty;
-            defer wk_hints.deinit(gpa);
-            if (surface_n == 0 and !pick_state.active and keymap.isMenuMode(keymap.currentMode())) {
-                keymap.ownBindings(gpa, keymap.currentMode(), &wk_hints) catch {};
-            }
-            // Buffer tab strip (only with more than one buffer open). Name
-            // slices borrow the buffers' own strings — valid this frame.
-            var tab_list: std.ArrayList(view_mod.Tab) = .empty;
-            defer tab_list.deinit(gpa);
-            if (buffers.count() > 1) {
-                var bit3 = buffers.iterator();
-                while (bit3.next()) |b| {
-                    const nm = b.editor.backingPath() orelse b.name;
-                    tab_list.append(gpa, .{ .name = std.fs.path.basename(nm), .active = b == abuf }) catch {};
-                }
-            }
-            // vim-goggles: a guest set a flash range; show it for the duration.
-            const flash_range: ?stemma.Range = fblk: {
-                const fs = core.wasm_host.flashState();
-                if (fs.gen != flash_gen) {
-                    flash_gen = fs.gen;
-                    flash_start_ns = frame_start;
-                }
-                const active = fs.gen > 0 and (frame_start -| flash_start_ns) < flash_duration_ns;
-                if (active or flash_was_active) view_dirty = true; // draw it, then clear it
-                flash_was_active = active;
-                if (!active) break :fblk null;
-                const len = editor.text().byteLen();
-                break :fblk .{ .start = @min(fs.start, len), .end = @min(fs.end, len) };
-            };
-            const hud: view_mod.Hud = .{
-                .mode = keymap.currentMode(),
-                .which_key = if (wk_hints.items.len > 0) wk_hints.items else null,
-                .surfaces = surface_buf[0..surface_n],
-                .flash = flash_range,
-                .hover = if (hover_ui.active) .{ .text = hover_ui.text.items, .offset = hover_ui.offset } else null,
-                .tabs = if (tab_list.items.len > 1) tab_list.items else null,
-                .md_inline = md_inline,
-                .cursor_style = cursor_cfg.styleFor(cursor_cfg.resolveMode(&keymap, keymap.currentMode())),
-                .cursor_on = if (cursor_cfg.blinkFor(cursor_cfg.resolveMode(&keymap, keymap.currentMode()))) blink_on else true,
-                .file = editor.backingPath() orelse abuf.name,
-                .dirty = editor.isDirty(gpa) catch true,
-                .save_failed = editor.save_state == .failed,
-                .buffer_pos = buffer_pos,
-                .backing = backing_chip,
-                .save_note = switch (editor.save_state) {
-                    .saving => "saving…",
-                    .stale => "save stale",
-                    else => null,
-                },
-                .unfetched_pct = unfetched_pct,
-                .peers = if (caps.layers.find(&editor.doc, "presence")) |pl| pl.spanCount() else 0,
-                .echo = if (echo_line.items.len > 0) echo_line.items else null,
-                .pick = if (pick_state.active) &pick_state else null,
-                .highlight_layer = caps.layers.find(&editor.doc, "highlight"),
-                .styles_layer = caps.layers.find(&editor.doc, "styles"),
-                .diag_layer = caps.layers.find(&editor.doc, "diagnostics"),
-                .presence_layer = caps.layers.find(&editor.doc, "presence"),
-                .link = link_note,
-                .trust = if (collab_session != null) blk: {
-                    const fp = noted_host_fp orelse break :blk null;
-                    break :blk hostTrustChip(known_peers.trust(fp));
-                } else null,
-                .cursor_diag = blk: {
-                    const dl = caps.layers.find(&editor.doc, "diagnostics") orelse break :blk null;
-                    const cur = editor.cursorOffset();
-                    for (0..dl.spanCount()) |i| {
-                        const d = dl.resolvedSpan(i);
-                        if (cur >= d.start and cur <= d.end) break :blk d.message;
-                    }
-                    break :blk null;
-                },
-            };
-            var arena_state = std.heap.ArenaAllocator.init(gpa);
-            defer arena_state.deinit();
-            view.resetFrame();
-            // Panes tile the frame via the window layout; each leaf builds
-            // into its own rect (absolute coords) — no emit translate, and
-            // click routing is the layout's hit-test. Non-focused panes build
-            // FIRST (their own scroll, no caret/dock); the focused pane builds
-            // LAST so `view.frame_layout` ends on it (caret + between-frame
-            // hit-testing) and carries the caret + picker dock.
-            const window_rect: region.Rect = .{ .x = 0, .y = 0, .w = @floatFromInt(fb[0]), .h = @floatFromInt(fb[1]) };
-            // Carve the picker's window-bottom dock off the window FIRST, so the
-            // panes lay out in what remains — the picker is a real region, not an
-            // overlay, and cannot overlap a pane or status line (region.zig's
-            // contract). Zero-height when no pick is open ⇒ panes fill the window.
-            const dock_cut = window_rect.cutBottom(view.pickDockHeight(if (pick_state.active) &pick_state else null));
-            const pick_dock = dock_cut.strip;
-            const frame_rect = dock_cut.rest;
-            last_frame_rect = frame_rect;
-
-            var slots: [window_layout.max_panes]window_layout.Slot = undefined;
-            const nslots = win_layout.collect(frame_rect, &slots);
-
-            // Free last frame's builds; each pane appends a fresh one below.
-            for (built_panes.items) |*old| old.deinit(gpa);
-            built_panes.clearRetainingCapacity();
-
-            var foc_rect = frame_rect;
-            var foc_border: region.Edges = .{};
-            for (slots[0..nslots]) |slot| {
-                if (slot.focused) {
-                    foc_rect = slot.rect;
-                    foc_border = slot.border;
-                    continue; // the focused pane builds last, below
-                }
-                const ob = buffers.get(slot.pane.buffer_id) orelse continue;
-                ob.editor.fold_layer = caps.layers.find(&ob.editor.doc, "folds");
-                const other_hud: view_mod.Hud = .{
-                    .mode = keymap.currentMode(),
-                    .file = ob.editor.backingPath() orelse ob.name,
-                    .cursor_on = false, // the caret belongs to the focused pane
-                    .pane_border = slot.border,
-                    // A peeked tool buffer keeps its colors: thread its styles feed too.
-                    .styles_layer = caps.layers.find(&ob.editor.doc, "styles"),
-                };
-                const bo = try view.build(arena_state.allocator(), &ob.editor, other_hud, &slot.pane.top_row, slot.rect, .{}, world_to_pixel);
-                try built_panes.append(gpa, bo);
-                if (bo.records_added != 0)
-                    binding[0] = try snail_vk.uploadDeltaAndWait(gpa, vctx, resources, ctx.command_pool, cache, binding[0], &view.atlas);
-            }
-
-            // The focused pane: active buffer, full HUD, caret, picker dock.
-            var fhud = hud;
-            fhud.pane_border = foc_border;
-            editor.fold_layer = caps.layers.find(&editor.doc, "folds");
-            const b = try view.build(arena_state.allocator(), editor, fhud, &view.top_row, foc_rect, pick_dock, world_to_pixel);
-            try built_panes.append(gpa, b);
-            if (b.records_added != 0)
-                binding[0] = try snail_vk.uploadDeltaAndWait(gpa, vctx, resources, ctx.command_pool, cache, binding[0], &view.atlas);
-            win_layout.focusedPane().top_row = view.top_row; // scrollToCursor may have moved it
-
-            // Every pane rendered into its own rect (identity transform), so
-            // all panes accumulate into one instance stream, one draw. The
-            // focused pane is last in `built_panes` → its caret draws on top.
-            instances.clearRetainingCapacity();
-            batches.clearRetainingCapacity();
-            var total_shapes: usize = 0;
-            for (built_panes.items) |bp| total_shapes += bp.shapes.len;
-            try instances.resize(gpa, @max(total_shapes, 1));
-            try batches.resize(gpa, @max(total_shapes, 1));
-            var ilen: usize = 0;
-            var blen: usize = 0;
-            for (built_panes.items) |bp| {
-                _ = try snail.emit.emit(instances.items, batches.items, &ilen, &blen, binding[0], &view.atlas, bp.shapes, .identity, .{ 1, 1, 1, 1 });
-            }
-            instances.items.len = ilen;
-            batches.items.len = blen;
-        }
+        // ── Rebuild + upload on damage (backend-independent build) ──
+        try render.buildFrame(&fx, .{
+            .editor = editor,
+            .abuf = abuf,
+            .attach = attach,
+            .frame_start = frame_start,
+            .fb = fb,
+            .blink_on = blink_on,
+        });
 
         // ── Draw ── (the only GPU/swapchain touch; headless skips it)
         try render.present(ctx, fb, frame_start, had_input);
