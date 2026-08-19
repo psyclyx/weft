@@ -40,6 +40,23 @@ pub fn hFsRead(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32, resul
     });
 }
 
+/// `fs.exists(path)` (perm fs_read): what a cwd-relative path is without
+/// reading it — 0 absent, 1 file, 2 dir, 3 other; -1 denied. The clean
+/// primitive behind project-root detection (climb to the nearest `.git`).
+pub fn hFsExists(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32, results: []i32) void {
+    const p: *WasmPlugin = @ptrCast(@alignCast(data.?));
+    if (!p.perms[perm_fs_read]) {
+        results[0] = -1;
+        return;
+    }
+    const path = caller.readMemory(p.gpa, @intCast(args[0]), @intCast(args[1])) catch {
+        results[0] = -1;
+        return;
+    };
+    defer p.gpa.free(path);
+    results[0] = @intFromEnum(file.statKind(p.gpa, path));
+}
+
 /// `fs.write(path, bytes)` (perm fs_write): replace a file. 0 ok / -1 denied.
 pub fn hFsWrite(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32, results: []i32) void {
     const p: *WasmPlugin = @ptrCast(@alignCast(data.?));

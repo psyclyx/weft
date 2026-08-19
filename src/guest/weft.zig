@@ -116,6 +116,7 @@ extern "weft" fn wl_proc_to_buffer(cmd: u32, cmd_len: u32, name: u32, name_len: 
 extern "weft" fn wl_proc_append_buffer(cmd: u32, cmd_len: u32, name: u32, name_len: u32) void;
 extern "weft" fn wl_proc_filter(cmd: u32, cmd_len: u32, start: u32, end: u32) void;
 extern "weft" fn wl_fs_read(path: u32, path_len: u32, out_ptr: u32, out_cap: u32) i32;
+extern "weft" fn wl_fs_exists(path: u32, path_len: u32) i32;
 extern "weft" fn wl_fs_write(path: u32, path_len: u32, ptr: u32, len: u32) i32;
 extern "weft" fn wl_fs_append(path: u32, path_len: u32, ptr: u32, len: u32) i32;
 extern "weft" fn wl_fs_list(auth: u32, auth_len: u32, path: u32, path_len: u32, out_ptr: u32, out_cap: u32) i32;
@@ -762,6 +763,18 @@ pub fn fsRead(fpath: []const u8) ?[]const u8 {
     const n = wl_fs_read(p(fpath.ptr), @intCast(fpath.len), p(&scratch), scratch.len);
     if (n < 0) return null;
     return scratch[0..@intCast(n)];
+}
+/// What `fpath` is, without reading it. Perm: fs_read. Cheap enough to climb a
+/// directory chain probing for a marker (e.g. `.git`) — project-root detection.
+pub const FsKind = enum(i32) { none = 0, file = 1, dir = 2, other = 3 };
+pub fn fsExists(fpath: []const u8) FsKind {
+    const k = wl_fs_exists(p(fpath.ptr), @intCast(fpath.len));
+    return switch (k) {
+        1 => .file,
+        2 => .dir,
+        3 => .other,
+        else => .none, // 0 absent, -1 denied → treat as absent
+    };
 }
 /// Replace a file with `bytes`. Perm: fs_write. Returns success.
 pub fn fsWrite(fpath: []const u8, bytes: []const u8) bool {

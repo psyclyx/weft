@@ -185,6 +185,7 @@ pub fn defineImports(linker: *wasm.Linker, p: *WasmPlugin) !void {
     try d(linker, "wl_proc_filter", 4, 0, proc_host.hProcFilter, p);
     // fs read/write (perm-gated) — design §4 Group B/C. Local, cwd-relative.
     try d(linker, "wl_fs_read", 4, 1, fs.hFsRead, p);
+    try d(linker, "wl_fs_exists", 2, 1, fs.hFsExists, p);
     try d(linker, "wl_fs_write", 4, 1, fs.hFsWrite, p);
     try d(linker, "wl_fs_append", 4, 1, fs.hFsAppend, p);
     try d(linker, "wl_fs_list", 6, 1, fs.hFsList, p);

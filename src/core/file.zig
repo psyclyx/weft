@@ -13,6 +13,23 @@ const stemma = @import("stemma");
 pub const ReadError = std.Io.Dir.ReadFileAllocError;
 pub const WriteError = std.Io.Dir.WriteFileError || std.Io.Dir.RenameError || Allocator.Error;
 
+/// What a cwd-relative path is, without reading it: absent, a regular file,
+/// a directory, or something else (symlink target kind, socket, …). The
+/// building block for existence checks and project-root detection (does
+/// `<dir>/.git` exist, and is it a file or a dir — worktrees make it either).
+pub const Kind = enum(i32) { none = 0, file = 1, dir = 2, other = 3 };
+
+pub fn statKind(gpa: Allocator, path: []const u8) Kind {
+    var threaded: std.Io.Threaded = .init(gpa, .{});
+    defer threaded.deinit();
+    const st = std.Io.Dir.cwd().statFile(threaded.io(), path, .{}) catch return .none;
+    return switch (st.kind) {
+        .file => .file,
+        .directory => .dir,
+        else => .other,
+    };
+}
+
 /// Read a whole file. Caller owns the bytes.
 pub fn readAlloc(gpa: Allocator, path: []const u8) (ReadError || Allocator.Error)![]u8 {
     var threaded: std.Io.Threaded = .init(gpa, .{});
@@ -174,4 +191,11 @@ test "read/write round trip through the atomic path" {
     const back = try readAlloc(gpa, dir_path);
     defer gpa.free(back);
     try t.expectEqualStrings("saved by a worker, honestly", back);
+
+    // statKind sees the file we just wrote, its parent dir, and reports absent
+    // for a path that isn't there — the project-root probe's building block.
+    try t.expectEqual(Kind.file, statKind(gpa, dir_path));
+    const parent = std.fs.path.dirname(dir_path).?;
+    try t.expectEqual(Kind.dir, statKind(gpa, parent));
+    try t.expectEqual(Kind.none, statKind(gpa, ".zig-cache/tmp/definitely-not-here-xyzzy"));
 }
