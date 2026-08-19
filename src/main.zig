@@ -32,6 +32,7 @@ const scroll = @import("app/scroll.zig");
 const window_cmds = @import("app/window_cmds.zig");
 const cursor_config = @import("app/cursor_config.zig");
 const config_load = @import("app/config_load.zig");
+const dispatch = @import("app/dispatch.zig");
 
 const arg_parse = @import("app/args.zig");
 const Args = arg_parse.Args;
@@ -157,7 +158,7 @@ pub fn main(init: std.process.Init) !void {
         .name = "menu-escape",
         .summary = "Leave a menu, back to its return mode.",
         .args = &.{},
-        .handler = menuEscapeHandler,
+        .handler = dispatch.menuEscapeHandler,
         .data = null,
     });
     // which-key: show the hint popup immediately (bypass the idle delay). If not
@@ -168,7 +169,7 @@ pub fn main(init: std.process.Init) !void {
         .name = "which-key-now",
         .summary = "Show the which-key popup now (open the leader menu if idle).",
         .args = &.{},
-        .handler = whichKeyNowHandler,
+        .handler = dispatch.whichKeyNowHandler,
         .data = &which_key_now,
     });
     _ = try commands.bind(gpa, "set-cursor", .{
@@ -701,7 +702,7 @@ pub fn main(init: std.process.Init) !void {
         while (window.nextKeyEvent()) |ev| {
             if (!ev.pressed) continue;
             had_input = true;
-            try dispatchKey(&cmd_ctx, &view, ev, fb[1]);
+            try dispatch.dispatchKey(&cmd_ctx, &view, ev, fb[1]);
         }
         if (window.shouldClose()) break;
 
@@ -1445,28 +1446,6 @@ pub fn main(init: std.process.Init) !void {
     ctx.waitIdle();
 }
 
-/// `menu-escape` (Escape / C-g in a menu) — leave the current menu mode back to
-/// its recorded return target (the root non-menu mode), or `normal`.
-fn menuEscapeHandler(ctx: *core.command.Context, data: ?*anyopaque, args: []const core.command.Value) anyerror!core.command.Value {
-    _ = data;
-    _ = args;
-    const km = ctx.keymap;
-    const ret = km.menuReturn(km.currentMode()) orelse "normal";
-    km.setMode(ctx.gpa, ret) catch {};
-    return .nil;
-}
-
-/// `which-key-now` — flag an immediate popup (bypassing the idle delay), and if
-/// not already in a menu, open the leader menu so a help key shows it anywhere.
-fn whichKeyNowHandler(ctx: *core.command.Context, data: ?*anyopaque, args: []const core.command.Value) anyerror!core.command.Value {
-    _ = args;
-    const flag: *bool = @ptrCast(@alignCast(data.?));
-    flag.* = true;
-    const km = ctx.keymap;
-    if (!km.isMenuMode(km.currentMode())) km.enterMode(ctx.gpa, "leader") catch {};
-    return .nil;
-}
-
 /// `peers` — echo/log every connected peer's fingerprint, four-word SAS,
 /// and trust grade, so a user can compare the SAS out of band and then
 /// `verify-peer <fingerprint>`. The full detail goes to the log (many
@@ -1587,114 +1566,6 @@ fn forgetPeerHandler(ctx: *core.command.Context, data: ?*anyopaque, args: []cons
     };
     var buf: [48]u8 = undefined;
     return ok_echo(ctx, std.fmt.bufPrint(&buf, "forgot {s}", .{&fp}) catch "forgot");
-}
-
-/// One view-computed vertical step. The goal-x (world px) is taken from
-/// the editor (sticky across a run of up/down) or seeded from the current
-/// caret's rendered x; the target offset is the nearest caret to it on
-/// the adjacent row. This is the interactive replacement for the core's
-/// scalar-column `moveVertical` — monospace stays exact (uniform
-/// advances), proportional text tracks the visual column.
-fn visualVertical(ed: *core.Editor, view: *view_mod.View, dir: i32) !void {
-    const rope = ed.text();
-    const cur = ed.cursorOffset();
-    const gx = ed.goalX() orelse try view.xOfOffsetOnRow(rope, cur);
-    ed.setGoalX(gx); // persists even at the doc edges, for the next step
-    const pt = rope.offsetToPoint(cur);
-    const rows = rope.lineCount();
-    // Skip folded rows (shared fold-aware successor — the magit status buffer's
-    // j/k bind to cursor-up/down, which land here).
-    const target_row = ed.nextVisibleRow(pt.row, if (dir < 0) -1 else 1, rows) orelse return;
-    const target = try view.xToOffsetOnRow(rope, target_row, gx);
-    ed.moveToVisual(target, gx);
-}
-
-fn dispatchKey(ctx: *core.command.Context, view: *view_mod.View, ev: wayland.KeyEvent, fb_h: u32) !void {
-    const c = wayland.c;
-    // Paging needs viewport geometry the core doesn't know; view-aware
-    // dispatch stays here.
-    if (ev.keysym == c.XKB_KEY_Page_Up or ev.keysym == c.XKB_KEY_Page_Down) {
-        _ = fb_h;
-        const rows = view.bodyRows();
-        const dir: i32 = if (ev.keysym == c.XKB_KEY_Page_Up) -1 else 1;
-        for (0..rows) |_| try visualVertical(ctx.editor(), view, dir);
-        return;
-    }
-
-    var name_buf: [64]u8 = undefined;
-    const n = c.xkb_keysym_get_name(ev.keysym, &name_buf, name_buf.len);
-    if (n > 0) {
-        var spec_buf: [80]u8 = undefined;
-        const spec = core.Keymap.keyspec(&spec_buf, ev.mods.ctrl, ev.mods.alt, ev.mods.shift, name_buf[0..@intCast(n)]);
-        if (ctx.keymap.lookup(spec)) |cmd_name| {
-            // Vertical motion is view-computed (goal-x over rendered
-            // geometry), not the core's column fallback — the interactive
-            // override of these commands. Same precedent as Page above.
-            if (std.mem.eql(u8, cmd_name, "cursor-up")) {
-                try visualVertical(ctx.editor(), view, -1);
-                return;
-            }
-            if (std.mem.eql(u8, cmd_name, "cursor-down")) {
-                try visualVertical(ctx.editor(), view, 1);
-                return;
-            }
-            // A bound key whose command NAMES a menu mode enters that submenu
-            // (the which-key / doom leader tree). Config declares submenus with
-            // `weft.menu` and binds leader keys to them; entering records the
-            // one-shot return target. No per-submenu entry command is needed.
-            if (ctx.keymap.isMenuMode(cmd_name)) {
-                ctx.keymap.enterMode(ctx.gpa, cmd_name) catch {};
-                return;
-            }
-            // Snapshot a menu mode so a one-shot key can pop back to its return
-            // target after the command runs — but only if the command didn't
-            // itself change the mode (submenu entry and explicit mode sets are
-            // preserved). Recorded/resolved by Keymap.enterMode on guest entry.
-            const menu_before: ?[]u8 = if (ctx.keymap.isMenuMode(ctx.keymap.currentMode()))
-                ctx.gpa.dupe(u8, ctx.keymap.currentMode()) catch null
-            else
-                null;
-            defer if (menu_before) |m| ctx.gpa.free(m);
-
-            const result = core.command.run(ctx.commands, ctx, cmd_name, &.{}) catch |err| blk: {
-                std.log.warn("command {s} failed: {t}", .{ cmd_name, err });
-                break :blk core.command.Value.nil;
-            };
-            // Surface a returned string as transient feedback so command results
-            // (e.g. share's "not connected") aren't silently dropped.
-            switch (result) {
-                .string => |s| if (s.len > 0) {
-                    ctx.echo.clearRetainingCapacity();
-                    ctx.echo.appendSlice(ctx.gpa, s) catch {};
-                },
-                else => {},
-            }
-            // One-shot menu: still in the menu we entered on ⇒ pop to its return
-            // target (the root non-menu mode). setMode dupes internally. A STICKY
-            // menu is exempt — it stays open so flag toggles accumulate; it
-            // leaves only via an explicit mode change (execute) or Escape.
-            if (menu_before) |m| {
-                if (!ctx.keymap.isStickyMenu(m) and std.mem.eql(u8, ctx.keymap.currentMode(), m)) {
-                    if (ctx.keymap.menuReturn(m)) |ret| ctx.keymap.setMode(ctx.gpa, ret) catch {};
-                }
-            }
-            return;
-        }
-    }
-    if (ev.mods.ctrl or ev.mods.alt) return;
-    const text = ev.text();
-    if (text.len > 0 and !(text.len == 1 and text[0] < 0x20)) {
-        // Unbound printable input runs the mode's text command (the
-        // modal posture: normal mode has none and swallows it). This IS
-        // the hot typing→commit path — fence it so an accidental blocking
-        // API here trips in Debug.
-        const tc = ctx.keymap.textCommand() orelse return;
-        core.task.beginHotSection();
-        defer core.task.endHotSection();
-        _ = core.command.run(ctx.commands, ctx, tc, &.{.{ .string = text }}) catch |err| {
-            std.log.warn("{s} failed: {t}", .{ tc, err });
-        };
-    }
 }
 
 /// `grammar-add <ext> <package-dir> <symbol>` — grammars as data.
