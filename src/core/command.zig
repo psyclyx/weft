@@ -139,6 +139,15 @@ pub const Context = struct {
     /// edits). Refuses with `error.Unauthorized` when the principal's grade
     /// cannot edit — the replica is left untouched, so no ghost can form.
     pub fn edit(self: *Context, r: Document.Range, bytes: []const u8) EditError!void {
+        // Read-only guard, IN DEPTH: a read-only buffer (magit/dired/proc output)
+        // admits edits only from its owning renderer — never the user, a vim
+        // operator, or an agent. Enforced at the one edit door, so no mode,
+        // split, or plugin path can corrupt a tool buffer as text (a `dw` in a
+        // magit buffer opened in another split is refused here, not merely
+        // unbound). The owner authors as its own peer; its name is the key.
+        const buf = self.buffer();
+        if (buf.read_only and !std.mem.eql(u8, self.principal.name, buf.owner))
+            return error.Unauthorized;
         const doc = self.document();
         if (!self.gradeOn(doc).canEdit()) return error.Unauthorized;
         // The user typing, OR a helper plugin (dw/autopair/comment) executing
@@ -457,4 +466,69 @@ test "command: an agent principal authors as its own peer even under a keystroke
     const after_agent = doc.commitCount();
     try t.expect(after_agent > after_user);
     try t.expect(doc.commitAt(after_agent - 1).author != Document.PeerId.user);
+}
+
+test "command: a read-only buffer admits only its owner (guard in depth)" {
+    const gpa = t.allocator;
+    const task = @import("task.zig");
+    var pool = try task.Pool.init(gpa, .{ .threads = 1 });
+    defer pool.deinit();
+    var buffers = try Buffers.init(gpa, pool, "user");
+    defer buffers.deinit(gpa);
+    var keymap: Keymap = .empty;
+    defer keymap.deinit(gpa);
+    var pick: @import("pick.zig").Pick = .empty;
+    defer pick.deinit(gpa);
+    var caps = @import("capability.zig").Caps.init(gpa, task.nowNs);
+    defer caps.deinit();
+    var actions = Actions.init(gpa);
+    defer actions.deinit();
+    var quit = false;
+    var echo_line: std.ArrayList(u8) = .empty;
+    defer echo_line.deinit(gpa);
+    var commands: Commands = .empty;
+    defer commands.deinit(gpa);
+    var ctx: Context = .{
+        .gpa = gpa,
+        .buffers = &buffers,
+        .commands = &commands,
+        .keymap = &keymap,
+        .actions = &actions,
+        .pick = &pick,
+        .caps = &caps,
+        .quit = &quit,
+        .echo = &echo_line,
+    };
+
+    // Seed as the user (realizes the doc), THEN mark read-only owned by "dired".
+    ctx.user_initiated = true;
+    try ctx.edit(.{ .start = 0, .end = 0 }, "tree");
+    try ctx.buffer().markReadOnly(gpa, "dired");
+
+    // The user is refused — no ghost commit; a vim operator (a plugin acting on
+    // the keystroke) is refused too. This is the corruption the split bug caused.
+    ctx.principal = .user; // name "user"
+    try t.expectError(error.Unauthorized, ctx.edit(.{ .start = 0, .end = 1 }, ""));
+    const OwnerCtx = struct {
+        gpa: std.mem.Allocator,
+        name: []const u8,
+        fn resolve(o: *anyopaque, d: *Document) Document.AddPeerError!Document.PeerId {
+            const a: *@This() = @ptrCast(@alignCast(o));
+            return d.peerNamed(a.gpa, a.name);
+        }
+    };
+    var ops = OwnerCtx{ .gpa = gpa, .name = "operators" };
+    ctx.principal = .{ .role = .plugin, .name = "operators", .ctx = &ops, .resolve = OwnerCtx.resolve };
+    try t.expectError(error.Unauthorized, ctx.edit(.{ .start = 0, .end = 1 }, ""));
+    const mid = try ctx.document().text().toOwnedSlice(gpa); // untouched by the refusals
+    defer gpa.free(mid);
+    try t.expectEqualStrings("tree", mid);
+
+    // The OWNER (its renderer, authoring as the "dired" peer) may still edit it.
+    var owner = OwnerCtx{ .gpa = gpa, .name = "dired" };
+    ctx.principal = .{ .role = .plugin, .name = "dired", .ctx = &owner, .resolve = OwnerCtx.resolve };
+    try ctx.edit(.{ .start = 0, .end = 4 }, "TREE");
+    const out = try ctx.document().text().toOwnedSlice(gpa);
+    defer gpa.free(out);
+    try t.expectEqualStrings("TREE", out);
 }

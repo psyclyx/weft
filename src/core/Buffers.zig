@@ -44,8 +44,30 @@ pub const Buffer = struct {
     mode: []u8 = &.{},
     /// Text input is swallowed (tool buffers; commands still run).
     read_only: bool = false,
+    /// When `read_only`, the ONE peer name allowed to edit it — its owning
+    /// renderer (magit/dired/proc output authors as its own peer). Every other
+    /// principal (the user, a vim operator, an agent) is refused at the edit
+    /// door, so a tool buffer can't be corrupted as text from any mode or split
+    /// (guard in depth). Empty ⇒ locked to nobody.
+    owner: []u8 = &.{},
     /// The shell's per-buffer attachments (providers); opaque to core.
     frontend: ?*anyopaque = null,
+
+    /// Mark this buffer read-only, owned by `owner_name` (the only peer that may
+    /// still edit it — its renderer). Idempotent; replaces any prior owner.
+    pub fn markReadOnly(self: *Buffer, gpa: Allocator, owner_name: []const u8) Allocator.Error!void {
+        const owned = try gpa.dupe(u8, owner_name);
+        gpa.free(self.owner);
+        self.owner = owned;
+        self.read_only = true;
+    }
+
+    /// Lift read-only (and drop the owner). For a `set-read-only off`.
+    pub fn clearReadOnly(self: *Buffer, gpa: Allocator) void {
+        gpa.free(self.owner);
+        self.owner = &.{};
+        self.read_only = false;
+    }
 };
 
 pub const Error = Allocator.Error;
@@ -85,6 +107,7 @@ fn destroyBuffer(self: *Buffers, gpa: Allocator, b: *Buffer) void {
     b.editor.deinit(gpa);
     gpa.free(b.name);
     gpa.free(b.mode);
+    gpa.free(b.owner);
     gpa.destroy(b);
 }
 
