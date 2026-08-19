@@ -60,6 +60,7 @@ pub const drainReplSessions = sessions.drainReplSessions;
 const syntax_host = @import("wasm_host/syntax.zig");
 const capability_host = @import("wasm_host/capability.zig");
 const pick_host = @import("wasm_host/pick.zig");
+const surface_host = @import("wasm_host/surface.zig");
 const rooted_fs = @import("rooted_fs.zig");
 const WasmCmd = wasm_abi.WasmCmd;
 const PendingItem = wasm_abi.PendingItem;
@@ -157,11 +158,11 @@ pub fn defineImports(linker: *wasm.Linker, p: *WasmPlugin) !void {
     try d(linker, "wl_menu_binding_cmd", 3, 1, hMenuBindingCmd, p);
     try d(linker, "wl_menu_binding_is_group", 1, 1, hMenuBindingIsGroup, p);
     // Surface (retained overlay: which-key/dired/magit render through this).
-    try d(linker, "wl_surface_begin", 1, 0, hSurfaceBegin, p);
-    try d(linker, "wl_surface_row", 0, 0, hSurfaceRow, p);
-    try d(linker, "wl_surface_span", 3, 0, hSurfaceSpan, p);
-    try d(linker, "wl_surface_end", 1, 0, hSurfaceEnd, p);
-    try d(linker, "wl_surface_close", 0, 0, hSurfaceClose, p);
+    try d(linker, "wl_surface_begin", 1, 0, surface_host.hSurfaceBegin, p);
+    try d(linker, "wl_surface_row", 0, 0, surface_host.hSurfaceRow, p);
+    try d(linker, "wl_surface_span", 3, 0, surface_host.hSurfaceSpan, p);
+    try d(linker, "wl_surface_end", 1, 0, surface_host.hSurfaceEnd, p);
+    try d(linker, "wl_surface_close", 0, 0, surface_host.hSurfaceClose, p);
     // Completion provider (host↔guest data-gather).
     try d(linker, "wl_provide_completion", 0, 0, capability_host.hProvideCompletion, p);
     try d(linker, "wl_completion_prefix", 2, 1, capability_host.hCompletionPrefix, p);
@@ -906,48 +907,6 @@ fn hMenuBindingIsGroup(data: ?*anyopaque, caller: *wasm.Caller, args: []const i3
 /// store is impossible. Guests without the export are skipped.
 pub fn notifyMenu(p: *WasmPlugin, open: bool) void {
     p.instance.callVoid("on_menu", &.{@as(i32, if (open) 1 else 0)}) catch {};
-}
-
-// ── Surface membrane: a guest builds its retained overlay begin→row→span→end,
-// then the view draws it every frame until close. Mirrors the pick membrane. ──
-fn hSurfaceBegin(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32, results: []i32) void {
-    _ = caller;
-    _ = results;
-    const p: *WasmPlugin = @ptrCast(@alignCast(data.?));
-    const placement: surface_mod.Placement = switch (@as(u32, @bitCast(args[0]))) {
-        1 => .corner,
-        2 => .center,
-        else => .bottom,
-    };
-    p.surface.begin(p.gpa, placement);
-}
-fn hSurfaceRow(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32, results: []i32) void {
-    _ = caller;
-    _ = args;
-    _ = results;
-    const p: *WasmPlugin = @ptrCast(@alignCast(data.?));
-    p.surface.addRow(p.gpa);
-}
-fn hSurfaceSpan(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32, results: []i32) void {
-    _ = results;
-    const p: *WasmPlugin = @ptrCast(@alignCast(data.?));
-    const text = caller.readMemory(p.gpa, @intCast(args[0]), @intCast(args[1])) catch return;
-    defer p.gpa.free(text);
-    p.surface.addSpan(p.gpa, text, surface_mod.Role.fromInt(@bitCast(args[2])));
-}
-fn hSurfaceEnd(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32, results: []i32) void {
-    _ = caller;
-    _ = results;
-    const p: *WasmPlugin = @ptrCast(@alignCast(data.?));
-    const selected: ?usize = if (args[0] < 0) null else @intCast(args[0]);
-    p.surface.end(p.gpa, selected);
-}
-fn hSurfaceClose(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32, results: []i32) void {
-    _ = caller;
-    _ = args;
-    _ = results;
-    const p: *WasmPlugin = @ptrCast(@alignCast(data.?));
-    p.surface.close(p.gpa);
 }
 
 /// Command dispatch back into the guest: stash the args (readable via
