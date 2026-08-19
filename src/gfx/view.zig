@@ -16,12 +16,10 @@
 
 const std = @import("std");
 const Allocator = std.mem.Allocator;
-const assert = std.debug.assert;
 
 const snail = @import("snail");
 const stemma = @import("stemma");
 const core = @import("../core/core.zig");
-const prepare = @import("prepare.zig");
 const layout = @import("layout.zig");
 const region = @import("region.zig");
 const fonts = @import("fonts.zig");
@@ -29,6 +27,7 @@ const statusline = @import("view/statusline.zig");
 const popup = @import("view/popup.zig");
 const decoration = @import("view/decoration.zig");
 const linelayout = @import("view/linelayout.zig");
+const render = @import("view/render.zig");
 
 const font_id_mono = fonts.font_id_mono;
 const margin: f32 = 8;
@@ -453,95 +452,7 @@ pub const View = struct {
             if (bd.bottom) try rects.append(scratch, .{ .x = frame.x, .y = frame.y + frame.h - th, .w = frame.w, .h = th, .color = c });
         }
 
-        return try self.render(world_to_pixel, runs.items, rects.items);
-    }
-
-    // ── Rendering (prepare + place) ──────────────────────────────────
-
-    fn render(self: *View, world_to_pixel: snail.Transform2D, runs: []Run, rects: []const Rect) !Built {
-        // Prepare every glyph run's records (idempotent for resident ones).
-        const run_ptrs = try self.gpa.alloc(*const snail.ShapedText, runs.len);
-        defer self.gpa.free(run_ptrs);
-        for (runs, run_ptrs) |*r, *out| out.* = &r.shaped;
-        const sources = self.face_set.sources();
-        const before = self.atlas.recordCount();
-        try prepare.run(self.gpa, &self.atlas, &sources, run_ptrs, .{ .unhinted = .{ .colr = .layers } });
-        const after = self.atlas.recordCount();
-
-        var count: usize = rects.len;
-        for (runs) |*r| count += try self.runShapeCount(r, world_to_pixel);
-        const shapes = try self.gpa.alloc(snail.Shape, count);
-        errdefer self.gpa.free(shapes);
-
-        var at: usize = 0;
-        // Rects first — they draw behind the text (a block caret sits
-        // behind its recolored glyph).
-        for (rects) |rc| {
-            shapes[at] = self.rectShape(rc);
-            at += 1;
-        }
-        for (runs) |*r| {
-            const placed = try self.placeRunInto(shapes[at..], r, world_to_pixel);
-            at += placed.len;
-        }
-        assert(at == shapes.len);
-        return .{ .shapes = shapes, .records_added = after - before };
-    }
-
-    fn runShapeCount(self: *View, r: *const Run, w2p: snail.Transform2D) !usize {
-        return switch (r.place) {
-            .cell => |cells| try snail.placedCellRunShapeCount(&r.shaped, &self.face_set.mono, cells, self.cellPlacement(r.baseline_y, w2p)),
-            .prop => try snail.placedRunShapeCount(&r.shaped, null, self.propPlacement(r, w2p)),
-        };
-    }
-
-    fn placeRunInto(self: *View, out: []snail.Shape, r: *const Run, w2p: snail.Transform2D) ![]snail.Shape {
-        return switch (r.place) {
-            .cell => |cells| try snail.placeCellRun(out, &r.shaped, &self.face_set.mono, cells, self.cellPlacement(r.baseline_y, w2p)),
-            .prop => try snail.placeRun(out, &r.shaped, null, self.propPlacement(r, w2p)),
-        };
-    }
-
-    fn cellPlacement(self: *const View, baseline_y: f32, world_to_pixel: snail.Transform2D) snail.CellRunPlacement {
-        return .{
-            .baseline = .{ .x = self.origin_x, .y = baseline_y },
-            .cell_width = self.cell_w,
-            .em = self.em,
-            .snap = .grid,
-            .y_axis = .down,
-            .world_to_pixel = world_to_pixel,
-        };
-    }
-
-    fn propPlacement(self: *const View, r: *const Run, world_to_pixel: snail.Transform2D) snail.RunPlacement {
-        _ = self;
-        const p = r.place.prop;
-        return .{
-            .baseline = .{ .x = p.x, .y = r.baseline_y },
-            .em = p.em,
-            .color = p.color,
-            .mode = .unhinted,
-            .snap = .origins,
-            .y_axis = .down,
-            .world_to_pixel = world_to_pixel,
-        };
-    }
-
-    fn rectShape(self: *const View, r: Rect) snail.Shape {
-        // The unit-square record spans [-1, 1]² (centered), so the affine
-        // maps its center to the rect's center with half-extent scales.
-        return .{
-            .key = self.rect_key,
-            .local_transform = .{
-                .xx = r.w / 2,
-                .xy = 0,
-                .tx = r.x + r.w / 2,
-                .yx = 0,
-                .yy = r.h / 2,
-                .ty = r.y + r.h / 2,
-            },
-            .local_color = r.color,
-        };
+        return try render.render(self, world_to_pixel, runs.items, rects.items);
     }
 
     // ── HUD (status line + picker; always mono) ──────────────────────
@@ -572,6 +483,7 @@ test {
     _ = @import("view/popup.zig");
     _ = @import("view/decoration.zig");
     _ = @import("view/linelayout.zig");
+    _ = @import("view/render.zig");
 }
 
 test "literal tabs: a tab advances to the next tab stop; offsets stay exact" {
