@@ -33,6 +33,7 @@ pub const Session = struct {
         buf: []const u8,
         argv: []const []const u8,
         environ: std.process.Environ,
+        cwd: ?[]const u8,
     ) !*Session {
         const s = try gpa.create(Session);
         errdefer gpa.destroy(s);
@@ -55,6 +56,7 @@ pub const Session = struct {
             .stdin = .pipe,
             .stdout = .pipe,
             .stderr = .pipe,
+            .cwd = if (cwd) |p| .{ .path = p } else .inherit,
         }) catch return error.ProcessSpawnFailed;
         s.reader = try pool.spawn(readLoop, .{s});
         return s;

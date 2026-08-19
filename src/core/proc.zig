@@ -93,7 +93,16 @@ pub const Options = struct {
     /// child is killed and `poll` yields `error.OutputTooLong` rather than
     /// letting a chatty child exhaust memory off-thread.
     max_output_bytes: usize = 16 << 20,
+    /// The child's working directory. `null` inherits weft's cwd; a path
+    /// `chdir`s the child after fork (project-rooted spawns — grep/run/git/an
+    /// agent in the project root, not wherever weft was launched).
+    cwd: ?[]const u8 = null,
 };
+
+/// The `SpawnOptions.cwd` for an optional path (null = inherit weft's cwd).
+fn cwdOf(path: ?[]const u8) std.process.Child.Cwd {
+    return if (path) |p| .{ .path = p } else .inherit;
+}
 
 /// Per-child state owned by the drain task once `spawn` succeeds: the
 /// worker's Io instance and the child handle. Heap-allocated so its
@@ -142,6 +151,7 @@ pub const Proc = struct {
             .stdin = opts.stdin,
             .stdout = .pipe,
             .stderr = .pipe,
+            .cwd = cwdOf(opts.cwd),
         }) catch return error.ProcessSpawnFailed;
         errdefer ctx.child.kill(io);
         const pid = ctx.child.id.?;
@@ -209,6 +219,7 @@ pub fn run(gpa: Allocator, argv: []const []const u8, opts: Options) (SpawnError 
         .stdin = opts.stdin,
         .stdout = .pipe,
         .stderr = .pipe,
+        .cwd = cwdOf(opts.cwd),
     }) catch {
         ctx.threaded.deinit();
         gpa.destroy(ctx);
@@ -309,6 +320,30 @@ test "proc: kill makes a long runner terminate (no hang)" {
         .signal => {},
         else => return error.ExpectedSignalTermination,
     }
+}
+
+test "proc: cwd runs the child in the given directory" {
+    const gpa = t.allocator;
+    var pool = try task.Pool.init(gpa, .{ .threads = 2 });
+    defer pool.deinit();
+
+    // `pwd -P` in an explicit cwd reports that dir, not weft's. /tmp is a
+    // stable, always-present absolute dir (resolve symlinks so macos /tmp
+    // → /private/tmp doesn't trip the compare — Linux CI is the target here).
+    var proc = try Proc.spawn(gpa, pool, &.{ "/bin/sh", "-c", "pwd -P" }, .{ .cwd = "/tmp" });
+    defer proc.deinit();
+    var res = try (try pollToEnd(&proc, 1_000_000));
+    defer res.deinit(gpa);
+    const out = std.mem.trimEnd(u8, res.stdout, "\n");
+    try t.expectEqualStrings("/tmp", out);
+
+    // null cwd (the default) inherits weft's cwd — not "/tmp" (unless weft is
+    // literally in /tmp, which the test runner is not).
+    var p2 = try Proc.spawn(gpa, pool, &.{ "/bin/sh", "-c", "pwd -P" }, .{});
+    defer p2.deinit();
+    var r2 = try (try pollToEnd(&p2, 1_000_000));
+    defer r2.deinit(gpa);
+    try t.expect(!std.mem.eql(u8, std.mem.trimEnd(u8, r2.stdout, "\n"), "/tmp"));
 }
 
 test {

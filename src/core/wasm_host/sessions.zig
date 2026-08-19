@@ -37,7 +37,7 @@ pub fn hReplStart(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32, re
         return;
     };
     defer gpa.free(buf);
-    const s = repl_session.Session.start(gpa, pool, p.ctx, p.name, buf, &.{ "/bin/sh", "-c", cmd }, shared.g_environ) catch {
+    const s = repl_session.Session.start(gpa, pool, p.ctx, p.name, buf, &.{ "/bin/sh", "-c", cmd }, shared.g_environ, null) catch {
         results[0] = -1;
         return;
     };
