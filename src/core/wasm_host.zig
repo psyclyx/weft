@@ -65,6 +65,7 @@ const menu = @import("wasm_host/menu.zig");
 pub const notifyMenu = menu.notifyMenu;
 const buffers_host = @import("wasm_host/buffers.zig");
 const declare = @import("wasm_host/declare.zig");
+const config_kv = @import("wasm_host/config_kv.zig");
 const rooted_fs = @import("rooted_fs.zig");
 const WasmCmd = wasm_abi.WasmCmd;
 const PendingItem = wasm_abi.PendingItem;
@@ -116,10 +117,10 @@ pub fn defineImports(linker: *wasm.Linker, p: *WasmPlugin) !void {
     try d(linker, "wl_arg_range", 1, 1, hArgRange, p);
     try d(linker, "wl_edit_range", 3, 0, hEditRange, p);
     // Group E: admin (kv).
-    try d(linker, "wl_kv_get", 4, 1, hKvGet, p);
-    try d(linker, "wl_kv_put", 4, 0, hKvPut, p);
+    try d(linker, "wl_kv_get", 4, 1, config_kv.hKvGet, p);
+    try d(linker, "wl_kv_put", 4, 0, config_kv.hKvPut, p);
     // Read-only config data the config plane staged (weft.set), distinct store.
-    try d(linker, "wl_config_get", 4, 1, hConfigGet, p);
+    try d(linker, "wl_config_get", 4, 1, config_kv.hConfigGet, p);
     // Config surface.
     try d(linker, "wl_echo", 2, 0, hEcho, p);
     // Command args in + result out (during on_command).
@@ -505,67 +506,6 @@ fn hEditRange(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32, result
     p.ctx.principal = p.principal();
     defer p.ctx.principal = saved;
     p.ctx.edit(.{ .start = cur.start, .end = cur.end }, bytes) catch {};
-}
-
-// Group E: admin (kv), namespaced by plugin name.
-/// `wl_config_get(key_ptr, key_len, out_ptr, out_cap) → n` — read this plugin's
-/// staged config value for `key` into guest memory, returning bytes written or
-/// -1 if absent. Reads the DISTINCT config store (never runtime kv scratch).
-/// The blob is the framed encoding the config shim produced (see guest
-/// weft.configList); the guest decoder detects a short buffer.
-fn hConfigGet(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32, results: []i32) void {
-    const p: *WasmPlugin = @ptrCast(@alignCast(data.?));
-    const store = p.config_store orelse {
-        results[0] = -1;
-        return;
-    };
-    const key = caller.readMemory(p.gpa, @intCast(args[0]), @intCast(args[1])) catch {
-        results[0] = -1;
-        return;
-    };
-    defer p.gpa.free(key);
-    const val = store.get(p.name, key) orelse {
-        results[0] = -1;
-        return;
-    };
-    const n = caller.writeMemory(@intCast(args[2]), @intCast(args[3]), val) catch {
-        results[0] = -1;
-        return;
-    };
-    results[0] = @intCast(n);
-}
-
-fn hKvGet(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32, results: []i32) void {
-    const p: *WasmPlugin = @ptrCast(@alignCast(data.?));
-    const store = p.store orelse {
-        results[0] = -1;
-        return;
-    };
-    const key = caller.readMemory(p.gpa, @intCast(args[0]), @intCast(args[1])) catch {
-        results[0] = -1;
-        return;
-    };
-    defer p.gpa.free(key);
-    const val = store.get(p.name, key) orelse {
-        results[0] = -1;
-        return;
-    };
-    const n = caller.writeMemory(@intCast(args[2]), @intCast(args[3]), val) catch {
-        results[0] = -1;
-        return;
-    };
-    results[0] = @intCast(n);
-}
-
-fn hKvPut(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32, results: []i32) void {
-    _ = results;
-    const p: *WasmPlugin = @ptrCast(@alignCast(data.?));
-    const store = p.store orelse return;
-    const key = caller.readMemory(p.gpa, @intCast(args[0]), @intCast(args[1])) catch return;
-    defer p.gpa.free(key);
-    const val = caller.readMemory(p.gpa, @intCast(args[2]), @intCast(args[3])) catch return;
-    defer p.gpa.free(val);
-    store.put(p.gpa, p.name, key, val) catch {};
 }
 
 // Config surface.
