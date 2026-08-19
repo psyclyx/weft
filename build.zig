@@ -246,36 +246,32 @@ fn addWasm(b: *std.Build, mod: *std.Build.Module) void {
 }
 
 /// Skia (default renderer): compile the C++ shim (src/gfx/skia/shim.cpp) with
-/// g++ against the pinned Skia headers, then link the object + libskia +
-/// libstdc++ into the Zig exe. g++ (not Zig's clang) builds the shim per the
-/// integration contract; the boundary is a small C ABI (shim.h), so only C
-/// types cross — Skia and the shim share GNU libstdc++ internally. Skia ships
-/// no useful pkg-config (only `-lskia`), so — like wasmtime/the grammars — we
-/// take the store path from `WEFT_SKIA` and wire include/lib explicitly.
+/// g++ against Skia's headers, then link the object + libskia + libstdc++ into
+/// the Zig exe. Resolved via **pkg-config** (Skia ships a `skia.pc`) — no env
+/// var; skia is a shell.nix buildInput, so its pkgconfig is on PKG_CONFIG_PATH,
+/// the same idiom every other dep uses. g++ (not Zig's clang) builds the shim
+/// so it resolves its own GNU libstdc++ ABI — which Skia's Ganesh init requires
+/// (it hands Skia a std::function); only the C ABI in shim.h crosses to Zig.
 fn addSkia(b: *std.Build, mod: *std.Build.Module) void {
-    const skia = b.graph.environ_map.get("WEFT_SKIA") orelse
-        @panic("WEFT_SKIA not set — build inside the nix shell (skia is the default renderer)");
-    const include = b.pathJoin(&.{ skia, "include", "skia" });
+    // Skia's include dir (`include/skia`) from its pkg-config.
+    const cflags = b.run(&.{ "pkg-config", "--cflags-only-I", "skia" });
+    // libstdc++'s real path — `zig cc`'s `-lstdc++` substitutes LLVM libc++
+    // (missing the GNU symbols), so link the real .so positionally instead;
+    // lld adds it as a DT_NEEDED, resolved at run time via LD_LIBRARY_PATH.
+    const libstdcpp = std.mem.trim(u8, b.run(&.{ "g++", "-print-file-name=libstdc++.so" }), " \t\r\n");
 
-    // Separate g++ compile → object, then link it into the exe (the shim
-    // uses Skia's C++ API; only the C ABI in shim.h crosses to Zig).
-    // -fno-exceptions/-fno-rtti match how nixpkgs builds Skia and keep the
-    // shim from pulling libgcc's unwinder (_Unwind_Resume) into the Zig link.
+    // Separate g++ compile → object; -fno-exceptions/-fno-rtti match how
+    // nixpkgs builds Skia and keep the shim from pulling libgcc's unwinder
+    // (_Unwind_Resume) into the Zig link.
     const cc = b.addSystemCommand(&.{ "g++", "-std=c++17", "-c", "-O2", "-fPIC", "-fno-rtti", "-fno-exceptions" });
-    cc.addArg(b.fmt("-I{s}", .{include}));
+    var it = std.mem.tokenizeAny(u8, cflags, " \t\r\n");
+    while (it.next()) |tok| cc.addArg(b.dupe(tok));
     cc.addFileArg(b.path("src/gfx/skia/shim.cpp"));
     cc.addArg("-o");
     const obj = cc.addOutputFileArg("weft_skia_shim.o");
     mod.addObjectFile(obj);
 
-    // Link libskia and GNU libstdc++ (Skia's own C++ runtime).
-    mod.addLibraryPath(.{ .cwd_relative = b.pathJoin(&.{ skia, "lib" }) });
-    mod.linkSystemLibrary("skia", .{});
-    // Skia + the shim need GNU libstdc++, but Zig intercepts `-lstdc++` and
-    // substitutes LLVM libc++ (missing the GNU symbols). Link the real .so by
-    // absolute path instead — lld adds it as a DT_NEEDED, resolved at run time
-    // via the shell's LD_LIBRARY_PATH (stdenv.cc.cc.lib).
-    const libstdcpp = std.mem.trim(u8, b.run(&.{ "g++", "-print-file-name=libstdc++.so" }), " \t\r\n");
+    mod.linkSystemLibrary("skia", .{}); // -L/-lskia from pkg-config
     mod.addObjectFile(.{ .cwd_relative = libstdcpp });
 }
 
