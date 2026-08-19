@@ -104,18 +104,21 @@ The ACP client works end-to-end and is launchable in the running editor:
   `weft.config` for the transcript + config-driven launch.
 - **Phase 3 — the ACP client** — `config/plugins/acp.js`: JSON-RPC over stdio,
   the initialize → session/new → session/prompt handshake, `session/update`
-  parsing → transcript. Verified end-to-end against a mock ACP agent (a test
-  drives the whole client-side round-trip; no agent binary or display needed).
-  Launchable: `weft.set("acp","cmd",…)` + `weft.plugin("acp.js")` +
-  `agent-start`.
+  parsing → transcript, and the harness callbacks: **`fs/read_text_file`** →
+  `weft.fileRead` (the live buffer, else disk — the agent sees your code) and
+  **`fs/write_text_file`** → `weft.fileWrite` (a gated, attributed, undoable
+  **agent-peer** edit — the harness payoff). Verified end-to-end against a mock
+  ACP agent (no agent binary or display needed). **A working coding agent:**
+  reads + writes your files + streams responses. Launchable: `weft.set("acp",
+  "cmd",…)` + `weft.plugin("acp.js")` + `agent-start`.
 
-**Remaining (additive on the working client):**
-- A prompt INPUT per turn (needs the command-arg or text-input membrane into
-  JS) — today the opening prompt is config data.
-- The client-side edit/permission callbacks: `fs/write_text_file` →
-  `weft.editAs` against the target buffer (so agent edits are gated, attributed
-  peer commits — the harness payoff), `session/request_permission` → the pick
-  membrane. Currently answered default-deny / no-op.
+**Remaining (refinements on the working agent):**
+- A prompt INPUT per turn (the command-arg or text-input membrane into JS) —
+  today the opening prompt is config data (one turn).
+- `session/request_permission` → the pick membrane (currently default-deny,
+  which is safe — it gates non-fs tool calls like shell exec).
+- Per-conversation agent identity (fs writes author as a single `agent` peer
+  for now) and usage tracking.
 - UI polish: transcript folding/styling, the status-line "● agent" segment, the
   sessions dashboard.
 
