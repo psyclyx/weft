@@ -10,8 +10,8 @@
 
 // Catalog + helix (NOT vim). helix composes the same motions/operators.
 [
-  "edit", "complete", "palette", "motions", "textobjects", "operators", "helix",
-  "comment", "autopair", "consult", "git", "grep", "make", "fmt", "buffers",
+  "edit", "complete", "project", "palette", "motions", "textobjects", "operators", "helix",
+  "comment", "autopair", "consult", "git", "grep", "make", "run", "fmt", "buffers",
   "windows", "modes", "dired", "which_key",
 ].forEach((p) => weft.plugin(p));
 
@@ -48,8 +48,19 @@ weft.bind("helix-leader", "o", "leader-open");
 weft.bind("helix-leader", "w", "leader-window");
 weft.bind("helix-leader", "q", "leader-quit");
 
+// Actions: abstract intents resolved by CONTEXT. `eval` runs the buffer by
+// language (a .zig buffer builds, else the language runner); `format` formats
+// it. A language plugin can weft.provide another provider without touching this
+// keymap or the helix editor.
+weft.action("eval");
+weft.provide("eval", {}, "run-line"); //             default: run the current line
+weft.provide("eval", { lang: "zig" }, "make-build"); // .zig builds the project
+weft.action("format");
+weft.provide("format", {}, "format-buffer");
+
 weft.bind("leader-file", "f", "find-file");
 weft.bind("leader-file", "s", "save");
+weft.bind("leader-file", "r", "project-recent"); // recent files
 weft.bind("leader-file", "d", "dired");
 weft.bind("leader-buffer", "b", "buf-pick");
 weft.bind("leader-buffer", "d", "buffer-close");
@@ -61,7 +72,8 @@ weft.bind("leader-search", "s", "consult-line");
 weft.bind("leader-search", "p", "grep");
 weft.bind("leader-search", "w", "grep-word");
 weft.bind("leader-code", "c", "comment-line");
-weft.bind("leader-code", "f", "format-buffer");
+weft.bind("leader-code", "f", "format"); // the format action
+weft.bind("leader-code", "e", "eval"); //   SPC c e — eval/run by language
 weft.bind("leader-code", "b", "make-build");
 weft.bind("leader-code", "t", "make-test");
 weft.bind("leader-open", "d", "dired");
@@ -77,4 +89,4 @@ weft.bind("helix-insert", "braceleft", "pair-brace");
 weft.bind("helix-insert", "bracketleft", "pair-bracket");
 weft.bind("helix-insert", "quotedbl", "pair-quote");
 
-weft.echo("weft: helix config loaded (helix binds, centered which-key)");
+weft.echo("weft: helix config (centered which-key; SPC c e eval, SPC f r recents)");

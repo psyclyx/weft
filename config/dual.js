@@ -10,9 +10,9 @@
 // Catalog + BOTH editors. helix loads first, vim last, so vim's init runs last
 // and the editor starts in vim's `normal`.
 [
-  "edit", "complete", "palette", "motions", "textobjects", "operators",
+  "edit", "complete", "project", "palette", "motions", "textobjects", "operators",
   "helix", "vim",
-  "comment", "autopair", "consult", "git", "grep", "make", "fmt", "buffers",
+  "comment", "autopair", "consult", "git", "grep", "make", "run", "fmt", "buffers",
   "windows", "modes", "dired", "which_key",
 ].forEach((p) => weft.plugin(p));
 
@@ -45,9 +45,20 @@ function leaderMap(leader) {
 leaderMap("leader"); //        vim's SPC
 leaderMap("helix-leader"); //  helix's SPC
 
+// Actions: abstract intents resolved by CONTEXT, shared by both editors. `eval`
+// runs the buffer by language (a .zig buffer builds, else the language runner);
+// `format` formats it. Bound once in the shared leader-code menu — a language
+// plugin can weft.provide another provider without touching either editor.
+weft.action("eval");
+weft.provide("eval", {}, "run-line"); //             default: run the current line
+weft.provide("eval", { lang: "zig" }, "make-build"); // .zig builds the project
+weft.action("format");
+weft.provide("format", {}, "format-buffer");
+
 // Submenu contents (editor-agnostic — bound once).
 weft.bind("leader-file", "f", "find-file");
 weft.bind("leader-file", "s", "save");
+weft.bind("leader-file", "r", "project-recent"); // recent files
 weft.bind("leader-file", "d", "dired");
 weft.bind("leader-buffer", "b", "buf-pick");
 weft.bind("leader-buffer", "d", "buffer-close");
@@ -59,7 +70,8 @@ weft.bind("leader-search", "s", "consult-line");
 weft.bind("leader-search", "p", "grep");
 weft.bind("leader-search", "w", "grep-word");
 weft.bind("leader-code", "c", "comment-line");
-weft.bind("leader-code", "f", "format-buffer");
+weft.bind("leader-code", "f", "format"); // the format action
+weft.bind("leader-code", "e", "eval"); //   SPC c e — eval/run by language
 weft.bind("leader-code", "b", "make-build");
 weft.bind("leader-code", "t", "make-test");
 weft.bind("leader-window", "v", "win-vsplit");
@@ -67,4 +79,4 @@ weft.bind("leader-window", "s", "win-split");
 weft.bind("leader-window", "w", "win-focus");
 weft.bind("leader-quit", "q", "quit");
 
-weft.echo("weft: dual config — `\\` toggles vim/helix per buffer");
+weft.echo("weft: dual config — `\\` toggles vim/helix; SPC c e eval, SPC f r recents");
