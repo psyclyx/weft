@@ -50,7 +50,7 @@ pub const BlobServer = remote_fs.BlobServer;
 pub const RemoteFile = remote_fs.RemoteFile;
 pub const RemoteFs = remote_fs.RemoteFs;
 
-pub const PartialDoc = @import("session/partial.zig").PartialDoc;
+pub const PartialDoc = @import("session/PartialDoc.zig");
 pub const Collab = @import("session/collab.zig").Collab;
 pub const Conn = @import("session/Conn.zig");
 

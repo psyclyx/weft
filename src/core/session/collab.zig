@@ -22,7 +22,7 @@ const RemoteFs = remote_fs.RemoteFs;
 const RemoteFile = remote_fs.RemoteFile;
 const serveBase = remote_fs.serveBase;
 
-const PartialDoc = @import("partial.zig").PartialDoc;
+const PartialDoc = @import("PartialDoc.zig");
 
 /// Batches carry the sender's frontier token so each side always knows
 /// what the peer holds: payload = uv token_len | token | stemma bytes.
