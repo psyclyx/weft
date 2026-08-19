@@ -124,16 +124,22 @@ chosen `optionId`, so tool calls needing approval prompt you.
 named agent peer (derived from `weft.config("name")` or the launch command), so
 each agent's edits attribute to a distinct CRDT peer.
 
-The agent is now functionally complete: reads + writes your files (attributed,
-undoable, per-agent), streams responses, converses (multi-turn), and prompts
-for tool permission.
+**UI:** a generic plugin **status chip** (`weft.status` → the status-line
+right cluster; the agent shows ● starting/thinking/streaming, ◌ waiting, ○
+idle); the transcript is **role-styled** (`weft.bufferAppend(name, text, class)`
+paints the styles feed — prompts emphasised, thoughts/tool output dimmed) and
+**folds** tool-call content under its header (`weft.bufferFold`/`bufferLen`);
+**usage/cost** is parsed defensively and shown dimmed.
 
-**Remaining — UI chrome (needs Hud/membrane plumbing, not functional):**
-- A status-line "● agent — waiting/thinking" segment (a plugin-published status
-  feed → a Hud field). The single most-wanted indicator.
-- Transcript folding + role styling (forward `weft.fold`/`weft.style` to JS).
-- Usage/cost readout (agent-reported; ACP doesn't standardize it — parse
-  defensively per agent) + a sessions dashboard.
+The agent is complete: reads + writes your files (attributed, undoable,
+per-agent), streams a role-styled + foldable transcript, converses (multi-turn),
+prompts for tool permission, shows live status + usage.
+
+**Related primitive:** span-level read-only (`weft.readOnlySpan` — a comint's
+produced output read-only, its input line editable), guarded at the edit door.
+
+Only a multi-session **dashboard** (one list across agents) is left as a future
+nicety; a single conversation is fully supported.
 
 ## Build order (each phase committable, independently useful)
 
