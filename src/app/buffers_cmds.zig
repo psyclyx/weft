@@ -173,3 +173,34 @@ pub fn closeBufferHandler(ctx: *core.command.Context, data: ?*anyopaque, args: [
     try ctx.buffers.close(ctx.gpa, b.id, ctx.keymap);
     return .nil;
 }
+
+/// Bind the graphical shell's open/close/browse commands onto `commands`,
+/// all pointing at the caller-owned `attach_deps`. These shadow the core
+/// versions (registry last-wins): they know about providers and remote
+/// shells, so they must register AFTER `core.builtins.install`.
+pub fn registerCommands(gpa: std.mem.Allocator, commands: *core.command.Commands, attach_deps: *AttachDeps) !void {
+    _ = try commands.bind(gpa, "open", .{
+        .name = "open",
+        .summary = "Open a local file or host:path over a shell, with providers.",
+        .args = &.{.{ .name = "path", .type = .string }},
+        .handler = openBufferHandler,
+        .data = attach_deps,
+    });
+    _ = try commands.bind(gpa, "buffer-close", .{
+        .name = "buffer-close",
+        .summary = "Close the active buffer (refuses when dirty), detaching providers.",
+        .args = &.{},
+        .handler = closeBufferHandler,
+        .data = attach_deps,
+    });
+    _ = try commands.bind(gpa, "browse-remote", .{
+        .name = "browse-remote",
+        .summary = "Browse a remote directory (host, path) over the host's shell.",
+        .args = &.{
+            .{ .name = "host", .type = .string },
+            .{ .name = "path", .type = .string },
+        },
+        .handler = browseRemoteHandler,
+        .data = attach_deps,
+    });
+}

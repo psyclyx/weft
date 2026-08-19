@@ -51,9 +51,6 @@ const lspAddCommand = providers.lspAddCommand;
 const grammarAddCommand = providers.grammarAddCommand;
 const reconnectTask = providers.reconnectTask;
 const buffers_cmds = @import("app/buffers_cmds.zig");
-const openBufferHandler = buffers_cmds.openBufferHandler;
-const closeBufferHandler = buffers_cmds.closeBufferHandler;
-const browseRemoteHandler = buffers_cmds.browseRemoteHandler;
 
 const arg_parse = @import("app/args.zig");
 const Args = arg_parse.Args;
@@ -300,30 +297,7 @@ pub fn main(init: std.process.Init) !void {
     try attachProviders(&attach_deps, buffers.active());
     // The graphical shell's open/close know about providers and remote
     // shells; they shadow the core versions (registry last-wins).
-    _ = try commands.bind(gpa, "open", .{
-        .name = "open",
-        .summary = "Open a local file or host:path over a shell, with providers.",
-        .args = &.{.{ .name = "path", .type = .string }},
-        .handler = openBufferHandler,
-        .data = &attach_deps,
-    });
-    _ = try commands.bind(gpa, "buffer-close", .{
-        .name = "buffer-close",
-        .summary = "Close the active buffer (refuses when dirty), detaching providers.",
-        .args = &.{},
-        .handler = closeBufferHandler,
-        .data = &attach_deps,
-    });
-    _ = try commands.bind(gpa, "browse-remote", .{
-        .name = "browse-remote",
-        .summary = "Browse a remote directory (host, path) over the host's shell.",
-        .args = &.{
-            .{ .name = "host", .type = .string },
-            .{ .name = "path", .type = .string },
-        },
-        .handler = browseRemoteHandler,
-        .data = &attach_deps,
-    });
+    try buffers_cmds.registerCommands(gpa, &commands, &attach_deps);
 
     // ── Connection (wire v1.1: N shared buffers over one session) ──
     var fd_link: core.session.FdLink = undefined;
