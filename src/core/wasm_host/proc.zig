@@ -188,24 +188,17 @@ fn procDeliver(ctx: ?*anyopaque, result: ?[]const u8) void {
     const out = result orelse return;
     const gpa = job.ctx.gpa;
     const bufs = job.ctx.buffers;
-    var target: ?*Buffers.Buffer = null;
-    var it = bufs.iterator();
-    while (it.next()) |b| {
-        if (std.mem.eql(u8, b.name, job.buf)) {
-            target = b;
-            break;
-        }
-    }
-    if (target == null) {
-        const id = bufs.create(gpa, job.buf) catch return;
-        target = bufs.get(id);
-        // A buffer proc CREATES is a plain tool sink (grep/make output) →
-        // read-only. A PRE-created buffer keeps whatever the plugin declared
-        // (a projection marks itself read-only via weft.readOnly; an editable
-        // one like *git-commit* stays writable) — proc doesn't override it.
-        if (target) |b| b.read_only = true;
-    }
-    const b = target orelse return;
+    // A buffer proc CREATES is a plain tool sink (grep/make output) → read-only.
+    // A PRE-created buffer keeps whatever the plugin declared (a projection
+    // marks itself read-only via weft.readOnly; an editable one like
+    // *git-commit* stays writable) — so create-branch marks, find-branch doesn't.
+    const b = if (bufs.findByName(job.buf)) |id|
+        (bufs.get(id) orelse return)
+    else blk: {
+        const nb = bufs.get(bufs.create(gpa, job.buf) catch return) orelse return;
+        nb.read_only = true;
+        break :blk nb;
+    };
     const doc = &b.editor.doc;
     const end = b.editor.text().byteLen();
     if (job.append) {

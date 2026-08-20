@@ -164,6 +164,23 @@ pub fn findByPath(self: *const Buffers, path: []const u8) ?Id {
     return null;
 }
 
+/// The buffer with display `name`, if any.
+pub fn findByName(self: *const Buffers, name: []const u8) ?Id {
+    var it = self.iterator();
+    while (it.next()) |b| if (std.mem.eql(u8, b.name, name)) return b.id;
+    return null;
+}
+
+/// The buffer named `name`, creating an empty one if absent — returning its
+/// STABLE `Id`. The handle a streamed/async producer (repl/net/proc output)
+/// captures once, instead of re-scanning by name every delivery: buffer ids are
+/// stable across list growth, so a rename or a second same-named buffer can't
+/// misroute output (a plain name scan can). A caller that must react to
+/// creation (mark read-only) should `findByName` + `create` itself.
+pub fn ensureNamed(self: *Buffers, gpa: Allocator, name: []const u8) Error!Id {
+    return self.findByName(name) orelse try self.create(gpa, name);
+}
+
 /// Focus `id`: the outgoing buffer saves the current keymap mode; the incoming
 /// buffer's mode is restored (its saved mode, or — when it's fresh — the base
 /// `default_mode`). A fresh buffer does NOT inherit the outgoing mode: that is
@@ -274,6 +291,23 @@ test "buffers: switchTo remembers the base mode + skips menus; back returns" {
     try bufs.back(gpa, &km);
     try t.expectEqual(code, bufs.active_id);
     try t.expectEqualStrings("normal", km.currentMode());
+}
+
+test "buffers: ensureNamed finds-or-creates by name; the Id is stable" {
+    const t = std.testing;
+    const gpa = t.allocator;
+    var pool = try task.Pool.init(gpa, .{ .threads = 1 });
+    defer pool.deinit();
+    var bufs = try init(gpa, pool, "user"); // one *scratch* (id 0)
+    defer bufs.deinit(gpa);
+
+    try t.expectEqual(@as(?Id, null), bufs.findByName("*repl*"));
+    const id = try bufs.ensureNamed(gpa, "*repl*"); // creates
+    try t.expectEqual(id, bufs.findByName("*repl*").?);
+    try t.expectEqual(id, try bufs.ensureNamed(gpa, "*repl*")); // idempotent — same Id
+    // The stable handle resolves the same buffer regardless of what else opens.
+    _ = try bufs.create(gpa, "other.zig");
+    try t.expectEqualStrings("*repl*", bufs.get(id).?.name);
 }
 
 test {

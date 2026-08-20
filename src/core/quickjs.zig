@@ -355,17 +355,7 @@ const transcript_peer = "agent-ui";
 /// buffer by name so it need not be focused (mirrors repl_session.drain).
 fn appendNamed(ctx: *command.Context, gpa: Allocator, name: []const u8, text: []const u8, class: u8) void {
     const bufs = ctx.buffers;
-    var target: ?*Buffers.Buffer = null;
-    var it = bufs.iterator();
-    while (it.next()) |b| if (std.mem.eql(u8, b.name, name)) {
-        target = b;
-        break;
-    };
-    if (target == null) {
-        const id = bufs.create(gpa, name) catch return;
-        target = bufs.get(id);
-    }
-    const b = target orelse return;
+    const b = bufs.get(bufs.ensureNamed(gpa, name) catch return) orelse return;
     const doc = &b.editor.doc;
     const start = b.editor.text().byteLen();
     command.renderInto(gpa, doc, .plugin, transcript_peer, &.{.{ .range = .{ .start = start, .end = start }, .bytes = text }}) catch return;

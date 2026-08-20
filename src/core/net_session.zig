@@ -48,6 +48,7 @@ pub const Session = struct {
     ctx: *command.Context,
     plugin: []u8,
     buf: []u8,
+    buf_id: ?Buffers.Id = null, // stable handle, captured on first delivery
     io_threaded: std.Io.Threaded, // for the TLS handshake io
     conn: Conn,
     out_mutex: task.Mutex = .{},
@@ -122,17 +123,16 @@ pub const Session = struct {
         defer s.out_mutex.unlock();
         if (s.out_buf.items.len == 0) return false;
         const bufs = s.ctx.buffers;
-        var target: ?*Buffers.Buffer = null;
-        var it = bufs.iterator();
-        while (it.next()) |b| if (std.mem.eql(u8, b.name, s.buf)) {
-            target = b;
-            break;
+        // Stable-Id resolution captured on first delivery (see repl_session):
+        // no per-tick name scan, and a reused slot re-resolves by name.
+        const b = blk: {
+            if (s.buf_id) |id| {
+                if (bufs.get(id)) |b| if (std.mem.eql(u8, b.name, s.buf)) break :blk b;
+            }
+            const id = bufs.ensureNamed(s.gpa, s.buf) catch return false;
+            s.buf_id = id;
+            break :blk bufs.get(id) orelse return false;
         };
-        if (target == null) {
-            const id = bufs.create(s.gpa, s.buf) catch return false;
-            target = bufs.get(id);
-        }
-        const b = target orelse return false;
         const doc = &b.editor.doc;
         const end = b.editor.text().byteLen();
         command.renderInto(s.gpa, doc, .plugin, s.plugin, &.{.{ .range = .{ .start = end, .end = end }, .bytes = s.out_buf.items }}) catch {

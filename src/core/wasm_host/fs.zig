@@ -193,19 +193,7 @@ pub fn hFsListAsync(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32, 
 pub fn deliverToBuffer(ctx: *command.Context, buf_name: []const u8, author: []const u8, content: []const u8) void {
     const gpa = ctx.gpa;
     const bufs = ctx.buffers;
-    var target: ?*Buffers.Buffer = null;
-    var it = bufs.iterator();
-    while (it.next()) |b| {
-        if (std.mem.eql(u8, b.name, buf_name)) {
-            target = b;
-            break;
-        }
-    }
-    if (target == null) {
-        const id = bufs.create(gpa, buf_name) catch return;
-        target = bufs.get(id);
-    }
-    const b = target orelse return;
+    const b = bufs.get(bufs.ensureNamed(gpa, buf_name) catch return) orelse return;
     const doc = &b.editor.doc;
     const end = b.editor.text().byteLen();
     // Proc output + peer-listing delivery, authored as the plugin peer.
