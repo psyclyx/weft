@@ -17,6 +17,7 @@ const Cmd = struct { name: []const u8, handler: *const fn () void };
 const cmds = [_]Cmd{
     .{ .name = "comment-line", .handler = commentLine },
     .{ .name = "comment-selection", .handler = commentSelection },
+    .{ .name = "op.comment", .handler = opComment },
 };
 
 export fn describe() void {
@@ -91,28 +92,23 @@ fn commentLine() void {
 /// Line starts of the selected span; a fixed cap (huge selections truncate).
 var starts: [1 << 12]usize = undefined;
 
-/// Toggle every line overlapping the selection. The add-vs-remove choice is
-/// uniform: remove iff EVERY non-blank selected line is already commented, else
-/// add. With no selection this falls back to the current line.
-fn commentSelection() void {
-    const sel = weft.selection() orelse {
-        commentLine();
-        return;
-    };
-
-    // Collect the start of each line the selection touches ([sel.start, sel.end)).
+/// Toggle every line overlapping `[start, end)` with one uniform decision:
+/// remove iff EVERY non-blank line in the span is already commented, else add.
+/// The shared core of `comment-selection` and the `gc` operator `op.comment`.
+fn commentSpan(start: usize, end: usize) void {
+    // Collect the start of each line the span touches.
     var count: usize = 0;
-    var off = sel.start;
+    var off = start;
     while (count < starts.len) {
         const l = weft.lineAt(off);
         starts[count] = l.start;
         count += 1;
         const next = l.end + 1; // start of the following line (past the newline)
-        if (next >= sel.end or next <= off) break; // reached / passed the end, or EOF
+        if (next >= end or next <= off) break; // reached / passed the end, or EOF
         off = next;
     }
 
-    // Pass 1: is every non-blank selected line already commented?
+    // Pass 1: is every non-blank line in the span already commented?
     var all_commented = true;
     for (starts[0..count]) |ls| {
         const l = weft.lineAt(ls);
@@ -129,4 +125,23 @@ fn commentSelection() void {
         k -= 1;
         applyLine(starts[k], action, true);
     }
+}
+
+/// Toggle every line overlapping the selection. With no selection this falls
+/// back to the current line.
+fn commentSelection() void {
+    const sel = weft.selection() orelse {
+        commentLine();
+        return;
+    };
+    commentSpan(sel.start, sel.end);
+}
+
+/// The `gc` operator: toggle comments over the awaited range's lines. Composes
+/// with every vim motion and text object (`gcap`, `gcip`, `gc3j`) and — via the
+/// doubled-operator path (op-line) — `gcc` on the current line.
+fn opComment() void {
+    const h = weft.argRange(0) orelse return;
+    const r = weft.rangeEnds(h) orelse return;
+    commentSpan(r.start, r.end);
 }

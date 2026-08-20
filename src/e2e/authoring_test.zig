@@ -69,6 +69,86 @@ test "authoring: `:%s/old/new/g` renames every occurrence (the daily refactor mo
     try t.expect(std.mem.indexOf(u8, disk, "navy") != null); // an unrelated value is untouched
 }
 
+test "authoring: `gc` comments — gcc toggles a line, gcip a paragraph (composition)" {
+    const gpa = t.allocator;
+    var app: App = undefined;
+    try app.init(gpa);
+    defer app.deinit();
+    const ed = &app.ed;
+
+    authorFile(ed, "app.js",
+        \\const a = 1;
+        \\const b = 2;
+        \\const c = 3;
+        \\
+    );
+
+    // gcc on the first line comments it; gcc again toggles it back — a round-trip.
+    ed.chord("g g"); // to the top
+    ed.chord("g c c");
+    ed.run("save");
+    ed.waitSave();
+    {
+        const disk = try core.file.readAlloc(gpa, "app.js");
+        defer gpa.free(disk);
+        try t.expect(std.mem.indexOf(u8, disk, "// const a = 1;") != null);
+        try t.expect(std.mem.indexOf(u8, disk, "// const b") == null); // only line 1
+    }
+    ed.chord("g g");
+    ed.chord("g c c"); // toggle off
+    ed.run("save");
+    ed.waitSave();
+    {
+        const disk = try core.file.readAlloc(gpa, "app.js");
+        defer gpa.free(disk);
+        try t.expect(std.mem.indexOf(u8, disk, "//") == null); // clean again
+    }
+
+    // The whole point of an OPERATOR: gc composes with a text object it never
+    // knew about. gcip comments the inner paragraph — all three lines at once.
+    ed.chord("g g");
+    ed.chord("g c i p");
+    ed.run("save");
+    ed.waitSave();
+    {
+        const disk = try core.file.readAlloc(gpa, "app.js");
+        defer gpa.free(disk);
+        try t.expect(std.mem.indexOf(u8, disk, "// const a = 1;") != null);
+        try t.expect(std.mem.indexOf(u8, disk, "// const b = 2;") != null);
+        try t.expect(std.mem.indexOf(u8, disk, "// const c = 3;") != null);
+    }
+}
+
+test "authoring: visual `gc` comments the selected lines" {
+    const gpa = t.allocator;
+    var app: App = undefined;
+    try app.init(gpa);
+    defer app.deinit();
+    const ed = &app.ed;
+
+    authorFile(ed, "s.css",
+        \\.a { color: red; }
+        \\.b { color: blue; }
+        \\.c { color: lime; }
+        \\
+    );
+
+    // Select the first two lines linewise, then gc — a vim user's muscle motion.
+    ed.chord("g g");
+    ed.press("V", ""); // linewise visual
+    ed.press("j", ""); // extend down one line
+    ed.chord("g c");
+    try t.expectEqualStrings("normal", ed.mode()); // gc returns to normal
+    ed.run("save");
+    ed.waitSave();
+
+    const disk = try core.file.readAlloc(gpa, "s.css");
+    defer gpa.free(disk);
+    try t.expect(std.mem.indexOf(u8, disk, "// .a { color: red; }") != null);
+    try t.expect(std.mem.indexOf(u8, disk, "// .b { color: blue; }") != null);
+    try t.expect(std.mem.indexOf(u8, disk, "// .c") == null); // the third line was not selected
+}
+
 test "authoring: `C-n` completes a word already in the buffer" {
     const gpa = t.allocator;
     var app: App = undefined;

@@ -22,8 +22,13 @@ const ex = ex_mod.Ex("normal", "ex");
 // for assembling the linewise paste (register text plus a synthesized newline).
 var paste_buf: [(1 << 16) + 1]u8 = undefined;
 
-// ── Pending-operator state (set on d/c/y; consumed by the next motion) ─
-var op_is_yank: bool = false;
+// ── Pending-operator state (set on d/c/y/gc; consumed by the next motion) ─
+// `op_edit_cmd` is the range-arg operator to apply (null = pure yank); `op_copies`
+// is whether to first yank the range into the register (d/c/y do, gc doesn't);
+// `op_after` is the mode to enter after. This trio lets ANY range-arg operator —
+// op.delete, op.comment, a plugin's own — ride the operator-pending machinery.
+var op_edit_cmd: ?[]const u8 = "op.delete";
+var op_copies: bool = true;
 var op_after: []const u8 = "normal"; // mode to enter after the operator
 
 // ── Count prefix (3dw, 5j, 2x): digits accumulate, the next motion/operator
@@ -110,10 +115,10 @@ fn deleteCharFwd() void {
     var n = consumeCount();
     while (n > 0) : (n -= 1) weft.run("delete-forward");
 }
-/// The pending operator is a CHANGE (`c`), not delete/yank — its after-mode is
-/// insert. vim's `cw`/`cW` special-case keys off this.
+/// The pending operator is a CHANGE (`c`) — its after-mode is insert. vim's
+/// `cw`/`cW` special-case keys off this.
 fn isChangeOp() bool {
-    return !op_is_yank and std.mem.eql(u8, op_after, "insert");
+    return std.mem.eql(u8, op_after, "insert");
 }
 
 fn isWordByte(ch: u8) bool {
@@ -189,21 +194,22 @@ fn opByMotion(comptime motion: []const u8) fn () void {
     }.h;
 }
 
-/// Apply the pending operator over a stamped range: d/c/y all yank into the
-/// register; d/c additionally delete via `op.delete` (the operators plugin's
-/// gated edit) and enter the after-mode (normal for d, insert for c).
+/// Apply the pending operator over a stamped range. `op_copies` yanks the range
+/// into the register first (d/c/y); `op_edit_cmd` then runs the gated edit
+/// (op.delete for d/c, op.comment for gc, …) and enters the after-mode. A pure
+/// yank (no edit command) flashes and returns to normal.
 fn applyOpRange(hnd: u32) void {
     const r = weft.rangeEnds(hnd) orelse return opCancel();
-    weft.yankRange(r.start, r.end, false);
-    if (op_is_yank) {
+    if (op_copies) weft.yankRange(r.start, r.end, false);
+    if (op_edit_cmd) |cmd| {
+        weft.runRangeArg(cmd, hnd);
+        weft.jump(r.start);
+        weft.setMode(op_after);
+    } else {
         weft.flash(r.start, r.end); // vim-goggles: flash the yanked region
         weft.jump(r.start);
         weft.setMode("normal");
-        return;
     }
-    weft.runRangeArg("op.delete", hnd);
-    weft.jump(r.start);
-    weft.setMode(op_after);
 }
 
 // ── Text objects: `i`/`a` in operator-pending enter a text-object mode with a
@@ -255,6 +261,7 @@ const static_cmds = [_]Cmd{
     .{ .name = "vim-visual-delete", .handler = visualDelete },
     .{ .name = "vim-visual-yank", .handler = visualYank },
     .{ .name = "vim-visual-change", .handler = visualChange },
+    .{ .name = "vim-visual-comment", .handler = visualComment },
     .{ .name = "vim-visual-line", .handler = visualLine },
     .{ .name = "vim-normal", .handler = normal },
     .{ .name = "vim-append-line", .handler = appendLine },
@@ -269,6 +276,7 @@ const static_cmds = [_]Cmd{
     .{ .name = "enter-op-delete", .handler = enterOpDelete },
     .{ .name = "enter-op-change", .handler = enterOpChange },
     .{ .name = "enter-op-yank", .handler = enterOpYank },
+    .{ .name = "enter-op-comment", .handler = enterOpComment },
     .{ .name = "op-cancel", .handler = opCancel },
     .{ .name = "op-line", .handler = opLine },
     .{ .name = "enter-op-inner", .handler = enterOpInner },
@@ -497,6 +505,11 @@ export fn init() void {
     // gg / zz as two-key sequences (goto-top / center).
     weft.bindKey("normal", "g g", "vim-goto-top");
     weft.bindKey("normal", "z z", "vim-center");
+    // `gc` — the comment operator (vim-commentary idiom): `gc{motion}`, `gcip`,
+    // `gcc` (line, via the doubled-operator path), and `gc` over a visual span.
+    // Bound in the guest so EVERY vim-based config gets it out of the box.
+    weft.bindKey("normal", "g c", "enter-op-comment");
+    weft.bindKey("visual", "g c", "vim-visual-comment");
     // C-w …: split/close, focus (h/j/k/l or arrows), move/swap (H/J/K/L or
     // shifted arrows). Shift lives in the letter keysym (H), not `S-h`;
     // arrows have no shifted keysym so they take an explicit `S-`.
@@ -625,6 +638,18 @@ fn visualChange() void {
     visual_linewise = false;
     weft.setMode("insert");
 }
+/// `gc` in visual mode: toggle comments over the selected lines, then return to
+/// normal — the same op.comment operator the motion path uses.
+fn visualComment() void {
+    if (weft.selection()) |s0| {
+        const s = visualSpan(s0);
+        if (weft.stampRange(.{ .start = s.start, .end = s.end })) |h| weft.runRangeArg("op.comment", h);
+        weft.jump(s.start);
+    }
+    weft.run("clear-selection");
+    visual_linewise = false;
+    weft.setMode("normal");
+}
 fn normal() void {
     // Leaving insert/visual SEALS the undo unit: `i…Esc` is one unit, so the
     // next normal-mode command (dd, x, …) is its own — `Esc` then `dd` then `u`
@@ -703,17 +728,29 @@ fn joinLines() void {
 
 // ── Operators ─────────────────────────────────────────────────────────
 fn enterOpDelete() void {
-    op_is_yank = false;
+    op_edit_cmd = "op.delete";
+    op_copies = true;
     op_after = "normal";
     weft.setMode("op-pending");
 }
 fn enterOpChange() void {
-    op_is_yank = false;
+    op_edit_cmd = "op.delete";
+    op_copies = true;
     op_after = "insert";
     weft.setMode("op-pending");
 }
 fn enterOpYank() void {
-    op_is_yank = true;
+    op_edit_cmd = null; // pure yank, no edit
+    op_copies = true;
+    op_after = "normal";
+    weft.setMode("op-pending");
+}
+/// `gc` — the comment operator. Toggles line comments over the next motion /
+/// text object (or the current line, doubled as `gcc`). Doesn't touch the
+/// register (op_copies=false); composes with every motion like d/c/y.
+fn enterOpComment() void {
+    op_edit_cmd = "op.comment";
+    op_copies = false;
     op_after = "normal";
     weft.setMode("op-pending");
 }
@@ -723,9 +760,16 @@ fn opCancel() void {
 /// dd / cc / yy — linewise. The operator char repeated (bound in op-pending).
 fn opLine() void {
     const l = weft.lineAt(weft.cursor());
-    weft.yankRange(l.start, l.end, true);
-    if (op_is_yank) {
-        weft.setMode("normal");
+    if (op_copies) weft.yankRange(l.start, l.end, true);
+    const edit = op_edit_cmd orelse {
+        weft.setMode("normal"); // yy: yank the line, nothing to edit
+        return;
+    };
+    // A non-delete line operator (gcc) toggles over the line's content in place.
+    if (!std.mem.eql(u8, edit, "op.delete")) {
+        if (weft.stampRange(.{ .start = l.start, .end = l.end })) |h| weft.runRangeArg(edit, h);
+        weft.jump(l.start);
+        weft.setMode(op_after);
         return;
     }
     if (std.mem.eql(u8, op_after, "insert")) {
