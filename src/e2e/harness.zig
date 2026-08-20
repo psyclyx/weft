@@ -718,6 +718,7 @@ const plugin_catalog = std.StaticStringMap([]const u8).initComptime(.{
     .{ "dired", @embedFile("guest_dired_wasm") },
     .{ "helix", @embedFile("guest_helix_wasm") },
     .{ "emacs", @embedFile("guest_emacs_wasm") },
+    .{ "debug", @embedFile("guest_debug_wasm") },
 });
 
 /// The PluginLoader `weft.plugin(name)` funnels through during a config boot.

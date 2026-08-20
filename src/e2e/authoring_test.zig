@@ -271,6 +271,36 @@ test "authoring: `.` repeats a COUNTED change (3dw then . deletes three more)" {
     try t.expectEqualStrings("g", disk);
 }
 
+test "debug: set a breakpoint on a line — gutter marker, list, toggle off" {
+    const gpa = t.allocator;
+    var app: App = undefined;
+    try app.init(gpa);
+    defer app.deinit();
+    const ed = &app.ed;
+
+    authorFile(ed, "prog.py",
+        \\def f(x):
+        \\    y = x + 1
+        \\    return y
+        \\
+    );
+    ed.press("k", ""); // up to a code line
+
+    // Set a breakpoint the IDE way (SPC d b). It was impossible before — there
+    // was no debug surface at all.
+    ed.chord("SPC d b");
+    try t.expect(std.mem.indexOf(u8, ed.echoText(), "breakpoint set") != null);
+    ed.chord("SPC d l");
+    try t.expect(std.mem.indexOf(u8, ed.echoText(), "1 breakpoint") != null);
+    app.proj.shot(ed, "debug-breakpoint"); // eyeball the ● in the gutter
+
+    // Toggle it off on the same line.
+    ed.chord("SPC d b");
+    try t.expect(std.mem.indexOf(u8, ed.echoText(), "breakpoint cleared") != null);
+    ed.chord("SPC d l");
+    try t.expect(std.mem.indexOf(u8, ed.echoText(), "0 breakpoint") != null);
+}
+
 test "authoring/dired: rename a file in place — edit the name, :w, confirm the plan" {
     const gpa = t.allocator;
     var app: App = undefined;

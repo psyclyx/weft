@@ -55,6 +55,7 @@ weft.plugin("repl");        // a stateful interactive REPL (persistent subproces
 weft.plugin("net");         // raw TCP/TLS transport (net.connect)
 weft.plugin("which_key");   // menu-hint overlay, as a plugin over the surface door
 weft.plugin("dired");       // directory editor (proc ls + its own keymap mode)
+weft.plugin("debug");       // breakpoints (gutter markers) — the debugger's first slice
 
 // Shared, editor-agnostic key bindings (the picker, and — below — which-key nav):
 // core ships the commands + modes; the BINDINGS are config data. Overridable by
@@ -191,6 +192,13 @@ weft.bind("normal", "SPC o r", "repl-start");
 weft.bind("normal", "SPC o c", "console-open");
 weft.bind("normal", "SPC o e", "direnv-status");
 weft.bind("normal", "SPC o a", "llm-ask-line");
+
+// SPC d — debug. Breakpoints today (gutter markers); run/step/inspect arrive
+// with the debug adapter. F9 toggles a breakpoint (the IDE convention).
+weft.bind("normal", "SPC d b", "debug-toggle-breakpoint");
+weft.bind("normal", "SPC d c", "debug-clear-breakpoints");
+weft.bind("normal", "SPC d l", "debug-list-breakpoints");
+weft.bind("normal", "F9", "debug-toggle-breakpoint");
 
 // SPC n — notes
 weft.bind("normal", "SPC n n", "notes-open");
