@@ -271,6 +271,13 @@ pub fn install(gpa: std.mem.Allocator, commands: *command.Commands, keymap: *@im
     try command.registerAction(gpa, commands, actions, "save", .pick);
     try actions.provide(.{ .action = "save", .command = "save-file", .owner = "core" });
 
+    // The "default" (modeless) mode's baseline editing keys — so BARE weft (run
+    // with no config at all) can still type/edit. These are the ONE binding set
+    // core ships, precisely because they must exist before any config loads; a
+    // config that loads an editor plugin (vim/helix) drives its own modes, and a
+    // config can rebind these at the higher config tier. (The picker + which-key
+    // nav binds, which only matter once a config's UI is up, are config data —
+    // defaults.js. This is the modeless floor, not app policy.)
     try keymap.setMode(gpa, "default");
     const binds = [_][2][]const u8{
         .{ "BackSpace", "delete-backward" },
