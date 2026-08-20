@@ -268,12 +268,18 @@ test "dired: gathers a directory tree via proc and renders the model (async)" {
 
     var loop = async_loop.Loop.init(gpa, env.pool, @import("../task.zig").nowNs);
     defer loop.deinit();
+    var subs: subbuffer.SubBuffers = .empty;
+    defer subs.deinit(gpa);
+    var reg: register.Register = .empty;
+    defer reg.deinit(gpa);
 
     var engine = try wasm.Engine.init();
     defer engine.deinit();
-    // dired now runs `ls` via proc (proc+timer), parses the marked blocks into a
-    // directory TREE, and re-renders it as the pretty `*dired*` model buffer.
-    const plugin = try loadPlugin(&engine, &env.ctx, "dired", @embedFile("guest_dired_wasm"), .{ .loop = &loop });
+    // dired runs `ls` via proc, parses the marked blocks into a directory TREE,
+    // and renders it as ONE always-editable name-only *dired* buffer (metadata is
+    // decoration). Wire the subbuffer + register services so its per-row id-spans
+    // + the yank/paste ferry work.
+    const plugin = try loadPlugin(&engine, &env.ctx, "dired", @embedFile("guest_dired_wasm"), .{ .loop = &loop, .subbuffers = &subs, .register = &reg });
     defer plugin.deinit();
     try t.expect(plugin.perms[wasm_host.perm_proc] and plugin.perms[wasm_host.perm_timer]);
 
@@ -295,18 +301,16 @@ test "dired: gathers a directory tree via proc and renders the model (async)" {
     }
     if (buf.?.editor.text().byteLen() > 0) {
         // on_fill parsed the raw ls output and re-rendered: the buffer holds the
-        // pretty projection (the header line), not the raw `ls`/sentinel bytes.
+        // name tree — no `ls`/sentinel bytes leak through.
         const s = try buf.?.editor.text().toOwnedSlice(gpa);
         defer gpa.free(s);
-        try t.expect(std.mem.indexOf(u8, s, "Directory:") != null);
         try t.expect(std.mem.indexOf(u8, s, "\x1e\x1e") == null); // sentinels repainted away
     }
 
-    // ── Editable-buffer file management (mini.files), DRY RUN ────────────────
     // The sandbox `ls` yields no entries, so drive the guest deterministically:
     // author a synthetic marked `ls -l` block into *dired* and fire `on_fill`
     // directly (the same export the proc bridge calls), so the guest parses a
-    // real 2-entry tree (a file + a dir).
+    // real 2-entry tree (a file + a dir) and rebuilds the editable projection.
     const synth =
         "\x1e\x1e.\n" ++
         "total 8\n" ++
@@ -315,33 +319,33 @@ test "dired: gathers a directory tree via proc and renders the model (async)" {
     try buf.?.editor.applyUserEdit(gpa, .{ .start = 0, .end = buf.?.editor.text().byteLen() }, synth);
     try plugin.instance.callVoid("on_fill", &.{});
 
-    // Enter edit mode: the buffer becomes the editable name-only projection, the
-    // keymap enters the `dired-edit` posture, AND the buffer is marked this
-    // plugin's tool projection — so a `save` resolves to `dired-commit`.
-    _ = try command.run(&env.commands, &env.ctx, "dired-edit", &.{});
-    try t.expectEqualStrings("dired-edit", env.keymap.currentMode());
+    // The buffer is the always-editable name tree — just indented names, no
+    // header/perms/glyphs in the TEXT — and it's marked this plugin's tool
+    // projection, so a save reconciles it.
     try t.expectEqualStrings("dired", buf.?.editor.toolName().?); // code-backed
     {
-        // The editable projection is just indented names — no header/perms/glyphs.
         const s = try buf.?.editor.text().toOwnedSlice(gpa);
         defer gpa.free(s);
         try t.expect(std.mem.indexOf(u8, s, "alpha.txt") != null);
         try t.expect(std.mem.indexOf(u8, s, "subdir/") != null);
         try t.expect(std.mem.indexOf(u8, s, "Directory:") == null);
+        try t.expect(std.mem.indexOf(u8, s, "rw-r--r--") == null); // perms are decoration
     }
 
-    // Append a NEW line — an inferred CREATE — plus rename an existing entry.
-    const probe = "weft_dryrun_probe.txt";
-    try buf.?.editor.applyUserEdit(
-        gpa,
-        .{ .start = 0, .end = buf.?.editor.text().byteLen() },
-        "renamed.txt\nsubdir/\n" ++ probe ++ "\n",
-    );
+    // Edit in place: APPEND a new row (a create) — the existing rows keep their
+    // hidden id-spans intact, so reconcile reads them back as unchanged by EXACT
+    // identity, and the new (id-less) row is a create. Appending (not a full
+    // replace) is how a user actually types a new file with `o`.
+    const probe = "weft_new_probe.txt";
+    const end = buf.?.editor.text().byteLen();
+    try buf.?.editor.applyUserEdit(gpa, .{ .start = end, .end = end }, probe ++ "\n");
 
-    // `dired-reconcile` (Z) previews the plan into *dired-plan* — buffer writes
-    // only, no proc/fs, so nothing is applied. The rename is inferred (same
-    // parent) and the probe is a create.
-    _ = try command.run(&env.commands, &env.ctx, "dired-reconcile", &.{});
+    // `save` on the *dired* projection resolves — via the `save` ACTION scoped to
+    // `When{.tool="dired"}` — to `dired-commit`, which reconciles by id, previews
+    // the ordered plan in *dired-plan*, and stages it behind the y/n confirm (it
+    // does NOT touch the filesystem itself; the confirm runs the ops via proc).
+    _ = try command.run(&env.commands, &env.ctx, "save", &.{});
+    try t.expectEqualStrings("dired-confirm", env.keymap.currentMode());
     const plan = blk: {
         var it = env.buffers.iterator();
         while (it.next()) |b| if (std.mem.eql(u8, b.name, "*dired-plan*")) break :blk b;
@@ -351,15 +355,11 @@ test "dired: gathers a directory tree via proc and renders the model (async)" {
     const ps = try plan.?.editor.text().toOwnedSlice(gpa);
     defer gpa.free(ps);
     try t.expect(std.mem.indexOf(u8, ps, "pending changes") != null);
-    try t.expect(std.mem.indexOf(u8, ps, "rename  alpha.txt -> renamed.txt") != null);
     try t.expect(std.mem.indexOf(u8, ps, "create  " ++ probe) != null);
-
-    // `save` on the *dired* projection resolves — via the `save` ACTION scoped to
-    // `When{.tool="dired"}` — to `dired-commit`, which stages the plan behind the
-    // y/n confirm (it does NOT write files itself; the confirm runs them via proc).
-    _ = try command.run(&env.commands, &env.ctx, "buffer-switch", &.{.{ .integer = @intCast(buf.?.id) }});
-    _ = try command.run(&env.commands, &env.ctx, "save", &.{});
-    try t.expectEqualStrings("dired-confirm", env.keymap.currentMode());
+    // The id-exact reconcile leaves the untouched rows alone — no spurious
+    // rename/move/delete of alpha.txt or subdir from a heuristic misfire.
+    try t.expect(std.mem.indexOf(u8, ps, "alpha.txt") == null);
+    try t.expect(std.mem.indexOf(u8, ps, "delete") == null);
 }
 
 test "helix: a second modal editor loads in its OWN mode namespace" {

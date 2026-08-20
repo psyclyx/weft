@@ -202,15 +202,11 @@ var confirm_cmd: [CMD_CAP]u8 = undefined;
 var confirm_len: usize = 0;
 var commit_pending: bool = false;
 
-// ── Editable-buffer file management (mini.files) — DRY RUN ONLY ──────────────
-// The tree buffer becomes an editable text buffer; the user renames/creates/
-// deletes/moves by editing lines; on "reconcile" we DIFF the edited text against
-// a SNAPSHOT of the original tree and PRINT the inferred ops into `*dired-plan*`.
-// CRUCIAL: this first cut NEVER touches the filesystem — it only computes + shows
-// the plan. No `proc`/`fs_write`/`gatherAfter` path is reachable from here; the
-// only host writes are to BUFFERS (`edit`/`style`/`echo`/`setMode`). Execution
-// (behind a confirm) is a separate later pass.
-var edit_mode_active: bool = false;
+// ── Editable-buffer file management (mini.files) ─────────────────────────────
+// The *dired* buffer is ALWAYS an editable name tree (metadata is decoration).
+// You rename/create/delete/move by editing it; `save` (dired-commit) diffs the
+// edited text against a SNAPSHOT of the gathered tree — matching by hidden id —
+// and applies the inferred ops behind a confirm.
 
 /// A snapshot row: the original tree entry we diff the edited buffer against.
 /// Identity in this first cut is heuristic (path + position/parent); precise
@@ -281,14 +277,10 @@ const cmds = [_]Cmd{
     .{ .name = "dired-copy", .handler = diredCopy },
     .{ .name = "dired-delete", .handler = diredDelete },
     .{ .name = "dired-shell", .handler = diredShell },
-    // Editable-buffer file management (mini.files): `dired-edit` opens the
-    // name-only editable projection; SAVING it (`:w`/C-s, via the `save` action
-    // scoped to this tool projection) reconciles + APPLIES the file ops behind a
-    // confirm. `dired-reconcile` is the dry-run preview; `dired-revert` discards.
-    .{ .name = "dired-edit", .handler = diredEdit },
+    // The *dired* buffer is ALWAYS an editable name tree; SAVING it (`:w`/C-s,
+    // via the `save` action scoped to this tool projection) reconciles the edits
+    // against the gather snapshot and APPLIES the file ops behind a confirm.
     .{ .name = "dired-commit", .handler = diredCommit },
-    .{ .name = "dired-reconcile", .handler = diredReconcile },
-    .{ .name = "dired-revert", .handler = diredRevert },
     // The input prompt + the delete confirm.
     .{ .name = "dired-input-finish", .handler = inputFinish },
     .{ .name = "dired-input-abort", .handler = inputAbort },
@@ -306,51 +298,28 @@ export fn describe() void {
 }
 export fn init() void {
     for (cmds) |c| _ = weft.register(c.name);
-    // The dired keymap swallows typing (a tree isn't editable); no fallback, so
-    // no `i`/`a` insert leaks into the read-only buffer.
-    weft.textInput("dired", null);
+    // dired is ONE always-editable buffer: its text is the name tree, metadata
+    // is decoration. It FALLS BACK to vim `normal`, so you rename by editing a
+    // name, create with `o`, delete with `dd`, move with `dd`+`p` (the register
+    // ferries the row's hidden id) — all in place — and `:w` reconciles. Only a
+    // few view keys override vim: fold-aware j/k, Tab (fold), Return (open dir/
+    // file), g (refresh), q (back). (After an insert, vim's Escape lands in plain
+    // `normal`, so the override keys sleep until you re-enter dired — but `:w`
+    // still saves, because the reconcile is scoped to the tool identity, not a
+    // mode.)
+    weft.setFallback("dired", "normal");
     weft.bindKey("dired", "j", "cursor-down"); // fold-aware in core
     weft.bindKey("dired", "k", "cursor-up");
     weft.bindKey("dired", "Down", "cursor-down");
     weft.bindKey("dired", "Up", "cursor-up");
     weft.bindKey("dired", "Tab", "dired-toggle-fold");
     weft.bindKey("dired", "Return", "dired-open");
-    weft.bindKey("dired", "minus", "dired-up");
-    weft.bindKey("dired", "asciicircum", "dired-up");
     weft.bindKey("dired", "g", "dired-refresh");
     weft.bindKey("dired", "q", "buffer-back");
-    // Marks.
-    weft.bindKey("dired", "m", "dired-mark");
-    weft.bindKey("dired", "u", "dired-unmark");
-    weft.bindKey("dired", "U", "dired-unmark-all");
-    weft.bindKey("dired", "t", "dired-toggle-marks");
-    // File operations.
-    weft.bindKey("dired", "plus", "dired-mkdir");
-    weft.bindKey("dired", "R", "dired-rename");
-    weft.bindKey("dired", "C", "dired-copy");
-    weft.bindKey("dired", "D", "dired-delete");
-    weft.bindKey("dired", "exclam", "dired-shell");
-    // Hidden-file toggle (`.` or `H`).
-    weft.bindKey("dired", "period", "dired-toggle-hidden");
-    weft.bindKey("dired", "H", "dired-toggle-hidden");
-    // Enter mini.files-style editable mode (`i`/`E`).
-    weft.bindKey("dired", "i", "dired-edit");
-    weft.bindKey("dired", "E", "dired-edit");
-
-    // Edit posture: a DISTINCT mode that FALLS BACK to vim `normal`, so ordinary
-    // editing (j/k, cw, dd, i→insert…) works while the reconcile/revert keys live
-    // in their own namespace instead of clobbering global `normal`. Reconcile is a
-    // DRY RUN. Caveat: vim's insert-Escape returns to plain `normal` (not here), so
-    // after an insert edit the keys below aren't live — invoke the commands by name
-    // (palette/`:`), or re-enter with `dired-edit`. A save-hook interception would
-    // be cleaner but needs a core primitive we intentionally didn't add.
-    weft.setFallback("dired-edit", "normal");
-    weft.bindKey("dired-edit", "Z", "dired-reconcile");
-    weft.bindKey("dired-edit", "Q", "dired-revert");
-    // Saving the editable projection reconciles it: `save` is an action, and we
-    // provide it scoped to THIS tool projection (the `dired` tool-backing) so
-    // `:w`/C-s resolve to `dired-commit` in a *dired* buffer — no core knows
-    // dired. The core file-write default still handles every other buffer.
+    // Saving the projection reconciles it: `save` is an ACTION, provided here for
+    // THIS tool projection, so `:w`/C-s resolve to `dired-commit` in a *dired*
+    // buffer (in any mode). No core knows dired; the file-write default handles
+    // every other buffer.
     weft.declareAction("save");
     weft.provide("save", .{ .tool = "dired" }, "dired-commit", 10);
 
@@ -385,10 +354,17 @@ export fn on_fill() void {
     loadRaw();
     parse();
     render();
-    // The projection is authored FIRST; styles/folds then index the new bytes.
+    // The projection is authored FIRST; styles/decorations/folds/ids then index
+    // the new bytes. The buffer stays EDITABLE (no read-only, no separate edit
+    // posture); saving it reconciles (dired-commit via the `save` action). Mark
+    // it this plugin's tool projection and snapshot the tree for that reconcile.
     weft.edit(.{ .start = 0, .end = weft.byteLen() }, render_buf[0..out]);
     publishStyles();
+    publishDecorations();
     publishFolds();
+    claimIds();
+    snapshot();
+    weft.toolBacking("dired");
     const target = if (restore_cursor)
         (findRestoreOffset() orelse @min(pending_cursor, out))
     else
@@ -489,7 +465,6 @@ fn focusBuffer(name: []const u8) bool {
 /// Re-gather the local tree (root + expanded dirs) into `*dired*`. `restore`
 /// keeps point on the node it was on across the async re-render.
 fn regather(restore: bool) void {
-    edit_mode_active = false; // a re-gather rebuilds the real tree → edits discarded
     if (restore) markRestore() else restore_cursor = false;
     const w = emitGather(0);
     show(cmd_buf[0..w]);
@@ -704,46 +679,62 @@ fn isOpen(e: *const Entry) bool {
     return e.kind == .dir and expanded.has(e.pathS()) and !folded.has(e.pathS());
 }
 
+/// The buffer's TEXT is only the editable name tree: `<indent><name>[/]`. All
+/// chrome — the fold arrow, mark, perms/size — is DECORATION (publishDecorations),
+/// never document bytes, so `yy` yanks exactly the name (+indent) and reconcile
+/// parses trivially. One always-editable render; no separate view/edit posture.
 fn render() void {
     out = 0;
     home_off = 0;
-    // Header: the listed directory + a hidden-files marker.
-    put("Directory: ");
-    put(cwd());
-    if (show_hidden) put("  [.a]");
-    put("\n\n");
-
     var i: usize = 0;
     while (i < entry_count) : (i += 1) {
         var e = &entries[i];
         e.r_start = out;
-        // Indent by depth (2 cols per level).
         var d: usize = 0;
         while (d < e.depth) : (d += 1) put("  ");
-        // Fold marker (dirs) / alignment (leaves).
-        if (e.kind == .dir) put(if (isOpen(e)) "\xe2\x96\xbe " else "\xe2\x96\xb8 ") else put("  ");
-        // Mark column.
-        put(if (e.marked) "* " else "  ");
-        // Rich columns.
-        if (e.permslen > 0) {
-            put(e.perms[0..e.permslen]);
-            put(" ");
-            putPad(e.size[0..e.sizelen], 8);
-            put(" ");
-            put(e.date[0..e.datelen]);
-            put("  ");
-        }
         e.name_r = out;
         put(e.nameS());
         if (e.kind == .dir) put("/");
-        if (e.kind == .symlink and e.llen > 0) {
-            put(" -> ");
-            put(e.link[0..e.llen]);
-        }
         put("\n");
         e.body = out;
         e.r_end = out;
         if (home_off == 0) home_off = e.r_start;
+    }
+}
+
+/// The metadata chrome, drawn BESIDE each name as a `virtual_before` decoration
+/// (dimmed): fold arrow (dirs), mark, and — when the listing had them — perms +
+/// size. Never in the text, so editing/yank/reconcile see only the name. Anchored
+/// at the name start; rebases as the name is edited.
+fn publishDecorations() void {
+    weft.decorateClear();
+    var i: usize = 0;
+    while (i < entry_count) : (i += 1) {
+        const e = &entries[i];
+        const arrow = if (e.kind == .dir) (if (isOpen(e)) "\xe2\x96\xbe" else "\xe2\x96\xb8") else " ";
+        const mk = if (e.marked) "*" else " ";
+        var buf: [96]u8 = undefined;
+        const msg = if (e.permslen > 0)
+            (std.fmt.bufPrint(&buf, "{s} {s} {s} {s:>7} ", .{ arrow, mk, e.perms[0..e.permslen], e.size[0..e.sizelen] }) catch continue)
+        else
+            (std.fmt.bufPrint(&buf, "{s} {s} ", .{ arrow, mk }) catch continue);
+        weft.decorate(e.name_r, .virtual_before, .muted, msg);
+    }
+}
+
+/// Claim the hidden id-span over each name (id = the entry's current path), so
+/// reconcile can read identity back. Rebases as the name is edited (rename) and
+/// — via the core register ferry — rides a `dd`→`p` (move). Cleared + re-claimed
+/// each authoring.
+fn claimIds() void {
+    weft.subbufferClear();
+    var i: usize = 0;
+    while (i < entry_count) : (i += 1) {
+        const e = &entries[i];
+        const end = if (e.r_end > e.r_start) e.r_end - 1 else e.r_end; // exclude the '\n'
+        const h = weft.claimSubbuffer(e.name_r, end) orelse continue;
+        weft.subbufferPutFact(h, "id", e.pathS());
+        weft.subbufferPutFact(h, "kind", if (e.kind == .dir) "dir" else "file");
     }
 }
 
@@ -755,17 +746,11 @@ fn lineEnd(off: usize) usize {
 }
 fn publishStyles() void {
     weft.styleClear();
-    weft.style(0, lineEnd(0), .header); // the directory header line
     var i: usize = 0;
     while (i < entry_count) : (i += 1) {
         const e = &entries[i];
         const le = lineEnd(e.r_start);
-        if (e.marked) {
-            weft.style(e.r_start, le, .removed); // marked row stands out
-            continue;
-        }
-        // Dim the marker/perms/size/date prefix; color the name by kind.
-        if (e.name_r > e.r_start) weft.style(e.r_start, e.name_r, .muted);
+        // Only the NAME is text now (metadata is decoration): color it by kind.
         const cls: weft.StyleClass = switch (e.kind) {
             .dir => .location, // blue, like ls dirs
             .exe => .added, // green, like ls executables
@@ -801,7 +786,9 @@ fn republish() void {
     render();
     weft.edit(.{ .start = 0, .end = weft.byteLen() }, render_buf[0..out]);
     publishStyles();
+    publishDecorations();
     publishFolds();
+    claimIds();
     weft.jump(weft.lineAt(@min(cur, out)).start);
 }
 
@@ -1012,25 +999,21 @@ fn diredDelete() void {
     weft.setMode("dired-confirm");
 }
 fn confirmYes() void {
-    if (commit_pending) {
-        commit_pending = false;
-        edit_mode_active = false; // applied → back to the live view
-    } else {
-        marked.clear(); // delete targets are gone; drop stale marks
-    }
+    commit_pending = false;
+    marked.clear(); // any delete targets are gone; drop stale marks
     gatherAfter(confirm_cmd[0..confirm_len]);
 }
 fn confirmNo() void {
     if (commit_pending) {
         commit_pending = false;
-        // Keep the user's edits: return to the editable *dired* buffer.
+        // Keep the user's edits: return to the (always-editable) *dired* buffer.
         _ = focusBuffer(dired_buf);
-        weft.setMode("dired-edit");
-        weft.echo("dired: not applied — keep editing (Q reverts)");
+        weft.setMode("dired");
+        weft.echo("dired: not applied — keep editing (g refreshes to discard)");
         return;
     }
     weft.setMode("dired");
-    weft.echo("delete cancelled");
+    weft.echo("cancelled");
 }
 
 // ── The `*dired-input*` single-line prompt ───────────────────────────────────
@@ -1127,35 +1110,9 @@ fn basenameOf(pth: []const u8) []const u8 {
 /// line, dirs trail `/`) and switch to the editable `dired-edit` posture. The
 /// simple projection (no header/perms/marks/fold glyphs) is what the reconcile
 /// parser reads back — far more robust than re-parsing the rich render.
-fn diredEdit() void {
-    if (peer_mode) {
-        weft.echo("dired: edit is local-only");
-        return;
-    }
-    if (!std.mem.eql(u8, activeName(), dired_buf)) {
-        weft.echo("dired: not in *dired*");
-        return;
-    }
-    if (entry_count == 0) {
-        weft.echo("dired: nothing to edit");
-        return;
-    }
-    snapshot();
-    renderEditable();
-    edit_mode_active = true;
-    // Mark the buffer this plugin's projection: its content is code-generated,
-    // and a save reconciles it (the `save` action resolves to `dired-commit`
-    // for `When{.tool="dired"}`). No core special-case — pure action dispatch.
-    weft.toolBacking("dired");
-    // `normal` (via the mode's fallback) — real vim editing; also the mode-leak
-    // fix, so opening a file elsewhere doesn't strand you in a dired mode.
-    weft.setMode("dired-edit");
-    weft.echo("dired edit: rename/create/delete/move; :w applies (with confirm), Q reverts");
-}
-
-/// Copy the live tree model into the snapshot arrays (path/kind/depth). The
-/// snapshot and the initial editable buffer are 1:1, so an immediate reconcile
-/// yields zero ops.
+/// Copy the live tree model into the snapshot arrays (path/kind/depth) — taken
+/// at each gather (on_fill). `save` (dired-commit) diffs the edited buffer
+/// against this to infer the file ops.
 fn snapshot() void {
     snap_count = @min(entry_count, MAX_ENTRIES);
     var i: usize = 0;
@@ -1165,67 +1122,6 @@ fn snapshot() void {
         snap[i].is_dir = entries[i].kind == .dir;
         snap[i].depth = entries[i].depth;
     }
-}
-
-/// Per-row name byte range in the editable projection (recorded during render,
-/// used to claim the hidden id-span over each name after authoring).
-var ed_name_start: [MAX_ENTRIES]usize = undefined;
-var ed_name_end: [MAX_ENTRIES]usize = undefined;
-
-/// Author the editable projection over `*dired*`: `<depth*2 spaces><name>[/]`,
-/// then claim a hidden id-span over each NAME carrying its original path as the
-/// identity `id`. That span rebases as you edit the name (rename), and — because
-/// the core register ferries subbuffer facts across a yank→paste — it rides a
-/// `dd`→`p` to another directory (a MOVE), while a typed line gets no id (a
-/// CREATE). Reconcile reads these back by id, path-independently.
-fn renderEditable() void {
-    out = 0;
-    var i: usize = 0;
-    while (i < entry_count) : (i += 1) {
-        const e = &entries[i];
-        var d: usize = 0;
-        while (d < e.depth) : (d += 1) put("  ");
-        ed_name_start[i] = out;
-        put(e.nameS());
-        if (e.kind == .dir) put("/");
-        ed_name_end[i] = out;
-        put("\n");
-    }
-    weft.edit(.{ .start = 0, .end = weft.byteLen() }, render_buf[0..out]);
-    weft.styleClear();
-    weft.foldClear();
-    // Claim the id-spans over the just-authored names (clear last render's first).
-    weft.subbufferClear();
-    i = 0;
-    while (i < entry_count) : (i += 1) {
-        const h = weft.claimSubbuffer(ed_name_start[i], ed_name_end[i]) orelse continue;
-        weft.subbufferPutFact(h, "id", entries[i].pathS());
-        weft.subbufferPutFact(h, "kind", if (entries[i].kind == .dir) "dir" else "file");
-    }
-    weft.jump(0);
-}
-
-/// `dired-reconcile` (`Z`): parse the edited buffer, diff it against the
-/// snapshot, and PRINT the inferred op plan into `*dired-plan*`. DRY RUN — this
-/// never mutates the filesystem; the real tree/buffer is left untouched so the
-/// user can keep editing, revert, or (later) confirm-execute.
-fn diredReconcile() void {
-    if (!edit_mode_active) {
-        weft.echo("dired: not in edit mode (press i/E first)");
-        return;
-    }
-    if (!std.mem.eql(u8, activeName(), dired_buf)) {
-        weft.echo("dired: reconcile runs from *dired*");
-        return;
-    }
-    loadRaw(); // page the EDITED buffer text in (active buffer is *dired*)
-    parseEdit();
-    diff();
-    const n = buildPlan();
-    showPlan();
-    if (el_overflow) weft.echo("dired: >1024 edited lines — plan truncated");
-    var mb: [64]u8 = undefined;
-    weft.echo(std.fmt.bufPrint(&mb, "dired: dry run — {d} op(s), nothing applied", .{n}) catch "dired: dry run");
 }
 
 /// Parse the editable buffer (in `raw`) into `elines`: leading spaces → depth,
@@ -1539,19 +1435,13 @@ fn composeOps() usize {
 /// confirm (which runs them via `gatherAfter` and re-gathers). A save OUTSIDE
 /// edit mode is a no-op (the view render is not an editable projection).
 fn diredCommit() void {
-    if (!edit_mode_active) {
-        weft.echo("dired: nothing to save (not editing)");
-        return;
-    }
-    if (!std.mem.eql(u8, activeName(), dired_buf)) return;
+    // A local *dired* projection only (a peer listing has no editable model).
+    if (peer_mode or !std.mem.eql(u8, activeName(), dired_buf)) return;
     loadRaw(); // page the EDITED buffer text (active buffer is *dired*)
     parseEdit();
     diff();
     const n = buildPlan();
     if (n == 0) {
-        weft.setMode("dired");
-        edit_mode_active = false;
-        regather(false); // back to the live view
         weft.echo("dired: no changes");
         return;
     }
@@ -1580,7 +1470,8 @@ fn planClass(line: []const u8) ?weft.StyleClass {
     if (std.mem.startsWith(u8, line, "create")) return .added;
     if (std.mem.startsWith(u8, line, "mkdir")) return .added;
     if (std.mem.startsWith(u8, line, "delete")) return .removed;
-    if (std.mem.startsWith(u8, line, "dired reconcile")) return .header;
+    if (std.mem.startsWith(u8, line, "copy")) return .location;
+    if (std.mem.startsWith(u8, line, "dired:")) return .header;
     return null; // blanks / footer / "(no changes)" — default
 }
 fn stylePlan() void {
@@ -1594,18 +1485,6 @@ fn stylePlan() void {
     }
 }
 
-/// `dired-revert` (`Q`): discard the edits and re-gather the REAL tree (also the
-/// natural exit from the dry-run preview). Ordinary undo / `:e!` revert too — it's
-/// a plain buffer now.
-fn diredRevert() void {
-    if (peer_mode) {
-        listPeer(cwd());
-        return;
-    }
-    regather(false); // rebuilds from the live fs → edits vanish; also clears edit mode
-    weft.echo("dired: reverted — edits discarded (dry run applied nothing)");
-}
-
 // ── Peer locus: flat `fsListAsync` listing (the old behavior, preserved) ─────
 fn openPeer() void {
     peer_mode = true;
@@ -1615,7 +1494,6 @@ fn openPeer() void {
 /// RemoteFs a few frames later). Plain names, dirs trailing `/` — read directly
 /// by the line-based peer navigation below (no model, no proc).
 fn listPeer(dir: []const u8) void {
-    edit_mode_active = false;
     setCwd(dir);
     if (!focusBuffer(dired_buf)) weft.runStr("buffer-create", dired_buf);
     _ = weft.fsListAsync("peer", dir, dired_buf);
