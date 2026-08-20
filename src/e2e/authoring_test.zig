@@ -149,6 +149,50 @@ test "authoring: visual `gc` comments the selected lines" {
     try t.expect(std.mem.indexOf(u8, disk, "// .c") == null); // the third line was not selected
 }
 
+test "authoring: `gU`/`gu` case operators — line, motion, and visual" {
+    const gpa = t.allocator;
+    var app: App = undefined;
+    try app.init(gpa);
+    defer app.deinit();
+    const ed = &app.ed;
+
+    authorFile(ed, "c.js",
+        \\let name = value;
+        \\
+    );
+
+    // gUU uppercases the whole line; guu lowercases it back (doubled = line).
+    ed.chord("g g");
+    ed.chord("g U U");
+    ed.run("save");
+    ed.waitSave();
+    {
+        const disk = try core.file.readAlloc(gpa, "c.js");
+        defer gpa.free(disk);
+        try t.expect(std.mem.indexOf(u8, disk, "LET NAME = VALUE;") != null);
+    }
+    ed.chord("g g");
+    ed.chord("g u u");
+    ed.run("save");
+    ed.waitSave();
+    {
+        const disk = try core.file.readAlloc(gpa, "c.js");
+        defer gpa.free(disk);
+        try t.expect(std.mem.indexOf(u8, disk, "let name = value;") != null);
+    }
+
+    // gUw — the operator over a WORD motion: only the first word uppercases.
+    ed.chord("g g");
+    ed.chord("g U w");
+    ed.run("save");
+    ed.waitSave();
+    {
+        const disk = try core.file.readAlloc(gpa, "c.js");
+        defer gpa.free(disk);
+        try t.expect(std.mem.indexOf(u8, disk, "LET name = value;") != null);
+    }
+}
+
 test "authoring: `C-n` completes a word already in the buffer" {
     const gpa = t.allocator;
     var app: App = undefined;

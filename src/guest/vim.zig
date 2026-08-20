@@ -261,7 +261,11 @@ const static_cmds = [_]Cmd{
     .{ .name = "vim-visual-delete", .handler = visualDelete },
     .{ .name = "vim-visual-yank", .handler = visualYank },
     .{ .name = "vim-visual-change", .handler = visualChange },
-    .{ .name = "vim-visual-comment", .handler = visualComment },
+    .{ .name = "vim-visual-comment", .handler = visualOp("op.comment") },
+    .{ .name = "vim-visual-upcase", .handler = visualOp("op.upcase") },
+    .{ .name = "vim-visual-lowercase", .handler = visualOp("op.lowercase") },
+    .{ .name = "enter-op-upcase", .handler = enterOpUpcase },
+    .{ .name = "enter-op-lowercase", .handler = enterOpLowercase },
     .{ .name = "vim-visual-line", .handler = visualLine },
     .{ .name = "vim-normal", .handler = normal },
     .{ .name = "vim-append-line", .handler = appendLine },
@@ -366,6 +370,7 @@ const cmds = static_cmds ++ gen_cmds ++ count_cmds;
 /// keeps the 3 through the `d`). Every other command clears the count in
 /// `on_command`, so a stray count can't leak into an unrelated later command.
 const preserve_count = blk: {
+    @setEvalBranchQuota(4000); // scanning every command name at comptime
     var arr: [cmds.len]bool = .{false} ** cmds.len;
     for (cmds, 0..) |c, i| {
         if (std.mem.startsWith(u8, c.name, "vim-count-") or
@@ -421,7 +426,10 @@ export fn init() void {
     weft.setFallback("op-pending", "default");
     weft.bindKey("op-pending", "Escape", "op-cancel");
     inline for (mtable) |m| if (m.in_op) weft.bindKey("op-pending", m.key, "vim/o/" ++ m.motion);
-    for ([_][]const u8{ "d", "c", "y" }) |k| weft.bindKey("op-pending", k, "op-line");
+    // The doubled operator is linewise (dd, yy, cc, gUU, guu; gcc's second key
+    // `c` is already here). Each maps to op-line, which applies whatever operator
+    // is pending to the current line.
+    for ([_][]const u8{ "d", "c", "y", "u", "U" }) |k| weft.bindKey("op-pending", k, "op-line");
     // i/a in operator-pending select a text object (di", ca(, yiw, …).
     weft.bindKey("op-pending", "i", "enter-op-inner");
     weft.bindKey("op-pending", "a", "enter-op-around");
@@ -510,6 +518,11 @@ export fn init() void {
     // Bound in the guest so EVERY vim-based config gets it out of the box.
     weft.bindKey("normal", "g c", "enter-op-comment");
     weft.bindKey("visual", "g c", "vim-visual-comment");
+    // `gU`/`gu` case operators (guu/gUU for the line; charwise over a motion).
+    weft.bindKey("normal", "g U", "enter-op-upcase");
+    weft.bindKey("normal", "g u", "enter-op-lowercase");
+    weft.bindKey("visual", "U", "vim-visual-upcase"); // vim: U/u case a selection
+    weft.bindKey("visual", "u", "vim-visual-lowercase");
     // C-w …: split/close, focus (h/j/k/l or arrows), move/swap (H/J/K/L or
     // shifted arrows). Shift lives in the letter keysym (H), not `S-h`;
     // arrows have no shifted keysym so they take an explicit `S-`.
@@ -638,17 +651,22 @@ fn visualChange() void {
     visual_linewise = false;
     weft.setMode("insert");
 }
-/// `gc` in visual mode: toggle comments over the selected lines, then return to
-/// normal — the same op.comment operator the motion path uses.
-fn visualComment() void {
-    if (weft.selection()) |s0| {
-        const s = visualSpan(s0);
-        if (weft.stampRange(.{ .start = s.start, .end = s.end })) |h| weft.runRangeArg("op.comment", h);
-        weft.jump(s.start);
-    }
-    weft.run("clear-selection");
-    visual_linewise = false;
-    weft.setMode("normal");
+/// A visual-mode operator: run a range-arg `cmd` (op.comment, op.upcase, …) over
+/// the selection, then clear it and return to normal. `gc`/`U`/`u` in visual all
+/// ride this — the same operators the motion path uses, no register touched.
+fn visualOp(comptime cmd: []const u8) fn () void {
+    return struct {
+        fn h() void {
+            if (weft.selection()) |s0| {
+                const s = visualSpan(s0);
+                if (weft.stampRange(.{ .start = s.start, .end = s.end })) |hnd| weft.runRangeArg(cmd, hnd);
+                weft.jump(s.start);
+            }
+            weft.run("clear-selection");
+            visual_linewise = false;
+            weft.setMode("normal");
+        }
+    }.h;
 }
 fn normal() void {
     // Leaving insert/visual SEALS the undo unit: `i…Esc` is one unit, so the
@@ -750,6 +768,20 @@ fn enterOpYank() void {
 /// register (op_copies=false); composes with every motion like d/c/y.
 fn enterOpComment() void {
     op_edit_cmd = "op.comment";
+    op_copies = false;
+    op_after = "normal";
+    weft.setMode("op-pending");
+}
+/// `gU` / `gu` — the case operators (uppercase / lowercase over a motion or text
+/// object; `gUU`/`guu` for the line). Charwise like vim; no register.
+fn enterOpUpcase() void {
+    op_edit_cmd = "op.upcase";
+    op_copies = false;
+    op_after = "normal";
+    weft.setMode("op-pending");
+}
+fn enterOpLowercase() void {
+    op_edit_cmd = "op.lowercase";
     op_copies = false;
     op_after = "normal";
     weft.setMode("op-pending");
