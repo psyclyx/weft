@@ -90,6 +90,79 @@ test "app/collab: an emacs coworker joins — vim + emacs peers converge" {
     try t.expectEqualStrings(at, bt); // identical on both, despite different editors
 }
 
+// The partner matrix continues: a HELIX coworker, and an emacs+helix pair — so
+// the three reference editors are all shown collaborating on one document. The
+// keymap is just data; convergence is the session layer, editor-agnostic.
+test "app/collab: a helix coworker joins — vim + helix peers converge" {
+    const gpa = t.allocator;
+    var a: Editor = undefined;
+    try Editor.initNamed(gpa, &a, "alice");
+    defer a.deinit();
+    var b: Editor = undefined;
+    try Editor.initNamed(gpa, &b, "bob");
+    defer b.deinit();
+    try loadVim(&a);
+    try loadHelix(&b); // bob uses helix (selection-first modal editing)
+
+    var link: Loopback = undefined;
+    try Loopback.init(&link, gpa, &a, &b, "alice", "bob");
+    defer link.deinit();
+
+    a.press("i", "");
+    a.typeText("ALICE");
+    a.press("Escape", "");
+    b.press("i", ""); // helix: i enters helix-insert
+    b.typeText("HELIX");
+    b.press("Escape", "");
+
+    const Ctx = struct { a: *Editor, b: *Editor };
+    const ok = try link.pumpUntil(Ctx{ .a = &a, .b = &b }, struct {
+        fn pred(c: Ctx) bool {
+            const at = c.a.buffers.active().editor.text().toOwnedSlice(c.a.gpa) catch return false;
+            defer c.a.gpa.free(at);
+            const bt = c.b.buffers.active().editor.text().toOwnedSlice(c.b.gpa) catch return false;
+            defer c.b.gpa.free(bt);
+            return std.mem.indexOf(u8, at, "ALICE") != null and std.mem.indexOf(u8, at, "HELIX") != null and
+                std.mem.indexOf(u8, bt, "ALICE") != null and std.mem.indexOf(u8, bt, "HELIX") != null;
+        }
+    }.pred);
+    try t.expect(ok);
+}
+
+test "app/collab: emacs + helix coworkers converge (no vim in sight)" {
+    const gpa = t.allocator;
+    var a: Editor = undefined;
+    try Editor.initNamed(gpa, &a, "alice");
+    defer a.deinit();
+    var b: Editor = undefined;
+    try Editor.initNamed(gpa, &b, "bob");
+    defer b.deinit();
+    try loadEmacs(&a); // alice: emacs (modeless)
+    try loadHelix(&b); // bob: helix
+
+    var link: Loopback = undefined;
+    try Loopback.init(&link, gpa, &a, &b, "alice", "bob");
+    defer link.deinit();
+
+    a.typeText("EMACS"); // modeless self-insert
+    b.press("i", "");
+    b.typeText("HELIX");
+    b.press("Escape", "");
+
+    const Ctx = struct { a: *Editor, b: *Editor };
+    const ok = try link.pumpUntil(Ctx{ .a = &a, .b = &b }, struct {
+        fn pred(c: Ctx) bool {
+            const at = c.a.buffers.active().editor.text().toOwnedSlice(c.a.gpa) catch return false;
+            defer c.a.gpa.free(at);
+            const bt = c.b.buffers.active().editor.text().toOwnedSlice(c.b.gpa) catch return false;
+            defer c.b.gpa.free(bt);
+            return std.mem.indexOf(u8, at, "EMACS") != null and std.mem.indexOf(u8, at, "HELIX") != null and
+                std.mem.indexOf(u8, bt, "EMACS") != null and std.mem.indexOf(u8, bt, "HELIX") != null;
+        }
+    }.pred);
+    try t.expect(ok);
+}
+
 test "app/collab: peer A types, it converges into peer B's buffer + cursor" {
     const gpa = t.allocator;
     var a: Editor = undefined;
