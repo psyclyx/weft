@@ -649,6 +649,61 @@ fn baseName(base: []const u8) []const u8 {
     return base;
 }
 
+/// The ASCII punctuation byte for a keysym NAME ("colon" → `:`), or null — the
+/// inverse of `punctName`, by scanning the frozen table (no second table to keep
+/// in sync). Starts at '!' so it never returns the space char (that displays as
+/// the "SPC" alias, not a literal blank).
+fn punctChar(name: []const u8) ?u8 {
+    var c: u8 = '!';
+    while (c < 127) : (c += 1) {
+        if (punctName(c)) |n| if (std.mem.eql(u8, n, name)) return c;
+    }
+    return null;
+}
+
+/// The DISPLAY form of a canonical keyspec — the inverse of `normalizeKey`, so
+/// which-key shows a binding in the SAME notation a config writes it ("SPC :",
+/// not "space colon"). Per token: modifier prefixes pass through; `space` → SPC,
+/// an ASCII-punctuation keysym name → its char, else the name verbatim (`f`,
+/// `Escape`, `F1`). Display only — logic always uses the canonical form.
+pub fn displayKey(self: *const Keymap, buf: []u8, key: []const u8) []const u8 {
+    _ = self;
+    var w: usize = 0;
+    var it = std.mem.splitScalar(u8, key, ' ');
+    var first = true;
+    while (it.next()) |tok| {
+        if (tok.len == 0) continue;
+        if (!first) {
+            if (w >= buf.len) return key;
+            buf[w] = ' ';
+            w += 1;
+        }
+        first = false;
+        var base = tok;
+        while (base.len >= 2 and base[1] == '-' and (base[0] == 'C' or base[0] == 'M' or base[0] == 'S')) {
+            if (w + 2 > buf.len) return key;
+            buf[w] = base[0];
+            buf[w + 1] = '-';
+            w += 2;
+            base = base[2..];
+        }
+        if (std.mem.eql(u8, base, "space")) {
+            if (w + 3 > buf.len) return key;
+            @memcpy(buf[w..][0..3], "SPC");
+            w += 3;
+        } else if (punctChar(base)) |c| {
+            if (w >= buf.len) return key;
+            buf[w] = c;
+            w += 1;
+        } else {
+            if (w + base.len > buf.len) return key;
+            @memcpy(buf[w..][0..base.len], base);
+            w += base.len;
+        }
+    }
+    return buf[0..w];
+}
+
 /// Canonicalize a human keyspec (or space-joined sequence) into `buf`. Per
 /// token: leading `C-`/`M-`/`S-` modifier prefixes pass through unchanged, then
 /// the base maps via `baseName`. Falls back to the raw input if it doesn't fit.
@@ -926,6 +981,14 @@ test "keymap: keyspec normalization — config writes SPC : / C-x C-f, stores ca
     try km.bind(gpa, "normal", "SPC :", "pick-commands", prio_config, "cfg");
     try t.expect((try km.feed(gpa, "space")) == .pending);
     try t.expectEqualStrings("pick-commands", (try km.feed(gpa, "colon")).run);
+
+    // displayKey is the inverse — which-key shows the config's notation back.
+    try t.expectEqualStrings("SPC :", km.displayKey(&buf, "space colon"));
+    try t.expectEqualStrings("SPC f f", km.displayKey(&buf, "space f f"));
+    try t.expectEqualStrings("C-x C-f", km.displayKey(&buf, "C-x C-f"));
+    try t.expectEqualStrings(":", km.displayKey(&buf, "colon")); // a lone segment
+    try t.expectEqualStrings("f", km.displayKey(&buf, "f"));
+    try t.expectEqualStrings("Escape", km.displayKey(&buf, "Escape"));
 }
 
 test "keymap: completions — chord next-keys, leaf vs group, deduped, global at top" {

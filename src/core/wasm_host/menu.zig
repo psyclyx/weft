@@ -33,7 +33,11 @@ pub fn hMenuBindingKey(data: ?*anyopaque, caller: *wasm.Caller, args: []const i3
         results[0] = -1;
         return;
     };
-    results[0] = @intCast(caller.writeMemory(@intCast(args[1]), @intCast(args[2]), b.key) catch 0);
+    // which-key shows keys in the config's notation ("SPC :"), not the canonical
+    // stored form ("space colon") — display only; logic uses the canonical key.
+    var dbuf: [256]u8 = undefined;
+    const disp = p.ctx.keymap.displayKey(&dbuf, b.key);
+    results[0] = @intCast(caller.writeMemory(@intCast(args[1]), @intCast(args[2]), disp) catch 0);
 }
 pub fn hMenuBindingCmd(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32, results: []i32) void {
     const p: *WasmPlugin = @ptrCast(@alignCast(data.?));

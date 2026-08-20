@@ -22,14 +22,32 @@ var scroll_off: usize = 0;
 
 const cmds = [_][]const u8{ "which-key-page-down", "which-key-page-up" };
 
+/// The baseline editing floor — self-insert + basic cursor/delete/newline. These
+/// are the "regular keys" everyone knows; listing them in a which-key hint (an
+/// F1 peek at a whole mode, or a mode that inherits the default editing keys) is
+/// pure noise. (They never appear as CHORD completions — `completions(prefix)`
+/// only offers keys that extend the pending chord — so this only trims the
+/// whole-mode peek, exactly where the clutter is.)
+fn isBaselineEdit(cmd: []const u8) bool {
+    const floor = [_][]const u8{
+        "insert-text",    "insert-newline", "insert-tab",   "delete-backward",
+        "delete-forward", "cursor-left",    "cursor-right", "cursor-up",
+        "cursor-down",
+    };
+    for (floor) |c| if (std.mem.eql(u8, cmd, c)) return true;
+    return false;
+}
+
 /// A menu's own leave/cancel/nav bindings are noise in the hint popup — every
-/// menu has them. Filter Escape/C-g/F1, the leave commands, and the paging keys.
+/// menu has them. Filter Escape/C-g/F1, the leave commands, the paging keys, and
+/// the baseline editing floor (see `isBaselineEdit`).
 fn isNoise(key: []const u8, cmd: []const u8) bool {
     return std.mem.eql(u8, key, "Escape") or std.mem.eql(u8, key, "C-g") or
         std.mem.eql(u8, key, "F1") or std.mem.eql(u8, cmd, "which-key-now") or
         std.mem.eql(u8, cmd, "menu-escape") or std.mem.eql(u8, cmd, "leader-cancel") or
         std.mem.eql(u8, cmd, "op-cancel") or
-        std.mem.eql(u8, cmd, "which-key-page-down") or std.mem.eql(u8, cmd, "which-key-page-up");
+        std.mem.eql(u8, cmd, "which-key-page-down") or std.mem.eql(u8, cmd, "which-key-page-up") or
+        isBaselineEdit(cmd);
 }
 
 export fn describe() void {
@@ -90,11 +108,11 @@ fn render() void {
         weft.surfaceSpan(cmd, if (group) .group else .leaf); // group vs leaf color
         shown += 1;
     }
-    // A position footer when it doesn't all fit — shows the range + that PgUp/
-    // PgDn page (and Backspace pops a level, both bound in `menu-nav`).
+    // A position footer when it doesn't all fit — shows the range + that C-n/C-p
+    // page it (and Backspace pops a level; the nav keys are `menu-nav` config).
     if (total > PAGE) {
         var buf: [64]u8 = undefined;
-        const msg = std.fmt.bufPrint(&buf, "{d}-{d}/{d}  PgUp/PgDn", .{ scroll_off + 1, scroll_off + shown, total }) catch "…";
+        const msg = std.fmt.bufPrint(&buf, "{d}-{d}/{d}  C-n/C-p", .{ scroll_off + 1, scroll_off + shown, total }) catch "…";
         weft.surfaceRow();
         weft.surfaceSpan(msg, .muted);
     }
