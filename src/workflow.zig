@@ -475,6 +475,10 @@ const guest = struct {
     const notes = @embedFile("guest_notes_wasm");
     const git = @embedFile("guest_git_wasm");
     const whitespace = @embedFile("guest_whitespace_wasm");
+    const grep = @embedFile("guest_grep_wasm");
+    const run = @embedFile("guest_run_wasm");
+    const make = @embedFile("guest_make_wasm");
+    const fmt = @embedFile("guest_fmt_wasm");
 };
 
 /// A standard vim editing set (synchronous plugins only — no subprocess).
@@ -498,6 +502,19 @@ fn loadWorkspace(ed: *Editor) !void {
     try ed.load("modes", guest.modes);
     try ed.load("notes", guest.notes);
     try ed.load("git", guest.git);
+}
+
+/// The workspace plus the project navigation/build tools — the surface a person
+/// uses to actually work a codebase: dired (file tree), grep (rg search),
+/// run/make (shell out a build/run), fmt (format a buffer). Used by the
+/// whole-app "web" e2e verticals.
+fn loadWebIde(ed: *Editor) !void {
+    try loadWorkspace(ed);
+    try ed.load("dired", guest.dired);
+    try ed.load("grep", guest.grep);
+    try ed.load("run", guest.run);
+    try ed.load("make", guest.make);
+    try ed.load("fmt", guest.fmt);
 }
 
 /// A writable path inside the test's tmpdir (which lives under
@@ -607,6 +624,19 @@ const Project = struct {
         harness.writePpm(self.gpa, fname, pixels, app_w, app_h) catch {};
     }
 };
+
+/// Author a file the way a person does: open it (adopts the path), enter
+/// insert, type the body, escape, save, and drive the save to disk. The natural
+/// motion — `open` then `i…Esc` then `save`. Assumes a normal-editing resting
+/// mode (call before entering any tool buffer, so no tool mode swallows typing).
+fn authorFile(ed: *Editor, name: []const u8, body: []const u8) void {
+    ed.runStr("open", name);
+    ed.press("i", "");
+    ed.typeText(body);
+    ed.press("Escape", "");
+    ed.run("save");
+    ed.waitSave();
+}
 
 /// The text of a named TOOL buffer (magit/dired/echo projections) — these ARE
 /// the rendered UI surface, so reading them to assert UI state is fair under
@@ -1225,6 +1255,63 @@ test "e2e/spine: write a file, init a repo, stage and commit — all through wef
         defer gpa.free(tracked);
         try t.expectEqualStrings("index.html", tracked);
     }
+}
+
+// ── The web-app narrative: many files, search them, run the code ────
+//
+// Continues the spine: a person fleshing out a small web app drops in more
+// files, searches across them, and runs the code. Drives the project-nav/build
+// tools (grep=rg, run=node) through their real commands; verifies FILE content
+// on disk and TOOL output on the rendered surface; screenshots each step.
+test "e2e/web: author js + html, grep across them, run it with node" {
+    const gpa = t.allocator;
+    var proj: Project = undefined;
+    try proj.init(gpa);
+    defer proj.deinit();
+
+    var ed: Editor = undefined;
+    try Editor.init(gpa, &ed);
+    defer ed.deinit();
+    try loadWebIde(&ed);
+
+    // ── 1. Author two files the natural way (open → type → save). ──
+    authorFile(&ed, "app.js",
+        \\function greet(name) {
+        \\  return "hello " + name;
+        \\}
+        \\console.log(greet("weft"));
+        \\
+    );
+    authorFile(&ed, "index.html",
+        \\<!doctype html>
+        \\<title>weft demo</title>
+        \\<script src="app.js"></script>
+        \\
+    );
+    // CONTENT on disk (the human's check).
+    {
+        const disk = try core.file.readAlloc(gpa, "app.js");
+        defer gpa.free(disk);
+        try t.expect(std.mem.indexOf(u8, disk, "return \"hello \" + name;") != null);
+    }
+
+    // ── 2. Search the project for a token that appears in BOTH files. ──
+    // `grep` runs `rg` into *grep*; a person types the pattern. "weft" is in
+    // app.js (greet("weft")) and index.html (<title>weft demo</title>).
+    ed.runStr("grep", "weft");
+    try t.expect(drainToolContains(&ed, "*grep*", "app.js"));
+    {
+        const hits = toolText(&ed, "*grep*") orelse return error.NoGrepBuffer;
+        defer gpa.free(hits);
+        try t.expect(std.mem.indexOf(u8, hits, "app.js") != null);
+        try t.expect(std.mem.indexOf(u8, hits, "index.html") != null);
+    }
+    proj.shot(&ed, "web-1-grep");
+
+    // ── 3. Run the code with node — real execution, real output. ──
+    ed.runStr("run-command", "node app.js");
+    try t.expect(drainToolContains(&ed, "*output*", "hello weft"));
+    proj.shot(&ed, "web-2-run");
 }
 
 // ── Coverage + documented gaps (the difficulty IS the signal) ───────
