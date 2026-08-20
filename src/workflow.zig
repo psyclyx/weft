@@ -761,18 +761,37 @@ fn bootConfig(ed: *Editor, config_dir: []const u8, loader_state: *ConfigLoader) 
     try core.quickjs.evalConfig(&ed.engine, &ed.ctx, loader_state.loader(), &ed.config_kv, config_dir, src);
 }
 
-/// Does the current pending which-key prefix offer `key` as a next step? This
-/// is exactly what the which-key overlay shows a user who paused mid-chord —
-/// the completions of `keymap.pending`. Used to drive "look it up in which-key".
-fn whichKeyOffers(ed: *Editor, key: []const u8) bool {
-    var kbuf: [256]u8 = undefined;
-    const want = core.Keymap.normalizeKey(&kbuf, key);
-    const n = ed.keymap.completions(ed.gpa, ed.keymap.pending) catch return false;
-    var i: usize = 0;
-    while (i < n) : (i += 1) {
-        if (ed.keymap.resolvedAt(i)) |b| if (std.mem.eql(u8, b.key, want)) return true;
+/// What the which-key overlay actually SHOWS on screen right now, as the text a
+/// user reads. This does NOT re-derive completions from the keymap (that would
+/// test what the harness *thinks* which-key shows) — it fires `on_menu` exactly
+/// as the app's MenuOverlay does, lets the which_key PLUGIN publish its surface
+/// (with its own noise-filtering + config-notation key display), and reads that
+/// surface's spans. So `whichKeyText` is literally the rendered overlay content.
+/// Caller frees. Empty if no plugin published a menu surface.
+fn whichKeyText(ed: *Editor, gpa: Allocator) ![]u8 {
+    for (ed.plugins.items) |pl| core.wasm_host.notifyMenu(pl, true); // peek (like F1)
+    var out: std.ArrayList(u8) = .empty;
+    errdefer out.deinit(gpa);
+    for (ed.plugins.items) |pl| {
+        if (!pl.surface.active) continue;
+        for (pl.surface.rows.items) |row| {
+            for (row.spans.items) |span| {
+                try out.appendSlice(gpa, span.text);
+                try out.append(gpa, ' ');
+            }
+            try out.append(gpa, '\n');
+        }
     }
-    return false;
+    for (ed.plugins.items) |pl| core.wasm_host.notifyMenu(pl, false); // leave
+    return out.toOwnedSlice(gpa);
+}
+
+/// Whether the rendered which-key overlay shows `needle` (a key in config
+/// notation, or a command name) — i.e. a user peeking the hint would SEE it.
+fn whichKeyShows(ed: *Editor, needle: []const u8) bool {
+    const text = whichKeyText(ed, ed.gpa) catch return false;
+    defer ed.gpa.free(text);
+    return std.mem.indexOf(u8, text, needle) != null;
 }
 
 /// Author a file the way a person does: open it (adopts the path), enter
@@ -1515,14 +1534,23 @@ test "e2e/config: the sample config boots; SPC g i is discoverable via which-key
     // The config ran to completion (its last line echoes this).
     try t.expect(std.mem.indexOf(u8, ed.echoText(), "config.js loaded") != null);
 
-    // A user who forgets the git keys reaches for the leader and reads which-key.
+    // A user who forgets the git keys reaches for the leader and READS the
+    // which-key overlay — so we assert on what the which_key plugin actually
+    // renders to the surface, not on the keymap the harness could introspect.
     ed.press("SPC", "");
     try t.expectEqualStrings("space", ed.keymap.pending); // the chord is pending
-    try t.expect(whichKeyOffers(&ed, "g")); // the git group is offered
-    ed.press("g", "");
+    {
+        const top = try whichKeyText(&ed, gpa);
+        defer gpa.free(top);
+        try t.expect(top.len > 0); // the overlay drew hints
+        try t.expect(std.mem.indexOf(u8, top, "g") != null); // the git group key is shown
+    }
+    ed.press("g", ""); // drill into the git group
     try t.expectEqualStrings("space g", ed.keymap.pending);
-    try t.expect(whichKeyOffers(&ed, "i")); // ... and `i` → git-init under it
-    try t.expect(whichKeyOffers(&ed, "g")); // ... and `g` → git-status
+    // The overlay now shows the git leaves BY THEIR COMMAND NAMES — what a user
+    // reads to discover the binding we added.
+    try t.expect(whichKeyShows(&ed, "git-init"));
+    try t.expect(whichKeyShows(&ed, "git-status"));
     ed.press("Escape", ""); // abandon the chord; nothing ran
     try t.expectEqualStrings("", ed.keymap.pending);
 }
