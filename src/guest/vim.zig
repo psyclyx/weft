@@ -26,6 +26,17 @@ var paste_buf: [(1 << 16) + 1]u8 = undefined;
 var op_is_yank: bool = false;
 var op_after: []const u8 = "normal"; // mode to enter after the operator
 
+// ── Count prefix (3dw, 5j, 2x): digits accumulate, the next motion/operator
+// repeats. Preserved through operator entry (3dw and d3w both delete 3 words),
+// cleared after any other command (see `on_command`). `consumeCount` reads and
+// resets it; 0 means "no count" → 1.
+var pending_count: u32 = 0;
+fn consumeCount() u32 {
+    const c = if (pending_count == 0) 1 else pending_count;
+    pending_count = 0;
+    return c;
+}
+
 const file_pick = 0;
 
 fn lineStartOff() usize {
@@ -56,17 +67,48 @@ const mtable = [_]MB{
     .{ .key = "percent", .motion = "motion.match-pair", .in_op = true },
 };
 
-/// Normal-mode motion: run the motion, jump to its target (the range end that
-/// isn't the current cursor — the motion is direction-carrying that way).
+/// Normal-mode motion: run the motion `count` times, jumping to each target (the
+/// range end that isn't the current cursor — the motion is direction-carrying).
 fn moveByMotion(comptime motion: []const u8) fn () void {
     return struct {
         fn h() void {
-            const cur = weft.cursor();
-            const hnd = weft.runRange(motion) orelse return;
-            const r = weft.rangeEnds(hnd) orelse return;
-            weft.jump(if (r.end == cur) r.start else r.end);
+            var n = consumeCount();
+            while (n > 0) : (n -= 1) {
+                const cur = weft.cursor();
+                const hnd = weft.runRange(motion) orelse return;
+                const r = weft.rangeEnds(hnd) orelse return;
+                weft.jump(if (r.end == cur) r.start else r.end);
+            }
         }
     }.h;
+}
+
+/// Count-aware digit key: accumulate a decimal count (saturating).
+fn countDigit(comptime d: u32) fn () void {
+    return struct {
+        fn h() void {
+            pending_count = pending_count *| 10 +| d;
+        }
+    }.h;
+}
+
+/// `0`: the digit 0 when a count is being typed (so `10`, `20` work), else the
+/// line-start motion (vim's overload of the key).
+fn zeroKey() void {
+    if (pending_count > 0) {
+        pending_count = pending_count *| 10;
+        return;
+    }
+    const cur = weft.cursor();
+    const hnd = weft.runRange("motion.line-start") orelse return;
+    const r = weft.rangeEnds(hnd) orelse return;
+    weft.jump(if (r.end == cur) r.start else r.end);
+}
+
+/// `x` with a count: delete `count` characters forward.
+fn deleteCharFwd() void {
+    var n = consumeCount();
+    while (n > 0) : (n -= 1) weft.run("delete-forward");
 }
 /// The pending operator is a CHANGE (`c`), not delete/yank — its after-mode is
 /// insert. vim's `cw`/`cW` special-case keys off this.
@@ -122,10 +164,26 @@ fn inclusiveEnd(hnd: u32) u32 {
 fn opByMotion(comptime motion: []const u8) fn () void {
     return struct {
         fn h() void {
+            const n = consumeCount();
             const eff = comptime changeWordEnd(motion);
             const use = if (eff.len > 0 and isChangeOp() and cursorOnWord()) eff else motion;
-            const hnd0 = weft.runRange(use) orelse return opCancel();
-            const hnd = if (isInclusiveMotion(use)) inclusiveEnd(hnd0) else hnd0;
+            // Advance a scratch cursor by the motion `n` times to find the target,
+            // so `d3w` deletes over three words; then apply the operator over
+            // [start, target]. For n==1 this reduces to a single motion range.
+            const start = weft.cursor();
+            var i: u32 = 0;
+            while (i < n) : (i += 1) {
+                const cur = weft.cursor();
+                const hnd = weft.runRange(use) orelse return opCancel();
+                const r = weft.rangeEnds(hnd) orelse return opCancel();
+                weft.jump(if (r.end == cur) r.start else r.end);
+            }
+            const target = weft.cursor();
+            weft.jump(start);
+            const lo = @min(start, target);
+            var hi = @max(start, target);
+            if (isInclusiveMotion(use)) hi = @min(hi + 1, weft.byteLen());
+            const hnd = weft.stampRange(.{ .start = lo, .end = hi }) orelse return opCancel();
             applyOpRange(hnd);
         }
     }.h;
@@ -243,6 +301,9 @@ const static_cmds = [_]Cmd{
     .{ .name = "do-find-F", .handler = doFindBigF },
     .{ .name = "do-find-t", .handler = doFindT },
     .{ .name = "do-find-T", .handler = doFindBigT },
+    // Count-prefix keys: `0` (digit-or-line-start) and count-aware `x`.
+    .{ .name = "vim-zero", .handler = zeroKey },
+    .{ .name = "vim-delete-char", .handler = deleteCharFwd },
     // The `:` ex command line (see ex.zig).
     .{ .name = "vim-ex", .handler = ex.enter },
     .{ .name = "ex-type", .handler = ex.onType },
@@ -279,13 +340,38 @@ const gen_cmds: [n_gen]Cmd = blk: {
     }
     break :blk arr;
 };
-const cmds = static_cmds ++ gen_cmds;
+/// One command per count digit 1–9 (`vim-count-N`), bound to the digit keys.
+const count_cmds: [9]Cmd = blk: {
+    var arr: [9]Cmd = undefined;
+    for (0..9) |i| arr[i] = .{
+        .name = std.fmt.comptimePrint("vim-count-{d}", .{i + 1}),
+        .handler = countDigit(@intCast(i + 1)),
+    };
+    break :blk arr;
+};
+const cmds = static_cmds ++ gen_cmds ++ count_cmds;
+
+/// Commands that PRESERVE a pending count instead of clearing it: the digit keys
+/// themselves, `0` (which may be a digit), and the operator entries (so `3dw`
+/// keeps the 3 through the `d`). Every other command clears the count in
+/// `on_command`, so a stray count can't leak into an unrelated later command.
+const preserve_count = blk: {
+    var arr: [cmds.len]bool = .{false} ** cmds.len;
+    for (cmds, 0..) |c, i| {
+        if (std.mem.startsWith(u8, c.name, "vim-count-") or
+            std.mem.eql(u8, c.name, "vim-zero") or
+            std.mem.startsWith(u8, c.name, "enter-op-")) arr[i] = true;
+    }
+    break :blk arr;
+};
 
 export fn describe() void {
     for (cmds) |c| weft.declareCommand(c.name);
 }
 export fn on_command(id: u32) void {
-    if (id < cmds.len) cmds[id].handler();
+    if (id >= cmds.len) return;
+    cmds[id].handler();
+    if (!preserve_count[id]) pending_count = 0;
 }
 export fn on_pick_accept(pick_id: u32) void {
     if (pick_id == file_pick) openChosen(weft.pickChoice());
@@ -334,6 +420,18 @@ export fn init() void {
     weft.setFallback("op-to", "default");
     weft.bindKey("op-to", "Escape", "op-cancel");
     inline for (otable) |o| weft.bindKey("op-to", o.key, "vim/to/" ++ o.obj);
+
+    // Count prefix: digits 1-9 accumulate in normal AND operator-pending (so both
+    // `3dw` and `d3w` work). `0` becomes digit-or-line-start; `x` becomes
+    // count-aware. These override the plain bindings above (last-wins).
+    inline for (1..10) |d| {
+        const key = std.fmt.comptimePrint("{d}", .{d});
+        const cmd = std.fmt.comptimePrint("vim-count-{d}", .{d});
+        weft.bindKey("normal", key, cmd);
+        weft.bindKey("op-pending", key, cmd);
+    }
+    weft.bindKey("normal", "0", "vim-zero");
+    weft.bindKey("normal", "x", "vim-delete-char");
 
     weft.bindKey("visual", "d", "vim-visual-delete");
     weft.bindKey("visual", "x", "vim-visual-delete");

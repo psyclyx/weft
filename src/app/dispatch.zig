@@ -196,6 +196,7 @@ var dot_reg_n: usize = 0;
 var dot_replaying: bool = false;
 var dot_suppress: bool = false; // the repeat key itself must not become the new change
 var dot_commits: usize = 0; // buffer commit count at the last rest
+var dot_cursor: usize = 0; // cursor offset at the last rest (to tell a motion from a prefix)
 var dot_buf: core.Buffers.Id = 0; // active buffer at the last rest (a switch resets the recorder)
 
 fn dotRecord(spec: []const u8, text: []const u8) void {
@@ -229,19 +230,29 @@ fn dotBoundary(ctx: *core.command.Context) void {
     if (bid != dot_buf) { // buffer switch: commit counts aren't comparable — reset.
         dot_buf = bid;
         dot_commits = ctx.editor().doc.commitCount();
+        dot_cursor = ctx.editor().cursorOffset();
         dot_pending_n = 0;
         return;
     }
-    if (!dotAtRest(ctx)) return;
+    if (!dotAtRest(ctx)) return; // mid-command — keep accumulating
     const now = ctx.editor().doc.commitCount();
+    const cur = ctx.editor().cursorOffset();
     if (dot_suppress) {
-        dot_suppress = false;
+        dot_suppress = false; // the repeat key itself: leave the register intact
     } else if (now != dot_commits and dot_pending_n > 0) {
+        // a change completed — promote its keys to the register.
         @memcpy(dot_reg[0..dot_pending_n], dot_pending[0..dot_pending_n]);
         dot_reg_n = dot_pending_n;
+    } else if (cur == dot_cursor) {
+        // no edit AND the cursor didn't move: a PREFIX (a count, a half-typed
+        // command) — keep it in `pending` so it rides with the change to come.
+        return;
     }
+    // a change, a motion (no edit but cursor moved), or a suppressed repeat: the
+    // pending sequence is done — start a fresh one from here.
     dot_pending_n = 0;
     dot_commits = now;
+    dot_cursor = cur;
 }
 
 /// Replay the recorded change by RE-FEEDING its keystrokes through the same

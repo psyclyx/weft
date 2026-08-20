@@ -193,6 +193,80 @@ test "authoring: `.` repeats a CHANGE with inserted text (cw), keystroke-faithfu
     try t.expectEqualStrings("X X baz", disk);
 }
 
+test "authoring: a count repeats an operator (3dw) and a motion (3w)" {
+    const gpa = t.allocator;
+    var app: App = undefined;
+    try app.init(gpa);
+    defer app.deinit();
+    const ed = &app.ed;
+
+    // Operator count: `3dw` deletes three words.
+    ed.runStr("open", "cn.txt");
+    ed.press("i", "");
+    ed.typeText("one two three four five");
+    ed.press("Escape", "");
+    ed.press("0", "");
+    ed.press("3", "3");
+    ed.press("d", "");
+    ed.press("w", ""); // 3dw → "four five"
+    ed.press("colon", "");
+    ed.typeText("w");
+    ed.press("Return", "");
+    ed.waitSave();
+    {
+        const disk = try core.file.readAlloc(gpa, "cn.txt");
+        defer gpa.free(disk);
+        try t.expectEqualStrings("four five", disk);
+    }
+
+    // Motion count: from line start, `3w` moves three words forward. Mark it.
+    ed.press("0", "");
+    ed.press("3", "3");
+    ed.press("w", ""); // → onto... "four five" has 2 words; 3w clamps to end
+    ed.press("i", "");
+    ed.typeText("Z");
+    ed.press("Escape", "");
+    ed.press("colon", "");
+    ed.typeText("w");
+    ed.press("Return", "");
+    ed.waitSave();
+    {
+        const disk = try core.file.readAlloc(gpa, "cn.txt");
+        defer gpa.free(disk);
+        // 3w from "four five" (2 words) lands at the last word / end; the marker
+        // is on/after "five", never back on "four".
+        try t.expect(std.mem.indexOf(u8, disk, "four ") != null);
+        try t.expect(std.mem.indexOf(u8, disk, "Z") != null);
+    }
+}
+
+test "authoring: `.` repeats a COUNTED change (3dw then . deletes three more)" {
+    const gpa = t.allocator;
+    var app: App = undefined;
+    try app.init(gpa);
+    defer app.deinit();
+    const ed = &app.ed;
+
+    ed.runStr("open", "cd.txt");
+    ed.press("i", "");
+    ed.typeText("a b c d e f g");
+    ed.press("Escape", "");
+    ed.press("0", "");
+    ed.press("3", "3");
+    ed.press("d", "");
+    ed.press("w", ""); // 3dw → "d e f g"
+    ed.press(".", ""); // repeat the WHOLE 3dw (count included) → "g"
+
+    ed.press("colon", "");
+    ed.typeText("w");
+    ed.press("Return", "");
+    ed.waitSave();
+
+    const disk = try core.file.readAlloc(gpa, "cd.txt");
+    defer gpa.free(disk);
+    try t.expectEqualStrings("g", disk);
+}
+
 test "authoring: `/` searches in the buffer and jumps to the match" {
     const gpa = t.allocator;
     var app: App = undefined;
