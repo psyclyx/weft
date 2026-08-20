@@ -38,6 +38,37 @@ test "authoring: `:w` writes the buffer to disk (the ex command a vim user reach
     try t.expect(std.mem.indexOf(u8, disk, "<!doctype html>") != null);
 }
 
+test "authoring: `:%s/old/new/g` renames every occurrence (the daily refactor motion)" {
+    const gpa = t.allocator;
+    var app: App = undefined;
+    try app.init(gpa);
+    defer app.deinit();
+    const ed = &app.ed;
+
+    ed.runStr("open", "theme.css");
+    ed.press("i", "");
+    ed.typeText(".btn { color: teal; }\n.link { color: teal; }\n.hdr { color: navy; }\n");
+    ed.press("Escape", "");
+
+    // Rename teal → coral across the whole file, the way a vim user does it.
+    ed.press("colon", "");
+    try t.expectEqualStrings("ex", ed.mode());
+    ed.typeText("%s/teal/coral/g");
+    ed.press("Return", "");
+
+    // Persist and check the artifact on disk.
+    ed.press("colon", "");
+    ed.typeText("w");
+    ed.press("Return", "");
+    ed.waitSave();
+
+    const disk = try core.file.readAlloc(gpa, "theme.css");
+    defer gpa.free(disk);
+    try t.expect(std.mem.indexOf(u8, disk, "teal") == null); // every match replaced
+    try t.expect(std.mem.count(u8, disk, "coral") == 2); // both, and only both
+    try t.expect(std.mem.indexOf(u8, disk, "navy") != null); // an unrelated value is untouched
+}
+
 test "authoring: `C-n` completes a word already in the buffer" {
     const gpa = t.allocator;
     var app: App = undefined;
