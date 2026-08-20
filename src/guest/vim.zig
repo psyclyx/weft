@@ -15,19 +15,12 @@ const ex_mod = @import("ex.zig");
 /// falls everything else through to the weft command registry (see ex.zig).
 const ex = ex_mod.Ex("normal", "ex");
 
-// ── Register (charwise/linewise), owned in guest memory ──────────────
-var reg_buf: [1 << 16]u8 = undefined;
-var reg_len: usize = 0;
-var reg_line: bool = false;
+// ── Register (charwise/linewise) — now the CORE register (weft.zig), shared
+// with helix and any editor, so `dd`→`p` ferries a projection row's hidden id
+// (a move) across editors and buffers. `yankRange` snapshots text + overlapping
+// subbuffer facts; `pasteAt` re-stamps them over the inserted text. A scratch
+// for assembling the linewise paste (register text plus a synthesized newline).
 var paste_buf: [(1 << 16) + 1]u8 = undefined;
-fn setReg(bytes: []const u8, linewise: bool) void {
-    reg_len = @min(bytes.len, reg_buf.len);
-    @memcpy(reg_buf[0..reg_len], bytes[0..reg_len]);
-    reg_line = linewise;
-}
-fn reg() []const u8 {
-    return reg_buf[0..reg_len];
-}
 
 // ── Pending-operator state (set on d/c/y; consumed by the next motion) ─
 var op_is_yank: bool = false;
@@ -91,7 +84,7 @@ fn opByMotion(comptime motion: []const u8) fn () void {
 /// gated edit) and enter the after-mode (normal for d, insert for c).
 fn applyOpRange(hnd: u32) void {
     const r = weft.rangeEnds(hnd) orelse return opCancel();
-    setReg(weft.slice(r.start, r.end), false);
+    weft.yankRange(r.start, r.end, false);
     if (op_is_yank) {
         weft.flash(r.start, r.end); // vim-goggles: flash the yanked region
         weft.jump(r.start);
@@ -416,7 +409,7 @@ fn visual() void {
 }
 fn visualDelete() void {
     if (weft.selection()) |s| {
-        setReg(weft.slice(s.start, s.end), false);
+        weft.yankRange(s.start, s.end, false);
         if (weft.stampRange(.{ .start = s.start, .end = s.end })) |h| weft.runRangeArg("op.delete", h);
     }
     weft.run("clear-selection");
@@ -424,7 +417,7 @@ fn visualDelete() void {
 }
 fn visualYank() void {
     if (weft.selection()) |s| {
-        setReg(weft.slice(s.start, s.end), false);
+        weft.yankRange(s.start, s.end, false);
         weft.flash(s.start, s.end); // vim-goggles
     }
     weft.run("clear-selection");
@@ -437,7 +430,7 @@ fn normal() void {
 fn deleteEol() void {
     const cur = weft.cursor();
     const e = lineEndOff();
-    setReg(weft.slice(cur, e), false);
+    weft.yankRange(cur, e, false);
     weft.edit(.{ .start = cur, .end = e }, "");
 }
 fn changeEol() void {
@@ -446,7 +439,7 @@ fn changeEol() void {
 }
 fn changeLine() void {
     const l = weft.lineAt(weft.cursor());
-    setReg(weft.slice(l.start, l.end), false);
+    weft.yankRange(l.start, l.end, false);
     weft.edit(.{ .start = l.start, .end = l.end }, "");
     weft.jump(l.start);
     weft.setMode("insert");
@@ -455,31 +448,39 @@ fn changeLine() void {
 // ── Register + paste ─────────────────────────────────────────────────
 fn yankLine() void {
     const l = weft.lineAt(weft.cursor());
-    setReg(weft.slice(l.start, l.end), true);
+    weft.yankRange(l.start, l.end, true);
     weft.flash(l.start, l.end); // vim-goggles
 }
 fn paste() void {
-    if (reg_line) {
+    if (weft.registerLinewise()) {
         const l = weft.lineAt(weft.cursor());
-        const r = reg();
+        const r = weft.registerText();
         paste_buf[0] = '\n';
         @memcpy(paste_buf[1 .. 1 + r.len], r);
         weft.edit(.{ .start = l.end, .end = l.end }, paste_buf[0 .. 1 + r.len]);
+        // The register text lands after the synthesized newline; re-stamp any
+        // ferried id-span there so `dd`→`p` is a move, not a delete+create.
+        weft.pasteAt(l.end + 1);
     } else {
         const off = weft.cursor();
-        weft.edit(.{ .start = off, .end = off }, reg());
+        const r = weft.registerText();
+        weft.edit(.{ .start = off, .end = off }, r);
+        weft.pasteAt(off);
     }
 }
 fn pasteBefore() void {
-    if (reg_line) {
+    if (weft.registerLinewise()) {
         const l = weft.lineAt(weft.cursor());
-        const r = reg();
+        const r = weft.registerText();
         @memcpy(paste_buf[0..r.len], r);
         paste_buf[r.len] = '\n';
         weft.edit(.{ .start = l.start, .end = l.start }, paste_buf[0 .. r.len + 1]);
+        weft.pasteAt(l.start); // text lands at l.start (the '\n' trails it)
     } else {
         const off = weft.cursor();
-        weft.edit(.{ .start = off, .end = off }, reg());
+        const r = weft.registerText();
+        weft.edit(.{ .start = off, .end = off }, r);
+        weft.pasteAt(off);
     }
 }
 fn joinLines() void {
@@ -515,7 +516,7 @@ fn opCancel() void {
 /// dd / cc / yy — linewise. The operator char repeated (bound in op-pending).
 fn opLine() void {
     const l = weft.lineAt(weft.cursor());
-    setReg(weft.slice(l.start, l.end), true);
+    weft.yankRange(l.start, l.end, true);
     if (op_is_yank) {
         weft.setMode("normal");
         return;

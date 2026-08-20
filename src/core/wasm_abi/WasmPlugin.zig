@@ -12,6 +12,7 @@ const kv = @import("../kv.zig");
 const Buffers = @import("../Buffers.zig");
 const syntax = @import("../syntax.zig");
 const subbuffer = @import("../subbuffer.zig");
+const register_mod = @import("../register.zig");
 const surface_mod = @import("../surface.zig");
 const async_loop = @import("../async.zig");
 const position = @import("../position.zig");
@@ -73,6 +74,9 @@ config_store: ?*kv.Store,
 /// Host effect services the membrane forwards to (mirrors abi.Services).
 syntax_of: ?SyntaxResolver,
 subbuffers: ?*subbuffer.SubBuffers,
+/// The core register/kill service (shared by every editor). Null = no
+/// register wired: yankRange/pasteAt degrade to no-ops. See register.zig.
+register: ?*register_mod.Register = null,
 loop: ?*async_loop.Loop,
 /// Subbuffers this plugin claimed, indexed by the handle the guest holds.
 /// Owned by the `subbuffers` service; we keep borrowed pointers only.

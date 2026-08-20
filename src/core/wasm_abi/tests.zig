@@ -11,6 +11,7 @@ const kv = @import("../kv.zig");
 const file = @import("../file.zig");
 const pick_mod = @import("../pick.zig");
 const subbuffer = @import("../subbuffer.zig");
+const register = @import("../register.zig");
 const surface_mod = @import("../surface.zig");
 const async_loop = @import("../async.zig");
 const net_session = @import("../net_session.zig");
@@ -1087,7 +1088,11 @@ test "wasm plugin: vim wires the modal keymap and runs motions/operators as .was
 
     var engine = try wasm.Engine.init();
     defer engine.deinit();
-    const plugin = try loadPlugin(&engine, &env.ctx, "vim", @embedFile("guest_vim_wasm"), .{});
+    // The register is now a CORE service (register.zig), shared by every editor
+    // — vim's yank/paste route through it, so wire one for the yy/p round-trip.
+    var reg: register.Register = .empty;
+    defer reg.deinit(gpa);
+    const plugin = try loadPlugin(&engine, &env.ctx, "vim", @embedFile("guest_vim_wasm"), .{ .register = &reg });
     defer plugin.deinit();
 
     // init() booted into normal and wired the whole keymap through the config
@@ -1102,7 +1107,7 @@ test "wasm plugin: vim wires the modal keymap and runs motions/operators as .was
     _ = try command.run(&env.commands, &env.ctx, "vim-normal", &.{});
     try t.expectEqualStrings("normal", env.keymap.currentMode());
 
-    // yank-line + paste duplicates the current line (register is guest state).
+    // yank-line + paste duplicates the current line (through the core register).
     const ed = &env.buffers.active().editor;
     try ed.insertText(gpa, "hello");
     ed.placeCursor(0);
@@ -1112,6 +1117,40 @@ test "wasm plugin: vim wires the modal keymap and runs motions/operators as .was
     defer gpa.free(s);
     try t.expectEqualStrings("hello\nhello", s);
     try t.expect(ed.doc.commitAt(ed.doc.commitCount() - 1).author != .user);
+}
+
+test "wasm plugin: vim yank/paste ferries a subbuffer id through the register (dd→p is a move)" {
+    const gpa = t.allocator;
+    var env: Env = undefined;
+    try Env.init(gpa, &env);
+    defer env.deinit(gpa);
+
+    var engine = try wasm.Engine.init();
+    defer engine.deinit();
+    var reg: register.Register = .empty;
+    defer reg.deinit(gpa);
+    var subs: subbuffer.SubBuffers = .empty;
+    defer subs.deinit(gpa);
+    const plugin = try loadPlugin(&engine, &env.ctx, "vim", @embedFile("guest_vim_wasm"), .{ .register = &reg, .subbuffers = &subs });
+    defer plugin.deinit();
+
+    const ed = &env.buffers.active().editor;
+    try ed.insertText(gpa, "row-a");
+    // A projection row: its name carries a hidden id (exactly as dired claims).
+    const row = try subs.claim(gpa, &ed.doc, .{ .start = 0, .end = 5 });
+    try row.putFact(gpa, "id", "42");
+    ed.placeCursor(0);
+
+    // yy then p: the id must ride the CORE register onto the pasted line — a
+    // move — not vanish into a delete+create. The whole thesis, end to end
+    // across the wasm membrane: yankRange snapshots it, pasteAt re-stamps it.
+    _ = try command.run(&env.commands, &env.ctx, "yank-line", &.{});
+    _ = try command.run(&env.commands, &env.ctx, "paste", &.{});
+    const s = try ed.text().toOwnedSlice(gpa);
+    defer gpa.free(s);
+    try t.expectEqualStrings("row-a\nrow-a", s);
+    const pasted = subs.at(&ed.doc, 8) orelse return error.NoIdOnPastedRow;
+    try t.expectEqualStrings("42", pasted.fact("id").?);
 }
 
 test "wasm plugins: a motion returns a range an operator awaits + applies (dw)" {

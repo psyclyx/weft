@@ -19,6 +19,7 @@ const Document = @import("../Document.zig");
 const kv = @import("../kv.zig");
 const file = @import("../file.zig");
 const subbuffer = @import("../subbuffer.zig");
+const register_mod = @import("../register.zig");
 const async_loop = @import("../async.zig");
 const Pool = @import("../task.zig").Pool;
 
@@ -90,6 +91,9 @@ pub const LoadOptions = struct {
     syntax_of: ?SyntaxResolver = null,
     /// The subbuffer service `claimSubbuffer` claims into. Null = unavailable.
     subbuffers: ?*subbuffer.SubBuffers = null,
+    /// The core register/kill service `yankRange`/`pasteAt` operate on (shared
+    /// across every editor plugin). Null = register unavailable (both no-op).
+    register: ?*register_mod.Register = null,
     /// The async loop `shellInsert` schedules its off-thread work on. Null =
     /// shell effects are unavailable (dropped).
     loop: ?*async_loop.Loop = null,
@@ -175,6 +179,7 @@ fn construct(engine: *wasm.Engine, ctx: *command.Context, name: []const u8, opts
         .pool = opts.pool,
         .syntax_of = opts.syntax_of,
         .subbuffers = opts.subbuffers,
+        .register = opts.register,
         .loop = opts.loop,
         .module = module,
         .linker = linker,

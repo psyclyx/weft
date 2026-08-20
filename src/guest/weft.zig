@@ -109,6 +109,12 @@ extern "weft" fn wl_node_children(off: u32) i32;
 extern "weft" fn wl_activate_path(out_ptr: u32, out_cap: u32) i32;
 extern "weft" fn wl_claim_subbuffer(start: u32, end: u32) i32;
 extern "weft" fn wl_subbuffer_put_fact(handle: u32, k: u32, kl: u32, v: u32, vl: u32) void;
+// Register/kill service (core, shared by every editor): yank snapshots text +
+// any overlapping subbuffer facts; paste re-stamps them over inserted text.
+extern "weft" fn wl_yank_range(start: u32, end: u32, linewise: u32) void;
+extern "weft" fn wl_register_text(out_ptr: u32, out_cap: u32) u32;
+extern "weft" fn wl_register_linewise() u32;
+extern "weft" fn wl_paste_at(base: u32) void;
 extern "weft" fn wl_shell_insert(ptr: u32, len: u32) void;
 extern "weft" fn wl_repl_start(cmd: u32, cmd_len: u32, name: u32, name_len: u32) i32;
 extern "weft" fn wl_repl_send(handle: u32, ptr: u32, len: u32) void;
@@ -724,6 +730,37 @@ pub fn claimSubbuffer(start: usize, end: usize) ?u32 {
 /// Attach a fact (`key` = `value`) to a claimed subbuffer.
 pub fn subbufferPutFact(handle: u32, key: []const u8, value: []const u8) void {
     wl_subbuffer_put_fact(handle, p(key.ptr), @intCast(key.len), p(value.ptr), @intCast(value.len));
+}
+
+// ── Register / kill (core, shared by every editor) ───────────────────
+/// A private scratch for `registerText`, so a paste can hold the register bytes
+/// while it reads the buffer through `slice`/`lineAt` (which reuse `scratch`).
+var reg_scratch: [1 << 16]u8 = undefined;
+
+/// Yank `[start, end)` into the shared register: captures the bytes, the
+/// `linewise` flag, AND the facts of any subbuffer the range overlaps (a
+/// projection row's hidden id), so a later `pasteAt` can ferry them. This is
+/// the one door an editor's yank/delete calls — identity-ferrying is core, not
+/// per-editor, so `dd`→`p` moves an id across editors and buffers alike.
+pub fn yankRange(start: usize, end: usize, linewise: bool) void {
+    wl_yank_range(@intCast(start), @intCast(end), @intFromBool(linewise));
+}
+/// The register bytes (into a private scratch, valid until the next call) — for
+/// an editor to build its paste. Charwise callers can insert these directly.
+pub fn registerText() []const u8 {
+    const n = wl_register_text(p(&reg_scratch), reg_scratch.len);
+    return reg_scratch[0..@intCast(n)];
+}
+/// Whether the register holds a linewise yank (the editor's paste-positioning
+/// policy stays its own).
+pub fn registerLinewise() bool {
+    return wl_register_linewise() != 0;
+}
+/// Re-stamp any ferried id-spans over register text ALREADY inserted at `base`
+/// (call right after inserting `registerText()`). Turns `dd`→`p` into a MOVE;
+/// a plain insert with no call — or a register with no payloads — creates none.
+pub fn pasteAt(base: usize) void {
+    wl_paste_at(@intCast(base));
 }
 
 // ── Effects (perm-gated) ─────────────────────────────────────────────

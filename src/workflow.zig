@@ -52,6 +52,7 @@ pub const Editor = struct {
     config_kv: core.kv.Store = .empty,
     loop: core.async_loop.Loop,
     subs: core.subbuffer.SubBuffers = .empty,
+    register: core.register = .empty,
     view: ?view_mod.View = null,
     /// Last active buffer id — so a buffer switch (open, buffer-next) fires
     /// `on_activate` to plugins, exactly as main's loop does.
@@ -82,6 +83,7 @@ pub const Editor = struct {
         self.plugin_kv = .empty;
         self.config_kv = .empty;
         self.subs = .empty;
+        self.register = .empty;
         self.view = null;
         self.pool = try core.task.Pool.init(gpa, .{ .threads = 2 });
         self.gpa = gpa;
@@ -134,6 +136,7 @@ pub const Editor = struct {
         if (self.view) |*v| v.deinit();
         self.loop.deinit();
         self.subs.deinit(gpa);
+        self.register.deinit(gpa);
         self.actions.deinit();
         self.caps.deinit();
         self.pick.deinit(gpa);
@@ -154,6 +157,7 @@ pub const Editor = struct {
             .config = &self.config_kv,
             .loop = &self.loop,
             .subbuffers = &self.subs,
+            .register = &self.register,
             .pool = self.pool,
         });
         try self.plugins.append(self.gpa, p);

@@ -178,6 +178,10 @@ pub fn main(init: std.process.Init) !void {
     defer config_kv.deinit(gpa);
     var plugin_subs: core.subbuffer.SubBuffers = .empty;
     defer plugin_subs.deinit(gpa);
+    // The one register/kill store every editor shares (editor-agnostic yank/
+    // paste that ferries a projection row's hidden id across dd→p).
+    var plugin_register: core.register = .empty;
+    defer plugin_register.deinit(gpa);
     var plugin_loop = core.async_loop.Loop.init(gpa, pool, core.task.nowNs);
     defer plugin_loop.deinit();
     // Give plugin `proc` children the parent PATH (nix tools like rg/zig).
@@ -203,7 +207,7 @@ pub fn main(init: std.process.Init) !void {
         .gpa = gpa,
         .engine = &wasm_engine,
         .ctx = &session.cmd_ctx,
-        .opts = .{ .kv = &plugin_kv, .config = &config_kv, .loop = &plugin_loop, .subbuffers = &plugin_subs, .syntax_of = resolveSyntax, .pool = pool, .module_cache_dir = module_cache_dir },
+        .opts = .{ .kv = &plugin_kv, .config = &config_kv, .loop = &plugin_loop, .subbuffers = &plugin_subs, .register = &plugin_register, .syntax_of = resolveSyntax, .pool = pool, .module_cache_dir = module_cache_dir },
         .list = &plugins,
         .js_list = &js_plugins,
         .dir = plugin_dir,

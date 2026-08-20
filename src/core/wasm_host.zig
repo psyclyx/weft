@@ -57,6 +57,7 @@ const dispatch = @import("wasm_host/dispatch.zig");
 const keymap = @import("wasm_host/keymap.zig");
 const commands = @import("wasm_host/commands.zig");
 const edit = @import("wasm_host/edit.zig");
+const register_host = @import("wasm_host/register.zig");
 
 /// Bind the full `weft.*` host-import membrane (the guest-side surface in
 /// src/guest/weft.zig). One import per abi.Abi method the shim exposes; each
@@ -176,6 +177,12 @@ pub fn defineImports(linker: *wasm.Linker, p: *WasmPlugin) !void {
     try d(linker, "wl_activate_path", 2, 1, activation.hActivatePath, p);
     try d(linker, "wl_claim_subbuffer", 2, 1, syntax_host.hClaimSubbuffer, p);
     try d(linker, "wl_subbuffer_put_fact", 5, 0, syntax_host.hSubbufferPutFact, p);
+    // Register/kill service: the editor-agnostic yank/paste that ferries a
+    // subbuffer's facts (a projection row's hidden id) across dd→p (register.zig).
+    try d(linker, "wl_yank_range", 3, 0, register_host.hYankRange, p);
+    try d(linker, "wl_register_text", 2, 1, register_host.hRegisterText, p);
+    try d(linker, "wl_register_linewise", 0, 1, register_host.hRegisterLinewise, p);
+    try d(linker, "wl_paste_at", 1, 0, register_host.hPasteAt, p);
     // Effects (perm-gated): shell insert — the membrane form of editLater
     // with a host-side proc body (the guest can't run off-thread itself).
     try d(linker, "wl_shell_insert", 2, 0, proc_host.hShellInsert, p);
