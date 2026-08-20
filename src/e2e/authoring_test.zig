@@ -129,6 +129,41 @@ test "authoring: Esc seals the undo unit — dd then u restores the whole line" 
     try t.expectEqualStrings("const x = 1;", disk);
 }
 
+test "authoring: `/` searches in the buffer and jumps to the match" {
+    const gpa = t.allocator;
+    var app: App = undefined;
+    try app.init(gpa);
+    defer app.deinit();
+    const ed = &app.ed;
+
+    ed.runStr("open", "doc.txt");
+    ed.press("i", "");
+    ed.typeText("alpha\nbravo\ncharlie\ndelta");
+    ed.press("Escape", "");
+
+    // The vim search key. Before this binding, `/` did nothing.
+    ed.press("/", "");
+    ed.settle(10);
+    try t.expectEqualStrings("pick", ed.mode()); // search prompt is open
+    ed.typeText("charlie"); // the pattern
+    ed.settle(10);
+    ed.press("Return", ""); // jump to the match
+
+    // Prove the cursor LANDED on the charlie line: drop a marker there and save.
+    ed.press("i", "");
+    ed.typeText("X");
+    ed.press("Escape", "");
+    ed.press("colon", "");
+    ed.typeText("w");
+    ed.press("Return", "");
+    ed.waitSave();
+
+    // The marker landed on the charlie line — `/charlie` jumped there.
+    const disk = try core.file.readAlloc(gpa, "doc.txt");
+    defer gpa.free(disk);
+    try t.expect(std.mem.indexOf(u8, disk, "Xcharlie") != null);
+}
+
 test "authoring: switch between two files with the fuzzy buffer picker" {
     const gpa = t.allocator;
     var app: App = undefined;

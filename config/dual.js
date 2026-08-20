@@ -54,6 +54,7 @@ function leaderMap(m) {
   weft.bind(m, "SPC g i", "git-init"); // start version control (git init)
   weft.bind(m, "SPC g l", "git-log");
   weft.bind(m, "SPC g b", "git-blame");
+  weft.bind(m, "/", "consult-line"); // vim `/` — search in this buffer
   weft.bind(m, "SPC s s", "consult-line");
   weft.bind(m, "SPC s p", "grep");
   weft.bind(m, "SPC s w", "grep-word");

@@ -117,6 +117,11 @@ weft.bind("normal", "SPC g d", "git-diff");
 weft.bind("normal", "SPC g D", "git-diff-staged");
 weft.bind("normal", "SPC g b", "git-blame");
 
+// `/` — search in this buffer (vim's search key). consult-line is a fuzzy
+// in-buffer jump: type a pattern, Return lands on the match. (A vim user reaches
+// for `/`; without this it did nothing — only SPC s s / SPC / were bound.)
+weft.bind("normal", "/", "consult-line");
+
 // SPC s — search
 weft.bind("normal", "SPC s s", "consult-line");
 weft.bind("normal", "SPC s i", "consult-imenu");
