@@ -11,8 +11,6 @@
 //!     sync layer directly; wrapping it in collab.tickCollab (hub multi-peer
 //!     adoption, partial checkout, reconnect) needs the ShareCtx + main() locals
 //!     stood up headlessly.
-//!   • magit renders "Branch:" UNCONDITIONALLY, so git-status on a non-repo shows
-//!     a fake-empty magit instead of hinting git-init — a display bug to fix.
 
 test {
     _ = @import("editing_test.zig");

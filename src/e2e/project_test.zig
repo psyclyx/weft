@@ -145,14 +145,20 @@ test "e2e/spine: write a file, init a repo, stage and commit — all through wef
         try t.expect(std.mem.indexOf(u8, disk, "<title>weft demo</title>") != null);
     }
 
+    // ── 1.5. git-status BEFORE a repo exists says so — and points the way. ──
+    // (Magit used to render a fake `Branch: (no branch)` here; now it tells the
+    // truth and names the fix, which is the natural path to step 2.)
+    ed.run("git-status");
+    try t.expect(drainToolContains(&ed, "*magit*", "Not a git repository."));
+    try t.expect(drainToolContains(&ed, "*magit*", "git-init")); // and it names the fix
+
     // ── 2. Start version control from INSIDE the editor (the new git-init). ──
-    // Before this command existed, git-status on a non-repo showed an empty
-    // buffer and there was no in-editor way to create the repo.
     ed.run("git-init");
-    // Prove git ACTUALLY ran, not just that the (unconditional) "Branch:" header
-    // rendered: wait for the real `git status` output to list the untracked file
-    // in *magit*. Then confirm the repo on disk via the git oracle.
+    // Prove git ACTUALLY ran and the repo now renders a real branch: wait for the
+    // `git status` output to list the untracked file + the `Branch:` header in
+    // *magit*. Then confirm the repo on disk via the git oracle.
     try t.expect(drainToolContains(&ed, "*magit*", "index.html"));
+    try t.expect(drainToolContains(&ed, "*magit*", "Branch:"));
     {
         const gitdir = try proj.oracle("git rev-parse --git-dir");
         defer gpa.free(gitdir);

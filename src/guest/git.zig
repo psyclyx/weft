@@ -136,6 +136,10 @@ var out: usize = 0;
 
 var branch: [256]u8 = undefined;
 var branch_len: usize = 0;
+// Whether the porcelain gave us a `## ` line — i.e. cwd IS a git repo. A fresh
+// repo with no commits still emits `## No commits yet on <branch>`, so absence
+// means "not a repository" (git exited 128), not "empty repo".
+var in_repo: bool = false;
 var recent_start: usize = 0; // recent-commits region in `raw`
 var recent_end: usize = 0;
 
@@ -557,6 +561,7 @@ fn parse() void {
     file_count = 0;
     hunk_count = 0;
     branch_len = 0;
+    in_repo = false;
     recent_start = 0;
     recent_end = 0;
     dropped_files = false;
@@ -606,6 +611,7 @@ fn parsePorcelain(s: usize, e: usize) void {
         const line = raw[ls..le];
         if (line.len == 0) continue;
         if (std.mem.startsWith(u8, line, "## ")) {
+            in_repo = true;
             const b = std.mem.trim(u8, line[3..], " \t\r");
             branch_len = @min(b.len, branch.len);
             @memcpy(branch[0..branch_len], b[0..branch_len]);
@@ -784,7 +790,13 @@ fn statusLabel(f: *const File) []const u8 {
 fn render() void {
     out = 0;
     home_off = 0;
-    // Branch header (always present).
+    // Not in a repo: say so plainly rather than a fake `Branch: (no branch)`.
+    // `SPC g i` (git-init) is the natural next move from here.
+    if (!in_repo) {
+        put("Not a git repository.\n\nRun git-init (SPC g i) to start one.\n");
+        return;
+    }
+    // Branch header.
     put("Branch: ");
     if (branch_len > 0) put(branch[0..branch_len]) else put("(no branch)");
     put("\n\n");

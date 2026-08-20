@@ -975,12 +975,16 @@ test "wasm plugin: git-status runs git into a focused tool buffer (async)" {
         std.Thread.yield() catch {};
     }
     if (buf.?.editor.text().byteLen() > 0) {
-        // on_fill parsed the raw git output and re-rendered the model: the
-        // buffer now holds the pretty projection, not the porcelain, so we
-        // assert the rendered branch header, not a `#`.
+        // on_fill parsed the raw git output and re-rendered the MODEL: the buffer
+        // holds the pretty projection, never the porcelain. Whether the ambient
+        // cwd is a repo or not, we get a model header — `Branch:` in a repo, or
+        // `Not a git repository.` outside one — but never a raw `## `/`#` line.
         const s = try buf.?.editor.text().toOwnedSlice(gpa);
         defer gpa.free(s);
-        try t.expect(std.mem.indexOf(u8, s, "Branch:") != null);
+        const is_repo = std.mem.indexOf(u8, s, "Branch:") != null;
+        const not_repo = std.mem.indexOf(u8, s, "Not a git repository.") != null;
+        try t.expect(is_repo or not_repo);
+        try t.expect(!std.mem.startsWith(u8, s, "## ")); // porcelain never leaks through
         const doc = &buf.?.editor.doc;
         try t.expect(doc.commitAt(doc.commitCount() - 1).author != .user); // the plugin peer
     }
