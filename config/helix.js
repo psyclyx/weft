@@ -14,6 +14,7 @@
   "comment", "autopair", "consult", "git", "grep", "make", "run", "fmt", "buffers",
   "windows", "modes", "dired", "which_key",
 ].forEach((p) => weft.plugin(p));
+weft.use("defaults"); // shared pick/editing/menu-nav bindings
 
 // which-key: centered popup, a longer hold before it appears.
 weft.set("which_key", "placement", "center");

@@ -43,6 +43,10 @@ const Bridge = struct {
     ctx: *command.Context,
     loader: ?PluginLoader,
     config: ?*kv.Store,
+    /// Directory the loaded config lives in — `weft.use(name)` resolves
+    /// `<dir>/<name>.js` against it (config-data includes). Null = no includes
+    /// (the plugin plane, or an unnamed config): `weft.use` degrades to a no-op.
+    config_dir: ?[]const u8 = null,
     pending_plugins: std.ArrayList([]u8) = .empty,
     pending_runs: std.ArrayList([]u8) = .empty,
 };
@@ -58,6 +62,7 @@ fn defineConfigFns(linker: *wasm.Linker, bridge: *Bridge) !void {
     try linker.defineFn("weft", "qjs_echo", 2, 0, cEcho, bridge);
     try linker.defineFn("weft", "qjs_log", 2, 0, cLog, bridge);
     try linker.defineFn("weft", "qjs_plugin", 2, 0, cPlugin, bridge);
+    try linker.defineFn("weft", "qjs_read_config", 4, 1, cReadConfig, bridge);
     try linker.defineFn("weft", "qjs_set", 6, 0, cSet, bridge);
     try linker.defineFn("weft", "qjs_menu", 2, 0, cMenu, bridge);
     try linker.defineFn("weft", "qjs_action", 2, 0, cAction, bridge);
@@ -84,8 +89,8 @@ fn cStubVoid(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32, results
 /// marshal the source into the guest, and eval it. A JS exception surfaces as
 /// `error.ConfigException` (the shim logs its message) — never a partial,
 /// silent half-applied config. Each call is a fresh JS runtime.
-pub fn evalConfig(engine: *wasm.Engine, ctx: *command.Context, loader: ?PluginLoader, config: ?*kv.Store, src: []const u8) EvalError!void {
-    var bridge: Bridge = .{ .ctx = ctx, .loader = loader, .config = config };
+pub fn evalConfig(engine: *wasm.Engine, ctx: *command.Context, loader: ?PluginLoader, config: ?*kv.Store, config_dir: ?[]const u8, src: []const u8) EvalError!void {
+    var bridge: Bridge = .{ .ctx = ctx, .loader = loader, .config = config, .config_dir = config_dir };
     defer {
         for (bridge.pending_plugins.items) |s| ctx.gpa.free(s);
         bridge.pending_plugins.deinit(ctx.gpa);
@@ -688,6 +693,39 @@ fn cBindKey(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32, results:
     br.ctx.keymap.bind(gpa, mode, key, cmd, @import("Keymap.zig").prio_config, "config") catch {};
 }
 
+/// `weft.use(name)` backing: read `<config_dir>/<name>.js` into the guest so the
+/// shim can nested-eval it (a shared-defaults include). -1 when no config dir
+/// (the plugin plane / an unnamed config) or the file is unreadable.
+fn cReadConfig(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32, results: []i32) void {
+    const br: *Bridge = @ptrCast(@alignCast(data.?));
+    const gpa = br.ctx.gpa;
+    const dir = br.config_dir orelse {
+        results[0] = -1;
+        return;
+    };
+    const name = readStr(br, caller, args[0], args[1]) orelse {
+        results[0] = -1;
+        return;
+    };
+    defer gpa.free(name);
+    const path = std.fmt.allocPrint(gpa, "{s}/{s}.js", .{ dir, name }) catch {
+        results[0] = -1;
+        return;
+    };
+    defer gpa.free(path);
+    const src = @import("file.zig").readAlloc(gpa, path) catch {
+        results[0] = -1;
+        return;
+    };
+    defer gpa.free(src);
+    const cap: usize = @intCast(args[3]);
+    const n = @min(src.len, cap);
+    results[0] = @intCast(caller.writeMemory(@intCast(args[2]), @intCast(cap), src[0..n]) catch {
+        results[0] = -1;
+        return;
+    });
+}
+
 fn cRun(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32, results: []i32) void {
     _ = results;
     const br: *Bridge = @ptrCast(@alignCast(data.?));
@@ -864,13 +902,45 @@ test "quickjs: config.js drives the weft ABI — binds a key and echoes" {
         \\weft.bind("normal", "k", "cursor-up");
         \\weft.echo("config loaded (" + (1 + 1) + " keys)");
     ;
-    try evalConfig(&engine, &env.ctx, null, null, cfg);
+    try evalConfig(&engine, &env.ctx, null, null, null, cfg);
 
     // The JS ran real logic (string concat + arithmetic) and reached the host:
     try env.keymap.setMode(gpa, "normal");
     try t.expectEqualStrings("cursor-down", env.keymap.lookup("j").?);
     try t.expectEqualStrings("cursor-up", env.keymap.lookup("k").?);
     try t.expectEqualStrings("config loaded (2 keys)", env.echo.items);
+}
+
+test "quickjs: weft.use includes a shared bindings module from the config dir" {
+    const gpa = t.allocator;
+    var env: Env = undefined;
+    try Env.init(gpa, &env);
+    defer env.deinit(gpa);
+
+    var engine = try wasm.Engine.init();
+    defer engine.deinit();
+
+    // A shared defaults file the config pulls in with `weft.use`. It binds a
+    // pick key (which now lives in config data, not core).
+    const dir = ".zig-cache/tmp/weft-use-test";
+    const defaults_path = dir ++ "/shared.js";
+    try @import("file.zig").writeBytesMakingDirs(gpa, dir, defaults_path,
+        \\weft.bind("pick", "Down", "pick-next");
+        \\weft.bind("pick", "Return", "pick-accept");
+    );
+    defer @import("file.zig").deleteFile(gpa, defaults_path);
+
+    // The config includes it, then OVERRIDES one bind (last-wins) to prove the
+    // including config wins over the shared defaults.
+    const cfg =
+        \\weft.use("shared");
+        \\weft.bind("pick", "Down", "pick-prev");
+    ;
+    try evalConfig(&engine, &env.ctx, null, null, dir, cfg);
+
+    try env.keymap.setMode(gpa, "pick");
+    try t.expectEqualStrings("pick-accept", env.keymap.lookup("Return").?); // from the include
+    try t.expectEqualStrings("pick-prev", env.keymap.lookup("Down").?); // config override won
 }
 
 test "quickjs: config.js can run a registered command through weft.run" {
@@ -892,7 +962,7 @@ test "quickjs: config.js can run a registered command through weft.run" {
 
     var engine = try wasm.Engine.init();
     defer engine.deinit();
-    try evalConfig(&engine, &env.ctx, null, null, "weft.run(\"mark\");");
+    try evalConfig(&engine, &env.ctx, null, null, null, "weft.run(\"mark\");");
     try t.expectEqualStrings("ran!", env.echo.items);
 }
 
@@ -913,7 +983,7 @@ test "quickjs: weft.action + weft.provide wire the pick dispatch layer" {
         \\weft.provide("eval", {}, "eval-line", -10);
         \\weft.bind("normal", "space", "eval");
     ;
-    try evalConfig(&engine, &env.ctx, null, null, cfg);
+    try evalConfig(&engine, &env.ctx, null, null, null, cfg);
 
     // The action registered its trampoline command (a key can bind to it), and
     // the key resolves to the action name through the normal keymap door.
@@ -1095,7 +1165,7 @@ test "quickjs: a config syntax error surfaces as ConfigException, not silent" {
     var engine = try wasm.Engine.init();
     defer engine.deinit();
     // Malformed JS: the eval must fail loudly, and nothing was bound.
-    try t.expectError(error.ConfigException, evalConfig(&engine, &env.ctx, null, null, "this is (not valid javascript"));
+    try t.expectError(error.ConfigException, evalConfig(&engine, &env.ctx, null, null, null, "this is (not valid javascript"));
     try t.expectEqual(@as(usize, 0), env.echo.items.len);
 }
 
@@ -1132,7 +1202,7 @@ test "quickjs: weft.plugin loads a real .wasm, then its command runs" {
         \\weft.plugin("edit");
         \\weft.bind("normal", "D", "duplicate-line");
     ;
-    try evalConfig(&engine, &env.ctx, .{ .ctx = &loader, .load = Loader.load }, null, cfg);
+    try evalConfig(&engine, &env.ctx, .{ .ctx = &loader, .load = Loader.load }, null, null, cfg);
 
     // The plugin loaded and registered its command; the config's bind took.
     try t.expect(loader.held != null);
@@ -1184,7 +1254,7 @@ test "quickjs: deferred load — weft.set before the plugin line reaches its ini
         \\weft.bind("insert", "grave", "pair-tick");
         \\weft.plugin("autopair");
     ;
-    try evalConfig(&engine, &env.ctx, .{ .ctx = &loader, .load = Loader.load }, &config, cfg);
+    try evalConfig(&engine, &env.ctx, .{ .ctx = &loader, .load = Loader.load }, &config, null, cfg);
 
     // The plugin read its config at init: it registered the CONFIG pair command,
     // not the shipped defaults.
@@ -1215,7 +1285,7 @@ test "quickjs: weft.menu declares a submenu the leader tree enters (doom-style)"
         \\weft.bind("leader", "f", "leader-file");
         \\weft.bind("leader-file", "s", "save");
     ;
-    try evalConfig(&engine, &env.ctx, null, null, cfg);
+    try evalConfig(&engine, &env.ctx, null, null, null, cfg);
 
     // The submenu is a menu mode: which-key shows it, and the dispatch enters it
     // when a leader key's command names it (that's why "f" → "leader-file" is a
@@ -1253,7 +1323,7 @@ test "quickjs: every shipped example config evals without a JS error" {
         defer env.deinit(gpa);
         var cfgstore: kv.Store = .empty;
         defer cfgstore.deinit(gpa);
-        evalConfig(&engine, &env.ctx, null, &cfgstore, src) catch |e| {
+        evalConfig(&engine, &env.ctx, null, &cfgstore, null, src) catch |e| {
             std.debug.print("config {s} failed: {t}\n", .{ path, e });
             return e;
         };

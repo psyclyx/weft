@@ -31,6 +31,10 @@ __attribute__((import_module("weft"), import_name("qjs_log")))
 extern void host_log(const char *msg, int msg_len);
 __attribute__((import_module("weft"), import_name("qjs_plugin")))
 extern void host_plugin(const char *name, int name_len);
+// Read config `<name>.js` (relative to the loaded config's dir) into `out`;
+// returns the byte count, or -1. Backs `weft.use` (config-data includes).
+__attribute__((import_module("weft"), import_name("qjs_read_config")))
+extern int host_read_config(const char *name, int name_len, char *out, int cap);
 __attribute__((import_module("weft"), import_name("qjs_set")))
 extern void host_set(const char *plugin, int plugin_len,
                      const char *key, int key_len,
@@ -115,6 +119,36 @@ static JSValue js_run(JSContext *ctx, JSValueConst this_val,
     const char *c = JS_ToCStringLen(ctx, &cl, argv[0]);
     if (c) host_run(c, (int)cl);
     JS_FreeCString(ctx, c);
+    return JS_UNDEFINED;
+}
+
+// weft.use(name): load config `<name>.js` (relative to the loaded config's dir)
+// and eval it in THIS runtime — a shared-defaults include, so the pick / editing
+// / menu-nav key bindings live in config data (a defaults.js every config
+// includes), not imperatively in core. Nested JS_Eval; the including config's
+// own binds run after and override (higher priority / last-wins).
+static char g_use_buf[262144];
+static JSValue js_use(JSContext *ctx, JSValueConst this_val,
+                      int argc, JSValueConst *argv) {
+    if (argc < 1) return JS_UNDEFINED;
+    size_t nl;
+    const char *name = JS_ToCStringLen(ctx, &nl, argv[0]);
+    if (!name) return JS_UNDEFINED;
+    int n = host_read_config(name, (int)nl, g_use_buf, (int)sizeof g_use_buf - 1);
+    JS_FreeCString(ctx, name);
+    if (n <= 0) return JS_UNDEFINED;
+    g_use_buf[n] = 0;
+    JSValue v = JS_Eval(ctx, g_use_buf, (size_t)n, "<use>", JS_EVAL_TYPE_GLOBAL);
+    if (JS_IsException(v)) {
+        JSValue e = JS_GetException(ctx);
+        const char *msg = JS_ToCString(ctx, e);
+        if (msg) {
+            host_log(msg, (int)strlen(msg));
+            JS_FreeCString(ctx, msg);
+        }
+        JS_FreeValue(ctx, e);
+    }
+    JS_FreeValue(ctx, v);
     return JS_UNDEFINED;
 }
 
@@ -280,6 +314,7 @@ static void install_weft(JSContext *ctx) {
     JSValue weft = JS_NewObject(ctx);
     JS_SetPropertyStr(ctx, weft, "bind", JS_NewCFunction(ctx, js_bind_key, "bind", 3));
     JS_SetPropertyStr(ctx, weft, "run", JS_NewCFunction(ctx, js_run, "run", 1));
+    JS_SetPropertyStr(ctx, weft, "use", JS_NewCFunction(ctx, js_use, "use", 1));
     JS_SetPropertyStr(ctx, weft, "echo", JS_NewCFunction(ctx, js_echo, "echo", 1));
     JS_SetPropertyStr(ctx, weft, "log", JS_NewCFunction(ctx, js_log, "log", 1));
     JS_SetPropertyStr(ctx, weft, "plugin", JS_NewCFunction(ctx, js_plugin, "plugin", 1));

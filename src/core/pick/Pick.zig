@@ -515,21 +515,11 @@ pub fn install(gpa: Allocator, commands: *command.Commands, keymap: *@import("..
     };
     for (defs) |cmd| _ = try commands.bind(gpa, cmd.name, cmd);
 
-    const binds = [_][2][]const u8{
-        .{ "Return", "pick-accept" },
-        .{ "Escape", "pick-cancel" },
-        .{ "C-g", "pick-cancel" },
-        .{ "BackSpace", "pick-backspace" },
-        .{ "Down", "pick-next" },
-        .{ "Up", "pick-prev" },
-        .{ "C-n", "pick-next" },
-        .{ "C-p", "pick-prev" },
-        .{ "Tab", "pick-complete" },
-        .{ "C-j", "pick-accept-input" },
-        .{ "S-Return", "pick-accept-input" },
-    };
-    const Keymap = @import("../Keymap.zig");
-    for (binds) |b| try keymap.bind(gpa, "pick", b[0], b[1], Keymap.prio_core, "core");
+    // The "pick" mode's KEY BINDINGS are config data, not core policy: the
+    // shipped `defaults.js` (which every config `weft.use`s) binds Down→pick-next,
+    // Return→pick-accept, etc. — so the picker is rebindable like everything
+    // else, and core ships only the COMMANDS + the mode's text command. (The
+    // text command IS mechanism — it names how typed input routes, not a key.)
     try keymap.setTextCommand(gpa, "pick", "pick-input");
     _ = try commands.bind(gpa, "palette", (comptime command.define("palette", "Open the command palette.", cPalette)));
 }

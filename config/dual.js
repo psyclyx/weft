@@ -15,6 +15,7 @@
   "comment", "autopair", "consult", "git", "grep", "make", "run", "fmt", "buffers",
   "windows", "modes", "dired", "which_key",
 ].forEach((p) => weft.plugin(p));
+weft.use("defaults"); // shared pick/editing/menu-nav bindings
 
 // `\` switches the current buffer's editor (mode is per-buffer, so buffers can
 // differ). vim-normal / helix-mode are each editor's "enter my normal" command.

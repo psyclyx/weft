@@ -16,7 +16,9 @@ pub fn loadJsConfig(gpa: std.mem.Allocator, ctx: *core.command.Context, path: []
     defer gpa.free(src);
     var engine = try core.wasm.Engine.init();
     defer engine.deinit();
-    try core.quickjs.evalConfig(&engine, ctx, loader, config, src);
+    // `weft.use(name)` resolves against the config's own directory.
+    const dir = std.fs.path.dirname(path);
+    try core.quickjs.evalConfig(&engine, ctx, loader, config, dir, src);
 }
 
 /// Decode the first record of a framed config blob (uvarint count, then per

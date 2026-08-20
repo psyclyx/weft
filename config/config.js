@@ -55,6 +55,11 @@ weft.plugin("net");         // raw TCP/TLS transport (net.connect)
 weft.plugin("which_key");   // menu-hint overlay, as a plugin over the surface door
 weft.plugin("dired");       // directory editor (proc ls + its own keymap mode)
 
+// Shared, editor-agnostic key bindings (the picker, and — below — which-key nav):
+// core ships the commands + modes; the BINDINGS are config data. Overridable by
+// anything bound after this line.
+weft.use("defaults");
+
 // ── Doom-Emacs-style leader (SPC). vim provides the `leader` menu mode (SPC
 // enters it in normal); which_key shows the tree. Each SPC <group> opens a
 // which-key submenu; a group binding whose command NAMES a menu mode enters it.
