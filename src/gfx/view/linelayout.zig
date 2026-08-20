@@ -35,6 +35,10 @@ pub const StyleInputs = struct {
     st_base: usize = 0,
     diag: ?[]const u8 = null,
     diag_base: usize = 0,
+    /// Placed decorations (virtual text) for the visible range — drawn beside
+    /// the text, never in the document. dired's metadata/arrow/mark ride this,
+    /// so the buffer text is only the editable name (yy yanks the name alone).
+    deco: ?*const core.layers.Layer = null,
 };
 
 /// The face + size + color a markdown attribute renders as.
@@ -93,6 +97,7 @@ pub fn resolveStyleInputs(
         s.diag = tint;
         s.diag_base = vis_start;
     }
+    s.deco = hud.decorations_layer;
     return s;
 }
 
@@ -138,8 +143,16 @@ fn layoutMonoLine(
 
     var cells: std.ArrayList(snail.Cell) = .empty;
     var stops: std.ArrayList(layout.Stop) = .empty;
-    var it = (std.unicode.Utf8View.init(text) catch return error.InvalidUtf8).iterator();
+    // Virtual-text prefix: decorations anchored on this row (dired's metadata/
+    // arrow/mark) laid out as leading dimmed cells at the front of the shaped
+    // buffer. They carry NO stop, so the caret (mapped through stops) sits after
+    // them, and they're never in the document — `yy` yanks only the real line.
+    var pfx_bytes: std.ArrayList(u8) = .empty;
     var col: usize = 0;
+    if (styles.deco) |dl| col = try layoutRowPrefix(v, scratch, dl, line, cols_visible, &pfx_bytes, &cells);
+    const pfx_len = pfx_bytes.items.len;
+
+    var it = (std.unicode.Utf8View.init(text) catch return error.InvalidUtf8).iterator();
     var byte: usize = 0;
     while (it.nextCodepointSlice()) |s| : (col += 1) {
         if (col >= cols_visible) break;
@@ -154,7 +167,9 @@ fn layoutMonoLine(
         // column; the NEXT cell jumps to the tab stop, so the tab reads
         // as blank whitespace. Offset↔stop stays 1:1 — the caret is exact.
         try cells.append(scratch, .{
-            .source = .{ .start = @intCast(byte), .end = @intCast(byte + s.len) },
+            // Source indexes the shaped buffer, whose real text sits after the
+            // virtual prefix bytes — so shift real cells past `pfx_len`.
+            .source = .{ .start = @intCast(pfx_len + byte), .end = @intCast(pfx_len + byte + s.len) },
             .column = @intCast(col),
             .color = color,
         });
@@ -165,8 +180,12 @@ fn layoutMonoLine(
     try stops.append(la, .{ .off = @intCast(line.start + byte), .x = v.origin_x + @as(f32, @floatFromInt(col)) * v.cell_w });
 
     if (cells.items.len > 0) {
-        const shbuf = try scratch.dupe(u8, text[0..byte]);
-        for (shbuf) |*b| {
+        // Shaped buffer = the virtual prefix bytes, then the real line (tabs→
+        // space). Prefix cells source into the head; real cells into the tail.
+        const shbuf = try scratch.alloc(u8, pfx_len + byte);
+        @memcpy(shbuf[0..pfx_len], pfx_bytes.items);
+        @memcpy(shbuf[pfx_len..], text[0..byte]);
+        for (shbuf[pfx_len..]) |*b| {
             if (b.* == '\t') b.* = ' ';
         }
         const shaped = try snail.shape(scratch, &v.face_set.mono, shbuf, .{});
@@ -182,6 +201,65 @@ fn layoutMonoLine(
         .x0 = v.origin_x,
         .stops = stops.items,
     };
+}
+
+/// Lay out a row's `virtual_before` decorations as leading dimmed cells at the
+/// front of the shaped buffer. Each decoration anchored within `[line.start,
+/// line.end]` contributes its `message` (one mono cell per codepoint, colored
+/// by its `kind` via the styles palette); they carry NO caret stop, so the real
+/// text (and the caret) begin at the returned column. This is the one render
+/// path for placed decorations — dired's metadata rides it, and inlay hints /
+/// blame / breakpoint glyphs can too. Returns the first real-text column.
+fn layoutRowPrefix(
+    v: *View,
+    scratch: Allocator,
+    dl: *const core.layers.Layer,
+    line: stemma.Range,
+    cols_visible: usize,
+    pfx_bytes: *std.ArrayList(u8),
+    cells: *std.ArrayList(snail.Cell),
+) !usize {
+    // Collect this row's virtual_before decorations, ordered by anchor so a row
+    // with several (arrow, then metadata) reads left-to-right deterministically.
+    const MAX = 16;
+    var segs: [MAX]struct { start: usize, kind: u32, message: []const u8 } = undefined;
+    var n: usize = 0;
+    for (0..dl.spanCount()) |i| {
+        const s = dl.resolvedSpan(i);
+        if (s.placement != .virtual_before) continue;
+        if (s.start < line.start or s.start > line.end) continue;
+        if (n >= MAX) break;
+        segs[n] = .{ .start = s.start, .kind = s.kind, .message = s.message };
+        n += 1;
+    }
+    if (n == 0) return 0;
+    std.mem.sort(@TypeOf(segs[0]), segs[0..n], {}, struct {
+        fn lt(_: void, a: @TypeOf(segs[0]), b: @TypeOf(segs[0])) bool {
+            return a.start < b.start;
+        }
+    }.lt);
+
+    var col: usize = 0;
+    for (segs[0..n]) |seg| {
+        // `role` is a styles-palette class; clamp an out-of-range value rather
+        // than panic on @enumFromInt (StyleClass is contiguous 0..=muted).
+        const raw: u8 = @truncate(seg.kind);
+        const cls: StyleClass = if (raw <= @intFromEnum(StyleClass.muted)) @enumFromInt(raw) else .muted;
+        const color = v.theme.styleColor(cls);
+        var it = (std.unicode.Utf8View.init(seg.message) catch continue).iterator();
+        while (it.nextCodepointSlice()) |cp| {
+            if (col >= cols_visible) break;
+            const b0 = pfx_bytes.items.len;
+            try pfx_bytes.appendSlice(scratch, cp);
+            try cells.append(scratch, .{
+                .source = .{ .start = @intCast(b0), .end = @intCast(b0 + cp.len) },
+                .column = @intCast(col),
+                .color = color,
+            });
+            col += 1;
+        }
+    }
+    return col;
 }
 
 /// Per-byte non-caret, non-diagnostic color. Precedence: syntax highlight
@@ -397,4 +475,45 @@ test "styles: Hud.styles_layer flows through resolveStyleInputs (the render seam
     try testing.expectEqual(v.theme.styleColor(.added), hlColor(&v, si, 0));
     try testing.expectEqual(v.theme.styleColor(.removed), hlColor(&v, si, 5));
     try testing.expectEqual(v.theme.foreground, hlColor(&v, si, 1)); // unpainted
+}
+
+test "decorations: a virtual_before decoration draws leading cells and shifts the caret; the doc text is only the name" {
+    const gpa = testing.allocator;
+    var v = try View.init(gpa, @embedFile("font_mono"), 16);
+    defer v.deinit();
+
+    // A dired-style row: the document text is ONLY the editable name; the
+    // metadata is a virtual_before decoration anchored at the name start.
+    var doc = try core.Document.init(gpa, "user");
+    defer doc.deinit(gpa);
+    try doc.insert(gpa, 0, "main.zig\n");
+    var store: core.layers.Layers = .empty;
+    defer store.deinit(gpa);
+    const layer = try store.claim(gpa, &doc, "decorations", .local, "dired");
+    const meta = "-rw- "; // 5 display columns of chrome
+    try layer.appendSpan(gpa, .{ .start = 0, .end = 0, .kind = @intFromEnum(StyleClass.muted), .message = meta, .placement = .virtual_before });
+
+    var arena = std.heap.ArenaAllocator.init(gpa);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const hud: Hud = .{ .mode = "normal", .decorations_layer = layer };
+    const si = try resolveStyleInputs(&v, a, hud, doc.text(), 1, 1);
+    try testing.expect(si.deco == layer);
+
+    var runs: std.ArrayList(Run) = .empty;
+    const vl = try layoutLine(&v, a, a, &runs, doc.text(), 0, 0, 40, null, si, null);
+
+    // The caret at the line start (offset 0) sits AFTER the 5-column prefix —
+    // the decoration displaced the text without becoming part of it.
+    try testing.expectEqual(@as(usize, 0), vl.stops[0].off);
+    try testing.expectApproxEqAbs(v.origin_x + 5 * v.cell_w, vl.stops[0].x, 0.01);
+    // One run, holding prefix cells (5) + name cells ("main.zig" = 8) = 13.
+    try testing.expectEqual(@as(usize, 1), runs.items.len);
+    try testing.expectEqual(@as(usize, 13), runs.items[0].place.cell.len);
+    // The name cells begin at column 5 (past the prefix).
+    try testing.expectEqual(@as(u32, 5), runs.items[0].place.cell[5].column);
+    // yy-name-only is structural: the document holds no metadata bytes at all.
+    const s = try doc.text().toOwnedSlice(gpa);
+    defer gpa.free(s);
+    try testing.expectEqualStrings("main.zig\n", s);
 }

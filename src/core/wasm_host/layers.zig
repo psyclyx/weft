@@ -4,6 +4,7 @@
 
 const std = @import("std");
 const wasm = @import("../wasm.zig");
+const core_layers = @import("../layers.zig");
 
 const shared = @import("plugin.zig");
 const WasmPlugin = shared.WasmPlugin;
@@ -71,6 +72,49 @@ pub fn hStyle(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32, result
 
 const folds_layer_name = "folds";
 pub const readonly_layer_name = "readonly";
+const decorations_layer_name = "decorations";
+
+/// `decorateClear()`: (re)claim the ACTIVE buffer's decorations layer and empty
+/// it — the guest republishes its full set of placed decorations each render.
+pub fn hDecorateClear(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32, results: []i32) void {
+    _ = caller;
+    _ = args;
+    _ = results;
+    const p: *WasmPlugin = @ptrCast(@alignCast(data.?));
+    const layer = p.ctx.caps.layers.claim(p.gpa, p.ctx.document(), decorations_layer_name, .local, p.name) catch return;
+    layer.publishSpans(p.gpa, &.{}) catch {};
+}
+
+/// `decorate(anchor, placement, role, text)`: place a display-only decoration
+/// anchored at `anchor` — virtual text drawn BESIDE the line (never in the
+/// document, so it takes no commit and `yy` never yanks it), colored by `role`
+/// (a styles-palette class). `placement`: 1=virtual_before, 2=virtual_after,
+/// 3=eol, 4=gutter (0=range is ignored — decorations only). A no-op if the
+/// layer wasn't claimed this round. This is the metadata-is-decoration door:
+/// dired's perms/size/arrow/mark, an inlay hint, a blame chip.
+pub fn hDecorate(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32, results: []i32) void {
+    _ = results;
+    const p: *WasmPlugin = @ptrCast(@alignCast(data.?));
+    const layer = p.ctx.caps.layers.find(p.ctx.document(), decorations_layer_name) orelse return;
+    const anchor: usize = @intCast(@as(u32, @bitCast(args[0])));
+    const placement: core_layers.Placement = switch (@as(u32, @bitCast(args[1]))) {
+        1 => .virtual_before,
+        2 => .virtual_after,
+        3 => .eol,
+        4 => .gutter,
+        else => return,
+    };
+    const role: u32 = @bitCast(args[2]);
+    const text = caller.readMemory(p.gpa, @intCast(args[3]), @intCast(args[4])) catch return;
+    defer p.gpa.free(text);
+    layer.appendSpan(p.gpa, .{
+        .start = anchor,
+        .end = anchor,
+        .kind = role,
+        .message = text,
+        .placement = placement,
+    }) catch {};
+}
 
 /// `readOnlyClear()`: (re)claim the ACTIVE buffer's read-only-span layer and
 /// empty it — the guest republishes its full set after (a comint marking its

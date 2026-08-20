@@ -282,6 +282,7 @@ pub const FrameBuilder = struct {
             .highlight_layer = fx.caps.layers.find(&editor.doc, "highlight"),
             .styles_layer = fx.caps.layers.find(&editor.doc, "styles"),
             .diag_layer = fx.caps.layers.find(&editor.doc, "diagnostics"),
+            .decorations_layer = fx.caps.layers.find(&editor.doc, "decorations"),
             .presence_layer = fx.caps.layers.find(&editor.doc, "presence"),
             .link = link_note,
             .trust = if (fx.collab_session.* != null) blk: {
@@ -359,6 +360,7 @@ pub const FrameBuilder = struct {
                 .md_inline = mdInlineFor(arena_state.allocator(), &ob.editor, ob.editor.backingPath() orelse ob.name, slot.pane.top_row),
                 .styles_layer = fx.caps.layers.find(&ob.editor.doc, "styles"),
                 .diag_layer = fx.caps.layers.find(&ob.editor.doc, "diagnostics"),
+                .decorations_layer = fx.caps.layers.find(&ob.editor.doc, "decorations"),
             };
             const bo = try self.view.build(arena_state.allocator(), &ob.editor, other_hud, &slot.pane.top_row, slot.rect, .{}, world_to_pixel);
             try self.built_panes.append(gpa, bo);

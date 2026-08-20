@@ -65,6 +65,10 @@ pub const Hud = struct {
     styles_layer: ?*const core.layers.Layer = null,
     /// The diagnostics feed layer (anchored spans, kind = severity).
     diag_layer: ?*const core.layers.Layer = null,
+    /// Placed decorations (virtual_before text drawn beside the line, never in
+    /// the document): dired's metadata/arrow/mark, inlay hints, blame. Rendered
+    /// as leading dimmed cells by the mono line layout.
+    decorations_layer: ?*const core.layers.Layer = null,
     /// Message of a diagnostic at the cursor, for the status line.
     cursor_diag: ?[]const u8 = null,
     /// Remote peers' cursors (replicated feed layer).

@@ -114,6 +114,31 @@ magit staging (hunk rows + `{hunk-id}` + ordered `add -p`/`reset`); editable
 buffer-list (delete a line → close that buffer); config editor; grep-writeback.
 None touch the editor; each supplies structure + reconcile.
 
+## Finding during Phase 2 (decoration rendering is NOT free)
+
+The `Placement` decoration enums (`virtual_before`/`eol`/`gutter`) exist in the
+layer data model (`layers.zig`) and rebase under edits — but **no renderer draws
+them**. The view consumes only `styles`/`highlight`/`diagnostics` (as per-byte
+color tints, `linelayout.zig`) and `folds` (elided rows). There is no path that
+injects a decoration's `message` as virtual text into the line layout. So
+"metadata-is-decoration" needs a real render path, not just the ABI door the
+design assumed.
+
+Options considered:
+- **Inline-virtual (recommended):** render `virtual_before` spans as leading,
+  dimmed, non-document cells in `layoutMonoLine` — one extra run before the real
+  text, with `stops` (offset→x) shifted past the prefix so the caret stays exact
+  and virtual cells get no stop. Route ALL of dired's chrome (perms/size/date +
+  fold arrow + mark) through ONE `virtual_before` decoration per row. Collapses
+  the render work to a single mechanism and generalizes to inlay hints, git
+  blame, and breakpoint glyphs — a good sign it's the right layer.
+- **True gutter:** a real left margin (reduces content width) for `gutter`
+  spans. More layout plumbing; defer until a use needs a genuine margin.
+- **Names-first (defer decorations):** ship a metadata-less editable tree (à la
+  mini.files). `yy`-name-only is then trivial (the name IS the only text), and
+  the crux behaviors (in-place edit, dd/p/save=move, fold-expand) land without
+  any render work. Decorations come when metadata display is wanted.
+
 ## Build order
 
 1. **Core register + payload ferry** (keystone; fixes the vim mis-layering).

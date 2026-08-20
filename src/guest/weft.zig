@@ -38,6 +38,8 @@ extern "weft" fn wl_fold_clear() void;
 extern "weft" fn wl_fold(start: u32, end: u32) void;
 extern "weft" fn wl_readonly_clear() void;
 extern "weft" fn wl_readonly_span(start: u32, end: u32) void;
+extern "weft" fn wl_decorate_clear() void;
+extern "weft" fn wl_decorate(anchor: u32, placement: u32, role: u32, ptr: u32, len: u32) void;
 // Native `editor` surface + stamped ranges ([FIX 1/3]). A range crosses as an
 // opaque u32 handle into a host-side table (the version token stays host-side).
 extern "weft" fn wl_editor_step(from: u32, dir: u32, kind: u32) u32;
@@ -286,6 +288,20 @@ pub fn readOnlyClear() void {
 /// at the edit door (a comint's produced output vs its editable input line).
 pub fn readOnlySpan(start: usize, end: usize) void {
     wl_readonly_span(@intCast(start), @intCast(end));
+}
+
+/// How a decoration is placed beside the text (never in the document).
+pub const DecoPlacement = enum(u32) { virtual_before = 1, virtual_after = 2, eol = 3, gutter = 4 };
+/// Reclaim + empty the decorations layer (republish the full set after).
+pub fn decorateClear() void {
+    wl_decorate_clear();
+}
+/// Place a display-only decoration anchored at `anchor`: virtual text drawn
+/// beside the line, colored by `role` (a styles-palette class). It is NEVER a
+/// document byte — so `yy` never yanks it and it takes no commit. This is how a
+/// projection shows metadata (dired's perms/size/arrow/mark) off the text.
+pub fn decorate(anchor: usize, placement: DecoPlacement, role: StyleClass, text: []const u8) void {
+    wl_decorate(@intCast(anchor), @intFromEnum(placement), @intFromEnum(role), p(text.ptr), @intCast(text.len));
 }
 
 // ── Native editor surface + stamped ranges (motions/operators) ────────

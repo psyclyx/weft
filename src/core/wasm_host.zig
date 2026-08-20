@@ -99,6 +99,10 @@ pub fn defineImports(linker: *wasm.Linker, p: *WasmPlugin) !void {
     try d(linker, "wl_fold", 2, 0, layers.hFold, p);
     try d(linker, "wl_readonly_clear", 0, 0, layers.hReadOnlyClear, p);
     try d(linker, "wl_readonly_span", 2, 0, layers.hReadOnlySpan, p);
+    // Placed decorations: virtual text drawn beside the line (metadata-is-
+    // decoration) — never document bytes, so yy never yanks it.
+    try d(linker, "wl_decorate_clear", 0, 0, layers.hDecorateClear, p);
+    try d(linker, "wl_decorate", 5, 0, layers.hDecorate, p);
     // Stamped ranges ([FIX 1/3]): a motion returns one, an operator awaits +
     // applies it. Handles cross; the version token stays host-side.
     try d(linker, "wl_stamp_range", 2, 1, edit.hStampRange, p);
