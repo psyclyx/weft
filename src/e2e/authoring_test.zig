@@ -296,6 +296,32 @@ test "authoring: typing balanced code with autopair stays balanced (type-over)" 
     try t.expectEqualStrings("function greet(name) { return \"hi\"; }", disk);
 }
 
+test "authoring: format the buffer (SPC c f) — zig fmt via the format action" {
+    const gpa = t.allocator;
+    var app: App = undefined;
+    try app.init(gpa);
+    defer app.deinit();
+    const ed = &app.ed;
+
+    // Write badly-spaced but valid zig, then format it. `SPC c f` → the `format`
+    // action → format-buffer, which filters .zig through `zig fmt`.
+    ed.runStr("open", "fmt_me.zig");
+    ed.press("i", "");
+    ed.typeText("const    x=1;");
+    ed.press("Escape", "");
+    ed.chord("SPC c f"); // format
+    ed.settle(60); // the formatter runs async (procFilter)
+
+    ed.press("colon", "");
+    ed.typeText("w");
+    ed.press("Return", "");
+    ed.waitSave();
+
+    const disk = try core.file.readAlloc(gpa, "fmt_me.zig");
+    defer gpa.free(disk);
+    try t.expectEqualStrings("const x = 1;\n", disk); // zig fmt's canonical form
+}
+
 test "debug: a real DAP session — launch, hit a breakpoint, see the stack, continue" {
     const gpa = t.allocator;
     var app: App = undefined;
