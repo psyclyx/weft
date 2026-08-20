@@ -189,52 +189,49 @@ pub fn dispatchKey(ctx: *core.command.Context, ev: wayland.KeyEvent) !void {
     if (n > 0) {
         var spec_buf: [80]u8 = undefined;
         const spec = core.Keymap.keyspec(&spec_buf, ev.mods.ctrl, ev.mods.alt, ev.mods.shift, name_buf[0..@intCast(n)]);
-        if (ctx.keymap.lookup(spec)) |cmd_name| {
-            // Vertical motion + paging are view-computed (goal-x over rendered
-            // geometry), registered by the shell as `cursor-up`/`cursor-down`/
-            // `scroll-page-*` that shadow the core scalar versions — so they
-            // dispatch uniformly through the keymap below, no name special-case.
-            // A bound key whose command NAMES a menu mode enters that submenu
-            // (the which-key / doom leader tree). Config declares submenus with
-            // `weft.menu` and binds leader keys to them; entering records the
-            // one-shot return target. No per-submenu entry command is needed.
-            if (ctx.keymap.isMenuMode(cmd_name)) {
-                ctx.keymap.enterMode(ctx.gpa, cmd_name) catch {};
-                return;
-            }
-            // Snapshot a menu mode so a one-shot key can pop back to its return
-            // target after the command runs — but only if the command didn't
-            // itself change the mode (submenu entry and explicit mode sets are
-            // preserved). Recorded/resolved by Keymap.enterMode on guest entry.
-            const menu_before: ?[]u8 = if (ctx.keymap.isMenuMode(ctx.keymap.currentMode()))
-                ctx.gpa.dupe(u8, ctx.keymap.currentMode()) catch null
-            else
-                null;
-            defer if (menu_before) |m| ctx.gpa.free(m);
-
-            const result = core.command.run(ctx.commands, ctx, cmd_name, &.{}) catch |err| blk: {
-                std.log.warn("command {s} failed: {t}", .{ cmd_name, err });
-                break :blk core.command.Value.nil;
-            };
-            // Surface a returned string as transient feedback so command results
-            // (e.g. share's "not connected") aren't silently dropped.
-            switch (result) {
-                .string => |s| if (s.len > 0) {
-                    ctx.echo.clearRetainingCapacity();
-                    ctx.echo.appendSlice(ctx.gpa, s) catch {};
-                },
-                else => {},
-            }
-            // One-shot menu: still in the menu we entered on ⇒ pop to its return
-            // target (the root non-menu mode). setMode dupes internally. A STICKY
-            // menu is exempt — it stays open so flag toggles accumulate; it
-            // leaves only via an explicit mode change (execute) or Escape.
-            if (menu_before) |m| {
-                if (!ctx.keymap.isStickyMenu(m) and std.mem.eql(u8, ctx.keymap.currentMode(), m)) {
-                    if (ctx.keymap.menuReturn(m)) |ret| ctx.keymap.setMode(ctx.gpa, ret) catch {};
+        // Feed the key through the pending SEQUENCE: a chord that could still
+        // extend is held (which-key shows its completions off `keymap.pending`);
+        // a completed binding runs; a lone unbound key falls to text insertion;
+        // a dead-end chord resets. `SPC f f` is a chord; `SPC C-w` never fires
+        // global `C-w` — a menu is a sequence, not a mode.
+        switch (ctx.keymap.feed(ctx.gpa, spec) catch core.Keymap.Feed.none) {
+            .pending, .none => return,
+            .text => {}, // a lone unbound key — fall through to text insertion
+            .run => |cmd_name| {
+                // Legacy mode-menu path (still valid while configs migrate to
+                // sequences): a bound key whose command NAMES a menu mode enters
+                // it. A real `weft.menu` submenu resolves this way until its keys
+                // become `SPC …` chords.
+                if (ctx.keymap.isMenuMode(cmd_name)) {
+                    ctx.keymap.enterMode(ctx.gpa, cmd_name) catch {};
+                    return;
                 }
-            }
-            return;
+                // Snapshot a menu mode so a one-shot key pops back after the
+                // command runs (unless the command itself changed the mode).
+                const menu_before: ?[]u8 = if (ctx.keymap.isMenuMode(ctx.keymap.currentMode()))
+                    ctx.gpa.dupe(u8, ctx.keymap.currentMode()) catch null
+                else
+                    null;
+                defer if (menu_before) |m| ctx.gpa.free(m);
+
+                const result = core.command.run(ctx.commands, ctx, cmd_name, &.{}) catch |err| blk: {
+                    std.log.warn("command {s} failed: {t}", .{ cmd_name, err });
+                    break :blk core.command.Value.nil;
+                };
+                switch (result) {
+                    .string => |s| if (s.len > 0) {
+                        ctx.echo.clearRetainingCapacity();
+                        ctx.echo.appendSlice(ctx.gpa, s) catch {};
+                    },
+                    else => {},
+                }
+                if (menu_before) |m| {
+                    if (!ctx.keymap.isStickyMenu(m) and std.mem.eql(u8, ctx.keymap.currentMode(), m)) {
+                        if (ctx.keymap.menuReturn(m)) |ret| ctx.keymap.setMode(ctx.gpa, ret) catch {};
+                    }
+                }
+                return;
+            },
         }
     }
     if (ev.mods.ctrl or ev.mods.alt) return;
