@@ -29,6 +29,14 @@ pub const prio_config = 100;
 
 modes: std.StringArrayHashMapUnmanaged(Bindings) = .empty,
 mode: []u8 = &.{},
+/// The pending key SEQUENCE (keyspecs joined by spaces) — the chord you're
+/// partway through: `space f` while `space f f` → find-file is being typed.
+/// Empty at rest. A binding's KEY is a whole sequence (a single key is a
+/// one-element sequence), so a "menu" is just a prefix of longer sequences —
+/// NOT a mode. `feed` drives it; which-key shows the completions of the pending
+/// prefix. Cleared on a completed binding, a dead end, Escape, or a mode/buffer
+/// switch.
+pending: []u8 = &.{},
 /// Scratch for `resolveBindings` — the deduplicated set of bindings reachable
 /// in a mode (own + fallback chain + global). Borrowed slices into `modes`,
 /// valid until the next keymap mutation. Rebuilt each call (which-key render).
@@ -102,6 +110,7 @@ pub fn deinit(self: *Keymap, gpa: Allocator) void {
     }
     self.menu_return.deinit(gpa);
     gpa.free(self.mode);
+    gpa.free(self.pending);
     self.* = .{};
 }
 
@@ -158,6 +167,91 @@ pub fn lookup(self: *const Keymap, key: []const u8) ?[]const u8 {
         if (bindings.get(key)) |entry| return entry.command;
     }
     return null;
+}
+
+/// What feeding a key produced (see `feed`).
+pub const Feed = union(enum) {
+    run: []const u8, // a full sequence resolved — run this command (borrowed)
+    pending, // extended the pending chord — which-key shows its completions
+    text, // a lone unbound key — the caller inserts it (if printable)
+    none, // a dead-end chord — reset, nothing to do
+};
+
+/// The command a full SEQUENCE resolves to: the mode's own table, its fallback
+/// chain, then `global`. A single-key seq gets global's universal binds; a
+/// multi-key chord effectively won't (global holds single keys), so a global key
+/// never fires MID-sequence — `SPC C-w` is the chord `space C-w`, not global
+/// `C-w`. (This is why menus-as-sequences dissolve the "global is too global".)
+fn resolveExact(self: *const Keymap, seq: []const u8) ?[]const u8 {
+    var mode: []const u8 = self.mode;
+    var depth: usize = 0;
+    while (depth < 8) : (depth += 1) {
+        if (self.modes.getPtr(mode)) |b| if (b.get(seq)) |e| return e.command;
+        mode = self.parents.get(mode) orelse break;
+    }
+    if (self.modes.getPtr(global_mode)) |b| if (b.get(seq)) |e| return e.command;
+    return null;
+}
+
+/// Whether `seq` is a strict PREFIX of some bound sequence in the current mode
+/// or its fallback chain (more keys would complete a chord). Global is not
+/// consulted — a chord tree lives in a mode, not the universal layer.
+fn isPrefix(self: *const Keymap, seq: []const u8) bool {
+    var mode: []const u8 = self.mode;
+    var depth: usize = 0;
+    while (depth < 8) : (depth += 1) {
+        if (self.modes.getPtr(mode)) |b| {
+            for (b.keys()) |k| {
+                if (k.len > seq.len and std.mem.startsWith(u8, k, seq) and k[seq.len] == ' ') return true;
+            }
+        }
+        mode = self.parents.get(mode) orelse break;
+    }
+    return false;
+}
+
+/// Feed one keyspec through the pending sequence. A complete binding wins
+/// immediately (configs don't bind a prefix as also complete); else, if the
+/// chord could still extend, hold it `pending`; else it's a dead end — a lone
+/// unbound key is `text` to insert, a broken chord just resets. NOTE: a `.run`
+/// command name borrows the keymap — use it before any rebind.
+pub fn feed(self: *Keymap, gpa: Allocator, key: []const u8) Allocator.Error!Feed {
+    const at_top = self.pending.len == 0;
+    const cand = if (at_top) key else try std.fmt.allocPrint(gpa, "{s} {s}", .{ self.pending, key });
+    defer if (!at_top) gpa.free(cand);
+
+    if (self.resolveExact(cand)) |cmd| {
+        try self.setPending(gpa, "");
+        return .{ .run = cmd };
+    }
+    if (self.isPrefix(cand)) {
+        try self.setPending(gpa, cand);
+        return .pending;
+    }
+    try self.setPending(gpa, "");
+    return if (at_top) .text else .none;
+}
+
+/// Set the pending sequence (owned copy); "" clears it (no allocation).
+pub fn setPending(self: *Keymap, gpa: Allocator, seq: []const u8) Allocator.Error!void {
+    if (seq.len == 0) {
+        gpa.free(self.pending);
+        self.pending = &.{};
+        return;
+    }
+    const owned = try gpa.dupe(u8, seq);
+    gpa.free(self.pending);
+    self.pending = owned;
+}
+
+/// Drop the last keyspec of the pending chord (Backspace mid-sequence).
+pub fn popPending(self: *Keymap, gpa: Allocator) Allocator.Error!void {
+    if (self.pending.len == 0) return;
+    const cut = std.mem.lastIndexOfScalar(u8, self.pending, ' ') orelse {
+        try self.setPending(gpa, "");
+        return;
+    };
+    try self.setPending(gpa, self.pending[0..cut]);
 }
 
 /// Make `mode` inherit `parent`'s bindings (chain-walked at lookup).
@@ -223,6 +317,9 @@ pub fn setMode(self: *Keymap, gpa: Allocator, mode: []const u8) Allocator.Error!
     const owned = try gpa.dupe(u8, mode);
     gpa.free(self.mode);
     self.mode = owned;
+    // A mode change abandons any half-typed chord (a stale `space f` must not
+    // combine with the new mode's next key).
+    try self.setPending(gpa, "");
 }
 
 /// Guest-initiated mode set. Identical to `setMode`, except that entering a
@@ -568,6 +665,56 @@ test "keymap: a locked projection mode refuses to leave for an editing mode" {
     // A non-locked mode never gates (ordinary editing).
     try km.setMode(gpa, "normal");
     try t.expect(km.mayLeaveLocked("insert"));
+}
+
+test "keymap: prefix sequences — a chord resolves; a menu is a prefix, not a mode" {
+    const gpa = t.allocator;
+    var km: Keymap = .empty;
+    defer km.deinit(gpa);
+    try km.setMode(gpa, "normal");
+    // A leader tree as SEQUENCES (no leader-* mode): SPC f f -> find-file, etc.
+    try km.bind(gpa, "normal", "space f f", "find-file", prio_config, "cfg");
+    try km.bind(gpa, "normal", "space g g", "git-status", prio_config, "cfg");
+    try km.bind(gpa, "normal", "i", "vim-insert", prio_config, "vim");
+    try km.bind(gpa, "global", "C-w", "window-thing", prio_config, "cfg");
+
+    // A single bound key runs immediately.
+    {
+        const r = try km.feed(gpa, "i");
+        try t.expect(r == .run);
+        try t.expectEqualStrings("vim-insert", r.run);
+        try t.expectEqual(@as(usize, 0), km.pending.len);
+    }
+    // SPC is a prefix -> pending; f -> still pending; f -> completes -> run.
+    try t.expect((try km.feed(gpa, "space")) == .pending);
+    try t.expectEqualStrings("space", km.pending);
+    try t.expect((try km.feed(gpa, "f")) == .pending);
+    try t.expectEqualStrings("space f", km.pending);
+    {
+        const r = try km.feed(gpa, "f");
+        try t.expect(r == .run);
+        try t.expectEqualStrings("find-file", r.run);
+        try t.expectEqual(@as(usize, 0), km.pending.len);
+    }
+    // The "global is too global" fix falls out: SPC then C-w is the CHORD
+    // `space C-w` (unbound) — NOT the global C-w. It resets, doesn't fire it.
+    try t.expect((try km.feed(gpa, "space")) == .pending);
+    try t.expect((try km.feed(gpa, "C-w")) == .none);
+    try t.expectEqual(@as(usize, 0), km.pending.len);
+    // C-w at the TOP (no pending) still hits global.
+    {
+        const r = try km.feed(gpa, "C-w");
+        try t.expect(r == .run);
+        try t.expectEqualStrings("window-thing", r.run);
+    }
+    // A lone unbound printable key is `text` (the caller inserts it).
+    try t.expect((try km.feed(gpa, "x")) == .text);
+
+    // Backspace pops one chord level.
+    try t.expect((try km.feed(gpa, "space")) == .pending);
+    try t.expect((try km.feed(gpa, "f")) == .pending);
+    try km.popPending(gpa);
+    try t.expectEqualStrings("space", km.pending);
 }
 
 test "keymap: menu return targets — guest entry records, nesting collapses to root" {
