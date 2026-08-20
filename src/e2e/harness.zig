@@ -22,6 +22,7 @@ const view_mod = weft.view;
 const harness = weft.gfx_harness;
 pub const window_layout = weft.window_layout;
 const window_cmds = weft.window_cmds;
+const dispatch = weft.dispatch;
 pub const app_session = weft.app_session;
 pub const app_providers = weft.app_providers;
 pub const app_collab = weft.app_collab;
@@ -52,6 +53,9 @@ pub const Editor = struct {
     pick: core.pick.Pick,
     caps: core.Caps,
     actions: core.Actions,
+    /// The buffer-word completion consumer — bound to `complete` so `C-n` opens
+    /// the completion pick, exactly as app/setup.zig wires it. (Owns no heap.)
+    completion_ui: core.complete_ui.CompletionUi = .empty,
     quit: bool = false,
     echo: std.ArrayList(u8) = .empty,
     ctx: command.Context = undefined,
@@ -116,6 +120,11 @@ pub const Editor = struct {
             .echo = &self.echo,
         };
         try core.builtins.install(gpa, &self.commands, &self.keymap, &self.actions);
+        // Wire the completion consumer (app/setup.zig binds this): `complete`
+        // opens the buffer-word completion pick. Without it, the config's insert
+        // `C-n` → `complete` is a no-op in the harness.
+        self.completion_ui = .empty;
+        _ = try self.commands.bind(gpa, "complete", self.completion_ui.commandSpec());
         // Proc-backed plugins (git/run/grep) shell out through the wasm host,
         // which passes this process-global environ to each child. main() sets it
         // at startup; the harness must too, or every subprocess runs PATH-less
@@ -179,66 +188,17 @@ pub const Editor = struct {
     }
 
     /// Press a key: `spec` is a keyspec (e.g. "i", "Escape", "C-w", "SPC");
-    /// `text` is the character it would type (printable input), or "". Mirrors
-    /// app/dispatch.zig `dispatchKey` FAITHFULLY — through `keymap.feed`, so
-    /// multi-key CHORDS work: pressing "SPC" then "g" then "i" walks the leader
-    /// sequence to `git-init`, exactly as a user does under the real config.
-    /// (The old lookup-based path only saw single keys — it could never drive
-    /// the SPC leader tree the sample config is built on.)
+    /// `text` is the character it would type (printable input), or "". Sends the
+    /// keypress through the REAL app dispatch (`app/dispatch.dispatchSpec`) — the
+    /// same single implementation the compositor path uses after xkb translation
+    /// — so chords, menus, text, and every binding behave EXACTLY as in the app.
+    /// The harness keeps no parallel dispatch logic. `spec` accepts natural
+    /// notation ("SPC"/"RET"); we canonicalize it here (the real path gets the
+    /// canonical xkb name for free).
     pub fn press(self: *Editor, spec_in: []const u8, text: []const u8) void {
-        self.ctx.user_initiated = true; // a keystroke: helper-plugin edits are the user's
-        defer self.ctx.user_initiated = false;
-        // Canonicalize natural notation ("SPC"→"space", "RET"→"Return") — `bind`
-        // stores canonical and `feed` matches it (the real dispatch gets the
-        // canonical xkb name for free; a test writes what it means).
         var kbuf: [256]u8 = undefined;
         const spec = core.Keymap.normalizeKey(&kbuf, spec_in);
-        // Mid-chord meta keys act on the which-key overlay, not the sequence.
-        if (self.keymap.pending.len > 0) {
-            if (std.mem.eql(u8, spec, "BackSpace")) {
-                self.keymap.popPending(self.gpa) catch {};
-                return;
-            }
-            if (self.keymap.navCommand(spec)) |cmd| {
-                _ = command.run(&self.commands, &self.ctx, cmd, &.{}) catch {};
-                return;
-            }
-        }
-        switch (self.keymap.feed(self.gpa, spec) catch core.Keymap.Feed.none) {
-            .pending, .none => return, // chord extends, or a dead end — nothing to run
-            .text => {}, // a lone unbound key — fall through to text insertion
-            .run => |cmd_name| {
-                if (self.keymap.isMenuMode(cmd_name)) {
-                    self.keymap.enterMode(self.gpa, cmd_name) catch {};
-                    self.syncActivate();
-                    return;
-                }
-                const menu_before: ?[]u8 = if (self.keymap.isMenuMode(self.keymap.currentMode()))
-                    self.gpa.dupe(u8, self.keymap.currentMode()) catch null
-                else
-                    null;
-                defer if (menu_before) |m| self.gpa.free(m);
-                const result = command.run(&self.commands, &self.ctx, cmd_name, &.{}) catch command.Value.nil;
-                switch (result) {
-                    .string => |s| if (s.len > 0) {
-                        self.echo.clearRetainingCapacity();
-                        self.echo.appendSlice(self.gpa, s) catch {};
-                    },
-                    else => {},
-                }
-                if (menu_before) |m| {
-                    if (!self.keymap.isStickyMenu(m) and std.mem.eql(u8, self.keymap.currentMode(), m)) {
-                        if (self.keymap.menuReturn(m)) |ret| self.keymap.setMode(self.gpa, ret) catch {};
-                    }
-                }
-                self.syncActivate();
-                return;
-            },
-        }
-        if (text.len == 0) return;
-        if (self.keymap.textCommand()) |tc| {
-            _ = command.run(&self.commands, &self.ctx, tc, &.{.{ .string = text }}) catch {};
-        }
+        dispatch.dispatchSpec(&self.ctx, spec, text) catch {};
         self.syncActivate();
     }
 
@@ -287,14 +247,16 @@ pub const Editor = struct {
         }
     }
 
-    /// Pump async plugin work (proc output, fs listings) to completion-ish:
-    /// tick the loop a bounded number of times with small sleeps.
+    /// Pump async plugin work (proc output, fs listings, completion candidates)
+    /// a bounded number of rounds, yielding real time between ticks so pool
+    /// workers make progress (this Zig's std dropped `Thread.sleep`; napUs is a
+    /// short busy-wait on the monotonic clock, like session.zig's own helper).
     pub fn settle(self: *Editor, rounds: usize) void {
         var i: usize = 0;
         while (i < rounds) : (i += 1) {
             _ = self.loop.tick();
             for (self.plugins.items) |p| _ = core.wasm_host.drainReplSessions(p);
-            std.Thread.sleep(2 * std.time.ns_per_ms);
+            napUs(2000);
         }
     }
 
@@ -865,3 +827,31 @@ pub fn drainUntilOracle(proj: *Project, ed: *Editor, sh_cmd: []const u8, needle:
     }
     return false;
 }
+
+/// A booted weft in a throwaway project: the REAL `config.js` loaded, driving in
+/// a tmp dir that is the process cwd. The one-call setup every config-driven
+/// exploratory test wants — drive `app.ed` through the real bindings, verify
+/// `app.proj` on disk. `config_dir` is the repo's `config/` (Project captured
+/// the repo root as `prev_cwd` before chdir'ing into the tmp project).
+pub const App = struct {
+    proj: Project = undefined,
+    ed: Editor = undefined,
+    loader: ConfigLoader = undefined,
+
+    pub fn init(self: *App, gpa: Allocator) !void {
+        try self.proj.init(gpa);
+        errdefer self.proj.deinit();
+        try Editor.init(gpa, &self.ed);
+        errdefer self.ed.deinit();
+        self.loader = .{ .ed = &self.ed };
+        const config_dir = try std.fmt.allocPrint(gpa, "{s}/config", .{self.proj.prev_cwd});
+        defer gpa.free(config_dir);
+        try bootConfig(&self.ed, config_dir, &self.loader);
+    }
+
+    pub fn deinit(self: *App) void {
+        self.loader.deinit();
+        self.ed.deinit();
+        self.proj.deinit();
+    }
+};

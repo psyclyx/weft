@@ -11,6 +11,7 @@ pub const gfx_harness = @import("gfx/harness.zig");
 pub const region = @import("gfx/region.zig");
 pub const window_layout = @import("gfx/window_layout.zig");
 pub const window_cmds = @import("app/window_cmds.zig");
+pub const dispatch = @import("app/dispatch.zig"); // the general keypress interface
 pub const app_session = @import("app/session.zig");
 pub const app_providers = @import("app/providers.zig");
 pub const app_collab = @import("app/collab.zig");

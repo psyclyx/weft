@@ -175,93 +175,103 @@ pub fn scrollPageDownHandler(ctx: *core.command.Context, data: ?*anyopaque, args
 }
 
 pub fn dispatchKey(ctx: *core.command.Context, ev: wayland.KeyEvent) !void {
-    // This whole dispatch is the synchronous handling of a user keystroke:
-    // any edit made here — directly or by a helper plugin (dw/autopair) — is
-    // the user's, so it joins the user's undo history (see command.edit).
-    // Vertical motion + paging are ordinary commands now (view-aware, shell-
-    // registered), so this is pure keymap → command — no view/geometry here.
-    ctx.user_initiated = true;
-    defer ctx.user_initiated = false;
+    // Translate the platform key event to a canonical keyspec (+ the printable
+    // text it would insert), then hand off to the backend-independent
+    // `dispatchSpec`. Splitting here means a headless driver (the e2e harness)
+    // sends keypresses through the SAME dispatch the compositor path uses —
+    // there is exactly one implementation of "what a keypress does".
     const c = wayland.c;
-
     var name_buf: [64]u8 = undefined;
     const n = c.xkb_keysym_get_name(ev.keysym, &name_buf, name_buf.len);
-    if (n > 0) {
-        var spec_buf: [80]u8 = undefined;
-        const spec = core.Keymap.keyspec(&spec_buf, ev.mods.ctrl, ev.mods.alt, ev.mods.shift, name_buf[0..@intCast(n)]);
-        // Mid-chord META keys act on the which-key overlay, NOT the sequence:
-        //  · Backspace steps BACK one key of the pending chord (pop a level).
-        //  · a NAV key (page down/up — `menu-nav` in defaults.js) pages the hint
-        //    and leaves `pending` intact, so a long menu scrolls instead of the
-        //    key dead-ending the chord and dismissing which-key.
-        if (ctx.keymap.pending.len > 0) {
-            if (std.mem.eql(u8, spec, "BackSpace")) {
-                ctx.keymap.popPending(ctx.gpa) catch {};
-                return;
-            }
-            if (ctx.keymap.navCommand(spec)) |cmd| {
-                _ = core.command.run(ctx.commands, ctx, cmd, &.{}) catch |err|
-                    std.log.warn("which-key nav {s} failed: {t}", .{ cmd, err });
-                return; // pending untouched — the hint just re-rendered
-            }
-        }
-        // Feed the key through the pending SEQUENCE: a chord that could still
-        // extend is held (which-key shows its completions off `keymap.pending`);
-        // a completed binding runs; a lone unbound key falls to text insertion;
-        // a dead-end chord resets. `SPC f f` is a chord; `SPC C-w` never fires
-        // global `C-w` — a menu is a sequence, not a mode.
-        switch (ctx.keymap.feed(ctx.gpa, spec) catch core.Keymap.Feed.none) {
-            .pending, .none => return,
-            .text => {}, // a lone unbound key — fall through to text insertion
-            .run => |cmd_name| {
-                // Legacy mode-menu path (still valid while configs migrate to
-                // sequences): a bound key whose command NAMES a menu mode enters
-                // it. A real `weft.menu` submenu resolves this way until its keys
-                // become `SPC …` chords.
-                if (ctx.keymap.isMenuMode(cmd_name)) {
-                    ctx.keymap.enterMode(ctx.gpa, cmd_name) catch {};
-                    return;
-                }
-                // Snapshot a menu mode so a one-shot key pops back after the
-                // command runs (unless the command itself changed the mode).
-                const menu_before: ?[]u8 = if (ctx.keymap.isMenuMode(ctx.keymap.currentMode()))
-                    ctx.gpa.dupe(u8, ctx.keymap.currentMode()) catch null
-                else
-                    null;
-                defer if (menu_before) |m| ctx.gpa.free(m);
+    if (n == 0) return;
+    var spec_buf: [80]u8 = undefined;
+    const spec = core.Keymap.keyspec(&spec_buf, ev.mods.ctrl, ev.mods.alt, ev.mods.shift, name_buf[0..@intCast(n)]);
+    // A modified (ctrl/alt) key inserts nothing; otherwise the event's printable
+    // text, unless it's a lone control char.
+    const text: []const u8 = if (ev.mods.ctrl or ev.mods.alt) "" else blk: {
+        const tx = ev.text();
+        break :blk if (tx.len > 0 and !(tx.len == 1 and tx[0] < 0x20)) tx else "";
+    };
+    return dispatchSpec(ctx, spec, text);
+}
 
-                const result = core.command.run(ctx.commands, ctx, cmd_name, &.{}) catch |err| blk: {
-                    std.log.warn("command {s} failed: {t}", .{ cmd_name, err });
-                    break :blk core.command.Value.nil;
-                };
-                switch (result) {
-                    .string => |s| if (s.len > 0) {
-                        ctx.echo.clearRetainingCapacity();
-                        ctx.echo.appendSlice(ctx.gpa, s) catch {};
-                    },
-                    else => {},
-                }
-                if (menu_before) |m| {
-                    if (!ctx.keymap.isStickyMenu(m) and std.mem.eql(u8, ctx.keymap.currentMode(), m)) {
-                        if (ctx.keymap.menuReturn(m)) |ret| ctx.keymap.setMode(ctx.gpa, ret) catch {};
-                    }
-                }
-                return;
-            },
+/// The general keypress interface: run a canonical keyspec (`spec`) plus the
+/// printable text it would insert (`text`, or "" for a non-text key) through the
+/// keymap. A chord that could still extend is held (which-key shows its
+/// completions off `keymap.pending`); a completed binding runs; a lone unbound
+/// key falls to text insertion; a dead-end chord resets. This is what
+/// `dispatchKey` reduces to after xkb translation, and what a headless driver
+/// calls to send a keypress to the REAL app (no parallel dispatch logic).
+///
+/// Any edit made here — directly or by a helper plugin (dw/autopair) — is the
+/// user's, so it joins the user's undo history (see command.edit).
+pub fn dispatchSpec(ctx: *core.command.Context, spec: []const u8, text: []const u8) !void {
+    ctx.user_initiated = true;
+    defer ctx.user_initiated = false;
+
+    // Mid-chord META keys act on the which-key overlay, NOT the sequence:
+    //  · Backspace steps BACK one key of the pending chord (pop a level).
+    //  · a NAV key (page down/up — `menu-nav` in defaults.js) pages the hint and
+    //    leaves `pending` intact, so a long menu scrolls instead of the key
+    //    dead-ending the chord and dismissing which-key.
+    if (ctx.keymap.pending.len > 0) {
+        if (std.mem.eql(u8, spec, "BackSpace")) {
+            ctx.keymap.popPending(ctx.gpa) catch {};
+            return;
+        }
+        if (ctx.keymap.navCommand(spec)) |cmd| {
+            _ = core.command.run(ctx.commands, ctx, cmd, &.{}) catch |err|
+                std.log.warn("which-key nav {s} failed: {t}", .{ cmd, err });
+            return; // pending untouched — the hint just re-rendered
         }
     }
-    if (ev.mods.ctrl or ev.mods.alt) return;
-    const text = ev.text();
-    if (text.len > 0 and !(text.len == 1 and text[0] < 0x20)) {
-        // Unbound printable input runs the mode's text command (the
-        // modal posture: normal mode has none and swallows it). This IS
-        // the hot typing→commit path — fence it so an accidental blocking
-        // API here trips in Debug.
-        const tc = ctx.keymap.textCommand() orelse return;
-        core.task.beginHotSection();
-        defer core.task.endHotSection();
-        _ = core.command.run(ctx.commands, ctx, tc, &.{.{ .string = text }}) catch |err| {
-            std.log.warn("{s} failed: {t}", .{ tc, err });
-        };
+    // Feed the key through the pending SEQUENCE. `SPC f f` is a chord; `SPC C-w`
+    // never fires global `C-w` — a menu is a sequence, not a mode.
+    switch (ctx.keymap.feed(ctx.gpa, spec) catch core.Keymap.Feed.none) {
+        .pending, .none => return,
+        .text => {}, // a lone unbound key — fall through to text insertion
+        .run => |cmd_name| {
+            // Legacy mode-menu path (still valid while configs migrate to
+            // sequences): a bound key whose command NAMES a menu mode enters it.
+            if (ctx.keymap.isMenuMode(cmd_name)) {
+                ctx.keymap.enterMode(ctx.gpa, cmd_name) catch {};
+                return;
+            }
+            // Snapshot a menu mode so a one-shot key pops back after the command
+            // runs (unless the command itself changed the mode).
+            const menu_before: ?[]u8 = if (ctx.keymap.isMenuMode(ctx.keymap.currentMode()))
+                ctx.gpa.dupe(u8, ctx.keymap.currentMode()) catch null
+            else
+                null;
+            defer if (menu_before) |m| ctx.gpa.free(m);
+
+            const result = core.command.run(ctx.commands, ctx, cmd_name, &.{}) catch |err| blk: {
+                std.log.warn("command {s} failed: {t}", .{ cmd_name, err });
+                break :blk core.command.Value.nil;
+            };
+            switch (result) {
+                .string => |s| if (s.len > 0) {
+                    ctx.echo.clearRetainingCapacity();
+                    ctx.echo.appendSlice(ctx.gpa, s) catch {};
+                },
+                else => {},
+            }
+            if (menu_before) |m| {
+                if (!ctx.keymap.isStickyMenu(m) and std.mem.eql(u8, ctx.keymap.currentMode(), m)) {
+                    if (ctx.keymap.menuReturn(m)) |ret| ctx.keymap.setMode(ctx.gpa, ret) catch {};
+                }
+            }
+            return;
+        },
     }
+    if (text.len == 0) return;
+    // Unbound printable input runs the mode's text command (the modal posture:
+    // normal mode has none and swallows it). This IS the hot typing→commit path —
+    // fence it so an accidental blocking API here trips in Debug.
+    const tc = ctx.keymap.textCommand() orelse return;
+    core.task.beginHotSection();
+    defer core.task.endHotSection();
+    _ = core.command.run(ctx.commands, ctx, tc, &.{.{ .string = text }}) catch |err| {
+        std.log.warn("{s} failed: {t}", .{ tc, err });
+    };
 }
