@@ -284,6 +284,10 @@ export fn init() void {
     // magit mode: navigation-only (swallows typing), plus the interactive verbs.
     // No fallback — nothing leaks insert into the read-only status buffer.
     weft.textInput("magit", null);
+    // A read-only projection: its keymap is PINNED — you can't drop into a
+    // generic editing mode (`normal`) inside it, so magit's keys never go dead.
+    // The framework enforces it; magit just declares it (no defensive handling).
+    weft.lockedMode("magit");
     weft.bindKey("magit", "j", "cursor-down"); // fold-aware in core
     weft.bindKey("magit", "k", "cursor-up");
     weft.bindKey("magit", "Down", "cursor-down");
@@ -458,6 +462,7 @@ export fn init() void {
     // A shared read-only view mode for the show/log/stash buffers (own their own
     // buffers, so magit's mutating keys never fire against a stale model).
     weft.textInput("git-view", null);
+    weft.lockedMode("git-view"); // read-only projection: keymap pinned (see magit)
     weft.bindKey("git-view", "j", "cursor-down");
     weft.bindKey("git-view", "k", "cursor-up");
     weft.bindKey("git-view", "Down", "cursor-down");

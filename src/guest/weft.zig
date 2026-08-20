@@ -66,6 +66,7 @@ extern "weft" fn wl_set_mode(ptr: u32, len: u32) void;
 extern "weft" fn wl_set_fallback(m: u32, ml: u32, par: u32, pl: u32) void;
 extern "weft" fn wl_text_input(m: u32, ml: u32, c: u32, cl: u32, has: u32) void;
 extern "weft" fn wl_menu_mode(ptr: u32, len: u32) void;
+extern "weft" fn wl_locked_mode(ptr: u32, len: u32) void;
 extern "weft" fn wl_declare_action(ptr: u32, len: u32) void;
 extern "weft" fn wl_provide(a: u32, al: u32, m: u32, ml: u32, l: u32, ll: u32, tl: u32, tll: u32, c: u32, cl: u32, prio: i32) void;
 extern "weft" fn wl_sticky_menu(ptr: u32, len: u32) void;
@@ -488,6 +489,14 @@ pub fn textInput(mode: []const u8, cmd: ?[]const u8) void {
 /// Declare `mode` a menu/prefix mode (which-key shows its bindings).
 pub fn menuMode(mode: []const u8) void {
     wl_menu_mode(p(mode.ptr), @intCast(mode.len));
+}
+/// Declare `mode` a LOCKED projection mode: a read-only view (magit, a git diff/
+/// log) whose keymap is pinned — a `setMode` out of it is refused unless it
+/// targets a menu or the same mode, so you can never end up in a generic editing
+/// mode (`normal`) inside the projection. The framework enforces it; the plugin
+/// just declares it (one line), never defensively handles the wrong-mode case.
+pub fn lockedMode(mode: []const u8) void {
+    wl_locked_mode(p(mode.ptr), @intCast(mode.len));
 }
 /// Declare `mode` a STICKY menu: stays open after a leaf key (flag-accumulating
 /// transients) instead of one-shot auto-popping. Implies `menuMode`.

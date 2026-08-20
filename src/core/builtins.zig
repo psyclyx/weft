@@ -108,6 +108,9 @@ fn cClearSelection(ctx: *Context, args: struct {}) anyerror!Value {
 }
 
 fn cSetMode(ctx: *Context, args: struct { mode: []const u8 }) anyerror!Value {
+    // A locked projection mode (magit/git-view) refuses to switch to a different
+    // editing mode — the read-only-buffer mode pin (see Keymap.mayLeaveLocked).
+    if (!ctx.keymap.mayLeaveLocked(args.mode)) return ok;
     try ctx.keymap.setMode(ctx.gpa, args.mode);
     return ok;
 }

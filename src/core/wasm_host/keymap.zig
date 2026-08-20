@@ -70,6 +70,9 @@ pub fn hSetMode(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32, resu
     const p: *WasmPlugin = @ptrCast(@alignCast(data.?));
     const mode = caller.readMemory(p.gpa, @intCast(args[0]), @intCast(args[1])) catch return;
     defer p.gpa.free(mode);
+    // A locked projection mode (magit/git-view) refuses to switch to a different
+    // editing mode — you can't land in `normal` inside a read-only projection.
+    if (!p.ctx.keymap.mayLeaveLocked(mode)) return;
     // Guest-initiated: route through enterMode so entering a menu mode records
     // its one-shot return target. Host-side mode save/restore (the picker) uses
     // plain setMode and never records.
@@ -108,6 +111,17 @@ pub fn hMenuMode(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32, res
     const mode = caller.readMemory(p.gpa, @intCast(args[0]), @intCast(args[1])) catch return;
     defer p.gpa.free(mode);
     p.ctx.keymap.markMenuMode(p.gpa, mode) catch {};
+}
+
+/// `locked_mode(mode)`: mark a read-only projection mode pinned (see
+/// Keymap.mayLeaveLocked) — magit/git-view can't be left for a generic editing
+/// mode, only a menu or itself.
+pub fn hLockedMode(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32, results: []i32) void {
+    _ = results;
+    const p: *WasmPlugin = @ptrCast(@alignCast(data.?));
+    const mode = caller.readMemory(p.gpa, @intCast(args[0]), @intCast(args[1])) catch return;
+    defer p.gpa.free(mode);
+    p.ctx.keymap.markLockedMode(p.gpa, mode) catch {};
 }
 
 /// `sticky_menu(mode)`: mark a menu mode STICKY — it stays open after a leaf

@@ -59,6 +59,12 @@ menu_return: std.StringArrayHashMapUnmanaged([]u8) = .empty,
 /// only an explicit mode change (execute, or Escape → the return target)
 /// leaves. A subset of `menu_modes`, so which-key still lists the keys.
 sticky_menus: std.StringArrayHashMapUnmanaged(void) = .empty,
+/// Modes a READ-ONLY projection pins itself to (magit, a git diff/log view): a
+/// `setMode` out of a locked mode is refused unless it targets a MENU (transient)
+/// or the same mode — so you can never land in a generic editing mode (`normal`)
+/// inside a projection, its keys dead. Buffer-SWITCH mode changes bypass the gate
+/// (they go through Buffers.switchTo, not the guest/builtin setMode door).
+locked_modes: std.StringArrayHashMapUnmanaged(void) = .empty,
 
 pub const empty: Keymap = .{};
 
@@ -88,6 +94,8 @@ pub fn deinit(self: *Keymap, gpa: Allocator) void {
     self.menu_modes.deinit(gpa);
     for (self.sticky_menus.keys()) |k| gpa.free(k);
     self.sticky_menus.deinit(gpa);
+    for (self.locked_modes.keys()) |k| gpa.free(k);
+    self.locked_modes.deinit(gpa);
     for (self.menu_return.keys(), self.menu_return.values()) |k, v| {
         gpa.free(k);
         gpa.free(v);
@@ -288,6 +296,26 @@ pub fn markStickyMenu(self: *Keymap, gpa: Allocator, mode: []const u8) Allocator
 /// Whether `mode` stays open after a leaf key (see `markStickyMenu`).
 pub fn isStickyMenu(self: *const Keymap, mode: []const u8) bool {
     return self.sticky_menus.contains(mode);
+}
+
+/// Declare `mode` a LOCKED projection mode (a read-only view: magit, a git diff/
+/// log). See `locked_modes` + `mayLeaveLocked`.
+pub fn markLockedMode(self: *Keymap, gpa: Allocator, mode: []const u8) Allocator.Error!void {
+    const gop = try self.locked_modes.getOrPut(gpa, mode);
+    if (!gop.found_existing) gop.key_ptr.* = try gpa.dupe(u8, mode);
+}
+
+pub fn isLockedMode(self: *const Keymap, mode: []const u8) bool {
+    return self.locked_modes.contains(mode);
+}
+
+/// Whether a within-buffer `setMode` to `target` is allowed from the CURRENT
+/// mode: always, unless the current mode is LOCKED and `target` is a different
+/// non-menu mode (which would drop a read-only projection into a generic editing
+/// mode). The guest/builtin setMode doors consult this; buffer-switch does not.
+pub fn mayLeaveLocked(self: *const Keymap, target: []const u8) bool {
+    if (!self.isLockedMode(self.mode)) return true;
+    return std.mem.eql(u8, target, self.mode) or self.isMenuMode(target);
 }
 
 /// Append `mode`'s own bindings (key → command) to `out`, in bind order.
@@ -516,6 +544,30 @@ test "keymap: a menu inherits the menu-nav base for nav keys; baseMode stops at 
     try km.setFallback(gpa, "leader-git", "leader");
     try km.markMenuMode(gpa, "leader-git");
     try t.expectEqualStrings("leader", km.parents.get("leader-git").?);
+}
+
+test "keymap: a locked projection mode refuses to leave for an editing mode" {
+    const gpa = t.allocator;
+    var km: Keymap = .empty;
+    defer km.deinit(gpa);
+    try km.markLockedMode(gpa, "magit");
+    try km.markMenuMode(gpa, "git-branch-menu");
+
+    try km.setMode(gpa, "magit");
+    // From the locked projection you may NOT jump to a different editing mode
+    // (the "normal-in-magit" leak) — that's now inexpressible...
+    try t.expect(!km.mayLeaveLocked("normal"));
+    try t.expect(!km.mayLeaveLocked("insert"));
+    // ...but a menu (transient) and staying put are fine.
+    try t.expect(km.mayLeaveLocked("git-branch-menu"));
+    try t.expect(km.mayLeaveLocked("magit"));
+
+    // From a menu (current mode not locked), returning to magit is allowed.
+    try km.setMode(gpa, "git-branch-menu");
+    try t.expect(km.mayLeaveLocked("magit"));
+    // A non-locked mode never gates (ordinary editing).
+    try km.setMode(gpa, "normal");
+    try t.expect(km.mayLeaveLocked("insert"));
 }
 
 test "keymap: menu return targets — guest entry records, nesting collapses to root" {
