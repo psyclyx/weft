@@ -68,12 +68,64 @@ fn moveByMotion(comptime motion: []const u8) fn () void {
         }
     }.h;
 }
+/// The pending operator is a CHANGE (`c`), not delete/yank — its after-mode is
+/// insert. vim's `cw`/`cW` special-case keys off this.
+fn isChangeOp() bool {
+    return !op_is_yank and std.mem.eql(u8, op_after, "insert");
+}
+
+fn isWordByte(ch: u8) bool {
+    return (ch >= 'a' and ch <= 'z') or (ch >= 'A' and ch <= 'Z') or
+        (ch >= '0' and ch <= '9') or ch == '_';
+}
+
+/// Is the cursor sitting ON a word character? (vim's `cw`→`ce` rule only
+/// applies when in a word — on whitespace, `cw` stays `cw`.)
+fn cursorOnWord() bool {
+    const cur = weft.cursor();
+    const s = weft.slice(cur, cur + 1);
+    return s.len == 1 and isWordByte(s[0]);
+}
+
+/// The word-END motion `cw`/`cW` should use in place of word-FORWARD, or "" if
+/// `motion` isn't a plain word-forward motion.
+fn changeWordEnd(comptime motion: []const u8) []const u8 {
+    if (std.mem.eql(u8, motion, "motion.word-fwd")) return "motion.word-end";
+    if (std.mem.eql(u8, motion, "motion.WORD-fwd")) return "motion.WORD-end";
+    return "";
+}
+
+/// An INCLUSIVE motion covers the endpoint CHARACTER (vim `e`/`E`): the motion's
+/// range end is the last byte of the word, so as an operator target it must be
+/// extended one byte — otherwise `de`/`ce` stop one char short (delete "cns" of
+/// "cnst"). Exclusive motions (`w`, `b`, `0`, `$`) already land past their span.
+fn isInclusiveMotion(m: []const u8) bool {
+    return std.mem.eql(u8, m, "motion.word-end") or std.mem.eql(u8, m, "motion.WORD-end");
+}
+
+/// Extend a stamped range's end by one byte (clamped to the buffer) — the
+/// inclusive-motion fixup, so the operator covers the endpoint character.
+fn inclusiveEnd(hnd: u32) u32 {
+    const r = weft.rangeEnds(hnd) orelse return hnd;
+    const end2 = @min(r.end + 1, weft.byteLen());
+    if (end2 == r.end) return hnd;
+    return weft.stampRange(.{ .start = r.start, .end = end2 }) orelse hnd;
+}
+
 /// Operator-pending motion: run the motion, apply the pending operator over its
-/// range.
+/// range. Two vim fidelity rules live here:
+///  · `cw`/`cW` special case — changing a word with the cursor IN a word acts
+///    like `ce`/`cE` (to the word END), so the trailing whitespace `dw` eats is
+///    preserved (`cw` on "cnst " → change "cnst", keep the space).
+///  · inclusive motions (`e`/`E`, and `cw`/`cW` which route to them) cover the
+///    endpoint char, so the operator range is extended one byte.
 fn opByMotion(comptime motion: []const u8) fn () void {
     return struct {
         fn h() void {
-            const hnd = weft.runRange(motion) orelse return opCancel();
+            const eff = comptime changeWordEnd(motion);
+            const use = if (eff.len > 0 and isChangeOp() and cursorOnWord()) eff else motion;
+            const hnd0 = weft.runRange(use) orelse return opCancel();
+            const hnd = if (isInclusiveMotion(use)) inclusiveEnd(hnd0) else hnd0;
             applyOpRange(hnd);
         }
     }.h;
