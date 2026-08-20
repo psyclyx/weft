@@ -193,6 +193,55 @@ test "authoring: `gU`/`gu` case operators — line, motion, and visual" {
     }
 }
 
+test "authoring: `>`/`<` indent operators — line, text object, visual" {
+    const gpa = t.allocator;
+    var app: App = undefined;
+    try app.init(gpa);
+    defer app.deinit();
+    const ed = &app.ed;
+
+    authorFile(ed, "n.js",
+        \\function f() {
+        \\return 1;
+        \\}
+        \\
+    );
+
+    // >> indents the current line one unit; << dedents it back (doubled = line).
+    ed.chord("g g");
+    ed.press("j", ""); // to `return 1;`
+    ed.chord("greater greater");
+    ed.run("save");
+    ed.waitSave();
+    {
+        const disk = try core.file.readAlloc(gpa, "n.js");
+        defer gpa.free(disk);
+        try t.expect(std.mem.indexOf(u8, disk, "  return 1;") != null);
+    }
+    ed.chord("less less");
+    ed.run("save");
+    ed.waitSave();
+    {
+        const disk = try core.file.readAlloc(gpa, "n.js");
+        defer gpa.free(disk);
+        try t.expect(std.mem.indexOf(u8, disk, "  return 1;") == null); // dedented
+        try t.expect(std.mem.indexOf(u8, disk, "return 1;") != null);
+    }
+
+    // >ip indents the whole paragraph — the operator composing with a text object.
+    ed.chord("g g");
+    ed.chord("greater i p");
+    ed.run("save");
+    ed.waitSave();
+    {
+        const disk = try core.file.readAlloc(gpa, "n.js");
+        defer gpa.free(disk);
+        try t.expect(std.mem.indexOf(u8, disk, "  function f() {") != null);
+        try t.expect(std.mem.indexOf(u8, disk, "  return 1;") != null);
+        try t.expect(std.mem.indexOf(u8, disk, "  }") != null);
+    }
+}
+
 test "authoring: `C-n` completes a word already in the buffer" {
     const gpa = t.allocator;
     var app: App = undefined;

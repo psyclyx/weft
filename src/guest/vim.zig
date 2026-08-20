@@ -264,8 +264,12 @@ const static_cmds = [_]Cmd{
     .{ .name = "vim-visual-comment", .handler = visualOp("op.comment") },
     .{ .name = "vim-visual-upcase", .handler = visualOp("op.upcase") },
     .{ .name = "vim-visual-lowercase", .handler = visualOp("op.lowercase") },
+    .{ .name = "vim-visual-indent", .handler = visualOp("op.indent") },
+    .{ .name = "vim-visual-dedent", .handler = visualOp("op.dedent") },
     .{ .name = "enter-op-upcase", .handler = enterOpUpcase },
     .{ .name = "enter-op-lowercase", .handler = enterOpLowercase },
+    .{ .name = "enter-op-indent", .handler = enterOpIndent },
+    .{ .name = "enter-op-dedent", .handler = enterOpDedent },
     .{ .name = "vim-visual-line", .handler = visualLine },
     .{ .name = "vim-normal", .handler = normal },
     .{ .name = "vim-append-line", .handler = appendLine },
@@ -429,7 +433,7 @@ export fn init() void {
     // The doubled operator is linewise (dd, yy, cc, gUU, guu; gcc's second key
     // `c` is already here). Each maps to op-line, which applies whatever operator
     // is pending to the current line.
-    for ([_][]const u8{ "d", "c", "y", "u", "U" }) |k| weft.bindKey("op-pending", k, "op-line");
+    for ([_][]const u8{ "d", "c", "y", "u", "U", "greater", "less" }) |k| weft.bindKey("op-pending", k, "op-line");
     // i/a in operator-pending select a text object (di", ca(, yiw, …).
     weft.bindKey("op-pending", "i", "enter-op-inner");
     weft.bindKey("op-pending", "a", "enter-op-around");
@@ -523,6 +527,11 @@ export fn init() void {
     weft.bindKey("normal", "g u", "enter-op-lowercase");
     weft.bindKey("visual", "U", "vim-visual-upcase"); // vim: U/u case a selection
     weft.bindKey("visual", "u", "vim-visual-lowercase");
+    // `>`/`<` indent operators (>> / << for the line; >ip / <j over a motion).
+    weft.bindKey("normal", "greater", "enter-op-indent");
+    weft.bindKey("normal", "less", "enter-op-dedent");
+    weft.bindKey("visual", "greater", "vim-visual-indent"); // > / < on a selection
+    weft.bindKey("visual", "less", "vim-visual-dedent");
     // C-w …: split/close, focus (h/j/k/l or arrows), move/swap (H/J/K/L or
     // shifted arrows). Shift lives in the letter keysym (H), not `S-h`;
     // arrows have no shifted keysym so they take an explicit `S-`.
@@ -782,6 +791,20 @@ fn enterOpUpcase() void {
 }
 fn enterOpLowercase() void {
     op_edit_cmd = "op.lowercase";
+    op_copies = false;
+    op_after = "normal";
+    weft.setMode("op-pending");
+}
+/// `>` / `<` — the indent operators (indent / dedent over a motion or text
+/// object; `>>`/`<<` for the line). Linewise; no register.
+fn enterOpIndent() void {
+    op_edit_cmd = "op.indent";
+    op_copies = false;
+    op_after = "normal";
+    weft.setMode("op-pending");
+}
+fn enterOpDedent() void {
+    op_edit_cmd = "op.dedent";
     op_copies = false;
     op_after = "normal";
     weft.setMode("op-pending");

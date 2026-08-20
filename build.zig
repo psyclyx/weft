@@ -33,6 +33,7 @@ const guests = [_]Guest{
     .{ .src = "src/guest/operators.zig", .import = "guest_operators_wasm", .install = true },
     .{ .src = "src/guest/vim.zig", .import = "guest_vim_wasm", .install = true },
     .{ .src = "src/guest/comment.zig", .import = "guest_comment_wasm", .install = true },
+    .{ .src = "src/guest/indent.zig", .import = "guest_indent_wasm", .install = true },
     .{ .src = "src/guest/whitespace.zig", .import = "guest_whitespace_wasm", .install = true },
     .{ .src = "src/guest/numbers.zig", .import = "guest_numbers_wasm", .install = true },
     .{ .src = "src/guest/autopair.zig", .import = "guest_autopair_wasm", .install = true },

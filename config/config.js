@@ -33,7 +33,8 @@ weft.plugin("textobjects"); // iw/i"/i(/ip … — each returns a range
 weft.plugin("operators");   // op.delete/upcase/lowercase — await a range
 weft.plugin("vim");         // modal editing — composes motions + textobjects + operators
 weft.plugin("ts");          // tree-sitter navigation: expand-selection, select-function
-weft.plugin("comment");     // toggle line comments
+weft.plugin("comment");     // toggle line comments (gc operator)
+weft.plugin("indent");      // indent/dedent operators (> / <)
 weft.plugin("whitespace");  // trim trailing whitespace
 weft.plugin("numbers");     // increment/decrement the number under the cursor
 weft.plugin("autopair");    // auto-close ( { [ " in insert mode

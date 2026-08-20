@@ -519,6 +519,7 @@ const guest = struct {
     const vim = @embedFile("guest_vim_wasm");
     const autopair = @embedFile("guest_autopair_wasm");
     const comment = @embedFile("guest_comment_wasm");
+    const indent = @embedFile("guest_indent_wasm");
     const dired = @embedFile("guest_dired_wasm");
     const buffers = @embedFile("guest_buffers_wasm");
     const modes = @embedFile("guest_modes_wasm");
@@ -558,6 +559,7 @@ pub fn loadVim(ed: *Editor) !void {
     try ed.load("textobjects", guest.textobjects);
     try ed.load("operators", guest.operators);
     try ed.load("comment", guest.comment);
+    try ed.load("indent", guest.indent);
     try ed.load("autopair", guest.autopair);
     try ed.load("vim", guest.vim);
 }
@@ -731,6 +733,7 @@ const plugin_catalog = std.StaticStringMap([]const u8).initComptime(.{
     .{ "operators", @embedFile("guest_operators_wasm") },
     .{ "vim", @embedFile("guest_vim_wasm") },
     .{ "comment", @embedFile("guest_comment_wasm") },
+    .{ "indent", @embedFile("guest_indent_wasm") },
     .{ "whitespace", @embedFile("guest_whitespace_wasm") },
     .{ "numbers", @embedFile("guest_numbers_wasm") },
     .{ "autopair", @embedFile("guest_autopair_wasm") },

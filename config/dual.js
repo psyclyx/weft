@@ -12,7 +12,7 @@
 [
   "edit", "complete", "project", "palette", "motions", "textobjects", "operators",
   "helix", "vim",
-  "comment", "autopair", "consult", "git", "grep", "make", "run", "fmt", "buffers",
+  "comment", "indent", "autopair", "consult", "git", "grep", "make", "run", "fmt", "buffers",
   "windows", "modes", "dired", "which_key",
 ].forEach((p) => weft.plugin(p));
 weft.use("defaults"); // shared pick/editing/menu-nav bindings
