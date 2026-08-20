@@ -9,6 +9,10 @@ const h = @import("harness.zig");
 
 const core = h.core;
 const App = h.App;
+const authorFile = h.authorFile;
+const toolText = h.toolText;
+const drainToolContains = h.drainToolContains;
+const drainUntilOracle = h.drainUntilOracle;
 
 test "authoring: `:w` writes the buffer to disk (the ex command a vim user reaches for)" {
     const gpa = t.allocator;
@@ -265,6 +269,56 @@ test "authoring: `.` repeats a COUNTED change (3dw then . deletes three more)" {
     const disk = try core.file.readAlloc(gpa, "cd.txt");
     defer gpa.free(disk);
     try t.expectEqualStrings("g", disk);
+}
+
+test "authoring/dired: rename a file in place — edit the name, :w, confirm the plan" {
+    const gpa = t.allocator;
+    var app: App = undefined;
+    try app.init(gpa);
+    defer app.deinit();
+    const ed = &app.ed;
+
+    // A file on disk; open the directory editor.
+    authorFile(ed, "old.txt", "keep me\n");
+    ed.run("dired");
+    try t.expect(drainToolContains(ed, "*dired*", "old.txt"));
+
+    // Rename IN PLACE: jump to the name (/), change the word old→new, as if it
+    // were any text buffer (the editable projection).
+    ed.press("/", "");
+    ed.settle(10);
+    ed.typeText("old");
+    ed.settle(10);
+    ed.press("Return", "");
+    ed.press("c", "");
+    ed.press("w", "");
+    ed.typeText("new");
+    ed.press("Escape", "");
+    try t.expect(drainToolContains(ed, "*dired*", "new.txt")); // the buffer shows the new name
+
+    // Save RECONCILES, but safely: it previews an ordered plan behind a y/n
+    // confirm rather than touching the disk blind.
+    ed.press("colon", "");
+    ed.typeText("w");
+    ed.press("Return", "");
+    try t.expectEqualStrings("dired-confirm", ed.mode());
+    {
+        const plan = toolText(ed, "*dired-plan*") orelse return error.NoPlan;
+        defer gpa.free(plan);
+        try t.expect(std.mem.indexOf(u8, plan, "rename") != null);
+        try t.expect(std.mem.indexOf(u8, plan, "old.txt") != null);
+        try t.expect(std.mem.indexOf(u8, plan, "new.txt") != null);
+    }
+    ed.press("y", ""); // apply the plan
+
+    // On disk: the file was RENAMED (not copied/deleted), content preserved.
+    try t.expect(drainUntilOracle(&app.proj, ed, "ls", "new.txt"));
+    const ls = try app.proj.oracle("ls");
+    defer gpa.free(ls);
+    try t.expectEqualStrings("new.txt", ls); // old.txt is gone
+    const disk = try core.file.readAlloc(gpa, "new.txt");
+    defer gpa.free(disk);
+    try t.expect(std.mem.indexOf(u8, disk, "keep me") != null);
 }
 
 test "authoring: visual mode — select with a motion, then delete and change" {
