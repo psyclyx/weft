@@ -41,29 +41,38 @@ pub const app_w: u32 = 640;
 pub const app_h: u32 = 400;
 pub const app_em: f32 = 16;
 
-/// A full editor, headless. Owns the buffers/commands/keymap/caps and a live
-/// plugin set; drives them through the same command + keymap surface main.zig
-/// uses.
+/// A full editor, headless — built around the REAL app state. It owns an
+/// `app_session.Session` (the same struct `main()` holds: buffers, command/
+/// keymap/pick surfaces, caps, echo, quit, cmd_ctx, AND the capability-consumer
+/// UIs completion/definition/symbols/hover + cursor config, all wired by
+/// `Session.init` exactly as the app does) plus `Providers` and the `main()`
+/// plugin-host locals (engine/loop/plugins). Driving the real Session — not a
+/// look-alike — is why completion / hover / goto-def work without the harness
+/// re-wiring anything; a new capability the app gains is here for free.
 pub const Editor = struct {
     gpa: Allocator,
     pool: *core.task.Pool,
-    buffers: core.Buffers,
-    commands: command.Commands,
-    keymap: core.Keymap,
-    pick: core.pick.Pick,
-    caps: core.Caps,
-    actions: core.Actions,
-    /// The buffer-word completion consumer — bound to `complete` so `C-n` opens
-    /// the completion pick, exactly as app/setup.zig wires it. (Owns no heap.)
-    completion_ui: core.complete_ui.CompletionUi = .empty,
-    quit: bool = false,
-    echo: std.ArrayList(u8) = .empty,
-    ctx: command.Context = undefined,
-    engine: core.wasm.Engine,
+
+    // The real editor state + provider registries, exactly as main() builds them.
+    session: app_session.Session = undefined,
+    prov: app_providers.Providers = undefined,
+    which_key_now: bool = false,
+
+    // Pointer aliases into `session`, set once it inits — so the driving methods
+    // and the tests read `ed.keymap` / `self.buffers` unchanged (auto-deref).
+    buffers: *core.Buffers = undefined,
+    commands: *command.Commands = undefined,
+    keymap: *core.Keymap = undefined,
+    pick: *core.Pick = undefined,
+    caps: *core.Caps = undefined,
+    ctx: *command.Context = undefined,
+
+    // ── main()-local plugin host + async loop (the harness owns these) ──
+    engine: core.wasm.Engine = undefined,
     plugins: std.ArrayList(*core.wasm_abi.WasmPlugin) = .empty,
     plugin_kv: core.kv.Store = .empty,
     config_kv: core.kv.Store = .empty,
-    loop: core.async_loop.Loop,
+    loop: core.async_loop.Loop = undefined,
     subs: core.subbuffer.SubBuffers = .empty,
     register: core.register = .empty,
     view: ?view_mod.View = null,
@@ -90,54 +99,44 @@ pub const Editor = struct {
     /// document over the collab loopback are DISTINCT CRDT replicas (identical
     /// agent names would collide event ids and corrupt the merge).
     pub fn initNamed(gpa: Allocator, self: *Editor, user: []const u8) !void {
-        self.quit = false;
-        self.echo = .empty;
+        self.gpa = gpa;
         self.plugins = .empty;
         self.plugin_kv = .empty;
         self.config_kv = .empty;
         self.subs = .empty;
         self.register = .empty;
         self.view = null;
+        self.which_key_now = false;
         self.pool = try core.task.Pool.init(gpa, .{ .threads = 2 });
-        self.gpa = gpa;
-        self.commands = .empty;
-        self.keymap = .empty;
-        self.pick = .empty;
-        self.caps = core.Caps.init(gpa, core.task.nowNs);
-        self.actions = core.Actions.init(gpa);
         self.engine = try core.wasm.Engine.init();
         self.loop = core.async_loop.Loop.init(gpa, self.pool, core.task.nowNs);
-        self.buffers = try core.Buffers.init(gpa, self.pool, user);
-        self.ctx = .{
-            .gpa = gpa,
-            .buffers = &self.buffers,
-            .commands = &self.commands,
-            .keymap = &self.keymap,
-            .actions = &self.actions,
-            .pick = &self.pick,
-            .caps = &self.caps,
-            .quit = &self.quit,
-            .echo = &self.echo,
-        };
-        try core.builtins.install(gpa, &self.commands, &self.keymap, &self.actions);
-        // Wire the completion consumer (app/setup.zig binds this): `complete`
-        // opens the buffer-word completion pick. Without it, the config's insert
-        // `C-n` → `complete` is a no-op in the harness.
-        self.completion_ui = .empty;
-        _ = try self.commands.bind(gpa, "complete", self.completion_ui.commandSpec());
+
+        // Stand up the REAL app state, in main()'s construction order: Providers'
+        // registries first (Session's capability consumers bind onto them), the
+        // Session (builtins + capability/caret commands), then Providers' attach
+        // phase (borrows the session caps).
+        try self.prov.initRegistries(gpa);
+        try self.session.init(gpa, self.pool, user, &self.prov.grammars, &self.prov.lsp_servers, &self.which_key_now);
+        self.prov.initAttach(gpa, &self.session.caps, parentEnviron(), true);
+
+        // Alias the moved state (session is a field of *self, so these are stable).
+        self.buffers = &self.session.buffers;
+        self.commands = &self.session.commands;
+        self.keymap = &self.session.keymap;
+        self.pick = &self.session.pick;
+        self.caps = &self.session.caps;
+        self.ctx = &self.session.cmd_ctx;
+
         // Proc-backed plugins (git/run/grep) shell out through the wasm host,
         // which passes this process-global environ to each child. main() sets it
-        // at startup; the harness must too, or every subprocess runs PATH-less
-        // and can't find its tool (git-init would silently no-op). Set to the
-        // real parent env — the faithful, main()-matching model.
+        // at startup; the harness must too, or every subprocess runs PATH-less.
         core.wasm_host.setEnviron(parentEnviron());
-        // Window layout: own the real pane tree and bind the real window
-        // commands onto our command surface (window-split/focus/move → intents
-        // applied by window_cmds.applyIntents), exactly like main().
+
+        // Window layout: own the real pane tree + bind the real window commands.
         self.win_ctx = .{};
         self.last_frame_rect = .{ .x = 0, .y = 0, .w = app_w, .h = app_h };
         self.win_layout = try window_layout.Layout.init(gpa, self.buffers.active_id);
-        try window_cmds.registerCommands(gpa, &self.commands, &self.win_ctx, &self.win_actions);
+        try window_cmds.registerCommands(gpa, self.commands, &self.win_ctx, &self.win_actions);
         self.last_active = self.buffers.active_id;
     }
 
@@ -161,22 +160,24 @@ pub const Editor = struct {
         self.loop.deinit();
         self.subs.deinit(gpa);
         self.register.deinit(gpa);
-        self.actions.deinit();
-        self.caps.deinit();
-        self.pick.deinit(gpa);
-        self.keymap.deinit(gpa);
-        self.commands.deinit(gpa);
-        self.echo.deinit(gpa);
-        self.buffers.deinit(gpa);
+        // Tear down in main()'s order (shells outlive buffers): detach per-buffer
+        // providers, free the Session (buffers/caps/keymap/…), join the pool,
+        // then Providers LAST (the persistent shells outlive buffers + workers).
+        {
+            var it = self.session.buffers.iterator();
+            while (it.next()) |b| app_providers.detachProviders(&self.prov.attach_deps, b);
+        }
+        self.session.deinit(gpa);
+        self.pool.deinit();
+        self.prov.deinit(gpa);
         self.plugin_kv.deinit(gpa);
         self.config_kv.deinit(gpa);
         self.engine.deinit();
-        self.pool.deinit();
     }
 
     /// Load a reference plugin from its embedded `.wasm` (describe+init run).
     pub fn load(self: *Editor, name: []const u8, wasm: []const u8) !void {
-        const p = try core.wasm_abi.loadPlugin(&self.engine, &self.ctx, name, wasm, .{
+        const p = try core.wasm_abi.loadPlugin(&self.engine, self.ctx, name, wasm, .{
             .kv = &self.plugin_kv,
             .config = &self.config_kv,
             .loop = &self.loop,
@@ -198,7 +199,7 @@ pub const Editor = struct {
     pub fn press(self: *Editor, spec_in: []const u8, text: []const u8) void {
         var kbuf: [256]u8 = undefined;
         const spec = core.Keymap.normalizeKey(&kbuf, spec_in);
-        dispatch.dispatchSpec(&self.ctx, spec, text) catch {};
+        dispatch.dispatchSpec(self.ctx, spec, text) catch {};
         self.syncActivate();
     }
 
@@ -216,25 +217,25 @@ pub const Editor = struct {
         self.ctx.user_initiated = true;
         defer self.ctx.user_initiated = false;
         if (self.keymap.textCommand()) |tc| {
-            _ = command.run(&self.commands, &self.ctx, tc, &.{.{ .string = s }}) catch {};
+            _ = command.run(self.commands, self.ctx, tc, &.{.{ .string = s }}) catch {};
         }
     }
 
     /// Run a command by name (a startup action, or a "menu leaf" invoked directly).
     pub fn run(self: *Editor, cmd: []const u8) void {
-        _ = command.run(&self.commands, &self.ctx, cmd, &.{}) catch {};
+        _ = command.run(self.commands, self.ctx, cmd, &.{}) catch {};
         self.syncActivate();
     }
 
     /// Run a command with one string argument (e.g. `open <path>`).
     pub fn runStr(self: *Editor, cmd: []const u8, arg: []const u8) void {
-        _ = command.run(&self.commands, &self.ctx, cmd, &.{.{ .string = arg }}) catch {};
+        _ = command.run(self.commands, self.ctx, cmd, &.{.{ .string = arg }}) catch {};
         self.syncActivate();
     }
 
     /// The current transient echo line (what a plugin last reported to the user).
     pub fn echoText(self: *Editor) []const u8 {
-        return self.echo.items;
+        return self.session.echo.items;
     }
 
     /// Drive the active buffer's async save to completion (bounded spin), the
@@ -288,7 +289,7 @@ pub const Editor = struct {
         const hud: view_mod.Hud = .{
             .mode = self.keymap.currentMode(),
             .file = self.buffers.active().name,
-            .pick = if (self.pick.active) &self.pick else null,
+            .pick = if (self.pick.active) self.pick else null,
         };
         const pixels = harness.renderView(self.gpa, v, &self.buffers.active().editor, hud, app_w, app_h) catch return;
         defer self.gpa.free(pixels);
@@ -305,7 +306,7 @@ pub const Editor = struct {
     /// main()'s `window_cmds.applyIntents` call.
     pub fn applyWindow(self: *Editor) void {
         const v = self.ensureView() catch return;
-        _ = window_cmds.applyIntents(&self.win_ctx, &self.win_layout, v, &self.buffers, self.gpa, &self.keymap, self.last_frame_rect);
+        _ = window_cmds.applyIntents(&self.win_ctx, &self.win_layout, v, self.buffers, self.gpa, self.keymap, self.last_frame_rect);
     }
 
     /// Number of panes currently tiled.
@@ -728,7 +729,7 @@ pub fn bootConfig(ed: *Editor, config_dir: []const u8, loader_state: *ConfigLoad
     defer ed.gpa.free(cfg_path);
     const src = try core.file.readAlloc(ed.gpa, cfg_path);
     defer ed.gpa.free(src);
-    try core.quickjs.evalConfig(&ed.engine, &ed.ctx, loader_state.loader(), &ed.config_kv, config_dir, src);
+    try core.quickjs.evalConfig(&ed.engine, ed.ctx, loader_state.loader(), &ed.config_kv, config_dir, src);
 }
 
 /// What the which-key overlay actually SHOWS on screen right now, as the text a
