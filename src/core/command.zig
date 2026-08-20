@@ -87,6 +87,10 @@ pub const Context = struct {
         return .{
             .mode = self.keymap.currentMode(),
             .lang = Actions.langOfName(self.buffers.active().name),
+            // The active buffer's projection identity — the reliable per-buffer
+            // signal a projection scopes `save`/etc. by (mode changes as you
+            // edit; the tool-backing doesn't). "" when not a tool projection.
+            .tool = self.editor().toolName() orelse "",
         };
     }
 

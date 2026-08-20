@@ -106,7 +106,7 @@ pub const Editor = struct {
             .quit = &self.quit,
             .echo = &self.echo,
         };
-        try core.builtins.install(gpa, &self.commands, &self.keymap);
+        try core.builtins.install(gpa, &self.commands, &self.keymap, &self.actions);
         // Window layout: own the real pane tree and bind the real window
         // commands onto our command surface (window-split/focus/move → intents
         // applied by window_cmds.applyIntents), exactly like main().

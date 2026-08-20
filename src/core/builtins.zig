@@ -55,7 +55,12 @@ fn cRedo(ctx: *Context, args: struct {}) anyerror!Value {
     return .{ .boolean = try ctx.editor().redo(ctx.gpa) };
 }
 
-fn cSave(ctx: *Context, args: struct {}) anyerror!Value {
+/// The default `save` provider: write the buffer to its file backing. `save` is
+/// an ACTION (not a bare command), so a projection (dired/magit) registers its
+/// own `save` provider scoped to its tool identity — the action system picks it
+/// over this in the projection's buffer, by specificity. The core stays
+/// projection-agnostic: no `if (isTool)` branch lives here.
+fn cSaveFile(ctx: *Context, args: struct {}) anyerror!Value {
     _ = args;
     try ctx.editor().requestSave(ctx.gpa);
     return ok;
@@ -239,7 +244,7 @@ const table = [_]command.Command{
     command.define("delete-forward", "Delete the selection or the character after the cursor.", cDeleteForward),
     command.define("undo", "Undo the newest own edit unit.", cUndo),
     command.define("redo", "Redo the newest undone unit.", cRedo),
-    command.define("save", "Request an asynchronous save of the current file.", cSave),
+    command.define("save-file", "Write the buffer to its file backing (the default `save` provider).", cSaveFile),
     command.define("cursor-left", "Move the cursor one character left.", cCursorLeft),
     command.define("cursor-right", "Move the cursor one character right.", cCursorRight),
     command.define("cursor-up", "Move the cursor up one line.", cCursorUp),
@@ -254,8 +259,14 @@ const table = [_]command.Command{
 
 /// Register every built-in and the default keymap. The default mode is
 /// plain modeless editing; a config replaces any of it by rebinding.
-pub fn install(gpa: std.mem.Allocator, commands: *command.Commands, keymap: *@import("Keymap.zig")) !void {
+pub fn install(gpa: std.mem.Allocator, commands: *command.Commands, keymap: *@import("Keymap.zig"), actions: *@import("action.zig")) !void {
     for (table) |cmd| _ = try commands.bind(gpa, cmd.name, cmd);
+
+    // `save` is an ACTION: `C-s`/`:w`/palette all dispatch it, and a projection
+    // (dired/magit) provides its own `save` scoped to its tool identity, which
+    // wins in its buffer. The default provider writes the file backing.
+    try command.registerAction(gpa, commands, actions, "save", .pick);
+    try actions.provide(.{ .action = "save", .command = "save-file", .owner = "core" });
 
     try keymap.setMode(gpa, "default");
     const binds = [_][2][]const u8{

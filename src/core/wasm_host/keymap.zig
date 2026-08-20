@@ -35,9 +35,9 @@ pub fn hDeclareAction(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32
     command.registerAction(gpa, p.ctx.commands, p.ctx.actions, name, .pick) catch {};
 }
 
-/// wl_provide(action, mode, lang, cmd, prio) — a plugin registers a provider
-/// for `action`, owned by its name (so teardown drops it and equal-tier
-/// collisions are attributable). Empty mode/lang = "don't care".
+/// wl_provide(action, mode, lang, tool, cmd, prio) — a plugin registers a
+/// provider for `action`, owned by its name (so teardown drops it and equal-
+/// tier collisions are attributable). Empty mode/lang/tool = "don't care".
 pub fn hProvide(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32, results: []i32) void {
     _ = results;
     const p: *WasmPlugin = @ptrCast(@alignCast(data.?));
@@ -48,16 +48,19 @@ pub fn hProvide(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32, resu
     defer gpa.free(mode);
     const lang = caller.readMemory(gpa, @intCast(args[4]), @intCast(args[5])) catch return;
     defer gpa.free(lang);
-    const cmd = caller.readMemory(gpa, @intCast(args[6]), @intCast(args[7])) catch return;
+    const tool = caller.readMemory(gpa, @intCast(args[6]), @intCast(args[7])) catch return;
+    defer gpa.free(tool);
+    const cmd = caller.readMemory(gpa, @intCast(args[8]), @intCast(args[9])) catch return;
     defer gpa.free(cmd);
     p.ctx.actions.provide(.{
         .action = action,
         .when = .{
             .mode = if (mode.len > 0) mode else null,
             .lang = if (lang.len > 0) lang else null,
+            .tool = if (tool.len > 0) tool else null,
         },
         .command = cmd,
-        .priority = args[8],
+        .priority = args[10],
         .owner = p.name,
     }) catch {};
 }

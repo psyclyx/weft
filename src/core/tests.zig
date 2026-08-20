@@ -476,7 +476,7 @@ const TestHost = struct {
             .quit = &host.quit,
             .echo = &host.echo_line,
         };
-        try core.builtins.install(gpa, &host.commands, &host.keymap);
+        try core.builtins.install(gpa, &host.commands, &host.keymap, &host.actions);
     }
 
     fn editor(host: *TestHost) *Editor {

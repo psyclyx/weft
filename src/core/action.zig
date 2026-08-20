@@ -53,17 +53,24 @@ pub const When = struct {
     /// Buffer language — the active buffer name's extension without the dot
     /// (`zig`, `py`, `md`). Matched case-sensitively.
     lang: ?[]const u8 = null,
+    /// The active buffer's tool-backing name (a plugin projection: `dired`,
+    /// `magit`), or null = don't care. Unlike `mode` — which changes as you
+    /// edit a projection (vim `i`/Escape → insert/normal) — the tool-backing is
+    /// a stable per-BUFFER signal, so a projection scopes its `save` (and other
+    /// context intents) to its own identity, in any mode.
+    tool: ?[]const u8 = null,
 
     /// How specific this predicate is — the count of constraints it imposes.
     /// Breaks priority ties in favour of the narrower provider, so a
     /// `lang:zig` bind beats an unconstrained default at equal priority.
     fn specificity(self: When) u8 {
-        return @as(u8, @intFromBool(self.mode != null)) + @intFromBool(self.lang != null);
+        return @as(u8, @intFromBool(self.mode != null)) + @intFromBool(self.lang != null) + @intFromBool(self.tool != null);
     }
 
     fn holds(self: When, ctx: Ctx) bool {
         if (self.mode) |m| if (!std.mem.eql(u8, m, ctx.mode)) return false;
         if (self.lang) |l| if (!std.mem.eql(u8, l, ctx.lang)) return false;
+        if (self.tool) |tl| if (!std.mem.eql(u8, tl, ctx.tool)) return false;
         return true;
     }
 };
@@ -74,6 +81,8 @@ pub const When = struct {
 pub const Ctx = struct {
     mode: []const u8,
     lang: []const u8 = "",
+    /// The active buffer's tool-backing name, or "" when it's not a projection.
+    tool: []const u8 = "",
 };
 
 /// The extension (sans dot) of a buffer display name, or "" — the `lang` key a
@@ -94,6 +103,7 @@ const Provider = struct {
     fn deinit(self: *Provider, gpa: Allocator) void {
         if (self.when.mode) |m| gpa.free(m);
         if (self.when.lang) |l| gpa.free(l);
+        if (self.when.tool) |tl| gpa.free(tl);
         gpa.free(self.command);
         gpa.free(self.owner);
     }
@@ -221,6 +231,7 @@ pub fn provide(self: *Actions, spec: ProvideSpec) !void {
     errdefer p.deinit(gpa);
     if (spec.when.mode) |m| p.when.mode = try gpa.dupe(u8, m);
     if (spec.when.lang) |l| p.when.lang = try gpa.dupe(u8, l);
+    if (spec.when.tool) |tl| p.when.tool = try gpa.dupe(u8, tl);
     try gop.value_ptr.providers.append(gpa, p);
 }
 
@@ -289,6 +300,24 @@ test "action: pick resolves by context, priority, and specificity" {
     try t.expectEqual(@as(?[]const u8, null), acts.resolve("nope", .{ .mode = "normal" }));
     try acts.provide(.{ .action = "run", .when = .{ .mode = "debug" }, .command = "run-target" });
     try t.expectEqual(@as(?[]const u8, null), acts.resolve("run", .{ .mode = "normal", .lang = "zig" }));
+}
+
+test "action: a projection scopes save by its tool identity, in any mode" {
+    var acts = Actions.init(t.allocator);
+    defer acts.deinit();
+
+    // Core's default save (file write), and dired's save for its projection.
+    try acts.provide(.{ .action = "save", .command = "save-file" });
+    try acts.provide(.{ .action = "save", .when = .{ .tool = "dired" }, .command = "dired-save" });
+
+    // In the dired projection, dired's provider wins — REGARDLESS of mode
+    // (normal while you :w, insert while you type): the tool identity is stable.
+    try t.expectEqualStrings("dired-save", acts.resolve("save", .{ .mode = "normal", .tool = "dired" }).?);
+    try t.expectEqualStrings("dired-save", acts.resolve("save", .{ .mode = "insert", .tool = "dired" }).?);
+    // A normal file buffer (no tool) falls to the default file write.
+    try t.expectEqualStrings("save-file", acts.resolve("save", .{ .mode = "normal", .lang = "zig", .tool = "" }).?);
+    // A different projection doesn't get dired's save.
+    try t.expectEqualStrings("save-file", acts.resolve("save", .{ .mode = "normal", .tool = "magit" }).?);
 }
 
 test "action: declare is idempotent and provider load-order-independent" {

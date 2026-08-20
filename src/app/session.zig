@@ -82,7 +82,7 @@ pub const Session = struct {
             .quit = &self.quit,
             .echo = &self.echo,
         };
-        try core.builtins.install(gpa, &self.commands, &self.keymap);
+        try core.builtins.install(gpa, &self.commands, &self.keymap, &self.actions);
         // Capability consumers — written against capability names only.
         self.completion_ui = .empty;
         self.def_ui = .empty;

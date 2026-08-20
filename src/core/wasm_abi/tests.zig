@@ -264,7 +264,7 @@ test "dired: gathers a directory tree via proc and renders the model (async)" {
     var env: Env = undefined;
     try Env.init(gpa, &env);
     defer env.deinit(gpa);
-    try @import("../builtins.zig").install(gpa, &env.commands, &env.keymap); // buffer-create
+    try @import("../builtins.zig").install(gpa, &env.commands, &env.keymap, &env.actions); // buffer-create
 
     var loop = async_loop.Loop.init(gpa, env.pool, @import("../task.zig").nowNs);
     defer loop.deinit();
@@ -691,7 +691,7 @@ test "wasm plugins: buf-pick switches to the accepted buffer by recorded id" {
     var env: Env = undefined;
     try Env.init(gpa, &env);
     defer env.deinit(gpa);
-    try @import("../builtins.zig").install(gpa, &env.commands, &env.keymap); // buffer-switch
+    try @import("../builtins.zig").install(gpa, &env.commands, &env.keymap, &env.actions); // buffer-switch
     try @import("../pick.zig").install(gpa, &env.commands, &env.keymap);
 
     // Two more buffers beyond the initial scratch (ids 1 and 2).
@@ -897,7 +897,7 @@ test "wasm plugin: git-status runs git into a focused tool buffer (async)" {
     var env: Env = undefined;
     try Env.init(gpa, &env);
     defer env.deinit(gpa);
-    try @import("../builtins.zig").install(gpa, &env.commands, &env.keymap); // buffer-create
+    try @import("../builtins.zig").install(gpa, &env.commands, &env.keymap, &env.actions); // buffer-create
 
     var loop = async_loop.Loop.init(gpa, env.pool, @import("../task.zig").nowNs);
     defer loop.deinit();
@@ -950,7 +950,7 @@ test "wasm plugin: run-command runs a shell command into a tool buffer (async)" 
     var env: Env = undefined;
     try Env.init(gpa, &env);
     defer env.deinit(gpa);
-    try @import("../builtins.zig").install(gpa, &env.commands, &env.keymap);
+    try @import("../builtins.zig").install(gpa, &env.commands, &env.keymap, &env.actions);
 
     var loop = async_loop.Loop.init(gpa, env.pool, @import("../task.zig").nowNs);
     defer loop.deinit();
@@ -1018,7 +1018,7 @@ test "wasm plugin: repl runs a persistent process and streams its output back" {
     var env: Env = undefined;
     try Env.init(gpa, &env);
     defer env.deinit(gpa);
-    try @import("../builtins.zig").install(gpa, &env.commands, &env.keymap); // buffer-create
+    try @import("../builtins.zig").install(gpa, &env.commands, &env.keymap, &env.actions); // buffer-create
 
     var loop = async_loop.Loop.init(gpa, env.pool, @import("../task.zig").nowNs);
     defer loop.deinit();
@@ -1056,7 +1056,7 @@ test "wasm plugin: console-send runs the current line and appends output" {
     var env: Env = undefined;
     try Env.init(gpa, &env);
     defer env.deinit(gpa);
-    try @import("../builtins.zig").install(gpa, &env.commands, &env.keymap); // buffer-create
+    try @import("../builtins.zig").install(gpa, &env.commands, &env.keymap, &env.actions); // buffer-create
 
     var loop = async_loop.Loop.init(gpa, env.pool, @import("../task.zig").nowNs);
     defer loop.deinit();
@@ -1425,7 +1425,7 @@ test "wasm plugin: notes capture appends via fs and open reads it back" {
     var env: Env = undefined;
     try Env.init(gpa, &env);
     defer env.deinit(gpa);
-    try @import("../builtins.zig").install(gpa, &env.commands, &env.keymap); // buffer-create
+    try @import("../builtins.zig").install(gpa, &env.commands, &env.keymap, &env.actions); // buffer-create
 
     const tmp = "weft-notes-test.md"; // cwd-relative; cleaned up below
     file.deleteFile(gpa, tmp);

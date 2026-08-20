@@ -58,6 +58,7 @@ const keymap = @import("wasm_host/keymap.zig");
 const commands = @import("wasm_host/commands.zig");
 const edit = @import("wasm_host/edit.zig");
 const register_host = @import("wasm_host/register.zig");
+const tool_host = @import("wasm_host/tool.zig");
 
 /// Bind the full `weft.*` host-import membrane (the guest-side surface in
 /// src/guest/weft.zig). One import per abi.Abi method the shim exposes; each
@@ -133,7 +134,7 @@ pub fn defineImports(linker: *wasm.Linker, p: *WasmPlugin) !void {
     try d(linker, "wl_menu_mode", 2, 0, keymap.hMenuMode, p);
     try d(linker, "wl_sticky_menu", 2, 0, keymap.hStickyMenu, p);
     try d(linker, "wl_declare_action", 2, 0, keymap.hDeclareAction, p);
-    try d(linker, "wl_provide", 9, 0, keymap.hProvide, p);
+    try d(linker, "wl_provide", 11, 0, keymap.hProvide, p);
     try d(linker, "wl_run", 2, 0, commands.hRun, p);
     try d(linker, "wl_run_int", 3, 0, commands.hRunInt, p);
     try d(linker, "wl_run_str", 4, 0, commands.hRunStr, p);
@@ -181,6 +182,10 @@ pub fn defineImports(linker: *wasm.Linker, p: *WasmPlugin) !void {
     try d(linker, "wl_activate_path", 2, 1, activation.hActivatePath, p);
     try d(linker, "wl_claim_subbuffer", 2, 1, syntax_host.hClaimSubbuffer, p);
     try d(linker, "wl_subbuffer_put_fact", 5, 0, syntax_host.hSubbufferPutFact, p);
+    try d(linker, "wl_subbuffer_clear", 0, 0, syntax_host.hSubbufferClear, p);
+    try d(linker, "wl_subbuffer_fact_at", 5, 1, syntax_host.hSubbufferFactAt, p);
+    // Tool-backed projection: a save fires the owner's on_save reconcile.
+    try d(linker, "wl_tool_backing", 2, 0, tool_host.hToolBacking, p);
     // Register/kill service: the editor-agnostic yank/paste that ferries a
     // subbuffer's facts (a projection row's hidden id) across dd→p (register.zig).
     try d(linker, "wl_yank_range", 3, 0, register_host.hYankRange, p);

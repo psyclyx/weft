@@ -67,7 +67,7 @@ extern "weft" fn wl_set_fallback(m: u32, ml: u32, par: u32, pl: u32) void;
 extern "weft" fn wl_text_input(m: u32, ml: u32, c: u32, cl: u32, has: u32) void;
 extern "weft" fn wl_menu_mode(ptr: u32, len: u32) void;
 extern "weft" fn wl_declare_action(ptr: u32, len: u32) void;
-extern "weft" fn wl_provide(a: u32, al: u32, m: u32, ml: u32, l: u32, ll: u32, c: u32, cl: u32, prio: i32) void;
+extern "weft" fn wl_provide(a: u32, al: u32, m: u32, ml: u32, l: u32, ll: u32, tl: u32, tll: u32, c: u32, cl: u32, prio: i32) void;
 extern "weft" fn wl_sticky_menu(ptr: u32, len: u32) void;
 extern "weft" fn wl_run(ptr: u32, len: u32) void;
 extern "weft" fn wl_run_int(ptr: u32, len: u32, n: i32) void;
@@ -111,6 +111,9 @@ extern "weft" fn wl_node_children(off: u32) i32;
 extern "weft" fn wl_activate_path(out_ptr: u32, out_cap: u32) i32;
 extern "weft" fn wl_claim_subbuffer(start: u32, end: u32) i32;
 extern "weft" fn wl_subbuffer_put_fact(handle: u32, k: u32, kl: u32, v: u32, vl: u32) void;
+extern "weft" fn wl_subbuffer_clear() void;
+extern "weft" fn wl_subbuffer_fact_at(offset: u32, k: u32, kl: u32, out: u32, cap: u32) i32;
+extern "weft" fn wl_tool_backing(ptr: u32, len: u32) void;
 // Register/kill service (core, shared by every editor): yank snapshots text +
 // any overlapping subbuffer facts; paste re-stamps them over inserted text.
 extern "weft" fn wl_yank_range(start: u32, end: u32, linewise: u32) void;
@@ -499,6 +502,10 @@ pub const When = struct {
     mode: ?[]const u8 = null,
     /// Buffer language — the active buffer name's extension (`zig`, `py`).
     lang: ?[]const u8 = null,
+    /// The active buffer's tool-backing name (a plugin projection: `dired`) —
+    /// a stable per-buffer signal, unlike `mode`. A projection scopes its
+    /// `save`/etc. providers by this so they win in its buffer in any mode.
+    tool: ?[]const u8 = null,
 };
 
 /// Declare an abstract intent `name` a key can bind to (and register its
@@ -516,6 +523,7 @@ pub fn declareAction(name: []const u8) void {
 pub fn provide(action: []const u8, when: When, cmd: []const u8, prio: i32) void {
     const m = when.mode orelse "";
     const l = when.lang orelse "";
+    const tl = when.tool orelse "";
     wl_provide(
         p(action.ptr),
         @intCast(action.len),
@@ -523,6 +531,8 @@ pub fn provide(action: []const u8, when: When, cmd: []const u8, prio: i32) void 
         @intCast(m.len),
         p(l.ptr),
         @intCast(l.len),
+        p(tl.ptr),
+        @intCast(tl.len),
         p(cmd.ptr),
         @intCast(cmd.len),
         prio,
@@ -746,6 +756,26 @@ pub fn claimSubbuffer(start: usize, end: usize) ?u32 {
 /// Attach a fact (`key` = `value`) to a claimed subbuffer.
 pub fn subbufferPutFact(handle: u32, key: []const u8, value: []const u8) void {
     wl_subbuffer_put_fact(handle, p(key.ptr), @intCast(key.len), p(value.ptr), @intCast(value.len));
+}
+/// Release every subbuffer this plugin claimed — a projection clears before it
+/// re-claims a fresh id-span per row each render, so stale spans never linger.
+pub fn subbufferClear() void {
+    wl_subbuffer_clear();
+}
+var subfact_scratch: [512]u8 = undefined;
+/// Read fact `key` off the innermost subbuffer covering `offset` (in the shared
+/// service — so it finds an id-span the register re-stamped on paste), or null.
+/// The reconcile read-back: a row's hidden id → its original identity.
+pub fn subbufferFactAt(offset: usize, key: []const u8) ?[]const u8 {
+    const n = wl_subbuffer_fact_at(@intCast(offset), p(key.ptr), @intCast(key.len), p(&subfact_scratch), subfact_scratch.len);
+    return if (n < 0) null else subfact_scratch[0..@intCast(n)];
+}
+
+/// Mark the active buffer as this plugin's tool projection (its content is
+/// plugin-regenerated). A save then resolves the `save` action to a provider
+/// this plugin registers for `When{ .tool = "<name>" }` — no core special-case.
+pub fn toolBacking(name: []const u8) void {
+    wl_tool_backing(p(name.ptr), @intCast(name.len));
 }
 
 // ── Register / kill (core, shared by every editor) ───────────────────
