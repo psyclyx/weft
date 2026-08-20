@@ -187,6 +187,7 @@ var truncated_raw = false;
 const Cmd = struct { name: []const u8, handler: *const fn () void };
 const cmds = [_]Cmd{
     .{ .name = "git-status", .handler = gitStatus },
+    .{ .name = "git-init", .handler = gitInit },
     .{ .name = "git-refresh", .handler = gitRefresh },
     .{ .name = "git-toggle-fold", .handler = gitToggleFold },
     .{ .name = "git-stage", .handler = gitStage },
@@ -957,6 +958,17 @@ fn gitStatus() void {
     restore_cursor = false;
     show(GATHER, buf_name);
     weft.setMode("magit");
+}
+
+/// Start version control from inside the editor: `git init` in the project,
+/// then gather straight into `*magit*`. Without this, `git-status` on a
+/// non-repo just shows an empty buffer and there is no in-editor way to create
+/// the repo — you had to drop to a shell. Reuses the same gather scaffolding as
+/// every other mutation (no git-init special-casing); after init, GATHER's
+/// `git status --branch` renders the fresh `Branch: main` header.
+fn gitInit() void {
+    restore_cursor = false;
+    gatherAfterSeq("git init");
 }
 fn gitRefresh() void {
     markRestore();

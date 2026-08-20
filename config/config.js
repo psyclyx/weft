@@ -111,6 +111,7 @@ weft.bind("normal", "SPC b N", "buf-scratch");
 //   A/V  cherry-pick / revert the commit under point
 //   P/F/f  push/pull/fetch — flag transients (toggle -f/-u, --rebase, --all/--prune)
 weft.bind("normal", "SPC g g", "git-status");
+weft.bind("normal", "SPC g i", "git-init"); // start version control (git init) from the editor
 weft.bind("normal", "SPC g l", "git-log");
 weft.bind("normal", "SPC g d", "git-diff");
 weft.bind("normal", "SPC g D", "git-diff-staged");

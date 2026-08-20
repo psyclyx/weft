@@ -107,6 +107,12 @@ pub const Editor = struct {
             .echo = &self.echo,
         };
         try core.builtins.install(gpa, &self.commands, &self.keymap, &self.actions);
+        // Proc-backed plugins (git/run/grep) shell out through the wasm host,
+        // which passes this process-global environ to each child. main() sets it
+        // at startup; the harness must too, or every subprocess runs PATH-less
+        // and can't find its tool (git-init would silently no-op). Set to the
+        // real parent env — the faithful, main()-matching model.
+        core.wasm_host.setEnviron(parentEnviron());
         // Window layout: own the real pane tree and bind the real window
         // commands onto our command surface (window-split/focus/move → intents
         // applied by window_cmds.applyIntents), exactly like main().
@@ -499,6 +505,158 @@ fn loadWorkspace(ed: *Editor) !void {
 /// core/tests.zig). Caller frees.
 fn tmpPath(gpa: Allocator, sub_path: []const u8, name: []const u8) ![]u8 {
     return std.fmt.allocPrint(gpa, ".zig-cache/tmp/{s}/{s}", .{ sub_path, name });
+}
+
+/// The parent process's environment as a `std.process.Environ` (the harness
+/// links libc, so `std.c.environ` is populated). Proc-backed plugins (git/run/
+/// grep) need PATH to resolve `git` etc. inside their `/bin/sh -c`, so the
+/// harness must hand this to the wasm host exactly as `main()` does at startup
+/// (core.wasm_host.setEnviron) — otherwise every subprocess runs PATH-less and
+/// silently fails to find its tool. The same block feeds the test's own oracle.
+fn parentEnviron() std.process.Environ {
+    return .{ .block = .{ .slice = std.mem.span(std.c.environ) } };
+}
+
+// This Zig's std dropped ambient process-cwd mutation (part of the `std.Io`
+// migration — see the gap note below), so the project harness reaches the raw
+// Linux syscalls directly, exactly as session.zig reaches `linux.socket*`.
+fn getCwdAlloc(gpa: Allocator) ![]u8 {
+    var buf: [4096]u8 = undefined;
+    const rc = linux.getcwd(&buf, buf.len);
+    if (@as(isize, @bitCast(rc)) < 0) return error.GetCwd;
+    return gpa.dupe(u8, std.mem.sliceTo(buf[0..rc], 0));
+}
+
+fn chdirTo(path: []const u8) !void {
+    var buf: [4096]u8 = undefined;
+    if (path.len >= buf.len) return error.NameTooLong;
+    @memcpy(buf[0..path.len], path);
+    buf[path.len] = 0;
+    const rc = linux.chdir(@as([*:0]const u8, @ptrCast(&buf)));
+    if (@as(isize, @bitCast(rc)) < 0) return error.Chdir;
+}
+
+// ── Project: weft launched IN a real on-disk project ────────────────
+//
+// The whole-app e2e drives weft the way a person starts a project: in a
+// throwaway directory that IS the process CWD, so the proc-backed plugins
+// (git/run/grep) operate on it exactly as a real weft launched in a project
+// root does (proc children inherit weft's cwd — see core/proc.zig). Per the
+// e2e's observation boundary, FILE CONTENT is verified by reading the disk (the
+// artifact a human checks), while UI state is read off the rendered surface
+// (tool buffers, echo). Nothing pokes editor.doc/CRDT internals.
+//
+// chdir is process-global and the suite is sequential, so `deinit` restores the
+// original cwd before cleanup; screenshots are written to ABSOLUTE paths under
+// the original cwd so they survive the tmpdir's removal.
+const Project = struct {
+    gpa: Allocator,
+    td: std.testing.TmpDir,
+    root: []u8, // absolute path to the project dir (the process cwd while live)
+    prev_cwd: []u8, // absolute cwd to restore on deinit
+
+    fn init(self: *Project, gpa: Allocator) !void {
+        self.gpa = gpa;
+        self.prev_cwd = try getCwdAlloc(gpa);
+        errdefer gpa.free(self.prev_cwd);
+        self.td = std.testing.tmpDir(.{});
+        // The testing tmpdir lives at `<cwd>/.zig-cache/tmp/<sub_path>` (the
+        // codebase convention — see tmpPath); make its absolute form the process
+        // cwd so proc-backed plugins operate on it.
+        self.root = try std.fmt.allocPrint(gpa, "{s}/.zig-cache/tmp/{s}", .{ self.prev_cwd, self.td.sub_path[0..] });
+        errdefer gpa.free(self.root);
+        try chdirTo(self.root);
+    }
+
+    fn deinit(self: *Project) void {
+        chdirTo(self.prev_cwd) catch {};
+        self.td.cleanup();
+        self.gpa.free(self.root);
+        self.gpa.free(self.prev_cwd);
+    }
+
+    /// Absolute path to `name` inside the project (caller frees).
+    fn path(self: *Project, name: []const u8) ![]u8 {
+        return std.fs.path.join(self.gpa, &.{ self.root, name });
+    }
+
+    /// Run a shell command to completion in the project and return its trimmed
+    /// stdout (caller frees). The test's own on-disk ORACLE — a human running
+    /// `git …` in a terminal — never the editor's plugin path; used to verify
+    /// content. Runs through `/bin/sh -c` (like the editor's own proc path) so
+    /// argv[0] is PATH-resolved — this Zig's `process.spawn` does not itself
+    /// search PATH for a bare command name.
+    fn oracle(self: *Project, sh_cmd: []const u8) ![]u8 {
+        var res = try core.proc.run(self.gpa, &.{ "/bin/sh", "-c", sh_cmd }, .{ .cwd = self.root, .environ = parentEnviron() });
+        defer res.deinit(self.gpa);
+        return self.gpa.dupe(u8, std.mem.trim(u8, res.stdout, " \t\r\n"));
+    }
+
+    /// Write a composite screenshot to an absolute artifact path that outlives
+    /// the tmpdir (best-effort; the e2e leaves frames to eyeball). Syncs the
+    /// window layout to the active buffer first — the real frame loop runs
+    /// `applyIntents` every frame, so without this the focused pane still shows
+    /// the buffer it was created with and the screenshot lies about what a user
+    /// sees (a magit mode chip over an empty *scratch* body).
+    fn shot(self: *Project, ed: *Editor, name: []const u8) void {
+        ed.applyWindow();
+        const pixels = ed.renderComposite() catch return;
+        defer self.gpa.free(pixels);
+        const fname = std.fmt.allocPrint(self.gpa, "{s}/.zig-cache/tmp/weft-e2e-{s}.ppm", .{ self.prev_cwd, name }) catch return;
+        defer self.gpa.free(fname);
+        harness.writePpm(self.gpa, fname, pixels, app_w, app_h) catch {};
+    }
+};
+
+/// The text of a named TOOL buffer (magit/dired/echo projections) — these ARE
+/// the rendered UI surface, so reading them to assert UI state is fair under
+/// the e2e's boundary (real FILE content is read from disk instead). Returns
+/// null if no such buffer exists. Caller frees.
+fn toolText(ed: *Editor, name: []const u8) ?[]u8 {
+    var it = ed.buffers.iterator();
+    while (it.next()) |b| {
+        if (std.mem.eql(u8, b.name, name))
+            return b.editor.text().toOwnedSlice(ed.gpa) catch null;
+    }
+    return null;
+}
+
+/// Drive the async loop until the named tool buffer contains `needle`, bounded
+/// by wall clock (the proc drain runs on a pool thread and delivers on real
+/// time). Returns whether it appeared. Mirrors the git-status async test's
+/// drain, generalized over an arbitrary buffer + needle.
+fn drainToolContains(ed: *Editor, name: []const u8, needle: []const u8) bool {
+    const deadline = core.task.nowNs() + 10 * std.time.ns_per_s;
+    while (core.task.nowNs() < deadline) {
+        _ = ed.loop.tick();
+        if (toolText(ed, name)) |txt| {
+            defer ed.gpa.free(txt);
+            if (std.mem.indexOf(u8, txt, needle) != null) return true;
+        }
+        std.Thread.yield() catch {};
+    }
+    return false;
+}
+
+/// Drive the async loop until the DISK oracle `sh_cmd` reports `needle` (or a
+/// timeout). A magit mutation (stage/commit) shells out asynchronously — the
+/// keypress only SCHEDULES `git add`/`git commit`; the loop tick is what lets
+/// the pool worker run it. Polling the on-disk oracle each round makes the
+/// assertion deterministic (disk truth), never a sleep-and-hope. git ops
+/// complete in a few ms, so this converges in a handful of rounds.
+fn drainUntilOracle(proj: *Project, ed: *Editor, sh_cmd: []const u8, needle: []const u8) bool {
+    const deadline = core.task.nowNs() + 10 * std.time.ns_per_s;
+    while (core.task.nowNs() < deadline) {
+        _ = ed.loop.tick();
+        const out = proj.oracle(sh_cmd) catch {
+            std.Thread.yield() catch {};
+            continue;
+        };
+        defer ed.gpa.free(out);
+        if (std.mem.indexOf(u8, out, needle) != null) return true;
+        std.Thread.yield() catch {};
+    }
+    return false;
 }
 
 // ── Tests: granular editor workflows ────────────────────────────────
@@ -974,6 +1132,101 @@ test "e2e/project: magit push/pull/fetch transients are sticky menus" {
     try t.expect(ed.keymap.isMenuMode("git-reset-menu"));
 }
 
+// ── The whole-app spine: start a project, write code, version it ────
+//
+// This is THE e2e the brief asks for: drive weft the way a person starts a web
+// app — in a real directory, through the editor's OWN commands and keys — and
+// verify the on-disk result. It launched a documented gap ("live-git subprocess
+// e2e needs a tmpdir-as-cwd + proc-drain harness"); `Project` closes it. Every
+// place the natural motion had no key/command was treated as SIGNAL and fixed
+// in the plugin/config (e.g. there was no in-editor `git init` — now there is),
+// never worked around in the test.
+test "e2e/spine: write a file, init a repo, stage and commit — all through weft" {
+    const gpa = t.allocator;
+    var proj: Project = undefined;
+    try proj.init(gpa);
+    defer proj.deinit();
+
+    var ed: Editor = undefined;
+    try Editor.init(gpa, &ed);
+    defer ed.deinit();
+    try loadWorkspace(&ed);
+
+    // ── 1. Write the first file the way a person does: open, type, save. ──
+    // (Mode starts `normal`; edit BEFORE entering any tool buffer, so no
+    // tool-mode ever swallows the typing — see [[mode-leak-class]].)
+    ed.runStr("open", "index.html");
+    ed.press("i", "");
+    ed.typeText("<!doctype html>\n<title>weft demo</title>\n");
+    ed.press("Escape", "");
+    ed.run("save");
+    ed.waitSave();
+
+    // CONTENT is verified on disk (the artifact a human checks), not via the
+    // editor's model.
+    {
+        const disk = try core.file.readAlloc(gpa, "index.html");
+        defer gpa.free(disk);
+        try t.expect(std.mem.indexOf(u8, disk, "<title>weft demo</title>") != null);
+    }
+
+    // ── 2. Start version control from INSIDE the editor (the new git-init). ──
+    // Before this command existed, git-status on a non-repo showed an empty
+    // buffer and there was no in-editor way to create the repo.
+    ed.run("git-init");
+    // Prove git ACTUALLY ran, not just that the (unconditional) "Branch:" header
+    // rendered: wait for the real `git status` output to list the untracked file
+    // in *magit*. Then confirm the repo on disk via the git oracle.
+    try t.expect(drainToolContains(&ed, "*magit*", "index.html"));
+    {
+        const gitdir = try proj.oracle("git rev-parse --git-dir");
+        defer gpa.free(gitdir);
+        try t.expect(gitdir.len > 0); // ".git" (or its absolute path)
+    }
+    proj.shot(&ed, "spine-1-init");
+
+    // Configure an author for this repo (world setup — a human's git identity),
+    // so the commit below has one. Repo-local, hermetic.
+    {
+        const e1 = try proj.oracle("git config user.email e2e@weft.test");
+        gpa.free(e1);
+        const e2 = try proj.oracle("git config user.name weft-e2e");
+        gpa.free(e2);
+    }
+
+    // ── 4. Stage everything with the magit key `S`, then commit with `c c`. ──
+    // We're in the *magit* buffer (git-init focused it), so these are real
+    // magit keypresses, not command invocations.
+    try t.expectEqualStrings("magit", ed.mode());
+    ed.press("S", ""); // git-stage-all → git add -A → re-gather (async)
+    // Disk oracle, drained: the file becomes staged once the async `git add`
+    // the keypress scheduled actually runs.
+    try t.expect(drainUntilOracle(&proj, &ed, "git diff --cached --name-only", "index.html"));
+    proj.shot(&ed, "spine-2-staged");
+
+    // Commit dispatch: `c` opens the transient, `c` again starts a commit.
+    ed.press("c", ""); // git-commit-dispatch (menu)
+    ed.press("c", ""); // git-commit → *git-commit* buffer, mode git-commit
+    try t.expectEqualStrings("git-commit", ed.mode());
+    ed.typeText("initial commit: weft demo skeleton");
+    ed.press("C-c", ""); // git-commit-menu
+    ed.press("C-c", ""); // git-commit-finish → git commit -F … → re-gather
+    try t.expect(drainToolContains(&ed, "*magit*", "initial commit"));
+    proj.shot(&ed, "spine-3-committed");
+
+    // ── 5. Verify the commit landed, on disk, via the git oracle. ──
+    {
+        const log = try proj.oracle("git log --oneline");
+        defer gpa.free(log);
+        try t.expect(std.mem.indexOf(u8, log, "initial commit: weft demo skeleton") != null);
+    }
+    {
+        const tracked = try proj.oracle("git ls-files");
+        defer gpa.free(tracked);
+        try t.expectEqualStrings("index.html", tracked);
+    }
+}
+
 // ── Coverage + documented gaps (the difficulty IS the signal) ───────
 //
 // NOW COVERED (promoted from gaps into the granular tests above):
@@ -992,16 +1245,23 @@ test "e2e/project: magit push/pull/fetch transients are sticky menus" {
 //     Collab.tick — the same code collab.tickCollab calls); it does NOT drive
 //     the full tickCollab frame-loop wrapper (partial-checkout / peer-fs /
 //     reconnect / hub adoption), which still needs the ShareCtx plumbing.
+//   • git (magit) workflow — NOW COVERED by "e2e/spine: …" above. `Project`
+//     closes the gap the note below used to describe: it makes a tmpdir the
+//     process CWD (raw linux.chdir — this Zig's std dropped ambient cwd) and
+//     sets the wasm host's parent environ (setEnviron), so the git plugin's
+//     `/bin/sh -c "git …"` children resolve `git` on PATH and operate on the
+//     project. The async magit mutations (init/stage/commit) are DRAINED to
+//     completion (drainUntilOracle) and verified on disk via a git oracle — a
+//     real repo, real commit, not a mocked one. Building it surfaced two live
+//     bugs, both fixed: the harness never set g_environ (every subprocess ran
+//     PATH-less), and there was no in-editor `git init` (added: git-init +
+//     SPC g i). NOTE still open: magit renders "Branch:" UNCONDITIONALLY, so
+//     git-status on a non-repo shows a fake-empty magit instead of offering to
+//     init — a display bug worth a follow-up (git-status should detect a
+//     non-repo and hint git-init).
 //
 // STILL OPEN — recorded here rather than written as flaky/green fakes; promote
 // each into a granular test when it gains the missing piece:
-//   • git (magit) workflow: the git plugin shells out via `proc` and operates
-//     on the process CWD, so a real staged/committed assertion needs (a) a
-//     tmpdir made the process CWD and (b) driving the async proc to completion
-//     in-harness. This Zig's churned subprocess/`Io.Dir` API made a robust,
-//     non-flaky version more trouble than signal for now; the magit commands
-//     themselves are unit-covered on the plugin side. A small "run a child in
-//     a tmpdir + pump the loop until proc drains" harness would unlock it.
 //   • debugger: there is no debug/DAP plugin or `debug-*` command surface, so
 //     "set a breakpoint and step" has no keys to press — the biggest missing
 //     IDE capability the e2e wants.
