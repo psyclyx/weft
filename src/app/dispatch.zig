@@ -80,29 +80,36 @@ pub fn handlePointer(
     return dirty;
 }
 
-/// `menu-escape` (Escape / C-g in a menu) — leave the current menu mode back to
-/// its recorded return target (the root non-menu mode), or `normal`.
+/// `menu-escape` (Escape / C-g, bound in the GLOBAL layer so it works anywhere)
+/// — leave the current MENU back to its recorded return target. Outside a menu
+/// it is a NO-OP: Escape must never force a mode change, or it drops you into
+/// the editing base (`normal`) inside a read-only projection like magit/dired —
+/// the recurring "wrong mode in a tool buffer" jank. A projection's own mode is
+/// its resting mode; Escape leaves it alone. (An editing mode's own Escape —
+/// vim insert/visual → normal — is bound mode-locally and wins over this.)
 pub fn menuEscapeHandler(ctx: *core.command.Context, data: ?*anyopaque, args: []const core.command.Value) anyerror!core.command.Value {
     _ = data;
     _ = args;
     const km = ctx.keymap;
-    // Fall back to the CONFIGURED base editing mode (vim's "normal", helix's
-    // "helix-normal", or plain "default"), not a hardcoded "normal" — the base
-    // is whatever the config left active after load (buffers.default_mode).
+    if (!km.isMenuMode(km.currentMode())) return .nil; // not in a menu → leave the mode be
+    // In a menu: return to its recorded target, else the configured base mode
+    // (vim's "normal", helix's "helix-normal", or plain "default").
     const base = if (ctx.buffers.default_mode.len > 0) ctx.buffers.default_mode else "default";
     const ret = km.menuReturn(km.currentMode()) orelse base;
     km.setMode(ctx.gpa, ret) catch {};
     return .nil;
 }
 
-/// `which-key-now` — flag an immediate popup (bypassing the idle delay), and if
-/// not already in a menu, open the leader menu so a help key shows it anywhere.
+/// `which-key-now` (F1) — toggle a which-key peek at the CURRENT mode's keys.
+/// It does NOT force-enter a hardcoded "leader": in normal you see the top-level
+/// bindings (the leader prefix among them), in a submenu you see that submenu,
+/// in magit the magit keys. The shell no longer assumes the root menu is named
+/// "leader"; it just reveals wherever you are.
 pub fn whichKeyNowHandler(ctx: *core.command.Context, data: ?*anyopaque, args: []const core.command.Value) anyerror!core.command.Value {
     _ = args;
+    _ = ctx;
     const flag: *bool = @ptrCast(@alignCast(data.?));
     flag.* = true;
-    const km = ctx.keymap;
-    if (!km.isMenuMode(km.currentMode())) km.enterMode(ctx.gpa, "leader") catch {};
     return .nil;
 }
 
