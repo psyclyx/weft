@@ -189,12 +189,21 @@ pub fn dispatchKey(ctx: *core.command.Context, ev: wayland.KeyEvent) !void {
     if (n > 0) {
         var spec_buf: [80]u8 = undefined;
         const spec = core.Keymap.keyspec(&spec_buf, ev.mods.ctrl, ev.mods.alt, ev.mods.shift, name_buf[0..@intCast(n)]);
-        // Mid-chord, Backspace steps BACK one key of the pending sequence (the
-        // which-key hint pops a level) rather than aborting the whole chord —
-        // the sequence-model replacement for the old menu-nav `menu-escape`.
-        if (ctx.keymap.pending.len > 0 and std.mem.eql(u8, spec, "BackSpace")) {
-            ctx.keymap.popPending(ctx.gpa) catch {};
-            return;
+        // Mid-chord META keys act on the which-key overlay, NOT the sequence:
+        //  · Backspace steps BACK one key of the pending chord (pop a level).
+        //  · a NAV key (page down/up — `menu-nav` in defaults.js) pages the hint
+        //    and leaves `pending` intact, so a long menu scrolls instead of the
+        //    key dead-ending the chord and dismissing which-key.
+        if (ctx.keymap.pending.len > 0) {
+            if (std.mem.eql(u8, spec, "BackSpace")) {
+                ctx.keymap.popPending(ctx.gpa) catch {};
+                return;
+            }
+            if (ctx.keymap.navCommand(spec)) |cmd| {
+                _ = core.command.run(ctx.commands, ctx, cmd, &.{}) catch |err|
+                    std.log.warn("which-key nav {s} failed: {t}", .{ cmd, err });
+                return; // pending untouched — the hint just re-rendered
+            }
         }
         // Feed the key through the pending SEQUENCE: a chord that could still
         // extend is held (which-key shows its completions off `keymap.pending`);

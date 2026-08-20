@@ -373,11 +373,23 @@ pub fn currentMode(self: *const Keymap) []const u8 {
 
 pub const Binding = struct { key: []const u8, command: []const u8 };
 
-/// The base mode every prefix menu falls back to for its navigation keys
-/// (pop-a-level, paginate the hint). STRUCTURE only — the actual key BINDINGS
-/// live in config (`defaults.js` binds `menu-nav`); the core just wires menus to
-/// inherit it, so nav is uniform + rebindable and no plugin/config re-wires it.
+/// The reserved layer for which-key NAVIGATION keys (paginate the hint) — the
+/// META keys that act on the which-key overlay WITHOUT being part of the chord
+/// you're typing. STRUCTURE only — the actual key BINDINGS are config data
+/// (`defaults.js` binds `menu-nav`), so nav is uniform + rebindable and no
+/// plugin/config re-wires it. Mid-chord, dispatch consults this via `navCommand`
+/// before feeding the key into the sequence: a nav key pages the hint and leaves
+/// `pending` intact; anything else extends (or ends) the chord as usual. (It's
+/// also the fallback base a legacy menu MODE inherits — same keys, both worlds.)
 pub const menu_nav_mode = "menu-nav";
+
+/// The command bound to `key` in the which-key NAV layer (`menu-nav`'s own
+/// table), or null. Dispatch runs this while a chord is `pending` so a nav key
+/// (page down/up) acts on the hint instead of dead-ending the sequence.
+pub fn navCommand(self: *const Keymap, key: []const u8) ?[]const u8 {
+    const b = self.modes.getPtr(menu_nav_mode) orelse return null;
+    return if (b.get(key)) |e| e.command else null;
+}
 
 /// Declare `mode` a prefix menu (config policy — the leader/chord tables).
 /// which-key shows its bindings while it is active. A menu with no fallback of
