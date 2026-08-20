@@ -7,16 +7,23 @@ const wasm = @import("../wasm.zig");
 const shared = @import("plugin.zig");
 const WasmPlugin = shared.WasmPlugin;
 
+// which-key enumerates the RESOLVED set of AVAILABLE bindings — the mode's own
+// table PLUS everything reachable through its fallback chain and the global
+// layer (a nearer mode's override wins) — not just the mode's own table. So the
+// hint answers "what can I press here" (in dired: its nav keys AND the editing
+// keys it inherits), independent of how many modes compose the context.
+// `resolveBindings` builds the deduped list once in `count`; `key`/`cmd`/`group`
+// index it (the guest enumerates synchronously in one `on_menu`).
 pub fn hMenuBindingCount(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32, results: []i32) void {
     _ = caller;
     _ = args;
     const p: *WasmPlugin = @ptrCast(@alignCast(data.?));
-    results[0] = @intCast(p.ctx.keymap.bindingCount(p.ctx.keymap.currentMode()));
+    const km = p.ctx.keymap;
+    results[0] = @intCast(km.resolveBindings(p.gpa, km.currentMode()) catch 0);
 }
 pub fn hMenuBindingKey(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32, results: []i32) void {
     const p: *WasmPlugin = @ptrCast(@alignCast(data.?));
-    const km = p.ctx.keymap;
-    const b = km.bindingAt(km.currentMode(), @intCast(args[0])) orelse {
+    const b = p.ctx.keymap.resolvedAt(@intCast(args[0])) orelse {
         results[0] = -1;
         return;
     };
@@ -24,8 +31,7 @@ pub fn hMenuBindingKey(data: ?*anyopaque, caller: *wasm.Caller, args: []const i3
 }
 pub fn hMenuBindingCmd(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32, results: []i32) void {
     const p: *WasmPlugin = @ptrCast(@alignCast(data.?));
-    const km = p.ctx.keymap;
-    const b = km.bindingAt(km.currentMode(), @intCast(args[0])) orelse {
+    const b = p.ctx.keymap.resolvedAt(@intCast(args[0])) orelse {
         results[0] = -1;
         return;
     };
@@ -40,7 +46,7 @@ pub fn hMenuBindingIsGroup(data: ?*anyopaque, caller: *wasm.Caller, args: []cons
     _ = caller;
     const p: *WasmPlugin = @ptrCast(@alignCast(data.?));
     const km = p.ctx.keymap;
-    const b = km.bindingAt(km.currentMode(), @intCast(args[0])) orelse {
+    const b = km.resolvedAt(@intCast(args[0])) orelse {
         results[0] = 0;
         return;
     };

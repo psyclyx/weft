@@ -29,6 +29,10 @@ pub const prio_config = 100;
 
 modes: std.StringArrayHashMapUnmanaged(Bindings) = .empty,
 mode: []u8 = &.{},
+/// Scratch for `resolveBindings` — the deduplicated set of bindings reachable
+/// in a mode (own + fallback chain + global). Borrowed slices into `modes`,
+/// valid until the next keymap mutation. Rebuilt each call (which-key render).
+resolved: std.ArrayList(Binding) = .empty,
 /// mode → parent mode: `lookup` walks the chain (vim's visual falls
 /// back to normal falls back to default).
 parents: std.StringArrayHashMapUnmanaged([]u8) = .empty,
@@ -69,6 +73,7 @@ pub fn deinit(self: *Keymap, gpa: Allocator) void {
         bindings.deinit(gpa);
     }
     self.modes.deinit(gpa);
+    self.resolved.deinit(gpa);
     for (self.parents.keys(), self.parents.values()) |k, v| {
         gpa.free(k);
         gpa.free(v);
@@ -290,6 +295,44 @@ pub fn bindingAt(self: *const Keymap, mode: []const u8, i: usize) ?Binding {
     const b = self.modes.getPtr(mode) orelse return null;
     if (i >= b.count()) return null;
     return .{ .key = b.keys()[i], .command = b.values()[i].command };
+}
+
+/// Build the RESOLVED set of bindings AVAILABLE in `mode` into `self.resolved`
+/// and return the count: the mode's own table, then each fallback parent, then
+/// `global` — the FIRST binding of a key wins (a nearer mode's local override),
+/// so each key appears once. This is "what can I press here", the same key set
+/// `lookup` would resolve — so which-key shows the whole reachable context
+/// (dired's nav keys AND the editing keys it inherits), not just one mode's own
+/// table. Read back with `resolvedAt`; both are valid until the next keymap
+/// mutation (the guest enumerates synchronously during its `on_menu`).
+pub fn resolveBindings(self: *Keymap, gpa: Allocator, mode: []const u8) Allocator.Error!usize {
+    self.resolved.clearRetainingCapacity();
+    var m: []const u8 = mode;
+    var depth: usize = 0;
+    while (depth < 8) : (depth += 1) {
+        try self.addResolved(gpa, m);
+        m = self.parents.get(m) orelse break;
+    }
+    try self.addResolved(gpa, global_mode);
+    return self.resolved.items.len;
+}
+
+/// Append `mode`'s own bindings to `resolved`, skipping any key already present
+/// (a nearer mode in the walk bound it — the override lookup honors).
+fn addResolved(self: *Keymap, gpa: Allocator, mode: []const u8) Allocator.Error!void {
+    const b = self.modes.getPtr(mode) orelse return;
+    outer: for (b.keys(), b.values()) |k, v| {
+        for (self.resolved.items) |existing| {
+            if (std.mem.eql(u8, existing.key, k)) continue :outer;
+        }
+        try self.resolved.append(gpa, .{ .key = k, .command = v.command });
+    }
+}
+
+/// The `i`-th resolved binding from the last `resolveBindings` (borrowed).
+pub fn resolvedAt(self: *const Keymap, i: usize) ?Binding {
+    if (i >= self.resolved.items.len) return null;
+    return self.resolved.items[i];
 }
 
 /// Compose a keyspec from modifiers + a keysym name into `buf`. `shift`
