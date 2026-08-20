@@ -49,7 +49,21 @@ fn bufPick() void {
     weft.pickEnd();
 }
 
-/// Open (and focus) a fresh scratch buffer.
+/// Switch to the scratch buffer — reusing the existing one if present, else
+/// creating it. Tool buffers (dired/magit) bind `q` here to leave; without the
+/// reuse, `buffer-create` spawns a NEW `*scratch*` every time (duplicate names
+/// are allowed), so leaving a tool repeatedly piled up scratch buffers.
 fn bufScratch() void {
+    const count = weft.bufferCount();
+    var i: usize = 0;
+    while (i < count) : (i += 1) {
+        const name = weft.bufferName(i) orelse continue;
+        if (std.mem.eql(u8, name, "*scratch*")) {
+            if (weft.bufferId(i)) |id| {
+                weft.runInt("buffer-switch", id);
+                return;
+            }
+        }
+    }
     weft.runStr("buffer-create", "*scratch*");
 }
