@@ -254,6 +254,7 @@ const static_cmds = [_]Cmd{
     .{ .name = "vim-visual", .handler = visual },
     .{ .name = "vim-visual-delete", .handler = visualDelete },
     .{ .name = "vim-visual-yank", .handler = visualYank },
+    .{ .name = "vim-visual-change", .handler = visualChange },
     .{ .name = "vim-normal", .handler = normal },
     .{ .name = "vim-append-line", .handler = appendLine },
     .{ .name = "vim-insert-line", .handler = insertLine },
@@ -436,6 +437,8 @@ export fn init() void {
     weft.bindKey("visual", "d", "vim-visual-delete");
     weft.bindKey("visual", "x", "vim-visual-delete");
     weft.bindKey("visual", "y", "vim-visual-yank");
+    weft.bindKey("visual", "c", "vim-visual-change");
+    weft.bindKey("visual", "s", "vim-visual-change"); // `s` in visual = change too
     weft.bindKey("visual", "Escape", "vim-normal");
     weft.bindKey("insert", "Escape", "vim-normal");
 
@@ -581,6 +584,19 @@ fn visualYank() void {
     }
     weft.run("clear-selection");
     weft.setMode("normal");
+}
+
+/// `c` in visual: change the selection — delete it and drop into insert (like
+/// `d` but landing in insert). Was UNBOUND, so `c` fell through to normal's
+/// operator-pending — a vim user selecting then `c` got nothing useful.
+fn visualChange() void {
+    if (weft.selection()) |s| {
+        weft.yankRange(s.start, s.end, false);
+        if (weft.stampRange(.{ .start = s.start, .end = s.end })) |h| weft.runRangeArg("op.delete", h);
+        weft.jump(s.start);
+    }
+    weft.run("clear-selection");
+    weft.setMode("insert");
 }
 fn normal() void {
     // Leaving insert/visual SEALS the undo unit: `i…Esc` is one unit, so the

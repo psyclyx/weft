@@ -267,6 +267,44 @@ test "authoring: `.` repeats a COUNTED change (3dw then . deletes three more)" {
     try t.expectEqualStrings("g", disk);
 }
 
+test "authoring: visual mode — select with a motion, then delete and change" {
+    const gpa = t.allocator;
+    var app: App = undefined;
+    try app.init(gpa);
+    defer app.deinit();
+    const ed = &app.ed;
+
+    ed.runStr("open", "v.txt");
+    ed.press("i", "");
+    ed.typeText("hello world foo");
+    ed.press("Escape", "");
+
+    // Visual DELETE: v selects, w extends over a word, d deletes it.
+    ed.press("0", "");
+    ed.press("v", "");
+    ed.press("w", ""); // select "hello "
+    try t.expectEqualStrings("visual", ed.mode());
+    ed.press("d", ""); // → "world foo"
+
+    // Visual CHANGE: v, w selects "world ", c deletes it and enters insert.
+    ed.press("0", "");
+    ed.press("v", "");
+    ed.press("w", ""); // select "world "
+    ed.press("c", ""); // was unbound in visual — now change
+    try t.expectEqualStrings("insert", ed.mode());
+    ed.typeText("X");
+    ed.press("Escape", ""); // → "Xfoo"
+
+    ed.press("colon", "");
+    ed.typeText("w");
+    ed.press("Return", "");
+    ed.waitSave();
+
+    const disk = try core.file.readAlloc(gpa, "v.txt");
+    defer gpa.free(disk);
+    try t.expectEqualStrings("Xfoo", disk);
+}
+
 test "authoring: `/` searches in the buffer and jumps to the match" {
     const gpa = t.allocator;
     var app: App = undefined;
