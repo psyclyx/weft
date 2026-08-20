@@ -124,7 +124,9 @@ pub fn deinit(self: *Keymap, gpa: Allocator) void {
 /// (config > plugin > core) always wins regardless of bind order. An
 /// equal-priority bind from a *different* owner is a collision — surfaced as a
 /// warning; last one wins.
-pub fn bind(self: *Keymap, gpa: Allocator, mode: []const u8, key: []const u8, command: []const u8, priority: i32, owner: []const u8) Allocator.Error!void {
+pub fn bind(self: *Keymap, gpa: Allocator, mode: []const u8, key_in: []const u8, command: []const u8, priority: i32, owner: []const u8) Allocator.Error!void {
+    var kbuf: [256]u8 = undefined;
+    const key = normalizeKey(&kbuf, key_in);
     const gop = try self.modes.getOrPut(gpa, mode);
     if (!gop.found_existing) {
         gop.key_ptr.* = try gpa.dupe(u8, mode);
@@ -197,19 +199,27 @@ fn resolveExact(self: *const Keymap, seq: []const u8) ?[]const u8 {
     return null;
 }
 
-/// Whether `seq` is a strict PREFIX of some bound sequence in the current mode
-/// or its fallback chain (more keys would complete a chord). Global is not
-/// consulted — a chord tree lives in a mode, not the universal layer.
+/// Whether `seq` is a strict PREFIX of some bound sequence in the current mode,
+/// its fallback chain, or `global` (more keys would complete a chord). Global IS
+/// consulted so a UNIVERSAL chord (`C-w s` window commands, bound in global) is
+/// reachable from every mode — this does NOT re-widen "global too global",
+/// because a match requires the WHOLE `seq` to be a literal prefix of a global
+/// key: mid-chord `space C-w` never matches global's `C-w …` (they don't share a
+/// start), so a global key only ever begins a sequence, never continues one.
 fn isPrefix(self: *const Keymap, seq: []const u8) bool {
     var mode: []const u8 = self.mode;
     var depth: usize = 0;
     while (depth < 8) : (depth += 1) {
-        if (self.modes.getPtr(mode)) |b| {
-            for (b.keys()) |k| {
-                if (k.len > seq.len and std.mem.startsWith(u8, k, seq) and k[seq.len] == ' ') return true;
-            }
-        }
+        if (self.modes.getPtr(mode)) |b| if (prefixIn(b, seq)) return true;
         mode = self.parents.get(mode) orelse break;
+    }
+    if (self.modes.getPtr(global_mode)) |b| if (prefixIn(b, seq)) return true;
+    return false;
+}
+
+fn prefixIn(b: *const Bindings, seq: []const u8) bool {
+    for (b.keys()) |k| {
+        if (k.len > seq.len and std.mem.startsWith(u8, k, seq) and k[seq.len] == ' ') return true;
     }
     return false;
 }
@@ -495,9 +505,11 @@ pub fn completions(self: *Keymap, gpa: Allocator, prefix: []const u8) Allocator.
         try self.addCompletions(gpa, m, prefix);
         m = self.parents.get(m) orelse break;
     }
-    // The universal layer holds single keys only, so it contributes only at the
-    // TOP of a sequence — never mid-chord (that's the "global isn't too global").
-    if (prefix.len == 0) try self.addCompletions(gpa, global_mode, prefix);
+    // The universal layer is consulted too, so a global chord opener (`C-w`) is
+    // offered from any mode. The prefix filter keeps it honest: mid-chord
+    // (`space`) global's `C-w …` keys don't start with the prefix, so nothing
+    // global leaks in — a global key only ever surfaces as a top-level choice.
+    try self.addCompletions(gpa, global_mode, prefix);
     return self.resolved.items.len;
 }
 
@@ -558,6 +570,102 @@ pub fn keyspec(buf: []u8, ctrl: bool, alt: bool, shift: bool, keysym_name: []con
     const n = @min(keysym_name.len, buf.len - i);
     @memcpy(buf[i..][0..n], keysym_name[0..n]);
     return buf[0 .. i + n];
+}
+
+// ── Keyspec normalization: the ONE translation between a human-authored config
+// and the canonical xkb-keysym form the platform emits at event time. It's the
+// bind-time inverse of `keyspec` (which composes the event-time spec from xkb):
+// a config writes what it means — "SPC :", "C-x C-f", "M-x", "space f f" — and
+// `bind` stores the canonical "space colon" / "C-x C-f" / "M-x" that `lookup`/
+// `feed` match against. Idempotent on already-canonical specs, so plugins keep
+// binding raw keysym names and nothing else changes. This is the whole
+// translation layer; keep it here so there's exactly one. ──────────────────────
+
+/// The X11/xkb keysym NAME for an ASCII punctuation byte (`:` → "colon"), or null
+/// for alphanumerics (whose keysym name is the character itself). A frozen table
+/// — these keysym names don't change — so no xkb dependency leaks into core.
+fn punctName(c: u8) ?[]const u8 {
+    return switch (c) {
+        '!' => "exclam",
+        '"' => "quotedbl",
+        '#' => "numbersign",
+        '$' => "dollar",
+        '%' => "percent",
+        '&' => "ampersand",
+        '\'' => "apostrophe",
+        '(' => "parenleft",
+        ')' => "parenright",
+        '*' => "asterisk",
+        '+' => "plus",
+        ',' => "comma",
+        '-' => "minus",
+        '.' => "period",
+        '/' => "slash",
+        ':' => "colon",
+        ';' => "semicolon",
+        '<' => "less",
+        '=' => "equal",
+        '>' => "greater",
+        '?' => "question",
+        '@' => "at",
+        '[' => "bracketleft",
+        '\\' => "backslash",
+        ']' => "bracketright",
+        '^' => "asciicircum",
+        '_' => "underscore",
+        '`' => "grave",
+        '{' => "braceleft",
+        '|' => "bar",
+        '}' => "braceright",
+        '~' => "asciitilde",
+        ' ' => "space",
+        else => null,
+    };
+}
+
+/// The canonical keysym name for one token's BASE (after modifier stripping):
+/// an emacs-style alias for a non-printable special, a single ASCII punctuation
+/// char via `punctName`, else the base verbatim (a keysym name or an alnum char,
+/// which already equals its name).
+fn baseName(base: []const u8) []const u8 {
+    const aliases = [_][2][]const u8{
+        .{ "SPC", "space" },  .{ "TAB", "Tab" },       .{ "RET", "Return" },
+        .{ "ESC", "Escape" }, .{ "DEL", "BackSpace" },
+    };
+    for (aliases) |a| if (std.mem.eql(u8, base, a[0])) return a[1];
+    if (base.len == 1) if (punctName(base[0])) |n| return n;
+    return base;
+}
+
+/// Canonicalize a human keyspec (or space-joined sequence) into `buf`. Per
+/// token: leading `C-`/`M-`/`S-` modifier prefixes pass through unchanged, then
+/// the base maps via `baseName`. Falls back to the raw input if it doesn't fit.
+pub fn normalizeKey(buf: []u8, key: []const u8) []const u8 {
+    var w: usize = 0;
+    var it = std.mem.splitScalar(u8, key, ' ');
+    var first = true;
+    while (it.next()) |tok| {
+        if (tok.len == 0) continue; // tolerate stray/doubled spaces
+        if (!first) {
+            if (w >= buf.len) return key;
+            buf[w] = ' ';
+            w += 1;
+        }
+        first = false;
+        var base = tok;
+        while (base.len >= 2 and base[1] == '-' and (base[0] == 'C' or base[0] == 'M' or base[0] == 'S')) {
+            if (w + 2 > buf.len) return key;
+            buf[w] = base[0];
+            buf[w + 1] = '-';
+            w += 2;
+            base = base[2..];
+        }
+        const name = baseName(base);
+        if (w + name.len > buf.len) return key;
+        @memcpy(buf[w..][0..name.len], name);
+        w += name.len;
+    }
+    return buf[0..w];
 }
 
 // ── Tests ───────────────────────────────────────────────────────────
@@ -777,6 +885,35 @@ test "keymap: prefix sequences — a chord resolves; a menu is a prefix, not a m
     try t.expect((try km.feed(gpa, "f")) == .pending);
     try km.popPending(gpa);
     try t.expectEqualStrings("space", km.pending);
+}
+
+test "keymap: keyspec normalization — config writes SPC : / C-x C-f, stores canonical" {
+    var buf: [256]u8 = undefined;
+    // The specials + punctuation a config would naturally write.
+    try t.expectEqualStrings("space colon", normalizeKey(&buf, "SPC :"));
+    try t.expectEqualStrings("space f f", normalizeKey(&buf, "SPC f f"));
+    try t.expectEqualStrings("C-x C-f", normalizeKey(&buf, "C-x C-f"));
+    try t.expectEqualStrings("M-x", normalizeKey(&buf, "M-x"));
+    try t.expectEqualStrings("space slash", normalizeKey(&buf, "SPC /"));
+    try t.expectEqualStrings("space equal", normalizeKey(&buf, "SPC ="));
+    try t.expectEqualStrings("C-space", normalizeKey(&buf, "C-SPC"));
+    try t.expectEqualStrings("Tab", normalizeKey(&buf, "TAB"));
+    try t.expectEqualStrings("BackSpace", normalizeKey(&buf, "DEL"));
+    // Idempotent on already-canonical specs (plugins bind these directly).
+    try t.expectEqualStrings("space colon", normalizeKey(&buf, "space colon"));
+    try t.expectEqualStrings("C-w s", normalizeKey(&buf, "C-w s"));
+    try t.expectEqualStrings("S-Return", normalizeKey(&buf, "S-Return"));
+    try t.expectEqualStrings("Escape", normalizeKey(&buf, "Escape"));
+
+    // End to end: binding via the human form resolves under the canonical key
+    // the platform emits at event time.
+    const gpa = t.allocator;
+    var km: Keymap = .empty;
+    defer km.deinit(gpa);
+    try km.setMode(gpa, "normal");
+    try km.bind(gpa, "normal", "SPC :", "pick-commands", prio_config, "cfg");
+    try t.expect((try km.feed(gpa, "space")) == .pending);
+    try t.expectEqualStrings("pick-commands", (try km.feed(gpa, "colon")).run);
 }
 
 test "keymap: completions — chord next-keys, leaf vs group, deduped, global at top" {

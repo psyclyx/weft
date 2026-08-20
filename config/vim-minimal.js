@@ -28,25 +28,25 @@ weft.provide("eval", { lang: "zig" }, "make-build");
 weft.action("format");
 weft.provide("format", {}, "format-buffer");
 
-// Flat leader (SPC). No submenus — every leader key is one action, so the
-// which-key popup is one flat list (the simplest menu shape).
-weft.bind("leader", "colon", "pick-commands"); // SPC : — run a command (M-x)
-weft.bind("leader", "space", "find-file"); //     SPC SPC — find file
-weft.bind("leader", "comma", "buf-pick"); //      SPC , — switch buffer
-weft.bind("leader", "slash", "grep"); //          SPC / — search project
-weft.bind("leader", "f", "find-file"); //         SPC f — find file
-weft.bind("leader", "b", "buf-pick"); //          SPC b — switch buffer
-weft.bind("leader", "s", "save"); //              SPC s — save
-weft.bind("leader", "g", "git-status"); //        SPC g — git
-weft.bind("leader", "e", "consult-line"); //      SPC e — jump to a line
-weft.bind("leader", "d", "dired"); //             SPC d — dired
-weft.bind("leader", "c", "comment-line"); //      SPC c — toggle comment
-weft.bind("leader", "equal", "format"); //        SPC = — format (the action)
-weft.bind("leader", "r", "eval"); //              SPC r — eval/run by language
-weft.bind("leader", "p", "project-recent"); //    SPC p — recent files
-weft.bind("leader", "m", "make-build"); //        SPC m — build
-weft.bind("leader", "M", "make-test"); //         SPC M — test
-weft.bind("leader", "q", "quit"); //              SPC q — quit
+// Flat leader (SPC) as one-key SEQUENCES: every `space X` is a single action, so
+// the which-key popup is one flat list (the simplest menu shape — no groups).
+weft.bind("normal", "SPC :", "pick-commands"); // SPC : — run a command (M-x)
+weft.bind("normal", "SPC SPC", "find-file"); //     SPC SPC — find file
+weft.bind("normal", "SPC ,", "buf-pick"); //      SPC , — switch buffer
+weft.bind("normal", "SPC /", "grep"); //          SPC / — search project
+weft.bind("normal", "SPC f", "find-file"); //         SPC f — find file
+weft.bind("normal", "SPC b", "buf-pick"); //          SPC b — switch buffer
+weft.bind("normal", "SPC s", "save"); //              SPC s — save
+weft.bind("normal", "SPC g", "git-status"); //        SPC g — git
+weft.bind("normal", "SPC e", "consult-line"); //      SPC e — jump to a line
+weft.bind("normal", "SPC d", "dired"); //             SPC d — dired
+weft.bind("normal", "SPC c", "comment-line"); //      SPC c — toggle comment
+weft.bind("normal", "SPC =", "format"); //        SPC = — format (the action)
+weft.bind("normal", "SPC r", "eval"); //              SPC r — eval/run by language
+weft.bind("normal", "SPC p", "project-recent"); //    SPC p — recent files
+weft.bind("normal", "SPC m", "make-build"); //        SPC m — build
+weft.bind("normal", "SPC M", "make-test"); //         SPC M — test
+weft.bind("normal", "SPC q", "quit"); //              SPC q — quit
 
 // Splits: use vim's own C-w chord (C-w s / v / w / o), plus vim goggles-style
 // increment/decrement kept on the vim defaults. Insert-mode autopair:

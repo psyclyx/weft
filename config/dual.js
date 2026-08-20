@@ -25,59 +25,48 @@ weft.bind("helix-normal", "backslash", "vim-normal"); // helix -> vim
 weft.set("editor", "which-key-delay-ms", "200");
 weft.bind("global", "F1", "which-key-now");
 
-// One doom leader tree, applied to BOTH editors' leader menus.
-[
-  "leader-file", "leader-buffer", "leader-git", "leader-search",
-  "leader-code", "leader-window", "leader-quit",
-].forEach((m) => weft.menu(m));
-
-function leaderMap(leader) {
-  weft.bind(leader, "colon", "pick-commands");
-  weft.bind(leader, "space", "find-file");
-  weft.bind(leader, "comma", "buf-pick");
-  weft.bind(leader, "f", "leader-file");
-  weft.bind(leader, "b", "leader-buffer");
-  weft.bind(leader, "g", "leader-git");
-  weft.bind(leader, "s", "leader-search");
-  weft.bind(leader, "c", "leader-code");
-  weft.bind(leader, "w", "leader-window");
-  weft.bind(leader, "q", "leader-quit");
-}
-leaderMap("leader"); //        vim's SPC
-leaderMap("helix-leader"); //  helix's SPC
-
 // Actions: abstract intents resolved by CONTEXT, shared by both editors. `eval`
 // runs the buffer by language (a .zig buffer builds, else the language runner);
-// `format` formats it. Bound once in the shared leader-code menu — a language
-// plugin can weft.provide another provider without touching either editor.
+// `format` formats it. Declared once — a language plugin can weft.provide
+// another provider without touching either editor's keymap.
 weft.action("eval");
 weft.provide("eval", {}, "run-line"); //             default: run the current line
 weft.provide("eval", { lang: "zig" }, "make-build"); // .zig builds the project
 weft.action("format");
 weft.provide("format", {}, "format-buffer");
 
-// Submenu contents (editor-agnostic — bound once).
-weft.bind("leader-file", "f", "find-file");
-weft.bind("leader-file", "s", "save");
-weft.bind("leader-file", "r", "project-recent"); // recent files
-weft.bind("leader-file", "d", "dired");
-weft.bind("leader-buffer", "b", "buf-pick");
-weft.bind("leader-buffer", "d", "buffer-close");
-weft.bind("leader-buffer", "n", "buffer-next");
-weft.bind("leader-git", "g", "git-status");
-weft.bind("leader-git", "l", "git-log");
-weft.bind("leader-git", "b", "git-blame");
-weft.bind("leader-search", "s", "consult-line");
-weft.bind("leader-search", "p", "grep");
-weft.bind("leader-search", "w", "grep-word");
-weft.bind("leader-code", "c", "comment-line");
-weft.bind("leader-code", "f", "format"); // the format action
-weft.bind("leader-code", "e", "eval"); //   SPC c e — eval/run by language
-weft.bind("leader-code", "b", "make-build");
-weft.bind("leader-code", "t", "make-test");
-weft.bind("leader-window", "v", "win-vsplit");
-weft.bind("leader-window", "s", "win-split");
-weft.bind("leader-window", "w", "win-focus");
-weft.bind("leader-quit", "q", "quit");
+// One doom leader tree as key SEQUENCES, applied to BOTH editors' base modes. A
+// menu (`space f`) is just a prefix of longer sequences; which-key completes it.
+// Same tree, bound in `normal` (vim) and `helix-normal` (helix) — the editor is
+// data, the leader is data, and they compose with no menu modes at all.
+function leaderMap(m) {
+  weft.bind(m, "SPC :", "pick-commands"); // SPC : — M-x
+  weft.bind(m, "SPC SPC", "find-file"); //     SPC SPC — find file
+  weft.bind(m, "SPC ,", "buf-pick"); //      SPC , — switch buffer
+  weft.bind(m, "SPC f f", "find-file");
+  weft.bind(m, "SPC f s", "save");
+  weft.bind(m, "SPC f r", "project-recent"); // recent files
+  weft.bind(m, "SPC f d", "dired");
+  weft.bind(m, "SPC b b", "buf-pick");
+  weft.bind(m, "SPC b d", "buffer-close");
+  weft.bind(m, "SPC b n", "buffer-next");
+  weft.bind(m, "SPC g g", "git-status");
+  weft.bind(m, "SPC g l", "git-log");
+  weft.bind(m, "SPC g b", "git-blame");
+  weft.bind(m, "SPC s s", "consult-line");
+  weft.bind(m, "SPC s p", "grep");
+  weft.bind(m, "SPC s w", "grep-word");
+  weft.bind(m, "SPC c c", "comment-line");
+  weft.bind(m, "SPC c f", "format"); // the format action
+  weft.bind(m, "SPC c e", "eval"); //  SPC c e — eval/run by language
+  weft.bind(m, "SPC c b", "make-build");
+  weft.bind(m, "SPC c t", "make-test");
+  weft.bind(m, "SPC w v", "win-vsplit");
+  weft.bind(m, "SPC w s", "win-split");
+  weft.bind(m, "SPC w w", "win-focus");
+  weft.bind(m, "SPC q q", "quit");
+}
+leaderMap("normal"); //        vim's SPC
+leaderMap("helix-normal"); //  helix's SPC
 
 weft.echo("weft: dual config — `\\` toggles vim/helix; SPC c e eval, SPC f r recents");

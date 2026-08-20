@@ -112,8 +112,7 @@ export fn init() void {
         .{ "o", "hx-open-below" },  .{ "x", "delete-forward" },
         .{ "d", "hx-delete-op" },   .{ "u", "undo" },
         .{ "C-r", "redo" },         .{ "p", "paste" },
-        .{ "colon", "helix-ex" },   .{ "space", "helix-leader" },
-        .{ "g", "helix-goto" },
+        .{ "colon", "helix-ex" },
     };
     for (nb) |b| weft.bindKey("helix-normal", b[0], b[1]);
     inline for (mtable) |m| weft.bindKey("helix-normal", m.key, "hx/n/" ++ m.motion);
@@ -129,24 +128,17 @@ export fn init() void {
     // Insert mode: Escape back to normal.
     weft.bindKey("helix-insert", "Escape", "hx-normal");
 
-    // Leader + goto menus (their own modes — which-key renders them).
-    weft.textInput("helix-leader", null);
-    weft.menuMode("helix-leader");
-    weft.bindKey("helix-leader", "Escape", "hx-normal");
-    weft.bindKey("helix-leader", "f", "vim-find-file"); // reuse if vim loaded, else a no-op
-
-    weft.bindKey("helix-leader", "b", "buf-pick"); // if buffers loaded
-    weft.bindKey("helix-leader", "slash", "grep-word"); // if grep loaded
-    weft.bindKey("helix-leader", "g", "git-status"); // if git loaded
-
-    weft.textInput("helix-goto", null);
-    weft.menuMode("helix-goto");
-    weft.bindKey("helix-goto", "Escape", "hx-normal");
-    weft.bindKey("helix-goto", "g", "cursor-doc-start"); // core: moves to doc start
-    weft.bindKey("helix-goto", "e", "cursor-doc-end");
-
-    // `:` no longer opens the palette — keep it on SPC : (the leader), vim-style.
-    weft.bindKey("helix-leader", "colon", "pick-commands");
+    // Leader + goto as key SEQUENCES in helix-normal (no menu modes): `space` /
+    // `g` are just the first key of chords which-key completes. A config
+    // (helix.js) layers a fuller `space …` tree at prio_config; these stay at the
+    // same depth so a config leaf never collides with a bare-helix prefix.
+    weft.bindKey("helix-normal", "space space", "pick-commands"); // SPC SPC — M-x
+    weft.bindKey("helix-normal", "space f f", "vim-find-file"); // reuse if vim loaded
+    weft.bindKey("helix-normal", "space b b", "buf-pick"); // if buffers loaded
+    weft.bindKey("helix-normal", "space g g", "git-status"); // if git loaded
+    // gg / ge (goto top / end of doc), two-key sequences.
+    weft.bindKey("helix-normal", "g g", "cursor-doc-start"); // core: moves to doc start
+    weft.bindKey("helix-normal", "g e", "cursor-doc-end");
 
     // The `:` command line (helix mode namespace). Same shape as vim's `ex`:
     // printable → hx-ex-type, Backspace/Enter/Escape edit/run/cancel.

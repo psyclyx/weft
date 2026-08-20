@@ -30,24 +30,12 @@ weft.set("theme", "selection", "#504945");
 weft.set("theme", "heading", "#fabd2f");
 weft.set("theme", "status", "#a89984");
 
-// Doom-style nested leader, bound in helix's own leader menu (SPC in
-// helix-normal). Submenu modes are shared with any config.
-[
-  "leader-file", "leader-buffer", "leader-git", "leader-search",
-  "leader-code", "leader-open", "leader-window", "leader-quit",
-].forEach((m) => weft.menu(m));
-
-weft.bind("helix-leader", "colon", "pick-commands"); // SPC : — M-x
-weft.bind("helix-leader", "space", "find-file"); //     SPC SPC — find file
-weft.bind("helix-leader", "comma", "buf-pick"); //      SPC , — switch buffer
-weft.bind("helix-leader", "f", "leader-file");
-weft.bind("helix-leader", "b", "leader-buffer");
-weft.bind("helix-leader", "g", "leader-git");
-weft.bind("helix-leader", "s", "leader-search");
-weft.bind("helix-leader", "c", "leader-code");
-weft.bind("helix-leader", "o", "leader-open");
-weft.bind("helix-leader", "w", "leader-window");
-weft.bind("helix-leader", "q", "leader-quit");
+// Doom-style leader as key SEQUENCES in helix-normal — `space f f`, etc. A menu
+// (`space f`) is just a prefix of longer sequences; which-key completes it. No
+// menu modes: the same sequence machinery the default config uses, over helix.
+weft.bind("helix-normal", "SPC :", "pick-commands"); // SPC : — M-x
+weft.bind("helix-normal", "SPC SPC", "find-file"); //    SPC SPC — find file
+weft.bind("helix-normal", "SPC ,", "buf-pick"); //     SPC , — switch buffer
 
 // Actions: abstract intents resolved by CONTEXT. `eval` runs the buffer by
 // language (a .zig buffer builds, else the language runner); `format` formats
@@ -59,30 +47,30 @@ weft.provide("eval", { lang: "zig" }, "make-build"); // .zig builds the project
 weft.action("format");
 weft.provide("format", {}, "format-buffer");
 
-weft.bind("leader-file", "f", "find-file");
-weft.bind("leader-file", "s", "save");
-weft.bind("leader-file", "r", "project-recent"); // recent files
-weft.bind("leader-file", "d", "dired");
-weft.bind("leader-buffer", "b", "buf-pick");
-weft.bind("leader-buffer", "d", "buffer-close");
-weft.bind("leader-buffer", "n", "buffer-next");
-weft.bind("leader-git", "g", "git-status");
-weft.bind("leader-git", "l", "git-log");
-weft.bind("leader-git", "b", "git-blame");
-weft.bind("leader-search", "s", "consult-line");
-weft.bind("leader-search", "p", "grep");
-weft.bind("leader-search", "w", "grep-word");
-weft.bind("leader-code", "c", "comment-line");
-weft.bind("leader-code", "f", "format"); // the format action
-weft.bind("leader-code", "e", "eval"); //   SPC c e — eval/run by language
-weft.bind("leader-code", "b", "make-build");
-weft.bind("leader-code", "t", "make-test");
-weft.bind("leader-open", "d", "dired");
-weft.bind("leader-open", "c", "console-open");
-weft.bind("leader-window", "v", "win-vsplit");
-weft.bind("leader-window", "s", "win-split");
-weft.bind("leader-window", "w", "win-focus");
-weft.bind("leader-quit", "q", "quit");
+weft.bind("helix-normal", "SPC f f", "find-file");
+weft.bind("helix-normal", "SPC f s", "save");
+weft.bind("helix-normal", "SPC f r", "project-recent"); // recent files
+weft.bind("helix-normal", "SPC f d", "dired");
+weft.bind("helix-normal", "SPC b b", "buf-pick");
+weft.bind("helix-normal", "SPC b d", "buffer-close");
+weft.bind("helix-normal", "SPC b n", "buffer-next");
+weft.bind("helix-normal", "SPC g g", "git-status");
+weft.bind("helix-normal", "SPC g l", "git-log");
+weft.bind("helix-normal", "SPC g b", "git-blame");
+weft.bind("helix-normal", "SPC s s", "consult-line");
+weft.bind("helix-normal", "SPC s p", "grep");
+weft.bind("helix-normal", "SPC s w", "grep-word");
+weft.bind("helix-normal", "SPC c c", "comment-line");
+weft.bind("helix-normal", "SPC c f", "format"); // the format action
+weft.bind("helix-normal", "SPC c e", "eval"); //   SPC c e — eval/run by language
+weft.bind("helix-normal", "SPC c b", "make-build");
+weft.bind("helix-normal", "SPC c t", "make-test");
+weft.bind("helix-normal", "SPC o d", "dired");
+weft.bind("helix-normal", "SPC o c", "console-open");
+weft.bind("helix-normal", "SPC w v", "win-vsplit");
+weft.bind("helix-normal", "SPC w s", "win-split");
+weft.bind("helix-normal", "SPC w w", "win-focus");
+weft.bind("helix-normal", "SPC q q", "quit");
 
 // Autopair (in helix's insert mode).
 weft.bind("helix-insert", "parenleft", "pair-paren");

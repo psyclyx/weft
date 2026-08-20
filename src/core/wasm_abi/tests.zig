@@ -380,9 +380,14 @@ test "helix: a second modal editor loads in its OWN mode namespace" {
     try t.expectEqualStrings("cursor-left", env.keymap.lookup("h").?);
     // Word motion is bound to helix's generated move wrapper (shared `motions`).
     try t.expectEqualStrings("hx/n/motion.word-fwd", env.keymap.lookup("w").?);
-    // Its leader/op menus are their own menu modes (which-key renders them).
-    try t.expect(env.keymap.isMenuMode("helix-leader"));
+    // op-pending stays a menu mode (which-key renders its motions), but the
+    // leader is now a key SEQUENCE — no `helix-leader` mode: `space` opens a
+    // chord and `space g g` completes to git-status through the sequence engine.
+    try t.expect(!env.keymap.isMenuMode("helix-leader"));
     try t.expect(env.keymap.isMenuMode("helix-op"));
+    try t.expect((try env.keymap.feed(gpa, "space")) == .pending);
+    try t.expect((try env.keymap.feed(gpa, "g")) == .pending);
+    try t.expectEqualStrings("git-status", (try env.keymap.feed(gpa, "g")).run);
 }
 
 test "vim ex: `:` opens a command line; :N gotos, :%s substitutes, unknown falls through" {

@@ -6,7 +6,7 @@
 //
 // Available:
 //   weft.plugin(name)              — load a reference plugin (or a .wasm path)
-//   weft.bind(mode, keys, command) — bind a key or a key SEQUENCE ("space f f")
+//   weft.bind(mode, keys, command) — bind a key or a key SEQUENCE ("SPC f f")
 //                                    in a mode; a multi-key sequence is a chord,
 //                                    its prefixes are which-key menus for free
 //   weft.action(name)              — declare an abstract intent a key can bind to
@@ -76,25 +76,25 @@ weft.bind("global", "F1", "which-key-now");
 
 // Top-level leader: quick actions (the group prefixes below are implied by the
 // longer sequences — `space f …` makes `space f` a group automatically).
-weft.bind("normal", "space space", "find-file");     // SPC SPC — find file
-weft.bind("normal", "space colon", "pick-commands"); // SPC :   — M-x (run a command)
-weft.bind("normal", "space period", "find-file");    // SPC .   — find file
-weft.bind("normal", "space comma", "buf-pick");      // SPC ,   — switch buffer
+weft.bind("normal", "SPC SPC", "find-file");     // SPC SPC — find file
+weft.bind("normal", "SPC :", "pick-commands"); // SPC :   — M-x (run a command)
+weft.bind("normal", "SPC .", "find-file");    // SPC .   — find file
+weft.bind("normal", "SPC ,", "buf-pick");      // SPC ,   — switch buffer
 
 // SPC f — files
-weft.bind("normal", "space f f", "find-file");
-weft.bind("normal", "space f s", "save");
-weft.bind("normal", "space f S", "save-as");
-weft.bind("normal", "space f r", "project-recent");
-weft.bind("normal", "space f d", "dired");
+weft.bind("normal", "SPC f f", "find-file");
+weft.bind("normal", "SPC f s", "save");
+weft.bind("normal", "SPC f S", "save-as");
+weft.bind("normal", "SPC f r", "project-recent");
+weft.bind("normal", "SPC f d", "dired");
 
 // SPC b — buffers
-weft.bind("normal", "space b b", "buf-pick");
-weft.bind("normal", "space b d", "buffer-close");
-weft.bind("normal", "space b k", "buffer-close");
-weft.bind("normal", "space b n", "buffer-next");
-weft.bind("normal", "space b s", "save");
-weft.bind("normal", "space b N", "buf-scratch");
+weft.bind("normal", "SPC b b", "buf-pick");
+weft.bind("normal", "SPC b d", "buffer-close");
+weft.bind("normal", "SPC b k", "buffer-close");
+weft.bind("normal", "SPC b n", "buffer-next");
+weft.bind("normal", "SPC b s", "save");
+weft.bind("normal", "SPC b N", "buf-scratch");
 
 // SPC g — git. `git-status` opens the *magit* model buffer, which runs its own
 // `magit` keymap: j/k move, TAB folds, s/u stage/unstage (file/hunk/region),
@@ -110,37 +110,37 @@ weft.bind("normal", "space b N", "buf-scratch");
 //   x  on a file/hunk discards (confirmed); on a commit opens the reset transient
 //   A/V  cherry-pick / revert the commit under point
 //   P/F/f  push/pull/fetch — flag transients (toggle -f/-u, --rebase, --all/--prune)
-weft.bind("normal", "space g g", "git-status");
-weft.bind("normal", "space g l", "git-log");
-weft.bind("normal", "space g d", "git-diff");
-weft.bind("normal", "space g D", "git-diff-staged");
-weft.bind("normal", "space g b", "git-blame");
+weft.bind("normal", "SPC g g", "git-status");
+weft.bind("normal", "SPC g l", "git-log");
+weft.bind("normal", "SPC g d", "git-diff");
+weft.bind("normal", "SPC g D", "git-diff-staged");
+weft.bind("normal", "SPC g b", "git-blame");
 
 // SPC s — search
-weft.bind("normal", "space s s", "consult-line");
-weft.bind("normal", "space s i", "consult-imenu");
-weft.bind("normal", "space s p", "grep");
-weft.bind("normal", "space s w", "grep-word");
+weft.bind("normal", "SPC s s", "consult-line");
+weft.bind("normal", "SPC s i", "consult-imenu");
+weft.bind("normal", "SPC s p", "grep");
+weft.bind("normal", "SPC s w", "grep-word");
 
 // SPC p — project
-weft.bind("normal", "space p p", "project-recent");
-weft.bind("normal", "space p f", "find-file");
-weft.bind("normal", "space p r", "project-recent");
-weft.bind("normal", "space p R", "project-root"); // echo the VCS root (projectile-style)
-weft.bind("normal", "space p slash", "grep");
+weft.bind("normal", "SPC p p", "project-recent");
+weft.bind("normal", "SPC p f", "find-file");
+weft.bind("normal", "SPC p r", "project-recent");
+weft.bind("normal", "SPC p R", "project-root"); // echo the VCS root (projectile-style)
+weft.bind("normal", "SPC p /", "grep");
 
 // SPC c — code
-weft.bind("normal", "space c c", "comment-line");
-weft.bind("normal", "space c f", "format"); // the format action (see above)
-weft.bind("normal", "space c d", "goto-definition");
-weft.bind("normal", "space c h", "hover");
-weft.bind("normal", "space c s", "symbols");
-weft.bind("normal", "space c e", "ts-expand-selection");
-weft.bind("normal", "space c n", "ts-select-node");
-weft.bind("normal", "space c b", "make-build");
-weft.bind("normal", "space c t", "make-test");
-weft.bind("normal", "space c r", "lang-run");
-weft.bind("normal", "space c x", "run-line");
+weft.bind("normal", "SPC c c", "comment-line");
+weft.bind("normal", "SPC c f", "format"); // the format action (see above)
+weft.bind("normal", "SPC c d", "goto-definition");
+weft.bind("normal", "SPC c h", "hover");
+weft.bind("normal", "SPC c s", "symbols");
+weft.bind("normal", "SPC c e", "ts-expand-selection");
+weft.bind("normal", "SPC c n", "ts-select-node");
+weft.bind("normal", "SPC c b", "make-build");
+weft.bind("normal", "SPC c t", "make-test");
+weft.bind("normal", "SPC c r", "lang-run");
+weft.bind("normal", "SPC c x", "run-line");
 
 // ── Actions: abstract intents resolved by CONTEXT (the dispatch middle tier).
 // weft.action(name) declares an intent a key binds to; weft.provide(name, when,
@@ -153,7 +153,7 @@ weft.action("eval");
 weft.provide("eval", {}, "run-line");                 // default: run the current line
 weft.provide("eval", { lang: "zig" }, "make-build");  // a .zig buffer builds the project
 weft.provide("eval", { lang: "py" }, "lang-run");     // python: the language runner
-weft.bind("normal", "space e", "eval");               // SPC e — eval/run, by language
+weft.bind("normal", "SPC e", "eval");               // SPC e — eval/run, by language
 
 // format is likewise an action: fmt handles most languages by extension, but a
 // language plugin can weft.provide("format", {lang:"…"}, "…") to override. The
@@ -171,49 +171,49 @@ weft.bind("normal", "K", "hover");
 //   weft.set("acp", "cmd", "codex-acp");   // or claude-agent-acp / gemini --experimental-acp / …
 //   weft.set("acp", "prompt", "Summarize this project.");
 //   weft.plugin("acp.js");                 // the ACP client (a JS plugin)
-//   weft.bind("normal", "space o A", "agent-start"); // SPC o A — start the agent
-//   weft.bind("normal", "space o s", "agent-send");  // SPC o s — send this line
+//   weft.bind("normal", "SPC o A", "agent-start"); // SPC o A — start the agent
+//   weft.bind("normal", "SPC o s", "agent-send");  // SPC o s — send this line
 
 // SPC o — open / tools
-weft.bind("normal", "space o d", "dired");
-weft.bind("normal", "space o r", "repl-start");
-weft.bind("normal", "space o c", "console-open");
-weft.bind("normal", "space o e", "direnv-status");
-weft.bind("normal", "space o a", "llm-ask-line");
+weft.bind("normal", "SPC o d", "dired");
+weft.bind("normal", "SPC o r", "repl-start");
+weft.bind("normal", "SPC o c", "console-open");
+weft.bind("normal", "SPC o e", "direnv-status");
+weft.bind("normal", "SPC o a", "llm-ask-line");
 
 // SPC n — notes
-weft.bind("normal", "space n n", "notes-open");
-weft.bind("normal", "space n c", "notes-capture");
+weft.bind("normal", "SPC n n", "notes-open");
+weft.bind("normal", "SPC n c", "notes-capture");
 
 // SPC w — window. Split/close via the windows plugin; focus + move go
 // straight to the core window-layout commands (a real recursive split
 // tree), so h/j/k/l walk panes and H/J/K/L swap them, vim-style.
-weft.bind("normal", "space w v", "win-vsplit");
-weft.bind("normal", "space w s", "win-split");
-weft.bind("normal", "space w w", "win-focus");
-weft.bind("normal", "space w d", "win-close");
-weft.bind("normal", "space w c", "win-center");
-weft.bind("normal", "space w o", "win-close");
-weft.bind("normal", "space w q", "window-close");
-weft.bind("normal", "space w h", "window-focus-left");
-weft.bind("normal", "space w j", "window-focus-down");
-weft.bind("normal", "space w k", "window-focus-up");
-weft.bind("normal", "space w l", "window-focus-right");
-weft.bind("normal", "space w H", "window-move-left");
-weft.bind("normal", "space w J", "window-move-down");
-weft.bind("normal", "space w K", "window-move-up");
-weft.bind("normal", "space w L", "window-move-right");
+weft.bind("normal", "SPC w v", "win-vsplit");
+weft.bind("normal", "SPC w s", "win-split");
+weft.bind("normal", "SPC w w", "win-focus");
+weft.bind("normal", "SPC w d", "win-close");
+weft.bind("normal", "SPC w c", "win-center");
+weft.bind("normal", "SPC w o", "win-close");
+weft.bind("normal", "SPC w q", "window-close");
+weft.bind("normal", "SPC w h", "window-focus-left");
+weft.bind("normal", "SPC w j", "window-focus-down");
+weft.bind("normal", "SPC w k", "window-focus-up");
+weft.bind("normal", "SPC w l", "window-focus-right");
+weft.bind("normal", "SPC w H", "window-move-left");
+weft.bind("normal", "SPC w J", "window-move-down");
+weft.bind("normal", "SPC w K", "window-move-up");
+weft.bind("normal", "SPC w L", "window-move-right");
 
 // SPC q — quit
-weft.bind("normal", "space q q", "quit");
+weft.bind("normal", "SPC q q", "quit");
 
 // SPC h — help (execute/describe a command via the palette)
-weft.bind("normal", "space h c", "pick-commands");
-weft.bind("normal", "space h h", "pick-commands");
+weft.bind("normal", "SPC h c", "pick-commands");
+weft.bind("normal", "SPC h h", "pick-commands");
 
 // SPC t — toggle
-weft.bind("normal", "space t w", "trim-trailing-buffer");
-weft.bind("normal", "space t c", "comment-line");
+weft.bind("normal", "SPC t w", "trim-trailing-buffer");
+weft.bind("normal", "SPC t c", "comment-line");
 
 // Numbers: vim-style increment/decrement.
 weft.bind("normal", "C-a", "increment-number");
