@@ -117,6 +117,7 @@ pub fn evalConfig(engine: *wasm.Engine, ctx: *command.Context, loader: ?PluginLo
     try linker.defineFn("weft", "qjs_buffer_fold", 4, 0, cStubVoid, &bridge);
     try linker.defineFn("weft", "qjs_buffer_len", 2, 1, cStubI32, &bridge);
     try linker.defineFn("weft", "qjs_config", 4, 1, cStubI32, &bridge);
+    try linker.defineFn("weft", "qjs_breakpoints", 4, 1, cStubI32, &bridge);
     try linker.defineFn("weft", "qjs_file_read", 4, 1, cStubI32, &bridge);
     try linker.defineFn("weft", "qjs_file_write", 6, 0, cStubVoid, &bridge);
     try linker.defineFn("weft", "qjs_line_text", 2, 1, cStubI32, &bridge);
@@ -221,6 +222,7 @@ pub const JsPlugin = struct {
         try self.linker.defineFn("weft", "qjs_buffer_fold", 4, 0, cBufferFold, self);
         try self.linker.defineFn("weft", "qjs_buffer_len", 2, 1, cBufferLen, self);
         try self.linker.defineFn("weft", "qjs_config", 4, 1, cConfig, self);
+        try self.linker.defineFn("weft", "qjs_breakpoints", 4, 1, cBreakpoints, self);
         try self.linker.defineFn("weft", "qjs_file_read", 4, 1, cFileRead, self);
         try self.linker.defineFn("weft", "qjs_file_write", 6, 0, cAgentWrite, self);
         try self.linker.defineFn("weft", "qjs_line_text", 2, 1, cLineText, self);
@@ -469,6 +471,20 @@ fn cConfig(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32, results: 
         return;
     };
     results[0] = @intCast(caller.writeMemory(@intCast(args[2]), @intCast(args[3]), value) catch 0);
+}
+
+/// weft.breakpoints(path) → the file's breakpoint lines as a "l1,l2,…" CSV (set
+/// by the debug plugin via publishBreakpoints), or "" if none. The DAP client
+/// reads this to send setBreakpoints, so the session stops where you marked.
+fn cBreakpoints(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32, results: []i32) void {
+    const self: *JsPlugin = @ptrCast(@alignCast(data.?));
+    const path = caller.readMemory(self.gpa, @intCast(args[0]), @intCast(args[1])) catch {
+        results[0] = 0;
+        return;
+    };
+    defer self.gpa.free(path);
+    const csv = @import("breakpoints.zig").get(path);
+    results[0] = @intCast(caller.writeMemory(@intCast(args[2]), @intCast(args[3]), csv) catch 0);
 }
 
 /// weft.fileRead(path) → the file's content for the agent's fs/read: the LIVE

@@ -7,9 +7,9 @@
 // The transport (procSpawn/procSend/onOutput/procRead) and the *debug*
 // transcript (bufferAppend) + status chip are the weft.* membrane; the protocol
 // is plain JS. The adapter command is config data — weft.set("dap","cmd",…) —
-// never baked (NixOS-friendly). Breakpoints: this first cut sets one at
-// weft.config("line") in weft.config("program"); wiring the `debug` plugin's
-// gutter breakpoints in is the next bridge.
+// never baked (NixOS-friendly). Breakpoints come from the `debug` plugin's
+// gutter markers via weft.breakpoints(program) — the lines you mark ARE where
+// the session stops — falling back to weft.config("line") if none are set.
 
 const BUF = "*debug*";
 const ST = { normal: 0, location: 4, emphasis: 5, muted: 6 };
@@ -35,10 +35,19 @@ function send(command, args) {
 function onMessage(msg) {
   if (msg.type === "event") {
     if (msg.event === "initialized") {
-      // The adapter is ready for configuration: send breakpoints, then done.
-      const line = parseInt(weft.config("line") || "1", 10);
+      // The adapter is ready for configuration: send breakpoints, then done. The
+      // lines come from the `debug` plugin's gutter markers (weft.breakpoints,
+      // published per file) — the visual breakpoints ARE the debug session's.
+      // Fall back to config `line` if nothing's been marked yet.
       const program = weft.config("program") || "program";
-      send("setBreakpoints", { source: { path: program, name: program }, breakpoints: [{ line: line }] });
+      const csv = weft.breakpoints(program);
+      const lines = csv
+        ? csv.split(",").map(function (s) { return parseInt(s, 10); }).filter(function (n) { return n > 0; })
+        : [parseInt(weft.config("line") || "1", 10)];
+      send("setBreakpoints", {
+        source: { path: program, name: program },
+        breakpoints: lines.map(function (l) { return { line: l }; }),
+      });
       send("configurationDone", {});
     } else if (msg.event === "stopped") {
       const b = msg.body || {};

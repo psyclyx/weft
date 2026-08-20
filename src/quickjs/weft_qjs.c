@@ -69,6 +69,11 @@ extern int host_buffer_len(const char *name, int name_len);
 // Read this plugin's config value for `key` (staged by weft.set) into `out`.
 __attribute__((import_module("weft"), import_name("qjs_config")))
 extern int host_config(const char *key, int key_len, char *out, int cap);
+
+// Read a file's breakpoint lines (a "l1,l2,…" CSV, published by the debug
+// plugin) into `out`; returns the byte count. Backs `weft.breakpoints`.
+__attribute__((import_module("weft"), import_name("qjs_breakpoints")))
+extern int host_breakpoints(const char *path, int path_len, char *out, int cap);
 // Read a file's content (the live buffer if open, else disk) into `out` — the
 // agent's fs/read_text_file, answered by the harness. Config stubs it.
 __attribute__((import_module("weft"), import_name("qjs_file_read")))
@@ -459,6 +464,22 @@ static JSValue js_config(JSContext *ctx, JSValueConst this_val,
     return JS_NewStringLen(ctx, g_config_buf, (size_t)n);
 }
 
+// weft.breakpoints(path) -> string: the file's breakpoint lines as a "l1,l2,…"
+// CSV (published by the debug plugin), or "". The DAP client reads this to send
+// setBreakpoints so the session stops on the lines you marked in the gutter.
+static char g_bp_buf[4096];
+static JSValue js_breakpoints(JSContext *ctx, JSValueConst this_val,
+                              int argc, JSValueConst *argv) {
+    if (argc < 1) return JS_NewStringLen(ctx, "", 0);
+    size_t pl;
+    const char *path = JS_ToCStringLen(ctx, &pl, argv[0]);
+    int n = 0;
+    if (path) n = host_breakpoints(path, (int)pl, g_bp_buf, (int)sizeof g_bp_buf);
+    JS_FreeCString(ctx, path);
+    if (n <= 0) return JS_NewStringLen(ctx, "", 0);
+    return JS_NewStringLen(ctx, g_bp_buf, (size_t)n);
+}
+
 // weft.fileRead(path) -> string: a file's content (live buffer or disk), "" if
 // unreadable. Shares g_read_buf (large; capped at its size for a first cut).
 static JSValue js_file_read(JSContext *ctx, JSValueConst this_val,
@@ -582,6 +603,7 @@ int weft_plugin_init(const char *src, int len) {
     JS_SetPropertyStr(g_ctx, weft, "bufferFold", JS_NewCFunction(g_ctx, js_buffer_fold, "bufferFold", 3));
     JS_SetPropertyStr(g_ctx, weft, "bufferLen", JS_NewCFunction(g_ctx, js_buffer_len, "bufferLen", 1));
     JS_SetPropertyStr(g_ctx, weft, "config", JS_NewCFunction(g_ctx, js_config, "config", 1));
+    JS_SetPropertyStr(g_ctx, weft, "breakpoints", JS_NewCFunction(g_ctx, js_breakpoints, "breakpoints", 1));
     JS_SetPropertyStr(g_ctx, weft, "fileRead", JS_NewCFunction(g_ctx, js_file_read, "fileRead", 1));
     JS_SetPropertyStr(g_ctx, weft, "fileWrite", JS_NewCFunction(g_ctx, js_file_write, "fileWrite", 2));
     JS_SetPropertyStr(g_ctx, weft, "lineText", JS_NewCFunction(g_ctx, js_line_text, "lineText", 0));

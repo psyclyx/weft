@@ -40,6 +40,7 @@ extern "weft" fn wl_readonly_clear() void;
 extern "weft" fn wl_readonly_span(start: u32, end: u32) void;
 extern "weft" fn wl_decorate_clear() void;
 extern "weft" fn wl_decorate(anchor: u32, placement: u32, role: u32, ptr: u32, len: u32) void;
+extern "weft" fn wl_breakpoint_publish(path_ptr: u32, path_len: u32, csv_ptr: u32, csv_len: u32) void;
 // Native `editor` surface + stamped ranges ([FIX 1/3]). A range crosses as an
 // opaque u32 handle into a host-side table (the version token stays host-side).
 extern "weft" fn wl_editor_step(from: u32, dir: u32, kind: u32) u32;
@@ -306,6 +307,13 @@ pub fn decorateClear() void {
 /// projection shows metadata (dired's perms/size/arrow/mark) off the text.
 pub fn decorate(anchor: usize, placement: DecoPlacement, role: StyleClass, text: []const u8) void {
     wl_decorate(@intCast(anchor), @intFromEnum(placement), @intFromEnum(role), p(text.ptr), @intCast(text.len));
+}
+
+/// Publish this buffer's breakpoint lines (a "l1,l2,…" CSV) to the shared
+/// registry, so the DAP client can send them in setBreakpoints. The `debug`
+/// plugin calls this whenever the set changes.
+pub fn publishBreakpoints(file: []const u8, line_csv: []const u8) void {
+    wl_breakpoint_publish(p(file.ptr), @intCast(file.len), p(line_csv.ptr), @intCast(line_csv.len));
 }
 
 // ── Native editor surface + stamped ranges (motions/operators) ────────

@@ -116,6 +116,20 @@ pub fn hDecorate(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32, res
     }) catch {};
 }
 
+/// `breakpointPublish(path, line_csv)`: the debug plugin publishes a file's
+/// breakpoint lines to the process-global registry, so the DAP client (a JS
+/// plugin) can read them for setBreakpoints. Display-only bridge — no document
+/// bytes, no perm needed.
+pub fn hBreakpointPublish(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32, results: []i32) void {
+    _ = results;
+    const p: *WasmPlugin = @ptrCast(@alignCast(data.?));
+    const path = caller.readMemory(p.gpa, @intCast(args[0]), @intCast(args[1])) catch return;
+    defer p.gpa.free(path);
+    const csv = caller.readMemory(p.gpa, @intCast(args[2]), @intCast(args[3])) catch return;
+    defer p.gpa.free(csv);
+    @import("../breakpoints.zig").publish(path, csv);
+}
+
 /// `readOnlyClear()`: (re)claim the ACTIVE buffer's read-only-span layer and
 /// empty it — the guest republishes its full set after (a comint marking its
 /// produced output read-only while the input line stays editable).

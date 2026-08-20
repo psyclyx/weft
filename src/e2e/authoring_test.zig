@@ -355,6 +355,46 @@ test "debug: a real DAP session — launch, hit a breakpoint, see the stack, con
     try t.expect(drainToolContains(ed, "*debug*", "terminated"));
 }
 
+test "debug: the gutter breakpoint IS the DAP breakpoint — mark a line, stop there" {
+    const gpa = t.allocator;
+    var app: App = undefined;
+    try app.init(gpa);
+    defer app.deinit();
+    const ed = &app.ed;
+
+    // A little program, and a breakpoint marked the IDE way — on line 3.
+    authorFile(ed, "prog.py",
+        \\def f(x):
+        \\    y = x + 1
+        \\    return y
+        \\
+    );
+    ed.press("k", ""); // from the trailing blank up to `return y` (line 3)
+    ed.chord("SPC d b");
+    try t.expect(std.mem.indexOf(u8, ed.echoText(), "breakpoint set") != null);
+
+    // Point the DAP client at the mock. The config `line` fallback is 9 — a line
+    // we did NOT mark — so if the session stops on line 3 it can only be because
+    // the gutter breakpoint travelled the bridge (debug → registry → dap.js).
+    const mock = try std.fmt.allocPrint(gpa, "node {s}/assets/mock_dap.mjs", .{app.proj.prev_cwd});
+    defer gpa.free(mock);
+    try ed.setConfig("dap", "cmd", mock);
+    try ed.setConfig("dap", "program", "prog.py"); // matches the buffer path we marked
+    try ed.setConfig("dap", "line", "9");
+
+    const dap_src = try std.fmt.allocPrint(gpa, "{s}/config/plugins/dap.js", .{app.proj.prev_cwd});
+    defer gpa.free(dap_src);
+    const src = try core.file.readAlloc(gpa, dap_src);
+    defer gpa.free(src);
+    try ed.loadJs("dap", src);
+
+    ed.run("debug-start");
+    try t.expect(drainToolContains(ed, "*debug*", "stopped: breakpoint"));
+    try t.expect(drainToolContains(ed, "*debug*", "program:3")); // the MARKED line, not the fallback
+    ed.run("debug-continue");
+    try t.expect(drainToolContains(ed, "*debug*", "terminated"));
+}
+
 test "debug: set a breakpoint on a line — gutter marker, list, toggle off" {
     const gpa = t.allocator;
     var app: App = undefined;

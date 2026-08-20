@@ -86,6 +86,7 @@ fn toggle() void {
         weft.echo("debug: too many breakpoints");
     }
     render();
+    publish();
 }
 
 /// Clear every breakpoint in the focused buffer.
@@ -96,6 +97,7 @@ fn clearAll() void {
     }
     weft.echo("debug: breakpoints cleared");
     render();
+    publish();
 }
 
 fn list() void {
@@ -118,4 +120,42 @@ fn render() void {
     while (i < bp_n) : (i += 1) if (samePath(i)) {
         weft.decorate(bp_off[i], .gutter, .removed, "\u{25CF}"); // ● in red-ish (removed)
     };
+}
+
+/// The 1-based line number of byte `off` in the active document: count newlines
+/// in `[0, off)`, reading in scratch-sized chunks so a long file still counts.
+fn lineOf(off: usize) usize {
+    var line: usize = 1;
+    var pos: usize = 0;
+    while (pos < off) {
+        const s = weft.slice(pos, off);
+        if (s.len == 0) break;
+        for (s) |ch| {
+            if (ch == '\n') line += 1;
+        }
+        pos += s.len;
+    }
+    return line;
+}
+
+/// Publish the focused buffer's breakpoint LINES (a "l1,l2,…" CSV) to the shared
+/// registry, so the DAP client sends them in setBreakpoints. Called whenever the
+/// set changes — the visual gutter and the debugger stay one source of truth.
+fn publish() void {
+    var buf: [1024]u8 = undefined;
+    var w: usize = 0;
+    var i: usize = 0;
+    while (i < bp_n) : (i += 1) if (samePath(i)) {
+        var numbuf: [16]u8 = undefined;
+        const s = std.fmt.bufPrint(&numbuf, "{d}", .{lineOf(bp_off[i])}) catch continue;
+        if (w != 0 and w < buf.len) {
+            buf[w] = ',';
+            w += 1;
+        }
+        if (w + s.len <= buf.len) {
+            @memcpy(buf[w .. w + s.len], s);
+            w += s.len;
+        }
+    };
+    weft.publishBreakpoints(cur_path[0..cur_plen], buf[0..w]);
 }

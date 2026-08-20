@@ -6,6 +6,7 @@
 
 let sbuf = "";
 let seq = 1;
+let stopLine = 7; // where the session "stops" — echoes the first breakpoint we're sent
 
 function sendMsg(obj) {
   obj.seq = seq++;
@@ -30,6 +31,7 @@ function handle(req) {
       break;
     case "setBreakpoints": {
       const bps = ((req.arguments && req.arguments.breakpoints) || []).map((b) => ({ verified: true, line: b.line }));
+      if (bps.length) stopLine = bps[0].line; // stop where the user actually marked
       response(req, { breakpoints: bps });
       break;
     }
@@ -43,7 +45,7 @@ function handle(req) {
       break;
     case "stackTrace":
       response(req, {
-        stackFrames: [{ id: 1, name: "main", line: 7, column: 1, source: { name: "program", path: "program" } }],
+        stackFrames: [{ id: 1, name: "main", line: stopLine, column: 1, source: { name: "program", path: "program" } }],
         totalFrames: 1,
       });
       break;

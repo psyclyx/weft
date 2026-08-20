@@ -104,6 +104,7 @@ pub fn defineImports(linker: *wasm.Linker, p: *WasmPlugin) !void {
     // decoration) — never document bytes, so yy never yanks it.
     try d(linker, "wl_decorate_clear", 0, 0, layers.hDecorateClear, p);
     try d(linker, "wl_decorate", 5, 0, layers.hDecorate, p);
+    try d(linker, "wl_breakpoint_publish", 4, 0, layers.hBreakpointPublish, p);
     // Stamped ranges ([FIX 1/3]): a motion returns one, an operator awaits +
     // applies it. Handles cross; the version token stays host-side.
     try d(linker, "wl_stamp_range", 2, 1, edit.hStampRange, p);
