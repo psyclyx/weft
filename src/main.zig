@@ -448,10 +448,6 @@ pub fn main(init: std.process.Init) !void {
         // providers and damage the view on focus change.
         const abuf = buffers.active();
         try attachProviders(attach_deps, abuf);
-        // Keep the active buffer's resting mode current, so it follows the
-        // buffer into any split: opening a tool buffer (magit/dired) in another
-        // pane restores ITS mode, not a stale `normal` where text operators bite.
-        buffers.captureActiveMode(gpa, &session.keymap) catch {};
         // Attach providers to EVERY visible pane's buffer, not just the active
         // one — so each split gets its own syntax grammar and highlights (the
         // frame builder reparses each visible pane; without an attachment its

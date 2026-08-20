@@ -25,6 +25,10 @@ pool: *task.Pool,
 user_agent: []u8,
 slots: std.ArrayList(?*Buffer) = .empty,
 active_id: Id = 0,
+/// The buffer active before the current one — where `buffer-back` returns (so
+/// leaving a tool lands you where you came from, not a fresh scratch). Updated
+/// on every `switchTo`, so it toggles between the two most recent buffers.
+prev_id: Id = 0,
 /// The mode a FRESH buffer (no saved mode) starts in — the config's base
 /// editing mode ("normal"/"helix-normal"), captured once after config load.
 /// A fresh buffer NEVER inherits the current keymap mode: that let a tool
@@ -165,37 +169,45 @@ pub fn findByPath(self: *const Buffers, path: []const u8) ?Id {
 /// `default_mode`). A fresh buffer does NOT inherit the outgoing mode: that is
 /// what let a tool buffer's mode (dired/magit) stick when you opened a file
 /// from it. The mode a buffer shows is always determined by the buffer.
-/// Keep the active buffer's resting mode in sync with the keymap — called each
-/// frame. A buffer's mode is INTRINSIC (magit is always magit, a code file is
-/// normal), so it must follow the buffer into any split, not be captured only
-/// on switch-away (which left it stale: a tool buffer set its mode via
-/// `setMode`, but `.mode` wasn't updated until you switched away, so opening it
-/// in another split restored the wrong — usually `normal` — mode, exposing
-/// text-editing operators on a projection). Transient MENU modes (leader/…) are
-/// skipped so returning to a buffer never lands you back in a menu.
-pub fn captureActiveMode(self: *Buffers, gpa: Allocator, keymap: *const Keymap) Error!void {
-    const mode = keymap.currentMode();
-    if (keymap.isMenuMode(mode)) return;
-    const b = self.active();
-    if (std.mem.eql(u8, b.mode, mode)) return;
-    const owned = try gpa.dupe(u8, mode);
-    gpa.free(b.mode);
-    b.mode = owned;
-}
-
 pub fn switchTo(self: *Buffers, gpa: Allocator, id: Id, keymap: *Keymap) Error!void {
     const target = self.get(id) orelse return;
     if (id == self.active_id) return;
     const old = self.active();
-    const held = try gpa.dupe(u8, keymap.currentMode());
-    gpa.free(old.mode);
-    old.mode = held;
+    // Remember the buffer's RESTING mode — the base of the current mode's
+    // fallback chain, not the transient mode itself. So leaving mid-`visual`
+    // (or `insert`, or `op-pending`) remembers `normal`, and a switch made from
+    // inside a menu (`SPC g g` runs git-status while `leader-git` is active) is
+    // skipped rather than stamping the buffer with a menu mode. No per-mode
+    // bookkeeping — it reuses the fallback declarations config already makes.
+    const base = keymap.baseMode(keymap.currentMode());
+    if (!keymap.isMenuMode(base)) {
+        const held = try gpa.dupe(u8, base);
+        gpa.free(old.mode);
+        old.mode = held;
+    }
+    self.prev_id = self.active_id;
     if (target.mode.len > 0) {
         try keymap.setMode(gpa, target.mode);
     } else if (self.default_mode.len > 0) {
         try keymap.setMode(gpa, self.default_mode);
     }
     self.active_id = id;
+}
+
+/// Switch to the buffer active before this one (where a tool's `q` returns).
+/// Falls back to any other live buffer, then to a fresh scratch — so it always
+/// leaves the current buffer even if the previous one was closed. GENERIC: a
+/// tool binds `q` here and thinks no further about where "back" is.
+pub fn back(self: *Buffers, gpa: Allocator, keymap: *Keymap) Error!void {
+    if (self.prev_id != self.active_id and self.get(self.prev_id) != null)
+        return self.switchTo(gpa, self.prev_id, keymap);
+    // No valid previous: land on the lowest-id other live buffer, if any.
+    for (self.slots.items, 0..) |slot, i| {
+        if (slot != null and i != self.active_id) return self.switchTo(gpa, @intCast(i), keymap);
+    }
+    // Nothing else exists — open a scratch.
+    const id = try self.create(gpa, "*scratch*");
+    try self.switchTo(gpa, id, keymap);
 }
 
 /// Next live buffer after the active one (cyclic) — `buffer-next`.
@@ -221,6 +233,47 @@ pub fn close(self: *Buffers, gpa: Allocator, id: Id, keymap: *Keymap) Error!void
     }
     self.slots.items[id] = null;
     self.destroyBuffer(gpa, b);
+}
+
+test "buffers: switchTo remembers the base mode + skips menus; back returns" {
+    const t = std.testing;
+    const gpa = t.allocator;
+    var pool = try task.Pool.init(gpa, .{ .threads = 1 });
+    defer pool.deinit();
+    var bufs = try init(gpa, pool, "user"); // one scratch (id 0)
+    defer bufs.deinit(gpa);
+    var km: Keymap = .empty;
+    defer km.deinit(gpa);
+    try km.setFallback(gpa, "visual", "normal"); // visual's base is normal
+    try km.markMenuMode(gpa, "leader-git");
+
+    const code = try bufs.create(gpa, "code.zig");
+    const magit = try bufs.create(gpa, "*magit*");
+
+    try km.setMode(gpa, "normal");
+    try bufs.switchTo(gpa, code, &km);
+
+    // Leaving `code` mid-VISUAL remembers its BASE mode (normal), not visual.
+    try km.setMode(gpa, "visual");
+    try bufs.switchTo(gpa, magit, &km);
+    try t.expectEqualStrings("normal", bufs.get(code).?.mode);
+
+    // Leaving `magit` in magit mode remembers magit.
+    try km.setMode(gpa, "magit");
+    try bufs.switchTo(gpa, code, &km);
+    try t.expectEqualStrings("magit", bufs.get(magit).?.mode);
+
+    // A switch made from inside a MENU (git-status while `leader-git` is up)
+    // must NOT stamp the buffer being left with the menu mode.
+    try km.setMode(gpa, "leader-git");
+    try bufs.switchTo(gpa, magit, &km); // restores magit's own mode
+    try t.expectEqualStrings("normal", bufs.get(code).?.mode); // still normal, not leader-git
+    try t.expectEqualStrings("magit", km.currentMode());
+
+    // `back` returns to the previous buffer (code), in its base mode (normal).
+    try bufs.back(gpa, &km);
+    try t.expectEqual(code, bufs.active_id);
+    try t.expectEqualStrings("normal", km.currentMode());
 }
 
 test {

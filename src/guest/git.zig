@@ -312,7 +312,7 @@ export fn init() void {
     weft.bindKey("magit", "g", "git-refresh");
     // RET dispatches: file/hunk → visit; commit → show.
     weft.bindKey("magit", "Return", "git-visit");
-    weft.bindKey("magit", "q", "buf-scratch");
+    weft.bindKey("magit", "q", "buffer-back");
 
     // Discard confirm: a tiny menu mode — y does it, n/Escape backs out.
     weft.menuMode("git-confirm");

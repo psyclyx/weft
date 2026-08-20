@@ -135,6 +135,15 @@ fn cBufferNext(ctx: *Context, args: struct {}) anyerror!Value {
     return ok;
 }
 
+/// Return to the previously active buffer — where a tool's `q` lands you (back
+/// where you came from, in that buffer's own mode). Generic: the tool binds `q`
+/// here; the core decides where "back" is.
+fn cBufferBack(ctx: *Context, args: struct {}) anyerror!Value {
+    _ = args;
+    try ctx.buffers.back(ctx.gpa, ctx.keymap);
+    return ok;
+}
+
 fn cBufferSwitch(ctx: *Context, args: struct { id: i64 }) anyerror!Value {
     if (args.id < 0) return error.TypeMismatch;
     try ctx.buffers.switchTo(ctx.gpa, @intCast(args.id), ctx.keymap);
@@ -218,6 +227,7 @@ fn cEcho(ctx: *Context, args: struct { text: []const u8 }) anyerror!Value {
 const table = [_]command.Command{
     command.define("insert-text", "Insert text at the cursor (replaces the selection).", cInsertText),
     command.define("buffer-next", "Focus the next buffer (cyclic).", cBufferNext),
+    command.define("buffer-back", "Return to the previously active buffer (tool `q`).", cBufferBack),
     command.define("buffer-switch", "Focus the buffer with the given id.", cBufferSwitch),
     command.define("buffer-create", "Create (and focus) a named scratch buffer.", cBufferCreate),
     command.define("buffer-close", "Close the active buffer (refuses when dirty).", cBufferClose),

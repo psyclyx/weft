@@ -158,6 +158,21 @@ pub fn setFallback(self: *Keymap, gpa: Allocator, mode: []const u8, parent: []co
     gop.value_ptr.* = try gpa.dupe(u8, parent);
 }
 
+/// The RESTING mode a buffer in `mode` should be remembered as: the root of the
+/// fallback chain (`visual`/`insert`/`op-pending` fall back to `normal`, so
+/// their base is `normal`; `magit`/`dired` have no parent, so they are their own
+/// base). This reuses the fallback declarations config already makes for key
+/// lookup — no separate "which modes are transient" bookkeeping. A menu mode has
+/// no parents, so it returns itself; callers skip menus explicitly.
+pub fn baseMode(self: *const Keymap, mode: []const u8) []const u8 {
+    var cur = mode;
+    var depth: usize = 0;
+    while (depth < 8) : (depth += 1) {
+        cur = self.parents.get(cur) orelse return cur;
+    }
+    return cur;
+}
+
 /// Set the command unbound printable input runs in `mode`. `null`
 /// records an *explicit* "swallow text" (the modal posture) — it stops
 /// the fallback walk, so a normal mode inheriting bindings from an

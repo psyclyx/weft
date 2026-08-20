@@ -306,7 +306,7 @@ export fn init() void {
     weft.bindKey("dired", "minus", "dired-up");
     weft.bindKey("dired", "asciicircum", "dired-up");
     weft.bindKey("dired", "g", "dired-refresh");
-    weft.bindKey("dired", "q", "buf-scratch");
+    weft.bindKey("dired", "q", "buffer-back");
     // Marks.
     weft.bindKey("dired", "m", "dired-mark");
     weft.bindKey("dired", "u", "dired-unmark");
