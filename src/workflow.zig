@@ -169,36 +169,71 @@ pub const Editor = struct {
         try self.plugins.append(self.gpa, p);
     }
 
-    /// Press a key: `spec` is a keyspec (e.g. "i", "Escape", "C-w"); `text` is
-    /// the character it would type (for printable input), or "". Mirrors
-    /// main.zig's dispatch: a bound command runs (a menu-mode name enters the
-    /// submenu; a one-shot menu key pops back), else printable text is inserted.
+    /// Press a key: `spec` is a keyspec (e.g. "i", "Escape", "C-w", "SPC");
+    /// `text` is the character it would type (printable input), or "". Mirrors
+    /// app/dispatch.zig `dispatchKey` FAITHFULLY — through `keymap.feed`, so
+    /// multi-key CHORDS work: pressing "SPC" then "g" then "i" walks the leader
+    /// sequence to `git-init`, exactly as a user does under the real config.
+    /// (The old lookup-based path only saw single keys — it could never drive
+    /// the SPC leader tree the sample config is built on.)
     pub fn press(self: *Editor, spec: []const u8, text: []const u8) void {
         self.ctx.user_initiated = true; // a keystroke: helper-plugin edits are the user's
         defer self.ctx.user_initiated = false;
-        if (self.keymap.lookup(spec)) |cmd| {
-            if (self.keymap.isMenuMode(cmd)) {
-                self.keymap.enterMode(self.gpa, cmd) catch {};
+        // Mid-chord meta keys act on the which-key overlay, not the sequence.
+        if (self.keymap.pending.len > 0) {
+            if (std.mem.eql(u8, spec, "BackSpace")) {
+                self.keymap.popPending(self.gpa) catch {};
                 return;
             }
-            const before: ?[]u8 = if (self.keymap.isMenuMode(self.keymap.currentMode()))
-                self.gpa.dupe(u8, self.keymap.currentMode()) catch null
-            else
-                null;
-            defer if (before) |b| self.gpa.free(b);
-            _ = command.run(&self.commands, &self.ctx, cmd, &.{}) catch {};
-            if (before) |b| {
-                if (!self.keymap.isStickyMenu(b) and std.mem.eql(u8, self.keymap.currentMode(), b)) {
-                    if (self.keymap.menuReturn(b)) |ret| self.keymap.setMode(self.gpa, ret) catch {};
-                }
+            if (self.keymap.navCommand(spec)) |cmd| {
+                _ = command.run(&self.commands, &self.ctx, cmd, &.{}) catch {};
+                return;
             }
-            self.syncActivate();
-            return;
+        }
+        switch (self.keymap.feed(self.gpa, spec) catch core.Keymap.Feed.none) {
+            .pending, .none => return, // chord extends, or a dead end — nothing to run
+            .text => {}, // a lone unbound key — fall through to text insertion
+            .run => |cmd_name| {
+                if (self.keymap.isMenuMode(cmd_name)) {
+                    self.keymap.enterMode(self.gpa, cmd_name) catch {};
+                    self.syncActivate();
+                    return;
+                }
+                const menu_before: ?[]u8 = if (self.keymap.isMenuMode(self.keymap.currentMode()))
+                    self.gpa.dupe(u8, self.keymap.currentMode()) catch null
+                else
+                    null;
+                defer if (menu_before) |m| self.gpa.free(m);
+                const result = command.run(&self.commands, &self.ctx, cmd_name, &.{}) catch command.Value.nil;
+                switch (result) {
+                    .string => |s| if (s.len > 0) {
+                        self.echo.clearRetainingCapacity();
+                        self.echo.appendSlice(self.gpa, s) catch {};
+                    },
+                    else => {},
+                }
+                if (menu_before) |m| {
+                    if (!self.keymap.isStickyMenu(m) and std.mem.eql(u8, self.keymap.currentMode(), m)) {
+                        if (self.keymap.menuReturn(m)) |ret| self.keymap.setMode(self.gpa, ret) catch {};
+                    }
+                }
+                self.syncActivate();
+                return;
+            },
         }
         if (text.len == 0) return;
         if (self.keymap.textCommand()) |tc| {
             _ = command.run(&self.commands, &self.ctx, tc, &.{.{ .string = text }}) catch {};
         }
+        self.syncActivate();
+    }
+
+    /// Press each key of a space-separated chord in turn — the natural way to
+    /// write a leader sequence in a test: `ed.chord("SPC g i")` drives
+    /// SPC→g→i. Non-printable by definition (leader keys), so no text.
+    pub fn chord(self: *Editor, seq: []const u8) void {
+        var it = std.mem.tokenizeScalar(u8, seq, ' ');
+        while (it.next()) |k| self.press(k, "");
     }
 
     /// Type a run of printable text through the active mode's text command
@@ -1312,6 +1347,18 @@ test "e2e/web: author js + html, grep across them, run it with node" {
     ed.runStr("run-command", "node app.js");
     try t.expect(drainToolContains(&ed, "*output*", "hello weft"));
     proj.shot(&ed, "web-2-run");
+
+    // ── 4. Browse the project as a file tree with dired. ──
+    ed.run("dired");
+    try t.expect(drainToolContains(&ed, "*dired*", "app.js"));
+    {
+        const tree = toolText(&ed, "*dired*") orelse return error.NoDiredBuffer;
+        defer gpa.free(tree);
+        try t.expect(std.mem.indexOf(u8, tree, "app.js") != null);
+        try t.expect(std.mem.indexOf(u8, tree, "index.html") != null);
+    }
+    try t.expectEqualStrings("dired", ed.mode());
+    proj.shot(&ed, "web-3-dired");
 }
 
 // ── Coverage + documented gaps (the difficulty IS the signal) ───────
