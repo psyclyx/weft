@@ -315,10 +315,12 @@ test "dired: gathers a directory tree via proc and renders the model (async)" {
     try buf.?.editor.applyUserEdit(gpa, .{ .start = 0, .end = buf.?.editor.text().byteLen() }, synth);
     try plugin.instance.callVoid("on_fill", &.{});
 
-    // Enter edit mode: the buffer becomes the simple editable projection and the
-    // keymap enters the distinct `dired-edit` posture.
+    // Enter edit mode: the buffer becomes the editable name-only projection, the
+    // keymap enters the `dired-edit` posture, AND the buffer is marked this
+    // plugin's tool projection — so a `save` resolves to `dired-commit`.
     _ = try command.run(&env.commands, &env.ctx, "dired-edit", &.{});
     try t.expectEqualStrings("dired-edit", env.keymap.currentMode());
+    try t.expectEqualStrings("dired", buf.?.editor.toolName().?); // code-backed
     {
         // The editable projection is just indented names — no header/perms/glyphs.
         const s = try buf.?.editor.text().toOwnedSlice(gpa);
@@ -336,8 +338,9 @@ test "dired: gathers a directory tree via proc and renders the model (async)" {
         "renamed.txt\nsubdir/\n" ++ probe ++ "\n",
     );
 
-    // Reconcile: computes + PRINTS the plan into *dired-plan*. Its only doors are
-    // buffer writes — no proc/fs — so the probe file is never actually created.
+    // `dired-reconcile` (Z) previews the plan into *dired-plan* — buffer writes
+    // only, no proc/fs, so nothing is applied. The rename is inferred (same
+    // parent) and the probe is a create.
     _ = try command.run(&env.commands, &env.ctx, "dired-reconcile", &.{});
     const plan = blk: {
         var it = env.buffers.iterator();
@@ -347,9 +350,16 @@ test "dired: gathers a directory tree via proc and renders the model (async)" {
     try t.expect(plan != null);
     const ps = try plan.?.editor.text().toOwnedSlice(gpa);
     defer gpa.free(ps);
-    try t.expect(std.mem.indexOf(u8, ps, "DRY RUN") != null);
+    try t.expect(std.mem.indexOf(u8, ps, "pending changes") != null);
     try t.expect(std.mem.indexOf(u8, ps, "rename  alpha.txt -> renamed.txt") != null);
     try t.expect(std.mem.indexOf(u8, ps, "create  " ++ probe) != null);
+
+    // `save` on the *dired* projection resolves — via the `save` ACTION scoped to
+    // `When{.tool="dired"}` — to `dired-commit`, which stages the plan behind the
+    // y/n confirm (it does NOT write files itself; the confirm runs them via proc).
+    _ = try command.run(&env.commands, &env.ctx, "buffer-switch", &.{.{ .integer = @intCast(buf.?.id) }});
+    _ = try command.run(&env.commands, &env.ctx, "save", &.{});
+    try t.expectEqualStrings("dired-confirm", env.keymap.currentMode());
 }
 
 test "helix: a second modal editor loads in its OWN mode namespace" {

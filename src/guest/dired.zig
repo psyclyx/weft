@@ -195,9 +195,12 @@ var op_src_len: usize = 0;
 /// Pre-quoted ` 'f1' 'f2' …` target suffix captured for the shell (`!`) verb.
 var op_args: [1 << 12]u8 = undefined;
 var op_args_len: usize = 0;
-/// The delete command staged behind the y/n `dired-confirm` menu.
+/// The command staged behind the y/n `dired-confirm` menu (a delete, or a whole
+/// reconcile plan). `commit_pending` distinguishes a save-reconcile confirm (No
+/// returns to editing) from a delete confirm (No returns to the view).
 var confirm_cmd: [CMD_CAP]u8 = undefined;
 var confirm_len: usize = 0;
+var commit_pending: bool = false;
 
 // ── Editable-buffer file management (mini.files) — DRY RUN ONLY ──────────────
 // The tree buffer becomes an editable text buffer; the user renames/creates/
@@ -227,7 +230,7 @@ var snap: [MAX_ENTRIES]Snap = undefined;
 var snap_count: usize = 0;
 
 /// The inferred category of an edited line after the diff.
-const EditCat = enum(u8) { unchanged, rename_to, move_to, create };
+const EditCat = enum(u8) { unchanged, rename_to, move_to, create, copy };
 /// One parsed line of the edited buffer (indent→depth, name→path, trailing `/`).
 const EditLine = struct {
     path: [PATH_CAP]u8 = undefined,
@@ -236,7 +239,12 @@ const EditLine = struct {
     depth: usize = 0,
     matched: bool = false,
     cat: EditCat = .unchanged,
-    partner: usize = 0, // snap index for rename_to/move_to
+    partner: usize = 0, // snap index for rename_to/move_to/copy
+    /// The hidden id read off this row's id-span: the ORIGINAL path of the entry
+    /// it came from (survives rename via anchor rebase, survives dd→p via the
+    /// register ferry). Empty ⇒ a typed/new line with no identity ⇒ a create.
+    oid: [PATH_CAP]u8 = undefined,
+    oidlen: usize = 0,
     fn pathS(self: *const EditLine) []const u8 {
         return self.path[0..self.plen];
     }
@@ -273,8 +281,12 @@ const cmds = [_]Cmd{
     .{ .name = "dired-copy", .handler = diredCopy },
     .{ .name = "dired-delete", .handler = diredDelete },
     .{ .name = "dired-shell", .handler = diredShell },
-    // Editable-buffer file management (mini.files) — DRY RUN (compute + print only).
+    // Editable-buffer file management (mini.files): `dired-edit` opens the
+    // name-only editable projection; SAVING it (`:w`/C-s, via the `save` action
+    // scoped to this tool projection) reconciles + APPLIES the file ops behind a
+    // confirm. `dired-reconcile` is the dry-run preview; `dired-revert` discards.
     .{ .name = "dired-edit", .handler = diredEdit },
+    .{ .name = "dired-commit", .handler = diredCommit },
     .{ .name = "dired-reconcile", .handler = diredReconcile },
     .{ .name = "dired-revert", .handler = diredRevert },
     // The input prompt + the delete confirm.
@@ -335,6 +347,12 @@ export fn init() void {
     weft.setFallback("dired-edit", "normal");
     weft.bindKey("dired-edit", "Z", "dired-reconcile");
     weft.bindKey("dired-edit", "Q", "dired-revert");
+    // Saving the editable projection reconciles it: `save` is an action, and we
+    // provide it scoped to THIS tool projection (the `dired` tool-backing) so
+    // `:w`/C-s resolve to `dired-commit` in a *dired* buffer — no core knows
+    // dired. The core file-write default still handles every other buffer.
+    weft.declareAction("save");
+    weft.provide("save", .{ .tool = "dired" }, "dired-commit", 10);
 
     // The prompt buffer is EDITABLE: fall back to `default` for text + editing,
     // then a C-c prefix (finish/abort/resume) — the git-input shape.
@@ -994,10 +1012,23 @@ fn diredDelete() void {
     weft.setMode("dired-confirm");
 }
 fn confirmYes() void {
-    marked.clear(); // targets are gone; drop stale marks
+    if (commit_pending) {
+        commit_pending = false;
+        edit_mode_active = false; // applied → back to the live view
+    } else {
+        marked.clear(); // delete targets are gone; drop stale marks
+    }
     gatherAfter(confirm_cmd[0..confirm_len]);
 }
 fn confirmNo() void {
+    if (commit_pending) {
+        commit_pending = false;
+        // Keep the user's edits: return to the editable *dired* buffer.
+        _ = focusBuffer(dired_buf);
+        weft.setMode("dired-edit");
+        weft.echo("dired: not applied — keep editing (Q reverts)");
+        return;
+    }
     weft.setMode("dired");
     weft.echo("delete cancelled");
 }
@@ -1112,10 +1143,14 @@ fn diredEdit() void {
     snapshot();
     renderEditable();
     edit_mode_active = true;
+    // Mark the buffer this plugin's projection: its content is code-generated,
+    // and a save reconciles it (the `save` action resolves to `dired-commit`
+    // for `When{.tool="dired"}`). No core special-case — pure action dispatch.
+    weft.toolBacking("dired");
     // `normal` (via the mode's fallback) — real vim editing; also the mode-leak
     // fix, so opening a file elsewhere doesn't strand you in a dired mode.
     weft.setMode("dired-edit");
-    weft.echo("dired edit (dry run): edit names; Z=reconcile preview, Q=revert");
+    weft.echo("dired edit: rename/create/delete/move; :w applies (with confirm), Q reverts");
 }
 
 /// Copy the live tree model into the snapshot arrays (path/kind/depth). The
@@ -1132,8 +1167,17 @@ fn snapshot() void {
     }
 }
 
-/// Author the editable projection over `*dired*`: `<depth*2 spaces><name>[/]`.
-/// Styles/folds are cleared so it reads/edits as plain text.
+/// Per-row name byte range in the editable projection (recorded during render,
+/// used to claim the hidden id-span over each name after authoring).
+var ed_name_start: [MAX_ENTRIES]usize = undefined;
+var ed_name_end: [MAX_ENTRIES]usize = undefined;
+
+/// Author the editable projection over `*dired*`: `<depth*2 spaces><name>[/]`,
+/// then claim a hidden id-span over each NAME carrying its original path as the
+/// identity `id`. That span rebases as you edit the name (rename), and — because
+/// the core register ferries subbuffer facts across a yank→paste — it rides a
+/// `dd`→`p` to another directory (a MOVE), while a typed line gets no id (a
+/// CREATE). Reconcile reads these back by id, path-independently.
 fn renderEditable() void {
     out = 0;
     var i: usize = 0;
@@ -1141,13 +1185,23 @@ fn renderEditable() void {
         const e = &entries[i];
         var d: usize = 0;
         while (d < e.depth) : (d += 1) put("  ");
+        ed_name_start[i] = out;
         put(e.nameS());
         if (e.kind == .dir) put("/");
+        ed_name_end[i] = out;
         put("\n");
     }
     weft.edit(.{ .start = 0, .end = weft.byteLen() }, render_buf[0..out]);
     weft.styleClear();
     weft.foldClear();
+    // Claim the id-spans over the just-authored names (clear last render's first).
+    weft.subbufferClear();
+    i = 0;
+    while (i < entry_count) : (i += 1) {
+        const h = weft.claimSubbuffer(ed_name_start[i], ed_name_end[i]) orelse continue;
+        weft.subbufferPutFact(h, "id", entries[i].pathS());
+        weft.subbufferPutFact(h, "kind", if (entries[i].kind == .dir) "dir" else "file");
+    }
     weft.jump(0);
 }
 
@@ -1183,6 +1237,7 @@ fn parseEdit() void {
     for (&ep_have) |*h| h.* = false;
     var i: usize = 0;
     while (i < raw_len) {
+        const ls = i; // this line's start offset in the buffer (raw is buffer[0..])
         var le = i;
         while (le < raw_len and raw[le] != '\n') le += 1;
         const line = raw[i..le];
@@ -1211,6 +1266,13 @@ fn parseEdit() void {
         e.depth = d;
         e.is_dir = is_dir;
         e.plen = joinPath(&e.path, parent, rest);
+        // The hidden identity: the id-span over this row's name (at ls+indent)
+        // carries the original path. Present ⇒ this row IS that entry (renamed/
+        // moved); absent ⇒ a typed/new line (a create).
+        if (weft.subbufferFactAt(ls + s, "id")) |oid| {
+            e.oidlen = @min(oid.len, PATH_CAP);
+            @memcpy(e.oid[0..e.oidlen], oid[0..e.oidlen]);
+        }
         // This line becomes the parent for depth d+1; a dedent invalidates deeper.
         const pn = @min(e.plen, PATH_CAP);
         @memcpy(ep_path[d][0..pn], e.path[0..pn]);
@@ -1222,14 +1284,15 @@ fn parseEdit() void {
     }
 }
 
-/// Infer ops by matching edited lines against the snapshot. HEURISTIC (first cut,
-/// no hidden ids): (1) exact path+kind ⇒ unchanged; (2) an unmatched original and
-/// an unmatched edit under the SAME parent ⇒ RENAME (positional); (3) an unmatched
-/// original and edit sharing a BASENAME under DIFFERENT parents ⇒ MOVE; (4)
-/// leftover originals ⇒ DELETE, leftover edits ⇒ CREATE (dir if `name/`).
-/// Limits: reordering-with-rename, or renaming a non-empty directory (its children
-/// re-parent and show as moves/creates), can misclassify — precise identity via
-/// per-line ids is the follow-up.
+/// Infer ops by matching edited lines against the snapshot. EXACT identity via
+/// hidden id-spans first — (0) a row whose id (original path) is in the snapshot
+/// IS that entry: same path ⇒ unchanged, same parent ⇒ RENAME, else MOVE; a
+/// second row with the same id ⇒ COPY. Then the heuristic fallback for id-less
+/// rows: (1) exact path ⇒ unchanged; (2) same-parent ⇒ rename; (3) shared
+/// basename ⇒ move; (4) leftovers ⇒ DELETE (originals) / CREATE (edits). The
+/// id pass makes `dd`→`p`-move and rename path-independent (the exact identity
+/// the old heuristic-only diff couldn't get); the fallback still handles a
+/// freshly-typed line that carries no id.
 fn diff() void {
     var i: usize = 0;
     while (i < snap_count) : (i += 1) {
@@ -1240,6 +1303,38 @@ fn diff() void {
     while (j < el_count) : (j += 1) {
         elines[j].matched = false;
         elines[j].cat = .unchanged;
+    }
+
+    // (0) id-exact: a row's hidden id (original path) resolves its identity.
+    j = 0;
+    while (j < el_count) : (j += 1) {
+        if (elines[j].oidlen == 0) continue;
+        const oid = elines[j].oid[0..elines[j].oidlen];
+        // Find the snapshot entry this id names.
+        i = 0;
+        var snap_idx: ?usize = null;
+        while (i < snap_count) : (i += 1) {
+            if (std.mem.eql(u8, snap[i].pathS(), oid)) {
+                snap_idx = i;
+                break;
+            }
+        }
+        const si = snap_idx orelse continue; // id names nothing we snapshotted
+        elines[j].matched = true;
+        elines[j].partner = si;
+        if (snap[si].matched) {
+            // The original id already claimed by another row ⇒ this is a COPY.
+            elines[j].cat = .copy;
+        } else {
+            snap[si].matched = true;
+            if (std.mem.eql(u8, elines[j].pathS(), oid)) {
+                elines[j].cat = .unchanged;
+            } else if (std.mem.eql(u8, dirnameOf(elines[j].pathS()), dirnameOf(oid))) {
+                elines[j].cat = .rename_to;
+            } else {
+                elines[j].cat = .move_to;
+            }
+        }
     }
 
     // (1) exact path + kind → unchanged.
@@ -1309,7 +1404,7 @@ fn diff() void {
 /// moves, creates, deletes (each grouped). Text only — see `showPlan`.
 fn buildPlan() usize {
     out = 0;
-    put("dired reconcile — DRY RUN (nothing applied; execution not wired yet)\n\n");
+    put("dired: pending changes (in apply order)\n\n");
     var n: usize = 0;
     var j: usize = 0;
     while (j < el_count) : (j += 1) if (elines[j].cat == .rename_to) {
@@ -1323,6 +1418,15 @@ fn buildPlan() usize {
     j = 0;
     while (j < el_count) : (j += 1) if (elines[j].cat == .move_to) {
         put("move    ");
+        put(snap[elines[j].partner].pathS());
+        put(" -> ");
+        put(elines[j].pathS());
+        put("\n");
+        n += 1;
+    };
+    j = 0;
+    while (j < el_count) : (j += 1) if (elines[j].cat == .copy) {
+        put("copy    ");
         put(snap[elines[j].partner].pathS());
         put(" -> ");
         put(elines[j].pathS());
@@ -1349,12 +1453,117 @@ fn buildPlan() usize {
         put("\n");
         n += 1;
     };
-    if (n == 0) put("(no changes detected)\n");
+    if (n == 0) put("(no changes)\n");
     put("\n");
     var mb: [96]u8 = undefined;
-    put(std.fmt.bufPrint(&mb, "{d} op(s) — DRY RUN, nothing executed. Q reverts; keep editing to revise.", .{n}) catch "DRY RUN — nothing executed.");
+    put(std.fmt.bufPrint(&mb, "{d} op(s)", .{n}) catch "");
     put("\n");
     return n;
+}
+
+/// Compose the reconcile plan into ONE shell command (into `confirm_cmd`), in
+/// apply order: mkdir parents → rename/move (mv) → copy (cp -r) → create
+/// (mkdir/touch) → delete (rm -rf). Paths are single-quoted (with `'` escaped),
+/// so spaces/specials are inert. Returns the byte length, or 0 on overflow.
+fn composeOps() usize {
+    var w: usize = 0;
+    const Emit = struct {
+        fn q(buf: []u8, at: usize, path: []const u8) ?usize {
+            var o = at;
+            if (o >= buf.len) return null;
+            buf[o] = '\'';
+            o += 1;
+            for (path) |ch| {
+                if (ch == '\'') { // ' → '\'' (close, escaped quote, reopen)
+                    const esc = "'\\''";
+                    if (o + esc.len > buf.len) return null;
+                    @memcpy(buf[o .. o + esc.len], esc);
+                    o += esc.len;
+                } else {
+                    if (o >= buf.len) return null;
+                    buf[o] = ch;
+                    o += 1;
+                }
+            }
+            if (o >= buf.len) return null;
+            buf[o] = '\'';
+            return o + 1;
+        }
+        fn lit(buf: []u8, at: usize, s: []const u8) ?usize {
+            if (at + s.len > buf.len) return null;
+            @memcpy(buf[at .. at + s.len], s);
+            return at + s.len;
+        }
+    };
+    // Directory creates first (a mkdir -p makes any parents a move/copy needs).
+    var j: usize = 0;
+    while (j < el_count) : (j += 1) if (elines[j].cat == .create and elines[j].is_dir) {
+        w = Emit.lit(&confirm_cmd, w, "mkdir -p -- ") orelse return 0;
+        w = Emit.q(&confirm_cmd, w, elines[j].pathS()) orelse return 0;
+        w = Emit.lit(&confirm_cmd, w, "; ") orelse return 0;
+    };
+    j = 0;
+    while (j < el_count) : (j += 1) if (elines[j].cat == .rename_to or elines[j].cat == .move_to) {
+        w = Emit.lit(&confirm_cmd, w, "mv -- ") orelse return 0;
+        w = Emit.q(&confirm_cmd, w, snap[elines[j].partner].pathS()) orelse return 0;
+        w = Emit.lit(&confirm_cmd, w, " ") orelse return 0;
+        w = Emit.q(&confirm_cmd, w, elines[j].pathS()) orelse return 0;
+        w = Emit.lit(&confirm_cmd, w, "; ") orelse return 0;
+    };
+    j = 0;
+    while (j < el_count) : (j += 1) if (elines[j].cat == .copy) {
+        w = Emit.lit(&confirm_cmd, w, "cp -r -- ") orelse return 0;
+        w = Emit.q(&confirm_cmd, w, snap[elines[j].partner].pathS()) orelse return 0;
+        w = Emit.lit(&confirm_cmd, w, " ") orelse return 0;
+        w = Emit.q(&confirm_cmd, w, elines[j].pathS()) orelse return 0;
+        w = Emit.lit(&confirm_cmd, w, "; ") orelse return 0;
+    };
+    j = 0;
+    while (j < el_count) : (j += 1) if (elines[j].cat == .create and !elines[j].is_dir) {
+        w = Emit.lit(&confirm_cmd, w, "touch -- ") orelse return 0;
+        w = Emit.q(&confirm_cmd, w, elines[j].pathS()) orelse return 0;
+        w = Emit.lit(&confirm_cmd, w, "; ") orelse return 0;
+    };
+    var i: usize = 0;
+    while (i < snap_count) : (i += 1) if (snap[i].deleted) {
+        w = Emit.lit(&confirm_cmd, w, "rm -rf -- ") orelse return 0;
+        w = Emit.q(&confirm_cmd, w, snap[i].pathS()) orelse return 0;
+        w = Emit.lit(&confirm_cmd, w, "; ") orelse return 0;
+    };
+    return w;
+}
+
+/// `dired-commit` — the `save` action's provider for a *dired* projection: parse
+/// the edited buffer, reconcile it against the gather snapshot by hidden id,
+/// preview the ordered ops in `*dired-plan*`, and stage them behind the y/n
+/// confirm (which runs them via `gatherAfter` and re-gathers). A save OUTSIDE
+/// edit mode is a no-op (the view render is not an editable projection).
+fn diredCommit() void {
+    if (!edit_mode_active) {
+        weft.echo("dired: nothing to save (not editing)");
+        return;
+    }
+    if (!std.mem.eql(u8, activeName(), dired_buf)) return;
+    loadRaw(); // page the EDITED buffer text (active buffer is *dired*)
+    parseEdit();
+    diff();
+    const n = buildPlan();
+    if (n == 0) {
+        weft.setMode("dired");
+        edit_mode_active = false;
+        regather(false); // back to the live view
+        weft.echo("dired: no changes");
+        return;
+    }
+    const w = composeOps();
+    if (w == 0) {
+        weft.echo("dired: too many changes to apply at once");
+        return;
+    }
+    confirm_len = w;
+    commit_pending = true;
+    showPlan(); // the pending-changes list, in *dired-plan*
+    weft.setMode("dired-confirm");
 }
 
 /// Publish the plan text (from `render_buf`) into `*dired-plan*` and color it.
