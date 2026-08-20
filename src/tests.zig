@@ -8,20 +8,12 @@ const t = std.testing;
 const stemma = @import("stemma");
 const snail = @import("snail");
 
+// The core/gfx/app unit tests now live in the `weft` module (src/weft.zig),
+// which OWNS those files — build.zig runs that module's test binary too. This
+// module carries the dependency-wiring smoke tests plus the driven e2e suite
+// (src/e2e), which reaches the app through the `weft` module, not `../` paths.
 test {
-    // The core ABI (milestone 2) and its property tests.
-    t.refAllDecls(@import("core/core.zig"));
-    _ = @import("core/tests.zig");
-    _ = @import("gfx/stats.zig");
-    _ = @import("gfx/view.zig");
-    _ = @import("gfx/layout.zig");
-    _ = @import("gfx/region.zig");
-    _ = @import("gfx/window_layout.zig");
-    _ = @import("gfx/harness.zig");
-    _ = @import("workflow.zig");
-    _ = @import("core/markdown.zig");
-    _ = @import("core/identity.zig");
-    _ = @import("app/frame.zig"); // which-key menu-overlay timing
+    _ = @import("e2e/e2e.zig");
 }
 
 test "stemma path dep: rope round-trips" {

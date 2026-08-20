@@ -145,10 +145,40 @@ pub fn build(b: *std.Build) void {
     addWasm(b, test_mod);
     embedGuests(b, test_mod);
     addQuickjs(b, test_mod);
+
+    // The weft app internals (core + gfx + app) exposed as ONE named module the
+    // e2e harness imports by name (src/weft.zig barrel), so its files under
+    // src/e2e/ reach the tree without `../` reach-arounds. Same deps those files
+    // need, wired here; guests stay test-only (embedded into test_mod, not here).
+    const weft_mod = b.createModule(.{
+        .root_source_file = b.path("src/weft.zig"),
+        .target = target,
+        .optimize = optimize,
+        .link_libc = true,
+    });
+    weft_mod.addImport("snail", snail_dep.module("snail"));
+    weft_mod.addImport("snail-raster", snail_dep.module("snail-raster"));
+    weft_mod.addImport("stemma", stemma_dep.module("stemma"));
+    weft_mod.addAnonymousImport("font_mono", .{
+        .root_source_file = snail_dep.path("assets/DejaVuSansMono.ttf"),
+    });
+    weft_mod.linkSystemLibrary("fontconfig", .{});
+    addSyntax(b, weft_mod, renderer);
+    addWasm(b, weft_mod);
+    embedGuests(b, weft_mod); // core's own wasm-membrane tests @embedFile the catalog
+    addQuickjs(b, weft_mod);
+    test_mod.addImport("weft", weft_mod);
+
     const unit_tests = b.addTest(.{ .root_module = test_mod });
     const run_tests = b.addRunArtifact(unit_tests);
     const test_step = b.step("test", "Run unit tests");
     test_step.dependOn(&run_tests.step);
+
+    // The `weft` module owns the core/gfx/app files, so its own unit tests run in
+    // a second test binary; the `test` step runs both.
+    const weft_tests = b.addTest(.{ .root_module = weft_mod });
+    const run_weft_tests = b.addRunArtifact(weft_tests);
+    test_step.dependOn(&run_weft_tests.step);
 }
 
 /// Tree-sitter (milestone 7): the library links normally; grammar
