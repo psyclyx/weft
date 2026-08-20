@@ -37,10 +37,13 @@ mode: []u8 = &.{},
 /// prefix. Cleared on a completed binding, a dead end, Escape, or a mode/buffer
 /// switch.
 pending: []u8 = &.{},
-/// Scratch for `resolveBindings` — the deduplicated set of bindings reachable
-/// in a mode (own + fallback chain + global). Borrowed slices into `modes`,
-/// valid until the next keymap mutation. Rebuilt each call (which-key render).
+/// Scratch for `resolveBindings`/`completions` — the deduplicated set of
+/// bindings (or chord completions) reachable in a mode. Borrowed slices into
+/// `modes`, valid until the next keymap mutation. Rebuilt each call (which-key
+/// render). `resolved_group` parallels it: whether each entry opens a submenu /
+/// continues a chord (a GROUP) rather than being a runnable LEAF.
 resolved: std.ArrayList(Binding) = .empty,
+resolved_group: std.ArrayList(bool) = .empty,
 /// mode → parent mode: `lookup` walks the chain (vim's visual falls
 /// back to normal falls back to default).
 parents: std.StringArrayHashMapUnmanaged([]u8) = .empty,
@@ -88,6 +91,7 @@ pub fn deinit(self: *Keymap, gpa: Allocator) void {
     }
     self.modes.deinit(gpa);
     self.resolved.deinit(gpa);
+    self.resolved_group.deinit(gpa);
     for (self.parents.keys(), self.parents.values()) |k, v| {
         gpa.free(k);
         gpa.free(v);
@@ -447,6 +451,7 @@ pub fn bindingAt(self: *const Keymap, mode: []const u8, i: usize) ?Binding {
 /// mutation (the guest enumerates synchronously during its `on_menu`).
 pub fn resolveBindings(self: *Keymap, gpa: Allocator, mode: []const u8) Allocator.Error!usize {
     self.resolved.clearRetainingCapacity();
+    self.resolved_group.clearRetainingCapacity();
     var m: []const u8 = mode;
     var depth: usize = 0;
     while (depth < 8) : (depth += 1) {
@@ -458,7 +463,8 @@ pub fn resolveBindings(self: *Keymap, gpa: Allocator, mode: []const u8) Allocato
 }
 
 /// Append `mode`'s own bindings to `resolved`, skipping any key already present
-/// (a nearer mode in the walk bound it — the override lookup honors).
+/// (a nearer mode in the walk bound it — the override lookup honors). A binding
+/// whose command names a menu mode is a GROUP (legacy menu-mode which-key).
 fn addResolved(self: *Keymap, gpa: Allocator, mode: []const u8) Allocator.Error!void {
     const b = self.modes.getPtr(mode) orelse return;
     outer: for (b.keys(), b.values()) |k, v| {
@@ -466,13 +472,69 @@ fn addResolved(self: *Keymap, gpa: Allocator, mode: []const u8) Allocator.Error!
             if (std.mem.eql(u8, existing.key, k)) continue :outer;
         }
         try self.resolved.append(gpa, .{ .key = k, .command = v.command });
+        try self.resolved_group.append(gpa, self.isMenuMode(v.command));
     }
 }
 
-/// The `i`-th resolved binding from the last `resolveBindings` (borrowed).
+/// Fill `resolved` (+ `resolved_group`) with the next-key CHOICES after
+/// `prefix` — the pending chord ("" = top level, the F1 peek). Scans the current
+/// mode + fallback chain (+ `global`, at top level only) for bindings whose key
+/// extends `prefix` by ≥1 segment; the display key is the immediate NEXT segment.
+/// Deduped by that segment (nearer mode / earlier bind wins). A segment is a LEAF
+/// when `prefix seg` is itself a complete binding (its command is shown); a GROUP
+/// when it only continues a chord (more keys follow — shown as a "+prefix"
+/// label, `resolved_group` true). This is what which-key renders as you type a
+/// chord: at `space`, the `f`/`g`/… choices; at `space f`, the file submenu's.
+/// Read back with `resolvedAt` / `resolvedIsGroup`; valid until the next mutation.
+pub fn completions(self: *Keymap, gpa: Allocator, prefix: []const u8) Allocator.Error!usize {
+    self.resolved.clearRetainingCapacity();
+    self.resolved_group.clearRetainingCapacity();
+    var m: []const u8 = self.mode;
+    var depth: usize = 0;
+    while (depth < 8) : (depth += 1) {
+        try self.addCompletions(gpa, m, prefix);
+        m = self.parents.get(m) orelse break;
+    }
+    // The universal layer holds single keys only, so it contributes only at the
+    // TOP of a sequence — never mid-chord (that's the "global isn't too global").
+    if (prefix.len == 0) try self.addCompletions(gpa, global_mode, prefix);
+    return self.resolved.items.len;
+}
+
+/// Append `mode`'s next-segment choices after `prefix` to `resolved`, deduped by
+/// segment against what's there (a nearer mode already offered it).
+fn addCompletions(self: *Keymap, gpa: Allocator, mode: []const u8, prefix: []const u8) Allocator.Error!void {
+    const b = self.modes.getPtr(mode) orelse return;
+    for (b.keys(), b.values()) |k, v| {
+        // The remainder of `k` past `prefix ` — the part this key adds to the chord.
+        const rest = if (prefix.len == 0) k else blk: {
+            if (!(k.len > prefix.len and std.mem.startsWith(u8, k, prefix) and k[prefix.len] == ' ')) continue;
+            break :blk k[prefix.len + 1 ..];
+        };
+        if (rest.len == 0) continue;
+        const seg_end = std.mem.indexOfScalar(u8, rest, ' ') orelse rest.len;
+        const seg = rest[0..seg_end];
+        const is_leaf = seg_end == rest.len; // the key ends here → a runnable leaf
+        for (self.resolved.items) |existing| {
+            if (std.mem.eql(u8, existing.key, seg)) break; // already offered — dedup
+        } else {
+            try self.resolved.append(gpa, .{ .key = seg, .command = if (is_leaf) v.command else "+prefix" });
+            try self.resolved_group.append(gpa, !is_leaf);
+        }
+    }
+}
+
+/// The `i`-th resolved binding from the last `resolveBindings`/`completions`.
 pub fn resolvedAt(self: *const Keymap, i: usize) ?Binding {
     if (i >= self.resolved.items.len) return null;
     return self.resolved.items[i];
+}
+
+/// Whether the `i`-th resolved entry is a GROUP (opens a submenu / continues a
+/// chord) rather than a runnable leaf — see `resolveBindings`/`completions`.
+pub fn resolvedIsGroup(self: *const Keymap, i: usize) bool {
+    if (i >= self.resolved_group.items.len) return false;
+    return self.resolved_group.items[i];
 }
 
 /// Compose a keyspec from modifiers + a keysym name into `buf`. `shift`
@@ -715,6 +777,71 @@ test "keymap: prefix sequences — a chord resolves; a menu is a prefix, not a m
     try t.expect((try km.feed(gpa, "f")) == .pending);
     try km.popPending(gpa);
     try t.expectEqualStrings("space", km.pending);
+}
+
+test "keymap: completions — chord next-keys, leaf vs group, deduped, global at top" {
+    const gpa = t.allocator;
+    var km: Keymap = .empty;
+    defer km.deinit(gpa);
+    try km.setMode(gpa, "normal");
+    // A leader tree as sequences: SPC f {f,r}, SPC g g; a plain top-level key.
+    try km.bind(gpa, "normal", "space f f", "find-file", prio_config, "cfg");
+    try km.bind(gpa, "normal", "space f r", "recent-files", prio_config, "cfg");
+    try km.bind(gpa, "normal", "space g g", "git-status", prio_config, "cfg");
+    try km.bind(gpa, "normal", "i", "vim-insert", prio_config, "vim");
+    try km.bind(gpa, "global", "C-w", "window-thing", prio_config, "cfg");
+
+    // Top level (empty prefix): the first segments, deduped. The three `space …`
+    // binds collapse to ONE `space` group; `i` is a leaf; global `C-w` shows at
+    // the top → {space, i, C-w} = 3.
+    try t.expectEqual(@as(usize, 3), try km.completions(gpa, ""));
+    // Build a name→(cmd,group) view to assert regardless of order.
+    const Found = struct {
+        fn get(k: *Keymap, key: []const u8) ?Binding {
+            var i: usize = 0;
+            while (i < k.resolved.items.len) : (i += 1) {
+                if (std.mem.eql(u8, k.resolved.items[i].key, key)) return k.resolved.items[i];
+            }
+            return null;
+        }
+        fn group(k: *Keymap, key: []const u8) bool {
+            var i: usize = 0;
+            while (i < k.resolved.items.len) : (i += 1) {
+                if (std.mem.eql(u8, k.resolved.items[i].key, key)) return k.resolvedIsGroup(i);
+            }
+            return false;
+        }
+    };
+    _ = try km.completions(gpa, "");
+    try t.expect(Found.get(&km, "space") != null);
+    try t.expect(Found.group(&km, "space")); // continues a chord → group
+    try t.expectEqualStrings("vim-insert", Found.get(&km, "i").?.command);
+    try t.expect(!Found.group(&km, "i")); // runnable leaf
+    try t.expectEqualStrings("window-thing", Found.get(&km, "C-w").?.command); // global at top
+    // `space f f` and `space f r` collapse to ONE `space` group at the top.
+    var space_count: usize = 0;
+    for (km.resolved.items) |b| {
+        if (std.mem.eql(u8, b.key, "space")) space_count += 1;
+    }
+    try t.expectEqual(@as(usize, 1), space_count);
+
+    // After `space`: the file/git submenu keys `f` (group) and `g` (leaf-ish
+    // group — `space g g`). Global does NOT appear mid-chord.
+    {
+        _ = try km.completions(gpa, "space");
+        try t.expect(Found.get(&km, "f") != null);
+        try t.expect(Found.group(&km, "f")); // space f {f,r} → still a group
+        try t.expect(Found.get(&km, "g") != null);
+        try t.expectEqual(@as(?Binding, null), Found.get(&km, "C-w")); // no global mid-chord
+    }
+    // After `space f`: the two leaves `f`→find-file, `r`→recent-files.
+    {
+        const n = try km.completions(gpa, "space f");
+        try t.expectEqual(@as(usize, 2), n);
+        try t.expectEqualStrings("find-file", Found.get(&km, "f").?.command);
+        try t.expect(!Found.group(&km, "f")); // a leaf now
+        try t.expectEqualStrings("recent-files", Found.get(&km, "r").?.command);
+    }
 }
 
 test "keymap: menu return targets — guest entry records, nesting collapses to root" {

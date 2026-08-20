@@ -45,35 +45,41 @@ pub const MenuOverlay = struct {
     ) bool {
         var dirty = false;
         const cur = keymap.currentMode();
+        const in_chord = keymap.pending.len > 0;
         const is_menu = keymap.isMenuMode(cur);
-        // Did the active mode change since we last had the overlay open?
-        const changed = self.open and !std.mem.eql(u8, cur, self.last_mode[0..self.last_len]);
+        // What the overlay currently reflects: the pending chord if one's being
+        // typed (`space f`), else the mode name. which-key re-renders whenever
+        // this changes — each keystroke of a chord grows the pending prefix, so
+        // the completions update in place.
+        const content: []const u8 = if (in_chord) keymap.pending else cur;
+        const changed = self.open and !std.mem.eql(u8, content, self.last_mode[0..self.last_len]);
         // F1 toggles a forced peek at the CURRENT (any) mode. Leaving that mode
         // ends the peek — a menu you drill into then shows on its own.
         if (which_key_now.*) self.forced = !self.forced;
         which_key_now.* = false;
         if (changed) self.forced = false;
 
-        // The overlay is active for a menu mode (after the idle delay) OR while a
-        // forced peek is on (immediately, any mode). No hardcoded root menu.
-        const active = is_menu or self.forced;
+        // The overlay is active mid-chord (immediately as you type a sequence),
+        // for a legacy menu mode (after the idle delay), or while a forced peek is
+        // on (immediately, any mode). No hardcoded root menu.
+        const active = in_chord or is_menu or self.forced;
         const same = active and self.open and !changed;
         if (!same) {
-            // Entered/left/switched: close a shown popup; the idle timer is
-            // CONTINUOUS across a menu→menu hop (a submenu after the popup is up
-            // inherits the wait already paid — no re-delay). A fresh entry or a
-            // forced peek starts now.
+            // Entered/left/switched/grew: close a shown popup; the idle timer is
+            // CONTINUOUS while the overlay stays up (menu→submenu hop, or a chord
+            // growing key-by-key) — the successor inherits the wait already paid,
+            // no re-delay. A fresh entry or a forced peek starts now.
             if (self.open and self.shown) {
                 for (plugins.items) |pl| core.wasm_host.notifyMenu(pl, false);
             }
-            const menu_hop = self.open and is_menu and !self.forced;
+            const carry = self.open and active and !self.forced;
             const prev_open_ns = self.open_ns;
             self.open = active;
             self.shown = false;
             if (active) {
-                self.open_ns = if (menu_hop) prev_open_ns else frame_start;
-                self.last_len = @min(cur.len, self.last_mode.len);
-                @memcpy(self.last_mode[0..self.last_len], cur[0..self.last_len]);
+                self.open_ns = if (carry) prev_open_ns else frame_start;
+                self.last_len = @min(content.len, self.last_mode.len);
+                @memcpy(self.last_mode[0..self.last_len], content[0..self.last_len]);
             }
             dirty = true;
         }
