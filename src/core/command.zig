@@ -198,6 +198,34 @@ pub const Context = struct {
     }
 };
 
+pub const RenderError = Document.AddPeerError || error{Unauthorized};
+
+/// Content production into a background document — the doc-targeted twin of
+/// `Context.render`, and the ONE home of the content-production membrane for
+/// streamed/async producers (repl, net, proc→buffer, agent fs-writes) that
+/// target a buffer OTHER than the active one, where the active-doc-only
+/// `Context.render` can't reach. Same contract: the single grade gate
+/// (plugin/agent capped at `.edit`, per the design's `min(owner_grant,
+/// manifest_max)`), authored as the named peer, one atomic commit, never the
+/// user's undo. Producers MUST route through this instead of re-deriving the
+/// gate (`gradeMin` + `peerNamed` + `peerReplaceAll`) — a fragmented gate is a
+/// policy that drifts when per-plugin manifests tighten the `.edit` cap.
+pub fn renderInto(
+    gpa: Allocator,
+    doc: *Document,
+    role: authority.Role,
+    name: []const u8,
+    items: []const Document.Replacement,
+) RenderError!void {
+    const grade = switch (role) {
+        .user, .remote => doc.my_grant,
+        .plugin, .agent => authority.gradeMin(doc.my_grant, .edit),
+    };
+    if (!grade.canEdit()) return error.Unauthorized;
+    const pid = try doc.peerNamed(gpa, name);
+    doc.peerReplaceAll(gpa, pid, items) catch {};
+}
+
 pub const Command = struct {
     name: []const u8,
     summary: []const u8,

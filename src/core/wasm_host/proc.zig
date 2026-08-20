@@ -9,7 +9,6 @@ const wasm = @import("../wasm.zig");
 const command = @import("../command.zig");
 const Buffers = @import("../Buffers.zig");
 const proc = @import("../proc.zig");
-const authority = @import("../authority.zig");
 const position = @import("../position.zig");
 const file = @import("../file.zig");
 
@@ -87,10 +86,8 @@ fn shellDeliver(ctx: ?*anyopaque, result: ?[]const u8) void {
     const bytes = result orelse return;
     const gpa = job.ctx.gpa;
     const doc = job.ctx.document();
-    if (!authority.gradeMin(doc.my_grant, .edit).canEdit()) return;
     const at = position.rebaseOffset(doc, job.version, job.offset, .right) orelse return;
-    const pid = doc.peerNamed(gpa, job.name) catch return;
-    doc.peerReplaceAll(gpa, pid, &.{.{ .range = .{ .start = at, .end = at }, .bytes = bytes }}) catch {};
+    command.renderInto(gpa, doc, .plugin, job.name, &.{.{ .range = .{ .start = at, .end = at }, .bytes = bytes }}) catch return;
 }
 
 fn shellFree(ctx: ?*anyopaque) void {
@@ -210,8 +207,6 @@ fn procDeliver(ctx: ?*anyopaque, result: ?[]const u8) void {
     }
     const b = target orelse return;
     const doc = &b.editor.doc;
-    if (!authority.gradeMin(doc.my_grant, .edit).canEdit()) return;
-    const pid = doc.peerNamed(gpa, job.plugin) catch return;
     const end = b.editor.text().byteLen();
     if (job.append) {
         // Append below the existing content (a console log), separated by a
@@ -219,12 +214,12 @@ fn procDeliver(ctx: ?*anyopaque, result: ?[]const u8) void {
         if (end > 0) {
             const sep = std.fmt.allocPrint(gpa, "\n{s}", .{out}) catch return;
             defer gpa.free(sep);
-            doc.peerReplaceAll(gpa, pid, &.{.{ .range = .{ .start = end, .end = end }, .bytes = sep }}) catch {};
+            command.renderInto(gpa, doc, .plugin, job.plugin, &.{.{ .range = .{ .start = end, .end = end }, .bytes = sep }}) catch {};
         } else {
-            doc.peerReplaceAll(gpa, pid, &.{.{ .range = .{ .start = end, .end = end }, .bytes = out }}) catch {};
+            command.renderInto(gpa, doc, .plugin, job.plugin, &.{.{ .range = .{ .start = end, .end = end }, .bytes = out }}) catch {};
         }
     } else {
-        doc.peerReplaceAll(gpa, pid, &.{.{ .range = .{ .start = 0, .end = end }, .bytes = out }}) catch {};
+        command.renderInto(gpa, doc, .plugin, job.plugin, &.{.{ .range = .{ .start = 0, .end = end }, .bytes = out }}) catch {};
     }
 
     // The text has landed: give the issuing plugin a chance to classify it into
@@ -332,11 +327,9 @@ fn filterDeliver(ctx: ?*anyopaque, result: ?[]const u8) void {
     const out = result orelse return;
     const gpa = job.ctx.gpa;
     const doc = job.ctx.document();
-    if (!authority.gradeMin(doc.my_grant, .edit).canEdit()) return;
     const rs = position.rebaseOffset(doc, job.version, job.start, .right) orelse return;
     const re = position.rebaseOffset(doc, job.version, job.end, .left) orelse return;
-    const pid = doc.peerNamed(gpa, job.plugin) catch return;
-    doc.peerReplaceAll(gpa, pid, &.{.{ .range = .{ .start = @min(rs, re), .end = @max(rs, re) }, .bytes = out }}) catch {};
+    command.renderInto(gpa, doc, .plugin, job.plugin, &.{.{ .range = .{ .start = @min(rs, re), .end = @max(rs, re) }, .bytes = out }}) catch return;
 }
 
 fn filterFree(ctx: ?*anyopaque) void {

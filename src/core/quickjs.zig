@@ -17,7 +17,6 @@ const command = @import("command.zig");
 const task = @import("task.zig");
 const proc_stream = @import("proc_stream.zig");
 const Buffers = @import("Buffers.zig");
-const authority = @import("authority.zig");
 const pick_mod = @import("pick.zig");
 const status_feed = @import("status_feed.zig");
 
@@ -368,10 +367,8 @@ fn appendNamed(ctx: *command.Context, gpa: Allocator, name: []const u8, text: []
     }
     const b = target orelse return;
     const doc = &b.editor.doc;
-    if (!authority.gradeMin(doc.my_grant, .edit).canEdit()) return;
-    const pid = doc.peerNamed(gpa, transcript_peer) catch return;
     const start = b.editor.text().byteLen();
-    doc.peerReplaceAll(gpa, pid, &.{.{ .range = .{ .start = start, .end = start }, .bytes = text }}) catch {};
+    command.renderInto(gpa, doc, .plugin, transcript_peer, &.{.{ .range = .{ .start = start, .end = start }, .bytes = text }}) catch return;
     if (class != 0) paintStyle(ctx, gpa, doc, start, start + text.len, class);
 }
 
@@ -605,10 +602,8 @@ fn cAgentWrite(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32, resul
     };
     const b = bufs.get(id) orelse return;
     const doc = &b.editor.doc;
-    if (!authority.gradeMin(doc.my_grant, .edit).canEdit()) return;
-    const pid = doc.peerNamed(gpa, peer) catch return;
     const end = b.editor.text().byteLen();
-    doc.peerReplaceAll(gpa, pid, &.{.{ .range = .{ .start = 0, .end = end }, .bytes = content }}) catch {};
+    command.renderInto(gpa, doc, .agent, peer, &.{.{ .range = .{ .start = 0, .end = end }, .bytes = content }}) catch return;
 }
 
 /// Decode the first record of a framed config blob (uvarint count, then

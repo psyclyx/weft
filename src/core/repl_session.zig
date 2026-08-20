@@ -10,7 +10,6 @@ const std = @import("std");
 const Allocator = std.mem.Allocator;
 const command = @import("command.zig");
 const Buffers = @import("Buffers.zig");
-const authority = @import("authority.zig");
 const task = @import("task.zig");
 
 pub const Session = struct {
@@ -105,13 +104,11 @@ pub const Session = struct {
         }
         const b = target orelse return false;
         const doc = &b.editor.doc;
-        if (!authority.gradeMin(doc.my_grant, .edit).canEdit()) {
+        const end = b.editor.text().byteLen();
+        command.renderInto(s.gpa, doc, .plugin, s.plugin, &.{.{ .range = .{ .start = end, .end = end }, .bytes = s.out_buf.items }}) catch {
             s.out_buf.clearRetainingCapacity();
             return false;
-        }
-        const pid = doc.peerNamed(s.gpa, s.plugin) catch return false;
-        const end = b.editor.text().byteLen();
-        doc.peerReplaceAll(s.gpa, pid, &.{.{ .range = .{ .start = end, .end = end }, .bytes = s.out_buf.items }}) catch {};
+        };
         s.out_buf.clearRetainingCapacity();
         return true;
     }

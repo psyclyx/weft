@@ -7,7 +7,6 @@ const std = @import("std");
 const wasm = @import("../wasm.zig");
 const command = @import("../command.zig");
 const Buffers = @import("../Buffers.zig");
-const authority = @import("../authority.zig");
 const rooted_fs = @import("../rooted_fs.zig");
 const file = @import("../file.zig");
 
@@ -208,10 +207,9 @@ pub fn deliverToBuffer(ctx: *command.Context, buf_name: []const u8, author: []co
     }
     const b = target orelse return;
     const doc = &b.editor.doc;
-    if (!authority.gradeMin(doc.my_grant, .edit).canEdit()) return;
-    const pid = doc.peerNamed(gpa, author) catch return;
     const end = b.editor.text().byteLen();
-    doc.peerReplaceAll(gpa, pid, &.{.{ .range = .{ .start = 0, .end = end }, .bytes = content }}) catch {};
+    // Proc output + peer-listing delivery, authored as the plugin peer.
+    command.renderInto(gpa, doc, .plugin, author, &.{.{ .range = .{ .start = 0, .end = end }, .bytes = content }}) catch return;
 }
 
 /// Bridge for the async `.peer` filesystem: the guest queues LIST requests
