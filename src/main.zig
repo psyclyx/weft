@@ -315,6 +315,22 @@ pub fn main(init: std.process.Init) !void {
     var scroll_ctx: scroll.ScrollCtx = .{ .view = view, .fb = &fb };
     try scroll.registerCommands(gpa, &session.commands, &scroll_ctx);
 
+    // Vertical motion + paging are view-computed (goal-x over rendered geometry,
+    // which the core can't see). Register them as commands carrying the live
+    // `view`: `cursor-up`/`cursor-down` SHADOW the core scalar versions by late
+    // binding, and `scroll-page-*` are ordinary commands — so key dispatch is
+    // pure keymap→command with no name special-case. Page binds in the GLOBAL
+    // layer, so it works in every mode as the old hardcoded keysym branch did.
+    const view_cmds = [_]core.command.Command{
+        .{ .name = "cursor-up", .summary = "Move up one visual line (goal-x).", .args = &.{}, .handler = dispatch.cursorUpHandler, .data = view },
+        .{ .name = "cursor-down", .summary = "Move down one visual line (goal-x).", .args = &.{}, .handler = dispatch.cursorDownHandler, .data = view },
+        .{ .name = "scroll-page-up", .summary = "Move up one page.", .args = &.{}, .handler = dispatch.scrollPageUpHandler, .data = view },
+        .{ .name = "scroll-page-down", .summary = "Move down one page.", .args = &.{}, .handler = dispatch.scrollPageDownHandler, .data = view },
+    };
+    for (view_cmds) |vc| _ = try session.commands.bind(gpa, vc.name, vc);
+    try session.keymap.bind(gpa, core.Keymap.global_mode, "Page_Up", "scroll-page-up", core.Keymap.prio_core, "shell");
+    try session.keymap.bind(gpa, core.Keymap.global_mode, "Page_Down", "scroll-page-down", core.Keymap.prio_core, "shell");
+
     // Theme is DATA: a runtime/bindable `set-color <name> <#hex>`, plus colors
     // the config staged declaratively via weft.set("theme", "<field>", "#hex").
     // Re-linearized per-field on mutation (Theme.setColor), so the draw path
@@ -444,7 +460,7 @@ pub fn main(init: std.process.Init) !void {
         while (window.nextKeyEvent()) |ev| {
             if (!ev.pressed) continue;
             had_input = true;
-            try dispatch.dispatchKey(&session.cmd_ctx, view, ev, fb[1]);
+            try dispatch.dispatchKey(&session.cmd_ctx, ev);
         }
         if (window.shouldClose()) break;
 

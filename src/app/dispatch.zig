@@ -86,7 +86,11 @@ pub fn menuEscapeHandler(ctx: *core.command.Context, data: ?*anyopaque, args: []
     _ = data;
     _ = args;
     const km = ctx.keymap;
-    const ret = km.menuReturn(km.currentMode()) orelse "normal";
+    // Fall back to the CONFIGURED base editing mode (vim's "normal", helix's
+    // "helix-normal", or plain "default"), not a hardcoded "normal" — the base
+    // is whatever the config left active after load (buffers.default_mode).
+    const base = if (ctx.buffers.default_mode.len > 0) ctx.buffers.default_mode else "default";
+    const ret = km.menuReturn(km.currentMode()) orelse base;
     km.setMode(ctx.gpa, ret) catch {};
     return .nil;
 }
@@ -122,22 +126,56 @@ fn visualVertical(ed: *core.Editor, view: *view_mod.View, dir: i32) !void {
     ed.moveToVisual(target, gx);
 }
 
-pub fn dispatchKey(ctx: *core.command.Context, view: *view_mod.View, ev: wayland.KeyEvent, fb_h: u32) !void {
+// ── View-aware motion commands (shell) ──────────────────────────────
+// The interactive, geometry-aware override of the core's scalar-column
+// cursor-up/down and paging — registered by the shell (data = the live `View`),
+// so they SHADOW the core `cursor-*` by late binding and dispatch UNIFORMLY
+// through the keymap. No `if (cmd_name == "cursor-up")` special-case in the hot
+// loop, and paging becomes an ordinary rebindable command (bound in the global
+// layer) instead of a hardcoded keysym branch.
+
+fn viewOf(data: ?*anyopaque) *view_mod.View {
+    return @ptrCast(@alignCast(data.?));
+}
+
+pub fn cursorUpHandler(ctx: *core.command.Context, data: ?*anyopaque, args: []const core.command.Value) anyerror!core.command.Value {
+    _ = args;
+    try visualVertical(ctx.editor(), viewOf(data), -1);
+    return .nil;
+}
+
+pub fn cursorDownHandler(ctx: *core.command.Context, data: ?*anyopaque, args: []const core.command.Value) anyerror!core.command.Value {
+    _ = args;
+    try visualVertical(ctx.editor(), viewOf(data), 1);
+    return .nil;
+}
+
+fn pageBy(ctx: *core.command.Context, view: *view_mod.View, dir: i32) !void {
+    const rows = view.bodyRows();
+    for (0..rows) |_| try visualVertical(ctx.editor(), view, dir);
+}
+
+pub fn scrollPageUpHandler(ctx: *core.command.Context, data: ?*anyopaque, args: []const core.command.Value) anyerror!core.command.Value {
+    _ = args;
+    try pageBy(ctx, viewOf(data), -1);
+    return .nil;
+}
+
+pub fn scrollPageDownHandler(ctx: *core.command.Context, data: ?*anyopaque, args: []const core.command.Value) anyerror!core.command.Value {
+    _ = args;
+    try pageBy(ctx, viewOf(data), 1);
+    return .nil;
+}
+
+pub fn dispatchKey(ctx: *core.command.Context, ev: wayland.KeyEvent) !void {
     // This whole dispatch is the synchronous handling of a user keystroke:
     // any edit made here — directly or by a helper plugin (dw/autopair) — is
     // the user's, so it joins the user's undo history (see command.edit).
+    // Vertical motion + paging are ordinary commands now (view-aware, shell-
+    // registered), so this is pure keymap → command — no view/geometry here.
     ctx.user_initiated = true;
     defer ctx.user_initiated = false;
     const c = wayland.c;
-    // Paging needs viewport geometry the core doesn't know; view-aware
-    // dispatch stays here.
-    if (ev.keysym == c.XKB_KEY_Page_Up or ev.keysym == c.XKB_KEY_Page_Down) {
-        _ = fb_h;
-        const rows = view.bodyRows();
-        const dir: i32 = if (ev.keysym == c.XKB_KEY_Page_Up) -1 else 1;
-        for (0..rows) |_| try visualVertical(ctx.editor(), view, dir);
-        return;
-    }
 
     var name_buf: [64]u8 = undefined;
     const n = c.xkb_keysym_get_name(ev.keysym, &name_buf, name_buf.len);
@@ -145,17 +183,10 @@ pub fn dispatchKey(ctx: *core.command.Context, view: *view_mod.View, ev: wayland
         var spec_buf: [80]u8 = undefined;
         const spec = core.Keymap.keyspec(&spec_buf, ev.mods.ctrl, ev.mods.alt, ev.mods.shift, name_buf[0..@intCast(n)]);
         if (ctx.keymap.lookup(spec)) |cmd_name| {
-            // Vertical motion is view-computed (goal-x over rendered
-            // geometry), not the core's column fallback — the interactive
-            // override of these commands. Same precedent as Page above.
-            if (std.mem.eql(u8, cmd_name, "cursor-up")) {
-                try visualVertical(ctx.editor(), view, -1);
-                return;
-            }
-            if (std.mem.eql(u8, cmd_name, "cursor-down")) {
-                try visualVertical(ctx.editor(), view, 1);
-                return;
-            }
+            // Vertical motion + paging are view-computed (goal-x over rendered
+            // geometry), registered by the shell as `cursor-up`/`cursor-down`/
+            // `scroll-page-*` that shadow the core scalar versions — so they
+            // dispatch uniformly through the keymap below, no name special-case.
             // A bound key whose command NAMES a menu mode enters that submenu
             // (the which-key / doom leader tree). Config declares submenus with
             // `weft.menu` and binds leader keys to them; entering records the
