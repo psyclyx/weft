@@ -176,9 +176,14 @@ pub const Editor = struct {
     /// sequence to `git-init`, exactly as a user does under the real config.
     /// (The old lookup-based path only saw single keys — it could never drive
     /// the SPC leader tree the sample config is built on.)
-    pub fn press(self: *Editor, spec: []const u8, text: []const u8) void {
+    pub fn press(self: *Editor, spec_in: []const u8, text: []const u8) void {
         self.ctx.user_initiated = true; // a keystroke: helper-plugin edits are the user's
         defer self.ctx.user_initiated = false;
+        // Canonicalize natural notation ("SPC"→"space", "RET"→"Return") — `bind`
+        // stores canonical and `feed` matches it (the real dispatch gets the
+        // canonical xkb name for free; a test writes what it means).
+        var kbuf: [256]u8 = undefined;
+        const spec = core.Keymap.normalizeKey(&kbuf, spec_in);
         // Mid-chord meta keys act on the which-key overlay, not the sequence.
         if (self.keymap.pending.len > 0) {
             if (std.mem.eql(u8, spec, "BackSpace")) {
@@ -659,6 +664,116 @@ const Project = struct {
         harness.writePpm(self.gpa, fname, pixels, app_w, app_h) catch {};
     }
 };
+
+// ── Booting the REAL config.js ──────────────────────────────────────
+//
+// The hand-wired loaders above set up a known plugin set; they can't surface
+// what's MISSING or bound weird in the sample config. `bootConfig` runs the
+// actual `config/config.js` in the quickjs sandbox — the same door main() uses
+// — against the embedded catalog, so a test drives the editor a user really
+// configured. What the config asks for but we can't load is recorded (a
+// finding), not silently dropped.
+
+/// Every reference plugin, keyed by the name a config's `weft.plugin(name)`
+/// uses → its embedded wasm (the test module embeds the whole catalog). The
+/// analogue of the lib/weft/plugins dir the shipped binary resolves against.
+const plugin_catalog = std.StaticStringMap([]const u8).initComptime(.{
+    .{ "edit", @embedFile("guest_edit_wasm") },
+    .{ "complete", @embedFile("guest_complete_wasm") },
+    .{ "project", @embedFile("guest_project_wasm") },
+    .{ "palette", @embedFile("guest_palette_wasm") },
+    .{ "structural", @embedFile("guest_structural_wasm") },
+    .{ "ts", @embedFile("guest_ts_wasm") },
+    .{ "region", @embedFile("guest_region_wasm") },
+    .{ "shell", @embedFile("guest_shell_wasm") },
+    .{ "motions", @embedFile("guest_motions_wasm") },
+    .{ "textobjects", @embedFile("guest_textobjects_wasm") },
+    .{ "operators", @embedFile("guest_operators_wasm") },
+    .{ "vim", @embedFile("guest_vim_wasm") },
+    .{ "comment", @embedFile("guest_comment_wasm") },
+    .{ "whitespace", @embedFile("guest_whitespace_wasm") },
+    .{ "numbers", @embedFile("guest_numbers_wasm") },
+    .{ "autopair", @embedFile("guest_autopair_wasm") },
+    .{ "consult", @embedFile("guest_consult_wasm") },
+    .{ "git", @embedFile("guest_git_wasm") },
+    .{ "grep", @embedFile("guest_grep_wasm") },
+    .{ "run", @embedFile("guest_run_wasm") },
+    .{ "make", @embedFile("guest_make_wasm") },
+    .{ "notes", @embedFile("guest_notes_wasm") },
+    .{ "fmt", @embedFile("guest_fmt_wasm") },
+    .{ "buffers", @embedFile("guest_buffers_wasm") },
+    .{ "windows", @embedFile("guest_windows_wasm") },
+    .{ "modes", @embedFile("guest_modes_wasm") },
+    .{ "snippets", @embedFile("guest_snippets_wasm") },
+    .{ "direnv", @embedFile("guest_direnv_wasm") },
+    .{ "llm", @embedFile("guest_llm_wasm") },
+    .{ "console", @embedFile("guest_console_wasm") },
+    .{ "repl", @embedFile("guest_repl_wasm") },
+    .{ "net", @embedFile("guest_net_wasm") },
+    .{ "http", @embedFile("guest_http_wasm") },
+    .{ "which_key", @embedFile("guest_which_key_wasm") },
+    .{ "dired", @embedFile("guest_dired_wasm") },
+    .{ "helix", @embedFile("guest_helix_wasm") },
+    .{ "emacs", @embedFile("guest_emacs_wasm") },
+});
+
+/// The PluginLoader `weft.plugin(name)` funnels through during a config boot.
+/// Resolves each name against the embedded catalog and loads it onto the
+/// editor; records what it couldn't resolve/load so the test can report it.
+const ConfigLoader = struct {
+    ed: *Editor,
+    missing: std.ArrayList([]const u8) = .empty, // names not in the catalog
+    failed: std.ArrayList([]const u8) = .empty, // resolved but loadPlugin errored
+
+    fn deinit(self: *ConfigLoader) void {
+        for (self.missing.items) |s| self.ed.gpa.free(s);
+        for (self.failed.items) |s| self.ed.gpa.free(s);
+        self.missing.deinit(self.ed.gpa);
+        self.failed.deinit(self.ed.gpa);
+    }
+
+    fn loadFn(ctx: *anyopaque, name: []const u8) void {
+        const self: *ConfigLoader = @ptrCast(@alignCast(ctx));
+        const gpa = self.ed.gpa;
+        if (std.mem.endsWith(u8, name, ".js")) return; // JS plugins aren't wired headlessly yet
+        const bytes = plugin_catalog.get(name) orelse {
+            self.missing.append(gpa, gpa.dupe(u8, name) catch return) catch {};
+            return;
+        };
+        self.ed.load(name, bytes) catch {
+            self.failed.append(gpa, gpa.dupe(u8, name) catch return) catch {};
+        };
+    }
+
+    fn loader(self: *ConfigLoader) core.quickjs.PluginLoader {
+        return .{ .ctx = self, .load = loadFn };
+    }
+};
+
+/// Boot the editor from the real `config/config.js` (read from `config_dir`,
+/// which also resolves its `weft.use("defaults")`). Fills `loader_state` with
+/// any plugins the config asked for that couldn't load.
+fn bootConfig(ed: *Editor, config_dir: []const u8, loader_state: *ConfigLoader) !void {
+    const cfg_path = try std.fmt.allocPrint(ed.gpa, "{s}/config.js", .{config_dir});
+    defer ed.gpa.free(cfg_path);
+    const src = try core.file.readAlloc(ed.gpa, cfg_path);
+    defer ed.gpa.free(src);
+    try core.quickjs.evalConfig(&ed.engine, &ed.ctx, loader_state.loader(), &ed.config_kv, config_dir, src);
+}
+
+/// Does the current pending which-key prefix offer `key` as a next step? This
+/// is exactly what the which-key overlay shows a user who paused mid-chord —
+/// the completions of `keymap.pending`. Used to drive "look it up in which-key".
+fn whichKeyOffers(ed: *Editor, key: []const u8) bool {
+    var kbuf: [256]u8 = undefined;
+    const want = core.Keymap.normalizeKey(&kbuf, key);
+    const n = ed.keymap.completions(ed.gpa, ed.keymap.pending) catch return false;
+    var i: usize = 0;
+    while (i < n) : (i += 1) {
+        if (ed.keymap.resolvedAt(i)) |b| if (std.mem.eql(u8, b.key, want)) return true;
+    }
+    return false;
+}
 
 /// Author a file the way a person does: open it (adopts the path), enter
 /// insert, type the body, escape, save, and drive the save to disk. The natural
@@ -1359,6 +1474,57 @@ test "e2e/web: author js + html, grep across them, run it with node" {
     }
     try t.expectEqualStrings("dired", ed.mode());
     proj.shot(&ed, "web-3-dired");
+}
+
+// ── Driving the REAL config as a user (chords + which-key) ──────────
+//
+// Everything above hand-wired a plugin set; this boots the actual sample
+// config.js and drives it the way a person does — through the SPC leader tree,
+// discovering keys via which-key. The value is what this SURFACES: plugins the
+// config references that don't load, keys that are bound weird, motions that
+// don't do what a vim user expects.
+test "e2e/config: the sample config boots; SPC g i is discoverable via which-key" {
+    const gpa = t.allocator;
+    var proj: Project = undefined;
+    try proj.init(gpa);
+    defer proj.deinit();
+
+    var ed: Editor = undefined;
+    try Editor.init(gpa, &ed);
+    defer ed.deinit();
+
+    // Boot the REAL config/config.js (read from the repo, which the Project
+    // captured as prev_cwd before chdir'ing into the tmp project).
+    const config_dir = try std.fmt.allocPrint(gpa, "{s}/config", .{proj.prev_cwd});
+    defer gpa.free(config_dir);
+    var loader_state: ConfigLoader = .{ .ed = &ed };
+    defer loader_state.deinit();
+    try bootConfig(&ed, config_dir, &loader_state);
+
+    // Any plugin the sample config asked for but we couldn't load is a FINDING
+    // — named on failure (only then, so a clean boot leaves stderr untouched).
+    if (loader_state.missing.items.len > 0) {
+        for (loader_state.missing.items) |nm| std.debug.print("[e2e/config] not in catalog: {s}\n", .{nm});
+    }
+    if (loader_state.failed.items.len > 0) {
+        for (loader_state.failed.items) |nm| std.debug.print("[e2e/config] failed to load: {s}\n", .{nm});
+    }
+    try t.expect(loader_state.missing.items.len == 0);
+    try t.expect(loader_state.failed.items.len == 0);
+
+    // The config ran to completion (its last line echoes this).
+    try t.expect(std.mem.indexOf(u8, ed.echoText(), "config.js loaded") != null);
+
+    // A user who forgets the git keys reaches for the leader and reads which-key.
+    ed.press("SPC", "");
+    try t.expectEqualStrings("space", ed.keymap.pending); // the chord is pending
+    try t.expect(whichKeyOffers(&ed, "g")); // the git group is offered
+    ed.press("g", "");
+    try t.expectEqualStrings("space g", ed.keymap.pending);
+    try t.expect(whichKeyOffers(&ed, "i")); // ... and `i` → git-init under it
+    try t.expect(whichKeyOffers(&ed, "g")); // ... and `g` → git-status
+    ed.press("Escape", ""); // abandon the chord; nothing ran
+    try t.expectEqualStrings("", ed.keymap.pending);
 }
 
 // ── Coverage + documented gaps (the difficulty IS the signal) ───────
