@@ -271,6 +271,31 @@ test "authoring: `.` repeats a COUNTED change (3dw then . deletes three more)" {
     try t.expectEqualStrings("g", disk);
 }
 
+test "authoring: typing balanced code with autopair stays balanced (type-over)" {
+    const gpa = t.allocator;
+    var app: App = undefined;
+    try app.init(gpa);
+    defer app.deinit();
+    const ed = &app.ed;
+
+    // A person types balanced code, typing the closers themselves. Without
+    // type-over, autopair orphaned each auto-closer and this became
+    // `...name; }})`. With type-over, typing `)`/`}`/`"` steps over the
+    // auto-inserted one, so what you typed is what you get.
+    ed.runStr("open", "t.js");
+    ed.press("i", "");
+    ed.typeText("function greet(name) { return \"hi\"; }");
+    ed.press("Escape", "");
+    ed.press("colon", "");
+    ed.typeText("w");
+    ed.press("Return", "");
+    ed.waitSave();
+
+    const disk = try core.file.readAlloc(gpa, "t.js");
+    defer gpa.free(disk);
+    try t.expectEqualStrings("function greet(name) { return \"hi\"; }", disk);
+}
+
 test "debug: set a breakpoint on a line — gutter marker, list, toggle off" {
     const gpa = t.allocator;
     var app: App = undefined;

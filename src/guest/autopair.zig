@@ -98,18 +98,49 @@ fn loadPairs() void {
     };
 }
 
+/// Type-over commands for the closing delimiters: typing `)`/`}`/`]` when that
+/// exact char is already under the cursor (the pair auto-inserted it) SKIPS over
+/// it instead of inserting a duplicate. Without this, typing balanced code
+/// `f(x)` produces `f(x))` — every opener orphans its auto-closer.
+const Closer = struct { name: []const u8, ch: u8 };
+const closers = [_]Closer{
+    .{ .name = "pair-close-paren", .ch = ')' },
+    .{ .name = "pair-close-brace", .ch = '}' },
+    .{ .name = "pair-close-bracket", .ch = ']' },
+};
+
 export fn describe() void {
     loadPairs();
     loadQuoteLangs();
     for (pairs[0..pairs_len]) |pr| weft.declareCommand(pr.name);
+    for (closers) |c| weft.declareCommand(c.name);
 }
 export fn init() void {
     loadPairs();
     loadQuoteLangs();
     for (pairs[0..pairs_len]) |pr| _ = weft.register(pr.name);
+    for (closers) |c| _ = weft.register(c.name);
 }
 export fn on_command(id: u32) void {
-    if (id < pairs_len) insertPair(pairs[id]);
+    if (id < pairs_len) {
+        insertPair(pairs[id]);
+    } else if (id - pairs_len < closers.len) {
+        skipClose(closers[id - pairs_len].ch);
+    }
+}
+
+/// Typing a closing delimiter: if it's already the next byte (an auto-inserted
+/// closer), step over it; otherwise insert it literally.
+fn skipClose(ch: u8) void {
+    const off = weft.cursor();
+    const nxt = weft.slice(off, off + 1);
+    if (nxt.len == 1 and nxt[0] == ch) {
+        weft.jump(off + 1);
+    } else {
+        const one = [_]u8{ch};
+        weft.edit(.{ .start = off, .end = off }, &one);
+        weft.jump(off + 1);
+    }
 }
 /// Track the focused buffer's extension, for the quote-language check.
 export fn on_activate() void {
@@ -125,6 +156,15 @@ export fn on_activate() void {
 /// open char alone and leave the cursor after it (no auto-close to delete).
 fn insertPair(pr: Pair) void {
     const off = weft.cursor();
+    // Quote type-over: a quote pair (open==close) typed over its own auto-inserted
+    // close quote steps past it, so `"x"` doesn't become `"x""`.
+    if (std.mem.eql(u8, pr.open, pr.close)) {
+        const nxt = weft.slice(off, off + pr.close.len);
+        if (std.mem.eql(u8, nxt, pr.close)) {
+            weft.jump(off + pr.close.len);
+            return;
+        }
+    }
     if (std.mem.eql(u8, pr.open, pr.close) and inQuoteLang()) {
         weft.edit(.{ .start = off, .end = off }, pr.open);
         weft.jump(off + pr.open.len);

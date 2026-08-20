@@ -244,6 +244,11 @@ weft.bind("insert", "braceleft", "pair-brace");
 weft.bind("insert", "bracketleft", "pair-bracket");
 weft.bind("insert", "quotedbl", "pair-quote");
 weft.bind("insert", "apostrophe", "pair-quote-single"); // ' pairs, except in lisps (a quote)
+// Type-over: typing the closing delimiter steps over an auto-inserted one, so
+// typing balanced `f(x)` stays `f(x)` instead of `f(x))`.
+weft.bind("insert", "parenright", "pair-close-paren");
+weft.bind("insert", "braceright", "pair-close-brace");
+weft.bind("insert", "bracketright", "pair-close-bracket");
 
 // Theme is data: override any Theme field by name with an sRGB hex. (A full
 // colorscheme is just a block of these; `set-color` does the same at runtime.)

@@ -80,5 +80,8 @@ weft.bind("helix-insert", "parenleft", "pair-paren");
 weft.bind("helix-insert", "braceleft", "pair-brace");
 weft.bind("helix-insert", "bracketleft", "pair-bracket");
 weft.bind("helix-insert", "quotedbl", "pair-quote");
+weft.bind("helix-insert", "parenright", "pair-close-paren"); // type-over
+weft.bind("helix-insert", "braceright", "pair-close-brace");
+weft.bind("helix-insert", "bracketright", "pair-close-bracket");
 
 weft.echo("weft: helix config (centered which-key; SPC c e eval, SPC f r recents)");

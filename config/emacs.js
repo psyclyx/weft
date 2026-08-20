@@ -94,6 +94,9 @@ weft.bind("emacs", "(", "pair-paren");
 weft.bind("emacs", "{", "pair-brace");
 weft.bind("emacs", "[", "pair-bracket");
 weft.bind("emacs", "\"", "pair-quote");
+weft.bind("emacs", ")", "pair-close-paren"); // type-over the auto-closer
+weft.bind("emacs", "}", "pair-close-brace");
+weft.bind("emacs", "]", "pair-close-bracket");
 
 // Theme as data — a calm light-on-dark block (emacs default-ish).
 weft.set("theme", "background", "#1d1f21");
