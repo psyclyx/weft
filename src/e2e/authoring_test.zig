@@ -414,6 +414,37 @@ test "authoring: visual mode — select with a motion, then delete and change" {
     try t.expectEqualStrings("Xfoo", disk);
 }
 
+test "authoring: `V` linewise visual — select whole lines and delete them" {
+    const gpa = t.allocator;
+    var app: App = undefined;
+    try app.init(gpa);
+    defer app.deinit();
+    const ed = &app.ed;
+
+    ed.runStr("open", "vl.txt");
+    ed.press("i", "");
+    ed.typeText("line1\nline2\nline3");
+    ed.press("Escape", "");
+    ed.press("k", "");
+    ed.press("k", ""); // up to line1
+
+    // V selects whole lines regardless of column; j extends by a line; d deletes
+    // both lines (with their newline), leaving line3.
+    ed.press("V", "");
+    try t.expectEqualStrings("visual", ed.mode());
+    ed.press("j", ""); // extend to line2
+    ed.press("d", ""); // delete lines 1-2 wholesale
+
+    ed.press("colon", "");
+    ed.typeText("w");
+    ed.press("Return", "");
+    ed.waitSave();
+
+    const disk = try core.file.readAlloc(gpa, "vl.txt");
+    defer gpa.free(disk);
+    try t.expectEqualStrings("line3", disk);
+}
+
 test "authoring: `/` searches in the buffer and jumps to the match" {
     const gpa = t.allocator;
     var app: App = undefined;

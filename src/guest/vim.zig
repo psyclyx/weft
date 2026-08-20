@@ -255,6 +255,7 @@ const static_cmds = [_]Cmd{
     .{ .name = "vim-visual-delete", .handler = visualDelete },
     .{ .name = "vim-visual-yank", .handler = visualYank },
     .{ .name = "vim-visual-change", .handler = visualChange },
+    .{ .name = "vim-visual-line", .handler = visualLine },
     .{ .name = "vim-normal", .handler = normal },
     .{ .name = "vim-append-line", .handler = appendLine },
     .{ .name = "vim-insert-line", .handler = insertLine },
@@ -433,6 +434,7 @@ export fn init() void {
     }
     weft.bindKey("normal", "0", "vim-zero");
     weft.bindKey("normal", "x", "vim-delete-char");
+    weft.bindKey("normal", "V", "vim-visual-line"); // linewise visual
 
     weft.bindKey("visual", "d", "vim-visual-delete");
     weft.bindKey("visual", "x", "vim-visual-delete");
@@ -565,24 +567,47 @@ fn insertLine() void {
     weft.jump(lineStartOff());
     weft.setMode("insert");
 }
-fn visual() void {
+/// LINEWISE visual (`V`): the operators snap the selection to whole lines.
+var visual_linewise: bool = false;
+
+/// The effective operated range for the current selection: verbatim charwise,
+/// or expanded to whole lines (incl. the trailing newline) when linewise.
+fn visualSpan(s: weft.Range) weft.Range {
+    if (!visual_linewise) return s;
+    const first = weft.lineAt(s.start);
+    const last = weft.lineAt(s.end);
+    return .{ .start = first.start, .end = @min(last.end + 1, weft.byteLen()) };
+}
+
+fn visual() void { // v — charwise
+    visual_linewise = false;
+    weft.run("set-mark");
+    weft.setMode("visual");
+}
+fn visualLine() void { // V — linewise
+    visual_linewise = true;
     weft.run("set-mark");
     weft.setMode("visual");
 }
 fn visualDelete() void {
-    if (weft.selection()) |s| {
-        weft.yankRange(s.start, s.end, false);
+    if (weft.selection()) |s0| {
+        const s = visualSpan(s0);
+        weft.yankRange(s.start, s.end, visual_linewise);
         if (weft.stampRange(.{ .start = s.start, .end = s.end })) |h| weft.runRangeArg("op.delete", h);
+        weft.jump(s.start);
     }
     weft.run("clear-selection");
+    visual_linewise = false;
     weft.setMode("normal");
 }
 fn visualYank() void {
-    if (weft.selection()) |s| {
-        weft.yankRange(s.start, s.end, false);
+    if (weft.selection()) |s0| {
+        const s = visualSpan(s0);
+        weft.yankRange(s.start, s.end, visual_linewise);
         weft.flash(s.start, s.end); // vim-goggles
     }
     weft.run("clear-selection");
+    visual_linewise = false;
     weft.setMode("normal");
 }
 
@@ -590,12 +615,14 @@ fn visualYank() void {
 /// `d` but landing in insert). Was UNBOUND, so `c` fell through to normal's
 /// operator-pending — a vim user selecting then `c` got nothing useful.
 fn visualChange() void {
-    if (weft.selection()) |s| {
-        weft.yankRange(s.start, s.end, false);
+    if (weft.selection()) |s0| {
+        const s = visualSpan(s0);
+        weft.yankRange(s.start, s.end, visual_linewise);
         if (weft.stampRange(.{ .start = s.start, .end = s.end })) |h| weft.runRangeArg("op.delete", h);
         weft.jump(s.start);
     }
     weft.run("clear-selection");
+    visual_linewise = false;
     weft.setMode("insert");
 }
 fn normal() void {
