@@ -390,6 +390,32 @@ test "helix: a second modal editor loads in its OWN mode namespace" {
     try t.expectEqualStrings("git-status", (try env.keymap.feed(gpa, "g")).run);
 }
 
+test "emacs: a modeless editor loads; motion/kill chords, C-x is a chord not a mode" {
+    const gpa = t.allocator;
+    var env: Env = undefined;
+    try Env.init(gpa, &env);
+    defer env.deinit(gpa);
+
+    var engine = try wasm.Engine.init();
+    defer engine.deinit();
+    const plugin = try loadPlugin(&engine, &env.ctx, "emacs", @embedFile("guest_emacs_wasm"), .{});
+    defer plugin.deinit();
+
+    // ONE resting mode; no modal posture. Its editing chords are bound directly.
+    try t.expectEqualStrings("emacs", env.keymap.currentMode());
+    try t.expectEqualStrings("cursor-right", env.keymap.lookup("C-f").?);
+    try t.expectEqualStrings("cursor-left", env.keymap.lookup("C-b").?);
+    try t.expectEqualStrings("beginning-of-line", env.keymap.lookup("C-a").?);
+    try t.expectEqualStrings("kill-line", env.keymap.lookup("C-k").?);
+    try t.expectEqualStrings("yank", env.keymap.lookup("C-y").?);
+    // Word motion drives the shared `motions` plugin (like vim/helix).
+    try t.expectEqualStrings("forward-word", env.keymap.lookup("M-f").?);
+    // M-< normalized to M-less at bind time.
+    try t.expectEqualStrings("beginning-of-buffer", env.keymap.lookup("M-less").?);
+    // `emacs` is NOT a menu mode — the C-x/C-c trees are key sequences (config).
+    try t.expect(!env.keymap.isMenuMode("emacs"));
+}
+
 test "vim ex: `:` opens a command line; :N gotos, :%s substitutes, unknown falls through" {
     const gpa = t.allocator;
     var env: Env = undefined;
