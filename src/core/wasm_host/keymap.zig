@@ -2,6 +2,7 @@
 //! text-input command, and menu/sticky-menu marks — each mirrors an abi.Abi
 //! config method, bound at the plugin tier owned by the plugin's name.
 
+const std = @import("std");
 const wasm = @import("../wasm.zig");
 
 const shared = @import("plugin.zig");
@@ -62,7 +63,14 @@ pub fn hProvide(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32, resu
         .command = cmd,
         .priority = args[10],
         .owner = p.name,
-    }) catch {};
+    }) catch |e| if (e == error.RaceRejectsProvider) {
+        // Surface the mistake to the plugin author via the echo line (the
+        // user-facing channel), not a global stderr warn — see action.zig.
+        const msg = std.fmt.allocPrint(gpa, "provide: '{s}' is a race action — register a capability provider instead", .{action}) catch return;
+        defer gpa.free(msg);
+        p.ctx.echo.clearRetainingCapacity();
+        p.ctx.echo.appendSlice(gpa, msg) catch {};
+    };
 }
 
 pub fn hSetMode(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32, results: []i32) void {

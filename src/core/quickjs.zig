@@ -808,7 +808,18 @@ fn cProvide(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32, results:
         .command = cmd,
         .priority = args[8],
         .owner = "config",
-    }) catch {};
+    }) catch |e| if (e == error.RaceRejectsProvider) echoProvideRefused(br.ctx, action);
+}
+
+/// Surface a rejected `provide` to the plugin author through the echo line —
+/// the normal user-facing channel — so the mistake (a pick provider on a race
+/// action) is reported where they'll see it, not on a global stderr.
+fn echoProvideRefused(ctx: *command.Context, action: []const u8) void {
+    const gpa = ctx.gpa;
+    const msg = std.fmt.allocPrint(gpa, "provide: '{s}' is a race action — register a capability provider instead", .{action}) catch return;
+    defer gpa.free(msg);
+    ctx.echo.clearRetainingCapacity();
+    ctx.echo.appendSlice(gpa, msg) catch {};
 }
 
 fn cEcho(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32, results: []i32) void {

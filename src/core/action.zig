@@ -212,12 +212,15 @@ pub fn provide(self: *Actions, spec: ProvideSpec) !void {
     const gpa = self.gpa;
     // A race action's providers are the async capability providers (registered
     // through the capability ABI, not here) — a `pick` command provider on one
-    // would never be consulted, so refuse it loudly rather than silently drop.
+    // would never be consulted. Refuse it as a TYPED ERROR the caller must
+    // handle, rather than a fire-and-forget `std.log.warn`: the membranes
+    // surface it to the plugin author through `echo` (the normal user-facing
+    // channel), so a mistake is reported where the author will see it instead
+    // of on a global stderr a caller can ignore — and a test can assert the
+    // refusal with `expectError` without polluting the suite's stderr (which
+    // Zig's build runner flags, printing a spurious `failed command:`).
     if (self.actions.getPtr(spec.action)) |a| {
-        if (a.policy == .race) {
-            std.log.warn("action '{s}' is race-policy; provide() (a pick provider) is ignored — register a capability provider instead", .{spec.action});
-            return;
-        }
+        if (a.policy == .race) return error.RaceRejectsProvider;
     } else {
         try self.ensure(spec.action, spec.declare_policy); // auto-declare (load order is free)
     }
@@ -357,9 +360,11 @@ test "action: race intents are enumerable, and reject pick providers" {
     try t.expect(acts.isAction("hover"));
     try t.expectEqual(Policy.race, acts.policyOf("hover").?);
 
-    // A pick provider on a race action is refused (its providers are the async
-    // capability providers, registered elsewhere) — resolve stays empty.
-    try acts.provide(.{ .action = "hover", .command = "fake-hover" });
+    // A pick provider on a race action is refused with a TYPED ERROR (its
+    // providers are the async capability providers, registered elsewhere) —
+    // asserted by value, so nothing is logged to the suite's stderr. resolve
+    // stays empty.
+    try t.expectError(error.RaceRejectsProvider, acts.provide(.{ .action = "hover", .command = "fake-hover" }));
     try t.expectEqual(@as(?[]const u8, null), acts.resolve("hover", .{ .mode = "normal", .lang = "zig" }));
 
     // noteRace is idempotent and doesn't disturb a real pick action.
