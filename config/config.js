@@ -66,6 +66,8 @@ weft.use("defaults");
 // weft.menu(name) declares a submenu — the leader tree is config, not baked in.
 
 // Declare the submenu modes first (so the leader keys below can enter them).
+// Every menu automatically inherits the "menu-nav" base (its keys are in
+// defaults.js: Backspace pops a level, PageUp/PageDown paginate the hint).
 [
   "leader-file", "leader-buffer", "leader-git", "leader-search",
   "leader-project", "leader-code", "leader-open", "leader-notes",

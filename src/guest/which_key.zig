@@ -1,27 +1,43 @@
 //! which-key — the menu-hint overlay, as a PLUGIN over the standard surface
 //! door (perms `{}`). It is NOT special core rendering: core fires `on_menu` at
 //! the frame boundary when a menu/prefix mode is entered or left, and this guest
-//! reads that mode's bindings and paints them into a retained corner popup — the
-//! same door dired/magit use. A colorscheme restyles it for free (spans carry a
-//! semantic Role, not a color): the KEY reads in the group/accent color so it
-//! pops from the plain command text, the user's "color-code it" ask. The corner
-//! placement is the "popup in the corner" layout the user preferred over a
-//! full-width vertical stack.
+//! reads that mode's AVAILABLE bindings (resolved through its fallback chain —
+//! see Keymap.resolveBindings) and paints them into a retained corner popup —
+//! the same door dired/magit use. A colorscheme restyles it for free (spans
+//! carry a semantic Role, not a color): the KEY reads in the group/accent color
+//! so it pops from the plain command text. When there are more bindings than fit
+//! a page, it PAGINATES — `which-key-page-down`/`-up` (bound in `menu-nav`, which
+//! menus fall back to) scroll it, and a footer shows the position.
 
 const std = @import("std");
 const weft = @import("weft.zig");
 
-/// A menu's own leave/cancel bindings are noise in the hint popup — every menu
-/// has them. Filter Escape/C-g and the commands that just leave the menu.
+/// Rows of bindings per page (before the position footer). A long menu — or a
+/// mode's whole resolved set on an F1 peek — paginates instead of overflowing.
+const PAGE: usize = 12;
+
+/// The current page's first-binding offset (into the non-noise bindings). Reset
+/// when a menu opens; advanced by the page commands.
+var scroll_off: usize = 0;
+
+const cmds = [_][]const u8{ "which-key-page-down", "which-key-page-up" };
+
+/// A menu's own leave/cancel/nav bindings are noise in the hint popup — every
+/// menu has them. Filter Escape/C-g/F1, the leave commands, and the paging keys.
 fn isNoise(key: []const u8, cmd: []const u8) bool {
     return std.mem.eql(u8, key, "Escape") or std.mem.eql(u8, key, "C-g") or
         std.mem.eql(u8, key, "F1") or std.mem.eql(u8, cmd, "which-key-now") or
         std.mem.eql(u8, cmd, "menu-escape") or std.mem.eql(u8, cmd, "leader-cancel") or
-        std.mem.eql(u8, cmd, "op-cancel");
+        std.mem.eql(u8, cmd, "op-cancel") or
+        std.mem.eql(u8, cmd, "which-key-page-down") or std.mem.eql(u8, cmd, "which-key-page-up");
 }
 
-export fn describe() void {}
-export fn init() void {}
+export fn describe() void {
+    for (cmds) |c| weft.declareCommand(c);
+}
+export fn init() void {
+    for (cmds) |c| _ = weft.register(c);
+}
 
 /// Where the hint popup docks, from config: weft.set("which_key","placement",
 /// "corner"|"center"). Corner (top-right) by default.
@@ -35,38 +51,74 @@ fn placement() weft.Placement {
     return .corner;
 }
 
+/// Count the non-noise bindings available in the current mode.
+fn countHints() usize {
+    const n = weft.menuBindingCount();
+    var total: usize = 0;
+    var i: usize = 0;
+    while (i < n) : (i += 1) {
+        if (!isNoise(weft.menuBindingKey(i), weft.menuBindingCmd(i))) total += 1;
+    }
+    return total;
+}
+
+/// Render the current page of hints into the surface.
+fn render() void {
+    const n = weft.menuBindingCount();
+    const total = countHints();
+    if (total == 0) {
+        weft.surfaceClose();
+        return;
+    }
+    // Clamp the offset to a valid page start (last page if it ran past the end).
+    if (scroll_off >= total) scroll_off = (total - 1) / PAGE * PAGE;
+
+    weft.surfaceBegin(placement());
+    var idx: usize = 0; // index among non-noise bindings
+    var shown: usize = 0;
+    var i: usize = 0;
+    while (i < n) : (i += 1) {
+        const key = weft.menuBindingKey(i);
+        const cmd = weft.menuBindingCmd(i);
+        if (isNoise(key, cmd)) continue;
+        defer idx += 1;
+        if (idx < scroll_off) continue;
+        if (shown >= PAGE) break;
+        const group = weft.menuBindingIsGroup(i);
+        weft.surfaceRow();
+        weft.surfaceSpan(key, .accent); // the key always stands out
+        weft.surfaceSpan(cmd, if (group) .group else .leaf); // group vs leaf color
+        shown += 1;
+    }
+    // A position footer when it doesn't all fit — shows the range + that PgUp/
+    // PgDn page (and Backspace pops a level, both bound in `menu-nav`).
+    if (total > PAGE) {
+        var buf: [64]u8 = undefined;
+        const msg = std.fmt.bufPrint(&buf, "{d}-{d}/{d}  PgUp/PgDn", .{ scroll_off + 1, scroll_off + shown, total }) catch "…";
+        weft.surfaceRow();
+        weft.surfaceSpan(msg, .muted);
+    }
+    weft.surfaceEnd(-1);
+}
+
 /// Core fires this when a menu mode is entered (open=1) or left (open=0). On
-/// open, the current mode IS the menu, so we enumerate its bindings directly.
+/// open, the current mode IS the menu; render its first page.
 export fn on_menu(open: u32) void {
     if (open == 0) {
         weft.surfaceClose();
         return;
     }
-    const n = weft.menuBindingCount();
-    if (n == 0) {
-        weft.surfaceClose();
-        return;
+    scroll_off = 0; // a fresh menu starts at the top
+    render();
+}
+
+/// The paging commands re-render in place (the menu stays open; the command
+/// doesn't change the mode). Ids match `cmds` registration order.
+export fn on_command(id: u32) void {
+    switch (id) {
+        0 => scroll_off += PAGE, // page down (render clamps to the last page)
+        1 => scroll_off = if (scroll_off >= PAGE) scroll_off - PAGE else 0, // page up
+        else => return,
     }
-    weft.surfaceBegin(placement());
-    var i: usize = 0;
-    var rows: usize = 0;
-    while (i < n) : (i += 1) {
-        const key = weft.menuBindingKey(i);
-        const cmd = weft.menuBindingCmd(i);
-        // Don't clutter the popup with the menu's own housekeeping keys
-        // (Escape/C-g leave the menu; every menu has them, so they're noise).
-        if (isNoise(key, cmd)) continue;
-        const group = weft.menuBindingIsGroup(i);
-        weft.surfaceRow();
-        weft.surfaceSpan(key, .accent); // the key always stands out
-        // A group (opens a submenu) reads distinctly from a terminal command —
-        // the user's 'differentiate groups from terminal commands' ask.
-        weft.surfaceSpan(cmd, if (group) .group else .leaf);
-        rows += 1;
-    }
-    if (rows == 0) {
-        weft.surfaceClose();
-        return;
-    }
-    weft.surfaceEnd(-1);
+    render();
 }

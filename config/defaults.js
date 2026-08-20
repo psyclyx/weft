@@ -16,3 +16,12 @@ weft.bind("pick", "C-p", "pick-prev");
 weft.bind("pick", "Tab", "pick-complete");
 weft.bind("pick", "C-j", "pick-accept-input");
 weft.bind("pick", "S-Return", "pick-accept-input");
+
+// ── Menu navigation — the base every menu mode falls back to ──────────
+// A config declares its menus (weft.menu) with a fallback to "menu-nav", so all
+// of them inherit these: Backspace pops one level (menu-escape returns to the
+// menu's parent), PageUp/PageDown paginate a long which-key hint in place.
+weft.bind("menu-nav", "BackSpace", "menu-escape");
+weft.bind("menu-nav", "PageDown", "which-key-page-down");
+weft.bind("menu-nav", "PageUp", "which-key-page-up");
+

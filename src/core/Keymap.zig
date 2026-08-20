@@ -173,6 +173,11 @@ pub fn baseMode(self: *const Keymap, mode: []const u8) []const u8 {
     var cur = mode;
     var depth: usize = 0;
     while (depth < 8) : (depth += 1) {
+        // A menu is its OWN base (a buffer is never remembered as a menu — the
+        // caller skips it). Stop here rather than walking into the `menu-nav`
+        // base a menu now falls back to for its navigation keys, which would
+        // wrongly make a menu's base a non-menu and get captured.
+        if (self.isMenuMode(cur)) return cur;
         cur = self.parents.get(cur) orelse return cur;
     }
     return cur;
@@ -249,11 +254,21 @@ pub fn currentMode(self: *const Keymap) []const u8 {
 
 pub const Binding = struct { key: []const u8, command: []const u8 };
 
+/// The base mode every prefix menu falls back to for its navigation keys
+/// (pop-a-level, paginate the hint). STRUCTURE only — the actual key BINDINGS
+/// live in config (`defaults.js` binds `menu-nav`); the core just wires menus to
+/// inherit it, so nav is uniform + rebindable and no plugin/config re-wires it.
+pub const menu_nav_mode = "menu-nav";
+
 /// Declare `mode` a prefix menu (config policy — the leader/chord tables).
-/// which-key shows its bindings while it is active.
+/// which-key shows its bindings while it is active. A menu with no fallback of
+/// its own inherits `menu-nav` (its nav keys) — so every menu paginates + pops
+/// a level for free, without each config wiring it.
 pub fn markMenuMode(self: *Keymap, gpa: Allocator, mode: []const u8) Allocator.Error!void {
     const gop = try self.menu_modes.getOrPut(gpa, mode);
     if (!gop.found_existing) gop.key_ptr.* = try gpa.dupe(u8, mode);
+    if (!std.mem.eql(u8, mode, menu_nav_mode) and !self.parents.contains(mode))
+        try self.setFallback(gpa, mode, menu_nav_mode);
 }
 
 /// Whether `mode` was declared a prefix menu (see `markMenuMode`).
@@ -472,6 +487,35 @@ test "keymap: the global layer applies under every mode, overridable locally" {
     // A mode still overrides a global key by binding it locally.
     try km.bind(gpa, "dired", "F1", "dired-help", prio_plugin, "dired");
     try t.expectEqualStrings("dired-help", km.lookup("F1").?);
+}
+
+test "keymap: a menu inherits the menu-nav base for nav keys; baseMode stops at the menu" {
+    const gpa = t.allocator;
+    var km: Keymap = .empty;
+    defer km.deinit(gpa);
+
+    // The nav base's keys are config data (here: Backspace pops a level).
+    try km.bind(gpa, Keymap.menu_nav_mode, "BackSpace", "menu-escape", prio_config, "cfg");
+    try km.bind(gpa, Keymap.menu_nav_mode, "PageDown", "which-key-page-down", prio_config, "cfg");
+
+    // Declaring a menu auto-wires it to inherit menu-nav (no per-config wiring),
+    // so its nav keys resolve through the fallback — but its OWN keys still win.
+    try km.markMenuMode(gpa, "leader");
+    try km.bind(gpa, "leader", "f", "leader-file", prio_config, "cfg");
+    try km.setMode(gpa, "leader");
+    try t.expectEqualStrings("leader-file", km.lookup("f").?); // own key
+    try t.expectEqualStrings("menu-escape", km.lookup("BackSpace").?); // inherited nav
+    try t.expectEqualStrings("which-key-page-down", km.lookup("PageDown").?);
+
+    // baseMode stops at the menu (a buffer is never remembered as a menu, nor as
+    // the menu-nav base it falls back to) — so switchTo's menu-skip stays correct.
+    try t.expectEqualStrings("leader", km.baseMode("leader"));
+    try t.expect(!km.parents.contains(Keymap.menu_nav_mode)); // the base itself has no fallback
+
+    // A menu that already has its own fallback is left alone (not re-wired).
+    try km.setFallback(gpa, "leader-git", "leader");
+    try km.markMenuMode(gpa, "leader-git");
+    try t.expectEqualStrings("leader", km.parents.get("leader-git").?);
 }
 
 test "keymap: menu return targets — guest entry records, nesting collapses to root" {
