@@ -174,6 +174,99 @@ pub fn scrollPageDownHandler(ctx: *core.command.Context, data: ?*anyopaque, args
     return .nil;
 }
 
+// ── Dot-repeat: record the last CHANGE as keystrokes, replay on demand ──────
+//
+// Composable + plugin-agnostic BY CONSTRUCTION: it records KEYS through the one
+// dispatch interface, not commands, so a change made by ANY plugin (vim
+// operators, autopair, comment, a structural edit) repeats out of the box. A
+// "change" is whatever key sequence left the buffer edited between two RESTING
+// points — a mode with no text command and no pending chord (each keymap's
+// normal-equivalent), so this works across vim/helix/emacs without knowing them.
+const KeyPress = struct {
+    spec: [24]u8 = undefined,
+    slen: u8 = 0,
+    text: [8]u8 = undefined,
+    tlen: u8 = 0,
+};
+const dot_cap = 256; // a change longer than this stops recording (degrade, don't clip mid-replay)
+var dot_pending: [dot_cap]KeyPress = undefined;
+var dot_pending_n: usize = 0;
+var dot_reg: [dot_cap]KeyPress = undefined;
+var dot_reg_n: usize = 0;
+var dot_replaying: bool = false;
+var dot_suppress: bool = false; // the repeat key itself must not become the new change
+var dot_commits: usize = 0; // buffer commit count at the last rest
+var dot_buf: core.Buffers.Id = 0; // active buffer at the last rest (a switch resets the recorder)
+
+fn dotRecord(spec: []const u8, text: []const u8) void {
+    if (dot_pending_n >= dot_cap) return;
+    var kp: KeyPress = .{};
+    const s = @min(spec.len, kp.spec.len);
+    @memcpy(kp.spec[0..s], spec[0..s]);
+    kp.slen = @intCast(s);
+    const tx = @min(text.len, kp.text.len);
+    @memcpy(kp.text[0..tx], text[0..tx]);
+    kp.tlen = @intCast(tx);
+    dot_pending[dot_pending_n] = kp;
+    dot_pending_n += 1;
+}
+
+/// At rest for change-recording: a mode that swallows typing (no text command),
+/// with no half-typed chord and not inside a menu — the point a command sequence
+/// has fully resolved. Generalizes vim `normal` / helix `normal` / emacs base.
+fn dotAtRest(ctx: *core.command.Context) bool {
+    return ctx.keymap.textCommand() == null and
+        ctx.keymap.pending.len == 0 and
+        !ctx.keymap.isMenuMode(ctx.keymap.currentMode());
+}
+
+/// Run at each dispatch's end (when recording): if we're back at rest, decide
+/// what the just-finished sequence was — a change (buffer edited → promote its
+/// keys to the register), a pure motion (no edit → discard), or the repeat key
+/// itself (suppressed). Mid-command (not at rest) it keeps accumulating.
+fn dotBoundary(ctx: *core.command.Context) void {
+    const bid = ctx.buffers.active_id;
+    if (bid != dot_buf) { // buffer switch: commit counts aren't comparable — reset.
+        dot_buf = bid;
+        dot_commits = ctx.editor().doc.commitCount();
+        dot_pending_n = 0;
+        return;
+    }
+    if (!dotAtRest(ctx)) return;
+    const now = ctx.editor().doc.commitCount();
+    if (dot_suppress) {
+        dot_suppress = false;
+    } else if (now != dot_commits and dot_pending_n > 0) {
+        @memcpy(dot_reg[0..dot_pending_n], dot_pending[0..dot_pending_n]);
+        dot_reg_n = dot_pending_n;
+    }
+    dot_pending_n = 0;
+    dot_commits = now;
+}
+
+/// Replay the recorded change by RE-FEEDING its keystrokes through the same
+/// dispatch — so it composes exactly as the original did. The `.` keypress that
+/// triggered this is then suppressed (it must not overwrite the register).
+pub fn replayDot(ctx: *core.command.Context) void {
+    if (dot_reg_n == 0) return;
+    dot_replaying = true;
+    var i: usize = 0;
+    while (i < dot_reg_n) : (i += 1) {
+        const kp = dot_reg[i];
+        dispatchSpec(ctx, kp.spec[0..kp.slen], kp.text[0..kp.tlen]) catch {};
+    }
+    dot_replaying = false;
+    dot_suppress = true;
+}
+
+/// Command handler for `repeat-change` (bound to `.`): replay the last change.
+pub fn repeatChangeHandler(ctx: *core.command.Context, data: ?*anyopaque, args: []const core.command.Value) anyerror!core.command.Value {
+    _ = data;
+    _ = args;
+    replayDot(ctx);
+    return .nil;
+}
+
 pub fn dispatchKey(ctx: *core.command.Context, ev: wayland.KeyEvent) !void {
     // Translate the platform key event to a canonical keyspec (+ the printable
     // text it would insert), then hand off to the backend-independent
@@ -208,6 +301,12 @@ pub fn dispatchKey(ctx: *core.command.Context, ev: wayland.KeyEvent) !void {
 pub fn dispatchSpec(ctx: *core.command.Context, spec: []const u8, text: []const u8) !void {
     ctx.user_initiated = true;
     defer ctx.user_initiated = false;
+
+    // Dot-repeat: record this keystroke (unless we ARE a replay), and decide at
+    // the end of dispatch whether the sequence so far was a repeatable change.
+    const dot_recording = !dot_replaying;
+    if (dot_recording) dotRecord(spec, text);
+    defer if (dot_recording) dotBoundary(ctx);
 
     // Mid-chord META keys act on the which-key overlay, NOT the sequence:
     //  · Backspace steps BACK one key of the pending chord (pop a level).

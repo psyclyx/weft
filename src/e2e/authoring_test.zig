@@ -129,6 +129,37 @@ test "authoring: Esc seals the undo unit — dd then u restores the whole line" 
     try t.expectEqualStrings("const x = 1;", disk);
 }
 
+test "authoring: `.` repeats the last change (dot-repeat, via keystroke replay)" {
+    const gpa = t.allocator;
+    var app: App = undefined;
+    try app.init(gpa);
+    defer app.deinit();
+    const ed = &app.ed;
+
+    ed.runStr("open", "words.txt");
+    ed.press("i", "");
+    ed.typeText("one two three four");
+    ed.press("Escape", "");
+    ed.press("0", ""); // line start
+
+    // dw deletes the first word; `.` repeats that change on the next word, then
+    // again — the classic vim idiom. Dot-repeat records the KEYS of the change
+    // (d, w) and replays them, so it composes with the operator/motion plugins.
+    ed.press("d", "");
+    ed.press("w", ""); // → "two three four"
+    ed.press(".", ""); // repeat dw → "three four"
+    ed.press(".", ""); // → "four"
+
+    ed.press("colon", "");
+    ed.typeText("w");
+    ed.press("Return", "");
+    ed.waitSave();
+
+    const disk = try core.file.readAlloc(gpa, "words.txt");
+    defer gpa.free(disk);
+    try t.expectEqualStrings("four", disk);
+}
+
 test "authoring: `/` searches in the buffer and jumps to the match" {
     const gpa = t.allocator;
     var app: App = undefined;

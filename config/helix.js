@@ -58,6 +58,7 @@ weft.bind("helix-normal", "SPC g g", "git-status");
 weft.bind("helix-normal", "SPC g i", "git-init"); // start version control (git init)
 weft.bind("helix-normal", "SPC g l", "git-log");
 weft.bind("helix-normal", "SPC g b", "git-blame");
+weft.bind("helix-normal", ".", "repeat-change"); // dot-repeat
 weft.bind("helix-normal", "/", "consult-line"); // vim/helix `/` — search in buffer
 weft.bind("helix-normal", "SPC s s", "consult-line");
 weft.bind("helix-normal", "SPC s p", "grep");

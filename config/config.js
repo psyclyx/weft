@@ -117,6 +117,11 @@ weft.bind("normal", "SPC g d", "git-diff");
 weft.bind("normal", "SPC g D", "git-diff-staged");
 weft.bind("normal", "SPC g b", "git-blame");
 
+// `.` — repeat the last change (vim dot-repeat). The recorder is core (it
+// records keystrokes through the one dispatch path), so it repeats a change made
+// by ANY plugin — vim operators, autopair, comment, structural — not just vim's.
+weft.bind("normal", ".", "repeat-change");
+
 // `/` — search in this buffer (vim's search key). consult-line is a fuzzy
 // in-buffer jump: type a pattern, Return lands on the match. (A vim user reaches
 // for `/`; without this it did nothing — only SPC s s / SPC / were bound.)

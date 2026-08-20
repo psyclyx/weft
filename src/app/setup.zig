@@ -54,6 +54,16 @@ pub fn registerCursorCommands(
         .handler = dispatch.menuEscapeHandler,
         .data = null,
     });
+    // Dot-repeat: replay the last change's keystrokes (vim `.`). The recorder
+    // lives in dispatch (it records through the one keypress interface), so this
+    // composes with every plugin out of the box.
+    _ = try commands.bind(gpa, "repeat-change", .{
+        .name = "repeat-change",
+        .summary = "Repeat the last change (vim `.`).",
+        .args = &.{},
+        .handler = dispatch.repeatChangeHandler,
+        .data = null,
+    });
     // which-key: show the hint popup immediately (bypass the idle delay). If not
     // already in a menu, open the leader menu — so a help key (F1) surfaces it
     // from anywhere.
