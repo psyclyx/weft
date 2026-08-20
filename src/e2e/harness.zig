@@ -502,7 +502,27 @@ const guest = struct {
     const run = @embedFile("guest_run_wasm");
     const make = @embedFile("guest_make_wasm");
     const fmt = @embedFile("guest_fmt_wasm");
+    const emacs = @embedFile("guest_emacs_wasm");
+    const helix = @embedFile("guest_helix_wasm");
 };
+
+/// The base editing set under an EMACS keymap (modeless: printable keys self-
+/// insert). The coworker in the collab matrix who "uses emacs, but can edit".
+pub fn loadEmacs(ed: *Editor) !void {
+    try ed.load("edit", guest.edit);
+    try ed.load("motions", guest.motions);
+    try ed.load("operators", guest.operators);
+    try ed.load("emacs", guest.emacs);
+}
+
+/// The base editing set under a HELIX keymap (selection-first modal editing).
+pub fn loadHelix(ed: *Editor) !void {
+    try ed.load("edit", guest.edit);
+    try ed.load("motions", guest.motions);
+    try ed.load("textobjects", guest.textobjects);
+    try ed.load("operators", guest.operators);
+    try ed.load("helix", guest.helix);
+}
 
 /// A standard vim editing set (synchronous plugins only — no subprocess).
 pub fn loadVim(ed: *Editor) !void {

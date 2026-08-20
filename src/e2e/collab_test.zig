@@ -35,6 +35,8 @@ const drainUntilOracle = h.drainUntilOracle;
 const tmpPath = h.tmpPath;
 const socketPair = h.socketPair;
 const napUs = h.napUs;
+const loadEmacs = h.loadEmacs;
+const loadHelix = h.loadHelix;
 
 // ── Multiplayer: two harnesses pair on a document over the loopback ──
 //
@@ -42,6 +44,51 @@ const napUs = h.napUs;
 // socketpair, document sync via `Collab.tick` (drain → handleFrame → push) —
 // the same code `collab.tickCollab` calls under the hood. Peer A types through
 // the real keymap/command path; the pump converges it into peer B's buffer.
+
+// The coworker scenario from the brief: they "use emacs, but can edit". A vim
+// peer and an emacs peer share the document; both edit through their OWN editor
+// and the real session sync converges them. Different keymaps, one document.
+test "app/collab: an emacs coworker joins — vim + emacs peers converge" {
+    const gpa = t.allocator;
+    var a: Editor = undefined;
+    try Editor.initNamed(gpa, &a, "alice");
+    defer a.deinit();
+    var b: Editor = undefined;
+    try Editor.initNamed(gpa, &b, "bob");
+    defer b.deinit();
+    try loadVim(&a); // alice uses vim
+    try loadEmacs(&b); // bob uses emacs (modeless — printable keys self-insert)
+
+    var link: Loopback = undefined;
+    try Loopback.init(&link, gpa, &a, &b, "alice", "bob");
+    defer link.deinit();
+
+    // Alice edits the vim way (i → text → Esc); Bob just types (emacs is modeless).
+    a.press("i", "");
+    a.typeText("ALICE");
+    a.press("Escape", "");
+    b.typeText("BOB");
+
+    // Both replicas converge to carry BOTH peers' text — real merge, two editors.
+    const Ctx = struct { a: *Editor, b: *Editor };
+    const converged = try link.pumpUntil(Ctx{ .a = &a, .b = &b }, struct {
+        fn pred(c: Ctx) bool {
+            const at = c.a.buffers.active().editor.text().toOwnedSlice(c.a.gpa) catch return false;
+            defer c.a.gpa.free(at);
+            const bt = c.b.buffers.active().editor.text().toOwnedSlice(c.b.gpa) catch return false;
+            defer c.b.gpa.free(bt);
+            return std.mem.indexOf(u8, at, "ALICE") != null and std.mem.indexOf(u8, at, "BOB") != null and
+                std.mem.indexOf(u8, bt, "ALICE") != null and std.mem.indexOf(u8, bt, "BOB") != null;
+        }
+    }.pred);
+    try t.expect(converged);
+
+    const at = try a.buffers.active().editor.text().toOwnedSlice(gpa);
+    defer gpa.free(at);
+    const bt = try b.buffers.active().editor.text().toOwnedSlice(gpa);
+    defer gpa.free(bt);
+    try t.expectEqualStrings(at, bt); // identical on both, despite different editors
+}
 
 test "app/collab: peer A types, it converges into peer B's buffer + cursor" {
     const gpa = t.allocator;
