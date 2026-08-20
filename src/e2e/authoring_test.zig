@@ -160,6 +160,39 @@ test "authoring: `.` repeats the last change (dot-repeat, via keystroke replay)"
     try t.expectEqualStrings("four", disk);
 }
 
+test "authoring: `.` repeats a CHANGE with inserted text (cw), keystroke-faithful" {
+    const gpa = t.allocator;
+    var app: App = undefined;
+    try app.init(gpa);
+    defer app.deinit();
+    const ed = &app.ed;
+
+    ed.runStr("open", "c.txt");
+    ed.press("i", "");
+    ed.typeText("foo bar baz");
+    ed.press("Escape", "");
+    ed.press("0", "");
+
+    // Change the first word to "X" — cw enters insert, we type, Esc. Because
+    // typing is per-keystroke now, the dot register captures c,w,X,Esc.
+    ed.press("c", "");
+    ed.press("w", "");
+    ed.typeText("X");
+    ed.press("Escape", ""); // → "X bar baz"
+
+    ed.press("w", ""); // move to "bar"
+    ed.press(".", ""); // repeat the whole change → change "bar" to "X"
+
+    ed.press("colon", "");
+    ed.typeText("w");
+    ed.press("Return", "");
+    ed.waitSave();
+
+    const disk = try core.file.readAlloc(gpa, "c.txt");
+    defer gpa.free(disk);
+    try t.expectEqualStrings("X X baz", disk);
+}
+
 test "authoring: `/` searches in the buffer and jumps to the match" {
     const gpa = t.allocator;
     var app: App = undefined;

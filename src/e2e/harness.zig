@@ -211,13 +211,25 @@ pub const Editor = struct {
         while (it.next()) |k| self.press(k, "");
     }
 
-    /// Type a run of printable text through the active mode's text command
-    /// (bulk insert; use `press` for keys that trigger bindings like autopair).
+    /// Type a run of text the way a person does — one KEYSTROKE at a time through
+    /// the real dispatch (`press`), NOT a bulk text-command. So typing composes
+    /// with per-key behaviors exactly as at the keyboard: autopair fires on
+    /// `(`/`"`, dot-repeat records the inserted chars, a mode's bound key in the
+    /// middle of a run behaves as bound. `\n`→Enter, `\t`→Tab; every other
+    /// codepoint presses itself.
     pub fn typeText(self: *Editor, s: []const u8) void {
-        self.ctx.user_initiated = true;
-        defer self.ctx.user_initiated = false;
-        if (self.keymap.textCommand()) |tc| {
-            _ = command.run(self.commands, self.ctx, tc, &.{.{ .string = s }}) catch {};
+        var i: usize = 0;
+        while (i < s.len) {
+            const n = std.unicode.utf8ByteSequenceLength(s[i]) catch 1;
+            const ch = s[i..@min(i + n, s.len)];
+            if (ch.len == 1 and ch[0] == '\n') {
+                self.press("Return", "\n");
+            } else if (ch.len == 1 and ch[0] == '\t') {
+                self.press("Tab", "\t");
+            } else {
+                self.press(ch, ch);
+            }
+            i += ch.len;
         }
     }
 
