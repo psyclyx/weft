@@ -70,6 +70,9 @@ pub const Editor = struct {
     // ── main()-local plugin host + async loop (the harness owns these) ──
     engine: core.wasm.Engine = undefined,
     plugins: std.ArrayList(*core.wasm_abi.WasmPlugin) = .empty,
+    /// Resident JS plugins (quickjs reactors: acp.js / dap.js), ticked each
+    /// settle() like main()'s frame loop ticks them.
+    js_plugins: std.ArrayList(*core.quickjs.JsPlugin) = .empty,
     plugin_kv: core.kv.Store = .empty,
     config_kv: core.kv.Store = .empty,
     loop: core.async_loop.Loop = undefined,
@@ -101,6 +104,7 @@ pub const Editor = struct {
     pub fn initNamed(gpa: Allocator, self: *Editor, user: []const u8) !void {
         self.gpa = gpa;
         self.plugins = .empty;
+        self.js_plugins = .empty;
         self.plugin_kv = .empty;
         self.config_kv = .empty;
         self.subs = .empty;
@@ -154,6 +158,8 @@ pub const Editor = struct {
     pub fn deinit(self: *Editor) void {
         const gpa = self.gpa;
         self.win_layout.deinit();
+        for (self.js_plugins.items) |jp| jp.deinit();
+        self.js_plugins.deinit(gpa);
         for (self.plugins.items) |p| p.deinit();
         self.plugins.deinit(gpa);
         if (self.view) |*v| v.deinit();
@@ -186,6 +192,26 @@ pub const Editor = struct {
             .pool = self.pool,
         });
         try self.plugins.append(self.gpa, p);
+    }
+
+    /// Load a resident JS plugin (a quickjs reactor — acp.js / dap.js), named so
+    /// it reads its config namespace `weft.set("<name>", …)`. Ticked in settle().
+    pub fn loadJs(self: *Editor, name: []const u8, src: []const u8) !void {
+        const jp = try core.quickjs.JsPlugin.load(self.gpa, &self.engine, self.ctx, self.pool, parentEnviron(), name, &self.config_kv, src);
+        try self.js_plugins.append(self.gpa, jp);
+    }
+
+    /// Set a plugin's config value (`weft.set("<plugin>", key, value)`), for
+    /// pointing a JS plugin at a test fixture before loading it. The config store
+    /// holds a FRAMED blob (uvarint record-count, then uvarint(len)++bytes), the
+    /// same shape `weft.set` writes — a single value is one record.
+    pub fn setConfig(self: *Editor, plugin: []const u8, key: []const u8, value: []const u8) !void {
+        var blob: std.ArrayList(u8) = .empty;
+        defer blob.deinit(self.gpa);
+        try putUvarint(&blob, self.gpa, 1); // one record
+        try putUvarint(&blob, self.gpa, value.len);
+        try blob.appendSlice(self.gpa, value);
+        try self.config_kv.put(self.gpa, plugin, key, blob.items);
     }
 
     /// Press a key: `spec` is a keyspec (e.g. "i", "Escape", "C-w", "SPC");
@@ -269,6 +295,7 @@ pub const Editor = struct {
         while (i < rounds) : (i += 1) {
             _ = self.loop.tick();
             for (self.plugins.items) |p| _ = core.wasm_host.drainReplSessions(p);
+            for (self.js_plugins.items) |jp| _ = jp.tick(); // reactor: drains proc output → onOutput
             napUs(2000);
         }
     }
@@ -577,6 +604,16 @@ pub fn parentEnviron() std.process.Environ {
     return .{ .block = .{ .slice = std.mem.span(std.c.environ) } };
 }
 
+/// LEB128 uvarint, appended to `out` — for framing a config blob (see setConfig).
+fn putUvarint(out: *std.ArrayList(u8), gpa: Allocator, value: usize) !void {
+    var v = value;
+    while (v >= 0x80) {
+        try out.append(gpa, @intCast((v & 0x7f) | 0x80));
+        v >>= 7;
+    }
+    try out.append(gpa, @intCast(v));
+}
+
 // This Zig's std dropped ambient process-cwd mutation (part of the `std.Io`
 // migration — see the gap note below), so the project harness reaches the raw
 // Linux syscalls directly, exactly as session.zig reaches `linux.socket*`.
@@ -832,6 +869,7 @@ pub fn drainToolContains(ed: *Editor, name: []const u8, needle: []const u8) bool
     const deadline = core.task.nowNs() + 10 * std.time.ns_per_s;
     while (core.task.nowNs() < deadline) {
         _ = ed.loop.tick();
+        for (ed.js_plugins.items) |jp| _ = jp.tick(); // drive JS reactors (DAP/ACP proc I/O)
         if (toolText(ed, name)) |txt| {
             defer ed.gpa.free(txt);
             if (std.mem.indexOf(u8, txt, needle) != null) return true;

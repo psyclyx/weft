@@ -235,7 +235,7 @@ fn installPlugins(b: *std.Build) void {
 }
 
 /// JS plugins shipped in the reference catalog (config/plugins/*.js).
-const js_plugins = [_][]const u8{"acp.js"};
+const js_plugins = [_][]const u8{ "acp.js", "dap.js" };
 
 /// QuickJS-ng compiled to a `wasm32-wasi` reactor (milestone 5 / 06B): the
 /// runtime behind user `config.js`. We invoke the same `zig cc` that builds

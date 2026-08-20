@@ -296,6 +296,39 @@ test "authoring: typing balanced code with autopair stays balanced (type-over)" 
     try t.expectEqualStrings("function greet(name) { return \"hi\"; }", disk);
 }
 
+test "debug: a real DAP session — launch, hit a breakpoint, see the stack, continue" {
+    const gpa = t.allocator;
+    var app: App = undefined;
+    try app.init(gpa);
+    defer app.deinit();
+    const ed = &app.ed;
+
+    // Point the DAP client at a mock adapter (node fixture) + a program/line.
+    const mock = try std.fmt.allocPrint(gpa, "node {s}/assets/mock_dap.mjs", .{app.proj.prev_cwd});
+    defer gpa.free(mock);
+    try ed.setConfig("dap", "cmd", mock);
+    try ed.setConfig("dap", "program", "prog.py");
+    try ed.setConfig("dap", "line", "7");
+
+    // Load the DAP client JS plugin (config.js skips .js in the harness).
+    const dap_src = try std.fmt.allocPrint(gpa, "{s}/config/plugins/dap.js", .{app.proj.prev_cwd});
+    defer gpa.free(dap_src);
+    const src = try core.file.readAlloc(gpa, dap_src);
+    defer gpa.free(src);
+    try ed.loadJs("dap", src);
+
+    // Start a debug session. The client drives initialize → launch →
+    // setBreakpoints → configurationDone; the adapter stops at the breakpoint.
+    ed.run("debug-start");
+    try t.expect(drainToolContains(ed, "*debug*", "stopped: breakpoint"));
+    // ... and the client requested the stack and rendered where we are.
+    try t.expect(drainToolContains(ed, "*debug*", "program:7"));
+
+    // Continue → the program runs to completion.
+    ed.run("debug-continue");
+    try t.expect(drainToolContains(ed, "*debug*", "terminated"));
+}
+
 test "debug: set a breakpoint on a line — gutter marker, list, toggle off" {
     const gpa = t.allocator;
     var app: App = undefined;

@@ -56,6 +56,7 @@ weft.plugin("net");         // raw TCP/TLS transport (net.connect)
 weft.plugin("which_key");   // menu-hint overlay, as a plugin over the surface door
 weft.plugin("dired");       // directory editor (proc ls + its own keymap mode)
 weft.plugin("debug");       // breakpoints (gutter markers) — the debugger's first slice
+weft.plugin("dap.js");      // DAP client: run/step/inspect (set weft.set("dap","cmd",<adapter>))
 
 // Shared, editor-agnostic key bindings (the picker, and — below — which-key nav):
 // core ships the commands + modes; the BINDINGS are config data. Overridable by
@@ -199,6 +200,17 @@ weft.bind("normal", "SPC d b", "debug-toggle-breakpoint");
 weft.bind("normal", "SPC d c", "debug-clear-breakpoints");
 weft.bind("normal", "SPC d l", "debug-list-breakpoints");
 weft.bind("normal", "F9", "debug-toggle-breakpoint");
+// The DAP session (dap.js): start, continue, step, stop. F5/F10/F11 are the IDE
+// conventions; the SPC d leaf mirrors them.
+weft.bind("normal", "SPC d d", "debug-start");
+weft.bind("normal", "SPC d r", "debug-continue");
+weft.bind("normal", "SPC d n", "debug-step-over");
+weft.bind("normal", "SPC d i", "debug-step-into");
+weft.bind("normal", "SPC d o", "debug-step-out");
+weft.bind("normal", "SPC d q", "debug-stop");
+weft.bind("normal", "F5", "debug-continue");
+weft.bind("normal", "F10", "debug-step-over");
+weft.bind("normal", "F11", "debug-step-into");
 
 // SPC n — notes
 weft.bind("normal", "SPC n n", "notes-open");
