@@ -99,6 +99,36 @@ test "authoring: fix a typo with `cw` — vim's ce special case, not dw" {
     try t.expectEqualStrings("const x = 1;", disk);
 }
 
+test "authoring: Esc seals the undo unit — dd then u restores the whole line" {
+    const gpa = t.allocator;
+    var app: App = undefined;
+    try app.init(gpa);
+    defer app.deinit();
+    const ed = &app.ed;
+
+    ed.runStr("open", "note.txt");
+    ed.press("i", "");
+    ed.typeText("const x = 1;");
+    ed.press("Escape", ""); // seals the insert unit (the fix)
+
+    // Fumble: delete the whole line, then undo. `u` must undo ONLY the dd — not
+    // reach back into the (now separate) typing unit. Before the fix, Esc didn't
+    // barrier, so dd coalesced with the typing and `u` reversed both, leaving a
+    // mid-edit state.
+    ed.press("d", "");
+    ed.press("d", ""); // dd — line gone
+    ed.press("u", ""); // undo — the whole line is back
+
+    ed.press("colon", "");
+    ed.typeText("w");
+    ed.press("Return", "");
+    ed.waitSave();
+
+    const disk = try core.file.readAlloc(gpa, "note.txt");
+    defer gpa.free(disk);
+    try t.expectEqualStrings("const x = 1;", disk);
+}
+
 test "authoring: switch between two files with the fuzzy buffer picker" {
     const gpa = t.allocator;
     var app: App = undefined;

@@ -485,6 +485,11 @@ fn visualYank() void {
     weft.setMode("normal");
 }
 fn normal() void {
+    // Leaving insert/visual SEALS the undo unit: `i…Esc` is one unit, so the
+    // next normal-mode command (dd, x, …) is its own — `Esc` then `dd` then `u`
+    // undoes just the delete, not the typing too. (Cursor motions already
+    // barrier; this covers the mode-change boundary a motion doesn't.)
+    weft.run("undo-barrier");
     weft.run("clear-selection");
     weft.setMode("normal");
 }

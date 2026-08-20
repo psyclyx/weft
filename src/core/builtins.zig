@@ -107,6 +107,18 @@ fn cClearSelection(ctx: *Context, args: struct {}) anyerror!Value {
     return ok;
 }
 
+fn cUndoBarrier(ctx: *Context, args: struct {}) anyerror!Value {
+    _ = args;
+    // Seal the open undo unit so the next edit starts a fresh one. Cursor
+    // motions already barrier (Editor.moveTo); this exposes the same seam to a
+    // modal plugin, which fires it on the boundaries a motion doesn't cover —
+    // notably LEAVING insert (vim's `i…Esc` is one undo unit; the next command
+    // must be its own, or `Esc` then `dd` then `u` reverses BOTH the typing and
+    // the delete instead of just the delete).
+    ctx.editor().history.barrier();
+    return ok;
+}
+
 fn cSetMode(ctx: *Context, args: struct { mode: []const u8 }) anyerror!Value {
     // A locked projection mode (magit/git-view) refuses to switch to a different
     // editing mode — the read-only-buffer mode pin (see Keymap.mayLeaveLocked).
@@ -254,6 +266,7 @@ const table = [_]command.Command{
     command.define("cursor-down", "Move the cursor down one line.", cCursorDown),
     command.define("set-mark", "Start a selection at the cursor.", cSetMark),
     command.define("clear-selection", "Drop the selection.", cClearSelection),
+    command.define("undo-barrier", "Seal the undo unit; the next edit starts a new one.", cUndoBarrier),
     command.define("set-mode", "Switch the keymap mode.", cSetMode),
     command.define("quit", "Exit the editor.", cQuit),
     command.define("insert-newline", "Insert a line break at the cursor.", cInsertNewline),
