@@ -162,14 +162,13 @@ const static_cmds = [_]Cmd{
     .{ .name = "enter-op-inner", .handler = enterOpInner },
     .{ .name = "enter-op-around", .handler = enterOpAround },
     .{ .name = "find-file", .handler = findFile },
-    .{ .name = "leader", .handler = enterLeader },
-    .{ .name = "leader-file", .handler = enterLeaderFile },
-    .{ .name = "leader-collab", .handler = enterLeaderCollab },
+    // `leader-cancel` stays: the f/F/t/T char-capture modes bind Escape to it.
+    // The leader/window/goto/zed MENU MODES are gone — those trees are now key
+    // SEQUENCES bound in normal/global (see install), so there's no mode to enter.
     .{ .name = "leader-cancel", .handler = leaderCancel },
     .{ .name = "vim-find-file", .handler = vimFindFile },
     .{ .name = "vim-share", .handler = vimShare },
     .{ .name = "vim-palette", .handler = vimPalette },
-    .{ .name = "window", .handler = enterWindow },
     .{ .name = "vim-split", .handler = vimSplit },
     .{ .name = "vim-vsplit", .handler = vimVsplit },
     .{ .name = "vim-focus-other", .handler = vimFocusOther },
@@ -182,9 +181,7 @@ const static_cmds = [_]Cmd{
     .{ .name = "vim-win-move-right", .handler = vimWinMoveRight },
     .{ .name = "vim-win-move-up", .handler = vimWinMoveUp },
     .{ .name = "vim-win-move-down", .handler = vimWinMoveDown },
-    .{ .name = "goto", .handler = enterGoto },
     .{ .name = "vim-goto-top", .handler = vimGotoTop },
-    .{ .name = "zed", .handler = enterZed },
     .{ .name = "vim-center", .handler = vimCenter },
     .{ .name = "find-f", .handler = enterFindF },
     .{ .name = "find-F", .handler = enterFindBigF },
@@ -292,11 +289,9 @@ export fn init() void {
     weft.bindKey("visual", "Escape", "vim-normal");
     weft.bindKey("insert", "Escape", "vim-normal");
 
-    for ([_][]const u8{ "leader", "leader-file", "leader-collab", "window", "goto", "zed" }) |m| {
-        weft.textInput(m, null);
-        weft.menuMode(m);
-        weft.bindKey(m, "Escape", "leader-cancel");
-    }
+    // No leader/window/goto/zed MODES: those trees are key sequences now (below).
+    // Only the f/F/t/T single-char capture modes remain — genuinely dynamic (the
+    // next key is arbitrary text), so they stay modes, not a static chord trie.
     const finds = [_][2][]const u8{
         .{ "find-f", "do-find-f" }, .{ "find-F", "do-find-F" },
         .{ "find-t", "do-find-t" }, .{ "find-T", "do-find-T" },
@@ -319,28 +314,34 @@ export fn init() void {
     weft.bindKey("ex", "C-u", "ex-clear");
 
     const np = [_][2][]const u8{
-        .{ "colon", "vim-ex" },                   .{ "space", "leader" },
-        .{ "g", "goto" },                         .{ "z", "zed" },
-        .{ "f", "find-f" },                       .{ "F", "find-F" },
-        .{ "t", "find-t" },                       .{ "T", "find-T" },
-        .{ "C-d", "scroll-half-down" },           .{ "C-u", "scroll-half-up" },
-        .{ "C-f", "scroll-page-down" },           .{ "C-b", "scroll-page-up" },
-        .{ "C-e", "scroll-line-down" },           .{ "C-y", "scroll-line-up" },
+        .{ "colon", "vim-ex" },
+        .{ "f", "find-f" },
+        .{ "F", "find-F" },
+        .{ "t", "find-t" },
+        .{ "T", "find-T" },
+        .{ "C-d", "scroll-half-down" },
+        .{ "C-u", "scroll-half-up" },
+        .{ "C-f", "scroll-page-down" },
+        .{ "C-b", "scroll-page-up" },
+        .{ "C-e", "scroll-line-down" },
+        .{ "C-y", "scroll-line-up" },
         .{ "C-bracketright", "goto-definition" },
     };
     for (np) |b| weft.bindKey("normal", b[0], b[1]);
-    // The window prefix works EVERYWHERE (the global layer), not just normal —
-    // C-w to split/focus from insert, dired, magit, a menu, etc.
-    weft.bindKey("global", "C-w", "window");
     weft.bindKey("default", "C-g", "cancel");
     weft.bindKey("insert", "C-n", "complete");
 
-    weft.bindKey("leader", "f", "leader-file");
-    weft.bindKey("leader", "c", "leader-collab");
-    weft.bindKey("leader", "space", "pick-commands");
-    weft.bindKey("leader-file", "f", "vim-find-file");
-    weft.bindKey("leader-collab", "s", "vim-share");
-    weft.bindKey("leader-collab", "h", "vim-palette");
+    // The leader tree, as SEQUENCES rooted at `space` — `space` is just the first
+    // key of a chord (isPrefix holds it pending; which-key shows the next keys),
+    // NOT a mode you enter. A user config (config.js) layers a fuller tree over
+    // this minimal default at prio_config.
+    weft.bindKey("normal", "space space", "pick-commands"); // SPC SPC — M-x
+    weft.bindKey("normal", "space f f", "vim-find-file"); // SPC f f — find file
+    weft.bindKey("normal", "space c s", "vim-share"); // SPC c s — collab share
+    weft.bindKey("normal", "space c h", "vim-palette"); // SPC c h — palette
+    // gg / zz as two-key sequences (goto-top / center).
+    weft.bindKey("normal", "g g", "vim-goto-top");
+    weft.bindKey("normal", "z z", "vim-center");
     // C-w …: split/close, focus (h/j/k/l or arrows), move/swap (H/J/K/L or
     // shifted arrows). Shift lives in the letter keysym (H), not `S-h`;
     // arrows have no shifted keysym so they take an explicit `S-`.
@@ -358,9 +359,17 @@ export fn init() void {
         .{ "S-Down", "vim-win-move-down" },   .{ "S-Up", "vim-win-move-up" },
         .{ "S-Right", "vim-win-move-right" },
     };
-    for (win) |b| weft.bindKey("window", b[0], b[1]);
-    weft.bindKey("goto", "g", "vim-goto-top");
-    weft.bindKey("zed", "z", "vim-center");
+    // Bound in `global` as `C-w <key>` SEQUENCES, so the window prefix works
+    // from EVERY mode (insert, dired, magit, mid-editing) — the same universal
+    // reach the old single global `C-w` menu key had, now a real chord. `C-w`
+    // alone holds pending; which-key lists these as its completions. `space C-w`
+    // is still inert (a distinct chord), never this — global matches only at a
+    // sequence's head.
+    for (win) |b| {
+        var buf: [16]u8 = undefined;
+        const seq = std.fmt.bufPrint(&buf, "C-w {s}", .{b[0]}) catch continue;
+        weft.bindKey("global", seq, b[1]);
+    }
     weft.bindKey("pick", "M-n", "pick-narrow");
     weft.bindKey("pick", "M-u", "pick-widen");
     weft.bindKey("pick", "M-s", "pick-style-cycle");
@@ -544,16 +553,8 @@ fn openChosen(choice: []const u8) void {
     weft.runStr("open", choice);
 }
 
-// ── Leader / prefix chords ───────────────────────────────────────────
-fn enterLeader() void {
-    weft.setMode("leader");
-}
-fn enterLeaderFile() void {
-    weft.setMode("leader-file");
-}
-fn enterLeaderCollab() void {
-    weft.setMode("leader-collab");
-}
+// ── Leader / prefix chords (bound as SEQUENCES; the leaves run from normal) ──
+/// Escape out of the f/F/t/T char-capture modes (their only menu-ish remnant).
 fn leaderCancel() void {
     weft.setMode("normal");
 }
@@ -569,9 +570,6 @@ fn vimShare() void {
 }
 fn vimPalette() void {
     thenNormal("pick-commands");
-}
-fn enterWindow() void {
-    weft.setMode("window");
 }
 fn vimSplit() void {
     thenNormal("window-split");
@@ -611,15 +609,9 @@ fn vimWinMoveUp() void {
 fn vimWinMoveDown() void {
     thenNormal("window-move-down");
 }
-fn enterGoto() void {
-    weft.setMode("goto");
-}
 fn vimGotoTop() void {
     weft.setMode("normal");
     weft.jump(0);
-}
-fn enterZed() void {
-    weft.setMode("zed");
 }
 fn vimCenter() void {
     thenNormal("center-line");

@@ -189,6 +189,13 @@ pub fn dispatchKey(ctx: *core.command.Context, ev: wayland.KeyEvent) !void {
     if (n > 0) {
         var spec_buf: [80]u8 = undefined;
         const spec = core.Keymap.keyspec(&spec_buf, ev.mods.ctrl, ev.mods.alt, ev.mods.shift, name_buf[0..@intCast(n)]);
+        // Mid-chord, Backspace steps BACK one key of the pending sequence (the
+        // which-key hint pops a level) rather than aborting the whole chord —
+        // the sequence-model replacement for the old menu-nav `menu-escape`.
+        if (ctx.keymap.pending.len > 0 and std.mem.eql(u8, spec, "BackSpace")) {
+            ctx.keymap.popPending(ctx.gpa) catch {};
+            return;
+        }
         // Feed the key through the pending SEQUENCE: a chord that could still
         // extend is held (which-key shows its completions off `keymap.pending`);
         // a completed binding runs; a lone unbound key falls to text insertion;
