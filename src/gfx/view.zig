@@ -33,6 +33,11 @@ pub const Theme = @import("view/Theme.zig");
 /// `Pick`, without hand-building a `core.surface.Surface`.
 pub const popup = @import("view/popup.zig");
 
+/// The UI mesh's `ui/statusline-seg` + `ui/gutter-segment` slots (north-star-
+/// plan §6 W3-1) — host-side providers + the fire/compose helpers
+/// `frame_builder.zig` drives each frame.
+pub const ui_mesh = @import("view/ui_mesh.zig");
+
 // ── Tests ──
 
 test {
@@ -47,4 +52,5 @@ test {
     _ = @import("view/decoration.zig");
     _ = @import("view/linelayout.zig");
     _ = @import("view/render.zig");
+    _ = ui_mesh;
 }

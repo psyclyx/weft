@@ -131,6 +131,9 @@ pub const FrameCtx = struct {
     buffers: *core.Buffers,
     caps: *core.Caps,
     keymap: *core.Keymap,
+    /// The `ui/statusline-seg` + `ui/gutter-segment` mesh Container (north-
+    /// star-plan §6 W3-1) — `frame_builder.zig` fires it each build.
+    ui_mesh: *core.container.Container,
     /// This frame's (today, singular) head — current mode, pending chord,
     /// pick session, echo line (north-star-plan §6 W2a-1).
     head: *core.Head,

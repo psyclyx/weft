@@ -49,15 +49,17 @@ pub fn buildHud(
     });
 
     var col: usize = 0;
-    // Mode chip: colored background, dark text — the loudest indicator.
-    const chip = try std.fmt.allocPrint(scratch, " {s} ", .{hud.mode});
-    col = try segRun(v, scratch, runs, rects, chip, col, base_y, cols_visible, v.theme.background, v.theme.modeChipColor(hud.mode));
-    col += 1;
-    if (hud.buffer_pos) |bp| {
-        col = try segRun(v, scratch, runs, rects, bp, col, base_y, cols_visible, v.theme.status, null);
-        col += 1;
+    // `ui/statusline-seg` mesh (north-star-plan §6 W3-1): mode chip, buffer
+    // position, file/path, collab liveness — composed by `frame_builder` in
+    // Container total order and rendered here as plain segments. The
+    // diagnostics count rides the SAME mesh call but is `align_right`, so it
+    // joins the right-anchored cluster below instead of this loop.
+    for (hud.statusline_segs) |seg| {
+        if (seg.align_right) continue;
+        const color = seg.fg_override orelse v.theme.roleColor(seg.role);
+        col = try segRun(v, scratch, runs, rects, seg.text, col, base_y, cols_visible, color, seg.bg_override);
+        col += seg.gap_after; // spacing is the PREDECESSOR's data — see Seg.gap_after's doc
     }
-    col = try segRun(v, scratch, runs, rects, hud.file orelse "[scratch]", col, base_y, cols_visible, v.theme.foreground, null);
     if (hud.dirty) col = try segRun(v, scratch, runs, rects, " ●", col, base_y, cols_visible, v.theme.diag_warn, null);
     if (hud.backing) |b| {
         const bk = try std.fmt.allocPrint(scratch, " ({s})", .{b});
@@ -74,10 +76,6 @@ pub fn buildHud(
             col = try segRun(v, scratch, runs, rects, fetched, col, base_y, cols_visible, v.theme.diag_warn, null);
         }
     }
-    if (hud.link) |l| {
-        const lk = try std.fmt.allocPrint(scratch, "  link:{s}", .{l});
-        col = try segRun(v, scratch, runs, rects, lk, col, base_y, cols_visible, v.theme.md_link, null);
-    }
     if (hud.trust) |tr| {
         const tt = try std.fmt.allocPrint(scratch, "  {s}", .{tr});
         col = try segRun(v, scratch, runs, rects, tt, col, base_y, cols_visible, v.theme.status, null);
@@ -87,15 +85,17 @@ pub fn buildHud(
         col = try segRun(v, scratch, runs, rects, em, col, base_y, cols_visible, v.theme.foreground, null);
     }
 
-    // Right-anchored cluster: peers then diagnostics, measured backward.
-    const status_diag_count = if (hud.diag_layer) |dl| dl.spanCount() else 0;
+    // Right-anchored cluster: peers, then the mesh's right-anchored segments
+    // (today: the diagnostics count), measured backward.
     var right_segs: std.ArrayList(struct { text: []const u8, color: [4]f32 }) = .empty;
     if (hud.plugin_status) |st|
         try right_segs.append(scratch, .{ .text = try std.fmt.allocPrint(scratch, "{s}  ", .{st}), .color = v.theme.accent });
     if (hud.peers > 0)
         try right_segs.append(scratch, .{ .text = try std.fmt.allocPrint(scratch, "✦{d} ", .{hud.peers}), .color = v.theme.accent });
-    if (status_diag_count > 0)
-        try right_segs.append(scratch, .{ .text = try std.fmt.allocPrint(scratch, "!{d} ", .{status_diag_count}), .color = v.theme.diag_error });
+    for (hud.statusline_segs) |seg| {
+        if (!seg.align_right) continue;
+        try right_segs.append(scratch, .{ .text = seg.text, .color = seg.fg_override orelse v.theme.roleColor(seg.role) });
+    }
     var right_w: usize = 0;
     for (right_segs.items) |seg| right_w += std.unicode.utf8CountCodepoints(seg.text) catch seg.text.len;
     if (right_w > 0 and right_w < cols_visible) {

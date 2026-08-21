@@ -10,6 +10,7 @@ const std = @import("std");
 const stemma = @import("stemma");
 const core = @import("../../core/core.zig");
 const region = @import("../region.zig");
+const ui_mesh = @import("ui_mesh.zig");
 
 const InlineAttr = core.capability.InlineAttr;
 
@@ -30,16 +31,13 @@ pub const MdInline = struct {
     }
 };
 
-/// What the frame shows besides the buffer: mode, file, dirtiness, and
-/// the picker when one is open. Plain data — the caller assembles it,
-/// the view renders it.
+/// What the frame shows besides the buffer: mode, dirtiness, the composed
+/// `ui/statusline-seg`/`ui/gutter-segment` mesh output, and the picker when
+/// one is open. Plain data — the caller assembles it, the view renders it.
 pub const Hud = struct {
     mode: []const u8,
-    file: ?[]const u8 = null,
     dirty: bool = false,
     save_failed: bool = false,
-    /// "2/3" — position in the buffer list.
-    buffer_pos: ?[]const u8 = null,
     /// Backing kind chip: "file" | "shell" | "tool" | "@shared" | null.
     backing: ?[]const u8 = null,
     /// Save progress chip: "saving…" | "save stale" | null.
@@ -73,11 +71,22 @@ pub const Hud = struct {
     cursor_diag: ?[]const u8 = null,
     /// Remote peers' cursors (replicated feed layer).
     presence_layer: ?*const core.layers.Layer = null,
-    /// Collab link liveness for the status line.
-    link: ?[]const u8 = null,
     /// Peer trust chip: "✓ verified" | "⚠ unverified" | null (the host we
     /// connected out to; see known_peers / the SAS).
     trust: ?[]const u8 = null,
+    /// The `ui/statusline-seg` mesh's composed output (north-star-plan §6
+    /// W3-1) — mode chip, buffer position, file/path, collab liveness (left
+    /// cluster) and the diagnostics count (right-anchored) all come from
+    /// here now; `statusline.zig` renders this list, it no longer formats
+    /// those chips itself. Empty when the caller never fired the mesh (every
+    /// pre-W3 test/harness call site) — those chips simply don't render,
+    /// same as any other omitted Hud field.
+    statusline_segs: []const ui_mesh.Seg = &.{},
+    /// The `ui/gutter-segment` mesh, resolved ONCE for this frame (north-
+    /// star-plan §6 W3-1) — null when nothing is bound (today's default: no
+    /// visual gutter, unchanged). See `ui_mesh.zig`'s module doc for the
+    /// "fire once per frame, invoke per visible row" shape.
+    gutter: ?ui_mesh.GutterFrame = null,
     /// which-key: the current prefix mode's bindings, shown as a panel
     /// while a chord is pending (null when not in a menu mode).
     which_key: ?[]const core.Keymap.Binding = null,

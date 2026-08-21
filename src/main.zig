@@ -426,6 +426,7 @@ pub fn main(init: std.process.Init) !void {
         .buffers = buffers,
         .caps = &session.caps,
         .keymap = &session.keymap,
+        .ui_mesh = &session.ui_mesh,
         .head = &session.head,
         .cursor_cfg = &session.cursor_cfg,
         .plugins = &plugins,

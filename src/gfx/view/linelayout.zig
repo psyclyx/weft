@@ -15,6 +15,7 @@ const stemma = @import("stemma");
 const core = @import("../../core/core.zig");
 const layout = @import("../layout.zig");
 const view = @import("../view.zig");
+const ui_mesh = @import("ui_mesh.zig");
 
 const View = view.View;
 const Run = view.Run;
@@ -39,6 +40,11 @@ pub const StyleInputs = struct {
     /// the text, never in the document. dired's metadata/arrow/mark ride this,
     /// so the buffer text is only the editable name (yy yanks the name alone).
     deco: ?*const core.layers.Layer = null,
+    /// The `ui/gutter-segment` mesh's per-frame resolution (north-star-plan
+    /// §6 W3-1), passed through from `Hud.gutter` unchanged — null (today's
+    /// default) means no gutter cells render, at the cost of one pointer
+    /// copy per frame.
+    gutter: ?ui_mesh.GutterFrame = null,
 };
 
 /// The face + size + color a markdown attribute renders as.
@@ -98,6 +104,7 @@ pub fn resolveStyleInputs(
         s.diag_base = vis_start;
     }
     s.deco = hud.decorations_layer;
+    s.gutter = hud.gutter;
     return s;
 }
 
@@ -149,7 +156,8 @@ fn layoutMonoLine(
     // them, and they're never in the document — `yy` yanks only the real line.
     var pfx_bytes: std.ArrayList(u8) = .empty;
     var col: usize = 0;
-    if (styles.deco) |dl| col = try layoutRowPrefix(v, scratch, dl, line, cols_visible, &pfx_bytes, &cells);
+    if (styles.gutter) |gf| col = try layoutGutterPrefix(v, scratch, gf, line, row, cols_visible, &pfx_bytes, &cells);
+    if (styles.deco) |dl| col = try layoutRowPrefix(v, scratch, dl, line, cols_visible, &pfx_bytes, &cells, col);
     const pfx_len = pfx_bytes.items.len;
 
     var it = (std.unicode.Utf8View.init(text) catch return error.InvalidUtf8).iterator();
@@ -218,6 +226,7 @@ fn layoutRowPrefix(
     cols_visible: usize,
     pfx_bytes: *std.ArrayList(u8),
     cells: *std.ArrayList(snail.Cell),
+    start_col: usize,
 ) !usize {
     // Collect this row's virtual_before decorations, ordered by anchor so a row
     // with several (arrow, then metadata) reads left-to-right deterministically.
@@ -232,14 +241,14 @@ fn layoutRowPrefix(
         segs[n] = .{ .start = s.start, .kind = s.kind, .message = s.message };
         n += 1;
     }
-    if (n == 0) return 0;
+    if (n == 0) return start_col;
     std.mem.sort(@TypeOf(segs[0]), segs[0..n], {}, struct {
         fn lt(_: void, a: @TypeOf(segs[0]), b: @TypeOf(segs[0])) bool {
             return a.start < b.start;
         }
     }.lt);
 
-    var col: usize = 0;
+    var col: usize = start_col;
     for (segs[0..n]) |seg| {
         // `role` is a styles-palette class; clamp an out-of-range value rather
         // than panic on @enumFromInt (StyleClass is contiguous 0..=muted).
@@ -247,6 +256,54 @@ fn layoutRowPrefix(
         const cls: StyleClass = if (raw <= @intFromEnum(StyleClass.muted)) @enumFromInt(raw) else .muted;
         const color = v.theme.styleColor(cls);
         var it = (std.unicode.Utf8View.init(seg.message) catch continue).iterator();
+        while (it.nextCodepointSlice()) |cp| {
+            if (col >= cols_visible) break;
+            const b0 = pfx_bytes.items.len;
+            try pfx_bytes.appendSlice(scratch, cp);
+            try cells.append(scratch, .{
+                .source = .{ .start = @intCast(b0), .end = @intCast(b0 + cp.len) },
+                .column = @intCast(col),
+                .color = color,
+            });
+            col += 1;
+        }
+    }
+    return col;
+}
+
+/// Lay out this row's `ui/gutter-segment` cells (north-star-plan §6 W3-1) as
+/// leading dimmed cells, BEFORE the decoration prefix `layoutRowPrefix`
+/// builds — the same leading-cell mechanism, generalized to a second
+/// producer. `gf.bindings` is the ALREADY-RESOLVED, priority-sorted provider
+/// list (`ui_mesh.gutterBindings`, fired once for the whole frame); this
+/// call is the "invoke per visible row" half — no Container scan here, one
+/// fn-pointer call per (row × eligible provider). Empty `bindings` (nothing
+/// bound — today's default) returns 0 immediately without allocating or
+/// calling anything past the length check. Returns the first column past
+/// the gutter, so the decoration/real-text prefixes continue from there.
+fn layoutGutterPrefix(
+    v: *View,
+    scratch: Allocator,
+    gf: ui_mesh.GutterFrame,
+    line: stemma.Range,
+    row: usize,
+    cols_visible: usize,
+    pfx_bytes: *std.ArrayList(u8),
+    cells: *std.ArrayList(snail.Cell),
+) !usize {
+    if (gf.bindings.len == 0) return 0;
+    var args: ui_mesh.GutterLineArgs = .{
+        .line = row,
+        .row = line,
+        .diag_layer = gf.diag_layer,
+        .bp_lines = gf.bp_lines,
+        .theme = &v.theme,
+    };
+    const segs = try ui_mesh.gutterCellsForLine(gf.bindings, scratch, &args);
+    var col: usize = 0;
+    for (segs) |seg| {
+        const color = seg.fg_override orelse v.theme.roleColor(seg.role);
+        var it = (std.unicode.Utf8View.init(seg.text) catch continue).iterator();
         while (it.nextCodepointSlice()) |cp| {
             if (col >= cols_visible) break;
             const b0 = pfx_bytes.items.len;
@@ -513,6 +570,49 @@ test "decorations: a virtual_before decoration draws leading cells and shifts th
     // The name cells begin at column 5 (past the prefix).
     try testing.expectEqual(@as(u32, 5), runs.items[0].place.cell[5].column);
     // yy-name-only is structural: the document holds no metadata bytes at all.
+    const s = try doc.text().toOwnedSlice(gpa);
+    defer gpa.free(s);
+    try testing.expectEqualStrings("main.zig\n", s);
+}
+
+test "gutter: a bound line-numbers provider draws leading cells through the real render path" {
+    const gpa = testing.allocator;
+    var v = try View.init(gpa, @embedFile("font_mono"), 16);
+    defer v.deinit();
+
+    var doc = try core.Document.init(gpa, "user");
+    defer doc.deinit(gpa);
+    try doc.insert(gpa, 0, "main.zig\n");
+
+    // The real mesh machinery end-to-end: declared slots, the DEFAULT gutter
+    // providers (unbound in production — this test is the proof they would
+    // RENDER if bound, closing the bound-but-invisible third-result gap),
+    // resolved once per frame, invoked per row by layoutGutterPrefix.
+    var mesh = core.container.Container.init(gpa);
+    defer mesh.deinit();
+    try ui_mesh.declareSlots(&mesh);
+    try ui_mesh.bindDefaultGutter(&mesh);
+
+    var arena = std.heap.ArenaAllocator.init(gpa);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const bindings = try ui_mesh.gutterBindings(&mesh, a, .{ .mode = "normal" });
+    try testing.expectEqual(@as(usize, 3), bindings.len);
+
+    const si: StyleInputs = .{ .gutter = .{ .bindings = bindings } };
+    var runs: std.ArrayList(Run) = .empty;
+    const vl = try layoutLine(&v, a, a, &runs, doc.text(), 0, 0, 40, null, si, null);
+
+    // Row 0 → "1 " = 2 leading gutter cells; diag/breakpoint providers opt
+    // out (no layer, no bp lines), contributing nothing. The caret at
+    // offset 0 sits past the gutter, exactly like the decoration prefix.
+    try testing.expectEqual(@as(usize, 0), vl.stops[0].off);
+    try testing.expectApproxEqAbs(v.origin_x + 2 * v.cell_w, vl.stops[0].x, 0.01);
+    try testing.expectEqual(@as(usize, 1), runs.items.len);
+    // 2 gutter cells + "main.zig" (8) = 10 cells; text starts at column 2.
+    try testing.expectEqual(@as(usize, 10), runs.items[0].place.cell.len);
+    try testing.expectEqual(@as(u32, 2), runs.items[0].place.cell[2].column);
+    // The document holds no gutter bytes — the gutter is chrome, not content.
     const s = try doc.text().toOwnedSlice(gpa);
     defer gpa.free(s);
     try testing.expectEqualStrings("main.zig\n", s);

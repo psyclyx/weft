@@ -99,6 +99,28 @@ pub const ProviderRef = union(enum) {
     /// by `seq`, never by `id` alone.
     caps_provider: struct { id: []const u8, seq: u64 },
     value: []const u8,
+    /// North-star-plan §6 W3 — a host-side native UI-mesh provider: an
+    /// in-process function + opaque context. This is the in-process
+    /// transport's PREVIEW of D2's future schema-directed guest payloads
+    /// (F6, §4 C18): it exists so a host-side slot CLIENT (the UI mesh —
+    /// `ui/statusline-seg`, `ui/gutter-segment`) can prove `Container`'s
+    /// composition machinery on real UI before any guest can bind a slot
+    /// (P2). Deliberately narrow — a real guest provider will marshal
+    /// through a schema VALUE, never a raw Zig function pointer, so this
+    /// variant does not try to anticipate that shape; it is deleted (or
+    /// gains a schema-marshalled sibling) the day D2 ships, not extended.
+    /// `call`/`ctx`/its `args` parameter are erased exactly like
+    /// `caps_provider`'s `id`/`seq` are erased to an opaque handle:
+    /// `Container` never dereferences any of them — only the ADAPTER that
+    /// declared the slot (the UI mesh, `gfx/view/ui_mesh.zig`) knows the
+    /// concrete `Args` type on both ends of a call for a given slot name.
+    ui_provider: struct {
+        call: *const fn (ctx: ?*anyopaque, gpa: Allocator, args: *anyopaque) anyerror!bool,
+        /// Owned by the BINDER: the Container never dereferences or frees
+        /// it; whoever binds must keep it alive until the matching
+        /// `unbindOwnerExact`/`unbindOwnerPrefix` and free it after.
+        ctx: ?*anyopaque = null,
+    },
 };
 
 pub const Binding = struct {
@@ -514,6 +536,49 @@ test "container: host-side client declares a new slot end-to-end (declare/bind/r
     defer ex.deinit();
     try t.expectEqual(@as(usize, 2), ex.eligible.len);
     try t.expectEqualStrings("howdy", ex.eligible[ex.winner.?].provider.value);
+}
+
+test "container: ui_provider — an erased host fn/ctx round-trips through bind/resolve, Container never dereferences it" {
+    // Proves the shape north-star-plan §6 W3 needs: Container stores the fn
+    // pointer + ctx opaquely (like caps_provider's id/seq) and the CALLER
+    // (an adapter, not Container) is the one who knows the concrete Args
+    // type and invokes `call`.
+    const gpa = t.allocator;
+    var c = Container.init(gpa);
+    defer c.deinit();
+    try declared(&c, "ui/test-seg", .ordered_union);
+
+    const Ctx = struct { tag: []const u8 };
+    var ctx1: Ctx = .{ .tag = "alpha" };
+    var ctx2: Ctx = .{ .tag = "beta" };
+    const Impl = struct {
+        fn call(ctx: ?*anyopaque, gpa2: Allocator, args: *anyopaque) anyerror!bool {
+            _ = gpa2;
+            const c2: *Ctx = @ptrCast(@alignCast(ctx.?));
+            const out: *std.ArrayList([]const u8) = @ptrCast(@alignCast(args));
+            try out.append(t.allocator, c2.tag);
+            return true;
+        }
+    };
+    try c.bind(.{ .slot = "ui/test-seg", .provider = .{ .ui_provider = .{ .call = Impl.call, .ctx = &ctx1 } }, .predicate = .{ .all = &.{} }, .priority = 10, .owner = "a" });
+    try c.bind(.{ .slot = "ui/test-seg", .provider = .{ .ui_provider = .{ .call = Impl.call, .ctx = &ctx2 } }, .predicate = .{ .all = &.{} }, .priority = 5, .owner = "b" });
+
+    const list = try c.eligible(gpa, "ui/test-seg", .{});
+    defer gpa.free(list);
+    try t.expectEqual(@as(usize, 2), list.len);
+
+    var out: std.ArrayList([]const u8) = .empty;
+    defer out.deinit(gpa);
+    for (list) |b| {
+        switch (b.provider) {
+            .ui_provider => |up| _ = try up.call(up.ctx, gpa, @ptrCast(&out)),
+            else => unreachable,
+        }
+    }
+    // Priority order preserved: "alpha" (priority 10) before "beta" (priority 5).
+    try t.expectEqual(@as(usize, 2), out.items.len);
+    try t.expectEqualStrings("alpha", out.items[0]);
+    try t.expectEqualStrings("beta", out.items[1]);
 }
 
 test {

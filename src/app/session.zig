@@ -25,6 +25,7 @@ const cursor_config = @import("cursor_config.zig");
 const providers = @import("providers.zig");
 const setup = @import("setup.zig");
 const frame = @import("frame.zig");
+const ui_mesh = @import("../gfx/view.zig").ui_mesh;
 
 pub const Session = struct {
     gpa: std.mem.Allocator,
@@ -57,6 +58,19 @@ pub const Session = struct {
     quit: bool,
     /// Self-referential: points at the fields above — built in place.
     cmd_ctx: core.command.Context,
+
+    /// The UI mesh's `ui/statusline-seg` + `ui/gutter-segment` slots (north-
+    /// star-plan §6 W3-1) — a Container distinct from `actions`'/`caps`' own
+    /// (each still holds its OWN instance per `System.zig`'s doc; F5's
+    /// fold-in into ONE shared Container is a later, named W3 step, not
+    /// this one). Declared at construction; the five default statusline
+    /// providers are bound here too (so the statusline renders unchanged
+    /// out of the box) — the three default gutter providers are NOT bound
+    /// (see `ui_mesh.zig`'s module doc: no live gutter exists today, so
+    /// nothing regresses by construction). NOTE: no config/plugin path
+    /// reaches this Container yet — reachability lands with the shared-
+    /// Container fold-in or a manifest verb (north-star-plan task #19).
+    ui_mesh: core.container.Container,
 
     // ── Capability-consumer UIs (written against capability names only) ──
     completion_ui: core.complete_ui.CompletionUi,
@@ -97,6 +111,10 @@ pub const Session = struct {
             .head = &self.head,
         };
         try core.builtins.install(gpa, &self.commands, &self.keymap, &self.head, &self.actions);
+        self.ui_mesh = core.container.Container.init(gpa);
+        errdefer self.ui_mesh.deinit();
+        try ui_mesh.declareSlots(&self.ui_mesh);
+        try ui_mesh.bindDefaultStatusline(&self.ui_mesh);
         // Capability consumers — written against capability names only.
         self.completion_ui = .empty;
         try setup.registerCapabilityConsumers(gpa, &self.commands, &self.completion_ui, grammars);
@@ -111,6 +129,7 @@ pub const Session = struct {
     /// no heap.)
     pub fn deinit(self: *Session, gpa: std.mem.Allocator) void {
         self.cursor_cfg.deinit();
+        self.ui_mesh.deinit();
         self.head.deinit(gpa);
         self.actions.deinit();
         self.caps.deinit();

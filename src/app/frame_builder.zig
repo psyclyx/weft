@@ -158,10 +158,16 @@ pub const FrameBuilder = struct {
 
         // Markdown styling for .md buffers: analyze a window (whole doc
         // when small) into per-byte attributes each damage frame — a
-        // stale paint is slightly-old truth, like highlight bulk.
+        // stale paint is slightly-old truth, like highlight bulk. Reused
+        // below for the `ui/statusline-seg`/`ui/gutter-segment` mesh output
+        // (segment text, the eligible-bindings slice) — both are per-frame
+        // scratch, reclaimed by this same arena, no manual free needed.
         var md_arena = std.heap.ArenaAllocator.init(gpa);
         defer md_arena.deinit();
-        const md_inline = mdInlineFor(md_arena.allocator(), editor, editor.backingPath() orelse abuf.name, self.view.top_row);
+        const mesh_gpa = md_arena.allocator();
+        const file_name = editor.backingPath() orelse abuf.name;
+        const md_inline = mdInlineFor(mesh_gpa, editor, file_name, self.view.top_row);
+        const diag_layer = fx.caps.layers.find(&editor.doc, "diagnostics");
 
         var pos_buf: [24]u8 = undefined;
         const buffer_pos = blk: {
@@ -254,6 +260,30 @@ pub const FrameBuilder = struct {
             const len = editor.text().byteLen();
             break :fblk .{ .start = @min(fs.start, len), .end = @min(fs.end, len) };
         };
+        // `ui/statusline-seg` (north-star-plan §6 W3-1): fire the mesh with
+        // this frame's mode/file/position/diagnostics/link — the same
+        // values the pre-mesh direct assembly used — and hand the composed
+        // segments to the Hud. `ui/gutter-segment` resolves its eligible
+        // provider list once too (empty by default: `Session.init` never
+        // binds the default gutter providers, so this is one cheap linear
+        // scan over a handful of bindings that always comes back empty in
+        // production today — see `ui_mesh.zig`'s module doc).
+        var statusline_args: view_mod.ui_mesh.StatuslineArgs = .{
+            .facts = .{ .mode = fx.head.currentMode(), .path = file_name },
+            .file = file_name,
+            .buffer_pos = buffer_pos,
+            .diag_layer = diag_layer,
+            .link = link_note,
+            .theme = &self.view.theme,
+        };
+        const statusline_segs = try view_mod.ui_mesh.fireStatusline(fx.ui_mesh, mesh_gpa, &statusline_args);
+        const gutter_bindings = try view_mod.ui_mesh.gutterBindings(fx.ui_mesh, mesh_gpa, statusline_args.facts);
+        const gutter_frame: view_mod.ui_mesh.GutterFrame = .{
+            .bindings = gutter_bindings,
+            .diag_layer = diag_layer,
+            .bp_lines = core.breakpoints.get(file_name),
+        };
+
         const hud: view_mod.Hud = .{
             .mode = fx.head.currentMode(),
             .which_key = if (wk_hints.items.len > 0) wk_hints.items else null,
@@ -264,10 +294,10 @@ pub const FrameBuilder = struct {
             .md_inline = md_inline,
             .cursor_style = fx.cursor_cfg.styleFor(fx.cursor_cfg.resolveMode(fx.keymap, fx.head, fx.head.currentMode())),
             .cursor_on = if (fx.cursor_cfg.blinkFor(fx.cursor_cfg.resolveMode(fx.keymap, fx.head, fx.head.currentMode()))) act.blink_on else true,
-            .file = editor.backingPath() orelse abuf.name,
+            .statusline_segs = statusline_segs,
+            .gutter = gutter_frame,
             .dirty = editor.isDirty(gpa) catch true,
             .save_failed = editor.save_state == .failed,
-            .buffer_pos = buffer_pos,
             .backing = backing_chip,
             .save_note = switch (editor.save_state) {
                 .saving => "saving…",
@@ -281,16 +311,15 @@ pub const FrameBuilder = struct {
             .pick = if (fx.head.pick.active) &fx.head.pick else null,
             .highlight_layer = fx.caps.layers.find(&editor.doc, "highlight"),
             .styles_layer = fx.caps.layers.find(&editor.doc, "styles"),
-            .diag_layer = fx.caps.layers.find(&editor.doc, "diagnostics"),
+            .diag_layer = diag_layer,
             .decorations_layer = fx.caps.layers.find(&editor.doc, "decorations"),
             .presence_layer = fx.caps.layers.find(&editor.doc, "presence"),
-            .link = link_note,
             .trust = if (fx.collab_session.* != null) blk: {
                 const fp = fx.noted_host_fp.* orelse break :blk null;
                 break :blk collab.hostTrustChip(fx.known_peers.trust(fp));
             } else null,
             .cursor_diag = blk: {
-                const dl = fx.caps.layers.find(&editor.doc, "diagnostics") orelse break :blk null;
+                const dl = diag_layer orelse break :blk null;
                 const cur = editor.cursorOffset();
                 for (0..dl.spanCount()) |i| {
                     const d = dl.resolvedSpan(i);
@@ -351,16 +380,35 @@ pub const FrameBuilder = struct {
             // attached by main's visible-pane loop, so resolveSyntax finds it.
             if (providers.resolveSyntax(ob)) |syn|
                 self.publishHighlight(gpa, &ob.editor, syn, fx.caps, slot.pane.top_row) catch {};
+            const other_name = ob.editor.backingPath() orelse ob.name;
+            const other_diag = fx.caps.layers.find(&ob.editor.doc, "diagnostics");
+            // A peeked pane's own `ui/statusline-seg` fire: mode + file only
+            // (no buffer position/link — matches today's peeked-pane
+            // rendering, which never showed those either) plus its own
+            // diagnostics count and gutter context.
+            var other_args: view_mod.ui_mesh.StatuslineArgs = .{
+                .facts = .{ .mode = fx.head.currentMode(), .path = other_name },
+                .file = other_name,
+                .diag_layer = other_diag,
+                .theme = &self.view.theme,
+            };
+            const other_segs = try view_mod.ui_mesh.fireStatusline(fx.ui_mesh, arena_state.allocator(), &other_args);
+            const other_gutter: view_mod.ui_mesh.GutterFrame = .{
+                .bindings = try view_mod.ui_mesh.gutterBindings(fx.ui_mesh, arena_state.allocator(), other_args.facts),
+                .diag_layer = other_diag,
+                .bp_lines = core.breakpoints.get(other_name),
+            };
             const other_hud: view_mod.Hud = .{
                 .mode = fx.head.currentMode(),
-                .file = ob.editor.backingPath() orelse ob.name,
+                .statusline_segs = other_segs,
+                .gutter = other_gutter,
                 .cursor_on = false, // the caret belongs to the focused pane
                 .pane_border = slot.border,
                 // A peeked pane keeps its syntax + markdown + tool colors + diagnostics.
                 .highlight_layer = fx.caps.layers.find(&ob.editor.doc, "highlight"),
-                .md_inline = mdInlineFor(arena_state.allocator(), &ob.editor, ob.editor.backingPath() orelse ob.name, slot.pane.top_row),
+                .md_inline = mdInlineFor(arena_state.allocator(), &ob.editor, other_name, slot.pane.top_row),
                 .styles_layer = fx.caps.layers.find(&ob.editor.doc, "styles"),
-                .diag_layer = fx.caps.layers.find(&ob.editor.doc, "diagnostics"),
+                .diag_layer = other_diag,
                 .decorations_layer = fx.caps.layers.find(&ob.editor.doc, "decorations"),
             };
             const bo = try self.view.build(arena_state.allocator(), &ob.editor, other_hud, &slot.pane.top_row, slot.rect, .{}, world_to_pixel);

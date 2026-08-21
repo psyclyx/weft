@@ -384,9 +384,16 @@ pub const Editor = struct {
     /// artifact to eyeball; best-effort, never asserts).
     pub fn snapshot(self: *Editor, name: []const u8) void {
         const v = self.ensureView() catch return;
+        var args: view_mod.ui_mesh.StatuslineArgs = .{
+            .facts = .{ .mode = self.head.currentMode() },
+            .file = self.buffers.active().name,
+            .theme = &v.theme,
+        };
+        const segs = view_mod.ui_mesh.fireStatusline(&self.session.ui_mesh, self.gpa, &args) catch &.{};
+        defer view_mod.ui_mesh.freeSegs(self.gpa, segs);
         const hud: view_mod.Hud = .{
             .mode = self.head.currentMode(),
-            .file = self.buffers.active().name,
+            .statusline_segs = segs,
             .pick = if (self.pick.active) self.pick else null,
         };
         const pixels = harness.renderView(self.gpa, v, &self.buffers.active().editor, hud, app_w, app_h) catch return;
@@ -441,9 +448,15 @@ pub const Editor = struct {
         }
         for (slots[0..n]) |slot| {
             const b = self.buffers.get(slot.pane.buffer_id) orelse self.buffers.active();
+            var args: view_mod.ui_mesh.StatuslineArgs = .{
+                .facts = .{ .mode = self.head.currentMode() },
+                .file = b.editor.backingPath() orelse b.name,
+                .theme = &v.theme,
+            };
+            const segs = try view_mod.ui_mesh.fireStatusline(&self.session.ui_mesh, arena.allocator(), &args);
             const hud: view_mod.Hud = .{
                 .mode = self.head.currentMode(),
-                .file = b.editor.backingPath() orelse b.name,
+                .statusline_segs = segs,
                 .cursor_on = slot.focused, // the caret belongs to the focused pane
                 .pane_border = slot.border,
             };
