@@ -27,9 +27,14 @@ export fn on_command(id: u32) void {
     if (id < cmds.len) cmds[id].handler();
 }
 
-/// Create+focus the tool buffer, then fill it with `cmd`'s output async.
+/// Create+focus the tool buffer, then fill it with `cmd`'s output async. Build
+/// and test output is command output like `run`'s, so it enters the same shared
+/// `output` mode — Return jumps to a compiler error's `file:line` (the `run`
+/// plugin owns the mode + output-visit; if it isn't loaded this is an inert
+/// no-op). weft modes are global, so this is reuse, not a hard dependency.
 fn run(cmd: []const u8, name: []const u8) void {
     weft.runStr("buffer-create", name); // creates + focuses an empty scratch
+    weft.setMode("output"); // navigable: Return visits a file:line (see run.zig)
     weft.procToBuffer(cmd, name);
 }
 fn makeBuild() void {
