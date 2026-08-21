@@ -315,6 +315,10 @@ const static_cmds = [_]Cmd{
     .{ .name = "find-F", .handler = enterFindBigF },
     .{ .name = "find-t", .handler = enterFindT },
     .{ .name = "find-T", .handler = enterFindBigT },
+    .{ .name = "vim-repeat-find", .handler = repeatFind },
+    .{ .name = "vim-repeat-find-rev", .handler = repeatFindRev },
+    .{ .name = "vim-replace-char", .handler = enterReplaceChar },
+    .{ .name = "do-replace-char", .handler = doReplaceChar },
     .{ .name = "do-find-f", .handler = doFindF },
     .{ .name = "do-find-F", .handler = doFindBigF },
     .{ .name = "do-find-t", .handler = doFindT },
@@ -475,6 +479,9 @@ export fn init() void {
         weft.textInput(f[0], f[1]);
         weft.bindKey(f[0], "Escape", "leader-cancel");
     }
+    // `r<char>` — same single-key capture shape as f/t (the next key is arbitrary).
+    weft.textInput("replace-char", "do-replace-char");
+    weft.bindKey("replace-char", "Escape", "leader-cancel");
 
     // The `:` command line. `ex` is a text-input mode: unbound printable keys
     // route to `ex-type` (accumulate into the line buffer, re-echoed as ":…");
@@ -494,6 +501,9 @@ export fn init() void {
         .{ "F", "find-F" },
         .{ "t", "find-t" },
         .{ "T", "find-T" },
+        .{ "semicolon", "vim-repeat-find" }, // ; repeat last f/t
+        .{ "comma", "vim-repeat-find-rev" }, //  , repeat reversed
+        .{ "r", "vim-replace-char" }, // r<char> replace under cursor
         .{ "C-d", "scroll-half-down" },
         .{ "C-u", "scroll-half-up" },
         .{ "C-f", "scroll-page-down" },
@@ -939,9 +949,62 @@ fn doFindT() void {
 fn doFindBigT() void {
     doFind('T');
 }
+// The last f/F/t/T target, so `;` repeats it and `,` repeats it reversed.
+var last_find_dir: u8 = 0;
+var last_find_char: u8 = 0;
+
 fn doFind(dir: u8) void {
     weft.setMode("normal");
-    if (weft.argStr(0)) |ch| findCharImpl(dir, ch);
+    if (weft.argStr(0)) |ch| {
+        if (ch.len > 0) {
+            last_find_dir = dir;
+            last_find_char = ch[0];
+        }
+        findCharImpl(dir, ch);
+    }
+}
+/// `;` — repeat the last f/F/t/T in its original direction.
+fn repeatFind() void {
+    if (last_find_dir == 0) return;
+    var buf = [1]u8{last_find_char};
+    findCharImpl(last_find_dir, buf[0..]);
+}
+/// `,` — repeat the last f/F/t/T in the OPPOSITE direction.
+fn repeatFindRev() void {
+    const rev: u8 = switch (last_find_dir) {
+        'f' => 'F',
+        'F' => 'f',
+        't' => 'T',
+        'T' => 't',
+        else => return,
+    };
+    var buf = [1]u8{last_find_char};
+    findCharImpl(rev, buf[0..]);
+}
+
+// ── r: replace the char(s) under the cursor with the next key ─────────
+var replace_count: u32 = 1;
+fn enterReplaceChar() void {
+    replace_count = consumeCount(); // `3rx` replaces three
+    weft.setMode("replace-char");
+}
+/// Replace `replace_count` chars from the cursor with the typed char, bounded to
+/// the current line (vim's `r` never crosses the newline). ASCII replacement for
+/// now — a multibyte target/replacement is the same corner comment.zig's token
+/// carries. Cursor lands on the last replaced char, as in vim.
+fn doReplaceChar() void {
+    weft.setMode("normal");
+    const ch = weft.argStr(0) orelse return;
+    if (ch.len == 0) return;
+    const cur = weft.cursor();
+    const l = weft.lineAt(cur);
+    var n = replace_count;
+    var pos = cur;
+    while (n > 0 and pos < l.end) : (n -= 1) {
+        weft.edit(.{ .start = pos, .end = pos + 1 }, ch);
+        pos += ch.len;
+    }
+    weft.jump(if (pos > cur) pos - ch.len else cur);
 }
 fn findCharImpl(dir: u8, ch_s: []const u8) void {
     if (ch_s.len == 0) return;

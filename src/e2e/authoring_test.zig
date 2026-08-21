@@ -242,6 +242,76 @@ test "authoring: `>`/`<` indent operators — line, text object, visual" {
     }
 }
 
+test "authoring: `f` finds a char, `;` repeats it, `,` repeats reversed" {
+    const gpa = t.allocator;
+    var app: App = undefined;
+    try app.init(gpa);
+    defer app.deinit();
+    const ed = &app.ed;
+
+    // Dots at indices 3, 7, 11. We navigate by find/repeat, then `x` deletes the
+    // char under the cursor — the deleted position is how we observe where we
+    // landed without poking cursor internals.
+    authorFile(ed, "f.txt",
+        \\foo.bar.baz.qux
+        \\
+    );
+
+    ed.chord("g g");
+    ed.press("f", ""); // f<char>
+    ed.typeText("."); // → first dot (index 3)
+    ed.press("semicolon", ""); // ; → next dot (index 7)
+    ed.press("semicolon", ""); // ; → next dot (index 11)
+    ed.press("comma", ""); // , → reversed, back to the dot at index 7
+    ed.press("x", ""); // delete the char there
+    ed.run("save");
+    ed.waitSave();
+
+    const disk = try core.file.readAlloc(gpa, "f.txt");
+    defer gpa.free(disk);
+    // If ; advanced twice and , stepped back once, the cursor sat on the dot at
+    // index 7 — deleting it fuses "bar" and "baz".
+    try t.expect(std.mem.indexOf(u8, disk, "foo.barbaz.qux") != null);
+}
+
+test "authoring: `r` replaces the char under the cursor; `3r` replaces a run" {
+    const gpa = t.allocator;
+    var app: App = undefined;
+    try app.init(gpa);
+    defer app.deinit();
+    const ed = &app.ed;
+
+    authorFile(ed, "r.txt",
+        \\hello world
+        \\
+    );
+
+    // r<char> replaces one char in place; cursor stays on it.
+    ed.chord("g g");
+    ed.press("r", "");
+    ed.typeText("J"); // 'h' → 'J'
+    ed.run("save");
+    ed.waitSave();
+    {
+        const disk = try core.file.readAlloc(gpa, "r.txt");
+        defer gpa.free(disk);
+        try t.expect(std.mem.indexOf(u8, disk, "Jello world") != null);
+    }
+
+    // 3r replaces a run of three (count captured on `r`), still line-bounded.
+    ed.chord("g g");
+    ed.press("3", ""); // count
+    ed.press("r", "");
+    ed.typeText("x"); // J,e,l → x,x,x
+    ed.run("save");
+    ed.waitSave();
+    {
+        const disk = try core.file.readAlloc(gpa, "r.txt");
+        defer gpa.free(disk);
+        try t.expect(std.mem.indexOf(u8, disk, "xxxlo world") != null);
+    }
+}
+
 test "authoring: `C-n` completes a word already in the buffer" {
     const gpa = t.allocator;
     var app: App = undefined;
