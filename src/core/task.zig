@@ -341,9 +341,14 @@ test "hot-section fence flags" {
     assertMayBlock();
 }
 
-/// Monotonic clock (raw syscall — no Io plumbing on hot paths).
+/// Monotonic clock: a RAW syscall (`linux.clock_gettime` — no libc, so no
+/// vDSO fast path either; this is a real syscall, not the ~free vDSO call
+/// glibc's `clock_gettime` would resolve to) — chosen over `std.Io`'s clock
+/// so hot-path/measurement call sites don't have to carry an `Io` instance
+/// for a timestamp. Still cheap relative to anything it might be timing.
 pub fn nowNs() u64 {
     var ts: linux.timespec = undefined;
-    _ = linux.clock_gettime(.MONOTONIC, &ts);
+    const rc = linux.clock_gettime(.MONOTONIC, &ts);
+    assert(linux.errno(rc) == .SUCCESS); // CLOCK_MONOTONIC is always supported on Linux
     return @as(u64, @intCast(ts.sec)) * std.time.ns_per_s + @as(u64, @intCast(ts.nsec));
 }

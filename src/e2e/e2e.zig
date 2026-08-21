@@ -20,4 +20,5 @@ test {
     _ = @import("config_test.zig");
     _ = @import("authoring_test.zig");
     _ = @import("teardown_test.zig");
+    _ = @import("latency_test.zig");
 }

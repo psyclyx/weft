@@ -227,11 +227,38 @@ pub const Editor = struct {
     /// The harness keeps no parallel dispatch logic. `spec` accepts natural
     /// notation ("SPC"/"RET"); we canonicalize it here (the real path gets the
     /// canonical xkb name for free).
+    ///
+    /// A thin wrapper over `pressTimed` (the only difference is discarding the
+    /// timing) — ONE dispatch path here, not two copies that can drift apart
+    /// and quietly invalidate whichever one nothing is watching.
     pub fn press(self: *Editor, spec_in: []const u8, text: []const u8) void {
+        _ = self.pressTimed(spec_in, text);
+    }
+
+    /// Like `press`, but returns the elapsed nanoseconds of the DISPATCH call
+    /// ONLY — `core.task.nowNs()` (the raw-syscall monotonic clock this
+    /// codebase already uses for hot-path timing; `std.time.Timer` needs
+    /// `std.Io` plumbing this call site has no reason to carry) bracketing
+    /// `dispatchSpec`. Key-spec normalization and `syncActivate` sit outside
+    /// the timed window, matching what the real key-to-commit path pays (xkb
+    /// translation happens before dispatch too; buffer-switch notification is
+    /// a rare post-effect, not part of "this keystroke's" cost). `press`
+    /// delegates here and discards the return, so every ordinary keypress in
+    /// the whole e2e suite pays two cheap clock reads — negligible next to a
+    /// dispatch, and the price of having only one implementation to trust.
+    /// This is the measurement instrument's ONLY hook into the app: it lives
+    /// here, on the caller side, so `dispatch.zig` itself carries no timing
+    /// and pays nothing when the return value goes unused. See `latency.zig`
+    /// for the stats built on top of it, and `latency_test.zig` for the
+    /// policy (what/how much to measure, and the regression threshold).
+    pub fn pressTimed(self: *Editor, spec_in: []const u8, text: []const u8) u64 {
         var kbuf: [256]u8 = undefined;
         const spec = core.Keymap.normalizeKey(&kbuf, spec_in);
+        const start = core.task.nowNs();
         dispatch.dispatchSpec(self.ctx, spec, text) catch {};
+        const elapsed = core.task.nowNs() -| start;
         self.syncActivate();
+        return elapsed;
     }
 
     /// Press each key of a space-separated chord in turn — the natural way to

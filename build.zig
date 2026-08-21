@@ -133,22 +133,6 @@ pub fn build(b: *std.Build) void {
         .optimize = optimize,
         .link_libc = true,
     });
-    test_mod.addImport("snail", snail_dep.module("snail"));
-    // CPU rasterizer — a display-free render-to-pixels harness for the
-    // view (gfx/harness.zig), so layout/decoration output can be asserted
-    // and dumped to an image without a compositor.
-    test_mod.addImport("snail-raster", snail_dep.module("snail-raster"));
-    test_mod.addImport("stemma", stemma_dep.module("stemma"));
-    // Same embedded mono face the exe uses — lets layout tests prove the
-    // monospace-as-degenerate-case parity (stop.x == margin + col*cell_w).
-    test_mod.addAnonymousImport("font_mono", .{
-        .root_source_file = snail_dep.path("assets/DejaVuSansMono.ttf"),
-    });
-    test_mod.linkSystemLibrary("fontconfig", .{}); // View tests resolve faces
-    addSyntax(b, test_mod, renderer);
-    addWasm(b, test_mod);
-    embedGuests(b, test_mod);
-    addQuickjs(b, test_mod);
 
     // The weft app internals (core + gfx + app) exposed as ONE named module the
     // e2e harness imports by name (src/weft.zig barrel), so its files under
@@ -171,7 +155,27 @@ pub fn build(b: *std.Build) void {
     addWasm(b, weft_mod);
     embedGuests(b, weft_mod); // core's own wasm-membrane tests @embedFile the catalog
     addQuickjs(b, weft_mod);
-    test_mod.addImport("weft", weft_mod);
+
+    // `test_mod` (the `test` step) and `latency_mod` (the `e2e-latency` step,
+    // below) are two SEPARATE module objects, wired IDENTICALLY through this
+    // one function — see the note by `latency_mod` for why they must be
+    // separate objects. Same doctrine as harness.zig's `press` delegating to
+    // `pressTimed`: one implementation of the wiring, not two copies that can
+    // quietly drift apart.
+    configureTestModule(b, test_mod, snail_dep, stemma_dep, weft_mod, renderer);
+
+    // The dispatch-latency instrument's record/compare switch (north-star-plan
+    // W0a/C10 — src/e2e/latency_test.zig). `test_mod` — the module the plain
+    // `test` step compiles — is HARDCODED to compare-only, always, regardless
+    // of `-Drecord-latency`: it's a module OBJECT, shared verbatim by every
+    // Step.Compile rooted at it, so wiring the live CLI flag into it would let
+    // `zig build test -Drecord-latency=true` silently overwrite the committed
+    // baseline as a side effect of an ordinary test run. The live flag is
+    // wired only into `latency_mod` below, a separate module used exclusively
+    // by the dedicated `e2e-latency` step.
+    const compare_only_opts = b.addOptions();
+    compare_only_opts.addOption(bool, "record", false);
+    test_mod.addOptions("latency_options", compare_only_opts);
 
     const unit_tests = b.addTest(.{ .root_module = test_mod });
     const run_tests = b.addRunArtifact(unit_tests);
@@ -183,6 +187,73 @@ pub fn build(b: *std.Build) void {
     const weft_tests = b.addTest(.{ .root_module = weft_mod });
     const run_weft_tests = b.addRunArtifact(weft_tests);
     test_step.dependOn(&run_weft_tests.step);
+
+    // A second copy of `test_mod`'s wiring — same `configureTestModule` call,
+    // so it cannot drift — used ONLY by the `e2e-latency` step below.
+    // `-Drecord-latency` is a COMPTIME option here, not a runtime env var: it
+    // has to change this module's compiled output, or `zig build`'s artifact
+    // caching would happily replay a stale cached run instead of re-executing
+    // in the new mode.
+    const record_latency = b.option(
+        bool,
+        "record-latency",
+        "With `zig build e2e-latency`: record the dispatch-latency baseline (src/e2e/latency_baseline.zon) instead of comparing against it. No effect on the `test` step.",
+    ) orelse false;
+    const latency_mod = b.createModule(.{
+        .root_source_file = b.path("src/tests.zig"),
+        .target = target,
+        .optimize = optimize,
+        .link_libc = true,
+    });
+    configureTestModule(b, latency_mod, snail_dep, stemma_dep, weft_mod, renderer);
+    const latency_opts = b.addOptions();
+    latency_opts.addOption(bool, "record", record_latency);
+    latency_mod.addOptions("latency_options", latency_opts);
+
+    // A dedicated step for the latency instrument alone (the full `test` step
+    // already runs it too, in compare mode, as part of the e2e suite) — a fast
+    // way to iterate on it, and the documented way to re-record:
+    //   zig build e2e-latency                          # compare against the baseline
+    //   zig build e2e-latency -Drecord-latency=true     # (re-)record the baseline
+    const latency_tests = b.addTest(.{ .root_module = latency_mod, .filters = &.{"e2e/latency"} });
+    const run_latency_tests = b.addRunArtifact(latency_tests);
+    const latency_step = b.step("e2e-latency", "Run (or, with -Drecord-latency=true, record) the dispatch-latency baseline");
+    latency_step.dependOn(&run_latency_tests.step);
+}
+
+/// Wire the shared test-module dependency set (snail/snail-raster/stemma/
+/// embedded font/fontconfig/syntax/wasmtime/embedded guests/quickjs/weft)
+/// onto `mod`. `test_mod` (the `test` step) and `latency_mod` (the
+/// `e2e-latency` step) both call this — it's the ONLY place that wiring is
+/// written, so the two binaries cannot drift apart the way two hand-copied
+/// blocks eventually would. The one thing that may legitimately differ
+/// between callers is added AFTER this returns: which `latency_options`
+/// value they attach.
+fn configureTestModule(
+    b: *std.Build,
+    mod: *std.Build.Module,
+    snail_dep: *std.Build.Dependency,
+    stemma_dep: *std.Build.Dependency,
+    weft_mod: *std.Build.Module,
+    renderer: Renderer,
+) void {
+    mod.addImport("snail", snail_dep.module("snail"));
+    // CPU rasterizer — a display-free render-to-pixels harness for the
+    // view (gfx/harness.zig), so layout/decoration output can be asserted
+    // and dumped to an image without a compositor.
+    mod.addImport("snail-raster", snail_dep.module("snail-raster"));
+    mod.addImport("stemma", stemma_dep.module("stemma"));
+    // Same embedded mono face the exe uses — lets layout tests prove the
+    // monospace-as-degenerate-case parity (stop.x == margin + col*cell_w).
+    mod.addAnonymousImport("font_mono", .{
+        .root_source_file = snail_dep.path("assets/DejaVuSansMono.ttf"),
+    });
+    mod.linkSystemLibrary("fontconfig", .{}); // View tests resolve faces
+    addSyntax(b, mod, renderer);
+    addWasm(b, mod);
+    embedGuests(b, mod);
+    addQuickjs(b, mod);
+    mod.addImport("weft", weft_mod);
 }
 
 /// Tree-sitter (milestone 7): the library links normally; grammar
