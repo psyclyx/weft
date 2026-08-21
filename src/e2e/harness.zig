@@ -310,9 +310,27 @@ pub const Editor = struct {
 
     /// Drive the active buffer's async save to completion (bounded spin), the
     /// same poll main's loop does — deterministic, no sleep-and-hope.
+    ///
+    /// Wall-clock bounded, like every other "wait for the pool" helper in this
+    /// file (`drainToolContains`, `drainUntilOracle`, `Loopback.pumpUntil`) —
+    /// NOT a fixed yield-count. A fixed count of `std.Thread.yield()` calls is
+    /// a count of scheduling opportunities, not of elapsed time: under CPU
+    /// contention (e.g. another `zig build test` running concurrently in the
+    /// same tree) the OS can legitimately decline to run this process's pool
+    /// worker for the whole budget, so the loop gave up while the save was
+    /// still in flight — `save_state` stuck at `.saving` — and the very next
+    /// disk read (or, worse, `requestSave`'s "one in flight is dropped" rule
+    /// swallowing the NEXT save request too) saw a file that was never
+    /// written. That's the concrete shape of the `c.js`-not-found flake: the
+    /// wait raced its own background write, not a fixture-path collision
+    /// (every fixture here lives under `Project`'s per-run `mkdtemp`'d
+    /// directory, already collision-proof). Same generous bound as the LSP
+    /// drains below — a save is cheap, so the happy path returns in a handful
+    /// of iterations regardless; the bound only matters as a genuine-hang
+    /// backstop.
     pub fn waitSave(self: *Editor) void {
-        var i: usize = 0;
-        while (i < 10_000) : (i += 1) {
+        const deadline = core.task.nowNs() + 30 * std.time.ns_per_s;
+        while (core.task.nowNs() < deadline) {
             if (self.buffers.active().editor.pollSave(self.gpa)) return;
             std.Thread.yield() catch {};
         }
