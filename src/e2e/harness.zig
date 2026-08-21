@@ -542,6 +542,7 @@ const guest = struct {
     const autopair = @embedFile("guest_autopair_wasm");
     const comment = @embedFile("guest_comment_wasm");
     const indent = @embedFile("guest_indent_wasm");
+    const lsp = @embedFile("guest_lsp_wasm");
     const dired = @embedFile("guest_dired_wasm");
     const buffers = @embedFile("guest_buffers_wasm");
     const modes = @embedFile("guest_modes_wasm");
@@ -801,6 +802,7 @@ const plugin_catalog = std.StaticStringMap([]const u8).initComptime(.{
     .{ "vim", @embedFile("guest_vim_wasm") },
     .{ "comment", @embedFile("guest_comment_wasm") },
     .{ "indent", @embedFile("guest_indent_wasm") },
+    .{ "lsp", @embedFile("guest_lsp_wasm") },
     .{ "whitespace", @embedFile("guest_whitespace_wasm") },
     .{ "numbers", @embedFile("guest_numbers_wasm") },
     .{ "autopair", @embedFile("guest_autopair_wasm") },

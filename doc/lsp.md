@@ -13,6 +13,30 @@ This is the answer to "a lot of this feels like plugin stuff": it is. The core
 `lsp.zig` client + the `nav_ui` consumers were core only because there was no
 membrane for a plugin to speak a stdio protocol *and* present results.
 
+## Three composable layers (the API is the point)
+
+A clean, minimal, cohesive API matters more than any one feature. Three layers
+that compose, each usable on its own:
+
+1. **Streaming** — host, generic. A raw bidirectional byte stream to a
+   subprocess (later: a socket): `procSpawn` / `procSend` / `procRead` / `procClose`,
+   plus readiness (`on_poll` fires only when a stream has bytes). No protocol,
+   no framing — just bytes + backpressure. `repl` is a stream → buffer; it opts
+   into THIS layer and nothing more.
+2. **JSON-RPC** — shared. Content-Length framing + request/response correlation
+   (id → pending) + notification dispatch, over a layer-1 stream. LSP and DAP
+   both speak it, so it's a **shared guest module** (`jsonrpc.zig`) imported at
+   compile time — no cross-plugin calls, each protocol plugin links its own copy.
+   (Host-provided JSON-RPC stays an option if the wasm JSON parse ever shows up
+   in a profile; the guest API wouldn't change.)
+3. **Protocol** — the plugin. `lsp` (and a future `dap`) import layers 1+2 and
+   add only their semantics: which methods, what each result means, how it's
+   presented (jump/pick/edit/decorate/echo).
+
+So: `lsp` = jsonrpc(stream(spawn "zls")) + LSP semantics. `dap` = the same over
+a debug adapter. `repl` = stream(spawn "sh") → buffer. One streaming primitive,
+one framing layer, N protocols.
+
 ## Substrate: a Zig (wasm) plugin, not JS
 
 DAP/ACP are JS because they're cold — a debug step or an agent turn is

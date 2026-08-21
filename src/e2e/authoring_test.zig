@@ -739,6 +739,50 @@ test "lsp: real zls diagnostics — a bad file reports an error we can jump to" 
     try t.expect(std.mem.indexOf(u8, msg, ":") != null); // "<severity>: <message>"
 }
 
+test "lsp: hover via the lsp PLUGIN (jsonrpc over raw proc) — real zls" {
+    const gpa = t.allocator;
+    var app: App = undefined;
+    try app.init(gpa);
+    defer app.deinit();
+    const ed = &app.ed;
+
+    if (!h.toolAvailable(gpa, "zls")) return error.SkipZigTest;
+
+    // A zig file on disk (heredoc → exact), then opened.
+    {
+        const out = try app.proj.oracle(
+            \\cat > h.zig <<'EOF'
+            \\fn add(a: i32, b: i32) i32 {
+            \\    return a + b;
+            \\}
+            \\pub fn main() void {
+            \\    const r = add(2, 3);
+            \\    _ = r;
+            \\}
+            \\EOF
+        );
+        gpa.free(out);
+    }
+    ed.runStr("open", "h.zig");
+
+    // Cursor onto `add` (the definition name), then hover through the PLUGIN. The
+    // request goes zls-bound over the new raw-proc stream + jsonrpc framing; the
+    // response lands async on the guest's on_poll and echoes zls's signature.
+    ed.chord("g g");
+    ed.press("w", ""); // `fn ` → `add`
+    var ok = false;
+    var round: usize = 0;
+    while (round < 600) : (round += 1) {
+        ed.run("lsp-hover");
+        ed.settle(3);
+        if (std.mem.indexOf(u8, ed.echoText(), "i32") != null) {
+            ok = true;
+            break;
+        }
+    }
+    try t.expect(ok); // zls's hover (the signature has i32) came back through the plugin
+}
+
 test "debug: a real DAP session — launch, hit a breakpoint, see the stack, continue" {
     const gpa = t.allocator;
     var app: App = undefined;
