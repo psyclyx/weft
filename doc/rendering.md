@@ -209,6 +209,61 @@ it INCREMENTALLY: P1–P2 move the popups first (bounded, low-risk), P3 formaliz
 seam, and only then (a later phase, P5) move the main editor view onto the scene ABI
 once it's proven on the popups + a perf check. Don't rewrite the hot view first.
 
+## The UI as a mesh of narrow capabilities (not one "UI plugin")
+
+Weft's strongest parts defer the concrete behind a NAMED INTERFACE: the caps
+registry races `edit/completion` / `edit/hover` providers by name, so any one is
+swappable and core names no implementation. A monolithic "UI plugin" throws that
+away — you'd swap all or nothing. So the UI decomposes the SAME way: not one
+plugin, but a set of narrow **UI capabilities**, each a small interface + a
+composition rule + a default (swappable) provider. Core wires names; it owns no
+widget. This is the answer to "swap at a reasonable granularity": the granularity
+is one capability.
+
+The decomposition — each a capability whose provider emits scene primitives:
+
+| Capability          | Composition   | Interface (in → out)                                        |
+|---------------------|---------------|-------------------------------------------------------------|
+| `ui/viewport`       | first-wins    | (buffer, visible range, geometry) → text rows scene         |
+| `ui/gutter-segment` | ordered-union | (line, facts) → gutter cells (line-nums, diag, git, breakpts)|
+| `ui/statusline-seg` | ordered-union | (editor state) → a span group (mode, path, position, lsp)   |
+| `ui/caret`          | first-wins    | (offset, mode) → caret shape/blink primitive                |
+| `ui/popup`          | union         | — a caret/docked scene (completion, hover, which-key, sig)   |
+| `ui/overlay`        | union         | (viewport) → decoration spans (search hits, selection, inlay)|
+| `ui/rail`           | first-wins    | (buffer, geometry) → scrollbar/minimap scene                |
+| `ui/layout`         | first-wins    | (panes, popups, docks) → placement rects                    |
+| `theme`             | first-wins    | role → color                                                |
+
+**Composition mode IS the granularity knob**, and it reuses the caps machinery
+(first-wins / union / ranked): a gutter is an ORDERED UNION of segment providers
+(line-numbers + diagnostics + git stack left-to-right); a statusline likewise;
+popups/overlays are a UNION (many coexist); viewport/caret/rail/layout/theme are
+FIRST-WINS (one default, individually overridable). Nobody registers "the UI" —
+they register a segment, a popup, an overlay.
+
+**Granularity rule:** carve a slot iff someone might reasonably swap JUST it —
+independent variation, independent authorship. Line-number style, diagnostic
+gutter marks, a statusline segment, the completion popup, a minimap: each is a
+thing a user or 3rd-party plugin swaps alone. Don't split below where pieces always
+change together (a caret's shape and blink are one slot, not two) — that's how you
+avoid trading a monolith for a thousand-cut mesh.
+
+**The scene is the narrow waist that lets fine pieces compose.** Every UI
+capability emits the SAME scene primitives (rows/spans/roles/regions/anchors), so a
+swapped provider still themes, lays out, falls back to text, and composes with its
+neighbors for free — no N×N mesh of bespoke interfaces, because they all speak
+scene. This is why the seam (above) and the granularity (here) are one design: the
+shared scene type is what makes many small interfaces cheap.
+
+**Wiring + defaults.** Core ships a default in-process provider per slot (native
+speed via the abi.zig transport); config binds a different provider to any one slot
+(`weft.provide("ui/gutter-segment", …)`), overriding just that piece. The frame
+composes by firing each UI capability and assembling the returned scenes through
+`ui/layout` — the same race-and-merge the completion UI already does, one level up.
+So swapping is literal and local: replace your git-sign gutter segment without
+forking the view; ship a minimap as a pure add; retheme by role; and at the limit
+(P5) even `ui/viewport` is just another first-wins slot.
+
 ## Primitive sketch (what P1 adds to `core.surface`)
 
 The retained `Surface` already has `rows[]`, `selected`, `Placement`. P1 adds:
