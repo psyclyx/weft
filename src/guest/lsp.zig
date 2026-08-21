@@ -20,7 +20,7 @@ var ready: bool = false; // initialize answered + initialized/didOpen sent
 var opened: bool = false; // didOpen sent for the current document
 
 // The user request awaiting the server (one in flight).
-const Want = enum { none, hover, definition, references, symbols, format, rename };
+const Want = enum { none, hover, definition, references, symbols, format, rename, signature, inlay };
 var want: Want = .none;
 var want_off: usize = 0;
 var want_id: i64 = 0;
@@ -62,6 +62,8 @@ const cmds = [_]Cmd{
     .{ .name = "prev-diagnostic", .handler = cmdPrevDiag },
     .{ .name = "lsp-format", .handler = cmdFormat },
     .{ .name = "rename", .handler = cmdRename },
+    .{ .name = "signature-help", .handler = cmdSignature },
+    .{ .name = "inlay-hints", .handler = cmdInlay },
 };
 
 export fn describe() void {
@@ -132,6 +134,12 @@ fn cmdPrevDiag() void {
 }
 fn cmdFormat() void {
     fire(.format);
+}
+fn cmdSignature() void {
+    fire(.signature);
+}
+fn cmdInlay() void {
+    fire(.inlay);
 }
 /// Rename the symbol under the cursor. With an arg, use it as the new name; else
 /// prompt (a free-text pick). On accept the request goes out (see on_pick_accept).
@@ -231,6 +239,16 @@ fn sendWant() void {
             ) catch return;
             want_id = conn.request("textDocument/rename", params);
         },
+        .signature => want_id = posRequest("textDocument/signatureHelp", pos, ""),
+        .inlay => {
+            const last = posOf(weft.byteLen());
+            const params = std.fmt.bufPrint(
+                &parambuf,
+                "{{\"textDocument\":{{\"uri\":\"{s}\"}},\"range\":{{\"start\":{{\"line\":0,\"character\":0}},\"end\":{{\"line\":{d},\"character\":0}}}}}}",
+                .{ uri_buf[0..uri_len], last.line + 1 },
+            ) catch return;
+            want_id = conn.request("textDocument/inlayHint", params);
+        },
     }
 }
 
@@ -297,6 +315,8 @@ fn dispatch(msg: rpc.Value) void {
                 .symbols => presentSymbols(result),
                 .format => weft.echo(if (applyEdits(result) > 0) "lsp: formatted" else "lsp: nothing to format"),
                 .rename => weft.echo(if (applyWorkspaceEdit(result) > 0) "lsp: renamed" else "lsp: rename made no change"),
+                .signature => presentSignature(result),
+                .inlay => presentInlay(result),
                 .none => {},
             }
             want = .none;
@@ -502,6 +522,57 @@ fn posInRange(rng: rpc.Value) ?Pos {
 
 fn sameUri(uri: []const u8) bool {
     return uri.len == 0 or std.mem.eql(u8, uri, uri_buf[0..uri_len]);
+}
+
+fn presentSignature(result: rpc.Value) void {
+    if (result != .object) {
+        weft.echo("lsp: no signature");
+        return;
+    }
+    const sigs = result.object.get("signatures") orelse {
+        weft.echo("lsp: no signature");
+        return;
+    };
+    if (sigs != .array or sigs.array.items.len == 0) {
+        weft.echo("lsp: no signature");
+        return;
+    }
+    const sig = sigs.array.items[0];
+    const label = if (sig == .object) (if (sig.object.get("label")) |l| (if (l == .string) l.string else "") else "") else "";
+    weft.echo(if (label.len == 0) "lsp: no signature" else label);
+}
+
+/// Inlay hints → virtual text after each position. Echoes the count (a screenshot
+/// shows the hints themselves). Appends (no clear) so it doesn't clobber the
+/// diagnostics gutter on the shared decoration layer.
+fn presentInlay(result: rpc.Value) void {
+    if (result != .array) {
+        weft.echo("lsp: no inlay hints");
+        return;
+    }
+    var count: usize = 0;
+    for (result.array.items) |hint| {
+        if (hint != .object) continue;
+        const pos = pointOf(hint.object.get("position")) orelse continue;
+        const label = inlayLabel(hint.object.get("label"));
+        if (label.len > 0) weft.decorate(offsetOf(pos.line, pos.col), .virtual_after, .muted, label);
+        count += 1;
+    }
+    var b: [48]u8 = undefined;
+    weft.echo(std.fmt.bufPrint(&b, "lsp: {d} inlay hints", .{count}) catch "lsp: inlay hints");
+}
+
+/// An inlay-hint label: a plain string, or an array of parts (take the first).
+fn inlayLabel(v: ?rpc.Value) []const u8 {
+    const o = v orelse return "";
+    return switch (o) {
+        .string => |s| s,
+        .array => |a| if (a.items.len > 0 and a.items[0] == .object)
+            (if (a.items[0].object.get("value")) |vv| (if (vv == .string) vv.string else "") else "")
+        else
+            "",
+        else => "",
+    };
 }
 
 fn contentsText(c: rpc.Value) []const u8 {

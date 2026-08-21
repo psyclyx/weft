@@ -787,6 +787,43 @@ test "lsp: rename via the lsp plugin — prompt, then apply the WorkspaceEdit �
     try t.expect(std.mem.indexOf(u8, disk, "foo") == null); // every occurrence
 }
 
+test "lsp: signature help + inlay hints via the lsp plugin — real zls" {
+    const gpa = t.allocator;
+    var app: App = undefined;
+    try app.init(gpa);
+    defer app.deinit();
+    const ed = &app.ed;
+
+    if (!h.toolAvailable(gpa, "zls")) return error.SkipZigTest;
+
+    {
+        const out = try app.proj.oracle(
+            \\cat > g.zig <<'EOF'
+            \\fn add(a: i32, b: i32) i32 {
+            \\    return a + b;
+            \\}
+            \\pub fn main() void {
+            \\    const r = add(2, 3);
+            \\    _ = r;
+            \\}
+            \\EOF
+        );
+        gpa.free(out);
+    }
+    ed.runStr("open", "g.zig");
+
+    // signature help inside the call `add(2, 3)` → echoes add's signature.
+    ed.chord("g g");
+    ed.press("4", "");
+    ed.press("j", ""); // line 5
+    ed.press("f", "");
+    ed.typeText("2"); // onto the first argument, inside the parens
+    try t.expect(h.drainEcho(ed, "signature-help", "i32"));
+
+    // inlay hints over the document → the plugin echoes the count (round-trip).
+    try t.expect(h.drainEcho(ed, "inlay-hints", "inlay hints"));
+}
+
 test "lsp: format via the lsp plugin applies the server's edits — real zls" {
     const gpa = t.allocator;
     var app: App = undefined;
