@@ -14,6 +14,7 @@ pub const window_cmds = @import("app/window_cmds.zig");
 pub const dispatch = @import("app/dispatch.zig"); // the general keypress interface
 pub const app_session = @import("app/session.zig");
 pub const app_providers = @import("app/providers.zig");
+pub const app_buffers_cmds = @import("app/buffers_cmds.zig");
 pub const app_collab = @import("app/collab.zig");
 
 // This module OWNS the core/gfx/app tree, so it also runs their display-free

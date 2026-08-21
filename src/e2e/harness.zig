@@ -22,6 +22,7 @@ const view_mod = weft.view;
 const harness = weft.gfx_harness;
 pub const window_layout = weft.window_layout;
 const window_cmds = weft.window_cmds;
+const app_buffers_cmds = weft.app_buffers_cmds;
 const dispatch = weft.dispatch;
 pub const app_session = weft.app_session;
 pub const app_providers = weft.app_providers;
@@ -141,6 +142,10 @@ pub const Editor = struct {
         self.last_frame_rect = .{ .x = 0, .y = 0, .w = app_w, .h = app_h };
         self.win_layout = try window_layout.Layout.init(gpa, self.buffers.active_id);
         try window_cmds.registerCommands(gpa, self.commands, &self.win_ctx, &self.win_actions);
+        // The app's provider-aware open/close (shadows the core versions): opening
+        // a file now attaches syntax + a language server per the lsp-add registry,
+        // exactly as main() does, so a .zig buffer gets zls.
+        try app_buffers_cmds.registerCommands(gpa, self.commands, &self.prov.attach_deps);
         self.last_active = self.buffers.active_id;
     }
 
@@ -296,8 +301,22 @@ pub const Editor = struct {
             _ = self.loop.tick();
             for (self.plugins.items) |p| _ = core.wasm_host.drainReplSessions(p);
             for (self.js_plugins.items) |jp| _ = jp.tick(); // reactor: drains proc output → onOutput
+            self.pumpLsp(); // language server responses → capability UIs (hover/def/sym)
             napUs(2000);
         }
+    }
+
+    /// Mirror frame.zig: pump the active buffer's LSP and fold any capability
+    /// results into the consumer UIs (hover text, definition/symbol jumps). A
+    /// no-op when no server is attached, so non-LSP tests are unaffected.
+    pub fn pumpLsp(self: *Editor) void {
+        if (self.buffers.active().frontend) |fe| {
+            const at: *app_providers.Attach = @ptrCast(@alignCast(fe));
+            if (at.lsp) |l| _ = l.tick(self.ctx) catch {};
+        }
+        _ = self.session.def_ui.tick(self.ctx) catch {};
+        _ = self.session.sym_ui.tick(self.ctx) catch {};
+        _ = self.session.hover_ui.tick(self.ctx) catch {};
     }
 
     // ── inspectors ──
@@ -913,6 +932,26 @@ pub fn toolText(ed: *Editor, name: []const u8) ?[]u8 {
 /// by wall clock (the proc drain runs on a pool thread and delivers on real
 /// time). Returns whether it appeared. Mirrors the git-status async test's
 /// drain, generalized over an arbitrary buffer + needle.
+/// Fire `hover` until the language server answers (or a budget elapses); true
+/// once the hover popup carries text. Re-fires each round because an LSP request
+/// before the server's initialize/didOpen handshake is DECLINED, not queued —
+/// so we keep asking until the server is ready and one lands.
+pub fn drainHover(ed: *Editor) bool {
+    var rounds: usize = 0;
+    while (rounds < 600) : (rounds += 1) {
+        ed.run("hover");
+        ed.settle(3);
+        if (ed.session.hover_ui.active and ed.session.hover_ui.text.items.len > 0) return true;
+    }
+    return false;
+}
+
+/// The hover popup's text (what the app draws at the caret) — the rendered UI
+/// state, read the same way a screenshot would see it.
+pub fn hoverText(ed: *Editor) []const u8 {
+    return ed.session.hover_ui.text.items;
+}
+
 pub fn drainToolContains(ed: *Editor, name: []const u8, needle: []const u8) bool {
     const deadline = core.task.nowNs() + 10 * std.time.ns_per_s;
     while (core.task.nowNs() < deadline) {

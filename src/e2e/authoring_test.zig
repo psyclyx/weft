@@ -654,6 +654,58 @@ test "authoring: format the buffer (SPC c f) — zig fmt via the format action" 
     try t.expectEqualStrings("const x = 1;\n", disk); // zig fmt's canonical form
 }
 
+test "lsp: real zls — hover shows a signature, goto-definition jumps to it" {
+    const gpa = t.allocator;
+    var app: App = undefined;
+    try app.init(gpa);
+    defer app.deinit();
+    const ed = &app.ed;
+
+    // Needs the real toolchain (src/e2e/shell.nix); skip cleanly without zls.
+    if (!h.toolAvailable(gpa, "zls")) return error.SkipZigTest;
+
+    // Write a small zig file to disk (heredoc, so autopair never mangles it) and
+    // open it — a fresh open attaches zls per the vim config's `lsp-add .zig zls`.
+    {
+        const out = try app.proj.oracle(
+            \\cat > add.zig <<'EOF'
+            \\fn add(a: i32, b: i32) i32 {
+            \\    return a + b;
+            \\}
+            \\pub fn main() void {
+            \\    const r = add(2, 3);
+            \\    _ = r;
+            \\}
+            \\EOF
+        );
+        gpa.free(out);
+    }
+    ed.runStr("open", "add.zig");
+
+    // Put the cursor on the `add` call (line 5), then hover: zls answers with the
+    // function's signature once its handshake completes.
+    ed.chord("g g");
+    ed.press("4", "");
+    ed.press("j", ""); // → line 5, `    const r = add(2, 3);`
+    ed.press("0", "");
+    ed.press("f", "");
+    ed.typeText("a"); // f a → onto the `a` of `add`
+    try t.expect(h.drainHover(ed));
+    try t.expect(std.mem.indexOf(u8, h.hoverText(ed), "i32") != null); // add's signature
+
+    // goto-definition from the call jumps to `fn add` on line 1; deleting the
+    // current line then proves we landed on the definition, not the call.
+    ed.run("goto-definition");
+    ed.settle(200); // let the (now-ready) server answer + def_ui jump
+    ed.chord("d d");
+    ed.run("save");
+    ed.waitSave();
+    const disk = try core.file.readAlloc(gpa, "add.zig");
+    defer gpa.free(disk);
+    try t.expect(std.mem.indexOf(u8, disk, "fn add(a: i32") == null); // the def line is gone
+    try t.expect(std.mem.indexOf(u8, disk, "const r = add(2, 3)") != null); // the call remains
+}
+
 test "debug: a real DAP session — launch, hit a breakpoint, see the stack, continue" {
     const gpa = t.allocator;
     var app: App = undefined;
