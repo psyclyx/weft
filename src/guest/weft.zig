@@ -131,6 +131,7 @@ extern "weft" fn wl_proc_spawn(cmd: u32, cmd_len: u32) i32;
 extern "weft" fn wl_proc_send(handle: u32, ptr: u32, len: u32) void;
 extern "weft" fn wl_proc_read(handle: u32, out: u32, cap: u32) i32;
 extern "weft" fn wl_proc_close(handle: u32) void;
+extern "weft" fn wl_cwd(out: u32, cap: u32) i32;
 extern "weft" fn wl_net_connect(host: u32, host_len: u32, name: u32, name_len: u32, sni: u32, sni_len: u32) i32;
 extern "weft" fn wl_net_send(handle: u32, ptr: u32, len: u32) void;
 extern "weft" fn wl_net_close(handle: u32) void;
@@ -880,6 +881,12 @@ pub fn procRead(handle: u32, out: []u8) []u8 {
 /// Kill the subprocess (its handle stays reserved).
 pub fn procClose(handle: u32) void {
     wl_proc_close(handle);
+}
+/// The process working directory (for absolute `file://` uris). Uses the shared
+/// scratch — copy it before the next read call.
+pub fn cwd() []const u8 {
+    const n = wl_cwd(p(&scratch), scratch.len);
+    return if (n <= 0) "" else scratch[0..@intCast(n)];
 }
 
 // ── net.connect (TCP / TLS) — perm net ───────────────────────────────

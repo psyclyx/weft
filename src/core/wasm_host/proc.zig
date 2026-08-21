@@ -99,6 +99,21 @@ pub fn hProcRead(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32, res
     results[0] = @intCast(caller.writeMemory(@intCast(args[1]), @intCast(cap), buf[0..n]) catch 0);
 }
 
+/// `cwd(out, cap) -> n`: the process working directory, for building absolute
+/// `file://` uris (a language server resolves relative uris to absolute, so a
+/// client must speak absolute to match returned locations).
+pub fn hCwd(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32, results: []i32) void {
+    _ = data;
+    var buf: [4096]u8 = undefined;
+    const rc = std.os.linux.getcwd(&buf, buf.len);
+    if (@as(isize, @bitCast(rc)) < 0) {
+        results[0] = 0;
+        return;
+    }
+    const path = std.mem.sliceTo(buf[0..rc], 0);
+    results[0] = @intCast(caller.writeMemory(@intCast(args[0]), @intCast(args[1]), path) catch 0);
+}
+
 /// `procClose(handle)`: kill the subprocess; the slot stays null for stability.
 pub fn hProcClose(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32, results: []i32) void {
     _ = caller;

@@ -304,22 +304,19 @@ pub const Editor = struct {
                 _ = core.wasm_host.notifyPollIfReady(p); // service raw-proc plugins (lsp)
             }
             for (self.js_plugins.items) |jp| _ = jp.tick(); // reactor: drains proc output → onOutput
-            self.pumpLsp(); // language server responses → capability UIs (hover/def/sym)
+            self.pumpLsp(); // core lsp attach → diagnostics layer (until phase 4)
             napUs(2000);
         }
     }
 
-    /// Mirror frame.zig: pump the active buffer's LSP and fold any capability
-    /// results into the consumer UIs (hover text, definition/symbol jumps). A
-    /// no-op when no server is attached, so non-LSP tests are unaffected.
+    /// Pump the active buffer's CORE lsp attach (its diagnostics still flow into
+    /// the layer until that moves to the plugin). The lsp PLUGIN's own responses
+    /// are serviced by notifyPollIfReady above. A no-op with no server attached.
     pub fn pumpLsp(self: *Editor) void {
         if (self.buffers.active().frontend) |fe| {
             const at: *app_providers.Attach = @ptrCast(@alignCast(fe));
             if (at.lsp) |l| _ = l.tick(self.ctx) catch {};
         }
-        _ = self.session.def_ui.tick(self.ctx) catch {};
-        _ = self.session.sym_ui.tick(self.ctx) catch {};
-        _ = self.session.hover_ui.tick(self.ctx) catch {};
     }
 
     // ── inspectors ──
@@ -937,24 +934,29 @@ pub fn toolText(ed: *Editor, name: []const u8) ?[]u8 {
 /// by wall clock (the proc drain runs on a pool thread and delivers on real
 /// time). Returns whether it appeared. Mirrors the git-status async test's
 /// drain, generalized over an arbitrary buffer + needle.
-/// Fire `hover` until the language server answers (or a budget elapses); true
-/// once the hover popup carries text. Re-fires each round because an LSP request
-/// before the server's initialize/didOpen handshake is DECLINED, not queued —
-/// so we keep asking until the server is ready and one lands.
-pub fn drainHover(ed: *Editor) bool {
+/// Re-fire an async `cmd` until the echo line contains `needle` (or a budget
+/// elapses). Re-fires because an LSP request before the server's handshake is
+/// declined, not queued — keep asking until the server is ready and one lands,
+/// its result echoed (the lsp plugin echoes hover / "no X" messages).
+pub fn drainEcho(ed: *Editor, cmd: []const u8, needle: []const u8) bool {
     var rounds: usize = 0;
     while (rounds < 600) : (rounds += 1) {
-        ed.run("hover");
+        ed.run(cmd);
         ed.settle(3);
-        if (ed.session.hover_ui.active and ed.session.hover_ui.text.items.len > 0) return true;
+        if (std.mem.indexOf(u8, ed.echoText(), needle) != null) return true;
     }
     return false;
 }
 
-/// The hover popup's text (what the app draws at the caret) — the rendered UI
-/// state, read the same way a screenshot would see it.
-pub fn hoverText(ed: *Editor) []const u8 {
-    return ed.session.hover_ui.text.items;
+/// Re-fire `cmd` until it opens a pick (a references / symbols location list).
+pub fn drainPick(ed: *Editor, cmd: []const u8) bool {
+    var rounds: usize = 0;
+    while (rounds < 600) : (rounds += 1) {
+        ed.run(cmd);
+        ed.settle(3);
+        if (ed.pick.active) return true;
+    }
+    return false;
 }
 
 /// Settle until the active buffer's `diagnostics` layer has at least one span

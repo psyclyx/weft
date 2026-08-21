@@ -654,7 +654,7 @@ test "authoring: format the buffer (SPC c f) — zig fmt via the format action" 
     try t.expectEqualStrings("const x = 1;\n", disk); // zig fmt's canonical form
 }
 
-test "lsp: real zls — hover shows a signature, goto-definition jumps to it" {
+test "lsp: hover + goto-definition via the lsp plugin — real zls" {
     const gpa = t.allocator;
     var app: App = undefined;
     try app.init(gpa);
@@ -690,13 +690,12 @@ test "lsp: real zls — hover shows a signature, goto-definition jumps to it" {
     ed.press("0", "");
     ed.press("f", "");
     ed.typeText("a"); // f a → onto the `a` of `add`
-    try t.expect(h.drainHover(ed));
-    try t.expect(std.mem.indexOf(u8, h.hoverText(ed), "i32") != null); // add's signature
+    try t.expect(h.drainEcho(ed, "hover", "i32")); // the plugin echoes add's signature
 
     // goto-definition from the call jumps to `fn add` on line 1; deleting the
     // current line then proves we landed on the definition, not the call.
     ed.run("goto-definition");
-    ed.settle(200); // let the (now-ready) server answer + def_ui jump
+    ed.settle(300); // server's ready now (hover spawned it) — one round-trip + jump
     ed.chord("d d");
     ed.run("save");
     ed.waitSave();
@@ -739,7 +738,7 @@ test "lsp: real zls diagnostics — a bad file reports an error we can jump to" 
     try t.expect(std.mem.indexOf(u8, msg, ":") != null); // "<severity>: <message>"
 }
 
-test "lsp: hover via the lsp PLUGIN (jsonrpc over raw proc) — real zls" {
+test "lsp: references + symbols via the lsp plugin — real zls" {
     const gpa = t.allocator;
     var app: App = undefined;
     try app.init(gpa);
@@ -748,10 +747,9 @@ test "lsp: hover via the lsp PLUGIN (jsonrpc over raw proc) — real zls" {
 
     if (!h.toolAvailable(gpa, "zls")) return error.SkipZigTest;
 
-    // A zig file on disk (heredoc → exact), then opened.
     {
         const out = try app.proj.oracle(
-            \\cat > h.zig <<'EOF'
+            \\cat > s.zig <<'EOF'
             \\fn add(a: i32, b: i32) i32 {
             \\    return a + b;
             \\}
@@ -763,24 +761,27 @@ test "lsp: hover via the lsp PLUGIN (jsonrpc over raw proc) — real zls" {
         );
         gpa.free(out);
     }
-    ed.runStr("open", "h.zig");
+    ed.runStr("open", "s.zig");
 
-    // Cursor onto `add` (the definition name), then hover through the PLUGIN. The
-    // request goes zls-bound over the new raw-proc stream + jsonrpc framing; the
-    // response lands async on the guest's on_poll and echoes zls's signature.
-    ed.chord("g g");
-    ed.press("w", ""); // `fn ` → `add`
-    var ok = false;
-    var round: usize = 0;
-    while (round < 600) : (round += 1) {
-        ed.run("lsp-hover");
-        ed.settle(3);
-        if (std.mem.indexOf(u8, ed.echoText(), "i32") != null) {
-            ok = true;
-            break;
+    // symbols: the plugin opens a pick of the document's symbols (add, main).
+    try t.expect(h.drainPick(ed, "symbols"));
+    {
+        var has_add = false;
+        var has_main = false;
+        for (ed.pick.items.items) |it| {
+            if (std.mem.eql(u8, it, "add")) has_add = true;
+            if (std.mem.eql(u8, it, "main")) has_main = true;
         }
+        try t.expect(has_add and has_main);
     }
-    try t.expect(ok); // zls's hover (the signature has i32) came back through the plugin
+    ed.press("Escape", ""); // close the pick
+
+    // references on `add` (the def name): the pick lists its uses — the
+    // declaration plus the call, at least two locations.
+    ed.chord("g g");
+    ed.press("w", ""); // onto `add`
+    try t.expect(h.drainPick(ed, "references"));
+    try t.expect(ed.pick.items.items.len >= 2);
 }
 
 test "debug: a real DAP session — launch, hit a breakpoint, see the stack, continue" {

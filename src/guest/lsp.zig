@@ -2,14 +2,12 @@
 //! doc/lsp.md). Layer 3: it imports the shared `jsonrpc` framing (layer 2) over
 //! the host's raw streaming membrane (layer 1) and adds only LSP semantics —
 //! which methods to send, what each result means, how it's presented through the
-//! editor membrane (echo / jump / pick / edit / decorate).
+//! editor membrane (echo / jump / pick).
 //!
-//! Async shape: a request is fired from a command and its response arrives later,
-//! on `on_poll` (the host calls it when the server stream has bytes). State is a
+//! Async shape: a request is fired from a command; its response arrives later on
+//! `on_poll` (the host calls it when the server stream has bytes). State is a
 //! small machine: spawn → initialize → (initialized + didOpen) → serve requests.
-//!
-//! Phase 2 is hover against one server (zls). Definition/references/symbols/
-//! diagnostics/… layer on by adding a `Want` variant + a response handler.
+//! Each feature is a `Want` variant + a params builder + a response handler.
 
 const std = @import("std");
 const weft = @import("weft.zig");
@@ -21,8 +19,8 @@ var init_id: i64 = 0; // the `initialize` request id
 var ready: bool = false; // initialize answered + initialized/didOpen sent
 var opened: bool = false; // didOpen sent for the current document
 
-// The user request awaiting the server (one in flight for now).
-const Want = enum { none, hover };
+// The user request awaiting the server (one in flight).
+const Want = enum { none, hover, definition, references, symbols };
 var want: Want = .none;
 var want_off: usize = 0;
 var want_id: i64 = 0;
@@ -31,13 +29,20 @@ var want_id: i64 = 0;
 var uri_buf: [1200]u8 = undefined;
 var uri_len: usize = 0;
 
-// Scratch for building JSON params / escaping text.
+// A location pick (references / symbols): offsets index-aligned to the entries.
+const pick_id_results: u32 = 1;
+var pick_offsets: [256]usize = undefined;
+var pick_n: usize = 0;
+
 var parambuf: [4096]u8 = undefined;
 var textbuf: [1 << 18]u8 = undefined; // JSON-escaped document text for didOpen
 
 const Cmd = struct { name: []const u8, handler: *const fn () void };
 const cmds = [_]Cmd{
-    .{ .name = "lsp-hover", .handler = hoverCmd },
+    .{ .name = "hover", .handler = cmdHover },
+    .{ .name = "goto-definition", .handler = cmdDefinition },
+    .{ .name = "references", .handler = cmdReferences },
+    .{ .name = "symbols", .handler = cmdSymbols },
 };
 
 export fn describe() void {
@@ -52,19 +57,37 @@ export fn on_command(id: u32) void {
     if (id < cmds.len) cmds[id].handler();
 }
 
-/// The host calls this when the server stream has bytes: drain every complete
-/// message and dispatch it.
+/// Drain every complete server message and dispatch it.
 export fn on_poll() void {
     while (conn.next()) |msg| dispatch(msg);
 }
 
+/// A pick entry was chosen: jump to its recorded offset.
+export fn on_pick_accept(pick_id: u32) void {
+    if (pick_id != pick_id_results) return;
+    const idx = weft.pickChoiceIndex() orelse return;
+    if (idx < pick_n) weft.jump(pick_offsets[idx]);
+}
+
 // ── Commands ─────────────────────────────────────────────────────────
-fn hoverCmd() void {
+fn cmdHover() void {
+    fire(.hover);
+}
+fn cmdDefinition() void {
+    fire(.definition);
+}
+fn cmdReferences() void {
+    fire(.references);
+}
+fn cmdSymbols() void {
+    fire(.symbols);
+}
+
+fn fire(kind: Want) void {
     ensureServer();
-    want = .hover;
+    want = kind;
     want_off = weft.cursor();
     if (ready) sendWant();
-    // else: fired once `initialize` is answered (see dispatch).
 }
 
 // ── Lifecycle ────────────────────────────────────────────────────────
@@ -76,7 +99,6 @@ fn ensureServer() void {
     }
     ready = false;
     opened = false;
-    // initialize: minimal capabilities; rootUri null (single-file analysis).
     init_id = conn.request("initialize",
         \\{"processId":null,"rootUri":null,"capabilities":{"textDocument":{"hover":{"contentFormat":["plaintext","markdown"]},"synchronization":{}}}}
     );
@@ -85,27 +107,34 @@ fn ensureServer() void {
 /// Send the pending request now that the server is ready.
 fn sendWant() void {
     syncDoc();
+    const pos = posOf(want_off);
     switch (want) {
         .none => {},
-        .hover => {
-            const pos = posOf(want_off);
-            const params = std.fmt.bufPrint(
-                &parambuf,
-                "{{\"textDocument\":{{\"uri\":\"{s}\"}},\"position\":{{\"line\":{d},\"character\":{d}}}}}",
-                .{ uri_buf[0..uri_len], pos.line, pos.col },
-            ) catch return;
-            want_id = conn.request("textDocument/hover", params);
+        .hover => want_id = posRequest("textDocument/hover", pos, ""),
+        .definition => want_id = posRequest("textDocument/definition", pos, ""),
+        .references => want_id = posRequest("textDocument/references", pos, ",\"context\":{\"includeDeclaration\":true}"),
+        .symbols => {
+            const params = std.fmt.bufPrint(&parambuf, "{{\"textDocument\":{{\"uri\":\"{s}\"}}}}", .{uri_buf[0..uri_len]}) catch return;
+            want_id = conn.request("textDocument/documentSymbol", params);
         },
     }
 }
 
-/// didOpen the current document once (full-text sync for now — didChange comes
-/// with the diagnostics phase).
+/// A position-based request: `{textDocument, position[, extra]}`.
+fn posRequest(method: []const u8, pos: Pos, extra: []const u8) i64 {
+    const params = std.fmt.bufPrint(
+        &parambuf,
+        "{{\"textDocument\":{{\"uri\":\"{s}\"}},\"position\":{{\"line\":{d},\"character\":{d}}}{s}}}",
+        .{ uri_buf[0..uri_len], pos.line, pos.col, extra },
+    ) catch return -1;
+    return conn.request(method, params);
+}
+
+/// didOpen the current document once (full-text sync for now).
 fn syncDoc() void {
     if (opened) return;
     buildUri();
-    const n = @min(weft.byteLen(), textbuf.len / 6); // escaping can grow ~6x worst case
-    const raw = weft.slice(0, n);
+    const raw = weft.slice(0, weft.byteLen());
     const esc = jsonEscape(raw);
     const params = std.fmt.bufPrint(
         &parambuf,
@@ -117,14 +146,18 @@ fn syncDoc() void {
 }
 
 fn buildUri() void {
+    // Copy the (possibly scratch-backed) path out before calling cwd (also
+    // scratch). Absolute paths pass through; relative ones get the cwd prefix, so
+    // the uri matches the absolute uris a server returns in its locations.
+    var pbuf: [1024]u8 = undefined;
     const path = weft.path() orelse "untitled";
-    // `file://` + path. Relative paths still work for single-file hover (zls
-    // keys the doc by uri and analyses the didOpen text); an absolute-uri pass
-    // arrives with the multi-file/project phase.
-    const s = std.fmt.bufPrint(&uri_buf, "file://{s}", .{path}) catch {
-        uri_len = 0;
-        return;
-    };
+    const pn = @min(path.len, pbuf.len);
+    @memcpy(pbuf[0..pn], path[0..pn]);
+    const pc = pbuf[0..pn];
+    const s = if (pn > 0 and pc[0] == '/')
+        std.fmt.bufPrint(&uri_buf, "file://{s}", .{pc}) catch return
+    else
+        std.fmt.bufPrint(&uri_buf, "file://{s}/{s}", .{ weft.cwd(), pc }) catch return;
     uri_len = s.len;
 }
 
@@ -132,7 +165,6 @@ fn buildUri() void {
 fn dispatch(msg: rpc.Value) void {
     if (msg != .object) return;
     const obj = msg.object;
-    // A response carries an id.
     if (obj.get("id")) |idv| {
         const id = asInt(idv) orelse return;
         if (id == init_id and !ready) {
@@ -142,32 +174,122 @@ fn dispatch(msg: rpc.Value) void {
             return;
         }
         if (id == want_id) {
-            const result = obj.get("result") orelse return;
+            const result = obj.get("result") orelse rpc.Value{ .null = {} };
             switch (want) {
                 .hover => presentHover(result),
+                .definition => presentDefinition(result),
+                .references => presentLocations(result, "reference"),
+                .symbols => presentSymbols(result),
                 .none => {},
             }
             want = .none;
         }
-        return;
     }
-    // Otherwise a notification (publishDiagnostics, …) — handled in later phases.
+    // notifications (publishDiagnostics, …) handled in a later phase.
 }
 
 fn presentHover(result: rpc.Value) void {
-    // hover.contents is a MarkupContent {kind,value}, a string, or a list.
     const text: []const u8 = switch (result) {
-        .object => |o| blk: {
-            const c = o.get("contents") orelse break :blk "";
-            break :blk contentsText(c);
-        },
+        .object => |o| if (o.get("contents")) |c| contentsText(c) else "",
         else => "",
     };
-    if (text.len == 0) {
-        weft.echo("lsp: no hover");
+    weft.echo(if (text.len == 0) "lsp: no hover" else text);
+}
+
+fn presentDefinition(result: rpc.Value) void {
+    const loc = firstLocation(result) orelse {
+        weft.echo("lsp: no definition");
+        return;
+    };
+    if (!sameUri(loc.uri)) {
+        weft.echo("lsp: definition in another file");
         return;
     }
-    weft.echo(text);
+    weft.jump(offsetOf(loc.line, loc.col));
+}
+
+fn presentLocations(result: rpc.Value, prompt: []const u8) void {
+    pick_n = 0;
+    if (result == .array) {
+        weft.pickBegin(prompt, pick_id_results);
+        for (result.array.items) |item| {
+            const loc = locationOf(item) orelse continue;
+            if (!sameUri(loc.uri)) continue; // cross-file later
+            if (pick_n >= pick_offsets.len) break;
+            pick_offsets[pick_n] = offsetOf(loc.line, loc.col);
+            pick_n += 1;
+            var lbl: [32]u8 = undefined;
+            const s = std.fmt.bufPrint(&lbl, "line {d}", .{loc.line + 1}) catch "?";
+            weft.pickAdd(s, "");
+        }
+        weft.pickEnd();
+    }
+    if (pick_n == 0) weft.echo("lsp: no references");
+}
+
+fn presentSymbols(result: rpc.Value) void {
+    pick_n = 0;
+    if (result == .array) {
+        weft.pickBegin("symbol", pick_id_results);
+        for (result.array.items) |item| addSymbol(item);
+        weft.pickEnd();
+    }
+    if (pick_n == 0) weft.echo("lsp: no symbols");
+}
+
+/// A DocumentSymbol (nested, has selectionRange/children) or a SymbolInformation
+/// (flat, has location). Add it + recurse children (bounded).
+fn addSymbol(item: rpc.Value) void {
+    if (item != .object or pick_n >= pick_offsets.len) return;
+    const o = item.object;
+    const name = if (o.get("name")) |n| (if (n == .string) n.string else "?") else "?";
+    // Prefer selectionRange (DocumentSymbol), else range, else location.range.
+    const rng = o.get("selectionRange") orelse o.get("range") orelse blk: {
+        if (o.get("location")) |l| if (l == .object) break :blk (l.object.get("range") orelse rpc.Value{ .null = {} });
+        break :blk rpc.Value{ .null = {} };
+    };
+    if (posInRange(rng)) |p| {
+        pick_offsets[pick_n] = offsetOf(p.line, p.col);
+        pick_n += 1;
+        weft.pickAdd(name, "");
+    }
+    if (o.get("children")) |ch| if (ch == .array) {
+        for (ch.array.items) |c| addSymbol(c);
+    };
+}
+
+// ── LSP value helpers ────────────────────────────────────────────────
+const Loc = struct { uri: []const u8, line: usize, col: usize };
+
+fn firstLocation(result: rpc.Value) ?Loc {
+    return switch (result) {
+        .object => locationOf(result),
+        .array => |a| if (a.items.len > 0) locationOf(a.items[0]) else null,
+        else => null,
+    };
+}
+
+/// A Location `{uri,range}` or a LocationLink `{targetUri,targetSelectionRange}`.
+fn locationOf(v: rpc.Value) ?Loc {
+    if (v != .object) return null;
+    const o = v.object;
+    const uri = o.get("uri") orelse o.get("targetUri") orelse return null;
+    const rng = o.get("range") orelse o.get("targetSelectionRange") orelse o.get("targetRange") orelse return null;
+    const p = posInRange(rng) orelse return null;
+    return .{ .uri = if (uri == .string) uri.string else "", .line = p.line, .col = p.col };
+}
+
+fn posInRange(rng: rpc.Value) ?Pos {
+    if (rng != .object) return null;
+    const start = rng.object.get("start") orelse return null;
+    if (start != .object) return null;
+    const line = asInt(start.object.get("line") orelse return null) orelse return null;
+    const col = asInt(start.object.get("character") orelse return null) orelse return null;
+    return .{ .line = @intCast(@max(line, 0)), .col = @intCast(@max(col, 0)) };
+}
+
+fn sameUri(uri: []const u8) bool {
+    return uri.len == 0 or std.mem.eql(u8, uri, uri_buf[0..uri_len]);
 }
 
 fn contentsText(c: rpc.Value) []const u8 {
@@ -179,10 +301,16 @@ fn contentsText(c: rpc.Value) []const u8 {
     };
 }
 
-// ── Helpers ──────────────────────────────────────────────────────────
+fn asInt(v: rpc.Value) ?i64 {
+    return switch (v) {
+        .integer => |i| i,
+        else => null,
+    };
+}
+
+// ── Position ↔ offset (ASCII columns for now) ────────────────────────
 const Pos = struct { line: usize, col: usize };
-/// Offset → 0-based LSP position. ASCII columns for now (UTF-16 handling comes
-/// with the cross-file phase); line count scans in scratch-sized chunks.
+
 fn posOf(offset: usize) Pos {
     var line: usize = 0;
     var pos: usize = 0;
@@ -194,15 +322,26 @@ fn posOf(offset: usize) Pos {
         }
         pos += s.len;
     }
-    const ls = weft.lineAt(offset).start;
-    return .{ .line = line, .col = offset - ls };
+    return .{ .line = line, .col = offset - weft.lineAt(offset).start };
 }
 
-fn asInt(v: rpc.Value) ?i64 {
-    return switch (v) {
-        .integer => |i| i,
-        else => null,
-    };
+fn offsetOf(line: usize, col: usize) usize {
+    const total = weft.byteLen();
+    if (line == 0) return @min(col, total);
+    var seen: usize = 0;
+    var pos: usize = 0;
+    while (pos < total) {
+        const s = weft.slice(pos, total);
+        if (s.len == 0) break;
+        for (s, 0..) |ch, k| {
+            if (ch == '\n') {
+                seen += 1;
+                if (seen == line) return @min(pos + k + 1 + col, total);
+            }
+        }
+        pos += s.len;
+    }
+    return total;
 }
 
 /// JSON-escape `raw` into `textbuf`; returns the escaped slice.
