@@ -57,6 +57,7 @@ weft.plugin("net");         // raw TCP/TLS transport (net.connect)
 weft.plugin("which_key");   // menu-hint overlay, as a plugin over the surface door
 weft.plugin("dired");       // directory editor (proc ls + its own keymap mode)
 weft.plugin("lsp");         // language server client (hover/def/… over jsonrpc)
+weft.set("lsp", "zig", "zls"); // server per language: weft.set("lsp","<lang>","<cmd>")
 weft.plugin("debug");       // breakpoints (gutter markers) — the debugger's first slice
 weft.plugin("dap.js");      // DAP client: run/step/inspect (set weft.set("dap","cmd",<adapter>))
 

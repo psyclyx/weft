@@ -33,6 +33,11 @@ var rename_nlen: usize = 0;
 // The open document's `file://` uri.
 var uri_buf: [1200]u8 = undefined;
 var uri_len: usize = 0;
+// The language the current connection serves (from the active file's extension).
+// A different-language file restarts the connection with that language's server.
+// (One active server at a time; concurrent multi-server is a refinement.)
+var cur_lang: [16]u8 = undefined;
+var cur_lang_len: usize = 0;
 
 // A location pick (references / symbols): offsets index-aligned to the entries.
 const pick_id_results: u32 = 1;
@@ -87,8 +92,9 @@ export fn on_poll() void {
 /// is opened, so diagnostics flow without waiting for a request. (Single-server,
 /// single-language for now — multi-server routing is a later phase.)
 export fn on_activate() void {
-    const path = weft.activatePath();
-    if (!std.mem.endsWith(u8, path, ".zig")) return;
+    // Only for files whose language has a configured server.
+    var lb: [16]u8 = undefined;
+    if (serverCmd(activeLang(&lb)).len == 0) return;
     ensureServer();
     // A different file → re-open under its uri.
     buildUri();
@@ -201,14 +207,43 @@ fn fire(kind: Want) void {
 }
 
 // ── Lifecycle ────────────────────────────────────────────────────────
+/// The active file's language id (its extension), copied out of scratch.
+fn activeLang(out: *[16]u8) []const u8 {
+    const path = weft.path() orelse return "";
+    const dot = std.mem.lastIndexOfScalar(u8, path, '.') orelse return "";
+    const ext = path[dot + 1 ..];
+    const n = @min(ext.len, out.len);
+    @memcpy(out[0..n], ext[0..n]);
+    return out[0..n];
+}
+
+/// The server command for `lang`: config (`weft.set("lsp","<lang>","<cmd>")`), or
+/// a built-in default. "" ⇒ no server for this language.
+fn serverCmd(lang: []const u8) []const u8 {
+    const c = weft.config(lang);
+    if (c.len > 0) return c;
+    if (std.mem.eql(u8, lang, "zig")) return "zls";
+    return "";
+}
+
+/// Ensure a server is running for the ACTIVE file's language, starting (or
+/// switching) the connection as needed.
 fn ensureServer() void {
-    if (conn.live) return;
-    if (!conn.start("zls")) {
+    var lb: [16]u8 = undefined;
+    const lang = activeLang(&lb);
+    if (conn.live and std.mem.eql(u8, lang, cur_lang[0..cur_lang_len])) return;
+    if (conn.live) conn.close();
+    const cmd = serverCmd(lang);
+    if (cmd.len == 0) return; // no server configured for this language
+    if (!conn.start(cmd)) {
         weft.echo("lsp: could not start server");
         return;
     }
+    cur_lang_len = @min(lang.len, cur_lang.len);
+    @memcpy(cur_lang[0..cur_lang_len], lang[0..cur_lang_len]);
     ready = false;
     opened = false;
+    diag_n = 0;
     init_id = conn.request("initialize",
         \\{"processId":null,"rootUri":null,"capabilities":{"textDocument":{"hover":{"contentFormat":["plaintext","markdown"]},"synchronization":{},"publishDiagnostics":{}}}}
     );
@@ -270,8 +305,8 @@ fn syncDoc() void {
     const esc = jsonEscape(raw);
     const params = std.fmt.bufPrint(
         &parambuf,
-        "{{\"textDocument\":{{\"uri\":\"{s}\",\"languageId\":\"zig\",\"version\":1,\"text\":\"{s}\"}}}}",
-        .{ uri_buf[0..uri_len], esc },
+        "{{\"textDocument\":{{\"uri\":\"{s}\",\"languageId\":\"{s}\",\"version\":1,\"text\":\"{s}\"}}}}",
+        .{ uri_buf[0..uri_len], cur_lang[0..cur_lang_len], esc },
     ) catch return;
     conn.notify("textDocument/didOpen", params);
     opened = true;

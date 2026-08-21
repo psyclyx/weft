@@ -444,6 +444,13 @@ pub fn configList(key: []const u8) ?ConfigIter {
     return .{ .cur = cur, .remaining = count };
 }
 
+/// This plugin's single config value for `key` (the first record of its list),
+/// or "" if unset. Borrows `config_scratch` — valid until the next config read.
+pub fn config(key: []const u8) []const u8 {
+    var it = configList(key) orelse return "";
+    return it.next() orelse "";
+}
+
 /// Show a transient status-line message.
 pub fn echo(msg: []const u8) void {
     wl_echo(p(msg.ptr), @intCast(msg.len));
