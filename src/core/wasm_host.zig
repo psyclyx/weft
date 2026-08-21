@@ -136,6 +136,7 @@ pub fn defineImports(linker: *wasm.Linker, p: *WasmPlugin) !void {
     try d(linker, "wl_menu_mode", 2, 0, keymap.hMenuMode, p);
     try d(linker, "wl_locked_mode", 2, 0, keymap.hLockedMode, p);
     try d(linker, "wl_resting_mode", 2, 0, keymap.hRestingMode, p);
+    try d(linker, "wl_exit_to_resting", 0, 0, keymap.hExitToResting, p);
     try d(linker, "wl_sticky_menu", 2, 0, keymap.hStickyMenu, p);
     try d(linker, "wl_declare_action", 2, 0, keymap.hDeclareAction, p);
     try d(linker, "wl_provide", 11, 0, keymap.hProvide, p);

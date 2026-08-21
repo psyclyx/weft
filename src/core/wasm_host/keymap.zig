@@ -85,6 +85,36 @@ pub fn hSetMode(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32, resu
     // its one-shot return target. Host-side mode save/restore (the picker) uses
     // plain setMode and never records.
     p.ctx.keymap.enterMode(p.gpa, mode) catch {};
+    // Remember a RESTING mode as the active buffer's resting mode, so exiting a
+    // transient sub-mode (insert/visual) returns HERE — this is what keeps a
+    // tool projection (dired) live after an in-place edit + Escape.
+    if (p.ctx.keymap.isRestingMode(mode)) {
+        const buf = p.ctx.buffers.active();
+        const held = p.gpa.dupe(u8, mode) catch return;
+        p.gpa.free(buf.mode);
+        buf.mode = held;
+    }
+}
+
+/// `exitToResting()`: leave a transient mode (insert/visual) back to the active
+/// buffer's RESTING mode — its own tool mode (dired) if it has one, else the base
+/// editing mode. Replaces a guest's hardcoded `setMode("normal")` on Escape, so a
+/// projection's keys never sleep after an in-place edit.
+pub fn hExitToResting(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32, results: []i32) void {
+    _ = caller;
+    _ = args;
+    _ = results;
+    const p: *WasmPlugin = @ptrCast(@alignCast(data.?));
+    const buf = p.ctx.buffers.active();
+    // The buffer's declared resting mode (its tool mode, or the config base it
+    // was stamped with on open) — no core-baked mode name; the config owns what
+    // "resting" means. `default_mode` is the last resort if a buffer never
+    // declared one.
+    const target = if (buf.mode.len > 0) buf.mode else p.ctx.buffers.default_mode;
+    if (target.len == 0) return;
+    const owned = p.gpa.dupe(u8, target) catch return;
+    defer p.gpa.free(owned);
+    p.ctx.keymap.setMode(p.gpa, owned) catch {};
 }
 
 pub fn hSetFallback(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32, results: []i32) void {

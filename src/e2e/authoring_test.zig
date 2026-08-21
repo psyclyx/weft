@@ -242,6 +242,27 @@ test "authoring: `>`/`<` indent operators — line, text object, visual" {
     }
 }
 
+test "dired: after an in-place edit, Escape returns to dired mode (not normal)" {
+    const gpa = t.allocator;
+    var app: App = undefined;
+    try app.init(gpa);
+    defer app.deinit();
+    const ed = &app.ed;
+
+    // A file to browse, then open dired on the project dir.
+    authorFile(ed, "note.txt", "hello\n");
+    ed.run("dired");
+    try t.expectEqualStrings("dired", ed.mode());
+
+    // Edit a name in place, then Escape. Before resting-mode-aware exit this
+    // stranded you in `normal` (dired's view keys asleep); now it returns to
+    // dired — the buffer's declared resting mode, no core-baked "normal".
+    ed.press("i", "");
+    ed.typeText("x");
+    ed.press("Escape", "");
+    try t.expectEqualStrings("dired", ed.mode());
+}
+
 test "authoring: switching back to an open file lands in an editable mode" {
     const gpa = t.allocator;
     var app: App = undefined;

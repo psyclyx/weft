@@ -206,7 +206,11 @@ pub fn switchTo(self: *Buffers, gpa: Allocator, id: Id, keymap: *Keymap) Error!v
     if (target.mode.len > 0) {
         try keymap.setMode(gpa, target.mode);
     } else if (self.default_mode.len > 0) {
+        // A fresh buffer DECLARES its resting mode (the config's base editing
+        // mode) rather than leaving it empty — so exiting a transient sub-mode
+        // always has a mode to return to, with no core-baked "normal".
         try keymap.setMode(gpa, self.default_mode);
+        target.mode = try gpa.dupe(u8, self.default_mode);
     }
     self.active_id = id;
 }

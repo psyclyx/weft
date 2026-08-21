@@ -697,7 +697,9 @@ fn normal() void {
     // barrier; this covers the mode-change boundary a motion doesn't.)
     weft.run("undo-barrier");
     weft.run("clear-selection");
-    weft.setMode("normal");
+    // Return to the buffer's RESTING mode: normal for a file, but `dired` for the
+    // dired projection — so its view keys stay live after an in-place edit.
+    weft.exitToResting();
 }
 fn deleteEol() void {
     const cur = weft.cursor();

@@ -1027,6 +1027,7 @@ pub const App = struct {
         const config_dir = try std.fmt.allocPrint(gpa, "{s}/config", .{self.proj.prev_cwd});
         defer gpa.free(config_dir);
         try bootConfig(&self.ed, config_dir, &self.loader);
+        try setResting(&self.ed); // mirror main.zig: config's base mode → default_mode
     }
 
     pub fn deinit(self: *App) void {
