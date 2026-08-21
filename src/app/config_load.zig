@@ -21,6 +21,61 @@ pub fn loadJsConfig(gpa: std.mem.Allocator, ctx: *core.command.Context, path: []
     try core.quickjs.evalConfig(&engine, ctx, loader, config, dir, src);
 }
 
+/// A LIVE config binding (north-star-plan §2.3/§6): remembers the manifest
+/// last applied so a `config-reload` is a `Manifest.reconcile` against it
+/// (an unchanged reload is a verified no-op; a changed one tears down what
+/// it owned and applies the delta) instead of a blind re-run of the whole
+/// JS program against already-mutated state. `main.zig` owns one of these
+/// for the session's config file and wires `config-reload` to `.reload()`.
+pub const ConfigSession = struct {
+    gpa: std.mem.Allocator,
+    ctx: *core.command.Context,
+    path: []u8,
+    loader: ?core.quickjs.PluginLoader,
+    config: *core.kv.Store,
+    last: ?*core.manifest.Manifest = null,
+
+    pub fn init(gpa: std.mem.Allocator, ctx: *core.command.Context, path: []const u8, loader: ?core.quickjs.PluginLoader, config: *core.kv.Store) !ConfigSession {
+        return .{ .gpa = gpa, .ctx = ctx, .path = try gpa.dupe(u8, path), .loader = loader, .config = config };
+    }
+
+    pub fn deinit(self: *ConfigSession) void {
+        if (self.last) |m| m.destroy();
+        self.gpa.free(self.path);
+        self.* = undefined;
+    }
+
+    /// (Re)load the config file: evaluate it fresh into a NEW manifest, then
+    /// reconcile against whatever was applied last (null on the first call —
+    /// `reconcile` degenerates to a full apply). Absent/broken config is a
+    /// logged warning, never fatal — matching `loadJsConfig`'s degrade.
+    pub fn reload(self: *ConfigSession) !void {
+        const src = try core.file.readAlloc(self.gpa, self.path);
+        defer self.gpa.free(src);
+        var engine = try core.wasm.Engine.init();
+        defer engine.deinit();
+        const dir = std.fs.path.dirname(self.path);
+        const new = try core.quickjs.evalToManifest(&engine, self.ctx, self.loader, self.config, dir, src, .config, "config");
+        errdefer new.destroy();
+        std.log.info("config: manifest hash = 0x{x}", .{new.hash()});
+        var actx: core.manifest.Manifest.ApplyCtx = .{ .ctx = self.ctx, .loader = self.loader, .config = self.config };
+        try core.manifest.Manifest.reconcile(self.gpa, self.last, new, &actx);
+        if (self.last) |old| old.destroy();
+        self.last = new;
+    }
+};
+
+/// The `config-reload` command handler — `main.zig` binds this over a
+/// `*ConfigSession` (`.data`). A failed reload is logged, never fatal (same
+/// degrade as the initial load).
+pub fn configReloadHandler(ctx: *core.command.Context, data: ?*anyopaque, args: []const core.command.Value) anyerror!core.command.Value {
+    _ = ctx;
+    _ = args;
+    const cs: *ConfigSession = @ptrCast(@alignCast(data.?));
+    cs.reload() catch |e| std.log.warn("config-reload: {t}", .{e});
+    return .nil;
+}
+
 /// Decode the first record of a framed config blob (uvarint count, then per
 /// record uvarint(len)++bytes — the encoding the config shim produces). Used to
 /// read a single-value `weft.set` (e.g. a theme color) host-side.

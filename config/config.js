@@ -76,7 +76,7 @@ weft.use("defaults");
 
 // which-key: hold a prefix for this long before the hint pops (doom-style idle
 // delay). F1 forces it now (a peek at the top-level choices from normal).
-weft.set("editor", "which-key-delay-ms", "200");
+weft.set("which_key", "delay-ms", "200"); // owned by which_key, not the old "editor" grab-bag
 weft.bind("global", "F1", "which-key-now");
 
 // Top-level leader: quick actions (the group prefixes below are implied by the

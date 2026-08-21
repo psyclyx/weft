@@ -850,17 +850,27 @@ pub const ConfigLoader = struct {
     ed: *Editor,
     missing: std.ArrayList([]const u8) = .empty, // names not in the catalog
     failed: std.ArrayList([]const u8) = .empty, // resolved but loadPlugin errored
+    /// EVERY name `weft.plugin(name)` requested, in request order — the
+    /// M3/M4 parity harness's "plugin load-list set-equality" evidence
+    /// (config_test.zig): recorded regardless of catalog/load outcome (a
+    /// `.js` name included), so two configs with the same catalog list
+    /// produce the same set here even though `.js` plugins aren't
+    /// instantiated headlessly.
+    requested: std.ArrayList([]const u8) = .empty,
 
     pub fn deinit(self: *ConfigLoader) void {
         for (self.missing.items) |s| self.ed.gpa.free(s);
         for (self.failed.items) |s| self.ed.gpa.free(s);
+        for (self.requested.items) |s| self.ed.gpa.free(s);
         self.missing.deinit(self.ed.gpa);
         self.failed.deinit(self.ed.gpa);
+        self.requested.deinit(self.ed.gpa);
     }
 
     fn loadFn(ctx: *anyopaque, name: []const u8) void {
         const self: *ConfigLoader = @ptrCast(@alignCast(ctx));
         const gpa = self.ed.gpa;
+        self.requested.append(gpa, gpa.dupe(u8, name) catch return) catch {};
         if (std.mem.endsWith(u8, name, ".js")) return; // JS plugins aren't wired headlessly yet
         const bytes = plugin_catalog.get(name) orelse {
             self.missing.append(gpa, gpa.dupe(u8, name) catch return) catch {};
@@ -876,15 +886,158 @@ pub const ConfigLoader = struct {
     }
 };
 
+/// A stable, sorted text snapshot of `requested` — comparable between two
+/// `ConfigLoader`s with `expectEqualStrings` (M3/M4 parity: "plugin
+/// load-list set-equality").
+pub fn requestedPluginsSnapshot(gpa: Allocator, loader_state: *const ConfigLoader) ![]u8 {
+    const list = try gpa.dupe([]const u8, loader_state.requested.items);
+    defer gpa.free(list);
+    std.mem.sort([]const u8, list, {}, struct {
+        fn lt(_: void, a: []const u8, b: []const u8) bool {
+            return std.mem.lessThan(u8, a, b);
+        }
+    }.lt);
+    var out: std.ArrayList(u8) = .empty;
+    errdefer out.deinit(gpa);
+    for (list) |name| {
+        try out.appendSlice(gpa, name);
+        try out.append(gpa, '\n');
+    }
+    return out.toOwnedSlice(gpa);
+}
+
+/// A stable, sorted text snapshot of an entire `kv.Store` — namespace, key,
+/// and the raw framed value blob — for a "full config-store diff" (M3/M4
+/// parity: catches ANY value divergence, not just a hand-picked key).
+pub fn kvSnapshot(gpa: Allocator, store: *core.kv.Store) ![]u8 {
+    var lines: std.ArrayList([]u8) = .empty;
+    defer {
+        for (lines.items) |l| gpa.free(l);
+        lines.deinit(gpa);
+    }
+    var nsit = store.ns.iterator();
+    while (nsit.next()) |nse| {
+        var kit = nse.value_ptr.iterator();
+        while (kit.next()) |ke| {
+            const line = try std.fmt.allocPrint(gpa, "{s}\x00{s}\x00{s}\n", .{ nse.key_ptr.*, ke.key_ptr.*, ke.value_ptr.* });
+            try lines.append(gpa, line);
+        }
+    }
+    std.mem.sort([]u8, lines.items, {}, struct {
+        fn lt(_: void, a: []u8, b: []u8) bool {
+            return std.mem.lessThan(u8, a, b);
+        }
+    }.lt);
+    var out: std.ArrayList(u8) = .empty;
+    errdefer out.deinit(gpa);
+    for (lines.items) |l| try out.appendSlice(gpa, l);
+    return out.toOwnedSlice(gpa);
+}
+
+/// A stable, sorted text snapshot of the keymap's MODE STRUCTURE — which
+/// modes are declared menus/sticky-menus/locked/resting, and each mode's
+/// text-swallow (`textCommand`) setting — the which-key GROUP structure a
+/// bind-only snapshot can't see (M3/M4 parity item 4).
+pub fn modeStructureSnapshot(gpa: Allocator, km: *core.Keymap) ![]u8 {
+    var names: std.StringArrayHashMapUnmanaged(void) = .empty;
+    defer names.deinit(gpa);
+    for (km.modes.keys()) |k| try names.put(gpa, k, {});
+    for (km.menu_modes.keys()) |k| try names.put(gpa, k, {});
+    for (km.text_commands.keys()) |k| try names.put(gpa, k, {});
+
+    const list = try gpa.dupe([]const u8, names.keys());
+    defer gpa.free(list);
+    std.mem.sort([]const u8, list, {}, struct {
+        fn lt(_: void, a: []const u8, b: []const u8) bool {
+            return std.mem.lessThan(u8, a, b);
+        }
+    }.lt);
+
+    // `textCommand` walks the fallback chain from the CURRENT mode — probing
+    // every mode name means temporarily changing it; save/restore so this
+    // inspection function leaves the editor exactly as it found it.
+    const orig_mode = try gpa.dupe(u8, km.currentMode());
+    defer gpa.free(orig_mode);
+
+    var out: std.ArrayList(u8) = .empty;
+    errdefer out.deinit(gpa);
+    for (list) |mode| {
+        km.setMode(gpa, mode) catch {};
+        const txt = km.textCommand() orelse "<inherit>";
+        const line = try std.fmt.allocPrint(gpa, "{s}|menu={}|sticky={}|locked={}|resting={}|text={s}\n", .{
+            mode, km.isMenuMode(mode), km.isStickyMenu(mode), km.isLockedMode(mode), km.isRestingMode(mode), txt,
+        });
+        defer gpa.free(line);
+        try out.appendSlice(gpa, line);
+    }
+    km.setMode(gpa, orig_mode) catch {};
+    return out.toOwnedSlice(gpa);
+}
+
 /// Boot the editor from the real `config/config.js` (read from `config_dir`,
 /// which also resolves its `weft.use("defaults")`). Fills `loader_state` with
 /// any plugins the config asked for that couldn't load.
 pub fn bootConfig(ed: *Editor, config_dir: []const u8, loader_state: *ConfigLoader) !void {
-    const cfg_path = try std.fmt.allocPrint(ed.gpa, "{s}/config.js", .{config_dir});
+    try bootConfigNamed(ed, config_dir, "config.js", loader_state);
+}
+
+/// Like `bootConfig`, but the config FILE within `config_dir` is named
+/// explicitly — the M3/M4 parity harness's door (north-star-plan §8): boot
+/// `config.js` and `config.northstar.js` from the SAME directory (so both
+/// resolve `weft.use("defaults")` identically) into two separate `Editor`s.
+pub fn bootConfigNamed(ed: *Editor, config_dir: []const u8, filename: []const u8, loader_state: *ConfigLoader) !void {
+    const cfg_path = try std.fmt.allocPrint(ed.gpa, "{s}/{s}", .{ config_dir, filename });
     defer ed.gpa.free(cfg_path);
     const src = try core.file.readAlloc(ed.gpa, cfg_path);
     defer ed.gpa.free(src);
     try core.quickjs.evalConfig(&ed.engine, ed.ctx, loader_state.loader(), &ed.config_kv, config_dir, src);
+}
+
+/// A stable, sorted text snapshot of the RESOLVED keymap: every (mode, key)
+/// this editor's keymap tables hold, across every mode, mapped to the
+/// command it resolves to — `owner`/`priority` deliberately excluded (two
+/// manifests reaching the same resolved table through different tiers is
+/// exactly the point being tested, not a difference). Comparable with
+/// `expectEqualStrings` between two editors booted from different configs.
+pub fn keymapSnapshot(gpa: Allocator, km: *core.Keymap) ![]u8 {
+    var lines: std.ArrayList([]u8) = .empty;
+    defer {
+        for (lines.items) |l| gpa.free(l);
+        lines.deinit(gpa);
+    }
+    var mit = km.modes.iterator();
+    while (mit.next()) |me| {
+        var kit = me.value_ptr.iterator();
+        while (kit.next()) |ke| {
+            const line = try std.fmt.allocPrint(gpa, "{s}\x00{s}\x00{s}\n", .{ me.key_ptr.*, ke.key_ptr.*, ke.value_ptr.command });
+            try lines.append(gpa, line);
+        }
+    }
+    std.mem.sort([]u8, lines.items, {}, struct {
+        fn lt(_: void, a: []u8, b: []u8) bool {
+            return std.mem.lessThan(u8, a, b);
+        }
+    }.lt);
+    var out: std.ArrayList(u8) = .empty;
+    errdefer out.deinit(gpa);
+    for (lines.items) |l| try out.appendSlice(gpa, l);
+    return out.toOwnedSlice(gpa);
+}
+
+/// A text snapshot of how `actions` resolve across the cross product of
+/// `modes` × `langs` (deterministic iteration order — the lists are small,
+/// fixed, and given in the same order by both callers, so no sort needed).
+/// The action-provider-set analogue of `keymapSnapshot`.
+pub fn actionSnapshot(gpa: Allocator, ctx: *command.Context, actions: []const []const u8, modes: []const []const u8, langs: []const []const u8) ![]u8 {
+    var out: std.ArrayList(u8) = .empty;
+    errdefer out.deinit(gpa);
+    for (actions) |a| for (modes) |m| for (langs) |l| {
+        const cmd = ctx.actions.resolve(a, .{ .mode = m, .lang = l }) orelse "<none>";
+        const line = try std.fmt.allocPrint(gpa, "{s}|{s}|{s}->{s}\n", .{ a, m, l, cmd });
+        defer gpa.free(line);
+        try out.appendSlice(gpa, line);
+    };
+    return out.toOwnedSlice(gpa);
 }
 
 /// What the which-key overlay actually SHOWS on screen right now, as the text a

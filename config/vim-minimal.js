@@ -16,7 +16,7 @@ weft.use("defaults"); // shared pick/editing/menu-nav bindings
 
 // which-key: no delay here (show the flat leader map the moment you press SPC).
 // F1 forces it (and the leader menu) from anywhere via the global layer.
-weft.set("editor", "which-key-delay-ms", "0");
+weft.set("which_key", "delay-ms", "0");
 weft.bind("global", "F1", "which-key-now");
 
 // Actions: one key, resolved by the buffer's language. `eval` runs the buffer

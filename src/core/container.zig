@@ -204,6 +204,22 @@ pub const Container = struct {
         }
     }
 
+    /// Remove every binding whose owner EQUALS `owner` exactly — the
+    /// collision-free sibling of `unbindOwnerPrefix`: a caller whose owner
+    /// identities are dynamically named (e.g. `manifest.zig`'s `"import:
+    /// <name>"`, where one imported name can be a literal string-prefix of
+    /// another — `"def"` of `"defaults"`) must use this, not the prefix
+    /// form, or tearing down one owner can silently take an unrelated one
+    /// with it.
+    pub fn unbindOwnerExact(self: *Container, owner: []const u8) void {
+        var i: usize = 0;
+        while (i < self.bindings.items.len) {
+            if (std.mem.eql(u8, self.bindings.items[i].owner, owner)) {
+                _ = self.bindings.swapRemove(i);
+            } else i += 1;
+        }
+    }
+
     /// The single winner for `slot` against `f` — `first_wins` resolution,
     /// the action-dispatch hot path (`action.Actions.resolve`). Never
     /// allocates: a plain scan, matching `action.zig`'s pre-Container

@@ -221,9 +221,27 @@ pub fn main(init: std.process.Init) !void {
     // so the sample config brings up its own vim/palette without --plugin. A
     // bare weft with no plugins is modeless. Absent or broken config is a
     // warning, never fatal.
+    //
+    // `config_session` outlives this block (held for the whole run) so
+    // `config-reload` can `Manifest.reconcile` against the manifest actually
+    // applied, rather than blindly re-running the JS program (north-star-plan
+    // §2.3/§6). Only wired when a config path was given.
+    var config_session: ?config_load.ConfigSession = null;
+    defer if (config_session) |*cs| cs.deinit();
     if (args.config) |config_path| {
-        config_load.loadJsConfig(gpa, &session.cmd_ctx, config_path, plugin_host.loader(), &config_kv) catch |e|
+        config_session = config_load.ConfigSession.init(gpa, &session.cmd_ctx, config_path, plugin_host.loader(), &config_kv) catch |e| blk: {
             std.log.warn("config: {s} failed to load: {t}", .{ config_path, e });
+            break :blk null;
+        };
+        if (config_session) |*cs| cs.reload() catch |e|
+            std.log.warn("config: {s} failed to load: {t}", .{ config_path, e });
+        if (config_session) |*cs| _ = try session.commands.bind(gpa, "config-reload", .{
+            .name = "config-reload",
+            .summary = "Reload config.js, reconciled against the manifest last applied.",
+            .args = &.{},
+            .handler = config_load.configReloadHandler,
+            .data = cs,
+        });
     }
     // The config's editor plugin (vim/helix) has set the base editing mode by
     // now; capture it as the mode fresh buffers open in, so a tool buffer's
@@ -365,9 +383,11 @@ pub fn main(init: std.process.Init) !void {
     var menu_overlay: frame_mod.MenuOverlay = .{};
     // which-key idle delay (doom-style): don't pop the hint until the menu has
     // been held this long — unless which-key-now (F1) forces it. Config sets it
-    // via weft.set("editor", "which-key-delay-ms", "200").
+    // via weft.set("which_key", "delay-ms", "200") — owned by the which_key
+    // plugin's namespace, not the old "editor" grab-bag (north-star-plan §8's
+    // forcing-function finding: every config value needs an owner).
     const which_key_delay_ns: u64 = blk: {
-        if (config_kv.get("editor", "which-key-delay-ms")) |raw| {
+        if (config_kv.get("which_key", "delay-ms")) |raw| {
             if (config_load.firstConfigRecord(raw)) |s| {
                 if (std.fmt.parseInt(u64, s, 10)) |ms| break :blk ms * std.time.ns_per_ms else |_| {}
             }

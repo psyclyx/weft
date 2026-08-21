@@ -23,7 +23,7 @@
 weft.use("defaults"); // shared picker + which-key nav bindings
 
 // which-key: a short idle delay, F1 peeks the current chord's choices.
-weft.set("editor", "which-key-delay-ms", "200");
+weft.set("which_key", "delay-ms", "200");
 weft.bind("global", "F1", "which-key-now");
 
 // M-x — run a command (the command palette). C-s — incremental search (consult).

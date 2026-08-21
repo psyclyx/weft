@@ -18,7 +18,7 @@ weft.use("defaults"); // shared pick/editing/menu-nav bindings
 
 // which-key: centered popup, a longer hold before it appears.
 weft.set("which_key", "placement", "center");
-weft.set("editor", "which-key-delay-ms", "350");
+weft.set("which_key", "delay-ms", "350");
 weft.bind("global", "F1", "which-key-now");
 
 // A gruvbox-dark-ish theme (theme is data — a colorscheme is just a block).

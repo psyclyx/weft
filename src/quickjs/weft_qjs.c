@@ -31,10 +31,13 @@ __attribute__((import_module("weft"), import_name("qjs_log")))
 extern void host_log(const char *msg, int msg_len);
 __attribute__((import_module("weft"), import_name("qjs_plugin")))
 extern void host_plugin(const char *name, int name_len);
-// Read config `<name>.js` (relative to the loaded config's dir) into `out`;
-// returns the byte count, or -1. Backs `weft.use` (config-data includes).
-__attribute__((import_module("weft"), import_name("qjs_read_config")))
-extern int host_read_config(const char *name, int name_len, char *out, int cap);
+// weft.use(name): evaluate `<config_dir>/<name>.js` into its OWN imported
+// sub-manifest, entirely host-side (a nested `evalToManifest` call, its own
+// fresh quickjs runtime — see core/quickjs.zig's `cUse`). Fire-and-forget:
+// there is nothing for the guest to do afterward (no nested JS_Eval here
+// anymore — the host does the whole sub-evaluation).
+__attribute__((import_module("weft"), import_name("qjs_use")))
+extern void host_use(const char *name, int name_len);
 __attribute__((import_module("weft"), import_name("qjs_set")))
 extern void host_set(const char *plugin, int plugin_len,
                      const char *key, int key_len,
@@ -127,33 +130,21 @@ static JSValue js_run(JSContext *ctx, JSValueConst this_val,
     return JS_UNDEFINED;
 }
 
-// weft.use(name): load config `<name>.js` (relative to the loaded config's dir)
-// and eval it in THIS runtime — a shared-defaults include, so the pick / editing
-// / menu-nav key bindings live in config data (a defaults.js every config
-// includes), not imperatively in core. Nested JS_Eval; the including config's
-// own binds run after and override (higher priority / last-wins).
-static char g_use_buf[262144];
+// weft.use(name): a shared-defaults include, so the pick / editing / menu-nav
+// key bindings live in config data (a defaults.js every config includes), not
+// imperatively in core. The host does the whole nested evaluation now (its
+// own fresh quickjs runtime, producing an IMPORTED sub-manifest at its own
+// tier — north-star-plan §2.2/§2.3) — no nested JS_Eval in this runtime, so a
+// broken include can't leave half of ITS declarations applied into a shared
+// JS global scope.
 static JSValue js_use(JSContext *ctx, JSValueConst this_val,
                       int argc, JSValueConst *argv) {
     if (argc < 1) return JS_UNDEFINED;
     size_t nl;
     const char *name = JS_ToCStringLen(ctx, &nl, argv[0]);
     if (!name) return JS_UNDEFINED;
-    int n = host_read_config(name, (int)nl, g_use_buf, (int)sizeof g_use_buf - 1);
+    host_use(name, (int)nl);
     JS_FreeCString(ctx, name);
-    if (n <= 0) return JS_UNDEFINED;
-    g_use_buf[n] = 0;
-    JSValue v = JS_Eval(ctx, g_use_buf, (size_t)n, "<use>", JS_EVAL_TYPE_GLOBAL);
-    if (JS_IsException(v)) {
-        JSValue e = JS_GetException(ctx);
-        const char *msg = JS_ToCString(ctx, e);
-        if (msg) {
-            host_log(msg, (int)strlen(msg));
-            JS_FreeCString(ctx, msg);
-        }
-        JS_FreeValue(ctx, e);
-    }
-    JS_FreeValue(ctx, v);
     return JS_UNDEFINED;
 }
 
@@ -658,6 +649,63 @@ void weft_on_command(int id) {
     JS_FreeValue(g_ctx, fn);
 }
 
+// Sealed eval (north-star-plan §2.3/§4 C11, M3 review R2): the CONFIG plane
+// (weft_eval, below) is a declarative, hash-approved evaluation — its
+// output (a manifest.zig `Manifest`) must be a pure function of the source
+// text, so a config script cannot make Date.now()/Math.random() (QuickJS's
+// OWN built-ins — not a `weft.*` import, so the qjs_contract's "no clock/
+// env-shaped import" audit can't see them) leak nondeterminism into a
+// `weft.set(...)` value and falsify the hash/reconcile-no-op guarantee.
+// Evaluated ONCE, immediately after `install_weft`, before any user source:
+// overrides `Date`/`Date.now`/`Math.random` with fixed-seed deterministic
+// replacements. Plain ES5 (no arrow/rest/spread) — this runs before we've
+// established the engine handles anything fancier, and it must never be the
+// thing that breaks. `weft_plugin_init` (the LIVE plugin plane, below) does
+// NOT get this — a resident plugin is not a one-shot declarative eval; its
+// `weft.*` calls mutate the editor immediately at any point in its lifetime,
+// so sealing would just make an agent/proc-timing plugin's Date.now() lie.
+static const char *SEAL_PRELUDE =
+    "(function(){\n"
+    "  var _OrigDate = Date;\n"
+    "  function SealedDate() {\n"
+    "    if (arguments.length === 0) return new _OrigDate(0);\n"
+    "    var args = Array.prototype.slice.call(arguments);\n"
+    "    var Bound = Function.prototype.bind.apply(_OrigDate, [null].concat(args));\n"
+    "    return new Bound();\n"
+    "  }\n"
+    "  SealedDate.prototype = _OrigDate.prototype;\n"
+    "  Object.defineProperty(_OrigDate.prototype, 'constructor',\n"
+    "    { value: SealedDate });\n"
+    "  SealedDate.now = function() { return 0; };\n"
+    "  SealedDate.parse = _OrigDate.parse;\n"
+    "  SealedDate.UTC = _OrigDate.UTC;\n"
+    "  globalThis.Date = SealedDate;\n"
+    "  var _seed = 123456789;\n"
+    "  globalThis.Math.random = function() {\n"
+    "    _seed ^= _seed << 13;\n"
+    "    _seed |= 0;\n"
+    "    _seed ^= _seed >>> 17;\n"
+    "    _seed ^= _seed << 5;\n"
+    "    _seed |= 0;\n"
+    "    return ((_seed >>> 0) % 1000000) / 1000000;\n"
+    "  };\n"
+    "})();\n";
+
+// Install the deterministic-seal prelude into `ctx`. Returns 0 on success,
+// -1 on a JS exception (the seal itself failing is a bug in SEAL_PRELUDE,
+// not a config author's mistake — logged the same way, but distinctly, so
+// it's diagnosable).
+static int install_seal(JSContext *ctx) {
+    JSValue val = JS_Eval(ctx, SEAL_PRELUDE, strlen(SEAL_PRELUDE), "<seal>", JS_EVAL_TYPE_GLOBAL);
+    int rc = 0;
+    if (JS_IsException(val)) {
+        log_exception(ctx);
+        rc = -1;
+    }
+    JS_FreeValue(ctx, val);
+    return rc;
+}
+
 // Evaluate `len` bytes of JS at `src` (owned by the host, in linear memory)
 // as the config program. Returns 0 on success, -1 on a JS exception. Each
 // call is a fresh runtime — the config plane holds no state between evals.
@@ -671,16 +719,15 @@ int weft_eval(const char *src, int len) {
         return -1;
     }
     install_weft(ctx);
+    if (install_seal(ctx) != 0) {
+        JS_FreeContext(ctx);
+        JS_FreeRuntime(rt);
+        return -1;
+    }
     JSValue val = JS_Eval(ctx, src, (size_t)len, "<config>", JS_EVAL_TYPE_GLOBAL);
     int rc = 0;
     if (JS_IsException(val)) {
-        JSValue exc = JS_GetException(ctx);
-        const char *msg = JS_ToCString(ctx, exc);
-        if (msg) {
-            host_log(msg, (int)strlen(msg));
-            JS_FreeCString(ctx, msg);
-        }
-        JS_FreeValue(ctx, exc);
+        log_exception(ctx);
         rc = -1;
     }
     JS_FreeValue(ctx, val);

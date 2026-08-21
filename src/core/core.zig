@@ -49,6 +49,7 @@ pub const layers = @import("layers.zig");
 pub const mode = @import("mode.zig");
 pub const facts = @import("facts.zig");
 pub const container = @import("container.zig");
+pub const manifest = @import("manifest.zig");
 pub const capability = @import("capability.zig");
 pub const Caps = capability.Caps;
 pub const Actions = @import("action.zig");

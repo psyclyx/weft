@@ -19,26 +19,34 @@ const proc_stream = @import("proc_stream.zig");
 const Buffers = @import("Buffers.zig");
 const pick_mod = @import("pick.zig");
 const status_feed = @import("status_feed.zig");
+const manifest_mod = @import("manifest.zig");
 
 /// The embedded engine+shim (built from quickjs-ng + weft_qjs.c by build.zig).
 pub const quickjs_wasm: []const u8 = @embedFile("quickjs_wasm");
 
 pub const EvalError = error{ConfigException} || wasm.Error;
 
-/// How `weft.plugin(name)` reaches the host's plugin loader. Kept as an
-/// opaque callback so this file stays free of the wasm-plugin lifecycle
-/// (main.zig owns the resident engine + plugin list + name resolution).
-pub const PluginLoader = struct {
-    ctx: *anyopaque,
-    load: *const fn (ctx: *anyopaque, name: []const u8) void,
-};
+/// How `weft.plugin(name)` reaches the host's plugin loader. Defined in
+/// `manifest.zig` (so that module stays quickjs-independent while still
+/// being the thing `Manifest.apply` calls); re-exported here so existing
+/// call sites (`config_load.zig`, tests) keep spelling it `quickjs.PluginLoader`.
+pub const PluginLoader = manifest_mod.PluginLoader;
 
-/// Host state behind the `weft.*` config imports: the editor the config wires,
-/// the plugin loader, the config-data store `weft.set` writes into, and the
-/// deferred work lists. Plugin loads and `weft.run`s are RECORDED during eval
-/// and replayed after it — so `weft.set` for a plugin always lands before that
-/// plugin is instantiated (its `init` reads config), regardless of line order,
-/// even across plugins.
+/// Host state behind the `weft.*` config imports: the editor the config
+/// wires and the plugin loader / config-data store. Two modes, picked by
+/// `manifest`:
+///
+///   - CONFIG-EVAL mode (`manifest` set, by `evalToManifest`): every
+///     `weft.*` call STAGES a declaration onto the `Manifest` instead of
+///     touching the editor — sealed evaluation (north-star-plan §2.3).
+///     Applying the result is a separate step (`Manifest.apply`/
+///     `.reconcile`), never done here.
+///   - LIVE mode (`manifest` null — a resident `JsPlugin`, see below): a
+///     persistent plugin isn't a one-shot declarative eval — its `weft.*`
+///     calls may run at any point in its lifetime (an `on_command`
+///     handler firing years into a session), so staging doesn't apply;
+///     each handler mutates the editor immediately, exactly as this module
+///     did before `manifest.zig` existed.
 const Bridge = struct {
     ctx: *command.Context,
     loader: ?PluginLoader,
@@ -47,8 +55,12 @@ const Bridge = struct {
     /// `<dir>/<name>.js` against it (config-data includes). Null = no includes
     /// (the plugin plane, or an unnamed config): `weft.use` degrades to a no-op.
     config_dir: ?[]const u8 = null,
-    pending_plugins: std.ArrayList([]u8) = .empty,
-    pending_runs: std.ArrayList([]u8) = .empty,
+    /// The resident wasm engine — `weft.use` needs it to spin up a NESTED,
+    /// independent `evalToManifest` for the imported file (its own fresh
+    /// quickjs runtime, exactly like the top-level eval; see `cUse`).
+    engine: *wasm.Engine,
+    /// Set only in CONFIG-EVAL mode — see the mode doc above.
+    manifest: ?*manifest_mod.Manifest = null,
 };
 
 const kv = @import("kv.zig");
@@ -111,7 +123,7 @@ const config_handlers = .{
     .{ .name = "qjs_echo", .handler = cEcho },
     .{ .name = "qjs_log", .handler = cLog },
     .{ .name = "qjs_plugin", .handler = cPlugin },
-    .{ .name = "qjs_read_config", .handler = cReadConfig },
+    .{ .name = "qjs_use", .handler = cUse },
     .{ .name = "qjs_set", .handler = cSet },
     .{ .name = "qjs_menu", .handler = cMenu },
     .{ .name = "qjs_action", .handler = cAction },
@@ -160,19 +172,22 @@ fn cStubVoid(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32, results
     _ = results;
 }
 
-/// Evaluate `src` as the user config: instantiate `quickjs.wasm` under WASI
-/// with the `weft.*` config surface bound over `ctx`, run its reactor init,
-/// marshal the source into the guest, and eval it. A JS exception surfaces as
-/// `error.ConfigException` (the shim logs its message) — never a partial,
-/// silent half-applied config. Each call is a fresh JS runtime.
-pub fn evalConfig(engine: *wasm.Engine, ctx: *command.Context, loader: ?PluginLoader, config: ?*kv.Store, config_dir: ?[]const u8, src: []const u8) EvalError!void {
-    var bridge: Bridge = .{ .ctx = ctx, .loader = loader, .config = config, .config_dir = config_dir };
-    defer {
-        for (bridge.pending_plugins.items) |s| ctx.gpa.free(s);
-        bridge.pending_plugins.deinit(ctx.gpa);
-        for (bridge.pending_runs.items) |s| ctx.gpa.free(s);
-        bridge.pending_runs.deinit(ctx.gpa);
-    }
+/// Evaluate `src` into a fresh `Manifest`, WITHOUT applying it: instantiate
+/// `quickjs.wasm` under WASI with the `weft.*` config surface bound in
+/// CONFIG-EVAL (staging) mode, run its reactor init, marshal the source into
+/// the guest, and eval it — every `weft.*` call the source makes appends one
+/// declaration to the returned manifest (north-star-plan §2.3: "nothing
+/// mutates the editor during eval"). A JS exception surfaces as
+/// `error.ConfigException` (the shim logs its message) and the partial
+/// manifest is destroyed — never a partial, silent half-applied config.
+/// Each call is a fresh JS runtime. `tier`/`owner` stamp the returned
+/// manifest (`.config`/`"config"` for the root; `cUse` calls this again,
+/// nested, for a `weft.use(name)` import at `.imported`/`"import:<name>"`).
+pub fn evalToManifest(engine: *wasm.Engine, ctx: *command.Context, loader: ?PluginLoader, config: ?*kv.Store, config_dir: ?[]const u8, src: []const u8, tier: manifest_mod.Tier, owner: []const u8) EvalError!*manifest_mod.Manifest {
+    const m = try manifest_mod.Manifest.create(ctx.gpa, owner, tier);
+    errdefer m.destroy();
+
+    var bridge: Bridge = .{ .ctx = ctx, .loader = loader, .config = config, .config_dir = config_dir, .engine = engine, .manifest = m };
 
     var module = try engine.compile(quickjs_wasm);
     defer module.deinit();
@@ -206,11 +221,22 @@ pub fn evalConfig(engine: *wasm.Engine, ctx: *command.Context, loader: ?PluginLo
     const rc = try instance.callI32("weft_eval", &.{ ptr, @intCast(src.len) });
     if (rc != 0) return error.ConfigException;
 
-    // Deferred phase: config eval fully populated the config store and the
-    // load/run lists. Now instantiate plugins (each reads its config at init),
-    // then run the queued startup actions (FIFO) — after every plugin exists.
-    if (bridge.loader) |ld| for (bridge.pending_plugins.items) |name| ld.load(ld.ctx, name);
-    for (bridge.pending_runs.items) |cmd| _ = command.run(ctx.commands, ctx, cmd, &.{}) catch {};
+    return m;
+}
+
+/// Evaluate `src` as the user config AND apply it — `evalToManifest` plus
+/// the hash-log + fresh `apply` pass (north-star-plan §2.3's "the approved
+/// artifact is the manifest value plus its hash"). This is the convenience
+/// entry point for a FIRST load; a config-reload wired against a previous
+/// manifest should call `evalToManifest` + `Manifest.reconcile` directly
+/// (see `config_load.ConfigSession`) so an unchanged reload is a verified
+/// no-op instead of a blind re-apply.
+pub fn evalConfig(engine: *wasm.Engine, ctx: *command.Context, loader: ?PluginLoader, config: ?*kv.Store, config_dir: ?[]const u8, src: []const u8) EvalError!void {
+    const m = try evalToManifest(engine, ctx, loader, config, config_dir, src, .config, "config");
+    defer m.destroy();
+    std.log.info("config: manifest hash = 0x{x}", .{m.hash()});
+    var actx: manifest_mod.Manifest.ApplyCtx = .{ .ctx = ctx, .loader = loader, .config = config };
+    try m.apply(ctx.gpa, &actx);
 }
 
 // ── The plugin plane: a PERSISTENT quickjs.wasm instance as a weft plugin ──
@@ -262,7 +288,10 @@ pub const JsPlugin = struct {
             .name = try gpa.dupe(u8, name),
             .config_store = config_store,
             .environ = environ,
-            .bridge = .{ .ctx = ctx, .loader = null, .config = null },
+            // LIVE mode (`manifest` left null) — see Bridge's doc: a resident
+            // JS plugin's `weft.*` calls mutate the editor immediately, not
+            // staged.
+            .bridge = .{ .ctx = ctx, .loader = null, .config = null, .engine = engine },
             .module = try engine.compile(quickjs_wasm),
             .linker = undefined,
             .instance = undefined,
@@ -753,66 +782,95 @@ fn cBindKey(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32, results:
     defer gpa.free(key);
     const cmd = readStr(br, caller, args[4], args[5]) orelse return;
     defer gpa.free(cmd);
-    // User config shadows plugins and core defaults (highest tier).
+    if (br.manifest) |m| {
+        m.addBind(mode, key, cmd) catch {};
+        return;
+    }
+    // LIVE mode (a resident JS plugin): user config shadows plugins and core
+    // defaults (highest tier) — unchanged from before manifest.zig existed.
     br.ctx.keymap.bind(gpa, mode, key, cmd, @import("Keymap.zig").prio_config, "config") catch {};
 }
 
-/// `weft.use(name)` backing: read `<config_dir>/<name>.js` into the guest so the
-/// shim can nested-eval it (a shared-defaults include). -1 when no config dir
-/// (the plugin plane / an unnamed config) or the file is unreadable.
-fn cReadConfig(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32, results: []i32) void {
+/// `weft.use(name)` backing: evaluate `<config_dir>/<name>.js` into ITS OWN
+/// manifest — a NESTED, independent `evalToManifest` call (its own fresh
+/// quickjs runtime, exactly like the top-level config's own eval), attached
+/// as an import at `.imported` tier (north-star-plan §2.2/§2.3: "imported
+/// manifests land one tier below the importer"). A no-op (no result to
+/// report — `weft.use` has always been fire-and-forget from JS) when: this
+/// isn't config-eval mode (a resident JS plugin's `weft.use` — no config_dir
+/// is ever wired for one, matching the old `cReadConfig`'s degrade), the
+/// file can't be read, or the nested eval throws — each logged, none fatal
+/// to the OUTER eval (a broken include shouldn't brick the whole config).
+fn cUse(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32, results: []i32) void {
+    _ = results;
     const br: *Bridge = @ptrCast(@alignCast(data.?));
     const gpa = br.ctx.gpa;
-    const dir = br.config_dir orelse {
-        results[0] = -1;
-        return;
-    };
-    const name = readStr(br, caller, args[0], args[1]) orelse {
-        results[0] = -1;
-        return;
-    };
+    const m = br.manifest orelse return;
+    const dir = br.config_dir orelse return;
+    const name = readStr(br, caller, args[0], args[1]) orelse return;
     defer gpa.free(name);
-    const path = std.fmt.allocPrint(gpa, "{s}/{s}.js", .{ dir, name }) catch {
-        results[0] = -1;
-        return;
-    };
+    // Nested weft.use (an imported file itself calling weft.use) flat-tiers
+    // — the sub-sub-manifest still lands at plain `.imported`, one rung, not
+    // a deeper one (manifest.zig's module doc: "a deliberate simplification
+    // — nothing in the shipped catalog nests weft.use more than one level").
+    // LOUD about it (nit c), not a silent behavior a config author has to
+    // discover by reading this file's comments.
+    if (m.tier == .imported) {
+        const msg = std.fmt.allocPrint(gpa, "config: weft.use(\"{s}\") nested inside an imported config — flattens to the same 'imported' tier, not a deeper one", .{name}) catch "";
+        defer if (msg.len > 0) gpa.free(msg);
+        std.log.warn("{s}", .{msg});
+        br.ctx.echo.clearRetainingCapacity();
+        br.ctx.echo.appendSlice(gpa, msg) catch {};
+    }
+    const path = std.fmt.allocPrint(gpa, "{s}/{s}.js", .{ dir, name }) catch return;
     defer gpa.free(path);
-    const src = @import("file.zig").readAlloc(gpa, path) catch {
-        results[0] = -1;
+    const src = @import("file.zig").readAlloc(gpa, path) catch |e| {
+        std.log.warn("config: weft.use(\"{s}\") failed to read {s}: {t}", .{ name, path, e });
         return;
     };
     defer gpa.free(src);
-    const cap: usize = @intCast(args[3]);
-    const n = @min(src.len, cap);
-    results[0] = @intCast(caller.writeMemory(@intCast(args[2]), @intCast(cap), src[0..n]) catch {
-        results[0] = -1;
+    const owner = std.fmt.allocPrint(gpa, "import:{s}", .{name}) catch return;
+    defer gpa.free(owner);
+    const sub = evalToManifest(br.engine, br.ctx, br.loader, br.config, dir, src, .imported, owner) catch |e| {
+        std.log.warn("config: weft.use(\"{s}\") failed: {t}", .{ name, e });
         return;
-    });
+    };
+    m.addImport(sub) catch sub.destroy();
 }
 
 fn cRun(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32, results: []i32) void {
     _ = results;
     const br: *Bridge = @ptrCast(@alignCast(data.?));
+    const gpa = br.ctx.gpa;
     const cmd = readStr(br, caller, args[0], args[1]) orelse return;
-    // Queue: run after all plugins load, so a config `weft.run("<plugin cmd>")`
-    // works even if written before the plugin's `weft.plugin(...)` line.
-    br.pending_runs.append(br.ctx.gpa, cmd) catch br.ctx.gpa.free(cmd);
+    defer gpa.free(cmd);
+    if (br.manifest) |m| {
+        m.addRun(cmd) catch {};
+        return;
+    }
+    // LIVE mode: a resident JS plugin calling weft.run has never had a
+    // replay path (only the config-eval tail drained the old pending-runs
+    // list) — preserved as-is here (a no-op), not a new limitation.
 }
 
 /// weft.set(plugin, key, blob) — stage config data for a plugin (read at its
-/// init via wl_config_get). The blob is already framed by the shim; store it
-/// verbatim in the DISTINCT config store, namespaced by plugin name.
+/// init via wl_config_get). The blob is already framed by the shim.
 fn cSet(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32, results: []i32) void {
     _ = results;
     const br: *Bridge = @ptrCast(@alignCast(data.?));
-    const store = br.config orelse return;
-    const plugin = readStr(br, caller, args[0], args[1]) orelse return;
-    defer br.ctx.gpa.free(plugin);
+    const gpa = br.ctx.gpa;
+    const owner = readStr(br, caller, args[0], args[1]) orelse return;
+    defer gpa.free(owner);
     const key = readStr(br, caller, args[2], args[3]) orelse return;
-    defer br.ctx.gpa.free(key);
+    defer gpa.free(key);
     const blob = readStr(br, caller, args[4], args[5]) orelse return;
-    defer br.ctx.gpa.free(blob);
-    store.put(br.ctx.gpa, plugin, key, blob) catch {};
+    defer gpa.free(blob);
+    if (br.manifest) |m| {
+        m.addValue(owner, key, blob) catch {};
+        return;
+    }
+    const store = br.config orelse return;
+    store.put(gpa, owner, key, blob) catch {};
 }
 
 /// weft.menu(name) — declare `name` as a prefix-menu keymap mode: a which-key
@@ -825,6 +883,10 @@ fn cMenu(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32, results: []
     const gpa = br.ctx.gpa;
     const name = readStr(br, caller, args[0], args[1]) orelse return;
     defer gpa.free(name);
+    if (br.manifest) |m| {
+        m.addMenu(name) catch {};
+        return;
+    }
     const km = br.ctx.keymap;
     const Keymap = @import("Keymap.zig");
     km.markMenuMode(gpa, name) catch {};
@@ -843,6 +905,10 @@ fn cAction(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32, results: 
     const gpa = br.ctx.gpa;
     const name = readStr(br, caller, args[0], args[1]) orelse return;
     defer gpa.free(name);
+    if (br.manifest) |m| {
+        m.addAction(name) catch {};
+        return;
+    }
     command.registerAction(gpa, br.ctx.commands, br.ctx.actions, name, .pick) catch {};
 }
 
@@ -863,6 +929,11 @@ fn cProvide(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32, results:
     defer gpa.free(lang);
     const cmd = readStr(br, caller, args[6], args[7]) orelse return;
     defer gpa.free(cmd);
+    const priority = args[8];
+    if (br.manifest) |m| {
+        m.addProvide(action, mode, lang, cmd, priority) catch {};
+        return;
+    }
     br.ctx.actions.provide(.{
         .action = action,
         .when = .{
@@ -870,14 +941,17 @@ fn cProvide(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32, results:
             .lang = if (lang.len > 0) lang else null,
         },
         .command = cmd,
-        .priority = args[8],
+        .priority = priority,
         .owner = "config",
     }) catch |e| if (e == error.RaceRejectsProvider) echoProvideRefused(br.ctx, action);
 }
 
 /// Surface a rejected `provide` to the plugin author through the echo line —
 /// the normal user-facing channel — so the mistake (a pick provider on a race
-/// action) is reported where they'll see it, not on a global stderr.
+/// action) is reported where they'll see it, not on a global stderr. LIVE
+/// mode only — `manifest.zig`'s `applyDecls` has its own copy for the
+/// config-eval path (this module stays free of a dependency the other
+/// direction).
 fn echoProvideRefused(ctx: *command.Context, action: []const u8) void {
     const gpa = ctx.gpa;
     const msg = std.fmt.allocPrint(gpa, "provide: '{s}' is a race action — register a capability provider instead", .{action}) catch return;
@@ -891,6 +965,10 @@ fn cEcho(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32, results: []
     const br: *Bridge = @ptrCast(@alignCast(data.?));
     const msg = readStr(br, caller, args[0], args[1]) orelse return;
     defer br.ctx.gpa.free(msg);
+    if (br.manifest) |m| {
+        m.addEcho(msg) catch {};
+        return;
+    }
     br.ctx.echo.clearRetainingCapacity();
     br.ctx.echo.appendSlice(br.ctx.gpa, msg) catch {};
 }
@@ -900,17 +978,33 @@ fn cLog(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32, results: []i
     const br: *Bridge = @ptrCast(@alignCast(data.?));
     const msg = readStr(br, caller, args[0], args[1]) orelse return;
     defer br.ctx.gpa.free(msg);
+    if (br.manifest) |m| {
+        m.addLog(msg) catch {};
+        return;
+    }
     std.log.info("config: {s}", .{msg});
 }
 
 fn cPlugin(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32, results: []i32) void {
     _ = results;
     const br: *Bridge = @ptrCast(@alignCast(data.?));
-    if (br.loader == null) return; // no loader wired → weft.plugin is a no-op
     const name = readStr(br, caller, args[0], args[1]) orelse return;
-    // Defer instantiation to after eval: config data staged by weft.set (on any
-    // line) is then in place before the plugin's init reads it.
-    br.pending_plugins.append(br.ctx.gpa, name) catch br.ctx.gpa.free(name);
+    if (br.manifest) |m| {
+        defer br.ctx.gpa.free(name);
+        m.addPlugin(name) catch {};
+        return;
+    }
+    if (br.loader == null) {
+        br.ctx.gpa.free(name);
+        return; // no loader wired → weft.plugin is a no-op (LIVE mode)
+    }
+    // LIVE mode with a loader wired never actually happens today (a resident
+    // JS plugin's bridge always has `loader = null` — see `JsPlugin.load`),
+    // but preserved for shape: load immediately (no deferred-replay list to
+    // stage into anymore — see manifest.zig's `apply` for why config-eval
+    // mode no longer needs one).
+    defer br.ctx.gpa.free(name);
+    br.loader.?.load(br.loader.?.ctx, name);
 }
 
 // ── Tests ───────────────────────────────────────────────────────────
@@ -1294,6 +1388,35 @@ test "quickjs: weft.plugin loads a real .wasm, then its command runs" {
     try t.expectEqualStrings("hi\nhi", s);
 }
 
+test "quickjs: R1 regression — weft.set for a .js plugin's STEM identity is not dropped as unowned" {
+    const gpa = t.allocator;
+    var env: Env = undefined;
+    try Env.init(gpa, &env);
+    defer env.deinit(gpa);
+    var engine = try wasm.Engine.init();
+    defer engine.deinit();
+
+    var cfgstore: kv.Store = .empty;
+    defer cfgstore.deinit(gpa);
+
+    // The DOCUMENTED ACP setup (config.js's commented block): weft.set
+    // BEFORE weft.plugin, a path-form name ("acp.js") whose config-store
+    // identity is its STEM ("acp" — config_load.zig's loadJs registers a
+    // JsPlugin under `stem(basename(name))`, and `weft.config(key)` keys on
+    // that stem). Pre-M3 this worked unconditionally (no ownership check
+    // existed); the value-ownership closed-namespace check must not
+    // silently drop it.
+    const cfg =
+        \\weft.set("acp", "cmd", "codex-acp");
+        \\weft.plugin("acp.js");
+    ;
+    try evalConfig(&engine, &env.ctx, null, &cfgstore, null, cfg);
+
+    const blob = cfgstore.get("acp", "cmd") orelse return error.ValueWronglyDropped;
+    const value = firstFramedRecord(blob) orelse return error.BadFrame;
+    try t.expectEqualStrings("codex-acp", value);
+}
+
 test "quickjs: deferred load — weft.set before the plugin line reaches its init" {
     const gpa = t.allocator;
     var env: Env = undefined;
@@ -1386,7 +1509,8 @@ test "quickjs: every shipped example config evals without a JS error" {
     // config/ (the test runs with cwd at the project root).
     const file = @import("file.zig");
     const paths = [_][]const u8{
-        "config/config.js", "config/vim-minimal.js", "config/helix.js", "config/dual.js",
+        "config/config.js", "config/config.northstar.js", "config/vim-minimal.js",
+        "config/helix.js",  "config/dual.js",
     };
     var engine = try wasm.Engine.init();
     defer engine.deinit();
@@ -1403,6 +1527,166 @@ test "quickjs: every shipped example config evals without a JS error" {
             return e;
         };
     }
+}
+
+test "quickjs: sealed eval — two evals of the same config produce identical manifest hashes" {
+    const gpa = t.allocator;
+    var engine = try wasm.Engine.init();
+    defer engine.deinit();
+
+    const cfg =
+        \\weft.plugin("edit");
+        \\weft.bind("normal", "j", "cursor-down");
+        \\weft.action("eval");
+        \\weft.provide("eval", { lang: "zig" }, "zig-eval");
+        \\weft.set("theme", "accent", "#8ec07c");
+        \\weft.echo("loaded");
+    ;
+
+    var env1: Env = undefined;
+    try Env.init(gpa, &env1);
+    defer env1.deinit(gpa);
+    const m1 = try evalToManifest(&engine, &env1.ctx, null, null, null, cfg, .config, "config");
+    defer m1.destroy();
+
+    var env2: Env = undefined;
+    try Env.init(gpa, &env2);
+    defer env2.deinit(gpa);
+    const m2 = try evalToManifest(&engine, &env2.ctx, null, null, null, cfg, .config, "config");
+    defer m2.destroy();
+
+    // Deterministic: staging the SAME source twice, in two entirely separate
+    // JS runtimes, yields byte-identical manifests (§2.3's sealed-eval claim
+    // — this is what "an eval using a sealed API is deterministic" tests
+    // against; the `.config` surface has no clock/env/random of its own,
+    // see qjs_contract's "no clock/env/random-shaped .config import" test).
+    try t.expectEqual(m1.hash(), m2.hash());
+
+    // And a manifest that DIFFERS (one extra decl) hashes differently — the
+    // hash is sensitive to content, not a constant.
+    const cfg2 = cfg ++ "\nweft.bind(\"normal\", \"k\", \"cursor-up\");\n";
+    var env3: Env = undefined;
+    try Env.init(gpa, &env3);
+    defer env3.deinit(gpa);
+    const m3 = try evalToManifest(&engine, &env3.ctx, null, null, null, cfg2, .config, "config");
+    defer m3.destroy();
+    try t.expect(m1.hash() != m3.hash());
+}
+
+test "quickjs: R2 — Date.now()/Math.random() are SEALED (fixed, deterministic across evals)" {
+    const gpa = t.allocator;
+    var engine = try wasm.Engine.init();
+    defer engine.deinit();
+
+    // A config that FEEDS the two nondeterministic engine builtins into
+    // weft.set — exactly the leak review R2 flagged (the .config `weft.*`
+    // surface itself has none of these, but Date/Math.random are QuickJS
+    // built-ins the qjs_contract audit can't see). `weft_eval`'s seal
+    // prelude (src/quickjs/weft_qjs.c) overrides both before this source
+    // ever runs; if it didn't, `Date.now()` (wall clock) or `Math.random()`
+    // would differ between the two evals below and the hashes would too.
+    const cfg =
+        \\weft.set("theme", "accent", "clock:" + Date.now());
+        \\weft.set("theme", "cursor", "rand:" + Math.random());
+        \\weft.set("theme", "selection", "date:" + (new Date()).getTime());
+    ;
+
+    var env1: Env = undefined;
+    try Env.init(gpa, &env1);
+    defer env1.deinit(gpa);
+    const m1 = try evalToManifest(&engine, &env1.ctx, null, null, null, cfg, .config, "config");
+    defer m1.destroy();
+
+    var env2: Env = undefined;
+    try Env.init(gpa, &env2);
+    defer env2.deinit(gpa);
+    const m2 = try evalToManifest(&engine, &env2.ctx, null, null, null, cfg, .config, "config");
+    defer m2.destroy();
+
+    try t.expectEqual(m1.hash(), m2.hash());
+    // Not just equal hashes by coincidence — the actual staged VALUES agree
+    // (and are the fixed, sealed constants: Date.now()==0, a repeatable
+    // Math.random() sequence, `new Date()` epoch 0). `.value` is the shim's
+    // FRAMED blob (uvarint-prefixed), same encoding `weft.set` always
+    // produces — decode with `firstFramedRecord`, as `weft.config` does.
+    try t.expectEqualStrings("clock:0", firstFramedRecord(m1.values.items[0].value).?);
+    try t.expectEqualStrings("clock:0", firstFramedRecord(m2.values.items[0].value).?);
+    try t.expectEqualStrings(
+        firstFramedRecord(m1.values.items[1].value).?,
+        firstFramedRecord(m2.values.items[1].value).?,
+    );
+    try t.expectEqualStrings("date:0", firstFramedRecord(m1.values.items[2].value).?);
+    try t.expectEqualStrings("date:0", firstFramedRecord(m2.values.items[2].value).?);
+}
+
+test "quickjs: weft.use produces a real imported sub-manifest at the imported tier" {
+    const gpa = t.allocator;
+    var env: Env = undefined;
+    try Env.init(gpa, &env);
+    defer env.deinit(gpa);
+    var engine = try wasm.Engine.init();
+    defer engine.deinit();
+
+    const dir = ".zig-cache/tmp/weft-use-manifest-test";
+    const defaults_path = dir ++ "/shared.js";
+    try @import("file.zig").writeBytesMakingDirs(gpa, dir, defaults_path,
+        \\weft.bind("pick", "Down", "pick-next");
+    );
+    defer @import("file.zig").deleteFile(gpa, defaults_path);
+
+    const cfg = "weft.use(\"shared\");\n";
+    const m = try evalToManifest(&engine, &env.ctx, null, null, dir, cfg, .config, "config");
+    defer m.destroy();
+
+    try t.expectEqual(@as(usize, 1), m.imports.items.len);
+    const sub = m.imports.items[0];
+    try t.expectEqual(manifest_mod.Tier.imported, sub.tier);
+    try t.expectEqualStrings("import:shared", sub.owner);
+    try t.expectEqual(@as(usize, 1), sub.binds.items.len);
+    try t.expectEqualStrings("pick-next", sub.binds.items[0].command);
+}
+
+test "quickjs: reconcile — reapplying the identical config is a verified no-op" {
+    const gpa = t.allocator;
+    var env: Env = undefined;
+    try Env.init(gpa, &env);
+    defer env.deinit(gpa);
+    var engine = try wasm.Engine.init();
+    defer engine.deinit();
+
+    const cfg =
+        \\weft.bind("normal", "j", "cursor-down");
+        \\weft.echo("hello");
+    ;
+    const m1 = try evalToManifest(&engine, &env.ctx, null, null, null, cfg, .config, "config");
+    defer m1.destroy();
+    var actx: manifest_mod.Manifest.ApplyCtx = .{ .ctx = &env.ctx, .loader = null, .config = null };
+    try m1.apply(gpa, &actx);
+    try env.keymap.setMode(gpa, "normal");
+    try t.expectEqualStrings("cursor-down", env.keymap.lookup("j").?);
+    try t.expectEqualStrings("hello", env.echo.items);
+
+    // A second eval of the SAME source, reconciled against m1: same hash,
+    // logged no-op, and critically the echo does NOT fire again (a echo
+    // re-firing on every identical reload would be the "no-op" claim lying).
+    env.echo.clearRetainingCapacity();
+    const m2 = try evalToManifest(&engine, &env.ctx, null, null, null, cfg, .config, "config");
+    defer m2.destroy();
+    try manifest_mod.Manifest.reconcile(gpa, m1, m2, &actx);
+    try t.expectEqualStrings("", env.echo.items); // no-op: nothing re-fired
+    try t.expectEqualStrings("cursor-down", env.keymap.lookup("j").?); // still bound
+
+    // A CHANGED config removes the old bind and adds a new one — reconcile
+    // tears down the removed decl and applies the added one.
+    const cfg3 =
+        \\weft.bind("normal", "k", "cursor-up");
+        \\weft.echo("hello");
+    ;
+    const m3 = try evalToManifest(&engine, &env.ctx, null, null, null, cfg3, .config, "config");
+    defer m3.destroy();
+    try manifest_mod.Manifest.reconcile(gpa, m2, m3, &actx);
+    try t.expectEqual(@as(?[]const u8, null), env.keymap.lookup("j")); // removed
+    try t.expectEqualStrings("cursor-up", env.keymap.lookup("k").?); // added
 }
 
 test {

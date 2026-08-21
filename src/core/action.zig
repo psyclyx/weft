@@ -400,6 +400,25 @@ pub fn unregisterByOwnerPrefix(self: *Actions, owner_prefix: []const u8) void {
     }
 }
 
+/// Remove every provider whose owner EQUALS `owner` exactly — for a caller
+/// whose owner identities are dynamically named and could otherwise
+/// false-prefix-match a sibling (e.g. `manifest.zig`'s reconcile teardown:
+/// owner `"import:def"` must not also tear down `"import:defaults"`, which
+/// `unregisterByOwnerPrefix`'s `startsWith` would do). Same shape as the
+/// prefix version, `std.mem.eql` instead.
+pub fn unregisterByOwner(self: *Actions, owner: []const u8) void {
+    self.container.unbindOwnerExact(owner);
+    for (self.actions.values()) |*a| {
+        var i: usize = 0;
+        while (i < a.providers.items.len) {
+            if (std.mem.eql(u8, a.providers.items[i].owner, owner)) {
+                var p = a.providers.swapRemove(i);
+                p.deinit(self.gpa);
+            } else i += 1;
+        }
+    }
+}
+
 // ── Tests ───────────────────────────────────────────────────────────
 
 const t = std.testing;
@@ -475,6 +494,22 @@ test "action: owner-prefix teardown drops a plugin's providers" {
     acts.unregisterByOwnerPrefix("zig-tools#");
     // The plugin's provider is gone; the config default remains.
     try t.expectEqualStrings("eval-default", acts.resolve("eval", .{ .mode = "normal", .lang = "zig" }).?);
+}
+
+test "action: unregisterByOwner is exact — a false-prefix sibling survives" {
+    var acts = Actions.init(t.allocator);
+    defer acts.deinit();
+
+    // "import:def" is a literal string-prefix of "import:defaults" — the
+    // exact scenario `unregisterByOwnerPrefix` would get wrong.
+    try acts.provide(.{ .action = "eval", .when = .{ .lang = "zig" }, .command = "from-def", .owner = "import:def" });
+    try acts.provide(.{ .action = "eval", .when = .{ .lang = "py" }, .command = "from-defaults", .owner = "import:defaults" });
+
+    acts.unregisterByOwner("import:def");
+    // The false-prefix sibling's provider survives.
+    try t.expectEqualStrings("from-defaults", acts.resolve("eval", .{ .mode = "normal", .lang = "py" }).?);
+    // The exactly-named owner's provider is gone.
+    try t.expectEqual(@as(?[]const u8, null), acts.resolve("eval", .{ .mode = "normal", .lang = "zig" }));
 }
 
 test "action: decl_index survives teardown — later-wins even after an unrelated owner's providers are removed" {

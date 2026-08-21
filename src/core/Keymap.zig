@@ -25,6 +25,13 @@ const Bindings = std.StringArrayHashMapUnmanaged(BindEntry);
 
 pub const prio_core = -100;
 pub const prio_plugin = 0;
+/// A `weft.use(name)`-imported manifest's rung (north-star-plan §2.2/§4 C11):
+/// strictly between `prio_plugin` and `prio_config`, so `defaults.js`'s
+/// binds always lose to `config.js`'s own later binds — by TIER, not by
+/// which one happened to be applied last (the old load-order-dependent
+/// contract `manifest.zig`'s doc comment replaces). See
+/// `manifest.keymapPriorityForTier`.
+pub const prio_imported = 50;
 pub const prio_config = 100;
 
 modes: std.StringArrayHashMapUnmanaged(Bindings) = .empty,
@@ -159,6 +166,25 @@ pub fn bind(self: *Keymap, gpa: Allocator, mode: []const u8, key_in: []const u8,
         .priority = priority,
         .owner = try gpa.dupe(u8, owner),
     };
+}
+
+/// Remove the binding at `mode`/`key` IFF it is currently owned by `owner`
+/// (else a no-op — never steal a slot a different, or since-rebound, owner
+/// holds). Used by `manifest.zig`'s reconcile teardown (north-star-plan §6):
+/// a bind declared by a PREVIOUS config manifest but absent from the
+/// reloaded one must not leave a ghost binding behind. Frees the entry's
+/// owned strings on removal.
+pub fn unbind(self: *Keymap, gpa: Allocator, mode: []const u8, key_in: []const u8, owner: []const u8) void {
+    var kbuf: [256]u8 = undefined;
+    const key = normalizeKey(&kbuf, key_in);
+    const bindings = self.modes.getPtr(mode) orelse return;
+    const entry = bindings.get(key) orelse return;
+    if (!std.mem.eql(u8, entry.owner, owner)) return;
+    if (bindings.fetchSwapRemove(key)) |removed| {
+        gpa.free(removed.key);
+        gpa.free(removed.value.command);
+        gpa.free(removed.value.owner);
+    }
 }
 
 /// The reserved layer consulted under EVERY mode, after its own fallback
@@ -820,6 +846,35 @@ test "keymap: layering is order-independent — higher priority always wins" {
     try b.bind(gpa, "default", "j", "cursor-down", prio_core, "core");
     try b.setMode(gpa, "default");
     try t.expectEqualStrings("my-thing", b.lookup("j").?);
+}
+
+test "keymap: unbind removes only if the owner still matches; no-op otherwise" {
+    const gpa = t.allocator;
+    var km: Keymap = .empty;
+    defer km.deinit(gpa);
+
+    try km.bind(gpa, "normal", "j", "cursor-down", prio_imported, "import:defaults");
+    try km.setMode(gpa, "normal");
+    try t.expectEqualStrings("cursor-down", km.lookup("j").?);
+
+    // A different owner can't steal-then-unbind the slot out from under it.
+    km.unbind(gpa, "normal", "j", "someone-else");
+    try t.expectEqualStrings("cursor-down", km.lookup("j").?);
+
+    // A higher tier has since taken the slot — unbinding the ORIGINAL owner
+    // must not remove the newer binding.
+    try km.bind(gpa, "normal", "j", "my-thing", prio_config, "config");
+    km.unbind(gpa, "normal", "j", "import:defaults");
+    try t.expectEqualStrings("my-thing", km.lookup("j").?);
+
+    // The rightful owner unbinds cleanly.
+    try km.bind(gpa, "normal", "k", "cursor-up", prio_imported, "import:defaults");
+    km.unbind(gpa, "normal", "k", "import:defaults");
+    try t.expectEqual(@as(?[]const u8, null), km.lookup("k"));
+
+    // Unbinding a never-bound key, or in an unknown mode, is a harmless no-op.
+    km.unbind(gpa, "normal", "z", "import:defaults");
+    km.unbind(gpa, "nope", "j", "import:defaults");
 }
 
 test "keymap: menu modes are leaf prefix tables, with enumerable bindings" {

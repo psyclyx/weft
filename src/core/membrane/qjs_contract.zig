@@ -73,8 +73,8 @@ pub const imports = [_]Entry{
     e("qjs_run", 2, 0, .config, "run a command by name (weft.run)"),
     e("qjs_echo", 2, 0, .config, "print a message to the echo area"),
     e("qjs_log", 2, 0, .config, "write a guest log line"),
-    e("qjs_plugin", 2, 0, .config, "queue a plugin load by name (weft.plugin), replayed after config eval"),
-    e("qjs_read_config", 4, 1, .config, "weft.use(name) backing: read `<config_dir>/<name>.js` for a nested eval; -1 if unavailable"),
+    e("qjs_plugin", 2, 0, .config, "weft.plugin(name): stage a plugin load onto the manifest"),
+    e("qjs_use", 2, 0, .config, "weft.use(name): evaluate `<config_dir>/<name>.js` into its own imported sub-manifest"),
     e("qjs_set", 6, 0, .config, "weft.set(plugin, key, blob): stage config data for a plugin, read at its init"),
     e("qjs_menu", 2, 0, .config, "weft.menu(name): declare a which-key style submenu mode"),
     e("qjs_action", 2, 0, .config, "weft.action(name): declare a pick action + its trampoline command"),
@@ -150,4 +150,24 @@ test "qjs membrane contract: every entry is well-formed, documented, and unique"
     try t.expectEqual(@as(usize, expected_count), imports.len);
     try t.expectEqual(@as(usize, 10), config_count); // defineConfigFns' surface
     try t.expectEqual(@as(usize, 15), plugin_count); // the resident-plugin-only surface
+}
+
+// Sealed eval (north-star-plan §2.3/§4 C11; manifest.zig's module doc):
+// the `.config` group is the ENTIRE channel a config script (or a
+// `weft.use`-imported one) has to affect the world. This asserts, by
+// inspecting the table rather than trusting a comment, that none of those
+// ten imports is clock/env/random-shaped — the inventory manifest.zig's
+// hash-determinism claim rests on. (`qjs_use`'s file read is confined to
+// `<config_dir>/<name>.js`, not general fs — not name-shaped like a clock/
+// env read, so not flagged here; see manifest.zig's doc for the one
+// residual gap this table CAN'T see: QuickJS-ng's own built-in
+// `Date`/`Math.random`.)
+test "qjs membrane contract: no clock/env/random-shaped .config import" {
+    const suspicious = [_][]const u8{ "time", "clock", "rand", "env", "getenv", "date", "now" };
+    for (imports) |entry| {
+        if (entry.group != .config) continue;
+        for (suspicious) |bad| {
+            try t.expect(std.mem.indexOf(u8, entry.name, bad) == null);
+        }
+    }
 }

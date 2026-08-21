@@ -22,7 +22,7 @@ weft.use("defaults"); // shared pick/editing/menu-nav bindings
 weft.bind("normal", "backslash", "helix-mode"); // vim  -> helix
 weft.bind("helix-normal", "backslash", "vim-normal"); // helix -> vim
 
-weft.set("editor", "which-key-delay-ms", "200");
+weft.set("which_key", "delay-ms", "200");
 weft.bind("global", "F1", "which-key-now");
 
 // Actions: abstract intents resolved by CONTEXT, shared by both editors. `eval`
