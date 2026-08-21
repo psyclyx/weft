@@ -68,6 +68,7 @@ function leaderMap(m) {
   weft.bind(m, "SPC w s", "win-split");
   weft.bind(m, "SPC w w", "win-focus");
   weft.bind(m, "SPC q q", "quit");
+  weft.bind(m, "C-SPC", "complete"); // the at-caret completion popup
 }
 leaderMap("normal"); //        vim's SPC
 leaderMap("helix-normal"); //  helix's SPC

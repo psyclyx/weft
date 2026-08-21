@@ -160,6 +160,11 @@ weft.bind("normal", "SPC c i", "inlay-hints");
 weft.bind("normal", "SPC c a", "code-actions");
 weft.bind("normal", "] d", "next-diagnostic"); // vim-style diagnostic navigation
 weft.bind("normal", "[ d", "prev-diagnostic");
+
+// Completion — trigger the at-caret popup (buffer-word + LSP race + merge-rank).
+// C-SPC from insert (where you're typing) and normal (browse from rest).
+weft.bind("insert", "C-SPC", "complete");
+weft.bind("normal", "C-SPC", "complete");
 weft.bind("normal", "SPC c e", "ts-expand-selection");
 weft.bind("normal", "SPC c n", "ts-select-node");
 weft.bind("normal", "SPC c b", "make-build");

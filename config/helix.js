@@ -84,4 +84,8 @@ weft.bind("helix-insert", "parenright", "pair-close-paren"); // type-over
 weft.bind("helix-insert", "braceright", "pair-close-brace");
 weft.bind("helix-insert", "bracketright", "pair-close-bracket");
 
+// Completion — the at-caret popup (buffer-word + LSP race + merge-rank).
+weft.bind("helix-insert", "C-SPC", "complete");
+weft.bind("helix-normal", "C-SPC", "complete");
+
 weft.echo("weft: helix config (centered which-key; SPC c e eval, SPC f r recents)");

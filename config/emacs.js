@@ -98,6 +98,11 @@ weft.bind("emacs", ")", "pair-close-paren"); // type-over the auto-closer
 weft.bind("emacs", "}", "pair-close-brace");
 weft.bind("emacs", "]", "pair-close-bracket");
 
+// Completion-at-point — the at-caret popup. C-M-i, the real emacs binding
+// (C-SPC is set-mark). M-/ also, dabbrev-muscle-memory.
+weft.bind("emacs", "C-M-i", "complete");
+weft.bind("emacs", "M-/", "complete");
+
 // Theme as data — a calm light-on-dark block (emacs default-ish).
 weft.set("theme", "background", "#1d1f21");
 weft.set("theme", "foreground", "#c5c8c6");

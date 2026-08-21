@@ -58,4 +58,8 @@ weft.bind("insert", "apostrophe", "pair-quote-single");
 weft.bind("normal", "C-a", "increment-number");
 weft.bind("normal", "C-x", "decrement-number");
 
+// Completion — the at-caret popup (buffer-word here; add the lsp plugin for more).
+weft.bind("insert", "C-SPC", "complete");
+weft.bind("normal", "C-SPC", "complete");
+
 weft.echo("weft: vim-minimal (flat SPC leader; SPC r eval, SPC p recents)");
