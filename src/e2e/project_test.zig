@@ -145,11 +145,14 @@ test "e2e/spine: write a file, init a repo, stage and commit — all through wef
         try t.expect(std.mem.indexOf(u8, disk, "<title>weft demo</title>") != null);
     }
 
+    // ── 1.5. git-status BEFORE a repo exists says so — and points the way. ──
+    // The project is a real isolated tmp dir with no git ancestor, so this is a
+    // genuine clean slate (magit used to render a fake `Branch: (no branch)`).
+    ed.run("git-status");
+    try t.expect(drainToolContains(&ed, "*magit*", "Not a git repository."));
+    try t.expect(drainToolContains(&ed, "*magit*", "git-init")); // and it names the fix
+
     // ── 2. Start version control from INSIDE the editor (the new git-init). ──
-    // (Note: the "not a git repository" render is proven in the internals test,
-    // not here — this project tmp lives under .zig-cache, which is INSIDE the
-    // monorepo repo, so git-status finds that ancestor. A clean-slate non-repo
-    // e2e wants git isolation, e.g. GIT_CEILING_DIRECTORIES on the harness env.)
     ed.run("git-init");
     // Prove git ACTUALLY ran and the repo now renders a real branch: wait for the
     // `git status` output to list the untracked file + the `Branch:` header in

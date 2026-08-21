@@ -635,6 +635,28 @@ pub fn chdirTo(path: []const u8) !void {
     if (@as(isize, @bitCast(rc)) < 0) return error.Chdir;
 }
 
+// libc mkdtemp: create a unique 0700 directory from a `…XXXXXX` template (mutated
+// in place), returning the path or null. Used to place the throwaway project in
+// the SYSTEM tmp, outside any git repo — see Project.
+extern "c" fn mkdtemp(template: [*:0]u8) ?[*:0]u8;
+
+/// Create an isolated directory under the system tmp (`$TMPDIR` or `/tmp`) and
+/// return its absolute path (caller frees). Unlike `std.testing.tmpDir` — which
+/// nests under `<cwd>/.zig-cache/tmp`, INSIDE this repo — this is a real
+/// standalone dir with no git-repo ancestor, so a project here reads as "not a
+/// repository" until it runs git-init, exactly like a person's fresh directory.
+pub fn makeSystemTmpDir(gpa: Allocator) ![]u8 {
+    const base = if (std.c.getenv("TMPDIR")) |p| std.mem.span(p) else "/tmp";
+    const suffix = "/weft-e2e-XXXXXX";
+    var tmpl: [4096]u8 = undefined;
+    if (base.len + suffix.len + 1 > tmpl.len) return error.NameTooLong;
+    @memcpy(tmpl[0..base.len], base);
+    @memcpy(tmpl[base.len..][0..suffix.len], suffix);
+    tmpl[base.len + suffix.len] = 0;
+    const made = mkdtemp(@ptrCast(&tmpl)) orelse return error.MkdTemp;
+    return gpa.dupe(u8, std.mem.span(made));
+}
+
 // ── Project: weft launched IN a real on-disk project ────────────────
 //
 // The whole-app e2e drives weft the way a person starts a project: in a
@@ -650,7 +672,6 @@ pub fn chdirTo(path: []const u8) !void {
 // the original cwd so they survive the tmpdir's removal.
 pub const Project = struct {
     gpa: Allocator,
-    td: std.testing.TmpDir,
     root: []u8, // absolute path to the project dir (the process cwd while live)
     prev_cwd: []u8, // absolute cwd to restore on deinit
 
@@ -658,18 +679,21 @@ pub const Project = struct {
         self.gpa = gpa;
         self.prev_cwd = try getCwdAlloc(gpa);
         errdefer gpa.free(self.prev_cwd);
-        self.td = std.testing.tmpDir(.{});
-        // The testing tmpdir lives at `<cwd>/.zig-cache/tmp/<sub_path>` (the
-        // codebase convention — see tmpPath); make its absolute form the process
-        // cwd so proc-backed plugins operate on it.
-        self.root = try std.fmt.allocPrint(gpa, "{s}/.zig-cache/tmp/{s}", .{ self.prev_cwd, self.td.sub_path[0..] });
+        // A real isolated dir in the system tmp — NOT under this repo — so the
+        // project has no git ancestor and behaves like a person's fresh folder.
+        self.root = try makeSystemTmpDir(gpa);
         errdefer gpa.free(self.root);
         try chdirTo(self.root);
     }
 
     pub fn deinit(self: *Project) void {
         chdirTo(self.prev_cwd) catch {};
-        self.td.cleanup();
+        // Remove the throwaway tree. `$0` carries the path as an argv, so spaces
+        // and specials can't break the command; run from prev_cwd, not inside it.
+        if (core.proc.run(self.gpa, &.{ "/bin/sh", "-c", "rm -rf -- \"$0\"", self.root }, .{ .cwd = self.prev_cwd, .environ = parentEnviron() })) |res| {
+            var r = res;
+            r.deinit(self.gpa);
+        } else |_| {}
         self.gpa.free(self.root);
         self.gpa.free(self.prev_cwd);
     }
