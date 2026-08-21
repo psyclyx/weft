@@ -262,6 +262,43 @@ test "e2e/grep: Return on a result jumps to that file at that line" {
     try t.expect(std.mem.indexOf(u8, disk, "const b = 2;") != null);
 }
 
+test "e2e/output: Return on a `file:line` in run output jumps there" {
+    const gpa = t.allocator;
+    var proj: Project = undefined;
+    try proj.init(gpa);
+    defer proj.deinit();
+
+    var ed: Editor = undefined;
+    try Editor.init(gpa, &ed);
+    defer ed.deinit();
+    try loadWebIde(&ed);
+
+    // File on disk, not opened — so visiting is a fresh open (lands in normal).
+    {
+        const r = try proj.oracle("printf 'const a = 1;\\nconst target = 42;\\nconst b = 2;\\n' > app.js");
+        gpa.free(r);
+    }
+
+    // Run a command whose output carries a location MID-line (like a stack frame
+    // or compiler note — "trace: app.js:2:5 …"), not at the start as grep does.
+    ed.runStr("run-command", "echo 'trace: app.js:2:5 boom'");
+    try t.expect(drainToolContains(&ed, "*output*", "app.js:2:5"));
+
+    // Return jumps to app.js line 2; deleting the line proves we landed there.
+    ed.press("k", "");
+    ed.press("Return", "");
+    try t.expectEqualStrings("normal", ed.mode());
+    ed.chord("d d");
+    ed.run("save");
+    ed.waitSave();
+
+    const disk = try core.file.readAlloc(gpa, "app.js");
+    defer gpa.free(disk);
+    try t.expect(std.mem.indexOf(u8, disk, "target") == null); // the located line is gone
+    try t.expect(std.mem.indexOf(u8, disk, "const a = 1;") != null);
+    try t.expect(std.mem.indexOf(u8, disk, "const b = 2;") != null);
+}
+
 test "e2e/web: author js + html, grep across them, run it with node" {
     const gpa = t.allocator;
     var proj: Project = undefined;
