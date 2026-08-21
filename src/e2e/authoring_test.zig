@@ -766,6 +766,46 @@ test "lsp: completion via the lsp plugin — async caps provider commits real zl
     try t.expect(h.drainLspCompletion(ed, off, "answ"));
 }
 
+test "lsp: didChange — an edit after open syncs, so completion sees new symbols — real zls" {
+    const gpa = t.allocator;
+    var app: App = undefined;
+    try app.init(gpa);
+    defer app.deinit();
+    const ed = &app.ed;
+
+    if (!h.toolAvailable(gpa, "zls")) return error.SkipZigTest;
+
+    // main references `zqx`, which doesn't exist at open time.
+    {
+        const out = try app.proj.oracle(
+            \\cat > dc.zig <<'EOF'
+            \\pub fn main() void {
+            \\    const x = zqx;
+            \\    _ = x;
+            \\}
+            \\EOF
+        );
+        gpa.free(out);
+    }
+    ed.runStr("open", "dc.zig");
+    ed.settle(120); // handshake + didOpen (the snapshot has no zqx*)
+
+    // Introduce a top-level decl with a real edit — this bumps the commit count,
+    // so the plugin sends didChange before the next request. Without didChange the
+    // server's copy is the stale snapshot and `zqxable` never completes.
+    const core_ed = &ed.buffers.active().editor;
+    core_ed.placeCursor(0);
+    try core_ed.insertText(gpa, "const zqxable = 7;\n");
+
+    const txt = try ed.textAlloc();
+    defer gpa.free(txt);
+    const needle = "= zqx";
+    const idx = std.mem.indexOf(u8, txt, needle).?;
+    const off = idx + needle.len; // right after `zqx`
+    core_ed.placeCursor(off);
+    try t.expect(h.drainCompletionText(ed, off, "zqx", "zqxable"));
+}
+
 test "lsp: real zls diagnostics — a bad file reports an error we can jump to" {
     const gpa = t.allocator;
     var app: App = undefined;

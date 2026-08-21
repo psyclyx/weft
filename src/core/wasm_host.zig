@@ -79,6 +79,7 @@ pub fn defineImports(linker: *wasm.Linker, p: *WasmPlugin) !void {
     // Group B: read-only.
     try d(linker, "wl_cursor", 0, 1, edit.hCursor, p);
     try d(linker, "wl_byte_len", 0, 1, edit.hByteLen, p);
+    try d(linker, "wl_doc_revision", 0, 1, edit.hDocRevision, p);
     try d(linker, "wl_slice", 4, 1, edit.hSlice, p);
     try d(linker, "wl_line_at", 2, 0, edit.hLineAt, p);
     try d(linker, "wl_selection", 1, 1, edit.hSelection, p);

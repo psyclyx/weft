@@ -26,6 +26,15 @@ pub fn hByteLen(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32, resu
     results[0] = @intCast(p.ctx.editor().text().byteLen());
 }
 
+/// The active document's monotonic commit count — a cheap change token. A plugin
+/// (LSP) tracks it to know when to resync (didChange) without diffing the text.
+pub fn hDocRevision(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32, results: []i32) void {
+    _ = caller;
+    _ = args;
+    const p: *WasmPlugin = @ptrCast(@alignCast(data.?));
+    results[0] = @intCast(p.ctx.editor().doc.commitCount());
+}
+
 pub fn hSlice(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32, results: []i32) void {
     const p: *WasmPlugin = @ptrCast(@alignCast(data.?));
     const rope = p.ctx.editor().text();

@@ -18,6 +18,11 @@ var conn: rpc.Conn = .{};
 var init_id: i64 = 0; // the `initialize` request id
 var ready: bool = false; // initialize answered + initialized/didOpen sent
 var opened: bool = false; // didOpen sent for the current document
+// Change tracking: resync (didChange, full-text) whenever the buffer's commit
+// count moves, so hover/completion/diagnostics see the CURRENT text, not the
+// didOpen snapshot. `doc_version` is the LSP document version (monotone).
+var synced_rev: u32 = 0;
+var doc_version: i64 = 1;
 
 // The user request awaiting the server (one in flight).
 const Want = enum { none, hover, definition, references, symbols, format, rename, signature, inlay, codeaction };
@@ -60,8 +65,7 @@ var diag_n: usize = 0;
 var comp_session: u32 = 0;
 var comp_id: i64 = 0;
 
-var parambuf: [4096]u8 = undefined;
-var textbuf: [1 << 18]u8 = undefined; // JSON-escaped document text for didOpen
+var parambuf: [4096]u8 = undefined; // small position/range params (bounded)
 
 const Cmd = struct { name: []const u8, handler: *const fn () void };
 const cmds = [_]Cmd{
@@ -343,19 +347,69 @@ fn posRequest(method: []const u8, pos: Pos, extra: []const u8) i64 {
     return conn.request(method, params);
 }
 
-/// didOpen the current document once (full-text sync for now).
+/// Keep the server's copy current: didOpen once, then didChange (full-text)
+/// whenever the buffer's commit count has moved since the last sync. Called
+/// before every request, so hover/completion/diagnostics act on the live text.
+///
+/// STREAMED, never held whole: stemma docs can be multi-gig, and a wasm32 guest
+/// can't hold that in one allocation. We frame the JSON-RPC envelope with the
+/// exact body length (a chunked size pass), then push the envelope prefix, the
+/// document escaped chunk-by-chunk (each chunk read via `slice`, escaped on the
+/// growable heap, sent, freed), and the suffix. Two full reads of the doc — the
+/// price of not materializing it — bounded by the server's appetite, not us.
 fn syncDoc() void {
-    if (opened) return;
+    const rev = weft.docRevision();
+    if (opened and rev == synced_rev) return;
+    if (!conn.live) return;
     buildUri();
-    const raw = weft.slice(0, weft.byteLen());
-    const esc = jsonEscape(raw);
-    const params = std.fmt.bufPrint(
-        &parambuf,
-        "{{\"textDocument\":{{\"uri\":\"{s}\",\"languageId\":\"{s}\",\"version\":1,\"text\":\"{s}\"}}}}",
-        .{ uri_buf[0..uri_len], cur_lang[0..cur_lang_len], esc },
-    ) catch return;
-    conn.notify("textDocument/didOpen", params);
-    opened = true;
+    const alloc = weft.allocator;
+    const uri = uri_buf[0..uri_len];
+    const total = weft.byteLen();
+
+    // The JSON-RPC envelope around the (streamed) document text. `params` is the
+    // {textDocument…text:"} … "} object; the envelope wraps it.
+    const prefix = if (!opened) blk: {
+        doc_version = 1;
+        break :blk std.fmt.allocPrint(alloc, "{{\"jsonrpc\":\"2.0\",\"method\":\"textDocument/didOpen\",\"params\":{{\"textDocument\":{{\"uri\":\"{s}\",\"languageId\":\"{s}\",\"version\":1,\"text\":\"", .{ uri, cur_lang[0..cur_lang_len] }) catch return;
+    } else blk: {
+        doc_version += 1;
+        break :blk std.fmt.allocPrint(alloc, "{{\"jsonrpc\":\"2.0\",\"method\":\"textDocument/didChange\",\"params\":{{\"textDocument\":{{\"uri\":\"{s}\",\"version\":{d}}},\"contentChanges\":[{{\"text\":\"", .{ uri, doc_version }) catch return;
+    };
+    defer alloc.free(prefix);
+    const suffix: []const u8 = if (!opened) "\"}}}" else "\"}]}}";
+
+    // Size pass: escaped byte count of the whole document (chunked, no hold).
+    var esc_total: usize = 0;
+    {
+        var pos: usize = 0;
+        while (pos < total) {
+            const chunk = weft.slice(pos, total); // ≤ slice scratch per call
+            if (chunk.len == 0) break;
+            esc_total += escapedLen(chunk);
+            pos += chunk.len;
+        }
+    }
+
+    // Frame + stream: header, prefix, escaped chunks, suffix.
+    conn.beginFrame(prefix.len + esc_total + suffix.len);
+    conn.writeChunk(prefix);
+    {
+        var esc: std.ArrayListUnmanaged(u8) = .empty;
+        defer esc.deinit(alloc);
+        var pos: usize = 0;
+        while (pos < total) {
+            const chunk = weft.slice(pos, total);
+            if (chunk.len == 0) break;
+            esc.clearRetainingCapacity();
+            escapeAppend(&esc, chunk) catch return; // OOM mid-frame desyncs; rare, bounded
+            conn.writeChunk(esc.items);
+            pos += chunk.len;
+        }
+    }
+    conn.writeChunk(suffix);
+
+    if (!opened) opened = true;
+    synced_rev = rev;
 }
 
 fn buildUri() void {
@@ -780,52 +834,33 @@ fn offsetOf(line: usize, col: usize) usize {
     return total;
 }
 
-/// JSON-escape `raw` into `textbuf`; returns the escaped slice.
-fn jsonEscape(raw: []const u8) []const u8 {
-    var w: usize = 0;
-    for (raw) |c| {
-        if (w + 6 > textbuf.len) break;
-        switch (c) {
-            '"' => {
-                textbuf[w] = '\\';
-                textbuf[w + 1] = '"';
-                w += 2;
-            },
-            '\\' => {
-                textbuf[w] = '\\';
-                textbuf[w + 1] = '\\';
-                w += 2;
-            },
-            '\n' => {
-                textbuf[w] = '\\';
-                textbuf[w + 1] = 'n';
-                w += 2;
-            },
-            '\r' => {
-                textbuf[w] = '\\';
-                textbuf[w + 1] = 'r';
-                w += 2;
-            },
-            '\t' => {
-                textbuf[w] = '\\';
-                textbuf[w + 1] = 't';
-                w += 2;
-            },
-            0...8, 11, 12, 14...31 => {
-                const hex = "0123456789abcdef";
-                textbuf[w] = '\\';
-                textbuf[w + 1] = 'u';
-                textbuf[w + 2] = '0';
-                textbuf[w + 3] = '0';
-                textbuf[w + 4] = hex[(c >> 4) & 0xf];
-                textbuf[w + 5] = hex[c & 0xf];
-                w += 6;
-            },
-            else => {
-                textbuf[w] = c;
-                w += 1;
-            },
-        }
-    }
-    return textbuf[0..w];
+/// JSON-escaped length of one byte — MUST match `escapeAppend` exactly, so the
+/// size pass and the send pass of a streamed document agree on the frame length.
+fn escapedLen(chunk: []const u8) usize {
+    var n: usize = 0;
+    for (chunk) |c| n += switch (c) {
+        '"', '\\', '\n', '\r', '\t' => @as(usize, 2),
+        0...8, 11, 12, 14...31 => 6,
+        else => 1,
+    };
+    return n;
+}
+
+/// Append `chunk` JSON-escaped to `list` (grows on the heap). Byte-for-byte the
+/// same escaping `escapedLen` counts; a UTF-8 sequence split across chunks is
+/// fine — bytes ≥ 0x80 copy verbatim.
+fn escapeAppend(list: *std.ArrayListUnmanaged(u8), chunk: []const u8) !void {
+    const alloc = weft.allocator;
+    for (chunk) |c| switch (c) {
+        '"' => try list.appendSlice(alloc, "\\\""),
+        '\\' => try list.appendSlice(alloc, "\\\\"),
+        '\n' => try list.appendSlice(alloc, "\\n"),
+        '\r' => try list.appendSlice(alloc, "\\r"),
+        '\t' => try list.appendSlice(alloc, "\\t"),
+        0...8, 11, 12, 14...31 => {
+            const hex = "0123456789abcdef";
+            try list.appendSlice(alloc, &[_]u8{ '\\', 'u', '0', '0', hex[(c >> 4) & 0xf], hex[c & 0xf] });
+        },
+        else => try list.append(alloc, c),
+    };
 }

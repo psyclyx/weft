@@ -14,6 +14,15 @@
 //! plus echo. A guest declares in `describe()`; the host cross-checks every
 //! `register`/effect against that declaration (the perm handshake).
 
+const std = @import("std");
+
+/// A growable heap over the guest's wasm linear memory (grows via memory.grow).
+/// Plugins that must hold data whose size the document dictates — a JSON-RPC
+/// message, an escaped chunk — allocate here instead of a fixed buffer, so file
+/// size is bounded by wasm memory (and streaming, for the unbounded cases), not
+/// a compile-time constant. See [[completion-ux-roadmap]].
+pub const allocator: std.mem.Allocator = std.heap.wasm_allocator;
+
 // ── Raw host imports (the grants). Named `wl_*` to keep the ergonomic
 // wrappers below as the surface guest code actually calls. ──
 extern "weft" fn wl_log(level: u32, ptr: u32, len: u32) void;
@@ -22,6 +31,7 @@ extern "weft" fn wl_declare_capability(ptr: u32, len: u32) void;
 extern "weft" fn wl_request_perm(perm: u32) void;
 extern "weft" fn wl_cursor() u32;
 extern "weft" fn wl_byte_len() u32;
+extern "weft" fn wl_doc_revision() u32;
 extern "weft" fn wl_slice(start: u32, end: u32, out_ptr: u32, out_cap: u32) u32;
 extern "weft" fn wl_line_at(offset: u32, out_ptr: u32) void;
 extern "weft" fn wl_selection(out_ptr: u32) u32;
@@ -194,6 +204,11 @@ pub fn cursor() usize {
 }
 pub fn byteLen() usize {
     return wl_byte_len();
+}
+/// The active document's monotonic commit count — a cheap change token (bumps on
+/// every edit). Track it to know when to resync without diffing the text.
+pub fn docRevision() u32 {
+    return wl_doc_revision();
 }
 /// Bytes of `[start, end)` of the active document (clamped). Valid until the
 /// next read call — copy to keep.

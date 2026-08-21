@@ -980,6 +980,43 @@ pub fn drainLspCompletion(ed: *Editor, off: usize, prefix: []const u8) bool {
     return false;
 }
 
+/// Like `drainLspCompletion`, but succeeds only when the MERGED completion set
+/// contains an item whose text contains `needle` — proves a specific candidate
+/// (e.g. a symbol introduced by an edit, so didChange must have synced) actually
+/// surfaced, not merely that some result arrived.
+pub fn drainCompletionText(ed: *Editor, off: usize, prefix: []const u8, needle: []const u8) bool {
+    var attempt: usize = 0;
+    while (attempt < 60) : (attempt += 1) {
+        const b = ed.buffers.active();
+        const sid = (ed.caps.fire(.completion, &b.editor.doc, b.editor.backingPath(), .{
+            .offset = off,
+            .text = prefix,
+        }) catch {
+            ed.settle(5);
+            continue;
+        }) orelse {
+            ed.settle(5);
+            continue;
+        };
+        var found = false;
+        var i: usize = 0;
+        while (i < 80) : (i += 1) {
+            ed.settle(2);
+            const merged = ed.caps.mergedCompletion(ed.gpa, sid) catch &.{};
+            for (merged) |it| {
+                if (std.mem.indexOf(u8, it.text, needle) != null) found = true;
+            }
+            ed.gpa.free(merged);
+            const s = ed.caps.session(sid) orelse break;
+            if (found or s.done(core.task.nowNs())) break;
+        }
+        ed.caps.finish(sid);
+        if (found) return true;
+        ed.settle(10);
+    }
+    return false;
+}
+
 /// Re-fire `cmd` until it opens a pick (a references / symbols location list).
 pub fn drainPick(ed: *Editor, cmd: []const u8) bool {
     var rounds: usize = 0;

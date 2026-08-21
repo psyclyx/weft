@@ -5,34 +5,40 @@
 //! and nothing protocol-specific. LSP and DAP both speak JSON-RPC, so both import
 //! this — compile-time shared, no cross-plugin calls.
 //!
-//! Freestanding-wasm shaped: fixed buffers, no ambient allocator. Parsing uses
-//! `std.json` over a `FixedBufferAllocator` on an owned arena, reset per message;
-//! a returned `Value` is valid until the next `next()`.
+//! Freestanding-wasm shaped, but NOT fixed-buffer: storage grows over the guest
+//! wasm heap (`weft.allocator`), so a message's size is bounded by wasm memory,
+//! not a compile-time constant. The rx accumulator and every outgoing envelope
+//! grow on demand; a document too large to marshal whole (multi-gig, stemma's
+//! territory) is streamed frame-by-frame via `beginFrame`/`writeChunk` so it is
+//! never held in one allocation. Parsing owns a per-message arena (freed on the
+//! next `next()`); a returned `Value` is valid until then.
 
 const std = @import("std");
 const weft = @import("weft.zig");
 
 pub const Value = std.json.Value;
 
+fn a() std.mem.Allocator {
+    return weft.allocator;
+}
+
 /// A JSON-RPC connection over one raw stream. The caller owns the storage
-/// (`var conn: Conn = .{}` then `conn.start(cmd)`) — it's ~½ MiB of buffers, so
-/// never pass it by value.
+/// (`var conn: Conn = .{}` then `conn.start(cmd)`); its buffers grow on the heap,
+/// so hold it by pointer, never by value.
 pub const Conn = struct {
     stream: u32 = 0,
     live: bool = false,
     seq: i64 = 1,
 
-    /// Accumulates raw stream bytes until a full `Content-Length` frame is present.
-    rx: [1 << 19]u8 = undefined, // 512 KiB — caps the largest single message
-    rxlen: usize = 0,
-    /// Backs the parse of the CURRENT message (reset every `next`).
-    arena: [1 << 19]u8 = undefined,
-    /// Assembles an outgoing envelope.
-    tx: [1 << 18]u8 = undefined,
+    /// Accumulates raw stream bytes until a full `Content-Length` frame is present
+    /// (grows to the largest single message the server sends).
+    rx: std.ArrayListUnmanaged(u8) = .empty,
+    /// Owns the CURRENT parsed message's arena; freed on the next `next()`.
+    parsed: ?std.json.Parsed(Value) = null,
 
     pub fn start(self: *Conn, cmd: []const u8) bool {
         self.stream = weft.procSpawn(cmd) orelse return false;
-        self.rxlen = 0;
+        self.rx.clearRetainingCapacity();
         self.seq = 1;
         self.live = true;
         return true;
@@ -41,46 +47,71 @@ pub const Conn = struct {
     pub fn close(self: *Conn) void {
         if (self.live) weft.procClose(self.stream);
         self.live = false;
+        if (self.parsed) |*pp| {
+            pp.deinit();
+            self.parsed = null;
+        }
+        self.rx.clearAndFree(a());
     }
 
     /// Send a request; returns its id (correlate the response by it). `params` is
-    /// a ready JSON value (object/array text) the protocol layer built.
+    /// a ready JSON value (object/array text) the protocol layer built. The
+    /// envelope grows to any params size; -1 on OOM.
     pub fn request(self: *Conn, method: []const u8, params: []const u8) i64 {
         const id = self.seq;
         self.seq += 1;
-        const body = std.fmt.bufPrint(
-            &self.tx,
+        const body = std.fmt.allocPrint(
+            a(),
             "{{\"jsonrpc\":\"2.0\",\"id\":{d},\"method\":\"{s}\",\"params\":{s}}}",
             .{ id, method, params },
         ) catch return -1;
+        defer a().free(body);
         self.frameAndSend(body);
         return id;
     }
 
-    /// Send a notification (no id, no response).
+    /// Send a notification (no id, no response). Grows to any params size.
     pub fn notify(self: *Conn, method: []const u8, params: []const u8) void {
-        const body = std.fmt.bufPrint(
-            &self.tx,
+        const body = std.fmt.allocPrint(
+            a(),
             "{{\"jsonrpc\":\"2.0\",\"method\":\"{s}\",\"params\":{s}}}",
             .{ method, params },
         ) catch return;
+        defer a().free(body);
         self.frameAndSend(body);
     }
 
     fn frameAndSend(self: *Conn, body: []const u8) void {
+        self.beginFrame(body.len);
+        self.writeChunk(body);
+    }
+
+    // ── Streamed send (bodies too large to hold whole) ──────────────────
+    // Emit the header with the total body length, then push the body in parts.
+    // The caller computes `body_len` up front (a size pass) and must write EXACTLY
+    // that many bytes across `writeChunk` calls — LSP framing has no terminator.
+
+    pub fn beginFrame(self: *Conn, body_len: usize) void {
         var hdr: [48]u8 = undefined;
-        const h = std.fmt.bufPrint(&hdr, "Content-Length: {d}\r\n\r\n", .{body.len}) catch return;
+        const h = std.fmt.bufPrint(&hdr, "Content-Length: {d}\r\n\r\n", .{body_len}) catch return;
         weft.procSend(self.stream, h);
-        weft.procSend(self.stream, body);
+    }
+
+    pub fn writeChunk(self: *Conn, bytes: []const u8) void {
+        weft.procSend(self.stream, bytes);
     }
 
     /// Drain the stream and return the NEXT complete message parsed, or null when
     /// none is buffered yet. Call in a loop from the plugin's `on_poll`:
     /// `while (conn.next()) |msg| handle(msg);`. The returned `Value` borrows the
-    /// arena — read it before the next `next()`.
+    /// message arena — read it before the next `next()`.
     pub fn next(self: *Conn) ?Value {
+        if (self.parsed) |*pp| {
+            pp.deinit();
+            self.parsed = null;
+        }
         self.pull();
-        const data = self.rx[0..self.rxlen];
+        const data = self.rx.items;
         // Header block ends at the first CRLFCRLF.
         const sep = std.mem.indexOf(u8, data, "\r\n\r\n") orelse return null;
         const header = data[0..sep];
@@ -90,36 +121,33 @@ pub const Conn = struct {
             return null;
         };
         const body_start = sep + 4;
-        if (self.rxlen < body_start + clen) return null; // body not all here yet
-        const body = self.rx[body_start .. body_start + clen];
-        var fba = std.heap.FixedBufferAllocator.init(&self.arena);
-        const v = std.json.parseFromSliceLeaky(Value, fba.allocator(), body, .{}) catch {
+        if (self.rx.items.len < body_start + clen) return null; // body not all here yet
+        const body = self.rx.items[body_start .. body_start + clen];
+        const parsed = std.json.parseFromSlice(Value, a(), body, .{}) catch {
             self.consume(body_start + clen);
             return null;
         };
-        self.consume(body_start + clen);
-        return v;
+        self.consume(body_start + clen); // safe: the arena holds its own copy
+        self.parsed = parsed;
+        return parsed.value;
     }
 
-    /// Pull all currently-available stream bytes into `rx` (bounded by capacity;
-    /// an over-cap message is dropped by the framer, not corrupted).
+    /// Pull all currently-available stream bytes into `rx` (grows as needed).
     fn pull(self: *Conn) void {
         var chunk: [1 << 16]u8 = undefined;
         while (true) {
             const got = weft.procRead(self.stream, &chunk);
             if (got.len == 0) break;
-            if (self.rxlen + got.len <= self.rx.len) {
-                @memcpy(self.rx[self.rxlen..][0..got.len], got);
-                self.rxlen += got.len;
-            }
+            self.rx.appendSlice(a(), got) catch return; // OOM: stop pulling this round
             if (got.len < chunk.len) break; // stream drained for now
         }
     }
 
     fn consume(self: *Conn, n: usize) void {
-        const k = @min(n, self.rxlen);
-        std.mem.copyForwards(u8, self.rx[0 .. self.rxlen - k], self.rx[k..self.rxlen]);
-        self.rxlen -= k;
+        const k = @min(n, self.rx.items.len);
+        const rest = self.rx.items.len - k;
+        std.mem.copyForwards(u8, self.rx.items[0..rest], self.rx.items[k..]);
+        self.rx.shrinkRetainingCapacity(rest);
     }
 };
 
