@@ -20,10 +20,15 @@ var ready: bool = false; // initialize answered + initialized/didOpen sent
 var opened: bool = false; // didOpen sent for the current document
 
 // The user request awaiting the server (one in flight).
-const Want = enum { none, hover, definition, references, symbols, format };
+const Want = enum { none, hover, definition, references, symbols, format, rename };
 var want: Want = .none;
 var want_off: usize = 0;
 var want_id: i64 = 0;
+
+// Rename: the new name typed into the prompt pick, sent once the server's ready.
+const pick_id_rename: u32 = 2;
+var rename_name: [256]u8 = undefined;
+var rename_nlen: usize = 0;
 
 // The open document's `file://` uri.
 var uri_buf: [1200]u8 = undefined;
@@ -56,6 +61,7 @@ const cmds = [_]Cmd{
     .{ .name = "next-diagnostic", .handler = cmdNextDiag },
     .{ .name = "prev-diagnostic", .handler = cmdPrevDiag },
     .{ .name = "lsp-format", .handler = cmdFormat },
+    .{ .name = "rename", .handler = cmdRename },
 };
 
 export fn describe() void {
@@ -88,11 +94,21 @@ export fn on_activate() void {
     if (ready) syncDoc();
 }
 
-/// A pick entry was chosen: jump to its recorded offset.
+/// A pick entry was chosen: a location jump, or the rename name.
 export fn on_pick_accept(pick_id: u32) void {
-    if (pick_id != pick_id_results) return;
-    const idx = weft.pickChoiceIndex() orelse return;
-    if (idx < pick_n) weft.jump(pick_offsets[idx]);
+    if (pick_id == pick_id_results) {
+        const idx = weft.pickChoiceIndex() orelse return;
+        if (idx < pick_n) weft.jump(pick_offsets[idx]);
+        return;
+    }
+    if (pick_id == pick_id_rename) {
+        const name = weft.pickChoice(); // borrows scratch — copy before posOf/params
+        if (name.len == 0) return;
+        rename_nlen = @min(name.len, rename_name.len);
+        @memcpy(rename_name[0..rename_nlen], name[0..rename_nlen]);
+        want = .rename;
+        if (ready) sendWant();
+    }
 }
 
 // ── Commands ─────────────────────────────────────────────────────────
@@ -116,6 +132,23 @@ fn cmdPrevDiag() void {
 }
 fn cmdFormat() void {
     fire(.format);
+}
+/// Rename the symbol under the cursor. With an arg, use it as the new name; else
+/// prompt (a free-text pick). On accept the request goes out (see on_pick_accept).
+fn cmdRename() void {
+    ensureServer();
+    want_off = weft.cursor();
+    if (weft.argStr(0)) |name| {
+        if (name.len > 0) {
+            rename_nlen = @min(name.len, rename_name.len);
+            @memcpy(rename_name[0..rename_nlen], name[0..rename_nlen]);
+            want = .rename;
+            if (ready) sendWant();
+            return;
+        }
+    }
+    weft.pickBegin("rename to", pick_id_rename);
+    weft.pickEnd(); // no items — the typed query is the new name
 }
 
 /// Jump to the next/previous stored diagnostic from the cursor (wrapping) and
@@ -190,6 +223,14 @@ fn sendWant() void {
             const params = std.fmt.bufPrint(&parambuf, "{{\"textDocument\":{{\"uri\":\"{s}\"}},\"options\":{{\"tabSize\":4,\"insertSpaces\":true}}}}", .{uri_buf[0..uri_len]}) catch return;
             want_id = conn.request("textDocument/formatting", params);
         },
+        .rename => {
+            const params = std.fmt.bufPrint(
+                &parambuf,
+                "{{\"textDocument\":{{\"uri\":\"{s}\"}},\"position\":{{\"line\":{d},\"character\":{d}}},\"newName\":\"{s}\"}}",
+                .{ uri_buf[0..uri_len], pos.line, pos.col, rename_name[0..rename_nlen] },
+            ) catch return;
+            want_id = conn.request("textDocument/rename", params);
+        },
     }
 }
 
@@ -254,7 +295,8 @@ fn dispatch(msg: rpc.Value) void {
                 .definition => presentDefinition(result),
                 .references => presentLocations(result, "reference"),
                 .symbols => presentSymbols(result),
-                .format => applyEdits(result),
+                .format => weft.echo(if (applyEdits(result) > 0) "lsp: formatted" else "lsp: nothing to format"),
+                .rename => weft.echo(if (applyWorkspaceEdit(result) > 0) "lsp: renamed" else "lsp: rename made no change"),
                 .none => {},
             }
             want = .none;
@@ -371,15 +413,13 @@ fn addSymbol(item: rpc.Value) void {
     };
 }
 
-/// Apply a server's TextEdit[] (formatting; the same shape a rename/code-action
-/// WorkspaceEdit carries per file). Apply BOTTOM-UP so earlier ranges' offsets
-/// stay valid as we edit. The gated edit door authors as this plugin's peer.
-fn applyEdits(result: rpc.Value) void {
-    if (result != .array or result.array.items.len == 0) {
-        weft.echo("lsp: nothing to format");
-        return;
-    }
+/// Apply a server's TextEdit[] (formatting; also each file's edits in a
+/// rename/code-action WorkspaceEdit). BOTTOM-UP so earlier ranges' offsets stay
+/// valid. Returns how many were applied. The gated edit door authors as our peer.
+fn applyEdits(result: rpc.Value) usize {
+    if (result != .array) return 0;
     const edits = result.array.items;
+    var applied: usize = 0;
     var i = edits.len;
     while (i > 0) {
         i -= 1;
@@ -391,8 +431,38 @@ fn applyEdits(result: rpc.Value) void {
         const en = pointOf(rng.object.get("end")) orelse continue;
         const newText = if (e.object.get("newText")) |n| (if (n == .string) n.string else "") else "";
         weft.edit(.{ .start = offsetOf(s.line, s.col), .end = offsetOf(en.line, en.col) }, newText);
+        applied += 1;
     }
-    weft.echo("lsp: formatted");
+    return applied;
+}
+
+/// Apply a WorkspaceEdit's edits for the CURRENT file (the `changes` map or
+/// `documentChanges` list — same-file rename for now; cross-file with multi-open).
+fn applyWorkspaceEdit(result: rpc.Value) usize {
+    if (result != .object) return 0;
+    const o = result.object;
+    if (o.get("changes")) |ch| {
+        if (ch == .object) {
+            var it = ch.object.iterator();
+            while (it.next()) |entry| {
+                if (sameUri(entry.key_ptr.*)) return applyEdits(entry.value_ptr.*);
+            }
+        }
+    }
+    if (o.get("documentChanges")) |dc| {
+        if (dc == .array) {
+            for (dc.array.items) |d| {
+                if (d != .object) continue;
+                const td = d.object.get("textDocument") orelse continue;
+                if (td != .object) continue;
+                const uri = td.object.get("uri") orelse continue;
+                if (uri == .string and sameUri(uri.string)) {
+                    return applyEdits(d.object.get("edits") orelse rpc.Value{ .null = {} });
+                }
+            }
+        }
+    }
+    return 0;
 }
 
 /// A `{line,character}` position value → editor coordinates.

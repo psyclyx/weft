@@ -738,6 +738,55 @@ test "lsp: real zls diagnostics — a bad file reports an error we can jump to" 
     try t.expect(h.drainEcho(ed, "next-diagnostic", "error"));
 }
 
+test "lsp: rename via the lsp plugin — prompt, then apply the WorkspaceEdit — real zls" {
+    const gpa = t.allocator;
+    var app: App = undefined;
+    try app.init(gpa);
+    defer app.deinit();
+    const ed = &app.ed;
+
+    if (!h.toolAvailable(gpa, "zls")) return error.SkipZigTest;
+
+    {
+        const out = try app.proj.oracle(
+            \\cat > r.zig <<'EOF'
+            \\fn foo() void {}
+            \\pub fn main() void {
+            \\    foo();
+            \\}
+            \\EOF
+        );
+        gpa.free(out);
+    }
+    ed.runStr("open", "r.zig");
+
+    // Rename `foo` → `bar`: cursor on the definition, name given as the arg (the
+    // interactive path prompts instead).
+    ed.chord("g g");
+    ed.press("w", ""); // `fn ` → `foo`
+    ed.runStr("rename", "bar");
+
+    // The rename is deferred until the server initializes; wait for the applied echo.
+    var ok = false;
+    var round: usize = 0;
+    while (round < 600) : (round += 1) {
+        ed.settle(3);
+        if (std.mem.indexOf(u8, ed.echoText(), "renamed") != null) {
+            ok = true;
+            break;
+        }
+    }
+    try t.expect(ok);
+    ed.run("save");
+    ed.waitSave();
+
+    const disk = try core.file.readAlloc(gpa, "r.zig");
+    defer gpa.free(disk);
+    try t.expect(std.mem.indexOf(u8, disk, "fn bar()") != null); // definition renamed
+    try t.expect(std.mem.indexOf(u8, disk, "bar();") != null); // call renamed
+    try t.expect(std.mem.indexOf(u8, disk, "foo") == null); // every occurrence
+}
+
 test "lsp: format via the lsp plugin applies the server's edits — real zls" {
     const gpa = t.allocator;
     var app: App = undefined;

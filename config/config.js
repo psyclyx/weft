@@ -151,6 +151,9 @@ weft.bind("normal", "SPC c d", "goto-definition");
 weft.bind("normal", "SPC c h", "hover");
 weft.bind("normal", "SPC c s", "symbols");
 weft.bind("normal", "SPC c F", "lsp-format"); // format via the language server
+weft.bind("normal", "SPC c R", "references");
+weft.bind("normal", "g r", "references"); // vim-style
+weft.bind("normal", "g R", "rename"); // rename the symbol under the cursor
 weft.bind("normal", "] d", "next-diagnostic"); // vim-style diagnostic navigation
 weft.bind("normal", "[ d", "prev-diagnostic");
 weft.bind("normal", "SPC c e", "ts-expand-selection");
