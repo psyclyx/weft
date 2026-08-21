@@ -200,6 +200,7 @@ pub const imports = [_]Entry{
 
     // ── surface.zig — the retained overlay (which-key/dired/magit) ─────
     .{ .name = "wl_surface_begin", .params = &.{.u32}, .results = &.{}, .group = .surface, .doc = "open a retained overlay surface at `placement`" },
+    .{ .name = "wl_surface_caret", .params = &.{.u32}, .results = &.{}, .group = .surface, .doc = "open a retained overlay surface anchored at document offset `offset` (rendering P2)" },
     .{ .name = "wl_surface_row", .params = &.{}, .results = &.{}, .group = .surface, .doc = "start a new row in the open surface" },
     .{ .name = "wl_surface_span", .params = &.{ .u32, .u32, .u32 }, .results = &.{}, .group = .surface, .doc = "append a styled text span to the current surface row" },
     .{ .name = "wl_surface_end", .params = &.{.i32}, .results = &.{}, .group = .surface, .doc = "close the open surface, marking a row selected or not" },
@@ -269,9 +270,9 @@ pub const imports = [_]Entry{
 /// verification block in that file for what happens if you forget), so an
 /// accidental add/remove — a merge conflict, a copy-paste slip, a
 /// half-finished edit — fails the build with a pointed message instead of
-/// silently drifting the two ~123-entry tables apart again (the exact class
+/// silently drifting the two ~124-entry tables apart again (the exact class
 /// this table exists to kill).
-const expected_import_count = 123;
+const expected_import_count = 124;
 
 /// A host→guest EXPORT entrypoint (design doc/north-star-plan.md §2.5, task
 /// W0a-D extension 2): every `instance.callVoid("name", args)` the host
@@ -324,7 +325,7 @@ pub const exports = [_]Export{
 const expected_export_count = 10;
 
 comptime {
-    @setEvalBranchQuota(50_000); // the O(n²) duplicate-name scans below, n≈123
+    @setEvalBranchQuota(50_000); // the O(n²) duplicate-name scans below, n≈124
     if (imports.len != expected_import_count) @compileError(std.fmt.comptimePrint(
         "core/membrane/contract_data.zig: imports table has {d} entries, expected {d}. " ++
             "If you added or removed a wl_* host import, update `expected_import_count` here. " ++

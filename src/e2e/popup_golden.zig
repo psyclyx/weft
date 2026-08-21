@@ -29,9 +29,24 @@ pub const Golden = struct {
     pixel_hash: u64 = 0,
 };
 
+/// A picker-DOCK scenario's expected layout (rendering P2 — the dock is now
+/// `popup.DockLayout`, a distinct shape from a caret popup's `CaretLayout`:
+/// no columns/flip/info-panel, just stacked rows). Kept as its own array
+/// (`GoldenFile.dock_cases`) rather than folding into `Golden`/`cases` — a
+/// tagged-union `layout` would make every existing caret-popup golden entry
+/// carry a redundant variant tag for no reason.
+pub const DockGolden = struct {
+    name: []const u8,
+    layout: popup.DockLayout,
+};
+
 pub const GoldenFile = struct {
     note: []const u8 = "",
     cases: []const Golden,
+    /// Defaults to empty so a golden file recorded before the dock gained
+    /// its own goldens still parses (ZON fills a missing field from its
+    /// default).
+    dock_cases: []const DockGolden = &.{},
 };
 
 /// Load the committed goldens from `path` (repo-relative). Caller must
@@ -64,6 +79,12 @@ pub fn find(file: GoldenFile, name: []const u8) ?Golden {
     return null;
 }
 
+/// Find `name`'s DOCK entry, or null if the scenario is new.
+pub fn findDock(file: GoldenFile, name: []const u8) ?DockGolden {
+    for (file.dock_cases) |c| if (std.mem.eql(u8, c.name, name)) return c;
+    return null;
+}
+
 /// Render `layout` as ZON text (caller frees) — used both to WRITE a fresh
 /// golden and to COMPARE one: `CaretLayout` nests slices/enums/optionals
 /// deep enough that a hand-rolled structural comparator would just be a
@@ -71,6 +92,14 @@ pub fn find(file: GoldenFile, name: []const u8) ?Golden {
 /// exactly when their canonical ZON texts are byte-identical, and a
 /// mismatch's own printed texts ARE the diff.
 pub fn layoutText(gpa: Allocator, layout: popup.CaretLayout) ![]u8 {
+    var aw: std.Io.Writer.Allocating = .init(gpa);
+    defer aw.deinit();
+    try std.zon.stringify.serialize(layout, .{}, &aw.writer);
+    return aw.toOwnedSlice();
+}
+
+/// `layoutText`'s counterpart for a picker-DOCK layout.
+pub fn dockLayoutText(gpa: Allocator, layout: popup.DockLayout) ![]u8 {
     var aw: std.Io.Writer.Allocating = .init(gpa);
     defer aw.deinit();
     try std.zon.stringify.serialize(layout, .{}, &aw.writer);

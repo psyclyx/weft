@@ -16,6 +16,7 @@ pub const app_session = @import("app/session.zig");
 pub const app_providers = @import("app/providers.zig");
 pub const app_buffers_cmds = @import("app/buffers_cmds.zig");
 pub const app_collab = @import("app/collab.zig");
+pub const app_frame_builder = @import("app/frame_builder.zig");
 
 // This module OWNS the core/gfx/app tree, so it also runs their display-free
 // unit tests (moved here from src/tests.zig — those files can only belong to one
@@ -36,4 +37,5 @@ test {
     _ = region;
     _ = window_layout;
     _ = @import("app/frame.zig"); // which-key menu-overlay timing
+    _ = @import("app/frame_builder.zig"); // rendering P2: caret-surface auto-expiry
 }

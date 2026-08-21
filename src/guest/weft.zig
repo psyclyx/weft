@@ -118,6 +118,7 @@ extern "weft" fn wl_open_file_pick(prompt_ptr: u32, prompt_len: u32, root_ptr: u
 extern "weft" fn wl_pick_choice(out_ptr: u32, out_cap: u32) i32;
 extern "weft" fn wl_pick_choice_index() i32;
 extern "weft" fn wl_surface_begin(placement: u32) void;
+extern "weft" fn wl_surface_caret(offset: u32) void;
 extern "weft" fn wl_surface_row() void;
 extern "weft" fn wl_surface_span(t: u32, tl: u32, role: u32) void;
 extern "weft" fn wl_surface_end(selected: i32) void;
@@ -187,7 +188,7 @@ fn ZigType(comptime v: contract_data.ValType) type {
 // compile time, pointing at the offending name, instead of silently
 // desyncing the guest and host halves of the membrane again.
 comptime {
-    @setEvalBranchQuota(50_000); // n≈123 entries, each doing a small const-eval
+    @setEvalBranchQuota(50_000); // n≈124 entries, each doing a small const-eval
     for (contract_data.imports) |entry| {
         const Fn = @typeInfo(@TypeOf(@field(@This(), entry.name))).@"fn";
         if (Fn.params.len != entry.params.len) @compileError(std.fmt.comptimePrint(
@@ -722,16 +723,30 @@ pub fn openFilePick(prompt: []const u8, root: []const u8, pick_id: u32) void {
 }
 
 // ── Surface (retained overlay: build begin→row→span…→end, then close) ────
-/// Where a surface docks. Mirrors core.surface.Placement.
-pub const Placement = enum(u32) { bottom = 0, corner = 1, center = 2 };
+/// Where a surface docks. Mirrors core.surface.Placement. `caret` is begun
+/// through `surfaceCaret`, not `surfaceBegin` — see its doc.
+pub const Placement = enum(u32) { bottom = 0, corner = 1, center = 2, caret = 3 };
 /// A span's semantic color role. Mirrors core.surface.Role — the theme resolves
 /// each to a real color, so a colorscheme restyles the surface for free.
-pub const Role = enum(u32) { normal = 0, accent = 1, group = 2, leaf = 3, effect = 4, muted = 5 };
+/// `annotation` is a dimmed side note (rendering P2 — see doc/rendering.md).
+pub const Role = enum(u32) { normal = 0, accent = 1, group = 2, leaf = 3, effect = 4, muted = 5, annotation = 6 };
 
-/// Begin (re)building this plugin's overlay at `placement`. Not shown until
-/// `surfaceEnd`; the previously-drawn surface stays live until then.
+/// Begin (re)building this plugin's overlay at `placement` (`bottom`/
+/// `corner`/`center` — a `caret` popup begins with `surfaceCaret` instead,
+/// since it also needs the anchor offset). Not shown until `surfaceEnd`; the
+/// previously-drawn surface stays live until then.
 pub fn surfaceBegin(placement: Placement) void {
     wl_surface_begin(@intFromEnum(placement));
+}
+/// Begin (re)building a CARET-anchored overlay — placed at `offset` (a
+/// document byte offset) instead of a corner/center/bottom dock; core lays
+/// it out just below (or, flipped, above) the caret's screen line, clamped
+/// into the viewport. The `lsp` plugin's hover popup uses this so its box
+/// tracks the caret, the same generic `drawCaretSurface` renderer the
+/// picker's own completion list draws through (rendering P2 — see
+/// doc/rendering.md).
+pub fn surfaceCaret(offset: usize) void {
+    wl_surface_caret(@intCast(offset));
 }
 /// Start a new row.
 pub fn surfaceRow() void {

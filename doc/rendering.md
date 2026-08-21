@@ -131,14 +131,31 @@ platform"; neither touches the scene vocabulary or any plugin.
   the hover box as surfaces built in core (still core-emitted) — deleting the
   bespoke `drawPickAtCaret`/`drawHoverAtCaret` layout. Behavior identical; the
   snapshot tests are the guard.
-- **P2 — the consumer emits the scene.** `complete_ui`/hover build a surface
-  instead of driving pick+bespoke draw; the picker dock too. NOTE: the hover
-  HUD path is currently DORMANT in production (`frame_builder.zig` passes
-  `.hover = null`; LSP hover routes to the echo line) — P2 must re-wire a
-  live hover *producer*, not just swap the build path; the popup-layout gate
-  drives the path directly meanwhile. `popup.zig` shrinks
-  to one generic surface renderer. Core no longer knows "completion popup", only
-  "a caret surface".
+- **P2 — the consumer emits the scene (DONE).** `Role.annotation` landed
+  (column≥1 dimming is now role-driven, not a column-number special case).
+  `core.pick.Pick.buildSurface` — not the render layer — builds the picker's
+  own scene, caret popup or window-bottom dock, from live `Pick` state;
+  `frame_builder.zig` hands it through `hud.surfaces` the same door a
+  plugin's retained surface uses (production `Hud.pick`/`Hud.hover` are now
+  dead fields, kept only as a legacy/test-only fallback in `View.build` for
+  callers that still build a `Hud` by hand). The hover HUD path was DORMANT
+  in production (`frame_builder.zig` passed `.hover = null`; LSP hover
+  routed to the echo line) — re-wired to a LIVE producer: the `lsp` guest
+  plugin now emits its hover as a `.caret` surface through a new
+  `wl_surface_caret` membrane call (echo remains the fallback only when
+  there's no hover result to anchor). `popup.zig` shrank to three generic
+  renderers — `drawSurfaces` (corner/center, and routing for a guest's
+  `.caret`/`.bottom` surface), `drawCaretSurface`, `drawDockSurface` — plus
+  their `layout*` introspection twins; it no longer names "completion" or
+  "hover" anywhere. Guard: `src/e2e/popup_layout_test.zig`'s goldens
+  (including two new dock scenarios). DISMISSAL: a guest has no
+  `on_move`/`on_edit` export to close its own caret popup when the cursor
+  wanders off — that's the P4-era generalization (guest-driven, once
+  UI-as-plugin needs it for more than hover). Meanwhile `frame_builder.zig`
+  enforces it as CORE POLICY: a retained guest `.caret` surface auto-CLOSES
+  the frame the cursor leaves its anchor's line — unlike the echo line
+  hover replaced, a caret popup paints over body text, so a stale one left
+  open is a real regression, not just clutter.
 - **P3 — formalize the backend + platform seams.** Extract the Rasterizer and
   Platform interfaces around `snail_vk`/`skia`/`wayland` (no behavior change), so
   webgpu / X / terminal / browser / macOS are drop-in later. Keep wayland+vulkan
@@ -282,10 +299,18 @@ The retained `Surface` already has `rows[]`, `selected`, `Placement`. P1 adds:
     Span { text, role, column: u8 = 0 }   // 0 = main, 1 = annotation, …
 
 Membrane (extends the existing `wl_surface_*`): `wl_surface_begin` gains a caret
-variant `wl_surface_caret(offset)`; `wl_surface_span` gains a column arg;
-`wl_surface_info(text)` sets the side panel. The generic renderer
-`drawCaretSurface` in `popup.zig` does the flip/clamp/column-align/info-box that
-`drawPickAtCaret`+`drawHoverAtCaret` hardcode today — one place, every caret popup.
+variant, `wl_surface_caret(offset)` — SHIPPED in P2, the one new membrane call the
+`lsp` plugin's hover needed. The column tag and linked info panel (`column` on
+`Span`, `Surface.info`) stay CORE-SIDE only for now — `wl_surface_span` is still
+3 params and there is no `wl_surface_info` import; no guest has needed an
+aligned/annotated caret list or a side panel yet (`Pick.buildSurface`, a core
+consumer, builds those directly against `core.surface.Surface`). Add
+`wl_surface_span_col`/`wl_surface_info` the same way, when a guest actually
+needs them — the pattern (contract_data.zig entry + contract.zig handler +
+weft.zig extern+wrapper, verified by both comptime tripwires) is established.
+The generic renderer `drawCaretSurface` in `popup.zig` does the
+flip/clamp/column-align/info-box that `drawPickAtCaret`+`drawHoverAtCaret`
+hardcoded before P1 — one place, every caret popup.
 
 ## Why this ordering
 

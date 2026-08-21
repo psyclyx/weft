@@ -49,6 +49,11 @@ const pick_id_results: u32 = 1;
 var pick_offsets: [256]usize = undefined;
 var pick_n: usize = 0;
 
+// Hover popup: capped row count (mirrors the view's `Hud.max_hover_rows` —
+// this guest doesn't depend on `gfx/view`, so the cap is repeated here as a
+// plain constant, not imported).
+const max_hover_rows = 16;
+
 // Diagnostics pushed by the server (publishDiagnostics): offset + severity +
 // packed message, for gutter markers and `]d`/`[d` navigation.
 const MAX_DIAG = 256;
@@ -570,12 +575,31 @@ fn strOf(v: ?rpc.Value) []const u8 {
     return if (o == .string) o.string else "";
 }
 
+/// Rendering P2 (doc/rendering.md): a LIVE hover producer. `want_off` (the
+/// cursor position the request was fired at) is always a valid anchor for a
+/// non-empty result, so hover shows as a caret popup — the same generic
+/// `drawCaretSurface` renderer the picker's own completion list uses,
+/// through the `wl_surface_caret` membrane call. Echo is now the fallback
+/// ONLY for the no-position case: an empty result, nothing to anchor.
 fn presentHover(result: rpc.Value) void {
     const text: []const u8 = switch (result) {
         .object => |o| if (o.get("contents")) |c| contentsText(c) else "",
         else => "",
     };
-    weft.echo(if (text.len == 0) "lsp: no hover" else text);
+    if (text.len == 0) {
+        weft.surfaceClose(); // drop any popup from a still-live prior hover
+        weft.echo("lsp: no hover");
+        return;
+    }
+    weft.surfaceCaret(want_off);
+    var rows: usize = 0;
+    var it = std.mem.splitScalar(u8, text, '\n');
+    while (it.next()) |line| : (rows += 1) {
+        if (rows >= max_hover_rows) break;
+        weft.surfaceRow();
+        weft.surfaceSpan(line, .normal);
+    }
+    weft.surfaceEnd(-1);
 }
 
 fn presentDefinition(result: rpc.Value) void {

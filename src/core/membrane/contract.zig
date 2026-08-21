@@ -169,6 +169,7 @@ const handlers = [_]struct { name: []const u8, handler: HostFn }{
 
     // ── surface.zig — the retained overlay (which-key/dired/magit) ─────
     .{ .name = "wl_surface_begin", .handler = surface.hSurfaceBegin },
+    .{ .name = "wl_surface_caret", .handler = surface.hSurfaceCaret },
     .{ .name = "wl_surface_row", .handler = surface.hSurfaceRow },
     .{ .name = "wl_surface_span", .handler = surface.hSurfaceSpan },
     .{ .name = "wl_surface_end", .handler = surface.hSurfaceEnd },
@@ -240,7 +241,7 @@ const handlers = [_]struct { name: []const u8, handler: HostFn }{
 /// `contract_data.imports.len` (an extra handler with no data entry, e.g. a
 /// stale rename, is otherwise invisible).
 fn zip() [contract_data.imports.len]Entry {
-    @setEvalBranchQuota(200_000); // O(n²) name matching, n≈123
+    @setEvalBranchQuota(200_000); // O(n²) name matching, n≈124
     if (handlers.len != contract_data.imports.len) @compileError(std.fmt.comptimePrint(
         "core/membrane/contract.zig: {d} handlers bound but contract_data.imports has {d} entries " ++
             "— a handler was added/removed without updating the other list.",
@@ -331,7 +332,7 @@ test "membrane contract: every entry is well-formed, documented, and unique" {
 
 test "membrane contract: defineImports binds every table entry onto a real linker" {
     // wasm_host.defineImports does nothing BUT walk this table now, so
-    // successfully defining all 123 imports on a real wasmtime Linker is the
+    // successfully defining all 124 imports on a real wasmtime Linker is the
     // runtime proof that every entry has a bound, arity-consistent handler —
     // the comptime checks above catch shape drift; this catches the linker
     // actually accepting what the table describes. `dummy` is never

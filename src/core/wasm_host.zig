@@ -6,7 +6,7 @@
 //! owns the WasmPlugin lifecycle + handshake — to keep each file focused on
 //! one concern; the two @import each other (Zig permits the cycle).
 //!
-//! `defineImports` itself no longer hand-lists the ~123 imports: it walks
+//! `defineImports` itself no longer hand-lists the ~124 imports: it walks
 //! `membrane/contract.zig`'s comptime table, the one place name/arity/handler
 //! are declared together (see that file for the drift-killing rationale).
 //! Handler bodies stay exactly where they were, in wasm_host/*.zig.

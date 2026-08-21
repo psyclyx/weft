@@ -4,23 +4,25 @@
 //! `doc/rendering.md`'s "the snapshot tests are the guard" claim was
 //! ASPIRATIONAL — `ed.snapshot`/`.snapshotPanes` write best-effort `.ppm`
 //! artifacts that are never asserted, and the LSP e2e tests assert `Pick`
-//! state + echo text, never rendered output. P2 (consumer-emits-scene, the
-//! guest-side migration) must not land on top of that gap. This file is the
-//! real gate.
+//! state + echo text, never rendered output. P2 (consumer-emits-scene) moved
+//! the picker's scene-building into `core.pick.Pick.buildSurface` and the
+//! picker dock onto the same generic `core.surface.Surface` vocabulary
+//! (`popup.drawDockSurface`) — this file is the real gate for both.
 //!
 //! DESIGN CHOICE, made deliberately: pixel snapshots are brittle (font
 //! rasterization, hinting, HiDPI) — the guard needs to be LAYOUT-level:
 //! assert the GEOMETRY + CONTENT of the laid-out popup (box rect, flip
 //! direction, per-row text + column x-positions, selected-row index + fill,
 //! info-panel rect + text, colors as theme-role IDENTITIES rather than raw
-//! RGB) instead of raw pixels. `popup.layoutCaretSurface`
-//! (src/gfx/view/popup.zig) is the introspection seam this needed: it splits
-//! `drawCaretSurface`'s geometry DECISION from the rects/runs it used to
-//! emit directly, so the decision is data a test can assert on. That's the
-//! PRIMARY gate here (every scenario below). One scenario ALSO rasterizes
-//! and hashes the popup's own bounding-box pixels as a coarse SMOKE check —
-//! belt and braces, not the primary signal (a hash tells you SOMETHING
-//! changed, never what — that's what the layout assertion is for).
+//! RGB) instead of raw pixels. `popup.layoutCaretSurface`/`layoutDockSurface`
+//! (src/gfx/view/popup.zig) are the introspection seam this needed: they
+//! split `drawCaretSurface`/`drawDockSurface`'s geometry DECISION from the
+//! rects/runs they used to emit directly, so the decision is data a test
+//! can assert on. That's the PRIMARY gate here (every scenario below). One
+//! scenario ALSO rasterizes and hashes the popup's own bounding-box pixels
+//! as a coarse SMOKE check — belt and braces, not the primary signal (a hash
+//! tells you SOMETHING changed, never what — that's what the layout
+//! assertion is for).
 //!
 //! Every scenario drives the REAL pipeline: a headless `Editor` (the real
 //! `app_session.Session` — builtins, buffer commands, the completion caps
@@ -34,15 +36,19 @@
 //! `core/tests.zig`'s `instantWords` fixture is (an `.instant`-latency
 //! handler that `push`es straight into the session — no LSP/zls dependency,
 //! so this gate stays fast and deterministic), and the real
-//! `Pick`/`caret_anchor` it produces. `popup.pickSurface`/`hoverSurface`
-//! build the `Surface` from that live state — never a hand-built `Surface`
-//! literal — and `layoutCaretSurface` lays it out exactly as `View.build`
-//! would. The hover scenario is the one exception: the live app currently
-//! routes LSP hover through an ECHO line, not `Hud.hover` (see
-//! `app/frame_builder.zig`'s `.hover = null` — the HUD popup path is still
-//! wired and drawn, just not fed by any producer today), so that scenario
-//! builds `Hud.hover` directly, the same way `gfx/harness.zig`'s own tests
-//! hand a `Hud` straight to `View.build`.
+//! `Pick`/`caret_anchor` it produces. `ed.pick.buildSurface` builds the
+//! `Surface` from that live state — never a hand-built `Surface` literal —
+//! and `layoutCaretSurface`/`layoutDockSurface` lay it out exactly as
+//! `View.build` (via `popup.drawSurfaces`) would. The hover scenario is the
+//! one exception: driving the REAL `lsp` guest plugin against a live
+//! language server is out of scope for a fast, deterministic gate (same
+//! reasoning `fireCompletion`'s fixture exists for completion), so it builds
+//! a `Surface` directly with `popup.textCaretSurface` — a plain "lines of
+//! text anchored at an offset" builder, the same shape the `lsp` plugin's
+//! own `wl_surface_caret`/`wl_surface_row`/`wl_surface_span` calls produce
+//! on the other side of the membrane (see `src/guest/lsp.zig`'s
+//! `presentHover`) — the same way `gfx/harness.zig`'s own tests hand a `Hud`
+//! straight to `View.build`.
 //!
 //! RECORD FLAG: mirrors `latency_test.zig`/build.zig's `-Drecord-latency`
 //! idiom exactly — see build.zig's `popup_layout_mod` for why record mode is
@@ -183,6 +189,36 @@ fn checkOrRecord(
     }
 }
 
+/// `checkOrRecord`'s counterpart for a picker-DOCK layout (`popup.DockLayout`
+/// — no pixel-smoke hash; the caret scenario above already covers that belt-
+/// and-braces check).
+fn checkOrRecordDock(
+    gpa: std.mem.Allocator,
+    record_cases: *std.ArrayList(popup_golden.DockGolden),
+    loaded: ?popup_golden.GoldenFile,
+    any_mismatch: *bool,
+    name: []const u8,
+    dl: popup.DockLayout,
+) !void {
+    if (popup_layout_options.record_popup_layout) {
+        try record_cases.append(gpa, .{ .name = name, .layout = dl });
+        return;
+    }
+    const golden = popup_golden.findDock(loaded.?, name) orelse {
+        log.err("{s}: no dock golden entry — run `zig build e2e-popup-layout -Drecord-popup-layout=true` to record it", .{name});
+        any_mismatch.* = true;
+        return;
+    };
+    const got_text = try popup_golden.dockLayoutText(gpa, dl);
+    defer gpa.free(got_text);
+    const want_text = try popup_golden.dockLayoutText(gpa, golden.layout);
+    defer gpa.free(want_text);
+    if (!std.mem.eql(u8, got_text, want_text)) {
+        log.err("{s}: dock layout mismatch\n--- got ---\n{s}\n--- want ---\n{s}\n", .{ name, got_text, want_text });
+        any_mismatch.* = true;
+    }
+}
+
 test "e2e/popup-layout: caret-popup layout goldens" {
     const gpa = t.allocator;
 
@@ -197,6 +233,8 @@ test "e2e/popup-layout: caret-popup layout goldens" {
 
     var record_cases: std.ArrayList(popup_golden.Golden) = .empty;
     defer record_cases.deinit(gpa);
+    var record_dock_cases: std.ArrayList(popup_golden.DockGolden) = .empty;
+    defer record_dock_cases.deinit(gpa);
     var any_mismatch = false;
 
     // Every scenario's `Surface`/`CaretLayout` is built into THIS ONE arena,
@@ -240,7 +278,7 @@ test "e2e/popup-layout: caret-popup layout goldens" {
         var fr = try buildFrame(ed, gpa, .{ .mode = ed.mode(), .pick = ed.pick }, fw, fh);
         defer fr.built.deinit(gpa);
 
-        const surf = popup.pickSurface(scratch, ed.pick, ed.pick.caret_anchor.?) orelse return error.NoSurface;
+        const surf = ed.pick.buildSurface(scratch, view.Hud.max_pick_rows) orelse return error.NoSurface;
         const cl = (try popup.layoutCaretSurface(fr.v, scratch, &surf, fr.built.body)) orelse return error.NoLayout;
 
         try t.expect(!cl.flipped_above);
@@ -286,7 +324,7 @@ test "e2e/popup-layout: caret-popup layout goldens" {
 
         var fr = try buildFrame(ed, gpa, .{ .mode = ed.mode(), .pick = ed.pick }, fw, fh);
         defer fr.built.deinit(gpa);
-        const surf = popup.pickSurface(scratch, ed.pick, ed.pick.caret_anchor.?) orelse return error.NoSurface;
+        const surf = ed.pick.buildSurface(scratch, view.Hud.max_pick_rows) orelse return error.NoSurface;
         const cl = (try popup.layoutCaretSurface(fr.v, scratch, &surf, fr.built.body)) orelse return error.NoLayout;
 
         try t.expect(cl.flipped_above);
@@ -314,7 +352,7 @@ test "e2e/popup-layout: caret-popup layout goldens" {
 
         var fr = try buildFrame(ed, gpa, .{ .mode = ed.mode(), .pick = ed.pick }, fw, fh);
         defer fr.built.deinit(gpa);
-        const surf = popup.pickSurface(scratch, ed.pick, ed.pick.caret_anchor.?) orelse return error.NoSurface;
+        const surf = ed.pick.buildSurface(scratch, view.Hud.max_pick_rows) orelse return error.NoSurface;
         const cl = (try popup.layoutCaretSurface(fr.v, scratch, &surf, fr.built.body)) orelse return error.NoLayout;
 
         // Clamped flush to the body's right edge, never past it.
@@ -341,7 +379,7 @@ test "e2e/popup-layout: caret-popup layout goldens" {
 
         var fr = try buildFrame(ed, gpa, .{ .mode = ed.mode(), .pick = ed.pick }, 800, 600);
         defer fr.built.deinit(gpa);
-        const surf = popup.pickSurface(scratch, ed.pick, ed.pick.caret_anchor.?) orelse return error.NoSurface;
+        const surf = ed.pick.buildSurface(scratch, view.Hud.max_pick_rows) orelse return error.NoSurface;
         const cl = (try popup.layoutCaretSurface(fr.v, scratch, &surf, fr.built.body)) orelse return error.NoLayout;
 
         const info = cl.info orelse return error.NoInfoPanel;
@@ -374,7 +412,7 @@ test "e2e/popup-layout: caret-popup layout goldens" {
 
         var fr = try buildFrame(ed, gpa, .{ .mode = ed.mode(), .pick = ed.pick }, fw, fh);
         defer fr.built.deinit(gpa);
-        const surf = popup.pickSurface(scratch, ed.pick, ed.pick.caret_anchor.?) orelse return error.NoSurface;
+        const surf = ed.pick.buildSurface(scratch, view.Hud.max_pick_rows) orelse return error.NoSurface;
         const cl = (try popup.layoutCaretSurface(fr.v, scratch, &surf, fr.built.body)) orelse return error.NoLayout;
 
         const info = cl.info orelse return error.NoInfoPanel;
@@ -400,7 +438,7 @@ test "e2e/popup-layout: caret-popup layout goldens" {
         var fr = try buildFrame(ed, gpa, .{ .mode = ed.mode(), .hover = .{ .text = hover_text, .offset = cur_off } }, 800, 600);
         defer fr.built.deinit(gpa);
 
-        const surf = popup.hoverSurface(scratch, hover_text, cur_off) orelse return error.NoSurface;
+        const surf = popup.textCaretSurface(scratch, hover_text, cur_off, view.Hud.max_hover_rows) orelse return error.NoSurface;
         const cl = (try popup.layoutCaretSurface(fr.v, scratch, &surf, fr.built.body)) orelse return error.NoLayout;
 
         try t.expectEqual(@as(usize, 3), cl.rows.len);
@@ -432,7 +470,7 @@ test "e2e/popup-layout: caret-popup layout goldens" {
 
         var fr = try buildFrame(ed, gpa, .{ .mode = ed.mode(), .pick = ed.pick }, 800, 600);
         defer fr.built.deinit(gpa);
-        const surf = popup.pickSurface(scratch, ed.pick, ed.pick.caret_anchor.?) orelse return error.NoSurface;
+        const surf = ed.pick.buildSurface(scratch, view.Hud.max_pick_rows) orelse return error.NoSurface;
         const cl = (try popup.layoutCaretSurface(fr.v, scratch, &surf, fr.built.body)) orelse return error.NoLayout;
 
         try t.expectEqual(@as(usize, 1), cl.col_x.len);
@@ -460,7 +498,7 @@ test "e2e/popup-layout: caret-popup layout goldens" {
 
         var fr = try buildFrame(ed, gpa, .{ .mode = ed.mode(), .pick = ed.pick }, 800, 600);
         defer fr.built.deinit(gpa);
-        const surf = popup.pickSurface(scratch, ed.pick, ed.pick.caret_anchor.?) orelse return error.NoSurface;
+        const surf = ed.pick.buildSurface(scratch, view.Hud.max_pick_rows) orelse return error.NoSurface;
         const cl = (try popup.layoutCaretSurface(fr.v, scratch, &surf, fr.built.body)) orelse return error.NoLayout;
 
         try t.expectEqual(@as(usize, view.Hud.max_pick_rows), cl.rows.len);
@@ -470,14 +508,86 @@ test "e2e/popup-layout: caret-popup layout goldens" {
         try checkOrRecord(gpa, &record_cases, loaded, &any_mismatch, "scroll_window_beyond_max_rows", cl, 0);
     }
 
+    // ── 8. The picker DOCK: header row + item rows, selected mid-list ───
+    // A plain (non-caret) pick — `Pick.open`, the same door `find-file`/
+    // `buffer-switch`/the command palette use — has no `caret_anchor`, so
+    // `Pick.buildSurface` takes the `.bottom` branch: the dock. Unlike the
+    // caret popup's completion list, the dock never went through a caps
+    // fixture (no LSP/completion involved), so this is `Pick.open` driven
+    // directly, exactly the pattern `core/System.zig`'s own pick tests use.
+    {
+        var ed_storage: Editor = undefined;
+        try Editor.init(gpa, &ed_storage);
+        defer ed_storage.deinit();
+        const ed = &ed_storage;
+
+        const entries = [_]core.pick.Entry{
+            .{ .text = "alpha", .doc = "first" },
+            .{ .text = "bravo", .doc = "second" },
+            .{ .text = "charlie", .doc = "third" },
+            .{ .text = "delta", .doc = "" },
+            .{ .text = "echo", .doc = "fifth" },
+        };
+        try ed.pick.open(ed.ctx, "find", &entries, .{ .handler = noopAccept });
+        ed.run("pick-next");
+        ed.run("pick-next"); // selected = 2 ("charlie")
+        try t.expect(ed.pick.active);
+        try t.expect(ed.pick.caret_anchor == null); // the dock, not a caret popup
+
+        const v = try ed.ensureView();
+        const dock_h = v.pickDockHeight(ed.pick);
+        const dock: region.Rect = .{ .x = 0, .y = 600 - dock_h, .w = 800, .h = dock_h };
+        const surf = ed.pick.buildSurface(scratch, view.Hud.max_pick_rows) orelse return error.NoSurface;
+        try t.expectEqual(core.surface.Placement.bottom, surf.placement);
+        const dl = (try popup.layoutDockSurface(v, scratch, &surf, dock)) orelse return error.NoLayout;
+
+        try t.expectEqual(@as(usize, 6), dl.rows.len); // header + 5 items
+        try t.expect(!dl.rows[0].selected);
+        try t.expectEqual(popup.SpanRole.normal, dl.rows[0].role); // the query line
+        try t.expect(std.mem.indexOf(u8, dl.rows[0].text, "find") != null);
+        try t.expect(std.mem.indexOf(u8, dl.rows[0].text, "[3/5]") != null);
+        try t.expect(dl.rows[3].selected); // header(0) + charlie's item index (2) = 3
+        try t.expectEqual(popup.SpanRole.muted, dl.rows[1].role);
+        try checkOrRecordDock(gpa, &record_dock_cases, loaded, &any_mismatch, "dock_selected_mid", dl);
+    }
+
+    // ── 9. The picker DOCK with zero matches: header only, still shows ──
+    {
+        var ed_storage: Editor = undefined;
+        try Editor.init(gpa, &ed_storage);
+        defer ed_storage.deinit();
+        const ed = &ed_storage;
+
+        try ed.pick.open(ed.ctx, "empty", &.{}, .{ .handler = noopAccept });
+        try t.expect(ed.pick.active);
+
+        const v = try ed.ensureView();
+        const dock_h = v.pickDockHeight(ed.pick);
+        const dock: region.Rect = .{ .x = 0, .y = 600 - dock_h, .w = 800, .h = dock_h };
+        const surf = ed.pick.buildSurface(scratch, view.Hud.max_pick_rows) orelse return error.NoSurface;
+        const dl = (try popup.layoutDockSurface(v, scratch, &surf, dock)) orelse return error.NoLayout;
+
+        try t.expectEqual(@as(usize, 1), dl.rows.len); // header only, no item rows
+        try t.expect(!dl.rows[0].selected);
+        try t.expect(std.mem.indexOf(u8, dl.rows[0].text, "[0/0]") != null);
+        try checkOrRecordDock(gpa, &record_dock_cases, loaded, &any_mismatch, "dock_no_matches", dl);
+    }
+
     if (popup_layout_options.record_popup_layout) {
         try popup_golden.saveGoldens(gpa, baseline_path, .{
             .note = "recorded via `zig build e2e-popup-layout -Drecord-popup-layout=true`",
             .cases = record_cases.items,
+            .dock_cases = record_dock_cases.items,
         });
-        log.info("recorded {d} case(s) to {s}", .{ record_cases.items.len, baseline_path });
+        log.info("recorded {d} case(s), {d} dock case(s) to {s}", .{ record_cases.items.len, record_dock_cases.items.len, baseline_path });
         return;
     }
 
     try t.expect(!any_mismatch);
+}
+
+fn noopAccept(ctx: *core.command.Context, data: ?*anyopaque, choice: []const u8) anyerror!void {
+    _ = ctx;
+    _ = data;
+    _ = choice;
 }

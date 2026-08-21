@@ -83,6 +83,7 @@ pub fn roleColor(self: *const Theme, role: core.surface.Role) [4]f32 {
         .group => self.heading, // a submenu — distinct from a leaf command
         .effect => self.md_link,
         .muted => self.status,
+        .annotation => self.syn_comment, // a dimmed side note (completion kind/detail)
         else => self.foreground, // .normal, .leaf, unknown
     };
 }

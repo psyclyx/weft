@@ -1,19 +1,25 @@
-//! Floating overlays — the picker dock/popup, hover box, and plugin surfaces.
+//! Floating overlays — caret popups, the picker dock, and plugin surfaces.
+//!
+//! Rendering P2 (doc/rendering.md): this file no longer knows what a
+//! "completion popup" or "hover box" is — those are CONSUMER concerns now
+//! (`core.pick.Pick.buildSurface` builds the picker's own scene; the `lsp`
+//! guest plugin emits its hover popup straight through the `wl_surface_*`
+//! membrane, same as which-key/dired/magit). What's left here is three
+//! GENERIC renderers over `core.surface.Surface`, one per `Placement`:
+//! `drawSurfaces` (corner/center — floating panels), `drawCaretSurface`
+//! (caret — anchored at a document offset, flip/clamp/column-align), and
+//! `drawDockSurface` (bottom — the window-bottom strip). `drawSurfaces`
+//! ALSO routes any `.caret`/`.bottom` surface it finds in `hud.surfaces`
+//! (a guest's, e.g. the lsp plugin's hover) to the matching renderer, so a
+//! plugin gets the exact same popup machinery core's own consumers use.
 //!
 //! Free functions over `*View`: each measures a box, clamps it inside the
 //! region it was handed, and appends the outline + rows into the frame
 //! builders. Split out of `view.zig`; `build` calls them after the body and
 //! HUD so they float above everything. `outlinedBox` is the shared frame.
-//!
-//! Two anchoring styles, ONE layout primitive each: `drawSurfaces` lays out
-//! the corner/center plugin overlays (which-key, dired, magit); the caret
-//! popups (completion + its docs box, hover) are `core.surface.Surface`s
-//! with `.caret` placement — built fresh every frame by `pickSurface`/
-//! `hoverSurface` from the live `Pick`/hover text, LAID OUT by
-//! `layoutCaretSurface` (the introspection seam — geometry + content as
-//! data, asserted by the popup-layout e2e gate instead of raw pixels), and
-//! drawn by the thin `drawCaretSurface`. `drawPick`/`drawHover` are the
-//! thin per-caller entry points `View.build` calls.
+//! `layoutCaretSurface`/`layoutDockSurface` split the geometry DECISION out
+//! of the draw call — the introspection seam the popup-layout e2e gate
+//! asserts against (golden ZON) instead of raw pixels.
 
 const std = @import("std");
 const Allocator = std.mem.Allocator;
@@ -28,96 +34,21 @@ const Run = view.Run;
 const Rect = view.Rect;
 const Hud = view.Hud;
 
-/// Draw the picker INTO its carved `dock` region (a window-bottom strip cut
-/// off the frame with `cutBottom`, so it never overlaps the panes or a
-/// status line — the region system's whole point). Every position is
-/// relative to `dock`, whose height is exactly `pickDockHeight`, so nothing
-/// spills. It receives its OWN rect, never the whole window.
-pub fn drawPickInto(
-    v: *View,
-    scratch: Allocator,
-    runs: *std.ArrayList(Run),
-    rects: *std.ArrayList(Rect),
-    p: *const core.Pick,
-    dock: region.Rect,
-) !void {
-    if (dock.h <= 0) return;
-    const total = p.filtered.items.len;
-    const shown = @min(total, Hud.max_pick_rows);
-    // A thin top rule sets the picker dock off from the panes above it.
-    try rects.append(scratch, .{ .x = dock.x, .y = dock.y, .w = dock.w, .h = dock.h, .color = v.theme.selection });
-    try rects.append(scratch, .{ .x = dock.x, .y = dock.y, .w = dock.w, .h = 1, .color = v.theme.accent });
-
-    const narrow_chip = if (p.narrow.items.len > 0)
-        try std.fmt.allocPrint(scratch, "[{s}]", .{p.narrow.items})
-    else
-        "";
-    const query = try std.fmt.allocPrint(scratch, "  {s}{s}> {s}_   [{d}/{d}] ·{s}", .{
-        p.prompt,                              narrow_chip, p.query.items,
-        if (total == 0) 0 else p.selected + 1, total,       @tagName(p.style),
-    });
-    try propLine(v, scratch, runs, query, dock.x, dock.y + v.ascent, v.theme.foreground);
-
-    const start = if (p.selected >= shown) p.selected + 1 - shown else 0;
-    for (0..shown) |i| {
-        const fi = start + i;
-        const item = p.items.items[p.filtered.items[fi]];
-        const doc = p.docOf(fi);
-        const l = if (doc.len > 0)
-            try std.fmt.allocPrint(scratch, "  {s}  · {s}", .{ item, doc })
-        else
-            try std.fmt.allocPrint(scratch, "  {s}", .{item});
-        const row_y = dock.y + @as(f32, @floatFromInt(1 + i)) * v.line_h;
-        const selected = fi == p.selected;
-        if (selected) try rects.append(scratch, .{ .x = dock.x, .y = row_y, .w = dock.w, .h = v.line_h, .color = v.theme.accent });
-        try propLine(v, scratch, runs, l, dock.x, row_y + v.ascent, if (selected) v.theme.background else v.theme.status);
-    }
-}
-
-/// Build a caret-anchored completion `Surface` from a live `Pick`'s current
-/// scroll window: column 0 = the candidate text, column 1 = its dimmed
-/// kind/detail note (when present, empty rows skip it — matching notes
-/// still align because the renderer sizes column 1 from whichever rows DO
-/// carry one). The selected row's full doc becomes the linked `info` panel.
-/// Scratch-owned (arena) — rebuilt fresh every frame, never retained past
-/// it. Null when there's nothing to show (no filtered candidates). `pub`
-/// so the popup-layout e2e gate (src/e2e/popup_layout_test.zig) can drive
-/// the real `pickSurface` → `layoutCaretSurface` path from a live `Pick`,
-/// instead of hand-building a `Surface`.
-pub fn pickSurface(scratch: Allocator, p: *const core.Pick, off: usize) ?core.surface.Surface {
-    const total = p.filtered.items.len;
-    if (total == 0) return null;
-    const shown = @min(total, Hud.max_pick_rows);
-    const start = if (p.selected >= shown) p.selected + 1 - shown else 0;
-
-    var surf: core.surface.Surface = .{};
-    surf.begin(scratch, .caret);
-    for (0..shown) |i| {
-        const idx = p.filtered.items[start + i];
-        surf.addRow(scratch);
-        surf.addSpanCol(scratch, p.items.items[idx], .normal, 0);
-        if (idx < p.docs.items.len) {
-            const note = p.docs.items[idx];
-            if (note.len > 0) surf.addSpanCol(scratch, note, .normal, 1);
-        }
-    }
-    surf.end(scratch, p.selected - start);
-    surf.anchor = off;
-    surf.setInfo(scratch, p.selectedInfo());
-    return surf;
-}
-
-/// Build a caret-anchored hover `Surface` from plain (LSP) text: one row per
-/// line (capped to `max_hover_rows`), column 0 only, no selection. Null for
-/// empty text. `pub` — see `pickSurface`'s doc for why.
-pub fn hoverSurface(scratch: Allocator, text: []const u8, off: usize) ?core.surface.Surface {
+/// Build a one-column caret `Surface` from plain multi-line text (capped to
+/// `max_rows`), no selection, no annotation column. A small GENERIC utility
+/// — it knows nothing about hover or LSP, just "lines of text anchored at a
+/// document offset" — kept for callers that hand `View.build` plain text
+/// directly through `Hud.hover` instead of routing a live producer's own
+/// surface through `hud.surfaces` (the production `lsp` plugin does the
+/// latter — see this file's module doc). Null for empty text.
+pub fn textCaretSurface(scratch: Allocator, text: []const u8, off: usize, max_rows: usize) ?core.surface.Surface {
     if (text.len == 0) return null;
     var surf: core.surface.Surface = .{};
     surf.begin(scratch, .caret);
     var rows: usize = 0;
     var it = std.mem.splitScalar(u8, text, '\n');
     while (it.next()) |line| : (rows += 1) {
-        if (rows >= Hud.max_hover_rows) break;
+        if (rows >= max_rows) break;
         surf.addRow(scratch);
         surf.addSpanCol(scratch, line, .normal, 0);
     }
@@ -127,25 +58,13 @@ pub fn hoverSurface(scratch: Allocator, text: []const u8, off: usize) ?core.surf
     return surf;
 }
 
-/// Build + draw the completion popup at `p`'s caret anchor, if it has one
-/// and there's anything to show. The single entry point `View.build` calls;
-/// the completion docs box is part of the same surface (its `info` panel).
-pub fn drawPick(v: *View, scratch: Allocator, runs: *std.ArrayList(Run), rects: *std.ArrayList(Rect), p: *const core.Pick, off: usize, body: region.Rect) !void {
-    if (pickSurface(scratch, p, off)) |surf| try drawCaretSurface(v, scratch, runs, rects, &surf, body);
-}
-
-/// Build + draw the hover box at `off`, if `text` is non-empty.
-pub fn drawHover(v: *View, scratch: Allocator, runs: *std.ArrayList(Run), rects: *std.ArrayList(Rect), text: []const u8, off: usize, body: region.Rect) !void {
-    if (hoverSurface(scratch, text, off)) |surf| try drawCaretSurface(v, scratch, runs, rects, &surf, body);
-}
-
 /// An exhaustive mirror of `core.surface.Role`'s named tags — the wire
 /// membrane's `Role` is deliberately non-exhaustive (an `_` catch-all for
 /// forward compatibility across the guest ABI), and `std.zon` refuses to
 /// (de)serialize non-exhaustive enums. `layoutCaretSurface`'s output feeds
 /// the popup-layout e2e gate's committed golden files, so its column-0 color
 /// identity is this small, exhaustive, ZON-friendly copy instead.
-pub const SpanRole = enum { normal, accent, group, leaf, effect, muted };
+pub const SpanRole = enum { normal, accent, group, leaf, effect, muted, annotation };
 
 fn fromRole(r: core.surface.Role) SpanRole {
     return switch (r) {
@@ -154,6 +73,7 @@ fn fromRole(r: core.surface.Role) SpanRole {
         .leaf => .leaf,
         .effect => .effect,
         .muted => .muted,
+        .annotation => .annotation,
         else => .normal, // .normal, and any future/unknown tag
     };
 }
@@ -167,6 +87,7 @@ fn spanRoleColor(v: *const View, role: SpanRole) [4]f32 {
         .group => v.theme.heading,
         .effect => v.theme.md_link,
         .muted => v.theme.status,
+        .annotation => v.theme.syn_comment,
         .normal, .leaf => v.theme.foreground,
     };
 }
@@ -340,11 +261,12 @@ pub fn layoutCaretSurface(
 /// Draw a `caret`-placed `Surface` — the ONE generic renderer `drawPickAtCaret`
 /// and `drawHoverAtCaret` used to hardcode separately. A thin consumer of
 /// `layoutCaretSurface`'s decision: turns positioned rows/spans/info into
-/// rects + runs. Column 0 reads through the span's semantic role; column 1+
-/// is a dimmed ANNOTATION by construction (the completion note) — comment
-/// gray, unless the selected row's accent fill forces every column to the
-/// box background instead, for legibility. A missing/off-screen anchor or
-/// an empty surface draws nothing.
+/// rects + runs. Every span reads through its own semantic ROLE (rendering
+/// P2 — see doc/rendering.md): a completion note column carries `.annotation`
+/// (dimmed comment gray) as DATA the producer tagged it with, not a column
+/// number the drawer special-cases — the selected row's accent fill still
+/// forces every column to the box background instead, for legibility. A
+/// missing/off-screen anchor or an empty surface draws nothing.
 pub fn drawCaretSurface(
     v: *View,
     scratch: Allocator,
@@ -359,12 +281,7 @@ pub fn drawCaretSurface(
     for (cl.rows) |row| {
         if (row.selected) try rects.append(scratch, .{ .x = cl.x, .y = row.y, .w = cl.w, .h = v.line_h, .color = v.theme.accent });
         for (row.spans) |sp| {
-            const color = if (row.selected)
-                v.theme.background
-            else if (sp.column == 0)
-                spanRoleColor(v, sp.role)
-            else
-                v.theme.syn_comment;
+            const color = if (row.selected) v.theme.background else spanRoleColor(v, sp.role);
             try propLine(v, scratch, runs, sp.text, sp.x, row.y + v.ascent, color);
         }
     }
@@ -375,6 +292,65 @@ pub fn drawCaretSurface(
             const ly = info.y + @as(f32, @floatFromInt(k)) * v.line_h + v.ascent;
             try propLine(v, scratch, runs, line, info.x + v.cell_w, ly, v.theme.foreground);
         }
+    }
+}
+
+/// One positioned dock row: its top y, whether it's the highlighted
+/// (selected) row, its single span's text, and that span's resolved color
+/// IDENTITY. A `bottom`-placed surface is ONE span per row by construction
+/// (`Pick.buildSurface` already joins item + note into one string) — no
+/// column alignment, unlike a caret popup's list.
+pub const DockRowLayout = struct { y: f32, selected: bool, text: []const u8, role: SpanRole };
+
+/// A `bottom`-placed `Surface`'s layout: the dock rect it was handed (never
+/// resized — the region carve upstream already sized it to the surface's
+/// row count) plus every row positioned + colored. Mirrors `CaretLayout`'s
+/// role as the popup-layout e2e gate's introspection seam.
+pub const DockLayout = struct {
+    x: f32,
+    y: f32,
+    w: f32,
+    h: f32,
+    rows: []const DockRowLayout,
+};
+
+/// Compute a `bottom`-placed `Surface`'s layout: each row stacks top-down
+/// from `dock.y`, one `line_h` apart — no flip/clamp (the dock IS the
+/// region, carved to fit exactly `pickDockHeight` upstream). Null when the
+/// dock has no height or the surface has nothing to show.
+pub fn layoutDockSurface(v: *View, scratch: Allocator, surf: *const core.surface.Surface, dock: region.Rect) !?DockLayout {
+    if (dock.h <= 0 or surf.rows.items.len == 0) return null;
+    const rows = try scratch.alloc(DockRowLayout, surf.rows.items.len);
+    for (surf.rows.items, 0..) |row, i| {
+        const selected = surf.selected != null and surf.selected.? == i;
+        const span = if (row.spans.items.len > 0) row.spans.items[0] else null;
+        rows[i] = .{
+            .y = dock.y + @as(f32, @floatFromInt(i)) * v.line_h,
+            .selected = selected,
+            .text = if (span) |sp| sp.text else "",
+            .role = if (span) |sp| fromRole(sp.role) else .normal,
+        };
+    }
+    return .{ .x = dock.x, .y = dock.y, .w = dock.w, .h = dock.h, .rows = rows };
+}
+
+/// Draw a `bottom`-placed `Surface` into its carved `dock` region (a
+/// window-bottom strip cut off the frame with `cutBottom`, so it never
+/// overlaps the panes or a status line — the region system's whole point).
+/// The generic counterpart to `drawCaretSurface`: a full-width fill + a thin
+/// top rule set the dock off from the panes above it, then each row draws
+/// through its own resolved ROLE (the picker's header row is `.normal`, its
+/// item rows `.muted`, matching `Theme.roleColor` — see `Pick.buildSurface`)
+/// — a selected row's accent fill forces the text to the box background,
+/// same legibility rule `drawCaretSurface` uses.
+pub fn drawDockSurface(v: *View, scratch: Allocator, runs: *std.ArrayList(Run), rects: *std.ArrayList(Rect), surf: *const core.surface.Surface, dock: region.Rect) !void {
+    const dl = (try layoutDockSurface(v, scratch, surf, dock)) orelse return;
+    try rects.append(scratch, .{ .x = dl.x, .y = dl.y, .w = dl.w, .h = dl.h, .color = v.theme.selection });
+    try rects.append(scratch, .{ .x = dl.x, .y = dl.y, .w = dl.w, .h = 1, .color = v.theme.accent });
+    for (dl.rows) |row| {
+        if (row.selected) try rects.append(scratch, .{ .x = dl.x, .y = row.y, .w = dl.w, .h = v.line_h, .color = v.theme.accent });
+        const color = if (row.selected) v.theme.background else spanRoleColor(v, row.role);
+        try propLine(v, scratch, runs, row.text, dl.x, row.y + v.ascent, color);
     }
 }
 
@@ -392,12 +368,18 @@ pub fn propLine(v: *View, scratch: Allocator, runs: *std.ArrayList(Run), text: [
     try runs.append(scratch, .{ .shaped = shaped, .baseline_y = baseline_y, .place = .{ .prop = .{ .x = x, .em = v.em, .color = color } } });
 }
 
-/// Draw retained plugin overlays (surfaces) as floating boxes. corner docks
-/// top-right of the pane, center is centered; bottom is left to the dock
-/// (buildHud) and skipped here. Each row's spans render at their own color
-/// (by Role), and a `selected` row gets a highlight behind it. Overlays are
-/// drawn last, so they sit above the body — and, being boxes with their own
-/// background, they don't reflow it.
+/// Draw retained plugin overlays (surfaces) as floating boxes, routing each
+/// by its `Placement` to the matching generic renderer — corner docks
+/// top-right of the pane, center is centered, `caret` floats at a document
+/// offset (`drawCaretSurface`), and `bottom` renders into the carved window-
+/// bottom `dock` (`drawDockSurface`). Rendering P2 (doc/rendering.md): this
+/// is what lets a GUEST plugin's caret popup (the `lsp` plugin's hover, via
+/// the `wl_surface_caret` membrane call) draw through the exact same path
+/// core's own picker uses — core names no implementation, only a placement.
+/// Each row's spans render at their own color (by Role), and a `selected`
+/// row gets a highlight behind it. Overlays are drawn last, so they sit
+/// above the body — and, being boxes with their own background, they don't
+/// reflow it.
 pub fn drawSurfaces(
     v: *View,
     scratch: Allocator,
@@ -405,6 +387,7 @@ pub fn drawSurfaces(
     rects: *std.ArrayList(Rect),
     hud: Hud,
     body: region.Rect,
+    dock: region.Rect,
     caret_y: ?f32,
 ) !void {
     // A surface floats within `body`; cap the row count to what fits, so a
@@ -412,14 +395,14 @@ pub fn drawSurfaces(
     const max_rows = @max(1, @as(usize, @intFromFloat(@max(0, body.h) / v.line_h)) -| 1);
     for (hud.surfaces) |surf| {
         if (!surf.active or surf.rows.items.len == 0) continue;
-        // `bottom` is the dock (buildHud); `caret` surfaces (completion,
-        // hover) float at a doc offset through `drawCaretSurface` instead —
-        // this loop only lays out the corner/center overlays. NOTE (P2): a
-        // GUEST-emitted `.caret` surface in `hud.surfaces` is silently skipped
-        // here today — no such producer exists yet; when P2 opens the caret
-        // door to plugins, route these through `drawCaretSurface` instead of
-        // letting this skip drop them.
-        if (surf.placement == .bottom or surf.placement == .caret) continue;
+        if (surf.placement == .caret) {
+            try drawCaretSurface(v, scratch, runs, rects, surf, body);
+            continue;
+        }
+        if (surf.placement == .bottom) {
+            try drawDockSurface(v, scratch, runs, rects, surf, dock);
+            continue;
+        }
 
         const nrows = @min(surf.rows.items.len, max_rows);
         // Width = widest row, in cells (one space between spans).

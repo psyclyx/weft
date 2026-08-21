@@ -19,6 +19,17 @@ pub fn hSurfaceBegin(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32,
     };
     p.surface.begin(p.gpa, placement);
 }
+/// Begin a `caret`-anchored overlay (rendering P2): like `hSurfaceBegin(3)`,
+/// plus the anchor offset in the SAME call — `Surface.anchor` isn't part of
+/// the begin/end double-buffered rebuild, so a guest sets it right alongside
+/// the placement instead of a separate call the guest could forget.
+pub fn hSurfaceCaret(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32, results: []i32) void {
+    _ = caller;
+    _ = results;
+    const p: *WasmPlugin = @ptrCast(@alignCast(data.?));
+    p.surface.begin(p.gpa, .caret);
+    p.surface.anchor = @intCast(@as(u32, @bitCast(args[0])));
+}
 pub fn hSurfaceRow(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32, results: []i32) void {
     _ = caller;
     _ = args;

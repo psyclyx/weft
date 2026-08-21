@@ -27,6 +27,7 @@ pub const dispatch = weft.dispatch;
 pub const app_session = weft.app_session;
 pub const app_providers = weft.app_providers;
 pub const app_collab = weft.app_collab;
+pub const app_frame_builder = weft.app_frame_builder;
 pub const region = weft.region;
 
 // Re-exports so the per-concern test files can alias what they need from this
@@ -1251,6 +1252,37 @@ pub fn drainEcho(ed: *Editor, cmd: []const u8, needle: []const u8) bool {
         ed.run(cmd);
         ed.settle(3);
         if (std.mem.indexOf(u8, ed.echoText(), needle) != null) return true;
+    }
+    return false;
+}
+
+/// A single-shot read of "does ANY plugin's active surface show `needle` in
+/// some row's span text" — the same "what does the user actually see"
+/// reading `whichKeyText` uses for the which-key overlay, factored out so
+/// `drainSurfaceText` (poll until true) and `surfaceGone` (assert false,
+/// no re-firing) share one walk instead of two copies.
+pub fn surfaceHasText(ed: *Editor, needle: []const u8) bool {
+    for (ed.plugins.items) |pl| {
+        if (!pl.surface.active) continue;
+        for (pl.surface.rows.items) |row| {
+            for (row.spans.items) |span| {
+                if (std.mem.indexOf(u8, span.text, needle) != null) return true;
+            }
+        }
+    }
+    return false;
+}
+
+/// `drainEcho`'s counterpart for a producer that shows a retained SURFACE
+/// instead of the echo line (rendering P2 — doc/rendering.md — e.g. the
+/// `lsp` plugin's hover popup, `wl_surface_caret`). Re-fires `cmd` until
+/// `surfaceHasText` is true (or a budget elapses).
+pub fn drainSurfaceText(ed: *Editor, cmd: []const u8, needle: []const u8) bool {
+    var rounds: usize = 0;
+    while (rounds < 600) : (rounds += 1) {
+        ed.run(cmd);
+        ed.settle(3);
+        if (surfaceHasText(ed, needle)) return true;
     }
     return false;
 }

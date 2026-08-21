@@ -24,6 +24,67 @@ const frame = @import("frame.zig");
 const FrameCtx = frame.FrameCtx;
 const Active = frame.Active;
 
+/// Rendering P2 fix (post rendering-P2-review): a retained GUEST `.caret`
+/// surface (the `lsp` plugin's hover, today — but the policy is general,
+/// not hover-specific) auto-EXPIRES — CLOSED, not merely skipped — once the
+/// focused head's cursor moves off the anchor's LINE. Unlike the echo line
+/// hover replaced, a `.caret` popup paints OVER body text (`drawCaretSurface`
+/// has no way to know it's stale), and a guest has no `on_move`/`on_edit`
+/// export to dismiss it itself — that guest-driven generalization is
+/// P4-era (see doc/rendering.md); this is core POLICY meanwhile, enforced
+/// exactly where core already resolves every surface's anchor: once per
+/// frame, right before `buildFrame` collects `hud.surfaces`.
+///
+/// CLOSE, not skip: the alternative (leave `active` true, just don't draw
+/// it) would still satisfy "not painted over the buffer", but it leaves a
+/// zombie Surface a later reader (another `hud.surfaces` consumer, a test)
+/// could mistake for live, and buys nothing — a guest surface's own next
+/// request rebuilds it from scratch anyway (hover is invoked per keypress/
+/// idle-timer, never incrementally). `Surface.close` frees the retained
+/// rows/spans, so this must run against the SAME allocator that built them
+/// (`pl.gpa`, not `FrameBuilder`'s `gpa` — a `WasmPlugin`'s surface is
+/// always built through its own `p.gpa`, see `wasm_host/surface.zig`).
+///
+/// An anchor past the current buffer's end (the buffer was switched since
+/// the popup was built) also counts as stale: `Rope.offsetToPoint` asserts
+/// in-range, so the length check guards the same class of crash
+/// `popup.layoutCaretSurface`'s `lineForOffset` sidesteps by walking the
+/// current frame's line map instead of dereferencing a raw offset.
+///
+/// The picker's OWN `.caret` surface is NEVER passed here — it isn't a
+/// `WasmPlugin`, so it can't be in `plugins`; `Pick.buildSurface`
+/// (core/pick/Pick.zig) rebuilds it fresh every frame from the LIVE
+/// `caret_anchor`, so it is definitionally never stale the way a guest's
+/// retained surface can be. That's what spares completion from flickering
+/// while narrowing: this function structurally never sees it, not a
+/// same-line coincidence.
+///
+/// Pure over the plugin list + the active rope/cursor (no `FrameBuilder`,
+/// no `FrameCtx`) so the policy is unit-testable without standing up a
+/// full render harness. The actual DECISION is factored one level further,
+/// into `expireIfStale` below, which needs only a `core.surface.Surface` —
+/// see this file's own tests.
+pub fn expireStaleCaretSurfaces(plugins: []const *core.wasm_abi.WasmPlugin, rope: *const stemma.Rope, cursor_off: usize) void {
+    for (plugins) |pl| expireIfStale(&pl.surface, pl.gpa, rope, cursor_off);
+}
+
+/// The per-surface staleness decision (see `expireStaleCaretSurfaces`'s doc
+/// for the full policy rationale): a no-op unless `surf` is an ACTIVE
+/// `.caret` surface with an anchor, in which case it closes `surf` (using
+/// `gpa` — the SAME allocator that built it) when the anchor's line no
+/// longer matches `cursor_off`'s, or the anchor now falls outside `rope`
+/// entirely (a buffer switch since the surface was built). Split out from
+/// `expireStaleCaretSurfaces` so a test can drive it against a hand-built
+/// `core.surface.Surface` + `stemma.Rope`, with no `WasmPlugin` (a live
+/// wasm instance) needed at all.
+fn expireIfStale(surf: *core.surface.Surface, gpa: std.mem.Allocator, rope: *const stemma.Rope, cursor_off: usize) void {
+    if (!surf.active or surf.placement != .caret) return;
+    const a = surf.anchor orelse return;
+    const cur_row = rope.offsetToPoint(cursor_off).row;
+    const stale = a > rope.byteLen() or rope.offsetToPoint(a).row != cur_row;
+    if (stale) surf.close(gpa);
+}
+
 pub const FrameBuilder = struct {
     gpa: std.mem.Allocator,
     view: view_mod.View,
@@ -212,10 +273,36 @@ pub const FrameBuilder = struct {
             (std.fmt.bufPrint(&listen_buf, "listening {d} ({s})", .{ h.clients.items.len, h.access.label() }) catch "listening")
         else
             null;
+        // Rendering P2 (doc/rendering.md): the picker builds its OWN scene
+        // (a caret-anchored completion list, or the window-bottom dock)
+        // fresh this frame — the same `core.surface.Surface` shape a
+        // plugin's retained overlay uses, built by `Pick.buildSurface`
+        // (core/pick/Pick.zig) rather than this render-layer file reaching
+        // into `Pick`'s fields. Arena-owned (`mesh_gpa`), so the pointer
+        // below stays valid through this frame's `renderPanes`/`view.build`.
+        var pick_surface_storage: ?core.surface.Surface = null;
+        if (fx.head.pick.active) pick_surface_storage = fx.head.pick.buildSurface(mesh_gpa, view_mod.Hud.max_pick_rows);
+
+        // Rendering P2 fix (post-review): a retained GUEST `.caret` surface
+        // (the `lsp` plugin's hover, today) auto-EXPIRES before it's
+        // collected below — see `expireStaleCaretSurfaces`'s doc for the
+        // close-vs-skip rationale. The picker's OWN `.caret` surface
+        // (`pick_surface_storage`, just above) is untouched by this — it
+        // isn't in `fx.plugins`, and `Pick.buildSurface` rebuilds it fresh
+        // every frame with the live anchor, so it can never go stale the
+        // same way (verified: typing narrows completion with no flicker —
+        // `authoring_test.zig`'s existing narrowing test stays green).
+        expireStaleCaretSurfaces(fx.plugins.items, editor.text(), editor.cursorOffset());
+
         // Collect the plugins' live overlays for this frame (which-key,
-        // dired, magit … render through the retained surface door).
-        var surface_buf: [64]*const core.surface.Surface = undefined;
+        // dired, magit … render through the retained surface door) plus the
+        // picker's own scene, built just above.
+        var surface_buf: [65]*const core.surface.Surface = undefined;
         var surface_n: usize = 0;
+        if (pick_surface_storage) |*ps| {
+            surface_buf[surface_n] = ps;
+            surface_n += 1;
+        }
         for (fx.plugins.items) |pl| {
             if (pl.surface.active and surface_n < surface_buf.len) {
                 surface_buf[surface_n] = &pl.surface;
@@ -289,7 +376,12 @@ pub const FrameBuilder = struct {
             .which_key = if (wk_hints.items.len > 0) wk_hints.items else null,
             .surfaces = surface_buf[0..surface_n],
             .flash = flash_range,
-            .hover = null, // hover is the `lsp` plugin's now (echoed, not a HUD popup)
+            // Rendering P2: hover is a LIVE producer now — the `lsp` guest
+            // plugin emits its own `.caret` surface (`wl_surface_caret`)
+            // straight into `hud.surfaces` above (via `fx.plugins`), same as
+            // which-key/dired/magit. This field is dead in production; see
+            // `View.build`'s doc for why it stays as a legacy/test-only path.
+            .hover = null,
             .tabs = if (tab_list.items.len > 1) tab_list.items else null,
             .md_inline = md_inline,
             .cursor_style = fx.cursor_cfg.styleFor(fx.cursor_cfg.resolveMode(fx.keymap, fx.head, fx.head.currentMode())),
@@ -308,7 +400,10 @@ pub const FrameBuilder = struct {
             .peers = if (fx.caps.layers.find(&editor.doc, "presence")) |pl| pl.spanCount() else 0,
             .echo = if (fx.head.echo.items.len > 0) fx.head.echo.items else null,
             .plugin_status = core.status_feed.get(),
-            .pick = if (fx.head.pick.active) &fx.head.pick else null,
+            // Rendering P2: the picker's scene already went into
+            // `hud.surfaces` (`pick_surface_storage`, above) — this field is
+            // dead in production; see `View.build`'s doc.
+            .pick = null,
             .highlight_layer = fx.caps.layers.find(&editor.doc, "highlight"),
             .styles_layer = fx.caps.layers.find(&editor.doc, "styles"),
             .diag_layer = diag_layer,
@@ -433,3 +528,113 @@ pub const FrameBuilder = struct {
         self.rebuilt = true;
     }
 };
+
+// ── Tests: the hover-popup auto-expiry policy (rendering P2 review, F1) ──
+// Deliberately over `expireIfStale` directly — no `WasmPlugin` (a live wasm
+// instance) needed, just a hand-built `core.surface.Surface` and
+// `stemma.Rope`, the same fixture-test idiom `core/surface.zig`'s own tests
+// use. `expireStaleCaretSurfaces` (the `[]const *WasmPlugin` wrapper
+// `buildFrame` actually calls) is a one-line loop over this — see its own
+// doc for why testing the decision here covers it. A REAL, dispatch-driven
+// integration test lives in `e2e/authoring_test.zig`
+// ("hover popup auto-expires...", zls-backed): it drives a real cursor move
+// through `ed.press` against the real `lsp` plugin's live surface, then
+// calls this exact function (not a reimplementation) to prove the shipped
+// policy closes a REAL popup, not just a fixture one.
+
+const t = std.testing;
+
+/// A `.caret` surface anchored at `off`, built + committed the same way
+/// `Pick.buildCaretSurface`/the `lsp` guest's `presentHover` do (begin →
+/// row → span → end, THEN set `anchor` — it's outside the double-buffered
+/// build, see `core/surface.zig`'s own doc).
+fn caretSurfaceAt(gpa: std.mem.Allocator, off: usize) core.surface.Surface {
+    var surf: core.surface.Surface = .{};
+    surf.begin(gpa, .caret);
+    surf.addRow(gpa);
+    surf.addSpan(gpa, "signature: fn add(a: i32, b: i32) i32", .normal);
+    surf.end(gpa, null);
+    surf.anchor = off;
+    return surf;
+}
+
+test "expireIfStale: cursor still on the anchor's line — untouched" {
+    const gpa = t.allocator;
+    var rope = try stemma.Rope.fromSlice(gpa, "line zero\nline one\nline two\n");
+    defer rope.deinit(gpa);
+    const off = rope.lineRange(0).start + 2; // "li|ne zero" — the popup's anchor
+
+    var surf = caretSurfaceAt(gpa, off);
+    defer surf.deinit(gpa);
+
+    expireIfStale(&surf, gpa, &rope, off); // cursor == anchor exactly
+    try t.expect(surf.active);
+    expireIfStale(&surf, gpa, &rope, rope.lineRange(0).start + 7); // same line, different column
+    try t.expect(surf.active);
+}
+
+test "expireIfStale: cursor moves off the anchor's line — CLOSES it (fault-injectable)" {
+    const gpa = t.allocator;
+    var rope = try stemma.Rope.fromSlice(gpa, "line zero\nline one\nline two\n");
+    defer rope.deinit(gpa);
+    const anchor_off = rope.lineRange(0).start + 2;
+    const moved_off = rope.lineRange(2).start + 1; // line 2 — far from the anchor's line 0
+
+    var surf = caretSurfaceAt(gpa, anchor_off);
+    defer surf.deinit(gpa); // a no-op once closed below; still safe either way
+    try t.expect(surf.active); // sanity: built active, exactly like a real hover popup
+
+    expireIfStale(&surf, gpa, &rope, moved_off);
+
+    // The fault-injection this guards: comment out `expireIfStale`'s
+    // `if (stale) surf.close(gpa);` (or its call site in
+    // `expireStaleCaretSurfaces`) and this assertion fails — `surf.active`
+    // stays true, reproducing F1 (the popup would keep painting over body
+    // text after the cursor moved away). Verified by hand during review
+    // remediation (temporarily no-op'd the close, confirmed THIS test
+    // fails while the rest of the suite stays green, then restored it);
+    // this is the permanent regression guard for that.
+    try t.expect(!surf.active);
+    try t.expectEqual(@as(usize, 0), surf.rows.items.len); // close() frees the rows too
+}
+
+test "expireIfStale: an anchor past the buffer's end (a buffer switch) also expires" {
+    const gpa = t.allocator;
+    var rope = try stemma.Rope.fromSlice(gpa, "short\n");
+    defer rope.deinit(gpa);
+
+    // An anchor from a since-closed, longer buffer — must not panic
+    // `rope.offsetToPoint`'s in-range assert.
+    var surf = caretSurfaceAt(gpa, 100);
+    defer surf.deinit(gpa);
+
+    expireIfStale(&surf, gpa, &rope, 2);
+    try t.expect(!surf.active);
+}
+
+test "expireIfStale: spares a non-caret placement and a not-yet-active surface" {
+    const gpa = t.allocator;
+    var rope = try stemma.Rope.fromSlice(gpa, "line zero\nline one\n");
+    defer rope.deinit(gpa);
+    const far_off = rope.lineRange(1).start;
+
+    // A `.bottom` surface (the picker dock's own shape, `Pick.buildSurface`'s
+    // other branch) — this policy only ever names `.caret`, so a dock (or
+    // any other placement) is untouched regardless of its anchor.
+    var dock: core.surface.Surface = .{};
+    dock.begin(gpa, .bottom);
+    dock.addRow(gpa);
+    dock.addSpan(gpa, "  query line", .normal);
+    dock.end(gpa, null);
+    dock.anchor = 0; // never read for a non-caret placement
+    defer dock.deinit(gpa);
+    expireIfStale(&dock, gpa, &rope, far_off);
+    try t.expect(dock.active);
+
+    // Nothing built yet (or already closed) — a no-op, not a crash on the
+    // null anchor.
+    var empty: core.surface.Surface = .{};
+    defer empty.deinit(gpa);
+    expireIfStale(&empty, gpa, &rope, far_off);
+    try t.expect(!empty.active);
+}

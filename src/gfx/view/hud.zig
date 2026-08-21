@@ -53,6 +53,15 @@ pub const Hud = struct {
     /// nothing of what it says; a plugin publishes via `weft.status` (a task
     /// progress, a repl state, an agent's "waiting"). Null = no chip.
     plugin_status: ?[]const u8 = null,
+    /// Rendering P2 (doc/rendering.md): a LEGACY/test-only path — production
+    /// (`frame_builder.zig`) leaves this null and instead hands the picker's
+    /// own `core.pick.Pick.buildSurface` scene through `surfaces` below, the
+    /// same door a plugin's retained overlay uses. `View.build` still honors
+    /// a non-null `pick` (building + drawing its surface itself) so a caller
+    /// that constructs a `Hud` directly — `gfx/harness.zig`, the e2e
+    /// harness's best-effort `.snapshot`, the popup-layout gate's own
+    /// scenarios — doesn't have to route through `frame_builder` to render
+    /// a pick.
     pick: ?*const core.Pick = null,
     /// The highlight feed layer (stamped bulk paint).
     highlight_layer: ?*const core.layers.Layer = null,
@@ -97,7 +106,13 @@ pub const Hud = struct {
     /// vim-goggles: a byte range to flash this frame (e.g. a yanked region),
     /// drawn as a transient highlight. Null when nothing is flashing.
     flash: ?stemma.Range = null,
-    /// Hover info (LSP) to show as a popup at the caret, or null.
+    /// Rendering P2 (doc/rendering.md): LEGACY/test-only, like `pick` above
+    /// — production hover is the `lsp` guest plugin's OWN `.caret` surface
+    /// (through `wl_surface_caret`, landing in `surfaces` below via
+    /// `frame_builder.zig`'s plugin-surface collection), so this field is
+    /// always null there. `View.build` still turns a non-null value into a
+    /// one-column caret surface (`popup.textCaretSurface`) for a caller
+    /// that hands plain hover text straight to `Hud` without a live plugin.
     hover: ?struct { text: []const u8, offset: usize } = null,
     /// Caret shape and blink phase (false = hidden this frame).
     cursor_style: CursorStyle = .block,

@@ -711,7 +711,10 @@ test "lsp: hover + goto-definition via the lsp plugin — real zls" {
     ed.press("0", "");
     ed.press("f", "");
     ed.typeText("a"); // f a → onto the `a` of `add`
-    try t.expect(h.drainEcho(ed, "hover", "i32")); // the plugin echoes add's signature
+    // Rendering P2: hover is a live caret-popup producer now, not an echo
+    // (the popup-layout gate covers the layout; this proves the real `lsp`
+    // plugin's round-trip actually reaches the surface membrane).
+    try t.expect(h.drainSurfaceText(ed, "hover", "i32")); // the popup shows add's signature
 
     // goto-definition from the call jumps to `fn add` on line 1; deleting the
     // current line then proves we landed on the definition, not the call.
@@ -724,6 +727,72 @@ test "lsp: hover + goto-definition via the lsp plugin — real zls" {
     defer gpa.free(disk);
     try t.expect(std.mem.indexOf(u8, disk, "fn add(a: i32") == null); // the def line is gone
     try t.expect(std.mem.indexOf(u8, disk, "const r = add(2, 3)") != null); // the call remains
+}
+
+test "lsp: hover popup auto-expires once the cursor leaves its anchor's line — real zls" {
+    const gpa = t.allocator;
+    var app: App = undefined;
+    try app.init(gpa);
+    defer app.deinit();
+    const ed = &app.ed;
+
+    // Needs the real toolchain (src/e2e/shell.nix); skip cleanly without zls.
+    if (!h.toolAvailable(gpa, "zls")) return error.SkipZigTest;
+
+    // Rendering P2 review, F1: a caret popup paints OVER body text (unlike
+    // the echo line hover replaced), so a stale one left open after the
+    // cursor moves away is a real regression, not just clutter — and a
+    // guest has no `on_move`/`on_edit` export to dismiss its own popup
+    // (that's P4-era; see doc/rendering.md). Production expires it as core
+    // POLICY, once per frame, in `frame_builder.buildFrame` — reproduce the
+    // same setup as the hover test above, then prove the fix against the
+    // REAL loaded `lsp` plugin's live surface.
+    {
+        const out = try app.proj.oracle(
+            \\cat > hover_expiry.zig <<'EOF'
+            \\fn add(a: i32, b: i32) i32 {
+            \\    return a + b;
+            \\}
+            \\pub fn main() void {
+            \\    const r = add(2, 3);
+            \\    _ = r;
+            \\}
+            \\EOF
+        );
+        gpa.free(out);
+    }
+    ed.runStr("open", "hover_expiry.zig");
+
+    ed.chord("g g");
+    ed.press("4", "");
+    ed.press("j", ""); // → line 5, `    const r = add(2, 3);`
+    ed.press("0", "");
+    ed.press("f", "");
+    ed.typeText("a"); // f a → onto the `a` of `add`
+    try t.expect(h.drainSurfaceText(ed, "hover", "i32")); // popup visible, anchored on line 5
+
+    // Move the cursor to a different line through REAL dispatch — the same
+    // motion a person makes after reading the popup, not a synthetic
+    // offset write.
+    ed.press("j", "");
+    ed.press("j", "");
+    try t.expect(h.surfaceHasText(ed, "i32")); // sanity: dispatch alone doesn't clear it —
+    // this is core's per-FRAME policy, and this harness never runs a real
+    // render loop (see `popup_layout_test.zig`'s module doc for why: this
+    // suite drives the editor/dispatch stack directly). So call the exact
+    // function `frame_builder.buildFrame` calls every real frame — proving
+    // the SHIPPED policy (not a reimplementation of it) actually closes
+    // this real, dispatch-driven popup once the cursor has genuinely moved.
+    h.app_frame_builder.expireStaleCaretSurfaces(
+        ed.plugins.items,
+        ed.buffers.active().editor.text(),
+        ed.buffers.active().editor.cursorOffset(),
+    );
+
+    try t.expect(!h.surfaceHasText(ed, "i32")); // the popup is gone
+    for (ed.plugins.items) |pl| {
+        if (pl.surface.placement == .caret) try t.expect(!pl.surface.active); // CLOSED, not merely hidden
+    }
 }
 
 test "lsp: completion via the lsp plugin — async caps provider commits real zls items" {

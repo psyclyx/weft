@@ -4,6 +4,16 @@
 //! driver (`tick`), and the pick commands bound in the "pick" keymap mode.
 //! Filtering/ranking delegates to the pure matcher in `match.zig`; the
 //! configuration value types come from `types.zig`.
+//!
+//! `buildSurface` (rendering P2 — doc/rendering.md) is Pick's OWN scene
+//! builder: the caret-anchored completion list (item + dimmed kind/detail
+//! note columns, the selected row's docs as a linked info panel) and the
+//! window-bottom dock (query line + item rows) used to be assembled by the
+//! render layer (`gfx/view/popup.zig`'s `pickSurface`/`drawPickInto`) reading
+//! `Pick`'s fields directly. Pick is "the consumer" now — it knows its own
+//! shape; the render layer (`popup.zig`'s `drawCaretSurface`/
+//! `drawDockSurface`) only knows `core.surface.Surface`, the same generic
+//! scene which-key/dired/magit already draw through.
 
 const std = @import("std");
 const Allocator = std.mem.Allocator;
@@ -11,6 +21,7 @@ const Allocator = std.mem.Allocator;
 const command = @import("../command.zig");
 const task = @import("../task.zig");
 const Value = command.Value;
+const surface = @import("../surface.zig");
 
 const match = @import("match.zig");
 const Match = match.Match;
@@ -347,6 +358,92 @@ pub fn selectedInfo(self: *const Pick) []const u8 {
     const idx = self.filtered.items[self.selected];
     if (idx >= self.infos.items.len) return "";
     return self.infos.items[idx];
+}
+
+/// Build this pick's scene as a `core.surface.Surface` (rendering P2 — see
+/// this file's module doc): a `caret`-placed completion list when
+/// `caret_anchor` is set, else the window-bottom `bottom` dock. `max_rows`
+/// caps how many candidates show (the view's `Hud.max_pick_rows`, passed in
+/// rather than imported — `core/pick` doesn't depend on `gfx/view`).
+/// `scratch`-owned (an arena) — rebuilt fresh every frame/caller, never
+/// retained past it, same discipline the old render-layer `pickSurface`
+/// used. Null when inactive, or (caret only) when there's nothing filtered
+/// — the dock still shows even empty (the query line always renders, the
+/// same behavior the old `drawPickInto` had).
+pub fn buildSurface(self: *const Pick, scratch: Allocator, max_rows: usize) ?surface.Surface {
+    if (!self.active) return null;
+    if (self.caret_anchor) |off| return self.buildCaretSurface(scratch, off, max_rows);
+    return self.buildDockSurface(scratch, max_rows);
+}
+
+/// The caret-anchored completion list: column 0 = the candidate text,
+/// column 1 = its dimmed kind/detail note (`.annotation` role — when
+/// present; empty rows skip it, matching notes still align because the
+/// renderer sizes column 1 from whichever rows DO carry one). The selected
+/// row's full doc becomes the linked `info` panel. Null when nothing is
+/// filtered.
+fn buildCaretSurface(self: *const Pick, scratch: Allocator, off: usize, max_rows: usize) ?surface.Surface {
+    const total = self.filtered.items.len;
+    if (total == 0) return null;
+    const shown = @min(total, max_rows);
+    const start = if (self.selected >= shown) self.selected + 1 - shown else 0;
+
+    var surf: surface.Surface = .{};
+    surf.begin(scratch, .caret);
+    for (0..shown) |i| {
+        const idx = self.filtered.items[start + i];
+        surf.addRow(scratch);
+        surf.addSpanCol(scratch, self.items.items[idx], .normal, 0);
+        if (idx < self.docs.items.len) {
+            const note = self.docs.items[idx];
+            if (note.len > 0) surf.addSpanCol(scratch, note, .annotation, 1);
+        }
+    }
+    surf.end(scratch, self.selected - start);
+    surf.anchor = off;
+    surf.setInfo(scratch, self.selectedInfo());
+    return surf;
+}
+
+/// The window-bottom dock: a header row (prompt + narrow chip + query +
+/// count + style, one `.normal`-role span — always shown, even with zero
+/// candidates) then one `.muted`-role row per shown candidate (item + its
+/// doc joined into a single string, matching the old `drawPickInto`'s
+/// layout exactly — the dock never column-aligns the note like the caret
+/// popup does). `surf.selected` marks the highlighted item row (offset by
+/// the header), or null when nothing is shown.
+fn buildDockSurface(self: *const Pick, scratch: Allocator, max_rows: usize) ?surface.Surface {
+    const total = self.filtered.items.len;
+    const shown = @min(total, max_rows);
+
+    var surf: surface.Surface = .{};
+    surf.begin(scratch, .bottom);
+    surf.addRow(scratch);
+    const narrow_chip = if (self.narrow.items.len > 0)
+        std.fmt.allocPrint(scratch, "[{s}]", .{self.narrow.items}) catch ""
+    else
+        "";
+    const query = std.fmt.allocPrint(scratch, "  {s}{s}> {s}_   [{d}/{d}] ·{s}", .{
+        self.prompt,                              narrow_chip, self.query.items,
+        if (total == 0) 0 else self.selected + 1, total,       @tagName(self.style),
+    }) catch return null;
+    surf.addSpan(scratch, query, .normal);
+
+    const start = if (self.selected >= shown) self.selected + 1 - shown else 0;
+    for (0..shown) |i| {
+        const fi = start + i;
+        const item = self.items.items[self.filtered.items[fi]];
+        const doc = self.docOf(fi);
+        const l = (if (doc.len > 0)
+            std.fmt.allocPrint(scratch, "  {s}  · {s}", .{ item, doc })
+        else
+            std.fmt.allocPrint(scratch, "  {s}", .{item})) catch continue;
+        surf.addRow(scratch);
+        surf.addSpan(scratch, l, .muted);
+    }
+    const selected: ?usize = if (shown > 0) 1 + (self.selected - start) else null;
+    surf.end(scratch, selected);
+    return surf;
 }
 
 // ── Commands ────────────────────────────────────────────────────────

@@ -424,28 +424,38 @@ pub fn build(
     }
 
     try statusline.buildHud(self, scratch, &runs, &rects, hud, status_rect, panel_rect, cols_visible);
-    // Floating surfaces (which-key popup, dired/magit) float within the BODY
-    // region — never over the status/tab/panel rects, which are carved out.
-    // Hand the caret's y so a corner surface can flip away from it.
+    // Floating surfaces (which-key popup, dired/magit, a guest's caret
+    // popup like the `lsp` plugin's hover) float within the BODY region —
+    // never over the status/tab/panel rects, which are carved out. Hand the
+    // caret's y so a corner surface can flip away from it, and the carved
+    // window-bottom `pick_dock` for any `.bottom`-placed surface.
     const caret_y: ?f32 = if (self.frame_layout.lineForOffset(cursor_off)) |li|
         self.frame_layout.lines[li].caretAt(cursor_off).y_top
     else
         null;
-    try popup.drawSurfaces(self, scratch, &runs, &rects, hud, body_rect, caret_y);
-    // The picker draws into its carved window-bottom dock (main cut it off
-    // the window with cutBottom, so it cannot overlap panes or a status
-    // line). A completion pick anchors at the caret instead — a `.caret`
-    // Surface (item/note columns + the selected row's docs as the linked
-    // info panel), laid out by the one generic caret-surface renderer.
+    try popup.drawSurfaces(self, scratch, &runs, &rects, hud, body_rect, pick_dock, caret_y);
+    // Rendering P2 (doc/rendering.md): in PRODUCTION `hud.pick`/`hud.hover`
+    // are null — `frame_builder.zig` builds the picker's own `.caret`/
+    // `.bottom` Surface and hands it through `hud.surfaces` above instead
+    // (the same door a plugin's surface uses), and the live hover popup is
+    // the `lsp` plugin's own surface (also through `hud.surfaces`). These
+    // two fields stay as a LEGACY/test-only path for callers that still
+    // build a `Hud` by hand without going through `frame_builder`
+    // (`gfx/harness.zig`, the e2e harness's best-effort `.snapshot`, and the
+    // popup-layout gate's own scenarios) — this view never special-cases
+    // "completion" or "hover" itself, only "a caret/dock surface".
     if (hud.pick) |p| {
-        if (p.caret_anchor) |off|
-            try popup.drawPick(self, scratch, &runs, &rects, p, off, body_rect)
-        else
-            try popup.drawPickInto(self, scratch, &runs, &rects, p, pick_dock);
+        if (p.buildSurface(scratch, Hud.max_pick_rows)) |surf| {
+            if (surf.placement == .caret)
+                try popup.drawCaretSurface(self, scratch, &runs, &rects, &surf, body_rect)
+            else
+                try popup.drawDockSurface(self, scratch, &runs, &rects, &surf, pick_dock);
+        }
     }
-    // Hover info floats at the caret, above everything else — likewise a
-    // `.caret` Surface (one column, no selection) through the same renderer.
-    if (hud.hover) |hv| try popup.drawHover(self, scratch, &runs, &rects, hv.text, hv.offset, body_rect);
+    if (hud.hover) |hv| {
+        if (popup.textCaretSurface(scratch, hv.text, hv.offset, Hud.max_hover_rows)) |surf|
+            try popup.drawCaretSurface(self, scratch, &runs, &rects, &surf, body_rect);
+    }
 
     // Thin pane dividers: a 1px line on each internal (shared) edge of
     // the pane's frame. Drawn on the frame boundary — outside the

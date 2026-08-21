@@ -36,11 +36,21 @@ pub const Role = enum(u32) {
     /// A side-effecting action (run/shell/etc.).
     effect = 4,
     muted = 5,
+    /// A dimmed ANNOTATION beside a row's main content — a completion item's
+    /// kind/detail note, a which-key hint's trailing comment. Distinct from
+    /// `muted` (a generically de-emphasized row) so a future colorscheme can
+    /// tell "this whole row is secondary" from "this column is a side note"
+    /// apart; today both resolve to the same comment color (rendering P2 —
+    /// see doc/rendering.md). Column-driven callers (`Pick.buildSurface`)
+    /// tag column-1+ spans with this instead of leaning on the renderer to
+    /// dim by column position, so the color is DATA the surface carries, not
+    /// a layout side effect the drawer infers.
+    annotation = 6,
     _,
 
     pub fn fromInt(v: u32) Role {
         return switch (v) {
-            0, 1, 2, 3, 4, 5 => @enumFromInt(v),
+            0, 1, 2, 3, 4, 5, 6 => @enumFromInt(v),
             else => .normal,
         };
     }
