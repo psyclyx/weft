@@ -937,6 +937,49 @@ pub fn drainEcho(ed: *Editor, cmd: []const u8, needle: []const u8) bool {
     return false;
 }
 
+/// Fire a completion caps session at `off` and settle until the LSP PLUGIN
+/// commits a non-empty result into it — proof the async provider round-trip
+/// (on_complete → textDocument/completion → poll → capsCommit) works end to end.
+/// Retries the whole fire while the server is still handshaking (an early fire
+/// declines, not-ready). Returns true once an `lsp` provider result with items
+/// lands; false after the budget.
+pub fn drainLspCompletion(ed: *Editor, off: usize, prefix: []const u8) bool {
+    var attempt: usize = 0;
+    while (attempt < 60) : (attempt += 1) {
+        const b = ed.buffers.active();
+        const sid = (ed.caps.fire(.completion, &b.editor.doc, b.editor.backingPath(), .{
+            .offset = off,
+            .text = prefix,
+        }) catch {
+            ed.settle(5);
+            continue;
+        }) orelse {
+            ed.settle(5);
+            continue;
+        };
+        var found = false;
+        var i: usize = 0;
+        while (i < 80) : (i += 1) {
+            ed.settle(2);
+            const s = ed.caps.session(sid) orelse break;
+            for (s.all()) |r| {
+                if (r.payload == .completion and
+                    std.mem.indexOf(u8, r.provider, "lsp") != null and
+                    r.payload.completion.len > 0)
+                {
+                    found = true;
+                    break;
+                }
+            }
+            if (found or s.done(core.task.nowNs())) break;
+        }
+        ed.caps.finish(sid);
+        if (found) return true;
+        ed.settle(10); // let the handshake finish, then re-fire
+    }
+    return false;
+}
+
 /// Re-fire `cmd` until it opens a pick (a references / symbols location list).
 pub fn drainPick(ed: *Editor, cmd: []const u8) bool {
     var rounds: usize = 0;

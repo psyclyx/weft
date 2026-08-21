@@ -726,6 +726,46 @@ test "lsp: hover + goto-definition via the lsp plugin — real zls" {
     try t.expect(std.mem.indexOf(u8, disk, "const r = add(2, 3)") != null); // the call remains
 }
 
+test "lsp: completion via the lsp plugin — async caps provider commits real zls items" {
+    const gpa = t.allocator;
+    var app: App = undefined;
+    try app.init(gpa);
+    defer app.deinit();
+    const ed = &app.ed;
+
+    if (!h.toolAvailable(gpa, "zls")) return error.SkipZigTest;
+
+    // A top-level const referenced by a distinct partial (`answ`) inside main.
+    // zls resolves in-file symbols from the didOpen snapshot (no build needed),
+    // so completing `answ` offers `answer_to_everything` — an LSP-only semantic
+    // completion the plugin must fetch asynchronously and commit into the session.
+    {
+        const out = try app.proj.oracle(
+            \\cat > comp.zig <<'EOF'
+            \\const answer_to_everything = 42;
+            \\pub fn main() void {
+            \\    const x = answ;
+            \\    _ = x;
+            \\}
+            \\EOF
+        );
+        gpa.free(out);
+    }
+    ed.runStr("open", "comp.zig");
+    ed.settle(120); // let the plugin spawn zls + finish the initialize handshake
+
+    // Place the cursor right after `answ` (the main-body usage, matched by the
+    // unambiguous `= answ`), then prove the LSP completion provider answers the
+    // caps session asynchronously with items.
+    const txt = try ed.textAlloc();
+    defer gpa.free(txt);
+    const needle = "= answ";
+    const idx = std.mem.indexOf(u8, txt, needle).?;
+    const off = idx + needle.len;
+    ed.buffers.active().editor.placeCursor(off);
+    try t.expect(h.drainLspCompletion(ed, off, "answ"));
+}
+
 test "lsp: real zls diagnostics — a bad file reports an error we can jump to" {
     const gpa = t.allocator;
     var app: App = undefined;
