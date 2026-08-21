@@ -104,8 +104,7 @@ pub const FrameCtx = struct {
     pick: *core.Pick,
     echo: *std.ArrayList(u8),
 
-    // ── Capability UI + config read by the HUD ──
-    hover_ui: *core.nav_ui.HoverUi,
+    // ── Config read by the HUD ──
     cursor_cfg: *cursor_config.CursorConfig,
 
     // ── Plugins (live surfaces + menu overlays) ──
@@ -162,8 +161,6 @@ pub fn tickAsync(
     abuf: *core.Buffers.Buffer,
     attach: *providers.Attach,
     cmd_ctx: *core.command.Context,
-    def_ui: *core.nav_ui.DefinitionUi,
-    sym_ui: *core.nav_ui.SymbolsUi,
     plugin_loop: *core.async_loop.Loop,
     next_backing_poll_ns: *u64,
     last_activate_path: *[std.fs.max_path_bytes]u8,
@@ -191,14 +188,6 @@ pub fn tickAsync(
     }
     if (attach.lsp) |l| {
         if (try l.tick(cmd_ctx)) dirty = true;
-    }
-    if (try def_ui.tick(cmd_ctx)) dirty = true;
-    if (try sym_ui.tick(cmd_ctx)) dirty = true;
-    if (try fx.hover_ui.tick(cmd_ctx)) dirty = true;
-    // Hover dismisses when the cursor leaves the point it was requested at.
-    if (fx.hover_ui.active and fx.buffers.active().editor.cursorOffset() != fx.hover_ui.offset) {
-        fx.hover_ui.clear();
-        dirty = true;
     }
     // Drive any async pick source (completion race-and-refine, file
     // finder, dir browser) — a no-op for a static or source-less

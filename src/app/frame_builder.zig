@@ -259,7 +259,7 @@ pub const FrameBuilder = struct {
             .which_key = if (wk_hints.items.len > 0) wk_hints.items else null,
             .surfaces = surface_buf[0..surface_n],
             .flash = flash_range,
-            .hover = if (fx.hover_ui.active) .{ .text = fx.hover_ui.text.items, .offset = fx.hover_ui.offset } else null,
+            .hover = null, // hover is the `lsp` plugin's now (echoed, not a HUD popup)
             .tabs = if (tab_list.items.len > 1) tab_list.items else null,
             .md_inline = md_inline,
             .cursor_style = fx.cursor_cfg.styleFor(fx.cursor_cfg.resolveMode(fx.keymap, fx.keymap.currentMode())),

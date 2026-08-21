@@ -19,16 +19,11 @@ pub fn registerCapabilityConsumers(
     gpa: std.mem.Allocator,
     commands: *core.command.Commands,
     completion_ui: *core.complete_ui.CompletionUi,
-    def_ui: *core.nav_ui.DefinitionUi,
-    sym_ui: *core.nav_ui.SymbolsUi,
-    hover_ui: *core.nav_ui.HoverUi,
     grammars: *core.syntax.Runtime,
     lsp_servers: *providers.LspServers,
 ) !void {
     _ = try commands.bind(gpa, "complete", completion_ui.commandSpec());
-    _ = try commands.bind(gpa, "goto-definition", def_ui.commandSpec());
-    _ = try commands.bind(gpa, "symbols", sym_ui.commandSpec());
-    _ = try commands.bind(gpa, "hover", hover_ui.commandSpec());
+    // hover / goto-definition / references / symbols are the `lsp` PLUGIN's now.
     // Grammars are data: builtins seeded, config extends via command.
     _ = try commands.bind(gpa, "grammar-add", providers.grammarAddCommand(grammars));
     // Language servers are data: config registers (extension, command)

@@ -40,9 +40,6 @@ pub const Session = struct {
 
     // ── Capability-consumer UIs (written against capability names only) ──
     completion_ui: core.complete_ui.CompletionUi,
-    def_ui: core.nav_ui.DefinitionUi,
-    sym_ui: core.nav_ui.SymbolsUi,
-    hover_ui: core.nav_ui.HoverUi,
 
     // ── Caret / which-key config (set declaratively by config at load time) ──
     cursor_cfg: cursor_config.CursorConfig,
@@ -85,24 +82,17 @@ pub const Session = struct {
         try core.builtins.install(gpa, &self.commands, &self.keymap, &self.actions);
         // Capability consumers — written against capability names only.
         self.completion_ui = .empty;
-        self.def_ui = .empty;
-        self.sym_ui = .empty;
-        self.hover_ui = .empty;
-        try setup.registerCapabilityConsumers(gpa, &self.commands, &self.completion_ui, &self.def_ui, &self.sym_ui, &self.hover_ui, grammars, lsp_servers);
+        try setup.registerCapabilityConsumers(gpa, &self.commands, &self.completion_ui, grammars, lsp_servers);
         // Caret config commands, registered before the config runs so it can
         // set per-mode styles at load time.
         self.cursor_cfg = .{ .gpa = gpa };
         try setup.registerCursorCommands(gpa, &self.commands, &self.cursor_cfg, which_key_now);
     }
 
-    /// Free in the exact reverse order `main()`'s defers used to run:
-    /// cursor_cfg, hover_ui, sym_ui, echo, caps, pick, keymap, commands,
-    /// buffers. (completion_ui/def_ui own no heap and had no defer — omitted, to
-    /// match `main()` exactly.)
+    /// Free in the exact reverse order `main()`'s defers used to run: cursor_cfg,
+    /// echo, caps, pick, keymap, commands, buffers. (completion_ui owns no heap.)
     pub fn deinit(self: *Session, gpa: std.mem.Allocator) void {
         self.cursor_cfg.deinit();
-        self.hover_ui.deinit(gpa);
-        self.sym_ui.deinit(gpa);
         self.echo.deinit(gpa);
         self.actions.deinit();
         self.caps.deinit();

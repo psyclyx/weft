@@ -409,7 +409,6 @@ pub fn main(init: std.process.Init) !void {
         .keymap = &session.keymap,
         .pick = &session.pick,
         .echo = &session.echo,
-        .hover_ui = &session.hover_ui,
         .cursor_cfg = &session.cursor_cfg,
         .plugins = &plugins,
         .conn = &collab_state.conn,
@@ -505,7 +504,7 @@ pub fn main(init: std.process.Init) !void {
         }
 
         // ── Async housekeeping tick (backing/LSP/nav/pick/plugins/activate/menu) ──
-        if (try frame_mod.tickAsync(&fx, abuf, attach, &session.cmd_ctx, &session.def_ui, &session.sym_ui, &plugin_loop, &next_backing_poll_ns, &last_activate_path, &last_activate_len, &menu_overlay, &which_key_now, which_key_delay_ns, frame_start))
+        if (try frame_mod.tickAsync(&fx, abuf, attach, &session.cmd_ctx, &plugin_loop, &next_backing_poll_ns, &last_activate_path, &last_activate_len, &menu_overlay, &which_key_now, which_key_delay_ns, frame_start))
             view_dirty = true;
         // JS plugins: fire each resident quickjs instance's proc-stream output
         // handler for streams with new bytes (agent transcripts stream in here).
