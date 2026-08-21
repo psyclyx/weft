@@ -59,6 +59,45 @@ None of these are colors or coordinates — they're logical. Metrics + placement
 stay core so terminal (cell grid) and webgpu (pixels) lay the SAME scene out
 correctly.
 
+## Layered API — reward the grain, fall back to text, escape to webgpu
+
+The membrane must make **good UI easy** and **bespoke UI unattractive** — not by
+prohibition, but by making the idiomatic path strictly the better deal. Three
+tiers, one vocabulary:
+
+- **Tier 1 — semantic scene (the default, and where the rewards live).** A plugin
+  emits rows/spans/roles/anchoring and gets, for free: theming + colorscheme
+  follow (roles, never colors), font + shaping + HiDPI, layout + flip/clamp +
+  column alignment, **automatic text fallback** on limited backends (terminal),
+  focus/keyboard/selection integration, and **composition** — its overlay stacks
+  and coexists with which-key, hover, and other plugins' surfaces because they all
+  speak the same scene. This is what ~all plugins should use.
+- **Tier 2 — structured widgets (still Tier-1 underneath).** Common shapes —
+  a caret popup, a list with a selected row + annotation column, a linked info
+  panel, a docked panel, an inline decoration — offered as ergonomic builders over
+  the same scene, so a plugin composes a rich UI without leaving the rewarded
+  path. The bar to clear: Tier 2 should cover enough that escaping is rare.
+- **Tier 3 — raw surface / webgpu (the escape hatch, deliberately costlier).** For
+  the genuinely-custom — a graph/plot, a shader viz, a game — a plugin can request
+  a raw drawable region (a texture/framebuffer rect it renders into, webgpu when
+  present). But it **opts OUT of everything Tier 1 gave**: no theming, no text
+  fallback (it must supply its own degraded rendering, or declare "graphics-only"
+  and be hidden on a terminal), no automatic composition, no free layout. The
+  escape exists for real needs and is honest about its costs.
+
+The incentive is structural: because Tier 1/2 hand you theming, fonts, fallback,
+layout, and composition, and Tier 3 makes you rebuild all of it, the grain is to
+work WITH the scene. A third-party plugin that uses the semantic API looks native,
+recolors with the user's theme, and works in a terminal — for free; one that
+reaches for raw webgpu to draw a menu is doing strictly more work for a worse
+result. We reward idiomatic; we don't forbid exotic.
+
+Text fallback is a first-class requirement, not an afterthought: **every Tier-1/2
+primitive has a defined text rendering** (a box → box-drawing chars, a role →
+an SGR color or attribute, a caret popup → an inline/echo list), so a plugin
+writes its UI ONCE and it degrades to good text on limited backends automatically.
+Only Tier 3 must hand-author (or forgo) its fallback.
+
 ## The backend + platform seams (core-internal)
 
 Two core-internal interfaces, so the additive platforms/backends slot in:
