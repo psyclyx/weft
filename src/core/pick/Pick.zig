@@ -526,7 +526,10 @@ pub fn install(gpa: Allocator, commands: *command.Commands, keymap: *@import("..
 
 /// Replace the item set of a live pick, preserving query and selection
 /// (race-and-refine consumers call this as results land).
-pub fn refresh(p: *Pick, gpa: Allocator, items: []const []const u8) !void {
+/// Replace the item set. `docs`, when non-empty, is a parallel array of
+/// display-only annotations (completion detail/kind) shown dimmed beside each
+/// item; pass `&.{}` for none. Matching/acceptance still see `items` only.
+pub fn refresh(p: *Pick, gpa: Allocator, items: []const []const u8, docs: []const []const u8) !void {
     if (!p.active) return;
     const keep = p.selection();
     const keep_owned = if (keep) |k| try gpa.dupe(u8, k) else null;
@@ -535,11 +538,11 @@ pub fn refresh(p: *Pick, gpa: Allocator, items: []const []const u8) !void {
     p.items.clearRetainingCapacity();
     for (p.docs.items) |d| gpa.free(d);
     p.docs.clearRetainingCapacity();
-    for (items) |it| {
+    for (items, 0..) |it, i| {
         const owned = try gpa.dupe(u8, it);
         errdefer gpa.free(owned);
         try p.items.append(gpa, owned);
-        const doc = try gpa.dupe(u8, "");
+        const doc = try gpa.dupe(u8, if (i < docs.len) docs[i] else "");
         errdefer gpa.free(doc);
         try p.docs.append(gpa, doc);
     }

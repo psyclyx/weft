@@ -94,8 +94,16 @@ pub const CompletionUi = struct {
             defer ctx.gpa.free(merged);
             const labels = try ctx.gpa.alloc([]const u8, merged.len);
             defer ctx.gpa.free(labels);
-            for (merged, 0..) |it, i| labels[i] = it.text;
-            try pick_mod.refresh(ctx.pick, ctx.gpa, labels);
+            const notes = try ctx.gpa.alloc([]const u8, merged.len);
+            defer {
+                for (notes) |n| ctx.gpa.free(n);
+                ctx.gpa.free(notes);
+            }
+            for (merged, 0..) |it, i| {
+                labels[i] = it.text;
+                notes[i] = try annotate(ctx.gpa, it);
+            }
+            try pick_mod.refresh(ctx.pick, ctx.gpa, labels, notes);
             changed = true;
         }
         if (s.done(task.nowNs())) {
@@ -114,6 +122,36 @@ pub const CompletionUi = struct {
             if (self.caps) |caps| caps.finish(id);
             self.session = null;
         }
+    }
+
+    /// A display-only annotation for a completion row: a short kind tag plus the
+    /// provider's detail (a type/signature), e.g. `fn · fn (i32) i32`. Owned by
+    /// the caller. The tag is the UI's reading of the LSP `CompletionItemKind`
+    /// number — core stores the number, the UI names it.
+    fn annotate(gpa: Allocator, it: *const capability.CompletionItem) ![]u8 {
+        const tag = kindTag(it.kind);
+        if (it.detail.len > 0 and tag.len > 0)
+            return std.fmt.allocPrint(gpa, "{s} · {s}", .{ tag, it.detail });
+        if (it.detail.len > 0) return gpa.dupe(u8, it.detail);
+        return gpa.dupe(u8, tag);
+    }
+
+    fn kindTag(kind: u8) []const u8 {
+        return switch (kind) {
+            2, 3 => "fn", // Method, Function
+            4 => "new", // Constructor
+            5, 10 => "field", // Field, Property
+            6 => "var", // Variable
+            7, 22 => "type", // Class, Struct
+            8 => "iface", // Interface
+            9 => "mod", // Module
+            13, 20 => "enum", // Enum, EnumMember
+            14 => "kw", // Keyword
+            15 => "snip", // Snippet
+            21, 12 => "const", // Constant, Value
+            25 => "typaram", // TypeParameter
+            else => "", // Text/unknown → no tag
+        };
     }
 
     fn accept(ctx: *command.Context, data: ?*anyopaque, choice: []const u8) anyerror!void {

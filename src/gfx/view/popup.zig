@@ -85,12 +85,22 @@ pub fn drawPickAtCaret(
 
     const shown = @min(total, Hud.max_pick_rows);
     const start = if (p.selected >= shown) p.selected + 1 - shown else 0;
-    var max_cols: usize = 8;
+    // Two columns: the item (matched/inserted) and a dimmed note (kind + detail),
+    // column-aligned. The note is display-only; empty for a plain item.
+    var max_item: usize = 8;
+    var max_note: usize = 0;
     for (0..shown) |i| {
-        const item = p.items.items[p.filtered.items[start + i]];
-        max_cols = @max(max_cols, std.unicode.utf8CountCodepoints(item) catch item.len);
+        const idx = p.filtered.items[start + i];
+        const item = p.items.items[idx];
+        max_item = @max(max_item, std.unicode.utf8CountCodepoints(item) catch item.len);
+        if (idx < p.docs.items.len) {
+            const note = p.docs.items[idx];
+            if (note.len > 0) max_note = @max(max_note, std.unicode.utf8CountCodepoints(note) catch note.len);
+        }
     }
-    const box_w = @as(f32, @floatFromInt(max_cols + 2)) * v.cell_w;
+    const gap: usize = if (max_note > 0) 2 else 0;
+    const cols = max_item + gap + max_note + 2;
+    const box_w = @as(f32, @floatFromInt(cols)) * v.cell_w;
     const box_h = @as(f32, @floatFromInt(shown)) * v.line_h;
     const box_x = std.math.clamp(c.x, body.x, @max(body.x, body.x + body.w - box_w));
     var box_y = c.y_top + c.height; // just below the caret line
@@ -98,13 +108,21 @@ pub fn drawPickAtCaret(
     box_y = std.math.clamp(box_y, body.y, @max(body.y, body.y + body.h - box_h));
     try outlinedBox(scratch, rects, box_x, box_y, box_w, box_h, v.theme.selection, v.theme.accent);
 
+    const note_x = box_x + @as(f32, @floatFromInt(max_item + gap + 1)) * v.cell_w;
     for (0..shown) |i| {
         const fi = start + i;
-        const item = p.items.items[p.filtered.items[fi]];
+        const idx = p.filtered.items[fi];
+        const item = p.items.items[idx];
         const row_y = box_y + @as(f32, @floatFromInt(i)) * v.line_h;
         const selected = fi == p.selected;
         if (selected) try rects.append(scratch, .{ .x = box_x, .y = row_y, .w = box_w, .h = v.line_h, .color = v.theme.accent });
         try propLine(v, scratch, runs, item, box_x + v.cell_w, row_y + v.ascent, if (selected) v.theme.background else v.theme.foreground);
+        if (idx < p.docs.items.len) {
+            const note = p.docs.items[idx];
+            // On the selected (accent) row use the box background so the dim note
+            // stays legible; otherwise the comment gray.
+            if (note.len > 0) try propLine(v, scratch, runs, note, note_x, row_y + v.ascent, if (selected) v.theme.background else v.theme.syn_comment);
+        }
     }
 }
 
