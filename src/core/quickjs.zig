@@ -53,20 +53,96 @@ const Bridge = struct {
 
 const kv = @import("kv.zig");
 
+const qjs_contract = @import("membrane/qjs_contract.zig");
+
+/// Look up `name`'s handler in a comptime `{name, handler}` list — a
+/// missing entry is a compile error naming exactly which qjs_* import
+/// wasn't wired, not a runtime binding gap.
+fn findHandler(comptime handlers: anytype, comptime name: []const u8) wasm.Linker.HostFn {
+    inline for (handlers) |h| {
+        if (comptime std.mem.eql(u8, h.name, name)) return h.handler;
+    }
+    @compileError("core/quickjs.zig: no handler bound for qjs_* import '" ++ name ++ "'");
+}
+
+/// Bind every `qjs_contract.imports` entry in `group` onto `linker`, each
+/// against its handler in `handlers` — the qjs analogue of contract.zig's
+/// `zip()`, but side-effecting (`defineFn` calls) instead of building a
+/// table, since quickjs.zig binds straight onto a `wasm.Linker`. Checked
+/// both ways: every matching table entry must find a handler (`findHandler`
+/// above), and `handlers.len` must equal the group's entry count (an extra,
+/// unlisted handler — e.g. a stale rename — is otherwise invisible).
+fn defineGroup(linker: *wasm.Linker, comptime group: qjs_contract.Group, comptime handlers: anytype, data: ?*anyopaque) !void {
+    comptime {
+        @setEvalBranchQuota(10_000);
+        var count: usize = 0;
+        for (qjs_contract.imports) |entry| {
+            if (entry.group == group) count += 1;
+        }
+        if (handlers.len != count) @compileError(std.fmt.comptimePrint(
+            "core/quickjs.zig: {d} handlers bound for group .{s} but qjs_contract.imports has {d} entries in it",
+            .{ handlers.len, @tagName(group), count },
+        ));
+    }
+    inline for (qjs_contract.imports) |entry| {
+        if (entry.group != group) continue;
+        const hfn = comptime findHandler(handlers, entry.name);
+        try linker.defineFn("weft", entry.name, entry.params.len, entry.results.len, hfn, data);
+    }
+}
+
+/// Satisfy every `.plugin`-group import with a generic stub — the config
+/// linker never calls them (quickjs.wasm imports them all as one shared
+/// binary; the JS globals that would call them aren't installed on the
+/// config path), so the stub choice (reject vs no-op) only has to match the
+/// import's result arity, derived straight from the table.
+fn defineStubs(linker: *wasm.Linker, data: ?*anyopaque) !void {
+    inline for (qjs_contract.imports) |entry| {
+        if (entry.group != .plugin) continue;
+        const hfn: wasm.Linker.HostFn = if (entry.results.len == 0) cStubVoid else cStubI32;
+        try linker.defineFn("weft", entry.name, entry.params.len, entry.results.len, hfn, data);
+    }
+}
+
+/// The `.config`-group handlers (real always — see `qjs_contract.Group`'s doc).
+const config_handlers = .{
+    .{ .name = "qjs_bind_key", .handler = cBindKey },
+    .{ .name = "qjs_run", .handler = cRun },
+    .{ .name = "qjs_echo", .handler = cEcho },
+    .{ .name = "qjs_log", .handler = cLog },
+    .{ .name = "qjs_plugin", .handler = cPlugin },
+    .{ .name = "qjs_read_config", .handler = cReadConfig },
+    .{ .name = "qjs_set", .handler = cSet },
+    .{ .name = "qjs_menu", .handler = cMenu },
+    .{ .name = "qjs_action", .handler = cAction },
+    .{ .name = "qjs_provide", .handler = cProvide },
+};
+
+/// The `.plugin`-group handlers a RESIDENT JS plugin's linker binds (real —
+/// `defineStubs` above covers the config linker's stand-ins).
+const plugin_handlers = .{
+    .{ .name = "qjs_register", .handler = cRegister },
+    .{ .name = "qjs_proc_spawn", .handler = cProcSpawn },
+    .{ .name = "qjs_proc_send", .handler = cProcSend },
+    .{ .name = "qjs_proc_read", .handler = cProcRead },
+    .{ .name = "qjs_proc_close", .handler = cProcClose },
+    .{ .name = "qjs_buffer_append", .handler = cBufferAppend },
+    .{ .name = "qjs_buffer_fold", .handler = cBufferFold },
+    .{ .name = "qjs_buffer_len", .handler = cBufferLen },
+    .{ .name = "qjs_config", .handler = cConfig },
+    .{ .name = "qjs_breakpoints", .handler = cBreakpoints },
+    .{ .name = "qjs_file_read", .handler = cFileRead },
+    .{ .name = "qjs_file_write", .handler = cAgentWrite },
+    .{ .name = "qjs_line_text", .handler = cLineText },
+    .{ .name = "qjs_pick", .handler = cPick },
+    .{ .name = "qjs_status", .handler = cStatus },
+};
+
 /// The shared `weft.*` membrane, bound over a `Bridge` — used by both the
 /// config eval plane and a JS plugin (they drive the editor identically; a
 /// plugin additionally registers commands via `qjs_register`).
 fn defineConfigFns(linker: *wasm.Linker, bridge: *Bridge) !void {
-    try linker.defineFn("weft", "qjs_bind_key", 6, 0, cBindKey, bridge);
-    try linker.defineFn("weft", "qjs_run", 2, 0, cRun, bridge);
-    try linker.defineFn("weft", "qjs_echo", 2, 0, cEcho, bridge);
-    try linker.defineFn("weft", "qjs_log", 2, 0, cLog, bridge);
-    try linker.defineFn("weft", "qjs_plugin", 2, 0, cPlugin, bridge);
-    try linker.defineFn("weft", "qjs_read_config", 4, 1, cReadConfig, bridge);
-    try linker.defineFn("weft", "qjs_set", 6, 0, cSet, bridge);
-    try linker.defineFn("weft", "qjs_menu", 2, 0, cMenu, bridge);
-    try linker.defineFn("weft", "qjs_action", 2, 0, cAction, bridge);
-    try linker.defineFn("weft", "qjs_provide", 9, 0, cProvide, bridge);
+    try defineGroup(linker, .config, config_handlers, bridge);
 }
 
 /// Plugin-plane import stubs for the config linker (never called there): an
@@ -108,21 +184,7 @@ pub fn evalConfig(engine: *wasm.Engine, ctx: *command.Context, loader: ?PluginLo
     // imports them all (one shared binary) — satisfy each with a stub so it
     // instantiates. They are never called on the config path (the JS globals
     // that would call them aren't installed for config).
-    try linker.defineFn("weft", "qjs_register", 2, 1, cStubI32, &bridge);
-    try linker.defineFn("weft", "qjs_proc_spawn", 4, 1, cStubI32, &bridge);
-    try linker.defineFn("weft", "qjs_proc_send", 3, 0, cStubVoid, &bridge);
-    try linker.defineFn("weft", "qjs_proc_read", 3, 1, cStubI32, &bridge);
-    try linker.defineFn("weft", "qjs_proc_close", 1, 0, cStubVoid, &bridge);
-    try linker.defineFn("weft", "qjs_buffer_append", 5, 0, cStubVoid, &bridge);
-    try linker.defineFn("weft", "qjs_buffer_fold", 4, 0, cStubVoid, &bridge);
-    try linker.defineFn("weft", "qjs_buffer_len", 2, 1, cStubI32, &bridge);
-    try linker.defineFn("weft", "qjs_config", 4, 1, cStubI32, &bridge);
-    try linker.defineFn("weft", "qjs_breakpoints", 4, 1, cStubI32, &bridge);
-    try linker.defineFn("weft", "qjs_file_read", 4, 1, cStubI32, &bridge);
-    try linker.defineFn("weft", "qjs_file_write", 6, 0, cStubVoid, &bridge);
-    try linker.defineFn("weft", "qjs_line_text", 2, 1, cStubI32, &bridge);
-    try linker.defineFn("weft", "qjs_pick", 4, 0, cStubVoid, &bridge);
-    try linker.defineFn("weft", "qjs_status", 2, 0, cStubVoid, &bridge);
+    try defineStubs(&linker, &bridge);
 
     var instance = try linker.instantiateWasi(&module);
     defer instance.deinit();
@@ -213,21 +275,7 @@ pub const JsPlugin = struct {
         errdefer self.linker.deinit();
         try self.linker.defineWasi();
         try defineConfigFns(&self.linker, &self.bridge);
-        try self.linker.defineFn("weft", "qjs_register", 2, 1, cRegister, self);
-        try self.linker.defineFn("weft", "qjs_proc_spawn", 4, 1, cProcSpawn, self);
-        try self.linker.defineFn("weft", "qjs_proc_send", 3, 0, cProcSend, self);
-        try self.linker.defineFn("weft", "qjs_proc_read", 3, 1, cProcRead, self);
-        try self.linker.defineFn("weft", "qjs_proc_close", 1, 0, cProcClose, self);
-        try self.linker.defineFn("weft", "qjs_buffer_append", 5, 0, cBufferAppend, self);
-        try self.linker.defineFn("weft", "qjs_buffer_fold", 4, 0, cBufferFold, self);
-        try self.linker.defineFn("weft", "qjs_buffer_len", 2, 1, cBufferLen, self);
-        try self.linker.defineFn("weft", "qjs_config", 4, 1, cConfig, self);
-        try self.linker.defineFn("weft", "qjs_breakpoints", 4, 1, cBreakpoints, self);
-        try self.linker.defineFn("weft", "qjs_file_read", 4, 1, cFileRead, self);
-        try self.linker.defineFn("weft", "qjs_file_write", 6, 0, cAgentWrite, self);
-        try self.linker.defineFn("weft", "qjs_line_text", 2, 1, cLineText, self);
-        try self.linker.defineFn("weft", "qjs_pick", 4, 0, cPick, self);
-        try self.linker.defineFn("weft", "qjs_status", 2, 0, cStatus, self);
+        try defineGroup(&self.linker, .plugin, plugin_handlers, self);
 
         self.instance = try self.linker.instantiateWasi(&self.module);
         errdefer self.instance.deinit();

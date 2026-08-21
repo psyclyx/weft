@@ -11,6 +11,7 @@ const Buffers = @import("../Buffers.zig");
 const proc = @import("../proc.zig");
 const position = @import("../position.zig");
 const file = @import("../file.zig");
+const contract = @import("../membrane/contract.zig");
 
 const shared = @import("plugin.zig");
 const WasmPlugin = shared.WasmPlugin;
@@ -320,7 +321,7 @@ fn procDeliver(ctx: ?*anyopaque, result: ?[]const u8) void {
     // let the guest paint the wrong buffer; it renders plain, exactly as before.
     // A plugin without `on_fill` (grep-less builds, other tools) is a no-op.
     if (bufs.active() == b)
-        job.styler.instance.callVoid("on_fill", &.{}) catch {}; // MissingExport → skip
+        contract.callOptionalExport("on_fill", &job.styler.instance, .{}) catch {}; // MissingExport → skip
 }
 
 fn procFree(ctx: ?*anyopaque) void {

@@ -6,6 +6,7 @@ const wasm = @import("../wasm.zig");
 const command = @import("../command.zig");
 const wasm_abi = @import("../wasm_abi.zig");
 const WasmCmd = wasm_abi.WasmCmd;
+const contract = @import("../membrane/contract.zig");
 
 const shared = @import("plugin.zig");
 const WasmPlugin = shared.WasmPlugin;
@@ -130,6 +131,6 @@ fn wpCmdTrampoline(ctx: *command.Context, data: ?*anyopaque, args: []const comma
     p.result = .nil;
     p.stampsClear(); // fresh per-dispatch stamp table
     defer p.cur_args = &.{};
-    try p.instance.callVoid("on_command", &.{@intCast(wc.id)});
+    try contract.callRequiredExport("on_command", &p.instance, .{@as(i32, @intCast(wc.id))});
     return p.result;
 }

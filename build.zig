@@ -264,13 +264,27 @@ fn configureTestModule(
 /// so the host can instantiate it under wasmtime.
 fn buildGuest(b: *std.Build, src: []const u8) *std.Build.Step.Compile {
     const wasm_target = b.resolveTargetQuery(.{ .cpu_arch = .wasm32, .os_tag = .freestanding });
+    const guest_mod = b.createModule(.{
+        .root_source_file = b.path(src),
+        .target = wasm_target,
+        .optimize = .ReleaseSmall,
+    });
+    // src/guest/weft.zig comptime-verifies its hand-written externs against
+    // core/membrane/contract_data.zig's signedness table (task W0a-D) — a
+    // plain relative `@import("../core/membrane/contract_data.zig")` fails
+    // ("import of file outside module path": each guest is its own module,
+    // rooted at src/guest/, and Zig 0.16 won't let a relative import escape
+    // that root). Wire it as a named import instead, same target as the
+    // guest itself (contract_data.zig has zero host-only deps — no
+    // wasmtime, no wasm_host — by design, so it compiles fine here too).
+    guest_mod.addImport("membrane_contract_data", b.createModule(.{
+        .root_source_file = b.path("src/core/membrane/contract_data.zig"),
+        .target = wasm_target,
+        .optimize = .ReleaseSmall,
+    }));
     const guest = b.addExecutable(.{
         .name = std.fs.path.stem(src),
-        .root_module = b.createModule(.{
-            .root_source_file = b.path(src),
-            .target = wasm_target,
-            .optimize = .ReleaseSmall,
-        }),
+        .root_module = guest_mod,
     });
     guest.entry = .disabled; // reactor: called through exports, not _start
     guest.rdynamic = true; // export the `export fn`s + memory

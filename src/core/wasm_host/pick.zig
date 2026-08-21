@@ -8,6 +8,7 @@ const wasm = @import("../wasm.zig");
 const command = @import("../command.zig");
 const pick_mod = @import("../pick.zig");
 const fs_source = @import("../fs_source.zig");
+const contract = @import("../membrane/contract.zig");
 
 const shared = @import("plugin.zig");
 const WasmPlugin = shared.WasmPlugin;
@@ -115,7 +116,7 @@ fn wpPickAccept(ctx: *command.Context, data: ?*anyopaque, choice: []const u8) an
     const p = bp.plugin;
     p.cur_choice = choice;
     defer p.cur_choice = &.{};
-    try p.instance.callVoid("on_pick_accept", &.{@intCast(bp.pick_id)});
+    try contract.callRequiredExport("on_pick_accept", &p.instance, .{@as(i32, @intCast(bp.pick_id))});
 }
 
 fn wpPickCleanup(data: ?*anyopaque, gpa: Allocator) void {

@@ -12,6 +12,7 @@
 const std = @import("std");
 const wasm = @import("../wasm.zig");
 const capability = @import("../capability.zig");
+const contract = @import("../membrane/contract.zig");
 
 const shared = @import("plugin.zig");
 const WasmPlugin = shared.WasmPlugin;
@@ -149,7 +150,7 @@ fn wpCompletionProvider(data: ?*anyopaque, caps: *capability.Caps, req: *const c
     p.cur_prefix = req.text;
     defer p.cur_prefix = &.{};
     const handle: i32 = @bitCast(@as(u32, @truncate(req.session)));
-    p.instance.callVoid("on_complete", &.{handle}) catch {
+    contract.callOptionalExport("on_complete", &p.instance, .{handle}) catch {
         caps.decline(req.session);
         p.capsBuilderClear();
     };

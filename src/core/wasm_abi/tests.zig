@@ -16,6 +16,7 @@ const surface_mod = @import("../surface.zig");
 const async_loop = @import("../async.zig");
 const net_session = @import("../net_session.zig");
 const wasm_host = @import("../wasm_host.zig");
+const contract = @import("../membrane/contract.zig");
 const Allocator = std.mem.Allocator;
 
 const wasm_abi = @import("../wasm_abi.zig");
@@ -317,7 +318,7 @@ test "dired: gathers a directory tree via proc and renders the model (async)" {
         "-rw-r--r-- 1 alice alice 42 2024-01-01 12:00 alpha.txt\n" ++
         "drwxr-xr-x 2 alice alice 4096 2024-01-01 12:00 subdir\n";
     try buf.?.editor.applyUserEdit(gpa, .{ .start = 0, .end = buf.?.editor.text().byteLen() }, synth);
-    try plugin.instance.callVoid("on_fill", &.{});
+    try contract.callOptionalExport("on_fill", &plugin.instance, .{});
 
     // The buffer is the always-editable name tree — just indented names, no
     // header/perms/glyphs in the TEXT — and it's marked this plugin's tool

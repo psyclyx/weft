@@ -23,8 +23,21 @@ const std = @import("std");
 /// a compile-time constant. See [[completion-ux-roadmap]].
 pub const allocator: std.mem.Allocator = std.heap.wasm_allocator;
 
+/// The pure-data half of the membrane contract (core/membrane/
+/// contract_data.zig) — no wasmtime/wasm_host dependency, so it compiles
+/// here under wasm32-freestanding same as the host side does. Used below
+/// ONLY by the comptime verification block; the ergonomic wrappers don't
+/// reference it.
+const contract_data = @import("membrane_contract_data");
+
 // ── Raw host imports (the grants). Named `wl_*` to keep the ergonomic
-// wrappers below as the surface guest code actually calls. ──
+// wrappers below as the surface guest code actually calls. Hand-written —
+// Zig 0.16 can't synthesize an `extern fn` declaration from a comptime loop
+// (no `@Type`, no `usingnamespace` decl-merging) — but comptime-VERIFIED
+// against `contract_data.imports` below: an arity or signedness slip here,
+// or an extern this file forgot to add/remove after the table changed,
+// fails the BUILD (see the `comptime` block right after the extern list),
+// not a silent runtime drift. ──
 extern "weft" fn wl_log(level: u32, ptr: u32, len: u32) void;
 extern "weft" fn wl_declare_command(ptr: u32, len: u32) void;
 extern "weft" fn wl_declare_capability(ptr: u32, len: u32) void;
@@ -157,6 +170,42 @@ extern "weft" fn wl_fs_write(path: u32, path_len: u32, ptr: u32, len: u32) i32;
 extern "weft" fn wl_fs_append(path: u32, path_len: u32, ptr: u32, len: u32) i32;
 extern "weft" fn wl_fs_list(auth: u32, auth_len: u32, path: u32, path_len: u32, out_ptr: u32, out_cap: u32) i32;
 extern "weft" fn wl_fs_list_async(auth: u32, auth_len: u32, path: u32, path_len: u32, dest: u32, dest_len: u32) i32;
+
+fn ZigType(comptime v: contract_data.ValType) type {
+    return switch (v) {
+        .i32 => i32,
+        .u32 => u32,
+    };
+}
+
+// The comptime tripwire the extern block's doc comment promises (task
+// W0a-D): walk every `contract_data.imports` entry and confirm the
+// hand-written extern of the same name, above, has the exact same arity
+// AND per-param/result signedness. A drift — wrong count, `u32` where the
+// table says `i32`, an extern renamed without updating the table, or a
+// table entry with no matching extern at all — fails right here at
+// compile time, pointing at the offending name, instead of silently
+// desyncing the guest and host halves of the membrane again.
+comptime {
+    @setEvalBranchQuota(50_000); // n≈123 entries, each doing a small const-eval
+    for (contract_data.imports) |entry| {
+        const Fn = @typeInfo(@TypeOf(@field(@This(), entry.name))).@"fn";
+        if (Fn.params.len != entry.params.len) @compileError(std.fmt.comptimePrint(
+            "src/guest/weft.zig: extern '{s}' takes {d} param(s), contract_data.zig says {d}",
+            .{ entry.name, Fn.params.len, entry.params.len },
+        ));
+        for (Fn.params, entry.params, 0..) |got, want, i| {
+            if (got.type.? != ZigType(want)) @compileError(std.fmt.comptimePrint(
+                "src/guest/weft.zig: extern '{s}' param {d} type doesn't match contract_data.zig's signedness",
+                .{ entry.name, i },
+            ));
+        }
+        const want_ret = if (entry.results.len == 0) void else ZigType(entry.results[0]);
+        if (Fn.return_type.? != want_ret) @compileError(
+            "src/guest/weft.zig: extern '" ++ entry.name ++ "' return type doesn't match contract_data.zig",
+        );
+    }
+}
 
 /// Shared scratch for host→guest byte returns. A read wrapper (`slice`,
 /// `path`, `kvGet`) returns a slice INTO this buffer, valid until the next

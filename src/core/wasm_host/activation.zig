@@ -3,6 +3,7 @@
 //! `on_activate` dispatch.
 
 const wasm = @import("../wasm.zig");
+const contract = @import("../membrane/contract.zig");
 
 const shared = @import("plugin.zig");
 const WasmPlugin = shared.WasmPlugin;
@@ -14,7 +15,7 @@ const WasmPlugin = shared.WasmPlugin;
 pub fn notifyActivate(p: *WasmPlugin, path: []const u8) void {
     p.cur_activate_path = path;
     defer p.cur_activate_path = &.{};
-    p.instance.callVoid("on_activate", &.{}) catch {}; // MissingExport → skip
+    contract.callOptionalExport("on_activate", &p.instance, .{}) catch {}; // MissingExport → skip
 }
 
 /// Service a plugin's async proc I/O — but only when there's something to do.
@@ -27,7 +28,7 @@ pub fn notifyPollIfReady(p: *WasmPlugin) bool {
         if (maybe) |s| if (s.pending() > 0) break true;
     } else false;
     if (!ready) return false;
-    p.instance.callVoid("on_poll", &.{}) catch {}; // MissingExport → skip
+    contract.callOptionalExport("on_poll", &p.instance, .{}) catch {}; // MissingExport → skip
     return true;
 }
 

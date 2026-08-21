@@ -1,24 +1,24 @@
-//! core/membrane/contract.zig — the one comptime table describing the
-//! `weft.*` guest↔host import membrane, the other half of which is hand-
-//! mirrored in src/guest/weft.zig's `extern "weft"` block. Today this table
-//! drives the HOST side: `wasm_host.defineImports` walks it to bind every
+//! core/membrane/contract.zig — the HOST side of the `weft.*` guest↔host
+//! membrane: binds `contract_data.zig`'s pure data (name/params/results/
+//! group/perm/doc) against this file's `handlers` (name → `HostFn`), and
+//! provides the typed helpers that fire the host→guest EXPORT entrypoints
+//! (`contract_data.exports`) instead of each call site naming a bare string.
+//!
+//! `wasm_host.defineImports` walks the zipped `imports` below to bind every
 //! `wl_*` import onto the wasmtime Linker, instead of the (name, nparams,
 //! nresults, handler) four-tuples wasm_host.zig used to hand-copy one at a
 //! time. One source of truth kills the class of bug where a guest extern's
 //! arity drifts from its host import's arity because someone edited one side
 //! and forgot the other.
 //!
-//! Scope (doc/north-star-plan.md §2.5 + §6, task W0a-C — deliberately
-//! narrow): this table is the HOST import side only. It does NOT (yet)
-//! generate the guest externs in src/guest/weft.zig, the ~10 host→guest
-//! exported entrypoints (today MissingExport-tolerant by hand), or quickjs's
-//! `qjs_*` table — those are the follow-up W0a slices. The `ValType`/`Perm`/
-//! `doc` fields exist so that follow-up can walk THIS table rather than
-//! inventing a second one; `params`/`results` are typed as `[]const ValType`
-//! (not a bare count) for the same reason — today every value is `.i32`, but
-//! a guest-side generator needs the type, not just the arity. (It will also
-//! need per-param SIGNEDNESS — the guest externs mix u32/i32 — which this
-//! table does not yet carry; that lands with the generator, not before.)
+//! Scope (doc/north-star-plan.md §2.5, task W0a-D): this file covers the
+//! HOST import side (zipping `contract_data.imports` with `handlers`) and
+//! the host→guest export call-site helpers. It does NOT generate the guest
+//! externs in src/guest/weft.zig (Zig 0.16 cannot reify a decl from a
+//! comptime loop — see contract_data.zig's doc comment) — those stay
+//! hand-written, comptime-VERIFIED against `contract_data.imports` from the
+//! guest side instead. quickjs's `qjs_*` table is a separate file
+//! (qjs_contract.zig, different marshalling path, not force-unified here).
 //!
 //! Not in scope: marshalling, scratch buffers, or handler bodies — those stay
 //! exactly where they are (wasm_host/*.zig), unchanged.
@@ -26,6 +26,11 @@
 const std = @import("std");
 const wasm = @import("../wasm.zig");
 const HostFn = wasm.Linker.HostFn;
+
+const contract_data = @import("contract_data.zig");
+pub const ValType = contract_data.ValType;
+pub const Group = contract_data.Group;
+pub const Perm = contract_data.Perm;
 
 const activation = @import("../wasm_host/activation.zig");
 const buffers = @import("../wasm_host/buffers.zig");
@@ -47,272 +52,261 @@ const surface = @import("../wasm_host/surface.zig");
 const syntax = @import("../wasm_host/syntax.zig");
 const tool = @import("../wasm_host/tool.zig");
 
-/// The wasm value type crossing the membrane. Every `wl_*` import is i32-only
-/// today (scalars + opaque handles; bulk data crosses as a `(ptr, len)` i32
-/// pair into the guest's linear memory) — typed as an enum rather than
-/// hardcoded, so a future value shape (externref, i64) is expressible without
-/// reshaping the table, not because one is coming.
-pub const ValType = enum { i32 };
-
-/// Which `wasm_host/*.zig` module owns an entry's handler. Also the table's
-/// sort key: entries below are grouped contiguously (not call-historical
-/// order) so a reviewer can see one module's whole surface at a glance.
-pub const Group = enum {
-    declare,
-    edit,
-    layers,
-    config_kv,
-    dispatch,
-    keymap,
-    commands,
-    buffers,
-    pick,
-    menu,
-    surface,
-    capability,
-    syntax,
-    activation,
-    tool,
-    register,
-    proc,
-    sessions,
-    fs,
-};
-
-/// The permission gate an entry's handler checks (`WasmPlugin.perms[..]`)
-/// before doing anything effectful. `null` = ungated today — most of the
-/// table; the north star names "grant story vs 5 booleans" (C9) and trap-on-
-/// deny as unchanged in W0a, so this field documents today's real gates, it
-/// doesn't add new ones. `proc_timer` names the one recurring COMBINATION
-/// this codebase actually checks: every `perm_timer` check in wasm_host/
-/// proc.zig and sessions.zig is paired with `perm_proc`, and `timer` never
-/// gates alone — modeled honestly as the pair it always is, rather than
-/// bolting on a multi-perm field for a case that doesn't otherwise exist.
-pub const Perm = enum { fs_read, fs_write, net, proc, proc_timer };
-
+/// The full host-side entry: `contract_data.Entry`'s fields plus the bound
+/// `HostFn`. Same shape `wasm_host.defineImports` and this file's tests
+/// consumed before the data/handler split — consumers are unaffected.
 pub const Entry = struct {
-    /// The `weft.<name>` import name — matches the guest's `extern "weft" fn
-    /// <name>(..)` in src/guest/weft.zig exactly.
     name: []const u8,
     params: []const ValType,
     results: []const ValType,
     group: Group,
     handler: HostFn,
     perm: ?Perm = null,
-    /// One-line human doc — NOT the source of truth for behavior (the
-    /// handler body is), just review/generation context.
     doc: []const u8,
 };
 
-fn words(comptime n: usize) []const ValType {
-    comptime var arr: [n]ValType = @splat(.i32);
-    return &arr;
-}
+/// name → handler, in the SAME grouping/order as `contract_data.imports`
+/// (for review, not correctness — the zip below matches by name). Add a
+/// handler here for every entry added to `contract_data.imports`; the
+/// comptime zip fails the build if the two lists don't correspond exactly.
+const handlers = [_]struct { name: []const u8, handler: HostFn }{
+    // ── declare.zig — describe-phase declarations ──────────────────────
+    .{ .name = "wl_log", .handler = declare.hLog },
+    .{ .name = "wl_declare_command", .handler = declare.hDeclareCommand },
+    .{ .name = "wl_declare_capability", .handler = declare.hDeclareCapability },
+    .{ .name = "wl_request_perm", .handler = declare.hRequestPerm },
 
-fn e(name: []const u8, comptime np: usize, comptime nr: usize, group: Group, handler: HostFn, doc: []const u8) Entry {
-    return .{ .name = name, .params = words(np), .results = words(nr), .group = group, .handler = handler, .doc = doc };
-}
+    // ── edit.zig — read-only, native editor step, write, stamped ranges ─
+    .{ .name = "wl_cursor", .handler = edit.hCursor },
+    .{ .name = "wl_byte_len", .handler = edit.hByteLen },
+    .{ .name = "wl_doc_revision", .handler = edit.hDocRevision },
+    .{ .name = "wl_slice", .handler = edit.hSlice },
+    .{ .name = "wl_line_at", .handler = edit.hLineAt },
+    .{ .name = "wl_selection", .handler = edit.hSelection },
+    .{ .name = "wl_path", .handler = edit.hPath },
+    .{ .name = "wl_editor_step", .handler = edit.hEditorStep },
+    .{ .name = "wl_set_selection", .handler = edit.hSetSelection },
+    .{ .name = "wl_edit", .handler = edit.hEdit },
+    .{ .name = "wl_render", .handler = edit.hRender },
+    .{ .name = "wl_edit_as", .handler = edit.hEditAs },
+    .{ .name = "wl_jump", .handler = edit.hJump },
+    .{ .name = "wl_stamp_range", .handler = edit.hStampRange },
+    .{ .name = "wl_set_result_range", .handler = edit.hSetResultRange },
+    .{ .name = "wl_run_range", .handler = edit.hRunRange },
+    .{ .name = "wl_range_ends", .handler = edit.hRangeEnds },
+    .{ .name = "wl_run_range_arg", .handler = edit.hRunRangeArg },
+    .{ .name = "wl_arg_range", .handler = edit.hArgRange },
+    .{ .name = "wl_edit_range", .handler = edit.hEditRange },
 
-fn eg(name: []const u8, comptime np: usize, comptime nr: usize, group: Group, handler: HostFn, perm: Perm, doc: []const u8) Entry {
-    return .{ .name = name, .params = words(np), .results = words(nr), .group = group, .handler = handler, .perm = perm, .doc = doc };
+    // ── layers.zig — flash/style/fold/readonly/decorate/breakpoints ────
+    .{ .name = "wl_flash", .handler = layers.hFlash },
+    .{ .name = "wl_style_clear", .handler = layers.hStyleClear },
+    .{ .name = "wl_style", .handler = layers.hStyle },
+    .{ .name = "wl_fold_clear", .handler = layers.hFoldClear },
+    .{ .name = "wl_fold", .handler = layers.hFold },
+    .{ .name = "wl_readonly_clear", .handler = layers.hReadOnlyClear },
+    .{ .name = "wl_readonly_span", .handler = layers.hReadOnlySpan },
+    .{ .name = "wl_decorate_clear", .handler = layers.hDecorateClear },
+    .{ .name = "wl_decorate", .handler = layers.hDecorate },
+    .{ .name = "wl_breakpoint_publish", .handler = layers.hBreakpointPublish },
+
+    // ── config_kv.zig — runtime kv scratch + the distinct config store ──
+    .{ .name = "wl_kv_get", .handler = config_kv.hKvGet },
+    .{ .name = "wl_kv_put", .handler = config_kv.hKvPut },
+    .{ .name = "wl_config_get", .handler = config_kv.hConfigGet },
+
+    // ── dispatch.zig — echo + command args in/result out ───────────────
+    .{ .name = "wl_echo", .handler = dispatch.hEcho },
+    .{ .name = "wl_arg_count", .handler = dispatch.hArgCount },
+    .{ .name = "wl_arg_int", .handler = dispatch.hArgInt },
+    .{ .name = "wl_arg_str", .handler = dispatch.hArgStr },
+    .{ .name = "wl_set_result_int", .handler = dispatch.hSetResultInt },
+    .{ .name = "wl_set_result_str", .handler = dispatch.hSetResultStr },
+
+    // ── keymap.zig — the local config plane: bindings/modes/providers ──
+    .{ .name = "wl_bind_key", .handler = keymap.hBindKey },
+    .{ .name = "wl_set_mode", .handler = keymap.hSetMode },
+    .{ .name = "wl_set_fallback", .handler = keymap.hSetFallback },
+    .{ .name = "wl_text_input", .handler = keymap.hTextInput },
+    .{ .name = "wl_menu_mode", .handler = keymap.hMenuMode },
+    .{ .name = "wl_locked_mode", .handler = keymap.hLockedMode },
+    .{ .name = "wl_resting_mode", .handler = keymap.hRestingMode },
+    .{ .name = "wl_exit_to_resting", .handler = keymap.hExitToResting },
+    .{ .name = "wl_sticky_menu", .handler = keymap.hStickyMenu },
+    .{ .name = "wl_declare_action", .handler = keymap.hDeclareAction },
+    .{ .name = "wl_provide", .handler = keymap.hProvide },
+
+    // ── commands.zig — register/run/introspect ──────────────────────────
+    .{ .name = "wl_register", .handler = commands.hRegister },
+    .{ .name = "wl_run", .handler = commands.hRun },
+    .{ .name = "wl_run_int", .handler = commands.hRunInt },
+    .{ .name = "wl_run_str", .handler = commands.hRunStr },
+    .{ .name = "wl_run_str2", .handler = commands.hRunStr2 },
+    .{ .name = "wl_command_count", .handler = commands.hCommandCount },
+    .{ .name = "wl_command_name", .handler = commands.hCommandName },
+    .{ .name = "wl_command_summary", .handler = commands.hCommandSummary },
+
+    // ── buffers.zig — the open-buffer list (introspection) ──────────────
+    .{ .name = "wl_buffer_count", .handler = buffers.hBufferCount },
+    .{ .name = "wl_buffer_id", .handler = buffers.hBufferId },
+    .{ .name = "wl_buffer_name", .handler = buffers.hBufferName },
+    .{ .name = "wl_buffer_active", .handler = buffers.hBufferActive },
+    .{ .name = "wl_buffer_readonly", .handler = buffers.hBufferReadonly },
+
+    // ── pick.zig — fuzzy pick build/open/accept ─────────────────────────
+    .{ .name = "wl_pick_begin", .handler = pick.hPickBegin },
+    .{ .name = "wl_pick_add", .handler = pick.hPickAdd },
+    .{ .name = "wl_pick_end", .handler = pick.hPickEnd },
+    .{ .name = "wl_open_file_pick", .handler = pick.hOpenFilePick },
+    .{ .name = "wl_pick_choice", .handler = pick.hPickChoice },
+    .{ .name = "wl_pick_choice_index", .handler = pick.hPickChoiceIndex },
+
+    // ── menu.zig — which-key style menu-mode binding introspection ─────
+    .{ .name = "wl_menu_binding_count", .handler = menu.hMenuBindingCount },
+    .{ .name = "wl_menu_binding_key", .handler = menu.hMenuBindingKey },
+    .{ .name = "wl_menu_binding_cmd", .handler = menu.hMenuBindingCmd },
+    .{ .name = "wl_menu_binding_is_group", .handler = menu.hMenuBindingIsGroup },
+
+    // ── surface.zig — the retained overlay (which-key/dired/magit) ─────
+    .{ .name = "wl_surface_begin", .handler = surface.hSurfaceBegin },
+    .{ .name = "wl_surface_row", .handler = surface.hSurfaceRow },
+    .{ .name = "wl_surface_span", .handler = surface.hSurfaceSpan },
+    .{ .name = "wl_surface_end", .handler = surface.hSurfaceEnd },
+    .{ .name = "wl_surface_close", .handler = surface.hSurfaceClose },
+
+    // ── capability.zig — the completion provider gather/push ───────────
+    .{ .name = "wl_provide_completion", .handler = capability.hProvideCompletion },
+    .{ .name = "wl_completion_prefix", .handler = capability.hCompletionPrefix },
+    .{ .name = "wl_caps_item", .handler = capability.hCapsItem },
+    .{ .name = "wl_caps_commit", .handler = capability.hCapsCommit },
+    .{ .name = "wl_caps_decline", .handler = capability.hCapsDecline },
+
+    // ── syntax.zig — structural (tree-sitter) read + subbuffers ────────
+    .{ .name = "wl_node_at", .handler = syntax.hNodeAt },
+    .{ .name = "wl_node_enclosing", .handler = syntax.hNodeEnclosing },
+    .{ .name = "wl_query", .handler = syntax.hQuery },
+    .{ .name = "wl_query_capture", .handler = syntax.hQueryCapture },
+    .{ .name = "wl_node_children", .handler = syntax.hNodeChildren },
+    .{ .name = "wl_claim_subbuffer", .handler = syntax.hClaimSubbuffer },
+    .{ .name = "wl_subbuffer_put_fact", .handler = syntax.hSubbufferPutFact },
+    .{ .name = "wl_subbuffer_clear", .handler = syntax.hSubbufferClear },
+    .{ .name = "wl_subbuffer_fact_at", .handler = syntax.hSubbufferFactAt },
+
+    // ── activation.zig — the focus event ────────────────────────────────
+    .{ .name = "wl_activate_path", .handler = activation.hActivatePath },
+
+    // ── tool.zig — projection ownership ─────────────────────────────────
+    .{ .name = "wl_tool_backing", .handler = tool.hToolBacking },
+
+    // ── register.zig — the editor-agnostic yank/paste service ──────────
+    .{ .name = "wl_yank_range", .handler = register.hYankRange },
+    .{ .name = "wl_register_text", .handler = register.hRegisterText },
+    .{ .name = "wl_register_linewise", .handler = register.hRegisterLinewise },
+    .{ .name = "wl_paste_at", .handler = register.hPasteAt },
+
+    // ── proc.zig — perm-gated off-thread process effects ───────────────
+    .{ .name = "wl_shell_insert", .handler = proc.hShellInsert },
+    .{ .name = "wl_proc_spawn", .handler = proc.hProcSpawn },
+    .{ .name = "wl_proc_send", .handler = proc.hProcSend },
+    .{ .name = "wl_proc_read", .handler = proc.hProcRead },
+    .{ .name = "wl_proc_close", .handler = proc.hProcClose },
+    .{ .name = "wl_cwd", .handler = proc.hCwd },
+    .{ .name = "wl_proc_to_buffer", .handler = proc.hProcToBuffer },
+    .{ .name = "wl_proc_append_buffer", .handler = proc.hProcAppendBuffer },
+    .{ .name = "wl_proc_filter", .handler = proc.hProcFilter },
+
+    // ── sessions.zig — persistent streamed REPL + net sessions ─────────
+    .{ .name = "wl_repl_start", .handler = sessions.hReplStart },
+    .{ .name = "wl_repl_send", .handler = sessions.hReplSend },
+    .{ .name = "wl_repl_quit", .handler = sessions.hReplQuit },
+    .{ .name = "wl_net_connect", .handler = sessions.hNetConnect },
+    .{ .name = "wl_net_send", .handler = sessions.hNetSend },
+    .{ .name = "wl_net_close", .handler = sessions.hNetClose },
+
+    // ── fs.zig — perm-gated local filesystem doors ─────────────────────
+    .{ .name = "wl_fs_read", .handler = fs.hFsRead },
+    .{ .name = "wl_fs_exists", .handler = fs.hFsExists },
+    .{ .name = "wl_fs_write", .handler = fs.hFsWrite },
+    .{ .name = "wl_fs_append", .handler = fs.hFsAppend },
+    .{ .name = "wl_fs_list", .handler = fs.hFsList },
+    .{ .name = "wl_fs_list_async", .handler = fs.hFsListAsync },
+};
+
+/// Zip `contract_data.imports` (data) with `handlers` (binding) by NAME —
+/// not position, so reordering either list can't silently mismatch a
+/// handler onto the wrong import. Both directions are checked: every data
+/// entry must find a handler (else `defineImports` would silently bind
+/// nothing for it — caught here instead), and `handlers.len` must equal
+/// `contract_data.imports.len` (an extra handler with no data entry, e.g. a
+/// stale rename, is otherwise invisible).
+fn zip() [contract_data.imports.len]Entry {
+    @setEvalBranchQuota(200_000); // O(n²) name matching, n≈123
+    if (handlers.len != contract_data.imports.len) @compileError(std.fmt.comptimePrint(
+        "core/membrane/contract.zig: {d} handlers bound but contract_data.imports has {d} entries " ++
+            "— a handler was added/removed without updating the other list.",
+        .{ handlers.len, contract_data.imports.len },
+    ));
+    var out: [contract_data.imports.len]Entry = undefined;
+    for (contract_data.imports, 0..) |d, i| {
+        var found = false;
+        for (handlers) |h| {
+            if (std.mem.eql(u8, h.name, d.name)) {
+                out[i] = .{ .name = d.name, .params = d.params, .results = d.results, .group = d.group, .handler = h.handler, .perm = d.perm, .doc = d.doc };
+                found = true;
+                break;
+            }
+        }
+        if (!found) @compileError("core/membrane/contract.zig: no handler bound for wl_* import '" ++ d.name ++ "' declared in contract_data.zig");
+    }
+    return out;
 }
 
 /// The membrane's host-import table: one entry per `weft.wl_*` import the
 /// guest shim declares. `wasm_host.defineImports` walks this to bind the
 /// Linker — nothing else in the host tree defines a `weft.*` import; add or
-/// change one here, and only here (then mirror it by hand in
-/// src/guest/weft.zig until the follow-up task generates that side too).
-pub const imports = [_]Entry{
-    // ── declare.zig — describe-phase declarations ──────────────────────
-    e("wl_log", 3, 0, .declare, declare.hLog, "write a guest log line at `level`"),
-    e("wl_declare_command", 2, 0, .declare, declare.hDeclareCommand, "describe-phase: declare a command name (id assigned on first declare)"),
-    e("wl_declare_capability", 2, 0, .declare, declare.hDeclareCapability, "describe-phase: declare an abstract capability name this plugin provides"),
-    e("wl_request_perm", 1, 0, .declare, declare.hRequestPerm, "describe-phase: request a permission bit (fs_read/fs_write/net/proc/timer)"),
+/// change one here (in `contract_data.imports` + `handlers` above), and
+/// mirror the extern in src/guest/weft.zig by hand (comptime-verified, see
+/// that file).
+pub const imports: [contract_data.imports.len]Entry = zip();
 
-    // ── edit.zig — read-only, native editor step, write, stamped ranges ─
-    e("wl_cursor", 0, 1, .edit, edit.hCursor, "the cursor's byte offset in the active document"),
-    e("wl_byte_len", 0, 1, .edit, edit.hByteLen, "the active document's byte length"),
-    e("wl_doc_revision", 0, 1, .edit, edit.hDocRevision, "the active document's monotonic commit count (a cheap change token)"),
-    e("wl_slice", 4, 1, .edit, edit.hSlice, "copy `[start,end)` of the active document into guest memory"),
-    e("wl_line_at", 2, 0, .edit, edit.hLineAt, "write the `[start,end)` byte span of the line containing `offset`"),
-    e("wl_selection", 1, 1, .edit, edit.hSelection, "the active selection's other endpoint (mark), or the cursor if none"),
-    e("wl_path", 2, 1, .edit, edit.hPath, "the active buffer's path into guest memory, or -1 if unnamed"),
-    e("wl_editor_step", 3, 1, .edit, edit.hEditorStep, "the pure step primitive a motion composes (char boundary or line motion); no cursor move"),
-    e("wl_set_selection", 2, 0, .edit, edit.hSetSelection, "select `[start,end)` (mark at start, cursor at end)"),
-    e("wl_edit", 4, 0, .edit, edit.hEdit, "the gated edit door: replace `[start,end)` with bytes, authored as the plugin's own peer"),
-    e("wl_render", 4, 0, .edit, edit.hRender, "produce derived/streamed content into a buffer, bypassing read-only (output, not user text)"),
-    e("wl_edit_as", 6, 0, .edit, edit.hEditAs, "like `wl_edit` but authored as a named `.agent` sub-peer (its own selective-undo unit)"),
-    e("wl_jump", 1, 0, .edit, edit.hJump, "move the cursor to `offset`"),
-    e("wl_stamp_range", 2, 1, .edit, edit.hStampRange, "stamp `[start,end)` at the current doc version into this plugin's range table; -1 on failure"),
-    e("wl_set_result_range", 1, 0, .edit, edit.hSetResultRange, "set the command result to a `range` Value from a stamped handle"),
-    e("wl_run_range", 2, 1, .edit, edit.hRunRange, "run a command by name, rebase + re-stamp its returned range (await-a-motion)"),
-    e("wl_range_ends", 2, 1, .edit, edit.hRangeEnds, "resolve a stamped-range handle to its current `[start,end)`"),
-    e("wl_run_range_arg", 3, 0, .edit, edit.hRunRangeArg, "run a command passing a stamped range (by handle) as its single arg"),
-    e("wl_arg_range", 1, 1, .edit, edit.hArgRange, "read a `range` command arg: rebase to head, re-stamp into this plugin's table"),
-    e("wl_edit_range", 3, 0, .edit, edit.hEditRange, "apply an edit over a stamped-range handle through the gated edit door"),
+// ── Host→guest export call sites: typed helpers over contract_data.exports ─
 
-    // ── layers.zig — flash/style/fold/readonly/decorate/breakpoints ────
-    e("wl_flash", 2, 0, .layers, layers.hFlash, "vim-goggles: flash `[start,end)` for the frame loop to fade and the view to draw"),
-    e("wl_style_clear", 0, 0, .layers, layers.hStyleClear, "(re)claim the active buffer's styles layer and baseline it to `.normal`"),
-    e("wl_style", 3, 0, .layers, layers.hStyle, "paint `[start,end)` of the active buffer's styles bulk with `class`"),
-    e("wl_fold_clear", 0, 0, .layers, layers.hFoldClear, "(re)claim the active buffer's fold layer and empty it"),
-    e("wl_fold", 2, 0, .layers, layers.hFold, "hide `[start,end)` as an invisible/folded span"),
-    e("wl_readonly_clear", 0, 0, .layers, layers.hReadOnlyClear, "(re)claim the active buffer's read-only-span layer and empty it"),
-    e("wl_readonly_span", 2, 0, .layers, layers.hReadOnlySpan, "mark `[start,end)` read-only (edit-door defense in depth)"),
-    e("wl_decorate_clear", 0, 0, .layers, layers.hDecorateClear, "(re)claim the active buffer's decorations layer and empty it"),
-    e("wl_decorate", 5, 0, .layers, layers.hDecorate, "place a display-only decoration (virtual text) anchored at `anchor`"),
-    e("wl_breakpoint_publish", 4, 0, .layers, layers.hBreakpointPublish, "publish a file's breakpoint lines to the process-global registry (for DAP)"),
-
-    // ── config_kv.zig — runtime kv scratch + the distinct config store ──
-    e("wl_kv_get", 4, 1, .config_kv, config_kv.hKvGet, "read this plugin's runtime kv scratch value for `key`"),
-    e("wl_kv_put", 4, 0, .config_kv, config_kv.hKvPut, "write this plugin's runtime kv scratch value for `key`"),
-    e("wl_config_get", 4, 1, .config_kv, config_kv.hConfigGet, "read this plugin's staged config value (the distinct weft.set store)"),
-
-    // ── dispatch.zig — echo + command args in/result out ───────────────
-    e("wl_echo", 2, 0, .dispatch, dispatch.hEcho, "print a message to the echo area"),
-    e("wl_arg_count", 0, 1, .dispatch, dispatch.hArgCount, "the current command dispatch's argument count"),
-    e("wl_arg_int", 1, 1, .dispatch, dispatch.hArgInt, "the `i`-th dispatch arg as an int"),
-    e("wl_arg_str", 3, 1, .dispatch, dispatch.hArgStr, "the `i`-th dispatch arg as a string, into guest memory"),
-    e("wl_set_result_int", 1, 0, .dispatch, dispatch.hSetResultInt, "set the command result to an int"),
-    e("wl_set_result_str", 2, 0, .dispatch, dispatch.hSetResultStr, "set the command result to a string"),
-
-    // ── keymap.zig — the local config plane: bindings/modes/providers ──
-    e("wl_bind_key", 6, 0, .keymap, keymap.hBindKey, "bind a key chord in mode `m` to command `c`"),
-    e("wl_set_mode", 2, 0, .keymap, keymap.hSetMode, "switch the active buffer's mode"),
-    e("wl_set_fallback", 4, 0, .keymap, keymap.hSetFallback, "declare mode `m`'s fallback (parent) mode for unbound keys"),
-    e("wl_text_input", 5, 0, .keymap, keymap.hTextInput, "declare mode `m`'s text-input command (and whether it takes the typed char)"),
-    e("wl_menu_mode", 2, 0, .keymap, keymap.hMenuMode, "declare a mode a which-key-style menu"),
-    e("wl_locked_mode", 2, 0, .keymap, keymap.hLockedMode, "mark a read-only projection mode pinned (can't leave for a generic editing mode)"),
-    e("wl_resting_mode", 2, 0, .keymap, keymap.hRestingMode, "declare a mode a buffer can rest in (`baseMode` stops there)"),
-    e("wl_exit_to_resting", 0, 0, .keymap, keymap.hExitToResting, "leave a transient mode back to the active buffer's resting mode"),
-    e("wl_sticky_menu", 2, 0, .keymap, keymap.hStickyMenu, "mark a menu mode sticky (stays open after a leaf key)"),
-    e("wl_declare_action", 2, 0, .keymap, keymap.hDeclareAction, "declare an abstract action + its trampoline command"),
-    e("wl_provide", 11, 0, .keymap, keymap.hProvide, "register a provider for an action, scoped by mode/lang/tool + priority"),
-
-    // ── commands.zig — register/run/introspect ──────────────────────────
-    e("wl_register", 2, 1, .commands, commands.hRegister, "register-phase: intern a name into this plugin's local command id table"),
-    e("wl_run", 2, 0, .commands, commands.hRun, "run a command by name, no args"),
-    e("wl_run_int", 3, 0, .commands, commands.hRunInt, "run a command by name with one int arg"),
-    e("wl_run_str", 4, 0, .commands, commands.hRunStr, "run a command by name with one string arg"),
-    e("wl_run_str2", 6, 0, .commands, commands.hRunStr2, "run a command by name with two string args"),
-    e("wl_command_count", 0, 1, .commands, commands.hCommandCount, "the number of registered commands (introspection)"),
-    e("wl_command_name", 3, 1, .commands, commands.hCommandName, "the `i`-th command's name, into guest memory"),
-    e("wl_command_summary", 3, 1, .commands, commands.hCommandSummary, "the `i`-th command's one-line summary, into guest memory"),
-
-    // ── buffers.zig — the open-buffer list (introspection) ──────────────
-    e("wl_buffer_count", 0, 1, .buffers, buffers.hBufferCount, "the number of open buffers"),
-    e("wl_buffer_id", 1, 1, .buffers, buffers.hBufferId, "the `i`-th open buffer's id, or -1"),
-    e("wl_buffer_name", 3, 1, .buffers, buffers.hBufferName, "the `i`-th open buffer's name, into guest memory"),
-    e("wl_buffer_active", 1, 1, .buffers, buffers.hBufferActive, "whether the `i`-th buffer is the active one"),
-    e("wl_buffer_readonly", 1, 1, .buffers, buffers.hBufferReadonly, "whether the `i`-th buffer is read-only"),
-
-    // ── pick.zig — fuzzy pick build/open/accept ─────────────────────────
-    e("wl_pick_begin", 3, 0, .pick, pick.hPickBegin, "start building a fuzzy pick with `prompt`, tagged `pick_id`"),
-    e("wl_pick_add", 4, 0, .pick, pick.hPickAdd, "add a candidate (text, detail) to the pick being built"),
-    e("wl_pick_end", 0, 0, .pick, pick.hPickEnd, "open the pick built so far"),
-    e("wl_open_file_pick", 5, 0, .pick, pick.hOpenFilePick, "open a file-tree pick rooted at `root`"),
-    e("wl_pick_choice", 2, 1, .pick, pick.hPickChoice, "the accepted pick's text, into guest memory"),
-    e("wl_pick_choice_index", 0, 1, .pick, pick.hPickChoiceIndex, "the accepted candidate's add-order index, or -1 for free-text"),
-
-    // ── menu.zig — which-key style menu-mode binding introspection ─────
-    e("wl_menu_binding_count", 0, 1, .menu, menu.hMenuBindingCount, "the current menu mode's binding-table entry count"),
-    e("wl_menu_binding_key", 3, 1, .menu, menu.hMenuBindingKey, "the `i`-th menu binding's key chord, into guest memory"),
-    e("wl_menu_binding_cmd", 3, 1, .menu, menu.hMenuBindingCmd, "the `i`-th menu binding's command name, into guest memory"),
-    e("wl_menu_binding_is_group", 1, 1, .menu, menu.hMenuBindingIsGroup, "whether the `i`-th menu binding is a group (submenu), not a leaf"),
-
-    // ── surface.zig — the retained overlay (which-key/dired/magit) ─────
-    e("wl_surface_begin", 1, 0, .surface, surface.hSurfaceBegin, "open a retained overlay surface at `placement`"),
-    e("wl_surface_row", 0, 0, .surface, surface.hSurfaceRow, "start a new row in the open surface"),
-    e("wl_surface_span", 3, 0, .surface, surface.hSurfaceSpan, "append a styled text span to the current surface row"),
-    e("wl_surface_end", 1, 0, .surface, surface.hSurfaceEnd, "close the open surface, marking a row selected or not"),
-    e("wl_surface_close", 0, 0, .surface, surface.hSurfaceClose, "close the surface without a selection"),
-
-    // ── capability.zig — the completion provider gather/push ───────────
-    e("wl_provide_completion", 0, 0, .capability, capability.hProvideCompletion, "caps trampoline: hand the guest the pending completion session"),
-    e("wl_completion_prefix", 2, 1, .capability, capability.hCompletionPrefix, "the current completion prefix, into guest memory"),
-    e("wl_caps_item", 11, 0, .capability, capability.hCapsItem, "append one rich completion item to the plugin's pending batch"),
-    e("wl_caps_commit", 1, 0, .capability, capability.hCapsCommit, "flush the pending completion batch into the session"),
-    e("wl_caps_decline", 1, 0, .capability, capability.hCapsDecline, "decline to answer a completion session"),
-
-    // ── syntax.zig — structural (tree-sitter) read + subbuffers ────────
-    e("wl_node_at", 4, 1, .syntax, syntax.hNodeAt, "the smallest named tree-sitter node covering `offset`"),
-    e("wl_node_enclosing", 5, 1, .syntax, syntax.hNodeEnclosing, "the smallest named node strictly enclosing `[start,end)` (expand-selection)"),
-    e("wl_query", 4, 1, .syntax, syntax.hQuery, "run a tree-sitter query over `[start,end)`, stashing its captures"),
-    e("wl_query_capture", 4, 1, .syntax, syntax.hQueryCapture, "read the `i`-th capture from the last `wl_query`/`wl_node_children`"),
-    e("wl_node_children", 1, 1, .syntax, syntax.hNodeChildren, "the named children of the smallest node at `off` (structural descent)"),
-    e("wl_claim_subbuffer", 2, 1, .syntax, syntax.hClaimSubbuffer, "claim `[start,end)` as a subbuffer (a projection row's hidden identity)"),
-    e("wl_subbuffer_put_fact", 5, 0, .syntax, syntax.hSubbufferPutFact, "attach a key/value fact to a claimed subbuffer"),
-    e("wl_subbuffer_clear", 0, 0, .syntax, syntax.hSubbufferClear, "release every subbuffer this plugin claimed"),
-    e("wl_subbuffer_fact_at", 5, 1, .syntax, syntax.hSubbufferFactAt, "read fact `key` off the innermost subbuffer covering `offset`"),
-
-    // ── activation.zig — the focus event ────────────────────────────────
-    e("wl_activate_path", 2, 1, .activation, activation.hActivatePath, "the path of the buffer taking focus (host→guest activation, borrowed)"),
-
-    // ── tool.zig — projection ownership ─────────────────────────────────
-    e("wl_tool_backing", 2, 0, .tool, tool.hToolBacking, "mark the active buffer as this plugin's tool projection"),
-
-    // ── register.zig — the editor-agnostic yank/paste service ──────────
-    e("wl_yank_range", 3, 0, .register, register.hYankRange, "capture `[start,end)` into the register, snapshotting overlapping subbuffer facts"),
-    e("wl_register_text", 2, 1, .register, register.hRegisterText, "the register's bytes, into guest memory"),
-    e("wl_register_linewise", 0, 1, .register, register.hRegisterLinewise, "whether the register holds a linewise yank"),
-    e("wl_paste_at", 1, 0, .register, register.hPasteAt, "re-claim a subbuffer for each ferried payload pasted at `base`"),
-
-    // ── proc.zig — perm-gated off-thread process effects ───────────────
-    eg("wl_shell_insert", 2, 0, .proc, proc.hShellInsert, .proc_timer, "run `<cmd>` off-thread and insert its stdout at the cursor when done"),
-    eg("wl_proc_spawn", 2, 1, .proc, proc.hProcSpawn, .proc, "spawn a persistent subprocess; its stdout buffers for `wl_proc_read`"),
-    e("wl_proc_send", 3, 0, .proc, proc.hProcSend, "write to a spawned subprocess's stdin"),
-    e("wl_proc_read", 3, 1, .proc, proc.hProcRead, "drain buffered stdout from a spawned subprocess"),
-    e("wl_proc_close", 1, 0, .proc, proc.hProcClose, "kill a spawned subprocess (slot stays for handle stability)"),
-    e("wl_cwd", 2, 1, .proc, proc.hCwd, "the process working directory (for absolute `file://` uris)"),
-    eg("wl_proc_to_buffer", 4, 0, .proc, proc.hProcToBuffer, .proc_timer, "run `<cmd>` off-thread and replace a named scratch buffer with its stdout"),
-    eg("wl_proc_append_buffer", 4, 0, .proc, proc.hProcAppendBuffer, .proc_timer, "like `wl_proc_to_buffer` but appends (a console log) instead of replacing"),
-    eg("wl_proc_filter", 4, 0, .proc, proc.hProcFilter, .proc_timer, "filter `[start,end)` through `<cmd>` in place (formatters)"),
-
-    // ── sessions.zig — persistent streamed REPL + net sessions ─────────
-    eg("wl_repl_start", 4, 1, .sessions, sessions.hReplStart, .proc_timer, "start a persistent REPL streaming into a named comint buffer"),
-    e("wl_repl_send", 3, 0, .sessions, sessions.hReplSend, "write a line to a REPL session's stdin"),
-    e("wl_repl_quit", 1, 0, .sessions, sessions.hReplQuit, "quit a REPL session (kill+join; handle stays valid but dead)"),
-    eg("wl_net_connect", 6, 1, .sessions, sessions.hNetConnect, .net, "dial `host:port` (TCP/TLS), streaming into a named buffer"),
-    e("wl_net_send", 3, 0, .sessions, sessions.hNetSend, "write bytes to a connected net session"),
-    e("wl_net_close", 1, 0, .sessions, sessions.hNetClose, "close a net session"),
-
-    // ── fs.zig — perm-gated local filesystem doors ─────────────────────
-    eg("wl_fs_read", 4, 1, .fs, fs.hFsRead, .fs_read, "read a file into the guest"),
-    eg("wl_fs_exists", 2, 1, .fs, fs.hFsExists, .fs_read, "what a cwd-relative path is (absent/file/dir/other), without reading it"),
-    eg("wl_fs_write", 4, 1, .fs, fs.hFsWrite, .fs_write, "replace a file's contents"),
-    eg("wl_fs_append", 4, 1, .fs, fs.hFsAppend, .fs_write, "append to a file (capture)"),
-    eg("wl_fs_list", 6, 1, .fs, fs.hFsList, .fs_read, "list a local directory (locus-routed; remote authorities degrade to -1)"),
-    eg("wl_fs_list_async", 6, 1, .fs, fs.hFsListAsync, .fs_read, "queue an async `.peer` directory listing, delivered to a buffer"),
-};
-
-/// The table's size, alongside `imports.len`, as a deliberate tripwire: bump
-/// this BY HAND alongside adding or removing a contract entry (and its guest
-/// extern in src/guest/weft.zig), so an accidental add/remove — a merge
-/// conflict, a copy-paste slip, a half-finished edit — fails the build with a
-/// pointed message instead of silently drifting the two ~123-entry tables
-/// apart again (the exact class this table exists to kill).
-const expected_count = 123;
-
-comptime {
-    @setEvalBranchQuota(50_000); // the O(n²) duplicate-name scan below, n≈123
-    if (imports.len != expected_count) @compileError(std.fmt.comptimePrint(
-        "core/membrane/contract.zig: imports table has {d} entries, expected {d}. " ++
-            "If you added or removed a wl_* host import, update `expected_count` here " ++
-            "AND mirror the change by hand in src/guest/weft.zig's extern block.",
-        .{ imports.len, expected_count },
-    ));
-    for (imports, 0..) |a, i| {
-        if (!std.mem.startsWith(u8, a.name, "wl_"))
-            @compileError("core/membrane/contract.zig: '" ++ a.name ++ "' doesn't look like a wl_* import");
-        if (a.params.len > 16)
-            @compileError("core/membrane/contract.zig: '" ++ a.name ++ "' has more params than wasm.zig's trampoline can carry (16)");
-        if (a.results.len > 8)
-            @compileError("core/membrane/contract.zig: '" ++ a.name ++ "' has more results than wasm.zig's trampoline can carry (8)");
-        for (imports[i + 1 ..]) |b| {
-            if (std.mem.eql(u8, a.name, b.name))
-                @compileError("core/membrane/contract.zig: duplicate wl_* import name '" ++ a.name ++ "'");
-        }
+fn findExport(comptime name: []const u8) contract_data.Export {
+    for (contract_data.exports) |e| {
+        if (std.mem.eql(u8, e.name, name)) return e;
     }
+    @compileError("core/membrane/contract.zig: '" ++ name ++ "' is not a declared guest export — add it to contract_data.exports first");
+}
+
+/// Call a REQUIRED guest export (`contract_data.exports[..].required = true`,
+/// e.g. `init`/`on_command`): a compile error if `name` isn't in the table,
+/// or if the table doesn't mark it required — so a call site can't silently
+/// assume presence for something the table says is optional. `args` is an
+/// anonymous tuple literal (`.{}`, `.{x}`, ...) — coercing it to the export's
+/// exact `[N]i32` arity is itself a compile-time check (a wrong-arity call
+/// fails to coerce). Otherwise a thin, behavior-preserving pass to
+/// `instance.callVoid` — this helper does not itself swallow any error; the
+/// call site's own `try`/`catch` (as today) decides what a failure means.
+pub fn callRequiredExport(comptime name: []const u8, instance: *wasm.Instance, args: anytype) wasm.Error!void {
+    const e = comptime findExport(name);
+    if (!e.required) @compileError("core/membrane/contract.zig: export '" ++ name ++ "' is optional in contract_data.exports — use callOptionalExport");
+    const arr: [e.params.len]i32 = args;
+    return instance.callVoid(name, &arr);
+}
+
+/// Call an OPTIONAL guest export (`required = false`, e.g. `on_menu`): a
+/// compile error if `name` isn't in the table, or if the table marks it
+/// required (an optional-only helper used on a required export would hide a
+/// real bug). Like `callRequiredExport`, this is a thin pass-through — the
+/// existing per-call-site tolerance (some sites swallow every error,
+/// `describe` swallows only `error.MissingExport`) is preserved verbatim by
+/// leaving that decision at the call site, not centralizing it here (the
+/// two patterns differ today; unifying them would be a behavior change).
+pub fn callOptionalExport(comptime name: []const u8, instance: *wasm.Instance, args: anytype) wasm.Error!void {
+    const e = comptime findExport(name);
+    if (e.required) @compileError("core/membrane/contract.zig: export '" ++ name ++ "' is required in contract_data.exports — use callRequiredExport");
+    const arr: [e.params.len]i32 = args;
+    return instance.callVoid(name, &arr);
 }
 
 // ── Tests ───────────────────────────────────────────────────────────
@@ -332,7 +326,7 @@ test "membrane contract: every entry is well-formed, documented, and unique" {
         const gop = try seen.getOrPut(t.allocator, entry.name); // every bound import appears in the table exactly once
         try t.expect(!gop.found_existing);
     }
-    try t.expectEqual(@as(usize, expected_count), imports.len);
+    try t.expectEqual(@as(usize, contract_data.imports.len), imports.len);
 }
 
 test "membrane contract: defineImports binds every table entry onto a real linker" {
@@ -351,4 +345,73 @@ test "membrane contract: defineImports binds every table entry onto a real linke
     defer linker.deinit();
     var dummy: WasmPlugin = undefined;
     try wasm_host.defineImports(&linker, &dummy);
+}
+
+/// The perm-drift cross-check (opus review of W0a-C, task W0a-D): a CURATED
+/// list of every `wl_*` import whose handler actually gates on a
+/// `requirePerm(p, caller, .x)` call (grep `requirePerm(` across
+/// wasm_host/*.zig to reproduce/update this list — there is no way to walk
+/// a function BODY at comptime, so this is hand-maintained, not derived).
+/// `proc_timer` here means the handler gates BOTH `.proc` and `.timer`
+/// (always as a pair — see `Perm`'s doc comment); an entry gating only one
+/// of the two would be a real, single `Perm` value instead.
+///
+/// Why a runtime test over a curated list, not a comptime block: Zig has no
+/// way to inspect a `pub fn hFoo(...)`'s BODY for which `requirePerm` calls
+/// it makes — that's control flow, not a type or a declaration comptime can
+/// walk. A test that hand-lists the enforcement sites and diffs both
+/// directions against `contract_data.zig`'s `.perm` metadata is the
+/// documented, honest middle ground: it can't catch a NEW ungated effectful
+/// handler (nothing forces this list to grow when one is added — same as
+/// today), but it DOES fail the moment `.perm` in the table and the actual
+/// `requirePerm` gate disagree for anything on this list, in EITHER
+/// direction (table says gated but code doesn't enforce it, or vice versa)
+/// — which is exactly the silent-drift class the review flagged.
+const perm_gated = [_]struct { name: []const u8, perm: Perm }{
+    .{ .name = "wl_shell_insert", .perm = .proc_timer }, // proc.zig hShellInsert: .proc + .timer
+    .{ .name = "wl_proc_spawn", .perm = .proc }, // proc.zig hProcSpawn: .proc only (no .timer)
+    .{ .name = "wl_proc_to_buffer", .perm = .proc_timer }, // proc.zig hProcToBuffer: .proc + .timer
+    .{ .name = "wl_proc_append_buffer", .perm = .proc_timer }, // proc.zig hProcAppendBuffer: .proc + .timer
+    .{ .name = "wl_proc_filter", .perm = .proc_timer }, // proc.zig hProcFilter: .proc + .timer
+    .{ .name = "wl_repl_start", .perm = .proc_timer }, // sessions.zig hReplStart: .proc + .timer
+    .{ .name = "wl_net_connect", .perm = .net }, // sessions.zig hNetConnect: .net
+    .{ .name = "wl_fs_read", .perm = .fs_read }, // fs.zig hFsRead: .fs_read
+    .{ .name = "wl_fs_exists", .perm = .fs_read }, // fs.zig hFsExists: .fs_read
+    .{ .name = "wl_fs_write", .perm = .fs_write }, // fs.zig hFsWrite: .fs_write
+    .{ .name = "wl_fs_append", .perm = .fs_write }, // fs.zig hFsAppend: .fs_write
+    .{ .name = "wl_fs_list", .perm = .fs_read }, // fs.zig hFsList: .fs_read
+    .{ .name = "wl_fs_list_async", .perm = .fs_read }, // fs.zig hFsListAsync: .fs_read
+};
+
+test "membrane contract: table .perm metadata agrees with the handlers' actual requirePerm gates" {
+    // Direction 1: every curated (actually-gated) import must have the SAME
+    // perm in the table — a table edit that changes/drops `.perm` without
+    // touching the handler (or vice versa) fails here.
+    for (perm_gated) |g| {
+        var found = false;
+        for (imports) |entry| {
+            if (!std.mem.eql(u8, entry.name, g.name)) continue;
+            found = true;
+            try t.expectEqual(g.perm, entry.perm orelse {
+                std.debug.print("membrane contract: '{s}' is requirePerm-gated ({t}) but contract_data.zig has .perm = null\n", .{ g.name, g.perm });
+                return error.TestExpectedEqual;
+            });
+        }
+        try t.expect(found); // the curated name must be a real import
+    }
+    // Direction 2: every table entry that CLAIMS a perm gate must be on the
+    // curated (verified-gated) list — an entry with `.perm` set but no
+    // matching requirePerm call would otherwise silently over-claim.
+    for (imports) |entry| {
+        const want = entry.perm orelse continue;
+        var found = false;
+        for (perm_gated) |g| {
+            if (std.mem.eql(u8, g.name, entry.name)) {
+                try t.expectEqual(want, g.perm);
+                found = true;
+            }
+        }
+        if (!found) std.debug.print("membrane contract: '{s}' claims .perm = {t} but isn't on the curated perm_gated list (see this test's doc comment)\n", .{ entry.name, want });
+        try t.expect(found);
+    }
 }

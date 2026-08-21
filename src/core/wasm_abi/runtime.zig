@@ -26,6 +26,7 @@ const Pool = @import("../task.zig").Pool;
 const wasm_host = @import("../wasm_host.zig");
 const WasmPlugin = @import("WasmPlugin.zig");
 const SyntaxResolver = WasmPlugin.SyntaxResolver;
+const contract = @import("../membrane/contract.zig");
 
 /// The embedded reference guest (compiled from `src/guest/hello.zig` to
 /// wasm32 by build.zig, embedded like `font_mono`).
@@ -75,7 +76,7 @@ pub fn runGuest(engine: *wasm.Engine, ctx: *command.Context, name: []const u8, w
     try linker.defineFn("weft", "edit", 4, 0, hostEdit, &host);
     var instance = try linker.instantiate(&module);
     defer instance.deinit();
-    try instance.callVoid("run", &.{});
+    try contract.callRequiredExport("run", &instance, .{});
 }
 
 pub const LoadOptions = struct {
@@ -123,11 +124,11 @@ pub fn loadPlugin(engine: *wasm.Engine, ctx: *command.Context, name: []const u8,
     // manifest may skip it). Then [approval], then init(): registrations,
     // cross-checked against the declaration.
     p.phase = .describing;
-    p.instance.callVoid("describe", &.{}) catch |e| {
+    contract.callOptionalExport("describe", &p.instance, .{}) catch |e| {
         if (e != error.MissingExport) return failLoad(p, e);
     };
     p.phase = .active;
-    p.instance.callVoid("init", &.{}) catch |e| return failLoad(p, e);
+    contract.callRequiredExport("init", &p.instance, .{}) catch |e| return failLoad(p, e);
     if (p.load_error) |e| return failLoad(p, e);
     return p;
 }
