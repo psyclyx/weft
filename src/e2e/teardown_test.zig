@@ -70,8 +70,8 @@ test "app/teardown: shells outlive buffers through an in-flight shell save" {
     try prov.initRegistries(gpa);
     var which_key_now = false;
     var sess: app_session.Session = undefined;
-    try sess.init(gpa, pool, "teardown-user", &prov.grammars, &prov.lsp_servers, &which_key_now);
-    prov.initAttach(gpa, &sess.caps, environ, true);
+    try sess.init(gpa, pool, "teardown-user", &prov.grammars, &which_key_now);
+    prov.initAttach(gpa, &sess.caps, environ);
 
     // A persistent shell registered in Providers.attach_deps.shells, exactly as
     // AttachDeps.shellFor does (gpa.create + spawn + put with a duped key), so
@@ -128,7 +128,7 @@ test "app/teardown: unconnected Collab constructs + tears down clean" {
     defer prov.deinit(gpa);
     var which_key_now = false;
     var sess: app_session.Session = undefined;
-    try sess.init(gpa, pool, "collab-user", &prov.grammars, &prov.lsp_servers, &which_key_now);
+    try sess.init(gpa, pool, "collab-user", &prov.grammars, &which_key_now);
     defer sess.deinit(gpa);
     // known_peers + my_identity stay main() locals (Collab borrows them); an empty
     // in-memory store keeps this hermetic (no config-home read/write).

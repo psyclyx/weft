@@ -153,13 +153,12 @@ pub const Active = struct {
 
 /// The async housekeeping tick (run each frame, after input): backing
 /// maintenance for every buffer (fold saves, merge external writes, retry
-/// stale saves, schedule polls), the LSP + nav/hover/pick ticks, native async
-/// completions and REPL streaming, the buffer-activation event, and the
-/// menu-overlay edges. Returns whether the view was damaged.
+/// stale saves, schedule polls), the pick tick, native async completions,
+/// plugin poll/REPL streaming (the LSP plugin rides this), the buffer-activation
+/// event, and the menu-overlay edges. Returns whether the view was damaged.
 pub fn tickAsync(
     fx: *const FrameCtx,
     abuf: *core.Buffers.Buffer,
-    attach: *providers.Attach,
     cmd_ctx: *core.command.Context,
     plugin_loop: *core.async_loop.Loop,
     next_backing_poll_ns: *u64,
@@ -185,9 +184,6 @@ pub fn tickAsync(
             if (was_stale and b.editor.save_state == .idle) try b.editor.requestSave(gpa);
             if (poll_due or b.editor.save_state == .stale) try b.editor.requestBackingPoll(gpa);
         }
-    }
-    if (attach.lsp) |l| {
-        if (try l.tick(cmd_ctx)) dirty = true;
     }
     // Drive any async pick source (completion race-and-refine, file
     // finder, dir browser) — a no-op for a static or source-less

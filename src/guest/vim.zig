@@ -583,7 +583,8 @@ export fn init() void {
     weft.runStr2("set-cursor", "visual", "block");
     weft.runStr2("set-cursor", "insert", "bar");
     weft.runStr2("cursor-blink", "insert", "on");
-    weft.runStr2("lsp-add", ".zig", "zls");
+    // Language servers come from config now (weft.set("lsp","<lang>","<cmd>")),
+    // read by the `lsp` plugin — no lsp-add registry.
 
     weft.setMode("normal");
 }

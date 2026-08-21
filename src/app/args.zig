@@ -25,7 +25,6 @@ pub const Args = struct {
     token: []const u8 = "weft-dev",
     user: []const u8 = "user",
     headless: bool = false,
-    lsp_cmd: ?[]const u8 = null, // --headless host-side server
     /// With --connect: open the host's document as an editable partial
     /// checkout (content follows the cursor; huge files open instantly).
     partial: bool = false,
@@ -78,8 +77,6 @@ pub fn parseArgs(process_args: std.process.Args) Args {
             out.headless = true;
         } else if (std.mem.eql(u8, a, "--partial")) {
             out.partial = true;
-        } else if (std.mem.eql(u8, a, "--lsp")) {
-            out.lsp_cmd = it.next() orelse out.lsp_cmd;
         } else {
             out.file = a;
         }

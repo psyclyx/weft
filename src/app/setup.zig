@@ -11,24 +11,22 @@ const cursor_config = @import("cursor_config.zig");
 const dispatch = @import("dispatch.zig");
 const providers = @import("providers.zig");
 
-/// Bind the capability consumers (complete, goto-definition, symbols, hover)
-/// plus the data-driven grammar/LSP registries (grammar-add, lsp-add) onto
-/// `commands`. Each UI/registry is caller-owned (declared in `main()` with its
-/// own defer); this only wires the command specs, in registration order.
+/// Bind the capability consumers (complete) plus the data-driven grammar registry
+/// (grammar-add) onto `commands`. Each UI/registry is caller-owned (declared in
+/// `main()` with its own defer); this only wires the command specs, in
+/// registration order. hover / goto-definition / references / symbols / rename /
+/// format / diagnostics / completion are all the `lsp` PLUGIN's now — the only
+/// capability consumer left in core is the completion UI, and server commands are
+/// config, not a registry.
 pub fn registerCapabilityConsumers(
     gpa: std.mem.Allocator,
     commands: *core.command.Commands,
     completion_ui: *core.complete_ui.CompletionUi,
     grammars: *core.syntax.Runtime,
-    lsp_servers: *providers.LspServers,
 ) !void {
     _ = try commands.bind(gpa, "complete", completion_ui.commandSpec());
-    // hover / goto-definition / references / symbols are the `lsp` PLUGIN's now.
     // Grammars are data: builtins seeded, config extends via command.
     _ = try commands.bind(gpa, "grammar-add", providers.grammarAddCommand(grammars));
-    // Language servers are data: config registers (extension, command)
-    // pairs; nothing here names a server.
-    _ = try commands.bind(gpa, "lsp-add", providers.lspAddCommand(lsp_servers));
 }
 
 /// Bind the caret/which-key/menu commands, registered before the config runs

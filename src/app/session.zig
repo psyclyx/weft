@@ -47,15 +47,14 @@ pub const Session = struct {
     /// Build the editing state IN PLACE (`self` is already at its final address
     /// in `main()`'s frame), so `cmd_ctx`'s `&self.field` borrows never dangle.
     /// Installs the built-ins, then binds the capability consumers (which also
-    /// wire `grammar-add`/`lsp-add` onto the caller-owned `grammars`/`lsp_servers`
-    /// registries) and the caret/which-key commands — in registration order.
+    /// wire `grammar-add` onto the caller-owned `grammars` registry) and the
+    /// caret/which-key commands — in registration order.
     pub fn init(
         self: *Session,
         gpa: std.mem.Allocator,
         pool: *core.task.Pool,
         user: []const u8,
         grammars: *core.syntax.Runtime,
-        lsp_servers: *providers.LspServers,
         which_key_now: *bool,
     ) !void {
         self.gpa = gpa;
@@ -82,7 +81,7 @@ pub const Session = struct {
         try core.builtins.install(gpa, &self.commands, &self.keymap, &self.actions);
         // Capability consumers — written against capability names only.
         self.completion_ui = .empty;
-        try setup.registerCapabilityConsumers(gpa, &self.commands, &self.completion_ui, grammars, lsp_servers);
+        try setup.registerCapabilityConsumers(gpa, &self.commands, &self.completion_ui, grammars);
         // Caret config commands, registered before the config runs so it can
         // set per-mode styles at load time.
         self.cursor_cfg = .{ .gpa = gpa };

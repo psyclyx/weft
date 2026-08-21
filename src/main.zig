@@ -76,19 +76,18 @@ pub fn main(init: std.process.Init) !void {
             .listen = args.listen orelse 7777,
             .access = args.access,
             .token = args.token,
-            .lsp_cmd = args.lsp_cmd,
             .file = args.file,
         }, init.minimal.environ);
     }
 
     // ── Core ──
-    // Providers owns the config-extended registries (grammars, lsp_servers) and
-    // the per-buffer attach bundle. Its deinit is registered FIRST so it runs
-    // LAST: the persistent remote shells must outlive the buffers whose backings
-    // + in-flight save workers use them, and the pool whose workers may still
-    // hold one. The registries exist now (before the session) so the session's
-    // capability consumers can bind grammar-add/lsp-add onto them; attach_deps is
-    // built later, once caps + the connect placement are known.
+    // Providers owns the config-extended grammar registry and the per-buffer
+    // attach bundle. Its deinit is registered FIRST so it runs LAST: the
+    // persistent remote shells must outlive the buffers whose backings + in-flight
+    // save workers use them, and the pool whose workers may still hold one. The
+    // registry exists now (before the session) so the session's capability
+    // consumers can bind grammar-add onto it; attach_deps is built later, once
+    // caps are known.
     var providers_state: providers.Providers = undefined;
     try providers_state.initRegistries(gpa);
     defer providers_state.deinit(gpa);
@@ -108,7 +107,7 @@ pub fn main(init: std.process.Init) !void {
     // registration order; its deinit frees them in the reverse order main()
     // used to.
     var session: Session = undefined;
-    try session.init(gpa, pool, args.user, &providers_state.grammars, &providers_state.lsp_servers, &which_key_now);
+    try session.init(gpa, pool, args.user, &providers_state.grammars, &which_key_now);
     defer session.deinit(gpa);
     const buffers = &session.buffers;
     if (args.file) |path| {
@@ -238,7 +237,7 @@ pub fn main(init: std.process.Init) !void {
     // feed, so no local LSP). detachProviders runs here (before Session.deinit,
     // while caps + buffers' docs are alive); the shells live on, freed last by
     // providers_state.deinit.
-    providers_state.initAttach(gpa, &session.caps, init.minimal.environ, args.connect == null);
+    providers_state.initAttach(gpa, &session.caps, init.minimal.environ);
     const attach_deps = &providers_state.attach_deps;
     defer {
         var det_it = buffers.iterator();
@@ -504,7 +503,7 @@ pub fn main(init: std.process.Init) !void {
         }
 
         // ── Async housekeeping tick (backing/LSP/nav/pick/plugins/activate/menu) ──
-        if (try frame_mod.tickAsync(&fx, abuf, attach, &session.cmd_ctx, &plugin_loop, &next_backing_poll_ns, &last_activate_path, &last_activate_len, &menu_overlay, &which_key_now, which_key_delay_ns, frame_start))
+        if (try frame_mod.tickAsync(&fx, abuf, &session.cmd_ctx, &plugin_loop, &next_backing_poll_ns, &last_activate_path, &last_activate_len, &menu_overlay, &which_key_now, which_key_delay_ns, frame_start))
             view_dirty = true;
         // JS plugins: fire each resident quickjs instance's proc-stream output
         // handler for streams with new bytes (agent transcripts stream in here).

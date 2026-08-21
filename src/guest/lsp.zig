@@ -54,6 +54,12 @@ var diag_mlen: [MAX_DIAG]usize = undefined;
 var diag_msgs: [1 << 14]u8 = undefined;
 var diag_n: usize = 0;
 
+// Completion is an async caps PROVIDER, not a command — its own pending slot,
+// independent of `want`. `on_complete(session)` sends textDocument/completion and
+// defers; the response commits rich items into that session (see complete_ui).
+var comp_session: u32 = 0;
+var comp_id: i64 = 0;
+
 var parambuf: [4096]u8 = undefined;
 var textbuf: [1 << 18]u8 = undefined; // JSON-escaped document text for didOpen
 
@@ -74,11 +80,37 @@ const cmds = [_]Cmd{
 
 export fn describe() void {
     for (cmds) |c| weft.declareCommand(c.name);
+    weft.declareCapability("edit/completion");
     weft.requestPerm(.proc);
     weft.requestPerm(.timer);
 }
 export fn init() void {
     for (cmds) |c| _ = weft.register(c.name);
+    weft.provideCompletion();
+}
+
+/// Completion request (caps provider): send textDocument/completion for the
+/// cursor and DEFER — the response commits into `session` off a later poll. If
+/// there's no server for this buffer's language (or it isn't ready yet), decline
+/// so the merge isn't left waiting on us.
+export fn on_complete(session: u32) void {
+    ensureServer();
+    if (!ready) {
+        weft.capsDecline(session);
+        return;
+    }
+    syncDoc();
+    const pos = posOf(weft.cursor());
+    const params = std.fmt.bufPrint(
+        &parambuf,
+        "{{\"textDocument\":{{\"uri\":\"{s}\"}},\"position\":{{\"line\":{d},\"character\":{d}}}}}",
+        .{ uri_buf[0..uri_len], pos.line, pos.col },
+    ) catch {
+        weft.capsDecline(session);
+        return;
+    };
+    comp_id = conn.request("textDocument/completion", params);
+    comp_session = session;
 }
 export fn on_command(id: u32) void {
     if (id < cmds.len) cmds[id].handler();
@@ -355,6 +387,10 @@ fn dispatch(msg: rpc.Value) void {
             if (want != .none) sendWant();
             return;
         }
+        if (comp_session != 0 and id == comp_id) {
+            presentCompletion(obj.get("result") orelse rpc.Value{ .null = {} });
+            return;
+        }
         if (id == want_id) {
             const result = obj.get("result") orelse rpc.Value{ .null = {} };
             switch (want) {
@@ -438,6 +474,46 @@ fn presentCodeActions(result: rpc.Value) void {
     const title = if (first == .object) (if (first.object.get("title")) |t| (if (t == .string) t.string else "") else "") else "";
     var b: [256]u8 = undefined;
     weft.echo(std.fmt.bufPrint(&b, "lsp: code action '{s}' (needs resolve)", .{title}) catch "lsp: code action");
+}
+
+/// Convert an LSP completion response into rich items and commit them into the
+/// pending session. Handles both a bare `CompletionItem[]` and a
+/// `CompletionList{items}`; carries label / insertText / detail / kind /
+/// documentation across to the merge + info popup. Capped so a huge list can't
+/// blow the frame. An empty result still commits (answers the session).
+fn presentCompletion(result: rpc.Value) void {
+    const session = comp_session;
+    comp_session = 0;
+    const items: []const rpc.Value = switch (result) {
+        .array => |a| a.items,
+        .object => |o| if (o.get("items")) |it| (if (it == .array) it.array.items else &.{}) else &.{},
+        else => &.{},
+    };
+    var rank: i32 = 0;
+    for (items) |it| {
+        if (rank >= 200) break;
+        if (it != .object) continue;
+        const o = it.object;
+        const label = strOf(o.get("label"));
+        if (label.len == 0) continue;
+        const ins = strOf(o.get("insertText"));
+        const kind: u8 = if (o.get("kind")) |k| (if (k == .integer) @intCast(@max(0, @min(255, k.integer))) else 0) else 0;
+        weft.capsItem(session, .{
+            .text = if (ins.len > 0) ins else label,
+            .label = label,
+            .detail = strOf(o.get("detail")),
+            .documentation = if (o.get("documentation")) |d| contentsText(d) else "",
+            .kind = kind,
+            .rank = rank,
+        });
+        rank += 1;
+    }
+    weft.capsCommit(session);
+}
+
+fn strOf(v: ?rpc.Value) []const u8 {
+    const o = v orelse return "";
+    return if (o == .string) o.string else "";
 }
 
 fn presentHover(result: rpc.Value) void {

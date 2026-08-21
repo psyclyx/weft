@@ -5,7 +5,7 @@
 //! literal), serves range reads for partial checkout, and autosaves.
 //! The window/Vulkan half of weft is simply never initialized.
 //!
-//!   weft --headless --listen PORT [--token T] [--lsp "zls"] [file]
+//!   weft --headless --listen PORT [--token T] [file]
 
 const std = @import("std");
 const core = @import("core/core.zig");
@@ -16,7 +16,6 @@ pub const Args = struct {
     listen: u16 = 7777,
     access: session.Access = .view,
     token: []const u8 = "weft-dev",
-    lsp_cmd: ?[]const u8 = null,
     file: ?[]const u8 = null,
 };
 
@@ -68,26 +67,6 @@ pub fn run(gpa: std.mem.Allocator, args: Args, environ: std.process.Environ) !vo
         .echo = &echo_line,
     };
 
-    // Host-side LSP: the server runs WHERE THE DOCUMENT LIVES.
-    var lsp: ?*core.lsp.Lsp = null;
-    defer if (lsp) |l| l.destroy();
-    if (args.lsp_cmd) |cmd_str| {
-        if (editor.backingPath()) |p| {
-            var argv: std.ArrayList([]const u8) = .empty;
-            defer argv.deinit(gpa);
-            var words = std.mem.tokenizeScalar(u8, cmd_str, ' ');
-            while (words.next()) |w| try argv.append(gpa, w);
-            lsp = core.lsp.Lsp.create(gpa, argv.items, p, &editor.doc, environ) catch |err| blk: {
-                std.log.warn("headless: lsp unavailable: {t}", .{err});
-                break :blk null;
-            };
-            if (lsp) |l| {
-                const layer = try caps.registerFeed(&editor.doc, "edit/diagnostics", "diagnostics", .host, "lsp/server");
-                l.attachDiagnostics(layer);
-            }
-        }
-    }
-
     var blob: ?session.BlobServer = null;
     defer if (blob) |*b| b.close();
     if (editor.backingPath()) |p| blob = session.BlobServer.openPath(p) catch null;
@@ -128,7 +107,6 @@ pub fn run(gpa: std.mem.Allocator, args: Args, environ: std.process.Environ) !vo
         hub.acceptPending(&cfg, headlessConfigure);
         _ = hub.tick();
         notePeerIdentities(&hub, &known);
-        if (lsp) |l| _ = try l.tick(&ctx);
         _ = editor.pollSave(gpa);
         if (editor.doc.commitCount() != seen_commits) {
             seen_commits = editor.doc.commitCount();

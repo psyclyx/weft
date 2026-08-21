@@ -121,8 +121,8 @@ pub const Editor = struct {
         // Session (builtins + capability/caret commands), then Providers' attach
         // phase (borrows the session caps).
         try self.prov.initRegistries(gpa);
-        try self.session.init(gpa, self.pool, user, &self.prov.grammars, &self.prov.lsp_servers, &self.which_key_now);
-        self.prov.initAttach(gpa, &self.session.caps, parentEnviron(), true);
+        try self.session.init(gpa, self.pool, user, &self.prov.grammars, &self.which_key_now);
+        self.prov.initAttach(gpa, &self.session.caps, parentEnviron());
 
         // Alias the moved state (session is a field of *self, so these are stable).
         self.buffers = &self.session.buffers;
@@ -304,18 +304,7 @@ pub const Editor = struct {
                 _ = core.wasm_host.notifyPollIfReady(p); // service raw-proc plugins (lsp)
             }
             for (self.js_plugins.items) |jp| _ = jp.tick(); // reactor: drains proc output → onOutput
-            self.pumpLsp(); // core lsp attach → diagnostics layer (until phase 4)
             napUs(2000);
-        }
-    }
-
-    /// Pump the active buffer's CORE lsp attach (its diagnostics still flow into
-    /// the layer until that moves to the plugin). The lsp PLUGIN's own responses
-    /// are serviced by notifyPollIfReady above. A no-op with no server attached.
-    pub fn pumpLsp(self: *Editor) void {
-        if (self.buffers.active().frontend) |fe| {
-            const at: *app_providers.Attach = @ptrCast(@alignCast(fe));
-            if (at.lsp) |l| _ = l.tick(self.ctx) catch {};
         }
     }
 
