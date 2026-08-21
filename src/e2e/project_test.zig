@@ -214,6 +214,54 @@ test "e2e/spine: write a file, init a repo, stage and commit — all through wef
 // files, searches across them, and runs the code. Drives the project-nav/build
 // tools (grep=rg, run=node) through their real commands; verifies FILE content
 // on disk and TOOL output on the rendered surface; screenshots each step.
+test "e2e/grep: Return on a result jumps to that file at that line" {
+    const gpa = t.allocator;
+    var proj: Project = undefined;
+    try proj.init(gpa);
+    defer proj.deinit();
+
+    var ed: Editor = undefined;
+    try Editor.init(gpa, &ed);
+    defer ed.deinit();
+    try loadWebIde(&ed);
+
+    // Put the files on disk WITHOUT opening them in weft, so visiting a result
+    // is a fresh open (lands in the editor's normal mode). (A separate quirk —
+    // revisiting an ALREADY-open buffer restores its remembered base mode, which
+    // baseMode currently walks past `normal` to `default`; that's the mode-leak
+    // class, out of scope here.)
+    {
+        const r1 = try proj.oracle("printf 'const a = 1;\\nconst target = 42;\\nconst b = 2;\\n' > app.js");
+        gpa.free(r1);
+        const r2 = try proj.oracle("printf 'const c = 3;\\n' > other.js");
+        gpa.free(r2);
+    }
+
+    // Search for a token that lives on exactly one line of one file, so the
+    // result list has a single unambiguous entry.
+    ed.runStr("grep", "target");
+    try t.expect(drainToolContains(&ed, "*grep*", "app.js:2:"));
+    try t.expectEqualStrings("grep", ed.mode()); // the results list is its own mode
+
+    // Return on that result jumps INTO app.js. Deleting the current line then
+    // proves we landed on line 2 (the match), not the top of the file — grep
+    // results you can actually navigate. (k first: pin the cursor to the one
+    // result line regardless of where the async fill left it.)
+    ed.press("k", "");
+    ed.press("k", "");
+    ed.press("Return", "");
+    try t.expectEqualStrings("normal", ed.mode()); // we're editing the file now
+    ed.chord("d d");
+    ed.run("save");
+    ed.waitSave();
+
+    const disk = try core.file.readAlloc(gpa, "app.js");
+    defer gpa.free(disk);
+    try t.expect(std.mem.indexOf(u8, disk, "target") == null); // the matched line is gone
+    try t.expect(std.mem.indexOf(u8, disk, "const a = 1;") != null); // neighbors intact
+    try t.expect(std.mem.indexOf(u8, disk, "const b = 2;") != null);
+}
+
 test "e2e/web: author js + html, grep across them, run it with node" {
     const gpa = t.allocator;
     var proj: Project = undefined;

@@ -21,6 +21,7 @@ const Cmd = struct { name: []const u8, handler: *const fn () void };
 const cmds = [_]Cmd{
     .{ .name = "grep", .handler = grep },
     .{ .name = "grep-word", .handler = grepWord },
+    .{ .name = "grep-visit", .handler = grepVisit },
 };
 
 export fn describe() void {
@@ -30,6 +31,18 @@ export fn describe() void {
 }
 export fn init() void {
     for (cmds) |c| _ = weft.register(c.name);
+    // `*grep*` is a results list you navigate: Return visits the `path:line`
+    // under the cursor, j/k walk the matches, q goes back. Fallback to `normal`
+    // (not a LOCKED mode) — like dired — so visiting a result leaves cleanly into
+    // the file's normal mode (a locked mode refuses to switch out; see
+    // Keymap.mayLeaveLocked).
+    weft.setFallback("grep", "normal");
+    weft.bindKey("grep", "Return", "grep-visit");
+    weft.bindKey("grep", "j", "cursor-down");
+    weft.bindKey("grep", "k", "cursor-up");
+    weft.bindKey("grep", "Down", "cursor-down");
+    weft.bindKey("grep", "Up", "cursor-up");
+    weft.bindKey("grep", "q", "buffer-back");
 }
 export fn on_command(id: u32) void {
     if (id < cmds.len) cmds[id].handler();
@@ -55,7 +68,52 @@ fn runGrep(pattern: []const u8) void {
         .{pattern},
     ) catch return;
     weft.runStr("buffer-create", "*grep*"); // creates + focuses an empty scratch
+    weft.setMode("grep"); // navigable results list (Return visits, j/k walk)
     weft.procToBuffer(cmd, "*grep*");
+}
+
+/// Return in `*grep*`: open the file at the `path:line` under the cursor. rg
+/// emits `path:line:content`; we reuse that shape (the same prefix on_fill
+/// colors as a location) to navigate — grep results you can actually jump to.
+var path_buf: [1024]u8 = undefined;
+fn grepVisit() void {
+    const l = weft.lineAt(weft.cursor());
+    const text = weft.slice(l.start, l.end); // borrows the read scratch
+    const c1 = std.mem.indexOfScalar(u8, text, ':') orelse return;
+    var j = c1 + 1;
+    const ds = j;
+    while (j < text.len and text[j] >= '0' and text[j] <= '9') j += 1;
+    if (j == ds) return; // no line number → not a result line
+    // Parse the line number and copy the path OUT of the scratch before opening
+    // (open reuses the read scratch, which would clobber `text`).
+    var line_no: usize = 0;
+    for (text[ds..j]) |d| line_no = line_no * 10 + (d - '0');
+    const path = text[0..c1];
+    const pn = @min(path.len, path_buf.len);
+    @memcpy(path_buf[0..pn], path[0..pn]);
+    weft.runStr("open", path_buf[0..pn]);
+    weft.jump(lineStartOffset(line_no));
+}
+
+/// Byte offset of the start of 1-based line `n` in the active buffer (clamped to
+/// EOF), scanning in scratch-sized chunks so a long file still resolves.
+fn lineStartOffset(n: usize) usize {
+    if (n <= 1) return 0;
+    var line: usize = 1;
+    var pos: usize = 0;
+    const total = weft.byteLen();
+    while (pos < total) {
+        const s = weft.slice(pos, total);
+        if (s.len == 0) break;
+        for (s, 0..) |ch, k| {
+            if (ch == '\n') {
+                line += 1;
+                if (line == n) return pos + k + 1;
+            }
+        }
+        pos += s.len;
+    }
+    return pos;
 }
 
 /// Search for the pattern passed as arg 0; a no-op when none was given.

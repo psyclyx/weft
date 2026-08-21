@@ -541,6 +541,7 @@ pub fn loadEmacs(ed: *Editor) !void {
     try ed.load("motions", guest.motions);
     try ed.load("operators", guest.operators);
     try ed.load("emacs", guest.emacs);
+    try setResting(ed); // emacs init set "emacs"
 }
 
 /// The base editing set under a HELIX keymap (selection-first modal editing).
@@ -550,6 +551,7 @@ pub fn loadHelix(ed: *Editor) !void {
     try ed.load("textobjects", guest.textobjects);
     try ed.load("operators", guest.operators);
     try ed.load("helix", guest.helix);
+    try setResting(ed); // helix init set "helix-normal"
 }
 
 /// A standard vim editing set (synchronous plugins only — no subprocess).
@@ -562,6 +564,14 @@ pub fn loadVim(ed: *Editor) !void {
     try ed.load("indent", guest.indent);
     try ed.load("autopair", guest.autopair);
     try ed.load("vim", guest.vim);
+    try setResting(ed); // vim init set "normal"; make it the fresh-buffer mode
+}
+
+/// Mirror main.zig: after the editor guest has set the base editing mode, capture
+/// it as `default_mode` so a file opened fresh (e.g. from *grep*/dired) lands in
+/// that mode, not stuck in the tool buffer's mode or an empty mode.
+fn setResting(ed: *Editor) !void {
+    try ed.buffers.setDefaultMode(ed.gpa, ed.keymap.currentMode());
 }
 
 /// The vim set plus the buffer/language/notes/git tools — a fuller "IDE"
