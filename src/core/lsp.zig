@@ -453,10 +453,12 @@ pub const Lsp = struct {
     fn registerProviders(self: *Lsp) !void {
         const caps = self.caps_reg orelse return;
         if (self.providers_registered) return;
+        // Only COMPLETION now — hover/definition/references/symbols + diagnostics
+        // moved to the `lsp` PLUGIN. This client is a completion-only provider
+        // until completion moves too (needs an async completion-provider path;
+        // see [[lsp-plugin-migration]]), at which point it retires entirely.
         const gated = [_]struct { can: bool, cap: []const u8 }{
             .{ .can = self.server_can.completion, .cap = "edit/completion" },
-            .{ .can = self.server_can.definition, .cap = "edit/definition" },
-            .{ .can = self.server_can.hover, .cap = "edit/hover" },
         };
         for (gated) |g| {
             if (!g.can) continue;

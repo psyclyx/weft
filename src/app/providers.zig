@@ -210,8 +210,8 @@ pub fn attachProviders(deps: *AttachDeps, buf: *core.Buffers.Buffer) !void {
                     break :blk null;
                 };
                 if (at.lsp) |l| {
-                    const diag_layer = try deps.caps.registerFeed(doc, "edit/diagnostics", "diagnostics", .host, "lsp/server");
-                    l.attachDiagnostics(diag_layer);
+                    // Diagnostics moved to the `lsp` plugin — the core client no
+                    // longer publishes a feed layer; it's completion-only now.
                     l.attachCaps(deps.caps, entry.extSlice());
                 }
             }
