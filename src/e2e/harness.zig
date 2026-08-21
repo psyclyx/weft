@@ -952,6 +952,20 @@ pub fn hoverText(ed: *Editor) []const u8 {
     return ed.session.hover_ui.text.items;
 }
 
+/// Settle until the active buffer's `diagnostics` layer has at least one span
+/// (the language server published), or a budget elapses. The layer's span count
+/// is the same rendered state the gutter/underlines draw from.
+pub fn drainDiagnostics(ed: *Editor) bool {
+    var rounds: usize = 0;
+    while (rounds < 600) : (rounds += 1) {
+        ed.settle(3);
+        if (ed.session.caps.layers.find(ed.ctx.document(), "diagnostics")) |l| {
+            if (l.spanCount() > 0) return true;
+        }
+    }
+    return false;
+}
+
 pub fn drainToolContains(ed: *Editor, name: []const u8, needle: []const u8) bool {
     const deadline = core.task.nowNs() + 10 * std.time.ns_per_s;
     while (core.task.nowNs() < deadline) {

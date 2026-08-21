@@ -706,6 +706,39 @@ test "lsp: real zls — hover shows a signature, goto-definition jumps to it" {
     try t.expect(std.mem.indexOf(u8, disk, "const r = add(2, 3)") != null); // the call remains
 }
 
+test "lsp: real zls diagnostics — a bad file reports an error we can jump to" {
+    const gpa = t.allocator;
+    var app: App = undefined;
+    try app.init(gpa);
+    defer app.deinit();
+    const ed = &app.ed;
+
+    if (!h.toolAvailable(gpa, "zls")) return error.SkipZigTest;
+
+    // A file with a syntax error — zls publishes a diagnostic for it.
+    {
+        const out = try app.proj.oracle(
+            \\cat > bad.zig <<'EOF'
+            \\pub fn main() void {
+            \\    const x: i32 = ;
+            \\    _ = x;
+            \\}
+            \\EOF
+        );
+        gpa.free(out);
+    }
+    ed.runStr("open", "bad.zig");
+
+    // The server reports diagnostics (rendered as underlines/gutter). Then a
+    // vim user's `]d` jumps to the next one and echoes it — proof the diagnostic
+    // is both received and navigable.
+    try t.expect(h.drainDiagnostics(ed));
+    ed.run("next-diagnostic");
+    const msg = ed.echoText();
+    try t.expect(std.mem.indexOf(u8, msg, "no diagnostics") == null);
+    try t.expect(std.mem.indexOf(u8, msg, ":") != null); // "<severity>: <message>"
+}
+
 test "debug: a real DAP session — launch, hit a breakpoint, see the stack, continue" {
     const gpa = t.allocator;
     var app: App = undefined;

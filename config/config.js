@@ -149,6 +149,8 @@ weft.bind("normal", "SPC c f", "format"); // the format action (see above)
 weft.bind("normal", "SPC c d", "goto-definition");
 weft.bind("normal", "SPC c h", "hover");
 weft.bind("normal", "SPC c s", "symbols");
+weft.bind("normal", "] d", "next-diagnostic"); // vim-style diagnostic navigation
+weft.bind("normal", "[ d", "prev-diagnostic");
 weft.bind("normal", "SPC c e", "ts-expand-selection");
 weft.bind("normal", "SPC c n", "ts-select-node");
 weft.bind("normal", "SPC c b", "make-build");

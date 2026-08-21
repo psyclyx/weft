@@ -573,7 +573,7 @@ pub fn selectedRange(self: *const Editor) ?Range {
 // Every motion is an undo barrier: typing after moving starts a new
 // undo unit (the vim-flavored grouping).
 
-fn moveTo(self: *Editor, offset: usize) void {
+pub fn moveTo(self: *Editor, offset: usize) void {
     self.doc.anchors.set(self.cursor, .{ .offset = offset, .bias = .right });
     self.history.barrier();
 }
