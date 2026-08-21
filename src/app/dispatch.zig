@@ -278,6 +278,23 @@ pub fn repeatChangeHandler(ctx: *core.command.Context, data: ?*anyopaque, args: 
     return .nil;
 }
 
+/// Is `spec` a bare modifier keypress (its base keysym, after any modifier
+/// prefixes, is itself a modifier)? Those carry no chord character.
+fn isBareModifier(spec: []const u8) bool {
+    var base = spec;
+    while (base.len >= 2 and base[1] == '-' and (base[0] == 'C' or base[0] == 'M' or base[0] == 'S')) {
+        base = base[2..];
+    }
+    const mods = [_][]const u8{
+        "Shift_L",  "Shift_R",     "Control_L",        "Control_R",   "Alt_L",
+        "Alt_R",    "Meta_L",      "Meta_R",           "Super_L",     "Super_R",
+        "Hyper_L",  "Hyper_R",     "ISO_Level3_Shift", "Mode_switch", "Caps_Lock",
+        "Num_Lock", "Scroll_Lock",
+    };
+    for (mods) |m| if (std.mem.eql(u8, base, m)) return true;
+    return false;
+}
+
 pub fn dispatchKey(ctx: *core.command.Context, ev: wayland.KeyEvent) !void {
     // Translate the platform key event to a canonical keyspec (+ the printable
     // text it would insert), then hand off to the backend-independent
@@ -312,6 +329,15 @@ pub fn dispatchKey(ctx: *core.command.Context, ev: wayland.KeyEvent) !void {
 pub fn dispatchSpec(ctx: *core.command.Context, spec: []const u8, text: []const u8) !void {
     ctx.user_initiated = true;
     defer ctx.user_initiated = false;
+
+    // A bare modifier press (Shift_L, Control_R, …) is NOT a key — it's the
+    // state that shapes the next real key. It must never reach `feed`, or it
+    // dead-ends a pending chord: `SPC :` needs Shift to make the colon, and that
+    // intervening Shift event would reset the `space` prefix, so `:` then fires
+    // vim-ex instead of the palette. (Same for any leader key with a shifted or
+    // uppercase continuation — `g R`, `SPC C`, …) The compositor emits these as
+    // real key events; swallow them here, the one shared dispatch point.
+    if (isBareModifier(spec)) return;
 
     // Dot-repeat: record this keystroke (unless we ARE a replay), and decide at
     // the end of dispatch whether the sequence so far was a repeatable change.

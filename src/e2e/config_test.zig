@@ -94,4 +94,15 @@ test "e2e/config: the sample config boots; SPC g i is discoverable via which-key
     try t.expect(whichKeyShows(&ed, "git-status"));
     ed.press("Escape", ""); // abandon the chord; nothing ran
     try t.expectEqualStrings("", ed.keymap.pending);
+
+    // SPC : must open the command PALETTE (pick-commands), not the ex line.
+    // Typing `:` needs Shift, and a real keyboard sends that Shift_L press as its
+    // own event BETWEEN space and colon — it must not dead-end the chord.
+    ed.press("SPC", "");
+    try t.expectEqualStrings("space", ed.keymap.pending);
+    ed.press("Shift_L", ""); // the modifier for `:` — a no-op for the chord
+    try t.expectEqualStrings("space", ed.keymap.pending); // still pending, not reset
+    ed.press(":", "");
+    try t.expectEqualStrings("", ed.keymap.pending); // the chord resolved + ran
+    try t.expect(ed.pick.active); // the palette (a pick), not the ex prompt
 }
