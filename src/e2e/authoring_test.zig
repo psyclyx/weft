@@ -766,6 +766,32 @@ test "lsp: completion via the lsp plugin — async caps provider commits real zl
     try t.expect(h.drainLspCompletion(ed, off, "answ"));
 }
 
+test "complete: the caret popup narrows as you type" {
+    const gpa = t.allocator;
+    var app: App = undefined;
+    try app.init(gpa);
+    defer app.deinit();
+    const ed = &app.ed;
+
+    // Buffer-word candidates sharing the prefix `al`; the cursor sits after a
+    // trailing `al`, which is the completion prefix.
+    const core_ed = &ed.buffers.active().editor;
+    try core_ed.insertText(gpa, "alphabet alpine beta al");
+    ed.run("complete");
+    try t.expect(ed.pick.active); // the popup opened (in "pick" mode)
+    const before = ed.pick.filtered.items.len;
+    try t.expect(before >= 2); // alphabet, alpine
+
+    // Typing narrows via the pick query: only `alpine` contains an `i`.
+    ed.press("i", "i");
+    try t.expect(ed.pick.filtered.items.len < before);
+    var has_alpine = false;
+    for (ed.pick.filtered.items) |idx| {
+        if (std.mem.indexOf(u8, ed.pick.items.items[idx], "alpine") != null) has_alpine = true;
+    }
+    try t.expect(has_alpine);
+}
+
 test "lsp: didChange — an edit after open syncs, so completion sees new symbols — real zls" {
     const gpa = t.allocator;
     var app: App = undefined;
