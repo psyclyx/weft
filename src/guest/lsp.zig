@@ -20,7 +20,7 @@ var ready: bool = false; // initialize answered + initialized/didOpen sent
 var opened: bool = false; // didOpen sent for the current document
 
 // The user request awaiting the server (one in flight).
-const Want = enum { none, hover, definition, references, symbols };
+const Want = enum { none, hover, definition, references, symbols, format };
 var want: Want = .none;
 var want_off: usize = 0;
 var want_id: i64 = 0;
@@ -55,6 +55,7 @@ const cmds = [_]Cmd{
     .{ .name = "symbols", .handler = cmdSymbols },
     .{ .name = "next-diagnostic", .handler = cmdNextDiag },
     .{ .name = "prev-diagnostic", .handler = cmdPrevDiag },
+    .{ .name = "lsp-format", .handler = cmdFormat },
 };
 
 export fn describe() void {
@@ -112,6 +113,9 @@ fn cmdNextDiag() void {
 }
 fn cmdPrevDiag() void {
     gotoDiag(false);
+}
+fn cmdFormat() void {
+    fire(.format);
 }
 
 /// Jump to the next/previous stored diagnostic from the cursor (wrapping) and
@@ -182,6 +186,10 @@ fn sendWant() void {
             const params = std.fmt.bufPrint(&parambuf, "{{\"textDocument\":{{\"uri\":\"{s}\"}}}}", .{uri_buf[0..uri_len]}) catch return;
             want_id = conn.request("textDocument/documentSymbol", params);
         },
+        .format => {
+            const params = std.fmt.bufPrint(&parambuf, "{{\"textDocument\":{{\"uri\":\"{s}\"}},\"options\":{{\"tabSize\":4,\"insertSpaces\":true}}}}", .{uri_buf[0..uri_len]}) catch return;
+            want_id = conn.request("textDocument/formatting", params);
+        },
     }
 }
 
@@ -246,6 +254,7 @@ fn dispatch(msg: rpc.Value) void {
                 .definition => presentDefinition(result),
                 .references => presentLocations(result, "reference"),
                 .symbols => presentSymbols(result),
+                .format => applyEdits(result),
                 .none => {},
             }
             want = .none;
@@ -362,6 +371,39 @@ fn addSymbol(item: rpc.Value) void {
     };
 }
 
+/// Apply a server's TextEdit[] (formatting; the same shape a rename/code-action
+/// WorkspaceEdit carries per file). Apply BOTTOM-UP so earlier ranges' offsets
+/// stay valid as we edit. The gated edit door authors as this plugin's peer.
+fn applyEdits(result: rpc.Value) void {
+    if (result != .array or result.array.items.len == 0) {
+        weft.echo("lsp: nothing to format");
+        return;
+    }
+    const edits = result.array.items;
+    var i = edits.len;
+    while (i > 0) {
+        i -= 1;
+        const e = edits[i];
+        if (e != .object) continue;
+        const rng = e.object.get("range") orelse continue;
+        if (rng != .object) continue;
+        const s = pointOf(rng.object.get("start")) orelse continue;
+        const en = pointOf(rng.object.get("end")) orelse continue;
+        const newText = if (e.object.get("newText")) |n| (if (n == .string) n.string else "") else "";
+        weft.edit(.{ .start = offsetOf(s.line, s.col), .end = offsetOf(en.line, en.col) }, newText);
+    }
+    weft.echo("lsp: formatted");
+}
+
+/// A `{line,character}` position value → editor coordinates.
+fn pointOf(v: ?rpc.Value) ?Pos {
+    const o = v orelse return null;
+    if (o != .object) return null;
+    const line = asInt(o.object.get("line") orelse return null) orelse return null;
+    const col = asInt(o.object.get("character") orelse return null) orelse return null;
+    return .{ .line = @intCast(@max(line, 0)), .col = @intCast(@max(col, 0)) };
+}
+
 // ── LSP value helpers ────────────────────────────────────────────────
 const Loc = struct { uri: []const u8, line: usize, col: usize };
 
@@ -385,11 +427,7 @@ fn locationOf(v: rpc.Value) ?Loc {
 
 fn posInRange(rng: rpc.Value) ?Pos {
     if (rng != .object) return null;
-    const start = rng.object.get("start") orelse return null;
-    if (start != .object) return null;
-    const line = asInt(start.object.get("line") orelse return null) orelse return null;
-    const col = asInt(start.object.get("character") orelse return null) orelse return null;
-    return .{ .line = @intCast(@max(line, 0)), .col = @intCast(@max(col, 0)) };
+    return pointOf(rng.object.get("start"));
 }
 
 fn sameUri(uri: []const u8) bool {

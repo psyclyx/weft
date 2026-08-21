@@ -738,6 +738,40 @@ test "lsp: real zls diagnostics — a bad file reports an error we can jump to" 
     try t.expect(h.drainEcho(ed, "next-diagnostic", "error"));
 }
 
+test "lsp: format via the lsp plugin applies the server's edits — real zls" {
+    const gpa = t.allocator;
+    var app: App = undefined;
+    try app.init(gpa);
+    defer app.deinit();
+    const ed = &app.ed;
+
+    if (!h.toolAvailable(gpa, "zls")) return error.SkipZigTest;
+
+    // A badly-spaced file zls will reformat.
+    {
+        const out = try app.proj.oracle(
+            \\cat > f.zig <<'EOF'
+            \\pub fn main()void{
+            \\const x=1;
+            \\_=x;
+            \\}
+            \\EOF
+        );
+        gpa.free(out);
+    }
+    ed.runStr("open", "f.zig");
+
+    // Format through the plugin: request → TextEdit[] → applied via the edit door.
+    try t.expect(h.drainEcho(ed, "lsp-format", "formatted"));
+    ed.run("save");
+    ed.waitSave();
+
+    const disk = try core.file.readAlloc(gpa, "f.zig");
+    defer gpa.free(disk);
+    try t.expect(std.mem.indexOf(u8, disk, "pub fn main() void {") != null); // spaced
+    try t.expect(std.mem.indexOf(u8, disk, "    const x = 1;") != null); // indented
+}
+
 test "lsp: references + symbols via the lsp plugin — real zls" {
     const gpa = t.allocator;
     var app: App = undefined;
