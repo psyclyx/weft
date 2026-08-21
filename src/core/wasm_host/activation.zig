@@ -17,6 +17,20 @@ pub fn notifyActivate(p: *WasmPlugin, path: []const u8) void {
     p.instance.callVoid("on_activate", &.{}) catch {}; // MissingExport → skip
 }
 
+/// Service a plugin's async proc I/O — but only when there's something to do.
+/// A plugin "registers" interest by opening a raw proc stream (`wl_proc_spawn`);
+/// the host calls its `on_poll` export ONLY when one of those streams has bytes
+/// pending. So idle plugins (and every plugin without a stream) cost nothing —
+/// this is readiness-driven, not a blind per-frame poll. Returns whether it ran.
+pub fn notifyPollIfReady(p: *WasmPlugin) bool {
+    const ready = for (p.proc_streams.items) |maybe| {
+        if (maybe) |s| if (s.pending() > 0) break true;
+    } else false;
+    if (!ready) return false;
+    p.instance.callVoid("on_poll", &.{}) catch {}; // MissingExport → skip
+    return true;
+}
+
 pub fn hActivatePath(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32, results: []i32) void {
     const p: *WasmPlugin = @ptrCast(@alignCast(data.?));
     results[0] = @intCast(caller.writeMemory(@intCast(args[0]), @intCast(args[1]), p.cur_activate_path) catch 0);

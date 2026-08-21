@@ -40,6 +40,7 @@ const proc_host = @import("wasm_host/proc.zig");
 
 const activation = @import("wasm_host/activation.zig");
 pub const notifyActivate = activation.notifyActivate;
+pub const notifyPollIfReady = activation.notifyPollIfReady;
 
 const sessions = @import("wasm_host/sessions.zig");
 pub const drainReplSessions = sessions.drainReplSessions;

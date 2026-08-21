@@ -299,7 +299,10 @@ pub const Editor = struct {
         var i: usize = 0;
         while (i < rounds) : (i += 1) {
             _ = self.loop.tick();
-            for (self.plugins.items) |p| _ = core.wasm_host.drainReplSessions(p);
+            for (self.plugins.items) |p| {
+                _ = core.wasm_host.drainReplSessions(p);
+                _ = core.wasm_host.notifyPollIfReady(p); // service raw-proc plugins (lsp)
+            }
             for (self.js_plugins.items) |jp| _ = jp.tick(); // reactor: drains proc output → onOutput
             self.pumpLsp(); // language server responses → capability UIs (hover/def/sym)
             napUs(2000);

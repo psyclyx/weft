@@ -210,6 +210,8 @@ pub fn tickAsync(
     // Stream any interactive REPL output into its comint buffer.
     for (fx.plugins.items) |pl| {
         if (core.wasm_host.drainReplSessions(pl)) dirty = true;
+        // Service raw-proc plugins (the lsp client) when their stream has bytes.
+        if (core.wasm_host.notifyPollIfReady(pl)) dirty = true;
     }
     // Fire the activation event when the focused buffer's path changes, so
     // language-aware plugins (`modes`) can attach keymaps/facts.
