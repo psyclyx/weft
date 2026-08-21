@@ -145,11 +145,11 @@ pub const PluginHost = struct {
 
     /// A bare name ("vim") resolves to `<dir>/vim.wasm` (or `<dir>/acp.js` for a
     /// `.js` name); anything with a path separator or a `.wasm`/`.js` suffix is
-    /// taken literally (explicit --plugin paths). Writes into `buf`.
+    /// taken literally (explicit --plugin paths) — `core.manifest.pluginTrust`'s
+    /// path-form test, called directly (not a parallel copy) so a plugin can
+    /// never resolve differently than it was trust-classified. Writes into `buf`.
     fn resolve(self: *PluginHost, buf: []u8, name: []const u8) ?[]const u8 {
-        if (std.mem.indexOfScalar(u8, name, '/') != null or
-            std.mem.endsWith(u8, name, ".wasm") or std.mem.endsWith(u8, name, ".js"))
-            return name;
+        if (core.manifest.pluginTrust(name) == .path_form) return name;
         return std.fmt.bufPrint(buf, "{s}/{s}.wasm", .{ self.dir, name }) catch null;
     }
 
@@ -165,7 +165,7 @@ pub const PluginHost = struct {
             return;
         };
         defer self.gpa.free(bytes);
-        const p = core.wasm_abi.loadPlugin(self.engine, self.ctx, std.fs.path.stem(name), bytes, self.opts) catch |e| {
+        const p = core.wasm_abi.loadPlugin(self.engine, self.ctx, core.manifest.pluginNamespace(name), bytes, self.opts) catch |e| {
             std.log.warn("plugin: {s} failed to load: {t}", .{ path, e });
             return;
         };
@@ -189,7 +189,7 @@ pub const PluginHost = struct {
             std.log.warn("plugin: {s} needs a task pool (agent subprocesses)", .{path});
             return;
         };
-        const p = core.quickjs.JsPlugin.load(self.gpa, self.engine, self.ctx, pool, core.wasm_host.hostEnviron(), std.fs.path.stem(std.fs.path.basename(name)), self.opts.config, src) catch |e| {
+        const p = core.quickjs.JsPlugin.load(self.gpa, self.engine, self.ctx, pool, core.wasm_host.hostEnviron(), core.manifest.pluginNamespace(name), self.opts.config, src) catch |e| {
             std.log.warn("plugin: {s} failed to load: {t}", .{ path, e });
             return;
         };

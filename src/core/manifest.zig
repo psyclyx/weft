@@ -96,8 +96,8 @@ pub const LogDecl = struct { message: []u8 };
 /// literally names a `.wasm`/`.js` file) is OUTSIDE the trust root: not
 /// curated, its grants unverified. Behavior is unchanged today (both load);
 /// this function exists so W4 has exactly one place to hang an approval
-/// prompt on the path-form branch. Mirrors `config_load.PluginHost.resolve`'s
-/// literal-vs-bare test — the two must agree, or a plugin could resolve
+/// prompt on the path-form branch. `config_load.zig`'s `PluginHost.resolve`
+/// calls this directly (not a parallel test) — a plugin must never resolve
 /// differently than it was trust-classified.
 pub const PluginTrust = enum { catalog, path_form };
 pub fn pluginTrust(name: []const u8) PluginTrust {
@@ -105,6 +105,23 @@ pub fn pluginTrust(name: []const u8) PluginTrust {
         std.mem.endsWith(u8, name, ".wasm") or std.mem.endsWith(u8, name, ".js"))
         return .path_form;
     return .catalog;
+}
+
+/// The identity a loaded plugin registers itself, and its config values,
+/// under — `weft.config`/`weft.set` key against THIS, never the raw
+/// declared name (`config_load.zig`'s `PluginHost.load`/`loadJs` pass this
+/// same value as `wasm_abi.loadPlugin`'s/`quickjs.JsPlugin.load`'s `name`
+/// param). `std.fs.path.stem` already strips both a leading directory
+/// (`stem` calls `basename` internally) and a trailing extension, so a bare
+/// catalog name ("git"), a bare `.js`/`.wasm` file ("dap.js"), and an
+/// explicit path ("/x/y/acp.js") all reduce to the same short identity
+/// ("git", "dap", "acp"). `Manifest.populateKnownPlugins` must PREDICT this
+/// identity before the plugin actually loads (so a `weft.set("acp", ...)`
+/// that precedes `weft.plugin("acp.js")` in authored order still resolves
+/// against a known owner — R1, see that function's doc) — the two
+/// derivations must never drift, hence one function both sides call.
+pub fn pluginNamespace(name: []const u8) []const u8 {
+    return std.fs.path.stem(name);
 }
 
 /// `Manifest`'s `Tier` (`.config`/`.imported`) mapped onto `Keymap.zig`'s
@@ -328,19 +345,18 @@ pub const Manifest = struct {
         for (self.imports.items) |imp| try imp.populateKnownPlugins(gpa, out);
         for (self.plugins.items) |d| {
             try out.put(gpa, d.name, {});
-            // A path-form / `.js` plugin's VALUE-STORE identity is its STEM
-            // (`config_load.zig`'s `PluginHost.load`/`loadJs`: a `.wasm` is
-            // registered under `std.fs.path.stem(name)`, a `.js` under
-            // `std.fs.path.stem(std.fs.path.basename(name))`) — NOT the raw
-            // declared name. `weft.plugin("acp.js")` reads its config as
-            // plugin "acp" (`weft.config(key)` keys on `JsPlugin.name`,
-            // which IS the stem). Without this, `weft.set("acp", "cmd", …)`
-            // — the documented ACP setup — silently dropped as an unknown
-            // owner (R1: a real pre-M3-working config broken by the
-            // ownership check). The stem is a substring of `d.name`'s own
-            // backing memory (no allocation), valid for the same lifetime.
-            const stem = std.fs.path.stem(std.fs.path.basename(d.name));
-            if (!std.mem.eql(u8, stem, d.name)) try out.put(gpa, stem, {});
+            // A path-form / `.js` plugin's VALUE-STORE identity is its
+            // `pluginNamespace` — NOT the raw declared name.
+            // `weft.plugin("acp.js")` reads its config as plugin "acp"
+            // (`weft.config(key)` keys on `JsPlugin.name`, which IS
+            // `pluginNamespace`'s result). Without this, `weft.set("acp",
+            // "cmd", …)` — the documented ACP setup — silently dropped as an
+            // unknown owner (R1: a real pre-M3-working config broken by the
+            // ownership check). The namespace is a substring of `d.name`'s
+            // own backing memory (no allocation), valid for the same
+            // lifetime.
+            const ns = pluginNamespace(d.name);
+            if (!std.mem.eql(u8, ns, d.name)) try out.put(gpa, ns, {});
         }
     }
 
@@ -607,6 +623,20 @@ test "manifest: pluginTrust classifies bare catalog names vs path-form" {
     try t.expectEqual(PluginTrust.path_form, pluginTrust("dap.js"));
     try t.expectEqual(PluginTrust.path_form, pluginTrust("./local/x.wasm"));
     try t.expectEqual(PluginTrust.path_form, pluginTrust("/abs/x.wasm"));
+}
+
+test "manifest: pluginNamespace + pluginTrust agree across name forms — pinned against config_load.zig's callers" {
+    const Case = struct { name: []const u8, namespace: []const u8, trust: PluginTrust };
+    const cases = [_]Case{
+        .{ .name = "git", .namespace = "git", .trust = .catalog },
+        .{ .name = "dap.js", .namespace = "dap", .trust = .path_form },
+        .{ .name = "/x/y/acp.js", .namespace = "acp", .trust = .path_form },
+        .{ .name = "foo.wasm", .namespace = "foo", .trust = .path_form },
+    };
+    for (cases) |c| {
+        try t.expectEqualStrings(c.namespace, pluginNamespace(c.name));
+        try t.expectEqual(c.trust, pluginTrust(c.name));
+    }
 }
 
 test "manifest: keymapPriorityForTier places imported strictly between plugin and config" {
