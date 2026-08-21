@@ -175,7 +175,11 @@ pub fn defineImports(linker: *wasm.Linker, p: *WasmPlugin) !void {
     // Completion provider (host↔guest data-gather).
     try d(linker, "wl_provide_completion", 0, 0, capability_host.hProvideCompletion, p);
     try d(linker, "wl_completion_prefix", 2, 1, capability_host.hCompletionPrefix, p);
-    try d(linker, "wl_push_completion", 2, 0, capability_host.hPushCompletion, p);
+    // Session-keyed deferred push: a guest completion source accretes rich items
+    // and flushes them (sync or off a later poll — async LSP), or declines.
+    try d(linker, "wl_caps_item", 11, 0, capability_host.hCapsItem, p);
+    try d(linker, "wl_caps_commit", 1, 0, capability_host.hCapsCommit, p);
+    try d(linker, "wl_caps_decline", 1, 0, capability_host.hCapsDecline, p);
     // Structural read + subbuffers.
     try d(linker, "wl_node_at", 4, 1, syntax_host.hNodeAt, p);
     // syntax.query (design §4): the tree stays host-side; captures/nodes cross.

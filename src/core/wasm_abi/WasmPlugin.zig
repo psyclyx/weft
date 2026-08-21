@@ -16,6 +16,7 @@ const register_mod = @import("../register.zig");
 const surface_mod = @import("../surface.zig");
 const async_loop = @import("../async.zig");
 const position = @import("../position.zig");
+const capability = @import("../capability.zig");
 const repl_session = @import("../repl_session.zig");
 const net_session = @import("../net_session.zig");
 const proc_stream = @import("../proc_stream.zig");
@@ -158,10 +159,15 @@ surface: surface_mod.Surface = .{},
 /// The caps provider id this plugin registered (owned), torn down on
 /// unload. Null until it calls `provideCompletion`.
 provider_id: ?[]u8 = null,
-/// Transient state for the duration of one `on_complete` call: the
-/// request's prefix, and the sink the guest's `pushCompletion` fills.
+/// The request's word prefix, exposed to the guest via `wl_completion_prefix`
+/// for the duration of one `on_complete` call (valid then; a deferred provider
+/// copies what it needs before returning).
 cur_prefix: []const u8 = &.{},
-completion_out: ?*std.ArrayList([]const u8) = null,
+/// Rich items the guest is accreting for a session via `wl_caps_item`, flushed
+/// as one batch on `wl_caps_commit`. Each item's bytes are gpa-owned here and
+/// freed after the push (which deep-copies) or on teardown.
+caps_builder: std.ArrayList(capability.CompletionItem) = .empty,
+caps_builder_session: u64 = 0,
 
 /// Stamp `[start, end)` against the current document version and hand the
 /// guest an opaque handle into `stamps`. Takes ownership of `version_owned`
@@ -178,6 +184,19 @@ pub fn pushRange(self: *WasmPlugin, version_owned: []u8, start: usize, end: usiz
 pub fn stampsClear(self: *WasmPlugin) void {
     for (self.stamps.items) |s| self.gpa.free(s.version);
     self.stamps.clearRetainingCapacity();
+}
+
+/// Drop the pending completion batch, freeing each item's owned bytes.
+pub fn capsBuilderClear(self: *WasmPlugin) void {
+    const gpa = self.gpa;
+    for (self.caps_builder.items) |it| {
+        gpa.free(it.text);
+        gpa.free(it.label);
+        gpa.free(it.detail);
+        gpa.free(it.documentation);
+    }
+    self.caps_builder.clearRetainingCapacity();
+    self.caps_builder_session = 0;
 }
 
 /// Reset the query-capture buffer, freeing each capture's name.
@@ -215,6 +234,8 @@ pub fn deinit(self: *WasmPlugin) void {
         self.ctx.caps.unregisterByIdPrefix(id);
         gpa.free(id);
     }
+    self.capsBuilderClear();
+    self.caps_builder.deinit(gpa);
     // Action providers this plugin registered (weft.provide) die with it, owned
     // by its name. The declared actions themselves persist (cheap names; another
     // plugin/config may still provide for them).

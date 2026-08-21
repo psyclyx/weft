@@ -105,7 +105,9 @@ extern "weft" fn wl_menu_binding_cmd(i: u32, out: u32, cap: u32) i32;
 extern "weft" fn wl_menu_binding_is_group(i: u32) i32;
 extern "weft" fn wl_provide_completion() void;
 extern "weft" fn wl_completion_prefix(out_ptr: u32, out_cap: u32) u32;
-extern "weft" fn wl_push_completion(ptr: u32, len: u32) void;
+extern "weft" fn wl_caps_item(session: i32, t: u32, tl: u32, l: u32, ll: u32, d: u32, dl: u32, kind: i32, doc: u32, docl: u32, rank: i32) void;
+extern "weft" fn wl_caps_commit(session: i32) void;
+extern "weft" fn wl_caps_decline(session: i32) void;
 // Structural (tree-sitter) read + subbuffers.
 extern "weft" fn wl_node_at(offset: u32, kind_out: u32, kind_cap: u32, span_out: u32) i32;
 extern "weft" fn wl_node_enclosing(start: u32, end: u32, kind_out: u32, kind_cap: u32, span_out: u32) i32;
@@ -720,24 +722,60 @@ pub fn pickChoiceIndex() ?usize {
 // ── Completion provider (the sel/completion domain) ──────────────────
 // The host→guest data-gather membrane: the plugin registers a provider in
 // `init` with `provideCompletion`, then the host calls the guest's exported
-// `on_complete` per request; inside it the guest reads the query with
-// `completionPrefix` and appends candidates with `pushCompletion`.
+// `on_complete(session)` per request. The guest OWNS that session's answer: it
+// offers items with `capsItem` and flushes them with `capsCommit`, or gives up
+// with `capsDecline`. It may answer DURING on_complete (a sync source) or LATER
+// off a poll (async — stash the `session`, commit when your data lands).
+
+/// A rich completion candidate. `text` inserts/matches; `label` is the display
+/// string (defaults to text when empty); `detail` is a right-aligned annotation
+/// (a type/signature); `documentation` feeds the info popup; `kind` is the LSP
+/// `CompletionItemKind` number (0 = unknown); `rank` orders within this source.
+pub const Completion = struct {
+    text: []const u8,
+    label: []const u8 = &.{},
+    detail: []const u8 = &.{},
+    documentation: []const u8 = &.{},
+    kind: u8 = 0,
+    rank: i32 = 0,
+};
 
 /// Register this plugin as an `edit/completion` provider (declared as the
 /// matching capability). Read-only — results race + merge-rank with everyone
-/// else's, exactly like the in-process provider.
+/// else's.
 pub fn provideCompletion() void {
     wl_provide_completion();
 }
 /// The current completion request's query prefix (valid for the duration of
-/// `on_complete`). Its own scratch — safe to hold while calling `slice`.
+/// `on_complete`). Its own scratch — safe to hold while calling `slice`. An
+/// async source must copy it before deferring.
 pub fn completionPrefix() []const u8 {
     const n = wl_completion_prefix(p(&prefix_scratch), prefix_scratch.len);
     return prefix_scratch[0..n];
 }
-/// Offer `text` as a completion candidate for the current request.
-pub fn pushCompletion(text: []const u8) void {
-    wl_push_completion(p(text.ptr), @intCast(text.len));
+/// Offer one candidate for `session` (accretes into a batch flushed by commit).
+pub fn capsItem(session: u32, it: Completion) void {
+    wl_caps_item(
+        @bitCast(session),
+        p(it.text.ptr),
+        @intCast(it.text.len),
+        p(it.label.ptr),
+        @intCast(it.label.len),
+        p(it.detail.ptr),
+        @intCast(it.detail.len),
+        @bitCast(@as(u32, it.kind)),
+        p(it.documentation.ptr),
+        @intCast(it.documentation.len),
+        it.rank,
+    );
+}
+/// Flush this source's offered items into `session` as one answer.
+pub fn capsCommit(session: u32) void {
+    wl_caps_commit(@bitCast(session));
+}
+/// Answer `session` with nothing (unsupported / no results / dead).
+pub fn capsDecline(session: u32) void {
+    wl_caps_decline(@bitCast(session));
 }
 
 // ── Activation (the buffer taking focus; valid during on_activate) ────

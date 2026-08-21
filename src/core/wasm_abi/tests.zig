@@ -551,22 +551,20 @@ test "wasm plugin: a completion provider gathers candidates across the membrane"
     try ed.insertText(gpa, "alpha alphabet beta alpha");
 
     // Fire a completion for prefix "alph": the host calls the guest's
-    // on_complete, which scans the buffer and pushes matches back. Same
-    // result the in-process complete.zig gives: {alpha, alphabet}, deduped.
+    // on_complete(session), which scans the buffer and offers each match into
+    // that session, then commits. The buffer has "alpha" twice, so the raw
+    // results carry it twice — dedup is a MERGE concern now (mergedCompletion
+    // dedups by text), not a collection-time one. The observable set is
+    // {alpha, alphabet}.
     const sid = (try env.caps.fire(.completion, &ed.doc, ed.backingPath(), .{ .text = "alph" })).?;
-    const session = env.caps.session(sid).?;
-    var found: std.ArrayList([]const u8) = .empty;
-    defer found.deinit(gpa);
-    for (session.all()) |r| {
-        if (r.payload != .completion) continue;
-        for (r.payload.completion) |item| try found.append(gpa, item.text);
-    }
-    try t.expectEqual(@as(usize, 2), found.items.len);
+    const merged = try env.caps.mergedCompletion(gpa, sid);
+    defer gpa.free(merged);
+    try t.expectEqual(@as(usize, 2), merged.len);
     var has_alpha = false;
     var has_alphabet = false;
-    for (found.items) |w| {
-        if (std.mem.eql(u8, w, "alpha")) has_alpha = true;
-        if (std.mem.eql(u8, w, "alphabet")) has_alphabet = true;
+    for (merged) |item| {
+        if (std.mem.eql(u8, item.text, "alpha")) has_alpha = true;
+        if (std.mem.eql(u8, item.text, "alphabet")) has_alphabet = true;
     }
     try t.expect(has_alpha and has_alphabet);
 }

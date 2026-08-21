@@ -129,6 +129,13 @@ pub const CompletionItem = struct {
     text: []u8,
     label: []u8 = &.{},
     detail: []u8 = &.{},
+    /// Documentation body (markdown/plain) for the info popup — resolved
+    /// lazily by richer providers; empty when none.
+    documentation: []u8 = &.{},
+    /// Semantic kind, LSP `CompletionItemKind` numbering (1=text … 25),
+    /// 0 = unknown. The UI maps this to an icon/short tag; core does not
+    /// interpret it.
+    kind: u8 = 0,
     rank: i32 = 0,
 };
 
@@ -178,6 +185,7 @@ pub const Result = struct {
                     gpa.free(it.text);
                     gpa.free(it.label);
                     gpa.free(it.detail);
+                    gpa.free(it.documentation);
                 }
                 gpa.free(items);
             },
@@ -580,6 +588,7 @@ fn dupePayload(gpa: Allocator, p: Payload) !Payload {
                     gpa.free(it.text);
                     gpa.free(it.label);
                     gpa.free(it.detail);
+                    gpa.free(it.documentation);
                 }
                 gpa.free(out);
             }
@@ -588,6 +597,8 @@ fn dupePayload(gpa: Allocator, p: Payload) !Payload {
                     .text = try gpa.dupe(u8, it.text),
                     .label = try gpa.dupe(u8, it.label),
                     .detail = try gpa.dupe(u8, it.detail),
+                    .documentation = try gpa.dupe(u8, it.documentation),
+                    .kind = it.kind,
                     .rank = it.rank,
                 };
                 n += 1;
