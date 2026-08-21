@@ -99,11 +99,14 @@ pub const CompletionUi = struct {
                 for (notes) |n| ctx.gpa.free(n);
                 ctx.gpa.free(notes);
             }
+            const infos = try ctx.gpa.alloc([]const u8, merged.len);
+            defer ctx.gpa.free(infos);
             for (merged, 0..) |it, i| {
                 labels[i] = it.text;
                 notes[i] = try annotate(ctx.gpa, it);
+                infos[i] = it.documentation; // borrowed from the session; refresh dupes
             }
-            try pick_mod.refresh(ctx.pick, ctx.gpa, labels, notes);
+            try pick_mod.refresh(ctx.pick, ctx.gpa, labels, notes, infos);
             changed = true;
         }
         if (s.done(task.nowNs())) {

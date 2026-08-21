@@ -31,6 +31,9 @@ prompt: []u8 = &.{},
 items: std.ArrayList([]u8) = .empty,
 /// Parallel to `items`: display-only docstrings ("" when none).
 docs: std.ArrayList([]u8) = .empty,
+/// Parallel to `items`: the full info body (completion documentation) shown in a
+/// side popup for the selected row ("" when none).
+infos: std.ArrayList([]u8) = .empty,
 query: std.ArrayList(u8) = .empty,
 /// Indices into `items`, filtered by `query`, rank order.
 filtered: std.ArrayList(u32) = .empty,
@@ -104,6 +107,9 @@ fn clear(self: *Pick, gpa: Allocator) void {
     for (self.docs.items) |d| gpa.free(d);
     self.docs.deinit(gpa);
     self.docs = .empty;
+    for (self.infos.items) |d| gpa.free(d);
+    self.infos.deinit(gpa);
+    self.infos = .empty;
     self.query.deinit(gpa);
     self.query = .empty;
     self.filtered.deinit(gpa);
@@ -157,6 +163,7 @@ pub fn openWith(
         const doc = try gpa.dupe(u8, e.doc);
         errdefer gpa.free(doc);
         try self.docs.append(gpa, doc);
+        try self.infos.append(gpa, try gpa.dupe(u8, "")); // static picks carry no info
     }
     try self.refilter(gpa);
     const prev = try gpa.dupe(u8, ctx.keymap.currentMode());
@@ -221,6 +228,7 @@ pub fn appendItems(
         const doc = try gpa.dupe(u8, d);
         errdefer gpa.free(doc);
         try p.docs.append(gpa, doc);
+        try p.infos.append(gpa, try gpa.dupe(u8, ""));
     }
     try p.refilter(gpa);
     if (keep_owned) |k| {
@@ -314,6 +322,15 @@ pub fn selection(self: *const Pick) ?[]const u8 {
 /// The docstring of the `i`-th filtered row.
 pub fn docOf(self: *const Pick, filtered_index: usize) []const u8 {
     return self.docs.items[self.filtered.items[filtered_index]];
+}
+
+/// The info body (documentation) of the currently-selected row, or "" — what the
+/// side info popup shows next to a completion list.
+pub fn selectedInfo(self: *const Pick) []const u8 {
+    if (self.filtered.items.len == 0 or self.selected >= self.filtered.items.len) return "";
+    const idx = self.filtered.items[self.selected];
+    if (idx >= self.infos.items.len) return "";
+    return self.infos.items[idx];
 }
 
 // ── Commands ────────────────────────────────────────────────────────
@@ -528,8 +545,9 @@ pub fn install(gpa: Allocator, commands: *command.Commands, keymap: *@import("..
 /// (race-and-refine consumers call this as results land).
 /// Replace the item set. `docs`, when non-empty, is a parallel array of
 /// display-only annotations (completion detail/kind) shown dimmed beside each
-/// item; pass `&.{}` for none. Matching/acceptance still see `items` only.
-pub fn refresh(p: *Pick, gpa: Allocator, items: []const []const u8, docs: []const []const u8) !void {
+/// item; `infos` likewise the full documentation body for the side popup. Pass
+/// `&.{}` for either. Matching/acceptance still see `items` only.
+pub fn refresh(p: *Pick, gpa: Allocator, items: []const []const u8, docs: []const []const u8, infos: []const []const u8) !void {
     if (!p.active) return;
     const keep = p.selection();
     const keep_owned = if (keep) |k| try gpa.dupe(u8, k) else null;
@@ -538,6 +556,8 @@ pub fn refresh(p: *Pick, gpa: Allocator, items: []const []const u8, docs: []cons
     p.items.clearRetainingCapacity();
     for (p.docs.items) |d| gpa.free(d);
     p.docs.clearRetainingCapacity();
+    for (p.infos.items) |d| gpa.free(d);
+    p.infos.clearRetainingCapacity();
     for (items, 0..) |it, i| {
         const owned = try gpa.dupe(u8, it);
         errdefer gpa.free(owned);
@@ -545,6 +565,7 @@ pub fn refresh(p: *Pick, gpa: Allocator, items: []const []const u8, docs: []cons
         const doc = try gpa.dupe(u8, if (i < docs.len) docs[i] else "");
         errdefer gpa.free(doc);
         try p.docs.append(gpa, doc);
+        try p.infos.append(gpa, try gpa.dupe(u8, if (i < infos.len) infos[i] else ""));
     }
     try p.refilter(gpa);
     if (keep_owned) |k| {

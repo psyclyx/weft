@@ -124,6 +124,34 @@ pub fn drawPickAtCaret(
             if (note.len > 0) try propLine(v, scratch, runs, note, note_x, row_y + v.ascent, if (selected) v.theme.background else v.theme.syn_comment);
         }
     }
+
+    // Documentation for the selected row → an info box beside the list (right,
+    // else left if it would overflow the body). Multi-line, capped.
+    const info = p.selectedInfo();
+    if (info.len > 0) {
+        var irows: usize = 0;
+        var icols: usize = 8;
+        var it = std.mem.splitScalar(u8, info, '\n');
+        while (it.next()) |line| : (irows += 1) {
+            if (irows >= Hud.max_hover_rows) break;
+            icols = @max(icols, @min(64, std.unicode.utf8CountCodepoints(line) catch line.len));
+        }
+        if (irows > 0) {
+            const iw = @as(f32, @floatFromInt(icols + 2)) * v.cell_w;
+            const ih = @as(f32, @floatFromInt(irows)) * v.line_h;
+            var ix = box_x + box_w + v.cell_w; // to the right of the list
+            if (ix + iw > body.x + body.w) ix = @max(body.x, box_x - iw - v.cell_w); // flip left
+            const iy = std.math.clamp(box_y, body.y, @max(body.y, body.y + body.h - ih));
+            try outlinedBox(scratch, rects, ix, iy, iw, ih, v.theme.selection, v.theme.accent);
+            var lit = std.mem.splitScalar(u8, info, '\n');
+            var k: usize = 0;
+            while (lit.next()) |line| : (k += 1) {
+                if (k >= irows) break;
+                const ly = iy + @as(f32, @floatFromInt(k)) * v.line_h + v.ascent;
+                try propLine(v, scratch, runs, line, ix + v.cell_w, ly, v.theme.foreground);
+            }
+        }
+    }
 }
 
 /// Draw hover text (LSP) as an outlined box anchored below the caret at
