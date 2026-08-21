@@ -650,6 +650,17 @@ pub fn chdirTo(path: []const u8) !void {
 // the SYSTEM tmp, outside any git repo — see Project.
 extern "c" fn mkdtemp(template: [*:0]u8) ?[*:0]u8;
 
+/// Whether `tool` is on PATH (probed through a shell, so it respects the same
+/// PATH the proc plugins inherit). Lets a test `return error.SkipZigTest` cleanly
+/// when an optional part of the toolchain (see src/e2e/shell.nix — zls, lldb-dap)
+/// isn't present, so the suite still passes outside that shell.
+pub fn toolAvailable(gpa: Allocator, tool: []const u8) bool {
+    const argv = [_][]const u8{ "/bin/sh", "-c", "command -v \"$0\" >/dev/null 2>&1 && printf yes", tool };
+    var res = core.proc.run(gpa, &argv, .{ .environ = parentEnviron() }) catch return false;
+    defer res.deinit(gpa);
+    return std.mem.indexOf(u8, res.stdout, "yes") != null;
+}
+
 /// Create an isolated directory under the system tmp (`$TMPDIR` or `/tmp`) and
 /// return its absolute path (caller frees). Unlike `std.testing.tmpDir` — which
 /// nests under `<cwd>/.zig-cache/tmp`, INSIDE this repo — this is a real

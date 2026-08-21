@@ -8,8 +8,10 @@
 // transcript (bufferAppend) + status chip are the weft.* membrane; the protocol
 // is plain JS. The adapter command is config data — weft.set("dap","cmd",…) —
 // never baked (NixOS-friendly). Breakpoints come from the `debug` plugin's
-// gutter markers via weft.breakpoints(program) — the lines you mark ARE where
+// gutter markers via weft.breakpoints(source) — the lines you mark ARE where
 // the session stops — falling back to weft.config("line") if none are set.
+// `source` is the file breakpoints live in; `program` is the executable to
+// launch (they differ for a compiled program, coincide for an interpreter).
 
 const BUF = "*debug*";
 const ST = { normal: 0, location: 4, emphasis: 5, muted: 6 };
@@ -37,15 +39,18 @@ function onMessage(msg) {
     if (msg.event === "initialized") {
       // The adapter is ready for configuration: send breakpoints, then done. The
       // lines come from the `debug` plugin's gutter markers (weft.breakpoints,
-      // published per file) — the visual breakpoints ARE the debug session's.
-      // Fall back to config `line` if nothing's been marked yet.
-      const program = weft.config("program") || "program";
-      const csv = weft.breakpoints(program);
+      // published per SOURCE file) — the visual breakpoints ARE the session's.
+      // Fall back to config `line` if nothing's been marked yet. `source` is the
+      // file breakpoints live in (what the debug info names); it differs from
+      // `program`, the executable to launch — for an interpreter they coincide,
+      // for a compiled program they don't. Defaults to program when unset.
+      const source = weft.config("source") || weft.config("program") || "program";
+      const csv = weft.breakpoints(source);
       const lines = csv
         ? csv.split(",").map(function (s) { return parseInt(s, 10); }).filter(function (n) { return n > 0; })
         : [parseInt(weft.config("line") || "1", 10)];
       send("setBreakpoints", {
-        source: { path: program, name: program },
+        source: { path: source, name: source },
         breakpoints: lines.map(function (l) { return { line: l }; }),
       });
       send("configurationDone", {});

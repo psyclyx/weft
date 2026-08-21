@@ -687,6 +687,63 @@ test "debug: a real DAP session — launch, hit a breakpoint, see the stack, con
     try t.expect(drainToolContains(ed, "*debug*", "terminated"));
 }
 
+test "debug: a REAL lldb-dap session — compile C, break on a line, stop, continue" {
+    const gpa = t.allocator;
+    var app: App = undefined;
+    try app.init(gpa);
+    defer app.deinit();
+    const ed = &app.ed;
+
+    // Needs the real toolchain (src/e2e/shell.nix); skip cleanly without it.
+    if (!h.toolAvailable(gpa, "lldb-dap") or !h.toolAvailable(gpa, "clang")) return error.SkipZigTest;
+
+    // A tiny C program; line 5 (the printf) is where we'll stop — a line that
+    // definitely executes and carries a clean line entry (`volatile` keeps the
+    // compiler from folding the arithmetic away even at -O0).
+    authorFile(ed, "main.c",
+        \\#include <stdio.h>
+        \\int main(void) {
+        \\  volatile int s = 0;
+        \\  s += 5;
+        \\  printf("r=%d\n", s);
+        \\  return 0;
+        \\}
+        \\
+    );
+    {
+        const out = try app.proj.oracle("clang -g -o prog main.c 2>&1");
+        defer gpa.free(out);
+        try t.expect(out.len == 0); // clean compile (diagnostics would print here)
+    }
+
+    // Point the DAP client at the real adapter. `program` is the executable to
+    // launch; `source` is the file breakpoints live in (they differ for a
+    // compiled program). Break on line 5 via the config fallback.
+    const src = try std.fmt.allocPrint(gpa, "{s}/main.c", .{app.proj.root});
+    defer gpa.free(src);
+    const prog = try std.fmt.allocPrint(gpa, "{s}/prog", .{app.proj.root});
+    defer gpa.free(prog);
+    try ed.setConfig("dap", "cmd", "lldb-dap");
+    try ed.setConfig("dap", "program", prog);
+    try ed.setConfig("dap", "source", src);
+    try ed.setConfig("dap", "line", "5");
+
+    const dap_src = try std.fmt.allocPrint(gpa, "{s}/config/plugins/dap.js", .{app.proj.prev_cwd});
+    defer gpa.free(dap_src);
+    const js = try core.file.readAlloc(gpa, dap_src);
+    defer gpa.free(js);
+    try ed.loadJs("dap", js);
+
+    // A real debugger: launch → stop at the breakpoint → report the stack line.
+    ed.run("debug-start");
+    try t.expect(drainToolContains(ed, "*debug*", "stopped"));
+    try t.expect(drainToolContains(ed, "*debug*", "main.c:5"));
+
+    // Continue → the program runs to completion.
+    ed.run("debug-continue");
+    try t.expect(drainToolContains(ed, "*debug*", "terminated"));
+}
+
 test "debug: the gutter breakpoint IS the DAP breakpoint — mark a line, stop there" {
     const gpa = t.allocator;
     var app: App = undefined;
