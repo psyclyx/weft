@@ -23,6 +23,7 @@ const core = @import("../core/core.zig");
 const cursor_config = @import("cursor_config.zig");
 const providers = @import("providers.zig");
 const setup = @import("setup.zig");
+const frame = @import("frame.zig");
 
 pub const Session = struct {
     gpa: std.mem.Allocator,
@@ -31,13 +32,25 @@ pub const Session = struct {
     buffers: core.Buffers,
     commands: core.command.Commands,
     /// System-scoped keymap TABLES — shared by every head (see
-    /// `core.Keymap`'s module doc). `head` below is the (today, singular)
-    /// per-head cursor into them; `main()`/the e2e harness construct exactly
-    /// one — W2a-2 wires more.
+    /// `core.Keymap`'s module doc). `head` below is `main()`'s ONE per-head
+    /// cursor into them; a second head (proven live by the e2e two-head
+    /// gate, `e2e/two_head_test.zig`) is a second `core.Head` + a second
+    /// `command.Context` pointed at it, borrowing these tables — `main()`
+    /// itself still drives exactly one (a second RENDERED head is a bigger,
+    /// later change — see `window_layout.zig`'s module doc for the boundary).
     keymap: core.Keymap,
     /// This session's one head's interaction state: current mode, pending
-    /// chord, pick session, echo line (north-star-plan §6 W2a-1).
+    /// chord, pick session, echo line, dot-repeat register (north-star-plan
+    /// §6 W2a).
     head: core.Head,
+    /// This head's which-key menu-overlay edge tracker (open/shown/forced/
+    /// open_ns) — app-layer state that can't live ON `core.Head` (see
+    /// `frame.MenuOverlay`'s doc), but is exactly as per-head as `head`
+    /// itself; `Session` is the nearest thing to a "per-head bundle" the app
+    /// has today, so it lives here beside it (north-star-plan §6 W2a-2). A
+    /// second head (the e2e two-head gate) pairs its own instance the same
+    /// way, alongside its own ad hoc `Head`.
+    menu_overlay: frame.MenuOverlay,
     caps: core.Caps,
     actions: core.Actions,
     quit: bool,
@@ -69,6 +82,7 @@ pub const Session = struct {
         self.commands = .empty;
         self.keymap = .empty;
         self.head = .empty;
+        self.menu_overlay = .{};
         self.caps = core.Caps.init(gpa, core.task.nowNs);
         self.actions = core.Actions.init(gpa);
         self.quit = false;

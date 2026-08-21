@@ -333,13 +333,13 @@ test "harness: renderBuilt composites panes laid out by the real window layout" 
     // Drive the REAL window layout: one vsplit → two side-by-side slots.
     var layout = try window_layout.Layout.init(gpa, 1);
     defer layout.deinit();
-    try layout.splitFocused(.vertical);
+    const focused = try layout.splitFocused(layout.root, .vertical);
 
     const w: u32 = 400;
     const h: u32 = 160;
     const frame: region.Rect = .{ .x = 0, .y = 0, .w = @floatFromInt(w), .h = @floatFromInt(h) };
     var slots: [window_layout.max_panes]window_layout.Slot = undefined;
-    const n = layout.collect(frame, &slots);
+    const n = layout.collect(focused, frame, &slots);
     try t.expectEqual(@as(usize, 2), n);
 
     const projection = snail.Mat4.ortho(0, @floatFromInt(w), @floatFromInt(h), 0, -1, 1);

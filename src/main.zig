@@ -379,8 +379,9 @@ pub fn main(init: std.process.Init) !void {
     var last_active: core.Buffers.Id = buffers.active_id;
     // Menu-overlay (on_menu) edge detection: fire at the frame boundary when the
     // active menu mode changes, so a which-key plugin re-renders exactly on
-    // enter/leave (and never nested inside another guest call).
-    var menu_overlay: frame_mod.MenuOverlay = .{};
+    // enter/leave (and never nested inside another guest call). Per-head
+    // storage: `session.menu_overlay` lives beside `session.head` (see
+    // `Session`'s doc — north-star-plan §6 W2a-2).
     // which-key idle delay (doom-style): don't pop the hint until the menu has
     // been held this long — unless which-key-now (F1) forces it. Config sets it
     // via weft.set("which_key", "delay-ms", "200") — owned by the which_key
@@ -506,7 +507,7 @@ pub fn main(init: std.process.Init) !void {
         }
 
         // ── Pointer → caret (click-to-place; drag extends a selection) ──
-        if (try dispatch.handlePointer(window, win_layout, view, editor, &win_ctx, gpa, last_frame_rect, &drag_anchor, &drag_selecting, &had_input))
+        if (try dispatch.handlePointer(window, win_layout, &session.head, view, editor, &win_ctx, gpa, last_frame_rect, &drag_anchor, &drag_selecting, &had_input))
             view_dirty = true;
 
         // Caret blink: any input shows a solid caret and restarts the
@@ -522,7 +523,7 @@ pub fn main(init: std.process.Init) !void {
         }
 
         // ── Async housekeeping tick (backing/LSP/nav/pick/plugins/activate/menu) ──
-        if (try frame_mod.tickAsync(&fx, abuf, &session.cmd_ctx, &plugin_loop, &next_backing_poll_ns, &last_activate_path, &last_activate_len, &menu_overlay, &which_key_now, which_key_delay_ns, frame_start))
+        if (try frame_mod.tickAsync(&fx, abuf, &session.cmd_ctx, &plugin_loop, &next_backing_poll_ns, &last_activate_path, &last_activate_len, &session.menu_overlay, &which_key_now, which_key_delay_ns, frame_start))
             view_dirty = true;
         // JS plugins: fire each resident quickjs instance's proc-stream output
         // handler for streams with new bytes (agent transcripts stream in here).
@@ -553,7 +554,7 @@ pub fn main(init: std.process.Init) !void {
             .frame_start = frame_start,
             .fb = fb,
             .blink_on = blink_on,
-            .menu_shown = menu_overlay.shown,
+            .menu_shown = session.menu_overlay.shown,
         });
 
         // ── Draw ── (the only GPU/swapchain touch; headless skips it)

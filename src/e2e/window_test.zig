@@ -72,7 +72,7 @@ test "app/window: vsplit into two panes, each renders its own buffer" {
     // The two panes show distinct buffers.
     const frame: region.Rect = .{ .x = 0, .y = 0, .w = @floatFromInt(app_w), .h = @floatFromInt(app_h) };
     var slots: [window_layout.max_panes]window_layout.Slot = undefined;
-    const n = ed.win_layout.collect(frame, &slots);
+    const n = ed.win_layout.collect(window_layout.headFocus(&ed.win_layout, ed.head), frame, &slots);
     try t.expectEqual(@as(usize, 2), n);
     try t.expect(slots[0].pane.buffer_id != slots[1].pane.buffer_id);
 

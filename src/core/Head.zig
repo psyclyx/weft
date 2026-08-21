@@ -29,6 +29,7 @@ const Allocator = std.mem.Allocator;
 
 const Keymap = @import("Keymap.zig");
 const Pick = @import("pick/Pick.zig");
+const Buffers = @import("Buffers.zig");
 
 const Head = @This();
 
@@ -62,8 +63,89 @@ resolved_group: std.ArrayList(bool) = .empty,
 pick: Pick = .empty,
 /// This head's transient status-line message.
 echo: std.ArrayList(u8) = .empty,
+/// This head's dot-repeat recorder (`.` replays the last change) — see
+/// `DotRepeat`'s doc below. Per-head for the same reason as `pick`/`echo`:
+/// two heads pressing keys concurrently must not interleave into one
+/// register.
+dot: DotRepeat = .empty,
+/// This head's window-layout FOCUS — a generation-checked HANDLE into a
+/// shared `window_layout.Layout`'s pane slot table, NOT a raw pointer.
+/// `pane` indexes the layout's slot table; `gen` is that slot's generation
+/// as of this handle's last validation. Plain data (two `u32`s) — `Head` is
+/// core and must not depend on `gfx/window_layout.zig`, but a pair of
+/// integers needs no type erasure to avoid that (no `anyopaque`, unlike an
+/// earlier version of this field). The LAYOUT (the split tree) is
+/// session-scoped, shared by every head looking at it, and its structural
+/// ops (split/close) can free or relocate a node a DIFFERENT head is
+/// pointing at — a raw pointer would go stale silently and dereferencing it
+/// is undefined behavior; a handle can be VALIDATED instead. `0`/`0` is not
+/// a special "unset" sentinel: it validates through the exact same check as
+/// any other handle (and correctly falls through to recovery if slot 0's
+/// generation has since moved on). See `window_layout.zig`'s module doc and
+/// its `headFocus`/`setHeadFocus` — the only functions that interpret these
+/// two numbers, and the only place a stale handle is detected and recovered.
+focused_pane: u32 = 0,
+focused_pane_gen: u32 = 0,
 
 pub const empty: Head = .{};
+
+/// One recorded keystroke of a dot-repeat change: the keyspec plus the
+/// printable text it inserted (fixed-size — a dot-repeat change is a few
+/// keys, not a novel). Storage only; see `dispatch.zig`'s dot-repeat section
+/// (`dotRecord`/`dotBoundary`/`replayDot`) for what fills and drains it —
+/// that logic needs `command.Context` (buffers/editor/keymap), which `Head`
+/// must not depend on (it would invert the core/app dependency), so it stays
+/// app-side and reaches in through this struct's public fields, exactly like
+/// `Keymap`'s pure functions reach into `Head.mode`/`Head.pending`.
+pub const KeyPress = struct {
+    spec: [24]u8 = undefined,
+    slen: u8 = 0,
+    text: [8]u8 = undefined,
+    tlen: u8 = 0,
+};
+
+/// A change longer than this stops recording (degrade, don't clip mid-replay).
+pub const dot_cap = 256;
+
+/// This head's dot-repeat register: the keys of the in-progress sequence
+/// (`pending`) and the last completed CHANGE (`reg`), plus the bookkeeping
+/// `dotBoundary` needs to tell a change from a motion from a prefix (commit
+/// count / cursor offset / active buffer at the last rest point). No
+/// allocations — fixed arrays — so `Head.deinit`'s `self.* = .{}` resets it
+/// for free; nothing here needs its own `deinit`.
+pub const DotRepeat = struct {
+    pending: [dot_cap]KeyPress = undefined,
+    pending_n: usize = 0,
+    reg: [dot_cap]KeyPress = undefined,
+    reg_n: usize = 0,
+    /// True while `replayDot` is re-feeding the register — suppresses
+    /// re-recording during a replay (the replayed keys must not overwrite
+    /// the register they came from).
+    replaying: bool = false,
+    /// True for one dispatch after a replay: the repeat key itself (`.`)
+    /// must not become the new recorded change.
+    suppress: bool = false,
+    /// Buffer commit count at the last rest point.
+    commits: usize = 0,
+    /// Cursor offset at the last rest point (tells a motion from a prefix).
+    cursor: usize = 0,
+    /// Active buffer id at the last rest point — a buffer switch resets the
+    /// recorder (commit counts across buffers aren't comparable).
+    buf: Buffers.Id = 0,
+    /// Whether `commits`/`cursor`/`buf` have ever been synced to a real
+    /// buffer. A brand-new head's first dispatch must always reset-and-sync
+    /// (exactly like a buffer switch) rather than compare against these
+    /// zero defaults — without this, a head that ATTACHES to a system after
+    /// buffer 0 already has edits (buffer ids start at 0 — `Buffers.init`'s
+    /// doc) would see `buf == 0` "match" its own unsynced default and
+    /// misread the gap since its creation as one giant in-progress change.
+    /// Two-head gate gap (north-star-plan §6 W2a GATE): the original
+    /// single-head design never needed this because the one head always
+    /// existed before the first edit.
+    synced: bool = false,
+
+    pub const empty: DotRepeat = .{};
+};
 
 pub fn deinit(self: *Head, gpa: Allocator) void {
     gpa.free(self.mode);

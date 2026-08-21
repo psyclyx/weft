@@ -328,7 +328,8 @@ pub const FrameBuilder = struct {
         fx.last_frame_rect.* = frame_rect;
 
         var slots: [window_layout.max_panes]window_layout.Slot = undefined;
-        const nslots = self.win_layout.collect(frame_rect, &slots);
+        const focused = window_layout.headFocus(&self.win_layout, fx.head);
+        const nslots = self.win_layout.collect(focused, frame_rect, &slots);
 
         // Free last frame's builds; each pane appends a fresh one below.
         for (self.built_panes.items) |*old| old.deinit(gpa);
@@ -375,7 +376,7 @@ pub const FrameBuilder = struct {
         const b = try self.view.build(arena_state.allocator(), editor, fhud, &self.view.top_row, foc_rect, pick_dock, world_to_pixel);
         try self.built_panes.append(gpa, b);
         records += b.records_added;
-        self.win_layout.focusedPane().top_row = self.view.top_row; // scrollToCursor may have moved it
+        focused.pane().top_row = self.view.top_row; // scrollToCursor may have moved it
 
         // Signal the backend path: how many glyph records the builds added (so
         // `present` uploads the atlas delta) and that the panes were rebuilt (so

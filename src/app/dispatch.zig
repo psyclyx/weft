@@ -23,6 +23,7 @@ const wayland = @import("../platform/wayland.zig");
 pub fn handlePointer(
     window: *wayland.Window,
     win_layout: *window_layout.Layout,
+    head: *core.Head,
     view: *view_mod.View,
     editor: *core.Editor,
     win_ctx: *window_cmds.WindowCtx,
@@ -40,8 +41,10 @@ pub fn handlePointer(
     // pane under the cursor (the intent is applied below, against the
     // layout); inside, the click maps directly (panes render into their
     // own rects, so the geometry map is already in absolute coords). The
-    // frame rect is last render's — one-frame latency, unseen.
-    const click_in_peek = win_layout.count() > 1 and !win_layout.focusedRect(last_frame_rect).contains(px, py);
+    // frame rect is last render's — one-frame latency, unseen. `head`'s
+    // focus, not the layout's own — see window_layout.zig's module doc.
+    const focused = window_layout.headFocus(win_layout, head);
+    const click_in_peek = win_layout.count() > 1 and !win_layout.focusedRect(focused, last_frame_rect).contains(px, py);
     if (window.consumeMousePressed(0)) {
         if (click_in_peek) {
             win_ctx.click_focus = true;
@@ -184,40 +187,24 @@ pub fn scrollPageDownHandler(ctx: *core.command.Context, data: ?*anyopaque, args
 // points — a mode with no text command and no pending chord (each keymap's
 // normal-equivalent), so this works across vim/helix/emacs without knowing them.
 //
-// W2a-2: this recorder is file-scope (process-global) state — two heads
-// pressing keys concurrently would interleave into ONE dot-register. It is
-// genuinely interaction state (per-head, like mode/pending/pick/echo — see
-// core.Head), but it lives app-side (dispatch.zig, not core) and out of
-// W2a-1's scope by the task brief ("do NOT touch dispatch.zig's globals").
-// Left untouched here; W2a-2 is where this moves onto (or alongside) Head.
-const KeyPress = struct {
-    spec: [24]u8 = undefined,
-    slen: u8 = 0,
-    text: [8]u8 = undefined,
-    tlen: u8 = 0,
-};
-const dot_cap = 256; // a change longer than this stops recording (degrade, don't clip mid-replay)
-var dot_pending: [dot_cap]KeyPress = undefined;
-var dot_pending_n: usize = 0;
-var dot_reg: [dot_cap]KeyPress = undefined;
-var dot_reg_n: usize = 0;
-var dot_replaying: bool = false;
-var dot_suppress: bool = false; // the repeat key itself must not become the new change
-var dot_commits: usize = 0; // buffer commit count at the last rest
-var dot_cursor: usize = 0; // cursor offset at the last rest (to tell a motion from a prefix)
-var dot_buf: core.Buffers.Id = 0; // active buffer at the last rest (a switch resets the recorder)
+// The recorder's STORAGE is `ctx.head.dot` (`core.Head.DotRepeat`) — per-head,
+// like mode/pending/pick/echo, so two heads pressing keys concurrently record
+// into separate registers and one's `.` never replays the other's change. This
+// (the decision logic: what starts/ends a recording, the replay path) stays
+// app-side because it needs `command.Context` (buffers/editor/keymap), which
+// `Head` must not depend on.
 
-fn dotRecord(spec: []const u8, text: []const u8) void {
-    if (dot_pending_n >= dot_cap) return;
-    var kp: KeyPress = .{};
+fn dotRecord(dot: *core.Head.DotRepeat, spec: []const u8, text: []const u8) void {
+    if (dot.pending_n >= core.Head.dot_cap) return;
+    var kp: core.Head.KeyPress = .{};
     const s = @min(spec.len, kp.spec.len);
     @memcpy(kp.spec[0..s], spec[0..s]);
     kp.slen = @intCast(s);
     const tx = @min(text.len, kp.text.len);
     @memcpy(kp.text[0..tx], text[0..tx]);
     kp.tlen = @intCast(tx);
-    dot_pending[dot_pending_n] = kp;
-    dot_pending_n += 1;
+    dot.pending[dot.pending_n] = kp;
+    dot.pending_n += 1;
 }
 
 /// At rest for change-recording: a mode that swallows typing (no text command),
@@ -234,48 +221,55 @@ fn dotAtRest(ctx: *core.command.Context) bool {
 /// keys to the register), a pure motion (no edit → discard), or the repeat key
 /// itself (suppressed). Mid-command (not at rest) it keeps accumulating.
 fn dotBoundary(ctx: *core.command.Context) void {
+    const dot = &ctx.head.dot;
     const bid = ctx.buffers.active_id;
-    if (bid != dot_buf) { // buffer switch: commit counts aren't comparable — reset.
-        dot_buf = bid;
-        dot_commits = ctx.editor().doc.commitCount();
-        dot_cursor = ctx.editor().cursorOffset();
-        dot_pending_n = 0;
+    // Buffer switch (or this head's very first dispatch ever — `synced`
+    // catches it even when `bid` coincidentally equals the zero default,
+    // e.g. a head attaching on buffer 0 — see `DotRepeat.synced`'s doc):
+    // commit counts from before now aren't comparable — reset and resync.
+    if (!dot.synced or bid != dot.buf) {
+        dot.synced = true;
+        dot.buf = bid;
+        dot.commits = ctx.editor().doc.commitCount();
+        dot.cursor = ctx.editor().cursorOffset();
+        dot.pending_n = 0;
         return;
     }
     if (!dotAtRest(ctx)) return; // mid-command — keep accumulating
     const now = ctx.editor().doc.commitCount();
     const cur = ctx.editor().cursorOffset();
-    if (dot_suppress) {
-        dot_suppress = false; // the repeat key itself: leave the register intact
-    } else if (now != dot_commits and dot_pending_n > 0) {
+    if (dot.suppress) {
+        dot.suppress = false; // the repeat key itself: leave the register intact
+    } else if (now != dot.commits and dot.pending_n > 0) {
         // a change completed — promote its keys to the register.
-        @memcpy(dot_reg[0..dot_pending_n], dot_pending[0..dot_pending_n]);
-        dot_reg_n = dot_pending_n;
-    } else if (cur == dot_cursor) {
+        @memcpy(dot.reg[0..dot.pending_n], dot.pending[0..dot.pending_n]);
+        dot.reg_n = dot.pending_n;
+    } else if (cur == dot.cursor) {
         // no edit AND the cursor didn't move: a PREFIX (a count, a half-typed
         // command) — keep it in `pending` so it rides with the change to come.
         return;
     }
     // a change, a motion (no edit but cursor moved), or a suppressed repeat: the
     // pending sequence is done — start a fresh one from here.
-    dot_pending_n = 0;
-    dot_commits = now;
-    dot_cursor = cur;
+    dot.pending_n = 0;
+    dot.commits = now;
+    dot.cursor = cur;
 }
 
 /// Replay the recorded change by RE-FEEDING its keystrokes through the same
 /// dispatch — so it composes exactly as the original did. The `.` keypress that
 /// triggered this is then suppressed (it must not overwrite the register).
 pub fn replayDot(ctx: *core.command.Context) void {
-    if (dot_reg_n == 0) return;
-    dot_replaying = true;
+    const dot = &ctx.head.dot;
+    if (dot.reg_n == 0) return;
+    dot.replaying = true;
     var i: usize = 0;
-    while (i < dot_reg_n) : (i += 1) {
-        const kp = dot_reg[i];
+    while (i < dot.reg_n) : (i += 1) {
+        const kp = dot.reg[i];
         dispatchSpec(ctx, kp.spec[0..kp.slen], kp.text[0..kp.tlen]) catch {};
     }
-    dot_replaying = false;
-    dot_suppress = true;
+    dot.replaying = false;
+    dot.suppress = true;
 }
 
 /// Command handler for `repeat-change` (bound to `.`): replay the last change.
@@ -349,8 +343,8 @@ pub fn dispatchSpec(ctx: *core.command.Context, spec: []const u8, text: []const 
 
     // Dot-repeat: record this keystroke (unless we ARE a replay), and decide at
     // the end of dispatch whether the sequence so far was a repeatable change.
-    const dot_recording = !dot_replaying;
-    if (dot_recording) dotRecord(spec, text);
+    const dot_recording = !ctx.head.dot.replaying;
+    if (dot_recording) dotRecord(&ctx.head.dot, spec, text);
     defer if (dot_recording) dotBoundary(ctx);
 
     // Mid-chord META keys act on the which-key overlay, NOT the sequence:

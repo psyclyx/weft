@@ -23,7 +23,7 @@ const harness = weft.gfx_harness;
 pub const window_layout = weft.window_layout;
 const window_cmds = weft.window_cmds;
 const app_buffers_cmds = weft.app_buffers_cmds;
-const dispatch = weft.dispatch;
+pub const dispatch = weft.dispatch;
 pub const app_session = weft.app_session;
 pub const app_providers = weft.app_providers;
 pub const app_collab = weft.app_collab;
@@ -422,7 +422,8 @@ pub const Editor = struct {
         const frame: region.Rect = .{ .x = 0, .y = 0, .w = @floatFromInt(app_w), .h = @floatFromInt(app_h) };
         self.last_frame_rect = frame;
         var slots: [window_layout.max_panes]window_layout.Slot = undefined;
-        const n = self.win_layout.collect(frame, &slots);
+        const focused = window_layout.headFocus(&self.win_layout, self.head);
+        const n = self.win_layout.collect(focused, frame, &slots);
 
         const projection = snail.Mat4.ortho(0, @floatFromInt(app_w), @floatFromInt(app_h), 0, -1, 1);
         const w2p = snail.mvpToScenePixel(projection, @floatFromInt(app_w), @floatFromInt(app_h)) orelse unreachable;
@@ -457,6 +458,97 @@ pub const Editor = struct {
         var buf: [128]u8 = undefined;
         const path = std.fmt.bufPrint(&buf, ".zig-cache/tmp/weft-app-{s}.ppm", .{name}) catch return;
         harness.writePpm(self.gpa, path, pixels, app_w, app_h) catch {};
+    }
+};
+
+// ── A second head over the SAME session (north-star-plan §6 W2a GATE) ──────
+//
+// Proves two heads sharing one system don't collide: distinct mode/pending
+// chord, distinct pick session, distinct echo line, distinct dot-repeat
+// register — ALL exercised through the real dispatch path
+// (`dispatch.dispatchSpec`/`command.run`), never by poking a `Head`'s fields
+// directly. Deliberately NOT a second `Editor` — a second `Editor` stands up
+// a second buffer set/keymap/caps/commands (a second SYSTEM); `SecondHead`
+// borrows an existing `Editor`'s everything except the one thing that must
+// be independent: `core.Head`. Mirrors `core.Head`'s own "two heads over one
+// system" unit test (`Head.zig`), but driven through dispatch/command.run
+// instead of touching `Pick`/mode fields directly, and over the full app
+// stack (real keymap tables, real commands, a real buffer) instead of a
+// minimal scaffold.
+pub const SecondHead = struct {
+    head: core.Head = .empty,
+    ctx: command.Context = undefined,
+
+    /// `start_mode` seeds this head's starting mode — a head attaching to an
+    /// already-configured system starts in ITS resting mode (mirrors
+    /// `Buffers.default_mode`/`setResting`'s "a file opened fresh lands in
+    /// the configured mode"), not a bare empty string. Host-side `setMode`
+    /// (not `dispatchSpec`) — establishing where a newly-attached head
+    /// starts is not itself a keystroke.
+    pub fn init(self: *SecondHead, ed: *Editor, start_mode: []const u8) !void {
+        self.head = .empty;
+        self.ctx = ed.ctx.*; // same buffers/commands/keymap/caps/actions — only `.head` differs
+        self.ctx.head = &self.head;
+        try self.head.setMode(ed.gpa, start_mode);
+    }
+
+    pub fn deinit(self: *SecondHead, gpa: Allocator) void {
+        self.head.deinit(gpa);
+    }
+
+    /// Press a key AS this head — the same real dispatch `Editor.press` uses.
+    pub fn press(self: *SecondHead, spec_in: []const u8, text: []const u8) void {
+        var kbuf: [256]u8 = undefined;
+        const spec = core.Keymap.normalizeKey(&kbuf, spec_in);
+        dispatch.dispatchSpec(&self.ctx, spec, text) catch {};
+    }
+
+    /// Press each key of a space-separated chord in turn (mirrors `Editor.chord`).
+    pub fn chord(self: *SecondHead, seq: []const u8) void {
+        var it = std.mem.tokenizeScalar(u8, seq, ' ');
+        while (it.next()) |k| self.press(k, "");
+    }
+
+    /// Type a run of text one keystroke at a time (mirrors `Editor.typeText`).
+    pub fn typeText(self: *SecondHead, s: []const u8) void {
+        var i: usize = 0;
+        while (i < s.len) {
+            const n = std.unicode.utf8ByteSequenceLength(s[i]) catch 1;
+            const ch = s[i..@min(i + n, s.len)];
+            if (ch.len == 1 and ch[0] == '\n') {
+                self.press("Return", "\n");
+            } else if (ch.len == 1 and ch[0] == '\t') {
+                self.press("Tab", "\t");
+            } else {
+                self.press(ch, ch);
+            }
+            i += ch.len;
+        }
+    }
+
+    /// Run a command by name AS this head (mirrors `Editor.run`).
+    pub fn run(self: *SecondHead, cmd: []const u8) void {
+        _ = command.run(self.ctx.commands, &self.ctx, cmd, &.{}) catch {};
+    }
+
+    /// Apply pending window-layout intents (window-split/focus/move) AS
+    /// THIS head — mirrors `Editor.applyWindow`, but against `ed`'s shared
+    /// `win_ctx`/`win_layout` with `self.head` as the acting head, so a
+    /// focus/split/close recorded by a command THIS head ran lands on
+    /// THIS head's handle, not `ed`'s own. The two-head window-op gate
+    /// (north-star-plan §6 W2a GATE) drives real split/close/focus
+    /// sequences "as" each head through this.
+    pub fn applyWindow(self: *SecondHead, ed: *Editor) void {
+        const v = ed.ensureView() catch return;
+        _ = window_cmds.applyIntents(&ed.win_ctx, &ed.win_layout, v, ed.buffers, ed.gpa, &self.head, ed.keymap, ed.last_frame_rect);
+    }
+
+    pub fn mode(self: *SecondHead) []const u8 {
+        return self.head.currentMode();
+    }
+
+    pub fn echoText(self: *SecondHead) []const u8 {
+        return self.head.echo.items;
     }
 };
 

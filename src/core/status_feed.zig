@@ -4,6 +4,16 @@
 //! A process-wide slot (not a `Context`/`FrameCtx` field) so the membrane can
 //! set it without threading a new field through every Context construction site;
 //! the frame builder reads it into the `Hud` each frame. Empty = no chip.
+//!
+//! W2a-2 note (north-star-plan §6): this is a plugin→user BROADCAST (a
+//! system-scoped event — one plugin publishing "building…" means it for
+//! every head looking at this system), not per-head interaction state like
+//! `echo`/`pick`/dot-repeat — there is no per-head cursor into it here to
+//! move (just one `set`/`get` slot, no per-reader position). It stays
+//! system-scoped. If two heads ever want to independently DISMISS/ack the
+//! chip (rather than just both displaying whatever's currently published),
+//! that's a per-head READ CURSOR over this feed — a W2b concern, not a
+//! reason to fragment the broadcast itself.
 
 const std = @import("std");
 

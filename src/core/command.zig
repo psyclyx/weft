@@ -65,11 +65,14 @@ pub const Context = struct {
     caps: *@import("capability.zig").Caps,
     quit: *bool,
     /// The interaction state of the head DISPATCHING this call — current
-    /// mode, pending chord, pick session, echo line (north-star-plan §2.7/§4
-    /// C14/§6 W2a-1). The SINGLE way core code reaches interaction state; two
-    /// heads on one system get two `Head`s, so there is no shared mode/pick/
-    /// echo left to collide on. The e2e harness and `main()` construct
-    /// exactly one `Head` today — W2a-2 is what makes more than one live.
+    /// mode, pending chord, pick session, echo line, dot-repeat register
+    /// (north-star-plan §2.7/§4 C14/§6 W2a). The SINGLE way core code reaches
+    /// interaction state; two heads on one system get two `Head`s (a second
+    /// `Context` differing only in `.head`), so there is no shared mode/
+    /// pick/echo/dot-repeat left to collide on — proven live by the e2e
+    /// two-head gate (`e2e/two_head_test.zig`). `main()` still drives exactly
+    /// one `Head` (a second RENDERED head is a bigger, later change); the
+    /// per-head STATE this field names is what W2a-2 made ready for more.
     head: *Head,
     /// Who is invoking right now (default: the interactive user). Plugins
     /// swap this in around their trampolines so their edits GRADE-gate as the

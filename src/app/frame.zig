@@ -24,13 +24,15 @@ const providers = @import("providers.zig");
 /// so `on_menu(open/close)` fire exactly once per enter/leave at the frame
 /// boundary (never nested inside another guest call). `.{}` is the idle state.
 ///
-/// W2a-2: this struct's OWN storage (open/shown/forced/open_ns/last_mode) is
-/// a single `main()`-local instance today — it now READS a `*core.Head` (see
-/// `update` below) but is not itself part of one. Two heads would each need
-/// their own overlay-edge tracker (a menu popup opening for head A must not
-/// suppress/idle-time head B's). Left as a single instance here (app-side,
-/// window-layout/overlay territory per the task brief); W2a-2 is where it
-/// either becomes a `Head` field or gets keyed per-head.
+/// PER-HEAD (north-star-plan §6 W2a-2): a menu popup opening for head A must
+/// not suppress/idle-time head B's, so this struct's storage lives beside
+/// whichever `core.Head` it tracks (`app.Session.menu_overlay` for the app's
+/// one head today; a second head's own instance for a second). It can't live
+/// ON `core.Head` itself — `Head` is core and this type is app-layer (it
+/// notifies wasm plugins) — so `update` stays a pure-ish function of an
+/// explicit `*core.Head` (mirroring the Keymap-tables/Head-cursor split),
+/// and the CALLER is responsible for pairing the right overlay instance with
+/// the right head, exactly as it already pairs `head`/`keymap`/`plugins`.
 pub const MenuOverlay = struct {
     open: bool = false,
     shown: bool = false, // has on_menu(open) fired for the current menu?

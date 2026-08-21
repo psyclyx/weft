@@ -131,56 +131,69 @@ pub fn applyIntents(
     var dirty = false;
     if (win_ctx.split) |axis| {
         win_ctx.split = null;
-        win_layout.focusedPane().top_row = view.top_row; // carried into the surviving half
-        win_layout.splitFocused(axis) catch {};
+        const focused = window_layout.headFocus(win_layout, head);
+        focused.pane().top_row = view.top_row; // carried into the surviving half
+        const nf = win_layout.splitFocused(focused, axis) catch focused;
+        window_layout.setHeadFocus(head, nf, win_layout);
         dirty = true;
     }
     if (win_ctx.close) {
         win_ctx.close = false;
         if (win_layout.count() > 1) {
-            win_layout.closeFocused();
+            const focused = window_layout.headFocus(win_layout, head);
+            const nf = win_layout.closeFocused(focused) catch focused;
+            window_layout.setHeadFocus(head, nf, win_layout);
             applyWindowFocus(win_layout, view, buffers, gpa, head, keymap);
             dirty = true;
         }
     }
     if (win_ctx.focus_dir) |dir| {
         win_ctx.focus_dir = null;
-        win_layout.focusedPane().top_row = view.top_row;
-        if (win_layout.focusNeighbor(last_frame_rect, dir)) {
+        const focused = window_layout.headFocus(win_layout, head);
+        focused.pane().top_row = view.top_row;
+        if (win_layout.focusNeighbor(focused, last_frame_rect, dir)) |nb| {
+            window_layout.setHeadFocus(head, nb, win_layout);
             applyWindowFocus(win_layout, view, buffers, gpa, head, keymap);
             dirty = true;
         }
     }
     if (win_ctx.move_dir) |dir| {
         win_ctx.move_dir = null;
-        win_layout.focusedPane().top_row = view.top_row;
+        const focused = window_layout.headFocus(win_layout, head);
+        focused.pane().top_row = view.top_row;
         // Swap contents with the neighbor; focus stays put but now shows
         // the neighbor's buffer, so the active buffer follows it.
-        if (win_layout.swapNeighbor(last_frame_rect, dir)) {
+        if (win_layout.swapNeighbor(focused, last_frame_rect, dir)) {
             applyWindowFocus(win_layout, view, buffers, gpa, head, keymap);
             dirty = true;
         }
     }
     if (win_ctx.focus_next) {
         win_ctx.focus_next = false;
-        win_layout.focusedPane().top_row = view.top_row;
-        if (win_layout.focusNext()) {
+        const focused = window_layout.headFocus(win_layout, head);
+        focused.pane().top_row = view.top_row;
+        if (win_layout.focusNext(focused)) |nx| {
+            window_layout.setHeadFocus(head, nx, win_layout);
             applyWindowFocus(win_layout, view, buffers, gpa, head, keymap);
             dirty = true;
         }
     }
     if (win_ctx.click_focus) {
         win_ctx.click_focus = false;
-        win_layout.focusedPane().top_row = view.top_row;
-        if (win_layout.focusAt(last_frame_rect, win_ctx.click_x, win_ctx.click_y)) {
-            applyWindowFocus(win_layout, view, buffers, gpa, head, keymap);
-            dirty = true;
+        const focused = window_layout.headFocus(win_layout, head);
+        focused.pane().top_row = view.top_row;
+        if (win_layout.focusAt(last_frame_rect, win_ctx.click_x, win_ctx.click_y)) |hit| {
+            if (hit != focused) {
+                window_layout.setHeadFocus(head, hit, win_layout);
+                applyWindowFocus(win_layout, view, buffers, gpa, head, keymap);
+                dirty = true;
+            }
         }
     }
     // The focused pane always shows the active buffer (buffer switches
     // via open/tabs/etc. land here); a pane whose buffer was closed
     // falls back to the active one so no leaf dangles.
-    win_layout.focusedPane().buffer_id = buffers.active_id;
+    window_layout.headFocus(win_layout, head).pane().buffer_id = buffers.active_id;
     {
         const PruneCtx = struct { active: core.Buffers.Id, bufs: *core.Buffers };
         win_layout.eachPane(PruneCtx{ .active = buffers.active_id, .bufs = buffers }, struct {
@@ -193,10 +206,10 @@ pub fn applyIntents(
 }
 
 /// After a window op moved focus (or changed the focused pane's content),
-/// make the active buffer follow the focused pane and restore that pane's
-/// scroll — the invariant "focused pane == active buffer".
+/// make the active buffer follow `head`'s focused pane and restore that
+/// pane's scroll — the invariant "focused pane == active buffer", per-head.
 pub fn applyWindowFocus(win_layout: *window_layout.Layout, view: *view_mod.View, buffers: *core.Buffers, gpa: std.mem.Allocator, head: *core.Head, keymap: *const core.Keymap) void {
-    const fp = win_layout.focusedPane();
+    const fp = window_layout.headFocus(win_layout, head).pane();
     if (buffers.get(fp.buffer_id) != null and buffers.active_id != fp.buffer_id)
         buffers.switchTo(gpa, fp.buffer_id, head, keymap) catch {};
     view.top_row = fp.top_row;
