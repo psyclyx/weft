@@ -34,6 +34,16 @@ const pick_id_results: u32 = 1;
 var pick_offsets: [256]usize = undefined;
 var pick_n: usize = 0;
 
+// Diagnostics pushed by the server (publishDiagnostics): offset + severity +
+// packed message, for gutter markers and `]d`/`[d` navigation.
+const MAX_DIAG = 256;
+var diag_off: [MAX_DIAG]usize = undefined;
+var diag_sev: [MAX_DIAG]u8 = undefined;
+var diag_moff: [MAX_DIAG]usize = undefined;
+var diag_mlen: [MAX_DIAG]usize = undefined;
+var diag_msgs: [1 << 14]u8 = undefined;
+var diag_n: usize = 0;
+
 var parambuf: [4096]u8 = undefined;
 var textbuf: [1 << 18]u8 = undefined; // JSON-escaped document text for didOpen
 
@@ -43,6 +53,8 @@ const cmds = [_]Cmd{
     .{ .name = "goto-definition", .handler = cmdDefinition },
     .{ .name = "references", .handler = cmdReferences },
     .{ .name = "symbols", .handler = cmdSymbols },
+    .{ .name = "next-diagnostic", .handler = cmdNextDiag },
+    .{ .name = "prev-diagnostic", .handler = cmdPrevDiag },
 };
 
 export fn describe() void {
@@ -60,6 +72,19 @@ export fn on_command(id: u32) void {
 /// Drain every complete server message and dispatch it.
 export fn on_poll() void {
     while (conn.next()) |msg| dispatch(msg);
+}
+
+/// A buffer took focus: if it's a zig file, ensure the server is up and the doc
+/// is opened, so diagnostics flow without waiting for a request. (Single-server,
+/// single-language for now — multi-server routing is a later phase.)
+export fn on_activate() void {
+    const path = weft.activatePath();
+    if (!std.mem.endsWith(u8, path, ".zig")) return;
+    ensureServer();
+    // A different file → re-open under its uri.
+    buildUri();
+    opened = false;
+    if (ready) syncDoc();
 }
 
 /// A pick entry was chosen: jump to its recorded offset.
@@ -82,6 +107,46 @@ fn cmdReferences() void {
 fn cmdSymbols() void {
     fire(.symbols);
 }
+fn cmdNextDiag() void {
+    gotoDiag(true);
+}
+fn cmdPrevDiag() void {
+    gotoDiag(false);
+}
+
+/// Jump to the next/previous stored diagnostic from the cursor (wrapping) and
+/// echo its severity + message.
+fn gotoDiag(fwd: bool) void {
+    if (diag_n == 0) {
+        weft.echo("lsp: no diagnostics");
+        return;
+    }
+    const cur = weft.cursor();
+    var best: ?usize = null; // index of nearest strictly after/before
+    var wrap: usize = 0; // extreme index for wrap-around
+    var i: usize = 0;
+    while (i < diag_n) : (i += 1) {
+        if (fwd) {
+            if (diag_off[i] > cur and (best == null or diag_off[i] < diag_off[best.?])) best = i;
+            if (diag_off[i] < diag_off[wrap]) wrap = i;
+        } else {
+            if (diag_off[i] < cur and (best == null or diag_off[i] > diag_off[best.?])) best = i;
+            if (diag_off[i] > diag_off[wrap]) wrap = i;
+        }
+    }
+    const idx = best orelse wrap;
+    weft.jump(diag_off[idx]);
+    const label: []const u8 = switch (diag_sev[idx]) {
+        1 => "error",
+        2 => "warning",
+        3 => "info",
+        else => "hint",
+    };
+    var buf: [1024]u8 = undefined;
+    const msg = diag_msgs[diag_moff[idx]..][0..diag_mlen[idx]];
+    const line = std.fmt.bufPrint(&buf, "{s}: {s}", .{ label, msg }) catch label;
+    weft.echo(line);
+}
 
 fn fire(kind: Want) void {
     ensureServer();
@@ -100,7 +165,7 @@ fn ensureServer() void {
     ready = false;
     opened = false;
     init_id = conn.request("initialize",
-        \\{"processId":null,"rootUri":null,"capabilities":{"textDocument":{"hover":{"contentFormat":["plaintext","markdown"]},"synchronization":{}}}}
+        \\{"processId":null,"rootUri":null,"capabilities":{"textDocument":{"hover":{"contentFormat":["plaintext","markdown"]},"synchronization":{},"publishDiagnostics":{}}}}
     );
 }
 
@@ -170,6 +235,7 @@ fn dispatch(msg: rpc.Value) void {
         if (id == init_id and !ready) {
             ready = true;
             conn.notify("initialized", "{}");
+            syncDoc(); // didOpen the active doc → diagnostics start flowing
             if (want != .none) sendWant();
             return;
         }
@@ -184,8 +250,46 @@ fn dispatch(msg: rpc.Value) void {
             }
             want = .none;
         }
+        return;
     }
-    // notifications (publishDiagnostics, …) handled in a later phase.
+    // A notification: only publishDiagnostics matters to us.
+    if (obj.get("method")) |m| {
+        if (m == .string and std.mem.eql(u8, m.string, "textDocument/publishDiagnostics")) {
+            onDiagnostics(obj.get("params"));
+        }
+    }
+}
+
+/// Store the server's diagnostics for the current doc and mark them in the
+/// gutter. Replaces the previous set (a publish is the whole list for the uri).
+fn onDiagnostics(params: ?rpc.Value) void {
+    const p = params orelse return;
+    if (p != .object) return;
+    if (p.object.get("uri")) |u| {
+        if (u == .string and !sameUri(u.string)) return;
+    }
+    diag_n = 0;
+    var mw: usize = 0;
+    weft.decorateClear();
+    const list = p.object.get("diagnostics") orelse return;
+    if (list != .array) return;
+    for (list.array.items) |d| {
+        if (d != .object or diag_n >= MAX_DIAG) continue;
+        const rng = d.object.get("range") orelse continue;
+        const pos = posInRange(rng) orelse continue;
+        const off = offsetOf(pos.line, pos.col);
+        const msg = if (d.object.get("message")) |mm| (if (mm == .string) mm.string else "") else "";
+        const sev: u8 = if (d.object.get("severity")) |s| (if (s == .integer) @intCast(@max(1, @min(4, s.integer))) else 1) else 1;
+        diag_off[diag_n] = off;
+        diag_sev[diag_n] = sev;
+        const ml = @min(msg.len, diag_msgs.len - mw);
+        @memcpy(diag_msgs[mw..][0..ml], msg[0..ml]);
+        diag_moff[diag_n] = mw;
+        diag_mlen[diag_n] = ml;
+        mw += ml;
+        diag_n += 1;
+        weft.decorate(weft.lineAt(off).start, .gutter, if (sev == 1) .removed else .emphasis, if (sev == 1) "\u{25CF}" else "\u{25B2}");
+    }
 }
 
 fn presentHover(result: rpc.Value) void {

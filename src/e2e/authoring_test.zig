@@ -731,11 +731,11 @@ test "lsp: real zls diagnostics — a bad file reports an error we can jump to" 
     // The server reports diagnostics (rendered as underlines/gutter). Then a
     // vim user's `]d` jumps to the next one and echoes it — proof the diagnostic
     // is both received and navigable.
-    try t.expect(h.drainDiagnostics(ed));
-    ed.run("next-diagnostic");
-    const msg = ed.echoText();
-    try t.expect(std.mem.indexOf(u8, msg, "no diagnostics") == null);
-    try t.expect(std.mem.indexOf(u8, msg, ":") != null); // "<severity>: <message>"
+    ed.run("hover"); // kick the plugin's server (also didOpens → diagnostics flow)
+    ed.settle(80);
+    // The plugin received publishDiagnostics (gutter-marked); `]d` navigates to
+    // one and echoes it — diagnostics received + navigable, all in the plugin.
+    try t.expect(h.drainEcho(ed, "next-diagnostic", "error"));
 }
 
 test "lsp: references + symbols via the lsp plugin — real zls" {

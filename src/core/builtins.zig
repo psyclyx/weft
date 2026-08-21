@@ -23,80 +23,6 @@ fn editErr(ctx: *Context, e: anyerror) anyerror!Value {
     return ok;
 }
 
-/// Jump to the next/previous diagnostic (the LSP-published `diagnostics` layer)
-/// from the cursor, wrapping around, and echo its severity + message. Core
-/// because it reads the shared layer store and moves the cursor — no LSP protocol
-/// knowledge, just "navigate the marks something put here".
-fn gotoDiagnostic(ctx: *Context, fwd: bool) anyerror!Value {
-    const layer = ctx.caps.layers.find(ctx.document(), "diagnostics") orelse return echoLine(ctx, "no diagnostics");
-    const n = layer.spanCount();
-    if (n == 0) return echoLine(ctx, "no diagnostics");
-    const cur = ctx.editor().cursorOffset();
-    var target: ?usize = null; // nearest strictly after/before the cursor
-    var wrap: ?usize = null; // extreme span, for wrap-around
-    var msg: []const u8 = "";
-    var sev: u32 = 1;
-    var wrap_msg: []const u8 = "";
-    var wrap_sev: u32 = 1;
-    var i: usize = 0;
-    while (i < n) : (i += 1) {
-        const rs = layer.resolvedSpan(i);
-        if (fwd) {
-            if (rs.start > cur and (target == null or rs.start < target.?)) {
-                target = rs.start;
-                msg = rs.message;
-                sev = rs.kind;
-            }
-            if (wrap == null or rs.start < wrap.?) {
-                wrap = rs.start;
-                wrap_msg = rs.message;
-                wrap_sev = rs.kind;
-            }
-        } else {
-            if (rs.start < cur and (target == null or rs.start > target.?)) {
-                target = rs.start;
-                msg = rs.message;
-                sev = rs.kind;
-            }
-            if (wrap == null or rs.start > wrap.?) {
-                wrap = rs.start;
-                wrap_msg = rs.message;
-                wrap_sev = rs.kind;
-            }
-        }
-    }
-    const off = target orelse wrap.?;
-    if (target == null) {
-        msg = wrap_msg;
-        sev = wrap_sev;
-    }
-    ctx.editor().moveTo(off);
-    ctx.echo.clearRetainingCapacity();
-    const label: []const u8 = switch (sev) {
-        1 => "error",
-        2 => "warning",
-        3 => "info",
-        else => "hint",
-    };
-    try ctx.echo.appendSlice(ctx.gpa, label);
-    try ctx.echo.appendSlice(ctx.gpa, ": ");
-    try ctx.echo.appendSlice(ctx.gpa, msg);
-    return ok;
-}
-fn echoLine(ctx: *Context, m: []const u8) anyerror!Value {
-    ctx.echo.clearRetainingCapacity();
-    try ctx.echo.appendSlice(ctx.gpa, m);
-    return ok;
-}
-fn cNextDiagnostic(ctx: *Context, args: struct {}) anyerror!Value {
-    _ = args;
-    return gotoDiagnostic(ctx, true);
-}
-fn cPrevDiagnostic(ctx: *Context, args: struct {}) anyerror!Value {
-    _ = args;
-    return gotoDiagnostic(ctx, false);
-}
-
 fn cInsertText(ctx: *Context, args: struct { text: []const u8 }) anyerror!Value {
     if (ctx.buffer().read_only) return ok;
     ctx.edit(ctx.editor().insertRange(), args.text) catch |e| return editErr(ctx, e);
@@ -345,8 +271,6 @@ const table = [_]command.Command{
     command.define("quit", "Exit the editor.", cQuit),
     command.define("insert-newline", "Insert a line break at the cursor.", cInsertNewline),
     command.define("insert-tab", "Insert a tab at the cursor.", cInsertTab),
-    command.define("next-diagnostic", "Jump to the next diagnostic (wraps) and echo it.", cNextDiagnostic),
-    command.define("prev-diagnostic", "Jump to the previous diagnostic (wraps) and echo it.", cPrevDiagnostic),
 };
 
 /// Register every built-in and the default keymap. The default mode is
