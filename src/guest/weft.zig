@@ -127,6 +127,10 @@ extern "weft" fn wl_shell_insert(ptr: u32, len: u32) void;
 extern "weft" fn wl_repl_start(cmd: u32, cmd_len: u32, name: u32, name_len: u32) i32;
 extern "weft" fn wl_repl_send(handle: u32, ptr: u32, len: u32) void;
 extern "weft" fn wl_repl_quit(handle: u32) void;
+extern "weft" fn wl_proc_spawn(cmd: u32, cmd_len: u32) i32;
+extern "weft" fn wl_proc_send(handle: u32, ptr: u32, len: u32) void;
+extern "weft" fn wl_proc_read(handle: u32, out: u32, cap: u32) i32;
+extern "weft" fn wl_proc_close(handle: u32) void;
 extern "weft" fn wl_net_connect(host: u32, host_len: u32, name: u32, name_len: u32, sni: u32, sni_len: u32) i32;
 extern "weft" fn wl_net_send(handle: u32, ptr: u32, len: u32) void;
 extern "weft" fn wl_net_close(handle: u32) void;
@@ -855,6 +859,27 @@ pub fn replSend(handle: u32, line: []const u8) void {
 /// Terminate a REPL session.
 pub fn replQuit(handle: u32) void {
     wl_repl_quit(handle);
+}
+
+/// Spawn a persistent subprocess whose stdout comes BACK to the guest (via
+/// `procRead`), for an in-guest protocol client. Returns a handle, or null.
+pub fn procSpawn(cmd: []const u8) ?u32 {
+    const h = wl_proc_spawn(p(cmd.ptr), @intCast(cmd.len));
+    return if (h < 0) null else @intCast(h);
+}
+/// Write bytes to the subprocess's stdin.
+pub fn procSend(handle: u32, bytes: []const u8) void {
+    wl_proc_send(handle, p(bytes.ptr), @intCast(bytes.len));
+}
+/// Drain up to `out.len` buffered stdout bytes; returns the slice read (may be
+/// empty). Valid until the next call.
+pub fn procRead(handle: u32, out: []u8) []u8 {
+    const n = wl_proc_read(handle, p(out.ptr), @intCast(out.len));
+    return if (n <= 0) out[0..0] else out[0..@intCast(n)];
+}
+/// Kill the subprocess (its handle stays reserved).
+pub fn procClose(handle: u32) void {
+    wl_proc_close(handle);
 }
 
 // ── net.connect (TCP / TLS) — perm net ───────────────────────────────

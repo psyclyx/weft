@@ -29,6 +29,88 @@ const ShellJob = struct {
     cmd: []u8, // the shell command line
 };
 
+// ── Raw persistent proc (wl_proc_spawn/send/read/close) ──────────────
+// A bidirectional stdio channel whose stdout comes BACK to the guest (unlike
+// the buffer-streaming repl sessions), so an in-guest protocol client — the
+// `lsp` plugin — can deframe Content-Length messages. Mirrors the JS proc
+// surface (quickjs cProc*) over the same proc_stream backend; handles index
+// `plugin.proc_streams` and stay stable (a closed slot is nulled, not removed).
+const proc_stream = @import("../proc_stream.zig");
+
+fn streamAt(p: *WasmPlugin, h: i32) ?*proc_stream.ProcStream {
+    if (h < 0 or h >= p.proc_streams.items.len) return null;
+    return p.proc_streams.items[@intCast(h)];
+}
+
+/// `procSpawn(cmd) -> handle` (or -1). Spawns a persistent subprocess inheriting
+/// the host environ + cwd; its stdout is buffered for `wl_proc_read`.
+pub fn hProcSpawn(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32, results: []i32) void {
+    const p: *WasmPlugin = @ptrCast(@alignCast(data.?));
+    if (!p.perms[perm_proc]) {
+        results[0] = -1;
+        return;
+    }
+    const pool = p.pool orelse {
+        results[0] = -1;
+        return;
+    };
+    const cmd = caller.readMemory(p.gpa, @intCast(args[0]), @intCast(args[1])) catch {
+        results[0] = -1;
+        return;
+    };
+    defer p.gpa.free(cmd);
+    const s = proc_stream.ProcStream.start(p.gpa, pool, cmd, null, shared.g_environ) catch {
+        results[0] = -1;
+        return;
+    };
+    const h: i32 = @intCast(p.proc_streams.items.len);
+    p.proc_streams.append(p.gpa, s) catch {
+        s.deinit();
+        results[0] = -1;
+        return;
+    };
+    results[0] = h;
+}
+
+/// `procSend(handle, bytes)`: write to the subprocess's stdin.
+pub fn hProcSend(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32, results: []i32) void {
+    _ = results;
+    const p: *WasmPlugin = @ptrCast(@alignCast(data.?));
+    const s = streamAt(p, args[0]) orelse return;
+    const bytes = caller.readMemory(p.gpa, @intCast(args[1]), @intCast(args[2])) catch return;
+    defer p.gpa.free(bytes);
+    s.send(bytes);
+}
+
+/// `procRead(handle, out, cap) -> n`: drain up to `cap` buffered stdout bytes.
+pub fn hProcRead(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32, results: []i32) void {
+    const p: *WasmPlugin = @ptrCast(@alignCast(data.?));
+    const s = streamAt(p, args[0]) orelse {
+        results[0] = 0;
+        return;
+    };
+    const cap: usize = @intCast(args[2]);
+    const buf = p.gpa.alloc(u8, cap) catch {
+        results[0] = 0;
+        return;
+    };
+    defer p.gpa.free(buf);
+    const n = s.read(buf);
+    results[0] = @intCast(caller.writeMemory(@intCast(args[1]), @intCast(cap), buf[0..n]) catch 0);
+}
+
+/// `procClose(handle)`: kill the subprocess; the slot stays null for stability.
+pub fn hProcClose(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32, results: []i32) void {
+    _ = caller;
+    _ = results;
+    const p: *WasmPlugin = @ptrCast(@alignCast(data.?));
+    const h = args[0];
+    if (streamAt(p, h)) |s| {
+        s.deinit();
+        p.proc_streams.items[@intCast(h)] = null;
+    }
+}
+
 /// Perm-gated (proc + timer): run `<cmd>` off the frame thread and insert its
 /// stdout at the cursor when it finishes — rebased if the buffer moved,
 /// authored as this plugin's peer. The membrane form of shell.zig's

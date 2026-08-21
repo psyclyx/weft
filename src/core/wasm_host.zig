@@ -206,6 +206,10 @@ pub fn defineImports(linker: *wasm.Linker, p: *WasmPlugin) !void {
     try d(linker, "wl_net_connect", 6, 1, sessions.hNetConnect, p);
     try d(linker, "wl_net_send", 3, 0, sessions.hNetSend, p);
     try d(linker, "wl_net_close", 1, 0, sessions.hNetClose, p);
+    try d(linker, "wl_proc_spawn", 2, 1, proc_host.hProcSpawn, p);
+    try d(linker, "wl_proc_send", 3, 0, proc_host.hProcSend, p);
+    try d(linker, "wl_proc_read", 3, 1, proc_host.hProcRead, p);
+    try d(linker, "wl_proc_close", 1, 0, proc_host.hProcClose, p);
     try d(linker, "wl_proc_to_buffer", 4, 0, proc_host.hProcToBuffer, p);
     try d(linker, "wl_proc_append_buffer", 4, 0, proc_host.hProcAppendBuffer, p);
     try d(linker, "wl_proc_filter", 4, 0, proc_host.hProcFilter, p);

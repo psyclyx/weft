@@ -18,6 +18,7 @@ const async_loop = @import("../async.zig");
 const position = @import("../position.zig");
 const repl_session = @import("../repl_session.zig");
 const net_session = @import("../net_session.zig");
+const proc_stream = @import("../proc_stream.zig");
 const Pool = @import("../task.zig").Pool;
 
 // The host-import table operates on `WasmPlugin` (principal() routes edits
@@ -135,6 +136,11 @@ sessions: std.ArrayList(?*repl_session.Session) = .empty,
 /// Live network connections this plugin opened (design §6.5), same handle/
 /// lifecycle model as `sessions`.
 net_sessions: std.ArrayList(?*net_session.Session) = .empty,
+/// Raw persistent subprocess streams (`wl_proc_spawn`), indexed by handle. Unlike
+/// `sessions` (which stream into a buffer), these hand raw stdout bytes back to
+/// the guest via `wl_proc_read` — the transport an in-guest protocol client
+/// (the `lsp` plugin) deframes. Null slot once closed (handles stay stable).
+proc_streams: std.ArrayList(?*proc_stream.ProcStream) = .empty,
 
 // ── Pick (built incrementally between begin/end, then opened) ──
 pick_prompt: std.ArrayList(u8) = .empty,
@@ -227,6 +233,8 @@ pub fn deinit(self: *WasmPlugin) void {
     self.sessions.deinit(gpa);
     for (self.net_sessions.items) |maybe| if (maybe) |s| s.deinit(); // shut + join
     self.net_sessions.deinit(gpa);
+    for (self.proc_streams.items) |maybe| if (maybe) |s| s.deinit(); // kill + join
+    self.proc_streams.deinit(gpa);
     self.stampsClear();
     self.stamps.deinit(gpa);
     self.queryCapsClear();
