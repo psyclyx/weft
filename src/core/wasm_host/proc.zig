@@ -14,8 +14,7 @@ const file = @import("../file.zig");
 
 const shared = @import("plugin.zig");
 const WasmPlugin = shared.WasmPlugin;
-const perm_proc = shared.perm_proc;
-const perm_timer = shared.perm_timer;
+const requirePerm = shared.requirePerm;
 
 /// A deferred shell insert, owned across the frame→pool→frame hop. Holds no
 /// plugin pointer — it re-resolves the doc + peer by name at delivery, so it
@@ -42,14 +41,12 @@ fn streamAt(p: *WasmPlugin, h: i32) ?*proc_stream.ProcStream {
     return p.proc_streams.items[@intCast(h)];
 }
 
-/// `procSpawn(cmd) -> handle` (or -1). Spawns a persistent subprocess inheriting
-/// the host environ + cwd; its stdout is buffered for `wl_proc_read`.
+/// `procSpawn(cmd) -> handle` (perm proc, trap on deny) (or -1 if unavailable).
+/// Spawns a persistent subprocess inheriting the host environ + cwd; its
+/// stdout is buffered for `wl_proc_read`.
 pub fn hProcSpawn(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32, results: []i32) void {
     const p: *WasmPlugin = @ptrCast(@alignCast(data.?));
-    if (!p.perms[perm_proc]) {
-        results[0] = -1;
-        return;
-    }
+    if (!requirePerm(p, caller, .proc)) return;
     const pool = p.pool orelse {
         results[0] = -1;
         return;
@@ -134,8 +131,9 @@ pub fn hProcClose(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32, re
 pub fn hShellInsert(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32, results: []i32) void {
     _ = results;
     const p: *WasmPlugin = @ptrCast(@alignCast(data.?));
-    // The perm model: dropped (no ghost) unless the plugin declared proc+timer.
-    if (!p.perms[perm_proc] or !p.perms[perm_timer]) return;
+    // Trap on deny — no ghost second result if the plugin didn't request both.
+    if (!requirePerm(p, caller, .proc)) return;
+    if (!requirePerm(p, caller, .timer)) return;
     const loop = p.loop orelse return;
     const gpa = p.gpa;
     const cmd = caller.readMemory(gpa, @intCast(args[0]), @intCast(args[1])) catch return;
@@ -219,7 +217,8 @@ const ProcJob = struct {
 pub fn hProcToBuffer(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32, results: []i32) void {
     _ = results;
     const p: *WasmPlugin = @ptrCast(@alignCast(data.?));
-    if (!p.perms[perm_proc] or !p.perms[perm_timer]) return;
+    if (!requirePerm(p, caller, .proc)) return;
+    if (!requirePerm(p, caller, .timer)) return;
     const loop = p.loop orelse return;
     const gpa = p.gpa;
     const cmd = caller.readMemory(gpa, @intCast(args[0]), @intCast(args[1])) catch return;
@@ -247,7 +246,8 @@ pub fn hProcToBuffer(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32,
 pub fn hProcAppendBuffer(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32, results: []i32) void {
     _ = results;
     const p: *WasmPlugin = @ptrCast(@alignCast(data.?));
-    if (!p.perms[perm_proc] or !p.perms[perm_timer]) return;
+    if (!requirePerm(p, caller, .proc)) return;
+    if (!requirePerm(p, caller, .timer)) return;
     const loop = p.loop orelse return;
     const gpa = p.gpa;
     const cmd = caller.readMemory(gpa, @intCast(args[0]), @intCast(args[1])) catch return;
@@ -356,7 +356,8 @@ var filter_counter: usize = 0;
 pub fn hProcFilter(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32, results: []i32) void {
     _ = results;
     const p: *WasmPlugin = @ptrCast(@alignCast(data.?));
-    if (!p.perms[perm_proc] or !p.perms[perm_timer]) return;
+    if (!requirePerm(p, caller, .proc)) return;
+    if (!requirePerm(p, caller, .timer)) return;
     const loop = p.loop orelse return;
     const gpa = p.gpa;
     const cmd = caller.readMemory(gpa, @intCast(args[0]), @intCast(args[1])) catch return;

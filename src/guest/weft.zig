@@ -992,8 +992,12 @@ pub fn procFilter(cmd: []const u8, r: Range) void {
 }
 
 // ── fs (perm-gated fs_read / fs_write) — local, cwd-relative ──────────
-/// Read a file into `scratch` (valid until the next read call), or null (denied
-/// / not found / too big). Perm: fs_read.
+// A missing perm never reaches these as -1/null: the host traps the call
+// outright (doc/north-star-plan.md §2.4 review C9), so a plugin that hasn't
+// requested the perm never even gets back here. The degrade values below are
+// for legitimate misses (not found / too big / not a directory) only.
+/// Read a file into `scratch` (valid until the next read call), or null (not
+/// found / too big). Perm: fs_read.
 pub fn fsRead(fpath: []const u8) ?[]const u8 {
     const n = wl_fs_read(p(fpath.ptr), @intCast(fpath.len), p(&scratch), scratch.len);
     if (n < 0) return null;
@@ -1008,7 +1012,7 @@ pub fn fsExists(fpath: []const u8) FsKind {
         1 => .file,
         2 => .dir,
         3 => .other,
-        else => .none, // 0 absent, -1 denied → treat as absent
+        else => .none, // 0 absent
     };
 }
 /// Replace a file with `bytes`. Perm: fs_write. Returns success.
@@ -1022,7 +1026,7 @@ pub fn fsAppend(fpath: []const u8, bytes: []const u8) bool {
 /// List a directory at `authority` (locus): "here" for the local fs; a peer/
 /// shell authority once the collab transport is wired. Entries newline-joined,
 /// directories with a trailing `/`, into `scratch` (valid until the next read).
-/// null = denied / unresolved authority / not a directory. Perm: fs_read.
+/// null = unresolved authority / not a directory. Perm: fs_read.
 pub fn fsList(authority: []const u8, dir: []const u8) ?[]const u8 {
     const n = wl_fs_list(p(authority.ptr), @intCast(authority.len), p(dir.ptr), @intCast(dir.len), p(&scratch), scratch.len);
     if (n < 0) return null;

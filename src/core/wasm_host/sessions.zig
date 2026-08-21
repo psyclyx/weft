@@ -8,20 +8,17 @@ const wasm = @import("../wasm.zig");
 
 const shared = @import("plugin.zig");
 const WasmPlugin = shared.WasmPlugin;
-const perm_net = shared.perm_net;
-const perm_proc = shared.perm_proc;
-const perm_timer = shared.perm_timer;
+const requirePerm = shared.requirePerm;
 
 const repl_session = @import("../repl_session.zig");
 
-/// Start a persistent REPL: `<cmd>` runs under /bin/sh, its output streaming
-/// into the named comint buffer. Returns a session handle, or -1.
+/// Start a persistent REPL (perm proc+timer, trap on deny): `<cmd>` runs
+/// under /bin/sh, its output streaming into the named comint buffer. Returns
+/// a session handle, or -1 if unavailable.
 pub fn hReplStart(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32, results: []i32) void {
     const p: *WasmPlugin = @ptrCast(@alignCast(data.?));
-    if (!p.perms[perm_proc] or !p.perms[perm_timer]) {
-        results[0] = -1;
-        return;
-    }
+    if (!requirePerm(p, caller, .proc)) return;
+    if (!requirePerm(p, caller, .timer)) return;
     const pool = p.pool orelse {
         results[0] = -1;
         return;
@@ -93,14 +90,12 @@ pub fn drainReplSessions(p: *WasmPlugin) bool {
 
 const net_session = @import("../net_session.zig");
 
-/// net.connect (perm net): dial `host:port` — TLS verifying `sni` when non-empty
-/// — streaming the socket into buffer `name`. Returns a handle, or -1.
+/// net.connect (perm net, trap on deny): dial `host:port` — TLS verifying
+/// `sni` when non-empty — streaming the socket into buffer `name`. Returns a
+/// handle, or -1 if unavailable.
 pub fn hNetConnect(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32, results: []i32) void {
     const p: *WasmPlugin = @ptrCast(@alignCast(data.?));
-    if (!p.perms[perm_net]) {
-        results[0] = -1;
-        return;
-    }
+    if (!requirePerm(p, caller, .net)) return;
     const pool = p.pool orelse {
         results[0] = -1;
         return;

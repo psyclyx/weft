@@ -12,17 +12,13 @@ const file = @import("../file.zig");
 
 const shared = @import("plugin.zig");
 const WasmPlugin = shared.WasmPlugin;
-const perm_fs_read = shared.perm_fs_read;
-const perm_fs_write = shared.perm_fs_write;
+const requirePerm = shared.requirePerm;
 
-/// `fs.read(path)` (perm fs_read): read a file into the guest, returning the
-/// byte count, or -1 (denied / not found / too big for the buffer).
+/// `fs.read(path)` (perm fs_read, trap on deny): read a file into the guest,
+/// returning the byte count, or -1 (not found / too big for the buffer).
 pub fn hFsRead(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32, results: []i32) void {
     const p: *WasmPlugin = @ptrCast(@alignCast(data.?));
-    if (!p.perms[perm_fs_read]) {
-        results[0] = -1;
-        return;
-    }
+    if (!requirePerm(p, caller, .fs_read)) return;
     const path = caller.readMemory(p.gpa, @intCast(args[0]), @intCast(args[1])) catch {
         results[0] = -1;
         return;
@@ -39,15 +35,12 @@ pub fn hFsRead(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32, resul
     });
 }
 
-/// `fs.exists(path)` (perm fs_read): what a cwd-relative path is without
-/// reading it — 0 absent, 1 file, 2 dir, 3 other; -1 denied. The clean
-/// primitive behind project-root detection (climb to the nearest `.git`).
+/// `fs.exists(path)` (perm fs_read, trap on deny): what a cwd-relative path is
+/// without reading it — 0 absent, 1 file, 2 dir, 3 other. The clean primitive
+/// behind project-root detection (climb to the nearest `.git`).
 pub fn hFsExists(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32, results: []i32) void {
     const p: *WasmPlugin = @ptrCast(@alignCast(data.?));
-    if (!p.perms[perm_fs_read]) {
-        results[0] = -1;
-        return;
-    }
+    if (!requirePerm(p, caller, .fs_read)) return;
     const path = caller.readMemory(p.gpa, @intCast(args[0]), @intCast(args[1])) catch {
         results[0] = -1;
         return;
@@ -56,13 +49,11 @@ pub fn hFsExists(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32, res
     results[0] = @intFromEnum(file.statKind(p.gpa, path));
 }
 
-/// `fs.write(path, bytes)` (perm fs_write): replace a file. 0 ok / -1 denied.
+/// `fs.write(path, bytes)` (perm fs_write, trap on deny): replace a file. 0
+/// ok / -1 on failure.
 pub fn hFsWrite(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32, results: []i32) void {
     const p: *WasmPlugin = @ptrCast(@alignCast(data.?));
-    if (!p.perms[perm_fs_write]) {
-        results[0] = -1;
-        return;
-    }
+    if (!requirePerm(p, caller, .fs_write)) return;
     const path = caller.readMemory(p.gpa, @intCast(args[0]), @intCast(args[1])) catch {
         results[0] = -1;
         return;
@@ -80,13 +71,11 @@ pub fn hFsWrite(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32, resu
     results[0] = 0;
 }
 
-/// `fs.append(path, bytes)` (perm fs_write): append to a file (capture). 0/-1.
+/// `fs.append(path, bytes)` (perm fs_write, trap on deny): append to a file
+/// (capture). 0 ok / -1 on failure.
 pub fn hFsAppend(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32, results: []i32) void {
     const p: *WasmPlugin = @ptrCast(@alignCast(data.?));
-    if (!p.perms[perm_fs_write]) {
-        results[0] = -1;
-        return;
-    }
+    if (!requirePerm(p, caller, .fs_write)) return;
     const path = caller.readMemory(p.gpa, @intCast(args[0]), @intCast(args[1])) catch {
         results[0] = -1;
         return;
@@ -104,17 +93,15 @@ pub fn hFsAppend(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32, res
     results[0] = 0;
 }
 
-/// `fs.list(authority, path, out, cap)` (perm fs_read) → n or -1. Locus-routed:
-/// `"here"` lists the LOCAL path via rooted_fs (confined to that dir); `.shell`/
-/// `.peer` authorities route to ShellFs / the peer_fs client once the collab
-/// transport is wired (they return -1 here, so a guest degrades, never reads the
-/// wrong locus). Directories keep a trailing `/`; entries are newline-joined.
+/// `fs.list(authority, path, out, cap)` (perm fs_read, trap on deny) → n or
+/// -1. Locus-routed: `"here"` lists the LOCAL path via rooted_fs (confined to
+/// that dir); `.shell`/`.peer` authorities route to ShellFs / the peer_fs
+/// client once the collab transport is wired (they return -1 here, so a guest
+/// degrades, never reads the wrong locus). Directories keep a trailing `/`;
+/// entries are newline-joined.
 pub fn hFsList(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32, results: []i32) void {
     const p: *WasmPlugin = @ptrCast(@alignCast(data.?));
-    if (!p.perms[perm_fs_read]) {
-        results[0] = -1;
-        return;
-    }
+    if (!requirePerm(p, caller, .fs_read)) return;
     const auth = caller.readMemory(p.gpa, @intCast(args[0]), @intCast(args[1])) catch {
         results[0] = -1;
         return;
@@ -149,17 +136,15 @@ pub fn hFsList(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32, resul
     results[0] = @intCast(caller.writeMemory(@intCast(args[4]), @intCast(args[5]), listing) catch 0);
 }
 
-/// `fs.list_async(authority, path, dest)` (perm fs_read) → 0 queued / -1. The
-/// async remote door: for a `"peer"` authority, queue a LIST that the frame
-/// loop posts over the connected session and delivers into the `dest` buffer
-/// (round-2 D1 — never a blocking round-trip on the frame thread). A local
-/// authority uses the synchronous `fs.list` instead, so this returns -1 for it.
+/// `fs.list_async(authority, path, dest)` (perm fs_read, trap on deny) → 0
+/// queued / -1. The async remote door: for a `"peer"` authority, queue a LIST
+/// that the frame loop posts over the connected session and delivers into the
+/// `dest` buffer (round-2 D1 — never a blocking round-trip on the frame
+/// thread). A local authority uses the synchronous `fs.list` instead, so this
+/// returns -1 for it.
 pub fn hFsListAsync(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32, results: []i32) void {
     const p: *WasmPlugin = @ptrCast(@alignCast(data.?));
-    if (!p.perms[perm_fs_read]) {
-        results[0] = -1;
-        return;
-    }
+    if (!requirePerm(p, caller, .fs_read)) return;
     const auth = caller.readMemory(p.gpa, @intCast(args[0]), @intCast(args[1])) catch {
         results[0] = -1;
         return;

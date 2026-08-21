@@ -7,6 +7,7 @@
 
 const std = @import("std");
 const Document = @import("../Document.zig");
+const wasm = @import("../wasm.zig");
 
 // The lifecycle side (wasm_abi) owns the plugin type; the handlers operate on
 // it. The two @import each other (Zig permits the file-level cycle) — routing
@@ -19,6 +20,45 @@ pub const perm_fs_write = 1;
 pub const perm_net = 2;
 pub const perm_proc = 3;
 pub const perm_timer = 4;
+
+/// The membrane's one grant-gate vocabulary (doc/architecture.md §2.4 /
+/// doc/north-star-plan.md review C9), enum-closed so a new perm can't be
+/// checked without a name for its trap message.
+pub const Perm = enum(u32) {
+    fs_read = perm_fs_read,
+    fs_write = perm_fs_write,
+    net = perm_net,
+    proc = perm_proc,
+    timer = perm_timer,
+
+    fn label(self: Perm) []const u8 {
+        return switch (self) {
+            .fs_read => "fs_read",
+            .fs_write => "fs_write",
+            .net => "net",
+            .proc => "proc",
+            .timer => "timer",
+        };
+    }
+};
+
+/// The membrane's ONE deny path: every perm-gated host import calls this
+/// before doing anything else. Granted → returns true, the site proceeds.
+/// Denied → traps the guest's call right here (`caller.trap`, wasm.zig) and
+/// returns false so the site's own `if (!requirePerm(...)) return;` reads as
+/// the whole gate — there is no second way to spell "denied" at a call site,
+/// so a site that forgets this call has no perm check at all (loud in
+/// review), and no site can hand back a success-shaped value on denial
+/// (doc/north-star-plan.md §2.4: "denied effects trap", review C9/[FIX 10]).
+/// The trap message names the plugin and the missing capability; it surfaces
+/// through the same guest-trap log path every other wasm trap already gets
+/// (`wasm.zig`'s `checkErr`/`checkTrap`), so denial is loud exactly like any
+/// other guest fault.
+pub fn requirePerm(p: *WasmPlugin, caller: *wasm.Caller, comptime perm: Perm) bool {
+    if (p.perms[@intFromEnum(perm)]) return true;
+    caller.trap("plugin '{s}' denied capability '{s}' (not requested in describe())", .{ p.name, perm.label() });
+    return false;
+}
 
 /// The parent process's environment, so a `proc` child inherits PATH (nix
 /// tools like `rg`/`zig` are NOT on /bin/sh's built-in path). Set once at

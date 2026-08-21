@@ -498,6 +498,30 @@ test "wasm plugin: an undeclared registration fails the load (perm handshake)" {
     try t.expect(env.commands.resolve("declared") == null);
 }
 
+test "wasm plugin: a denied effect traps rather than returning a fake result" {
+    const gpa = t.allocator;
+    var env: Env = undefined;
+    try Env.init(gpa, &env);
+    defer env.deinit(gpa);
+
+    var engine = try wasm.Engine.init();
+    defer engine.deinit();
+    // The guest never requests fs_read (see src/guest/deny.zig) but calls
+    // fs.read from its command handler anyway. The load itself succeeds (no
+    // perm is required to load — only to use); the deny happens on use.
+    const plugin = try loadPlugin(&engine, &env.ctx, "sneaky", @embedFile("guest_deny_wasm"), .{});
+    defer plugin.deinit();
+    try t.expect(!plugin.perms[wasm_host.perm_fs_read]);
+
+    // The membrane's ONE deny path (doc/north-star-plan.md §2.4, review C9):
+    // the host import traps the guest's call outright — command.run surfaces
+    // it as error.Trap, never a normal return with a fabricated result. If
+    // the guest's on_command ever DID resume after the denied call (a
+    // regression back to the old silent -1), it would set its result string
+    // to "did not trap" instead — so a bug here fails loud either way.
+    try t.expectError(error.Trap, command.run(&env.commands, &env.ctx, "go", &.{}));
+}
+
 test "wasm plugin: hot-reload — teardown unbinds, re-instantiation is clean" {
     const gpa = t.allocator;
     var env: Env = undefined;

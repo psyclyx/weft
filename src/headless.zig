@@ -41,32 +41,8 @@ pub fn run(gpa: std.mem.Allocator, args: Args, environ: std.process.Environ) !vo
         }
     }
 
-    // The minimal command surface the LSP adapter's tick needs.
-    var commands: core.command.Commands = .empty;
-    defer commands.deinit(gpa);
-    var keymap: core.Keymap = .empty;
-    defer keymap.deinit(gpa);
-    var pick_state: core.Pick = .empty;
-    defer pick_state.deinit(gpa);
     var caps = capability.Caps.init(gpa, core.task.nowNs);
     defer caps.deinit();
-    var actions = core.Actions.init(gpa);
-    defer actions.deinit();
-    var quit = false;
-    var echo_line: std.ArrayList(u8) = .empty;
-    defer echo_line.deinit(gpa);
-    var ctx: core.command.Context = .{
-        .gpa = gpa,
-        .buffers = &buffers,
-        .commands = &commands,
-        .keymap = &keymap,
-        .actions = &actions,
-        .pick = &pick_state,
-        .caps = &caps,
-        .quit = &quit,
-        .echo = &echo_line,
-    };
-
     var blob: ?session.BlobServer = null;
     defer if (blob) |*b| b.close();
     if (editor.backingPath()) |p| blob = session.BlobServer.openPath(p) catch null;
@@ -99,7 +75,7 @@ pub fn run(gpa: std.mem.Allocator, args: Args, environ: std.process.Environ) !vo
     var park: std.atomic.Value(u32) = .init(0);
     var last_change_ns: u64 = 0;
     var seen_commits: usize = 0;
-    while (!quit) {
+    while (true) {
         // Adopt newly accepted connections, then tick everyone;
         // broadcast falls out of per-peer frontier tracking (a batch
         // merged from one peer moves the head, so every other Collab
