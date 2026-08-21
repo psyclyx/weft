@@ -25,9 +25,22 @@
 //! priority" idea at two latencies; `race` actions are declared here as a
 //! reserved policy and delegate to `Caps` at their (few, UI-bound) call sites,
 //! folded in incrementally rather than migrated wholesale.
+//!
+//! **F5 Container adapter (north-star-plan §2.2/§5/§6 W1).** `pick`
+//! resolution is re-expressed as a query against `container.Container`: each
+//! `provide()` call also binds a Container `Binding` on a slot named for the
+//! action; `resolve()` queries `container.resolveOne` instead of hand-rolling
+//! the priority/specificity scan. This is a TRANSITIONAL adapter — named
+//! deletion gate: **W3** (north-star-plan §6), once the UI mesh's own
+//! Container-native slots exist and this module's own tie-break machinery
+//! (the `When`/`Provider` scan this comment used to describe) can be deleted
+//! outright rather than delegated. Tie-break behavior for EXISTING data is
+//! preserved exactly — see `resolve`'s and `provide`'s doc comments for how.
 
 const std = @import("std");
 const Allocator = std.mem.Allocator;
+const facts = @import("facts.zig");
+const container_mod = @import("container.zig");
 
 const Actions = @This();
 
@@ -59,20 +72,9 @@ pub const When = struct {
     /// a stable per-BUFFER signal, so a projection scopes its `save` (and other
     /// context intents) to its own identity, in any mode.
     tool: ?[]const u8 = null,
-
-    /// How specific this predicate is — the count of constraints it imposes.
-    /// Breaks priority ties in favour of the narrower provider, so a
-    /// `lang:zig` bind beats an unconstrained default at equal priority.
-    fn specificity(self: When) u8 {
-        return @as(u8, @intFromBool(self.mode != null)) + @intFromBool(self.lang != null) + @intFromBool(self.tool != null);
-    }
-
-    fn holds(self: When, ctx: Ctx) bool {
-        if (self.mode) |m| if (!std.mem.eql(u8, m, ctx.mode)) return false;
-        if (self.lang) |l| if (!std.mem.eql(u8, l, ctx.lang)) return false;
-        if (self.tool) |tl| if (!std.mem.eql(u8, tl, ctx.tool)) return false;
-        return true;
-    }
+    // Specificity (constraint count) and eligibility ("holds") used to be
+    // hand-rolled methods here; both are now `facts.Predicate`'s job (via
+    // `predicateFromWhen` + `container.Container`) — see `provide`/`resolve`.
 };
 
 /// The ambient facts a `When` tests against — snapshotted at fire time from the
@@ -99,6 +101,10 @@ const Provider = struct {
     priority: i32,
     command: []u8, // owned — the concrete command this provider runs
     owner: []u8, // owned — plugin/config name, for teardown
+    /// Owned backing array for the Container `Binding.predicate` this
+    /// provider bound (`predicateFromWhen`'s `.all` slice — empty but still
+    /// allocated when `when` is unconstrained, so `deinit` is uniform).
+    predicate_owned: []facts.Predicate = &.{},
 
     fn deinit(self: *Provider, gpa: Allocator) void {
         if (self.when.mode) |m| gpa.free(m);
@@ -106,6 +112,7 @@ const Provider = struct {
         if (self.when.tool) |tl| gpa.free(tl);
         gpa.free(self.command);
         gpa.free(self.owner);
+        gpa.free(self.predicate_owned);
     }
 };
 
@@ -126,9 +133,20 @@ pub const Trampoline = struct { name: []u8 };
 gpa: Allocator,
 actions: std.StringArrayHashMapUnmanaged(Action) = .empty,
 trampolines: std.ArrayList(*Trampoline) = .empty,
+/// The Container this module adapts onto (F5, W1). Every `pick` action name
+/// is a `first_wins` slot; every `provide()`'d provider is a `Binding`.
+container: container_mod.Container = undefined,
+/// Assigns each `provide()`d provider its `decl_index` basis — monotonic,
+/// GLOBAL across every action name, and NEVER reused, mirroring
+/// `capability.zig`'s `next_provider_seq`. Using a live provider-list length
+/// instead (the pre-fix approach) reuses indices after
+/// `unregisterByOwnerPrefix` shrinks that list, inverting same-owner
+/// tie-breaks for providers registered after a teardown — see `provide`'s
+/// doc and the regression test for the exact reproduction.
+next_provide_seq: u64 = 0,
 
 pub fn init(gpa: Allocator) Actions {
-    return .{ .gpa = gpa };
+    return .{ .gpa = gpa, .container = container_mod.Container.init(gpa) };
 }
 
 pub fn deinit(self: *Actions) void {
@@ -143,6 +161,7 @@ pub fn deinit(self: *Actions) void {
         gpa.destroy(tr);
     }
     self.trampolines.deinit(gpa);
+    self.container.deinit();
 }
 
 /// Record action `name` with a dispatch `policy`, idempotently, WITHOUT binding
@@ -156,6 +175,11 @@ pub fn ensure(self: *Actions, name: []const u8, policy: Policy) !void {
     if (!gop.found_existing) {
         gop.key_ptr.* = try gpa.dupe(u8, name);
         gop.value_ptr.* = .{ .policy = policy };
+        // Every action name is a `first_wins` Container slot, `pick` or
+        // `race` alike — `race` actions never get providers bound here
+        // (Caps binds its own Container instead), so the declaration is
+        // inert for them, but idempotent/harmless to make.
+        try self.container.declareSlot(.{ .name = name, .shape = .action, .composition = .first_wins });
     } else if (gop.value_ptr.policy != policy) {
         std.log.warn("action '{s}': declared {s} but re-declared {s}; keeping the first", .{ name, @tagName(gop.value_ptr.policy), @tagName(policy) });
     }
@@ -204,6 +228,15 @@ pub const ProvideSpec = struct {
     /// Policy to auto-declare the action with if it doesn't exist yet — a
     /// provider can arrive before its `declare` (load order is free).
     declare_policy: Policy = .pick,
+    /// The Container tier this provider binds at (north-star-plan §2.2/§6
+    /// W1: "action provides carry Container Tier.imported vs Tier.config").
+    /// Defaults to `.plugin` — every `.wasm`/JS-plugin call site through
+    /// `capability.zig`-style registration keeps today's uniform-plugin-tier
+    /// behavior unchanged. `manifest.zig`'s config-manifest apply is the ONE
+    /// caller that now passes a REAL tier (`.config` for the root manifest,
+    /// `.imported` for a `weft.use`-imported one) — the config-plane
+    /// stratification the W2b-pending note anticipated, arriving here first.
+    tier: container_mod.Tier = .plugin,
 };
 
 /// Register a provider for `spec.action`, auto-declaring the action if needed
@@ -225,6 +258,13 @@ pub fn provide(self: *Actions, spec: ProvideSpec) !void {
         try self.ensure(spec.action, spec.declare_policy); // auto-declare (load order is free)
     }
     const gop = self.actions.getOrPut(gpa, spec.action) catch unreachable; // present now
+    // Reserve capacity BEFORE any owned memory exists, so the append at the
+    // end (after Container has already accepted the binding) is infallible
+    // — otherwise a late OOM there would leave the Container referencing a
+    // Provider that was never actually stored (see the ownership note by
+    // `appendAssumeCapacity` below).
+    try gop.value_ptr.providers.ensureUnusedCapacity(gpa, 1);
+
     var p: Provider = .{
         .when = .{},
         .priority = spec.priority,
@@ -235,7 +275,89 @@ pub fn provide(self: *Actions, spec: ProvideSpec) !void {
     if (spec.when.mode) |m| p.when.mode = try gpa.dupe(u8, m);
     if (spec.when.lang) |l| p.when.lang = try gpa.dupe(u8, l);
     if (spec.when.tool) |tl| p.when.tool = try gpa.dupe(u8, tl);
-    try gop.value_ptr.providers.append(gpa, p);
+
+    const pred = try predicateFromWhen(gpa, p.when);
+    p.predicate_owned = ownedBacking(pred);
+
+    // decl_index: the Container's canonical tie-break convention is
+    // "earlier decl_index wins" (container.zig's `betterThan`); THIS
+    // module's pre-Container contract was "later registration wins"
+    // (resolve's old doc comment, still true from a caller's view).
+    // Subtracting a MONOTONIC, NEVER-REUSED `next_provide_seq` (not a live
+    // provider-list length — that reuses indices after a teardown shrinks
+    // the list, inverting same-owner tie-breaks; see the field doc and
+    // "action: decl_index survives teardown...") makes "later registered"
+    // mean "smaller decl_index" mean "wins", reproducing the legacy
+    // contract exactly through the new convention, permanently — not just
+    // until the next `unregisterByOwnerPrefix`.
+    const seq = self.next_provide_seq;
+    self.next_provide_seq += 1;
+    const decl_index: u32 = std.math.maxInt(u32) - @as(u32, @intCast(seq));
+
+    // Container.bind borrows `pred`/`p.command`/`p.owner` — all owned by
+    // `p`. Bind BEFORE storing `p`: on failure (SlotCollision, or OOM
+    // growing the container's own bindings list), `errdefer p.deinit`
+    // above cleans up `p`'s memory and nothing has been stored anywhere
+    // that could reference it afterward. On success, the capacity
+    // reserved above makes storing `p` itself infallible, so the
+    // Container's new binding is never left pointing at a Provider that
+    // didn't end up recorded.
+    try self.container.bind(.{
+        .slot = self.actions.getKey(spec.action).?,
+        .provider = .{ .command = p.command },
+        .predicate = pred,
+        .priority = spec.priority,
+        // TIER: `spec.tier`, defaulting to `.plugin` — the uniform-tier
+        // deviation from §2.2's "tier from owner class" language is now
+        // scoped to callers that DON'T pass a real tier (every `.wasm`/
+        // JS-plugin capability registration path), not a blanket rule.
+        // `manifest.zig`'s config-manifest `apply` is the one caller that
+        // now passes `.config`/`.imported` — the W2b-pending stratification
+        // arriving for the config plane specifically (north-star-plan §6):
+        // a config manifest's OWN providers stay relatively ordered by
+        // priority/specificity exactly as before (they're all the SAME
+        // tier, `.config`), so the "config sets a low-priority default"
+        // pattern within one manifest is unaffected; only a DIFFERENT
+        // tier's provider (an imported manifest, or a future plugin-tier
+        // provide) now loses to config's on tier before priority is even
+        // consulted — which is the point.
+        .tier = spec.tier,
+        .owner = p.owner,
+        .decl_index = decl_index,
+    });
+    gop.value_ptr.providers.appendAssumeCapacity(p);
+}
+
+/// Build the Container predicate for `when`: each present field is one
+/// conjunct (`.all` of 0..3 leaves — 0 = unconstrained, matches always,
+/// specificity 0, exactly the old `When{}` default provider's standing).
+/// Always heap-allocates (even the empty case) so `Provider.deinit`'s
+/// `gpa.free` is uniform regardless of how many fields were set.
+fn predicateFromWhen(gpa: Allocator, w: When) Allocator.Error!facts.Predicate {
+    var buf: [3]facts.Predicate = undefined;
+    var n: usize = 0;
+    if (w.mode) |m| {
+        buf[n] = .{ .mode = m };
+        n += 1;
+    }
+    if (w.lang) |l| {
+        buf[n] = .{ .lang = l };
+        n += 1;
+    }
+    if (w.tool) |tl| {
+        buf[n] = .{ .tool = tl };
+        n += 1;
+    }
+    const owned = try gpa.alloc(facts.Predicate, n);
+    @memcpy(owned, buf[0..n]);
+    return .{ .all = owned };
+}
+
+fn ownedBacking(p: facts.Predicate) []facts.Predicate {
+    return switch (p) {
+        .all => |k| @constCast(k),
+        else => &.{},
+    };
 }
 
 /// The concrete command an action resolves to in `ctx`, or null when no
@@ -244,25 +366,29 @@ pub fn provide(self: *Actions, spec: ProvideSpec) !void {
 /// over an unconstrained default), then toward the later registration — a pure
 /// function of the provider set and the context, never load-order dependent
 /// beyond the deliberate same-(priority,specificity) last-wins.
+///
+/// F5 adapter: a Container query (`container.resolveOne`) rather than the
+/// hand-rolled scan this doc comment used to describe verbatim — see
+/// `provide`'s `decl_index` note for how "later registration wins" survives
+/// the swap. On the dispatch-latency hot path (`e2e/latency`'s `action`
+/// category): no allocation, matching the original scan's profile.
 pub fn resolve(self: *const Actions, name: []const u8, ctx: Ctx) ?[]const u8 {
-    const a = self.actions.getPtr(name) orelse return null;
-    var best: ?*const Provider = null;
-    for (a.providers.items) |*p| {
-        if (!p.when.holds(ctx)) continue;
-        if (best) |b| {
-            if (p.priority < b.priority) continue;
-            if (p.priority == b.priority and
-                p.when.specificity() < b.when.specificity()) continue;
-        }
-        best = p;
-    }
-    return if (best) |b| b.command else null;
+    const b = self.container.resolveOne(name, factsOf(ctx)) orelse return null;
+    return b.provider.command;
+}
+
+fn factsOf(ctx: Ctx) facts.Facts {
+    return .{ .mode = ctx.mode, .lang = ctx.lang, .tool = ctx.tool };
 }
 
 /// Remove every provider registered by an owner whose name starts with
 /// `owner_prefix` (plugin teardown). Actions themselves persist (they are
-/// names, cheap and idempotent to re-declare).
+/// names, cheap and idempotent to re-declare). Container bindings are
+/// dropped FIRST — they borrow each provider's `command`/`owner` strings, so
+/// removing them before `Provider.deinit` frees that memory is required, not
+/// cosmetic (see container.zig's `unbindOwnerPrefix` doc).
 pub fn unregisterByOwnerPrefix(self: *Actions, owner_prefix: []const u8) void {
+    self.container.unbindOwnerPrefix(owner_prefix);
     for (self.actions.values()) |*a| {
         var i: usize = 0;
         while (i < a.providers.items.len) {
@@ -349,6 +475,31 @@ test "action: owner-prefix teardown drops a plugin's providers" {
     acts.unregisterByOwnerPrefix("zig-tools#");
     // The plugin's provider is gone; the config default remains.
     try t.expectEqualStrings("eval-default", acts.resolve("eval", .{ .mode = "normal", .lang = "zig" }).?);
+}
+
+test "action: decl_index survives teardown — later-wins even after an unrelated owner's providers are removed" {
+    // Reproduces the exact sequence a review found broken when decl_index
+    // was derived from the live (shrinkable) provider-list length: provide
+    // B1, provide C1, provide B2, unregister C (shrinking the list C1 sat
+    // in), provide B3. C gets a distinct priority so its OWN registration
+    // is a legitimate, non-colliding bind (an unconstrained same-priority
+    // C would rightly collide with B's default provider — a different,
+    // correct behavior this test isn't about); what matters is only that C
+    // occupies a slot in the provider list before being torn down. The
+    // three B-owned providers tie on (tier,priority,specificity) — same
+    // owner, so decl_index alone decides — and the legacy, still-documented
+    // contract is "later registration wins": B3 must win, not B2.
+    var acts = Actions.init(t.allocator);
+    defer acts.deinit();
+
+    try acts.provide(.{ .action = "eval", .command = "b1", .owner = "B" });
+    try acts.provide(.{ .action = "eval", .command = "c1", .owner = "C", .priority = 5 });
+    try acts.provide(.{ .action = "eval", .command = "b2", .owner = "B" });
+    try t.expectEqualStrings("c1", acts.resolve("eval", .{ .mode = "normal" }).?); // C's higher priority wins for now
+
+    acts.unregisterByOwnerPrefix("C");
+    try acts.provide(.{ .action = "eval", .command = "b3", .owner = "B" });
+    try t.expectEqualStrings("b3", acts.resolve("eval", .{ .mode = "normal" }).?);
 }
 
 test "action: race intents are enumerable, and reject pick providers" {

@@ -9,6 +9,9 @@ const std = @import("std");
 const command = @import("command.zig");
 const Context = command.Context;
 const Value = command.Value;
+const facts = @import("facts.zig");
+const container_mod = @import("container.zig");
+const Actions = @import("action.zig");
 
 const ok: Value = .nil;
 
@@ -244,7 +247,55 @@ fn cEcho(ctx: *Context, args: struct { text: []const u8 }) anyerror!Value {
     return ok;
 }
 
+fn providerLabel(p: container_mod.ProviderRef) []const u8 {
+    return switch (p) {
+        .command => |c| c,
+        .caps_provider => |r| r.id,
+        .value => |c| c,
+    };
+}
+
+/// `explain-binding <slot>` — the Container's `explain` (north-star-plan
+/// §2.2/§6 W1) wired to a REAL consumer, not a debug printf: echoes which
+/// bindings on an ACTION slot are eligible for the active buffer's facts and
+/// why the winner won. The facts mirror `Context.actionCtx` (same
+/// mode/lang/tool) plus the buffer's path/name, so `explain-binding eval`
+/// answers exactly the question `Actions.resolve("eval", ...)` would have
+/// asked.
+fn cExplainBinding(ctx: *Context, args: struct { slot: []const u8 }) anyerror!Value {
+    const f: facts.Facts = .{
+        .path = ctx.editor().backingPath(),
+        .name = ctx.buffers.active().name,
+        .mode = ctx.keymap.currentMode(),
+        .lang = Actions.langOfName(ctx.buffers.active().name),
+        .tool = ctx.editor().toolName() orelse "",
+    };
+    var ex = try ctx.actions.container.explain(ctx.gpa, args.slot, f);
+    defer ex.deinit();
+
+    ctx.echo.clearRetainingCapacity();
+    if (ex.eligible.len == 0) {
+        try ctx.echo.appendSlice(ctx.gpa, "explain-binding: no eligible binding");
+        return ok;
+    }
+    const w = ex.eligible[ex.winner.?];
+    var buf: [256]u8 = undefined;
+    const msg = std.fmt.bufPrint(&buf, "{s}: {d} eligible, winner={s} (owner={s} tier={s} priority={d} specificity={d}){s}", .{
+        args.slot,
+        ex.eligible.len,
+        providerLabel(w.provider),
+        w.owner,
+        @tagName(w.tier),
+        w.priority,
+        w.specificity,
+        if (ex.collision) " COLLISION" else "",
+    }) catch "explain-binding: (result too long to display)";
+    try ctx.echo.appendSlice(ctx.gpa, msg);
+    return ok;
+}
+
 const table = [_]command.Command{
+    command.define("explain-binding", "Explain which Container binding wins an action slot for the active buffer's facts.", cExplainBinding),
     command.define("insert-text", "Insert text at the cursor (replaces the selection).", cInsertText),
     command.define("buffer-next", "Focus the next buffer (cyclic).", cBufferNext),
     command.define("buffer-back", "Return to the previously active buffer (tool `q`).", cBufferBack),
@@ -316,6 +367,58 @@ pub fn install(gpa: std.mem.Allocator, commands: *command.Commands, keymap: *@im
     try keymap.setTextCommand(gpa, "default", "insert-text");
 
     try @import("pick.zig").install(gpa, commands, keymap);
+}
+
+// ── Tests ───────────────────────────────────────────────────────────
+
+const t = std.testing;
+
+test "builtins: explain-binding is a real consumer of Container.explain" {
+    const gpa = t.allocator;
+    const task = @import("task.zig");
+    var pool = try task.Pool.init(gpa, .{ .threads = 1 });
+    defer pool.deinit();
+    var buffers = try @import("Buffers.zig").init(gpa, pool, "user");
+    defer buffers.deinit(gpa);
+    var keymap: @import("Keymap.zig") = .empty;
+    defer keymap.deinit(gpa);
+    var pick: @import("pick.zig").Pick = .empty;
+    defer pick.deinit(gpa);
+    var caps = @import("capability.zig").Caps.init(gpa, task.nowNs);
+    defer caps.deinit();
+    var actions = Actions.init(gpa);
+    defer actions.deinit();
+    var quit = false;
+    var echo_line: std.ArrayList(u8) = .empty;
+    defer echo_line.deinit(gpa);
+    var commands: command.Commands = .empty;
+    defer commands.deinit(gpa);
+    try install(gpa, &commands, &keymap, &actions);
+
+    // A second, higher-priority "save" provider (as a projection like dired
+    // would register), so `explain-binding` has more than one eligible
+    // binding to report on.
+    try actions.provide(.{ .action = "save", .command = "dired-save", .priority = 10, .owner = "dired" });
+
+    var ctx: Context = .{
+        .gpa = gpa,
+        .buffers = &buffers,
+        .commands = &commands,
+        .keymap = &keymap,
+        .actions = &actions,
+        .pick = &pick,
+        .caps = &caps,
+        .quit = &quit,
+        .echo = &echo_line,
+    };
+
+    _ = try command.run(&commands, &ctx, "explain-binding", &.{.{ .string = "save" }});
+    try t.expect(std.mem.indexOf(u8, echo_line.items, "dired-save") != null);
+    try t.expect(std.mem.indexOf(u8, echo_line.items, "2 eligible") != null);
+
+    // An unknown slot: no eligible bindings, no crash, an honest echo.
+    _ = try command.run(&commands, &ctx, "explain-binding", &.{.{ .string = "nonexistent-slot" }});
+    try t.expect(std.mem.indexOf(u8, echo_line.items, "no eligible binding") != null);
 }
 
 test {

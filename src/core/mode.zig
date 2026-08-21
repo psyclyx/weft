@@ -230,7 +230,9 @@ pub const Engine = struct {
     }
 };
 
-fn globMatch(pattern: []const u8, text: []const u8) bool {
+/// Shared with `facts.zig` (W1): the merged-fact `Predicate.glob` case reuses
+/// this exact algorithm rather than forking a second copy.
+pub fn globMatch(pattern: []const u8, text: []const u8) bool {
     // Iterative `*`/`?` glob with backtracking — O(len·len) worst case,
     // fine for paths; no regex engine (footgun rule: predicates stay data).
     var p: usize = 0;

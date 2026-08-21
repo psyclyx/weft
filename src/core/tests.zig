@@ -738,6 +738,60 @@ test "syntax: instant-tier definition + symbols providers race through registry"
     }
 }
 
+test "capability: two languages' tree-sitter providers bind without collision and fire only for their own language" {
+    // Regression for a W1 review finding: `syntax.registerProviders` scopes
+    // `edit/definition`/`edit/symbols-document` (both `first_wins`
+    // composition) by a SINGLE extension via `predicateFromExtensions`. A
+    // `.any`-blind `disjoint()` treated that single-extension `any(...)` as
+    // one opaque, never-disjoint atom, so a .zig buffer's provider and a
+    // .nix buffer's provider — same slot, same default priority, same
+    // specificity, different owners — looked like an unresolvable
+    // collision. `Caps.register` (via `registerProviders`) would then fail
+    // for the SECOND language attached in a session, which propagates
+    // through buffer attach into the `open` command. This exercises the
+    // REAL `Caps.register` path (not a synthetic Container test) for
+    // exactly that two-language scenario.
+    const gpa = t.allocator;
+    var host: TestHost = undefined;
+    try TestHost.init(gpa, &host);
+    defer host.deinit(gpa);
+
+    var doc_zig = try Document.init(gpa, "user");
+    defer doc_zig.deinit(gpa);
+    try doc_zig.insert(gpa, 0, "fn f() void {}\n");
+    const zig_spec = core.syntax.forPath("a.zig").?;
+    const zig_syn = try core.syntax.Syntax.create(gpa, zig_spec, &doc_zig);
+    defer zig_syn.destroy();
+    try core.syntax.registerProviders(&host.caps, zig_syn);
+
+    var doc_nix = try Document.init(gpa, "user");
+    defer doc_nix.deinit(gpa);
+    try doc_nix.insert(gpa, 0, "{ x = 1; }\n");
+    const nix_spec = core.syntax.forPath("b.nix").?;
+    const nix_syn = try core.syntax.Syntax.create(gpa, nix_spec, &doc_nix);
+    defer nix_syn.destroy();
+    // Must NOT error — the exact call that used to trap with SlotCollision.
+    try core.syntax.registerProviders(&host.caps, nix_syn);
+
+    // Each fires only against its OWN language's buffer: exactly one
+    // provider matches and answers per fire, never both.
+    {
+        const id = (try host.caps.fire(.symbols, &doc_zig, "a.zig", .{})).?;
+        defer host.caps.finish(id);
+        try t.expectEqual(@as(usize, 1), host.caps.session(id).?.all().len);
+    }
+    {
+        const id = (try host.caps.fire(.symbols, &doc_nix, "b.nix", .{})).?;
+        defer host.caps.finish(id);
+        try t.expectEqual(@as(usize, 1), host.caps.session(id).?.all().len);
+    }
+    {
+        const id = (try host.caps.fire(.definition, &doc_zig, "a.zig", .{ .offset = 0 })).?;
+        defer host.caps.finish(id);
+        try t.expectEqual(@as(usize, 1), host.caps.session(id).?.all().len);
+    }
+}
+
 test "syntax: highlight feed publishes stamped bulk into its layer" {
     const gpa = t.allocator;
     var host: TestHost = undefined;

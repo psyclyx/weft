@@ -27,6 +27,8 @@ test {
     _ = @import("core/tests.zig");
     _ = @import("core/markdown.zig");
     _ = @import("core/identity.zig");
+    _ = @import("core/facts.zig");
+    _ = @import("core/container.zig");
     _ = @import("gfx/stats.zig");
     _ = @import("gfx/layout.zig");
     _ = view;

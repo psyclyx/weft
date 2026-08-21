@@ -17,6 +17,17 @@
 //! Composition lives here, chosen by the profile: merge-ranked
 //! (completion), first-wins-by-priority (hover/definition/symbols/
 //! actions), union (references, diagnostics-by-layer).
+//!
+//! **F5 Container adapter (north-star-plan §2.2/§5/§6 W1).** The "which
+//! providers match this fire" step — the extension filter formerly inline in
+//! `fire` — is now a `container.Container` query: `register` binds each
+//! provider as a `Binding` (predicate built from its `extensions`,
+//! composition from `Kind.composition()`), and `fire` asks the Container for
+//! the eligible set instead of hand-scanning `self.providers`. Sessions,
+//! restamping, and the race/merge machinery below are UNTOUCHED — this is
+//! the "only the match step delegates" adapter the plan calls for. TRANSIENT:
+//! named deletion gate **W3** (north-star-plan §6), once the UI mesh's own
+//! Container-native slots exist.
 
 const std = @import("std");
 const Allocator = std.mem.Allocator;
@@ -25,6 +36,8 @@ const assert = std.debug.assert;
 const Document = @import("Document.zig");
 const layers_mod = @import("layers.zig");
 const position = @import("position.zig");
+const facts = @import("facts.zig");
+const container_mod = @import("container.zig");
 
 pub const Shape = enum { query, feed, action };
 
@@ -232,14 +245,24 @@ pub const Provider = struct {
     extensions: [][]u8 = &.{},
     data: ?*anyopaque = null,
     handler: *const fn (data: ?*anyopaque, caps: *Caps, req: *const Request) anyerror!void,
+    /// Owned backing array for the Container `Binding.predicate` this
+    /// provider bound (`predicateFromExtensions`'s `.all`/`.any` slice).
+    predicate_owned: []facts.Predicate = &.{},
+    /// Per-registration unique key (see `container_mod.ProviderRef.caps_provider`'s
+    /// doc for why `id` alone is not enough to find this struct back).
+    seq: u64 = 0,
 
     fn deinit(self: *Provider, gpa: Allocator) void {
         gpa.free(self.capability);
         gpa.free(self.id);
         for (self.extensions) |e| gpa.free(e);
         gpa.free(self.extensions);
+        gpa.free(self.predicate_owned);
     }
 
+    /// Superseded by the Container query `fire` now uses (see the file doc's
+    /// F5 note) — kept as a small, still-correct standalone predicate for
+    /// any future direct introspection; not on the dispatch path anymore.
     fn matches(self: *const Provider, path: ?[]const u8) bool {
         if (self.extensions.len == 0) return true;
         const p = path orelse return false;
@@ -249,6 +272,56 @@ pub const Provider = struct {
         return false;
     }
 };
+
+/// Map a capability NAME (not just the closed `Kind` enum) to the Container
+/// composition its slot should declare. Recognized `Kind` names use
+/// `Kind.composition()`; anything else (a host-defined capability outside
+/// the closed enum) defaults to `.first_wins` — the collision-checked,
+/// single-winner default is the safer unknown-composition guess.
+fn compositionForCapability(name: []const u8) container_mod.Composition {
+    inline for (std.meta.tags(Kind)) |k| {
+        if (std.mem.eql(u8, k.capabilityName(), name)) {
+            return switch (k.composition()) {
+                .merge_ranked => .merge_ranked,
+                .union_all => .ordered_union,
+                .first_wins => .first_wins,
+            };
+        }
+    }
+    return .first_wins;
+}
+
+/// The Container predicate for a provider's extension list: empty = matches
+/// every document (`.all` of zero conjuncts, specificity 0, same standing as
+/// the pre-Container `matches`'s empty-extensions case); ONE extension = a
+/// bare `.ext` leaf (cheaper than wrapping a single-element `.any`, and
+/// `explain` reads it more plainly — `disjoint` no longer NEEDS the `.any`
+/// wrapper to prove two single-extension providers apart, but there is no
+/// reason to allocate one either); more than one = an OR across extensions
+/// (`.any`), matching `matches`'s exact semantics — `facts.disjoint` unwraps
+/// `.any` correctly (universally, per its doc), so two providers each
+/// scoped to a different language's extensions never collide at bind time.
+/// `exts` must already be the provider's OWNED, duped extension strings (not
+/// the caller's borrowed `spec.extensions`) — the returned predicate's
+/// leaves reference them directly. Neither the empty nor single-extension
+/// case allocates; `Provider.deinit`'s `gpa.free(self.predicate_owned)` is
+/// still safe either way (`ownedBacking` returns `&.{}` for a bare leaf, and
+/// freeing an empty slice is always a no-op).
+fn predicateFromExtensions(gpa: Allocator, exts: []const []u8) Allocator.Error!facts.Predicate {
+    if (exts.len == 0) return .{ .all = &.{} };
+    if (exts.len == 1) return .{ .ext = exts[0] };
+    const owned = try gpa.alloc(facts.Predicate, exts.len);
+    for (exts, 0..) |e, i| owned[i] = .{ .ext = e };
+    return .{ .any = owned };
+}
+
+fn ownedBacking(p: facts.Predicate) []facts.Predicate {
+    return switch (p) {
+        .all => |k| @constCast(k),
+        .any => |k| @constCast(k),
+        else => &.{},
+    };
+}
 
 pub const Session = struct {
     kind: Kind,
@@ -312,9 +385,16 @@ pub const Caps = struct {
     layers: layers_mod.Layers = .empty,
     /// Monotonic clock, injectable for tests.
     now: *const fn () u64,
+    /// The Container this module adapts onto (F5, W1) — see the file doc.
+    /// Every capability name is a slot; every `register`ed provider is a
+    /// `Binding` whose owner is the provider's `id`.
+    container: container_mod.Container = undefined,
+    /// Assigns each `register`ed provider its unique `seq` — see
+    /// `Provider.seq`'s doc.
+    next_provider_seq: u64 = 0,
 
     pub fn init(gpa: Allocator, now: *const fn () u64) Caps {
-        return .{ .gpa = gpa, .now = now };
+        return .{ .gpa = gpa, .now = now, .container = container_mod.Container.init(gpa) };
     }
 
     pub fn deinit(self: *Caps) void {
@@ -329,6 +409,7 @@ pub const Caps = struct {
         }
         self.sessions.deinit(self.gpa);
         self.layers.deinit(self.gpa);
+        self.container.deinit();
     }
 
     // ── Registration ────────────────────────────────────────────
@@ -356,21 +437,63 @@ pub const Caps = struct {
             exts[i] = try gpa.dupe(u8, e);
             filled += 1;
         }
-        try self.providers.append(gpa, .{
-            .capability = try gpa.dupe(u8, spec.capability),
-            .id = try gpa.dupe(u8, spec.id),
+        const cap_owned = try gpa.dupe(u8, spec.capability);
+        errdefer gpa.free(cap_owned);
+        const id_owned = try gpa.dupe(u8, spec.id);
+        errdefer gpa.free(id_owned);
+        const pred = try predicateFromExtensions(gpa, exts);
+        errdefer gpa.free(ownedBacking(pred));
+
+        // Reserve capacity first so storing the provider after a successful
+        // bind is infallible — same ownership reasoning as action.zig's
+        // `provide` (see its comment): a late OOM here must never leave the
+        // Container referencing a provider that didn't end up stored.
+        try self.providers.ensureUnusedCapacity(gpa, 1);
+
+        const seq = self.next_provider_seq;
+        self.next_provider_seq += 1;
+
+        try self.container.declareSlot(.{
+            .name = cap_owned,
+            .shape = .query,
+            .composition = compositionForCapability(cap_owned),
+        });
+        try self.container.bind(.{
+            .slot = cap_owned,
+            .provider = .{ .caps_provider = .{ .id = id_owned, .seq = seq } },
+            .predicate = pred,
+            .priority = spec.priority,
+            // TIER: uniform `.plugin` for every capability provider — an
+            // APPROVED, W2b-PENDING deviation from §2.2's "tier from owner
+            // class" language, not the end state; see action.zig's `provide`
+            // for the identical call and the full reasoning (real tier
+            // stratification needs manifest-carried owner identity, which
+            // doesn't exist yet).
+            .tier = .plugin,
+            .owner = id_owned,
+        });
+
+        self.providers.appendAssumeCapacity(.{
+            .capability = cap_owned,
+            .id = id_owned,
             .latency = spec.latency,
             .placement = spec.placement,
             .priority = spec.priority,
             .extensions = exts,
             .data = spec.data,
             .handler = spec.handler,
+            .predicate_owned = ownedBacking(pred),
+            .seq = seq,
         });
     }
 
     /// Remove every provider and feed whose id starts with `id_prefix`
-    /// (plugin teardown).
+    /// (plugin teardown). Container bindings (owner = provider id) are
+    /// dropped FIRST — they borrow `capability`/`id` from the Provider
+    /// structs `deinit` is about to free; see container.zig's
+    /// `unbindOwnerPrefix` doc for why the order matters.
     pub fn unregisterByIdPrefix(self: *Caps, id_prefix: []const u8) void {
+        self.container.unbindOwnerPrefix(id_prefix);
         var i: usize = 0;
         while (i < self.providers.items.len) {
             if (std.mem.startsWith(u8, self.providers.items[i].id, id_prefix)) {
@@ -416,14 +539,34 @@ pub const Caps = struct {
         timeout_ns: u64 = 2 * std.time.ns_per_s,
     };
 
+    /// The Provider a Container binding's `caps_provider` ref names, found
+    /// by its unique `seq` — NOT by `id` (see `container_mod.ProviderRef`'s
+    /// doc: `syntax.registerProviders` legitimately registers the same id
+    /// once per buffer, so an id-only lookup could return the WRONG
+    /// buffer's provider — a real bug this `seq` scan exists to avoid, not
+    /// defensive paranoia).
+    fn findProviderBySeq(self: *const Caps, seq: u64) ?*const Provider {
+        for (self.providers.items) |*p| {
+            if (p.seq == seq) return p;
+        }
+        return null;
+    }
+
     /// Fire `kind` at every matching provider. Returns a session id
     /// (finish it) — or null when no provider matches.
     pub fn fire(self: *Caps, kind: Kind, doc: *Document, path: ?[]const u8, opts: FireOptions) !?u64 {
         const gpa = self.gpa;
+        const cap_name = kind.capabilityName();
+        const elig = try self.container.eligible(gpa, cap_name, .{ .path = path });
+        defer gpa.free(elig);
         var matched: std.ArrayList(*const Provider) = .empty;
         defer matched.deinit(gpa);
-        for (self.providers.items) |*p| {
-            if (std.mem.eql(u8, p.capability, kind.capabilityName()) and p.matches(path)) {
+        for (elig) |b| {
+            const ref = switch (b.provider) {
+                .caps_provider => |r| r,
+                else => continue,
+            };
+            if (self.findProviderBySeq(ref.seq)) |p| {
                 try matched.append(gpa, p);
             }
         }
