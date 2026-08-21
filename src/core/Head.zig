@@ -87,7 +87,28 @@ dot: DotRepeat = .empty,
 focused_pane: u32 = 0,
 focused_pane_gen: u32 = 0,
 
+/// This head's transient/menu stack — the DURABLE record `Ctx.
+/// pushTransient`/`TransientHandle.deinit` push and pop. Distinct from
+/// `menu_return` above (guest `enterMode` bookkeeping, keyed by mode name,
+/// no push/pop discipline): this is an explicit LIFO stack a caller must
+/// pop in order, so an out-of-order or missing pop is DETECTABLE
+/// (`hasOpenTransients`) rather than silently corrupting which mode a
+/// later pop lands on. See `ctx.zig`'s module doc ("Paired transients") and
+/// `TransientFrame`'s doc below.
+transient_stack: std.ArrayList(TransientFrame) = .empty,
+
 pub const empty: Head = .{};
+
+/// One live "paired transient" push (`ctx.zig`'s `Ctx.pushTransient`) —
+/// north-star-plan §2.1's "transient/menu modes are structurally paired
+/// (`ctx.push(transient)` returns a value whose going-out-of-scope IS the
+/// pop)". `mode` is what this frame entered; `return_to` is the mode to
+/// restore on pop, captured at push time (so nested pushes each remember
+/// their OWN prior mode, not a shared global "previous").
+pub const TransientFrame = struct {
+    mode: []u8,
+    return_to: []u8,
+};
 
 /// One recorded keystroke of a dot-repeat change: the keyspec plus the
 /// printable text it inserted (fixed-size — a dot-repeat change is a few
@@ -159,6 +180,11 @@ pub fn deinit(self: *Head, gpa: Allocator) void {
     self.resolved_group.deinit(gpa);
     self.pick.deinit(gpa);
     self.echo.deinit(gpa);
+    for (self.transient_stack.items) |frame| {
+        gpa.free(frame.mode);
+        gpa.free(frame.return_to);
+    }
+    self.transient_stack.deinit(gpa);
     self.* = .{};
 }
 
@@ -230,6 +256,68 @@ pub fn enterMode(self: *Head, gpa: Allocator, km: *const Keymap, mode: []const u
 /// recorded return target for.
 pub fn menuReturn(self: *const Head, mode: []const u8) ?[]const u8 {
     return self.menu_return.get(mode);
+}
+
+/// Push a paired transient scope: remember the CURRENT mode as this frame's
+/// return target, enter `mode` (via `enterMode`, so menu-return bookkeeping
+/// still applies), and return the new frame's stack depth — the token
+/// `popTransientMode` verifies before restoring. See `ctx.zig`'s
+/// `Ctx.pushTransient` (the intended caller) and this struct's
+/// `transient_stack` doc.
+/// A real, enforced cap on simultaneously open transients (review F2: the
+/// capacity limit belongs HERE, at push time — "a real limit surfaced at
+/// push time, not capture time" — not as a silent drop deep inside
+/// `ctx.zig`'s scope-capture bookkeeping). `ctx.zig`'s `max_scopes` budgets
+/// exactly `max_open_transients` transient slots on top of the 6 fixed
+/// scopes, so a `Ctx.capture` can never overflow from a LEGITIMATELY
+/// pushed transient stack — see that module's `ScopeList.append` doc for
+/// the belt-and-suspenders behavior if this invariant is ever broken by a
+/// future change instead.
+pub const max_open_transients: usize = 6;
+pub const TransientPushError = error{TooManyOpenTransients};
+
+pub fn pushTransientMode(self: *Head, gpa: Allocator, km: *const Keymap, mode: []const u8) (Allocator.Error || TransientPushError)!usize {
+    if (self.transient_stack.items.len >= max_open_transients) {
+        std.log.warn("head: refusing to open a {d}th nested transient/menu ('{s}') — pop one first", .{ self.transient_stack.items.len + 1, mode });
+        return error.TooManyOpenTransients;
+    }
+    const ret = try gpa.dupe(u8, self.mode);
+    errdefer gpa.free(ret);
+    const held = try gpa.dupe(u8, mode);
+    errdefer gpa.free(held);
+    try self.transient_stack.append(gpa, .{ .mode = held, .return_to = ret });
+    errdefer _ = self.transient_stack.pop();
+    try self.enterMode(gpa, km, mode);
+    return self.transient_stack.items.len - 1;
+}
+
+/// Pop a transient pushed by `pushTransientMode`, restoring its recorded
+/// return mode — but ONLY if `depth` names the current TOP of the stack
+/// (LIFO). A stale or out-of-order `depth` (something else was pushed on
+/// top and never popped) is refused with `error.OutOfOrder` rather than
+/// restoring the wrong frame's target; an empty stack (already popped, or
+/// never pushed) is `error.Empty`. Both are non-fatal for the caller to
+/// log-and-continue (`TransientHandle.deinit` does exactly that) — the
+/// POINT is that the mode never silently lands somewhere the pusher didn't
+/// intend.
+pub const TransientPopError = error{ OutOfOrder, Empty };
+pub fn popTransientMode(self: *Head, gpa: Allocator, depth: usize) (Allocator.Error || TransientPopError)!void {
+    if (self.transient_stack.items.len == 0) return error.Empty;
+    if (depth != self.transient_stack.items.len - 1) return error.OutOfOrder;
+    const frame = self.transient_stack.pop().?;
+    defer {
+        gpa.free(frame.mode);
+        gpa.free(frame.return_to);
+    }
+    try self.setMode(gpa, frame.return_to);
+}
+
+/// Whether this head has a transient pushed but never popped — the
+/// leak-detecting query north-star-plan §6 W2b gate (d) asks for ("a
+/// transient/menu push cannot outlive its scope ... else runtime-paired
+/// with a leak-detecting test").
+pub fn hasOpenTransients(self: *const Head) bool {
+    return self.transient_stack.items.len != 0;
 }
 
 /// The command bound to `key` in this head's current mode (chain-walked),

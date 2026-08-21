@@ -82,6 +82,22 @@ pub fn deinit(self: *Pick, gpa: Allocator) void {
     self.* = .{};
 }
 
+/// Cancel an active pick WITHOUT the ordinary `close()`'s mode-restore side
+/// effect (`ctx.head.setMode(prev_mode)`/menu-return popping) and WITHOUT
+/// wiping learned frecency (unlike `deinit`). A no-op when nothing is
+/// active. This is `clear`'s exact cleanup, made reachable without a
+/// `command.Context` — for a caller that is about to determine the head's
+/// resting mode some OTHER way (`core.System.Host.swap`, north-star-plan
+/// §6 W2b: a pick's items/acceptor are minted against the system a head is
+/// LEAVING, so a live pick cannot be carried across a system re-bind; the
+/// swap cancels it here, then lands the mode via the target system's own
+/// resting rule, not via this pick's `prev_mode`, which named a mode in the
+/// system being left).
+pub fn cancelActive(self: *Pick, gpa: Allocator) void {
+    if (!self.active) return;
+    self.clear(gpa);
+}
+
 fn clear(self: *Pick, gpa: Allocator) void {
     // Stop the async source first: it hands off ownership (refcount)
     // and never blocks, so this is legal inside the input hot

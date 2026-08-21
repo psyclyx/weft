@@ -90,18 +90,28 @@ pub const Context = struct {
         return self.buffers.active();
     }
 
+    /// Reach the captured `Ctx` value (north-star-plan §2.1/§6 W2b) — the
+    /// door this struct GAINS to the scope/principal/locus/grant snapshot,
+    /// without `Context` itself becoming that value. `Context` stays the
+    /// PLUMBING struct (long-lived pointers into the system's live state);
+    /// `ctx.Ctx` is the immutable-facts snapshot taken fresh each call —
+    /// see `ctx.zig`'s module doc for the full split and why `Ctx.setMode`
+    /// is now the policy door for dispatch-path mode changes.
+    pub fn capturedCtx(self: *Context) @import("ctx.zig").Ctx {
+        return @import("ctx.zig").Ctx.capture(self);
+    }
+
     /// Snapshot the ambient facts an action's `when` predicate resolves
     /// against: the active keymap mode + the active buffer's language (its
-    /// name's extension). Borrowed for the duration of the call.
+    /// name's extension) + the active buffer's tool-backing identity.
+    /// north-star-plan §2.1/§6 W2b: this is now literally a VIEW of the
+    /// captured `Ctx` — `capturedCtx().mergedFacts()` — rather than its own
+    /// ad hoc re-snapshot, so a Container resolution call site and an
+    /// `action.resolve` call site read the exact same merged facts for the
+    /// same dispatch. Borrowed for the duration of the call.
     pub fn actionCtx(self: *Context) Actions.Ctx {
-        return .{
-            .mode = self.head.currentMode(),
-            .lang = Actions.langOfName(self.buffers.active().name),
-            // The active buffer's projection identity — the reliable per-buffer
-            // signal a projection scopes `save`/etc. by (mode changes as you
-            // edit; the tool-backing doesn't). "" when not a tool projection.
-            .tool = self.editor().toolName() orelse "",
-        };
+        const facts = self.capturedCtx().mergedFacts();
+        return .{ .mode = facts.mode, .lang = facts.lang, .tool = facts.tool };
     }
 
     /// Fire a `race`-policy intent (completion/hover/definition/…): the capability

@@ -1549,7 +1549,7 @@ test "quickjs: every shipped example config evals without a JS error" {
     const file = @import("file.zig");
     const paths = [_][]const u8{
         "config/config.js", "config/config.northstar.js", "config/vim-minimal.js",
-        "config/helix.js",  "config/dual.js",
+        "config/helix.js",  "config/dual.js",             "config/agent-ux.js",
     };
     var engine = try wasm.Engine.init();
     defer engine.deinit();

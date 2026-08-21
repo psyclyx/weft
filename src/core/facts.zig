@@ -54,6 +54,13 @@ pub const Facts = struct {
     /// The active buffer's tool-backing identity, or "" when not a
     /// projection (`action.Ctx.tool`'s exact convention).
     tool: []const u8 = "",
+    /// The focused pane handle (north-star-plan §5 F4: "`pane` is a fact on
+    /// head scopes, `principal` is identity, never a scope axis"). Mirrors
+    /// `Head.focused_pane` — 0 is not a sentinel here either (see that
+    /// field's doc); a predicate that cares about a SPECIFIC pane compares
+    /// this against a value it already validated through
+    /// `window_layout.headFocus`, never against the bare default.
+    pane: u32 = 0,
 
     fn hasTag(self: Facts, tag: []const u8) bool {
         for (self.tags) |tg| if (std.mem.eql(u8, tg, tag)) return true;
