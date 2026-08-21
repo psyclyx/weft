@@ -620,9 +620,29 @@ keys for structural children; lists only for leaf sequences that never
 reparent; enforced by the graph facade's types; stemma sketch + property
 tests land before any W5 client models structure. Rationale for the record:
 this is the only representation where identity-preserving move is a
-register write, cycle checks are local, and concurrent reparent resolves by
-the same multi-value-register semantics ObjectDoc already has for maps —
-lists would wire the ferry disease into the substrate.
+register write and deletion composes as "trash is another parent" — lists
+would wire the ferry disease into the substrate.
+
+**F3 VALIDATED (2026-08-21)** — `lib/stemma/.../structure_sketch.zig`: 400
+seeded multi-replica schedules converge, stay acyclic, stay reachable;
+trash-resurrection preserves subtrees; no evidence against the decision.
+Two caveats for the real implementation, adversarially verified:
+1. *Cross-node cycle-breaking is a NEW mechanism, and its winner is not
+   ObjectDoc's.* Resolving a tree of parent-registers requires a single
+   replica-portable GLOBAL total order over all writes (Lamport per event,
+   ties by agent-name then seq) replayed once with per-write cycle
+   rejection — not the per-register MV rule ObjectDoc reuses for maps;
+   budget it as new. The effective parent is the last write in that order
+   whose application doesn't cycle — normally a causally-maximal
+   conflict-set member, but when every causally-dominant write would cycle,
+   the survivor is an earlier superseded write (in the limit, the create):
+   deterministic and convergent, but outside the conflict set.
+2. *Fractional order keys are not a free O(log N) lunch.* Random-scatter
+   insertion keeps keys short, but same-locus insertion grows keys linearly
+   (~N/8 bytes in the sketch); between two FIXED adjacent keys that Θ(N) is
+   an information-theoretic floor no immutable-label scheme escapes without
+   relabeling. A real implementation must periodically rebalance fragmented
+   sibling runs during compaction — a cleverer encoding cannot substitute.
 
 **F4 — DECIDED.** The seven scope kinds; `pane` is a fact on head scopes;
 `principal` is identity, never a scope axis.
