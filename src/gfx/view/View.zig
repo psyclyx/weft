@@ -427,15 +427,18 @@ pub fn build(
     try popup.drawSurfaces(self, scratch, &runs, &rects, hud, body_rect, caret_y);
     // The picker draws into its carved window-bottom dock (main cut it off
     // the window with cutBottom, so it cannot overlap panes or a status
-    // line). A completion pick anchors at the caret instead — a popup.
+    // line). A completion pick anchors at the caret instead — a `.caret`
+    // Surface (item/note columns + the selected row's docs as the linked
+    // info panel), laid out by the one generic caret-surface renderer.
     if (hud.pick) |p| {
         if (p.caret_anchor) |off|
-            try popup.drawPickAtCaret(self, scratch, &runs, &rects, p, off, body_rect)
+            try popup.drawPick(self, scratch, &runs, &rects, p, off, body_rect)
         else
             try popup.drawPickInto(self, scratch, &runs, &rects, p, pick_dock);
     }
-    // Hover info floats at the caret, above everything else.
-    if (hud.hover) |hv| try popup.drawHoverAtCaret(self, scratch, &runs, &rects, hv.text, hv.offset, body_rect);
+    // Hover info floats at the caret, above everything else — likewise a
+    // `.caret` Surface (one column, no selection) through the same renderer.
+    if (hud.hover) |hv| try popup.drawHover(self, scratch, &runs, &rects, hv.text, hv.offset, body_rect);
 
     // Thin pane dividers: a 1px line on each internal (shared) edge of
     // the pane's frame. Drawn on the frame boundary — outside the
