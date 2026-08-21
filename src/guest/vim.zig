@@ -319,6 +319,7 @@ const static_cmds = [_]Cmd{
     .{ .name = "vim-repeat-find-rev", .handler = repeatFindRev },
     .{ .name = "vim-replace-char", .handler = enterReplaceChar },
     .{ .name = "do-replace-char", .handler = doReplaceChar },
+    .{ .name = "vim-tilde", .handler = tildeCase },
     .{ .name = "do-find-f", .handler = doFindF },
     .{ .name = "do-find-F", .handler = doFindBigF },
     .{ .name = "do-find-t", .handler = doFindT },
@@ -504,6 +505,7 @@ export fn init() void {
         .{ "semicolon", "vim-repeat-find" }, // ; repeat last f/t
         .{ "comma", "vim-repeat-find-rev" }, //  , repeat reversed
         .{ "r", "vim-replace-char" }, // r<char> replace under cursor
+        .{ "asciitilde", "vim-tilde" }, // ~ toggle case under cursor
         .{ "C-d", "scroll-half-down" },
         .{ "C-u", "scroll-half-up" },
         .{ "C-f", "scroll-page-down" },
@@ -980,6 +982,26 @@ fn repeatFindRev() void {
     };
     var buf = [1]u8{last_find_char};
     findCharImpl(rev, buf[0..]);
+}
+
+/// `~` — toggle the case of the char(s) under the cursor and advance past them
+/// (count-aware: `3~`), bounded to the line. Non-letters just advance, no edit.
+fn tildeCase() void {
+    var n = consumeCount();
+    const l = weft.lineAt(weft.cursor());
+    var pos = weft.cursor();
+    while (n > 0 and pos < l.end) : (n -= 1) {
+        const s = weft.slice(pos, pos + 1);
+        if (s.len == 0) break;
+        const c = s[0];
+        const flipped: u8 = if (c >= 'a' and c <= 'z') c - 32 else if (c >= 'A' and c <= 'Z') c + 32 else c;
+        if (flipped != c) {
+            var buf = [1]u8{flipped};
+            weft.edit(.{ .start = pos, .end = pos + 1 }, buf[0..]);
+        }
+        pos += 1;
+    }
+    weft.jump(pos);
 }
 
 // ── r: replace the char(s) under the cursor with the next key ─────────

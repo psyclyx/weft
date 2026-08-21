@@ -274,6 +274,30 @@ test "authoring: `f` finds a char, `;` repeats it, `,` repeats reversed" {
     try t.expect(std.mem.indexOf(u8, disk, "foo.barbaz.qux") != null);
 }
 
+test "authoring: `~` toggles case under the cursor and advances (count-aware)" {
+    const gpa = t.allocator;
+    var app: App = undefined;
+    try app.init(gpa);
+    defer app.deinit();
+    const ed = &app.ed;
+
+    authorFile(ed, "tilde.txt",
+        \\Hello World
+        \\
+    );
+
+    // 5~ from the top flips the case of the first five chars ("Hello" → "hELLO").
+    ed.chord("g g");
+    ed.press("5", "");
+    ed.press("asciitilde", "");
+    ed.run("save");
+    ed.waitSave();
+
+    const disk = try core.file.readAlloc(gpa, "tilde.txt");
+    defer gpa.free(disk);
+    try t.expect(std.mem.indexOf(u8, disk, "hELLO World") != null);
+}
+
 test "authoring: `r` replaces the char under the cursor; `3r` replaces a run" {
     const gpa = t.allocator;
     var app: App = undefined;
