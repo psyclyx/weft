@@ -308,6 +308,7 @@ export fn init() void {
     // still saves, because the reconcile is scoped to the tool identity, not a
     // mode.)
     weft.setFallback("dired", "normal");
+    weft.restingMode("dired"); // *dired* rests in dired, not the normal it falls back to
     weft.bindKey("dired", "j", "cursor-down"); // fold-aware in core
     weft.bindKey("dired", "k", "cursor-up");
     weft.bindKey("dired", "Down", "cursor-down");

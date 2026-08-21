@@ -242,6 +242,40 @@ test "authoring: `>`/`<` indent operators — line, text object, visual" {
     }
 }
 
+test "authoring: switching back to an open file lands in an editable mode" {
+    const gpa = t.allocator;
+    var app: App = undefined;
+    try app.init(gpa);
+    defer app.deinit();
+    const ed = &app.ed;
+
+    // Open two files, then return to the first — the buffer we already have open.
+    authorFile(ed, "a.txt",
+        \\alpha
+        \\beta
+        \\
+    );
+    authorFile(ed, "b.txt",
+        \\gamma
+        \\
+    );
+    ed.runStr("open", "a.txt"); // switch BACK to the already-open buffer
+
+    // Before resting modes, this stranded you in `default` (baseMode overshot
+    // normal→default), vim keys dead. Now it's normal — and genuinely editable:
+    // dd removes the first line.
+    try t.expectEqualStrings("normal", ed.mode());
+    ed.chord("g g");
+    ed.chord("d d");
+    ed.run("save");
+    ed.waitSave();
+
+    const disk = try core.file.readAlloc(gpa, "a.txt");
+    defer gpa.free(disk);
+    try t.expect(std.mem.indexOf(u8, disk, "alpha") == null); // dd worked → editable
+    try t.expect(std.mem.indexOf(u8, disk, "beta") != null);
+}
+
 test "authoring: `f` finds a char, `;` repeats it, `,` repeats reversed" {
     const gpa = t.allocator;
     var app: App = undefined;

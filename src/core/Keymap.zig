@@ -77,6 +77,15 @@ sticky_menus: std.StringArrayHashMapUnmanaged(void) = .empty,
 /// (they go through Buffers.switchTo, not the guest/builtin setMode door).
 locked_modes: std.StringArrayHashMapUnmanaged(void) = .empty,
 
+/// Modes a buffer can REST in — the base editing mode (`normal`) and each tool
+/// projection (`dired`, `grep`, `output`, `emacs`, `helix-normal`). `baseMode`
+/// stops at the first of these in a mode's fallback chain, so leaving a buffer
+/// remembers its resting mode rather than overshooting to the root `default`
+/// (which would strand a revisited file in a mode with no editing keys). Locked
+/// modes are implicitly resting. Transient modes (visual/insert/op-pending/…) are
+/// NOT declared, so they resolve through to their base editing mode.
+resting_modes: std.StringArrayHashMapUnmanaged(void) = .empty,
+
 pub const empty: Keymap = .{};
 
 pub fn deinit(self: *Keymap, gpa: Allocator) void {
@@ -108,6 +117,8 @@ pub fn deinit(self: *Keymap, gpa: Allocator) void {
     self.sticky_menus.deinit(gpa);
     for (self.locked_modes.keys()) |k| gpa.free(k);
     self.locked_modes.deinit(gpa);
+    for (self.resting_modes.keys()) |k| gpa.free(k);
+    self.resting_modes.deinit(gpa);
     for (self.menu_return.keys(), self.menu_return.values()) |k, v| {
         gpa.free(k);
         gpa.free(v);
@@ -294,6 +305,12 @@ pub fn baseMode(self: *const Keymap, mode: []const u8) []const u8 {
         // base a menu now falls back to for its navigation keys, which would
         // wrongly make a menu's base a non-menu and get captured.
         if (self.isMenuMode(cur)) return cur;
+        // A RESTING mode is a buffer's base: `normal` and each tool projection
+        // (dired/grep/output/magit). Stop here so a transient mode (visual/
+        // insert) resolves to its editing base while a tool buffer keeps its own
+        // mode — WITHOUT overshooting `normal`→`default` to the root, which would
+        // strand a revisited file in the editing-less `default` mode.
+        if (self.isRestingMode(cur)) return cur;
         cur = self.parents.get(cur) orelse return cur;
     }
     return cur;
@@ -430,6 +447,19 @@ pub fn markLockedMode(self: *Keymap, gpa: Allocator, mode: []const u8) Allocator
 
 pub fn isLockedMode(self: *const Keymap, mode: []const u8) bool {
     return self.locked_modes.contains(mode);
+}
+
+/// Declare `mode` a RESTING mode — a mode a buffer settles in (see `resting_modes`
+/// + `baseMode`). Idempotent.
+pub fn markRestingMode(self: *Keymap, gpa: Allocator, mode: []const u8) Allocator.Error!void {
+    const gop = try self.resting_modes.getOrPut(gpa, mode);
+    if (!gop.found_existing) gop.key_ptr.* = try gpa.dupe(u8, mode);
+}
+
+/// A resting mode is one explicitly declared, or any LOCKED projection (which is
+/// always a buffer's resting mode).
+pub fn isRestingMode(self: *const Keymap, mode: []const u8) bool {
+    return self.resting_modes.contains(mode) or self.isLockedMode(mode);
 }
 
 /// Whether a within-buffer `setMode` to `target` is allowed from the CURRENT

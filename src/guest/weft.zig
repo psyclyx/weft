@@ -68,6 +68,7 @@ extern "weft" fn wl_set_fallback(m: u32, ml: u32, par: u32, pl: u32) void;
 extern "weft" fn wl_text_input(m: u32, ml: u32, c: u32, cl: u32, has: u32) void;
 extern "weft" fn wl_menu_mode(ptr: u32, len: u32) void;
 extern "weft" fn wl_locked_mode(ptr: u32, len: u32) void;
+extern "weft" fn wl_resting_mode(ptr: u32, len: u32) void;
 extern "weft" fn wl_declare_action(ptr: u32, len: u32) void;
 extern "weft" fn wl_provide(a: u32, al: u32, m: u32, ml: u32, l: u32, ll: u32, tl: u32, tll: u32, c: u32, cl: u32, prio: i32) void;
 extern "weft" fn wl_sticky_menu(ptr: u32, len: u32) void;
@@ -505,6 +506,13 @@ pub fn menuMode(mode: []const u8) void {
 /// just declares it (one line), never defensively handles the wrong-mode case.
 pub fn lockedMode(mode: []const u8) void {
     wl_locked_mode(p(mode.ptr), @intCast(mode.len));
+}
+/// Declare `mode` a RESTING mode — the base a buffer settles in: the editing base
+/// (`normal`) or a tool projection (`dired`, `output`, …). Leaving a buffer in a
+/// transient sub-mode (visual/insert) remembers this instead of overshooting to
+/// the root, so switching back doesn't strand you in an editing-less mode.
+pub fn restingMode(mode: []const u8) void {
+    wl_resting_mode(p(mode.ptr), @intCast(mode.len));
 }
 /// Declare `mode` a STICKY menu: stays open after a leaf key (flag-accumulating
 /// transients) instead of one-shot auto-popping. Implies `menuMode`.

@@ -132,6 +132,16 @@ pub fn hLockedMode(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32, r
     p.ctx.keymap.markLockedMode(p.gpa, mode) catch {};
 }
 
+/// `resting_mode(mode)`: declare a mode a buffer can rest in, so `baseMode` stops
+/// there instead of overshooting to the root `default`.
+pub fn hRestingMode(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32, results: []i32) void {
+    _ = results;
+    const p: *WasmPlugin = @ptrCast(@alignCast(data.?));
+    const mode = caller.readMemory(p.gpa, @intCast(args[0]), @intCast(args[1])) catch return;
+    defer p.gpa.free(mode);
+    p.ctx.keymap.markRestingMode(p.gpa, mode) catch {};
+}
+
 /// `sticky_menu(mode)`: mark a menu mode STICKY — it stays open after a leaf
 /// key (flag-accumulating transients) instead of one-shot auto-popping.
 pub fn hStickyMenu(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32, results: []i32) void {

@@ -33,6 +33,7 @@ export fn init() void {
     // the stack frame or compile error you're looking at — j/k walk, q goes back.
     // Fallback to normal (not locked) so the visit leaves cleanly into the file.
     weft.setFallback("output", "normal");
+    weft.restingMode("output"); // *output* rests in output, not the normal it falls back to
     weft.bindKey("output", "Return", "output-visit");
     weft.bindKey("output", "q", "buffer-back");
 }

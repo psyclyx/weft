@@ -37,6 +37,7 @@ export fn init() void {
     // the file's normal mode (a locked mode refuses to switch out; see
     // Keymap.mayLeaveLocked).
     weft.setFallback("grep", "normal");
+    weft.restingMode("grep"); // *grep* rests in grep, not the normal it falls back to
     weft.bindKey("grep", "Return", "grep-visit");
     weft.bindKey("grep", "j", "cursor-down");
     weft.bindKey("grep", "k", "cursor-up");

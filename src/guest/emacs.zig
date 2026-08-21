@@ -127,6 +127,7 @@ export fn init() void {
     // layer the emacs chords over it. No textInput override — text falls through
     // to default's insert-text (modeless).
     weft.setFallback("emacs", "default");
+    weft.restingMode("emacs"); // the base a file buffer rests in
 
     for (cmds) |c| _ = weft.register(c.name);
 

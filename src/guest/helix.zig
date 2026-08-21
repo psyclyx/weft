@@ -157,6 +157,7 @@ export fn init() void {
     weft.runStr2("set-cursor", "helix-op", "underline");
     weft.runStr2("cursor-blink", "helix-insert", "on");
 
+    weft.restingMode("helix-normal"); // the base a file buffer rests in
     weft.setMode("helix-normal");
 }
 

@@ -225,11 +225,8 @@ test "e2e/grep: Return on a result jumps to that file at that line" {
     defer ed.deinit();
     try loadWebIde(&ed);
 
-    // Put the files on disk WITHOUT opening them in weft, so visiting a result
-    // is a fresh open (lands in the editor's normal mode). (A separate quirk —
-    // revisiting an ALREADY-open buffer restores its remembered base mode, which
-    // baseMode currently walks past `normal` to `default`; that's the mode-leak
-    // class, out of scope here.)
+    // Put the files on disk WITHOUT opening them in weft, so the assertion below
+    // (dd deletes the matched line) is unambiguous — the token exists only here.
     {
         const r1 = try proj.oracle("printf 'const a = 1;\\nconst target = 42;\\nconst b = 2;\\n' > app.js");
         gpa.free(r1);

@@ -403,6 +403,7 @@ export fn on_pick_accept(pick_id: u32) void {
 
 export fn init() void {
     weft.setFallback("normal", "default");
+    weft.restingMode("normal"); // the base a file buffer rests in (not visual/insert)
     weft.setFallback("visual", "normal");
     weft.setFallback("insert", "default");
     weft.textInput("normal", null);
