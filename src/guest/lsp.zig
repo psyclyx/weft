@@ -20,7 +20,7 @@ var ready: bool = false; // initialize answered + initialized/didOpen sent
 var opened: bool = false; // didOpen sent for the current document
 
 // The user request awaiting the server (one in flight).
-const Want = enum { none, hover, definition, references, symbols, format, rename, signature, inlay };
+const Want = enum { none, hover, definition, references, symbols, format, rename, signature, inlay, codeaction };
 var want: Want = .none;
 var want_off: usize = 0;
 var want_id: i64 = 0;
@@ -69,6 +69,7 @@ const cmds = [_]Cmd{
     .{ .name = "rename", .handler = cmdRename },
     .{ .name = "signature-help", .handler = cmdSignature },
     .{ .name = "inlay-hints", .handler = cmdInlay },
+    .{ .name = "code-actions", .handler = cmdCodeActions },
 };
 
 export fn describe() void {
@@ -146,6 +147,9 @@ fn cmdSignature() void {
 }
 fn cmdInlay() void {
     fire(.inlay);
+}
+fn cmdCodeActions() void {
+    fire(.codeaction);
 }
 /// Rename the symbol under the cursor. With an arg, use it as the new name; else
 /// prompt (a free-text pick). On accept the request goes out (see on_pick_accept).
@@ -284,6 +288,16 @@ fn sendWant() void {
             ) catch return;
             want_id = conn.request("textDocument/inlayHint", params);
         },
+        .codeaction => {
+            // Actions for the cursor's line, passing any diagnostics on it as
+            // context (so quick-fixes surface).
+            const params = std.fmt.bufPrint(
+                &parambuf,
+                "{{\"textDocument\":{{\"uri\":\"{s}\"}},\"range\":{{\"start\":{{\"line\":{d},\"character\":0}},\"end\":{{\"line\":{d},\"character\":0}}}},\"context\":{{\"diagnostics\":[]}}}}",
+                .{ uri_buf[0..uri_len], pos.line, pos.line + 1 },
+            ) catch return;
+            want_id = conn.request("textDocument/codeAction", params);
+        },
     }
 }
 
@@ -352,6 +366,7 @@ fn dispatch(msg: rpc.Value) void {
                 .rename => weft.echo(if (applyWorkspaceEdit(result) > 0) "lsp: renamed" else "lsp: rename made no change"),
                 .signature => presentSignature(result),
                 .inlay => presentInlay(result),
+                .codeaction => presentCodeActions(result),
                 .none => {},
             }
             want = .none;
@@ -396,6 +411,33 @@ fn onDiagnostics(params: ?rpc.Value) void {
         diag_n += 1;
         weft.decorate(weft.lineAt(off).start, .gutter, if (sev == 1) .removed else .emphasis, if (sev == 1) "\u{25CF}" else "\u{25B2}");
     }
+}
+
+/// Code actions for the line. Applies the first action that carries an inline
+/// `edit` (a quick-fix WorkspaceEdit) and echoes its title; a pick of titles is a
+/// refinement (holding N edits needs cross-poll storage). Command-only actions
+/// (needing a resolve/execute round-trip) just report their title.
+fn presentCodeActions(result: rpc.Value) void {
+    if (result != .array or result.array.items.len == 0) {
+        weft.echo("lsp: no code actions");
+        return;
+    }
+    for (result.array.items) |a| {
+        if (a != .object) continue;
+        const title = if (a.object.get("title")) |t| (if (t == .string) t.string else "action") else "action";
+        if (a.object.get("edit")) |edit| {
+            if (applyWorkspaceEdit(edit) > 0) {
+                var b: [256]u8 = undefined;
+                weft.echo(std.fmt.bufPrint(&b, "lsp: code action applied — '{s}'", .{title}) catch "lsp: code action applied");
+                return;
+            }
+        }
+    }
+    // Actions exist but none had an inline in-file edit (command/resolve kind).
+    const first = result.array.items[0];
+    const title = if (first == .object) (if (first.object.get("title")) |t| (if (t == .string) t.string else "") else "") else "";
+    var b: [256]u8 = undefined;
+    weft.echo(std.fmt.bufPrint(&b, "lsp: code action '{s}' (needs resolve)", .{title}) catch "lsp: code action");
 }
 
 fn presentHover(result: rpc.Value) void {

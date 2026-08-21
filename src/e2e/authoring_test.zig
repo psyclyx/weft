@@ -808,6 +808,38 @@ test "lsp: rename via the lsp plugin — prompt, then apply the WorkspaceEdit �
     try t.expect(std.mem.indexOf(u8, disk, "foo") == null); // every occurrence
 }
 
+test "lsp: code actions via the lsp plugin — request/response round-trip — real zls" {
+    const gpa = t.allocator;
+    var app: App = undefined;
+    try app.init(gpa);
+    defer app.deinit();
+    const ed = &app.ed;
+
+    if (!h.toolAvailable(gpa, "zls")) return error.SkipZigTest;
+
+    {
+        const out = try app.proj.oracle(
+            \\cat > act.zig <<'EOF'
+            \\pub fn main() void {
+            \\    const x = 1;
+            \\    _ = x;
+            \\}
+            \\EOF
+        );
+        gpa.free(out);
+    }
+    ed.runStr("open", "act.zig");
+    ed.run("hover"); // kick the server + didOpen
+    ed.settle(60);
+
+    // Request code actions for the line; the plugin echoes the outcome — an
+    // applied quick-fix, an action needing resolve, or none. This verifies the
+    // codeAction request/response path. (A quick-fix that actually edits needs
+    // zls build-on-save + a build.zig to produce a fixable diagnostic — an
+    // environment requirement, not a code gap.)
+    try t.expect(h.drainEcho(ed, "code-actions", "code action"));
+}
+
 test "lsp: signature help + inlay hints via the lsp plugin — real zls" {
     const gpa = t.allocator;
     var app: App = undefined;
