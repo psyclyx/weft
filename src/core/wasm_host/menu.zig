@@ -20,17 +20,18 @@ pub fn hMenuBindingCount(data: ?*anyopaque, caller: *wasm.Caller, args: []const 
     _ = args;
     const p: *WasmPlugin = @ptrCast(@alignCast(data.?));
     const km = p.ctx.keymap;
-    const n = if (km.pending.len > 0)
-        km.completions(p.gpa, km.pending) catch 0
-    else if (km.isMenuMode(km.currentMode()))
-        km.resolveBindings(p.gpa, km.currentMode()) catch 0
+    const head = p.ctx.head;
+    const n = if (head.pending.len > 0)
+        head.completions(p.gpa, km, head.pending) catch 0
+    else if (km.isMenuMode(head.currentMode()))
+        head.resolveBindings(p.gpa, km, head.currentMode()) catch 0
     else
-        km.completions(p.gpa, "") catch 0;
+        head.completions(p.gpa, km, "") catch 0;
     results[0] = @intCast(n);
 }
 pub fn hMenuBindingKey(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32, results: []i32) void {
     const p: *WasmPlugin = @ptrCast(@alignCast(data.?));
-    const b = p.ctx.keymap.resolvedAt(@intCast(args[0])) orelse {
+    const b = p.ctx.head.resolvedAt(@intCast(args[0])) orelse {
         results[0] = -1;
         return;
     };
@@ -42,7 +43,7 @@ pub fn hMenuBindingKey(data: ?*anyopaque, caller: *wasm.Caller, args: []const i3
 }
 pub fn hMenuBindingCmd(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32, results: []i32) void {
     const p: *WasmPlugin = @ptrCast(@alignCast(data.?));
-    const b = p.ctx.keymap.resolvedAt(@intCast(args[0])) orelse {
+    const b = p.ctx.head.resolvedAt(@intCast(args[0])) orelse {
         results[0] = -1;
         return;
     };
@@ -55,7 +56,7 @@ pub fn hMenuBindingCmd(data: ?*anyopaque, caller: *wasm.Caller, args: []const i3
 pub fn hMenuBindingIsGroup(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32, results: []i32) void {
     _ = caller;
     const p: *WasmPlugin = @ptrCast(@alignCast(data.?));
-    results[0] = if (p.ctx.keymap.resolvedIsGroup(@intCast(args[0]))) 1 else 0;
+    results[0] = if (p.ctx.head.resolvedIsGroup(@intCast(args[0]))) 1 else 0;
 }
 
 /// Fire a guest's `on_menu(open)` — a menu mode was entered (open=1) or left

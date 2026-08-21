@@ -276,7 +276,7 @@ pub fn openSharedHandler(ctx: *core.command.Context, data: ?*anyopaque, args: []
         try texts.append(ctx.gpa, text);
         try entries.append(ctx.gpa, .{ .text = text, .doc = "shared by a peer — open to collaborate" });
     }
-    try ctx.pick.open(ctx, "shared", entries.items, .{ .handler = openSharedAccept, .data = sc });
+    try ctx.head.pick.open(ctx, "shared", entries.items, .{ .handler = openSharedAccept, .data = sc });
     return .nil;
 }
 
@@ -306,7 +306,7 @@ fn openSharedAccept(ctx: *core.command.Context, data: ?*anyopaque, choice: []con
         col.presence_layer = try sc.caps.layers.claim(ctx.gpa, doc, "presence", .replicated, "collab");
         col.import_diag_layer = try sc.caps.layers.claim(ctx.gpa, doc, "diagnostics", .host, "remote-host");
     }
-    try ctx.buffers.switchTo(ctx.gpa, id, ctx.keymap);
+    try ctx.buffers.switchTo(ctx.gpa, id, ctx.head, ctx.keymap);
 }
 
 /// Bind every collaboration command against the shared state. Called after

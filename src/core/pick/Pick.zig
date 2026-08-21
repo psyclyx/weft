@@ -166,9 +166,9 @@ pub fn openWith(
         try self.infos.append(gpa, try gpa.dupe(u8, "")); // static picks carry no info
     }
     try self.refilter(gpa);
-    const prev = try gpa.dupe(u8, ctx.keymap.currentMode());
+    const prev = try gpa.dupe(u8, ctx.head.currentMode());
     errdefer gpa.free(prev);
-    try ctx.keymap.setMode(gpa, "pick");
+    try ctx.head.setMode(gpa, "pick");
     // Commit — infallible from here, so the acceptor/source become
     // live only once the pick is fully open.
     self.acceptor = acceptor;
@@ -250,12 +250,12 @@ fn close(self: *Pick, ctx: *command.Context) !void {
     // menu's one-shot return target instead — the pick bypasses the keymap
     // dispatch site, so this is where that class of stickiness is fixed.
     if (ctx.keymap.isMenuMode(prev)) {
-        if (ctx.keymap.menuReturn(prev)) |ret| {
-            try ctx.keymap.setMode(ctx.gpa, ret);
+        if (ctx.head.menuReturn(prev)) |ret| {
+            try ctx.head.setMode(ctx.gpa, ret);
             return;
         }
     }
-    try ctx.keymap.setMode(ctx.gpa, prev);
+    try ctx.head.setMode(ctx.gpa, prev);
 }
 
 fn frecOf(self: *const Pick, text: []const u8) Frec {
@@ -336,7 +336,7 @@ pub fn selectedInfo(self: *const Pick) []const u8 {
 // ── Commands ────────────────────────────────────────────────────────
 
 fn pickOf(ctx: *command.Context) *Pick {
-    return ctx.pick;
+    return &ctx.head.pick;
 }
 
 /// Promote the current query into the sticky narrowing filter and clear
@@ -503,7 +503,7 @@ fn cPalette(ctx: *command.Context, args: struct {}) anyerror!Value {
             try entries.append(ctx.gpa, .{ .text = ctx.commands.nameOf(n), .doc = cmd.summary });
         }
     }
-    try ctx.pick.open(ctx, "command", entries.items, .{ .handler = runChoice });
+    try ctx.head.pick.open(ctx, "command", entries.items, .{ .handler = runChoice });
     return .nil;
 }
 
@@ -638,8 +638,7 @@ const TestEnv = struct {
     caps: @import("../capability.zig").Caps,
     actions: @import("../action.zig"),
     quit: bool = false,
-    echo: std.ArrayList(u8) = .empty,
-    pick: Pick = .empty,
+    head: @import("../Head.zig") = .empty,
 
     fn init(gpa: Allocator) !*TestEnv {
         const pool = try task.Pool.init(gpa, .{ .threads = 1 });
@@ -661,17 +660,15 @@ const TestEnv = struct {
             .commands = &self.commands,
             .keymap = &self.keymap,
             .actions = &self.actions,
-            .pick = &self.pick,
             .caps = &self.caps,
             .quit = &self.quit,
-            .echo = &self.echo,
+            .head = &self.head,
         };
     }
 
     fn deinit(self: *TestEnv) void {
         const gpa = self.gpa;
-        self.pick.deinit(gpa);
-        self.echo.deinit(gpa);
+        self.head.deinit(gpa);
         self.actions.deinit();
         self.caps.deinit();
         self.keymap.deinit(gpa);
@@ -701,16 +698,16 @@ test "pick: free-text accept — typed query when nothing matches" {
     defer sink.got.deinit(gpa);
     var ctx = env.ctx();
 
-    try env.pick.openWith(&ctx, "read", &.{.{ .text = "apple" }}, .{
+    try env.head.pick.openWith(&ctx, "read", &.{.{ .text = "apple" }}, .{
         .handler = Sink.accept,
         .data = &sink,
     }, .{ .allow_free_text = true });
     _ = try cInput(&ctx, .{ .text = "zzz" }); // matches nothing
-    try t.expect(env.pick.selection() == null);
+    try t.expect(env.head.pick.selection() == null);
     _ = try cAccept(&ctx, .{});
     try t.expect(sink.called);
     try t.expectEqualStrings("zzz", sink.got.items);
-    try t.expect(!env.pick.active);
+    try t.expect(!env.head.pick.active);
 }
 
 test "pick: free-text off — no candidate means no acceptance" {
@@ -721,14 +718,14 @@ test "pick: free-text off — no candidate means no acceptance" {
     defer sink.got.deinit(gpa);
     var ctx = env.ctx();
 
-    try env.pick.open(&ctx, "cmd", &.{.{ .text = "apple" }}, .{
+    try env.head.pick.open(&ctx, "cmd", &.{.{ .text = "apple" }}, .{
         .handler = Sink.accept,
         .data = &sink,
     });
     _ = try cInput(&ctx, .{ .text = "zzz" });
     _ = try cAccept(&ctx, .{});
     try t.expect(!sink.called);
-    try t.expect(!env.pick.active);
+    try t.expect(!env.head.pick.active);
 }
 
 test "pick: appendItems preserves query and selection" {
@@ -739,14 +736,14 @@ test "pick: appendItems preserves query and selection" {
     defer sink.got.deinit(gpa);
     var ctx = env.ctx();
 
-    try env.pick.open(&ctx, "p", &.{
+    try env.head.pick.open(&ctx, "p", &.{
         .{ .text = "one" }, .{ .text = "two" }, .{ .text = "three" },
     }, .{ .handler = Sink.accept, .data = &sink });
     _ = try cNext(&ctx, .{}); // select "two"
-    try t.expectEqualStrings("two", env.pick.selection().?);
-    try env.pick.appendItems(gpa, &.{"four"}, null);
-    try t.expectEqual(@as(usize, 4), env.pick.items.items.len);
-    try t.expectEqualStrings("two", env.pick.selection().?);
+    try t.expectEqualStrings("two", env.head.pick.selection().?);
+    try env.head.pick.appendItems(gpa, &.{"four"}, null);
+    try t.expectEqual(@as(usize, 4), env.head.pick.items.items.len);
+    try t.expectEqualStrings("two", env.head.pick.selection().?);
 }
 
 const FakeSrc = struct {
@@ -759,7 +756,7 @@ const FakeSrc = struct {
         s.polls += 1;
         if (s.emitted) return false;
         s.emitted = true;
-        try ctx.pick.appendItems(ctx.gpa, &.{ "alpha", "beta" }, null);
+        try ctx.head.pick.appendItems(ctx.gpa, &.{ "alpha", "beta" }, null);
         return true;
     }
     fn close(data: ?*anyopaque, gpa: Allocator) void {
@@ -785,7 +782,7 @@ test "pick: async source — poll folds, onQuery on change, close once" {
     var fake: FakeSrc = .{};
     var ctx = env.ctx();
 
-    try env.pick.openWith(&ctx, "src", &.{}, .{
+    try env.head.pick.openWith(&ctx, "src", &.{}, .{
         .handler = Sink.accept,
         .data = &sink,
     }, .{ .source = .{
@@ -796,16 +793,16 @@ test "pick: async source — poll folds, onQuery on change, close once" {
         .debounce_ns = 0,
     } });
 
-    try t.expect(try env.pick.tick(&ctx)); // poll emits
-    try t.expectEqual(@as(usize, 2), env.pick.items.items.len);
-    try t.expect(!try env.pick.tick(&ctx)); // nothing new
+    try t.expect(try env.head.pick.tick(&ctx)); // poll emits
+    try t.expectEqual(@as(usize, 2), env.head.pick.items.items.len);
+    try t.expect(!try env.head.pick.tick(&ctx)); // nothing new
     try t.expectEqual(@as(usize, 0), fake.query_fires); // no query change yet
 
     _ = try cInput(&ctx, .{ .text = "a" });
-    _ = try env.pick.tick(&ctx);
+    _ = try env.head.pick.tick(&ctx);
     try t.expectEqual(@as(usize, 1), fake.query_fires); // fired on change
 
     _ = try cCancel(&ctx, .{});
     try t.expectEqual(@as(usize, 1), fake.closes);
-    try t.expect(!env.pick.active);
+    try t.expect(!env.head.pick.active);
 }

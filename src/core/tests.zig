@@ -446,10 +446,9 @@ test "editor: save request round trip + dirty tracking" {
 const TestHost = struct {
     pool: *task.Pool,
     buffers: core.Buffers,
-    echo_line: std.ArrayList(u8),
     commands: core.command.Commands,
     keymap: core.Keymap,
-    pick: core.Pick,
+    head: core.Head,
     caps: core.Caps,
     actions: core.Actions,
     quit: bool,
@@ -458,10 +457,9 @@ const TestHost = struct {
     fn init(gpa: Allocator, host: *TestHost) !void {
         host.pool = try task.Pool.init(gpa, .{ .threads = 1 });
         host.buffers = try core.Buffers.init(gpa, host.pool, "user");
-        host.echo_line = .empty;
         host.commands = .empty;
         host.keymap = .empty;
-        host.pick = .empty;
+        host.head = .empty;
         host.caps = core.Caps.init(gpa, core.task.nowNs);
         host.actions = core.Actions.init(gpa);
         host.quit = false;
@@ -471,12 +469,11 @@ const TestHost = struct {
             .commands = &host.commands,
             .keymap = &host.keymap,
             .actions = &host.actions,
-            .pick = &host.pick,
             .caps = &host.caps,
             .quit = &host.quit,
-            .echo = &host.echo_line,
+            .head = &host.head,
         };
-        try core.builtins.install(gpa, &host.commands, &host.keymap, &host.actions);
+        try core.builtins.install(gpa, &host.commands, &host.keymap, &host.head, &host.actions);
     }
 
     fn editor(host: *TestHost) *Editor {
@@ -486,10 +483,9 @@ const TestHost = struct {
     fn deinit(host: *TestHost, gpa: Allocator) void {
         host.actions.deinit();
         host.caps.deinit();
-        host.pick.deinit(gpa);
+        host.head.deinit(gpa);
         host.keymap.deinit(gpa);
         host.commands.deinit(gpa);
-        host.echo_line.deinit(gpa);
         host.buffers.deinit(gpa);
         host.pool.deinit();
     }
@@ -509,7 +505,7 @@ test "authority: a view grade refuses edits, forms no ghost, and echoes" {
     // and an honest echo is set — no divergent local ghost.
     _ = try core.command.run(&host.commands, &host.ctx, "insert-text", &.{.{ .string = "x" }});
     try t.expectEqual(before, host.editor().text().byteLen());
-    try t.expect(host.echo_line.items.len > 0);
+    try t.expect(host.head.echo.items.len > 0);
 
     // With edit grade restored, the same command applies.
     host.editor().doc.my_grant = .own;
@@ -906,7 +902,7 @@ test "buffers: switch restores modes, close/create keep the set sane" {
     defer host.deinit(gpa);
     const run = core.command.run;
 
-    try host.keymap.setMode(gpa, "normal");
+    try host.head.setMode(gpa, "normal");
     try t.expectEqual(@as(usize, 1), host.buffers.count());
     const scratch_id = host.buffers.active().id;
 
@@ -914,15 +910,15 @@ test "buffers: switch restores modes, close/create keep the set sane" {
     _ = try run(&host.commands, &host.ctx, "buffer-create", &.{.{ .string = "*tool*" }});
     try t.expectEqual(@as(usize, 2), host.buffers.count());
     try t.expectEqualStrings("*tool*", host.buffers.active().name);
-    try host.keymap.setMode(gpa, "magit");
+    try host.head.setMode(gpa, "magit");
 
     // Switching away saves "magit" on the tool buffer and restores the
     // scratch buffer's "normal"; switching back restores "magit".
     _ = try run(&host.commands, &host.ctx, "buffer-switch", &.{.{ .integer = @intCast(scratch_id) }});
-    try t.expectEqualStrings("normal", host.keymap.currentMode());
+    try t.expectEqualStrings("normal", host.head.currentMode());
     _ = try run(&host.commands, &host.ctx, "buffer-next", &.{});
     try t.expectEqualStrings("*tool*", host.buffers.active().name);
-    try t.expectEqualStrings("magit", host.keymap.currentMode());
+    try t.expectEqualStrings("magit", host.head.currentMode());
 
     // Read-only swallows text commands but not others.
     _ = try run(&host.commands, &host.ctx, "buffer-read-only", &.{.{ .boolean = true }});
@@ -961,23 +957,23 @@ test "buffers: a fresh buffer opens in default_mode — a tool mode never leaks"
     const run = core.command.run;
 
     // The config base editing mode, captured once.
-    try host.keymap.setMode(gpa, "normal");
+    try host.head.setMode(gpa, "normal");
     try host.buffers.setDefaultMode(gpa, "normal");
 
     // Enter a tool buffer and put it in its own (tool) mode, as dired/magit do.
     _ = try run(&host.commands, &host.ctx, "buffer-create", &.{.{ .string = "*dired*" }});
-    try host.keymap.setMode(gpa, "dired");
-    try t.expectEqualStrings("dired", host.keymap.currentMode());
+    try host.head.setMode(gpa, "dired");
+    try t.expectEqualStrings("dired", host.head.currentMode());
 
     // Open a file FROM the tool buffer — a fresh buffer. Structurally it must
     // start in default_mode, never inherit "dired" (the bug this makes
     // impossible to express: a tool mode sticking after you open a file).
     _ = try run(&host.commands, &host.ctx, "open", &.{.{ .string = "/tmp/weft-mode-test.zig" }});
-    try t.expectEqualStrings("normal", host.keymap.currentMode());
+    try t.expectEqualStrings("normal", host.head.currentMode());
 
     // Going back to the tool buffer still restores its mode (per-buffer intact).
     _ = try run(&host.commands, &host.ctx, "buffer-switch", &.{.{ .integer = 1 }});
-    try t.expectEqualStrings("dired", host.keymap.currentMode());
+    try t.expectEqualStrings("dired", host.head.currentMode());
 }
 
 test "editor: bulk load — big file opens as a compacted base, edits and saves" {
@@ -1030,14 +1026,14 @@ test "completion UI: source-driven fold into the pick; accept replaces the prefi
     // A word prefix at the cursor; the instant provider offers alpha/beta.
     try host.editor().insertText(gpa, "al");
     _ = try core.command.run(&host.commands, &host.ctx, "complete", &.{});
-    try t.expect(host.pick.active);
+    try t.expect(host.head.pick.active);
     // Instant-tier results were folded during fire (source path); the
     // pick already carries them, no bespoke tick needed.
-    try t.expect(host.pick.items.items.len >= 2);
+    try t.expect(host.head.pick.items.items.len >= 2);
 
     _ = try core.command.run(&host.commands, &host.ctx, "pick-input", &.{.{ .string = "alp" }});
     _ = try core.command.run(&host.commands, &host.ctx, "pick-accept", &.{});
-    try t.expect(!host.pick.active);
+    try t.expect(!host.head.pick.active);
     const text = try host.editor().text().toOwnedSlice(gpa);
     defer gpa.free(text);
     try t.expectEqualStrings("alpha", text);

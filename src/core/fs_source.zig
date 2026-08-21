@@ -82,7 +82,7 @@ fn drain(shared: *Shared, seen: *usize, ctx: *command.Context) anyerror!bool {
     defer ctx.gpa.free(batch);
     for (batch, 0..) |*b, i| b.* = shared.produced.items[seen.* + i];
     shared.mutex.unlock();
-    try ctx.pick.appendItems(ctx.gpa, batch, null);
+    try ctx.head.pick.appendItems(ctx.gpa, batch, null);
     seen.* = total;
     return true;
 }

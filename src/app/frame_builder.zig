@@ -226,8 +226,8 @@ pub const FrameBuilder = struct {
         // appeared — the "corner first, then middle" jump.
         var wk_hints: std.ArrayList(core.Keymap.Binding) = .empty;
         defer wk_hints.deinit(gpa);
-        if (act.menu_shown and surface_n == 0 and !fx.pick.active and fx.keymap.isMenuMode(fx.keymap.currentMode())) {
-            fx.keymap.ownBindings(gpa, fx.keymap.currentMode(), &wk_hints) catch {};
+        if (act.menu_shown and surface_n == 0 and !fx.head.pick.active and fx.keymap.isMenuMode(fx.head.currentMode())) {
+            fx.keymap.ownBindings(gpa, fx.head.currentMode(), &wk_hints) catch {};
         }
         // Buffer tab strip (only with more than one buffer open). Name
         // slices borrow the buffers' own strings — valid this frame.
@@ -255,15 +255,15 @@ pub const FrameBuilder = struct {
             break :fblk .{ .start = @min(fs.start, len), .end = @min(fs.end, len) };
         };
         const hud: view_mod.Hud = .{
-            .mode = fx.keymap.currentMode(),
+            .mode = fx.head.currentMode(),
             .which_key = if (wk_hints.items.len > 0) wk_hints.items else null,
             .surfaces = surface_buf[0..surface_n],
             .flash = flash_range,
             .hover = null, // hover is the `lsp` plugin's now (echoed, not a HUD popup)
             .tabs = if (tab_list.items.len > 1) tab_list.items else null,
             .md_inline = md_inline,
-            .cursor_style = fx.cursor_cfg.styleFor(fx.cursor_cfg.resolveMode(fx.keymap, fx.keymap.currentMode())),
-            .cursor_on = if (fx.cursor_cfg.blinkFor(fx.cursor_cfg.resolveMode(fx.keymap, fx.keymap.currentMode()))) act.blink_on else true,
+            .cursor_style = fx.cursor_cfg.styleFor(fx.cursor_cfg.resolveMode(fx.keymap, fx.head, fx.head.currentMode())),
+            .cursor_on = if (fx.cursor_cfg.blinkFor(fx.cursor_cfg.resolveMode(fx.keymap, fx.head, fx.head.currentMode()))) act.blink_on else true,
             .file = editor.backingPath() orelse abuf.name,
             .dirty = editor.isDirty(gpa) catch true,
             .save_failed = editor.save_state == .failed,
@@ -276,9 +276,9 @@ pub const FrameBuilder = struct {
             },
             .unfetched_pct = unfetched_pct,
             .peers = if (fx.caps.layers.find(&editor.doc, "presence")) |pl| pl.spanCount() else 0,
-            .echo = if (fx.echo.items.len > 0) fx.echo.items else null,
+            .echo = if (fx.head.echo.items.len > 0) fx.head.echo.items else null,
             .plugin_status = core.status_feed.get(),
-            .pick = if (fx.pick.active) fx.pick else null,
+            .pick = if (fx.head.pick.active) &fx.head.pick else null,
             .highlight_layer = fx.caps.layers.find(&editor.doc, "highlight"),
             .styles_layer = fx.caps.layers.find(&editor.doc, "styles"),
             .diag_layer = fx.caps.layers.find(&editor.doc, "diagnostics"),
@@ -322,7 +322,7 @@ pub const FrameBuilder = struct {
         // panes lay out in what remains — the picker is a real region, not an
         // overlay, and cannot overlap a pane or status line (region.zig's
         // contract). Zero-height when no pick is open ⇒ panes fill the window.
-        const dock_cut = window_rect.cutBottom(self.view.pickDockHeight(if (fx.pick.active) fx.pick else null));
+        const dock_cut = window_rect.cutBottom(self.view.pickDockHeight(if (fx.head.pick.active) &fx.head.pick else null));
         const pick_dock = dock_cut.strip;
         const frame_rect = dock_cut.rest;
         fx.last_frame_rect.* = frame_rect;
@@ -351,7 +351,7 @@ pub const FrameBuilder = struct {
             if (providers.resolveSyntax(ob)) |syn|
                 self.publishHighlight(gpa, &ob.editor, syn, fx.caps, slot.pane.top_row) catch {};
             const other_hud: view_mod.Hud = .{
-                .mode = fx.keymap.currentMode(),
+                .mode = fx.head.currentMode(),
                 .file = ob.editor.backingPath() orelse ob.name,
                 .cursor_on = false, // the caret belongs to the focused pane
                 .pane_border = slot.border,

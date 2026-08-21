@@ -19,7 +19,7 @@ pub fn openBufferHandler(ctx: *core.command.Context, data: ?*anyopaque, args: []
     if (args.len != 1 or args[0] != .string) return error.TypeMismatch;
     const spec = args[0].string;
     if (ctx.buffers.findByPath(spec)) |id| {
-        try ctx.buffers.switchTo(ctx.gpa, id, ctx.keymap);
+        try ctx.buffers.switchTo(ctx.gpa, id, ctx.head, ctx.keymap);
         return .{ .integer = @intCast(id) };
     }
 
@@ -38,7 +38,7 @@ pub fn openBufferHandler(ctx: *core.command.Context, data: ?*anyopaque, args: []
         while (rit.next()) |b| {
             switch (b.editor.backing) {
                 .shell => |s| if (s.fs == fs0 and std.mem.eql(u8, s.path, r.path)) {
-                    try ctx.buffers.switchTo(ctx.gpa, b.id, ctx.keymap);
+                    try ctx.buffers.switchTo(ctx.gpa, b.id, ctx.head, ctx.keymap);
                     return .{ .integer = @intCast(b.id) };
                 },
                 else => {},
@@ -47,7 +47,7 @@ pub fn openBufferHandler(ctx: *core.command.Context, data: ?*anyopaque, args: []
     }
 
     const id = try ctx.buffers.create(ctx.gpa, std.fs.path.basename(spec));
-    errdefer ctx.buffers.close(ctx.gpa, id, ctx.keymap) catch {};
+    errdefer ctx.buffers.close(ctx.gpa, id, ctx.head, ctx.keymap) catch {};
     const buf = ctx.buffers.get(id).?;
     if (remote) |r| {
         const fs = try deps.shellFor(r.host);
@@ -59,7 +59,7 @@ pub fn openBufferHandler(ctx: *core.command.Context, data: ?*anyopaque, args: []
         };
     }
     try attachProviders(deps, buf);
-    try ctx.buffers.switchTo(ctx.gpa, id, ctx.keymap);
+    try ctx.buffers.switchTo(ctx.gpa, id, ctx.head, ctx.keymap);
     return .{ .integer = @intCast(id) };
 }
 
@@ -94,7 +94,7 @@ pub fn browseRemoteHandler(ctx: *core.command.Context, data: ?*anyopaque, args: 
     // Source built last: openWith closes it on failure, so the only
     // unwinding left is rb (its errdefers above).
     const rd = try core.fs_source.RemoteDir.create(gpa, ctx.buffers.pool, fs, path);
-    try ctx.pick.openWith(ctx, prompt, &.{}, .{
+    try ctx.head.pick.openWith(ctx, prompt, &.{}, .{
         .handler = browseRemoteAccept,
         .cleanup = browseRemoteCleanup,
         .data = rb,
@@ -170,7 +170,7 @@ pub fn closeBufferHandler(ctx: *core.command.Context, data: ?*anyopaque, args: [
         }
     }
     detachProviders(deps, b);
-    try ctx.buffers.close(ctx.gpa, b.id, ctx.keymap);
+    try ctx.buffers.close(ctx.gpa, b.id, ctx.head, ctx.keymap);
     return .nil;
 }
 

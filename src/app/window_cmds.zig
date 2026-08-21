@@ -124,7 +124,8 @@ pub fn applyIntents(
     view: *view_mod.View,
     buffers: *core.Buffers,
     gpa: std.mem.Allocator,
-    keymap: *core.Keymap,
+    head: *core.Head,
+    keymap: *const core.Keymap,
     last_frame_rect: region.Rect,
 ) bool {
     var dirty = false;
@@ -138,7 +139,7 @@ pub fn applyIntents(
         win_ctx.close = false;
         if (win_layout.count() > 1) {
             win_layout.closeFocused();
-            applyWindowFocus(win_layout, view, buffers, gpa, keymap);
+            applyWindowFocus(win_layout, view, buffers, gpa, head, keymap);
             dirty = true;
         }
     }
@@ -146,7 +147,7 @@ pub fn applyIntents(
         win_ctx.focus_dir = null;
         win_layout.focusedPane().top_row = view.top_row;
         if (win_layout.focusNeighbor(last_frame_rect, dir)) {
-            applyWindowFocus(win_layout, view, buffers, gpa, keymap);
+            applyWindowFocus(win_layout, view, buffers, gpa, head, keymap);
             dirty = true;
         }
     }
@@ -156,7 +157,7 @@ pub fn applyIntents(
         // Swap contents with the neighbor; focus stays put but now shows
         // the neighbor's buffer, so the active buffer follows it.
         if (win_layout.swapNeighbor(last_frame_rect, dir)) {
-            applyWindowFocus(win_layout, view, buffers, gpa, keymap);
+            applyWindowFocus(win_layout, view, buffers, gpa, head, keymap);
             dirty = true;
         }
     }
@@ -164,7 +165,7 @@ pub fn applyIntents(
         win_ctx.focus_next = false;
         win_layout.focusedPane().top_row = view.top_row;
         if (win_layout.focusNext()) {
-            applyWindowFocus(win_layout, view, buffers, gpa, keymap);
+            applyWindowFocus(win_layout, view, buffers, gpa, head, keymap);
             dirty = true;
         }
     }
@@ -172,7 +173,7 @@ pub fn applyIntents(
         win_ctx.click_focus = false;
         win_layout.focusedPane().top_row = view.top_row;
         if (win_layout.focusAt(last_frame_rect, win_ctx.click_x, win_ctx.click_y)) {
-            applyWindowFocus(win_layout, view, buffers, gpa, keymap);
+            applyWindowFocus(win_layout, view, buffers, gpa, head, keymap);
             dirty = true;
         }
     }
@@ -194,9 +195,9 @@ pub fn applyIntents(
 /// After a window op moved focus (or changed the focused pane's content),
 /// make the active buffer follow the focused pane and restore that pane's
 /// scroll — the invariant "focused pane == active buffer".
-pub fn applyWindowFocus(win_layout: *window_layout.Layout, view: *view_mod.View, buffers: *core.Buffers, gpa: std.mem.Allocator, keymap: *core.Keymap) void {
+pub fn applyWindowFocus(win_layout: *window_layout.Layout, view: *view_mod.View, buffers: *core.Buffers, gpa: std.mem.Allocator, head: *core.Head, keymap: *const core.Keymap) void {
     const fp = win_layout.focusedPane();
     if (buffers.get(fp.buffer_id) != null and buffers.active_id != fp.buffer_id)
-        buffers.switchTo(gpa, fp.buffer_id, keymap) catch {};
+        buffers.switchTo(gpa, fp.buffer_id, head, keymap) catch {};
     view.top_row = fp.top_row;
 }

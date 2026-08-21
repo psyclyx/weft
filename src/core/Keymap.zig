@@ -1,4 +1,4 @@
-//! Keymap — modal key → command-name tables. Pure string domain: a
+//! Keymap — modal key → command-name TABLES. Pure string domain: a
 //! keyspec is `[C-][M-][S-]<xkb keysym name>`. Shift usually lives in
 //! the keysym (`a` vs `A`); the explicit `S-` is only for keys with no
 //! shifted keysym — `S-Return`, `S-Tab` (specials keep their names —
@@ -7,8 +7,22 @@
 //! neither knows xkb nor the commands it names (late binding — a bind
 //! may name a command a plugin provides later).
 //!
-//! Modes are the vim enabler: bindings live per mode, `mode` selects
-//! the active table, and mode switching is itself just a command.
+//! Modes are the vim enabler: bindings live per mode; mode SWITCHING is
+//! itself just a command.
+//!
+//! THE SPLIT (north-star-plan §2.7/§4 C14/§6 W2a-1): this struct used to
+//! ALSO hold the mutable CURSOR into these tables — `mode` (which mode is
+//! current), `pending` (the half-typed chord), `menu_return` (per-menu
+//! return targets), and the which-key render scratch. That made "current
+//! mode" a process-global: two heads attached to one system would have had
+//! to share it. It has all moved to `Head.zig`. What stays here is
+//! everything that describes what a mode IS — TABLE properties, shared by
+//! every head looking at this system: the key→command bindings themselves,
+//! fallback chains, and the menu/sticky/locked/resting declarations. Every
+//! method below that used to read `self.mode` now takes the mode as an
+//! explicit parameter and is a PURE function of `(tables, mode, key)` — see
+//! `Head.zig`'s methods (`lookup`, `feed`, `setMode`, `enterMode`, …), which
+//! hold a head's position and call into these pure lookups to move it.
 
 const std = @import("std");
 const Allocator = std.mem.Allocator;
@@ -35,22 +49,6 @@ pub const prio_imported = 50;
 pub const prio_config = 100;
 
 modes: std.StringArrayHashMapUnmanaged(Bindings) = .empty,
-mode: []u8 = &.{},
-/// The pending key SEQUENCE (keyspecs joined by spaces) — the chord you're
-/// partway through: `space f` while `space f f` → find-file is being typed.
-/// Empty at rest. A binding's KEY is a whole sequence (a single key is a
-/// one-element sequence), so a "menu" is just a prefix of longer sequences —
-/// NOT a mode. `feed` drives it; which-key shows the completions of the pending
-/// prefix. Cleared on a completed binding, a dead end, Escape, or a mode/buffer
-/// switch.
-pending: []u8 = &.{},
-/// Scratch for `resolveBindings`/`completions` — the deduplicated set of
-/// bindings (or chord completions) reachable in a mode. Borrowed slices into
-/// `modes`, valid until the next keymap mutation. Rebuilt each call (which-key
-/// render). `resolved_group` parallels it: whether each entry opens a submenu /
-/// continues a chord (a GROUP) rather than being a runnable LEAF.
-resolved: std.ArrayList(Binding) = .empty,
-resolved_group: std.ArrayList(bool) = .empty,
 /// mode → parent mode: `lookup` walks the chain (vim's visual falls
 /// back to normal falls back to default).
 parents: std.StringArrayHashMapUnmanaged([]u8) = .empty,
@@ -61,16 +59,11 @@ parents: std.StringArrayHashMapUnmanaged([]u8) = .empty,
 text_commands: std.StringArrayHashMapUnmanaged([]u8) = .empty,
 /// Modes the config declared as prefix menus (leader/chord tables) — the
 /// which-key hint shows their bindings. Policy lives in config; this is
-/// just the mechanism that remembers the declaration.
+/// just the mechanism that remembers the declaration. WHICH mode a given
+/// head should return to when it leaves one of these is head-scoped state
+/// (two heads can enter the same menu from different origins) — see
+/// `Head.menu_return`.
 menu_modes: std.StringArrayHashMapUnmanaged(void) = .empty,
-/// menu mode → the mode to return to when a one-shot menu key fires. Distinct
-/// from `parents` (the key-lookup fallback chain): a menu's return target is
-/// where the *modal posture* goes after the menu closes, not where its unbound
-/// keys fall through. Recorded only on GUEST-initiated menu entry (`enterMode`),
-/// never on host-side save/restore (the picker), so the picker can't poison it.
-/// Already resolved to the root non-menu mode at record time, so nested menus
-/// (leader→leader-file) collapse to one hop back to normal.
-menu_return: std.StringArrayHashMapUnmanaged([]u8) = .empty,
 /// Menu modes that STAY OPEN after a leaf key (the one-shot auto-pop is
 /// suppressed) — flag-accumulating transients (magit's push/fetch option
 /// popups): toggle keys mutate state and re-render while the menu persists;
@@ -106,8 +99,6 @@ pub fn deinit(self: *Keymap, gpa: Allocator) void {
         bindings.deinit(gpa);
     }
     self.modes.deinit(gpa);
-    self.resolved.deinit(gpa);
-    self.resolved_group.deinit(gpa);
     for (self.parents.keys(), self.parents.values()) |k, v| {
         gpa.free(k);
         gpa.free(v);
@@ -126,13 +117,6 @@ pub fn deinit(self: *Keymap, gpa: Allocator) void {
     self.locked_modes.deinit(gpa);
     for (self.resting_modes.keys()) |k| gpa.free(k);
     self.resting_modes.deinit(gpa);
-    for (self.menu_return.keys(), self.menu_return.values()) |k, v| {
-        gpa.free(k);
-        gpa.free(v);
-    }
-    self.menu_return.deinit(gpa);
-    gpa.free(self.mode);
-    gpa.free(self.pending);
     self.* = .{};
 }
 
@@ -194,16 +178,17 @@ pub fn unbind(self: *Keymap, gpa: Allocator, mode: []const u8, key_in: []const u
 /// binding it locally; global is never a fallback target, only the final check.
 pub const global_mode = "global";
 
-/// The command bound to `keyspec` in the current mode or its fallback
-/// chain, then the `global` layer, if any.
-pub fn lookup(self: *const Keymap, key: []const u8) ?[]const u8 {
-    var mode: []const u8 = self.mode;
+/// The command bound to `keyspec` in `mode` or its fallback chain, then the
+/// `global` layer, if any. Pure function of `(tables, mode, key)` — a head
+/// calls this with its own current mode (see `Head.lookup`).
+pub fn lookup(self: *const Keymap, mode: []const u8, key: []const u8) ?[]const u8 {
+    var m: []const u8 = mode;
     var depth: usize = 0;
     while (depth < 8) : (depth += 1) {
-        if (self.modes.getPtr(mode)) |bindings| {
+        if (self.modes.getPtr(m)) |bindings| {
             if (bindings.get(key)) |entry| return entry.command;
         }
-        mode = self.parents.get(mode) orelse break;
+        m = self.parents.get(m) orelse break;
     }
     // Universal fallback: `global` binds apply under every mode.
     if (self.modes.getPtr(global_mode)) |bindings| {
@@ -212,7 +197,7 @@ pub fn lookup(self: *const Keymap, key: []const u8) ?[]const u8 {
     return null;
 }
 
-/// What feeding a key produced (see `feed`).
+/// What feeding a key produced (see `Head.feed`).
 pub const Feed = union(enum) {
     run: []const u8, // a full sequence resolved — run this command (borrowed)
     pending, // extended the pending chord — which-key shows its completions
@@ -220,35 +205,37 @@ pub const Feed = union(enum) {
     none, // a dead-end chord — reset, nothing to do
 };
 
-/// The command a full SEQUENCE resolves to: the mode's own table, its fallback
-/// chain, then `global`. A single-key seq gets global's universal binds; a
-/// multi-key chord effectively won't (global holds single keys), so a global key
-/// never fires MID-sequence — `SPC C-w` is the chord `space C-w`, not global
-/// `C-w`. (This is why menus-as-sequences dissolve the "global is too global".)
-fn resolveExact(self: *const Keymap, seq: []const u8) ?[]const u8 {
-    var mode: []const u8 = self.mode;
+/// The command a full SEQUENCE resolves to, in `mode`: its own table, its
+/// fallback chain, then `global`. A single-key seq gets global's universal
+/// binds; a multi-key chord effectively won't (global holds single keys), so
+/// a global key never fires MID-sequence — `SPC C-w` is the chord
+/// `space C-w`, not global `C-w`. (This is why menus-as-sequences dissolve
+/// the "global is too global" problem.) Called by `Head.feed` with the
+/// head's own mode + pending-extended candidate.
+pub fn resolveExact(self: *const Keymap, mode: []const u8, seq: []const u8) ?[]const u8 {
+    var m: []const u8 = mode;
     var depth: usize = 0;
     while (depth < 8) : (depth += 1) {
-        if (self.modes.getPtr(mode)) |b| if (b.get(seq)) |e| return e.command;
-        mode = self.parents.get(mode) orelse break;
+        if (self.modes.getPtr(m)) |b| if (b.get(seq)) |e| return e.command;
+        m = self.parents.get(m) orelse break;
     }
     if (self.modes.getPtr(global_mode)) |b| if (b.get(seq)) |e| return e.command;
     return null;
 }
 
-/// Whether `seq` is a strict PREFIX of some bound sequence in the current mode,
-/// its fallback chain, or `global` (more keys would complete a chord). Global IS
+/// Whether `seq` is a strict PREFIX of some bound sequence in `mode`, its
+/// fallback chain, or `global` (more keys would complete a chord). Global IS
 /// consulted so a UNIVERSAL chord (`C-w s` window commands, bound in global) is
 /// reachable from every mode — this does NOT re-widen "global too global",
 /// because a match requires the WHOLE `seq` to be a literal prefix of a global
 /// key: mid-chord `space C-w` never matches global's `C-w …` (they don't share a
 /// start), so a global key only ever begins a sequence, never continues one.
-fn isPrefix(self: *const Keymap, seq: []const u8) bool {
-    var mode: []const u8 = self.mode;
+pub fn isPrefix(self: *const Keymap, mode: []const u8, seq: []const u8) bool {
+    var m: []const u8 = mode;
     var depth: usize = 0;
     while (depth < 8) : (depth += 1) {
-        if (self.modes.getPtr(mode)) |b| if (prefixIn(b, seq)) return true;
-        mode = self.parents.get(mode) orelse break;
+        if (self.modes.getPtr(m)) |b| if (prefixIn(b, seq)) return true;
+        m = self.parents.get(m) orelse break;
     }
     if (self.modes.getPtr(global_mode)) |b| if (prefixIn(b, seq)) return true;
     return false;
@@ -259,50 +246,6 @@ fn prefixIn(b: *const Bindings, seq: []const u8) bool {
         if (k.len > seq.len and std.mem.startsWith(u8, k, seq) and k[seq.len] == ' ') return true;
     }
     return false;
-}
-
-/// Feed one keyspec through the pending sequence. A complete binding wins
-/// immediately (configs don't bind a prefix as also complete); else, if the
-/// chord could still extend, hold it `pending`; else it's a dead end — a lone
-/// unbound key is `text` to insert, a broken chord just resets. NOTE: a `.run`
-/// command name borrows the keymap — use it before any rebind.
-pub fn feed(self: *Keymap, gpa: Allocator, key: []const u8) Allocator.Error!Feed {
-    const at_top = self.pending.len == 0;
-    const cand = if (at_top) key else try std.fmt.allocPrint(gpa, "{s} {s}", .{ self.pending, key });
-    defer if (!at_top) gpa.free(cand);
-
-    if (self.resolveExact(cand)) |cmd| {
-        try self.setPending(gpa, "");
-        return .{ .run = cmd };
-    }
-    if (self.isPrefix(cand)) {
-        try self.setPending(gpa, cand);
-        return .pending;
-    }
-    try self.setPending(gpa, "");
-    return if (at_top) .text else .none;
-}
-
-/// Set the pending sequence (owned copy); "" clears it (no allocation).
-pub fn setPending(self: *Keymap, gpa: Allocator, seq: []const u8) Allocator.Error!void {
-    if (seq.len == 0) {
-        gpa.free(self.pending);
-        self.pending = &.{};
-        return;
-    }
-    const owned = try gpa.dupe(u8, seq);
-    gpa.free(self.pending);
-    self.pending = owned;
-}
-
-/// Drop the last keyspec of the pending chord (Backspace mid-sequence).
-pub fn popPending(self: *Keymap, gpa: Allocator) Allocator.Error!void {
-    if (self.pending.len == 0) return;
-    const cut = std.mem.lastIndexOfScalar(u8, self.pending, ' ') orelse {
-        try self.setPending(gpa, "");
-        return;
-    };
-    try self.setPending(gpa, self.pending[0..cut]);
 }
 
 /// Make `mode` inherit `parent`'s bindings (chain-walked at lookup).
@@ -356,62 +299,18 @@ pub fn setTextCommand(self: *Keymap, gpa: Allocator, mode: []const u8, cmd: ?[]c
     gop.value_ptr.* = try gpa.dupe(u8, cmd orelse "");
 }
 
-/// The current mode's text command (chain-walked like `lookup`; an
-/// explicit none stops the walk).
-pub fn textCommand(self: *const Keymap) ?[]const u8 {
-    var mode: []const u8 = self.mode;
+/// `mode`'s text command (chain-walked like `lookup`; an explicit none stops
+/// the walk). Called by `Head.textCommand` with the head's own current mode.
+pub fn textCommand(self: *const Keymap, mode: []const u8) ?[]const u8 {
+    var m: []const u8 = mode;
     var depth: usize = 0;
     while (depth < 8) : (depth += 1) {
-        if (self.text_commands.get(mode)) |cmd| {
+        if (self.text_commands.get(m)) |cmd| {
             return if (cmd.len == 0) null else cmd;
         }
-        mode = self.parents.get(mode) orelse return null;
+        m = self.parents.get(m) orelse return null;
     }
     return null;
-}
-
-pub fn setMode(self: *Keymap, gpa: Allocator, mode: []const u8) Allocator.Error!void {
-    const owned = try gpa.dupe(u8, mode);
-    gpa.free(self.mode);
-    self.mode = owned;
-    // A mode change abandons any half-typed chord (a stale `space f` must not
-    // combine with the new mode's next key).
-    try self.setPending(gpa, "");
-}
-
-/// Guest-initiated mode set. Identical to `setMode`, except that entering a
-/// *menu* mode records its return target — the root non-menu mode we came from
-/// — so a one-shot menu key can pop back (see `menuReturn`). Only guests route
-/// through here; host-side mode save/restore (the picker) uses plain `setMode`,
-/// so a restore-into-a-menu never records a bogus return target.
-pub fn enterMode(self: *Keymap, gpa: Allocator, mode: []const u8) Allocator.Error!void {
-    if (self.isMenuMode(mode) and !std.mem.eql(u8, self.mode, mode)) {
-        // If we came from another menu, inherit *its* return target so a chain
-        // of menus collapses to a single hop back to the root non-menu mode;
-        // otherwise return to exactly where we were.
-        const root = self.menuReturn(self.mode) orelse self.mode;
-        const owned_root = try gpa.dupe(u8, root); // dupe before setMode frees self.mode
-        errdefer gpa.free(owned_root);
-        const gop = try self.menu_return.getOrPut(gpa, mode);
-        if (gop.found_existing) {
-            gpa.free(gop.value_ptr.*);
-        } else {
-            errdefer _ = self.menu_return.swapRemove(mode);
-            gop.key_ptr.* = try gpa.dupe(u8, mode);
-        }
-        gop.value_ptr.* = owned_root;
-    }
-    try self.setMode(gpa, mode);
-}
-
-/// The mode a one-shot key should pop `mode` back to (the root non-menu mode),
-/// or null if `mode` isn't a menu with a recorded return target.
-pub fn menuReturn(self: *const Keymap, mode: []const u8) ?[]const u8 {
-    return self.menu_return.get(mode);
-}
-
-pub fn currentMode(self: *const Keymap) []const u8 {
-    return self.mode;
 }
 
 pub const Binding = struct { key: []const u8, command: []const u8 };
@@ -488,13 +387,14 @@ pub fn isRestingMode(self: *const Keymap, mode: []const u8) bool {
     return self.resting_modes.contains(mode) or self.isLockedMode(mode);
 }
 
-/// Whether a within-buffer `setMode` to `target` is allowed from the CURRENT
-/// mode: always, unless the current mode is LOCKED and `target` is a different
-/// non-menu mode (which would drop a read-only projection into a generic editing
-/// mode). The guest/builtin setMode doors consult this; buffer-switch does not.
-pub fn mayLeaveLocked(self: *const Keymap, target: []const u8) bool {
-    if (!self.isLockedMode(self.mode)) return true;
-    return std.mem.eql(u8, target, self.mode) or self.isMenuMode(target);
+/// Whether a within-buffer `setMode` to `target` is allowed from `current`:
+/// always, unless `current` is LOCKED and `target` is a different non-menu
+/// mode (which would drop a read-only projection into a generic editing
+/// mode). The guest/builtin setMode doors consult this (with the calling
+/// head's own current mode); buffer-switch does not.
+pub fn mayLeaveLocked(self: *const Keymap, current: []const u8, target: []const u8) bool {
+    if (!self.isLockedMode(current)) return true;
+    return std.mem.eql(u8, target, current) or self.isMenuMode(target);
 }
 
 /// Append `mode`'s own bindings (key → command) to `out`, in bind order.
@@ -519,71 +419,73 @@ pub fn bindingAt(self: *const Keymap, mode: []const u8, i: usize) ?Binding {
     return .{ .key = b.keys()[i], .command = b.values()[i].command };
 }
 
-/// Build the RESOLVED set of bindings AVAILABLE in `mode` into `self.resolved`
-/// and return the count: the mode's own table, then each fallback parent, then
+/// Build the RESOLVED set of bindings AVAILABLE in `mode` into `out`/
+/// `out_group` (a HEAD's own scratch — see `Head.resolveBindings`) and
+/// return the count: the mode's own table, then each fallback parent, then
 /// `global` — the FIRST binding of a key wins (a nearer mode's local override),
 /// so each key appears once. This is "what can I press here", the same key set
 /// `lookup` would resolve — so which-key shows the whole reachable context
 /// (dired's nav keys AND the editing keys it inherits), not just one mode's own
-/// table. Read back with `resolvedAt`; both are valid until the next keymap
-/// mutation (the guest enumerates synchronously during its `on_menu`).
-pub fn resolveBindings(self: *Keymap, gpa: Allocator, mode: []const u8) Allocator.Error!usize {
-    self.resolved.clearRetainingCapacity();
-    self.resolved_group.clearRetainingCapacity();
+/// table. Read back with the head's `resolvedAt`; both are valid until the next
+/// keymap mutation (the guest enumerates synchronously during its `on_menu`).
+pub fn resolveBindingsInto(self: *const Keymap, gpa: Allocator, mode: []const u8, out: *std.ArrayList(Binding), out_group: *std.ArrayList(bool)) Allocator.Error!usize {
+    out.clearRetainingCapacity();
+    out_group.clearRetainingCapacity();
     var m: []const u8 = mode;
     var depth: usize = 0;
     while (depth < 8) : (depth += 1) {
-        try self.addResolved(gpa, m);
+        try self.addResolvedInto(gpa, m, out, out_group);
         m = self.parents.get(m) orelse break;
     }
-    try self.addResolved(gpa, global_mode);
-    return self.resolved.items.len;
+    try self.addResolvedInto(gpa, global_mode, out, out_group);
+    return out.items.len;
 }
 
-/// Append `mode`'s own bindings to `resolved`, skipping any key already present
+/// Append `mode`'s own bindings to `out`, skipping any key already present
 /// (a nearer mode in the walk bound it — the override lookup honors). A binding
 /// whose command names a menu mode is a GROUP (legacy menu-mode which-key).
-fn addResolved(self: *Keymap, gpa: Allocator, mode: []const u8) Allocator.Error!void {
+fn addResolvedInto(self: *const Keymap, gpa: Allocator, mode: []const u8, out: *std.ArrayList(Binding), out_group: *std.ArrayList(bool)) Allocator.Error!void {
     const b = self.modes.getPtr(mode) orelse return;
     outer: for (b.keys(), b.values()) |k, v| {
-        for (self.resolved.items) |existing| {
+        for (out.items) |existing| {
             if (std.mem.eql(u8, existing.key, k)) continue :outer;
         }
-        try self.resolved.append(gpa, .{ .key = k, .command = v.command });
-        try self.resolved_group.append(gpa, self.isMenuMode(v.command));
+        try out.append(gpa, .{ .key = k, .command = v.command });
+        try out_group.append(gpa, self.isMenuMode(v.command));
     }
 }
 
-/// Fill `resolved` (+ `resolved_group`) with the next-key CHOICES after
-/// `prefix` — the pending chord ("" = top level, the F1 peek). Scans the current
-/// mode + fallback chain (+ `global`, at top level only) for bindings whose key
-/// extends `prefix` by ≥1 segment; the display key is the immediate NEXT segment.
-/// Deduped by that segment (nearer mode / earlier bind wins). A segment is a LEAF
-/// when `prefix seg` is itself a complete binding (its command is shown); a GROUP
-/// when it only continues a chord (more keys follow — shown as a "+prefix"
-/// label, `resolved_group` true). This is what which-key renders as you type a
-/// chord: at `space`, the `f`/`g`/… choices; at `space f`, the file submenu's.
-/// Read back with `resolvedAt` / `resolvedIsGroup`; valid until the next mutation.
-pub fn completions(self: *Keymap, gpa: Allocator, prefix: []const u8) Allocator.Error!usize {
-    self.resolved.clearRetainingCapacity();
-    self.resolved_group.clearRetainingCapacity();
-    var m: []const u8 = self.mode;
+/// Fill `out`/`out_group` (a head's own scratch) with the next-key CHOICES
+/// after `prefix` in `mode` — the pending chord ("" = top level, the F1
+/// peek). Scans `mode` + fallback chain (+ `global`, at top level only) for
+/// bindings whose key extends `prefix` by ≥1 segment; the display key is the
+/// immediate NEXT segment. Deduped by that segment (nearer mode / earlier
+/// bind wins). A segment is a LEAF when `prefix seg` is itself a complete
+/// binding (its command is shown); a GROUP when it only continues a chord
+/// (more keys follow — shown as a "+prefix" label, `out_group` true). This
+/// is what which-key renders as you type a chord: at `space`, the `f`/`g`/…
+/// choices; at `space f`, the file submenu's. Read back with the head's
+/// `resolvedAt`/`resolvedIsGroup`; valid until the next mutation.
+pub fn completionsInto(self: *const Keymap, gpa: Allocator, mode: []const u8, prefix: []const u8, out: *std.ArrayList(Binding), out_group: *std.ArrayList(bool)) Allocator.Error!usize {
+    out.clearRetainingCapacity();
+    out_group.clearRetainingCapacity();
+    var m: []const u8 = mode;
     var depth: usize = 0;
     while (depth < 8) : (depth += 1) {
-        try self.addCompletions(gpa, m, prefix);
+        try self.addCompletionsInto(gpa, m, prefix, out, out_group);
         m = self.parents.get(m) orelse break;
     }
     // The universal layer is consulted too, so a global chord opener (`C-w`) is
     // offered from any mode. The prefix filter keeps it honest: mid-chord
     // (`space`) global's `C-w …` keys don't start with the prefix, so nothing
     // global leaks in — a global key only ever surfaces as a top-level choice.
-    try self.addCompletions(gpa, global_mode, prefix);
-    return self.resolved.items.len;
+    try self.addCompletionsInto(gpa, global_mode, prefix, out, out_group);
+    return out.items.len;
 }
 
-/// Append `mode`'s next-segment choices after `prefix` to `resolved`, deduped by
+/// Append `mode`'s next-segment choices after `prefix` to `out`, deduped by
 /// segment against what's there (a nearer mode already offered it).
-fn addCompletions(self: *Keymap, gpa: Allocator, mode: []const u8, prefix: []const u8) Allocator.Error!void {
+fn addCompletionsInto(self: *const Keymap, gpa: Allocator, mode: []const u8, prefix: []const u8, out: *std.ArrayList(Binding), out_group: *std.ArrayList(bool)) Allocator.Error!void {
     const b = self.modes.getPtr(mode) orelse return;
     for (b.keys(), b.values()) |k, v| {
         // The remainder of `k` past `prefix ` — the part this key adds to the chord.
@@ -595,26 +497,13 @@ fn addCompletions(self: *Keymap, gpa: Allocator, mode: []const u8, prefix: []con
         const seg_end = std.mem.indexOfScalar(u8, rest, ' ') orelse rest.len;
         const seg = rest[0..seg_end];
         const is_leaf = seg_end == rest.len; // the key ends here → a runnable leaf
-        for (self.resolved.items) |existing| {
+        for (out.items) |existing| {
             if (std.mem.eql(u8, existing.key, seg)) break; // already offered — dedup
         } else {
-            try self.resolved.append(gpa, .{ .key = seg, .command = if (is_leaf) v.command else "+prefix" });
-            try self.resolved_group.append(gpa, !is_leaf);
+            try out.append(gpa, .{ .key = seg, .command = if (is_leaf) v.command else "+prefix" });
+            try out_group.append(gpa, !is_leaf);
         }
     }
-}
-
-/// The `i`-th resolved binding from the last `resolveBindings`/`completions`.
-pub fn resolvedAt(self: *const Keymap, i: usize) ?Binding {
-    if (i >= self.resolved.items.len) return null;
-    return self.resolved.items[i];
-}
-
-/// Whether the `i`-th resolved entry is a GROUP (opens a submenu / continues a
-/// chord) rather than a runnable leaf — see `resolveBindings`/`completions`.
-pub fn resolvedIsGroup(self: *const Keymap, i: usize) bool {
-    if (i >= self.resolved_group.items.len) return false;
-    return self.resolved_group.items[i];
 }
 
 /// Compose a keyspec from modifiers + a keysym name into `buf`. `shift`
@@ -800,22 +689,20 @@ test "keymap: modal binding, rebinding, keyspec composition" {
     var km: Keymap = .empty;
     defer km.deinit(gpa);
 
-    try km.setMode(gpa, "normal");
     try km.bind(gpa, "normal", "i", "enter-insert", prio_plugin, "vim");
     try km.bind(gpa, "normal", "C-s", "save", prio_plugin, "vim");
     try km.bind(gpa, "insert", "Escape", "enter-normal", prio_plugin, "vim");
 
-    try t.expectEqualStrings("enter-insert", km.lookup("i").?);
-    try t.expectEqualStrings("save", km.lookup("C-s").?);
-    try t.expectEqual(@as(?[]const u8, null), km.lookup("Escape"));
+    try t.expectEqualStrings("enter-insert", km.lookup("normal", "i").?);
+    try t.expectEqualStrings("save", km.lookup("normal", "C-s").?);
+    try t.expectEqual(@as(?[]const u8, null), km.lookup("normal", "Escape"));
 
-    try km.setMode(gpa, "insert");
-    try t.expectEqualStrings("enter-normal", km.lookup("Escape").?);
-    try t.expectEqual(@as(?[]const u8, null), km.lookup("i"));
+    try t.expectEqualStrings("enter-normal", km.lookup("insert", "Escape").?);
+    try t.expectEqual(@as(?[]const u8, null), km.lookup("insert", "i"));
 
     // Same-owner rebinding replaces.
     try km.bind(gpa, "insert", "Escape", "custom-escape", prio_plugin, "vim");
-    try t.expectEqualStrings("custom-escape", km.lookup("Escape").?);
+    try t.expectEqualStrings("custom-escape", km.lookup("insert", "Escape").?);
 
     var buf: [32]u8 = undefined;
     try t.expectEqualStrings("C-M-x", keyspec(&buf, true, true, false, "x"));
@@ -834,8 +721,7 @@ test "keymap: layering is order-independent — higher priority always wins" {
     try a.bind(gpa, "default", "j", "cursor-down", prio_core, "core");
     try a.bind(gpa, "default", "j", "motion.down", prio_plugin, "vim");
     try a.bind(gpa, "default", "j", "my-thing", prio_config, "config");
-    try a.setMode(gpa, "default");
-    try t.expectEqualStrings("my-thing", a.lookup("j").?);
+    try t.expectEqualStrings("my-thing", a.lookup("default", "j").?);
 
     // Same binds in the OPPOSITE order resolve identically — a lower tier can
     // never displace a higher one, so the result is a pure function of the set.
@@ -844,8 +730,7 @@ test "keymap: layering is order-independent — higher priority always wins" {
     try b.bind(gpa, "default", "j", "my-thing", prio_config, "config");
     try b.bind(gpa, "default", "j", "motion.down", prio_plugin, "vim");
     try b.bind(gpa, "default", "j", "cursor-down", prio_core, "core");
-    try b.setMode(gpa, "default");
-    try t.expectEqualStrings("my-thing", b.lookup("j").?);
+    try t.expectEqualStrings("my-thing", b.lookup("default", "j").?);
 }
 
 test "keymap: unbind removes only if the owner still matches; no-op otherwise" {
@@ -854,23 +739,22 @@ test "keymap: unbind removes only if the owner still matches; no-op otherwise" {
     defer km.deinit(gpa);
 
     try km.bind(gpa, "normal", "j", "cursor-down", prio_imported, "import:defaults");
-    try km.setMode(gpa, "normal");
-    try t.expectEqualStrings("cursor-down", km.lookup("j").?);
+    try t.expectEqualStrings("cursor-down", km.lookup("normal", "j").?);
 
     // A different owner can't steal-then-unbind the slot out from under it.
     km.unbind(gpa, "normal", "j", "someone-else");
-    try t.expectEqualStrings("cursor-down", km.lookup("j").?);
+    try t.expectEqualStrings("cursor-down", km.lookup("normal", "j").?);
 
     // A higher tier has since taken the slot — unbinding the ORIGINAL owner
     // must not remove the newer binding.
     try km.bind(gpa, "normal", "j", "my-thing", prio_config, "config");
     km.unbind(gpa, "normal", "j", "import:defaults");
-    try t.expectEqualStrings("my-thing", km.lookup("j").?);
+    try t.expectEqualStrings("my-thing", km.lookup("normal", "j").?);
 
     // The rightful owner unbinds cleanly.
     try km.bind(gpa, "normal", "k", "cursor-up", prio_imported, "import:defaults");
     km.unbind(gpa, "normal", "k", "import:defaults");
-    try t.expectEqual(@as(?[]const u8, null), km.lookup("k"));
+    try t.expectEqual(@as(?[]const u8, null), km.lookup("normal", "k"));
 
     // Unbinding a never-bound key, or in an unknown mode, is a harmless no-op.
     km.unbind(gpa, "normal", "z", "import:defaults");
@@ -925,15 +809,13 @@ test "keymap: the global layer applies under every mode, overridable locally" {
     try km.bind(gpa, "normal", "i", "insert", prio_plugin, "vim");
 
     // In normal (which has no F1 of its own) F1 falls through to global.
-    try km.setMode(gpa, "normal");
-    try t.expectEqualStrings("which-key-now", km.lookup("F1").?);
+    try t.expectEqualStrings("which-key-now", km.lookup("normal", "F1").?);
     // In a standalone tool mode with NO fallback chain, F1 still works —
     // that's the whole point (before, tool modes were islands).
-    try km.setMode(gpa, "dired");
-    try t.expectEqualStrings("which-key-now", km.lookup("F1").?);
+    try t.expectEqualStrings("which-key-now", km.lookup("dired", "F1").?);
     // A mode still overrides a global key by binding it locally.
     try km.bind(gpa, "dired", "F1", "dired-help", prio_plugin, "dired");
-    try t.expectEqualStrings("dired-help", km.lookup("F1").?);
+    try t.expectEqualStrings("dired-help", km.lookup("dired", "F1").?);
 }
 
 test "keymap: a menu inherits the menu-nav base for nav keys; baseMode stops at the menu" {
@@ -949,10 +831,9 @@ test "keymap: a menu inherits the menu-nav base for nav keys; baseMode stops at 
     // so its nav keys resolve through the fallback — but its OWN keys still win.
     try km.markMenuMode(gpa, "leader");
     try km.bind(gpa, "leader", "f", "leader-file", prio_config, "cfg");
-    try km.setMode(gpa, "leader");
-    try t.expectEqualStrings("leader-file", km.lookup("f").?); // own key
-    try t.expectEqualStrings("menu-escape", km.lookup("BackSpace").?); // inherited nav
-    try t.expectEqualStrings("which-key-page-down", km.lookup("PageDown").?);
+    try t.expectEqualStrings("leader-file", km.lookup("leader", "f").?); // own key
+    try t.expectEqualStrings("menu-escape", km.lookup("leader", "BackSpace").?); // inherited nav
+    try t.expectEqualStrings("which-key-page-down", km.lookup("leader", "PageDown").?);
 
     // baseMode stops at the menu (a buffer is never remembered as a menu, nor as
     // the menu-nav base it falls back to) — so switchTo's menu-skip stays correct.
@@ -972,72 +853,24 @@ test "keymap: a locked projection mode refuses to leave for an editing mode" {
     try km.markLockedMode(gpa, "magit");
     try km.markMenuMode(gpa, "git-branch-menu");
 
-    try km.setMode(gpa, "magit");
     // From the locked projection you may NOT jump to a different editing mode
     // (the "normal-in-magit" leak) — that's now inexpressible...
-    try t.expect(!km.mayLeaveLocked("normal"));
-    try t.expect(!km.mayLeaveLocked("insert"));
+    try t.expect(!km.mayLeaveLocked("magit", "normal"));
+    try t.expect(!km.mayLeaveLocked("magit", "insert"));
     // ...but a menu (transient) and staying put are fine.
-    try t.expect(km.mayLeaveLocked("git-branch-menu"));
-    try t.expect(km.mayLeaveLocked("magit"));
+    try t.expect(km.mayLeaveLocked("magit", "git-branch-menu"));
+    try t.expect(km.mayLeaveLocked("magit", "magit"));
 
     // From a menu (current mode not locked), returning to magit is allowed.
-    try km.setMode(gpa, "git-branch-menu");
-    try t.expect(km.mayLeaveLocked("magit"));
+    try t.expect(km.mayLeaveLocked("git-branch-menu", "magit"));
     // A non-locked mode never gates (ordinary editing).
-    try km.setMode(gpa, "normal");
-    try t.expect(km.mayLeaveLocked("insert"));
+    try t.expect(km.mayLeaveLocked("normal", "insert"));
 }
 
-test "keymap: prefix sequences — a chord resolves; a menu is a prefix, not a mode" {
-    const gpa = t.allocator;
-    var km: Keymap = .empty;
-    defer km.deinit(gpa);
-    try km.setMode(gpa, "normal");
-    // A leader tree as SEQUENCES (no leader-* mode): SPC f f -> find-file, etc.
-    try km.bind(gpa, "normal", "space f f", "find-file", prio_config, "cfg");
-    try km.bind(gpa, "normal", "space g g", "git-status", prio_config, "cfg");
-    try km.bind(gpa, "normal", "i", "vim-insert", prio_config, "vim");
-    try km.bind(gpa, "global", "C-w", "window-thing", prio_config, "cfg");
-
-    // A single bound key runs immediately.
-    {
-        const r = try km.feed(gpa, "i");
-        try t.expect(r == .run);
-        try t.expectEqualStrings("vim-insert", r.run);
-        try t.expectEqual(@as(usize, 0), km.pending.len);
-    }
-    // SPC is a prefix -> pending; f -> still pending; f -> completes -> run.
-    try t.expect((try km.feed(gpa, "space")) == .pending);
-    try t.expectEqualStrings("space", km.pending);
-    try t.expect((try km.feed(gpa, "f")) == .pending);
-    try t.expectEqualStrings("space f", km.pending);
-    {
-        const r = try km.feed(gpa, "f");
-        try t.expect(r == .run);
-        try t.expectEqualStrings("find-file", r.run);
-        try t.expectEqual(@as(usize, 0), km.pending.len);
-    }
-    // The "global is too global" fix falls out: SPC then C-w is the CHORD
-    // `space C-w` (unbound) — NOT the global C-w. It resets, doesn't fire it.
-    try t.expect((try km.feed(gpa, "space")) == .pending);
-    try t.expect((try km.feed(gpa, "C-w")) == .none);
-    try t.expectEqual(@as(usize, 0), km.pending.len);
-    // C-w at the TOP (no pending) still hits global.
-    {
-        const r = try km.feed(gpa, "C-w");
-        try t.expect(r == .run);
-        try t.expectEqualStrings("window-thing", r.run);
-    }
-    // A lone unbound printable key is `text` (the caller inserts it).
-    try t.expect((try km.feed(gpa, "x")) == .text);
-
-    // Backspace pops one chord level.
-    try t.expect((try km.feed(gpa, "space")) == .pending);
-    try t.expect((try km.feed(gpa, "f")) == .pending);
-    try km.popPending(gpa);
-    try t.expectEqualStrings("space", km.pending);
-}
+// Chord feeding (`feed`/`pending`), which-key resolution (`resolveBindings`/
+// `completions`), and menu return-target tracking (`enterMode`/`menuReturn`)
+// are all HEAD cursor behavior now — see `Head.zig`'s test block for their
+// coverage (including the two-head independence tests this split exists for).
 
 test "keymap: keyspec normalization — config writes SPC : / C-x C-f, stores canonical" {
     var buf: [256]u8 = undefined;
@@ -1062,10 +895,8 @@ test "keymap: keyspec normalization — config writes SPC : / C-x C-f, stores ca
     const gpa = t.allocator;
     var km: Keymap = .empty;
     defer km.deinit(gpa);
-    try km.setMode(gpa, "normal");
     try km.bind(gpa, "normal", "SPC :", "pick-commands", prio_config, "cfg");
-    try t.expect((try km.feed(gpa, "space")) == .pending);
-    try t.expectEqualStrings("pick-commands", (try km.feed(gpa, "colon")).run);
+    try t.expectEqualStrings("pick-commands", km.lookup("normal", "space colon").?);
 
     // displayKey is the inverse — which-key shows the config's notation back.
     try t.expectEqualStrings("SPC :", km.displayKey(&buf, "space colon"));
@@ -1074,109 +905,4 @@ test "keymap: keyspec normalization — config writes SPC : / C-x C-f, stores ca
     try t.expectEqualStrings(":", km.displayKey(&buf, "colon")); // a lone segment
     try t.expectEqualStrings("f", km.displayKey(&buf, "f"));
     try t.expectEqualStrings("Escape", km.displayKey(&buf, "Escape"));
-}
-
-test "keymap: completions — chord next-keys, leaf vs group, deduped, global at top" {
-    const gpa = t.allocator;
-    var km: Keymap = .empty;
-    defer km.deinit(gpa);
-    try km.setMode(gpa, "normal");
-    // A leader tree as sequences: SPC f {f,r}, SPC g g; a plain top-level key.
-    try km.bind(gpa, "normal", "space f f", "find-file", prio_config, "cfg");
-    try km.bind(gpa, "normal", "space f r", "recent-files", prio_config, "cfg");
-    try km.bind(gpa, "normal", "space g g", "git-status", prio_config, "cfg");
-    try km.bind(gpa, "normal", "i", "vim-insert", prio_config, "vim");
-    try km.bind(gpa, "global", "C-w", "window-thing", prio_config, "cfg");
-
-    // Top level (empty prefix): the first segments, deduped. The three `space …`
-    // binds collapse to ONE `space` group; `i` is a leaf; global `C-w` shows at
-    // the top → {space, i, C-w} = 3.
-    try t.expectEqual(@as(usize, 3), try km.completions(gpa, ""));
-    // Build a name→(cmd,group) view to assert regardless of order.
-    const Found = struct {
-        fn get(k: *Keymap, key: []const u8) ?Binding {
-            var i: usize = 0;
-            while (i < k.resolved.items.len) : (i += 1) {
-                if (std.mem.eql(u8, k.resolved.items[i].key, key)) return k.resolved.items[i];
-            }
-            return null;
-        }
-        fn group(k: *Keymap, key: []const u8) bool {
-            var i: usize = 0;
-            while (i < k.resolved.items.len) : (i += 1) {
-                if (std.mem.eql(u8, k.resolved.items[i].key, key)) return k.resolvedIsGroup(i);
-            }
-            return false;
-        }
-    };
-    _ = try km.completions(gpa, "");
-    try t.expect(Found.get(&km, "space") != null);
-    try t.expect(Found.group(&km, "space")); // continues a chord → group
-    try t.expectEqualStrings("vim-insert", Found.get(&km, "i").?.command);
-    try t.expect(!Found.group(&km, "i")); // runnable leaf
-    try t.expectEqualStrings("window-thing", Found.get(&km, "C-w").?.command); // global at top
-    // `space f f` and `space f r` collapse to ONE `space` group at the top.
-    var space_count: usize = 0;
-    for (km.resolved.items) |b| {
-        if (std.mem.eql(u8, b.key, "space")) space_count += 1;
-    }
-    try t.expectEqual(@as(usize, 1), space_count);
-
-    // After `space`: the file/git submenu keys `f` (group) and `g` (leaf-ish
-    // group — `space g g`). Global does NOT appear mid-chord.
-    {
-        _ = try km.completions(gpa, "space");
-        try t.expect(Found.get(&km, "f") != null);
-        try t.expect(Found.group(&km, "f")); // space f {f,r} → still a group
-        try t.expect(Found.get(&km, "g") != null);
-        try t.expectEqual(@as(?Binding, null), Found.get(&km, "C-w")); // no global mid-chord
-    }
-    // After `space f`: the two leaves `f`→find-file, `r`→recent-files.
-    {
-        const n = try km.completions(gpa, "space f");
-        try t.expectEqual(@as(usize, 2), n);
-        try t.expectEqualStrings("find-file", Found.get(&km, "f").?.command);
-        try t.expect(!Found.group(&km, "f")); // a leaf now
-        try t.expectEqualStrings("recent-files", Found.get(&km, "r").?.command);
-    }
-}
-
-test "keymap: menu return targets — guest entry records, nesting collapses to root" {
-    const gpa = t.allocator;
-    var km: Keymap = .empty;
-    defer km.deinit(gpa);
-
-    try km.markMenuMode(gpa, "leader");
-    try km.markMenuMode(gpa, "leader-file");
-    try km.setMode(gpa, "normal");
-
-    // Guest enters leader from normal → return target is normal.
-    try km.enterMode(gpa, "leader");
-    try t.expectEqualStrings("leader", km.currentMode());
-    try t.expectEqualStrings("normal", km.menuReturn("leader").?);
-
-    // Nested: enter leader-file from leader → collapses to the root (normal),
-    // not one hop back to leader.
-    try km.enterMode(gpa, "leader-file");
-    try t.expectEqualStrings("normal", km.menuReturn("leader-file").?);
-
-    // A non-menu mode has no return target.
-    try t.expectEqual(@as(?[]const u8, null), km.menuReturn("normal"));
-}
-
-test "keymap: host-side setMode restore does NOT poison menu return targets" {
-    const gpa = t.allocator;
-    var km: Keymap = .empty;
-    defer km.deinit(gpa);
-
-    try km.markMenuMode(gpa, "leader");
-    try km.setMode(gpa, "normal");
-    try km.enterMode(gpa, "leader"); // return target: normal
-
-    // The picker saves prev="leader", sets "pick" (plain setMode, not a menu),
-    // then on close restores "leader" via plain setMode. That restore must not
-    // rewrite leader's return target to "pick".
-    try km.setMode(gpa, "pick");
-    try km.setMode(gpa, "leader");
-    try t.expectEqualStrings("normal", km.menuReturn("leader").?);
 }

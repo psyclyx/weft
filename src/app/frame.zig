@@ -23,6 +23,14 @@ const providers = @import("providers.zig");
 /// tracks whether a menu mode is active and whether its hint popup has fired,
 /// so `on_menu(open/close)` fire exactly once per enter/leave at the frame
 /// boundary (never nested inside another guest call). `.{}` is the idle state.
+///
+/// W2a-2: this struct's OWN storage (open/shown/forced/open_ns/last_mode) is
+/// a single `main()`-local instance today — it now READS a `*core.Head` (see
+/// `update` below) but is not itself part of one. Two heads would each need
+/// their own overlay-edge tracker (a menu popup opening for head A must not
+/// suppress/idle-time head B's). Left as a single instance here (app-side,
+/// window-layout/overlay territory per the task brief); W2a-2 is where it
+/// either becomes a `Head` field or gets keyed per-head.
 pub const MenuOverlay = struct {
     open: bool = false,
     shown: bool = false, // has on_menu(open) fired for the current menu?
@@ -37,21 +45,22 @@ pub const MenuOverlay = struct {
     /// consumed here. Returns whether the view was damaged.
     pub fn update(
         self: *MenuOverlay,
-        keymap: *core.Keymap,
+        head: *core.Head,
+        keymap: *const core.Keymap,
         plugins: *std.ArrayList(*core.wasm_abi.WasmPlugin),
         frame_start: u64,
         which_key_now: *bool,
         which_key_delay_ns: u64,
     ) bool {
         var dirty = false;
-        const cur = keymap.currentMode();
-        const in_chord = keymap.pending.len > 0;
+        const cur = head.currentMode();
+        const in_chord = head.pending.len > 0;
         const is_menu = keymap.isMenuMode(cur);
         // What the overlay currently reflects: the pending chord if one's being
         // typed (`space f`), else the mode name. which-key re-renders whenever
         // this changes — each keystroke of a chord grows the pending prefix, so
         // the completions update in place.
-        const content: []const u8 = if (in_chord) keymap.pending else cur;
+        const content: []const u8 = if (in_chord) head.pending else cur;
         const changed = self.open and !std.mem.eql(u8, content, self.last_mode[0..self.last_len]);
         // F1 toggles a forced peek at the CURRENT (any) mode. Leaving that mode
         // ends the peek — a menu you drill into then shows on its own.
@@ -101,8 +110,9 @@ pub const FrameCtx = struct {
     buffers: *core.Buffers,
     caps: *core.Caps,
     keymap: *core.Keymap,
-    pick: *core.Pick,
-    echo: *std.ArrayList(u8),
+    /// This frame's (today, singular) head — current mode, pending chord,
+    /// pick session, echo line (north-star-plan §6 W2a-1).
+    head: *core.Head,
 
     // ── Config read by the HUD ──
     cursor_cfg: *cursor_config.CursorConfig,
@@ -188,7 +198,7 @@ pub fn tickAsync(
     // Drive any async pick source (completion race-and-refine, file
     // finder, dir browser) — a no-op for a static or source-less
     // pick. Completion now rides this instead of a bespoke tick.
-    if (try fx.pick.tick(cmd_ctx)) dirty = true;
+    if (try fx.head.pick.tick(cmd_ctx)) dirty = true;
     // Deliver native async completions (subprocess/timer output, deferred
     // edits) on the frame thread; a completion repaints.
     if (plugin_loop.tick()) dirty = true;
@@ -211,7 +221,7 @@ pub fn tickAsync(
     }
     // Menu overlay edges — fired at the frame boundary (top-level, so a
     // menu-owner guest can't re-enter its store).
-    if (menu.update(fx.keymap, fx.plugins, frame_start, which_key_now, which_key_delay_ns)) dirty = true;
+    if (menu.update(fx.head, fx.keymap, fx.plugins, frame_start, which_key_now, which_key_delay_ns)) dirty = true;
     return dirty;
 }
 
@@ -223,6 +233,8 @@ test "menu overlay: drilling into a submenu doesn't re-delay once the popup is u
     const gpa = t.allocator;
     var km: core.Keymap = .empty;
     defer km.deinit(gpa);
+    var head: core.Head = .empty;
+    defer head.deinit(gpa);
     try km.markMenuMode(gpa, "leader");
     try km.markMenuMode(gpa, "leader-file");
     var plugins: std.ArrayList(*core.wasm_abi.WasmPlugin) = .empty;
@@ -233,24 +245,24 @@ test "menu overlay: drilling into a submenu doesn't re-delay once the popup is u
     const delay: u64 = 200;
 
     // Normal: nothing open.
-    try km.setMode(gpa, "normal");
-    _ = mo.update(&km, &plugins, 0, &wkn, delay);
+    try head.setMode(gpa, "normal");
+    _ = mo.update(&head, &km, &plugins, 0, &wkn, delay);
     try t.expect(!mo.open and !mo.shown);
 
     // Enter leader at t=100: open, not yet shown (0 < delay).
-    try km.setMode(gpa, "leader");
-    _ = mo.update(&km, &plugins, 100, &wkn, delay);
+    try head.setMode(gpa, "leader");
+    _ = mo.update(&head, &km, &plugins, 100, &wkn, delay);
     try t.expect(mo.open and !mo.shown);
 
     // t=350: held past the delay → the popup appears.
-    _ = mo.update(&km, &plugins, 350, &wkn, delay);
+    _ = mo.update(&head, &km, &plugins, 350, &wkn, delay);
     try t.expect(mo.shown);
 
     // Drill into leader-file at t=360: the idle timer is continuous (measured
     // from the first menu entry, t=100), so 360−100 ≥ delay → the submenu hint
     // shows THIS frame, no re-delay. This is the bug fix.
-    try km.setMode(gpa, "leader-file");
-    _ = mo.update(&km, &plugins, 360, &wkn, delay);
+    try head.setMode(gpa, "leader-file");
+    _ = mo.update(&head, &km, &plugins, 360, &wkn, delay);
     try t.expect(mo.shown);
 }
 
@@ -258,6 +270,8 @@ test "menu overlay: entering a menu from a non-menu still waits the idle delay" 
     const gpa = t.allocator;
     var km: core.Keymap = .empty;
     defer km.deinit(gpa);
+    var head: core.Head = .empty;
+    defer head.deinit(gpa);
     try km.markMenuMode(gpa, "leader");
     try km.markMenuMode(gpa, "leader-file");
     var plugins: std.ArrayList(*core.wasm_abi.WasmPlugin) = .empty;
@@ -268,22 +282,22 @@ test "menu overlay: entering a menu from a non-menu still waits the idle delay" 
     const delay: u64 = 200;
 
     // Fresh entry from normal: the timer starts now — the first popup waits.
-    try km.setMode(gpa, "normal");
-    _ = mo.update(&km, &plugins, 1000, &wkn, delay);
-    try km.setMode(gpa, "leader-file");
-    _ = mo.update(&km, &plugins, 1000, &wkn, delay);
+    try head.setMode(gpa, "normal");
+    _ = mo.update(&head, &km, &plugins, 1000, &wkn, delay);
+    try head.setMode(gpa, "leader-file");
+    _ = mo.update(&head, &km, &plugins, 1000, &wkn, delay);
     try t.expect(mo.open and !mo.shown);
-    _ = mo.update(&km, &plugins, 1150, &wkn, delay); // 150 < delay
+    _ = mo.update(&head, &km, &plugins, 1150, &wkn, delay); // 150 < delay
     try t.expect(!mo.shown);
-    _ = mo.update(&km, &plugins, 1201, &wkn, delay); // 201 ≥ delay
+    _ = mo.update(&head, &km, &plugins, 1201, &wkn, delay); // 201 ≥ delay
     try t.expect(mo.shown);
 
     // Leaving menus entirely closes the overlay; a later re-entry starts fresh.
-    try km.setMode(gpa, "normal");
-    _ = mo.update(&km, &plugins, 1300, &wkn, delay);
+    try head.setMode(gpa, "normal");
+    _ = mo.update(&head, &km, &plugins, 1300, &wkn, delay);
     try t.expect(!mo.open and !mo.shown);
-    try km.setMode(gpa, "leader");
-    _ = mo.update(&km, &plugins, 1300, &wkn, delay);
+    try head.setMode(gpa, "leader");
+    _ = mo.update(&head, &km, &plugins, 1300, &wkn, delay);
     try t.expect(!mo.shown); // fresh timer, not instant
 }
 
@@ -291,14 +305,16 @@ test "menu overlay: F1 forces the popup immediately, bypassing the delay" {
     const gpa = t.allocator;
     var km: core.Keymap = .empty;
     defer km.deinit(gpa);
+    var head: core.Head = .empty;
+    defer head.deinit(gpa);
     try km.markMenuMode(gpa, "leader");
     var plugins: std.ArrayList(*core.wasm_abi.WasmPlugin) = .empty;
     defer plugins.deinit(gpa);
 
     var mo: MenuOverlay = .{};
     var wkn = true; // F1 pressed
-    try km.setMode(gpa, "leader");
-    _ = mo.update(&km, &plugins, 5, &wkn, 10_000);
+    try head.setMode(gpa, "leader");
+    _ = mo.update(&head, &km, &plugins, 5, &wkn, 10_000);
     try t.expect(mo.shown); // shown despite 5 ≪ delay
     try t.expect(!wkn); // the flag was consumed
 }
@@ -307,23 +323,25 @@ test "menu overlay: F1 peeks the CURRENT (non-menu) mode; no forced leader; togg
     const gpa = t.allocator;
     var km: core.Keymap = .empty;
     defer km.deinit(gpa);
+    var head: core.Head = .empty;
+    defer head.deinit(gpa);
     var plugins: std.ArrayList(*core.wasm_abi.WasmPlugin) = .empty;
     defer plugins.deinit(gpa);
     // "normal" is NOT a menu mode; F1 must still reveal ITS keys — the old
     // behavior force-entered a hardcoded "leader" instead of showing the level
     // you're at (the magit-style "wrong menu" jank).
-    try km.setMode(gpa, "normal");
+    try head.setMode(gpa, "normal");
 
     var mo: MenuOverlay = .{};
     var wkn = true; // F1
-    _ = mo.update(&km, &plugins, 5, &wkn, 10_000);
+    _ = mo.update(&head, &km, &plugins, 5, &wkn, 10_000);
     try t.expect(mo.forced);
     try t.expect(mo.shown); // shown immediately for the current mode
-    try t.expectEqualStrings("normal", km.currentMode()); // did NOT jump into "leader"
+    try t.expectEqualStrings("normal", head.currentMode()); // did NOT jump into "leader"
 
     // A second F1 dismisses the peek.
     wkn = true;
-    _ = mo.update(&km, &plugins, 20, &wkn, 10_000);
+    _ = mo.update(&head, &km, &plugins, 20, &wkn, 10_000);
     try t.expect(!mo.forced);
     try t.expect(!mo.open);
     try t.expect(!mo.shown);
@@ -333,19 +351,21 @@ test "menu overlay: leaving the peeked mode ends the forced peek" {
     const gpa = t.allocator;
     var km: core.Keymap = .empty;
     defer km.deinit(gpa);
+    var head: core.Head = .empty;
+    defer head.deinit(gpa);
     var plugins: std.ArrayList(*core.wasm_abi.WasmPlugin) = .empty;
     defer plugins.deinit(gpa);
-    try km.setMode(gpa, "normal");
+    try head.setMode(gpa, "normal");
 
     var mo: MenuOverlay = .{};
     var wkn = true; // F1 peeks normal
-    _ = mo.update(&km, &plugins, 5, &wkn, 10_000);
+    _ = mo.update(&head, &km, &plugins, 5, &wkn, 10_000);
     try t.expect(mo.forced and mo.shown);
 
     // Switch to another non-menu mode: the peek ends (no lingering overlay).
-    try km.setMode(gpa, "insert");
+    try head.setMode(gpa, "insert");
     wkn = false;
-    _ = mo.update(&km, &plugins, 20, &wkn, 10_000);
+    _ = mo.update(&head, &km, &plugins, 20, &wkn, 10_000);
     try t.expect(!mo.forced);
     try t.expect(!mo.open);
 }

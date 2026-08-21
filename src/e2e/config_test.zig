@@ -80,7 +80,7 @@ test "e2e/config: the sample config boots; SPC g i is discoverable via which-key
     // which-key overlay — so we assert on what the which_key plugin actually
     // renders to the surface, not on the keymap the harness could introspect.
     ed.press("SPC", "");
-    try t.expectEqualStrings("space", ed.keymap.pending); // the chord is pending
+    try t.expectEqualStrings("space", ed.head.pending); // the chord is pending
     {
         const top = try whichKeyText(&ed, gpa);
         defer gpa.free(top);
@@ -88,23 +88,23 @@ test "e2e/config: the sample config boots; SPC g i is discoverable via which-key
         try t.expect(std.mem.indexOf(u8, top, "g") != null); // the git group key is shown
     }
     ed.press("g", ""); // drill into the git group
-    try t.expectEqualStrings("space g", ed.keymap.pending);
+    try t.expectEqualStrings("space g", ed.head.pending);
     // The overlay now shows the git leaves BY THEIR COMMAND NAMES — what a user
     // reads to discover the binding we added.
     try t.expect(whichKeyShows(&ed, "git-init"));
     try t.expect(whichKeyShows(&ed, "git-status"));
     ed.press("Escape", ""); // abandon the chord; nothing ran
-    try t.expectEqualStrings("", ed.keymap.pending);
+    try t.expectEqualStrings("", ed.head.pending);
 
     // SPC : must open the command PALETTE (pick-commands), not the ex line.
     // Typing `:` needs Shift, and a real keyboard sends that Shift_L press as its
     // own event BETWEEN space and colon — it must not dead-end the chord.
     ed.press("SPC", "");
-    try t.expectEqualStrings("space", ed.keymap.pending);
+    try t.expectEqualStrings("space", ed.head.pending);
     ed.press("Shift_L", ""); // the modifier for `:` — a no-op for the chord
-    try t.expectEqualStrings("space", ed.keymap.pending); // still pending, not reset
+    try t.expectEqualStrings("space", ed.head.pending); // still pending, not reset
     ed.press(":", "");
-    try t.expectEqualStrings("", ed.keymap.pending); // the chord resolved + ran
+    try t.expectEqualStrings("", ed.head.pending); // the chord resolved + ran
     try t.expect(ed.pick.active); // the palette (a pick), not the ex prompt
 }
 

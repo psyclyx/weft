@@ -68,8 +68,8 @@ pub fn hProvide(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32, resu
         // user-facing channel), not a global stderr warn — see action.zig.
         const msg = std.fmt.allocPrint(gpa, "provide: '{s}' is a race action — register a capability provider instead", .{action}) catch return;
         defer gpa.free(msg);
-        p.ctx.echo.clearRetainingCapacity();
-        p.ctx.echo.appendSlice(gpa, msg) catch {};
+        p.ctx.head.echo.clearRetainingCapacity();
+        p.ctx.head.echo.appendSlice(gpa, msg) catch {};
     };
 }
 
@@ -80,11 +80,11 @@ pub fn hSetMode(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32, resu
     defer p.gpa.free(mode);
     // A locked projection mode (magit/git-view) refuses to switch to a different
     // editing mode — you can't land in `normal` inside a read-only projection.
-    if (!p.ctx.keymap.mayLeaveLocked(mode)) return;
+    if (!p.ctx.keymap.mayLeaveLocked(p.ctx.head.currentMode(), mode)) return;
     // Guest-initiated: route through enterMode so entering a menu mode records
     // its one-shot return target. Host-side mode save/restore (the picker) uses
     // plain setMode and never records.
-    p.ctx.keymap.enterMode(p.gpa, mode) catch {};
+    p.ctx.head.enterMode(p.gpa, p.ctx.keymap, mode) catch {};
     // Remember a RESTING mode as the active buffer's resting mode, so exiting a
     // transient sub-mode (insert/visual) returns HERE — this is what keeps a
     // tool projection (dired) live after an in-place edit + Escape.
@@ -114,7 +114,7 @@ pub fn hExitToResting(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32
     if (target.len == 0) return;
     const owned = p.gpa.dupe(u8, target) catch return;
     defer p.gpa.free(owned);
-    p.ctx.keymap.setMode(p.gpa, owned) catch {};
+    p.ctx.head.setMode(p.gpa, owned) catch {};
 }
 
 pub fn hSetFallback(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32, results: []i32) void {

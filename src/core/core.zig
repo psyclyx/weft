@@ -35,6 +35,7 @@ pub const UndoLog = undo.UndoLog;
 pub const Editor = @import("Editor.zig");
 pub const Buffers = @import("Buffers.zig");
 pub const Keymap = @import("Keymap.zig");
+pub const Head = @import("Head.zig");
 pub const builtins = @import("builtins.zig");
 pub const pick = @import("pick.zig");
 pub const surface = @import("surface.zig");

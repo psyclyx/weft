@@ -13,8 +13,8 @@ pub fn hEcho(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32, results
     const p: *WasmPlugin = @ptrCast(@alignCast(data.?));
     const msg = caller.readMemory(p.gpa, @intCast(args[0]), @intCast(args[1])) catch return;
     defer p.gpa.free(msg);
-    p.ctx.echo.clearRetainingCapacity();
-    p.ctx.echo.appendSlice(p.gpa, msg) catch {};
+    p.ctx.head.echo.clearRetainingCapacity();
+    p.ctx.head.echo.appendSlice(p.gpa, msg) catch {};
 }
 
 // Command args in + result out. Integers cross as i32 — the membrane word.

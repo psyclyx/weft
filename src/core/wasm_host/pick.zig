@@ -61,7 +61,7 @@ pub fn hPickEnd(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32, resu
     };
     defer gpa.free(entries);
     for (p.pick_items.items, entries) |it, *e| e.* = .{ .text = it.text, .doc = it.doc };
-    p.ctx.pick.open(p.ctx, p.pick_prompt.items, entries, .{
+    p.ctx.head.pick.open(p.ctx, p.pick_prompt.items, entries, .{
         .handler = wpPickAccept,
         .cleanup = wpPickCleanup,
         .data = bp,
@@ -85,7 +85,7 @@ pub fn hOpenFilePick(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32,
         return;
     };
     // openWith closes the source on failure; only the BoundPick is ours.
-    p.ctx.pick.openWith(p.ctx, prompt, &.{}, .{
+    p.ctx.head.pick.openWith(p.ctx, prompt, &.{}, .{
         .handler = wpPickAccept,
         .cleanup = wpPickCleanup,
         .data = bp,
@@ -106,7 +106,7 @@ pub fn hPickChoiceIndex(data: ?*anyopaque, caller: *wasm.Caller, args: []const i
     _ = caller;
     _ = args;
     const p: *WasmPlugin = @ptrCast(@alignCast(data.?));
-    results[0] = if (p.ctx.pick.accepted_index) |i| @intCast(i) else -1;
+    results[0] = if (p.ctx.head.pick.accepted_index) |i| @intCast(i) else -1;
 }
 
 /// Pick accept: stash the choice, dispatch to the guest's on_pick_accept.

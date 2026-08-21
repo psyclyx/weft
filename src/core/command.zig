@@ -13,6 +13,7 @@ const Document = @import("Document.zig");
 const Editor = @import("Editor.zig");
 const Buffers = @import("Buffers.zig");
 const Keymap = @import("Keymap.zig");
+const Head = @import("Head.zig");
 const Actions = @import("action.zig");
 const capability = @import("capability.zig");
 const authority = @import("authority.zig");
@@ -56,14 +57,20 @@ pub const Context = struct {
     gpa: Allocator,
     buffers: *Buffers,
     commands: *Commands,
+    /// The system-scoped keymap TABLES (bindings, fallback chains, menu/
+    /// locked/resting declarations) — shared by every head attached to this
+    /// system. See `Keymap.zig`'s module doc for the table/cursor split.
     keymap: *Keymap,
     actions: *Actions,
-    pick: *@import("pick.zig").Pick,
     caps: *@import("capability.zig").Caps,
     quit: *bool,
-    /// Transient status-line message (`echo` writes it, the view shows
-    /// it) — the generic report-back surface for commands and plugins.
-    echo: *std.ArrayList(u8),
+    /// The interaction state of the head DISPATCHING this call — current
+    /// mode, pending chord, pick session, echo line (north-star-plan §2.7/§4
+    /// C14/§6 W2a-1). The SINGLE way core code reaches interaction state; two
+    /// heads on one system get two `Head`s, so there is no shared mode/pick/
+    /// echo left to collide on. The e2e harness and `main()` construct
+    /// exactly one `Head` today — W2a-2 is what makes more than one live.
+    head: *Head,
     /// Who is invoking right now (default: the interactive user). Plugins
     /// swap this in around their trampolines so their edits GRADE-gate as the
     /// plugin peer — see `plugin.zig`.
@@ -85,7 +92,7 @@ pub const Context = struct {
     /// name's extension). Borrowed for the duration of the call.
     pub fn actionCtx(self: *Context) Actions.Ctx {
         return .{
-            .mode = self.keymap.currentMode(),
+            .mode = self.head.currentMode(),
             .lang = Actions.langOfName(self.buffers.active().name),
             // The active buffer's projection identity — the reliable per-buffer
             // signal a projection scopes `save`/etc. by (mode changes as you
@@ -260,14 +267,14 @@ pub fn actionTrampoline(ctx: *Context, data: ?*anyopaque, args: []const Value) a
     if (ctx.actions.resolve(tr.name, ctx.actionCtx())) |cmd| {
         return run(ctx.commands, ctx, cmd, args);
     }
-    ctx.echo.clearRetainingCapacity();
+    ctx.head.echo.clearRetainingCapacity();
     const lang = Actions.langOfName(ctx.buffers.active().name);
     var buf: [128]u8 = undefined;
     const msg = if (lang.len > 0)
         std.fmt.bufPrint(&buf, "no {s} provider for .{s}", .{ tr.name, lang }) catch tr.name
     else
         std.fmt.bufPrint(&buf, "no {s} provider here", .{tr.name}) catch tr.name;
-    ctx.echo.appendSlice(ctx.gpa, msg) catch {};
+    ctx.head.echo.appendSlice(ctx.gpa, msg) catch {};
     return .nil;
 }
 
@@ -410,15 +417,13 @@ test "command: schema derivation, validation, late-bound run" {
     defer buffers.deinit(gpa);
     var keymap: Keymap = .empty;
     defer keymap.deinit(gpa);
-    var pick: @import("pick.zig").Pick = .empty;
-    defer pick.deinit(gpa);
+    var head: Head = .empty;
+    defer head.deinit(gpa);
     var caps = @import("capability.zig").Caps.init(gpa, @import("task.zig").nowNs);
     defer caps.deinit();
     var actions = Actions.init(gpa);
     defer actions.deinit();
     var quit = false;
-    var echo_line: std.ArrayList(u8) = .empty;
-    defer echo_line.deinit(gpa);
 
     var commands: Commands = .empty;
     defer commands.deinit(gpa);
@@ -428,10 +433,9 @@ test "command: schema derivation, validation, late-bound run" {
         .commands = &commands,
         .keymap = &keymap,
         .actions = &actions,
-        .pick = &pick,
         .caps = &caps,
         .quit = &quit,
-        .echo = &echo_line,
+        .head = &head,
     };
 
     // Late binding: invoked-by-name before it exists → UnknownCommand.
@@ -467,15 +471,13 @@ test "command: an agent principal authors as its own peer even under a keystroke
     defer buffers.deinit(gpa);
     var keymap: Keymap = .empty;
     defer keymap.deinit(gpa);
-    var pick: @import("pick.zig").Pick = .empty;
-    defer pick.deinit(gpa);
+    var head: Head = .empty;
+    defer head.deinit(gpa);
     var caps = @import("capability.zig").Caps.init(gpa, task.nowNs);
     defer caps.deinit();
     var actions = Actions.init(gpa);
     defer actions.deinit();
     var quit = false;
-    var echo_line: std.ArrayList(u8) = .empty;
-    defer echo_line.deinit(gpa);
     var commands: Commands = .empty;
     defer commands.deinit(gpa);
     var ctx: Context = .{
@@ -484,10 +486,9 @@ test "command: an agent principal authors as its own peer even under a keystroke
         .commands = &commands,
         .keymap = &keymap,
         .actions = &actions,
-        .pick = &pick,
         .caps = &caps,
         .quit = &quit,
-        .echo = &echo_line,
+        .head = &head,
     };
     const doc = ctx.document();
 
@@ -527,15 +528,13 @@ test "command: read-only refuses interactive edit, allows render (in depth)" {
     defer buffers.deinit(gpa);
     var keymap: Keymap = .empty;
     defer keymap.deinit(gpa);
-    var pick: @import("pick.zig").Pick = .empty;
-    defer pick.deinit(gpa);
+    var head: Head = .empty;
+    defer head.deinit(gpa);
     var caps = @import("capability.zig").Caps.init(gpa, task.nowNs);
     defer caps.deinit();
     var actions = Actions.init(gpa);
     defer actions.deinit();
     var quit = false;
-    var echo_line: std.ArrayList(u8) = .empty;
-    defer echo_line.deinit(gpa);
     var commands: Commands = .empty;
     defer commands.deinit(gpa);
     var ctx: Context = .{
@@ -544,10 +543,9 @@ test "command: read-only refuses interactive edit, allows render (in depth)" {
         .commands = &commands,
         .keymap = &keymap,
         .actions = &actions,
-        .pick = &pick,
         .caps = &caps,
         .quit = &quit,
-        .echo = &echo_line,
+        .head = &head,
     };
 
     // Seed via render (content production), THEN mark the buffer read-only.

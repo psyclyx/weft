@@ -623,6 +623,6 @@ pub fn runtimeConnectFinish(
     col.import_diag_layer = try caps.layers.claim(gpa, &buf.editor.doc, "diagnostics", .host, "remote-host");
     session_slot.* = sess;
     conn_slot.* = c;
-    try ctx.buffers.switchTo(gpa, id, ctx.keymap);
+    try ctx.buffers.switchTo(gpa, id, ctx.head, ctx.keymap);
     std.log.info("connected to {s}", .{hostport});
 }

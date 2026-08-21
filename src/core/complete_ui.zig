@@ -61,12 +61,12 @@ pub const CompletionUi = struct {
         // Open with the source BEFORE recording the session, so a failed
         // open (which closes the source) sees session == null and the
         // errdefer above is the sole owner that finishes it.
-        try ctx.pick.openWith(ctx, "complete", &.{}, .{
+        try ctx.head.pick.openWith(ctx, "complete", &.{}, .{
             .handler = accept,
             .data = self,
         }, .{ .source = self.source() });
         // Draw the completion list as a popup AT the caret, not the bottom dock.
-        ctx.pick.caret_anchor = ctx.editor().cursorOffset();
+        ctx.head.pick.caret_anchor = ctx.editor().cursorOffset();
         self.session = id;
         self.prefix_len = plen;
         // Surface instant-tier results (they answered during fire) now.
@@ -106,7 +106,7 @@ pub const CompletionUi = struct {
                 notes[i] = try annotate(ctx.gpa, it);
                 infos[i] = it.documentation; // borrowed from the session; refresh dupes
             }
-            try pick_mod.refresh(ctx.pick, ctx.gpa, labels, notes, infos);
+            try pick_mod.refresh(&ctx.head.pick, ctx.gpa, labels, notes, infos);
             changed = true;
         }
         if (s.done(task.nowNs())) {

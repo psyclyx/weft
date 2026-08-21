@@ -246,7 +246,7 @@ pub fn main(init: std.process.Init) !void {
     // The config's editor plugin (vim/helix) has set the base editing mode by
     // now; capture it as the mode fresh buffers open in, so a tool buffer's
     // mode (dired/magit) can never leak into a file opened from it.
-    session.buffers.setDefaultMode(gpa, session.keymap.currentMode()) catch {};
+    session.buffers.setDefaultMode(gpa, session.head.currentMode()) catch {};
 
     // ── Per-buffer providers (syntax + LSP hang off Buffer.frontend) ──
     // Phase two of `providers_state`: build attach_deps in place (it borrows the
@@ -426,8 +426,7 @@ pub fn main(init: std.process.Init) !void {
         .buffers = buffers,
         .caps = &session.caps,
         .keymap = &session.keymap,
-        .pick = &session.pick,
-        .echo = &session.echo,
+        .head = &session.head,
         .cursor_cfg = &session.cursor_cfg,
         .plugins = &plugins,
         .conn = &collab_state.conn,
@@ -516,7 +515,7 @@ pub fn main(init: std.process.Init) !void {
         if (had_input) {
             blink_on = true;
             blink_next_ns = frame_start + blink_period_ns;
-        } else if (session.cursor_cfg.blinkFor(session.keymap.currentMode()) and frame_start >= blink_next_ns) {
+        } else if (session.cursor_cfg.blinkFor(session.head.currentMode()) and frame_start >= blink_next_ns) {
             blink_on = !blink_on;
             blink_next_ns = frame_start + blink_period_ns;
             view_dirty = true;
@@ -532,13 +531,13 @@ pub fn main(init: std.process.Init) !void {
         };
         // ── Connect/disconnect/listen intents (outside the hot section:
         // connect blocks on TCP, disconnect joins threads). ──
-        if (collab.applyIntents(&collab_state.share_ctx, &session.cmd_ctx, pool, &collab_state.connect_task, &collab_state.connect_hostport, &collab_state.fd_link, &session.echo, &my_identity, args.token, args.user))
+        if (collab.applyIntents(&collab_state.share_ctx, &session.cmd_ctx, pool, &collab_state.connect_task, &collab_state.connect_hostport, &collab_state.fd_link, session.echo(), &my_identity, args.token, args.user))
             view_dirty = true;
         // ── Window-layout intents (outside the input hot section) ──
-        if (window_cmds.applyIntents(&win_ctx, win_layout, view, buffers, gpa, &session.keymap, last_frame_rect))
+        if (window_cmds.applyIntents(&win_ctx, win_layout, view, buffers, gpa, &session.head, &session.keymap, last_frame_rect))
             view_dirty = true;
         // ── Collab tick (adopt/publish/relay, partial fetch, peer-fs, reconnect) ──
-        if (try collab.tickCollab(&collab_state.share_ctx, &session.cmd_ctx, ed0, win_layout, &collab_state.peer_fs_bridge, &collab_state.remote_fs, &collab_state.peer_fs_inflight, &collab_state.noted_host_fp, &collab_state.last_liveness, &collab_state.reconnect, &collab_state.next_reconnect_ns, &collab_state.fd_link, &my_identity, pool, args.connect, args.token, &session.echo))
+        if (try collab.tickCollab(&collab_state.share_ctx, &session.cmd_ctx, ed0, win_layout, &collab_state.peer_fs_bridge, &collab_state.remote_fs, &collab_state.peer_fs_inflight, &collab_state.noted_host_fp, &collab_state.last_liveness, &collab_state.reconnect, &collab_state.next_reconnect_ns, &collab_state.fd_link, &my_identity, pool, args.connect, args.token, session.echo()))
             view_dirty = true;
         if (editor.doc.commitCount() != attach.seen_commits) {
             attach.seen_commits = editor.doc.commitCount();

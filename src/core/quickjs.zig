@@ -611,7 +611,7 @@ fn cPick(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32, results: []
     const bp = gpa.create(JsBoundPick) catch return;
     bp.* = .{ .plugin = self };
     // pick.open copies the entry text/doc, so `opts` may free after this.
-    self.ctx.pick.open(self.ctx, prompt, entries.items, .{
+    self.ctx.head.pick.open(self.ctx, prompt, entries.items, .{
         .handler = jsPickAccept,
         .cleanup = jsPickCleanup,
         .data = bp,
@@ -621,7 +621,7 @@ fn cPick(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32, results: []
 fn jsPickAccept(ctx: *command.Context, data: ?*anyopaque, choice: []const u8) anyerror!void {
     _ = choice;
     const bp: *JsBoundPick = @ptrCast(@alignCast(data.?));
-    const idx: i32 = if (ctx.pick.accepted_index) |i| @intCast(i) else -1;
+    const idx: i32 = if (ctx.head.pick.accepted_index) |i| @intCast(i) else -1;
     bp.plugin.instance.callVoid("weft_on_pick", &.{idx}) catch {};
 }
 
@@ -819,8 +819,8 @@ fn cUse(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32, results: []i
         const msg = std.fmt.allocPrint(gpa, "config: weft.use(\"{s}\") nested inside an imported config — flattens to the same 'imported' tier, not a deeper one", .{name}) catch "";
         defer if (msg.len > 0) gpa.free(msg);
         std.log.warn("{s}", .{msg});
-        br.ctx.echo.clearRetainingCapacity();
-        br.ctx.echo.appendSlice(gpa, msg) catch {};
+        br.ctx.head.echo.clearRetainingCapacity();
+        br.ctx.head.echo.appendSlice(gpa, msg) catch {};
     }
     const path = std.fmt.allocPrint(gpa, "{s}/{s}.js", .{ dir, name }) catch return;
     defer gpa.free(path);
@@ -956,8 +956,8 @@ fn echoProvideRefused(ctx: *command.Context, action: []const u8) void {
     const gpa = ctx.gpa;
     const msg = std.fmt.allocPrint(gpa, "provide: '{s}' is a race action — register a capability provider instead", .{action}) catch return;
     defer gpa.free(msg);
-    ctx.echo.clearRetainingCapacity();
-    ctx.echo.appendSlice(gpa, msg) catch {};
+    ctx.head.echo.clearRetainingCapacity();
+    ctx.head.echo.appendSlice(gpa, msg) catch {};
 }
 
 fn cEcho(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32, results: []i32) void {
@@ -969,8 +969,8 @@ fn cEcho(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32, results: []
         m.addEcho(msg) catch {};
         return;
     }
-    br.ctx.echo.clearRetainingCapacity();
-    br.ctx.echo.appendSlice(br.ctx.gpa, msg) catch {};
+    br.ctx.head.echo.clearRetainingCapacity();
+    br.ctx.head.echo.appendSlice(br.ctx.gpa, msg) catch {};
 }
 
 fn cLog(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32, results: []i32) void {
@@ -1016,11 +1016,10 @@ const Env = struct {
     buffers: @import("Buffers.zig"),
     commands: command.Commands,
     keymap: @import("Keymap.zig"),
-    pick: @import("pick.zig").Pick,
+    head: @import("Head.zig"),
     caps: @import("capability.zig").Caps,
     actions: @import("action.zig"),
     quit: bool,
-    echo: std.ArrayList(u8),
     ctx: command.Context,
 
     fn init(gpa: Allocator, self: *Env) !void {
@@ -1028,30 +1027,27 @@ const Env = struct {
         self.buffers = try @import("Buffers.zig").init(gpa, self.pool, "user");
         self.commands = .empty;
         self.keymap = .empty;
-        self.pick = .empty;
+        self.head = .empty;
         self.caps = @import("capability.zig").Caps.init(gpa, task.nowNs);
         self.actions = @import("action.zig").init(gpa);
         self.quit = false;
-        self.echo = .empty;
         self.ctx = .{
             .gpa = gpa,
             .buffers = &self.buffers,
             .commands = &self.commands,
             .keymap = &self.keymap,
             .actions = &self.actions,
-            .pick = &self.pick,
             .caps = &self.caps,
             .quit = &self.quit,
-            .echo = &self.echo,
+            .head = &self.head,
         };
     }
     fn deinit(self: *Env, gpa: Allocator) void {
         self.actions.deinit();
         self.caps.deinit();
-        self.pick.deinit(gpa);
+        self.head.deinit(gpa);
         self.keymap.deinit(gpa);
         self.commands.deinit(gpa);
-        self.echo.deinit(gpa);
         self.buffers.deinit(gpa);
         self.pool.deinit();
     }
@@ -1074,10 +1070,10 @@ test "quickjs: config.js drives the weft ABI — binds a key and echoes" {
     try evalConfig(&engine, &env.ctx, null, null, null, cfg);
 
     // The JS ran real logic (string concat + arithmetic) and reached the host:
-    try env.keymap.setMode(gpa, "normal");
-    try t.expectEqualStrings("cursor-down", env.keymap.lookup("j").?);
-    try t.expectEqualStrings("cursor-up", env.keymap.lookup("k").?);
-    try t.expectEqualStrings("config loaded (2 keys)", env.echo.items);
+    try env.head.setMode(gpa, "normal");
+    try t.expectEqualStrings("cursor-down", env.keymap.lookup(env.head.currentMode(), "j").?);
+    try t.expectEqualStrings("cursor-up", env.keymap.lookup(env.head.currentMode(), "k").?);
+    try t.expectEqualStrings("config loaded (2 keys)", env.head.echo.items);
 }
 
 test "quickjs: weft.use includes a shared bindings module from the config dir" {
@@ -1107,9 +1103,9 @@ test "quickjs: weft.use includes a shared bindings module from the config dir" {
     ;
     try evalConfig(&engine, &env.ctx, null, null, dir, cfg);
 
-    try env.keymap.setMode(gpa, "pick");
-    try t.expectEqualStrings("pick-accept", env.keymap.lookup("Return").?); // from the include
-    try t.expectEqualStrings("pick-prev", env.keymap.lookup("Down").?); // config override won
+    try env.head.setMode(gpa, "pick");
+    try t.expectEqualStrings("pick-accept", env.keymap.lookup(env.head.currentMode(), "Return").?); // from the include
+    try t.expectEqualStrings("pick-prev", env.keymap.lookup(env.head.currentMode(), "Down").?); // config override won
 }
 
 test "quickjs: config.js can run a registered command through weft.run" {
@@ -1123,7 +1119,7 @@ test "quickjs: config.js can run a registered command through weft.run" {
         fn mark(ctx: *command.Context, data: ?*anyopaque, args: []const command.Value) anyerror!command.Value {
             _ = data;
             _ = args;
-            try ctx.echo.appendSlice(ctx.gpa, "ran!");
+            try ctx.head.echo.appendSlice(ctx.gpa, "ran!");
             return .nil;
         }
     };
@@ -1132,7 +1128,7 @@ test "quickjs: config.js can run a registered command through weft.run" {
     var engine = try wasm.Engine.init();
     defer engine.deinit();
     try evalConfig(&engine, &env.ctx, null, null, null, "weft.run(\"mark\");");
-    try t.expectEqualStrings("ran!", env.echo.items);
+    try t.expectEqualStrings("ran!", env.head.echo.items);
 }
 
 test "quickjs: weft.action + weft.provide wire the pick dispatch layer" {
@@ -1158,8 +1154,8 @@ test "quickjs: weft.action + weft.provide wire the pick dispatch layer" {
     // the key resolves to the action name through the normal keymap door.
     try t.expect(env.commands.resolve("eval") != null);
     try t.expect(env.ctx.actions.isAction("eval"));
-    try env.keymap.setMode(gpa, "normal");
-    try t.expectEqualStrings("eval", env.keymap.lookup("space").?);
+    try env.head.setMode(gpa, "normal");
+    try t.expectEqualStrings("eval", env.keymap.lookup(env.head.currentMode(), "space").?);
 
     // The `when` predicates crossed the JS→host membrane intact: eval resolves
     // per language, and the unconstrained default covers everything else.
@@ -1187,7 +1183,7 @@ test "quickjs: a JS plugin registers a command dispatched back into JS" {
 
     try t.expect(env.commands.resolve("greet") != null);
     _ = try command.run(&env.commands, &env.ctx, "greet", &.{});
-    try t.expectEqualStrings("hi from js", env.echo.items);
+    try t.expectEqualStrings("hi from js", env.head.echo.items);
 }
 
 test "quickjs: a JS plugin drives a duplex subprocess and reads its output" {
@@ -1214,11 +1210,11 @@ test "quickjs: a JS plugin drives a duplex subprocess and reads its output" {
     _ = try command.run(&env.commands, &env.ctx, "go", &.{});
     // Pump the frame-boundary output dispatch until the reply arrives.
     const deadline = task.nowNs() + 2 * std.time.ns_per_s;
-    while (std.mem.indexOf(u8, env.echo.items, "ping") == null and task.nowNs() < deadline) {
+    while (std.mem.indexOf(u8, env.head.echo.items, "ping") == null and task.nowNs() < deadline) {
         _ = plugin.tick();
         std.atomic.spinLoopHint();
     }
-    try t.expect(std.mem.indexOf(u8, env.echo.items, "ping") != null);
+    try t.expect(std.mem.indexOf(u8, env.head.echo.items, "ping") != null);
 }
 
 test "quickjs: the ACP plugin drives a mock agent's message into the transcript" {
@@ -1295,7 +1291,7 @@ test "quickjs: a JS plugin reads a file through weft.fileRead" {
     defer plugin.deinit();
 
     _ = try command.run(&env.commands, &env.ctx, "r", &.{});
-    try t.expectEqualStrings("file contents here", env.echo.items);
+    try t.expectEqualStrings("file contents here", env.head.echo.items);
 }
 
 test "quickjs: a JS plugin writes a file as an attributed agent peer edit" {
@@ -1335,7 +1331,7 @@ test "quickjs: a config syntax error surfaces as ConfigException, not silent" {
     defer engine.deinit();
     // Malformed JS: the eval must fail loudly, and nothing was bound.
     try t.expectError(error.ConfigException, evalConfig(&engine, &env.ctx, null, null, null, "this is (not valid javascript"));
-    try t.expectEqual(@as(usize, 0), env.echo.items.len);
+    try t.expectEqual(@as(usize, 0), env.head.echo.items.len);
 }
 
 test "quickjs: weft.plugin loads a real .wasm, then its command runs" {
@@ -1376,8 +1372,8 @@ test "quickjs: weft.plugin loads a real .wasm, then its command runs" {
     // The plugin loaded and registered its command; the config's bind took.
     try t.expect(loader.held != null);
     try t.expect(env.commands.find("duplicate-line") != null);
-    try env.keymap.setMode(gpa, "normal");
-    try t.expectEqualStrings("duplicate-line", env.keymap.lookup("D").?);
+    try env.head.setMode(gpa, "normal");
+    try t.expectEqualStrings("duplicate-line", env.keymap.lookup(env.head.currentMode(), "D").?);
 
     // And the command actually runs through the membrane: duplicate a line.
     try env.buffers.active().editor.insertText(gpa, "hi");
@@ -1459,8 +1455,8 @@ test "quickjs: deferred load — weft.set before the plugin line reaches its ini
     try t.expect(loader.held != null);
     try t.expect(env.commands.find("pair-tick") != null);
     try t.expect(env.commands.find("pair-paren") == null);
-    try env.keymap.setMode(gpa, "insert");
-    try t.expectEqualStrings("pair-tick", env.keymap.lookup("grave").?);
+    try env.head.setMode(gpa, "insert");
+    try t.expectEqualStrings("pair-tick", env.keymap.lookup(env.head.currentMode(), "grave").?);
 
     // And it runs through the membrane: inserts the configured backtick pair.
     _ = try command.run(&env.commands, &env.ctx, "pair-tick", &.{});
@@ -1491,14 +1487,14 @@ test "quickjs: weft.menu declares a submenu the leader tree enters (doom-style)"
     try t.expect(env.keymap.isMenuMode("leader-file"));
 
     // In the leader menu, "f" resolves to the submenu name (a group entry).
-    try env.keymap.setMode(gpa, "leader");
-    try t.expectEqualStrings("leader-file", env.keymap.lookup("f").?);
+    try env.head.setMode(gpa, "leader");
+    try t.expectEqualStrings("leader-file", env.keymap.lookup(env.head.currentMode(), "f").?);
 
     // Inside the submenu: its own keys bind, and Escape/C-g leave via menu-escape.
-    try env.keymap.setMode(gpa, "leader-file");
-    try t.expectEqualStrings("save", env.keymap.lookup("s").?);
-    try t.expectEqualStrings("menu-escape", env.keymap.lookup("Escape").?);
-    try t.expectEqualStrings("menu-escape", env.keymap.lookup("C-g").?);
+    try env.head.setMode(gpa, "leader-file");
+    try t.expectEqualStrings("save", env.keymap.lookup(env.head.currentMode(), "s").?);
+    try t.expectEqualStrings("menu-escape", env.keymap.lookup(env.head.currentMode(), "Escape").?);
+    try t.expectEqualStrings("menu-escape", env.keymap.lookup(env.head.currentMode(), "C-g").?);
 }
 
 test "quickjs: every shipped example config evals without a JS error" {
@@ -1662,19 +1658,19 @@ test "quickjs: reconcile — reapplying the identical config is a verified no-op
     defer m1.destroy();
     var actx: manifest_mod.Manifest.ApplyCtx = .{ .ctx = &env.ctx, .loader = null, .config = null };
     try m1.apply(gpa, &actx);
-    try env.keymap.setMode(gpa, "normal");
-    try t.expectEqualStrings("cursor-down", env.keymap.lookup("j").?);
-    try t.expectEqualStrings("hello", env.echo.items);
+    try env.head.setMode(gpa, "normal");
+    try t.expectEqualStrings("cursor-down", env.keymap.lookup(env.head.currentMode(), "j").?);
+    try t.expectEqualStrings("hello", env.head.echo.items);
 
     // A second eval of the SAME source, reconciled against m1: same hash,
     // logged no-op, and critically the echo does NOT fire again (a echo
     // re-firing on every identical reload would be the "no-op" claim lying).
-    env.echo.clearRetainingCapacity();
+    env.head.echo.clearRetainingCapacity();
     const m2 = try evalToManifest(&engine, &env.ctx, null, null, null, cfg, .config, "config");
     defer m2.destroy();
     try manifest_mod.Manifest.reconcile(gpa, m1, m2, &actx);
-    try t.expectEqualStrings("", env.echo.items); // no-op: nothing re-fired
-    try t.expectEqualStrings("cursor-down", env.keymap.lookup("j").?); // still bound
+    try t.expectEqualStrings("", env.head.echo.items); // no-op: nothing re-fired
+    try t.expectEqualStrings("cursor-down", env.keymap.lookup(env.head.currentMode(), "j").?); // still bound
 
     // A CHANGED config removes the old bind and adds a new one — reconcile
     // tears down the removed decl and applies the added one.
@@ -1685,8 +1681,8 @@ test "quickjs: reconcile — reapplying the identical config is a verified no-op
     const m3 = try evalToManifest(&engine, &env.ctx, null, null, null, cfg3, .config, "config");
     defer m3.destroy();
     try manifest_mod.Manifest.reconcile(gpa, m2, m3, &actx);
-    try t.expectEqual(@as(?[]const u8, null), env.keymap.lookup("j")); // removed
-    try t.expectEqualStrings("cursor-up", env.keymap.lookup("k").?); // added
+    try t.expectEqual(@as(?[]const u8, null), env.keymap.lookup(env.head.currentMode(), "j")); // removed
+    try t.expectEqualStrings("cursor-up", env.keymap.lookup(env.head.currentMode(), "k").?); // added
 }
 
 test {

@@ -21,8 +21,8 @@ const ok: Value = .nil;
 /// not allowed). Other errors propagate.
 fn editErr(ctx: *Context, e: anyerror) anyerror!Value {
     if (e != error.Unauthorized) return e;
-    ctx.echo.clearRetainingCapacity();
-    try ctx.echo.appendSlice(ctx.gpa, "read-only: view access");
+    ctx.head.echo.clearRetainingCapacity();
+    try ctx.head.echo.appendSlice(ctx.gpa, "read-only: view access");
     return ok;
 }
 
@@ -125,8 +125,8 @@ fn cUndoBarrier(ctx: *Context, args: struct {}) anyerror!Value {
 fn cSetMode(ctx: *Context, args: struct { mode: []const u8 }) anyerror!Value {
     // A locked projection mode (magit/git-view) refuses to switch to a different
     // editing mode — the read-only-buffer mode pin (see Keymap.mayLeaveLocked).
-    if (!ctx.keymap.mayLeaveLocked(args.mode)) return ok;
-    try ctx.keymap.setMode(ctx.gpa, args.mode);
+    if (!ctx.keymap.mayLeaveLocked(ctx.head.currentMode(), args.mode)) return ok;
+    try ctx.head.setMode(ctx.gpa, args.mode);
     return ok;
 }
 
@@ -154,7 +154,7 @@ fn cInsertTab(ctx: *Context, args: struct {}) anyerror!Value {
 
 fn cBufferNext(ctx: *Context, args: struct {}) anyerror!Value {
     _ = args;
-    try ctx.buffers.switchTo(ctx.gpa, ctx.buffers.nextId(), ctx.keymap);
+    try ctx.buffers.switchTo(ctx.gpa, ctx.buffers.nextId(), ctx.head, ctx.keymap);
     return ok;
 }
 
@@ -163,19 +163,19 @@ fn cBufferNext(ctx: *Context, args: struct {}) anyerror!Value {
 /// here; the core decides where "back" is.
 fn cBufferBack(ctx: *Context, args: struct {}) anyerror!Value {
     _ = args;
-    try ctx.buffers.back(ctx.gpa, ctx.keymap);
+    try ctx.buffers.back(ctx.gpa, ctx.head, ctx.keymap);
     return ok;
 }
 
 fn cBufferSwitch(ctx: *Context, args: struct { id: i64 }) anyerror!Value {
     if (args.id < 0) return error.TypeMismatch;
-    try ctx.buffers.switchTo(ctx.gpa, @intCast(args.id), ctx.keymap);
+    try ctx.buffers.switchTo(ctx.gpa, @intCast(args.id), ctx.head, ctx.keymap);
     return ok;
 }
 
 fn cBufferCreate(ctx: *Context, args: struct { name: []const u8 }) anyerror!Value {
     const id = try ctx.buffers.create(ctx.gpa, args.name);
-    try ctx.buffers.switchTo(ctx.gpa, id, ctx.keymap);
+    try ctx.buffers.switchTo(ctx.gpa, id, ctx.head, ctx.keymap);
     return .{ .integer = @intCast(id) };
 }
 
@@ -192,7 +192,7 @@ fn cBufferClose(ctx: *Context, args: struct {}) anyerror!Value {
     _ = args;
     const b = ctx.buffer();
     if (b.editor.isDirty(ctx.gpa) catch true) return .{ .string = "dirty" };
-    try ctx.buffers.close(ctx.gpa, b.id, ctx.keymap);
+    try ctx.buffers.close(ctx.gpa, b.id, ctx.head, ctx.keymap);
     return ok;
 }
 
@@ -201,7 +201,7 @@ fn cBufferClose(ctx: *Context, args: struct {}) anyerror!Value {
 /// remote-capable version; this core one keeps headless hosts honest.
 fn cOpen(ctx: *Context, args: struct { path: []const u8 }) anyerror!Value {
     if (ctx.buffers.findByPath(args.path)) |id| {
-        try ctx.buffers.switchTo(ctx.gpa, id, ctx.keymap);
+        try ctx.buffers.switchTo(ctx.gpa, id, ctx.head, ctx.keymap);
         return .{ .integer = @intCast(id) };
     }
     const id = try ctx.buffers.create(ctx.gpa, std.fs.path.basename(args.path));
@@ -209,11 +209,11 @@ fn cOpen(ctx: *Context, args: struct { path: []const u8 }) anyerror!Value {
     ed.openFile(ctx.gpa, args.path) catch |err| switch (err) {
         error.FileNotFound => try ed.adoptPath(ctx.gpa, args.path),
         else => |e| {
-            try ctx.buffers.close(ctx.gpa, id, ctx.keymap);
+            try ctx.buffers.close(ctx.gpa, id, ctx.head, ctx.keymap);
             return e;
         },
     };
-    try ctx.buffers.switchTo(ctx.gpa, id, ctx.keymap);
+    try ctx.buffers.switchTo(ctx.gpa, id, ctx.head, ctx.keymap);
     return .{ .integer = @intCast(id) };
 }
 
@@ -242,8 +242,8 @@ fn cSaveAs(ctx: *Context, args: struct { path: []const u8 }) anyerror!Value {
 /// Show a transient message on the status line — the generic surface
 /// plugins and commands report through (cleared by the next echo).
 fn cEcho(ctx: *Context, args: struct { text: []const u8 }) anyerror!Value {
-    ctx.echo.clearRetainingCapacity();
-    try ctx.echo.appendSlice(ctx.gpa, args.text);
+    ctx.head.echo.clearRetainingCapacity();
+    try ctx.head.echo.appendSlice(ctx.gpa, args.text);
     return ok;
 }
 
@@ -266,16 +266,16 @@ fn cExplainBinding(ctx: *Context, args: struct { slot: []const u8 }) anyerror!Va
     const f: facts.Facts = .{
         .path = ctx.editor().backingPath(),
         .name = ctx.buffers.active().name,
-        .mode = ctx.keymap.currentMode(),
+        .mode = ctx.head.currentMode(),
         .lang = Actions.langOfName(ctx.buffers.active().name),
         .tool = ctx.editor().toolName() orelse "",
     };
     var ex = try ctx.actions.container.explain(ctx.gpa, args.slot, f);
     defer ex.deinit();
 
-    ctx.echo.clearRetainingCapacity();
+    ctx.head.echo.clearRetainingCapacity();
     if (ex.eligible.len == 0) {
-        try ctx.echo.appendSlice(ctx.gpa, "explain-binding: no eligible binding");
+        try ctx.head.echo.appendSlice(ctx.gpa, "explain-binding: no eligible binding");
         return ok;
     }
     const w = ex.eligible[ex.winner.?];
@@ -290,7 +290,7 @@ fn cExplainBinding(ctx: *Context, args: struct { slot: []const u8 }) anyerror!Va
         w.specificity,
         if (ex.collision) " COLLISION" else "",
     }) catch "explain-binding: (result too long to display)";
-    try ctx.echo.appendSlice(ctx.gpa, msg);
+    try ctx.head.echo.appendSlice(ctx.gpa, msg);
     return ok;
 }
 
@@ -326,7 +326,7 @@ const table = [_]command.Command{
 
 /// Register every built-in and the default keymap. The default mode is
 /// plain modeless editing; a config replaces any of it by rebinding.
-pub fn install(gpa: std.mem.Allocator, commands: *command.Commands, keymap: *@import("Keymap.zig"), actions: *@import("action.zig")) !void {
+pub fn install(gpa: std.mem.Allocator, commands: *command.Commands, keymap: *@import("Keymap.zig"), head: *@import("Head.zig"), actions: *@import("action.zig")) !void {
     for (table) |cmd| _ = try commands.bind(gpa, cmd.name, cmd);
 
     // `save` is an ACTION: `C-s`/`:w`/palette all dispatch it, and a projection
@@ -342,7 +342,7 @@ pub fn install(gpa: std.mem.Allocator, commands: *command.Commands, keymap: *@im
     // config can rebind these at the higher config tier. (The picker + which-key
     // nav binds, which only matter once a config's UI is up, are config data —
     // defaults.js. This is the modeless floor, not app policy.)
-    try keymap.setMode(gpa, "default");
+    try head.setMode(gpa, "default");
     const binds = [_][2][]const u8{
         .{ "BackSpace", "delete-backward" },
         .{ "Delete", "delete-forward" },
@@ -382,18 +382,16 @@ test "builtins: explain-binding is a real consumer of Container.explain" {
     defer buffers.deinit(gpa);
     var keymap: @import("Keymap.zig") = .empty;
     defer keymap.deinit(gpa);
-    var pick: @import("pick.zig").Pick = .empty;
-    defer pick.deinit(gpa);
+    var head: @import("Head.zig") = .empty;
+    defer head.deinit(gpa);
     var caps = @import("capability.zig").Caps.init(gpa, task.nowNs);
     defer caps.deinit();
     var actions = Actions.init(gpa);
     defer actions.deinit();
     var quit = false;
-    var echo_line: std.ArrayList(u8) = .empty;
-    defer echo_line.deinit(gpa);
     var commands: command.Commands = .empty;
     defer commands.deinit(gpa);
-    try install(gpa, &commands, &keymap, &actions);
+    try install(gpa, &commands, &keymap, &head, &actions);
 
     // A second, higher-priority "save" provider (as a projection like dired
     // would register), so `explain-binding` has more than one eligible
@@ -406,19 +404,18 @@ test "builtins: explain-binding is a real consumer of Container.explain" {
         .commands = &commands,
         .keymap = &keymap,
         .actions = &actions,
-        .pick = &pick,
         .caps = &caps,
         .quit = &quit,
-        .echo = &echo_line,
+        .head = &head,
     };
 
     _ = try command.run(&commands, &ctx, "explain-binding", &.{.{ .string = "save" }});
-    try t.expect(std.mem.indexOf(u8, echo_line.items, "dired-save") != null);
-    try t.expect(std.mem.indexOf(u8, echo_line.items, "2 eligible") != null);
+    try t.expect(std.mem.indexOf(u8, head.echo.items, "dired-save") != null);
+    try t.expect(std.mem.indexOf(u8, head.echo.items, "2 eligible") != null);
 
     // An unknown slot: no eligible bindings, no crash, an honest echo.
     _ = try command.run(&commands, &ctx, "explain-binding", &.{.{ .string = "nonexistent-slot" }});
-    try t.expect(std.mem.indexOf(u8, echo_line.items, "no eligible binding") != null);
+    try t.expect(std.mem.indexOf(u8, head.echo.items, "no eligible binding") != null);
 }
 
 test {

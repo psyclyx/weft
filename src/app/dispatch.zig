@@ -91,12 +91,13 @@ pub fn menuEscapeHandler(ctx: *core.command.Context, data: ?*anyopaque, args: []
     _ = data;
     _ = args;
     const km = ctx.keymap;
-    if (!km.isMenuMode(km.currentMode())) return .nil; // not in a menu → leave the mode be
+    const head = ctx.head;
+    if (!km.isMenuMode(head.currentMode())) return .nil; // not in a menu → leave the mode be
     // In a menu: return to its recorded target, else the configured base mode
     // (vim's "normal", helix's "helix-normal", or plain "default").
     const base = if (ctx.buffers.default_mode.len > 0) ctx.buffers.default_mode else "default";
-    const ret = km.menuReturn(km.currentMode()) orelse base;
-    km.setMode(ctx.gpa, ret) catch {};
+    const ret = head.menuReturn(head.currentMode()) orelse base;
+    head.setMode(ctx.gpa, ret) catch {};
     return .nil;
 }
 
@@ -182,6 +183,13 @@ pub fn scrollPageDownHandler(ctx: *core.command.Context, data: ?*anyopaque, args
 // "change" is whatever key sequence left the buffer edited between two RESTING
 // points — a mode with no text command and no pending chord (each keymap's
 // normal-equivalent), so this works across vim/helix/emacs without knowing them.
+//
+// W2a-2: this recorder is file-scope (process-global) state — two heads
+// pressing keys concurrently would interleave into ONE dot-register. It is
+// genuinely interaction state (per-head, like mode/pending/pick/echo — see
+// core.Head), but it lives app-side (dispatch.zig, not core) and out of
+// W2a-1's scope by the task brief ("do NOT touch dispatch.zig's globals").
+// Left untouched here; W2a-2 is where this moves onto (or alongside) Head.
 const KeyPress = struct {
     spec: [24]u8 = undefined,
     slen: u8 = 0,
@@ -216,9 +224,9 @@ fn dotRecord(spec: []const u8, text: []const u8) void {
 /// with no half-typed chord and not inside a menu — the point a command sequence
 /// has fully resolved. Generalizes vim `normal` / helix `normal` / emacs base.
 fn dotAtRest(ctx: *core.command.Context) bool {
-    return ctx.keymap.textCommand() == null and
-        ctx.keymap.pending.len == 0 and
-        !ctx.keymap.isMenuMode(ctx.keymap.currentMode());
+    return ctx.head.textCommand(ctx.keymap) == null and
+        ctx.head.pending.len == 0 and
+        !ctx.keymap.isMenuMode(ctx.head.currentMode());
 }
 
 /// Run at each dispatch's end (when recording): if we're back at rest, decide
@@ -319,7 +327,7 @@ pub fn dispatchKey(ctx: *core.command.Context, ev: wayland.KeyEvent) !void {
 /// The general keypress interface: run a canonical keyspec (`spec`) plus the
 /// printable text it would insert (`text`, or "" for a non-text key) through the
 /// keymap. A chord that could still extend is held (which-key shows its
-/// completions off `keymap.pending`); a completed binding runs; a lone unbound
+/// completions off the head's pending chord); a completed binding runs; a lone unbound
 /// key falls to text insertion; a dead-end chord resets. This is what
 /// `dispatchKey` reduces to after xkb translation, and what a headless driver
 /// calls to send a keypress to the REAL app (no parallel dispatch logic).
@@ -350,9 +358,9 @@ pub fn dispatchSpec(ctx: *core.command.Context, spec: []const u8, text: []const 
     //  · a NAV key (page down/up — `menu-nav` in defaults.js) pages the hint and
     //    leaves `pending` intact, so a long menu scrolls instead of the key
     //    dead-ending the chord and dismissing which-key.
-    if (ctx.keymap.pending.len > 0) {
+    if (ctx.head.pending.len > 0) {
         if (std.mem.eql(u8, spec, "BackSpace")) {
-            ctx.keymap.popPending(ctx.gpa) catch {};
+            ctx.head.popPending(ctx.gpa) catch {};
             return;
         }
         if (ctx.keymap.navCommand(spec)) |cmd| {
@@ -363,20 +371,20 @@ pub fn dispatchSpec(ctx: *core.command.Context, spec: []const u8, text: []const 
     }
     // Feed the key through the pending SEQUENCE. `SPC f f` is a chord; `SPC C-w`
     // never fires global `C-w` — a menu is a sequence, not a mode.
-    switch (ctx.keymap.feed(ctx.gpa, spec) catch core.Keymap.Feed.none) {
+    switch (ctx.head.feed(ctx.gpa, ctx.keymap, spec) catch core.Keymap.Feed.none) {
         .pending, .none => return,
         .text => {}, // a lone unbound key — fall through to text insertion
         .run => |cmd_name| {
             // Legacy mode-menu path (still valid while configs migrate to
             // sequences): a bound key whose command NAMES a menu mode enters it.
             if (ctx.keymap.isMenuMode(cmd_name)) {
-                ctx.keymap.enterMode(ctx.gpa, cmd_name) catch {};
+                ctx.head.enterMode(ctx.gpa, ctx.keymap, cmd_name) catch {};
                 return;
             }
             // Snapshot a menu mode so a one-shot key pops back after the command
             // runs (unless the command itself changed the mode).
-            const menu_before: ?[]u8 = if (ctx.keymap.isMenuMode(ctx.keymap.currentMode()))
-                ctx.gpa.dupe(u8, ctx.keymap.currentMode()) catch null
+            const menu_before: ?[]u8 = if (ctx.keymap.isMenuMode(ctx.head.currentMode()))
+                ctx.gpa.dupe(u8, ctx.head.currentMode()) catch null
             else
                 null;
             defer if (menu_before) |m| ctx.gpa.free(m);
@@ -387,14 +395,14 @@ pub fn dispatchSpec(ctx: *core.command.Context, spec: []const u8, text: []const 
             };
             switch (result) {
                 .string => |s| if (s.len > 0) {
-                    ctx.echo.clearRetainingCapacity();
-                    ctx.echo.appendSlice(ctx.gpa, s) catch {};
+                    ctx.head.echo.clearRetainingCapacity();
+                    ctx.head.echo.appendSlice(ctx.gpa, s) catch {};
                 },
                 else => {},
             }
             if (menu_before) |m| {
-                if (!ctx.keymap.isStickyMenu(m) and std.mem.eql(u8, ctx.keymap.currentMode(), m)) {
-                    if (ctx.keymap.menuReturn(m)) |ret| ctx.keymap.setMode(ctx.gpa, ret) catch {};
+                if (!ctx.keymap.isStickyMenu(m) and std.mem.eql(u8, ctx.head.currentMode(), m)) {
+                    if (ctx.head.menuReturn(m)) |ret| ctx.head.setMode(ctx.gpa, ret) catch {};
                 }
             }
             return;
@@ -404,7 +412,7 @@ pub fn dispatchSpec(ctx: *core.command.Context, spec: []const u8, text: []const 
     // Unbound printable input runs the mode's text command (the modal posture:
     // normal mode has none and swallows it). This IS the hot typing→commit path —
     // fence it so an accidental blocking API here trips in Debug.
-    const tc = ctx.keymap.textCommand() orelse return;
+    const tc = ctx.head.textCommand(ctx.keymap) orelse return;
     core.task.beginHotSection();
     defer core.task.endHotSection();
     _ = core.command.run(ctx.commands, ctx, tc, &.{.{ .string = text }}) catch |err| {

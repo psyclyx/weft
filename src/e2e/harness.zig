@@ -64,6 +64,8 @@ pub const Editor = struct {
     buffers: *core.Buffers = undefined,
     commands: *command.Commands = undefined,
     keymap: *core.Keymap = undefined,
+    /// This harness's (today, singular) head — mode/pending/pick/echo.
+    head: *core.Head = undefined,
     pick: *core.Pick = undefined,
     caps: *core.Caps = undefined,
     ctx: *command.Context = undefined,
@@ -128,7 +130,8 @@ pub const Editor = struct {
         self.buffers = &self.session.buffers;
         self.commands = &self.session.commands;
         self.keymap = &self.session.keymap;
-        self.pick = &self.session.pick;
+        self.head = &self.session.head;
+        self.pick = &self.session.head.pick;
         self.caps = &self.session.caps;
         self.ctx = &self.session.cmd_ctx;
 
@@ -305,7 +308,7 @@ pub const Editor = struct {
 
     /// The current transient echo line (what a plugin last reported to the user).
     pub fn echoText(self: *Editor) []const u8 {
-        return self.session.echo.items;
+        return self.session.head.echo.items;
     }
 
     /// Drive the active buffer's async save to completion (bounded spin), the
@@ -358,13 +361,13 @@ pub const Editor = struct {
         return self.buffers.active().editor.text().toOwnedSlice(self.gpa);
     }
     pub fn mode(self: *Editor) []const u8 {
-        return self.keymap.currentMode();
+        return self.head.currentMode();
     }
     pub fn bufferName(self: *Editor) []const u8 {
         return self.buffers.active().name;
     }
     pub fn setMode(self: *Editor, m: []const u8) void {
-        self.keymap.setMode(self.gpa, m) catch {};
+        self.head.setMode(self.gpa, m) catch {};
     }
 
     /// Lazily create the harness's persistent View (glyph atlas + metrics),
@@ -379,7 +382,7 @@ pub const Editor = struct {
     pub fn snapshot(self: *Editor, name: []const u8) void {
         const v = self.ensureView() catch return;
         const hud: view_mod.Hud = .{
-            .mode = self.keymap.currentMode(),
+            .mode = self.head.currentMode(),
             .file = self.buffers.active().name,
             .pick = if (self.pick.active) self.pick else null,
         };
@@ -398,7 +401,7 @@ pub const Editor = struct {
     /// main()'s `window_cmds.applyIntents` call.
     pub fn applyWindow(self: *Editor) void {
         const v = self.ensureView() catch return;
-        _ = window_cmds.applyIntents(&self.win_ctx, &self.win_layout, v, self.buffers, self.gpa, self.keymap, self.last_frame_rect);
+        _ = window_cmds.applyIntents(&self.win_ctx, &self.win_layout, v, self.buffers, self.gpa, self.head, self.keymap, self.last_frame_rect);
     }
 
     /// Number of panes currently tiled.
@@ -435,7 +438,7 @@ pub const Editor = struct {
         for (slots[0..n]) |slot| {
             const b = self.buffers.get(slot.pane.buffer_id) orelse self.buffers.active();
             const hud: view_mod.Hud = .{
-                .mode = self.keymap.currentMode(),
+                .mode = self.head.currentMode(),
                 .file = b.editor.backingPath() orelse b.name,
                 .cursor_on = slot.focused, // the caret belongs to the focused pane
                 .pane_border = slot.border,
@@ -625,7 +628,7 @@ pub fn loadVim(ed: *Editor) !void {
 /// it as `default_mode` so a file opened fresh (e.g. from *grep*/dired) lands in
 /// that mode, not stuck in the tool buffer's mode or an empty mode.
 fn setResting(ed: *Editor) !void {
-    try ed.buffers.setDefaultMode(ed.gpa, ed.keymap.currentMode());
+    try ed.buffers.setDefaultMode(ed.gpa, ed.head.currentMode());
 }
 
 /// The vim set plus the buffer/language/notes/git tools — a fuller "IDE"
@@ -971,24 +974,20 @@ pub fn modeStructureSnapshot(gpa: Allocator, km: *core.Keymap) ![]u8 {
         }
     }.lt);
 
-    // `textCommand` walks the fallback chain from the CURRENT mode — probing
-    // every mode name means temporarily changing it; save/restore so this
-    // inspection function leaves the editor exactly as it found it.
-    const orig_mode = try gpa.dupe(u8, km.currentMode());
-    defer gpa.free(orig_mode);
-
+    // `textCommand` is now a pure function of (tables, mode) — W2a-1's split
+    // (Head owns the CURRENT-mode cursor; Keymap only holds tables) means
+    // probing every mode name needs no save/restore dance against a live
+    // head anymore; it never touches one.
     var out: std.ArrayList(u8) = .empty;
     errdefer out.deinit(gpa);
     for (list) |mode| {
-        km.setMode(gpa, mode) catch {};
-        const txt = km.textCommand() orelse "<inherit>";
+        const txt = km.textCommand(mode) orelse "<inherit>";
         const line = try std.fmt.allocPrint(gpa, "{s}|menu={}|sticky={}|locked={}|resting={}|text={s}\n", .{
             mode, km.isMenuMode(mode), km.isStickyMenu(mode), km.isLockedMode(mode), km.isRestingMode(mode), txt,
         });
         defer gpa.free(line);
         try out.appendSlice(gpa, line);
     }
-    km.setMode(gpa, orig_mode) catch {};
     return out.toOwnedSlice(gpa);
 }
 

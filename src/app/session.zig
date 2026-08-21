@@ -1,6 +1,7 @@
 //! `Session` — the cohesive owner of weft's core editing state: the buffer set,
-//! the command/keymap/pick surfaces, the capability store, the transient echo
-//! line, the quit flag, and the capability-consumer UIs (completion, definition,
+//! the command/keymap surfaces, the one `Head` this process runs today (its
+//! mode/pending/pick/echo — north-star-plan §6 W2a-1), the capability store,
+//! the quit flag, and the capability-consumer UIs (completion, definition,
 //! symbols, hover) plus the caret config. `main()` holds ONE `session` object
 //! instead of ~a dozen loose editing locals.
 //!
@@ -29,12 +30,17 @@ pub const Session = struct {
     // ── Editor core ──
     buffers: core.Buffers,
     commands: core.command.Commands,
+    /// System-scoped keymap TABLES — shared by every head (see
+    /// `core.Keymap`'s module doc). `head` below is the (today, singular)
+    /// per-head cursor into them; `main()`/the e2e harness construct exactly
+    /// one — W2a-2 wires more.
     keymap: core.Keymap,
-    pick: core.Pick,
+    /// This session's one head's interaction state: current mode, pending
+    /// chord, pick session, echo line (north-star-plan §6 W2a-1).
+    head: core.Head,
     caps: core.Caps,
     actions: core.Actions,
     quit: bool,
-    echo: std.ArrayList(u8),
     /// Self-referential: points at the fields above — built in place.
     cmd_ctx: core.command.Context,
 
@@ -62,23 +68,21 @@ pub const Session = struct {
         errdefer self.buffers.deinit(gpa);
         self.commands = .empty;
         self.keymap = .empty;
-        self.pick = .empty;
+        self.head = .empty;
         self.caps = core.Caps.init(gpa, core.task.nowNs);
         self.actions = core.Actions.init(gpa);
         self.quit = false;
-        self.echo = .empty;
         self.cmd_ctx = .{
             .gpa = gpa,
             .buffers = &self.buffers,
             .commands = &self.commands,
             .keymap = &self.keymap,
             .actions = &self.actions,
-            .pick = &self.pick,
             .caps = &self.caps,
             .quit = &self.quit,
-            .echo = &self.echo,
+            .head = &self.head,
         };
-        try core.builtins.install(gpa, &self.commands, &self.keymap, &self.actions);
+        try core.builtins.install(gpa, &self.commands, &self.keymap, &self.head, &self.actions);
         // Capability consumers — written against capability names only.
         self.completion_ui = .empty;
         try setup.registerCapabilityConsumers(gpa, &self.commands, &self.completion_ui, grammars);
@@ -89,15 +93,23 @@ pub const Session = struct {
     }
 
     /// Free in the exact reverse order `main()`'s defers used to run: cursor_cfg,
-    /// echo, caps, pick, keymap, commands, buffers. (completion_ui owns no heap.)
+    /// head (echo+pick), caps, keymap, commands, buffers. (completion_ui owns
+    /// no heap.)
     pub fn deinit(self: *Session, gpa: std.mem.Allocator) void {
         self.cursor_cfg.deinit();
-        self.echo.deinit(gpa);
+        self.head.deinit(gpa);
         self.actions.deinit();
         self.caps.deinit();
-        self.pick.deinit(gpa);
         self.keymap.deinit(gpa);
         self.commands.deinit(gpa);
         self.buffers.deinit(gpa);
+    }
+
+    /// Delegating facade: the echo line lives on `head` now (north-star-plan
+    /// §6 W2a-1 moved it out of `Session`'s own storage) — this is the one
+    /// spot app-side code says `session.echo()` instead of reaching into
+    /// `session.head.echo` directly.
+    pub fn echo(self: *Session) *std.ArrayList(u8) {
+        return &self.head.echo;
     }
 };
