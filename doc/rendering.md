@@ -77,20 +77,23 @@ tiers, one vocabulary:
   panel, a docked panel, an inline decoration — offered as ergonomic builders over
   the same scene, so a plugin composes a rich UI without leaving the rewarded
   path. The bar to clear: Tier 2 should cover enough that escaping is rare.
-- **Tier 3 — raw surface / webgpu (the escape hatch, deliberately costlier).** For
-  the genuinely-custom — a graph/plot, a shader viz, a game — a plugin can request
-  a raw drawable region (a texture/framebuffer rect it renders into, webgpu when
-  present). But it **opts OUT of everything Tier 1 gave**: no theming, no text
-  fallback (it must supply its own degraded rendering, or declare "graphics-only"
-  and be hidden on a terminal), no automatic composition, no free layout. The
-  escape exists for real needs and is honest about its costs.
+- **Tier 3 — raw drawable / webgpu (custom pixels, still integrated).** For the
+  genuinely-custom — a graph/plot, a shader viz, an interactive canvas — a plugin
+  renders its own pixels into a drawable region core owns (a texture rect, webgpu
+  when present). Crucially it **stays wired into the editor**: it can still declare
+  selectable text regions and hit-boxes, take focus, receive routed key/pointer
+  events, sit in the window/pane layout, compose with other surfaces, and opt into
+  theme colors — the same integration hooks Tier 1/2 use. What it gives up is only
+  the *convenience*: it hand-renders its content and, if it wants to work on a
+  terminal, supplies its own text fallback (or declares graphics-only). Tier 3 is
+  a first-class citizen, not a sandbox exile.
 
-The incentive is structural: because Tier 1/2 hand you theming, fonts, fallback,
-layout, and composition, and Tier 3 makes you rebuild all of it, the grain is to
-work WITH the scene. A third-party plugin that uses the semantic API looks native,
-recolors with the user's theme, and works in a terminal — for free; one that
-reaches for raw webgpu to draw a menu is doing strictly more work for a worse
-result. We reward idiomatic; we don't forbid exotic.
+The incentive is by CARROT, not stick: Tier 1/2 are so easy and so integrated that
+you reach for Tier 3 only when you truly need custom pixels — and even then you
+stay part of the editor. A menu drawn in raw webgpu is more work for no gain, so
+nobody does it; a live plot in webgpu is worth it, and it still gets selection,
+focus, and layout. We reward idiomatic without making the exotic strictly worse —
+the difference is convenience, not capability or citizenship.
 
 Text fallback is a first-class requirement, not an afterthought: **every Tier-1/2
 primitive has a defined text rendering** (a box → box-drawing chars, a role →
@@ -138,13 +141,92 @@ platform"; neither touches the scene vocabulary or any plugin.
   as the one live impl.
 - **P4 — UI-as-plugin.** The completion CONSUMER moves to a guest plugin emitting
   the caret-surface scene through the membrane (needs the caps-fire + live-narrow
-  membrane from [[completion-ux-roadmap]]). This is the payoff: the completion UI
-  is a plugin, drawn through the same seam as which-key.
+  membrane from [[completion-ux-roadmap]]). The completion UI is a plugin, drawn
+  through the same seam as which-key.
+- **P5 — the editor view as a bundled scene client (core goes rendering-free).**
+  Only after P1–P4 prove the ABI on the popups + a perf check: the main buffer
+  view emits its viewport as a scene (in-process, native speed via the abi.zig
+  transport), so core keeps platform + rasterizer + ABI and owns NO widgets. This
+  is the "no rendering in core" endpoint; sequence it LAST because it's the hot
+  path.
 
 ## Non-goals (not yet)
 
 Actual webgpu / X / terminal / browser / macOS implementations. This doc only
 fixes the SEAM so they are additive. Wayland+Vulkan stays the sole platform+backend.
+
+## Decided splits (were open; resolved so this is build-ready)
+
+- **Layout lives in core, always.** A plugin supplies logical content + roles +
+  an anchor; core resolves widths, columns, wrapping, and flip/clamp because only
+  the active backend knows cell/glyph metrics (a terminal cell ≠ a webgpu pixel).
+  A plugin that tried to lay out would break the moment the backend changed. So
+  the scene is metric-free.
+- **Tier 3 hands back a texture/framebuffer rect, not a command buffer.** The
+  plugin renders into an opaque drawable region core owns; core composites it into
+  the frame. A raw command-buffer hand-off would weld plugins to one GPU API
+  (vulkan today) and defeat the whole webgpu-is-additive goal. The texture rect is
+  the backend-neutral escape hatch (backed by webgpu when present; a stub/hidden
+  region on a terminal). The rect is INTEGRATED, not isolated: the plugin also
+  declares selectable-text spans + hit-boxes over it, joins focus/input routing and
+  the pane layout, and composes like any surface — so custom pixels still behave
+  like part of the editor.
+
+## Should the text UI itself be a plugin? (leaning yes)
+
+The user's sharper framing: *no rendering in core at all — only the ABI that lets
+the UI be a plugin.* Taken seriously, this is the cleanest version of everything
+above. Core then owns exactly: the **platform** (window/input/present), the
+**rasterizer** (scene → pixels/cells), the **document/edit model + dispatch**, and
+the **scene + input ABI**. It owns NO widgets — not even the main editor view. The
+text editor is the FIRST, bundled scene client: it emits the buffer viewport as a
+scene (lines as rows, cursor/selection/gutter/decorations as spans + regions) the
+same way which-key does, and everything else (completion, hover, dired, magit) is
+just more clients.
+
+Why this is attractive:
+- **One rendering path, proven by its hardest client.** If the editor view itself
+  goes through the scene ABI, the ABI is provably expressive and fast enough for
+  everything — no "core UI" escape that plugins can't match. A 3rd-party plugin
+  can do anything the editor does, including replace/augment the view.
+- **Uniformity.** No special-case core rendering to keep in sync with the membrane;
+  the abstraction-audit's "producers bypassing the render membrane" goes to zero by
+  construction.
+
+The one real risk is **per-frame cost** for the main view (scrolling a large doc).
+Two things defuse it: the scene is bounded by the VIEWPORT, not the document (only
+visible lines emit, so multi-gig is irrelevant — [[completion-ux-roadmap]]/stemma
+already stream); and the bundled UI runs **in-process** (native), not over the wasm
+boundary. weft already has this split — `abi.zig` (in-process) mirrors `weft.zig`
+(wasm) one-for-one, SAME plugin logic, different transport — so the first-party
+editor UI is an in-process scene client at native speed, while third-party UI
+plugins use the identical ABI over wasm. The membrane is the contract; the
+transport is an implementation detail per client.
+
+Provisional decision: **yes** — treat the editor view as a bundled, in-process
+scene client and keep core rendering-free (platform + rasterizer + ABI). But prove
+it INCREMENTALLY: P1–P2 move the popups first (bounded, low-risk), P3 formalizes the
+seam, and only then (a later phase, P5) move the main editor view onto the scene ABI
+once it's proven on the popups + a perf check. Don't rewrite the hot view first.
+
+## Primitive sketch (what P1 adds to `core.surface`)
+
+The retained `Surface` already has `rows[]`, `selected`, `Placement`. P1 adds:
+
+    Placement = enum { bottom, corner, center, caret }   // + caret
+    Surface {
+        …existing…
+        anchor: ?usize = null,        // doc offset when placement == .caret
+        info: []u8 = &.{},            // linked side panel (selected row's docs)
+        // a Row's spans may carry a column tag so core aligns them:
+    }
+    Span { text, role, column: u8 = 0 }   // 0 = main, 1 = annotation, …
+
+Membrane (extends the existing `wl_surface_*`): `wl_surface_begin` gains a caret
+variant `wl_surface_caret(offset)`; `wl_surface_span` gains a column arg;
+`wl_surface_info(text)` sets the side panel. The generic renderer
+`drawCaretSurface` in `popup.zig` does the flip/clamp/column-align/info-box that
+`drawPickAtCaret`+`drawHoverAtCaret` hardcode today — one place, every caret popup.
 
 ## Why this ordering
 
