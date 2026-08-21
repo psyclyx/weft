@@ -49,6 +49,13 @@ const View = @This();
 pub const Built = struct {
     shapes: []snail.Shape,
     records_added: u32,
+    /// This build's BODY region (the frame after the tab/status/panel chrome
+    /// is carved off) — the same rect `drawPick`/`drawHover` passed to
+    /// `popup.drawCaretSurface`. Exposed so a caller (the popup-layout e2e
+    /// gate) can re-derive a caret popup's layout from the SAME `body` the
+    /// real frame used, instead of recomputing the chrome-carve formula and
+    /// risking it drift out of step with `build`'s.
+    body: region.Rect = .{},
 
     pub fn deinit(self: *Built, gpa: Allocator) void {
         gpa.free(self.shapes);
@@ -454,7 +461,9 @@ pub fn build(
         if (bd.bottom) try rects.append(scratch, .{ .x = frame.x, .y = frame.y + frame.h - th, .w = frame.w, .h = th, .color = c });
     }
 
-    return try render.render(self, world_to_pixel, runs.items, rects.items);
+    var built = try render.render(self, world_to_pixel, runs.items, rects.items);
+    built.body = body_rect;
+    return built;
 }
 
 // ── HUD (status line + picker; always mono) ──────────────────────

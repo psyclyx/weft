@@ -132,7 +132,11 @@ platform"; neither touches the scene vocabulary or any plugin.
   bespoke `drawPickAtCaret`/`drawHoverAtCaret` layout. Behavior identical; the
   snapshot tests are the guard.
 - **P2 — the consumer emits the scene.** `complete_ui`/hover build a surface
-  instead of driving pick+bespoke draw; the picker dock too. `popup.zig` shrinks
+  instead of driving pick+bespoke draw; the picker dock too. NOTE: the hover
+  HUD path is currently DORMANT in production (`frame_builder.zig` passes
+  `.hover = null`; LSP hover routes to the echo line) — P2 must re-wire a
+  live hover *producer*, not just swap the build path; the popup-layout gate
+  drives the path directly meanwhile. `popup.zig` shrinks
   to one generic surface renderer. Core no longer knows "completion popup", only
   "a caret surface".
 - **P3 — formalize the backend + platform seams.** Extract the Rasterizer and

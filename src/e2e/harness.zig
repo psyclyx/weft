@@ -33,6 +33,7 @@ pub const region = weft.region;
 // one harness module (`const core = h.core;` etc.) without their own imports.
 pub const session = core.session;
 pub const gfx_harness = harness; // aliased as `harness` in the window tests
+pub const view = view_mod; // the View/Built/Hud package, for popup-layout introspection
 
 const Allocator = std.mem.Allocator;
 const command = core.command;
@@ -369,8 +370,12 @@ pub const Editor = struct {
     }
 
     /// Lazily create the harness's persistent View (glyph atlas + metrics),
-    /// shared by the single-pane snapshot and the multi-pane composite.
-    fn ensureView(self: *Editor) !*view_mod.View {
+    /// shared by the single-pane snapshot and the multi-pane composite. `pub`
+    /// so a test file can build its OWN custom-sized frame (e.g. the
+    /// popup-layout gate's flip/clamp scenarios, which need to choose the
+    /// frame geometry deliberately) instead of the fixed `app_w`/`app_h`
+    /// `snapshot`/`snapshotPanes` use.
+    pub fn ensureView(self: *Editor) !*view_mod.View {
         if (self.view == null) self.view = try view_mod.View.init(self.gpa, @embedFile("font_mono"), app_em);
         return &self.view.?;
     }

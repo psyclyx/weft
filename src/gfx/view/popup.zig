@@ -9,10 +9,11 @@
 //! the corner/center plugin overlays (which-key, dired, magit); the caret
 //! popups (completion + its docs box, hover) are `core.surface.Surface`s
 //! with `.caret` placement — built fresh every frame by `pickSurface`/
-//! `hoverSurface` from the live `Pick`/hover text — laid out and drawn by
-//! the ONE generic `drawCaretSurface` (flip-above/clamp, column alignment,
-//! selected-row styling, the linked info panel). `drawPick`/`drawHover` are
-//! the thin per-caller entry points `View.build` calls.
+//! `hoverSurface` from the live `Pick`/hover text, LAID OUT by
+//! `layoutCaretSurface` (the introspection seam — geometry + content as
+//! data, asserted by the popup-layout e2e gate instead of raw pixels), and
+//! drawn by the thin `drawCaretSurface`. `drawPick`/`drawHover` are the
+//! thin per-caller entry points `View.build` calls.
 
 const std = @import("std");
 const Allocator = std.mem.Allocator;
@@ -79,8 +80,11 @@ pub fn drawPickInto(
 /// still align because the renderer sizes column 1 from whichever rows DO
 /// carry one). The selected row's full doc becomes the linked `info` panel.
 /// Scratch-owned (arena) — rebuilt fresh every frame, never retained past
-/// it. Null when there's nothing to show (no filtered candidates).
-fn pickSurface(scratch: Allocator, p: *const core.Pick, off: usize) ?core.surface.Surface {
+/// it. Null when there's nothing to show (no filtered candidates). `pub`
+/// so the popup-layout e2e gate (src/e2e/popup_layout_test.zig) can drive
+/// the real `pickSurface` → `layoutCaretSurface` path from a live `Pick`,
+/// instead of hand-building a `Surface`.
+pub fn pickSurface(scratch: Allocator, p: *const core.Pick, off: usize) ?core.surface.Surface {
     const total = p.filtered.items.len;
     if (total == 0) return null;
     const shown = @min(total, Hud.max_pick_rows);
@@ -105,8 +109,8 @@ fn pickSurface(scratch: Allocator, p: *const core.Pick, off: usize) ?core.surfac
 
 /// Build a caret-anchored hover `Surface` from plain (LSP) text: one row per
 /// line (capped to `max_hover_rows`), column 0 only, no selection. Null for
-/// empty text.
-fn hoverSurface(scratch: Allocator, text: []const u8, off: usize) ?core.surface.Surface {
+/// empty text. `pub` — see `pickSurface`'s doc for why.
+pub fn hoverSurface(scratch: Allocator, text: []const u8, off: usize) ?core.surface.Surface {
     if (text.len == 0) return null;
     var surf: core.surface.Surface = .{};
     surf.begin(scratch, .caret);
@@ -135,28 +139,109 @@ pub fn drawHover(v: *View, scratch: Allocator, runs: *std.ArrayList(Run), rects:
     if (hoverSurface(scratch, text, off)) |surf| try drawCaretSurface(v, scratch, runs, rects, &surf, body);
 }
 
-/// Draw a `caret`-placed `Surface` — the ONE generic layout `drawPickAtCaret`
-/// and `drawHoverAtCaret` used to hardcode separately: resolve the anchor's
-/// caret geometry, flip the box above the line (else clamp into `body`) when
-/// it would overflow, align every row's spans into their declared COLUMNS
-/// (0 = main content — an 8-cell floor so a short list never looks cramped;
-/// 1+ = a dimmed annotation, sized to whichever rows carry one), highlight
-/// the selected row (forcing its text to the box background for legibility
-/// against the accent fill), and — if the surface carries `info` — place a
-/// linked side panel beside it (right, else left), multi-line and capped.
-/// A missing/off-screen anchor or an empty surface draws nothing.
-pub fn drawCaretSurface(
+/// An exhaustive mirror of `core.surface.Role`'s named tags — the wire
+/// membrane's `Role` is deliberately non-exhaustive (an `_` catch-all for
+/// forward compatibility across the guest ABI), and `std.zon` refuses to
+/// (de)serialize non-exhaustive enums. `layoutCaretSurface`'s output feeds
+/// the popup-layout e2e gate's committed golden files, so its column-0 color
+/// identity is this small, exhaustive, ZON-friendly copy instead.
+pub const SpanRole = enum { normal, accent, group, leaf, effect, muted };
+
+fn fromRole(r: core.surface.Role) SpanRole {
+    return switch (r) {
+        .accent => .accent,
+        .group => .group,
+        .leaf => .leaf,
+        .effect => .effect,
+        .muted => .muted,
+        else => .normal, // .normal, and any future/unknown tag
+    };
+}
+
+/// Mirrors `Theme.roleColor` over `SpanRole` instead of `core.surface.Role` —
+/// same table, kept beside its source so a future role/color addition is one
+/// two-switch edit, not a silent drift.
+fn spanRoleColor(v: *const View, role: SpanRole) [4]f32 {
+    return switch (role) {
+        .accent => v.theme.accent,
+        .group => v.theme.heading,
+        .effect => v.theme.md_link,
+        .muted => v.theme.status,
+        .normal, .leaf => v.theme.foreground,
+    };
+}
+
+/// One positioned span in a laid-out caret row: WHERE it draws (world x)
+/// and its resolved color IDENTITY (never a raw RGB — see `SpanRole`).
+pub const SpanLayout = struct {
+    text: []const u8,
+    column: u8,
+    x: f32,
+    role: SpanRole,
+};
+
+/// One positioned row: its top y, whether it's the selected (accent-filled)
+/// row, and its positioned spans.
+pub const RowLayout = struct {
+    y: f32,
+    selected: bool,
+    spans: []const SpanLayout,
+};
+
+/// The linked info panel's box + its line-split text, already placed
+/// (right of the list, or flipped left when that would overflow `body`).
+pub const InfoLayout = struct {
+    x: f32,
+    y: f32,
+    w: f32,
+    h: f32,
+    flipped_left: bool,
+    lines: []const []const u8,
+};
+
+/// A `caret`-placed `Surface`'s full LAYOUT DECISION: the box rect, whether
+/// it flipped above the caret line, every column's x-offset (in cells) and
+/// width, every row positioned + colored, and the linked info panel if any.
+/// This is the introspection seam the popup-layout e2e gate asserts against
+/// (golden ZON, `src/e2e/popup_layout_test.zig`) instead of raw pixels —
+/// pixel snapshots are brittle to font hinting/HiDPI, but this is pure
+/// arithmetic over fixed metrics, so it's exactly reproducible run to run.
+/// Every field here is ZON-serializable by construction (no non-exhaustive
+/// enums, no pointers besides plain slices) — see `SpanRole`.
+pub const CaretLayout = struct {
+    x: f32,
+    y: f32,
+    w: f32,
+    h: f32,
+    flipped_above: bool,
+    /// Column x-offsets/widths, in CELLS (not pixels) — stable across `em`,
+    /// so a theme/font-size change doesn't false-positive the golden.
+    col_x: []const usize,
+    col_w: []const usize,
+    rows: []const RowLayout,
+    info: ?InfoLayout,
+};
+
+/// Compute a `caret`-placed `Surface`'s layout — resolve the anchor's caret
+/// geometry, flip the box above the line (else clamp into `body`) when it
+/// would overflow, align every row's spans into their declared COLUMNS (0 =
+/// main content — an 8-cell floor so a short list never looks cramped; 1+ =
+/// a dimmed annotation, sized to whichever rows carry one), mark the
+/// selected row, and — if the surface carries `info` — place a linked side
+/// panel beside it (right, else left), multi-line and capped. Null under
+/// the same conditions `drawCaretSurface` draws nothing: an empty surface,
+/// a missing anchor, or an anchor whose line is off-screen. `scratch`-owned
+/// (arena) — never retained past the frame/test that built it.
+pub fn layoutCaretSurface(
     v: *View,
     scratch: Allocator,
-    runs: *std.ArrayList(Run),
-    rects: *std.ArrayList(Rect),
     surf: *const core.surface.Surface,
     body: region.Rect,
-) !void {
+) !?CaretLayout {
     const nrows = surf.rows.items.len;
-    if (nrows == 0) return;
-    const off = surf.anchor orelse return;
-    const li = v.frame_layout.lineForOffset(off) orelse return; // off-screen
+    if (nrows == 0) return null;
+    const off = surf.anchor orelse return null;
+    const li = v.frame_layout.lineForOffset(off) orelse return null; // off-screen
     const c = v.frame_layout.lines[li].caretAt(off);
 
     // Column widths in codepoints, across every row. Column 0 floors at 8
@@ -188,32 +273,28 @@ pub fn drawCaretSurface(
     const box_h = @as(f32, @floatFromInt(nrows)) * v.line_h;
     const box_x = std.math.clamp(c.x, body.x, @max(body.x, body.x + body.w - box_w));
     var box_y = c.y_top + c.height; // just below the caret line
-    if (box_y + box_h > body.y + body.h) box_y = c.y_top - box_h; // flip above
+    var flipped_above = false;
+    if (box_y + box_h > body.y + body.h) {
+        box_y = c.y_top - box_h; // flip above
+        flipped_above = true;
+    }
     box_y = std.math.clamp(box_y, body.y, @max(body.y, body.y + body.h - box_h));
-    try outlinedBox(scratch, rects, box_x, box_y, box_w, box_h, v.theme.selection, v.theme.accent);
 
+    const rows = try scratch.alloc(RowLayout, nrows);
     for (surf.rows.items, 0..) |row, i| {
         const row_y = box_y + @as(f32, @floatFromInt(i)) * v.line_h;
         const selected = surf.selected != null and surf.selected.? == i;
-        if (selected) try rects.append(scratch, .{ .x = box_x, .y = row_y, .w = box_w, .h = v.line_h, .color = v.theme.accent });
-        for (row.spans.items) |sp| {
+        const spans = try scratch.alloc(SpanLayout, row.spans.items.len);
+        for (row.spans.items, 0..) |sp, si| {
             const x = box_x + @as(f32, @floatFromInt(col_x[sp.column])) * v.cell_w;
-            // Column 0 reads through the span's semantic role; column 1+ is
-            // a dimmed ANNOTATION by construction (the completion note) —
-            // comment gray, unless the selected row's accent fill forces
-            // every column to the box background instead, for legibility.
-            const color = if (selected)
-                v.theme.background
-            else if (sp.column == 0)
-                v.theme.roleColor(sp.role)
-            else
-                v.theme.syn_comment;
-            try propLine(v, scratch, runs, sp.text, x, row_y + v.ascent, color);
+            spans[si] = .{ .text = sp.text, .column = sp.column, .x = x, .role = fromRole(sp.role) };
         }
+        rows[i] = .{ .y = row_y, .selected = selected, .spans = spans };
     }
 
     // The linked side panel (e.g. the selected row's full docs): beside the
     // box (right, else left if it would overflow the body). Multi-line, capped.
+    var info: ?InfoLayout = null;
     if (surf.info.len > 0) {
         var irows: usize = 0;
         var icols: usize = 8;
@@ -226,16 +307,73 @@ pub fn drawCaretSurface(
             const iw = @as(f32, @floatFromInt(icols + 2)) * v.cell_w;
             const ih = @as(f32, @floatFromInt(irows)) * v.line_h;
             var ix = box_x + box_w + v.cell_w; // to the right of the list
-            if (ix + iw > body.x + body.w) ix = @max(body.x, box_x - iw - v.cell_w); // flip left
+            var flipped_left = false;
+            if (ix + iw > body.x + body.w) {
+                ix = @max(body.x, box_x - iw - v.cell_w); // flip left
+                flipped_left = true;
+            }
             const iy = std.math.clamp(box_y, body.y, @max(body.y, body.y + body.h - ih));
-            try outlinedBox(scratch, rects, ix, iy, iw, ih, v.theme.selection, v.theme.accent);
+            const lines = try scratch.alloc([]const u8, irows);
             var lit = std.mem.splitScalar(u8, surf.info, '\n');
             var k: usize = 0;
             while (lit.next()) |line| : (k += 1) {
                 if (k >= irows) break;
-                const ly = iy + @as(f32, @floatFromInt(k)) * v.line_h + v.ascent;
-                try propLine(v, scratch, runs, line, ix + v.cell_w, ly, v.theme.foreground);
+                lines[k] = line;
             }
+            info = .{ .x = ix, .y = iy, .w = iw, .h = ih, .flipped_left = flipped_left, .lines = lines };
+        }
+    }
+
+    return .{
+        .x = box_x,
+        .y = box_y,
+        .w = box_w,
+        .h = box_h,
+        .flipped_above = flipped_above,
+        .col_x = col_x,
+        .col_w = col_w,
+        .rows = rows,
+        .info = info,
+    };
+}
+
+/// Draw a `caret`-placed `Surface` — the ONE generic renderer `drawPickAtCaret`
+/// and `drawHoverAtCaret` used to hardcode separately. A thin consumer of
+/// `layoutCaretSurface`'s decision: turns positioned rows/spans/info into
+/// rects + runs. Column 0 reads through the span's semantic role; column 1+
+/// is a dimmed ANNOTATION by construction (the completion note) — comment
+/// gray, unless the selected row's accent fill forces every column to the
+/// box background instead, for legibility. A missing/off-screen anchor or
+/// an empty surface draws nothing.
+pub fn drawCaretSurface(
+    v: *View,
+    scratch: Allocator,
+    runs: *std.ArrayList(Run),
+    rects: *std.ArrayList(Rect),
+    surf: *const core.surface.Surface,
+    body: region.Rect,
+) !void {
+    const cl = (try layoutCaretSurface(v, scratch, surf, body)) orelse return;
+    try outlinedBox(scratch, rects, cl.x, cl.y, cl.w, cl.h, v.theme.selection, v.theme.accent);
+
+    for (cl.rows) |row| {
+        if (row.selected) try rects.append(scratch, .{ .x = cl.x, .y = row.y, .w = cl.w, .h = v.line_h, .color = v.theme.accent });
+        for (row.spans) |sp| {
+            const color = if (row.selected)
+                v.theme.background
+            else if (sp.column == 0)
+                spanRoleColor(v, sp.role)
+            else
+                v.theme.syn_comment;
+            try propLine(v, scratch, runs, sp.text, sp.x, row.y + v.ascent, color);
+        }
+    }
+
+    if (cl.info) |info| {
+        try outlinedBox(scratch, rects, info.x, info.y, info.w, info.h, v.theme.selection, v.theme.accent);
+        for (info.lines, 0..) |line, k| {
+            const ly = info.y + @as(f32, @floatFromInt(k)) * v.line_h + v.ascent;
+            try propLine(v, scratch, runs, line, info.x + v.cell_w, ly, v.theme.foreground);
         }
     }
 }

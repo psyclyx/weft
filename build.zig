@@ -178,6 +178,24 @@ pub fn build(b: *std.Build) void {
     compare_only_opts.addOption(bool, "record", false);
     test_mod.addOptions("latency_options", compare_only_opts);
 
+    // The same record/compare doctrine for the popup-layout golden gate
+    // (rendering P2's guard — src/e2e/popup_layout_test.zig): `test_mod` is
+    // HARDCODED to compare-only for the identical reason (a plain `zig build
+    // test -Drecord-popup-layout=true` must never be able to overwrite the
+    // committed goldens as a side effect of an ordinary run). The live flag
+    // is wired only into `popup_layout_mod` below.
+    //
+    // The option's FIELD NAME is `record_popup_layout`, not `record` (unlike
+    // `latency_options` above) — purely so the generated options SOURCE FILE
+    // differs from `compare_only_opts`'s. `b.addOptions()` content-addresses
+    // its emitted file; an identical `pub const record: bool = false;` body
+    // would hash to the SAME generated file as the latency one, and Zig
+    // refuses to let one physical file root two different named modules
+    // ("file exists in modules 'latency_options' and 'popup_layout_options'").
+    const compare_only_popup_opts = b.addOptions();
+    compare_only_popup_opts.addOption(bool, "record_popup_layout", false);
+    test_mod.addOptions("popup_layout_options", compare_only_popup_opts);
+
     const unit_tests = b.addTest(.{ .root_module = test_mod });
     const run_tests = b.addRunArtifact(unit_tests);
     const test_step = b.step("test", "Run unit tests");
@@ -220,6 +238,44 @@ pub fn build(b: *std.Build) void {
     const run_latency_tests = b.addRunArtifact(latency_tests);
     const latency_step = b.step("e2e-latency", "Run (or, with -Drecord-latency=true, record) the dispatch-latency baseline");
     latency_step.dependOn(&run_latency_tests.step);
+
+    // Same doctrine, third instrument: the popup-layout golden gate
+    // (rendering P2's guard). A THIRD separate module object — not reused
+    // from `latency_mod` — for the identical reason `latency_mod` isn't
+    // `test_mod`: the record flag has to be baked into the compiled output,
+    // and two instruments sharing one module would mean recording one
+    // baseline silently forces a rebuild (and re-run) of the other under the
+    // same flag, which is a surprising coupling neither instrument asked for.
+    const record_popup_layout = b.option(
+        bool,
+        "record-popup-layout",
+        "With `zig build e2e-popup-layout`: record the caret-popup layout goldens (src/e2e/popup_layout_baseline.zon) instead of comparing against them. No effect on the `test` step.",
+    ) orelse false;
+    const popup_layout_mod = b.createModule(.{
+        .root_source_file = b.path("src/tests.zig"),
+        .target = target,
+        .optimize = optimize,
+        .link_libc = true,
+    });
+    configureTestModule(b, popup_layout_mod, snail_dep, stemma_dep, weft_mod, renderer);
+    const popup_layout_opts = b.addOptions();
+    popup_layout_opts.addOption(bool, "record_popup_layout", record_popup_layout);
+    popup_layout_mod.addOptions("popup_layout_options", popup_layout_opts);
+
+    // A dedicated step for the popup-layout gate alone (the full `test` step
+    // already runs it too, in compare mode) — the documented way to re-record
+    // after a deliberate, EXPLAINED layout change:
+    //   zig build e2e-popup-layout                                # compare
+    //   zig build e2e-popup-layout -Drecord-popup-layout=true      # re-record
+    //   zig fmt src/e2e/popup_layout_baseline.zon                  # then canonicalize it —
+    //     `std.zon.stringify`'s raw output isn't always zig-fmt's chosen layout for
+    //     deeply nested data (unlike the flatter `latency_baseline.zon`, which happens
+    //     to already match); the `test`/`e2e-popup-layout` steps don't run `zig fmt`
+    //     themselves, so a fresh recording needs this by hand before it's committed.
+    const popup_layout_tests = b.addTest(.{ .root_module = popup_layout_mod, .filters = &.{"e2e/popup-layout"} });
+    const run_popup_layout_tests = b.addRunArtifact(popup_layout_tests);
+    const popup_layout_step = b.step("e2e-popup-layout", "Run (or, with -Drecord-popup-layout=true, record) the caret-popup layout goldens");
+    popup_layout_step.dependOn(&run_popup_layout_tests.step);
 }
 
 /// Wire the shared test-module dependency set (snail/snail-raster/stemma/

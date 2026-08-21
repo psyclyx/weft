@@ -27,6 +27,12 @@ pub const Tab = hud_mod.Tab;
 /// The view's color palette (data + role→color lookups), from `view/Theme.zig`.
 pub const Theme = @import("view/Theme.zig");
 
+/// The caret/corner/center overlay renderer — re-exported so a caller outside
+/// this package (the popup-layout e2e gate) can drive `popup.pickSurface`/
+/// `popup.hoverSurface` → `popup.layoutCaretSurface` directly, over a live
+/// `Pick`, without hand-building a `core.surface.Surface`.
+pub const popup = @import("view/popup.zig");
+
 // ── Tests ──
 
 test {

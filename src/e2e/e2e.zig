@@ -22,4 +22,5 @@ test {
     _ = @import("authoring_test.zig");
     _ = @import("teardown_test.zig");
     _ = @import("latency_test.zig");
+    _ = @import("popup_layout_test.zig");
 }
