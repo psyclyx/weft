@@ -23,6 +23,7 @@ const session = @import("session.zig");
 const layers = @import("layers.zig");
 const identity = @import("identity.zig");
 const Document = @import("Document.zig");
+const scheduler = @import("scheduler.zig");
 
 const FdNode = struct { next: ?*FdNode = null, fd: i32 };
 
@@ -79,17 +80,28 @@ pub const Hub = struct {
     incoming: std.atomic.Value(?*FdNode) = .init(null),
     listener: ?i32 = null,
     accept_thread: ?std.Thread = null,
+    /// Scheduler wake-fd (north-star-plan §6 W2a-3): signaled by the accept
+    /// thread on a new incoming connection and by every peer's reader
+    /// thread on new inbox data (`Session.wake_fd`, set on each peer at
+    /// `adopt`) — ONE fd shared across N peers (an eventfd counter tolerates
+    /// concurrent writers fine). The caller registers it as a scheduler fd
+    /// source for the hub's lifetime.
+    wake_fd: std.posix.fd_t,
 
     /// A hub with no listener yet — call `listen` once it is stored at a
     /// stable address (the accept thread captures `self`). `access` is the
     /// grade every peer on this endpoint is granted (safe default: view);
     /// `id` is the host identity presented to peers (null in tests).
     pub fn init(gpa: Allocator, token: []const u8, access: session.Access, id: ?*const identity.Identity) !Hub {
+        const tok = try gpa.dupe(u8, token);
+        errdefer gpa.free(tok);
+        const wake_fd = try scheduler.newWakeFd();
         return .{
             .gpa = gpa,
-            .token = try gpa.dupe(u8, token),
+            .token = tok,
             .access = access,
             .id = if (id) |i| i.* else null,
+            .wake_fd = wake_fd,
         };
     }
 
@@ -128,6 +140,7 @@ pub const Hub = struct {
             self.gpa.destroy(n);
         }
         self.gpa.free(self.token);
+        scheduler.closeWakeFd(self.wake_fd);
     }
 
     /// Adopt every fd the accept thread has queued, running `configure`
@@ -202,6 +215,7 @@ pub const Hub = struct {
         p.* = .{ .hub = self, .fd_link = .{ .fd = fd }, .sess = undefined, .conn = undefined };
         p.sess = try session.Session.create(gpa, p.fd_link.link(), .server, self.token, self.access, if (self.id) |*i| i else null);
         errdefer p.sess.destroy();
+        p.sess.setWakeFd(self.wake_fd);
         p.conn = try session.Conn.init(gpa, p.sess, "host", .server);
         errdefer p.conn.deinit();
         try self.clients.append(gpa, p);
@@ -236,6 +250,7 @@ fn acceptMain(hub: *Hub) void {
             node.next = head;
             head = hub.incoming.cmpxchgWeak(head, node, .release, .monotonic) orelse break;
         }
+        scheduler.signalWakeFd(hub.wake_fd);
     }
 }
 

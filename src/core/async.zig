@@ -92,6 +92,20 @@ pub const Loop = struct {
         self.timers.deinit(self.gpa);
     }
 
+    /// The earliest due time among live (non-canceled) timers, or null if
+    /// there are none — a pure query so a scheduler deadline source can
+    /// sleep exactly until this loop's next timer needs `tick` instead of
+    /// being serviced by accident on whatever cadence something else wakes
+    /// the frame thread (north-star-plan §6 W2a-3).
+    pub fn nextDueNs(self: *const Loop) ?u64 {
+        var min: ?u64 = null;
+        for (self.timers.items) |tm| {
+            if (tm.canceled) continue;
+            if (min == null or tm.due_ns < min.?) min = tm.due_ns;
+        }
+        return min;
+    }
+
     fn fresh(self: *Loop) Id {
         const id: Id = @enumFromInt(self.next_id);
         self.next_id += 1;

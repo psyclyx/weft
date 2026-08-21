@@ -127,17 +127,19 @@ pub const RenderState = struct {
 
     /// Present: (re)rasterize on damage, then acquire a swapchain image, copy the
     /// staged pixels into it, and submit/present. The only method touching the
-    /// swapchain — mirrors the snail backend's `present` seam.
-    pub fn present(self: *RenderState, ctx: *Context, fb: [2]u32, frame_start: u64, had_input: bool) !void {
+    /// swapchain — mirrors the snail backend's `present` seam, including the
+    /// `bool` return (see its doc: whether a frame was actually submitted, so
+    /// the caller can retry a deferred present on the next scheduler wake).
+    pub fn present(self: *RenderState, ctx: *Context, fb: [2]u32, frame_start: u64, had_input: bool) !bool {
         _ = fb; // geometry follows ctx.extent (kept in sync by main)
         if (self.fb.rebuilt) {
             self.fb.rebuilt = false;
             self.fb.records_added = 0;
             try self.rasterize(ctx);
         }
-        if (!self.have_frame) return;
+        if (!self.have_frame) return false;
 
-        const cmd = try ctx.beginFrame() orelse return;
+        const cmd = try ctx.beginFrame() orelse return false;
         self.copyToSwapchain(ctx, cmd);
         try ctx.submitPresent(cmd);
 
@@ -145,6 +147,7 @@ pub const RenderState = struct {
         self.fb.stats.recordFrame(frame_ns);
         if (had_input) self.fb.stats.recordInput(frame_ns);
         _ = self.fb.stats.maybeLog(600);
+        return true;
     }
 
     /// Record the staged pixels → acquired swapchain image copy: transition to

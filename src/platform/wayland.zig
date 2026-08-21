@@ -222,6 +222,27 @@ pub const Window = struct {
         if (now > self.repeat_next_ns + interval * 8) self.repeat_next_ns = now + interval;
     }
 
+    /// The Wayland display's fd — non-blocking, readable when the
+    /// compositor has queued protocol data. The scheduler source
+    /// (`app/loop_sources.zig`) registers this directly; `pumpEvents`
+    /// (called unconditionally on every scheduler wake, fd or timer) does
+    /// the actual `prepare_read`/`flush`/`read_events` dance.
+    pub fn fd(self: *const Window) i32 {
+        return c.wl_display_get_fd(self.display);
+    }
+
+    /// Next due time for synthesized key-repeat, or null when no key is
+    /// currently held repeatable — a pure query (north-star-plan §6
+    /// W2a-3): the scheduler sleeps until this instant instead of
+    /// relying on vsync to happen to service `emitKeyRepeats` in time.
+    /// The synthesis itself still runs inside `pumpEvents` (called on
+    /// every wake regardless of which source fired), so this reports
+    /// timing only and mutates nothing.
+    pub fn repeatDueNs(self: *const Window) ?u64 {
+        if (self.repeat_ev == null or self.repeat_rate <= 0 or !self.focused) return null;
+        return self.repeat_next_ns;
+    }
+
     pub fn shouldClose(self: *const Window) bool {
         return self.close_requested;
     }

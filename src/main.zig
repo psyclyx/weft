@@ -39,6 +39,8 @@ const render_mod = @import("app/render.zig");
 const frame_mod = @import("app/frame.zig");
 const collab = @import("app/collab.zig");
 const collab_cmds = @import("app/collab_cmds.zig");
+const loop_sources = @import("app/loop_sources.zig");
+const scheduler = core.scheduler;
 const hostTrustChip = collab.hostTrustChip;
 const selectionAnchorOf = collab.selectionAnchorOf;
 const identityHandler = collab_cmds.identityHandler;
@@ -447,7 +449,81 @@ pub fn main(init: std.process.Init) !void {
 
     std.log.info("weft: rendering — {d} bytes open, em {d}", .{ ed0.text().byteLen(), args.em });
 
+    // ── The scheduler (north-star-plan §6 W2a-3): registered SOURCES, one
+    // poll()-based wait per iteration. `main()`'s per-wake body below is
+    // UNCHANGED from the pre-scheduler loop (same input→commit→build→
+    // present shape) except: it now runs once per genuine wake (an fd
+    // ready, or a deadline reached) instead of once per vsync regardless
+    // of whether anything happened, and the final present is gated on
+    // `render.fb.rebuilt` (see `loop_sources.zig`'s module doc + the
+    // per-source doc comments below for the old clock-polled site each
+    // timer replaces).
+    var sched = scheduler.Scheduler.init(gpa, stats_mod.nowNs);
+    defer sched.deinit();
+
+    // fd sources: the wayland display socket (already non-blocking; the
+    // scheduler only needs to know it's a wake reason — the actual pump
+    // stays in the body, unconditional, below) and the task pool's
+    // completion signal (real push wakeup — §6 W2a-3 item 3).
+    _ = try sched.addFd(window.fd(), .{ .read = true }, null, loop_sources.noopFdReady, "wayland");
+    const pool_wake_fd = try scheduler.newWakeFd();
+    defer scheduler.closeWakeFd(pool_wake_fd);
+    pool.setNotifyFd(pool_wake_fd);
+    _ = try sched.addFd(pool_wake_fd, .{ .read = true }, null, null, "pool");
+
+    // Reified timers (§6 W2a-3 item 2) — see loop_sources.zig for the old
+    // clock-polled site each one replaces.
+    var blink_ctx: loop_sources.BlinkCtx = .{
+        .cursor_cfg = &session.cursor_cfg,
+        .keymap = &session.keymap,
+        .head = &session.head,
+        .blink_next_ns = &blink_next_ns,
+    };
+    _ = try sched.addTimer(&blink_ctx, loop_sources.blinkDue, "caret_blink");
+    _ = try sched.addTimer(window, loop_sources.keyRepeatDue, "key_repeat");
+    var which_key_ctx: loop_sources.WhichKeyCtx = .{ .menu = &session.menu_overlay, .delay_ns = which_key_delay_ns };
+    _ = try sched.addTimer(&which_key_ctx, loop_sources.whichKeyDue, "which_key_delay");
+    _ = try sched.addTimer(&next_backing_poll_ns, loop_sources.backingPollDue, "backing_poll");
+    var flash_ctx: loop_sources.FlashCtx = .{ .flash_start_ns = &flash_start_ns, .flash_duration_ns = flash_duration_ns };
+    _ = try sched.addTimer(&flash_ctx, loop_sources.flashDue, "flash_expiry");
+    var reconnect_ctx: loop_sources.ReconnectCtx = .{
+        .share_ctx = &collab_state.share_ctx,
+        .next_reconnect_ns = &collab_state.next_reconnect_ns,
+        .connect_arg = args.connect,
+    };
+    _ = try sched.addTimer(&reconnect_ctx, loop_sources.reconnectDue, "reconnect_backoff");
+    _ = try sched.addTimer(&session.head, loop_sources.pickDebounceDue, "pick_debounce");
+    _ = try sched.addTimer(&plugin_loop, loop_sources.pluginLoopDue, "plugin_loop_timers");
+    var plugin_stream_ctx: loop_sources.PluginStreamCtx = .{ .plugins = &plugins, .js_plugins = &js_plugins };
+    _ = try sched.addTimer(&plugin_stream_ctx, loop_sources.pluginStreamDue, "plugin_stream_poll");
+
+    // Present discipline (§6 W2a-3 item 4): `present_pending` is set once a
+    // frame is actually built, and cleared once `render.present` reports
+    // it submitted one; while pending, the retry source below demands an
+    // immediate re-check (the fence-poll in `Context.beginFrame` never
+    // blocks, so this is a tight but self-limiting loop, not a busy spin —
+    // it only runs while there is genuinely a frame waiting to go out).
+    // Suppressed while `ctx.swapchain_stale` (minimized/zero-extent) — see
+    // `PresentRetryCtx`'s doc for why that guard is load-bearing, not
+    // cosmetic.
+    var present_pending = false;
+    var present_retry_ctx: loop_sources.PresentRetryCtx = .{ .pending = &present_pending, .swapchain_stale = &ctx.swapchain_stale };
+    _ = try sched.addTimer(&present_retry_ctx, loop_sources.presentRetryDue, "present_retry");
+
+    // The outbound session's wake-fd (§6 W2a-3 item 3) exists for the whole
+    // run regardless of whether a session is bound to it yet (`Collab`
+    // creates it in `initBase`) — register it once, unconditionally;
+    // nothing signals it until `Session.setWakeFd` wires an actual session
+    // (see collab.zig's `connect`/`runtimeConnectFinish`/reconnect-rebind).
+    if (collab_state.share_ctx.conn_wake_fd >= 0)
+        _ = try sched.addFd(collab_state.share_ctx.conn_wake_fd, .{ .read = true }, null, null, "conn");
+    // The hub's eventfd, by contrast, doesn't exist until the Hub struct
+    // itself does (--listen at boot, or the `listen` command at runtime) —
+    // tracked so it's registered/removed exactly once per transition.
+    var hub_src_id: ?scheduler.Id = null;
+
     while (!window.shouldClose() and !session.quit) {
+        _ = try sched.step();
         const frame_start = stats_mod.nowNs();
         window.pumpEvents();
 
@@ -459,6 +535,14 @@ pub fn main(init: std.process.Init) !void {
                 // (don't render into a destroyed swapchain).
                 error.ZeroExtent => {
                     ctx.swapchain_stale = true;
+                    // Nothing is presentable while minimized — drop any
+                    // latched present so `present_retry` (also gated on
+                    // `swapchain_stale` directly, belt-and-suspenders)
+                    // has nothing to spin on. The next real resize sets
+                    // `view_dirty` unconditionally, which re-latches this
+                    // through the ordinary dirty path once there's an
+                    // actual frame to show again.
+                    present_pending = false;
                     continue;
                 },
                 else => return e,
@@ -540,6 +624,15 @@ pub fn main(init: std.process.Init) !void {
         // ── Collab tick (adopt/publish/relay, partial fetch, peer-fs, reconnect) ──
         if (try collab.tickCollab(&collab_state.share_ctx, &session.cmd_ctx, ed0, win_layout, &collab_state.peer_fs_bridge, &collab_state.remote_fs, &collab_state.peer_fs_inflight, &collab_state.noted_host_fp, &collab_state.last_liveness, &collab_state.reconnect, &collab_state.next_reconnect_ns, &collab_state.fd_link, &my_identity, pool, args.connect, args.token, session.echo()))
             view_dirty = true;
+        // The hub's wake-fd source tracks the Hub struct's own lifetime
+        // (listen/stop-listen, connect/disconnect are all funneled through
+        // `applyIntents`/`tickCollab` above) — reconcile once per wake.
+        if (collab_state.hub != null and hub_src_id == null) {
+            hub_src_id = try sched.addFd(collab_state.hub.?.wake_fd, .{ .read = true }, null, null, "hub");
+        } else if (collab_state.hub == null and hub_src_id != null) {
+            sched.removeFd(hub_src_id.?);
+            hub_src_id = null;
+        }
         if (editor.doc.commitCount() != attach.seen_commits) {
             attach.seen_commits = editor.doc.commitCount();
             view_dirty = true;
@@ -558,7 +651,18 @@ pub fn main(init: std.process.Init) !void {
         });
 
         // ── Draw ── (the only GPU/swapchain touch; headless skips it)
-        try render.present(ctx, fb, frame_start, had_input);
+        // Present discipline (§6 W2a-3 item 4): only when a frame was
+        // actually built this wake or one is still outstanding from a
+        // deferred retry — an idle editor with nothing dirty submits
+        // NOTHING, vsync or not. `render.present` itself never blocks on
+        // the GPU fence (`Context.beginFrame`'s zero-timeout poll); a
+        // `false` return means it deferred, and `present_pending` stays
+        // set so the `present_retry` timer source demands an immediate
+        // recheck next step.
+        present_pending = present_pending or render.fb.rebuilt;
+        if (present_pending) {
+            if (try render.present(ctx, fb, frame_start, had_input)) present_pending = false;
+        }
     }
     ctx.waitIdle();
 }

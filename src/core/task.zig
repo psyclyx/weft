@@ -16,6 +16,7 @@ const std = @import("std");
 const Allocator = std.mem.Allocator;
 const assert = std.debug.assert;
 const linux = std.os.linux;
+const scheduler = @import("scheduler.zig");
 
 // Parking uses the raw Linux futex (weft is Wayland/Linux-native;
 // std.Thread.Futex is gone in 0.16 and the std.Io replacement would drag
@@ -100,6 +101,14 @@ pub const Pool = struct {
     /// Futex word: bumped on every state change workers care about.
     wake: std.atomic.Value(u32) = .init(0),
     shutdown: std.atomic.Value(bool) = .init(false),
+    /// Optional scheduler wake-fd (north-star-plan §6 W2a-3): signaled once
+    /// after any task completes, so `core/scheduler.zig` learns "a pool
+    /// task finished" without polling every handle every wake. Coalesced by
+    /// construction (an eventfd counter, not a per-task message) — a burst
+    /// of completions between two scheduler steps collapses to one wake,
+    /// which is exactly right (the caller still has to poll every handle to
+    /// find out WHICH ones finished; this is only "go look").
+    notify_fd: ?std.posix.fd_t = null,
 
     pub const Options = struct {
         /// 0 = a small editor-shaped default: enough for concurrent
@@ -147,6 +156,12 @@ pub const Pool = struct {
         const gpa = self.gpa;
         gpa.free(self.threads);
         gpa.destroy(self);
+    }
+
+    /// Wire the pool's completion signal to a scheduler wake-fd (idempotent;
+    /// pass `null` to unwire). The caller owns the fd's lifetime.
+    pub fn setNotifyFd(self: *Pool, fd: ?std.posix.fd_t) void {
+        self.notify_fd = fd;
     }
 
     /// Submit `f(args...)` to the pool. Lock-free; safe on the hot path.
@@ -220,12 +235,16 @@ fn TaskContainer(comptime f: anytype) type {
 
         fn run(node: *Node) void {
             const self: *Container = @alignCast(@fieldParentPtr("node", node));
+            // Captured before the node can possibly be freed below (a
+            // detached handle's second-finisher destroys it immediately).
+            const pool = node.pool;
             self.result = @call(.auto, f, self.args);
             // Publish, then hand off ownership if the holder detached.
             if (node.state.cmpxchgStrong(Node.pending, Node.done, .release, .acquire)) |actual| {
                 assert(actual == Node.detached);
                 node.destroyFn(node, node.pool.gpa);
             }
+            if (pool.notify_fd) |fd| scheduler.signalWakeFd(fd);
         }
 
         fn destroy(node: *Node, gpa: Allocator) void {

@@ -27,6 +27,7 @@ const Link = link_mod.Link;
 const Mutex = link_mod.Mutex;
 const futexWaitTimed = link_mod.futexWaitTimed;
 const futexWake = link_mod.futexWake;
+const scheduler_mod = @import("../scheduler.zig");
 
 pub const Liveness = enum { connecting, connected, degraded, offline };
 
@@ -100,6 +101,24 @@ tx: secure.Channel = undefined,
 rx: secure.Channel = undefined,
 
 last_rx_ns: std.atomic.Value(u64) = .init(0),
+
+/// Optional scheduler wake-fd (north-star-plan §6 W2a-3): the reader
+/// thread signals it whenever it pushes fresh inbox data, and at
+/// terminal reader exit (a liveness transition worth noticing promptly
+/// too) — the fd Hub/Collab register as a scheduler source so tick
+/// servicing wakes on real activity instead of a per-frame poll. Not
+/// owned here: Hub shares ONE fd across every peer Session it creates;
+/// Collab owns one for the outbound session across reconnects.
+wake_fd: ?std.posix.fd_t = null,
+
+pub fn setWakeFd(self: *Session, fd: ?std.posix.fd_t) void {
+    self.wake_fd = fd;
+}
+
+fn notifyWake(self: *Session) void {
+    const fd = self.wake_fd orelse return;
+    scheduler_mod.signalWakeFd(fd);
+}
 
 pub fn create(
     gpa: Allocator,
@@ -239,6 +258,7 @@ pub fn drain(self: *Session, gpa: Allocator, out: *std.ArrayList(wire.Decoder.De
 fn readerMain(self: *Session) void {
     self.runReader() catch {};
     self.dead.store(true, .release);
+    self.notifyWake(); // a liveness transition is worth noticing promptly
 }
 
 fn runReader(self: *Session) !void {
@@ -269,6 +289,7 @@ fn runReader(self: *Session) !void {
                     node.next = head;
                     head = self.inbox.cmpxchgWeak(head, node, .release, .monotonic) orelse break;
                 }
+                self.notifyWake();
             }
         }
     }
@@ -356,6 +377,7 @@ fn handshake(self: *Session) !void {
     }
     self.established.store(true, .release);
     self.wakeWriter();
+    self.notifyWake(); // the peer's fingerprint/SAS just became readable
 }
 
 // ── Writer: priority drain + heartbeat clock ────────────────
@@ -381,6 +403,7 @@ fn writerMain(self: *Session) void {
             defer gpa.free(hb);
             self.writeSealed(hb) catch {
                 self.dead.store(true, .release);
+                self.notifyWake(); // a half-open link (write fails, read blocks) must be noticed
                 return;
             };
         }
@@ -393,6 +416,7 @@ fn writerMain(self: *Session) void {
             defer gpa.free(f);
             self.writeSealed(f) catch {
                 self.dead.store(true, .release);
+                self.notifyWake(); // a half-open link (write fails, read blocks) must be noticed
                 return;
             };
             continue;

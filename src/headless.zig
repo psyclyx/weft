@@ -5,12 +5,23 @@
 //! literal), serves range reads for partial checkout, and autosaves.
 //! The window/Vulkan half of weft is simply never initialized.
 //!
+//! The loop is the SAME `core/scheduler.zig` kernel `main.zig` drives
+//! (north-star-plan §6 W2a-3 item 5's unification) — collab (the hub's
+//! wake-fd) and pool sources, no window/present sources at all. The old
+//! shape here was a fixed 15ms futex park regardless of whether anything
+//! was pending; that's gone — an idle host with no peers, no in-flight
+//! saves, and nothing dirty genuinely blocks in `poll()` until a peer's
+//! reader thread (or the accept thread) signals the hub's eventfd, or the
+//! pool signals a finished task, or the autosave-idle deadline (armed only
+//! while a change is actually pending) comes due.
+//!
 //!   weft --headless --listen PORT [--token T] [file]
 
 const std = @import("std");
 const core = @import("core/core.zig");
 const session = core.session;
 const capability = core.capability;
+const scheduler = core.scheduler;
 
 pub const Args = struct {
     listen: u16 = 7777,
@@ -72,28 +83,72 @@ pub fn run(gpa: std.mem.Allocator, args: Args, environ: std.process.Environ) !vo
         .blob = if (blob != null) &blob.? else null,
     };
 
-    var park: std.atomic.Value(u32) = .init(0);
-    var last_change_ns: u64 = 0;
-    var seen_commits: usize = 0;
-    while (true) {
-        // Adopt newly accepted connections, then tick everyone;
-        // broadcast falls out of per-peer frontier tracking (a batch
-        // merged from one peer moves the head, so every other Collab
-        // sends on its next tick).
-        hub.acceptPending(&cfg, headlessConfigure);
-        _ = hub.tick();
-        notePeerIdentities(&hub, &known);
-        _ = editor.pollSave(gpa);
-        if (editor.doc.commitCount() != seen_commits) {
-            seen_commits = editor.doc.commitCount();
-            last_change_ns = core.task.nowNs();
-        }
-        if (last_change_ns != 0 and core.task.nowNs() - last_change_ns > 2 * std.time.ns_per_s) {
-            last_change_ns = 0;
-            if (editor.backingPath() != null) try editor.requestSave(gpa);
-        }
-        parkNs(&park, 15 * std.time.ns_per_ms);
+    // ── The scheduler: pool completions + the hub's peer-activity signal
+    // (new connection, or any peer's inbox gaining data — see hub.zig's
+    // `wake_fd` doc) as fd sources; autosave-idle as a deadline source,
+    // armed only while a change is actually pending. ──
+    var sched = scheduler.Scheduler.init(gpa, core.task.nowNs);
+    defer sched.deinit();
+    const pool_wake_fd = try scheduler.newWakeFd();
+    defer scheduler.closeWakeFd(pool_wake_fd);
+    pool.setNotifyFd(pool_wake_fd);
+    _ = try sched.addFd(pool_wake_fd, .{ .read = true }, null, null, "pool");
+    _ = try sched.addFd(hub.wake_fd, .{ .read = true }, null, null, "hub");
+
+    var loop_state: LoopState = .{
+        .hub = &hub,
+        .cfg = &cfg,
+        .known = &known,
+        .editor = editor,
+        .gpa = gpa,
+    };
+    _ = try sched.addTimer(&loop_state, autosaveDue, "autosave_idle");
+
+    // Never returns (no shutdown path today — matches the old `while
+    // (true)`; the process is killed externally).
+    try sched.run(&loop_state, wake);
+}
+
+/// The per-wake body: unchanged from the old per-15ms-tick loop, just run
+/// on genuine wakes now instead of a fixed park. Adopt newly accepted
+/// connections, then tick everyone; broadcast falls out of per-peer
+/// frontier tracking (a batch merged from one peer moves the head, so
+/// every other Collab sends on its next tick).
+const LoopState = struct {
+    hub: *core.hub.Hub,
+    cfg: *HeadlessCfg,
+    known: *core.known_peers.KnownPeers,
+    editor: *core.Editor,
+    gpa: std.mem.Allocator,
+    last_change_ns: u64 = 0,
+    seen_commits: usize = 0,
+};
+
+fn wake(ctx: ?*anyopaque) anyerror!void {
+    const l: *LoopState = @ptrCast(@alignCast(ctx.?));
+    l.hub.acceptPending(l.cfg, headlessConfigure);
+    _ = l.hub.tick();
+    notePeerIdentities(l.hub, l.known);
+    _ = l.editor.pollSave(l.gpa);
+    if (l.editor.doc.commitCount() != l.seen_commits) {
+        l.seen_commits = l.editor.doc.commitCount();
+        l.last_change_ns = core.task.nowNs();
     }
+    if (l.last_change_ns != 0 and core.task.nowNs() - l.last_change_ns > 2 * std.time.ns_per_s) {
+        l.last_change_ns = 0;
+        if (l.editor.backingPath() != null) try l.editor.requestSave(l.gpa);
+    }
+}
+
+/// Pure query (north-star-plan §6 W2a-3): dormant while no change is
+/// pending; otherwise the same "2s of quiet since the last change" line
+/// the old inline compare used, now told to the scheduler instead of
+/// discovered by accident on the next 15ms park.
+fn autosaveDue(ctx: ?*anyopaque, now: u64) ?u64 {
+    _ = now;
+    const l: *const LoopState = @ptrCast(@alignCast(ctx.?));
+    if (l.last_change_ns == 0) return null;
+    return l.last_change_ns + 2 * std.time.ns_per_s;
 }
 
 /// Binding policy for a new peer: the headless host serves ONE document
@@ -117,7 +172,7 @@ fn headlessConfigure(ctx: ?*anyopaque, peer: *core.hub.Peer) anyerror!void {
 
 /// Note each freshly-established peer's identity exactly once: record the
 /// TOFU entry and log its fingerprint, SAS, and trust so an operator can
-/// verify a newcomer out of band. Cheap to call every tick (the flag
+/// verify a newcomer out of band. Cheap to call every wake (the flag
 /// gates the work; the fingerprint is only available post-handshake).
 fn notePeerIdentities(hub: *core.hub.Hub, known: *core.known_peers.KnownPeers) void {
     for (hub.clients.items) |p| {
@@ -140,12 +195,4 @@ fn notePeerIdentities(hub: *core.hub.Hub, known: *core.known_peers.KnownPeers) v
             );
         }
     }
-}
-
-fn parkNs(word: *std.atomic.Value(u32), ns: u64) void {
-    var ts: std.os.linux.timespec = .{
-        .sec = @intCast(ns / std.time.ns_per_s),
-        .nsec = @intCast(ns % std.time.ns_per_s),
-    };
-    _ = std.os.linux.futex_4arg(&word.raw, .{ .cmd = .WAIT, .private = true }, word.load(.acquire), &ts);
 }

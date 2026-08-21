@@ -74,7 +74,16 @@ pub const MenuOverlay = struct {
         // for a legacy menu mode (after the idle delay), or while a forced peek is
         // on (immediately, any mode). No hardcoded root menu.
         const active = in_chord or is_menu or self.forced;
-        const same = active and self.open and !changed;
+        // "Same" must ALSO cover "closed before, closed now" — the ordinary
+        // idle state outside any menu. The old `active and self.open and
+        // !changed` was false whenever `active` was false REGARDLESS of
+        // `self.open`, so this returned `dirty = true` on every single call
+        // while idle outside a menu (north-star-plan §6 W2a-3: found via
+        // the idle-wakeup measurement — dirty-gated present is meaningless
+        // if something marks dirty unconditionally every wake). `changed`
+        // is already false whenever `self.open` is false (see its
+        // definition above), so comparing openness directly is exact.
+        const same = (active == self.open) and !changed;
         if (!same) {
             // Entered/left/switched/grew: close a shown popup; the idle timer is
             // CONTINUOUS while the overlay stays up (menu→submenu hop, or a chord
@@ -370,4 +379,36 @@ test "menu overlay: leaving the peeked mode ends the forced peek" {
     _ = mo.update(&head, &km, &plugins, 20, &wkn, 10_000);
     try t.expect(!mo.forced);
     try t.expect(!mo.open);
+}
+
+test "menu overlay: idle outside any menu is a stable state — no dirty every call" {
+    // north-star-plan §6 W2a-3: this is the exact bug the idle-wakeup
+    // measurement caught — `update` must report NOT dirty on a second
+    // consecutive call with nothing changed, or dirty-gated present is
+    // meaningless (every wake would rebuild regardless of real damage).
+    const gpa = t.allocator;
+    var km: core.Keymap = .empty;
+    defer km.deinit(gpa);
+    var head: core.Head = .empty;
+    defer head.deinit(gpa);
+    try km.markMenuMode(gpa, "leader");
+    var plugins: std.ArrayList(*core.wasm_abi.WasmPlugin) = .empty;
+    defer plugins.deinit(gpa);
+    try head.setMode(gpa, "normal");
+
+    var mo: MenuOverlay = .{};
+    var wkn = false;
+    const dirty1 = mo.update(&head, &km, &plugins, 0, &wkn, 200);
+    try t.expect(!dirty1); // both-closed IS the "same" state from `.{}`'s initial idle
+
+    var i: u64 = 1;
+    while (i < 20) : (i += 1) {
+        const dirty = mo.update(&head, &km, &plugins, i * 100, &wkn, 200);
+        try t.expect(!dirty);
+    }
+
+    // A real transition (entering a menu) still reports dirty, proving the
+    // fix didn't just make everything report `false`.
+    try head.setMode(gpa, "leader");
+    try t.expect(mo.update(&head, &km, &plugins, 2100, &wkn, 200));
 }

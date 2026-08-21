@@ -73,6 +73,14 @@ pub const ShareCtx = struct {
     /// C-g: drop queued connect/listen intents and abort an in-flight
     /// connect. Applied in the frame loop (which owns the connect handle).
     cancel_requested: bool = false,
+    /// Scheduler wake-fd (north-star-plan §6 W2a-3) for the OUTBOUND
+    /// session: wired onto every `core.session.Session` this run creates
+    /// for it (initial connect, runtime connect, reconnect rebind) so tick
+    /// servicing wakes on real inbox activity. `-1` when creating the fd
+    /// failed (falls back to the bounded background-services poll) — the
+    /// sentinel keeps `initBase` infallible rather than threading a second
+    /// optional through every call site.
+    conn_wake_fd: std.posix.fd_t = -1,
 };
 
 /// `Collab` — the cohesive owner of the connection cluster: the outbound client
@@ -168,6 +176,13 @@ pub const Collab = struct {
         self.peer_fs_bridge = .{ .gpa = gpa };
         core.wasm_host.setPeerFsBridge(&self.peer_fs_bridge);
         self.peer_fs_inflight = .empty;
+        // Best-effort: a failed eventfd create (fd exhaustion) falls back to
+        // the scheduler's bounded background-services poll rather than
+        // making this infallible init fail the whole run over it.
+        const conn_wake_fd = core.scheduler.newWakeFd() catch blk: {
+            std.log.warn("collab: could not create a wake eventfd — outbound sync falls back to poll-driven servicing", .{});
+            break :blk -1;
+        };
         self.share_ctx = .{
             .conn = &self.conn,
             .hub = &self.hub,
@@ -179,6 +194,7 @@ pub const Collab = struct {
             .known = known,
             .peer_fs_root = if (self.peer_fs_root) |*r| r else null,
             .fs_grant = .{ .access = share_fs },
+            .conn_wake_fd = conn_wake_fd,
         };
         // Boot --listen folds onto the runtime listen path (one code path): seed
         // the intent; the first frame boots the hub.
@@ -213,6 +229,7 @@ pub const Collab = struct {
         const hp = hostport orelse return;
         self.fd_link = .{ .fd = try core.session.tcpConnect(hp) };
         self.collab_session = try core.session.Session.create(gpa, self.fd_link.link(), .client, token, .own, my_identity);
+        if (self.share_ctx.conn_wake_fd >= 0) self.collab_session.?.setWakeFd(self.share_ctx.conn_wake_fd);
         self.conn = try core.session.Conn.init(gpa, self.collab_session.?, user, .client);
         const col = try self.conn.?.bindPrimary(&ed0.doc, 0);
         col.presence_layer = try caps.layers.claim(gpa, &ed0.doc, "presence", .replicated, "collab");
@@ -251,6 +268,7 @@ pub const Collab = struct {
         if (self.partial_state) |*p| p.deinit();
         if (self.conn) |*c| c.deinit();
         if (self.collab_session) |s| s.destroy();
+        if (self.share_ctx.conn_wake_fd >= 0) core.scheduler.closeWakeFd(self.share_ctx.conn_wake_fd);
     }
 };
 
@@ -400,7 +418,7 @@ pub fn applyIntents(
                 connect_hostport.* = null;
             }
             if (res) |fd| {
-                runtimeConnectFinish(gpa, cmd_ctx, sc.session, sc.conn, fd_link, fd, hp, token, user, sc.caps, my_identity) catch |err| {
+                runtimeConnectFinish(gpa, cmd_ctx, sc.session, sc.conn, fd_link, fd, hp, token, user, sc.caps, my_identity, sc.conn_wake_fd) catch |err| {
                     _ = std.os.linux.close(fd);
                     var buf: [96]u8 = undefined;
                     setEcho(echo, gpa, std.fmt.bufPrint(&buf, "connect failed: {t}", .{err}) catch "connect failed");
@@ -576,6 +594,7 @@ pub fn tickCollab(
                         sc.session.*.?.destroy();
                         fd_link.* = .{ .fd = fd };
                         sc.session.* = try core.session.Session.create(gpa, fd_link.link(), .client, token, .own, my_identity);
+                        if (sc.conn_wake_fd >= 0) sc.session.*.?.setWakeFd(sc.conn_wake_fd);
                         try c.rebind(sc.session.*.?);
                         std.log.info("collab: reconnected", .{});
                         dirty = true;
@@ -607,10 +626,12 @@ pub fn runtimeConnectFinish(
     user: []const u8,
     caps: *core.Caps,
     my_identity: *const core.identity.Identity,
+    conn_wake_fd: std.posix.fd_t,
 ) !void {
     fd_link.* = .{ .fd = fd };
     const sess = try core.session.Session.create(gpa, fd_link.link(), .client, token, .own, my_identity);
     errdefer sess.destroy();
+    if (conn_wake_fd >= 0) sess.setWakeFd(conn_wake_fd);
     var c = try core.session.Conn.init(gpa, sess, user, .client);
     errdefer c.deinit();
 

@@ -102,9 +102,16 @@ pub const RenderState = struct {
 
     /// The GPU present: upload the frame's atlas delta, emit the built panes
     /// into the instance stream, then acquire a swapchain image, record the
-    /// stream into the render pass, submit, present, and record latency stats.
-    /// The ONLY method that touches the swapchain/command buffer or GPU atlas.
-    pub fn present(self: *RenderState, ctx: *Context, fb: [2]u32, frame_start: u64, had_input: bool) !void {
+    /// stream into the render pass, submit, present, and record latency
+    /// stats. The ONLY method that touches the swapchain/command buffer or
+    /// GPU atlas. Returns whether a frame was actually submitted — `false`
+    /// means `beginFrame` deferred (the prior frame's fence isn't signaled
+    /// yet, or the swapchain needs recreation); the caller (main()'s
+    /// present-retry source, north-star-plan §6 W2a-3) tries again on the
+    /// next scheduler wake. The upload/emit above already ran and is NOT
+    /// redone on a retry (`fb.rebuilt` is cleared up front — a retry finds
+    /// it already false and reuses `self.instances`/`self.batches`).
+    pub fn present(self: *RenderState, ctx: *Context, fb: [2]u32, frame_start: u64, had_input: bool) !bool {
         // Backend-only atlas upload + instance emit, driven by the build's
         // `records_added`/`rebuilt` signals. Runs on every rebuilt frame
         // regardless of swapchain availability; a clean frame reuses last
@@ -117,7 +124,7 @@ pub const RenderState = struct {
             }
             try self.emitBuiltPanes();
         }
-        const cmd = try ctx.beginFrame() orelse return;
+        const cmd = try ctx.beginFrame() orelse return false;
         ctx.beginRenderPass(cmd, self.fb.view.theme.background);
         self.renderer.beginFrame(ctx.current_frame);
         const draw_state: snail.render.target.DrawState = .{
@@ -135,6 +142,7 @@ pub const RenderState = struct {
         self.fb.stats.recordFrame(frame_ns);
         if (had_input) self.fb.stats.recordInput(frame_ns);
         _ = self.fb.stats.maybeLog(600);
+        return true;
     }
 
     pub fn deinit(self: *RenderState) void {

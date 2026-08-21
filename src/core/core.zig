@@ -22,6 +22,7 @@ pub const wasm_host = @import("wasm_host.zig");
 pub const quickjs = @import("quickjs.zig");
 pub const task = @import("task.zig");
 pub const async_loop = @import("async.zig");
+pub const scheduler = @import("scheduler.zig");
 pub const kv = @import("kv.zig");
 pub const proc = @import("proc.zig");
 pub const repl_session = @import("repl_session.zig");

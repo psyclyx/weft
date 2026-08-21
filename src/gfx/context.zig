@@ -417,10 +417,33 @@ pub const Context = struct {
     /// Wait for the frame slot, acquire an image, and begin recording.
     /// The render pass is NOT begun yet — record transfer work (texture
     /// uploads) first, then call `beginRenderPass`. Returns null when the
-    /// swapchain needs recreation.
+    /// swapchain needs recreation, OR when the previous frame's GPU work
+    /// hasn't finished yet (north-star-plan §6 W2a-3 / §2.7: "the kernel
+    /// must never block on a GPU fence") — the FENCE is polled with a ZERO
+    /// timeout, never awaited, so THAT wait can never stall the scheduler
+    /// thread. A caller that gets `null` for this reason should retry on
+    /// the scheduler's next wake (see `app/loop_sources.zig`'s
+    /// present-retry source): in the common case (idle, then one edit) the
+    /// fence is already signaled and this returns a command buffer on the
+    /// first try, so no latency is added to the input→present path; only a
+    /// GPU that's still busy from the prior frame defers, exactly as FIFO
+    /// present would have made the caller wait anyway.
+    ///
+    /// Scope note (review): the non-blocking guarantee covers the FENCE
+    /// only. `vkAcquireNextImageKHR` below still passes an effectively
+    /// unbounded timeout and, under FIFO, can genuinely block for up to
+    /// ~1 vblank waiting for a presentable image to cycle back — a small,
+    /// display-refresh-bounded wait, not the open-ended GPU-workload wait
+    /// the fence change eliminates. Making the acquire non-blocking too
+    /// would need a present-time image pool (`VK_KHR_present_wait` or a
+    /// deeper swapchain queue) — out of scope here; the fence was the
+    /// unbounded one (worst case: seconds, if the GPU is behind on other
+    /// work), the acquire is bounded by the display's own refresh cadence.
     pub fn beginFrame(self: *Context) !?vk.VkCommandBuffer {
         const frame = self.current_frame;
-        try check(vk.vkWaitForFences(self.device, 1, &self.in_flight[frame], vk.VK_TRUE, std.math.maxInt(u64)));
+        const wait = vk.vkWaitForFences(self.device, 1, &self.in_flight[frame], vk.VK_TRUE, 0);
+        if (wait == vk.VK_TIMEOUT) return null;
+        try check(wait);
 
         var image_index: u32 = 0;
         const acquire = vk.vkAcquireNextImageKHR(
