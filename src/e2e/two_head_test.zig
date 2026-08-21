@@ -15,23 +15,33 @@
 //! guards against) to actually fail without the fix, not just pass by
 //! accident — see the coordinator review response for that record.
 //!
-//! Deliberately guest-plugin-free (no `loadVim`/`loadWorkspace`): driving it
-//! revealed a REAL, separate gap this stage does not fix — `wasm_host/
-//! commands.zig`'s `wpCmdTrampoline` runs a WASM-plugin-backed command's
-//! `on_command` against the PLUGIN's load-time `ctx` (set once when
-//! `loadPlugin` runs, always the first/primary head), not the `ctx` that
-//! actually dispatched the call; it even discards the passed-in `ctx`
-//! (`_ = ctx;`). So a guest command (any real vim/helix/emacs keybinding —
-//! `weft.setMode`/`weft.edit`/etc.) driven "as" a second head still acts on
-//! the FIRST head's `Head`, silently. Two-head readiness for the guest ABI
-//! (mirroring "the guest ABI itself is implicitly active-buffer addressed"
-//! in the ground-truth table) is real work, sized like its own phase, not a
-//! two-line fix folded into this one — reported here, not patched. This
-//! file instead proves the per-head split at the layer W2a-2 actually
-//! touched: dispatch.zig + core.Head, using core-only commands (the
-//! `default`-mode floor `core.builtins` installs, plus a couple of
-//! synthetic mode-entry commands as plain Zig handlers) so every assertion
-//! is about HEAD isolation, not entangled with the guest-ctx gap above.
+//! Most of this file drives core-only commands (the `default`-mode floor
+//! `core.builtins` installs, plus a couple of synthetic mode-entry commands
+//! as plain Zig handlers) so those assertions are about HEAD isolation at
+//! the layer W2a-2 touched (dispatch.zig + core.Head), not entangled with
+//! the guest-ABI gap below.
+//!
+//! GUEST-ABI HEAD ADDRESSING (task #14, north-star-plan §2.1/§2.7): the
+//! tests at the bottom of this file close a gap this file's header used to
+//! report rather than patch — `wasm_host/commands.zig`'s `wpCmdTrampoline`
+//! used to run a WASM-plugin-backed command's `on_command` against the
+//! PLUGIN's load-time `ctx` (set once when `loadPlugin` ran, always the
+//! first/primary head), not the `ctx` that actually dispatched the call; it
+//! even discarded the passed-in `ctx` (`_ = ctx;`). So a guest command (any
+//! real vim/helix/emacs keybinding — `weft.setMode`/`weft.edit`/etc.) driven
+//! "as" a second head silently acted on the FIRST head's `Head`. The fix
+//! (`WasmPlugin.active_ctx`, `wasm_host/commands.zig`'s module doc — the
+//! dispatching/background classification for every host→guest entry) routes
+//! every `wasm_host/*` read/mutation through the DISPATCHING head's ctx for
+//! the call's duration; the quickjs resident-plugin plane
+//! (`core/quickjs.zig`'s `JsPlugin`/`Bridge`) had the identical shape of bug
+//! in its own command trampoline and got the identical fix. The tests below
+//! drive a REAL guest plugin (`src/guest/headtest.zig` — a minimal fixture
+//! built for exactly this, see its module doc for why not `loadVim`) through
+//! head B and assert head A is untouched, that a BACKGROUND entry
+//! (`on_poll`) targets the system default regardless of which head last
+//! dispatched, and that a `wl_run`-nested reentrant dispatch keeps the same
+//! dispatching head through the nesting (save/restore, not a bare set).
 
 const std = @import("std");
 const t = std.testing;
@@ -354,4 +364,107 @@ test "two heads: distinct echo lines" {
 
     try t.expectEqualStrings("from A", ed.echoText());
     try t.expectEqualStrings("from B", b.echoText());
+}
+
+// ── Guest-ABI head addressing (task #14) — the gap this file's header used
+// to report rather than patch. `headtest` (src/guest/headtest.zig) is a REAL
+// wasm plugin, driven through the REAL `on_command`/`on_poll` trampolines —
+// not a synthetic stand-in for them. ──────────────────────────────────────
+
+test "two heads: a guest-plugin (wasm) command dispatched as B mutates B's Head, not A's" {
+    const gpa = t.allocator;
+    var ed: Editor = undefined;
+    try Editor.init(gpa, &ed);
+    defer ed.deinit();
+    try h.loadHeadtest(&ed);
+
+    var b: SecondHead = undefined;
+    try b.init(&ed, "default");
+    defer b.deinit(gpa);
+
+    try t.expectEqualStrings("default", ed.mode());
+    try t.expectEqualStrings("default", b.mode());
+
+    // "head-poke" (weft.setMode + weft.echo) dispatched "as" B.
+    b.run("head-poke");
+
+    // B mutated: both writes landed on B's Head.
+    try t.expectEqualStrings("poked", b.mode());
+    try t.expectEqualStrings("poked", b.echoText());
+
+    // A untouched. THE FIX: before it, a guest command (any real vim/helix/
+    // emacs keybinding — weft.setMode/weft.edit/etc.) dispatched "as" a
+    // second head silently acted on the plugin's LOAD-TIME ctx (head A)
+    // instead — `wpCmdTrampoline` discarded the dispatching `ctx` entirely.
+    try t.expectEqualStrings("default", ed.mode());
+    try t.expectEqual(@as(usize, 0), ed.head.echo.items.len);
+}
+
+test "two heads: a wl_run-nested guest command keeps the dispatching head through the nesting" {
+    const gpa = t.allocator;
+    var ed: Editor = undefined;
+    try Editor.init(gpa, &ed);
+    defer ed.deinit();
+    try h.loadHeadtest(&ed);
+
+    var b: SecondHead = undefined;
+    try b.init(&ed, "default");
+    defer b.deinit(gpa);
+
+    // "head-relay": wl_run("head-poke") (a nested, in-guest reentrant
+    // dispatch through THIS SAME plugin) then a SECOND weft.echo write AFTER
+    // the nested call returns. Both the nested call's writes and the outer
+    // handler's post-nesting write must land on B throughout — this is what
+    // fails under a "reset active_ctx to the load-time default as soon as a
+    // nested dispatch returns" bug (a bare set instead of save/restore):
+    // the post-nesting echo would land back on A instead.
+    b.run("head-relay");
+
+    try t.expectEqualStrings("poked", b.mode()); // set by the NESTED head-poke
+    try t.expectEqualStrings("after-relay", b.echoText()); // written AFTER the nested call returned — still B
+
+    // A never touched, at any point in the nesting.
+    try t.expectEqualStrings("default", ed.mode());
+    try t.expectEqual(@as(usize, 0), ed.head.echo.items.len);
+}
+
+test "two heads: on_poll (background) targets the system default ctx, not the last-dispatching head" {
+    const gpa = t.allocator;
+    var ed: Editor = undefined;
+    try Editor.init(gpa, &ed);
+    defer ed.deinit();
+    try h.loadHeadtest(&ed);
+
+    var b: SecondHead = undefined;
+    try b.init(&ed, "default");
+    defer b.deinit(gpa);
+
+    // B is "the last-dispatching head": it dispatches head-poke (so its
+    // mode/echo are visibly different from A's default — proving on_poll's
+    // landing spot below isn't accidentally A by coincidence) and
+    // head-spawn (perm proc; spawns a real subprocess so a REAL readiness-
+    // driven on_poll fires off the frame-loop tick, not a synthetic direct
+    // export call).
+    b.run("head-poke");
+    b.run("head-spawn");
+    try t.expectEqualStrings("poked", b.mode());
+    try t.expectEqualStrings("default", ed.mode()); // A untouched by B's dispatches
+
+    // Drive the async loop for real until on_poll fires (readiness-driven —
+    // `notifyPollIfReady` calls it only once the spawned stream has bytes
+    // pending). Bounded, generous — a plain `echo hi` subprocess is fast.
+    var round: usize = 0;
+    while (round < 200 and !std.mem.eql(u8, "polled", ed.mode())) : (round += 1) {
+        ed.settle(1);
+    }
+
+    // on_poll (BACKGROUND, wasm_host/commands.zig's classification) landed
+    // on A — the load-time/system-default ctx — even though B was the last
+    // head to dispatch anything.
+    try t.expectEqualStrings("polled", ed.mode());
+    try t.expectEqualStrings("polled", ed.echoText());
+    // B, meanwhile, is untouched by the background entry — still exactly
+    // where its own last dispatch (head-poke) left it.
+    try t.expectEqualStrings("poked", b.mode());
+    try t.expectEqualStrings("poked", b.echoText());
 }

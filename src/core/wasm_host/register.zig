@@ -20,7 +20,7 @@ pub fn hYankRange(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32, re
     _ = results;
     const p: *WasmPlugin = @ptrCast(@alignCast(data.?));
     const reg = p.register orelse return;
-    const ed = p.ctx.editor();
+    const ed = p.activeCtx().editor();
     const rope = ed.text();
     const len = rope.byteLen();
     const s = @min(@as(usize, @intCast(args[0])), len);
@@ -68,6 +68,6 @@ pub fn hPasteAt(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32, resu
     const p: *WasmPlugin = @ptrCast(@alignCast(data.?));
     const reg = p.register orelse return;
     const subs = p.subbuffers orelse return;
-    const ed = p.ctx.editor();
+    const ed = p.activeCtx().editor();
     reg.restamp(p.gpa, subs, &ed.doc, @intCast(args[0]));
 }

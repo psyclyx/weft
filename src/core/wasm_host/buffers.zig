@@ -8,7 +8,7 @@ const WasmPlugin = shared.WasmPlugin;
 
 /// The i-th open buffer, or null (O(i) walk — the introspection path).
 fn bufferAtIndex(p: *WasmPlugin, i: usize) ?*@import("../Buffers.zig").Buffer {
-    var it = p.ctx.buffers.iterator();
+    var it = p.activeCtx().buffers.iterator();
     var j: usize = 0;
     while (it.next()) |b| : (j += 1) if (j == i) return b;
     return null;
@@ -18,7 +18,7 @@ pub fn hBufferCount(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32, 
     _ = caller;
     _ = args;
     const p: *WasmPlugin = @ptrCast(@alignCast(data.?));
-    results[0] = @intCast(p.ctx.buffers.count());
+    results[0] = @intCast(p.activeCtx().buffers.count());
 }
 
 pub fn hBufferId(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32, results: []i32) void {
@@ -44,7 +44,7 @@ pub fn hBufferActive(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32,
     _ = caller;
     const p: *WasmPlugin = @ptrCast(@alignCast(data.?));
     const b = bufferAtIndex(p, @intCast(args[0]));
-    results[0] = if (b != null and b == p.ctx.buffers.active()) 1 else 0;
+    results[0] = if (b != null and b == p.activeCtx().buffers.active()) 1 else 0;
 }
 
 pub fn hBufferReadonly(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32, results: []i32) void {

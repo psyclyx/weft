@@ -16,14 +16,14 @@ pub fn hCursor(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32, resul
     _ = caller;
     _ = args;
     const p: *WasmPlugin = @ptrCast(@alignCast(data.?));
-    results[0] = @intCast(p.ctx.editor().cursorOffset());
+    results[0] = @intCast(p.activeCtx().editor().cursorOffset());
 }
 
 pub fn hByteLen(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32, results: []i32) void {
     _ = caller;
     _ = args;
     const p: *WasmPlugin = @ptrCast(@alignCast(data.?));
-    results[0] = @intCast(p.ctx.editor().text().byteLen());
+    results[0] = @intCast(p.activeCtx().editor().text().byteLen());
 }
 
 /// The active document's monotonic commit count — a cheap change token. A plugin
@@ -32,12 +32,12 @@ pub fn hDocRevision(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32, 
     _ = caller;
     _ = args;
     const p: *WasmPlugin = @ptrCast(@alignCast(data.?));
-    results[0] = @intCast(p.ctx.editor().doc.commitCount());
+    results[0] = @intCast(p.activeCtx().editor().doc.commitCount());
 }
 
 pub fn hSlice(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32, results: []i32) void {
     const p: *WasmPlugin = @ptrCast(@alignCast(data.?));
-    const rope = p.ctx.editor().text();
+    const rope = p.activeCtx().editor().text();
     const len = rope.byteLen();
     const s = @min(@as(usize, @intCast(args[0])), len);
     const e = @min(@as(usize, @intCast(args[1])), len);
@@ -62,7 +62,7 @@ pub fn hSlice(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32, result
 pub fn hLineAt(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32, results: []i32) void {
     _ = results;
     const p: *WasmPlugin = @ptrCast(@alignCast(data.?));
-    const rope = p.ctx.editor().text();
+    const rope = p.activeCtx().editor().text();
     const row = rope.offsetToPoint(@min(@as(usize, @intCast(args[0])), rope.byteLen())).row;
     const line = rope.lineRange(row);
     const pair = [2]u32{ @intCast(line.start), @intCast(line.end) };
@@ -71,7 +71,7 @@ pub fn hLineAt(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32, resul
 
 pub fn hSelection(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32, results: []i32) void {
     const p: *WasmPlugin = @ptrCast(@alignCast(data.?));
-    const sel = p.ctx.editor().selectedRange() orelse {
+    const sel = p.activeCtx().editor().selectedRange() orelse {
         results[0] = 0;
         return;
     };
@@ -82,7 +82,7 @@ pub fn hSelection(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32, re
 
 pub fn hPath(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32, results: []i32) void {
     const p: *WasmPlugin = @ptrCast(@alignCast(data.?));
-    const path = p.ctx.editor().backingPath() orelse {
+    const path = p.activeCtx().editor().backingPath() orelse {
         results[0] = -1;
         return;
     };
@@ -99,10 +99,10 @@ pub fn hEdit(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32, results
     const p: *WasmPlugin = @ptrCast(@alignCast(data.?));
     const bytes = caller.readMemory(p.gpa, @intCast(args[2]), @intCast(args[3])) catch return;
     defer p.gpa.free(bytes);
-    const saved = p.ctx.principal;
-    p.ctx.principal = p.principal();
-    defer p.ctx.principal = saved;
-    p.ctx.edit(.{ .start = @intCast(args[0]), .end = @intCast(args[1]) }, bytes) catch {};
+    const saved = p.activeCtx().principal;
+    p.activeCtx().principal = p.principal();
+    defer p.activeCtx().principal = saved;
+    p.activeCtx().edit(.{ .start = @intCast(args[0]), .end = @intCast(args[1]) }, bytes) catch {};
 }
 
 /// `edit_as(agent, start, end, bytes)` (perm edit): the gated `ctx.edit` door,
@@ -119,15 +119,15 @@ pub fn hEditAs(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32, resul
     defer p.gpa.free(agent);
     const bytes = caller.readMemory(p.gpa, @intCast(args[4]), @intCast(args[5])) catch return;
     defer p.gpa.free(bytes);
-    const saved_prin = p.ctx.principal;
+    const saved_prin = p.activeCtx().principal;
     const saved_override = p.author_override;
     p.author_override = if (agent.len > 0) agent else null;
-    p.ctx.principal = p.principal();
+    p.activeCtx().principal = p.principal();
     defer {
-        p.ctx.principal = saved_prin;
+        p.activeCtx().principal = saved_prin;
         p.author_override = saved_override;
     }
-    p.ctx.edit(.{ .start = @intCast(args[2]), .end = @intCast(args[3]) }, bytes) catch {};
+    p.activeCtx().edit(.{ .start = @intCast(args[2]), .end = @intCast(args[3]) }, bytes) catch {};
 }
 
 /// `render(start, end, bytes)` (perm edit): produce derived/streamed content
@@ -139,17 +139,17 @@ pub fn hRender(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32, resul
     const p: *WasmPlugin = @ptrCast(@alignCast(data.?));
     const bytes = caller.readMemory(p.gpa, @intCast(args[2]), @intCast(args[3])) catch return;
     defer p.gpa.free(bytes);
-    const saved = p.ctx.principal;
-    p.ctx.principal = p.principal();
-    defer p.ctx.principal = saved;
-    p.ctx.render(.{ .start = @intCast(args[0]), .end = @intCast(args[1]) }, bytes) catch {};
+    const saved = p.activeCtx().principal;
+    p.activeCtx().principal = p.principal();
+    defer p.activeCtx().principal = saved;
+    p.activeCtx().render(.{ .start = @intCast(args[0]), .end = @intCast(args[1]) }, bytes) catch {};
 }
 
 pub fn hJump(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32, results: []i32) void {
     _ = caller;
     _ = results;
     const p: *WasmPlugin = @ptrCast(@alignCast(data.?));
-    const ed = p.ctx.editor();
+    const ed = p.activeCtx().editor();
     ed.placeCursor(@min(@as(usize, @intCast(args[0])), ed.text().byteLen()));
 }
 
@@ -163,7 +163,7 @@ pub fn hEditorStep(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32, r
     const from: usize = @intCast(args[0]);
     const dir: Editor.StepDir = @enumFromInt(@as(u32, @intCast(args[1])));
     const kind: Editor.StepKind = @enumFromInt(@as(u32, @intCast(args[2])));
-    results[0] = @intCast(p.ctx.editor().stepOffset(from, dir, kind));
+    results[0] = @intCast(p.activeCtx().editor().stepOffset(from, dir, kind));
 }
 
 /// `editor.setSelection(start, end)`: select `[start, end)` (mark at start,
@@ -173,7 +173,7 @@ pub fn hSetSelection(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32,
     _ = caller;
     _ = results;
     const p: *WasmPlugin = @ptrCast(@alignCast(data.?));
-    const ed = p.ctx.editor();
+    const ed = p.activeCtx().editor();
     const len = ed.text().byteLen();
     ed.placeCursor(@min(@as(usize, @intCast(args[0])), len));
     ed.setMark(p.gpa) catch {};
@@ -186,7 +186,7 @@ pub fn hSetSelection(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32,
 pub fn hStampRange(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32, results: []i32) void {
     _ = caller;
     const p: *WasmPlugin = @ptrCast(@alignCast(data.?));
-    const v = p.ctx.document().version(p.gpa) catch {
+    const v = p.activeCtx().document().version(p.gpa) catch {
         results[0] = -1;
         return;
     };
@@ -220,7 +220,7 @@ pub fn hRunRange(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32, res
         return;
     };
     defer p.gpa.free(cmd);
-    const rv = command.run(p.ctx.commands, p.ctx, cmd, &.{}) catch {
+    const rv = command.run(p.activeCtx().commands, p.activeCtx(), cmd, &.{}) catch {
         results[0] = -1;
         return;
     };
@@ -228,11 +228,11 @@ pub fn hRunRange(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32, res
         results[0] = -1;
         return;
     }
-    const cur = rv.range.rebase(p.ctx.document()) orelse {
+    const cur = rv.range.rebase(p.activeCtx().document()) orelse {
         results[0] = -1;
         return;
     };
-    const v = p.ctx.document().version(p.gpa) catch {
+    const v = p.activeCtx().document().version(p.gpa) catch {
         results[0] = -1;
         return;
     };
@@ -253,7 +253,7 @@ pub fn hRangeEnds(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32, re
         results[0] = -1;
         return;
     }
-    const cur = p.stamps.items[h].range.rebase(p.ctx.document()) orelse {
+    const cur = p.stamps.items[h].range.rebase(p.activeCtx().document()) orelse {
         results[0] = -1;
         return;
     };
@@ -275,7 +275,7 @@ pub fn hRunRangeArg(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32, 
     const h: usize = @intCast(args[2]);
     if (h >= p.stamps.items.len) return;
     const rv = command.Value{ .range = p.stamps.items[h].range };
-    _ = command.run(p.ctx.commands, p.ctx, cmd, &.{rv}) catch {};
+    _ = command.run(p.activeCtx().commands, p.activeCtx(), cmd, &.{rv}) catch {};
 }
 
 /// An operator reads its `range` arg: rebase to head, re-stamp into this
@@ -288,11 +288,11 @@ pub fn hArgRange(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32, res
         results[0] = -1;
         return;
     }
-    const cur = p.cur_args[i].range.rebase(p.ctx.document()) orelse {
+    const cur = p.cur_args[i].range.rebase(p.activeCtx().document()) orelse {
         results[0] = -1;
         return;
     };
-    const v = p.ctx.document().version(p.gpa) catch {
+    const v = p.activeCtx().document().version(p.gpa) catch {
         results[0] = -1;
         return;
     };
@@ -313,11 +313,11 @@ pub fn hEditRange(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32, re
     const p: *WasmPlugin = @ptrCast(@alignCast(data.?));
     const h: usize = @intCast(args[0]);
     if (h >= p.stamps.items.len) return;
-    const cur = p.stamps.items[h].range.rebase(p.ctx.document()) orelse return;
+    const cur = p.stamps.items[h].range.rebase(p.activeCtx().document()) orelse return;
     const bytes = caller.readMemory(p.gpa, @intCast(args[1]), @intCast(args[2])) catch return;
     defer p.gpa.free(bytes);
-    const saved = p.ctx.principal;
-    p.ctx.principal = p.principal();
-    defer p.ctx.principal = saved;
-    p.ctx.edit(.{ .start = cur.start, .end = cur.end }, bytes) catch {};
+    const saved = p.activeCtx().principal;
+    p.activeCtx().principal = p.principal();
+    defer p.activeCtx().principal = saved;
+    p.activeCtx().edit(.{ .start = cur.start, .end = cur.end }, bytes) catch {};
 }

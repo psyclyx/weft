@@ -57,7 +57,6 @@ pub const Editor = struct {
     // The real editor state + provider registries, exactly as main() builds them.
     session: app_session.Session = undefined,
     prov: app_providers.Providers = undefined,
-    which_key_now: bool = false,
 
     // Pointer aliases into `session`, set once it inits — so the driving methods
     // and the tests read `ed.keymap` / `self.buffers` unchanged (auto-deref).
@@ -113,7 +112,6 @@ pub const Editor = struct {
         self.subs = .empty;
         self.register = .empty;
         self.view = null;
-        self.which_key_now = false;
         self.pool = try core.task.Pool.init(gpa, .{ .threads = 2 });
         self.engine = try core.wasm.Engine.init();
         self.loop = core.async_loop.Loop.init(gpa, self.pool, core.task.nowNs);
@@ -123,7 +121,7 @@ pub const Editor = struct {
         // Session (builtins + capability/caret commands), then Providers' attach
         // phase (borrows the session caps).
         try self.prov.initRegistries(gpa);
-        try self.session.init(gpa, self.pool, user, &self.prov.grammars, &self.which_key_now);
+        try self.session.init(gpa, self.pool, user, &self.prov.grammars);
         self.prov.initAttach(gpa, &self.session.caps, parentEnviron());
 
         // Alias the moved state (session is a field of *self, so these are stable).
@@ -681,6 +679,10 @@ const guest = struct {
     const fmt = @embedFile("guest_fmt_wasm");
     const emacs = @embedFile("guest_emacs_wasm");
     const helix = @embedFile("guest_helix_wasm");
+    /// Test fixture only (not installed) — see `src/guest/headtest.zig`'s
+    /// module doc: the minimal guest the two-head gate's guest-ABI tests
+    /// (`two_head_test.zig`) drive.
+    const headtest = @embedFile("guest_headtest_wasm");
 };
 
 /// The base editing set under an EMACS keymap (modeless: printable keys self-
@@ -714,6 +716,15 @@ pub fn loadVim(ed: *Editor) !void {
     try ed.load("autopair", guest.autopair);
     try ed.load("vim", guest.vim);
     try setResting(ed); // vim init set "normal"; make it the fresh-buffer mode
+}
+
+/// The minimal guest-ABI head-addressing test fixture (task #14) — see
+/// `src/guest/headtest.zig`'s module doc for its three commands + `on_poll`.
+/// Loaded against `ed`'s (head A's) ctx, exactly like every other `load*`
+/// helper here — the two-head gate then drives its commands "as" a SECOND
+/// head to prove the guest ABI itself is head-addressed.
+pub fn loadHeadtest(ed: *Editor) !void {
+    try ed.load("headtest", guest.headtest);
 }
 
 /// Mirror main.zig: after the editor guest has set the base editing mode, capture

@@ -61,6 +61,23 @@ const Bridge = struct {
     engine: *wasm.Engine,
     /// Set only in CONFIG-EVAL mode — see the mode doc above.
     manifest: ?*manifest_mod.Manifest = null,
+    /// HEAD ADDRESSING (mirrors `WasmPlugin.active_ctx`, wasm_host/commands.zig's
+    /// classification doc): the dispatching head's ctx for the duration of a
+    /// LIVE `JsPlugin` guest call (`weft_on_command`/`weft_on_pick`), set/
+    /// restored by `JsPlugin.onCommand`/`jsPickAccept`. Null in every other
+    /// case — CONFIG-EVAL mode (`evalToManifest`/`evalConfig`, always staging
+    /// into `manifest`, never touching `ctx.head`) never sets it, and a
+    /// resident plugin's BACKGROUND entry (`tick`'s `weft_on_output`) leaves it
+    /// alone too, so both correctly fall back to `ctx` via `activeCtx()`.
+    active_ctx: ?*command.Context = null,
+
+    /// Optional-with-fallback where WasmPlugin's twin is non-optional
+    /// (init'd to the load ctx): the null here MEANS something — config-eval
+    /// mode never sets it, so `orelse ctx` doubles as the "not a live
+    /// dispatch" marker. Same concept, two representations, both deliberate.
+    fn activeCtx(self: *Bridge) *command.Context {
+        return self.active_ctx orelse self.ctx;
+    }
 };
 
 const kv = @import("kv.zig");
@@ -324,8 +341,18 @@ pub const JsPlugin = struct {
         return self;
     }
 
-    /// Dispatch command `id` into the JS handler registered for it.
-    pub fn onCommand(self: *JsPlugin, id: i32) void {
+    /// Dispatch command `id` into the JS handler registered for it. DISPATCHING
+    /// (mirrors `wasm_host/commands.zig`'s `wpCmdTrampoline`): `ctx` is the
+    /// head `command.run` was actually invoked with — route `bridge.active_ctx`
+    /// through it for the call's duration (save/restore, not a bare set — kept
+    /// nesting-safe on the same discipline as the wasm plane even though
+    /// `weft.run` from a resident JS plugin is a no-op today, per `cRun`'s
+    /// LIVE-mode doc; a JS command handler CAN still open a pick, whose accept
+    /// re-enters through `jsPickAccept`, so a bare set would be wrong).
+    pub fn onCommand(self: *JsPlugin, ctx: *command.Context, id: i32) void {
+        const saved_ctx = self.bridge.active_ctx;
+        self.bridge.active_ctx = ctx;
+        defer self.bridge.active_ctx = saved_ctx;
         self.instance.callVoid("weft_on_command", &.{id}) catch {};
     }
 
@@ -495,7 +522,7 @@ fn cBufferFold(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32, resul
     const gpa = self.gpa;
     const name = caller.readMemory(gpa, @intCast(args[0]), @intCast(args[1])) catch return;
     defer gpa.free(name);
-    foldNamed(self.ctx, gpa, name, @intCast(@as(u32, @bitCast(args[2]))), @intCast(@as(u32, @bitCast(args[3]))));
+    foldNamed(self.bridge.activeCtx(), gpa, name, @intCast(@as(u32, @bitCast(args[2]))), @intCast(@as(u32, @bitCast(args[3]))));
 }
 
 /// weft.bufferLen(name) → a named buffer's byte length (for fold offsets).
@@ -506,7 +533,7 @@ fn cBufferLen(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32, result
         return;
     };
     defer self.gpa.free(name);
-    const b = namedBuffer(self.ctx, self.gpa, name) orelse {
+    const b = namedBuffer(self.bridge.activeCtx(), self.gpa, name) orelse {
         results[0] = 0;
         return;
     };
@@ -521,7 +548,7 @@ fn cBufferAppend(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32, res
     defer gpa.free(name);
     const text = caller.readMemory(gpa, @intCast(args[2]), @intCast(args[3])) catch return;
     defer gpa.free(text);
-    appendNamed(self.ctx, gpa, name, text, @truncate(@as(u32, @bitCast(args[4]))));
+    appendNamed(self.bridge.activeCtx(), gpa, name, text, @truncate(@as(u32, @bitCast(args[4]))));
 }
 
 /// weft.config(key) -> string: this plugin's config value for `key` (what the
@@ -577,8 +604,8 @@ fn cFileRead(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32, results
     };
     defer gpa.free(path);
     var content: ?[]u8 = null;
-    if (self.ctx.buffers.findByPath(path)) |id| {
-        if (self.ctx.buffers.get(id)) |b| content = b.editor.text().toOwnedSlice(gpa) catch null;
+    if (self.bridge.activeCtx().buffers.findByPath(path)) |id| {
+        if (self.bridge.activeCtx().buffers.get(id)) |b| content = b.editor.text().toOwnedSlice(gpa) catch null;
     }
     if (content == null) content = @import("file.zig").readAlloc(gpa, path) catch null;
     const bytes = content orelse {
@@ -611,17 +638,27 @@ fn cPick(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32, results: []
     const bp = gpa.create(JsBoundPick) catch return;
     bp.* = .{ .plugin = self };
     // pick.open copies the entry text/doc, so `opts` may free after this.
-    self.ctx.head.pick.open(self.ctx, prompt, entries.items, .{
+    const ctx = self.bridge.activeCtx();
+    ctx.head.pick.open(ctx, prompt, entries.items, .{
         .handler = jsPickAccept,
         .cleanup = jsPickCleanup,
         .data = bp,
     }) catch gpa.destroy(bp);
 }
 
+/// DISPATCHING (mirrors `wasm_host/pick.zig`'s `wpPickAccept`): `ctx` is the
+/// head whose pick session just accepted. `ctx.head.pick.accepted_index`
+/// itself already reads through it correctly (it's the parameter, not
+/// `self.ctx`); route `bridge.active_ctx` through it too for the
+/// `weft_on_pick` call, so anything the JS handler does in response (echo,
+/// bind, another pick) sees the SAME head, not the plugin's load-time one.
 fn jsPickAccept(ctx: *command.Context, data: ?*anyopaque, choice: []const u8) anyerror!void {
     _ = choice;
     const bp: *JsBoundPick = @ptrCast(@alignCast(data.?));
     const idx: i32 = if (ctx.head.pick.accepted_index) |i| @intCast(i) else -1;
+    const saved_ctx = bp.plugin.bridge.active_ctx;
+    bp.plugin.bridge.active_ctx = ctx;
+    defer bp.plugin.bridge.active_ctx = saved_ctx;
     bp.plugin.instance.callVoid("weft_on_pick", &.{idx}) catch {};
 }
 
@@ -643,7 +680,7 @@ fn cStatus(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32, results: 
 /// prompt line. Written into the guest's receive buffer.
 fn cLineText(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32, results: []i32) void {
     const self: *JsPlugin = @ptrCast(@alignCast(data.?));
-    const ed = self.ctx.editor();
+    const ed = self.bridge.activeCtx().editor();
     const rope = ed.text();
     const row = rope.offsetToPoint(@min(ed.cursorOffset(), rope.byteLen())).row;
     const line = rope.lineRange(row);
@@ -681,7 +718,7 @@ fn cAgentWrite(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32, resul
     const agent = caller.readMemory(gpa, @intCast(args[4]), @intCast(args[5])) catch return;
     defer gpa.free(agent);
     const peer = if (agent.len > 0) agent else agent_peer;
-    const bufs = self.ctx.buffers;
+    const bufs = self.bridge.activeCtx().buffers;
     const id = bufs.findByPath(path) orelse blk: {
         const new_id = bufs.create(gpa, std.fs.path.basename(path)) catch return;
         const nb = bufs.get(new_id) orelse return;
@@ -718,12 +755,14 @@ fn framedUvarint(cur: *[]const u8) ?u64 {
 }
 
 /// The command handler a `weft.command` registers under: dispatch back into the
-/// owning JS plugin by id.
+/// owning JS plugin by id. `ctx` is the dispatching head's — forwarded to
+/// `onCommand` (THE FIX: previously discarded, so a guest-JS-backed command
+/// always ran against the plugin's load-time ctx regardless of which head
+/// dispatched it).
 fn jsCmdTramp(ctx: *command.Context, data: ?*anyopaque, args: []const command.Value) anyerror!command.Value {
-    _ = ctx;
     _ = args;
     const c: *JsPlugin.Cmd = @ptrCast(@alignCast(data.?));
-    c.plugin.onCommand(c.id);
+    c.plugin.onCommand(ctx, c.id);
     return .nil;
 }
 
@@ -751,7 +790,7 @@ fn cRegister(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32, results
         results[0] = -1;
         return;
     };
-    _ = self.ctx.commands.bind(gpa, name, .{
+    _ = self.bridge.activeCtx().commands.bind(gpa, name, .{
         .name = c.name,
         .summary = "js",
         .args = &.{},
@@ -769,13 +808,13 @@ fn cRegister(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32, results
 // (a bad bind is dropped) — the JS side already validated arity/types. ──
 
 fn readStr(br: *Bridge, caller: *wasm.Caller, ptr: i32, len: i32) ?[]u8 {
-    return caller.readMemory(br.ctx.gpa, @intCast(ptr), @intCast(len)) catch null;
+    return caller.readMemory(br.activeCtx().gpa, @intCast(ptr), @intCast(len)) catch null;
 }
 
 fn cBindKey(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32, results: []i32) void {
     _ = results;
     const br: *Bridge = @ptrCast(@alignCast(data.?));
-    const gpa = br.ctx.gpa;
+    const gpa = br.activeCtx().gpa;
     const mode = readStr(br, caller, args[0], args[1]) orelse return;
     defer gpa.free(mode);
     const key = readStr(br, caller, args[2], args[3]) orelse return;
@@ -788,7 +827,7 @@ fn cBindKey(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32, results:
     }
     // LIVE mode (a resident JS plugin): user config shadows plugins and core
     // defaults (highest tier) — unchanged from before manifest.zig existed.
-    br.ctx.keymap.bind(gpa, mode, key, cmd, @import("Keymap.zig").prio_config, "config") catch {};
+    br.activeCtx().keymap.bind(gpa, mode, key, cmd, @import("Keymap.zig").prio_config, "config") catch {};
 }
 
 /// `weft.use(name)` backing: evaluate `<config_dir>/<name>.js` into ITS OWN
@@ -804,7 +843,7 @@ fn cBindKey(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32, results:
 fn cUse(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32, results: []i32) void {
     _ = results;
     const br: *Bridge = @ptrCast(@alignCast(data.?));
-    const gpa = br.ctx.gpa;
+    const gpa = br.activeCtx().gpa;
     const m = br.manifest orelse return;
     const dir = br.config_dir orelse return;
     const name = readStr(br, caller, args[0], args[1]) orelse return;
@@ -819,8 +858,8 @@ fn cUse(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32, results: []i
         const msg = std.fmt.allocPrint(gpa, "config: weft.use(\"{s}\") nested inside an imported config — flattens to the same 'imported' tier, not a deeper one", .{name}) catch "";
         defer if (msg.len > 0) gpa.free(msg);
         std.log.warn("{s}", .{msg});
-        br.ctx.head.echo.clearRetainingCapacity();
-        br.ctx.head.echo.appendSlice(gpa, msg) catch {};
+        br.activeCtx().head.echo.clearRetainingCapacity();
+        br.activeCtx().head.echo.appendSlice(gpa, msg) catch {};
     }
     const path = std.fmt.allocPrint(gpa, "{s}/{s}.js", .{ dir, name }) catch return;
     defer gpa.free(path);
@@ -831,7 +870,7 @@ fn cUse(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32, results: []i
     defer gpa.free(src);
     const owner = std.fmt.allocPrint(gpa, "import:{s}", .{name}) catch return;
     defer gpa.free(owner);
-    const sub = evalToManifest(br.engine, br.ctx, br.loader, br.config, dir, src, .imported, owner) catch |e| {
+    const sub = evalToManifest(br.engine, br.activeCtx(), br.loader, br.config, dir, src, .imported, owner) catch |e| {
         std.log.warn("config: weft.use(\"{s}\") failed: {t}", .{ name, e });
         return;
     };
@@ -841,7 +880,7 @@ fn cUse(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32, results: []i
 fn cRun(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32, results: []i32) void {
     _ = results;
     const br: *Bridge = @ptrCast(@alignCast(data.?));
-    const gpa = br.ctx.gpa;
+    const gpa = br.activeCtx().gpa;
     const cmd = readStr(br, caller, args[0], args[1]) orelse return;
     defer gpa.free(cmd);
     if (br.manifest) |m| {
@@ -858,7 +897,7 @@ fn cRun(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32, results: []i
 fn cSet(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32, results: []i32) void {
     _ = results;
     const br: *Bridge = @ptrCast(@alignCast(data.?));
-    const gpa = br.ctx.gpa;
+    const gpa = br.activeCtx().gpa;
     const owner = readStr(br, caller, args[0], args[1]) orelse return;
     defer gpa.free(owner);
     const key = readStr(br, caller, args[2], args[3]) orelse return;
@@ -880,14 +919,14 @@ fn cSet(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32, results: []i
 fn cMenu(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32, results: []i32) void {
     _ = results;
     const br: *Bridge = @ptrCast(@alignCast(data.?));
-    const gpa = br.ctx.gpa;
+    const gpa = br.activeCtx().gpa;
     const name = readStr(br, caller, args[0], args[1]) orelse return;
     defer gpa.free(name);
     if (br.manifest) |m| {
         m.addMenu(name) catch {};
         return;
     }
-    const km = br.ctx.keymap;
+    const km = br.activeCtx().keymap;
     const Keymap = @import("Keymap.zig");
     km.markMenuMode(gpa, name) catch {};
     km.setTextCommand(gpa, name, null) catch {}; // swallow text — a menu, not typing
@@ -902,14 +941,14 @@ fn cMenu(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32, results: []
 fn cAction(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32, results: []i32) void {
     _ = results;
     const br: *Bridge = @ptrCast(@alignCast(data.?));
-    const gpa = br.ctx.gpa;
+    const gpa = br.activeCtx().gpa;
     const name = readStr(br, caller, args[0], args[1]) orelse return;
     defer gpa.free(name);
     if (br.manifest) |m| {
         m.addAction(name) catch {};
         return;
     }
-    command.registerAction(gpa, br.ctx.commands, br.ctx.actions, name, .pick) catch {};
+    command.registerAction(gpa, br.activeCtx().commands, br.activeCtx().actions, name, .pick) catch {};
 }
 
 /// weft.provide(action, mode, lang, cmd, prio) — register a provider. Empty
@@ -920,7 +959,7 @@ fn cAction(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32, results: 
 fn cProvide(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32, results: []i32) void {
     _ = results;
     const br: *Bridge = @ptrCast(@alignCast(data.?));
-    const gpa = br.ctx.gpa;
+    const gpa = br.activeCtx().gpa;
     const action = readStr(br, caller, args[0], args[1]) orelse return;
     defer gpa.free(action);
     const mode = readStr(br, caller, args[2], args[3]) orelse return;
@@ -934,7 +973,7 @@ fn cProvide(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32, results:
         m.addProvide(action, mode, lang, cmd, priority) catch {};
         return;
     }
-    br.ctx.actions.provide(.{
+    br.activeCtx().actions.provide(.{
         .action = action,
         .when = .{
             .mode = if (mode.len > 0) mode else null,
@@ -943,7 +982,7 @@ fn cProvide(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32, results:
         .command = cmd,
         .priority = priority,
         .owner = "config",
-    }) catch |e| if (e == error.RaceRejectsProvider) echoProvideRefused(br.ctx, action);
+    }) catch |e| if (e == error.RaceRejectsProvider) echoProvideRefused(br.activeCtx(), action);
 }
 
 /// Surface a rejected `provide` to the plugin author through the echo line —
@@ -964,20 +1003,24 @@ fn cEcho(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32, results: []
     _ = results;
     const br: *Bridge = @ptrCast(@alignCast(data.?));
     const msg = readStr(br, caller, args[0], args[1]) orelse return;
-    defer br.ctx.gpa.free(msg);
+    // alloc + free both via activeCtx().gpa: safe because gpa is the one
+    // process allocator and active_ctx cannot change inside a synchronous
+    // host import — stated because the free would be wrong if either stopped
+    // holding.
+    defer br.activeCtx().gpa.free(msg);
     if (br.manifest) |m| {
         m.addEcho(msg) catch {};
         return;
     }
-    br.ctx.head.echo.clearRetainingCapacity();
-    br.ctx.head.echo.appendSlice(br.ctx.gpa, msg) catch {};
+    br.activeCtx().head.echo.clearRetainingCapacity();
+    br.activeCtx().head.echo.appendSlice(br.activeCtx().gpa, msg) catch {};
 }
 
 fn cLog(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32, results: []i32) void {
     _ = results;
     const br: *Bridge = @ptrCast(@alignCast(data.?));
     const msg = readStr(br, caller, args[0], args[1]) orelse return;
-    defer br.ctx.gpa.free(msg);
+    defer br.activeCtx().gpa.free(msg);
     if (br.manifest) |m| {
         m.addLog(msg) catch {};
         return;
@@ -990,12 +1033,12 @@ fn cPlugin(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32, results: 
     const br: *Bridge = @ptrCast(@alignCast(data.?));
     const name = readStr(br, caller, args[0], args[1]) orelse return;
     if (br.manifest) |m| {
-        defer br.ctx.gpa.free(name);
+        defer br.activeCtx().gpa.free(name);
         m.addPlugin(name) catch {};
         return;
     }
     if (br.loader == null) {
-        br.ctx.gpa.free(name);
+        br.activeCtx().gpa.free(name);
         return; // no loader wired → weft.plugin is a no-op (LIVE mode)
     }
     // LIVE mode with a loader wired never actually happens today (a resident
@@ -1003,7 +1046,7 @@ fn cPlugin(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32, results: 
     // but preserved for shape: load immediately (no deferred-replay list to
     // stage into anymore — see manifest.zig's `apply` for why config-eval
     // mode no longer needs one).
-    defer br.ctx.gpa.free(name);
+    defer br.activeCtx().gpa.free(name);
     br.loader.?.load(br.loader.?.ctx, name);
 }
 

@@ -21,6 +21,15 @@ const requirePerm = shared.requirePerm;
 /// plugin pointer — it re-resolves the doc + peer by name at delivery, so it
 /// survives the plugin being unloaded mid-flight (mirrors abi.zig's
 /// DeferredEdit). Freed in every terminal case by the sink's deinit.
+///
+/// `ctx` is the DISPATCHING Context captured at request time (activeCtx() —
+/// task #14), not the plugin's load-time one: if a job ever grows a `.head`
+/// read (echo the result to the requesting head), dispatch-time capture is
+/// the right target. The flip side is a real invariant: the captured Context
+/// must OUTLIVE the job. Today that's free (every head's ctx is
+/// session-lifetime and jobs only read the head-independent gpa/document/
+/// buffers fields) — it stops being free the moment a shorter-lived per-head
+/// Context exists. Same applies to ProcJob and FilterJob below.
 const ShellJob = struct {
     ctx: *command.Context,
     name: []u8,
@@ -139,13 +148,13 @@ pub fn hShellInsert(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32, 
     const gpa = p.gpa;
     const cmd = caller.readMemory(gpa, @intCast(args[0]), @intCast(args[1])) catch return;
     errdefer gpa.free(cmd);
-    const doc = p.ctx.document();
+    const doc = p.activeCtx().document();
     const job = gpa.create(ShellJob) catch {
         gpa.free(cmd);
         return;
     };
     job.* = .{
-        .ctx = p.ctx,
+        .ctx = p.activeCtx(),
         .name = gpa.dupe(u8, p.name) catch {
             gpa.destroy(job);
             gpa.free(cmd);
@@ -157,7 +166,7 @@ pub fn hShellInsert(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32, 
             gpa.free(cmd);
             return;
         },
-        .offset = p.ctx.editor().cursorOffset(),
+        .offset = p.activeCtx().editor().cursorOffset(),
         .cmd = cmd,
     };
     _ = loop.spawn(shellWork, job, .{ .ctx = job, .call = shellDeliver, .deinit = shellFree }) catch {
@@ -228,7 +237,7 @@ pub fn hProcToBuffer(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32,
     errdefer gpa.free(name);
     const job = gpa.create(ProcJob) catch return;
     job.* = .{
-        .ctx = p.ctx,
+        .ctx = p.activeCtx(),
         .styler = p,
         .plugin = gpa.dupe(u8, p.name) catch {
             gpa.destroy(job);
@@ -257,7 +266,7 @@ pub fn hProcAppendBuffer(data: ?*anyopaque, caller: *wasm.Caller, args: []const 
     errdefer gpa.free(name);
     const job = gpa.create(ProcJob) catch return;
     job.* = .{
-        .ctx = p.ctx,
+        .ctx = p.activeCtx(),
         .styler = p,
         .plugin = gpa.dupe(u8, p.name) catch {
             gpa.destroy(job);
@@ -363,7 +372,7 @@ pub fn hProcFilter(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32, r
     const gpa = p.gpa;
     const cmd = caller.readMemory(gpa, @intCast(args[0]), @intCast(args[1])) catch return;
     errdefer gpa.free(cmd);
-    const rope = p.ctx.editor().text();
+    const rope = p.activeCtx().editor().text();
     const len = rope.byteLen();
     const s = @min(@as(usize, @intCast(args[2])), len);
     const e = @min(@as(usize, @intCast(args[3])), len);
@@ -374,14 +383,14 @@ pub fn hProcFilter(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32, r
         var sr = rope.streamReader(.{ .start = s, .end = e }, &.{});
         sr.interface.readSliceAll(content) catch return;
     }
-    const version = p.ctx.document().version(gpa) catch return;
+    const version = p.activeCtx().document().version(gpa) catch return;
     errdefer gpa.free(version);
     filter_counter += 1;
     const tmp = std.fmt.allocPrint(gpa, "/tmp/weft-filter-{d}-{d}", .{ filter_counter, s }) catch return;
     errdefer gpa.free(tmp);
     const job = gpa.create(FilterJob) catch return;
     job.* = .{
-        .ctx = p.ctx,
+        .ctx = p.activeCtx(),
         .plugin = gpa.dupe(u8, p.name) catch {
             gpa.destroy(job);
             return;

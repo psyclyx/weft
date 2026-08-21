@@ -21,7 +21,7 @@ pub fn hBindKey(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32, resu
     // A plugin binds at the plugin tier, owned by its name (so a config bind
     // shadows it and equal-tier collisions between two plugins are surfaced).
     const Keymap = @import("../Keymap.zig");
-    p.ctx.keymap.bind(gpa, mode, key, cmd, Keymap.prio_plugin, p.name) catch {};
+    p.activeCtx().keymap.bind(gpa, mode, key, cmd, Keymap.prio_plugin, p.name) catch {};
 }
 
 /// wl_declare_action(name) — a plugin declares an abstract intent + its
@@ -33,7 +33,7 @@ pub fn hDeclareAction(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32
     const name = caller.readMemory(gpa, @intCast(args[0]), @intCast(args[1])) catch return;
     defer gpa.free(name);
     const command = @import("../command.zig");
-    command.registerAction(gpa, p.ctx.commands, p.ctx.actions, name, .pick) catch {};
+    command.registerAction(gpa, p.activeCtx().commands, p.activeCtx().actions, name, .pick) catch {};
 }
 
 /// wl_provide(action, mode, lang, tool, cmd, prio) — a plugin registers a
@@ -53,7 +53,7 @@ pub fn hProvide(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32, resu
     defer gpa.free(tool);
     const cmd = caller.readMemory(gpa, @intCast(args[8]), @intCast(args[9])) catch return;
     defer gpa.free(cmd);
-    p.ctx.actions.provide(.{
+    p.activeCtx().actions.provide(.{
         .action = action,
         .when = .{
             .mode = if (mode.len > 0) mode else null,
@@ -68,8 +68,8 @@ pub fn hProvide(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32, resu
         // user-facing channel), not a global stderr warn — see action.zig.
         const msg = std.fmt.allocPrint(gpa, "provide: '{s}' is a race action — register a capability provider instead", .{action}) catch return;
         defer gpa.free(msg);
-        p.ctx.head.echo.clearRetainingCapacity();
-        p.ctx.head.echo.appendSlice(gpa, msg) catch {};
+        p.activeCtx().head.echo.clearRetainingCapacity();
+        p.activeCtx().head.echo.appendSlice(gpa, msg) catch {};
     };
 }
 
@@ -80,16 +80,16 @@ pub fn hSetMode(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32, resu
     defer p.gpa.free(mode);
     // A locked projection mode (magit/git-view) refuses to switch to a different
     // editing mode — you can't land in `normal` inside a read-only projection.
-    if (!p.ctx.keymap.mayLeaveLocked(p.ctx.head.currentMode(), mode)) return;
+    if (!p.activeCtx().keymap.mayLeaveLocked(p.activeCtx().head.currentMode(), mode)) return;
     // Guest-initiated: route through enterMode so entering a menu mode records
     // its one-shot return target. Host-side mode save/restore (the picker) uses
     // plain setMode and never records.
-    p.ctx.head.enterMode(p.gpa, p.ctx.keymap, mode) catch {};
+    p.activeCtx().head.enterMode(p.gpa, p.activeCtx().keymap, mode) catch {};
     // Remember a RESTING mode as the active buffer's resting mode, so exiting a
     // transient sub-mode (insert/visual) returns HERE — this is what keeps a
     // tool projection (dired) live after an in-place edit + Escape.
-    if (p.ctx.keymap.isRestingMode(mode)) {
-        const buf = p.ctx.buffers.active();
+    if (p.activeCtx().keymap.isRestingMode(mode)) {
+        const buf = p.activeCtx().buffers.active();
         const held = p.gpa.dupe(u8, mode) catch return;
         p.gpa.free(buf.mode);
         buf.mode = held;
@@ -105,16 +105,16 @@ pub fn hExitToResting(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32
     _ = args;
     _ = results;
     const p: *WasmPlugin = @ptrCast(@alignCast(data.?));
-    const buf = p.ctx.buffers.active();
+    const buf = p.activeCtx().buffers.active();
     // The buffer's declared resting mode (its tool mode, or the config base it
     // was stamped with on open) — no core-baked mode name; the config owns what
     // "resting" means. `default_mode` is the last resort if a buffer never
     // declared one.
-    const target = if (buf.mode.len > 0) buf.mode else p.ctx.buffers.default_mode;
+    const target = if (buf.mode.len > 0) buf.mode else p.activeCtx().buffers.default_mode;
     if (target.len == 0) return;
     const owned = p.gpa.dupe(u8, target) catch return;
     defer p.gpa.free(owned);
-    p.ctx.head.setMode(p.gpa, owned) catch {};
+    p.activeCtx().head.setMode(p.gpa, owned) catch {};
 }
 
 pub fn hSetFallback(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32, results: []i32) void {
@@ -125,7 +125,7 @@ pub fn hSetFallback(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32, 
     defer gpa.free(mode);
     const parent = caller.readMemory(gpa, @intCast(args[2]), @intCast(args[3])) catch return;
     defer gpa.free(parent);
-    p.ctx.keymap.setFallback(gpa, mode, parent) catch {};
+    p.activeCtx().keymap.setFallback(gpa, mode, parent) catch {};
 }
 
 pub fn hTextInput(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32, results: []i32) void {
@@ -135,12 +135,12 @@ pub fn hTextInput(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32, re
     const mode = caller.readMemory(gpa, @intCast(args[0]), @intCast(args[1])) catch return;
     defer gpa.free(mode);
     if (args[4] == 0) {
-        p.ctx.keymap.setTextCommand(gpa, mode, null) catch {};
+        p.activeCtx().keymap.setTextCommand(gpa, mode, null) catch {};
         return;
     }
     const cmd = caller.readMemory(gpa, @intCast(args[2]), @intCast(args[3])) catch return;
     defer gpa.free(cmd);
-    p.ctx.keymap.setTextCommand(gpa, mode, cmd) catch {};
+    p.activeCtx().keymap.setTextCommand(gpa, mode, cmd) catch {};
 }
 
 pub fn hMenuMode(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32, results: []i32) void {
@@ -148,7 +148,7 @@ pub fn hMenuMode(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32, res
     const p: *WasmPlugin = @ptrCast(@alignCast(data.?));
     const mode = caller.readMemory(p.gpa, @intCast(args[0]), @intCast(args[1])) catch return;
     defer p.gpa.free(mode);
-    p.ctx.keymap.markMenuMode(p.gpa, mode) catch {};
+    p.activeCtx().keymap.markMenuMode(p.gpa, mode) catch {};
 }
 
 /// `locked_mode(mode)`: mark a read-only projection mode pinned (see
@@ -159,7 +159,7 @@ pub fn hLockedMode(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32, r
     const p: *WasmPlugin = @ptrCast(@alignCast(data.?));
     const mode = caller.readMemory(p.gpa, @intCast(args[0]), @intCast(args[1])) catch return;
     defer p.gpa.free(mode);
-    p.ctx.keymap.markLockedMode(p.gpa, mode) catch {};
+    p.activeCtx().keymap.markLockedMode(p.gpa, mode) catch {};
 }
 
 /// `resting_mode(mode)`: declare a mode a buffer can rest in, so `baseMode` stops
@@ -169,7 +169,7 @@ pub fn hRestingMode(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32, 
     const p: *WasmPlugin = @ptrCast(@alignCast(data.?));
     const mode = caller.readMemory(p.gpa, @intCast(args[0]), @intCast(args[1])) catch return;
     defer p.gpa.free(mode);
-    p.ctx.keymap.markRestingMode(p.gpa, mode) catch {};
+    p.activeCtx().keymap.markRestingMode(p.gpa, mode) catch {};
 }
 
 /// `sticky_menu(mode)`: mark a menu mode STICKY — it stays open after a leaf
@@ -179,5 +179,5 @@ pub fn hStickyMenu(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32, r
     const p: *WasmPlugin = @ptrCast(@alignCast(data.?));
     const mode = caller.readMemory(p.gpa, @intCast(args[0]), @intCast(args[1])) catch return;
     defer p.gpa.free(mode);
-    p.ctx.keymap.markStickyMenu(p.gpa, mode) catch {};
+    p.activeCtx().keymap.markStickyMenu(p.gpa, mode) catch {};
 }

@@ -14,7 +14,7 @@ pub fn hNodeAt(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32, resul
         results[0] = -1;
         return;
     };
-    const syn = resolve(p.ctx.buffer()) orelse {
+    const syn = resolve(p.activeCtx().buffer()) orelse {
         results[0] = -1;
         return;
     };
@@ -36,7 +36,7 @@ pub fn hNodeEnclosing(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32
         results[0] = -1;
         return;
     };
-    const syn = resolve(p.ctx.buffer()) orelse {
+    const syn = resolve(p.activeCtx().buffer()) orelse {
         results[0] = -1;
         return;
     };
@@ -71,7 +71,7 @@ pub fn hQuery(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32, result
         results[0] = -1;
         return;
     };
-    const syn = resolve(p.ctx.buffer()) orelse {
+    const syn = resolve(p.activeCtx().buffer()) orelse {
         results[0] = -1;
         return;
     };
@@ -102,7 +102,7 @@ pub fn hNodeChildren(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32,
         results[0] = -1;
         return;
     };
-    const syn = resolve(p.ctx.buffer()) orelse {
+    const syn = resolve(p.activeCtx().buffer()) orelse {
         results[0] = -1;
         return;
     };
@@ -140,7 +140,7 @@ pub fn hClaimSubbuffer(data: ?*anyopaque, caller: *wasm.Caller, args: []const i3
         results[0] = -1;
         return;
     };
-    const ed = p.ctx.editor();
+    const ed = p.activeCtx().editor();
     const sub = subs.claim(p.gpa, &ed.doc, .{ .start = @intCast(args[0]), .end = @intCast(args[1]) }) catch {
         results[0] = -1;
         return;
@@ -191,7 +191,7 @@ pub fn hSubbufferFactAt(data: ?*anyopaque, caller: *wasm.Caller, args: []const i
         results[0] = -1;
         return;
     };
-    const ed = p.ctx.editor();
+    const ed = p.activeCtx().editor();
     const sub = subs.at(&ed.doc, @intCast(@as(u32, @bitCast(args[0])))) orelse {
         results[0] = -1;
         return;

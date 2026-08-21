@@ -96,20 +96,17 @@ pub fn main(init: std.process.Init) !void {
     var pool = try core.task.Pool.init(gpa, .{});
     defer pool.deinit();
 
-    // which-key: show the hint popup immediately (bypass the idle delay). If not
-    // already in a menu, open the leader menu — so a help key (F1) surfaces it
-    // from anywhere. Dispatch reads it; the session's caret commands bind it.
-    var which_key_now = false;
-
     // ── Core editing state ──
     // `Session` owns the buffers, the command/keymap/pick surfaces, the caps
     // store, the echo line + quit flag, the capability-consumer UIs and the
     // caret config. Built IN PLACE (cmd_ctx borrows its siblings), it installs
     // the built-ins and binds the capability + caret/which-key commands in
     // registration order; its deinit frees them in the reverse order main()
-    // used to.
+    // used to. which-key's F1 "show the hint now" flag lives on
+    // `session.menu_overlay` (per-head, beside `session.head` — see
+    // `frame.MenuOverlay`'s field doc), not a separate local here.
     var session: Session = undefined;
-    try session.init(gpa, pool, args.user, &providers_state.grammars, &which_key_now);
+    try session.init(gpa, pool, args.user, &providers_state.grammars);
     defer session.deinit(gpa);
     const buffers = &session.buffers;
     if (args.file) |path| {
@@ -607,7 +604,7 @@ pub fn main(init: std.process.Init) !void {
         }
 
         // ── Async housekeeping tick (backing/LSP/nav/pick/plugins/activate/menu) ──
-        if (try frame_mod.tickAsync(&fx, abuf, &session.cmd_ctx, &plugin_loop, &next_backing_poll_ns, &last_activate_path, &last_activate_len, &session.menu_overlay, &which_key_now, which_key_delay_ns, frame_start))
+        if (try frame_mod.tickAsync(&fx, abuf, &session.cmd_ctx, &plugin_loop, &next_backing_poll_ns, &last_activate_path, &last_activate_len, &session.menu_overlay, which_key_delay_ns, frame_start))
             view_dirty = true;
         // JS plugins: fire each resident quickjs instance's proc-stream output
         // handler for streams with new bytes (agent transcripts stream in here).

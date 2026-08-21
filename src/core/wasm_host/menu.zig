@@ -19,8 +19,8 @@ pub fn hMenuBindingCount(data: ?*anyopaque, caller: *wasm.Caller, args: []const 
     _ = caller;
     _ = args;
     const p: *WasmPlugin = @ptrCast(@alignCast(data.?));
-    const km = p.ctx.keymap;
-    const head = p.ctx.head;
+    const km = p.activeCtx().keymap;
+    const head = p.activeCtx().head;
     const n = if (head.pending.len > 0)
         head.completions(p.gpa, km, head.pending) catch 0
     else if (km.isMenuMode(head.currentMode()))
@@ -31,19 +31,19 @@ pub fn hMenuBindingCount(data: ?*anyopaque, caller: *wasm.Caller, args: []const 
 }
 pub fn hMenuBindingKey(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32, results: []i32) void {
     const p: *WasmPlugin = @ptrCast(@alignCast(data.?));
-    const b = p.ctx.head.resolvedAt(@intCast(args[0])) orelse {
+    const b = p.activeCtx().head.resolvedAt(@intCast(args[0])) orelse {
         results[0] = -1;
         return;
     };
     // which-key shows keys in the config's notation ("SPC :"), not the canonical
     // stored form ("space colon") — display only; logic uses the canonical key.
     var dbuf: [256]u8 = undefined;
-    const disp = p.ctx.keymap.displayKey(&dbuf, b.key);
+    const disp = p.activeCtx().keymap.displayKey(&dbuf, b.key);
     results[0] = @intCast(caller.writeMemory(@intCast(args[1]), @intCast(args[2]), disp) catch 0);
 }
 pub fn hMenuBindingCmd(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32, results: []i32) void {
     const p: *WasmPlugin = @ptrCast(@alignCast(data.?));
-    const b = p.ctx.head.resolvedAt(@intCast(args[0])) orelse {
+    const b = p.activeCtx().head.resolvedAt(@intCast(args[0])) orelse {
         results[0] = -1;
         return;
     };
@@ -56,7 +56,7 @@ pub fn hMenuBindingCmd(data: ?*anyopaque, caller: *wasm.Caller, args: []const i3
 pub fn hMenuBindingIsGroup(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32, results: []i32) void {
     _ = caller;
     const p: *WasmPlugin = @ptrCast(@alignCast(data.?));
-    results[0] = if (p.ctx.head.resolvedIsGroup(@intCast(args[0]))) 1 else 0;
+    results[0] = if (p.activeCtx().head.resolvedIsGroup(@intCast(args[0]))) 1 else 0;
 }
 
 /// Fire a guest's `on_menu(open)` — a menu mode was entered (open=1) or left

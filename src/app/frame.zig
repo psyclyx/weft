@@ -40,6 +40,17 @@ pub const MenuOverlay = struct {
     open_ns: u64 = 0, // when the current menu was entered (idle timer)
     last_mode: [64]u8 = undefined,
     last_len: usize = 0,
+    /// The F1 "show the hint now" edge, set by the `which-key-now` command
+    /// and consumed by `update` below. PER-HEAD, same reasoning as this
+    /// struct's own doc: head A pressing F1 must not force head B's popup.
+    /// Was a free-floating `main()`-local `bool` threaded through `Session.
+    /// init`/`registerCursorCommands`/`tickAsync` (misclassified in the W2a-2
+    /// sweep as "stays a main() local" — see `session.zig`'s old module doc);
+    /// moved HERE rather than onto `core.Head` because it's read/mutated
+    /// exclusively by this app-layer struct (the same "can't live on Head
+    /// itself" reasoning above), and `Session.menu_overlay` is already the
+    /// established "per-head, beside Head" home this struct's own doc names.
+    which_key_now: bool = false,
 
     /// Fire menu-overlay edges: `on_menu(open)` when a (different) menu mode
     /// becomes active, `on_menu(close)` when we leave menus. `which_key_now`
@@ -51,7 +62,6 @@ pub const MenuOverlay = struct {
         keymap: *const core.Keymap,
         plugins: *std.ArrayList(*core.wasm_abi.WasmPlugin),
         frame_start: u64,
-        which_key_now: *bool,
         which_key_delay_ns: u64,
     ) bool {
         var dirty = false;
@@ -66,8 +76,8 @@ pub const MenuOverlay = struct {
         const changed = self.open and !std.mem.eql(u8, content, self.last_mode[0..self.last_len]);
         // F1 toggles a forced peek at the CURRENT (any) mode. Leaving that mode
         // ends the peek — a menu you drill into then shows on its own.
-        if (which_key_now.*) self.forced = !self.forced;
-        which_key_now.* = false;
+        if (self.which_key_now) self.forced = !self.forced;
+        self.which_key_now = false;
         if (changed) self.forced = false;
 
         // The overlay is active mid-chord (immediately as you type a sequence),
@@ -186,7 +196,6 @@ pub fn tickAsync(
     last_activate_path: *[std.fs.max_path_bytes]u8,
     last_activate_len: *usize,
     menu: *MenuOverlay,
-    which_key_now: *bool,
     which_key_delay_ns: u64,
     frame_start: u64,
 ) !bool {
@@ -232,7 +241,7 @@ pub fn tickAsync(
     }
     // Menu overlay edges — fired at the frame boundary (top-level, so a
     // menu-owner guest can't re-enter its store).
-    if (menu.update(fx.head, fx.keymap, fx.plugins, frame_start, which_key_now, which_key_delay_ns)) dirty = true;
+    if (menu.update(fx.head, fx.keymap, fx.plugins, frame_start, which_key_delay_ns)) dirty = true;
     return dirty;
 }
 
@@ -252,28 +261,27 @@ test "menu overlay: drilling into a submenu doesn't re-delay once the popup is u
     defer plugins.deinit(gpa);
 
     var mo: MenuOverlay = .{};
-    var wkn = false;
     const delay: u64 = 200;
 
     // Normal: nothing open.
     try head.setMode(gpa, "normal");
-    _ = mo.update(&head, &km, &plugins, 0, &wkn, delay);
+    _ = mo.update(&head, &km, &plugins, 0, delay);
     try t.expect(!mo.open and !mo.shown);
 
     // Enter leader at t=100: open, not yet shown (0 < delay).
     try head.setMode(gpa, "leader");
-    _ = mo.update(&head, &km, &plugins, 100, &wkn, delay);
+    _ = mo.update(&head, &km, &plugins, 100, delay);
     try t.expect(mo.open and !mo.shown);
 
     // t=350: held past the delay → the popup appears.
-    _ = mo.update(&head, &km, &plugins, 350, &wkn, delay);
+    _ = mo.update(&head, &km, &plugins, 350, delay);
     try t.expect(mo.shown);
 
     // Drill into leader-file at t=360: the idle timer is continuous (measured
     // from the first menu entry, t=100), so 360−100 ≥ delay → the submenu hint
     // shows THIS frame, no re-delay. This is the bug fix.
     try head.setMode(gpa, "leader-file");
-    _ = mo.update(&head, &km, &plugins, 360, &wkn, delay);
+    _ = mo.update(&head, &km, &plugins, 360, delay);
     try t.expect(mo.shown);
 }
 
@@ -289,26 +297,25 @@ test "menu overlay: entering a menu from a non-menu still waits the idle delay" 
     defer plugins.deinit(gpa);
 
     var mo: MenuOverlay = .{};
-    var wkn = false;
     const delay: u64 = 200;
 
     // Fresh entry from normal: the timer starts now — the first popup waits.
     try head.setMode(gpa, "normal");
-    _ = mo.update(&head, &km, &plugins, 1000, &wkn, delay);
+    _ = mo.update(&head, &km, &plugins, 1000, delay);
     try head.setMode(gpa, "leader-file");
-    _ = mo.update(&head, &km, &plugins, 1000, &wkn, delay);
+    _ = mo.update(&head, &km, &plugins, 1000, delay);
     try t.expect(mo.open and !mo.shown);
-    _ = mo.update(&head, &km, &plugins, 1150, &wkn, delay); // 150 < delay
+    _ = mo.update(&head, &km, &plugins, 1150, delay); // 150 < delay
     try t.expect(!mo.shown);
-    _ = mo.update(&head, &km, &plugins, 1201, &wkn, delay); // 201 ≥ delay
+    _ = mo.update(&head, &km, &plugins, 1201, delay); // 201 ≥ delay
     try t.expect(mo.shown);
 
     // Leaving menus entirely closes the overlay; a later re-entry starts fresh.
     try head.setMode(gpa, "normal");
-    _ = mo.update(&head, &km, &plugins, 1300, &wkn, delay);
+    _ = mo.update(&head, &km, &plugins, 1300, delay);
     try t.expect(!mo.open and !mo.shown);
     try head.setMode(gpa, "leader");
-    _ = mo.update(&head, &km, &plugins, 1300, &wkn, delay);
+    _ = mo.update(&head, &km, &plugins, 1300, delay);
     try t.expect(!mo.shown); // fresh timer, not instant
 }
 
@@ -322,12 +329,11 @@ test "menu overlay: F1 forces the popup immediately, bypassing the delay" {
     var plugins: std.ArrayList(*core.wasm_abi.WasmPlugin) = .empty;
     defer plugins.deinit(gpa);
 
-    var mo: MenuOverlay = .{};
-    var wkn = true; // F1 pressed
+    var mo: MenuOverlay = .{ .which_key_now = true }; // F1 pressed
     try head.setMode(gpa, "leader");
-    _ = mo.update(&head, &km, &plugins, 5, &wkn, 10_000);
+    _ = mo.update(&head, &km, &plugins, 5, 10_000);
     try t.expect(mo.shown); // shown despite 5 ≪ delay
-    try t.expect(!wkn); // the flag was consumed
+    try t.expect(!mo.which_key_now); // the flag was consumed
 }
 
 test "menu overlay: F1 peeks the CURRENT (non-menu) mode; no forced leader; toggles off" {
@@ -343,16 +349,15 @@ test "menu overlay: F1 peeks the CURRENT (non-menu) mode; no forced leader; togg
     // you're at (the magit-style "wrong menu" jank).
     try head.setMode(gpa, "normal");
 
-    var mo: MenuOverlay = .{};
-    var wkn = true; // F1
-    _ = mo.update(&head, &km, &plugins, 5, &wkn, 10_000);
+    var mo: MenuOverlay = .{ .which_key_now = true }; // F1
+    _ = mo.update(&head, &km, &plugins, 5, 10_000);
     try t.expect(mo.forced);
     try t.expect(mo.shown); // shown immediately for the current mode
     try t.expectEqualStrings("normal", head.currentMode()); // did NOT jump into "leader"
 
     // A second F1 dismisses the peek.
-    wkn = true;
-    _ = mo.update(&head, &km, &plugins, 20, &wkn, 10_000);
+    mo.which_key_now = true;
+    _ = mo.update(&head, &km, &plugins, 20, 10_000);
     try t.expect(!mo.forced);
     try t.expect(!mo.open);
     try t.expect(!mo.shown);
@@ -368,15 +373,13 @@ test "menu overlay: leaving the peeked mode ends the forced peek" {
     defer plugins.deinit(gpa);
     try head.setMode(gpa, "normal");
 
-    var mo: MenuOverlay = .{};
-    var wkn = true; // F1 peeks normal
-    _ = mo.update(&head, &km, &plugins, 5, &wkn, 10_000);
+    var mo: MenuOverlay = .{ .which_key_now = true }; // F1 peeks normal
+    _ = mo.update(&head, &km, &plugins, 5, 10_000);
     try t.expect(mo.forced and mo.shown);
 
     // Switch to another non-menu mode: the peek ends (no lingering overlay).
     try head.setMode(gpa, "insert");
-    wkn = false;
-    _ = mo.update(&head, &km, &plugins, 20, &wkn, 10_000);
+    _ = mo.update(&head, &km, &plugins, 20, 10_000);
     try t.expect(!mo.forced);
     try t.expect(!mo.open);
 }
@@ -397,18 +400,17 @@ test "menu overlay: idle outside any menu is a stable state — no dirty every c
     try head.setMode(gpa, "normal");
 
     var mo: MenuOverlay = .{};
-    var wkn = false;
-    const dirty1 = mo.update(&head, &km, &plugins, 0, &wkn, 200);
+    const dirty1 = mo.update(&head, &km, &plugins, 0, 200);
     try t.expect(!dirty1); // both-closed IS the "same" state from `.{}`'s initial idle
 
     var i: u64 = 1;
     while (i < 20) : (i += 1) {
-        const dirty = mo.update(&head, &km, &plugins, i * 100, &wkn, 200);
+        const dirty = mo.update(&head, &km, &plugins, i * 100, 200);
         try t.expect(!dirty);
     }
 
     // A real transition (entering a menu) still reports dirty, proving the
     // fix didn't just make everything report `false`.
     try head.setMode(gpa, "leader");
-    try t.expect(mo.update(&head, &km, &plugins, 2100, &wkn, 200));
+    try t.expect(mo.update(&head, &km, &plugins, 2100, 200));
 }

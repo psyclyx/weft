@@ -15,8 +15,9 @@
 //!
 //! The grammar/LSP registries (`grammars`, `lsp_servers`) that the capability
 //! consumers' `grammar-add`/`lsp-add` bind onto live in `Providers`; `init`
-//! borrows them by pointer to wire those two commands, and `which_key_now` (the
-//! F1 flag the dispatch path reads) stays a `main()` local, borrowed likewise.
+//! borrows them by pointer to wire those two commands. `which_key_now` (the
+//! F1 flag the dispatch path reads) lives on `menu_overlay` below, not as a
+//! separate `main()` local — see `frame.MenuOverlay`'s field doc for why.
 
 const std = @import("std");
 const core = @import("../core/core.zig");
@@ -74,7 +75,6 @@ pub const Session = struct {
         pool: *core.task.Pool,
         user: []const u8,
         grammars: *core.syntax.Runtime,
-        which_key_now: *bool,
     ) !void {
         self.gpa = gpa;
         self.buffers = try core.Buffers.init(gpa, pool, user);
@@ -103,7 +103,7 @@ pub const Session = struct {
         // Caret config commands, registered before the config runs so it can
         // set per-mode styles at load time.
         self.cursor_cfg = .{ .gpa = gpa };
-        try setup.registerCursorCommands(gpa, &self.commands, &self.cursor_cfg, which_key_now);
+        try setup.registerCursorCommands(gpa, &self.commands, &self.cursor_cfg, &self.menu_overlay.which_key_now);
     }
 
     /// Free in the exact reverse order `main()`'s defers used to run: cursor_cfg,

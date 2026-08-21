@@ -41,9 +41,9 @@ pub fn hStyleClear(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32, r
     _ = results;
     const p: *WasmPlugin = @ptrCast(@alignCast(data.?));
     const gpa = p.gpa;
-    const doc = p.ctx.document();
-    const len = p.ctx.editor().text().byteLen();
-    const layer = p.ctx.caps.layers.claim(gpa, doc, styles_layer_name, .local, p.name) catch return;
+    const doc = p.activeCtx().document();
+    const len = p.activeCtx().editor().text().byteLen();
+    const layer = p.activeCtx().caps.layers.claim(gpa, doc, styles_layer_name, .local, p.name) catch return;
     const zeros = gpa.alloc(u8, len) catch return;
     defer gpa.free(zeros);
     @memset(zeros, 0);
@@ -60,7 +60,7 @@ pub fn hStyle(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32, result
     _ = caller;
     _ = results;
     const p: *WasmPlugin = @ptrCast(@alignCast(data.?));
-    const layer = p.ctx.caps.layers.find(p.ctx.document(), styles_layer_name) orelse return;
+    const layer = p.activeCtx().caps.layers.find(p.activeCtx().document(), styles_layer_name) orelse return;
     if (layer.bulk) |*b| {
         const start = @min(@as(usize, @intCast(@as(u32, @bitCast(args[0])))), b.classes.len);
         const end = @min(@as(usize, @intCast(@as(u32, @bitCast(args[1])))), b.classes.len);
@@ -81,7 +81,7 @@ pub fn hDecorateClear(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32
     _ = args;
     _ = results;
     const p: *WasmPlugin = @ptrCast(@alignCast(data.?));
-    const layer = p.ctx.caps.layers.claim(p.gpa, p.ctx.document(), decorations_layer_name, .local, p.name) catch return;
+    const layer = p.activeCtx().caps.layers.claim(p.gpa, p.activeCtx().document(), decorations_layer_name, .local, p.name) catch return;
     layer.publishSpans(p.gpa, &.{}) catch {};
 }
 
@@ -95,7 +95,7 @@ pub fn hDecorateClear(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32
 pub fn hDecorate(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32, results: []i32) void {
     _ = results;
     const p: *WasmPlugin = @ptrCast(@alignCast(data.?));
-    const layer = p.ctx.caps.layers.find(p.ctx.document(), decorations_layer_name) orelse return;
+    const layer = p.activeCtx().caps.layers.find(p.activeCtx().document(), decorations_layer_name) orelse return;
     const anchor: usize = @intCast(@as(u32, @bitCast(args[0])));
     const placement: core_layers.Placement = switch (@as(u32, @bitCast(args[1]))) {
         1 => .virtual_before,
@@ -138,7 +138,7 @@ pub fn hReadOnlyClear(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32
     _ = args;
     _ = results;
     const p: *WasmPlugin = @ptrCast(@alignCast(data.?));
-    const layer = p.ctx.caps.layers.claim(p.gpa, p.ctx.document(), readonly_layer_name, .local, p.name) catch return;
+    const layer = p.activeCtx().caps.layers.claim(p.gpa, p.activeCtx().document(), readonly_layer_name, .local, p.name) catch return;
     layer.publishSpans(p.gpa, &.{}) catch {};
 }
 
@@ -149,7 +149,7 @@ pub fn hReadOnlySpan(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32,
     _ = caller;
     _ = results;
     const p: *WasmPlugin = @ptrCast(@alignCast(data.?));
-    const layer = p.ctx.caps.layers.find(p.ctx.document(), readonly_layer_name) orelse return;
+    const layer = p.activeCtx().caps.layers.find(p.activeCtx().document(), readonly_layer_name) orelse return;
     const start: usize = @intCast(@as(u32, @bitCast(args[0])));
     const end: usize = @intCast(@as(u32, @bitCast(args[1])));
     if (end <= start) return;
@@ -164,7 +164,7 @@ pub fn hFoldClear(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32, re
     _ = args;
     _ = results;
     const p: *WasmPlugin = @ptrCast(@alignCast(data.?));
-    const layer = p.ctx.caps.layers.claim(p.gpa, p.ctx.document(), folds_layer_name, .local, p.name) catch return;
+    const layer = p.activeCtx().caps.layers.claim(p.gpa, p.activeCtx().document(), folds_layer_name, .local, p.name) catch return;
     layer.publishSpans(p.gpa, &.{}) catch {};
 }
 
@@ -176,7 +176,7 @@ pub fn hFold(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32, results
     _ = caller;
     _ = results;
     const p: *WasmPlugin = @ptrCast(@alignCast(data.?));
-    const layer = p.ctx.caps.layers.find(p.ctx.document(), folds_layer_name) orelse return;
+    const layer = p.activeCtx().caps.layers.find(p.activeCtx().document(), folds_layer_name) orelse return;
     const start: usize = @intCast(@as(u32, @bitCast(args[0])));
     const end: usize = @intCast(@as(u32, @bitCast(args[1])));
     if (end <= start) return;

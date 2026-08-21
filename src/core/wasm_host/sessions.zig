@@ -34,7 +34,7 @@ pub fn hReplStart(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32, re
         return;
     };
     defer gpa.free(buf);
-    const s = repl_session.Session.start(gpa, pool, p.ctx, p.name, buf, &.{ "/bin/sh", "-c", cmd }, shared.g_environ, null) catch {
+    const s = repl_session.Session.start(gpa, pool, p.activeCtx(), p.name, buf, &.{ "/bin/sh", "-c", cmd }, shared.g_environ, null) catch {
         results[0] = -1;
         return;
     };
@@ -116,7 +116,7 @@ pub fn hNetConnect(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32, r
         return;
     };
     defer gpa.free(sni);
-    const s = net_session.Session.start(gpa, pool, p.ctx, p.name, name, hostport, if (sni.len > 0) sni else null) catch {
+    const s = net_session.Session.start(gpa, pool, p.activeCtx(), p.name, name, hostport, if (sni.len > 0) sni else null) catch {
         results[0] = -1;
         return;
     };

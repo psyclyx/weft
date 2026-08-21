@@ -33,7 +33,7 @@ pub fn hProvideCompletion(data: ?*anyopaque, caller: *wasm.Caller, args: []const
         p.load_error = error.OutOfMemory;
         return;
     };
-    p.ctx.caps.register(.{
+    p.activeCtx().caps.register(.{
         .capability = "edit/completion",
         .id = id,
         // `fast`, not `instant`: a guest source may answer off a later poll
@@ -123,7 +123,7 @@ pub fn hCapsCommit(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32, r
     // Even an empty commit answers the session (so it can reach done()).
     const empty: []capability.CompletionItem = &.{};
     const items = if (p.caps_builder_session == session) p.caps_builder.items else empty;
-    p.ctx.caps.push(session, from, .{ .completion = items }) catch {};
+    p.activeCtx().caps.push(session, from, .{ .completion = items }) catch {};
     p.capsBuilderClear();
 }
 
@@ -133,7 +133,7 @@ pub fn hCapsDecline(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32, 
     _ = results;
     const p: *WasmPlugin = @ptrCast(@alignCast(data.?));
     const session = sessionOf(args[0]);
-    p.ctx.caps.decline(session);
+    p.activeCtx().caps.decline(session);
     if (p.caps_builder_session == session) p.capsBuilderClear();
 }
 

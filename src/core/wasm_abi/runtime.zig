@@ -174,6 +174,7 @@ fn construct(engine: *wasm.Engine, ctx: *command.Context, name: []const u8, opts
     p.* = .{
         .gpa = gpa,
         .ctx = ctx,
+        .active_ctx = ctx,
         .name = name_dup,
         .store = opts.kv,
         .config_store = opts.config,

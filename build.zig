@@ -21,6 +21,7 @@ const guests = [_]Guest{
     .{ .src = "src/guest/rogue.zig", .import = "guest_rogue_wasm", .install = false },
     .{ .src = "src/guest/deny.zig", .import = "guest_deny_wasm", .install = false },
     .{ .src = "src/guest/demo_config.zig", .import = "guest_demo_config_wasm", .install = false },
+    .{ .src = "src/guest/headtest.zig", .import = "guest_headtest_wasm", .install = false },
     .{ .src = "src/guest/edit.zig", .import = "guest_edit_wasm", .install = true },
     .{ .src = "src/guest/complete.zig", .import = "guest_complete_wasm", .install = true },
     .{ .src = "src/guest/project.zig", .import = "guest_project_wasm", .install = true },

@@ -68,9 +68,8 @@ test "app/teardown: shells outlive buffers through an in-flight shell save" {
     // then the Session, then Providers' attach phase (borrows session caps).
     var prov: app_providers.Providers = undefined;
     try prov.initRegistries(gpa);
-    var which_key_now = false;
     var sess: app_session.Session = undefined;
-    try sess.init(gpa, pool, "teardown-user", &prov.grammars, &which_key_now);
+    try sess.init(gpa, pool, "teardown-user", &prov.grammars);
     prov.initAttach(gpa, &sess.caps, environ);
 
     // A persistent shell registered in Providers.attach_deps.shells, exactly as
@@ -126,9 +125,8 @@ test "app/teardown: unconnected Collab constructs + tears down clean" {
     var prov: app_providers.Providers = undefined;
     try prov.initRegistries(gpa);
     defer prov.deinit(gpa);
-    var which_key_now = false;
     var sess: app_session.Session = undefined;
-    try sess.init(gpa, pool, "collab-user", &prov.grammars, &which_key_now);
+    try sess.init(gpa, pool, "collab-user", &prov.grammars);
     defer sess.deinit(gpa);
     // known_peers + my_identity stay main() locals (Collab borrows them); an empty
     // in-memory store keeps this hermetic (no config-home read/write).

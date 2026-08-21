@@ -59,7 +59,24 @@ pub const StampSlot = struct { range: position.StampedRange, version: []u8 };
 pub const QueryCap = struct { name: []u8, start: usize, end: usize };
 
 gpa: Allocator,
+/// The LOAD-TIME ctx (set once by `construct`, always the ctx `loadPlugin`
+/// was called with — the system's primary head today). Background host→guest
+/// entries (init/describe, `on_poll`, `on_fill`, `on_complete` — see
+/// `wasm_host/commands.zig`'s classification doc) read through `activeCtx()`
+/// which falls back to this when no dispatch is in progress, so they always
+/// see the system default, never a stale "whichever head last dispatched".
 ctx: *command.Context,
+/// The ctx a DISPATCHING host→guest call (on_command, on_pick_accept) should
+/// route every host-import read/mutation through for the call's duration —
+/// the interaction state (mode/pending/pick/echo/dot-repeat) of the HEAD that
+/// issued the call, not necessarily the plugin's load-time head. Set (save/
+/// restore around the guest call, reentrancy-safe — `wl_run` nests) by each
+/// dispatching entry; every other entry leaves it alone, so it stays at
+/// whatever the innermost enclosing dispatch set (or `ctx` outside any
+/// dispatch). Every `wasm_host/*` handler reads state through `activeCtx()`,
+/// never `ctx` directly — see `wasm_host/commands.zig`'s module doc for the
+/// full dispatching/background classification.
+active_ctx: *command.Context,
 name: []u8,
 /// A transient author identity, set only for the duration of a single
 /// `wl_edit_as` call: subsequent edits (and the peer resolver) author as this
@@ -203,6 +220,13 @@ pub fn capsBuilderClear(self: *WasmPlugin) void {
 pub fn queryCapsClear(self: *WasmPlugin) void {
     for (self.query_caps.items) |q| self.gpa.free(q.name);
     self.query_caps.clearRetainingCapacity();
+}
+
+/// The ctx every `wasm_host/*` handler should read/mutate through — the
+/// dispatching head's ctx while a guest call is in flight, else the load-time
+/// default. See the `active_ctx` field doc.
+pub fn activeCtx(self: *WasmPlugin) *command.Context {
+    return self.active_ctx;
 }
 
 pub fn declaresCommand(self: *WasmPlugin, name: []const u8) bool {

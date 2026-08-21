@@ -61,7 +61,7 @@ pub fn hPickEnd(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32, resu
     };
     defer gpa.free(entries);
     for (p.pick_items.items, entries) |it, *e| e.* = .{ .text = it.text, .doc = it.doc };
-    p.ctx.head.pick.open(p.ctx, p.pick_prompt.items, entries, .{
+    p.activeCtx().head.pick.open(p.activeCtx(), p.pick_prompt.items, entries, .{
         .handler = wpPickAccept,
         .cleanup = wpPickCleanup,
         .data = bp,
@@ -80,12 +80,12 @@ pub fn hOpenFilePick(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32,
     defer gpa.free(root);
     const bp = gpa.create(WasmBoundPick) catch return;
     bp.* = .{ .plugin = p, .pick_id = @intCast(args[4]) };
-    const finder = fs_source.LocalFinder.create(gpa, p.ctx.buffers.pool, root) catch {
+    const finder = fs_source.LocalFinder.create(gpa, p.activeCtx().buffers.pool, root) catch {
         gpa.destroy(bp);
         return;
     };
     // openWith closes the source on failure; only the BoundPick is ours.
-    p.ctx.head.pick.openWith(p.ctx, prompt, &.{}, .{
+    p.activeCtx().head.pick.openWith(p.activeCtx(), prompt, &.{}, .{
         .handler = wpPickAccept,
         .cleanup = wpPickCleanup,
         .data = bp,
@@ -106,14 +106,21 @@ pub fn hPickChoiceIndex(data: ?*anyopaque, caller: *wasm.Caller, args: []const i
     _ = caller;
     _ = args;
     const p: *WasmPlugin = @ptrCast(@alignCast(data.?));
-    results[0] = if (p.ctx.head.pick.accepted_index) |i| @intCast(i) else -1;
+    results[0] = if (p.activeCtx().head.pick.accepted_index) |i| @intCast(i) else -1;
 }
 
 /// Pick accept: stash the choice, dispatch to the guest's on_pick_accept.
+/// DISPATCHING (wasm_host/commands.zig's classification): `ctx` is the head
+/// whose pick session just accepted — route `active_ctx` through it for the
+/// call's duration (save/restore, same reentrancy discipline as
+/// `wpCmdTrampoline`), so `wl_pick_choice`/`wl_pick_choice_index` and anything
+/// else `on_pick_accept` reaches see THAT head's state.
 fn wpPickAccept(ctx: *command.Context, data: ?*anyopaque, choice: []const u8) anyerror!void {
-    _ = ctx;
     const bp: *WasmBoundPick = @ptrCast(@alignCast(data.?));
     const p = bp.plugin;
+    const saved_ctx = p.active_ctx;
+    p.active_ctx = ctx;
+    defer p.active_ctx = saved_ctx;
     p.cur_choice = choice;
     defer p.cur_choice = &.{};
     try contract.callRequiredExport("on_pick_accept", &p.instance, .{@as(i32, @intCast(bp.pick_id))});
