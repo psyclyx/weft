@@ -111,6 +111,101 @@ test "e2e/project: magit push/pull/fetch transients are sticky menus" {
     try t.expect(ed.keymap.isMenuMode("git-reset-menu"));
 }
 
+// Task #21: `git-rebase-interactive` re-sets `git-rebase-menu` when a rebase
+// is already mid-flight, MEANING to keep the transient open (`c`/`a`/`s` are
+// what the user needs next). Before the fix that re-set was undone by
+// dispatch.zig's leaf auto-pop: a leaf that leaves the mode UNCHANGED in a
+// non-sticky menu reads as "did nothing, pop it" — so `i` bounced straight
+// back to *magit*. `git-rebase-menu` is now STICKY (matching git-push/pull/
+// fetch-menu's idiom): a same-mode re-set no longer auto-pops, while c/a/s
+// still close normally because each explicitly `weft.setMode`s to a
+// DIFFERENT mode (magit), which dispatch's "leaf moved us elsewhere" branch
+// honors regardless of stickiness. Drives a REAL conflicted rebase (two
+// branches editing the same line) so `.git/rebase-merge` exists for real —
+// not a faked marker directory.
+test "e2e/project: git-rebase-interactive keeps git-rebase-menu open on a real conflicted rebase; continue/abort still close" {
+    const gpa = t.allocator;
+    var proj: Project = undefined;
+    try proj.init(gpa);
+    defer proj.deinit();
+
+    var ed: Editor = undefined;
+    try Editor.init(gpa, &ed);
+    defer ed.deinit();
+    try loadWorkspace(&ed);
+
+    // ── Set up a genuinely conflicted rebase via the oracle (a human's own
+    // git usage, never the editor) — two branches editing the same line,
+    // then rebasing one onto the other. ──
+    for ([_][]const u8{
+        "git init -q -b master",
+        "git config user.email e2e@weft.test",
+        "git config user.name weft-e2e",
+        "printf 'base\\n' > f.txt && git add f.txt && git commit -q -m c1",
+        "git checkout -q -b feature",
+        "printf 'feature-change\\n' > f.txt && git add f.txt && git commit -q -m c-feature",
+        "git checkout -q master",
+        "printf 'master-change\\n' > f.txt && git add f.txt && git commit -q -m c-master",
+        "git checkout -q feature",
+        "git rebase master >/dev/null 2>&1", // conflicts and pauses — nonzero rc, ignored by oracle()
+    }) |cmd| {
+        const out = try proj.oracle(cmd);
+        gpa.free(out);
+    }
+    {
+        const marker = try proj.oracle("test -d .git/rebase-merge && echo yes || echo no");
+        defer gpa.free(marker);
+        try t.expectEqualStrings("yes", marker); // the real precondition `rebaseInProgress` checks
+    }
+
+    // ── Open magit on the now-conflicted repo. ──
+    ed.run("git-status");
+    try t.expect(drainToolContains(&ed, "*magit*", "Branch:"));
+    try t.expectEqualStrings("magit", ed.mode());
+
+    // ── `r` opens the rebase transient; `i`, with a rebase mid-flight, must
+    // leave the user IN it (the bug: it used to bounce back to magit). ──
+    ed.press("r", ""); // git-rebase-menu (paired-transient push)
+    try t.expectEqualStrings("git-rebase-menu", ed.mode());
+    try t.expectEqual(@as(usize, 1), ed.head.transient_stack.items.len);
+
+    ed.press("i", ""); // git-rebase-interactive: rebase in progress -> re-set, sticky holds it open
+    try t.expectEqualStrings("git-rebase-menu", ed.mode());
+    try t.expectEqual(@as(usize, 1), ed.head.transient_stack.items.len); // not grown, not popped
+
+    // ── `c` (continue) still closes to magit, even though the conflict is
+    // still unresolved and `git rebase --continue` itself fails — gatherAfter
+    // Seq's `;`-sequenced re-gather always leaves via `weft.setMode("magit")`,
+    // a DIFFERENT mode than git-rebase-menu, so it closes regardless of
+    // stickiness. ──
+    ed.press("c", ""); // git-rebase-continue
+    try t.expectEqualStrings("magit", ed.mode());
+    try t.expect(!ed.head.hasOpenTransients());
+    // Drain `c`'s async `git rebase --continue` (it fails fast — conflict
+    // unresolved — but still runs a real subprocess in the SAME repo) before
+    // firing another git process below: two live git invocations in one
+    // worktree can race on `.git/index.lock`.
+    ed.settle(50);
+
+    // The conflict is still unresolved, so the rebase is still mid-flight —
+    // re-opening the menu and pressing `i` again must still hold it open.
+    ed.press("r", "");
+    ed.press("i", "");
+    try t.expectEqualStrings("git-rebase-menu", ed.mode());
+
+    // ── `a` (abort) closes to magit too, and this time actually clears the
+    // paused rebase. Mode flips synchronously (`gatherAfterSeq`'s `setMode`
+    // runs before the subprocess even starts), but the abort itself is
+    // async — poll the on-disk oracle (not `drainToolContains`: *magit*'s
+    // buffer already contains a stale "Branch:" from the `c` step's
+    // re-gather, so a text-containment check would pass before the abort's
+    // OWN re-gather actually lands). ──
+    ed.press("a", ""); // git-rebase-abort
+    try t.expectEqualStrings("magit", ed.mode());
+    try t.expect(!ed.head.hasOpenTransients());
+    try t.expect(drainUntilOracle(&proj, &ed, "test -d .git/rebase-merge && echo yes || echo no", "no"));
+}
+
 // ── The whole-app spine: start a project, write code, version it ────
 //
 // This is THE e2e the brief asks for: drive weft the way a person starts a web

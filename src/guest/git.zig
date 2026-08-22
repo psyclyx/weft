@@ -400,7 +400,15 @@ export fn init() void {
 
     // Rebase transient (`r`): interactive + in-progress continue/abort/skip. The
     // right verb is chosen per state; the wrong one just no-ops with a git error.
-    weft.menuMode("git-rebase-menu");
+    // STICKY (matching git-push/pull/fetch-menu's idiom): needed ONLY for `i`
+    // when a rebase is mid-flight, which re-sets the SAME mode to keep the
+    // menu open (dispatch.zig's leaf auto-pop otherwise treats "still the same
+    // mode after the leaf" as "did nothing, pop it" — undoing the re-set).
+    // c/a/s/`i`-when-clean all still close normally: each explicitly leaves via
+    // `weft.setMode` to a DIFFERENT mode (magit or git-input), which dispatch's
+    // "leaf moved us elsewhere" branch honors regardless of stickiness — same
+    // as git-push-menu's sticky toggles vs. its mode-changing `-do` leaf.
+    weft.stickyMenu("git-rebase-menu");
     weft.bindKey("git-rebase-menu", "i", "git-rebase-interactive");
     weft.bindKey("git-rebase-menu", "c", "git-rebase-continue");
     weft.bindKey("git-rebase-menu", "a", "git-rebase-abort");
@@ -1915,6 +1923,10 @@ fn rebaseInProgress() bool {
 fn gitRebaseInteractive() void {
     if (rebaseInProgress()) {
         weft.echo("rebase in progress — c continue / a abort / s skip");
+        // Re-set the SAME mode we're already in: with `git-rebase-menu` sticky
+        // this is a genuine no-op leaf (mode unchanged, nothing to auto-pop) —
+        // the menu stays open, unlike the plain-menuMode case where dispatch
+        // would read "unchanged" as "close it".
         weft.setMode("git-rebase-menu");
         return;
     }
