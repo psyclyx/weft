@@ -306,6 +306,15 @@ save/`peerSyncTo`, ≥1 MiB bulk-load, and a `PartialDoc` round-trip.
 version byte + old-`stg` decode fork, or ratify the fleet-wide flag-day for
 pre-GA collab. *Gate:* stated in-repo; a two-peer convergence test on the new
 wire; if forking, an old×new interop test.
+**[DECIDED 2026-08-22 — flag-day, ratified.]** Live text collab is pre-GA
+with no deployed mixed-version fleet: weft's main has never been pushed,
+`GraphCollab` has no production call site, and `Collab(Document)`'s peers
+are the dogfooding user's own builds. A version-byte decode fork would
+preserve compatibility no live session needs, at the cost of a second
+decode path with no demolition client. Ratified: W7a's swap changes the
+collab wire wholesale (`stg` → `stj`); peers must run same-era builds;
+the two-peer convergence test on the new wire is the gate. If a real
+fleet exists before W7a lands, this decision reopens.
 
 **W7a (weft) — the backing swap for the degenerate case.** `Document.doc:
 TextDoc` → the one graph core with a single root text node; reimplement the
