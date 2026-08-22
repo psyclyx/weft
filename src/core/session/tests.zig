@@ -1131,6 +1131,210 @@ test "GraphDoc over the wire: an edit through the on_save PROJECTION converges o
     try t.expectEqualStrings("user: hell!!!o", text_b);
 }
 
+// ── W6 check-in: TranscriptDoc live over the wire, confined by a subtree
+// grant (doc/north-star-plan.md §6 W6 gate: "two principals, one model,
+// different projections, converging, subtree grant enforced; the check-in
+// scenario end-to-end"). CORRECTED CLAIM (an earlier version of this
+// comment overstated what this test drives): the producer side here calls
+// `TranscriptDoc.append`/`editText` DIRECTLY — the model API `quickjs.zig`'s
+// `cTranscriptEntry`/`cTranscriptAppend` are a thin membrane wrapper OVER
+// (arg-unmarshal, single-instance-transcript lookup, then exactly these two
+// calls, then a re-fill). This test proves the MODEL + its replication +
+// grant enforcement + the push re-fill trigger — it does NOT exercise the
+// membrane handlers, the JS runtime, or `config/plugins/acp.js` at all; see
+// `quickjs.zig`'s own seam test(s) for coverage of that layer instead. ─────
+
+test "W6 check-in: a home session streams a live transcript; a remote observer converges via push re-fill, and is confined to its granted entry while streaming continues" {
+    const gpa = t.allocator;
+    const fds = try socketPair();
+    var la: FdLink = .{ .fd = fds[0] };
+    var lb: FdLink = .{ .fd = fds[1] };
+
+    // "Home": the headless agent session's own replica — the ONE `create`
+    // call (graph.zig's one-create discipline). One turn already landed
+    // before the remote attaches, like a session already running when you
+    // check in.
+    var home = try TranscriptDoc.create(gpa, "home");
+    defer home.deinit(gpa);
+    const e0 = try home.append(gpa, "user", 1, "start the refactor");
+    const e0_ref = try home.graph.nodeRef(gpa, e0);
+    defer e0_ref.free(gpa);
+
+    const sa = try Session.create(gpa, la.link(), .server, "tok", .own, null);
+    defer sa.destroy();
+    const sb = try Session.create(gpa, lb.link(), .client, "tok", .own, null);
+    defer sb.destroy();
+    var ca = try Conn.init(gpa, sa, "home", .server);
+    defer ca.deinit();
+    var cb = try Conn.init(gpa, sb, "remote", .client);
+    defer cb.deinit();
+
+    const ga = try ca.shareGraph(&home.graph, "transcript", 1);
+
+    const offer_deadline = task.nowNs() + 5 * std.time.ns_per_s;
+    while (task.nowNs() < offer_deadline and cb.offers.items.len == 0) {
+        _ = try ca.tick();
+        _ = try cb.tick();
+        futexWaitTimed(&sa.out_wake, sa.out_wake.load(.acquire), std.time.ns_per_ms);
+    }
+    try t.expect(cb.offers.items.len > 0);
+    try t.expectEqual(Conn.DocKind.graph, cb.offers.items[0].kind);
+
+    // Built directly as a `TranscriptDoc`, `adopt`ed back into this SAME
+    // variable below — the pointer-stability discipline `TranscriptDoc.
+    // adopt`'s own doc comment now spells out in full (a real footgun a W6
+    // remote observer hits on its very first wire-bootstrap, not just a
+    // test-plumbing nicety).
+    var remote: TranscriptDoc = .{ .graph = try GraphDoc.init(gpa, "remote") };
+    defer remote.deinit(gpa);
+    const gb = try cb.openGraphOffer(0, &remote.graph, 1);
+
+    const bootstrap_deadline = task.nowNs() + 5 * std.time.ns_per_s;
+    while (task.nowNs() < bootstrap_deadline and remote.graph.root().mapGet("entries") == null) {
+        _ = try ca.tick();
+        _ = try cb.tick();
+        futexWaitTimed(&sb.out_wake, sb.out_wake.load(.acquire), std.time.ns_per_ms);
+    }
+    remote = try TranscriptDoc.adopt(remote.graph);
+    try t.expectEqual(@as(usize, 1), remote.count());
+
+    // The observer's own projected buffer — from here on, re-filled ONLY
+    // through the push trigger (`refillOnChange`, fed by `cb.tick()`'s own
+    // changed bool), never a manual extra `fill()` call, so the test
+    // actually exercises live-projection freshness rather than masking a
+    // missing push path behind a final catch-up fill.
+    var doc_r = try Document.init(gpa, "remote");
+    defer doc_r.deinit(gpa);
+    var subs_r: subbuffer.SubBuffers = .empty;
+    defer subs_r.deinit(gpa);
+    try TranscriptDoc.fill(gpa, &remote, &doc_r, &subs_r); // the initial pull, matching a buffer just opened
+
+    // Grant: the remote observer may intervene ONLY on the first entry
+    // (the identity-anchored subtree grant W6 adds) — never the whole
+    // transcript, so home's own continued streaming stays authoritative
+    // and unaffected by anything the remote does elsewhere.
+    var grant_table = grants.HandleTable.init(gpa);
+    defer grant_table.deinit();
+    ga.bindGrants(&grant_table);
+    _ = try ga.grantSubtree(e0_ref);
+
+    // Streaming continues: home appends a second entry, then streams a
+    // chunk onto it — simulating an agent's turn landing while the remote
+    // is attached, calling `TranscriptDoc.append`/`editText` directly — the
+    // model API `cTranscriptEntry`/`cTranscriptAppend` wrap, NOT those
+    // handlers themselves (see this section's corrected header comment) —
+    // each followed by an immediate `fill()` of home's OWN projection (the
+    // LOCAL half of live-projection freshness this test exercises directly;
+    // see `transcript.zig`'s `refillOnChange` doc comment for the REMOTE
+    // half, exercised below via `cb.tick()`).
+    var doc_h = try Document.init(gpa, "home");
+    defer doc_h.deinit(gpa);
+    var subs_h: subbuffer.SubBuffers = .empty;
+    defer subs_h.deinit(gpa);
+    try TranscriptDoc.fill(gpa, &home, &doc_h, &subs_h);
+
+    _ = try home.append(gpa, "agent", 2, "Looking at ");
+    try TranscriptDoc.fill(gpa, &home, &doc_h, &subs_h); // local append: immediate re-fill
+    const e1_text_obj = home.at(1).textObj();
+    try home.editText(gpa, e1_text_obj, "Looking at ".len, "the module now.");
+    try TranscriptDoc.fill(gpa, &home, &doc_h, &subs_h); // local stream chunk: immediate re-fill
+
+    // The remote converges on the new entry AND its own projected buffer
+    // catches up — through nothing but `refillOnChange` fed by
+    // `cb.tick()`'s changed bool, inside the SAME pump loop that waits for
+    // convergence (no separate catch-up fill after the loop below).
+    const stream_deadline = task.nowNs() + 5 * std.time.ns_per_s;
+    var streamed = false;
+    while (task.nowNs() < stream_deadline) {
+        _ = try ca.tick();
+        const changed = try cb.tick();
+        try TranscriptDoc.refillOnChange(gpa, &remote, &doc_r, &subs_r, changed);
+        if (remote.count() == 2) {
+            const rt = try remote.at(1).text(gpa);
+            defer gpa.free(rt);
+            if (std.mem.eql(u8, rt, "Looking at the module now.")) {
+                streamed = true;
+                break;
+            }
+        }
+        testPark(2);
+    }
+    try t.expect(streamed);
+    {
+        const got = try doc_r.text().toOwnedSlice(gpa);
+        defer gpa.free(got);
+        try t.expectEqualStrings("user: start the refactor\nagent: Looking at the module now.", got);
+    }
+
+    // Intervene UNDER GRANT: the remote edits entry 0's body — inside its
+    // granted subtree — and it lands on home's replica.
+    try remote.editText(gpa, remote.at(0).textObj(), "start the refactor".len, "!!");
+    const grant_deadline = task.nowNs() + 5 * std.time.ns_per_s;
+    var landed = false;
+    while (task.nowNs() < grant_deadline) {
+        _ = try ca.tick();
+        _ = try cb.tick();
+        const ht = try home.at(0).text(gpa);
+        defer gpa.free(ht);
+        if (std.mem.eql(u8, ht, "start the refactor!!")) {
+            landed = true;
+            break;
+        }
+        testPark(2);
+    }
+    try t.expect(landed);
+    try t.expectEqual(@as(usize, 0), gb.refusals.items.len);
+
+    // Frontier equality on the ALLOWED edit — not just content agreement
+    // (graph.zig's own convergence rigor) — checked HERE, before the
+    // refused edit below gives `remote` a local-only op home never merges
+    // (by design: a refused SEND still applies locally, see
+    // `GraphCollab.admitRegions`'s "deferred-until-release" doc comment),
+    // which would otherwise make the two frontiers genuinely diverge.
+    {
+        const hv = try home.graph.version(gpa);
+        defer gpa.free(hv);
+        const rv = try remote.graph.version(gpa);
+        defer gpa.free(rv);
+        try t.expectEqual(GraphDoc.VersionOrder.equal, try home.graph.compareVersions(gpa, hv, rv));
+    }
+
+    // Both projections render this shared, converged state identically —
+    // "two principals, one model, different projections, converging" —
+    // checked HERE (before the refused edit below gives `remote` a real
+    // local divergence of its own, by design; see the note above).
+    try TranscriptDoc.fill(gpa, &home, &doc_h, &subs_h);
+    {
+        const text_h = try doc_h.text().toOwnedSlice(gpa);
+        defer gpa.free(text_h);
+        try TranscriptDoc.refillOnChange(gpa, &remote, &doc_r, &subs_r, true);
+        const text_r = try doc_r.text().toOwnedSlice(gpa);
+        defer gpa.free(text_r);
+        try t.expectEqualStrings(text_h, text_r);
+    }
+
+    // The negative half: the remote tries to edit entry 1 (home's own
+    // streamed turn) — OUTSIDE the grant — refused loudly, never landing;
+    // home's streaming replica is unaffected ("session unaffected").
+    try remote.editText(gpa, remote.at(1).textObj(), 0, "XX");
+    const refuse_deadline = task.nowNs() + 5 * std.time.ns_per_s;
+    var refused = false;
+    while (task.nowNs() < refuse_deadline) {
+        _ = try ca.tick();
+        _ = try cb.tick();
+        if (gb.refusals.items.len > 0) {
+            refused = true;
+            break;
+        }
+        testPark(2);
+    }
+    try t.expect(refused);
+    try t.expectEqual(GraphCollab.RefusalReason.authority, gb.refusals.items[0].reason);
+    const ht1 = try home.at(1).text(gpa);
+    defer gpa.free(ht1);
+    try t.expectEqualStrings("Looking at the module now.", ht1);
+}
+
 // ── W6 slice 1: the per-region lease over the REAL wire ─────────────────
 // (doc/d1-live-reconcile.md §5, §6). Two regions ("room1"/"room2") on a
 // plain `GraphDoc` shared alice(server)↔bob(client) exactly like the

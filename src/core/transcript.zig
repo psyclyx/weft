@@ -103,6 +103,23 @@ pub fn open(gpa: Allocator, agent_name: []const u8, bytes: []const u8) GraphDoc.
 /// only ever speaks `GraphDoc`'s generic token model, deliberately with no
 /// knowledge of `entries` — the caller adopts once its own convergence
 /// predicate (or the entries key's mere presence) says it's time.
+///
+/// **Pointer-stability footgun (a real one — a W6 remote observer hits this
+/// on the very first wire-bootstrap path):** this takes `GraphDoc` BY VALUE
+/// and returns a fresh `TranscriptDoc` by value. If a caller has already
+/// bound a `GraphCollab` to `&some_graph_doc` (the ordinary shape —
+/// `Conn.openGraphOffer`/`shareGraph` take a stable `*GraphDoc`) and then
+/// calls `adopt(some_graph_doc)` into a DIFFERENT variable, the result is a
+/// COPY at a new address — the `GraphCollab` keeps writing into the OLD
+/// variable, which the caller has stopped reading, so the replica silently
+/// stops updating from the caller's point of view. The fix is to build the
+/// holder as a `TranscriptDoc` from the start (`var tr: TranscriptDoc =
+/// .{ .graph = try GraphDoc.init(gpa, name) }`), bind `GraphCollab` to
+/// `&tr.graph`, and assign `adopt`'s result back into the SAME variable
+/// (`tr = try adopt(tr.graph);` — never `var tr2 = try adopt(...)`): the
+/// bound address (`&tr.graph`) never moves, only the value stored there
+/// changes. See `session/tests.zig`'s "GraphDoc over the wire" and "W6
+/// check-in" tests for this pattern applied end to end.
 pub fn adopt(g: GraphDoc) error{Corrupt}!TranscriptDoc {
     if (g.root().mapGet(entries_key) == null) return error.Corrupt;
     // The documented split-brain footgun (two independent create()s merged
@@ -258,6 +275,62 @@ pub fn fill(gpa: Allocator, tr: *const TranscriptDoc, doc: *Document, subs: *sub
         defer ref.free(gpa);
         try sub.putFact(gpa, node_fact, ref.token);
     }
+}
+
+/// The subbuffer claim `fill` minted for its LAST row (the model's most
+/// recently appended entry) — the one a live-streaming producer needs to
+/// grow INCREMENTALLY (see `quickjs.zig`'s `cTranscriptAppend`, the
+/// per-chunk path this exists for) without paying `fill`'s full
+/// re-projection cost on every chunk. Correct only IMMEDIATELY after a
+/// `fill` call and only while nothing else has claimed on `doc` in between:
+/// `fill` drops every claim on `doc` then mints one per row IN APPEND ORDER
+/// via `subs.claim` (a plain list append), so right after it returns, the
+/// LAST claim anywhere in `subs.list` that still belongs to `doc` is
+/// exactly the last row's — this walks backward from the end of `subs.
+/// list` for the first match, which is O(1) in the common case (nothing
+/// else has claimed on `doc` since) and never wrong (it doesn't ASSUME
+/// that, it VERIFIES `s.doc == doc` at each step). `null` for an empty
+/// transcript (nothing to return) or if `doc` never had anything claimed
+/// on it at all.
+pub fn lastRowClaim(subs: *const subbuffer.SubBuffers, doc: *const Document) ?*subbuffer.SubBuffer {
+    var i = subs.list.items.len;
+    while (i > 0) {
+        i -= 1;
+        const s = subs.list.items[i];
+        if (s.doc == doc) return s;
+    }
+    return null;
+}
+
+/// The model→buffer PUSH trigger for a REMOTE change (W6 check-in,
+/// north-star-plan.md §6 W6/W5's "the model replicates over a session"
+/// gate). `fill` above is deliberately PULL — it recomputes from the model
+/// whenever called, on no particular schedule. A LOCAL producer already
+/// knows it just changed something, so it needs no help from this
+/// function to notice — but it does NOT necessarily call this full `fill`
+/// at its own call site: `quickjs.zig`'s `cTranscriptEntry` (a new row —
+/// structure changed, so a full re-projection is the honest floor) does;
+/// `cTranscriptAppend` (a streamed chunk onto the row already open) does
+/// NOT — it grows the projected buffer and `lastRowClaim`'s claim
+/// INCREMENTALLY instead (a point-insert + one claim's `extendEnd`, not a
+/// full `fill`), see that handler's doc comment for the mechanism and
+/// exactly when it falls back to a full `fill`. A REMOTE merge is
+/// different: nothing local calls `fill` for you when a
+/// `GraphCollab`-fed batch lands, so SOME caller has to notice and re-run
+/// it. The "notice" this function asks for is `changed`: whatever the
+/// caller's own collab tick already tells it (`GraphCollab.tick`'s or
+/// `Conn.tick`'s return value) — the EXACT signal an ordinary shared TEXT
+/// buffer's redraw already rides (`app/collab.zig`'s `tickCollab`: `dirty
+/// = try c.tick()`). The only real difference is what "dirty" must DO: a
+/// TextDoc buffer's rope IS the replicated content, so "dirty" only means
+/// "redraw, the bytes are already right"; a `GraphDoc` has no directly
+/// renderable text of its own, so a changed transcript must be
+/// RE-PROJECTED (`fill`), not merely repainted. No timer, no polling, no
+/// second admission path invented here — `changed` is already
+/// frame-driven, this just answers the one extra question a graph-backed
+/// projection needs answered before a redraw would show anything true.
+pub fn refillOnChange(gpa: Allocator, tr: *const TranscriptDoc, doc: *Document, subs: *subbuffer.SubBuffers, changed: bool) command.RenderError!void {
+    if (changed) try fill(gpa, tr, doc, subs);
 }
 
 // ── `on_save` reconciliation (§2.6's `ReconcileMode.on_save`, formalized) ──
@@ -672,6 +745,39 @@ test "Projection.fill: a second append re-fills without losing the mapping" {
     defer ref1.free(gpa);
     try t.expectEqualStrings(ref0.token, subs.at(&doc, "user: ".len).?.fact(node_fact).?);
     try t.expectEqualStrings(ref1.token, subs.at(&doc, "user: hi\nagent: ".len).?.fact(node_fact).?);
+}
+
+test "refillOnChange: false is a true no-op (stale content untouched); true re-projects" {
+    const gpa = t.allocator;
+    var tr = try TranscriptDoc.create(gpa, "alice");
+    defer tr.deinit(gpa);
+    _ = try tr.append(gpa, "user", 1, "hi");
+
+    var doc = try Document.init(gpa, "user");
+    defer doc.deinit(gpa);
+    var subs: subbuffer.SubBuffers = .empty;
+    defer subs.deinit(gpa);
+    try fill(gpa, &tr, &doc, &subs);
+
+    // The model changes (as a remote merge would), but `changed=false` —
+    // the "nothing to notice" case a quiet tick reports — must leave the
+    // buffer exactly as stale as it already was: the whole point of a PUSH
+    // trigger is that it never re-projects without being told to.
+    _ = try tr.append(gpa, "agent", 2, "yo");
+    try refillOnChange(gpa, &tr, &doc, &subs, false);
+    {
+        const got = try doc.text().toOwnedSlice(gpa);
+        defer gpa.free(got);
+        try t.expectEqualStrings("user: hi", got);
+    }
+
+    // `changed=true` re-projects, picking up everything that accumulated
+    // since the last `fill` — exactly what a collab tick's own bool would
+    // report once the merge actually lands.
+    try refillOnChange(gpa, &tr, &doc, &subs, true);
+    const got = try doc.text().toOwnedSlice(gpa);
+    defer gpa.free(got);
+    try t.expectEqualStrings("user: hi\nagent: yo", got);
 }
 
 test "Projection.fill: merging a second replica's append updates the projection" {

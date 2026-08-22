@@ -1,17 +1,24 @@
 // acp.js — an ACP (Agent Client Protocol) client, as a weft JS plugin.
 //
 // Speaks JSON-RPC 2.0 over an agent subprocess's stdio (newline-delimited),
-// drives the initialize → session/new → session/prompt handshake, and renders
-// the agent's streamed messages into a transcript buffer. weft is the harness:
-// the agent's file I/O and tool approvals arrive as callbacks the editor
-// answers (fs/read, fs/write, request_permission — a later pass wires these to
-// weft.editAs + the pick membrane), so every agent edit is a gated, attributed
-// peer commit. Agents are config data — the command to launch is passed in, not
-// baked (NixOS-friendly); nothing here assumes how the adapter is installed.
+// drives the initialize → session/new → session/prompt handshake, and feeds
+// the agent's streamed messages into a LIVE `TranscriptDoc` (the W6 check-in
+// model, core/transcript.zig) via `weft.transcriptEntry`/`transcriptAppend` —
+// the host owns the model + its graph-doc replication; this plugin only ever
+// says WHAT a chunk is (role, text), never how it's stored. weft is the
+// harness: the agent's file I/O and tool approvals arrive as callbacks the
+// editor answers (fs/read, fs/write, request_permission), so every agent edit
+// is a gated, attributed peer commit. Agents are config data — the command to
+// launch is passed in, not baked (NixOS-friendly); nothing here assumes how
+// the adapter is installed.
 //
-// State is per-session; this first cut drives ONE session. The transport
-// (procSpawn/procSend/onOutput/procRead) and the transcript (bufferAppend) are
-// the weft.* membrane; the protocol is plain JS over JSON.parse.
+// State is per-session; this first cut drives ONE session (the
+// single-instance limitation `transcript.zig`'s `SaveBinding` and
+// `JsPlugin.transcript` both document — a per-buffer transcript registry is a
+// named, un-built deferral, not multiplexed here). The transport
+// (procSpawn/procSend/onOutput/procRead) and the transcript
+// (transcriptEntry/transcriptAppend) are the weft.* membrane; the protocol is
+// plain JS over JSON.parse.
 
 const TRANSCRIPT = "*agent*";
 
@@ -34,93 +41,96 @@ function respond(id, result) {
   weft.procSend(agent, JSON.stringify({ jsonrpc: "2.0", id, result }) + "\n");
 }
 
-// StyleClass values (core.capability.StyleClass), painted over the appended
-// range so the transcript reads by role: prompts, thoughts, tool calls.
-const ST = { normal: 0, location: 4, emphasis: 5, muted: 6 };
-
-function transcript(text, cls) {
-  weft.bufferAppend(TRANSCRIPT, text, cls || 0);
-}
-
 // The status-line chip — visible even when the transcript isn't focused.
 function setStatus(dot, state) {
   weft.status(dot + " " + agentName + " · " + state);
 }
 
-// Send a prompt on the existing session (a subsequent turn). Renders the prompt
-// into the transcript so the conversation reads as a whole.
+// ── The transcript: role-tagged entries, streamed. ──────────────────────
+//
+// `liveKind` tracks which ROLE is currently open on the host's single live
+// entry (JsPlugin.transcript_live_text) — NOT which toolCallId or turn, a
+// real simplification named here: consecutive chunks of the SAME role
+// (agent_message_chunk after agent_message_chunk, say) stream onto ONE
+// entry; a role change opens a fresh one. `trOpen` is for a role that must
+// ALWAYS start a new entry regardless of what's currently open (a user
+// prompt, a tool call header); `trAppend` opens on a role change and
+// otherwise streams.
+let liveKind = null;
+
+function trOpen(role, text) {
+  weft.transcriptEntry(TRANSCRIPT, role, text || "");
+  liveKind = role;
+}
+function trAppend(role, text) {
+  if (!text) return;
+  if (liveKind !== role) trOpen(role, text);
+  else weft.transcriptAppend(TRANSCRIPT, text);
+}
+
+// Send a prompt on the existing session (a subsequent turn) — its own
+// transcript entry, always fresh (a user turn never merges into whatever
+// role was open before it).
 function sendPrompt(text) {
   if (!agent || !sid || !text) return;
-  transcript("\n\n› " + text + "\n", ST.emphasis);
+  trOpen("user", text);
   setStatus("●", "thinking");
   rpc("session/prompt", { sessionId: sid, prompt: [{ type: "text", text: text }] });
 }
 
-// Usage/cost, wherever an agent puts it (ACP doesn't standardize it) — parsed
-// defensively and rendered dimmed into the transcript.
-function usageOf(msg) {
-  return (
-    (msg.params && msg.params.update && msg.params.update.usage) ||
-    (msg.result && msg.result.usage) ||
-    msg.usage ||
-    null
-  );
-}
-function showUsage(u) {
-  const inTok = u.input_tokens ?? u.inputTokens ?? u.prompt_tokens;
-  const outTok = u.output_tokens ?? u.outputTokens ?? u.completion_tokens;
-  const cost = u.total_cost_usd ?? u.cost ?? u.costUSD;
-  let s = "· usage";
-  if (inTok != null) s += " ↑" + inTok;
-  if (outTok != null) s += " ↓" + outTok;
-  if (cost != null) s += " $" + (typeof cost === "number" ? cost.toFixed(4) : cost);
-  if (s !== "· usage") transcript("\n" + s + "\n", ST.muted);
-}
-
-// Render a tool_call_update's content (diffs, output) then FOLD it, so the
-// verbose bits collapse under the tool header. Byte offsets come from the host
-// (weft.bufferLen) so folds are correct under multibyte text.
-function prefixLines(s, p) {
-  return (
-    s
-      .split("\n")
-      .map((l) => "    " + p + l)
-      .join("\n") + "\n"
-  );
-}
+// Render a tool_call_update's content (diffs, output) as plain text onto
+// whatever entry `tool_call` just opened — DEFERRED: concurrent/interleaved
+// tool calls (more than one toolCallId live at once) collapse onto whichever
+// entry happens to be open, matching the flat-stream behavior this replaces
+// rather than a new limitation.
+//
+// The old per-chunk `bufferFold`/`paintStyle` richness (role colors, folded
+// tool output) is ALSO dropped here, but not lost for good — its return
+// path is concrete, not a vague "later": `TranscriptDoc.fill`'s plain
+// "role: text" projection is now the one and only content path (never a
+// decoration a plugin paints over a SEPARATELY-driven raw append — that
+// would resurrect exactly the parallel transcript representation the model
+// exists to replace). Richness comes back as a DECORATION PROVIDER over
+// THAT SAME projection's existing per-row subbuffer claims — the identical
+// id-span mechanism `fill` already mints one of per entry (`node_fact`,
+// carrying the entry's portable `NodeRef`) and dired's decoration renderer
+// already consumes for its own rows (editable-projection Phase 2,
+// doc/editable-projection.md: "the decoration renderer" — read a claim's
+// facts, e.g. this entry's `role` looked up back through its `NodeRef`, and
+// a tool entry's `kind`, and paint/fold purely from THAT, never from
+// separately-tracked byte ranges a plugin keeps in sync by hand). Until
+// that provider is built, the transcript reads as plain "role: text" rows —
+// correct and honest, just undecorated.
 function renderToolContent(u) {
   const items = u.content || [];
   if (!items.length) return;
-  const start = weft.bufferLen(TRANSCRIPT);
+  let blob = "";
   for (const it of items) {
     if (it.type === "diff") {
-      transcript("    " + (it.path || "") + "\n", ST.muted);
-      if (it.oldText) transcript(prefixLines(it.oldText, "- "), ST.muted);
-      if (it.newText) transcript(prefixLines(it.newText, "+ "), ST.muted);
+      blob += "    " + (it.path || "") + "\n";
+      if (it.oldText) blob += it.oldText.split("\n").map((l) => "    - " + l).join("\n") + "\n";
+      if (it.newText) blob += it.newText.split("\n").map((l) => "    + " + l).join("\n") + "\n";
     } else if (it.type === "content" && it.content) {
-      transcript("    " + (it.content.text || "") + "\n", ST.muted);
+      blob += "    " + (it.content.text || "") + "\n";
     }
   }
-  const end = weft.bufferLen(TRANSCRIPT);
-  if (end > start) weft.bufferFold(TRANSCRIPT, start, end);
+  if (blob) weft.transcriptAppend(TRANSCRIPT, blob);
 }
 
 // One decoded JSON-RPC message from the agent.
 function onMessage(msg) {
-  const u = usageOf(msg);
-  if (u) showUsage(u);
   // Streaming notifications (the turn's content).
   if (msg.method === "session/update") {
     const u = (msg.params && msg.params.update) || {};
     if (u.sessionUpdate === "agent_message_chunk" && u.content) {
       setStatus("●", "streaming");
-      transcript(u.content.text || "");
+      trAppend("agent", u.content.text || "");
     } else if (u.sessionUpdate === "agent_thought_chunk" && u.content) {
-      transcript(u.content.text || "", ST.muted); // thoughts, dimmed
+      trAppend("thought", u.content.text || "");
     } else if (u.sessionUpdate === "tool_call") {
-      transcript("\n[" + (u.kind || "tool") + "] " + (u.title || u.toolCallId || "") + "\n", ST.location);
+      trOpen("tool", "[" + (u.kind || "tool") + "] " + (u.title || u.toolCallId || "") + "\n");
     } else if (u.sessionUpdate === "tool_call_update") {
-      renderToolContent(u); // the verbose content, folded under the header
+      renderToolContent(u); // the verbose content, appended onto the open tool entry
     }
     return;
   }
@@ -223,6 +233,31 @@ weft.onOutput((h) => {
 // global so config / a command can kick it off; command-arg + config-read
 // wiring (so the prompt comes from an input line and `cmd` from weft.agent) is
 // the remaining integration.
+// CONTINUITY ACROSS RESTARTS (undocumented before this pass, worth stating
+// plainly): the live `TranscriptDoc` lives on the HOST's `JsPlugin`
+// instance, not in this JS module's state — calling `startAgent` again
+// (a re-launch, or a config-driven restart of the same running plugin)
+// does NOT start a fresh transcript. It CONTINUES appending new entries
+// onto the SAME model `weft.transcriptEntry` first created, so a second
+// agent's turns land after the first agent's, in the SAME buffer, as more
+// rows of one growing conversation — not two separate sessions. Whether
+// that's the right default for a genuine agent SWAP (a different `cmd`) vs.
+// a mere reconnect of the SAME agent is an open UX question this slice
+// doesn't answer; `liveKind = null` below only resets which ROLE is
+// considered "live" for streaming purposes (so the next chunk always opens
+// a fresh row rather than accidentally appending onto whatever the PRIOR
+// agent's session left open) — it does NOT start a new transcript.
+//
+// EAGER BUFFER CREATION, DROPPED: earlier versions of this file called
+// `transcript("")` here to make the `*agent*` buffer exist immediately (so
+// e.g. a split could show it before any content arrived). That called
+// `weft.bufferAppend` directly, which is gone — an empty `weft.
+// transcriptEntry` call would mint a spurious empty ROW in the model
+// (there is no "just create the buffer" verb that isn't also "create an
+// entry" for a graph-backed model), so this was deliberately NOT
+// preserved. The buffer now appears lazily, on the FIRST real entry
+// (`sendPrompt`'s `trOpen("user", prompt)`, just below) — a small,
+// intentional timing difference from before.
 function startAgent(cmd, prompt) {
   // The identity this agent's edits attribute to (a distinct CRDT peer): a
   // configured name, else the launch command's first word. So "claude"/"codex"
@@ -230,7 +265,7 @@ function startAgent(cmd, prompt) {
   agentName = weft.config("name") || cmd.split(/\s+/)[0].split("/").pop() || "agent";
   pending = prompt;
   setStatus("●", "starting");
-  transcript(""); // ensure the transcript buffer exists
+  liveKind = null; // the next chunk always opens a fresh row (see module note above) — never resets the transcript itself
   agent = weft.procSpawn(cmd);
   rpc("initialize", {
     protocolVersion: 1,

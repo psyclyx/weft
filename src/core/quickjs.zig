@@ -20,6 +20,9 @@ const Buffers = @import("Buffers.zig");
 const pick_mod = @import("pick.zig");
 const status_feed = @import("status_feed.zig");
 const manifest_mod = @import("manifest.zig");
+const TranscriptDoc = @import("transcript.zig");
+const GraphDoc = @import("graph.zig");
+const subbuffer = @import("subbuffer.zig");
 
 /// The embedded engine+shim (built from quickjs-ng + weft_qjs.c by build.zig).
 pub const quickjs_wasm: []const u8 = @embedFile("quickjs_wasm");
@@ -197,6 +200,8 @@ const plugin_handlers = .{
     .{ .name = "qjs_buffer_append", .handler = cBufferAppend },
     .{ .name = "qjs_buffer_fold", .handler = cBufferFold },
     .{ .name = "qjs_buffer_len", .handler = cBufferLen },
+    .{ .name = "qjs_transcript_entry", .handler = cTranscriptEntry },
+    .{ .name = "qjs_transcript_append", .handler = cTranscriptAppend },
     .{ .name = "qjs_config", .handler = cConfig },
     .{ .name = "qjs_breakpoints", .handler = cBreakpoints },
     .{ .name = "qjs_file_read", .handler = cFileRead },
@@ -326,6 +331,52 @@ pub const JsPlugin = struct {
     /// Proc streams this plugin spawned, indexed by the handle the JS holds.
     /// A closed slot is left null so handles stay stable (never reused).
     streams: std.ArrayList(?*proc_stream.ProcStream) = .empty,
+    /// This plugin's single-instance live transcript MODEL (W6 check-in
+    /// producer seam, doc/north-star-plan.md §6 W5/W6) — created on first
+    /// `weft.transcriptEntry` call. Single-instance, the SAME limitation
+    /// `transcript.zig`'s `SaveBinding` documents (no per-buffer registry
+    /// yet — named, not silently dropped): one JS plugin drives at most one
+    /// live transcript at a time. **`name` (both handlers' first arg) is
+    /// BUFFER SELECTION ONLY, never a second model key** — there is exactly
+    /// one `TranscriptDoc` here regardless of how many distinct `name`s get
+    /// passed. Calling with a NEW name re-projects the SAME model into a
+    /// (possibly fresh) buffer by that name; the buffer used by an EARLIER
+    /// call simply stops being updated (it goes stale, silently, from that
+    /// point on — nothing deletes or marks it). A plugin that wants two
+    /// independently-updating transcript buffers needs the not-yet-built
+    /// per-buffer registry `SaveBinding`'s doc comment already names; this
+    /// is a precondition, not enforced, exactly like that one.
+    transcript: ?TranscriptDoc = null,
+    /// The transcript's subbuffer claims — one table shared by every
+    /// `TranscriptDoc.fill` call this plugin makes (mirrors `fill`'s own
+    /// `subs` parameter; owned here, not stack-local, because it must
+    /// outlive any single membrane call).
+    transcript_subs: subbuffer.SubBuffers = .empty,
+    /// The currently-streaming entry's TEXT object — `weft.transcriptAppend`
+    /// inserts at its end (in the MODEL; see `transcript_live_sub` for the
+    /// matching BUFFER-side claim `cTranscriptAppend` grows incrementally).
+    /// `null` until the first `weft.transcriptEntry` call; a stream chunk
+    /// with nothing open is a silent no-op (see `cTranscriptAppend`), not a
+    /// trap — an adapter racing its first chunk ahead of the entry-open
+    /// call is that plugin's protocol-timing bug to fix, not a membrane
+    /// violation this handler should punish.
+    transcript_live_text: ?GraphDoc.ObjId = null,
+    /// Bytes already written into `transcript_live_text` — where the next
+    /// streamed chunk's `editText` insert lands (append-only: this producer
+    /// never edits earlier in the body, the "append-mostly shape
+    /// transcript.zig's own docs anticipate").
+    transcript_live_len: usize = 0,
+    /// The PROJECTED BUFFER's claim for the same live entry — `transcript.
+    /// lastRowClaim`'s return, cached right after the `fill()` that
+    /// `cTranscriptEntry` runs for this row, so `cTranscriptAppend` can grow
+    /// it INCREMENTALLY (a point-insert + `SubBuffer.extendEnd`) instead of
+    /// re-running `fill` on every streamed chunk — see `cTranscriptAppend`'s
+    /// doc comment for the full mechanism and its full-`fill` fallback.
+    /// `null` exactly when `transcript_live_text` is (kept in lockstep by
+    /// both handlers); also invalidated (read but never trusted) if the
+    /// caller's `name` names a DIFFERENT buffer than the one this claim
+    /// lives on — see that fallback.
+    transcript_live_sub: ?*subbuffer.SubBuffer = null,
 
     const Cmd = struct { plugin: *JsPlugin, id: i32, name: []u8 };
 
@@ -431,6 +482,8 @@ pub const JsPlugin = struct {
         gpa.free(self.name);
         for (self.streams.items) |maybe| if (maybe) |s| s.deinit();
         self.streams.deinit(gpa);
+        self.transcript_subs.deinit(gpa);
+        if (self.transcript) |*tr| tr.deinit(gpa);
         for (self.cmds.items) |c| {
             gpa.free(c.name);
             gpa.destroy(c);
@@ -604,6 +657,128 @@ fn cBufferAppend(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32, res
     const text = caller.readMemory(gpa, @intCast(args[2]), @intCast(args[3])) catch return;
     defer gpa.free(text);
     appendNamed(self.bridge.activeCtx(), gpa, name, text, @truncate(@as(u32, @bitCast(args[4]))));
+}
+
+/// weft.transcriptEntry(name, role, text): begin a new entry in this
+/// plugin's live transcript (created on first use — `JsPlugin.transcript`'s
+/// doc comment), then FULLY re-fill `name`'s tool-backed projection buffer
+/// from the model. Full `fill` (not the incremental path `cTranscriptAppend`
+/// below uses) is the honest choice HERE: a new entry is a structural
+/// change to the model (a new row, new decoration prefix, a whole new
+/// subbuffer claim to mint) — there is no "just grow the last claim" shape
+/// for it, unlike a chunk streamed onto a row that already exists. This is
+/// the LOCAL half of live-projection freshness (a local append is
+/// synchronous, so re-filling right here is the honest trigger; the REMOTE
+/// half is `TranscriptDoc.refillOnChange`, driven by a collab quad's own
+/// changed signal — see that function's doc comment). This is the seam
+/// REPLACING a raw `weft.bufferAppend` for actual conversation content
+/// (doc/agents.md's ACP client is the first caller, config/plugins/acp.js):
+/// `role` is now real model data an entry carries, not a decoration prefix
+/// a plugin painted onto a plain buffer by hand.
+fn cTranscriptEntry(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32, results: []i32) void {
+    _ = results;
+    const self: *JsPlugin = @ptrCast(@alignCast(data.?));
+    const gpa = self.gpa;
+    const name = caller.readMemory(gpa, @intCast(args[0]), @intCast(args[1])) catch return;
+    defer gpa.free(name);
+    const role = caller.readMemory(gpa, @intCast(args[2]), @intCast(args[3])) catch return;
+    defer gpa.free(role);
+    const text = caller.readMemory(gpa, @intCast(args[4]), @intCast(args[5])) catch return;
+    defer gpa.free(text);
+    transcriptEntry(self, gpa, name, role, text) catch return;
+}
+
+fn transcriptEntry(self: *JsPlugin, gpa: Allocator, name: []const u8, role: []const u8, text: []const u8) !void {
+    if (self.transcript == null) self.transcript = try TranscriptDoc.create(gpa, self.name);
+    const tr = &self.transcript.?;
+    const obj = try tr.append(gpa, role, @bitCast(task.nowNs()), text);
+    self.transcript_live_text = tr.graph.ref(obj).mapGet("text").?.objId().?;
+    self.transcript_live_len = text.len;
+    // Cleared BEFORE the buffer lookup/fill below, not after: if either
+    // fails partway (buffer creation, `fill`'s allocation), an early
+    // `return`/error must never leave a STALE claim pointing at the
+    // PREVIOUS entry's row cached under `transcript_live_text` now naming
+    // the NEW one — `cTranscriptAppend`'s `sub.?.doc != doc` guard only
+    // catches a buffer/name mismatch, not this. `null` here always means
+    // "fall back to a full fill", which is always correct.
+    self.transcript_live_sub = null;
+    const b = namedBuffer(self.bridge.activeCtx(), gpa, name) orelse return;
+    try b.editor.setToolBacking(gpa, TranscriptDoc.projection_author);
+    try TranscriptDoc.fill(gpa, tr, &b.editor.doc, &self.transcript_subs);
+    // Cache the fresh row's claim for `cTranscriptAppend`'s incremental
+    // path — see `transcript.lastRowClaim`'s doc comment for why this is
+    // safe to grab right here (nothing else claims on `b.editor.doc`
+    // between the `fill` above and this line).
+    self.transcript_live_sub = TranscriptDoc.lastRowClaim(&self.transcript_subs, &b.editor.doc);
+}
+
+/// weft.transcriptAppend(name, text): stream `text` onto the currently-open
+/// entry's body — a real text-CRDT insert into the MODEL
+/// (`TranscriptDoc.editText`, the append-mostly shape transcript.zig's own
+/// docs anticipate) PLUS an INCREMENTAL update of the PROJECTED BUFFER,
+/// deliberately NOT a full `fill` (REQUIRED per review: streaming is the
+/// primary workload here, and a full re-fill is O(chunks × (transcript_
+/// bytes + n_rows)) — every entry re-read, the whole buffer text rebuilt,
+/// every row's claim dropped and re-minted — for a chunk that only ever
+/// touches ONE row's tail). The buffer-side update instead: (1) a
+/// zero-width point-insert at `self.transcript_live_sub`'s CURRENT end —
+/// the exact shape `appendNamed` already uses for a plain buffer, so it's
+/// the SAME `command.renderInto` call, just aimed at one claim's tail
+/// instead of the whole document — then (2) `SubBuffer.extendEnd` to widen
+/// that ONE claim to cover the new bytes (an append landing exactly at a
+/// claim's inward-biased end does NOT auto-extend it — see `extendEnd`'s
+/// doc comment for why that's a real gap this closes, not a workaround).
+/// Cost: O(chunk_len), independent of transcript size or row count.
+///
+/// Falls back to a full `fill` (loud in effect, not in a log — see below)
+/// in exactly two cases, both meaning the cached claim can't be trusted:
+/// no claim was ever cached (`transcript_live_sub == null` — e.g. `name`
+/// pointed at a fresh/different buffer than the one `cTranscriptEntry` last
+/// filled; `JsPlugin.transcript`'s doc comment on `name` being
+/// buffer-selection-only, never a second model key, is the precise
+/// contract this degrades under), or the cached claim's OWN buffer no
+/// longer matches `name`'s buffer right now (the same cross-buffer case,
+/// caught defensively even if the cache was stale for another reason). A
+/// full `fill` is always a CORRECT answer for either case — the fallback
+/// never drops a chunk, it just pays the price the fast path exists to
+/// avoid.
+fn cTranscriptAppend(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32, results: []i32) void {
+    _ = results;
+    const self: *JsPlugin = @ptrCast(@alignCast(data.?));
+    const gpa = self.gpa;
+    const name = caller.readMemory(gpa, @intCast(args[0]), @intCast(args[1])) catch return;
+    defer gpa.free(name);
+    const text = caller.readMemory(gpa, @intCast(args[2]), @intCast(args[3])) catch return;
+    defer gpa.free(text);
+    transcriptAppend(self, gpa, name, text) catch return;
+}
+
+fn transcriptAppend(self: *JsPlugin, gpa: Allocator, name: []const u8, text: []const u8) !void {
+    if (text.len == 0) return;
+    const tr = if (self.transcript) |*trp| trp else return;
+    const text_obj = self.transcript_live_text orelse return;
+    // The model insert always happens — replication's source of truth,
+    // independent of whatever the buffer-side fast/slow path below does.
+    try tr.editText(gpa, text_obj, self.transcript_live_len, text);
+    self.transcript_live_len += text.len;
+
+    const b = namedBuffer(self.bridge.activeCtx(), gpa, name) orelse return;
+    const doc = &b.editor.doc;
+    const sub = self.transcript_live_sub;
+    if (sub == null or sub.?.doc != doc) {
+        // Slow path: no trustworthy cached claim (see this fn's doc
+        // comment for the two cases) — a full re-fill is always correct.
+        try TranscriptDoc.fill(gpa, tr, doc, &self.transcript_subs);
+        self.transcript_live_sub = TranscriptDoc.lastRowClaim(&self.transcript_subs, doc);
+        return;
+    }
+    // Fast path: grow the buffer and the one claim that names this row,
+    // nothing else touched.
+    const at = sub.?.resolve().end;
+    try command.renderInto(gpa, doc, .plugin, TranscriptDoc.projection_author, &.{
+        .{ .range = .{ .start = at, .end = at }, .bytes = text },
+    });
+    try sub.?.extendEnd(gpa, at + text.len);
 }
 
 /// weft.config(key) -> string: this plugin's config value for `key` (what the
@@ -1407,6 +1582,21 @@ test "quickjs: a JS plugin drives a duplex subprocess and reads its output" {
     try t.expect(std.mem.indexOf(u8, env.head.echo.items, "ping") != null);
 }
 
+// SCOPE NOTE (added alongside the incremental-append/decoration-path
+// rework below, so a future reader doesn't have to reconstruct this from
+// git blame): this test predates `weft.transcriptEntry`/`transcriptAppend`
+// and was written against the OLD raw `weft.bufferAppend` path — it never
+// names the transcript seam and never asserts role tagging or model state,
+// only a plain substring in the rendered buffer. It still exercises the
+// REAL `config/plugins/acp.js` end to end (a real mock-agent subprocess,
+// the real JSON-RPC parse, the real `weft.transcriptEntry` call
+// `acp.js`'s `trAppend` now makes), so it is NOT vacuous — but it is
+// coincidental coverage of the new seam, not a test written FOR it. The
+// test below is: a direct handler-level test, driving `weft.
+// transcriptEntry`/`transcriptAppend` through the real JS runtime, that
+// asserts what this one does not (role tagging, streamed-body accumulation,
+// the model AND the projected buffer, and that the FAST incremental path —
+// not a full-`fill` fallback — is what actually ran).
 test "quickjs: the ACP plugin drives a mock agent's message into the transcript" {
     const gpa = t.allocator;
     var env: Env = undefined;
@@ -1457,6 +1647,113 @@ test "quickjs: the ACP plugin drives a mock agent's message into the transcript"
         std.atomic.spinLoopHint();
     }
     try t.expect(found);
+}
+
+test "quickjs: transcriptEntry/transcriptAppend — role tagging, streamed-body accumulation, model+buffer agreement, and the INCREMENTAL (not full-refill) fast path" {
+    const gpa = t.allocator;
+    var env: Env = undefined;
+    try Env.init(gpa, &env);
+    defer env.deinit(gpa);
+    var engine = try wasm.Engine.init();
+    defer engine.deinit();
+
+    // Four commands, one per step, so the Zig side can peek host state
+    // BETWEEN individual `weft.transcriptEntry`/`transcriptAppend` calls —
+    // a single top-level `weft_plugin_init` eval (like the mock-agent test
+    // above uses) runs its whole body in one uninterruptible JS_Eval, which
+    // can't be inspected mid-script.
+    const src =
+        \\weft.command("open", () => weft.transcriptEntry("*t*", "user", "hi"));
+        \\weft.command("chunk", () => weft.transcriptAppend("*t*", "!"));
+        \\weft.command("open2", () => weft.transcriptEntry("*t*", "agent", "yo"));
+    ;
+    var plugin = try JsPlugin.load(gpa, &engine, &env.ctx, env.pool, .empty, "test", null, src);
+    defer plugin.deinit();
+
+    const bufText = struct {
+        fn get(e: *Env, gpa2: Allocator) ![]u8 {
+            var it = e.buffers.iterator();
+            while (it.next()) |b| {
+                if (std.mem.eql(u8, b.name, "*t*")) return b.editor.text().toOwnedSlice(gpa2);
+            }
+            return error.NoBuffer;
+        }
+    }.get;
+
+    // "open": the model gets its first (role, text) entry; the FULL `fill`
+    // path runs (a structural change — new row), which mints entry 0's
+    // subbuffer claim — cached as `transcript_live_sub`.
+    _ = try command.run(&env.commands, &env.ctx, "open", &.{});
+    try t.expectEqual(@as(usize, 1), plugin.transcript.?.count());
+    try t.expectEqualStrings("user", plugin.transcript.?.at(0).role());
+    {
+        const b0 = try plugin.transcript.?.at(0).text(gpa);
+        defer gpa.free(b0);
+        try t.expectEqualStrings("hi", b0);
+    }
+    {
+        const got = try bufText(&env, gpa);
+        defer gpa.free(got);
+        try t.expectEqualStrings("user: hi", got);
+    }
+    try t.expectEqual(@as(usize, 1), plugin.transcript_subs.list.items.len);
+    const sub_a = plugin.transcript_live_sub.?;
+
+    // "chunk" ×2: streamed onto the SAME row. The claim object's IDENTITY
+    // (not just its resolved range) stays the SAME pointer across both —
+    // the precise signature of the INCREMENTAL path (`SubBuffer.extendEnd`
+    // mutates the existing claim in place); a full-`fill` fallback would
+    // `dropDoc` + re-`claim`, minting a BRAND NEW object each time, which
+    // this asserts did NOT happen.
+    _ = try command.run(&env.commands, &env.ctx, "chunk", &.{});
+    const sub_b = plugin.transcript_live_sub.?;
+    try t.expectEqual(@as(usize, 1), plugin.transcript_subs.list.items.len); // no new/leaked claim
+    try t.expect(sub_a == sub_b);
+
+    _ = try command.run(&env.commands, &env.ctx, "chunk", &.{});
+    const sub_c = plugin.transcript_live_sub.?;
+    try t.expectEqual(@as(usize, 1), plugin.transcript_subs.list.items.len);
+    try t.expect(sub_b == sub_c);
+
+    // The MODEL accumulated both chunks (replication's source of truth)...
+    {
+        const b0 = try plugin.transcript.?.at(0).text(gpa);
+        defer gpa.free(b0);
+        try t.expectEqualStrings("hi!!", b0);
+    }
+    // ...and the PROJECTED BUFFER agrees, byte for byte, with what a full
+    // `fill` of this same model would have produced — the incremental path
+    // is a performance shortcut, never a divergent rendering.
+    {
+        const got = try bufText(&env, gpa);
+        defer gpa.free(got);
+        try t.expectEqualStrings("user: hi!!", got);
+
+        const DocumentMod = @import("Document.zig");
+        var doc_check = try DocumentMod.init(gpa, "check");
+        defer doc_check.deinit(gpa);
+        var subs_check: subbuffer.SubBuffers = .empty;
+        defer subs_check.deinit(gpa);
+        try TranscriptDoc.fill(gpa, &plugin.transcript.?, &doc_check, &subs_check);
+        const full = try doc_check.text().toOwnedSlice(gpa);
+        defer gpa.free(full);
+        try t.expectEqualStrings(full, got);
+    }
+
+    // "open2": a NEW row — role tagging carries through per entry, not just
+    // per plugin — and its claim is a genuinely DIFFERENT object (the full
+    // `fill` this triggers re-mints every row's claim, entry 0's included).
+    _ = try command.run(&env.commands, &env.ctx, "open2", &.{});
+    try t.expectEqual(@as(usize, 2), plugin.transcript.?.count());
+    try t.expectEqualStrings("agent", plugin.transcript.?.at(1).role());
+    const sub_d = plugin.transcript_live_sub.?;
+    try t.expect(sub_d != sub_c);
+    try t.expectEqual(@as(usize, 2), plugin.transcript_subs.list.items.len);
+    {
+        const got = try bufText(&env, gpa);
+        defer gpa.free(got);
+        try t.expectEqualStrings("user: hi!!\nagent: yo", got);
+    }
 }
 
 test "quickjs: a JS plugin reads a file through weft.fileRead" {

@@ -69,6 +69,28 @@ pub const SubBuffer = struct {
         return self.facts.get(name);
     }
 
+    /// Widen this claim's END to `new_end` — the one growth shape the
+    /// inward bias (this struct's module doc: "text typed at either edge
+    /// grows the surrounding buffer, not the embedded island") deliberately
+    /// does NOT give you for free: an append landing EXACTLY at a claim's
+    /// current end is, by that same bias, outside it. A live-streaming
+    /// producer (a transcript entry's body growing one chunk at a time —
+    /// see `transcript.zig`'s `lastRowClaim` / `quickjs.zig`'s
+    /// `cTranscriptAppend`) needs the opposite answer for THAT one claim:
+    /// the new bytes are the claim's own content, not surrounding chrome.
+    /// Re-anchors rather than mutating in place — anchors are immutable
+    /// handles into the document's anchor set (`Document.addAnchor`'s own
+    /// contract), so "moving" one means dropping the old and minting a
+    /// fresh one at the new position, same `.left` bias every claim's end
+    /// already uses. Caller's responsibility: `new_end` must be a valid
+    /// offset in `self.doc` AT THE TIME OF THE CALL (typically "right after
+    /// inserting the bytes that justify the growth").
+    pub fn extendEnd(self: *SubBuffer, gpa: Allocator, new_end: usize) Allocator.Error!void {
+        const fresh = try self.doc.addAnchor(gpa, new_end, .left);
+        self.doc.removeAnchor(self.end);
+        self.end = fresh;
+    }
+
     fn deinit(self: *SubBuffer, gpa: Allocator) void {
         self.doc.removeAnchor(self.start);
         self.doc.removeAnchor(self.end);
@@ -212,6 +234,35 @@ test "subbuffer: nested claims resolve innermost; dropDoc clears" {
 
     subs.dropDoc(gpa, &doc);
     try t.expectEqual(@as(usize, 0), subs.list.items.len);
+}
+
+test "subbuffer: extendEnd grows a claim to cover a tail append that landed outside its inward-biased end" {
+    const gpa = t.allocator;
+    var doc = try Document.init(gpa, "user");
+    defer doc.deinit(gpa);
+    try doc.insert(gpa, 0, "role: hi");
+    var subs: SubBuffers = .empty;
+    defer subs.deinit(gpa);
+
+    // Claim the body ("hi", offsets 6..8) — same shape `fill` claims a
+    // transcript row's body.
+    const body = try subs.claim(gpa, &doc, .{ .start = 6, .end = 8 });
+    try t.expectEqual(@as(usize, 8), body.resolve().end);
+
+    // Append at the claim's own end — the inward bias means this does NOT
+    // auto-extend it (the whole reason `extendEnd` exists).
+    try doc.insert(gpa, 8, "!!");
+    try t.expectEqual(@as(usize, 8), body.resolve().end);
+    try t.expect(!body.contains(9));
+
+    // `extendEnd` widens it explicitly to include the new bytes.
+    try body.extendEnd(gpa, 8 + 2);
+    try t.expectEqual(@as(usize, 10), body.resolve().end);
+    try t.expect(body.contains(9));
+
+    // Still rebases normally afterward (a fresh anchor, not a one-shot patch).
+    try doc.insert(gpa, 0, "XX");
+    try t.expectEqual(@as(usize, 12), body.resolve().end);
 }
 
 test {

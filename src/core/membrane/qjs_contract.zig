@@ -91,6 +91,8 @@ pub const imports = [_]Entry{
     e("qjs_buffer_append", 5, 0, .plugin, "append text (+style class) to a named buffer, authored as the transcript peer"),
     e("qjs_buffer_fold", 4, 0, .plugin, "collapse `[start,end)` of a named buffer as an invisible/foldable span"),
     e("qjs_buffer_len", 2, 1, .plugin, "weft.bufferLen(name): a named buffer's byte length"),
+    e("qjs_transcript_entry", 6, 0, .plugin, "weft.transcriptEntry(name, role, text): start a new entry in this plugin's live TranscriptDoc (created on first use), re-filling the named projected buffer (W6 check-in producer seam)"),
+    e("qjs_transcript_append", 4, 0, .plugin, "weft.transcriptAppend(name, text): stream a chunk onto the currently-open entry's body as a text-CRDT insert, re-filling the named projected buffer"),
     e("qjs_config", 4, 1, .plugin, "weft.config(key): this plugin's staged config value"),
     e("qjs_breakpoints", 4, 1, .plugin, "weft.breakpoints(path): the file's breakpoint lines as a CSV"),
     e("qjs_file_read", 4, 1, .plugin, "weft.fileRead(path): the file's live-buffer-or-disk content for an agent read"),
@@ -105,7 +107,7 @@ pub const imports = [_]Entry{
 /// `qjs_*` import, so a merge conflict or half-finished edit fails the
 /// build instead of silently drifting quickjs.zig's three registration
 /// sites apart.
-const expected_count = 27;
+const expected_count = 29;
 
 comptime {
     @setEvalBranchQuota(10_000); // O(n²) duplicate scan, n=27
@@ -151,7 +153,7 @@ test "qjs membrane contract: every entry is well-formed, documented, and unique"
     }
     try t.expectEqual(@as(usize, expected_count), imports.len);
     try t.expectEqual(@as(usize, 12), config_count); // defineConfigFns' surface
-    try t.expectEqual(@as(usize, 15), plugin_count); // the resident-plugin-only surface
+    try t.expectEqual(@as(usize, 17), plugin_count); // the resident-plugin-only surface
 }
 
 // Sealed eval (north-star-plan §2.3/§4 C11; manifest.zig's module doc):

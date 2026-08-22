@@ -69,6 +69,19 @@ extern void host_buffer_fold(const char *name, int name_len, int start, int end)
 // A named buffer's byte length — for computing fold offsets.
 __attribute__((import_module("weft"), import_name("qjs_buffer_len")))
 extern int host_buffer_len(const char *name, int name_len);
+// W6 check-in producer seam (doc/agents.md, north-star-plan.md §6 W5/W6):
+// start a new role-tagged entry in this plugin's single-instance live
+// TranscriptDoc (created on first call), re-filling `name`'s projected
+// buffer from the model. Config stubs it (never called there).
+__attribute__((import_module("weft"), import_name("qjs_transcript_entry")))
+extern void host_transcript_entry(const char *name, int name_len,
+                                  const char *role, int role_len,
+                                  const char *text, int text_len);
+// Stream a chunk onto the currently-open entry's body (a real text-CRDT
+// insert), re-filling `name`'s projected buffer the same way.
+__attribute__((import_module("weft"), import_name("qjs_transcript_append")))
+extern void host_transcript_append(const char *name, int name_len,
+                                   const char *text, int text_len);
 // Read this plugin's config value for `key` (staged by weft.set) into `out`.
 __attribute__((import_module("weft"), import_name("qjs_config")))
 extern int host_config(const char *key, int key_len, char *out, int cap);
@@ -537,6 +550,36 @@ static JSValue js_buffer_len(JSContext *ctx, JSValueConst this_val,
     return JS_NewInt32(ctx, n);
 }
 
+// weft.transcriptEntry(name, role, text): start a new entry in this
+// plugin's live transcript model (W6 check-in producer seam).
+static JSValue js_transcript_entry(JSContext *ctx, JSValueConst this_val,
+                                   int argc, JSValueConst *argv) {
+    if (argc < 3) return JS_UNDEFINED;
+    size_t nl, rl, tl;
+    const char *name = JS_ToCStringLen(ctx, &nl, argv[0]);
+    const char *role = JS_ToCStringLen(ctx, &rl, argv[1]);
+    const char *text = JS_ToCStringLen(ctx, &tl, argv[2]);
+    if (name && role && text) host_transcript_entry(name, (int)nl, role, (int)rl, text, (int)tl);
+    JS_FreeCString(ctx, name);
+    JS_FreeCString(ctx, role);
+    JS_FreeCString(ctx, text);
+    return JS_UNDEFINED;
+}
+
+// weft.transcriptAppend(name, text): stream a chunk onto the currently-open
+// entry's body.
+static JSValue js_transcript_append(JSContext *ctx, JSValueConst this_val,
+                                    int argc, JSValueConst *argv) {
+    if (argc < 2) return JS_UNDEFINED;
+    size_t nl, tl;
+    const char *name = JS_ToCStringLen(ctx, &nl, argv[0]);
+    const char *text = JS_ToCStringLen(ctx, &tl, argv[1]);
+    if (name && text) host_transcript_append(name, (int)nl, text, (int)tl);
+    JS_FreeCString(ctx, name);
+    JS_FreeCString(ctx, text);
+    return JS_UNDEFINED;
+}
+
 // weft.config(key) -> string: this plugin's config value (weft.set), or "".
 static char g_config_buf[8192];
 static JSValue js_config(JSContext *ctx, JSValueConst this_val,
@@ -689,6 +732,8 @@ int weft_plugin_init(const char *src, int len) {
     JS_SetPropertyStr(g_ctx, weft, "bufferAppend", JS_NewCFunction(g_ctx, js_buffer_append, "bufferAppend", 2));
     JS_SetPropertyStr(g_ctx, weft, "bufferFold", JS_NewCFunction(g_ctx, js_buffer_fold, "bufferFold", 3));
     JS_SetPropertyStr(g_ctx, weft, "bufferLen", JS_NewCFunction(g_ctx, js_buffer_len, "bufferLen", 1));
+    JS_SetPropertyStr(g_ctx, weft, "transcriptEntry", JS_NewCFunction(g_ctx, js_transcript_entry, "transcriptEntry", 3));
+    JS_SetPropertyStr(g_ctx, weft, "transcriptAppend", JS_NewCFunction(g_ctx, js_transcript_append, "transcriptAppend", 2));
     JS_SetPropertyStr(g_ctx, weft, "config", JS_NewCFunction(g_ctx, js_config, "config", 1));
     JS_SetPropertyStr(g_ctx, weft, "breakpoints", JS_NewCFunction(g_ctx, js_breakpoints, "breakpoints", 1));
     JS_SetPropertyStr(g_ctx, weft, "fileRead", JS_NewCFunction(g_ctx, js_file_read, "fileRead", 1));
