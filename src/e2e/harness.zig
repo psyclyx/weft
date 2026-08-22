@@ -1413,6 +1413,41 @@ pub fn drainToolContains(ed: *Editor, name: []const u8, needle: []const u8) bool
     return false;
 }
 
+/// Drive the async loop until it has NO in-flight tasks (every subprocess
+/// this `Editor` scheduled — `wl_proc_to_buffer`'s "mutate ; gather" among
+/// them — has been polled to completion by `loop.tick` and delivered), or a
+/// timeout. `Loop.tasks` (async.zig) is the pool-wake signal itself: an entry
+/// is only removed once `handle.poll()` reports the pool thread actually
+/// finished, so `tasks.items.len == 0` is a direct observation of subprocess
+/// exit — not an inference from elapsed ticks.
+///
+/// This is the fix for the git-rebase-interactive flake (task #22): a caller
+/// about to fire a SECOND git subprocess in the same worktree (e.g. abort,
+/// right after continue) must first prove the first one's `git` process has
+/// actually exited, or the two can collide on `.git/index.lock`. The old
+/// `ed.settle(50)` used a FIXED round count — the same shape as the `waitSave`
+/// flake (see its doc comment): a count of scheduling opportunities, not of
+/// elapsed time. `settle`'s rounds each busy-wait a real 2ms via `napUs`, so
+/// under light load 50 rounds comfortably outlasts a `git` subprocess — but
+/// under CPU contention (a concurrent `zig build`, or plain machine load) the
+/// OS can decline to run this process's POOL WORKER thread (a different
+/// thread than the one busy-waiting) for the whole ~100ms budget, so the
+/// fixed count elapses while the subprocess is still in flight, and the very
+/// next git invocation races it for the lock. Wall-clock bounded like every
+/// other "wait for the pool" helper in this file (`waitSave`,
+/// `drainToolContains`, `drainUntilOracle`) — the loop keeps ticking past any
+/// fixed budget as long as real time remains, so it only gives up on a
+/// genuine hang.
+pub fn drainLoopIdle(ed: *Editor) bool {
+    const deadline = core.task.nowNs() + 10 * std.time.ns_per_s;
+    while (core.task.nowNs() < deadline) {
+        _ = ed.loop.tick();
+        if (ed.loop.tasks.items.len == 0) return true;
+        std.Thread.yield() catch {};
+    }
+    return false;
+}
+
 /// Drive the async loop until the DISK oracle `sh_cmd` reports `needle` (or a
 /// timeout). A magit mutation (stage/commit) shells out asynchronously — the
 /// keypress only SCHEDULES `git add`/`git commit`; the loop tick is what lets

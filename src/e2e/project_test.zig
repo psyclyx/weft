@@ -32,6 +32,7 @@ const authorFile = h.authorFile;
 const toolText = h.toolText;
 const drainToolContains = h.drainToolContains;
 const drainUntilOracle = h.drainUntilOracle;
+const drainLoopIdle = h.drainLoopIdle;
 const tmpPath = h.tmpPath;
 const socketPair = h.socketPair;
 const napUs = h.napUs;
@@ -184,8 +185,10 @@ test "e2e/project: git-rebase-interactive keeps git-rebase-menu open on a real c
     // Drain `c`'s async `git rebase --continue` (it fails fast — conflict
     // unresolved — but still runs a real subprocess in the SAME repo) before
     // firing another git process below: two live git invocations in one
-    // worktree can race on `.git/index.lock`.
-    ed.settle(50);
+    // worktree can race on `.git/index.lock`. Wait for the pool to actually
+    // report the subprocess done (task #22) — not a fixed tick count, which
+    // flaked once under concurrent-build load (see `drainLoopIdle`'s doc).
+    try t.expect(drainLoopIdle(&ed));
 
     // The conflict is still unresolved, so the rebase is still mid-flight —
     // re-opening the menu and pressing `i` again must still hold it open.
