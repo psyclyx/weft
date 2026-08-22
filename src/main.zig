@@ -59,6 +59,35 @@ const arg_parse = @import("app/args.zig");
 const Args = arg_parse.Args;
 const parseArgs = arg_parse.parseArgs;
 
+/// Host a second, minimal system ("agent-ux") on `host` — task #19 items
+/// 1/4's live-swap gate, run against the REAL desktop session rather than
+/// `core/System.zig`'s synthetic fixtures. `src` is `config/agent-ux.js`'s
+/// already-read bytes. Mirrors `core/System.zig`'s own "the real
+/// config/agent-ux.js manifest hosts a SECOND system end-to-end" gate test
+/// almost exactly (a scoped, one-shot `wasm.Engine` for the eval, just like
+/// `config_load.ConfigSession.reload`'s pattern — config is a startup
+/// declaration, not a resident runtime) but against `Session.host` instead
+/// of a bare test-local `Host`. Deliberately does NOT call `initPlugins` on
+/// the new system (task #19 item 3: the second system stays plugin-free).
+fn hostAgentUx(gpa: std.mem.Allocator, pool: *core.task.Pool, host: *core.System.Host, user: []const u8, src: []const u8) !void {
+    const sys = try core.System.create(gpa, pool, "agent-ux", user);
+    errdefer sys.destroy();
+    var engine = try core.wasm.Engine.init();
+    defer engine.deinit();
+    var c = sys.contextFor(&sys.default_head);
+    const m = try core.quickjs.evalToManifest(&engine, &c, null, &sys.config_kv, "config", src, .config, "agent-ux");
+    {
+        // The manifest errdefer must not outlive applyManifest: on success,
+        // ownership of `m` moves into sys.applied_manifest, and sys.destroy()
+        // (the outer errdefer) frees it — a still-armed m.destroy() on a later
+        // failure (hostSystem OOM) would double-free.
+        errdefer m.destroy();
+        try sys.applyManifest(gpa, m, null);
+    }
+    try host.hostSystem(sys);
+    std.log.info("agent-ux: hosted a second system from config/agent-ux.js ({d} bytes)", .{src.len});
+}
+
 pub fn main(init: std.process.Init) !void {
     // Debug builds get leak checking; release builds get the lean
     // allocator (DebugAllocator's bookkeeping costs real RSS).
@@ -108,7 +137,8 @@ pub fn main(init: std.process.Init) !void {
     var session: Session = undefined;
     try session.init(gpa, pool, args.user, &providers_state.grammars);
     defer session.deinit(gpa);
-    const buffers = &session.buffers;
+    const buffers = &session.system.buffers;
+    const editor_keymap = &session.system.keymap; // baked, like `buffers` — see applyIntents
     if (args.file) |path| {
         const b0 = buffers.active();
         gpa.free(b0.name);
@@ -153,7 +183,7 @@ pub fn main(init: std.process.Init) !void {
     // status line's peer trust; first contact is accepted but unverified).
     var known_peers = try core.known_peers.KnownPeers.load(gpa, init.minimal.environ);
     defer known_peers.deinit();
-    _ = try session.commands.bind(gpa, "identity", .{
+    _ = try session.system.commands.bind(gpa, "identity", .{
         .name = "identity",
         .summary = "Show this machine's identity fingerprint.",
         .args = &.{},
@@ -168,46 +198,33 @@ pub fn main(init: std.process.Init) !void {
     //    reaching the editor only through the `weft.*` membrane and authoring
     //    every edit as its own peer. The effect services the ABI's Group D/E
     //    need are wired here and forwarded across the membrane.
-    var plugin_kv: core.kv.Store = .empty;
-    defer plugin_kv.deinit(gpa);
-    // Config data the config plane stages via weft.set — a DISTINCT store from
-    // plugin_kv so runtime scratch and injected config can never collide.
-    var config_kv: core.kv.Store = .empty;
-    defer config_kv.deinit(gpa);
-    var plugin_subs: core.subbuffer.SubBuffers = .empty;
-    defer plugin_subs.deinit(gpa);
-    // The one register/kill store every editor shares (editor-agnostic yank/
-    // paste that ferries a projection row's hidden id across dd→p).
-    var plugin_register: core.register = .empty;
-    defer plugin_register.deinit(gpa);
-    var plugin_loop = core.async_loop.Loop.init(gpa, pool, core.task.nowNs);
-    defer plugin_loop.deinit();
+    //
+    // OWNED by `session.system` now (task #19 item 3: "plugin instances are
+    // PER-SYSTEM" — `core.System.Plugins`), not bare `main()` locals — this
+    // is a STRUCTURAL move only: the editor system is still the only one
+    // that ever calls `initPlugins`/loads a plugin (agent-ux "stays
+    // plugin-free" per the task). `plug` below is a convenience alias to
+    // `session.system.plugins.?`, taken once, right after creation — it
+    // stays valid even across a LATER `system-swap` (a raw pointer into the
+    // editor System's heap-pinned allocation, not re-read through
+    // `session.system`), which is exactly right: plugin ticking/streaming
+    // is unconditionally editor-scoped regardless of which system the head
+    // is currently attached to (agent-ux never gets its own).
+    try session.system.initPlugins(pool);
+    const plug = &session.system.plugins.?;
     // Give plugin `proc` children the parent PATH (nix tools like rg/zig).
     core.wasm_host.setEnviron(init.minimal.environ);
-    var wasm_engine = try core.wasm.Engine.init();
-    defer wasm_engine.deinit();
-    var plugins: std.ArrayList(*core.wasm_abi.WasmPlugin) = .empty;
-    defer {
-        for (plugins.items) |p| p.deinit();
-        plugins.deinit(gpa);
-    }
-    // JS plugins (resident quickjs instances — e.g. the ACP agent client).
-    var js_plugins: std.ArrayList(*core.quickjs.JsPlugin) = .empty;
-    defer {
-        for (js_plugins.items) |p| p.deinit();
-        js_plugins.deinit(gpa);
-    }
     const plugin_dir = config_load.pluginDir(gpa);
     defer gpa.free(plugin_dir);
     const module_cache_dir = config_load.moduleCacheDir(gpa);
     defer if (module_cache_dir) |d| gpa.free(d);
     var plugin_host: config_load.PluginHost = .{
         .gpa = gpa,
-        .engine = &wasm_engine,
+        .engine = &plug.engine,
         .ctx = &session.cmd_ctx,
-        .opts = .{ .kv = &plugin_kv, .config = &config_kv, .loop = &plugin_loop, .subbuffers = &plugin_subs, .register = &plugin_register, .syntax_of = resolveSyntax, .pool = pool, .module_cache_dir = module_cache_dir },
-        .list = &plugins,
-        .js_list = &js_plugins,
+        .opts = .{ .kv = &plug.kv, .config = &session.system.config_kv, .loop = &plug.loop, .subbuffers = &plug.subbuffers, .register = &plug.register, .syntax_of = resolveSyntax, .pool = pool, .module_cache_dir = module_cache_dir },
+        .list = &plug.list,
+        .js_list = &plug.js_list,
         .dir = plugin_dir,
     };
     // Explicit --plugin flags load first, in order.
@@ -228,17 +245,17 @@ pub fn main(init: std.process.Init) !void {
     var config_session: ?config_load.ConfigSession = null;
     defer if (config_session) |*cs| cs.deinit();
     if (args.config) |config_path| {
-        config_session = config_load.ConfigSession.init(gpa, &session.cmd_ctx, config_path, plugin_host.loader(), &config_kv) catch |e| blk: {
+        config_session = config_load.ConfigSession.init(gpa, &session.cmd_ctx, config_path, plugin_host.loader(), &session.system.config_kv) catch |e| blk: {
             std.log.warn("config: {s} failed to load: {t}", .{ config_path, e });
             break :blk null;
         };
         // `weft.statusSegment` mesh reachability (north-star-plan task #19
-        // item 3): binds straight into `session.container` — the same
-        // shared Container `session.caps`/`session.actions` already use.
-        if (config_session) |*cs| cs.ui_bind = .{ .ctx = &session.container, .bind = view_mod.ui_mesh.bindManifestSegment };
+        // item 3): binds straight into `session.system.container` — the same
+        // shared Container `session.system.caps`/`.actions` already use.
+        if (config_session) |*cs| cs.ui_bind = .{ .ctx = &session.system.container, .bind = view_mod.ui_mesh.bindManifestSegment };
         if (config_session) |*cs| cs.reload() catch |e|
             std.log.warn("config: {s} failed to load: {t}", .{ config_path, e });
-        if (config_session) |*cs| _ = try session.commands.bind(gpa, "config-reload", .{
+        if (config_session) |*cs| _ = try session.system.commands.bind(gpa, "config-reload", .{
             .name = "config-reload",
             .summary = "Reload config.js, reconciled against the manifest last applied.",
             .args = &.{},
@@ -249,7 +266,42 @@ pub fn main(init: std.process.Init) !void {
     // The config's editor plugin (vim/helix) has set the base editing mode by
     // now; capture it as the mode fresh buffers open in, so a tool buffer's
     // mode (dired/magit) can never leak into a file opened from it.
-    session.buffers.setDefaultMode(gpa, session.head.currentMode()) catch {};
+    session.system.buffers.setDefaultMode(gpa, session.head.currentMode()) catch {};
+
+    // ── A second hosted system: agent-ux (north-star-plan task #19 items
+    //    1/4) ── A minimal SECOND system, hosted alongside "editor" on the
+    // SAME `session.host` — proves `system-swap` works on the REAL desktop
+    // session, not just `System.zig`'s synthetic gate fixtures.
+    // `config/agent-ux.js` is a dev-checkout GATE FIXTURE, not an installed
+    // file (see its own module doc — no `build.zig install` rule ships it);
+    // a missing/broken read degrades to a warning, never fatal, same as
+    // `--config`. Deliberately minimal — "a few binds, no heavy plugins" —
+    // so this costs nothing when absent and stays plugin-free when present
+    // (task #19 item 3: the SECOND system never calls `initPlugins`).
+    if (core.file.readAlloc(gpa, "config/agent-ux.js")) |src| {
+        defer gpa.free(src);
+        hostAgentUx(gpa, pool, &session.host, args.user, src) catch |e|
+            std.log.warn("agent-ux: failed to host: {t}", .{e});
+    } else |_| {}
+    // The `system-swap <name>` command — SHADOWS `core.System.
+    // registerSwapCommand` (registry last-wins, same pattern
+    // `buffers_cmds.zig` uses): identical surface, but additionally refuses
+    // while a live collab connection is bound to the CURRENT system's
+    // Document (task #19 item 2). Bound onto EVERY hosted system's command
+    // table (not just "editor"'s) so a head that swapped onto agent-ux can
+    // swap BACK — see `Session.SwapCmdData`'s doc. `swap_data`'s address is
+    // stable for the run (a `main()` local); every system's binding shares
+    // the same `data` pointer.
+    var swap_data: session_mod.Session.SwapCmdData = .{ .session = &session };
+    for (session.host.systems.values()) |sys| {
+        _ = try sys.commands.bind(gpa, "system-swap", .{
+            .name = "system-swap",
+            .summary = "Re-bind this head to another hosted system (refuses on an open transient/menu or a live collab connection).",
+            .args = &.{.{ .name = "name", .type = .string }},
+            .handler = session_mod.Session.systemSwapHandler,
+            .data = &swap_data,
+        });
+    }
 
     // ── Per-buffer providers (syntax + LSP hang off Buffer.frontend) ──
     // Phase two of `providers_state`: build attach_deps in place (it borrows the
@@ -258,7 +310,12 @@ pub fn main(init: std.process.Init) !void {
     // feed, so no local LSP). detachProviders runs here (before Session.deinit,
     // while caps + buffers' docs are alive); the shells live on, freed last by
     // providers_state.deinit.
-    providers_state.initAttach(gpa, &session.caps, init.minimal.environ);
+    // W0b: swap-blocking — `AttachDeps.caps` is a long-lived borrow of the
+    // EDITOR system's caps, baked once here. Providers/LSP attach is
+    // structurally editor-only (agent-ux never gets a `--file`/providers
+    // pass); not repointed on swap — see `fx`'s doc below for the full
+    // borrow-audit finding this is one instance of.
+    providers_state.initAttach(gpa, &session.system.caps, init.minimal.environ);
     const attach_deps = &providers_state.attach_deps;
     defer {
         var det_it = buffers.iterator();
@@ -267,7 +324,7 @@ pub fn main(init: std.process.Init) !void {
     try attachProviders(attach_deps, buffers.active());
     // The graphical shell's open/close know about providers and remote
     // shells; they shadow the core versions (registry last-wins).
-    try buffers_cmds.registerCommands(gpa, &session.commands, attach_deps);
+    try buffers_cmds.registerCommands(gpa, &session.system.commands, attach_deps);
 
     // ── Connection (wire v1.1: N shared buffers over one session) ──
     // `Collab` owns the whole connection cluster (outbound conn/session/partial,
@@ -281,14 +338,28 @@ pub fn main(init: std.process.Init) !void {
     // before the doc layers drop — and before Session (it reads the session caps).
     // (known_peers + my_identity stay main() locals: built early for the identity
     // command; Collab borrows them.)
+    // W0b: swap-blocking — `ShareCtx.buffers`/`.caps` are long-lived borrows
+    // of the EDITOR system, baked once here; NOT repointed on swap. This is
+    // exactly why `system-swap`'s refusal (task #19 item 2, wired below via
+    // `Collab.isLiveOpaque`) exists: a swap while a connection is LIVE would
+    // otherwise leave it silently bound to a system's buffers that stopped
+    // being the one dispatch/rendering targets. While dormant (no
+    // connection), the stale borrow is inert.
     var collab_state: collab.Collab = undefined;
-    collab_state.initBase(gpa, buffers, &session.caps, &known_peers, args.share_root, args.share_fs, args.listen, args.access);
+    collab_state.initBase(gpa, buffers, &session.system.caps, &known_peers, args.share_root, args.share_fs, args.listen, args.access);
     defer collab_state.deinit(gpa);
-    try collab_state.connect(gpa, ed0, &session.caps, &my_identity, args.connect, args.token, args.user, args.partial);
+    try collab_state.connect(gpa, ed0, &session.system.caps, &my_identity, args.connect, args.token, args.user, args.partial);
     // The buffer close path unbinds shares before the doc dies (Providers borrows
     // the share surface).
     attach_deps.share = &collab_state.share_ctx;
-    try collab_cmds.registerCommands(gpa, &session.commands, &collab_state.share_ctx, &known_peers);
+    try collab_cmds.registerCommands(gpa, &session.system.commands, &collab_state.share_ctx, &known_peers);
+    // `system-swap`'s live-collab refusal (task #19 item 2) — wired NOW that
+    // `collab_state` exists at a stable address; `swap_data` was bound onto
+    // every hosted system's commands earlier with this predicate unset
+    // (always-allow) because collab doesn't exist yet that early. Nothing
+    // reads `isBlocked` before the frame loop starts, so the gap is inert.
+    swap_data.blocked_ctx = &collab_state;
+    swap_data.isBlocked = collab.Collab.isLiveOpaque;
     // Window layout: a recursive split tree over the region geometry. Core
     // commands only RECORD intent on `win_ctx`; the frame loop applies them
     // (splitFocused/closeFocused/focus/move by pane geometry) and keeps the
@@ -298,7 +369,7 @@ pub fn main(init: std.process.Init) !void {
     var win_ctx: window_cmds.WindowCtx = .{};
     // Stable storage so each command's `data` pointer stays valid for the run.
     var window_action_ctx: [window_cmds.cmd_count]window_cmds.WindowActionCtx = undefined;
-    try window_cmds.registerCommands(gpa, &session.commands, &win_ctx, &window_action_ctx);
+    try window_cmds.registerCommands(gpa, &session.system.commands, &win_ctx, &window_action_ctx);
 
     // ── Window + Vulkan ──
     const window = try wayland.Window.init(1280, 800, "weft", "dev.psyclyx.weft");
@@ -333,7 +404,7 @@ pub fn main(init: std.process.Init) !void {
     // don't see), so they're registered here. `view.top_row` is always the
     // focused pane's scroll.
     var scroll_ctx: scroll.ScrollCtx = .{ .view = view, .fb = &fb };
-    try scroll.registerCommands(gpa, &session.commands, &scroll_ctx);
+    try scroll.registerCommands(gpa, &session.system.commands, &scroll_ctx);
 
     // Vertical motion + paging are view-computed (goal-x over rendered geometry,
     // which the core can't see). Register them as commands carrying the live
@@ -347,15 +418,15 @@ pub fn main(init: std.process.Init) !void {
         .{ .name = "scroll-page-up", .summary = "Move up one page.", .args = &.{}, .handler = dispatch.scrollPageUpHandler, .data = view },
         .{ .name = "scroll-page-down", .summary = "Move down one page.", .args = &.{}, .handler = dispatch.scrollPageDownHandler, .data = view },
     };
-    for (view_cmds) |vc| _ = try session.commands.bind(gpa, vc.name, vc);
-    try session.keymap.bind(gpa, core.Keymap.global_mode, "Page_Up", "scroll-page-up", core.Keymap.prio_core, "shell");
-    try session.keymap.bind(gpa, core.Keymap.global_mode, "Page_Down", "scroll-page-down", core.Keymap.prio_core, "shell");
+    for (view_cmds) |vc| _ = try session.system.commands.bind(gpa, vc.name, vc);
+    try session.system.keymap.bind(gpa, core.Keymap.global_mode, "Page_Up", "scroll-page-up", core.Keymap.prio_core, "shell");
+    try session.system.keymap.bind(gpa, core.Keymap.global_mode, "Page_Down", "scroll-page-down", core.Keymap.prio_core, "shell");
 
     // Theme is DATA: a runtime/bindable `set-color <name> <#hex>`, plus colors
     // the config staged declaratively via weft.set("theme", "<field>", "#hex").
     // Re-linearized per-field on mutation (Theme.setColor), so the draw path
     // stays a plain lookup.
-    _ = try session.commands.bind(gpa, "set-color", .{
+    _ = try session.system.commands.bind(gpa, "set-color", .{
         .name = "set-color",
         .summary = "Set a theme color (name, #rrggbb).",
         .args = &.{ .{ .name = "name", .type = .string }, .{ .name = "hex", .type = .string } },
@@ -363,7 +434,7 @@ pub fn main(init: std.process.Init) !void {
         .data = view,
     });
     inline for (@typeInfo(view_mod.Theme).@"struct".fields) |f| {
-        if (config_kv.get("theme", f.name)) |blob| {
+        if (session.system.config_kv.get("theme", f.name)) |blob| {
             if (config_load.firstConfigRecord(blob)) |hex| _ = view.theme.setColor(f.name, hex);
         }
     }
@@ -391,7 +462,7 @@ pub fn main(init: std.process.Init) !void {
     // plugin's namespace, not the old "editor" grab-bag (north-star-plan §8's
     // forcing-function finding: every config value needs an owner).
     const which_key_delay_ns: u64 = blk: {
-        if (config_kv.get("which_key", "delay-ms")) |raw| {
+        if (session.system.config_kv.get("which_key", "delay-ms")) |raw| {
             if (config_load.firstConfigRecord(raw)) |s| {
                 if (std.fmt.parseInt(u64, s, 10)) |ms| break :blk ms * std.time.ns_per_ms else |_| {}
             }
@@ -404,7 +475,7 @@ pub fn main(init: std.process.Init) !void {
     var flash_start_ns: u64 = 0;
     var flash_was_active = false;
     const flash_duration_ns: u64 = blk: {
-        if (config_kv.get("editor", "flash-ms")) |raw| {
+        if (session.system.config_kv.get("editor", "flash-ms")) |raw| {
             if (config_load.firstConfigRecord(raw)) |s| {
                 if (std.fmt.parseInt(u64, s, 10)) |ms| break :blk ms * std.time.ns_per_ms else |_| {}
             }
@@ -425,15 +496,32 @@ pub fn main(init: std.process.Init) !void {
     // The frame BUILD's read/borrow surface — pointers to the stable state the
     // HUD + pane build read each frame (the per-frame active editor/buffer and
     // clock are passed as `frame.Active`). Owns nothing.
+    //
+    // W0b: swap-blocking (task #19 item 2's borrow audit) — `buffers`/
+    // `.caps`/`.keymap`/`.ui_mesh` are baked ONCE, here, against whichever
+    // system `session.system` is AT THIS LINE (the editor — `hostAgentUx`
+    // above runs before this). A later `system-swap` repoints `session.
+    // cmd_ctx` (so dispatch — key→command→buffer edit — genuinely runs
+    // against the new system) but does NOT repoint these: the render
+    // surface (what's drawn — pane content, the which-key popup's keymap,
+    // capability-driven statusline/gutter segments) keeps showing the
+    // system that was live when `fx` was built, regardless of later swaps.
+    // `win_layout` (below) compounds this: its panes are keyed to THIS
+    // `buffers` instance's id space, which a different system's `Buffers`
+    // cannot resolve. Re-pointing all of this safely is the render-
+    // membrane's "who holds a pointer into the live session" question
+    // (`core/System.zig`'s module doc names it explicitly) — NOT solved
+    // here. `Session.rebindSystem` logs this caveat on every successful
+    // swap so a live user isn't silently confused by it.
     const fx: frame_mod.FrameCtx = .{
         .gpa = gpa,
         .buffers = buffers,
-        .caps = &session.caps,
-        .keymap = &session.keymap,
-        .ui_mesh = &session.container,
+        .caps = &session.system.caps,
+        .keymap = &session.system.keymap,
+        .ui_mesh = &session.system.container,
         .head = &session.head,
         .cursor_cfg = &session.cursor_cfg,
-        .plugins = &plugins,
+        .plugins = &plug.list,
         .conn = &collab_state.conn,
         .hub = &collab_state.hub,
         .collab_session = &collab_state.collab_session,
@@ -477,7 +565,7 @@ pub fn main(init: std.process.Init) !void {
     // clock-polled site each one replaces.
     var blink_ctx: loop_sources.BlinkCtx = .{
         .cursor_cfg = &session.cursor_cfg,
-        .keymap = &session.keymap,
+        .keymap = &session.system.keymap,
         .head = &session.head,
         .blink_next_ns = &blink_next_ns,
     };
@@ -495,8 +583,8 @@ pub fn main(init: std.process.Init) !void {
     };
     _ = try sched.addTimer(&reconnect_ctx, loop_sources.reconnectDue, "reconnect_backoff");
     _ = try sched.addTimer(&session.head, loop_sources.pickDebounceDue, "pick_debounce");
-    _ = try sched.addTimer(&plugin_loop, loop_sources.pluginLoopDue, "plugin_loop_timers");
-    var plugin_stream_ctx: loop_sources.PluginStreamCtx = .{ .plugins = &plugins, .js_plugins = &js_plugins };
+    _ = try sched.addTimer(&plug.loop, loop_sources.pluginLoopDue, "plugin_loop_timers");
+    var plugin_stream_ctx: loop_sources.PluginStreamCtx = .{ .plugins = &plug.list, .js_plugins = &plug.js_list };
     _ = try sched.addTimer(&plugin_stream_ctx, loop_sources.pluginStreamDue, "plugin_stream_poll");
 
     // Present discipline (§6 W2a-3 item 4): `present_pending` is set once a
@@ -524,7 +612,7 @@ pub fn main(init: std.process.Init) !void {
     // tracked so it's registered/removed exactly once per transition.
     var hub_src_id: ?scheduler.Id = null;
 
-    while (!window.shouldClose() and !session.quit) {
+    while (!window.shouldClose() and !session.system.quit) {
         _ = try sched.step();
         const frame_start = stats_mod.nowNs();
         window.pumpEvents();
@@ -609,11 +697,11 @@ pub fn main(init: std.process.Init) !void {
         }
 
         // ── Async housekeeping tick (backing/LSP/nav/pick/plugins/activate/menu) ──
-        if (try frame_mod.tickAsync(&fx, abuf, &session.cmd_ctx, &plugin_loop, &next_backing_poll_ns, &last_activate_path, &last_activate_len, &session.menu_overlay, which_key_delay_ns, frame_start))
+        if (try frame_mod.tickAsync(&fx, abuf, &session.cmd_ctx, &plug.loop, &next_backing_poll_ns, &last_activate_path, &last_activate_len, &session.menu_overlay, which_key_delay_ns, frame_start))
             view_dirty = true;
         // JS plugins: fire each resident quickjs instance's proc-stream output
         // handler for streams with new bytes (agent transcripts stream in here).
-        for (js_plugins.items) |jp| if (jp.tick()) {
+        for (plug.js_list.items) |jp| if (jp.tick()) {
             view_dirty = true;
         };
         // ── Connect/disconnect/listen intents (outside the hot section:
@@ -621,7 +709,9 @@ pub fn main(init: std.process.Init) !void {
         if (collab.applyIntents(&collab_state.share_ctx, &session.cmd_ctx, pool, &collab_state.connect_task, &collab_state.connect_hostport, &collab_state.fd_link, session.echo(), &my_identity, args.token, args.user))
             view_dirty = true;
         // ── Window-layout intents (outside the input hot section) ──
-        if (window_cmds.applyIntents(&win_ctx, win_layout, view, buffers, gpa, &session.head, &session.keymap, last_frame_rect))
+        // `keymap` baked to the editor's like `buffers` (W0b consistency: the
+        // whole window subsystem stays on the editor system's state pre-W0b).
+        if (window_cmds.applyIntents(&win_ctx, win_layout, view, buffers, gpa, &session.head, editor_keymap, last_frame_rect))
             view_dirty = true;
         // ── Collab tick (adopt/publish/relay, partial fetch, peer-fs, reconnect) ──
         if (try collab.tickCollab(&collab_state.share_ctx, &session.cmd_ctx, ed0, win_layout, &collab_state.peer_fs_bridge, &collab_state.remote_fs, &collab_state.peer_fs_inflight, &collab_state.noted_host_fp, &collab_state.last_liveness, &collab_state.reconnect, &collab_state.next_reconnect_ns, &collab_state.fd_link, &my_identity, pool, args.connect, args.token, session.echo()))

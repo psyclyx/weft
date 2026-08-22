@@ -70,7 +70,7 @@ test "app/teardown: shells outlive buffers through an in-flight shell save" {
     try prov.initRegistries(gpa);
     var sess: app_session.Session = undefined;
     try sess.init(gpa, pool, "teardown-user", &prov.grammars);
-    prov.initAttach(gpa, &sess.caps, environ);
+    prov.initAttach(gpa, &sess.system.caps, environ);
 
     // A persistent shell registered in Providers.attach_deps.shells, exactly as
     // AttachDeps.shellFor does (gpa.create + spawn + put with a duped key), so
@@ -81,7 +81,7 @@ test "app/teardown: shells outlive buffers through an in-flight shell save" {
 
     // Back buffer 0 by that shell and kick an in-flight save: the pool worker now
     // holds `fs`, and Editor.deinit will spin-wait it out at teardown.
-    const ed = &sess.buffers.active().editor;
+    const ed = &sess.system.buffers.active().editor;
     try ed.openShell(gpa, fs, path);
     try ed.doc.insert(gpa, ed.text().byteLen(), "an unsaved edit\n");
     try ed.requestSave(gpa);
@@ -89,7 +89,7 @@ test "app/teardown: shells outlive buffers through an in-flight shell save" {
     // ── Tear down in main()'s EXACT order ──
     // 1. detach per-buffer providers (before the buffers/caps die).
     {
-        var it = sess.buffers.iterator();
+        var it = sess.system.buffers.iterator();
         while (it.next()) |b| app_providers.detachProviders(&prov.attach_deps, b);
     }
     // 2. Session (buffers die here; Editor.deinit waits out the save on `fs`).
@@ -135,8 +135,8 @@ test "app/teardown: unconnected Collab constructs + tears down clean" {
     var id = core.identity.Identity.generate();
 
     var col: app_collab.Collab = undefined;
-    col.initBase(gpa, &sess.buffers, &sess.caps, &known, null, .none, null, .view);
-    try col.connect(gpa, &sess.buffers.active().editor, &sess.caps, &id, null, "tok", "user", false);
+    col.initBase(gpa, &sess.system.buffers, &sess.system.caps, &known, null, .none, null, .view);
+    try col.connect(gpa, &sess.system.buffers.active().editor, &sess.system.caps, &id, null, "tok", "user", false);
     // main()'s order: Collab before Session (it reads the session caps + must
     // unbind before the doc layers drop).
     col.deinit(gpa);

@@ -1,22 +1,38 @@
-//! `Session` — the cohesive owner of weft's core editing state: the buffer set,
-//! the command/keymap surfaces, the one `Head` this process runs today (its
-//! mode/pending/pick/echo — north-star-plan §6 W2a-1), the capability store,
-//! the quit flag, and the capability-consumer UIs (completion, definition,
-//! symbols, hover) plus the caret config. `main()` holds ONE `session` object
-//! instead of ~a dozen loose editing locals.
+//! `Session` — `main()`'s APP GLUE for the ONE hosted `core.System` the
+//! desktop binary runs today (north-star-plan task #19 item 1,
+//! "Session-on-System"): the one `Head` this process drives (its
+//! mode/pending/pick/echo — section 6 W2a-1), the which-key menu-overlay
+//! tracker beside it, the capability-consumer UIs (completion, definition,
+//! symbols, hover), the caret config, and the self-referential `cmd_ctx`
+//! dozens of `main.zig`/`app/*.zig` call sites hold a pointer to.
 //!
-//! `cmd_ctx` holds pointers to sibling fields (`&self.buffers`, `&self.commands`
-//! …), so — exactly like `RenderState` — `init` runs IN PLACE (`self` already at
-//! its final address in `main()`'s frame): no captured `&self.field` can dangle
-//! after a move. `init` also installs the built-ins and binds the capability +
-//! caret/which-key commands, in the same registration order `main()` used
-//! inline (registration is last-wins — order is load-bearing). `deinit` frees in
-//! the exact reverse order `main()`'s defers used to run.
+//! **The bundle fields (buffers/commands/keymap/caps/actions/quit/
+//! container/config_kv) live on `system` now, not on `Session` itself** —
+//! see `core/System.zig`'s module doc for the full reasoning this
+//! completes: `System.create` heap-pins the bundle (`*System`, never
+//! relocated), so `cmd_ctx`'s six table pointers can be REPOINTED in place
+//! by `core.System.Host.swap` instead of dangling on a move. `host` hosts
+//! every system this process knows about (today: "editor", and — if
+//! `config/agent-ux.js` is present — "agent-ux"); `system` is a convenience
+//! alias for whichever one `cmd_ctx` currently targets, kept in sync by
+//! `rebindSystem` below. Reaching a bundle field is mechanical:
+//! `session.buffers` (old) → `session.system.buffers` (now) — Zig has no
+//! field aliasing, so every call site that used to read a `Session` bundle
+//! field directly was updated to go through `.system.` (`main.zig`,
+//! `e2e/harness.zig`, `e2e/teardown_test.zig` — the only three files that
+//! ever did; see the borrow-audit table in the task report for the rest of
+//! `main.zig`'s ~30 wired subsystems, which borrow SPECIFIC pointers taken
+//! from those fields at wiring time, not `Session`/`System` itself).
+//!
+//! `init` builds `head`/`menu_overlay`/`cmd_ctx`/the capability-consumer UIs
+//! IN PLACE (`self` already at its final address in `main()`'s frame), so
+//! `cmd_ctx`'s `&self.field`/`&self.system.field` borrows never dangle.
+//! `deinit` frees in the exact reverse order `main()`'s defers used to run.
 //!
 //! The grammar/LSP registries (`grammars`, `lsp_servers`) that the capability
 //! consumers' `grammar-add`/`lsp-add` bind onto live in `Providers`; `init`
 //! borrows them by pointer to wire those two commands. `which_key_now` (the
-//! F1 flag the dispatch path reads) lives on `menu_overlay` below, not as a
+//! F1 flag the dispatch path reads) lives on `menu_overlay` below, not a
 //! separate `main()` local — see `frame.MenuOverlay`'s field doc for why.
 
 const std = @import("std");
@@ -30,48 +46,37 @@ const ui_mesh = @import("../gfx/view.zig").ui_mesh;
 pub const Session = struct {
     gpa: std.mem.Allocator,
 
-    // ── Editor core ──
-    buffers: core.Buffers,
-    commands: core.command.Commands,
-    /// System-scoped keymap TABLES — shared by every head (see
-    /// `core.Keymap`'s module doc). `head` below is `main()`'s ONE per-head
-    /// cursor into them; a second head (proven live by the e2e two-head
-    /// gate, `e2e/two_head_test.zig`) is a second `core.Head` + a second
-    /// `command.Context` pointed at it, borrowing these tables — `main()`
-    /// itself still drives exactly one (a second RENDERED head is a bigger,
-    /// later change — see `window_layout.zig`'s module doc for the boundary).
-    keymap: core.Keymap,
-    /// This session's one head's interaction state: current mode, pending
-    /// chord, pick session, echo line, dot-repeat register (north-star-plan
-    /// §6 W2a).
+    // ── The hosted System(s) (task #19 item 1) ──
+    /// The container-level registry (section 2.7): every `core.System` this
+    /// process hosts, owned here. `deinit` tears every one of them down
+    /// (their buffers/commands/keymap/caps/actions/container/config_kv/
+    /// plugins — see `System.destroy`'s doc for the exact per-system
+    /// teardown order).
+    host: core.System.Host,
+    /// Whichever hosted system `cmd_ctx` currently targets — a convenience
+    /// alias, NOT the source of truth (`host.systemOf(&self.cmd_ctx)` would
+    /// answer the same question by address identity off `cmd_ctx` itself).
+    /// Kept in sync by `rebindSystem` so app code that wants "the active
+    /// system's X" reads naturally (`session.system.buffers`).
+    system: *core.System,
+
+    // ── This process's one head (north-star-plan section 6 W2a-1) — APP
+    //    GLUE, not a System field: a head is a cursor INTO whichever system
+    //    it's attached to, so it survives a swap unchanged (see
+    //    `rebindSystem`).
     head: core.Head,
     /// This head's which-key menu-overlay edge tracker (open/shown/forced/
     /// open_ns) — app-layer state that can't live ON `core.Head` (see
     /// `frame.MenuOverlay`'s doc), but is exactly as per-head as `head`
     /// itself; `Session` is the nearest thing to a "per-head bundle" the app
-    /// has today, so it lives here beside it (north-star-plan §6 W2a-2). A
-    /// second head (the e2e two-head gate) pairs its own instance the same
-    /// way, alongside its own ad hoc `Head`.
+    /// has today, so it lives here beside it (north-star-plan section 6
+    /// W2a-2). A second head (the e2e two-head gate) pairs its own instance
+    /// the same way, alongside its own ad hoc `Head`.
     menu_overlay: frame.MenuOverlay,
-    /// The ONE `container.Container` this session's `caps`/`actions` AND the
-    /// UI mesh's `ui/statusline-seg` + `ui/gutter-segment` slots (north-
-    /// star-plan §6 W3-1) all bind into (task #19's shared-Container
-    /// fold-in — `System.zig`'s `container` field doc has the full
-    /// reasoning, identical here: action names/`edit/*` capability names/
-    /// `ui/*` mesh names are one flat, non-colliding slot namespace).
-    /// `ui_mesh.declareSlots`/`bindDefaultStatusline` run against this same
-    /// instance below; the three default gutter providers are NOT bound
-    /// (see `ui_mesh.zig`'s module doc: no live gutter exists today, so
-    /// nothing regresses by construction). REACHABLE from config now:
-    /// `main.zig` wires a `manifest.StatusSegBinder` onto its
-    /// `ConfigSession` pointed at `&self.container`, so `weft.statusSegment`
-    /// in `config.js` binds a real `ui/statusline-seg` provider here (see
-    /// `ui_mesh.zig`'s `bindManifestSegment`).
-    container: core.container.Container,
-    caps: core.Caps,
-    actions: core.Actions,
-    quit: bool,
-    /// Self-referential: points at the fields above — built in place.
+    /// Self-referential: `system.contextFor(&self.head)` at build time —
+    /// repointed IN PLACE (not rebuilt) by `rebindSystem`/`Host.swap`, so
+    /// every OTHER holder of `&self.cmd_ctx` sees the new system from its
+    /// next read on, exactly like `core/System.zig`'s own gate tests.
     cmd_ctx: core.command.Context,
 
     // ── Capability-consumer UIs (written against capability names only) ──
@@ -80,9 +85,11 @@ pub const Session = struct {
     // ── Caret / which-key config (set declaratively by config at load time) ──
     cursor_cfg: cursor_config.CursorConfig,
 
-    /// Build the editing state IN PLACE (`self` is already at its final address
-    /// in `main()`'s frame), so `cmd_ctx`'s `&self.field` borrows never dangle.
-    /// Installs the built-ins, then binds the capability consumers (which also
+    /// Build the app glue IN PLACE (`self` is already at its final address in
+    /// `main()`'s frame), so `cmd_ctx`'s borrows never dangle. Hosts a fresh
+    /// "editor" `core.System` (buffers/commands/keymap/caps/actions/
+    /// container/config_kv + the built-in command/keymap floor — see
+    /// `System.create`), then binds the capability consumers (which also
     /// wire `grammar-add` onto the caller-owned `grammars` registry) and the
     /// caret/which-key commands — in registration order.
     pub fn init(
@@ -93,62 +100,253 @@ pub const Session = struct {
         grammars: *core.syntax.Runtime,
     ) !void {
         self.gpa = gpa;
-        self.buffers = try core.Buffers.init(gpa, pool, user);
-        errdefer self.buffers.deinit(gpa);
-        self.commands = .empty;
-        self.keymap = .empty;
+        self.host = core.System.Host.init(gpa);
+        errdefer self.host.deinit();
+        const sys = try core.System.create(gpa, pool, "editor", user);
+        errdefer sys.destroy();
+        try self.host.hostSystem(sys);
+        self.system = sys;
         self.head = .empty;
+        // `System.create`'s `builtins.install` already set `sys.default_head`
+        // into the modeless floor's "default" mode (the headless dispatch
+        // target needs one immediately — see `System.create`'s doc); THIS
+        // head is the one the desktop actually drives, so it starts there
+        // too — mirroring exactly what the old direct
+        // `core.builtins.install(..., &self.head, ...)` call used to do
+        // before `System.create` took over installing the builtins.
+        try self.head.setMode(gpa, self.system.default_head.currentMode());
         self.menu_overlay = .{};
-        // The ONE shared Container (task #19) — built before `caps`/
-        // `actions`, which borrow a pointer into it.
-        self.container = core.container.Container.init(gpa);
-        errdefer self.container.deinit();
-        self.caps = core.Caps.init(gpa, core.task.nowNs, &self.container);
-        self.actions = core.Actions.init(gpa, &self.container);
-        self.quit = false;
-        self.cmd_ctx = .{
-            .gpa = gpa,
-            .buffers = &self.buffers,
-            .commands = &self.commands,
-            .keymap = &self.keymap,
-            .actions = &self.actions,
-            .caps = &self.caps,
-            .quit = &self.quit,
-            .head = &self.head,
-        };
-        try core.builtins.install(gpa, &self.commands, &self.keymap, &self.head, &self.actions);
-        try ui_mesh.declareSlots(&self.container);
-        try ui_mesh.bindDefaultStatusline(&self.container);
+        self.cmd_ctx = self.system.contextFor(&self.head);
+        try ui_mesh.declareSlots(&self.system.container);
+        try ui_mesh.bindDefaultStatusline(&self.system.container);
         // Capability consumers — written against capability names only.
         self.completion_ui = .empty;
-        try setup.registerCapabilityConsumers(gpa, &self.commands, &self.completion_ui, grammars);
+        try setup.registerCapabilityConsumers(gpa, &self.system.commands, &self.completion_ui, grammars);
         // Caret config commands, registered before the config runs so it can
         // set per-mode styles at load time.
         self.cursor_cfg = .{ .gpa = gpa };
-        try setup.registerCursorCommands(gpa, &self.commands, &self.cursor_cfg, &self.menu_overlay.which_key_now);
+        try setup.registerCursorCommands(gpa, &self.system.commands, &self.cursor_cfg, &self.menu_overlay.which_key_now);
     }
 
-    /// Free in the exact reverse order `main()`'s defers used to run: cursor_cfg,
-    /// head (echo+pick), caps, keymap, commands, buffers. (completion_ui owns
-    /// no heap.)
+    /// Free in the exact reverse order `main()`'s defers used to run:
+    /// cursor_cfg, head (echo+pick), then every hosted system (`host.deinit`
+    /// — buffers/caps/keymap/commands/plugins/..., per-system, in
+    /// `System.destroy`'s documented order). (completion_ui owns no heap.)
     pub fn deinit(self: *Session, gpa: std.mem.Allocator) void {
         self.cursor_cfg.deinit();
         self.head.deinit(gpa);
-        self.actions.deinit();
-        self.caps.deinit();
-        // The shared Container outlives both borrowers above (neither
-        // `deinit` touches it) — torn down here, once, by its owner.
-        self.container.deinit();
-        self.keymap.deinit(gpa);
-        self.commands.deinit(gpa);
-        self.buffers.deinit(gpa);
+        self.host.deinit();
     }
 
     /// Delegating facade: the echo line lives on `head` now (north-star-plan
-    /// §6 W2a-1 moved it out of `Session`'s own storage) — this is the one
-    /// spot app-side code says `session.echo()` instead of reaching into
-    /// `session.head.echo` directly.
+    /// section 6 W2a-1 moved it out of `Session`'s own storage) — this is
+    /// the one spot app-side code says `session.echo()` instead of reaching
+    /// into `session.head.echo` directly.
     pub fn echo(self: *Session) *std.ArrayList(u8) {
         return &self.head.echo;
     }
+
+    /// Re-bind `self.head` onto the hosted system named `target` — wraps
+    /// `core.System.Host.swap` (which repoints `cmd_ctx`'s six table
+    /// pointers in place) and keeps `self.system` in sync so subsequent
+    /// `session.system.X` reads see the NEW system. This is the "extend
+    /// `Host.swap`" half of task #19 item 1/2: everything `Host.swap`
+    /// already refuses (`error.OpenTransient`) or cancels (an open pick) is
+    /// unchanged; app-side callers that need to refuse on OTHER grounds
+    /// (task #19 item 2's live-collab case) check BEFORE calling this — see
+    /// `SwapCmdData`/`systemSwapHandler` below, which is how `main.zig`
+    /// wires the actual `system-swap` command so the collab check runs at
+    /// COMMAND time, not bind time.
+    pub fn rebindSystem(self: *Session, target: []const u8) core.System.Host.SwapError!void {
+        try self.host.swap(self.gpa, &self.cmd_ctx, &self.head, target);
+        self.system = self.host.systemOf(&self.cmd_ctx) orelse self.system;
+        // Dispatch (key -> command -> buffer edit, through `cmd_ctx`) now
+        // genuinely targets `target`. The RENDER surface does not yet (task
+        // #19's borrow audit — `main.zig`'s `fx`/`win_layout`/collab/
+        // providers borrows are baked once at boot, W0b) — named loudly
+        // here so a live user isn't silently confused by typing into a
+        // buffer the screen isn't showing.
+        std.log.info("system-swap: dispatch now targets '{s}' (render surface unchanged until the render membrane repoints it — W0b)", .{target});
+    }
+
+    /// `main.zig`'s `system-swap` command data: bundles `*Session` with an
+    /// OPTIONAL app-level refusal predicate, checked at COMMAND time (not
+    /// bind time) before `rebindSystem` runs. Generic (a function pointer +
+    /// opaque ctx) rather than importing `app/collab.zig` directly, so
+    /// `Session`'s own dependency surface doesn't grow to know about every
+    /// main()-level subsystem that might want a say — `main.zig` wires
+    /// `isBlocked`/`blocked_ctx` to `Collab.isLive` for the live-collab
+    /// refusal (task #19 item 2: "collab sessions bound to a system's
+    /// Document" — swapping out from under one is refused loudly, not
+    /// forced, matching `Host.swap`'s own open-transient refusal in spirit).
+    pub const SwapCmdData = struct {
+        session: *Session,
+        blocked_ctx: ?*anyopaque = null,
+        isBlocked: ?*const fn (?*anyopaque) bool = null,
+    };
+
+    pub const SwapCmdError = core.System.Host.SwapError || error{SwapBlocked};
+
+    /// The app-level `system-swap` command handler — the ONLY registered
+    /// handler in the real editor (`main.zig` binds this directly onto every
+    /// hosted system; `core.System.registerSwapCommand` exists for the
+    /// synthetic gate fixtures and is not registered here, so there is
+    /// nothing to shadow): identical `system-swap <name>` surface, but
+    /// refuses loudly (logged, like `Host.swap`'s own transient refusal)
+    /// when `data.isBlocked` says so, BEFORE touching the Host at all.
+    pub fn systemSwapHandler(ctx: *core.command.Context, data: ?*anyopaque, args: []const core.command.Value) anyerror!core.command.Value {
+        _ = ctx;
+        const d: *SwapCmdData = @ptrCast(@alignCast(data.?));
+        if (args.len == 0 or args[0] != .string) return .nil;
+        if (d.isBlocked) |blocked| {
+            if (blocked(d.blocked_ctx)) {
+                std.log.warn("system-swap: refused — a live collab connection is bound to this system's document; disconnect before swapping systems", .{});
+                return error.SwapBlocked;
+            }
+        }
+        try d.session.rebindSystem(args[0].string);
+        return .nil;
+    }
 };
+
+// ── Tests: task #19 item 1/4's live gate, against the REAL production
+//    Session (not `core/System.zig`'s synthetic fixtures) ──
+
+const t = std.testing;
+
+fn testGrammars(gpa: std.mem.Allocator) !core.syntax.Runtime {
+    return core.syntax.Runtime.initBuiltins(gpa);
+}
+
+test "session: RUNS ON a System — init hosts \"editor\", cmd_ctx is wired to it, quit/mode match System.create's floor" {
+    const gpa = t.allocator;
+    const pool = try core.task.Pool.init(gpa, .{ .threads = 1 });
+    defer pool.deinit();
+    var grammars = try testGrammars(gpa);
+    defer grammars.deinit(gpa);
+
+    var sess: Session = undefined;
+    try sess.init(gpa, pool, "user", &grammars);
+    defer sess.deinit(gpa);
+
+    try t.expectEqualStrings("editor", sess.system.name);
+    try t.expect(sess.host.get("editor").? == sess.system);
+    try t.expect(sess.cmd_ctx.buffers == &sess.system.buffers);
+    try t.expect(sess.cmd_ctx.head == &sess.head);
+    // The modeless floor's "default" mode, mirrored from `System.create`'s
+    // `builtins.install` onto THIS head (not just `system.default_head`).
+    try t.expectEqualStrings("default", sess.head.currentMode());
+
+    // A real command through the real Session's cmd_ctx.
+    try t.expect(!sess.system.quit);
+    _ = try core.command.run(&sess.system.commands, &sess.cmd_ctx, "insert-text", &.{.{ .string = "hi" }});
+    const got = try sess.cmd_ctx.editor().text().toOwnedSlice(gpa);
+    defer gpa.free(got);
+    try t.expectEqualStrings("hi", got);
+}
+
+test "session: GATE — system-swap live-rebinds the REAL Session's head; buffers/commands/keymap switch, refuses on an open transient" {
+    const gpa = t.allocator;
+    const pool = try core.task.Pool.init(gpa, .{ .threads = 1 });
+    defer pool.deinit();
+    var grammars = try testGrammars(gpa);
+    defer grammars.deinit(gpa);
+
+    var sess: Session = undefined;
+    try sess.init(gpa, pool, "user", &grammars);
+    defer sess.deinit(gpa);
+    const editor_sys = sess.system;
+
+    // A second, minimal hosted system — exactly what `main.zig` hosts from
+    // `config/agent-ux.js`, built directly here so this test needs no file
+    // I/O.
+    const agent_sys = try core.System.create(gpa, pool, "agent-ux", "user");
+    try agent_sys.keymap.bind(gpa, "chat", "q", "agent-ux-quit-noop", core.Keymap.prio_plugin, "test");
+    try sess.host.hostSystem(agent_sys);
+
+    // Type into the editor system first — lands on ITS buffer.
+    _ = try core.command.run(&editor_sys.commands, &sess.cmd_ctx, "insert-text", &.{.{ .string = "editor text" }});
+
+    var swap_data: Session.SwapCmdData = .{ .session = &sess };
+    try sess.system.commands.bind(gpa, "system-swap", .{
+        .name = "system-swap",
+        .summary = "test",
+        .args = &.{.{ .name = "name", .type = .string }},
+        .handler = Session.systemSwapHandler,
+        .data = &swap_data,
+    });
+
+    // The swap runs through the ORDINARY command surface — proving this
+    // isn't a special path, exactly like `core/System.zig`'s own "via the
+    // system-swap COMMAND" gate test, but against `app.Session` this time.
+    _ = try core.command.run(&editor_sys.commands, &sess.cmd_ctx, "system-swap", &.{.{ .string = "agent-ux" }});
+
+    // Every table pointer repointed; `sess.system` (the convenience alias)
+    // kept in sync.
+    try t.expect(sess.cmd_ctx.buffers == &agent_sys.buffers);
+    try t.expect(sess.cmd_ctx.keymap == &agent_sys.keymap);
+    try t.expect(sess.cmd_ctx.commands == &agent_sys.commands);
+    try t.expect(sess.system == agent_sys);
+
+    // Editing now lands on the NEW system's buffer — the editor's own text
+    // from before the swap is untouched.
+    _ = try core.command.run(&agent_sys.commands, &sess.cmd_ctx, "insert-text", &.{.{ .string = "agent text" }});
+    const agent_got = try agent_sys.buffers.active().editor.text().toOwnedSlice(gpa);
+    defer gpa.free(agent_got);
+    try t.expectEqualStrings("agent text", agent_got);
+    const editor_got = try editor_sys.buffers.active().editor.text().toOwnedSlice(gpa);
+    defer gpa.free(editor_got);
+    try t.expectEqualStrings("editor text", editor_got);
+
+    // Swap back.
+    _ = try core.command.run(&agent_sys.commands, &sess.cmd_ctx, "system-swap", &.{.{ .string = "editor" }});
+    try t.expect(sess.cmd_ctx.buffers == &editor_sys.buffers);
+    try t.expect(sess.system == editor_sys);
+
+    // F1 — an open transient refuses the swap, same as `Host.swap` alone.
+    try editor_sys.keymap.markMenuMode(gpa, "leader");
+    const cc = sess.cmd_ctx.capturedCtx();
+    var handle = try cc.pushTransient(&editor_sys.keymap, "leader");
+    defer handle.deinit();
+    try t.expectError(error.OpenTransient, sess.rebindSystem("agent-ux"));
+    try t.expect(sess.cmd_ctx.buffers == &editor_sys.buffers);
+}
+
+test "session: SwapCmdData.isBlocked refuses loudly BEFORE touching the Host — task #19 item 2's live-collab case" {
+    const gpa = t.allocator;
+    const pool = try core.task.Pool.init(gpa, .{ .threads = 1 });
+    defer pool.deinit();
+    var grammars = try testGrammars(gpa);
+    defer grammars.deinit(gpa);
+
+    var sess: Session = undefined;
+    try sess.init(gpa, pool, "user", &grammars);
+    defer sess.deinit(gpa);
+    const editor_sys = sess.system;
+
+    const agent_sys = try core.System.create(gpa, pool, "agent-ux", "user");
+    try sess.host.hostSystem(agent_sys);
+
+    const AlwaysBlocked = struct {
+        fn blocked(_: ?*anyopaque) bool {
+            return true;
+        }
+    };
+    var swap_data: Session.SwapCmdData = .{ .session = &sess, .isBlocked = AlwaysBlocked.blocked };
+    try sess.system.commands.bind(gpa, "system-swap", .{
+        .name = "system-swap",
+        .summary = "test",
+        .args = &.{.{ .name = "name", .type = .string }},
+        .handler = Session.systemSwapHandler,
+        .data = &swap_data,
+    });
+
+    try t.expectError(error.SwapBlocked, core.command.run(&editor_sys.commands, &sess.cmd_ctx, "system-swap", &.{.{ .string = "agent-ux" }}));
+    // Refused BEFORE the Host was touched: still targeting the editor.
+    try t.expect(sess.cmd_ctx.buffers == &editor_sys.buffers);
+    try t.expect(sess.system == editor_sys);
+}
+
+test {
+    std.testing.refAllDecls(@This());
+}

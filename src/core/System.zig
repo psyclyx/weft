@@ -77,6 +77,12 @@ const builtins = @import("builtins.zig");
 const manifest = @import("manifest.zig");
 const task = @import("task.zig");
 const container_mod = @import("container.zig");
+const wasm = @import("wasm.zig");
+const wasm_abi = @import("wasm_abi.zig");
+const quickjs = @import("quickjs.zig");
+const async_loop = @import("async.zig");
+const subbuffer = @import("subbuffer.zig");
+const register_mod = @import("register.zig");
 
 pub const System = @This();
 
@@ -143,6 +149,18 @@ quit: bool = false,
 /// this instead of blindly re-applying). Owned; destroyed on replacement
 /// and in `destroy`.
 applied_manifest: ?*manifest.Manifest = null,
+/// Per-system plugin bundle (task #19 item 3; §6 W2b-1: "Plugin instances
+/// are PER-SYSTEM — they register into system state"). `null` until
+/// `initPlugins` runs — a system hosting a manifest with no plugins (today,
+/// every system except "editor"; the agent-ux gate manifest deliberately
+/// loads none) never pays for an `Engine`/`Loop` it doesn't use. This is a
+/// STRUCTURAL move only: `main.zig` calls `initPlugins` once, for the
+/// editor system, and wires `app/config_load.zig`'s `PluginHost` against
+/// the fields below in place of its old bare `main()` locals — no second
+/// system actually loads a plugin yet (that would be a separate, later
+/// change: reading a manifest's own `weft.plugin(...)` calls against
+/// `--plugin`-style resolution for a non-editor system).
+plugins: ?Plugins = null,
 
 /// Build a system from scratch: fresh buffers (one scratch buffer, per
 /// `Buffers.init`), empty commands/keymap, and the built-in command/keymap
@@ -173,6 +191,14 @@ pub fn create(gpa: Allocator, pool: *task.Pool, name: []const u8, user: []const 
 
 pub fn destroy(self: *System) void {
     const gpa = self.gpa;
+    // Plugins die FIRST — before any of this system's OTHER state (buffers,
+    // commands, caps) — mirroring `main.zig`'s pre-System defer order
+    // exactly (every plugin/engine/loop-related defer ran before
+    // `Session`'s own, so a plugin's registered command — its `.data`
+    // pointing INTO a `WasmPlugin` — never outlives the wasmtime engine
+    // that compiled it, and nothing plugin-owned is still resident when
+    // buffers/commands unwind).
+    if (self.plugins) |*p| p.deinit(gpa);
     if (self.applied_manifest) |m| m.destroy();
     self.default_head.deinit(gpa);
     self.actions.deinit();
@@ -273,6 +299,67 @@ pub fn applyManifest(self: *System, gpa: Allocator, m: *manifest.Manifest, loade
     if (self.applied_manifest) |old| old.destroy();
     self.applied_manifest = m;
 }
+
+/// Stand up this system's plugin bundle (task #19 item 3) — idempotent (a
+/// second call is a no-op, so `main.zig` can call it unconditionally
+/// without tracking whether it already did). Only the editor system calls
+/// this today; a headless system with no plugins (agent-ux) simply never
+/// does, leaving `self.plugins == null` — `command.run`/manifest apply
+/// don't touch this field at all, so a plugin-free system pays nothing.
+pub fn initPlugins(self: *System, pool: *task.Pool) !void {
+    if (self.plugins != null) return;
+    self.plugins = try Plugins.init(self.gpa, pool);
+}
+
+/// The per-system plugin bundle (task #19 item 3): the wasm `Engine`, the
+/// resident wasm/JS plugin lists, the plugin-scoped `kv.Store` (runtime
+/// scratch — distinct from `System.config_kv`, mirroring the old
+/// `plugin_kv`/`config_kv` split one level up, now per-system), the
+/// subbuffer service, the shared register/kill store, and the async `Loop`
+/// shell effects schedule onto. Every field here used to be a `main()`
+/// local; moving OWNERSHIP onto `System` is what makes "a second hosted
+/// system could have its own plugins" structurally true, without actually
+/// wiring a second system's manifest to load any (the agent-ux gate
+/// manifest loads none — see this struct's field doc on `System.plugins`).
+/// `app/config_load.zig`'s `PluginHost`/`WasmPlugin`/`JsPlugin` types are
+/// untouched — this only relocates where instances of them are STORED.
+pub const Plugins = struct {
+    engine: wasm.Engine,
+    loop: async_loop.Loop,
+    kv: kv.Store = .empty,
+    subbuffers: subbuffer.SubBuffers = .empty,
+    register: register_mod.Register = .empty,
+    list: std.ArrayList(*wasm_abi.WasmPlugin) = .empty,
+    js_list: std.ArrayList(*quickjs.JsPlugin) = .empty,
+
+    pub fn init(gpa: Allocator, pool: *task.Pool) !Plugins {
+        return .{
+            .engine = try wasm.Engine.init(),
+            .loop = async_loop.Loop.init(gpa, pool, task.nowNs),
+        };
+    }
+
+    /// Frees in exactly the order `main.zig`'s old `defer` stack unwound
+    /// (LIFO over: plugin_kv, config_kv, plugin_subs, plugin_register,
+    /// plugin_loop, wasm_engine, plugins-list, js_plugins-list — config_kv
+    /// is `System.config_kv` now, torn down separately by `System.destroy`,
+    /// not part of this bundle): js plugins, then wasm plugins (both may
+    /// hold registered commands whose `.data` points INTO them), then the
+    /// engine (invalidates any compiled module those plugins referenced),
+    /// then the loop, then register/subbuffers/kv (no other teardown step
+    /// depends on these, so their relative order is unconstrained).
+    pub fn deinit(self: *Plugins, gpa: Allocator) void {
+        for (self.js_list.items) |p| p.deinit();
+        self.js_list.deinit(gpa);
+        for (self.list.items) |p| p.deinit();
+        self.list.deinit(gpa);
+        self.engine.deinit();
+        self.loop.deinit();
+        self.register.deinit(gpa);
+        self.subbuffers.deinit(gpa);
+        self.kv.deinit(gpa);
+    }
+};
 
 /// The container-level registry: "the container hosts N systems" (§2.7).
 /// Owns every hosted `*System` (destroyed by `Host.deinit`).
@@ -674,8 +761,6 @@ test "system: the real config/agent-ux.js manifest hosts a SECOND system end-to-
     const agent_sys = try testSystem(gpa, pool, "agent-ux");
     defer agent_sys.destroy();
 
-    const quickjs = @import("quickjs.zig");
-    const wasm = @import("wasm.zig");
     var engine = try wasm.Engine.init();
     defer engine.deinit();
 

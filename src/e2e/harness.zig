@@ -124,15 +124,15 @@ pub const Editor = struct {
         // phase (borrows the session caps).
         try self.prov.initRegistries(gpa);
         try self.session.init(gpa, self.pool, user, &self.prov.grammars);
-        self.prov.initAttach(gpa, &self.session.caps, parentEnviron());
+        self.prov.initAttach(gpa, &self.session.system.caps, parentEnviron());
 
         // Alias the moved state (session is a field of *self, so these are stable).
-        self.buffers = &self.session.buffers;
-        self.commands = &self.session.commands;
-        self.keymap = &self.session.keymap;
+        self.buffers = &self.session.system.buffers;
+        self.commands = &self.session.system.commands;
+        self.keymap = &self.session.system.keymap;
         self.head = &self.session.head;
         self.pick = &self.session.head.pick;
-        self.caps = &self.session.caps;
+        self.caps = &self.session.system.caps;
         self.ctx = &self.session.cmd_ctx;
 
         // Proc-backed plugins (git/run/grep) shell out through the wasm host,
@@ -178,7 +178,7 @@ pub const Editor = struct {
         // providers, free the Session (buffers/caps/keymap/…), join the pool,
         // then Providers LAST (the persistent shells outlive buffers + workers).
         {
-            var it = self.session.buffers.iterator();
+            var it = self.session.system.buffers.iterator();
             while (it.next()) |b| app_providers.detachProviders(&self.prov.attach_deps, b);
         }
         self.session.deinit(gpa);
@@ -390,7 +390,7 @@ pub const Editor = struct {
             .file = self.buffers.active().name,
             .theme = &v.theme,
         };
-        const segs = view_mod.ui_mesh.fireStatusline(&self.session.container, self.gpa, &args) catch &.{};
+        const segs = view_mod.ui_mesh.fireStatusline(&self.session.system.container, self.gpa, &args) catch &.{};
         defer view_mod.ui_mesh.freeSegs(self.gpa, segs);
         const hud: view_mod.Hud = .{
             .mode = self.head.currentMode(),
@@ -454,7 +454,7 @@ pub const Editor = struct {
                 .file = b.editor.backingPath() orelse b.name,
                 .theme = &v.theme,
             };
-            const segs = try view_mod.ui_mesh.fireStatusline(&self.session.container, arena.allocator(), &args);
+            const segs = try view_mod.ui_mesh.fireStatusline(&self.session.system.container, arena.allocator(), &args);
             const hud: view_mod.Hud = .{
                 .mode = self.head.currentMode(),
                 .statusline_segs = segs,
@@ -1385,7 +1385,7 @@ pub fn drainDiagnostics(ed: *Editor) bool {
     var rounds: usize = 0;
     while (rounds < 600) : (rounds += 1) {
         ed.settle(3);
-        if (ed.session.caps.layers.find(ed.ctx.document(), "diagnostics")) |l| {
+        if (ed.session.system.caps.layers.find(ed.ctx.document(), "diagnostics")) |l| {
             if (l.spanCount() > 0) return true;
         }
     }
