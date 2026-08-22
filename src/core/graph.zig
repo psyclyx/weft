@@ -452,7 +452,16 @@ pub fn touchedRegions(self: *const GraphDoc, gpa: Allocator, batch: []const u8) 
 
 /// The whole history (bootstrap batch for `open`).
 pub fn serialize(self: *const GraphDoc, gpa: Allocator) Allocator.Error![]u8 {
-    return self.obj.serialize(gpa);
+    return self.obj.serialize(gpa) catch |e| switch (e) {
+        error.OutOfMemory => error.OutOfMemory,
+        // stemma ≥0.5.0-dev widens ObjectDoc.serialize with
+        // error.Unrealized (partial checkout). A GraphDoc's ObjectDoc is
+        // never partial — no facade path calls openPartial or mints
+        // holes — so it is unreachable here; the `else` (not a named
+        // arm) keeps this compiling on both sides of the pin boundary
+        // (the pinned stemma's error set doesn't name Unrealized).
+        else => unreachable,
+    };
 }
 
 // ── Ancestry / reachability — the identity-anchored SUBTREE GRANT ────────
