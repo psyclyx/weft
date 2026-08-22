@@ -166,12 +166,23 @@ pub const Ctx = struct {
     /// against the principal's `GrantDecl`s). Empty until W4 wires capture-
     /// time grant resolution; a real slice of resolved handles lands then.
     grants: []const u8 = &.{},
-    /// Cache key. See `System.zig`'s `generation` doc for exactly what this
-    /// counts today (a coarse, honest over-approximation — "has ANYTHING
-    /// in this system's bindings changed" — not yet the fine-grained
-    /// per-Container epoch the plan's prose imagines, which needs
-    /// action.zig/capability.zig/Keymap to share ONE Container instance
-    /// first, F5's W3 deletion gate).
+    /// Cache key: the shared `container.Container`'s own `epoch` (task
+    /// #19's shared-Container fold-in), read straight off
+    /// `ctx.actions.container.epoch` at capture time — `ctx.caps.container`
+    /// is the SAME instance (System/Session's ONE Container; see
+    /// `System.zig`'s `container` field doc), so either would read
+    /// identically. This REPLACES the old `System.generation`-over-
+    /// approximation this field used to document: `generation` was never
+    /// actually wired to `Ctx.capture` in the first place (no
+    /// `command.Context` held a `*System` to read it from), so this is the
+    /// field's first REAL value, not a precision upgrade of a working one.
+    /// Bumped on every `declareSlot`/`bind`/`unbindOwnerPrefix`/
+    /// `unbindOwnerExact` across EVERY domain sharing the Container (an
+    /// action `provide`, a capability `register`, a `ui/*` mesh bind all
+    /// bump the same counter) — Container-wide, not yet per-SLOT (a bind on
+    /// slot A still bumps the epoch a resolution against unrelated slot B
+    /// would read), but a true, live, unconditionally-correct-to-read
+    /// counter end to end, which the old field never was.
     epoch: u64 = 0,
     /// The dispatching `command.Context` this value was captured from — see
     /// the module doc's "This is the value the plan describes, plus one
@@ -189,7 +200,7 @@ pub const Ctx = struct {
     /// `Head.transient_stack` a `pushTransient` call built, appended after
     /// `mode` in declaration order (innermost transient last).
     pub fn capture(ctx: *command.Context) Ctx {
-        var self: Ctx = .{ .host = ctx, .principal = ctx.principal };
+        var self: Ctx = .{ .host = ctx, .principal = ctx.principal, .epoch = ctx.actions.container.epoch };
         self.scopes.append(.{ .kind = .workspace });
         self.scopes.append(.{ .kind = .system });
         self.scopes.append(.{ .kind = .head, .facts = .{ .pane = ctx.head.focused_pane } });
@@ -331,6 +342,8 @@ const TestEnv = struct {
     buffers: @import("Buffers.zig"),
     commands: command.Commands = .empty,
     keymap: @import("Keymap.zig") = .empty,
+    /// The ONE shared Container `caps`/`actions` bind into (task #19).
+    container: @import("container.zig").Container = undefined,
     caps: @import("capability.zig").Caps,
     actions: @import("action.zig"),
     head: Head = .empty,
@@ -345,9 +358,12 @@ const TestEnv = struct {
             .gpa = gpa,
             .pool = pool,
             .buffers = try @import("Buffers.zig").init(gpa, pool, "user"),
-            .caps = @import("capability.zig").Caps.init(gpa, task.nowNs),
-            .actions = @import("action.zig").init(gpa),
+            .container = @import("container.zig").Container.init(gpa),
+            .caps = undefined,
+            .actions = undefined,
         };
+        self.caps = @import("capability.zig").Caps.init(gpa, task.nowNs, &self.container);
+        self.actions = @import("action.zig").init(gpa, &self.container);
         self.ctx = .{
             .gpa = gpa,
             .buffers = &self.buffers,
@@ -367,6 +383,7 @@ const TestEnv = struct {
         self.head.deinit(gpa);
         self.actions.deinit();
         self.caps.deinit();
+        self.container.deinit();
         self.commands.deinit(gpa);
         self.keymap.deinit(gpa);
         self.buffers.deinit(gpa);
@@ -412,6 +429,43 @@ test "ctx: capture is PROVABLY non-allocating" {
     const c = Ctx.capture(&starved);
     try t.expectEqual(@as(usize, 0), failing.allocations);
     try t.expectEqual(@as(usize, 6), c.scopes.len);
+}
+
+test "ctx: epoch is the shared Container's TRUE per-mutation counter — task #19 (replaces System.generation)" {
+    const gpa = t.allocator;
+    var env = try TestEnv.init(gpa);
+    defer env.deinit();
+
+    const c0 = Ctx.capture(&env.ctx);
+    const e0 = c0.epoch;
+
+    // A Container mutation — an action provider bind — bumps the epoch a
+    // later capture reads.
+    try env.actions.provide(.{ .action = "eval", .command = "zig-eval" });
+    const c1 = Ctx.capture(&env.ctx);
+    try t.expect(c1.epoch != e0);
+    const e1 = c1.epoch;
+
+    // A capability registration ALSO bumps it — same shared Container,
+    // reached through a different domain (`caps`, not `actions`).
+    const NoOp = struct {
+        fn h(_: ?*anyopaque, _: *@import("capability.zig").Caps, _: *const @import("capability.zig").Request) anyerror!void {}
+    };
+    try env.caps.register(.{ .capability = "edit/completion", .id = "test.probe", .handler = NoOp.h });
+    const c2 = Ctx.capture(&env.ctx);
+    try t.expect(c2.epoch != e1);
+    const e2 = c2.epoch;
+
+    // An UNRELATED mutation — editing the buffer, changing mode — never
+    // touches the Container (no declareSlot/bind/unbind), so it does NOT
+    // bump the epoch: proof this is a true per-mutation counter, not a
+    // coarse "anything in the system changed" flag (the property
+    // `System.generation` — removed — never actually delivered, since
+    // nothing wired it to `Ctx.capture` in the first place).
+    try env.head.setMode(gpa, "insert");
+    try env.buffers.active().editor.insertText(gpa, "hi");
+    const c3 = Ctx.capture(&env.ctx);
+    try t.expectEqual(e2, c3.epoch);
 }
 
 test "ctx: mergedFacts merges across scopes, innermost shadows" {

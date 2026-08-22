@@ -53,24 +53,26 @@ pub const Session = struct {
     /// second head (the e2e two-head gate) pairs its own instance the same
     /// way, alongside its own ad hoc `Head`.
     menu_overlay: frame.MenuOverlay,
+    /// The ONE `container.Container` this session's `caps`/`actions` AND the
+    /// UI mesh's `ui/statusline-seg` + `ui/gutter-segment` slots (north-
+    /// star-plan §6 W3-1) all bind into (task #19's shared-Container
+    /// fold-in — `System.zig`'s `container` field doc has the full
+    /// reasoning, identical here: action names/`edit/*` capability names/
+    /// `ui/*` mesh names are one flat, non-colliding slot namespace).
+    /// `ui_mesh.declareSlots`/`bindDefaultStatusline` run against this same
+    /// instance below; the three default gutter providers are NOT bound
+    /// (see `ui_mesh.zig`'s module doc: no live gutter exists today, so
+    /// nothing regresses by construction). REACHABLE from config now:
+    /// `main.zig` wires a `manifest.StatusSegBinder` onto its
+    /// `ConfigSession` pointed at `&self.container`, so `weft.statusSegment`
+    /// in `config.js` binds a real `ui/statusline-seg` provider here (see
+    /// `ui_mesh.zig`'s `bindManifestSegment`).
+    container: core.container.Container,
     caps: core.Caps,
     actions: core.Actions,
     quit: bool,
     /// Self-referential: points at the fields above — built in place.
     cmd_ctx: core.command.Context,
-
-    /// The UI mesh's `ui/statusline-seg` + `ui/gutter-segment` slots (north-
-    /// star-plan §6 W3-1) — a Container distinct from `actions`'/`caps`' own
-    /// (each still holds its OWN instance per `System.zig`'s doc; F5's
-    /// fold-in into ONE shared Container is a later, named W3 step, not
-    /// this one). Declared at construction; the five default statusline
-    /// providers are bound here too (so the statusline renders unchanged
-    /// out of the box) — the three default gutter providers are NOT bound
-    /// (see `ui_mesh.zig`'s module doc: no live gutter exists today, so
-    /// nothing regresses by construction). NOTE: no config/plugin path
-    /// reaches this Container yet — reachability lands with the shared-
-    /// Container fold-in or a manifest verb (north-star-plan task #19).
-    ui_mesh: core.container.Container,
 
     // ── Capability-consumer UIs (written against capability names only) ──
     completion_ui: core.complete_ui.CompletionUi,
@@ -97,8 +99,12 @@ pub const Session = struct {
         self.keymap = .empty;
         self.head = .empty;
         self.menu_overlay = .{};
-        self.caps = core.Caps.init(gpa, core.task.nowNs);
-        self.actions = core.Actions.init(gpa);
+        // The ONE shared Container (task #19) — built before `caps`/
+        // `actions`, which borrow a pointer into it.
+        self.container = core.container.Container.init(gpa);
+        errdefer self.container.deinit();
+        self.caps = core.Caps.init(gpa, core.task.nowNs, &self.container);
+        self.actions = core.Actions.init(gpa, &self.container);
         self.quit = false;
         self.cmd_ctx = .{
             .gpa = gpa,
@@ -111,10 +117,8 @@ pub const Session = struct {
             .head = &self.head,
         };
         try core.builtins.install(gpa, &self.commands, &self.keymap, &self.head, &self.actions);
-        self.ui_mesh = core.container.Container.init(gpa);
-        errdefer self.ui_mesh.deinit();
-        try ui_mesh.declareSlots(&self.ui_mesh);
-        try ui_mesh.bindDefaultStatusline(&self.ui_mesh);
+        try ui_mesh.declareSlots(&self.container);
+        try ui_mesh.bindDefaultStatusline(&self.container);
         // Capability consumers — written against capability names only.
         self.completion_ui = .empty;
         try setup.registerCapabilityConsumers(gpa, &self.commands, &self.completion_ui, grammars);
@@ -129,10 +133,12 @@ pub const Session = struct {
     /// no heap.)
     pub fn deinit(self: *Session, gpa: std.mem.Allocator) void {
         self.cursor_cfg.deinit();
-        self.ui_mesh.deinit();
         self.head.deinit(gpa);
         self.actions.deinit();
         self.caps.deinit();
+        // The shared Container outlives both borrowers above (neither
+        // `deinit` touches it) — torn down here, once, by its owner.
+        self.container.deinit();
         self.keymap.deinit(gpa);
         self.commands.deinit(gpa);
         self.buffers.deinit(gpa);

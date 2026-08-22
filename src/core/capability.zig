@@ -25,9 +25,19 @@
 //! composition from `Kind.composition()`), and `fire` asks the Container for
 //! the eligible set instead of hand-scanning `self.providers`. Sessions,
 //! restamping, and the race/merge machinery below are UNTOUCHED — this is
-//! the "only the match step delegates" adapter the plan calls for. TRANSIENT:
-//! named deletion gate **W3** (north-star-plan §6), once the UI mesh's own
-//! Container-native slots exist.
+//! the "only the match step delegates" adapter the plan calls for.
+//!
+//! **The shared-Container fold-in (task #19, the W3 deletion gate's first
+//! half).** `self.container` is BORROWED, not owned — the same shared
+//! `container.Container` instance `action.zig`'s `Actions` and
+//! `gfx/view/ui_mesh.zig`'s `ui/*` slots bind into (System/Session owns and
+//! tears it down; see `action.zig`'s matching doc for the full reasoning,
+//! identical here). Capability names, action names, and `ui/*` mesh names
+//! are one flat Container slot namespace now. NOT yet done: `fire`'s match
+//! step still queries the Container through THIS module's own adapter shape
+//! (`Kind`/`Provider`/session bookkeeping) rather than a caller resolving
+//! against a bare `container.Container` — deleting this adapter outright is
+//! the remaining, later half of W3's deletion gate.
 
 const std = @import("std");
 const Allocator = std.mem.Allocator;
@@ -386,17 +396,26 @@ pub const Caps = struct {
     /// Monotonic clock, injectable for tests.
     now: *const fn () u64,
     /// The Container this module adapts onto (F5, W1) — see the file doc.
-    /// Every capability name is a slot; every `register`ed provider is a
+    /// BORROWED (task #19's shared-Container fold-in), not owned — the
+    /// caller constructing this `Caps` owns one `container.Container` per
+    /// System/Session and hands a pointer to every domain that binds into
+    /// it. Every capability name is a slot; every `register`ed provider is a
     /// `Binding` whose owner is the provider's `id`.
-    container: container_mod.Container = undefined,
+    container: *container_mod.Container,
     /// Assigns each `register`ed provider its unique `seq` — see
     /// `Provider.seq`'s doc.
     next_provider_seq: u64 = 0,
 
-    pub fn init(gpa: Allocator, now: *const fn () u64) Caps {
-        return .{ .gpa = gpa, .now = now, .container = container_mod.Container.init(gpa) };
+    /// `container` is BORROWED (task #19) — see the field doc.
+    pub fn init(gpa: Allocator, now: *const fn () u64, container: *container_mod.Container) Caps {
+        return .{ .gpa = gpa, .now = now, .container = container };
     }
 
+    /// Does NOT deinit `self.container` — borrowed (see the field doc); the
+    /// owner (System/Session) tears it down once every borrower has finished
+    /// — see `action.zig`'s matching `deinit` doc for why the ordering
+    /// relative to THIS module's own memory (`self.providers` etc.) is safe
+    /// either way for a coordinated full teardown.
     pub fn deinit(self: *Caps) void {
         for (self.providers.items) |*p| p.deinit(self.gpa);
         self.providers.deinit(self.gpa);
@@ -409,7 +428,6 @@ pub const Caps = struct {
         }
         self.sessions.deinit(self.gpa);
         self.layers.deinit(self.gpa);
-        self.container.deinit();
     }
 
     // ── Registration ────────────────────────────────────────────
@@ -471,6 +489,7 @@ pub const Caps = struct {
             // doesn't exist yet).
             .tier = .plugin,
             .owner = id_owned,
+            .domain = .caps,
         });
 
         self.providers.appendAssumeCapacity(.{
@@ -493,7 +512,7 @@ pub const Caps = struct {
     /// structs `deinit` is about to free; see container.zig's
     /// `unbindOwnerPrefix` doc for why the order matters.
     pub fn unregisterByIdPrefix(self: *Caps, id_prefix: []const u8) void {
-        self.container.unbindOwnerPrefix(id_prefix);
+        self.container.unbindOwnerPrefix(.caps, id_prefix);
         var i: usize = 0;
         while (i < self.providers.items.len) {
             if (std.mem.startsWith(u8, self.providers.items[i].id, id_prefix)) {

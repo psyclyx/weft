@@ -432,9 +432,11 @@ test "command: schema derivation, validation, late-bound run" {
     defer keymap.deinit(gpa);
     var head: Head = .empty;
     defer head.deinit(gpa);
-    var caps = @import("capability.zig").Caps.init(gpa, @import("task.zig").nowNs);
+    var container = @import("container.zig").Container.init(gpa);
+    defer container.deinit();
+    var caps = @import("capability.zig").Caps.init(gpa, @import("task.zig").nowNs, &container);
     defer caps.deinit();
-    var actions = Actions.init(gpa);
+    var actions = Actions.init(gpa, &container);
     defer actions.deinit();
     var quit = false;
 
@@ -486,9 +488,11 @@ test "command: an agent principal authors as its own peer even under a keystroke
     defer keymap.deinit(gpa);
     var head: Head = .empty;
     defer head.deinit(gpa);
-    var caps = @import("capability.zig").Caps.init(gpa, task.nowNs);
+    var container = @import("container.zig").Container.init(gpa);
+    defer container.deinit();
+    var caps = @import("capability.zig").Caps.init(gpa, task.nowNs, &container);
     defer caps.deinit();
-    var actions = Actions.init(gpa);
+    var actions = Actions.init(gpa, &container);
     defer actions.deinit();
     var quit = false;
     var commands: Commands = .empty;
@@ -543,9 +547,11 @@ test "command: read-only refuses interactive edit, allows render (in depth)" {
     defer keymap.deinit(gpa);
     var head: Head = .empty;
     defer head.deinit(gpa);
-    var caps = @import("capability.zig").Caps.init(gpa, task.nowNs);
+    var container = @import("container.zig").Container.init(gpa);
+    defer container.deinit();
+    var caps = @import("capability.zig").Caps.init(gpa, task.nowNs, &container);
     defer caps.deinit();
-    var actions = Actions.init(gpa);
+    var actions = Actions.init(gpa, &container);
     defer actions.deinit();
     var quit = false;
     var commands: Commands = .empty;

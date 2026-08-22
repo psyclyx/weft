@@ -102,6 +102,11 @@ extern void host_provide(const char *action, int action_len,
                          const char *mode, int mode_len,
                          const char *lang, int lang_len,
                          const char *cmd, int cmd_len, int prio);
+// weft.statusSegment(text, role, priority): stage a static ui/statusline-seg
+// segment onto the manifest (north-star-plan §6 W3, task #19 item 3).
+__attribute__((import_module("weft"), import_name("qjs_status_segment")))
+extern void host_status_segment(const char *text, int text_len,
+                                const char *role, int role_len, int priority);
 
 // ── JS → host trampolines. Each pulls its string args out of the JS values
 // and forwards to the host import. ──
@@ -304,6 +309,25 @@ static JSValue js_provide(JSContext *ctx, JSValueConst this_val,
     return JS_UNDEFINED;
 }
 
+// weft.statusSegment(text, role[, priority]) — stage a static status-line
+// segment (north-star-plan §6 W3, task #19). `role` names a
+// core.surface.Role ("normal","muted","accent",…); unknown/empty falls back
+// to "normal" host-side. `priority` defaults to 0 — the composition sort key
+// within `ui/statusline-seg` (an ordered_union slot).
+static JSValue js_status_segment(JSContext *ctx, JSValueConst this_val,
+                                 int argc, JSValueConst *argv) {
+    if (argc < 2) return JS_ThrowTypeError(ctx, "statusSegment(text, role[, priority])");
+    size_t tl, rl;
+    const char *txt = JS_ToCStringLen(ctx, &tl, argv[0]);
+    const char *role = JS_ToCStringLen(ctx, &rl, argv[1]);
+    int32_t prio = 0;
+    if (argc >= 3) JS_ToInt32(ctx, &prio, argv[2]);
+    if (txt && role) host_status_segment(txt, (int)tl, role, (int)rl, prio);
+    JS_FreeCString(ctx, txt);
+    JS_FreeCString(ctx, role);
+    return JS_UNDEFINED;
+}
+
 // Install the `weft` global: the config surface config.js calls.
 static void install_weft(JSContext *ctx) {
     JSValue global = JS_GetGlobalObject(ctx);
@@ -318,6 +342,7 @@ static void install_weft(JSContext *ctx) {
     JS_SetPropertyStr(ctx, weft, "menu", JS_NewCFunction(ctx, js_menu, "menu", 1));
     JS_SetPropertyStr(ctx, weft, "action", JS_NewCFunction(ctx, js_action, "action", 1));
     JS_SetPropertyStr(ctx, weft, "provide", JS_NewCFunction(ctx, js_provide, "provide", 3));
+    JS_SetPropertyStr(ctx, weft, "statusSegment", JS_NewCFunction(ctx, js_status_segment, "statusSegment", 2));
     JS_SetPropertyStr(ctx, global, "weft", weft);
     JS_FreeValue(ctx, global);
 }

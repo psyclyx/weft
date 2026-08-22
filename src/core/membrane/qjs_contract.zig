@@ -1,7 +1,7 @@
 //! core/membrane/qjs_contract.zig — the `weft.*` membrane's THIRD surface
 //! (doc/north-star-plan.md §2.5, task W0a-D extension 3): the `qjs_*` import
 //! table `src/core/quickjs.zig` binds onto quickjs.wasm's Linker, today
-//! hand-listed at THREE call sites (`defineConfigFns`'s 10 config-plane
+//! hand-listed at THREE call sites (`defineConfigFns`'s 11 config-plane
 //! imports, `evalConfig`'s 15 plugin-plane stubs, `JsPlugin.load`'s 15
 //! plugin-plane real handlers) that must all agree on every name's arity.
 //!
@@ -31,9 +31,9 @@ const std = @import("std");
 
 pub const ValType = enum { i32 };
 
-/// Which linker(s) an entry is bound on. `.config` — the 10 `weft.*` calls
+/// Which linker(s) an entry is bound on. `.config` — the 11 `weft.*` calls
 /// every config/plugin script can make (bind/run/echo/log/plugin/use/set/
-/// menu/action/provide) — real handlers always. `.plugin` — the 15 calls
+/// menu/action/provide/statusSegment) — real handlers always. `.plugin` — the 15 calls
 /// only a RESIDENT JS plugin makes (register/proc/buffer/config/
 /// breakpoints/fileRead/fileWrite/lineText/pick/status); stubbed on the
 /// config-eval linker (present to satisfy quickjs.wasm's shared import
@@ -79,6 +79,7 @@ pub const imports = [_]Entry{
     e("qjs_menu", 2, 0, .config, "weft.menu(name): declare a which-key style submenu mode"),
     e("qjs_action", 2, 0, .config, "weft.action(name): declare a pick action + its trampoline command"),
     e("qjs_provide", 9, 0, .config, "weft.provide(action, mode, lang, cmd, prio): register a provider"),
+    e("qjs_status_segment", 5, 0, .config, "weft.statusSegment(text, role, priority): stage a static ui/statusline-seg segment onto the manifest (north-star-plan task #19)"),
 
     // ── the plugin plane: stubbed on the config linker, real on a JsPlugin's ─
     e("qjs_register", 2, 1, .plugin, "bind a command name to this JS plugin's on_command; returns its id"),
@@ -103,10 +104,10 @@ pub const imports = [_]Entry{
 /// `qjs_*` import, so a merge conflict or half-finished edit fails the
 /// build instead of silently drifting quickjs.zig's three registration
 /// sites apart.
-const expected_count = 25;
+const expected_count = 26;
 
 comptime {
-    @setEvalBranchQuota(10_000); // O(n²) duplicate scan, n=25
+    @setEvalBranchQuota(10_000); // O(n²) duplicate scan, n=26
     if (imports.len != expected_count) @compileError(std.fmt.comptimePrint(
         "core/membrane/qjs_contract.zig: imports table has {d} entries, expected {d}. " ++
             "If you added or removed a qjs_* import, update `expected_count` here and wire " ++
@@ -148,7 +149,7 @@ test "qjs membrane contract: every entry is well-formed, documented, and unique"
         }
     }
     try t.expectEqual(@as(usize, expected_count), imports.len);
-    try t.expectEqual(@as(usize, 10), config_count); // defineConfigFns' surface
+    try t.expectEqual(@as(usize, 11), config_count); // defineConfigFns' surface
     try t.expectEqual(@as(usize, 15), plugin_count); // the resident-plugin-only surface
 }
 

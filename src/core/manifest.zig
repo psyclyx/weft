@@ -28,9 +28,10 @@
 //!
 //! **Sealed eval** (§2.3, §4 C11): the `weft.*` config-group host surface
 //! (`bind_key`/`run`/`echo`/`log`/`plugin`/`use`/`set`/`menu`/`action`/
-//! `provide` — see `membrane/qjs_contract.zig`'s `.config` group) is the
-//! ONLY channel a config script can use to affect a `Manifest`; none of
-//! those ten imports reads wall-clock, environment, or filesystem outside
+//! `provide`/`statusSegment` — see `membrane/qjs_contract.zig`'s `.config`
+//! group) is the ONLY channel a config script can use to affect a
+//! `Manifest`; none of those eleven imports reads wall-clock, environment,
+//! or filesystem outside
 //! the config's own directory (`qjs_use`'s file read is confined to
 //! `<config_dir>/<name>.js`) — verified by
 //! `qjs_contract_test.zig`'s "no clock/env-shaped .config import" check.
@@ -64,6 +65,7 @@ const command = @import("command.zig");
 const kv = @import("kv.zig");
 const container_mod = @import("container.zig");
 const Keymap = @import("Keymap.zig");
+const surface = @import("surface.zig");
 
 pub const Tier = container_mod.Tier;
 
@@ -74,6 +76,46 @@ pub const Tier = container_mod.Tier;
 pub const PluginLoader = struct {
     ctx: *anyopaque,
     load: *const fn (ctx: *anyopaque, name: []const u8) void,
+};
+
+/// Opaque seam so `weft.statusSegment` can bind a `StatusSegmentDecl` into
+/// the `ui/statusline-seg` Container slot WITHOUT this (core-layer) module
+/// depending on `gfx/view/ui_mesh.zig` (a gfx-layer module — core never
+/// imports gfx; `ui_mesh.zig`'s `StatuslineArgs`/`Seg` types need `Theme`
+/// for `fg_override`/`bg_override`, which is genuinely gfx-coupled, so
+/// those types can't move down to core without a much bigger move). Mirrors
+/// `PluginLoader`'s shape exactly: an opaque ctx + a function pointer the
+/// EMBEDDER wires (`app/config_load.zig`'s `ConfigSession.ui_bind`, wired
+/// from `main.zig` to `gfx/view/ui_mesh.zig`'s `bindManifestSegment` against
+/// `&session.container`). `ApplyCtx.ui_bind` defaults to `null` — every
+/// existing `ApplyCtx` struct-literal call site (config-eval tests,
+/// `System.applyManifest`, …) compiles unchanged and `weft.statusSegment`
+/// becomes a documented, logged no-op wherever no binder is wired, exactly
+/// like `loader == null` already does for `weft.plugin`.
+pub const StatusSegBinder = struct {
+    ctx: *anyopaque,
+    /// Bind `decl` — BORROWED, not copied: the caller (`applyDecls`)
+    /// guarantees it outlives the binding, because `decl` points directly
+    /// into `self.status_segments.items` (a `*const Manifest`'s decl lists
+    /// are treated as immutable for the manifest's whole lifetime — nothing
+    /// appends to them after config eval finishes) and `teardownOwned`
+    /// (called strictly before `Manifest.destroy`, see `reconcile`'s doc)
+    /// unbinds every one of THIS manifest's owner's bindings before that
+    /// memory is freed.
+    ///
+    /// `decl` is `*StatusSegmentDecl` (mutable), not `*const`, on purpose:
+    /// the implementation is expected to resolve `decl.role` into
+    /// `decl.resolved_role` HERE, once, at bind time (see that field's
+    /// doc) — `applyDecls` hands over a `@constCast`ed pointer into its own
+    /// `*const Manifest`, sound because nothing else touches this
+    /// manifest's decls while `applyDecls` runs and every READ of
+    /// `resolved_role` happens strictly after `bind` returns. `apply_ctx`
+    /// is the SAME `*command.Context` `applyDecls` is running against —
+    /// passed through so a binder can echo a role-typo warning through the
+    /// ordinary user-facing channel, the `weft.set`/`echoValueDropped`
+    /// precedent (this module stays free of the warning's TEXT — that's
+    /// the binder's call, since it owns the vocabulary `role` names).
+    bind: *const fn (ctx: *anyopaque, apply_ctx: *command.Context, owner: []const u8, tier: Tier, decl: *StatusSegmentDecl) anyerror!void,
 };
 
 // ── Declaration types — one per `weft.*` call, in AUTHORED order. ──────────
@@ -87,6 +129,32 @@ pub const ValueDecl = struct { owner: []u8, key: []u8, value: []u8 };
 pub const RunDecl = struct { command: []u8 };
 pub const EchoDecl = struct { message: []u8 };
 pub const LogDecl = struct { message: []u8 };
+/// `weft.statusSegment(text, role, priority)` (north-star-plan §6 W3, task
+/// #19 item 3's mesh-reachability verb) — a STATIC status-line segment:
+/// literal `text`, a `role` naming a `core.surface.Role`, and `priority`
+/// (the `ui/statusline-seg` slot's ordinary ordered_union sort key).
+/// Deliberately NOT `text_or_command` despite the field name a first draft
+/// of this verb used in review notes: a command-BACKED dynamic segment
+/// (re-evaluated per HUD build) needs a `ui_provider` whose `call`
+/// re-invokes `command.run` — a real, separate feature (needs a
+/// `*command.Context` at fire time, which a config-time `StatusSegmentDecl`
+/// doesn't have and shouldn't fake) left for a later step; this type stays
+/// honestly static-only until that lands.
+pub const StatusSegmentDecl = struct {
+    text: []u8,
+    role: []u8,
+    priority: i32,
+    /// `role`'s parsed `core.surface.Role` — resolved ONCE at BIND time,
+    /// inside `StatusSegBinder.bind`'s implementation (`gfx/view/ui_mesh.
+    /// zig`'s `bindManifestSegment`), not at fire time: the fire path
+    /// (`manifestSegProvider`) stays silent and cheap, never re-parsing a
+    /// string on every HUD build. Deliberately not resolved earlier, in
+    /// `applyDecls` (which COULD — `core.surface` is core-layer, no gfx
+    /// dependency needed to parse the enum): a decl that's staged but never
+    /// bound (no `ui_bind` wired) should never warn about a role typo it
+    /// will never render. `.normal` until bound.
+    resolved_role: surface.Role = .normal,
+};
 
 /// Whether a `weft.plugin(name)` names the bundled catalog or an explicit
 /// path — the trust-root choke point (north-star-plan §5 "Trust root —
@@ -179,6 +247,7 @@ pub const Manifest = struct {
     runs: std.ArrayList(RunDecl) = .empty,
     echoes: std.ArrayList(EchoDecl) = .empty,
     logs: std.ArrayList(LogDecl) = .empty,
+    status_segments: std.ArrayList(StatusSegmentDecl) = .empty,
 
     pub fn create(gpa: Allocator, owner: []const u8, tier: Tier) !*Manifest {
         const self = try gpa.create(Manifest);
@@ -223,6 +292,11 @@ pub const Manifest = struct {
         self.echoes.deinit(gpa);
         for (self.logs.items) |d| gpa.free(d.message);
         self.logs.deinit(gpa);
+        for (self.status_segments.items) |d| {
+            gpa.free(d.text);
+            gpa.free(d.role);
+        }
+        self.status_segments.deinit(gpa);
         gpa.destroy(self);
     }
 
@@ -260,6 +334,13 @@ pub const Manifest = struct {
     }
     pub fn addLog(self: *Manifest, message: []const u8) !void {
         try self.logs.append(self.gpa, .{ .message = try self.gpa.dupe(u8, message) });
+    }
+    pub fn addStatusSegment(self: *Manifest, text: []const u8, role: []const u8, priority: i32) !void {
+        try self.status_segments.append(self.gpa, .{
+            .text = try self.gpa.dupe(u8, text),
+            .role = try self.gpa.dupe(u8, role),
+            .priority = priority,
+        });
     }
     /// Attach a fully-evaluated sub-manifest (a `weft.use(name)` import).
     /// Takes ownership: `destroy` frees it recursively.
@@ -317,6 +398,12 @@ pub const Manifest = struct {
         for (self.echoes.items) |d| hStr(h, d.message);
         hLen(h, self.logs.items.len);
         for (self.logs.items) |d| hStr(h, d.message);
+        hLen(h, self.status_segments.items.len);
+        for (self.status_segments.items) |d| {
+            hStr(h, d.text);
+            hStr(h, d.role);
+            h.update(std.mem.asBytes(&d.priority));
+        }
         hLen(h, self.imports.items.len);
         for (self.imports.items) |imp| imp.hashInto(h);
     }
@@ -327,6 +414,11 @@ pub const Manifest = struct {
         ctx: *command.Context,
         loader: ?PluginLoader,
         config: ?*kv.Store,
+        /// `weft.statusSegment`'s mesh-reachability seam (task #19 item 3)
+        /// — see `StatusSegBinder`'s doc. `null` (every call site that
+        /// doesn't explicitly set it) makes a `weft.statusSegment` decl a
+        /// logged no-op, never a crash.
+        ui_bind: ?StatusSegBinder = null,
     };
 
     /// Apply this manifest FRESH — every declaration is applied as if for
@@ -411,6 +503,19 @@ pub const Manifest = struct {
             actx.ctx.head.echo.appendSlice(gpa, d.message) catch {};
         }
         for (self.logs.items) |d| std.log.info("config: {s}", .{d.message});
+        for (self.status_segments.items) |*d| {
+            if (actx.ui_bind) |binder| {
+                // `@constCast`: sound here — see `StatusSegBinder.bind`'s
+                // doc for why a binder mutating `d.resolved_role` in place
+                // is safe (this manifest's decls are otherwise immutable
+                // for the duration of this `apply`/`reconcile` call, and
+                // nothing reads `resolved_role` before `bind` returns).
+                binder.bind(binder.ctx, actx.ctx, self.owner, self.tier, @constCast(d)) catch |e|
+                    std.log.warn("config: weft.statusSegment('{s}') failed to bind: {t}", .{ d.text, e });
+            } else {
+                std.log.warn("config: weft.statusSegment('{s}') declared but no UI-mesh binder is wired for this apply; dropped", .{d.text});
+            }
+        }
     }
 
     fn loadPlugins(self: *const Manifest, actx: *ApplyCtx) !void {
@@ -529,6 +634,22 @@ pub const Manifest = struct {
         // literal string-prefix pair a `startsWith` teardown would
         // wrongly conflate (nit R-b).
         if (self.provides.items.len > 0) actx.ctx.actions.unregisterByOwner(self.owner);
+        // `weft.statusSegment` bindings share the SAME Container `actions`
+        // adapts onto (task #19's shared-Container fold-in) — unbind them
+        // by the identical owner-exact convention `provides` uses just
+        // above (a raw Container call, not routed through the `actions`
+        // domain wrapper: these are `ui/*` bindings, not action provides).
+        // Domain-SCOPED (review send-back): `.ui`, not the container-wide
+        // form the pre-fix code used — this call and the `unregisterByOwner`
+        // just above are NOT redundant even when `self.owner` is the same
+        // string for both (e.g. the root config manifest's `"config"`):
+        // each now removes ONLY its own domain's bindings, precisely.
+        // MUST run before `Manifest.destroy()` frees `d.text`/`d.role` —
+        // `StatusSegBinder.bind`'s `ctx` pointer borrows straight into
+        // `self.status_segments.items`; see that type's doc. `reconcile`
+        // guarantees this ordering (`teardownOwned` always precedes
+        // `destroy` for the OLD manifest — see its doc).
+        if (self.status_segments.items.len > 0) actx.ctx.actions.container.unbindOwnerExact(.ui, self.owner);
         if (actx.config) |store| {
             for (self.values.items) |d| _ = store.del(gpa, d.owner, d.key);
         }

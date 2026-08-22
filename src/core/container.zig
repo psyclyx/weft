@@ -123,6 +123,20 @@ pub const ProviderRef = union(enum) {
     },
 };
 
+/// Which adapter a `Binding` came from — task #19's cross-domain unbind
+/// hazard fix (review send-back). `owner` strings are free-form per domain
+/// (a plugin name, a caps provider id, a manifest owner) and were NEVER
+/// guaranteed distinct ACROSS domains — see `unbindOwnerPrefix`'s doc for
+/// the reachable-today collision this closes. `Domain` is compared ONLY by
+/// the two unbind functions below; `bind`'s collision check, `resolveOne`,
+/// `eligible`, and `explain` never read it — resolution is already
+/// domain-safe by construction (action names / `edit/*` capability names /
+/// `ui/*` mesh names are disjoint SLOT namespaces), so adding a domain
+/// filter there would be a no-op, not a fix. `other` covers this module's
+/// own tests and any future ad hoc/`value`-shaped binding with no adapter
+/// of its own.
+pub const Domain = enum { action, caps, ui, other };
+
 pub const Binding = struct {
     slot: []const u8,
     provider: ProviderRef,
@@ -138,6 +152,9 @@ pub const Binding = struct {
     /// strings are freed — `unbindOwnerPrefix` must be called first (see the
     /// F5 adapters for the ordering this requires).
     owner: []const u8,
+    /// Which adapter bound this — see `Domain`'s doc. Defaults to `.other`
+    /// so a bare test/one-off `bind()` call doesn't need to name one.
+    domain: Domain = .other,
     /// Position within ONE owner's authored list — data, never load order.
     /// See `betterThan`'s doc for the "earlier decl_index wins" convention
     /// and what an adapter whose legacy contract is "later wins" must do.
@@ -158,6 +175,26 @@ pub const Container = struct {
     /// backing storage. Callers must `unbindOwnerPrefix` before freeing the
     /// memory a binding borrows.
     bindings: std.ArrayList(Binding) = .empty,
+    /// TRUE EPOCH (north-star-plan task #19 item 2 — CONTAINER-WIDE, not
+    /// per-slot; see the body below): a monotonic counter bumped on every
+    /// successful `declareSlot`/`bind`/
+    /// `unbindOwnerPrefix`/`unbindOwnerExact` call — i.e. every mutation of
+    /// this Container's resolvable state. `ctx.zig`'s `Ctx.epoch` reads this
+    /// directly (`ctx.actions.container.epoch` — `Actions`/`Caps` now BOTH
+    /// borrow the same instance, System/Session's shared fold-in, so either
+    /// path reads the identical counter) as its cache key at capture time.
+    /// Before the fold-in this was `System.generation` — a coarse "has
+    /// ANYTHING in this system's bindings changed" flag that was never
+    /// actually wired to `Ctx.epoch` in the first place (no `command.Context`
+    /// held a `*System` to read it from). This field is the honest
+    /// replacement: real, Container-wide (not yet per-SLOT — a resolveOne
+    /// for slot A still sees its epoch bump when slot B's bindings change —
+    /// but a true, live, always-correct-to-read counter, wired end to end).
+    /// Wraps (`+%=`) rather than panicking on overflow — matching
+    /// `System.generation`'s old convention — since a real process will
+    /// never bind/unbind `2^64` times, this only guards against Zig's
+    /// safety-checked `+=` panicking in the theoretical limit.
+    epoch: u64 = 0,
 
     pub fn init(gpa: Allocator) Container {
         return .{ .gpa = gpa };
@@ -185,6 +222,7 @@ pub const Container = struct {
         } else if (gop.value_ptr.shape != decl.shape or gop.value_ptr.composition != decl.composition) {
             std.log.warn("container: slot '{s}' redeclared with a different shape/composition; keeping the first", .{decl.name});
         }
+        self.epoch +%= 1;
     }
 
     pub const BindError = error{ UnknownSlot, SlotCollision } || Allocator.Error;
@@ -209,37 +247,65 @@ pub const Container = struct {
             }
         }
         try self.bindings.append(self.gpa, binding);
+        self.epoch +%= 1;
     }
 
-    /// Remove every binding whose owner starts with `prefix` (plugin
-    /// teardown), across every slot. Callers MUST call this before freeing
-    /// the memory those bindings' `owner`/`slot`/predicate fields borrow —
+    /// Remove every binding in `domain` whose owner starts with `prefix`
+    /// (plugin teardown) — across every SLOT (still cross-slot: a plugin's
+    /// action providers live on many different action-name slots), but
+    /// scoped to ONE domain. Callers MUST call this before freeing the
+    /// memory those bindings' `owner`/`slot`/predicate fields borrow —
     /// `Container` does not own that memory and does not dereference it
     /// here, but a binding left dangling past this call is a use-after-free
     /// waiting for the next `resolveOne`/`eligible`/`bind`.
-    pub fn unbindOwnerPrefix(self: *Container, prefix: []const u8) void {
+    ///
+    /// **Cross-domain hazard, FIXED (task #19's shared-Container fold-in;
+    /// review send-back).** Before `domain` existed, this was
+    /// container-WIDE: `owner` strings from DIFFERENT domains (a plugin
+    /// name, a caps provider id, a manifest owner) sat in the SAME bindings
+    /// list, and `action.zig`'s `unregisterByOwnerPrefix` /
+    /// `capability.zig`'s `unregisterByIdPrefix` each called this with no
+    /// way to say "only MY domain." Reachable TODAY, not merely
+    /// theoretical: `wasm_abi/WasmPlugin.zig`'s completion-provider caps id
+    /// is `"plugin.<name>/edit/completion"` — a plugin literally named
+    /// `"plugin"` calling `unregisterByOwnerPrefix("plugin")` (its own
+    /// action-provider teardown) would `startsWith`-match and silently
+    /// delete every OTHER plugin's `"plugin.<name>/..."` caps binding too,
+    /// while `Caps.providers` (untouched) still believed them registered —
+    /// a desync, not a crash. `Domain` closes this structurally: each
+    /// adapter's unbind call now names its own domain, so a same-prefix
+    /// collision across domains can no longer remove the wrong bindings —
+    /// see the regression test below ("cross-domain prefix collision").
+    pub fn unbindOwnerPrefix(self: *Container, domain: Domain, prefix: []const u8) void {
         var i: usize = 0;
         while (i < self.bindings.items.len) {
-            if (std.mem.startsWith(u8, self.bindings.items[i].owner, prefix)) {
+            if (self.bindings.items[i].domain == domain and std.mem.startsWith(u8, self.bindings.items[i].owner, prefix)) {
                 _ = self.bindings.swapRemove(i);
             } else i += 1;
         }
+        self.epoch +%= 1;
     }
 
-    /// Remove every binding whose owner EQUALS `owner` exactly — the
-    /// collision-free sibling of `unbindOwnerPrefix`: a caller whose owner
-    /// identities are dynamically named (e.g. `manifest.zig`'s `"import:
-    /// <name>"`, where one imported name can be a literal string-prefix of
-    /// another — `"def"` of `"defaults"`) must use this, not the prefix
-    /// form, or tearing down one owner can silently take an unrelated one
-    /// with it.
-    pub fn unbindOwnerExact(self: *Container, owner: []const u8) void {
+    /// Remove every binding in `domain` whose owner EQUALS `owner` exactly
+    /// — the collision-free sibling of `unbindOwnerPrefix`: a caller whose
+    /// owner identities are dynamically named (e.g. `manifest.zig`'s
+    /// `"import: <name>"`, where one imported name can be a literal
+    /// string-prefix of another — `"def"` of `"defaults"`) must use this,
+    /// not the prefix form, or tearing down one owner can silently take an
+    /// unrelated one with it. `domain` closes the SAME-owner, cross-domain
+    /// collision the prefix form's doc names (e.g. a config manifest's
+    /// owner `"config"` names an `action` provide AND a `ui` status
+    /// segment at once — see `manifest.zig`'s `teardownOwned`, which now
+    /// issues two scoped calls, one per domain, instead of one that would
+    /// have removed both regardless of which was meant).
+    pub fn unbindOwnerExact(self: *Container, domain: Domain, owner: []const u8) void {
         var i: usize = 0;
         while (i < self.bindings.items.len) {
-            if (std.mem.eql(u8, self.bindings.items[i].owner, owner)) {
+            if (self.bindings.items[i].domain == domain and std.mem.eql(u8, self.bindings.items[i].owner, owner)) {
                 _ = self.bindings.swapRemove(i);
             } else i += 1;
         }
+        self.epoch +%= 1;
     }
 
     /// The single winner for `slot` against `f` — `first_wins` resolution,
@@ -494,11 +560,60 @@ test "container: unbindOwnerPrefix drops every binding from matching owners" {
     try c.bind(.{ .slot = "s", .provider = .{ .value = "1" }, .predicate = .{ .all = &.{} }, .owner = "plugin#1" });
     try c.bind(.{ .slot = "s", .provider = .{ .value = "2" }, .predicate = .{ .all = &.{} }, .owner = "plugin#2" });
     try c.bind(.{ .slot = "s", .provider = .{ .value = "3" }, .predicate = .{ .all = &.{} }, .owner = "other" });
-    c.unbindOwnerPrefix("plugin#");
+    c.unbindOwnerPrefix(.other, "plugin#");
     const list = try c.eligible(gpa, "s", .{});
     defer gpa.free(list);
     try t.expectEqual(@as(usize, 1), list.len);
     try t.expectEqualStrings("other", list[0].owner);
+}
+
+test "container: DOMAIN closes the cross-domain prefix-collision hazard (task #19 review send-back)" {
+    // The reachable-TODAY shape `unbindOwnerPrefix`'s doc names: a wasm
+    // plugin's action-provider owner is its bare NAME (`WasmPlugin.zig`'s
+    // `unregisterByOwnerPrefix(self.name)`); a caps provider's id is
+    // `"plugin.<name>/edit/completion"` (`wasm_host/capability.zig`). A
+    // plugin literally named "plugin" makes "plugin.foo/edit/completion"
+    // (some OTHER plugin's caps id) start with "plugin". Before `Domain`
+    // existed, tearing down the action-domain owner "plugin" would ALSO
+    // have swept the unrelated caps-domain binding below out from under
+    // it, desyncing `Caps.providers` (still believing it registered) from
+    // the Container (now missing it).
+    const gpa = t.allocator;
+    var c = Container.init(gpa);
+    defer c.deinit();
+    try declared(&c, "eval", .first_wins); // an action slot
+    try c.declareSlot(.{ .name = "edit/completion", .shape = .query, .composition = .merge_ranked }); // a caps slot
+
+    try c.bind(.{ .slot = "eval", .provider = .{ .command = "plugin-eval" }, .predicate = .{ .all = &.{} }, .owner = "plugin", .domain = .action });
+    try c.bind(.{ .slot = "edit/completion", .provider = .{ .caps_provider = .{ .id = "plugin.foo/edit/completion", .seq = 0 } }, .predicate = .{ .all = &.{} }, .owner = "plugin.foo/edit/completion", .domain = .caps });
+
+    // Tear down ONLY the action-domain owner "plugin" — a bare
+    // `startsWith` would ALSO match the caps owner above
+    // ("plugin.foo/edit/completion".startsWith("plugin")).
+    c.unbindOwnerPrefix(.action, "plugin");
+
+    // The action-domain binding is gone...
+    try t.expectEqual(@as(?*const Binding, null), c.resolveOne("eval", .{}));
+    // ...but the caps-domain binding SURVIVES and still resolves — the
+    // exact desync the domain filter closes.
+    const elig = try c.eligible(gpa, "edit/completion", .{});
+    defer gpa.free(elig);
+    try t.expectEqual(@as(usize, 1), elig.len);
+    try t.expectEqualStrings("plugin.foo/edit/completion", elig[0].owner);
+
+    // The SAME collision, `unbindOwnerExact` this time: a config manifest's
+    // owner "config" names an action provide AND (after this send-back's
+    // fix) a ui status segment at once — exact-match teardown of one must
+    // not remove the other.
+    try c.bind(.{ .slot = "eval", .provider = .{ .command = "config-eval" }, .predicate = .{ .all = &.{} }, .owner = "config", .domain = .action });
+    try c.declareSlot(.{ .name = "ui/statusline-seg", .shape = .query, .composition = .ordered_union });
+    try c.bind(.{ .slot = "ui/statusline-seg", .provider = .{ .value = "seg" }, .predicate = .{ .all = &.{} }, .owner = "config", .domain = .ui });
+
+    c.unbindOwnerExact(.action, "config");
+    try t.expectEqual(@as(?*const Binding, null), c.resolveOne("eval", .{}));
+    const ui_elig = try c.eligible(gpa, "ui/statusline-seg", .{});
+    defer gpa.free(ui_elig);
+    try t.expectEqual(@as(usize, 1), ui_elig.len);
 }
 
 test "container: explain reports the eligible set, sort keys, and the winner" {
@@ -579,6 +694,28 @@ test "container: ui_provider — an erased host fn/ctx round-trips through bind/
     try t.expectEqual(@as(usize, 2), out.items.len);
     try t.expectEqualStrings("alpha", out.items[0]);
     try t.expectEqualStrings("beta", out.items[1]);
+}
+
+test "container: epoch is a real monotonic counter over declareSlot/bind/unbind" {
+    const gpa = t.allocator;
+    var c = Container.init(gpa);
+    defer c.deinit();
+    try t.expectEqual(@as(u64, 0), c.epoch);
+
+    try declared(&c, "s", .first_wins);
+    const after_declare = c.epoch;
+    try t.expect(after_declare != 0);
+
+    try c.bind(.{ .slot = "s", .provider = .{ .value = "a" }, .predicate = .{ .all = &.{} }, .owner = "a" });
+    const after_bind = c.epoch;
+    try t.expect(after_bind != after_declare);
+
+    // A failed bind (unknown slot) never mutates state — never bumps epoch.
+    try t.expectError(error.UnknownSlot, c.bind(.{ .slot = "nope", .provider = .{ .value = "x" }, .predicate = .{ .all = &.{} }, .owner = "a" }));
+    try t.expectEqual(after_bind, c.epoch);
+
+    c.unbindOwnerExact(.other, "a");
+    try t.expect(c.epoch != after_bind);
 }
 
 test {

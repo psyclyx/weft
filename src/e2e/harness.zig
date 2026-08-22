@@ -390,7 +390,7 @@ pub const Editor = struct {
             .file = self.buffers.active().name,
             .theme = &v.theme,
         };
-        const segs = view_mod.ui_mesh.fireStatusline(&self.session.ui_mesh, self.gpa, &args) catch &.{};
+        const segs = view_mod.ui_mesh.fireStatusline(&self.session.container, self.gpa, &args) catch &.{};
         defer view_mod.ui_mesh.freeSegs(self.gpa, segs);
         const hud: view_mod.Hud = .{
             .mode = self.head.currentMode(),
@@ -454,7 +454,7 @@ pub const Editor = struct {
                 .file = b.editor.backingPath() orelse b.name,
                 .theme = &v.theme,
             };
-            const segs = try view_mod.ui_mesh.fireStatusline(&self.session.ui_mesh, arena.allocator(), &args);
+            const segs = try view_mod.ui_mesh.fireStatusline(&self.session.container, arena.allocator(), &args);
             const hud: view_mod.Hud = .{
                 .mode = self.head.currentMode(),
                 .statusline_segs = segs,

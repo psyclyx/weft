@@ -52,7 +52,9 @@ pub fn run(gpa: std.mem.Allocator, args: Args, environ: std.process.Environ) !vo
         }
     }
 
-    var caps = capability.Caps.init(gpa, core.task.nowNs);
+    var container = core.container.Container.init(gpa);
+    defer container.deinit();
+    var caps = capability.Caps.init(gpa, core.task.nowNs, &container);
     defer caps.deinit();
     var blob: ?session.BlobServer = null;
     defer if (blob) |*b| b.close();

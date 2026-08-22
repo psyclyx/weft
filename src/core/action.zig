@@ -30,12 +30,26 @@
 //! resolution is re-expressed as a query against `container.Container`: each
 //! `provide()` call also binds a Container `Binding` on a slot named for the
 //! action; `resolve()` queries `container.resolveOne` instead of hand-rolling
-//! the priority/specificity scan. This is a TRANSITIONAL adapter — named
-//! deletion gate: **W3** (north-star-plan §6), once the UI mesh's own
-//! Container-native slots exist and this module's own tie-break machinery
-//! (the `When`/`Provider` scan this comment used to describe) can be deleted
-//! outright rather than delegated. Tie-break behavior for EXISTING data is
-//! preserved exactly — see `resolve`'s and `provide`'s doc comments for how.
+//! the priority/specificity scan. This is a TRANSITIONAL adapter. Tie-break
+//! behavior for EXISTING data is preserved exactly — see `resolve`'s and
+//! `provide`'s doc comments for how.
+//!
+//! **The shared-Container fold-in (task #19, the W3 deletion gate's first
+//! half).** `self.container` is no longer an instance THIS module owns —
+//! it's a `*container.Container` BORROWED from whoever constructs this
+//! `Actions` (`System.zig`/`app/session.zig`/every test `Env`), the SAME
+//! instance `capability.zig`'s `Caps` and `gfx/view/ui_mesh.zig`'s
+//! statusline/gutter slots bind into: action names, `edit/*` capability
+//! names, and `ui/*` mesh names are one flat namespace of Container slot
+//! names now (they already couldn't collide — see `container.zig`'s doc).
+//! What this fold-in does NOT do — the deletion gate is not yet fully
+//! reached: `resolve()` below still calls `container.resolveOne` through
+//! THIS module's own adapter shape (its own `When`/`Ctx`/`ProvideSpec`
+//! vocabulary, its own `decl_index` bookkeeping) rather than a caller
+//! querying a bare `container.Container` directly — folding the RESOLVE
+//! PATH itself (deleting this adapter outright, not just unifying the store
+//! it adapts onto) is the remaining, later step the plan still calls W3's
+//! deletion gate.
 
 const std = @import("std");
 const Allocator = std.mem.Allocator;
@@ -133,9 +147,15 @@ pub const Trampoline = struct { name: []u8 };
 gpa: Allocator,
 actions: std.StringArrayHashMapUnmanaged(Action) = .empty,
 trampolines: std.ArrayList(*Trampoline) = .empty,
-/// The Container this module adapts onto (F5, W1). Every `pick` action name
+/// The Container this module adapts onto (F5, W1) — BORROWED, not owned
+/// (task #19's shared-Container fold-in): the caller constructing this
+/// `Actions` owns one `container.Container` per System/Session and hands a
+/// pointer to every domain that binds into it (`Caps`, this module, the UI
+/// mesh). `Actions.deinit` therefore never calls `.deinit()` on it — the
+/// owner tears it down, after every domain that borrowed it has torn down
+/// ITS OWN bindings (see this struct's `deinit`). Every `pick` action name
 /// is a `first_wins` slot; every `provide()`'d provider is a `Binding`.
-container: container_mod.Container = undefined,
+container: *container_mod.Container,
 /// Assigns each `provide()`d provider its `decl_index` basis — monotonic,
 /// GLOBAL across every action name, and NEVER reused, mirroring
 /// `capability.zig`'s `next_provider_seq`. Using a live provider-list length
@@ -145,10 +165,26 @@ container: container_mod.Container = undefined,
 /// doc and the regression test for the exact reproduction.
 next_provide_seq: u64 = 0,
 
-pub fn init(gpa: Allocator) Actions {
-    return .{ .gpa = gpa, .container = container_mod.Container.init(gpa) };
+/// `container` is BORROWED (task #19): the caller owns one shared
+/// `container.Container` (per System/Session — see this struct's field doc)
+/// and keeps it alive at least as long as this `Actions` and every other
+/// domain sharing it.
+pub fn init(gpa: Allocator, container: *container_mod.Container) Actions {
+    return .{ .gpa = gpa, .container = container };
 }
 
+/// Does NOT deinit `self.container` — it's borrowed (see the field doc);
+/// the owner (System/Session) tears it down once every borrower (this
+/// module, `Caps`, the UI mesh) has finished. This module also does not
+/// unbind its own bindings from it here — see `container.zig`'s
+/// `Container.deinit` doc: a full deinit never dereferences a binding's
+/// borrowed strings, only the Container's OWN duped slot names, so freeing
+/// this module's `Provider` strings (below) before or after the shared
+/// Container itself is torn down is equally safe, AS LONG AS nothing
+/// resolves against the Container in between — true for a coordinated
+/// System/Session teardown, not true for a partial reload (see `provide`'s
+/// and `unregisterByOwnerPrefix`'s docs for the partial-teardown discipline
+/// that still applies).
 pub fn deinit(self: *Actions) void {
     const gpa = self.gpa;
     for (self.actions.keys(), self.actions.values()) |name, *a| {
@@ -161,7 +197,6 @@ pub fn deinit(self: *Actions) void {
         gpa.destroy(tr);
     }
     self.trampolines.deinit(gpa);
-    self.container.deinit();
 }
 
 /// Record action `name` with a dispatch `policy`, idempotently, WITHOUT binding
@@ -323,6 +358,7 @@ pub fn provide(self: *Actions, spec: ProvideSpec) !void {
         // consulted — which is the point.
         .tier = spec.tier,
         .owner = p.owner,
+        .domain = .action,
         .decl_index = decl_index,
     });
     gop.value_ptr.providers.appendAssumeCapacity(p);
@@ -388,7 +424,7 @@ fn factsOf(ctx: Ctx) facts.Facts {
 /// removing them before `Provider.deinit` frees that memory is required, not
 /// cosmetic (see container.zig's `unbindOwnerPrefix` doc).
 pub fn unregisterByOwnerPrefix(self: *Actions, owner_prefix: []const u8) void {
-    self.container.unbindOwnerPrefix(owner_prefix);
+    self.container.unbindOwnerPrefix(.action, owner_prefix);
     for (self.actions.values()) |*a| {
         var i: usize = 0;
         while (i < a.providers.items.len) {
@@ -407,7 +443,7 @@ pub fn unregisterByOwnerPrefix(self: *Actions, owner_prefix: []const u8) void {
 /// `unregisterByOwnerPrefix`'s `startsWith` would do). Same shape as the
 /// prefix version, `std.mem.eql` instead.
 pub fn unregisterByOwner(self: *Actions, owner: []const u8) void {
-    self.container.unbindOwnerExact(owner);
+    self.container.unbindOwnerExact(.action, owner);
     for (self.actions.values()) |*a| {
         var i: usize = 0;
         while (i < a.providers.items.len) {
@@ -424,7 +460,9 @@ pub fn unregisterByOwner(self: *Actions, owner: []const u8) void {
 const t = std.testing;
 
 test "action: pick resolves by context, priority, and specificity" {
-    var acts = Actions.init(t.allocator);
+    var container = container_mod.Container.init(t.allocator);
+    defer container.deinit();
+    var acts = Actions.init(t.allocator, &container);
     defer acts.deinit();
 
     // eval: a zig provider, a python provider, and an unconstrained default.
@@ -451,7 +489,9 @@ test "action: pick resolves by context, priority, and specificity" {
 }
 
 test "action: a projection scopes save by its tool identity, in any mode" {
-    var acts = Actions.init(t.allocator);
+    var container = container_mod.Container.init(t.allocator);
+    defer container.deinit();
+    var acts = Actions.init(t.allocator, &container);
     defer acts.deinit();
 
     // Core's default save (file write), and dired's save for its projection.
@@ -469,7 +509,9 @@ test "action: a projection scopes save by its tool identity, in any mode" {
 }
 
 test "action: declare is idempotent and provider load-order-independent" {
-    var acts = Actions.init(t.allocator);
+    var container = container_mod.Container.init(t.allocator);
+    defer container.deinit();
+    var acts = Actions.init(t.allocator, &container);
     defer acts.deinit();
 
     // provide-before-declare works (auto-declares).
@@ -484,7 +526,9 @@ test "action: declare is idempotent and provider load-order-independent" {
 }
 
 test "action: owner-prefix teardown drops a plugin's providers" {
-    var acts = Actions.init(t.allocator);
+    var container = container_mod.Container.init(t.allocator);
+    defer container.deinit();
+    var acts = Actions.init(t.allocator, &container);
     defer acts.deinit();
 
     try acts.provide(.{ .action = "eval", .when = .{ .lang = "zig" }, .command = "zig-eval", .owner = "zig-tools#3" });
@@ -497,7 +541,9 @@ test "action: owner-prefix teardown drops a plugin's providers" {
 }
 
 test "action: unregisterByOwner is exact — a false-prefix sibling survives" {
-    var acts = Actions.init(t.allocator);
+    var container = container_mod.Container.init(t.allocator);
+    defer container.deinit();
+    var acts = Actions.init(t.allocator, &container);
     defer acts.deinit();
 
     // "import:def" is a literal string-prefix of "import:defaults" — the
@@ -524,7 +570,9 @@ test "action: decl_index survives teardown — later-wins even after an unrelate
     // three B-owned providers tie on (tier,priority,specificity) — same
     // owner, so decl_index alone decides — and the legacy, still-documented
     // contract is "later registration wins": B3 must win, not B2.
-    var acts = Actions.init(t.allocator);
+    var container = container_mod.Container.init(t.allocator);
+    defer container.deinit();
+    var acts = Actions.init(t.allocator, &container);
     defer acts.deinit();
 
     try acts.provide(.{ .action = "eval", .command = "b1", .owner = "B" });
@@ -538,7 +586,9 @@ test "action: decl_index survives teardown — later-wins even after an unrelate
 }
 
 test "action: race intents are enumerable, and reject pick providers" {
-    var acts = Actions.init(t.allocator);
+    var container = container_mod.Container.init(t.allocator);
+    defer container.deinit();
+    var acts = Actions.init(t.allocator, &container);
     defer acts.deinit();
 
     // A capability kind noted as a race intent joins the one registry.

@@ -132,7 +132,11 @@ pub const FrameCtx = struct {
     caps: *core.Caps,
     keymap: *core.Keymap,
     /// The `ui/statusline-seg` + `ui/gutter-segment` mesh Container (north-
-    /// star-plan §6 W3-1) — `frame_builder.zig` fires it each build.
+    /// star-plan §6 W3-1) — `frame_builder.zig` fires it each build. Task
+    /// #19's shared-Container fold-in: this is the SAME instance
+    /// `session.caps`/`session.actions` bind into (`&session.container`),
+    /// not a UI-mesh-only Container — the field keeps this name because
+    /// every reader here only ever fires `ui/*` slots on it.
     ui_mesh: *core.container.Container,
     /// This frame's (today, singular) head — current mode, pending chord,
     /// pick session, echo line (north-star-plan §6 W2a-1).

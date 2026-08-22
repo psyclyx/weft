@@ -287,21 +287,30 @@ pub fn declareSlots(c: *container.Container) !void {
 
 /// The five default statusline segments, at `.core` tier (lowest). The TIER
 /// mechanism means a higher-tier binding on the same slot outranks these —
-/// proven by the mesh test — but NOTE: no config/plugin path REACHES this
-/// Container yet (manifest `provide` routes to Actions only; the guest
-/// membrane routes to caps). Reachability arrives with the shared-Container
-/// fold-in or a manifest verb (north-star-plan task #19); until then only
-/// host code binds here. Priorities reproduce today's left-to-right
+/// proven by the mesh test. Priorities reproduce today's left-to-right
 /// order: mode, position, file, collab-liveness (left cluster); diagnostics
 /// count (right-anchored, `align_right`).
+///
+/// **Reachability (north-star-plan task #19, DONE):** two paths reach this
+/// Container now. (1) The shared-Container fold-in: `action.zig`'s
+/// `Actions` and `capability.zig`'s `Caps` bind into the SAME instance
+/// `declareSlots`/`bindDefaultStatusline` target (one `container.Container`
+/// per System/Session — see `System.zig`'s `container` field doc) — action
+/// names, `edit/*` capability names, and `ui/*` mesh names are one flat,
+/// non-colliding slot namespace. (2) A manifest verb: `weft.statusSegment`
+/// (config plane) stages a `manifest.StatusSegmentDecl`; `Manifest.
+/// applyDecls` binds it through `bindManifestSegment` below, when an
+/// embedder wires a `manifest.StatusSegBinder` (`main.zig` does, against
+/// `&session.container`). Static text only — a command-BACKED dynamic
+/// segment is a later step (see `manifest.StatusSegmentDecl`'s doc).
 pub fn bindDefaultStatusline(c: *container.Container) !void {
     const all: container.Predicate = .{ .all = &.{} };
     const owner = "core:statusline";
-    try c.bind(.{ .slot = "ui/statusline-seg", .provider = .{ .ui_provider = .{ .call = modeChipProvider } }, .predicate = all, .tier = .core, .priority = 100, .owner = owner, .decl_index = 0 });
-    try c.bind(.{ .slot = "ui/statusline-seg", .provider = .{ .ui_provider = .{ .call = bufferPosProvider } }, .predicate = all, .tier = .core, .priority = 90, .owner = owner, .decl_index = 1 });
-    try c.bind(.{ .slot = "ui/statusline-seg", .provider = .{ .ui_provider = .{ .call = filePathProvider } }, .predicate = all, .tier = .core, .priority = 80, .owner = owner, .decl_index = 2 });
-    try c.bind(.{ .slot = "ui/statusline-seg", .provider = .{ .ui_provider = .{ .call = collabLivenessProvider } }, .predicate = all, .tier = .core, .priority = 70, .owner = owner, .decl_index = 3 });
-    try c.bind(.{ .slot = "ui/statusline-seg", .provider = .{ .ui_provider = .{ .call = diagCountProvider } }, .predicate = all, .tier = .core, .priority = 10, .owner = owner, .decl_index = 4 });
+    try c.bind(.{ .slot = "ui/statusline-seg", .provider = .{ .ui_provider = .{ .call = modeChipProvider } }, .predicate = all, .tier = .core, .priority = 100, .owner = owner, .domain = .ui, .decl_index = 0 });
+    try c.bind(.{ .slot = "ui/statusline-seg", .provider = .{ .ui_provider = .{ .call = bufferPosProvider } }, .predicate = all, .tier = .core, .priority = 90, .owner = owner, .domain = .ui, .decl_index = 1 });
+    try c.bind(.{ .slot = "ui/statusline-seg", .provider = .{ .ui_provider = .{ .call = filePathProvider } }, .predicate = all, .tier = .core, .priority = 80, .owner = owner, .domain = .ui, .decl_index = 2 });
+    try c.bind(.{ .slot = "ui/statusline-seg", .provider = .{ .ui_provider = .{ .call = collabLivenessProvider } }, .predicate = all, .tier = .core, .priority = 70, .owner = owner, .domain = .ui, .decl_index = 3 });
+    try c.bind(.{ .slot = "ui/statusline-seg", .provider = .{ .ui_provider = .{ .call = diagCountProvider } }, .predicate = all, .tier = .core, .priority = 10, .owner = owner, .domain = .ui, .decl_index = 4 });
 }
 
 /// The three default gutter segments — real, fireable, tested, but NOT
@@ -311,9 +320,69 @@ pub fn bindDefaultStatusline(c: *container.Container) !void {
 pub fn bindDefaultGutter(c: *container.Container) !void {
     const all: container.Predicate = .{ .all = &.{} };
     const owner = "core:gutter";
-    try c.bind(.{ .slot = "ui/gutter-segment", .provider = .{ .ui_provider = .{ .call = lineNumberProvider } }, .predicate = all, .tier = .core, .priority = 100, .owner = owner, .decl_index = 0 });
-    try c.bind(.{ .slot = "ui/gutter-segment", .provider = .{ .ui_provider = .{ .call = diagMarksProvider } }, .predicate = all, .tier = .core, .priority = 90, .owner = owner, .decl_index = 1 });
-    try c.bind(.{ .slot = "ui/gutter-segment", .provider = .{ .ui_provider = .{ .call = breakpointMarksProvider } }, .predicate = all, .tier = .core, .priority = 80, .owner = owner, .decl_index = 2 });
+    try c.bind(.{ .slot = "ui/gutter-segment", .provider = .{ .ui_provider = .{ .call = lineNumberProvider } }, .predicate = all, .tier = .core, .priority = 100, .owner = owner, .domain = .ui, .decl_index = 0 });
+    try c.bind(.{ .slot = "ui/gutter-segment", .provider = .{ .ui_provider = .{ .call = diagMarksProvider } }, .predicate = all, .tier = .core, .priority = 90, .owner = owner, .domain = .ui, .decl_index = 1 });
+    try c.bind(.{ .slot = "ui/gutter-segment", .provider = .{ .ui_provider = .{ .call = breakpointMarksProvider } }, .predicate = all, .tier = .core, .priority = 80, .owner = owner, .domain = .ui, .decl_index = 2 });
+}
+
+/// `weft.statusSegment`'s mesh-reachability seam (north-star-plan task #19
+/// item 3) — matches `core.manifest.StatusSegBinder.bind`'s signature
+/// exactly, so an embedder wires `.{ .ctx = &session.container, .bind =
+/// bindManifestSegment }` directly (`main.zig` does). Binds `decl` — BORROWED
+/// (see `core.manifest.StatusSegmentDecl`'s and `StatusSegBinder`'s docs for
+/// the lifetime contract: it points into a `Manifest`'s own decl list,
+/// unbound by `teardownOwned`/`unbindOwnerExact` before that manifest is
+/// destroyed) — as an ordinary `ui/statusline-seg` `ui_provider`, at
+/// `tier`/`owner`/`decl.priority`, domain `.ui` (task #19 review send-back:
+/// the Container's cross-domain unbind hazard fix — see `container.zig`'s
+/// `Domain` doc). Composes alongside `bindDefaultStatusline`'s `.core`-tier
+/// defaults exactly like the "MESH TEST" below proves for a host-bound
+/// extra provider: a `.config`-tier binding here always outranks `.core`
+/// regardless of priority.
+///
+/// **Role resolution happens HERE, at bind time** (review send-back nit —
+/// moved off the fire path): `decl.role` is parsed ONCE against
+/// `core.surface.Role` and cached into `decl.resolved_role` (mutating the
+/// BORROWED `decl` is the documented contract — see `StatusSegBinder.bind`'s
+/// doc for why it's sound); an unrecognized/empty name warns AND echoes
+/// (the `weft.set`/`echoValueDropped` precedent — a config typo should
+/// degrade the segment's color, not break config loading, but the author
+/// should still see it) exactly ONCE, only for a decl that's actually going
+/// to render — never for one staged but dropped (no binder wired).
+/// `manifestSegProvider` (the fire path) just reads the cached enum: no
+/// string parsing, no possible warning, every HUD build.
+pub fn bindManifestSegment(ctx_ptr: *anyopaque, apply_ctx: *core.command.Context, owner: []const u8, tier: container.Tier, decl: *core.manifest.StatusSegmentDecl) !void {
+    const c: *container.Container = @ptrCast(@alignCast(ctx_ptr));
+    decl.resolved_role = std.meta.stringToEnum(core.surface.Role, decl.role) orelse blk: {
+        const gpa = apply_ctx.gpa;
+        std.log.warn("weft.statusSegment('{s}'): unrecognized role '{s}' — falling back to 'normal'", .{ decl.text, decl.role });
+        const msg = std.fmt.allocPrint(gpa, "weft.statusSegment('{s}'): unrecognized role '{s}' — using 'normal'", .{ decl.text, decl.role }) catch break :blk .normal;
+        defer gpa.free(msg);
+        apply_ctx.head.echo.clearRetainingCapacity();
+        apply_ctx.head.echo.appendSlice(gpa, msg) catch {};
+        break :blk .normal;
+    };
+    try c.bind(.{
+        .slot = "ui/statusline-seg",
+        .provider = .{ .ui_provider = .{ .call = manifestSegProvider, .ctx = decl } },
+        .predicate = .{ .all = &.{} },
+        .tier = tier,
+        .priority = decl.priority,
+        .owner = owner,
+        .domain = .ui,
+    });
+}
+
+/// `manifest.StatusSegmentDecl`'s `text` + already-BOUND-TIME-resolved
+/// `resolved_role` rendered as a static `Seg` — no string parsing here (see
+/// `bindManifestSegment`'s doc for why that moved to bind time): this path
+/// stays silent and cheap on every HUD build.
+fn manifestSegProvider(ctx: ?*anyopaque, gpa: Allocator, raw: *anyopaque) anyerror!bool {
+    const decl: *const core.manifest.StatusSegmentDecl = @ptrCast(@alignCast(ctx.?));
+    const a: *StatuslineArgs = @ptrCast(@alignCast(raw));
+    const text = try gpa.dupe(u8, decl.text);
+    try a.out.append(gpa, .{ .text = text, .role = decl.resolved_role });
+    return true;
 }
 
 // ── Tests ───────────────────────────────────────────────────────────
@@ -415,7 +484,7 @@ test "ui_mesh: MESH TEST — an extra statusline provider inserts at its priorit
     // Config tier outranks `.core` regardless of priority — the extra
     // segment sorts FIRST, ahead of the mode chip, proving real ordering
     // (tier-then-priority) rather than a hardcoded slot.
-    try c.bind(.{ .slot = "ui/statusline-seg", .provider = .{ .ui_provider = .{ .call = Extra.call } }, .predicate = .{ .all = &.{} }, .tier = .config, .priority = 0, .owner = "test-plugin" });
+    try c.bind(.{ .slot = "ui/statusline-seg", .provider = .{ .ui_provider = .{ .call = Extra.call } }, .predicate = .{ .all = &.{} }, .tier = .config, .priority = 0, .owner = "test-plugin", .domain = .ui });
 
     var args: StatuslineArgs = .{ .facts = .{ .mode = "normal" }, .file = "a.zig", .theme = &theme };
     const with_extra = try fireStatusline(&c, gpa, &args);
@@ -425,7 +494,7 @@ test "ui_mesh: MESH TEST — an extra statusline provider inserts at its priorit
     try t.expectEqualStrings(" normal ", with_extra[1].text);
     try t.expectEqualStrings("a.zig", with_extra[2].text);
 
-    c.unbindOwnerExact("test-plugin");
+    c.unbindOwnerExact(.ui, "test-plugin");
     var args2: StatuslineArgs = .{ .facts = .{ .mode = "normal" }, .file = "a.zig", .theme = &theme };
     const after = try fireStatusline(&c, gpa, &args2);
     defer freeSegs(gpa, after);
@@ -530,6 +599,87 @@ test "ui_mesh: gutter — unbound is a zero-cost no-op; bound, line numbers + di
         try t.expectEqualStrings("3 ", cells[0].text);
         try t.expectEqualStrings("\u{25CF} ", cells[1].text);
     }
+}
+
+test "ui_mesh: MESH REACHABILITY — weft.statusSegment reaches ui/statusline-seg through the REAL sealed-eval manifest path (task #19)" {
+    // Proves the whole chain end to end, through the ACTUAL config surface
+    // (not a Zig stand-in for it): config JS source -> quickjs sealed eval
+    // -> Manifest -> Manifest.apply -> StatusSegBinder -> a real Container
+    // bind -> fireStatusline composes it into the statusline. Uses a real
+    // `core.System` (task #19's shared-Container fold-in: `sys.container`
+    // is the SAME instance `sys.caps`/`sys.actions` bind into) as the host,
+    // mirroring `System.zig`'s own "config/agent-ux.js hosts a SECOND
+    // system end-to-end" test.
+    const gpa = t.allocator;
+    const pool = try core.task.Pool.init(gpa, .{ .threads = 1 });
+    defer pool.deinit();
+    const sys = try core.System.create(gpa, pool, "editor", "user");
+    defer sys.destroy();
+
+    try declareSlots(&sys.container);
+    try bindDefaultStatusline(&sys.container);
+
+    var engine = try core.wasm.Engine.init();
+    defer engine.deinit();
+    var c = sys.contextFor(&sys.default_head);
+    const src = "weft.statusSegment(\"BUILD OK\", \"accent\", 500);";
+    const m = try core.quickjs.evalToManifest(&engine, &c, null, null, null, src, .config, "config");
+    defer m.destroy();
+
+    var actx: core.manifest.Manifest.ApplyCtx = .{
+        .ctx = &c,
+        .loader = null,
+        .config = null,
+        .ui_bind = .{ .ctx = &sys.container, .bind = bindManifestSegment },
+    };
+    try m.apply(gpa, &actx);
+
+    const theme: Theme = .{};
+    var args: StatuslineArgs = .{ .facts = .{ .mode = "normal" }, .file = "a.zig", .theme = &theme };
+    const segs = try fireStatusline(&sys.container, gpa, &args);
+    defer freeSegs(gpa, segs);
+
+    // `weft.statusSegment`'s priority (500) is irrelevant here — TIER
+    // decides first in the strict weak order (container.zig's `betterThan`)
+    // and `.config` (this manifest's tier) always outranks `bindDefault
+    // Statusline`'s `.core` — so the staged segment sorts before the mode
+    // chip regardless of the chip's own higher raw priority (100).
+    try t.expect(segs.len >= 1);
+    try t.expectEqualStrings("BUILD OK", segs[0].text);
+    try t.expectEqual(core.surface.Role.accent, segs[0].role);
+}
+
+test "ui_mesh: weft.statusSegment with NO binder wired is a logged no-op, not a crash" {
+    // The honest fallback `ApplyCtx.ui_bind == null` documents: a manifest
+    // can stage the decl (config eval never fails), but applying it against
+    // a host that never wired a `StatusSegBinder` drops it — proven here by
+    // asserting the statusline composes EXACTLY the defaults, nothing more.
+    const gpa = t.allocator;
+    const pool = try core.task.Pool.init(gpa, .{ .threads = 1 });
+    defer pool.deinit();
+    const sys = try core.System.create(gpa, pool, "editor", "user");
+    defer sys.destroy();
+
+    try declareSlots(&sys.container);
+    try bindDefaultStatusline(&sys.container);
+
+    var engine = try core.wasm.Engine.init();
+    defer engine.deinit();
+    var c = sys.contextFor(&sys.default_head);
+    const src = "weft.statusSegment(\"unreachable\", \"accent\", 500);";
+    const m = try core.quickjs.evalToManifest(&engine, &c, null, null, null, src, .config, "config");
+    defer m.destroy();
+
+    var actx: core.manifest.Manifest.ApplyCtx = .{ .ctx = &c, .loader = null, .config = null }; // ui_bind left null
+    try m.apply(gpa, &actx);
+
+    const theme: Theme = .{};
+    var args: StatuslineArgs = .{ .facts = .{ .mode = "normal" }, .file = "a.zig", .theme = &theme };
+    const segs = try fireStatusline(&sys.container, gpa, &args);
+    defer freeSegs(gpa, segs);
+
+    for (segs) |s| try t.expect(!std.mem.eql(u8, s.text, "unreachable"));
+    try t.expectEqualStrings(" normal ", segs[0].text); // just the ordinary defaults
 }
 
 test {

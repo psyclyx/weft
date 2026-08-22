@@ -385,9 +385,11 @@ test "builtins: explain-binding is a real consumer of Container.explain" {
     defer keymap.deinit(gpa);
     var head: @import("Head.zig") = .empty;
     defer head.deinit(gpa);
-    var caps = @import("capability.zig").Caps.init(gpa, task.nowNs);
+    var container = @import("container.zig").Container.init(gpa);
+    defer container.deinit();
+    var caps = @import("capability.zig").Caps.init(gpa, task.nowNs, &container);
     defer caps.deinit();
-    var actions = Actions.init(gpa);
+    var actions = Actions.init(gpa, &container);
     defer actions.deinit();
     var quit = false;
     var commands: command.Commands = .empty;

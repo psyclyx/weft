@@ -448,6 +448,8 @@ const TestHost = struct {
     buffers: core.Buffers,
     commands: core.command.Commands,
     keymap: core.Keymap,
+    /// The ONE shared Container `caps`/`actions` bind into (task #19).
+    container: core.container.Container,
     head: core.Head,
     caps: core.Caps,
     actions: core.Actions,
@@ -460,8 +462,9 @@ const TestHost = struct {
         host.commands = .empty;
         host.keymap = .empty;
         host.head = .empty;
-        host.caps = core.Caps.init(gpa, core.task.nowNs);
-        host.actions = core.Actions.init(gpa);
+        host.container = core.container.Container.init(gpa);
+        host.caps = core.Caps.init(gpa, core.task.nowNs, &host.container);
+        host.actions = core.Actions.init(gpa, &host.container);
         host.quit = false;
         host.ctx = .{
             .gpa = gpa,
@@ -483,6 +486,7 @@ const TestHost = struct {
     fn deinit(host: *TestHost, gpa: Allocator) void {
         host.actions.deinit();
         host.caps.deinit();
+        host.container.deinit();
         host.head.deinit(gpa);
         host.keymap.deinit(gpa);
         host.commands.deinit(gpa);

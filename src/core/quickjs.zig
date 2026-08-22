@@ -145,6 +145,7 @@ const config_handlers = .{
     .{ .name = "qjs_menu", .handler = cMenu },
     .{ .name = "qjs_action", .handler = cAction },
     .{ .name = "qjs_provide", .handler = cProvide },
+    .{ .name = "qjs_status_segment", .handler = cStatusSegment },
 };
 
 /// The `.plugin`-group handlers a RESIDENT JS plugin's linker binds (real —
@@ -985,6 +986,30 @@ fn cProvide(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32, results:
     }) catch |e| if (e == error.RaceRejectsProvider) echoProvideRefused(br.activeCtx(), action);
 }
 
+/// weft.statusSegment(text, role, priority) — stage a static `ui/statusline-
+/// seg` segment onto the manifest (north-star-plan §6 W3, task #19 item 3's
+/// mesh-reachability verb). CONFIG-ONLY: unlike `weft.provide`/`weft.action`
+/// this has no LIVE (resident-JS-plugin, `br.manifest == null`) behavior —
+/// the direct-bind path would need this (core-layer) module to know the
+/// gfx-layer `ui_mesh.zig` provider shape, exactly the dependency
+/// `manifest.StatusSegBinder`'s doc explains core can't take; a resident
+/// plugin reaching `ui/*` live is a later step (D2/W0b), not this one.
+fn cStatusSegment(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32, results: []i32) void {
+    _ = results;
+    const br: *Bridge = @ptrCast(@alignCast(data.?));
+    const gpa = br.activeCtx().gpa;
+    const text = readStr(br, caller, args[0], args[1]) orelse return;
+    defer gpa.free(text);
+    const role = readStr(br, caller, args[2], args[3]) orelse return;
+    defer gpa.free(role);
+    const priority = args[4];
+    if (br.manifest) |m| {
+        m.addStatusSegment(text, role, priority) catch {};
+        return;
+    }
+    std.log.warn("weft.statusSegment: config-plane only (not available to a resident plugin yet)", .{});
+}
+
 /// Surface a rejected `provide` to the plugin author through the echo line —
 /// the normal user-facing channel — so the mistake (a pick provider on a race
 /// action) is reported where they'll see it, not on a global stderr. LIVE
@@ -1060,6 +1085,8 @@ const Env = struct {
     commands: command.Commands,
     keymap: @import("Keymap.zig"),
     head: @import("Head.zig"),
+    /// The ONE shared Container `caps`/`actions` bind into (task #19).
+    container: @import("container.zig").Container,
     caps: @import("capability.zig").Caps,
     actions: @import("action.zig"),
     quit: bool,
@@ -1071,8 +1098,9 @@ const Env = struct {
         self.commands = .empty;
         self.keymap = .empty;
         self.head = .empty;
-        self.caps = @import("capability.zig").Caps.init(gpa, task.nowNs);
-        self.actions = @import("action.zig").init(gpa);
+        self.container = @import("container.zig").Container.init(gpa);
+        self.caps = @import("capability.zig").Caps.init(gpa, task.nowNs, &self.container);
+        self.actions = @import("action.zig").init(gpa, &self.container);
         self.quit = false;
         self.ctx = .{
             .gpa = gpa,
@@ -1088,6 +1116,7 @@ const Env = struct {
     fn deinit(self: *Env, gpa: Allocator) void {
         self.actions.deinit();
         self.caps.deinit();
+        self.container.deinit();
         self.head.deinit(gpa);
         self.keymap.deinit(gpa);
         self.commands.deinit(gpa);

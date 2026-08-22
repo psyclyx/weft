@@ -232,6 +232,10 @@ pub fn main(init: std.process.Init) !void {
             std.log.warn("config: {s} failed to load: {t}", .{ config_path, e });
             break :blk null;
         };
+        // `weft.statusSegment` mesh reachability (north-star-plan task #19
+        // item 3): binds straight into `session.container` — the same
+        // shared Container `session.caps`/`session.actions` already use.
+        if (config_session) |*cs| cs.ui_bind = .{ .ctx = &session.container, .bind = view_mod.ui_mesh.bindManifestSegment };
         if (config_session) |*cs| cs.reload() catch |e|
             std.log.warn("config: {s} failed to load: {t}", .{ config_path, e });
         if (config_session) |*cs| _ = try session.commands.bind(gpa, "config-reload", .{
@@ -426,7 +430,7 @@ pub fn main(init: std.process.Init) !void {
         .buffers = buffers,
         .caps = &session.caps,
         .keymap = &session.keymap,
-        .ui_mesh = &session.ui_mesh,
+        .ui_mesh = &session.container,
         .head = &session.head,
         .cursor_cfg = &session.cursor_cfg,
         .plugins = &plugins,

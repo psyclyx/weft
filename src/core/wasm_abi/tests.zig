@@ -39,9 +39,11 @@ test "wasm plugin: a .wasm guest edits the buffer through the host ABI, as its p
     defer keymap.deinit(gpa);
     var head: @import("../Head.zig") = .empty;
     defer head.deinit(gpa);
-    var caps = @import("../capability.zig").Caps.init(gpa, task.nowNs);
+    var container = @import("../container.zig").Container.init(gpa);
+    defer container.deinit();
+    var caps = @import("../capability.zig").Caps.init(gpa, task.nowNs, &container);
     defer caps.deinit();
-    var actions = @import("../action.zig").init(gpa);
+    var actions = @import("../action.zig").init(gpa, &container);
     defer actions.deinit();
     var quit = false;
     var ctx: command.Context = .{
@@ -85,9 +87,11 @@ test "wasm plugin: init registers a command that dispatches back into the guest"
     defer keymap.deinit(gpa);
     var head: @import("../Head.zig") = .empty;
     defer head.deinit(gpa);
-    var caps = @import("../capability.zig").Caps.init(gpa, task.nowNs);
+    var container = @import("../container.zig").Container.init(gpa);
+    defer container.deinit();
+    var caps = @import("../capability.zig").Caps.init(gpa, task.nowNs, &container);
     defer caps.deinit();
-    var actions = @import("../action.zig").init(gpa);
+    var actions = @import("../action.zig").init(gpa, &container);
     defer actions.deinit();
     var quit = false;
     var ctx: command.Context = .{
@@ -128,6 +132,8 @@ const Env = struct {
     commands: command.Commands,
     keymap: @import("../Keymap.zig"),
     head: @import("../Head.zig"),
+    /// The ONE shared Container `caps`/`actions` bind into (task #19).
+    container: @import("../container.zig").Container,
     caps: @import("../capability.zig").Caps,
     actions: @import("../action.zig"),
     quit: bool,
@@ -140,8 +146,9 @@ const Env = struct {
         self.commands = .empty;
         self.keymap = .empty;
         self.head = .empty;
-        self.caps = @import("../capability.zig").Caps.init(gpa, task.nowNs);
-        self.actions = @import("../action.zig").init(gpa);
+        self.container = @import("../container.zig").Container.init(gpa);
+        self.caps = @import("../capability.zig").Caps.init(gpa, task.nowNs, &self.container);
+        self.actions = @import("../action.zig").init(gpa, &self.container);
         self.quit = false;
         self.ctx = .{
             .gpa = gpa,
@@ -157,6 +164,7 @@ const Env = struct {
     fn deinit(self: *Env, gpa: Allocator) void {
         self.actions.deinit();
         self.caps.deinit();
+        self.container.deinit();
         self.head.deinit(gpa);
         self.keymap.deinit(gpa);
         self.commands.deinit(gpa);

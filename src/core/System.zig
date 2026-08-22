@@ -76,6 +76,7 @@ const kv = @import("kv.zig");
 const builtins = @import("builtins.zig");
 const manifest = @import("manifest.zig");
 const task = @import("task.zig");
+const container_mod = @import("container.zig");
 
 pub const System = @This();
 
@@ -101,6 +102,24 @@ commands: command.Commands = .empty,
 /// see `Keymap.zig`'s module doc for the table/cursor split this mirrors
 /// at system scope.
 keymap: Keymap = .empty,
+/// The ONE `container.Container` this system's `caps`/`actions` bind into,
+/// and the target `gfx/view/ui_mesh.zig`'s `declareSlots`/
+/// `bindDefaultStatusline` are pointed at by an embedder (north-star-plan
+/// task #19, the shared-Container fold-in). Action names, `edit/*`
+/// capability names, and `ui/*` mesh names are one flat slot namespace —
+/// they already couldn't collide (see `container.zig`'s doc) — so folding
+/// three separate resolution stores (this system's `actions`/`caps`, plus
+/// whatever UI mesh Container an embedder builds against `&self.container`)
+/// into one is purely a STORAGE change: `Actions`/`Caps` still adapt onto
+/// it through their own domain shapes (F5's adapter, not yet deleted — see
+/// their module docs for exactly what remains). `Ctx.epoch` (`ctx.zig`)
+/// reads `self.container.epoch` (via `ctx.actions.container.epoch`,
+/// equivalently `ctx.caps.container.epoch` — same instance) as its cache
+/// key — the TRUE per-mutation counter that replaces this system's old
+/// `generation` field (removed: it was an unread, never-actually-wired
+/// placeholder — nothing gave `Ctx.capture` a path to a `*System` to read
+/// it from in the first place).
+container: container_mod.Container = undefined,
 caps: Caps,
 actions: Actions,
 /// Config-value store (`weft.set`) for THIS system's manifest — distinct
@@ -124,16 +143,6 @@ quit: bool = false,
 /// this instead of blindly re-applying). Owned; destroyed on replacement
 /// and in `destroy`.
 applied_manifest: ?*manifest.Manifest = null,
-/// Bumped on every `applyManifest` call — the cache key `ctx.zig`'s
-/// `Ctx.epoch` reads. See that field's doc for exactly what this
-/// over-approximates (every binding-affecting mutation in this system,
-/// not a precise per-slot invalidation) and why: `action.zig`/
-/// `capability.zig` each still hold their OWN `container.Container`
-/// instance (F5's fold-in is a named W3 deletion gate, not done yet), so
-/// there is no single Container to read a true epoch from today. A
-/// coarser-than-necessary cache key that never under-invalidates is the
-/// honest W2b interim, not a precise miss.
-generation: u64 = 0,
 
 /// Build a system from scratch: fresh buffers (one scratch buffer, per
 /// `Buffers.init`), empty commands/keymap, and the built-in command/keymap
@@ -147,10 +156,17 @@ pub fn create(gpa: Allocator, pool: *task.Pool, name: []const u8, user: []const 
         .gpa = gpa,
         .name = try gpa.dupe(u8, name),
         .buffers = try Buffers.init(gpa, pool, user),
-        .caps = Caps.init(gpa, task.nowNs),
-        .actions = Actions.init(gpa),
+        .container = container_mod.Container.init(gpa),
+        .caps = undefined,
+        .actions = undefined,
     };
     errdefer self.buffers.deinit(gpa);
+    // `caps`/`actions` borrow `&self.container` (task #19's shared-Container
+    // fold-in) — set AFTER the struct literal above so `self.container`
+    // already holds its final value at a stable address (`self` is already
+    // heap-allocated) before anything points into it.
+    self.caps = Caps.init(gpa, task.nowNs, &self.container);
+    self.actions = Actions.init(gpa, &self.container);
     try builtins.install(gpa, &self.commands, &self.keymap, &self.default_head, &self.actions);
     return self;
 }
@@ -161,6 +177,10 @@ pub fn destroy(self: *System) void {
     self.default_head.deinit(gpa);
     self.actions.deinit();
     self.caps.deinit();
+    // The shared Container outlives both borrowers above (neither `deinit`
+    // touches it) — torn down here, once, by its owner. See `action.zig`'s/
+    // `capability.zig`'s `deinit` docs for why the relative order is safe.
+    self.container.deinit();
     self.keymap.deinit(gpa);
     self.commands.deinit(gpa);
     self.buffers.deinit(gpa);
@@ -235,14 +255,23 @@ pub fn detachHead(self: *System, gpa: Allocator, head: *Head) Allocator.Error!vo
 /// `default_head` (so a fully headless system's `weft.bind`/`weft.echo`/
 /// `weft.run` land somewhere real even with no attached head). Takes
 /// ownership of `m`: stored as `applied_manifest`, freeing whatever was
-/// applied before it. Bumps `generation`.
+/// applied before it. No separate "generation" bump anymore — `applyDecls`'s
+/// `weft.bind`/`weft.provide`/etc. mutate `self.container` directly (through
+/// `actions`/`caps`), which bumps `self.container.epoch` itself; that IS the
+/// cache key now (`Ctx.epoch`, `ctx.zig`) — see `container`'s field doc.
+/// `ui_bind` left unset (`ApplyCtx.ui_bind` defaults to `null`): `System` is
+/// core-layer and has no path to a gfx-layer `ui_mesh` binder to wire one —
+/// an embedder that wants `weft.statusSegment` reachable through THIS
+/// system's manifests builds its own `ApplyCtx` (with `.ui_bind` set)
+/// against `&self.container` directly instead of calling this convenience
+/// wrapper (see `app/config_load.zig`'s `ConfigSession` for the app-layer
+/// example).
 pub fn applyManifest(self: *System, gpa: Allocator, m: *manifest.Manifest, loader: ?manifest.PluginLoader) !void {
     var c = self.contextFor(&self.default_head);
     var actx: manifest.Manifest.ApplyCtx = .{ .ctx = &c, .loader = loader, .config = &self.config_kv };
     try manifest.Manifest.reconcile(gpa, self.applied_manifest, m, &actx);
     if (self.applied_manifest) |old| old.destroy();
     self.applied_manifest = m;
-    self.generation +%= 1;
 }
 
 /// The container-level registry: "the container hosts N systems" (§2.7).

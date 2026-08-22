@@ -665,6 +665,8 @@ const TestCtx = struct {
     pool: *@import("task.zig").Pool,
     buffers: @import("Buffers.zig"),
     commands: @import("command.zig").Commands = .empty,
+    /// The ONE shared Container `caps`/`actions` bind into (task #19).
+    container: @import("container.zig").Container = undefined,
     caps: @import("capability.zig").Caps,
     actions: @import("action.zig"),
     quit: bool = false,
@@ -680,9 +682,12 @@ const TestCtx = struct {
             .gpa = gpa,
             .pool = pool,
             .buffers = try @import("Buffers.zig").init(gpa, pool, "user"),
-            .caps = @import("capability.zig").Caps.init(gpa, task.nowNs),
-            .actions = @import("action.zig").init(gpa),
+            .container = @import("container.zig").Container.init(gpa),
+            .caps = undefined,
+            .actions = undefined,
         };
+        self.caps = @import("capability.zig").Caps.init(gpa, task.nowNs, &self.container);
+        self.actions = @import("action.zig").init(gpa, &self.container);
         self.ctx = .{
             .gpa = gpa,
             .buffers = &self.buffers,
@@ -700,6 +705,7 @@ const TestCtx = struct {
         const gpa = self.gpa;
         self.actions.deinit();
         self.caps.deinit();
+        self.container.deinit();
         self.commands.deinit(gpa);
         self.buffers.deinit(gpa);
         self.pool.deinit();

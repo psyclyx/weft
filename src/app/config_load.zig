@@ -34,6 +34,16 @@ pub const ConfigSession = struct {
     loader: ?core.quickjs.PluginLoader,
     config: *core.kv.Store,
     last: ?*core.manifest.Manifest = null,
+    /// `weft.statusSegment` mesh-reachability seam (north-star-plan task
+    /// #19 item 3; see `core.manifest.StatusSegBinder`'s doc) — unset
+    /// (`null`) by default, so every existing caller of `init` compiles and
+    /// behaves unchanged. `main.zig` sets this field directly after `init`
+    /// returns (`cs.ui_bind = .{ .ctx = &session.container, .bind =
+    /// view_mod.ui_mesh.bindManifestSegment }`) rather than threading it
+    /// through `init`'s own parameter list, which would force every OTHER
+    /// caller (tests, a headless embedder with no UI mesh at all) to pass
+    /// one too.
+    ui_bind: ?core.manifest.StatusSegBinder = null,
 
     pub fn init(gpa: std.mem.Allocator, ctx: *core.command.Context, path: []const u8, loader: ?core.quickjs.PluginLoader, config: *core.kv.Store) !ConfigSession {
         return .{ .gpa = gpa, .ctx = ctx, .path = try gpa.dupe(u8, path), .loader = loader, .config = config };
@@ -58,7 +68,7 @@ pub const ConfigSession = struct {
         const new = try core.quickjs.evalToManifest(&engine, self.ctx, self.loader, self.config, dir, src, .config, "config");
         errdefer new.destroy();
         std.log.info("config: manifest hash = 0x{x}", .{new.hash()});
-        var actx: core.manifest.Manifest.ApplyCtx = .{ .ctx = self.ctx, .loader = self.loader, .config = self.config };
+        var actx: core.manifest.Manifest.ApplyCtx = .{ .ctx = self.ctx, .loader = self.loader, .config = self.config, .ui_bind = self.ui_bind };
         try core.manifest.Manifest.reconcile(self.gpa, self.last, new, &actx);
         if (self.last) |old| old.destroy();
         self.last = new;

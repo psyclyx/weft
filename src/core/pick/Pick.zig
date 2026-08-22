@@ -748,6 +748,8 @@ const TestEnv = struct {
     buffers: @import("../Buffers.zig"),
     commands: command.Commands = .empty,
     keymap: @import("../Keymap.zig") = .empty,
+    /// The ONE shared Container `caps`/`actions` bind into (task #19).
+    container: @import("../container.zig").Container = undefined,
     caps: @import("../capability.zig").Caps,
     actions: @import("../action.zig"),
     quit: bool = false,
@@ -760,9 +762,12 @@ const TestEnv = struct {
             .gpa = gpa,
             .pool = pool,
             .buffers = try @import("../Buffers.zig").init(gpa, pool, "user"),
-            .caps = @import("../capability.zig").Caps.init(gpa, task.nowNs),
-            .actions = @import("../action.zig").init(gpa),
+            .container = @import("../container.zig").Container.init(gpa),
+            .caps = undefined,
+            .actions = undefined,
         };
+        self.caps = @import("../capability.zig").Caps.init(gpa, task.nowNs, &self.container);
+        self.actions = @import("../action.zig").init(gpa, &self.container);
         return self;
     }
 
@@ -784,6 +789,7 @@ const TestEnv = struct {
         self.head.deinit(gpa);
         self.actions.deinit();
         self.caps.deinit();
+        self.container.deinit();
         self.keymap.deinit(gpa);
         self.commands.deinit(gpa);
         self.buffers.deinit(gpa);
