@@ -128,7 +128,12 @@ pub fn init(gpa: Allocator, agent_name: []const u8) Error!GraphDoc {
 /// replicas of what's meant to be "the same" graph document have no
 /// shared root object; only a doc that GENUINELY starts empty (this
 /// slice's origin case) should call `init` — every joining participant
-/// calls `open`.
+/// that already HOLDS bytes to bootstrap from calls `open`. The one
+/// documented exception: `session/GraphCollab.zig`'s wire driver binds a
+/// joiner to a virgin `init` shell and lets the frontier exchange fill it
+/// in place (there is no single "bytes" value to hand `open` in that
+/// path) — see that file's module doc comment for why `init`, not `open`,
+/// is the correct bootstrap shell there.
 pub fn open(gpa: Allocator, agent_name: []const u8, bytes: []const u8) MergeError!GraphDoc {
     var obj = try ObjectDoc.open(gpa, bytes);
     errdefer obj.deinit(gpa);

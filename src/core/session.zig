@@ -11,8 +11,13 @@
 //! - `session/remote_fs.zig` — `BlobServer`/`serveBase` (host serving),
 //!                             `RemoteFile`/`RemoteFs`, `BlobOp` (a namespace).
 //! - `session/PartialDoc.zig`— editable partial checkout.
-//! - `session/Collab.zig`    — per-document sync driver.
-//! - `session/Conn.zig`      — N shared buffers over one session.
+//! - `session/Collab.zig`    — per-document (TextDoc) sync driver.
+//! - `session/GraphCollab.zig` — per-document (GraphDoc) sync driver, the
+//!                             shared frontier/batch core WITHOUT the
+//!                             text-only presence/diagnostics/blob/partial
+//!                             machinery (stemma delta 5).
+//! - `session/Conn.zig`      — N shared buffers (text or graph) over one
+//!                             session.
 //!
 //! The cross-cutting integration tests (two live sessions over a
 //! socketpair) live in `session/tests.zig`.
@@ -40,6 +45,7 @@ pub const RemoteFs = remote_fs.RemoteFs;
 
 pub const PartialDoc = @import("session/PartialDoc.zig");
 pub const Collab = @import("session/Collab.zig");
+pub const GraphCollab = @import("session/GraphCollab.zig");
 pub const Conn = @import("session/Conn.zig");
 
 // ── TCP bootstrap (shared by editor and agent) ──────────────────────

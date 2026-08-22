@@ -77,6 +77,21 @@ pub fn create(gpa: Allocator, agent_name: []const u8) Allocator.Error!Transcript
 pub fn open(gpa: Allocator, agent_name: []const u8, bytes: []const u8) GraphDoc.MergeError!TranscriptDoc {
     var g = try GraphDoc.open(gpa, agent_name, bytes);
     errdefer g.deinit(gpa);
+    return adopt(g);
+}
+
+/// Validate an already-populated `GraphDoc` as a transcript — the same
+/// invariant `open` checks, factored out so a `GraphDoc` bootstrapped
+/// through a DIFFERENT path than an explicit `serialize`/`open` byte
+/// handshake (stemma delta 5's session driver: `GraphCollab`'s frontier
+/// exchange fills a virgin `GraphDoc.init(gpa, name)` shell over the wire —
+/// see `GraphCollab.zig`'s module doc comment — with no single "bytes"
+/// value this call ever holds directly) can validate it once content has
+/// actually landed. `GraphCollab` itself never calls this: it
+/// only ever speaks `GraphDoc`'s generic token model, deliberately with no
+/// knowledge of `entries` — the caller adopts once its own convergence
+/// predicate (or the entries key's mere presence) says it's time.
+pub fn adopt(g: GraphDoc) error{Corrupt}!TranscriptDoc {
     if (g.root().mapGet(entries_key) == null) return error.Corrupt;
     // The documented split-brain footgun (two independent create()s merged
     // = two concurrent entries lists, one silently shadowed) made

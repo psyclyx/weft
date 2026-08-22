@@ -13,6 +13,7 @@ const layers_mod = @import("../layers.zig");
 
 const Session = @import("Session.zig");
 const Access = Session.Access;
+const sync_core = @import("sync_core.zig");
 
 const remote_fs_mod = @import("remote_fs.zig");
 const BlobOp = remote_fs_mod.BlobOp;
@@ -40,8 +41,10 @@ cursor_offset: usize = 0,
 /// selected). Published so peers render our selection, not just our
 /// caret; the caller sets it alongside cursor_offset.
 selection_anchor: usize = 0,
-their_frontier: ?[]u8 = null,
-last_sent_version: ?[]u8 = null,
+/// Frontier tracking + batch/frontier wire framing — shared with
+/// `GraphCollab` (see `sync_core.zig` for exactly what's shared and why
+/// the merge call itself isn't).
+core: sync_core.SyncCore(Document) = .{},
 /// Host side: the grade last announced to this peer for this document,
 /// so `push` re-emits a `grant` only when it changes (initial + on any
 /// `setPeerAccess`). Unused on the client (which receives, never sends).
@@ -54,7 +57,6 @@ client_bound: bool = false,
 presence_layer: ?*layers_mod.Layer = null,
 last_presence_offset: usize = std.math.maxInt(usize),
 last_presence_anchor: usize = std.math.maxInt(usize),
-announced: bool = false,
 /// Peer presence by name; the FULL set republishes into the layer on
 /// every change, so any number of peers coexist. Parallel arrays:
 /// caret (head), selection anchor, and identity hue quantized to u16.
@@ -100,8 +102,7 @@ pub fn deinit(self: *Collab) void {
     // (disconnect keeps the buffer as a local file; buffer-close unbinds
     // before the doc is freed — the doc always outlives this).
     if (self.client_bound) self.doc.my_grant = .own;
-    if (self.their_frontier) |f| self.gpa.free(f);
-    if (self.last_sent_version) |v| self.gpa.free(v);
+    self.core.deinit(self.gpa);
     for (self.presence_names.items) |n| self.gpa.free(n);
     self.presence_names.deinit(self.gpa);
     self.presence_offsets.deinit(self.gpa);
@@ -115,11 +116,7 @@ pub fn deinit(self: *Collab) void {
 /// duplicate events are no-ops), presence republishes.
 pub fn rebind(self: *Collab, new_session: *Session) void {
     self.session = new_session;
-    self.announced = false;
-    if (self.their_frontier) |f| self.gpa.free(f);
-    self.their_frontier = null;
-    if (self.last_sent_version) |v| self.gpa.free(v);
-    self.last_sent_version = null;
+    self.core.rebind(self.gpa);
     // Re-announce the grant after a reconnect (host side); the client
     // keeps its current my_grant so there is no read-only flash.
     self.last_sent_grant = null;
@@ -161,36 +158,33 @@ pub fn handleFrame(self: *Collab, frame: wire.Decoder.Decoded) !bool {
         .op => if (frame.channel == self.base) {
             switch (std.enums.fromInt(wire.OpKind, frame.kind) orelse return false) {
                 .batch => {
-                    var cur: []const u8 = frame.payload;
-                    const tlen = wire.getUv(&cur) catch return false;
-                    if (tlen > cur.len) return false;
-                    const token = cur[0..tlen];
-                    const batch = cur[tlen..];
-                    try self.setTheirFrontier(token);
-                    // Authorization: a view-only peer's ops are never
-                    // admitted to the shared document (and thus never
-                    // propagate to other peers). We still track their
-                    // frontier so sync stays consistent and they keep
-                    // receiving everyone else's edits.
-                    if (!self.session.access.canEdit()) return changed;
-                    if (batch.len > 0) {
-                        const merged = self.doc.mergeRemote(gpa, batch) catch |err| blk: {
-                            if (err == error.Unrealized) {
-                                // Remote edits landed inside spans we
-                                // have not fetched: stash the batch,
-                                // realize (push() pumps the reads),
-                                // merge again on arrival.
-                                if (self.partial) |p| try p.stash(batch);
-                            } else {
-                                std.log.warn("collab: batch rejected: {t}", .{err});
-                            }
-                            break :blk false;
-                        };
-                        changed = changed or merged;
-                    }
+                    // Decode + frontier-track + view-peer admission gate:
+                    // shared with the graph driver
+                    // (`sync_core.SyncCore.admitBatch`) — a view-only
+                    // peer's ops are never admitted to the shared document
+                    // (and thus never propagate to other peers), but their
+                    // frontier is still tracked so sync stays consistent
+                    // and they keep receiving everyone else's edits. The
+                    // merge call + its `Unrealized` recovery stay here —
+                    // `GraphCollab` has no such branch (see
+                    // `sync_core.zig`'s doc comment).
+                    const batch = (try self.core.admitBatch(gpa, self.session, frame.payload)) orelse return changed;
+                    const merged = self.doc.mergeRemote(gpa, batch) catch |err| blk: {
+                        if (err == error.Unrealized) {
+                            // Remote edits landed inside spans we
+                            // have not fetched: stash the batch,
+                            // realize (push() pumps the reads),
+                            // merge again on arrival.
+                            if (self.partial) |p| try p.stash(batch);
+                        } else {
+                            std.log.warn("collab: batch rejected: {t}", .{err});
+                        }
+                        break :blk false;
+                    };
+                    changed = changed or merged;
                 },
                 .frontier => {
-                    try self.setTheirFrontier(frame.payload);
+                    try self.core.setTheirFrontier(gpa, frame.payload);
                     try self.sendBatch();
                 },
                 .share => {}, // connection-level; Conn consumes these
@@ -316,12 +310,7 @@ pub fn push(self: *Collab) !bool {
         try p.pump(self.session, self.base);
     }
 
-    if (!self.announced) {
-        self.announced = true;
-        const v = try self.doc.version(gpa);
-        defer gpa.free(v);
-        try self.session.post(.op, @intFromEnum(wire.OpKind.frontier), self.base, v);
-    }
+    try self.core.announceOnce(gpa, self.session, self.base, self.doc);
 
     // Host side: announce the grade we grant this peer on this document
     // (initial + whenever it changes via setPeerAccess/applyGrades), so
@@ -334,11 +323,7 @@ pub fn push(self: *Collab) !bool {
         const grade: [1]u8 = .{@intFromEnum(self.session.access)};
         try self.session.post(.op, @intFromEnum(wire.OpKind.grant), self.base, &grade);
     }
-    const head = try self.doc.version(gpa);
-    defer gpa.free(head);
-    const moved = self.last_sent_version == null or
-        !std.mem.eql(u8, self.last_sent_version.?, head);
-    if (moved) try self.sendBatch();
+    try self.core.pushOnMove(gpa, self.session, self.base, self.doc, self.partialSkip());
 
     // Forward host-scoped diagnostics when they changed.
     if (self.export_diag_layer) |layer| {
@@ -443,37 +428,20 @@ pub fn packPresenceKind(hue16: u32, head_is_start: bool) u32 {
     return (hue16 & 0xffff) | (@as(u32, if (head_is_start) 0 else 1) << 16);
 }
 
-fn setTheirFrontier(self: *Collab, token: []const u8) !void {
-    if (self.their_frontier) |f| self.gpa.free(f);
-    self.their_frontier = try self.gpa.dupe(u8, token);
+/// The no-frontier fallback (`sync_core.sendBatch`'s serialize branch)
+/// would ship the whole document as a bootstrap — impossible (and wrong)
+/// from a partial checkout; wait for the host's announce and send the
+/// delta instead. `sync_core.zig` doesn't know `PartialDoc` exists, so
+/// this is computed here and threaded through as `skip`.
+fn partialSkip(self: *const Collab) bool {
+    return self.core.their_frontier == null and self.partial != null;
 }
 
-/// Send everything the peer lacks (their frontier, or the whole
-/// history when unknown), prefixed with our frontier. Duplicates on
-/// their side are no-ops — retransmit-safe.
+/// Thin wrapper so the `.frontier` handler's call site reads the same as
+/// before the extraction — the actual framing lives in `sync_core.zig`,
+/// shared with `GraphCollab`.
 fn sendBatch(self: *Collab) !void {
-    const gpa = self.gpa;
-    // The no-frontier fallback serializes the whole document as a
-    // bootstrap — impossible (and wrong) from a partial checkout;
-    // wait for the host's announce and send the delta instead.
-    if (self.their_frontier == null and self.partial != null) return;
-    const head = try self.doc.version(gpa);
-    errdefer gpa.free(head);
-    const batch = if (self.their_frontier) |f|
-        try self.doc.eventsSince(gpa, f)
-    else
-        try self.doc.serialize(gpa);
-    defer gpa.free(batch);
-
-    var payload: std.ArrayList(u8) = .empty;
-    defer payload.deinit(gpa);
-    try wire.putUv(gpa, &payload, head.len);
-    try payload.appendSlice(gpa, head);
-    try payload.appendSlice(gpa, batch);
-    try self.session.post(.op, @intFromEnum(wire.OpKind.batch), self.base, payload.items);
-
-    if (self.last_sent_version) |v| gpa.free(v);
-    self.last_sent_version = head;
+    try self.core.sendBatch(self.gpa, self.session, self.base, self.doc, self.partialSkip());
 }
 
 const t = std.testing;

@@ -13,10 +13,14 @@ const identity = @import("../identity.zig");
 const task = @import("../task.zig");
 const Document = @import("../Document.zig");
 const layers_mod = @import("../layers.zig");
+const subbuffer = @import("../subbuffer.zig");
+const GraphDoc = @import("../graph.zig");
+const TranscriptDoc = @import("../transcript.zig");
 
 const session = @import("../session.zig");
 const Session = @import("Session.zig");
 const Collab = @import("Collab.zig");
+const GraphCollab = @import("GraphCollab.zig");
 const Conn = @import("Conn.zig");
 const PartialDoc = @import("PartialDoc.zig");
 
@@ -880,4 +884,147 @@ test "hub: three-way convergence, presence relay, reconnect rebind" {
         testPark(2);
     }
     try t.expect(rounds < 800);
+}
+
+// ── stemma delta 5: a GraphDoc (the agent transcript) replicates over the
+// REAL wire — W5's gate ("the model replicates over a session"), driven
+// through `Conn.shareGraph`/`openGraphOffer` exactly like the text
+// share/offer test above, so the announce/quad-allocation/open-by-name
+// flow is proven for a graph doc too, not just the frontier exchange in
+// isolation. ─────────────────────────────────────────────────────────
+
+test "GraphDoc over the wire: transcript shares, joiner adopts, edits converge both ways" {
+    const gpa = t.allocator;
+    const fds = try socketPair();
+    var la: FdLink = .{ .fd = fds[0] };
+    var lb: FdLink = .{ .fd = fds[1] };
+
+    // Origin: the ONE replica that ever calls `create` (graph.zig's
+    // one-create discipline) — one entry already in it before it's shared,
+    // so the joiner's bootstrap has real content to prove, not just an
+    // empty shell.
+    var origin = try TranscriptDoc.create(gpa, "alice");
+    defer origin.deinit(gpa);
+    _ = try origin.append(gpa, "user", 1, "hello");
+
+    const sa = try Session.create(gpa, la.link(), .server, "tok", .own, null);
+    defer sa.destroy();
+    const sb = try Session.create(gpa, lb.link(), .client, "tok", .own, null);
+    defer sb.destroy();
+    var ca = try Conn.init(gpa, sa, "alice", .server);
+    defer ca.deinit();
+    var cb = try Conn.init(gpa, sb, "bob", .client);
+    defer cb.deinit();
+
+    _ = try ca.shareGraph(&origin.graph, "transcript", 1);
+
+    // Pump until the offer arrives and carries the graph discriminator
+    // (Conn.DocKind) — proves the additive share-announce byte round-trips
+    // over the real wire, not just in a unit-level encode/decode check.
+    const offer_deadline = task.nowNs() + 5 * std.time.ns_per_s;
+    while (task.nowNs() < offer_deadline and cb.offers.items.len == 0) {
+        _ = try ca.tick();
+        _ = try cb.tick();
+        futexWaitTimed(&sa.out_wake, sa.out_wake.load(.acquire), std.time.ns_per_ms);
+    }
+    try t.expect(cb.offers.items.len > 0);
+    try t.expectEqualStrings("transcript", cb.offers.items[0].name);
+    try t.expectEqual(Conn.DocKind.graph, cb.offers.items[0].kind);
+
+    // Adopt: a virgin, structurally-empty GraphDoc shell — `GraphDoc.init`,
+    // not `.open` (which decodes a byte batch and has nothing to decode
+    // yet; the frontier exchange below fills the doc, not a byte slice
+    // handed to `open`). Built directly as a `TranscriptDoc` (its `graph`
+    // field, not further validated yet) so `&joiner.graph` is a STABLE
+    // address for `GraphCollab` to hold — re-wrapping a separately-adopted
+    // `GraphDoc` afterwards would copy the struct and strand the bound
+    // pointer at the old address.
+    var joiner: TranscriptDoc = .{ .graph = try GraphDoc.init(gpa, "bob") };
+    defer joiner.deinit(gpa);
+    _ = try cb.openGraphOffer(0, &joiner.graph, 1);
+
+    // Pump until bootstrap lands: the origin's whole history arrives as
+    // ONE batch (their_frontier was unknown, so `eventsSince` fell back to
+    // `serialize` — see GraphCollab.sendBatch) the instant bob announces
+    // his (empty-doc) frontier.
+    const bootstrap_deadline = task.nowNs() + 5 * std.time.ns_per_s;
+    while (task.nowNs() < bootstrap_deadline and joiner.graph.root().mapGet("entries") == null) {
+        _ = try ca.tick();
+        _ = try cb.tick();
+        futexWaitTimed(&sb.out_wake, sb.out_wake.load(.acquire), std.time.ns_per_ms);
+    }
+    // Client-level validation happens HERE, once content has actually
+    // landed — GraphCollab itself never knows "entries" exists (see
+    // TranscriptDoc.adopt's doc comment on the seam). Assigned back into
+    // the SAME variable (not rebound) so `&joiner.graph` stays the address
+    // GraphCollab is bound to.
+    joiner = try TranscriptDoc.adopt(joiner.graph);
+    try t.expectEqual(@as(usize, 1), joiner.count());
+    try t.expectEqualStrings("user", joiner.at(0).role());
+    const boot_txt = try joiner.at(0).text(gpa);
+    defer gpa.free(boot_txt);
+    try t.expectEqualStrings("hello", boot_txt);
+
+    // Origin appends a second entry → joiner sees it through real op
+    // frames (not a direct merge call).
+    _ = try origin.append(gpa, "agent", 2, "hi there");
+    const append_deadline = task.nowNs() + 5 * std.time.ns_per_s;
+    while (task.nowNs() < append_deadline and joiner.count() < 2) {
+        _ = try ca.tick();
+        _ = try cb.tick();
+        futexWaitTimed(&sa.out_wake, sa.out_wake.load(.acquire), std.time.ns_per_ms);
+    }
+    try t.expectEqual(@as(usize, 2), joiner.count());
+    try t.expectEqualStrings("agent", joiner.at(1).role());
+
+    // Joiner edits an entry's text in place → origin converges (the other
+    // direction, proving this is real bidirectional sync, not a one-way
+    // feed).
+    try joiner.editText(gpa, joiner.at(1).textObj(), 2, "XX");
+    const converge_deadline = task.nowNs() + 5 * std.time.ns_per_s;
+    var converged = false;
+    while (task.nowNs() < converge_deadline) {
+        _ = try ca.tick();
+        _ = try cb.tick();
+        if (origin.count() == 2) {
+            const ot = try origin.at(1).text(gpa);
+            defer gpa.free(ot);
+            if (std.mem.eql(u8, ot, "hiXX there")) {
+                converged = true;
+                break;
+            }
+        }
+        testPark(2);
+    }
+    try t.expect(converged);
+
+    // Frontier equality on BOTH replicas — matching graph.zig's/
+    // transcript.zig's convergence rigor (content agreement alone can mask
+    // an unconverged frontier).
+    const ov = try origin.graph.version(gpa);
+    defer gpa.free(ov);
+    const jv = try joiner.graph.version(gpa);
+    defer gpa.free(jv);
+    try t.expectEqual(GraphDoc.VersionOrder.equal, try origin.graph.compareVersions(gpa, ov, jv));
+
+    // The projection re-fills correctly on BOTH ends from the SAME
+    // converged model — proves the graph↔text bridge survives a real
+    // wire round trip, not just an in-process merge.
+    var doc_a = try Document.init(gpa, "alice");
+    defer doc_a.deinit(gpa);
+    var subs_a: subbuffer.SubBuffers = .empty;
+    defer subs_a.deinit(gpa);
+    try TranscriptDoc.fill(gpa, &origin, &doc_a, &subs_a);
+    const text_a = try doc_a.text().toOwnedSlice(gpa);
+    defer gpa.free(text_a);
+    try t.expectEqualStrings("user: hello\nagent: hiXX there", text_a);
+
+    var doc_b = try Document.init(gpa, "bob");
+    defer doc_b.deinit(gpa);
+    var subs_b: subbuffer.SubBuffers = .empty;
+    defer subs_b.deinit(gpa);
+    try TranscriptDoc.fill(gpa, &joiner, &doc_b, &subs_b);
+    const text_b = try doc_b.text().toOwnedSlice(gpa);
+    defer gpa.free(text_b);
+    try t.expectEqualStrings(text_a, text_b);
 }
