@@ -65,15 +65,8 @@ const TextDoc = stemma.TextDoc;
 /// source, not two independently-arrived-at aliases of the same type) are
 /// the SAME type as each other by construction, not just by coincidence.
 ///
-/// Sourced from stemma's root export when present (`stemma.EventAnchor`,
-/// added alongside `TextDoc.eventCount`/`ObjectDoc.eventCount`, W7-0) —
-/// weft's pinned stemma (v0.3.0) predates it, so this falls back to
-/// `TextDoc`'s own alias (the identical underlying type either way) until
-/// the pin bumps past the release that carries the root export.
-/// DEMOLITION: once it does, collapse both lines to `stemma.EventAnchor`/
-/// `stemma.AnchorSide` unconditionally.
-pub const EventAnchor = if (@hasDecl(stemma, "EventAnchor")) stemma.EventAnchor else TextDoc.EventAnchor;
-pub const AnchorSide = if (@hasDecl(stemma, "AnchorSide")) stemma.AnchorSide else TextDoc.AnchorSide;
+pub const EventAnchor = stemma.EventAnchor;
+pub const AnchorSide = stemma.AnchorSide;
 pub const AnchorHandle = stemma.AnchorSet.Handle;
 
 const Document = @This();
@@ -592,7 +585,7 @@ pub fn adoptPartial(
     watermarks: []const AgentWatermark,
     chunks: []const BaseChunk,
 ) (Error || error{Corrupt})!void {
-    assert(docEventCount(&self.doc) == 0);
+    assert(self.doc.eventCount() == 0);
     assert(self.log.items.len == 0);
     for (self.peers.items) |slot| assert(slot == null);
     var fresh = try TextDoc.openPartial(gpa, base_version, watermarks, chunks);
@@ -608,7 +601,7 @@ pub fn adoptPartial(
 /// anchors into the loaded content resolve as `error.Compacted`; use
 /// for large files where that trade is right.
 pub fn adoptContent(self: *Document, gpa: Allocator, content: []const u8) Error!void {
-    assert(docEventCount(&self.doc) == 0);
+    assert(self.doc.eventCount() == 0);
     assert(self.log.items.len == 0);
     for (self.peers.items) |slot| assert(slot == null);
     var fresh = TextDoc.openFromContent(gpa, content) catch |e| switch (e) {
@@ -649,20 +642,7 @@ pub fn compact(self: *Document, gpa: Allocator, stable_token: []const u8) TextDo
 /// Raw stemma event count since the last compaction (or since genesis,
 /// uncompacted) — the walker's replay cost scales with this.
 pub fn eventCount(self: *const Document) usize {
-    return docEventCount(&self.doc);
-}
-
-/// Shim over `TextDoc.eventCount()` (stemma W7-0, landed alongside this
-/// facade's own `eventCount`). weft is pinned to stemma v0.3.0, which
-/// predates the public fn, so at the pin we still have to reach through
-/// `.history` directly; under `NPINS_OVERRIDE_STEMMA` (or once the pin is
-/// bumped past the release carrying it) the real fn is used instead.
-/// DEMOLITION: delete this shim and inline `doc.eventCount()` at its three
-/// call sites once weft's pin moves to a stemma release with the fn — the
-/// `.history.` reach below is scaffolding, not a design choice.
-fn docEventCount(doc: *const TextDoc) usize {
-    if (@hasDecl(TextDoc, "eventCount")) return doc.eventCount();
-    return doc.history.eventCount();
+    return self.doc.eventCount();
 }
 
 /// Per-agent compaction watermarks for serving `adoptPartial` peers.
