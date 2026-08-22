@@ -576,6 +576,76 @@ pub const SecondHead = struct {
     }
 };
 
+/// TestHead — the SECOND head implementation W0b's gate asks for (task W0b
+/// item 4, doc/north-star-plan.md §6: "a second head implementation (tty or
+/// test-head) attaches through the same grant"): a minimal, harness-driven
+/// client wrapping `SecondHead` (above — already "a second `core.Head` on
+/// the real session, driven through the real dispatch") with its own named
+/// `core.InProcClient` identity, so keypress injection goes through the
+/// SAME `beginDispatch`/`endDispatch` bracket `app/window_head.zig`'s
+/// `WindowHead.dispatchKey` uses, not a look-alike. This is the concrete
+/// proof that the guard-sharing mechanics (W0b item 2/3) are genuinely
+/// transport/client-agnostic: two DIFFERENT client identities ("window-head"
+/// vs "test-head"), same `core.InProcClient` type, same bracket discipline,
+/// same downstream `wasm_host/plugin.zig` `canDispatch` a future
+/// `requireDispatch`-gated in-process call would read. Reads a laid-out
+/// frame through the SAME scene path the window-head uses too — this
+/// struct adds no rendering of its own; a caller drives `Editor.
+/// ensureView`/`renderComposite` (below) exactly as it would for the
+/// primary head, because the render pipeline is per-SESSION, not per-head
+/// (see `app/window_head.zig`'s module doc on what a head owns vs what it
+/// shares).
+pub const TestHead = struct {
+    second: SecondHead = .{},
+    client: core.InProcClient = undefined,
+
+    /// Unlike `app/window_head.zig`'s WindowHead (first-party, self-grants
+    /// everything), TestHead starts with NO perms granted — a test that
+    /// wants to exercise a perm-gated path sets `self.client.perms[...]`
+    /// explicitly, so a gate test asserting denial (see
+    /// `e2e/test_head_test.zig`) is testing something real, not a tautology
+    /// against an identity that already grants itself everything.
+    pub fn init(self: *TestHead, ed: *Editor, start_mode: []const u8) !void {
+        try self.second.init(ed, start_mode);
+        self.client = .{ .name = "test-head", .active_ctx = &self.second.ctx };
+    }
+
+    pub fn deinit(self: *TestHead, gpa: Allocator) void {
+        self.second.deinit(gpa);
+    }
+
+    /// Inject one key spec through the REAL dispatch entry
+    /// (`app/dispatch.zig:dispatchSpec`, via `SecondHead.press`), bracketed
+    /// by THIS head's `InProcClient.in_dispatch` — see this struct's doc.
+    pub fn press(self: *TestHead, spec: []const u8, text: []const u8) void {
+        const prior = self.client.beginDispatch();
+        defer self.client.endDispatch(prior);
+        self.second.press(spec, text);
+    }
+
+    /// Press each key of a space-separated chord in turn, each individually
+    /// bracketed (mirrors `SecondHead.chord`, but through THIS struct's
+    /// guarded `press`).
+    pub fn chord(self: *TestHead, seq: []const u8) void {
+        var it = std.mem.tokenizeScalar(u8, seq, ' ');
+        while (it.next()) |k| self.press(k, "");
+    }
+
+    pub fn run(self: *TestHead, cmd: []const u8) void {
+        const prior = self.client.beginDispatch();
+        defer self.client.endDispatch(prior);
+        self.second.run(cmd);
+    }
+
+    pub fn mode(self: *TestHead) []const u8 {
+        return self.second.mode();
+    }
+
+    pub fn echoText(self: *TestHead) []const u8 {
+        return self.second.echoText();
+    }
+};
+
 // ── In-process multiplayer loopback ─────────────────────────────────
 //
 // Two live encrypted Sessions over a socketpair, each syncing one editor's

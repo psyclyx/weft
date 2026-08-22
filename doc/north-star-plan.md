@@ -331,6 +331,17 @@ splitting transport from semantics throughout. It lands WITH its first
 client (the window-head, §2.7) rather than as untested speculative surface —
 and it goes through the same handle tables and guards.
 
+**AS-BUILT REVISION (W0b landed):** the window-head turned out to be the
+transport's first client BY IDENTITY only — a named `InProcClient` with
+perms and the dispatch bracket — not by consumption: its platform/render
+wiring is core-privileged native code that calls no `wl_*` semantic body at
+all. The split (shared `hasPerm`/`canDispatch` predicates + one semantic
+body per import, proven on a representative six) is validated by
+`InProcClient`'s own tests and the TestHead; the transport's first real
+CONSUMERS are future native blobs and any core code migrating onto the
+shared bodies. ~118 imports remain mechanically unsplit until a consumer
+wants them.
+
 **Native blobs are first-class loadables, with the trust split stated
 plainly** (user direction: native code + heavy DRM/libwayland plugin work
 should be able to make weft a compositor). The membrane's promise divides:
@@ -715,12 +726,15 @@ continues on current machinery as clients-in-waiting.
   providers); bespoke drawers deleted; W1 adapters for these paths deleted
   (F5's named gate). *Gate:* completion popup + statusline as slot
   providers; snapshots unchanged; adapter deletion done.
-- **W0b — the in-process transport, with its client.** Transport/semantics
-  split of `wasm_host/*`; the window-head becomes a real in-process blob
-  under `head/attach`. *Gate:* the headless variant is the SAME composition
-  minus the window-head binding (the relabeling risk from review A7a is
-  dead because the slots and the state split now exist first); a second
-  head implementation (tty or test-head) attaches through the same grant.
+- **W0b — the in-process transport, with its client (DONE, as revised).**
+  Transport/semantics split of `wasm_host/*` (representative six + the
+  shared guard predicates; see §2.5's as-built revision — the window-head
+  is a client by IDENTITY, not consumption; `head/attach` as a real
+  capture-time grant is W4). *Gate met:* headed vs headless is
+  `System.create` plus/minus the WindowHead (headless.zig converged onto
+  the same construction, semantics traced identical); the TestHead attaches
+  through the same client-identity contract with ZERO self-granted perms,
+  making its denial tests non-tautological.
 - **W4 — grants live.** Capture-time powerbox; handle lifetime = scope
   lifetime; identity-anchored doc limits; approval-as-manifest-diff;
   release blockers closed. *Gate:* revoke fs from a RUNNING plugin → next

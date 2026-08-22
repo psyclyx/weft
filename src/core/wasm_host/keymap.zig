@@ -3,7 +3,9 @@
 //! config method, bound at the plugin tier owned by the plugin's name.
 
 const std = @import("std");
+const Allocator = std.mem.Allocator;
 const wasm = @import("../wasm.zig");
+const command_mod = @import("../command.zig");
 
 const shared = @import("plugin.zig");
 const WasmPlugin = shared.WasmPlugin;
@@ -88,29 +90,35 @@ pub fn hProvide(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32, resu
     };
 }
 
-pub fn hSetMode(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32, results: []i32) void {
-    _ = results;
-    const p: *WasmPlugin = @ptrCast(@alignCast(data.?));
-    // HEAD-GATED (task #19 item 4): SETS the current head's mode (the
-    // mode-leak class's founding bug — "background forces a mode"). Compare
-    // `wl_menu_mode`/`wl_locked_mode`/`wl_resting_mode`/`wl_sticky_menu`
-    // below, which DECLARE a mode's system-scoped TABLE properties and stay
-    // ungated.
-    if (!requireDispatch(p, caller, "wl_set_mode")) return;
-    const mode = caller.readMemory(p.gpa, @intCast(args[0]), @intCast(args[1])) catch return;
-    defer p.gpa.free(mode);
-    const ctx = p.activeCtx();
+/// The signal a split head-gated import returns on a missing dispatching
+/// entry — see `fs.zig`'s `PermError` for the identical rationale one level
+/// up the guard ladder (`shared.canDispatch` vs `shared.hasPerm`): the wasm
+/// trampoline turns this into a trap (`shared.trapNotDispatching`); an
+/// in-process caller lets it propagate as an ordinary Zig error.
+pub const DispatchError = error{NotDispatching};
+
+/// `weft.setMode(mode)` semantic body (task #19 item 3's POLICY DOOR,
+/// HEAD-GATED per task #19 item 4 — W0b split, doc/north-star-plan.md §2.5):
+/// the mode-leak class's founding bug ("background forces a mode") is
+/// `shared.canDispatch(id)` here — SAME check `requireDispatch`'s wasm trap
+/// uses, shared not reimplemented. Compare `hMenuMode`/`hLockedMode`/
+/// `hRestingMode`/`hStickyMenu` below, which DECLARE a mode's system-scoped
+/// TABLE properties and stay ungated (no split needed — they carry no head
+/// state). Routes through `Ctx.enterMode` (never raw `Head`) — the SAME
+/// policy door a host command handler uses — so entering a menu mode still
+/// records its one-shot return target; host-side mode save/restore (the
+/// picker) goes through the door's plain `setMode` instead and never
+/// records (see `ctx.zig`'s `Ctx.enterMode` doc). `gpa` is separate from
+/// `ctx.gpa` only because the wasm trampoline already has `p.gpa` in hand;
+/// an in-process caller passes its own allocator (ordinarily the same one
+/// `ctx.gpa` names).
+pub fn setMode(gpa: Allocator, ctx: *command_mod.Context, id: anytype, mode: []const u8) DispatchError!void {
+    if (!shared.canDispatch(id)) return error.NotDispatching;
     // A locked projection mode (magit/git-view) refuses to switch to a different
     // editing mode — you can't land in `normal` inside a read-only projection.
+    // Business-rule no-op, not a guard denial — same silent-return shape the
+    // pre-split handler had, unaffected by the transport split.
     if (!ctx.keymap.mayLeaveLocked(ctx.head.currentMode(), mode)) return;
-    // THE POLICY DOOR (task #19 item 3): this IS a dispatch-path call —
-    // `requireDispatch` above already proved it (`p.in_dispatch`/`p.loading`)
-    // — so it captures a `Ctx` from the live `command.Context` and routes
-    // guest-initiated mode changes through `Ctx.enterMode`, the same door
-    // host command handlers use. `enterMode` (not `setMode`) so entering a
-    // menu mode still records its one-shot return target; host-side mode
-    // save/restore (the picker) goes through the door's plain `setMode`
-    // instead and never records — see `ctx.zig`'s `Ctx.enterMode` doc.
     const c = ctx_mod.Ctx.capture(ctx);
     c.enterMode(ctx.keymap, mode) catch {};
     // Remember a RESTING mode as the active buffer's resting mode, so exiting a
@@ -118,10 +126,20 @@ pub fn hSetMode(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32, resu
     // tool projection (dired) live after an in-place edit + Escape.
     if (ctx.keymap.isRestingMode(mode)) {
         const buf = ctx.buffers.active();
-        const held = p.gpa.dupe(u8, mode) catch return;
-        p.gpa.free(buf.mode);
+        const held = gpa.dupe(u8, mode) catch return;
+        gpa.free(buf.mode);
         buf.mode = held;
     }
+}
+
+pub fn hSetMode(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32, results: []i32) void {
+    _ = results;
+    const p: *WasmPlugin = @ptrCast(@alignCast(data.?));
+    const mode = caller.readMemory(p.gpa, @intCast(args[0]), @intCast(args[1])) catch return;
+    defer p.gpa.free(mode);
+    setMode(p.gpa, p.activeCtx(), p, mode) catch {
+        shared.trapNotDispatching(p, caller, "wl_set_mode");
+    };
 }
 
 /// `exitToResting()`: leave a transient mode (insert/visual) back to the active

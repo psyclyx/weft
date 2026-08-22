@@ -42,7 +42,38 @@ pub const Perm = enum(u32) {
     }
 };
 
-/// The membrane's ONE deny path: every perm-gated host import calls this
+/// The PURE grant check (W0b — doc/north-star-plan.md §2.5): whether `id`
+/// declared `perm`. Deliberately `anytype`, not `*WasmPlugin`: this is the
+/// ONE piece of logic that must never drift between the wasm transport and
+/// the in-process transport (C7's "one contract, two transports"), so it is
+/// factored out where BOTH `requirePerm` (below, wasm) and
+/// `core/inproc/InProcClient.zig` (in-process) call it — neither
+/// reimplements "is the bit set". `id` is duck-typed (a `perms:
+/// [perm_count]bool` field) rather than a nominal shared struct: WasmPlugin
+/// and InProcClient hold that field under the same name without either
+/// depending on the other's type, mirroring `gfx/context.zig`'s
+/// `assertPlatform`/`app/rasterizer.zig`'s comptime-contract convention
+/// already used for the Platform/Rasterizer seams (P3) — see
+/// `InProcClient.zig`'s `assertClientIdentity` for the analogous compile-time
+/// check on this shape.
+pub fn hasPerm(id: anytype, comptime perm: Perm) bool {
+    return id.perms[@intFromEnum(perm)];
+}
+
+/// The wasm-specific half of denial: format + raise the trap. Split out of
+/// `requirePerm` so a SPLIT handler's semantic body (which embeds `hasPerm`
+/// itself — see e.g. `fs.zig`'s `fsRead`) can call this directly from its
+/// wasm trampoline's `catch` arm, without re-deriving the message or
+/// double-checking the bit `hasPerm` already decided. `requirePerm` below is
+/// this plus the check, kept for the ~117 handlers not yet split (task W0b
+/// item 1 — see doc/north-star-plan.md's honest coverage note): behavior is
+/// byte-identical to before this refactor.
+pub fn trapPermDenied(p: *WasmPlugin, caller: *wasm.Caller, comptime perm: Perm) void {
+    caller.trap("plugin '{s}' denied capability '{s}' (not requested in describe())", .{ p.name, perm.label() });
+}
+
+/// The membrane's ONE deny path: every perm-gated host import NOT YET split
+/// into semantic-body-plus-trampoline (see `trapPermDenied`'s doc) calls this
 /// before doing anything else. Granted → returns true, the site proceeds.
 /// Denied → traps the guest's call right here (`caller.trap`, wasm.zig) and
 /// returns false so the site's own `if (!requirePerm(...)) return;` reads as
@@ -55,8 +86,8 @@ pub const Perm = enum(u32) {
 /// (`wasm.zig`'s `checkErr`/`checkTrap`), so denial is loud exactly like any
 /// other guest fault.
 pub fn requirePerm(p: *WasmPlugin, caller: *wasm.Caller, comptime perm: Perm) bool {
-    if (p.perms[@intFromEnum(perm)]) return true;
-    caller.trap("plugin '{s}' denied capability '{s}' (not requested in describe())", .{ p.name, perm.label() });
+    if (hasPerm(p, perm)) return true;
+    trapPermDenied(p, caller, perm);
     return false;
 }
 
@@ -88,9 +119,25 @@ pub fn requirePerm(p: *WasmPlugin, caller: *wasm.Caller, comptime perm: Perm) bo
 /// entry by definition, promoting `in_dispatch` to true for the nested
 /// call's duration (see that trampoline's doc). There is no OTHER way to
 /// spell "background, but make an exception" — exactly the point.
-pub fn requireDispatch(p: *WasmPlugin, caller: *wasm.Caller, comptime verb: []const u8) bool {
-    if (p.in_dispatch or p.loading) return true;
+/// The PURE dispatch-entry check — `id`'s counterpart to `hasPerm` above,
+/// same rationale (duck-typed `anytype`, shared unconditionally by both
+/// transports so the two entry classes it admits — dispatching, and the
+/// one-time load handshake — can never drift between a wasm trap and an
+/// in-process error). `id` needs `in_dispatch: bool` and `loading: bool`.
+pub fn canDispatch(id: anytype) bool {
+    return id.in_dispatch or id.loading;
+}
+
+/// wasm-specific denial half — see `trapPermDenied`'s doc for why this is
+/// split out (a split handler's semantic body calls this from its
+/// trampoline's `catch`, in-process code never does).
+pub fn trapNotDispatching(p: *WasmPlugin, caller: *wasm.Caller, comptime verb: []const u8) void {
     caller.trap("plugin '{s}' called {s} from a background entry — head state requires a dispatching entry (on_command/on_pick_accept, or a nested wl_run) or the load handshake (describe/init)", .{ p.name, verb });
+}
+
+pub fn requireDispatch(p: *WasmPlugin, caller: *wasm.Caller, comptime verb: []const u8) bool {
+    if (canDispatch(p)) return true;
+    trapNotDispatching(p, caller, verb);
     return false;
 }
 

@@ -29,6 +29,14 @@ pub const perm_net = plugin.perm_net;
 pub const perm_proc = plugin.perm_proc;
 pub const perm_timer = plugin.perm_timer;
 pub const setEnviron = plugin.setEnviron;
+// The shared guard predicates (W0b, doc/north-star-plan.md §2.5) — the ONE
+// grant/dispatch check both the wasm transport (`requirePerm`/
+// `requireDispatch` below) and the in-process transport
+// (`core/inproc/InProcClient.zig`) read. Re-exported so app/e2e code (which
+// only ever reaches `core.*` through this facade, never a raw relative path
+// into `wasm_host/*.zig` — see `e2e/test_head_test.zig`) can name them too.
+pub const hasPerm = plugin.hasPerm;
+pub const canDispatch = plugin.canDispatch;
 pub fn hostEnviron() @import("std").process.Environ {
     return plugin.g_environ;
 }

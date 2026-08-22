@@ -9,8 +9,6 @@
 //!   weft [file] [--font path.ttf] [--em N] [--plugin p.wasm]... [--config config.js]
 
 const std = @import("std");
-const wayland = @import("platform/wayland.zig");
-const Context = @import("gfx/context.zig").Context;
 const core = @import("core/core.zig");
 const view_mod = @import("gfx/view.zig");
 const region = @import("gfx/region.zig");
@@ -35,7 +33,7 @@ const dispatch = @import("app/dispatch.zig");
 const setup = @import("app/setup.zig");
 const session_mod = @import("app/session.zig");
 const Session = session_mod.Session;
-const render_mod = @import("app/render.zig");
+const window_head = @import("app/window_head.zig");
 const frame_mod = @import("app/frame.zig");
 const collab = @import("app/collab.zig");
 const collab_cmds = @import("app/collab_cmds.zig");
@@ -371,34 +369,25 @@ pub fn main(init: std.process.Init) !void {
     var window_action_ctx: [window_cmds.cmd_count]window_cmds.WindowActionCtx = undefined;
     try window_cmds.registerCommands(gpa, &session.system.commands, &win_ctx, &window_action_ctx);
 
-    // ── Window + Vulkan ──
-    const window = try wayland.Window.init(1280, 800, "weft", "dev.psyclyx.weft");
-    defer window.deinit();
-    var fb = window.framebufferSize();
-    const ctx = try Context.init(gpa, .{
-        .display = window.display,
-        .surface = window.surface,
-    }, fb[0], fb[1], "weft");
-    defer ctx.deinit();
+    // ── Window + Vulkan + Rasterizer, as ONE unit: the window-head (W0b,
+    //    doc/north-star-plan.md §2.5/§2.7) — an in-process client owning the
+    //    platform attachment, under its own named identity. See
+    //    `app/window_head.zig`'s module doc for what this does and
+    //    deliberately does NOT extract (the frame loop stays here).
+    const font_bytes: []const u8 = if (args.font) |p| try core.file.readAlloc(gpa, p) else embedded_font;
+    defer if (args.font != null) gpa.free(@constCast(font_bytes));
+    var whead: window_head.WindowHead = undefined;
+    try whead.init(gpa, &session.cmd_ctx, 1280, 800, font_bytes, args.em, buffers.active_id);
+    defer whead.deinit();
     // The swapchain's actual extent is authoritative: a server-side-deco or
     // tiling compositor can force it to differ from the requested framebuffer
     // size. Drive all render geometry (layout, MVP, surface size) from it — from
     // frame one — so nothing mis-scales.
-    fb = .{ ctx.extent.width, ctx.extent.height };
-
-    // ── Render path (backend chosen by -Drenderer; both share `ctx`) ──
-    const font_bytes: []const u8 = if (args.font) |p| try core.file.readAlloc(gpa, p) else embedded_font;
-    defer if (args.font != null) gpa.free(@constCast(font_bytes));
-    // All render resources + the pane tree are OWNED by `render`; it builds
-    // them in place (no move hazard) and frees them in the reverse order
-    // main() used to. ctx (the device) is declared earlier, so it outlives
-    // render's Vulkan frees. The aliases below are non-owning borrows so the
-    // frame loop reads `view`/`cache`/etc. unchanged.
-    var render: render_mod.RenderState = undefined;
-    try render.init(gpa, ctx, font_bytes, args.em, buffers.active_id);
-    defer render.deinit();
-    const view = &render.fb.view;
-    const win_layout = &render.fb.win_layout;
+    var fb: [2]u32 = .{ whead.ctx.extent.width, whead.ctx.extent.height };
+    // `view`/`win_layout` alias `whead.render.fb.*` — non-owning borrows so
+    // the frame loop reads them unchanged regardless of backend.
+    const view = &whead.render.fb.view;
+    const win_layout = &whead.render.fb.win_layout;
 
     // Scrolling commands need the view + framebuffer (which core commands
     // don't see), so they're registered here. `view.top_row` is always the
@@ -555,7 +544,7 @@ pub fn main(init: std.process.Init) !void {
     // scheduler only needs to know it's a wake reason — the actual pump
     // stays in the body, unconditional, below) and the task pool's
     // completion signal (real push wakeup — §6 W2a-3 item 3).
-    _ = try sched.addFd(window.fd(), .{ .read = true }, null, loop_sources.noopFdReady, "wayland");
+    _ = try sched.addFd(whead.window.fd(), .{ .read = true }, null, loop_sources.noopFdReady, "wayland");
     const pool_wake_fd = try scheduler.newWakeFd();
     defer scheduler.closeWakeFd(pool_wake_fd);
     pool.setNotifyFd(pool_wake_fd);
@@ -570,7 +559,7 @@ pub fn main(init: std.process.Init) !void {
         .blink_next_ns = &blink_next_ns,
     };
     _ = try sched.addTimer(&blink_ctx, loop_sources.blinkDue, "caret_blink");
-    _ = try sched.addTimer(window, loop_sources.keyRepeatDue, "key_repeat");
+    _ = try sched.addTimer(whead.window, loop_sources.keyRepeatDue, "key_repeat");
     var which_key_ctx: loop_sources.WhichKeyCtx = .{ .menu = &session.menu_overlay, .delay_ns = which_key_delay_ns };
     _ = try sched.addTimer(&which_key_ctx, loop_sources.whichKeyDue, "which_key_delay");
     _ = try sched.addTimer(&next_backing_poll_ns, loop_sources.backingPollDue, "backing_poll");
@@ -597,7 +586,7 @@ pub fn main(init: std.process.Init) !void {
     // `PresentRetryCtx`'s doc for why that guard is load-bearing, not
     // cosmetic.
     var present_pending = false;
-    var present_retry_ctx: loop_sources.PresentRetryCtx = .{ .pending = &present_pending, .swapchain_stale = &ctx.swapchain_stale };
+    var present_retry_ctx: loop_sources.PresentRetryCtx = .{ .pending = &present_pending, .swapchain_stale = &whead.ctx.swapchain_stale };
     _ = try sched.addTimer(&present_retry_ctx, loop_sources.presentRetryDue, "present_retry");
 
     // The outbound session's wake-fd (§6 W2a-3 item 3) exists for the whole
@@ -612,19 +601,19 @@ pub fn main(init: std.process.Init) !void {
     // tracked so it's registered/removed exactly once per transition.
     var hub_src_id: ?scheduler.Id = null;
 
-    while (!window.shouldClose() and !session.system.quit) {
+    while (!whead.window.shouldClose() and !session.system.quit) {
         _ = try sched.step();
         const frame_start = stats_mod.nowNs();
-        window.pumpEvents();
+        whead.window.pumpEvents();
 
-        if (window.consumeResized() or ctx.swapchain_stale) {
-            const req = window.framebufferSize();
-            ctx.recreateSwapchain(req[0], req[1]) catch |e| switch (e) {
+        if (whead.window.consumeResized() or whead.ctx.swapchain_stale) {
+            const req = whead.window.framebufferSize();
+            whead.ctx.recreateSwapchain(req[0], req[1]) catch |e| switch (e) {
                 // Minimized / zero-size surface: the swapchain is torn down and
                 // can't be recreated yet. Skip this frame and retry next one
                 // (don't render into a destroyed swapchain).
                 error.ZeroExtent => {
-                    ctx.swapchain_stale = true;
+                    whead.ctx.swapchain_stale = true;
                     // Nothing is presentable while minimized — drop any
                     // latched present so `present_retry` (also gated on
                     // `swapchain_stale` directly, belt-and-suspenders)
@@ -638,7 +627,7 @@ pub fn main(init: std.process.Init) !void {
                 else => return e,
             };
             // Geometry follows the swapchain's actual extent, not the request.
-            fb = .{ ctx.extent.width, ctx.extent.height };
+            fb = .{ whead.ctx.extent.width, whead.ctx.extent.height };
             view_dirty = true;
         }
 
@@ -647,14 +636,17 @@ pub fn main(init: std.process.Init) !void {
         // narrowly inside dispatchKey around the typing/commit path, not
         // here: a bound key can also trigger a deliberately-blocking
         // control command (open a file, save), and those must be allowed
-        // to block. See dispatchKey.
+        // to block. See dispatchKey. `whead.dispatchKey` (not
+        // `dispatch.dispatchKey` directly) brackets the call under the
+        // window-head's `InProcClient` identity (W0b item 3) — see
+        // `app/window_head.zig`'s module doc.
         var had_input = false;
-        while (window.nextKeyEvent()) |ev| {
+        while (whead.window.nextKeyEvent()) |ev| {
             if (!ev.pressed) continue;
             had_input = true;
-            try dispatch.dispatchKey(&session.cmd_ctx, ev);
+            try whead.dispatchKey(&session.cmd_ctx, ev);
         }
-        if (window.shouldClose()) break;
+        if (whead.window.shouldClose()) break;
 
         // Commands may have created/switched buffers; lazily attach
         // providers and damage the view on focus change.
@@ -681,7 +673,7 @@ pub fn main(init: std.process.Init) !void {
         }
 
         // ── Pointer → caret (click-to-place; drag extends a selection) ──
-        if (try dispatch.handlePointer(window, win_layout, &session.head, view, editor, &win_ctx, gpa, last_frame_rect, &drag_anchor, &drag_selecting, &had_input))
+        if (try dispatch.handlePointer(whead.window, win_layout, &session.head, view, editor, &win_ctx, gpa, last_frame_rect, &drag_anchor, &drag_selecting, &had_input))
             view_dirty = true;
 
         // Caret blink: any input shows a solid caret and restarts the
@@ -732,7 +724,7 @@ pub fn main(init: std.process.Init) !void {
         if (had_input) view_dirty = true; // cursor moves damage the view
 
         // ── Rebuild + upload on damage (backend-independent build) ──
-        try render.buildFrame(&fx, .{
+        try whead.render.buildFrame(&fx, .{
             .editor = editor,
             .abuf = abuf,
             .attach = attach,
@@ -751,10 +743,10 @@ pub fn main(init: std.process.Init) !void {
         // `false` return means it deferred, and `present_pending` stays
         // set so the `present_retry` timer source demands an immediate
         // recheck next step.
-        present_pending = present_pending or render.fb.rebuilt;
+        present_pending = present_pending or whead.render.fb.rebuilt;
         if (present_pending) {
-            if (try render.present(ctx, fb, frame_start, had_input)) present_pending = false;
+            if (try whead.render.present(whead.ctx, fb, frame_start, had_input)) present_pending = false;
         }
     }
-    ctx.waitIdle();
+    whead.ctx.waitIdle();
 }

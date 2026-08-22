@@ -15,6 +15,26 @@
 //! pool signals a finished task, or the autosave-idle deadline (armed only
 //! while a change is actually pending) comes due.
 //!
+//! **W0b's headed/headless gate (doc/north-star-plan.md §6): `sys` below is
+//! built with `core.System.create` — the SAME construction `app/session.zig`'s
+//! `Session.init` uses for the windowed binary's "editor" system (buffers,
+//! commands, keymap, caps, actions, container, the built-in command/keymap
+//! floor). This file used to build its own bare `Buffers`+`Container`+`Caps`
+//! triple by hand (pre-`System`, an artifact of headless.zig predating the
+//! System/Host split) — that divergence meant "headless is the same
+//! composition minus the window-head" was ASPIRATIONAL, not literally true.
+//! Migrating it onto `core.System.create` closes that gap: the only
+//! structural difference between this file and `main.zig` is that NO
+//! `app/window_head.zig` `WindowHead` is ever constructed here, and no
+//! `core.Head` ever attaches (`sys.default_head` — the same headless
+//! dispatch target `agent-ux`, `core/System.zig`'s own "zero-head systems
+//! are a first-class resting state" gate, uses — services collab/autosave
+//! directly; nothing here injects a keystroke). commands/keymap/actions go
+//! unused today (a hub relays bytes, it doesn't dispatch), which is
+//! harmless overhead, not dead weight: it is what makes hosting a manifest
+//! (a future `--headless --config`) or a second head attaching to THIS
+//! system (W4's `head/attach`) additive instead of a rewrite.
+//!
 //!   weft --headless --listen PORT [--token T] [file]
 
 const std = @import("std");
@@ -33,8 +53,11 @@ pub const Args = struct {
 pub fn run(gpa: std.mem.Allocator, args: Args, environ: std.process.Environ) !void {
     var pool = try core.task.Pool.init(gpa, .{ .threads = 2 });
     defer pool.deinit();
-    var buffers = try core.Buffers.init(gpa, pool, "host");
-    defer buffers.deinit(gpa);
+    // The SAME `core.System` construction the windowed binary hosts as its
+    // "editor" system (`app/session.zig`'s `Session.init`) — see module doc.
+    const sys = try core.System.create(gpa, pool, "host", "host");
+    defer sys.destroy();
+    const buffers = &sys.buffers;
     const editor = &buffers.active().editor;
     if (args.file) |p| {
         editor.openFile(gpa, p) catch |err| switch (err) {
@@ -52,10 +75,7 @@ pub fn run(gpa: std.mem.Allocator, args: Args, environ: std.process.Environ) !vo
         }
     }
 
-    var container = core.container.Container.init(gpa);
-    defer container.deinit();
-    var caps = capability.Caps.init(gpa, core.task.nowNs, &container);
-    defer caps.deinit();
+    const caps = &sys.caps;
     var blob: ?session.BlobServer = null;
     defer if (blob) |*b| b.close();
     if (editor.backingPath()) |p| blob = session.BlobServer.openPath(p) catch null;
@@ -81,7 +101,7 @@ pub fn run(gpa: std.mem.Allocator, args: Args, environ: std.process.Environ) !vo
     try hub.listen(args.listen);
     var cfg: HeadlessCfg = .{
         .doc = &editor.doc,
-        .caps = &caps,
+        .caps = caps,
         .blob = if (blob != null) &blob.? else null,
     };
 

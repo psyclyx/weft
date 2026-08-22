@@ -16,6 +16,7 @@ test {
     _ = @import("editing_test.zig");
     _ = @import("window_test.zig");
     _ = @import("two_head_test.zig");
+    _ = @import("test_head_test.zig");
     _ = @import("menu_test.zig");
     _ = @import("collab_test.zig");
     _ = @import("project_test.zig");
