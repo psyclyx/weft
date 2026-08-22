@@ -241,13 +241,18 @@ pub fn contextFor(self: *System, head: *Head) command.Context {
 /// system's next key).
 pub fn attachHead(self: *System, gpa: Allocator, head: *Head) Allocator.Error!void {
     try head.setPending(gpa, "");
+    // mechanism-not-policy (task #19 item 3): the system-attach/detach
+    // rebind mechanism (`Host.swap`'s two halves) — no `*command.Context`
+    // exists yet for THIS head at this point (attach IS what makes one
+    // meaningful), same reasoning as `Buffers.switchTo`'s restore. Raw
+    // mechanism entry (`Head.setModeRaw`), by design.
     const active = self.buffers.active();
     if (active.mode.len > 0) {
-        try head.setMode(gpa, active.mode);
+        try head.setModeRaw(gpa, active.mode);
     } else if (self.buffers.default_mode.len > 0) {
-        try head.setMode(gpa, self.buffers.default_mode);
+        try head.setModeRaw(gpa, self.buffers.default_mode);
     } else {
-        try head.setMode(gpa, "");
+        try head.setModeRaw(gpa, "");
     }
 }
 
@@ -507,7 +512,7 @@ test "system: create/destroy — a fresh headless system services command.run im
     defer sys.destroy();
 
     var c = sys.contextFor(&sys.default_head);
-    try sys.default_head.setMode(gpa, "default");
+    try sys.default_head.setModeRaw(gpa, "default");
     _ = try command.run(&sys.commands, &c, "insert-text", &.{.{ .string = "hi" }});
     const rope = c.editor().text();
     const got = try rope.toOwnedSlice(gpa);
@@ -532,13 +537,13 @@ test "system: GATE (a) — the container hosts TWO systems concurrently, one hea
     defer editor_head.deinit(gpa);
     try editor_sys.attachHead(gpa, &editor_head);
     var ec = editor_sys.contextFor(&editor_head);
-    try editor_head.setMode(gpa, "default");
+    try editor_head.setModeRaw(gpa, "default");
     _ = try command.run(&editor_sys.commands, &ec, "insert-text", &.{.{ .string = "editor text" }});
 
     // The agent-ux system is HEADLESS: no head ever attaches to it, but its
     // OWN default_head lets a direct command.run edit its buffer anyway.
     var ac = agent_sys.contextFor(&agent_sys.default_head);
-    try agent_sys.default_head.setMode(gpa, "default");
+    try agent_sys.default_head.setModeRaw(gpa, "default");
     _ = try command.run(&agent_sys.commands, &ac, "insert-text", &.{.{ .string = "agent text" }});
 
     // Both landed on their OWN buffer, entirely independent of the other.
@@ -577,7 +582,7 @@ test "system: GATE (b) — a head re-binds editor<->agent-ux live: tables switch
     var head: Head = .empty;
     defer head.deinit(gpa);
     try editor_sys.attachHead(gpa, &head);
-    try head.setMode(gpa, "visual"); // a transient-ish editing mode, not menu
+    try head.setModeRaw(gpa, "visual"); // a transient-ish editing mode, not menu
 
     var c = editor_sys.contextFor(&head);
     // Direct table lookups (by explicit mode name, not through `head` —
@@ -653,7 +658,7 @@ test "system: F1 — swap REFUSES while a transient/menu is open, nothing repoin
     var head: Head = .empty;
     defer head.deinit(gpa);
     try editor_sys.attachHead(gpa, &head);
-    try head.setMode(gpa, "normal");
+    try head.setModeRaw(gpa, "normal");
     var c = editor_sys.contextFor(&head);
 
     const cc = c.capturedCtx();

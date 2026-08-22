@@ -19,16 +19,22 @@
 //! the known stack depth (`ourTransientTop`/`popOurTransient` below) rather
 //! than threaded through as a live handle — the stack, not a Zig scope, is
 //! the durable record spanning however many keypresses the menu stays open.
-//! NOT migrated this pass (deliberately — see `ctx.zig`'s module doc):
-//! guest-initiated `weft.setMode` (every plugin's OWN direct menu entry —
-//! `git-push-menu`/`git-pull-menu`/`git-fetch-menu` (sticky), `git-reset-menu`,
-//! `git-confirm`/`git-confirm2`, vim's `op-pending`/`op-to`, helix's
-//! `helix-op`, dired's `dired-confirm`) stays on plain `Head.enterMode` and
-//! the legacy `Head.menu_return` table, which therefore CANNOT be deleted —
-//! it is still the only record for those. The leaf auto-pop / `menu-escape`
-//! logic below checks WHICH mechanism owns the currently-open menu
-//! (`ourTransientTop`) and falls back to the legacy `menuReturn` lookup when
-//! it isn't ours, so both paths keep their exact pre-migration observable
+//! NOT migrated to PAIRED TRANSIENTS this pass (deliberately — see
+//! `ctx.zig`'s module doc): guest-initiated `weft.setMode` (every plugin's
+//! OWN direct menu entry — `git-push-menu`/`git-pull-menu`/`git-fetch-menu`
+//! (sticky), `git-reset-menu`, `git-confirm`/`git-confirm2`, vim's
+//! `op-pending`/`op-to`, helix's `helix-op`, dired's `dired-confirm`) stays
+//! on the legacy `Head.menu_return` table (not `Head.transient_stack`),
+//! which therefore CANNOT be deleted — it is still the only record for
+//! those. Task #19 item 3 (the POLICY DOOR) is a separate axis from this:
+//! it changed HOW that legacy table gets written — `wasm_host/keymap.zig`'s
+//! `hSetMode` now captures a `Ctx` and calls `Ctx.enterMode`, not raw
+//! `Head.enterMode`/`Head.enterModeRaw` — without changing WHICH table
+//! (`menu_return` vs `transient_stack`) a guest menu lands in. The leaf
+//! auto-pop / `menu-escape` logic below checks WHICH mechanism owns the
+//! currently-open menu (`ourTransientTop`) and falls back to the legacy
+//! `menuReturn` lookup when it isn't ours (also now through the door, both
+//! below) — so all paths keep their exact pre-migration observable
 //! behavior. See `src/e2e/menu_test.zig` for the paired-transient path
 //! driven through this REAL dispatch (enter/leaf/auto-pop, `menu-escape`,
 //! sticky re-enter, nested LIFO, a leaf's own buffer switch mid-menu, and
@@ -167,13 +173,16 @@ pub fn menuEscapeHandler(ctx: *core.command.Context, data: ?*anyopaque, args: []
         popOurTransient(ctx, depth);
         return .nil;
     }
-    // Legacy fallback: a GUEST-entered menu (`weft.setMode`, not migrated
-    // this pass — see ctx.zig's module doc) — return to its recorded
-    // target, else the configured base mode (vim's "normal", helix's
-    // "helix-normal", or plain "default").
+    // Legacy fallback: a GUEST-entered menu (`weft.setMode`'s own
+    // `menu_return` bookkeeping — task #19 item 2's paired-transient stack
+    // only tracks menus DISPATCH itself pushed, see this function's module
+    // doc) — return to its recorded target, else the configured base mode
+    // (vim's "normal", helix's "helix-normal", or plain "default"). Still on
+    // the POLICY door (task #19 item 3): `menuEscapeHandler` runs with a
+    // live `ctx`, so this goes through `Ctx.setMode`, not raw `Head`.
     const base = if (ctx.buffers.default_mode.len > 0) ctx.buffers.default_mode else "default";
     const ret = head.menuReturn(cur) orelse base;
-    head.setMode(ctx.gpa, ret) catch {};
+    ctx.capturedCtx().setMode(ret) catch {};
     return .nil;
 }
 
@@ -470,10 +479,11 @@ pub fn dispatchSpec(ctx: *core.command.Context, spec: []const u8, text: []const 
                     // fires again while it's open) is idempotent, not a
                     // fresh scope — a sticky re-enter is NOT a second push
                     // (it would grow the stack for no real nesting).
-                    // `Head.enterMode` itself already no-ops the
-                    // return-target record in this case; call it directly,
-                    // matching the pre-migration behavior exactly.
-                    ctx.head.enterMode(ctx.gpa, ctx.keymap, cmd_name) catch {};
+                    // `enterMode` itself already no-ops the return-target
+                    // record in this case; call it directly through the
+                    // POLICY door (task #19 item 3), matching the
+                    // pre-migration behavior exactly.
+                    ctx.capturedCtx().enterMode(ctx.keymap, cmd_name) catch {};
                     return;
                 }
                 const c = core.ctx.Ctx.capture(ctx);
@@ -511,7 +521,9 @@ pub fn dispatchSpec(ctx: *core.command.Context, spec: []const u8, text: []const 
                     if (ourTransientTop(ctx, m)) |depth| {
                         popOurTransient(ctx, depth);
                     } else if (ctx.head.menuReturn(m)) |ret| {
-                        ctx.head.setMode(ctx.gpa, ret) catch {};
+                        // Legacy fallback (task #19 item 2's scope, unchanged)
+                        // through the POLICY door (task #19 item 3).
+                        ctx.capturedCtx().setMode(ret) catch {};
                     }
                 } else if (!std.mem.eql(u8, ctx.head.currentMode(), m)) {
                     // The leaf itself already moved us elsewhere (a guest

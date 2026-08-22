@@ -8,6 +8,13 @@ const wasm = @import("../wasm.zig");
 const shared = @import("plugin.zig");
 const WasmPlugin = shared.WasmPlugin;
 const requireDispatch = shared.requireDispatch;
+// The POLICY door (task #19 item 3) — `hSetMode`/`hExitToResting` are the
+// ONE membrane chokepoint every guest's `weft.setMode`/`weft.exitToResting`
+// funnels through (see `ctx.zig`'s module doc, "BACKGROUND CODE CANNOT"),
+// so routing THIS site through `Ctx.capture`/`Ctx.enterMode`/`Ctx.setMode`
+// is what puts every guest-driven mode change on the door without touching
+// any of the ~15 guest plugin files that call `weft.setMode` directly.
+const ctx_mod = @import("../ctx.zig");
 
 pub fn hBindKey(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32, results: []i32) void {
     _ = results;
@@ -92,18 +99,25 @@ pub fn hSetMode(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32, resu
     if (!requireDispatch(p, caller, "wl_set_mode")) return;
     const mode = caller.readMemory(p.gpa, @intCast(args[0]), @intCast(args[1])) catch return;
     defer p.gpa.free(mode);
+    const ctx = p.activeCtx();
     // A locked projection mode (magit/git-view) refuses to switch to a different
     // editing mode — you can't land in `normal` inside a read-only projection.
-    if (!p.activeCtx().keymap.mayLeaveLocked(p.activeCtx().head.currentMode(), mode)) return;
-    // Guest-initiated: route through enterMode so entering a menu mode records
-    // its one-shot return target. Host-side mode save/restore (the picker) uses
-    // plain setMode and never records.
-    p.activeCtx().head.enterMode(p.gpa, p.activeCtx().keymap, mode) catch {};
+    if (!ctx.keymap.mayLeaveLocked(ctx.head.currentMode(), mode)) return;
+    // THE POLICY DOOR (task #19 item 3): this IS a dispatch-path call —
+    // `requireDispatch` above already proved it (`p.in_dispatch`/`p.loading`)
+    // — so it captures a `Ctx` from the live `command.Context` and routes
+    // guest-initiated mode changes through `Ctx.enterMode`, the same door
+    // host command handlers use. `enterMode` (not `setMode`) so entering a
+    // menu mode still records its one-shot return target; host-side mode
+    // save/restore (the picker) goes through the door's plain `setMode`
+    // instead and never records — see `ctx.zig`'s `Ctx.enterMode` doc.
+    const c = ctx_mod.Ctx.capture(ctx);
+    c.enterMode(ctx.keymap, mode) catch {};
     // Remember a RESTING mode as the active buffer's resting mode, so exiting a
     // transient sub-mode (insert/visual) returns HERE — this is what keeps a
     // tool projection (dired) live after an in-place edit + Escape.
-    if (p.activeCtx().keymap.isRestingMode(mode)) {
-        const buf = p.activeCtx().buffers.active();
+    if (ctx.keymap.isRestingMode(mode)) {
+        const buf = ctx.buffers.active();
         const held = p.gpa.dupe(u8, mode) catch return;
         p.gpa.free(buf.mode);
         buf.mode = held;
@@ -119,18 +133,21 @@ pub fn hExitToResting(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32
     _ = results;
     const p: *WasmPlugin = @ptrCast(@alignCast(data.?));
     // HEAD-GATED (task #19 item 4): same door as `wl_set_mode`, one hop
-    // removed — it resolves the target mode, then calls `head.setMode`.
+    // removed — it resolves the target mode, then calls through `Ctx.setMode`
+    // (task #19 item 3: the policy door, not the raw mechanism).
     if (!requireDispatch(p, caller, "wl_exit_to_resting")) return;
-    const buf = p.activeCtx().buffers.active();
+    const ctx = p.activeCtx();
+    const buf = ctx.buffers.active();
     // The buffer's declared resting mode (its tool mode, or the config base it
     // was stamped with on open) — no core-baked mode name; the config owns what
     // "resting" means. `default_mode` is the last resort if a buffer never
     // declared one.
-    const target = if (buf.mode.len > 0) buf.mode else p.activeCtx().buffers.default_mode;
+    const target = if (buf.mode.len > 0) buf.mode else ctx.buffers.default_mode;
     if (target.len == 0) return;
     const owned = p.gpa.dupe(u8, target) catch return;
     defer p.gpa.free(owned);
-    p.activeCtx().head.setMode(p.gpa, owned) catch {};
+    const c = ctx_mod.Ctx.capture(ctx);
+    c.setMode(owned) catch {};
 }
 
 pub fn hSetFallback(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32, results: []i32) void {

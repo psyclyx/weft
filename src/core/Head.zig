@@ -36,8 +36,9 @@ const Head = @This();
 // ── The keymap CURSOR ──────────────────────────────────────────────────
 // Owned copies; freed in `deinit`. See Keymap.zig for the table half.
 
-/// This head's current mode. Never empty once any `setMode`/`enterMode` has
-/// run; `.empty`'s value is "" (no mode set yet — the modeless floor).
+/// This head's current mode. Never empty once any `setModeRaw`/
+/// `enterModeRaw` (or, on the dispatch path, `Ctx.setMode`/`Ctx.enterMode`)
+/// has run; `.empty`'s value is "" (no mode set yet — the modeless floor).
 mode: []u8 = &.{},
 /// This head's pending key SEQUENCE (see Keymap.zig's `pending` doc — same
 /// meaning, just relocated: it is cursor state, not a table).
@@ -46,8 +47,9 @@ pending: []u8 = &.{},
 /// Per-head because two heads can have the SAME menu mode open from
 /// DIFFERENT origins (head A entered "leader" from "normal", head B from
 /// "insert" — a shared table would clobber one head's return target with
-/// the other's). Recorded only by `enterMode` (guest-initiated); host-side
-/// save/restore (the picker) uses plain `setMode` and never touches this.
+/// the other's). Recorded only by `enterModeRaw` (reached from
+/// `Ctx.enterMode`, guest-initiated); host-side save/restore (the picker)
+/// uses plain `setModeRaw` and never touches this.
 menu_return: std.StringArrayHashMapUnmanaged([]u8) = .empty,
 /// Scratch for `resolveBindings`/`completions` (which-key rendering) —
 /// per-head so two heads rendering which-key in the same tick never
@@ -89,7 +91,7 @@ focused_pane_gen: u32 = 0,
 
 /// This head's transient/menu stack — the DURABLE record `Ctx.
 /// pushTransient`/`TransientHandle.deinit` push and pop. Distinct from
-/// `menu_return` above (guest `enterMode` bookkeeping, keyed by mode name,
+/// `menu_return` above (guest `enterModeRaw` bookkeeping, keyed by mode name,
 /// no push/pop discipline): this is an explicit LIFO stack a caller must
 /// pop in order, so an out-of-order or missing pop is DETECTABLE
 /// (`hasOpenTransients`) rather than silently corrupting which mode a
@@ -214,30 +216,43 @@ pub fn currentMode(self: *const Head) []const u8 {
     return self.mode;
 }
 
-/// Host-side (or generic) mode set: no menu-return bookkeeping. Abandons any
-/// half-typed chord (a stale `space f` must not combine with the new mode's
-/// next key). Used for buffer-switch restore and host-side save/restore (the
-/// picker), neither of which should poison a menu's return target.
-pub fn setMode(self: *Head, gpa: Allocator, mode: []const u8) Allocator.Error!void {
+/// **MECHANISM, not policy (task #19 item 3 — north-star-plan §2.1/§5
+/// "Mode changes — REVISED").** Host-side (or generic) mode set: no
+/// menu-return bookkeeping. Abandons any half-typed chord (a stale
+/// `space f` must not combine with the new mode's next key). Used for
+/// buffer-switch restore and host-side save/restore (the picker), neither
+/// of which should poison a menu's return target — and, RAW, by
+/// `Ctx.setMode` itself, the ONE place a `*command.Context`-holding caller
+/// should reach this from. Named `setModeRaw` (not plain `setMode`)
+/// PRECISELY so a stray `head.setMode(...)` in new dispatch-path code fails
+/// to COMPILE instead of silently bypassing the door — see `ctx.zig`'s
+/// module doc for the door itself and which call sites legitimately stay
+/// on this raw entry (`Buffers.switchTo`, `System.attachHead`/
+/// `detachHead`, `Pick`'s own save/restore, install-time bootstrap, and
+/// tests that exercise `Head` directly with no `command.Context` in scope).
+pub fn setModeRaw(self: *Head, gpa: Allocator, mode: []const u8) Allocator.Error!void {
     const owned = try gpa.dupe(u8, mode);
     gpa.free(self.mode);
     self.mode = owned;
     try self.setPending(gpa, "");
 }
 
-/// Guest-initiated mode set. Identical to `setMode`, except that entering a
-/// *menu* mode (per `km`'s tables) records THIS HEAD's return target — the
-/// root non-menu mode it came from — so a one-shot menu key can pop back
-/// (see `menuReturn`). Only guests route through here; host-side mode save/
-/// restore uses plain `setMode`, so a restore-into-a-menu never records a
-/// bogus return target.
-pub fn enterMode(self: *Head, gpa: Allocator, km: *const Keymap, mode: []const u8) Allocator.Error!void {
+/// **MECHANISM, not policy** — see `setModeRaw`'s doc; same naming
+/// rationale (`enterModeRaw`, not plain `enterMode`, so `Ctx.enterMode` is
+/// the only spelling that compiles from ordinary dispatch-path code).
+/// Guest-initiated mode set. Identical to `setModeRaw`, except that
+/// entering a *menu* mode (per `km`'s tables) records THIS HEAD's return
+/// target — the root non-menu mode it came from — so a one-shot menu key
+/// can pop back (see `menuReturn`). Only guests route through here (via
+/// `Ctx.enterMode`); host-side mode save/restore uses plain `setModeRaw`,
+/// so a restore-into-a-menu never records a bogus return target.
+pub fn enterModeRaw(self: *Head, gpa: Allocator, km: *const Keymap, mode: []const u8) Allocator.Error!void {
     if (km.isMenuMode(mode) and !std.mem.eql(u8, self.mode, mode)) {
         // If we came from another menu, inherit *its* return target so a chain
         // of menus collapses to a single hop back to the root non-menu mode;
         // otherwise return to exactly where we were.
         const root = self.menuReturn(self.mode) orelse self.mode;
-        const owned_root = try gpa.dupe(u8, root); // dupe before setMode frees self.mode
+        const owned_root = try gpa.dupe(u8, root); // dupe before setModeRaw frees self.mode
         errdefer gpa.free(owned_root);
         const gop = try self.menu_return.getOrPut(gpa, mode);
         if (gop.found_existing) {
@@ -248,7 +263,7 @@ pub fn enterMode(self: *Head, gpa: Allocator, km: *const Keymap, mode: []const u
         }
         gop.value_ptr.* = owned_root;
     }
-    try self.setMode(gpa, mode);
+    try self.setModeRaw(gpa, mode);
 }
 
 /// The mode THIS HEAD should pop `mode` back to (the root non-menu mode it
@@ -259,7 +274,7 @@ pub fn menuReturn(self: *const Head, mode: []const u8) ?[]const u8 {
 }
 
 /// Push a paired transient scope: remember the CURRENT mode as this frame's
-/// return target, enter `mode` (via `enterMode`, so menu-return bookkeeping
+/// return target, enter `mode` (via `enterModeRaw`, so menu-return bookkeeping
 /// still applies), and return the new frame's stack depth — the token
 /// `popTransientMode` verifies before restoring. See `ctx.zig`'s
 /// `Ctx.pushTransient` (the intended caller) and this struct's
@@ -287,7 +302,7 @@ pub fn pushTransientMode(self: *Head, gpa: Allocator, km: *const Keymap, mode: [
     errdefer gpa.free(held);
     try self.transient_stack.append(gpa, .{ .mode = held, .return_to = ret });
     errdefer _ = self.transient_stack.pop();
-    try self.enterMode(gpa, km, mode);
+    try self.enterModeRaw(gpa, km, mode);
     return self.transient_stack.items.len - 1;
 }
 
@@ -309,7 +324,7 @@ pub fn popTransientMode(self: *Head, gpa: Allocator, depth: usize) (Allocator.Er
         gpa.free(frame.mode);
         gpa.free(frame.return_to);
     }
-    try self.setMode(gpa, frame.return_to);
+    try self.setModeRaw(gpa, frame.return_to);
 }
 
 /// Whether this head has a transient pushed but never popped — the
@@ -430,7 +445,7 @@ test "head: setMode/feed/pending are per-head — Keymap holds only tables" {
 
     var h: Head = .empty;
     defer h.deinit(gpa);
-    try h.setMode(gpa, "normal");
+    try h.setModeRaw(gpa, "normal");
     try t.expectEqualStrings("enter-insert", h.lookup(&km, "i").?);
 
     try t.expect((try h.feed(gpa, &km, "space")) == .pending);
@@ -456,7 +471,7 @@ test "head: prefix sequences — a chord resolves; a menu is a prefix, not a mod
 
     var h: Head = .empty;
     defer h.deinit(gpa);
-    try h.setMode(gpa, "normal");
+    try h.setModeRaw(gpa, "normal");
 
     // A single bound key runs immediately.
     {
@@ -510,7 +525,7 @@ test "head: completions — chord next-keys, leaf vs group, deduped, global at t
 
     var h: Head = .empty;
     defer h.deinit(gpa);
-    try h.setMode(gpa, "normal");
+    try h.setModeRaw(gpa, "normal");
 
     // Top level (empty prefix): the first segments, deduped. The three `space …`
     // binds collapse to ONE `space` group; `i` is a leaf; global `C-w` shows at
@@ -576,12 +591,12 @@ test "head: menu return targets are per-head, not shared via the table" {
     var b: Head = .empty;
     defer b.deinit(gpa);
 
-    try a.setMode(gpa, "normal");
-    try a.enterMode(gpa, &km, "leader");
+    try a.setModeRaw(gpa, "normal");
+    try a.enterModeRaw(gpa, &km, "leader");
     try t.expectEqualStrings("normal", a.menuReturn("leader").?);
 
-    try b.setMode(gpa, "insert");
-    try b.enterMode(gpa, &km, "leader");
+    try b.setModeRaw(gpa, "insert");
+    try b.enterModeRaw(gpa, &km, "leader");
     try t.expectEqualStrings("insert", b.menuReturn("leader").?);
 
     // Each head's return target is untouched by the other's entry — the whole
@@ -599,16 +614,16 @@ test "head: menu return targets — guest entry records, nesting collapses to ro
 
     var h: Head = .empty;
     defer h.deinit(gpa);
-    try h.setMode(gpa, "normal");
+    try h.setModeRaw(gpa, "normal");
 
     // Guest enters leader from normal → return target is normal.
-    try h.enterMode(gpa, &km, "leader");
+    try h.enterModeRaw(gpa, &km, "leader");
     try t.expectEqualStrings("leader", h.currentMode());
     try t.expectEqualStrings("normal", h.menuReturn("leader").?);
 
     // Nested: enter leader-file from leader → collapses to the root (normal),
     // not one hop back to leader.
-    try h.enterMode(gpa, &km, "leader-file");
+    try h.enterModeRaw(gpa, &km, "leader-file");
     try t.expectEqualStrings("normal", h.menuReturn("leader-file").?);
 
     // A non-menu mode has no return target.
@@ -623,14 +638,14 @@ test "head: host-side setMode restore does NOT poison menu return targets" {
 
     var h: Head = .empty;
     defer h.deinit(gpa);
-    try h.setMode(gpa, "normal");
-    try h.enterMode(gpa, &km, "leader"); // return target: normal
+    try h.setModeRaw(gpa, "normal");
+    try h.enterModeRaw(gpa, &km, "leader"); // return target: normal
 
     // The picker saves prev="leader", sets "pick" (plain setMode, not a menu),
     // then on close restores "leader" via plain setMode. That restore must not
     // rewrite leader's return target to "pick".
-    try h.setMode(gpa, "pick");
-    try h.setMode(gpa, "leader");
+    try h.setModeRaw(gpa, "pick");
+    try h.setModeRaw(gpa, "leader");
     try t.expectEqualStrings("normal", h.menuReturn("leader").?);
 }
 
@@ -650,8 +665,8 @@ test "head: two heads over one system hold independent mode, chord, pick, and ec
     defer head_b.deinit(gpa);
 
     // Distinct current modes.
-    try head_a.setMode(gpa, "normal");
-    try head_b.setMode(gpa, "insert");
+    try head_a.setModeRaw(gpa, "normal");
+    try head_b.setModeRaw(gpa, "insert");
     try t.expectEqualStrings("normal", head_a.currentMode());
     try t.expectEqualStrings("insert", head_b.currentMode());
 

@@ -21,8 +21,8 @@
 //! fallback chains, and the menu/sticky/locked/resting declarations. Every
 //! method below that used to read `self.mode` now takes the mode as an
 //! explicit parameter and is a PURE function of `(tables, mode, key)` — see
-//! `Head.zig`'s methods (`lookup`, `feed`, `setMode`, `enterMode`, …), which
-//! hold a head's position and call into these pure lookups to move it.
+//! `Head.zig`'s methods (`lookup`, `feed`, `setModeRaw`, `enterModeRaw`, …),
+//! which hold a head's position and call into these pure lookups to move it.
 
 const std = @import("std");
 const Allocator = std.mem.Allocator;
@@ -868,9 +868,10 @@ test "keymap: a locked projection mode refuses to leave for an editing mode" {
 }
 
 // Chord feeding (`feed`/`pending`), which-key resolution (`resolveBindings`/
-// `completions`), and menu return-target tracking (`enterMode`/`menuReturn`)
-// are all HEAD cursor behavior now — see `Head.zig`'s test block for their
-// coverage (including the two-head independence tests this split exists for).
+// `completions`), and menu return-target tracking (`enterModeRaw`/
+// `menuReturn`) are all HEAD cursor behavior now — see `Head.zig`'s test
+// block for their coverage (including the two-head independence tests this
+// split exists for).
 
 test "keymap: keyspec normalization — config writes SPC : / C-x C-f, stores canonical" {
     var buf: [256]u8 = undefined;

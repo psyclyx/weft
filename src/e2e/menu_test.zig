@@ -256,7 +256,11 @@ test "menu: fault injection — an unpaired push is caught by the interaction-bo
     // discipline `Buffers.switchTo`/`Pick.openWith` now follow stomps
     // `head.mode` directly, deliberately never popping — the exact "menu-
     // mode leaks" bug class `ctx.zig`'s "Paired transients" doc names.
-    ed.head.setMode(gpa, "normal") catch unreachable;
+    // Deliberately the RAW mechanism entry, not the door — this line IS the
+    // bug being fault-injected (task #19 item 3: `Head.setModeRaw` is
+    // exactly the escape hatch a reviewer should treat with suspicion
+    // outside the enumerated mechanism sites).
+    ed.head.setModeRaw(gpa, "normal") catch unreachable;
     try t.expect(ed.head.hasOpenTransients()); // leaked: mode moved, stack didn't
 
     // The NEXT real keypress crosses `dispatchSpec`'s boundary. Press
@@ -308,7 +312,12 @@ test "menu: F3 reconcile — a leaf's own setMode-then-resolve mid-handler sees 
         fn run(ctx: *command.Context, data: ?*anyopaque, args: []const command.Value) anyerror!command.Value {
             _ = args;
             const res: *Result = @ptrCast(@alignCast(data.?));
-            try ctx.head.setMode(ctx.gpa, "leaf-target"); // the guest's weft.setMode(X)
+            // task #19 item 3: the guest's `weft.setMode(X)` now reaches
+            // `Head` through the POLICY door too (`wasm_host/keymap.zig`'s
+            // `hSetMode` captures its own `Ctx`) — modeled here the same way.
+            // enterMode, mirroring hSetMode's production door exactly
+            // (degenerates to setMode for a non-menu target like this one).
+            try ctx.capturedCtx().enterMode(ctx.keymap, "leaf-target"); // the guest's weft.setMode(X)
             const c = core.ctx.Ctx.capture(ctx); // the guest's weft.run(<action>) resolving facts
             const mode = c.mergedFacts().mode;
             res.mode_len = @min(mode.len, res.mode_buf.len);

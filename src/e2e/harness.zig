@@ -366,8 +366,13 @@ pub const Editor = struct {
     pub fn bufferName(self: *Editor) []const u8 {
         return self.buffers.active().name;
     }
+    /// Test-harness convenience: seeds `head`'s mode directly, no
+    /// `*command.Context`/dispatch involved (mechanism-not-policy, task #19
+    /// item 3) — distinct from `Head.setModeRaw`/`Ctx.setMode` by NAME, but
+    /// implemented on the raw mechanism since it exists purely to establish
+    /// test fixture state before a scenario drives real dispatch.
     pub fn setMode(self: *Editor, m: []const u8) void {
-        self.head.setMode(self.gpa, m) catch {};
+        self.head.setModeRaw(self.gpa, m) catch {};
     }
 
     /// Lazily create the harness's persistent View (glyph atlas + metrics),
@@ -499,14 +504,16 @@ pub const SecondHead = struct {
     /// `start_mode` seeds this head's starting mode — a head attaching to an
     /// already-configured system starts in ITS resting mode (mirrors
     /// `Buffers.default_mode`/`setResting`'s "a file opened fresh lands in
-    /// the configured mode"), not a bare empty string. Host-side `setMode`
-    /// (not `dispatchSpec`) — establishing where a newly-attached head
-    /// starts is not itself a keystroke.
+    /// the configured mode"), not a bare empty string. mechanism-not-policy
+    /// (task #19 item 3), mirroring `System.attachHead`: raw `setModeRaw`
+    /// (not `dispatchSpec`/`Ctx.setMode`) — establishing where a
+    /// newly-attached head starts is not itself a keystroke, and there is
+    /// no `*command.Context` for THIS head yet to capture a `Ctx` from.
     pub fn init(self: *SecondHead, ed: *Editor, start_mode: []const u8) !void {
         self.head = .empty;
         self.ctx = ed.ctx.*; // same buffers/commands/keymap/caps/actions — only `.head` differs
         self.ctx.head = &self.head;
-        try self.head.setMode(ed.gpa, start_mode);
+        try self.head.setModeRaw(ed.gpa, start_mode);
     }
 
     pub fn deinit(self: *SecondHead, gpa: Allocator) void {

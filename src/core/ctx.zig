@@ -18,49 +18,64 @@
 //! exactly what makes `capture` cheap: no allocation, a handful of borrowed
 //! slices, one pointer.
 //!
-//! **The POLICY door, not the mechanism.** `Head.setMode`/`Head.enterMode`
-//! stay the mechanism (unchanged, still the thing that actually mutates
-//! `Head.mode`) — see north-star-plan §5 "Mode changes — REVISED": the
-//! user's call was that the imperative call STAYS, what changes is where it
-//! lives. `Ctx.setMode` is the ONLY door core/host code should call it
-//! through going forward: it requires a `Ctx`, and a `Ctx` requires a live
+//! **The POLICY door, not the mechanism.** `Head.setModeRaw`/
+//! `Head.enterModeRaw` stay the mechanism (unchanged, still the thing that
+//! actually mutates `Head.mode`) — see north-star-plan §5 "Mode changes —
+//! REVISED": the user's call was that the imperative call STAYS, what
+//! changes is where it lives. `Ctx.setMode`/`Ctx.enterMode` are the ONLY
+//! door core/host/guest-membrane code should call it through going
+//! forward: they require a `Ctx`, and a `Ctx` requires a live
 //! `*command.Context` to `capture` from. Code with no `*command.Context` in
 //! scope — a raw host-import trampoline reached from a background poll, a
 //! timer, a proc-fill callback — has no local binding to call `capture` on
 //! in the first place, so routing mode changes through this door is what
 //! makes "shell forces normal mode from a fill" (the historical leak class,
 //! `doc/mode-leak-class.md`) structurally awkward to reintroduce, not
-//! merely discouraged by convention. See the bottom of this file
+//! merely discouraged by convention. **`Raw` is the name, not a convention**
+//! (task #19 item 3): `Head.setMode`/`Head.enterMode` no longer EXIST — only
+//! `setModeRaw`/`enterModeRaw` do — so a stray `head.setMode(...)` typed
+//! into new dispatch-path code fails to COMPILE instead of silently
+//! bypassing the door; a reviewer seeing `.setModeRaw(` in a diff outside
+//! the small, enumerated mechanism-site list (below) has an immediate,
+//! not-merely-conventional reason to ask why. See the bottom of this file
 //! ("BACKGROUND CODE CANNOT — a worked, honest example") for exactly how
-//! far that guarantee reaches today and where it does not yet (W2b judgment
-//! call — the escape hatch is named, not hidden).
+//! far the "background code cannot reach the door" guarantee reaches today
+//! and where it does not yet (W2b judgment call — the escape hatch is
+//! named, not hidden).
 //!
-//! **Migration status (W2b, updated task #19 item 2):** `Head.setMode`'s
-//! ~150 existing call sites are NOT bulk-migrated — only `dispatch.zig`'s
-//! OWN menu machinery (the auto-enter branch where a bound command's name
-//! IS a declared menu mode, its matching leaf auto-pop, and `menu-escape`)
-//! now goes through `pushTransient`/the paired pop. Guest `weft.setMode`
-//! (every plugin's own menu entry — `git-push-menu`, `op-pending`, …) and
-//! `builtins.zig` are explicitly, deliberately still on plain `enterMode` —
-//! seeing this migration through them is real future work, not an
-//! oversight (see `dispatch.zig`'s module doc for exactly which real
-//! production menus are on which path today). `Buffers.switchTo`'s mode
-//! restore and `Pick.zig`'s save/restore both stay on their own bypassing
-//! `setMode` too (that's THEIR nuanced restore semantics, unchanged) but
-//! now each drops any open transient stack first (`Head.dropAllTransients`)
-//! so bypassing never leaves a stale frame behind — the one piece of this
-//! migration that reaches them without moving them onto the door itself.
-//! What IS real and load-bearing: the door exists, is tested end-to-end
-//! (capture → setMode → Head.mode changes; menu-enter → pushTransient →
-//! Head.mode changes, through the REAL `dispatch.zig` production path —
-//! `e2e/menu_test.zig`), and is the documented target for every NEW
-//! dispatch-path mode change.
+//! **Migration status (task #19 item 3, DONE — supersedes item 2's note
+//! below):** every POLICY call site now goes through the door. Three
+//! classes were migrated: (a) the ONE guest membrane chokepoint every
+//! plugin's `weft.setMode`/`weft.exitToResting` funnels through
+//! (`wasm_host/keymap.zig`'s `hSetMode`/`hExitToResting` — this single
+//! change puts every guest plugin's mode change on the door WITHOUT
+//! touching any of the ~15 guest `.zig` files that call `weft.setMode`
+//! directly, since they never touched `Head` in the first place); (b) host
+//! command handlers with a live `*command.Context` (`builtins.zig`'s
+//! `cSetMode`, `dispatch.zig`'s `menuEscapeHandler` legacy fallback + the
+//! sticky-menu-reenter/leaf-auto-pop-legacy-fallback branches inside
+//! `dispatchSpec`); (c) MECHANISM call sites are the deliberate residual —
+//! `Buffers.switchTo`'s mode restore, `System.attachHead`/`detachHead`,
+//! `Pick.zig`'s own save/restore, and install-time bootstrap
+//! (`builtins.install`, `Session.init`) — each has no `*command.Context` to
+//! capture from (bootstrap) or owns nuanced restore semantics the door
+//! doesn't model (buffer/system/pick save-restore), and each is now marked
+//! `mechanism-not-policy` at the call site. `Buffers.switchTo`'s mode
+//! restore and `Pick.zig`'s save/restore both drop any open transient stack
+//! first (`Head.dropAllTransients`) so bypassing never leaves a stale frame
+//! behind — unchanged from item 2. What IS real and load-bearing: the door
+//! exists, is tested end-to-end (capture → setMode → Head.mode changes;
+//! menu-enter → pushTransient → Head.mode changes, through the REAL
+//! `dispatch.zig` production path — `e2e/menu_test.zig`), now has REAL
+//! callers on the guest-membrane and host-command-handler paths (not just
+//! its own tests), and the mechanism entry it calls through is
+//! UNREACHABLE under its old name.
 //!
 //! **F3, RESOLVED (task #19 item 2, corrected on review send-back):**
 //! "the innermost transient frame's mode agrees with `Head.currentMode()`"
 //! holds BY CONSTRUCTION AT DISPATCH BOUNDARIES and at the two host bypass
 //! sites (`Buffers.switchTo`, `Pick.openWith` — both now drop the whole
-//! transient stack before their raw `setMode`, `Head.dropAllTransients`).
+//! transient stack before their raw `setModeRaw`, `Head.dropAllTransients`).
 //! It does NOT hold, and was never required to, MID-HANDLER: a guest
 //! command running under an open menu can legitimately call
 //! `weft.setMode(X)` and then — still inside that same handler, before
@@ -296,24 +311,25 @@ pub const Ctx = struct {
 
     /// The POLICY door for a mode change (§2.1, §5 "Mode changes —
     /// REVISED"). Mechanism unchanged: this calls straight through to
-    /// `Head.setMode`. What's new is that only code holding a `Ctx` — which
-    /// requires a live `*command.Context` to `capture` from — can reach
-    /// this door at all. See the module doc's migration-status note: this
-    /// is the target for new dispatch-path mode changes; the ~150 existing
-    /// direct `Head.setMode` call sites are a named, deliberate residual.
+    /// `Head.setModeRaw`. What's new is that only code holding a `Ctx` —
+    /// which requires a live `*command.Context` to `capture` from — can
+    /// reach this door at all. See the module doc's migration-status note:
+    /// this is the ONLY spelling for a dispatch-path mode change now — the
+    /// mechanism it calls through no longer exists under a bare `setMode`
+    /// name (task #19 item 3).
     pub fn setMode(self: *const Ctx, target: []const u8) Allocator.Error!void {
-        try self.host.head.setMode(self.host.gpa, target);
+        try self.host.head.setModeRaw(self.host.gpa, target);
     }
 
-    /// Guest-shaped variant: routes through `Head.enterMode` (records a
+    /// Guest-shaped variant: routes through `Head.enterModeRaw` (records a
     /// menu return target when `target` is a declared menu mode) instead
-    /// of the bare host-side `setMode`. See `Head.enterMode`'s doc for the
-    /// save/restore distinction this preserves.
+    /// of the bare host-side `setModeRaw`. See `Head.enterModeRaw`'s doc
+    /// for the save/restore distinction this preserves.
     pub fn enterMode(self: *const Ctx, km: *const @import("Keymap.zig"), target: []const u8) Allocator.Error!void {
-        try self.host.head.enterMode(self.host.gpa, km, target);
+        try self.host.head.enterModeRaw(self.host.gpa, km, target);
     }
 
-    /// Push a transient/menu scope, entering `mode` via `Head.enterMode`.
+    /// Push a transient/menu scope, entering `mode` via `Head.enterModeRaw`.
     /// Returns a handle whose `.deinit()` pops it (restores the pre-push
     /// mode) — the structural pairing §2.1 asks for. See the module doc's
     /// "Paired transients" section for the LIFO/leak-detection contract.
@@ -437,7 +453,7 @@ const TestEnv = struct {
             .quit = &self.quit,
             .head = &self.head,
         };
-        try self.head.setMode(gpa, "normal");
+        try self.head.setModeRaw(gpa, "normal"); // mechanism-not-policy: test fixture bootstrap
         return self;
     }
 
@@ -525,7 +541,7 @@ test "ctx: epoch is the shared Container's TRUE per-mutation counter — task #1
     // coarse "anything in the system changed" flag (the property
     // `System.generation` — removed — never actually delivered, since
     // nothing wired it to `Ctx.capture` in the first place).
-    try env.head.setMode(gpa, "insert");
+    try env.head.setModeRaw(gpa, "insert");
     try env.buffers.active().editor.insertText(gpa, "hi");
     const c3 = Ctx.capture(&env.ctx);
     try t.expectEqual(e2, c3.epoch);

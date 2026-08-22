@@ -238,7 +238,7 @@ test "which-key: on_menu builds a corner surface from the current menu's binding
     try env.keymap.markMenuMode(gpa, "leader-file");
     try env.keymap.bind(gpa, "leader", "f", "leader-file", Keymap.prio_plugin, "test");
     try env.keymap.bind(gpa, "leader", "g", "git-status", Keymap.prio_plugin, "test");
-    try env.head.setMode(gpa, "leader");
+    try env.head.setModeRaw(gpa, "leader");
 
     // Core fires on_menu(open) at the frame boundary; the guest reads the
     // current menu's bindings and paints a surface.
@@ -535,7 +535,7 @@ test "wasm plugin: a background entry's head-gated import traps (task #19 item 4
     var env: Env = undefined;
     try Env.init(gpa, &env);
     defer env.deinit(gpa);
-    try env.head.setMode(gpa, "start"); // an observable baseline the trap must not move
+    try env.head.setModeRaw(gpa, "start"); // an observable baseline the trap must not move
 
     var engine = try wasm.Engine.init();
     defer engine.deinit();
@@ -555,7 +555,7 @@ test "wasm plugin: the SAME head-gated import works from a dispatching entry, an
     var env: Env = undefined;
     try Env.init(gpa, &env);
     defer env.deinit(gpa);
-    try env.head.setMode(gpa, "start");
+    try env.head.setModeRaw(gpa, "start");
 
     var engine = try wasm.Engine.init();
     defer engine.deinit();
@@ -683,7 +683,7 @@ test "wasm plugin: demo-config composes commands + binds a key (config surface)"
     defer cfg.deinit();
 
     // init() bound C-d → dup-up through the config surface.
-    try env.head.setMode(gpa, "default");
+    try env.head.setModeRaw(gpa, "default");
     try t.expectEqualStrings("dup-up", env.keymap.lookup(env.head.currentMode(), "C-d").?);
 
     const ed = &env.buffers.active().editor;

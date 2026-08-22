@@ -114,7 +114,10 @@ pub const Session = struct {
         // too — mirroring exactly what the old direct
         // `core.builtins.install(..., &self.head, ...)` call used to do
         // before `System.create` took over installing the builtins.
-        try self.head.setMode(gpa, self.system.default_head.currentMode());
+        // mechanism-not-policy (task #19 item 3): session bootstrap, before
+        // `self.cmd_ctx` (built two lines below) exists to capture a `Ctx`
+        // from.
+        try self.head.setModeRaw(gpa, self.system.default_head.currentMode());
         self.menu_overlay = .{};
         self.cmd_ctx = self.system.contextFor(&self.head);
         try ui_mesh.declareSlots(&self.system.container);

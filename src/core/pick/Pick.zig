@@ -94,7 +94,7 @@ pub fn deinit(self: *Pick, gpa: Allocator) void {
 }
 
 /// Cancel an active pick WITHOUT the ordinary `close()`'s mode-restore side
-/// effect (`ctx.head.setMode(prev_mode)`/menu-return popping) and WITHOUT
+/// effect (`ctx.head.setModeRaw(prev_mode)`/menu-return popping) and WITHOUT
 /// wiping learned frecency (unlike `deinit`). A no-op when nothing is
 /// active. This is `clear`'s exact cleanup, made reachable without a
 /// `command.Context` — for a caller that is about to determine the head's
@@ -195,15 +195,16 @@ pub fn openWith(
     try self.refilter(gpa);
     const prev = try gpa.dupe(u8, ctx.head.currentMode());
     errdefer gpa.free(prev);
-    // Pick bypasses the keymap dispatch site (this file's module doc, and
-    // `close`'s own comment below) — `setMode` here is a raw overwrite, not
-    // a `Head.popTransientMode` pop. Same reasoning as `Buffers.switchTo`
+    // mechanism-not-policy (task #19 item 3): Pick bypasses the keymap
+    // dispatch site (this file's module doc, and `close`'s own comment
+    // below) — `setModeRaw` here is a raw overwrite, not a
+    // `Head.popTransientMode` pop. Same reasoning as `Buffers.switchTo`
     // (task #19 item 2): any transient/menu frame still open named a return
     // target in the mode we're leaving for "pick", which `close` will
     // restore from `prev` (a plain string) rather than by popping — so drop
     // the stack now instead of leaving it to outlive its scope.
     ctx.head.dropAllTransients(gpa);
-    try ctx.head.setMode(gpa, "pick");
+    try ctx.head.setModeRaw(gpa, "pick");
     // Commit — infallible from here, so the acceptor/source become
     // live only once the pick is fully open.
     self.acceptor = acceptor;
@@ -280,17 +281,19 @@ fn close(self: *Pick, ctx: *command.Context) !void {
     const prev = try ctx.gpa.dupe(u8, self.prev_mode);
     defer ctx.gpa.free(prev);
     self.clear(ctx.gpa);
+    // mechanism-not-policy (task #19 item 3): Pick's own save/restore — see
+    // `openWith`'s comment above for why this bypasses the door.
     // If the pick was opened from a menu (e.g. the palette from leader),
     // restoring prev_mode would leave the user stuck in the menu. Pop to the
     // menu's one-shot return target instead — the pick bypasses the keymap
     // dispatch site, so this is where that class of stickiness is fixed.
     if (ctx.keymap.isMenuMode(prev)) {
         if (ctx.head.menuReturn(prev)) |ret| {
-            try ctx.head.setMode(ctx.gpa, ret);
+            try ctx.head.setModeRaw(ctx.gpa, ret);
             return;
         }
     }
-    try ctx.head.setMode(ctx.gpa, prev);
+    try ctx.head.setModeRaw(ctx.gpa, prev);
 }
 
 fn frecOf(self: *const Pick, text: []const u8) Frec {

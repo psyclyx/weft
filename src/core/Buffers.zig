@@ -218,13 +218,19 @@ pub fn switchTo(self: *Buffers, gpa: Allocator, id: Id, head: *Head, keymap: *co
     // ever reach again — the exact silent leak the pairing exists to kill).
     head.dropAllTransients(gpa);
     self.prev_id = self.active_id;
+    // mechanism-not-policy (task #19 item 3): this is the buffer-switch
+    // resting-mode RESTORE, `switchTo`'s own nuanced semantics (see this
+    // function's module doc) — no `*command.Context` to capture a `Ctx`
+    // from at this layer, and the door doesn't model "restore mode X
+    // because THIS buffer remembers it" anyway. Raw mechanism entry
+    // (`Head.setModeRaw`), by design.
     if (target.mode.len > 0) {
-        try head.setMode(gpa, target.mode);
+        try head.setModeRaw(gpa, target.mode);
     } else if (self.default_mode.len > 0) {
         // A fresh buffer DECLARES its resting mode (the config's base editing
         // mode) rather than leaving it empty — so exiting a transient sub-mode
         // always has a mode to return to, with no core-baked "normal".
-        try head.setMode(gpa, self.default_mode);
+        try head.setModeRaw(gpa, self.default_mode);
         target.mode = try gpa.dupe(u8, self.default_mode);
     }
     self.active_id = id;
@@ -288,22 +294,22 @@ test "buffers: switchTo remembers the base mode + skips menus; back returns" {
     const code = try bufs.create(gpa, "code.zig");
     const magit = try bufs.create(gpa, "*magit*");
 
-    try head.setMode(gpa, "normal");
+    try head.setModeRaw(gpa, "normal");
     try bufs.switchTo(gpa, code, &head, &km);
 
     // Leaving `code` mid-VISUAL remembers its BASE mode (normal), not visual.
-    try head.setMode(gpa, "visual");
+    try head.setModeRaw(gpa, "visual");
     try bufs.switchTo(gpa, magit, &head, &km);
     try t.expectEqualStrings("normal", bufs.get(code).?.mode);
 
     // Leaving `magit` in magit mode remembers magit.
-    try head.setMode(gpa, "magit");
+    try head.setModeRaw(gpa, "magit");
     try bufs.switchTo(gpa, code, &head, &km);
     try t.expectEqualStrings("magit", bufs.get(magit).?.mode);
 
     // A switch made from inside a MENU (git-status while `leader-git` is up)
     // must NOT stamp the buffer being left with the menu mode.
-    try head.setMode(gpa, "leader-git");
+    try head.setModeRaw(gpa, "leader-git");
     try bufs.switchTo(gpa, magit, &head, &km); // restores magit's own mode
     try t.expectEqualStrings("normal", bufs.get(code).?.mode); // still normal, not leader-git
     try t.expectEqualStrings("magit", head.currentMode());

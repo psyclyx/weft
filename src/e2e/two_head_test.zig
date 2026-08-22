@@ -72,14 +72,17 @@ fn noop(ctx: *command.Context, data: ?*anyopaque, args: []const command.Value) a
 fn enterInsert(ctx: *command.Context, data: ?*anyopaque, args: []const command.Value) anyerror!command.Value {
     _ = data;
     _ = args;
-    ctx.head.setMode(ctx.gpa, "insert") catch {};
+    // POLICY door (task #19 item 3): an ordinary bound command handler has a
+    // live `ctx` — this is the shape `ctx.zig`'s module doc's worked example
+    // gives, exercised here through REAL dispatch (`ed.press`).
+    ctx.capturedCtx().setMode("insert") catch {};
     return .nil;
 }
 
 fn enterNormal(ctx: *command.Context, data: ?*anyopaque, args: []const command.Value) anyerror!command.Value {
     _ = data;
     _ = args;
-    ctx.head.setMode(ctx.gpa, "normal") catch {};
+    ctx.capturedCtx().setMode("normal") catch {};
     return .nil;
 }
 
@@ -99,7 +102,7 @@ fn initModal(gpa: std.mem.Allocator, ed: *Editor) !void {
     try ed.keymap.bind(gpa, "normal", "l", "cursor-right", core.Keymap.prio_config, "test");
     try ed.keymap.bind(gpa, "insert", "Escape", "enter-normal", core.Keymap.prio_config, "test");
     try ed.keymap.setTextCommand(gpa, "insert", "insert-text");
-    try ed.head.setMode(gpa, "normal");
+    try ed.head.setModeRaw(gpa, "normal");
 }
 
 test "two heads: A mid-chord does not touch B's mode/pending, and B types in insert" {
@@ -152,7 +155,7 @@ test "two heads: A in a menu mode does not move B out of normal" {
     var ed: Editor = undefined;
     try Editor.init(gpa, &ed);
     defer ed.deinit();
-    try ed.head.setMode(gpa, "normal");
+    try ed.head.setModeRaw(gpa, "normal");
 
     // A magit-style special mode: locked (no text command — typing doesn't
     // fall through to self-insert) AND reachable as a one-shot menu, the

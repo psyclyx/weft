@@ -271,12 +271,12 @@ test "menu overlay: drilling into a submenu doesn't re-delay once the popup is u
     const delay: u64 = 200;
 
     // Normal: nothing open.
-    try head.setMode(gpa, "normal");
+    try head.setModeRaw(gpa, "normal");
     _ = mo.update(&head, &km, &plugins, 0, delay);
     try t.expect(!mo.open and !mo.shown);
 
     // Enter leader at t=100: open, not yet shown (0 < delay).
-    try head.setMode(gpa, "leader");
+    try head.setModeRaw(gpa, "leader");
     _ = mo.update(&head, &km, &plugins, 100, delay);
     try t.expect(mo.open and !mo.shown);
 
@@ -287,7 +287,7 @@ test "menu overlay: drilling into a submenu doesn't re-delay once the popup is u
     // Drill into leader-file at t=360: the idle timer is continuous (measured
     // from the first menu entry, t=100), so 360−100 ≥ delay → the submenu hint
     // shows THIS frame, no re-delay. This is the bug fix.
-    try head.setMode(gpa, "leader-file");
+    try head.setModeRaw(gpa, "leader-file");
     _ = mo.update(&head, &km, &plugins, 360, delay);
     try t.expect(mo.shown);
 }
@@ -307,9 +307,9 @@ test "menu overlay: entering a menu from a non-menu still waits the idle delay" 
     const delay: u64 = 200;
 
     // Fresh entry from normal: the timer starts now — the first popup waits.
-    try head.setMode(gpa, "normal");
+    try head.setModeRaw(gpa, "normal");
     _ = mo.update(&head, &km, &plugins, 1000, delay);
-    try head.setMode(gpa, "leader-file");
+    try head.setModeRaw(gpa, "leader-file");
     _ = mo.update(&head, &km, &plugins, 1000, delay);
     try t.expect(mo.open and !mo.shown);
     _ = mo.update(&head, &km, &plugins, 1150, delay); // 150 < delay
@@ -318,10 +318,10 @@ test "menu overlay: entering a menu from a non-menu still waits the idle delay" 
     try t.expect(mo.shown);
 
     // Leaving menus entirely closes the overlay; a later re-entry starts fresh.
-    try head.setMode(gpa, "normal");
+    try head.setModeRaw(gpa, "normal");
     _ = mo.update(&head, &km, &plugins, 1300, delay);
     try t.expect(!mo.open and !mo.shown);
-    try head.setMode(gpa, "leader");
+    try head.setModeRaw(gpa, "leader");
     _ = mo.update(&head, &km, &plugins, 1300, delay);
     try t.expect(!mo.shown); // fresh timer, not instant
 }
@@ -337,7 +337,7 @@ test "menu overlay: F1 forces the popup immediately, bypassing the delay" {
     defer plugins.deinit(gpa);
 
     var mo: MenuOverlay = .{ .which_key_now = true }; // F1 pressed
-    try head.setMode(gpa, "leader");
+    try head.setModeRaw(gpa, "leader");
     _ = mo.update(&head, &km, &plugins, 5, 10_000);
     try t.expect(mo.shown); // shown despite 5 ≪ delay
     try t.expect(!mo.which_key_now); // the flag was consumed
@@ -354,7 +354,7 @@ test "menu overlay: F1 peeks the CURRENT (non-menu) mode; no forced leader; togg
     // "normal" is NOT a menu mode; F1 must still reveal ITS keys — the old
     // behavior force-entered a hardcoded "leader" instead of showing the level
     // you're at (the magit-style "wrong menu" jank).
-    try head.setMode(gpa, "normal");
+    try head.setModeRaw(gpa, "normal");
 
     var mo: MenuOverlay = .{ .which_key_now = true }; // F1
     _ = mo.update(&head, &km, &plugins, 5, 10_000);
@@ -378,14 +378,14 @@ test "menu overlay: leaving the peeked mode ends the forced peek" {
     defer head.deinit(gpa);
     var plugins: std.ArrayList(*core.wasm_abi.WasmPlugin) = .empty;
     defer plugins.deinit(gpa);
-    try head.setMode(gpa, "normal");
+    try head.setModeRaw(gpa, "normal");
 
     var mo: MenuOverlay = .{ .which_key_now = true }; // F1 peeks normal
     _ = mo.update(&head, &km, &plugins, 5, 10_000);
     try t.expect(mo.forced and mo.shown);
 
     // Switch to another non-menu mode: the peek ends (no lingering overlay).
-    try head.setMode(gpa, "insert");
+    try head.setModeRaw(gpa, "insert");
     _ = mo.update(&head, &km, &plugins, 20, 10_000);
     try t.expect(!mo.forced);
     try t.expect(!mo.open);
@@ -404,7 +404,7 @@ test "menu overlay: idle outside any menu is a stable state — no dirty every c
     try km.markMenuMode(gpa, "leader");
     var plugins: std.ArrayList(*core.wasm_abi.WasmPlugin) = .empty;
     defer plugins.deinit(gpa);
-    try head.setMode(gpa, "normal");
+    try head.setModeRaw(gpa, "normal");
 
     var mo: MenuOverlay = .{};
     const dirty1 = mo.update(&head, &km, &plugins, 0, 200);
@@ -418,6 +418,6 @@ test "menu overlay: idle outside any menu is a stable state — no dirty every c
 
     // A real transition (entering a menu) still reports dirty, proving the
     // fix didn't just make everything report `false`.
-    try head.setMode(gpa, "leader");
+    try head.setModeRaw(gpa, "leader");
     try t.expect(mo.update(&head, &km, &plugins, 2100, 200));
 }

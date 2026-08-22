@@ -126,7 +126,10 @@ fn cSetMode(ctx: *Context, args: struct { mode: []const u8 }) anyerror!Value {
     // A locked projection mode (magit/git-view) refuses to switch to a different
     // editing mode — the read-only-buffer mode pin (see Keymap.mayLeaveLocked).
     if (!ctx.keymap.mayLeaveLocked(ctx.head.currentMode(), args.mode)) return ok;
-    try ctx.head.setMode(ctx.gpa, args.mode);
+    // THE POLICY DOOR (task #19 item 3): this is a bound command handler —
+    // it HAS a live `*command.Context`, so it captures a `Ctx` and changes
+    // mode through `Ctx.setMode`, not the raw `Head.setModeRaw` mechanism.
+    try ctx.capturedCtx().setMode(args.mode);
     return ok;
 }
 
@@ -343,7 +346,10 @@ pub fn install(gpa: std.mem.Allocator, commands: *command.Commands, keymap: *@im
     // config can rebind these at the higher config tier. (The picker + which-key
     // nav binds, which only matter once a config's UI is up, are config data —
     // defaults.js. This is the modeless floor, not app policy.)
-    try head.setMode(gpa, "default");
+    // mechanism-not-policy (task #19 item 3): install-time bootstrap, before
+    // any `*command.Context` exists to capture a `Ctx` from — the raw
+    // mechanism entry (`Head.setModeRaw`) is the only door reachable here.
+    try head.setModeRaw(gpa, "default");
     const binds = [_][2][]const u8{
         .{ "BackSpace", "delete-backward" },
         .{ "Delete", "delete-forward" },

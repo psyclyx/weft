@@ -1226,7 +1226,7 @@ test "quickjs: config.js drives the weft ABI — binds a key and echoes" {
     try evalConfig(&engine, &env.ctx, null, null, null, cfg);
 
     // The JS ran real logic (string concat + arithmetic) and reached the host:
-    try env.head.setMode(gpa, "normal");
+    try env.head.setModeRaw(gpa, "normal");
     try t.expectEqualStrings("cursor-down", env.keymap.lookup(env.head.currentMode(), "j").?);
     try t.expectEqualStrings("cursor-up", env.keymap.lookup(env.head.currentMode(), "k").?);
     try t.expectEqualStrings("config loaded (2 keys)", env.head.echo.items);
@@ -1259,7 +1259,7 @@ test "quickjs: weft.use includes a shared bindings module from the config dir" {
     ;
     try evalConfig(&engine, &env.ctx, null, null, dir, cfg);
 
-    try env.head.setMode(gpa, "pick");
+    try env.head.setModeRaw(gpa, "pick");
     try t.expectEqualStrings("pick-accept", env.keymap.lookup(env.head.currentMode(), "Return").?); // from the include
     try t.expectEqualStrings("pick-prev", env.keymap.lookup(env.head.currentMode(), "Down").?); // config override won
 }
@@ -1310,7 +1310,7 @@ test "quickjs: weft.action + weft.provide wire the pick dispatch layer" {
     // the key resolves to the action name through the normal keymap door.
     try t.expect(env.commands.resolve("eval") != null);
     try t.expect(env.ctx.actions.isAction("eval"));
-    try env.head.setMode(gpa, "normal");
+    try env.head.setModeRaw(gpa, "normal");
     try t.expectEqualStrings("eval", env.keymap.lookup(env.head.currentMode(), "space").?);
 
     // The `when` predicates crossed the JS→host membrane intact: eval resolves
@@ -1535,7 +1535,7 @@ test "quickjs: weft.plugin loads a real .wasm, then its command runs" {
     // The plugin loaded and registered its command; the config's bind took.
     try t.expect(loader.held != null);
     try t.expect(env.commands.find("duplicate-line") != null);
-    try env.head.setMode(gpa, "normal");
+    try env.head.setModeRaw(gpa, "normal");
     try t.expectEqualStrings("duplicate-line", env.keymap.lookup(env.head.currentMode(), "D").?);
 
     // And the command actually runs through the membrane: duplicate a line.
@@ -1618,7 +1618,7 @@ test "quickjs: deferred load — weft.set before the plugin line reaches its ini
     try t.expect(loader.held != null);
     try t.expect(env.commands.find("pair-tick") != null);
     try t.expect(env.commands.find("pair-paren") == null);
-    try env.head.setMode(gpa, "insert");
+    try env.head.setModeRaw(gpa, "insert");
     try t.expectEqualStrings("pair-tick", env.keymap.lookup(env.head.currentMode(), "grave").?);
 
     // And it runs through the membrane: inserts the configured backtick pair.
@@ -1650,11 +1650,11 @@ test "quickjs: weft.menu declares a submenu the leader tree enters (doom-style)"
     try t.expect(env.keymap.isMenuMode("leader-file"));
 
     // In the leader menu, "f" resolves to the submenu name (a group entry).
-    try env.head.setMode(gpa, "leader");
+    try env.head.setModeRaw(gpa, "leader");
     try t.expectEqualStrings("leader-file", env.keymap.lookup(env.head.currentMode(), "f").?);
 
     // Inside the submenu: its own keys bind, and Escape/C-g leave via menu-escape.
-    try env.head.setMode(gpa, "leader-file");
+    try env.head.setModeRaw(gpa, "leader-file");
     try t.expectEqualStrings("save", env.keymap.lookup(env.head.currentMode(), "s").?);
     try t.expectEqualStrings("menu-escape", env.keymap.lookup(env.head.currentMode(), "Escape").?);
     try t.expectEqualStrings("menu-escape", env.keymap.lookup(env.head.currentMode(), "C-g").?);
@@ -1821,7 +1821,7 @@ test "quickjs: reconcile — reapplying the identical config is a verified no-op
     defer m1.destroy();
     var actx: manifest_mod.Manifest.ApplyCtx = .{ .ctx = &env.ctx, .loader = null, .config = null };
     try m1.apply(gpa, &actx);
-    try env.head.setMode(gpa, "normal");
+    try env.head.setModeRaw(gpa, "normal");
     try t.expectEqualStrings("cursor-down", env.keymap.lookup(env.head.currentMode(), "j").?);
     try t.expectEqualStrings("hello", env.head.echo.items);
 

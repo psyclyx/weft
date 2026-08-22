@@ -906,7 +906,7 @@ test "buffers: switch restores modes, close/create keep the set sane" {
     defer host.deinit(gpa);
     const run = core.command.run;
 
-    try host.head.setMode(gpa, "normal");
+    try host.head.setModeRaw(gpa, "normal");
     try t.expectEqual(@as(usize, 1), host.buffers.count());
     const scratch_id = host.buffers.active().id;
 
@@ -914,7 +914,7 @@ test "buffers: switch restores modes, close/create keep the set sane" {
     _ = try run(&host.commands, &host.ctx, "buffer-create", &.{.{ .string = "*tool*" }});
     try t.expectEqual(@as(usize, 2), host.buffers.count());
     try t.expectEqualStrings("*tool*", host.buffers.active().name);
-    try host.head.setMode(gpa, "magit");
+    try host.head.setModeRaw(gpa, "magit");
 
     // Switching away saves "magit" on the tool buffer and restores the
     // scratch buffer's "normal"; switching back restores "magit".
@@ -961,12 +961,12 @@ test "buffers: a fresh buffer opens in default_mode — a tool mode never leaks"
     const run = core.command.run;
 
     // The config base editing mode, captured once.
-    try host.head.setMode(gpa, "normal");
+    try host.head.setModeRaw(gpa, "normal");
     try host.buffers.setDefaultMode(gpa, "normal");
 
     // Enter a tool buffer and put it in its own (tool) mode, as dired/magit do.
     _ = try run(&host.commands, &host.ctx, "buffer-create", &.{.{ .string = "*dired*" }});
-    try host.head.setMode(gpa, "dired");
+    try host.head.setModeRaw(gpa, "dired");
     try t.expectEqualStrings("dired", host.head.currentMode());
 
     // Open a file FROM the tool buffer — a fresh buffer. Structurally it must
