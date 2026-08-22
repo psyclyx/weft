@@ -102,6 +102,24 @@ pub fn hasPerm(id: anytype, comptime perm: Perm) bool {
     return id.perms[@intFromEnum(perm)];
 }
 
+/// `id`'s currently-possessed `Limit` for `perm` (W4 slice 2, task #8) — the
+/// read side `wasm_host/fs.zig`'s split bodies consult AFTER `hasPerm`
+/// already confirmed possession. Same duck-typed `anytype`/degrade story as
+/// `hasPerm`: no table wired (`id.grant_table == null`, every pre-W4
+/// construction and every test that doesn't opt in) → `.none` — the fs
+/// bodies' existing cwd-relative, unconfined behavior, byte-identical to
+/// before this slice (mintGrantHandles never sets anything but `.none` for a
+/// boolean-derived grant either, so a real System degrades the same way
+/// until something actually mints a limited row). Deliberately does NOT
+/// re-check possession itself — a caller that hasn't already gated on
+/// `hasPerm` shouldn't be asking "what's the limit" at all.
+pub fn limitFor(id: anytype, comptime perm: Perm) grants_mod.Limit {
+    if (id.grant_table) |table| {
+        return table.limitFor(id.grant_handles[@intFromEnum(perm)]);
+    }
+    return .none;
+}
+
 /// The wasm-specific half of denial: format + raise the trap. Split out of
 /// `requirePerm` so a SPLIT handler's semantic body (which embeds `hasPerm`
 /// itself — see e.g. `fs.zig`'s `fsRead`) can call this directly from its
@@ -116,9 +134,35 @@ pub fn hasPerm(id: anytype, comptime perm: Perm) bool {
 pub fn trapPermDenied(p: *WasmPlugin, caller: *wasm.Caller, comptime perm: Perm) void {
     const reason: []const u8 = if (p.grant_table) |table| switch (table.reasonFor(p.grant_handles[@intFromEnum(perm)])) {
         .revoked => "revoked",
-        .never_granted, .ok => "not requested in describe()",
+        .scope_expired => "scope expired",
+        // `.ok`/`.never_granted` are the only reasons `hasPerm`'s FALSE result
+        // can actually correspond to when no limit is in play (this function
+        // is only ever called after `hasPerm` already said no); `.out_of_limit`
+        // is never `reasonFor`'s answer (it doesn't inspect paths — see
+        // `grants.Reason`'s doc) but the switch must stay exhaustive over the
+        // shared enum, so it's bucketed with the same wording, defensively.
+        .never_granted, .ok, .out_of_limit => "not requested in describe()",
     } else "not requested in describe()";
     caller.trap("plugin '{s}' denied capability '{s}' ({s})", .{ p.name, perm.label(), reason });
+}
+
+/// The membrane's THIRD deny path (task #8 / W4 slice 2, alongside
+/// `trapPermDenied`/`trapNotDispatching`): a `.fs_root`-limited grant IS
+/// possessed (this only ever fires from a split body's `catch` arm on
+/// `error.OutOfLimit`, which `fs.zig`'s bodies return ONLY after `hasPerm`
+/// already passed), but `path` fell outside its root. Re-derives the root
+/// via `limitFor` rather than threading it through every call site — a
+/// second, cheap table read, no I/O — so the trap names BOTH the offending
+/// path and the root it escaped (§6 W4 slice 2: "trapped with the path and
+/// root named"). `root` is `"?"` only if this is ever called for a perm
+/// whose CURRENT limit isn't `.fs_root` — defensive, not reachable through
+/// `fs.zig`'s own call sites today.
+pub fn trapOutOfLimit(p: *WasmPlugin, caller: *wasm.Caller, comptime perm: Perm, path: []const u8) void {
+    const root: []const u8 = switch (limitFor(p, perm)) {
+        .fs_root => |r| r,
+        .none => "?",
+    };
+    caller.trap("plugin '{s}' denied capability '{s}': path '{s}' is outside the granted root '{s}'", .{ p.name, perm.label(), path, root });
 }
 
 /// The membrane's ONE deny path: every perm-gated host import NOT YET split

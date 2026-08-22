@@ -22,6 +22,7 @@ const guests = [_]Guest{
     .{ .src = "src/guest/deny.zig", .import = "guest_deny_wasm", .install = false },
     .{ .src = "src/guest/demo_config.zig", .import = "guest_demo_config_wasm", .install = false },
     .{ .src = "src/guest/headtest.zig", .import = "guest_headtest_wasm", .install = false },
+    .{ .src = "src/guest/fs_limit.zig", .import = "guest_fs_limit_wasm", .install = false },
     .{ .src = "src/guest/edit.zig", .import = "guest_edit_wasm", .install = true },
     .{ .src = "src/guest/complete.zig", .import = "guest_complete_wasm", .install = true },
     .{ .src = "src/guest/project.zig", .import = "guest_project_wasm", .install = true },
@@ -276,6 +277,27 @@ pub fn build(b: *std.Build) void {
     const run_popup_layout_tests = b.addRunArtifact(popup_layout_tests);
     const popup_layout_step = b.step("e2e-popup-layout", "Run (or, with -Drecord-popup-layout=true, record) the caret-popup layout goldens");
     popup_layout_step.dependOn(&run_popup_layout_tests.step);
+
+    // task #8's deny-vs-crash channel split (src/e2e/trap_kinds_main.zig):
+    // a PLAIN EXECUTABLE, not `addTest`, deliberately — this is the one
+    // place a real guest crash is allowed to log `.err` without failing
+    // `zig build test` (Zig 0.16's default test runner fails the whole
+    // suite on any `.err` log; this repo has no per-test downgrade shim).
+    // Reuses `weft_mod` directly (it already carries `addWasm`, so
+    // `src/e2e/trap_kinds_main.zig` reaches `weft.core.wasm` unmodified) —
+    // no `configureTestModule` needed here since this isn't a test binary
+    // and touches none of snail/stemma/fonts/syntax.
+    const trap_kinds_mod = b.createModule(.{
+        .root_source_file = b.path("src/e2e/trap_kinds_main.zig"),
+        .target = target,
+        .optimize = optimize,
+        .link_libc = true,
+    });
+    trap_kinds_mod.addImport("weft", weft_mod);
+    const trap_kinds_exe = b.addExecutable(.{ .name = "e2e-trap-kinds", .root_module = trap_kinds_mod });
+    const run_trap_kinds = b.addRunArtifact(trap_kinds_exe);
+    const trap_kinds_step = b.step("e2e-trap-kinds", "Prove task #8's deny-vs-crash channel split: a native guest fault logs .err, a host-raised deny logs .warn and never .err");
+    trap_kinds_step.dependOn(&run_trap_kinds.step);
 }
 
 /// Wire the shared test-module dependency set (snail/snail-raster/stemma/

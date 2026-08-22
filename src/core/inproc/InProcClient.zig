@@ -148,6 +148,25 @@ pub const InProcClient = struct {
         return fs_impl.fsRead(gpa, self, path);
     }
 
+    /// `weft.fs.write(path, bytes)` reached natively — mirrors `fsRead`,
+    /// above, for `hFsWrite`'s semantic body (`wasm_host/fs.zig`'s
+    /// `fsWrite`). Denial (including `error.OutOfLimit` — task #8 / W4
+    /// slice 2's `.fs_root` confinement) propagates as an ordinary Zig
+    /// error, same story as `fsRead`.
+    pub fn fsWrite(self: *InProcClient, gpa: std.mem.Allocator, path: []const u8, bytes: []const u8) fs_impl.PermError!bool {
+        return fs_impl.fsWrite(gpa, self, path, bytes);
+    }
+
+    /// `weft.fs.append(path, bytes)` reached natively — mirrors `fsWrite`.
+    pub fn fsAppend(self: *InProcClient, gpa: std.mem.Allocator, path: []const u8, bytes: []const u8) fs_impl.PermError!bool {
+        return fs_impl.fsAppend(gpa, self, path, bytes);
+    }
+
+    /// `weft.fs.exists(path)` reached natively — mirrors `fsRead`.
+    pub fn fsExists(self: *InProcClient, gpa: std.mem.Allocator, path: []const u8) fs_impl.PermError!@import("../file.zig").Kind {
+        return fs_impl.fsExists(gpa, self, path);
+    }
+
     /// `weft.setMode(mode)` reached natively — the SAME semantic body
     /// (`wasm_host/keymap.zig`'s `setMode`) `hSetMode`'s wasm trampoline
     /// calls. Must be called from within a `beginDispatch`/`endDispatch`
@@ -206,6 +225,62 @@ test "InProcClient: fsRead denies without the grant, reads with it — SAME sema
     c.perms[wasm_host_plugin.perm_fs_read] = true;
     const bytes = (try c.fsRead(gpa, "does-not-exist-anywhere.xyz")) orelse null;
     try t.expectEqual(@as(?[]u8, null), bytes); // mundane failure, not a PermissionDenied
+}
+
+test "InProcClient: an fs_root-limited grant confines fs — in-root ok, out-of-root and traversal fail closed (task #8 / W4 slice 2)" {
+    const gpa = t.allocator;
+    var dummy_ctx: command.Context = undefined;
+    var c: InProcClient = .{ .name = "test-client", .active_ctx = &dummy_ctx };
+
+    // A throwaway root under .zig-cache/tmp — see file.zig's own tests for
+    // this convention (real cwd-relative paths, matching what `fsRead`/
+    // `fsWrite`'s "local cwd-relative" contract already assumes).
+    var tmp = t.tmpDir(.{});
+    defer tmp.cleanup();
+    var root_buf: [256]u8 = undefined;
+    const root = try std.fmt.bufPrint(&root_buf, ".zig-cache/tmp/{s}", .{tmp.sub_path});
+
+    // Mint the limited row DIRECTLY (grants.zig's module doc: mintGrantHandles
+    // only ever translates the boolean describe() handshake into `.none`-limit
+    // rows — a `.fs_root`-limited row is minted by hand until a config verb
+    // exists to declare one).
+    var table = grants_mod.HandleTable.init(gpa);
+    defer table.deinit();
+    const hr = try table.grant(.{ .capability = "fs_read", .limit = .{ .fs_root = root } }, "test-client", null);
+    const hw = try table.grant(.{ .capability = "fs_write", .limit = .{ .fs_root = root } }, "test-client", null);
+    c.grant_table = &table;
+    c.grant_handles[wasm_host_plugin.perm_fs_read] = hr;
+    c.grant_handles[wasm_host_plugin.perm_fs_write] = hw;
+
+    // In-root write, then read, round-trips — through the SAME semantic
+    // bodies `hFsWrite`/`hFsRead`'s wasm trampolines call.
+    var in_path_buf: [300]u8 = undefined;
+    const in_path = try std.fmt.bufPrint(&in_path_buf, "{s}/note.txt", .{root});
+    try t.expect(try c.fsWrite(gpa, in_path, "hello from in-root"));
+    const got = (try c.fsRead(gpa, in_path)).?;
+    defer gpa.free(got);
+    try t.expectEqualStrings("hello from in-root", got);
+
+    // Out-of-root: a path that doesn't even lexically start with the root —
+    // denied at layer 1 (the lexical gate), no filesystem access at all.
+    try t.expectError(error.OutOfLimit, c.fsRead(gpa, "totally/unrelated/path.txt"));
+    try t.expectError(error.OutOfLimit, c.fsWrite(gpa, "totally/unrelated/path.txt", "x"));
+
+    // Traversal: LEXICALLY prefixed by the root (passes layer 1) but escapes
+    // it via `..` — denied by the KERNEL (layer 2, RESOLVE_BENEATH), fails
+    // closed exactly like an outright unrelated path, not silently allowed
+    // because the string happened to start right.
+    var esc_path_buf: [300]u8 = undefined;
+    const esc_path = try std.fmt.bufPrint(&esc_path_buf, "{s}/../../etc/passwd", .{root});
+    try t.expectError(error.OutOfLimit, c.fsRead(gpa, esc_path));
+    try t.expectError(error.OutOfLimit, c.fsAppend(gpa, esc_path, "x"));
+
+    // The grant table's own possession check still applies underneath: a
+    // capability never granted at all is PermissionDenied, not OutOfLimit —
+    // the two stay distinguishable even for a limited principal.
+    var no_write_c: InProcClient = .{ .name = "test-client", .active_ctx = &dummy_ctx, .grant_table = &table };
+    no_write_c.grant_handles[wasm_host_plugin.perm_fs_read] = hr;
+    try t.expectError(error.PermissionDenied, no_write_c.fsWrite(gpa, in_path, "nope"));
 }
 
 test "InProcClient: setMode traps NotDispatching outside a dispatch bracket, same guard as wl_set_mode" {

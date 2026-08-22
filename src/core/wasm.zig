@@ -21,29 +21,43 @@ pub const c = @cImport({
 
 pub const Error = error{ Compile, Instantiate, Call, Trap, MissingExport, BadType } || Allocator.Error;
 
+// Task #8's deny-vs-crash split (checkErr/checkTrap, below) does NOT need a
+// side channel. A first attempt threaded a `TrapKind` through a
+// `threadlocal`, guessing (from an unverified older comment on `checkErr`)
+// that wasmtime folds every trap — host-raised or native — into the same
+// `wasmtime_error_t` channel. Standalone probing of this wasmtime version's
+// C API (small, direct C-API programs, not just this file's own
+// `zig build test` output — see this task's review) showed that guess was
+// wrong: the two scenarios arrive on TWO DIFFERENT CHANNELS, unconditionally:
+//   - A REAL guest execution fault (`unreachable`, an out-of-bounds access,
+//     ...) — raised natively inside wasmtime, no host callback ever runs —
+//     comes back from `wasmtime_func_call` as `err == null`, `trap != null`:
+//     the dedicated `wasm_trap_t**` out-param, handled by `checkTrap` below.
+//   - A host-raised deny (`Caller.trap()`, called FROM a host import
+//     callback — `wasm_host/plugin.zig`'s `trapPermDenied`/
+//     `trapNotDispatching`/`trapOutOfLimit`) comes back as `err != null`,
+//     `trap == null`: handled by `checkErr` below.
+// (This CONTRADICTS `checkErr`'s older doc comment claiming both shapes fold
+// into `err` — that claim was never verified against this wasmtime version
+// and was simply wrong for the func-call path; corrected below.) Since the
+// two shapes are structurally distinct channels, not a single channel
+// needing a smuggled-in tag, `checkErr`'s trap branch and `checkTrap` can
+// each just log at the FIXED level appropriate to what can possibly reach
+// them — see each function's own doc, immediately below.
+
 /// Turn a wasmtime `*wasmtime_error_t` (null = ok) into a Zig error, logging
 /// its message. Consumes the error object.
 ///
-/// This wasmtime C API version folds an actual wasm trap (a guest execution
-/// fault — including one a host import callback raises explicitly, e.g.
-/// `wasm_host/plugin.zig`'s `requirePerm`) into the SAME `wasmtime_error_t`
-/// return value `wasmtime_func_call`'s docs say only carries host/programmer
-/// errors (bad arity, wrong store); the separate `wasm_trap_t**` out-param
-/// (`checkTrap`, below) is left null in that case. We tell the two apart the
-/// way wasmtime itself does internally: a trap unwinds through wasm frames
-/// and so carries a wasm stack trace; a host/programmer error (bad call
-/// shape) never executed any wasm and so never has one. Trap-shaped errors
-/// always surface as `error.Trap` regardless of `tag`, so callers (and
-/// `wasm_host/plugin.zig`'s `requirePerm`) get one honest signal for "the
-/// guest's call was aborted," not a tag that varies by which call site
-/// happened to be on the stack.
-///
-/// Logged at `.warn`, not `.err`, when it's a trap: a trap is the GUEST
-/// faulting (or a grant being denied — an expected protocol outcome, not a
-/// host bug), the same severity `app/dispatch.zig` already logs a failed
-/// command at ("command {s} failed: {t}"). A non-trap error here (compile/
-/// instantiate broke, or a host/programmer call-shape bug) stays `.err` — an
-/// actual engine-side fault, not a guest one.
+/// A trap-shaped `wasmtime_error_t` (one carrying a wasm stack trace — see
+/// `is_trap`, below) reaching THIS function is, per the channel-split note
+/// above, a HOST-RAISED deny (`Caller.trap()`, from a host import callback)
+/// — a real guest execution fault never comes through here, it comes
+/// through `checkTrap`. So this always logs a trap at `.warn`: an expected
+/// protocol outcome, the same severity `app/dispatch.zig` already logs a
+/// failed command at ("command {s} failed: {t}"), never a crash. A non-trap
+/// error here (compile/instantiate broke, or a host/programmer call-shape
+/// bug) stays `.err` regardless — an actual engine-side fault, never a
+/// guest one.
 fn checkErr(err: ?*c.wasmtime_error_t, comptime tag: Error) Error!void {
     const e = err orelse return;
     var trace: c.wasm_frame_vec_t = undefined;
@@ -62,17 +76,24 @@ fn checkErr(err: ?*c.wasmtime_error_t, comptime tag: Error) Error!void {
     return if (is_trap) error.Trap else tag;
 }
 
-/// The `wasm_trap_t**` out-param path `wasmtime_func_call` documents for a
-/// mid-execution trap. In practice this wasmtime version routes traps through
-/// `checkErr` instead (see its doc comment); this stays as the honest
-/// fallback for whichever call sites (`Instance.init`/`instantiate`) only
-/// ever populate `trap`, not `err`. Same `.warn` rationale as `checkErr`'s
-/// trap branch — a trap is the guest's fault, not the host's.
+/// The `wasm_trap_t**` out-param path `wasmtime_func_call` (and
+/// `wasmtime_instance_new`/`wasmtime_linker_instantiate`) populate for a
+/// REAL wasm execution fault — per the channel-split note above, this is the ONLY
+/// channel a genuine guest crash (`unreachable`, an out-of-bounds access,
+/// a stack overflow, ...) reaches; a host-raised deny never lands here (it
+/// comes back as `err`, through `checkErr`, never populating this
+/// out-param — see that function's doc). Logged at `.err`: this IS task
+/// #8's crash-observability restoration — a real guest fault is exactly as
+/// loud as any other host-side fault, not softened to `.warn` alongside an
+/// ordinary protocol denial. (`Instance.init`/`Linker.instantiate` can also
+/// reach this via a module `start`-section trap; none of weft's guests use
+/// one, so in practice this fires from an exported-function call gone bad —
+/// still the same "guest genuinely faulted" shape either way.)
 fn checkTrap(trap: ?*c.wasm_trap_t) Error!void {
     const tr = trap orelse return;
     var msg: c.wasm_byte_vec_t = undefined;
     c.wasm_trap_message(tr, &msg);
-    std.log.warn("wasm trap: {s}", .{msg.data[0..msg.size]});
+    std.log.err("wasm trap: {s}", .{msg.data[0..msg.size]});
     c.wasm_byte_vec_delete(&msg);
     c.wasm_trap_delete(tr);
     return error.Trap;
@@ -344,9 +365,17 @@ pub const Caller = struct {
     /// Host callbacks run with no allocator handy, so this formats into a
     /// fixed internal buffer (truncated if it doesn't fit — traps are short,
     /// human-readable diagnostics, not a data channel). A denied grant is the
-    /// only caller today (`wasm_host/plugin.zig`'s `requirePerm`); any host
+    /// only caller today (`wasm_host/plugin.zig`'s `requirePerm`/
+    /// `trapPermDenied`/`trapNotDispatching`/`trapOutOfLimit`); any host
     /// import that must reject a call outright can use this instead of
-    /// inventing its own silent-failure return code.
+    /// inventing its own silent-failure return code. This function IS the
+    /// membrane's ONE deny path (see `trap_msg`'s doc, above): a trap raised
+    /// this way always surfaces to the caller as a HOST-RAISED trap (per this
+    /// file's module doc, `err != null`/`trap == null` from
+    /// `wasmtime_func_call`) — `checkErr`, not `checkTrap`, handles it, which
+    /// is what makes every deny log at `.warn` rather than `.err` (task #8) —
+    /// no kind-tracking needed on this struct; the wasmtime channel itself
+    /// already tells the two shapes apart.
     pub fn trap(self: *Caller, comptime fmt: []const u8, args: anytype) void {
         var w: std.Io.Writer = .fixed(&self.trap_buf);
         w.print(fmt, args) catch {}; // truncated: keep only the written prefix
@@ -401,11 +430,11 @@ fn trampoline(
     // A callback that called `caller.trap(...)` (a denied effect) aborts the
     // call right here: we hand wasmtime a real trap instead of `results`, so
     // the guest never observes the callback's (unset/stale) return values.
-    // The unwind surfaces at whatever host→guest call is on the stack (e.g.
-    // `on_command`), where `checkErr` (this trap's shape makes it recognize
-    // this as a trap, not a call error — see its doc comment) logs this
-    // message and returns `error.Trap` — the same handling every other guest
-    // trap already gets, no new log site needed.
+    // Handing wasmtime a `wasm_trap_t*` FROM a host callback like this is
+    // exactly what makes the unwind surface as a HOST-RAISED trap at the
+    // call site (`err != null`, this file's module doc's channel split) —
+    // `checkErr` picks it up and logs it at `.warn`, never `checkTrap`
+    // (that channel is for wasm's OWN native faults, never a callback's).
     if (caller.trap_msg) |msg| return c.wasmtime_trap_new(msg.ptr, msg.len);
     i = 0;
     while (i < nresults and i < rbuf.len) : (i += 1) results[i] = .{ .kind = c.WASMTIME_I32, .of = .{ .i32 = rbuf[i] } };
@@ -532,6 +561,16 @@ test "wasm: a host callback that calls Caller.trap aborts the guest's call with 
     // the mechanism `wasm_host/plugin.zig`'s `requirePerm` rides for
     // trap-on-deny, doc/north-star-plan.md §2.4 review C9).
     try t.expectError(error.Trap, instance.callI32("run", &.{5}));
+    // Task #8: this trap is HOST-raised (`hostDeny` calls `caller.trap`),
+    // so it comes back through `checkErr` (this file's module doc's channel
+    // split) and logs at `.warn` — never `.err`, which is exactly why this
+    // assertion is safe to run inside `zig build test` at all: a `.err` log
+    // anywhere fails the WHOLE suite (Zig 0.16's default test runner's
+    // `log_err_count` gate, no per-test downgrade shim in this repo). The
+    // native-fault side of the split (`checkTrap`, `.err`) is deliberately
+    // NOT exercised here for that reason — see `src/e2e/trap_kinds_main.zig`
+    // (`zig build e2e-trap-kinds`), a dedicated non-`test` step that IS
+    // allowed to observe an `.err` log firing.
 }
 
 // A guest exporting `memory` + `strptr() -> i32` (a pointer to "hi" in its

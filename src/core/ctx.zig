@@ -753,10 +753,12 @@ test "ctx: W4 slice 1 — CAPTURE-TIME grant resolution + SCOPE-LIFETIME: a tran
     try t.expectEqual(@as(usize, 2), c2.grants.len);
 
     // SCOPE-LIFETIME (§2.4: "scope exit revokes; a stashed handle from a
-    // dead Ctx traps"): popping the transient sweeps the scoped row.
+    // dead Ctx traps"): popping the transient sweeps the scoped row. Task #8:
+    // a scope dying reports `.scope_expired`, distinct from an explicit
+    // `revoke` — see `grants.zig`'s `Row.scope_dead` doc.
     handle.deinit();
     try t.expect(!table.check(scoped));
-    try t.expectEqual(grants_mod.Reason.revoked, table.reasonFor(scoped));
+    try t.expectEqual(grants_mod.Reason.scope_expired, table.reasonFor(scoped));
     try t.expect(table.check(baseline)); // the plugin-lifetime row is untouched
 
     // A capture taken AFTER the pop no longer collects the dead row.

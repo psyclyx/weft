@@ -1751,3 +1751,135 @@ test "wasm plugin: kv admin round-trips across the membrane, namespaced" {
     try t.expectEqualStrings("v", store.get("edit", "k").?);
     try t.expectEqual(@as(?[]const u8, null), store.get("other", "k"));
 }
+
+// ── W4 slice 2 / task #8: `.fs_root` limit enforcement through a REAL guest ─
+// `src/guest/fs_limit.zig` requests fs_read+fs_write and exposes each as a
+// command reading its path from the args, so the host controls exactly
+// which path each scenario tries. `loadPlugin` mints `.none`-limit rows for
+// the perms it declared (grants.zig's `mintGrantHandles`, unchanged by this
+// slice — every boolean-derived grant stays unrestricted); the test narrows
+// those SAME rows to a tmp root directly (no config verb mints a `.fs_root`
+// grant yet — see grants.zig's module doc), then drives the guest through
+// `command.run` exactly like every other membrane test in this file.
+
+test "wasm plugin: an fs_root-limited grant confines fs through a REAL guest — in-root ok, out-of-root and traversal trap (task #8 / W4 slice 2)" {
+    const gpa = t.allocator;
+    var env: Env = undefined;
+    try Env.init(gpa, &env);
+    defer env.deinit(gpa);
+
+    var tmp = t.tmpDir(.{});
+    defer tmp.cleanup();
+    var root_buf: [256]u8 = undefined;
+    const root = try std.fmt.bufPrint(&root_buf, ".zig-cache/tmp/{s}", .{tmp.sub_path});
+
+    var table = @import("../grants.zig").HandleTable.init(gpa);
+    defer table.deinit();
+
+    var engine = try wasm.Engine.init();
+    defer engine.deinit();
+    const plugin = try loadPlugin(&engine, &env.ctx, "fs_limit", @embedFile("guest_fs_limit_wasm"), .{ .grant_table = &table });
+    defer plugin.deinit();
+
+    // Narrow the plugin-lifetime rows `mintGrantHandles` already minted (both
+    // `.none` until now) to the tmp root — same handles the guest's own
+    // `hasPerm`/`limitFor` checks read on its very next call, exactly like a
+    // live revoke would take effect (§2.4's "use = possession").
+    table.rows.items[plugin.grant_handles[wasm_host.perm_fs_read].idx].limit = .{ .fs_root = root };
+    table.rows.items[plugin.grant_handles[wasm_host.perm_fs_write].idx].limit = .{ .fs_root = root };
+
+    var in_path_buf: [300]u8 = undefined;
+    const in_path = try std.fmt.bufPrint(&in_path_buf, "{s}/note.txt", .{root});
+
+    // In-root write, then read, succeed — across the membrane, through the
+    // REAL split semantic bodies + the kernel-confined RootedFs backstop.
+    const wr = try command.run(&env.commands, &env.ctx, "try-write", &.{ .{ .string = in_path }, .{ .string = "hi from guest" } });
+    try t.expectEqual(command.Value{ .integer = 1 }, wr);
+    const rr = try command.run(&env.commands, &env.ctx, "try-read", &.{.{ .string = in_path }});
+    try t.expectEqualStrings("hi from guest", rr.string);
+
+    // Out-of-root: the guest's call traps outright — never a fake "<absent>"
+    // it could keep running past (the same trap-on-deny discipline
+    // `deny.zig`'s test proves for a missing perm; this is the identical
+    // property for a POSSESSED-but-out-of-bounds path).
+    try t.expectError(error.Trap, command.run(&env.commands, &env.ctx, "try-read", &.{.{ .string = "totally/unrelated/path.txt" }}));
+    try t.expectError(error.Trap, command.run(&env.commands, &env.ctx, "try-exists", &.{.{ .string = "totally/unrelated/path.txt" }}));
+
+    // Traversal: lexically prefixed by the root (passes the fast lexical
+    // gate) but escapes it via `..` — the KERNEL gate (RootedFs,
+    // RESOLVE_BENEATH) closes what the lexical gate alone would miss. Fails
+    // exactly the same way: a trap, not a silent allow.
+    var esc_path_buf: [300]u8 = undefined;
+    const esc_path = try std.fmt.bufPrint(&esc_path_buf, "{s}/../../etc/passwd", .{root});
+    try t.expectError(error.Trap, command.run(&env.commands, &env.ctx, "try-read", &.{.{ .string = esc_path }}));
+    try t.expectError(error.Trap, command.run(&env.commands, &env.ctx, "try-write", &.{ .{ .string = esc_path }, .{ .string = "x" } }));
+}
+
+test "wasm_host/plugin.zig: trap message taxonomy — each Reason gets a distinct, correct message" {
+    const gpa = t.allocator;
+    var env: Env = undefined;
+    try Env.init(gpa, &env);
+    defer env.deinit(gpa);
+
+    var table = @import("../grants.zig").HandleTable.init(gpa);
+    defer table.deinit();
+
+    var engine = try wasm.Engine.init();
+    defer engine.deinit();
+    // fs_limit requests fs_read+fs_write; loadPlugin mints a plugin-lifetime
+    // row for each via mintGrantHandles. This ONE plugin's table + handles
+    // are reused across the sub-scenarios below, each mutating exactly the
+    // state needed to provoke ONE Reason — a manufactured `wasm.Caller`
+    // (its `context`/`caller` pointers are never dereferenced by `.trap()`,
+    // only `trap_buf`/`trap_msg` — see `Caller.trap`'s doc) lets the trap
+    // FUNCTIONS be tested directly, without needing a live guest call for
+    // each (the wasm-guest test above already proves `.out_of_limit` reaches
+    // this taxonomy end to end; this test proves the taxonomy ITSELF,
+    // exhaustively, at the API layer — message content, not log level: every
+    // trap `trapPermDenied`/`trapOutOfLimit` raises is HOST-raised, so it
+    // reaches `checkErr` and logs `.warn`, never `.err` — see wasm.zig's
+    // module doc's channel split — nothing left to classify here).
+    const plugin = try loadPlugin(&engine, &env.ctx, "fs_limit", @embedFile("guest_fs_limit_wasm"), .{ .grant_table = &table });
+    defer plugin.deinit();
+    const plugin_mod = @import("../wasm_host/plugin.zig");
+
+    // never_granted: `.net` was never requested by this guest at all.
+    {
+        var caller: wasm.Caller = .{ .context = undefined, .caller = undefined };
+        plugin_mod.trapPermDenied(plugin, &caller, .net);
+        try t.expect(std.mem.indexOf(u8, caller.trap_msg.?, "not requested in describe()") != null);
+    }
+
+    // revoked: an explicit revoke() on the row this plugin DID mint.
+    {
+        _ = table.revoke("fs_limit", "fs_read");
+        var caller: wasm.Caller = .{ .context = undefined, .caller = undefined };
+        plugin_mod.trapPermDenied(plugin, &caller, .fs_read);
+        try t.expect(std.mem.indexOf(u8, caller.trap_msg.?, "revoked") != null);
+        try t.expect(std.mem.indexOf(u8, caller.trap_msg.?, "scope expired") == null); // distinct wording
+    }
+
+    // scope_expired: a scoped row swept by its scope's exit — distinct
+    // wording from a plain revoke, even though both fail `check` identically.
+    {
+        const scope = table.newScope();
+        const scoped_h = try table.grant(.{ .capability = "fs_write" }, "fs_limit", scope);
+        _ = table.sweepScope(scope);
+        plugin.grant_handles[wasm_host.perm_fs_write] = scoped_h; // swap in the swept row
+        var caller: wasm.Caller = .{ .context = undefined, .caller = undefined };
+        plugin_mod.trapPermDenied(plugin, &caller, .fs_write);
+        try t.expect(std.mem.indexOf(u8, caller.trap_msg.?, "scope expired") != null);
+    }
+
+    // out_of_limit: names BOTH the offending path and the root it escaped —
+    // the §6 W4 slice 2 gate ("trapped with the path and root named").
+    {
+        const limited = try table.grant(.{ .capability = "fs_write", .limit = .{ .fs_root = "vault" } }, "fs_limit", null);
+        plugin.grant_handles[wasm_host.perm_fs_write] = limited;
+        var caller: wasm.Caller = .{ .context = undefined, .caller = undefined };
+        plugin_mod.trapOutOfLimit(plugin, &caller, .fs_write, "elsewhere/secret.txt");
+        const msg = caller.trap_msg.?;
+        try t.expect(std.mem.indexOf(u8, msg, "elsewhere/secret.txt") != null);
+        try t.expect(std.mem.indexOf(u8, msg, "vault") != null);
+    }
+}

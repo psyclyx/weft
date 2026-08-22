@@ -32,9 +32,9 @@
 //!      code could pick and choose from. STATUS: the table has two READERS,
 //!      but consumer #2's RESULT has no production consumer yet — collected,
 //!      tested, unconsumed (see `Ctx.grants`' field doc for the coupling
-//!      rule its first consumer must honor). A swept scope's rows currently
-//!      report `.revoked` — a future `scope_expired` Reason variant would
-//!      be more precise once #8's structured taxonomy lands.
+//!      rule its first consumer must honor). A swept scope's rows report the
+//!      dedicated `.scope_expired` Reason (task #8's structured taxonomy),
+//!      distinct from an explicit `revoke` — see `Row.scope_dead`.
 //!
 //! **Scope lifetime** (§2.4: "a handle's lifetime is bounded by the scope
 //! its GrantDecl matched"). A row MAY carry an owning `scope: ?u64` token
@@ -51,14 +51,19 @@
 //! for it.
 //!
 //! **What's deliberately NOT here**: predicate-gated admission at USE time
-//! (a row's `predicate`/`limit` are recorded and inspectable, but
-//! `hasPerm`'s possession check does not currently evaluate them — the fs
-//! semantic bodies check ONLY aliveness, per capability, exactly like the
-//! boolean they replace); `Limit.fs_root` enforcement (the shape exists so a
-//! later slice can start checking paths against it, `fs.zig`'s bodies don't
-//! consult it yet); a config-authored `GrantDecl` verb. All three are named,
-//! not silently dropped — see the north-star-plan §6 W4 report for the full
-//! deferred list.
+//! (a row's `predicate` is recorded and inspectable, but `hasPerm`'s
+//! possession check does not currently evaluate it — the fs semantic
+//! bodies check ONLY aliveness, per capability, exactly like the boolean
+//! they replace); a config-authored `GrantDecl` verb (`mintGrantHandles`
+//! still only translates the boolean `describe()` handshake — a row's
+//! `limit` stays `.none` for every plugin-lifetime grant it mints; a test
+//! that wants a `.fs_root`-limited row mints one directly via `grant()`).
+//! `Limit.fs_root` ENFORCEMENT itself is no longer deferred: W4 slice 2
+//! wires it — `wasm_host/fs.zig`'s five split semantic bodies now consult
+//! `limitFor` and confine a limited grant's paths (see that file's module
+//! doc for the exact policy, including the named v1 symlink-handling gap
+//! in `fsExists`). Both remaining gaps are named, not silently dropped —
+//! see the north-star-plan §6 W4 report for the full deferred list.
 
 const std = @import("std");
 const Allocator = std.mem.Allocator;
@@ -126,12 +131,36 @@ pub const Row = struct {
     gen: u32 = 0,
     alive: bool = true,
     scope: ?u64 = null,
+    /// Set by `sweepScope` (never by `revoke`) — the #8 distinction between
+    /// "the scope this grant lived in exited" and "someone explicitly
+    /// revoked it": both invalidate the row identically for `check`, but
+    /// `reasonFor` reads this to tell the two apart in a trap message.
+    scope_dead: bool = false,
 };
 
 /// Why a handle fails `check` — the trap-message distinction §6 W4 asks for
-/// ("revoked" vs "never requested"), and the groundwork for #8's structured
-/// deny-trap reasons.
-pub const Reason = enum { ok, never_granted, revoked };
+/// ("revoked" vs "never requested"), and the shared vocabulary #8's
+/// structured deny-trap taxonomy names throughout the membrane. NOT every
+/// variant is produced by `reasonFor` below (which only ever inspects TABLE
+/// state — aliveness/gen — so it returns `.ok`/`.never_granted`/`.revoked`/
+/// `.scope_expired`, never `.out_of_limit`): `.out_of_limit` is carried here
+/// purely so every deny-reason in the membrane has ONE enum to name itself
+/// with, even though it's decided by `wasm_host/fs.zig`'s limit check (it
+/// needs the checked PATH, which a bare `CapHandle` doesn't carry) rather
+/// than by this table. `requireDispatch`'s background-entry denial
+/// (`wasm_host/plugin.zig`'s `trapNotDispatching`) is its own reason too,
+/// but is deliberately NOT added here: it isn't a grant-table state at all
+/// (`in_dispatch`/`loading`, unrelated to any `Row`) — folding it into this
+/// enum would be table vocabulary standing in for a check that never
+/// touches the table. Its trap message stays free text; what unifies it
+/// with everything else here is that EVERY deny in this file (and
+/// `wasm_host/plugin.zig`'s `trapPermDenied`/`trapNotDispatching`/
+/// `trapOutOfLimit`, which format these reasons into a trap message) is
+/// HOST-raised via `Caller.trap()`, which wasmtime's C API surfaces as a
+/// structurally distinct channel from a guest's own native fault — see
+/// `wasm.zig`'s module doc for the mechanics; no enum needed to carry that
+/// distinction, the wasmtime channel already does.
+pub const Reason = enum { ok, never_granted, revoked, scope_expired, out_of_limit };
 
 /// The System-owned grant table (§2.4's "resolves the principal's
 /// GrantDecls" mechanism; see `System.zig`'s `grants` field). Append-only:
@@ -182,12 +211,30 @@ pub const HandleTable = struct {
     }
 
     /// Why `h` fails `check` (or `.ok` if it wouldn't) — the trap-message
-    /// distinction (§6 W4 gate: "distinct from never-granted").
+    /// distinction (§6 W4 gate: "distinct from never-granted"), now also
+    /// distinguishing `.scope_expired` (task #8: "the scope_expired variant
+    /// belongs with #8") from a plain `.revoked` — see `Row.scope_dead`'s
+    /// doc. A `gen` mismatch on an otherwise-alive-looking row (can't
+    /// happen today — `alive` and `gen` always flip together — but `gen` is
+    /// still checked first, matching `check`'s own order) falls back to
+    /// `.revoked`: whichever invalidation flipped `gen` didn't tag
+    /// `scope_dead`, so it wasn't `sweepScope`.
     pub fn reasonFor(self: *const HandleTable, h: CapHandle) Reason {
         if (h.isNone() or h.idx >= self.rows.items.len) return .never_granted;
         const r = self.rows.items[h.idx];
         if (r.alive and r.gen == h.gen) return .ok;
-        return .revoked;
+        return if (r.scope_dead) .scope_expired else .revoked;
+    }
+
+    /// The `.fs_root` limit's read side (task #8 / W4 slice 2): `h`'s row's
+    /// `Limit`, or `.none` for an invalid handle — a caller that wants to
+    /// ENFORCE the limit has already gone through `check`/`reasonFor` for
+    /// possession; this only ever reads the row, never re-derives
+    /// possession itself. See `wasm_host/plugin.zig`'s `limitFor` for the
+    /// duck-typed wrapper both transports call through.
+    pub fn limitFor(self: *const HandleTable, h: CapHandle) Limit {
+        if (h.isNone() or h.idx >= self.rows.items.len) return .none;
+        return self.rows.items[h.idx].limit;
     }
 
     /// Invalidate every LIVE row for (principal, capability) — the
@@ -228,6 +275,7 @@ pub const HandleTable = struct {
             if (r.alive and r.scope != null and r.scope.? == scope) {
                 r.alive = false;
                 r.gen +%= 1;
+                r.scope_dead = true; // #8: distinct from an explicit `revoke`
                 n += 1;
             }
         }
@@ -313,6 +361,43 @@ test "grants: scope sweep invalidates only rows tagged with that scope" {
 
     // Sweeping an already-swept (or unused) scope is a harmless no-op.
     try t.expectEqual(@as(usize, 0), table.sweepScope(scope));
+}
+
+test "grants: scope_expired is distinct from revoked (task #8's taxonomy)" {
+    const gpa = t.allocator;
+    var table = HandleTable.init(gpa);
+    defer table.deinit();
+
+    const scope = table.newScope();
+    const scoped = try table.grant(.{ .capability = "doc.edit" }, "notes", scope);
+    const explicit = try table.grant(.{ .capability = "fs_read" }, "notes", null);
+
+    _ = table.sweepScope(scope);
+    _ = table.revoke("notes", "fs_read");
+
+    // Same observable possession outcome (neither checks true)...
+    try t.expect(!table.check(scoped));
+    try t.expect(!table.check(explicit));
+    // ...but a DIFFERENT reason: the scope dying is not the same event as a
+    // deliberate revoke, and a trap message should say which happened.
+    try t.expectEqual(Reason.scope_expired, table.reasonFor(scoped));
+    try t.expectEqual(Reason.revoked, table.reasonFor(explicit));
+}
+
+test "grants: limitFor reads a row's Limit; .none for an invalid handle" {
+    const gpa = t.allocator;
+    var table = HandleTable.init(gpa);
+    defer table.deinit();
+
+    const unrestricted = try table.grant(.{ .capability = "fs_read" }, "notes", null);
+    const limited = try table.grant(.{ .capability = "fs_read", .limit = .{ .fs_root = "notes-vault" } }, "agent", null);
+
+    try t.expectEqual(Limit.none, table.limitFor(unrestricted));
+    switch (table.limitFor(limited)) {
+        .fs_root => |root| try t.expectEqualStrings("notes-vault", root),
+        .none => return error.TestUnexpectedResult,
+    }
+    try t.expectEqual(Limit.none, table.limitFor(.none)); // never-minted handle degrades safely
 }
 
 test "grants: collectForPrincipal — capture-time resolution, predicate-gated, no cross-principal leak" {

@@ -107,6 +107,29 @@ pub const RootedFs = struct {
         }
     }
 
+    /// Append `bytes` to `rel` (confined, created if absent) — the append
+    /// counterpart to `write`, above (O_APPEND instead of O_TRUNC). Used by
+    /// `wasm_host/fs.zig`'s `fsAppend` when a `.fs_root` grant limits the
+    /// call (north-star-plan §6 W4 slice 2).
+    pub fn append(self: *const RootedFs, rel: [*:0]const u8, bytes: []const u8) Error!void {
+        const fd = try self.openBeneath(
+            rel,
+            .{ .ACCMODE = .WRONLY, .CREAT = true, .APPEND = true, .CLOEXEC = true },
+            0o644,
+        );
+        defer _ = linux.close(fd);
+        var off: usize = 0;
+        while (off < bytes.len) {
+            const rc = linux.write(fd, bytes[off..].ptr, bytes.len - off);
+            const n = switch (linux.errno(rc)) {
+                .SUCCESS => rc,
+                .INTR => continue,
+                else => return error.Io,
+            };
+            off += n;
+        }
+    }
+
     /// List the directory at `rel` (confined), returning names newline-joined
     /// (owned). Directories keep a trailing `/`, so a consumer (dired) can tell
     /// them apart. Order is filesystem order.
@@ -193,6 +216,27 @@ test "rooted_fs: confines reads/writes; rejects .., absolute, and symlink escape
     defer gpa.free(listing);
     try t.expect(std.mem.indexOf(u8, listing, "hi.txt") != null);
     try t.expect(std.mem.indexOf(u8, listing, "..") == null);
+}
+
+test "rooted_fs: append creates-then-appends (confined), rejects the same escapes as write" {
+    const gpa = t.allocator;
+    var pbuf: [128]u8 = undefined;
+    const root_path = try makeTmpRoot(&pbuf);
+
+    var fs = try RootedFs.open(root_path.ptr);
+    defer fs.close();
+    defer {
+        _ = linux.unlinkat(fs.root_fd, "log.txt", 0);
+        _ = linux.rmdir(root_path.ptr);
+    }
+
+    try fs.append("log.txt", "one\n"); // created, since absent
+    try fs.append("log.txt", "two\n"); // appended, not truncated
+    const got = try fs.read(gpa, "log.txt");
+    defer gpa.free(got);
+    try t.expectEqualStrings("one\ntwo\n", got);
+
+    try t.expectError(error.Confined, fs.append("../escape.txt", "x"));
 }
 
 test {
