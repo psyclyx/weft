@@ -93,6 +93,29 @@ pub fn hPath(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32, results
     results[0] = @intCast(n);
 }
 
+/// W4 slice 3 (north-star-plan §2.4/§6, review B2's repair): the doc-region
+/// half of the deny taxonomy — `command.Context.edit`'s NEW `error.OutOfLimit`/
+/// `error.Collapsed` (a `.doc_region` grant narrowing this edit, or that
+/// grant's identity anchors no longer resolving) MUST trap here, not
+/// silently no-op like the pre-existing `catch {}` still does for
+/// `error.Unauthorized`/`Document.AddPeerError` (a PRE-EXISTING gap this
+/// slice does not expand scope to close — see the W4 slice 3 report). [FIX
+/// 10]/§6 W4's gate is explicit: "TRAPS on identity collapse (not silently
+/// drifts)". Re-derives the resolved bounds via a second, cheap
+/// `checkDocRegion` call for the message — the same "second cheap read, not
+/// threaded through the error" convention `wasm_host/plugin.zig`'s
+/// `trapOutOfLimit` already uses for `.fs_root`.
+fn trapDocRegion(p: *WasmPlugin, caller: *wasm.Caller, start: usize, end: usize, err: anyerror) void {
+    switch (err) {
+        error.OutOfLimit => switch (p.activeCtx().checkDocRegion(start, end)) {
+            .out_of_limit => |b| caller.trap("plugin '{s}' doc-edit [{d},{d}) is outside its granted region [{d},{d})", .{ p.name, start, end, b.start, b.end }),
+            .ok, .collapsed => caller.trap("plugin '{s}' doc-edit [{d},{d}) denied: outside its granted doc_region", .{ p.name, start, end }),
+        },
+        error.Collapsed => caller.trap("plugin '{s}' doc-edit grant COLLAPSED — its identity anchors no longer resolve (deleted or compacted); re-grant needed", .{p.name}),
+        else => unreachable,
+    }
+}
+
 // Group C: write.
 pub fn hEdit(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32, results: []i32) void {
     _ = results;
@@ -102,7 +125,12 @@ pub fn hEdit(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32, results
     const saved = p.activeCtx().principal;
     p.activeCtx().principal = p.principal();
     defer p.activeCtx().principal = saved;
-    p.activeCtx().edit(.{ .start = @intCast(args[0]), .end = @intCast(args[1]) }, bytes) catch {};
+    const start: usize = @intCast(args[0]);
+    const end: usize = @intCast(args[1]);
+    p.activeCtx().edit(.{ .start = start, .end = end }, bytes) catch |e| switch (e) {
+        error.OutOfLimit, error.Collapsed => trapDocRegion(p, caller, start, end, e),
+        else => {},
+    };
 }
 
 /// `edit_as(agent, start, end, bytes)` (perm edit): the gated `ctx.edit` door,
@@ -127,7 +155,12 @@ pub fn hEditAs(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32, resul
         p.activeCtx().principal = saved_prin;
         p.author_override = saved_override;
     }
-    p.activeCtx().edit(.{ .start = @intCast(args[2]), .end = @intCast(args[3]) }, bytes) catch {};
+    const start: usize = @intCast(args[2]);
+    const end: usize = @intCast(args[3]);
+    p.activeCtx().edit(.{ .start = start, .end = end }, bytes) catch |e| switch (e) {
+        error.OutOfLimit, error.Collapsed => trapDocRegion(p, caller, start, end, e),
+        else => {},
+    };
 }
 
 /// `render(start, end, bytes)` (perm edit): produce derived/streamed content
@@ -319,5 +352,8 @@ pub fn hEditRange(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32, re
     const saved = p.activeCtx().principal;
     p.activeCtx().principal = p.principal();
     defer p.activeCtx().principal = saved;
-    p.activeCtx().edit(.{ .start = cur.start, .end = cur.end }, bytes) catch {};
+    p.activeCtx().edit(.{ .start = cur.start, .end = cur.end }, bytes) catch |e| switch (e) {
+        error.OutOfLimit, error.Collapsed => trapDocRegion(p, caller, cur.start, cur.end, e),
+        else => {},
+    };
 }

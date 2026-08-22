@@ -170,6 +170,11 @@ pub fn fsRead(gpa: Allocator, id: anytype, path: []const u8) PermError!?[]u8 {
                 else => null,
             };
         },
+        // A `.doc_region` limit is a TEXT-EDIT-shaped narrowing (W4 slice 3)
+        // — it never legitimately rides an fs_read/fs_write grant. Fail
+        // CLOSED, not open: a malformed/mismatched limit denies rather than
+        // silently degrading to unconfined access.
+        .doc_region => return error.OutOfLimit,
     }
 }
 
@@ -212,6 +217,7 @@ pub fn fsExists(gpa: Allocator, id: anytype, path: []const u8) PermError!file.Ki
             _ = rootRelative(root, path) orelse return error.OutOfLimit;
             return file.statKind(gpa, path);
         },
+        .doc_region => return error.OutOfLimit, // see `fsRead`'s doc: fail closed on a mismatched limit shape
     }
 }
 
@@ -253,6 +259,7 @@ pub fn fsWrite(gpa: Allocator, id: anytype, path: []const u8, bytes: []const u8)
             };
             return true;
         },
+        .doc_region => return error.OutOfLimit, // see `fsRead`'s doc: fail closed on a mismatched limit shape
     }
 }
 
@@ -299,6 +306,7 @@ pub fn fsAppend(gpa: Allocator, id: anytype, path: []const u8, bytes: []const u8
             };
             return true;
         },
+        .doc_region => return error.OutOfLimit, // see `fsRead`'s doc: fail closed on a mismatched limit shape
     }
 }
 
@@ -342,6 +350,7 @@ pub fn fsList(gpa: Allocator, id: anytype, authority: []const u8, path: []const 
             defer fs.close();
             return fs.list(gpa, ".") catch null;
         },
+        .doc_region => return error.OutOfLimit, // see `fsRead`'s doc: fail closed on a mismatched limit shape
         .fs_root => |root| {
             const rel = rootRelative(root, path) orelse return error.OutOfLimit;
             var rfs = openLimitedRoot(gpa, root) orelse return null;

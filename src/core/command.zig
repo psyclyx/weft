@@ -18,6 +18,7 @@ const Actions = @import("action.zig");
 const capability = @import("capability.zig");
 const authority = @import("authority.zig");
 const position = @import("position.zig");
+const grants_mod = @import("grants.zig");
 
 pub const Principal = authority.Principal;
 pub const Grade = authority.Grade;
@@ -155,7 +156,7 @@ pub const Context = struct {
         return &self.buffers.active().editor.doc;
     }
 
-    pub const EditError = Document.AddPeerError || error{Unauthorized};
+    pub const EditError = Document.AddPeerError || error{ Unauthorized, OutOfLimit, Collapsed };
 
     /// The invoking principal's grade on `doc`. The user inherits the
     /// document's own grade; a plugin/agent may not exceed `.edit` (nor the
@@ -169,6 +170,59 @@ pub const Context = struct {
         };
     }
 
+    /// `checkDocRegion`'s answer (north-star-plan §2.4/§6 W4 slice 3, review
+    /// B2's repair) — see `grants.DocRegion`'s doc for the full policy this
+    /// implements (side semantics, collapse conditions).
+    pub const DocRegionVerdict = union(enum) {
+        /// No `.doc_region` grant narrows this edit — either nothing is
+        /// wired (`grant_table == null`, every pre-W4/headless construction),
+        /// or the principal holds no such grant for THIS document. The
+        /// pre-existing `gradeOn` gate is the only gate in effect either way.
+        ok,
+        /// A live `.doc_region` grant applies, its anchors resolve, but `[r.start,
+        /// r.end)` reaches outside the resolved `[start, end)` — carries the
+        /// CURRENT resolved bounds for the trap message.
+        out_of_limit: struct { start: usize, end: usize },
+        /// A live `.doc_region` grant applies but its identity anchors no
+        /// longer resolve to a well-formed span — either `resolveAnchors`
+        /// itself failed (deleted-and-compacted, corrupt, foreign, or an
+        /// allocation failure: ANY failure fails CLOSED) or the region
+        /// degenerated to empty/inverted (its whole text was deleted — see
+        /// `grants.DocRegion`'s "Collapse policy"). A loud "re-grant needed",
+        /// never a silent narrowing.
+        collapsed,
+    };
+
+    /// The doc-region READ side (§6 W4 slice 3): does a live `.doc_region`
+    /// grant narrow the acting principal's edit of `[start, end)` on the
+    /// ACTIVE document? First live `.doc_region` row (scanned via the SAME
+    /// capture-time, predicate-gated collection `Ctx.capture` already
+    /// performs — `grants.zig`'s "no wallet" rule: this only ever looks at
+    /// what capture resolved, never re-derives possession) whose `doc_id`
+    /// names the active buffer wins; a principal holding none degrades to
+    /// `.ok` (§6 W4 slice 1/2's honest-v1 precedent: nothing production
+    /// mints a `.doc_region` grant yet — see `grants.zig`'s module doc — so
+    /// every existing plugin/agent is UNAFFECTED until a test, or a later
+    /// `weft.grant` verb, mints one).
+    pub fn checkDocRegion(self: *Context, start: usize, end: usize) DocRegionVerdict {
+        const table = self.grant_table orelse return .ok;
+        const doc = self.document();
+        const c = self.capturedCtx();
+        for (c.grants.constSlice()) |h| {
+            const region = switch (table.limitFor(h)) {
+                .doc_region => |dr| dr,
+                .none, .fs_root => continue,
+            };
+            if (!std.mem.eql(u8, region.doc_id, self.buffer().name)) continue;
+            var out: [2]usize = undefined;
+            doc.resolveAnchors(self.gpa, &.{ region.start, region.end }, &out) catch return .collapsed;
+            if (out[0] >= out[1]) return .collapsed; // whole region's text is gone
+            if (start < out[0] or end > out[1]) return .{ .out_of_limit = .{ .start = out[0], .end = out[1] } };
+            return .ok;
+        }
+        return .ok;
+    }
+
     /// INTERACTIVE edit: delete `r`, insert `bytes` on the ACTIVE document as a
     /// direct user/tool text mutation. This is the door for typing, vim
     /// operators, autopair, comment — anything that edits text AS text. It is
@@ -176,8 +230,22 @@ pub const Context = struct {
     /// derived content there), so a projection like magit/dired has NO
     /// interactive-edit path at all — no mode, split, or plugin can corrupt it
     /// as text. Refusal leaves the replica untouched (no ghost commit).
+    ///
+    /// **W4 slice 3**: also the doc-region enforcement point — the ONE
+    /// chokepoint every `wl_edit`/`wl_edit_as`/`wl_edit_range` guest door and
+    /// every host/in-process edit path already funnels through (see
+    /// `wasm_host/edit.zig`'s module doc), so wiring `checkDocRegion` HERE
+    /// covers all of them for free, with no per-transport duplication.
+    /// `render` deliberately does NOT get this check — it's content
+    /// PRODUCTION (a re-render from a model), not a principal editing text
+    /// it holds a scoped grant over.
     pub fn edit(self: *Context, r: Document.Range, bytes: []const u8) EditError!void {
         if (self.buffer().read_only or self.readOnlyOverlaps(r)) return error.Unauthorized;
+        switch (self.checkDocRegion(r.start, r.end)) {
+            .ok => {},
+            .out_of_limit => return error.OutOfLimit,
+            .collapsed => return error.Collapsed,
+        }
         return self.applyEdit(r, bytes, self.user_initiated);
     }
 
@@ -259,6 +327,107 @@ pub fn renderInto(
     if (!grade.canEdit()) return error.Unauthorized;
     const pid = try doc.peerNamed(gpa, name);
     doc.peerReplaceAll(gpa, pid, items) catch {};
+}
+
+/// [FIX 2] (doc/extensibility.md, release-blocking): apply a capability
+/// `.edits`-shaped `Result` (the format/rename/code-action `action` shape —
+/// `capability.Kind.format`/`.rename`, `Payload.edits`) through the SAME
+/// content-production gate `renderInto` already provides — grade-capped, one
+/// atomic commit — CLAMPED to the range the CONSUMER fired against (`fired`)
+/// and attributed to the PROVIDER's own name, never whatever principal is
+/// currently dispatching. Nothing calls this in production yet (no
+/// guest-side `weft.provideAction` registrar exists to populate an
+/// `action`-shaped `Provider` at all — see the module doc below) — same
+/// honest-v1 shape as `grants.DocRegion` (§6 W4 slice 3: "the machinery is
+/// the deliverable"). Tests fire a real `Caps` session against a fake
+/// provider and call this directly.
+///
+/// **The clamp (security-critical half, DONE).** `result.version` is
+/// core-enforced to be the session's FIRE-time version (`Caps.push`'s
+/// restamp — never trusted from the provider), so every `Replacement`'s
+/// `[start,end)` is unambiguously old-space against that ONE token. Each is
+/// rebased to the CURRENT head via `position.StampedRange`, the same
+/// machinery a motion's stamped range rebases through; so is `fired` (the
+/// range the consumer itself licensed at fire time — typically stamped at
+/// the SAME version, but rebased independently so a late apply against a
+/// moved-on document degrades honestly rather than comparing stale numbers).
+/// EVERY edit is checked BEFORE any is applied (`error.StaleVersion` if
+/// either side's version has fallen out of the commit log); a batch with ANY
+/// edit landing outside `fired`'s rebased bounds is refused WHOLESALE
+/// (`error.OutOfRange`, the overage logged) — never a partial apply, which
+/// would still let an attacker smuggle one bad edit in among legitimate
+/// ones.
+///
+/// **Re-attribution — the OTHER half of [FIX 2], HONEST SUBSET.** Applies as
+/// a peer NAMED after `result.provider` (`renderInto`'s `role=.plugin` +
+/// `name` — the same peer-naming primitive `Document.peerNamed` already
+/// gives `renderInto`'s other callers), never whatever principal is
+/// currently dispatching/firing — so the landed commit's author is the
+/// PROVIDER, gets its OWN selective-undo unit distinct from the firing
+/// user's, and is capped at `.edit` grade like any non-user peer. This
+/// closes the peer-attribution half of "a malicious host formatter returns
+/// a backdoor that lands as the victim's signed commit": the backdoor, if
+/// in-range, lands as the FORMATTER's peer, not the victim's. What this does
+/// NOT do: resolve `result.provider` back to a REAL `authority.Principal`
+/// with its own LIVE grant/predicate state (a revoked or narrowly-scoped
+/// provider still applies here as long as its NAME resolves to a peer) —
+/// that needs the capability registry to plumb a resolvable `Principal`
+/// through `Provider`/`Result`, which no `action`-shaped registrar exists to
+/// populate yet (only `edit/completion`'s `hProvideCompletion` registers
+/// ANYTHING guest-side today — there is no guest-side `weft.provideAction`).
+/// Named follow-up, not silently dropped.
+///
+/// **Why this routes through `renderInto`, not `Context.edit` (named
+/// divergence, W4 slice 3 review).** `Context.edit` is where `checkDocRegion`
+/// lives — but that gate answers "does the ACTING PRINCIPAL's own
+/// `.doc_region` grant cover this range", which is the wrong question for an
+/// applied action result: the acting authority here is the FIRED RANGE
+/// itself (`fired`, this function's clamp), not any grant the PROVIDER
+/// happens to hold. [FIX 2]'s threat model is "a formatter answers with
+/// bytes outside what it was asked to touch" — the fired-range clamp IS the
+/// gate for that threat, and it SUBSTITUTES for (does not stack with) a
+/// grant check here. Consequence, stated plainly: a provider's OWN
+/// `.doc_region` grant (if it ever held one) is NOT consulted when its
+/// results are applied through this function — unreachable in v1 (nothing
+/// mints an action-provider `.doc_region` grant, same honest-v1 note as
+/// everywhere else in this slice), but worth being honest about should a
+/// future caller expect BOTH gates to compose.
+pub const ApplyActionError = RenderError || error{ NotAnAction, StaleVersion, OutOfRange };
+
+pub fn applyActionResult(
+    gpa: Allocator,
+    doc: *Document,
+    fired: position.StampedRange,
+    result: *const capability.Result,
+) ApplyActionError!usize {
+    if (result.payload != .edits) return error.NotAnAction;
+    const edits = result.payload.edits;
+    const bounds = fired.rebase(doc) orelse return error.StaleVersion;
+
+    // Pre-flight EVERY edit before applying ANY of them — see this
+    // function's doc's "no partial apply" note.
+    const items = try gpa.alloc(Document.Replacement, edits.len);
+    defer gpa.free(items);
+    for (edits, 0..) |e, i| {
+        const r = position.StampedRange.at(result.version, e.start, e.end).rebase(doc) orelse return error.StaleVersion;
+        if (r.start < bounds.start or r.end > bounds.end) {
+            std.log.warn("capability: provider '{s}' action result touches [{d},{d}), outside the fired range [{d},{d}) — REFUSED", .{ result.provider, r.start, r.end, bounds.start, bounds.end });
+            return error.OutOfRange;
+        }
+        items[i] = .{ .range = r, .bytes = e.text };
+    }
+    // `peerReplaceAll` requires ascending-by-offset input (see
+    // `Document.replaceAll`'s doc); a provider's edits may arrive in any
+    // order (LSP TextEdit[] is unordered) — sort defensively rather than
+    // trust it, the same "structural impossibility over convention" posture
+    // the rest of this gate takes.
+    std.mem.sort(Document.Replacement, items, {}, struct {
+        fn lessThan(_: void, a: Document.Replacement, b: Document.Replacement) bool {
+            return a.range.start < b.range.start;
+        }
+    }.lessThan);
+    try renderInto(gpa, doc, .plugin, result.provider, items);
+    return items.len;
 }
 
 pub const Command = struct {
@@ -650,4 +819,516 @@ test "command: read-only refuses interactive edit, allows render (in depth)" {
     const out2 = try ctx.document().text().toOwnedSlice(gpa);
     defer gpa.free(out2);
     try t.expectEqualStrings("TREE!", out2);
+}
+
+// ── W4 slice 3: doc_region grants + action-result clamping ─────────────
+// (north-star-plan §2.4/§6 W4, review B2's repair; doc/extensibility.md
+// [FIX 2]). Shared fixture: a real Buffers/Document-backed Context with a
+// wired grant_table — mirrors the tests above, factored out because this
+// section needs it five times.
+
+const DocRegionEnv = struct {
+    gpa: Allocator,
+    pool: *@import("task.zig").Pool,
+    buffers: Buffers,
+    keymap: Keymap = .empty,
+    head: Head = .empty,
+    container: @import("container.zig").Container,
+    caps: capability.Caps,
+    actions: Actions,
+    quit: bool = false,
+    commands: Commands = .empty,
+    table: grants_mod.HandleTable,
+    ctx: Context = undefined,
+
+    fn init(gpa: Allocator) !*DocRegionEnv {
+        const task = @import("task.zig");
+        const pool = try task.Pool.init(gpa, .{ .threads = 1 });
+        const self = try gpa.create(DocRegionEnv);
+        self.* = .{
+            .gpa = gpa,
+            .pool = pool,
+            .buffers = try Buffers.init(gpa, pool, "user"),
+            .container = @import("container.zig").Container.init(gpa),
+            .caps = undefined,
+            .actions = undefined,
+            .table = grants_mod.HandleTable.init(gpa),
+        };
+        self.caps = capability.Caps.init(gpa, task.nowNs, &self.container);
+        self.actions = Actions.init(gpa, &self.container);
+        self.ctx = .{
+            .gpa = gpa,
+            .buffers = &self.buffers,
+            .commands = &self.commands,
+            .keymap = &self.keymap,
+            .actions = &self.actions,
+            .caps = &self.caps,
+            .quit = &self.quit,
+            .head = &self.head,
+            .grant_table = &self.table,
+        };
+        try self.head.setModeRaw(gpa, "normal");
+        return self;
+    }
+
+    fn deinit(self: *DocRegionEnv) void {
+        const gpa = self.gpa;
+        self.head.deinit(gpa);
+        self.actions.deinit();
+        self.caps.deinit();
+        self.container.deinit();
+        self.commands.deinit(gpa);
+        self.keymap.deinit(gpa);
+        self.buffers.deinit(gpa);
+        self.table.deinit();
+        self.pool.deinit();
+        gpa.destroy(self);
+    }
+};
+
+/// A named, resolvable peer identity for these tests — the same tiny
+/// resolver shape the tests above already use for `.agent`/`.plugin`
+/// principals.
+const NamedPeer = struct {
+    gpa: Allocator,
+    name: []const u8,
+    fn resolve(actx: *anyopaque, d: *Document) Document.AddPeerError!Document.PeerId {
+        const a: *@This() = @ptrCast(@alignCast(actx));
+        return d.peerNamed(a.gpa, a.name);
+    }
+};
+
+test "command: W4 slice 3 — doc_region grant follows concurrent edits elsewhere, traps outside, grows at both boundaries" {
+    const gpa = t.allocator;
+    var env = try DocRegionEnv.init(gpa);
+    defer env.deinit();
+    const ctx = &env.ctx;
+    const doc = ctx.document();
+
+    // Seed "0123456789" as the user.
+    ctx.principal = .user;
+    ctx.user_initiated = true;
+    try ctx.edit(.{ .start = 0, .end = 0 }, "0123456789");
+    ctx.user_initiated = false;
+
+    // Region [3,7) = "3456" — GROWING boundaries: start anchors to the
+    // character BEFORE it ('2', side=.after), end to the character AFTER it
+    // ('7', side=.before). See `grants.DocRegion`'s doc for the choice.
+    const start_anchor = try doc.exportAnchor(gpa, 3, .after);
+    defer gpa.free(start_anchor.agent);
+    const end_anchor = try doc.exportAnchor(gpa, 7, .before);
+    defer gpa.free(end_anchor.agent);
+    _ = try env.table.grant(.{
+        .capability = "doc.edit",
+        .limit = .{ .doc_region = .{ .doc_id = ctx.buffer().name, .start = start_anchor, .end = end_anchor } },
+    }, "agent", null);
+
+    var agent_ident = NamedPeer{ .gpa = gpa, .name = "agent" };
+    ctx.principal = .{ .role = .agent, .name = "agent", .ctx = &agent_ident, .resolve = NamedPeer.resolve };
+
+    // Inside the region: allowed.
+    try ctx.edit(.{ .start = 4, .end = 5 }, "X"); // "3456" → "3X56"
+
+    // Outside the region: refused, distinctly (not Unauthorized).
+    try t.expectError(error.OutOfLimit, ctx.edit(.{ .start = 0, .end = 1 }, "Q"));
+
+    // A ground-truth resolve, matching what `checkDocRegion` itself computes
+    // — the test's oracle, not a hardcoded offset (proves "follows", not
+    // "happens to still work").
+    var bounds: [2]usize = undefined;
+    try doc.resolveAnchors(gpa, &.{ start_anchor, end_anchor }, &bounds);
+    try t.expectEqual(@as(usize, 3), bounds[0]);
+    try t.expectEqual(@as(usize, 7), bounds[1]);
+
+    // CONCURRENT EDIT ELSEWHERE (before the region), by an UNRELATED peer
+    // holding no doc_region grant — ordinary, unrestricted edit.
+    var other_ident = NamedPeer{ .gpa = gpa, .name = "other" };
+    ctx.principal = .{ .role = .plugin, .name = "other", .ctx = &other_ident, .resolve = NamedPeer.resolve };
+    try ctx.edit(.{ .start = 0, .end = 0 }, "XY"); // insert 2 bytes before the region
+
+    var bounds2: [2]usize = undefined;
+    try doc.resolveAnchors(gpa, &.{ start_anchor, end_anchor }, &bounds2);
+    try t.expectEqual(bounds[0] + 2, bounds2[0]); // the region SHIFTED with the edit...
+    try t.expectEqual(bounds[1] + 2, bounds2[1]); // ...both ends, uniformly — it FOLLOWED, not drifted
+
+    // The agent's grant follows: an edit at the (new) inside offset still
+    // works, and the (new) outside offset still traps.
+    ctx.principal = .{ .role = .agent, .name = "agent", .ctx = &agent_ident, .resolve = NamedPeer.resolve };
+    try ctx.edit(.{ .start = bounds2[0], .end = bounds2[0] + 1 }, "Z");
+    try t.expectError(error.OutOfLimit, ctx.edit(.{ .start = 0, .end = 1 }, "Q"));
+
+    // CONCURRENT EDIT ELSEWHERE (after the region) — appending far past the
+    // end must not move the region at all (neither anchor is anywhere near
+    // it).
+    ctx.principal = .{ .role = .plugin, .name = "other", .ctx = &other_ident, .resolve = NamedPeer.resolve };
+    const tail = doc.text().byteLen();
+    try ctx.edit(.{ .start = tail, .end = tail }, "TAIL");
+    var bounds3: [2]usize = undefined;
+    try doc.resolveAnchors(gpa, &.{ start_anchor, end_anchor }, &bounds3);
+    try t.expectEqual(bounds2[0], bounds3[0]);
+    try t.expectEqual(bounds2[1], bounds3[1]);
+
+    // ── Boundary insertions (both edges): GROWING semantics, decided.
+    // Insert exactly at the CURRENT start boundary — the agent's own
+    // authority — and confirm the region's END shifts right by exactly the
+    // inserted length (the interior, including the new text, is now wider).
+    ctx.principal = .{ .role = .agent, .name = "agent", .ctx = &agent_ident, .resolve = NamedPeer.resolve };
+    try ctx.edit(.{ .start = bounds3[0], .end = bounds3[0] }, "LEFT"); // zero-width insert AT the start boundary
+    var bounds4: [2]usize = undefined;
+    try doc.resolveAnchors(gpa, &.{ start_anchor, end_anchor }, &bounds4);
+    try t.expectEqual(bounds3[0], bounds4[0]); // start offset unchanged (still "right after '2'")...
+    try t.expectEqual(bounds3[1] + 4, bounds4[1]); // ...but the region WIDENED by "LEFT".len — inclusive
+    // Proof it's really inside: an edit touching exactly the inserted text
+    // succeeds under the SAME grant.
+    try ctx.edit(.{ .start = bounds4[0], .end = bounds4[0] + 4 }, "left");
+
+    // Insert exactly at the CURRENT end boundary — symmetric check.
+    var bounds5: [2]usize = undefined;
+    try doc.resolveAnchors(gpa, &.{ start_anchor, end_anchor }, &bounds5);
+    try ctx.edit(.{ .start = bounds5[1], .end = bounds5[1] }, "RIGHT"); // zero-width insert AT the end boundary
+    var bounds6: [2]usize = undefined;
+    try doc.resolveAnchors(gpa, &.{ start_anchor, end_anchor }, &bounds6);
+    try t.expectEqual(bounds5[0], bounds6[0]); // start unaffected
+    try t.expectEqual(bounds5[1] + 5, bounds6[1]); // end WIDENED by "RIGHT".len — inclusive
+    try ctx.edit(.{ .start = bounds6[1] - 5, .end = bounds6[1] }, "right"); // the inserted text is editable too
+}
+
+test "command: W4 slice 3 — deleting a doc_region's entire text collapses the grant (trap, never silent narrow)" {
+    const gpa = t.allocator;
+    var env = try DocRegionEnv.init(gpa);
+    defer env.deinit();
+    const ctx = &env.ctx;
+    const doc = ctx.document();
+
+    ctx.principal = .user;
+    ctx.user_initiated = true;
+    try ctx.edit(.{ .start = 0, .end = 0 }, "0123456789");
+    ctx.user_initiated = false;
+
+    const start_anchor = try doc.exportAnchor(gpa, 3, .after);
+    defer gpa.free(start_anchor.agent);
+    const end_anchor = try doc.exportAnchor(gpa, 7, .before);
+    defer gpa.free(end_anchor.agent);
+    _ = try env.table.grant(.{
+        .capability = "doc.edit",
+        .limit = .{ .doc_region = .{ .doc_id = ctx.buffer().name, .start = start_anchor, .end = end_anchor } },
+    }, "agent", null);
+
+    var agent_ident = NamedPeer{ .gpa = gpa, .name = "agent" };
+    ctx.principal = .{ .role = .agent, .name = "agent", .ctx = &agent_ident, .resolve = NamedPeer.resolve };
+
+    // Deleting the WHOLE region is itself an in-bounds edit (still allowed —
+    // the agent has full authority over its own region, including emptying
+    // it).
+    try ctx.edit(.{ .start = 3, .end = 7 }, "");
+
+    // The NEXT edit attempt under the same grant traps — collapsed, not a
+    // silent narrowing to some now-meaningless zero-width point.
+    try t.expectError(error.Collapsed, ctx.edit(.{ .start = 3, .end = 3 }, "x"));
+    switch (ctx.checkDocRegion(3, 3)) {
+        .collapsed => {},
+        .ok, .out_of_limit => return error.TestUnexpectedResult,
+    }
+}
+
+test "command: W4 slice 3 — compaction collapses a doc_region grant (trap, not UB)" {
+    const gpa = t.allocator;
+    var env = try DocRegionEnv.init(gpa);
+    defer env.deinit();
+    const ctx = &env.ctx;
+    const doc = ctx.document();
+
+    ctx.principal = .user;
+    ctx.user_initiated = true;
+    try ctx.edit(.{ .start = 0, .end = 0 }, "0123456789");
+    ctx.user_initiated = false;
+
+    const start_anchor = try doc.exportAnchor(gpa, 3, .after);
+    defer gpa.free(start_anchor.agent);
+    const end_anchor = try doc.exportAnchor(gpa, 7, .before);
+    defer gpa.free(end_anchor.agent);
+    _ = try env.table.grant(.{
+        .capability = "doc.edit",
+        .limit = .{ .doc_region = .{ .doc_id = ctx.buffer().name, .start = start_anchor, .end = end_anchor } },
+    }, "agent", null);
+
+    var agent_ident = NamedPeer{ .gpa = gpa, .name = "agent" };
+    ctx.principal = .{ .role = .agent, .name = "agent", .ctx = &agent_ident, .resolve = NamedPeer.resolve };
+    try ctx.edit(.{ .start = 4, .end = 5 }, "X"); // ordinary in-region edit, pre-compaction
+
+    // Compact at the current head — even though the region's TEXT is still
+    // present and untouched, identity anchors into compacted content stop
+    // resolving unconditionally (stemma's `TextDoc.compact` doc).
+    const version = try doc.version(gpa);
+    defer gpa.free(version);
+    try doc.compact(gpa, version);
+
+    try t.expectError(error.Collapsed, ctx.edit(.{ .start = 4, .end = 5 }, "y"));
+}
+
+test "command: W4 slice 3 — a single-commit rewrite of the WHOLE region survives (re-inflates); a two-step clear-then-type collapses" {
+    const gpa = t.allocator;
+    var env = try DocRegionEnv.init(gpa);
+    defer env.deinit();
+    const ctx = &env.ctx;
+    const doc = ctx.document();
+
+    ctx.principal = .user;
+    ctx.user_initiated = true;
+    try ctx.edit(.{ .start = 0, .end = 0 }, "0123456789");
+    ctx.user_initiated = false;
+
+    const start_anchor = try doc.exportAnchor(gpa, 3, .after);
+    defer gpa.free(start_anchor.agent);
+    const end_anchor = try doc.exportAnchor(gpa, 7, .before);
+    defer gpa.free(end_anchor.agent);
+    _ = try env.table.grant(.{
+        .capability = "doc.edit",
+        .limit = .{ .doc_region = .{ .doc_id = ctx.buffer().name, .start = start_anchor, .end = end_anchor } },
+    }, "agent", null);
+
+    var agent_ident = NamedPeer{ .gpa = gpa, .name = "agent" };
+    ctx.principal = .{ .role = .agent, .name = "agent", .ctx = &agent_ident, .resolve = NamedPeer.resolve };
+
+    // ONE atomic replace of the WHOLE region: delete [3,7) + insert
+    // "REWRITE" in the SAME `edit` call. Per `grants.DocRegion`'s doc, this
+    // does NOT collapse — the insert's CRDT origin sits adjacent to BOTH
+    // surviving boundary characters, so the region re-inflates around it.
+    try ctx.edit(.{ .start = 3, .end = 7 }, "REWRITE");
+    var bounds: [2]usize = undefined;
+    try doc.resolveAnchors(gpa, &.{ start_anchor, end_anchor }, &bounds);
+    try t.expectEqual(@as(usize, 3), bounds[0]);
+    try t.expectEqual(@as(usize, 10), bounds[1]); // "REWRITE" (7 bytes) fully absorbed
+    // Still-live grant: another in-region edit succeeds right after.
+    try ctx.edit(.{ .start = bounds[0], .end = bounds[0] + 1 }, "r");
+}
+
+test "command: W4 slice 3 (B2 adversarial a) — a peer's paste INSIDE the region is covered by the grant" {
+    const gpa = t.allocator;
+    var env = try DocRegionEnv.init(gpa);
+    defer env.deinit();
+    const ctx = &env.ctx;
+    const doc = ctx.document();
+
+    ctx.principal = .user;
+    ctx.user_initiated = true;
+    try ctx.edit(.{ .start = 0, .end = 0 }, "0123456789");
+    ctx.user_initiated = false;
+
+    const start_anchor = try doc.exportAnchor(gpa, 3, .after);
+    defer gpa.free(start_anchor.agent);
+    const end_anchor = try doc.exportAnchor(gpa, 7, .before);
+    defer gpa.free(end_anchor.agent);
+    _ = try env.table.grant(.{
+        .capability = "doc.edit",
+        .limit = .{ .doc_region = .{ .doc_id = ctx.buffer().name, .start = start_anchor, .end = end_anchor } },
+    }, "agent", null);
+
+    // A DIFFERENT, unrelated peer pastes text into the MIDDLE of the region
+    // (not at either boundary) — an ordinary concurrent edit, unrestricted
+    // (it holds no doc_region grant of its own).
+    var other_ident = NamedPeer{ .gpa = gpa, .name = "other" };
+    ctx.principal = .{ .role = .plugin, .name = "other", .ctx = &other_ident, .resolve = NamedPeer.resolve };
+    try ctx.edit(.{ .start = 5, .end = 5 }, "PASTE"); // "01234" + "PASTE" + "56789"
+    const mid = try doc.text().toOwnedSlice(gpa);
+    defer gpa.free(mid);
+    try t.expectEqualStrings("01234PASTE56789", mid);
+
+    // The grantee can edit the PASTED text — it landed strictly between the
+    // two boundary anchors, so it is covered, not just the original bytes.
+    var bounds: [2]usize = undefined;
+    try doc.resolveAnchors(gpa, &.{ start_anchor, end_anchor }, &bounds);
+    try t.expectEqual(@as(usize, 3), bounds[0]); // unaffected — '2' didn't move
+    try t.expectEqual(@as(usize, 12), bounds[1]); // '7' shifted +5 (PASTE landed before it) — the region widened to absorb it
+
+    var agent_ident = NamedPeer{ .gpa = gpa, .name = "agent" };
+    ctx.principal = .{ .role = .agent, .name = "agent", .ctx = &agent_ident, .resolve = NamedPeer.resolve };
+    // "PASTE" occupies [5,10) in "01234PASTE56789" — squarely inside
+    // [bounds[0], bounds[1]). Replace it under the grant: must succeed.
+    try ctx.edit(.{ .start = 5, .end = 10 }, "paste");
+    const after = try doc.text().toOwnedSlice(gpa);
+    defer gpa.free(after);
+    try t.expectEqualStrings("01234paste56789", after);
+}
+
+test "command: W4 slice 3 (B2 adversarial b) — cut-inside-then-paste-outside traps: the grant does not follow content out of the region" {
+    const gpa = t.allocator;
+    var env = try DocRegionEnv.init(gpa);
+    defer env.deinit();
+    const ctx = &env.ctx;
+    const doc = ctx.document();
+
+    ctx.principal = .user;
+    ctx.user_initiated = true;
+    try ctx.edit(.{ .start = 0, .end = 0 }, "0123456789");
+    ctx.user_initiated = false;
+
+    const start_anchor = try doc.exportAnchor(gpa, 3, .after);
+    defer gpa.free(start_anchor.agent);
+    const end_anchor = try doc.exportAnchor(gpa, 7, .before);
+    defer gpa.free(end_anchor.agent);
+    _ = try env.table.grant(.{
+        .capability = "doc.edit",
+        .limit = .{ .doc_region = .{ .doc_id = ctx.buffer().name, .start = start_anchor, .end = end_anchor } },
+    }, "agent", null);
+
+    var agent_ident = NamedPeer{ .gpa = gpa, .name = "agent" };
+    ctx.principal = .{ .role = .agent, .name = "agent", .ctx = &agent_ident, .resolve = NamedPeer.resolve };
+
+    // CUT: delete "45" from inside the region ([4,6) of "3456") — an
+    // ordinary in-bounds edit, allowed.
+    try ctx.edit(.{ .start = 4, .end = 6 }, "");
+    const cut = try doc.text().toOwnedSlice(gpa);
+    defer gpa.free(cut);
+    try t.expectEqualStrings("01236789", cut);
+
+    // PASTE outside: the SAME grantee tries to paste the cut text ("45")
+    // at offset 0 — well outside the (now-shrunk) region. The grant is
+    // bound to the FIXED identity-anchored span, not to wherever cut
+    // content happens to relocate — this MUST trap, never silently follow
+    // the content out.
+    try t.expectError(error.OutOfLimit, ctx.edit(.{ .start = 0, .end = 0 }, "45"));
+    const unchanged = try doc.text().toOwnedSlice(gpa);
+    defer gpa.free(unchanged);
+    try t.expectEqualStrings("01236789", unchanged); // refused: no ghost paste
+}
+
+test "command: W4 slice 3 — multiple doc_region grants for one principal: the FIRST live matching row wins (v1 policy, locked)" {
+    const gpa = t.allocator;
+    var env = try DocRegionEnv.init(gpa);
+    defer env.deinit();
+    const ctx = &env.ctx;
+    const doc = ctx.document();
+
+    ctx.principal = .user;
+    ctx.user_initiated = true;
+    try ctx.edit(.{ .start = 0, .end = 0 }, "0123456789");
+    ctx.user_initiated = false;
+
+    // TWO doc_region grants for the SAME principal+document: a narrow one
+    // [3,7) minted FIRST, a wide-open one [0,10) minted SECOND. §6 W4 slice
+    // 3's `checkDocRegion` scans in mint order and stops at the first
+    // `.doc_region` match — so the NARROW one governs, even though a wider
+    // grant also exists. Locked here so a future change to that scan order
+    // is a deliberate, reviewed decision, not an accidental drift.
+    const narrow_start = try doc.exportAnchor(gpa, 3, .after);
+    defer gpa.free(narrow_start.agent);
+    const narrow_end = try doc.exportAnchor(gpa, 7, .before);
+    defer gpa.free(narrow_end.agent);
+    _ = try env.table.grant(.{
+        .capability = "doc.edit",
+        .limit = .{ .doc_region = .{ .doc_id = ctx.buffer().name, .start = narrow_start, .end = narrow_end } },
+    }, "agent", null);
+
+    const wide_start = try doc.exportAnchor(gpa, 0, .after);
+    defer gpa.free(wide_start.agent);
+    const wide_end = try doc.exportAnchor(gpa, 10, .before);
+    defer gpa.free(wide_end.agent);
+    _ = try env.table.grant(.{
+        .capability = "doc.edit",
+        .limit = .{ .doc_region = .{ .doc_id = ctx.buffer().name, .start = wide_start, .end = wide_end } },
+    }, "agent", null);
+
+    var agent_ident = NamedPeer{ .gpa = gpa, .name = "agent" };
+    ctx.principal = .{ .role = .agent, .name = "agent", .ctx = &agent_ident, .resolve = NamedPeer.resolve };
+
+    // An edit inside the WIDE grant but outside the NARROW one traps —
+    // proof the first (narrow) row is the one actually enforced.
+    try t.expectError(error.OutOfLimit, ctx.edit(.{ .start = 0, .end = 1 }, "Q"));
+    // Inside BOTH: allowed.
+    try ctx.edit(.{ .start = 4, .end = 5 }, "X");
+}
+
+test "command: W4 slice 3 [FIX 2] — applyActionResult refuses an out-of-range batch wholesale" {
+    const gpa = t.allocator;
+    var env = try DocRegionEnv.init(gpa);
+    defer env.deinit();
+    const ctx = &env.ctx;
+    const doc = ctx.document();
+
+    ctx.principal = .user;
+    ctx.user_initiated = true;
+    try ctx.edit(.{ .start = 0, .end = 0 }, "0123456789");
+    ctx.user_initiated = false;
+
+    // What the consumer fired against — say, a "format this selection"
+    // request over [2,8), stamped at the current head.
+    const fired_version = try doc.version(gpa);
+    defer gpa.free(fired_version);
+    const fired = position.StampedRange.at(fired_version, 2, 8);
+
+    // A fake provider whose SESSION answer touches bytes OUTSIDE [2,8) —
+    // the laundering shape [FIX 2] closes.
+    const BadProvider = struct {
+        fn handle(_: ?*anyopaque, caps: *capability.Caps, req: *const capability.Request) anyerror!void {
+            var edits = [_]capability.Replacement{
+                .{ .start = 0, .end = 1, .text = @constCast("Q") }, // outside [2,8)
+            };
+            try caps.push(req.session, .{ .id = "evil-formatter" }, .{ .edits = &edits });
+        }
+    };
+    try env.caps.register(.{
+        .capability = capability.Kind.format.capabilityName(),
+        .id = "test.bad-formatter",
+        .placement = .host,
+        .handler = BadProvider.handle,
+    });
+    const bad_session = (try env.caps.fire(.format, doc, null, .{})).?;
+    const bad_result = &env.caps.session(bad_session).?.all()[0];
+    try t.expectError(error.OutOfRange, applyActionResult(gpa, doc, fired, bad_result));
+    // Refused wholesale: the document is untouched.
+    const unchanged = try doc.text().toOwnedSlice(gpa);
+    defer gpa.free(unchanged);
+    try t.expectEqualStrings("0123456789", unchanged);
+    env.caps.finish(bad_session);
+}
+
+test "command: W4 slice 3 [FIX 2] — applyActionResult applies an in-range batch, re-attributed to the provider" {
+    const gpa = t.allocator;
+    var env = try DocRegionEnv.init(gpa);
+    defer env.deinit();
+    const ctx = &env.ctx;
+    const doc = ctx.document();
+
+    ctx.principal = .user;
+    ctx.user_initiated = true;
+    try ctx.edit(.{ .start = 0, .end = 0 }, "0123456789");
+    ctx.user_initiated = false;
+
+    const fired_version = try doc.version(gpa);
+    defer gpa.free(fired_version);
+    const fired = position.StampedRange.at(fired_version, 2, 8);
+
+    // A GOOD provider whose batch stays inside [2,8) — applies, and lands
+    // authored as the PROVIDER's own peer, not the firing user's.
+    const GoodProvider = struct {
+        fn handle(_: ?*anyopaque, caps: *capability.Caps, req: *const capability.Request) anyerror!void {
+            var edits = [_]capability.Replacement{
+                .{ .start = 4, .end = 5, .text = @constCast("X") }, // inside [2,8)
+            };
+            try caps.push(req.session, .{ .id = "good-formatter" }, .{ .edits = &edits });
+        }
+    };
+    try env.caps.register(.{
+        .capability = capability.Kind.format.capabilityName(),
+        .id = "test.good-formatter",
+        .placement = .host,
+        .handler = GoodProvider.handle,
+    });
+    const good_session = (try env.caps.fire(.format, doc, null, .{})).?;
+    const good_result = &env.caps.session(good_session).?.all()[0];
+    const applied = try applyActionResult(gpa, doc, fired, good_result);
+    try t.expectEqual(@as(usize, 1), applied);
+
+    const after = try doc.text().toOwnedSlice(gpa);
+    defer gpa.free(after);
+    try t.expectEqualStrings("0123X56789", after);
+    // Re-attribution, TIGHT: the landed commit's author is EXACTLY the
+    // provider's own peer (`doc.peerNamed("good-formatter")` — idempotent
+    // for a live name, so this re-resolves the SAME id `applyActionResult`
+    // minted), not merely "some non-user peer".
+    const provider_peer = try doc.peerNamed(gpa, "good-formatter");
+    const last = doc.commitAt(doc.commitCount() - 1);
+    try t.expectEqual(provider_peer, last.author);
+    env.caps.finish(good_session);
 }

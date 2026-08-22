@@ -46,6 +46,26 @@ fn hostCursor(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32, result
     results[0] = @intCast(h.ctx.editor().cursorOffset());
 }
 
+/// W4 slice 3 (north-star-plan §2.4/§6, review B2's repair): `hostEdit` is a
+/// wasm-transport trampoline too (this minimal ABI's `run` door, per the
+/// module doc's "milestone-2 proof" — `caller` is a real `*wasm.Caller`, not
+/// a stand-in), so the SAME "denied effects trap" bar
+/// `wasm_host/edit.zig`'s `hEdit`/`hEditAs`/`hEditRange` meet applies here.
+/// A twin of that file's `trapDocRegion` (kept separate rather than shared:
+/// this ABI's `HostCtx` carries a `*command.Context` directly, not a
+/// `*WasmPlugin` — sharing would need a needless duck-typed coupling for one
+/// caller).
+fn trapDocRegion(h: *HostCtx, caller: *wasm.Caller, start: usize, end: usize, err: anyerror) void {
+    switch (err) {
+        error.OutOfLimit => switch (h.ctx.checkDocRegion(start, end)) {
+            .out_of_limit => |b| caller.trap("plugin '{s}' doc-edit [{d},{d}) is outside its granted region [{d},{d})", .{ h.name, start, end, b.start, b.end }),
+            .ok, .collapsed => caller.trap("plugin '{s}' doc-edit [{d},{d}) denied: outside its granted doc_region", .{ h.name, start, end }),
+        },
+        error.Collapsed => caller.trap("plugin '{s}' doc-edit grant COLLAPSED — its identity anchors no longer resolve (deleted or compacted); re-grant needed", .{h.name}),
+        else => unreachable,
+    }
+}
+
 fn hostEdit(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32, results: []i32) void {
     _ = results;
     const h: *HostCtx = @ptrCast(@alignCast(data.?));
@@ -56,7 +76,16 @@ fn hostEdit(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32, results:
     const saved = h.ctx.principal;
     h.ctx.principal = .{ .role = .plugin, .name = h.name, .ctx = h, .resolve = resolvePeer };
     defer h.ctx.principal = saved;
-    h.ctx.edit(.{ .start = @intCast(args[0]), .end = @intCast(args[1]) }, bytes) catch {};
+    const start: usize = @intCast(args[0]);
+    const end: usize = @intCast(args[1]);
+    // `error.Unauthorized`/`Document.AddPeerError` still swallow silently
+    // here — the SAME pre-existing gap `wasm_host/edit.zig`'s module doc
+    // names for its three doors, now named here too rather than left
+    // implicit; only the two W4 slice 3 errors are new and MUST trap.
+    h.ctx.edit(.{ .start = start, .end = end }, bytes) catch |e| switch (e) {
+        error.OutOfLimit, error.Collapsed => trapDocRegion(h, caller, start, end, e),
+        else => {},
+    };
 }
 
 fn resolvePeer(ctx: *anyopaque, doc: *Document) Document.AddPeerError!Document.PeerId {

@@ -203,6 +203,19 @@ pub const UndoLog = struct {
         normalize(&repls);
         // Author the inverse as THIS log's identity so it is that peer's
         // own unit (a spawned peer's undo never lands as the user's edit).
+        //
+        // NAMED GAP (W4 slice 3 review): this calls `Document.replaceAll`/
+        // `peerReplaceAll` directly — NOT through `command.Context.edit` —
+        // so a `.doc_region` grant's `checkDocRegion` gate is NEVER
+        // consulted here. Safe TODAY because undo is always USER-DRIVEN
+        // (a human invoking undo/redo, even over an agent's own history,
+        // per this file's module doc — "never state restoration," an
+        // ordinary inverse-op replay, not an autonomous principal acting).
+        // A FUTURE "agent undo" verb (an agent programmatically unwinding
+        // its OWN edits as an autonomous action, not on a human's keypress)
+        // would need to route through `ctx.edit` — or re-derive the SAME
+        // gate here — so a scoped grant's boundary can't be bypassed by
+        // asking for undo instead of a forward edit.
         if (self.author == .user) {
             try doc.replaceAll(gpa, repls.items);
         } else {

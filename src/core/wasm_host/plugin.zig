@@ -137,11 +137,12 @@ pub fn trapPermDenied(p: *WasmPlugin, caller: *wasm.Caller, comptime perm: Perm)
         .scope_expired => "scope expired",
         // `.ok`/`.never_granted` are the only reasons `hasPerm`'s FALSE result
         // can actually correspond to when no limit is in play (this function
-        // is only ever called after `hasPerm` already said no); `.out_of_limit`
-        // is never `reasonFor`'s answer (it doesn't inspect paths — see
-        // `grants.Reason`'s doc) but the switch must stay exhaustive over the
-        // shared enum, so it's bucketed with the same wording, defensively.
-        .never_granted, .ok, .out_of_limit => "not requested in describe()",
+        // is only ever called after `hasPerm` already said no); `.out_of_limit`/
+        // `.collapsed` are never `reasonFor`'s answer (neither inspects paths
+        // or documents — see `grants.Reason`'s doc) but the switch must stay
+        // exhaustive over the shared enum, so both are bucketed with the same
+        // wording, defensively.
+        .never_granted, .ok, .out_of_limit, .collapsed => "not requested in describe()",
     } else "not requested in describe()";
     caller.trap("plugin '{s}' denied capability '{s}' ({s})", .{ p.name, perm.label(), reason });
 }
@@ -160,7 +161,7 @@ pub fn trapPermDenied(p: *WasmPlugin, caller: *wasm.Caller, comptime perm: Perm)
 pub fn trapOutOfLimit(p: *WasmPlugin, caller: *wasm.Caller, comptime perm: Perm, path: []const u8) void {
     const root: []const u8 = switch (limitFor(p, perm)) {
         .fs_root => |r| r,
-        .none => "?",
+        .none, .doc_region => "?", // this trap is fs-path-shaped; `.doc_region` never reaches it (see this fn's doc)
     };
     caller.trap("plugin '{s}' denied capability '{s}': path '{s}' is outside the granted root '{s}'", .{ p.name, perm.label(), path, root });
 }
