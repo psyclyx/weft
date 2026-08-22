@@ -125,19 +125,23 @@
 const std = @import("std");
 const Allocator = std.mem.Allocator;
 const facts_mod = @import("facts.zig");
-const stemma = @import("stemma");
 const graph = @import("graph.zig");
+const Document = @import("Document.zig");
 
 pub const Facts = facts_mod.Facts;
 pub const Predicate = facts_mod.Predicate;
 
-/// The portable identity anchor a `.doc_region` limit is keyed on — stemma's
-/// `TextDoc.EventAnchor` (agent name + seq + side), re-exported here so this
-/// file doesn't need a `Document.zig` dependency just for a type alias (see
-/// `DocRegion`'s doc for why the EXPORTED form, not a byte offset, is what a
-/// limit stores).
-pub const EventAnchor = stemma.TextDoc.EventAnchor;
-pub const AnchorSide = stemma.TextDoc.AnchorSide;
+/// The portable identity anchor a `.doc_region` limit is keyed on — the
+/// SAME (agent, seq, side) type `Document.zig` re-exports (both `TextDoc`
+/// and `ObjectDoc` alias stemma's one `seq_walker.EventAnchor`/`AnchorSide`
+/// rather than defining their own — see `Document.EventAnchor`'s doc for
+/// the pin-vs-root-export note). Aliased through `Document` — not
+/// `stemma.TextDoc` again — so there is exactly one place in weft that
+/// resolves this type, not two independently-arrived-at aliases of the
+/// same thing (see `DocRegion`'s doc for why the EXPORTED form, not a
+/// byte offset, is what a limit stores).
+pub const EventAnchor = Document.EventAnchor;
+pub const AnchorSide = Document.AnchorSide;
 
 /// A `.doc_region` limit (north-star-plan §2.4/§6 W4 slice 3, review B2's
 /// repair): "text-region limits are identity-anchored, not

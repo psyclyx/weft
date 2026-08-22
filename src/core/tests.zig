@@ -1001,7 +1001,7 @@ test "editor: bulk load — big file opens as a compacted base, edits and saves"
     defer ed.deinit(gpa);
     try ed.openFile(gpa, path);
     // Zero events: the content is the base.
-    try t.expectEqual(@as(usize, 0), ed.doc.doc.history.eventCount());
+    try t.expectEqual(@as(usize, 0), ed.doc.eventCount());
     try t.expect(!try ed.isDirty(gpa));
 
     // Ordinary editing + guarded save on top of the base.
@@ -1060,7 +1060,7 @@ test "editor: compactNow keeps the backing mirror and saves working" {
     defer ed.deinit(gpa);
     try ed.openFile(gpa, path);
     try ed.compactNow(gpa);
-    try t.expectEqual(@as(usize, 0), ed.doc.doc.history.eventCount());
+    try t.expectEqual(@as(usize, 0), ed.doc.eventCount());
     try t.expect(!try ed.isDirty(gpa));
 
     // The panic case: edit + save AFTER compaction — markSaved's
