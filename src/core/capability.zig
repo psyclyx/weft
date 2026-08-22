@@ -18,26 +18,41 @@
 //! (completion), first-wins-by-priority (hover/definition/symbols/
 //! actions), union (references, diagnostics-by-layer).
 //!
-//! **F5 Container adapter (north-star-plan §2.2/§5/§6 W1).** The "which
-//! providers match this fire" step — the extension filter formerly inline in
-//! `fire` — is now a `container.Container` query: `register` binds each
-//! provider as a `Binding` (predicate built from its `extensions`,
-//! composition from `Kind.composition()`), and `fire` asks the Container for
-//! the eligible set instead of hand-scanning `self.providers`. Sessions,
-//! restamping, and the race/merge machinery below are UNTOUCHED — this is
-//! the "only the match step delegates" adapter the plan calls for.
+//! **F5 Container adapter, W3 RESOLVED (north-star-plan §2.2/§5/§6 W1/W3).**
+//! The "which providers match this fire" step — the extension filter
+//! formerly inline in `fire` — is a `container.Container` query: `register`
+//! binds each provider as a `Binding` (predicate built from its
+//! `extensions`, composition from `Kind.composition()`), and `fire` asks the
+//! Container for the eligible set (`container.eligible`) instead of
+//! hand-scanning `self.providers`. There is no parallel matcher left beside
+//! it: `Provider.matches` — the pre-Container hand-rolled extension check —
+//! is DELETED (it was already dead, superseded, and unreferenced outside its
+//! own definition; nothing to keep it around for). Sessions, restamping, and
+//! the race/merge machinery below are UNTOUCHED — this was always the "only
+//! the match step delegates" adapter the plan calls for, and the match step
+//! now delegates completely.
 //!
-//! **The shared-Container fold-in (task #19, the W3 deletion gate's first
-//! half).** `self.container` is BORROWED, not owned — the same shared
+//! **The shared-Container fold-in (task #19) + what remains, honestly.**
+//! `self.container` is BORROWED, not owned — the same shared
 //! `container.Container` instance `action.zig`'s `Actions` and
 //! `gfx/view/ui_mesh.zig`'s `ui/*` slots bind into (System/Session owns and
 //! tears it down; see `action.zig`'s matching doc for the full reasoning,
 //! identical here). Capability names, action names, and `ui/*` mesh names
-//! are one flat Container slot namespace now. NOT yet done: `fire`'s match
-//! step still queries the Container through THIS module's own adapter shape
-//! (`Kind`/`Provider`/session bookkeeping) rather than a caller resolving
-//! against a bare `container.Container` — deleting this adapter outright is
-//! the remaining, later half of W3's deletion gate.
+//! are one flat Container slot namespace now. What's LEFT here after the
+//! match step folds is not adapter logic, it's the domain's own payload
+//! store and registration facade — neither one an "adapter" in the sense
+//! W3's gate means: `self.providers` (this module's OWN store of `Provider`
+//! structs — handler function pointers, `data` closures, latency/placement
+//! metadata — none of which `container.Binding` has any schema for; a
+//! `Binding` names a provider, it doesn't carry its behavior) and
+//! `findProviderBySeq` (the lookup FROM a winning `Binding`'s
+//! `caps_provider.seq` BACK to that struct — see its doc for why `seq`, not
+//! `id`, is the only safe key: `syntax.registerProviders` legitimately
+//! registers the same `id` once per buffer). A `Binding` is the Container's
+//! answer to "who's eligible, in what order"; the `Provider` struct is what
+//! you actually DO once you have that answer — resolution has exactly one
+//! implementation (the Container), the payload store does not compete with
+//! it.
 
 const std = @import("std");
 const Allocator = std.mem.Allocator;
@@ -268,18 +283,6 @@ pub const Provider = struct {
         for (self.extensions) |e| gpa.free(e);
         gpa.free(self.extensions);
         gpa.free(self.predicate_owned);
-    }
-
-    /// Superseded by the Container query `fire` now uses (see the file doc's
-    /// F5 note) — kept as a small, still-correct standalone predicate for
-    /// any future direct introspection; not on the dispatch path anymore.
-    fn matches(self: *const Provider, path: ?[]const u8) bool {
-        if (self.extensions.len == 0) return true;
-        const p = path orelse return false;
-        for (self.extensions) |ext| {
-            if (std.mem.endsWith(u8, p, ext)) return true;
-        }
-        return false;
     }
 };
 

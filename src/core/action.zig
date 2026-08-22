@@ -14,8 +14,10 @@
 //! Actions ride the command door: declaring one registers a trampoline
 //! `Command` of the same name (see command.registerAction), so the keymap, ex
 //! commands, the palette, and programmatic `command.run` all dispatch actions
-//! uniformly — no bespoke firing path. The trampoline resolves the provider
-//! against the live `Ctx` and tail-calls the chosen command.
+//! uniformly — no bespoke firing path. The trampoline (`command.actionTrampoline`)
+//! resolves the provider by querying the shared `container.Container` DIRECTLY
+//! against the live `Ctx`'s full merged facts — not through this module (see
+//! the W3 note below) — and tail-calls the chosen command.
 //!
 //! Two dispatch policies. `pick` (implemented here) runs the single best
 //! applicable provider — the synchronous, command-shaped intents (eval, format,
@@ -26,30 +28,48 @@
 //! reserved policy and delegate to `Caps` at their (few, UI-bound) call sites,
 //! folded in incrementally rather than migrated wholesale.
 //!
-//! **F5 Container adapter (north-star-plan §2.2/§5/§6 W1).** `pick`
-//! resolution is re-expressed as a query against `container.Container`: each
-//! `provide()` call also binds a Container `Binding` on a slot named for the
-//! action; `resolve()` queries `container.resolveOne` instead of hand-rolling
-//! the priority/specificity scan. This is a TRANSITIONAL adapter. Tie-break
-//! behavior for EXISTING data is preserved exactly — see `resolve`'s and
-//! `provide`'s doc comments for how.
+//! **F5 Container adapter, W3 RESOLVED (north-star-plan §2.2/§5/§6 W1/W3).**
+//! `pick` resolution is a query against `container.Container`: each
+//! `provide()` call binds a Container `Binding` on a slot named for the
+//! action, using `When`/`ProvideSpec` only to TRANSLATE into a `Binding` at
+//! registration time (predicate, priority, tier, owner, `decl_index`). The
+//! RESOLVE half of the adapter — the thing W3's deletion gate named — is
+//! gone from the dispatch path: `command.actionTrampoline` (the ONE call
+//! site that fires on every keystroke) queries `container.resolveOne`
+//! directly against the captured `Ctx`'s full `mergedFacts()`, no longer
+//! routing through this module's `resolve()`/`Ctx`/`factsOf` narrow-then-
+//! rebuild round trip. See `command.zig`'s `actionTrampoline` doc for the
+//! exact before/after and why the round trip was real adapter glue (not
+//! merely an extra hop): it silently discarded every `Facts` field this
+//! module's `Ctx` doesn't carry (path, tags, pane, …) before Container ever
+//! saw them.
 //!
-//! **The shared-Container fold-in (task #19, the W3 deletion gate's first
-//! half).** `self.container` is no longer an instance THIS module owns —
-//! it's a `*container.Container` BORROWED from whoever constructs this
-//! `Actions` (`System.zig`/`app/session.zig`/every test `Env`), the SAME
-//! instance `capability.zig`'s `Caps` and `gfx/view/ui_mesh.zig`'s
-//! statusline/gutter slots bind into: action names, `edit/*` capability
-//! names, and `ui/*` mesh names are one flat namespace of Container slot
-//! names now (they already couldn't collide — see `container.zig`'s doc).
-//! What this fold-in does NOT do — the deletion gate is not yet fully
-//! reached: `resolve()` below still calls `container.resolveOne` through
-//! THIS module's own adapter shape (its own `When`/`Ctx`/`ProvideSpec`
-//! vocabulary, its own `decl_index` bookkeeping) rather than a caller
-//! querying a bare `container.Container` directly — folding the RESOLVE
-//! PATH itself (deleting this adapter outright, not just unifying the store
-//! it adapts onto) is the remaining, later step the plan still calls W3's
-//! deletion gate.
+//! **What's left of this module (task #19's shared-Container fold-in +
+//! this fold's honest accounting).** `self.container` is a
+//! `*container.Container` BORROWED from whoever constructs this `Actions`
+//! (`System.zig`/`app/session.zig`/every test `Env`), the SAME instance
+//! `capability.zig`'s `Caps` and `gfx/view/ui_mesh.zig`'s statusline/gutter
+//! slots bind into — action names, `edit/*` capability names, and `ui/*`
+//! mesh names are one flat Container slot namespace. With the resolve path
+//! gone, `Actions` is a REGISTRATION FACADE over `Container.bind`, plus the
+//! domain vocabulary that facade needs: `When`/`ProvideSpec` → `Predicate`
+//! translation (`predicateFromWhen`), the `next_provide_seq` counter that
+//! reproduces the legacy "later registration wins" contract through the
+//! Container's "earlier `decl_index` wins" convention (see `provide`'s
+//! doc), and owner-scoped teardown (`unregisterByOwnerPrefix`/
+//! `unregisterByOwner`) — bookkeeping a bare `Container` has no way to do on
+//! its own, because it doesn't know which borrowed strings a `Provider`
+//! struct is about to free. `resolve()` itself is NOT deleted — it stays as
+//! a small, honest READ-side convenience (two lines: `container.resolveOne`
+//! + unwrap `.command`), used by this module's own tests, `System.zig`'s
+//! explain-adjacent test, `quickjs.zig`, `config_test.zig`, and
+//! `e2e/harness.zig`'s `actionSnapshot` — none of that is "adapter logic"
+//! anymore (no bespoke scan, no bespoke tie-break), just a narrow-`Ctx`
+//! call shape those callers still want. That IS the end state W3 asked for:
+//! REGISTER stays a domain-shaped binding constructor; RESOLVE is the
+//! Container, full stop, on the one path that matters (dispatch) — a
+//! convenience wrapper existing alongside it is not a second
+//! implementation of resolution, just a narrower door onto the same one.
 
 const std = @import("std");
 const Allocator = std.mem.Allocator;
@@ -403,11 +423,17 @@ fn ownedBacking(p: facts.Predicate) []facts.Predicate {
 /// function of the provider set and the context, never load-order dependent
 /// beyond the deliberate same-(priority,specificity) last-wins.
 ///
-/// F5 adapter: a Container query (`container.resolveOne`) rather than the
-/// hand-rolled scan this doc comment used to describe verbatim — see
-/// `provide`'s `decl_index` note for how "later registration wins" survives
-/// the swap. On the dispatch-latency hot path (`e2e/latency`'s `action`
-/// category): no allocation, matching the original scan's profile.
+/// **Not the dispatch path (W3 fold, see the file doc).** A thin two-line
+/// convenience — `container.resolveOne` + unwrap `.provider.command` — kept
+/// for callers that want the narrow `Ctx` (mode/lang/tool) shape: this
+/// module's own tests, `System.zig`, `quickjs.zig`, `config_test.zig`,
+/// `e2e/harness.zig`'s `actionSnapshot`. `command.actionTrampoline` — the
+/// actual per-keystroke hot path `e2e/latency`'s `action` category measures
+/// — no longer calls this; it queries `self.container.resolveOne` directly
+/// against the FULL captured `mergedFacts()`, skipping the narrow-then-
+/// rebuild `Ctx`/`factsOf` round trip this method still does for its own
+/// callers. No allocation either way — same profile as the original
+/// hand-rolled scan this used to describe verbatim, before the F5 adapter.
 pub fn resolve(self: *const Actions, name: []const u8, ctx: Ctx) ?[]const u8 {
     const b = self.container.resolveOne(name, factsOf(ctx)) orelse return null;
     return b.provider.command;

@@ -102,13 +102,16 @@ pub const Context = struct {
     }
 
     /// Snapshot the ambient facts an action's `when` predicate resolves
-    /// against: the active keymap mode + the active buffer's language (its
-    /// name's extension) + the active buffer's tool-backing identity.
-    /// north-star-plan §2.1/§6 W2b: this is now literally a VIEW of the
-    /// captured `Ctx` — `capturedCtx().mergedFacts()` — rather than its own
-    /// ad hoc re-snapshot, so a Container resolution call site and an
-    /// `action.resolve` call site read the exact same merged facts for the
-    /// same dispatch. Borrowed for the duration of the call.
+    /// against, narrowed to the `Actions.Ctx` (mode/lang/tool) view — the
+    /// F5-adapter vocabulary `Actions.resolve` still takes. **Not the
+    /// dispatch path anymore** (north-star-plan §5 F5/§6 W3): `actionTrampoline`
+    /// below now calls `ctx.actions.container.resolveOne` directly against
+    /// the FULL `capturedCtx().mergedFacts()`, so the hot path no longer
+    /// narrows-then-rebuilds a `Facts` through this type. What's left of this
+    /// method is a convenience for callers that still want the narrow
+    /// `Actions.Ctx` shape — `Actions.resolve`'s own test/introspection
+    /// callers (see `System.zig`'s explain-binding-adjacent test) — kept
+    /// working, unmodified, on the same contract it always had.
     pub fn actionCtx(self: *Context) Actions.Ctx {
         const facts = self.capturedCtx().mergedFacts();
         return .{ .mode = facts.mode, .lang = facts.lang, .tool = facts.tool };
@@ -275,10 +278,28 @@ pub fn run(commands: *const Commands, ctx: *Context, name: []const u8, args: []c
 /// action key in the wrong buffer should explain, not fail). A `race` action's
 /// synchronous trampoline resolves nothing (its providers answer over time
 /// through `Caps`); it's a no-op here by design, surfaced as such.
+///
+/// **F5/W3, the resolve-path fold (north-star-plan §5 F5/§6 W3).** This is
+/// now a bare `container.Container.resolveOne` call against the captured
+/// `Ctx`'s FULL merged facts — not `Actions.resolve`/`Context.actionCtx`'s
+/// narrowed mode/lang/tool round trip (snapshot the full `Facts`, throw away
+/// everything but 3 fields into an `Actions.Ctx`, then rebuild a `Facts` with
+/// those 3 fields and defaults for the rest — the exact adapter-shape glue
+/// the plan's W3 gate names). `action.When` only ever tests mode/lang/tool
+/// today, so the two are behaviorally identical; the fold is real anyway,
+/// because it deletes a per-dispatch allocation-free-but-still-real double
+/// conversion on the hottest path in the editor (`e2e/latency`'s `action`
+/// category measures exactly this call), and it means a FUTURE action
+/// predicate over a field `Actions.Ctx` doesn't carry (path, tags, pane, …)
+/// needs no new plumbing here — the Container already sees the whole `Facts`
+/// value. `Actions.resolve` itself is UNCHANGED and still public — see its
+/// doc for why it stays (a registration facade's natural read-side
+/// convenience, and ~30 existing test call sites depend on its exact
+/// signature).
 pub fn actionTrampoline(ctx: *Context, data: ?*anyopaque, args: []const Value) anyerror!Value {
     const tr: *Actions.Trampoline = @ptrCast(@alignCast(data.?));
-    if (ctx.actions.resolve(tr.name, ctx.actionCtx())) |cmd| {
-        return run(ctx.commands, ctx, cmd, args);
+    if (ctx.actions.container.resolveOne(tr.name, ctx.capturedCtx().mergedFacts())) |b| {
+        return run(ctx.commands, ctx, b.provider.command, args);
     }
     ctx.head.echo.clearRetainingCapacity();
     const lang = Actions.langOfName(ctx.buffers.active().name);
