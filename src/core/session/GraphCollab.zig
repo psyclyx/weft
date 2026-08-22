@@ -47,7 +47,15 @@
 //! `base + 2` (diagnostics) and `base + 3` (blob/`.peer`-fs) remain
 //! unclaimed; a graph quad still reserves the full 4-wide slot (`Conn`'s
 //! `next_base` counter is shared with text shares, so bases never collide
-//! either way).
+//! either way). W6 slice 2 (identity-anchored SUBTREE GRANTS, north-star-
+//! plan.md §6 W6) claims no new channel at all: grants are HOST-declared
+//! and enforced entirely locally (`bindGrants`/`grantSubtree` below) — see
+//! that pair's doc comments for why nothing about a grant crosses the
+//! wire in this slice, unlike the lease (which announces so the OTHER side
+//! can display "locked by X"). `.region_refused`'s payload gains one
+//! trailing byte (a `RefusalReason`) so a refused sender can tell a lease
+//! refusal from an authority one from a collapsed-grant one — additive,
+//! same version-tolerance convention as the lease frame's trailing `hue16`.
 //!
 //! ## Bootstrap = the frontier exchange itself
 //!
@@ -81,6 +89,7 @@ const Session = @import("Session.zig");
 const sync_core = @import("sync_core.zig");
 const region_lease = @import("region_lease.zig");
 const LeaseTable = region_lease.LeaseTable;
+const grants_mod = @import("../grants.zig");
 
 const GraphCollab = @This();
 
@@ -130,9 +139,74 @@ reaped: bool = false,
 /// silently taking a region we never released.
 needs_lease_reannounce: bool = false,
 
+// ── W6 slice 2: identity-anchored SUBTREE GRANTS (doc/north-star-plan.md
+// §6 W6, d1-live-reconcile.md §5.2's "the same [per-region admission]
+// machinery W6 needs for identity-anchored subtree grants... used for
+// mutual exclusion instead of authority") — the SECOND predicate
+// `admitRegions`'s doc comment names, composing over the SAME
+// `touchedRegions` call the lease predicate already uses, ANDed into the
+// same admit/refuse control flow (see `admitRegions` below). `grants` is
+// NOT owned here — same "one table per REPLICA, bound in, not built in"
+// shape as `leases` — `null` (the default) means no grant enforcement, so
+// every existing caller of this driver keeps today's canEdit-only
+// admission unchanged. Reuses `grants.zig`'s `HandleTable` wholesale
+// (`Row`/`CapHandle`/`revoke`/`Reason` machinery already built, tested, and
+// System-agnostic — nothing about it requires the plugin/Ctx apparatus
+// `System.grants` happens to also use it for) rather than growing a THIRD
+// bespoke grant table alongside `HandleTable` and `LeaseTable` — see
+// `grantSubtree`'s doc comment for the declaration API and
+// `Limit.graph_subtree`'s doc comment (grants.zig) for the row shape and
+// collapse policy.
+grants: ?*grants_mod.HandleTable = null,
+/// Stable storage for `self.session`'s peer's AUTHENTICATED identity
+/// fingerprint (`Session.peerFingerprint()`), populated the first time
+/// `grantSubtree` mints a row — a `grants.HandleTable.Row.principal` is a
+/// BORROWED `[]const u8` that must outlive the row (see `grantSubtree`'s
+/// doc comment), and `peerFingerprint()` itself returns a fresh VALUE each
+/// call, not a pointer into anything stable, so this field is what a
+/// minted row actually borrows from. Copied, not a pointer into
+/// `self.session` itself, because a `rebind` across a reconnect swaps
+/// `self.session` to a DIFFERENT `*Session` object for the SAME peer
+/// (`rebind`'s own doc comment: "the peer's declared name is still valid —
+/// same peer, new link") — borrowing straight from the live session would
+/// dangle the instant the old session is destroyed. The identity itself
+/// (the peer's persistent keypair, hence its fingerprint) does not change
+/// across a reconnect, so a row minted before a rebind stays correctly
+/// matchable after one without needing to be re-minted.
+peer_fingerprint: ?[24]u8 = null,
+/// The capability name every `grantSubtree` row is minted under — a graph
+/// doc's own namespace, distinct from `.doc_region`'s `"doc.edit"` (a
+/// different substrate, a different chokepoint — see `Limit.graph_subtree`'s
+/// doc comment).
+pub const graph_edit_capability = "graph.edit";
+
+/// Why a batch was refused at `admitRegions` — the taxonomy a refused
+/// SENDER needs to tell "someone else is using this region right now"
+/// (`.lease`, occupancy, W6 slice 1) apart from "you were never given
+/// authority over this region" (`.authority`, W6 slice 2) apart from "your
+/// grant's root node no longer exists" (`.collapsed`, the trap-on-collapse
+/// discipline, §2.4) — the no-silent-third-result rule applied to the
+/// refusal channel itself: three DISTINCT reasons a batch didn't land, not
+/// one bit of "refused" a sender has to guess the cause of. Numbered
+/// explicitly (not just declaration order) because it rides the wire
+/// (`sendRefusal`/`.region_refused`'s trailing byte, additive like the
+/// lease frame's trailing `hue16` — see `handleFrame`): `.lease = 0` keeps
+/// an OLDER peer's decode (pre-W6-slice-2, no trailing byte at all)
+/// correct by construction, since lease refusal was the only reason that
+/// existed before this slice.
+pub const RefusalReason = enum(u8) {
+    lease = 0,
+    authority = 1,
+    collapsed = 2,
+};
+
 pub const Refusal = struct {
     region: NodeRef,
+    /// The lease holder's name for `.lease` refusals; empty (`""`) for
+    /// `.authority`/`.collapsed` (there is no "other holder" to name —
+    /// the sender itself simply lacks, or lost, authority).
     holder: []u8,
+    reason: RefusalReason = .lease,
 
     pub fn free(self: Refusal, gpa: Allocator) void {
         gpa.free(self.region.token);
@@ -162,6 +236,113 @@ pub fn deinit(self: *GraphCollab) void {
 /// behaves exactly as before this slice.
 pub fn bindLeases(self: *GraphCollab, table: *LeaseTable) void {
     self.leases = table;
+}
+
+/// Bind a per-replica `grants.HandleTable` for subtree-grant enforcement
+/// (W6 slice 2, see the field's doc comment). Opt-in and additive, exactly
+/// like `bindLeases`: an unbound `GraphCollab` behaves exactly as before
+/// this slice. Typically bound only on the ENFORCING (host) side — the
+/// peer being granted authority needs no table at all (see `grantSubtree`'s
+/// doc comment on provenance).
+pub fn bindGrants(self: *GraphCollab, table: *grants_mod.HandleTable) void {
+    self.grants = table;
+}
+
+/// The HOST-side subtree-grant declaration API (W6 slice 2, north-star-
+/// plan.md §6 W6 / d1-live-reconcile.md §5.2's admission hook, second
+/// predicate): declare that the peer AUTHENTICATED at the other end of
+/// THIS quad's `session` may edit within `root`'s subtree on THIS doc.
+///
+/// **The identity-binding shape, DECIDED (post-review REQUIRED FIX 1) —
+/// keyed on `session.peerFingerprint()`, never a self-declared name.** The
+/// first shipped version of this API took a `principal: []const u8` name
+/// parameter and minted rows keyed on it, matched at admission against
+/// `self.peer_name` — the SAME self-declared string the LEASE mechanism
+/// learns from an inbound announce frame (`peer_name`'s doc comment: "no
+/// separate identity handshake... same trust level as `Collab`'s presence
+/// names"). That is fine for a lease (collaboration hygiene, not a security
+/// boundary, per `region_lease.zig`'s own module doc) but is a real
+/// authority hole for a GRANT: a peer holding `access = .edit` and a
+/// confining grant could announce a lease under ANY other string (an
+/// ungranted name, or nothing at all) and thereby have `admitRegions` find
+/// zero rows for "that" principal — `doc_has_grants = true`,
+/// `peer_has_grants = false` — which this design's own rule ("absence of a
+/// grant row for a peer keeps today's behavior") then reads as
+/// UNRESTRICTED. A grantee sheds its own confinement by renaming — exactly
+/// the silent widening §2.4 forbids, and it works with nothing more than
+/// controlling a string nobody authenticates.
+///
+/// The fix: `Session` already proves an unforgeable identity in its secure
+/// handshake — `their_id` (the peer's public key), from which
+/// `peerFingerprint()` derives (Session.zig's `peerFingerprint`/`their_id`
+/// doc comments: "valid once established"). THIS quad's peer is exactly
+/// `self.session`'s peer (`GraphCollab` is one quad per `Session`, one
+/// `Session` per encrypted link — see the module doc comment), so a
+/// subtree grant declared through THIS `GraphCollab` unambiguously targets
+/// that authenticated identity; there is no `principal` parameter to spoof
+/// because there is nothing left for a caller to name — the grantee is
+/// whoever cryptographically proved themselves on this link, full stop.
+/// This closes the hub/mesh face of the same bug for free too: a peer
+/// declaring another peer's self-chosen name can never make THEIR
+/// fingerprint match a row minted against someone else's `Session`.
+/// `peer_name` stays exactly what it always was — a DISPLAY-trust label for
+/// the lease/presence UI, never consulted for authority again.
+///
+/// Requires `self.session` to be `established` (returns
+/// `error.PeerNotEstablished` otherwise) — a grant cannot be honestly bound
+/// to an identity that hasn't yet proven itself.
+///
+/// Mints a fresh, independently-revocable row (`grants.HandleTable.grant` —
+/// a SECOND call for the same peer ADDS to the union, it never replaces a
+/// prior row — see `Limit.graph_subtree`'s doc comment for the
+/// union-of-grants confinement this composes into). The row's `principal`
+/// bytes are the fingerprint, stably stored in `self.peer_fingerprint` (see
+/// that field's doc comment for why a fresh `peerFingerprint()` value can't
+/// be borrowed directly).
+///
+/// **Deferred, named**: no config/manifest surface exists yet — see
+/// `Limit.graph_subtree`'s module-doc entry in grants.zig for why. Nothing
+/// here crosses the wire in this slice — the grant table is consulted only
+/// by the side that bound it; a granted peer learns of its new authority
+/// only by SUCCEEDING at edits it would previously have been refused for,
+/// exactly like the coarse per-doc `canEdit` grant it composes with today.
+pub fn grantSubtree(self: *GraphCollab, root: NodeRef) !grants_mod.CapHandle {
+    const table = self.grants orelse return error.NoGrantTable;
+    const fp = self.session.peerFingerprint() orelse return error.PeerNotEstablished;
+    // Every row this quad has EVER minted borrows its `principal` bytes
+    // from this SAME `self.peer_fingerprint` storage (see that field's doc
+    // comment) — overwriting it with a DIFFERENT identity would silently
+    // reinterpret every prior row as belonging to someone else. This can't
+    // happen through normal use (one `Session`, hence one peer, per quad;
+    // `rebind` swaps `self.session` but never touches this cache — see
+    // `rebind`'s doc comment: "the peer's declared name is still valid,
+    // same peer, new link"), but asserting it here makes the
+    // one-identity-per-`GraphCollab` invariant STRUCTURAL rather than
+    // dependent on nothing elsewhere in this file ever violating it by
+    // accident.
+    if (self.peer_fingerprint) |cached| {
+        std.debug.assert(std.mem.eql(u8, &cached, &fp));
+    }
+    self.peer_fingerprint = fp;
+    return table.grant(.{
+        .capability = graph_edit_capability,
+        .limit = .{ .graph_subtree = .{ .doc_id = self.name, .root = root } },
+    }, &self.peer_fingerprint.?, null);
+}
+
+/// Revoke every subtree grant THIS quad's authenticated peer holds on THIS
+/// doc (v1 granularity — `grants.HandleTable.revoke`'s own (principal,
+/// capability) scope; there is only one capability name this API ever
+/// mints, so this narrows to exactly "every graph-subtree row this peer
+/// holds here"). `0` (a harmless no-op) if the session isn't established or
+/// nothing was ever granted. A caller that wants to revoke a SINGLE row
+/// (leaving others in the union intact) already has that row's `CapHandle`
+/// from `grantSubtree` and can go straight through the bound table's
+/// lower-level API instead.
+pub fn revokeSubtreeGrants(self: *GraphCollab) usize {
+    const table = self.grants orelse return 0;
+    const fp = self.session.peerFingerprint() orelse return 0;
+    return table.revoke(&fp, graph_edit_capability);
 }
 
 /// Point at a fresh session after a reconnect: the announce + frontier
@@ -234,7 +415,7 @@ pub fn handleFrame(self: *GraphCollab, frame: wire.Decoder.Decoded) !bool {
                 }) {
                     .refuse => |r| {
                         defer r.free(gpa);
-                        self.sendRefusal(r.region, r.holder) catch |err| {
+                        self.sendRefusal(r.region, r.holder, r.reason) catch |err| {
                             std.log.warn("graph-collab: refusal echo failed: {t}", .{err});
                         };
                         return false;
@@ -265,11 +446,22 @@ pub fn handleFrame(self: *GraphCollab, frame: wire.Decoder.Decoded) !bool {
                 const hlen = wire.getUv(&cur) catch return false;
                 if (hlen > cur.len) return false;
                 const holder = cur[0..hlen];
+                cur = cur[hlen..];
+                // Trailing reason byte (W6 slice 2) — additive/version-
+                // tolerant exactly like the lease frame's trailing `hue16`
+                // (see `handleLeaseFrame`'s doc comment for the precedent):
+                // an OLDER sender (pre-W6-slice-2) never sent this byte at
+                // all, since `.lease` was the only refusal reason that
+                // existed — `getUv`'s `catch` default of `0` decodes to
+                // `.lease` either way, so an old peer's refusal is still
+                // interpreted correctly, never a decode error.
+                const reason_code = wire.getUv(&cur) catch 0;
+                const reason = std.enums.fromInt(RefusalReason, reason_code) orelse .lease;
                 const region_owned: NodeRef = .{ .token = try gpa.dupe(u8, region_token) };
                 errdefer region_owned.free(gpa);
                 const holder_owned = try gpa.dupe(u8, holder);
                 errdefer gpa.free(holder_owned);
-                try self.refusals.append(gpa, .{ .region = region_owned, .holder = holder_owned });
+                try self.refusals.append(gpa, .{ .region = region_owned, .holder = holder_owned, .reason = reason });
                 return false;
             },
         }
@@ -280,20 +472,17 @@ pub fn handleFrame(self: *GraphCollab, frame: wire.Decoder.Decoded) !bool {
 }
 
 /// Which regions (portable `NodeRef`s) `batch` touches, checked against
-/// the bound lease table — the GENERAL per-region admission hook (doc/
-/// d1-live-reconcile.md §5.2: "the same per-region admission W6 needs for
-/// identity-anchored subtree grants"; north-star-plan.md §6 W6). The lease
-/// is this hook's FIRST client, not its only intended one: a future
-/// subtree-grant check composes here the same way (another predicate over
-/// the same `touchedRegions` call, ANDed into the same admit/refuse
-/// control flow) rather than a second, parallel admission path — see this
-/// file's `.batch` handler for where it sits relative to `sync_core`'s
-/// coarse gate.
-///
-/// No lease table bound, or an empty one, is the fast path: no clone, no
-/// dry-run merge — `GraphDoc.touchedRegions` is only ever called when
-/// there is something to protect (see its own doc comment for the cost
-/// this avoids paying on every batch).
+/// the bound lease table AND the bound grant table — the GENERAL per-region
+/// admission hook (doc/d1-live-reconcile.md §5.2: "the same per-region
+/// admission W6 needs for identity-anchored subtree grants"; north-star-
+/// plan.md §6 W6). The lease was this hook's FIRST client (W6 slice 1); the
+/// subtree grant (`gatherGrantRoots` + the authority loop in
+/// `admitRegions`, W6 slice 2) is its SECOND — another predicate over the
+/// exact same dry-run pass, ANDed into the same admit/refuse control flow,
+/// not a second, parallel admission path. See this file's `.batch` handler
+/// for where this whole function sits relative to `sync_core`'s coarse
+/// gate, and `admitRegions`'s own doc comment for the authority-then-lease
+/// composition order.
 ///
 /// ## "Refused" is deferred-until-release, not a permanent verdict
 ///
@@ -312,38 +501,203 @@ pub fn handleFrame(self: *GraphCollab, frame: wire.Decoder.Decoded) !bool {
 /// once-refused op finally lands ("late apply on release"); if the same
 /// principal still holds it, refused again, harmlessly. This falls out of
 /// the existing frontier-delta design for free — no special-casing here.
-/// The sender's OWN replica has a real, if transient, local divergence in
-/// the meantime (their local doc has the edit; the shared replica doesn't
-/// yet) — visible to them via `refusals` (append-only; draining/freeing
-/// each entry is the caller's job, same contract as `Collab`'s other
-/// accumulator lists).
+/// **This property is why REQUIRED FIX 2 matters**: before it, a
+/// create-and-populate batch's touched region (the new node) could NEVER
+/// resolve against `self` no matter how many times it was re-sent — the
+/// node's identity never gets "older" — so "deferred-until-release" quietly
+/// became a PERMANENT lockout for exactly the grantee-appends-an-entry case
+/// this whole mechanism exists to serve. See `GraphDoc.touchedRegionsWithin`'s
+/// doc comment for the fix. The sender's OWN replica has a real, if
+/// transient, local divergence in the meantime (their local doc has the
+/// edit; the shared replica doesn't yet) — visible to them via `refusals`
+/// (append-only; draining/freeing each entry is the caller's job, same
+/// contract as `Collab`'s other accumulator lists).
 pub const RegionVerdict = union(enum) {
     admit,
     refuse: Refusal,
 };
 
+/// This peer's LIVE `.graph_subtree` rows for THIS doc — the authority
+/// half of `admitRegions`, split out because it must run BEFORE the
+/// dry-run merge below (grant roots are always PRE-EXISTING nodes, never
+/// batch-fresh, so resolving/reachable-checking them against `self.doc`
+/// needs no scratch clone — see `GraphDoc.touchedRegionsWithin`'s doc
+/// comment for why the TOUCHED regions are a different story).
+///
+/// **Identity, DECIDED (REQUIRED FIX 1)**: matched against
+/// `self.session.peerFingerprint()` — the AUTHENTICATED identity of this
+/// quad's peer — never `self.peer_name` (self-declared, spoofable; see
+/// `grantSubtree`'s doc comment for the exploit this closes and why).
+///
+/// **Union-of-grants confinement + collapse, DECIDED**: see
+/// `Limit.graph_subtree`'s doc comment (grants.zig) for the policy. A
+/// collapsed (root deleted/unreachable) row is NOT dropped from the
+/// union and does NOT fall back to unrestricted — it is simply excluded
+/// from `roots` (there is no live subtree left to test containment
+/// against), so if it was this peer's ONLY row, `peer_has_grants` stays
+/// `true` while `roots` ends up EMPTY: every subsequent touched region
+/// then fails containment against the (empty) union, and `admitRegions`
+/// refuses EVERYTHING for this peer on this doc with `.collapsed` — total
+/// refusal, not a partial or silent one. That is the intended behavior,
+/// not a bug: a grantee with a dead grant has no OTHER standing to edit
+/// with (per-doc `canEdit` still gates elsewhere, but authority here is
+/// what W6 added, and it has nothing to fall back to once its one grant is
+/// gone).
+const GrantContext = struct {
+    doc_has_grants: bool = false,
+    peer_has_grants: bool = false,
+    any_collapsed: bool = false,
+    /// This peer's alive+reachable granted roots, as PORTABLE tokens
+    /// (borrowed from the table's rows — never freed here; `roots.deinit`
+    /// only frees the ArrayList's own backing memory). Passed straight
+    /// into `GraphDoc.touchedRegionsWithin`, which resolves them inside
+    /// its own scratch clone.
+    roots: std.ArrayList(NodeRef) = .empty,
+
+    fn deinit(self: *GrantContext, gpa: Allocator) void {
+        self.roots.deinit(gpa);
+    }
+};
+
+fn gatherGrantRoots(self: *GraphCollab, gpa: Allocator) !GrantContext {
+    var ctx: GrantContext = .{};
+    const table = self.grants orelse return ctx;
+    if (table.rows.items.len == 0) return ctx; // fast path — nothing minted anywhere
+
+    const peer_fp = self.session.peerFingerprint(); // ?[24]u8 — AUTHENTICATED, never peer_name (FIX 1)
+
+    for (table.rows.items) |r| {
+        if (!r.alive) continue;
+        const gs = switch (r.limit) {
+            .graph_subtree => |g| g,
+            .none, .fs_root, .doc_region => continue,
+        };
+        if (!std.mem.eql(u8, gs.doc_id, self.name)) continue;
+        ctx.doc_has_grants = true;
+        const fp = peer_fp orelse continue; // not (yet) authenticated — matches no row
+        if (!std.mem.eql(u8, r.principal, &fp)) continue;
+        ctx.peer_has_grants = true;
+        const root_obj = self.doc.resolve(gs.root) catch {
+            ctx.any_collapsed = true;
+            continue;
+        };
+        if (!try self.doc.reachable(gpa, root_obj)) {
+            ctx.any_collapsed = true;
+            continue;
+        }
+        try ctx.roots.append(gpa, gs.root);
+    }
+    return ctx;
+}
+
+/// **Composition order, DECIDED (W6 slice 2, north-star-plan.md §6 W6): canEdit (per-doc,
+/// `sync_core.admitBatch` — already run by the caller BEFORE this function)
+/// → subtree grants (AUTHORITY) → lease (OCCUPANCY).** Authority runs before
+/// occupancy at this chokepoint because it is the more fundamental — and
+/// more ACTIONABLE — question: a sender who was never granted a region at
+/// all should be told THAT ("you have no authority here"), not "someone
+/// else happens to be using it right now" (which would be true but
+/// misleading — it implies the sender WOULD be allowed if only the holder
+/// released, which isn't so for an unauthorized sender).
+///
+/// At most ONE dry-run merge, and ZERO when there is nothing to protect:
+/// `gatherGrantRoots` resolves this peer's granted roots against `self.doc`
+/// (cheap, no clone — see its doc comment) and reports `doc_has_grants` for
+/// free from that same walk; combined with `self.leases`' own emptiness
+/// (equally cheap), an ordinary share with NEITHER a grant table nor a
+/// lease table holding anything active returns `.admit` immediately below,
+/// before `GraphDoc.touchedRegionsWithin`'s `serialize`+`open`+`merge` ever
+/// runs — this is the fast path `touchedRegionsWithin`'s own doc comment
+/// prices the dry-run cost against ("paid only when the caller has active
+/// regions to protect"), and it is load-bearing: `admitRegions` runs on
+/// EVERY inbound batch on EVERY graph quad, so a plain share (no grants,
+/// no leases — the common case) must not pay a full-history dry-run per
+/// batch just because the mechanism EXISTS. When something IS active,
+/// `touchedRegionsWithin` runs its ONE scratch-clone merge, and both the
+/// authority loop and the lease loop below read from that SAME result —
+/// never two dry-run merges for one batch either (module doc comment: "do
+/// NOT clone the lease plumbing").
 pub fn admitRegions(self: *GraphCollab, gpa: Allocator, batch: []const u8) !RegionVerdict {
-    const table = self.leases orelse return .admit;
-    if (table.isEmpty()) return .admit;
-    const touched = try self.doc.touchedRegions(gpa, batch);
+    var grant_ctx = try self.gatherGrantRoots(gpa);
+    defer grant_ctx.deinit(gpa);
+
+    // The fast path, restored (post-review: the consolidation below had
+    // dropped it, making EVERY inbound batch on an ordinary share — no
+    // grants, no leases bound at all — pay a full serialize+open+merge
+    // dry-run that was previously zero cost). `gatherGrantRoots` already
+    // walked the grant table for free (no clone); `leases_active` is an
+    // equally cheap table-emptiness check. Neither table having anything
+    // to protect means there is nothing for the clone below to answer —
+    // skip it entirely, exactly like `touchedRegions`'s own doc comment
+    // promises ("paid only when the caller has active regions to
+    // protect").
+    const leases_active = if (self.leases) |lt| !lt.isEmpty() else false;
+    if (!grant_ctx.doc_has_grants and !leases_active) return .admit;
+
+    const touched = try self.doc.touchedRegionsWithin(gpa, batch, grant_ctx.roots.items);
     defer {
-        for (touched) |r| r.free(gpa);
+        for (touched) |tr| tr.region.free(gpa);
         gpa.free(touched);
     }
-    for (touched) |region| {
-        const holder = table.holderOf(region) orelse continue; // free — no restriction
+    if (touched.len == 0) return .admit;
+
+    if (grant_ctx.doc_has_grants) {
+        if (self.session.peerFingerprint() == null) {
+            // Grants are configured for this doc, but we cannot attribute
+            // the sender to ANY identity yet (session not established —
+            // see `gatherGrantRoots`'s doc comment) — fail CLOSED rather
+            // than silently admit (this codebase's standing doctrine,
+            // grants.zig's `.doc_region` collapse policy: "ANY failure
+            // fails CLOSED, not open"). Unreachable in practice once a
+            // `.batch` frame could even be decrypted (that already implies
+            // `established`); kept as a real, defensive branch rather than
+            // an `unreachable` for direct `admitRegions` callers (tests).
+            return .{ .refuse = .{
+                .region = try touched[0].region.dupe(gpa),
+                .holder = try gpa.dupe(u8, ""),
+                .reason = .authority,
+            } };
+        }
+        if (grant_ctx.peer_has_grants) {
+            for (touched) |tr| {
+                if (!tr.within_roots) {
+                    return .{
+                        .refuse = .{
+                            .region = try tr.region.dupe(gpa),
+                            .holder = try gpa.dupe(u8, ""),
+                            // If ANY of this peer's granted roots has
+                            // collapsed, surface THAT rather than a flat
+                            // "outside your grant" — see `GrantContext`'s doc
+                            // comment for the total-refusal-on-sole-collapse
+                            // case this composes with.
+                            .reason = if (grant_ctx.any_collapsed) .collapsed else .authority,
+                        },
+                    };
+                }
+            }
+        }
+        // else: this doc has grants for SOMEONE, but not for this
+        // authenticated peer — unrestricted (today's behavior; grants
+        // narrow, they never default-deny the world).
+    }
+
+    const table = self.leases orelse return .admit;
+    if (table.isEmpty()) return .admit;
+    for (touched) |tr| {
+        const holder = table.holderOf(tr.region) orelse continue; // free — no restriction
         if (self.peer_name) |pn| {
             if (std.mem.eql(u8, holder, pn)) continue; // the sender's own held region
         }
         return .{ .refuse = .{
-            .region = try region.dupe(gpa),
+            .region = try tr.region.dupe(gpa),
             .holder = try gpa.dupe(u8, holder),
+            .reason = .lease,
         } };
     }
     return .admit;
 }
 
-fn sendRefusal(self: *GraphCollab, region: NodeRef, holder: []const u8) !void {
+fn sendRefusal(self: *GraphCollab, region: NodeRef, holder: []const u8, reason: RefusalReason) !void {
     const gpa = self.gpa;
     var payload: std.ArrayList(u8) = .empty;
     defer payload.deinit(gpa);
@@ -351,6 +705,7 @@ fn sendRefusal(self: *GraphCollab, region: NodeRef, holder: []const u8) !void {
     try payload.appendSlice(gpa, region.token);
     try wire.putUv(gpa, &payload, holder.len);
     try payload.appendSlice(gpa, holder);
+    try wire.putUv(gpa, &payload, @intFromEnum(reason));
     try self.session.post(.op, @intFromEnum(wire.OpKind.region_refused), self.base, payload.items);
 }
 

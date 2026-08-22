@@ -178,7 +178,7 @@ pub fn trapPermDenied(p: *WasmPlugin, caller: *wasm.Caller, comptime perm: Perm)
 pub fn trapOutOfLimit(p: *WasmPlugin, caller: *wasm.Caller, comptime perm: Perm, path: []const u8) void {
     const root: []const u8 = switch (limitFor(p, perm)) {
         .fs_root => |r| r,
-        .none, .doc_region => "?", // this trap is fs-path-shaped; `.doc_region` never reaches it (see this fn's doc)
+        .none, .doc_region, .graph_subtree => "?", // this trap is fs-path-shaped; neither reaches it (see this fn's doc)
     };
     caller.trap("plugin '{s}' denied capability '{s}': path '{s}' is outside the granted root '{s}'", .{ p.name, perm.label(), path, root });
 }
@@ -298,7 +298,7 @@ test "mintGrantHandles: the composition rule — a pre-existing config-authored 
     try t.expectEqual(configured.gen, handles[perm_fs_write].gen);
     switch (table.limitFor(handles[perm_fs_write])) {
         .fs_root => |root| try t.expectEqualStrings("repo", root),
-        .none, .doc_region => return error.TestUnexpectedResult,
+        .none, .doc_region, .graph_subtree => return error.TestUnexpectedResult,
     }
     // Exactly ONE live row exists for (git, fs_write) — the boolean baseline
     // was never separately minted.

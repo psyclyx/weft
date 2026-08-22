@@ -105,11 +105,28 @@
 //! for the full reasoning). Tests still mint a `.doc_region` row directly via
 //! `grant()`; a future runtime-side verb (a command a loaded plugin/keybind
 //! invokes against a live buffer) is what would populate this in production.
+//!
+//! **`Limit.graph_subtree` (W6 slice 2, north-star-plan §6 W6)**: the
+//! graph-doc analog of `.doc_region` — see `GraphSubtree`'s doc for the
+//! shape, collapse policy, and the union-of-grants confinement decision.
+//! ENFORCEMENT lives at `session/GraphCollab.zig`'s `admitRegions` (that
+//! file's per-region admission hook, shared verbatim with W6 slice 1's
+//! lease — same split as `.doc_region`, a different live document type to
+//! resolve against). **Provenance, honest-v1**: unlike `.fs_root`/
+//! `.doc_region`, there is no config surface AT ALL yet, not even a
+//! runtime-verb one — `GraphCollab.grantSubtree` is a host-called API with
+//! no caller in production code, the same "collected, tested, unconsumed"
+//! status `Ctx.grants`' own doc comment names for its still-unwired
+//! consumer. A `weft.grant`-shaped config surface for subtree grants is
+//! explicitly deferred (it would need the same "runtime identity, not a
+//! config-time one" argument `.doc_region` already makes, plus a live
+//! `GraphDoc` to resolve against — neither exists at config-eval time).
 
 const std = @import("std");
 const Allocator = std.mem.Allocator;
 const facts_mod = @import("facts.zig");
 const stemma = @import("stemma");
+const graph = @import("graph.zig");
 
 pub const Facts = facts_mod.Facts;
 pub const Predicate = facts_mod.Predicate;
@@ -200,16 +217,56 @@ pub const DocRegion = struct {
     end: EventAnchor,
 };
 
+/// The graph-doc analog of `DocRegion` (W6 slice 2, north-star-plan §6 W6):
+/// identity-anchored, not position-anchored, EXACTLY like the text form —
+/// §2.4's "on graph docs, limits key on `ObjId` subtrees and are exact."
+/// `root` is a portable `graph.zig#GraphDoc.NodeRef`, never a raw `ObjId`
+/// (see that type's own doc comment for why a doc-local handle can't be
+/// stored in a row meant to outlive one merge). `doc_id` mirrors
+/// `DocRegion.doc_id` exactly: which `GraphDoc` this narrows, since a grant
+/// table is scoped wider than one doc — today's minter (`GraphCollab`) uses
+/// the doc's own quad name, same convention `DocRegion`'s minter uses the
+/// buffer's name for.
+///
+/// **ENFORCEMENT lives at `session/GraphCollab.zig`'s `admitRegions`**
+/// (W6 slice 2), not here — same split `.doc_region` already has with
+/// `command.Context.checkDocRegion`: this table has no LIVE `GraphDoc` to
+/// resolve a `NodeRef`/walk containment against, only the driver that owns
+/// one does. **Collapse policy**, stated once and reused verbatim (not a
+/// new `Reason`): if `root` no longer resolves, OR resolves but is no
+/// longer `GraphDoc.reachable` (deleted/trashed — the walk-down analog of a
+/// text anchor collapsing to its deletion point), the grant is COLLAPSED —
+/// `.collapsed`, the SAME reason `.doc_region` already carries in this
+/// file's `Reason` enum below, never silently widened to unrestricted or
+/// narrowed to deny-everything (§2.4: "never silently widen or narrow").
+///
+/// **Union-of-grants confinement, DECIDED (§6 W6, mirrors `weft.grant`'s
+/// composition rule)**: once a principal holds ANY live `.graph_subtree` row
+/// for a doc, every edit from that principal on that doc must fall within
+/// the UNION of all its live granted subtrees (each row narrows; rows don't
+/// stack into anything wider than their union — the same "config REPLACES
+/// the baseline" shape `weft.grant` already commits to for `.fs_root`,
+/// read honestly for a per-peer authority table instead of a per-plugin
+/// capability table). A principal with ZERO rows for a doc is UNAFFECTED —
+/// today's per-doc `canEdit` governs, unchanged; grants NARROW, they never
+/// default-deny the whole world.
+pub const GraphSubtree = struct {
+    doc_id: []const u8,
+    root: graph.NodeRef,
+};
+
 /// A limit narrowing a grant (north-star-plan §2.4). `.none` = unrestricted
 /// within the capability; `.fs_root` = confined to a subtree; `.doc_region` =
 /// confined to an identity-anchored text span (`DocRegion`'s doc — §6 W4
-/// slice 3, review B2's repair). A tagged union, not a bare string, so a
-/// future limit kind (a net host) is a new variant, never a stringly-typed
-/// convention.
+/// slice 3, review B2's repair); `.graph_subtree` = confined to an
+/// identity-anchored graph subtree (`GraphSubtree`'s doc — §6 W6). A tagged
+/// union, not a bare string, so a future limit kind (a net host) is a new
+/// variant, never a stringly-typed convention.
 pub const Limit = union(enum) {
     none,
     fs_root: []const u8,
     doc_region: DocRegion,
+    graph_subtree: GraphSubtree,
 };
 
 /// A declared grant: what a principal MAY hold for `capability`, gated by
@@ -551,7 +608,7 @@ test "grants: limitFor reads a row's Limit; .none for an invalid handle" {
     try t.expectEqual(Limit.none, table.limitFor(unrestricted));
     switch (table.limitFor(limited)) {
         .fs_root => |root| try t.expectEqualStrings("notes-vault", root),
-        .none, .doc_region => return error.TestUnexpectedResult,
+        .none, .doc_region, .graph_subtree => return error.TestUnexpectedResult,
     }
     try t.expectEqual(Limit.none, table.limitFor(.none)); // never-minted handle degrades safely
 }
@@ -576,7 +633,27 @@ test "grants: .doc_region limit round-trips through the table (W4 slice 3)" {
             try t.expectEqual(AnchorSide.after, dr.start.side);
             try t.expectEqual(AnchorSide.before, dr.end.side);
         },
-        .none, .fs_root => return error.TestUnexpectedResult,
+        .none, .fs_root, .graph_subtree => return error.TestUnexpectedResult,
+    }
+}
+
+test "grants: .graph_subtree limit round-trips through the table (W6 slice 2)" {
+    const gpa = t.allocator;
+    var table = HandleTable.init(gpa);
+    defer table.deinit();
+
+    const root: graph.NodeRef = .{ .token = "sto\x01\x05alice\x03" };
+    const limited = try table.grant(.{
+        .capability = "graph.edit",
+        .limit = .{ .graph_subtree = .{ .doc_id = "notes-graph", .root = root } },
+    }, "agent", null);
+
+    switch (table.limitFor(limited)) {
+        .graph_subtree => |gs| {
+            try t.expectEqualStrings("notes-graph", gs.doc_id);
+            try t.expect(gs.root.eql(root));
+        },
+        .none, .fs_root, .doc_region => return error.TestUnexpectedResult,
     }
 }
 

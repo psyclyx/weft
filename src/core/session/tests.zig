@@ -26,6 +26,7 @@ const Conn = @import("Conn.zig");
 const PartialDoc = @import("PartialDoc.zig");
 const region_lease = @import("region_lease.zig");
 const LeaseTable = region_lease.LeaseTable;
+const grants = @import("../grants.zig");
 
 const link_mod = @import("link.zig");
 const FdLink = link_mod.FdLink;
@@ -1549,4 +1550,602 @@ test "lease: announce frame is version-tolerant — missing hue, extra trailing 
         try t.expect(changed);
     }
     try t.expectEqual(@as(u32, 42), table.hueOf(region).?);
+}
+
+// ── W6 slice 2: identity-anchored SUBTREE GRANTS (doc/north-star-plan.md
+// §6 W6, d1-live-reconcile.md §5.2) — the second predicate over
+// `GraphCollab.admitRegions`, composing with the W6 slice 1 lease above.
+//
+// Post-review REQUIRED FIX 1 changed the trust model these tests exercise:
+// authority is now keyed on `Session.peerFingerprint()` — the AUTHENTICATED
+// identity a secure handshake proves — never the self-declared `peer_name`
+// a lease announcement carries. That means every test below that checks
+// authority needs a REAL, established `Session` pair (not the
+// `session = undefined` shorthand the version-tolerance lease test above
+// gets away with, since that test never touches `self.session` at all).
+// `SessionPair` is the minimal two-`Session`-over-a-socketpair rig for
+// that — no `Conn`/`GraphDoc`-sharing machinery needed, since
+// `admitRegions` only ever calls `self.session.peerFingerprint()`, never
+// anything wire-protocol-shaped. The confinement case additionally gets a
+// FULL socketpair round trip through `LeaseRig` (real `Conn`s, real
+// `GraphDoc` sync) to prove the wire path end to end.
+
+/// Two live `Session`s over one socketpair, both waited to `established` —
+/// enough for `Session.peerFingerprint()` to be meaningful on either side,
+/// without any `Conn`/document-sharing machinery `admitRegions` doesn't
+/// need. `a`/`b` name the two ends generically (not "alice"/"bob") because
+/// which one plays which role is the CALLER's choice per test.
+const SessionPair = struct {
+    la: FdLink,
+    lb: FdLink,
+    a: *Session,
+    b: *Session,
+
+    /// Out-pointer, same reasoning as `LeaseRig.setup`'s own doc comment:
+    /// `Session.create` stores the `Link` it's given, and `FdLink.link()`'s
+    /// `Link.ctx` POINTS BACK at the `FdLink` struct itself — returning
+    /// this struct BY VALUE would copy `la`/`lb` and strand that pointer at
+    /// a dead address the instant this function returned.
+    fn setup(gpa: Allocator, self: *SessionPair) !void {
+        const fds = try socketPair();
+        self.la = .{ .fd = fds[0] };
+        self.lb = .{ .fd = fds[1] };
+        self.a = try Session.create(gpa, self.la.link(), .server, "tok", .own, null);
+        errdefer self.a.destroy();
+        self.b = try Session.create(gpa, self.lb.link(), .client, "tok", .own, null);
+        errdefer self.b.destroy();
+        const deadline = task.nowNs() + 5 * std.time.ns_per_s;
+        while (task.nowNs() < deadline) {
+            if (self.a.established.load(.acquire) and self.b.established.load(.acquire)) return;
+            testPark(2);
+        }
+        return error.NotEstablished;
+    }
+
+    fn deinit(self: *SessionPair) void {
+        self.a.destroy();
+        self.b.destroy();
+    }
+};
+
+/// Two docs (alice = enforcer, bob = the peer whose edits get checked)
+/// with a granted-shaped structure already converged: `inside` (the
+/// subtree a grant will name) and `outside` (never granted), both direct
+/// children of the root map. Independent of `SessionPair` — the CRDT model
+/// and the crypto session are orthogonal axes; a test wires them together
+/// by choosing which `SessionPair` end a `GraphCollab` is bound to.
+const GrantDocs = struct {
+    alice: GraphDoc,
+    bob: GraphDoc,
+    inside: GraphDoc.NodeRef,
+    outside: GraphDoc.NodeRef,
+
+    fn setup(gpa: Allocator) !GrantDocs {
+        var alice = try GraphDoc.init(gpa, "alice");
+        errdefer alice.deinit(gpa);
+        const inside_obj = (try alice.set(gpa, null, "inside", .map)).?;
+        _ = (try alice.set(gpa, null, "outside", .map)).?;
+        const inside_ref = try alice.nodeRef(gpa, inside_obj);
+        errdefer inside_ref.free(gpa);
+        const outside_obj = alice.root().mapGet("outside").?.objId().?;
+        const outside_ref = try alice.nodeRef(gpa, outside_obj);
+        errdefer outside_ref.free(gpa);
+
+        const bytes = try alice.serialize(gpa);
+        defer gpa.free(bytes);
+        var bob = try GraphDoc.open(gpa, "bob", bytes);
+        errdefer bob.deinit(gpa);
+
+        return .{ .alice = alice, .bob = bob, .inside = inside_ref, .outside = outside_ref };
+    }
+
+    fn deinit(self: *GrantDocs, gpa: Allocator) void {
+        self.inside.free(gpa);
+        self.outside.free(gpa);
+        self.alice.deinit(gpa);
+        self.bob.deinit(gpa);
+    }
+};
+
+/// A `GraphCollab` enforcing over `docs.alice`, wired to `sess` (a real,
+/// established `Session` — `admitRegions` now derives authority from
+/// `sess.peerFingerprint()`, so an unestablished/fake session would make
+/// every grant check see "no identity").
+fn makeEnforcer(gpa: Allocator, docs: *GrantDocs, sess: *Session, table: *grants.HandleTable) !GraphCollab {
+    var gc = try GraphCollab.init(gpa, sess, &docs.alice, "alice");
+    gc.bindGrants(table);
+    return gc;
+}
+
+// Post-review: the W6 slice 2 consolidation (one dry-run pass serving both
+// the authority and lease checks) had dropped the fast path `admitRegions`
+// always had — every inbound batch on an ORDINARY share (no grants, no
+// leases bound at all, the common case) started paying a full
+// serialize+open+merge dry-run against `self.doc`'s committed HEAD that was
+// previously zero cost. The fix restores a guard ahead of
+// `GraphDoc.touchedRegionsWithin`; this test pins it so it can't silently
+// regress again.
+//
+// The chosen observable: deliberately GARBAGE, structurally-invalid batch
+// bytes. With the fast path intact, `admitRegions` on a `GraphCollab` with
+// NEITHER table bound returns `.admit` WITHOUT ever calling
+// `touchedRegionsWithin` — the garbage is never even parsed. If the guard
+// regressed, `touchedRegionsWithin` WOULD run, attempt to `merge` the
+// garbage into its scratch clone, and fail (`error.Corrupt` or similar) —
+// turning this call into an ERROR instead of `.admit`. This is a direct,
+// honest behavioral observable of "did the clone run," not an inspection
+// of the guard's source text — a benchmark/timing assertion was considered
+// and rejected as flaky and not meaningfully more honest than this.
+// `session = undefined` is safe here: with no grant table bound,
+// `gatherGrantRoots` returns before ever touching `self.session` (see its
+// own early `self.grants orelse return ctx`).
+test "subtree grant: an ordinary share (no grants, no leases bound) admits WITHOUT attempting the dry-run clone — the fast path (post-review restoration)" {
+    const gpa = t.allocator;
+    var doc = try GraphDoc.init(gpa, "alice");
+    defer doc.deinit(gpa);
+
+    var gc = try GraphCollab.init(gpa, undefined, &doc, "alice");
+    defer gc.deinit();
+    // Neither `bindGrants` nor `bindLeases` — the ordinary-share shape.
+
+    const garbage = "\xff\xff\xff\xff\xff\xff\xff\xff\xff" ++
+        "this is not a valid ObjectDoc event batch, at all";
+    switch (try gc.admitRegions(gpa, garbage)) {
+        .admit => {},
+        .refuse => |r| {
+            r.free(gpa);
+            return error.TestUnexpectedResult;
+        },
+    }
+}
+
+test "subtree grant: peer confined to a granted subtree — in-region admitted, out-of-region refused with the authority reason" {
+    const gpa = t.allocator;
+    var sp: SessionPair = undefined;
+    try SessionPair.setup(gpa, &sp);
+    defer sp.deinit();
+
+    var docs = try GrantDocs.setup(gpa);
+    defer docs.deinit(gpa);
+
+    var table = grants.HandleTable.init(gpa);
+    defer table.deinit();
+    var gc = try makeEnforcer(gpa, &docs, sp.a, &table);
+    defer gc.deinit();
+    _ = try gc.grantSubtree(docs.inside);
+
+    // In-region: the peer edits INSIDE the granted subtree — admitted.
+    const b_inside = try docs.bob.resolve(docs.inside);
+    _ = try docs.bob.set(gpa, b_inside, "k", .{ .str = "v" });
+    {
+        const av = try docs.alice.version(gpa);
+        defer gpa.free(av);
+        const batch = try docs.bob.eventsSince(gpa, av);
+        defer gpa.free(batch);
+        switch (try gc.admitRegions(gpa, batch)) {
+            .admit => {},
+            .refuse => |r| {
+                r.free(gpa);
+                return error.TestUnexpectedResult;
+            },
+        }
+        // Test plumbing: advance alice's real state past the admitted
+        // edit so the NEXT `eventsSince` below is a clean delta for the
+        // out-of-region case alone.
+        const changes = try docs.alice.merge(gpa, batch);
+        gpa.free(changes);
+    }
+
+    // Out-of-region: the peer edits the "outside" map — never granted.
+    const b_outside = try docs.bob.resolve(docs.outside);
+    _ = try docs.bob.set(gpa, b_outside, "k2", .{ .str = "v2" });
+    const av2 = try docs.alice.version(gpa);
+    defer gpa.free(av2);
+    const batch2 = try docs.bob.eventsSince(gpa, av2);
+    defer gpa.free(batch2);
+    switch (try gc.admitRegions(gpa, batch2)) {
+        .refuse => |r| {
+            defer r.free(gpa);
+            try t.expectEqual(GraphCollab.RefusalReason.authority, r.reason);
+            try t.expect(r.region.eql(docs.outside));
+        },
+        .admit => return error.TestUnexpectedResult,
+    }
+}
+
+test "subtree grant: SPOOFED peer_name has no effect on authority — keyed on the authenticated session identity (REQUIRED FIX 1)" {
+    const gpa = t.allocator;
+    var sp: SessionPair = undefined;
+    try SessionPair.setup(gpa, &sp);
+    defer sp.deinit();
+
+    var docs = try GrantDocs.setup(gpa);
+    defer docs.deinit(gpa);
+
+    var table = grants.HandleTable.init(gpa);
+    defer table.deinit();
+    var gc = try makeEnforcer(gpa, &docs, sp.a, &table);
+    defer gc.deinit();
+    _ = try gc.grantSubtree(docs.inside);
+
+    // The attacker's move: `peer_name` reads as an ARBITRARY, UNGRANTED,
+    // self-declared name — exactly the field the pre-fix design keyed
+    // authority on (learned from an inbound, unauthenticated lease
+    // announce; see `peer_name`'s own doc comment: "no separate identity
+    // handshake... same trust level as `Collab`'s presence names"). A real
+    // attacker would just announce a lease under this name; setting the
+    // field directly is the same thing without needing the wire.
+    gc.peer_name = try gpa.dupe(u8, "eve");
+
+    // The same spoofed name doesn't cause a false REFUSAL inside the grant
+    // — `peer_name` is simply never consulted for authority. Checked FIRST
+    // (its own clean batch, then merged as test plumbing) so the second,
+    // load-bearing check below starts from a clean delta rather than a
+    // batch straddling both edits.
+    const b_inside = try docs.bob.resolve(docs.inside);
+    _ = try docs.bob.set(gpa, b_inside, "fine", .{ .str = "ok" });
+    {
+        const av = try docs.alice.version(gpa);
+        defer gpa.free(av);
+        const batch = try docs.bob.eventsSince(gpa, av);
+        defer gpa.free(batch);
+        switch (try gc.admitRegions(gpa, batch)) {
+            .admit => {},
+            .refuse => |r| {
+                r.free(gpa);
+                return error.TestUnexpectedResult;
+            },
+        }
+        const changes = try docs.alice.merge(gpa, batch);
+        gpa.free(changes);
+    }
+
+    // Edit OUTSIDE the granted subtree. Pre-fix, `checkSubtreeGrants`
+    // looked up rows for "eve": `doc_has_grants = true` (the doc has a row,
+    // for the REAL peer), `peer_has_grants = false` (no row literally named
+    // "eve") — and the design's own "absence of a grant row keeps today's
+    // behavior" rule then read that as UNRESTRICTED, silently admitting a
+    // whole-doc edit from a peer that renamed its way out of its own
+    // confinement. Must now refuse `.authority`: the AUTHENTICATED identity
+    // (this quad's real session peer) is exactly who holds the grant,
+    // independent of whatever `peer_name` claims.
+    const b_outside = try docs.bob.resolve(docs.outside);
+    _ = try docs.bob.set(gpa, b_outside, "hacked", .{ .str = "evil" });
+    const av2 = try docs.alice.version(gpa);
+    defer gpa.free(av2);
+    const batch2 = try docs.bob.eventsSince(gpa, av2);
+    defer gpa.free(batch2);
+    switch (try gc.admitRegions(gpa, batch2)) {
+        .refuse => |r| {
+            defer r.free(gpa);
+            try t.expectEqual(GraphCollab.RefusalReason.authority, r.reason);
+        },
+        .admit => return error.TestUnexpectedResult,
+    }
+}
+
+test "subtree grant: create-and-populate a NEW child under the granted root in ONE batch is admitted (REQUIRED FIX 2)" {
+    const gpa = t.allocator;
+    var sp: SessionPair = undefined;
+    try SessionPair.setup(gpa, &sp);
+    defer sp.deinit();
+
+    var docs = try GrantDocs.setup(gpa);
+    defer docs.deinit(gpa);
+
+    var table = grants.HandleTable.init(gpa);
+    defer table.deinit();
+    var gc = try makeEnforcer(gpa, &docs, sp.a, &table);
+    defer gc.deinit();
+    _ = try gc.grantSubtree(docs.inside);
+
+    // ONE local batch: the peer creates a NEW child under the granted root
+    // AND immediately populates it — the ordinary shape of "grantee appends
+    // an entry to its own subtree," the primary W6 use case. Before syncing
+    // at all, this new node's `ObjId` exists ONLY in `docs.bob`'s history —
+    // `docs.alice` (the enforcer's pre-merge replica) has never seen the
+    // creating event, only the scratch clone `touchedRegionsWithin` builds
+    // internally has.
+    const b_inside = try docs.bob.resolve(docs.inside);
+    const new_child = (try docs.bob.set(gpa, b_inside, "entry", .map)).?;
+    _ = try docs.bob.set(gpa, new_child, "text", .{ .str = "hello" });
+    const new_child_ref = try docs.bob.nodeRef(gpa, new_child);
+    defer new_child_ref.free(gpa);
+
+    const av = try docs.alice.version(gpa);
+    defer gpa.free(av);
+    const batch = try docs.bob.eventsSince(gpa, av);
+    defer gpa.free(batch);
+
+    // Pre-fix, this failed `self.doc.resolve` (MissingDependency) and was
+    // refused `.authority` — PERMANENTLY, since the new node's identity
+    // never becomes "older" on retry (see `admitRegions`'s doc comment on
+    // why this broke "deferred-until-release, not a permanent verdict").
+    switch (try gc.admitRegions(gpa, batch)) {
+        .admit => {},
+        .refuse => |r| {
+            r.free(gpa);
+            return error.TestUnexpectedResult;
+        },
+    }
+
+    // Not just admitted in principle — it actually lands.
+    const changes = try docs.alice.merge(gpa, batch);
+    gpa.free(changes);
+    const a_child = try docs.alice.resolve(new_child_ref);
+    try t.expectEqualStrings("hello", docs.alice.ref(a_child).mapGet("text").?.asStr());
+}
+
+test "subtree grant: a peer with no grant rows of its own is unaffected — per-doc canEdit still governs" {
+    const gpa = t.allocator;
+    // Two DIFFERENT authenticated identities: the grant goes to the FIRST,
+    // but the batch being checked is attributed (via `session`) to the
+    // SECOND — zero rows for it.
+    var sp_granted: SessionPair = undefined;
+    try SessionPair.setup(gpa, &sp_granted);
+    defer sp_granted.deinit();
+    var sp_other: SessionPair = undefined;
+    try SessionPair.setup(gpa, &sp_other);
+    defer sp_other.deinit();
+
+    var docs = try GrantDocs.setup(gpa);
+    defer docs.deinit(gpa);
+
+    var table = grants.HandleTable.init(gpa);
+    defer table.deinit();
+
+    // Alice's quad talking to the GRANTED identity mints the row...
+    {
+        var gc = try makeEnforcer(gpa, &docs, sp_granted.a, &table);
+        defer gc.deinit();
+        _ = try gc.grantSubtree(docs.inside);
+    }
+
+    // ...but THIS check runs on alice's quad talking to the OTHER
+    // identity: absence of a grant row for THIS peer keeps today's
+    // behavior (grants narrow, they don't default-deny the world).
+    var gc = try makeEnforcer(gpa, &docs, sp_other.a, &table);
+    defer gc.deinit();
+
+    const b_outside = try docs.bob.resolve(docs.outside);
+    _ = try docs.bob.set(gpa, b_outside, "k", .{ .str = "v" });
+    const av = try docs.alice.version(gpa);
+    defer gpa.free(av);
+    const batch = try docs.bob.eventsSince(gpa, av);
+    defer gpa.free(batch);
+
+    switch (try gc.admitRegions(gpa, batch)) {
+        .admit => {},
+        .refuse => |r| {
+            r.free(gpa);
+            return error.TestUnexpectedResult;
+        },
+    }
+}
+
+test "subtree grant: root deleted — every subsequent admission traps loudly with the collapsed reason" {
+    const gpa = t.allocator;
+    var sp: SessionPair = undefined;
+    try SessionPair.setup(gpa, &sp);
+    defer sp.deinit();
+
+    var docs = try GrantDocs.setup(gpa);
+    defer docs.deinit(gpa);
+
+    var table = grants.HandleTable.init(gpa);
+    defer table.deinit();
+    var gc = try makeEnforcer(gpa, &docs, sp.a, &table);
+    defer gc.deinit();
+    _ = try gc.grantSubtree(docs.inside);
+
+    // The subtree's root gets deleted on ALICE's replica — concurrently
+    // with the peer's edit below (the peer never learns of the deletion
+    // first).
+    try docs.alice.unset(gpa, null, "inside");
+    const inside_obj = try docs.alice.resolve(docs.inside);
+    try t.expect(!try docs.alice.reachable(gpa, inside_obj));
+
+    const b_inside = try docs.bob.resolve(docs.inside);
+    _ = try docs.bob.set(gpa, b_inside, "k", .{ .str = "v" });
+    const av = try docs.alice.version(gpa);
+    defer gpa.free(av);
+    const batch = try docs.bob.eventsSince(gpa, av);
+    defer gpa.free(batch);
+
+    switch (try gc.admitRegions(gpa, batch)) {
+        .refuse => |r| {
+            defer r.free(gpa);
+            // The COLLAPSED reason, not a flat "authority" refusal — see
+            // `GrantContext`'s doc comment: with the root gone, "you never
+            // had access" would be dishonest (the peer DID, until it
+            // collapsed); "re-grant needed" is the actionable signal.
+            try t.expectEqual(GraphCollab.RefusalReason.collapsed, r.reason);
+        },
+        .admit => return error.TestUnexpectedResult,
+    }
+}
+
+test "subtree grant + lease composition: inside the grant but leased by another -> lease refusal; outside the grant -> authority refusal" {
+    const gpa = t.allocator;
+    var sp: SessionPair = undefined;
+    try SessionPair.setup(gpa, &sp);
+    defer sp.deinit();
+
+    var docs = try GrantDocs.setup(gpa);
+    defer docs.deinit(gpa);
+
+    // A child node nested INSIDE the granted subtree — the lease half of
+    // this test needs a region distinct from `inside` itself.
+    const inside_obj = try docs.alice.resolve(docs.inside);
+    const child_obj = (try docs.alice.set(gpa, inside_obj, "child", .map)).?;
+    const child_ref = try docs.alice.nodeRef(gpa, child_obj);
+    defer child_ref.free(gpa);
+
+    // Sync bob up to the child's creation before he edits anything.
+    {
+        const bv = try docs.bob.version(gpa);
+        defer gpa.free(bv);
+        const batch = try docs.alice.eventsSince(gpa, bv);
+        defer gpa.free(batch);
+        const changes = try docs.bob.merge(gpa, batch);
+        gpa.free(changes);
+    }
+
+    var grant_table = grants.HandleTable.init(gpa);
+    defer grant_table.deinit();
+    var lease_table: LeaseTable = .empty;
+    defer lease_table.deinit(gpa);
+
+    var gc = try makeEnforcer(gpa, &docs, sp.a, &grant_table);
+    defer gc.deinit();
+    gc.bindLeases(&lease_table);
+    _ = try gc.grantSubtree(docs.inside);
+    // Carol holds the child region's lease (occupancy, self-declared name
+    // — leases stay name-keyed, only authority moved to identity) —
+    // independent of the peer's (broader) authority over the whole
+    // `inside` subtree.
+    _ = try lease_table.tryAcquire(gpa, child_ref, "carol", 0);
+
+    // The peer edits the CHILD: within its GRANT, but occupied by carol's
+    // LEASE — a lease refusal, not an authority one (composition order:
+    // authority passes first, THEN lease catches it).
+    {
+        const b_child = try docs.bob.resolve(child_ref);
+        _ = try docs.bob.set(gpa, b_child, "k", .{ .str = "v" });
+        const av = try docs.alice.version(gpa);
+        defer gpa.free(av);
+        const batch = try docs.bob.eventsSince(gpa, av);
+        defer gpa.free(batch);
+        switch (try gc.admitRegions(gpa, batch)) {
+            .refuse => |r| {
+                defer r.free(gpa);
+                try t.expectEqual(GraphCollab.RefusalReason.lease, r.reason);
+            },
+            .admit => return error.TestUnexpectedResult,
+        }
+        // Test plumbing (see the confinement test's comment): advance
+        // alice past this refused batch so the next check below is clean.
+        const changes = try docs.alice.merge(gpa, batch);
+        gpa.free(changes);
+    }
+
+    // The peer edits OUTSIDE the grant entirely: authority refusal,
+    // distinct from the lease refusal above — the taxonomy is observable.
+    {
+        const b_outside = try docs.bob.resolve(docs.outside);
+        _ = try docs.bob.set(gpa, b_outside, "k2", .{ .str = "v2" });
+        const av = try docs.alice.version(gpa);
+        defer gpa.free(av);
+        const batch = try docs.bob.eventsSince(gpa, av);
+        defer gpa.free(batch);
+        switch (try gc.admitRegions(gpa, batch)) {
+            .refuse => |r| {
+                defer r.free(gpa);
+                try t.expectEqual(GraphCollab.RefusalReason.authority, r.reason);
+            },
+            .admit => return error.TestUnexpectedResult,
+        }
+    }
+}
+
+test "subtree grant: a batch straddling the grant boundary is refused WHOLE, matching admitRegions' existing batch granularity" {
+    const gpa = t.allocator;
+    var sp: SessionPair = undefined;
+    try SessionPair.setup(gpa, &sp);
+    defer sp.deinit();
+
+    var docs = try GrantDocs.setup(gpa);
+    defer docs.deinit(gpa);
+
+    var table = grants.HandleTable.init(gpa);
+    defer table.deinit();
+    var gc = try makeEnforcer(gpa, &docs, sp.a, &table);
+    defer gc.deinit();
+    _ = try gc.grantSubtree(docs.inside);
+
+    // ONE batch, two ops: one inside the grant, one outside it.
+    const b_inside = try docs.bob.resolve(docs.inside);
+    _ = try docs.bob.set(gpa, b_inside, "k1", .{ .str = "in" });
+    const b_outside = try docs.bob.resolve(docs.outside);
+    _ = try docs.bob.set(gpa, b_outside, "k2", .{ .str = "out" });
+
+    const av = try docs.alice.version(gpa);
+    defer gpa.free(av);
+    const batch = try docs.bob.eventsSince(gpa, av);
+    defer gpa.free(batch);
+
+    switch (try gc.admitRegions(gpa, batch)) {
+        .refuse => |r| {
+            defer r.free(gpa);
+            try t.expectEqual(GraphCollab.RefusalReason.authority, r.reason);
+        },
+        .admit => return error.TestUnexpectedResult,
+    }
+
+    // Whole-batch semantics: NEITHER op landed — a real driver's `.batch`
+    // handler only ever calls `merge` on `.admit` (see this file's
+    // `.batch` handler), and this test never called `merge` either.
+    try t.expect(docs.alice.root().mapGet("inside").?.mapGet("k1") == null);
+    try t.expect(docs.alice.root().mapGet("outside").?.mapGet("k2") == null);
+}
+
+test "subtree grant: confinement over the REAL wire (socketpair e2e) — admitted inside, refused loudly outside" {
+    const gpa = t.allocator;
+    var rig: LeaseRig = undefined;
+    try LeaseRig.setup(gpa, &rig);
+    defer rig.deinit(gpa);
+    rig.bindLeases();
+
+    var grant_table = grants.HandleTable.init(gpa);
+    defer grant_table.deinit();
+    rig.ga.bindGrants(&grant_table);
+
+    // Alice (the host) grants bob's AUTHENTICATED identity — proven by the
+    // secure handshake `LeaseRig.setup` already completed, `rig.ga.session
+    // .peerFingerprint()` under the hood — authority over room1's subtree
+    // only. No lease/name dance needed to establish identity anymore
+    // (REQUIRED FIX 1: authority keys on the session, never a self-declared
+    // name).
+    _ = try rig.ga.grantSubtree(rig.room1);
+
+    // Bob edits INSIDE the granted subtree (room1 itself, self-inclusive
+    // containment) — admitted and lands on alice's replica.
+    const b_room1 = try rig.joiner.resolve(rig.room1);
+    _ = try rig.joiner.set(gpa, b_room1, "granted-edit", .{ .str = "ok" });
+    {
+        const deadline = task.nowNs() + 5 * std.time.ns_per_s;
+        var landed = false;
+        while (task.nowNs() < deadline) {
+            try rig.pump();
+            const a_room1 = rig.origin.resolve(rig.room1) catch continue;
+            if (rig.origin.ref(a_room1).mapGet("granted-edit") != null) {
+                landed = true;
+                break;
+            }
+            testPark(2);
+        }
+        try t.expect(landed);
+    }
+    try t.expectEqual(@as(usize, 0), rig.gb.refusals.items.len);
+
+    // Bob edits OUTSIDE the grant (room2) — refused loudly, authority
+    // reason, never merged.
+    const b_room2 = try rig.joiner.resolve(rig.room2);
+    _ = try rig.joiner.set(gpa, b_room2, "denied-edit", .{ .str = "no" });
+    {
+        const deadline = task.nowNs() + 5 * std.time.ns_per_s;
+        var refused = false;
+        while (task.nowNs() < deadline) {
+            try rig.pump();
+            if (rig.gb.refusals.items.len > 0) {
+                refused = true;
+                break;
+            }
+            testPark(2);
+        }
+        try t.expect(refused);
+    }
+    try t.expectEqual(@as(usize, 1), rig.gb.refusals.items.len);
+    try t.expectEqual(GraphCollab.RefusalReason.authority, rig.gb.refusals.items[0].reason);
+    try t.expect(rig.origin.ref(rig.origin.resolve(rig.room2) catch unreachable).mapGet("denied-edit") == null);
 }

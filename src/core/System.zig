@@ -565,6 +565,7 @@ fn formatLimit(buf: []u8, limit: grants_mod.Limit) []const u8 {
         .none => "none",
         .fs_root => |root| std.fmt.bufPrint(buf, "fs_root({s})", .{root}) catch buf,
         .doc_region => |dr| std.fmt.bufPrint(buf, "doc_region({s})", .{dr.doc_id}) catch buf,
+        .graph_subtree => |gs| std.fmt.bufPrint(buf, "graph_subtree({s})", .{gs.doc_id}) catch buf,
     };
 }
 

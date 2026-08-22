@@ -211,7 +211,13 @@ pub const Context = struct {
         for (c.grants.constSlice()) |h| {
             const region = switch (table.limitFor(h)) {
                 .doc_region => |dr| dr,
-                .none, .fs_root => continue,
+                // `.graph_subtree` is a GraphDoc-shaped limit — it never
+                // legitimately rides a `doc.edit` row a TEXT buffer's
+                // `checkDocRegion` would consult (see `GraphSubtree`'s doc
+                // comment: enforcement lives at `GraphCollab.admitRegions`
+                // instead). Same "not this chokepoint's business" skip as
+                // `.fs_root`.
+                .none, .fs_root, .graph_subtree => continue,
             };
             if (!std.mem.eql(u8, region.doc_id, self.buffer().name)) continue;
             var out: [2]usize = undefined;

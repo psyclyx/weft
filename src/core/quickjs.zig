@@ -2017,7 +2017,7 @@ test "quickjs: W4 slice 4 — reconcile round trip: a weft.grant removed leaves 
     try t.expect(table.check(h));
     switch (table.limitFor(h)) {
         .fs_root => |root| try t.expectEqualStrings("repo", root),
-        .none, .doc_region => return error.TestUnexpectedResult,
+        .none, .doc_region, .graph_subtree => return error.TestUnexpectedResult,
     }
 
     // Reload WITHOUT the grant decl at all — reconcile tears it down.
