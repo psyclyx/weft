@@ -66,22 +66,38 @@
 //! that reasoning stated against the actual model, not just in the
 //! abstract.
 //!
-//! ## `Projection`/`ReconcileMode` (§2.6) — named, not yet generically built
+//! ## `Projection`/`ReconcileMode` (§2.6) — named, `on_save` now built for
+//! one real client
 //!
 //! §2.6 sketches a generic `Projection` (a `fill` + a `ReconcileMode` of
 //! `on_save`/`live`/`authoritative`) meant to run over a captured `Ctx` and
 //! a rendering `Viewport` — machinery from W2b/W3 this slice does not
-//! plumb through. Building that generic type now, unused by anything but a
-//! single client, would be exactly the kind of premature abstraction this
-//! plan elsewhere refuses (F1's "two substrates is scaffolding with a
-//! demolition date", the container's "systems are values" discipline
-//! preferring one real client over a speculative interface). `transcript.
-//! zig`'s `fill` is that ONE variant, concretely: a `.read_only` reconcile
-//! (edits refused — the existing `Buffer.read_only` mechanism, not
-//! anything new), documented there against `on_save`/`live`'s real
-//! unsuitability for a transcript. The generic union lands when a second
-//! client needs a different mode and the shape can be inferred from two
-//! real cases instead of guessed from one.
+//! plumb through. Building that generic UNION type now, with only ONE
+//! real graph-doc client, would still be exactly the kind of premature
+//! abstraction this plan elsewhere refuses (F1's "two substrates is
+//! scaffolding with a demolition date", the container's "systems are
+//! values" discipline preferring a real client over a speculative
+//! interface) — so `ReconcileMode` itself stays unbuilt as a runtime
+//! type. What DID change (W5 slice 3): `on_save` itself — one arm of that
+//! sketched union — is now a real, concrete MECHANISM with two
+//! independent instances proving its shape instead of one: dired's
+//! (guest/wasm, `doc/editable-projection.md`, ordered rename/move/delete/
+//! create file ops inferred from a path snapshot) and `transcript.zig`'s
+//! (host/in-process, `reconcileOnSave`, a per-row text-CRDT diff
+//! reconciled BY NODEREF — no snapshot needed, since each row's own
+//! current model text IS its live snapshot). Both wire through the
+//! IDENTICAL dispatch mechanism — the `save` ACTION scoped by tool
+//! identity (`action.zig`'s `When{.tool=...}`) — which is the actual
+//! answer to "what does declaring an authority mode mean, mechanically":
+//! not a field on a `Projection` struct instance (no such struct is
+//! instantiated at runtime for either client), but WHICH action provider
+//! a tool-backed buffer's `save` resolves to. `transcript.zig`'s
+//! `reconcileOnSave` doc comment has the full contract and the concurrent-
+//! edit refusal/re-target rules; this file just anchors where the second
+//! real case lives, since a THIRD client is what would finally justify
+//! promoting `ReconcileMode` to an actual generic type here. `live`
+//! remains exactly as undesigned as before (D1, north-star-plan.md §7.1);
+//! `authoritative` remains unneeded by anything built.
 
 const std = @import("std");
 const Allocator = std.mem.Allocator;

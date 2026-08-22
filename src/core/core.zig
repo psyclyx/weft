@@ -80,6 +80,7 @@ pub const file = @import("file.zig");
 pub const ShellFs = @import("ShellFs.zig");
 pub const backing = @import("backing.zig");
 pub const Backing = backing.Backing;
+pub const textdiff = @import("textdiff.zig");
 pub const GraphDoc = @import("graph.zig");
 pub const transcript = @import("transcript.zig");
 

@@ -22,12 +22,15 @@
 //!   which may already contain post-save typing). On `error.Stale`,
 //!   merge the disk first, then retry.
 //!
-//! The diff is prefix/suffix trimming — one replaced window. Correct
-//! always (both sides converge on the disk content); coarser than a
-//! structural diff when an external writer edits two distant regions
-//! (the window spans both). A refinement ladder (line-based Myers
-//! inside the window) exists if that coarseness ever bites; anchors
-//! inside the replaced window collapse to its edge either way.
+//! The diff is `textdiff.diffWindow` — prefix/suffix trimming, one
+//! replaced window. Correct always (both sides converge on the disk
+//! content); coarser than a structural diff when an external writer edits
+//! two distant regions (the window spans both). A refinement ladder
+//! (line-based Myers inside the window) exists if that coarseness ever
+//! bites; anchors inside the replaced window collapse to its edge either
+//! way. `transcript.zig`'s `on_save` row reconciliation needs the
+//! identical "old vs new → one window" shape, so the diff itself lives in
+//! `textdiff.zig`, shared — see that file's module doc comment.
 
 const std = @import("std");
 const Allocator = std.mem.Allocator;
@@ -36,6 +39,7 @@ const assert = std.debug.assert;
 const stemma = @import("stemma");
 const Document = @import("Document.zig");
 const ShellFs = @import("ShellFs.zig");
+const textdiff = @import("textdiff.zig");
 
 /// Where a buffer's bytes live. The authority, not just a path.
 pub const Backing = union(enum) {
@@ -99,7 +103,7 @@ pub const Sync = struct {
         const mirror = doc.peerText(self.peer);
         const old_bytes = try ropeBytes(gpa, mirror);
         defer gpa.free(old_bytes);
-        const changed = if (diffWindow(old_bytes, new_bytes)) |w| blk: {
+        const changed = if (textdiff.diffWindow(old_bytes, new_bytes)) |w| blk: {
             if (w.old_end > w.start) {
                 try doc.peerDelete(gpa, self.peer, .{ .start = w.start, .end = w.old_end });
             }
@@ -139,24 +143,6 @@ pub fn localToken(bytes: []const u8) [64]u8 {
     return hex;
 }
 
-/// `old[start..old_end)` became `new[start..new_end)`.
-const Window = struct { start: usize, old_end: usize, new_end: usize };
-
-/// The single replaced window between two byte strings, snapped to
-/// UTF-8 boundaries. Null when equal.
-fn diffWindow(old: []const u8, new: []const u8) ?Window {
-    if (std.mem.eql(u8, old, new)) return null;
-    const max_prefix = @min(old.len, new.len);
-    var p: usize = 0;
-    while (p < max_prefix and old[p] == new[p]) p += 1;
-    while (p > 0 and p < old.len and old[p] & 0xC0 == 0x80) p -= 1;
-    var s: usize = 0;
-    const max_suffix = @min(old.len, new.len) - p;
-    while (s < max_suffix and old[old.len - 1 - s] == new[new.len - 1 - s]) s += 1;
-    while (s > 0 and old[old.len - s] & 0xC0 == 0x80) s -= 1;
-    return .{ .start = p, .old_end = old.len - s, .new_end = new.len - s };
-}
-
 fn ropeBytes(gpa: Allocator, rope: *const stemma.Rope) Allocator.Error![]u8 {
     var snap = rope.snapshot();
     defer snap.deinit(gpa);
@@ -176,20 +162,6 @@ fn shellEnviron() std.process.Environ {
 
 fn docBytes(gpa: Allocator, doc: *const Document) ![]u8 {
     return ropeBytes(gpa, doc.text());
-}
-
-test "diffWindow: trims, snaps to scalar boundaries" {
-    try t.expectEqual(@as(?Window, null), diffWindow("abc", "abc"));
-    const w = diffWindow("hello world", "hello brave world").?;
-    try t.expectEqual(@as(usize, 6), w.start);
-    try t.expectEqual(@as(usize, 6), w.old_end);
-    try t.expectEqual(@as(usize, 12), w.new_end);
-    // Multi-byte: the changed byte sits inside a codepoint; the window
-    // must widen to whole scalars.
-    const w2 = diffWindow("aàb", "aèb").?; // à=0xC3A0 è=0xC3A8 share 0xC3
-    try t.expectEqual(@as(usize, 1), w2.start);
-    try t.expectEqual(@as(usize, 3), w2.old_end);
-    try t.expectEqual(@as(usize, 3), w2.new_end);
 }
 
 test "backing: external write merges with unsaved local edits (the nvim case)" {

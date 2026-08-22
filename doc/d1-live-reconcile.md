@@ -210,7 +210,7 @@ The load-bearing distinctions:
 | tool class | mode | reasoning |
 |---|---|---|
 | code / prose buffer (post-W7 degenerate one-node graph doc) | **live (text)** | one node, no structure; FugueMax convergence is the whole story. The flagship function-scoped-grant scenario (plan §6 W7) lives here. |
-| agent transcript | **read_only** now → **live (text)** later | append-mostly; editing a past turn's body is the future live case (transcript.zig:216-232). Genuinely multi-writer only if two humans co-edit one turn — rare, and handled by §1.2 when delta 3 lands. |
+| agent transcript | **read_only** now → **live (text)** later (but see the seam note below: W5-3 ships `on_save` machinery on it as the gate's mechanism proof) | append-mostly; editing a past turn's body is the future live case (transcript.zig:216-232). Genuinely multi-writer only if two humans co-edit one turn — rare, and handled by §1.2 when delta 3 lands. |
 | dired / file manager | **on_save** | fs-authority; a half-typed rename must not `mv`. Commit point = the human's save, deliberately. Live would be actively dangerous. |
 | magit staging | **on_save** | git index is the authority; `add -p`/`reset` at save. Same as dired. |
 | config editor | **on_save** | validate + apply atomically at commit; a half-edited config must never take effect. |

@@ -1028,3 +1028,101 @@ test "GraphDoc over the wire: transcript shares, joiner adopts, edits converge b
     defer gpa.free(text_b);
     try t.expectEqualStrings(text_a, text_b);
 }
+
+test "GraphDoc over the wire: an edit through the on_save PROJECTION converges on the peer" {
+    // W5 slice 3's replication gate: `reconcileOnSave` isn't just a local
+    // in-process reconcile — because the model it writes into IS a
+    // `GraphDoc`, the resulting `textInsert`/`textDelete` ops are ordinary
+    // graph events, so slice 2's existing wire machinery (`GraphCollab`)
+    // carries them with NO new wire work, exactly as `graph.zig`'s W5
+    // slice 1 doc comment promised. This proves that promise against a
+    // REAL edit that arrived through a projected BUFFER (`doc.insert` +
+    // `reconcileOnSave`), not a direct `TranscriptDoc.editText` model call
+    // (that path is already covered by the test above).
+    const gpa = t.allocator;
+    const fds = try socketPair();
+    var la: FdLink = .{ .fd = fds[0] };
+    var lb: FdLink = .{ .fd = fds[1] };
+
+    var origin = try TranscriptDoc.create(gpa, "alice");
+    defer origin.deinit(gpa);
+    _ = try origin.append(gpa, "user", 1, "hello");
+
+    const sa = try Session.create(gpa, la.link(), .server, "tok", .own, null);
+    defer sa.destroy();
+    const sb = try Session.create(gpa, lb.link(), .client, "tok", .own, null);
+    defer sb.destroy();
+    var ca = try Conn.init(gpa, sa, "alice", .server);
+    defer ca.deinit();
+    var cb = try Conn.init(gpa, sb, "bob", .client);
+    defer cb.deinit();
+
+    _ = try ca.shareGraph(&origin.graph, "transcript", 1);
+
+    const offer_deadline = task.nowNs() + 5 * std.time.ns_per_s;
+    while (task.nowNs() < offer_deadline and cb.offers.items.len == 0) {
+        _ = try ca.tick();
+        _ = try cb.tick();
+        futexWaitTimed(&sa.out_wake, sa.out_wake.load(.acquire), std.time.ns_per_ms);
+    }
+    try t.expect(cb.offers.items.len > 0);
+
+    var joiner: TranscriptDoc = .{ .graph = try GraphDoc.init(gpa, "bob") };
+    defer joiner.deinit(gpa);
+    _ = try cb.openGraphOffer(0, &joiner.graph, 1);
+
+    const bootstrap_deadline = task.nowNs() + 5 * std.time.ns_per_s;
+    while (task.nowNs() < bootstrap_deadline and joiner.graph.root().mapGet("entries") == null) {
+        _ = try ca.tick();
+        _ = try cb.tick();
+        futexWaitTimed(&sb.out_wake, sb.out_wake.load(.acquire), std.time.ns_per_ms);
+    }
+    joiner = try TranscriptDoc.adopt(joiner.graph);
+    try t.expectEqual(@as(usize, 1), joiner.count());
+
+    // Edit THROUGH THE PROJECTION on the origin side: fill a buffer, type
+    // into it (an ordinary buffer edit, no graph API touched directly),
+    // then save-reconcile — the same path a real UI's `C-s` would drive.
+    var doc_a = try Document.init(gpa, "alice");
+    defer doc_a.deinit(gpa);
+    var subs_a: subbuffer.SubBuffers = .empty;
+    defer subs_a.deinit(gpa);
+    try TranscriptDoc.fill(gpa, &origin, &doc_a, &subs_a);
+    const row0_mid = "user: hell".len; // strictly inside the claimed body span
+    try doc_a.insert(gpa, row0_mid, "!!!");
+    const report = try TranscriptDoc.reconcileOnSave(gpa, &origin, &doc_a, &subs_a);
+    try t.expectEqual(@as(usize, 1), report.applied);
+    try t.expectEqual(@as(usize, 0), report.stale);
+    const origin_body = try origin.at(0).text(gpa);
+    defer gpa.free(origin_body);
+    try t.expectEqualStrings("hell!!!o", origin_body);
+
+    // Pump until the joiner's replica converges on the SAME text (a real
+    // op frame over the wire, not a direct merge call).
+    const converge_deadline = task.nowNs() + 5 * std.time.ns_per_s;
+    var converged = false;
+    while (task.nowNs() < converge_deadline) {
+        _ = try ca.tick();
+        _ = try cb.tick();
+        const jt = try joiner.at(0).text(gpa);
+        defer gpa.free(jt);
+        if (std.mem.eql(u8, jt, "hell!!!o")) {
+            converged = true;
+            break;
+        }
+        testPark(2);
+    }
+    try t.expect(converged);
+
+    // Re-fill on the joiner's side reflects the origin's projected edit —
+    // the graph↔text bridge survives a real wire round trip for an edit
+    // that itself arrived through a projection, not just a model call.
+    var doc_b = try Document.init(gpa, "bob");
+    defer doc_b.deinit(gpa);
+    var subs_b: subbuffer.SubBuffers = .empty;
+    defer subs_b.deinit(gpa);
+    try TranscriptDoc.fill(gpa, &joiner, &doc_b, &subs_b);
+    const text_b = try doc_b.text().toOwnedSlice(gpa);
+    defer gpa.free(text_b);
+    try t.expectEqualStrings("user: hell!!!o", text_b);
+}
