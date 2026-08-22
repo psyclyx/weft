@@ -195,6 +195,14 @@ pub fn openWith(
     try self.refilter(gpa);
     const prev = try gpa.dupe(u8, ctx.head.currentMode());
     errdefer gpa.free(prev);
+    // Pick bypasses the keymap dispatch site (this file's module doc, and
+    // `close`'s own comment below) — `setMode` here is a raw overwrite, not
+    // a `Head.popTransientMode` pop. Same reasoning as `Buffers.switchTo`
+    // (task #19 item 2): any transient/menu frame still open named a return
+    // target in the mode we're leaving for "pick", which `close` will
+    // restore from `prev` (a plain string) rather than by popping — so drop
+    // the stack now instead of leaving it to outlive its scope.
+    ctx.head.dropAllTransients(gpa);
     try ctx.head.setMode(gpa, "pick");
     // Commit — infallible from here, so the acceptor/source become
     // live only once the pick is fully open.

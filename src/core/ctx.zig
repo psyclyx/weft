@@ -35,28 +35,52 @@
 //! far that guarantee reaches today and where it does not yet (W2b judgment
 //! call — the escape hatch is named, not hidden).
 //!
-//! **Migration status (W2b):** `Head.setMode`'s ~150 existing call sites
-//! (guest `weft.setMode`, `dispatch.zig`'s menu machinery, `Pick.zig`'s
-//! save/restore, `Buffers.switchTo`'s mode restore, `builtins.zig`) are
-//! NOT bulk-migrated in this pass — see this module's and `System.zig`'s
-//! doc for why (mostly: they each carry their own nuanced restore/sticky/
-//! menu-return semantics that deserve a dedicated migration + full
-//! regression pass, not a rushed swap that risks the "byte-identical"
-//! requirement). What IS real and load-bearing: the door exists, is
-//! tested end-to-end (capture → setMode → Head.mode changes), and is the
-//! documented target for every NEW dispatch-path mode change.
+//! **Migration status (W2b, updated task #19 item 2):** `Head.setMode`'s
+//! ~150 existing call sites are NOT bulk-migrated — only `dispatch.zig`'s
+//! OWN menu machinery (the auto-enter branch where a bound command's name
+//! IS a declared menu mode, its matching leaf auto-pop, and `menu-escape`)
+//! now goes through `pushTransient`/the paired pop. Guest `weft.setMode`
+//! (every plugin's own menu entry — `git-push-menu`, `op-pending`, …) and
+//! `builtins.zig` are explicitly, deliberately still on plain `enterMode` —
+//! seeing this migration through them is real future work, not an
+//! oversight (see `dispatch.zig`'s module doc for exactly which real
+//! production menus are on which path today). `Buffers.switchTo`'s mode
+//! restore and `Pick.zig`'s save/restore both stay on their own bypassing
+//! `setMode` too (that's THEIR nuanced restore semantics, unchanged) but
+//! now each drops any open transient stack first (`Head.dropAllTransients`)
+//! so bypassing never leaves a stale frame behind — the one piece of this
+//! migration that reaches them without moving them onto the door itself.
+//! What IS real and load-bearing: the door exists, is tested end-to-end
+//! (capture → setMode → Head.mode changes; menu-enter → pushTransient →
+//! Head.mode changes, through the REAL `dispatch.zig` production path —
+//! `e2e/menu_test.zig`), and is the documented target for every NEW
+//! dispatch-path mode change.
 //!
-//! **F3 follow-up, named (review):** once the production menu-enter path
-//! (`dispatch.zig`'s legacy mode-menu path, `Pick.zig`'s save/restore)
-//! actually migrates onto `pushTransient`, the `mode` scope's fact source
-//! should become `Head.transient_stack`'s top frame when one is open
-//! (today `Ctx.capture`'s `mode` scope always reads `Head.currentMode()`
-//! directly, which happens to already reflect the top transient's mode
-//! since `pushTransientMode` calls `enterMode` — but that's Head's
-//! internal wiring, not something `capture` reads as "the mode scope's
-//! source of truth IS the transient stack" the way §2.1 implies once
-//! transients are the norm rather than the exception). Not needed until
-//! the migration above happens; noted so it isn't lost.
+//! **F3, RESOLVED (task #19 item 2, corrected on review send-back):**
+//! "the innermost transient frame's mode agrees with `Head.currentMode()`"
+//! holds BY CONSTRUCTION AT DISPATCH BOUNDARIES and at the two host bypass
+//! sites (`Buffers.switchTo`, `Pick.openWith` — both now drop the whole
+//! transient stack before their raw `setMode`, `Head.dropAllTransients`).
+//! It does NOT hold, and was never required to, MID-HANDLER: a guest
+//! command running under an open menu can legitimately call
+//! `weft.setMode(X)` and then — still inside that same handler, before
+//! `dispatch.zig`'s own post-leaf pop/discard-pop runs — capture again
+//! (e.g. to resolve an action). `weft.setMode` and capture-driven
+//! resolution are both ordinary public APIs with no prohibition against
+//! composing them that way; a crashing assert on that divergence would
+//! have made an unremarkable guest pattern a ReleaseSafe abort (and, worse,
+//! a *silent wrong answer* in ReleaseFast, where the assert compiles out
+//! and `mergedFacts` would have resolved against the STALE menu name via
+//! the trailing transient scope's shadow). So `capture` RECONCILES instead
+//! of asserting: every transient scope's `mode` FACT is sourced from
+//! `Head.currentMode()` (the live mode), not the frame's own recorded
+//! `mode` — the handler changed mode deliberately, so the live mode is the
+//! only honest answer for resolution. A divergence is still observable
+//! (`std.log.debug`, never fatal) but no longer a crash risk. See
+//! `Ctx.capture`'s doc for the full reasoning (including why only the
+//! INNERMOST frame's fact ever needs correcting) and
+//! `e2e/menu_test.zig`'s "F3 reconcile" test for the exact
+//! setMode-then-resolve-mid-handler scenario this fixes.
 //!
 //! **Paired transients** (§2.1: "`ctx.push(transient)` returns a value
 //! whose going-out-of-scope IS the pop"). Zig has no destructors, so
@@ -213,8 +237,47 @@ pub const Ctx = struct {
         } });
         self.scopes.append(.{ .kind = .subbuffer });
         self.scopes.append(.{ .kind = .mode, .facts = .{ .mode = ctx.head.currentMode() } });
-        for (ctx.head.transient_stack.items) |frame| {
-            self.scopes.append(.{ .kind = .transient, .facts = .{ .mode = frame.mode } });
+        // F3 (RESOLVED, task #19 item 2 + review send-back): the invariant
+        // "the innermost transient frame's mode agrees with
+        // `Head.currentMode()`" holds AT DISPATCH BOUNDARIES and at the two
+        // host bypass sites (`Buffers.switchTo`, `Pick.openWith`, both of
+        // which now drop the whole stack before overwriting `mode` — see
+        // `Head.dropAllTransients`). It does NOT hold, and is not required
+        // to, INSIDE a still-running leaf handler: a guest command bound
+        // under an open menu is free to call `weft.setMode(X)` and then
+        // (still in the same handler, before `dispatch.zig`'s own
+        // post-leaf pop/discard-pop runs) capture again — e.g. to resolve
+        // an action. That capture sees a transient top whose recorded
+        // `mode` still names the menu, while `Head.currentMode()` already
+        // reads `X`. Neither is "wrong": the transient frame is a historical
+        // record (what menu this scope was pushed FOR); `currentMode()` is
+        // the live fact. For RESOLUTION (`mergedFacts`, below) the live
+        // mode is the only honest answer — the handler changed it
+        // deliberately, so a stale shadow would resolve against a mode the
+        // interaction has already left. Reconciled by construction, not by
+        // hoping: every transient scope's `mode` FACT is sourced from
+        // `Head.currentMode()`, not `frame.mode` — so even the innermost
+        // (last-appended, §2.1 "innermost shadows") transient scope can
+        // only ever shadow `mergedFacts().mode` with the SAME live value
+        // the `mode` scope above already carries. (Only the innermost
+        // frame's fact can reach `mergedFacts` at all — every OUTER
+        // transient scope's fact is itself shadowed by whatever comes
+        // after it, so this only needs correcting where divergence could
+        // actually surface.) A divergence is still logged — DEBUG level,
+        // never fatal (a crashing assert here would make two ordinary
+        // public APIs, `weft.setMode` + capture-driven action resolution,
+        // an accidental crash surface — exactly the window this task
+        // exists to close, not reopen).
+        if (ctx.head.transient_stack.items.len > 0) {
+            const top = ctx.head.transient_stack.items[ctx.head.transient_stack.items.len - 1];
+            if (!std.mem.eql(u8, top.mode, ctx.head.currentMode())) {
+                std.log.debug("ctx: capture saw an open transient ('{s}') diverge from the live mode ('{s}') — a leaf handler changed mode before its dispatch-boundary pop; resolving facts against the LIVE mode", .{ top.mode, ctx.head.currentMode() });
+            }
+        }
+        const live_mode = ctx.head.currentMode();
+        for (ctx.head.transient_stack.items, 0..) |frame, i| {
+            const mode_fact = if (i + 1 == ctx.head.transient_stack.items.len) live_mode else frame.mode;
+            self.scopes.append(.{ .kind = .transient, .facts = .{ .mode = mode_fact } });
         }
         return self;
     }

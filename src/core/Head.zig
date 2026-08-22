@@ -320,6 +320,47 @@ pub fn hasOpenTransients(self: *const Head) bool {
     return self.transient_stack.items.len != 0;
 }
 
+/// Pop the transient at `depth` LIKE `popTransientMode` (same LIFO check,
+/// same errors), but WITHOUT restoring its recorded `return_to` — for a
+/// caller that already knows `self.mode` was changed some OTHER way (task
+/// #19 item 2: a leaf command's own guest `weft.setMode`, mid-menu, that
+/// exits somewhere other than the recorded return target) and a restore
+/// here would stomp that deliberate choice. The frame still has to come off
+/// the stack — leaving it would be exactly the silent leak this whole
+/// mechanism exists to make loud instead of (`ctx.zig`'s "Paired
+/// transients"): its memory is freed and `hasOpenTransients` stops
+/// reporting it, just without touching `self.mode`.
+pub fn popTransientDiscard(self: *Head, gpa: Allocator, depth: usize) TransientPopError!void {
+    if (self.transient_stack.items.len == 0) return error.Empty;
+    if (depth != self.transient_stack.items.len - 1) return error.OutOfOrder;
+    const frame = self.transient_stack.pop().?;
+    gpa.free(frame.mode);
+    gpa.free(frame.return_to);
+}
+
+/// Discard EVERY open transient without restoring anything — for a caller
+/// about to overwrite `self.mode` wholesale through a path that has never
+/// gone through `pushTransientMode`/`popTransientMode` (`Buffers.switchTo`'s
+/// resting-mode restore, `Pick.openWith`'s save/restore — both bypass the
+/// keymap dispatch site entirely, same as they did before transients
+/// existed). Whatever `self.mode` becomes right after this call is the
+/// caller's own decision; any transient frame recorded against the mode
+/// being left behind is now meaningless (it named a scope in the buffer/
+/// interaction the head is LEAVING), so there is nothing honest left to pop
+/// it INTO — this is the buffer-switch/pick-open counterpart of
+/// `popTransientDiscard`, generalized to "all of them, unconditionally"
+/// rather than "the one on top, if it matches." See those callers' doc
+/// comments for why a plain overwrite (not a pop) has always been legacy's
+/// own behavior here — this just keeps the stack from silently outliving
+/// the scope it described.
+pub fn dropAllTransients(self: *Head, gpa: Allocator) void {
+    for (self.transient_stack.items) |frame| {
+        gpa.free(frame.mode);
+        gpa.free(frame.return_to);
+    }
+    self.transient_stack.clearRetainingCapacity();
+}
+
 /// The command bound to `key` in this head's current mode (chain-walked),
 /// then the `global` layer — see `Keymap.lookup`.
 pub fn lookup(self: *const Head, km: *const Keymap, key: []const u8) ?[]const u8 {

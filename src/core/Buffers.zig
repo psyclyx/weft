@@ -206,6 +206,17 @@ pub fn switchTo(self: *Buffers, gpa: Allocator, id: Id, head: *Head, keymap: *co
         gpa.free(old.mode);
         old.mode = held;
     }
+    // A buffer switch bypasses the keymap dispatch site entirely (this
+    // function's own doc, and Keymap.zig's locked-mode doc) — `head.mode` is
+    // about to be overwritten directly below, not popped through
+    // `Head.popTransientMode`. Any transient/menu frame still open (task
+    // #19 item 2: dispatch.zig's paired-transient menu push) named a return
+    // target in the buffer being LEFT, which this switch is discarding
+    // anyway — so there is nothing left to restore it into. Drop it now
+    // rather than let it outlive the scope it described (`hasOpenTransients`
+    // would otherwise keep reporting a menu that, from here on, no key can
+    // ever reach again — the exact silent leak the pairing exists to kill).
+    head.dropAllTransients(gpa);
     self.prev_id = self.active_id;
     if (target.mode.len > 0) {
         try head.setMode(gpa, target.mode);

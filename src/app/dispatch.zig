@@ -5,6 +5,37 @@
 //! motion and paging are view-computed (goal-x over rendered geometry), the
 //! interactive override the core's scalar-column fallback can't do. Also the
 //! menu command handlers (`menu-escape`, `which-key-now`).
+//!
+//! **Menu enter/return (task #19 item 2): paired transients, not a bare
+//! `enterMode`.** A bound key whose command NAMES a declared menu mode
+//! (`ctx.keymap.isMenuMode(cmd_name)`, in `dispatchSpec`'s `.run` case) is
+//! the actual production shape of a menu open — real examples:
+//! `src/guest/git.zig`'s `weft.bindKey("magit", "c", "git-commit-dispatch")`,
+//! `git-branch-menu`, `git-stash-menu`, `git-log-menu`, `git-rebase-menu`,
+//! `git-commit-menu`, `git-input-menu`. Entering one now PUSHES a paired
+//! transient (`core/ctx.zig`'s `Ctx.pushTransient`, backed by
+//! `core.Head.transient_stack`) instead of a bare `Head.enterMode`; the
+//! matching leaf auto-pop and `menu-escape` are the POP, reconstructed from
+//! the known stack depth (`ourTransientTop`/`popOurTransient` below) rather
+//! than threaded through as a live handle — the stack, not a Zig scope, is
+//! the durable record spanning however many keypresses the menu stays open.
+//! NOT migrated this pass (deliberately — see `ctx.zig`'s module doc):
+//! guest-initiated `weft.setMode` (every plugin's OWN direct menu entry —
+//! `git-push-menu`/`git-pull-menu`/`git-fetch-menu` (sticky), `git-reset-menu`,
+//! `git-confirm`/`git-confirm2`, vim's `op-pending`/`op-to`, helix's
+//! `helix-op`, dired's `dired-confirm`) stays on plain `Head.enterMode` and
+//! the legacy `Head.menu_return` table, which therefore CANNOT be deleted —
+//! it is still the only record for those. The leaf auto-pop / `menu-escape`
+//! logic below checks WHICH mechanism owns the currently-open menu
+//! (`ourTransientTop`) and falls back to the legacy `menuReturn` lookup when
+//! it isn't ours, so both paths keep their exact pre-migration observable
+//! behavior. See `src/e2e/menu_test.zig` for the paired-transient path
+//! driven through this REAL dispatch (enter/leaf/auto-pop, `menu-escape`,
+//! sticky re-enter, nested LIFO, a leaf's own buffer switch mid-menu, and
+//! the interaction-boundary leak tripwire below) and `project_test.zig`'s
+//! spine test for the real `git-commit-dispatch` → `git-commit` (buffer
+//! switch mid-menu) → `git-commit-menu` → `git-commit-finish` flow,
+//! unmodified by this migration.
 
 const std = @import("std");
 const core = @import("../core/core.zig");
@@ -83,6 +114,38 @@ pub fn handlePointer(
     return dirty;
 }
 
+/// Whether the TOP of `ctx.head`'s transient stack is the frame our own
+/// paired-transient menu machinery (below) pushed for menu mode `m` — the
+/// precondition every pop site here checks before touching the stack.
+/// `ctx.zig`'s F3 invariant (a debug assertion in `Ctx.capture`) is exactly
+/// this: whenever the stack is non-empty its top frame's mode equals
+/// `head.currentMode()`, so if `m` is still current, an open top frame
+/// naming `m` can only be the one THIS FILE pushed for it (a guest-entered
+/// menu — `weft.setMode`, not migrated this pass — never touches the
+/// stack at all, see `ctx.zig`'s module doc).
+fn ourTransientTop(ctx: *core.command.Context, m: []const u8) ?usize {
+    const stack = ctx.head.transient_stack.items;
+    if (stack.len == 0) return null;
+    const depth = stack.len - 1;
+    return if (std.mem.eql(u8, stack[depth].mode, m)) depth else null;
+}
+
+/// Pop our own transient at `depth`, restoring the mode it recorded at push
+/// time — the paired-transient counterpart of the legacy
+/// `head.menuReturn(m)`-then-`setMode` dance. Reconstructs a `TransientHandle`
+/// from the known depth rather than threading one through from the push
+/// site: `Head.transient_stack` (not a Zig stack frame) is already the
+/// durable record spanning however many keypresses the menu stayed open for
+/// (`ctx.zig`'s "Paired transients" doc), so there is no live handle value
+/// to have carried across those separate `dispatchSpec` calls in the first
+/// place — reconstructing one here to reuse `TransientHandle.deinit`'s
+/// LIFO-checked, idempotent pop is the honest way to drive the SAME
+/// mechanism, not a workaround of it.
+fn popOurTransient(ctx: *core.command.Context, depth: usize) void {
+    var handle: core.ctx.TransientHandle = .{ .host = ctx, .depth = depth };
+    handle.deinit();
+}
+
 /// `menu-escape` (Escape / C-g, bound in the GLOBAL layer so it works anywhere)
 /// — leave the current MENU back to its recorded return target. Outside a menu
 /// it is a NO-OP: Escape must never force a mode change, or it drops you into
@@ -95,11 +158,21 @@ pub fn menuEscapeHandler(ctx: *core.command.Context, data: ?*anyopaque, args: []
     _ = args;
     const km = ctx.keymap;
     const head = ctx.head;
-    if (!km.isMenuMode(head.currentMode())) return .nil; // not in a menu → leave the mode be
-    // In a menu: return to its recorded target, else the configured base mode
-    // (vim's "normal", helix's "helix-normal", or plain "default").
+    const cur = head.currentMode();
+    if (!km.isMenuMode(cur)) return .nil; // not in a menu → leave the mode be
+    // Paired-transient path (task #19 item 2): if we're the one who pushed
+    // this menu, leaving IS the pop — restores the exact pre-push mode,
+    // whatever it was, no separate lookup needed.
+    if (ourTransientTop(ctx, cur)) |depth| {
+        popOurTransient(ctx, depth);
+        return .nil;
+    }
+    // Legacy fallback: a GUEST-entered menu (`weft.setMode`, not migrated
+    // this pass — see ctx.zig's module doc) — return to its recorded
+    // target, else the configured base mode (vim's "normal", helix's
+    // "helix-normal", or plain "default").
     const base = if (ctx.buffers.default_mode.len > 0) ctx.buffers.default_mode else "default";
-    const ret = head.menuReturn(head.currentMode()) orelse base;
+    const ret = head.menuReturn(cur) orelse base;
     head.setMode(ctx.gpa, ret) catch {};
     return .nil;
 }
@@ -331,6 +404,22 @@ pub fn dispatchKey(ctx: *core.command.Context, ev: wayland.KeyEvent) !void {
 pub fn dispatchSpec(ctx: *core.command.Context, spec: []const u8, text: []const u8) !void {
     ctx.user_initiated = true;
     defer ctx.user_initiated = false;
+    // THE INTERACTION-BOUNDARY LEAK CHECK (task #19 item 2): every path
+    // through this function that pushes a paired transient (the menu-enter
+    // branch below) also pops it before returning, on every branch that
+    // handling has — so by the time we're back here, at the true edge of
+    // ONE dispatch, either the stack is empty or the head is sitting in
+    // exactly the menu mode its top frame names (the same invariant
+    // `ctx.zig`'s F3 debug-asserts on every `Ctx.capture`). If BOTH "not a
+    // menu" and "transients open" are true, a push somewhere leaked past
+    // its pop — the class this whole mechanism exists to make loud instead
+    // of silent. This should be UNREACHABLE; it is the tripwire proving it,
+    // not a normal-operation code path (see `menu_test.zig`'s fault-
+    // injection test, which pushes one on purpose and confirms this fires).
+    defer if (ctx.head.hasOpenTransients() and !ctx.keymap.isMenuMode(ctx.head.currentMode())) {
+        std.log.warn("dispatch: {d} open transient(s) survived a dispatch that left mode '{s}' (not a menu) — an unpaired push leaked; recovering by popping all", .{ ctx.head.transient_stack.items.len, ctx.head.currentMode() });
+        ctx.head.dropAllTransients(ctx.gpa);
+    };
 
     // A bare modifier press (Shift_L, Control_R, …) is NOT a key — it's the
     // state that shapes the next real key. It must never reach `feed`, or it
@@ -369,10 +458,28 @@ pub fn dispatchSpec(ctx: *core.command.Context, spec: []const u8, text: []const 
         .pending, .none => return,
         .text => {}, // a lone unbound key — fall through to text insertion
         .run => |cmd_name| {
-            // Legacy mode-menu path (still valid while configs migrate to
-            // sequences): a bound key whose command NAMES a menu mode enters it.
+            // A bound key whose command NAMES a menu mode enters it — the
+            // PAIRED-TRANSIENT push (task #19 item 2, north-star-plan §2.1/§5,
+            // `ctx.zig`'s `Ctx.pushTransient`): `Head.transient_stack` durably
+            // records the pre-push mode as this frame's return target, so
+            // leaving (the leaf auto-pop below, or `menu-escape`) is the
+            // MATCHING pop, not an independent `menuReturn` lookup.
             if (ctx.keymap.isMenuMode(cmd_name)) {
-                ctx.head.enterMode(ctx.gpa, ctx.keymap, cmd_name) catch {};
+                if (std.mem.eql(u8, ctx.head.currentMode(), cmd_name)) {
+                    // Re-entering the menu we're ALREADY in (the bound key
+                    // fires again while it's open) is idempotent, not a
+                    // fresh scope — a sticky re-enter is NOT a second push
+                    // (it would grow the stack for no real nesting).
+                    // `Head.enterMode` itself already no-ops the
+                    // return-target record in this case; call it directly,
+                    // matching the pre-migration behavior exactly.
+                    ctx.head.enterMode(ctx.gpa, ctx.keymap, cmd_name) catch {};
+                    return;
+                }
+                const c = core.ctx.Ctx.capture(ctx);
+                _ = c.pushTransient(ctx.keymap, cmd_name) catch |err| {
+                    std.log.warn("dispatch: menu-enter '{s}' refused ({t}) — mode unchanged", .{ cmd_name, err });
+                };
                 return;
             }
             // Snapshot a menu mode so a one-shot key pops back after the command
@@ -396,7 +503,31 @@ pub fn dispatchSpec(ctx: *core.command.Context, spec: []const u8, text: []const 
             }
             if (menu_before) |m| {
                 if (!ctx.keymap.isStickyMenu(m) and std.mem.eql(u8, ctx.head.currentMode(), m)) {
-                    if (ctx.head.menuReturn(m)) |ret| ctx.head.setMode(ctx.gpa, ret) catch {};
+                    // Still the same menu after the leaf: time to auto-pop.
+                    // If WE pushed it (the branch above), pop through the
+                    // paired mechanism (restores the exact pre-push mode);
+                    // else it's a guest-entered menu (`weft.setMode`, out of
+                    // this pass's scope) — the legacy `menuReturn` lookup.
+                    if (ourTransientTop(ctx, m)) |depth| {
+                        popOurTransient(ctx, depth);
+                    } else if (ctx.head.menuReturn(m)) |ret| {
+                        ctx.head.setMode(ctx.gpa, ret) catch {};
+                    }
+                } else if (!std.mem.eql(u8, ctx.head.currentMode(), m)) {
+                    // The leaf itself already moved us elsewhere (a guest
+                    // `weft.setMode`, or a buffer switch) — if that leaf was
+                    // running INSIDE our own pushed transient for `m`, that
+                    // frame is now stale: the scope ended through a
+                    // different door than the pop above. Discard it WITHOUT
+                    // restoring (a restore here would stomp the mode the
+                    // leaf just deliberately set) — still has to come off
+                    // the stack, or it leaks (task #19 item 2's tripwire,
+                    // below, would otherwise be the one to catch this).
+                    if (ourTransientTop(ctx, m)) |depth| {
+                        ctx.head.popTransientDiscard(ctx.gpa, depth) catch |err| {
+                            std.log.warn("dispatch: discard-pop of stale transient '{s}' failed ({t})", .{ m, err });
+                        };
+                    }
                 }
             }
             return;
