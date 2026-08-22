@@ -38,4 +38,10 @@ test {
     _ = window_layout;
     _ = @import("app/frame.zig"); // which-key menu-overlay timing
     _ = @import("app/frame_builder.zig"); // rendering P2: caret-surface auto-expiry
+    // P3 (doc/rendering.md): the Rasterizer/Platform seam contracts + their
+    // compile-time-only skeleton proofs. Neither needs Vulkan/wayland to
+    // typecheck (see each file's module doc), so they run under the
+    // display-free `test` step too, not only the windowed exe build.
+    _ = @import("app/rasterizer.zig");
+    _ = @import("platform/platform.zig");
 }

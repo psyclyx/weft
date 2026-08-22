@@ -156,10 +156,14 @@ platform"; neither touches the scene vocabulary or any plugin.
   the frame the cursor leaves its anchor's line — unlike the echo line
   hover replaced, a caret popup paints over body text, so a stale one left
   open is a real regression, not just clutter.
-- **P3 — formalize the backend + platform seams.** Extract the Rasterizer and
-  Platform interfaces around `snail_vk`/`skia`/`wayland` (no behavior change), so
-  webgpu / X / terminal / browser / macOS are drop-in later. Keep wayland+vulkan
-  as the one live impl.
+- **P3 — formalize the backend + platform seams (DONE).** Extract the Rasterizer
+  and Platform interfaces around `snail_vk`/`skia`/`wayland` (no behavior
+  change), so webgpu / X / terminal / browser / macOS are drop-in later. Keep
+  wayland+vulkan as the one live impl. FINDING recorded in `rasterizer.zig`'s
+  module doc: today's RenderState conflates draw (scene→pixels) with surface
+  ownership (present/swapchain) — the future `draw(scene)` /
+  `presentFramebuffer(ctx)` split is what lets the harness's CPU raster become
+  a literal named impl, and is where a terminal/webgpu backend enters.
 - **P4 — UI-as-plugin.** The completion CONSUMER moves to a guest plugin emitting
   the caret-surface scene through the membrane (needs the caps-fire + live-narrow
   membrane from [[completion-ux-roadmap]]). The completion UI is a plugin, drawn

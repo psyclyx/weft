@@ -10,6 +10,7 @@
 
 const std = @import("std");
 const linux = std.os.linux;
+const platform = @import("platform.zig");
 
 /// Monotonic clock in nanoseconds (raw syscall; matches core/task.zig).
 fn nowNs() u64 {
@@ -24,27 +25,14 @@ pub const c = @cImport({
     @cInclude("xdg-shell-client-protocol.h");
 });
 
-/// One translated keyboard event, in press order.
-pub const KeyEvent = struct {
-    /// xkb keysym (layout-resolved, e.g. XKB_KEY_a, XKB_KEY_Escape).
-    keysym: u32,
-    /// UTF-8 text this key produces under current modifiers ("" if none).
-    utf8: [8]u8 = @splat(0),
-    utf8_len: u8 = 0,
-    mods: Mods = .{},
-    pressed: bool,
-
-    pub fn text(self: *const KeyEvent) []const u8 {
-        return self.utf8[0..self.utf8_len];
-    }
-};
-
-pub const Mods = packed struct {
-    ctrl: bool = false,
-    alt: bool = false,
-    shift: bool = false,
-    logo: bool = false,
-};
+/// P3 (doc/rendering.md): `KeyEvent`/`Mods` now live in `platform.zig` — the
+/// platform-SEAM file, not this one concrete implementation — so naming the
+/// portable key-event shape needs no wayland/xkb dependency (see
+/// `platform.zig`'s module doc, "leaks found" #3). Re-exported here so every
+/// existing `wayland.KeyEvent`/`wayland.Mods` call site (`app/dispatch.zig`,
+/// `main.zig`) keeps compiling unchanged — a pure move, no behavior change.
+pub const KeyEvent = platform.KeyEvent;
+pub const Mods = platform.Mods;
 
 pub const Window = struct {
     const max_outputs = 8;
@@ -247,6 +235,22 @@ pub const Window = struct {
         return self.close_requested;
     }
 
+    /// The xkb name for a keysym (e.g. "a", "Escape", "F1") — `""` if xkb
+    /// can't name it. `app/dispatch.zig:dispatchKey` calls this to turn a
+    /// `KeyEvent.keysym` into the string `core.Keymap.keyspec` builds a
+    /// canonical binding name from. Stateless (xkb keysym names don't
+    /// depend on the live keymap), so this takes a bare keysym, not `self`.
+    /// P3 (doc/rendering.md): wraps `xkb_keysym_get_name` so `wayland.c`
+    /// stays INSIDE this file — `dispatchKey` used to import `wayland.c`
+    /// directly for this one call, reaching past `Window`'s public surface
+    /// into xkb's raw C API from a platform-neutral file. See
+    /// `platform.zig`'s module doc, "leaks found" #2.
+    pub fn keysymName(buf: []u8, keysym: u32) []const u8 {
+        const n = c.xkb_keysym_get_name(keysym, buf.ptr, buf.len);
+        if (n <= 0) return "";
+        return buf[0..@intCast(n)];
+    }
+
     pub fn framebufferSize(self: *const Window) [2]u32 {
         const scale = @max(self.buffer_scale, 1);
         return .{ self.width * scale, self.height * scale };
@@ -343,6 +347,14 @@ pub const Window = struct {
         return null;
     }
 };
+
+// P3 (doc/rendering.md): `Window` is the Platform seam's one live
+// implementation — checked here, at the definition site, against the
+// contract `platform.zig` names (see that file's module doc for the full
+// decl-by-decl audit this was extracted from).
+comptime {
+    platform.assertPlatform(Window);
+}
 
 fn selfFrom(data: ?*anyopaque) *Window {
     return @ptrCast(@alignCast(data.?));

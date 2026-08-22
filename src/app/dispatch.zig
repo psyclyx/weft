@@ -385,12 +385,18 @@ pub fn dispatchKey(ctx: *core.command.Context, ev: wayland.KeyEvent) !void {
     // `dispatchSpec`. Splitting here means a headless driver (the e2e harness)
     // sends keypresses through the SAME dispatch the compositor path uses —
     // there is exactly one implementation of "what a keypress does".
-    const c = wayland.c;
+    //
+    // P3 (doc/rendering.md): goes through `Window.keysymName` — the
+    // Platform's public surface — rather than importing `wayland.c` (xkb's
+    // raw C API) directly, as this file used to. This file is
+    // platform-NEUTRAL (shared by the real compositor path and every
+    // headless/e2e keypress via `dispatchSpec`, below); it should only ever
+    // need `wayland.KeyEvent`'s public shape, never wayland's C internals.
     var name_buf: [64]u8 = undefined;
-    const n = c.xkb_keysym_get_name(ev.keysym, &name_buf, name_buf.len);
-    if (n == 0) return;
+    const name = wayland.Window.keysymName(&name_buf, ev.keysym);
+    if (name.len == 0) return;
     var spec_buf: [80]u8 = undefined;
-    const spec = core.Keymap.keyspec(&spec_buf, ev.mods.ctrl, ev.mods.alt, ev.mods.shift, name_buf[0..@intCast(n)]);
+    const spec = core.Keymap.keyspec(&spec_buf, ev.mods.ctrl, ev.mods.alt, ev.mods.shift, name);
     // A modified (ctrl/alt) key inserts nothing; otherwise the event's printable
     // text, unless it's a lone control char.
     const text: []const u8 = if (ev.mods.ctrl or ev.mods.alt) "" else blk: {

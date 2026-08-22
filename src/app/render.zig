@@ -14,8 +14,19 @@
 //! decodes those same shapes into SkCanvas glyph/rect draws.
 
 const build_options = @import("build_options");
+const rasterizer = @import("rasterizer.zig");
 
 pub const RenderState = switch (build_options.renderer) {
     .snail => @import("render_snail.zig").RenderState,
     .skia => @import("render_skia.zig").RenderState,
 };
+
+// P3 (doc/rendering.md): whichever backend the switch above selected is
+// checked against the Rasterizer contract HERE, at the seam — see
+// `rasterizer.zig`'s module doc for the full contract + the comptime-vs-
+// vtable rationale. Asserting only the selected type (not both
+// unconditionally) preserves the mutual-exclusivity this file's own doc
+// comment requires: a snail build must never analyze skia, and vice versa.
+comptime {
+    rasterizer.assertRasterizer(RenderState);
+}

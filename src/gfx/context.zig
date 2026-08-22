@@ -9,6 +9,9 @@ const build_options = @import("build_options");
 
 pub const max_frames_in_flight = 2;
 
+// W-later: platform-specific WSI shape (vkCreateWaylandSurfaceKHR has no
+// backend-neutral form) — see platform.zig's leak #1 for the seam note; the
+// right shape (a tagged union per platform) waits on a second platform.
 pub const SurfaceSource = struct {
     display: *anyopaque, // *wl_display
     surface: *anyopaque, // *wl_surface
