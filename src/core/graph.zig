@@ -404,6 +404,13 @@ pub fn touchedRegionsWithin(self: *const GraphDoc, gpa: Allocator, batch: []cons
             .list_ins => |l| l.obj,
             .list_del => |l| l.obj,
             .text => |tc| tc.obj,
+            // stemma v0.3.0's move op: the moved/created node is the
+            // region. UNREACHABLE today — this facade exposes no
+            // structural ops, so no batch can carry one; before it does,
+            // `contains` must learn the structural forest (structParent
+            // parentage), which `walkContains`'s creation-nesting walk
+            // does not see. Named here so the wiring slice can't miss it.
+            .structure => |s| s.node,
         } orelse continue; // a change directly on the root map has no
         // leaseable ObjId of its own (§1.1: region = one ObjId).
         const ref_ = try scratch.nodeRef(gpa, obj);
