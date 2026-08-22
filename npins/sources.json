@@ -34,10 +34,10 @@
       "version_upper_bound": null,
       "release_prefix": null,
       "submodules": false,
-      "version": "v0.4.0",
-      "revision": "07e1d1da7866b9534d1099d18ad1b94faf9e579a",
-      "url": "https://api.github.com/repos/psyclyx/stemma/tarball/refs/tags/v0.4.0",
-      "hash": "sha256-QGpYlUbAZ/WXJQICjSCol5e3rVCtbAsDiRvBplHfP4A="
+      "version": "v0.5.0",
+      "revision": "0ebfe403796fe1d88915de6504c507854e93f0f7",
+      "url": "https://api.github.com/repos/psyclyx/stemma/tarball/refs/tags/v0.5.0",
+      "hash": "sha256-UtU0k1WVpcV4dvh88ug6x+6eO3yVLP0ADYELePig3bI="
     }
   },
   "version": 8
