@@ -425,6 +425,33 @@ structural writers on one region ⇒ cases 5/6 cannot arise).
   color. Your own keystroke into a held region is refused with a visible message,
   not swallowed.
 
+### 5.2a As-built semantics (W6 slice 1, amended at landing)
+
+Three semantics the mechanism pinned down when it became code, recorded here
+so the doc matches the shipped invariants:
+
+- **Concurrent acquire converges by deterministic tiebreak, not timing.** Two
+  principals that both `tryAcquire` a region before either announcement
+  propagates each believe they hold it; the fold resolves the conflict as a
+  pure function of the two principal names (byte-wise lower name wins),
+  identical on every replica regardless of arrival order — so all tables
+  converge to ONE holder with no healing round, and the loser's in-flight
+  edit is refused loudly. Linearizable acquisition order is NOT promised;
+  this is not a distributed lock service, it is a convergent mutual-exclusion
+  declaration.
+- **Refusal is deferred-until-release, not permanent rejection.** A refused
+  edit was already applied on the sender's own replica (local edits always
+  apply locally); admission refusal does not advance the frontier the refuser
+  reports, so the op is naturally re-included in the sender's future batches
+  and is re-refused while the lease holds — bounded by real head-moves, no
+  busy loop — then LANDS when the lease releases. The sender carries a
+  visible, transient local divergence until then (its `refusals` list is the
+  loud signal). The UI's job (later slice) is to acquire on focus-enter so
+  this backstop rarely fires.
+- **Leases survive reconnect by re-announcement** (presence parity): a
+  rebind re-announces every self-held region exactly once; a disconnected
+  peer's leases are reaped and recoverable only by that re-announce.
+
 ### 5.3 Why declared beats silent turn-taking
 
 Silent turn-taking is last-write-wins with invisible ownership: principals clobber

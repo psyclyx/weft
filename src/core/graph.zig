@@ -277,6 +277,90 @@ pub fn merge(self: *GraphDoc, gpa: Allocator, bytes: []const u8) MergeError![]Ch
     return self.obj.merge(gpa, bytes);
 }
 
+/// Which regions (portable `NodeRef`s, deduplicated) would merging `batch`
+/// touch — WITHOUT committing it to this replica. Caller owns the returned
+/// slice and each ref's token (`NodeRef.free`).
+///
+/// ## Why this exists, and why it's shaped as a dry-run instead of a decode
+///
+/// W6 slice 1's per-region admission (doc/d1-live-reconcile.md §5.2,
+/// §0 "admission is per-document and coarse") needs to know which `ObjId`s
+/// an INCOMING batch targets *before* deciding whether to merge it — a
+/// batch touching a region leased by another principal must never be
+/// merged at all (§6 test 5: "assert B's op is NOT merged" — not merged
+/// then reverted, not merged then compensated, never merged). `ObjectDoc`
+/// hands back exactly this mapping (`Change.obj`) from `merge` itself
+/// (ObjectDoc.zig:611-684), but only AFTER applying the batch — too late,
+/// and `ObjectDoc`'s batch decoder (`Decoder`, ObjectDoc.zig:1030) is a
+/// private implementation type, not a public pre-merge peek API. Two other
+/// options were weighed and rejected: merge-then-roll-back the REAL doc has
+/// no undo (events are permanent in `history`; a "rollback" that only
+/// reverted the materialized tree would still leave the events integrated,
+/// so a future `serialize`/`eventsSince` on this replica would silently
+/// forward the refused ops to a THIRD peer — exactly the silent divergence
+/// this mechanism exists to prevent). Admit-then-compensate (merge for
+/// real, then apply an undo op) fails test 5's letter directly ("NOT
+/// merged") and, worse, the compensating op is itself a new causal event
+/// that races with what a third replica sees.
+///
+/// So: merge the batch into a throwaway CLONE (`serialize` + `open` — both
+/// already public), read the clone's `Change` stream, mint portable tokens
+/// from the CLONE's local `ObjId`s (portable because `exportId` keys on
+/// agent NAME + seq, not local numbering — see `NodeRef`'s doc comment —
+/// so the tokens are identical to what a real merge into `self` would
+/// produce), then discard the clone entirely. If the caller decides to
+/// admit, it calls `merge` again on the real doc with the SAME bytes — safe
+/// because `self` hasn't been touched by this call, and `merge` is a pure
+/// function of `(current history, batch bytes)`, so replaying it is not a
+/// second causal event, just the same integration done once instead of
+/// speculatively twice. If the caller refuses, `self` was NEVER merged, so
+/// there is nothing to un-forward — divergence is structurally impossible,
+/// not just avoided by discipline. The cost (a full `serialize`+`open` per
+/// admission-checked batch) is paid only when the caller has active
+/// regions to protect (see `GraphCollab.admitRegions`'s empty-table fast
+/// path) — an honest, named cost, not a hidden one; a cheaper stemma-side
+/// peek API (exposing `Decoder`'s op→obj mapping without applying it) would
+/// remove it, and is the delta to ask for if this cost ever matters.
+pub fn touchedRegions(self: *const GraphDoc, gpa: Allocator, batch: []const u8) MergeError![]NodeRef {
+    const bytes = try self.serialize(gpa);
+    defer gpa.free(bytes);
+    // The scratch clone never originates a local write (only ever merges
+    // remote bytes), so its own agent identity is inert — any name works.
+    var scratch = try GraphDoc.open(gpa, "~region-peek-scratch", bytes);
+    defer scratch.deinit(gpa);
+    const changes = try scratch.merge(gpa, batch);
+    defer gpa.free(changes);
+
+    var out: std.ArrayList(NodeRef) = .empty;
+    errdefer {
+        for (out.items) |r| r.free(gpa);
+        out.deinit(gpa);
+    }
+    for (changes) |c| {
+        const obj: ObjId = switch (c) {
+            .map => |m| m.obj,
+            .list_ins => |l| l.obj,
+            .list_del => |l| l.obj,
+            .text => |tc| tc.obj,
+        } orelse continue; // a change directly on the root map has no
+        // leaseable ObjId of its own (§1.1: region = one ObjId).
+        const ref_ = try scratch.nodeRef(gpa, obj);
+        var dup = false;
+        for (out.items) |existing| {
+            if (existing.eql(ref_)) {
+                dup = true;
+                break;
+            }
+        }
+        if (dup) {
+            gpa.free(ref_.token);
+            continue;
+        }
+        try out.append(gpa, ref_);
+    }
+    return out.toOwnedSlice(gpa);
+}
+
 /// The whole history (bootstrap batch for `open`).
 pub fn serialize(self: *const GraphDoc, gpa: Allocator) Allocator.Error![]u8 {
     return self.obj.serialize(gpa);
@@ -360,6 +444,94 @@ test "GraphDoc: version/eventsSince/merge round-trip converges across replicas" 
     const bv = try b.version(gpa);
     defer gpa.free(bv);
     try t.expectEqual(VersionOrder.equal, try a.compareVersions(gpa, av, bv));
+}
+
+test "GraphDoc.touchedRegions: dry-run peek identifies the touched object without merging or mutating" {
+    const gpa = t.allocator;
+    var a = try GraphDoc.init(gpa, "alice");
+    defer a.deinit(gpa);
+    const n1 = (try a.set(gpa, null, "n1", .map)).?;
+    _ = (try a.set(gpa, null, "n2", .map)).?;
+    const n1_ref = try a.nodeRef(gpa, n1);
+    defer n1_ref.free(gpa);
+
+    const bytes = try a.serialize(gpa);
+    defer gpa.free(bytes);
+    var b = try GraphDoc.open(gpa, "bob", bytes);
+    defer b.deinit(gpa);
+    const b_n1 = try b.resolve(n1_ref);
+    _ = try b.set(gpa, b_n1, "label", .{ .str = "hi" });
+
+    const av = try a.version(gpa);
+    defer gpa.free(av);
+    const batch = try b.eventsSince(gpa, av);
+    defer gpa.free(batch);
+
+    const touched = try a.touchedRegions(gpa, batch);
+    defer {
+        for (touched) |r| r.free(gpa);
+        gpa.free(touched);
+    }
+    try t.expectEqual(@as(usize, 1), touched.len);
+    try t.expect(touched[0].eql(n1_ref));
+
+    // The dry run must not have mutated `a` at all.
+    try t.expect(a.ref(n1).mapGet("label") == null);
+    const av2 = try a.version(gpa);
+    defer gpa.free(av2);
+    try t.expectEqualStrings(av, av2);
+
+    // A real merge with the SAME bytes afterwards still works — the
+    // scratch clone never touched `a`'s own state, so replaying is not a
+    // second causal event, just the integration done for real.
+    const changes = try a.merge(gpa, batch);
+    defer gpa.free(changes);
+    try t.expectEqualStrings("hi", a.ref(n1).mapGet("label").?.asStr());
+}
+
+test "GraphDoc.touchedRegions: correct under init-then-merge bootstrap order (mirrors GraphCollab, not GraphDoc.open)" {
+    // `GraphDoc.open` merges BEFORE `setAgent` (registers the bootstrap
+    // sender's agent name first, the local identity second); `GraphCollab`
+    // bootstraps the opposite way (`GraphDoc.init` registers the LOCAL
+    // identity first, then `merge` registers the remote sender during the
+    // batch) — see GraphCollab.zig's module doc comment on why `init`, not
+    // `open`, is the joiner's bootstrap shell. Both orders must resolve
+    // portable tokens identically; this pins the order the wire path
+    // actually uses (a real cross-wire regression surfaced exactly this
+    // ordering difference during development — a test-harness bug where a
+    // stray reused variable name shadowed the real one, not a
+    // `touchedRegions`/stemma bug, but worth pinning given how easy the
+    // confusion was).
+    const gpa = t.allocator;
+    var a = try GraphDoc.init(gpa, "alice");
+    defer a.deinit(gpa);
+    const room1 = (try a.set(gpa, null, "room1", .map)).?;
+    _ = (try a.set(gpa, null, "room2", .map)).?;
+    const room1_ref = try a.nodeRef(gpa, room1);
+    defer room1_ref.free(gpa);
+
+    var b = try GraphDoc.init(gpa, "bob");
+    defer b.deinit(gpa);
+    const boot = try a.serialize(gpa);
+    defer gpa.free(boot);
+    const changes = try b.merge(gpa, boot);
+    gpa.free(changes);
+
+    const b_room1 = try b.resolve(room1_ref);
+    _ = try b.set(gpa, b_room1, "hacked", .{ .str = "evil" });
+
+    const av = try a.version(gpa);
+    defer gpa.free(av);
+    const batch = try b.eventsSince(gpa, av);
+    defer gpa.free(batch);
+
+    const touched = try a.touchedRegions(gpa, batch);
+    defer {
+        for (touched) |r| gpa.free(r.token);
+        gpa.free(touched);
+    }
+    try t.expectEqual(@as(usize, 1), touched.len);
+    try t.expect(touched[0].eql(room1_ref));
 }
 
 test {

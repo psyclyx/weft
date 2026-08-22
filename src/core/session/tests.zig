@@ -11,6 +11,7 @@ const linux = std.os.linux;
 
 const identity = @import("../identity.zig");
 const task = @import("../task.zig");
+const wire = @import("../wire.zig");
 const Document = @import("../Document.zig");
 const layers_mod = @import("../layers.zig");
 const subbuffer = @import("../subbuffer.zig");
@@ -23,6 +24,8 @@ const Collab = @import("Collab.zig");
 const GraphCollab = @import("GraphCollab.zig");
 const Conn = @import("Conn.zig");
 const PartialDoc = @import("PartialDoc.zig");
+const region_lease = @import("region_lease.zig");
+const LeaseTable = region_lease.LeaseTable;
 
 const link_mod = @import("link.zig");
 const FdLink = link_mod.FdLink;
@@ -1125,4 +1128,425 @@ test "GraphDoc over the wire: an edit through the on_save PROJECTION converges o
     const text_b = try doc_b.text().toOwnedSlice(gpa);
     defer gpa.free(text_b);
     try t.expectEqualStrings("user: hell!!!o", text_b);
+}
+
+// ── W6 slice 1: the per-region lease over the REAL wire ─────────────────
+// (doc/d1-live-reconcile.md §5, §6). Two regions ("room1"/"room2") on a
+// plain `GraphDoc` shared alice(server)↔bob(client) exactly like the
+// GraphDoc-over-the-wire tests above; `GraphCollab.bindLeases` opts each
+// side's quad into per-region admission on top of the ordinary frontier
+// exchange. ──────────────────────────────────────────────────────────────
+
+/// Shared two-party rig for the lease tests below: alice (server) and bob
+/// (client), one shared `GraphDoc` with two independent regions already
+/// converged on both replicas, lease tables bound on both quads.
+const LeaseRig = struct {
+    la: FdLink,
+    lb: FdLink,
+    sa: *Session,
+    sb: *Session,
+    ca: Conn,
+    cb: Conn,
+    origin: GraphDoc,
+    joiner: GraphDoc,
+    ga: *GraphCollab,
+    gb: *GraphCollab,
+    table_a: LeaseTable = .empty,
+    table_b: LeaseTable = .empty,
+    room1: GraphDoc.NodeRef,
+    room2: GraphDoc.NodeRef,
+    sa_destroyed: bool = false,
+
+    /// Takes `self` as an OUT-POINTER (never returns `LeaseRig` by value):
+    /// `ca.shareGraph(&self.origin, ...)`/`cb.openGraphOffer(0, &self.joiner,
+    /// ...)` bind `GraphCollab.doc` to `&self.origin`/`&self.joiner`
+    /// DIRECTLY — if this instead built `origin`/`joiner` as local
+    /// variables and returned a struct literal copying them in (as a
+    /// `fn setup(gpa) !LeaseRig` normally would), the copy would strand
+    /// the bound pointer at the dead local's address the moment this
+    /// function returns. This is exactly the hazard the GraphDoc-over-the-
+    /// wire test above already documents for `TranscriptDoc`
+    /// ("re-wrapping a separately-adopted GraphDoc afterwards would copy
+    /// the struct and strand the bound pointer at the old address") —
+    /// same fix, applied here because this rig factors setup into a
+    /// helper instead of inlining it per test.
+    fn setup(gpa: Allocator, self: *LeaseRig) !void {
+        self.table_a = .empty;
+        self.table_b = .empty;
+        self.sa_destroyed = false;
+
+        const fds = try socketPair();
+        self.la = .{ .fd = fds[0] };
+        self.lb = .{ .fd = fds[1] };
+
+        self.origin = try GraphDoc.init(gpa, "alice");
+        errdefer self.origin.deinit(gpa);
+        const room1 = (try self.origin.set(gpa, null, "room1", .map)).?;
+        const room2 = (try self.origin.set(gpa, null, "room2", .map)).?;
+        self.room1 = try self.origin.nodeRef(gpa, room1);
+        errdefer self.room1.free(gpa);
+        self.room2 = try self.origin.nodeRef(gpa, room2);
+        errdefer self.room2.free(gpa);
+
+        self.sa = try Session.create(gpa, self.la.link(), .server, "tok", .own, null);
+        errdefer self.sa.destroy();
+        self.sb = try Session.create(gpa, self.lb.link(), .client, "tok", .own, null);
+        errdefer self.sb.destroy();
+        self.ca = try Conn.init(gpa, self.sa, "alice", .server);
+        errdefer self.ca.deinit();
+        self.cb = try Conn.init(gpa, self.sb, "bob", .client);
+        errdefer self.cb.deinit();
+
+        self.ga = try self.ca.shareGraph(&self.origin, "rig", 1);
+
+        const offer_deadline = task.nowNs() + 5 * std.time.ns_per_s;
+        while (task.nowNs() < offer_deadline and self.cb.offers.items.len == 0) {
+            _ = try self.ca.tick();
+            _ = try self.cb.tick();
+            futexWaitTimed(&self.sa.out_wake, self.sa.out_wake.load(.acquire), std.time.ns_per_ms);
+        }
+        if (self.cb.offers.items.len == 0) return error.NoOffer;
+
+        self.joiner = try GraphDoc.init(gpa, "bob");
+        errdefer self.joiner.deinit(gpa);
+        self.gb = try self.cb.openGraphOffer(0, &self.joiner, 1);
+
+        const bootstrap_deadline = task.nowNs() + 5 * std.time.ns_per_s;
+        while (task.nowNs() < bootstrap_deadline and self.joiner.root().mapGet("room2") == null) {
+            _ = try self.ca.tick();
+            _ = try self.cb.tick();
+            futexWaitTimed(&self.sb.out_wake, self.sb.out_wake.load(.acquire), std.time.ns_per_ms);
+        }
+        if (self.joiner.root().mapGet("room2") == null) return error.NoBootstrap;
+    }
+
+    fn bindLeases(self: *LeaseRig) void {
+        self.ga.bindLeases(&self.table_a);
+        self.gb.bindLeases(&self.table_b);
+    }
+
+    fn deinit(self: *LeaseRig, gpa: Allocator) void {
+        self.room1.free(gpa);
+        self.room2.free(gpa);
+        self.ca.deinit();
+        self.cb.deinit();
+        if (!self.sa_destroyed) self.sa.destroy();
+        self.sb.destroy();
+        self.origin.deinit(gpa);
+        self.joiner.deinit(gpa);
+        self.table_a.deinit(gpa);
+        self.table_b.deinit(gpa);
+    }
+
+    fn pump(self: *LeaseRig) !void {
+        _ = try self.ca.tick();
+        _ = try self.cb.tick();
+    }
+
+    /// Pump both sides (or just bob's, if alice's session was killed)
+    /// until `region` shows `want` (or null) as its holder in `table`, or
+    /// the deadline passes. Returns whether the condition was met.
+    fn pumpUntilHolder(self: *LeaseRig, table: *const LeaseTable, region: GraphDoc.NodeRef, want: ?[]const u8) !bool {
+        const deadline = task.nowNs() + 5 * std.time.ns_per_s;
+        while (task.nowNs() < deadline) {
+            if (!self.sa_destroyed) _ = try self.ca.tick();
+            _ = try self.cb.tick();
+            const got = table.holderOf(region);
+            const matched = if (want) |w| (got != null and std.mem.eql(u8, got.?, w)) else got == null;
+            if (matched) return true;
+            testPark(2);
+        }
+        return false;
+    }
+};
+
+test "lease: D1 test 5 — A holds a lease, B's edit into it is refused at admission, loudly" {
+    const gpa = t.allocator;
+    var rig: LeaseRig = undefined;
+    try LeaseRig.setup(gpa, &rig);
+    defer rig.deinit(gpa);
+    rig.bindLeases();
+
+    // Alice acquires room1 — granted (free).
+    const acq = try rig.ga.acquireLease(rig.room1);
+    try t.expectEqual(LeaseTable.AcquireResult.granted, acq);
+
+    // Bob learns of it (the display data path — "locked by A").
+    try t.expect(try rig.pumpUntilHolder(&rig.table_b, rig.room1, "alice"));
+
+    // Bob edits INTO alice's held region (an ordinary graph mutation on
+    // his own replica — nothing gates the local call; the wire admission
+    // gate is where this gets caught).
+    const b_room1 = try rig.joiner.resolve(rig.room1);
+    _ = try rig.joiner.set(gpa, b_room1, "hacked", .{ .str = "evil" });
+
+    // Pump until bob's OWN quad receives the echoed refusal — `refusals`
+    // records refusals RECEIVED (the loud echo to the sender), not issued;
+    // alice is the one refusing, so the observable signal lives on bob's
+    // side (`gb`), never alice's own `ga.refusals` (that would only ever
+    // fill if SHE were on the receiving end of someone else's refusal).
+    // This is the letter of §6 test 5: "the refusal is observable to B —
+    // via ... a trap/echo — not a silent drop."
+    const deadline = task.nowNs() + 5 * std.time.ns_per_s;
+    var refused = false;
+    while (task.nowNs() < deadline) {
+        try rig.pump();
+        if (rig.gb.refusals.items.len > 0) {
+            refused = true;
+            break;
+        }
+        testPark(2);
+    }
+    try t.expect(refused);
+
+    // The refusal names the right region and the right holder.
+    try t.expect(rig.gb.refusals.items[0].region.eql(rig.room1));
+    try t.expectEqualStrings("alice", rig.gb.refusals.items[0].holder);
+
+    // NOT merged: alice's replica never got bob's key.
+    try t.expect(rig.origin.ref(rig.origin.resolve(rig.room1) catch unreachable).mapGet("hacked") == null);
+}
+
+test "lease: coexists with disjoint-region editing — genuine multi-writer preserved" {
+    const gpa = t.allocator;
+    var rig: LeaseRig = undefined;
+    try LeaseRig.setup(gpa, &rig);
+    defer rig.deinit(gpa);
+    rig.bindLeases();
+
+    const acq = try rig.ga.acquireLease(rig.room1);
+    try t.expectEqual(LeaseTable.AcquireResult.granted, acq);
+    try t.expect(try rig.pumpUntilHolder(&rig.table_b, rig.room1, "alice"));
+
+    // Bob edits the OTHER region, disjoint from alice's lease.
+    const b_room2 = try rig.joiner.resolve(rig.room2);
+    _ = try rig.joiner.set(gpa, b_room2, "note", .{ .str = "fine" });
+
+    const deadline = task.nowNs() + 5 * std.time.ns_per_s;
+    var converged = false;
+    while (task.nowNs() < deadline) {
+        try rig.pump();
+        const room2 = rig.origin.resolve(rig.room2) catch continue;
+        if (rig.origin.ref(room2).mapGet("note")) |v| {
+            if (std.mem.eql(u8, v.asStr(), "fine")) {
+                converged = true;
+                break;
+            }
+        }
+        testPark(2);
+    }
+    try t.expect(converged);
+    // No refusal was ever needed — the lease on room1 never touched room2.
+    try t.expectEqual(@as(usize, 0), rig.ga.refusals.items.len);
+}
+
+test "lease: lifecycle over the wire — acquire, conflict answer, release, re-acquire by peer" {
+    const gpa = t.allocator;
+    var rig: LeaseRig = undefined;
+    try LeaseRig.setup(gpa, &rig);
+    defer rig.deinit(gpa);
+    rig.bindLeases();
+
+    const acq = try rig.ga.acquireLease(rig.room1);
+    try t.expectEqual(LeaseTable.AcquireResult.granted, acq);
+    try t.expect(try rig.pumpUntilHolder(&rig.table_b, rig.room1, "alice"));
+
+    // Bob's own acquire attempt sees the conflict answer as DATA.
+    const conflict = try rig.gb.acquireLease(rig.room1);
+    switch (conflict) {
+        .held_by => |h| try t.expectEqualStrings("alice", h),
+        .granted => return error.TestUnexpectedResult,
+    }
+
+    // Alice releases; the release propagates.
+    try rig.ga.releaseLease(rig.room1);
+    try t.expect(try rig.pumpUntilHolder(&rig.table_b, rig.room1, null));
+
+    // Now bob can acquire it, and alice learns.
+    const acq2 = try rig.gb.acquireLease(rig.room1);
+    try t.expectEqual(LeaseTable.AcquireResult.granted, acq2);
+    try t.expect(try rig.pumpUntilHolder(&rig.table_a, rig.room1, "bob"));
+}
+
+test "lease: disconnect reaping — a dead session's leases die, the peer can acquire" {
+    const gpa = t.allocator;
+    var rig: LeaseRig = undefined;
+    try LeaseRig.setup(gpa, &rig);
+    defer rig.deinit(gpa);
+    rig.bindLeases();
+
+    const acq = try rig.ga.acquireLease(rig.room1);
+    try t.expectEqual(LeaseTable.AcquireResult.granted, acq);
+    try t.expect(try rig.pumpUntilHolder(&rig.table_b, rig.room1, "alice"));
+
+    // Alice vanishes: her session dies. Closing one end of a socketpair
+    // delivers EOF to the other, so bob's session notices without needing
+    // alice's side pumped again.
+    rig.sa.destroy();
+    rig.sa_destroyed = true;
+
+    // Bob's own tick (via `push`) reaps alice's leases once his session
+    // reports offline.
+    try t.expect(try rig.pumpUntilHolder(&rig.table_b, rig.room1, null));
+
+    // The region is acquirable again.
+    const acq2 = try rig.gb.acquireLease(rig.room1);
+    try t.expectEqual(LeaseTable.AcquireResult.granted, acq2);
+}
+
+test "lease: concurrent acquire race — tables converge to the SAME holder, the loser is refused loudly" {
+    const gpa = t.allocator;
+    var rig: LeaseRig = undefined;
+    try LeaseRig.setup(gpa, &rig);
+    defer rig.deinit(gpa);
+    rig.bindLeases();
+
+    // The genuine focus-enter race: both principals `tryAcquire` the SAME
+    // free region locally before either announcement has crossed the
+    // wire (`acquireLease` only QUEUES the announce — `postFeed` doesn't
+    // block for delivery — so calling it on both sides before any `pump`
+    // reliably reproduces the window). Both succeed locally; nothing has
+    // arbitrated between them yet.
+    const acq_a = try rig.ga.acquireLease(rig.room1);
+    try t.expectEqual(LeaseTable.AcquireResult.granted, acq_a);
+    const acq_b = try rig.gb.acquireLease(rig.room1);
+    try t.expectEqual(LeaseTable.AcquireResult.granted, acq_b);
+    try t.expectEqualStrings("alice", rig.table_a.holderOf(rig.room1).?);
+    try t.expectEqualStrings("bob", rig.table_b.holderOf(rig.room1).?);
+
+    // Once both announcements propagate, `foldRemoteAcquire`'s
+    // deterministic tiebreak ("alice" < "bob" byte-wise) resolves the
+    // race IDENTICALLY on both replicas — not a stable inversion, not
+    // order-dependent. Pump until both tables agree.
+    const deadline = task.nowNs() + 5 * std.time.ns_per_s;
+    var converged = false;
+    while (task.nowNs() < deadline) {
+        try rig.pump();
+        const ha = rig.table_a.holderOf(rig.room1);
+        const hb = rig.table_b.holderOf(rig.room1);
+        if (ha != null and hb != null and std.mem.eql(u8, ha.?, hb.?)) {
+            converged = true;
+            break;
+        }
+        testPark(2);
+    }
+    try t.expect(converged);
+    try t.expectEqualStrings("alice", rig.table_a.holderOf(rig.room1).?);
+    try t.expectEqualStrings("alice", rig.table_b.holderOf(rig.room1).?);
+
+    // The loser (bob) edits the region he transiently believed he held —
+    // this must be refused LOUDLY at admission, never silently merged.
+    // Zero refusals here would mean concurrent writes into one region
+    // slipped through — exactly what the tiebreak exists to prevent.
+    const b_room1 = try rig.joiner.resolve(rig.room1);
+    _ = try rig.joiner.set(gpa, b_room1, "raced", .{ .str = "loser" });
+
+    var refused = false;
+    const deadline2 = task.nowNs() + 5 * std.time.ns_per_s;
+    while (task.nowNs() < deadline2) {
+        try rig.pump();
+        if (rig.gb.refusals.items.len > 0) {
+            refused = true;
+            break;
+        }
+        testPark(2);
+    }
+    try t.expect(refused);
+    try t.expectEqualStrings("alice", rig.gb.refusals.items[0].holder);
+    try t.expect(rig.origin.ref(rig.origin.resolve(rig.room1) catch unreachable).mapGet("raced") == null);
+}
+
+test "lease: reconnect re-announces held leases (presence parity, not a fresh acquire race)" {
+    const gpa = t.allocator;
+    var rig: LeaseRig = undefined;
+    try LeaseRig.setup(gpa, &rig);
+    defer rig.deinit(gpa);
+    rig.bindLeases();
+
+    const acq = try rig.ga.acquireLease(rig.room1);
+    try t.expectEqual(LeaseTable.AcquireResult.granted, acq);
+    try t.expect(try rig.pumpUntilHolder(&rig.table_b, rig.room1, "alice"));
+
+    // Alice's session dies; bob reaps her lease from HIS table (the
+    // existing disconnect behavior) — alice's OWN local table is
+    // untouched, since she never released.
+    rig.sa.destroy();
+    rig.sa_destroyed = true;
+    try t.expect(try rig.pumpUntilHolder(&rig.table_b, rig.room1, null));
+    try t.expectEqualStrings("alice", rig.table_a.holderOf(rig.room1).?);
+
+    // Reconnect: a fresh socketpair + fresh Sessions, both Conns rebind
+    // (mirrors the "hub: ... reconnect rebind" test's pattern). Bob's
+    // ORIGINAL session shared alice's socketpair (a direct 2-party link,
+    // unlike the hub test's separate per-leaf links), so it's just as
+    // dead as alice's the moment alice's end closed — destroy it before
+    // replacing it, or it's orphaned (a real leak, not a false positive:
+    // caught by the allocator during this fix's own development). `rig`
+    // takes ownership of both new sessions for teardown from here on.
+    rig.sb.destroy();
+    const fds2 = try socketPair();
+    var la2: FdLink = .{ .fd = fds2[0] };
+    var lb2: FdLink = .{ .fd = fds2[1] };
+    const sa2 = try Session.create(gpa, la2.link(), .server, "tok", .own, null);
+    const sb2 = try Session.create(gpa, lb2.link(), .client, "tok", .own, null);
+    try rig.ca.rebind(sa2);
+    try rig.cb.rebind(sb2);
+    rig.sa = sa2;
+    rig.sb = sb2;
+    rig.sa_destroyed = false;
+
+    // Bob re-learns alice still holds room1 — the reconnect re-announce
+    // (`needs_lease_reannounce`), NOT a fresh `acquireLease` call (alice
+    // never re-acquires; she still believes she always held it).
+    try t.expect(try rig.pumpUntilHolder(&rig.table_b, rig.room1, "alice"));
+}
+
+test "lease: announce frame is version-tolerant — missing hue, extra trailing bytes" {
+    const gpa = t.allocator;
+    var gc: GraphCollab = try GraphCollab.init(gpa, undefined, undefined, "bob");
+    defer gc.deinit();
+    var table: LeaseTable = .empty;
+    defer table.deinit(gpa);
+    gc.bindLeases(&table);
+
+    const region: GraphDoc.NodeRef = .{ .token = "sto\x01\x05alice\x01" };
+
+    // Older sender: no trailing hue16 field at all.
+    {
+        var payload: std.ArrayList(u8) = .empty;
+        defer payload.deinit(gpa);
+        try wire.putUv(gpa, &payload, 5); // "alice".len
+        try payload.appendSlice(gpa, "alice");
+        try wire.putUv(gpa, &payload, region.token.len);
+        try payload.appendSlice(gpa, region.token);
+        try wire.putUv(gpa, &payload, 1); // acquired
+
+        const owned = try gpa.dupe(u8, payload.items);
+        const changed = try gc.handleFrame(.{ .class = .feed, .kind = 0, .channel = gc.base + 1, .payload = owned });
+        gpa.free(owned);
+        try t.expect(changed);
+    }
+    try t.expectEqualStrings("alice", table.holderOf(region).?);
+    try t.expectEqualStrings("alice", gc.peer_name.?);
+
+    // Newer sender: extra trailing bytes past every field this decoder
+    // knows about — ignored, not a decode error (same tolerance
+    // `Collab`'s presence frame documents).
+    {
+        var payload: std.ArrayList(u8) = .empty;
+        defer payload.deinit(gpa);
+        try wire.putUv(gpa, &payload, 5);
+        try payload.appendSlice(gpa, "alice");
+        try wire.putUv(gpa, &payload, region.token.len);
+        try payload.appendSlice(gpa, region.token);
+        try wire.putUv(gpa, &payload, 1);
+        try wire.putUv(gpa, &payload, 42); // hue16
+        try payload.appendSlice(gpa, "\x00\x00\x00future-field-a-newer-peer-added");
+
+        const owned = try gpa.dupe(u8, payload.items);
+        const changed = try gc.handleFrame(.{ .class = .feed, .kind = 0, .channel = gc.base + 1, .payload = owned });
+        gpa.free(owned);
+        try t.expect(changed);
+    }
+    try t.expectEqual(@as(u32, 42), table.hueOf(region).?);
 }

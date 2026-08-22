@@ -27,7 +27,17 @@ pub const ControlKind = enum(u8) { hello = 0, hello2 = 1, finish = 2, accept = 3
 /// has assigned this peer for the quad's document: a single byte
 /// (`Access`). The client sets `Document.my_grant` from it so it can refuse
 /// a local edit its ops would only be dropped for — see session.zig.
-pub const OpKind = enum(u8) { batch = 0, frontier = 1, share = 2, grant = 3 };
+/// `region_refused` (GraphDoc quads only, W6 slice 1's per-region lease —
+/// doc/d1-live-reconcile.md §5) is the LOUD counterpart to a batch that was
+/// decoded and passed the coarse `canEdit` gate but was refused at the
+/// per-region admission hook because the sender doesn't hold the lease on
+/// a region its ops touch: uv region_token_len | region_token | uv
+/// holder_len | holder — sent back to the sender on the SAME quad so the
+/// refusal is observable, never a silent drop (see GraphCollab.zig). A
+/// `Collab` (text doc) peer that doesn't know this kind ignores it
+/// gracefully (`std.enums.fromInt` returns null); text docs have no
+/// regions to refuse.
+pub const OpKind = enum(u8) { batch = 0, frontier = 1, share = 2, grant = 3, region_refused = 4 };
 // call/ok/err/cancel are the blob (partial-checkout) request cycle; fs_call/
 // fs_ok are the .peer filesystem cycle (peer_fs) — a DISTINCT kind, so fs ops
 // never collide with the blob op-space (which routes by op-byte value).
