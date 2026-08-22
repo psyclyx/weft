@@ -162,8 +162,21 @@ offset↔geometry map, and the markdown analyzer.
 
 ## Build
 
-Zig deps are path deps into the monorepo checkout (`../../lib/snail`,
-`../../lib/stemma`). System libraries — wayland, libxkbcommon,
+Internal libraries ([snail](https://github.com/psyclyx/snail),
+[stemma](https://github.com/psyclyx/stemma)) resolve to GitHub release
+pins by default — a standalone clone of weft builds with no monorepo
+around it, and `npins/sources.json` carries the same pins for the nix
+layer. To iterate against a local checkout, set the npins override
+variable and both layers follow:
+
+```sh
+NPINS_OVERRIDE_STEMMA=../../lib/stemma zig build test   # and/or NPINS_OVERRIDE_SNAIL
+```
+
+(The zon path twin is static, so the override must name the monorepo
+location `../../lib/<name>` — anything else is a loud refusal, not a
+silently ignored setting. Keep `build.zig.zon`'s pins and
+`npins/sources.json` on the same tags.) System libraries — wayland, libxkbcommon,
 vulkan-loader, harfbuzz, tree-sitter, wasmtime, skia (default renderer,
 resolved through `pkg-config`; its C++ shim is built with the shell's g++),
 the QuickJS-ng source, and the build-time wayland-scanner/pkg-config/slangc

@@ -4,13 +4,28 @@
     // Generated once by the Zig toolchain; never changes.
     .fingerprint = 0xfd7f37f6df96dc3b,
     .minimum_zig_version = "0.16.0",
-    // Path deps into the monorepo checkout (the phasekeep app pattern):
-    // local development never round-trips through GitHub. Once
-    // psyclyx/stemma exists these become url+hash pins so the repo builds
-    // standalone from a clone (see README, "Dependencies").
+    // Internal libraries resolve to their GitHub release pins by default,
+    // so a standalone clone of weft builds with no monorepo around it. The
+    // `*_local` twins are the monorepo-iteration path, selected by setting
+    // NPINS_OVERRIDE_STEMMA / NPINS_OVERRIDE_SNAIL (the same variables
+    // npins honors on the nix side — one switch flips both layers; see
+    // build.zig's depOrOverride and README "Build"). Everything is lazy:
+    // only the selected twin is ever resolved, so a standalone clone never
+    // touches the missing ../../lib paths and a monorepo iteration never
+    // fetches a tarball. Keep these pins in step with npins/sources.json.
     .dependencies = .{
-        .snail = .{ .path = "../../lib/snail" },
-        .stemma = .{ .path = "../../lib/stemma" },
+        .snail = .{
+            .url = "https://github.com/psyclyx/snail/archive/refs/tags/v0.19.0.tar.gz",
+            .hash = "snail-0.19.0-vw75SJ_2BAEaJX7P0tjMgAKYdyhkURJdS7oJUuKjZlHE",
+            .lazy = true,
+        },
+        .stemma = .{
+            .url = "https://github.com/psyclyx/stemma/archive/refs/tags/v0.2.0.tar.gz",
+            .hash = "stemma-0.2.0-CIOtoKWlCAAJXck_dKzXx3s7RFmKVdM_Ft42bxz3JDkJ",
+            .lazy = true,
+        },
+        .snail_local = .{ .path = "../../lib/snail", .lazy = true },
+        .stemma_local = .{ .path = "../../lib/stemma", .lazy = true },
     },
     .paths = .{
         "build.zig",

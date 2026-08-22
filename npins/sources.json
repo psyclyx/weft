@@ -6,6 +6,38 @@
       "artifact": "nixexprs.tar.xz",
       "url": "https://releases.nixos.org/nixpkgs/nixpkgs-26.11pre1053303.6b5e5b7a6631/nixexprs.tar.xz",
       "hash": "sha256-NebGpEUD7MV7GWfUhDErp7imOKX2rFSUDtqkO5ryJ/o="
+    },
+    "snail": {
+      "type": "GitRelease",
+      "repository": {
+        "type": "GitHub",
+        "owner": "psyclyx",
+        "repo": "snail"
+      },
+      "pre_releases": false,
+      "version_upper_bound": null,
+      "release_prefix": null,
+      "submodules": false,
+      "version": "v0.19.0",
+      "revision": "34861bf852b7129efaddf65ccdc9f8085149bc7d",
+      "url": "https://api.github.com/repos/psyclyx/snail/tarball/refs/tags/v0.19.0",
+      "hash": "sha256-OK2sLEqZRhio1b5g5sOfGYvtMMkHiZbg/mIvxmQFsBM="
+    },
+    "stemma": {
+      "type": "GitRelease",
+      "repository": {
+        "type": "GitHub",
+        "owner": "psyclyx",
+        "repo": "stemma"
+      },
+      "pre_releases": false,
+      "version_upper_bound": null,
+      "release_prefix": null,
+      "submodules": false,
+      "version": "v0.2.0",
+      "revision": "a38b3887e1e933fe80bafc697e6444f27bd439dd",
+      "url": "https://api.github.com/repos/psyclyx/stemma/tarball/refs/tags/v0.2.0",
+      "hash": "sha256-yxi29UStK6JsbxXd2vakvsrDr8X0Y2l8iuqdVUhM2ag="
     }
   },
   "version": 8

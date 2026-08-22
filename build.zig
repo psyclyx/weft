@@ -70,8 +70,12 @@ pub fn build(b: *std.Build) void {
     const optimize = b.standardOptimizeOption(.{});
     const renderer = b.option(Renderer, "renderer", "GPU renderer backend (skia|snail); default skia") orelse .skia;
 
-    const snail_dep = b.dependency("snail", .{ .target = target, .optimize = optimize });
-    const stemma_dep = b.dependency("stemma", .{ .target = target, .optimize = optimize });
+    const snail_opt = depOrOverride(b, "snail", "NPINS_OVERRIDE_SNAIL", .{ .target = target, .optimize = optimize });
+    const stemma_opt = depOrOverride(b, "stemma", "NPINS_OVERRIDE_STEMMA", .{ .target = target, .optimize = optimize });
+    // Both queried before unwrapping so a first-ever build discovers every
+    // missing fetch in one round rather than one per re-run.
+    const snail_dep = snail_opt orelse return;
+    const stemma_dep = stemma_opt orelse return;
 
     // ── Desktop (Wayland) executable ──
     const exe_mod = b.createModule(.{
@@ -540,4 +544,36 @@ fn addWaylandProtocols(b: *std.Build, mod: *std.Build.Module) void {
 
     mod.addIncludePath(header.dirname());
     mod.addCSourceFile(.{ .file = code });
+}
+
+/// Resolve an internal-library dependency: the GitHub release pin by
+/// default (a standalone clone builds with no monorepo around it), or the
+/// zon `<name>_local` path twin when NPINS_OVERRIDE_<NAME> is set — the
+/// same variable npins honors on the nix side, so one switch flips both
+/// layers. Zon path deps are static, so the override's VALUE can't choose
+/// an arbitrary path: it must name the fixed monorepo location, and a
+/// mismatch is a hard error rather than a silently ignored setting.
+/// Returns null only when the selected pin still needs fetching (the build
+/// runner fetches and re-runs).
+fn depOrOverride(
+    b: *std.Build,
+    comptime name: []const u8,
+    comptime env_var: []const u8,
+    args: anytype,
+) ?*std.Build.Dependency {
+    const override = b.graph.environ_map.get(env_var) orelse
+        return b.lazyDependency(name, args);
+    const fixed = "../../lib/" ++ name;
+    const want = std.fs.path.resolve(b.allocator, &.{ b.build_root.path orelse ".", fixed }) catch
+        @panic("resolve " ++ fixed);
+    // resolve() is lexical (no cwd access): a relative override is resolved
+    // against the build root, so `NPINS_OVERRIDE_X=../../lib/x` from the
+    // weft checkout means the same thing it means to the zon manifest.
+    const got = std.fs.path.resolve(b.allocator, &.{ b.build_root.path orelse ".", override }) catch
+        @panic("resolve override");
+    if (!std.mem.eql(u8, want, got)) std.debug.panic(
+        "{s}={s}: zon path deps are static, so the override must name the monorepo twin {s} ({s}); point it there or unset it",
+        .{ env_var, override, fixed, want },
+    );
+    return b.lazyDependency(name ++ "_local", args);
 }
