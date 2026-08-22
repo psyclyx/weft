@@ -764,6 +764,18 @@ continues on current machinery as clients-in-waiting.
   *Gate:* a function-level subtree grant on an ordinary CODE buffer, keyed
   by node identity, surviving a peer's concurrent refactor or trapping
   loudly — the flagship scenario on the substrate people actually use.
+  **[AMENDED 2026-08-22 — see doc/w7-rebase.md, DECIDED]:** W7 is SPLIT.
+  The gate as worded already passes on W4's shipped anchor-pair grant;
+  what the graph buys (move-survival, node-robust collapse, subtree
+  granularity) requires functions as STRUCTURAL nodes, which the backing
+  swap alone does not deliver. **W7a** = the substrate inversion (option
+  (i), incremental behind the facade; gate = drop-in parity — F1's real
+  mandate), blocked on four remaining stemma gaps (eventsBetween,
+  bulk-load, partial checkout, materializeAt) + the wire flag-day
+  decision. **W7b** = the flagship node layer (struct forest through the
+  facade, syntax-claim reconcile, function-NodeRef grants; gate = the
+  scenario above incl. surviving a MOVE). Fusing them would ship a
+  backing swap labeled as the flagship.
 
 Explicitly NOT in this plan: new platforms/backends beyond the seams, QUIC,
 P2P authority, manifest-as-ObjectDoc, the compositor build itself, stemma
