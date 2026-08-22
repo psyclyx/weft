@@ -37,6 +37,11 @@ pub const setEnviron = plugin.setEnviron;
 // into `wasm_host/*.zig` — see `e2e/test_head_test.zig`) can name them too.
 pub const hasPerm = plugin.hasPerm;
 pub const canDispatch = plugin.canDispatch;
+// north-star-plan §6 W4 slice 1 — the grant-table minting step
+// (`wasm_abi/runtime.zig`'s `loadPlugin` calls this once, right after
+// `describe()`) and the `Perm` vocabulary it's keyed on.
+pub const mintGrantHandles = plugin.mintGrantHandles;
+pub const Perm = plugin.Perm;
 pub fn hostEnviron() @import("std").process.Environ {
     return plugin.g_environ;
 }

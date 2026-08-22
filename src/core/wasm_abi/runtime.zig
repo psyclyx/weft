@@ -106,6 +106,13 @@ pub const LoadOptions = struct {
     /// serialize + persist. wasmtime validates engine/version on deserialize,
     /// so a stale image is rejected and recompiled safely.
     module_cache_dir: ?[]const u8 = null,
+    /// north-star-plan §6 W4 slice 1 — the grant table this plugin's
+    /// `describe()`-declared perms mint POSSESSED handles into (see
+    /// `WasmPlugin.grant_table`/`grant_handles`). Null = no table (the
+    /// pre-W4 default): `hasPerm` degrades to reading `perms` directly, and
+    /// nothing about this plugin is revocable. A real `System` sets this to
+    /// `&system.grants`.
+    grant_table: ?*@import("../grants.zig").HandleTable = null,
 };
 
 /// Load a `.wasm` plugin under the perm handshake: bind the `weft.*` import
@@ -139,6 +146,12 @@ pub fn loadPlugin(engine: *wasm.Engine, ctx: *command.Context, name: []const u8,
         if (e != error.MissingExport) return failLoad(p, e);
     };
     p.phase = .active;
+    // north-star-plan §6 W4 slice 1: `perms` is final now (describe() has
+    // run) — if a grant table is wired, mint this plugin's POSSESSED
+    // handles from it before `init()` runs, so even init-time fs/proc/etc
+    // calls already go through the revocable handle path (see
+    // `wasm_host/plugin.zig`'s `mintGrantHandles`/`hasPerm`).
+    if (p.grant_table) |table| wasm_host.mintGrantHandles(table, p.name, p.perms, &p.grant_handles);
     contract.callRequiredExport("init", &p.instance, .{}) catch |e| return failLoad(p, e);
     p.loading = false;
     if (p.load_error) |e| return failLoad(p, e);
@@ -195,6 +208,7 @@ fn construct(engine: *wasm.Engine, ctx: *command.Context, name: []const u8, opts
         .subbuffers = opts.subbuffers,
         .register = opts.register,
         .loop = opts.loop,
+        .grant_table = opts.grant_table,
         .module = module,
         .linker = linker,
         .instance = undefined,

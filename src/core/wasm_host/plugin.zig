@@ -8,6 +8,7 @@
 const std = @import("std");
 const Document = @import("../Document.zig");
 const wasm = @import("../wasm.zig");
+const grants_mod = @import("../grants.zig");
 
 // The lifecycle side (wasm_abi) owns the plugin type; the handlers operate on
 // it. The two @import each other (Zig permits the file-level cycle) — routing
@@ -31,7 +32,7 @@ pub const Perm = enum(u32) {
     proc = perm_proc,
     timer = perm_timer,
 
-    fn label(self: Perm) []const u8 {
+    pub fn label(self: Perm) []const u8 {
         return switch (self) {
             .fs_read => "fs_read",
             .fs_write => "fs_write",
@@ -42,21 +43,62 @@ pub const Perm = enum(u32) {
     }
 };
 
-/// The PURE grant check (W0b — doc/north-star-plan.md §2.5): whether `id`
-/// declared `perm`. Deliberately `anytype`, not `*WasmPlugin`: this is the
-/// ONE piece of logic that must never drift between the wasm transport and
-/// the in-process transport (C7's "one contract, two transports"), so it is
-/// factored out where BOTH `requirePerm` (below, wasm) and
-/// `core/inproc/InProcClient.zig` (in-process) call it — neither
-/// reimplements "is the bit set". `id` is duck-typed (a `perms:
-/// [perm_count]bool` field) rather than a nominal shared struct: WasmPlugin
-/// and InProcClient hold that field under the same name without either
-/// depending on the other's type, mirroring `gfx/context.zig`'s
-/// `assertPlatform`/`app/rasterizer.zig`'s comptime-contract convention
-/// already used for the Platform/Rasterizer seams (P3) — see
-/// `InProcClient.zig`'s `assertClientIdentity` for the analogous compile-time
-/// check on this shape.
+/// Translate a plugin's DECLARED perms (the `describe()` boolean handshake)
+/// into `grants.HandleTable` rows, at LOAD time (north-star-plan §6 W4 slice
+/// 1, task item 1: "the System's grant table is POPULATED from the loaded
+/// plugins' declared perms ... translated into GrantDecls, so the machinery
+/// runs on real data without a new config verb"). Called once, from
+/// `wasm_abi/runtime.zig`'s `loadPlugin` right after `describe()` finishes
+/// (`perms` is final at that point) — a plugin loaded WITHOUT a table wired
+/// (`opts.grant_table == null`, every headless test today) never calls this;
+/// see `hasPerm`'s doc for what that means for it. A `grant` failure (OOM)
+/// degrades to `CapHandle.none` for that one perm — logged, not fatal: the
+/// plugin loses that capability rather than the whole load failing on an
+/// allocator hiccup unrelated to the wasm module itself.
+pub fn mintGrantHandles(table: *grants_mod.HandleTable, principal: []const u8, perms: [WasmPlugin.perm_count]bool, out: *[WasmPlugin.perm_count]grants_mod.CapHandle) void {
+    inline for (0..WasmPlugin.perm_count) |i| {
+        if (perms[i]) {
+            const p: Perm = @enumFromInt(i);
+            out[i] = table.grant(.{ .capability = p.label() }, principal, null) catch blk: {
+                std.log.warn("wasm_host: plugin '{s}' — minting a grant-table row for '{s}' failed (OOM); that capability is UNAVAILABLE", .{ principal, p.label() });
+                break :blk grants_mod.CapHandle.none;
+            };
+        }
+    }
+}
+
+/// The PURE grant check (W0b — doc/north-star-plan.md §2.5, migrated to the
+/// handle table by W4 §6/§2.4): whether `id` currently POSSESSES `perm`.
+/// Deliberately `anytype`, not `*WasmPlugin`: this is the ONE piece of logic
+/// that must never drift between the wasm transport and the in-process
+/// transport (C7's "one contract, two transports"), so it is factored out
+/// where BOTH `requirePerm` (below, wasm) and `core/inproc/InProcClient.zig`
+/// (in-process) call it — neither reimplements the check. `id` is duck-typed
+/// (`perms`/`grant_table`/`grant_handles` fields) rather than a nominal
+/// shared struct: WasmPlugin and InProcClient hold them under the same
+/// names without either depending on the other's type, mirroring
+/// `gfx/context.zig`'s `assertPlatform`/`app/rasterizer.zig`'s
+/// comptime-contract convention already used for the Platform/Rasterizer
+/// seams (P3) — see `InProcClient.zig`'s `assertClientIdentity` for the
+/// analogous compile-time check on this shape.
+///
+/// **The migration, precisely** (§6 W4 gate: "the hasPerm migration must be
+/// behavior-identical for granted plugins"): when `id.grant_table` is wired
+/// (a real `System`, or a test that opts in), the booleans are NOT the
+/// checked state anymore — only `id.grant_handles[perm]`'s live table row is
+/// (§2.4 "use = possession"). A revoked row fails here on its very next
+/// check, with no re-read of `perms` at all — that's what makes revoking a
+/// RUNNING plugin's capability take effect immediately. When NO table is
+/// wired (`id.grant_table == null` — every construction that predates W4,
+/// still the common case for bare unit-test fixtures), this degrades
+/// EXACTLY to the pre-W4 boolean read: the machinery is simply absent, not
+/// silently bypassed, so every existing test that pokes `.perms[i] = true`
+/// directly (without ever touching a `HandleTable`) keeps behaving
+/// identically.
 pub fn hasPerm(id: anytype, comptime perm: Perm) bool {
+    if (id.grant_table) |table| {
+        return table.check(id.grant_handles[@intFromEnum(perm)]);
+    }
     return id.perms[@intFromEnum(perm)];
 }
 
@@ -67,9 +109,16 @@ pub fn hasPerm(id: anytype, comptime perm: Perm) bool {
 /// double-checking the bit `hasPerm` already decided. `requirePerm` below is
 /// this plus the check, kept for the ~117 handlers not yet split (task W0b
 /// item 1 — see doc/north-star-plan.md's honest coverage note): behavior is
-/// byte-identical to before this refactor.
+/// byte-identical to before this refactor, MODULO the message: a table-wired
+/// plugin now gets a REVOCATION-specific reason, distinct from "never
+/// requested" (§6 W4 gate) — a plugin with no table wired keeps the exact
+/// pre-W4 wording, since there is no revocation state to distinguish.
 pub fn trapPermDenied(p: *WasmPlugin, caller: *wasm.Caller, comptime perm: Perm) void {
-    caller.trap("plugin '{s}' denied capability '{s}' (not requested in describe())", .{ p.name, perm.label() });
+    const reason: []const u8 = if (p.grant_table) |table| switch (table.reasonFor(p.grant_handles[@intFromEnum(perm)])) {
+        .revoked => "revoked",
+        .never_granted, .ok => "not requested in describe()",
+    } else "not requested in describe()";
+    caller.trap("plugin '{s}' denied capability '{s}' ({s})", .{ p.name, perm.label(), reason });
 }
 
 /// The membrane's ONE deny path: every perm-gated host import NOT YET split

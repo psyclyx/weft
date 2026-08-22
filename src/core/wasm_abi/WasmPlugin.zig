@@ -21,6 +21,7 @@ const repl_session = @import("../repl_session.zig");
 const net_session = @import("../net_session.zig");
 const proc_stream = @import("../proc_stream.zig");
 const Pool = @import("../task.zig").Pool;
+const grants_mod = @import("../grants.zig");
 
 // The host-import table operates on `WasmPlugin` (principal() routes edits
 // through its peer resolver); the two @import each other (Zig allows it).
@@ -157,6 +158,22 @@ declared: std.ArrayList([]u8) = .empty,
 /// Capability names the guest declared during `describe()` (owned).
 declared_caps: std.ArrayList([]u8) = .empty,
 perms: [perm_count]bool = @splat(false),
+/// north-star-plan §6 W4 slice 1 — the grant table this plugin's possessed
+/// handles (`grant_handles`, below) are checked against. `null` (the default
+/// every pre-W4 construction gets) means "no table wired": `hasPerm` then
+/// falls back to reading `perms` directly, exactly as before this slice —
+/// see `wasm_host/plugin.zig`'s `hasPerm` doc. Set from `LoadOptions.grant_table`
+/// by `construct`; a real value only when the loader (a `System`, or a test
+/// that opts in) supplies one.
+grant_table: ?*grants_mod.HandleTable = null,
+/// This plugin's POSSESSED handles, one slot per `Perm` — the "use =
+/// possession" state `hasPerm` checks when `grant_table` is wired. Minted
+/// once, at load time, from `perms` (`wasm_host/plugin.zig`'s
+/// `mintGrantHandles`, called by `loadPlugin` right after `describe()`
+/// finishes) — NOT re-derived per use. `CapHandle.none` for every
+/// undeclared perm, and for every slot when `grant_table` is null (nothing
+/// ever mints into it).
+grant_handles: [perm_count]grants_mod.CapHandle = @splat(.none),
 /// A cross-check failure inside an import callback (which cannot itself
 /// abort instantiation): recorded here, checked after `init()` to fail
 /// the load and roll back.

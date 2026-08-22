@@ -85,6 +85,18 @@ pub const Context = struct {
     /// streaming), whose edits stay their own peer — the per-principal
     /// selective-undo property we keep for collaborators and agents.
     user_initiated: bool = false,
+    /// The System's grant table (north-star-plan §2.4/§6 W4 slice 1) —
+    /// `null` everywhere this isn't wired (every headless test fixture, and
+    /// production until a caller opts in), in which case `Ctx.capture`
+    /// resolves an empty grant list and the wasm/in-process membrane's
+    /// `hasPerm` falls back to its pre-W4 boolean check (see
+    /// `wasm_host/plugin.zig`'s `hasPerm` doc). Set by `System.create`
+    /// (`&self.grants`) once a caller routes a `Context` through a `System`;
+    /// see `grants.zig`'s module doc for the table shape and
+    /// `ctx.zig`'s `Ctx.capture` for how a captured `Ctx` resolves it into
+    /// `Ctx.grants` (zero allocation, no wallet — capture COLLECTS matching
+    /// rows, it never mints new ones).
+    grant_table: ?*@import("grants.zig").HandleTable = null,
 
     pub fn buffer(self: *Context) *Buffers.Buffer {
         return self.buffers.active();

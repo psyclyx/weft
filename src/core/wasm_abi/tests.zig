@@ -1594,6 +1594,53 @@ test "wasm plugin: notes capture appends via fs and open reads it back" {
     try t.expectEqualStrings("todo x\ntodo y\n", s);
 }
 
+test "wasm plugin: W4 slice 1 GATE — revoking fs from a RUNNING plugin traps its next fs call, real wasm guest" {
+    const gpa = t.allocator;
+    var env: Env = undefined;
+    try Env.init(gpa, &env);
+    defer env.deinit(gpa);
+    try @import("../builtins.zig").install(gpa, &env.commands, &env.keymap, &env.head, &env.actions);
+
+    const tmp = "weft-notes-revoke-test.md";
+    file.deleteFile(gpa, tmp);
+    defer file.deleteFile(gpa, tmp);
+
+    var engine = try wasm.Engine.init();
+    defer engine.deinit();
+
+    const grants_mod = @import("../grants.zig");
+    var table = grants_mod.HandleTable.init(gpa);
+    defer table.deinit();
+
+    // Loaded with a grant table wired (`opts.grant_table`) — the ONLY
+    // difference from the plain "notes" test above: this plugin's declared
+    // perms are minted into REVOCABLE handle-table rows (`mintGrantHandles`,
+    // called by `loadPlugin` right after `describe()`), not left as bare
+    // booleans.
+    const plugin = try loadPlugin(&engine, &env.ctx, "notes", @embedFile("guest_notes_wasm"), .{ .grant_table = &table });
+    defer plugin.deinit();
+    try t.expect(plugin.perms[wasm_host.perm_fs_write]);
+    try t.expect(table.check(plugin.grant_handles[wasm_host.perm_fs_write]));
+
+    // Live and working, exactly like the ungated test — the migration is
+    // behavior-identical for a granted plugin.
+    _ = try command.run(&env.commands, &env.ctx, "notes-capture", &.{ .{ .string = "before" }, .{ .string = tmp } });
+
+    // Revoke fs_write from the RUNNING plugin — no reload, no re-describe,
+    // no new load at all: the SAME `*WasmPlugin` the first capture already
+    // dispatched through.
+    const n = table.revoke("notes", wasm_host.Perm.fs_write.label());
+    try t.expectEqual(@as(usize, 1), n);
+    try t.expect(!table.check(plugin.grant_handles[wasm_host.perm_fs_write]));
+    // Distinct from "never granted" (§6 W4 gate) — the trap message this
+    // feeds names the reason differently; see `trapPermDenied`.
+    try t.expectEqual(grants_mod.Reason.revoked, table.reasonFor(plugin.grant_handles[wasm_host.perm_fs_write]));
+
+    // The VERY NEXT fs.write-backed call traps — command.run surfaces it as
+    // error.Trap (the membrane's one deny path), never a normal return.
+    try t.expectError(error.Trap, command.run(&env.commands, &env.ctx, "notes-capture", &.{ .{ .string = "after" }, .{ .string = tmp } }));
+}
+
 test "wasm plugin: modes reacts to the activation event by language, without touching the head (task #19 item 4)" {
     const gpa = t.allocator;
     var env: Env = undefined;

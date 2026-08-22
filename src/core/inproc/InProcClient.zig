@@ -67,6 +67,7 @@ const fs_impl = @import("../wasm_host/fs.zig");
 const keymap_impl = @import("../wasm_host/keymap.zig");
 const wasm_host_plugin = @import("../wasm_host/plugin.zig");
 const WasmPlugin = @import("../wasm_abi/WasmPlugin.zig");
+const grants_mod = @import("../grants.zig");
 
 /// The guest-side `Perm` enum order (`WasmPlugin.perm_count`'s doc: fs_read,
 /// fs_write, net, proc, timer) — an in-process client's `perms` array is the
@@ -82,6 +83,17 @@ pub const InProcClient = struct {
     /// Declared grants — see this file's module doc, "no real capture-time
     /// GRANT machinery" above.
     perms: [perm_count]bool = @splat(false),
+    /// north-star-plan §6 W4 slice 1 — mirrors `WasmPlugin.grant_table`
+    /// exactly (see that field's doc). `null` for every client today (the
+    /// two first-party clients this module's doc names self-grant `perms`
+    /// directly and are never routed through a `System`'s table) — kept
+    /// here so `hasPerm`'s duck-typed contract stays IDENTICAL across both
+    /// transports, not because anything currently wires it.
+    grant_table: ?*grants_mod.HandleTable = null,
+    /// Mirrors `WasmPlugin.grant_handles` — see that field's doc. Unused
+    /// (`.none` throughout) unless a caller mints into it via a wired
+    /// `grant_table`.
+    grant_handles: [perm_count]grants_mod.CapHandle = @splat(.none),
     /// The ctx a DISPATCHING call routes reads/mutations through — mirrors
     /// `WasmPlugin.active_ctx` exactly (same field name, so the same
     /// `activeCtx()`-shaped access pattern reads naturally for both).
@@ -156,7 +168,7 @@ pub const InProcClient = struct {
 /// duck-typed contract, not a vtable or a shared nominal base).
 pub fn assertClientIdentity(comptime T: type) void {
     if (@typeInfo(T) != .@"struct") @compileError(@typeName(T) ++ ": a client identity must be a struct");
-    inline for (.{ "perms", "in_dispatch", "loading", "name" }) |name| {
+    inline for (.{ "perms", "in_dispatch", "loading", "name", "grant_table", "grant_handles" }) |name| {
         if (!@hasField(T, name)) @compileError(@typeName(T) ++ ": missing field `" ++ name ++ "` — the shared client-identity contract `wasm_host/plugin.zig`'s hasPerm/canDispatch duck-type against");
     }
 }

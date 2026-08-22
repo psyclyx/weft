@@ -120,10 +120,12 @@ const authority = @import("authority.zig");
 const locus_mod = @import("locus.zig");
 const action_mod = @import("action.zig");
 const Head = @import("Head.zig");
+const grants_mod = @import("grants.zig");
 
 pub const Facts = facts_mod.Facts;
 pub const Principal = authority.Principal;
 pub const Locus = locus_mod.Locus;
+pub const CapHandle = grants_mod.CapHandle;
 
 /// The seven scope kinds (north-star-plan F4, DECIDED): "The seven scope
 /// kinds; `pane` is a fact on head scopes; `principal` is identity, never a
@@ -191,6 +193,42 @@ pub const ScopeList = struct {
     }
 };
 
+/// Fixed capacity for one capture's resolved-grant list (north-star-plan
+/// §2.4/§6 W4 slice 1). Generous, not derived from anything load-bearing
+/// today (the only production population is plugin-lifetime — a handful of
+/// perms per plugin, §6 W4's honest-v1 note) — sized so a future
+/// predicate-scoped decl or two doesn't need a resize, same "belt-and-
+/// suspenders, log loudly, never allocate" policy `ScopeList.append` uses.
+pub const max_grants = 16;
+
+/// `Ctx.grants`'s backing store — the bounded-array idiom `ScopeList` already
+/// established, reused here for the SAME reason: `Ctx.capture` must stay
+/// allocation-free (see the "zero-alloc capture" test), and a resolved grant
+/// list is exactly as capture-scoped as the scope stack it was resolved
+/// against. Overflow drops the OLDEST collected handle (matching
+/// `ScopeList`'s "drop the least-specific/least-current" policy) and warns —
+/// unreachable in practice at today's `max_grants`.
+pub const GrantList = struct {
+    items: [max_grants]CapHandle = undefined,
+    len: usize = 0,
+
+    pub fn append(self: *GrantList, h: CapHandle) void {
+        if (self.len < max_grants) {
+            self.items[self.len] = h;
+            self.len += 1;
+            return;
+        }
+        std.log.warn("ctx: grant capture overflowed max_grants ({d}) — dropping the OLDEST collected handle", .{max_grants});
+        var i: usize = 0;
+        while (i + 1 < max_grants) : (i += 1) self.items[i] = self.items[i + 1];
+        self.items[max_grants - 1] = h;
+    }
+
+    pub fn constSlice(self: *const GrantList) []const CapHandle {
+        return self.items[0..self.len];
+    }
+};
+
 /// The captured interaction value. Facts/principal/locus/grants/epoch are
 /// the immutable "value" half (§2.1's pseudocode); `host` is the live
 /// back-reference `setMode`/`pushTransient` need — see the module doc.
@@ -201,10 +239,22 @@ pub const Ctx = struct {
     /// always-present local sentinel — until a remote-attach head fills a
     /// real one (W6).
     locus: Locus = .here,
-    /// W4 placeholder (§2.4: "grants riding the Ctx", resolved at capture
-    /// against the principal's `GrantDecl`s). Empty until W4 wires capture-
-    /// time grant resolution; a real slice of resolved handles lands then.
-    grants: []const u8 = &.{},
+    /// The CAPTURE-TIME powerbox (§2.4/§6 W4 slice 1: "grants riding the
+    /// Ctx"): every live `grants.CapHandle` this capture's principal
+    /// possesses under the CURRENT merged facts, resolved fresh by
+    /// `capture` (below) against `host.grant_table`'s rows — a COLLECTION,
+    /// never a mint (§2.4's "no wallet" rule: this is exactly what's
+    /// eligible for THIS capture, nothing the receiving code could pick
+    /// among). Empty (`.len == 0`) whenever `host.grant_table` is `null`
+    /// (every headless test today) — the honest "no table wired" case.
+    /// PLUMBED, NOT YET CONSUMED (W4 slice 1, the in_dispatch-bracket
+    /// precedent): today's runtime verdicts all flow through the plugins'
+    /// own baseline handles (`grant_handles` — Path A); nothing in
+    /// production reads THIS collected list yet. Whoever wires its first
+    /// consumer must ALSO wire `loadPlugin`'s `grant_table`, or Path A
+    /// (booleans say yes) and Path B (empty table says nothing) will
+    /// silently disagree.
+    grants: GrantList = .{},
     /// Cache key: the shared `container.Container`'s own `epoch` (task
     /// #19's shared-Container fold-in), read straight off
     /// `ctx.actions.container.epoch` at capture time — `ctx.caps.container`
@@ -294,6 +344,16 @@ pub const Ctx = struct {
             const mode_fact = if (i + 1 == ctx.head.transient_stack.items.len) live_mode else frame.mode;
             self.scopes.append(.{ .kind = .transient, .facts = .{ .mode = mode_fact } });
         }
+        // CAPTURE-TIME grant resolution (§2.4/§6 W4 slice 1) — the last step,
+        // since it reads the now-fully-assembled scope stack via
+        // `mergedFacts`. Zero allocation: `collectForPrincipal` only reads
+        // `ctx.grant_table`'s existing rows and appends into the fixed
+        // `GrantList` above — no new allocation is introduced whether or not
+        // a table is wired (`null` short-circuits to "nothing collected",
+        // matching the FailingAllocator test's expectations).
+        if (ctx.grant_table) |table| {
+            table.collectForPrincipal(ctx.principal.name, self.mergedFacts(), &self.grants);
+        }
         return self;
     }
 
@@ -337,6 +397,22 @@ pub const Ctx = struct {
         const depth = try self.host.head.pushTransientMode(self.host.gpa, km, mode);
         return .{ .host = self.host, .depth = depth };
     }
+
+    /// Mint a grant SCOPED to an open transient (§2.4/§6 W4 slice 1's
+    /// SCOPE-LIFETIME promise: "handles minted for transient/buffer-scoped
+    /// grants die at scope exit"). Ties the new row's lifetime to `handle`'s
+    /// transient frame via its `depth` as the scope token — `handle.deinit()`
+    /// (the pop) sweeps every row scoped to it, so a later `check` against
+    /// the returned handle traps, not drifts. Honest v1 (see `grants.zig`'s
+    /// module doc): NOTHING production mints a scoped grant today — every
+    /// real perm is plugin-lifetime — so this is exercised only by tests
+    /// (this file's "SCOPE-LIFETIME" test). Requires `self.host.grant_table`;
+    /// returns `CapHandle.none` (a no-op) when none is wired, same
+    /// degrade-honestly convention `hasPerm` uses.
+    pub fn grantScopedToTransient(self: *const Ctx, handle: *const TransientHandle, decl: grants_mod.GrantDecl) CapHandle {
+        const table = self.host.grant_table orelse return CapHandle.none;
+        return table.grant(decl, self.principal.name, @as(u64, @intCast(handle.depth))) catch CapHandle.none;
+    }
 };
 
 /// A live, paired transient-scope push. See `Ctx.pushTransient`.
@@ -354,6 +430,11 @@ pub const TransientHandle = struct {
     pub fn deinit(self: *TransientHandle) void {
         if (self.popped) return;
         self.popped = true;
+        // SCOPE-LIFETIME sweep (§2.4/§6 W4 slice 1): invalidate any grant
+        // minted against THIS transient's scope token (`Ctx.grantScopedToTransient`)
+        // before it pops — "scope exit revokes". A no-op when no table is
+        // wired or nothing was ever scoped here (the ordinary case today).
+        if (self.host.grant_table) |table| _ = table.sweepScope(@as(u64, @intCast(self.depth)));
         self.host.head.popTransientMode(self.host.gpa, self.depth) catch |e| {
             std.log.warn("ctx: transient pop refused ({t}) — a later push was never popped (leak) or this handle is stale", .{e});
         };
@@ -640,6 +721,48 @@ test "ctx: paired transient — an out-of-order pop is refused, not silently mis
     // removed from the stack. `hasOpenTransients` still reports it — the
     // detector the module doc promises, not a silent third result.
     try t.expect(env.head.hasOpenTransients());
+}
+
+test "ctx: W4 slice 1 — CAPTURE-TIME grant resolution + SCOPE-LIFETIME: a transient-scoped grant traps after the transient pops" {
+    const gpa = t.allocator;
+    var env = try TestEnv.init(gpa);
+    defer env.deinit();
+    try env.keymap.markMenuMode(gpa, "leader");
+
+    var table = grants_mod.HandleTable.init(gpa);
+    defer table.deinit();
+    env.ctx.grant_table = &table;
+
+    // A PLUGIN-LIFETIME grant (no scope) — present in every capture for
+    // this principal regardless of the transient below, the honest-v1
+    // production shape (§6 W4: "manifest-static is the only production
+    // population").
+    const baseline = try table.grant(.{ .capability = "fs_read" }, "user", null);
+
+    const c = Ctx.capture(&env.ctx);
+    try t.expectEqual(@as(usize, 1), c.grants.len); // just the baseline — no transient open yet
+
+    var handle = try c.pushTransient(&env.keymap, "leader");
+    const scoped = c.grantScopedToTransient(&handle, .{ .capability = "test.transient-cap" });
+    try t.expect(table.check(scoped));
+
+    // CAPTURE-TIME resolution (§2.4's powerbox): a fresh capture while the
+    // transient is open collects BOTH rows — nothing minted here, only
+    // collected (no wallet: this Ctx sees exactly what's eligible now).
+    const c2 = Ctx.capture(&env.ctx);
+    try t.expectEqual(@as(usize, 2), c2.grants.len);
+
+    // SCOPE-LIFETIME (§2.4: "scope exit revokes; a stashed handle from a
+    // dead Ctx traps"): popping the transient sweeps the scoped row.
+    handle.deinit();
+    try t.expect(!table.check(scoped));
+    try t.expectEqual(grants_mod.Reason.revoked, table.reasonFor(scoped));
+    try t.expect(table.check(baseline)); // the plugin-lifetime row is untouched
+
+    // A capture taken AFTER the pop no longer collects the dead row.
+    const c3 = Ctx.capture(&env.ctx);
+    try t.expectEqual(@as(usize, 1), c3.grants.len);
+    try t.expectEqual(baseline.idx, c3.grants.constSlice()[0].idx);
 }
 
 test {

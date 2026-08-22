@@ -83,6 +83,7 @@ const quickjs = @import("quickjs.zig");
 const async_loop = @import("async.zig");
 const subbuffer = @import("subbuffer.zig");
 const register_mod = @import("register.zig");
+const grants_mod = @import("grants.zig");
 
 pub const System = @This();
 
@@ -161,6 +162,17 @@ applied_manifest: ?*manifest.Manifest = null,
 /// change: reading a manifest's own `weft.plugin(...)` calls against
 /// `--plugin`-style resolution for a non-editor system).
 plugins: ?Plugins = null,
+/// The GRANT TABLE this system owns (north-star-plan §2.4/§6 W4 slice 1:
+/// "the GRANT TABLE a System owns"). Wire `&self.grants` into a plugin
+/// load's `wasm_abi.LoadOptions.grant_table` to make its `describe()`-
+/// declared perms revocable rows instead of static booleans — see
+/// `grants.zig`'s module doc for the full shape, `revoke` (below) for the
+/// live-revocation entry point, and `contextFor`'s `Context.grant_table`
+/// wiring for how a captured `Ctx` resolves against it. Every `Context`
+/// this system hands out (`contextFor`) points at the SAME table, so
+/// `Ctx.capture`'s grant resolution and a loaded plugin's possession checks
+/// both consult exactly one source of truth.
+grants: grants_mod.HandleTable = undefined,
 
 /// Build a system from scratch: fresh buffers (one scratch buffer, per
 /// `Buffers.init`), empty commands/keymap, and the built-in command/keymap
@@ -177,6 +189,7 @@ pub fn create(gpa: Allocator, pool: *task.Pool, name: []const u8, user: []const 
         .container = container_mod.Container.init(gpa),
         .caps = undefined,
         .actions = undefined,
+        .grants = grants_mod.HandleTable.init(gpa),
     };
     errdefer self.buffers.deinit(gpa);
     // `caps`/`actions` borrow `&self.container` (task #19's shared-Container
@@ -211,6 +224,7 @@ pub fn destroy(self: *System) void {
     self.commands.deinit(gpa);
     self.buffers.deinit(gpa);
     self.config_kv.deinit(gpa);
+    self.grants.deinit();
     gpa.free(self.name);
     gpa.destroy(self);
 }
@@ -229,7 +243,22 @@ pub fn contextFor(self: *System, head: *Head) command.Context {
         .caps = &self.caps,
         .quit = &self.quit,
         .head = head,
+        .grant_table = &self.grants,
     };
+}
+
+/// Revoke `capability` from `principal` (§6 W4 gate: "revoke fs from a
+/// RUNNING plugin → its next fs call traps"). Invalidates every LIVE row
+/// this table holds for that exact (principal, capability) pair — a plugin
+/// currently possessing a handle into one of those rows fails its very
+/// next `hasPerm` check (no re-load, no re-describe) and traps with a
+/// REVOKED-specific message (`wasm_host/plugin.zig`'s `trapPermDenied`),
+/// distinct from "never requested". Returns how many rows were invalidated
+/// (0 = no match — a typo'd principal/capability name, or it was never
+/// granted / already revoked). See `registerRevokeCommand` for the live
+/// `revoke <plugin> <capability>` debug command this backs.
+pub fn revoke(self: *System, principal: []const u8, cap_name: []const u8) usize {
+    return self.grants.revoke(principal, cap_name);
 }
 
 /// The "attach" half of a rebind (§6 W2b gate (b)): land `head` in this
@@ -468,6 +497,7 @@ pub const Host = struct {
         c.actions = &to.actions;
         c.caps = &to.caps;
         c.quit = &to.quit;
+        c.grant_table = &to.grants;
         try to.attachHead(gpa, head);
     }
 };
@@ -493,6 +523,34 @@ pub fn registerSwapCommand(gpa: Allocator, commands: *command.Commands, host: *H
         .args = &.{.{ .name = "name", .type = .string }},
         .handler = systemSwapHandler,
         .data = host,
+    });
+}
+
+/// The `revoke <plugin> <capability>` debug command (§6 W4 gate: "a `revoke
+/// <plugin> <capability>` debug command proves it live") — `data` is the
+/// owning `*System`. Thin wrapper over `System.revoke`, echoing how many
+/// rows it invalidated so the effect is visible without a debugger.
+pub fn revokeHandler(ctx: *command.Context, data: ?*anyopaque, args: []const command.Value) anyerror!command.Value {
+    const sys: *System = @ptrCast(@alignCast(data.?));
+    if (args.len < 2 or args[0] != .string or args[1] != .string) return .nil;
+    const n = sys.revoke(args[0].string, args[1].string);
+    var buf: [160]u8 = undefined;
+    const msg = std.fmt.bufPrint(&buf, "revoke: {s}/{s} — {d} row(s) invalidated", .{ args[0].string, args[1].string, n }) catch "revoke: done";
+    ctx.head.echo.clearRetainingCapacity();
+    ctx.head.echo.appendSlice(ctx.gpa, msg) catch {};
+    return .nil;
+}
+
+/// Not installed by `builtins.install` (same rationale as `registerSwapCommand`
+/// — optional, per-embedder wiring): a system that wants the live `revoke`
+/// debug command binds it explicitly against itself.
+pub fn registerRevokeCommand(gpa: Allocator, commands: *command.Commands, system: *System) !void {
+    _ = try commands.bind(gpa, "revoke", .{
+        .name = "revoke",
+        .summary = "Revoke a capability from a principal/plugin — its next matching use traps.",
+        .args = &.{ .{ .name = "principal", .type = .string }, .{ .name = "capability", .type = .string } },
+        .handler = revokeHandler,
+        .data = system,
     });
 }
 
@@ -605,6 +663,10 @@ test "system: GATE (b) — a head re-binds editor<->agent-ux live: tables switch
     try t.expect(c.actions == &agent_sys.actions);
     try t.expect(c.caps == &agent_sys.caps);
     try t.expect(c.quit == &agent_sys.quit);
+    // W4 slice 1: the grant table repoints too — a captured Ctx after a
+    // swap must resolve against the NEW system's grants, never the old
+    // one's (each system owns its own table, `System.create`'s doc).
+    try t.expect(c.grant_table.? == &agent_sys.grants);
 
     // Interaction state does NOT leak across: the head's mode is whatever
     // agent-ux's resting rule gives a fresh attach (its buffer never
@@ -782,6 +844,48 @@ test "system: the real config/agent-ux.js manifest hosts a SECOND system end-to-
     // Headless the whole time: no Head other than `default_head` ever
     // attached, and the system fully evaluated + applied its own manifest.
     try t.expect(!agent_sys.default_head.hasOpenTransients());
+}
+
+test "system: W4 slice 1 — the System-owned grant table, capture-time resolution, and the live revoke command" {
+    const gpa = t.allocator;
+    const pool = try task.Pool.init(gpa, .{ .threads = 1 });
+    defer pool.deinit();
+    const sys = try testSystem(gpa, pool, "editor");
+    defer sys.destroy();
+
+    // A plugin-lifetime grant, minted the way `wasm_host/plugin.zig`'s
+    // `mintGrantHandles` would at load time — directly against the System's
+    // OWN table (`grants.zig`'s module doc: "the GRANT TABLE a System
+    // owns").
+    const h = try sys.grants.grant(.{ .capability = "fs_read" }, "notes", null);
+    try t.expect(sys.grants.check(h));
+
+    // CAPTURE-TIME resolution (§2.4): a `Ctx` captured for the "notes"
+    // principal, through a `Context` this system handed out, collects the
+    // matching row — `contextFor` wires `grant_table` automatically.
+    var c = sys.contextFor(&sys.default_head);
+    c.principal = .{ .role = .plugin, .name = "notes" };
+    const captured = c.capturedCtx();
+    try t.expectEqual(@as(usize, 1), captured.grants.len);
+    try t.expectEqual(h.idx, captured.grants.constSlice()[0].idx);
+
+    // A DIFFERENT principal's capture sees nothing of "notes"'s grant — no
+    // wallet, no cross-principal leak.
+    c.principal = .{ .role = .plugin, .name = "vim" };
+    try t.expectEqual(@as(usize, 0), c.capturedCtx().grants.len);
+    c.principal = .{ .role = .plugin, .name = "notes" };
+
+    // The live `revoke` debug command (§6 W4 gate) invalidates the row —
+    // through the ordinary command surface, exactly as a keybinding would.
+    try registerRevokeCommand(gpa, &sys.commands, sys);
+    _ = try command.run(&sys.commands, &c, "revoke", &.{ .{ .string = "notes" }, .{ .string = "fs_read" } });
+
+    try t.expect(!sys.grants.check(h));
+    try t.expectEqual(grants_mod.Reason.revoked, sys.grants.reasonFor(h));
+    try t.expectEqualStrings("revoke: notes/fs_read — 1 row(s) invalidated", sys.default_head.echo.items);
+
+    // A capture AFTER revocation no longer collects the dead row.
+    try t.expectEqual(@as(usize, 0), c.capturedCtx().grants.len);
 }
 
 test {
