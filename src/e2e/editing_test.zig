@@ -206,7 +206,7 @@ test "workflow: vim — cw changes a word then re-inserts" {
     try t.expect(std.mem.indexOf(u8, got, "bar") != null);
 }
 
-test "workflow: modes — opening a file detects its language on activate" {
+test "workflow: modes — opening a file detects its language on activate, without touching the head (task #19 item 4)" {
     const gpa = t.allocator;
     var ed: Editor = undefined;
     try Editor.init(gpa, &ed);
@@ -214,10 +214,17 @@ test "workflow: modes — opening a file detects its language on activate" {
     try loadWorkspace(&ed);
 
     // The natural way to "work on a zig file" is to open it. modes' on_activate
-    // fires (harness mirrors main) and echoes the detected language.
+    // fires (harness mirrors main) and detects the language — it no longer
+    // echoes it, though: `on_activate` is BACKGROUND (no per-call dispatching
+    // head — see `wasm_host/commands.zig`'s classification doc) and `wl_echo`
+    // is head-gated (task #19 item 4), so `src/guest/modes.zig` downgraded
+    // this to `weft.log` (still observable in the process log, just not the
+    // editor's echo line). What this test asserts instead is the structural
+    // guarantee: opening a file never lands language text on `ed.echoText()`
+    // via this path, for either extension.
     ed.runStr("open", "/tmp/weft-nonexistent-main.zig");
-    try t.expect(std.mem.indexOf(u8, ed.echoText(), "zig") != null);
+    try t.expect(std.mem.indexOf(u8, ed.echoText(), "zig") == null);
 
     ed.runStr("open", "/tmp/weft-nonexistent-app.js");
-    try t.expect(std.mem.indexOf(u8, ed.echoText(), "javascript") != null);
+    try t.expect(std.mem.indexOf(u8, ed.echoText(), "javascript") == null);
 }

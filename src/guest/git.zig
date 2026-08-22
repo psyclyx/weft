@@ -274,6 +274,9 @@ const cmds = [_]Cmd{
     .{ .name = "git-diff", .handler = gitDiff },
     .{ .name = "git-diff-staged", .handler = gitDiffStaged },
     .{ .name = "git-blame", .handler = gitBlame },
+    // Internal: the deferred half of `noteDrops` (task #19 item 4) — not a
+    // user-facing verb, invoked only via `weft.run` from `on_fill`.
+    .{ .name = "git-note-drops-deliver", .handler = gitNoteDropsDeliver },
 };
 
 export fn describe() void {
@@ -550,7 +553,19 @@ fn parseAndRender() void {
     noteDrops();
 }
 
+/// `noteDrops` is only ever reached from `on_fill` (BACKGROUND — see the
+/// on_fill body above: it's the tail of `parseAndRender`, called nowhere
+/// else). `weft.echo` is head-gated (task #19 item 4), so the actual
+/// echoes defer through a self-registered command: a nested `weft.run` from
+/// a background entry IS a dispatching entry for its duration (the same
+/// door an async LSP response uses — see `src/guest/lsp.zig`'s identical
+/// pattern), so `gitNoteDropsDeliver` below runs with a real dispatching
+/// head.
 fn noteDrops() void {
+    if (dropped_files or dropped_hunks or truncated_raw) weft.run("git-note-drops-deliver");
+}
+
+fn gitNoteDropsDeliver() void {
     if (dropped_files) weft.echo("magit: >128 files — some omitted");
     if (dropped_hunks) weft.echo("magit: >512 hunks — some omitted");
     if (truncated_raw) weft.echo("magit: output > 256 KiB — diff truncated");

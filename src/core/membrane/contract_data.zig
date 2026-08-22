@@ -88,6 +88,40 @@ pub const Entry = struct {
     results: []const ValType,
     group: Group,
     perm: ?Perm = null,
+    /// task #19 item 4: TRUE for an import whose handler MUTATES per-head
+    /// interaction state — `Head.zig`'s module doc: mode, pending chord,
+    /// pick session, echo line (dot-repeat and window focus have no `wl_*`
+    /// door today). `false` — the overwhelming majority — for everything
+    /// else, in particular:
+    ///   - mode/menu TABLE declarations (`wl_menu_mode`, `wl_locked_mode`,
+    ///     `wl_resting_mode`, `wl_sticky_menu`, `wl_set_fallback`,
+    ///     `wl_bind_key`, `wl_text_input`, `wl_declare_action`, `wl_provide`)
+    ///     — these declare what a mode/action IS, system-scoped (Keymap
+    ///     owns the tables; Head owns only the CURSOR into them — see
+    ///     Head.zig's "THE SPLIT"), legal from `init`.
+    ///   - buffer/editor-owned state post-W2a (`wl_jump`, `wl_set_selection`,
+    ///     `wl_editor_step`, every `wl_edit*`/stamped-range import,
+    ///     `wl_flash`, every `wl_style*`/`wl_fold*`/`wl_readonly*`/
+    ///     `wl_decorate*`) — cursor/selection/document content live on
+    ///     `Editor`, not `Head`; flash/styles/folds are buffer layers.
+    ///   - reads of head state (`wl_pick_choice`, `wl_pick_choice_index`,
+    ///     `wl_menu_binding_*`) — `on_menu`'s whole job is reading `Head`
+    ///     through a BACKGROUND entry to render which-key; gating reads
+    ///     would break it. Only MUTATION is gated, mirroring `requirePerm`'s
+    ///     effects-only scope.
+    /// A `true` entry is NOT blanket-denied outside dispatch, though: it is
+    /// also legal during the one-time `describe()`/`init()` load handshake
+    /// (`WasmPlugin.loading`'s doc) — `wl_set_mode` specifically is exactly
+    /// how `vim.zig`/`helix.zig`/`emacs.zig`'s `init()` establishes the
+    /// guest's STARTING mode (`weft.setMode("normal")`, its last line), a
+    /// real pattern every modal-editor guest uses, discovered by the full
+    /// test suite failing when this table's first draft (wrongly) assumed
+    /// `init` never needs a head-gated import.
+    /// Enforced by `wasm_host/plugin.zig`'s `requireDispatch`, called at the
+    /// top of each `true` entry's handler; cross-checked against the actual
+    /// call sites by `contract.zig`'s curated `head_gated` test (same shape
+    /// as its `perm_gated` test).
+    head_gated: bool = false,
     /// One-line human doc — NOT the source of truth for behavior (the
     /// handler body is), just review/generation context.
     doc: []const u8,
@@ -147,7 +181,7 @@ pub const imports = [_]Entry{
     .{ .name = "wl_config_get", .params = &.{ .u32, .u32, .u32, .u32 }, .results = &.{.i32}, .group = .config_kv, .doc = "read this plugin's staged config value (the distinct weft.set store)" },
 
     // ── dispatch.zig — echo + command args in/result out ───────────────
-    .{ .name = "wl_echo", .params = &.{ .u32, .u32 }, .results = &.{}, .group = .dispatch, .doc = "print a message to the echo area" },
+    .{ .name = "wl_echo", .params = &.{ .u32, .u32 }, .results = &.{}, .group = .dispatch, .head_gated = true, .doc = "print a message to the echo area" },
     .{ .name = "wl_arg_count", .params = &.{}, .results = &.{.u32}, .group = .dispatch, .doc = "the current command dispatch's argument count" },
     .{ .name = "wl_arg_int", .params = &.{.u32}, .results = &.{.i32}, .group = .dispatch, .doc = "the `i`-th dispatch arg as an int" },
     .{ .name = "wl_arg_str", .params = &.{ .u32, .u32, .u32 }, .results = &.{.i32}, .group = .dispatch, .doc = "the `i`-th dispatch arg as a string, into guest memory" },
@@ -156,13 +190,13 @@ pub const imports = [_]Entry{
 
     // ── keymap.zig — the local config plane: bindings/modes/providers ──
     .{ .name = "wl_bind_key", .params = &.{ .u32, .u32, .u32, .u32, .u32, .u32 }, .results = &.{}, .group = .keymap, .doc = "bind a key chord in mode `m` to command `c`" },
-    .{ .name = "wl_set_mode", .params = &.{ .u32, .u32 }, .results = &.{}, .group = .keymap, .doc = "switch the active buffer's mode" },
+    .{ .name = "wl_set_mode", .params = &.{ .u32, .u32 }, .results = &.{}, .group = .keymap, .head_gated = true, .doc = "switch the active buffer's mode" },
     .{ .name = "wl_set_fallback", .params = &.{ .u32, .u32, .u32, .u32 }, .results = &.{}, .group = .keymap, .doc = "declare mode `m`'s fallback (parent) mode for unbound keys" },
     .{ .name = "wl_text_input", .params = &.{ .u32, .u32, .u32, .u32, .u32 }, .results = &.{}, .group = .keymap, .doc = "declare mode `m`'s text-input command (and whether it takes the typed char)" },
     .{ .name = "wl_menu_mode", .params = &.{ .u32, .u32 }, .results = &.{}, .group = .keymap, .doc = "declare a mode a which-key-style menu" },
     .{ .name = "wl_locked_mode", .params = &.{ .u32, .u32 }, .results = &.{}, .group = .keymap, .doc = "mark a read-only projection mode pinned (can't leave for a generic editing mode)" },
     .{ .name = "wl_resting_mode", .params = &.{ .u32, .u32 }, .results = &.{}, .group = .keymap, .doc = "declare a mode a buffer can rest in (`baseMode` stops there)" },
-    .{ .name = "wl_exit_to_resting", .params = &.{}, .results = &.{}, .group = .keymap, .doc = "leave a transient mode back to the active buffer's resting mode" },
+    .{ .name = "wl_exit_to_resting", .params = &.{}, .results = &.{}, .group = .keymap, .head_gated = true, .doc = "leave a transient mode back to the active buffer's resting mode" },
     .{ .name = "wl_sticky_menu", .params = &.{ .u32, .u32 }, .results = &.{}, .group = .keymap, .doc = "mark a menu mode sticky (stays open after a leaf key)" },
     .{ .name = "wl_declare_action", .params = &.{ .u32, .u32 }, .results = &.{}, .group = .keymap, .doc = "declare an abstract action + its trampoline command" },
     .{ .name = "wl_provide", .params = &.{ .u32, .u32, .u32, .u32, .u32, .u32, .u32, .u32, .u32, .u32, .i32 }, .results = &.{}, .group = .keymap, .doc = "register a provider for an action, scoped by mode/lang/tool + priority" },
@@ -187,8 +221,8 @@ pub const imports = [_]Entry{
     // ── pick.zig — fuzzy pick build/open/accept ─────────────────────────
     .{ .name = "wl_pick_begin", .params = &.{ .u32, .u32, .u32 }, .results = &.{}, .group = .pick, .doc = "start building a fuzzy pick with `prompt`, tagged `pick_id`" },
     .{ .name = "wl_pick_add", .params = &.{ .u32, .u32, .u32, .u32 }, .results = &.{}, .group = .pick, .doc = "add a candidate (text, detail) to the pick being built" },
-    .{ .name = "wl_pick_end", .params = &.{}, .results = &.{}, .group = .pick, .doc = "open the pick built so far" },
-    .{ .name = "wl_open_file_pick", .params = &.{ .u32, .u32, .u32, .u32, .u32 }, .results = &.{}, .group = .pick, .doc = "open a file-tree pick rooted at `root`" },
+    .{ .name = "wl_pick_end", .params = &.{}, .results = &.{}, .group = .pick, .head_gated = true, .doc = "open the pick built so far" },
+    .{ .name = "wl_open_file_pick", .params = &.{ .u32, .u32, .u32, .u32, .u32 }, .results = &.{}, .group = .pick, .head_gated = true, .doc = "open a file-tree pick rooted at `root`" },
     .{ .name = "wl_pick_choice", .params = &.{ .u32, .u32 }, .results = &.{.i32}, .group = .pick, .doc = "the accepted pick's text, into guest memory" },
     .{ .name = "wl_pick_choice_index", .params = &.{}, .results = &.{.i32}, .group = .pick, .doc = "the accepted candidate's add-order index, or -1 for free-text" },
 

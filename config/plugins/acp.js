@@ -21,6 +21,7 @@ let nextId = 0; // JSON-RPC request id counter
 let pending = null; // the prompt to send once the session exists
 let buf = ""; // partial-line accumulator for the NDJSON stream
 let pendingPerm = null; // an outstanding session/request_permission: {id, optionIds}
+let pendingPermPick = null; // {prompt, opts} for the deferred weft.pick — see onMessage
 let agentName = "agent"; // the CRDT peer this agent's edits attribute to
 
 function rpc(method, params) {
@@ -152,7 +153,13 @@ function onMessage(msg) {
     pendingPerm = { id: msg.id, optionIds: opts.map((o) => o.optionId) };
     const title = (p.toolCall && (p.toolCall.title || p.toolCall.toolCallId)) || "permission";
     setStatus("◌", "waiting");
-    weft.pick("agent · " + title, opts.map((o) => o.name).join("\n"));
+    // weft.pick MUTATES head state (task #19 item 4 — head-gated) and
+    // onMessage runs off weft.onOutput (BACKGROUND — no dispatching head).
+    // Defer through a self-registered command below: a nested weft.run IS a
+    // dispatching entry for its duration (same door the wasm plugin plane
+    // uses for an on_poll-landed async result — see src/guest/lsp.zig).
+    pendingPermPick = { prompt: "agent · " + title, opts: opts.map((o) => o.name).join("\n") };
+    weft.run("acp-open-permission-pick");
     return;
   }
 
@@ -169,6 +176,17 @@ function onMessage(msg) {
     sendPrompt(pending);
   }
 }
+
+// Internal: the deferred half of session/request_permission (see onMessage)
+// — not a user-facing verb, invoked only via weft.run from the background
+// weft.onOutput handler. weft.pick needs a dispatching entry; this command
+// IS one.
+weft.command("acp-open-permission-pick", () => {
+  if (!pendingPermPick) return;
+  const pp = pendingPermPick;
+  pendingPermPick = null;
+  weft.pick(pp.prompt, pp.opts);
+});
 
 // A permission pick was accepted: answer the agent with the chosen option (or
 // cancelled for an out-of-range / dismissed choice).

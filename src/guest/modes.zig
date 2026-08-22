@@ -54,12 +54,24 @@ export fn on_command(id: u32) void {
     if (id < cmds.len) cmds[id].handler();
 }
 
-/// The host calls this when a buffer takes focus (design §3).
+/// The host calls this when a buffer takes focus (design §3). BACKGROUND
+/// (`on_activate` carries no per-call ctx at all — `wasm_host/commands.zig`'s
+/// classification doc), so this can no longer `weft.echo` the detected
+/// language directly: `wl_echo` is head-gated (task #19 item 4) and there is
+/// no dispatching head to route through here (unlike `on_fill`/`on_poll`,
+/// `on_activate` has no natural "the async thing that just landed" moment to
+/// defer through a self-dispatched command either — it fires synchronously
+/// off the SAME buffer-switch that would make the echo redundant a frame
+/// later anyway). Downgraded to `weft.log` — still observable (the process
+/// log), no longer a false promise of a user-visible echo this entry can't
+/// honor. A per-head-aware activation echo is real future work, not solved
+/// here (see `wasm_host/commands.zig`'s doc for the same "no ctx flows in"
+/// limitation `on_menu` documents).
 export fn on_activate() void {
     const path = weft.activatePath();
     const l = langFor(path) orelse return;
     const msg = std.fmt.bufPrint(&echo_buf, "mode: {s}", .{l.name}) catch return;
-    weft.echo(msg);
+    weft.log(.info, msg);
 }
 
 /// Run the current file with its language's interpreter, output into *run*.

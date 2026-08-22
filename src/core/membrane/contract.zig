@@ -62,6 +62,7 @@ pub const Entry = struct {
     group: Group,
     handler: HostFn,
     perm: ?Perm = null,
+    head_gated: bool = false,
     doc: []const u8,
 };
 
@@ -252,7 +253,7 @@ fn zip() [contract_data.imports.len]Entry {
         var found = false;
         for (handlers) |h| {
             if (std.mem.eql(u8, h.name, d.name)) {
-                out[i] = .{ .name = d.name, .params = d.params, .results = d.results, .group = d.group, .handler = h.handler, .perm = d.perm, .doc = d.doc };
+                out[i] = .{ .name = d.name, .params = d.params, .results = d.results, .group = d.group, .handler = h.handler, .perm = d.perm, .head_gated = d.head_gated, .doc = d.doc };
                 found = true;
                 break;
             }
@@ -413,6 +414,55 @@ test "membrane contract: table .perm metadata agrees with the handlers' actual r
             }
         }
         if (!found) std.debug.print("membrane contract: '{s}' claims .perm = {t} but isn't on the curated perm_gated list (see this test's doc comment)\n", .{ entry.name, want });
+        try t.expect(found);
+    }
+}
+
+/// The dispatch-gating cross-check (task #19 item 4), same shape as
+/// `perm_gated` above: a CURATED list of every `wl_*` import whose handler
+/// actually gates on `requireDispatch(p, caller, ..)` (grep `requireDispatch(`
+/// across wasm_host/*.zig to reproduce/update this list — same "no way to
+/// walk a function body at comptime" rationale as `perm_gated`'s doc).
+const head_gated_list = [_][]const u8{
+    "wl_set_mode", // keymap.zig hSetMode
+    "wl_exit_to_resting", // keymap.zig hExitToResting
+    "wl_echo", // dispatch.zig hEcho
+    "wl_pick_end", // pick.zig hPickEnd
+    "wl_open_file_pick", // pick.zig hOpenFilePick
+};
+
+test "membrane contract: table .head_gated metadata agrees with the handlers' actual requireDispatch gates" {
+    // LIMITATION (stated so this test isn't over-trusted): this proves
+    // gated ⇔ curated-list agreement — it CANNOT prove completeness (that
+    // every head-state WRITER in wasm_host/* is gated). An ungated handler
+    // that reaches head.echo/mode/pick on some branch is invisible here;
+    // finding those takes the review-style sweep of `.head` touches (which
+    // is how the wl_provide error-path echo was caught and gated).
+    // Direction 1: every curated (actually-gated) import must be marked
+    // `.head_gated = true` in the table.
+    for (head_gated_list) |name| {
+        var found = false;
+        for (imports) |entry| {
+            if (!std.mem.eql(u8, entry.name, name)) continue;
+            found = true;
+            if (!entry.head_gated) {
+                std.debug.print("membrane contract: '{s}' is requireDispatch-gated but contract_data.zig has .head_gated = false\n", .{name});
+                return error.TestExpectedEqual;
+            }
+        }
+        try t.expect(found); // the curated name must be a real import
+    }
+    // Direction 2: every table entry that CLAIMS `.head_gated = true` must be
+    // on the curated (verified-gated) list — a table edit that flips the bit
+    // without wiring the handler's `requireDispatch` call would otherwise
+    // silently over-claim the guarantee.
+    for (imports) |entry| {
+        if (!entry.head_gated) continue;
+        var found = false;
+        for (head_gated_list) |name| {
+            if (std.mem.eql(u8, name, entry.name)) found = true;
+        }
+        if (!found) std.debug.print("membrane contract: '{s}' claims .head_gated = true but isn't on the curated head_gated_list (see this test's doc comment)\n", .{entry.name});
         try t.expect(found);
     }
 }

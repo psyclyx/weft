@@ -287,6 +287,9 @@ const cmds = [_]Cmd{
     .{ .name = "dired-input-resume", .handler = inputResume },
     .{ .name = "dired-confirm-yes", .handler = confirmYes },
     .{ .name = "dired-confirm-no", .handler = confirmNo },
+    // Internal: the deferred half of `noteDrops` (task #19 item 4) — not a
+    // user-facing verb, invoked only via `weft.run` from `on_fill`.
+    .{ .name = "dired-note-drops-deliver", .handler = diredNoteDropsDeliver },
 };
 
 export fn describe() void {
@@ -389,7 +392,18 @@ fn activeName() []const u8 {
     return "";
 }
 
+/// `noteDrops` is only ever reached from `on_fill` (BACKGROUND — its sole
+/// call site, at the tail of that export above). `weft.echo` is head-gated
+/// (task #19 item 4), so the actual echoes defer through a self-registered
+/// command — a nested `weft.run` from a background entry IS a dispatching
+/// entry for its duration (same door `src/guest/git.zig`'s `noteDrops` and
+/// `src/guest/lsp.zig`'s async responses use).
 fn noteDrops() void {
+    if (dropped_entries or truncated_raw or truncated_cmd or expanded.overflow or marked.overflow)
+        weft.run("dired-note-drops-deliver");
+}
+
+fn diredNoteDropsDeliver() void {
     if (dropped_entries) weft.echo("dired: >1024 entries — some omitted");
     if (truncated_raw) weft.echo("dired: ls output > 256 KiB — truncated");
     if (truncated_cmd) weft.echo("dired: too many expanded dirs — gather truncated");

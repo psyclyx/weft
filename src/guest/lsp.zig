@@ -85,6 +85,10 @@ const cmds = [_]Cmd{
     .{ .name = "signature-help", .handler = cmdSignature },
     .{ .name = "inlay-hints", .handler = cmdInlay },
     .{ .name = "code-actions", .handler = cmdCodeActions },
+    // Internal: the deferred half of `on_poll`'s message dispatch (task #19
+    // item 4) — not a user-facing verb, invoked only via `weft.run` from
+    // `on_poll` itself. See `on_poll`'s doc.
+    .{ .name = "lsp-deliver-internal", .handler = lspDeliverInternal },
 };
 
 export fn describe() void {
@@ -125,9 +129,26 @@ export fn on_command(id: u32) void {
     if (id < cmds.len) cmds[id].handler();
 }
 
-/// Drain every complete server message and dispatch it.
+/// Drain every complete server message and dispatch it. BACKGROUND (task #19
+/// item 4): `dispatch` (below) presents results through `weft.echo`/
+/// `weft.pick` — both head-gated, and `on_poll` has no dispatching head to
+/// route them through directly. Defer each message through a self-
+/// registered command instead: a nested `weft.run` from a background entry
+/// IS a dispatching entry for its duration (`wasm_host/plugin.zig`'s
+/// `requireDispatch` doc — the sanctioned door), so `lspDeliverInternal`
+/// runs with a real one. `pending_msg` is valid synchronously across the
+/// nested call (nothing re-parses `conn`'s buffer until the NEXT loop
+/// iteration's `conn.next()`).
 export fn on_poll() void {
-    while (conn.next()) |msg| dispatch(msg);
+    while (conn.next()) |msg| {
+        pending_msg = msg;
+        weft.run("lsp-deliver-internal");
+    }
+}
+
+var pending_msg: rpc.Value = undefined;
+fn lspDeliverInternal() void {
+    dispatch(pending_msg);
 }
 
 /// A buffer took focus: if it's a zig file, ensure the server is up and the doc

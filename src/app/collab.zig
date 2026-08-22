@@ -242,6 +242,26 @@ pub const Collab = struct {
         }
     }
 
+    /// Whether THIS `Collab` is bound to a live connection right now — an
+    /// outbound `Conn`/session, or an inbound `Hub` accepting peers. Both
+    /// keep state (docs, presence, wire framing) keyed to the specific
+    /// `buffers`/`caps` this `Collab` was built against (`initBase`) — task
+    /// #19 item 2's swap-refusal case: re-binding the ATTACHED system out
+    /// from under either would silently strand the connection against
+    /// buffers no longer the one being edited/rendered.
+    pub fn isLive(self: *const Collab) bool {
+        return self.collab_session != null or self.hub != null;
+    }
+
+    /// `app/session.zig`'s `Session.SwapCmdData.isBlocked` trampoline —
+    /// `ctx` is a `*const Collab`. A free function (not a closure) so
+    /// `main.zig` can wire it directly without `Session` importing
+    /// `collab.zig` (see `SwapCmdData`'s doc for why that matters).
+    pub fn isLiveOpaque(ctx: ?*anyopaque) bool {
+        const self: *const Collab = @ptrCast(@alignCast(ctx.?));
+        return self.isLive();
+    }
+
     /// Free in the EXACT reverse order `main()`'s connection defers used to run:
     /// detach the in-flight connect handles; drop the share intents; free the
     /// pending peer-fs listings; clear the process-global bridge then free it;

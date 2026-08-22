@@ -7,6 +7,7 @@ const wasm = @import("../wasm.zig");
 
 const shared = @import("plugin.zig");
 const WasmPlugin = shared.WasmPlugin;
+const requireDispatch = shared.requireDispatch;
 
 pub fn hBindKey(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32, results: []i32) void {
     _ = results;
@@ -64,18 +65,31 @@ pub fn hProvide(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32, resu
         .priority = args[10],
         .owner = p.name,
     }) catch |e| if (e == error.RaceRejectsProvider) {
-        // Surface the mistake to the plugin author via the echo line (the
-        // user-facing channel), not a global stderr warn — see action.zig.
+        // Surface the mistake to the plugin author via the echo line when the
+        // call is on a dispatching path or the load handshake (the common,
+        // legitimate cases) — from a BACKGROUND entry, head.echo is exactly
+        // the gated interaction state (review of #19 item 4: this error path
+        // was the one ungated head.echo writer), so fall back to the log.
         const msg = std.fmt.allocPrint(gpa, "provide: '{s}' is a race action — register a capability provider instead", .{action}) catch return;
         defer gpa.free(msg);
-        p.activeCtx().head.echo.clearRetainingCapacity();
-        p.activeCtx().head.echo.appendSlice(gpa, msg) catch {};
+        if (p.in_dispatch or p.loading) {
+            p.activeCtx().head.echo.clearRetainingCapacity();
+            p.activeCtx().head.echo.appendSlice(gpa, msg) catch {};
+        } else {
+            std.log.warn("plugin '{s}': {s}", .{ p.name, msg });
+        }
     };
 }
 
 pub fn hSetMode(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32, results: []i32) void {
     _ = results;
     const p: *WasmPlugin = @ptrCast(@alignCast(data.?));
+    // HEAD-GATED (task #19 item 4): SETS the current head's mode (the
+    // mode-leak class's founding bug — "background forces a mode"). Compare
+    // `wl_menu_mode`/`wl_locked_mode`/`wl_resting_mode`/`wl_sticky_menu`
+    // below, which DECLARE a mode's system-scoped TABLE properties and stay
+    // ungated.
+    if (!requireDispatch(p, caller, "wl_set_mode")) return;
     const mode = caller.readMemory(p.gpa, @intCast(args[0]), @intCast(args[1])) catch return;
     defer p.gpa.free(mode);
     // A locked projection mode (magit/git-view) refuses to switch to a different
@@ -101,10 +115,12 @@ pub fn hSetMode(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32, resu
 /// editing mode. Replaces a guest's hardcoded `setMode("normal")` on Escape, so a
 /// projection's keys never sleep after an in-place edit.
 pub fn hExitToResting(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32, results: []i32) void {
-    _ = caller;
     _ = args;
     _ = results;
     const p: *WasmPlugin = @ptrCast(@alignCast(data.?));
+    // HEAD-GATED (task #19 item 4): same door as `wl_set_mode`, one hop
+    // removed — it resolves the target mode, then calls `head.setMode`.
+    if (!requireDispatch(p, caller, "wl_exit_to_resting")) return;
     const buf = p.activeCtx().buffers.active();
     // The buffer's declared resting mode (its tool mode, or the config base it
     // was stamped with on open) — no core-baked mode name; the config owns what

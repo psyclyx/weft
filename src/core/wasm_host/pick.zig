@@ -12,6 +12,7 @@ const contract = @import("../membrane/contract.zig");
 
 const shared = @import("plugin.zig");
 const WasmPlugin = shared.WasmPlugin;
+const requireDispatch = shared.requireDispatch;
 const WasmBoundPick = @import("../wasm_abi.zig").WasmBoundPick;
 
 // trampoline that dispatches to the guest's on_pick_accept.
@@ -48,10 +49,14 @@ pub fn hPickAdd(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32, resu
 }
 
 pub fn hPickEnd(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32, results: []i32) void {
-    _ = caller;
     _ = args;
     _ = results;
     const p: *WasmPlugin = @ptrCast(@alignCast(data.?));
+    // HEAD-GATED (task #19 item 4): opening a pick puts the dispatching
+    // head's `Head.pick` into session — `wl_pick_begin`/`wl_pick_add` only
+    // touch this plugin's OWN scratch (pick_prompt/pick_items), never
+    // `Head`, so they stay ungated; the actual head mutation happens here.
+    if (!requireDispatch(p, caller, "wl_pick_end")) return;
     const gpa = p.gpa;
     const bp = gpa.create(WasmBoundPick) catch return;
     bp.* = .{ .plugin = p, .pick_id = p.pick_id };
@@ -73,6 +78,9 @@ pub fn hPickEnd(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32, resu
 pub fn hOpenFilePick(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32, results: []i32) void {
     _ = results;
     const p: *WasmPlugin = @ptrCast(@alignCast(data.?));
+    // HEAD-GATED (task #19 item 4): same door as `wl_pick_end`, just with a
+    // built-in file-tree source instead of guest-supplied items.
+    if (!requireDispatch(p, caller, "wl_open_file_pick")) return;
     const gpa = p.gpa;
     const prompt = caller.readMemory(gpa, @intCast(args[0]), @intCast(args[1])) catch return;
     defer gpa.free(prompt);
@@ -119,8 +127,13 @@ fn wpPickAccept(ctx: *command.Context, data: ?*anyopaque, choice: []const u8) an
     const bp: *WasmBoundPick = @ptrCast(@alignCast(data.?));
     const p = bp.plugin;
     const saved_ctx = p.active_ctx;
+    const saved_dispatch = p.in_dispatch;
     p.active_ctx = ctx;
-    defer p.active_ctx = saved_ctx;
+    p.in_dispatch = true; // DISPATCHING (task #19 item 4) — see wpCmdTrampoline's doc
+    defer {
+        p.active_ctx = saved_ctx;
+        p.in_dispatch = saved_dispatch;
+    }
     p.cur_choice = choice;
     defer p.cur_choice = &.{};
     try contract.callRequiredExport("on_pick_accept", &p.instance, .{@as(i32, @intCast(bp.pick_id))});

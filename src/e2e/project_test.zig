@@ -83,10 +83,14 @@ test "e2e/project: opening the saved file recognizes its language" {
     defer ed.deinit();
     try loadWorkspace(&ed);
 
+    // `modes`' on_activate detects the language but no longer echoes it
+    // (task #19 item 4 — `on_activate` is BACKGROUND, `wl_echo` is head-
+    // gated; see src/guest/modes.zig's doc). Assert the structural
+    // guarantee instead: neither open lands language text on the echo line.
     ed.runStr("open", zig_path);
-    try t.expect(std.mem.indexOf(u8, ed.echoText(), "zig") != null);
+    try t.expect(std.mem.indexOf(u8, ed.echoText(), "zig") == null);
     ed.runStr("open", js_path); // switching buffers re-fires on_activate
-    try t.expect(std.mem.indexOf(u8, ed.echoText(), "javascript") != null);
+    try t.expect(std.mem.indexOf(u8, ed.echoText(), "javascript") == null);
 }
 
 test "e2e/project: magit push/pull/fetch transients are sticky menus" {

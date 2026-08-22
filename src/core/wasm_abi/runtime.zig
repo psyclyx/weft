@@ -122,13 +122,25 @@ pub fn loadPlugin(engine: *wasm.Engine, ctx: *command.Context, name: []const u8,
 
     // describe(): declarations only (optional export — a guest with a static
     // manifest may skip it). Then [approval], then init(): registrations,
-    // cross-checked against the declaration.
+    // cross-checked against the declaration. `p.loading` (task #19 item 4,
+    // `WasmPlugin.loading`'s doc) brackets BOTH — a head-gated import (e.g.
+    // `weft.setMode` establishing the guest's starting mode, the pattern
+    // every modal-editor guest's `init()` ends with) is legitimate here:
+    // `active_ctx` is still the fresh load-time `ctx`, so there is no
+    // second head to hijack yet. NOT a `defer`: every early-return path
+    // below is through `failLoad`, which `deinit`s `p` — writing a field on
+    // it AFTER that (what a `defer p.loading = false` would do, since
+    // defers run after the deferred-from expression is evaluated) is a
+    // use-after-free. Set back to `false` explicitly, only on the path
+    // where `p` survives to be returned.
+    p.loading = true;
     p.phase = .describing;
     contract.callOptionalExport("describe", &p.instance, .{}) catch |e| {
         if (e != error.MissingExport) return failLoad(p, e);
     };
     p.phase = .active;
     contract.callRequiredExport("init", &p.instance, .{}) catch |e| return failLoad(p, e);
+    p.loading = false;
     if (p.load_error) |e| return failLoad(p, e);
     return p;
 }

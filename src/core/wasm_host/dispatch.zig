@@ -7,10 +7,13 @@ const wasm = @import("../wasm.zig");
 
 const shared = @import("plugin.zig");
 const WasmPlugin = shared.WasmPlugin;
+const requireDispatch = shared.requireDispatch;
 
 pub fn hEcho(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32, results: []i32) void {
     _ = results;
     const p: *WasmPlugin = @ptrCast(@alignCast(data.?));
+    // HEAD-GATED (task #19 item 4): writes the dispatching head's echo line.
+    if (!requireDispatch(p, caller, "wl_echo")) return;
     const msg = caller.readMemory(p.gpa, @intCast(args[0]), @intCast(args[1])) catch return;
     defer p.gpa.free(msg);
     p.activeCtx().head.echo.clearRetainingCapacity();

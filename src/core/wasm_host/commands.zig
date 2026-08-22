@@ -9,8 +9,14 @@
 //! (`WasmPlugin.active_ctx`, doc there) instead of `p.ctx` directly; each
 //! DISPATCHING host→guest entry sets it to the call's real ctx for the
 //! call's duration (save/restore — reentrancy-safe, since a guest command can
-//! `wl_run` another one). The classification, enumerating every host→guest
-//! entry point in this plugin plane:
+//! `wl_run` another one). The SAME entries also set `p.in_dispatch = true`
+//! for the call's duration (task #19 item 4, `WasmPlugin.in_dispatch`'s doc):
+//! that classification is enumerated ONCE below and drives BOTH fields — a
+//! DISPATCHING entry sets both `active_ctx` and `in_dispatch`; a BACKGROUND
+//! one sets neither, leaving `activeCtx()` at the load-time default and
+//! `wasm_host/plugin.zig`'s `requireDispatch` trapping any head-gated import
+//! it reaches for. The classification, enumerating every host→guest entry
+//! point in this plugin plane:
 //!
 //!   DISPATCHING (routes through the calling ctx — `activeCtx()` differs from
 //!   the load-time `ctx` for the call's duration):
@@ -183,8 +189,19 @@ fn wpCmdTrampoline(ctx: *command.Context, data: ?*anyopaque, args: []const comma
     const wc: *WasmCmd = @ptrCast(@alignCast(data.?));
     const p = wc.plugin;
     const saved_ctx = p.active_ctx;
+    const saved_dispatch = p.in_dispatch;
     p.active_ctx = ctx;
-    defer p.active_ctx = saved_ctx;
+    // DISPATCHING (task #19 item 4, alongside `active_ctx` above): this entry
+    // is `on_command` — head-gated imports (`wl_set_mode`, `wl_echo`, …) may
+    // fire for the call's duration, regardless of whether a real keystroke or
+    // a nested `wl_run` (even one issued from a BACKGROUND entry) got us
+    // here — see `wasm_host/plugin.zig`'s `requireDispatch` doc for why that
+    // nested-from-background case is a sanctioned door, not a bug.
+    p.in_dispatch = true;
+    defer {
+        p.active_ctx = saved_ctx;
+        p.in_dispatch = saved_dispatch;
+    }
     p.cur_args = args;
     p.result = .nil;
     p.stampsClear(); // fresh per-dispatch stamp table

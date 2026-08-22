@@ -53,6 +53,15 @@ const Editor = h.Editor;
 const SecondHead = h.SecondHead;
 const window_layout = h.window_layout;
 
+/// Run `cmd` (no args) and return its integer result, or 0 if it didn't set
+/// one — a thin wrapper `Editor`/`SecondHead` don't expose (they only run
+/// for side effects), used below to observe `head-poll-count` without
+/// depending on a head mutation `on_poll` itself no longer makes.
+fn runInt(ed: *Editor, cmd: []const u8) i64 {
+    const v = command.run(ed.commands, ed.ctx, cmd, &.{}) catch return 0;
+    return if (v == .integer) v.integer else 0;
+}
+
 fn noop(ctx: *command.Context, data: ?*anyopaque, args: []const command.Value) anyerror!command.Value {
     _ = ctx;
     _ = data;
@@ -428,7 +437,7 @@ test "two heads: a wl_run-nested guest command keeps the dispatching head throug
     try t.expectEqual(@as(usize, 0), ed.head.echo.items.len);
 }
 
-test "two heads: on_poll (background) targets the system default ctx, not the last-dispatching head" {
+test "two heads: on_poll (background) can no longer force a mode or echo onto ANY head (task #19 item 4)" {
     const gpa = t.allocator;
     var ed: Editor = undefined;
     try Editor.init(gpa, &ed);
@@ -440,31 +449,40 @@ test "two heads: on_poll (background) targets the system default ctx, not the la
     defer b.deinit(gpa);
 
     // B is "the last-dispatching head": it dispatches head-poke (so its
-    // mode/echo are visibly different from A's default — proving on_poll's
-    // landing spot below isn't accidentally A by coincidence) and
-    // head-spawn (perm proc; spawns a real subprocess so a REAL readiness-
-    // driven on_poll fires off the frame-loop tick, not a synthetic direct
-    // export call).
+    // mode/echo are visibly different from A's default) and head-spawn
+    // (perm proc; spawns a real subprocess so a REAL readiness-driven
+    // on_poll fires off the frame-loop tick, not a synthetic direct export
+    // call).
     b.run("head-poke");
     b.run("head-spawn");
     try t.expectEqualStrings("poked", b.mode());
     try t.expectEqualStrings("default", ed.mode()); // A untouched by B's dispatches
 
-    // Drive the async loop for real until on_poll fires (readiness-driven —
-    // `notifyPollIfReady` calls it only once the spawned stream has bytes
-    // pending). Bounded, generous — a plain `echo hi` subprocess is fast.
+    // Drive the async loop for real until on_poll has fired at least once —
+    // observed via `head-poll-count` (a command result, not a head mutation:
+    // on_poll's OWN head-touching writes are exactly what this test proves
+    // no longer take effect, so the loop can't key off them the way the
+    // pre-item-4 version of this test did). Bounded, generous — a plain
+    // `echo hi` subprocess is fast.
     var round: usize = 0;
-    while (round < 200 and !std.mem.eql(u8, "polled", ed.mode())) : (round += 1) {
+    while (round < 200) : (round += 1) {
         ed.settle(1);
+        if (runInt(&ed, "head-poll-count") != 0) break;
     }
+    try t.expect(runInt(&ed, "head-poll-count") >= 1); // on_poll really did fire
 
-    // on_poll (BACKGROUND, wasm_host/commands.zig's classification) landed
-    // on A — the load-time/system-default ctx — even though B was the last
-    // head to dispatch anything.
-    try t.expectEqualStrings("polled", ed.mode());
-    try t.expectEqualStrings("polled", ed.echoText());
-    // B, meanwhile, is untouched by the background entry — still exactly
-    // where its own last dispatch (head-poke) left it.
+    // BEFORE task #19 item 4: on_poll's `weft.setMode("polled")`/
+    // `weft.echo("polled")` silently landed on A (the load-time/system-
+    // default ctx) even though B was the last head to dispatch anything —
+    // `wasm_host/commands.zig`'s classification doc NAMED this gap without
+    // closing it (`ctx.zig`'s "BACKGROUND CODE CANNOT" doc block). NOW:
+    // `wl_set_mode` traps inside `on_poll` (`requireDispatch`,
+    // `wasm_host/plugin.zig`) — the guest call unwinds right there, so the
+    // `weft.echo` right after it never runs either. Neither head moves.
+    try t.expectEqualStrings("default", ed.mode()); // A: never touched, was "polled" before this fix
+    try t.expectEqual(@as(usize, 0), ed.head.echo.items.len);
+    // B, meanwhile, is untouched by the background entry either way — still
+    // exactly where its own last dispatch (head-poke) left it.
     try t.expectEqualStrings("poked", b.mode());
     try t.expectEqualStrings("poked", b.echoText());
 }

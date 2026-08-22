@@ -70,6 +70,25 @@ const Bridge = struct {
     /// resident plugin's BACKGROUND entry (`tick`'s `weft_on_output`) leaves it
     /// alone too, so both correctly fall back to `ctx` via `activeCtx()`.
     active_ctx: ?*command.Context = null,
+    /// Mirrors `WasmPlugin.in_dispatch` (task #19 item 4 — same escape hatch,
+    /// closed the same way, one layer down under the JS engine): true only
+    /// for the duration of a LIVE `JsPlugin` DISPATCHING call
+    /// (`weft_on_command`/`weft_on_pick`), set/restored by the same sites as
+    /// `active_ctx` above. CONFIG-EVAL mode never sets it (every `weft.*`
+    /// call there stages onto `manifest` instead of touching `ctx.head`, so
+    /// gating would be a no-op anyway); a resident plugin's BACKGROUND entry
+    /// (`tick`'s `weft_on_output`) leaves it false, so `requireDispatch`
+    /// (below) traps a head-touching `weft.*` call reached from there.
+    in_dispatch: bool = false,
+    /// Mirrors `WasmPlugin.loading` (task #19 item 4, corrected mid-build —
+    /// see that field's doc for why: a modal guest's `init()` legitimately
+    /// sets its STARTING mode, discovered by the wasm plane's test suite,
+    /// not by inspection). True for the duration of `JsPlugin.load`'s
+    /// `weft_plugin_init` call (the JS body's top-level run, registering
+    /// commands — the closest analogue to `describe()`+`init()`). Same
+    /// safety argument: `active_ctx` is still the fresh load-time `ctx`
+    /// during this call, so nothing else could be mid-interaction yet.
+    loading: bool = false,
 
     /// Optional-with-fallback where WasmPlugin's twin is non-optional
     /// (init'd to the load ctx): the null here MEANS something — config-eval
@@ -77,6 +96,24 @@ const Bridge = struct {
     /// dispatch" marker. Same concept, two representations, both deliberate.
     fn activeCtx(self: *Bridge) *command.Context {
         return self.active_ctx orelse self.ctx;
+    }
+
+    /// task #19 item 4 (mirrors `wasm_host/plugin.zig`'s `requireDispatch`
+    /// exactly, one layer down under the JS engine): every LIVE `weft.*`
+    /// handler that MUTATES head state (`weft.echo`, `weft.pick` — see
+    /// `contract_data.zig`'s `.head_gated` doc for the exact boundary this
+    /// mirrors) calls this before touching `activeCtx().head`. In dispatch
+    /// (`in_dispatch`, set by `JsPlugin.onCommand`/`jsPickAccept`) or loading
+    /// (`loading`, set by `JsPlugin.load`) → true, the site proceeds.
+    /// Outside both (a resident plugin's BACKGROUND `weft_on_output`, fired
+    /// by `tick`, reaching for the head directly) → traps the call, same
+    /// discipline as the wasm plane's twin. Config-eval mode never reaches
+    /// here — every `weft.*` call there returns early onto `manifest`
+    /// before touching `ctx.head` at all.
+    fn requireDispatch(self: *Bridge, caller: *wasm.Caller, comptime verb: []const u8) bool {
+        if (self.in_dispatch or self.loading) return true;
+        caller.trap("a JS plugin called {s} from a background entry (weft_on_output) — head state requires a dispatching entry (weft_on_command/weft_on_pick) or the load handshake", .{verb});
+        return false;
     }
 };
 
@@ -337,7 +374,14 @@ pub const JsPlugin = struct {
         const at: usize = @intCast(ptr);
         try self.instance.writeGuest(at, src);
         try self.instance.writeGuest(at + src.len, &.{0});
+        // `Bridge.loading` (task #19 item 4): legitimate for the top-level JS
+        // body to touch head state while it runs (see that field's doc) — no
+        // `defer` needed to reset it: every error path below returns before
+        // reaching the plain `false` set, and `self`/`self.bridge` are only
+        // read again on the surviving success path.
+        self.bridge.loading = true;
         const rc = try self.instance.callI32("weft_plugin_init", &.{ ptr, @intCast(src.len) });
+        self.bridge.loading = false;
         if (rc != 0) return error.ConfigException;
         return self;
     }
@@ -346,14 +390,23 @@ pub const JsPlugin = struct {
     /// (mirrors `wasm_host/commands.zig`'s `wpCmdTrampoline`): `ctx` is the
     /// head `command.run` was actually invoked with — route `bridge.active_ctx`
     /// through it for the call's duration (save/restore, not a bare set — kept
-    /// nesting-safe on the same discipline as the wasm plane even though
-    /// `weft.run` from a resident JS plugin is a no-op today, per `cRun`'s
-    /// LIVE-mode doc; a JS command handler CAN still open a pick, whose accept
-    /// re-enters through `jsPickAccept`, so a bare set would be wrong).
+    /// nesting-safe on the same discipline as the wasm plane; a JS command
+    /// handler CAN still open a pick, whose accept re-enters through
+    /// `jsPickAccept`, so a bare set would be wrong). `bridge.in_dispatch`
+    /// (task #19 item 4) rides along the SAME save/restore, unconditionally
+    /// true for this call's duration — including when a BACKGROUND entry
+    /// (`weft_on_output`) reached here via a nested `weft.run` (now
+    /// dispatching for real, `cRun`'s doc): that promotion is the sanctioned
+    /// door, not a bug — see `Bridge.requireDispatch`'s doc.
     pub fn onCommand(self: *JsPlugin, ctx: *command.Context, id: i32) void {
         const saved_ctx = self.bridge.active_ctx;
+        const saved_dispatch = self.bridge.in_dispatch;
         self.bridge.active_ctx = ctx;
-        defer self.bridge.active_ctx = saved_ctx;
+        self.bridge.in_dispatch = true;
+        defer {
+            self.bridge.active_ctx = saved_ctx;
+            self.bridge.in_dispatch = saved_dispatch;
+        }
         self.instance.callVoid("weft_on_command", &.{id}) catch {};
     }
 
@@ -627,6 +680,10 @@ const JsBoundPick = struct { plugin: *JsPlugin };
 fn cPick(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32, results: []i32) void {
     _ = results;
     const self: *JsPlugin = @ptrCast(@alignCast(data.?));
+    // HEAD-GATED (task #19 item 4): opens a pick on the dispatching head —
+    // only ever bound on a resident JsPlugin's linker (the `.plugin` group),
+    // so always LIVE mode; no manifest branch to short-circuit through.
+    if (!self.bridge.requireDispatch(caller, "weft.pick")) return;
     const gpa = self.gpa;
     const prompt = caller.readMemory(gpa, @intCast(args[0]), @intCast(args[1])) catch return;
     defer gpa.free(prompt);
@@ -658,8 +715,13 @@ fn jsPickAccept(ctx: *command.Context, data: ?*anyopaque, choice: []const u8) an
     const bp: *JsBoundPick = @ptrCast(@alignCast(data.?));
     const idx: i32 = if (ctx.head.pick.accepted_index) |i| @intCast(i) else -1;
     const saved_ctx = bp.plugin.bridge.active_ctx;
+    const saved_dispatch = bp.plugin.bridge.in_dispatch;
     bp.plugin.bridge.active_ctx = ctx;
-    defer bp.plugin.bridge.active_ctx = saved_ctx;
+    bp.plugin.bridge.in_dispatch = true; // DISPATCHING (task #19 item 4) — see onCommand's doc
+    defer {
+        bp.plugin.bridge.active_ctx = saved_ctx;
+        bp.plugin.bridge.in_dispatch = saved_dispatch;
+    }
     bp.plugin.instance.callVoid("weft_on_pick", &.{idx}) catch {};
 }
 
@@ -888,9 +950,20 @@ fn cRun(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32, results: []i
         m.addRun(cmd) catch {};
         return;
     }
-    // LIVE mode: a resident JS plugin calling weft.run has never had a
-    // replay path (only the config-eval tail drained the old pending-runs
-    // list) — preserved as-is here (a no-op), not a new limitation.
+    // LIVE mode (task #19 item 4): NOW dispatches for real — a resident JS
+    // plugin's `weft.run(name)` runs `name` through the SAME shared command
+    // registry `wl_run` does, via `command.run`. Previously a no-op (the
+    // config-eval tail's replay list never applied here); this is what makes
+    // a background `weft_on_output` handler's ONE sanctioned door to head
+    // state work at all (`Bridge.requireDispatch`'s doc): a message landing
+    // async can't call `weft.echo`/`weft.pick` directly, but it CAN defer
+    // through a self-registered command, which re-enters `JsPlugin.onCommand`
+    // (a DISPATCHING entry — `in_dispatch` promotes to true for its nested
+    // duration, mirroring `wpCmdTrampoline`'s reentrancy story exactly). If
+    // `cmd` resolves to a command bound by ANOTHER plugin (wasm or JS), this
+    // runs THAT one too — same "by name, system-wide" semantics `wl_run`
+    // already has, not scoped to the calling plugin.
+    _ = command.run(br.activeCtx().commands, br.activeCtx(), cmd, &.{}) catch {};
 }
 
 /// weft.set(plugin, key, blob) — stage config data for a plugin (read at its
@@ -983,7 +1056,7 @@ fn cProvide(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32, results:
         .command = cmd,
         .priority = priority,
         .owner = "config",
-    }) catch |e| if (e == error.RaceRejectsProvider) echoProvideRefused(br.activeCtx(), action);
+    }) catch |e| if (e == error.RaceRejectsProvider) echoProvideRefused(br, action);
 }
 
 /// weft.statusSegment(text, role, priority) — stage a static `ui/statusline-
@@ -1016,12 +1089,19 @@ fn cStatusSegment(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32, re
 /// mode only — `manifest.zig`'s `applyDecls` has its own copy for the
 /// config-eval path (this module stays free of a dependency the other
 /// direction).
-fn echoProvideRefused(ctx: *command.Context, action: []const u8) void {
+fn echoProvideRefused(br: *Bridge, action: []const u8) void {
+    const ctx = br.activeCtx();
     const gpa = ctx.gpa;
     const msg = std.fmt.allocPrint(gpa, "provide: '{s}' is a race action — register a capability provider instead", .{action}) catch return;
     defer gpa.free(msg);
-    ctx.head.echo.clearRetainingCapacity();
-    ctx.head.echo.appendSlice(gpa, msg) catch {};
+    // head.echo only from a dispatching path or load — a BACKGROUND entry's
+    // error lands in the log instead (the gated class; see #19 item 4).
+    if (br.in_dispatch or br.loading) {
+        ctx.head.echo.clearRetainingCapacity();
+        ctx.head.echo.appendSlice(gpa, msg) catch {};
+    } else {
+        std.log.warn("js plugin: {s}", .{msg});
+    }
 }
 
 fn cEcho(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32, results: []i32) void {
@@ -1037,6 +1117,10 @@ fn cEcho(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32, results: []
         m.addEcho(msg) catch {};
         return;
     }
+    // HEAD-GATED (task #19 item 4): reached only in LIVE mode (config-eval
+    // already returned above) — a resident plugin's BACKGROUND
+    // `weft_on_output` must not write the head's echo line directly.
+    if (!br.requireDispatch(caller, "weft.echo")) return;
     br.activeCtx().head.echo.clearRetainingCapacity();
     br.activeCtx().head.echo.appendSlice(br.activeCtx().gpa, msg) catch {};
 }
@@ -1269,8 +1353,15 @@ test "quickjs: a JS plugin drives a duplex subprocess and reads its output" {
     // The plugin spawns a child (sh builtins, hermetic .empty env), sends it a
     // line, and its onOutput handler reads the echoed reply — the whole
     // agent-transport shape (spawn + stdin + streamed stdout) in JS.
+    // `weft.onOutput` is BACKGROUND (`weft_on_output`, fired by `tick`);
+    // `weft.echo` is head-gated (task #19 item 4), so the reply defers
+    // through a self-registered command — a nested `weft.run` from a
+    // background entry IS a dispatching entry for its duration (same door
+    // `config/plugins/acp.js`'s real onOutput→weft.pick path uses).
     const src =
-        \\weft.onOutput((h) => { weft.echo("got:" + weft.procRead(h)); });
+        \\let reply = "";
+        \\weft.onOutput((h) => { reply = weft.procRead(h); weft.run("deliver"); });
+        \\weft.command("deliver", () => { weft.echo("got:" + reply); });
         \\weft.command("go", () => {
         \\  let h = weft.procSpawn("read x; printf '%s\n' \"$x\"");
         \\  weft.procSend(h, "ping\n");

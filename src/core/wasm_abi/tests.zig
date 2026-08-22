@@ -521,6 +521,81 @@ test "wasm plugin: a denied effect traps rather than returning a fake result" {
     try t.expectError(error.Trap, command.run(&env.commands, &env.ctx, "go", &.{}));
 }
 
+// ── task #19 item 4: closing the `activeCtx()` background escape hatch ─────
+// `src/guest/headtest.zig` (task #14's fixture, see its module doc) exercises
+// the SAME guest through both a DISPATCHING entry (`on_command` via
+// `command.run` — must work) and a BACKGROUND one (`on_poll`, called directly
+// here rather than through the real readiness/proc-stream machinery — the
+// point under test is the gate, not the poll scheduler) — must trap. Mirrors
+// `deny.zig`'s "a guest built to misbehave for the test it backs" pattern,
+// one door over (dispatch-gating, not perm-gating).
+
+test "wasm plugin: a background entry's head-gated import traps (task #19 item 4)" {
+    const gpa = t.allocator;
+    var env: Env = undefined;
+    try Env.init(gpa, &env);
+    defer env.deinit(gpa);
+    try env.head.setMode(gpa, "start"); // an observable baseline the trap must not move
+
+    var engine = try wasm.Engine.init();
+    defer engine.deinit();
+    const plugin = try loadPlugin(&engine, &env.ctx, "headtest", @embedFile("guest_headtest_wasm"), .{});
+    defer plugin.deinit();
+
+    // `on_poll` attempts `weft.setMode("polled")` then `weft.echo("polled")`.
+    // `requireDispatch` (wasm_host/plugin.zig) traps on the FIRST one — the
+    // guest call unwinds right there, so the echo never runs either.
+    try t.expectError(error.Trap, contract.callOptionalExport("on_poll", &plugin.instance, .{}));
+    try t.expectEqualStrings("start", env.head.currentMode()); // untouched
+    try t.expectEqual(@as(usize, 0), env.head.echo.items.len); // untouched
+}
+
+test "wasm plugin: the SAME head-gated import works from a dispatching entry, and a nested wl_run keeps dispatch status (task #19 item 4)" {
+    const gpa = t.allocator;
+    var env: Env = undefined;
+    try Env.init(gpa, &env);
+    defer env.deinit(gpa);
+    try env.head.setMode(gpa, "start");
+
+    var engine = try wasm.Engine.init();
+    defer engine.deinit();
+    const plugin = try loadPlugin(&engine, &env.ctx, "headtest", @embedFile("guest_headtest_wasm"), .{});
+    defer plugin.deinit();
+
+    // `head-poke` (on_command — DISPATCHING): the identical `weft.setMode`/
+    // `weft.echo` pair `on_poll` traps on above now succeeds.
+    _ = try command.run(&env.commands, &env.ctx, "head-poke", &.{});
+    try t.expectEqualStrings("poked", env.head.currentMode());
+    try t.expectEqualStrings("poked", env.head.echo.items);
+
+    // `head-relay` (on_command -> wl_run("head-poke") -> on_command, nested)
+    // THEN a second `weft.echo` write after the nested call returns. Both the
+    // nested call's writes and the post-nesting write must succeed — proving
+    // `in_dispatch` (like `active_ctx`) is saved/restored around the nested
+    // dispatch (still true before and after), not bare-set-and-lost the
+    // instant the inner call returns.
+    _ = try command.run(&env.commands, &env.ctx, "head-relay", &.{});
+    try t.expectEqualStrings("poked", env.head.currentMode()); // set by the nested head-poke
+    try t.expectEqualStrings("after-relay", env.head.echo.items); // written AFTER the nesting, still succeeds
+}
+
+test "wasm plugin: init-phase table-config declarations are unaffected by dispatch-gating (task #19 item 4)" {
+    const gpa = t.allocator;
+    var env: Env = undefined;
+    try Env.init(gpa, &env);
+    defer env.deinit(gpa);
+
+    var engine = try wasm.Engine.init();
+    defer engine.deinit();
+    // headtest's `init()` (a BACKGROUND entry) calls `weft.restingMode("poked")`
+    // — a mode TABLE declaration (Keymap-owned, not Head-owned; see
+    // contract_data.zig's `.head_gated` doc). `loadPlugin` returning at all
+    // (not a load-time trap) is the proof: `wl_resting_mode` stayed ungated.
+    const plugin = try loadPlugin(&engine, &env.ctx, "headtest", @embedFile("guest_headtest_wasm"), .{});
+    defer plugin.deinit();
+    try t.expect(env.keymap.isRestingMode("poked"));
+}
+
 test "wasm plugin: hot-reload — teardown unbinds, re-instantiation is clean" {
     const gpa = t.allocator;
     var env: Env = undefined;
@@ -1519,7 +1594,7 @@ test "wasm plugin: notes capture appends via fs and open reads it back" {
     try t.expectEqualStrings("todo x\ntodo y\n", s);
 }
 
-test "wasm plugin: modes reacts to the activation event by language" {
+test "wasm plugin: modes reacts to the activation event by language, without touching the head (task #19 item 4)" {
     const gpa = t.allocator;
     var env: Env = undefined;
     try Env.init(gpa, &env);
@@ -1530,17 +1605,21 @@ test "wasm plugin: modes reacts to the activation event by language" {
     const plugin = try loadPlugin(&engine, &env.ctx, "modes", @embedFile("guest_modes_wasm"), .{});
     defer plugin.deinit();
 
-    // Fire activation for a python file: on_activate detects the language and
-    // echoes it — the host→guest reactive event (design §3).
+    // Fire activation for a python, then a zig, then an unrecognized-extension
+    // file: on_activate detects the language each time (design §3) — this
+    // test can't observe the detection directly (`on_activate` downgraded its
+    // `weft.echo` to `weft.log` — see src/guest/modes.zig's doc: `on_activate`
+    // is BACKGROUND, `wl_echo` is head-gated, and there is no dispatching head
+    // to route an echo through here), so what it DOES assert is the
+    // structural guarantee this task adds: a BACKGROUND entry never touches
+    // `env.head.echo`, for any of these activations — not a crash, not a
+    // trap-then-silently-recover, just never reached at all.
+    try t.expectEqual(@as(usize, 0), env.head.echo.items.len);
     wasm_host.notifyActivate(plugin, "src/main.py");
-    try t.expectEqualStrings("mode: python", env.head.echo.items);
-
-    // A zig file re-detects; an unknown extension is a silent no-op.
-    env.head.echo.clearRetainingCapacity();
+    try t.expectEqual(@as(usize, 0), env.head.echo.items.len);
     wasm_host.notifyActivate(plugin, "build.zig");
-    try t.expectEqualStrings("mode: zig", env.head.echo.items);
-    env.head.echo.clearRetainingCapacity();
-    wasm_host.notifyActivate(plugin, "LICENSE");
+    try t.expectEqual(@as(usize, 0), env.head.echo.items.len);
+    wasm_host.notifyActivate(plugin, "LICENSE"); // unrecognized extension: still a no-op
     try t.expectEqual(@as(usize, 0), env.head.echo.items.len);
 }
 

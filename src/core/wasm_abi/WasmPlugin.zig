@@ -77,6 +77,51 @@ ctx: *command.Context,
 /// never `ctx` directly — see `wasm_host/commands.zig`'s module doc for the
 /// full dispatching/background classification.
 active_ctx: *command.Context,
+/// Whether the guest call CURRENTLY in flight is a DISPATCHING host→guest
+/// entry (`on_command`/`on_pick_accept`) rather than a BACKGROUND one (task
+/// #19 item 4 — closing the `activeCtx()` escape hatch `ctx.zig`'s
+/// "BACKGROUND CODE CANNOT" doc block names: a background entry could still
+/// reach a head-touching import and mutate the load-time ctx's `Head`
+/// through it — convention, not structure). Set/cleared by the SAME save/
+/// restore sites that manage `active_ctx` (`wpCmdTrampoline`/`wpPickAccept`),
+/// so it shares that field's reentrancy story exactly: a nested `wl_run`
+/// re-enters one of those same trampolines, which sets this true again
+/// (already true, or promoting it from false — see `wasm_host/plugin.zig`'s
+/// `requireDispatch` doc for what that promotion means) and restores
+/// whatever it was on the way out — LIFO, never a bare set. Every head-
+/// gated `wasm_host/*` handler (`contract_data.zig`'s `.head_gated = true`
+/// entries) calls `requireDispatch` first, which reads this field (and
+/// `loading`, below).
+in_dispatch: bool = false,
+/// True for the duration of `describe()`/`init()` — the ONE-TIME load
+/// handshake (`wasm_abi/runtime.zig`'s `loadPlugin`), a THIRD entry class
+/// `requireDispatch` also admits, distinct from both `in_dispatch` and a
+/// plain denied background call (task #19 item 4, corrected mid-build: the
+/// original design assumed `init` never needs a head-gated import — WRONG,
+/// caught by the full test suite, not by inspection. `vim.zig`/`helix.zig`/
+/// `emacs.zig`'s `init()` all end with `weft.setMode("normal")` /
+/// equivalent, establishing the guest's STARTING mode — a real, load-
+/// bearing pattern every modal-editor guest uses, not an oversight to
+/// route around). Why this is safe though it "touches Head": at the moment
+/// `describe()`/`init()` runs, `active_ctx` is STILL `ctx` by construction
+/// (`construct()` just set both to the same pointer, nothing has run yet)
+/// — there is no OTHER head that could be mid-interaction with a plugin
+/// that didn't exist a moment ago, so a head-gated call here can only ever
+/// set the SAME (single, load-time) head's starting state, never hijack a
+/// second one. NUANCE (review of #19 item 4): at STARTUP that head is fresh;
+/// on a RUNTIME `config-reload` that loads a NEW plugin, the load-time head
+/// is the LIVE editing head — a modal plugin's `init` `setMode("normal")`
+/// then stomps the live mode. That is pre-existing reload behavior this
+/// exemption PRESERVES (necessary — trapping it would break every modal
+/// guest's load), not a new hole it opens; a mid-chord stomp is unreachable
+/// (dispatching `config-reload` consumed the chord). The argument stops
+/// holding the instant load finishes — every
+/// LATER background entry (`on_poll`/`on_fill`/`on_activate`/`on_complete`/
+/// `on_menu`) still traps, exactly as `in_dispatch` alone would enforce. Set
+/// true/false by `loadPlugin` bracketing `describe()`+`init()`; never true
+/// again after `loadPlugin` returns (no save/restore needed — load doesn't
+/// nest with itself).
+loading: bool = false,
 name: []u8,
 /// A transient author identity, set only for the duration of a single
 /// `wl_edit_as` call: subsequent edits (and the peer resolver) author as this

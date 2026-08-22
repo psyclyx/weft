@@ -60,6 +60,40 @@ pub fn requirePerm(p: *WasmPlugin, caller: *wasm.Caller, comptime perm: Perm) bo
     return false;
 }
 
+/// The membrane's SECOND deny path (task #19 item 4, alongside `requirePerm`
+/// above): every import that MUTATES per-head interaction state (mode/
+/// pending/pick/echo — `Head.zig`'s module doc; NOT mode/menu/action TABLE
+/// declarations, which are system-scoped, and NOT the buffer/editor-owned
+/// cursor/selection — see `contract_data.zig`'s `.head_gated` doc for the
+/// full boundary) calls this before touching `activeCtx().head`. TWO entry
+/// classes admit it:
+///   - In dispatch (`p.in_dispatch`, set by `wpCmdTrampoline`/
+///     `wpPickAccept` for the DISPATCHING entries `on_command`/
+///     `on_pick_accept`) — the ordinary case, exactly like `requirePerm`.
+///   - Loading (`p.loading`, set by `loadPlugin` around `describe()`+
+///     `init()` — see that field's doc for why setting the STARTING mode
+///     during load can't hijack a second head: there isn't one yet).
+/// Outside BOTH (every other BACKGROUND entry — `on_activate`/`on_poll`/
+/// `on_fill`/`on_complete`/`on_menu`, none of which carry a real dispatching
+/// head, AND none of which are the one-time load handshake) → traps the
+/// guest's call right here (`caller.trap`, same as `requirePerm`) and
+/// returns false, so `if (!requireDispatch(...)) return;` reads as the whole
+/// gate — same shape, same trap-message discipline, same "no site can hand
+/// back a success-shaped value on denial" property `requirePerm`'s doc
+/// states. A background entry that legitimately needs to reach the head
+/// AFTER load (an async LSP response landing off `on_poll` that wants to
+/// echo a result, say) has ONE sanctioned door: dispatch itself back in
+/// through `wl_run` — a real command name, cross-checked at registration
+/// like any other — which re-enters `wpCmdTrampoline` and is a DISPATCHING
+/// entry by definition, promoting `in_dispatch` to true for the nested
+/// call's duration (see that trampoline's doc). There is no OTHER way to
+/// spell "background, but make an exception" — exactly the point.
+pub fn requireDispatch(p: *WasmPlugin, caller: *wasm.Caller, comptime verb: []const u8) bool {
+    if (p.in_dispatch or p.loading) return true;
+    caller.trap("plugin '{s}' called {s} from a background entry — head state requires a dispatching entry (on_command/on_pick_accept, or a nested wl_run) or the load handshake (describe/init)", .{ p.name, verb });
+    return false;
+}
+
 /// The parent process's environment, so a `proc` child inherits PATH (nix
 /// tools like `rg`/`zig` are NOT on /bin/sh's built-in path). Set once at
 /// startup from `main`; empty in tests (the child falls back to sh's default
