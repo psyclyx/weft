@@ -220,11 +220,26 @@ pub fn main(init: std.process.Init) !void {
         .gpa = gpa,
         .engine = &plug.engine,
         .ctx = &session.cmd_ctx,
-        .opts = .{ .kv = &plug.kv, .config = &session.system.config_kv, .loop = &plug.loop, .subbuffers = &plug.subbuffers, .register = &plug.register, .syntax_of = resolveSyntax, .pool = pool, .module_cache_dir = module_cache_dir },
+        // `.grant_table = &session.system.grants` (north-star-plan §6 W4
+        // slice 4 — "this slice makes grants REAL in the desktop"): the
+        // production loader now mints every loaded plugin's perms as
+        // REVOCABLE handle-table rows instead of bare booleans, and
+        // couples with `Ctx.capture`'s already-wired `ctx.grant_table`
+        // (`System.contextFor`) so the capture-time powerbox and a
+        // plugin's own possession checks agree — see `ctx.zig`'s
+        // `Ctx.grants` field doc for the coupling rule this closes.
+        .opts = .{ .kv = &plug.kv, .config = &session.system.config_kv, .loop = &plug.loop, .subbuffers = &plug.subbuffers, .register = &plug.register, .syntax_of = resolveSyntax, .pool = pool, .module_cache_dir = module_cache_dir, .grant_table = &session.system.grants },
         .list = &plug.list,
         .js_list = &plug.js_list,
         .dir = plugin_dir,
     };
+    // The live `revoke`/`grants-show` debug commands (north-star-plan §6 W4
+    // slice 4) — opt-in, per-embedder wiring (see their own docs for why
+    // `builtins.install` doesn't bind them unconditionally): bound onto the
+    // editor system now that its grant table actually holds real,
+    // production-minted rows.
+    try core.System.registerRevokeCommand(gpa, &session.system.commands, session.system);
+    try core.System.registerGrantsShowCommand(gpa, &session.system.commands, session.system);
     // Explicit --plugin flags load first, in order.
     for (args.plugins[0..args.plugin_count]) |name| plugin_host.load(name);
 

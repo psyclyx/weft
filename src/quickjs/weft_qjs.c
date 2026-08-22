@@ -107,6 +107,15 @@ extern void host_provide(const char *action, int action_len,
 __attribute__((import_module("weft"), import_name("qjs_status_segment")))
 extern void host_status_segment(const char *text, int text_len,
                                 const char *role, int role_len, int priority);
+// weft.grant(plugin, capability, opts): stage a GrantDecl onto the manifest
+// (north-star-plan §6 W4 slice 4). `root` is opts.root ("" = unrestricted,
+// Limit.none; non-empty narrows to Limit.fs_root) — the only limit kind a
+// config script can author in v1 (see manifest.zig's ManifestGrantDecl doc
+// for why doc-region limits stay runtime-only).
+__attribute__((import_module("weft"), import_name("qjs_grant")))
+extern void host_grant(const char *plugin, int plugin_len,
+                       const char *capability, int capability_len,
+                       const char *root, int root_len);
 
 // ── JS → host trampolines. Each pulls its string args out of the JS values
 // and forwards to the host import. ──
@@ -328,6 +337,67 @@ static JSValue js_status_segment(JSContext *ctx, JSValueConst this_val,
     return JS_UNDEFINED;
 }
 
+// weft.grant(plugin, capability[, opts]) — stage a GrantDecl onto the
+// manifest (north-star-plan §6 W4 slice 4). `opts` is a plain object;
+// `opts.root`, if a (possibly empty) STRING, narrows the grant to
+// Limit.fs_root ("" is a legitimate string value — still unrestricted, same
+// as omitting `root` entirely). Omitted `opts`, or an `opts` object with no
+// `root` property at all, is the legitimate unrestricted case.
+//
+// FAIL CLOSED on a mistyped narrowing (review send-back, required close):
+// if `opts` IS present and DOES have an own `root` property, but that
+// property's VALUE is not a string (`{root: undefined}`, `{root: 123}`, a
+// typo'd variable that evaluated to `undefined`, …), this is an ERROR, not
+// a silent widen to unrestricted — `{root: someUndefinedVar}` must never
+// quietly grant unlimited access. Distinguishing "no root key" (fine, stays
+// unrestricted) from "a root key whose value is wrong" (reject) needs
+// JS_HasProperty, not just JS_GetPropertyStr — the latter returns
+// JS_UNDEFINED for BOTH cases indistinguishably. Sealed eval fails loudly
+// (the M3 precedent): a JS_ThrowTypeError here surfaces to the config
+// author as a ConfigException at eval time, not a permission silently
+// granted wider than intended.
+static JSValue js_grant(JSContext *ctx, JSValueConst this_val,
+                        int argc, JSValueConst *argv) {
+    if (argc < 2) return JS_ThrowTypeError(ctx, "grant(plugin, capability[, opts])");
+    size_t pl, cl;
+    const char *plugin = JS_ToCStringLen(ctx, &pl, argv[0]);
+    const char *capability = JS_ToCStringLen(ctx, &cl, argv[1]);
+    const char *root = NULL;
+    size_t rl = 0;
+    JSValue jroot = JS_UNDEFINED;
+    if (argc >= 3 && JS_IsObject(argv[2])) {
+        JSAtom root_atom = JS_NewAtom(ctx, "root");
+        int has_root = JS_HasProperty(ctx, argv[2], root_atom);
+        if (has_root < 0) {
+            // JS_HasProperty itself threw (e.g. a Proxy trap) — propagate.
+            JS_FreeAtom(ctx, root_atom);
+            JS_FreeCString(ctx, plugin);
+            JS_FreeCString(ctx, capability);
+            return JS_EXCEPTION;
+        }
+        if (has_root) {
+            jroot = JS_GetProperty(ctx, argv[2], root_atom);
+            JS_FreeAtom(ctx, root_atom);
+            if (!JS_IsString(jroot)) {
+                JSValue exc = JS_ThrowTypeError(ctx, "grant(plugin, capability, opts): opts.root must be a string — a non-string/undefined root would silently grant UNRESTRICTED access instead of the narrowing you meant");
+                JS_FreeValue(ctx, jroot);
+                JS_FreeCString(ctx, plugin);
+                JS_FreeCString(ctx, capability);
+                return exc;
+            }
+            root = JS_ToCStringLen(ctx, &rl, jroot);
+        } else {
+            JS_FreeAtom(ctx, root_atom);
+        }
+    }
+    if (plugin && capability) host_grant(plugin, (int)pl, capability, (int)cl, root ? root : "", (int)rl);
+    JS_FreeCString(ctx, plugin);
+    JS_FreeCString(ctx, capability);
+    if (root) JS_FreeCString(ctx, root);
+    JS_FreeValue(ctx, jroot);
+    return JS_UNDEFINED;
+}
+
 // Install the `weft` global: the config surface config.js calls.
 static void install_weft(JSContext *ctx) {
     JSValue global = JS_GetGlobalObject(ctx);
@@ -343,6 +413,7 @@ static void install_weft(JSContext *ctx) {
     JS_SetPropertyStr(ctx, weft, "action", JS_NewCFunction(ctx, js_action, "action", 1));
     JS_SetPropertyStr(ctx, weft, "provide", JS_NewCFunction(ctx, js_provide, "provide", 3));
     JS_SetPropertyStr(ctx, weft, "statusSegment", JS_NewCFunction(ctx, js_status_segment, "statusSegment", 2));
+    JS_SetPropertyStr(ctx, weft, "grant", JS_NewCFunction(ctx, js_grant, "grant", 2));
     JS_SetPropertyStr(ctx, global, "weft", weft);
     JS_FreeValue(ctx, global);
 }

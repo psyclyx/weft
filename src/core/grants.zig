@@ -41,29 +41,52 @@
 //! (`HandleTable.newScope`/a caller-chosen token like a transient's `depth`,
 //! see `ctx.zig`'s `Ctx.grantScopedToTransient`); `sweepScope` invalidates
 //! every row tagged with a given token — the scope-exit sweep. **Honest v1
-//! scope of this mechanism**: every PRODUCTION grant today is plugin-
-//! lifetime (minted at load, `scope = null`, swept only when the whole
-//! table is torn down with its owning `System`) — `sweepScope` exists and is
-//! tested (`ctx.zig`'s paired-transient test), but nothing production wires
-//! a scoped grant yet. A manifest-authored `GrantDecl` verb (buffer/
-//! transient-scoped grants a config or plugin can actually DECLARE) is a
-//! later slice; this table is the machinery it will populate, not a stand-in
-//! for it.
+//! scope of this mechanism**: every PRODUCTION grant today (both the
+//! describe()-boolean baseline AND a manifest-authored `weft.grant`, see
+//! below) is plugin-lifetime (minted at load/apply, `scope = null`, swept
+//! only when the whole table is torn down with its owning `System`) —
+//! `sweepScope` exists and is tested (`ctx.zig`'s paired-transient test), but
+//! nothing production wires a SCOPED grant yet (a buffer/transient-scoped
+//! `weft.grant` is a later slice; this table is the machinery it will
+//! populate, not a stand-in for it).
 //!
 //! **What's deliberately NOT here**: predicate-gated admission at USE time
 //! (a row's `predicate` is recorded and inspectable, but `hasPerm`'s
 //! possession check does not currently evaluate it — the fs semantic
 //! bodies check ONLY aliveness, per capability, exactly like the boolean
-//! they replace); a config-authored `GrantDecl` verb (`mintGrantHandles`
-//! still only translates the boolean `describe()` handshake — a row's
-//! `limit` stays `.none` for every plugin-lifetime grant it mints; a test
-//! that wants a `.fs_root`-limited row mints one directly via `grant()`).
-//! `Limit.fs_root` ENFORCEMENT itself is no longer deferred: W4 slice 2
-//! wires it — `wasm_host/fs.zig`'s five split semantic bodies now consult
-//! `limitFor` and confine a limited grant's paths (see that file's module
-//! doc for the exact policy, including the named v1 symlink-handling gap
-//! in `fsExists`). Both remaining gaps are named, not silently dropped —
-//! see the north-star-plan §6 W4 report for the full deferred list.
+//! they replace). `Limit.fs_root` ENFORCEMENT itself is no longer deferred:
+//! W4 slice 2 wires it — `wasm_host/fs.zig`'s five split semantic bodies now
+//! consult `limitFor` and confine a limited grant's paths (see that file's
+//! module doc for the exact policy, including the named v1 symlink-handling
+//! gap in `fsExists`).
+//!
+//! **`weft.grant` (W4 slice 4, this table's last deferred consumer landed)**:
+//! `manifest.zig`'s `weft.grant(plugin, capability, opts)` verb stages a
+//! `ManifestGrantDecl` (opts.root → `Limit.fs_root`) that `reconcileGrants`
+//! mints into THIS table (`Manifest.apply` calls it too, with `old = null` —
+//! there is no separate `applyGrants` function), strictly BEFORE the named
+//! plugin's `describe()` handshake runs (`Manifest.apply`/`.reconcile`'s
+//! ordering — grants before `loadPlugins`). **Composition, decided**: a
+//! config-authored row for `(plugin, capability)` REPLACES the
+//! describe()-boolean baseline for that exact pair — `findLive` (below) is
+//! `mintGrantHandles`'s read side, consulted before it would otherwise mint a
+//! second, unrestricted row; config is the user's EXPLICIT word, and tier
+//! logic already says config outranks a plugin's own ask. The honest
+//! consequence, also decided: since the baseline row for a config-narrowed
+//! pair is never minted in the first place, revoking (or reconcile tearing
+//! down) the config grant does NOT "fall back" to an unrestricted baseline —
+//! there is none to fall back to; the plugin loses that capability entirely
+//! until a fresh load re-establishes it (mirrors the existing "plugin
+//! removed from config but unload isn't wired — restart to fully remove it"
+//! honesty `manifest.zig` already states for plugins themselves). The MIRROR
+//! case is equally honest: ADDING a narrowing grant for an ALREADY-RUNNING
+//! plugin mints a real, independently-revocable row, but that plugin's OWN
+//! possessed handle (`mintGrantHandles` only ever runs at ITS load) stays
+//! pointed at its original, broader handle until a fresh load re-runs the
+//! composition check — see `manifest.zig`'s `reconcileGrants` doc for the
+//! full reasoning. An explicit `revoke` command, unlike a reload, takes
+//! effect immediately (it invalidates the row a handle already points at,
+//! rather than depending on `mintGrantHandles` running again).
 //!
 //! **`Limit.doc_region` (W4 slice 3, review B2's repair)**: identity-anchored
 //! (not position-anchored) text-region confinement — see `DocRegion`'s doc
@@ -73,10 +96,15 @@
 //! already funnels through — see `wasm_host/edit.zig`'s module doc), not
 //! here or in `wasm_host/*`: unlike `.fs_root`, this limit needs to resolve
 //! anchors against a LIVE `Document`, which neither this table nor a bare
-//! `CapHandle` has access to. Same honest-v1 population story as `.fs_root`
-//! in slice 1→2: nothing production mints a `.doc_region` grant yet (the
-//! `weft.grant` verb is a later slice) — tests mint one directly via
-//! `grant()`, exercising the same machinery a real verb will populate.
+//! `CapHandle` has access to. **Still honest-v1 population**: `weft.grant`'s
+//! `opts` v1 supports only `root` (→ `.fs_root`) — a config-authored
+//! `.doc_region` limit is deliberately NOT expressible from config (doc
+//! regions are RUNTIME identities, resolved against a live `Document`'s
+//! anchors; a config script evaluates before any buffer exists, so it has no
+//! anchor to author against — see `manifest.zig`'s `ManifestGrantDecl` doc
+//! for the full reasoning). Tests still mint a `.doc_region` row directly via
+//! `grant()`; a future runtime-side verb (a command a loaded plugin/keybind
+//! invokes against a live buffer) is what would populate this in production.
 
 const std = @import("std");
 const Allocator = std.mem.Allocator;
@@ -345,6 +373,26 @@ pub const HandleTable = struct {
         return self.rows.items[h.idx].limit;
     }
 
+    /// The composition rule's read side (north-star-plan §2.4/§6 W4 slice 4:
+    /// "a config-authored `weft.grant` NARROWS/REPLACES the describe()-boolean
+    /// baseline for that exact (principal, capability) pair"). Returns the
+    /// first LIVE row's handle for `(principal, capability)`, or `null` if
+    /// none exists yet. `wasm_host/plugin.zig`'s `mintGrantHandles` calls this
+    /// BEFORE minting a boolean-derived row — a config-authored row (staged by
+    /// `manifest.zig`'s `applyGrants`/`reconcileGrants`, which mints strictly
+    /// BEFORE a plugin's `describe()` handshake runs) is found here and reused
+    /// as-is instead of leaving it orphaned alongside a second, unrestricted
+    /// row for the same pair. O(n) linear scan — same cost class as `revoke`,
+    /// called at most once per DECLARED perm per plugin LOAD, never a hot
+    /// path.
+    pub fn findLive(self: *const HandleTable, principal: []const u8, capability: []const u8) ?CapHandle {
+        for (self.rows.items, 0..) |r, i| {
+            if (r.alive and std.mem.eql(u8, r.principal, principal) and std.mem.eql(u8, r.capability, capability))
+                return .{ .idx = @intCast(i), .gen = r.gen };
+        }
+        return null;
+    }
+
     /// Invalidate every LIVE row for (principal, capability) — the
     /// revocation point. Bumps `gen` in addition to clearing `alive`
     /// (belt-and-suspenders: rows are never reused in v1, so `alive` alone
@@ -530,6 +578,28 @@ test "grants: .doc_region limit round-trips through the table (W4 slice 3)" {
         },
         .none, .fs_root => return error.TestUnexpectedResult,
     }
+}
+
+test "grants: findLive — the composition rule's read side" {
+    const gpa = t.allocator;
+    var table = HandleTable.init(gpa);
+    defer table.deinit();
+
+    // Nothing minted yet: no live row to find.
+    try t.expectEqual(@as(?CapHandle, null), table.findLive("git", "fs_write"));
+
+    const h = try table.grant(.{ .capability = "fs_write", .limit = .{ .fs_root = "repo" } }, "git", null);
+    const found = table.findLive("git", "fs_write").?;
+    try t.expectEqual(h.idx, found.idx);
+    try t.expectEqual(h.gen, found.gen);
+
+    // A different capability, or a different principal, doesn't match.
+    try t.expectEqual(@as(?CapHandle, null), table.findLive("git", "fs_read"));
+    try t.expectEqual(@as(?CapHandle, null), table.findLive("vim", "fs_write"));
+
+    // Revoked rows are DEAD, not found — `findLive` only ever sees possession.
+    _ = table.revoke("git", "fs_write");
+    try t.expectEqual(@as(?CapHandle, null), table.findLive("git", "fs_write"));
 }
 
 test "grants: collectForPrincipal — capture-time resolution, predicate-gated, no cross-principal leak" {

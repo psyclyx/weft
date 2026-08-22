@@ -214,3 +214,101 @@ pub const PluginHost = struct {
         self.load(name);
     }
 };
+
+// ── Tests ───────────────────────────────────────────────────────────
+// north-star-plan §6 W4 slice 4: "this slice makes grants REAL in the
+// desktop — loadPlugin's grant_table must be wired where plugins actually
+// load." These drive `PluginHost.load` itself (main.zig's exact production
+// entry point — a real `System`, `System.initPlugins`'s real `Plugins`
+// bundle, `PluginHost` resolving a name to a real on-disk `.wasm`), not the
+// wasm-membrane suite's lower-level `wasm_abi.loadPlugin` direct calls.
+
+const t = std.testing;
+
+test "config_load: W4 slice 4 GATE — the PRODUCTION loader wires a real, revocable grant table" {
+    const gpa = t.allocator;
+    const pool = try core.task.Pool.init(gpa, .{ .threads = 1 });
+    defer pool.deinit();
+    const sys = try core.System.create(gpa, pool, "editor", "user");
+    defer sys.destroy();
+    try sys.initPlugins(pool);
+    const plug = &sys.plugins.?;
+    var c = sys.contextFor(&sys.default_head);
+
+    const dir = ".zig-cache/tmp/weft-grant-prod-loader-test";
+    const wasm_path = dir ++ "/notes.wasm";
+    try core.file.writeBytesMakingDirs(gpa, dir, wasm_path, @embedFile("guest_notes_wasm"));
+    defer core.file.deleteFile(gpa, wasm_path);
+
+    const tmp_note = "weft-grant-prod-loader-note.md";
+    core.file.deleteFile(gpa, tmp_note);
+    defer core.file.deleteFile(gpa, tmp_note);
+
+    // `.opts.grant_table = &sys.grants` — the EXACT wiring `main.zig` now
+    // does; everything else about `PluginHost` is the real production path.
+    var host: PluginHost = .{
+        .gpa = gpa,
+        .engine = &plug.engine,
+        .ctx = &c,
+        .opts = .{ .grant_table = &sys.grants },
+        .list = &plug.list,
+        .js_list = &plug.js_list,
+        .dir = dir,
+    };
+    host.load("notes");
+    try t.expectEqual(@as(usize, 1), plug.list.items.len);
+    const plugin = plug.list.items[0];
+    try t.expect(plugin.grant_table != null);
+    try t.expect(plugin.perms[core.wasm_host.perm_fs_write]);
+    try t.expect(sys.grants.check(plugin.grant_handles[core.wasm_host.perm_fs_write]));
+
+    // Live and working through the production path.
+    _ = try core.command.run(&sys.commands, &c, "notes-capture", &.{ .{ .string = "before" }, .{ .string = tmp_note } });
+
+    // Revoke through the SAME table the loader wired — no reload, no
+    // re-describe: the running plugin's very next matching call traps.
+    const n = sys.revoke("notes", "fs_write");
+    try t.expectEqual(@as(usize, 1), n);
+    try t.expectError(error.Trap, core.command.run(&sys.commands, &c, "notes-capture", &.{ .{ .string = "after" }, .{ .string = tmp_note } }));
+}
+
+test "config_load: W4 slice 4 — the composition rule holds through the PRODUCTION loader: a config-authored weft.grant narrows describe()'s ask into ONE row" {
+    const gpa = t.allocator;
+    const pool = try core.task.Pool.init(gpa, .{ .threads = 1 });
+    defer pool.deinit();
+    const sys = try core.System.create(gpa, pool, "editor", "user");
+    defer sys.destroy();
+    try sys.initPlugins(pool);
+    const plug = &sys.plugins.?;
+    var c = sys.contextFor(&sys.default_head);
+
+    const dir = ".zig-cache/tmp/weft-grant-prod-composition-test";
+    const wasm_path = dir ++ "/notes.wasm";
+    try core.file.writeBytesMakingDirs(gpa, dir, wasm_path, @embedFile("guest_notes_wasm"));
+    defer core.file.deleteFile(gpa, wasm_path);
+
+    // The config-authored grant, minted the way `manifest.zig`'s
+    // `applyGrants`/`reconcileGrants` would — strictly BEFORE the plugin
+    // loads (the ordering the composition rule depends on).
+    const configured = try sys.grants.grant(.{ .capability = "fs_write", .limit = .{ .fs_root = "notes-vault" } }, "notes", null);
+
+    var host: PluginHost = .{
+        .gpa = gpa,
+        .engine = &plug.engine,
+        .ctx = &c,
+        .opts = .{ .grant_table = &sys.grants },
+        .list = &plug.list,
+        .js_list = &plug.js_list,
+        .dir = dir,
+    };
+    host.load("notes");
+    try t.expectEqual(@as(usize, 1), plug.list.items.len);
+    const plugin = plug.list.items[0];
+
+    // The plugin's own describe() ALSO asked for fs_write (a plain
+    // boolean) — but its POSSESSED handle is the config-authored, LIMITED
+    // row, not a second, unrestricted one alongside it.
+    try t.expect(plugin.perms[core.wasm_host.perm_fs_write]);
+    try t.expectEqual(configured.idx, plugin.grant_handles[core.wasm_host.perm_fs_write].idx);
+    try t.expectEqual(configured.gen, plugin.grant_handles[core.wasm_host.perm_fs_write].gen);
+}

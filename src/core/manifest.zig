@@ -28,9 +28,9 @@
 //!
 //! **Sealed eval** (§2.3, §4 C11): the `weft.*` config-group host surface
 //! (`bind_key`/`run`/`echo`/`log`/`plugin`/`use`/`set`/`menu`/`action`/
-//! `provide`/`statusSegment` — see `membrane/qjs_contract.zig`'s `.config`
-//! group) is the ONLY channel a config script can use to affect a
-//! `Manifest`; none of those eleven imports reads wall-clock, environment,
+//! `provide`/`statusSegment`/`grant` — see `membrane/qjs_contract.zig`'s
+//! `.config` group) is the ONLY channel a config script can use to affect a
+//! `Manifest`; none of those twelve imports reads wall-clock, environment,
 //! or filesystem outside
 //! the config's own directory (`qjs_use`'s file read is confined to
 //! `<config_dir>/<name>.js`) — verified by
@@ -66,6 +66,7 @@ const kv = @import("kv.zig");
 const container_mod = @import("container.zig");
 const Keymap = @import("Keymap.zig");
 const surface = @import("surface.zig");
+const grants_mod = @import("grants.zig");
 
 pub const Tier = container_mod.Tier;
 
@@ -154,6 +155,36 @@ pub const StatusSegmentDecl = struct {
     /// bound (no `ui_bind` wired) should never warn about a role typo it
     /// will never render. `.normal` until bound.
     resolved_role: surface.Role = .normal,
+};
+
+/// `weft.grant(plugin, capability, opts)` (north-star-plan §2.4/§6 W4 slice
+/// 4 — the deferred verb `grants.zig`'s module doc named): stage a
+/// `GrantDecl` onto the manifest, minted into the System's `grants.
+/// HandleTable` by `reconcileGrants` (see that function's doc — `apply`
+/// calls it too, with `old = null`) strictly BEFORE the named plugin's
+/// `describe()` handshake runs.
+///
+/// `root` is `opts.root` flattened to a plain string by the qjs shim before
+/// it ever reaches `manifest.zig` (`quickjs.zig`'s `cGrant`) — `""` (the
+/// default; `opts` itself is optional at the JS call site) means
+/// `Limit.none` (unrestricted within the capability); a non-empty string
+/// narrows to `Limit.fs_root`.
+///
+/// **Why `opts` carries no `region`/`.doc_region` field, on purpose**: a
+/// `Limit.doc_region` is keyed by stemma `EventAnchor`s — identities
+/// resolved against a LIVE `Document`'s CRDT history (`grants.zig`'s
+/// `DocRegion` doc). Config evaluation is sealed and runs before any buffer
+/// exists (`Manifest`'s own module doc: "nothing mutates the editor during
+/// eval") — there is no document, no anchor, nothing to author a region
+/// AGAINST at config-eval time. Doc-region limits are RUNTIME identities;
+/// authoring one is necessarily a runtime act (a command invoked against a
+/// live buffer, not a `weft.*` config call), so it stays out of this verb's
+/// `opts` shape rather than accepting a string that could only ever be
+/// wrong (a byte range that drifts the instant anything upstream edits).
+pub const ManifestGrantDecl = struct {
+    plugin: []u8,
+    capability: []u8,
+    root: []u8,
 };
 
 /// Whether a `weft.plugin(name)` names the bundled catalog or an explicit
@@ -248,6 +279,7 @@ pub const Manifest = struct {
     echoes: std.ArrayList(EchoDecl) = .empty,
     logs: std.ArrayList(LogDecl) = .empty,
     status_segments: std.ArrayList(StatusSegmentDecl) = .empty,
+    grants: std.ArrayList(ManifestGrantDecl) = .empty,
 
     pub fn create(gpa: Allocator, owner: []const u8, tier: Tier) !*Manifest {
         const self = try gpa.create(Manifest);
@@ -297,6 +329,12 @@ pub const Manifest = struct {
             gpa.free(d.role);
         }
         self.status_segments.deinit(gpa);
+        for (self.grants.items) |d| {
+            gpa.free(d.plugin);
+            gpa.free(d.capability);
+            gpa.free(d.root);
+        }
+        self.grants.deinit(gpa);
         gpa.destroy(self);
     }
 
@@ -340,6 +378,13 @@ pub const Manifest = struct {
             .text = try self.gpa.dupe(u8, text),
             .role = try self.gpa.dupe(u8, role),
             .priority = priority,
+        });
+    }
+    pub fn addGrant(self: *Manifest, plugin: []const u8, capability: []const u8, root: []const u8) !void {
+        try self.grants.append(self.gpa, .{
+            .plugin = try self.gpa.dupe(u8, plugin),
+            .capability = try self.gpa.dupe(u8, capability),
+            .root = try self.gpa.dupe(u8, root),
         });
     }
     /// Attach a fully-evaluated sub-manifest (a `weft.use(name)` import).
@@ -404,6 +449,12 @@ pub const Manifest = struct {
             hStr(h, d.role);
             h.update(std.mem.asBytes(&d.priority));
         }
+        hLen(h, self.grants.items.len);
+        for (self.grants.items) |d| {
+            hStr(h, d.plugin);
+            hStr(h, d.capability);
+            hStr(h, d.root);
+        }
         hLen(h, self.imports.items.len);
         for (self.imports.items) |imp| imp.hashInto(h);
     }
@@ -423,12 +474,27 @@ pub const Manifest = struct {
 
     /// Apply this manifest FRESH — every declaration is applied as if for
     /// the first time (the initial config load). For a RELOAD against a
-    /// previously-applied manifest, use `reconcile` instead.
+    /// previously-applied manifest, use `reconcile` instead. Grants still
+    /// mint correctly here (`reconcileGrants(gpa, null, self, actx)`, below)
+    /// — but this does NOT log the approval-diff PRESENTATION
+    /// (`grantDiffSummary`); that is `reconcile`'s doc, not this function's.
+    /// Harmless in practice: every PRODUCTION caller (`System.applyManifest`,
+    /// `config_load.ConfigSession.reload`) always calls `reconcile`, passing
+    /// `old = null` for the first load — `apply` itself is a test/embedder
+    /// convenience for callers that don't want reconcile's diffing at all.
     pub fn apply(self: *const Manifest, gpa: Allocator, actx: *ApplyCtx) !void {
         var known: std.StringHashMapUnmanaged(void) = .empty;
         defer known.deinit(gpa);
         try self.populateKnownPlugins(gpa, &known);
         try self.applyDecls(gpa, actx, &known);
+        // Grants mint BEFORE plugins load (`reconcileGrants(gpa, null, ...)`
+        // degenerates to "mint every declared grant, revoke nothing" — the
+        // fresh-load case) — see `reconcileGrants`'s doc for why this
+        // ordering is what makes the composition rule (a config-authored
+        // grant narrows/replaces a plugin's own describe() ask) work at all:
+        // `wasm_host/plugin.zig`'s `mintGrantHandles` must find this row
+        // ALREADY live when a plugin's `describe()` handshake runs.
+        try reconcileGrants(gpa, null, self, actx);
         try self.loadPlugins(actx);
         try self.runCommands(actx);
     }
@@ -547,7 +613,12 @@ pub const Manifest = struct {
     /// re-instantiated; a `weft.run` already executed is not re-run); a
     /// plugin present in `old` but absent from `new` is logged (unload isn't
     /// wired — restart to fully remove it, an honest limitation, not silent
-    /// drift).
+    /// drift). `weft.grant` decls join a THIRD family (`reconcileGrants`):
+    /// add/remove-DIFFED, unlike plugins/runs (add-only) but ALSO unlike
+    /// binds/provides (blind teardown+reapply) — see that function's doc for
+    /// why a grant needs its own middle ground. Every call also logs the
+    /// approval-diff PRESENTATION (`grantDiffSummary`) before applying
+    /// anything.
     pub fn reconcile(gpa: Allocator, old: ?*const Manifest, new: *const Manifest, actx: *ApplyCtx) !void {
         if (old) |o| {
             if (o.hash() == new.hash()) {
@@ -558,10 +629,27 @@ pub const Manifest = struct {
             try o.teardownOwned(gpa, actx);
         }
 
+        // The approval-diff PRESENTATION (§2.4/§6 W4's residual: "the
+        // approval surface shows the manifest DIFF, not raw tuples") — every
+        // load logs it, including the first (`old == null`: everything
+        // reads as added). The hash check above already returned early on a
+        // true no-op reload, so every path reaching here has SOMETHING to
+        // show.
+        if (grantDiffSummary(gpa, old, new)) |summary| {
+            defer gpa.free(summary);
+            std.log.info("{s}", .{summary});
+        } else |e| std.log.warn("config: grant diff summary failed: {t}", .{e});
+
         var known: std.StringHashMapUnmanaged(void) = .empty;
         defer known.deinit(gpa);
         try new.populateKnownPlugins(gpa, &known);
         try new.applyDecls(gpa, actx, &known);
+
+        // Grants mint/revoke BEFORE plugin loading (`loadPluginsDiffed`
+        // below): a config-authored row must already be LIVE when a newly-
+        // loading plugin's `describe()` handshake runs, for the composition
+        // rule (`wasm_host/plugin.zig`'s `mintGrantHandles`) to find it.
+        try reconcileGrants(gpa, old, new, actx);
 
         var old_plugins: std.StringHashMapUnmanaged(void) = .empty;
         defer old_plugins.deinit(gpa);
@@ -615,6 +703,258 @@ pub const Manifest = struct {
             if (old_runs.contains(d.command)) continue; // already ran on a prior load
             _ = command.run(actx.ctx.commands, actx.ctx, d.command, &.{}) catch {};
         }
+    }
+
+    // ── Grants (north-star-plan §2.4/§6 W4 slice 4: `weft.grant` — the
+    // deferred verb `grants.zig`'s module doc named) ───────────────────────
+
+    fn collectGrants(self: *const Manifest, gpa: Allocator, out: *std.ArrayList(ManifestGrantDecl)) !void {
+        for (self.imports.items) |imp| try imp.collectGrants(gpa, out);
+        for (self.grants.items) |d| try out.append(gpa, d);
+    }
+
+    fn containsGrant(list: []const ManifestGrantDecl, d: ManifestGrantDecl) bool {
+        for (list) |x| {
+            if (std.mem.eql(u8, x.plugin, d.plugin) and std.mem.eql(u8, x.capability, d.capability) and std.mem.eql(u8, x.root, d.root))
+                return true;
+        }
+        return false;
+    }
+
+    /// Grants: an ADD/REMOVE-diffed pass, joining the same family as
+    /// plugins/runs (`loadPluginsDiffed`/`runCommandsDiffed`) — its OWN
+    /// pass, deliberately not folded into `applyDecls`/`teardownOwned`'s
+    /// per-owner "unbind everything owned, then reapply everything" pattern.
+    /// That pattern is safe for binds/provides/values (nothing outside the
+    /// manifest holds a standing reference into them), but a `weft.grant`
+    /// decl mints a table row a loaded plugin may already POSSESS as a
+    /// `CapHandle` (`WasmPlugin.grant_handles`) — `HandleTable.grant` always
+    /// mints a FRESH row, never updates one in place, so blindly
+    /// revoke-then-remint on every reconcile (which runs whenever the
+    /// manifest's hash differs, for ANY reason — not necessarily a grant
+    /// change) would silently orphan that plugin's already-held handle even
+    /// when ITS grant never changed. So: only a decl truly ABSENT from `new`
+    /// (by full plugin+capability+root identity — a changed `root` is
+    /// "old removed, new added", exactly right, since the LIMIT changed) is
+    /// revoked; only a decl truly ABSENT from `old` is minted; an UNCHANGED
+    /// decl (present, byte-identical, in both) is left completely alone, so
+    /// whatever already holds its handle keeps holding a LIVE one.
+    ///
+    /// **The composition-rule round trip (north-star-plan §2.4, the honest
+    /// answer)**: when a `weft.grant` decl is REMOVED, `revoke` invalidates
+    /// every live row for that (principal, capability) — normally exactly
+    /// ONE row, since `wasm_host/plugin.zig`'s `mintGrantHandles` never
+    /// separately mints a describe()-boolean row when a config-authored one
+    /// already exists (see that function's doc). There is therefore no
+    /// "baseline" row left to fall back to: the plugin loses that capability
+    /// entirely until a fresh load re-establishes it — the same honesty
+    /// `manifest.zig` already states for a removed `weft.plugin` (unload
+    /// isn't wired; restart to fully remove it).
+    ///
+    /// **The mirror case, equally honest — ADDING a narrowing grant for an
+    /// ALREADY-RUNNING plugin (review nit 3)**: this pass DOES mint a fresh
+    /// row for a `weft.grant` decl newly added on reload, even naming a
+    /// plugin that's already loaded — but `loadPluginsDiffed` (the plugin-
+    /// loading pass right after this one) skips a plugin already present
+    /// (`manifest.zig`'s own "add-only, unload isn't wired" limitation), so
+    /// `wasm_host/plugin.zig`'s `mintGrantHandles`/composition check — the
+    /// ONLY place a plugin's OWN `grant_handles[i]` gets (re)pointed at a
+    /// row — never runs again for it. The freshly-minted, narrower row
+    /// exists in the table, live and correct for `grants-show`/future
+    /// principals, but the ALREADY-RUNNING plugin keeps possessing its
+    /// original, BROADER describe()-boolean handle (minted at ITS load,
+    /// before this grant existed) until a fresh load re-runs
+    /// `mintGrantHandles` and finds the new row via `findLive`. Not a
+    /// silent security hole — the narrower row is real and independently
+    /// revocable/inspectable — but a config author who ADDS a narrowing
+    /// grant expecting it to immediately confine an already-running plugin
+    /// will be surprised: reload/restart is what makes it take hold, same
+    /// as removing a `weft.plugin` line doesn't unload it. (An EXPLICIT
+    /// `revoke <plugin> <capability>` command, by contrast, invalidates the
+    /// plugin's held handle immediately — that path doesn't go through
+    /// reload at all.)
+    ///
+    /// `old == null` (the fresh-load case — `apply`'s caller) degenerates to
+    /// "mint everything declared, revoke nothing".
+    fn reconcileGrants(gpa: Allocator, old: ?*const Manifest, new: *const Manifest, actx: *ApplyCtx) !void {
+        var new_grants: std.ArrayList(ManifestGrantDecl) = .empty;
+        defer new_grants.deinit(gpa);
+        try new.collectGrants(gpa, &new_grants);
+
+        var old_grants: std.ArrayList(ManifestGrantDecl) = .empty;
+        defer old_grants.deinit(gpa);
+        if (old) |o| try o.collectGrants(gpa, &old_grants);
+
+        for (old_grants.items) |od| {
+            if (containsGrant(new_grants.items, od)) continue; // unchanged — leave its row alone
+            if (actx.ctx.grant_table) |table| {
+                const n = table.revoke(od.plugin, od.capability);
+                std.log.info("config: weft.grant('{s}', '{s}') removed — {d} row(s) revoked", .{ od.plugin, od.capability, n });
+            }
+        }
+        for (new_grants.items) |nd| {
+            if (containsGrant(old_grants.items, nd)) continue; // unchanged — already minted, already possessed
+            const table = actx.ctx.grant_table orelse {
+                std.log.warn("config: weft.grant('{s}', '{s}') declared but no grant table is wired for this apply; dropped", .{ nd.plugin, nd.capability });
+                continue;
+            };
+            const limit: grants_mod.Limit = if (nd.root.len > 0) .{ .fs_root = nd.root } else .none;
+            _ = table.grant(.{ .capability = nd.capability, .limit = limit }, nd.plugin, null) catch |e|
+                std.log.warn("config: weft.grant('{s}', '{s}') failed to mint ({t})", .{ nd.plugin, nd.capability, e });
+        }
+    }
+
+    // ── The approval-diff PRESENTATION (§2.4/§6 W4's residual: "the
+    // approval surface shows the manifest DIFF, not raw tuples") ──────────
+
+    fn containsStr(list: []const []const u8, s: []const u8) bool {
+        for (list) |x| if (std.mem.eql(u8, x, s)) return true;
+        return false;
+    }
+
+    /// One grant's display token: `capability`, or `capability@root=X` when
+    /// limited. Caller-owned.
+    fn grantToken(gpa: Allocator, d: ManifestGrantDecl) ![]u8 {
+        if (d.root.len == 0) return gpa.dupe(u8, d.capability);
+        return std.fmt.allocPrint(gpa, "{s}@root={s}", .{ d.capability, d.root });
+    }
+
+    /// Every grant token declared FOR `plugin` in `list`, comma-joined, in
+    /// decl order. Caller-owned.
+    fn grantTokensFor(gpa: Allocator, list: []const ManifestGrantDecl, plugin: []const u8) ![]u8 {
+        var out: std.ArrayList(u8) = .empty;
+        defer out.deinit(gpa);
+        var first = true;
+        for (list) |d| {
+            if (!std.mem.eql(u8, d.plugin, plugin)) continue;
+            if (!first) try out.append(gpa, ',');
+            first = false;
+            const tok = try grantToken(gpa, d);
+            defer gpa.free(tok);
+            try out.appendSlice(gpa, tok);
+        }
+        return out.toOwnedSlice(gpa);
+    }
+
+    /// `plugin`'s grant tokens present in `to` but absent from `from` (by
+    /// `containsGrant`'s full-tuple identity) — the set-difference
+    /// `grantDiffSummary`'s "~name[+a,-b]" shape needs in BOTH directions
+    /// (swap `from`/`to`, and the sign, for the removed half). Each token is
+    /// PREFIXED with `sign` ('+' or '-'). Caller-owned.
+    fn grantChangedFor(gpa: Allocator, plugin: []const u8, from: []const ManifestGrantDecl, to: []const ManifestGrantDecl, sign: u8) ![]u8 {
+        var out: std.ArrayList(u8) = .empty;
+        defer out.deinit(gpa);
+        var first = true;
+        for (to) |d| {
+            if (!std.mem.eql(u8, d.plugin, plugin)) continue;
+            if (containsGrant(from, d)) continue;
+            if (!first) try out.append(gpa, ',');
+            first = false;
+            try out.append(gpa, sign);
+            const tok = try grantToken(gpa, d);
+            defer gpa.free(tok);
+            try out.appendSlice(gpa, tok);
+        }
+        return out.toOwnedSlice(gpa);
+    }
+
+    fn appendDiffEntry(gpa: Allocator, out: *std.ArrayList(u8), sign: u8, name: []const u8, toks: []const u8) !void {
+        try out.append(gpa, ' ');
+        try out.append(gpa, sign);
+        try out.appendSlice(gpa, name);
+        if (toks.len > 0) {
+            try out.append(gpa, '[');
+            try out.appendSlice(gpa, toks);
+            try out.append(gpa, ']');
+        }
+    }
+
+    /// The diff PRESENTATION itself (v1 — INSPECTION, never a gate; §6 W4:
+    /// "a blocking approve/deny prompt is explicitly NOT v1 — the diff
+    /// PRESENTATION is the gate"): one summary line in the
+    /// `+git[proc,fs_write@root=repo] -notes[fs_write] ~vim[+doc.edit]` shape
+    /// — a `+name[...]` entry per plugin newly present in `new` (bracket
+    /// lists ITS `weft.grant` decls in `new`, omitted if it declared none), a
+    /// `-name[...]` entry per plugin present in `old` but absent from `new`
+    /// (bracket lists what it held), and a `~name[+cap,-cap2]` entry for a
+    /// plugin present in BOTH whose `weft.grant` set changed. `old == null`
+    /// (the first load) reads every plugin as added. `(no change)` when
+    /// nothing in either dimension differs.
+    ///
+    /// **The catalog-trust-root framing (§5 "Trust root — DECIDED")**: a
+    /// bare catalog plugin name's OWN `describe()`-declared perms are the
+    /// bundled catalog's IMPLICIT, curated grant bundle — deliberately NOT
+    /// enumerable here. This diff is computed PRE-load (`reconcile` calls it
+    /// before `applyDecls`/plugin loading run at all) — it's what a user
+    /// would approve BEFORE trusting the load, never a post-hoc report of
+    /// what a plugin's `describe()` already asked for (which hasn't run
+    /// yet). Only EXPLICIT `weft.grant` decls are data this function CAN
+    /// see, so only they appear in the brackets; a bare `+name` with no
+    /// bracket is exactly "this plugin loads under the catalog's own,
+    /// curated trust — nothing further was explicitly declared for it".
+    /// Caller-owned.
+    pub fn grantDiffSummary(gpa: Allocator, old: ?*const Manifest, new: *const Manifest) ![]u8 {
+        var new_plugins: std.ArrayList([]const u8) = .empty;
+        defer new_plugins.deinit(gpa);
+        try new.collectPluginNames(gpa, &new_plugins);
+        var new_grants: std.ArrayList(ManifestGrantDecl) = .empty;
+        defer new_grants.deinit(gpa);
+        try new.collectGrants(gpa, &new_grants);
+
+        var old_plugins: std.ArrayList([]const u8) = .empty;
+        defer old_plugins.deinit(gpa);
+        var old_grants: std.ArrayList(ManifestGrantDecl) = .empty;
+        defer old_grants.deinit(gpa);
+        if (old) |o| {
+            try o.collectPluginNames(gpa, &old_plugins);
+            try o.collectGrants(gpa, &old_grants);
+        }
+
+        var out: std.ArrayList(u8) = .empty;
+        defer out.deinit(gpa);
+        try out.appendSlice(gpa, "config grants:");
+        var any = false;
+        var seen: std.StringHashMapUnmanaged(void) = .empty;
+        defer seen.deinit(gpa);
+
+        for (new_plugins.items) |name| {
+            if ((try seen.getOrPut(gpa, name)).found_existing) continue;
+            if (!containsStr(old_plugins.items, name)) {
+                const toks = try grantTokensFor(gpa, new_grants.items, name);
+                defer gpa.free(toks);
+                try appendDiffEntry(gpa, &out, '+', name, toks);
+                any = true;
+            } else {
+                const added = try grantChangedFor(gpa, name, old_grants.items, new_grants.items, '+');
+                defer gpa.free(added);
+                const removed = try grantChangedFor(gpa, name, new_grants.items, old_grants.items, '-');
+                defer gpa.free(removed);
+                if (added.len > 0 or removed.len > 0) {
+                    try out.append(gpa, ' ');
+                    try out.append(gpa, '~');
+                    try out.appendSlice(gpa, name);
+                    try out.append(gpa, '[');
+                    try out.appendSlice(gpa, added);
+                    if (added.len > 0 and removed.len > 0) try out.append(gpa, ',');
+                    try out.appendSlice(gpa, removed);
+                    try out.append(gpa, ']');
+                    any = true;
+                }
+            }
+        }
+        for (old_plugins.items) |name| {
+            if ((try seen.getOrPut(gpa, name)).found_existing) continue;
+            const toks = try grantTokensFor(gpa, old_grants.items, name);
+            defer gpa.free(toks);
+            try appendDiffEntry(gpa, &out, '-', name, toks);
+            any = true;
+        }
+
+        if (!any) {
+            out.clearRetainingCapacity();
+            try out.appendSlice(gpa, "config grants: (no change)");
+        }
+        return out.toOwnedSlice(gpa);
     }
 
     /// Tear down every bind/provide/value THIS manifest (self + imports)
@@ -779,6 +1119,89 @@ test "manifest: R3 — length-framed hash distinguishes a bare-concatenation col
     try b.addBind("ab", "", "c");
 
     try t.expect(a.hash() != b.hash());
+}
+
+test "manifest: staging — weft.grant lands as a ManifestGrantDecl, hash-sensitive to its root" {
+    const gpa = t.allocator;
+    const a = try Manifest.create(gpa, "config", .config);
+    defer a.destroy();
+    try a.addGrant("git", "fs_write", "repo");
+
+    try t.expectEqual(@as(usize, 1), a.grants.items.len);
+    try t.expectEqualStrings("git", a.grants.items[0].plugin);
+    try t.expectEqualStrings("fs_write", a.grants.items[0].capability);
+    try t.expectEqualStrings("repo", a.grants.items[0].root);
+
+    const b = try Manifest.create(gpa, "config", .config);
+    defer b.destroy();
+    try b.addGrant("git", "fs_write", "repo");
+    try t.expectEqual(a.hash(), b.hash());
+
+    const c = try Manifest.create(gpa, "config", .config);
+    defer c.destroy();
+    try c.addGrant("git", "fs_write", "other-repo");
+    try t.expect(a.hash() != c.hash());
+
+    const d = try Manifest.create(gpa, "config", .config);
+    defer d.destroy();
+    try d.addGrant("git", "fs_write", ""); // unrestricted — a different decl than a limited one
+    try t.expect(a.hash() != d.hash());
+}
+
+test "manifest: grantDiffSummary — the first load reads every plugin as added, grants bracketed" {
+    const gpa = t.allocator;
+    const new = try Manifest.create(gpa, "config", .config);
+    defer new.destroy();
+    try new.addPlugin("git");
+    try new.addGrant("git", "proc", "");
+    try new.addGrant("git", "fs_write", "repo");
+    try new.addPlugin("vim");
+
+    const summary = try Manifest.grantDiffSummary(gpa, null, new);
+    defer gpa.free(summary);
+    try t.expectEqualStrings("config grants: +git[proc,fs_write@root=repo] +vim", summary);
+}
+
+test "manifest: grantDiffSummary — add/remove/change across a reload; an unchanged plugin stays silent" {
+    const gpa = t.allocator;
+    const old = try Manifest.create(gpa, "config", .config);
+    defer old.destroy();
+    try old.addPlugin("git");
+    try old.addGrant("git", "fs_write", "repo");
+    try old.addPlugin("notes");
+    try old.addGrant("notes", "fs_write", "");
+    try old.addPlugin("vim");
+
+    const new = try Manifest.create(gpa, "config", .config);
+    defer new.destroy();
+    try new.addPlugin("git");
+    try new.addGrant("git", "fs_write", "other-repo"); // root CHANGED
+    try new.addPlugin("vim"); // unchanged, no grants either side
+    try new.addPlugin("helix"); // newly added
+
+    const summary = try Manifest.grantDiffSummary(gpa, old, new);
+    defer gpa.free(summary);
+    try t.expect(std.mem.indexOf(u8, summary, "~git[+fs_write@root=other-repo,-fs_write@root=repo]") != null);
+    try t.expect(std.mem.indexOf(u8, summary, "+helix") != null);
+    try t.expect(std.mem.indexOf(u8, summary, "-notes[fs_write]") != null);
+    try t.expect(std.mem.indexOf(u8, summary, "vim") == null); // silent — nothing changed for it
+}
+
+test "manifest: grantDiffSummary — a true no-op reload reports '(no change)'" {
+    const gpa = t.allocator;
+    const old = try Manifest.create(gpa, "config", .config);
+    defer old.destroy();
+    try old.addPlugin("vim");
+    try old.addGrant("vim", "fs_read", "");
+
+    const new = try Manifest.create(gpa, "config", .config);
+    defer new.destroy();
+    try new.addPlugin("vim");
+    try new.addGrant("vim", "fs_read", "");
+
+    const summary = try Manifest.grantDiffSummary(gpa, old, new);
+    defer gpa.free(summary);
+    try t.expectEqualStrings("config grants: (no change)", summary);
 }
 
 test {

@@ -51,18 +51,35 @@ pub const Perm = enum(u32) {
 /// `wasm_abi/runtime.zig`'s `loadPlugin` right after `describe()` finishes
 /// (`perms` is final at that point) — a plugin loaded WITHOUT a table wired
 /// (`opts.grant_table == null`, every headless test today) never calls this;
-/// see `hasPerm`'s doc for what that means for it. A `grant` failure (OOM)
-/// degrades to `CapHandle.none` for that one perm — logged, not fatal: the
-/// plugin loses that capability rather than the whole load failing on an
-/// allocator hiccup unrelated to the wasm module itself.
+/// see `hasPerm`'s doc for what that means for it.
+///
+/// **The composition rule (W4 slice 4, north-star-plan §2.4)**: BEFORE
+/// minting a fresh boolean-derived row for a declared perm, this checks
+/// `table.findLive` for an ALREADY-live row on the exact same (principal,
+/// capability) pair — one a config-authored `weft.grant`
+/// (`manifest.zig`'s `reconcileGrants`) mints strictly before
+/// this call runs (`Manifest.apply`/`.reconcile` order: grants, then
+/// `loadPlugins`). If found, that row's handle is REUSED as-is — a
+/// config-authored grant NARROWS/REPLACES the describe() baseline for that
+/// pair, never sits alongside it as a second, unrestricted row a confused
+/// deputy could reach for instead. If not found (the ordinary case — no
+/// `weft.grant` named this plugin+capability), a fresh unrestricted
+/// (`.none`-limit) row is minted exactly as before this slice. A `grant`
+/// failure (OOM) degrades to `CapHandle.none` for that one perm — logged,
+/// not fatal: the plugin loses that capability rather than the whole load
+/// failing on an allocator hiccup unrelated to the wasm module itself.
 pub fn mintGrantHandles(table: *grants_mod.HandleTable, principal: []const u8, perms: [WasmPlugin.perm_count]bool, out: *[WasmPlugin.perm_count]grants_mod.CapHandle) void {
     inline for (0..WasmPlugin.perm_count) |i| {
         if (perms[i]) {
             const p: Perm = @enumFromInt(i);
-            out[i] = table.grant(.{ .capability = p.label() }, principal, null) catch blk: {
-                std.log.warn("wasm_host: plugin '{s}' — minting a grant-table row for '{s}' failed (OOM); that capability is UNAVAILABLE", .{ principal, p.label() });
-                break :blk grants_mod.CapHandle.none;
-            };
+            if (table.findLive(principal, p.label())) |existing| {
+                out[i] = existing;
+            } else {
+                out[i] = table.grant(.{ .capability = p.label() }, principal, null) catch blk: {
+                    std.log.warn("wasm_host: plugin '{s}' — minting a grant-table row for '{s}' failed (OOM); that capability is UNAVAILABLE", .{ principal, p.label() });
+                    break :blk grants_mod.CapHandle.none;
+                };
+            }
         }
     }
 }
@@ -250,4 +267,55 @@ pub fn resolvePeerWp(ctx: *anyopaque, doc: *Document) Document.AddPeerError!Docu
     // call), else as the plugin's own peer. The peer name IS the CRDT identity,
     // so a distinct name → a distinct sub-peer → per-agent selective undo.
     return doc.peerNamed(p.gpa, p.author_override orelse p.name);
+}
+
+// ── Tests ───────────────────────────────────────────────────────────
+
+const t = std.testing;
+
+test "mintGrantHandles: the composition rule — a pre-existing config-authored row is REUSED, never duplicated" {
+    const gpa = t.allocator;
+    var table = grants_mod.HandleTable.init(gpa);
+    defer table.deinit();
+
+    // A config-authored `weft.grant("git", "fs_write", {root: "repo"})` has
+    // already minted its row (`manifest.zig`'s `reconcileGrants`, which the
+    // real pipeline always runs BEFORE `loadPlugin`/`mintGrantHandles` — see
+    // this function's doc).
+    const configured = try table.grant(.{ .capability = "fs_write", .limit = .{ .fs_root = "repo" } }, "git", null);
+
+    // `describe()` ALSO asked for fs_write (the ordinary boolean handshake) —
+    // and, say, fs_read, which config never mentioned.
+    var perms: [WasmPlugin.perm_count]bool = @splat(false);
+    perms[perm_fs_write] = true;
+    perms[perm_fs_read] = true;
+    var handles: [WasmPlugin.perm_count]grants_mod.CapHandle = @splat(grants_mod.CapHandle.none);
+    mintGrantHandles(&table, "git", perms, &handles);
+
+    // fs_write: the plugin's possessed handle IS the config-authored row —
+    // same idx/gen, not a second, unrestricted duplicate.
+    try t.expectEqual(configured.idx, handles[perm_fs_write].idx);
+    try t.expectEqual(configured.gen, handles[perm_fs_write].gen);
+    switch (table.limitFor(handles[perm_fs_write])) {
+        .fs_root => |root| try t.expectEqualStrings("repo", root),
+        .none, .doc_region => return error.TestUnexpectedResult,
+    }
+    // Exactly ONE live row exists for (git, fs_write) — the boolean baseline
+    // was never separately minted.
+    var live_fs_write: usize = 0;
+    for (table.rows.items) |r| {
+        if (r.alive and std.mem.eql(u8, r.principal, "git") and std.mem.eql(u8, r.capability, "fs_write")) live_fs_write += 1;
+    }
+    try t.expectEqual(@as(usize, 1), live_fs_write);
+
+    // fs_read: config never granted it — the ordinary unrestricted
+    // boolean-derived row is minted, exactly as before this slice.
+    try t.expect(table.check(handles[perm_fs_read]));
+    try t.expectEqual(grants_mod.Limit.none, table.limitFor(handles[perm_fs_read]));
+
+    // Revoking the config grant leaves fs_write with nothing to fall back
+    // to (the composition rule's honest consequence — see grants.zig's
+    // module doc): no separate baseline row exists to "return".
+    _ = table.revoke("git", "fs_write");
+    try t.expect(!table.check(handles[perm_fs_write]));
 }

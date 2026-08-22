@@ -183,6 +183,7 @@ const config_handlers = .{
     .{ .name = "qjs_action", .handler = cAction },
     .{ .name = "qjs_provide", .handler = cProvide },
     .{ .name = "qjs_status_segment", .handler = cStatusSegment },
+    .{ .name = "qjs_grant", .handler = cGrant },
 };
 
 /// The `.plugin`-group handlers a RESIDENT JS plugin's linker binds (real —
@@ -1083,6 +1084,32 @@ fn cStatusSegment(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32, re
     std.log.warn("weft.statusSegment: config-plane only (not available to a resident plugin yet)", .{});
 }
 
+/// weft.grant(plugin, capability, opts) — stage a `GrantDecl` onto the
+/// manifest (north-star-plan §6 W4 slice 4, the deferred verb `grants.zig`'s
+/// module doc named). `root` is already the flattened `opts.root` string by
+/// the time it reaches here (the C shim, `js_grant`, pulls it out of the JS
+/// object — this handler stays as string-only as every other `.config`
+/// import). CONFIG-EVAL mode only — same precedent as `cStatusSegment`
+/// above: authority delegation is a declarative, sealed-eval-time act (§2.3),
+/// not something a resident plugin's live code should be able to conjure for
+/// ANOTHER principal at any point in its lifetime.
+fn cGrant(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32, results: []i32) void {
+    _ = results;
+    const br: *Bridge = @ptrCast(@alignCast(data.?));
+    const gpa = br.activeCtx().gpa;
+    const plugin = readStr(br, caller, args[0], args[1]) orelse return;
+    defer gpa.free(plugin);
+    const capability = readStr(br, caller, args[2], args[3]) orelse return;
+    defer gpa.free(capability);
+    const root = readStr(br, caller, args[4], args[5]) orelse return;
+    defer gpa.free(root);
+    if (br.manifest) |m| {
+        m.addGrant(plugin, capability, root) catch {};
+        return;
+    }
+    std.log.warn("weft.grant: config-plane only (not available to a resident plugin yet)", .{});
+}
+
 /// Surface a rejected `provide` to the plugin author through the echo line —
 /// the normal user-facing channel — so the mistake (a pick provider on a race
 /// action) is reported where they'll see it, not on a global stderr. LIVE
@@ -1778,6 +1805,125 @@ test "quickjs: R2 — Date.now()/Math.random() are SEALED (fixed, deterministic 
     try t.expectEqualStrings("date:0", firstFramedRecord(m2.values.items[2].value).?);
 }
 
+test "quickjs: weft.grant stages a GrantDecl onto the manifest, and the hash is sensitive to it (§6 W4 slice 4)" {
+    const gpa = t.allocator;
+    var engine = try wasm.Engine.init();
+    defer engine.deinit();
+
+    const cfg =
+        \\weft.grant("git", "fs_write", { root: "repo" });
+        \\weft.grant("git", "proc");
+    ;
+
+    var env1: Env = undefined;
+    try Env.init(gpa, &env1);
+    defer env1.deinit(gpa);
+    const m1 = try evalToManifest(&engine, &env1.ctx, null, null, null, cfg, .config, "config");
+    defer m1.destroy();
+
+    try t.expectEqual(@as(usize, 2), m1.grants.items.len);
+    try t.expectEqualStrings("git", m1.grants.items[0].plugin);
+    try t.expectEqualStrings("fs_write", m1.grants.items[0].capability);
+    try t.expectEqualStrings("repo", m1.grants.items[0].root);
+    try t.expectEqualStrings("git", m1.grants.items[1].plugin);
+    try t.expectEqualStrings("proc", m1.grants.items[1].capability);
+    try t.expectEqualStrings("", m1.grants.items[1].root); // no opts — unrestricted
+
+    // Sealed eval, extended to grants: the SAME source, in a totally
+    // separate JS runtime, hashes identically.
+    var env2: Env = undefined;
+    try Env.init(gpa, &env2);
+    defer env2.deinit(gpa);
+    const m2 = try evalToManifest(&engine, &env2.ctx, null, null, null, cfg, .config, "config");
+    defer m2.destroy();
+    try t.expectEqual(m1.hash(), m2.hash());
+
+    // A CHANGED grant (a different root — the limit itself changed) changes
+    // the hash: the determinism claim covers grants, not just binds/values.
+    const cfg2 =
+        \\weft.grant("git", "fs_write", { root: "other-repo" });
+        \\weft.grant("git", "proc");
+    ;
+    var env3: Env = undefined;
+    try Env.init(gpa, &env3);
+    defer env3.deinit(gpa);
+    const m3 = try evalToManifest(&engine, &env3.ctx, null, null, null, cfg2, .config, "config");
+    defer m3.destroy();
+    try t.expect(m1.hash() != m3.hash());
+}
+
+test "quickjs: weft.grant FAILS CLOSED — a non-string/undefined opts.root throws, eval fails loudly (review nit 1)" {
+    const gpa = t.allocator;
+    var engine = try wasm.Engine.init();
+    defer engine.deinit();
+
+    // A mistyped narrowing — {root: 123} — must NEVER silently degrade to
+    // unrestricted; the whole eval must fail instead (sealed eval's M3
+    // precedent: fail loudly, never widen quietly).
+    {
+        var env: Env = undefined;
+        try Env.init(gpa, &env);
+        defer env.deinit(gpa);
+        const cfg = "weft.grant(\"git\", \"fs_write\", { root: 123 });\n";
+        try t.expectError(error.ConfigException, evalToManifest(&engine, &env.ctx, null, null, null, cfg, .config, "config"));
+    }
+
+    // Same for an explicitly `undefined` root — the exact "a typo'd
+    // variable that evaluated to undefined" case the send-back named.
+    {
+        var env: Env = undefined;
+        try Env.init(gpa, &env);
+        defer env.deinit(gpa);
+        const cfg = "weft.grant(\"git\", \"fs_write\", { root: undefined });\n";
+        try t.expectError(error.ConfigException, evalToManifest(&engine, &env.ctx, null, null, null, cfg, .config, "config"));
+    }
+
+    // But an OMITTED opts, or an opts object with no `root` key at all, is
+    // the legitimate unrestricted case — no exception, root stays "".
+    {
+        var env: Env = undefined;
+        try Env.init(gpa, &env);
+        defer env.deinit(gpa);
+        const cfg = "weft.grant(\"git\", \"proc\");\n";
+        const m = try evalToManifest(&engine, &env.ctx, null, null, null, cfg, .config, "config");
+        defer m.destroy();
+        try t.expectEqualStrings("", m.grants.items[0].root);
+    }
+    {
+        var env: Env = undefined;
+        try Env.init(gpa, &env);
+        defer env.deinit(gpa);
+        const cfg = "weft.grant(\"git\", \"proc\", {});\n";
+        const m = try evalToManifest(&engine, &env.ctx, null, null, null, cfg, .config, "config");
+        defer m.destroy();
+        try t.expectEqualStrings("", m.grants.items[0].root);
+    }
+}
+
+test "quickjs: weft.grant is config-plane only — a resident JS plugin's call is a logged no-op" {
+    const gpa = t.allocator;
+    var env: Env = undefined;
+    try Env.init(gpa, &env);
+    defer env.deinit(gpa);
+    var engine = try wasm.Engine.init();
+    defer engine.deinit();
+
+    // A JS plugin registers a command that calls weft.grant from a LIVE
+    // dispatch — `br.manifest == null` there, so `cGrant` must degrade to a
+    // warning, never crash and never mutate anything (statusSegment's exact
+    // precedent for a config-only verb reached from the plugin plane).
+    const src =
+        \\weft.command("try-grant", function() {
+        \\  weft.grant("other", "fs_write", { root: "x" });
+        \\  weft.echo("survived");
+        \\});
+    ;
+    const plugin = try JsPlugin.load(gpa, &engine, &env.ctx, env.pool, .empty, "grantplugin", null, src);
+    defer plugin.deinit();
+    _ = try command.run(&env.commands, &env.ctx, "try-grant", &.{});
+    try t.expectEqualStrings("survived", env.head.echo.items);
+}
+
 test "quickjs: weft.use produces a real imported sub-manifest at the imported tier" {
     const gpa = t.allocator;
     var env: Env = undefined;
@@ -1846,6 +1992,90 @@ test "quickjs: reconcile — reapplying the identical config is a verified no-op
     try manifest_mod.Manifest.reconcile(gpa, m2, m3, &actx);
     try t.expectEqual(@as(?[]const u8, null), env.keymap.lookup(env.head.currentMode(), "j")); // removed
     try t.expectEqualStrings("cursor-up", env.keymap.lookup(env.head.currentMode(), "k").?); // added
+}
+
+test "quickjs: W4 slice 4 — reconcile round trip: a weft.grant removed leaves COHERENT state, no baseline fallback" {
+    const gpa = t.allocator;
+    var env: Env = undefined;
+    try Env.init(gpa, &env);
+    defer env.deinit(gpa);
+    var engine = try wasm.Engine.init();
+    defer engine.deinit();
+
+    const grants_mod = @import("grants.zig");
+    var table = grants_mod.HandleTable.init(gpa);
+    defer table.deinit();
+    env.ctx.grant_table = &table;
+
+    const cfg1 = "weft.grant(\"git\", \"fs_write\", { root: \"repo\" });\n";
+    const m1 = try evalToManifest(&engine, &env.ctx, null, null, null, cfg1, .config, "config");
+    defer m1.destroy();
+    var actx: manifest_mod.Manifest.ApplyCtx = .{ .ctx = &env.ctx, .loader = null, .config = null };
+    try manifest_mod.Manifest.reconcile(gpa, null, m1, &actx);
+
+    const h = table.findLive("git", "fs_write").?;
+    try t.expect(table.check(h));
+    switch (table.limitFor(h)) {
+        .fs_root => |root| try t.expectEqualStrings("repo", root),
+        .none, .doc_region => return error.TestUnexpectedResult,
+    }
+
+    // Reload WITHOUT the grant decl at all — reconcile tears it down.
+    const m2 = try evalToManifest(&engine, &env.ctx, null, null, null, "", .config, "config");
+    defer m2.destroy();
+    try manifest_mod.Manifest.reconcile(gpa, m1, m2, &actx);
+
+    try t.expect(!table.check(h));
+    try t.expectEqual(grants_mod.Reason.revoked, table.reasonFor(h));
+    // The composition rule's honest consequence (grants.zig's module doc):
+    // no separate describe()-boolean baseline row was ever minted for a
+    // config-narrowed pair, so there is nothing to "fall back" to — the
+    // pair reads as fully ungranted now, not silently reverted to
+    // unrestricted.
+    try t.expectEqual(@as(?grants_mod.CapHandle, null), table.findLive("git", "fs_write"));
+}
+
+test "quickjs: W4 slice 4 — an UNCHANGED weft.grant survives a reload that changes something else (no orphaned handle)" {
+    const gpa = t.allocator;
+    var env: Env = undefined;
+    try Env.init(gpa, &env);
+    defer env.deinit(gpa);
+    var engine = try wasm.Engine.init();
+    defer engine.deinit();
+
+    const grants_mod = @import("grants.zig");
+    var table = grants_mod.HandleTable.init(gpa);
+    defer table.deinit();
+    env.ctx.grant_table = &table;
+
+    const cfg1 =
+        \\weft.grant("git", "fs_write", { root: "repo" });
+        \\weft.bind("normal", "j", "cursor-down");
+    ;
+    const m1 = try evalToManifest(&engine, &env.ctx, null, null, null, cfg1, .config, "config");
+    defer m1.destroy();
+    var actx: manifest_mod.Manifest.ApplyCtx = .{ .ctx = &env.ctx, .loader = null, .config = null };
+    try manifest_mod.Manifest.reconcile(gpa, null, m1, &actx);
+    const h = table.findLive("git", "fs_write").?;
+
+    // Reload with the SAME grant decl but a DIFFERENT, unrelated bind — the
+    // manifest's hash differs (reconcile's teardown+reapply DOES run), but
+    // the grant itself must survive as the SAME live row, not a
+    // revoke-then-remint (`reconcileGrants`'s whole point: an already-loaded
+    // plugin's POSSESSED handle must not be silently orphaned by a reload
+    // that didn't touch ITS grant).
+    const cfg2 =
+        \\weft.grant("git", "fs_write", { root: "repo" });
+        \\weft.bind("normal", "k", "cursor-up");
+    ;
+    const m2 = try evalToManifest(&engine, &env.ctx, null, null, null, cfg2, .config, "config");
+    defer m2.destroy();
+    try manifest_mod.Manifest.reconcile(gpa, m1, m2, &actx);
+
+    try t.expect(table.check(h)); // still the SAME live handle
+    const h2 = table.findLive("git", "fs_write").?;
+    try t.expectEqual(h.idx, h2.idx);
+    try t.expectEqual(h.gen, h2.gen);
 }
 
 test {

@@ -554,6 +554,64 @@ pub fn registerRevokeCommand(gpa: Allocator, commands: *command.Commands, system
     });
 }
 
+/// `Limit`'s one-line display form for `grantsShowHandler` — `grants.zig`'s
+/// `Limit` union rendered as `none` / `fs_root(<path>)` / `doc_region(<doc_id>)`.
+/// Writes into `buf`, returns the written slice (never longer than `buf`;
+/// truncated with no crash if a path/doc_id somehow doesn't fit — an
+/// inspection command degrading gracefully beats it failing to list
+/// anything).
+fn formatLimit(buf: []u8, limit: grants_mod.Limit) []const u8 {
+    return switch (limit) {
+        .none => "none",
+        .fs_root => |root| std.fmt.bufPrint(buf, "fs_root({s})", .{root}) catch buf,
+        .doc_region => |dr| std.fmt.bufPrint(buf, "doc_region({s})", .{dr.doc_id}) catch buf,
+    };
+}
+
+/// The `grants-show` debug command (§6 W4 slice 4: "the INSPECTION surface"
+/// half of the approval-as-manifest-diff residual — a blocking approve/deny
+/// prompt is explicitly NOT v1; this is). `data` is the owning `*System`.
+/// Lists EVERY row this System's `HandleTable` has ever minted (alive or
+/// not) as `<principal>/<capability> limit=<...> state=<alive|revoked|
+/// scope_expired>` — a dead row stays listed (with its state), not erased,
+/// so "what got revoked and why" is answerable without a debugger. One
+/// echo line (the ordinary debug-command surface); `std.log.info` mirrors
+/// each row too, for a reload-time transcript.
+pub fn grantsShowHandler(ctx: *command.Context, data: ?*anyopaque, args: []const command.Value) anyerror!command.Value {
+    _ = args;
+    const sys: *System = @ptrCast(@alignCast(data.?));
+    const gpa = ctx.gpa;
+    var out: std.ArrayList(u8) = .empty;
+    defer out.deinit(gpa);
+    out.appendSlice(gpa, "grants-show:") catch {};
+    for (sys.grants.rows.items) |r| {
+        const state: []const u8 = if (r.alive) "alive" else if (r.scope_dead) "scope_expired" else "revoked";
+        var limit_buf: [256]u8 = undefined;
+        const limit_str = formatLimit(&limit_buf, r.limit);
+        const line = std.fmt.allocPrint(gpa, " {s}/{s} limit={s} state={s}", .{ r.principal, r.capability, limit_str, state }) catch continue;
+        defer gpa.free(line);
+        out.appendSlice(gpa, line) catch {};
+        std.log.info("grants-show:{s}", .{line});
+    }
+    if (sys.grants.rows.items.len == 0) out.appendSlice(gpa, " (empty)") catch {};
+    ctx.head.echo.clearRetainingCapacity();
+    ctx.head.echo.appendSlice(gpa, out.items) catch {};
+    return .nil;
+}
+
+/// Not installed by `builtins.install` (same rationale as `registerRevokeCommand`
+/// above): a system that wants the live `grants-show` inspection command
+/// binds it explicitly against itself.
+pub fn registerGrantsShowCommand(gpa: Allocator, commands: *command.Commands, system: *System) !void {
+    _ = try commands.bind(gpa, "grants-show", .{
+        .name = "grants-show",
+        .summary = "List every row in the grant table: principal, capability, limit, state.",
+        .args = &.{},
+        .handler = grantsShowHandler,
+        .data = system,
+    });
+}
+
 // ── Tests ───────────────────────────────────────────────────────────
 
 const t = std.testing;
@@ -886,6 +944,26 @@ test "system: W4 slice 1 — the System-owned grant table, capture-time resoluti
 
     // A capture AFTER revocation no longer collects the dead row.
     try t.expectEqual(@as(usize, 0), c.capturedCtx().grants.len);
+}
+
+test "system: W4 slice 4 — grants-show lists every row, alive and dead, with its limit and state" {
+    const gpa = t.allocator;
+    const pool = try task.Pool.init(gpa, .{ .threads = 1 });
+    defer pool.deinit();
+    const sys = try testSystem(gpa, pool, "editor");
+    defer sys.destroy();
+
+    _ = try sys.grants.grant(.{ .capability = "fs_read" }, "notes", null);
+    _ = try sys.grants.grant(.{ .capability = "fs_write", .limit = .{ .fs_root = "repo" } }, "git", null);
+    _ = sys.grants.revoke("notes", "fs_read");
+
+    try registerGrantsShowCommand(gpa, &sys.commands, sys);
+    var c = sys.contextFor(&sys.default_head);
+    _ = try command.run(&sys.commands, &c, "grants-show", &.{});
+
+    const echoed = sys.default_head.echo.items;
+    try t.expect(std.mem.indexOf(u8, echoed, "notes/fs_read limit=none state=revoked") != null);
+    try t.expect(std.mem.indexOf(u8, echoed, "git/fs_write limit=fs_root(repo) state=alive") != null);
 }
 
 test {

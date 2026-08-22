@@ -38,6 +38,7 @@ test {
     _ = window_layout;
     _ = @import("app/frame.zig"); // which-key menu-overlay timing
     _ = @import("app/frame_builder.zig"); // rendering P2: caret-surface auto-expiry
+    _ = @import("app/config_load.zig"); // W4 slice 4: the production plugin/grant-table loader
     // P3 (doc/rendering.md): the Rasterizer/Platform seam contracts + their
     // compile-time-only skeleton proofs. Neither needs Vulkan/wayland to
     // typecheck (see each file's module doc), so they run under the
