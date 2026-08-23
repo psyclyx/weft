@@ -248,6 +248,15 @@ cur_prefix: []const u8 = &.{},
 caps_builder: std.ArrayList(capability.CompletionItem) = .empty,
 caps_builder_session: u64 = 0,
 
+// ── D2's generic schema-directed slot verbs (core/slot.zig, wasm_host/
+// slot.zig) — `wl_slot_declare`'s host-owned parsed schema trees and
+// `wl_slot_bind`'s host-owned predicate leaf strings, both freed on unload
+// (Container itself never frees a slot's schema/a binding's predicate — see
+// `container.SlotDecl.schema`'s doc — so whichever side allocated it owns
+// the free; here, that's this plugin).
+declared_schemas: std.ArrayList(*const @import("../schema.zig").Schema) = .empty,
+slot_predicate_strs: std.ArrayList([]u8) = .empty,
+
 /// Stamp `[start, end)` against the current document version and hand the
 /// guest an opaque handle into `stamps`. Takes ownership of `version_owned`
 /// (freed when the table is reset). Returns the handle.
@@ -326,6 +335,15 @@ pub fn deinit(self: *WasmPlugin) void {
     // by its name. The declared actions themselves persist (cheap names; another
     // plugin/config may still provide for them).
     self.ctx.actions.unregisterByOwnerPrefix(self.name);
+    // D2 slot providers (wl_slot_bind) die with it too — same shape. Slots
+    // THEMSELVES (wl_slot_declare) persist, exactly like declared actions —
+    // Container has no slot-removal API (matches every other domain's
+    // "declarations outlive a single provider" convention).
+    if (self.ctx.slot_host) |host| host.unregisterByOwnerPrefix(self.name);
+    for (self.declared_schemas.items) |s| @import("../schema.zig").freeSchema(gpa, s);
+    self.declared_schemas.deinit(gpa);
+    for (self.slot_predicate_strs.items) |s| gpa.free(s);
+    self.slot_predicate_strs.deinit(gpa);
     for (self.commands.items) |wc| {
         if (self.ctx.commands.find(wc.name)) |n| {
             if (self.ctx.commands.lookup(n)) |cmd| {

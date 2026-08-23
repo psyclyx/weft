@@ -23,6 +23,9 @@ const guests = [_]Guest{
     .{ .src = "src/guest/demo_config.zig", .import = "guest_demo_config_wasm", .install = false },
     .{ .src = "src/guest/headtest.zig", .import = "guest_headtest_wasm", .install = false },
     .{ .src = "src/guest/fs_limit.zig", .import = "guest_fs_limit_wasm", .install = false },
+    // D2's worked example (doc/d2-schema-payloads.md §6) — a third-party
+    // slot the wasm-membrane suite proves end to end; never shipped.
+    .{ .src = "src/guest/badge.zig", .import = "guest_badge_wasm", .install = false },
     .{ .src = "src/guest/edit.zig", .import = "guest_edit_wasm", .install = true },
     .{ .src = "src/guest/complete.zig", .import = "guest_complete_wasm", .install = true },
     .{ .src = "src/guest/project.zig", .import = "guest_project_wasm", .install = true },
@@ -413,6 +416,19 @@ fn buildGuest(b: *std.Build, src: []const u8) *std.Build.Step.Compile {
     // wasmtime, no wasm_host — by design, so it compiles fine here too).
     guest_mod.addImport("membrane_contract_data", b.createModule(.{
         .root_source_file = b.path("src/core/membrane/contract_data.zig"),
+        .target = wasm_target,
+        .optimize = .ReleaseSmall,
+    }));
+    // D2 (doc/d2-schema-payloads.md §3.2/§3.3): the guest SDK imports the
+    // IDENTICAL core/schema.zig the host does — same zero-host-dependency
+    // posture as contract_data.zig above, same reason it needs a named
+    // import rather than a relative `../core/schema.zig` reach-around (each
+    // guest is its own module rooted at src/guest/). This is what makes a
+    // guest's own `parseSchema`/`decodeCursor`/`canonicalizeSchema` calls
+    // (weft.zig's `schemaEncode`/`slotBind` ergonomic wrappers) the SAME
+    // implementation the host runs, not a second one.
+    guest_mod.addImport("weft_schema", b.createModule(.{
+        .root_source_file = b.path("src/core/schema.zig"),
         .target = wasm_target,
         .optimize = .ReleaseSmall,
     }));

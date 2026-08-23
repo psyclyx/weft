@@ -132,10 +132,15 @@ const Env = struct {
     commands: command.Commands,
     keymap: @import("../Keymap.zig"),
     head: @import("../Head.zig"),
-    /// The ONE shared Container `caps`/`actions` bind into (task #19).
+    /// The ONE shared Container `caps`/`actions`/`slot_host` bind into (task
+    /// #19; D2 follows the same borrow convention from day one).
     container: @import("../container.zig").Container,
     caps: @import("../capability.zig").Caps,
     actions: @import("../action.zig"),
+    /// D2's generic, schema-directed slot host (doc/d2-schema-payloads.md
+    /// §3.2, core/slot.zig) — `Caps`'s sibling, NOT a replacement; see that
+    /// file's module doc for why it's kept separate this slice.
+    slot_host: @import("../slot.zig").SlotHost,
     quit: bool,
     ctx: command.Context,
 
@@ -149,6 +154,7 @@ const Env = struct {
         self.container = @import("../container.zig").Container.init(gpa);
         self.caps = @import("../capability.zig").Caps.init(gpa, task.nowNs, &self.container);
         self.actions = @import("../action.zig").init(gpa, &self.container);
+        self.slot_host = @import("../slot.zig").SlotHost.init(gpa, &self.container);
         self.quit = false;
         self.ctx = .{
             .gpa = gpa,
@@ -159,9 +165,11 @@ const Env = struct {
             .caps = &self.caps,
             .quit = &self.quit,
             .head = &self.head,
+            .slot_host = &self.slot_host,
         };
     }
     fn deinit(self: *Env, gpa: Allocator) void {
+        self.slot_host.deinit();
         self.actions.deinit();
         self.caps.deinit();
         self.container.deinit();
@@ -665,6 +673,75 @@ test "wasm plugin: a completion provider gathers candidates across the membrane"
         if (std.mem.eql(u8, item.text, "alphabet")) has_alphabet = true;
     }
     try t.expect(has_alpha and has_alphabet);
+}
+
+test "D2: a wasm guest declares+binds a NOVEL 'ui/badge' slot; the host fires, restamps, and decodes it with NO core type for it" {
+    // doc/d2-schema-payloads.md §6's worked example, made e2e: `badge.zig`
+    // (src/guest/badge.zig) is a third-party CI-status plugin. Nothing in
+    // `core/` — not `capability.zig`, not `container.zig`, not this test
+    // file — ever names a "Badge" type. The ONLY thing the host holds is the
+    // `*const schema.Schema` tree `wl_slot_declare` shipped across the
+    // membrane as a canonical blob and `schema.parseSchema` decoded back —
+    // proven below by decoding through THAT tree (pulled from `Container`),
+    // never through `badge.zig`'s own `badge_schema` constant.
+    const gpa = t.allocator;
+    var env: Env = undefined;
+    try Env.init(gpa, &env);
+    defer env.deinit(gpa);
+
+    var engine = try wasm.Engine.init();
+    defer engine.deinit();
+    const plugin = try loadPlugin(&engine, &env.ctx, "badge", @embedFile("guest_badge_wasm"), .{});
+    defer plugin.deinit();
+
+    // init() ran wl_slot_declare + wl_slot_bind: the slot exists, WITH a
+    // schema (container.zig:1's placeholder `schema = 0` is gone — this is
+    // the real `?*const Schema` D2 carries), and one provider is bound.
+    const decl = env.container.slots.get("ui/badge").?;
+    try t.expect(decl.schema != null);
+    try t.expectEqual(@import("../container.zig").Shape.query, decl.shape);
+    try t.expectEqual(@import("../container.zig").Composition.ordered_union, decl.composition);
+    try t.expectEqual(@as(usize, 1), env.slot_host.providers.items.len);
+
+    // Fire it — the SlotHost/Container race, exactly like `Caps.fire` for
+    // completion, but through the generic verbs, and with an explicit fired
+    // VERSION the host will restamp every `range` field to (§4), no matter
+    // what version the guest's payload claims.
+    const schema_mod = @import("../schema.zig");
+    const fired_version = "fired-session-version-42";
+    const id = (try env.slot_host.fire("ui/badge", .{}, fired_version, .{})).?;
+    const session = env.slot_host.session(id).?;
+    try t.expectEqual(@as(usize, 1), session.all().len);
+    try t.expect(session.done());
+
+    const result = session.all()[0];
+    try t.expectEqualStrings("badge", result.provider);
+
+    // Decode through the SCHEMA THE HOST HOLDS (pulled from Container, the
+    // wire-marshalled tree wl_slot_declare shipped) — not through any Zig
+    // struct type, because there is none.
+    const schema_tree = decl.schema.?;
+    const cur = try schema_mod.decodeCursor(schema_tree, result.payload).enterStruct();
+    try t.expectEqualStrings("3 failing", try (try cur.field("text")).?.asStr());
+    try t.expectEqual(@as(u32, 3), try (try cur.field("count")).?.asU32());
+
+    // `where` (anchor) rides through UNCHANGED — an anchor is resolved, not
+    // restamped (§4); this slice records it, doesn't resolve it (named, not
+    // built — see core/slot.zig's `push` doc).
+    const where = try (try cur.field("where")).?.asAnchor();
+    try t.expectEqualStrings("ci", where.agent);
+    try t.expectEqual(@as(u64, 5), where.seq);
+
+    // `loc` (range) is RESTAMPED: the guest's claimed "stale-guest-claimed-
+    // version" never survives — the fired session version does. This is
+    // schema.walk's `.on_range` arm, live on `SlotHost.push`'s path (§4).
+    const loc = try (try cur.field("loc")).?.asRange();
+    try t.expectEqualStrings(fired_version, loc.version);
+    try t.expect(!std.mem.eql(u8, loc.version, "stale-guest-claimed-version"));
+    try t.expectEqual(@as(u64, 10), loc.start);
+    try t.expectEqual(@as(u64, 14), loc.end);
+
+    env.slot_host.finish(id);
 }
 
 test "wasm plugin: demo-config composes commands + binds a key (config surface)" {

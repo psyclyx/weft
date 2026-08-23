@@ -48,6 +48,7 @@ const pick = @import("../wasm_host/pick.zig");
 const proc = @import("../wasm_host/proc.zig");
 const register = @import("../wasm_host/register.zig");
 const sessions = @import("../wasm_host/sessions.zig");
+const slot = @import("../wasm_host/slot.zig");
 const surface = @import("../wasm_host/surface.zig");
 const syntax = @import("../wasm_host/syntax.zig");
 const tool = @import("../wasm_host/tool.zig");
@@ -232,6 +233,12 @@ const handlers = [_]struct { name: []const u8, handler: HostFn }{
     .{ .name = "wl_fs_append", .handler = fs.hFsAppend },
     .{ .name = "wl_fs_list", .handler = fs.hFsList },
     .{ .name = "wl_fs_list_async", .handler = fs.hFsListAsync },
+
+    // ── slot.zig — D2's generic, schema-directed membrane verbs ────────
+    .{ .name = "wl_slot_declare", .handler = slot.hSlotDeclare },
+    .{ .name = "wl_slot_bind", .handler = slot.hSlotBind },
+    .{ .name = "wl_payload_push", .handler = slot.hPayloadPush },
+    .{ .name = "wl_payload_read", .handler = slot.hPayloadRead },
 };
 
 /// Zip `contract_data.imports` (data) with `handlers` (binding) by NAME —

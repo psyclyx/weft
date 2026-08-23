@@ -67,6 +67,16 @@ pub const Group = enum {
     proc,
     sessions,
     fs,
+    /// D2's generic, schema-directed slot verbs (doc/d2-schema-payloads.md
+    /// §3.2) — `wl_slot_declare`/`wl_slot_bind`/`wl_payload_push`/
+    /// `wl_payload_read`, handled by `wasm_host/slot.zig`. Deliberately its
+    /// own group, not folded into `.capability`: that group is the
+    /// COMPLETION-specific `wl_caps_*` surface (`wl_provide_completion`/
+    /// `wl_caps_item`/…) this slice does NOT touch or migrate (§5.3's
+    /// demolition gate is later work) — `.slot` names the NEW generic
+    /// surface that coexists beside it by design (§5.3: "the two paths
+    /// coexist by DESIGN under a stated demolition date").
+    slot,
 };
 
 /// The permission gate an entry's handler checks (`WasmPlugin.perms[..]`)
@@ -296,6 +306,24 @@ pub const imports = [_]Entry{
     .{ .name = "wl_fs_append", .params = &.{ .u32, .u32, .u32, .u32 }, .results = &.{.i32}, .group = .fs, .perm = .fs_write, .doc = "append to a file (capture)" },
     .{ .name = "wl_fs_list", .params = &.{ .u32, .u32, .u32, .u32, .u32, .u32 }, .results = &.{.i32}, .group = .fs, .perm = .fs_read, .doc = "list a local directory (locus-routed; remote authorities degrade to -1)" },
     .{ .name = "wl_fs_list_async", .params = &.{ .u32, .u32, .u32, .u32, .u32, .u32 }, .results = &.{.i32}, .group = .fs, .perm = .fs_read, .doc = "queue an async `.peer` directory listing, delivered to a buffer" },
+
+    // ── slot.zig — D2's generic, schema-directed membrane verbs ────────
+    // (doc/d2-schema-payloads.md §3.2). These four carry `(SchemaRef
+    // version, ptr, len)` scalars only — `schema.zig` interprets the
+    // `(ptr,len)` bytes against the slot's declared schema; this table
+    // stays ignorant of what's inside them, exactly like every other bulk
+    // `(ptr,len)` import here.
+    // DEVIATION from doc/d2-schema-payloads.md §3.2's literal 4-param
+    // listing, disclosed in the D2 slice report: `Container.declareSlot`
+    // requires `shape`/`composition` (no defaults) and the RUNTIME verb has
+    // no OTHER channel to supply them (unlike `weft.slot`'s JS literal,
+    // which carries them as named fields) — extended to 6 params rather
+    // than hardcoding a shape/composition every runtime-declared slot would
+    // be stuck with.
+    .{ .name = "wl_slot_declare", .params = &.{ .u32, .u32, .u32, .u32, .u32, .u32 }, .results = &.{}, .group = .slot, .doc = "runtime-declare a slot: name + shape + composition + its canonical schema blob (schema.canonicalizeSchema's wire form)" },
+    .{ .name = "wl_slot_bind", .params = &.{ .u32, .u32, .u32, .u32, .u32, .i32 }, .results = &.{}, .group = .slot, .doc = "bind a provider for an already-declared slot, gated by a predicate blob, at priority" },
+    .{ .name = "wl_payload_push", .params = &.{ .i32, .u32, .u32, .u32 }, .results = &.{}, .group = .slot, .doc = "push one schema-encoded payload (SchemaRef version + bytes) for a fired slot session" },
+    .{ .name = "wl_payload_read", .params = &.{ .i32, .u32, .u32 }, .results = &.{.i32}, .group = .slot, .doc = "host->guest: fill a guest scratch buffer with a fired session's schema-encoded request payload" },
 };
 
 /// The imports table's size, alongside `imports.len`, as a deliberate
@@ -306,7 +334,7 @@ pub const imports = [_]Entry{
 /// half-finished edit — fails the build with a pointed message instead of
 /// silently drifting the two ~124-entry tables apart again (the exact class
 /// this table exists to kill).
-const expected_import_count = 124;
+const expected_import_count = 128;
 
 /// A host→guest EXPORT entrypoint (design doc/north-star-plan.md §2.5, task
 /// W0a-D extension 2): every `instance.callVoid("name", args)` the host
@@ -354,9 +382,18 @@ pub const exports = [_]Export{
     .{ .name = "on_activate", .params = &.{}, .results = &.{}, .required = false, .doc = "a buffer took focus (path readable via wl_activate_path during the call)" },
     .{ .name = "on_poll", .params = &.{}, .results = &.{}, .required = false, .doc = "readiness-driven: fired only when this plugin's raw proc stream has bytes pending" },
     .{ .name = "on_fill", .params = &.{}, .results = &.{}, .required = false, .doc = "a proc-filled buffer landed and is still focused; a chance to paint style spans" },
+    // D2's generic slot-fire dispatch (doc/d2-schema-payloads.md §3.2/§7):
+    // the schema-directed sibling of `on_complete` — a schema-provider
+    // guest answers `session` by calling `wl_payload_push` (during this
+    // call, or later off a poll, mirroring `on_complete`'s sync/async
+    // split) or `wl_payload_read`s the fired request first. Host→guest
+    // DISPATCH stays call-based (§7: "a schema marshals DATA, never
+    // function pointers"); only the PAYLOAD crossing it carries is
+    // schema-directed.
+    .{ .name = "on_slot_fire", .params = &.{.i32}, .results = &.{}, .required = false, .doc = "answer a schema-carrying slot session (handle); push via wl_payload_push during this call or later off a poll" },
 };
 
-const expected_export_count = 10;
+const expected_export_count = 11;
 
 comptime {
     @setEvalBranchQuota(50_000); // the O(n²) duplicate-name scans below, n≈124

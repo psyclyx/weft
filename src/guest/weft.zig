@@ -30,6 +30,14 @@ pub const allocator: std.mem.Allocator = std.heap.wasm_allocator;
 /// reference it.
 const contract_data = @import("membrane_contract_data");
 
+/// D2's schema language + marshaller (core/schema.zig), imported under the
+/// SAME name a guest's own code uses to reach it directly for a build-time-
+/// known slot's typed encode/decode (§3.3's build-time codegen arm is a
+/// LATER step; every guest today, including this SDK's own ergonomic
+/// wrappers below, uses this module's runtime interpreter directly — the
+/// §3.3 fallback arm, always available with zero codegen).
+pub const schema = @import("weft_schema");
+
 // ── Raw host imports (the grants). Named `wl_*` to keep the ergonomic
 // wrappers below as the surface guest code actually calls. Hand-written —
 // Zig 0.16 can't synthesize an `extern fn` declaration from a comptime loop
@@ -171,6 +179,11 @@ extern "weft" fn wl_fs_write(path: u32, path_len: u32, ptr: u32, len: u32) i32;
 extern "weft" fn wl_fs_append(path: u32, path_len: u32, ptr: u32, len: u32) i32;
 extern "weft" fn wl_fs_list(auth: u32, auth_len: u32, path: u32, path_len: u32, out_ptr: u32, out_cap: u32) i32;
 extern "weft" fn wl_fs_list_async(auth: u32, auth_len: u32, path: u32, path_len: u32, dest: u32, dest_len: u32) i32;
+// D2's generic, schema-directed slot verbs (doc/d2-schema-payloads.md §3.2).
+extern "weft" fn wl_slot_declare(name_ptr: u32, name_len: u32, shape: u32, composition: u32, schema_ptr: u32, schema_len: u32) void;
+extern "weft" fn wl_slot_bind(name_ptr: u32, name_len: u32, pred_ptr: u32, pred_len: u32, tier: u32, priority: i32) void;
+extern "weft" fn wl_payload_push(session: i32, version: u32, ptr: u32, len: u32) void;
+extern "weft" fn wl_payload_read(session: i32, ptr: u32, cap: u32) i32;
 
 fn ZigType(comptime v: contract_data.ValType) type {
     return switch (v) {
@@ -1102,4 +1115,88 @@ pub fn fsList(authority: []const u8, dir: []const u8) ?[]const u8 {
 /// listings use the synchronous `fsList("here", …)`.
 pub fn fsListAsync(authority: []const u8, dir: []const u8, dest: []const u8) bool {
     return wl_fs_list_async(p(authority.ptr), @intCast(authority.len), p(dir.ptr), @intCast(dir.len), p(dest.ptr), @intCast(dest.len)) == 0;
+}
+
+// ── D2: generic, schema-directed slots (doc/d2-schema-payloads.md §6) ────
+// A third-party plugin declares a NOVEL slot with a NOVEL result shape —
+// core has no type for it, ever. `slotDeclare` ships the schema TREE as its
+// canonical blob (`schema.canonicalizeSchema` — the same module the host
+// runs, `weft_schema` above); `slotBind` registers a provider; `payloadPush`
+// answers a fired session with schema-encoded bytes the host restamps and a
+// consumer decodes with `schema.decodeCursor` — none of which core
+// recompiles for.
+
+pub const SlotShape = enum(u32) { query = 0, feed = 1, action = 2, value = 3 };
+pub const SlotComposition = enum(u32) { first_wins = 0, ordered_union = 1, merge_ranked = 2 };
+pub const SlotTier = enum(u32) { core = 0, imported = 1, plugin = 2, config = 3, transient = 4 };
+
+/// Runtime-declare a slot (`wl_slot_declare`) — no core recompile, no core
+/// type: `sch` crosses as its own canonical blob.
+pub fn slotDeclare(name: []const u8, shape: SlotShape, composition: SlotComposition, sch: *const schema.Schema) void {
+    const blob = schema.canonicalizeSchema(allocator, sch) catch return;
+    defer allocator.free(blob);
+    wl_slot_declare(p(name.ptr), @intCast(name.len), @intFromEnum(shape), @intFromEnum(composition), p(blob.ptr), @intCast(blob.len));
+}
+
+/// A single-axis predicate for `slotBind` — the wire micro-format
+/// `wasm_host/slot.zig`'s `parsePredicate` decodes (see that file's module
+/// doc for why this is deliberately not a full self-hosted `facts.Predicate`
+/// yet — a disclosed, bounded simplification, not the end state).
+pub const SlotPredicate = union(enum) { all, mode: []const u8, ext: []const u8, lang: []const u8, tool: []const u8 };
+
+fn putUvLocal(buf: []u8, v: u64) usize {
+    var x = v;
+    var i: usize = 0;
+    while (true) {
+        const b: u8 = @intCast(x & 0x7f);
+        x >>= 7;
+        if (x == 0) {
+            buf[i] = b;
+            return i + 1;
+        }
+        buf[i] = b | 0x80;
+        i += 1;
+    }
+}
+
+/// Bind a provider for an already-declared slot (`wl_slot_bind`).
+pub fn slotBind(name: []const u8, pred: SlotPredicate, tier: SlotTier, priority: i32) void {
+    var buf: [512]u8 = undefined;
+    var len: usize = 0;
+    const leaf: ?struct { tag: u8, s: []const u8 } = switch (pred) {
+        .all => null,
+        .mode => |s| .{ .tag = 1, .s = s },
+        .ext => |s| .{ .tag = 2, .s = s },
+        .lang => |s| .{ .tag = 3, .s = s },
+        .tool => |s| .{ .tag = 4, .s = s },
+    };
+    if (leaf) |lf| {
+        buf[0] = lf.tag;
+        len = 1;
+        len += putUvLocal(buf[len..], lf.s.len);
+        @memcpy(buf[len..][0..lf.s.len], lf.s);
+        len += lf.s.len;
+    }
+    wl_slot_bind(p(name.ptr), @intCast(name.len), p(&buf), @intCast(len), @intFromEnum(tier), priority);
+}
+
+/// Push one schema-encoded payload for a fired `session` (`wl_payload_push`).
+/// `version` is this plugin's `SchemaRef` for the slot (§2.3) — the host
+/// never trusts a `range`-marked field's claimed version either way (it
+/// restamps those unconditionally); this is metadata for future skew
+/// detection, not currently checked (see `wasm_host/slot.zig`'s doc).
+pub fn payloadPush(session: u32, version: u32, sch: *const schema.Schema, value: schema.Value) void {
+    const bytes = schema.encode(allocator, sch, value) catch return;
+    defer allocator.free(bytes);
+    wl_payload_push(@bitCast(session), version, p(bytes.ptr), @intCast(bytes.len));
+}
+
+var slot_scratch: [1 << 16]u8 = undefined;
+
+/// The fired session's schema-encoded REQUEST payload (`wl_payload_read`),
+/// into a private scratch — empty if there is none. Valid until the next call.
+pub fn payloadRead(session: u32) []const u8 {
+    const n = wl_payload_read(@bitCast(session), p(&slot_scratch), slot_scratch.len);
+    if (n < 0) return &.{};
+    return slot_scratch[0..@intCast(n)];
 }

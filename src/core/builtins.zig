@@ -256,6 +256,7 @@ fn providerLabel(p: container_mod.ProviderRef) []const u8 {
         .caps_provider => |r| r.id,
         .value => |c| c,
         .ui_provider => "ui_provider",
+        .schema_provider => |r| r.owner,
     };
 }
 

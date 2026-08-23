@@ -49,6 +49,7 @@
 const std = @import("std");
 const Allocator = std.mem.Allocator;
 const facts_mod = @import("facts.zig");
+const schema_mod = @import("schema.zig");
 
 pub const Facts = facts_mod.Facts;
 pub const Predicate = facts_mod.Predicate;
@@ -64,17 +65,33 @@ pub const Shape = enum { query, feed, action, value };
 /// switch is today, and what the F5 adapter maps onto this enum.
 pub const Composition = enum { first_wins, ordered_union, merge_ranked };
 
-/// Placeholder for D2's schema-directed marshalling (§4 C18, §5 F6/D2). A
-/// slot's schema is a bare version number until the schema language
-/// (scalars/strings/arrays/structs/anchor/range) is designed; 0 = "no schema
-/// yet" for every W1 slot.
+/// D2's on-wire schema VERSION tag (doc/d2-schema-payloads.md §2.2 form 1):
+/// was the whole placeholder before D2 landed ("0 = no schema yet"); now
+/// RE-PURPOSED per that doc's reconciliation — the schema TREE is
+/// `SlotDecl.schema` below, and this u32 is the version a peer/guest stamps
+/// a payload with (§2.3: "on the wire, a payload is prefixed with its
+/// producer's SchemaRef version") so additive skew is detectable. Not
+/// carried on `SlotDecl` itself (a slot's CURRENT schema version is a
+/// property of the declaring producer's build, not of the Container's
+/// slot-name registration — see `schema.encodeVersioned`/`splitVersion`,
+/// which is where this type actually rides the wire).
 pub const SchemaRef = u32;
 
 pub const SlotDecl = struct {
     name: []const u8,
     shape: Shape,
     composition: Composition,
-    schema: SchemaRef = 0,
+    /// The slot's schema TREE (doc/d2-schema-payloads.md §2.2 form 1) —
+    /// `null` for a slot with no schema-directed payload yet (every pre-D2
+    /// caller, and any slot whose payload is still `container.zig:117`'s
+    /// `ui_provider` in-process transport). BORROWED, like `Binding.slot`/
+    /// `.owner`/`.predicate` — `Container` never dereferences it, only holds
+    /// the pointer; the DECLARER keeps it alive for the slot's lifetime
+    /// (a `weft.slot` config literal's tree lives as long as its `Manifest`;
+    /// a `wl_slot_declare` guest call's tree is `schema.parseSchema`-heap-
+    /// owned by whichever host module registered the slot — see
+    /// `core/slot.zig`).
+    schema: ?*const schema_mod.Schema = null,
 };
 
 /// The dispatch.md ladder (§2.2), kept and extended. HIGHER wins: an
@@ -121,6 +138,17 @@ pub const ProviderRef = union(enum) {
         /// `unbindOwnerExact`/`unbindOwnerPrefix` and free it after.
         ctx: ?*anyopaque = null,
     },
+    /// D2's generic, schema-directed provider reference (doc/
+    /// d2-schema-payloads.md §3.2's `wl_slot_bind`) — the crossable sibling
+    /// of `caps_provider`: erased to an opaque `(owner, seq)` pair exactly
+    /// the same way (`Container` never dereferences either field), looked up
+    /// back to a real provider struct by `seq` (never `id`/`owner` alone —
+    /// same collision reasoning `caps_provider`'s doc gives) by whichever
+    /// adapter bound it — `core/slot.zig`'s `SlotHost`, the generic
+    /// membrane-verb sibling of `capability.zig`'s `Caps` this slice adds
+    /// WITHOUT touching `Caps`/`Payload` (that migration is a later slice,
+    /// §5.3's demolition gate).
+    schema_provider: struct { owner: []const u8, seq: u64 },
 };
 
 /// Which adapter a `Binding` came from — task #19's cross-domain unbind
@@ -135,7 +163,7 @@ pub const ProviderRef = union(enum) {
 /// filter there would be a no-op, not a fix. `other` covers this module's
 /// own tests and any future ad hoc/`value`-shaped binding with no adapter
 /// of its own.
-pub const Domain = enum { action, caps, ui, other };
+pub const Domain = enum { action, caps, ui, slot, other };
 
 pub const Binding = struct {
     slot: []const u8,

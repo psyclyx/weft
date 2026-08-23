@@ -67,6 +67,7 @@ const container_mod = @import("container.zig");
 const Keymap = @import("Keymap.zig");
 const surface = @import("surface.zig");
 const grants_mod = @import("grants.zig");
+const schema_mod = @import("schema.zig");
 
 pub const Tier = container_mod.Tier;
 
@@ -187,6 +188,40 @@ pub const ManifestGrantDecl = struct {
     root: []u8,
 };
 
+/// D2's `weft.slot(name, {shape, composition, schema})` (doc/
+/// d2-schema-payloads.md §2.2 form 3) — stages a runtime slot declaration
+/// onto the manifest, rhyming with `StatusSegmentDecl`/`ManifestGrantDecl`
+/// exactly: one entry per call, applied through `applyDecls` in authored
+/// order. Unlike `StatusSegmentDecl` this needs NO opaque binder seam
+/// (`StatusSegBinder`'s doc explains why THAT verb needs one — `ui_mesh.zig`'s
+/// gfx-coupled `Seg`/`StatuslineArgs` types): `Container.declareSlot` is
+/// already core-layer and schema-directed, so `applyDecls` calls it
+/// directly (see that function, below).
+///
+/// **Scope note, disclosed (D2 slice report)**: this type, its hash
+/// participation, and its `applyDecls` wiring ARE built and tested here —
+/// what is NOT built in this slice is the `weft.slot(...)` JS SURFACE
+/// itself (a `qjs_slot_declare` C-shim import in src/quickjs/weft_qjs.c
+/// that walks a JS schema-literal object tree into a `Schema` value, the
+/// way `js_grant`/`js_status_segment` flatten their own JS args today). That
+/// C-side JS-object-tree walk is a real, separate unit of work with no new
+/// CORE mechanism riding on it — every mechanism it would call
+/// (`Manifest.addSlot`, the hash, `Container.declareSlot`) is already here,
+/// tested exactly like `weft.grant`'s own tests exercise `Manifest.addGrant`
+/// directly (`manifest.zig`'s own test discipline — see this file's
+/// "manifest: staging — weft.grant lands..." test for the precedent this
+/// type's tests follow).
+pub const SlotDeclDecl = struct {
+    name: []u8,
+    shape: container_mod.Shape,
+    composition: container_mod.Composition,
+    /// Heap-owned (`schema_mod.cloneSchema`'d at `addSlot` time, freed by
+    /// `Manifest.destroy`) — independent of whatever storage duration the
+    /// caller's schema value had, matching every other decl field's
+    /// dupe-on-stage convention.
+    schema: *const schema_mod.Schema,
+};
+
 /// Whether a `weft.plugin(name)` names the bundled catalog or an explicit
 /// path — the trust-root choke point (north-star-plan §5 "Trust root —
 /// DECIDED", §4 C17). A bare name ("vim") resolves against the bundled
@@ -280,6 +315,7 @@ pub const Manifest = struct {
     logs: std.ArrayList(LogDecl) = .empty,
     status_segments: std.ArrayList(StatusSegmentDecl) = .empty,
     grants: std.ArrayList(ManifestGrantDecl) = .empty,
+    slots: std.ArrayList(SlotDeclDecl) = .empty,
 
     pub fn create(gpa: Allocator, owner: []const u8, tier: Tier) !*Manifest {
         const self = try gpa.create(Manifest);
@@ -329,6 +365,11 @@ pub const Manifest = struct {
             gpa.free(d.role);
         }
         self.status_segments.deinit(gpa);
+        for (self.slots.items) |d| {
+            gpa.free(d.name);
+            schema_mod.freeSchema(gpa, d.schema);
+        }
+        self.slots.deinit(gpa);
         for (self.grants.items) |d| {
             gpa.free(d.plugin);
             gpa.free(d.capability);
@@ -378,6 +419,19 @@ pub const Manifest = struct {
             .text = try self.gpa.dupe(u8, text),
             .role = try self.gpa.dupe(u8, role),
             .priority = priority,
+        });
+    }
+    /// Stage a `weft.slot` declaration. `schema` is deep-cloned
+    /// (`schema_mod.cloneSchema`) — the caller's value need not outlive
+    /// this call.
+    pub fn addSlot(self: *Manifest, name: []const u8, shape: container_mod.Shape, composition: container_mod.Composition, schema: *const schema_mod.Schema) !void {
+        const cloned = try schema_mod.cloneSchema(self.gpa, schema);
+        errdefer schema_mod.freeSchema(self.gpa, cloned);
+        try self.slots.append(self.gpa, .{
+            .name = try self.gpa.dupe(u8, name),
+            .shape = shape,
+            .composition = composition,
+            .schema = cloned,
         });
     }
     pub fn addGrant(self: *Manifest, plugin: []const u8, capability: []const u8, root: []const u8) !void {
@@ -454,6 +508,25 @@ pub const Manifest = struct {
             hStr(h, d.plugin);
             hStr(h, d.capability);
             hStr(h, d.root);
+        }
+        hLen(h, self.slots.items.len);
+        for (self.slots.items) |d| {
+            hStr(h, d.name);
+            h.update(std.mem.asBytes(&d.shape));
+            h.update(std.mem.asBytes(&d.composition));
+            // The schema is PART OF THE MANIFEST HASH (§2.2 form 3: "changing
+            // a slot's schema changes the approved artifact, exactly as
+            // changing a grant does") — canonicalizeSchema never allocates
+            // failably-in-a-way-this-hot-path-can't-just-skip, but `hashInto`
+            // has no error return (matches every other field here), so an
+            // OOM degrades to hashing nothing for this one field rather than
+            // panicking — see the test below for why that's still sound (an
+            // OOM here means the process is about to fail allocating for
+            // real work anyway).
+            if (schema_mod.canonicalizeSchema(std.heap.page_allocator, d.schema)) |blob| {
+                defer std.heap.page_allocator.free(blob);
+                hStr(h, blob);
+            } else |_| {}
         }
         hLen(h, self.imports.items.len);
         for (self.imports.items) |imp| imp.hashInto(h);
@@ -569,6 +642,22 @@ pub const Manifest = struct {
             actx.ctx.head.echo.appendSlice(gpa, d.message) catch {};
         }
         for (self.logs.items) |d| std.log.info("config: {s}", .{d.message});
+        // D2's `weft.slot` (§2.2 form 3): unlike `status_segments`, no opaque
+        // binder seam is needed — `Container.declareSlot` is already
+        // core-layer (see `SlotDeclDecl`'s doc for why). The schema pointer
+        // is BORROWED by Container (matches every other slot declarer); it
+        // stays alive because this `Manifest` owns it for its own lifetime,
+        // which is guaranteed to outlive the `System`/`Container` it applies
+        // into (a config reload destroys the OLD manifest only after the new
+        // one has applied — see `reconcile`).
+        for (self.slots.items) |d| {
+            actx.ctx.actions.container.declareSlot(.{
+                .name = d.name,
+                .shape = d.shape,
+                .composition = d.composition,
+                .schema = d.schema,
+            }) catch {};
+        }
         for (self.status_segments.items) |*d| {
             if (actx.ui_bind) |binder| {
                 // `@constCast`: sound here — see `StatusSegBinder.bind`'s
@@ -1147,6 +1236,62 @@ test "manifest: staging — weft.grant lands as a ManifestGrantDecl, hash-sensit
     try d.addGrant("git", "fs_write", ""); // unrestricted — a different decl than a limited one
     try t.expect(a.hash() != d.hash());
 }
+
+test "manifest: staging — weft.slot lands as a SlotDeclDecl, hash-sensitive to its schema (D2 §2.2 form 3)" {
+    const gpa = t.allocator;
+    const str_ty: schema_mod.Schema = .str;
+    const u32_ty: schema_mod.Schema = .{ .scalar = .u32 };
+    const fields_v1 = [_]schema_mod.Schema.Field{.{ .name = "text", .ty = &str_ty }};
+    const schema_v1: schema_mod.Schema = .{ .@"struct" = &fields_v1 };
+
+    const a = try Manifest.create(gpa, "config", .config);
+    defer a.destroy();
+    try a.addSlot("ui/badge", .query, .ordered_union, &schema_v1);
+
+    try t.expectEqual(@as(usize, 1), a.slots.items.len);
+    try t.expectEqualStrings("ui/badge", a.slots.items[0].name);
+    try t.expectEqual(container_mod.Shape.query, a.slots.items[0].shape);
+    // The staged schema is a DEEP, independent clone — proven by mutating
+    // the source `schema_v1` after staging and confirming the manifest's
+    // own copy is unaffected (it is a distinct heap tree; `schemaEql`
+    // structural-compares it against the ORIGINAL shape below instead).
+    try t.expect(schema_mod.schemaEql(&schema_v1, a.slots.items[0].schema));
+
+    const b = try Manifest.create(gpa, "config", .config);
+    defer b.destroy();
+    try b.addSlot("ui/badge", .query, .ordered_union, &schema_v1);
+    try t.expectEqual(a.hash(), b.hash());
+
+    // A DIFFERENT schema (an added field — §2.3's only legal evolution, but
+    // still a hash-visible change: "changing a slot's schema changes the
+    // approved artifact, exactly as changing a grant does") hashes
+    // differently, even though the SLOT NAME is identical.
+    const fields_v2 = [_]schema_mod.Schema.Field{
+        .{ .name = "text", .ty = &str_ty },
+        .{ .name = "count", .ty = &u32_ty },
+    };
+    const schema_v2: schema_mod.Schema = .{ .@"struct" = &fields_v2 };
+    const c = try Manifest.create(gpa, "config", .config);
+    defer c.destroy();
+    try c.addSlot("ui/badge", .query, .ordered_union, &schema_v2);
+    try t.expect(a.hash() != c.hash());
+
+    // A different composition, same name+schema, also hash-visible.
+    const d = try Manifest.create(gpa, "config", .config);
+    defer d.destroy();
+    try d.addSlot("ui/badge", .query, .merge_ranked, &schema_v1);
+    try t.expect(a.hash() != d.hash());
+}
+
+// NOTE (D2 slice report): `applyDecls`'s `weft.slot` loop (above, in
+// `applyDecls` itself) has no FILE-LOCAL end-to-end test against a real
+// `command.Context` — consistent with every OTHER `applyDecls` loop in this
+// file (`binds`/`provides`/`values`/…), none of which has one either: this
+// file's tests exercise staging + hashing directly (see the test above);
+// `apply`/`reconcile` against a live `System` are covered at the
+// `System`/`config_load.zig` integration level, which this slice does not
+// add new coverage to (unchanged surface — the new loop calls the same
+// already-tested `Container.declareSlot` every other slot declarer calls).
 
 test "manifest: grantDiffSummary — the first load reads every plugin as added, grants bracketed" {
     const gpa = t.allocator;

@@ -98,6 +98,15 @@ pub const Context = struct {
     /// `Ctx.grants` (zero allocation, no wallet — capture COLLECTS matching
     /// rows, it never mints new ones).
     grant_table: ?*@import("grants.zig").HandleTable = null,
+    /// D2's generic, schema-directed slot host (doc/d2-schema-payloads.md
+    /// §3.2, `core/slot.zig`) — the sibling of `caps` for RUNTIME-declared
+    /// `wl_slot_*`/`wl_payload_*` slots. `null` everywhere this isn't wired
+    /// (every pre-D2 fixture, and any test that doesn't opt in), matching
+    /// `grant_table`'s optional-field convention exactly: `wasm_host/slot.zig`'s
+    /// handlers no-op (or trap loudly, per handler — see that file) when this
+    /// is unset, so every existing `Context{...}` literal across the tree
+    /// compiles unchanged.
+    slot_host: ?*@import("slot.zig").SlotHost = null,
 
     pub fn buffer(self: *Context) *Buffers.Buffer {
         return self.buffers.active();
