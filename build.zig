@@ -201,13 +201,64 @@ pub fn build(b: *std.Build) void {
     compare_only_popup_opts.addOption(bool, "record_popup_layout", false);
     test_mod.addOptions("popup_layout_options", compare_only_popup_opts);
 
+    // task #23 — READ THIS BEFORE treating `failed command: .../test
+    // --listen=-` as a failure. It can print on a run where every test
+    // PASSED (`Build Summary: ...; N/N tests passed`, exit 0) — it is not,
+    // by itself, a build-protocol bug or a flake to chase. Root-caused by
+    // reading Zig 0.16's build runner (lib/zig/compiler/build_runner.zig
+    // `makeStep`, lib/zig/std/Build/Step/Run.zig `evalZigTest`):
+    //
+    //   1. A `--listen=-` test binary signals "no more tests" by finishing
+    //      its last test and EXITING — which closes its stdout. The build
+    //      runner's protocol reader sees that as `EndOfStream` (`no_poll`
+    //      in `evalZigTest`) — THE SAME event a genuine mid-test crash
+    //      produces. It disambiguates the two by checking `tests_done &&
+    //      exited==0` afterward, but EITHER WAY it captures whatever the
+    //      child wrote to its real stderr into `result_stderr` first,
+    //      unconditionally.
+    //   2. `makeStep` then prints that step's captured stderr + this
+    //      `failed command:` line whenever `result_stderr.len > 0` — the
+    //      comment there is literally "no matter the result" — regardless
+    //      of whether the step went on to succeed.
+    //   3. This suite's tests legitimately log at `.warn` to real stderr as
+    //      their OWN assertion mechanism (wasm guest-trap / capability-
+    //      denial fixtures — see `wasm.zig`'s `checkErr`/`checkTrap` and
+    //      task #8's crash-observability doctrine below). That's expected,
+    //      wanted test content, not a bug to silence — so `result_stderr`
+    //      is routinely non-empty on an all-green run, and step 2 fires.
+    //
+    // Net: this text is cosmetic noise, not a signal. THE RELIABLE SIGNAL
+    // is the process exit code (0 = every step + test genuinely passed —
+    // `Step.make` only returns `error.MakeFailed`, which is what actually
+    // fails the build, when `test_results.isSuccess()` is false, i.e. a
+    // real `fail_count`/`crash_count`/`timeout_count`). Run `zig build test
+    // --summary all` to also print the reassuring "N/N tests passed" line
+    // alongside the noise (the default `--summary` is `failures`, which
+    // prints NOTHING on a clean pass — so a noisy-but-green run shows only
+    // the alarming half by default). A REAL failure looks different: it
+    // additionally prints `error: 'test name' failed: ...` with a stack
+    // trace (or `N errors were logged.` for an unexpected `.err` log)
+    // BEFORE the `failed command:` line — that block's presence, not the
+    // `failed command:` line, is what to act on.
+    //
+    // Neither `--summary` nor `--test-timeout` (the closest built-in lever
+    // for a hung test) can be defaulted from here: both are `zig build`
+    // CLI flags parsed by the build runner before `build()` runs, and
+    // `std.Build.Step.Run` exposes no per-step field for either — verified
+    // against this Zig's std/Build/Step/Run.zig and compiler/build_runner.zig.
+    // So this can't be engineered away from build.zig; it's documented
+    // here instead, at the one place a reader hits it.
     const unit_tests = b.addTest(.{ .root_module = test_mod });
     const run_tests = b.addRunArtifact(unit_tests);
     const test_step = b.step("test", "Run unit tests");
     test_step.dependOn(&run_tests.step);
 
     // The `weft` module owns the core/gfx/app files, so its own unit tests run in
-    // a second test binary; the `test` step runs both.
+    // a second test binary; the `test` step runs both. The two binaries run as
+    // sibling, unordered dependencies of `test_step` — Zig's build runner is
+    // free to run them CONCURRENTLY (subject to `-j`/available job slots), so
+    // don't assume serial execution when reasoning about timing-sensitive tests
+    // (e.g. e2e/latency_test.zig) run under `test_mod`.
     const weft_tests = b.addTest(.{ .root_module = weft_mod });
     const run_weft_tests = b.addRunArtifact(weft_tests);
     test_step.dependOn(&run_weft_tests.step);
