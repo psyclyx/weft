@@ -331,7 +331,49 @@ pub const RemoteFs = struct {
 
 /// Serve a base_open / base_read call from `doc`'s compacted base.
 /// Reply: uv id | u8 ok, then op-specific body. A doc that is not
-/// compacted answers ok=0 (client falls back to full sync).
+/// (meaningfully) compacted answers ok=0 (client falls back to full
+/// sync).
+///
+/// An earlier W7a draft added a server-side `openPartialCompatible` gate
+/// here, working around a stemma v0.5.0 bug where `ObjectDoc.openPartial`
+/// rejected any REAL (edited-then-compacted, not just the degenerate
+/// founder) compaction boundary. Fixed upstream in stemma v0.5.1
+/// (`build.zig.zon`'s pin): `openPartial`'s accepted range is now
+/// `head.seq <= seq_base` (not `==`), covering both regimes — see
+/// `ObjectDoc.openPartial`'s own doc comment for the two cases and why
+/// `head.seq <= seq_base` holds. That invariant holds for ANY `base_
+/// version`/watermark pair `Document` itself can produce, by
+/// construction: `init` mints the founder via `openFromContent`
+/// (`head.seq == seq_base`, trivially) and `compact` always raises the
+/// compacting agent's `seq_base` to `stable_token`'s seq + 1 (`head.seq
+/// == seq_base - 1`, i.e. `<`) — there is no path in this file that could
+/// hand `openPartial` a self-inconsistent pair, so a redundant recheck
+/// here would only ever assert something `serveBase` already guarantees.
+/// `openPartial` itself validates loudly on genuine inconsistency (an
+/// `assert`, not a silent wrong-identity mint — see its doc comment) — the
+/// right place for that defense is centrally in stemma, once, not
+/// duplicated at every caller. Removed rather than loosened.
+///
+/// W7a mechanical change (w7-rebase.md §3.2's "serveBase's TextDoc-only
+/// base_bytes read"): `TextDoc` had one whole-document `base_bytes`
+/// field; `ObjectDoc` compacts PER OBJECT (`text_bases`, keyed by the
+/// object's `ObjId`) — this now reads `doc.doc.text_bases.get(doc.body)`
+/// instead. The "not compacted" gate changed with it, honestly, not just
+/// mechanically: under `TextDoc`, `base_version.len == 0` meant "never
+/// compacted" (a fresh document has none). Under `Document`'s `ObjectDoc`
+/// substrate, EVERY document has a non-empty `base_version` from
+/// `init` onward (the founder text-object-creation event — see
+/// `Document.init`'s doc comment), so that check would now say "ok=1"
+/// for a perfectly ordinary, never-explicitly-compacted document with a
+/// trivial (possibly zero-byte) base — exactly the case this gate exists
+/// to say "no, fall back to full sync" for. The honest replacement: is
+/// there any REAL content in the base worth serving — `text_bases[body].
+/// bytes.len > 0`. True for a bulk-loaded file (the whole content IS the
+/// base from `adoptContent`) and for a document `compact`ed after real
+/// edits (the base is rebuilt to hold everything up to the stable
+/// point); false for a plain `init`ed, never-compacted document (the
+/// founder's base is the empty string) and, same as before, for a
+/// document with any still-unrealized span (`!doc.baseRealized()`).
 pub fn serveBase(gpa: Allocator, doc: *Document, payload: []const u8) ![]u8 {
     var cur: []const u8 = payload;
     const id = try wire.getUv(&cur);
@@ -343,8 +385,9 @@ pub fn serveBase(gpa: Allocator, doc: *Document, payload: []const u8) ![]u8 {
     try wire.putUv(gpa, &reply, id);
 
     const base_version = doc.doc.base_version;
-    const base_bytes = doc.doc.base_bytes;
-    if (base_version.len == 0 or !doc.baseRealized()) {
+    const text_base = doc.doc.text_bases.get(doc.body);
+    const base_bytes = if (text_base) |tb| tb.bytes else &.{};
+    if (base_bytes.len == 0 or !doc.baseRealized()) {
         try reply.append(gpa, 0);
         return reply.toOwnedSlice(gpa);
     }

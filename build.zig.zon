@@ -20,8 +20,8 @@
             .lazy = true,
         },
         .stemma = .{
-            .url = "https://github.com/psyclyx/stemma/archive/refs/tags/v0.5.0.tar.gz",
-            .hash = "stemma-0.5.0-CIOtoLM2CwBEb19lrurqvDR6RGhQWFpwOJBCDbRKbCVb",
+            .url = "https://github.com/psyclyx/stemma/archive/refs/tags/v0.5.1.tar.gz",
+            .hash = "stemma-0.5.1-CIOtoCSSCwD69dQ1C8uW7pEjTqZ3bKxGWf06XZVt0Ob5",
             .lazy = true,
         },
         .snail_local = .{ .path = "../../lib/snail", .lazy = true },

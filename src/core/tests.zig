@@ -1000,8 +1000,14 @@ test "editor: bulk load — big file opens as a compacted base, edits and saves"
     var ed = try Editor.init(gpa, pool, "user");
     defer ed.deinit(gpa);
     try ed.openFile(gpa, path);
-    // Zero events: the content is the base.
-    try t.expectEqual(@as(usize, 0), ed.doc.eventCount());
+    // O(1) events, not O(content): the content is the base. Under the
+    // graph substrate (W7a) that floor is 1, not 0 — the body text
+    // object's founder creation event, which is never itself a
+    // compaction target (`Document.founder_event_count`'s doc comment) —
+    // still nowhere near the millions a per-scalar load of a multi-MB
+    // file would cost, which is the property this assertion actually
+    // guards.
+    try t.expectEqual(@as(usize, 1), ed.doc.eventCount());
     try t.expect(!try ed.isDirty(gpa));
 
     // Ordinary editing + guarded save on top of the base.
@@ -1060,7 +1066,10 @@ test "editor: compactNow keeps the backing mirror and saves working" {
     defer ed.deinit(gpa);
     try ed.openFile(gpa, path);
     try ed.compactNow(gpa);
-    try t.expectEqual(@as(usize, 0), ed.doc.eventCount());
+    // Same floor as the bulk-load case above: `compact` folds every
+    // text_ins/text_del away but never the founder's creation event, so
+    // the post-compact floor is 1, not 0, under the graph substrate.
+    try t.expectEqual(@as(usize, 1), ed.doc.eventCount());
     try t.expect(!try ed.isDirty(gpa));
 
     // The panic case: edit + save AFTER compaction — markSaved's
