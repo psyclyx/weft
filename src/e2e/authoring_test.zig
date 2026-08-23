@@ -1135,6 +1135,91 @@ test "lsp: references + symbols via the lsp plugin — real zls" {
     try t.expect(ed.pick.items.items.len >= 2);
 }
 
+test "lsp: open returns immediately, before the server's handshake — real zls" {
+    const gpa = t.allocator;
+    var app: App = undefined;
+    try app.init(gpa);
+    defer app.deinit();
+    const ed = &app.ed;
+
+    // Needs the real toolchain (src/e2e/shell.nix); skip cleanly without zls.
+    if (!h.toolAvailable(gpa, "zls")) return error.SkipZigTest;
+
+    {
+        const out = try app.proj.oracle(
+            \\cat > quick.zig <<'EOF'
+            \\pub fn main() void {}
+            \\EOF
+        );
+        gpa.free(out);
+    }
+
+    // `open` (and the `on_activate` it triggers, which is what spawns zls)
+    // must return without waiting on the server's fork+exec or its
+    // initialize handshake. This is a HANG BACKSTOP (generous — a shared,
+    // contended CI box can stall a scheduled thread for a while — not a
+    // tight perf gate; see e2e/latency_test.zig for the real latency
+    // instrument): a regression that reintroduces a blocking spawn+handshake
+    // wait on this path would blow way past even this bound, since it would
+    // be waiting on zls's real startup, not a scheduling hiccup.
+    const start = core.task.nowNs();
+    ed.runStr("open", "quick.zig");
+    const elapsed = core.task.nowNs() - start;
+    try t.expect(elapsed < 2 * std.time.ns_per_s);
+
+    // The buffer is immediately editable through the real insert path —
+    // never stalled waiting for zls to become ready.
+    const core_ed = &ed.buffers.active().editor;
+    try core_ed.insertText(gpa, "// touched before any handshake could finish\n");
+    const txt = try ed.textAlloc();
+    defer gpa.free(txt);
+    try t.expect(std.mem.indexOf(u8, txt, "// touched before any handshake could finish") != null);
+
+    // The server does eventually come up and answer — the other lsp tests
+    // prove the full round-trip; this just confirms it wasn't on the
+    // critical path to get this far.
+    ed.settle(300);
+}
+
+test "lsp: a configured server binary that doesn't exist degrades silently — no block, no hang" {
+    const gpa = t.allocator;
+    var app: App = undefined;
+    try app.init(gpa);
+    defer app.deinit();
+    const ed = &app.ed;
+
+    // A made-up extension pointed at a command that can't possibly exist —
+    // "a server is configured but nothing is installed for it", distinct
+    // from "no server configured at all" (where `serverCmd` returns "" and
+    // the plugin never spawns anything, already the common no-op case every
+    // non-.zig file exercises).
+    try ed.setConfig("lsp", "noexist", "definitely-not-a-real-lsp-server-xyz123");
+
+    {
+        const out = try app.proj.oracle("printf 'hello\\n' > missing.noexist");
+        gpa.free(out);
+    }
+
+    const start = core.task.nowNs();
+    ed.runStr("open", "missing.noexist");
+    const elapsed = core.task.nowNs() - start;
+    try t.expect(elapsed < 2 * std.time.ns_per_s); // generous hang backstop, not a perf gate
+
+    // Usable immediately regardless of the absent server.
+    const core_ed = &ed.buffers.active().editor;
+    try core_ed.insertText(gpa, "world\n");
+
+    // No LSP feature can ever answer (there is nothing to answer with) — a
+    // bounded settle, then a command that would need the server: no crash,
+    // no hang, and no popup ever appears (the "honest warn" — none of this
+    // spams the echo line repeatedly; `ensureServer` only attempts the spawn
+    // once per language, not once per keystroke).
+    ed.settle(20);
+    ed.run("hover");
+    ed.settle(20);
+    for (ed.plugins.items) |pl| try t.expect(!pl.surface.active); // nothing ever rendered
+}
+
 test "debug: a real DAP session — launch, hit a breakpoint, see the stack, continue" {
     const gpa = t.allocator;
     var app: App = undefined;
