@@ -38,6 +38,8 @@ const BlobServer = remote_fs.BlobServer;
 const RemoteFile = remote_fs.RemoteFile;
 const RemoteFs = remote_fs.RemoteFs;
 
+const syntax_claim = @import("../syntax_claim.zig");
+
 const t = std.testing;
 
 fn socketPair() ![2]i32 {
@@ -2352,4 +2354,622 @@ test "subtree grant: confinement over the REAL wire (socketpair e2e) — admitte
     try t.expectEqual(@as(usize, 1), rig.gb.refusals.items.len);
     try t.expectEqual(GraphCollab.RefusalReason.authority, rig.gb.refusals.items[0].reason);
     try t.expect(rig.origin.ref(rig.origin.resolve(rig.room2) catch unreachable).mapGet("denied-edit") == null);
+}
+
+// ── W7b — THE FLAGSHIP GATE (doc/w7-rebase.md §4 W7b, north-star-plan.md
+// §6 W7): a function-level subtree grant on a CODE buffer, keyed by node
+// identity, surviving a peer's concurrent in-function edit AND a peer's
+// move/reorder of the function, OR trapping loudly on its deletion.
+//
+// "Code buffer" here is a `GraphDoc` reconciled by `syntax_claim.reconcile`
+// (W7b piece 2) into one struct node per function, each owning its OWN
+// `"body"` text object (see `syntax_claim.zig`'s module doc comment for
+// why that decouples "where a function sits" from "what it contains," and
+// hence why a move can never collapse anything here). The admission
+// machinery below is 100% the EXISTING, already-shipped W6 slice 2
+// mechanism (`GraphCollab.grantSubtree`/`admitRegions`) — piece 1
+// (`graph.zig`'s struct-forest-aware `contains`/`reachable` and the
+// move-admission rule in `touchedRegionsWithin`) is what makes it correct
+// for struct nodes; nothing new is built here, only wired and exercised.
+//
+// A lighter rig than `LeaseRig`'s full socketpair `Conn` wire (same choice
+// the "peer confined to a granted subtree" test above makes): a real
+// `SessionPair` for authenticated identity (`admitRegions` only ever calls
+// `session.peerFingerprint()`, never anything wire-shaped), batch bytes
+// moved by hand via `eventsSince`/`admitRegions`/`merge` — deterministic,
+// no timing-dependent `pump`/deadline loop to flake (see
+// [[flakes-are-real-bugs]]: a timing flake on a fast box is a real bug,
+// avoided here by construction rather than budgeted for).
+
+/// Two docs sharing a code buffer reconciled into three functions
+/// (`helperA`, `functionB`, `helperC`) — `functionB` is the one a grant
+/// will confine a peer to.
+const SyntaxGateDocs = struct {
+    alice: GraphDoc,
+    bob: GraphDoc,
+    a_ref: GraphDoc.NodeRef,
+    b_ref: GraphDoc.NodeRef,
+    c_ref: GraphDoc.NodeRef,
+
+    const source =
+        \\const std = @import("std");
+        \\
+        \\fn helperA() void {
+        \\    doA();
+        \\}
+        \\
+        \\pub fn functionB(x: i32) i32 {
+        \\    return x + 1;
+        \\}
+        \\
+        \\fn helperC() void {
+        \\    doC();
+        \\}
+        \\
+    ;
+
+    fn setup(gpa: Allocator) !SyntaxGateDocs {
+        var alice = try GraphDoc.init(gpa, "alice");
+        errdefer alice.deinit(gpa);
+        // `res.created` is OWNED (freed by `deinit` below); `res.kept`/
+        // `.deleted` are plain counts, nothing to free — see
+        // `ReconcileResult`'s field docs.
+        var res = try syntax_claim.reconcile(gpa, &alice, source);
+        defer res.deinit(gpa);
+        try t.expectEqual(@as(usize, 3), res.created.items.len);
+
+        const a_ref = (try syntax_claim.findByName(gpa, &alice, "helperA")).?;
+        errdefer a_ref.free(gpa);
+        const b_ref = (try syntax_claim.findByName(gpa, &alice, "functionB")).?;
+        errdefer b_ref.free(gpa);
+        const c_ref = (try syntax_claim.findByName(gpa, &alice, "helperC")).?;
+        errdefer c_ref.free(gpa);
+
+        const bytes = try alice.serialize(gpa);
+        defer gpa.free(bytes);
+        var bob = try GraphDoc.open(gpa, "bob", bytes);
+        errdefer bob.deinit(gpa);
+
+        return .{ .alice = alice, .bob = bob, .a_ref = a_ref, .b_ref = b_ref, .c_ref = c_ref };
+    }
+
+    fn deinit(self: *SyntaxGateDocs, gpa: Allocator) void {
+        self.a_ref.free(gpa);
+        self.b_ref.free(gpa);
+        self.c_ref.free(gpa);
+        self.alice.deinit(gpa);
+        self.bob.deinit(gpa);
+    }
+};
+
+/// Admit `batch` through `gc`, merge it into `docs.alice` if admitted, and
+/// fail the test loudly on refusal — the "should always land" shape parts
+/// (a)/(b) of the gate share.
+fn admitAndMerge(gpa: Allocator, gc: *GraphCollab, docs: *SyntaxGateDocs, batch: []const u8) !void {
+    switch (try gc.admitRegions(gpa, batch)) {
+        .admit => {},
+        .refuse => |r| {
+            r.free(gpa);
+            return error.TestUnexpectedResult;
+        },
+    }
+    const changes = try docs.alice.merge(gpa, batch);
+    gpa.free(changes);
+}
+
+test "W7b gate: function-level subtree grant survives a concurrent in-function edit (a), a host MOVE of the function (b), and traps loudly on host DELETE (c)" {
+    const gpa = t.allocator;
+    var sp: SessionPair = undefined;
+    try SessionPair.setup(gpa, &sp);
+    defer sp.deinit();
+
+    var docs = try SyntaxGateDocs.setup(gpa);
+    defer docs.deinit(gpa);
+
+    var table = grants.HandleTable.init(gpa);
+    defer table.deinit();
+    var gc = try GraphCollab.init(gpa, sp.a, &docs.alice, "codebuf");
+    defer gc.deinit();
+    gc.bindGrants(&table);
+
+    // The host grants the peer's AUTHENTICATED identity authority over
+    // `functionB`'s subtree ONLY — nothing about helperA/helperC.
+    _ = try gc.grantSubtree(docs.b_ref);
+
+    const alice_b = try docs.alice.resolve(docs.b_ref);
+    const alice_b_body = syntax_claim.bodyOf(&docs.alice, alice_b).?;
+    const bob_b = try docs.bob.resolve(docs.b_ref);
+    const bob_b_body = syntax_claim.bodyOf(&docs.bob, bob_b).?;
+    const alice_a = try docs.alice.resolve(docs.a_ref);
+    const alice_a_body = syntax_claim.bodyOf(&docs.alice, alice_a).?;
+
+    // ── (a) the peer edits INSIDE functionB, CONCURRENTLY with the host
+    // editing elsewhere (helperA's own body, never granted) — the peer's
+    // edit is admitted (subtree containment: functionB's body is a direct
+    // child of functionB's own struct node), the host's edit needs no
+    // admission at all (it's the host's own replica), and both converge —
+    // disjoint objects, D1 §3 case 1.
+    _ = try docs.alice.textInsert(gpa, alice_a_body, 0, "// host edit elsewhere\n");
+    _ = try docs.bob.textInsert(gpa, bob_b_body, 0, "// peer edit\n");
+    {
+        const av = try docs.alice.version(gpa);
+        defer gpa.free(av);
+        const batch = try docs.bob.eventsSince(gpa, av);
+        defer gpa.free(batch);
+        try admitAndMerge(gpa, &gc, &docs, batch);
+    }
+    try t.expectEqual(@as(usize, 0), gc.refusals.items.len);
+    // Sync alice's own edit back to bob too, then assert full convergence.
+    {
+        const bv = try docs.bob.version(gpa);
+        defer gpa.free(bv);
+        const batch = try docs.alice.eventsSince(gpa, bv);
+        defer gpa.free(batch);
+        const changes = try docs.bob.merge(gpa, batch);
+        gpa.free(changes);
+    }
+    {
+        const av = try docs.alice.version(gpa);
+        defer gpa.free(av);
+        const bv = try docs.bob.version(gpa);
+        defer gpa.free(bv);
+        try t.expectEqual(GraphDoc.VersionOrder.equal, try docs.alice.compareVersions(gpa, av, bv));
+    }
+    {
+        const body_bytes = try docs.alice.ref(alice_b_body).textRope().toOwnedSlice(gpa);
+        defer gpa.free(body_bytes);
+        try t.expect(std.mem.indexOf(u8, body_bytes, "peer edit") != null);
+    }
+    {
+        const a_body_obj = syntax_claim.bodyOf(&docs.bob, try docs.bob.resolve(docs.a_ref)).?;
+        const bytes = try docs.bob.ref(a_body_obj).textRope().toOwnedSlice(gpa);
+        defer gpa.free(bytes);
+        try t.expect(std.mem.indexOf(u8, bytes, "host edit elsewhere") != null);
+    }
+
+    // ── (b) the HOST MOVES functionB: reparented under helperA's OWN
+    // struct node — a real structural move (not a cosmetic reorder),
+    // exercising piece 1's nested struct-forest containment too. An
+    // anchor-pair grant (w7-rebase.md §2.2) could not survive this AT ALL
+    // (a move in a shared-buffer model is a cut+paste, minting new
+    // insertion identity and collapsing the pair) — here NOTHING about
+    // functionB's own `ObjId` or its `"body"` object changes, so the
+    // grant (keyed on functionB's `NodeRef`) needs no re-issue, and the
+    // peer doesn't even need to learn about the move to keep editing.
+    {
+        const key = try GraphDoc.orderKeyBetween(gpa, null, null);
+        defer gpa.free(key);
+        try docs.alice.structMove(gpa, alice_b, .{ .node = alice_a }, key);
+    }
+    switch (docs.alice.structParent(alice_b).?) {
+        .node => |p| try t.expectEqual(alice_a, p),
+        .root, .trash => return error.TestUnexpectedResult,
+    }
+
+    _ = try docs.bob.textInsert(gpa, bob_b_body, 0, "// peer edit after move\n");
+    {
+        const av = try docs.alice.version(gpa);
+        defer gpa.free(av);
+        const batch = try docs.bob.eventsSince(gpa, av);
+        defer gpa.free(batch);
+        try admitAndMerge(gpa, &gc, &docs, batch);
+    }
+    try t.expectEqual(@as(usize, 0), gc.refusals.items.len);
+    {
+        const body_bytes = try docs.alice.ref(alice_b_body).textRope().toOwnedSlice(gpa);
+        defer gpa.free(body_bytes);
+        try t.expect(std.mem.indexOf(u8, body_bytes, "peer edit after move") != null);
+    }
+
+    // ── (c) the HOST DELETES functionB (`structDelete` — moves it to
+    // `.trash`). The peer's grant COLLAPSES: `functionB`'s `NodeRef` no
+    // longer resolves-`reachable` (piece 1's `reachable`, which now knows
+    // the struct forest), so `gatherGrantRoots` excludes it from the
+    // peer's usable roots — it was the peer's ONLY grant, so admission
+    // refuses EVERYTHING for this peer on this doc, loudly, `.collapsed`
+    // — never silently admitted, never silently dropped.
+    try docs.alice.structDelete(gpa, alice_b);
+    try t.expect(!try docs.alice.reachable(gpa, alice_b));
+
+    _ = try docs.bob.textInsert(gpa, bob_b_body, 0, "// peer edit after delete\n");
+    {
+        const av = try docs.alice.version(gpa);
+        defer gpa.free(av);
+        const batch = try docs.bob.eventsSince(gpa, av);
+        defer gpa.free(batch);
+        switch (try gc.admitRegions(gpa, batch)) {
+            .refuse => |r| {
+                defer r.free(gpa);
+                try t.expectEqual(GraphCollab.RefusalReason.collapsed, r.reason);
+            },
+            .admit => return error.TestUnexpectedResult,
+        }
+    }
+    {
+        const body_bytes = try docs.alice.ref(alice_b_body).textRope().toOwnedSlice(gpa);
+        defer gpa.free(body_bytes);
+        try t.expect(std.mem.indexOf(u8, body_bytes, "peer edit after delete") == null); // never merged
+    }
+}
+
+test "W7b gate: an in-node identity anchor inside a granted function's body survives a concurrent edit — names the CHARACTER, not the offset" {
+    const gpa = t.allocator;
+    var docs = try SyntaxGateDocs.setup(gpa);
+    defer docs.deinit(gpa);
+
+    const bob_b = try docs.bob.resolve(docs.b_ref);
+    const bob_b_body = syntax_claim.bodyOf(&docs.bob, bob_b).?;
+
+    const orig_bytes = try docs.bob.ref(bob_b_body).textRope().toOwnedSlice(gpa);
+    defer gpa.free(orig_bytes);
+    const anchor_off: usize = 10;
+    try t.expect(orig_bytes.len > anchor_off);
+    const target_char = orig_bytes[anchor_off];
+
+    const anchor = try docs.bob.objectAnchorAt(gpa, bob_b_body, anchor_off, .before);
+    defer gpa.free(anchor.agent);
+
+    // A concurrent in-function edit — exactly what a peer holding a
+    // subtree grant on functionB, or a collaborator sharing it, sends —
+    // inserted BEFORE the anchored position, shifting every byte offset
+    // from there on.
+    const prefix = "// concurrent edit\n";
+    _ = try docs.bob.textInsert(gpa, bob_b_body, 0, prefix);
+
+    var resolved: [1]usize = undefined;
+    try docs.bob.resolveObjectAnchors(gpa, bob_b_body, &.{anchor}, &resolved);
+
+    // The NUMERIC offset shifted by exactly the inserted prefix's length —
+    // if it named a fixed OFFSET, resolving would incorrectly still
+    // report `anchor_off`. It names the CHARACTER instead.
+    try t.expectEqual(anchor_off + prefix.len, resolved[0]);
+    const new_bytes = try docs.bob.ref(bob_b_body).textRope().toOwnedSlice(gpa);
+    defer gpa.free(new_bytes);
+    try t.expectEqual(target_char, new_bytes[resolved[0]]);
+}
+
+// ── W7b move-admission coverage (post-review) — the entire structural
+// admission path (`structuralChangeAdmitted`, `graph.zig`) had ZERO tests
+// before this: no peer batch anywhere in the suite ever carried a
+// `.structure` change through `admitRegions`. That is why the first
+// version's rule shipped with a real hole (review found it: node-and-
+// destination-only admits an ADOPT-IN — a peer moving a FOREIGN node to
+// become a child of their own granted root, escalating a narrow grant to
+// the whole document). The five tests below exercise all five structural
+// paths directly through `admitRegions`, real batches, same construction
+// as the flagship gate test above — including the null-origin adoption
+// variant (5/5) a second review pass flagged as non-blocking but worth
+// locking down given this is authority code.
+
+/// A small STRUCT FOREST, already converged, purpose-built for exercising
+/// the move-admission rule directly — no `syntax_claim`/reconcile
+/// involved (this is piece 1's own admission mechanism under test, not
+/// the syntax overlay): `granted` is the grant root, with two existing
+/// structural children `child1`/`child2` already nested under it
+/// (enough structure to test a reparent WITHIN the grant); `foreign` is a
+/// separate top-level struct node the peer is never granted.
+const StructGrantDocs = struct {
+    alice: GraphDoc,
+    bob: GraphDoc,
+    granted: GraphDoc.NodeRef,
+    child1: GraphDoc.NodeRef,
+    child2: GraphDoc.NodeRef,
+    foreign: GraphDoc.NodeRef,
+    /// A PLAIN map object — created via ordinary `set`, never
+    /// `structCreate`d — for move-admission test 5/5 (null-origin
+    /// adoption refusal): its pre-merge `structParent` is `null` because
+    /// it was never a struct-forest member at all, not because it's new.
+    plain: GraphDoc.NodeRef,
+
+    fn setup(gpa: Allocator) !StructGrantDocs {
+        var alice = try GraphDoc.init(gpa, "alice");
+        errdefer alice.deinit(gpa);
+        const granted_obj = try alice.structCreate(gpa, .root, "b");
+        const child1_obj = try alice.structCreate(gpa, .{ .node = granted_obj }, "b");
+        const child2_obj = try alice.structCreate(gpa, .{ .node = granted_obj }, "c");
+        const foreign_obj = try alice.structCreate(gpa, .root, "a");
+        const plain_obj = (try alice.set(gpa, null, "plain", .map)).?;
+
+        const granted_ref = try alice.nodeRef(gpa, granted_obj);
+        errdefer granted_ref.free(gpa);
+        const child1_ref = try alice.nodeRef(gpa, child1_obj);
+        errdefer child1_ref.free(gpa);
+        const child2_ref = try alice.nodeRef(gpa, child2_obj);
+        errdefer child2_ref.free(gpa);
+        const foreign_ref = try alice.nodeRef(gpa, foreign_obj);
+        errdefer foreign_ref.free(gpa);
+        const plain_ref = try alice.nodeRef(gpa, plain_obj);
+        errdefer plain_ref.free(gpa);
+
+        const bytes = try alice.serialize(gpa);
+        defer gpa.free(bytes);
+        var bob = try GraphDoc.open(gpa, "bob", bytes);
+        errdefer bob.deinit(gpa);
+
+        return .{ .alice = alice, .bob = bob, .granted = granted_ref, .child1 = child1_ref, .child2 = child2_ref, .foreign = foreign_ref, .plain = plain_ref };
+    }
+
+    fn deinit(self: *StructGrantDocs, gpa: Allocator) void {
+        self.granted.free(gpa);
+        self.child1.free(gpa);
+        self.child2.free(gpa);
+        self.foreign.free(gpa);
+        self.plain.free(gpa);
+        self.alice.deinit(gpa);
+        self.bob.deinit(gpa);
+    }
+};
+
+fn makeStructEnforcer(gpa: Allocator, docs: *StructGrantDocs, sess: *Session, table: *grants.HandleTable) !GraphCollab {
+    var gc = try GraphCollab.init(gpa, sess, &docs.alice, "structbuf");
+    gc.bindGrants(table);
+    return gc;
+}
+
+test "W7b move-admission (1/5): ADOPT-IN refused — a peer cannot move a FOREIGN node to become a child of their granted root" {
+    const gpa = t.allocator;
+    var sp: SessionPair = undefined;
+    try SessionPair.setup(gpa, &sp);
+    defer sp.deinit();
+    var docs = try StructGrantDocs.setup(gpa);
+    defer docs.deinit(gpa);
+    var table = grants.HandleTable.init(gpa);
+    defer table.deinit();
+    var gc = try makeStructEnforcer(gpa, &docs, sp.a, &table);
+    defer gc.deinit();
+    _ = try gc.grantSubtree(docs.granted);
+
+    // The reviewer's exact trace: `structMove(foreign, .{.node = granted},
+    // key)` — the node check (post-merge, `foreign` IS now a struct child
+    // of `granted`) and a NODE-ONLY destination check would both pass;
+    // this must be refused on the ORIGIN check (`foreign`'s pre-merge
+    // parent is `.root`, not a member of `{granted}`).
+    const bob_foreign = try docs.bob.resolve(docs.foreign);
+    const bob_granted = try docs.bob.resolve(docs.granted);
+    const key = try GraphDoc.orderKeyBetween(gpa, null, null);
+    defer gpa.free(key);
+    try docs.bob.structMove(gpa, bob_foreign, .{ .node = bob_granted }, key);
+
+    const av = try docs.alice.version(gpa);
+    defer gpa.free(av);
+    const batch = try docs.bob.eventsSince(gpa, av);
+    defer gpa.free(batch);
+    switch (try gc.admitRegions(gpa, batch)) {
+        .refuse => |r| {
+            defer r.free(gpa);
+            try t.expectEqual(GraphCollab.RefusalReason.authority, r.reason);
+        },
+        .admit => return error.TestUnexpectedResult,
+    }
+    // Never merged — `foreign` stays exactly where it was, at `.root`.
+    const alice_foreign = try docs.alice.resolve(docs.foreign);
+    switch (docs.alice.structParent(alice_foreign).?) {
+        .root => {},
+        .trash, .node => return error.TestUnexpectedResult,
+    }
+}
+
+test "W7b move-admission (2/5): MOVE-OUT refused — a peer cannot export a granted node to a foreign parent, nor self-delete it via move-to-trash" {
+    const gpa = t.allocator;
+    var sp: SessionPair = undefined;
+    try SessionPair.setup(gpa, &sp);
+    defer sp.deinit();
+    var docs = try StructGrantDocs.setup(gpa);
+    defer docs.deinit(gpa);
+    var table = grants.HandleTable.init(gpa);
+    defer table.deinit();
+    var gc = try makeStructEnforcer(gpa, &docs, sp.a, &table);
+    defer gc.deinit();
+    _ = try gc.grantSubtree(docs.granted);
+
+    // (2a) `child1` (granted, nested under `granted`) exported OUT to
+    // `.root` — origin ∈ union, destination ∉ union.
+    {
+        const bob_child1 = try docs.bob.resolve(docs.child1);
+        const key = try GraphDoc.orderKeyBetween(gpa, null, null);
+        defer gpa.free(key);
+        try docs.bob.structMove(gpa, bob_child1, .root, key);
+
+        const av = try docs.alice.version(gpa);
+        defer gpa.free(av);
+        const batch = try docs.bob.eventsSince(gpa, av);
+        defer gpa.free(batch);
+        switch (try gc.admitRegions(gpa, batch)) {
+            .refuse => |r| {
+                defer r.free(gpa);
+                try t.expectEqual(GraphCollab.RefusalReason.authority, r.reason);
+            },
+            .admit => return error.TestUnexpectedResult,
+        }
+    }
+
+    // (2b) the granted root itself moved to `.trash` (self-delete via
+    // move) — the corollary named in `structuralChangeAdmitted`'s doc
+    // comment, kept from the original rule: a subtree grant confers
+    // authority to edit WITHIN a node, not to strike it from existence.
+    {
+        const bob_granted = try docs.bob.resolve(docs.granted);
+        const key = try GraphDoc.orderKeyBetween(gpa, null, null);
+        defer gpa.free(key);
+        try docs.bob.structMove(gpa, bob_granted, .trash, key);
+
+        const av = try docs.alice.version(gpa);
+        defer gpa.free(av);
+        const batch = try docs.bob.eventsSince(gpa, av);
+        defer gpa.free(batch);
+        switch (try gc.admitRegions(gpa, batch)) {
+            .refuse => |r| {
+                defer r.free(gpa);
+                try t.expectEqual(GraphCollab.RefusalReason.authority, r.reason);
+            },
+            .admit => return error.TestUnexpectedResult,
+        }
+    }
+}
+
+test "W7b move-admission (3/5): REORDER-WITHIN-GRANT admitted — a peer may reparent one already-granted node under another, converges" {
+    const gpa = t.allocator;
+    var sp: SessionPair = undefined;
+    try SessionPair.setup(gpa, &sp);
+    defer sp.deinit();
+    var docs = try StructGrantDocs.setup(gpa);
+    defer docs.deinit(gpa);
+    var table = grants.HandleTable.init(gpa);
+    defer table.deinit();
+    var gc = try makeStructEnforcer(gpa, &docs, sp.a, &table);
+    defer gc.deinit();
+    _ = try gc.grantSubtree(docs.granted);
+
+    // `child1` reparented under `child2` — a PURE intra-subtree reparent:
+    // origin (`child1`'s pre-merge parent, `granted`) ∈ union, destination
+    // (`child2`) ∈ union, node (`child1`, post-merge) ∈ union.
+    const bob_child1 = try docs.bob.resolve(docs.child1);
+    const bob_child2 = try docs.bob.resolve(docs.child2);
+    const key = try GraphDoc.orderKeyBetween(gpa, null, null);
+    defer gpa.free(key);
+    try docs.bob.structMove(gpa, bob_child1, .{ .node = bob_child2 }, key);
+
+    const av = try docs.alice.version(gpa);
+    defer gpa.free(av);
+    const batch = try docs.bob.eventsSince(gpa, av);
+    defer gpa.free(batch);
+    switch (try gc.admitRegions(gpa, batch)) {
+        .admit => {},
+        .refuse => |r| {
+            r.free(gpa);
+            return error.TestUnexpectedResult;
+        },
+    }
+    const changes = try docs.alice.merge(gpa, batch);
+    gpa.free(changes);
+
+    const alice_child1 = try docs.alice.resolve(docs.child1);
+    const alice_child2 = try docs.alice.resolve(docs.child2);
+    switch (docs.alice.structParent(alice_child1).?) {
+        .node => |p| try t.expectEqual(alice_child2, p),
+        .root, .trash => return error.TestUnexpectedResult,
+    }
+
+    // Convergence.
+    {
+        const bv = try docs.bob.version(gpa);
+        defer gpa.free(bv);
+        const sync_batch = try docs.alice.eventsSince(gpa, bv);
+        defer gpa.free(sync_batch);
+        const sync_changes = try docs.bob.merge(gpa, sync_batch);
+        gpa.free(sync_changes);
+    }
+    {
+        const av2 = try docs.alice.version(gpa);
+        defer gpa.free(av2);
+        const bv2 = try docs.bob.version(gpa);
+        defer gpa.free(bv2);
+        try t.expectEqual(GraphDoc.VersionOrder.equal, try docs.alice.compareVersions(gpa, av2, bv2));
+    }
+}
+
+test "W7b move-admission (4/5): struct_CREATE inside the peer's own granted subtree is admitted — the transcript-append analog (a create has no origin to check)" {
+    const gpa = t.allocator;
+    var sp: SessionPair = undefined;
+    try SessionPair.setup(gpa, &sp);
+    defer sp.deinit();
+    var docs = try StructGrantDocs.setup(gpa);
+    defer docs.deinit(gpa);
+    var table = grants.HandleTable.init(gpa);
+    defer table.deinit();
+    var gc = try makeStructEnforcer(gpa, &docs, sp.a, &table);
+    defer gc.deinit();
+    _ = try gc.grantSubtree(docs.granted);
+
+    const bob_granted = try docs.bob.resolve(docs.granted);
+    const key = try GraphDoc.orderKeyBetween(gpa, null, null);
+    defer gpa.free(key);
+    const new_node = try docs.bob.structCreate(gpa, .{ .node = bob_granted }, key);
+    const new_ref = try docs.bob.nodeRef(gpa, new_node);
+    defer new_ref.free(gpa);
+
+    const av = try docs.alice.version(gpa);
+    defer gpa.free(av);
+    const batch = try docs.bob.eventsSince(gpa, av);
+    defer gpa.free(batch);
+    switch (try gc.admitRegions(gpa, batch)) {
+        .admit => {},
+        .refuse => |r| {
+            r.free(gpa);
+            return error.TestUnexpectedResult;
+        },
+    }
+    const changes = try docs.alice.merge(gpa, batch);
+    gpa.free(changes);
+
+    const alice_granted = try docs.alice.resolve(docs.granted);
+    const alice_new = try docs.alice.resolve(new_ref);
+    switch (docs.alice.structParent(alice_new).?) {
+        .node => |p| try t.expectEqual(alice_granted, p),
+        .root, .trash => return error.TestUnexpectedResult,
+    }
+}
+
+test "W7b move-admission (5/5): NULL-ORIGIN ADOPTION refused — a peer cannot bare-structMove a PRE-EXISTING plain object (never structCreate'd) into their granted subtree" {
+    const gpa = t.allocator;
+    var sp: SessionPair = undefined;
+    try SessionPair.setup(gpa, &sp);
+    defer sp.deinit();
+    var docs = try StructGrantDocs.setup(gpa);
+    defer docs.deinit(gpa);
+    var table = grants.HandleTable.init(gpa);
+    defer table.deinit();
+    var gc = try makeStructEnforcer(gpa, &docs, sp.a, &table);
+    defer gc.deinit();
+    _ = try gc.grantSubtree(docs.granted);
+
+    // `plain` PRE-EXISTS (an ordinary `set`-created map object, part of
+    // the converged setup) but was NEVER `structCreate`d — its pre-merge
+    // `structParent` is `null` because it was never a struct-forest
+    // member at all, NOT because it's new. LOCALLY, `ObjectDoc.structMove`
+    // has no precondition that `node` was ever `structCreate`d (see
+    // `structuralChangeAdmitted`'s doc comment) — bob's own call below
+    // succeeds unconditionally, on bob's OWN replica.
+    const bob_plain = try docs.bob.resolve(docs.plain);
+    const bob_granted = try docs.bob.resolve(docs.granted);
+    const key = try GraphDoc.orderKeyBetween(gpa, null, null);
+    defer gpa.free(key);
+    try docs.bob.structMove(gpa, bob_plain, .{ .node = bob_granted }, key);
+
+    const av = try docs.alice.version(gpa);
+    defer gpa.free(av);
+    const batch = try docs.bob.eventsSince(gpa, av);
+    defer gpa.free(batch);
+
+    // DISCOVERED WHILE WRITING THIS TEST, worth recording precisely: this
+    // construction never reaches a `.refuse` VERDICT at all — it is
+    // rejected a layer EARLIER and more fundamentally, at stemma's own
+    // merge validation. `ObjectDoc`'s `Walker.resolveStructNode`
+    // (`objects_state.zig`) requires ANY `struct_move`'s `node` target to
+    // trace back to a `.struct_create` op when merging from an UNTRUSTED
+    // (remote) source — `plain` fails that (it was `.map_set`, not
+    // `.struct_create`) — so `scratch.merge` inside `touchedRegionsWithin`
+    // itself returns `error.Corrupt`, propagated straight through
+    // `admitRegions` as a thrown error, never a `RegionVerdict`. This is
+    // an EVEN STRONGER refusal than `.authority` (the batch is invalid,
+    // not merely unauthorized) and makes `structuralChangeAdmitted`'s
+    // "pre-existing, no prior struct placement ⇒ ineligible" branch
+    // (graph.zig) unreachable via this exact path FOR A REMOTE BATCH —
+    // stemma's own decoder already closes it one layer down. That branch
+    // is kept anyway, as documented defense-in-depth (a different/future
+    // caller of the admission primitive that reaches a node without going
+    // through stemma's untrusted-merge validation would still need it),
+    // but THIS test's honest job is to confirm the ACTUAL enforcement
+    // point: never admitted, never merged, `plain`'s state unchanged —
+    // exactly the outcome asked for, via the mechanism that's really
+    // there.
+    try t.expectError(error.Corrupt, gc.admitRegions(gpa, batch));
+
+    // Never merged — `plain` was never a struct node before, and still
+    // isn't: `structParent` stays `null`, not `.node(granted)`. (`self`
+    // here is `docs.alice`, whose replica the failed merge never touched —
+    // `touchedRegionsWithin`'s scratch clone is thrown away on error,
+    // exactly like every other refused/failed admission attempt.)
+    const alice_plain = try docs.alice.resolve(docs.plain);
+    try t.expect(docs.alice.structParent(alice_plain) == null);
 }

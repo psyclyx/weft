@@ -333,6 +333,34 @@ projection id-diff, §2.3); grant on the function `NodeRef` via `graph_subtree`
 grant on a code buffer, keyed by node identity, survives a peer's concurrent
 in-function edit AND a peer's move/reorder of the function, OR traps loudly on
 the function's deletion/collapse.
+**[AS-BUILT 2026-08-22 — gate MET; one named integration remainder.]**
+Landed: the struct forest through the facade (containment = value-tree ∪
+struct-forest, one cycle guard; the struct `.root` sentinel and the map
+root are disjoint anchors, both walked for reachability); structural
+admission = pure INTRA-SUBTREE reparenting (origin ∈ union — read from
+the enforcer's pre-merge replica, the only place the pre-move parent
+exists — AND destination ∈ union AND node ∈ union; creates admit on
+destination alone iff the node is genuinely new to the enforcer; a
+pre-existing never-structCreate'd object is ineligible, closing the
+same annexation spelled as a bare structMove on a plain object; all
+five paths test-covered after review caught the adopt-in direction
+open and untested); syntax_claim.zig (per-function struct nodes owning
+dedicated body text objects; name-keyed identity v1 — a rename mints a
+new node, ts-query and anchor-matching are named follow-ups;
+single-reconciler discipline documented as a structural hazard, not
+yet enforced). The flagship scenario passes at the real admission
+chokepoint with authenticated identity: the grant follows its function
+through a move (the capability anchor-pairs cannot express) and traps
+`.collapsed` on deletion.
+**THE REMAINDER (recorded, not implied-done):** the editor's real code
+buffer is still W7a's single-`"text"` `Document`; the flagship runs on
+a reconciled function-graph `GraphDoc`. The honest integration is the
+PROJECTION: struct bodies become the code buffer's truth and the flat
+text a derived materialization ("text is a projection" — the north
+star's endgame shape), wired through `Document`/`Editor`/`Collab`,
+with `reconcile` as the id-diff maintenance it already is. A parallel
+dual-write representation is the forbidden class; the per-function
+design enables the projection and forecloses nothing.
 
 **Where each stemma delta already sits:** SeqWalker (`SeqWalker.zig`, both docs
 via `.dense`/`.sparse`), anchors (delta 3, `objectAnchorAt`), text compaction

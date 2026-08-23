@@ -66,6 +66,42 @@
 //! that reasoning stated against the actual model, not just in the
 //! abstract.
 //!
+//! ## The struct forest — exposed (W7b, doc/w7-rebase.md §4)
+//!
+//! The paragraph above was true at W5/W6 slice time — stemma's F3
+//! parent-register mechanism lived only in the test-only
+//! `structure_sketch.zig`, unreachable from `ObjectDoc` proper, so this
+//! facade correctly exposed no move/reparent primitive at all. **stemma
+//! v0.5.1 (pinned) ships it for real** — `ObjectDoc.structCreate`/
+//! `structMove`/`structDelete`/`structParent`/`structChildren`/
+//! `structCycleBroken` (delta 6) — and W7b's flagship (a function-level
+//! subtree grant that survives a peer's MOVE of the function,
+//! w7-rebase.md §2.2 point 1: "an anchor-pair CANNOT [survive a move];
+//! ... only real on the graph substrate") needs exactly this. So it is
+//! exposed below, straight through, as its own accessor group.
+//!
+//! This does NOT reopen the `seq*`/`list*` discipline above: those wrap
+//! `ObjectDoc.listInsert`/`listDelete` and remain LEAF-SEQUENCE-only
+//! (`ObjectDoc`'s list has no reparent primitive to wrap — nothing
+//! changed there). The struct forest is a genuinely SEPARATE parent
+//! relation stemma maintains (`struct_parents`, keyed by portable
+//! `EventId`, parented at one of two SENTINELS — `.root`/`.trash` — or
+//! another struct node — never at an ordinary map/list `ObjId`) —
+//! disjoint from, and composable with, the map/list containment tree a
+//! struct node's OWN fields still use ordinarily (a function's struct
+//! node is a real map object: `set(gpa, func_node, "body", .text)` works
+//! exactly like any other map). See `contains`/`reachable`'s section doc
+//! comment below for exactly how the two relations compose for
+//! containment and collapse.
+//!
+//! `parent`/`node` arguments below are raw LOCAL `ObjId`s — the SAME
+//! idiom `set`'s `parent: ?ObjId` already uses for ordinary local
+//! composition within one replica's own call sequence. A `NodeRef` is
+//! minted only where a value must CROSS a boundary (a grant's `root`, a
+//! subbuffer fact, a caller resuming work after a merge) — see
+//! `NodeRef`'s own doc comment; this is not a new rule, just applied to
+//! one more accessor group.
+//!
 //! ## `Projection`/`ReconcileMode` (§2.6) — named, `on_save` now built for
 //! one real client
 //!
@@ -215,6 +251,105 @@ pub fn textInsert(self: *GraphDoc, gpa: Allocator, text_obj: ObjId, byte_offset:
 
 pub fn textDelete(self: *GraphDoc, gpa: Allocator, text_obj: ObjId, range: stemma.Range) Error!stemma.Edit {
     return self.obj.textDelete(gpa, text_obj, range);
+}
+
+// ── The struct forest (W7b) — see the module doc comment's "The struct
+// forest — exposed" section for why this exists now and how it differs
+// from `seq*`/`list*` above. ────────────────────────────────────────────
+
+/// Where a structural node's parent register can point: the two
+/// permanent sentinels, or another structural node by LOCAL `ObjId`
+/// (mirrors `set`'s `parent: ?ObjId` idiom — mint a `NodeRef` only at a
+/// boundary, per the module doc comment).
+pub const StructRef = ObjectDoc.StructRef;
+
+/// Create a new structural node under `parent`, ordered by `order_key`
+/// among its siblings (`orderKeyBetween`). Returns the new node's LOCAL
+/// `ObjId` — immediately usable with `set`/`ref` like any other map
+/// object (a struct node IS a map object; the struct forest is a
+/// SEPARATE parent relation layered on top, not a new value kind).
+pub fn structCreate(self: *GraphDoc, gpa: Allocator, parent: StructRef, order_key: []const u8) (Error || error{OrderKeyTooLong})!ObjId {
+    return self.obj.structCreate(gpa, parent, order_key);
+}
+
+/// Identity-preserving move: `node` keeps its `ObjId` — hence keeps any
+/// grant keyed on it (`grants.GraphSubtree`) — while its EFFECTIVE parent
+/// register changes. This is precisely the capability an `EventAnchor`
+/// PAIR cannot express (w7-rebase.md §2.2: a cut+paste relocate mints new
+/// insertion identity and collapses an anchor-pair grant; a struct node's
+/// identity is untouched by a move because nothing about the node's OWN
+/// fields/text changed, only its placement in the forest).
+pub fn structMove(self: *GraphDoc, gpa: Allocator, node: ObjId, parent: StructRef, order_key: []const u8) (Error || error{OrderKeyTooLong})!void {
+    return self.obj.structMove(gpa, node, parent, order_key);
+}
+
+/// Sugar: move `node` to `.trash` (F3: "trash is another parent," not a
+/// true delete) — NOT recursive; `node`'s own struct-forest children keep
+/// pointing at it, unreachable from `.root` until it (and them) move
+/// back out. See `reachable`'s doc comment for how this is the
+/// collapse-trap condition a subtree grant relies on.
+pub fn structDelete(self: *GraphDoc, gpa: Allocator, node: ObjId) Error!void {
+    return self.obj.structDelete(gpa, node);
+}
+
+/// `node`'s current effective parent register, or `null` if `node` was
+/// never a struct node. LANDMINE (see `ObjectDoc.structParent`'s own doc
+/// comment in full): the winner is picked by a DIFFERENT rule than
+/// `ValueRef.mapGet`'s — a global Lamport-then-identity order over EVERY
+/// structural write in the doc, not a per-register MV rule — so the
+/// winner can sit OUTSIDE `structConflictCount`'s reported set when a
+/// cross-node cycle was broken (`structCycleBroken`). A projection
+/// surfacing "why is this node here" must check that before explaining
+/// the placement as an ordinary uncontested write.
+pub fn structParent(self: *const GraphDoc, node: ObjId) ?StructRef {
+    return self.obj.structParent(node);
+}
+
+/// Children of `parent` (`.root`/`.trash`/a node), sorted by order key
+/// then authoring identity — the sibling-order `structChildren` itself
+/// guarantees. Caller owns the returned slice.
+pub fn structChildren(self: *const GraphDoc, gpa: Allocator, parent: StructRef) Allocator.Error![]ObjId {
+    return self.obj.structChildren(gpa, parent);
+}
+
+/// `node`'s current order-key bytes (the sort key `structChildren` uses)
+/// — borrowed, valid for the doc's lifetime, `null` if `node` isn't a
+/// struct node. The currency `orderKeyBetween` computes a fresh midpoint
+/// against.
+pub fn structOrderKey(self: *const GraphDoc, node: ObjId) ?[]const u8 {
+    return self.obj.structOrderKey(node);
+}
+
+/// True iff `node`'s effective parent is a cycle-break survivor sitting
+/// OUTSIDE its own reported conflict set (`structParent`'s doc comment).
+pub fn structCycleBroken(self: *const GraphDoc, node: ObjId) bool {
+    return self.obj.structCycleBroken(node);
+}
+
+/// A byte-string fractional order-key strictly between `a` and `b`
+/// (either bound `null` for "no bound on that side") — the sibling-order
+/// currency `structCreate`/`structMove` consume. Caller owns the
+/// returned bytes.
+pub const orderKeyBetween = ObjectDoc.orderKeyBetween;
+
+// ── Per-object identity anchors (delta 3, already shipped) — exposed here
+// for a struct node's OWN body text object: "does this position inside a
+// granted function's body still name the same CHARACTER after a
+// concurrent edit shifts it" (doc/w7-rebase.md §4 W7b's "identity
+// persistence across an in-function edit" gate assertion; D1 §4's ledgered
+// "REQUIRED — delta 3", SHIPPED at this pin). Thin wrappers, same idiom as
+// everything above: raw local `ObjId` in, no boundary crossed. ──────────
+
+pub const AnchorSide = ObjectDoc.AnchorSide;
+pub const EventAnchor = ObjectDoc.EventAnchor;
+pub const AnchorError = ObjectDoc.AnchorError;
+
+pub fn objectAnchorAt(self: *const GraphDoc, gpa: Allocator, obj: ObjId, byte_offset: usize, stickiness: AnchorSide) AnchorError!EventAnchor {
+    return self.obj.objectAnchorAt(gpa, obj, byte_offset, stickiness);
+}
+
+pub fn resolveObjectAnchors(self: *const GraphDoc, gpa: Allocator, obj: ObjId, anchors: []const EventAnchor, out: []usize) AnchorError!void {
+    return self.obj.resolveObjectAnchors(gpa, obj, anchors, out);
 }
 
 // ── NodeRef — the portable identity token ─────────────────────────────
@@ -399,18 +534,22 @@ pub fn touchedRegionsWithin(self: *const GraphDoc, gpa: Allocator, batch: []cons
         out.deinit(gpa);
     }
     for (changes) |c| {
+        var is_structure = false;
         const obj: ObjId = switch (c) {
             .map => |m| m.obj,
             .list_ins => |l| l.obj,
             .list_del => |l| l.obj,
             .text => |tc| tc.obj,
-            // stemma v0.3.0's move op: the moved/created node is the
-            // region. UNREACHABLE today — this facade exposes no
-            // structural ops, so no batch can carry one; before it does,
-            // `contains` must learn the structural forest (structParent
-            // parentage), which `walkContains`'s creation-nesting walk
-            // does not see. Named here so the wiring slice can't miss it.
-            .structure => |s| s.node,
+            // W7b: the struct forest is now exposed (see the module doc
+            // comment), so a peer's batch CAN carry a `struct_create`/
+            // `struct_move`. The moved/created node is the region — see
+            // the MOVE-ADMISSION RULE below for why node-containment
+            // ALONE (the pre-W7b generic shape every other change kind
+            // still uses) is not sufficient for this one.
+            .structure => |s| blk: {
+                is_structure = true;
+                break :blk s.node;
+            },
         } orelse continue; // a change directly on the root map has no
         // leaseable ObjId of its own (§1.1: region = one ObjId).
         const ref_ = try scratch.nodeRef(gpa, obj);
@@ -432,9 +571,165 @@ pub fn touchedRegionsWithin(self: *const GraphDoc, gpa: Allocator, batch: []cons
                 break;
             }
         }
+        if (within and is_structure) {
+            within = try structuralChangeAdmitted(self, &scratch, gpa, root_objs.items, obj, ref_);
+        }
         try out.append(gpa, .{ .region = ref_, .within_roots = within });
     }
     return out.toOwnedSlice(gpa);
+}
+
+/// ## MOVE-ADMISSION RULE, DECIDED (W7b, doc/w7-rebase.md §4) — REVISED
+/// after review found the first version's reasoning self-contradictory
+/// (a `struct_create`/`struct_move` whose region is `node`, already known
+/// `within` the peer's granted union by the caller's node-containment
+/// check, evaluated against `scratch` — i.e. POST-merge).
+///
+/// The ORIGINAL rule (destination-parent-also-within-union) does NOT close
+/// the adopt-in direction it claimed to, and the flaw is visible in its
+/// own words: "making X a descendant of the granted root" is EXACTLY what
+/// the destination check admits, by construction — a peer holding a grant
+/// on `G` sends `struct_move(foreign, .{.node = G}, key)` for some node
+/// `foreign` they were never granted authority over; post-merge (in
+/// `scratch`) `foreign` IS now `G`'s struct child, so `contains(G,
+/// foreign)` is true (the node check) AND `contains(G, G)` is true
+/// (self-inclusive — the destination check). Both pass; ADMITTED. The
+/// peer just annexed arbitrary foreign content into their subtree and, by
+/// the SAME containment mechanism, gained ongoing edit authority over its
+/// entire contents — repeatable to escalate a narrow grant to the whole
+/// document. Checking only where a node ENDS UP can never distinguish
+/// "the peer reorganized their own territory" from "the peer imported
+/// someone else's" — both produce an identical post-merge state.
+///
+/// **THE FIX: admission for a structural change is a pure INTRA-SUBTREE
+/// REPARENT — origin ∈ union AND destination ∈ union AND node ∈ union
+/// post-merge (already checked by the caller); `.root`/`.trash` never
+/// count as "within" on either end.** The origin is `node`'s parent
+/// BEFORE this batch — read from `self` (the ENFORCER's own real,
+/// pre-merge replica), NEVER from `scratch`. This is not a stylistic
+/// choice: `scratch` already has the batch's move applied, so
+/// `scratch.structParent(node)` can only ever report the NEW parent —
+/// asking `scratch` "what was the origin" is asking the post-state to
+/// remember the pre-state, which it structurally cannot; only `self`,
+/// untouched by this batch, still holds it. With both ends checked
+/// against the union, the reviewer's trace now fails correctly:
+/// `foreign`'s pre-merge origin (on `self`) is `.root` — not a member of
+/// `{G}` — so admission refuses it, `.authority`, before the destination
+/// check even matters.
+///
+/// **`.root`/`.trash` origins are DECIDED to never count** — the export
+/// and self-delete directions this rule was already right about: a peer
+/// moving their OWN granted root/child to a foreign parent or to `.trash`
+/// has origin ∈ union but destination ∉ union → refused (kept from the
+/// original rule, still correct — see the corollary below).
+///
+/// **CREATE vs MOVE, decided explicitly, per review's ask.** A brand-new
+/// node minted by THIS batch (`struct_create`) has no origin at all —
+/// nothing is being "reparented FROM" anywhere; it is the direct
+/// structural analog of the already-admitted "grantee appends an entry to
+/// its own subtree" case (`touchedRegionsWithin`'s own doc comment, the
+/// create-and-populate fix). Decided: admit a create iff its destination
+/// ∈ union (already established by the caller's node check, since a
+/// freshly-created node's only containment path IS through its parent).
+/// Detecting "no origin" is NOT a matter of asking `scratch.structParent`
+/// (which reports SOME placement for both a create and a move — the
+/// Change stream cannot tell them apart syntactically) — it is asking
+/// **does `node` exist on `self` AT ALL, before this batch?** via
+/// `self.resolve` on the SAME portable token `scratch` minted. A
+/// `MissingDependency`/`Corrupt` failure means `self` has never seen this
+/// object's creating event — it is genuinely new, born in this very
+/// batch, and there is categorically nothing prior to check.
+///
+/// **The case review's literal wording left implicit, closed here rather
+/// than left open: a PRE-EXISTING node that resolves on `self` but was
+/// NEVER a struct-forest member before (`self.structParent` returns
+/// `null`, not because it's new, but because it's an ordinary map/list/
+/// text object nothing ever `structCreate`d) is NOT treated as a
+/// no-origin create.** `ObjectDoc.structMove` has no precondition that
+/// `node` was ever `structCreate`d — it will happily adopt ANY existing
+/// `ObjId` into the struct forest for the first time. Treating "no prior
+/// struct placement" as automatically create-like would reopen the exact
+/// hole this rule exists to close, just spelled with `structMove` on a
+/// plain object (another function's own `"body"` text object, say)
+/// instead of on a sibling struct node — same annexation, same
+/// escalation. So: pre-existing + no struct placement is INELIGIBLE
+/// (treated exactly like a `.root`/`.trash` origin — never within any
+/// union), not create-like. Only a node `self` has never heard of at all
+/// gets the permissive create path.
+///
+/// **This branch is defense-in-depth, confirmed unreachable via an
+/// ordinary REMOTE batch today** (`session/tests.zig`'s move-admission
+/// test 5/5): stemma's own `Walker.resolveStructNode` already refuses,
+/// with `error.Corrupt`, ANY `struct_move` whose `node` doesn't trace back
+/// to a `.struct_create` op when merging from an untrusted source — one
+/// layer BELOW this function, inside `scratch.merge` itself. A plain
+/// object can never even survive the merge that would let this branch's
+/// logic run. Kept anyway: a future caller reaching a node without going
+/// through that untrusted-merge validation (this facade offers no such
+/// path today, but the admission primitive shouldn't assume one never
+/// will) still needs this to be correct, not merely lucky.
+///
+/// `roots.items` (passed in, `ObjId`s already resolved against `scratch`)
+/// are used against `self` too for the origin check without re-resolving:
+/// `touchedRegionsWithin`'s own doc comment already establishes this is
+/// sound — "`roots` are always PRE-EXISTING nodes... they resolve
+/// identically whether checked against `self` or the clone, since the
+/// clone is `self`'s history plus the batch, never less."
+///
+/// Corollary, unchanged from the original rule, still correct: a peer's
+/// own `struct_delete` (→ `struct_move` to `.trash`) of a node they hold
+/// a grant ROOT on is refused (origin ∈ union, destination = `.trash` ∉
+/// union) — a subtree grant confers authority to edit WITHIN a function,
+/// not to strike it from existence. Deletion is the host's call (gate
+/// scenario (c)): the host deletes, the peer's grant COLLAPSES per
+/// `reachable`, and the peer's next edit traps loudly, `.collapsed` —
+/// never through this rule refusing a delete batch the peer never gets to
+/// send, since it's the host's own local edit.
+fn structuralChangeAdmitted(
+    self: *const GraphDoc,
+    scratch: *const GraphDoc,
+    gpa: Allocator,
+    roots: []const ObjId,
+    obj: ObjId,
+    node_ref: NodeRef,
+) Allocator.Error!bool {
+    // Destination: `node`'s parent AFTER this batch (post-merge, only
+    // `scratch` has this — `self` hasn't merged the batch at all). `obj`
+    // is already `node`'s SCRATCH-local id (the caller resolved it from
+    // the `Change` stream directly); `node_ref` (the portable token, also
+    // already minted by the caller) is what the ORIGIN check below needs
+    // to look `node` up on `self` instead — a scratch-local id is not
+    // safe to reuse against `self` in general (only `roots`, established
+    // PRE-EXISTING, are — see the doc comment above).
+    const dest = scratch.structParent(obj) orelse return false;
+    const dest_within = switch (dest) {
+        .root, .trash => false,
+        .node => |pid| blk: {
+            for (roots) |root_obj| {
+                if (try scratch.contains(gpa, root_obj, pid)) break :blk true;
+            }
+            break :blk false;
+        },
+    };
+    if (!dest_within) return false;
+
+    // Origin: does `node` exist on `self` (pre-merge) at all?
+    const self_obj = self.resolve(node_ref) catch return true; // genuinely new — CREATE case; destination check above already governs.
+
+    // Pre-existing: a reparent (or an adoption attempt of a plain,
+    // never-struct-forest object — see the doc comment above). Its
+    // ORIGIN must ALSO be within the union, read from `self` — never
+    // `scratch`, which only ever knows the NEW parent.
+    const origin = self.structParent(self_obj) orelse return false; // pre-existing, no prior struct placement — ineligible, not "no origin"
+    return switch (origin) {
+        .root, .trash => false,
+        .node => |pid| blk: {
+            for (roots) |root_obj| {
+                if (try self.contains(gpa, root_obj, pid)) break :blk true;
+            }
+            break :blk false;
+        },
+    };
 }
 
 /// The `roots = &.{}` case of `touchedRegionsWithin`, kept as its own
@@ -470,7 +765,8 @@ pub fn serialize(self: *const GraphDoc, gpa: Allocator) Allocator.Error![]u8 {
 // §5.2's "the same [per-region admission] machinery W6 needs for
 // identity-anchored subtree grants... used for mutual exclusion instead of
 // authority"; D1 §3/§4's "small facade addition: a reachability/trash
-// predicate ... buildable now").
+// predicate ... buildable now"; W7b, doc/w7-rebase.md §4, taught this walk
+// the STRUCT FOREST — see "Containment semantics" below).
 //
 // Two predicates, one walk:
 //   - `contains(root, target)` — is `target` within the subtree rooted at
@@ -485,56 +781,99 @@ pub fn serialize(self: *const GraphDoc, gpa: Allocator) Allocator.Error![]u8 {
 //
 // ## Why a walk DOWN, never a walk up
 //
-// `ObjectDoc` stores no parent pointer per object (see this file's own "F3
-// — why seq* exists" comment above: an object's parent slot is fixed at
-// creation, but nothing stores the REVERSE edge) — so the only navigable
-// direction is DOWN, from a `ValueRef`, through `mapKeys`/`mapConflictAt`
-// (every CONCURRENT value at a key, not just `mapGet`'s deterministic
-// winner — a losing MV-conflict branch is still a real, live object, and
-// excluding it from containment would make an authority decision depend on
-// a tiebreak that has nothing to do with authority) and `listAt`. Cost:
-// O(size of the walked subtree) — `contains` returns as soon as `target`
-// is found; `reachable`'s worst case (a genuinely deleted/foreign target)
-// walks every live object in the doc. This is the same class of honest,
-// named, unavoidable-without-parent-pointers cost `touchedRegions`'s own
-// doc comment prices for its dry-run merge; a cheaper reverse index would
-// be the delta to ask stemma for if this cost ever matters at real-document
+// `ObjectDoc` stores no REVERSE parent pointer for the value tree (an
+// object's map/list parent slot is fixed at creation, nothing indexes
+// "who points at me") — so the only navigable direction there is DOWN,
+// from a `ValueRef`, through `mapKeys`/`mapConflictAt` (every CONCURRENT
+// value at a key, not just `mapGet`'s deterministic winner — a losing
+// MV-conflict branch is still a real, live object, and excluding it from
+// containment would make an authority decision depend on a tiebreak that
+// has nothing to do with authority) and `listAt`. The struct forest DOES
+// store the effective parent per node (`structParent`) but this walk
+// still goes DOWN through it too, via `structChildren` — for the same
+// reason `touchedRegionsWithin` resolves things forward, not backward: a
+// single downward walk from `root`/`self.root()` composes both relations
+// uniformly (see "Containment semantics" below) without needing two
+// different traversal directions. Cost: O(size of the walked subtree) —
+// `contains` returns as soon as `target` is found; `reachable`'s worst
+// case (a genuinely deleted/foreign target) walks every live object in
+// the doc. This is the same class of honest, named,
+// unavoidable-without-parent-pointers cost `touchedRegions`'s own doc
+// comment prices for its dry-run merge; a cheaper reverse index would be
+// the delta to ask stemma for if this cost ever matters at real-document
 // scale — not built speculatively here.
+//
+// ## Containment semantics, DECIDED (W7b): value-tree UNION struct-forest
+//
+// A code buffer's function struct nodes compose BOTH relations at once —
+// a function node is a real map object (its OWN fields, e.g. `"body"`, sit
+// in the ordinary value tree) AND a struct-forest node (its nested
+// functions, if any, sit in `structChildren`). So "is `target` inside the
+// subtree rooted at `root`" must union both: `target` is contained if it
+// is reachable from `root` by ANY sequence of map/list-containment edges
+// AND/OR struct-forest parent edges, in any order/mix. This is the
+// honest reading of "subtree" for a node that legitimately has children
+// of both kinds — narrower semantics (say, "only the relation the ROOT's
+// own kind implies") would make a function's OWN nested helper functions
+// silently fall OUTSIDE a grant on the function, which is not what
+// "grant this function's subtree" means to a caller. Implementation:
+// `walkContains`, for the node `v` it is currently expanding, ALSO
+// fetches `v`'s struct-forest children (when `v` has an `ObjId`) and
+// treats them exactly like a map/list child — same eligibility test, same
+// recursion, same `visited` guard.
+//
+// ## `reachable` and the struct forest's OWN root sentinel
+//
+// One asymmetry `contains` doesn't have to worry about (its `subtree_root`
+// is always a concrete, already-existing `ObjId`) but `reachable` does:
+// `self.root()` (the value-tree's root MAP object) and the struct forest's
+// `.root` SENTINEL are two DIFFERENT anchors with no edge between them — a
+// TOP-LEVEL struct node (`structParent(node) == .root`) is parented at the
+// sentinel, never at `self.root()`'s `ObjId`, so a walk that only ever
+// starts from `self.root()` would never discover it (and would therefore
+// wrongly report it `unreachable`, since nothing links `self.root()` to
+// it). `reachable` therefore runs the value-tree walk from `self.root()`
+// AND, separately, the struct-forest's own top level
+// (`structChildren(.root)`) — the union of "linked from the document's
+// value root" and "resolves, via the struct forest, to the struct
+// forest's root sentinel (not `.trash`)." A struct node whose ancestry
+// terminates at `.trash` (directly, via `structDelete`, or transitively —
+// an ancestor was trashed, per `structDelete`'s "not recursive" doc
+// comment) is NOT reachable by either path: exactly the collapse-trap
+// condition a subtree grant on that node relies on (§2.4 generalized,
+// above).
 //
 // ## The move-op stability contract — and the cycle guard it needs
 //
-// Today (no move/reparent op exposed by THIS facade — see "F3" above), an
-// object's parent is fixed forever at creation, so between two surviving
-// objects `contains`'s answer never flips except via deletion —
-// creation-time-stable, EXCEPT deletion (which can only ever take
-// `contains`/`reachable` from `true` to `false`, never the reverse;
-// resurrection isn't expressible either). When F3's parent-register move op
-// lands (stemma delta 6; the underlying stemma library itself may already
-// carry the mechanism — this facade is what still refuses to expose a
-// mutator for it, per "F3" above), this walk's CONTRACT does not change
-// shape: it already answers "is `target` reachable from `root` under the
-// CURRENT live parentage," which is exactly what a move-aware walk also
-// answers — only the STABILITY guarantee narrows from "for the object's
-// whole lifetime, modulo deletion" to "at the moment of the call," same as
-// any live containment check over a mutable tree. No caller needs to
-// change; a grant whose node got moved OUT of its subtree correctly starts
-// reading as outside it — the honest answer to a question about CURRENT
-// structure, neither a silent widening nor a silent narrowing.
+// With `structMove` exposed (W7b, "The struct forest — exposed" module doc
+// comment section), `contains`/`reachable`'s CONTRACT does not change
+// shape from what it always promised: "is `target` reachable from `root`
+// under the CURRENT live parentage" — a move-aware walk answers exactly
+// that; only the STABILITY guarantee narrows from "for the object's whole
+// lifetime, modulo deletion" (true of the value tree, whose parent slot is
+// fixed at creation) to "at the moment of the call" for anything reached
+// through the struct forest, same as any live containment check over a
+// mutable tree. No caller needs to change; a grant whose node got moved
+// OUT of its subtree correctly starts reading as outside it — the honest
+// answer to a question about CURRENT structure, neither a silent widening
+// nor a silent narrowing.
 //
-// A move op DOES change one thing a walk-down must defend against: a graph
-// with reparenting can (transiently, or via a bug/malicious peer on a
-// substrate that doesn't forbid it) contain a CYCLE — something this walk
-// never had to consider when every parent edge was creation-time-immutable.
-// `walkContains` therefore carries a `visited` set from its first call:
+// A move op also means a graph with reparenting can, in principle, contain
+// a CYCLE — something this walk never had to consider when every parent
+// edge was creation-time-immutable. stemma's OWN cycle-break
+// (`structCycleBroken`) keeps the MATERIALIZED `struct_parents` table
+// acyclic by construction (a write that would create a cycle is
+// deterministically rejected — `ObjectDoc.wouldCycleLocal`/the global
+// Lamport replay), so this walk does not strictly need the guard to stay
+// terminating. It keeps the guard anyway, unconditionally, over BOTH
+// relations: `walkContains` carries a `visited` set from its first call —
 // each `ObjId` is marked before recursing into it, and an already-visited
-// id is skipped rather than re-walked — turning a potential infinite
-// recursion (or at best exponential re-walking of shared substructure, MV
-// conflict branches included) into a walk that visits each live object at
-// most once, correct and terminating regardless of what the substrate
-// allows. This is added NOW, ahead of the move op actually landing here,
-// because it is cheap and because an authority predicate is exactly the
-// kind of check that must not degrade into "works until someone constructs
-// a cycle."
+// id is skipped rather than re-walked. This is defense-in-depth an
+// authority predicate should not go without (a stemma-side cycle-break
+// bug would otherwise turn a permission check into an infinite recursion,
+// the worst possible failure mode for exactly this code), and it is what
+// already made shared MV-conflict substructure in the value tree safe to
+// walk, unchanged.
 fn childObjId(v: ValueRef) ?ObjId {
     // `ValueRef.objId()` is documented `unreachable` on a scalar node
     // (scalars have no identity) — gate on `kind()` first so a string/int/
@@ -545,6 +884,29 @@ fn childObjId(v: ValueRef) ?ObjId {
     };
 }
 
+/// Walk `oid`'s struct-forest children (W7b) exactly like a map/list
+/// child: eligibility test, recurse, `visited` guard. Shared by both
+/// branches below (a struct node's children can themselves have BOTH
+/// value-tree and struct-forest children — see "Containment semantics"
+/// above).
+fn walkStructChildren(
+    self: *const GraphDoc,
+    gpa: Allocator,
+    visited: *std.AutoHashMapUnmanaged(ObjId, void),
+    oid: ObjId,
+    target: ObjId,
+) Allocator.Error!bool {
+    const kids = try self.obj.structChildren(gpa, .{ .node = oid });
+    defer gpa.free(kids);
+    for (kids) |kid| {
+        if (std.meta.eql(kid, target)) return true;
+        const gop = try visited.getOrPut(gpa, kid);
+        if (gop.found_existing) continue; // already walked — cycle guard
+        if (try self.walkContains(gpa, visited, self.ref(kid), target)) return true;
+    }
+    return false;
+}
+
 fn walkContains(
     self: *const GraphDoc,
     gpa: Allocator,
@@ -552,6 +914,11 @@ fn walkContains(
     v: ValueRef,
     target: ObjId,
 ) Allocator.Error!bool {
+    // Struct-forest children of `v` ITSELF, unioned with its value-tree
+    // children below — see "Containment semantics, DECIDED (W7b)" above.
+    if (childObjId(v)) |vid| {
+        if (try self.walkStructChildren(gpa, visited, vid, target)) return true;
+    }
     switch (v.kind()) {
         .map => {
             var it = v.mapKeys();
@@ -582,14 +949,15 @@ fn walkContains(
                 }
             }
         },
-        else => {}, // text/scalar leaves have no structural children
+        else => {}, // text/scalar leaves have no value-tree children
     }
     return false;
 }
 
 /// Is `target` within the subtree rooted at `subtree_root` (self-inclusive:
 /// `subtree_root == target` counts)? See the section doc comment above for
-/// cost and the move-op stability + cycle-guard contract.
+/// cost, the containment-semantics decision (value-tree UNION struct
+/// forest), and the move-op stability + cycle-guard contract.
 pub fn contains(self: *const GraphDoc, gpa: Allocator, subtree_root: ObjId, target: ObjId) Allocator.Error!bool {
     if (std.meta.eql(subtree_root, target)) return true;
     var visited: std.AutoHashMapUnmanaged(ObjId, void) = .empty;
@@ -599,11 +967,28 @@ pub fn contains(self: *const GraphDoc, gpa: Allocator, subtree_root: ObjId, targ
 }
 
 /// Is `target` still reachable from the DOC ROOT — i.e. NOT deleted/
-/// trashed? See the section doc comment above.
+/// trashed? See the section doc comment above, especially "`reachable`
+/// and the struct forest's own root sentinel": this walks BOTH the
+/// value-tree root (`self.root()`) and the struct forest's OWN top level
+/// (`structChildren(.root)`), since a top-level struct node is parented
+/// at a sentinel disconnected from `self.root()`'s `ObjId`.
 pub fn reachable(self: *const GraphDoc, gpa: Allocator, target: ObjId) Allocator.Error!bool {
     var visited: std.AutoHashMapUnmanaged(ObjId, void) = .empty;
     defer visited.deinit(gpa);
-    return self.walkContains(gpa, &visited, self.root(), target);
+    if (try self.walkContains(gpa, &visited, self.root(), target)) return true;
+    // The struct forest's OWN top level is queried with the SENTINEL
+    // `.root`, not a node `ObjId` — `walkStructChildren` is node-keyed
+    // (`structChildren(.{ .node = oid })`), so the sentinel case is
+    // spelled out directly here instead.
+    const top = try self.obj.structChildren(gpa, .root);
+    defer gpa.free(top);
+    for (top) |kid| {
+        if (std.meta.eql(kid, target)) return true;
+        const gop = try visited.getOrPut(gpa, kid);
+        if (gop.found_existing) continue;
+        if (try self.walkContains(gpa, &visited, self.ref(kid), target)) return true;
+    }
+    return false;
 }
 
 // ── Tests ───────────────────────────────────────────────────────────
