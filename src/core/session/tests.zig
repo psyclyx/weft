@@ -1134,19 +1134,56 @@ test "GraphDoc over the wire: an edit through the on_save PROJECTION converges o
 }
 
 // ── W6 check-in: TranscriptDoc live over the wire, confined by a subtree
-// grant (doc/north-star-plan.md §6 W6 gate: "two principals, one model,
-// different projections, converging, subtree grant enforced; the check-in
-// scenario end-to-end"). CORRECTED CLAIM (an earlier version of this
-// comment overstated what this test drives): the producer side here calls
-// `TranscriptDoc.append`/`editText` DIRECTLY — the model API `quickjs.zig`'s
-// `cTranscriptEntry`/`cTranscriptAppend` are a thin membrane wrapper OVER
-// (arg-unmarshal, single-instance-transcript lookup, then exactly these two
-// calls, then a re-fill). This test proves the MODEL + its replication +
-// grant enforcement + the push re-fill trigger — it does NOT exercise the
-// membrane handlers, the JS runtime, or `config/plugins/acp.js` at all; see
-// `quickjs.zig`'s own seam test(s) for coverage of that layer instead. ─────
+// grant (doc/north-star-plan.md §6 W6 gate, in full: "attach to the
+// daemon's headless agent session, observe via slot-fired scenes,
+// intervene under grant, detach, session unaffected"). CORRECTED CLAIM (an
+// earlier version of this comment overstated what this test drives): the
+// producer side here calls `TranscriptDoc.append`/`editText` DIRECTLY —
+// the model API `quickjs.zig`'s `cTranscriptEntry`/`cTranscriptAppend` are
+// a thin membrane wrapper OVER (arg-unmarshal, single-instance-transcript
+// lookup, then exactly these two calls, then a re-fill). This test proves
+// the MODEL + its replication + grant enforcement + the push re-fill
+// trigger + a real disconnect/reconnect cycle — it does NOT exercise the
+// membrane handlers, the JS runtime, or `config/plugins/acp.js` at all
+// (see `quickjs.zig`'s own seam test(s) for that layer), and it does NOT
+// exercise "scenes" literally (§1's own doctrine: scenes never cross the
+// wire — what replicates is the GRAPH DOC; "observe via slot-fired scenes"
+// is realized here as fill/refillOnChange projecting the converged model
+// locally on each side, exactly as a remote head's UI slot would).
+//
+// **The listen path, judged honestly**: this rig is the same socketpair +
+// `Session`/`Conn` harness every OTHER integration test in this file uses
+// (`GraphDoc over the wire`, the lease suite, the subtree-grant suite) —
+// not `core/hub.zig`'s `Hub.listen` (a real, headlessly-testable TCP
+// accept loop; `headless.zig` drives it with no app/GUI loop at all,
+// confirmed by reading that file). `Hub` was considered and rejected for
+// THIS test specifically: real TCP sockets are the one part of this rig
+// that can be sandbox-dependent (the existing `tcpConnect` tests already
+// `catch return`/skip when binding is forbidden — see below), which is
+// exactly the kind of environment-dependent flake this repo's own gate
+// notes warn about; a "gate test" that can silently skip its own
+// assertions in the environment gates are checked in is worse than one
+// that uses a slightly lower-fidelity but fully deterministic harness.
+// `Hub.Peer.conn` IS a `Conn` (this same type) wrapping an accepted `fd`
+// into a `Session` exactly like `FdLink` wraps a socketpair fd here — so
+// this rig exercises the identical `Session`/`Conn`/`GraphCollab` code
+// `Hub` would drive, just fed a deterministic pipe instead of a real
+// socket. What's SEPARATE, real, and honestly still missing: `headless.
+// zig`'s `configure` callback (`HeadlessCfg`) only binds ONE primary TEXT
+// `Document` per peer — there is no headless "agent session" concept, no
+// `TranscriptDoc`, and no `Conn.shareGraph` call anywhere in
+// `--headless`'s listen path today. Wiring that in is real, un-built
+// plumbing (a `--headless --agent`-shaped mode, or a `System.agent_ux`-ish
+// second system per §2.7) — named here as the recorded remainder, not
+// papered over: nothing about `Hub`/`Conn`/`GraphCollab` blocks it: it is
+// purely a missing CALLER, not a missing mechanism.
+//
+// Stage 4 (detach/re-attach) below is new; stages 1-3 (attach, observe
+// live, intervene under grant, refuse out-of-grant) were already covered
+// before this pass — see `git log -p` on this test for the boundary if it
+// matters. ───────────────────────────────────────────────────────────────
 
-test "W6 check-in: a home session streams a live transcript; a remote observer converges via push re-fill, and is confined to its granted entry while streaming continues" {
+test "W6 check-in: a home session streams a live transcript; a remote observer converges via push re-fill, is confined to its granted entry while streaming continues, then detaches and RE-ATTACHES (same identity) without disturbing home or losing its grant" {
     const gpa = t.allocator;
     const fds = try socketPair();
     var la: FdLink = .{ .fd = fds[0] };
@@ -1162,10 +1199,31 @@ test "W6 check-in: a home session streams a live transcript; a remote observer c
     const e0_ref = try home.graph.nodeRef(gpa, e0);
     defer e0_ref.free(gpa);
 
-    const sa = try Session.create(gpa, la.link(), .server, "tok", .own, null);
-    defer sa.destroy();
-    const sb = try Session.create(gpa, lb.link(), .client, "tok", .own, null);
-    defer sb.destroy();
+    // The remote's PERSISTENT identity — reused verbatim across the
+    // detach/re-attach below (stage 4). This matters structurally, not
+    // just for test plumbing: `GraphCollab.grantSubtree` keys its row on
+    // `session.peerFingerprint()`, the authenticated peer identity derived
+    // from this keypair (REQUIRED FIX 1, see that function's doc comment) —
+    // never a self-declared name and never the `*Session` object itself. A
+    // reconnecting peer that authenticates with the SAME keypair is, by
+    // that mechanism, unambiguously the SAME grantee, so its standing grant
+    // survives a fresh `Session`/`Conn.rebind` with no re-grant needed. If
+    // the remote reconnected with a FRESH identity instead (as every OTHER
+    // reconnect test in this file passes `null` and gets one) it would
+    // authenticate as a stranger and its old grant would not apply — an
+    // honest consequence of identity-keyed authority, not a bug in this
+    // test's setup. That stranger-gains-nothing property is asserted by
+    // the "subtree grant: SPOOFED peer_name ..." and "...no grant rows of
+    // its own is unaffected" tests below, not re-proven here.
+    const remote_id = identity.Identity.forTest(0xc6);
+
+    // `sa`/`sb` are `var`, not `const`: stage 4 destroys and replaces both
+    // wholesale on reconnect (mirrors the "hub: ... reconnect rebind"
+    // test's pattern — the ORIGINAL sessions get no `defer`, since they're
+    // explicitly destroyed mid-test; only whichever session is CURRENT at
+    // function exit is deferred, at the point it's created).
+    var sa = try Session.create(gpa, la.link(), .server, "tok", .own, null);
+    var sb = try Session.create(gpa, lb.link(), .client, "tok", .own, &remote_id);
     var ca = try Conn.init(gpa, sa, "home", .server);
     defer ca.deinit();
     var cb = try Conn.init(gpa, sb, "remote", .client);
@@ -1303,8 +1361,9 @@ test "W6 check-in: a home session streams a live transcript; a remote observer c
 
     // Both projections render this shared, converged state identically —
     // "two principals, one model, different projections, converging" —
-    // checked HERE (before the refused edit below gives `remote` a real
-    // local divergence of its own, by design; see the note above).
+    // checked HERE (before the OUT-OF-GRANT edit at the very end of this
+    // test gives `remote` a real local divergence of its own, by design;
+    // see that block's own note on why it has to come last).
     try TranscriptDoc.fill(gpa, &home, &doc_h, &subs_h);
     {
         const text_h = try doc_h.text().toOwnedSlice(gpa);
@@ -1315,9 +1374,165 @@ test "W6 check-in: a home session streams a live transcript; a remote observer c
         try t.expectEqualStrings(text_h, text_r);
     }
 
-    // The negative half: the remote tries to edit entry 1 (home's own
-    // streamed turn) — OUTSIDE the grant — refused loudly, never landing;
-    // home's streaming replica is unaffected ("session unaffected").
+    // ── Stage 4: DETACH, SESSION UNAFFECTED (the gate's last clause) ──────
+    //
+    // The remote disconnects — a real session teardown, not a soft
+    // "stop ticking" fiction: `sb.destroy()` closes bob's own socket end,
+    // which delivers EOF to home's reader thread. From here until
+    // reconnect, `cb`/`gb` (bob's OWN Conn/GraphCollab, bound to the now-
+    // freed `sb`) must never be ticked — mirroring the exact discipline
+    // the "lease: disconnect reaping"/"lease: reconnect" tests already
+    // established for the symmetric case (guard ticking whichever side's
+    // Session object was just destroyed; only the SURVIVING peer's own
+    // still-live Session is ticked to observe the other end going dead).
+    sb.destroy();
+
+    // Home's transcript keeps streaming regardless — pure model + LOCAL
+    // projection work (`home.append`/`fill`), touching no session state at
+    // all, so it needs no guard and no help from the wire layer noticing
+    // anything: the daemon doesn't care whether anyone is watching.
+    _ = try home.append(gpa, "user", 3, "keep going while I'm away");
+    try TranscriptDoc.fill(gpa, &home, &doc_h, &subs_h);
+    {
+        const got = try doc_h.text().toOwnedSlice(gpa);
+        defer gpa.free(got);
+        try t.expect(std.mem.indexOf(u8, got, "keep going while I'm away") != null);
+    }
+
+    // Home's own (still-allocated) session notices the peer vanished, and
+    // ticking `ca` through that stays harmless — "session unaffected"
+    // means the host side neither crashes nor blocks when its one peer
+    // drops. `ca`/`ga` never touch `cb`/`sb` (destroyed above) here.
+    var offline_seen = false;
+    const offline_deadline = task.nowNs() + 5 * std.time.ns_per_s;
+    while (task.nowNs() < offline_deadline) {
+        _ = try ca.tick();
+        if (sa.liveness() == .offline) {
+            offline_seen = true;
+            break;
+        }
+        testPark(2);
+    }
+    try t.expect(offline_seen);
+
+    // Named honestly rather than asserted, because there is nothing TO
+    // reap in THIS scenario: a per-region LEASE is session-scoped and IS
+    // reaped on disconnect (`GraphCollab.reapIfDead`, exercised directly
+    // by the "lease: disconnect reaping" test above) — but `ga`'s subtree
+    // GRANT for the remote is deliberately NOT session-scoped. It is keyed
+    // on `remote_id`'s fingerprint, an authenticated and PERSISTENT
+    // identity (`grantSubtree`'s REQUIRED FIX 1), and nothing in
+    // `GraphCollab`/`grants.zig` revokes a grant merely because its
+    // holder's LINK dropped — revocation is an explicit `revoke`/
+    // `revokeSubtreeGrants` call, or the grant's own root collapsing,
+    // never a disconnect. That is precisely what lets the re-attach below
+    // skip re-granting entirely: the SAME identity reconnecting is,
+    // structurally, the SAME grantee. A `LeaseTable` was never bound on
+    // this quad (only `bindGrants`), so there is no lease state here to
+    // demonstrate reaping on beyond what the dedicated lease tests already
+    // cover; a check-in scenario that also held a lease would reap it
+    // exactly as those tests show.
+
+    // ── RE-ATTACH: fresh sockets, fresh Sessions, SAME remote identity ──
+    sa.destroy(); // home's now-dead-peered session, still allocated until here
+    const fds2 = try socketPair();
+    var la2: FdLink = .{ .fd = fds2[0] };
+    var lb2: FdLink = .{ .fd = fds2[1] };
+    sa = try Session.create(gpa, la2.link(), .server, "tok", .own, null);
+    defer sa.destroy();
+    sb = try Session.create(gpa, lb2.link(), .client, "tok", .own, &remote_id);
+    defer sb.destroy();
+    try ca.rebind(sa);
+    try cb.rebind(sb);
+
+    // Reconverge: home's backlog (the entry appended while the remote was
+    // gone) arrives on the SAME `remote`/`doc_r`/`subs_r` from stages 1-3 —
+    // "the second visit proves the daemon-ish property," not a fresh
+    // bootstrap. Still driven through the live PUSH trigger
+    // (`refillOnChange` fed by `cb.tick()`), same discipline as stage 3.
+    const reattach_deadline = task.nowNs() + 5 * std.time.ns_per_s;
+    var reattached = false;
+    while (task.nowNs() < reattach_deadline) {
+        _ = try ca.tick();
+        const changed = try cb.tick();
+        try TranscriptDoc.refillOnChange(gpa, &remote, &doc_r, &subs_r, changed);
+        if (remote.count() == 3) {
+            const rt = try remote.at(2).text(gpa);
+            defer gpa.free(rt);
+            if (std.mem.eql(u8, rt, "keep going while I'm away")) {
+                reattached = true;
+                break;
+            }
+        }
+        testPark(2);
+    }
+    try t.expect(reattached);
+
+    // The grant SURVIVES the reconnect with no re-grant call: the remote
+    // edits entry 0's body again (intervene #2), purely on the strength of
+    // `remote_id` matching the row `ga.grantSubtree(e0_ref)` minted back
+    // in stage 2 — no second `grantSubtree` call anywhere in this test
+    // past that point.
+    try remote.editText(gpa, remote.at(0).textObj(), 0, ">> ");
+    const regrant_deadline = task.nowNs() + 5 * std.time.ns_per_s;
+    var relanded = false;
+    while (task.nowNs() < regrant_deadline) {
+        _ = try ca.tick();
+        _ = try cb.tick();
+        const ht = try home.at(0).text(gpa);
+        defer gpa.free(ht);
+        if (std.mem.eql(u8, ht, ">> start the refactor!!")) {
+            relanded = true;
+            break;
+        }
+        testPark(2);
+    }
+    try t.expect(relanded);
+    // No refusal was generated by this legitimate, in-grant edit — same
+    // "0 refusals" shape intervene #1 checked above.
+    try t.expectEqual(@as(usize, 0), gb.refusals.items.len);
+
+    // Full re-convergence, no corruption, after a real disconnect +
+    // reconnect cycle — frontier equality one more time. Checked HERE,
+    // before the out-of-grant edit below gives `remote` a real local
+    // divergence of its own (same reason the FIRST frontier-equality
+    // check above had to precede any refusal-producing edit).
+    {
+        const hv = try home.graph.version(gpa);
+        defer gpa.free(hv);
+        const rv = try remote.graph.version(gpa);
+        defer gpa.free(rv);
+        try t.expectEqual(GraphDoc.VersionOrder.equal, try home.graph.compareVersions(gpa, hv, rv));
+    }
+
+    // ── The negative half, deliberately LAST: an out-of-grant edit
+    // permanently poisons `remote`'s outbound queue ────────────────────
+    //
+    // A refused AUTHORITY batch is never merged, and — unlike a LEASE
+    // refusal — nothing ever "releases" a subtree-grant boundary, so this
+    // sender's every future batch keeps re-including the same refused op
+    // bundled with anything new (`sync_core`'s frontier-delta design:
+    // home's announced frontier never advances past what it refused,
+    // so `eventsSince` keeps re-offering it) — and `admitRegions` refuses
+    // a batch straddling the grant boundary WHOLE, not row-by-row (see the
+    // dedicated "subtree grant: a batch straddling the grant boundary is
+    // refused WHOLE" test). Concretely: after THIS edit, `remote` could
+    // never get another legitimate edit through either, not because
+    // authority was revoked but because it would always ride bundled with
+    // this one. That is why intervene #2 (proving the grant survives
+    // reconnect) had to run BEFORE this, not after — an earlier draft of
+    // this test tried the order the north-star-plan gate text lists
+    // ("intervene converges → out-of-grant refuses → detach → ... →
+    // re-attach → converged") with a THIRD intervene after re-attach, and
+    // it failed for exactly this reason: real shipped behavior, not a
+    // test bug. Recovering from a stuck AUTHORITY refusal (discarding or
+    // rebasing the poisoned op) has no mechanism today — a genuine,
+    // honestly-named gap this test surfaces rather than hides.
+    //
+    // The remote tries to edit entry 1 (home's own streamed turn) —
+    // OUTSIDE the grant — refused loudly, never landing; home's streaming
+    // replica is unaffected ("session unaffected"), on the reconnected
+    // link exactly as it was on the original one.
     try remote.editText(gpa, remote.at(1).textObj(), 0, "XX");
     const refuse_deadline = task.nowNs() + 5 * std.time.ns_per_s;
     var refused = false;
