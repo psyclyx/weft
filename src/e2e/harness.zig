@@ -1355,6 +1355,25 @@ pub fn toolText(ed: *Editor, name: []const u8) ?[]u8 {
     return null;
 }
 
+/// Drive the async loop until the ACTIVE buffer's own text contains `needle`,
+/// bounded by wall clock — the buffer-content counterpart to
+/// `drainToolContains`/`drainSurfaceText`/`drainEcho`, for a plugin-authored
+/// edit that lands directly in the EDITED buffer (e.g. format-buffer's
+/// `procFilter`, task #28) rather than a tool buffer/surface/echo. A fixed
+/// `settle(N)` round count is scheduling opportunities, not elapsed time —
+/// see `drainEcho`'s doc comment for why that's the wrong bound for an async
+/// pool-thread delivery.
+pub fn drainBufferContains(ed: *Editor, needle: []const u8) bool {
+    const deadline = core.task.nowNs() + 10 * std.time.ns_per_s;
+    while (core.task.nowNs() < deadline) {
+        ed.settle(3);
+        const txt = ed.textAlloc() catch return false;
+        defer ed.gpa.free(txt);
+        if (std.mem.indexOf(u8, txt, needle) != null) return true;
+    }
+    return false;
+}
+
 /// Drive the async loop until the named tool buffer contains `needle`, bounded
 /// by wall clock (the proc drain runs on a pool thread and delivers on real
 /// time). Returns whether it appeared. Mirrors the git-status async test's
@@ -1363,9 +1382,18 @@ pub fn toolText(ed: *Editor, name: []const u8) ?[]u8 {
 /// elapses). Re-fires because an LSP request before the server's handshake is
 /// declined, not queued — keep asking until the server is ready and one lands,
 /// its result echoed (the lsp plugin echoes hover / "no X" messages).
+///
+/// Bounded by WALL CLOCK, not a round count (task #28): a fixed iteration
+/// count is scheduling opportunities, not elapsed time — under CPU
+/// contention (or just a slower box) the OS can legitimately decline to run
+/// this process's pool worker for whatever the budget assumed, so the loop
+/// gives up while the real zls round-trip is still in flight. Same failure
+/// shape `waitSave`'s doc comment already names for saves; `drainToolContains`/
+/// `drainUntilOracle` already use a real deadline for this reason — this
+/// mirrors them instead of round-counting.
 pub fn drainEcho(ed: *Editor, cmd: []const u8, needle: []const u8) bool {
-    var rounds: usize = 0;
-    while (rounds < 600) : (rounds += 1) {
+    const deadline = core.task.nowNs() + 30 * std.time.ns_per_s;
+    while (core.task.nowNs() < deadline) {
         ed.run(cmd);
         ed.settle(3);
         if (std.mem.indexOf(u8, ed.echoText(), needle) != null) return true;
@@ -1393,10 +1421,11 @@ pub fn surfaceHasText(ed: *Editor, needle: []const u8) bool {
 /// `drainEcho`'s counterpart for a producer that shows a retained SURFACE
 /// instead of the echo line (rendering P2 — doc/rendering.md — e.g. the
 /// `lsp` plugin's hover popup, `wl_surface_caret`). Re-fires `cmd` until
-/// `surfaceHasText` is true (or a budget elapses).
+/// `surfaceHasText` is true (or a budget elapses). Wall-clock bounded —
+/// see `drainEcho`'s doc comment (task #28).
 pub fn drainSurfaceText(ed: *Editor, cmd: []const u8, needle: []const u8) bool {
-    var rounds: usize = 0;
-    while (rounds < 600) : (rounds += 1) {
+    const deadline = core.task.nowNs() + 30 * std.time.ns_per_s;
+    while (core.task.nowNs() < deadline) {
         ed.run(cmd);
         ed.settle(3);
         if (surfaceHasText(ed, needle)) return true;
@@ -1485,9 +1514,10 @@ pub fn drainCompletionText(ed: *Editor, off: usize, prefix: []const u8, needle: 
 }
 
 /// Re-fire `cmd` until it opens a pick (a references / symbols location list).
+/// Wall-clock bounded — see `drainEcho`'s doc comment (task #28).
 pub fn drainPick(ed: *Editor, cmd: []const u8) bool {
-    var rounds: usize = 0;
-    while (rounds < 600) : (rounds += 1) {
+    const deadline = core.task.nowNs() + 30 * std.time.ns_per_s;
+    while (core.task.nowNs() < deadline) {
         ed.run(cmd);
         ed.settle(3);
         if (ed.pick.active) return true;
@@ -1497,10 +1527,11 @@ pub fn drainPick(ed: *Editor, cmd: []const u8) bool {
 
 /// Settle until the active buffer's `diagnostics` layer has at least one span
 /// (the language server published), or a budget elapses. The layer's span count
-/// is the same rendered state the gutter/underlines draw from.
+/// is the same rendered state the gutter/underlines draw from. Wall-clock
+/// bounded — see `drainEcho`'s doc comment (task #28).
 pub fn drainDiagnostics(ed: *Editor) bool {
-    var rounds: usize = 0;
-    while (rounds < 600) : (rounds += 1) {
+    const deadline = core.task.nowNs() + 30 * std.time.ns_per_s;
+    while (core.task.nowNs() < deadline) {
         ed.settle(3);
         if (ed.session.system.caps.layers.find(ed.ctx.document(), "diagnostics")) |l| {
             if (l.spanCount() > 0) return true;

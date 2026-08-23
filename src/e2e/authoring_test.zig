@@ -663,7 +663,10 @@ test "authoring: format the buffer (SPC c f) — zig fmt via the format action" 
     ed.typeText("const    x=1;");
     ed.press("Escape", "");
     ed.chord("SPC c f"); // format
-    ed.settle(60); // the formatter runs async (procFilter)
+    // The formatter runs async (procFilter, off a pool thread) — wait for the
+    // real result to land instead of assuming a fixed settle() round count is
+    // enough wall-clock time (task #28: it wasn't, on a slower/quieter box).
+    try t.expect(h.drainBufferContains(ed, "const x = 1;\n"));
 
     ed.press("colon", "");
     ed.typeText("w");
