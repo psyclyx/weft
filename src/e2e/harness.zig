@@ -906,13 +906,32 @@ pub fn chdirTo(path: []const u8) !void {
 // the SYSTEM tmp, outside any git repo — see Project.
 extern "c" fn mkdtemp(template: [*:0]u8) ?[*:0]u8;
 
+/// Backstop for a `command -v` probe (task #23 part B): this execs a shell
+/// builtin against PATH, nothing else — a real answer lands in milliseconds,
+/// so seconds of slack absorbs a loaded box without ever approaching the old
+/// UNBOUNDED wait (`core.proc.run` blocked until the child's EOF, no matter
+/// how long that took — see `core.proc.runDeadline`'s doc comment). If this
+/// ever actually fires, the shell itself is wedged, not the probed tool.
+const tool_probe_timeout: std.Io.Timeout = .{ .duration = .{ .raw = .fromSeconds(5), .clock = .awake } };
+
 /// Whether `tool` is on PATH (probed through a shell, so it respects the same
 /// PATH the proc plugins inherit). Lets a test `return error.SkipZigTest` cleanly
 /// when an optional part of the toolchain (see src/e2e/shell.nix — zls, lldb-dap)
 /// isn't present, so the suite still passes outside that shell.
+///
+/// A timeout is treated the same as "not found" (UNAVAILABLE — the caller
+/// skips), but LOUDLY: a `command -v` wedging is itself a finding, worth a
+/// warn even though the test doesn't fail for it.
 pub fn toolAvailable(gpa: Allocator, tool: []const u8) bool {
     const argv = [_][]const u8{ "/bin/sh", "-c", "command -v \"$0\" >/dev/null 2>&1 && printf yes", tool };
-    var res = core.proc.run(gpa, &argv, .{ .environ = parentEnviron() }) catch return false;
+    const start = core.task.nowNs();
+    var res = core.proc.runDeadline(gpa, &argv, .{ .environ = parentEnviron() }, tool_probe_timeout) catch |err| {
+        if (err == error.Timeout) {
+            const elapsed_ms = (core.task.nowNs() - start) / std.time.ns_per_ms;
+            std.log.warn("toolAvailable({s}): `command -v` timed out after {d}ms (backstop 5s) — treating as unavailable", .{ tool, elapsed_ms });
+        }
+        return false;
+    };
     defer res.deinit(gpa);
     return std.mem.indexOf(u8, res.stdout, "yes") != null;
 }
@@ -986,8 +1005,29 @@ pub const Project = struct {
     /// content. Runs through `/bin/sh -c` (like the editor's own proc path) so
     /// argv[0] is PATH-resolved — this Zig's `process.spawn` does not itself
     /// search PATH for a bare command name.
+    ///
+    /// Bounded (task #23 part B, `core.proc.runDeadline`): most oracle
+    /// commands are git/ls/printf (well under a second), but
+    /// authoring_test.zig also drives a real `clang` compile through here —
+    /// bounded generously (tens of seconds) so a genuine compile never trips
+    /// it, while a wedged child still fails fast instead of hanging the whole
+    /// test binary. Unlike `toolAvailable`, a timed-out oracle is NOT
+    /// skippable: it means the test environment itself can't answer a
+    /// question about the disk, which is a broken run, not an absent
+    /// optional tool — so the error propagates (test FAILURE) after logging
+    /// the command and elapsed time that plain `error.Timeout` alone can't
+    /// carry.
+    const oracle_timeout: std.Io.Timeout = .{ .duration = .{ .raw = .fromSeconds(60), .clock = .awake } };
+
     pub fn oracle(self: *Project, sh_cmd: []const u8) ![]u8 {
-        var res = try core.proc.run(self.gpa, &.{ "/bin/sh", "-c", sh_cmd }, .{ .cwd = self.root, .environ = parentEnviron() });
+        const start = core.task.nowNs();
+        var res = core.proc.runDeadline(self.gpa, &.{ "/bin/sh", "-c", sh_cmd }, .{ .cwd = self.root, .environ = parentEnviron() }, oracle_timeout) catch |err| {
+            if (err == error.Timeout) {
+                const elapsed_ms = (core.task.nowNs() - start) / std.time.ns_per_ms;
+                std.log.err("oracle(\"{s}\") timed out after {d}ms (backstop 60s) — the test environment can't answer; broken run, not a skippable condition", .{ sh_cmd, elapsed_ms });
+            }
+            return err;
+        };
         defer res.deinit(self.gpa);
         return self.gpa.dupe(u8, std.mem.trim(u8, res.stdout, " \t\r\n"));
     }

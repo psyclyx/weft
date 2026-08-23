@@ -46,6 +46,13 @@ pub const DrainError = error{
     /// Captured output crossed `Options.max_output_bytes`; the child was
     /// killed and the partial buffers discarded.
     OutputTooLong,
+    /// `runDeadline`'s wall-clock bound elapsed before the child reached
+    /// EOF; the child was killed and reaped, and any partial output
+    /// discarded. A real, distinct answer — never folded into a silent
+    /// empty `Result`, so a caller that only skips on a genuine "no such
+    /// tool"/"command failed" can tell the difference from "we gave up
+    /// waiting". `run` (no deadline) never produces this.
+    Timeout,
 } || Allocator.Error;
 
 /// A finished child's captured output and how it ended. Owns its byte
@@ -155,8 +162,10 @@ pub const Proc = struct {
         }) catch return error.ProcessSpawnFailed;
         errdefer ctx.child.kill(io);
         const pid = ctx.child.id.?;
-        // Ownership of `ctx` transfers to the drain task on success.
-        const handle = try pool.spawn(drain, .{ctx});
+        // Ownership of `ctx` transfers to the drain task on success. `.none`:
+        // the frame loop owns bounding this one (poll + explicit `kill`),
+        // not `drain` — see `Proc`'s doc comment.
+        const handle = try pool.spawn(drain, .{ ctx, .none });
         return .{ .gpa = gpa, .pid = pid, .handle = handle };
     }
 
@@ -205,7 +214,25 @@ pub const Proc = struct {
 /// thread — it is the body a `DeferredWork` (abi.editLater) or any pool
 /// worker runs to shell out without the poll-handle dance. Same spawn+drain
 /// as `Proc`, minus the pool handoff.
+///
+/// UNBOUNDED: waits for the child's own EOF, however long that takes. Right
+/// for a plugin's own shell-out (wasm_host/proc.zig's git/run/grep/filter
+/// jobs) — the command is the USER's choice, and capping it would silently
+/// truncate a legitimate long-running build. A caller that does NOT trust
+/// its child to finish on its own (a test harness shelling out to `command
+/// -v`, a compiler, or a disk oracle it can't otherwise bound) wants
+/// `runDeadline` instead.
 pub fn run(gpa: Allocator, argv: []const []const u8, opts: Options) (SpawnError || DrainError)!Result {
+    return runDeadline(gpa, argv, opts, .none);
+}
+
+/// Like `run`, but bounds the drain with `timeout` (a real wall-clock cap on
+/// how long the child may take to finish, not a poll budget) instead of
+/// waiting for EOF unconditionally. On expiry the child is killed and
+/// reaped — so no zombie survives the call — and `error.Timeout` comes back:
+/// a distinct, real answer, never a silent empty `Result`. `run(...)` is
+/// just `runDeadline(..., .none)`.
+pub fn runDeadline(gpa: Allocator, argv: []const []const u8, opts: Options, timeout: std.Io.Timeout) (SpawnError || DrainError)!Result {
     const ctx = try gpa.create(DrainCtx);
     ctx.* = .{
         .gpa = gpa,
@@ -225,13 +252,21 @@ pub fn run(gpa: Allocator, argv: []const []const u8, opts: Options) (SpawnError 
         gpa.destroy(ctx);
         return error.ProcessSpawnFailed;
     };
-    return drain(ctx); // drain owns ctx now (frees it in every case)
+    return drain(ctx, timeout); // drain owns ctx now (frees it in every case)
 }
 
 /// The off-thread body: read both pipes to EOF (concurrently, so a full
 /// stderr pipe can't deadlock a stdout drain), reap the child, and return
 /// the owned capture. Frees its own `DrainCtx`.
-fn drain(ctx: *DrainCtx) DrainError!Result {
+///
+/// `timeout` bounds the WHOLE drain, not each individual read: `.duration`
+/// is resolved to a fixed `.deadline` once up front (mirroring
+/// `Io.Timeout.toDeadline`'s own doc'd purpose) and that same absolute
+/// deadline is handed to every `mr.fill` call in the loop below — otherwise
+/// a chatty-but-eventually-hung child would keep resetting a per-call
+/// "N seconds from now" duration and never actually time out. `.none`
+/// (from `run`) makes every `fill` block until EOF, exactly as before.
+fn drain(ctx: *DrainCtx, timeout: std.Io.Timeout) DrainError!Result {
     const gpa = ctx.gpa;
     const io = ctx.threaded.io();
     defer {
@@ -244,7 +279,8 @@ fn drain(ctx: *DrainCtx) DrainError!Result {
     mr.init(gpa, io, mr_buf.toStreams(), &.{ ctx.child.stdout.?, ctx.child.stderr.? });
     defer mr.deinit();
 
-    while (mr.fill(64, .none)) |_| {
+    const deadline = timeout.toDeadline(io);
+    while (mr.fill(64, deadline)) |_| {
         const buffered = mr.reader(0).bufferedLen() + mr.reader(1).bufferedLen();
         if (buffered > ctx.max_output_bytes) {
             std.posix.kill(ctx.child.id.?, std.posix.SIG.KILL) catch {};
@@ -253,6 +289,11 @@ fn drain(ctx: *DrainCtx) DrainError!Result {
         }
     } else |err| switch (err) {
         error.EndOfStream => {},
+        error.Timeout => {
+            std.posix.kill(ctx.child.id.?, std.posix.SIG.KILL) catch {};
+            _ = ctx.child.wait(io) catch {};
+            return error.Timeout;
+        },
         else => return error.DrainFailed,
     }
     mr.checkAnyError() catch return error.DrainFailed;
