@@ -2571,6 +2571,550 @@ test "subtree grant: confinement over the REAL wire (socketpair e2e) — admitte
     try t.expect(rig.origin.ref(rig.origin.resolve(rig.room2) catch unreachable).mapGet("denied-edit") == null);
 }
 
+// ── D3 — stuck-authority-refusal PREVENTION + RECOVERY (task #24,
+// doc/d3-refusal-recovery.md, in full: "how a stuck replica recovers, and —
+// more importantly — how the stuck state is made unreachable in the first
+// place"). The seven falsifiable tests from that doc's §6, in order:
+// two TRACE LOCKS guarding the dead designs (§1.1/§1.2's findings against
+// regression), two PREVENTION tests (the graph `.grant` announce +
+// `GraphCollab.mayEditNode` pre-flight), one RECOVERY test (the
+// re-bootstrap that heals a replica already poisoned by the W6 check-in
+// test's own negative case), one TRIGGER-HONESTY test (the "wait for
+// release" path is proven dead for authority), and one showing collapse
+// composes with the same recovery path. Reuses this file's existing rigs
+// (`SessionPair`/`GrantDocs`/`makeEnforcer` for deterministic direct-mint
+// checks, `LeaseRig` for a real wire pump, and a bespoke detach/re-attach
+// for the recovery test — the SAME pattern the W6 check-in test's stage 4
+// already proves, extended here to also discard and rebuild the poisoned
+// `GraphDoc` itself).
+
+test "D3 §6 test 1 (trace lock, falsifies design #1): revert-in-same-batch (insert then delete netting zero) is STILL refused .authority — a region is reported for every APPLIED change, never net content" {
+    const gpa = t.allocator;
+    var sp: SessionPair = undefined;
+    try SessionPair.setup(gpa, &sp);
+    defer sp.deinit();
+
+    var docs = try GrantDocs.setup(gpa);
+    defer docs.deinit(gpa);
+
+    // A text object OUTSIDE the grant, seeded on alice then synced to bob
+    // BEFORE the grant is declared — the revert edit below needs an
+    // existing text object to insert-then-delete on.
+    const a_outside = try docs.alice.resolve(docs.outside);
+    const text_obj = (try docs.alice.set(gpa, a_outside, "body", .text)).?;
+    const text_ref = try docs.alice.nodeRef(gpa, text_obj);
+    defer text_ref.free(gpa);
+    {
+        const bv = try docs.bob.version(gpa);
+        defer gpa.free(bv);
+        const batch = try docs.alice.eventsSince(gpa, bv);
+        defer gpa.free(batch);
+        const changes = try docs.bob.merge(gpa, batch);
+        gpa.free(changes);
+    }
+
+    var table = grants.HandleTable.init(gpa);
+    defer table.deinit();
+    var gc = try makeEnforcer(gpa, &docs, sp.a, &table);
+    defer gc.deinit();
+    _ = try gc.grantSubtree(docs.inside);
+
+    // Bob (out-of-grant) inserts then deletes the SAME bytes, in ONE local
+    // batch — nets zero visible content, but both the insert and the
+    // delete are real, applied `Change`s naming the out-of-grant text
+    // object (doc/d3-refusal-recovery.md §1.1: coalescing an insert+delete
+    // pair does NOT fold to nothing, and even when adjacent same-direction
+    // edits DO coalesce, the change still carries the object).
+    const b_text = try docs.bob.resolve(text_ref);
+    _ = try docs.bob.textInsert(gpa, b_text, 0, "XY");
+    _ = try docs.bob.textDelete(gpa, b_text, .{ .start = 0, .end = 2 });
+
+    const av = try docs.alice.version(gpa);
+    defer gpa.free(av);
+    const batch = try docs.bob.eventsSince(gpa, av);
+    defer gpa.free(batch);
+
+    switch (try gc.admitRegions(gpa, batch)) {
+        .refuse => |r| {
+            defer r.free(gpa);
+            try t.expectEqual(GraphCollab.RefusalReason.authority, r.reason);
+        },
+        .admit => return error.TestUnexpectedResult,
+    }
+    // Never merged — home's replica is byte-for-byte unchanged: the
+    // "revert" bought nothing, exactly as §1.1 traces.
+    try t.expectEqual(@as(usize, 0), docs.alice.ref(text_obj).textRope().byteLen());
+}
+
+test "D3 §6 test 2 (trace lock, falsifies design #2): a straddling batch is refused WHOLE, and re-riding the UNCHANGED batch never partially admits the in-grant op" {
+    const gpa = t.allocator;
+    var sp: SessionPair = undefined;
+    try SessionPair.setup(gpa, &sp);
+    defer sp.deinit();
+
+    var docs = try GrantDocs.setup(gpa);
+    defer docs.deinit(gpa);
+
+    var table = grants.HandleTable.init(gpa);
+    defer table.deinit();
+    var gc = try makeEnforcer(gpa, &docs, sp.a, &table);
+    defer gc.deinit();
+    _ = try gc.grantSubtree(docs.inside);
+
+    // ONE batch, two ops: one inside the grant, one outside it — same
+    // shape as the "straddling" test above.
+    const b_inside = try docs.bob.resolve(docs.inside);
+    _ = try docs.bob.set(gpa, b_inside, "k1", .{ .str = "in" });
+    const b_outside = try docs.bob.resolve(docs.outside);
+    _ = try docs.bob.set(gpa, b_outside, "k2", .{ .str = "out" });
+
+    const av = try docs.alice.version(gpa);
+    defer gpa.free(av);
+    const batch = try docs.bob.eventsSince(gpa, av);
+    defer gpa.free(batch);
+
+    // Re-check the IDENTICAL batch bytes N times — standing in for "the
+    // sender keeps re-offering it every tick" (`sync_core`'s frontier-delta
+    // re-includes an unmerged op forever, §0 finding #1: alice never merges
+    // on a `.refuse`, so her version never advances, so a real re-send
+    // would compute this exact same delta every time). If op-subset
+    // admission existed on this substrate (design #2), SOME retry would
+    // eventually admit "k1" alone; per-agent run contiguity
+    // (`ObjectDoc.Decoder.validate`, §1.2) forbids it, so EVERY retry
+    // refuses the batch WHOLE, identically.
+    var i: usize = 0;
+    while (i < 5) : (i += 1) {
+        switch (try gc.admitRegions(gpa, batch)) {
+            .refuse => |r| {
+                defer r.free(gpa);
+                try t.expectEqual(GraphCollab.RefusalReason.authority, r.reason);
+            },
+            .admit => return error.TestUnexpectedResult,
+        }
+    }
+
+    // Neither op ever landed — not "k2" (expected, out-of-grant), and
+    // critically not "k1" EITHER (in-grant, but bundled): the letter of
+    // "no partial admit path exists."
+    try t.expect(docs.alice.root().mapGet("inside").?.mapGet("k1") == null);
+    try t.expect(docs.alice.root().mapGet("outside").?.mapGet("k2") == null);
+}
+
+test "D3 §6 test 3 (prevention): an announced subtree grant reaches the grantee via the graph .grant frame, and the client's own pre-flight check refuses an out-of-grant edit LOCALLY — never minted, never sent, never refused by the host" {
+    const gpa = t.allocator;
+    var rig: LeaseRig = undefined;
+    try LeaseRig.setup(gpa, &rig);
+    defer rig.deinit(gpa);
+
+    var grant_table = grants.HandleTable.init(gpa);
+    defer grant_table.deinit();
+    rig.ga.bindGrants(&grant_table);
+    _ = try rig.ga.grantSubtree(rig.room1);
+
+    // Pump until bob's quad has recorded the announced root over the graph
+    // `.grant` frame — the prevention half landing.
+    const deadline = task.nowNs() + 5 * std.time.ns_per_s;
+    var announced = false;
+    while (task.nowNs() < deadline) {
+        try rig.pump();
+        if (rig.gb.granted_roots.len == 1 and rig.gb.granted_roots[0].eql(rig.room1)) {
+            announced = true;
+            break;
+        }
+        testPark(2);
+    }
+    try t.expect(announced);
+    try t.expectEqual(@as(usize, 0), rig.gb.refusals.items.len); // nothing refused yet
+
+    // Pre-flight: bob's own local predicate, against his own LIVE doc —
+    // in-grant admits, out-of-grant refuses.
+    const room1_obj = try rig.joiner.resolve(rig.room1);
+    const room2_obj = try rig.joiner.resolve(rig.room2);
+    try t.expect(try rig.gb.mayEditNode(gpa, room1_obj));
+    try t.expect(!(try rig.gb.mayEditNode(gpa, room2_obj)));
+
+    // The honest client discipline this predicate exists to support (D3
+    // §2.1's "before committing the local op AND before it can ride a
+    // batch"): consult it BEFORE minting anything. In-grant: the check
+    // passes, the edit is minted, sent, and admitted.
+    _ = try rig.joiner.set(gpa, room1_obj, "granted-edit", .{ .str = "ok" });
+    {
+        const land_deadline = task.nowNs() + 5 * std.time.ns_per_s;
+        var landed = false;
+        while (task.nowNs() < land_deadline) {
+            try rig.pump();
+            const a_room1 = rig.origin.resolve(rig.room1) catch continue;
+            if (rig.origin.ref(a_room1).mapGet("granted-edit") != null) {
+                landed = true;
+                break;
+            }
+            testPark(2);
+        }
+        try t.expect(landed);
+    }
+
+    // Out-of-grant: the check FAILS, so the honest client never calls
+    // `joiner.set` at all — no op is ever minted (D3 §2.1: "no out-of-grant
+    // event is ever minted"), so nothing is ever sent, nothing is ever
+    // refused, and the host never even sees an attempt.
+    const quiescent_deadline = task.nowNs() + 200 * std.time.ns_per_ms;
+    while (task.nowNs() < quiescent_deadline) {
+        try rig.pump();
+        testPark(2);
+    }
+    try t.expectEqual(@as(usize, 0), rig.gb.refusals.items.len);
+    try t.expect(rig.origin.ref(rig.origin.resolve(rig.room2) catch unreachable).mapGet("denied-edit") == null);
+}
+
+test "D3 §6 test 4 (prevention is advisory only — cannot widen): a grantee's local belief in a wider grant still can't get an out-of-grant op merged" {
+    const gpa = t.allocator;
+    var rig: LeaseRig = undefined;
+    try LeaseRig.setup(gpa, &rig);
+    defer rig.deinit(gpa);
+
+    var grant_table = grants.HandleTable.init(gpa);
+    defer grant_table.deinit();
+    rig.ga.bindGrants(&grant_table);
+    _ = try rig.ga.grantSubtree(rig.room1); // room2 is NEVER granted
+
+    // Simulate a grantee that OVER-CLAIMS: its local `granted_roots`
+    // (DISPLAY/prevention state — never authority) claims BOTH rooms,
+    // wider than what alice's table actually holds — either because it
+    // ignored the real announcement or because it was fed (a buggy host,
+    // or a MITM) a claim wider than the host's table. Constructed directly
+    // rather than over the wire (same technique the "SPOOFED peer_name"
+    // test above uses to bypass the wire and assert straight against the
+    // adversarial belief).
+    var roots: std.ArrayList(GraphDoc.NodeRef) = .empty;
+    defer roots.deinit(gpa);
+    try roots.append(gpa, try rig.room1.dupe(gpa));
+    try roots.append(gpa, try rig.room2.dupe(gpa));
+    rig.gb.granted_roots = try roots.toOwnedSlice(gpa); // freed by rig.deinit -> gb.deinit
+
+    // The local predicate, fooled by the over-claim, says room2 is fine...
+    const room2_obj = try rig.joiner.resolve(rig.room2);
+    try t.expect(try rig.gb.mayEditNode(gpa, room2_obj));
+
+    // ...but sending the edit anyway (bypassing the local check, as a
+    // buggy/malicious client would) still gets refused: the announcement
+    // is advisory, never authority — the HOST's `admitRegions` is the only
+    // real enforcement, independent of whatever the grantee believes.
+    _ = try rig.joiner.set(gpa, room2_obj, "denied-edit", .{ .str = "no" });
+    const deadline = task.nowNs() + 5 * std.time.ns_per_s;
+    var refused = false;
+    while (task.nowNs() < deadline) {
+        try rig.pump();
+        if (rig.gb.refusals.items.len > 0) {
+            refused = true;
+            break;
+        }
+        testPark(2);
+    }
+    try t.expect(refused);
+    try t.expectEqual(GraphCollab.RefusalReason.authority, rig.gb.refusals.items[0].reason);
+    try t.expect(rig.origin.ref(rig.origin.resolve(rig.room2) catch unreachable).mapGet("denied-edit") == null);
+}
+
+test "D3 §6 test 5 (recovery): re-bootstrap heals a poisoned replica — frontiers converge, the in-grant edit lands, the out-of-grant edit never does, home's other region is undisturbed" {
+    const gpa = t.allocator;
+    const fds = try socketPair();
+    var la: FdLink = .{ .fd = fds[0] };
+    var lb: FdLink = .{ .fd = fds[1] };
+
+    var origin = try GraphDoc.init(gpa, "alice");
+    defer origin.deinit(gpa);
+    const inside_obj = (try origin.set(gpa, null, "inside", .map)).?;
+    const outside_obj = (try origin.set(gpa, null, "outside", .map)).?;
+    const inside_ref = try origin.nodeRef(gpa, inside_obj);
+    defer inside_ref.free(gpa);
+    const outside_ref = try origin.nodeRef(gpa, outside_obj);
+    defer outside_ref.free(gpa);
+    // Home's OTHER region — must survive the whole scenario untouched
+    // (property iv: "the host's stream/other regions were never
+    // disturbed").
+    _ = try origin.set(gpa, outside_obj, "untouched", .{ .str = "home" });
+
+    // The remote's PERSISTENT identity, reused across the re-attach below —
+    // same discipline the W6 check-in test's stage 4 established: a
+    // reconnecting peer authenticating with the SAME keypair is,
+    // structurally, the SAME grantee, so the standing grant survives with
+    // no re-grant call.
+    const remote_id = identity.Identity.forTest(0xd3);
+
+    var sa = try Session.create(gpa, la.link(), .server, "tok", .own, null);
+    const sb1 = try Session.create(gpa, lb.link(), .client, "tok", .own, &remote_id);
+    var ca = try Conn.init(gpa, sa, "home", .server);
+    defer ca.deinit();
+    var cb1 = try Conn.init(gpa, sb1, "remote", .client);
+
+    const ga = try ca.shareGraph(&origin, "d3-recover", 1);
+
+    const offer_deadline = task.nowNs() + 5 * std.time.ns_per_s;
+    while (task.nowNs() < offer_deadline and cb1.offers.items.len == 0) {
+        _ = try ca.tick();
+        _ = try cb1.tick();
+        futexWaitTimed(&sa.out_wake, sa.out_wake.load(.acquire), std.time.ns_per_ms);
+    }
+    try t.expect(cb1.offers.items.len > 0);
+
+    var remote1 = try GraphDoc.init(gpa, "remote");
+    const gb1 = try cb1.openGraphOffer(0, &remote1, 1);
+
+    const bootstrap_deadline = task.nowNs() + 5 * std.time.ns_per_s;
+    while (task.nowNs() < bootstrap_deadline and remote1.root().mapGet("inside") == null) {
+        _ = try ca.tick();
+        _ = try cb1.tick();
+        futexWaitTimed(&sb1.out_wake, sb1.out_wake.load(.acquire), std.time.ns_per_ms);
+    }
+    try t.expect(remote1.root().mapGet("inside") != null);
+
+    var table = grants.HandleTable.init(gpa);
+    defer table.deinit();
+    ga.bindGrants(&table);
+    _ = try ga.grantSubtree(inside_ref);
+
+    // ── Drive the poison: an out-of-grant edit is refused, then a
+    // SUBSEQUENT in-grant edit is refused TOO — by bundling with the
+    // still-unmerged refusal (the W6 check-in test's own negative case;
+    // doc/d3-refusal-recovery.md §0's "the refuser's frontier never
+    // advances past the refused op"). ──
+    const b1_outside = try remote1.resolve(outside_ref);
+    _ = try remote1.set(gpa, b1_outside, "poison", .{ .str = "bad" });
+
+    const poison_deadline = task.nowNs() + 5 * std.time.ns_per_s;
+    while (task.nowNs() < poison_deadline and gb1.refusals.items.len == 0) {
+        _ = try ca.tick();
+        _ = try cb1.tick();
+        testPark(2);
+    }
+    try t.expect(gb1.refusals.items.len > 0);
+    try t.expectEqual(GraphCollab.RefusalReason.authority, gb1.refusals.items[0].reason);
+    // The trigger-honesty predicate: this is the client's signal to
+    // re-bootstrap, not to wait.
+    try t.expect(gb1.needsRebootstrap());
+
+    const b1_inside = try remote1.resolve(inside_ref);
+    _ = try remote1.set(gpa, b1_inside, "wanted", .{ .str = "good" });
+
+    const stuck_deadline = task.nowNs() + 3 * std.time.ns_per_s;
+    while (task.nowNs() < stuck_deadline and gb1.refusals.items.len < 2) {
+        _ = try ca.tick();
+        _ = try cb1.tick();
+        testPark(2);
+    }
+    try t.expect(gb1.refusals.items.len >= 2); // the in-grant edit got bundled and refused too
+    try t.expect(origin.ref(inside_obj).mapGet("wanted") == null); // permanently stuck, absent recovery
+
+    // ── Recovery (§2.2/§1.3): discard the poisoned replica, re-attach with
+    // a fresh `GraphDoc` + a fresh `GraphCollab` (a brand-new `Conn`), on
+    // the SAME persistent identity — the empty-joiner bootstrap pulls
+    // home's CLEAN history (which never merged the poison). ──
+    cb1.deinit(); // frees gb1 too
+    sb1.destroy();
+    sa.destroy();
+
+    const fds2 = try socketPair();
+    var la2: FdLink = .{ .fd = fds2[0] };
+    var lb2: FdLink = .{ .fd = fds2[1] };
+    sa = try Session.create(gpa, la2.link(), .server, "tok", .own, null);
+    defer sa.destroy();
+    const sb2 = try Session.create(gpa, lb2.link(), .client, "tok", .own, &remote_id);
+    defer sb2.destroy();
+    try ca.rebind(sa); // re-announces ga's share to whoever attaches next
+
+    var cb2 = try Conn.init(gpa, sb2, "remote", .client);
+    defer cb2.deinit();
+
+    remote1.deinit(gpa); // discard the poisoned replica
+
+    const reoffer_deadline = task.nowNs() + 5 * std.time.ns_per_s;
+    while (task.nowNs() < reoffer_deadline and cb2.offers.items.len == 0) {
+        _ = try ca.tick();
+        _ = try cb2.tick();
+        futexWaitTimed(&sa.out_wake, sa.out_wake.load(.acquire), std.time.ns_per_ms);
+    }
+    try t.expect(cb2.offers.items.len > 0);
+
+    var remote2 = try GraphDoc.init(gpa, "remote");
+    defer remote2.deinit(gpa);
+    const gb2 = try cb2.openGraphOffer(0, &remote2, 1);
+
+    const rebootstrap_deadline = task.nowNs() + 5 * std.time.ns_per_s;
+    while (task.nowNs() < rebootstrap_deadline and remote2.root().mapGet("inside") == null) {
+        _ = try ca.tick();
+        _ = try cb2.tick();
+        futexWaitTimed(&sb2.out_wake, sb2.out_wake.load(.acquire), std.time.ns_per_ms);
+    }
+    try t.expect(remote2.root().mapGet("inside") != null);
+    // The fresh replica pulled home's CLEAN history — it never saw the
+    // poison, so it starts from exactly what home has right now.
+    try t.expect(remote2.root().mapGet("outside").?.mapGet("poison") == null);
+
+    // Replay ONLY the still-wanted, in-grant edit, as a fresh local event
+    // on the clean base — the grant survives the reconnect (identity-
+    // keyed), so no second `grantSubtree` call is needed.
+    const b2_inside = try remote2.resolve(inside_ref);
+    _ = try remote2.set(gpa, b2_inside, "wanted", .{ .str = "good" });
+
+    const land_deadline = task.nowNs() + 5 * std.time.ns_per_s;
+    var landed = false;
+    while (task.nowNs() < land_deadline) {
+        _ = try ca.tick();
+        _ = try cb2.tick();
+        if (origin.ref(inside_obj).mapGet("wanted") != null) {
+            landed = true;
+            break;
+        }
+        testPark(2);
+    }
+    try t.expect(landed); // (ii) the in-grant edit landed on home
+
+    // (i) frontiers converge — not just content agreement.
+    {
+        const hv = try origin.version(gpa);
+        defer gpa.free(hv);
+        const rv = try remote2.version(gpa);
+        defer gpa.free(rv);
+        try t.expectEqual(GraphDoc.VersionOrder.equal, try origin.compareVersions(gpa, hv, rv));
+    }
+    // (iii) the out-of-grant edit never landed, even after recovery.
+    try t.expect(origin.ref(outside_obj).mapGet("poison") == null);
+    // (iv) home's OTHER region was never disturbed.
+    try t.expectEqualStrings("home", origin.ref(outside_obj).mapGet("untouched").?.asStr());
+    try t.expectEqualStrings("good", origin.ref(inside_obj).mapGet("wanted").?.asStr());
+    // The replayed edit was clean — no refusal on the fresh replica.
+    try t.expectEqual(@as(usize, 0), gb2.refusals.items.len);
+}
+
+test "D3 §6 test 6 (trigger honesty): an .authority refusal is the signal to re-bootstrap, and the wait-for-release path is proven dead after N ticks" {
+    const gpa = t.allocator;
+    var sp: SessionPair = undefined;
+    try SessionPair.setup(gpa, &sp);
+    defer sp.deinit();
+
+    var docs = try GrantDocs.setup(gpa);
+    defer docs.deinit(gpa);
+
+    var table = grants.HandleTable.init(gpa);
+    defer table.deinit();
+    var gc = try makeEnforcer(gpa, &docs, sp.a, &table);
+    defer gc.deinit();
+    _ = try gc.grantSubtree(docs.inside);
+
+    const b_outside = try docs.bob.resolve(docs.outside);
+    _ = try docs.bob.set(gpa, b_outside, "k", .{ .str = "v" });
+    const av = try docs.alice.version(gpa);
+    defer gpa.free(av);
+    const batch = try docs.bob.eventsSince(gpa, av);
+    defer gpa.free(batch);
+
+    // "No release ever arrives, and nothing proactively retries" —
+    // simulated as N re-checks of the SAME unmerged batch, standing in for
+    // N ticks of a sender that keeps re-offering it (`sync_core`'s
+    // frontier-delta) with nothing changing on the enforcer's side (there
+    // IS no lease to release here — this is authority). Every single one
+    // refuses identically: the "deferred-until-release" healing property a
+    // LEASE gets NEVER fires for authority.
+    const N = 25;
+    var i: usize = 0;
+    while (i < N) : (i += 1) {
+        switch (try gc.admitRegions(gpa, batch)) {
+            .refuse => |r| {
+                defer r.free(gpa);
+                try t.expectEqual(GraphCollab.RefusalReason.authority, r.reason);
+            },
+            .admit => return error.TestUnexpectedResult, // would falsify "the wait path is dead"
+        }
+    }
+    // Still never merged, after all N "ticks."
+    try t.expect(docs.alice.root().mapGet("outside").?.mapGet("k") == null);
+
+    // The sender's own signal (`refusals`, appended by the real wire path
+    // when the echoed `.region_refused` lands — simulated directly here,
+    // same technique the other direct-mint tests in this suite use to
+    // exercise `GraphCollab` state without a socket) names the reason as
+    // `.authority`, and `needsRebootstrap` reads it as the policy trigger.
+    var sender = try GraphCollab.init(gpa, undefined, &docs.bob, "bob");
+    defer sender.deinit();
+    try t.expect(!sender.needsRebootstrap()); // nothing refused yet — no trigger
+    try sender.refusals.append(gpa, .{
+        .region = try docs.outside.dupe(gpa),
+        .holder = try gpa.dupe(u8, ""),
+        .reason = .authority,
+    });
+    // The policy: an authority (or collapsed) refusal is a re-bootstrap
+    // trigger, never a "wait for release" one — `.lease` is the ONLY
+    // refusal reason that ever heals by waiting.
+    try t.expect(sender.needsRebootstrap());
+}
+
+test "D3 §6 test 7 (collapse composes with recovery): a sole grant root's collapse refuses .collapsed, and the SAME re-bootstrap path heals it" {
+    const gpa = t.allocator;
+    var sp: SessionPair = undefined;
+    try SessionPair.setup(gpa, &sp);
+    defer sp.deinit();
+
+    var docs = try GrantDocs.setup(gpa);
+    defer docs.deinit(gpa);
+
+    var table = grants.HandleTable.init(gpa);
+    defer table.deinit();
+    var gc = try makeEnforcer(gpa, &docs, sp.a, &table);
+    defer gc.deinit();
+    _ = try gc.grantSubtree(docs.inside); // bob's SOLE grant root
+
+    // The root collapses on alice's replica (deleted) — concurrently with
+    // bob's edit, exactly like the existing "root deleted" test above.
+    try docs.alice.unset(gpa, null, "inside");
+    const inside_obj = try docs.alice.resolve(docs.inside);
+    try t.expect(!try docs.alice.reachable(gpa, inside_obj));
+
+    const b_inside = try docs.bob.resolve(docs.inside);
+    _ = try docs.bob.set(gpa, b_inside, "ungrounded", .{ .str = "orphaned" });
+    const av = try docs.alice.version(gpa);
+    defer gpa.free(av);
+    const batch = try docs.bob.eventsSince(gpa, av);
+    defer gpa.free(batch);
+
+    switch (try gc.admitRegions(gpa, batch)) {
+        .refuse => |r| {
+            defer r.free(gpa);
+            try t.expectEqual(GraphCollab.RefusalReason.collapsed, r.reason);
+        },
+        .admit => return error.TestUnexpectedResult,
+    }
+    // Bob's edit applied locally (as every refused send does) but never
+    // reached alice — checked against the collapsed object DIRECTLY (its
+    // creating event is permanent history, so it stays readable even
+    // though it's unreachable from `root()` now; `root().mapGet("inside")`
+    // is `null` post-collapse, so that path can't be used to check this).
+    try t.expect(docs.alice.ref(inside_obj).mapGet("ungrounded") == null);
+
+    // ── Recovery: the SAME re-bootstrap path (§2.2/§1.3) heals a
+    // collapsed-grant poison exactly like an authority one — discard bob's
+    // replica, open a fresh one from alice's CURRENT (post-collapse)
+    // history. Bob has nothing left to re-apply: the grant's root is gone,
+    // so per `GrantContext`'s doc comment ("a grantee with a dead grant has
+    // no OTHER standing to edit with"), there is no still-meaningful edit
+    // to replay — the honest outcome of a sole grant collapsing. ──
+    docs.bob.deinit(gpa);
+    const alice_bytes = try docs.alice.serialize(gpa);
+    defer gpa.free(alice_bytes);
+    docs.bob = try GraphDoc.open(gpa, "bob", alice_bytes);
+
+    // Converges to home's post-collapse state, byte for byte — frontier
+    // equality, not just content agreement.
+    {
+        const hv = try docs.alice.version(gpa);
+        defer gpa.free(hv);
+        const rv = try docs.bob.version(gpa);
+        defer gpa.free(rv);
+        try t.expectEqual(GraphDoc.VersionOrder.equal, try docs.alice.compareVersions(gpa, hv, rv));
+    }
+    // None of the now-ungrounded edit survived recovery.
+    try t.expect(docs.bob.root().mapGet("inside") == null);
+}
+
 // ── W7b — THE FLAGSHIP GATE (doc/w7-rebase.md §4 W7b, north-star-plan.md
 // §6 W7): a function-level subtree grant on a CODE buffer, keyed by node
 // identity, surviving a peer's concurrent in-function edit AND a peer's
