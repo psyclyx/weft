@@ -120,7 +120,12 @@ pub fn attachProviders(deps: *AttachDeps, buf: *core.Buffers.Buffer) !void {
     const lang_path = buf.editor.backingPath() orelse buf.name;
 
     if (deps.grammars.forPath(lang_path)) |spec| {
-        at.syntax = core.syntax.Syntax.create(gpa, spec, doc) catch |err| blk: {
+        // `createAsync`, not `create`: the initial full parse costs the
+        // whole file (an incremental reparse after only costs the edit —
+        // tree-sitter does that part for free), so it runs on the
+        // buffer's own pool worker instead of blocking `open`. See
+        // src/core/syntax.zig's module doc for how the tree lands.
+        at.syntax = core.syntax.Syntax.createAsync(gpa, buf.editor.pool, spec, doc) catch |err| blk: {
             std.log.warn("syntax {s} unavailable: {t}", .{ spec.name, err });
             break :blk null;
         };

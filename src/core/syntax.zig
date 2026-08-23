@@ -15,6 +15,43 @@
 //! carrying any predicate are disabled at load. That keeps keywords,
 //! literals, comments, types-by-node — the load-bearing highlights —
 //! and drops only heuristic identifier classification.
+//!
+//! Initial parse, off the open path: an incremental reparse (`sync`)
+//! costs roughly the edit size, not the file size — tree-sitter does
+//! that part for free. The FIRST parse of a freshly opened file has no
+//! old tree to reuse, so its cost is the whole file, full stop.
+//! `createAsync` (the interactive `open` path, `src/app/providers.zig`)
+//! hands that one-time cost to a `task.Pool` worker instead of running
+//! it inline: `self.tree` stays null (the buffer paints unhighlighted —
+//! `paint`'s `tree orelse` fallback) until the worker's tree lands and
+//! `sync` adopts it. Edits landing during that window are NOT lost: the
+//! mirror is snapshotted at spawn time but `sync` refuses to drain it
+//! while `pending_initial` is outstanding (every `editCb` before the
+//! tree lands would be a no-op anyway — there's nothing to edit yet), so
+//! they queue up as ordinary un-drained commits; the moment the worker's
+//! tree lands, `sync` drains all of them at once — each becomes a
+//! `ts_tree_edit` against the just-landed tree — and does ONE
+//! incremental reparse to bring it current. Same semantics an edit gets
+//! any other day, just batched. `create` (tests/tools that want a tree
+//! back immediately) keeps the old, fully synchronous shape.
+//!
+//! The background job (`InitialParseJob`) owns EVERYTHING it touches —
+//! its own re-opened grammar handle, its own `TSParser`, its own rope
+//! snapshot, its own TSInput read buffer — none of it borrowed from the
+//! `Syntax` it was spawned for. That is what lets `destroy` walk away
+//! from a still-running job with no wait: there is nothing of `Syntax`'s
+//! left for the worker to touch, so closing a buffer never has to wait
+//! on the pool actually scheduling the parse — which matters because
+//! production runs ONE shared pool where persistent readers (shells,
+//! REPLs, the agent door, net collab — `proc_stream`/`repl_session`/
+//! `net_session`/`proc`) can occupy every worker for their session's
+//! whole lifetime; a join here would starve exactly like that class of
+//! bug. `InitialParseJob.state` is the single-owner handoff for the
+//! `*TSTree` it eventually produces: a plain CAS between "the worker
+//! finished, here's the tree" and "`Syntax.destroy` got there first,
+//! self-clean" — whichever side loses touches `result` not at all, so
+//! there is no window where both a live pointer AND nobody who deletes
+//! it exist at once.
 
 const std = @import("std");
 const Allocator = std.mem.Allocator;
@@ -24,6 +61,7 @@ const stemma = @import("stemma");
 const build_options = @import("build_options");
 const Document = @import("Document.zig");
 const Mirror = @import("mirror.zig");
+const task = @import("task.zig");
 
 pub const c = @cImport({
     @cInclude("tree_sitter/api.h");
@@ -199,6 +237,141 @@ fn classOf(name: []const u8) Class {
 
 pub const Error = error{ OutOfMemory, GrammarLoad, QueryLoad };
 
+/// dlopen `spec`'s grammar `.so` and hand back a parser already bound to
+/// its language. Shared by `Syntax.createUnparsed` (whose parser serves
+/// the QUERY compile below it, and every later incremental `sync`) and
+/// `InitialParseJob.create` (whose parser is a wholly separate,
+/// worker-owned instance — see module doc). `dlopen` on an
+/// already-mapped `.so` is a fast refcount bump, not a second disk read,
+/// so calling this twice per buffer is not the cost this file exists to
+/// avoid.
+fn loadGrammar(spec: *const LanguageSpec) Error!struct { lib: std.DynLib, parser: *c.TSParser, lang: *const c.TSLanguage } {
+    var path_buf: [512]u8 = undefined;
+    const lib_path = std.fmt.bufPrint(&path_buf, "{s}/parser", .{spec.parser_dir}) catch return error.GrammarLoad;
+    var lib = std.DynLib.open(lib_path) catch return error.GrammarLoad;
+    errdefer lib.close();
+    const LangFn = *const fn () callconv(.c) ?*const c.TSLanguage;
+    const lang_fn = lib.lookup(LangFn, spec.symbol) orelse return error.GrammarLoad;
+    const lang = lang_fn() orelse return error.GrammarLoad;
+
+    const parser = c.ts_parser_new() orelse return error.OutOfMemory;
+    errdefer c.ts_parser_delete(parser);
+    if (!c.ts_parser_set_language(parser, lang)) return error.GrammarLoad;
+
+    return .{ .lib = lib, .parser = parser, .lang = lang };
+}
+
+/// A background initial-parse job (`Syntax.createAsync`), fully
+/// independent of the `Syntax` it was spawned for — see module doc for
+/// why. `state`/`result` are the single-owner CAS handoff for the tree:
+/// 0 = undecided, 1 = the worker claimed it (finished, `result` is
+/// final — `Syntax.sync` will adopt it), 2 = `Syntax.destroy` claimed it
+/// first (the buffer closed before the parse landed — the worker
+/// self-cleans instead of publishing). Whichever side LOSES the CAS
+/// touches `result` not at all.
+const InitialParseJob = struct {
+    gpa: Allocator,
+    lib: std.DynLib,
+    parser: *c.TSParser,
+    rope: stemma.Rope,
+    read_buf: [4096]u8 = undefined,
+    read_rope: ?*const stemma.Rope = null,
+    state: std.atomic.Value(u8) = .init(0),
+    result: ?*c.TSTree = null,
+
+    const claimed_by_worker: u8 = 1;
+    const claimed_by_syntax: u8 = 2;
+
+    /// `rope` is a snapshot the caller hands off (this job becomes its
+    /// sole owner — freed in `runAndRelease`/`abandonUnstarted`, whichever
+    /// runs).
+    fn create(gpa: Allocator, spec: *const LanguageSpec, rope: stemma.Rope) Error!*InitialParseJob {
+        const g = try loadGrammar(spec);
+        errdefer {
+            c.ts_parser_delete(g.parser);
+            var lib = g.lib;
+            lib.close();
+        }
+        const job = try gpa.create(InitialParseJob);
+        job.* = .{ .gpa = gpa, .lib = g.lib, .parser = g.parser, .rope = rope };
+        return job;
+    }
+
+    /// Never spawned (grammar reload raced/OOM in `Syntax.createAsync`,
+    /// or the pool itself failed to accept the task) — release every
+    /// resource this job holds and free the job itself. There is no tree
+    /// to worry about; the parse never ran.
+    fn abandonUnstarted(self: *InitialParseJob) void {
+        const gpa = self.gpa;
+        c.ts_parser_delete(self.parser);
+        self.lib.close();
+        self.rope.deinit(gpa);
+        gpa.destroy(self);
+    }
+
+    fn readCb(payload: ?*anyopaque, byte_index: u32, _: c.TSPoint, bytes_read: [*c]u32) callconv(.c) [*c]const u8 {
+        const self: *InitialParseJob = @ptrCast(@alignCast(payload.?));
+        const rope = self.read_rope.?;
+        const len = rope.byteLen();
+        if (byte_index >= len) {
+            bytes_read.* = 0;
+            return null;
+        }
+        var n = @min(self.read_buf.len, len - byte_index);
+        // Hole-aware, same as `Syntax.readCb` — a partial checkout reads
+        // as EOF at the first unrealized byte.
+        while (n > 0 and !rope.isRealized(.{ .start = byte_index, .end = byte_index + n })) {
+            n /= 2;
+        }
+        if (n == 0) {
+            bytes_read.* = 0;
+            return null;
+        }
+        var sr = rope.streamReader(.{ .start = byte_index, .end = byte_index + n }, &.{});
+        sr.interface.readSliceAll(self.read_buf[0..n]) catch unreachable;
+        bytes_read.* = @intCast(n);
+        return &self.read_buf;
+    }
+
+    /// Runs the (whole-file, no old tree — this job is single-use) parse
+    /// and immediately releases every OTHER resource it holds — parser,
+    /// grammar handle, rope snapshot — regardless of what happens to the
+    /// tree afterward (published or self-deleted by the caller). Only
+    /// the returned tree, if any, outlives this call.
+    fn runAndRelease(self: *InitialParseJob) ?*c.TSTree {
+        self.read_rope = &self.rope;
+        const input: c.TSInput = .{
+            .payload = self,
+            .read = readCb,
+            .encoding = c.TSInputEncodingUTF8,
+            .decode = null,
+        };
+        const tree = c.ts_parser_parse(self.parser, null, input);
+        self.read_rope = null;
+        c.ts_parser_delete(self.parser);
+        self.lib.close();
+        self.rope.deinit(self.gpa);
+        return tree;
+    }
+};
+
+/// Pool-worker body for `Syntax.createAsync`'s initial parse. Runs the
+/// parse, then races `Syntax.destroy` for ownership of the result via
+/// `job.state`'s CAS (see `InitialParseJob`'s doc): lose, and this
+/// deletes its own tree and frees the job — `Syntax` is already gone and
+/// nothing else will ever look at `job` again; win, and `job` (tree
+/// included) is left for `Syntax.sync` to adopt and free.
+fn initialParseWorker(job: *InitialParseJob) void {
+    const tree = job.runAndRelease();
+    job.result = tree;
+    const lost = job.state.cmpxchgStrong(0, InitialParseJob.claimed_by_worker, .release, .acquire) != null;
+    if (lost) {
+        if (tree) |t_| c.ts_tree_delete(t_);
+        const gpa = job.gpa;
+        gpa.destroy(job);
+    }
+}
+
 pub const Syntax = struct {
     gpa: Allocator,
     lib: std.DynLib,
@@ -217,24 +390,26 @@ pub const Syntax = struct {
     /// TSInput chunk buffer (parse-time only).
     read_buf: [4096]u8 = undefined,
     read_rope: ?*const stemma.Rope = null,
+    /// The initial full parse, in flight on a pool worker (`createAsync`
+    /// only) — a fully independent `InitialParseJob` (see module doc and
+    /// its own doc comment for the ownership split and the CAS handoff).
+    /// While set: `self.tree` is null. Never set by `create`.
+    pending_initial: ?*InitialParseJob = null,
 
-    /// Loads the grammar, does the initial full parse of `doc`'s
-    /// current text, and positions the mirror at the current commit.
-    pub fn create(gpa: Allocator, spec: *const LanguageSpec, doc: *const Document) Error!*Syntax {
+    /// Shared setup for both constructors below: loads the grammar and
+    /// compiles the highlight query (cheap — proportional to the query
+    /// text, not the file), and positions the mirror at the document's
+    /// current commit. Does NOT parse; callers finish the job.
+    fn createUnparsed(gpa: Allocator, spec: *const LanguageSpec, doc: *const Document) Error!*Syntax {
         const self = try gpa.create(Syntax);
         errdefer gpa.destroy(self);
 
-        var path_buf: [512]u8 = undefined;
-        const lib_path = std.fmt.bufPrint(&path_buf, "{s}/parser", .{spec.parser_dir}) catch return error.GrammarLoad;
-        var lib = std.DynLib.open(lib_path) catch return error.GrammarLoad;
+        const g = try loadGrammar(spec);
+        var lib = g.lib;
         errdefer lib.close();
-        const LangFn = *const fn () callconv(.c) ?*const c.TSLanguage;
-        const lang_fn = lib.lookup(LangFn, spec.symbol) orelse return error.GrammarLoad;
-        const lang = lang_fn() orelse return error.GrammarLoad;
-
-        const parser = c.ts_parser_new() orelse return error.OutOfMemory;
+        const parser = g.parser;
         errdefer c.ts_parser_delete(parser);
-        if (!c.ts_parser_set_language(parser, lang)) return error.GrammarLoad;
+        const lang = g.lang;
 
         var err_offset: u32 = 0;
         var err_type: c.TSQueryError = c.TSQueryErrorNone;
@@ -301,15 +476,91 @@ pub const Syntax = struct {
             .doc = doc,
         };
 
-        // Adopt the current text and parse it whole.
+        // Adopt the current text (parsing it is each caller's job).
         self.mirror.rope = doc.text().snapshot();
         self.mirror.cursor = doc.commitCount();
+        return self;
+    }
+
+    /// Loads the grammar and does the initial full parse of `doc`'s
+    /// current text INLINE — for tests/tools that want a ready tree back.
+    /// The interactive open path uses `createAsync` instead (see module
+    /// doc): a full parse costs the whole file, and that must not run on
+    /// the path that makes a buffer usable.
+    pub fn create(gpa: Allocator, spec: *const LanguageSpec, doc: *const Document) Error!*Syntax {
+        const self = try createUnparsed(gpa, spec, doc);
         self.tree = self.parse(doc.text(), null);
         return self;
     }
 
+    /// Same setup as `create`, but the initial full parse runs on `pool`
+    /// instead of inline, on a job that owns everything it touches (see
+    /// `InitialParseJob`'s doc): this call returns with the buffer's
+    /// mirror positioned and `self.tree` still null — the buffer is
+    /// immediately usable and paints unhighlighted until the worker's
+    /// tree lands (see module doc for how `sync` adopts it and folds in
+    /// edits that landed meanwhile).
+    pub fn createAsync(gpa: Allocator, pool: *task.Pool, spec: *const LanguageSpec, doc: *const Document) Error!*Syntax {
+        const self = try createUnparsed(gpa, spec, doc);
+        // A second, independent snapshot for the job: `self.mirror.rope`
+        // stays put (untouched — `sync` won't drain it until the tree
+        // lands), but the job needs its own refcounted handle since it
+        // outlives this call and runs concurrently with whatever this
+        // buffer does next.
+        const worker_rope = self.mirror.rope.snapshot();
+        const job = InitialParseJob.create(gpa, spec, worker_rope) catch {
+            var wr = worker_rope;
+            wr.deinit(gpa);
+            // Degraded fallback (not a second supported mode — just the
+            // one case, grammar reload/allocation failing for the
+            // background job specifically, where parsing inline THIS
+            // ONCE beats a buffer that never highlights at all).
+            self.tree = self.parse(doc.text(), null);
+            return self;
+        };
+        var handle = pool.spawn(initialParseWorker, .{job}) catch {
+            job.abandonUnstarted();
+            // Same degraded-fallback reasoning as above (OOM spawning).
+            self.tree = self.parse(doc.text(), null);
+            return self;
+        };
+        // Fire-and-forget: `task.Handle` only owns the pool's bookkeeping
+        // for this task now (the worker's `void` return carries nothing —
+        // the tree crosses through `job.result`, below), so there is
+        // nothing to poll it FOR; detaching immediately means its
+        // container reclaims itself whenever the worker finishes, with no
+        // one required to ever look at it again.
+        handle.detach();
+        self.pending_initial = job;
+        return self;
+    }
+
+    /// See module doc + `InitialParseJob`'s doc for the ownership split
+    /// and the CAS handoff `state`/`result` implement; `destroy` is the
+    /// other side of it.
     pub fn destroy(self: *Syntax) void {
         const gpa = self.gpa;
+        if (self.pending_initial) |job| {
+            // No join, no spin, no deadline: the job owns its own
+            // parser/grammar-handle/rope — nothing of ours for a
+            // still-running (or not-yet-STARTED — a saturated pool can
+            // leave this queued behind persistent readers for a session's
+            // whole lifetime) worker to touch, so there is nothing to
+            // wait for here. We race the worker for `state` purely to
+            // decide who deletes the tree, never to synchronize teardown.
+            const lost = job.state.cmpxchgStrong(0, InitialParseJob.claimed_by_syntax, .release, .acquire) != null;
+            if (lost) {
+                // The worker already finished (and already claimed) before
+                // we got here — its tree is ours to free now; nothing else
+                // ever will.
+                if (job.result) |t_| c.ts_tree_delete(t_);
+                job.gpa.destroy(job);
+            }
+            // Else: the worker will see `state == claimed_by_syntax`
+            // (whenever the pool gets around to running it) and clean up
+            // after itself — see `initialParseWorker`.
+            self.pending_initial = null;
+        }
         if (self.tree) |t_| c.ts_tree_delete(t_);
         c.ts_query_cursor_delete(self.qcursor);
         c.ts_query_delete(self.query);
@@ -323,9 +574,30 @@ pub const Syntax = struct {
 
     /// Fold new commits into the tree and reparse incrementally.
     /// Returns true when anything changed.
+    ///
+    /// While `createAsync`'s initial parse is still in flight (see module
+    /// doc), this refuses to drain the mirror — every `editCb` before the
+    /// tree lands is a no-op anyway (no tree to edit yet), which would
+    /// otherwise advance `mirror.cursor` past commits and lose their
+    /// `ts_tree_edit` deltas for good. Once the job's tree lands, draining
+    /// resumes and folds in everything that queued up meanwhile as one
+    /// incremental reparse — same shape as an ordinary edit.
     pub fn sync(self: *Syntax, gpa: Allocator, doc: *const Document) !bool {
+        var changed = false;
+        if (self.pending_initial) |job| {
+            const st = job.state.load(.acquire);
+            if (st == 0) return false; // still parsing
+            // `sync`/`destroy` are never both reachable for a live
+            // `Syntax` (the latter frees it) — the only claimant `sync`
+            // can ever observe here is the worker's own.
+            assert(st == InitialParseJob.claimed_by_worker);
+            self.tree = job.result;
+            self.pending_initial = null;
+            job.gpa.destroy(job);
+            changed = true;
+        }
         const drained = try self.mirror.drain(gpa, doc, self, editCb);
-        if (drained == 0) return false;
+        if (drained == 0) return changed;
         const new_tree = self.parse(doc.text(), self.tree);
         if (self.tree) |old| c.ts_tree_delete(old);
         self.tree = new_tree;

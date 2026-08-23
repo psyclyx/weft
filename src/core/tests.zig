@@ -603,6 +603,167 @@ test "syntax: tree queries — node-at-offset, ancestors, and captures" {
     try t.expectError(error.QueryLoad, syn.queryCaptures(gpa, "(nonsense_node", .{ .start = 0, .end = 1 }));
 }
 
+// ── Syntax: async initial parse (open must not block) ───────────────
+//
+// `createAsync` is what the interactive `open` path uses (unlike the
+// `create` calls above, which stay synchronous for tests/tools that want
+// a tree back immediately). The initial full parse — the one tree-sitter
+// cost that scales with the WHOLE file — runs on a pool worker instead
+// of inline; `sync` adopts the tree once it lands.
+
+test "syntax: createAsync returns before the initial parse runs" {
+    const gpa = t.allocator;
+    var pool = try task.Pool.init(gpa, .{ .threads = 1 });
+    defer pool.deinit();
+    var doc = try Document.init(gpa, "user");
+    defer doc.deinit(gpa);
+
+    // A synthetic large file: many repeated top-level declarations. The
+    // assertion below is structural (a parse-ran seam), not wall-clock —
+    // it holds no matter how big this actually is or how fast the
+    // worker thread gets scheduled.
+    var src: std.ArrayList(u8) = .empty;
+    defer src.deinit(gpa);
+    for (0..20_000) |i| {
+        var line_buf: [64]u8 = undefined;
+        const line = try std.fmt.bufPrint(&line_buf, "const x{d} = {d}; // note {d}\n", .{ i, i, i });
+        try src.appendSlice(gpa, line);
+    }
+    try doc.insert(gpa, 0, src.items);
+
+    const spec = core.syntax.forPath("big.zig").?;
+    const syn = try core.syntax.Syntax.createAsync(gpa, pool, spec, &doc);
+    defer syn.destroy();
+
+    // No one but `sync`/`destroy` ever clears `pending_initial` or sets
+    // `tree`, and we've called neither yet — so both are deterministic
+    // right here, independent of how far the background worker has
+    // actually gotten. The parse has not run synchronously on this path.
+    try t.expect(syn.pending_initial != null);
+    try t.expectEqual(@as(?*core.syntax.c.TSTree, null), syn.tree);
+    // The buffer itself is fully usable regardless — the document
+    // doesn't wait on the parse at all.
+    try t.expectEqual(src.items.len, doc.text().byteLen());
+
+    // paint() degrades gracefully with no tree yet: unhighlighted, not
+    // an error — this is the buffer's honest first paint.
+    const classes = try syn.paint(gpa, .{ .start = 0, .end = 200 });
+    defer gpa.free(classes);
+    for (classes) |cl| try t.expectEqual(core.syntax.Class.none, cl);
+}
+
+test "syntax: highlights arrive and paint once the background parse lands" {
+    const gpa = t.allocator;
+    var pool = try task.Pool.init(gpa, .{ .threads = 1 });
+    defer pool.deinit();
+    var doc = try Document.init(gpa, "user");
+    defer doc.deinit(gpa);
+    try doc.insert(gpa, 0, "const x = 42; // note\n");
+
+    const spec = core.syntax.forPath("demo.zig").?;
+    const syn = try core.syntax.Syntax.createAsync(gpa, pool, spec, &doc);
+    defer syn.destroy();
+    try t.expectEqual(@as(?*core.syntax.c.TSTree, null), syn.tree);
+
+    // Drive the loop until the parse lands — the same poll-until-done
+    // idiom `Editor.pollSave`'s tests use for the save worker, not a
+    // sleep: `sync` returns true exactly once the tree is adopted.
+    while (!try syn.sync(gpa, &doc)) std.Thread.yield() catch {};
+    try t.expect(syn.tree != null);
+
+    const classes = try syn.paint(gpa, .{ .start = 0, .end = doc.text().byteLen() });
+    defer gpa.free(classes);
+    try t.expectEqual(core.syntax.Class.keyword, classes[0]);
+    try t.expectEqual(core.syntax.Class.number, classes[10]);
+    try t.expectEqual(core.syntax.Class.comment, classes[15]);
+}
+
+test "syntax: an edit during the pending initial parse lands coherently, not torn" {
+    const gpa = t.allocator;
+    var pool = try task.Pool.init(gpa, .{ .threads = 1 });
+    defer pool.deinit();
+    var doc = try Document.init(gpa, "user");
+    defer doc.deinit(gpa);
+    try doc.insert(gpa, 0, "const x = 1;\n");
+
+    const spec = core.syntax.forPath("demo.zig").?;
+    const syn = try core.syntax.Syntax.createAsync(gpa, pool, spec, &doc);
+    defer syn.destroy();
+    // Guaranteed still pending here (see the test above) — no `sync`
+    // call has happened yet to adopt anything.
+    try t.expect(syn.pending_initial != null);
+
+    // An edit lands before the buffer has ever synced — exactly the
+    // torn-highlight hazard: there is no tree yet to `ts_tree_edit`, so
+    // a naive implementation could drop this edit's delta once the
+    // background tree finally lands.
+    try doc.insert(gpa, doc.text().byteLen(), "var y = \"str\";\n");
+
+    while (!try syn.sync(gpa, &doc)) std.Thread.yield() catch {};
+    try t.expect(syn.tree != null);
+
+    const text = try doc.text().toOwnedSlice(gpa);
+    defer gpa.free(text);
+    const classes = try syn.paint(gpa, .{ .start = 0, .end = doc.text().byteLen() });
+    defer gpa.free(classes);
+    // Both the original text and the edit that landed during the
+    // pending window highlight correctly — coherent, not torn.
+    const const_at = std.mem.indexOf(u8, text, "const").?;
+    try t.expectEqual(core.syntax.Class.keyword, classes[const_at]);
+    const str_at = std.mem.indexOf(u8, text, "\"str\"").?;
+    try t.expectEqual(core.syntax.Class.string, classes[str_at + 1]);
+}
+
+test "syntax: destroy while pending on a saturated pool returns promptly, no leak" {
+    const gpa = t.allocator;
+    // ONE worker, matching production's floor (`min(4, cpus-1)`, as low
+    // as 1) — and occupied for the WHOLE test by a "hog" task standing in
+    // for a persistent reader (proc_stream/repl_session/net_session/proc
+    // — a shell, a REPL, the agent door, net collab — any of which can
+    // occupy a worker for its session's lifetime). With the pool fully
+    // saturated like this, the initial-parse task this test spawns next
+    // cannot even START running until the hog is released, below — the
+    // exact condition that used to deadlock `destroy`'s old join.
+    var pool = try task.Pool.init(gpa, .{ .threads = 1 });
+    defer pool.deinit();
+    var release: std.atomic.Value(bool) = .init(false);
+    const Hog = struct {
+        fn run(flag: *std.atomic.Value(bool)) void {
+            while (!flag.load(.acquire)) std.Thread.yield() catch {};
+        }
+    };
+    var hog = try pool.spawn(Hog.run, .{&release});
+    hog.detach();
+
+    var doc = try Document.init(gpa, "user");
+    defer doc.deinit(gpa);
+    try doc.insert(gpa, 0, "const x = 1;\n");
+    const spec = core.syntax.forPath("demo.zig").?;
+    const syn = try core.syntax.Syntax.createAsync(gpa, pool, spec, &doc);
+    // Queued behind the hog — cannot have started.
+    try t.expect(syn.pending_initial != null);
+
+    // The actual assertion: this returns immediately (no join, no spin —
+    // see syntax.zig's `destroy`) despite the parse having no way to run
+    // yet. Before the ownership-restructure fix, this line hung the
+    // calling thread forever.
+    syn.destroy();
+
+    // Let the hog go so the now-abandoned parse job actually runs to
+    // completion on the worker it was queued for, exercising its
+    // self-clean path (`initialParseWorker` losing the `state` CAS to
+    // `destroy`, above) for real rather than leaving it forever queued.
+    // `pool.deinit()` below would otherwise hang joining a worker stuck
+    // in the hog's loop.
+    release.store(true, .release);
+    // `t.allocator` is the assertion: it fails the test if the job
+    // struct or its rope snapshot outlives this scope — the worker frees
+    // both itself once it sees it lost the claim (a `*TSTree`, if the
+    // parse even produced one, is tree-sitter's own C allocation, outside
+    // `t.allocator`'s ledger — `ts_tree_delete`'s correctness there is
+    // exercised by the coherence/adoption tests above, not this one).
+}
+
 // ── Capabilities (phase 2, milestone 1) ─────────────────────────────
 
 const capability = core.capability;
