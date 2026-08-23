@@ -452,6 +452,25 @@ so the doc matches the shipped invariants:
   rebind re-announces every self-held region exactly once; a disconnected
   peer's leases are reaped and recoverable only by that re-announce.
 
+### 5.2b Authority refusals do not self-heal — recovery is re-bootstrap (task #24, doc/d3-refusal-recovery.md)
+
+The deferred-until-release property above is a LEASE property: a lease
+refusal heals when the holder releases. A SUBTREE-GRANT authority refusal
+(`.authority`/`.collapsed`) has no release — the refuser never merges the
+op, its frontier never advances past it, and the frontier-delta re-offers
+it in every future batch, refused WHOLE alongside anything bundled with it
+(per-agent run contiguity forbids admitting a batch minus one op). By
+construction, not a bug — and permanent within one replica's life. D3
+decides the resolution: **prevention** (the subtree grant is announced to
+its grantee over the graph quad's `.grant` frame — the same host→client
+authority announcement the per-doc grade already uses — so the grantee's
+projection refuses out-of-grant edits locally and the poison op is never
+minted; advisory only, the host still enforces) plus **recovery** (a
+poisoned replica discards its doc and re-bootstraps from the host's clean
+history — the refused op only ever existed locally — replaying its wanted
+in-grant edits as new events). An `.authority`/`.collapsed` refusal is a
+signal to re-bootstrap, never to wait.
+
 ### 5.3 Why declared beats silent turn-taking
 
 Silent turn-taking is last-write-wins with invisible ownership: principals clobber
