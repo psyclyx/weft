@@ -1426,6 +1426,27 @@ test "authoring/dired: rename a semantic field, apply its dialog, and verify dis
     try t.expectEqualStrings("new.txt", renamed.value.bytes);
     try t.expectEqual(view_ref, ed.head.semantic_focus.path().?.view);
 
+    // Vim's force-edit spelling is generic for structured views: Ex invokes
+    // `view.revert`, and the owning provider rebuilds its draft from external
+    // authority. Neither Ex nor Vim knows this is a directory tool.
+    ed.press("colon", "");
+    ed.typeText("e!");
+    ed.press("Return", "");
+    try t.expectEqualStrings("normal", ed.head.currentMode());
+    var reverted = try ed.session.system.semantic.fields.get(field_ref).?.snapshot(gpa);
+    defer reverted.deinit();
+    try t.expectEqualStrings("old.txt", reverted.value.bytes);
+    try t.expectEqual(view_ref, ed.head.semantic_focus.path().?.view);
+
+    // Stage the rename again so the rest of the test still proves that the
+    // exact draft shown by the view is the plan applied after confirmation.
+    try ed.session.system.semantic.fields.get(field_ref).?.edit(reverted.value.revision, .{
+        .start = 0,
+        .end = reverted.value.bytes.len,
+        .replacement = "new.txt",
+        .selection_after = .{ .anchor = 7, .caret = 7 },
+    });
+
     // Apply is an advertised semantic action. Its provider opens a head-local
     // interaction; the dialog owns `y`, rather than introducing a dired mode or
     // polluting which-key/global bindings.
