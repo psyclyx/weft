@@ -12,6 +12,7 @@ const contract = fs.contract;
 pub const Fake = struct {
     gpa: std.mem.Allocator,
     records: std.ArrayList(Record) = .empty,
+    leases: std.ArrayList(LeaseSlot) = .empty,
     root_revision: u64 = 1,
 
     const Record = struct {
@@ -26,6 +27,19 @@ pub const Fake = struct {
         alive: bool = true,
     };
 
+    const LeaseSlot = struct {
+        generation: u32 = 1,
+        value: ?Lease = null,
+    };
+
+    const Lease = struct {
+        root: contract.Root,
+        kind: contract.Kind,
+        contents: []u8 = &.{},
+        link_target: []u8 = &.{},
+        mode: u32,
+    };
+
     pub fn init(gpa: std.mem.Allocator) Fake {
         return .{ .gpa = gpa };
     }
@@ -37,6 +51,11 @@ pub const Fake = struct {
             self.gpa.free(record.link_target);
         }
         self.records.deinit(self.gpa);
+        for (self.leases.items) |lease_slot| if (lease_slot.value) |lease| {
+            self.gpa.free(lease.contents);
+            self.gpa.free(lease.link_target);
+        };
+        self.leases.deinit(self.gpa);
     }
 
     pub fn provider(self: *Fake) fs.service.Provider {
@@ -76,6 +95,7 @@ pub const Fake = struct {
         try validateRoot(root_ref);
         return .{
             .exclusive_create = true,
+            .durable_file_lease = true,
             .symlink = true,
             .posix_mode = true,
             .guard_strength = .atomic,
@@ -147,6 +167,38 @@ pub const Fake = struct {
             .eof = length == available,
         };
         return owned;
+    }
+
+    pub fn capture(self: *Fake, source: contract.EntrySource) contract.Error!contract.LeaseRef {
+        try validateRoot(source.root);
+        const index = try self.entryIndex(source.ref);
+        const record = self.records.items[index];
+        if (!revisionMatches(record.revision, source.revision)) return error.Stale;
+        if (record.kind != .regular and record.kind != .symlink) return error.Unsupported;
+        const contents = try self.gpa.dupe(u8, record.contents);
+        errdefer self.gpa.free(contents);
+        const link_target = try self.gpa.dupe(u8, record.link_target);
+        errdefer self.gpa.free(link_target);
+        for (self.leases.items, 0..) |*slot, slot_index| {
+            if (slot.value != null) continue;
+            slot.value = .{ .root = source.root, .kind = record.kind, .contents = contents, .link_target = link_target, .mode = record.mode };
+            return .{ .authority = .here, .slot = @intCast(slot_index), .generation = slot.generation };
+        }
+        try self.leases.append(self.gpa, .{ .generation = 1, .value = .{ .root = source.root, .kind = record.kind, .contents = contents, .link_target = link_target, .mode = record.mode } });
+        return .{ .authority = .here, .slot = @intCast(self.leases.items.len - 1), .generation = self.leases.items[self.leases.items.len - 1].generation };
+    }
+
+    pub fn releaseLease(self: *Fake, source: contract.LeaseSource) void {
+        if (source.root.authority != .here or source.ref.authority != .here or source.ref.slot >= self.leases.items.len) return;
+        const slot = &self.leases.items[source.ref.slot];
+        if (slot.generation != source.ref.generation) return;
+        if (slot.value) |lease| {
+            self.gpa.free(lease.contents);
+            self.gpa.free(lease.link_target);
+        }
+        slot.value = null;
+        slot.generation +%= 1;
+        if (slot.generation == 0) slot.generation = 1;
     }
 
     pub fn apply(self: *Fake, gpa: std.mem.Allocator, effect_plan: contract.Plan) contract.Error!contract.OwnedApplyReport {
@@ -239,7 +291,7 @@ pub const Fake = struct {
     fn copy(self: *Fake, outputs: []?contract.EntryRef, operation_index: usize, operation: anytype) contract.Error!contract.Outcome {
         const source = switch (operation.source) {
             .entry => |entry| entry,
-            .lease => return .unsupported,
+            .lease => |lease_source| return self.copyLease(outputs, operation_index, operation, lease_source),
         };
         validateRoot(source.root) catch return .unsupported;
         const source_index = self.entryIndex(source.ref) catch return .stale;
@@ -251,6 +303,22 @@ pub const Fake = struct {
         const new_index = try self.copyTree(source_index, parent, operation.destination.name.bytes);
         self.bump(new_index);
         outputs[operation_index] = self.refFor(new_index);
+        return .{ .applied = null };
+    }
+
+    fn copyLease(self: *Fake, outputs: []?contract.EntryRef, operation_index: usize, operation: anytype, source: contract.LeaseSource) contract.Error!contract.Outcome {
+        if (source.root.authority != .here or source.ref.authority != .here or source.ref.slot >= self.leases.items.len) return .stale;
+        const slot = self.leases.items[source.ref.slot];
+        if (slot.generation != source.ref.generation) return .stale;
+        const lease = slot.value orelse return .stale;
+        const parent = try self.parentIndex(operation.destination.parent, outputs);
+        if (!try self.prepareDestination(parent, operation.destination.name.bytes, operation.expected)) return .{ .conflict = "destination changed" };
+        const payload = if (lease.kind == .regular) lease.contents else &.{};
+        const link_target = if (lease.kind == .symlink) lease.link_target else &.{};
+        const index = try self.appendRecord(parent, operation.destination.name.bytes, lease.kind, payload, link_target);
+        self.records.items[index].mode = lease.mode;
+        self.bump(index);
+        outputs[operation_index] = self.refFor(index);
         return .{ .applied = null };
     }
 
@@ -534,6 +602,38 @@ test "fake provider copies symlinks as entries without following them" {
     try std.testing.expectEqual(@as(usize, 2), listing.value.entries.len);
     try std.testing.expectEqual(contract.Kind.symlink, listing.value.entries[1].observation.kind);
     try std.testing.expectEqualStrings("target/elsewhere", listing.value.entries[1].observation.metadata.link_target.?);
+}
+
+test "fake leases survive source deletion and are generation checked" {
+    var fake = Fake.init(std.testing.allocator);
+    defer fake.deinit();
+    const source = try fake.seed(.root, "source", .regular, "payload");
+    const provider = fake.provider();
+    var observed = try provider.observe(std.testing.allocator, Fake.root(), .{ .entry = source });
+    defer observed.deinit();
+    const lease_ref = try provider.capture(.{ .root = Fake.root(), .ref = source, .revision = observed.value.revision });
+    const lease: contract.LeaseSource = .{ .root = Fake.root(), .ref = lease_ref };
+    try fake.deleteExternally(source);
+    const operation = [_]contract.Planned{.{
+        .id = opId(14),
+        .operation = .{ .copy = .{ .source = .{ .lease = lease }, .destination = .{ .parent = .root, .name = try .init("restored") } } },
+    }};
+    var report = try provider.apply(std.testing.allocator, .{ .root = Fake.root(), .base_revision = &.{}, .operations = &operation });
+    defer report.deinit();
+    try std.testing.expectEqual(std.meta.Tag(contract.Outcome).applied, std.meta.activeTag(report.value.entries[0].outcome));
+    provider.releaseLease(lease);
+    var stale_report = try provider.apply(std.testing.allocator, .{ .root = Fake.root(), .base_revision = &.{}, .operations = &operation });
+    defer stale_report.deinit();
+    try std.testing.expectEqual(std.meta.Tag(contract.Outcome).stale, std.meta.activeTag(stale_report.value.entries[0].outcome));
+}
+
+test "fake directory leasing is explicit unsupported" {
+    var fake = Fake.init(std.testing.allocator);
+    defer fake.deinit();
+    const directory = try fake.seed(.root, "tree", .directory, &.{});
+    var observed = try fake.provider().observe(std.testing.allocator, Fake.root(), .{ .entry = directory });
+    defer observed.deinit();
+    try std.testing.expectError(error.Unsupported, fake.provider().capture(.{ .root = Fake.root(), .ref = directory, .revision = observed.value.revision }));
 }
 
 test "fake provider keeps dependency failures inside the apply report" {

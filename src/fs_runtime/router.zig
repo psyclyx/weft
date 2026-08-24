@@ -118,6 +118,28 @@ pub const Router = struct {
         return provider.read(allocator, request);
     }
 
+    /// Capture before a dired/tool session loses its namespace address. The
+    /// provider owns the durable bytes/descriptor behind the returned opaque
+    /// lease; the router only validates the source authority and preserves it
+    /// in the portable value.
+    pub fn capture(self: *Router, source: contract.EntrySource) Error!contract.LeaseSource {
+        const provider = try self.checkRoot(source.root);
+        try checkEntry(source.root, source.ref);
+        const ref = try provider.capture(source);
+        if (ref.generation == 0 or ref.authority != source.root.authority) return error.InvalidHandle;
+        return .{ .root = source.root, .ref = ref };
+    }
+
+    /// Release is intentionally idempotent at the provider boundary. A
+    /// stale/released lease is harmless, while a live lease is made unusable
+    /// before its backing storage is reclaimed by the provider.
+    pub fn release(self: *Router, source: contract.LeaseSource) Error!void {
+        const provider = try self.checkRoot(source.root);
+        if (source.ref.generation == 0 or source.ref.authority != source.root.authority)
+            return error.InvalidHandle;
+        provider.releaseLease(source);
+    }
+
     /// Validate the complete plan and every embedded authority before handing
     /// it to a provider.  Cross-provider plans are intentionally unsupported
     /// until a future explicit bridge operation is introduced; a source is
@@ -253,6 +275,13 @@ const TestProvider = struct {
         result.value = .{ .observation = .{ .node = .root, .revision = .{ .token = &.{} }, .kind = .regular }, .bytes = &.{}, .eof = true };
         return result;
     }
+
+    pub fn capture(self: *TestProvider, source: contract.EntrySource) contract.Error!contract.LeaseRef {
+        if (source.root.authority != self.authority or source.ref.authority != self.authority) return error.Confined;
+        return .{ .authority = self.authority, .slot = 7, .generation = 1 };
+    }
+
+    pub fn releaseLease(_: *TestProvider, _: contract.LeaseSource) void {}
 
     pub fn apply(self: *TestProvider, gpa: std.mem.Allocator, effect_plan: contract.Plan) contract.Error!contract.OwnedApplyReport {
         if (effect_plan.root.authority != self.authority) return error.Confined;

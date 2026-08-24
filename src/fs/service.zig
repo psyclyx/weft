@@ -20,6 +20,8 @@ pub const Provider = struct {
         observe: *const fn (*anyopaque, std.mem.Allocator, contract.Root, contract.NodeRef) contract.Error!contract.OwnedObservation,
         list: *const fn (*anyopaque, std.mem.Allocator, contract.Root, contract.NodeRef) contract.Error!contract.OwnedListing,
         read: *const fn (*anyopaque, std.mem.Allocator, contract.ReadRequest) contract.Error!contract.OwnedReadResult,
+        capture: *const fn (*anyopaque, contract.EntrySource) contract.Error!contract.LeaseRef,
+        release_lease: *const fn (*anyopaque, contract.LeaseSource) void,
         apply: *const fn (*anyopaque, std.mem.Allocator, contract.Plan) contract.Error!contract.OwnedApplyReport,
         watch: *const fn (*anyopaque, contract.Root, contract.NodeRef, bool) contract.Error!contract.WatchRef,
         poll_invalidation: *const fn (*anyopaque, contract.WatchRef) contract.Error!?contract.Invalidation,
@@ -60,6 +62,14 @@ pub const Provider = struct {
                 return self(raw).read(gpa, request);
             }
 
+            fn capture(raw: *anyopaque, source: contract.EntrySource) contract.Error!contract.LeaseRef {
+                return self(raw).capture(source);
+            }
+
+            fn releaseLease(raw: *anyopaque, source: contract.LeaseSource) void {
+                self(raw).releaseLease(source);
+            }
+
             fn apply(raw: *anyopaque, gpa: std.mem.Allocator, effect_plan: contract.Plan) contract.Error!contract.OwnedApplyReport {
                 return self(raw).apply(gpa, effect_plan);
             }
@@ -81,6 +91,8 @@ pub const Provider = struct {
                 .observe = @This().observe,
                 .list = @This().list,
                 .read = @This().read,
+                .capture = @This().capture,
+                .release_lease = @This().releaseLease,
                 .apply = @This().apply,
                 .watch = @This().watch,
                 .poll_invalidation = @This().pollInvalidation,
@@ -105,6 +117,17 @@ pub const Provider = struct {
 
     pub fn read(self: Provider, gpa: std.mem.Allocator, request: contract.ReadRequest) contract.Error!contract.OwnedReadResult {
         return self.vtable.read(self.context, gpa, request);
+    }
+
+    /// Materialize an entry into a provider-owned capability. The returned
+    /// lease is independent of the source namespace, but remains scoped to
+    /// this provider authority and is valid until `releaseLease`.
+    pub fn capture(self: Provider, source: contract.EntrySource) contract.Error!contract.LeaseRef {
+        return self.vtable.capture(self.context, source);
+    }
+
+    pub fn releaseLease(self: Provider, source: contract.LeaseSource) void {
+        self.vtable.release_lease(self.context, source);
     }
 
     pub fn apply(self: Provider, gpa: std.mem.Allocator, effect_plan: contract.Plan) ApplyError!contract.OwnedApplyReport {

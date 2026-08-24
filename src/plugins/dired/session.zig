@@ -208,7 +208,7 @@ pub const Session = struct {
         self.view_ref = try self.plugin.host.views.publish(
             self.plugin.gpa,
             self.plugin.owner,
-            self.target,
+            .{ .ref = self.target, .revision = self.target_revision },
             self.scene_revision,
             scene.value,
         );
@@ -830,6 +830,12 @@ const FakeFilesystem = struct {
     pub fn read(_: *FakeFilesystem, _: std.mem.Allocator, _: contract.ReadRequest) contract.Error!contract.OwnedReadResult {
         return error.Unsupported;
     }
+
+    pub fn capture(_: *FakeFilesystem, _: contract.EntrySource) contract.Error!contract.LeaseRef {
+        return error.Unsupported;
+    }
+
+    pub fn releaseLease(_: *FakeFilesystem, _: contract.LeaseSource) void {}
 
     pub fn apply(_: *FakeFilesystem, gpa: std.mem.Allocator, effect_plan: contract.Plan) contract.Error!contract.OwnedApplyReport {
         var owned = contract.OwnedApplyReport.init(gpa);

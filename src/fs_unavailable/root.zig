@@ -42,6 +42,12 @@ pub const Provider = struct {
         return error.Unsupported;
     }
 
+    pub fn capture(_: *Provider, _: contract.EntrySource) contract.Error!contract.LeaseRef {
+        return error.Unsupported;
+    }
+
+    pub fn releaseLease(_: *Provider, _: contract.LeaseSource) void {}
+
     pub fn apply(_: *Provider, _: std.mem.Allocator, _: contract.Plan) contract.Error!contract.OwnedApplyReport {
         return error.Unsupported;
     }

@@ -21,6 +21,7 @@ pub const LinuxFs = struct {
     generation_seed: u32,
     roots: std.ArrayList(RootSlot) = .empty,
     entries: std.ArrayList(EntrySlot) = .empty,
+    leases: std.ArrayList(LeaseSlot) = .empty,
 
     const RootSlot = struct {
         generation: u32,
@@ -35,6 +36,22 @@ pub const LinuxFs = struct {
     const EntrySlot = struct {
         generation: u32,
         value: ?EntryState = null,
+    };
+
+    /// A lease is a provider-owned materialized file value. Directory trees
+    /// deliberately remain unsupported until their snapshot/space bounds are
+    /// specified; retaining an open fd would not be portable or durable.
+    const LeaseSlot = struct {
+        generation: u32,
+        value: ?LeaseState = null,
+    };
+
+    const LeaseState = struct {
+        root: contract.Root,
+        kind: contract.Kind,
+        contents: []u8 = &.{},
+        link_target: []u8 = &.{},
+        mode: u32,
     };
 
     const EntryState = struct {
@@ -139,6 +156,8 @@ pub const LinuxFs = struct {
             slot.value = null;
         }
         self.roots.deinit(self.gpa);
+        for (self.leases.items) |*slot| self.clearLeaseSlot(slot);
+        self.leases.deinit(self.gpa);
         self.* = undefined;
     }
 
@@ -194,6 +213,7 @@ pub const LinuxFs = struct {
         _ = try self.rootState(root);
         return .{
             .exclusive_create = true,
+            .durable_file_lease = true,
             .symlink = true,
             .posix_mode = true,
             .guard_strength = .preflight,
@@ -374,6 +394,57 @@ pub const LinuxFs = struct {
         return owned;
     }
 
+    /// Materialize one regular file or symlink into provider-owned storage.
+    /// The source is opened/read through the already pinned parent fd and
+    /// checked again before publication, so deletion or replacement after
+    /// capture cannot change what a later paste observes. Directory leasing
+    /// is intentionally unsupported in this slice.
+    pub fn capture(self: *LinuxFs, source: contract.EntrySource) contract.Error!contract.LeaseRef {
+        const resolved = try self.resolveEntry(source.root, source.ref);
+        defer resolved.close();
+        if (!revisionMatches(resolved.snapshot, source.revision)) return error.Stale;
+        if (resolved.snapshot.kind != .regular and resolved.snapshot.kind != .symlink) return error.Unsupported;
+
+        var contents: []u8 = &.{};
+        var link_target: []u8 = &.{};
+        errdefer {
+            self.gpa.free(contents);
+            self.gpa.free(link_target);
+        }
+        if (resolved.snapshot.kind == .regular) {
+            contents = try readWholeFile(self.gpa, resolved.parent_fd, resolved.state.name, resolved.snapshot);
+        } else {
+            link_target = try readlinkAt(self.gpa, resolved.parent_fd, resolved.state.name);
+            const finish = try statAt(self.gpa, resolved.parent_fd, resolved.state.name);
+            if (!finish.identity.eql(resolved.snapshot.identity) or !sameRevision(finish, resolved.snapshot)) return error.Stale;
+        }
+        const finish = try statAt(self.gpa, resolved.parent_fd, resolved.state.name);
+        if (!finish.identity.eql(resolved.snapshot.identity) or !sameRevision(finish, resolved.snapshot)) return error.Stale;
+
+        for (self.leases.items, 0..) |*slot, index| {
+            if (slot.value != null) continue;
+            slot.value = .{ .root = source.root, .kind = resolved.snapshot.kind, .contents = contents, .link_target = link_target, .mode = resolved.snapshot.mode };
+            contents = &.{};
+            link_target = &.{};
+            return .{ .authority = source.root.authority, .slot = @intCast(index), .generation = slot.generation };
+        }
+        try self.leases.append(self.gpa, .{
+            .generation = self.generation_seed,
+            .value = .{ .root = source.root, .kind = resolved.snapshot.kind, .contents = contents, .link_target = link_target, .mode = resolved.snapshot.mode },
+        });
+        contents = &.{};
+        link_target = &.{};
+        return .{ .authority = source.root.authority, .slot = @intCast(self.leases.items.len - 1), .generation = self.leases.items[self.leases.items.len - 1].generation };
+    }
+
+    pub fn releaseLease(self: *LinuxFs, source: contract.LeaseSource) void {
+        if (source.ref.authority != .here or source.ref.slot >= self.leases.items.len) return;
+        const slot = &self.leases.items[source.ref.slot];
+        if (slot.generation != source.ref.generation) return;
+        if (slot.value) |lease| if (!lease.root.eql(source.root)) return;
+        self.clearLeaseSlot(slot);
+    }
+
     pub fn apply(
         self: *LinuxFs,
         gpa: std.mem.Allocator,
@@ -534,7 +605,7 @@ pub const LinuxFs = struct {
         try requireExclusive(copy_op.expected);
         const source = switch (copy_op.source) {
             .entry => |entry| entry,
-            .lease => return error.Unsupported,
+            .lease => |lease| return self.copyLease(destination_root, copy_op, outputs, lease),
         };
         const resolved = try self.resolveEntry(source.root, source.ref);
         defer resolved.close();
@@ -568,6 +639,52 @@ pub const LinuxFs = struct {
             return .{ .outcome = .{ .ambiguous = "copy completed but its destination could not be observed" } };
         const entry = self.mintEntry(destination_root, destination.node, copy_op.destination.name.bytes, copied) catch
             return .{ .outcome = .{ .ambiguous = "copy completed but its result handle could not be retained" } };
+        return .{ .outcome = .{ .applied = null }, .output = entry };
+    }
+
+    fn copyLease(
+        self: *LinuxFs,
+        destination_root: contract.Root,
+        copy_op: anytype,
+        outputs: []?contract.EntryRef,
+        source: contract.LeaseSource,
+    ) contract.Error!Execution {
+        if (source.ref.authority != .here or source.ref.slot >= self.leases.items.len) return error.Stale;
+        const slot = self.leases.items[source.ref.slot];
+        if (slot.generation != source.ref.generation) return error.Stale;
+        const lease = slot.value orelse return error.Stale;
+        if (!lease.root.eql(source.root)) return error.Stale;
+        if (lease.kind != .regular and lease.kind != .symlink) return error.Unsupported;
+        try requireExclusive(copy_op.expected);
+        var destination = try self.resolveParent(destination_root, copy_op.destination.parent, outputs);
+        defer destination.close();
+        const destination_z = try checkedNameZ(self.gpa, copy_op.destination.name.bytes);
+        defer self.gpa.free(destination_z);
+        switch (lease.kind) {
+            .regular => {
+                const fd = try fdResult(linux.openat(destination.fd, destination_z.ptr, .{
+                    .ACCMODE = .WRONLY,
+                    .CREAT = true,
+                    .EXCL = true,
+                    .NOFOLLOW = true,
+                    .CLOEXEC = true,
+                }, @intCast(lease.mode)));
+                defer closeFd(fd);
+                writeAll(fd, lease.contents) catch return .{ .outcome = .{ .ambiguous = "lease paste created a partial file" } };
+                if (linux.errno(linux.fchmod(fd, @intCast(lease.mode))) != .SUCCESS)
+                    return .{ .outcome = .{ .ambiguous = "lease paste created a file whose mode could not be applied" } };
+            },
+            .symlink => {
+                const target_z = try self.gpa.dupeZ(u8, lease.link_target);
+                defer self.gpa.free(target_z);
+                try voidResult(linux.symlinkat(target_z.ptr, destination.fd, destination_z.ptr));
+            },
+            else => return error.Unsupported,
+        }
+        const copied = statAt(self.gpa, destination.fd, copy_op.destination.name.bytes) catch
+            return .{ .outcome = .{ .ambiguous = "lease paste completed but its destination could not be observed" } };
+        const entry = self.mintEntry(destination_root, destination.node, copy_op.destination.name.bytes, copied) catch
+            return .{ .outcome = .{ .ambiguous = "lease paste completed but its result handle could not be retained" } };
         return .{ .outcome = .{ .applied = null }, .output = entry };
     }
 
@@ -1180,6 +1297,15 @@ pub const LinuxFs = struct {
         bumpGeneration(&slot.generation);
     }
 
+    fn clearLeaseSlot(self: *LinuxFs, slot: *LeaseSlot) void {
+        if (slot.value) |lease| {
+            self.gpa.free(lease.contents);
+            self.gpa.free(lease.link_target);
+        }
+        slot.value = null;
+        bumpGeneration(&slot.generation);
+    }
+
     fn rootSlot(self: *LinuxFs, root: contract.Root) ?*RootSlot {
         if (root.authority != .here or root.slot >= self.roots.items.len) return null;
         const slot = &self.roots.items[root.slot];
@@ -1245,6 +1371,36 @@ fn validateMode(mode: u32) contract.Error!void {
 fn checkedNameZ(gpa: std.mem.Allocator, bytes: []const u8) contract.Error![:0]u8 {
     _ = contract.Name.init(bytes) catch return error.InvalidName;
     return gpa.dupeZ(u8, bytes);
+}
+
+fn readWholeFile(gpa: std.mem.Allocator, parent_fd: i32, name: []const u8, expected: LinuxFs.Snapshot) contract.Error![]u8 {
+    const name_z = try checkedNameZ(gpa, name);
+    defer gpa.free(name_z);
+    const fd = try fdResult(linux.openat(parent_fd, name_z.ptr, .{
+        .ACCMODE = .RDONLY,
+        .CLOEXEC = true,
+        .NOFOLLOW = true,
+    }, 0));
+    defer closeFd(fd);
+    const opened = try statFd(fd);
+    if (opened.kind != .regular or !opened.identity.eql(expected.identity) or !sameRevision(opened, expected)) return error.Stale;
+    var bytes: std.ArrayList(u8) = .empty;
+    errdefer bytes.deinit(gpa);
+    var buffer: [64 * 1024]u8 = undefined;
+    while (true) {
+        const rc = linux.read(fd, &buffer, buffer.len);
+        const count = switch (linux.errno(rc)) {
+            .SUCCESS => rc,
+            .INTR => continue,
+            .ACCES, .PERM => return error.PermissionDenied,
+            else => return error.Io,
+        };
+        if (count == 0) break;
+        try bytes.appendSlice(gpa, buffer[0..count]);
+    }
+    const finish = try statFd(fd);
+    if (!finish.identity.eql(expected.identity) or !sameRevision(finish, expected)) return error.Stale;
+    return bytes.toOwnedSlice(gpa);
 }
 
 fn openDirectoryAt(parent_fd: i32, name: []const u8) contract.Error!i32 {
@@ -2324,6 +2480,82 @@ test "linux readlink releases its buffer when shrinking realloc fails" {
         "link",
     ));
     try t.expectEqual(failing_state.allocations, failing_state.deallocations);
+}
+
+test "linux file leases survive namespace deletion and replacement" {
+    var fixture = try Fixture.init(t.allocator);
+    defer fixture.deinit();
+    const provider = fixture.local.provider();
+    const setup = [_]contract.Planned{.{
+        .id = opId(92),
+        .operation = .{ .create_file = .{ .destination = .{ .parent = .root, .name = try .init("source") }, .contents = "payload" } },
+    }};
+    var setup_report = try provider.apply(t.allocator, .{ .root = fixture.root, .base_revision = &.{}, .operations = &setup });
+    defer setup_report.deinit();
+    var listing = try provider.list(t.allocator, fixture.root, .root);
+    defer listing.deinit();
+    const source = findEntry(listing.value, "source") orelse return error.TestExpectedEqual;
+    const lease_ref = try provider.capture(.{ .root = fixture.root, .ref = source.observation.node.entry, .revision = source.observation.revision });
+    const lease: contract.LeaseSource = .{ .root = fixture.root, .ref = lease_ref };
+    try externalUnlink(&fixture.local, fixture.root, "source");
+
+    const operation = [_]contract.Planned{.{
+        .id = opId(93),
+        .operation = .{ .copy = .{ .source = .{ .lease = lease }, .destination = .{ .parent = .root, .name = try .init("restored") } } },
+    }};
+    var report = try provider.apply(t.allocator, .{ .root = fixture.root, .base_revision = &.{}, .operations = &operation });
+    defer report.deinit();
+    try expectOutcome(.applied, report.value.entries[0].outcome);
+    provider.releaseLease(lease);
+    var stale = try provider.apply(t.allocator, .{ .root = fixture.root, .base_revision = &.{}, .operations = &operation });
+    defer stale.deinit();
+    try expectOutcome(.stale, stale.value.entries[0].outcome);
+}
+
+test "linux symlink leases preserve link text without following" {
+    var fixture = try Fixture.init(t.allocator);
+    defer fixture.deinit();
+    const provider = fixture.local.provider();
+    const setup = [_]contract.Planned{.{
+        .id = opId(94),
+        .operation = .{ .create_symlink = .{ .destination = .{ .parent = .root, .name = try .init("link") }, .target = "outside/target" } },
+    }};
+    var setup_report = try provider.apply(t.allocator, .{ .root = fixture.root, .base_revision = &.{}, .operations = &setup });
+    defer setup_report.deinit();
+    var listing = try provider.list(t.allocator, fixture.root, .root);
+    defer listing.deinit();
+    const source = findEntry(listing.value, "link") orelse return error.TestExpectedEqual;
+    const lease_ref = try provider.capture(.{ .root = fixture.root, .ref = source.observation.node.entry, .revision = source.observation.revision });
+    const lease: contract.LeaseSource = .{ .root = fixture.root, .ref = lease_ref };
+    try externalUnlink(&fixture.local, fixture.root, "link");
+    const operation = [_]contract.Planned{.{
+        .id = opId(95),
+        .operation = .{ .copy = .{ .source = .{ .lease = lease }, .destination = .{ .parent = .root, .name = try .init("link-copy") } } },
+    }};
+    var report = try provider.apply(t.allocator, .{ .root = fixture.root, .base_revision = &.{}, .operations = &operation });
+    defer report.deinit();
+    try expectOutcome(.applied, report.value.entries[0].outcome);
+    var after = try provider.list(t.allocator, fixture.root, .root);
+    defer after.deinit();
+    const copy = findEntry(after.value, "link-copy") orelse return error.TestExpectedEqual;
+    try t.expectEqual(contract.Kind.symlink, copy.observation.kind);
+    try t.expectEqualStrings("outside/target", copy.observation.metadata.link_target.?);
+}
+
+test "linux directory leases are explicit unsupported" {
+    var fixture = try Fixture.init(t.allocator);
+    defer fixture.deinit();
+    const provider = fixture.local.provider();
+    const setup = [_]contract.Planned{.{
+        .id = opId(96),
+        .operation = .{ .create_directory = .{ .destination = .{ .parent = .root, .name = try .init("tree") } } },
+    }};
+    var setup_report = try provider.apply(t.allocator, .{ .root = fixture.root, .base_revision = &.{}, .operations = &setup });
+    defer setup_report.deinit();
+    var listing = try provider.list(t.allocator, fixture.root, .root);
+    defer listing.deinit();
+    const tree = findEntry(listing.value, "tree") orelse return error.TestExpectedEqual;
+    try t.expectError(error.Unsupported, provider.capture(.{ .root = fixture.root, .ref = tree.observation.node.entry, .revision = tree.observation.revision }));
 }
 
 test "linux provider closes root fds and generation-checks reused root slots" {
