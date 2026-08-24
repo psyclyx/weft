@@ -275,7 +275,7 @@ test "semantic rows preserve stable focus and field columns" {
     var memory: Memory = .{};
     var fields = view_runtime.field.Registry.init(.here);
     defer fields.deinit(std.testing.allocator);
-    const field_ref = try fields.insert(std.testing.allocator, "test", .init(&memory));
+    const field_ref = try fields.insert(std.testing.allocator, @enumFromInt(1), .init(&memory));
     const children = [_]semantic.scene.Node{
         .{ .id = @enumFromInt(2), .layout = .{ .column = 0 }, .content = .{ .label = "0644" } },
         .{ .id = @enumFromInt(3), .layout = .{ .column = 8 }, .focusable = true, .content = .{ .field = .{ .ref = field_ref } } },

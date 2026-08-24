@@ -603,12 +603,12 @@ test "target opening is revision guarded and confines handlers to their own atta
         probes: usize = 0,
         opens: usize = 0,
 
-        fn probe(self: *@This(), descriptor: semantic.target.Descriptor) target_runtime.resolver.ProbeError!?target_runtime.resolver.Strength {
+        pub fn probe(self: *@This(), descriptor: semantic.target.Descriptor) target_runtime.resolver.ProbeError!?target_runtime.resolver.Strength {
             self.probes += 1;
             return if (descriptor.kind == .directory) .exact else null;
         }
 
-        fn open(self: *@This(), _: semantic.target.Located) target_runtime.resolver.OpenError!semantic.view.Ref {
+        pub fn open(self: *@This(), _: semantic.target.Located) target_runtime.resolver.OpenError!semantic.view.Ref {
             self.opens += 1;
             return self.view;
         }

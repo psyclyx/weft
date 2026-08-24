@@ -16,7 +16,7 @@ export fn init() void {
         .display_name = "fixture directory",
         .facts = &.{.{ .name = "locus", .value = "synthetic:test" }},
     }) catch unreachable;
-    weft.semanticTargetHandlerRegister(77, "fixture-directory") catch unreachable;
+    _ = weft.semanticTargetHandlerRegister(77, "fixture-directory") catch unreachable;
     field_ref = weft.semanticFieldRegister(41, .{
         .revision = "1",
         .bytes = "name",
@@ -93,22 +93,22 @@ export fn on_semantic_target_probe(token: u32) void {
 /// explicit and keep stale requests from being treated as opens.
 export fn on_semantic_target_open(token: u32) void {
     if (token != 77) {
-        _ = weft.semanticTargetHandlerOpenError(.rejected);
+        _ = weft.semanticTargetHandlerOpenError(error.Rejected);
         return;
     }
     var request = weft.semanticTargetHandlerCurrentLocated(weft.allocator) catch {
-        _ = weft.semanticTargetHandlerOpenError(.rejected);
+        _ = weft.semanticTargetHandlerOpenError(error.Rejected);
         return;
     };
     defer request.deinit();
     if (!request.value.target.eql(target_ref) or request.value.revision != 1) {
-        _ = weft.semanticTargetHandlerOpenError(.stale_target);
+        _ = weft.semanticTargetHandlerOpenError(error.StaleTarget);
         return;
     }
     switch (request.value.location) {
         .whole => {},
         else => {
-            _ = weft.semanticTargetHandlerOpenError(.rejected);
+            _ = weft.semanticTargetHandlerOpenError(error.Rejected);
             return;
         },
     }
