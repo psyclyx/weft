@@ -40,4 +40,9 @@ pub const standard = struct {
     pub const paste_after = "selection.paste-after";
     pub const open = "target.open";
     pub const edit = "field.edit";
+    pub const refresh = "view.refresh";
+    pub const apply = "view.apply";
+    pub const revert = "view.revert";
+    pub const confirm = "interaction.confirm";
+    pub const cancel = "interaction.cancel";
 };

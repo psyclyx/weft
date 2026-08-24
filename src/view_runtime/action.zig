@@ -93,6 +93,28 @@ pub const Registry = struct {
             break;
         }
         if (!advertised) return error.ActionUnavailable;
+        return invokeProvider(self, view_instance, request);
+    }
+
+    /// Invoke an action already authorized by an active interaction. The
+    /// interaction declaration is the action advertisement; requiring the
+    /// underlying scene node to duplicate it would couple dialogs to tool
+    /// projections and make local bindings indistinguishable from globals.
+    pub fn invokeInteraction(
+        self: *const Registry,
+        views: *const view_runtime.Registry,
+        request: semantic.action.Request,
+    ) Error!semantic.action.Outcome {
+        const view_instance = views.get(request.view) orelse return error.StaleView;
+        if (view_instance.node(request.subject) == null) return error.UnknownSubject;
+        return invokeProvider(self, view_instance, request);
+    }
+
+    fn invokeProvider(
+        self: *const Registry,
+        view_instance: *const view_runtime.Instance,
+        request: semantic.action.Request,
+    ) Error!semantic.action.Outcome {
         if (!selectionBelongsToView(view_instance, request.selection)) return error.InvalidSelection;
         const provider = self.find(view_instance.descriptor.owner) orelse return error.ProviderUnavailable;
         return provider.invoke(request);
@@ -185,4 +207,9 @@ test "actions not advertised by the subject are unavailable" {
         .view = view_ref,
         .subject = @enumFromInt(1),
     }));
+    try std.testing.expect((try actions.invokeInteraction(&views, .{
+        .action = "dialog.confirm",
+        .view = view_ref,
+        .subject = @enumFromInt(1),
+    })) == .handled);
 }

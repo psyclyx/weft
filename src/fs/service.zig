@@ -9,7 +9,7 @@ const std = @import("std");
 const contract = @import("contract.zig");
 const plan = @import("plan.zig");
 
-pub const ApplyError = contract.Error || plan.ValidationError;
+pub const ApplyError = contract.Error || plan.ValidationError || plan.ReportValidationError;
 
 pub const Provider = struct {
     context: *anyopaque,
@@ -109,7 +109,10 @@ pub const Provider = struct {
 
     pub fn apply(self: Provider, gpa: std.mem.Allocator, effect_plan: contract.Plan) ApplyError!contract.OwnedApplyReport {
         try plan.validate(gpa, effect_plan);
-        return self.vtable.apply(self.context, gpa, effect_plan);
+        var report = try self.vtable.apply(self.context, gpa, effect_plan);
+        errdefer report.deinit();
+        try plan.validateReport(gpa, effect_plan, report.value);
+        return report;
     }
 
     pub fn watch(self: Provider, root: contract.Root, directory: contract.NodeRef, recursive: bool) contract.Error!contract.WatchRef {

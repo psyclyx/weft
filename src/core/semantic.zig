@@ -290,11 +290,25 @@ pub const Services = struct {
         gpa: std.mem.Allocator,
         request: semantic.action.Request,
     ) InvokeActionError!ActionEffect {
+        const with_transfer = self.withCurrentTransfer(request);
+        const outcome = try self.actions.invoke(&self.views, with_transfer);
+        return self.absorbActionOutcome(stack, gpa, outcome);
+    }
+
+    fn withCurrentTransfer(self: *Services, request: semantic.action.Request) semantic.action.Request {
         var with_transfer = request;
         if (with_transfer.transfer == null) {
             if (self.transfer) |*item| with_transfer.transfer = item.value;
         }
-        const outcome = try self.actions.invoke(&self.views, with_transfer);
+        return with_transfer;
+    }
+
+    fn absorbActionOutcome(
+        self: *Services,
+        stack: *view_runtime.interaction.Stack,
+        gpa: std.mem.Allocator,
+        outcome: semantic.action.Outcome,
+    ) InvokeActionError!ActionEffect {
         return switch (outcome) {
             .declined => .declined,
             .handled => .handled,
@@ -324,7 +338,7 @@ pub const Services = struct {
         const action = active.actionForInput(input) orelse return null;
         const interaction_ref = active.descriptor.ref;
         const disposition = action.disposition;
-        const effect = self.invokeAction(stack, gpa, .{
+        const effect = self.invokeInteractionAction(stack, gpa, .{
             .action = action.id,
             .view = active.descriptor.view,
             .subject = active.descriptor.root,
@@ -343,6 +357,17 @@ pub const Services = struct {
             .declined, .interaction_opened => {},
         };
         return effect;
+    }
+
+    fn invokeInteractionAction(
+        self: *Services,
+        stack: *view_runtime.interaction.Stack,
+        gpa: std.mem.Allocator,
+        request: semantic.action.Request,
+    ) InvokeActionError!ActionEffect {
+        const with_transfer = self.withCurrentTransfer(request);
+        const outcome = try self.actions.invokeInteraction(&self.views, with_transfer);
+        return self.absorbActionOutcome(stack, gpa, outcome);
     }
 
     /// Invoke an action against the deepest node on the active focus path that

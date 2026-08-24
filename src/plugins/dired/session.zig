@@ -112,6 +112,22 @@ pub const Plugin = struct {
                 error.StaleTarget => error.Stale,
                 else => error.Failed,
             };
+            if (std.mem.eql(u8, request.action, semantic.action.standard.apply)) {
+                if (session.apply_committed or !session.draft.hasPendingChanges()) return error.Rejected;
+                return .{ .interaction = session.applyConfirmation() };
+            }
+            if (std.mem.eql(u8, request.action, semantic.action.standard.revert)) {
+                session.revert() catch |err| return mapActionError(err);
+                return .handled;
+            }
+            if (std.mem.eql(u8, request.action, semantic.action.standard.refresh)) {
+                session.refresh() catch |err| return mapActionError(err);
+                return .handled;
+            }
+            if (std.mem.eql(u8, request.action, semantic.action.standard.confirm)) {
+                return if (session.applyConfirmed() catch |err| return mapActionError(err)) .handled else .declined;
+            }
+            if (std.mem.eql(u8, request.action, semantic.action.standard.cancel)) return .handled;
             var staged = session.draft.duplicate() catch return error.Failed;
             defer staged.deinit();
             var staged_controller = actions.Controller.init(self.gpa, &staged, session.view_ref);
@@ -165,6 +181,9 @@ pub const Session = struct {
     view_ref: semantic.view.Ref = undefined,
     controller: actions.Controller = undefined,
     loaded: bool = false,
+    /// All effects completed but rebuilding the view failed. While set, a
+    /// second confirmation may refresh state but must never replay the plan.
+    apply_committed: bool = false,
     scene_revision: u64 = 1,
 
     fn init(plugin: *Plugin, target: semantic.target.Ref, target_revision: u64, directory: fs.target.Directory) Session {
@@ -216,9 +235,10 @@ pub const Session = struct {
     /// disappearance and become conflicts; no watcher mutates the draft.
     pub fn refresh(self: *Session) !void {
         try self.validateTarget();
-        var staged = try self.refreshedDraft(false);
+        var staged = try self.refreshedDraft(self.apply_committed);
         defer staged.deinit();
         try self.publishDraft(&staged);
+        self.apply_committed = false;
     }
 
     /// Explicit revert discards the draft and rebuilds from current authority
@@ -229,6 +249,7 @@ pub const Session = struct {
         defer staged.deinit();
         try self.publishDraft(&staged);
         self.controller.clearCapture();
+        self.apply_committed = false;
     }
 
     pub fn buildPlan(self: *const Session) !model.OwnedPlan {
@@ -237,9 +258,52 @@ pub const Session = struct {
 
     pub fn apply(self: *Session, gpa: std.mem.Allocator) !contract.OwnedApplyReport {
         try self.validateTarget();
+        if (self.apply_committed) return error.AlreadyApplied;
         var effect_plan = try self.buildPlan();
         defer effect_plan.deinit();
         return self.plugin.host.filesystems.apply(gpa, effect_plan.value);
+    }
+
+    fn applyConfirmation(self: *const Session) semantic.interaction.Definition {
+        return .{
+            .role = .dialog,
+            .view = self.view_ref,
+            .root = projection.rootNodeId(),
+            .actions = &.{
+                .{ .id = semantic.action.standard.confirm, .label = "Apply", .disposition = .close_on_handled },
+                .{ .id = semantic.action.standard.cancel, .label = "Cancel", .disposition = .close_on_handled },
+            },
+            .bindings = &.{
+                .{ .input = "y", .action = semantic.action.standard.confirm },
+                .{ .input = "n", .action = semantic.action.standard.cancel },
+                .{ .input = "enter", .action = semantic.action.standard.confirm },
+                .{ .input = "escape", .action = semantic.action.standard.cancel },
+            },
+            .default_action = semantic.action.standard.confirm,
+            .cancel_action = semantic.action.standard.cancel,
+            .presentation = "which-key-like",
+        };
+    }
+
+    /// Execute the immutable plan represented by the visible diff. A partial
+    /// report leaves the interaction open; a complete report closes it. Once
+    /// every effect completes, a failed refresh cannot make confirmation run
+    /// the plan twice.
+    fn applyConfirmed(self: *Session) !bool {
+        var report = try self.apply(self.plugin.gpa);
+        defer report.deinit();
+        var complete = true;
+        for (report.value.entries) |entry| switch (entry.outcome) {
+            .applied, .already_satisfied => {},
+            .conflict, .stale, .unsupported, .ambiguous, .recoverable_at => complete = false,
+        };
+        if (!complete) {
+            self.refresh() catch {};
+            return false;
+        }
+        self.apply_committed = true;
+        self.revert() catch {};
+        return true;
     }
 
     fn refreshedDraft(self: *Session, discard_draft: bool) !model.Model {
@@ -654,6 +718,42 @@ test "directory listing boundary rejects retargeted and invalid entries" {
             },
         }},
     }));
+}
+
+test "draft apply is a generic confirmation interaction and revert action" {
+    var fixture: Fixture = undefined;
+    try fixture.init();
+    defer fixture.deinit();
+    const session = fixture.plugin.sessions.items[0];
+    const row = session.draft.rows.items[0].id;
+    const field = session.fieldFor(row).?;
+    var snapshot = try fixture.fields.get(field.ref).?.snapshot(std.testing.allocator);
+    defer snapshot.deinit();
+    try fixture.fields.get(field.ref).?.edit(snapshot.value.revision, .{
+        .start = 0,
+        .end = snapshot.value.bytes.len,
+        .replacement = "pending",
+    });
+
+    const requested = try fixture.actions.invoke(&fixture.views, .{
+        .action = semantic.action.standard.apply,
+        .view = session.view_ref,
+        .subject = projection.rootNodeId(),
+    });
+    const interaction = requested.interaction;
+    try std.testing.expectEqual(semantic.interaction.Role.dialog, interaction.role);
+    try std.testing.expectEqualStrings("which-key-like", interaction.presentation);
+    try std.testing.expectEqualStrings(semantic.action.standard.confirm, interaction.bindings[0].action);
+    try std.testing.expectEqualStrings(semantic.action.standard.cancel, interaction.bindings[1].action);
+
+    const applied = try fixture.actions.invokeInteraction(&fixture.views, .{
+        .action = semantic.action.standard.confirm,
+        .view = session.view_ref,
+        .subject = projection.rootNodeId(),
+    });
+    try std.testing.expect(applied == .handled);
+    try std.testing.expectEqual(model.Pending.observed, session.draft.rows.items[0].pending);
+    try std.testing.expectEqualStrings("kept", session.draft.rows.items[0].draft.name);
 }
 
 const FakeEntry = struct {

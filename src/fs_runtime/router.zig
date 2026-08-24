@@ -11,7 +11,7 @@ const fs = @import("weft_fs");
 
 const contract = fs.contract;
 
-pub const Error = contract.Error || fs.plan.ValidationError || error{
+pub const Error = contract.Error || fs.plan.ValidationError || fs.plan.ReportValidationError || error{
     AuthorityAlreadyRegistered,
     AuthorityRetired,
     UnknownAuthority,

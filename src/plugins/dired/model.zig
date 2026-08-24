@@ -165,15 +165,15 @@ pub const Model = struct {
     }
 
     fn reconcileInPlace(self: *Model, snapshot: Snapshot) !void {
-        try validateSnapshot(snapshot);
-        const had_dirty_rows = self.hasDirtyRows();
+        try validateSnapshot(snapshot, self.root.authority);
+        const had_dirty_rows = self.hasPendingChanges();
         var seen = std.AutoHashMapUnmanaged(NodeId, void).empty;
         defer seen.deinit(self.gpa);
         for (snapshot.entries) |entry| {
             if (self.rowForIdentity(entry.identity)) |id| {
                 const row_ptr = self.rowMutable(id).?;
                 try seen.put(self.gpa, id, {});
-                if (isDirty(row_ptr)) {
+                if (rowHasPendingChanges(row_ptr)) {
                     const external_change = if (row_ptr.base) |base| !observationMatches(base, entry) else true;
                     const latest = try cloneObservation(self.gpa, entry);
                     self.freeObservation(&row_ptr.current);
@@ -208,7 +208,7 @@ pub const Model = struct {
         defer remove.deinit(self.gpa);
         for (self.rows.items) |*row_ptr| {
             if (seen.contains(row_ptr.id)) continue;
-            if (isDirty(row_ptr)) {
+            if (rowHasPendingChanges(row_ptr)) {
                 self.freeObservation(&row_ptr.current);
                 row_ptr.current = null;
                 row_ptr.conflict = .stale;
@@ -340,8 +340,8 @@ pub const Model = struct {
         return copy;
     }
 
-    fn hasDirtyRows(self: *const Model) bool {
-        for (self.rows.items) |*row_ptr| if (isDirty(row_ptr)) return true;
+    pub fn hasPendingChanges(self: *const Model) bool {
+        for (self.rows.items) |*row_ptr| if (rowHasPendingChanges(row_ptr)) return true;
         return false;
     }
 
@@ -633,7 +633,7 @@ const Builder = struct {
             if (row.pending == .copied or row.pending == .copied_renamed)
                 try self.emit(row.id);
         }
-        for (self.model.rows.items) |row| if (isDirty(&row)) try self.emit(row.id);
+        for (self.model.rows.items) |row| if (rowHasPendingChanges(&row)) try self.emit(row.id);
     }
 
     fn emit(self: *Builder, id: NodeId) !void {
@@ -822,15 +822,21 @@ fn baseSource(model: *const Model, row_ptr: *const Row) ?contract.EntrySource {
     return .{ .root = model.root, .ref = observed.identity, .revision = .{ .token = observed.revision } };
 }
 
-fn isDirty(row_ptr: *const Row) bool {
+pub fn rowHasPendingChanges(row_ptr: *const Row) bool {
     return row_ptr.pending != .observed or row_ptr.name_dirty or row_ptr.mode_dirty or row_ptr.conflict != .none;
 }
 
-fn validateSnapshot(snapshot: Snapshot) !void {
+fn validateSnapshot(snapshot: Snapshot, authority: semantic.handle.Authority) !void {
     for (snapshot.entries, 0..) |entry, index| {
-        _ = entry;
+        if (entry.identity.generation == 0) return error.InvalidIdentity;
+        if (entry.identity.authority != authority) return error.InvalidIdentity;
+        if (entry.name.len > max_transfer_name or entry.revision.len > max_transfer_revision or
+            entry.contents.len > max_transfer_payload or entry.link_target.len > max_transfer_payload)
+            return error.TransferTooLarge;
+        _ = contract.Name.init(entry.name) catch return error.InvalidName;
         for (snapshot.entries[index + 1 ..]) |later| {
             if (sameEntry(snapshot.entries[index].identity, later.identity)) return error.DuplicateIdentity;
+            if (std.mem.eql(u8, entry.name, later.name)) return error.DuplicateName;
         }
     }
 }
@@ -1229,6 +1235,22 @@ test "dirty external mutation is stale and duplicate snapshots are rejected tran
     } }));
     try std.testing.expectEqual(before_rows, model.rows.items.len);
     try std.testing.expectEqual(before_next, model.next_id);
+    try std.testing.expectError(error.DuplicateName, model.reconcile(.{ .entries = &.{
+        .{ .identity = ref(30, 1), .name = "same", .revision = "a", .kind = .regular },
+        .{ .identity = ref(31, 1), .name = "same", .revision = "b", .kind = .regular },
+    } }));
+    try std.testing.expectError(error.InvalidName, model.reconcile(.{ .entries = &.{.{
+        .identity = ref(31, 1),
+        .name = "bad/name",
+        .revision = "a",
+        .kind = .regular,
+    }} }));
+    try std.testing.expectError(error.InvalidIdentity, model.reconcile(.{ .entries = &.{.{
+        .identity = .{ .authority = @enumFromInt(9), .slot = 31, .generation = 1 },
+        .name = "foreign",
+        .revision = "a",
+        .kind = .regular,
+    }} }));
 }
 
 test "captured transfer keeps old name across source rename or deletion" {

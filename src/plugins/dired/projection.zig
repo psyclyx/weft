@@ -54,9 +54,25 @@ pub fn project(gpa: std.mem.Allocator, rows: []const model.Row, bindings: []cons
     owned.value = .{
         .id = root_id,
         .role = "dired",
+        .actions = try rootActions(arena, rows),
         .content = .{ .container = .{ .axis = .vertical, .children = children } },
     };
     return owned;
+}
+
+fn rootActions(arena: std.mem.Allocator, rows: []const model.Row) ![]scene.Action {
+    var dirty = false;
+    for (rows) |*row| {
+        if (model.rowHasPendingChanges(row)) {
+            dirty = true;
+            break;
+        }
+    }
+    const result = try arena.alloc(scene.Action, 3);
+    result[0] = .{ .id = standard.refresh, .label = "Refresh" };
+    result[1] = .{ .id = standard.apply, .label = "Apply draft", .enabled = dirty };
+    result[2] = .{ .id = standard.revert, .label = "Revert draft", .enabled = dirty };
+    return result;
 }
 
 fn validateInputs(rows: []const model.Row, bindings: []const FieldBinding) !void {
@@ -251,6 +267,10 @@ pub fn rowNodeId(raw: model.NodeId) !scene.NodeId {
     return stableId(raw, row_domain);
 }
 
+pub fn rootNodeId() scene.NodeId {
+    return root_id;
+}
+
 /// Resolve only row-domain scene identities back to model identity.
 pub fn modelRowId(node: scene.NodeId) !model.NodeId {
     const raw = @intFromEnum(node);
@@ -287,10 +307,14 @@ test "projection keeps row ids and order stable across draft rename" {
     };
     var first = try project(std.testing.allocator, dired.rows.items, &refs);
     defer first.deinit();
+    try std.testing.expectEqualStrings(standard.refresh, first.value.actions[0].id);
+    try std.testing.expect(first.value.actions[0].enabled);
+    try std.testing.expect(!first.value.actions[1].enabled);
     const first_ids = [_]scene.NodeId{ first.value.content.container.children[0].id, first.value.content.container.children[1].id };
     try dired.rename(dired.rows.items[0].id, "renamed");
     var second = try project(std.testing.allocator, dired.rows.items, &refs);
     defer second.deinit();
+    try std.testing.expect(second.value.actions[1].enabled and second.value.actions[2].enabled);
     try std.testing.expectEqual(first_ids[0], second.value.content.container.children[0].id);
     try std.testing.expectEqual(first_ids[1], second.value.content.container.children[1].id);
     try std.testing.expectEqual(
