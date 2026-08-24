@@ -223,19 +223,31 @@ makes glyph coverage machine-dependent.
 
 ### Recording a demo video
 
-The whole-app spine test can optionally turn its existing milestone screenshots
-into an H.264 MP4. This is opt-in, so ordinary test runs remain unchanged:
+The existing whole-app spine test can optionally stream its live, synchronized
+two-screen capture into an H.264 MP4. This is opt-in, so ordinary test runs
+remain unchanged:
 
 ```sh
 WEFT_E2E_VIDEO=/tmp/weft-spine.mp4 \
   zig build e2e-demo --summary all
 ```
 
-The recorder writes two frames per second and keeps the numbered PPM staging
-frames beside the requested output (`/tmp/weft-spine.mp4.frames-*`). If
-`ffmpeg` is unavailable or cannot encode, the test still passes and those raw
-frames remain available for manual conversion. The focused `e2e-demo` step
-ensures the path names only this narrative's output.
+The output is 30 fps by default, with the source and observer screens composed
+side-by-side into each frame from one capture operation. The demo path types at
+75 ms per character and lingers on milestone states for 1000 ms. Tune those
+values without changing the scenario:
+
+```sh
+WEFT_E2E_VIDEO=/tmp/weft-spine.mp4 \
+WEFT_E2E_VIDEO_FPS=30 WEFT_E2E_TYPING_MS=55 WEFT_E2E_LINGER_MS=1500 \
+  zig build e2e-demo --summary all
+```
+
+Frames are streamed directly to `ffmpeg` through a bounded one-frame PPM
+buffer; no raw frame sequence is retained. If `ffmpeg` is unavailable, the
+test still runs with ordinary timing and reports that recording was disabled.
+The focused `e2e-demo` step selects the existing spine test; it does not add a
+separate demo scenario.
 
 ## Remote
 

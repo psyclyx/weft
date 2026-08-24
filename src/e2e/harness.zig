@@ -965,20 +965,27 @@ pub fn makeSystemTmpDir(gpa: Allocator) ![]u8 {
     return gpa.dupe(u8, std.mem.span(made));
 }
 
-/// Opt-in encoder for the durable screenshots emitted by Project.shot.
+fn envU32(comptime name: [:0]const u8, fallback: u32, min: u32, max: u32) u32 {
+    const raw = std.c.getenv(name) orelse return fallback;
+    const value = std.fmt.parseInt(u32, std.mem.sliceTo(raw, 0), 10) catch return fallback;
+    return if (value >= min and value <= max) value else fallback;
+}
+
+/// Opt-in streaming encoder for the frames emitted by Project.capture.
 ///
-/// The recorder deliberately stages ordinary PPM files first.  This keeps the
-/// test's observation boundary deterministic and leaves useful evidence when
-/// ffmpeg is unavailable or fails.  The encoder is only constructed when
-/// WEFT_E2E_VIDEO is set; normal e2e runs do not touch this path.
+/// Frames are encoded as one PPM at a time and written to ffmpeg's stdin. No
+/// frame directory or unbounded in-memory sequence is retained. The encoder is
+/// only constructed when WEFT_E2E_VIDEO is set; normal e2e runs do not touch
+/// this path.
 pub const VideoRecorder = struct {
     gpa: Allocator,
     output_path: []u8,
-    frame_dir: []u8,
+    io_threaded: ?std.Io.Threaded = null,
+    child: ?std.process.Child = null,
     frame_count: usize = 0,
-
-    const fps = 2;
-    const encode_timeout: std.Io.Timeout = .{ .duration = .{ .raw = .fromSeconds(60), .clock = .awake } };
+    width: ?u32 = null,
+    height: ?u32 = null,
+    fps: u32 = 30,
 
     pub fn init(gpa: Allocator, requested_path: []const u8, base_dir: []const u8) !VideoRecorder {
         const output_path = if (std.fs.path.isAbsolute(requested_path))
@@ -987,81 +994,108 @@ pub const VideoRecorder = struct {
             try std.fs.path.join(gpa, &.{ base_dir, requested_path });
         errdefer gpa.free(output_path);
 
-        // A unique staging directory prevents stale frames from a previous
-        // run from entering the numbered image2 sequence.  It is retained on
-        // purpose: when encoding fails, the raw frames are still the demo
-        // artifact and can be encoded manually.
-        const frame_dir = try std.fmt.allocPrint(
-            gpa,
-            "{s}.frames-{d}",
-            .{ output_path, core.task.nowNs() },
-        );
-        errdefer gpa.free(frame_dir);
-
-        var threaded: std.Io.Threaded = .init(gpa, .{});
-        defer threaded.deinit();
-        try std.Io.Dir.cwd().createDirPath(threaded.io(), frame_dir);
-
-        return .{
+        const fps = envU32("WEFT_E2E_VIDEO_FPS", 30, 1, 120);
+        var recorder: VideoRecorder = .{
             .gpa = gpa,
             .output_path = output_path,
-            .frame_dir = frame_dir,
+            .fps = fps,
         };
+        errdefer recorder.deinit();
+
+        var threaded: std.Io.Threaded = .init(gpa, .{ .environ = parentEnviron() });
+        const io = threaded.io();
+        if (std.fs.path.dirname(output_path)) |parent| {
+            try std.Io.Dir.cwd().createDirPath(io, parent);
+        }
+
+        var fps_buf: [16]u8 = undefined;
+        const fps_text = std.fmt.bufPrint(&fps_buf, "{d}", .{fps}) catch unreachable;
+        const child = std.process.spawn(io, .{
+            .argv = &.{
+                "ffmpeg",   "-hide_banner", "-loglevel",          "error", "-y",
+                "-f",       "image2pipe",   "-vcodec",            "ppm",   "-framerate",
+                fps_text,   "-i",           "-",                  "-c:v",  "libx264",
+                "-pix_fmt", "yuv420p",      recorder.output_path,
+            },
+            .stdin = .pipe,
+            .stdout = .ignore,
+            .stderr = .ignore,
+        }) catch |err| {
+            threaded.deinit();
+            std.log.warn("e2e video: ffmpeg unavailable ({t}); recording disabled", .{err});
+            return recorder;
+        };
+        recorder.io_threaded = threaded;
+        recorder.child = child;
+        return recorder;
+    }
+
+    pub fn active(self: *const VideoRecorder) bool {
+        return self.child != null and self.io_threaded != null;
     }
 
     pub fn record(self: *VideoRecorder, pixels: []const u8, width: u32, height: u32) !void {
-        const frame_number = self.frame_count + 1;
-        const path = try std.fmt.allocPrint(
-            self.gpa,
-            "{s}/frame-{d:0>6}.ppm",
-            .{ self.frame_dir, frame_number },
-        );
-        defer self.gpa.free(path);
-        try harness.writePpm(self.gpa, path, pixels, width, height);
-        self.frame_count = frame_number;
+        if (!self.active()) return;
+        if (self.width) |expected| {
+            if (expected != width or self.height.? != height) return error.InvalidFrameSize;
+        } else {
+            self.width = width;
+            self.height = height;
+        }
+
+        const header = try std.fmt.allocPrint(self.gpa, "P6\n{d} {d}\n255\n", .{ width, height });
+        defer self.gpa.free(header);
+        const rgb_len = @as(usize, width) * height * 3;
+        const out = try self.gpa.alloc(u8, header.len + rgb_len);
+        defer self.gpa.free(out);
+        @memcpy(out[0..header.len], header);
+        var di = header.len;
+        var i: usize = 0;
+        while (i < pixels.len) : (i += 4) {
+            out[di] = pixels[i];
+            out[di + 1] = pixels[i + 1];
+            out[di + 2] = pixels[i + 2];
+            di += 3;
+        }
+        const io_threaded = &self.io_threaded.?;
+        const stdin = self.child.?.stdin orelse return error.EncoderClosed;
+        try stdin.writeStreamingAll(io_threaded.io(), out[0..di]);
+        self.frame_count += 1;
     }
 
-    /// Encode the staged sequence to an H.264 MP4.  The command is routed
-    /// through /bin/sh only to resolve ffmpeg from PATH; all user-controlled
-    /// values are positional parameters, never interpolated shell text.
+    /// Close ffmpeg's image2pipe input and wait for the bounded encoder to
+    /// finish. The demo path may block here; normal tests never construct one.
     pub fn finish(self: *VideoRecorder) void {
-        if (self.frame_count == 0) {
-            std.log.warn("e2e video: no frames were recorded for {s}", .{self.output_path});
-            return;
+        if (self.child == null) return;
+        const io_threaded = &self.io_threaded.?;
+        var child = self.child.?;
+        if (child.stdin) |stdin| {
+            stdin.close(io_threaded.io());
+            child.stdin = null;
         }
-
-        var result = core.proc.runDeadline(
-            self.gpa,
-            &.{
-                "/bin/sh",
-                "-c",
-                "exec \"$0\" -hide_banner -loglevel error -y -framerate 2 -i frame-%06d.ppm -c:v libx264 -pix_fmt yuv420p \"$1\"",
-                "ffmpeg",
-                self.output_path,
-            },
-            .{ .cwd = self.frame_dir, .environ = parentEnviron() },
-            encode_timeout,
-        ) catch |err| {
-            std.log.warn(
-                "e2e video: ffmpeg unavailable or failed ({t}); raw frames retained at {s}",
-                .{ err, self.frame_dir },
-            );
+        const term = child.wait(io_threaded.io()) catch |err| {
+            std.log.warn("e2e video: ffmpeg wait failed ({t})", .{err});
+            self.child = null;
             return;
         };
-        defer result.deinit(self.gpa);
-        if (!result.succeeded()) {
-            std.log.warn(
-                "e2e video: ffmpeg exited unsuccessfully ({?}); raw frames retained at {s}",
-                .{ result.exitCode(), self.frame_dir },
-            );
-            return;
+        self.child = null;
+        switch (term) {
+            .exited => |code| if (code != 0) {
+                std.log.warn("e2e video: ffmpeg exited with status {d}", .{code});
+            } else {
+                std.log.info("e2e video: wrote {s} ({d} frames at {d} fps)", .{ self.output_path, self.frame_count, self.fps });
+            },
+            else => std.log.warn("e2e video: ffmpeg did not exit normally", .{}),
         }
-        std.log.info("e2e video: wrote {s} ({d} frames at {d} fps)", .{ self.output_path, self.frame_count, fps });
     }
 
     pub fn deinit(self: *VideoRecorder) void {
+        if (self.child) |*child| {
+            child.kill(self.io_threaded.?.io());
+            self.child = null;
+        }
+        if (self.io_threaded) |*threaded| threaded.deinit();
         self.gpa.free(self.output_path);
-        self.gpa.free(self.frame_dir);
         self.* = undefined;
     }
 };
@@ -1084,10 +1118,16 @@ pub const Project = struct {
     root: []u8, // absolute path to the project dir (the process cwd while live)
     prev_cwd: []u8, // absolute cwd to restore on deinit
     video: ?VideoRecorder = null,
+    demo_left: ?*Editor = null,
+    demo_right: ?*Editor = null,
+    typing_ms: u32 = 75,
+    linger_ms: u32 = 1000,
 
     pub fn init(self: *Project, gpa: Allocator) !void {
         self.gpa = gpa;
         self.video = null;
+        self.demo_left = null;
+        self.demo_right = null;
         self.prev_cwd = try getCwdAlloc(gpa);
         errdefer gpa.free(self.prev_cwd);
         // A real isolated dir in the system tmp — NOT under this repo — so the
@@ -1101,8 +1141,24 @@ pub const Project = struct {
             const requested_path = std.mem.sliceTo(raw_path, 0);
             if (requested_path.len != 0) {
                 self.video = try VideoRecorder.init(gpa, requested_path, self.prev_cwd);
+                self.typing_ms = envU32("WEFT_E2E_TYPING_MS", 75, 0, 2000);
+                self.linger_ms = envU32("WEFT_E2E_LINGER_MS", 1000, 0, 10000);
             }
         }
+    }
+
+    /// True only when the opt-in encoder actually spawned. Normal tests never
+    /// enter the demo path, and a missing ffmpeg falls back to ordinary timing.
+    pub fn demoEnabled(self: *const Project) bool {
+        return if (self.video) |*video| video.active() else false;
+    }
+
+    /// Bind the two existing test screens to one capture clock. The caller
+    /// owns both Editors and must keep them alive until Project.deinit.
+    pub fn bindDemoScreens(self: *Project, left: *Editor, right: *Editor) void {
+        if (!self.demoEnabled()) return;
+        self.demo_left = left;
+        self.demo_right = right;
     }
 
     pub fn deinit(self: *Project) void {
@@ -1159,12 +1215,94 @@ pub const Project = struct {
         return self.gpa.dupe(u8, std.mem.trim(u8, res.stdout, " \t\r\n"));
     }
 
+    fn record(self: *Project, pixels: []const u8, width: u32, height: u32) void {
+        if (self.video) |*video| {
+            video.record(pixels, width, height) catch |err| {
+                std.log.warn("e2e video: could not write frame {d}: {t}", .{ video.frame_count, err });
+            };
+        }
+    }
+
+    fn pairPixels(self: *Project) ![]u8 {
+        const left = self.demo_left orelse return error.NoDemoScreens;
+        const right = self.demo_right orelse return error.NoDemoScreens;
+        left.applyWindow();
+        right.applyWindow();
+        // Both renders happen inside this one capture operation. There is no
+        // per-screen timer: the pair is one logical frame at one frame index.
+        const left_pixels = try left.renderComposite();
+        defer self.gpa.free(left_pixels);
+        const right_pixels = try right.renderComposite();
+        defer self.gpa.free(right_pixels);
+        const out_w = app_w * 2;
+        const out = try self.gpa.alloc(u8, @as(usize, out_w) * app_h * 4);
+        var y: usize = 0;
+        while (y < app_h) : (y += 1) {
+            const dst = out[y * out_w * 4 ..][0 .. out_w * 4];
+            const src_left = left_pixels[y * app_w * 4 ..][0 .. app_w * 4];
+            const src_right = right_pixels[y * app_w * 4 ..][0 .. app_w * 4];
+            @memcpy(dst[0 .. app_w * 4], src_left);
+            @memcpy(dst[app_w * 4 ..], src_right);
+        }
+        return out;
+    }
+
+    fn frame(self: *Project) void {
+        const pixels = self.pairPixels() catch return;
+        defer self.gpa.free(pixels);
+        self.record(pixels, app_w * 2, app_h);
+    }
+
+    fn delay(self: *Project, ms: u32) void {
+        if (!self.demoEnabled() or self.demo_left == null or self.demo_right == null) return;
+        const fps = self.video.?.fps;
+        const count = @max(@as(u64, 1), (@as(u64, ms) * fps + 999) / 1000);
+        const interval_us = @max(@as(u64, 1), 1_000_000 / fps);
+        var i: u64 = 0;
+        while (i < count) : (i += 1) {
+            self.frame();
+            napUs(interval_us);
+        }
+    }
+
+    /// Type through the same Editor implementation, adding only demo cadence
+    /// and frame emission when recording is active.
+    pub fn typeText(self: *Project, ed: *Editor, text: []const u8) void {
+        if (!self.demoEnabled() or self.demo_left == null or self.demo_right == null) {
+            ed.typeText(text);
+            return;
+        }
+        var i: usize = 0;
+        while (i < text.len) {
+            const n = std.unicode.utf8ByteSequenceLength(text[i]) catch 1;
+            const ch = text[i..@min(i + n, text.len)];
+            ed.typeText(ch);
+            self.delay(self.typing_ms);
+            i += ch.len;
+        }
+    }
+
+    /// Capture one synchronized pair, then linger on the resulting state.
+    /// Normal mode keeps the original one-screen PPM behavior.
+    pub fn capture(self: *Project, ed: *Editor, name: []const u8) void {
+        if (self.demoEnabled() and self.demo_left != null and self.demo_right != null) {
+            const pixels = self.pairPixels() catch return;
+            const fname = std.fmt.allocPrint(self.gpa, "{s}/.zig-cache/tmp/weft-e2e-{s}.ppm", .{ self.prev_cwd, name }) catch {
+                self.gpa.free(pixels);
+                return;
+            };
+            defer self.gpa.free(fname);
+            harness.writePpm(self.gpa, fname, pixels, app_w * 2, app_h) catch {};
+            self.record(pixels, app_w * 2, app_h);
+            self.gpa.free(pixels);
+            self.delay(self.linger_ms);
+            return;
+        }
+        self.shot(ed, name);
+    }
+
     /// Write a composite screenshot to an absolute artifact path that outlives
-    /// the tmpdir (best-effort; the e2e leaves frames to eyeball). Syncs the
-    /// window layout to the active buffer first — the real frame loop runs
-    /// `applyIntents` every frame, so without this the focused pane still shows
-    /// the buffer it was created with and the screenshot lies about what a user
-    /// sees (a magit mode chip over an empty *scratch* body).
+    /// the tmpdir (best-effort; the e2e leaves frames to eyeball).
     pub fn shot(self: *Project, ed: *Editor, name: []const u8) void {
         ed.applyWindow();
         const pixels = ed.renderComposite() catch return;
@@ -1172,11 +1310,7 @@ pub const Project = struct {
         const fname = std.fmt.allocPrint(self.gpa, "{s}/.zig-cache/tmp/weft-e2e-{s}.ppm", .{ self.prev_cwd, name }) catch return;
         defer self.gpa.free(fname);
         harness.writePpm(self.gpa, fname, pixels, app_w, app_h) catch {};
-        if (self.video) |*video| {
-            video.record(pixels, app_w, app_h) catch |err| {
-                std.log.warn("e2e video: could not write frame {d}: {t}", .{ video.frame_count, err });
-            };
-        }
+        self.record(pixels, app_w, app_h);
     }
 };
 

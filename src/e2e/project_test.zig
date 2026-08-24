@@ -230,15 +230,29 @@ test "e2e/spine: write a file, init a repo, stage and commit — all through wef
     defer ed.deinit();
     try loadWorkspace(&ed);
 
+    // Demo mode observes this same scenario with a second existing test
+    // screen. Normal runs do not construct it; recording composes both views
+    // through one synchronized capture operation.
+    var mirror: Editor = undefined;
+    var have_mirror = false;
+    defer if (have_mirror) mirror.deinit();
+    if (proj.demoEnabled()) {
+        try Editor.init(gpa, &mirror);
+        have_mirror = true;
+        try loadWorkspace(&mirror);
+        proj.bindDemoScreens(&ed, &mirror);
+    }
+
     // ── 1. Write the first file the way a person does: open, type, save. ──
     // (Mode starts `normal`; edit BEFORE entering any tool buffer, so no
     // tool-mode ever swallows the typing — see [[mode-leak-class]].)
     ed.runStr("open", "index.html");
     ed.press("i", "");
-    ed.typeText("<!doctype html>\n<title>weft demo</title>\n");
+    proj.typeText(&ed, "<!doctype html>\n<title>weft demo</title>\n");
     ed.press("Escape", "");
     ed.run("save");
     ed.waitSave();
+    if (have_mirror) mirror.runStr("open", "index.html");
 
     // CONTENT is verified on disk (the artifact a human checks), not via the
     // editor's model.
@@ -267,7 +281,7 @@ test "e2e/spine: write a file, init a repo, stage and commit — all through wef
         defer gpa.free(gitdir);
         try t.expect(gitdir.len > 0); // ".git" (or its absolute path)
     }
-    proj.shot(&ed, "spine-1-init");
+    proj.capture(&ed, "spine-1-init");
 
     // Configure an author for this repo (world setup — a human's git identity),
     // so the commit below has one. Repo-local, hermetic.
@@ -286,17 +300,17 @@ test "e2e/spine: write a file, init a repo, stage and commit — all through wef
     // Disk oracle, drained: the file becomes staged once the async `git add`
     // the keypress scheduled actually runs.
     try t.expect(drainUntilOracle(&proj, &ed, "git diff --cached --name-only", "index.html"));
-    proj.shot(&ed, "spine-2-staged");
+    proj.capture(&ed, "spine-2-staged");
 
     // Commit dispatch: `c` opens the transient, `c` again starts a commit.
     ed.press("c", ""); // git-commit-dispatch (menu)
     ed.press("c", ""); // git-commit → *git-commit* buffer, mode git-commit
     try t.expectEqualStrings("git-commit", ed.mode());
-    ed.typeText("initial commit: weft demo skeleton");
+    proj.typeText(&ed, "initial commit: weft demo skeleton");
     ed.press("C-c", ""); // git-commit-menu
     ed.press("C-c", ""); // git-commit-finish → git commit -F … → re-gather
     try t.expect(drainToolContains(&ed, "*magit*", "initial commit"));
-    proj.shot(&ed, "spine-3-committed");
+    proj.capture(&ed, "spine-3-committed");
 
     // ── 5. Verify the commit landed, on disk, via the git oracle. ──
     {
