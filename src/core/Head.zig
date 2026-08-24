@@ -775,6 +775,7 @@ test "head: semantic focus and interaction scopes are independent" {
 
     const definition: kernel.interaction.Definition = .{
         .role = .dialog,
+        .view = view_ref,
         .root = @enumFromInt(20),
         .actions = &.{.{ .id = "apply", .label = "Apply" }},
         .bindings = &.{.{ .input = "y", .action = "apply" }},

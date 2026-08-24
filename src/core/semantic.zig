@@ -31,6 +31,24 @@ pub const Services = struct {
         self.targets.deinit(gpa);
         self.* = undefined;
     }
+
+    pub const OpenInteractionError = view_runtime.interaction.Error || error{
+        StaleView,
+        UnknownRoot,
+    };
+
+    /// Compose two otherwise-independent mechanisms at their one real
+    /// invariant: an interaction root must name a node in its declared view.
+    pub fn openInteraction(
+        self: *const Services,
+        stack: *view_runtime.interaction.Stack,
+        gpa: std.mem.Allocator,
+        definition: kernel.interaction.Definition,
+    ) OpenInteractionError!kernel.interaction.Ref {
+        const instance = self.views.get(definition.view) orelse return error.StaleView;
+        if (instance.node(definition.root) == null) return error.UnknownRoot;
+        return stack.open(gpa, definition);
+    }
 };
 
 test "semantic services keep target, view, and field namespaces typed" {
@@ -46,4 +64,14 @@ test "semantic services keep target, view, and field namespaces typed" {
     });
     try std.testing.expect(services.targets.get(target_ref) != null);
     try std.testing.expect(services.views.get(view_ref) != null);
+
+    var interactions: view_runtime.interaction.Stack = .empty;
+    defer interactions.deinit(std.testing.allocator);
+    _ = try services.openInteraction(&interactions, std.testing.allocator, .{
+        .role = .dialog,
+        .view = view_ref,
+        .root = @enumFromInt(1),
+        .actions = &.{.{ .id = "ok", .label = "OK" }},
+    });
+    try std.testing.expect(interactions.active() != null);
 }

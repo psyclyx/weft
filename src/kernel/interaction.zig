@@ -3,6 +3,7 @@
 
 const handle = @import("handle.zig");
 const scene = @import("scene.zig");
+const view = @import("view.zig");
 
 pub const Tag = struct {};
 pub const Ref = handle.Handle(Tag);
@@ -27,6 +28,7 @@ pub const Binding = struct {
 /// `presentation` is an open-ended renderer hint, not a core layout choice.
 pub const Definition = struct {
     role: Role,
+    view: view.Ref,
     root: scene.NodeId,
     actions: []const Action,
     bindings: []const Binding = &.{},
@@ -38,6 +40,7 @@ pub const Definition = struct {
 pub const Descriptor = struct {
     ref: Ref,
     role: Role,
+    view: view.Ref,
     root: scene.NodeId,
     actions: []const Action,
     bindings: []const Binding = &.{},

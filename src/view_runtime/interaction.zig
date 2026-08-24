@@ -45,6 +45,7 @@ pub const Instance = struct {
         self.descriptor = .{
             .ref = ref,
             .role = definition.role,
+            .view = definition.view,
             .root = definition.root,
             .actions = actions,
             .bindings = bindings,
@@ -181,6 +182,7 @@ fn validate(gpa: std.mem.Allocator, definition: kernel.interaction.Definition) E
 
 const confirm_definition: kernel.interaction.Definition = .{
     .role = .dialog,
+    .view = .{ .authority = .here, .slot = 1, .generation = 1 },
     .root = @enumFromInt(1),
     .actions = &.{
         .{ .id = "confirm", .label = "Apply" },
