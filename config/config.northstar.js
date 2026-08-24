@@ -252,6 +252,7 @@ bindActionGroup("normal", "SPC v", [
   ["y", "selection.copy"],
   ["x", "selection.cut"],
   ["d", "selection.delete"],
+  ["m", "fs.permissions.edit"],
   ["p", "selection.paste-after"],
   ["P", "selection.paste-before"],
   ["r", "view.refresh"],

@@ -75,11 +75,16 @@ const ConfigActions = struct {
     applies: usize = 0,
     confirms: usize = 0,
     plugin_actions: usize = 0,
+    permission_edits: usize = 0,
 
     pub fn invoke(self: *ConfigActions, request: semantic.action.Request) view_runtime.action.ProviderError!semantic.action.Outcome {
         const action = request.action;
         if (std.mem.eql(u8, action, "fixture.plugin-action")) {
             self.plugin_actions += 1;
+            return .handled;
+        }
+        if (std.mem.eql(u8, action, "fs.permissions.edit")) {
+            self.permission_edits += 1;
             return .handled;
         }
         if (std.mem.eql(u8, action, semantic.action.standard.edit)) {
@@ -187,7 +192,7 @@ test "e2e/config: the sample config boots; SPC g i is discoverable via which-key
     // A plugin-owned action is deliberately not part of core's standard
     // vocabulary. The config API declares its focused-view trampoline from
     // data, then the retained fixture below advertises and handles it.
-    try core.quickjs.evalConfig(&ed.engine, ed.ctx, null, &ed.config_kv, null, "weft.semanticAction('fixture.plugin-action'); weft.bind('normal', 'SPC v m', 'fixture.plugin-action');");
+    try core.quickjs.evalConfig(&ed.engine, ed.ctx, null, &ed.config_kv, null, "weft.semanticAction('fixture.plugin-action'); weft.bind('normal', 'SPC v z', 'fixture.plugin-action');");
     try t.expect(ed.commands.resolve("fixture.plugin-action") != null);
 
     // Any plugin the sample config asked for but we couldn't load is a FINDING
@@ -241,6 +246,7 @@ test "e2e/config: the sample config boots; SPC g i is discoverable via which-key
     try t.expect(whichKeyShows(&ed, semantic.action.standard.refresh));
     try t.expect(whichKeyShows(&ed, semantic.action.standard.revert));
     try t.expect(whichKeyShows(&ed, semantic.action.standard.apply));
+    try t.expect(whichKeyShows(&ed, "fs.permissions.edit"));
     ed.press("Escape", "");
 
     // Assert the complete config surface directly, including the cursor
@@ -255,6 +261,7 @@ test "e2e/config: the sample config boots; SPC g i is discoverable via which-key
         .{ .sequence = "space v y", .command = semantic.action.standard.copy },
         .{ .sequence = "space v x", .command = semantic.action.standard.cut },
         .{ .sequence = "space v d", .command = semantic.action.standard.delete },
+        .{ .sequence = "space v m", .command = "fs.permissions.edit" },
         .{ .sequence = "space v p", .command = semantic.action.standard.paste_after },
         .{ .sequence = "space v P", .command = semantic.action.standard.paste_before },
         .{ .sequence = "space v r", .command = semantic.action.standard.refresh },
@@ -297,6 +304,7 @@ test "e2e/config: the sample config boots; SPC g i is discoverable via which-key
         .{ .id = semantic.action.standard.copy },
         .{ .id = semantic.action.standard.cut },
         .{ .id = semantic.action.standard.delete },
+        .{ .id = "fs.permissions.edit" },
         .{ .id = semantic.action.standard.paste_before },
         .{ .id = semantic.action.standard.paste_after },
         .{ .id = "fixture.plugin-action" },
@@ -339,11 +347,13 @@ test "e2e/config: the sample config boots; SPC g i is discoverable via which-key
     ed.chord("SPC v x");
     ed.chord("SPC v P");
     ed.chord("SPC v d");
+    ed.chord("SPC v z");
     try t.expectEqual(@as(usize, 1), actions.copies);
     try t.expectEqual(@as(usize, 1), actions.cuts);
     try t.expectEqual(@as(usize, 1), actions.paste_after);
     try t.expectEqual(@as(usize, 1), actions.paste_before);
     try t.expectEqual(@as(usize, 1), actions.deletes);
+    try t.expectEqual(@as(usize, 1), actions.permission_edits);
 
     ed.chord("SPC v m");
     try t.expectEqual(@as(usize, 1), actions.plugin_actions);
