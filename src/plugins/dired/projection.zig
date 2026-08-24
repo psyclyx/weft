@@ -80,6 +80,10 @@ pub fn projectWith(gpa: std.mem.Allocator, rows: []const model.Row, bindings: []
     owned.value = .{
         .id = root_id,
         .role = "dired",
+        // The container itself remains an actionable focus stop when a
+        // directory is empty. Input plugins can then invoke advertised root
+        // actions without inventing an invisible text row.
+        .focusable = true,
         .actions = try rootActions(arena, rows, options),
         .content = .{ .container = .{ .axis = .vertical, .children = children } },
     };
