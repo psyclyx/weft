@@ -40,9 +40,13 @@ pub const standard = struct {
     pub const paste_after = "selection.paste-after";
     pub const open = "target.open";
     pub const edit = "field.edit";
+    /// Lifecycle intents for retained, structured views.  They are open
+    /// protocol names: a provider advertises only the ones it supports, while
+    /// generic input configurations can expose them without knowing the
+    /// provider (directory editor, picker, or another tool).
     pub const refresh = "view.refresh";
-    pub const apply = "view.apply";
     pub const revert = "view.revert";
+    pub const apply = "view.apply";
     pub const confirm = "interaction.confirm";
     pub const cancel = "interaction.cancel";
 };

@@ -96,6 +96,26 @@ test "e2e/config: the sample config boots; SPC g i is discoverable via which-key
     ed.press("Escape", ""); // abandon the chord; nothing ran
     try t.expectEqualStrings("", ed.head.pending);
 
+    // Structured views use the same generic semantic action commands from
+    // config: no dired-specific keymap or dispatch branch is needed.  The
+    // names are visible through which-key, which also proves the config can
+    // exercise focus, field, transfer, target, and view-lifecycle intents.
+    ed.press("SPC", "");
+    ed.press("v", "");
+    try t.expectEqualStrings("space v", ed.head.pending);
+    try t.expect(whichKeyShows(&ed, "cursor-down"));
+    try t.expect(whichKeyShows(&ed, "field-edit"));
+    try t.expect(whichKeyShows(&ed, "selection-copy"));
+    try t.expect(whichKeyShows(&ed, "selection-cut"));
+    try t.expect(whichKeyShows(&ed, "selection-delete"));
+    try t.expect(whichKeyShows(&ed, "selection-paste-before"));
+    try t.expect(whichKeyShows(&ed, "selection-paste-after"));
+    try t.expect(whichKeyShows(&ed, "target-open-focused"));
+    try t.expect(whichKeyShows(&ed, "view-refresh"));
+    try t.expect(whichKeyShows(&ed, "view-revert"));
+    try t.expect(whichKeyShows(&ed, "view-apply"));
+    ed.press("Escape", "");
+
     // SPC : must open the command PALETTE (pick-commands), not the ex line.
     // Typing `:` needs Shift, and a real keyboard sends that Shift_L press as its
     // own event BETWEEN space and colon — it must not dead-end the chord.

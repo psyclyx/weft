@@ -27,6 +27,71 @@ fn semanticMove(ctx: *Context, movement: @import("weft_semantic").focus.Movement
     return services.moveHeadFocus(ctx.head, ctx.gpa, movement);
 }
 
+/// Invoke one action advertised by the focused semantic node.  These command
+/// names are deliberately about the shared action vocabulary, not about any
+/// particular tool: a directory view, a picker, or a future structured editor
+/// may all advertise the same selection operation.  An ordinary text buffer
+/// simply has no semantic action to consume, so the command is a harmless
+/// no-op there.
+fn invokeSemanticAction(ctx: *Context, action_name: []const u8) anyerror!Value {
+    const services = ctx.semantic orelse return ok;
+    _ = services.invokeFocusedAction(&ctx.head.interactions, ctx.head, ctx.gpa, action_name) catch |err| switch (err) {
+        error.ActionUnavailable, error.StaleView => return ok,
+        else => return err,
+    };
+    return ok;
+}
+
+fn cSelectionCopy(ctx: *Context, args: struct {}) anyerror!Value {
+    _ = args;
+    return invokeSemanticAction(ctx, semantic_model.action.standard.copy);
+}
+
+fn cSelectionCut(ctx: *Context, args: struct {}) anyerror!Value {
+    _ = args;
+    return invokeSemanticAction(ctx, semantic_model.action.standard.cut);
+}
+
+fn cSelectionDelete(ctx: *Context, args: struct {}) anyerror!Value {
+    _ = args;
+    return invokeSemanticAction(ctx, semantic_model.action.standard.delete);
+}
+
+fn cSelectionPasteBefore(ctx: *Context, args: struct {}) anyerror!Value {
+    _ = args;
+    return invokeSemanticAction(ctx, semantic_model.action.standard.paste_before);
+}
+
+fn cSelectionPasteAfter(ctx: *Context, args: struct {}) anyerror!Value {
+    _ = args;
+    return invokeSemanticAction(ctx, semantic_model.action.standard.paste_after);
+}
+
+fn cTargetOpenFocused(ctx: *Context, args: struct {}) anyerror!Value {
+    _ = args;
+    return invokeSemanticAction(ctx, semantic_model.action.standard.open);
+}
+
+fn cFieldEdit(ctx: *Context, args: struct {}) anyerror!Value {
+    _ = args;
+    return invokeSemanticAction(ctx, semantic_model.action.standard.edit);
+}
+
+fn cViewRefresh(ctx: *Context, args: struct {}) anyerror!Value {
+    _ = args;
+    return invokeSemanticAction(ctx, semantic_model.action.standard.refresh);
+}
+
+fn cViewRevert(ctx: *Context, args: struct {}) anyerror!Value {
+    _ = args;
+    return invokeSemanticAction(ctx, semantic_model.action.standard.revert);
+}
+
+fn cViewApply(ctx: *Context, args: struct {}) anyerror!Value {
+    _ = args;
+    return invokeSemanticAction(ctx, semantic_model.action.standard.apply);
+}
+
 /// Map an edit refusal to a visible status echo. Keymap dispatch only
 /// `log.warn`s command errors, so a grade refusal would be silent; surface
 /// it honestly and swallow it (a `view` peer editing is not an error, just
@@ -356,6 +421,16 @@ const table = [_]command.Command{
     command.define("buffer-read-only", "Set/clear the active buffer's read-only flag.", cBufferReadOnly),
     command.define("open", "Open a file in a buffer (dedupes by path).", cOpen),
     command.define("open-target", "Open and focus a published semantic target.", cOpenTarget),
+    command.define("selection-copy", "Invoke the focused semantic selection.copy action.", cSelectionCopy),
+    command.define("selection-cut", "Invoke the focused semantic selection.cut action.", cSelectionCut),
+    command.define("selection-delete", "Invoke the focused semantic selection.delete action.", cSelectionDelete),
+    command.define("selection-paste-before", "Invoke the focused semantic selection.paste-before action.", cSelectionPasteBefore),
+    command.define("selection-paste-after", "Invoke the focused semantic selection.paste-after action.", cSelectionPasteAfter),
+    command.define("target-open-focused", "Invoke the focused semantic target.open action.", cTargetOpenFocused),
+    command.define("field-edit", "Invoke the focused semantic field.edit action.", cFieldEdit),
+    command.define("view-refresh", "Invoke the focused semantic view.refresh action.", cViewRefresh),
+    command.define("view-revert", "Invoke the focused semantic view.revert action.", cViewRevert),
+    command.define("view-apply", "Invoke the focused semantic view.apply action.", cViewApply),
     command.define("echo", "Show a message on the status line.", cEcho),
     command.define("save-as", "Save to a new path (refuses to clobber an existing file).", cSaveAs),
     command.define("delete-backward", "Delete the selection or the character before the cursor.", cDeleteBackward),
