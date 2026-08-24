@@ -43,6 +43,8 @@ pub const schema = @import("weft_schema");
 /// but cannot import host runtime implementation files sideways.
 pub const semantic = @import("weft_semantic");
 pub const semantic_codec = @import("weft_scene_codec");
+pub const fs = @import("weft_fs");
+pub const fs_codec = @import("weft_fs_codec");
 
 // ── Raw host imports (the grants). Named `wl_*` to keep the ergonomic
 // wrappers below as the surface guest code actually calls. Hand-written —
@@ -216,6 +218,8 @@ extern "weft" fn wl_fs_write(path: u32, path_len: u32, ptr: u32, len: u32) i32;
 extern "weft" fn wl_fs_append(path: u32, path_len: u32, ptr: u32, len: u32) i32;
 extern "weft" fn wl_fs_list(auth: u32, auth_len: u32, path: u32, path_len: u32, out_ptr: u32, out_cap: u32) i32;
 extern "weft" fn wl_fs_list_async(auth: u32, auth_len: u32, path: u32, path_len: u32, dest: u32, dest_len: u32) i32;
+extern "weft" fn wl_semantic_fs_list(target_authority: u32, target_slot: u32, target_generation: u32, revision_low: u32, revision_high: u32, out_ptr: u32, out_cap: u32) i32;
+extern "weft" fn wl_semantic_fs_apply(target_authority: u32, target_slot: u32, target_generation: u32, revision_low: u32, revision_high: u32, plan_ptr: u32, plan_len: u32, out_ptr: u32, out_cap: u32) i32;
 // D2's generic, schema-directed slot verbs (doc/d2-schema-payloads.md §3.2).
 extern "weft" fn wl_slot_declare(name_ptr: u32, name_len: u32, shape: u32, composition: u32, schema_ptr: u32, schema_len: u32) void;
 extern "weft" fn wl_slot_bind(name_ptr: u32, name_len: u32, pred_ptr: u32, pred_len: u32, tier: u32, priority: i32) void;
@@ -1532,6 +1536,80 @@ pub fn fsList(authority: []const u8, dir: []const u8) ?[]const u8 {
 /// listings use the synchronous `fsList("here", …)`.
 pub fn fsListAsync(authority: []const u8, dir: []const u8, dest: []const u8) bool {
     return wl_fs_list_async(p(authority.ptr), @intCast(authority.len), p(dir.ptr), @intCast(dir.len), p(dest.ptr), @intCast(dest.len)) == 0;
+}
+
+/// Typed status returned by the target-scoped filesystem membrane.  A
+/// non-negative host result is an encoded response length; these values are
+/// only used internally by the retrying wrappers below.
+pub const SemanticFsError = fs_codec.Error || error{
+    Unavailable,
+    StaleTarget,
+    Unsupported,
+    InvalidTarget,
+    Failed,
+};
+
+fn semanticFsError(code: i32) SemanticFsError!void {
+    switch (code) {
+        -1 => return error.Unavailable,
+        -2 => return error.StaleTarget,
+        -3 => return error.Unsupported,
+        -4 => return error.InvalidTarget,
+        -5 => return error.Failed,
+        else => {},
+    }
+}
+
+fn semanticFsRevisionLow(revision: u64) u32 {
+    return @intCast(revision & 0xffff_ffff);
+}
+
+fn semanticFsRevisionHigh(revision: u64) u32 {
+    return @intCast(revision >> 32);
+}
+
+/// List the exact directory attachment of a live target revision.  The
+/// response buffer grows only up to the codec's canonical payload limit, so
+/// callers do not need to expose a fixed-size dired scratch area.
+pub fn semanticFsList(gpa: std.mem.Allocator, target: semantic.target.Ref, revision: u64) SemanticFsError!fs_codec.OwnedListing {
+    const wire = target.toWire();
+    var capacity: usize = 4096;
+    while (true) {
+        if (capacity > fs_codec.Limits.max_payload_bytes) capacity = fs_codec.Limits.max_payload_bytes;
+        const bytes = try gpa.alloc(u8, capacity);
+        defer gpa.free(bytes);
+        const result = wl_semantic_fs_list(wire.authority, wire.slot, wire.generation, semanticFsRevisionLow(revision), semanticFsRevisionHigh(revision), p(bytes.ptr), @intCast(bytes.len));
+        if (result == -6) {
+            if (capacity == fs_codec.Limits.max_payload_bytes) return error.LimitExceeded;
+            capacity = @min(capacity * 2, fs_codec.Limits.max_payload_bytes);
+            continue;
+        }
+        try semanticFsError(result);
+        return fs_codec.decodeListing(gpa, bytes[0..@intCast(result)]);
+    }
+}
+
+/// Apply a canonical typed plan against the exact target revision.  Cross-root
+/// sources are rejected by the host until a provider supplies an explicit
+/// durable lease; this wrapper therefore carries no ambient root capability.
+pub fn semanticFsApply(gpa: std.mem.Allocator, target: semantic.target.Ref, revision: u64, effect_plan: fs.contract.Plan) SemanticFsError!fs_codec.OwnedApplyReport {
+    const plan_bytes = try fs_codec.encodePlan(gpa, effect_plan);
+    defer gpa.free(plan_bytes);
+    const wire = target.toWire();
+    var capacity: usize = 4096;
+    while (true) {
+        if (capacity > fs_codec.Limits.max_payload_bytes) capacity = fs_codec.Limits.max_payload_bytes;
+        const bytes = try gpa.alloc(u8, capacity);
+        defer gpa.free(bytes);
+        const result = wl_semantic_fs_apply(wire.authority, wire.slot, wire.generation, semanticFsRevisionLow(revision), semanticFsRevisionHigh(revision), p(plan_bytes.ptr), @intCast(plan_bytes.len), p(bytes.ptr), @intCast(bytes.len));
+        if (result == -6) {
+            if (capacity == fs_codec.Limits.max_payload_bytes) return error.LimitExceeded;
+            capacity = @min(capacity * 2, fs_codec.Limits.max_payload_bytes);
+            continue;
+        }
+        try semanticFsError(result);
+        return fs_codec.decodeApplyReport(gpa, bytes[0..@intCast(result)]);
+    }
 }
 
 // ── D2: generic, schema-directed slots (doc/d2-schema-payloads.md §6) ────

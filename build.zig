@@ -688,6 +688,19 @@ fn buildGuest(b: *std.Build, src: []const u8) *std.Build.Step.Compile {
         .optimize = .ReleaseSmall,
     });
     semantic.addImport("weft_schema", schema);
+    const fs = b.createModule(.{
+        .root_source_file = b.path("src/fs/root.zig"),
+        .target = wasm_target,
+        .optimize = .ReleaseSmall,
+    });
+    fs.addImport("weft_semantic", semantic);
+    const fs_codec = b.createModule(.{
+        .root_source_file = b.path("src/fs_codec/root.zig"),
+        .target = wasm_target,
+        .optimize = .ReleaseSmall,
+    });
+    fs_codec.addImport("weft_semantic", semantic);
+    fs_codec.addImport("weft_fs", fs);
     const scene_codec = b.createModule(.{
         .root_source_file = b.path("src/scene_codec/root.zig"),
         .target = wasm_target,
@@ -697,6 +710,8 @@ fn buildGuest(b: *std.Build, src: []const u8) *std.Build.Step.Compile {
     scene_codec.addImport("weft_schema", schema);
     guest_sdk.addImport("weft_semantic", semantic);
     guest_sdk.addImport("weft_scene_codec", scene_codec);
+    guest_sdk.addImport("weft_fs", fs);
+    guest_sdk.addImport("weft_fs_codec", fs_codec);
     guest_mod.addImport("weft", guest_sdk);
     const guest = b.addExecutable(.{
         .name = std.fs.path.stem(src),

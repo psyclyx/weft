@@ -51,6 +51,7 @@ const semantic = @import("../wasm_host/semantic.zig");
 const semantic_action = @import("../wasm_host/semantic_action.zig");
 const semantic_field = @import("../wasm_host/semantic_field.zig");
 const semantic_target = @import("../wasm_host/semantic_target.zig");
+const semantic_fs = @import("../wasm_host/semantic_fs.zig");
 const sessions = @import("../wasm_host/sessions.zig");
 const slot = @import("../wasm_host/slot.zig");
 const surface = @import("../wasm_host/surface.zig");
@@ -266,6 +267,8 @@ const handlers = [_]struct { name: []const u8, handler: HostFn }{
     .{ .name = "wl_fs_append", .handler = fs.hFsAppend },
     .{ .name = "wl_fs_list", .handler = fs.hFsList },
     .{ .name = "wl_fs_list_async", .handler = fs.hFsListAsync },
+    .{ .name = "wl_semantic_fs_list", .handler = semantic_fs.hList },
+    .{ .name = "wl_semantic_fs_apply", .handler = semantic_fs.hApply },
 
     // ── slot.zig — D2's generic, schema-directed membrane verbs ────────
     .{ .name = "wl_slot_declare", .handler = slot.hSlotDeclare },
@@ -423,6 +426,8 @@ const perm_gated = [_]struct { name: []const u8, perm: Perm }{
     .{ .name = "wl_fs_append", .perm = .fs_write }, // fs.zig hFsAppend: .fs_write
     .{ .name = "wl_fs_list", .perm = .fs_read }, // fs.zig hFsList: .fs_read
     .{ .name = "wl_fs_list_async", .perm = .fs_read }, // fs.zig hFsListAsync: .fs_read
+    .{ .name = "wl_semantic_fs_list", .perm = .fs_read }, // semantic_fs.zig hList: .fs_read
+    .{ .name = "wl_semantic_fs_apply", .perm = .fs_write }, // semantic_fs.zig hApply: .fs_write
 };
 
 test "membrane contract: table .perm metadata agrees with the handlers' actual requirePerm gates" {
