@@ -297,6 +297,10 @@ pub const imports = [_]Entry{
     .{ .name = "wl_semantic_field_edit_meta", .params = &.{ .u32, .u32 }, .results = &.{.i32}, .group = .semantic, .doc = "host-to-guest callback read: fixed metadata for the current field edit" },
     .{ .name = "wl_semantic_field_edit_revision", .params = &.{ .u32, .u32 }, .results = &.{.i32}, .group = .semantic, .doc = "host-to-guest callback read: exact expected field revision bytes" },
     .{ .name = "wl_semantic_field_edit_replacement", .params = &.{ .u32, .u32 }, .results = &.{.i32}, .group = .semantic, .doc = "host-to-guest callback read: exact replacement bytes for the current field edit" },
+    .{ .name = "wl_semantic_action_provider", .params = &.{}, .results = &.{.i32}, .group = .semantic, .doc = "register this owner as a semantic action provider" },
+    .{ .name = "wl_semantic_action_request_len", .params = &.{}, .results = &.{.i32}, .group = .semantic, .doc = "host-to-guest callback read: byte length of the current canonical action request" },
+    .{ .name = "wl_semantic_action_request", .params = &.{ .u32, .u32 }, .results = &.{.i32}, .group = .semantic, .doc = "host-to-guest callback read: copy the current canonical action request" },
+    .{ .name = "wl_semantic_action_respond", .params = &.{ .u32, .u32, .u32 }, .results = &.{.i32}, .group = .semantic, .doc = "answer the current action once: declined, handled, canonical transfer, or canonical interaction" },
 
     // ── proc.zig — perm-gated off-thread process effects ───────────────
     .{ .name = "wl_shell_insert", .params = &.{ .u32, .u32 }, .results = &.{}, .group = .proc, .perm = .proc_timer, .doc = "run `<cmd>` off-thread and insert its stdout at the cursor when done" },
@@ -352,7 +356,7 @@ pub const imports = [_]Entry{
 /// half-finished edit — fails the build with a pointed message instead of
 /// silently drifting the two ~124-entry tables apart again (the exact class
 /// this table exists to kill).
-const expected_import_count = 143;
+const expected_import_count = 147;
 
 /// A host→guest EXPORT entrypoint (design doc/north-star-plan.md §2.5, task
 /// W0a-D extension 2): every `instance.callVoid("name", args)` the host
@@ -410,9 +414,10 @@ pub const exports = [_]Export{
     // schema-directed.
     .{ .name = "on_slot_fire", .params = &.{.i32}, .results = &.{}, .required = false, .doc = "answer a schema-carrying slot session (handle); push via wl_payload_push during this call or later off a poll" },
     .{ .name = "on_semantic_field_edit", .params = &.{.i32}, .results = &.{}, .required = false, .doc = "answer one tokenized semantic field edit by synchronously pushing a new snapshot" },
+    .{ .name = "on_semantic_action", .params = &.{}, .results = &.{}, .required = false, .doc = "answer one semantic action synchronously using the current canonical request" },
 };
 
-const expected_export_count = 12;
+const expected_export_count = 13;
 
 comptime {
     @setEvalBranchQuota(50_000); // the O(n²) duplicate-name scans below, n≈124

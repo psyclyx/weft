@@ -3,10 +3,12 @@
 
 const weft = @import("weft");
 const kernel = weft.semantic_kernel;
+const std = @import("std");
 
 var field_ref: kernel.scene.FieldRef = undefined;
 
 export fn init() void {
+    if (!weft.semanticActionProvider()) unreachable;
     const target = weft.semanticTargetPublish(.{
         .kind = .directory,
         .display_name = "fixture directory",
@@ -32,6 +34,16 @@ export fn init() void {
         .content = .{ .container = .{ .children = &.{child} } },
     }, target, 7) catch unreachable;
     if (!weft.semanticViewFocus(view, child.id)) unreachable;
+}
+
+export fn on_semantic_action() void {
+    var request = weft.semanticActionCurrent(weft.allocator) catch return;
+    defer request.deinit();
+    if (std.mem.eql(u8, request.value.action, "fixture.open")) {
+        _ = weft.semanticActionHandled();
+    } else {
+        _ = weft.semanticActionDecline();
+    }
 }
 
 export fn on_semantic_field_edit(token: u32) void {

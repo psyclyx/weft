@@ -179,6 +179,10 @@ extern "weft" fn wl_semantic_field_close(authority: u32, slot: u32, generation: 
 extern "weft" fn wl_semantic_field_edit_meta(out: u32, out_cap: u32) i32;
 extern "weft" fn wl_semantic_field_edit_revision(out: u32, out_cap: u32) i32;
 extern "weft" fn wl_semantic_field_edit_replacement(out: u32, out_cap: u32) i32;
+extern "weft" fn wl_semantic_action_provider() i32;
+extern "weft" fn wl_semantic_action_request_len() i32;
+extern "weft" fn wl_semantic_action_request(out: u32, out_cap: u32) i32;
+extern "weft" fn wl_semantic_action_respond(kind: u32, payload: u32, payload_len: u32) i32;
 extern "weft" fn wl_shell_insert(ptr: u32, len: u32) void;
 extern "weft" fn wl_repl_start(cmd: u32, cmd_len: u32, name: u32, name_len: u32) i32;
 extern "weft" fn wl_repl_send(handle: u32, ptr: u32, len: u32) void;
@@ -1034,6 +1038,56 @@ pub const SemanticActionResult = enum(i32) {
 
 pub fn semanticAction(action: []const u8) SemanticActionResult {
     return @enumFromInt(wl_semantic_action(p(action.ptr), @intCast(action.len)));
+}
+
+/// Register this plugin as the single provider for scenes it owns. Core routes
+/// by retained view ownership; the guest callback remains tool-defined.
+pub fn semanticActionProvider() bool {
+    return wl_semantic_action_provider() == 1;
+}
+
+pub const SemanticActionResponse = enum(u32) {
+    declined = 0,
+    handled = 1,
+    transfer = 2,
+    interaction = 3,
+};
+
+/// Read the request available only during `on_semantic_action()`.
+pub fn semanticActionCurrent(gpa: std.mem.Allocator) (semantic_codec.Error || error{Rejected})!semantic_codec.action.OwnedRequest {
+    const raw_len = wl_semantic_action_request_len();
+    if (raw_len <= 0) return error.Rejected;
+    const len: usize = @intCast(raw_len);
+    const bytes = try gpa.alloc(u8, len);
+    defer gpa.free(bytes);
+    if (wl_semantic_action_request(p(bytes.ptr), @intCast(bytes.len)) != raw_len) return error.Rejected;
+    return semantic_codec.action.decodeRequest(gpa, bytes);
+}
+
+fn semanticActionRespondEmpty(kind: SemanticActionResponse) bool {
+    return wl_semantic_action_respond(@intFromEnum(kind), 0, 0) == 1;
+}
+
+pub fn semanticActionDecline() bool {
+    return semanticActionRespondEmpty(.declined);
+}
+
+pub fn semanticActionHandled() bool {
+    return semanticActionRespondEmpty(.handled);
+}
+
+pub fn semanticActionTransfer(item: semantic_kernel.transfer.Item) SemanticPublishError!void {
+    const payload = try semantic_codec.transfer.encode(allocator, item);
+    defer allocator.free(payload);
+    if (wl_semantic_action_respond(@intFromEnum(SemanticActionResponse.transfer), p(payload.ptr), @intCast(payload.len)) != 1)
+        return error.Rejected;
+}
+
+pub fn semanticActionInteraction(definition: semantic_kernel.interaction.Definition) SemanticPublishError!void {
+    const payload = try semantic_codec.interaction.encode(allocator, definition);
+    defer allocator.free(payload);
+    if (wl_semantic_action_respond(@intFromEnum(SemanticActionResponse.interaction), p(payload.ptr), @intCast(payload.len)) != 1)
+        return error.Rejected;
 }
 
 pub const SemanticPublishError = semantic_codec.Error || error{Rejected};

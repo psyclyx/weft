@@ -48,6 +48,7 @@ const pick = @import("../wasm_host/pick.zig");
 const proc = @import("../wasm_host/proc.zig");
 const register = @import("../wasm_host/register.zig");
 const semantic = @import("../wasm_host/semantic.zig");
+const semantic_action = @import("../wasm_host/semantic_action.zig");
 const semantic_field = @import("../wasm_host/semantic_field.zig");
 const sessions = @import("../wasm_host/sessions.zig");
 const slot = @import("../wasm_host/slot.zig");
@@ -225,6 +226,10 @@ const handlers = [_]struct { name: []const u8, handler: HostFn }{
     .{ .name = "wl_semantic_field_edit_meta", .handler = semantic_field.hFieldEditMeta },
     .{ .name = "wl_semantic_field_edit_revision", .handler = semantic_field.hFieldEditRevision },
     .{ .name = "wl_semantic_field_edit_replacement", .handler = semantic_field.hFieldEditReplacement },
+    .{ .name = "wl_semantic_action_provider", .handler = semantic_action.hProvider },
+    .{ .name = "wl_semantic_action_request_len", .handler = semantic_action.hRequestLen },
+    .{ .name = "wl_semantic_action_request", .handler = semantic_action.hRequest },
+    .{ .name = "wl_semantic_action_respond", .handler = semantic_action.hRespond },
 
     // ── proc.zig — perm-gated off-thread process effects ───────────────
     .{ .name = "wl_shell_insert", .handler = proc.hShellInsert },
@@ -455,6 +460,7 @@ const head_gated_list = [_][]const u8{
     "wl_echo", // dispatch.zig hEcho
     "wl_pick_end", // pick.zig hPickEnd
     "wl_open_file_pick", // pick.zig hOpenFilePick
+    "wl_semantic_view_focus", // semantic.zig hSemanticViewFocus
     "wl_semantic_action", // semantic.zig hSemanticAction
 };
 

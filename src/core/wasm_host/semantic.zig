@@ -144,13 +144,13 @@ pub fn hSemanticViewFocus(data: ?*anyopaque, caller: *wasm.Caller, args: []const
     const has_preferred: u32 = @bitCast(args[5]);
     if (has_preferred > 1) return;
     const preferred: ?kernel.scene.NodeId = if (has_preferred == 0) null else blk: {
-        const low: u64 = @as(u64, @bitCast(args[3]));
-        const high: u64 = @as(u64, @bitCast(args[4]));
+        const low: u64 = @as(u32, @bitCast(args[3]));
+        const high: u64 = @as(u32, @bitCast(args[4]));
         break :blk @enumFromInt((high << 32) | low);
     };
     const ctx = plugin.activeCtx();
     const services = ctx.semantic orelse return;
-    _ = services.focusView(&ctx.head, plugin.gpa, ref, preferred) catch return;
+    _ = services.focusView(ctx.head, plugin.gpa, ref, preferred) catch return;
     results[0] = 1;
 }
 

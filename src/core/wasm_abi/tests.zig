@@ -63,12 +63,24 @@ test "wasm plugin: canonical targets and scenes cross the semantic membrane" {
     try t.expectEqualStrings("2", snapshot.value.revision);
     try t.expectEqualStrings("renamed", snapshot.value.bytes);
     try t.expectEqual(@as(u64, 7), snapshot.value.selection.caret);
-    try t.expectEqual(@as(@import("weft_kernel").scene.NodeId, @enumFromInt(0x1_0000_0002)), env.head.semantic_focus.path().?.leaf().?);
+    const child_id: @import("weft_kernel").scene.NodeId = @enumFromInt(0x1_0000_0002);
+    try t.expectEqual(child_id, env.head.semantic_focus.path().?.leaf().?);
+    try t.expect((try semantic.actions.invoke(&semantic.views, .{
+        .action = "fixture.open",
+        .view = view_ref,
+        .subject = child_id,
+        .selection = .{ .nodes = &.{child_id} },
+    })) == .handled);
 
     plugin.deinit();
     try t.expect(semantic.targets.get(target_ref) == null);
     try t.expect(semantic.views.get(view_ref) == null);
     try t.expect(semantic.fields.get(field_ref) == null);
+    try t.expectError(error.StaleView, semantic.actions.invoke(&semantic.views, .{
+        .action = "fixture.open",
+        .view = view_ref,
+        .subject = child_id,
+    }));
 }
 
 test "wasm plugin: a .wasm guest edits the buffer through the host ABI, as its peer" {

@@ -527,7 +527,7 @@ test "semantic view focus is head-scoped with preferred and root fallback" {
     foreign.authority = @enumFromInt(42);
     try std.testing.expectError(error.StaleView, services.focusView(&head_a, std.testing.allocator, foreign, null));
     try std.testing.expectEqual(@as(kernel.scene.NodeId, @enumFromInt(2)), head_a.semantic_focus.path().?.leaf().?);
-    try services.closeView(std.testing.allocator, "focus", view_ref);
+    try std.testing.expect(services.closeView(std.testing.allocator, "focus", view_ref));
     try std.testing.expectError(error.StaleView, services.focusView(&head_b, std.testing.allocator, view_ref, null));
 
     const root_only = try services.publishView(std.testing.allocator, "root-only", null, 1, .{

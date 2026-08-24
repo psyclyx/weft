@@ -241,6 +241,11 @@ surface: surface_mod.Surface = .{},
 /// callback/cache memory and is torn down immediately after owner revocation.
 semantic_fields: plugin_semantic.field.Bridge = .empty,
 
+// ── Sandboxed semantic action provider ──
+/// One owner-scoped provider endpoint. Requests and aggregate responses cross
+/// as canonical portable values; no guest pointer survives the callback.
+semantic_actions: plugin_semantic.action.Bridge = .empty,
+
 // ── Completion provider (host→guest data-gather) ──
 /// The caps provider id this plugin registered (owned), torn down on
 /// unload. Null until it calls `provideCompletion`.
@@ -335,6 +340,7 @@ pub fn deinit(self: *WasmPlugin) void {
     // retained handle becomes stale before either side can dangle.
     if (self.ctx.semantic) |services| _ = services.releaseOwner(gpa, self.name);
     self.semantic_fields.deinit();
+    self.semantic_actions.deinit();
     // Completion provider dies with the plugin (unregister before freeing
     // its id — the caps registry holds the id by reference).
     if (self.provider_id) |id| {

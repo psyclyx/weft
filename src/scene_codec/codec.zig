@@ -17,6 +17,7 @@ pub const Limits = struct {
     pub const max_string_bytes: usize = 1 * 1024 * 1024;
     pub const max_actions: usize = 4096;
     pub const max_bindings: usize = 4096;
+    pub const max_representations: usize = 1024;
 };
 
 pub const Error = error{
@@ -32,6 +33,8 @@ const magic = "WSC";
 const scene_kind: u8 = 1;
 const interaction_kind: u8 = 2;
 const target_kind: u8 = 3;
+const transfer_kind: u8 = 4;
+const action_request_kind: u8 = 5;
 const root_parent: u64 = std.math.maxInt(u32);
 
 const Writer = struct {
@@ -89,6 +92,12 @@ const Writer = struct {
 
     fn string(self: *Writer, value: []const u8) Error!void {
         if (value.len > Limits.max_string_bytes) return error.LimitExceeded;
+        try self.uv(value.len);
+        try self.append(value);
+    }
+
+    fn blob(self: *Writer, value: []const u8) Error!void {
+        if (value.len > Limits.max_payload_bytes) return error.LimitExceeded;
         try self.uv(value.len);
         try self.append(value);
     }
@@ -170,6 +179,11 @@ const Reader = struct {
     fn string(self: *Reader, arena: std.mem.Allocator) Error![]const u8 {
         const n = try self.count(Limits.max_string_bytes);
         return try arena.dupe(u8, try self.take(n));
+    }
+
+    fn blob(self: *Reader, arena: std.mem.Allocator) Error![]const u8 {
+        const len = try self.count(Limits.max_payload_bytes);
+        return try arena.dupe(u8, try self.take(len));
     }
 
     fn strictBool(self: *Reader) Error!bool {
@@ -278,6 +292,14 @@ fn readFieldHandle(reader: *Reader) Error!kernel.scene.FieldRef {
 }
 
 fn readViewHandle(reader: *Reader) Error!kernel.view.Ref {
+    const authority = try reader.readU32();
+    const slot = try reader.readU32();
+    const generation = try reader.readU32();
+    if (generation == 0) return error.InvalidData;
+    return .fromWire(.{ .authority = authority, .slot = slot, .generation = generation });
+}
+
+fn readTargetHandle(reader: *Reader) Error!kernel.target.Ref {
     const authority = try reader.readU32();
     const slot = try reader.readU32();
     const generation = try reader.readU32();
@@ -771,6 +793,222 @@ pub fn decodeTarget(gpa: std.mem.Allocator, bytes: []const u8) Error!OwnedTarget
     return owned;
 }
 
+// ── Transfer ────────────────────────────────────────────────────────────
+
+fn validateTransfer(gpa: std.mem.Allocator, item: kernel.transfer.Item) Error!void {
+    if (item.representations.len == 0) return error.InvalidData;
+    if (item.representations.len > Limits.max_representations) return error.LimitExceeded;
+    if (item.suggested_name.len > Limits.max_string_bytes) return error.LimitExceeded;
+    if (item.source) |source| {
+        if (source.revision.len == 0) return error.InvalidData;
+        if (source.revision.len > Limits.max_string_bytes) return error.LimitExceeded;
+        if (source.target.generation == 0) return error.InvalidData;
+    }
+    var media_types: std.StringHashMapUnmanaged(void) = .empty;
+    defer media_types.deinit(gpa);
+    for (item.representations) |representation| {
+        if (representation.media_type.len == 0) return error.InvalidData;
+        if (representation.media_type.len > Limits.max_string_bytes or representation.payload.len > Limits.max_payload_bytes) return error.LimitExceeded;
+        if (representation.schema) |value| {
+            if (value.len == 0) return error.InvalidData;
+            if (value.len > Limits.max_string_bytes) return error.LimitExceeded;
+        }
+        const result = try media_types.getOrPut(gpa, representation.media_type);
+        if (result.found_existing) return error.Duplicate;
+    }
+}
+
+fn writeTransferBody(writer: *Writer, item: kernel.transfer.Item) Error!void {
+    try writer.byte(switch (item.intent) {
+        .copy => 0,
+        .cut => 1,
+    });
+    try writer.string(item.suggested_name);
+    try writer.byte(@intFromBool(item.source != null));
+    if (item.source) |source| {
+        try writeHandle(writer, source.target);
+        try writer.string(source.revision);
+    }
+    try writer.count(item.representations.len, Limits.max_representations);
+    for (item.representations) |representation| {
+        try writer.string(representation.media_type);
+        try optionalString(writer, representation.schema);
+        try writer.blob(representation.payload);
+    }
+}
+
+fn readTransferBody(reader: *Reader, arena: std.mem.Allocator) Error!kernel.transfer.Item {
+    const intent: kernel.transfer.Intent = switch (try reader.byte()) {
+        0 => .copy,
+        1 => .cut,
+        else => return error.Corrupt,
+    };
+    const suggested_name = try reader.string(arena);
+    const source: ?kernel.transfer.Source = if (try reader.strictBool()) .{
+        .target = try readTargetHandle(reader),
+        .revision = try reader.string(arena),
+    } else null;
+    if (source) |value| if (value.revision.len == 0) return error.InvalidData;
+    const representations = try arena.alloc(kernel.transfer.Representation, try reader.count(Limits.max_representations));
+    if (representations.len == 0) return error.InvalidData;
+    var media_types: std.StringHashMapUnmanaged(void) = .empty;
+    defer media_types.deinit(arena);
+    for (representations) |*representation| {
+        representation.media_type = try reader.string(arena);
+        representation.schema = try readOptionalString(reader, arena);
+        representation.payload = try reader.blob(arena);
+        if (representation.media_type.len == 0) return error.InvalidData;
+        const result = try media_types.getOrPut(arena, representation.media_type);
+        if (result.found_existing) return error.Duplicate;
+    }
+    return .{ .intent = intent, .suggested_name = suggested_name, .source = source, .representations = representations };
+}
+
+pub fn encodeTransfer(gpa: std.mem.Allocator, item: kernel.transfer.Item) Error![]u8 {
+    try validateTransfer(gpa, item);
+    var writer = Writer.init(gpa);
+    errdefer writer.deinit();
+    try header(&writer, transfer_kind);
+    try writeTransferBody(&writer, item);
+    return writer.finish();
+}
+
+pub const OwnedTransfer = struct {
+    arena: std.heap.ArenaAllocator,
+    value: kernel.transfer.Item,
+
+    pub fn deinit(self: *OwnedTransfer) void {
+        self.arena.deinit();
+        self.* = undefined;
+    }
+};
+
+pub fn decodeTransfer(gpa: std.mem.Allocator, bytes: []const u8) Error!OwnedTransfer {
+    var reader = try Reader.init(bytes);
+    try checkHeader(&reader, transfer_kind);
+    var owned: OwnedTransfer = .{ .arena = .init(gpa), .value = undefined };
+    errdefer owned.arena.deinit();
+    owned.value = try readTransferBody(&reader, owned.arena.allocator());
+    try reader.done();
+    return owned;
+}
+
+// ── Action request ──────────────────────────────────────────────────────
+
+fn validateSelection(selection: kernel.selection.Selection) Error!void {
+    switch (selection) {
+        .none => {},
+        .text => |range| {
+            if (range.field.generation == 0 or range.start > range.end) return error.InvalidData;
+        },
+        .nodes => |nodes| {
+            if (nodes.len > Limits.max_nodes) return error.LimitExceeded;
+            for (nodes) |node| if (@intFromEnum(node) == 0) return error.InvalidData;
+        },
+        .custom => |custom| {
+            if (custom.schema.len == 0) return error.InvalidData;
+            if (custom.schema.len > Limits.max_string_bytes or custom.payload.len > Limits.max_payload_bytes) return error.LimitExceeded;
+        },
+    }
+}
+
+fn writeSelection(writer: *Writer, selection: kernel.selection.Selection) Error!void {
+    switch (selection) {
+        .none => try writer.byte(0),
+        .text => |range| {
+            try writer.byte(1);
+            try writeHandle(writer, range.field);
+            try writer.writeU64(range.start);
+            try writer.writeU64(range.end);
+            try writer.byte(@intFromBool(range.linewise));
+        },
+        .nodes => |nodes| {
+            try writer.byte(2);
+            try writer.count(nodes.len, Limits.max_nodes);
+            for (nodes) |node| try writer.writeU64(@intFromEnum(node));
+        },
+        .custom => |custom| {
+            try writer.byte(3);
+            try writer.string(custom.schema);
+            try writer.blob(custom.payload);
+        },
+    }
+}
+
+fn readSelection(reader: *Reader, arena: std.mem.Allocator) Error!kernel.selection.Selection {
+    return switch (try reader.byte()) {
+        0 => .none,
+        1 => blk: {
+            const field = try readFieldHandle(reader);
+            const start = try reader.readU64();
+            const end = try reader.readU64();
+            if (start > end) return error.InvalidData;
+            break :blk .{ .text = .{ .field = field, .start = start, .end = end, .linewise = try reader.strictBool() } };
+        },
+        2 => blk: {
+            const nodes = try arena.alloc(kernel.scene.NodeId, try reader.count(Limits.max_nodes));
+            for (nodes) |*node| {
+                const raw = try reader.readU64();
+                if (raw == 0) return error.InvalidData;
+                node.* = @enumFromInt(raw);
+            }
+            break :blk .{ .nodes = nodes };
+        },
+        3 => blk: {
+            const schema_value = try reader.string(arena);
+            if (schema_value.len == 0) return error.InvalidData;
+            break :blk .{ .custom = .{ .schema = schema_value, .payload = try reader.blob(arena) } };
+        },
+        else => error.Corrupt,
+    };
+}
+
+pub fn encodeActionRequest(gpa: std.mem.Allocator, request: kernel.action.Request) Error![]u8 {
+    if (request.action.len == 0) return error.InvalidData;
+    if (request.action.len > Limits.max_string_bytes) return error.LimitExceeded;
+    if (request.view.generation == 0 or @intFromEnum(request.subject) == 0) return error.InvalidData;
+    try validateSelection(request.selection);
+    if (request.transfer) |item| try validateTransfer(gpa, item);
+    var writer = Writer.init(gpa);
+    errdefer writer.deinit();
+    try header(&writer, action_request_kind);
+    try writer.string(request.action);
+    try writeHandle(&writer, request.view);
+    try writer.writeU64(@intFromEnum(request.subject));
+    try writeSelection(&writer, request.selection);
+    try writer.byte(@intFromBool(request.transfer != null));
+    if (request.transfer) |item| try writeTransferBody(&writer, item);
+    return writer.finish();
+}
+
+pub const OwnedActionRequest = struct {
+    arena: std.heap.ArenaAllocator,
+    value: kernel.action.Request,
+
+    pub fn deinit(self: *OwnedActionRequest) void {
+        self.arena.deinit();
+        self.* = undefined;
+    }
+};
+
+pub fn decodeActionRequest(gpa: std.mem.Allocator, bytes: []const u8) Error!OwnedActionRequest {
+    var reader = try Reader.init(bytes);
+    try checkHeader(&reader, action_request_kind);
+    var owned: OwnedActionRequest = .{ .arena = .init(gpa), .value = undefined };
+    errdefer owned.arena.deinit();
+    const arena = owned.arena.allocator();
+    const action = try reader.string(arena);
+    if (action.len == 0) return error.InvalidData;
+    const view = try readViewHandle(&reader);
+    const subject_raw = try reader.readU64();
+    if (subject_raw == 0) return error.InvalidData;
+    const selection = try readSelection(&reader, arena);
+    const transfer: ?kernel.transfer.Item = if (try reader.strictBool()) try readTransferBody(&reader, arena) else null;
+    try reader.done();
+    owned.value = .{ .action = action, .view = view, .subject = @enumFromInt(subject_raw), .selection = selection, .transfer = transfer };
+    return owned;
+}
+
 // ── Tests ────────────────────────────────────────────────────────────────
 
 const t = std.testing;
@@ -813,6 +1051,87 @@ test "interaction and target codecs round-trip defaults, handles, variants, and 
     defer target_value.deinit();
     try t.expectEqualStrings("dired", target_value.value.kind.synthetic);
     try t.expectEqualStrings("project", target_value.value.facts[0].value);
+}
+
+test "transfer and action request codecs preserve captured data and wide node ids" {
+    const representations = [_]kernel.transfer.Representation{
+        .{ .media_type = "application/vnd.weft.file", .schema = "file/v1", .payload = &.{ 0, 0xff, '/', '\n' } },
+        .{ .media_type = "text/plain", .payload = "display" },
+    };
+    const transfer_value: kernel.transfer.Item = .{
+        .intent = .cut,
+        .suggested_name = "raw-name",
+        .source = .{ .target = .{ .authority = .here, .slot = 5, .generation = 9 }, .revision = "opaque-revision" },
+        .representations = &representations,
+    };
+    const transfer_bytes = try encodeTransfer(t.allocator, transfer_value);
+    defer t.allocator.free(transfer_bytes);
+    var decoded_transfer = try decodeTransfer(t.allocator, transfer_bytes);
+    defer decoded_transfer.deinit();
+    try t.expectEqual(kernel.transfer.Intent.cut, decoded_transfer.value.intent);
+    try t.expectEqualStrings("opaque-revision", decoded_transfer.value.source.?.revision);
+    try t.expectEqualSlices(u8, representations[0].payload, decoded_transfer.value.representations[0].payload);
+
+    const wide_node: kernel.scene.NodeId = @enumFromInt(0x1_0000_0002);
+    const request: kernel.action.Request = .{
+        .action = kernel.action.standard.paste_after,
+        .view = .{ .authority = .here, .slot = 8, .generation = 3 },
+        .subject = wide_node,
+        .selection = .{ .nodes = &.{ wide_node, @enumFromInt(7) } },
+        .transfer = transfer_value,
+    };
+    const request_bytes = try encodeActionRequest(t.allocator, request);
+    defer t.allocator.free(request_bytes);
+    var decoded_request = try decodeActionRequest(t.allocator, request_bytes);
+    defer decoded_request.deinit();
+    try t.expectEqualStrings(kernel.action.standard.paste_after, decoded_request.value.action);
+    try t.expectEqual(@as(u64, 0x1_0000_0002), @intFromEnum(decoded_request.value.subject));
+    try t.expectEqual(@as(u64, 0x1_0000_0002), @intFromEnum(decoded_request.value.selection.nodes[0]));
+    try t.expectEqualStrings("application/vnd.weft.file", decoded_request.value.transfer.?.representations[0].media_type);
+}
+
+test "transfer and action request codecs reject ambiguous or malformed values" {
+    const duplicates = [_]kernel.transfer.Representation{
+        .{ .media_type = "same", .payload = "a" },
+        .{ .media_type = "same", .payload = "b" },
+    };
+    try t.expectError(error.Duplicate, encodeTransfer(t.allocator, .{ .intent = .copy, .representations = &duplicates }));
+    try t.expectError(error.InvalidData, encodeTransfer(t.allocator, .{
+        .intent = .copy,
+        .representations = &.{.{ .media_type = "typed", .schema = "", .payload = "x" }},
+    }));
+    try t.expectError(error.InvalidData, encodeTransfer(t.allocator, .{
+        .intent = .copy,
+        .source = .{ .target = .{ .authority = .here, .slot = 1, .generation = 0 }, .revision = "1" },
+        .representations = &.{.{ .media_type = "typed", .payload = "x" }},
+    }));
+    try t.expectError(error.InvalidData, encodeActionRequest(t.allocator, .{
+        .action = "",
+        .view = .{ .authority = .here, .slot = 1, .generation = 1 },
+        .subject = @enumFromInt(1),
+    }));
+    try t.expectError(error.InvalidData, encodeActionRequest(t.allocator, .{
+        .action = "go",
+        .view = .{ .authority = .here, .slot = 1, .generation = 1 },
+        .subject = @enumFromInt(1),
+        .selection = .{ .text = .{
+            .field = .{ .authority = .here, .slot = 2, .generation = 1 },
+            .start = 4,
+            .end = 3,
+        } },
+    }));
+
+    const valid = try encodeTransfer(t.allocator, .{
+        .intent = .copy,
+        .representations = &.{.{ .media_type = "typed", .payload = "x" }},
+    });
+    defer t.allocator.free(valid);
+    try t.expectError(error.Corrupt, decodeTransfer(t.allocator, valid[0 .. valid.len - 1]));
+    const trailing = try t.allocator.alloc(u8, valid.len + 1);
+    defer t.allocator.free(trailing);
+    @memcpy(trailing[0..valid.len], valid);
+    trailing[valid.len] = 0;
+    try t.expectError(error.Corrupt, decodeTransfer(t.allocator, trailing));
 }
 
 test "scene codec: hostile tags, truncation, trailing bytes, and duplicate IDs refuse" {
