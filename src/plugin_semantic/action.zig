@@ -28,6 +28,7 @@ const OwnedOutcome = union(enum) {
     interaction: scene_codec.interaction.Owned,
     open_target: scene_codec.target.OwnedLocated,
     focus: semantic.scene.NodeId,
+    open_relation: scene_codec.action.OwnedRelation,
 
     fn deinit(self: *OwnedOutcome) void {
         switch (self.*) {
@@ -35,6 +36,7 @@ const OwnedOutcome = union(enum) {
             .transfer => |*value| value.deinit(),
             .interaction => |*value| value.deinit(),
             .open_target => |*value| value.deinit(),
+            .open_relation => |*value| value.deinit(),
         }
         self.* = undefined;
     }
@@ -47,6 +49,7 @@ const OwnedOutcome = union(enum) {
             .interaction => |value| .{ .interaction = value.value },
             .open_target => |value| .{ .open_target = value.value },
             .focus => |value| .{ .focus = value },
+            .open_relation => |value| .{ .open_relation = value.value },
         };
     }
 };
@@ -132,6 +135,12 @@ pub const Bridge = struct {
     pub fn respondFocus(self: *Bridge, node: semantic.scene.NodeId) ResponseError!void {
         try self.beginResponse();
         self.response = .{ .focus = node };
+    }
+
+    pub fn adoptOpenRelation(self: *Bridge, owned: *scene_codec.action.OwnedRelation) ResponseError!void {
+        try self.beginResponse();
+        self.response = .{ .open_relation = owned.* };
+        owned.* = undefined;
     }
 
     fn beginResponse(self: *const Bridge) ResponseError!void {
@@ -235,4 +244,39 @@ test "sandbox action bridge carries same-view focus as a scalar value" {
         .subject = @enumFromInt(2),
     });
     try std.testing.expectEqual(@as(u64, 0x1_0000_0002), @intFromEnum(outcome.focus));
+}
+
+test "sandbox action bridge carries an owned relation request" {
+    const Fixture = struct {
+        bridge: *Bridge = undefined,
+
+        fn invoke(raw: *anyopaque) CallbackError!void {
+            const self: *@This() = @ptrCast(@alignCast(raw));
+            const bytes = self.bridge.currentRequestBytes() orelse return error.Failed;
+            var request = scene_codec.action.decodeRequest(std.testing.allocator, bytes) catch return error.Failed;
+            defer request.deinit();
+            const encoded = scene_codec.action.encodeRelation(std.testing.allocator, .{
+                .source = .{ .target = .{ .authority = .here, .slot = 3, .generation = 4 }, .revision = 9 },
+                .name = "container",
+            }) catch return error.Failed;
+            defer std.testing.allocator.free(encoded);
+            var relation = scene_codec.action.decodeRelation(std.testing.allocator, encoded) catch return error.Failed;
+            self.bridge.adoptOpenRelation(&relation) catch {
+                relation.deinit();
+                return error.Failed;
+            };
+        }
+    };
+    var fixture: Fixture = .{};
+    var bridge = Bridge.init(std.testing.allocator, .{ .context = &fixture, .invoke = Fixture.invoke });
+    defer bridge.deinit();
+    fixture.bridge = &bridge;
+    const outcome = try bridge.invoke(.{
+        .action = "open-parent",
+        .view = .{ .authority = .here, .slot = 1, .generation = 1 },
+        .subject = @enumFromInt(2),
+    });
+    try std.testing.expectEqual(@as(u64, 3), outcome.open_relation.source.target.slot);
+    try std.testing.expectEqual(@as(u64, 9), outcome.open_relation.source.revision);
+    try std.testing.expectEqualStrings("container", outcome.open_relation.name);
 }

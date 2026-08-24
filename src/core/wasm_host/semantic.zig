@@ -255,6 +255,7 @@ pub fn hSemanticAction(data: ?*anyopaque, caller: *wasm.Caller, args: []const i3
         .transfer_stored => 2,
         .interaction_opened => 3,
         .target_opened => 4,
+        .relation_opened => 6,
         .focus_requested => 5,
     } else 0;
 }

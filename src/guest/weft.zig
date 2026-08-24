@@ -1068,6 +1068,7 @@ pub const SemanticActionResult = enum(i32) {
     interaction_opened = 3,
     target_opened = 4,
     focus_changed = 5,
+    relation_opened = 6,
     failed = -1,
     _,
 };
@@ -1089,6 +1090,7 @@ pub const SemanticActionResponse = enum(u32) {
     interaction = 3,
     open_target = 4,
     focus = 5,
+    open_relation = 6,
 };
 
 /// Read the request available only during `on_semantic_action()`.
@@ -1146,6 +1148,15 @@ pub fn semanticActionFocus(node: semantic.scene.NodeId) bool {
     var bytes: [8]u8 = undefined;
     std.mem.writeInt(u64, &bytes, raw, .little);
     return wl_semantic_action_respond(@intFromEnum(SemanticActionResponse.focus), p(&bytes), bytes.len) == 1;
+}
+
+/// Ask core to resolve a named relation from an exact source target and open
+/// the admitted destination. Handler choice remains host policy.
+pub fn semanticActionOpenRelation(request: semantic.action.RelationRequest) SemanticPublishError!void {
+    const payload = try semantic_codec.action.encodeRelation(allocator, request);
+    defer allocator.free(payload);
+    if (wl_semantic_action_respond(@intFromEnum(SemanticActionResponse.open_relation), p(payload.ptr), @intCast(payload.len)) != 1)
+        return error.Rejected;
 }
 
 pub const SemanticPublishError = semantic_codec.Error || error{Rejected};

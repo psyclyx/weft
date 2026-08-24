@@ -724,7 +724,7 @@ fn changeLine() void {
 // ── Register + paste ─────────────────────────────────────────────────
 fn semanticDid(action: []const u8) bool {
     return switch (weft.semanticAction(action)) {
-        .handled, .transfer_stored, .interaction_opened, .target_opened, .focus_changed => true,
+        .handled, .transfer_stored, .interaction_opened, .target_opened, .focus_changed, .relation_opened => true,
         .unavailable, .failed, _ => false,
     };
 }

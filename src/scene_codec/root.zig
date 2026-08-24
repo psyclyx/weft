@@ -39,6 +39,9 @@ pub const action = struct {
     pub const encodeRequest = codec.encodeActionRequest;
     pub const decodeRequest = codec.decodeActionRequest;
     pub const OwnedRequest = codec.OwnedActionRequest;
+    pub const encodeRelation = codec.encodeTargetRelation;
+    pub const decodeRelation = codec.decodeTargetRelation;
+    pub const OwnedRelation = codec.OwnedTargetRelation;
 };
 
 pub const Limits = codec.Limits;
@@ -53,6 +56,8 @@ pub const encodeTargetDescriptor = codec.encodeTargetDescriptor;
 pub const decodeTargetDescriptor = codec.decodeTargetDescriptor;
 pub const encodeLocatedTarget = codec.encodeLocatedTarget;
 pub const decodeLocatedTarget = codec.decodeLocatedTarget;
+pub const encodeTargetRelation = codec.encodeTargetRelation;
+pub const decodeTargetRelation = codec.decodeTargetRelation;
 pub const encodeTransfer = codec.encodeTransfer;
 pub const decodeTransfer = codec.decodeTransfer;
 pub const encodeActionRequest = codec.encodeActionRequest;

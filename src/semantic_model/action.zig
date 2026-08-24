@@ -19,6 +19,13 @@ pub const Request = struct {
     transfer: ?transfer.Item = null,
 };
 
+/// Provider-neutral request to follow a named edge from an exact source
+/// target revision. Core resolves the relation and chooses the target handler.
+pub const RelationRequest = struct {
+    source: target.Located,
+    name: []const u8,
+};
+
 pub const Outcome = union(enum) {
     declined,
     handled,
@@ -40,6 +47,9 @@ pub const Outcome = union(enum) {
     /// enter a secondary field without knowing the caller's editing model.
     /// Core validates the node against the request view before changing focus.
     focus: scene.NodeId,
+    /// Request-only: resolve a named relation from this exact source and open
+    /// the admitted destination. Handler selection remains core policy.
+    open_relation: RelationRequest,
 };
 
 /// Interoperable names are conveniences, not a closed enum. A plugin may

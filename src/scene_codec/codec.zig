@@ -41,6 +41,7 @@ const transfer_kind: u8 = 4;
 const action_request_kind: u8 = 5;
 const target_descriptor_kind: u8 = 6;
 const located_target_kind: u8 = 7;
+const target_relation_kind: u8 = 9;
 const root_parent: u64 = std.math.maxInt(u32);
 
 const Writer = struct {
@@ -1017,6 +1018,41 @@ pub fn decodeLocatedTarget(gpa: std.mem.Allocator, bytes: []const u8) Error!Owne
     return owned;
 }
 
+pub fn encodeTargetRelation(gpa: std.mem.Allocator, request: semantic.action.RelationRequest) Error![]u8 {
+    if (request.name.len == 0) return error.InvalidData;
+    if (request.name.len > Limits.max_string_bytes) return error.LimitExceeded;
+    var writer = Writer.init(gpa);
+    errdefer writer.deinit();
+    try header(&writer, target_relation_kind);
+    try writeTargetLink(&writer, request.source);
+    try writer.string(request.name);
+    return writer.finish();
+}
+
+pub const OwnedTargetRelation = struct {
+    arena: std.heap.ArenaAllocator,
+    value: semantic.action.RelationRequest,
+
+    pub fn deinit(self: *OwnedTargetRelation) void {
+        self.arena.deinit();
+        self.* = undefined;
+    }
+};
+
+pub fn decodeTargetRelation(gpa: std.mem.Allocator, bytes: []const u8) Error!OwnedTargetRelation {
+    var reader = try Reader.init(bytes);
+    try checkHeader(&reader, target_relation_kind);
+    var owned: OwnedTargetRelation = .{ .arena = .init(gpa), .value = undefined };
+    errdefer owned.arena.deinit();
+    const arena = owned.arena.allocator();
+    const source = try readTargetLink(&reader, arena);
+    const name = try reader.string(arena);
+    if (name.len == 0) return error.InvalidData;
+    try reader.done();
+    owned.value = .{ .source = source, .name = name };
+    return owned;
+}
+
 // ── Transfer ────────────────────────────────────────────────────────────
 
 fn validateTransfer(gpa: std.mem.Allocator, item: semantic.transfer.Item) Error!void {
@@ -1476,6 +1512,27 @@ test "transfer and action request codecs preserve captured data and wide node id
     try t.expectEqual(@as(u64, 0x1_0000_0002), @intFromEnum(decoded_request.value.subject));
     try t.expectEqual(@as(u64, 0x1_0000_0002), @intFromEnum(decoded_request.value.selection.nodes[0]));
     try t.expectEqualStrings("application/vnd.weft.file", decoded_request.value.transfer.?.representations[0].media_type);
+}
+
+test "target relation action codec preserves source revision, location, and name" {
+    const request: semantic.action.RelationRequest = .{
+        .source = .{
+            .target = .{ .authority = @enumFromInt(7), .slot = 11, .generation = 3 },
+            .revision = 42,
+            .location = .{ .provider = .{ .schema = "tree/v1", .payload = &.{ 0, 0xff, '/', '\n' } } },
+        },
+        .name = "container",
+    };
+    const bytes = try encodeTargetRelation(t.allocator, request);
+    defer t.allocator.free(bytes);
+    var decoded = try decodeTargetRelation(t.allocator, bytes);
+    defer decoded.deinit();
+    try t.expectEqual(request.source.target, decoded.value.source.target);
+    try t.expectEqual(request.source.revision, decoded.value.source.revision);
+    try t.expectEqualStrings(request.name, decoded.value.name);
+    try t.expectEqualStrings(request.source.location.provider.schema, decoded.value.source.location.provider.schema);
+    try t.expectEqualSlices(u8, request.source.location.provider.payload, decoded.value.source.location.provider.payload);
+    try t.expectError(error.InvalidData, encodeTargetRelation(t.allocator, .{ .source = request.source, .name = "" }));
 }
 
 test "transfer and action request codecs reject ambiguous or malformed values" {

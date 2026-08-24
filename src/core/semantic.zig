@@ -405,7 +405,7 @@ pub const Services = struct {
         UnknownRoot,
     };
 
-    pub const InvokeActionError = view_runtime.action.Error || OpenInteractionError || semantic.transfer.ValidationError || ResolveTargetError || OpenTargetError || FocusError || error{UnknownFocusTarget};
+    pub const InvokeActionError = view_runtime.action.Error || OpenInteractionError || semantic.transfer.ValidationError || ResolveTargetError || TargetRelationError || OpenTargetError || FocusError || error{ UnknownFocusTarget, NoTargetRelation, AmbiguousTargetRelations };
     pub const InvokeInputError = InvokeActionError || view_runtime.interaction.Error;
 
     pub const FocusError = view_runtime.view.Error;
@@ -477,6 +477,7 @@ pub const Services = struct {
         transfer_stored,
         interaction_opened: semantic.interaction.Ref,
         target_opened: semantic.view.Ref,
+        relation_opened: semantic.view.Ref,
         focus_requested: struct {
             view: semantic.view.Ref,
             node: semantic.scene.NodeId,
@@ -528,6 +529,20 @@ pub const Services = struct {
                 .no_handler => error.NoTargetHandler,
                 .ambiguous => error.AmbiguousTargetHandlers,
             },
+            .open_relation => |request| blk: {
+                var relation = try self.resolveTargetRelation(gpa, request.source, request.name);
+                defer relation.deinit();
+                const located = switch (relation.value) {
+                    .absent => return error.NoTargetRelation,
+                    .ambiguous => return error.AmbiguousTargetRelations,
+                    .resolved => |value| value,
+                };
+                break :blk switch (try self.openLocatedTarget(gpa, located)) {
+                    .opened => |opened_view| .{ .relation_opened = opened_view },
+                    .no_handler => error.NoTargetHandler,
+                    .ambiguous => error.AmbiguousTargetHandlers,
+                };
+            },
             .focus => |node| blk: {
                 const instance = self.views.get(view) orelse return error.StaleView;
                 if (instance.node(node) == null) return error.UnknownFocusTarget;
@@ -569,7 +584,7 @@ pub const Services = struct {
         };
         try self.applyActionFocus(head, gpa, prior_focus, effect);
         if (disposition == .close_on_handled) switch (effect) {
-            .handled, .transfer_stored, .target_opened, .focus_requested => try stack.close(gpa, interaction_ref),
+            .handled, .transfer_stored, .target_opened, .relation_opened, .focus_requested => try stack.close(gpa, interaction_ref),
             .declined, .interaction_opened => {},
         };
         return effect;
@@ -630,6 +645,7 @@ pub const Services = struct {
     ) FocusError!void {
         switch (effect) {
             .target_opened => |view| _ = try self.focusView(head, gpa, view, null),
+            .relation_opened => |view| _ = try self.focusView(head, gpa, view, null),
             .focus_requested => |focus| {
                 const anchor = if (prior_focus) |path|
                     if (path.view.eql(focus.view))
@@ -1113,6 +1129,93 @@ test "semantic target relations resolve, stay absent, and reject stale or ambigu
     var failed = RelationProvider{ .destination = destination, .failed = true };
     _ = try services.registerTargetRelationProvider(std.testing.allocator, relation_owner, "failed", .init(&failed));
     try std.testing.expectError(error.RelationFailed, services.resolveTargetRelation(std.testing.allocator, source, "container"));
+}
+
+test "semantic relation action resolves through independent provider and handler owners" {
+    const ActionProvider = struct {
+        request: semantic.action.RelationRequest,
+
+        pub fn invoke(self: *@This(), _: semantic.action.Request) view_runtime.action.ProviderError!semantic.action.Outcome {
+            return .{ .open_relation = self.request };
+        }
+    };
+    const RelationProvider = struct {
+        destination: semantic.target.Located,
+        pub fn query(self: *@This(), request: target_runtime.relation.Query) target_runtime.relation.QueryError!?target_runtime.relation.Relation {
+            if (!std.mem.eql(u8, request.name, "container")) return null;
+            return .{ .name = request.name, .target = self.destination };
+        }
+    };
+    const Handler = struct {
+        view: semantic.view.Ref,
+        opened: usize = 0,
+
+        pub fn probe(_: *@This(), descriptor: semantic.target.Descriptor) target_runtime.resolver.ProbeError!?target_runtime.resolver.Strength {
+            return switch (descriptor.kind) {
+                .synthetic => |kind| if (std.mem.eql(u8, kind, "parent")) .exact else null,
+                else => null,
+            };
+        }
+
+        pub fn open(self: *@This(), located: semantic.target.Located) target_runtime.resolver.OpenError!semantic.view.Ref {
+            if (located.location != .whole) return error.Rejected;
+            self.opened += 1;
+            return self.view;
+        }
+    };
+
+    var services = Services.init(.here);
+    defer services.deinit(std.testing.allocator);
+    const target_owner = try services.acquireOwner();
+    const action_owner = try services.acquireOwner();
+    const relation_owner = try services.acquireOwner();
+    const opener_owner = try services.acquireOwner();
+    const source_ref = try services.publishTarget(std.testing.allocator, target_owner, .{
+        .kind = .{ .synthetic = "child" },
+        .display_name = "child",
+    });
+    const destination_ref = try services.publishTarget(std.testing.allocator, target_owner, .{
+        .kind = .{ .synthetic = "parent" },
+        .display_name = "parent",
+    });
+    const source = semantic.target.Located{ .target = source_ref, .revision = 1 };
+    const destination = semantic.target.Located{ .target = destination_ref, .revision = 1 };
+    const original = try services.publishView(std.testing.allocator, target_owner, null, 1, .{
+        .id = @enumFromInt(1),
+        .actions = &.{.{ .id = "open-parent" }},
+        .content = .{ .label = "child view" },
+    });
+    const destination_view = try services.publishView(std.testing.allocator, opener_owner, destination_ref, 1, .{
+        .id = @enumFromInt(2),
+        .focusable = true,
+        .content = .{ .label = "parent view" },
+    });
+    var handler: Handler = .{ .view = destination_view };
+    _ = try services.registerTargetHandler(std.testing.allocator, opener_owner, "parent-opener", .init(&handler));
+    var relation_provider: RelationProvider = .{ .destination = destination };
+    _ = try services.registerTargetRelationProvider(std.testing.allocator, relation_owner, "containment", .init(&relation_provider));
+    var action_provider: ActionProvider = .{ .request = .{ .source = source, .name = "container" } };
+    try services.registerActionProvider(std.testing.allocator, action_owner, .init(&action_provider));
+
+    var head: Head = .empty;
+    defer head.deinit(std.testing.allocator);
+    _ = try services.focusView(&head, std.testing.allocator, original, @enumFromInt(1));
+    const effect = (try services.invokeFocusedAction(&head.interactions, &head, std.testing.allocator, "open-parent")).?;
+    try std.testing.expectEqual(destination_view, effect.relation_opened);
+    try std.testing.expectEqual(@as(usize, 1), handler.opened);
+    try std.testing.expectEqual(destination_view, head.semantic_focus.path().?.view);
+
+    // The source revision is part of the request, so replacement cannot make
+    // the same provider response silently open a newer target.
+    try services.replaceTarget(std.testing.allocator, target_owner, source_ref, .{
+        .kind = .{ .synthetic = "child" },
+        .display_name = "replaced child",
+    });
+    try std.testing.expectError(error.StaleTarget, services.invokeAction(&head.interactions, std.testing.allocator, .{
+        .action = "open-parent",
+        .view = original,
+        .subject = @enumFromInt(1),
+    }));
 }
 
 test "target opening is revision guarded and confines handlers to their own attached views" {
