@@ -148,14 +148,13 @@ pub const ScalarValue = union(Scalar) {
 
 // ── Encode (§3.1: a pre-order walk, no tags, no padding) ────────────────
 
-pub const EncodeError = error{ SchemaMismatch, InvalidSchema } || Allocator.Error;
+pub const EncodeError = error{SchemaMismatch} || Allocator.Error;
 
 /// Encode `value` against `schema` — a pre-order walk emitting bytes with NO
 /// tags and NO padding (§3.1). `error.SchemaMismatch` when `value`'s shape
 /// doesn't match `schema` at some node (a caller bug, not a wire-corruption
 /// case — decode's `error.Corrupt` is the untrusted-input sibling of this).
 pub fn encode(gpa: Allocator, schema: *const Schema, value: Value) EncodeError![]u8 {
-    try validateSchema(schema);
     var list: std.ArrayList(u8) = .empty;
     errdefer list.deinit(gpa);
     try encodeInto(gpa, &list, schema, value);
@@ -170,7 +169,6 @@ pub fn encode(gpa: Allocator, schema: *const Schema, value: Value) EncodeError![
 /// e2e's guest fixture, and the meta-schema blob's own future use all need
 /// it identically).
 pub fn encodeVersioned(gpa: Allocator, version: u32, schema: *const Schema, value: Value) EncodeError![]u8 {
-    try validateSchema(schema);
     var list: std.ArrayList(u8) = .empty;
     errdefer list.deinit(gpa);
     try wire.putUv(gpa, &list, version);
@@ -749,8 +747,9 @@ pub fn validateSchema(schema: *const Schema) SchemaValidationError!void {
 }
 
 const maxSchemaDepth: usize = 256;
-const maxSchemaNodes: usize = 1 << 20;
-const maxSchemaName: usize = 1 << 20;
+const maxSchemaNodes: usize = 1 << 16;
+const maxSchemaMembers: usize = 1 << 12;
+const maxSchemaName: usize = 1 << 16;
 
 const ValidationState = struct { nodes: usize = 0 };
 
@@ -762,7 +761,7 @@ fn validateSchemaInner(schema: *const Schema, state: *ValidationState, depth: us
         .array => |elem| try validateSchemaInner(elem, state, depth + 1),
         .optional => |elem| try validateSchemaInner(elem, state, depth + 1),
         .variant => |cases| {
-            if (cases.len == 0 or cases.len > maxSchemaNodes) return error.InvalidSchema;
+            if (cases.len == 0 or cases.len > maxSchemaMembers) return error.InvalidSchema;
             for (cases, 0..) |c, i| {
                 if (c.name.len == 0 or c.name.len > maxSchemaName) return error.InvalidSchema;
                 for (cases[0..i]) |prior| {
@@ -772,7 +771,7 @@ fn validateSchemaInner(schema: *const Schema, state: *ValidationState, depth: us
             }
         },
         .@"struct" => |fields| {
-            if (fields.len > maxSchemaNodes) return error.InvalidSchema;
+            if (fields.len > maxSchemaMembers) return error.InvalidSchema;
             for (fields, 0..) |f, i| {
                 if (f.name.len == 0 or f.name.len > maxSchemaName) return error.InvalidSchema;
                 for (fields[0..i]) |prior| {
@@ -875,7 +874,7 @@ fn parseOne(state: *ParseState, cur: *[]const u8, depth: usize) (DecodeError || 
         tag_optional => .{ .optional = try parseOne(state, cur, depth + 1) },
         tag_struct => blk: {
             const n = wire.getUv(cur) catch return error.Corrupt;
-            if (n > 1 << 20) return error.Corrupt; // sanity cap, hostile-input guard
+            if (n > maxSchemaMembers) return error.Corrupt;
             const fields = try gpa.alloc(Schema.Field, @intCast(n));
             var filled: usize = 0;
             errdefer {
@@ -912,7 +911,7 @@ fn parseOne(state: *ParseState, cur: *[]const u8, depth: usize) (DecodeError || 
         },
         tag_variant => blk: {
             const n = wire.getUv(cur) catch return error.Corrupt;
-            if (n == 0 or n > maxSchemaNodes) return error.Corrupt;
+            if (n == 0 or n > maxSchemaMembers) return error.Corrupt;
             const cases = try gpa.alloc(Schema.Case, @intCast(n));
             var filled: usize = 0;
             errdefer {
