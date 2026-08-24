@@ -1522,7 +1522,7 @@ pub fn semanticFieldCurrentEdit(gpa: std.mem.Allocator) (std.mem.Allocator.Error
     const replacement = try gpa.alloc(u8, replacement_len);
     errdefer gpa.free(replacement);
     if (wl_semantic_field_edit_revision(p(revision.ptr), revision_len) != revision_len or
-        wl_semantic_field_edit_replacement(p(replacement.ptr), replacement_len) != replacement_len)
+        (replacement_len != 0 and wl_semantic_field_edit_replacement(p(replacement.ptr), replacement_len) != replacement_len))
         return error.Rejected;
     return .{
         .storage_allocator = gpa,

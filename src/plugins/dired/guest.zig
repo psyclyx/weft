@@ -538,14 +538,7 @@ pub const Session = struct {
             .token = token,
             .ref = undefined,
         };
-        const draft_row = draft.row(row) orelse return error.Stale;
-        field.selection = .{
-            .anchor = 0,
-            .caret = @intCast(switch (kind) {
-                .name => draft_row.draft.name.len,
-                .mode => @as(usize, if (draft_row.draft.mode != null) 4 else 0),
-            }),
-        };
+        _ = draft.row(row) orelse return error.Stale;
         field.ref = try self.registerField(field, draft);
         errdefer _ = weft.semanticFieldClose(field.ref);
         try self.fields.append(self.plugin.gpa, field);

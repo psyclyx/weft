@@ -456,10 +456,8 @@ test "e2e/web: author js + html, grep across them, run it with node" {
     const input_posture = try gpa.dupe(u8, ed.mode());
     defer gpa.free(input_posture);
     ed.runStr("open", ".");
-    try t.expectEqual(@as(usize, 1), ed.session.dired_plugin.sessions.items.len);
-    const dired = ed.session.dired_plugin.sessions.items[0];
-    try t.expectEqual(dired.view_ref, ed.head.semantic_focus.path().?.view);
-    const scene = ed.session.system.semantic.views.get(dired.view_ref).?.scene;
+    const view_ref = ed.head.semantic_focus.path().?.view;
+    const scene = ed.session.system.semantic.views.get(view_ref).?.scene;
     try t.expectEqualStrings("dired", scene.role);
     try t.expect(ed.buffers.findByName("*dired*") == null);
 
@@ -472,9 +470,12 @@ test "e2e/web: author js + html, grep across them, run it with node" {
     try t.expectEqualStrings("dired.row", children[1].role);
     var saw_app = false;
     var saw_index = false;
-    for (dired.draft.rows.items) |row| {
-        saw_app = saw_app or std.mem.eql(u8, row.draft.name, "app.js");
-        saw_index = saw_index or std.mem.eql(u8, row.draft.name, "index.html");
+    for (children) |row| {
+        const field_ref = row.content.container.children[2].content.field.ref;
+        var snapshot = try ed.session.system.semantic.fields.get(field_ref).?.snapshot(gpa);
+        defer snapshot.deinit();
+        saw_app = saw_app or std.mem.eql(u8, snapshot.value.bytes, "app.js");
+        saw_index = saw_index or std.mem.eql(u8, snapshot.value.bytes, "index.html");
     }
     try t.expect(saw_app and saw_index);
 
@@ -492,7 +493,7 @@ test "e2e/web: author js + html, grep across them, run it with node" {
     // remains retained and focused, rather than being reconstructed as a tool
     // buffer or dropping the head back into a dired mode.
     ed.run("view-refresh");
-    try t.expectEqual(dired.view_ref, ed.head.semantic_focus.path().?.view);
-    try t.expectEqualStrings("dired", ed.session.system.semantic.views.get(dired.view_ref).?.scene.role);
+    try t.expectEqual(view_ref, ed.head.semantic_focus.path().?.view);
+    try t.expectEqualStrings("dired", ed.session.system.semantic.views.get(view_ref).?.scene.role);
     proj.shot(&ed, "web-3-dired");
 }

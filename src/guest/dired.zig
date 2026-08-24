@@ -1,20 +1,28 @@
-//! Directory-tool launcher.
+//! Sandboxed directory-tool plugin.
 //!
-//! The directory editor itself is a semantic target handler composed over
-//! the public view, action, field, and filesystem contracts. This sandboxed
-//! catalog plugin contributes only the user-facing command that publishes an
-//! ordinary local target through the app's generic `open` seam. It owns no
-//! text projection, editor mode, keymap, shell command, or filesystem policy.
+//! The named `weft_dired_guest` library composes the portable draft model,
+//! semantic projection, and public target-scoped filesystem ABI. This root
+//! contributes only wasm callbacks plus the user-facing launcher. It owns no
+//! text projection, editor mode, keymap, shell command, syscall, or platform
+//! policy.
 
 const weft = @import("weft");
+const dired_guest = @import("weft_dired_guest");
 
 const command_name = "dired";
+var plugin: dired_guest.Plugin = undefined;
 
 export fn describe() void {
+    weft.requestPerm(.fs_read);
+    weft.requestPerm(.fs_write);
     weft.declareCommand(command_name);
 }
 
 export fn init() void {
+    plugin = .init(weft.allocator);
+    // The launcher remains usable in a command-only host. Target callbacks
+    // decline until the generic semantic services become available.
+    plugin.start() catch {};
     _ = weft.register(command_name);
 }
 
@@ -26,4 +34,24 @@ export fn on_command(id: u32) void {
         return;
     }
     weft.runStr("open", directory);
+}
+
+export fn on_semantic_target_probe(token: u32) void {
+    plugin.targetProbe(token);
+}
+
+export fn on_semantic_target_open(token: u32) void {
+    plugin.targetOpen(token);
+}
+
+export fn on_semantic_relation_query(token: u32) void {
+    plugin.relationQuery(token);
+}
+
+export fn on_semantic_action() void {
+    plugin.semanticAction();
+}
+
+export fn on_semantic_field_edit(token: u32) void {
+    plugin.fieldEdit(token);
 }

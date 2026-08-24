@@ -341,7 +341,6 @@ pub fn build(b: *std.Build) void {
         .link_libc = true,
     });
     addArchitectureImports(exe_mod, architecture);
-    exe_mod.addImport("weft_dired_host", dired_modules.host);
     exe_mod.addImport("weft_fs_platform", fs_platform);
     exe_mod.addImport("snail", snail_dep.module("snail"));
     // SPIR-V-only shader scope: slangc runs inside snail's build; weft
@@ -410,7 +409,6 @@ pub fn build(b: *std.Build) void {
         .link_libc = true,
     });
     addArchitectureImports(weft_mod, architecture);
-    weft_mod.addImport("weft_dired_host", dired_modules.host);
     weft_mod.addImport("weft_fs_platform", fs_platform);
     weft_mod.addImport("snail", snail_dep.module("snail"));
     weft_mod.addImport("snail-raster", snail_dep.module("snail-raster"));

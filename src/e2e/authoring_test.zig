@@ -251,15 +251,18 @@ test "dired: semantic field editing keeps the view focused and returns to normal
     const ed = &app.ed;
 
     // Open the current directory through the ordinary provider-aware `open`
-    // command. The app Session composes the dired plugin as a semantic target
-    // handler; there is no dired buffer or dired mode involved.
+    // command. The sandboxed dired plugin claims it through the generic
+    // target-handler ABI; there is no dired buffer or dired mode involved.
     authorFile(ed, "note.txt", "hello\n");
     ed.runStr("open", ".");
-    try t.expectEqual(@as(usize, 1), ed.session.dired_plugin.sessions.items.len);
-    const dired = ed.session.dired_plugin.sessions.items[0];
-    try t.expectEqual(dired.view_ref, ed.head.semantic_focus.path().?.view);
-    try t.expectEqualStrings("dired", ed.session.system.semantic.views.get(dired.view_ref).?.scene.role);
-    try t.expectEqualStrings("note.txt", dired.draft.rows.items[0].draft.name);
+    const view_ref = ed.head.semantic_focus.path().?.view;
+    const view = ed.session.system.semantic.views.get(view_ref).?;
+    try t.expectEqualStrings("dired", view.scene.role);
+    const leaf = ed.head.semantic_focus.path().?.leaf().?;
+    const field_ref = view.node(leaf).?.content.field.ref;
+    var before = try ed.session.system.semantic.fields.get(field_ref).?.snapshot(gpa);
+    defer before.deinit();
+    try t.expectEqualStrings("note.txt", before.value.bytes);
 
     // Enter the ordinary Vim insert posture on the focused semantic field,
     // type through the generic field provider, then leave it. The plugin owns
@@ -268,8 +271,10 @@ test "dired: semantic field editing keeps the view focused and returns to normal
     ed.typeText("x");
     ed.press("Escape", "");
     try t.expectEqualStrings("normal", ed.mode());
-    try t.expectEqual(dired.view_ref, ed.head.semantic_focus.path().?.view);
-    try t.expectEqualStrings("xnote.txt", dired.draft.rows.items[0].draft.name);
+    try t.expectEqual(view_ref, ed.head.semantic_focus.path().?.view);
+    var after = try ed.session.system.semantic.fields.get(field_ref).?.snapshot(gpa);
+    defer after.deinit();
+    try t.expectEqualStrings("xnote.txt", after.value.bytes);
 }
 
 test "authoring: switching back to an open file lands in an editable mode" {
@@ -1401,11 +1406,13 @@ test "authoring/dired: rename a semantic field, apply its dialog, and verify dis
     // surface, not a legacy `*dired*` text buffer.
     authorFile(ed, "old.txt", "keep me\n");
     ed.runStr("open", ".");
-    try t.expectEqual(@as(usize, 1), ed.session.dired_plugin.sessions.items.len);
-    const dired = ed.session.dired_plugin.sessions.items[0];
-    try t.expectEqualStrings("dired", ed.session.system.semantic.views.get(dired.view_ref).?.scene.role);
-    try t.expectEqual(dired.view_ref, ed.head.semantic_focus.path().?.view);
-    try t.expectEqualStrings("old.txt", dired.draft.rows.items[0].draft.name);
+    const view_ref = ed.head.semantic_focus.path().?.view;
+    const view = ed.session.system.semantic.views.get(view_ref).?;
+    try t.expectEqualStrings("dired", view.scene.role);
+    const field_ref = view.node(ed.head.semantic_focus.path().?.leaf().?).?.content.field.ref;
+    var initial = try ed.session.system.semantic.fields.get(field_ref).?.snapshot(gpa);
+    defer initial.deinit();
+    try t.expectEqualStrings("old.txt", initial.value.bytes);
 
     // Replace the raw name through generic semantic field editing. The field
     // starts at byte offset zero; Delete is the core field operation inherited
@@ -1414,8 +1421,10 @@ test "authoring/dired: rename a semantic field, apply its dialog, and verify dis
     for (0..7) |_| ed.press("Delete", ""); // `old.txt`
     ed.typeText("new.txt");
     ed.press("Escape", "");
-    try t.expectEqualStrings("new.txt", dired.draft.rows.items[0].draft.name);
-    try t.expectEqual(dired.view_ref, ed.head.semantic_focus.path().?.view);
+    var renamed = try ed.session.system.semantic.fields.get(field_ref).?.snapshot(gpa);
+    defer renamed.deinit();
+    try t.expectEqualStrings("new.txt", renamed.value.bytes);
+    try t.expectEqual(view_ref, ed.head.semantic_focus.path().?.view);
 
     // Apply is an advertised semantic action. Its provider opens a head-local
     // interaction; the dialog owns `y`, rather than introducing a dired mode or

@@ -47,7 +47,6 @@ const fs = @import("weft_fs");
 const fs_runtime = @import("weft_fs_runtime");
 const semantic = @import("weft_semantic");
 const target_runtime = @import("weft_target_runtime");
-const dired_host = @import("weft_dired_host");
 
 pub const Session = struct {
     gpa: std.mem.Allocator,
@@ -77,11 +76,6 @@ pub const Session = struct {
     filesystem_system: *core.System,
     filesystem_owner: semantic.owner.Id,
     filesystem_relations: LocalDirectoryRelations,
-    /// The native semantic directory projection. It owns only generic target
-    /// handler/view/field/action registrations; local roots remain app-owned.
-    dired_owner: semantic.owner.Id,
-    dired_plugin: dired_host.Plugin,
-
     // ── This process's one head (north-star-plan section 6 W2a-1) — APP
     //    GLUE, not a System field: a head is a cursor INTO whichever system
     //    it's attached to, so it survives a swap unchanged (see
@@ -142,19 +136,6 @@ pub const Session = struct {
             "local-directory.container",
             .init(&self.filesystem_relations),
         );
-        self.dired_owner = try self.system.semantic.acquireOwner();
-        errdefer _ = self.system.semantic.releaseOwner(gpa, self.dired_owner);
-        self.dired_plugin = dired_host.Plugin.init(gpa, self.dired_owner, .{
-            .filesystems = &self.system.filesystems,
-            .targets = &self.system.semantic.targets,
-            .target_handlers = &self.system.semantic.target_handlers,
-            .target_relations = &self.system.semantic.target_relations,
-            .views = &self.system.semantic.views,
-            .fields = &self.system.semantic.fields,
-            .actions = &self.system.semantic.actions,
-        });
-        errdefer self.dired_plugin.deinit();
-        try self.dired_plugin.start();
         self.head = .empty;
         // `System.create`'s `builtins.install` already set `sys.default_head`
         // into the modeless floor's "default" mode (the headless dispatch
@@ -185,8 +166,6 @@ pub const Session = struct {
     /// — buffers/caps/keymap/commands/plugins/..., per-system, in
     /// `System.destroy`'s documented order). (completion_ui owns no heap.)
     pub fn deinit(self: *Session, gpa: std.mem.Allocator) void {
-        self.dired_plugin.deinit();
-        _ = self.filesystem_system.semantic.releaseOwner(gpa, self.dired_owner);
         while (self.directory_targets.items.len != 0)
             self.closeDirectoryTarget(self.directory_targets.items.len - 1);
         self.directory_targets.deinit(gpa);
@@ -532,30 +511,69 @@ test "session: local directories become deduplicated semantic targets while file
     try sess.init(gpa, pool, "user", &grammars);
     defer sess.deinit(gpa);
 
+    // Session publishes filesystem targets but owns no directory UI. Install
+    // a tiny generic test handler to prove app composition is independent of
+    // whichever plugin (the shipped sandboxed dired, a remote browser, or a
+    // synthetic tool) chooses to render them.
+    const TestHandler = struct {
+        gpa: std.mem.Allocator,
+        services: *core.semantic.Services,
+        owner: semantic.owner.Id,
+        opened: std.ArrayList(struct {
+            target: semantic.target.Located,
+            view: semantic.view.Ref,
+        }) = .empty,
+
+        fn deinit(self: *@This()) void {
+            self.opened.deinit(self.gpa);
+        }
+
+        pub fn probe(_: *@This(), descriptor: semantic.target.Descriptor) target_runtime.resolver.ProbeError!?semantic.target.Match {
+            return if (descriptor.kind == .directory) .exact else null;
+        }
+
+        pub fn open(self: *@This(), located: semantic.target.Located) target_runtime.resolver.OpenError!semantic.view.Ref {
+            const descriptor = self.services.targets.get(located.target) orelse return error.StaleTarget;
+            if (descriptor.revision != located.revision or descriptor.kind != .directory) return error.StaleTarget;
+            for (self.opened.items) |entry|
+                if (entry.target.target.eql(located.target) and entry.target.revision == located.revision)
+                    return entry.view;
+            const view = self.services.views.publish(
+                self.gpa,
+                self.owner,
+                .{ .ref = located.target, .revision = located.revision },
+                1,
+                .{ .id = @enumFromInt(1), .role = "directory-test", .focusable = true, .content = .{ .label = "directory" } },
+            ) catch return error.Failed;
+            self.opened.append(self.gpa, .{ .target = located, .view = view }) catch return error.Failed;
+            return view;
+        }
+    };
+    const handler_owner = try sess.system.semantic.acquireOwner();
+    defer _ = sess.system.semantic.releaseOwner(gpa, handler_owner);
+    var handler: TestHandler = .{ .gpa = gpa, .services = &sess.system.semantic, .owner = handler_owner };
+    defer handler.deinit();
+    _ = try sess.system.semantic.target_handlers.register(gpa, handler_owner, "test.directory", .init(&handler));
+    defer _ = sess.system.semantic.target_handlers.unregisterOwner(gpa, handler_owner);
+
     try t.expect(try sess.openLocalDirectory(&sess.cmd_ctx, directory_path));
-    // The publisher lazily pins the actual parent fd while the directory
-    // plugin asks whether a `container` edge exists. That target belongs to
-    // filesystem publication, not to dired's session state.
-    try t.expectEqual(@as(usize, 2), sess.directory_targets.items.len);
-    try t.expectEqual(@as(usize, 1), sess.dired_plugin.sessions.items.len);
+    try t.expectEqual(@as(usize, 1), sess.directory_targets.items.len);
     const first_target = sess.directory_targets.items[0].publication.ref;
-    const first_view = sess.dired_plugin.sessions.items[0].view_ref;
+    const first_view = sess.head.semantic_focus.view.?;
     try t.expectEqual(first_view, sess.head.semantic_focus.view.?);
     const scene = sess.system.semantic.views.get(first_view).?.scene;
-    try t.expectEqualStrings("dired", scene.role);
+    try t.expectEqualStrings("directory-test", scene.role);
     try t.expect(scene.focusable);
     try t.expect(sess.system.buffers.findByName("*dired*") == null);
-    var advertises_container = false;
-    for (scene.actions) |action| {
-        if (std.mem.eql(u8, action.id, semantic.action.standard.open_container))
-            advertises_container = action.enabled;
-    }
-    try t.expect(advertises_container);
+
+    // Containment is publisher-owned and lazy. Resolving it pins the parent
+    // independently of the generic handler's view state.
     var parent = try sess.system.semantic.resolveTargetRelation(gpa, .{
         .target = first_target,
         .revision = sess.directory_targets.items[0].publication.revision,
     }, "container");
     defer parent.deinit();
+    try t.expectEqual(@as(usize, 2), sess.directory_targets.items.len);
     try t.expectEqual(
         sess.directory_targets.items[1].publication.ref,
         parent.value.resolved.target,
@@ -566,15 +584,13 @@ test "session: local directories become deduplicated semantic targets while file
     // comparison must reuse the existing publication and session.
     try t.expect(try sess.openLocalDirectory(&sess.cmd_ctx, tmp_path));
     try t.expectEqual(@as(usize, 2), sess.directory_targets.items.len);
-    try t.expectEqual(@as(usize, 2), sess.dired_plugin.sessions.items.len);
 
-    // Reopening the same publication reuses the plugin-owned retained view;
+    // Reopening the same publication reuses the handler-owned retained view;
     // it does not create shared mutable draft state or a text-buffer twin.
     try t.expect(try sess.openLocalDirectory(&sess.cmd_ctx, directory_path));
     try t.expectEqual(first_target, sess.directory_targets.items[0].publication.ref);
     try t.expectEqual(first_view, sess.head.semantic_focus.view.?);
     try t.expectEqual(@as(usize, 2), sess.directory_targets.items.len);
-    try t.expectEqual(@as(usize, 2), sess.dired_plugin.sessions.items.len);
     try t.expect(!try sess.openLocalDirectory(&sess.cmd_ctx, file_path));
     try t.expectEqual(@as(usize, 2), sess.directory_targets.items.len);
 
@@ -586,21 +602,14 @@ test "session: local directories become deduplicated semantic targets while file
     try tmp.dir.createDirPath(t.io, "odd\n\xff");
     try t.expect(try sess.openLocalDirectory(&sess.cmd_ctx, directory_path));
     try t.expectEqual(@as(usize, 3), sess.directory_targets.items.len);
-    try t.expectEqual(@as(usize, 3), sess.dired_plugin.sessions.items.len);
     try t.expect(!sess.directory_targets.items[2].publication.ref.eql(first_target));
 
-    // `-` and any other input model invoke the same advertised action. The
-    // action follows the publisher-owned edge, admits the parent through the
-    // ordinary target-handler registry, and focuses a second retained view.
-    const effect = (try sess.system.semantic.invokeFocusedAction(
-        &sess.head.interactions,
-        &sess.head,
-        gpa,
-        semantic.action.standard.open_container,
-    )).?;
-    try t.expect(effect == .relation_opened);
-    try t.expectEqual(@as(usize, 3), sess.dired_plugin.sessions.items.len);
-    try t.expectEqual(sess.dired_plugin.sessions.items[1].view_ref, sess.head.semantic_focus.view.?);
+    var replacement_parent = try sess.system.semantic.resolveTargetRelation(gpa, .{
+        .target = sess.directory_targets.items[2].publication.ref,
+        .revision = sess.directory_targets.items[2].publication.revision,
+    }, "container");
+    defer replacement_parent.deinit();
+    try t.expectEqual(sess.directory_targets.items[1].publication.ref, replacement_parent.value.resolved.target);
 }
 
 test "session: GATE — system-swap live-rebinds the REAL Session's head; buffers/commands/keymap switch, refuses on an open transient" {

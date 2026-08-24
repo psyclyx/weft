@@ -36,6 +36,10 @@ pub fn readBounded(
 ) ?[]u8 {
     const value_len: u32 = @bitCast(len);
     if (value_len < minimum or value_len > maximum) return null;
+    // An empty byte string has no address to validate. Guest allocators may
+    // represent a zero-length slice with a non-dereferenceable sentinel, so
+    // crossing into linear memory would reject a perfectly valid value.
+    if (value_len == 0) return gpa.alloc(u8, 0) catch null;
     const value_ptr: u32 = @bitCast(ptr);
     return caller.readMemory(gpa, value_ptr, value_len) catch null;
 }
