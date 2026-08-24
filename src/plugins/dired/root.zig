@@ -40,9 +40,12 @@ pub const FieldBinding = projection.FieldBinding;
 pub const OwnedScene = projection.OwnedScene;
 pub const project = projection.project;
 pub const metadata_column = projection.metadata_column;
+pub const mode_column = projection.mode_column;
 pub const name_column = projection.name_column;
 pub const original_column = projection.original_column;
+pub const permissions_edit_action = projection.permissions_edit_action;
 pub const rowNodeId = projection.rowNodeId;
+pub const modeNodeId = projection.modeNodeId;
 pub const modelRowId = projection.modelRowId;
 
 pub const ActionController = actions.Controller;
