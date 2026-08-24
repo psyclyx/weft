@@ -372,6 +372,26 @@ pub fn build(b: *std.Build) void {
         const run_contract_tests = b.addRunArtifact(contract_tests);
         contract_step.dependOn(&run_contract_tests.step);
     }
+
+    // Compile-only Darwin choke point. Platform-neutral facades are analyzed
+    // for the next supported host without trying to run a foreign artifact;
+    // the Linux provider is created only in the native `.linux` branch below.
+    const darwin_target = b.resolveTargetQuery(.{ .cpu_arch = .aarch64, .os_tag = .macos });
+    const darwin_architecture = createArchitectureModules(b, darwin_target, optimize);
+    const darwin_gate_mod = b.createModule(.{
+        .root_source_file = b.path("src/tests/darwin_architecture_gate.zig"),
+        .target = darwin_target,
+        .optimize = optimize,
+    });
+    addArchitectureImports(darwin_gate_mod, darwin_architecture);
+    const darwin_gate = b.addObject(.{
+        .name = "weft-darwin-architecture",
+        .root_module = darwin_gate_mod,
+    });
+    const darwin_step = b.step("check-darwin-architecture", "Compile portable architecture modules for aarch64-macos");
+    darwin_step.dependOn(&darwin_gate.step);
+    contract_step.dependOn(&darwin_gate.step);
+
     const fs_fake = b.createModule(.{
         .root_source_file = b.path("src/fs_fake/root.zig"),
         .target = target,
