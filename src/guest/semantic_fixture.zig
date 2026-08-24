@@ -34,6 +34,30 @@ export fn init() void {
         .content = .{ .container = .{ .children = &.{child} } },
     }, target, 7) catch unreachable;
     if (!weft.semanticViewFocus(view, child.id)) unreachable;
+
+    const definition: kernel.interaction.Definition = .{
+        .role = .dialog,
+        .view = view,
+        .root = @enumFromInt(1),
+        .actions = &.{
+            .{ .id = "fixture.yes", .label = "Yes" },
+            .{ .id = "fixture.no", .label = "No" },
+        },
+        .bindings = &.{
+            .{ .input = "y", .action = "fixture.yes" },
+            .{ .input = "n", .action = "fixture.no" },
+        },
+        .presentation = "fixture-dialog",
+    };
+    const first = weft.semanticInteractionOpen(definition) catch unreachable;
+    const second = weft.semanticInteractionOpen(definition) catch unreachable;
+    // Strict LIFO and generation checks are observable from the guest API:
+    // the buried ref and then its stale generation both refuse to close.
+    if (weft.semanticInteractionClose(first)) unreachable;
+    if (!weft.semanticInteractionClose(second)) unreachable;
+    if (!weft.semanticInteractionClose(first)) unreachable;
+    if (weft.semanticInteractionClose(first)) unreachable;
+    _ = weft.semanticInteractionOpen(definition) catch unreachable;
 }
 
 export fn on_semantic_action() void {

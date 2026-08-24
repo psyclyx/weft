@@ -51,6 +51,19 @@ test "wasm plugin: canonical targets and scenes cross the semantic membrane" {
     try t.expectEqual(@as(u64, 7), view.descriptor.revision);
     try t.expectEqualStrings("fixture", view.scene.role);
     const field_ref = view.scene.content.container.children[0].content.field.ref;
+    const interaction = env.head.interactions.active().?;
+    try t.expectEqual(view_ref, interaction.descriptor.view);
+    try t.expectEqual(@as(@import("weft_kernel").scene.NodeId, @enumFromInt(1)), interaction.descriptor.root);
+    try t.expectEqualStrings("fixture-dialog", interaction.descriptor.presentation);
+    try t.expectEqualStrings("fixture.yes", interaction.actionForInput("y").?.id);
+    try t.expectEqualStrings("fixture.no", interaction.actionForInput("n").?.id);
+    try t.expect(interaction.actionForInput("x") == null);
+    // Interaction bindings are stack-local; the fixture did not mutate the
+    // editor mode, pending chord, or the shared keymap.
+    try t.expectEqualStrings("", env.head.currentMode());
+    try t.expectEqual(@as(usize, 0), env.head.pending.len);
+    try t.expect(env.head.lookup(&env.keymap, "y") == null);
+    try t.expect(env.head.lookup(&env.keymap, "n") == null);
     const provider = semantic.fields.get(field_ref).?;
     try provider.edit("1", .{
         .start = 0,

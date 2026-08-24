@@ -322,6 +322,20 @@ pub const Services = struct {
         return stack.open(gpa, definition);
     }
 
+    /// Close only the active interaction on this head. The stack validates
+    /// authority, generation, and strict LIFO order; stale or buried refs
+    /// are harmless false results rather than cross-dialog mutations.
+    pub fn closeInteraction(
+        self: *const Services,
+        stack: *view_runtime.interaction.Stack,
+        gpa: std.mem.Allocator,
+        ref: kernel.interaction.Ref,
+    ) bool {
+        _ = self;
+        stack.close(gpa, ref) catch return false;
+        return true;
+    }
+
     /// Move one head through the active view's declared focus order. `false`
     /// means this head has no live semantic view, so a caller may fall back to
     /// its text-editor movement. A live view consumes the intent even when it
@@ -581,6 +595,46 @@ test "interaction-local input invokes semantic action and closes explicitly" {
     _ = services.releaseOwner(std.testing.allocator, "dialog-owner");
     try std.testing.expect((try services.invokeInteractionInput(&interactions, std.testing.allocator, "y")).? == .declined);
     try std.testing.expect(interactions.active() == null);
+}
+
+test "semantic interaction refs are head-local and close only the active scope" {
+    var services = Services.init(.here);
+    defer services.deinit(std.testing.allocator);
+    const view_ref = try services.publishView(std.testing.allocator, "dialog", null, 1, .{
+        .id = @enumFromInt(1),
+        .content = .{ .label = "body" },
+    });
+    const definition: kernel.interaction.Definition = .{
+        .role = .dialog,
+        .view = view_ref,
+        .root = @enumFromInt(1),
+        .actions = &.{
+            .{ .id = "yes", .label = "Yes" },
+            .{ .id = "no", .label = "No" },
+        },
+        .bindings = &.{
+            .{ .input = "y", .action = "yes" },
+            .{ .input = "n", .action = "no" },
+        },
+        .presentation = "fixture-dialog",
+    };
+    var head_a: Head = .empty;
+    defer head_a.deinit(std.testing.allocator);
+    var head_b: Head = .empty;
+    defer head_b.deinit(std.testing.allocator);
+    const first = try services.openInteraction(&head_a.interactions, std.testing.allocator, definition);
+    const second = try services.openInteraction(&head_a.interactions, std.testing.allocator, definition);
+    const other = try services.openInteraction(&head_b.interactions, std.testing.allocator, definition);
+    try std.testing.expectEqual(view_ref, head_a.interactions.active().?.descriptor.view);
+    try std.testing.expectEqual(@as(kernel.scene.NodeId, @enumFromInt(1)), head_a.interactions.active().?.descriptor.root);
+    try std.testing.expectEqualStrings("yes", head_a.interactions.actionForInput("y").?.id);
+    try std.testing.expectEqualStrings("no", head_b.interactions.actionForInput("n").?.id);
+    try std.testing.expect(!services.closeInteraction(&head_a.interactions, std.testing.allocator, first));
+    try std.testing.expect(services.closeInteraction(&head_a.interactions, std.testing.allocator, second));
+    try std.testing.expect(!services.closeInteraction(&head_a.interactions, std.testing.allocator, second));
+    try std.testing.expect(services.closeInteraction(&head_a.interactions, std.testing.allocator, first));
+    try std.testing.expect(!services.closeInteraction(&head_a.interactions, std.testing.allocator, other));
+    try std.testing.expectEqual(other, head_b.interactions.active().?.descriptor.ref);
 }
 
 test "ordinary editor input targets semantic fields and focus order" {

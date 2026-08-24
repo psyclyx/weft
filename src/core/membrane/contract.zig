@@ -213,6 +213,8 @@ const handlers = [_]struct { name: []const u8, handler: HostFn }{
     // ── semantic.zig — generic focused-view actions ───────────────────
     .{ .name = "wl_semantic_active", .handler = semantic.hSemanticActive },
     .{ .name = "wl_semantic_view_focus", .handler = semantic.hSemanticViewFocus },
+    .{ .name = "wl_semantic_interaction_open", .handler = semantic.hSemanticInteractionOpen },
+    .{ .name = "wl_semantic_interaction_close", .handler = semantic.hSemanticInteractionClose },
     .{ .name = "wl_semantic_action", .handler = semantic.hSemanticAction },
     .{ .name = "wl_semantic_target_publish", .handler = semantic.hSemanticTargetPublish },
     .{ .name = "wl_semantic_target_replace", .handler = semantic.hSemanticTargetReplace },
@@ -461,6 +463,8 @@ const head_gated_list = [_][]const u8{
     "wl_pick_end", // pick.zig hPickEnd
     "wl_open_file_pick", // pick.zig hOpenFilePick
     "wl_semantic_view_focus", // semantic.zig hSemanticViewFocus
+    "wl_semantic_interaction_open", // semantic.zig hSemanticInteractionOpen
+    "wl_semantic_interaction_close", // semantic.zig hSemanticInteractionClose
     "wl_semantic_action", // semantic.zig hSemanticAction
 };
 

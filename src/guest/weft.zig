@@ -166,6 +166,8 @@ extern "weft" fn wl_register_linewise() u32;
 extern "weft" fn wl_paste_at(base: u32) void;
 extern "weft" fn wl_semantic_active() u32;
 extern "weft" fn wl_semantic_view_focus(authority: u32, slot: u32, generation: u32, preferred_low: u32, preferred_high: u32, has_preferred: u32) i32;
+extern "weft" fn wl_semantic_interaction_open(payload: u32, payload_len: u32, out: u32, out_cap: u32) i32;
+extern "weft" fn wl_semantic_interaction_close(authority: u32, slot: u32, generation: u32) u32;
 extern "weft" fn wl_semantic_action(action: u32, action_len: u32) i32;
 extern "weft" fn wl_semantic_target_publish(payload: u32, payload_len: u32, out: u32, out_cap: u32) i32;
 extern "weft" fn wl_semantic_target_replace(authority: u32, slot: u32, generation: u32, payload: u32, payload_len: u32) i32;
@@ -1025,6 +1027,22 @@ pub fn semanticViewFocus(ref: semantic_kernel.view.Ref, preferred: ?semantic_ker
     const low: u32 = @truncate(raw);
     const high: u32 = @truncate(raw >> 32);
     return wl_semantic_view_focus(wire.authority, wire.slot, wire.generation, low, high, @intFromBool(preferred != null)) != 0;
+}
+
+/// Open a bounded head-local interaction definition using the canonical
+/// scene codec. The host owns the decoded descriptor and returns a typed ref.
+pub fn semanticInteractionOpen(definition: semantic_kernel.interaction.Definition) SemanticPublishError!semantic_kernel.interaction.Ref {
+    const payload = try semantic_codec.encodeInteraction(allocator, definition);
+    defer allocator.free(payload);
+    var out: [12]u8 = undefined;
+    if (wl_semantic_interaction_open(p(payload.ptr), @intCast(payload.len), p(&out), out.len) != 1) return error.Rejected;
+    return readSemanticHandle(semantic_kernel.interaction.Ref, &out);
+}
+
+/// Close only the currently active interaction named by this typed ref.
+pub fn semanticInteractionClose(ref: semantic_kernel.interaction.Ref) bool {
+    const wire = ref.toWire();
+    return wl_semantic_interaction_close(wire.authority, wire.slot, wire.generation) != 0;
 }
 
 pub const SemanticActionResult = enum(i32) {

@@ -144,14 +144,47 @@ pub fn hSemanticViewFocus(data: ?*anyopaque, caller: *wasm.Caller, args: []const
     const has_preferred: u32 = @bitCast(args[5]);
     if (has_preferred > 1) return;
     const preferred: ?kernel.scene.NodeId = if (has_preferred == 0) null else blk: {
-        const low: u64 = @as(u32, @bitCast(args[3]));
-        const high: u64 = @as(u32, @bitCast(args[4]));
+        const low: u64 = @as(u64, @as(u32, @bitCast(args[3])));
+        const high: u64 = @as(u64, @as(u32, @bitCast(args[4])));
         break :blk @enumFromInt((high << 32) | low);
     };
     const ctx = plugin.activeCtx();
     const services = ctx.semantic orelse return;
     _ = services.focusView(ctx.head, plugin.gpa, ref, preferred) catch return;
     results[0] = 1;
+}
+
+/// Decode a bounded canonical interaction definition and open it on the
+/// dispatching head's local stack. The typed ref is written last; if guest
+/// output is invalid, roll back the newly opened scope before returning.
+pub fn hSemanticInteractionOpen(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32, results: []i32) void {
+    const plugin: *WasmPlugin = @ptrCast(@alignCast(data.?));
+    results[0] = 0;
+    if (!requireDispatch(plugin, caller, "wl_semantic_interaction_open")) return;
+    const ctx = plugin.activeCtx();
+    const services = ctx.semantic orelse return;
+    const payload = readPayload(plugin, caller, args[0], args[1]) orelse return;
+    defer plugin.gpa.free(payload);
+    var decoded = scene_codec.decodeInteraction(plugin.gpa, payload) catch return;
+    defer decoded.deinit();
+    const ref = services.openInteraction(&ctx.head.interactions, plugin.gpa, decoded.value) catch return;
+    if (!wire_util.writeHandle(caller, @bitCast(args[2]), @bitCast(args[3]), ref)) {
+        _ = services.closeInteraction(&ctx.head.interactions, plugin.gpa, ref);
+        return;
+    }
+    results[0] = 1;
+}
+
+/// Close only the active interaction named by the typed ref. A stale or
+/// buried ref returns 0 and leaves the head-local stack unchanged.
+pub fn hSemanticInteractionClose(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32, results: []i32) void {
+    const plugin: *WasmPlugin = @ptrCast(@alignCast(data.?));
+    results[0] = 0;
+    if (!requireDispatch(plugin, caller, "wl_semantic_interaction_close")) return;
+    const ctx = plugin.activeCtx();
+    const services = ctx.semantic orelse return;
+    const ref = wire_util.readHandle(kernel.interaction.Ref, args[0..3]) orelse return;
+    results[0] = @intFromBool(services.closeInteraction(&ctx.head.interactions, plugin.gpa, ref));
 }
 
 /// Return values are transport status, not policy: 0 unavailable/declined,
