@@ -1101,6 +1101,33 @@ pub const VideoRecorder = struct {
     }
 };
 
+/// Optional work that advances product state immediately before a demo frame
+/// is rendered. The recorder knows nothing about collaboration (or any other
+/// subsystem): a scenario binds its own clock participant, and the one frame
+/// boundary then observes the resulting state on both screens.
+pub const DemoFrameHook = struct {
+    context: *anyopaque,
+    run: *const fn (*anyopaque) void,
+
+    pub fn init(pointer: anytype) DemoFrameHook {
+        const Pointer = @TypeOf(pointer);
+        const info = switch (@typeInfo(Pointer)) {
+            .pointer => |value| value,
+            else => @compileError("demo frame hook must be initialized from a pointer"),
+        };
+        if (info.size != .one or info.is_const)
+            @compileError("demo frame hook requires a mutable single-item pointer");
+        const Implementation = info.child;
+        const Adapter = struct {
+            fn run(raw: *anyopaque) void {
+                const implementation: *Implementation = @ptrCast(@alignCast(raw));
+                implementation.beforeDemoFrame();
+            }
+        };
+        return .{ .context = pointer, .run = Adapter.run };
+    }
+};
+
 // ── Project: weft launched IN a real on-disk project ────────────────
 //
 // The whole-app e2e drives weft the way a person starts a project: in a
@@ -1121,6 +1148,7 @@ pub const Project = struct {
     video: ?VideoRecorder = null,
     demo_left: ?*Editor = null,
     demo_right: ?*Editor = null,
+    demo_frame_hook: ?DemoFrameHook = null,
     typing_ms: u32 = 75,
     linger_ms: u32 = 1000,
 
@@ -1129,6 +1157,7 @@ pub const Project = struct {
         self.video = null;
         self.demo_left = null;
         self.demo_right = null;
+        self.demo_frame_hook = null;
         self.prev_cwd = try getCwdAlloc(gpa);
         errdefer gpa.free(self.prev_cwd);
         // A real isolated dir in the system tmp — NOT under this repo — so the
@@ -1160,6 +1189,14 @@ pub const Project = struct {
         if (!self.demoEnabled()) return;
         self.demo_left = left;
         self.demo_right = right;
+    }
+
+    /// Add a scenario-owned participant to the synchronized capture clock.
+    /// This is deliberately a generic lifecycle seam: the video harness does
+    /// not import or identify the subsystem being advanced.
+    pub fn bindDemoFrameHook(self: *Project, hook: DemoFrameHook) void {
+        if (!self.demoEnabled()) return;
+        self.demo_frame_hook = hook;
     }
 
     pub fn deinit(self: *Project) void {
@@ -1249,15 +1286,16 @@ pub const Project = struct {
     }
 
     fn frame(self: *Project) void {
+        if (self.demo_frame_hook) |hook| hook.run(hook.context);
         const pixels = self.pairPixels() catch return;
         defer self.gpa.free(pixels);
         self.record(pixels, app_w * 2, app_h);
     }
 
     fn delay(self: *Project, ms: u32) void {
-        if (!self.demoEnabled() or self.demo_left == null or self.demo_right == null) return;
+        if (!self.demoEnabled() or self.demo_left == null or self.demo_right == null or ms == 0) return;
         const fps = self.video.?.fps;
-        const count = @max(@as(u64, 1), (@as(u64, ms) * fps + 999) / 1000);
+        const count = (@as(u64, ms) * fps + 999) / 1000;
         const interval_us = @max(@as(u64, 1), 1_000_000 / fps);
         var i: u64 = 0;
         while (i < count) : (i += 1) {
@@ -1287,6 +1325,7 @@ pub const Project = struct {
     /// Normal mode keeps the original one-screen PPM behavior.
     pub fn capture(self: *Project, ed: *Editor, name: []const u8) void {
         if (self.demoEnabled() and self.demo_left != null and self.demo_right != null) {
+            if (self.demo_frame_hook) |hook| hook.run(hook.context);
             const pixels = self.pairPixels() catch return;
             const fname = std.fmt.allocPrint(self.gpa, "{s}/.zig-cache/tmp/weft-e2e-{s}.ppm", .{ self.prev_cwd, name }) catch {
                 self.gpa.free(pixels);
