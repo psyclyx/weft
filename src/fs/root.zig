@@ -6,6 +6,7 @@
 pub const kernel = @import("weft_kernel");
 pub const contract = @import("contract.zig");
 pub const plan = @import("plan.zig");
+pub const service = @import("service.zig");
 
 test {
     @import("std").testing.refAllDecls(@This());

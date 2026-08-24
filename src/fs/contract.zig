@@ -16,6 +16,14 @@ pub const EntryRef = kernel.handle.Handle(EntryTag);
 pub const LeaseRef = kernel.handle.Handle(LeaseTag);
 pub const WatchRef = kernel.handle.Handle(WatchTag);
 
+/// A root is a directory object in its own right, but it deliberately has no
+/// synthetic entry handle. Keeping that distinction explicit avoids sentinel
+/// slots and makes confinement visible in every operation.
+pub const NodeRef = union(enum) {
+    root,
+    entry: EntryRef,
+};
+
 pub const NameError = error{ Empty, Reserved, ContainsSlash, ContainsNul };
 
 pub const Name = struct {
@@ -30,8 +38,16 @@ pub const Name = struct {
     }
 };
 
+/// Destinations may be beneath the root, an observed directory, or a
+/// directory created by an earlier operation in the same ordered plan.
+pub const ParentRef = union(enum) {
+    root,
+    entry: EntryRef,
+    planned: usize,
+};
+
 pub const Slot = struct {
-    parent: EntryRef,
+    parent: ParentRef,
     name: Name,
 };
 
@@ -56,7 +72,7 @@ pub const Metadata = struct {
 };
 
 pub const Observation = struct {
-    entry: EntryRef,
+    node: NodeRef,
     revision: Revision,
     kind: Kind,
     metadata: Metadata = .{},
@@ -184,6 +200,68 @@ pub const ReportEntry = struct {
 pub const ApplyReport = struct {
     entries: []const ReportEntry,
 };
+
+pub const Listing = struct {
+    directory: Observation,
+    revision: Revision,
+    entries: []const DirEntry,
+};
+
+pub const ReadRequest = struct {
+    source: Source,
+    offset: u64 = 0,
+    limit: ?u64 = null,
+};
+
+pub const ReadResult = struct {
+    observation: Observation,
+    bytes: []const u8,
+    eof: bool,
+};
+
+/// Results own one arena so nested raw names, revision tokens, link targets,
+/// and report details share one obvious lifetime. Providers allocate from the
+/// arena; callers call `deinit` exactly once.
+pub fn Owned(comptime T: type) type {
+    return struct {
+        arena: std.heap.ArenaAllocator,
+        value: T = undefined,
+
+        const Self = @This();
+
+        pub fn init(gpa: std.mem.Allocator) Self {
+            return .{ .arena = .init(gpa) };
+        }
+
+        pub fn allocator(self: *Self) std.mem.Allocator {
+            return self.arena.allocator();
+        }
+
+        pub fn deinit(self: *Self) void {
+            self.arena.deinit();
+            self.* = undefined;
+        }
+    };
+}
+
+pub const OwnedObservation = Owned(Observation);
+pub const OwnedListing = Owned(Listing);
+pub const OwnedReadResult = Owned(ReadResult);
+pub const OwnedApplyReport = Owned(ApplyReport);
+
+pub const Error = error{
+    NotFound,
+    AlreadyExists,
+    NotDirectory,
+    PermissionDenied,
+    Confined,
+    Stale,
+    CrossDevice,
+    Unsupported,
+    InvalidName,
+    Busy,
+    Io,
+} || std.mem.Allocator.Error;
 
 pub const Invalidation = union(enum) {
     changed: ?EntryRef,

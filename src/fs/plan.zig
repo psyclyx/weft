@@ -3,9 +3,7 @@
 const std = @import("std");
 const contract = @import("contract.zig");
 
-pub const ValidationError = error{ InvalidDependency, DependencyCycle, DuplicateOperationId } || std.mem.Allocator.Error;
-
-const VisitState = enum { unseen, visiting, done };
+pub const ValidationError = error{ InvalidDependency, DuplicateOperationId } || std.mem.Allocator.Error;
 
 pub fn validate(gpa: std.mem.Allocator, plan: contract.Plan) ValidationError!void {
     var ids: std.AutoHashMapUnmanaged(contract.OperationId, void) = .empty;
@@ -13,30 +11,32 @@ pub fn validate(gpa: std.mem.Allocator, plan: contract.Plan) ValidationError!voi
     for (plan.operations, 0..) |operation, i| {
         const id_result = try ids.getOrPut(gpa, operation.id);
         if (id_result.found_existing) return error.DuplicateOperationId;
+        // Plans are already in canonical execution order. Dependencies may
+        // only name earlier operations, which makes cycles unrepresentable
+        // while still allowing independent operations to run in parallel.
         for (operation.depends_on) |dependency|
-            if (dependency >= plan.operations.len or dependency == i) return error.InvalidDependency;
+            if (dependency >= i) return error.InvalidDependency;
+        if (destinationParent(operation.operation)) |parent| switch (parent) {
+            .planned => |dependency| if (dependency >= i) return error.InvalidDependency,
+            else => {},
+        };
     }
-
-    const states = try gpa.alloc(VisitState, plan.operations.len);
-    defer gpa.free(states);
-    @memset(states, .unseen);
-    for (plan.operations, 0..) |_, i| try visit(plan, states, i);
 }
 
-fn visit(plan: contract.Plan, states: []VisitState, i: usize) ValidationError!void {
-    switch (states[i]) {
-        .done => return,
-        .visiting => return error.DependencyCycle,
-        .unseen => {},
-    }
-    states[i] = .visiting;
-    for (plan.operations[i].depends_on) |dependency| try visit(plan, states, dependency);
-    states[i] = .done;
+fn destinationParent(operation: contract.Operation) ?contract.ParentRef {
+    return switch (operation) {
+        .create_file => |create| create.destination.parent,
+        .create_directory => |create| create.destination.parent,
+        .create_symlink => |create| create.destination.parent,
+        .copy => |copy| copy.destination.parent,
+        .rename => |rename| rename.destination.parent,
+        .remove, .set_permissions => null,
+    };
 }
 
-test "plan rejects cycles" {
+test "plan rejects forward dependencies" {
     const destination: contract.Slot = .{
-        .parent = .{ .authority = .here, .slot = 1, .generation = 1 },
+        .parent = .root,
         .name = try .init("cycle-test"),
     };
     const operations = [_]contract.Planned{
@@ -48,5 +48,5 @@ test "plan rejects cycles" {
         .base_revision = &.{},
         .operations = &operations,
     };
-    try std.testing.expectError(error.DependencyCycle, validate(std.testing.allocator, plan));
+    try std.testing.expectError(error.InvalidDependency, validate(std.testing.allocator, plan));
 }
