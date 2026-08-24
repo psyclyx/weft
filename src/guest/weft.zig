@@ -172,6 +172,12 @@ extern "weft" fn wl_semantic_target_close(authority: u32, slot: u32, generation:
 extern "weft" fn wl_semantic_view_publish(payload: u32, payload_len: u32, target_authority: u32, target_slot: u32, target_generation: u32, revision: u32, out: u32, out_cap: u32) i32;
 extern "weft" fn wl_semantic_view_replace(authority: u32, slot: u32, generation: u32, revision: u32, payload: u32, payload_len: u32) i32;
 extern "weft" fn wl_semantic_view_close(authority: u32, slot: u32, generation: u32) u32;
+extern "weft" fn wl_semantic_field_register(token: u32, revision: u32, revision_len: u32, bytes: u32, bytes_len: u32, anchor: u32, caret: u32, flags: u32, out: u32, out_cap: u32) i32;
+extern "weft" fn wl_semantic_field_update(authority: u32, slot: u32, generation: u32, revision: u32, revision_len: u32, bytes: u32, bytes_len: u32, anchor: u32, caret: u32, flags: u32) i32;
+extern "weft" fn wl_semantic_field_close(authority: u32, slot: u32, generation: u32) u32;
+extern "weft" fn wl_semantic_field_edit_meta(out: u32, out_cap: u32) i32;
+extern "weft" fn wl_semantic_field_edit_revision(out: u32, out_cap: u32) i32;
+extern "weft" fn wl_semantic_field_edit_replacement(out: u32, out_cap: u32) i32;
 extern "weft" fn wl_shell_insert(ptr: u32, len: u32) void;
 extern "weft" fn wl_repl_start(cmd: u32, cmd_len: u32, name: u32, name_len: u32) i32;
 extern "weft" fn wl_repl_send(handle: u32, ptr: u32, len: u32) void;
@@ -1084,6 +1090,109 @@ pub fn semanticViewReplace(ref: semantic_kernel.view.Ref, revision: u32, root: s
 pub fn semanticViewClose(ref: semantic_kernel.view.Ref) bool {
     const wire = ref.toWire();
     return wl_semantic_view_close(wire.authority, wire.slot, wire.generation) != 0;
+}
+
+pub const SemanticFieldSnapshot = struct {
+    revision: []const u8,
+    bytes: []const u8,
+    selection: SemanticFieldSelection,
+    read_only: bool = false,
+    single_line: bool = false,
+};
+
+pub const SemanticFieldSelection = struct {
+    anchor: u32,
+    caret: u32,
+};
+
+fn semanticFieldFlags(snapshot: SemanticFieldSnapshot) u32 {
+    return @as(u32, @intFromBool(snapshot.read_only)) |
+        (@as(u32, @intFromBool(snapshot.single_line)) << 1);
+}
+
+pub fn semanticFieldRegister(token: u32, snapshot: SemanticFieldSnapshot) SemanticPublishError!semantic_kernel.scene.FieldRef {
+    var out: [12]u8 = undefined;
+    if (wl_semantic_field_register(
+        token,
+        p(snapshot.revision.ptr),
+        @intCast(snapshot.revision.len),
+        p(snapshot.bytes.ptr),
+        @intCast(snapshot.bytes.len),
+        snapshot.selection.anchor,
+        snapshot.selection.caret,
+        semanticFieldFlags(snapshot),
+        p(&out),
+        out.len,
+    ) != 1) return error.Rejected;
+    return readSemanticHandle(semantic_kernel.scene.FieldRef, &out);
+}
+
+pub fn semanticFieldUpdate(ref: semantic_kernel.scene.FieldRef, snapshot: SemanticFieldSnapshot) SemanticPublishError!void {
+    const wire = ref.toWire();
+    if (wl_semantic_field_update(
+        wire.authority,
+        wire.slot,
+        wire.generation,
+        p(snapshot.revision.ptr),
+        @intCast(snapshot.revision.len),
+        p(snapshot.bytes.ptr),
+        @intCast(snapshot.bytes.len),
+        snapshot.selection.anchor,
+        snapshot.selection.caret,
+        semanticFieldFlags(snapshot),
+    ) != 1) return error.Rejected;
+}
+
+pub fn semanticFieldClose(ref: semantic_kernel.scene.FieldRef) bool {
+    const wire = ref.toWire();
+    return wl_semantic_field_close(wire.authority, wire.slot, wire.generation) != 0;
+}
+
+pub const SemanticFieldEdit = struct {
+    storage_allocator: std.mem.Allocator,
+    expected_revision: []u8,
+    start: u32,
+    end: u32,
+    replacement: []u8,
+    selection_after: ?SemanticFieldSelection,
+
+    pub fn deinit(self: *SemanticFieldEdit) void {
+        self.storage_allocator.free(self.replacement);
+        self.storage_allocator.free(self.expected_revision);
+        self.* = undefined;
+    }
+};
+
+/// Read the request available only during `on_semantic_field_edit(token)`.
+/// The returned bytes are owned by `gpa`; call `deinit` after updating or
+/// rejecting the field in provider code.
+pub fn semanticFieldCurrentEdit(gpa: std.mem.Allocator) (std.mem.Allocator.Error || error{Rejected})!SemanticFieldEdit {
+    var meta: [28]u8 = undefined;
+    if (wl_semantic_field_edit_meta(p(&meta), meta.len) != meta.len) return error.Rejected;
+    const start = std.mem.readInt(u32, meta[0..4], .little);
+    const end = std.mem.readInt(u32, meta[4..8], .little);
+    const revision_len = std.mem.readInt(u32, meta[8..12], .little);
+    const replacement_len = std.mem.readInt(u32, meta[12..16], .little);
+    const has_selection = std.mem.readInt(u32, meta[16..20], .little);
+    if (has_selection > 1) return error.Rejected;
+    const revision = try gpa.alloc(u8, revision_len);
+    errdefer gpa.free(revision);
+    const replacement = try gpa.alloc(u8, replacement_len);
+    errdefer gpa.free(replacement);
+    if (wl_semantic_field_edit_revision(p(revision.ptr), revision_len) != revision_len or
+        wl_semantic_field_edit_replacement(p(replacement.ptr), replacement_len) != replacement_len)
+        return error.Rejected;
+    return .{
+        .storage_allocator = gpa,
+        .expected_revision = revision,
+        .start = start,
+        .end = end,
+        .replacement = replacement,
+        .selection_after = if (has_selection == 1) .{
+            .anchor = std.mem.readInt(u32, meta[20..24], .little),
+            .caret = std.mem.readInt(u32, meta[24..28], .little),
+        } else null,
+    };
 }
 
 // ── Effects (perm-gated) ─────────────────────────────────────────────

@@ -66,6 +66,9 @@ pub const drainReplSessions = sessions.drainReplSessions;
 const menu = @import("wasm_host/menu.zig");
 pub const notifyMenu = menu.notifyMenu;
 
+const semantic_field = @import("wasm_host/semantic_field.zig");
+pub const initSemanticFieldBridge = semantic_field.initBridge;
+
 /// Bind the full `weft.*` host-import membrane (the guest-side surface in
 /// src/guest/weft.zig) by walking `membrane/contract.zig`'s table — one
 /// `defineFn` per entry, tagged with the plugin so the callback recovers its

@@ -244,6 +244,7 @@ fn construct(engine: *wasm.Engine, ctx: *command.Context, name: []const u8, opts
     };
     try wasm_host.defineImports(&p.linker, p);
     p.instance = try p.linker.instantiate(&p.module);
+    p.semantic_fields = wasm_host.initSemanticFieldBridge(p);
     return p;
 }
 

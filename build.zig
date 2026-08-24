@@ -28,6 +28,7 @@ const ArchitectureModules = struct {
     fs_runtime: *std.Build.Module,
     view_runtime: *std.Build.Module,
     target_runtime: *std.Build.Module,
+    plugin_semantic: *std.Build.Module,
 };
 
 fn createArchitectureModules(
@@ -84,6 +85,13 @@ fn createArchitectureModules(
         .optimize = optimize,
     });
     target_runtime.addImport("weft_kernel", kernel);
+    const plugin_semantic = b.createModule(.{
+        .root_source_file = b.path("src/plugin_semantic/root.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    plugin_semantic.addImport("weft_kernel", kernel);
+    plugin_semantic.addImport("weft_view_runtime", view_runtime);
     return .{
         .wire = wire,
         .schema = schema,
@@ -93,6 +101,7 @@ fn createArchitectureModules(
         .fs_runtime = fs_runtime,
         .view_runtime = view_runtime,
         .target_runtime = target_runtime,
+        .plugin_semantic = plugin_semantic,
     };
 }
 
@@ -105,6 +114,7 @@ fn addArchitectureImports(mod: *std.Build.Module, architecture: ArchitectureModu
     mod.addImport("weft_fs_runtime", architecture.fs_runtime);
     mod.addImport("weft_view_runtime", architecture.view_runtime);
     mod.addImport("weft_target_runtime", architecture.target_runtime);
+    mod.addImport("weft_plugin_semantic", architecture.plugin_semantic);
 }
 
 const guests = [_]Guest{
@@ -355,7 +365,7 @@ pub fn build(b: *std.Build) void {
     // Portable contract gate: deliberately separate from the application
     // suite so these roots cannot acquire app/platform dependencies unnoticed.
     const contract_step = b.step("test-contract", "Run portable schema/kernel/filesystem contract tests");
-    inline for (.{ architecture.wire, architecture.schema, architecture.kernel, architecture.scene_codec, architecture.fs, architecture.fs_runtime, architecture.view_runtime, architecture.target_runtime }) |contract_mod| {
+    inline for (.{ architecture.wire, architecture.schema, architecture.kernel, architecture.scene_codec, architecture.fs, architecture.fs_runtime, architecture.view_runtime, architecture.target_runtime, architecture.plugin_semantic }) |contract_mod| {
         const contract_tests = b.addTest(.{ .root_module = contract_mod });
         const run_contract_tests = b.addRunArtifact(contract_tests);
         contract_step.dependOn(&run_contract_tests.step);

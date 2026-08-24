@@ -22,6 +22,7 @@ const net_session = @import("../net_session.zig");
 const proc_stream = @import("../proc_stream.zig");
 const Pool = @import("../task.zig").Pool;
 const grants_mod = @import("../grants.zig");
+const plugin_semantic = @import("weft_plugin_semantic");
 
 // The host-import table operates on `WasmPlugin` (principal() routes edits
 // through its peer resolver); the two @import each other (Zig allows it).
@@ -234,6 +235,12 @@ cur_choice: []const u8 = &.{},
 /// drawn every frame by the view while active. One per plugin.
 surface: surface_mod.Surface = .{},
 
+// ── Sandboxed semantic field providers ──
+/// Stable heap proxies + host-owned snapshots for fields registered by this
+/// guest. The system registry owns handle generations; this bridge owns only
+/// callback/cache memory and is torn down immediately after owner revocation.
+semantic_fields: plugin_semantic.field.Bridge = .empty,
+
 // ── Completion provider (host→guest data-gather) ──
 /// The caps provider id this plugin registered (owned), torn down on
 /// unload. Null until it calls `provideCompletion`.
@@ -327,6 +334,7 @@ pub fn deinit(self: *WasmPlugin) void {
     // whole owner namespace while the guest instance is still alive; every
     // retained handle becomes stale before either side can dangle.
     if (self.ctx.semantic) |services| _ = services.releaseOwner(gpa, self.name);
+    self.semantic_fields.deinit();
     // Completion provider dies with the plugin (unregister before freeing
     // its id — the caps registry holds the id by reference).
     if (self.provider_id) |id| {

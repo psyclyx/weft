@@ -42,7 +42,7 @@ pub const Edit = struct {
     selection_after: ?Selection = null,
 };
 
-pub const Error = error{ InvalidOwner, InvalidRange, Stale, ReadOnly, Unsupported } || std.mem.Allocator.Error;
+pub const Error = error{ InvalidOwner, InvalidRange, InvalidRevision, Stale, ReadOnly, Unsupported, Failed } || std.mem.Allocator.Error;
 
 pub const Provider = struct {
     context: *anyopaque,

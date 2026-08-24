@@ -4,9 +4,9 @@
 //! an open action name. They never learn a tool kind or call dired directly.
 
 const wasm = @import("../wasm.zig");
-const std = @import("std");
 const kernel = @import("weft_kernel");
 const scene_codec = @import("weft_scene_codec");
+const wire_util = @import("semantic_wire.zig");
 
 const shared = @import("plugin.zig");
 const WasmPlugin = shared.WasmPlugin;
@@ -16,18 +16,6 @@ const requireDispatch = shared.requireDispatch;
 /// Keep this admission limit local to the transport; the kernel deliberately
 /// leaves the open action namespace extensible.
 const max_action_bytes = 4096;
-
-const handle_bytes = @sizeOf(kernel.handle.Wire);
-
-fn readHandle(comptime Ref: type, args: []const i32) ?Ref {
-    const wire: kernel.handle.Wire = .{
-        .authority = @bitCast(args[0]),
-        .slot = @bitCast(args[1]),
-        .generation = @bitCast(args[2]),
-    };
-    if (wire.generation == 0) return null;
-    return Ref.fromWire(wire);
-}
 
 fn optionalTarget(args: []const i32) error{InvalidHandle}!?kernel.target.Ref {
     const authority: u32 = @bitCast(args[0]);
@@ -40,21 +28,8 @@ fn optionalTarget(args: []const i32) error{InvalidHandle}!?kernel.target.Ref {
     return kernel.target.Ref.fromWire(.{ .authority = authority, .slot = slot, .generation = generation });
 }
 
-fn writeHandle(caller: *wasm.Caller, out_ptr: u32, out_cap: u32, ref: anytype) bool {
-    if (out_cap < handle_bytes) return false;
-    const wire = ref.toWire();
-    var bytes: [handle_bytes]u8 = undefined;
-    std.mem.writeInt(u32, bytes[0..4], wire.authority, .little);
-    std.mem.writeInt(u32, bytes[4..8], wire.slot, .little);
-    std.mem.writeInt(u32, bytes[8..12], wire.generation, .little);
-    return (caller.writeMemory(out_ptr, out_cap, &bytes) catch return false) == handle_bytes;
-}
-
 fn readPayload(plugin: *WasmPlugin, caller: *wasm.Caller, ptr: i32, len: i32) ?[]u8 {
-    const payload_len: u32 = @bitCast(len);
-    if (payload_len == 0 or payload_len > scene_codec.Limits.max_payload_bytes) return null;
-    const payload_ptr: u32 = @bitCast(ptr);
-    return caller.readMemory(plugin.gpa, payload_ptr, payload_len) catch null;
+    return wire_util.readBounded(plugin.gpa, caller, ptr, len, 1, scene_codec.Limits.max_payload_bytes);
 }
 
 /// Publish a provider-neutral target definition encoded by the canonical
@@ -69,7 +44,7 @@ pub fn hSemanticTargetPublish(data: ?*anyopaque, caller: *wasm.Caller, args: []c
     var decoded = scene_codec.decodeTarget(plugin.gpa, payload) catch return;
     defer decoded.deinit();
     const ref = services.publishTarget(plugin.gpa, plugin.name, decoded.value) catch return;
-    if (!writeHandle(caller, @bitCast(args[2]), @bitCast(args[3]), ref)) {
+    if (!wire_util.writeHandle(caller, @bitCast(args[2]), @bitCast(args[3]), ref)) {
         _ = services.closeTarget(plugin.gpa, plugin.name, ref);
         return;
     }
@@ -80,7 +55,7 @@ pub fn hSemanticTargetReplace(data: ?*anyopaque, caller: *wasm.Caller, args: []c
     const plugin: *WasmPlugin = @ptrCast(@alignCast(data.?));
     results[0] = 0;
     const services = plugin.activeCtx().semantic orelse return;
-    const ref = readHandle(kernel.target.Ref, args[0..3]) orelse return;
+    const ref = wire_util.readHandle(kernel.target.Ref, args[0..3]) orelse return;
     const payload = readPayload(plugin, caller, args[3], args[4]) orelse return;
     defer plugin.gpa.free(payload);
     var decoded = scene_codec.decodeTarget(plugin.gpa, payload) catch return;
@@ -95,7 +70,7 @@ pub fn hSemanticTargetClose(data: ?*anyopaque, _: *wasm.Caller, args: []const i3
         results[0] = 0;
         return;
     };
-    const ref = readHandle(kernel.target.Ref, args[0..3]) orelse {
+    const ref = wire_util.readHandle(kernel.target.Ref, args[0..3]) orelse {
         results[0] = 0;
         return;
     };
@@ -115,7 +90,7 @@ pub fn hSemanticViewPublish(data: ?*anyopaque, caller: *wasm.Caller, args: []con
     defer decoded.deinit();
     const revision: u32 = @bitCast(args[5]);
     const ref = services.publishView(plugin.gpa, plugin.name, target, revision, decoded.root.*) catch return;
-    if (!writeHandle(caller, @bitCast(args[6]), @bitCast(args[7]), ref)) {
+    if (!wire_util.writeHandle(caller, @bitCast(args[6]), @bitCast(args[7]), ref)) {
         _ = services.closeView(plugin.gpa, plugin.name, ref);
         return;
     }
@@ -126,7 +101,7 @@ pub fn hSemanticViewReplace(data: ?*anyopaque, caller: *wasm.Caller, args: []con
     const plugin: *WasmPlugin = @ptrCast(@alignCast(data.?));
     results[0] = 0;
     const services = plugin.activeCtx().semantic orelse return;
-    const ref = readHandle(kernel.view.Ref, args[0..3]) orelse return;
+    const ref = wire_util.readHandle(kernel.view.Ref, args[0..3]) orelse return;
     const revision: u32 = @bitCast(args[3]);
     const payload = readPayload(plugin, caller, args[4], args[5]) orelse return;
     defer plugin.gpa.free(payload);
@@ -142,7 +117,7 @@ pub fn hSemanticViewClose(data: ?*anyopaque, _: *wasm.Caller, args: []const i32,
         results[0] = 0;
         return;
     };
-    const ref = readHandle(kernel.view.Ref, args[0..3]) orelse {
+    const ref = wire_util.readHandle(kernel.view.Ref, args[0..3]) orelse {
         results[0] = 0;
         return;
     };

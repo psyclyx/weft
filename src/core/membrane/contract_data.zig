@@ -290,6 +290,12 @@ pub const imports = [_]Entry{
     .{ .name = "wl_semantic_view_publish", .params = &.{ .u32, .u32, .u32, .u32, .u32, .u32, .u32, .u32 }, .results = &.{.i32}, .group = .semantic, .doc = "admit a canonical semantic scene and write its typed view handle" },
     .{ .name = "wl_semantic_view_replace", .params = &.{ .u32, .u32, .u32, .u32, .u32, .u32 }, .results = &.{.i32}, .group = .semantic, .doc = "replace an owned retained scene at an explicit revision" },
     .{ .name = "wl_semantic_view_close", .params = &.{ .u32, .u32, .u32 }, .results = &.{.u32}, .group = .semantic, .doc = "close an owned view and invalidate its generation" },
+    .{ .name = "wl_semantic_field_register", .params = &.{ .u32, .u32, .u32, .u32, .u32, .u32, .u32, .u32, .u32, .u32 }, .results = &.{.i32}, .group = .semantic, .doc = "register a tokenized host-retained editable field snapshot and write its typed handle" },
+    .{ .name = "wl_semantic_field_update", .params = &.{ .u32, .u32, .u32, .u32, .u32, .u32, .u32, .u32, .u32, .u32 }, .results = &.{.i32}, .group = .semantic, .doc = "replace an owned field snapshot at a distinct provider revision" },
+    .{ .name = "wl_semantic_field_close", .params = &.{ .u32, .u32, .u32 }, .results = &.{.u32}, .group = .semantic, .doc = "close an owned field endpoint and invalidate its generation" },
+    .{ .name = "wl_semantic_field_edit_meta", .params = &.{ .u32, .u32 }, .results = &.{.i32}, .group = .semantic, .doc = "host-to-guest callback read: fixed metadata for the current field edit" },
+    .{ .name = "wl_semantic_field_edit_revision", .params = &.{ .u32, .u32 }, .results = &.{.i32}, .group = .semantic, .doc = "host-to-guest callback read: exact expected field revision bytes" },
+    .{ .name = "wl_semantic_field_edit_replacement", .params = &.{ .u32, .u32 }, .results = &.{.i32}, .group = .semantic, .doc = "host-to-guest callback read: exact replacement bytes for the current field edit" },
 
     // ── proc.zig — perm-gated off-thread process effects ───────────────
     .{ .name = "wl_shell_insert", .params = &.{ .u32, .u32 }, .results = &.{}, .group = .proc, .perm = .proc_timer, .doc = "run `<cmd>` off-thread and insert its stdout at the cursor when done" },
@@ -345,7 +351,7 @@ pub const imports = [_]Entry{
 /// half-finished edit — fails the build with a pointed message instead of
 /// silently drifting the two ~124-entry tables apart again (the exact class
 /// this table exists to kill).
-const expected_import_count = 136;
+const expected_import_count = 142;
 
 /// A host→guest EXPORT entrypoint (design doc/north-star-plan.md §2.5, task
 /// W0a-D extension 2): every `instance.callVoid("name", args)` the host
@@ -402,9 +408,10 @@ pub const exports = [_]Export{
     // function pointers"); only the PAYLOAD crossing it carries is
     // schema-directed.
     .{ .name = "on_slot_fire", .params = &.{.i32}, .results = &.{}, .required = false, .doc = "answer a schema-carrying slot session (handle); push via wl_payload_push during this call or later off a poll" },
+    .{ .name = "on_semantic_field_edit", .params = &.{.i32}, .results = &.{}, .required = false, .doc = "answer one tokenized semantic field edit by synchronously pushing a new snapshot" },
 };
 
-const expected_export_count = 11;
+const expected_export_count = 12;
 
 comptime {
     @setEvalBranchQuota(50_000); // the O(n²) duplicate-name scans below, n≈124

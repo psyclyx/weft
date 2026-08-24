@@ -48,6 +48,7 @@ const pick = @import("../wasm_host/pick.zig");
 const proc = @import("../wasm_host/proc.zig");
 const register = @import("../wasm_host/register.zig");
 const semantic = @import("../wasm_host/semantic.zig");
+const semantic_field = @import("../wasm_host/semantic_field.zig");
 const sessions = @import("../wasm_host/sessions.zig");
 const slot = @import("../wasm_host/slot.zig");
 const surface = @import("../wasm_host/surface.zig");
@@ -217,6 +218,12 @@ const handlers = [_]struct { name: []const u8, handler: HostFn }{
     .{ .name = "wl_semantic_view_publish", .handler = semantic.hSemanticViewPublish },
     .{ .name = "wl_semantic_view_replace", .handler = semantic.hSemanticViewReplace },
     .{ .name = "wl_semantic_view_close", .handler = semantic.hSemanticViewClose },
+    .{ .name = "wl_semantic_field_register", .handler = semantic_field.hFieldRegister },
+    .{ .name = "wl_semantic_field_update", .handler = semantic_field.hFieldUpdate },
+    .{ .name = "wl_semantic_field_close", .handler = semantic_field.hFieldClose },
+    .{ .name = "wl_semantic_field_edit_meta", .handler = semantic_field.hFieldEditMeta },
+    .{ .name = "wl_semantic_field_edit_revision", .handler = semantic_field.hFieldEditRevision },
+    .{ .name = "wl_semantic_field_edit_replacement", .handler = semantic_field.hFieldEditReplacement },
 
     // ── proc.zig — perm-gated off-thread process effects ───────────────
     .{ .name = "wl_shell_insert", .handler = proc.hShellInsert },

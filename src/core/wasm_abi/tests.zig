@@ -50,11 +50,24 @@ test "wasm plugin: canonical targets and scenes cross the semantic membrane" {
     try t.expect(view.descriptor.target.?.eql(target_ref));
     try t.expectEqual(@as(u64, 7), view.descriptor.revision);
     try t.expectEqualStrings("fixture", view.scene.role);
-    try t.expectEqualStrings("hello", view.scene.content.container.children[0].content.label);
+    const field_ref = view.scene.content.container.children[0].content.field.ref;
+    const provider = semantic.fields.get(field_ref).?;
+    try provider.edit("1", .{
+        .start = 0,
+        .end = 4,
+        .replacement = "renamed",
+        .selection_after = .{ .anchor = 7, .caret = 7 },
+    });
+    var snapshot = try provider.snapshot(gpa);
+    defer snapshot.deinit();
+    try t.expectEqualStrings("2", snapshot.value.revision);
+    try t.expectEqualStrings("renamed", snapshot.value.bytes);
+    try t.expectEqual(@as(u64, 7), snapshot.value.selection.caret);
 
     plugin.deinit();
     try t.expect(semantic.targets.get(target_ref) == null);
     try t.expect(semantic.views.get(view_ref) == null);
+    try t.expect(semantic.fields.get(field_ref) == null);
 }
 
 test "wasm plugin: a .wasm guest edits the buffer through the host ABI, as its peer" {
