@@ -17,6 +17,7 @@ pub const Provider = struct {
 
     pub const VTable = struct {
         capabilities: *const fn (*anyopaque, contract.Root) contract.Error!contract.Capabilities,
+        same_root: *const fn (*anyopaque, contract.Root, contract.Root) contract.Error!bool,
         observe: *const fn (*anyopaque, std.mem.Allocator, contract.Root, contract.NodeRef) contract.Error!contract.OwnedObservation,
         list: *const fn (*anyopaque, std.mem.Allocator, contract.Root, contract.NodeRef) contract.Error!contract.OwnedListing,
         read: *const fn (*anyopaque, std.mem.Allocator, contract.ReadRequest) contract.Error!contract.OwnedReadResult,
@@ -54,6 +55,10 @@ pub const Provider = struct {
                 return self(raw).observe(gpa, root, node);
             }
 
+            fn sameRoot(raw: *anyopaque, left: contract.Root, right: contract.Root) contract.Error!bool {
+                return self(raw).sameRoot(left, right);
+            }
+
             fn list(raw: *anyopaque, gpa: std.mem.Allocator, root: contract.Root, directory: contract.NodeRef) contract.Error!contract.OwnedListing {
                 return self(raw).list(gpa, root, directory);
             }
@@ -88,6 +93,7 @@ pub const Provider = struct {
 
             const vtable: VTable = .{
                 .capabilities = @This().capabilities,
+                .same_root = @This().sameRoot,
                 .observe = @This().observe,
                 .list = @This().list,
                 .read = @This().read,
@@ -105,6 +111,15 @@ pub const Provider = struct {
 
     pub fn capabilities(self: Provider, root: contract.Root) contract.Error!contract.Capabilities {
         return self.vtable.capabilities(self.context, root);
+    }
+
+    /// Compare the provider-owned identities behind two roots. Handle equality
+    /// is not sufficient: a path may be reacquired into a fresh slot after an
+    /// external rename, while the underlying directory object remains the
+    /// same. This operation is deliberately provider-owned so Darwin and
+    /// remote implementations can use their own stable identity mechanism.
+    pub fn sameRoot(self: Provider, left: contract.Root, right: contract.Root) contract.Error!bool {
+        return self.vtable.same_root(self.context, left, right);
     }
 
     pub fn observe(self: Provider, gpa: std.mem.Allocator, root: contract.Root, node: contract.NodeRef) contract.Error!contract.OwnedObservation {

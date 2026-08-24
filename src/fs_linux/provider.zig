@@ -188,6 +188,15 @@ pub const LinuxFs = struct {
         return self.pinRootFd(fd, snapshot.identity);
     }
 
+    /// Compare the stable directory identities behind two pinned roots. The
+    /// opaque root handles themselves are allocation slots and therefore do
+    /// not answer whether two path acquisitions reached the same directory.
+    pub fn sameRoot(self: *LinuxFs, left: contract.Root, right: contract.Root) contract.Error!bool {
+        const left_state = try self.rootState(left);
+        const right_state = try self.rootState(right);
+        return left_state.identity.locationEql(right_state.identity);
+    }
+
     /// Pin the actual parent of an already-pinned directory without resolving
     /// its original pathname again. `null` means the directory is its own
     /// parent (the filesystem root). This is deliberately platform mechanism:

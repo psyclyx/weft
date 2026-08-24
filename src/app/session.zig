@@ -209,14 +209,29 @@ pub const Session = struct {
         const resolved_path = try std.fs.path.resolve(ctx.gpa, &.{path});
         defer ctx.gpa.free(resolved_path);
 
+        // Resolve the path at the authority boundary before deduplication.
+        // Reusing an old publication before this check would mistake a
+        // replacement at a renamed path for the originally pinned object.
+        const root = self.filesystem_provider.acquireRoot(resolved_path) catch |err| return switch (err) {
+            error.NotFound, error.NotDirectory, error.Unsupported => false,
+            else => err,
+        };
+        var root_owned = true;
+        errdefer if (root_owned) self.filesystem_provider.releaseRoot(root);
+
         var index: usize = 0;
         while (index < self.directory_targets.items.len) : (index += 1) {
             const existing = &self.directory_targets.items[index];
-            // A lazily derived parent owns only a display label. After an
-            // external rename that lexical path could name a replacement, so
-            // it must never participate in later path deduplication.
-            if (!existing.opened_by_path) continue;
-            if (!std.mem.eql(u8, existing.path, resolved_path)) continue;
+            // Compare the provider-owned directory identities, not lexical
+            // paths or opaque root slots. A path may have been renamed and
+            // replaced between opens; only the same pinned object is eligible
+            // for deduplication. This also naturally deduplicates a parent
+            // first reached through `-` and later opened by path.
+            const same_root = system.filesystems.sameRoot(existing.root, root) catch |err| switch (err) {
+                error.Stale => false,
+                else => return err,
+            };
+            if (!same_root) continue;
             const descriptor = system.semantic.targets.get(existing.publication.ref);
             if (descriptor == null or descriptor.?.revision != existing.publication.revision) {
                 self.closeDirectoryTarget(index);
@@ -226,16 +241,12 @@ pub const Session = struct {
                 self.closeDirectoryTarget(index);
                 break;
             };
+            self.filesystem_provider.releaseRoot(root);
+            root_owned = false;
             try focusDirectoryTarget(&system.semantic, ctx.head, ctx.gpa, existing.publication.ref);
             return true;
         }
 
-        const root = self.filesystem_provider.acquireRoot(path) catch |err| return switch (err) {
-            error.NotFound, error.NotDirectory, error.Unsupported => false,
-            else => err,
-        };
-        var root_owned = true;
-        errdefer if (root_owned) self.filesystem_provider.releaseRoot(root);
         try self.directory_targets.ensureUnusedCapacity(ctx.gpa, 1);
         const owned_path = try ctx.gpa.dupe(u8, resolved_path);
         var path_owned = true;
@@ -288,6 +299,23 @@ pub const Session = struct {
             return null;
         };
         errdefer self.filesystem_provider.releaseRoot(parent_root);
+
+        // A parent may already be retained because another directory was
+        // opened through the same relation, or because the user opened its
+        // path directly. Reuse that provider-owned identity rather than
+        // creating a second target publication for the same object.
+        for (self.directory_targets.items) |candidate| {
+            const same_root = self.filesystem_system.filesystems.sameRoot(candidate.root, parent_root) catch |err| switch (err) {
+                error.Stale => false,
+                else => return err,
+            };
+            if (!same_root) continue;
+            self.filesystem_provider.releaseRoot(parent_root);
+            self.directory_targets.items[index].parent = candidate.publication.ref;
+            self.directory_targets.items[index].parent_resolved = true;
+            return candidate.publication.located();
+        }
+
         try self.directory_targets.ensureUnusedCapacity(self.gpa, 1);
         const parent_path = try std.fs.path.resolve(self.gpa, &.{ source.path, ".." });
         errdefer self.gpa.free(parent_path);
@@ -307,7 +335,6 @@ pub const Session = struct {
             .path = parent_path,
             .root = parent_root,
             .publication = publication,
-            .opened_by_path = false,
         });
         self.directory_targets.items[index].parent = publication.ref;
         self.directory_targets.items[index].parent_resolved = true;
@@ -408,7 +435,6 @@ const DirectoryTarget = struct {
     path: []u8,
     root: fs.contract.Root,
     publication: fs_runtime.publication.Registration,
-    opened_by_path: bool = true,
     parent_resolved: bool = false,
     parent: ?semantic.target.Ref = null,
 };
@@ -535,15 +561,33 @@ test "session: local directories become deduplicated semantic targets while file
         parent.value.resolved.target,
     );
 
+    // The parent first arrived as a pinned relation target. Opening its
+    // lexical path later reacquires a fresh root handle, but provider identity
+    // comparison must reuse the existing publication and session.
+    try t.expect(try sess.openLocalDirectory(&sess.cmd_ctx, tmp_path));
+    try t.expectEqual(@as(usize, 2), sess.directory_targets.items.len);
+    try t.expectEqual(@as(usize, 2), sess.dired_plugin.sessions.items.len);
+
     // Reopening the same publication reuses the plugin-owned retained view;
     // it does not create shared mutable draft state or a text-buffer twin.
     try t.expect(try sess.openLocalDirectory(&sess.cmd_ctx, directory_path));
     try t.expectEqual(first_target, sess.directory_targets.items[0].publication.ref);
     try t.expectEqual(first_view, sess.head.semantic_focus.view.?);
     try t.expectEqual(@as(usize, 2), sess.directory_targets.items.len);
-    try t.expectEqual(@as(usize, 1), sess.dired_plugin.sessions.items.len);
+    try t.expectEqual(@as(usize, 2), sess.dired_plugin.sessions.items.len);
     try t.expect(!try sess.openLocalDirectory(&sess.cmd_ctx, file_path));
     try t.expectEqual(@as(usize, 2), sess.directory_targets.items.len);
+
+    // A directory can be renamed and replaced at its old path while its
+    // original fd remains pinned. Opening that path must resolve the new
+    // object, not reuse the old target merely because the display path is the
+    // same. The replacement's parent is the already-retained root target.
+    try tmp.dir.rename("odd\n\xff", tmp.dir, "moved\n\xff", t.io);
+    try tmp.dir.createDirPath(t.io, "odd\n\xff");
+    try t.expect(try sess.openLocalDirectory(&sess.cmd_ctx, directory_path));
+    try t.expectEqual(@as(usize, 3), sess.directory_targets.items.len);
+    try t.expectEqual(@as(usize, 3), sess.dired_plugin.sessions.items.len);
+    try t.expect(!sess.directory_targets.items[2].publication.ref.eql(first_target));
 
     // `-` and any other input model invoke the same advertised action. The
     // action follows the publisher-owned edge, admits the parent through the
@@ -555,7 +599,7 @@ test "session: local directories become deduplicated semantic targets while file
         semantic.action.standard.open_container,
     )).?;
     try t.expect(effect == .relation_opened);
-    try t.expectEqual(@as(usize, 2), sess.dired_plugin.sessions.items.len);
+    try t.expectEqual(@as(usize, 3), sess.dired_plugin.sessions.items.len);
     try t.expectEqual(sess.dired_plugin.sessions.items[1].view_ref, sess.head.semantic_focus.view.?);
 }
 

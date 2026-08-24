@@ -106,6 +106,12 @@ pub const Fake = struct {
         };
     }
 
+    pub fn sameRoot(self: *Fake, left: contract.Root, right: contract.Root) contract.Error!bool {
+        try validateRoot(left);
+        try validateRoot(right);
+        return left.eql(right);
+    }
+
     pub fn observe(self: *Fake, gpa: std.mem.Allocator, root_ref: contract.Root, node: contract.NodeRef) contract.Error!contract.OwnedObservation {
         try validateRoot(root_ref);
         var owned = contract.OwnedObservation.init(gpa);

@@ -126,7 +126,7 @@ pub const Router = struct {
             return error.InvalidHandle;
     }
 
-    fn providerFor(self: *Router, authority: semantic.handle.Authority) Error!fs.service.Provider {
+    fn providerFor(self: *const Router, authority: semantic.handle.Authority) Error!fs.service.Provider {
         if (self.providers.get(authority)) |provider| return provider;
         if (self.retired.contains(authority)) return error.AuthorityRetired;
         return error.UnknownAuthority;
@@ -167,6 +167,14 @@ pub const Router = struct {
     pub fn capabilities(self: *Router, root: contract.Root) Error!contract.Capabilities {
         const provider = try self.checkRoot(root);
         return provider.capabilities(root);
+    }
+
+    /// Compare two roots through their owning provider. The router only
+    /// rejects cross-authority comparisons; identity remains provider policy.
+    pub fn sameRoot(self: *const Router, left: contract.Root, right: contract.Root) Error!bool {
+        if (left.authority != right.authority) return false;
+        const provider = try self.providerFor(left.authority);
+        return provider.sameRoot(left, right);
     }
 
     pub fn observe(self: *Router, allocator: std.mem.Allocator, root: contract.Root, node: contract.NodeRef) Error!contract.OwnedObservation {
@@ -314,6 +322,11 @@ const TestProvider = struct {
         if (root.authority != self.authority) return error.Confined;
         self.capabilities_calls += 1;
         return .{ .watch = .invalidation };
+    }
+
+    pub fn sameRoot(self: *TestProvider, left: contract.Root, right: contract.Root) contract.Error!bool {
+        if (left.authority != self.authority or right.authority != self.authority) return error.Confined;
+        return left.eql(right);
     }
 
     pub fn observe(self: *TestProvider, gpa: std.mem.Allocator, root: contract.Root, node: contract.NodeRef) contract.Error!contract.OwnedObservation {

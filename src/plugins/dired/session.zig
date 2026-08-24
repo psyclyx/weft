@@ -1428,6 +1428,10 @@ const FakeFilesystem = struct {
         };
     }
 
+    pub fn sameRoot(_: *FakeFilesystem, left: contract.Root, right: contract.Root) contract.Error!bool {
+        return left.eql(right);
+    }
+
     pub fn observe(_: *FakeFilesystem, gpa: std.mem.Allocator, _: contract.Root, node: contract.NodeRef) contract.Error!contract.OwnedObservation {
         var owned = contract.OwnedObservation.init(gpa);
         owned.value = .{ .node = node, .revision = .{ .token = &.{} }, .kind = .directory };

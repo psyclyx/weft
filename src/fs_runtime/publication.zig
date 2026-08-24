@@ -95,6 +95,11 @@ const TestProvider = struct {
         return .{};
     }
 
+    pub fn sameRoot(self: *TestProvider, left: fs.contract.Root, right: fs.contract.Root) fs.contract.Error!bool {
+        if (left.authority != self.authority or right.authority != self.authority) return error.Confined;
+        return left.eql(right);
+    }
+
     pub fn observe(self: *TestProvider, gpa: std.mem.Allocator, root: fs.contract.Root, node: fs.contract.NodeRef) fs.contract.Error!fs.contract.OwnedObservation {
         if (root.authority != self.authority) return error.Confined;
         self.observe_calls += 1;

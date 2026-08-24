@@ -24,6 +24,10 @@ pub const Provider = struct {
         return error.Unsupported;
     }
 
+    pub fn sameRoot(_: *Provider, _: contract.Root, _: contract.Root) contract.Error!bool {
+        return error.Unsupported;
+    }
+
     pub fn acquireParent(_: *Provider, _: contract.Root) contract.Error!?contract.Root {
         return error.Unsupported;
     }

@@ -276,6 +276,9 @@ const TestProvider = struct {
     pub fn capabilities(_: *@This(), _: contract.Root) contract.Error!contract.Capabilities {
         return .{ .durable_lease = .{ .regular_file_max_bytes = 1024, .symlink_target_max_bytes = 1024 } };
     }
+    pub fn sameRoot(_: *@This(), left: contract.Root, right: contract.Root) contract.Error!bool {
+        return left.eql(right);
+    }
     pub fn observe(_: *@This(), gpa: std.mem.Allocator, _: contract.Root, node: contract.NodeRef) contract.Error!contract.OwnedObservation {
         var value = contract.OwnedObservation.init(gpa);
         value.value = .{ .node = node, .revision = .{ .token = "r" }, .kind = .regular };
