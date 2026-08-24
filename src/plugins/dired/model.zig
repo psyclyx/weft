@@ -101,6 +101,14 @@ pub const OwnedPlan = struct {
     }
 };
 
+/// Policy chosen at the filesystem-provider boundary for materializing an
+/// otherwise provider-neutral draft. Keeping it as a value leaves room for
+/// independent conflict or metadata policies without teaching the model about
+/// a platform or capability registry.
+pub const PlanPolicy = struct {
+    remove: contract.RemovePolicy = .quarantine,
+};
+
 const entry_media = "application/x-weft-dired-entry";
 const entry_schema = "weft.dired.entry.v3";
 const entry_schema_v2 = "weft.dired.entry.v2";
@@ -342,17 +350,17 @@ pub const Model = struct {
     /// Build the one typed effect plan consumed by preview/apply. It includes
     /// all visible dirty rows, not hidden clipboard state.
     pub fn buildPlan(self: *const Model) !OwnedPlan {
-        return self.buildPlanWith(.quarantine);
+        return self.buildPlanWith(.{});
     }
 
     /// Build the same immutable plan with the provider-selected removal
     /// policy. The model's default remains quarantine so pure clients retain
     /// the conservative behavior; a provider that cannot quarantine can
     /// explicitly select permanent removal at its apply boundary.
-    pub fn buildPlanWith(self: *const Model, remove_policy: contract.RemovePolicy) !OwnedPlan {
+    pub fn buildPlanWith(self: *const Model, policy: PlanPolicy) !OwnedPlan {
         var owned: OwnedPlan = .{ .arena = .init(self.gpa), .value = undefined };
         errdefer owned.deinit();
-        var builder = Builder.init(owned.arena.allocator(), self, remove_policy);
+        var builder = Builder.init(owned.arena.allocator(), self, policy);
         try builder.build();
         owned.value = .{
             .root = self.root,
@@ -670,15 +678,15 @@ pub const Model = struct {
 const Builder = struct {
     arena: std.mem.Allocator,
     model: *const Model,
-    remove_policy: contract.RemovePolicy,
+    policy: PlanPolicy,
     operations: std.ArrayList(contract.Planned) = .empty,
     emitted: std.ArrayList(NodeId) = .empty,
     create_operations: std.ArrayList(struct { id: NodeId, index: usize }) = .empty,
     capture_operations: std.ArrayList(struct { source: contract.EntrySource, index: usize }) = .empty,
     visiting: std.ArrayList(NodeId) = .empty,
 
-    fn init(arena: std.mem.Allocator, model: *const Model, remove_policy: contract.RemovePolicy) Builder {
-        return .{ .arena = arena, .model = model, .remove_policy = remove_policy };
+    fn init(arena: std.mem.Allocator, model: *const Model, policy: PlanPolicy) Builder {
+        return .{ .arena = arena, .model = model, .policy = policy };
     }
 
     fn build(self: *Builder) !void {
@@ -732,7 +740,7 @@ const Builder = struct {
             // fully successful batch still honors the user's deletion.
             try self.add(.{ .remove = .{
                 .source = try self.copyEntrySource(source),
-                .policy = self.remove_policy,
+                .policy = self.policy.remove,
             } }, row_ptr, null);
         } else if (row_ptr.pending == .added) {
             try self.addCreate(row_ptr, parent_ref, row_ptr.draft.name);
@@ -1542,7 +1550,7 @@ test "symlink copy and source deletion preserve guarded source ordering" {
     try std.testing.expectEqual(ref(104, 1), plan.value.operations[0].operation.copy.source.entry.ref);
     try std.testing.expectEqualStrings("link-copy", plan.value.operations[0].operation.copy.destination.name.bytes);
 
-    var permanent_plan = try model.buildPlanWith(.permanent);
+    var permanent_plan = try model.buildPlanWith(.{ .remove = .permanent });
     defer permanent_plan.deinit();
     try std.testing.expectEqual(contract.RemovePolicy.permanent, permanent_plan.value.operations[1].operation.remove.policy);
 }

@@ -436,7 +436,7 @@ pub const Session = struct {
             .quarantine
         else
             .permanent;
-        var effect_plan = try self.draft.buildPlanWith(remove_policy);
+        var effect_plan = try self.draft.buildPlanWith(.{ .remove = remove_policy });
         defer effect_plan.deinit();
         var report = try weft.semanticFsApply(self.plugin.gpa, self.target, self.target_revision, effect_plan.value);
         defer report.deinit();

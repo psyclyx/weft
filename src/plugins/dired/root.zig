@@ -23,6 +23,7 @@ pub const Draft = model.Draft;
 pub const Row = model.Row;
 pub const EntryCapture = model.EntryCapture;
 pub const OwnedPlan = model.OwnedPlan;
+pub const PlanPolicy = model.PlanPolicy;
 pub const PastePlacement = model.PastePlacement;
 pub const PasteAnchor = model.PasteAnchor;
 
