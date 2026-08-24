@@ -14,16 +14,10 @@ const Renderer = enum { skia, snail };
 /// guests are test fixtures (a bare hello, a perm-violating rogue, a demo
 /// config) exercised only by the wasm-membrane suite, embedded into the test
 /// module below.
-/// Optional portable module surfaces made available to a guest. Keep this as
-/// data on the catalog entry rather than inferring a dependency from a source
-/// filename: the same guest source may be built with different capability
-/// surfaces in a later profile.
-const GuestModule = enum { dired };
 const Guest = struct {
     src: []const u8,
     import: []const u8,
     install: bool,
-    modules: []const GuestModule = &.{},
 };
 
 /// Compiler-enforced subsystem boundaries. Cross-module code imports these
@@ -267,7 +261,7 @@ const guests = [_]Guest{
     .{ .src = "src/guest/net.zig", .import = "guest_net_wasm", .install = true },
     .{ .src = "src/guest/http.zig", .import = "guest_http_wasm", .install = true },
     .{ .src = "src/guest/which_key.zig", .import = "guest_which_key_wasm", .install = true },
-    .{ .src = "src/guest/dired.zig", .import = "guest_dired_wasm", .install = true, .modules = &.{.dired} },
+    .{ .src = "src/guest/dired.zig", .import = "guest_dired_wasm", .install = true },
     .{ .src = "src/guest/helix.zig", .import = "guest_helix_wasm", .install = true },
     .{ .src = "src/guest/emacs.zig", .import = "guest_emacs_wasm", .install = true },
     .{ .src = "src/guest/debug.zig", .import = "guest_debug_wasm", .install = true },
@@ -779,9 +773,6 @@ fn buildGuest(b: *std.Build, guest_spec: Guest) *std.Build.Step.Compile {
     guest_sdk.addImport("weft_scene_codec", scene_codec);
     guest_sdk.addImport("weft_fs", fs);
     guest_sdk.addImport("weft_fs_codec", fs_codec);
-    if (hasGuestModule(guest_spec.modules, .dired)) {
-        addDiredGuestModule(b, wasm_target, guest_sdk, guest_mod, semantic, fs);
-    }
     guest_mod.addImport("weft", guest_sdk);
     const guest = b.addExecutable(.{
         .name = std.fs.path.stem(src),
@@ -790,66 +781,6 @@ fn buildGuest(b: *std.Build, guest_spec: Guest) *std.Build.Step.Compile {
     guest.entry = .disabled; // reactor: called through exports, not _start
     guest.rdynamic = true; // export the `export fn`s + memory
     return guest;
-}
-
-fn hasGuestModule(modules: []const GuestModule, requested: GuestModule) bool {
-    for (modules) |module| if (module == requested) return true;
-    return false;
-}
-
-/// Add only the portable dired facade to a wasm guest. This deliberately
-/// mirrors the host-side graph's model → projection/actions → facade shape,
-/// but stops at `weft_semantic` and `weft_fs`: session, view, target, and
-/// filesystem runtime modules are host-only and have no edge into this graph.
-fn addDiredGuestModule(
-    b: *std.Build,
-    wasm_target: std.Build.ResolvedTarget,
-    guest_sdk: *std.Build.Module,
-    guest_mod: *std.Build.Module,
-    semantic: *std.Build.Module,
-    fs: *std.Build.Module,
-) void {
-    const dired_model = b.createModule(.{
-        .root_source_file = b.path("src/plugins/dired/model.zig"),
-        .target = wasm_target,
-        .optimize = .ReleaseSmall,
-    });
-    dired_model.addImport("weft_semantic", semantic);
-    dired_model.addImport("weft_fs", fs);
-
-    const dired_projection = b.createModule(.{
-        .root_source_file = b.path("src/plugins/dired/projection.zig"),
-        .target = wasm_target,
-        .optimize = .ReleaseSmall,
-    });
-    dired_projection.addImport("weft_semantic", semantic);
-    dired_projection.addImport("weft_fs", fs);
-    dired_projection.addImport("weft_dired_model", dired_model);
-
-    const dired_actions = b.createModule(.{
-        .root_source_file = b.path("src/plugins/dired/actions.zig"),
-        .target = wasm_target,
-        .optimize = .ReleaseSmall,
-    });
-    dired_actions.addImport("weft_semantic", semantic);
-    dired_actions.addImport("weft_fs", fs);
-    dired_actions.addImport("weft_dired_model", dired_model);
-    dired_actions.addImport("weft_dired_projection", dired_projection);
-
-    const dired = b.createModule(.{
-        .root_source_file = b.path("src/plugins/dired/root.zig"),
-        .target = wasm_target,
-        .optimize = .ReleaseSmall,
-    });
-    dired.addImport("weft_dired_model", dired_model);
-    dired.addImport("weft_dired_projection", dired_projection);
-    dired.addImport("weft_dired_actions", dired_actions);
-
-    // Keep the facade available under the same named import in the SDK and
-    // directly on the guest module. Existing guests need not use it yet; the
-    // catalog profile makes the dependency explicit for a future cutover.
-    guest_sdk.addImport("weft_dired", dired);
-    guest_mod.addImport("weft_dired", dired);
 }
 
 /// Embed every guest's `.wasm` bytes into a module. Used only by the test
