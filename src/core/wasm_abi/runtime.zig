@@ -222,6 +222,9 @@ fn construct(engine: *wasm.Engine, ctx: *command.Context, name: []const u8, opts
     const name_dup = try gpa.dupe(u8, name);
     errdefer gpa.free(name_dup);
     const semantic_owner = if (ctx.semantic) |services| try services.acquireOwner() else null;
+    errdefer if (semantic_owner) |owner| if (ctx.semantic) |services| {
+        _ = services.releaseOwner(gpa, owner);
+    };
     var module = try compileCached(engine, gpa, opts.module_cache_dir, wasm_bytes);
     errdefer module.deinit();
     var linker = try wasm.Linker.init(engine);
@@ -243,7 +246,7 @@ fn construct(engine: *wasm.Engine, ctx: *command.Context, name: []const u8, opts
         .module = module,
         .linker = linker,
         .instance = undefined,
-        .semantic_attachments = .init(gpa),
+        .semantic_attachments = try .init(gpa, semantic_owner),
     };
     try wasm_host.defineImports(&p.linker, p);
     p.instance = try p.linker.instantiate(&p.module);

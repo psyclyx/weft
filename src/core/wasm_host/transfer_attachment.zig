@@ -22,6 +22,8 @@ const contract = fs.contract;
 pub const Error = fs_runtime.Error || error{
     InvalidAttachment,
     AttachmentExhausted,
+    InvalidOwner,
+    OwnerNamespaceExhausted,
 };
 
 /// The guest receives both the opaque transfer identity and the exact lease
@@ -104,11 +106,21 @@ const AttachmentState = struct {
 
 pub const Registry = struct {
     gpa: std.mem.Allocator,
+    /// The semantic-owner namespace is part of every wire attachment handle;
+    /// it prevents two live plugin principals from interpreting the same
+    /// `(authority, slot, generation)` tuple as their own resource.
+    namespace: semantic.handle.Authority,
     entries: std.AutoHashMap(semantic.transfer.Attachment, *AttachmentState),
     next_slot: u32 = 1,
 
-    pub fn init(gpa: std.mem.Allocator) Registry {
-        return .{ .gpa = gpa, .entries = .init(gpa) };
+    pub fn init(gpa: std.mem.Allocator, owner: ?semantic.owner.Id) Error!Registry {
+        const namespace = if (owner) |id| blk: {
+            if (!id.isValid()) return error.InvalidOwner;
+            const raw = @intFromEnum(id);
+            if (raw > std.math.maxInt(u32)) return error.OwnerNamespaceExhausted;
+            break :blk @as(semantic.handle.Authority, @enumFromInt(@as(u32, @intCast(raw))));
+        } else semantic.handle.Authority.here;
+        return .{ .gpa = gpa, .namespace = namespace, .entries = .init(gpa) };
     }
 
     /// Detaches all guest handles. States with host transfer references stay
@@ -136,7 +148,7 @@ pub const Registry = struct {
             return err;
         };
         const attachment: semantic.transfer.Attachment = .{
-            .authority = lease.root.authority,
+            .authority = self.namespace,
             .slot = self.next_slot,
             .generation = 1,
         };
@@ -394,7 +406,7 @@ test "attachment ownership spans clipboard replacement and pending paste" {
     var router = fs_runtime.Router.init(std.testing.allocator);
     defer router.deinit();
     try router.register(.here, .init(&provider));
-    var registry = Registry.init(std.testing.allocator);
+    var registry = try Registry.init(std.testing.allocator, @enumFromInt(1));
     const root: contract.Root = .{ .authority = .here, .slot = 1, .generation = 1 };
     const captured_result = try registry.capture(&router, .{
         .root = root,
@@ -492,6 +504,46 @@ test "attachment ownership spans clipboard replacement and pending paste" {
     try std.testing.expectEqual(@as(usize, 3), provider.released);
 }
 
+test "attachment namespaces reject a foreign registry handle" {
+    var provider: TestProvider = .{};
+    var router = fs_runtime.Router.init(std.testing.allocator);
+    defer router.deinit();
+    try router.register(.here, .init(&provider));
+    var first = try Registry.init(std.testing.allocator, @enumFromInt(1));
+    defer first.deinit();
+    var second = try Registry.init(std.testing.allocator, @enumFromInt(2));
+    defer second.deinit();
+
+    const first_capture = try first.capture(&router, .{
+        .root = .{ .authority = .here, .slot = 1, .generation = 1 },
+        .ref = .{ .authority = .here, .slot = 2, .generation = 1 },
+        .revision = .{ .token = "r" },
+    });
+    const second_capture = try second.capture(&router, .{
+        .root = .{ .authority = .here, .slot = 1, .generation = 1 },
+        .ref = .{ .authority = .here, .slot = 3, .generation = 1 },
+        .revision = .{ .token = "r" },
+    });
+    try std.testing.expectEqual(@as(u32, 1), first_capture.attachment.slot);
+    try std.testing.expectEqual(@as(u32, 1), second_capture.attachment.slot);
+    try std.testing.expect(first_capture.attachment.authority != second_capture.attachment.authority);
+
+    const encoded = try scene_codec.transfer.encode(std.testing.allocator, .{
+        .intent = .copy,
+        .representations = &.{.{ .media_type = "application/test", .attachment = first_capture.attachment, .payload = "x" }},
+    });
+    defer std.testing.allocator.free(encoded);
+    var foreign = try scene_codec.transfer.decode(std.testing.allocator, encoded);
+    defer foreign.deinit();
+    try std.testing.expectError(error.InvalidAttachment, second.resolve(&foreign));
+    try std.testing.expect(foreign.value.representations[0].resource == null);
+}
+
+test "attachment namespace exhaustion is explicit" {
+    const exhausted: semantic.owner.Id = @enumFromInt(@as(u64, std.math.maxInt(u32)) + 1);
+    try std.testing.expectError(error.OwnerNamespaceExhausted, Registry.init(std.testing.allocator, exhausted));
+}
+
 test "capture releases lease when attachment publication runs out of memory" {
     var provider: TestProvider = .{};
     var router = fs_runtime.Router.init(std.testing.allocator);
@@ -501,7 +553,7 @@ test "capture releases lease when attachment publication runs out of memory" {
     // capture allocates the provider resource and attachment state first;
     // the third allocation is the registry's first hash-table publication.
     var failing = std.testing.FailingAllocator.init(std.testing.allocator, .{ .fail_index = 2 });
-    var registry = Registry.init(failing.allocator());
+    var registry = try Registry.init(failing.allocator(), @enumFromInt(1));
     defer registry.deinit();
     const result = registry.capture(&router, .{
         .root = .{ .authority = .here, .slot = 1, .generation = 1 },
