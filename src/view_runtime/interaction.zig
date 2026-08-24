@@ -36,6 +36,7 @@ pub const Instance = struct {
             .id = try arena.dupe(u8, source.id),
             .label = try arena.dupe(u8, source.label),
             .enabled = source.enabled,
+            .disposition = source.disposition,
         };
         const bindings = try arena.alloc(kernel.interaction.Binding, definition.bindings.len);
         for (definition.bindings, bindings) |source, *destination| destination.* = .{

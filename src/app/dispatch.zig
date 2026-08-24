@@ -459,6 +459,17 @@ pub fn dispatchSpec(ctx: *core.command.Context, spec: []const u8, text: []const 
     // real key events; swallow them here, the one shared dispatch point.
     if (isBareModifier(spec)) return;
 
+    // Active interactions get first refusal through their own local binding
+    // table. This is a semantic action dispatch, not a temporary editor mode:
+    // unbound keys continue normally, while a bound y/n/Escape never leaks to
+    // the global keymap or triggers which-key merely because a dialog exists.
+    if (ctx.semantic) |services| {
+        if (services.invokeInteractionInput(&ctx.head.interactions, ctx.gpa, spec) catch |err| blk: {
+            std.log.warn("interaction input '{s}' failed: {t}", .{ spec, err });
+            break :blk @as(?core.semantic.Services.ActionEffect, .declined);
+        }) |_| return;
+    }
+
     // Dot-repeat: record this keystroke (unless we ARE a replay), and decide at
     // the end of dispatch whether the sequence so far was a repeatable change.
     const dot_recording = !ctx.head.dot.replaying;

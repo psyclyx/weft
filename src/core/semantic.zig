@@ -42,6 +42,7 @@ pub const Services = struct {
     };
 
     pub const InvokeActionError = view_runtime.action.Error || OpenInteractionError || kernel.transfer.ValidationError;
+    pub const InvokeInputError = InvokeActionError || view_runtime.interaction.Error;
 
     pub const ActionEffect = union(enum) {
         declined,
@@ -76,6 +77,33 @@ pub const Services = struct {
             },
             .interaction => |definition| .{ .interaction_opened = try self.openInteraction(stack, gpa, definition) },
         };
+    }
+
+    /// Resolve only the active interaction's local bindings, invoke the owning
+    /// view provider, and apply the action's explicit lifetime disposition.
+    /// Null means the interaction did not bind this input, so a caller may
+    /// continue with its ordinary input stack. A bound input is never exposed
+    /// as an editor mode and never implicitly opens global key help.
+    pub fn invokeInteractionInput(
+        self: *Services,
+        stack: *view_runtime.interaction.Stack,
+        gpa: std.mem.Allocator,
+        input: []const u8,
+    ) InvokeInputError!?ActionEffect {
+        const active = stack.active() orelse return null;
+        const action = active.actionForInput(input) orelse return null;
+        const interaction_ref = active.descriptor.ref;
+        const disposition = action.disposition;
+        const effect = try self.invokeAction(stack, gpa, .{
+            .action = action.id,
+            .view = active.descriptor.view,
+            .subject = active.descriptor.root,
+        });
+        if (disposition == .close_on_handled) switch (effect) {
+            .handled, .transfer_stored => try stack.close(gpa, interaction_ref),
+            .declined, .interaction_opened => {},
+        };
+        return effect;
     }
 
     /// Compose two otherwise-independent mechanisms at their one real
@@ -155,4 +183,38 @@ test "semantic services keep target, view, and field namespaces typed" {
     var confirm = request;
     confirm.action = "confirm";
     try std.testing.expect((try services.invokeAction(&interactions, std.testing.allocator, confirm)) == .interaction_opened);
+}
+
+test "interaction-local input invokes semantic action and closes explicitly" {
+    var services = Services.init(.here);
+    defer services.deinit(std.testing.allocator);
+    const root: kernel.scene.Node = .{
+        .id = @enumFromInt(1),
+        .actions = &.{.{ .id = "confirm" }},
+        .content = .{ .label = "Apply changes?" },
+    };
+    const view_ref = try services.views.publish(std.testing.allocator, "dialog-owner", null, 1, root);
+    const Handler = struct {
+        calls: usize = 0,
+        pub fn invoke(self: *@This(), _: kernel.action.Request) view_runtime.action.ProviderError!kernel.action.Outcome {
+            self.calls += 1;
+            return .handled;
+        }
+    };
+    var handler: Handler = .{};
+    try services.actions.register(std.testing.allocator, "dialog-owner", .init(&handler));
+    var interactions: view_runtime.interaction.Stack = .empty;
+    defer interactions.deinit(std.testing.allocator);
+    _ = try services.openInteraction(&interactions, std.testing.allocator, .{
+        .role = .dialog,
+        .view = view_ref,
+        .root = @enumFromInt(1),
+        .actions = &.{.{ .id = "confirm", .disposition = .close_on_handled }},
+        .bindings = &.{.{ .input = "y", .action = "confirm" }},
+        .presentation = "which-key-like",
+    });
+    try std.testing.expect(try services.invokeInteractionInput(&interactions, std.testing.allocator, "x") == null);
+    try std.testing.expect((try services.invokeInteractionInput(&interactions, std.testing.allocator, "y")).? == .handled);
+    try std.testing.expectEqual(@as(usize, 1), handler.calls);
+    try std.testing.expect(interactions.active() == null);
 }
