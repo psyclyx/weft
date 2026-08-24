@@ -3,6 +3,7 @@
 
 const std = @import("std");
 const handle = @import("handle.zig");
+const target = @import("target.zig");
 
 pub const NodeId = enum(u64) {
     _,
@@ -10,6 +11,12 @@ pub const NodeId = enum(u64) {
 
 pub const FieldTag = struct {};
 pub const FieldRef = handle.Handle(FieldTag);
+
+/// A scene node may name a resource without naming the plugin that handles it.
+/// The target registry remains the authority for resolving this revision-stamped
+/// link.  Locations deliberately remain opaque to the scene model so local,
+/// remote, and synthetic producers share one value contract.
+pub const TargetLink = target.Located;
 
 pub const Axis = enum { horizontal, vertical, overlay };
 
@@ -55,6 +62,7 @@ pub const Node = struct {
     actions: []const Action = &.{},
     layout: Layout = .{},
     focusable: bool = false,
+    target: ?TargetLink = null,
     content: Content,
 };
 
@@ -65,6 +73,7 @@ pub const ValidationError = error{
     DuplicateFact,
     InvalidAction,
     DuplicateAction,
+    InvalidTarget,
     TooDeep,
 } || std.mem.Allocator.Error;
 
@@ -96,11 +105,22 @@ fn validateNode(gpa: std.mem.Allocator, seen: *std.AutoHashMapUnmanaged(u64, voi
         const action_result = try action_ids.getOrPut(gpa, action.id);
         if (action_result.found_existing) return error.DuplicateAction;
     }
+    if (node.target) |link| try validateTargetLink(link);
     switch (node.content) {
         .container => |container| for (container.children) |child|
             try validateNode(gpa, seen, child, depth + 1),
         .action => |action| if (action.action.len == 0) return error.InvalidAction,
         else => {},
+    }
+}
+
+pub fn validateTargetLink(link: TargetLink) error{InvalidTarget}!void {
+    if (link.target.generation == 0 or link.revision == 0) return error.InvalidTarget;
+    switch (link.location) {
+        .whole => {},
+        .text => |range| if (range.start > range.end) return error.InvalidTarget,
+        .node => |value| if (value.len == 0) return error.InvalidTarget,
+        .provider => |value| if (value.schema.len == 0) return error.InvalidTarget,
     }
 }
 
@@ -137,4 +157,23 @@ test "scene validation rejects empty content action ids" {
         .content = .{ .action = .{ .action = "", .label = "Run" } },
     };
     try std.testing.expectError(error.InvalidAction, validate(std.testing.allocator, node));
+}
+
+test "scene validation accepts opaque target links and rejects malformed ones" {
+    const target_ref: target.Ref = .{ .authority = @enumFromInt(77), .slot = 4, .generation = 9 };
+    try validate(std.testing.allocator, .{
+        .id = @enumFromInt(1),
+        .target = .{ .target = target_ref, .revision = 3, .location = .{ .provider = .{ .schema = "remote.node", .payload = &.{ 0, 0xff } } } },
+        .content = .{ .label = "remote" },
+    });
+    try std.testing.expectError(error.InvalidTarget, validate(std.testing.allocator, .{
+        .id = @enumFromInt(1),
+        .target = .{ .target = target_ref, .revision = 0 },
+        .content = .{ .label = "bad" },
+    }));
+    try std.testing.expectError(error.InvalidTarget, validate(std.testing.allocator, .{
+        .id = @enumFromInt(1),
+        .target = .{ .target = target_ref, .revision = 1, .location = .{ .text = .{ .start = 3, .end = 2 } } },
+        .content = .{ .label = "bad" },
+    }));
 }

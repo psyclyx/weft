@@ -31,6 +31,10 @@ pub const Error = error{
 const protocol_version: u8 = 1;
 const magic = "WSC";
 const scene_kind: u8 = 1;
+// Scene v1 remains the compact wire form for target-less scenes.  v2 adds an
+// optional typed target link to each node; decode accepts both forms so older
+// guests remain readable while new guests only opt into v2 when needed.
+const scene_v2_kind: u8 = 8;
 const interaction_kind: u8 = 2;
 const target_kind: u8 = 3;
 const transfer_kind: u8 = 4;
@@ -309,6 +313,70 @@ fn readTargetHandle(reader: *Reader) Error!semantic.target.Ref {
     return .fromWire(.{ .authority = authority, .slot = slot, .generation = generation });
 }
 
+fn validateSceneTargetLink(link: semantic.scene.TargetLink) Error!void {
+    semantic.scene.validateTargetLink(link) catch return error.InvalidData;
+    switch (link.location) {
+        .whole, .text => {},
+        .node => |value| if (value.len > Limits.max_payload_bytes) return error.LimitExceeded,
+        .provider => |value| {
+            if (value.schema.len > Limits.max_string_bytes or value.payload.len > Limits.max_payload_bytes)
+                return error.LimitExceeded;
+        },
+    }
+}
+
+fn writeTargetLink(writer: *Writer, link: semantic.scene.TargetLink) Error!void {
+    try validateSceneTargetLink(link);
+    try writeHandle(writer, link.target);
+    try writer.writeU64(link.revision);
+    switch (link.location) {
+        .whole => try writer.byte(0),
+        .text => |range| {
+            try writer.byte(1);
+            try writer.writeU64(range.start);
+            try writer.writeU64(range.end);
+        },
+        .node => |value| {
+            try writer.byte(2);
+            try writer.blob(value);
+        },
+        .provider => |value| {
+            try writer.byte(3);
+            try writer.string(value.schema);
+            try writer.blob(value.payload);
+        },
+    }
+}
+
+fn readTargetLink(reader: *Reader, arena: std.mem.Allocator) Error!semantic.scene.TargetLink {
+    const target_ref = try readTargetHandle(reader);
+    const revision = try reader.readU64();
+    if (revision == 0) return error.InvalidData;
+    const location: semantic.target.Location = switch (try reader.byte()) {
+        0 => .whole,
+        1 => blk: {
+            const start = try reader.readU64();
+            const end = try reader.readU64();
+            if (start > end) return error.InvalidData;
+            break :blk .{ .text = .{ .start = start, .end = end } };
+        },
+        2 => blk: {
+            const value = try reader.blob(arena);
+            if (value.len == 0) return error.InvalidData;
+            break :blk .{ .node = value };
+        },
+        3 => blk: {
+            const schema_value = try reader.string(arena);
+            if (schema_value.len == 0) return error.InvalidData;
+            break :blk .{ .provider = .{ .schema = schema_value, .payload = try reader.blob(arena) } };
+        },
+        else => return error.Corrupt,
+    };
+    const link: semantic.scene.TargetLink = .{ .target = target_ref, .revision = revision, .location = location };
+    try validateSceneTargetLink(link);
+    return link;
+}
+
 // ── Scene ────────────────────────────────────────────────────────────────
 
 const SceneCount = struct { nodes: usize = 0 };
@@ -339,6 +407,7 @@ fn validateSceneNode(gpa: std.mem.Allocator, node: semantic.scene.Node, seen: *s
         const result = try action_ids.getOrPut(gpa, action.id);
         if (result.found_existing) return error.Duplicate;
     }
+    if (node.target) |link| try validateSceneTargetLink(link);
     switch (node.content) {
         .container => |container| {
             if (container.children.len > Limits.max_children) return error.LimitExceeded;
@@ -353,6 +422,16 @@ fn validateSceneNode(gpa: std.mem.Allocator, node: semantic.scene.Node, seen: *s
     }
 }
 
+fn sceneHasTarget(node: semantic.scene.Node) bool {
+    if (node.target != null) return true;
+    return switch (node.content) {
+        .container => |container| for (container.children) |child| {
+            if (sceneHasTarget(child)) break true;
+        } else false,
+        else => false,
+    };
+}
+
 fn countScene(gpa: std.mem.Allocator, root: semantic.scene.Node) Error!usize {
     var seen: std.AutoHashMapUnmanaged(u64, void) = .empty;
     defer seen.deinit(gpa);
@@ -361,7 +440,7 @@ fn countScene(gpa: std.mem.Allocator, root: semantic.scene.Node) Error!usize {
     return count.nodes;
 }
 
-fn encodeSceneNode(writer: *Writer, node: semantic.scene.Node, parent: u32, index: *u32) Error!void {
+fn encodeSceneNode(writer: *Writer, node: semantic.scene.Node, parent: u32, index: *u32, versioned_targets: bool) Error!void {
     const this_index = index.*;
     index.* += 1;
     try writer.writeU64(@intFromEnum(node.id));
@@ -384,12 +463,16 @@ fn encodeSceneNode(writer: *Writer, node: semantic.scene.Node, parent: u32, inde
     try writer.byte(if (node.layout.min_cells != null) 1 else 0);
     if (node.layout.min_cells) |value| try writer.writeU16(value);
     try writer.byte(if (node.focusable) 1 else 0);
+    if (versioned_targets) {
+        try writer.byte(if (node.target != null) 1 else 0);
+        if (node.target) |link| try writeTargetLink(writer, link);
+    }
     switch (node.content) {
         .container => |container| {
             try writer.byte(0);
             try writer.byte(axisTag(container.axis));
             try writer.count(container.children.len, Limits.max_children);
-            for (container.children) |child| try encodeSceneNode(writer, child, this_index, index);
+            for (container.children) |child| try encodeSceneNode(writer, child, this_index, index, versioned_targets);
         },
         .label => |label| {
             try writer.byte(1);
@@ -412,12 +495,13 @@ fn encodeSceneNode(writer: *Writer, node: semantic.scene.Node, parent: u32, inde
 
 pub fn encodeScene(gpa: std.mem.Allocator, root: semantic.scene.Node) Error![]u8 {
     const count = try countScene(gpa, root);
+    const versioned_targets = sceneHasTarget(root);
     var writer = Writer.init(gpa);
     errdefer writer.deinit();
-    try header(&writer, scene_kind);
+    try header(&writer, if (versioned_targets) scene_v2_kind else scene_kind);
     try writer.count(count, Limits.max_nodes);
     var index: u32 = 0;
-    try encodeSceneNode(&writer, root, @intCast(root_parent), &index);
+    try encodeSceneNode(&writer, root, @intCast(root_parent), &index, versioned_targets);
     return writer.finish();
 }
 
@@ -440,6 +524,7 @@ const TempNode = struct {
     actions: []const semantic.scene.Action,
     layout: semantic.scene.Layout,
     focusable: bool,
+    target: ?semantic.scene.TargetLink,
     content: TempContent,
 };
 
@@ -483,7 +568,7 @@ fn readActions(reader: *Reader, arena: std.mem.Allocator) Error![]const semantic
     return actions;
 }
 
-fn readTempNode(reader: *Reader, arena: std.mem.Allocator) Error!TempNode {
+fn readTempNode(reader: *Reader, arena: std.mem.Allocator, versioned_targets: bool) Error!TempNode {
     const id = try nodeId(try reader.readU64());
     const parent_raw = try reader.uv();
     if (parent_raw > root_parent) return error.BadReference;
@@ -494,6 +579,10 @@ fn readTempNode(reader: *Reader, arena: std.mem.Allocator) Error!TempNode {
     const column = if (try reader.strictBool()) try reader.readU16() else null;
     const min_cells = if (try reader.strictBool()) try reader.readU16() else null;
     const focusable = try reader.strictBool();
+    const target_link: ?semantic.scene.TargetLink = if (versioned_targets and try reader.strictBool())
+        try readTargetLink(reader, arena)
+    else
+        null;
     const content: TempContent = switch (try reader.byte()) {
         0 => .{ .container = TempContainer{ .axis = try axisFromTag(try reader.byte()), .child_count = try reader.count(Limits.max_children) } },
         1 => .{ .label = try reader.string(arena) },
@@ -513,6 +602,7 @@ fn readTempNode(reader: *Reader, arena: std.mem.Allocator) Error!TempNode {
         .actions = actions,
         .layout = .{ .grow = grow, .column = column, .min_cells = min_cells },
         .focusable = focusable,
+        .target = target_link,
         .content = content,
     };
 }
@@ -565,7 +655,7 @@ fn materializeNode(arena: std.mem.Allocator, records: []const TempNode, index: u
     if (depth > Limits.max_depth or index >= records.len) return error.BadReference;
     const record = records[index];
     const node = try arena.create(semantic.scene.Node);
-    node.* = .{ .id = record.id, .role = record.role, .facts = record.facts, .actions = record.actions, .layout = record.layout, .focusable = record.focusable, .content = undefined };
+    node.* = .{ .id = record.id, .role = record.role, .facts = record.facts, .actions = record.actions, .layout = record.layout, .focusable = record.focusable, .target = record.target, .content = undefined };
     switch (record.content) {
         .container => |container| {
             const children = try arena.alloc(semantic.scene.Node, container.children.len);
@@ -581,14 +671,21 @@ fn materializeNode(arena: std.mem.Allocator, records: []const TempNode, index: u
 
 pub fn decodeScene(gpa: std.mem.Allocator, bytes: []const u8) Error!OwnedScene {
     var reader = try Reader.init(bytes);
-    try checkHeader(&reader, scene_kind);
+    if (!std.mem.eql(u8, try reader.take(magic.len), magic)) return error.Corrupt;
+    if (try reader.byte() != protocol_version) return error.Corrupt;
+    const encoded_kind = try reader.byte();
+    const versioned_targets = switch (encoded_kind) {
+        scene_kind => false,
+        scene_v2_kind => true,
+        else => return error.Corrupt,
+    };
     const arena_init = std.heap.ArenaAllocator.init(gpa);
     var owned: OwnedScene = .{ .arena = arena_init, .root = undefined };
     errdefer owned.arena.deinit();
     const arena = owned.arena.allocator();
     const count = try reader.count(Limits.max_nodes);
     const records = try arena.alloc(TempNode, count);
-    for (records) |*record| record.* = try readTempNode(&reader, arena);
+    for (records) |*record| record.* = try readTempNode(&reader, arena, versioned_targets);
     try validateParents(arena, records);
     try reader.done();
     owned.root = try materializeNode(arena, records, 0, 0);
@@ -1158,6 +1255,107 @@ test "scene codec: preorder scene round-trip preserves semantic fields" {
     try t.expectEqual(field_ref, child.content.field.ref);
     try t.expectEqualStrings("save", child.actions[0].id);
     try t.expect(!child.actions[0].enabled);
+    try t.expect(child.target == null);
+}
+
+test "scene v2 codec round-trips target links and v1 remains readable" {
+    const links = [_]semantic.scene.TargetLink{
+        .{ .target = .{ .authority = .here, .slot = 1, .generation = 2 }, .revision = 3 },
+        .{ .target = .{ .authority = @enumFromInt(41), .slot = 4, .generation = 5 }, .revision = 6, .location = .{ .text = .{ .start = 2, .end = 9 } } },
+        .{ .target = .{ .authority = @enumFromInt(42), .slot = 7, .generation = 8 }, .revision = 9, .location = .{ .node = &.{ 0, 0xff, '/', '\n' } } },
+        .{ .target = .{ .authority = @enumFromInt(43), .slot = 10, .generation = 11 }, .revision = 12, .location = .{ .provider = .{ .schema = "remote.node.v1", .payload = &.{ 1, 2, 3 } } } },
+    };
+    var children: [links.len]semantic.scene.Node = undefined;
+    for (&children, links) |*child, link| child.* = .{ .id = @enumFromInt(1), .focusable = true, .target = link, .content = .{ .label = "target" } };
+    for (&children, 0..) |*child, index| child.id = @enumFromInt(index + 2);
+    const root: semantic.scene.Node = .{ .id = @enumFromInt(1), .content = .{ .container = .{ .children = &children } } };
+    const bytes = try encodeScene(t.allocator, root);
+    defer t.allocator.free(bytes);
+    try t.expectEqual(@as(u8, scene_v2_kind), bytes[4]);
+    var decoded = try decodeScene(t.allocator, bytes);
+    defer decoded.deinit();
+    for (decoded.root.content.container.children, links) |child, expected| {
+        try t.expectEqual(expected.target, child.target.?.target);
+        try t.expectEqual(expected.revision, child.target.?.revision);
+        try t.expectEqualDeep(expected.location, child.target.?.location);
+    }
+
+    const v1 = try encodeScene(t.allocator, .{ .id = @enumFromInt(1), .content = .{ .label = "old guest" } });
+    defer t.allocator.free(v1);
+    try t.expectEqual(@as(u8, scene_kind), v1[4]);
+    var old = try decodeScene(t.allocator, v1);
+    defer old.deinit();
+    try t.expect(old.root.target == null);
+}
+
+test "scene v2 codec rejects malformed target link handles and locations" {
+    const target_node: semantic.scene.Node = .{
+        .id = @enumFromInt(1),
+        .target = .{ .target = .{ .authority = .here, .slot = 1, .generation = 2 }, .revision = 3, .location = .{ .provider = .{ .schema = "schema", .payload = "payload" } } },
+        .content = .{ .label = "target" },
+    };
+    const encoded = try encodeScene(t.allocator, target_node);
+    defer t.allocator.free(encoded);
+
+    var malformed_generation = try t.allocator.dupe(u8, encoded);
+    defer t.allocator.free(malformed_generation);
+    var generation_reader = try Reader.init(malformed_generation);
+    var generation_arena = std.heap.ArenaAllocator.init(t.allocator);
+    defer generation_arena.deinit();
+    _ = try generation_reader.take(magic.len);
+    _ = try generation_reader.byte();
+    _ = try generation_reader.byte();
+    _ = try generation_reader.count(Limits.max_nodes);
+    _ = try generation_reader.readU64();
+    _ = try generation_reader.uv();
+    _ = try generation_reader.string(generation_arena.allocator());
+    _ = try generation_reader.count(Limits.max_facts);
+    _ = try generation_reader.count(Limits.max_actions);
+    _ = try generation_reader.readU16();
+    _ = try generation_reader.strictBool();
+    _ = try generation_reader.strictBool();
+    _ = try generation_reader.strictBool();
+    try t.expectEqual(@as(u8, 1), try generation_reader.byte());
+    const generation_offset = generation_reader.pos + 8;
+    @memset(malformed_generation[generation_offset .. generation_offset + 4], 0);
+    try t.expectError(error.InvalidData, decodeScene(t.allocator, malformed_generation));
+
+    const text_node: semantic.scene.Node = .{
+        .id = @enumFromInt(1),
+        .target = .{ .target = .{ .authority = .here, .slot = 1, .generation = 2 }, .revision = 3, .location = .{ .text = .{ .start = 1, .end = 4 } } },
+        .content = .{ .label = "target" },
+    };
+    const text_encoded = try encodeScene(t.allocator, text_node);
+    defer t.allocator.free(text_encoded);
+    var malformed_range = try t.allocator.dupe(u8, text_encoded);
+    defer t.allocator.free(malformed_range);
+    var range_reader = try Reader.init(malformed_range);
+    var range_arena = std.heap.ArenaAllocator.init(t.allocator);
+    defer range_arena.deinit();
+    _ = try range_reader.take(magic.len);
+    _ = try range_reader.byte();
+    _ = try range_reader.byte();
+    _ = try range_reader.count(Limits.max_nodes);
+    _ = try range_reader.readU64();
+    _ = try range_reader.uv();
+    _ = try range_reader.string(range_arena.allocator());
+    _ = try range_reader.count(Limits.max_facts);
+    _ = try range_reader.count(Limits.max_actions);
+    _ = try range_reader.readU16();
+    _ = try range_reader.strictBool();
+    _ = try range_reader.strictBool();
+    _ = try range_reader.strictBool();
+    try t.expectEqual(@as(u8, 1), try range_reader.byte());
+    range_reader.pos += 12 + 8;
+    try t.expectEqual(@as(u8, 1), try range_reader.byte());
+    const start_offset = range_reader.pos;
+    var start_bytes: [8]u8 = undefined;
+    var end_bytes: [8]u8 = undefined;
+    std.mem.writeInt(u64, &start_bytes, 8, .little);
+    std.mem.writeInt(u64, &end_bytes, 2, .little);
+    @memcpy(malformed_range[start_offset .. start_offset + 8], &start_bytes);
+    @memcpy(malformed_range[start_offset + 8 .. start_offset + 16], &end_bytes);
+    try t.expectError(error.InvalidData, decodeScene(t.allocator, malformed_range));
 }
 
 test "interaction and target codecs round-trip defaults, handles, variants, and facts" {
@@ -1515,7 +1713,7 @@ test "scene codec: forward parent references and invalid target tags refuse" {
     _ = try reader.count(Limits.max_nodes);
     var arena = std.heap.ArenaAllocator.init(t.allocator);
     defer arena.deinit();
-    _ = try readTempNode(&reader, arena.allocator());
+    _ = try readTempNode(&reader, arena.allocator(), false);
     // The child record starts with its id, followed by its parent varint.
     reader.pos += 8;
     invalid[reader.pos] = 2; // parent index must be earlier, not forward.
