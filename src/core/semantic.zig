@@ -88,9 +88,12 @@ pub const Services = struct {
         revision: u64,
         root: semantic.scene.Node,
     ) ViewAdmissionError!semantic.view.Ref {
-        if (target) |ref| if (self.targets.get(ref) == null) return error.StaleTarget;
-        try self.validateFieldRefs(root, 0);
-        return self.views.publish(gpa, owner, target, revision, root);
+        const target_binding: ?semantic.view.TargetBinding = if (target) |ref| blk: {
+            const descriptor = self.targets.get(ref) orelse return error.StaleTarget;
+            break :blk .{ .ref = ref, .revision = descriptor.revision };
+        } else null;
+        try self.validateSceneRefs(root, 0);
+        return self.views.publish(gpa, owner, target_binding, revision, root);
     }
 
     pub fn replaceView(
@@ -101,7 +104,7 @@ pub const Services = struct {
         revision: u64,
         root: semantic.scene.Node,
     ) ViewAdmissionError!void {
-        try self.validateFieldRefs(root, 0);
+        try self.validateSceneRefs(root, 0);
         return self.views.replace(gpa, owner, ref, revision, root);
     }
 
@@ -198,7 +201,8 @@ pub const Services = struct {
         if (handler_descriptor.owner != view_instance.descriptor.owner)
             return error.HandlerOwnerMismatch;
         const view_target = view_instance.descriptor.target orelse return error.ViewTargetMismatch;
-        if (!view_target.eql(located.target)) return error.ViewTargetMismatch;
+        if (!view_target.ref.eql(located.target) or view_target.revision != located.revision)
+            return error.ViewTargetMismatch;
         return view_ref;
     }
 
@@ -220,11 +224,18 @@ pub const Services = struct {
         };
     }
 
-    fn validateFieldRefs(self: *const Services, node: semantic.scene.Node, depth: usize) error{ StaleField, TooDeep }!void {
+    /// Scene facts remain descriptive; live typed references are admitted
+    /// here. A copied target handle is insufficient after replacement: each
+    /// link names the exact descriptor revision it was authored against.
+    fn validateSceneRefs(self: *const Services, node: semantic.scene.Node, depth: usize) error{ StaleField, StaleTarget, TooDeep }!void {
         if (depth > 1024) return error.TooDeep;
+        if (node.target) |link| {
+            const descriptor = self.targets.get(link.target) orelse return error.StaleTarget;
+            if (descriptor.revision != link.revision) return error.StaleTarget;
+        }
         switch (node.content) {
             .field => |field| if (self.fields.get(field.ref) == null) return error.StaleField,
-            .container => |container| for (container.children) |child| try self.validateFieldRefs(child, depth + 1),
+            .container => |container| for (container.children) |child| try self.validateSceneRefs(child, depth + 1),
             .label, .action => {},
         }
     }
@@ -239,6 +250,7 @@ pub const Services = struct {
 
     pub const FocusError = view_runtime.view.Error;
     pub const FieldInputError = view_runtime.field.Error || error{StaleField};
+    pub const FocusedTargetError = error{ StaleView, StaleTarget };
 
     /// Attach one live retained view to exactly one head. A preferred node is
     /// accepted only while it exists in that view; stale preferences recover
@@ -261,6 +273,31 @@ pub const Services = struct {
         const path = (try instance.focusPath(selected, &storage)) orelse return error.StaleView;
         try head.semantic_focus.set(gpa, path);
         return selected;
+    }
+
+    /// Return the closest target link on one head's retained focus path. The
+    /// value is borrowed only for synchronous dispatch; the view registry owns
+    /// any location payload. A target replacement is an explicit stale result,
+    /// never an opportunity to reinterpret the old scene against new facts.
+    pub fn focusedTarget(
+        self: *const Services,
+        head: *Head,
+    ) FocusedTargetError!?semantic.target.Located {
+        const path = head.semantic_focus.path() orelse return null;
+        const instance = self.views.get(path.view) orelse {
+            head.semantic_focus.clear();
+            return error.StaleView;
+        };
+        var index = path.nodes.len;
+        while (index > 0) {
+            index -= 1;
+            const node = instance.node(path.nodes[index]) orelse continue;
+            const link = node.target orelse continue;
+            const descriptor = self.targets.get(link.target) orelse return error.StaleTarget;
+            if (descriptor.revision != link.revision) return error.StaleTarget;
+            return link;
+        }
+        return null;
     }
 
     /// The small generic editing vocabulary used by ordinary editor commands
@@ -530,6 +567,34 @@ pub const Services = struct {
         try provider.edit(value.revision, edit);
         return true;
     }
+
+    /// Resolve an ordinary "edit this field" request without choosing an
+    /// editing model. This proves the endpoint is live and writable; Vim,
+    /// Helix, Emacs, or a modeless input plugin independently decides how its
+    /// subsequent keystrokes become the generic field edits above.
+    pub fn requestFocusedFieldEdit(
+        self: *const Services,
+        head: *Head,
+        gpa: std.mem.Allocator,
+    ) FieldInputError!bool {
+        const path = head.semantic_focus.path() orelse return false;
+        const instance = self.views.get(path.view) orelse {
+            head.semantic_focus.clear();
+            return false;
+        };
+        const field_ref = path.field orelse return false;
+        const leaf = path.leaf() orelse return error.StaleField;
+        const node = instance.node(leaf) orelse return error.StaleField;
+        switch (node.content) {
+            .field => |field| if (!field.ref.eql(field_ref)) return error.StaleField,
+            else => return error.StaleField,
+        }
+        const provider = self.fields.get(field_ref) orelse return error.StaleField;
+        var snapshot = try provider.snapshot(gpa);
+        defer snapshot.deinit();
+        if (snapshot.value.read_only) return error.ReadOnly;
+        return true;
+    }
 };
 
 fn validateLocation(location: semantic.target.Location) error{InvalidLocation}!void {
@@ -557,6 +622,11 @@ test "semantic services keep target, view, and field namespaces typed" {
         .kind = .directory,
         .display_name = "directory",
     });
+    try std.testing.expectError(error.StaleTarget, services.publishView(std.testing.allocator, owner, null, 1, .{
+        .id = @enumFromInt(98),
+        .target = .{ .target = target_ref, .revision = 2 },
+        .content = .{ .label = "future target revision" },
+    }));
     const view_ref = try services.publishView(std.testing.allocator, owner, target_ref, 1, .{
         .id = @enumFromInt(1),
         .actions = &.{
@@ -675,6 +745,10 @@ test "target opening is revision guarded and confines handlers to their own atta
     defer current.deinit();
     try std.testing.expectError(error.InvalidLocation, services.openTarget(selected, current.located(.{ .text = .{ .start = 9, .end = 2 } })));
     try std.testing.expectEqual(@as(usize, 1), handler.opens);
+    // A handler cannot answer the new target revision with a retained view
+    // bound to the old one, even though both typed handles remain live.
+    try std.testing.expectError(error.ViewTargetMismatch, services.openTarget(selected, current.located(.whole)));
+    try std.testing.expectEqual(@as(usize, 2), handler.opens);
 
     const foreign_view = try services.publishView(std.testing.allocator, foreign_owner, target_ref, 1, .{
         .id = @enumFromInt(2),
@@ -901,6 +975,8 @@ test "ordinary editor input targets semantic fields and focus order" {
     try std.testing.expect(try services.moveHeadFocus(&head, std.testing.allocator, .next));
     try std.testing.expectEqual(@as(semantic.scene.NodeId, @enumFromInt(3)), head.semantic_focus.path().?.leaf().?);
     try std.testing.expect(head.semantic_focus.path().?.field.?.eql(second_ref));
+    try std.testing.expect(try services.requestFocusedFieldEdit(&head, std.testing.allocator));
+    try std.testing.expectEqual(@as(u64, 1), second.revision); // request is mode- and mutation-free
     try std.testing.expect((try services.invokeFocusedAction(&head.interactions, &head, std.testing.allocator, semantic.action.standard.copy)).? == .handled);
     try std.testing.expectEqual(@as(usize, 1), actions.calls);
 

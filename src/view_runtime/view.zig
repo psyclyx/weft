@@ -17,7 +17,7 @@ pub const Instance = struct {
         gpa: std.mem.Allocator,
         ref: semantic.view.Ref,
         owner: semantic.owner.Id,
-        target: ?semantic.target.Ref,
+        target: ?semantic.view.TargetBinding,
         revision: u64,
         root: semantic.scene.Node,
     ) Error!*Instance {
@@ -113,7 +113,7 @@ pub const Registry = struct {
         self: *Registry,
         gpa: std.mem.Allocator,
         owner: semantic.owner.Id,
-        target: ?semantic.target.Ref,
+        target: ?semantic.view.TargetBinding,
         revision: u64,
         root: semantic.scene.Node,
     ) Error!semantic.view.Ref {
@@ -216,7 +216,24 @@ fn cloneNode(gpa: std.mem.Allocator, node: semantic.scene.Node) std.mem.Allocato
         .actions = actions,
         .layout = node.layout,
         .focusable = node.focusable,
+        .target = if (node.target) |link| try cloneTargetLink(gpa, link) else null,
         .content = content,
+    };
+}
+
+fn cloneTargetLink(gpa: std.mem.Allocator, link: semantic.scene.TargetLink) std.mem.Allocator.Error!semantic.scene.TargetLink {
+    return .{
+        .target = link.target,
+        .revision = link.revision,
+        .location = switch (link.location) {
+            .whole => .whole,
+            .text => |range| .{ .text = range },
+            .node => |value| .{ .node = try gpa.dupe(u8, value) },
+            .provider => |value| .{ .provider = .{
+                .schema = try gpa.dupe(u8, value.schema),
+                .payload = try gpa.dupe(u8, value.payload),
+            } },
+        },
     };
 }
 

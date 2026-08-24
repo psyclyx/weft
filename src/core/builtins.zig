@@ -69,12 +69,34 @@ fn cSelectionPasteAfter(ctx: *Context, args: struct {}) anyerror!Value {
 
 fn cTargetOpenFocused(ctx: *Context, args: struct {}) anyerror!Value {
     _ = args;
+    const services = ctx.semantic orelse return ok;
+    if (try target_open.openFocused(services, ctx.head, ctx.gpa)) |result|
+        return targetOpenResult(result);
+    // A scene may deliberately expose custom open behavior without linking a
+    // registered target. Preserve that generic action-provider escape hatch;
+    // a present typed link never falls through on stale/ambiguous resolution.
     return invokeSemanticAction(ctx, semantic_model.action.standard.open);
 }
 
 fn cFieldEdit(ctx: *Context, args: struct {}) anyerror!Value {
     _ = args;
-    return invokeSemanticAction(ctx, semantic_model.action.standard.edit);
+    const services = ctx.semantic orelse return ok;
+    const effect = services.invokeFocusedAction(
+        &ctx.head.interactions,
+        ctx.head,
+        ctx.gpa,
+        semantic_model.action.standard.edit,
+    ) catch |err| switch (err) {
+        error.ActionUnavailable, error.ProviderUnavailable => null,
+        error.StaleView => return ok,
+        else => return err,
+    };
+    if (effect) |handled| switch (handled) {
+        .declined => {},
+        else => return ok,
+    };
+    _ = try services.requestFocusedFieldEdit(ctx.head, ctx.gpa);
+    return ok;
 }
 
 fn cViewRefresh(ctx: *Context, args: struct {}) anyerror!Value {
@@ -319,6 +341,10 @@ fn cOpenTarget(ctx: *Context, args: struct { authority: i64, slot: i64, generati
         .generation = try targetWord(args.generation),
     };
     const result = try target_open.openAndFocus(services, ctx.head, ctx.gpa, semantic_model.target.Ref.fromWire(wire));
+    return targetOpenResult(result);
+}
+
+fn targetOpenResult(result: target_open.Result) anyerror!Value {
     return switch (result) {
         .opened => .nil,
         .no_handler => error.NoTargetHandler,

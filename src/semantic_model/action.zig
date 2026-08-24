@@ -22,9 +22,11 @@ pub const Outcome = union(enum) {
     declined,
     handled,
     /// Capture-only: the provider must not mutate its model before returning
-    /// this borrowed value. The host first takes ownership; a controller may
-    /// then issue a separate delete action for cut semantics without losing
-    /// data if capture/allocation fails.
+    /// this borrowed value. The host first takes ownership; an input model may
+    /// then issue a separate delete action for copy-then-delete workflows
+    /// (Vim `dd`, for example) without losing data if capture/allocation fails.
+    /// A transfer whose own intent is `.cut` instead remains a deferred move
+    /// consumed by paste.
     transfer: transfer.Item,
     /// Request-only: mutation waits for an action on the resulting dialog.
     interaction: interaction.Definition,
