@@ -381,7 +381,7 @@ pub const Services = struct {
         UnknownRoot,
     };
 
-    pub const InvokeActionError = view_runtime.action.Error || OpenInteractionError || semantic.transfer.ValidationError || ResolveTargetError || OpenTargetError || FocusError;
+    pub const InvokeActionError = view_runtime.action.Error || OpenInteractionError || semantic.transfer.ValidationError || ResolveTargetError || OpenTargetError || FocusError || error{UnknownFocusTarget};
     pub const InvokeInputError = InvokeActionError || view_runtime.interaction.Error;
 
     pub const FocusError = view_runtime.view.Error;
@@ -453,6 +453,10 @@ pub const Services = struct {
         transfer_stored,
         interaction_opened: semantic.interaction.Ref,
         target_opened: semantic.view.Ref,
+        focus_requested: struct {
+            view: semantic.view.Ref,
+            node: semantic.scene.NodeId,
+        },
     };
 
     /// Invoke against the view owner's provider, then absorb any cross-view
@@ -466,7 +470,7 @@ pub const Services = struct {
     ) InvokeActionError!ActionEffect {
         const with_transfer = self.withCurrentTransfer(request);
         const outcome = try self.actions.invoke(&self.views, with_transfer);
-        return self.absorbActionOutcome(stack, gpa, outcome);
+        return self.absorbActionOutcome(stack, gpa, with_transfer.view, outcome);
     }
 
     fn withCurrentTransfer(self: *Services, request: semantic.action.Request) semantic.action.Request {
@@ -481,6 +485,7 @@ pub const Services = struct {
         self: *Services,
         stack: *view_runtime.interaction.Stack,
         gpa: std.mem.Allocator,
+        view: semantic.view.Ref,
         outcome: semantic.action.Outcome,
     ) InvokeActionError!ActionEffect {
         return switch (outcome) {
@@ -498,6 +503,11 @@ pub const Services = struct {
                 .opened => |view| .{ .target_opened = view },
                 .no_handler => error.NoTargetHandler,
                 .ambiguous => error.AmbiguousTargetHandlers,
+            },
+            .focus => |node| blk: {
+                const instance = self.views.get(view) orelse return error.StaleView;
+                if (instance.node(node) == null) return error.UnknownFocusTarget;
+                break :blk .{ .focus_requested = .{ .view = view, .node = node } };
             },
         };
     }
@@ -532,11 +542,9 @@ pub const Services = struct {
             },
             else => return err,
         };
-        if (effect == .target_opened) {
-            _ = try self.focusView(head, gpa, effect.target_opened, null);
-        }
+        try self.applyActionFocus(head, gpa, effect);
         if (disposition == .close_on_handled) switch (effect) {
-            .handled, .transfer_stored, .target_opened => try stack.close(gpa, interaction_ref),
+            .handled, .transfer_stored, .target_opened, .focus_requested => try stack.close(gpa, interaction_ref),
             .declined, .interaction_opened => {},
         };
         return effect;
@@ -550,7 +558,7 @@ pub const Services = struct {
     ) InvokeActionError!ActionEffect {
         const with_transfer = self.withCurrentTransfer(request);
         const outcome = try self.actions.invokeInteraction(&self.views, with_transfer);
-        return self.absorbActionOutcome(stack, gpa, outcome);
+        return self.absorbActionOutcome(stack, gpa, with_transfer.view, outcome);
     }
 
     /// Invoke an action against the deepest node on the active focus path that
@@ -580,13 +588,19 @@ pub const Services = struct {
                     .view = path.view,
                     .subject = node.id,
                 });
-                if (effect == .target_opened) {
-                    _ = try self.focusView(head, gpa, effect.target_opened, null);
-                }
+                try self.applyActionFocus(head, gpa, effect);
                 return effect;
             }
         }
         return error.ActionUnavailable;
+    }
+
+    fn applyActionFocus(self: *const Services, head: *Head, gpa: std.mem.Allocator, effect: ActionEffect) FocusError!void {
+        switch (effect) {
+            .target_opened => |view| _ = try self.focusView(head, gpa, view, null),
+            .focus_requested => |focus| _ = try self.focusView(head, gpa, focus.view, focus.node),
+            else => {},
+        }
     }
 
     pub fn hasActiveView(self: *const Services, head: *const Head) bool {
@@ -854,6 +868,53 @@ test "semantic services keep target, view, and field namespaces typed" {
     try std.testing.expect(services.targets.get(target_ref) == null);
     try std.testing.expect(services.views.get(view_ref) == null);
     try std.testing.expectEqual(Services.Released{}, services.releaseOwner(std.testing.allocator, owner));
+}
+
+test "semantic action focus stays inside its retained view" {
+    const Provider = struct {
+        target: semantic.scene.NodeId,
+
+        pub fn invoke(self: *@This(), _: semantic.action.Request) view_runtime.action.ProviderError!semantic.action.Outcome {
+            return .{ .focus = self.target };
+        }
+    };
+
+    var services = Services.init(.here);
+    defer services.deinit(std.testing.allocator);
+    const owner = try services.acquireOwner();
+    const row: semantic.scene.Node = .{
+        .id = @enumFromInt(2),
+        .focusable = true,
+        .actions = &.{.{ .id = "field.secondary" }},
+        .content = .{ .label = "row" },
+    };
+    const secondary: semantic.scene.Node = .{
+        .id = @enumFromInt(3),
+        // Secondary nodes need not participate in ordinary row traversal.
+        .focusable = false,
+        .content = .{ .label = "secondary field" },
+    };
+    const view_ref = try services.publishView(std.testing.allocator, owner, null, 1, .{
+        .id = @enumFromInt(1),
+        .content = .{ .container = .{ .children = &.{ row, secondary } } },
+    });
+    var provider: Provider = .{ .target = secondary.id };
+    try services.registerActionProvider(std.testing.allocator, owner, .init(&provider));
+    var head: Head = .empty;
+    defer head.deinit(std.testing.allocator);
+    _ = try services.focusView(&head, std.testing.allocator, view_ref, row.id);
+
+    const effect = (try services.invokeFocusedAction(&head.interactions, &head, std.testing.allocator, "field.secondary")).?;
+    try std.testing.expect(effect == .focus_requested);
+    try std.testing.expectEqual(secondary.id, head.semantic_focus.path().?.leaf().?);
+
+    provider.target = @enumFromInt(99);
+    try std.testing.expectError(error.UnknownFocusTarget, services.invokeAction(&head.interactions, std.testing.allocator, .{
+        .action = "field.secondary",
+        .view = view_ref,
+        .subject = row.id,
+    }));
+    try std.testing.expectEqual(secondary.id, head.semantic_focus.path().?.leaf().?);
 }
 
 test "semantic target relations resolve, stay absent, and reject stale or ambiguous edges" {

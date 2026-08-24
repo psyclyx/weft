@@ -27,10 +27,11 @@ const OwnedOutcome = union(enum) {
     transfer: scene_codec.transfer.Owned,
     interaction: scene_codec.interaction.Owned,
     open_target: scene_codec.target.OwnedLocated,
+    focus: semantic.scene.NodeId,
 
     fn deinit(self: *OwnedOutcome) void {
         switch (self.*) {
-            .declined, .handled => {},
+            .declined, .handled, .focus => {},
             .transfer => |*value| value.deinit(),
             .interaction => |*value| value.deinit(),
             .open_target => |*value| value.deinit(),
@@ -45,6 +46,7 @@ const OwnedOutcome = union(enum) {
             .transfer => |value| .{ .transfer = value.value },
             .interaction => |value| .{ .interaction = value.value },
             .open_target => |value| .{ .open_target = value.value },
+            .focus => |value| .{ .focus = value },
         };
     }
 };
@@ -127,6 +129,11 @@ pub const Bridge = struct {
         owned.* = undefined;
     }
 
+    pub fn respondFocus(self: *Bridge, node: semantic.scene.NodeId) ResponseError!void {
+        try self.beginResponse();
+        self.response = .{ .focus = node };
+    }
+
     fn beginResponse(self: *const Bridge) ResponseError!void {
         if (self.request_wire == null) return error.NotInFlight;
         if (self.response != null) return error.AlreadyResponded;
@@ -207,4 +214,25 @@ test "sandbox action bridge requires exactly one response during callback" {
     fixture.mode = .duplicate;
     try std.testing.expect((try bridge.invoke(request)) == .handled);
     try std.testing.expectError(error.NotInFlight, bridge.respondDeclined());
+}
+
+test "sandbox action bridge carries same-view focus as a scalar value" {
+    const Fixture = struct {
+        bridge: *Bridge = undefined,
+
+        fn invoke(raw: *anyopaque) CallbackError!void {
+            const self: *@This() = @ptrCast(@alignCast(raw));
+            self.bridge.respondFocus(@enumFromInt(0x1_0000_0002)) catch return error.Failed;
+        }
+    };
+    var fixture: Fixture = .{};
+    var bridge = Bridge.init(std.testing.allocator, .{ .context = &fixture, .invoke = Fixture.invoke });
+    defer bridge.deinit();
+    fixture.bridge = &bridge;
+    const outcome = try bridge.invoke(.{
+        .action = "focus-secondary",
+        .view = .{ .authority = .here, .slot = 1, .generation = 1 },
+        .subject = @enumFromInt(2),
+    });
+    try std.testing.expectEqual(@as(u64, 0x1_0000_0002), @intFromEnum(outcome.focus));
 }

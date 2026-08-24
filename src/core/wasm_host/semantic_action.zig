@@ -4,6 +4,7 @@
 //! leaf only copies canonical bytes through linear memory and invokes the
 //! guest's optional synchronous callback.
 
+const std = @import("std");
 const wasm = @import("../wasm.zig");
 const contract = @import("../membrane/contract.zig");
 const plugin_semantic = @import("weft_plugin_semantic");
@@ -69,7 +70,7 @@ pub fn hRespond(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32, resu
             if (payload_len != 0) return;
             plugin.semantic_actions.respondHandled() catch return;
         },
-        2, 3, 4 => {
+        2, 3, 4, 5 => {
             const payload = wire_util.readBounded(plugin.gpa, caller, args[1], args[2], 1, scene_codec.Limits.max_payload_bytes) orelse return;
             defer plugin.gpa.free(payload);
             if (kind == 2) {
@@ -84,12 +85,17 @@ pub fn hRespond(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32, resu
                     decoded.deinit();
                     return;
                 };
-            } else {
+            } else if (kind == 4) {
                 var decoded = scene_codec.target.decodeLocated(plugin.gpa, payload) catch return;
                 plugin.semantic_actions.adoptOpenTarget(&decoded) catch {
                     decoded.deinit();
                     return;
                 };
+            } else {
+                if (payload.len != @sizeOf(u64)) return;
+                const raw = std.mem.readInt(u64, payload[0..8], .little);
+                if (raw == 0) return;
+                plugin.semantic_actions.respondFocus(@enumFromInt(raw)) catch return;
             }
         },
         else => return,

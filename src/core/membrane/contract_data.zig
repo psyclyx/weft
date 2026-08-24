@@ -304,7 +304,7 @@ pub const imports = [_]Entry{
     .{ .name = "wl_semantic_action_provider", .params = &.{}, .results = &.{.i32}, .group = .semantic, .doc = "register this owner as a semantic action provider" },
     .{ .name = "wl_semantic_action_request_len", .params = &.{}, .results = &.{.i32}, .group = .semantic, .doc = "host-to-guest callback read: byte length of the current canonical action request" },
     .{ .name = "wl_semantic_action_request", .params = &.{ .u32, .u32 }, .results = &.{.i32}, .group = .semantic, .doc = "host-to-guest callback read: copy the current canonical action request" },
-    .{ .name = "wl_semantic_action_respond", .params = &.{ .u32, .u32, .u32 }, .results = &.{.i32}, .group = .semantic, .doc = "answer the current action once: declined, handled, canonical transfer, or canonical interaction" },
+    .{ .name = "wl_semantic_action_respond", .params = &.{ .u32, .u32, .u32 }, .results = &.{.i32}, .group = .semantic, .doc = "answer the current action once: declined, handled, canonical transfer/interaction/target, or same-view focus" },
     .{ .name = "wl_semantic_target_handler_register", .params = &.{ .u32, .u32, .u32, .u32, .u32 }, .results = &.{.i32}, .group = .semantic, .doc = "register a tokenized owner-scoped target handler and write its typed handle" },
     .{ .name = "wl_semantic_target_handler_close", .params = &.{ .u32, .u32, .u32 }, .results = &.{.u32}, .group = .semantic, .doc = "close an owned target handler and invalidate its generation" },
     .{ .name = "wl_semantic_target_handler_request_len", .params = &.{}, .results = &.{.i32}, .group = .semantic, .doc = "host-to-guest callback read: byte length of the current canonical descriptor or located target" },

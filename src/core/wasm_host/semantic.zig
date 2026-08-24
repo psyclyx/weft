@@ -232,7 +232,8 @@ pub fn hSemanticInteractionClose(data: ?*anyopaque, caller: *wasm.Caller, args: 
 }
 
 /// Return values are transport status, not policy: 0 unavailable/declined,
-/// 1 handled, 2 transfer stored, 3 interaction opened, -1 refused/failed.
+/// 1 handled, 2 transfer stored, 3 interaction opened, 4 target opened,
+/// 5 focus changed, -1 refused/failed.
 pub fn hSemanticAction(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32, results: []i32) void {
     const plugin: *WasmPlugin = @ptrCast(@alignCast(data.?));
     results[0] = -1;
@@ -254,5 +255,6 @@ pub fn hSemanticAction(data: ?*anyopaque, caller: *wasm.Caller, args: []const i3
         .transfer_stored => 2,
         .interaction_opened => 3,
         .target_opened => 4,
+        .focus_requested => 5,
     } else 0;
 }

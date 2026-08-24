@@ -157,7 +157,7 @@ pub const Plugin = struct {
                     session.controller.capture = captured;
                     return .{ .transfer = session.controller.captured().? };
                 },
-                .declined, .interaction, .open_target => {},
+                .declined, .interaction, .open_target, .focus => {},
             }
             return outcome;
         }

@@ -35,6 +35,11 @@ pub const Outcome = union(enum) {
     /// the generic target-handler registry. The provider never chooses a
     /// handler or manufactures a view handle.
     open_target: target.Located,
+    /// Request-only: move the dispatching head to another stable node in the
+    /// same retained view. This is useful for tool actions that reveal or
+    /// enter a secondary field without knowing the caller's editing model.
+    /// Core validates the node against the request view before changing focus.
+    focus: scene.NodeId,
 };
 
 /// Interoperable names are conveniences, not a closed enum. A plugin may

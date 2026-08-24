@@ -1067,6 +1067,7 @@ pub const SemanticActionResult = enum(i32) {
     transfer_stored = 2,
     interaction_opened = 3,
     target_opened = 4,
+    focus_changed = 5,
     failed = -1,
     _,
 };
@@ -1087,6 +1088,7 @@ pub const SemanticActionResponse = enum(u32) {
     transfer = 2,
     interaction = 3,
     open_target = 4,
+    focus = 5,
 };
 
 /// Read the request available only during `on_semantic_action()`.
@@ -1134,6 +1136,16 @@ pub fn semanticActionOpenTarget(located: semantic.target.Located) SemanticPublis
     defer allocator.free(payload);
     if (wl_semantic_action_respond(@intFromEnum(SemanticActionResponse.open_target), p(payload.ptr), @intCast(payload.len)) != 1)
         return error.Rejected;
+}
+
+/// Ask core to move the dispatching head to another stable node in the same
+/// retained view. The host validates membership before changing head state.
+pub fn semanticActionFocus(node: semantic.scene.NodeId) bool {
+    const raw: u64 = @intFromEnum(node);
+    if (raw == 0) return false;
+    var bytes: [8]u8 = undefined;
+    std.mem.writeInt(u64, &bytes, raw, .little);
+    return wl_semantic_action_respond(@intFromEnum(SemanticActionResponse.focus), p(&bytes), bytes.len) == 1;
 }
 
 pub const SemanticPublishError = semantic_codec.Error || error{Rejected};
