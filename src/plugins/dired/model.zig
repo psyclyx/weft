@@ -45,7 +45,11 @@ pub const SnapshotEntry = struct {
     link_target: []const u8 = &.{},
 };
 
-pub const Snapshot = struct { entries: []const SnapshotEntry };
+pub const Snapshot = struct {
+    entries: []const SnapshotEntry,
+    /// Revision of the directory namespace that produced `entries`.
+    revision: []const u8 = &.{},
+};
 
 pub const Observation = struct {
     identity: contract.EntryRef,
@@ -108,16 +112,27 @@ const no_parent = std.math.maxInt(u32);
 pub const Model = struct {
     gpa: std.mem.Allocator,
     root: contract.Root,
+    /// The directory whose children top-level rows represent. This is
+    /// distinct from `root`, which is the provider confinement/routing root.
+    directory: contract.NodeRef = .root,
+    /// Last clean namespace observation. A dirty refresh deliberately keeps
+    /// the old token so apply can detect an intervening namespace change.
+    base_revision: ?[]u8 = null,
     rows: std.ArrayList(Row) = .empty,
     next_id: NodeId = 1,
 
     pub fn init(gpa: std.mem.Allocator, root: contract.Root) Model {
-        return .{ .gpa = gpa, .root = root };
+        return initAt(gpa, root, .root);
+    }
+
+    pub fn initAt(gpa: std.mem.Allocator, root: contract.Root, directory: contract.NodeRef) Model {
+        return .{ .gpa = gpa, .root = root, .directory = directory };
     }
 
     pub fn deinit(self: *Model) void {
         for (self.rows.items) |*row_ptr| self.freeRow(row_ptr);
         self.rows.deinit(self.gpa);
+        if (self.base_revision) |revision| self.gpa.free(revision);
         self.* = undefined;
     }
 
@@ -137,7 +152,21 @@ pub const Model = struct {
     /// Reconcile by identity, never by listing position or visible name.
     /// Dirty rows remain present when their source disappears, marked stale.
     pub fn reconcile(self: *Model, snapshot: Snapshot) !void {
+        // Reconciliation is a value transaction: allocations and all
+        // identity matching happen against a deep staged copy. The live
+        // draft changes only after the complete snapshot succeeds.
+        var staged = try self.duplicate();
+        errdefer staged.deinit();
+        try staged.reconcileInPlace(snapshot);
+        const previous = self.*;
+        self.* = staged;
+        staged = previous;
+        staged.deinit();
+    }
+
+    fn reconcileInPlace(self: *Model, snapshot: Snapshot) !void {
         try validateSnapshot(snapshot);
+        const had_dirty_rows = self.hasDirtyRows();
         var seen = std.AutoHashMapUnmanaged(NodeId, void).empty;
         defer seen.deinit(self.gpa);
         for (snapshot.entries) |entry| {
@@ -186,6 +215,7 @@ pub const Model = struct {
             } else try remove.append(self.gpa, row_ptr.id);
         }
         for (remove.items) |id| self.removeRow(id);
+        if (!had_dirty_rows) try self.replaceBaseRevision(snapshot.revision);
     }
 
     pub fn rename(self: *Model, id: NodeId, name: []const u8) !void {
@@ -288,10 +318,37 @@ pub const Model = struct {
         try builder.build();
         owned.value = .{
             .root = self.root,
-            .base_revision = &.{},
+            .base_revision = try owned.arena.allocator().dupe(u8, self.base_revision orelse &.{}),
             .operations = try owned.arena.allocator().dupe(contract.Planned, builder.operations.items),
         };
         return owned;
+    }
+
+    /// Deep-copy the complete draft value so adapters can stage a scene and
+    /// publish it before committing an infallible model swap.
+    pub fn duplicate(self: *const Model) !Model {
+        var copy = Model.initAt(self.gpa, self.root, self.directory);
+        errdefer copy.deinit();
+        copy.next_id = self.next_id;
+        if (self.base_revision) |revision| copy.base_revision = try self.gpa.dupe(u8, revision);
+        try copy.rows.ensureTotalCapacity(self.gpa, self.rows.items.len);
+        for (self.rows.items) |row_value| {
+            var row_copy = try cloneRow(self.gpa, row_value);
+            errdefer copy.freeRow(&row_copy);
+            copy.rows.appendAssumeCapacity(row_copy);
+        }
+        return copy;
+    }
+
+    fn hasDirtyRows(self: *const Model) bool {
+        for (self.rows.items) |*row_ptr| if (isDirty(row_ptr)) return true;
+        return false;
+    }
+
+    fn replaceBaseRevision(self: *Model, value: []const u8) !void {
+        const next = try self.gpa.dupe(u8, value);
+        if (self.base_revision) |previous| self.gpa.free(previous);
+        self.base_revision = next;
     }
 
     fn appendObserved(self: *Model, parent: ?NodeId, entry: SnapshotEntry) !NodeId {
@@ -652,7 +709,10 @@ const Builder = struct {
     }
 
     fn parentRef(self: *Builder, row_ptr: *const Row) !contract.ParentRef {
-        const parent = row_ptr.parent orelse return .root;
+        const parent = row_ptr.parent orelse return switch (self.model.directory) {
+            .root => .root,
+            .entry => |entry| .{ .entry = entry },
+        };
         const parent_row = self.model.row(parent) orelse return error.UnknownParent;
         if (parent_row.pending == .added or parent_row.pending == .copied or parent_row.pending == .copied_renamed) {
             for (self.create_operations.items) |planned| if (planned.id == parent) return .{ .planned = planned.index };
@@ -789,6 +849,54 @@ fn cloneObservation(gpa: std.mem.Allocator, entry: SnapshotEntry) !Observation {
     observation.revision = try gpa.dupe(u8, entry.revision);
     observation.name = try gpa.dupe(u8, entry.name);
     return observation;
+}
+
+fn cloneStoredObservation(gpa: std.mem.Allocator, source: Observation) !Observation {
+    var observation = Observation{
+        .identity = source.identity,
+        .revision = &.{},
+        .name = &.{},
+        .kind = source.kind,
+        .mode = source.mode,
+    };
+    errdefer freeObservationWith(gpa, &observation);
+    observation.revision = try gpa.dupe(u8, source.revision);
+    observation.name = try gpa.dupe(u8, source.name);
+    return observation;
+}
+
+fn cloneRow(gpa: std.mem.Allocator, source: Row) !Row {
+    var row_copy = Row{
+        .id = source.id,
+        .parent = source.parent,
+        .base = null,
+        .current = null,
+        .draft = .{ .name = &.{}, .kind = source.draft.kind, .mode = source.draft.mode, .contents = &.{}, .link_target = &.{} },
+        .pending = source.pending,
+        .conflict = source.conflict,
+        .name_dirty = source.name_dirty,
+        .mode_dirty = source.mode_dirty,
+    };
+    errdefer {
+        if (row_copy.base) |*observation| freeObservationWith(gpa, observation);
+        if (row_copy.current) |*observation| freeObservationWith(gpa, observation);
+        freeDraftWith(gpa, &row_copy.draft);
+        if (row_copy.copy_source) |copy_source| gpa.free(copy_source.revision);
+    }
+    if (source.base) |observation| row_copy.base = try cloneStoredObservation(gpa, observation);
+    if (source.current) |observation| row_copy.current = try cloneStoredObservation(gpa, observation);
+    row_copy.draft.name = try gpa.dupe(u8, source.draft.name);
+    row_copy.draft.contents = try gpa.dupe(u8, source.draft.contents);
+    row_copy.draft.link_target = try gpa.dupe(u8, source.draft.link_target);
+    if (source.copy_source) |copy_source| row_copy.copy_source = .{
+        .root = copy_source.root,
+        .entry = copy_source.entry,
+        .revision = try gpa.dupe(u8, copy_source.revision),
+        .kind = copy_source.kind,
+        .mode = copy_source.mode,
+        .intent = copy_source.intent,
+    };
+    return row_copy;
 }
 
 fn draftFrom(gpa: std.mem.Allocator, entry: SnapshotEntry) !Draft {
@@ -1395,4 +1503,39 @@ test "build plan rejects missing parent, non-directory parent, and cycles" {
     const second = try model.addDirectory(first, "second", null);
     model.rowMutable(first).?.parent = second;
     try std.testing.expectError(error.ParentCycle, model.buildPlan());
+}
+
+fn reconcileAllocationFailureCase(gpa: std.mem.Allocator) !void {
+    var dired = Model.init(gpa, .{ .authority = .here, .slot = 80, .generation = 1 });
+    defer dired.deinit();
+    try dired.reconcile(.{
+        .revision = "base-one",
+        .entries = &.{.{ .identity = ref(80, 1), .name = "kept", .revision = "entry-one", .kind = .regular }},
+    });
+    const id = dired.rows.items[0].id;
+    try dired.rename(id, "draft-name");
+    dired.reconcile(.{
+        .revision = "base-two",
+        .entries = &.{
+            .{ .identity = ref(80, 1), .name = "external-name", .revision = "entry-two", .kind = .regular },
+            .{ .identity = ref(81, 1), .name = "new-entry", .revision = "entry-one", .kind = .directory },
+        },
+    }) catch |err| {
+        // Every failed staged reconciliation leaves the complete live draft
+        // and its namespace guard untouched.
+        try std.testing.expectEqual(@as(usize, 1), dired.rows.items.len);
+        try std.testing.expectEqual(id, dired.rows.items[0].id);
+        try std.testing.expectEqualStrings("draft-name", dired.rows.items[0].draft.name);
+        try std.testing.expectEqualStrings("base-one", dired.base_revision.?);
+        return err;
+    };
+    try std.testing.expectEqual(@as(usize, 2), dired.rows.items.len);
+    try std.testing.expectEqualStrings("draft-name", dired.row(id).?.draft.name);
+    try std.testing.expectEqual(Conflict.stale, dired.row(id).?.conflict);
+    // A dirty refresh observes current state but retains the clean baseline.
+    try std.testing.expectEqualStrings("base-one", dired.base_revision.?);
+}
+
+test "reconcile is transactional under every allocation failure" {
+    try std.testing.checkAllAllocationFailures(std.testing.allocator, reconcileAllocationFailureCase, .{});
 }

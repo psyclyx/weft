@@ -50,6 +50,14 @@ pub const Controller = struct {
         return if (self.capture) |item| item.value else null;
     }
 
+    /// Move the owned capture across controller instances without exposing a
+    /// borrowed result beyond the synchronous action call.
+    pub fn takeCapture(self: *Controller) ?transfer.OwnedItem {
+        const owned = self.capture;
+        self.capture = null;
+        return owned;
+    }
+
     pub fn clearCapture(self: *Controller) void {
         if (self.capture) |*item| item.deinit();
         self.capture = null;

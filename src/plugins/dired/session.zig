@@ -65,11 +65,18 @@ pub const Plugin = struct {
         self.* = undefined;
     }
 
-    /// Claim any valid directory attachment whose authority has a live route.
+    /// Claim only an attachment that the provider currently observes as a
+    /// directory. Decoding a fact proves its shape, not its referent's kind.
     pub fn probe(self: *Plugin, descriptor: semantic.target.Descriptor) target_runtime.resolver.ProbeError!?semantic.target.Match {
         if (descriptor.kind != .directory) return null;
         const directory = (fs.target.find(descriptor.facts) catch return error.InvalidTarget) orelse return null;
-        _ = self.host.filesystems.capabilities(directory.root) catch return error.Unavailable;
+        var observed = self.host.filesystems.observe(self.gpa, directory.root, directory.node) catch |err| return switch (err) {
+            error.InvalidHandle, error.NotFound, error.NotDirectory => error.InvalidTarget,
+            else => error.Unavailable,
+        };
+        defer observed.deinit();
+        if (!std.meta.eql(observed.value.node, directory.node) or observed.value.kind != .directory)
+            return error.InvalidTarget;
         return .exact;
     }
 
@@ -101,13 +108,21 @@ pub const Plugin = struct {
     pub fn invoke(self: *Plugin, request: semantic.action.Request) view_runtime.action.ProviderError!semantic.action.Outcome {
         for (self.sessions.items) |session| {
             if (!session.view_ref.eql(request.view)) continue;
-            const outcome = session.controller.invoke(request) catch |err| return mapActionError(err);
+            var staged = session.draft.duplicate() catch return error.Failed;
+            defer staged.deinit();
+            var staged_controller = actions.Controller.init(self.gpa, &staged, session.view_ref);
+            defer staged_controller.deinit();
+            const outcome = staged_controller.invoke(request) catch |err| return mapActionError(err);
             switch (outcome) {
                 .handled => {
-                    session.bumpFieldRevisions();
-                    session.refreshScene() catch return error.Failed;
+                    session.publishDraft(&staged) catch return error.Failed;
                 },
-                else => {},
+                .transfer => {
+                    session.controller.clearCapture();
+                    session.controller.capture = staged_controller.takeCapture();
+                    return .{ .transfer = session.controller.captured().? };
+                },
+                .declined, .interaction => {},
             }
             return outcome;
         }
@@ -154,14 +169,18 @@ pub const Session = struct {
             .target = target,
             .target_revision = target_revision,
             .directory = directory,
-            .draft = .init(plugin.gpa, directory.root),
+            .draft = .initAt(plugin.gpa, directory.root, directory.node),
         };
     }
 
     fn load(self: *Session) !void {
-        try self.refreshModel(false);
-        try self.prepareFields();
-        var scene = try self.projectScene();
+        var initial = try self.refreshedDraft(true);
+        defer initial.deinit();
+        const previous = self.draft;
+        self.draft = initial;
+        initial = previous;
+        try self.prepareFieldsFor(&self.draft);
+        var scene = try self.projectSceneFor(&self.draft);
         defer scene.deinit();
         self.view_ref = try self.plugin.host.views.publish(
             self.plugin.gpa,
@@ -192,18 +211,20 @@ pub const Session = struct {
     /// Reconcile an external listing by opaque identity. Dirty rows survive
     /// disappearance and become conflicts; no watcher mutates the draft.
     pub fn refresh(self: *Session) !void {
-        try self.refreshModel(false);
-        self.bumpFieldRevisions();
-        try self.refreshScene();
+        try self.validateTarget();
+        var staged = try self.refreshedDraft(false);
+        defer staged.deinit();
+        try self.publishDraft(&staged);
     }
 
     /// Explicit revert discards the draft and rebuilds from current authority
     /// state. This is the generic operation `:e!` can invoke for a tool view.
     pub fn revert(self: *Session) !void {
+        try self.validateTarget();
+        var staged = try self.refreshedDraft(true);
+        defer staged.deinit();
+        try self.publishDraft(&staged);
         self.controller.clearCapture();
-        try self.refreshModel(true);
-        self.bumpFieldRevisions();
-        try self.refreshScene();
     }
 
     pub fn buildPlan(self: *const Session) !model.OwnedPlan {
@@ -211,18 +232,20 @@ pub const Session = struct {
     }
 
     pub fn apply(self: *Session, gpa: std.mem.Allocator) !contract.OwnedApplyReport {
+        try self.validateTarget();
         var effect_plan = try self.buildPlan();
         defer effect_plan.deinit();
         return self.plugin.host.filesystems.apply(gpa, effect_plan.value);
     }
 
-    fn refreshModel(self: *Session, discard_draft: bool) !void {
+    fn refreshedDraft(self: *Session, discard_draft: bool) !model.Model {
         var listing = try self.plugin.host.filesystems.list(
             self.plugin.gpa,
             self.directory.root,
             self.directory.node,
         );
         defer listing.deinit();
+        try validateListing(self.directory, listing.value);
         const arena = listing.allocator();
         const entries = try arena.alloc(model.SnapshotEntry, listing.value.entries.len);
         for (listing.value.entries, entries) |entry, *snapshot| {
@@ -239,38 +262,55 @@ pub const Session = struct {
                 .link_target = entry.observation.metadata.link_target orelse &.{},
             };
         }
-        if (discard_draft) {
-            var replacement = model.Model.init(self.plugin.gpa, self.directory.root);
-            errdefer replacement.deinit();
-            try replacement.reconcile(.{ .entries = entries });
-            self.draft.deinit();
-            self.draft = replacement;
-            if (self.loaded) self.controller.model = &self.draft;
-        } else {
-            try self.draft.reconcile(.{ .entries = entries });
-        }
+        var staged = if (discard_draft)
+            model.Model.initAt(self.plugin.gpa, self.directory.root, self.directory.node)
+        else
+            try self.draft.duplicate();
+        errdefer staged.deinit();
+        try staged.reconcile(.{ .entries = entries, .revision = listing.value.revision.token });
+        return staged;
     }
 
-    fn refreshScene(self: *Session) !void {
-        try self.prepareFields();
-        var scene = try self.projectScene();
+    fn validateTarget(self: *const Session) !void {
+        const descriptor = self.plugin.host.targets.get(self.target) orelse return error.StaleTarget;
+        if (descriptor.revision != self.target_revision or descriptor.kind != .directory) return error.StaleTarget;
+        const directory = (try fs.target.find(descriptor.facts)) orelse return error.StaleTarget;
+        if (!sameDirectory(directory, self.directory)) return error.StaleTarget;
+    }
+
+    /// Publish a staged model's scene first, then commit it with an infallible
+    /// value swap. Failed allocation or view replacement leaves both the live
+    /// draft and retained scene unchanged.
+    fn publishDraft(self: *Session, staged: *model.Model) !void {
+        const old_fields_len = self.fields.items.len;
+        var committed = false;
+        defer if (!committed) self.rollbackFieldsFrom(old_fields_len);
+        try self.prepareFieldsFor(staged);
+        var scene = try self.projectSceneFor(staged);
         defer scene.deinit();
-        self.scene_revision +|= 1;
+        const next_revision = std.math.add(u64, self.scene_revision, 1) catch return error.RevisionOverflow;
         try self.plugin.host.views.replace(
             self.plugin.gpa,
             self.plugin.owner,
             self.view_ref,
-            self.scene_revision,
+            next_revision,
             scene.value,
         );
+        const previous = self.draft;
+        self.draft = staged.*;
+        staged.* = previous;
+        self.scene_revision = next_revision;
+        self.controller.model = &self.draft;
+        self.bumpFieldRevisions();
         self.pruneFields();
+        committed = true;
     }
 
     /// Additions are staged before scene replacement; obsolete field refs are
     /// retained until the new scene is live. An allocation failure therefore
     /// cannot publish a scene containing a missing field.
-    fn prepareFields(self: *Session) !void {
-        for (self.draft.rows.items) |row| {
+    fn prepareFieldsFor(self: *Session, draft: *const model.Model) !void {
+        for (draft.rows.items) |row| {
             if (self.fieldFor(row.id) != null) continue;
             const field = try self.plugin.gpa.create(NameField);
             errdefer self.plugin.gpa.destroy(field);
@@ -282,6 +322,14 @@ pub const Session = struct {
             );
             errdefer _ = self.plugin.host.fields.remove(self.plugin.gpa, self.plugin.owner, field.ref);
             try self.fields.append(self.plugin.gpa, field);
+        }
+    }
+
+    fn rollbackFieldsFrom(self: *Session, first: usize) void {
+        while (self.fields.items.len > first) {
+            const field = self.fields.pop().?;
+            _ = self.plugin.host.fields.remove(self.plugin.gpa, self.plugin.owner, field.ref);
+            self.plugin.gpa.destroy(field);
         }
     }
 
@@ -297,14 +345,14 @@ pub const Session = struct {
         }
     }
 
-    fn projectScene(self: *Session) !projection.OwnedScene {
-        const bindings = try self.plugin.gpa.alloc(projection.FieldBinding, self.draft.rows.items.len);
+    fn projectSceneFor(self: *Session, draft: *const model.Model) !projection.OwnedScene {
+        const bindings = try self.plugin.gpa.alloc(projection.FieldBinding, draft.rows.items.len);
         defer self.plugin.gpa.free(bindings);
-        for (self.draft.rows.items, bindings) |row, *binding| binding.* = .{
+        for (draft.rows.items, bindings) |row, *binding| binding.* = .{
             .row = row.id,
             .field = self.fieldFor(row.id).?.ref,
         };
-        return projection.project(self.plugin.gpa, self.draft.rows.items, bindings);
+        return projection.project(self.plugin.gpa, draft.rows.items, bindings);
     }
 
     fn fieldFor(self: *const Session, row: model.NodeId) ?*NameField {
@@ -316,6 +364,24 @@ pub const Session = struct {
         for (self.fields.items) |field| field.revision +|= 1;
     }
 };
+
+fn validateListing(directory: fs.target.Directory, listing: contract.Listing) !void {
+    if (!std.meta.eql(listing.directory.node, directory.node) or listing.directory.kind != .directory)
+        return error.InvalidListing;
+    for (listing.entries) |entry| {
+        _ = contract.Name.init(entry.name.bytes) catch return error.InvalidListing;
+        const identity = switch (entry.observation.node) {
+            .root => return error.InvalidListing,
+            .entry => |ref| ref,
+        };
+        if (identity.generation == 0 or identity.authority != directory.root.authority)
+            return error.InvalidListing;
+    }
+}
+
+fn sameDirectory(a: fs.target.Directory, b: fs.target.Directory) bool {
+    return a.root.eql(b.root) and std.meta.eql(a.node, b.node);
+}
 
 const NameField = struct {
     session: *Session,
@@ -360,14 +426,15 @@ const NameField = struct {
         @memcpy(next[0..start], row.draft.name[0..start]);
         @memcpy(next[start..][0..edit_value.replacement.len], edit_value.replacement);
         @memcpy(next[start + edit_value.replacement.len ..], row.draft.name[end..]);
-        self.session.draft.rename(self.row, next) catch |err| return switch (err) {
+        var staged = self.session.draft.duplicate() catch return error.OutOfMemory;
+        defer staged.deinit();
+        staged.rename(self.row, next) catch |err| return switch (err) {
             error.OutOfMemory => error.OutOfMemory,
             else => error.Unsupported,
         };
         const caret: u64 = @intCast(start + edit_value.replacement.len);
+        self.session.publishDraft(&staged) catch return error.Failed;
         self.selection = edit_value.selection_after orelse .{ .anchor = caret, .caret = caret };
-        self.revision +|= 1;
-        self.session.refreshScene() catch return error.Failed;
     }
 };
 
@@ -461,6 +528,113 @@ test "actions retain deleted rows as portable paste anchors and revert discards 
     try session.revert();
     try std.testing.expectEqual(@as(usize, 1), session.draft.rows.items.len);
     try std.testing.expectEqual(model.Pending.observed, session.draft.rows.items[0].pending);
+}
+
+test "entry-backed directory sessions preserve their destination and namespace revision" {
+    var fixture: Fixture = undefined;
+    const directory: fs.target.Directory = .{ .root = rootRef(), .node = .{ .entry = entryRef(99) } };
+    try fixture.initAt(directory);
+    defer fixture.deinit();
+    const session = fixture.plugin.sessions.items[0];
+    const row = session.draft.rows.items[0].id;
+    try session.draft.rename(row, "nested-name");
+    var effect_plan = try session.buildPlan();
+    defer effect_plan.deinit();
+    try std.testing.expectEqualStrings("listing", effect_plan.value.base_revision);
+    try std.testing.expectEqual(@as(usize, 1), effect_plan.value.operations.len);
+    const rename = effect_plan.value.operations[0].operation.rename;
+    try std.testing.expectEqual(entryRef(99), rename.destination.parent.entry);
+}
+
+test "failed scene replacement leaves action and field drafts unchanged" {
+    var fixture: Fixture = undefined;
+    try fixture.init();
+    defer fixture.deinit();
+    const session = fixture.plugin.sessions.items[0];
+    const row = session.draft.rows.items[0].id;
+    const field = session.fieldFor(row).?;
+    var before = try fixture.fields.get(field.ref).?.snapshot(std.testing.allocator);
+    defer before.deinit();
+
+    try std.testing.expect(fixture.views.close(std.testing.allocator, fixture.plugin.owner, session.view_ref));
+    try std.testing.expectError(error.Failed, fixture.plugin.invoke(.{
+        .action = semantic.action.standard.delete,
+        .view = session.view_ref,
+        .subject = try projection.rowNodeId(row),
+    }));
+    try std.testing.expectEqual(model.Pending.observed, session.draft.row(row).?.pending);
+
+    try std.testing.expectError(error.Failed, fixture.fields.get(field.ref).?.edit(before.value.revision, .{
+        .start = 0,
+        .end = before.value.bytes.len,
+        .replacement = "not-committed",
+    }));
+    try std.testing.expectEqualStrings("kept", session.draft.row(row).?.draft.name);
+    var after = try fixture.fields.get(field.ref).?.snapshot(std.testing.allocator);
+    defer after.deinit();
+    try std.testing.expectEqualSlices(u8, before.value.revision, after.value.revision);
+}
+
+test "target replacement and closure make existing sessions explicitly stale" {
+    var fixture: Fixture = undefined;
+    try fixture.init();
+    defer fixture.deinit();
+    const old_session = fixture.plugin.sessions.items[0];
+    const binding = try fs.target.encode(std.testing.allocator, .{ .root = rootRef() });
+    defer std.testing.allocator.free(binding);
+    try fixture.targets.replace(std.testing.allocator, @enumFromInt(1), fixture.target, .{
+        .kind = .directory,
+        .display_name = "replacement",
+        .facts = &.{.{ .name = fs.target.fact_name, .value = binding }},
+    });
+    try std.testing.expectError(error.StaleTarget, old_session.refresh());
+
+    var resolution = try fixture.handlers.resolve(std.testing.allocator, fixture.targets.get(fixture.target).?.*);
+    defer resolution.deinit();
+    _ = try fixture.handlers.open(resolution.value.decide().selected, .{ .target = fixture.target, .revision = 2 });
+    try std.testing.expectEqual(@as(usize, 2), fixture.plugin.sessions.items.len);
+    const current_session = fixture.plugin.sessions.items[1];
+    try std.testing.expect(fixture.targets.close(std.testing.allocator, @enumFromInt(1), fixture.target));
+    try std.testing.expectError(error.StaleTarget, current_session.refresh());
+}
+
+test "directory listing boundary rejects retargeted and invalid entries" {
+    const directory: fs.target.Directory = .{ .root = rootRef() };
+    const valid_directory: contract.Observation = .{
+        .node = .root,
+        .revision = .{ .token = "r" },
+        .kind = .directory,
+    };
+    try validateListing(directory, .{ .directory = valid_directory, .revision = .{ .token = "r" }, .entries = &.{} });
+    try std.testing.expectError(error.InvalidListing, validateListing(directory, .{
+        .directory = .{ .node = .{ .entry = entryRef(4) }, .revision = .{ .token = "r" }, .kind = .directory },
+        .revision = .{ .token = "r" },
+        .entries = &.{},
+    }));
+    try std.testing.expectError(error.InvalidListing, validateListing(directory, .{
+        .directory = valid_directory,
+        .revision = .{ .token = "r" },
+        .entries = &.{.{
+            .name = .{ .bytes = "bad/name" },
+            .observation = .{
+                .node = .{ .entry = .{ .authority = @enumFromInt(9), .slot = 1, .generation = 1 } },
+                .revision = .{ .token = "r" },
+                .kind = .regular,
+            },
+        }},
+    }));
+    try std.testing.expectError(error.InvalidListing, validateListing(directory, .{
+        .directory = valid_directory,
+        .revision = .{ .token = "r" },
+        .entries = &.{.{
+            .name = try contract.Name.init("other-authority"),
+            .observation = .{
+                .node = .{ .entry = .{ .authority = @enumFromInt(9), .slot = 1, .generation = 1 } },
+                .revision = .{ .token = "r" },
+                .kind = .regular,
+            },
+        }},
+    }));
 }
 
 const FakeEntry = struct {
@@ -565,9 +739,14 @@ const Fixture = struct {
     views: view_runtime.view.Registry,
     fields: view_runtime.field.Registry,
     actions: view_runtime.action.Registry,
+    target: semantic.target.Ref,
     plugin: Plugin,
 
     fn init(self: *Fixture) !void {
+        return self.initAt(.{ .root = rootRef() });
+    }
+
+    fn initAt(self: *Fixture, directory: fs.target.Directory) !void {
         self.* = .{
             .fake = .{},
             .router = .init(std.testing.allocator),
@@ -576,13 +755,14 @@ const Fixture = struct {
             .views = .init(.here),
             .fields = .init(.here),
             .actions = .{},
+            .target = undefined,
             .plugin = undefined,
         };
         try self.fake.set(&.{.{ .name = "kept", .ref = entryRef(8), .revision = "1", .kind = .regular }});
         try self.router.register(.here, .init(&self.fake));
-        const binding = try fs.target.encode(std.testing.allocator, .{ .root = rootRef() });
+        const binding = try fs.target.encode(std.testing.allocator, directory);
         defer std.testing.allocator.free(binding);
-        const target = try self.targets.publish(std.testing.allocator, @enumFromInt(1), .{
+        self.target = try self.targets.publish(std.testing.allocator, @enumFromInt(1), .{
             .kind = .directory,
             .display_name = "fixture",
             .facts = &.{.{ .name = fs.target.fact_name, .value = binding }},
@@ -596,9 +776,9 @@ const Fixture = struct {
             .actions = &self.actions,
         });
         try self.plugin.start();
-        var resolution = try self.handlers.resolve(std.testing.allocator, self.targets.get(target).?.*);
+        var resolution = try self.handlers.resolve(std.testing.allocator, self.targets.get(self.target).?.*);
         defer resolution.deinit();
-        _ = try self.handlers.open(resolution.value.decide().selected, .{ .target = target, .revision = 1 });
+        _ = try self.handlers.open(resolution.value.decide().selected, .{ .target = self.target, .revision = 1 });
     }
 
     fn deinit(self: *Fixture) void {
