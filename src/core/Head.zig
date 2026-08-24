@@ -26,6 +26,8 @@
 
 const std = @import("std");
 const Allocator = std.mem.Allocator;
+const kernel = @import("weft_kernel");
+const view_runtime = @import("weft_view_runtime");
 
 const Keymap = @import("Keymap.zig");
 const Pick = @import("pick/Pick.zig");
@@ -65,6 +67,13 @@ resolved_group: std.ArrayList(bool) = .empty,
 pick: Pick = .empty,
 /// This head's transient status-line message.
 echo: std.ArrayList(u8) = .empty,
+/// Semantic focus is a stable view/node/field path rather than a text cursor.
+/// A renderer or editing plugin may project that path into its own local
+/// caret state, but tool views do not need to pretend to be text buffers.
+semantic_focus: SemanticFocus = .empty,
+/// Dialogs, pickers, and popups are nested semantic interactions local to
+/// this head. Their bindings are resolved here before any global keymap help.
+interactions: view_runtime.interaction.Stack = .empty,
 /// This head's dot-repeat recorder (`.` replays the last change) — see
 /// `DotRepeat`'s doc below. Per-head for the same reason as `pick`/`echo`:
 /// two heads pressing keys concurrently must not interleave into one
@@ -100,6 +109,41 @@ focused_pane_gen: u32 = 0,
 transient_stack: std.ArrayList(TransientFrame) = .empty,
 
 pub const empty: Head = .{};
+
+pub const SemanticFocus = struct {
+    view: ?kernel.view.Ref = null,
+    nodes: std.ArrayList(kernel.scene.NodeId) = .empty,
+    field: ?kernel.scene.FieldRef = null,
+
+    pub const empty: SemanticFocus = .{};
+
+    pub fn deinit(self: *SemanticFocus, gpa: Allocator) void {
+        self.nodes.deinit(gpa);
+        self.* = .{};
+    }
+
+    pub fn set(self: *SemanticFocus, gpa: Allocator, next: kernel.focus.Path) Allocator.Error!void {
+        try self.nodes.ensureTotalCapacity(gpa, next.nodes.len);
+        self.nodes.clearRetainingCapacity();
+        self.nodes.appendSliceAssumeCapacity(next.nodes);
+        self.view = next.view;
+        self.field = next.field;
+    }
+
+    pub fn clear(self: *SemanticFocus) void {
+        self.view = null;
+        self.nodes.clearRetainingCapacity();
+        self.field = null;
+    }
+
+    pub fn path(self: *const SemanticFocus) ?kernel.focus.Path {
+        return .{
+            .view = self.view orelse return null,
+            .nodes = self.nodes.items,
+            .field = self.field,
+        };
+    }
+};
 
 /// One live "paired transient" push (`ctx.zig`'s `Ctx.pushTransient`) —
 /// north-star-plan §2.1's "transient/menu modes are structurally paired
@@ -182,6 +226,8 @@ pub fn deinit(self: *Head, gpa: Allocator) void {
     self.resolved_group.deinit(gpa);
     self.pick.deinit(gpa);
     self.echo.deinit(gpa);
+    self.semantic_focus.deinit(gpa);
+    self.interactions.deinit(gpa);
     for (self.transient_stack.items) |frame| {
         gpa.free(frame.mode);
         gpa.free(frame.return_to);
@@ -711,6 +757,31 @@ test "head: two heads over one system hold independent mode, chord, pick, and ec
     head_a.pick = .empty;
     head_b.pick.deinit(gpa);
     head_b.pick = .empty;
+}
+
+test "head: semantic focus and interaction scopes are independent" {
+    const gpa = t.allocator;
+    var a: Head = .empty;
+    defer a.deinit(gpa);
+    var b: Head = .empty;
+    defer b.deinit(gpa);
+
+    const view_ref: kernel.view.Ref = .{ .authority = .here, .slot = 7, .generation = 2 };
+    const field_ref: kernel.scene.FieldRef = .{ .authority = .here, .slot = 3, .generation = 4 };
+    const nodes = [_]kernel.scene.NodeId{ @enumFromInt(11), @enumFromInt(12) };
+    try a.semantic_focus.set(gpa, .{ .view = view_ref, .nodes = &nodes, .field = field_ref });
+    try t.expectEqual(@as(usize, 2), a.semantic_focus.path().?.nodes.len);
+    try t.expect(b.semantic_focus.path() == null);
+
+    const definition: kernel.interaction.Definition = .{
+        .role = .dialog,
+        .root = @enumFromInt(20),
+        .actions = &.{.{ .id = "apply", .label = "Apply" }},
+        .bindings = &.{.{ .input = "y", .action = "apply" }},
+    };
+    _ = try a.interactions.open(gpa, definition);
+    try t.expectEqualStrings("apply", a.interactions.actionForInput("y").?.id);
+    try t.expect(b.interactions.actionForInput("y") == null);
 }
 
 // Minimal Context scaffolding for the pick-session test above (Context holds

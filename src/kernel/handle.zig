@@ -44,6 +44,12 @@ pub fn Handle(comptime Marker: type) type {
                 .generation = self.generation,
             };
         }
+
+        pub fn eql(self: Self, other: Self) bool {
+            return self.authority == other.authority and
+                self.slot == other.slot and
+                self.generation == other.generation;
+        }
     };
 }
 
