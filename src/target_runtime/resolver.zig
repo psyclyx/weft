@@ -7,12 +7,7 @@ const semantic = @import("weft_semantic");
 pub const HandlerTag = struct {};
 pub const HandlerRef = semantic.handle.Handle(HandlerTag);
 
-pub const Strength = enum(u8) {
-    fallback,
-    compatible,
-    preferred,
-    exact,
-};
+pub const Strength = semantic.target.Match;
 
 pub const ProbeError = error{ Unavailable, InvalidTarget, Failed };
 pub const OpenError = error{ StaleTarget, Unavailable, Rejected, Failed };

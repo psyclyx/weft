@@ -92,6 +92,7 @@ fn createArchitectureModules(
     });
     plugin_semantic.addImport("weft_semantic", semantic);
     plugin_semantic.addImport("weft_view_runtime", view_runtime);
+    plugin_semantic.addImport("weft_target_runtime", target_runtime);
     plugin_semantic.addImport("weft_scene_codec", scene_codec);
     return .{
         .wire = wire,

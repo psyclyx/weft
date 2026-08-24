@@ -13,6 +13,15 @@ pub const Kind = union(enum) {
     synthetic: []const u8,
 };
 
+/// A handler's data-dependent claim on one immutable target descriptor.
+/// Equal strongest claims remain ambiguous; registration order is not policy.
+pub const Match = enum(u8) {
+    fallback,
+    compatible,
+    preferred,
+    exact,
+};
+
 pub const Fact = struct {
     name: []const u8,
     value: []const u8,

@@ -8,6 +8,7 @@ const std = @import("std");
 
 pub const field = @import("field.zig");
 pub const action = @import("action.zig");
+pub const target = @import("target.zig");
 
 test {
     std.testing.refAllDecls(@This());
