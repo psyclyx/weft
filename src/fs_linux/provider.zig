@@ -17,6 +17,10 @@ const revision_magic: u32 = 0x31584657; // "WFX1", little endian.
 var generation_nonce: std.atomic.Value(u32) = .init(1);
 
 pub const LinuxFs = struct {
+    pub const lease_capability: contract.LeaseCapability = .{
+        .regular_file_max_bytes = 64 * 1024 * 1024,
+        .symlink_target_max_bytes = 64 * 1024,
+    };
     gpa: std.mem.Allocator,
     generation_seed: u32,
     roots: std.ArrayList(RootSlot) = .empty,
@@ -213,7 +217,7 @@ pub const LinuxFs = struct {
         _ = try self.rootState(root);
         return .{
             .exclusive_create = true,
-            .durable_file_lease = true,
+            .durable_lease = lease_capability,
             .symlink = true,
             .posix_mode = true,
             .guard_strength = .preflight,
@@ -412,9 +416,20 @@ pub const LinuxFs = struct {
             self.gpa.free(link_target);
         }
         if (resolved.snapshot.kind == .regular) {
-            contents = try readWholeFile(self.gpa, resolved.parent_fd, resolved.state.name, resolved.snapshot);
+            contents = try readWholeFile(
+                self.gpa,
+                resolved.parent_fd,
+                resolved.state.name,
+                resolved.snapshot,
+                lease_capability.regular_file_max_bytes,
+            );
         } else {
-            link_target = try readlinkAt(self.gpa, resolved.parent_fd, resolved.state.name);
+            link_target = try readlinkAtBounded(
+                self.gpa,
+                resolved.parent_fd,
+                resolved.state.name,
+                lease_capability.symlink_target_max_bytes,
+            );
             const finish = try statAt(self.gpa, resolved.parent_fd, resolved.state.name);
             if (!finish.identity.eql(resolved.snapshot.identity) or !sameRevision(finish, resolved.snapshot)) return error.Stale;
         }
@@ -1351,6 +1366,7 @@ fn outcomeForError(err: contract.Error) contract.Outcome {
         error.CrossDevice => .{ .conflict = "cross-device operation is unsupported" },
         error.Unsupported => .unsupported,
         error.InvalidName => .{ .conflict = "invalid raw leaf name" },
+        error.LimitExceeded => .{ .conflict = "lease size limit exceeded" },
         error.Busy => .{ .conflict = "entry is busy" },
         error.Io => .{ .ambiguous = "filesystem operation failed with unknown effect" },
         error.OutOfMemory => unreachable,
@@ -1373,7 +1389,13 @@ fn checkedNameZ(gpa: std.mem.Allocator, bytes: []const u8) contract.Error![:0]u8
     return gpa.dupeZ(u8, bytes);
 }
 
-fn readWholeFile(gpa: std.mem.Allocator, parent_fd: i32, name: []const u8, expected: LinuxFs.Snapshot) contract.Error![]u8 {
+fn readWholeFile(
+    gpa: std.mem.Allocator,
+    parent_fd: i32,
+    name: []const u8,
+    expected: LinuxFs.Snapshot,
+    max_bytes: u64,
+) contract.Error![]u8 {
     const name_z = try checkedNameZ(gpa, name);
     defer gpa.free(name_z);
     const fd = try fdResult(linux.openat(parent_fd, name_z.ptr, .{
@@ -1384,11 +1406,23 @@ fn readWholeFile(gpa: std.mem.Allocator, parent_fd: i32, name: []const u8, expec
     defer closeFd(fd);
     const opened = try statFd(fd);
     if (opened.kind != .regular or !opened.identity.eql(expected.identity) or !sameRevision(opened, expected)) return error.Stale;
+    if (opened.size > max_bytes) return error.LimitExceeded;
     var bytes: std.ArrayList(u8) = .empty;
     errdefer bytes.deinit(gpa);
     var buffer: [64 * 1024]u8 = undefined;
     while (true) {
-        const rc = linux.read(fd, &buffer, buffer.len);
+        const remaining = max_bytes -| bytes.items.len;
+        if (remaining == 0) {
+            const probe = linux.read(fd, &buffer, 1);
+            switch (linux.errno(probe)) {
+                .SUCCESS => if (probe != 0) return error.LimitExceeded,
+                .INTR => continue,
+                .ACCES, .PERM => return error.PermissionDenied,
+                else => return error.Io,
+            }
+            break;
+        }
+        const rc = linux.read(fd, &buffer, @intCast(@min(remaining, buffer.len)));
         const count = switch (linux.errno(rc)) {
             .SUCCESS => rc,
             .INTR => continue,
@@ -1401,6 +1435,34 @@ fn readWholeFile(gpa: std.mem.Allocator, parent_fd: i32, name: []const u8, expec
     const finish = try statFd(fd);
     if (!finish.identity.eql(expected.identity) or !sameRevision(finish, expected)) return error.Stale;
     return bytes.toOwnedSlice(gpa);
+}
+
+fn readlinkAtBounded(
+    gpa: std.mem.Allocator,
+    parent_fd: i32,
+    name: []const u8,
+    max_bytes: u64,
+) contract.Error![]u8 {
+    const name_z = try checkedNameZ(gpa, name);
+    defer gpa.free(name_z);
+    const capacity = std.math.cast(usize, max_bytes +| 1) orelse return error.LimitExceeded;
+    const buffer = try gpa.alloc(u8, capacity);
+    errdefer gpa.free(buffer);
+    var length: usize = undefined;
+    while (true) {
+        const rc = linux.readlinkat(parent_fd, name_z.ptr, buffer.ptr, buffer.len);
+        length = switch (linux.errno(rc)) {
+            .SUCCESS => rc,
+            .INTR => continue,
+            .NOENT => return error.NotFound,
+            .ACCES, .PERM => return error.PermissionDenied,
+            .LOOP => return error.Confined,
+            else => return error.Io,
+        };
+        break;
+    }
+    if (length > max_bytes) return error.LimitExceeded;
+    return gpa.realloc(buffer, length);
 }
 
 fn openDirectoryAt(parent_fd: i32, name: []const u8) contract.Error!i32 {
@@ -2540,6 +2602,30 @@ test "linux symlink leases preserve link text without following" {
     const copy = findEntry(after.value, "link-copy") orelse return error.TestExpectedEqual;
     try t.expectEqual(contract.Kind.symlink, copy.observation.kind);
     try t.expectEqualStrings("outside/target", copy.observation.metadata.link_target.?);
+}
+
+test "linux bounded lease read rejects bytes beyond its limit" {
+    var fixture = try Fixture.init(t.allocator);
+    defer fixture.deinit();
+    const provider = fixture.local.provider();
+    const setup = [_]contract.Planned{.{
+        .id = opId(97),
+        .operation = .{ .create_file = .{ .destination = .{ .parent = .root, .name = try .init("oversize") }, .contents = "12" } },
+    }};
+    var setup_report = try provider.apply(t.allocator, .{ .root = fixture.root, .base_revision = &.{}, .operations = &setup });
+    defer setup_report.deinit();
+    var listing = try provider.list(t.allocator, fixture.root, .root);
+    defer listing.deinit();
+    const source = findEntry(listing.value, "oversize") orelse return error.TestExpectedEqual;
+    const resolved = try fixture.local.resolveEntry(fixture.root, source.observation.node.entry);
+    defer resolved.close();
+    try t.expectError(error.LimitExceeded, readWholeFile(
+        t.allocator,
+        resolved.parent_fd,
+        resolved.state.name,
+        resolved.snapshot,
+        1,
+    ));
 }
 
 test "linux directory leases are explicit unsupported" {

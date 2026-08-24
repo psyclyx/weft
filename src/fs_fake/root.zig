@@ -10,6 +10,10 @@ const fs = @import("weft_fs");
 const contract = fs.contract;
 
 pub const Fake = struct {
+    pub const lease_capability: contract.LeaseCapability = .{
+        .regular_file_max_bytes = 1024 * 1024,
+        .symlink_target_max_bytes = 64 * 1024,
+    };
     gpa: std.mem.Allocator,
     records: std.ArrayList(Record) = .empty,
     leases: std.ArrayList(LeaseSlot) = .empty,
@@ -95,7 +99,7 @@ pub const Fake = struct {
         try validateRoot(root_ref);
         return .{
             .exclusive_create = true,
-            .durable_file_lease = true,
+            .durable_lease = lease_capability,
             .symlink = true,
             .posix_mode = true,
             .guard_strength = .atomic,
@@ -175,6 +179,12 @@ pub const Fake = struct {
         const record = self.records.items[index];
         if (!revisionMatches(record.revision, source.revision)) return error.Stale;
         if (record.kind != .regular and record.kind != .symlink) return error.Unsupported;
+        const limit = if (record.kind == .regular)
+            lease_capability.regular_file_max_bytes
+        else
+            lease_capability.symlink_target_max_bytes;
+        const size = if (record.kind == .regular) record.contents.len else record.link_target.len;
+        if (size > limit) return error.LimitExceeded;
         const contents = try self.gpa.dupe(u8, record.contents);
         errdefer self.gpa.free(contents);
         const link_target = try self.gpa.dupe(u8, record.link_target);
@@ -193,6 +203,7 @@ pub const Fake = struct {
         const slot = &self.leases.items[source.ref.slot];
         if (slot.generation != source.ref.generation) return;
         if (slot.value) |lease| {
+            if (!lease.root.eql(source.root)) return;
             self.gpa.free(lease.contents);
             self.gpa.free(lease.link_target);
         }
@@ -634,6 +645,27 @@ test "fake directory leasing is explicit unsupported" {
     var observed = try fake.provider().observe(std.testing.allocator, Fake.root(), .{ .entry = directory });
     defer observed.deinit();
     try std.testing.expectError(error.Unsupported, fake.provider().capture(.{ .root = Fake.root(), .ref = directory, .revision = observed.value.revision }));
+}
+
+test "fake lease capability enforces exact file boundary" {
+    var fake = Fake.init(std.testing.allocator);
+    defer fake.deinit();
+    const limit = Fake.lease_capability.regular_file_max_bytes;
+    const exact = try std.testing.allocator.alloc(u8, @intCast(limit));
+    defer std.testing.allocator.free(exact);
+    @memset(exact, 'x');
+    const source = try fake.seed(.root, "exact", .regular, exact);
+    var observed = try fake.provider().observe(std.testing.allocator, Fake.root(), .{ .entry = source });
+    defer observed.deinit();
+    _ = try fake.provider().capture(.{ .root = Fake.root(), .ref = source, .revision = observed.value.revision });
+
+    const oversize = try std.testing.allocator.alloc(u8, @intCast(limit + 1));
+    defer std.testing.allocator.free(oversize);
+    @memset(oversize, 'y');
+    const too_large = try fake.seed(.root, "too-large", .regular, oversize);
+    var too_large_observed = try fake.provider().observe(std.testing.allocator, Fake.root(), .{ .entry = too_large });
+    defer too_large_observed.deinit();
+    try std.testing.expectError(error.LimitExceeded, fake.provider().capture(.{ .root = Fake.root(), .ref = too_large, .revision = too_large_observed.value.revision }));
 }
 
 test "fake provider keeps dependency failures inside the apply report" {

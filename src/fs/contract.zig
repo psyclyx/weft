@@ -95,10 +95,18 @@ pub const GuardStrength = enum {
 
 pub const WatchPrecision = enum { none, invalidation, recursive_invalidation };
 
+/// A durable lease is a provider-owned materialization, not an unbounded
+/// promise to retain arbitrary source data. Providers publish the exact byte
+/// limits they enforce before and during capture.
+pub const LeaseCapability = struct {
+    regular_file_max_bytes: u64,
+    symlink_target_max_bytes: u64,
+};
+
 pub const Capabilities = struct {
     exclusive_create: bool = false,
     atomic_exchange: bool = false,
-    durable_file_lease: bool = false,
+    durable_lease: ?LeaseCapability = null,
     tree_snapshot: bool = false,
     symlink: bool = false,
     posix_mode: bool = false,
@@ -272,6 +280,7 @@ pub const Error = error{
     InvalidName,
     Busy,
     Io,
+    LimitExceeded,
 } || std.mem.Allocator.Error;
 
 pub const Invalidation = union(enum) {
