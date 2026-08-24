@@ -185,6 +185,16 @@ extern "weft" fn wl_semantic_action_provider() i32;
 extern "weft" fn wl_semantic_action_request_len() i32;
 extern "weft" fn wl_semantic_action_request(out: u32, out_cap: u32) i32;
 extern "weft" fn wl_semantic_action_respond(kind: u32, payload: u32, payload_len: u32) i32;
+// Synchronous target-handler callbacks. The host owns the registry and calls
+// the guest's optional `on_semantic_target_probe/open` export. During those
+// callbacks, the request imports expose one canonical descriptor/located
+// target and the response imports accept exactly one scalar answer.
+extern "weft" fn wl_semantic_target_handler_register(token: u32, id: u32, id_len: u32, out: u32, out_cap: u32) i32;
+extern "weft" fn wl_semantic_target_handler_close(authority: u32, slot: u32, generation: u32) u32;
+extern "weft" fn wl_semantic_target_handler_request_len() i32;
+extern "weft" fn wl_semantic_target_handler_request(out: u32, out_cap: u32) i32;
+extern "weft" fn wl_semantic_target_handler_probe_respond(kind: u32) i32;
+extern "weft" fn wl_semantic_target_handler_open_respond(kind: u32, authority: u32, slot: u32, generation: u32) i32;
 extern "weft" fn wl_shell_insert(ptr: u32, len: u32) void;
 extern "weft" fn wl_repl_start(cmd: u32, cmd_len: u32, name: u32, name_len: u32) i32;
 extern "weft" fn wl_repl_send(handle: u32, ptr: u32, len: u32) void;
@@ -1141,6 +1151,117 @@ pub fn semanticTargetReplace(ref: semantic.target.Ref, definition: semantic.targ
 pub fn semanticTargetClose(ref: semantic.target.Ref) bool {
     const wire = ref.toWire();
     return wl_semantic_target_close(wire.authority, wire.slot, wire.generation) != 0;
+}
+
+// ── Generic target-handler callbacks ─────────────────────────────────
+// Handler registration deliberately has a guest-local phantom type. The
+// target-runtime registry is a host implementation detail and is not imported
+// into the guest module; only this stable three-word wire identity crosses the
+// membrane.
+pub const SemanticTargetHandlerTag = struct {};
+pub const SemanticTargetHandlerRef = semantic.handle.Handle(SemanticTargetHandlerTag);
+pub const TargetHandlerRef = SemanticTargetHandlerRef;
+
+/// Errors a probe may report to the host. A probe that cannot handle a target
+/// should normally use `semanticTargetHandlerProbeNone`; these errors are for
+/// a provider that did recognize the target domain but cannot answer it.
+pub const SemanticTargetProbeError = error{ Unavailable, InvalidTarget, Failed };
+
+/// Errors an open may report after a successful probe. `StaleTarget` is
+/// intentionally distinct from `Unavailable`: the host can refresh and retry
+/// the former, while the latter is a provider-level absence.
+pub const SemanticTargetOpenError = error{ StaleTarget, Unavailable, Rejected, Failed };
+
+pub const SemanticTargetHandlerError = SemanticPublishError;
+
+/// Register one stable handler token. `token` is returned to the callback
+/// export, while `id` is metadata used by host diagnostics and resolution.
+/// The returned reference is portable across heads and dired instances, but
+/// only this plugin may close it.
+pub fn semanticTargetHandlerRegister(token: u32, id: []const u8) SemanticTargetHandlerError!SemanticTargetHandlerRef {
+    if (id.len == 0) return error.InvalidData;
+    if (id.len > semantic_codec.Limits.max_string_bytes) return error.LimitExceeded;
+    var out: [12]u8 = undefined;
+    if (wl_semantic_target_handler_register(token, p(id.ptr), @intCast(id.len), p(&out), out.len) != 1)
+        return error.Rejected;
+    return readSemanticHandle(SemanticTargetHandlerRef, &out);
+}
+
+/// Remove a handler registration. The host invalidates the generation even if
+/// a later plugin instance reuses the same slot.
+pub fn semanticTargetHandlerClose(ref: SemanticTargetHandlerRef) bool {
+    const wire = ref.toWire();
+    return wl_semantic_target_handler_close(wire.authority, wire.slot, wire.generation) != 0;
+}
+
+/// Read and own the canonical request available only during
+/// `on_semantic_target_probe` or `on_semantic_target_open`. The host supplies
+/// one bounded payload; callers must use the returned codec-owned value's
+/// `deinit` before returning from the callback.
+fn semanticTargetHandlerRequest(gpa: std.mem.Allocator) (semantic_codec.Error || error{Rejected})![]u8 {
+    const raw_len = wl_semantic_target_handler_request_len();
+    if (raw_len <= 0) return error.Rejected;
+    const len: usize = @intCast(raw_len);
+    if (len > semantic_codec.Limits.max_payload_bytes) return error.LimitExceeded;
+    const bytes = try gpa.alloc(u8, len);
+    errdefer gpa.free(bytes);
+    if (wl_semantic_target_handler_request(p(bytes.ptr), @intCast(bytes.len)) != raw_len)
+        return error.Rejected;
+    return bytes;
+}
+
+/// Decode the descriptor currently being probed. The returned descriptor owns
+/// all strings/facts through its arena; call `deinit` after answering.
+pub fn semanticTargetHandlerCurrentDescriptor(gpa: std.mem.Allocator) (semantic_codec.Error || error{Rejected})!semantic_codec.target.OwnedDescriptor {
+    const bytes = try semanticTargetHandlerRequest(gpa);
+    defer gpa.free(bytes);
+    return semantic_codec.target.decodeDescriptor(gpa, bytes);
+}
+
+/// Decode the located target currently being opened. The returned value owns
+/// all location payloads through its arena; call `deinit` after answering.
+pub fn semanticTargetHandlerCurrentLocated(gpa: std.mem.Allocator) (semantic_codec.Error || error{Rejected})!semantic_codec.target.OwnedLocated {
+    const bytes = try semanticTargetHandlerRequest(gpa);
+    defer gpa.free(bytes);
+    return semantic_codec.target.decodeLocated(gpa, bytes);
+}
+
+/// Resolve the probe response codes without exposing transport integers to a
+/// plugin. The host accepts one response for each callback and rejects all
+/// subsequent answers.
+pub fn semanticTargetHandlerProbeNone() bool {
+    return wl_semantic_target_handler_probe_respond(0) == 1;
+}
+
+pub fn semanticTargetHandlerProbeMatch(match: semantic.target.Match) bool {
+    return wl_semantic_target_handler_probe_respond(1 + @as(u32, @intFromEnum(match))) == 1;
+}
+
+pub fn semanticTargetHandlerProbeError(err: SemanticTargetProbeError) bool {
+    const code: u32 = switch (err) {
+        error.Unavailable => 5,
+        error.InvalidTarget => 6,
+        error.Failed => 7,
+    };
+    return wl_semantic_target_handler_probe_respond(code) == 1;
+}
+
+/// Answer an open with a retained semantic view. The host validates the view
+/// owner and target relationship before returning it to the resolver.
+pub fn semanticTargetHandlerOpenView(view: semantic.view.Ref) bool {
+    if (view.generation == 0) return false;
+    const wire = view.toWire();
+    return wl_semantic_target_handler_open_respond(0, wire.authority, wire.slot, wire.generation) == 1;
+}
+
+pub fn semanticTargetHandlerOpenError(err: SemanticTargetOpenError) bool {
+    const code: u32 = switch (err) {
+        error.StaleTarget => 1,
+        error.Unavailable => 2,
+        error.Rejected => 3,
+        error.Failed => 4,
+    };
+    return wl_semantic_target_handler_open_respond(code, 0, 0, 0) == 1;
 }
 
 /// Publish a retained scene. A null target is represented canonically by an
