@@ -11,10 +11,6 @@ pub const Extent = struct {
     pub fn eql(a: Extent, b: Extent) bool {
         return a.width == b.width and a.height == b.height;
     }
-
-    pub fn nonZero(self: Extent) bool {
-        return self.width != 0 and self.height != 0;
-    }
 };
 
 pub const ToplevelConfigure = struct {
@@ -26,10 +22,9 @@ pub const ToplevelConfigure = struct {
 };
 
 pub const SurfaceConfigure = struct {
-    /// Geometry is sent only for a usable extent. The caller must send it
-    /// after acknowledging the configure and commit before attempting a
-    /// present.
-    geometry: ?Extent = null,
+    /// The caller sends this after acknowledging the configure and commits
+    /// before attempting a present.
+    geometry: Extent,
     extent: Extent,
     extent_changed: bool,
 };
@@ -64,7 +59,7 @@ pub const State = struct {
         self.extent = next;
         if (changed) self.resize_pending = true;
         return .{
-            .geometry = if (next.nonZero()) next else null,
+            .geometry = next,
             .extent = next,
             .extent_changed = changed,
         };
@@ -103,7 +98,7 @@ test "configure reducer coalesces superseded extents at the ack boundary" {
     try std.testing.expect(result.extent_changed);
     try std.testing.expectEqual(@as(u32, 1280), result.extent.width);
     try std.testing.expectEqual(@as(u32, 720), result.extent.height);
-    try std.testing.expectEqual(@as(u32, 1280), result.geometry.?.width);
+    try std.testing.expectEqual(@as(u32, 1280), result.geometry.width);
     try std.testing.expect(state.consumeResized());
     try std.testing.expect(!state.consumeResized());
 }

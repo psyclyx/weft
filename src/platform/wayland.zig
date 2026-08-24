@@ -422,16 +422,14 @@ fn xdgSurfaceConfigure(data: ?*anyopaque, xdg_surface: ?*c.xdg_surface, serial: 
     // resize has been applied.
     c.xdg_surface_ack_configure(xdg_surface.?, serial);
     const decision = self.resize_state.surfaceConfigure();
-    if (decision.geometry) |geometry| {
-        c.xdg_surface_set_window_geometry(
-            xdg_surface.?,
-            0,
-            0,
-            @intCast(geometry.width),
-            @intCast(geometry.height),
-        );
-        c.wl_surface_commit(self.surface);
-    }
+    c.xdg_surface_set_window_geometry(
+        xdg_surface.?,
+        0,
+        0,
+        @intCast(decision.geometry.width),
+        @intCast(decision.geometry.height),
+    );
+    c.wl_surface_commit(self.surface);
 }
 
 const xdg_surface_listener = c.xdg_surface_listener{
