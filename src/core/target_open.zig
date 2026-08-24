@@ -31,7 +31,15 @@ pub const Result = union(enum) {
     },
 };
 
-pub const Error = Services.ResolveTargetError || Services.OpenTargetError || Services.FocusError || Services.FocusedTargetError;
+pub const Error = Services.ResolveTargetError || Services.TargetRelationError || Services.OpenTargetError || Services.FocusError || Services.FocusedTargetError;
+
+pub const RelativeOpenResult = union(enum) {
+    absent,
+    relation_ambiguous: usize,
+    no_handler,
+    handler_ambiguous: struct { strength: Match, count: usize },
+    opened: struct { view: semantic_model.view.Ref, node: semantic_model.scene.NodeId },
+};
 
 /// Resolve, open, and focus one target on one head.
 ///
@@ -113,6 +121,36 @@ pub fn openFocused(
 ) Error!?Result {
     const located = try services.focusedTarget(head) orelse return null;
     return try openLocated(services, head, gpa, located, null);
+}
+
+/// Resolve a raw name through the independent `child` relation of an exact
+/// working target, then admit/open the returned target. Namespace ownership
+/// stays with relation providers; rendering/opening ownership stays with
+/// target handlers.
+pub fn openRelative(
+    services: *Services,
+    head: *Head,
+    gpa: std.mem.Allocator,
+    source: semantic_model.target.Located,
+    name: []const u8,
+) Error!RelativeOpenResult {
+    var relation = try services.resolveTargetRelationWithArgument(
+        gpa,
+        source,
+        target_runtime.relation.standard.child,
+        name,
+    );
+    defer relation.deinit();
+    const child = switch (relation.value) {
+        .absent => return .absent,
+        .ambiguous => |value| return .{ .relation_ambiguous = value.count },
+        .resolved => |located| located,
+    };
+    return switch (try openLocated(services, head, gpa, child, null)) {
+        .no_handler => .no_handler,
+        .ambiguous => |value| .{ .handler_ambiguous = .{ .strength = value.strength, .count = value.count } },
+        .opened => |value| .{ .opened = .{ .view = value.view, .node = value.node } },
+    };
 }
 
 test "generic target opening distinguishes none, ambiguity, and focus" {

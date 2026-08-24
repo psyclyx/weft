@@ -382,6 +382,24 @@ fn cOpenTarget(ctx: *Context, args: struct { authority: i64, slot: i64, generati
     return targetOpenResult(result);
 }
 
+/// Open a raw child name below this head's validated working target. The
+/// relation provider owns namespace lookup; this command never joins names
+/// with a path or falls back to process cwd. It is useful to plugins that
+/// have a relative result (grep, run, language tools) without requiring them
+/// to know the target's locus.
+fn cOpenRelative(ctx: *Context, args: struct { name: []const u8 }) anyerror!Value {
+    const services = ctx.semantic orelse return error.SemanticUnavailable;
+    const source = (try services.workingTarget(ctx.head)) orelse return error.WorkingTargetUnavailable;
+    const result = try target_open.openRelative(services, ctx.head, ctx.gpa, source.located(), args.name);
+    return switch (result) {
+        .absent => error.RelativeTargetUnavailable,
+        .relation_ambiguous => error.AmbiguousRelativeTarget,
+        .no_handler => error.NoTargetHandler,
+        .handler_ambiguous => error.AmbiguousTargetHandlers,
+        .opened => .nil,
+    };
+}
+
 fn targetOpenResult(result: target_open.Result) anyerror!Value {
     return switch (result) {
         .opened => .nil,
@@ -485,6 +503,7 @@ const table = [_]command.Command{
     command.define("buffer-read-only", "Set/clear the active buffer's read-only flag.", cBufferReadOnly),
     command.define("open", "Open a file in a buffer (dedupes by path).", cOpen),
     command.define("open-target", "Open and focus a published semantic target.", cOpenTarget),
+    command.define("open-relative", "Open a raw name below the semantic working target.", cOpenRelative),
     command.define("selection-copy", "Invoke the focused semantic selection.copy action.", cSelectionCopy),
     command.define("selection-cut", "Invoke the focused semantic selection.cut action.", cSelectionCut),
     command.define("selection-delete", "Invoke the focused semantic selection.delete action.", cSelectionDelete),

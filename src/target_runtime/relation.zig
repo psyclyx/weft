@@ -22,6 +22,15 @@ pub const QueryError = error{ Unavailable, InvalidRelation, StaleTarget, Failed 
 pub const Query = struct {
     source: semantic.target.Located,
     name: []const u8,
+    /// Optional provider-owned selector/argument. Core treats this as raw
+    /// opaque bytes; an absent selector preserves the legacy query contract.
+    argument: ?[]const u8 = null,
+};
+
+pub const standard = struct {
+    /// Resolve one raw child name below a container target. The relation
+    /// registry owns this vocabulary; target handlers remain independent.
+    pub const child = "child";
 };
 
 pub const Relation = semantic.target.Relation;

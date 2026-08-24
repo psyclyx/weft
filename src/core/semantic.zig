@@ -323,6 +323,21 @@ pub const Services = struct {
         source: semantic.target.Located,
         name: []const u8,
     ) TargetRelationError!OwnedTargetRelationResult {
+        return self.resolveTargetRelationWithArgument(gpa, source, name, null);
+    }
+
+    /// Query an independent relation provider with an optional raw selector.
+    /// The selector is never parsed, normalized, joined, or interpreted by
+    /// core; it is copied only as part of the provider's returned location.
+    /// This is the generic seam for names below a working target (for example
+    /// relation `child`) and works equally for remote or synthetic publishers.
+    pub fn resolveTargetRelationWithArgument(
+        self: *const Services,
+        gpa: std.mem.Allocator,
+        source: semantic.target.Located,
+        name: []const u8,
+        argument: ?[]const u8,
+    ) TargetRelationError!OwnedTargetRelationResult {
         if (!validRelationName(name)) return error.InvalidRelation;
         if (source.target.authority != self.targets.authority) return error.StaleTarget;
         const source_descriptor = self.targets.get(source.target) orelse return error.StaleTarget;
@@ -331,7 +346,7 @@ pub const Services = struct {
 
         var output = OwnedTargetRelationResult.init(gpa);
         errdefer output.deinit();
-        var relations = try self.target_relations.query(gpa, .{ .source = source, .name = name });
+        var relations = try self.target_relations.query(gpa, .{ .source = source, .name = name, .argument = argument });
         defer relations.deinit();
         if (relations.value.candidates.len == 0) {
             // Preserve explicit provider knowledge about a relation that was
@@ -1147,11 +1162,16 @@ test "semantic target relations resolve, stay absent, and reject stale or ambigu
         foreign_authority: bool = false,
         unavailable: bool = false,
         failed: bool = false,
+        expected_argument: ?[]const u8 = null,
 
         pub fn query(self: *@This(), request: target_runtime.relation.Query) target_runtime.relation.QueryError!?target_runtime.relation.Relation {
             if (self.unavailable) return error.Unavailable;
             if (self.failed) return error.Failed;
             if (!std.mem.eql(u8, request.name, "container")) return null;
+            if (self.expected_argument) |expected| {
+                const actual = request.argument orelse return null;
+                if (!std.mem.eql(u8, actual, expected)) return null;
+            }
             var target = self.destination;
             if (self.foreign_authority) target.target.authority = @enumFromInt(99);
             return .{ .name = if (self.wrong_name) "other" else request.name, .target = target };
@@ -1189,6 +1209,17 @@ test "semantic target relations resolve, stay absent, and reject stale or ambigu
         },
         else => return error.TestUnexpectedResult,
     }
+    var selected = RelationProvider{ .destination = destination, .expected_argument = "odd\n\xff" };
+    const selected_ref = try services.registerTargetRelationProvider(std.testing.allocator, relation_owner, "relations-selector", .init(&selected));
+    var selected_resolution = try services.resolveTargetRelationWithArgument(
+        std.testing.allocator,
+        source,
+        "container",
+        "odd\n\xff",
+    );
+    defer selected_resolution.deinit();
+    try std.testing.expectEqual(destination.target, selected_resolution.value.resolved.target);
+    try std.testing.expect(services.target_relations.unregister(std.testing.allocator, selected_ref));
     var absent = try services.resolveTargetRelation(std.testing.allocator, source, "parent");
     defer absent.deinit();
     try std.testing.expectEqual(Services.TargetRelationResult.absent, absent.value);

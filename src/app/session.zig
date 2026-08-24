@@ -425,7 +425,13 @@ const LocalDirectoryRelations = struct {
     session: *Session,
 
     pub fn query(self: *LocalDirectoryRelations, request: target_runtime.relation.Query) target_runtime.relation.QueryError!?target_runtime.relation.Relation {
-        if (!std.mem.eql(u8, request.name, "container")) return null;
+        if (std.mem.eql(u8, request.name, "container")) return self.queryContainer(request);
+        if (!std.mem.eql(u8, request.name, target_runtime.relation.standard.child)) return null;
+        const name = request.argument orelse return null;
+        return self.queryChild(request, name);
+    }
+
+    fn queryContainer(self: *LocalDirectoryRelations, request: target_runtime.relation.Query) target_runtime.relation.QueryError!?target_runtime.relation.Relation {
         if (request.source.location != .whole) return error.InvalidRelation;
         for (self.session.directory_targets.items, 0..) |directory, index| {
             if (!directory.publication.ref.eql(request.source.target)) continue;
@@ -436,6 +442,76 @@ const LocalDirectoryRelations = struct {
                 else => error.Failed,
             }) orelse return null;
             return .{ .name = request.name, .target = parent };
+        }
+        return null;
+    }
+
+    /// Resolve a raw child name through the filesystem provider's listing and
+    /// publish the resulting directory target. This is intentionally a
+    /// relation provider concern: no target handler or core path operation is
+    /// involved, and raw names remain bytes all the way to the provider.
+    fn queryChild(self: *LocalDirectoryRelations, request: target_runtime.relation.Query, name: []const u8) target_runtime.relation.QueryError!?target_runtime.relation.Relation {
+        if (request.source.location != .whole or name.len == 0) return error.InvalidRelation;
+        for (self.session.directory_targets.items, 0..) |directory, index| {
+            if (!directory.publication.ref.eql(request.source.target)) continue;
+            if (directory.publication.revision != request.source.revision) return error.StaleTarget;
+            const parent = self.session.filesystem_system.filesystems.authorizedDirectory(
+                request.source.target,
+                request.source.revision,
+            ) catch |err| return switch (err) {
+                error.StaleTarget, error.TargetUnbound, error.UnknownAuthority => error.StaleTarget,
+                else => error.Failed,
+            };
+            var listing = self.session.filesystem_system.filesystems.list(
+                self.session.gpa,
+                parent.root,
+                parent.node,
+            ) catch |err| return switch (err) {
+                error.Stale, error.NotFound => error.StaleTarget,
+                else => error.Failed,
+            };
+            defer listing.deinit();
+            for (listing.value.entries) |entry| {
+                if (!std.mem.eql(u8, entry.name.bytes, name)) continue;
+                if (entry.observation.kind != .directory) return null;
+                const entry_ref = switch (entry.observation.node) {
+                    .root => return error.InvalidRelation,
+                    .entry => |ref| ref,
+                };
+                var child = fs_runtime.publication.publishChildDirectory(
+                    self.session.gpa,
+                    &self.session.filesystem_system.semantic.targets,
+                    &self.session.filesystem_system.filesystems,
+                    self.session.filesystem_owner,
+                    .{
+                        .parent = request.source,
+                        .entry = entry_ref,
+                        .entry_revision = entry.observation.revision,
+                    },
+                ) catch |err| return switch (err) {
+                    error.Stale, error.StaleTarget => error.StaleTarget,
+                    error.Unsupported, error.NotFound, error.NotDirectory => error.Unavailable,
+                    else => error.Failed,
+                };
+                errdefer _ = child.close(
+                    self.session.gpa,
+                    &self.session.filesystem_system.semantic.targets,
+                );
+                // Keep the retained target discoverable by the next query.
+                // The path is app/provider bookkeeping only; core never sees
+                // or joins it while resolving the relation.
+                const child_path = std.fs.path.join(self.session.gpa, &.{ directory.path, name }) catch return error.Failed;
+                errdefer self.session.gpa.free(child_path);
+                self.session.directory_targets.append(self.session.gpa, .{
+                    .path = child_path,
+                    .root = child.derived_root,
+                    .publication = child.registration,
+                }) catch return error.Failed;
+                child.active = false;
+                return .{ .name = request.name, .target = child.registration.located() };
+            }
+            _ = index;
+            return null;
         }
         return null;
     }
@@ -499,6 +575,7 @@ test "session: local directories become deduplicated semantic targets while file
     var tmp = t.tmpDir(.{});
     defer tmp.cleanup();
     try tmp.dir.createDirPath(t.io, "odd\n\xff");
+    try tmp.dir.createDirPath(t.io, "odd\n\xff/child\n\xfe");
     const tmp_path = try std.fmt.allocPrint(gpa, ".zig-cache/tmp/{s}", .{tmp.sub_path});
     defer gpa.free(tmp_path);
     const directory_path = try std.fs.path.join(gpa, &.{ tmp_path, "odd\n\xff" });
@@ -578,6 +655,20 @@ test "session: local directories become deduplicated semantic targets while file
         sess.directory_targets.items[1].publication.ref,
         parent.value.resolved.target,
     );
+
+    // The generic command path resolves a raw child selector through the
+    // relation provider, then hands the resulting target to the independent
+    // target handler. No process cwd or core-side path joining participates.
+    sess.head.working_target = .{
+        .target = first_target,
+        .revision = sess.directory_targets[0].publication.revision,
+    };
+    _ = try core.command.run(&sess.system.commands, &sess.cmd_ctx, "open-relative", &.{.{ .string = "child\n\xfe" }});
+    try t.expectEqual(@as(usize, 3), sess.directory_targets.items.len);
+    const child_target = sess.directory_targets.items[2].publication.ref;
+    const child_view = sess.head.semantic_focus.path().?.view;
+    try t.expectEqual(child_target, sess.system.semantic.views.get(child_view).?.descriptor.target.?.ref);
+    try t.expectEqualStrings("child\n\xfe", sess.system.semantic.targets.get(child_target).?.display_name);
 
     // The parent first arrived as a pinned relation target. Opening its
     // lexical path later reacquires a fresh root handle, but provider identity
