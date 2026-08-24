@@ -167,6 +167,12 @@ fn cloneNode(gpa: std.mem.Allocator, node: kernel.scene.Node) std.mem.Allocator.
         .name = try gpa.dupe(u8, source.name),
         .value = try gpa.dupe(u8, source.value),
     };
+    const actions = try gpa.alloc(kernel.scene.Action, node.actions.len);
+    for (node.actions, actions) |source, *destination| destination.* = .{
+        .id = try gpa.dupe(u8, source.id),
+        .label = try gpa.dupe(u8, source.label),
+        .enabled = source.enabled,
+    };
     const content: kernel.scene.Content = switch (node.content) {
         .container => |container| blk: {
             const children = try gpa.alloc(kernel.scene.Node, container.children.len);
@@ -189,6 +195,7 @@ fn cloneNode(gpa: std.mem.Allocator, node: kernel.scene.Node) std.mem.Allocator.
         .id = node.id,
         .role = try gpa.dupe(u8, node.role),
         .facts = facts,
+        .actions = actions,
         .layout = node.layout,
         .focusable = node.focusable,
         .content = content,

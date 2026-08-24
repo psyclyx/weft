@@ -16,13 +16,19 @@ pub const Source = struct {
     revision: []const u8,
 };
 
+pub const ValidationError = error{
+    NoRepresentations,
+    InvalidMediaType,
+    DuplicateRepresentation,
+} || std.mem.Allocator.Error;
+
 pub const Item = struct {
     intent: Intent,
     suggested_name: []const u8 = &.{},
     source: ?Source = null,
     representations: []const Representation,
 
-    pub fn validate(self: Item, gpa: std.mem.Allocator) !void {
+    pub fn validate(self: Item, gpa: std.mem.Allocator) ValidationError!void {
         if (self.representations.len == 0) return error.NoRepresentations;
         var seen: std.StringHashMapUnmanaged(void) = .empty;
         defer seen.deinit(gpa);
@@ -47,7 +53,7 @@ pub const OwnedItem = struct {
     arena: std.heap.ArenaAllocator,
     value: Item = undefined,
 
-    pub fn init(gpa: std.mem.Allocator, source_item: Item) !OwnedItem {
+    pub fn init(gpa: std.mem.Allocator, source_item: Item) ValidationError!OwnedItem {
         try source_item.validate(gpa);
         var owned: OwnedItem = .{ .arena = .init(gpa) };
         errdefer owned.deinit();

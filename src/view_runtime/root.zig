@@ -4,6 +4,7 @@
 const std = @import("std");
 
 pub const field = @import("field.zig");
+pub const action = @import("action.zig");
 pub const interaction = @import("interaction.zig");
 pub const view = @import("view.zig");
 

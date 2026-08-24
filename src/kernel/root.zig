@@ -12,6 +12,7 @@ pub const selection = @import("selection.zig");
 pub const focus = @import("focus.zig");
 pub const transfer = @import("transfer.zig");
 pub const interaction = @import("interaction.zig");
+pub const action = @import("action.zig");
 
 test {
     @import("std").testing.refAllDecls(@This());

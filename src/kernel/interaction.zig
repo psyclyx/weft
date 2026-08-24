@@ -10,11 +10,7 @@ pub const Ref = handle.Handle(Tag);
 
 pub const Role = enum { dialog, picker, popup, custom };
 
-pub const Action = struct {
-    id: []const u8,
-    label: []const u8,
-    enabled: bool = true,
-};
+pub const Action = scene.Action;
 
 /// Interaction-local input routing. These bindings are consulted only while
 /// the interaction is active; they do not create an editor mode and do not
