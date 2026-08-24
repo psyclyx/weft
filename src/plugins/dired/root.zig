@@ -1,15 +1,15 @@
-//! Plugin-facing dired model facade.
+//! Portable plugin-facing dired facade.
 //!
-//! Implementation and focused model tests live in `model.zig`; this root
-//! intentionally exports only the stable plugin contract and keeps the
-//! dedicated named-module build entrypoint small.
+//! This root deliberately contains only the host-independent model,
+//! projection, and action contracts. Host integration is exposed separately
+//! by `host.zig`; keeping that edge out of this facade makes it impossible for
+//! portable dired users to acquire runtime registries accidentally.
 
 const std = @import("std");
 
 pub const model = @import("weft_dired_model");
 pub const projection = @import("weft_dired_projection");
 pub const actions = @import("weft_dired_actions");
-pub const session = @import("weft_dired_session");
 
 pub const Model = model.Model;
 pub const NodeId = model.NodeId;
@@ -47,8 +47,6 @@ pub const modelRowId = projection.modelRowId;
 
 pub const ActionController = actions.Controller;
 pub const ActionError = actions.Error;
-pub const Plugin = session.Plugin;
-pub const Session = session.Session;
 
 test {
     std.testing.refAllDecls(@This());

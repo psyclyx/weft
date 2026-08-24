@@ -432,7 +432,7 @@ pub fn build(b: *std.Build) void {
     // Dired's draft/reconcile model is a plugin-local pure module. It sees
     // only the named generic semantic/filesystem contracts; the existing dired
     // guest is intentionally not wired to this draft yet.
-    const dired_facade = b.createModule(.{
+    const dired = b.createModule(.{
         .root_source_file = b.path("src/plugins/dired/root.zig"),
         .target = target,
         .optimize = optimize,
@@ -457,6 +457,11 @@ pub fn build(b: *std.Build) void {
         .target = target,
         .optimize = optimize,
     });
+    const dired_host = b.createModule(.{
+        .root_source_file = b.path("src/plugins/dired/host.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
     dired_projection.addImport("weft_dired_model", dired_model);
     dired_actions.addImport("weft_dired_model", dired_model);
     dired_actions.addImport("weft_dired_projection", dired_projection);
@@ -466,12 +471,15 @@ pub fn build(b: *std.Build) void {
     dired_session.addImport("weft_fs_runtime", architecture.fs_runtime);
     dired_session.addImport("weft_view_runtime", architecture.view_runtime);
     dired_session.addImport("weft_target_runtime", architecture.target_runtime);
-    dired_facade.addImport("weft_dired_model", dired_model);
-    dired_facade.addImport("weft_dired_projection", dired_projection);
-    dired_facade.addImport("weft_dired_actions", dired_actions);
-    dired_facade.addImport("weft_dired_session", dired_session);
+    dired_host.addImport("weft_dired_session", dired_session);
+    // `weft_dired` is the portable facade. It intentionally does not import
+    // the host session module; host registries are available only through the
+    // separately named `weft_dired_host` facade.
+    dired.addImport("weft_dired_model", dired_model);
+    dired.addImport("weft_dired_projection", dired_projection);
+    dired.addImport("weft_dired_actions", dired_actions);
     const dired_model_step = b.step("test-dired-model", "Run the pure dired model and semantic projection tests");
-    inline for (.{ dired_facade, dired_model, dired_projection, dired_actions, dired_session }) |dired_module| {
+    inline for (.{ dired, dired_model, dired_projection, dired_actions }) |dired_module| {
         dired_module.addImport("weft_semantic", architecture.semantic);
         dired_module.addImport("weft_fs", architecture.fs);
         const dired_tests = b.addTest(.{ .root_module = dired_module });
@@ -479,6 +487,20 @@ pub fn build(b: *std.Build) void {
         dired_model_step.dependOn(&run_dired_tests.step);
         test_step.dependOn(&run_dired_tests.step);
     }
+
+    // Session tests are intentionally a separate host-side gate. The session
+    // adapter sees runtime registries; the portable facade above never does.
+    dired_session.addImport("weft_semantic", architecture.semantic);
+    dired_session.addImport("weft_fs", architecture.fs);
+    const dired_session_tests = b.addTest(.{ .root_module = dired_session });
+    const run_dired_session_tests = b.addRunArtifact(dired_session_tests);
+    const dired_host_tests = b.addTest(.{ .root_module = dired_host });
+    const run_dired_host_tests = b.addRunArtifact(dired_host_tests);
+    const dired_host_step = b.step("test-dired-host", "Run host-bound dired session tests");
+    dired_host_step.dependOn(&run_dired_session_tests.step);
+    dired_host_step.dependOn(&run_dired_host_tests.step);
+    test_step.dependOn(&run_dired_session_tests.step);
+    test_step.dependOn(&run_dired_host_tests.step);
 
     const fs_runtime_tests = b.addTest(.{ .root_module = architecture.fs_runtime });
     const run_fs_runtime_tests = b.addRunArtifact(fs_runtime_tests);
