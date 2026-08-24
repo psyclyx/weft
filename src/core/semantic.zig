@@ -1180,7 +1180,7 @@ test "semantic relation action resolves through independent provider and handler
     });
     const source = semantic.target.Located{ .target = source_ref, .revision = 1 };
     const destination = semantic.target.Located{ .target = destination_ref, .revision = 1 };
-    const original = try services.publishView(std.testing.allocator, target_owner, null, 1, .{
+    const original = try services.publishView(std.testing.allocator, action_owner, null, 1, .{
         .id = @enumFromInt(1),
         .actions = &.{.{ .id = "open-parent" }},
         .content = .{ .label = "child view" },
