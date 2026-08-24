@@ -40,6 +40,52 @@ const tmpPath = h.tmpPath;
 const socketPair = h.socketPair;
 const napUs = h.napUs;
 
+fn collectSceneActions(
+    gpa: std.mem.Allocator,
+    node: semantic.scene.Node,
+    actions: *std.ArrayList([]const u8),
+) std.mem.Allocator.Error!void {
+    for (node.actions) |candidate| {
+        var seen = false;
+        for (actions.items) |existing| {
+            if (std.mem.eql(u8, existing, candidate.id)) {
+                seen = true;
+                break;
+            }
+        }
+        if (!seen) try actions.append(gpa, candidate.id);
+    }
+    switch (node.content) {
+        .container => |container| for (container.children) |child|
+            try collectSceneActions(gpa, child, actions),
+        else => {},
+    }
+}
+
+fn sceneNodeWithRole(node: semantic.scene.Node, role: []const u8) ?semantic.scene.Node {
+    if (std.mem.eql(u8, node.role, role)) return node;
+    return switch (node.content) {
+        .container => |container| for (container.children) |child| {
+            if (sceneNodeWithRole(child, role)) |found| break found;
+        } else null,
+        else => null,
+    };
+}
+
+fn sceneNodeWithFact(node: semantic.scene.Node, role: []const u8, name: []const u8, value: []const u8) ?semantic.scene.Node {
+    if (std.mem.eql(u8, node.role, role)) {
+        for (node.facts) |fact| {
+            if (std.mem.eql(u8, fact.name, name) and std.mem.eql(u8, fact.value, value)) return node;
+        }
+    }
+    return switch (node.content) {
+        .container => |container| for (container.children) |child| {
+            if (sceneNodeWithFact(child, role, name, value)) |found| break found;
+        } else null,
+        else => null,
+    };
+}
+
 const ConfigField = struct {
     snapshot_calls: usize = 0,
     edits: usize = 0,
@@ -338,6 +384,12 @@ test "e2e/config: the sample config boots; SPC g i is discoverable via which-key
         try t.expectEqualStrings(binding.command, ed.keymap.resolveExact("normal", binding.sequence).?);
     }
 
+    // Seed both capability-varying row kinds so the real dired scene has
+    // concrete rows whose advertised target/actions can be checked below.
+    // This remains a test-only observation of the plugin protocol; config and
+    // core do not inspect dired roles or dispatch dired commands.
+    _ = try proj.oracle("printf x > plain-file; mkdir -- child-directory");
+
     // The sample's ordinary file-group binding reaches the shipped launcher,
     // which delegates to generic target opening. Its observable result is a
     // retained semantic scene—not a dired keymap mode or text buffer.
@@ -355,6 +407,69 @@ test "e2e/config: the sample config boots; SPC g i is discoverable via which-key
     ed.chord("SPC o d");
     try t.expectEqual(configured_directory_view, ed.head.semantic_focus.path().?.view);
     try t.expect(ed.buffers.findByName("*dired*") == null);
+
+    // The config surface must cover the actions the REAL directory scene
+    // advertises, not merely a hand-built generic fixture. This is deliberately
+    // a protocol-level gate: the scene owns action meaning, while config owns
+    // command declarations and key policy. Adding an action to dired without
+    // making it reachable from config is therefore an immediate test failure.
+    const dired_scene = ed.session.system.semantic.views.get(configured_directory_view).?.scene;
+
+    // First walk the actual scene and reject any newly advertised action that
+    // lacks a config binding. This catches additions as well as removals; the
+    // explicit table below also makes the required public contract readable.
+    var advertised_actions: std.ArrayList([]const u8) = .empty;
+    defer advertised_actions.deinit(gpa);
+    try collectSceneActions(gpa, dired_scene, &advertised_actions);
+    for (advertised_actions.items) |action| {
+        var sequence: ?[]const u8 = null;
+        for (structured_view_bindings) |binding| {
+            if (std.mem.eql(u8, binding.command, action)) {
+                sequence = binding.sequence;
+                break;
+            }
+        }
+        try t.expect(sequence != null);
+        try t.expect(ed.commands.resolve(action) != null);
+        try t.expectEqualStrings(action, ed.keymap.resolveExact("normal", sequence.?).?);
+    }
+
+    // Required actions are checked independently so an accidental removal
+    // from the scene cannot make the dynamic walk vacuously pass.
+    for (structured_view_bindings) |binding| {
+        if (std.mem.eql(u8, binding.command, "cursor-down") or std.mem.eql(u8, binding.command, "cursor-up")) continue;
+        var found = false;
+        for (advertised_actions.items) |action| {
+            if (std.mem.eql(u8, action, binding.command)) {
+                found = true;
+                break;
+            }
+        }
+        try t.expect(found);
+        try t.expect(ed.commands.resolve(binding.command) != null);
+        try t.expectEqualStrings(binding.command, ed.keymap.resolveExact("normal", binding.sequence).?);
+    }
+    try t.expect(sceneNodeWithFact(dired_scene, "dired.row", "kind", "regular") != null);
+    const directory_row = sceneNodeWithFact(dired_scene, "dired.row", "kind", "directory") orelse return error.MissingDirectoryRow;
+    try t.expectEqualStrings("cursor-down", ed.keymap.resolveExact("normal", "space v j").?);
+    try t.expectEqualStrings("cursor-up", ed.keymap.resolveExact("normal", "space v k").?);
+    // Return/minus are generic Vim input policy, not dired bindings. Keep the
+    // two gates adjacent so config coverage includes the ordinary navigation
+    // path into and out of a focused semantic target.
+    try t.expectEqualStrings("vim-open-focused", ed.keymap.resolveExact("normal", "Return").?);
+    try t.expectEqualStrings("vim-open-container", ed.keymap.resolveExact("normal", "minus").?);
+
+    // Exercise that policy against the real row: Return opens the child target
+    // through generic target resolution, and minus follows its generic
+    // `container` relation back to this directory. No dired keymap is involved.
+    const dired_name = sceneNodeWithRole(directory_row, "dired.name") orelse return error.MissingNameField;
+    _ = try ed.session.system.semantic.focusView(ed.head, gpa, configured_directory_view, dired_name.id);
+    ed.press("Return", "");
+    const child_view = ed.head.semantic_focus.path().?.view;
+    try t.expect(!child_view.eql(configured_directory_view));
+    try t.expectEqualStrings("dired", ed.session.system.semantic.views.get(child_view).?.scene.role);
+    ed.press("minus", "");
+    try t.expectEqual(configured_directory_view, ed.head.semantic_focus.path().?.view);
 
     // Now drive those bindings against a real retained scene. This fixture is
     // intentionally generic: it owns fields, actions, a target link, and an
