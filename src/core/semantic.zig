@@ -407,7 +407,7 @@ pub const Services = struct {
         UnknownRoot,
     };
 
-    pub const InvokeActionError = view_runtime.action.Error || OpenInteractionError || semantic.transfer.ValidationError || ResolveTargetError || TargetRelationError || OpenTargetError || FocusError || error{ InvalidRegister, UnknownFocusTarget, NoTargetRelation, AmbiguousTargetRelations };
+    pub const InvokeActionError = view_runtime.action.Error || OpenInteractionError || semantic.transfer.ValidationError || ResolveTargetError || TargetRelationError || OpenTargetError || FocusError || error{ InvalidRegister, InvalidWorkingTarget, UnknownFocusTarget, NoTargetRelation, AmbiguousTargetRelations };
     pub const InvokeInputError = InvokeActionError || view_runtime.interaction.Error;
 
     pub const FocusError = view_runtime.view.Error;
@@ -484,6 +484,7 @@ pub const Services = struct {
             view: semantic.view.Ref,
             node: semantic.scene.NodeId,
         },
+        working_target_requested: Head.WorkingTarget,
     };
 
     /// Invoke against the view owner's provider, then absorb any cross-view
@@ -576,6 +577,18 @@ pub const Services = struct {
                 if (instance.node(node) == null) return error.UnknownFocusTarget;
                 break :blk .{ .focus_requested = .{ .view = view, .node = node } };
             },
+            .set_working_target => |located| blk: {
+                switch (located.location) {
+                    .whole => {},
+                    else => return error.InvalidWorkingTarget,
+                }
+                const descriptor = self.targets.get(located.target) orelse return error.StaleTarget;
+                if (descriptor.revision != located.revision) return error.StaleTarget;
+                break :blk .{ .working_target_requested = .{
+                    .target = located.target,
+                    .revision = located.revision,
+                } };
+            },
         };
     }
 
@@ -612,7 +625,7 @@ pub const Services = struct {
         };
         try self.applyActionFocus(head, gpa, prior_focus, effect);
         if (disposition == .close_on_handled) switch (effect) {
-            .handled, .transfer_stored, .target_opened, .relation_opened, .focus_requested => try stack.close(gpa, interaction_ref),
+            .handled, .transfer_stored, .target_opened, .relation_opened, .focus_requested, .working_target_requested => try stack.close(gpa, interaction_ref),
             .declined, .interaction_opened => {},
         };
         return effect;
@@ -696,6 +709,7 @@ pub const Services = struct {
                 _ = try self.focusView(head, gpa, focus.view, focus.node);
                 if (anchor) |node| head.semantic_focus.setNavigationAnchor(node);
             },
+            .working_target_requested => |target| head.working_target = target,
             else => {},
         }
     }

@@ -74,6 +74,11 @@ semantic_focus: SemanticFocus = .empty,
 /// Dialogs, pickers, and popups are nested semantic interactions local to
 /// this head. Their bindings are resolved here before any global keymap help.
 interactions: view_runtime.interaction.Stack = .empty,
+/// Exact semantic container used to resolve relative effects for this head.
+/// This is deliberately not process-global cwd state. Only the target handle
+/// and descriptor revision are retained, so no provider-owned path/location
+/// bytes escape an action callback.
+working_target: ?WorkingTarget = null,
 /// This head's dot-repeat recorder (`.` replays the last change) — see
 /// `DotRepeat`'s doc below. Per-head for the same reason as `pick`/`echo`:
 /// two heads pressing keys concurrently must not interleave into one
@@ -109,6 +114,15 @@ focused_pane_gen: u32 = 0,
 transient_stack: std.ArrayList(TransientFrame) = .empty,
 
 pub const empty: Head = .{};
+
+pub const WorkingTarget = struct {
+    target: semantic.target.Ref,
+    revision: u64,
+
+    pub fn located(self: WorkingTarget) semantic.target.Located {
+        return .{ .target = self.target, .revision = self.revision };
+    }
+};
 
 pub const SemanticFocus = struct {
     view: ?semantic.view.Ref = null,

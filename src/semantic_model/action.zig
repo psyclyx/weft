@@ -50,6 +50,10 @@ pub const Outcome = union(enum) {
     /// Request-only: resolve a named relation from this exact source and open
     /// the admitted destination. Handler selection remains core policy.
     open_relation: RelationRequest,
+    /// Request-only: make an exact, whole target the dispatching head's
+    /// working container. Core validates the descriptor revision before
+    /// storing it; relative-effect routing remains a provider concern.
+    set_working_target: target.Located,
 };
 
 /// Interoperable names are conveniences, not a closed enum. A plugin may
@@ -65,6 +69,10 @@ pub const standard = struct {
     /// target. A directory parent is one use; archives, remote loci, and
     /// synthetic hierarchies can expose the same interaction.
     pub const open_container = "target.open-container";
+    /// Set the focused whole target as this head's working container. This is
+    /// the target-oriented analogue of `cd`: it applies equally to local,
+    /// remote, archive, and synthetic hierarchies.
+    pub const set_working_target = "workspace.set-working-target";
     pub const edit = "field.edit";
     /// Lifecycle intents for retained, structured views.  They are open
     /// protocol names: a provider advertises only the ones it supports, while
