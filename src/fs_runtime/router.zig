@@ -26,11 +26,17 @@ pub const TargetBinding = struct {
     directory: fs.target.Directory,
 };
 
+pub const EntryBinding = struct {
+    revision: u64,
+    entry: fs.target.Entry,
+};
+
 pub const Router = struct {
     allocator: std.mem.Allocator,
     providers: std.AutoHashMap(semantic.handle.Authority, fs.service.Provider),
     retired: std.AutoHashMap(semantic.handle.Authority, void),
     target_bindings: std.AutoHashMap(u128, TargetBinding),
+    entry_bindings: std.AutoHashMap(u128, EntryBinding),
 
     pub fn init(allocator: std.mem.Allocator) Router {
         return .{
@@ -38,6 +44,7 @@ pub const Router = struct {
             .providers = .init(allocator),
             .retired = .init(allocator),
             .target_bindings = .init(allocator),
+            .entry_bindings = .init(allocator),
         };
     }
 
@@ -45,6 +52,7 @@ pub const Router = struct {
         self.providers.deinit();
         self.retired.deinit();
         self.target_bindings.deinit();
+        self.entry_bindings.deinit();
         self.* = undefined;
     }
 
@@ -71,12 +79,18 @@ pub const Router = struct {
             if (entry.value_ptr.directory.root.authority == authority)
                 try stale.append(self.allocator, entry.key_ptr.*);
         }
+        var entry_bindings = self.entry_bindings.iterator();
+        while (entry_bindings.next()) |entry| {
+            if (entry.value_ptr.entry.root.authority == authority)
+                try stale.append(self.allocator, entry.key_ptr.*);
+        }
         // Retire only after every potentially failing allocation succeeds.
         // If either table insertion or stale-key collection fails, the live
         // route and its bindings remain intact.
         try self.retired.put(authority, {});
         _ = self.providers.remove(authority);
         for (stale.items) |key| _ = self.target_bindings.remove(key);
+        for (stale.items) |key| _ = self.entry_bindings.remove(key);
     }
 
     fn targetKey(target: semantic.target.Ref) u128 {
@@ -105,7 +119,8 @@ pub const Router = struct {
     }
 
     pub fn unbindTarget(self: *Router, target: semantic.target.Ref) bool {
-        return self.target_bindings.remove(targetKey(target));
+        const key = targetKey(target);
+        return self.target_bindings.remove(key) or self.entry_bindings.remove(key);
     }
 
     /// Return only a binding minted by the in-process filesystem authority.
@@ -115,6 +130,28 @@ pub const Router = struct {
         const binding = self.target_bindings.get(targetKey(target)) orelse return error.TargetUnbound;
         if (binding.revision != revision) return error.StaleTarget;
         return binding.directory;
+    }
+
+    /// Return only a provider-issued ordinary-entry binding.  As with
+    /// directories, the descriptive fact is not an authority and the
+    /// requested semantic revision must match the binding exactly.
+    pub fn authorizedEntry(self: *const Router, target: semantic.target.Ref, revision: u64) Error!fs.target.Entry {
+        const binding = self.entry_bindings.get(targetKey(target)) orelse return error.TargetUnbound;
+        if (binding.revision != revision) return error.StaleTarget;
+        return binding.entry;
+    }
+
+    pub fn bindEntry(self: *Router, target: semantic.target.Ref, revision: u64, entry: fs.target.Entry) Error!void {
+        if (target.generation == 0 or revision == 0) return error.InvalidHandle;
+        try fs.target.validateEntry(entry);
+        var observed = try self.observe(self.allocator, entry.root, .{ .entry = entry.ref });
+        defer observed.deinit();
+        if (!std.meta.eql(observed.value.node, .{ .entry = entry.ref })) return error.InvalidHandle;
+        if (observed.value.kind != .regular) return error.Unsupported;
+        if (!std.mem.eql(u8, observed.value.revision.token, entry.revision.token)) return error.Stale;
+        const key = targetKey(target);
+        if (self.target_bindings.contains(key) or self.entry_bindings.contains(key)) return error.TargetAlreadyBound;
+        try self.entry_bindings.put(key, .{ .revision = revision, .entry = entry });
     }
 
     /// Validate the authority envelope for a provider-owned lease without
@@ -331,6 +368,8 @@ test {
 
 const TestProvider = struct {
     authority: semantic.handle.Authority,
+    observed_kind: contract.Kind = .directory,
+    observed_revision: []const u8 = &.{},
     capabilities_calls: usize = 0,
     observe_calls: usize = 0,
     list_calls: usize = 0,
@@ -368,7 +407,7 @@ const TestProvider = struct {
         if (root.authority != self.authority) return error.Confined;
         self.observe_calls += 1;
         var result = contract.OwnedObservation.init(gpa);
-        result.value = .{ .node = node, .revision = .{ .token = &.{} }, .kind = .directory };
+        result.value = .{ .node = node, .revision = .{ .token = self.observed_revision }, .kind = self.observed_kind };
         return result;
     }
 
@@ -525,6 +564,25 @@ test "target bindings are explicit, revision-stamped, and retired with their aut
     try router.bindTarget(target, 1, directory);
     try router.unregister(.here);
     try std.testing.expectError(error.TargetUnbound, router.authorizedDirectory(target, 1));
+}
+
+test "ordinary file bindings preserve provider entry identity and revision" {
+    var provider = TestProvider{ .authority = .here, .observed_kind = .regular, .observed_revision = "file-r1" };
+    var router = Router.init(std.testing.allocator);
+    defer router.deinit();
+    try router.register(.here, provider.asProvider());
+    const target: semantic.target.Ref = .{ .authority = .here, .slot = 9, .generation = 1 };
+    const source: fs.target.Entry = .{
+        .root = makeRoot(.here),
+        .ref = makeEntry(.here),
+        .revision = .{ .token = "file-r1" },
+    };
+    try router.bindEntry(target, 7, source);
+    try std.testing.expectEqual(source, try router.authorizedEntry(target, 7));
+    try std.testing.expectError(error.StaleTarget, router.authorizedEntry(target, 8));
+    try std.testing.expectError(error.TargetAlreadyBound, router.bindEntry(target, 7, source));
+    try std.testing.expect(router.unbindTarget(target));
+    try std.testing.expectError(error.TargetUnbound, router.authorizedEntry(target, 7));
 }
 
 test "apply refuses a cross-provider plan before provider execution" {

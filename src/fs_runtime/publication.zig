@@ -33,6 +33,12 @@ pub const ChildDefinition = struct {
     entry_revision: contract.Revision,
 };
 
+pub const EntryDefinition = struct {
+    display_name: []const u8,
+    entry: fs.target.Entry,
+    facts: []const semantic.target.Fact = &.{},
+};
+
 /// The two-part lifetime created by `publish`. Keeping it as a value makes
 /// ownership explicit without coupling either registry to the other.
 pub const Registration = struct {
@@ -139,6 +145,73 @@ pub fn publish(
     return .{ .ref = ref, .revision = descriptor.revision, .owner = owner };
 }
 
+/// Publish an ordinary-file target from an already observed provider entry.
+/// The descriptive target and executable router binding are committed as one
+/// composition; a failed observation never leaves a target that merely looks
+/// openable.
+pub fn publishEntry(
+    gpa: std.mem.Allocator,
+    targets: *target_runtime.target.Registry,
+    router: *router_mod.Router,
+    owner: semantic.owner.Id,
+    definition: EntryDefinition,
+) Error!Registration {
+    const encoded_entry = try fs.target.encodeEntry(gpa, definition.entry);
+    defer gpa.free(encoded_entry);
+
+    const facts = try gpa.alloc(semantic.target.Fact, definition.facts.len + 1);
+    defer gpa.free(facts);
+    facts[0] = .{ .name = fs.target.entry_fact_name, .value = encoded_entry };
+    @memcpy(facts[1..], definition.facts);
+
+    const ref = try targets.publish(gpa, owner, .{
+        .kind = .file,
+        .display_name = definition.display_name,
+        .facts = facts,
+    });
+    errdefer _ = targets.close(gpa, owner, ref);
+    const descriptor = targets.get(ref) orelse return error.StaleTarget;
+    try router.bindEntry(ref, descriptor.revision, definition.entry);
+    return .{ .ref = ref, .revision = descriptor.revision, .owner = owner };
+}
+
+/// Publish a regular direct child from a live directory target.  Listing is
+/// the relation proof; the router repeats the no-follow observation during
+/// binding, preserving the provider's TOCTOU boundary.
+pub fn publishChildFile(
+    gpa: std.mem.Allocator,
+    targets: *target_runtime.target.Registry,
+    router: *router_mod.Router,
+    owner: semantic.owner.Id,
+    definition: ChildDefinition,
+) Error!Registration {
+    switch (definition.parent.location) {
+        .whole => {},
+        else => return error.Unsupported,
+    }
+    const parent_descriptor = targets.get(definition.parent.target) orelse return error.StaleTarget;
+    if (parent_descriptor.revision != definition.parent.revision or parent_descriptor.kind != .directory)
+        return error.StaleTarget;
+    const parent = try router.authorizedDirectory(definition.parent.target, definition.parent.revision);
+    var listing = try router.list(gpa, parent.root, parent.node);
+    defer listing.deinit();
+    for (listing.value.entries) |entry| {
+        const entry_ref = switch (entry.observation.node) {
+            .root => continue,
+            .entry => |ref| ref,
+        };
+        if (!entry_ref.eql(definition.entry)) continue;
+        if (!std.mem.eql(u8, entry.observation.revision.token, definition.entry_revision.token))
+            return error.Stale;
+        if (entry.observation.kind != .regular) return error.Unsupported;
+        return publishEntry(gpa, targets, router, owner, .{
+            .display_name = entry.name.bytes,
+            .entry = .{ .root = parent.root, .ref = definition.entry, .revision = entry.observation.revision },
+        });
+    }
+    return error.Stale;
+}
+
 /// Publish a directory target from a live, directly listed child. Listing is
 /// the relation proof: the entry must occur in the authorized parent's
 /// current listing with the exact opaque identity, revision, and directory
@@ -210,6 +283,7 @@ const TestProvider = struct {
     listed_ref: fs.contract.EntryRef = .{ .authority = .here, .slot = 4, .generation = 1 },
     listed_kind: fs.contract.Kind = .directory,
     listed_revision: []const u8 = "child-revision",
+    observed_revision: ?[]const u8 = null,
     derive_calls: usize = 0,
     release_calls: usize = 0,
 
@@ -245,9 +319,13 @@ const TestProvider = struct {
         var owned = fs.contract.OwnedObservation.init(gpa);
         const kind = if (self.derived_observed_kind != null and root.slot == 4)
             self.derived_observed_kind.?
+        else if (self.list_enabled and std.meta.eql(node, .{ .entry = self.listed_ref }))
+            self.listed_kind
         else
             self.observed_kind;
-        owned.value = .{ .node = node, .revision = .{ .token = &.{} }, .kind = kind };
+        const observed_revision = self.observed_revision orelse if (self.list_enabled and
+            std.meta.eql(node, .{ .entry = self.listed_ref })) self.listed_revision else "";
+        owned.value = .{ .node = node, .revision = .{ .token = observed_revision }, .kind = kind };
         return owned;
     }
 
@@ -503,4 +581,49 @@ test "child publication proves direct identity, owns derived root, and preserves
     try std.testing.expect(revoked.revoke(gpa, &targets));
     try std.testing.expectEqual(@as(usize, 2), provider.release_calls);
     try std.testing.expect(!revoked.revoke(gpa, &targets));
+}
+
+test "ordinary-file publication composes an opaque entry fact and guarded binding" {
+    const gpa = std.testing.allocator;
+    const fs_authority: semantic.handle.Authority = @enumFromInt(47);
+    const target_authority: semantic.handle.Authority = @enumFromInt(77);
+    const owner: semantic.owner.Id = @enumFromInt(14);
+    const child_ref: fs.contract.EntryRef = .{ .authority = fs_authority, .slot = 12, .generation = 1 };
+    var provider = TestProvider{
+        .authority = fs_authority,
+        .list_enabled = true,
+        .listed_name = "ordinary\nfile\xff",
+        .listed_ref = child_ref,
+        .listed_kind = .regular,
+    };
+    var router = router_mod.Router.init(gpa);
+    defer router.deinit();
+    try router.register(fs_authority, provider.provider());
+    var targets = target_runtime.target.Registry.init(target_authority);
+    defer targets.deinit(gpa);
+
+    var parent = try publish(gpa, &targets, &router, owner, .{
+        .display_name = "parent",
+        .directory = .{ .root = testRoot(fs_authority) },
+    });
+    defer _ = parent.close(gpa, &targets, &router);
+
+    const registration = try publishChildFile(gpa, &targets, &router, owner, .{
+        .parent = parent.located(),
+        .entry = child_ref,
+        .entry_revision = .{ .token = "child-revision" },
+    });
+    var file = registration;
+    defer _ = file.close(gpa, &targets, &router);
+    const descriptor = targets.get(registration.ref).?;
+    try std.testing.expectEqual(semantic.target.Kind.file, descriptor.kind);
+    try std.testing.expectEqualStrings("ordinary\nfile\xff", descriptor.display_name);
+    const attachment = (try fs.target.findEntry(descriptor.facts)).?;
+    try std.testing.expectEqual(child_ref, attachment.ref);
+    try std.testing.expectEqual(testRoot(fs_authority), attachment.root);
+    try std.testing.expectEqualStrings("child-revision", attachment.revision.token);
+    const authorized = try router.authorizedEntry(registration.ref, registration.revision);
+    try std.testing.expectEqual(attachment.root, authorized.root);
+    try std.testing.expectEqual(attachment.ref, authorized.ref);
+    try std.testing.expectEqualSlices(u8, attachment.revision.token, authorized.revision.token);
 }
