@@ -64,6 +64,7 @@ const ConfigField = struct {
 
 const ConfigActions = struct {
     view: semantic.view.Ref = undefined,
+    permission_target: semantic.scene.NodeId = @enumFromInt(0),
     edit_requests: usize = 0,
     copies: usize = 0,
     cuts: usize = 0,
@@ -85,7 +86,7 @@ const ConfigActions = struct {
         }
         if (std.mem.eql(u8, action, "fs.permissions.edit")) {
             self.permission_edits += 1;
-            return .handled;
+            return .{ .focus = self.permission_target };
         }
         if (std.mem.eql(u8, action, semantic.action.standard.edit)) {
             self.edit_requests += 1;
@@ -277,9 +278,11 @@ test "e2e/config: the sample config boots; SPC g i is discoverable via which-key
     // interaction, but has no directory/file/Vim branch. The sample config is
     // therefore proving the same path any tool plugin receives.
     var field: ConfigField = .{};
+    var permission_field: ConfigField = .{};
     const semantic_services = &ed.session.system.semantic;
     const owner = try semantic_services.acquireOwner();
     const field_ref = try semantic_services.insertField(gpa, owner, .init(&field));
+    const permission_field_ref = try semantic_services.insertField(gpa, owner, .init(&permission_field));
     const target_ref = try semantic_services.publishTarget(gpa, owner, .{
         .kind = .{ .synthetic = "config-fixture" },
         .display_name = "config fixture target",
@@ -298,6 +301,13 @@ test "e2e/config: the sample config boots; SPC g i is discoverable via which-key
         .target = .{ .target = target_ref, .revision = 1, .location = .{ .node = "config" } },
         .content = .{ .field = .{ .ref = field_ref, .single_line = true } },
     };
+    const permission_node: semantic.scene.Node = .{
+        .id = @enumFromInt(5),
+        // A secondary field is entered by its advertised action and does not
+        // add another stop to ordinary structured-view row traversal.
+        .focusable = false,
+        .content = .{ .field = .{ .ref = permission_field_ref, .single_line = true } },
+    };
     const row_actions = [_]semantic.scene.Action{
         .{ .id = semantic.action.standard.open },
         .{ .id = semantic.action.standard.edit },
@@ -312,7 +322,7 @@ test "e2e/config: the sample config boots; SPC g i is discoverable via which-key
     const first_row: semantic.scene.Node = .{
         .id = @enumFromInt(2),
         .actions = &row_actions,
-        .content = .{ .container = .{ .children = &.{field_node} } },
+        .content = .{ .container = .{ .children = &.{ field_node, permission_node } } },
     };
     const second_row: semantic.scene.Node = .{
         .id = @enumFromInt(4),
@@ -329,7 +339,7 @@ test "e2e/config: the sample config boots; SPC g i is discoverable via which-key
         .actions = &root_actions,
         .content = .{ .container = .{ .children = &.{ first_row, second_row } } },
     });
-    var actions: ConfigActions = .{ .view = fixture_view };
+    var actions: ConfigActions = .{ .view = fixture_view, .permission_target = permission_node.id };
     try semantic_services.registerActionProvider(gpa, owner, .init(&actions));
     _ = try semantic_services.focusView(ed.head, gpa, fixture_view, field_node.id);
 
@@ -354,6 +364,14 @@ test "e2e/config: the sample config boots; SPC g i is discoverable via which-key
     try t.expectEqual(@as(usize, 1), actions.paste_before);
     try t.expectEqual(@as(usize, 1), actions.deletes);
     try t.expectEqual(@as(usize, 1), actions.permission_edits);
+    try t.expectEqual(permission_node.id, ed.head.semantic_focus.path().?.leaf().?);
+
+    // The next row movement is relative to the primary field from which the
+    // action entered this secondary field, not the scene's first row.
+    ed.chord("SPC v j");
+    try t.expectEqual(second_row.id, ed.head.semantic_focus.path().?.leaf().?);
+    ed.chord("SPC v k");
+    try t.expectEqual(field_node.id, ed.head.semantic_focus.path().?.leaf().?);
 
     ed.chord("SPC v z");
     try t.expectEqual(@as(usize, 1), actions.plugin_actions);
