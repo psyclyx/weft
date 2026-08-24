@@ -1742,6 +1742,123 @@ test "authoring/dired: a durable raw-name copy survives rename, deletion, and a 
     try t.expectEqual(core.file.Kind.none, core.file.statKind(gpa, source_path));
 }
 
+test "authoring/dired: symlink rows stay links through generic copy, delete, and paste" {
+    const gpa = t.allocator;
+    var app: App = undefined;
+    try app.init(gpa);
+    defer app.deinit();
+    const ed = &app.ed;
+
+    // Keep the referent in a directory whose name sorts after the link. The
+    // source listing therefore contains both a link entry and an ordinary
+    // directory, while the focus walk below remains independent of ordering.
+    try core.file.writeBytesMakingDirs(gpa, "z-referents", "z-referents/target.txt", "referent survives\n");
+    _ = try app.proj.oracle("mkdir destination && ln -s -- z-referents/target.txt a-link");
+    ed.runStr("open", ".");
+    const source_view_ref = ed.head.semantic_focus.path().?.view;
+    const source_view = ed.session.system.semantic.views.get(source_view_ref).?;
+    const source_rows = source_view.scene.content.container.children;
+    try t.expectEqual(@as(usize, 3), source_rows.len);
+
+    var found_link = false;
+    var link_leaf: ?semantic.scene.NodeId = null;
+    for (source_rows) |row| {
+        const columns = row.content.container.children;
+        const field_ref = columns[2].content.field.ref;
+        var snapshot = try ed.session.system.semantic.fields.get(field_ref).?.snapshot(gpa);
+        defer snapshot.deinit();
+        if (!std.mem.eql(u8, snapshot.value.bytes, "a-link")) continue;
+        found_link = true;
+        link_leaf = columns[2].id;
+        try t.expectEqualStrings("symlink", columns[0].content.label);
+        // A symlink is an entry, not a directory target. It must not offer
+        // traversal or a no-follow permission edit the provider cannot safely
+        // perform through this semantic surface.
+        try t.expect(columns[2].target == null);
+        try t.expect(row.target == null);
+        switch (columns[1].content) {
+            .label => |label| try t.expect(label.len != 0),
+            else => return error.SymlinkAdvertisedEditableMode,
+        }
+        for (row.actions) |action| {
+            try t.expect(!std.mem.eql(u8, action.id, "fs.permissions.edit"));
+        }
+    }
+    try t.expect(found_link);
+    const link_leaf_id = link_leaf orelse return error.TestExpectedEqual;
+
+    // Resolve focus only through the generic semantic focus protocol. This
+    // loop is deliberately independent of dired row ids or a dired mode.
+    var focused_link = false;
+    for (0..source_rows.len) |_| {
+        const leaf = ed.head.semantic_focus.path().?.leaf().?;
+        if (leaf == link_leaf_id) {
+            focused_link = true;
+            break;
+        }
+        ed.press("j", "");
+    }
+    try t.expect(focused_link);
+
+    // The configured generic actions capture a durable link lease, retain the
+    // link text/type, and stage deletion as a reversible row change.
+    ed.chord("SPC v y");
+    try t.expect(ed.session.system.semantic.transfer != null);
+    ed.chord("SPC v d");
+    const deleted_view = ed.session.system.semantic.views.get(source_view_ref).?;
+    var saw_deleted = false;
+    for (deleted_view.scene.content.container.children) |row| for (row.facts) |fact| {
+        saw_deleted = saw_deleted or
+            (std.mem.eql(u8, fact.name, "change") and std.mem.eql(u8, fact.value, "delete"));
+    };
+    try t.expect(saw_deleted);
+    // Deletion is a retained draft until the provider's explicit apply dialog
+    // is confirmed. The link-as-entry draft must never touch its referent.
+    ed.chord("SPC v a");
+    try t.expect(ed.head.interactions.active() != null);
+    ed.press("y", "y");
+    try t.expect(ed.head.interactions.active() == null);
+    try t.expect(drainUntilOracle(&app.proj, ed, "test ! -L a-link && test -f z-referents/target.txt && printf ok", "ok"));
+    const source_state = try app.proj.oracle("test -f z-referents/target.txt && printf intact");
+    defer gpa.free(source_state);
+    try t.expectEqualStrings("intact", source_state);
+
+    // Paste in an independent dired instance after the source link has been
+    // removed. The retained transfer must recreate a symlink with identical
+    // raw link text; the referent remains an ordinary untouched file.
+    ed.runStr("open", "destination");
+    const destination_view_ref = ed.head.semantic_focus.path().?.view;
+    const empty = ed.session.system.semantic.views.get(destination_view_ref).?;
+    try t.expectEqual(@as(usize, 0), empty.scene.content.container.children.len);
+    ed.chord("SPC v p");
+    const pasted = ed.session.system.semantic.views.get(destination_view_ref).?;
+    try t.expectEqual(@as(usize, 1), pasted.scene.content.container.children.len);
+    const pasted_row = pasted.scene.content.container.children[0];
+    const pasted_columns = pasted_row.content.container.children;
+    try t.expectEqualStrings("symlink", pasted_columns[0].content.label);
+    var pasted_name = try ed.session.system.semantic.fields.get(pasted_columns[2].content.field.ref).?.snapshot(gpa);
+    defer pasted_name.deinit();
+    try t.expectEqualStrings("a-link", pasted_name.value.bytes);
+    switch (pasted_columns[1].content) {
+        .label => |label| try t.expect(label.len != 0),
+        else => return error.PastedSymlinkAdvertisedEditableMode,
+    }
+
+    ed.chord("SPC v a");
+    try t.expect(ed.head.interactions.active() != null);
+    ed.press("y", "y");
+    try t.expect(ed.head.interactions.active() == null);
+    const link_type = try app.proj.oracle("test -L destination/a-link && printf link");
+    defer gpa.free(link_type);
+    try t.expectEqualStrings("link", link_type);
+    const link_target = try app.proj.oracle("readlink -- destination/a-link");
+    defer gpa.free(link_target);
+    try t.expectEqualStrings("z-referents/target.txt", link_target);
+    const referent = try core.file.readAlloc(gpa, "z-referents/target.txt");
+    defer gpa.free(referent);
+    try t.expectEqualStrings("referent survives\n", referent);
+}
+
 test "authoring/dired: generic create and permissions actions apply from an empty directory" {
     const gpa = t.allocator;
     var app: App = undefined;

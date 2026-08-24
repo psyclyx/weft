@@ -342,9 +342,17 @@ pub const Model = struct {
     /// Build the one typed effect plan consumed by preview/apply. It includes
     /// all visible dirty rows, not hidden clipboard state.
     pub fn buildPlan(self: *const Model) !OwnedPlan {
+        return self.buildPlanWith(.quarantine);
+    }
+
+    /// Build the same immutable plan with the provider-selected removal
+    /// policy. The model's default remains quarantine so pure clients retain
+    /// the conservative behavior; a provider that cannot quarantine can
+    /// explicitly select permanent removal at its apply boundary.
+    pub fn buildPlanWith(self: *const Model, remove_policy: contract.RemovePolicy) !OwnedPlan {
         var owned: OwnedPlan = .{ .arena = .init(self.gpa), .value = undefined };
         errdefer owned.deinit();
-        var builder = Builder.init(owned.arena.allocator(), self);
+        var builder = Builder.init(owned.arena.allocator(), self, remove_policy);
         try builder.build();
         owned.value = .{
             .root = self.root,
@@ -662,14 +670,15 @@ pub const Model = struct {
 const Builder = struct {
     arena: std.mem.Allocator,
     model: *const Model,
+    remove_policy: contract.RemovePolicy,
     operations: std.ArrayList(contract.Planned) = .empty,
     emitted: std.ArrayList(NodeId) = .empty,
     create_operations: std.ArrayList(struct { id: NodeId, index: usize }) = .empty,
     capture_operations: std.ArrayList(struct { source: contract.EntrySource, index: usize }) = .empty,
     visiting: std.ArrayList(NodeId) = .empty,
 
-    fn init(arena: std.mem.Allocator, model: *const Model) Builder {
-        return .{ .arena = arena, .model = model };
+    fn init(arena: std.mem.Allocator, model: *const Model, remove_policy: contract.RemovePolicy) Builder {
+        return .{ .arena = arena, .model = model, .remove_policy = remove_policy };
     }
 
     fn build(self: *Builder) !void {
@@ -721,7 +730,10 @@ const Builder = struct {
             // capture, so the remove runs only after all captures apply. A
             // destination conflict therefore preserves the source while a
             // fully successful batch still honors the user's deletion.
-            try self.add(.{ .remove = .{ .source = try self.copyEntrySource(source) } }, row_ptr, null);
+            try self.add(.{ .remove = .{
+                .source = try self.copyEntrySource(source),
+                .policy = self.remove_policy,
+            } }, row_ptr, null);
         } else if (row_ptr.pending == .added) {
             try self.addCreate(row_ptr, parent_ref, row_ptr.draft.name);
         } else if (row_ptr.pending == .copied or row_ptr.pending == .copied_renamed) {
@@ -1526,8 +1538,13 @@ test "symlink copy and source deletion preserve guarded source ordering" {
     try std.testing.expectEqual(std.meta.activeTag(plan.value.operations[1].operation), .remove);
     try std.testing.expectEqual(@as(usize, 1), plan.value.operations[1].depends_on.len);
     try std.testing.expectEqual(@as(usize, 0), plan.value.operations[1].depends_on[0]);
+    try std.testing.expectEqual(contract.RemovePolicy.quarantine, plan.value.operations[1].operation.remove.policy);
     try std.testing.expectEqual(ref(104, 1), plan.value.operations[0].operation.copy.source.entry.ref);
     try std.testing.expectEqualStrings("link-copy", plan.value.operations[0].operation.copy.destination.name.bytes);
+
+    var permanent_plan = try model.buildPlanWith(.permanent);
+    defer permanent_plan.deinit();
+    try std.testing.expectEqual(contract.RemovePolicy.permanent, permanent_plan.value.operations[1].operation.remove.policy);
 }
 
 test "raw byte names round-trip through capture, paste, and plan" {

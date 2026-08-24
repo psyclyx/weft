@@ -428,7 +428,15 @@ pub const Session = struct {
     }
 
     fn applyConfirmed(self: *Session) !bool {
-        var effect_plan = try self.draft.buildPlan();
+        // Quarantine is the conservative default for portable model clients,
+        // but it is not universally available. The provider capability is the
+        // sole policy input at this boundary; dired does not inspect kinds or
+        // platforms and therefore keeps the same plan shape everywhere.
+        const remove_policy: contract.RemovePolicy = if (self.capabilities.quarantine)
+            .quarantine
+        else
+            .permanent;
+        var effect_plan = try self.draft.buildPlanWith(remove_policy);
         defer effect_plan.deinit();
         var report = try weft.semanticFsApply(self.plugin.gpa, self.target, self.target_revision, effect_plan.value);
         defer report.deinit();
