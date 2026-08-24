@@ -108,6 +108,10 @@ pub const Plugin = struct {
     pub fn invoke(self: *Plugin, request: semantic.action.Request) view_runtime.action.ProviderError!semantic.action.Outcome {
         for (self.sessions.items) |session| {
             if (!session.view_ref.eql(request.view)) continue;
+            session.validateTarget() catch |err| return switch (err) {
+                error.StaleTarget => error.Stale,
+                else => error.Failed,
+            };
             var staged = session.draft.duplicate() catch return error.Failed;
             defer staged.deinit();
             var staged_controller = actions.Controller.init(self.gpa, &staged, session.view_ref);
@@ -139,7 +143,7 @@ pub const Plugin = struct {
 
     fn mapActionError(err: anyerror) view_runtime.action.ProviderError {
         return switch (err) {
-            error.StaleSubject, error.InvalidView => error.Stale,
+            error.StaleSubject, error.StaleTarget, error.InvalidView => error.Stale,
             error.UnknownSubject,
             error.AmbiguousSubject,
             error.InvalidSelection,
@@ -412,6 +416,7 @@ const NameField = struct {
     }
 
     pub fn edit(self: *NameField, expected_revision: []const u8, edit_value: view_runtime.field.Edit) view_runtime.field.Error!void {
+        self.session.validateTarget() catch return error.Stale;
         if (expected_revision.len != @sizeOf(u64) or
             std.mem.readInt(u64, expected_revision[0..8], .little) != self.revision)
             return error.Stale;
@@ -588,6 +593,20 @@ test "target replacement and closure make existing sessions explicitly stale" {
         .facts = &.{.{ .name = fs.target.fact_name, .value = binding }},
     });
     try std.testing.expectError(error.StaleTarget, old_session.refresh());
+    const old_row = old_session.draft.rows.items[0].id;
+    try std.testing.expectError(error.Stale, fixture.plugin.invoke(.{
+        .action = semantic.action.standard.delete,
+        .view = old_session.view_ref,
+        .subject = try projection.rowNodeId(old_row),
+    }));
+    const old_field = old_session.fieldFor(old_row).?;
+    var old_snapshot = try fixture.fields.get(old_field.ref).?.snapshot(std.testing.allocator);
+    defer old_snapshot.deinit();
+    try std.testing.expectError(error.Stale, fixture.fields.get(old_field.ref).?.edit(old_snapshot.value.revision, .{
+        .start = 0,
+        .end = old_snapshot.value.bytes.len,
+        .replacement = "stale-edit",
+    }));
 
     var resolution = try fixture.handlers.resolve(std.testing.allocator, fixture.targets.get(fixture.target).?.*);
     defer resolution.deinit();
