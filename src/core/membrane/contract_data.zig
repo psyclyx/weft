@@ -346,6 +346,7 @@ pub const imports = [_]Entry{
     .{ .name = "wl_fs_append", .params = &.{ .u32, .u32, .u32, .u32 }, .results = &.{.i32}, .group = .fs, .perm = .fs_write, .doc = "append to a file (capture)" },
     .{ .name = "wl_fs_list", .params = &.{ .u32, .u32, .u32, .u32, .u32, .u32 }, .results = &.{.i32}, .group = .fs, .perm = .fs_read, .doc = "list a local directory (locus-routed; remote authorities degrade to -1)" },
     .{ .name = "wl_fs_list_async", .params = &.{ .u32, .u32, .u32, .u32, .u32, .u32 }, .results = &.{.i32}, .group = .fs, .perm = .fs_read, .doc = "queue an async `.peer` directory listing, delivered to a buffer" },
+    .{ .name = "wl_semantic_fs_publish_child_directory", .params = &.{ .u32, .u32, .u32, .u32 }, .results = &.{.i32}, .group = .fs, .perm = .fs_read, .doc = "derive and publish one provider-confined direct child directory from a canonical guarded request" },
     .{ .name = "wl_semantic_fs_list", .params = &.{ .u32, .u32, .u32, .u32, .u32, .u32, .u32 }, .results = &.{.i32}, .group = .fs, .perm = .fs_read, .doc = "list the filesystem directory attached to a live semantic target revision" },
     .{ .name = "wl_semantic_fs_apply", .params = &.{ .u32, .u32, .u32, .u32, .u32, .u32, .u32, .u32, .u32 }, .results = &.{.i32}, .group = .fs, .perm = .fs_write, .doc = "apply a bounded typed filesystem plan against a live semantic target revision" },
 
@@ -376,7 +377,7 @@ pub const imports = [_]Entry{
 /// half-finished edit — fails the build with a pointed message instead of
 /// silently drifting the two ~124-entry tables apart again (the exact class
 /// this table exists to kill).
-const expected_import_count = 167;
+const expected_import_count = 168;
 
 /// A host→guest EXPORT entrypoint (design doc/north-star-plan.md §2.5, task
 /// W0a-D extension 2): every `instance.callVoid("name", args)` the host

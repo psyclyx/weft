@@ -59,6 +59,10 @@ pub fn hSemanticTargetReplace(data: ?*anyopaque, caller: *wasm.Caller, args: []c
     const scope = plugin.semanticScope() orelse return;
     const services = scope.services;
     const ref = wire_util.readHandle(semantic.target.Ref, args[0..3]) orelse return;
+    // A provider-confined directory target is an immutable authority value.
+    // Replacing only its descriptive half would split target revision from
+    // router binding; close and derive another target instead.
+    if (plugin.ownsSemanticDirectory(ref)) return;
     const payload = readPayload(plugin, caller, args[3], args[4]) orelse return;
     defer plugin.gpa.free(payload);
     var decoded = scene_codec.decodeTarget(plugin.gpa, payload) catch return;
@@ -77,6 +81,10 @@ pub fn hSemanticTargetClose(data: ?*anyopaque, _: *wasm.Caller, args: []const i3
         results[0] = 0;
         return;
     };
+    if (plugin.closeSemanticDirectory(&scope.services.targets, ref)) |closed| {
+        results[0] = @intFromBool(closed);
+        return;
+    }
     results[0] = @intFromBool(scope.services.closeTarget(plugin.gpa, scope.owner, ref));
 }
 

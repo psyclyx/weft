@@ -9,6 +9,11 @@ pub const codec = @import("codec.zig");
 
 pub const Limits = codec.Limits;
 pub const Error = codec.Error;
+pub const OwnedListing = codec.OwnedListing;
+pub const OwnedPlan = codec.OwnedPlan;
+pub const OwnedApplyReport = codec.OwnedApplyReport;
+pub const ChildDirectory = codec.ChildDirectory;
+pub const OwnedChildDirectory = codec.OwnedChildDirectory;
 pub const listing = struct {
     pub const encode = codec.encodeListing;
     pub const decode = codec.decodeListing;

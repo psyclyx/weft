@@ -231,6 +231,7 @@ extern "weft" fn wl_fs_write(path: u32, path_len: u32, ptr: u32, len: u32) i32;
 extern "weft" fn wl_fs_append(path: u32, path_len: u32, ptr: u32, len: u32) i32;
 extern "weft" fn wl_fs_list(auth: u32, auth_len: u32, path: u32, path_len: u32, out_ptr: u32, out_cap: u32) i32;
 extern "weft" fn wl_fs_list_async(auth: u32, auth_len: u32, path: u32, path_len: u32, dest: u32, dest_len: u32) i32;
+extern "weft" fn wl_semantic_fs_publish_child_directory(request_ptr: u32, request_len: u32, out_ptr: u32, out_cap: u32) i32;
 extern "weft" fn wl_semantic_fs_list(target_authority: u32, target_slot: u32, target_generation: u32, revision_low: u32, revision_high: u32, out_ptr: u32, out_cap: u32) i32;
 extern "weft" fn wl_semantic_fs_apply(target_authority: u32, target_slot: u32, target_generation: u32, revision_low: u32, revision_high: u32, plan_ptr: u32, plan_len: u32, out_ptr: u32, out_cap: u32) i32;
 // D2's generic, schema-directed slot verbs (doc/d2-schema-payloads.md §3.2).
@@ -1672,7 +1673,7 @@ pub fn fsListAsync(authority: []const u8, dir: []const u8, dest: []const u8) boo
 /// Typed status returned by the target-scoped filesystem membrane.  A
 /// non-negative host result is an encoded response length; these values are
 /// only used internally by the retrying wrappers below.
-pub const SemanticFsError = fs_codec.Error || error{
+pub const SemanticFsError = fs_codec.Error || semantic_codec.Error || error{
     Unavailable,
     StaleTarget,
     Unsupported,
@@ -1697,6 +1698,42 @@ fn semanticFsRevisionLow(revision: u64) u32 {
 
 fn semanticFsRevisionHigh(revision: u64) u32 {
     return @intCast(revision >> 32);
+}
+
+/// Publish an observed direct child directory as a new independently confined
+/// semantic target. The request carries only the live parent target and
+/// guarded entry identity; the host re-reads the provider name and derives a
+/// new root, so neither a raw root capability nor a filename is trusted from
+/// guest memory.
+pub fn semanticFsPublishChildDirectory(
+    gpa: std.mem.Allocator,
+    parent: semantic.target.Located,
+    entry: fs.contract.EntryRef,
+    revision: fs.contract.Revision,
+) SemanticFsError!semantic.target.Located {
+    const request = try fs_codec.child_directory.encode(gpa, .{
+        .parent = parent,
+        .entry = entry,
+        .revision = revision,
+    });
+    defer gpa.free(request);
+    var output: [64]u8 = undefined;
+    const result = wl_semantic_fs_publish_child_directory(
+        p(request.ptr),
+        @intCast(request.len),
+        p(&output),
+        output.len,
+    );
+    try semanticFsError(result);
+    const result_len: usize = @intCast(result);
+    if (result_len > output.len) return error.Failed;
+    var located = try semantic_codec.target.decodeLocated(gpa, output[0..result_len]);
+    defer located.deinit();
+    switch (located.value.location) {
+        .whole => {},
+        else => return error.InvalidTarget,
+    }
+    return located.value;
 }
 
 /// List the exact directory attachment of a live target revision.  The

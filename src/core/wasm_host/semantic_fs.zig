@@ -13,6 +13,7 @@ const semantic = @import("weft_semantic");
 const fs = @import("weft_fs");
 const fs_codec = @import("weft_fs_codec");
 const fs_runtime = @import("weft_fs_runtime");
+const scene_codec = @import("weft_scene_codec");
 
 const shared = @import("plugin.zig");
 const WasmPlugin = shared.WasmPlugin;
@@ -47,9 +48,9 @@ pub const AuthorizedDirectory = struct {
 fn status(err: anyerror) i32 {
     return @intFromEnum(switch (err) {
         error.Unavailable => Status.unavailable,
-        error.StaleTarget => Status.stale_target,
+        error.Stale, error.StaleTarget => Status.stale_target,
         error.Unsupported => Status.unsupported,
-        error.InvalidTarget, error.InvalidDirectoryTarget, error.InvalidAttachment => Status.invalid,
+        error.InvalidHandle, error.InvalidTarget, error.InvalidDirectoryTarget, error.InvalidAttachment, error.NotDirectory => Status.invalid,
         else => Status.failed,
     });
 }
@@ -123,6 +124,81 @@ pub fn requireUnrestricted(plugin: *WasmPlugin, caller: *wasm.Caller, comptime p
             return false;
         },
     }
+}
+
+/// Derive a provider-confined direct child root and publish its ordinary
+/// semantic target as one transaction. The canonical request contains no raw
+/// root or name; `publishChildDirectory` re-lists the authorized parent and
+/// the provider repeats the guarded no-follow check before minting authority.
+pub fn hPublishChildDirectory(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32, results: []i32) void {
+    const plugin: *WasmPlugin = @ptrCast(@alignCast(data.?));
+    results[0] = @intFromEnum(Status.unavailable);
+    if (!requirePerm(plugin, caller, .fs_read)) return;
+    if (!requireUnrestricted(plugin, caller, .fs_read)) return;
+    const scope = plugin.semanticScope() orelse return;
+    const router = plugin.activeCtx().filesystems orelse return;
+    const request_bytes = wire_util.readBounded(
+        plugin.gpa,
+        caller,
+        args[0],
+        args[1],
+        1,
+        fs_codec.Limits.max_payload_bytes,
+    ) orelse {
+        results[0] = @intFromEnum(Status.invalid);
+        return;
+    };
+    defer plugin.gpa.free(request_bytes);
+    var request = fs_codec.child_directory.decode(plugin.gpa, request_bytes) catch |err| {
+        results[0] = status(err);
+        return;
+    };
+    defer request.deinit();
+    plugin.semantic_directories.ensureUnusedCapacity(plugin.gpa, 1) catch {
+        results[0] = @intFromEnum(Status.failed);
+        return;
+    };
+    var publication = fs_runtime.publication.publishChildDirectory(
+        plugin.gpa,
+        &scope.services.targets,
+        router,
+        scope.owner,
+        .{
+            .parent = request.value.parent,
+            .entry = request.value.entry,
+            .entry_revision = request.value.revision,
+        },
+    ) catch |err| {
+        results[0] = status(err);
+        return;
+    };
+    var publication_owned = true;
+    defer {
+        if (publication_owned) _ = publication.close(plugin.gpa, &scope.services.targets);
+    }
+
+    const encoded = scene_codec.target.encodeLocated(plugin.gpa, publication.located()) catch |err| {
+        results[0] = status(err);
+        return;
+    };
+    defer plugin.gpa.free(encoded);
+    const out_ptr: u32 = @bitCast(args[2]);
+    const out_cap: u32 = @bitCast(args[3]);
+    if (out_cap < encoded.len) {
+        results[0] = @intFromEnum(Status.output_too_small);
+        return;
+    }
+    const written = caller.writeMemory(out_ptr, out_cap, encoded) catch {
+        results[0] = @intFromEnum(Status.failed);
+        return;
+    };
+    if (written != encoded.len) {
+        results[0] = @intFromEnum(Status.failed);
+        return;
+    }
+    plugin.semantic_directories.appendAssumeCapacity(publication);
+    publication_owned = false;
+    results[0] = @intCast(encoded.len);
 }
 
 /// V1 intentionally keeps the membrane's authority boundary simple and

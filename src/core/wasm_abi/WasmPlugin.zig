@@ -24,6 +24,7 @@ const Pool = @import("../task.zig").Pool;
 const grants_mod = @import("../grants.zig");
 const plugin_semantic = @import("weft_plugin_semantic");
 const semantic_model = @import("weft_semantic");
+const fs_runtime = @import("weft_fs_runtime");
 const semantic_runtime = @import("../semantic.zig");
 const transfer_attachment = @import("../wasm_host/transfer_attachment.zig");
 
@@ -262,6 +263,13 @@ semantic_targets: plugin_semantic.target.Bridge = .empty,
 /// values; the guest receives no target-registry implementation authority.
 semantic_relations: plugin_semantic.relation.Bridge = .empty,
 
+// ── Provider-confined semantic directory publications ──
+/// Direct-child targets derived through the filesystem authority boundary.
+/// The guest owns ordinary semantic handles; this host-side collection owns
+/// the paired target binding and provider root so generic target close and
+/// plugin teardown revoke the complete capability, not only its description.
+semantic_directories: std.ArrayList(fs_runtime.publication.ChildRegistration) = .empty,
+
 // ── Sandboxed semantic transfer attachments ──
 /// Guest references are owner-scoped and are revoked with this plugin. Host
 /// transfer owners retain the resolved resource independently.
@@ -349,6 +357,29 @@ pub fn semanticScope(self: *WasmPlugin) ?SemanticScope {
     return .{ .services = home, .owner = owner };
 }
 
+pub fn ownsSemanticDirectory(self: *const WasmPlugin, ref: semantic_model.target.Ref) bool {
+    for (self.semantic_directories.items) |directory|
+        if (directory.registration.ref.eql(ref)) return true;
+    return false;
+}
+
+/// Close a provider-confined target through the same generic target-close ABI
+/// every other owned target uses. `null` means the handle is not one of these
+/// paired publications and the ordinary semantic registry should decide it.
+pub fn closeSemanticDirectory(
+    self: *WasmPlugin,
+    targets: *@import("weft_target_runtime").target.Registry,
+    ref: semantic_model.target.Ref,
+) ?bool {
+    for (self.semantic_directories.items, 0..) |*directory, index| {
+        if (!directory.registration.ref.eql(ref)) continue;
+        if (!directory.close(self.gpa, targets)) return false;
+        _ = self.semantic_directories.swapRemove(index);
+        return true;
+    }
+    return null;
+}
+
 pub fn declaresCommand(self: *WasmPlugin, name: []const u8) bool {
     for (self.declared.items) |d| if (std.mem.eql(u8, d, name)) return true;
     return false;
@@ -376,8 +407,18 @@ pub fn deinit(self: *WasmPlugin) void {
     // whole owner namespace while the guest instance is still alive; every
     // retained handle becomes stale before either side can dangle.
     if (self.semantic_owner) |owner| {
-        if (self.ctx.semantic) |services| _ = services.releaseOwner(gpa, owner);
+        if (self.ctx.semantic) |services| {
+            // Paired filesystem publications must close before bulk semantic
+            // owner revocation: their provider roots are an independent
+            // lifetime that the semantic registry neither knows nor owns.
+            while (self.semantic_directories.items.len != 0) {
+                var directory = self.semantic_directories.pop().?;
+                _ = directory.revoke(gpa, &services.targets);
+            }
+            _ = services.releaseOwner(gpa, owner);
+        }
     }
+    self.semantic_directories.deinit(gpa);
     self.semantic_fields.deinit();
     self.semantic_actions.deinit();
     self.semantic_targets.deinit();

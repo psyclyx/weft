@@ -225,6 +225,7 @@ const guests = [_]Guest{
     // slot the wasm-membrane suite proves end to end; never shipped.
     .{ .src = "src/guest/badge.zig", .import = "guest_badge_wasm", .install = false },
     .{ .src = "src/guest/semantic_fixture.zig", .import = "guest_semantic_wasm", .install = false },
+    .{ .src = "src/guest/semantic_fs_fixture.zig", .import = "guest_semantic_fs_wasm", .install = false },
     .{ .src = "src/guest/edit.zig", .import = "guest_edit_wasm", .install = true },
     .{ .src = "src/guest/complete.zig", .import = "guest_complete_wasm", .install = true },
     .{ .src = "src/guest/project.zig", .import = "guest_project_wasm", .install = true },

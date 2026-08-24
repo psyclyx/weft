@@ -18,6 +18,9 @@ const async_loop = @import("../async.zig");
 const net_session = @import("../net_session.zig");
 const wasm_host = @import("../wasm_host.zig");
 const contract = @import("../membrane/contract.zig");
+const semantic_model = @import("weft_semantic");
+const fs_contract = @import("weft_fs").contract;
+const fs_runtime = @import("weft_fs_runtime");
 const Allocator = std.mem.Allocator;
 
 const wasm_abi = @import("../wasm_abi.zig");
@@ -120,6 +123,173 @@ test "wasm plugin: canonical targets and scenes cross the semantic membrane" {
         .view = view_ref,
         .subject = child_id,
     }));
+}
+
+test "wasm plugin: guarded child directories publish and revoke complete authority" {
+    const gpa = t.allocator;
+    const Provider = struct {
+        child_generation: u32 = 1,
+        child_live: bool = false,
+        derive_calls: usize = 0,
+        release_calls: usize = 0,
+
+        const parent_root: fs_contract.Root = .{ .authority = .here, .slot = 0, .generation = 1 };
+        const child_entry: fs_contract.EntryRef = .{ .authority = .here, .slot = 7, .generation = 1 };
+        const child_name = "child\n\xff";
+        const child_revision = "child-r1";
+
+        fn childRoot(self: *const @This()) fs_contract.Root {
+            return .{ .authority = .here, .slot = 1, .generation = self.child_generation };
+        }
+
+        fn provider(self: *@This()) @import("weft_fs").service.Provider {
+            return .init(self);
+        }
+
+        pub fn capabilities(_: *@This(), _: fs_contract.Root) fs_contract.Error!fs_contract.Capabilities {
+            return .{};
+        }
+
+        pub fn sameRoot(self: *@This(), left: fs_contract.Root, right: fs_contract.Root) fs_contract.Error!bool {
+            try self.validateRoot(left);
+            try self.validateRoot(right);
+            return left.eql(right);
+        }
+
+        pub fn deriveRoot(self: *@This(), source: fs_contract.EntrySource) fs_contract.Error!fs_contract.Root {
+            if (!source.root.eql(parent_root) or !source.ref.eql(child_entry) or
+                !std.mem.eql(u8, source.revision.token, child_revision)) return error.Stale;
+            if (self.child_live) return error.Busy;
+            self.child_live = true;
+            self.derive_calls += 1;
+            return self.childRoot();
+        }
+
+        pub fn releaseRoot(self: *@This(), root: fs_contract.Root) void {
+            if (!self.child_live or !root.eql(self.childRoot())) return;
+            self.child_live = false;
+            self.release_calls += 1;
+            self.child_generation +%= 1;
+            if (self.child_generation == 0) self.child_generation = 1;
+        }
+
+        fn validateRoot(self: *@This(), root: fs_contract.Root) fs_contract.Error!void {
+            if (root.eql(parent_root)) return;
+            if (self.child_live and root.eql(self.childRoot())) return;
+            return error.Stale;
+        }
+
+        pub fn observe(self: *@This(), allocator: std.mem.Allocator, root: fs_contract.Root, node: fs_contract.NodeRef) fs_contract.Error!fs_contract.OwnedObservation {
+            try self.validateRoot(root);
+            if (node != .root) return error.Stale;
+            var owned = fs_contract.OwnedObservation.init(allocator);
+            owned.value = .{ .node = .root, .revision = .{ .token = &.{} }, .kind = .directory };
+            return owned;
+        }
+
+        pub fn list(self: *@This(), allocator: std.mem.Allocator, root: fs_contract.Root, node: fs_contract.NodeRef) fs_contract.Error!fs_contract.OwnedListing {
+            try self.validateRoot(root);
+            if (node != .root) return error.Stale;
+            var owned = fs_contract.OwnedListing.init(allocator);
+            errdefer owned.deinit();
+            const arena = owned.allocator();
+            const revision = try arena.dupe(u8, if (root.eql(parent_root)) "parent-r1" else "derived-r1");
+            const entries = try arena.alloc(fs_contract.DirEntry, if (root.eql(parent_root)) 1 else 0);
+            if (root.eql(parent_root)) {
+                entries[0] = .{
+                    .name = fs_contract.Name.init(try arena.dupe(u8, child_name)) catch unreachable,
+                    .observation = .{
+                        .node = .{ .entry = child_entry },
+                        .revision = .{ .token = try arena.dupe(u8, child_revision) },
+                        .kind = .directory,
+                    },
+                };
+            }
+            owned.value = .{
+                .directory = .{ .node = .root, .revision = .{ .token = revision }, .kind = .directory },
+                .revision = .{ .token = revision },
+                .entries = entries,
+            };
+            return owned;
+        }
+
+        pub fn read(_: *@This(), _: std.mem.Allocator, _: fs_contract.ReadRequest) fs_contract.Error!fs_contract.OwnedReadResult {
+            return error.Unsupported;
+        }
+        pub fn capture(_: *@This(), _: fs_contract.EntrySource) fs_contract.Error!fs_contract.LeaseRef {
+            return error.Unsupported;
+        }
+        pub fn releaseLease(_: *@This(), _: fs_contract.LeaseSource) void {}
+        pub fn apply(_: *@This(), _: std.mem.Allocator, _: fs_contract.Plan) fs_contract.Error!fs_contract.OwnedApplyReport {
+            return error.Unsupported;
+        }
+        pub fn watch(_: *@This(), _: fs_contract.Root, _: fs_contract.NodeRef, _: bool) fs_contract.Error!fs_contract.WatchRef {
+            return error.Unsupported;
+        }
+        pub fn pollInvalidation(_: *@This(), _: fs_contract.WatchRef) fs_contract.Error!?fs_contract.Invalidation {
+            return error.Unsupported;
+        }
+        pub fn closeWatch(_: *@This(), _: fs_contract.WatchRef) void {}
+    };
+
+    var env: Env = undefined;
+    try Env.init(gpa, &env);
+    defer env.deinit(gpa);
+    var semantic = semantic_mod.Services.init(.here);
+    defer semantic.deinit(gpa);
+    var router = fs_runtime.Router.init(gpa);
+    defer router.deinit();
+    var provider: Provider = .{};
+    try router.register(.here, provider.provider());
+    env.ctx.semantic = &semantic;
+    env.ctx.filesystems = &router;
+
+    const host_owner = try semantic.acquireOwner();
+    defer _ = semantic.releaseOwner(gpa, host_owner);
+    var parent = try fs_runtime.publication.publish(
+        gpa,
+        &semantic.targets,
+        &router,
+        host_owner,
+        .{ .display_name = "parent", .directory = .{ .root = Provider.parent_root } },
+    );
+    defer _ = parent.close(gpa, &semantic.targets, &router);
+
+    var engine = try wasm.Engine.init();
+    defer engine.deinit();
+    const fixture_bytes = @embedFile("guest_semantic_fs_wasm");
+
+    const first = try loadPlugin(&engine, &env.ctx, "semantic-fs-fixture", fixture_bytes, .{});
+    var first_live = true;
+    defer if (first_live) first.deinit();
+    try t.expectEqual(@as(usize, 1), first.semantic_directories.items.len);
+    const first_child = first.semantic_directories.items[0].registration;
+    try t.expectEqualStrings(Provider.child_name, semantic.targets.get(first_child.ref).?.display_name);
+    const first_authorized = try router.authorizedDirectory(first_child.ref, first_child.revision);
+    try t.expectEqual(provider.childRoot(), first_authorized.root);
+    try t.expectEqual(@as(usize, 1), provider.derive_calls);
+
+    const closed = try command.run(&env.commands, &env.ctx, "fixture-close-child-directory", &.{});
+    try t.expectEqual(command.Value{ .integer = 1 }, closed);
+    try t.expectEqual(@as(usize, 0), first.semantic_directories.items.len);
+    try t.expect(semantic.targets.get(first_child.ref) == null);
+    try t.expectError(error.TargetUnbound, router.authorizedDirectory(first_child.ref, first_child.revision));
+    try t.expectEqual(@as(usize, 1), provider.release_calls);
+    first.deinit();
+    first_live = false;
+    try t.expectEqual(@as(usize, 1), provider.release_calls);
+
+    // Owner teardown exercises the same complete lifetime without asking the
+    // guest to close first; neither the target binding nor provider root may
+    // survive plugin unload.
+    const second = try loadPlugin(&engine, &env.ctx, "semantic-fs-fixture", fixture_bytes, .{});
+    const second_child = second.semantic_directories.items[0].registration;
+    try t.expect(provider.child_live);
+    second.deinit();
+    try t.expect(!provider.child_live);
+    try t.expectEqual(@as(usize, 2), provider.release_calls);
+    try t.expect(semantic.targets.get(second_child.ref) == null);
+    try t.expectError(error.TargetUnbound, router.authorizedDirectory(second_child.ref, second_child.revision));
 }
 
 test "wasm plugin: semantic ownership is instance-specific and system-local" {
