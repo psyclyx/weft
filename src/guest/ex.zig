@@ -174,7 +174,7 @@ fn builtin(kw: []const u8, bang: bool, args: []const u8) bool {
             // open action protocol config binds; ex knows neither dired nor
             // how a provider reconstructs its draft.
             switch (weft.semanticAction(weft.semantic.action.standard.revert)) {
-                .handled, .transfer_stored, .interaction_opened => {},
+                .handled, .transfer_stored, .interaction_opened, .target_opened => {},
                 .unavailable, .failed, _ => weft.echo("e: structured view refused revert"),
             }
         } else {
