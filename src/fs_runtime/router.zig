@@ -90,8 +90,15 @@ pub const Router = struct {
     /// `weft.fs.directory.v1` fact.  Callers must unbind before closing a
     /// target or replacing its revision.
     pub fn bindTarget(self: *Router, target: semantic.target.Ref, revision: u64, directory: fs.target.Directory) Error!void {
-        if (target.generation == 0) return error.InvalidHandle;
+        if (target.generation == 0 or revision == 0) return error.InvalidHandle;
         try fs.target.validate(directory);
+        // Binding is the authority-minting step, so establish that the route
+        // and exact node are live directories now. Descriptive target facts
+        // and well-shaped opaque handles are not enough.
+        var observed = try self.observe(self.allocator, directory.root, directory.node);
+        defer observed.deinit();
+        if (!std.meta.eql(observed.value.node, directory.node)) return error.InvalidHandle;
+        if (observed.value.kind != .directory) return error.NotDirectory;
         const key = targetKey(target);
         if (self.target_bindings.contains(key)) return error.TargetAlreadyBound;
         try self.target_bindings.put(key, .{ .revision = revision, .directory = directory });
@@ -409,14 +416,16 @@ test "target bindings are explicit, revision-stamped, and retired with their aut
     const target: semantic.target.Ref = .{ .authority = .here, .slot = 4, .generation = 3 };
     const directory: fs.target.Directory = .{ .root = makeRoot(.here), .node = .root };
     try std.testing.expectError(error.TargetUnbound, router.authorizedDirectory(target, 1));
+    try std.testing.expectError(error.UnknownAuthority, router.bindTarget(target, 1, directory));
+    try router.register(.here, provider.asProvider());
     try router.bindTarget(target, 1, directory);
     try std.testing.expectEqual(directory, try router.authorizedDirectory(target, 1));
     try std.testing.expectError(error.StaleTarget, router.authorizedDirectory(target, 2));
+    try std.testing.expectError(error.InvalidHandle, router.bindTarget(target, 0, directory));
     try std.testing.expectError(error.TargetAlreadyBound, router.bindTarget(target, 1, directory));
     try std.testing.expect(router.unbindTarget(target));
     try std.testing.expectError(error.TargetUnbound, router.authorizedDirectory(target, 1));
     try router.bindTarget(target, 1, directory);
-    try router.register(.here, provider.asProvider());
     try router.unregister(.here);
     try std.testing.expectError(error.TargetUnbound, router.authorizedDirectory(target, 1));
 }

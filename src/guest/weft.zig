@@ -1556,7 +1556,7 @@ fn semanticFsError(code: i32) SemanticFsError!void {
         -3 => return error.Unsupported,
         -4 => return error.InvalidTarget,
         -5 => return error.Failed,
-        else => {},
+        else => if (code < 0) return error.Failed,
     }
 }
 
@@ -1585,7 +1585,9 @@ pub fn semanticFsList(gpa: std.mem.Allocator, target: semantic.target.Ref, revis
             continue;
         }
         try semanticFsError(result);
-        return fs_codec.decodeListing(gpa, bytes[0..@intCast(result)]);
+        const result_len: usize = @intCast(result);
+        if (result_len > bytes.len) return error.Failed;
+        return fs_codec.decodeListing(gpa, bytes[0..result_len]);
     }
 }
 
@@ -1608,7 +1610,9 @@ pub fn semanticFsApply(gpa: std.mem.Allocator, target: semantic.target.Ref, revi
             continue;
         }
         try semanticFsError(result);
-        return fs_codec.decodeApplyReport(gpa, bytes[0..@intCast(result)]);
+        const result_len: usize = @intCast(result);
+        if (result_len > bytes.len) return error.Failed;
+        return fs_codec.decodeApplyReport(gpa, bytes[0..result_len]);
     }
 }
 
