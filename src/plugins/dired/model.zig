@@ -221,12 +221,29 @@ pub const Model = struct {
     }
 
     pub fn rename(self: *Model, id: NodeId, name: []const u8) !void {
-        _ = try contract.Name.init(name);
         const row_ptr = self.rowMutable(id) orelse return error.UnknownNode;
+        // An empty editable name is the draft representation of deletion,
+        // not the removal of a presentation row. Keeping the row and identity
+        // stable preserves anchors/registers while the user is still typing.
+        if (name.len == 0) {
+            try self.replaceBytes(&row_ptr.draft.name, name);
+            row_ptr.name_dirty = true;
+            row_ptr.pending = .deleted;
+            return;
+        }
+        _ = try contract.Name.init(name);
         try self.replaceBytes(&row_ptr.draft.name, name);
-        row_ptr.name_dirty = true;
-        if (row_ptr.pending == .observed) row_ptr.pending = .renamed;
-        if (row_ptr.pending == .copied) row_ptr.pending = .copied_renamed;
+        row_ptr.name_dirty = if (row_ptr.base) |base| !std.mem.eql(u8, base.name, name) else true;
+        row_ptr.pending = if (row_ptr.copy_source != null)
+            .copied_renamed
+        else if (row_ptr.base == null)
+            .added
+        else if (row_ptr.name_dirty)
+            .renamed
+        else if (row_ptr.mode_dirty)
+            .modified
+        else
+            .observed;
     }
 
     pub fn setMode(self: *Model, id: NodeId, mode: u32) !void {
@@ -1417,6 +1434,42 @@ test "captured transfer keeps old name across source rename or deletion" {
     try source.reconcile(.{ .entries = &.{} });
     const pasted_after_delete = try destination.paste(null, &deleted_item);
     try std.testing.expectEqualStrings("new", destination.row(pasted_after_delete).?.draft.name);
+}
+
+test "empty names retain rows as deletions and typing revives their origin" {
+    var dired = Model.init(std.testing.allocator, .{ .authority = .here, .slot = 32, .generation = 1 });
+    defer dired.deinit();
+    try dired.reconcile(.{ .entries = &.{.{
+        .identity = ref(33, 1),
+        .name = "observed",
+        .revision = "r1",
+        .kind = .regular,
+    }} });
+    const observed = dired.rows.items[0].id;
+
+    try dired.rename(observed, "");
+    try std.testing.expectEqual(@as(usize, 1), dired.rows.items.len);
+    try std.testing.expectEqual(Pending.deleted, dired.row(observed).?.pending);
+    try std.testing.expectEqualStrings("", dired.row(observed).?.draft.name);
+    var removal = try dired.buildPlan();
+    defer removal.deinit();
+    try std.testing.expectEqual(@as(usize, 1), removal.value.operations.len);
+    try std.testing.expect(removal.value.operations[0].operation == .remove);
+
+    try dired.rename(observed, "renamed");
+    try std.testing.expectEqual(Pending.renamed, dired.row(observed).?.pending);
+    try std.testing.expectEqualStrings("renamed", dired.row(observed).?.draft.name);
+    try dired.rename(observed, "observed");
+    try std.testing.expectEqual(Pending.observed, dired.row(observed).?.pending);
+    try std.testing.expect(!dired.row(observed).?.name_dirty);
+
+    const added = try dired.addFile(null, "pending", &.{}, null);
+    try dired.rename(added, "");
+    var suppressed = try dired.buildPlan();
+    defer suppressed.deinit();
+    try std.testing.expectEqual(@as(usize, 0), suppressed.value.operations.len);
+    try dired.rename(added, "restored");
+    try std.testing.expectEqual(Pending.added, dired.row(added).?.pending);
 }
 
 test "planner captures before source rename independent of row order" {

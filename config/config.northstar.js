@@ -63,7 +63,7 @@ weft.plugin("console");     // grant bundle: proc
 weft.plugin("repl");        // grant bundle: proc (persistent subprocess)
 weft.plugin("net");         // grant bundle: net
 weft.plugin("which_key");   // menu-hint overlay over the surface door
-weft.plugin("dired");       // grant bundle: proc (ls) — later: the fs graph projection
+weft.plugin("dired");       // directory launcher; the target handler owns its semantic scene/actions
 weft.plugin("lsp");         // grant bundle: proc + fs.read
 weft.set("lsp", "zig", "zls");
 weft.plugin("debug");       // breakpoints (gutter markers)

@@ -338,6 +338,17 @@ test "e2e/config: the sample config boots; SPC g i is discoverable via which-key
         try t.expectEqualStrings(binding.command, ed.keymap.resolveExact("normal", binding.sequence).?);
     }
 
+    // The sample's ordinary file-group binding reaches the shipped launcher,
+    // which delegates to generic target opening. Its observable result is a
+    // retained semantic scene—not a dired keymap mode or text buffer.
+    ed.chord("SPC f d");
+    const configured_directory_view = ed.head.semantic_focus.path().?.view;
+    try t.expectEqualStrings(
+        "dired",
+        ed.session.system.semantic.views.get(configured_directory_view).?.scene.role,
+    );
+    try t.expect(ed.buffers.findByName("*dired*") == null);
+
     // Now drive those bindings against a real retained scene. This fixture is
     // intentionally generic: it owns fields, actions, a target link, and an
     // interaction, but has no directory/file/Vim branch. The sample config is
@@ -498,6 +509,10 @@ test "e2e/config: the sample config boots; SPC g i is discoverable via which-key
     // yy/dd/paste/open-container keys then resolve through the same advertised
     // semantic actions as the config chords above.
     _ = try semantic_services.focusView(ed.head, gpa, fixture_view, field_node.id);
+    ed.press("j", "");
+    try t.expectEqual(second_row.id, ed.head.semantic_focus.path().?.leaf().?);
+    ed.press("k", "");
+    try t.expectEqual(field_node.id, ed.head.semantic_focus.path().?.leaf().?);
     ed.press("i", "");
     try t.expectEqualStrings("insert", ed.head.currentMode());
     ed.typeText("x");

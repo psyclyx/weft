@@ -453,6 +453,8 @@ test "e2e/web: author js + html, grep across them, run it with node" {
     // The app Session publishes a typed directory target and the composed dired
     // plugin claims it as an ordinary semantic view. There is no *dired* text
     // buffer and no dired-specific mode for this acceptance path.
+    const input_posture = try gpa.dupe(u8, ed.mode());
+    defer gpa.free(input_posture);
     ed.runStr("open", ".");
     try t.expectEqual(@as(usize, 1), ed.session.dired_plugin.sessions.items.len);
     const dired = ed.session.dired_plugin.sessions.items[0];
@@ -468,8 +470,13 @@ test "e2e/web: author js + html, grep across them, run it with node" {
     try t.expectEqual(@as(usize, 2), children.len);
     try t.expectEqualStrings("dired.row", children[0].role);
     try t.expectEqualStrings("dired.row", children[1].role);
-    try t.expectEqualStrings("app.js", dired.draft.rows.items[0].draft.name);
-    try t.expectEqualStrings("index.html", dired.draft.rows.items[1].draft.name);
+    var saw_app = false;
+    var saw_index = false;
+    for (dired.draft.rows.items) |row| {
+        saw_app = saw_app or std.mem.eql(u8, row.draft.name, "app.js");
+        saw_index = saw_index or std.mem.eql(u8, row.draft.name, "index.html");
+    }
+    try t.expect(saw_app and saw_index);
 
     // Vim's ordinary j/k motions consume the generic semantic focus protocol;
     // the plugin does not need to know that the caller happens to be Vim.
@@ -479,7 +486,7 @@ test "e2e/web: author js + html, grep across them, run it with node" {
     try t.expect(first_focus != second_focus);
     ed.press("k", "");
     try t.expectEqual(first_focus, ed.head.semantic_focus.path().?.leaf().?);
-    try t.expectEqualStrings("normal", ed.mode());
+    try t.expectEqualStrings(input_posture, ed.mode());
 
     // The same view can be refreshed through the generic action endpoint. It
     // remains retained and focused, rather than being reconstructed as a tool

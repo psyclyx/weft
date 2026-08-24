@@ -80,10 +80,10 @@ pub fn projectWith(gpa: std.mem.Allocator, rows: []const model.Row, bindings: []
     owned.value = .{
         .id = root_id,
         .role = "dired",
-        // The container itself remains an actionable focus stop when a
-        // directory is empty. Input plugins can then invoke advertised root
-        // actions without inventing an invisible text row.
-        .focusable = true,
+        // The container itself is a focus stop only when there is no ordinary
+        // name field to select. Root actions remain reachable through every
+        // row's ancestor path in non-empty directories.
+        .focusable = rows.len == 0,
         .actions = try rootActions(arena, rows, options),
         .content = .{ .container = .{ .axis = .vertical, .children = children } },
     };
@@ -232,7 +232,10 @@ fn rowActions(arena: std.mem.Allocator, row: model.Row, mode_editable: bool, has
     const actions = try arena.alloc(scene.Action, 9 + @as(usize, if (mode_editable) 1 else 0));
     const unavailable = row.pending == .deleted or row.conflict == .stale;
     actions[0] = .{ .id = standard.open, .label = "Open", .enabled = !unavailable and has_target };
-    actions[1] = .{ .id = standard.edit, .label = "Edit name", .enabled = row.pending != .deleted };
+    // Deletion is a reversible draft state, not the destruction of this row.
+    // Keep its name editor advertised so any input policy can revive it; only
+    // an externally stale row is unsafe to edit.
+    actions[1] = .{ .id = standard.edit, .label = "Edit name", .enabled = row.conflict != .stale };
     actions[2] = .{ .id = standard.copy, .label = "Copy", .enabled = !unavailable };
     actions[3] = .{ .id = standard.cut, .label = "Cut", .enabled = !unavailable };
     actions[4] = .{ .id = standard.delete, .label = "Delete", .enabled = row.pending != .deleted };
@@ -429,6 +432,8 @@ test "projection keeps deleted rows visible and labels original renamed name" {
     try std.testing.expectEqual(@as(usize, 4), row.content.container.children.len);
     try std.testing.expectEqualStrings("original: old", row.content.container.children[3].content.label);
     try std.testing.expectEqualStrings("deleted", row.content.container.children[3].facts[0].value);
+    try std.testing.expectEqualStrings(standard.edit, row.actions[1].id);
+    try std.testing.expect(row.actions[1].enabled);
     try std.testing.expectEqualStrings(standard.paste_before, row.actions[5].id);
     try std.testing.expectEqualStrings(standard.paste_after, row.actions[6].id);
     try std.testing.expect(row.actions[5].enabled and row.actions[6].enabled);

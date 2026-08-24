@@ -780,8 +780,11 @@ const DraftField = struct {
             .revision = revision,
             .bytes = bytes,
             .selection = self.selection,
-            .read_only = row.pending == .deleted or row.conflict == .stale or
-                (self.kind == .mode and !self.session.modeEditable(row.*)),
+            // A deleted name field stays live so typing can revive the same
+            // retained row without losing its anchor or requiring a mode
+            // transition. Metadata fields remain unavailable for deletions.
+            .read_only = row.conflict == .stale or
+                (self.kind == .mode and (row.pending == .deleted or !self.session.modeEditable(row.*))),
             .single_line = true,
         };
         return owned;
@@ -793,7 +796,8 @@ const DraftField = struct {
             std.mem.readInt(u64, expected_revision[0..8], .little) != self.revision)
             return error.Stale;
         const row = self.session.draft.row(self.row) orelse return error.Stale;
-        if (row.pending == .deleted or row.conflict == .stale) return error.ReadOnly;
+        if (row.conflict == .stale) return error.ReadOnly;
+        if (self.kind == .mode and row.pending == .deleted) return error.ReadOnly;
         if (self.kind == .mode and !self.session.modeEditable(row.*)) return error.ReadOnly;
         var owned_current: ?[]u8 = null;
         defer if (owned_current) |bytes| self.session.plugin.gpa.free(bytes);

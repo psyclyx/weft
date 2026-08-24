@@ -54,12 +54,20 @@ fn lineEndOff() usize {
 
 // ── Motion keys: each drives the `motions` plugin by name. `in_op` keys are
 // also valid after an operator (dw, de, d$, …). ──
-const MB = struct { key: []const u8, motion: []const u8, in_op: bool };
+const MB = struct {
+    key: []const u8,
+    motion: []const u8,
+    in_op: bool,
+    /// An ordinary input command that expresses the same intent for a
+    /// retained semantic view. This is input-policy composition: Vim knows
+    /// neither the scene role nor which plugin owns the focused nodes.
+    semantic_command: ?[]const u8 = null,
+};
 const mtable = [_]MB{
-    .{ .key = "h", .motion = "motion.left", .in_op = false },
-    .{ .key = "l", .motion = "motion.right", .in_op = false },
-    .{ .key = "j", .motion = "motion.down", .in_op = false },
-    .{ .key = "k", .motion = "motion.up", .in_op = false },
+    .{ .key = "h", .motion = "motion.left", .in_op = false, .semantic_command = "cursor-left" },
+    .{ .key = "l", .motion = "motion.right", .in_op = false, .semantic_command = "cursor-right" },
+    .{ .key = "j", .motion = "motion.down", .in_op = false, .semantic_command = "cursor-down" },
+    .{ .key = "k", .motion = "motion.up", .in_op = false, .semantic_command = "cursor-up" },
     .{ .key = "w", .motion = "motion.word-fwd", .in_op = true },
     .{ .key = "b", .motion = "motion.word-back", .in_op = true },
     .{ .key = "e", .motion = "motion.word-end", .in_op = true },
@@ -75,10 +83,15 @@ const mtable = [_]MB{
 
 /// Normal-mode motion: run the motion `count` times, jumping to each target (the
 /// range end that isn't the current cursor — the motion is direction-carrying).
-fn moveByMotion(comptime motion: []const u8) fn () void {
+fn moveByMotion(comptime motion: []const u8, comptime semantic_command: ?[]const u8) fn () void {
     return struct {
         fn h() void {
             var n = consumeCount();
+            if (weft.semanticActive()) {
+                const command = semantic_command orelse return;
+                while (n > 0) : (n -= 1) weft.run(command);
+                return;
+            }
             while (n > 0) : (n -= 1) {
                 const cur = weft.cursor();
                 const hnd = weft.runRange(motion) orelse return;
@@ -352,7 +365,7 @@ const gen_cmds: [n_gen]Cmd = blk: {
     var arr: [n_gen]Cmd = undefined;
     var i: usize = 0;
     for (mtable) |m| {
-        arr[i] = .{ .name = "vim/n/" ++ m.motion, .handler = moveByMotion(m.motion) };
+        arr[i] = .{ .name = "vim/n/" ++ m.motion, .handler = moveByMotion(m.motion, m.semantic_command) };
         i += 1;
         if (m.in_op) {
             arr[i] = .{ .name = "vim/o/" ++ m.motion, .handler = opByMotion(m.motion) };

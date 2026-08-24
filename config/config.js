@@ -56,7 +56,7 @@ weft.plugin("console");     // a command console — run a line, append output
 weft.plugin("repl");        // a stateful interactive REPL (persistent subprocess)
 weft.plugin("net");         // raw TCP/TLS transport (net.connect)
 weft.plugin("which_key");   // menu-hint overlay, as a plugin over the surface door
-weft.plugin("dired");       // directory editor (proc ls + its own keymap mode)
+weft.plugin("dired");       // directory launcher; the target handler owns its semantic scene/actions
 weft.plugin("lsp");         // language server client (hover/def/… over jsonrpc)
 weft.set("lsp", "zig", "zls"); // server per language: weft.set("lsp","<lang>","<cmd>")
 weft.plugin("debug");       // breakpoints (gutter markers) — the debugger's first slice
