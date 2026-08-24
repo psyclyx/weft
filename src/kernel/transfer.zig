@@ -40,6 +40,42 @@ pub const Item = struct {
     }
 };
 
+/// A clipboard/register owns its transfer independently of the view or plugin
+/// instance that produced it. Every representation is immutable after capture,
+/// so closing or reconciling the source cannot retarget a later paste.
+pub const OwnedItem = struct {
+    arena: std.heap.ArenaAllocator,
+    value: Item = undefined,
+
+    pub fn init(gpa: std.mem.Allocator, source_item: Item) !OwnedItem {
+        try source_item.validate(gpa);
+        var owned: OwnedItem = .{ .arena = .init(gpa) };
+        errdefer owned.deinit();
+        const arena = owned.arena.allocator();
+        const representations = try arena.alloc(Representation, source_item.representations.len);
+        for (source_item.representations, representations) |source, *destination| destination.* = .{
+            .media_type = try arena.dupe(u8, source.media_type),
+            .schema = if (source.schema) |schema| try arena.dupe(u8, schema) else null,
+            .payload = try arena.dupe(u8, source.payload),
+        };
+        owned.value = .{
+            .intent = source_item.intent,
+            .suggested_name = try arena.dupe(u8, source_item.suggested_name),
+            .source = if (source_item.source) |source| .{
+                .target = source.target,
+                .revision = try arena.dupe(u8, source.revision),
+            } else null,
+            .representations = representations,
+        };
+        return owned;
+    }
+
+    pub fn deinit(self: *OwnedItem) void {
+        self.arena.deinit();
+        self.* = undefined;
+    }
+};
+
 test "transfer requires unique typed representations" {
     const reps = [_]Representation{
         .{ .media_type = "text/plain", .payload = "a" },
@@ -47,4 +83,20 @@ test "transfer requires unique typed representations" {
     };
     const item: Item = .{ .intent = .copy, .representations = &reps };
     try std.testing.expectError(error.DuplicateRepresentation, item.validate(std.testing.allocator));
+}
+
+test "owned transfer survives mutation of producer storage" {
+    var name = [_]u8{ 'o', 'l', 'd' };
+    var payload = [_]u8{ 'd', 'a', 't', 'a' };
+    const reps = [_]Representation{.{ .media_type = "application/test", .payload = &payload }};
+    var owned = try OwnedItem.init(std.testing.allocator, .{
+        .intent = .copy,
+        .suggested_name = &name,
+        .representations = &reps,
+    });
+    defer owned.deinit();
+    @memset(&name, 'x');
+    @memset(&payload, 'x');
+    try std.testing.expectEqualStrings("old", owned.value.suggested_name);
+    try std.testing.expectEqualStrings("data", owned.value.representations[0].payload);
 }
