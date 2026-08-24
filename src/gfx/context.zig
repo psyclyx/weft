@@ -24,6 +24,15 @@ fn check(result: vk.VkResult) !void {
     }
 }
 
+const SwapchainResources = struct {
+    swapchain: vk.VkSwapchainKHR = null,
+    extent: vk.VkExtent2D = .{ .width = 0, .height = 0 },
+    images: []vk.VkImage = &.{},
+    views: []vk.VkImageView = &.{},
+    framebuffers: []vk.VkFramebuffer = &.{},
+    render_finished: []vk.VkSemaphore = &.{},
+};
+
 pub const Context = struct {
     allocator: std.mem.Allocator,
 
@@ -285,7 +294,10 @@ pub const Context = struct {
         try check(vk.vkCreateRenderPass(self.device, &create_info, null, &self.render_pass));
     }
 
-    fn createSwapchain(self: *Context, fb_width: u32, fb_height: u32) !void {
+    fn buildSwapchain(self: *Context, fb_width: u32, fb_height: u32, old_swapchain: vk.VkSwapchainKHR) !SwapchainResources {
+        var resources: SwapchainResources = .{};
+        errdefer self.destroySwapchainResources(&resources);
+
         var caps: vk.VkSurfaceCapabilitiesKHR = undefined;
         try check(vk.vkGetPhysicalDeviceSurfaceCapabilitiesKHR(self.physical_device, self.surface, &caps));
 
@@ -319,19 +331,23 @@ pub const Context = struct {
             .compositeAlpha = vk.VK_COMPOSITE_ALPHA_OPAQUE_BIT_KHR,
             .presentMode = vk.VK_PRESENT_MODE_FIFO_KHR,
             .clipped = vk.VK_TRUE,
+            .oldSwapchain = old_swapchain,
         };
-        try check(vk.vkCreateSwapchainKHR(self.device, &create_info, null, &self.swapchain));
-        self.extent = extent;
+        try check(vk.vkCreateSwapchainKHR(self.device, &create_info, null, &resources.swapchain));
+        resources.extent = extent;
 
         var actual: u32 = 0;
-        try check(vk.vkGetSwapchainImagesKHR(self.device, self.swapchain, &actual, null));
-        self.images = try self.allocator.alloc(vk.VkImage, actual);
-        try check(vk.vkGetSwapchainImagesKHR(self.device, self.swapchain, &actual, self.images.ptr));
+        try check(vk.vkGetSwapchainImagesKHR(self.device, resources.swapchain, &actual, null));
+        resources.images = try self.allocator.alloc(vk.VkImage, actual);
+        try check(vk.vkGetSwapchainImagesKHR(self.device, resources.swapchain, &actual, resources.images.ptr));
 
-        self.views = try self.allocator.alloc(vk.VkImageView, actual);
-        self.framebuffers = try self.allocator.alloc(vk.VkFramebuffer, actual);
-        self.render_finished = try self.allocator.alloc(vk.VkSemaphore, actual);
-        for (self.images, self.views, self.framebuffers, self.render_finished) |image, *view, *framebuffer, *sem| {
+        resources.views = try self.allocator.alloc(vk.VkImageView, actual);
+        resources.framebuffers = try self.allocator.alloc(vk.VkFramebuffer, actual);
+        resources.render_finished = try self.allocator.alloc(vk.VkSemaphore, actual);
+        for (resources.views) |*view| view.* = null;
+        for (resources.framebuffers) |*framebuffer| framebuffer.* = null;
+        for (resources.render_finished) |*sem| sem.* = null;
+        for (resources.images, resources.views, resources.framebuffers, resources.render_finished) |image, *view, *framebuffer, *sem| {
             const view_info = vk.VkImageViewCreateInfo{
                 .sType = vk.VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO,
                 .image = image,
@@ -363,28 +379,74 @@ pub const Context = struct {
             };
             try check(vk.vkCreateSemaphore(self.device, &sem_info, null, sem));
         }
+        return resources;
+    }
+
+    fn destroySwapchainResources(self: *Context, resources: *SwapchainResources) void {
+        for (resources.render_finished) |sem| if (sem != null) vk.vkDestroySemaphore(self.device, sem, null);
+        for (resources.framebuffers) |framebuffer| if (framebuffer != null) vk.vkDestroyFramebuffer(self.device, framebuffer, null);
+        for (resources.views) |view| if (view != null) vk.vkDestroyImageView(self.device, view, null);
+        self.allocator.free(resources.render_finished);
+        self.allocator.free(resources.framebuffers);
+        self.allocator.free(resources.views);
+        self.allocator.free(resources.images);
+        if (resources.swapchain != null) vk.vkDestroySwapchainKHR(self.device, resources.swapchain, null);
+        resources.* = .{};
+    }
+
+    fn installSwapchain(self: *Context, resources: *SwapchainResources) void {
+        self.swapchain = resources.swapchain;
+        self.extent = resources.extent;
+        self.images = resources.images;
+        self.views = resources.views;
+        self.framebuffers = resources.framebuffers;
+        self.render_finished = resources.render_finished;
+        resources.* = .{};
+    }
+
+    fn createSwapchain(self: *Context, fb_width: u32, fb_height: u32) !void {
+        var resources = try self.buildSwapchain(fb_width, fb_height, null);
+        self.installSwapchain(&resources);
     }
 
     fn destroySwapchain(self: *Context) void {
-        for (self.render_finished) |sem| vk.vkDestroySemaphore(self.device, sem, null);
-        for (self.framebuffers) |framebuffer| vk.vkDestroyFramebuffer(self.device, framebuffer, null);
-        for (self.views) |view| vk.vkDestroyImageView(self.device, view, null);
-        self.allocator.free(self.render_finished);
-        self.allocator.free(self.framebuffers);
-        self.allocator.free(self.views);
-        self.allocator.free(self.images);
-        self.render_finished = &.{};
-        self.framebuffers = &.{};
-        self.views = &.{};
-        self.images = &.{};
-        vk.vkDestroySwapchainKHR(self.device, self.swapchain, null);
+        var resources: SwapchainResources = .{
+            .swapchain = self.swapchain,
+            .extent = self.extent,
+            .images = self.images,
+            .views = self.views,
+            .framebuffers = self.framebuffers,
+            .render_finished = self.render_finished,
+        };
         self.swapchain = null;
+        self.images = &.{};
+        self.views = &.{};
+        self.framebuffers = &.{};
+        self.render_finished = &.{};
+        self.destroySwapchainResources(&resources);
+        self.extent = .{ .width = 0, .height = 0 };
     }
 
     pub fn recreateSwapchain(self: *Context, fb_width: u32, fb_height: u32) !void {
-        try check(vk.vkDeviceWaitIdle(self.device));
+        // A zero surface is a real minimized state. Retire old images but
+        // leave the device alive; a later positive configure restores them.
+        if (fb_width == 0 or fb_height == 0) {
+            try check(vk.vkQueueWaitIdle(self.queue));
+            self.destroySwapchain();
+            self.swapchain_stale = true;
+            return error.ZeroExtent;
+        }
+
+        // Keep the old handle/resources alive while creating its successor,
+        // as required by VK_KHR_swapchain's oldSwapchain contract. Queue-idle
+        // is the narrowly-scoped retirement barrier: it proves old images,
+        // views, framebuffers, and present semaphores are no longer in use
+        // without vkDeviceWaitIdle on every configure.
+        var next = try self.buildSwapchain(fb_width, fb_height, self.swapchain);
+        errdefer self.destroySwapchainResources(&next);
+        try check(vk.vkQueueWaitIdle(self.queue));
         self.destroySwapchain();
-        try self.createSwapchain(fb_width, fb_height);
+        self.installSwapchain(&next);
         self.swapchain_stale = false;
     }
 

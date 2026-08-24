@@ -11,6 +11,7 @@
 const std = @import("std");
 const linux = std.os.linux;
 const platform = @import("platform.zig");
+const resize = @import("resize.zig");
 
 /// Monotonic clock in nanoseconds (raw syscall; matches core/task.zig).
 fn nowNs() u64 {
@@ -67,8 +68,8 @@ pub const Window = struct {
     width: u32,
     height: u32,
     buffer_scale: u32 = 1,
+    resize_state: resize.State,
     outputs: [max_outputs]OutputInfo = [_]OutputInfo{.{}} ** max_outputs,
-    pending_geometry_commit: bool = true,
     resized: bool = false,
     close_requested: bool = false,
     focused: bool = true,
@@ -112,6 +113,7 @@ pub const Window = struct {
             .toplevel = undefined,
             .width = width,
             .height = height,
+            .resize_state = resize.State.init(width, height),
         };
 
         self.xkb_context = c.xkb_context_new(c.XKB_CONTEXT_NO_FLAGS);
@@ -252,8 +254,8 @@ pub const Window = struct {
     }
 
     pub fn framebufferSize(self: *const Window) [2]u32 {
-        const scale = @max(self.buffer_scale, 1);
-        return .{ self.width * scale, self.height * scale };
+        const extent = self.resize_state.framebufferExtent();
+        return .{ extent.width, extent.height };
     }
 
     pub fn consumeResized(self: *Window) bool {
@@ -329,6 +331,7 @@ pub const Window = struct {
         const next = self.currentBufferScale();
         if (next == self.buffer_scale) return;
         self.buffer_scale = next;
+        _ = self.resize_state.setScale(next);
         self.resized = true;
         c.wl_surface_set_buffer_scale(self.surface, @intCast(next));
     }
@@ -418,17 +421,24 @@ const wm_base_listener = c.xdg_wm_base_listener{
 
 fn xdgSurfaceConfigure(data: ?*anyopaque, xdg_surface: ?*c.xdg_surface, serial: u32) callconv(.c) void {
     const self = selfFrom(data);
+    // Wayland ordering is intentional: acknowledge first, then send the
+    // newest coalesced geometry and commit.  Main cannot acquire/present a
+    // new Vulkan image until this callback has completed and the resulting
+    // resize has been applied.
     c.xdg_surface_ack_configure(xdg_surface.?, serial);
-    if (self.pending_geometry_commit and self.width > 0 and self.height > 0) {
+    const decision = self.resize_state.surfaceConfigure();
+    self.width = decision.extent.width;
+    self.height = decision.extent.height;
+    if (decision.extent_changed) self.resized = true;
+    if (decision.geometry) |geometry| {
         c.xdg_surface_set_window_geometry(
             xdg_surface.?,
             0,
             0,
-            @intCast(self.width),
-            @intCast(self.height),
+            @intCast(geometry.width),
+            @intCast(geometry.height),
         );
         c.wl_surface_commit(self.surface);
-        self.pending_geometry_commit = false;
     }
 }
 
@@ -444,16 +454,14 @@ fn xdgToplevelConfigure(
     _: ?*c.wl_array,
 ) callconv(.c) void {
     const self = selfFrom(data);
-    self.pending_geometry_commit = true;
-    if (width > 0 and height > 0) {
-        const w: u32 = @intCast(width);
-        const h: u32 = @intCast(height);
-        if (w != self.width or h != self.height) {
-            self.width = w;
-            self.height = h;
-            self.resized = true;
-        }
-    }
+    // A zero extent is retained as an explicit minimized state.  A later
+    // positive configure restores it; state-only configures are represented
+    // by the reducer's null extent and do not disturb framebuffer geometry.
+    const extent: resize.Extent = .{
+        .width = if (width > 0) @intCast(width) else 0,
+        .height = if (height > 0) @intCast(height) else 0,
+    };
+    self.resize_state.toplevelConfigure(.{ .extent = extent });
 }
 
 fn xdgToplevelClose(data: ?*anyopaque, _: ?*c.xdg_toplevel) callconv(.c) void {

@@ -7,6 +7,14 @@ const t = std.testing;
 
 const stemma = @import("stemma");
 const snail = @import("snail");
+const resize = @import("platform/resize.zig");
+
+// Keep the display-free configure reducer in this test graph.  The Wayland
+// implementation imports the same module, so these tests exercise the exact
+// state machine used by the callbacks without requiring a compositor.
+comptime {
+    _ = resize;
+}
 
 // The core/gfx/app unit tests now live in the `weft` module (src/weft.zig),
 // which OWNS those files — build.zig runs that module's test binary too. This

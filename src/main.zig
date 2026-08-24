@@ -621,8 +621,14 @@ pub fn main(init: std.process.Init) !void {
         const frame_start = stats_mod.nowNs();
         whead.window.pumpEvents();
 
-        if (whead.window.consumeResized() or whead.ctx.swapchain_stale) {
-            const req = whead.window.framebufferSize();
+        // A configure callback has already acked xdg_surface and committed
+        // the newest usable geometry before this edge is visible. Recreate
+        // before building a frame; no present may use retired resources.
+        const resized = whead.window.consumeResized();
+        const req = whead.window.framebufferSize();
+        // A minimized surface has no work to retry: do not queue-idle on
+        // every scheduler wake while the stale marker is intentionally held.
+        if (resized or (whead.ctx.swapchain_stale and req[0] != 0 and req[1] != 0)) {
             whead.ctx.recreateSwapchain(req[0], req[1]) catch |e| switch (e) {
                 // Minimized / zero-size surface: the swapchain is torn down and
                 // can't be recreated yet. Skip this frame and retry next one
@@ -641,6 +647,9 @@ pub fn main(init: std.process.Init) !void {
                 },
                 else => return e,
             };
+            // Any frame latched before the configure was for the old extent;
+            // only the frame built below may be presented on this swapchain.
+            present_pending = false;
             // Geometry follows the swapchain's actual extent, not the request.
             fb = .{ whead.ctx.extent.width, whead.ctx.extent.height };
             view_dirty = true;
