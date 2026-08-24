@@ -28,7 +28,9 @@ pub const FieldBinding = struct {
     target: ?scene.TargetLink = null,
 };
 
-pub const permissions_edit_action = "fs.permissions.edit";
+pub const permissions_edit_action = fs.action.permissions_edit;
+pub const create_file_action = fs.action.entry_create_file;
+pub const create_directory_action = fs.action.entry_create_directory;
 
 /// Root-level capabilities are supplied by the session adapter. The pure
 /// projection does not query target registries or infer hierarchy from paths.
@@ -92,15 +94,17 @@ fn rootActions(arena: std.mem.Allocator, rows: []const model.Row, options: Optio
             break;
         }
     }
-    const result = try arena.alloc(scene.Action, 3 + @as(usize, @intFromBool(options.has_container)));
+    const result = try arena.alloc(scene.Action, 5 + @as(usize, @intFromBool(options.has_container)));
     var index: usize = 0;
     if (options.has_container) {
         result[index] = .{ .id = standard.open_container, .label = "Open container" };
         index += 1;
     }
     result[index] = .{ .id = standard.refresh, .label = "Refresh" };
-    result[index + 1] = .{ .id = standard.apply, .label = "Apply draft", .enabled = dirty };
-    result[index + 2] = .{ .id = standard.revert, .label = "Revert draft", .enabled = dirty };
+    result[index + 1] = .{ .id = create_file_action, .label = "New file" };
+    result[index + 2] = .{ .id = create_directory_action, .label = "New directory" };
+    result[index + 3] = .{ .id = standard.apply, .label = "Apply draft", .enabled = dirty };
+    result[index + 4] = .{ .id = standard.revert, .label = "Revert draft", .enabled = dirty };
     return result;
 }
 
@@ -221,7 +225,7 @@ fn rowFacts(arena: std.mem.Allocator, row: model.Row) ![]scene.Fact {
 }
 
 fn rowActions(arena: std.mem.Allocator, row: model.Row, mode_editable: bool, has_target: bool) ![]scene.Action {
-    const actions = try arena.alloc(scene.Action, 7 + @as(usize, if (mode_editable) 1 else 0));
+    const actions = try arena.alloc(scene.Action, 9 + @as(usize, if (mode_editable) 1 else 0));
     const unavailable = row.pending == .deleted or row.conflict == .stale;
     actions[0] = .{ .id = standard.open, .label = "Open", .enabled = !unavailable and has_target };
     actions[1] = .{ .id = standard.edit, .label = "Edit name", .enabled = row.pending != .deleted };
@@ -230,7 +234,9 @@ fn rowActions(arena: std.mem.Allocator, row: model.Row, mode_editable: bool, has
     actions[4] = .{ .id = standard.delete, .label = "Delete", .enabled = row.pending != .deleted };
     actions[5] = .{ .id = standard.paste_before, .label = "Paste before", .enabled = row.conflict != .stale };
     actions[6] = .{ .id = standard.paste_after, .label = "Paste after", .enabled = row.conflict != .stale };
-    if (mode_editable) actions[7] = .{
+    actions[7] = .{ .id = create_file_action, .label = "New file" };
+    actions[8] = .{ .id = create_directory_action, .label = "New directory" };
+    if (mode_editable) actions[9] = .{
         .id = permissions_edit_action,
         .label = "Edit permissions",
         .enabled = !unavailable,
@@ -332,6 +338,13 @@ pub fn rowNodeId(raw: model.NodeId) !scene.NodeId {
     return stableId(raw, row_domain);
 }
 
+/// Stable identity of a row's ordinary editable name field. Actions which
+/// create an entry focus this node so any editing model can immediately edit
+/// the selected placeholder through the generic field endpoint.
+pub fn nameNodeId(raw: model.NodeId) !scene.NodeId {
+    return stableId(raw, field_domain);
+}
+
 /// Stable identity of a row's secondary permissions field/label node.
 pub fn modeNodeId(raw: model.NodeId) !scene.NodeId {
     return stableId(raw, mode_domain);
@@ -379,7 +392,7 @@ test "projection keeps row ids and order stable across draft rename" {
     defer first.deinit();
     try std.testing.expectEqualStrings(standard.refresh, first.value.actions[0].id);
     try std.testing.expect(first.value.actions[0].enabled);
-    try std.testing.expect(!first.value.actions[1].enabled);
+    try std.testing.expect(!first.value.actions[3].enabled);
     var with_container = try projectWith(std.testing.allocator, dired.rows.items, &refs, .{ .has_container = true });
     defer with_container.deinit();
     try std.testing.expectEqualStrings(standard.open_container, with_container.value.actions[0].id);
@@ -388,7 +401,7 @@ test "projection keeps row ids and order stable across draft rename" {
     try dired.rename(dired.rows.items[0].id, "renamed");
     var second = try project(std.testing.allocator, dired.rows.items, &refs);
     defer second.deinit();
-    try std.testing.expect(second.value.actions[1].enabled and second.value.actions[2].enabled);
+    try std.testing.expect(second.value.actions[3].enabled and second.value.actions[4].enabled);
     try std.testing.expectEqual(first_ids[0], second.value.content.container.children[0].id);
     try std.testing.expectEqual(first_ids[1], second.value.content.container.children[1].id);
     try std.testing.expectEqual(
@@ -489,9 +502,9 @@ test "projection fixes metadata field columns and styles mode-only modifications
     try std.testing.expectEqualStrings("changed", children[2].facts[0].value);
     try std.testing.expectEqualStrings(standard.paste_before, row.actions[5].id);
     try std.testing.expect(row.actions[5].enabled and row.actions[6].enabled);
-    try std.testing.expectEqual(@as(usize, 8), row.actions.len);
-    try std.testing.expectEqualStrings(permissions_edit_action, row.actions[7].id);
-    try std.testing.expect(row.actions[7].enabled);
+    try std.testing.expectEqual(@as(usize, 10), row.actions.len);
+    try std.testing.expectEqualStrings(permissions_edit_action, row.actions[9].id);
+    try std.testing.expect(row.actions[9].enabled);
 }
 
 test "projection rejects duplicate missing and generation-zero bindings" {

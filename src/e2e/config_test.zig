@@ -77,6 +77,8 @@ const ConfigActions = struct {
     confirms: usize = 0,
     plugin_actions: usize = 0,
     permission_edits: usize = 0,
+    file_creates: usize = 0,
+    directory_creates: usize = 0,
     container_opens: usize = 0,
     relation_source: semantic.target.Located = undefined,
 
@@ -93,6 +95,14 @@ const ConfigActions = struct {
         if (std.mem.eql(u8, action, semantic.action.standard.open_container)) {
             self.container_opens += 1;
             return .{ .open_relation = .{ .source = self.relation_source, .name = "container" } };
+        }
+        if (std.mem.eql(u8, action, "fs.entry.create-file")) {
+            self.file_creates += 1;
+            return .handled;
+        }
+        if (std.mem.eql(u8, action, "fs.entry.create-directory")) {
+            self.directory_creates += 1;
+            return .handled;
         }
         if (std.mem.eql(u8, action, semantic.action.standard.edit)) {
             self.edit_requests += 1;
@@ -269,6 +279,8 @@ test "e2e/config: the sample config boots; SPC g i is discoverable via which-key
     try t.expect(whichKeyShows(&ed, semantic.action.standard.revert));
     try t.expect(whichKeyShows(&ed, semantic.action.standard.apply));
     try t.expect(whichKeyShows(&ed, "fs.permissions.edit"));
+    try t.expect(whichKeyShows(&ed, "fs.entry.create-file"));
+    try t.expect(whichKeyShows(&ed, "fs.entry.create-directory"));
     ed.press("Escape", "");
 
     // Assert the complete config surface directly, including the cursor
@@ -285,6 +297,8 @@ test "e2e/config: the sample config boots; SPC g i is discoverable via which-key
         .{ .sequence = "space v x", .command = semantic.action.standard.cut },
         .{ .sequence = "space v d", .command = semantic.action.standard.delete },
         .{ .sequence = "space v m", .command = "fs.permissions.edit" },
+        .{ .sequence = "space v n", .command = "fs.entry.create-file" },
+        .{ .sequence = "space v N", .command = "fs.entry.create-directory" },
         .{ .sequence = "space v p", .command = semantic.action.standard.paste_after },
         .{ .sequence = "space v P", .command = semantic.action.standard.paste_before },
         .{ .sequence = "space v r", .command = semantic.action.standard.refresh },
@@ -350,6 +364,8 @@ test "e2e/config: the sample config boots; SPC g i is discoverable via which-key
         .{ .id = semantic.action.standard.paste_before },
         .{ .id = semantic.action.standard.paste_after },
         .{ .id = "fixture.plugin-action" },
+        .{ .id = "fs.entry.create-file" },
+        .{ .id = "fs.entry.create-directory" },
     };
     const first_row: semantic.scene.Node = .{
         .id = @enumFromInt(2),
@@ -395,12 +411,16 @@ test "e2e/config: the sample config boots; SPC g i is discoverable via which-key
     ed.chord("SPC v P");
     ed.chord("SPC v d");
     ed.chord("SPC v m");
+    ed.chord("SPC v n");
+    ed.chord("SPC v N");
     try t.expectEqual(@as(usize, 1), actions.copies);
     try t.expectEqual(@as(usize, 1), actions.cuts);
     try t.expectEqual(@as(usize, 1), actions.paste_after);
     try t.expectEqual(@as(usize, 1), actions.paste_before);
     try t.expectEqual(@as(usize, 1), actions.deletes);
     try t.expectEqual(@as(usize, 1), actions.permission_edits);
+    try t.expectEqual(@as(usize, 1), actions.file_creates);
+    try t.expectEqual(@as(usize, 1), actions.directory_creates);
     try t.expectEqual(permission_node.id, ed.head.semantic_focus.path().?.leaf().?);
 
     // The next row movement is relative to the primary field from which the

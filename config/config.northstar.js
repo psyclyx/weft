@@ -254,6 +254,8 @@ bindActionGroup("normal", "SPC v", [
   ["x", "selection.cut"],
   ["d", "selection.delete"],
   ["m", "fs.permissions.edit"],
+  ["n", "fs.entry.create-file"],
+  ["N", "fs.entry.create-directory"],
   ["p", "selection.paste-after"],
   ["P", "selection.paste-before"],
   ["r", "view.refresh"],

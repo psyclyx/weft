@@ -175,6 +175,12 @@ pub const Plugin = struct {
                     .name = "container",
                 } };
             }
+            if (std.mem.eql(u8, request.action, projection.create_file_action)) {
+                return .{ .focus = session.addPending(.regular) catch |err| return mapActionError(err) };
+            }
+            if (std.mem.eql(u8, request.action, projection.create_directory_action)) {
+                return .{ .focus = session.addPending(.directory) catch |err| return mapActionError(err) };
+            }
             if (std.mem.eql(u8, request.action, semantic.action.standard.revert)) {
                 session.revert() catch |err| return mapActionError(err);
                 return .handled;
@@ -387,6 +393,29 @@ pub const Session = struct {
 
     pub fn buildPlan(self: *const Session) !model.OwnedPlan {
         return self.draft.buildPlan();
+    }
+
+    /// Stage a provider-neutral filesystem entry and focus its ordinary name
+    /// field. Editing models decide what focus means; dired never enters an
+    /// editor mode or handles text input itself.
+    fn addPending(self: *Session, kind: contract.Kind) !semantic.scene.NodeId {
+        var staged = try self.draft.duplicate();
+        defer staged.deinit();
+        const default_name = switch (kind) {
+            .regular => "new-file",
+            .directory => "new-directory",
+            .symlink, .other => return error.Unsupported,
+        };
+        const id = switch (kind) {
+            .regular => try staged.addFile(null, default_name, &.{}, null),
+            .directory => try staged.addDirectory(null, default_name, null),
+            .symlink, .other => unreachable,
+        };
+        const node = try projection.nameNodeId(id);
+        try self.publishDraft(&staged);
+        const field = self.fieldFor(id) orelse unreachable;
+        field.selection = .{ .anchor = 0, .caret = @intCast(default_name.len) };
+        return node;
     }
 
     pub fn apply(self: *Session, gpa: std.mem.Allocator) !contract.OwnedApplyReport {
@@ -896,7 +925,7 @@ test "provider capabilities expose permissions as an ordinary secondary action a
     const mode_field = session.modeFieldFor(row).?;
 
     const scene_row = fixture.views.get(session.view_ref).?.scene.content.container.children[0];
-    try std.testing.expectEqualStrings(projection.permissions_edit_action, scene_row.actions[7].id);
+    try std.testing.expectEqualStrings(projection.permissions_edit_action, scene_row.actions[9].id);
     try std.testing.expectEqual(mode_field.ref, scene_row.content.container.children[1].content.field.ref);
     try std.testing.expect(!scene_row.content.container.children[1].focusable);
 
@@ -931,6 +960,50 @@ test "provider capabilities expose permissions as an ordinary secondary action a
         .replacement = "0788",
     }));
     try std.testing.expectEqual(@as(?u32, 0o600), session.draft.row(row).?.draft.mode);
+}
+
+test "create actions stage aligned rows and focus ordinary name fields" {
+    var fixture: Fixture = undefined;
+    try fixture.init();
+    defer fixture.deinit();
+    const session = fixture.plugin.sessions.items[0];
+
+    const file = try fixture.actions.invoke(&fixture.views, .{
+        .action = projection.create_file_action,
+        .view = session.view_ref,
+        .subject = projection.rootNodeId(),
+    });
+    const file_id = session.draft.rows.items[session.draft.rows.items.len - 1].id;
+    try std.testing.expectEqual(try projection.nameNodeId(file_id), file.focus);
+    const file_row = session.draft.row(file_id).?;
+    try std.testing.expectEqual(model.Pending.added, file_row.pending);
+    try std.testing.expectEqual(contract.Kind.regular, file_row.draft.kind);
+    try std.testing.expectEqualStrings("new-file", file_row.draft.name);
+    var file_field = try fixture.fields.get(session.fieldFor(file_id).?.ref).?.snapshot(std.testing.allocator);
+    defer file_field.deinit();
+    try std.testing.expectEqual(@as(u64, 0), file_field.value.selection.anchor);
+    try std.testing.expectEqual(@as(u64, "new-file".len), file_field.value.selection.caret);
+
+    const directory = try fixture.actions.invoke(&fixture.views, .{
+        .action = projection.create_directory_action,
+        .view = session.view_ref,
+        // Focus rests on the name field, while generic action traversal
+        // chooses the containing row which advertises creation.
+        .subject = try projection.rowNodeId(file_id),
+    });
+    const directory_id = session.draft.rows.items[session.draft.rows.items.len - 1].id;
+    try std.testing.expectEqual(try projection.nameNodeId(directory_id), directory.focus);
+    try std.testing.expectEqual(contract.Kind.directory, session.draft.row(directory_id).?.draft.kind);
+
+    const scene_rows = fixture.views.get(session.view_ref).?.scene.content.container.children;
+    const file_scene = scene_rows[scene_rows.len - 2];
+    try std.testing.expectEqual(@as(usize, 3), file_scene.content.container.children.len);
+    try std.testing.expectEqualStrings("dired.mode", file_scene.content.container.children[1].role);
+    var effect_plan = try session.buildPlan();
+    defer effect_plan.deinit();
+    try std.testing.expectEqual(@as(usize, 2), effect_plan.value.operations.len);
+    try std.testing.expectEqual(std.meta.activeTag(effect_plan.value.operations[0].operation), .create_file);
+    try std.testing.expectEqual(std.meta.activeTag(effect_plan.value.operations[1].operation), .create_directory);
 }
 
 test "actions retain deleted rows as portable paste anchors and revert discards the draft" {

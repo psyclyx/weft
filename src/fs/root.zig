@@ -5,6 +5,7 @@
 
 pub const semantic = @import("weft_semantic");
 pub const contract = @import("contract.zig");
+pub const action = @import("action.zig");
 pub const plan = @import("plan.zig");
 pub const service = @import("service.zig");
 pub const target = @import("target.zig");

@@ -46,7 +46,10 @@ pub const mode_column = projection.mode_column;
 pub const name_column = projection.name_column;
 pub const original_column = projection.original_column;
 pub const permissions_edit_action = projection.permissions_edit_action;
+pub const create_file_action = projection.create_file_action;
+pub const create_directory_action = projection.create_directory_action;
 pub const rowNodeId = projection.rowNodeId;
+pub const nameNodeId = projection.nameNodeId;
 pub const modeNodeId = projection.modeNodeId;
 pub const modelRowId = projection.modelRowId;
 
