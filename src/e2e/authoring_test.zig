@@ -1501,6 +1501,93 @@ test "authoring/dired: rename a semantic field, apply its dialog, and verify dis
     try t.expect(std.mem.indexOf(u8, disk, "keep me") != null);
 }
 
+test "authoring/dired: refresh reconciles external churn without retargeting a dirty row" {
+    const gpa = t.allocator;
+    var app: App = undefined;
+    try app.init(gpa);
+    defer app.deinit();
+    const ed = &app.ed;
+
+    authorFile(ed, "dirty.txt", "dirty\n");
+    authorFile(ed, "clean.txt", "clean\n");
+    authorFile(ed, "removed.txt", "removed\n");
+    ed.runStr("open", ".");
+
+    var view_ref = ed.head.semantic_focus.path().?.view;
+    var view = ed.session.system.semantic.views.get(view_ref).?;
+    var dirty_field: ?semantic.scene.FieldRef = null;
+    var clean_row_id: @TypeOf(view.scene.content.container.children[0].id) = undefined;
+    var clean_field: ?semantic.scene.FieldRef = null;
+    for (view.scene.content.container.children) |row| {
+        const name_node = row.content.container.children[2];
+        const field_ref = name_node.content.field.ref;
+        var snapshot = try ed.session.system.semantic.fields.get(field_ref).?.snapshot(gpa);
+        defer snapshot.deinit();
+        if (std.mem.eql(u8, snapshot.value.bytes, "dirty.txt")) dirty_field = field_ref;
+        if (std.mem.eql(u8, snapshot.value.bytes, "clean.txt")) {
+            clean_row_id = row.id;
+            clean_field = field_ref;
+        }
+    }
+    const dirty_ref = dirty_field orelse return error.TestExpectedEqual;
+    _ = clean_field orelse return error.TestExpectedEqual;
+
+    var before = try ed.session.system.semantic.fields.get(dirty_ref).?.snapshot(gpa);
+    defer before.deinit();
+    try ed.session.system.semantic.fields.get(dirty_ref).?.edit(before.value.revision, .{
+        .start = 0,
+        .end = before.value.bytes.len,
+        .replacement = "draft.txt",
+        .selection_after = .{ .anchor = 9, .caret = 9 },
+    });
+
+    // Mutate the backing directory without going through the dired draft.
+    // Both renames preserve opaque identities; the dirty rename must not
+    // retarget its draft, while the clean rename must refresh its child
+    // target. The new file exercises external create, and removed.txt
+    // exercises external deletion.
+    try core.file.writeBytes(gpa, "created.txt", "created\n");
+    _ = try app.proj.oracle("mv -- dirty.txt externally-renamed.txt");
+    _ = try app.proj.oracle("mv -- clean.txt renamed.txt");
+    core.file.deleteFile(gpa, "removed.txt");
+
+    ed.chord("SPC v r");
+    view_ref = ed.head.semantic_focus.path().?.view;
+    view = ed.session.system.semantic.views.get(view_ref).?;
+
+    var saw_created = false;
+    var saw_renamed = false;
+    var saw_removed = false;
+    var saw_dirty_stale = false;
+    for (view.scene.content.container.children) |row| {
+        const name_node = row.content.container.children[2];
+        var snapshot = try ed.session.system.semantic.fields.get(name_node.content.field.ref).?.snapshot(gpa);
+        defer snapshot.deinit();
+        if (std.mem.eql(u8, snapshot.value.bytes, "created.txt")) saw_created = true;
+        if (std.mem.eql(u8, snapshot.value.bytes, "removed.txt")) saw_removed = true;
+        if (std.mem.eql(u8, snapshot.value.bytes, "renamed.txt")) {
+            saw_renamed = true;
+            // A clean external rename keeps the same row identity and gets a
+            // freshly justified child target rather than a stale target link.
+            try t.expectEqual(clean_row_id, row.id);
+            try t.expect(name_node.target != null);
+        }
+        if (std.mem.eql(u8, snapshot.value.bytes, "draft.txt")) {
+            saw_dirty_stale = true;
+            try t.expectEqual(@as(?semantic.scene.TargetLink, null), name_node.target);
+            var stale = false;
+            for (row.facts) |fact| {
+                if (std.mem.eql(u8, fact.name, "change") and std.mem.eql(u8, fact.value, "stale")) stale = true;
+            }
+            try t.expect(stale);
+        }
+    }
+    try t.expect(saw_created);
+    try t.expect(saw_renamed);
+    try t.expect(!saw_removed);
+    try t.expect(saw_dirty_stale);
+}
+
 test "authoring/dired: a durable raw-name copy survives rename, deletion, and a different directory view" {
     const gpa = t.allocator;
     var app: App = undefined;

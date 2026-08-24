@@ -241,6 +241,11 @@ const Field = struct {
 
 const RowTarget = struct {
     row: dired.NodeId,
+    // The target registry revision is not the filesystem entry revision.
+    // Retaining by row id alone would leave a child target stale after an
+    // external rename or metadata change.
+    entry: contract.EntryRef,
+    entry_revision: []u8,
     located: semantic.target.Located,
     active: bool = true,
     fresh: bool = false,
@@ -548,6 +553,11 @@ pub const Session = struct {
                 self.updateField(field, &self.draft, field.revision) catch {};
         }
         for (self.fields.items[0..old_fields_len]) |*field| {
+            // A clean row may disappear during refresh. Its field has no
+            // staged value to update; pruneFields closes it after the new
+            // scene commits. Treating that expected disappearance as stale
+            // would reject the entire external reconciliation.
+            if (staged.row(field.row) == null) continue;
             try self.updateField(field, staged, field.revision +| 1);
             updated += 1;
         }
@@ -659,17 +669,32 @@ pub const Session = struct {
             while (self.row_targets.items.len > old_len) {
                 const target = self.row_targets.pop().?;
                 _ = weft.semanticTargetClose(target.located.target);
+                self.plugin.gpa.free(target.entry_revision);
             }
             for (self.row_targets.items) |*target| target.active = true;
         }
         for (draft.rows.items) |row| {
             const child = dired.observedChild(self.directory, row) orelse continue;
             var retained = false;
-            for (self.row_targets.items) |*target| {
+            var target_index: usize = 0;
+            while (target_index < self.row_targets.items.len) : (target_index += 1) {
+                const target = &self.row_targets.items[target_index];
                 if (target.row != row.id) continue;
-                target.active = true;
+                if (target.entry.eql(child.entry) and
+                    std.mem.eql(u8, target.entry_revision, child.revision.token))
+                {
+                    target.active = true;
+                    target.fresh = false;
+                    retained = true;
+                    break;
+                }
+                // The row identity survived, but the observation that
+                // justified its child target did not. Hide the old target
+                // while publishing a replacement, so project() cannot bind
+                // stale authority after an external refresh. It remains
+                // available to abortRowTargets if publication fails.
+                target.active = false;
                 target.fresh = false;
-                retained = true;
                 break;
             }
             if (retained) continue;
@@ -683,11 +708,18 @@ pub const Session = struct {
             errdefer {
                 if (owned) _ = weft.semanticTargetClose(located.target);
             }
+            const entry_revision = try self.plugin.gpa.dupe(u8, child.revision.token);
+            var revision_owned = true;
+            errdefer if (revision_owned) self.plugin.gpa.free(entry_revision);
             try self.row_targets.append(self.plugin.gpa, .{
                 .row = row.id,
+                .entry = child.entry,
+                .entry_revision = entry_revision,
                 .located = located,
                 .fresh = true,
             });
+            // The row target now owns the revision copy.
+            revision_owned = false;
             owned = false;
         }
     }
@@ -699,6 +731,7 @@ pub const Session = struct {
             if (!self.row_targets.items[index].fresh) continue;
             const target = self.row_targets.swapRemove(index);
             _ = weft.semanticTargetClose(target.located.target);
+            self.plugin.gpa.free(target.entry_revision);
         }
         for (self.row_targets.items) |*target| {
             target.active = true;
@@ -713,12 +746,16 @@ pub const Session = struct {
             if (self.row_targets.items[index].active) continue;
             const target = self.row_targets.swapRemove(index);
             _ = weft.semanticTargetClose(target.located.target);
+            self.plugin.gpa.free(target.entry_revision);
         }
         for (self.row_targets.items) |*target| target.fresh = false;
     }
 
     fn closeAllRowTargets(self: *Session) void {
-        for (self.row_targets.items) |target| _ = weft.semanticTargetClose(target.located.target);
+        for (self.row_targets.items) |target| {
+            _ = weft.semanticTargetClose(target.located.target);
+            self.plugin.gpa.free(target.entry_revision);
+        }
         self.row_targets.deinit(self.plugin.gpa);
     }
 
