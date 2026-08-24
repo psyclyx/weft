@@ -24,6 +24,10 @@ pub const Provider = struct {
         return error.Unsupported;
     }
 
+    pub fn acquireParent(_: *Provider, _: contract.Root) contract.Error!?contract.Root {
+        return error.Unsupported;
+    }
+
     pub fn releaseRoot(_: *Provider, _: contract.Root) void {}
 
     pub fn capabilities(_: *Provider, _: contract.Root) contract.Error!contract.Capabilities {

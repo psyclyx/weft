@@ -185,14 +185,36 @@ pub const LinuxFs = struct {
         const snapshot = try statFd(fd);
         if (snapshot.kind != .directory) return error.NotDirectory;
 
+        return self.pinRootFd(fd, snapshot.identity);
+    }
+
+    /// Pin the actual parent of an already-pinned directory without resolving
+    /// its original pathname again. `null` means the directory is its own
+    /// parent (the filesystem root). This is deliberately platform mechanism:
+    /// app target publication may expose a generic `container` relation while
+    /// plugins remain unaware of fds or path syntax.
+    pub fn acquireParent(self: *LinuxFs, root: contract.Root) contract.Error!?contract.Root {
+        const state = try self.rootState(root);
+        const fd = try openDirectoryAt(state.fd, "..");
+        errdefer closeFd(fd);
+        const snapshot = try statFd(fd);
+        if (snapshot.kind != .directory) return error.NotDirectory;
+        if (snapshot.identity.locationEql(state.identity)) {
+            closeFd(fd);
+            return null;
+        }
+        return try self.pinRootFd(fd, snapshot.identity);
+    }
+
+    fn pinRootFd(self: *LinuxFs, fd: i32, identity: Identity) std.mem.Allocator.Error!contract.Root {
         for (self.roots.items, 0..) |*slot, index| {
             if (slot.value != null) continue;
-            slot.value = .{ .fd = fd, .identity = snapshot.identity };
+            slot.value = .{ .fd = fd, .identity = identity };
             return .{ .authority = .here, .slot = @intCast(index), .generation = slot.generation };
         }
         try self.roots.append(self.gpa, .{
             .generation = self.generation_seed,
-            .value = .{ .fd = fd, .identity = snapshot.identity },
+            .value = .{ .fd = fd, .identity = identity },
         });
         return .{
             .authority = .here,
@@ -1700,6 +1722,28 @@ const Fixture = struct {
         self.* = undefined;
     }
 };
+
+test "linux provider pins a directory parent by fd after external rename" {
+    const gpa = t.allocator;
+    var tmp = t.tmpDir(.{});
+    defer tmp.cleanup();
+    try tmp.dir.createDirPath(t.io, "parent/child");
+    const base = try std.fmt.allocPrint(gpa, ".zig-cache/tmp/{s}", .{tmp.sub_path});
+    defer gpa.free(base);
+    const child_path = try std.fs.path.join(gpa, &.{ base, "parent", "child" });
+    defer gpa.free(child_path);
+
+    var local = LinuxFs.init(gpa);
+    defer local.deinit();
+    const child = try local.acquireRoot(child_path);
+    try tmp.dir.rename("parent", tmp.dir, "moved", t.io);
+
+    const parent = (try local.acquireParent(child)).?;
+    var listing = try local.list(gpa, parent, .root);
+    defer listing.deinit();
+    try t.expectEqual(@as(usize, 1), listing.value.entries.len);
+    try t.expectEqualStrings("child", listing.value.entries[0].name.bytes);
+}
 
 fn opId(byte: u8) contract.OperationId {
     return [_]u8{byte} ** 16;
