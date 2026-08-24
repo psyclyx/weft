@@ -13,6 +13,11 @@ const transfer = kernel.transfer;
 const contract = fs.contract;
 
 pub const NodeId = u64;
+pub const PastePlacement = enum { before, after };
+pub const PasteAnchor = struct {
+    row: NodeId,
+    parent: ?NodeId,
+};
 pub const max_transfer_payload: usize = 1 << 20;
 pub const max_transfer_records: usize = 4096;
 pub const max_transfer_name: usize = 1 << 16;
@@ -240,6 +245,7 @@ pub const Model = struct {
     /// Paste mutates the destination draft. No one-off plan is returned: the
     /// visible rows and `buildPlan()` are the same preview/apply source.
     pub fn paste(self: *Model, parent: ?NodeId, item: *const transfer.OwnedItem) !NodeId {
+        try self.validateParent(parent);
         const value = item.value;
         if (value.representation(entry_media)) |representation| {
             if (!std.mem.eql(u8, representation.schema orelse return error.InvalidTransfer, entry_schema)) return error.InvalidTransfer;
@@ -249,6 +255,28 @@ pub const Model = struct {
         const representation = value.representation(tree_media) orelse return error.UnsupportedTransfer;
         if (!std.mem.eql(u8, representation.schema orelse return error.InvalidTransfer, tree_schema)) return error.InvalidTransfer;
         return self.decodeTree(parent, value.suggested_name, representation.payload, value.intent);
+    }
+
+    /// Paste beside a stable row anchor. The anchor's parent is supplied by
+    /// the caller so a stale listing cannot silently retarget the operation.
+    /// Placement affects only visible draft ordering; filesystem plans carry
+    /// typed destinations and never encode a row index.
+    pub fn pasteAt(self: *Model, anchor: PasteAnchor, placement: PastePlacement, item: *const transfer.OwnedItem) !NodeId {
+        const index = try self.anchorIndex(anchor, placement);
+        const value = item.value;
+        if (value.representation(entry_media)) |representation| {
+            if (!std.mem.eql(u8, representation.schema orelse return error.InvalidTransfer, entry_schema)) return error.InvalidTransfer;
+            const captured = try decodeEntry(representation.payload);
+            var copied_row = try self.makeCopiedRow(self.next_id, anchor.parent, value.suggested_name, captured, value.intent);
+            var committed = false;
+            errdefer if (!committed) self.freeRow(&copied_row);
+            const id = try self.insertOwnedRows(index, &.{copied_row});
+            committed = true;
+            return id;
+        }
+        const representation = value.representation(tree_media) orelse return error.UnsupportedTransfer;
+        if (!std.mem.eql(u8, representation.schema orelse return error.InvalidTransfer, tree_schema)) return error.InvalidTransfer;
+        return self.decodeTreeAt(anchor.parent, value.suggested_name, representation.payload, value.intent, index);
     }
 
     /// Build the one typed effect plan consumed by preview/apply. It includes
@@ -286,25 +314,58 @@ pub const Model = struct {
         if (name.len > max_transfer_name) return error.TransferTooLarge;
         try self.validateParent(parent);
         _ = try contract.Name.init(name);
-        var draft = Draft{ .name = &.{}, .kind = kind, .mode = mode, .contents = &.{}, .link_target = &.{} };
-        errdefer freeDraftWith(self.gpa, &draft);
-        draft.name = try self.gpa.dupe(u8, name);
-        draft.contents = try self.gpa.dupe(u8, contents);
-        draft.link_target = try self.gpa.dupe(u8, link_target);
         const id = self.next_id;
+        var pending_row = try self.makePendingRow(id, parent, name, kind, mode, contents, link_target, pending);
+        var committed = false;
+        errdefer if (!committed) self.freeRow(&pending_row);
+        try self.rows.append(self.gpa, pending_row);
         self.next_id += 1;
-        try self.rows.append(self.gpa, .{ .id = id, .parent = parent, .base = null, .current = null, .draft = draft, .pending = pending });
+        committed = true;
         return id;
     }
 
     fn appendCopied(self: *Model, parent: ?NodeId, name: []const u8, captured: EntryCapture, intent: transfer.Intent) !NodeId {
         try self.validateParent(parent);
+        const id = self.next_id;
+        var copied_row = try self.makeCopiedRow(id, parent, name, captured, intent);
+        var committed = false;
+        errdefer if (!committed) self.freeRow(&copied_row);
+        try self.rows.append(self.gpa, copied_row);
+        self.next_id += 1;
+        committed = true;
+        return id;
+    }
+
+    fn makePendingRow(self: *Model, id: NodeId, parent: ?NodeId, name: []const u8, kind: contract.Kind, mode: ?u32, contents: []const u8, link_target: []const u8, pending: Pending) !Row {
+        _ = try contract.Name.init(name);
+        var draft = Draft{ .name = &.{}, .kind = kind, .mode = mode, .contents = &.{}, .link_target = &.{} };
+        errdefer freeDraftWith(self.gpa, &draft);
+        draft.name = try self.gpa.dupe(u8, name);
+        draft.contents = try self.gpa.dupe(u8, contents);
+        draft.link_target = try self.gpa.dupe(u8, link_target);
+        return .{ .id = id, .parent = parent, .base = null, .current = null, .draft = draft, .pending = pending };
+    }
+
+    fn makeCopiedRow(self: *Model, id: NodeId, parent: ?NodeId, name: []const u8, captured: EntryCapture, intent: transfer.Intent) !Row {
+        if (name.len > max_transfer_name) return error.TransferTooLarge;
         const revision = try self.gpa.dupe(u8, captured.revision);
         errdefer self.gpa.free(revision);
-        const id = try self.appendPending(parent, name, captured.kind, captured.mode, &.{}, &.{}, .copied);
-        const row_ptr = self.rowMutable(id).?;
-        row_ptr.copy_source = .{ .root = captured.root, .entry = captured.entry, .revision = revision, .kind = captured.kind, .mode = captured.mode, .intent = intent };
-        return id;
+        var copied_row = try self.makePendingRow(id, parent, name, captured.kind, captured.mode, &.{}, &.{}, .copied);
+        errdefer self.freeRow(&copied_row);
+        copied_row.copy_source = .{ .root = captured.root, .entry = captured.entry, .revision = revision, .kind = captured.kind, .mode = captured.mode, .intent = intent };
+        return copied_row;
+    }
+
+    fn insertOwnedRows(self: *Model, index: usize, rows: []const Row) !NodeId {
+        if (rows.len == 0 or index > self.rows.items.len) return error.InvalidPlacement;
+        if (self.next_id > std.math.maxInt(NodeId) - rows.len) return error.TooManyRows;
+        try self.rows.ensureTotalCapacity(self.gpa, self.rows.items.len + rows.len);
+        const old_len = self.rows.items.len;
+        self.rows.items.len = old_len + rows.len;
+        std.mem.copyBackwards(Row, self.rows.items[index + rows.len .. old_len + rows.len], self.rows.items[index..old_len]);
+        std.mem.copyForwards(Row, self.rows.items[index .. index + rows.len], rows);
+        self.next_id += @intCast(rows.len);
+        return rows[0].id;
     }
 
     fn validateParent(self: *const Model, parent: ?NodeId) !void {
@@ -318,6 +379,38 @@ pub const Model = struct {
             if (parent_row.draft.kind != .directory) return error.NotDirectory;
             cursor = parent_row.parent;
         }
+    }
+
+    fn anchorIndex(self: *const Model, anchor: PasteAnchor, placement: PastePlacement) !usize {
+        const anchor_index = self.indexOf(anchor.row) orelse return error.UnknownAnchor;
+        const anchor_row = &self.rows.items[anchor_index];
+        if (!sameOptionalId(anchor_row.parent, anchor.parent)) return error.StaleAnchor;
+        if (anchor_row.conflict == .stale or anchor_row.pending == .deleted) return error.StaleAnchor;
+        if (anchor.parent) |parent| {
+            const parent_row = self.row(parent) orelse return error.StaleAnchor;
+            if (parent_row.draft.kind != .directory) return error.NotDirectory;
+        }
+        return switch (placement) {
+            .before => anchor_index,
+            .after => self.subtreeEnd(anchor_index),
+        };
+    }
+
+    fn subtreeEnd(self: *const Model, start: usize) usize {
+        var end = start + 1;
+        while (end < self.rows.items.len and self.isDescendant(self.rows.items[end].id, self.rows.items[start].id)) end += 1;
+        return end;
+    }
+
+    fn isDescendant(self: *const Model, candidate: NodeId, ancestor: NodeId) bool {
+        var cursor = self.row(candidate).?.parent;
+        var steps: usize = 0;
+        while (cursor) |parent| : (steps += 1) {
+            if (parent == ancestor) return true;
+            if (steps >= self.rows.items.len) return false;
+            cursor = (self.row(parent) orelse return false).parent;
+        }
+        return false;
     }
 
     fn replaceBytes(self: *Model, slot: *[]u8, value: []const u8) !void {
@@ -384,9 +477,14 @@ pub const Model = struct {
     }
 
     fn decodeTree(self: *Model, parent: ?NodeId, root_name: []const u8, payload: []const u8, intent: transfer.Intent) !NodeId {
+        return self.decodeTreeAt(parent, root_name, payload, intent, self.rows.items.len);
+    }
+
+    fn decodeTreeAt(self: *Model, parent: ?NodeId, root_name: []const u8, payload: []const u8, intent: transfer.Intent, insertion_index: usize) !NodeId {
         if (payload.len > max_transfer_payload or !std.mem.startsWith(u8, payload, tree_magic)) return error.InvalidTransfer;
         if (root_name.len > max_transfer_name) return error.TransferTooLarge;
         _ = try contract.Name.init(root_name);
+        try self.validateParent(parent);
         var cursor: usize = tree_magic.len;
         const count = try getU32(payload, &cursor);
         if (count == 0 or count > max_transfer_records) return error.InvalidTransfer;
@@ -422,16 +520,25 @@ pub const Model = struct {
             try decoded.append(self.gpa, .{ .parent_index = parent_index, .kind = kind, .mode = if (has_mode == 0) null else mode_value, .name = name, .contents = contents, .link_target = link_target });
         }
         if (cursor != payload.len) return error.InvalidTransfer;
-        try self.validateParent(parent);
+        if (self.next_id > std.math.maxInt(NodeId) - @as(NodeId, @intCast(count))) return error.TooManyRows;
         const ids = try self.gpa.alloc(NodeId, count);
         defer self.gpa.free(ids);
+        const inserted = try self.gpa.alloc(Row, count);
+        defer self.gpa.free(inserted);
+        var initialized: usize = 0;
+        var committed = false;
+        errdefer if (!committed) for (inserted[0..initialized]) |*row_ptr| self.freeRow(row_ptr);
         for (decoded.items, 0..) |node, index| {
+            ids[index] = self.next_id + @as(NodeId, @intCast(index));
             const row_parent = if (index == 0) parent else ids[node.parent_index];
             const actual_name = if (index == 0) root_name else node.name;
-            ids[index] = try self.appendPending(row_parent, actual_name, node.kind, node.mode, node.contents, node.link_target, .added);
+            inserted[index] = try self.makePendingRow(ids[index], row_parent, actual_name, node.kind, node.mode, node.contents, node.link_target, .added);
+            initialized += 1;
         }
+        const first = try self.insertOwnedRows(insertion_index, inserted);
+        committed = true;
         _ = intent;
-        return ids[0];
+        return first;
     }
 };
 
@@ -741,6 +848,11 @@ fn sameEntry(a: contract.EntryRef, b: contract.EntryRef) bool {
     return a.authority == b.authority and a.slot == b.slot and a.generation == b.generation;
 }
 
+fn sameOptionalId(left: ?NodeId, right: ?NodeId) bool {
+    if (left) |value| return right != null and right.? == value;
+    return right == null;
+}
+
 fn opId(index: usize) contract.OperationId {
     var id: contract.OperationId = @splat(0);
     std.mem.writeInt(usize, id[0..@sizeOf(usize)], index, .little);
@@ -788,6 +900,85 @@ test "paste rows are visible and plan follows edited destination draft" {
     defer plan.deinit();
     try std.testing.expectEqualStrings("edited", plan.value.operations[0].operation.copy.destination.name.bytes);
     try std.testing.expectEqual(source.root, plan.value.operations[0].operation.copy.source.entry.root);
+}
+
+test "entry paste before and after uses stable sibling anchors" {
+    var source = Model.init(std.testing.allocator, .{ .authority = .here, .slot = 10, .generation = 1 });
+    try source.reconcile(.{ .entries = &.{.{ .identity = ref(31, 1), .name = "copied", .revision = "r", .kind = .regular }} });
+    var item = try source.yank(source.rows.items[0].id, .copy);
+    source.deinit();
+    defer item.deinit();
+
+    var destination = Model.init(std.testing.allocator, .{ .authority = .here, .slot = 20, .generation = 1 });
+    defer destination.deinit();
+    try destination.reconcile(.{ .entries = &.{
+        .{ .identity = ref(32, 1), .name = "left", .revision = "r", .kind = .regular },
+        .{ .identity = ref(33, 1), .name = "right", .revision = "r", .kind = .regular },
+    } });
+    const right = destination.rows.items[1].id;
+    _ = try destination.pasteAt(.{ .row = right, .parent = null }, .before, &item);
+    try std.testing.expectEqualStrings("left", destination.rows.items[0].draft.name);
+    try std.testing.expectEqualStrings("copied", destination.rows.items[1].draft.name);
+    try std.testing.expectEqualStrings("right", destination.rows.items[2].draft.name);
+    const left = destination.rows.items[0].id;
+    _ = try destination.pasteAt(.{ .row = left, .parent = null }, .after, &item);
+    try std.testing.expectEqualStrings("left", destination.rows.items[0].draft.name);
+    try std.testing.expectEqualStrings("copied", destination.rows.items[1].draft.name);
+    try std.testing.expectEqualStrings("copied", destination.rows.items[2].draft.name);
+    try std.testing.expectEqualStrings("right", destination.rows.items[3].draft.name);
+}
+
+test "pending subtree paste stays contiguous preorder around siblings after source deletion" {
+    var source = Model.init(std.testing.allocator, .{ .authority = .here, .slot = 40, .generation = 1 });
+    _ = try source.addDirectory(null, "subtree", null);
+    const subtree = source.rows.items[0].id;
+    _ = try source.addFile(subtree, "leaf", "contents", null);
+    var item = try source.yank(subtree, .copy);
+    try source.markDelete(subtree);
+    source.deinit();
+    defer item.deinit();
+
+    var destination = Model.init(std.testing.allocator, .{ .authority = .here, .slot = 41, .generation = 1 });
+    defer destination.deinit();
+    _ = try destination.addFile(null, "left", "", null);
+    const right = try destination.addFile(null, "right", "", null);
+    _ = try destination.pasteAt(.{ .row = right, .parent = null }, .before, &item);
+    try std.testing.expectEqualStrings("left", destination.rows.items[0].draft.name);
+    try std.testing.expectEqualStrings("subtree", destination.rows.items[1].draft.name);
+    try std.testing.expectEqualStrings("leaf", destination.rows.items[2].draft.name);
+    try std.testing.expectEqualStrings("right", destination.rows.items[3].draft.name);
+    try std.testing.expectEqual(destination.rows.items[2].parent, destination.rows.items[1].id);
+
+    const left = destination.rows.items[0].id;
+    _ = try destination.pasteAt(.{ .row = left, .parent = null }, .after, &item);
+    try std.testing.expectEqualStrings("left", destination.rows.items[0].draft.name);
+    try std.testing.expectEqualStrings("subtree", destination.rows.items[1].draft.name);
+    try std.testing.expectEqualStrings("leaf", destination.rows.items[2].draft.name);
+    try std.testing.expectEqualStrings("subtree", destination.rows.items[3].draft.name);
+    try std.testing.expectEqualStrings("leaf", destination.rows.items[4].draft.name);
+    try std.testing.expectEqualStrings("right", destination.rows.items[5].draft.name);
+}
+
+test "paste placement rejects stale anchors without changing draft rows" {
+    var source = Model.init(std.testing.allocator, .{ .authority = .here, .slot = 50, .generation = 1 });
+    defer source.deinit();
+    try source.reconcile(.{ .entries = &.{.{ .identity = ref(51, 1), .name = "source", .revision = "r", .kind = .regular }} });
+    var item = try source.yank(source.rows.items[0].id, .copy);
+    defer item.deinit();
+
+    var destination = Model.init(std.testing.allocator, .{ .authority = .here, .slot = 52, .generation = 1 });
+    defer destination.deinit();
+    const anchor = try destination.addFile(null, "anchor", "", null);
+    const before_rows = destination.rows.items.len;
+    const before_next = destination.next_id;
+    try std.testing.expectError(error.StaleAnchor, destination.pasteAt(.{ .row = anchor, .parent = 99 }, .before, &item));
+    try std.testing.expectEqual(before_rows, destination.rows.items.len);
+    try std.testing.expectEqual(before_next, destination.next_id);
+    try std.testing.expectError(error.UnknownAnchor, destination.pasteAt(.{ .row = 99, .parent = null }, .after, &item));
+    try destination.markDelete(anchor);
+    try std.testing.expectError(error.StaleAnchor, destination.pasteAt(.{ .row = anchor, .parent = null }, .before, &item));
+    try std.testing.expectEqual(before_rows, destination.rows.items.len);
+    try std.testing.expectEqual(before_next, destination.next_id);
 }
 
 test "dirty external mutation is stale and duplicate snapshots are rejected transactionally" {

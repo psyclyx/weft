@@ -19,6 +19,8 @@ pub const Observation = model.Observation;
 pub const Draft = model.Draft;
 pub const Row = model.Row;
 pub const OwnedPlan = model.OwnedPlan;
+pub const PastePlacement = model.PastePlacement;
+pub const PasteAnchor = model.PasteAnchor;
 
 pub const max_transfer_payload = model.max_transfer_payload;
 pub const max_transfer_records = model.max_transfer_records;
