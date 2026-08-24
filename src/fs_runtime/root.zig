@@ -5,10 +5,12 @@
 
 pub const router = @import("router.zig");
 pub const publication = @import("publication.zig");
+pub const resource = @import("resource.zig");
 
 pub const Error = router.Error;
 pub const Router = router.Router;
 pub const TargetBinding = router.TargetBinding;
+pub const LeaseResource = resource.LeaseResource;
 
 test {
     @import("std").testing.refAllDecls(@This());

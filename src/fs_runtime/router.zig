@@ -117,6 +117,15 @@ pub const Router = struct {
         return binding.directory;
     }
 
+    /// Validate the authority envelope for a provider-owned lease without
+    /// consuming it. The provider remains the authority for whether the
+    /// lease slot itself is live.
+    pub fn validateLease(self: *Router, source: contract.LeaseSource) Error!void {
+        _ = try self.checkRoot(source.root);
+        if (source.ref.generation == 0 or source.ref.authority != source.root.authority)
+            return error.InvalidHandle;
+    }
+
     fn providerFor(self: *Router, authority: semantic.handle.Authority) Error!fs.service.Provider {
         if (self.providers.get(authority)) |provider| return provider;
         if (self.retired.contains(authority)) return error.AuthorityRetired;
