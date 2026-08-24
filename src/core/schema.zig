@@ -65,9 +65,10 @@ fn scalarWidth(s: Scalar) usize {
     };
 }
 
-/// A `Schema` is a tree. The constructor set is deliberately small (§5 F6:
-/// "scalars, strings, arrays, structs, anchor, range") — unions/variants are
-/// DELIBERATELY EXCLUDED (§2.1, §7 names exactly where that bites first).
+/// A `Schema` is a tree. `variant` is a bounded, tagged union: its case
+/// metadata is carried by the schema, while the wire carries only the case
+/// index and that case's payload. The case name is metadata, just like a
+/// struct field name, and never crosses the payload wire.
 pub const Schema = union(enum) {
     scalar: Scalar,
     /// utf8, uv-length-framed, validated at the boundary (`Cursor.asStr`).
@@ -86,8 +87,14 @@ pub const Schema = union(enum) {
     anchor,
     /// schema-MARKED: a StampedRange (version + [s,e)) — §4's `.on_range`.
     range,
+    /// bounded tag (a case index), followed by the selected case payload.
+    variant: []const Case,
 
     pub const Field = struct { name: []const u8, ty: *const Schema };
+    pub const Case = struct { name: []const u8, ty: *const Schema };
+    /// Descriptive alias for callers that want to make the tagged-union
+    /// intent explicit at call sites (`Schema.VariantCase`).
+    pub const VariantCase = Case;
 };
 
 /// The wire form of an `anchor`-marked field — `(agent, seq, side)`, the
@@ -119,7 +126,15 @@ pub const Value = union(enum) {
     optional: ?*const Value,
     anchor: AnchorWire,
     range: RangeWire,
+    variant: VariantValue,
 };
+
+/// The selected payload for a `Schema.variant`. `tag` is an index into the
+/// schema's case table, not an open-ended wire enum. A pointer keeps the
+/// representation consistent with `Value.optional` while allowing every
+/// payload shape, including an empty struct, to be selected.
+pub const VariantValue = struct { tag: usize, payload: *const Value };
+pub const Variant = VariantValue;
 
 pub const ScalarValue = union(Scalar) {
     bool: bool,
@@ -133,13 +148,14 @@ pub const ScalarValue = union(Scalar) {
 
 // ── Encode (§3.1: a pre-order walk, no tags, no padding) ────────────────
 
-pub const EncodeError = error{SchemaMismatch} || Allocator.Error;
+pub const EncodeError = error{ SchemaMismatch, InvalidSchema } || Allocator.Error;
 
 /// Encode `value` against `schema` — a pre-order walk emitting bytes with NO
 /// tags and NO padding (§3.1). `error.SchemaMismatch` when `value`'s shape
 /// doesn't match `schema` at some node (a caller bug, not a wire-corruption
 /// case — decode's `error.Corrupt` is the untrusted-input sibling of this).
 pub fn encode(gpa: Allocator, schema: *const Schema, value: Value) EncodeError![]u8 {
+    try validateSchema(schema);
     var list: std.ArrayList(u8) = .empty;
     errdefer list.deinit(gpa);
     try encodeInto(gpa, &list, schema, value);
@@ -154,6 +170,7 @@ pub fn encode(gpa: Allocator, schema: *const Schema, value: Value) EncodeError![
 /// e2e's guest fixture, and the meta-schema blob's own future use all need
 /// it identically).
 pub fn encodeVersioned(gpa: Allocator, version: u32, schema: *const Schema, value: Value) EncodeError![]u8 {
+    try validateSchema(schema);
     var list: std.ArrayList(u8) = .empty;
     errdefer list.deinit(gpa);
     try wire.putUv(gpa, &list, version);
@@ -248,6 +265,11 @@ fn encodeInto(gpa: Allocator, list: *std.ArrayList(u8), schema: *const Schema, v
             try wire.putUv(gpa, list, r.start);
             try wire.putUv(gpa, list, r.end);
         },
+        .variant => |cases| {
+            if (value != .variant or value.variant.tag >= cases.len) return error.SchemaMismatch;
+            try wire.putUv(gpa, list, value.variant.tag);
+            try encodeInto(gpa, list, cases[value.variant.tag].ty, value.variant.payload.*);
+        },
     }
 }
 
@@ -334,6 +356,13 @@ pub const Cursor = struct {
                 _ = wire.getUv(&cur) catch return error.Corrupt; // end
                 return self.bytes.len - cur.len;
             },
+            .variant => |cases| {
+                var cur = self.bytes;
+                const tag = wire.getUv(&cur) catch return error.Corrupt;
+                if (tag >= cases.len) return error.Corrupt;
+                const sub: Cursor = .{ .schema = cases[@intCast(tag)].ty, .bytes = cur };
+                return (self.bytes.len - cur.len) + try sub.skip();
+            },
         }
     }
 
@@ -408,6 +437,18 @@ pub const Cursor = struct {
         return .{ .version = version, .start = start, .end = end };
     }
 
+    /// Enter a tagged variant and validate its bounded case index. The
+    /// selected payload is borrowed from `self.bytes`; reading it is still
+    /// bounds-checked by the returned cursor.
+    pub fn enterVariant(self: Cursor) DecodeError!VariantCursor {
+        const cases = if (self.schema.* == .variant) self.schema.variant else return error.SchemaMismatch;
+        var cur = self.bytes;
+        const raw_tag = wire.getUv(&cur) catch return error.Corrupt;
+        if (raw_tag >= cases.len) return error.Corrupt;
+        const tag: usize = @intCast(raw_tag);
+        return .{ .cases = cases, .tag = tag, .payload = .{ .schema = cases[tag].ty, .bytes = cur } };
+    }
+
     /// `null` when absent; else a sub-cursor over the element.
     pub fn enterOptional(self: Cursor) DecodeError!?Cursor {
         const elem = if (self.schema.* == .optional) self.schema.optional else return error.SchemaMismatch;
@@ -449,6 +490,26 @@ pub const ArrayCursor = struct {
         self.bytes = self.bytes[n..];
         self.idx += 1;
         return cur;
+    }
+};
+
+/// A dynamically decoded variant. `tag` is guaranteed to be in `cases`; use
+/// `selected()` for a cursor over its payload and `caseName()` for metadata.
+pub const VariantCursor = struct {
+    cases: []const Schema.Case,
+    tag: usize,
+    payload: Cursor,
+
+    pub fn selected(self: VariantCursor) Cursor {
+        return self.payload;
+    }
+
+    pub fn caseName(self: VariantCursor) []const u8 {
+        return self.cases[self.tag].name;
+    }
+
+    pub fn caseMetadata(self: VariantCursor) Schema.Case {
+        return self.cases[self.tag];
     }
 };
 
@@ -613,6 +674,15 @@ fn walkInto(gpa: Allocator, out: *std.ArrayList(u8), schema: *const Schema, byte
             try wire.putUv(gpa, out, r.end);
             return consumed;
         },
+        .variant => |cases| {
+            var cur = bytes;
+            const raw_tag = wire.getUv(&cur) catch return error.Corrupt;
+            if (raw_tag >= cases.len) return error.Corrupt;
+            const tag: usize = @intCast(raw_tag);
+            try wire.putUv(gpa, out, raw_tag);
+            const n = try walkInto(gpa, out, cases[tag].ty, cur, visitor);
+            return (bytes.len - cur.len) + n;
+        },
     }
 }
 
@@ -622,8 +692,8 @@ fn walkInto(gpa: Allocator, out: *std.ArrayList(u8), schema: *const Schema, byte
 // as a finite tree in THIS language: `Schema` is self-referential
 // (`array`/`optional` hold `*const Schema`; `struct` holds `Field`s that
 // hold `*const Schema`), and §2.1's constructor set deliberately excludes
-// recursion/`ref` (§7 item 2: "a self-referential schema... is not
-// expressible... deferred until a structural client forces it"). Encoding a
+// recursion/`ref` (a self-referential schema still cannot be expressed).
+// Encoding a
 // `Schema` tree is exactly that structural client, one layer too early for
 // the language to serve generically — so `canonicalizeSchema`/`parseSchema`
 // are a HAND-WRITTEN recursive codec (the same wire primitives — `putUv`,
@@ -648,6 +718,7 @@ const tag_struct: u8 = 10;
 const tag_optional: u8 = 11;
 const tag_anchor: u8 = 12;
 const tag_range: u8 = 13;
+const tag_variant: u8 = 14;
 
 fn scalarTag(s: Scalar) u8 {
     return switch (s) {
@@ -667,7 +738,54 @@ fn scalarTag(s: Scalar) u8 {
 /// slot). Byte-identical for byte-identical trees (no hash maps, no
 /// nondeterministic iteration — a `struct`'s fields are already an ordered
 /// slice).
-pub fn canonicalizeSchema(gpa: Allocator, schema: *const Schema) Allocator.Error![]u8 {
+pub const SchemaValidationError = error{InvalidSchema};
+
+/// Validate schema metadata and recursive shape before it is used as a type.
+/// This catches duplicate/empty case names, empty variants, unreasonable
+/// metadata, and pointer cycles/depth bombs without importing a host runtime.
+pub fn validateSchema(schema: *const Schema) SchemaValidationError!void {
+    var state: ValidationState = .{};
+    try validateSchemaInner(schema, &state, 0);
+}
+
+const maxSchemaDepth: usize = 256;
+const maxSchemaNodes: usize = 1 << 20;
+const maxSchemaName: usize = 1 << 20;
+
+const ValidationState = struct { nodes: usize = 0 };
+
+fn validateSchemaInner(schema: *const Schema, state: *ValidationState, depth: usize) SchemaValidationError!void {
+    if (depth > maxSchemaDepth or state.nodes >= maxSchemaNodes) return error.InvalidSchema;
+    state.nodes += 1;
+    switch (schema.*) {
+        .scalar, .str, .bytes, .anchor, .range => {},
+        .array => |elem| try validateSchemaInner(elem, state, depth + 1),
+        .optional => |elem| try validateSchemaInner(elem, state, depth + 1),
+        .variant => |cases| {
+            if (cases.len == 0 or cases.len > maxSchemaNodes) return error.InvalidSchema;
+            for (cases, 0..) |c, i| {
+                if (c.name.len == 0 or c.name.len > maxSchemaName) return error.InvalidSchema;
+                for (cases[0..i]) |prior| {
+                    if (std.mem.eql(u8, prior.name, c.name)) return error.InvalidSchema;
+                }
+                try validateSchemaInner(c.ty, state, depth + 1);
+            }
+        },
+        .@"struct" => |fields| {
+            if (fields.len > maxSchemaNodes) return error.InvalidSchema;
+            for (fields, 0..) |f, i| {
+                if (f.name.len == 0 or f.name.len > maxSchemaName) return error.InvalidSchema;
+                for (fields[0..i]) |prior| {
+                    if (std.mem.eql(u8, prior.name, f.name)) return error.InvalidSchema;
+                }
+                try validateSchemaInner(f.ty, state, depth + 1);
+            }
+        },
+    }
+}
+
+pub fn canonicalizeSchema(gpa: Allocator, schema: *const Schema) (Allocator.Error || SchemaValidationError)![]u8 {
+    try validateSchema(schema);
     var list: std.ArrayList(u8) = .empty;
     errdefer list.deinit(gpa);
     try canonicalizeInto(gpa, &list, schema);
@@ -698,6 +816,15 @@ fn canonicalizeInto(gpa: Allocator, list: *std.ArrayList(u8), schema: *const Sch
         },
         .anchor => try list.append(gpa, tag_anchor),
         .range => try list.append(gpa, tag_range),
+        .variant => |cases| {
+            try list.append(gpa, tag_variant);
+            try wire.putUv(gpa, list, cases.len);
+            for (cases) |c| {
+                try wire.putUv(gpa, list, c.name.len);
+                try list.appendSlice(gpa, c.name);
+                try canonicalizeInto(gpa, list, c.ty);
+            }
+        },
     }
 }
 
@@ -712,11 +839,21 @@ fn canonicalizeInto(gpa: Allocator, list: *std.ArrayList(u8), schema: *const Sch
 /// `SlotDecl.schema` borrow already assumes.
 pub fn parseSchema(gpa: Allocator, bytes: []const u8) (DecodeError || Allocator.Error)!*const Schema {
     var cur = bytes;
-    const s = try parseOne(gpa, &cur);
+    var state: ParseState = .{ .gpa = gpa };
+    const s = parseOne(&state, &cur, 0) catch |err| return err;
+    if (cur.len != 0) {
+        freeSchema(gpa, s);
+        return error.Corrupt;
+    }
     return s;
 }
 
-fn parseOne(gpa: Allocator, cur: *[]const u8) (DecodeError || Allocator.Error)!*Schema {
+const ParseState = struct { gpa: Allocator, nodes: usize = 0 };
+
+fn parseOne(state: *ParseState, cur: *[]const u8, depth: usize) (DecodeError || Allocator.Error)!*Schema {
+    const gpa = state.gpa;
+    if (depth > maxSchemaDepth or state.nodes >= maxSchemaNodes) return error.Corrupt;
+    state.nodes += 1;
     if (cur.len < 1) return error.Corrupt;
     const tag = cur.*[0];
     cur.* = cur.*[1..];
@@ -734,8 +871,8 @@ fn parseOne(gpa: Allocator, cur: *[]const u8) (DecodeError || Allocator.Error)!*
         tag_bytes => .bytes,
         tag_anchor => .anchor,
         tag_range => .range,
-        tag_array => .{ .array = try parseOne(gpa, cur) },
-        tag_optional => .{ .optional = try parseOne(gpa, cur) },
+        tag_array => .{ .array = try parseOne(state, cur, depth + 1) },
+        tag_optional => .{ .optional = try parseOne(state, cur, depth + 1) },
         tag_struct => blk: {
             const n = wire.getUv(cur) catch return error.Corrupt;
             if (n > 1 << 20) return error.Corrupt; // sanity cap, hostile-input guard
@@ -748,17 +885,67 @@ fn parseOne(gpa: Allocator, cur: *[]const u8) (DecodeError || Allocator.Error)!*
                 }
                 gpa.free(fields);
             }
+            var pending_name: ?[]u8 = null;
+            var pending_ty: ?*Schema = null;
+            errdefer {
+                if (pending_name) |name| gpa.free(name);
+                if (pending_ty) |ty| freeSchema(gpa, ty);
+            }
             var i: usize = 0;
             while (i < n) : (i += 1) {
                 const nlen = wire.getUv(cur) catch return error.Corrupt;
-                if (nlen > cur.len) return error.Corrupt;
-                const name = try gpa.dupe(u8, cur.*[0..@intCast(nlen)]);
+                if (nlen == 0 or nlen > maxSchemaName or nlen > cur.len) return error.Corrupt;
+                pending_name = try gpa.dupe(u8, cur.*[0..@intCast(nlen)]);
                 cur.* = cur.*[@intCast(nlen)..];
-                const ty = try parseOne(gpa, cur);
-                fields[i] = .{ .name = name, .ty = ty };
+                pending_ty = try parseOne(state, cur, depth + 1);
+                for (fields[0..i]) |prior| {
+                    if (std.mem.eql(u8, prior.name, pending_name.?)) {
+                        return error.Corrupt;
+                    }
+                }
+                fields[i] = .{ .name = pending_name.?, .ty = pending_ty.? };
                 filled += 1;
+                pending_name = null;
+                pending_ty = null;
             }
             break :blk .{ .@"struct" = fields };
+        },
+        tag_variant => blk: {
+            const n = wire.getUv(cur) catch return error.Corrupt;
+            if (n == 0 or n > maxSchemaNodes) return error.Corrupt;
+            const cases = try gpa.alloc(Schema.Case, @intCast(n));
+            var filled: usize = 0;
+            errdefer {
+                for (cases[0..filled]) |c| {
+                    gpa.free(@constCast(c.name));
+                    freeSchema(gpa, c.ty);
+                }
+                gpa.free(cases);
+            }
+            var pending_name: ?[]u8 = null;
+            var pending_ty: ?*Schema = null;
+            errdefer {
+                if (pending_name) |name| gpa.free(name);
+                if (pending_ty) |ty| freeSchema(gpa, ty);
+            }
+            var i: usize = 0;
+            while (i < n) : (i += 1) {
+                const nlen = wire.getUv(cur) catch return error.Corrupt;
+                if (nlen == 0 or nlen > maxSchemaName or nlen > cur.len) return error.Corrupt;
+                pending_name = try gpa.dupe(u8, cur.*[0..@intCast(nlen)]);
+                cur.* = cur.*[@intCast(nlen)..];
+                pending_ty = try parseOne(state, cur, depth + 1);
+                for (cases[0..i]) |prior| {
+                    if (std.mem.eql(u8, prior.name, pending_name.?)) {
+                        return error.Corrupt;
+                    }
+                }
+                cases[i] = .{ .name = pending_name.?, .ty = pending_ty.? };
+                filled += 1;
+                pending_name = null;
+                pending_ty = null;
+            }
+            break :blk .{ .variant = cases };
         },
         else => return error.Corrupt,
     };
@@ -772,7 +959,7 @@ fn parseOne(gpa: Allocator, cur: *[]const u8) (DecodeError || Allocator.Error)!*
 /// `Manifest.addSlot` uses this to give a staged `weft.slot` declaration its
 /// own owned tree, independent of whatever the caller's schema value's
 /// storage duration is.
-pub fn cloneSchema(gpa: Allocator, s: *const Schema) (DecodeError || Allocator.Error)!*const Schema {
+pub fn cloneSchema(gpa: Allocator, s: *const Schema) (DecodeError || Allocator.Error || SchemaValidationError)!*const Schema {
     const blob = try canonicalizeSchema(gpa, s);
     defer gpa.free(blob);
     return parseSchema(gpa, blob);
@@ -790,6 +977,13 @@ pub fn freeSchema(gpa: Allocator, schema: *const Schema) void {
             }
             gpa.free(@constCast(fields));
         },
+        .variant => |cases| {
+            for (cases) |c| {
+                gpa.free(@constCast(c.name));
+                freeSchema(gpa, c.ty);
+            }
+            gpa.free(@constCast(cases));
+        },
         .scalar, .str, .bytes, .anchor, .range => {},
     }
     gpa.destroy(@as(*Schema, @constCast(schema)));
@@ -805,6 +999,15 @@ pub fn schemaEql(a: *const Schema, b: *const Schema) bool {
         .str, .bytes, .anchor, .range => true,
         .array => schemaEql(a.array, b.array),
         .optional => schemaEql(a.optional, b.optional),
+        .variant => blk: {
+            const ac = a.variant;
+            const bc = b.variant;
+            if (ac.len != bc.len) break :blk false;
+            for (ac, bc) |x, y| {
+                if (!std.mem.eql(u8, x.name, y.name) or !schemaEql(x.ty, y.ty)) break :blk false;
+            }
+            break :blk true;
+        },
         .@"struct" => blk: {
             const af = a.@"struct";
             const bf = b.@"struct";
@@ -930,6 +1133,98 @@ test "schema: optional present/absent round-trip" {
     defer gpa.free(absent);
     try t.expectEqual(@as(?Cursor, null), try decodeCursor(&schema, absent).enterOptional());
     try t.expectEqual(@as(usize, 1), absent.len);
+}
+
+test "schema: variant encodes a bounded tag and selected payload" {
+    const gpa = t.allocator;
+    const text_ty: Schema = .str;
+    const count_ty: Schema = .{ .scalar = .u32 };
+    const cases = [_]Schema.Case{
+        .{ .name = "text", .ty = &text_ty },
+        .{ .name = "count", .ty = &count_ty },
+    };
+    const schema: Schema = .{ .variant = &cases };
+
+    const text_value: Value = .{ .str = "hello" };
+    const text_bytes = try encode(gpa, &schema, .{ .variant = .{ .tag = 0, .payload = &text_value } });
+    defer gpa.free(text_bytes);
+    try t.expectEqualSlices(u8, &.{ 0, 5, 'h', 'e', 'l', 'l', 'o' }, text_bytes);
+    const text_cur = try decodeCursor(&schema, text_bytes).enterVariant();
+    try t.expectEqual(@as(usize, 0), text_cur.tag);
+    try t.expectEqualStrings("text", text_cur.caseName());
+    try t.expectEqualStrings("hello", try text_cur.selected().asStr());
+
+    const count_value: Value = .{ .scalar = .{ .u32 = 42 } };
+    const count_bytes = try encode(gpa, &schema, .{ .variant = .{ .tag = 1, .payload = &count_value } });
+    defer gpa.free(count_bytes);
+    try t.expectEqualSlices(u8, &.{ 1, 42, 0, 0, 0 }, count_bytes);
+    const count_cur = try decodeCursor(&schema, count_bytes).enterVariant();
+    try t.expectEqual(@as(usize, 1), count_cur.tag);
+    try t.expectEqualStrings("count", count_cur.caseName());
+    try t.expectEqual(@as(u32, 42), try count_cur.selected().asU32());
+
+    try t.expectError(error.SchemaMismatch, encode(gpa, &schema, .{ .variant = .{ .tag = 2, .payload = &count_value } }));
+    try t.expectError(error.SchemaMismatch, encode(gpa, &schema, .{ .variant = .{ .tag = 0, .payload = &count_value } }));
+}
+
+test "schema: variant walks selected nested marks and refuses unknown/truncated tags" {
+    const gpa = t.allocator;
+    const range_ty: Schema = .range;
+    const cases = [_]Schema.Case{.{ .name = "location", .ty = &range_ty }};
+    const schema: Schema = .{ .variant = &cases };
+    const value: Value = .{ .range = .{ .version = "stale", .start = 4, .end = 9 } };
+    const bytes = try encode(gpa, &schema, .{ .variant = .{ .tag = 0, .payload = &value } });
+    defer gpa.free(bytes);
+
+    const Ctx = struct { version: []const u8 };
+    var ctx: Ctx = .{ .version = "fresh" };
+    const rewritten = try walk(gpa, &schema, bytes, .{
+        .ctx = &ctx,
+        .on_range = struct {
+            fn cb(c: ?*anyopaque, r: RangeWire) []const u8 {
+                _ = r;
+                return @as(*Ctx, @ptrCast(@alignCast(c.?))).version;
+            }
+        }.cb,
+    });
+    defer gpa.free(rewritten);
+    const variant = try decodeCursor(&schema, rewritten).enterVariant();
+    try t.expectEqualStrings("fresh", (try variant.selected().asRange()).version);
+
+    try t.expectError(error.Corrupt, decodeCursor(&schema, &.{ 1, 0 }).enterVariant());
+    try t.expectError(error.Corrupt, (try decodeCursor(&schema, &.{0}).enterVariant()).selected().asRange());
+    try t.expectError(error.Corrupt, walk(gpa, &schema, &.{ 2, 0 }, .{}));
+}
+
+test "schema: variant canonicalization preserves case metadata and validates it" {
+    const gpa = t.allocator;
+    const str_ty: Schema = .str;
+    const u32_ty: Schema = .{ .scalar = .u32 };
+    const cases = [_]Schema.Case{
+        .{ .name = "message", .ty = &str_ty },
+        .{ .name = "code", .ty = &u32_ty },
+    };
+    const original: Schema = .{ .variant = &cases };
+    const blob = try canonicalizeSchema(gpa, &original);
+    defer gpa.free(blob);
+    try t.expectEqual(tag_variant, blob[0]);
+    const parsed = try parseSchema(gpa, blob);
+    defer freeSchema(gpa, parsed);
+    try t.expect(schemaEql(&original, parsed));
+
+    const duplicate = [_]Schema.Case{
+        .{ .name = "same", .ty = &str_ty },
+        .{ .name = "same", .ty = &u32_ty },
+    };
+    const invalid_duplicate: Schema = .{ .variant = &duplicate };
+    try t.expectError(error.InvalidSchema, validateSchema(&invalid_duplicate));
+    try t.expectError(error.InvalidSchema, canonicalizeSchema(gpa, &invalid_duplicate));
+
+    const empty: Schema = .{ .variant = &.{} };
+    try t.expectError(error.InvalidSchema, validateSchema(&empty));
+    try t.expectError(error.Corrupt, parseSchema(gpa, &.{ tag_variant, 0 }));
+    // A valid blob followed by bytes is not another valid canonical schema.
+    try t.expectError(error.Corrupt, parseSchema(gpa, &.{ tag_variant, 1, 1, 'x', tag_str, 255 }));
 }
 
 test "schema: anchor/range round-trip (the two schema marks)" {
