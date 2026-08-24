@@ -640,6 +640,21 @@ test "fake leases survive source deletion and are generation checked" {
     defer observed.deinit();
     const lease_ref = try provider.capture(.{ .root = Fake.root(), .ref = source, .revision = observed.value.revision });
     const lease: contract.LeaseSource = .{ .root = Fake.root(), .ref = lease_ref };
+
+    const forged_operation = [_]contract.Planned{.{
+        .id = opId(15),
+        .operation = .{ .copy = .{
+            .source = .{ .lease = .{
+                .root = .{ .authority = @enumFromInt(10), .slot = 0, .generation = 1 },
+                .ref = lease_ref,
+            } },
+            .destination = .{ .parent = .root, .name = try .init("forged") },
+        } },
+    }};
+    var forged_report = try provider.apply(std.testing.allocator, .{ .root = Fake.root(), .base_revision = &.{}, .operations = &forged_operation });
+    defer forged_report.deinit();
+    try std.testing.expectEqual(std.meta.Tag(contract.Outcome).stale, std.meta.activeTag(forged_report.value.entries[0].outcome));
+
     try fake.deleteExternally(source);
     const operation = [_]contract.Planned{.{
         .id = opId(14),

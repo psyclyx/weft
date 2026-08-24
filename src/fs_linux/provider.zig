@@ -2689,6 +2689,11 @@ test "linux file leases survive namespace deletion and replacement" {
     var fixture = try Fixture.init(t.allocator);
     defer fixture.deinit();
     const provider = fixture.local.provider();
+    try fixture.tmp.dir.createDir(t.io, "destination", .default_dir);
+    const destination_path = try std.fs.path.join(t.allocator, &.{ fixture.path, "destination" });
+    defer t.allocator.free(destination_path);
+    const destination_root = try fixture.local.acquireRoot(destination_path);
+    defer fixture.local.releaseRoot(destination_root);
     const setup = [_]contract.Planned{.{
         .id = opId(92),
         .operation = .{ .create_file = .{ .destination = .{ .parent = .root, .name = try .init("source") }, .contents = "payload" } },
@@ -2701,16 +2706,20 @@ test "linux file leases survive namespace deletion and replacement" {
     const lease_ref = try provider.capture(.{ .root = fixture.root, .ref = source.observation.node.entry, .revision = source.observation.revision });
     const lease: contract.LeaseSource = .{ .root = fixture.root, .ref = lease_ref };
     try externalUnlink(&fixture.local, fixture.root, "source");
+    // The source namespace may close independently of the transfer. The
+    // materialized lease must remain routable and releasable through the
+    // provider after its root fd and entry handles are gone.
+    fixture.local.releaseRoot(fixture.root);
 
     const operation = [_]contract.Planned{.{
         .id = opId(93),
         .operation = .{ .copy = .{ .source = .{ .lease = lease }, .destination = .{ .parent = .root, .name = try .init("restored") } } },
     }};
-    var report = try provider.apply(t.allocator, .{ .root = fixture.root, .base_revision = &.{}, .operations = &operation });
+    var report = try provider.apply(t.allocator, .{ .root = destination_root, .base_revision = &.{}, .operations = &operation });
     defer report.deinit();
     try expectOutcome(.applied, report.value.entries[0].outcome);
     provider.releaseLease(lease);
-    var stale = try provider.apply(t.allocator, .{ .root = fixture.root, .base_revision = &.{}, .operations = &operation });
+    var stale = try provider.apply(t.allocator, .{ .root = destination_root, .base_revision = &.{}, .operations = &operation });
     defer stale.deinit();
     try expectOutcome(.stale, stale.value.entries[0].outcome);
 }

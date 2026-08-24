@@ -121,9 +121,7 @@ pub const Router = struct {
     /// consuming it. The provider remains the authority for whether the
     /// lease slot itself is live.
     pub fn validateLease(self: *Router, source: contract.LeaseSource) Error!void {
-        _ = try self.checkRoot(source.root);
-        if (source.ref.generation == 0 or source.ref.authority != source.root.authority)
-            return error.InvalidHandle;
+        _ = try self.checkLease(source);
     }
 
     fn providerFor(self: *const Router, authority: semantic.handle.Authority) Error!fs.service.Provider {
@@ -135,6 +133,20 @@ pub const Router = struct {
     fn checkRoot(self: *Router, root: contract.Root) Error!fs.service.Provider {
         if (root.generation == 0) return error.InvalidHandle;
         return self.providerFor(root.authority);
+    }
+
+    /// Route a durable lease by its provider authority, not by the liveness
+    /// of the root that happened to mint it. A root is a scoped namespace
+    /// address and may be closed immediately after capture; the provider owns
+    /// the lease materialization and decides whether its opaque slot remains
+    /// live. The envelope checks stay here so a lease cannot cross authorities
+    /// before reaching provider policy.
+    fn checkLease(self: *Router, source: contract.LeaseSource) Error!fs.service.Provider {
+        if (source.root.generation == 0 or
+            source.ref.generation == 0 or
+            source.ref.authority != source.root.authority)
+            return error.InvalidHandle;
+        return self.providerFor(source.root.authority);
     }
 
     fn checkEntry(root: contract.Root, entry: contract.EntryRef) Error!void {
@@ -156,10 +168,7 @@ pub const Router = struct {
                 return provider;
             },
             .lease => |lease| {
-                const provider = try self.checkRoot(lease.root);
-                if (lease.ref.generation == 0 or lease.ref.authority != lease.root.authority)
-                    return error.InvalidHandle;
-                return provider;
+                return self.checkLease(lease);
             },
         };
     }
@@ -229,9 +238,7 @@ pub const Router = struct {
     /// stale/released lease is harmless, while a live lease is made unusable
     /// before its backing storage is reclaimed by the provider.
     pub fn release(self: *Router, source: contract.LeaseSource) Error!void {
-        const provider = try self.checkRoot(source.root);
-        if (source.ref.generation == 0 or source.ref.authority != source.root.authority)
-            return error.InvalidHandle;
+        const provider = try self.checkLease(source);
         provider.releaseLease(source);
     }
 
@@ -328,6 +335,8 @@ const TestProvider = struct {
     observe_calls: usize = 0,
     list_calls: usize = 0,
     read_calls: usize = 0,
+    release_calls: usize = 0,
+    source_root_closed: bool = false,
     apply_calls: usize = 0,
     watch_calls: usize = 0,
     poll_calls: usize = 0,
@@ -373,7 +382,13 @@ const TestProvider = struct {
 
     pub fn read(self: *TestProvider, gpa: std.mem.Allocator, request: contract.ReadRequest) contract.Error!contract.OwnedReadResult {
         const source_authority = switch (request.source) {
-            .entry => |entry| entry.root.authority,
+            .entry => |entry| blk: {
+                if (self.source_root_closed) return error.Stale;
+                break :blk entry.root.authority;
+            },
+            // A provider-owned lease remains usable after the source root is
+            // closed. The router must therefore route this by authority and
+            // leave root/lease-slot liveness to the provider.
             .lease => |lease| lease.root.authority,
         };
         if (source_authority != self.authority) return error.Confined;
@@ -388,7 +403,9 @@ const TestProvider = struct {
         return .{ .authority = self.authority, .slot = 7, .generation = 1 };
     }
 
-    pub fn releaseLease(_: *TestProvider, _: contract.LeaseSource) void {}
+    pub fn releaseLease(self: *TestProvider, _: contract.LeaseSource) void {
+        self.release_calls += 1;
+    }
 
     pub fn apply(self: *TestProvider, gpa: std.mem.Allocator, effect_plan: contract.Plan) contract.Error!contract.OwnedApplyReport {
         if (effect_plan.root.authority != self.authority) return error.Confined;
@@ -443,6 +460,38 @@ test "routes local, remote, and synthetic authorities" {
     try std.testing.expectEqual(@as(usize, 1), remote.observe_calls);
     try std.testing.expectEqual(@as(usize, 1), remote.read_calls);
     try std.testing.expectEqual(@as(usize, 1), synthetic.list_calls);
+}
+
+test "leases route by provider authority after their source root closes" {
+    var local = TestProvider{ .authority = .here };
+    var router = Router.init(std.testing.allocator);
+    defer router.deinit();
+    try router.register(.here, local.asProvider());
+
+    const root = makeRoot(.here);
+    const lease = try router.capture(.{ .root = root, .ref = makeEntry(.here), .revision = .{ .token = &.{} } });
+
+    // Closing the namespace invalidates ordinary entry operations, but does
+    // not revoke the provider-owned materialization represented by `lease`.
+    // The state boundary is owned by the concrete provider, while the router
+    // only sees the authority.
+    local.source_root_closed = true;
+    try std.testing.expectError(error.Stale, router.read(std.testing.allocator, .{ .source = .{ .entry = .{
+        .root = root,
+        .ref = makeEntry(.here),
+        .revision = .{ .token = &.{} },
+    } } }));
+    var read_result = try router.read(std.testing.allocator, .{ .source = .{ .lease = lease } });
+    read_result.deinit();
+    try router.release(lease);
+    try std.testing.expectEqual(@as(usize, 1), local.read_calls);
+    try std.testing.expectEqual(@as(usize, 1), local.release_calls);
+
+    // A lease reference from another authority is not allowed to reach a
+    // provider, even though its shape is otherwise valid.
+    const forged = contract.LeaseSource{ .root = root, .ref = .{ .authority = @enumFromInt(10), .slot = 7, .generation = 1 } };
+    try std.testing.expectError(error.InvalidHandle, router.validateLease(forged));
+    try std.testing.expectError(error.InvalidHandle, router.release(forged));
 }
 
 test "unregister rejects stale and unknown authorities" {
