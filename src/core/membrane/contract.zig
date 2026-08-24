@@ -492,6 +492,7 @@ const head_gated_list = [_][]const u8{
     "wl_echo", // dispatch.zig hEcho
     "wl_pick_end", // pick.zig hPickEnd
     "wl_open_file_pick", // pick.zig hOpenFilePick
+    "wl_semantic_working_target", // semantic.zig hSemanticWorkingTarget
     "wl_semantic_view_focus", // semantic.zig hSemanticViewFocus
     "wl_semantic_interaction_open", // semantic.zig hSemanticInteractionOpen
     "wl_semantic_interaction_close", // semantic.zig hSemanticInteractionClose
