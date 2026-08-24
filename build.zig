@@ -25,6 +25,7 @@ const ArchitectureModules = struct {
     kernel: *std.Build.Module,
     scene_codec: *std.Build.Module,
     fs: *std.Build.Module,
+    fs_runtime: *std.Build.Module,
     view_runtime: *std.Build.Module,
     target_runtime: *std.Build.Module,
 };
@@ -64,6 +65,13 @@ fn createArchitectureModules(
         .optimize = optimize,
     });
     fs.addImport("weft_kernel", kernel);
+    const fs_runtime = b.createModule(.{
+        .root_source_file = b.path("src/fs_runtime/root.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    fs_runtime.addImport("weft_kernel", kernel);
+    fs_runtime.addImport("weft_fs", fs);
     const view_runtime = b.createModule(.{
         .root_source_file = b.path("src/view_runtime/root.zig"),
         .target = target,
@@ -82,6 +90,7 @@ fn createArchitectureModules(
         .kernel = kernel,
         .scene_codec = scene_codec,
         .fs = fs,
+        .fs_runtime = fs_runtime,
         .view_runtime = view_runtime,
         .target_runtime = target_runtime,
     };
@@ -93,6 +102,7 @@ fn addArchitectureImports(mod: *std.Build.Module, architecture: ArchitectureModu
     mod.addImport("weft_kernel", architecture.kernel);
     mod.addImport("weft_scene_codec", architecture.scene_codec);
     mod.addImport("weft_fs", architecture.fs);
+    mod.addImport("weft_fs_runtime", architecture.fs_runtime);
     mod.addImport("weft_view_runtime", architecture.view_runtime);
     mod.addImport("weft_target_runtime", architecture.target_runtime);
 }
@@ -344,7 +354,7 @@ pub fn build(b: *std.Build) void {
     // Portable contract gate: deliberately separate from the application
     // suite so these roots cannot acquire app/platform dependencies unnoticed.
     const contract_step = b.step("test-contract", "Run portable schema/kernel/filesystem contract tests");
-    inline for (.{ architecture.wire, architecture.schema, architecture.kernel, architecture.scene_codec, architecture.fs, architecture.view_runtime, architecture.target_runtime }) |contract_mod| {
+    inline for (.{ architecture.wire, architecture.schema, architecture.kernel, architecture.scene_codec, architecture.fs, architecture.fs_runtime, architecture.view_runtime, architecture.target_runtime }) |contract_mod| {
         const contract_tests = b.addTest(.{ .root_module = contract_mod });
         const run_contract_tests = b.addRunArtifact(contract_tests);
         contract_step.dependOn(&run_contract_tests.step);
@@ -373,6 +383,12 @@ pub fn build(b: *std.Build) void {
     const run_dired_model_tests = b.addRunArtifact(dired_model_tests);
     const dired_model_step = b.step("test-dired-model", "Run the pure dired draft/reconcile model tests");
     dired_model_step.dependOn(&run_dired_model_tests.step);
+
+    const fs_runtime_tests = b.addTest(.{ .root_module = architecture.fs_runtime });
+    const run_fs_runtime_tests = b.addRunArtifact(fs_runtime_tests);
+    const fs_runtime_step = b.step("test-fs-runtime", "Run filesystem provider routing tests");
+    fs_runtime_step.dependOn(&run_fs_runtime_tests.step);
+    contract_step.dependOn(&run_fs_runtime_tests.step);
 
     // The `weft` module owns the core/gfx/app files, so its own unit tests run in
     // a second test binary; the `test` step runs both. The two binaries run as
