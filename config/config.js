@@ -264,9 +264,9 @@ weft.bind("normal", "SPC h h", "pick-commands");
 weft.bind("normal", "SPC t w", "trim-trailing-buffer");
 weft.bind("normal", "SPC t c", "comment-line");
 
-// SPC v — generic structured-view controls. These commands address the
-// semantic focus/action protocol, so the same bindings work for a directory
-// view, a picker, or any other plugin-owned scene that advertises them.
+// SPC v — generic structured-view controls. Movement remains an ordinary
+// input command; every operation below names the exact open semantic action
+// advertised by a directory view, picker, or any other plugin-owned scene.
 //
 // Keep the declaration data-shaped: adding another generic view action is one
 // entry here, and a plugin never needs to know which tool/config supplied the
@@ -283,19 +283,19 @@ function bindActionGroup(mode, prefix, bindings) {
   }
 }
 
+weft.bind("normal", "SPC v j", "cursor-down");
+weft.bind("normal", "SPC v k", "cursor-up");
 bindActionGroup("normal", "SPC v", [
-  ["j", "cursor-down"],
-  ["k", "cursor-up"],
-  ["o", "target-open-focused"],
-  ["e", "field-edit"],
-  ["y", "selection-copy"],
-  ["x", "selection-cut"],
-  ["d", "selection-delete"],
-  ["p", "selection-paste-after"],
-  ["P", "selection-paste-before"],
-  ["r", "view-refresh"],
-  ["R", "view-revert"],
-  ["a", "view-apply"],
+  ["o", "target.open"],
+  ["e", "field.edit"],
+  ["y", "selection.copy"],
+  ["x", "selection.cut"],
+  ["d", "selection.delete"],
+  ["p", "selection.paste-after"],
+  ["P", "selection.paste-before"],
+  ["r", "view.refresh"],
+  ["R", "view.revert"],
+  ["a", "view.apply"],
 ]);
 
 // Numbers: vim-style increment/decrement.

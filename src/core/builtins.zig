@@ -69,6 +69,14 @@ pub fn registerSemanticAction(
 fn semanticActionTrampoline(ctx: *Context, data: ?*anyopaque, args: []const Value) anyerror!Value {
     _ = args;
     const target: *@import("semantic.zig").Services.SemanticCommand = @ptrCast(@alignCast(data.?));
+    // These two standard actions have useful generic fallbacks when a scene
+    // publishes a target link or an editable field but its provider does not
+    // need custom behavior. The action names remain the public config surface;
+    // neither fallback knows which plugin authored the scene.
+    if (std.mem.eql(u8, target.name, semantic_model.action.standard.open))
+        return cTargetOpenFocused(ctx, .{});
+    if (std.mem.eql(u8, target.name, semantic_model.action.standard.edit))
+        return cFieldEdit(ctx, .{});
     return invokeSemanticAction(ctx, target.name);
 }
 

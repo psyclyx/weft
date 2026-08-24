@@ -244,19 +244,19 @@ function bindActionGroup(mode, prefix, bindings) {
   }
 }
 
+weft.bind("normal", "SPC v j", "cursor-down");
+weft.bind("normal", "SPC v k", "cursor-up");
 bindActionGroup("normal", "SPC v", [
-  ["j", "cursor-down"],
-  ["k", "cursor-up"],
-  ["o", "target-open-focused"],
-  ["e", "field-edit"],
-  ["y", "selection-copy"],
-  ["x", "selection-cut"],
-  ["d", "selection-delete"],
-  ["p", "selection-paste-after"],
-  ["P", "selection-paste-before"],
-  ["r", "view-refresh"],
-  ["R", "view-revert"],
-  ["a", "view-apply"],
+  ["o", "target.open"],
+  ["e", "field.edit"],
+  ["y", "selection.copy"],
+  ["x", "selection.cut"],
+  ["d", "selection.delete"],
+  ["p", "selection.paste-after"],
+  ["P", "selection.paste-before"],
+  ["r", "view.refresh"],
+  ["R", "view.revert"],
+  ["a", "view.apply"],
 ]);
 
 weft.bind("normal", "C-a", "increment-number");

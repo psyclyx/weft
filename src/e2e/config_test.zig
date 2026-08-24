@@ -231,16 +231,16 @@ test "e2e/config: the sample config boots; SPC g i is discoverable via which-key
     ed.press("SPC", "");
     ed.press("v", "");
     try t.expectEqualStrings("space v", ed.head.pending);
-    try t.expect(whichKeyShows(&ed, "field-edit"));
-    try t.expect(whichKeyShows(&ed, "selection-copy"));
-    try t.expect(whichKeyShows(&ed, "selection-cut"));
-    try t.expect(whichKeyShows(&ed, "selection-delete"));
-    try t.expect(whichKeyShows(&ed, "selection-paste-before"));
-    try t.expect(whichKeyShows(&ed, "selection-paste-after"));
-    try t.expect(whichKeyShows(&ed, "target-open-focused"));
-    try t.expect(whichKeyShows(&ed, "view-refresh"));
-    try t.expect(whichKeyShows(&ed, "view-revert"));
-    try t.expect(whichKeyShows(&ed, "view-apply"));
+    try t.expect(whichKeyShows(&ed, semantic.action.standard.edit));
+    try t.expect(whichKeyShows(&ed, semantic.action.standard.copy));
+    try t.expect(whichKeyShows(&ed, semantic.action.standard.cut));
+    try t.expect(whichKeyShows(&ed, semantic.action.standard.delete));
+    try t.expect(whichKeyShows(&ed, semantic.action.standard.paste_before));
+    try t.expect(whichKeyShows(&ed, semantic.action.standard.paste_after));
+    try t.expect(whichKeyShows(&ed, semantic.action.standard.open));
+    try t.expect(whichKeyShows(&ed, semantic.action.standard.refresh));
+    try t.expect(whichKeyShows(&ed, semantic.action.standard.revert));
+    try t.expect(whichKeyShows(&ed, semantic.action.standard.apply));
     ed.press("Escape", "");
 
     // Assert the complete config surface directly, including the cursor
@@ -250,16 +250,16 @@ test "e2e/config: the sample config boots; SPC g i is discoverable via which-key
     const structured_view_bindings = [_]struct { sequence: []const u8, command: []const u8 }{
         .{ .sequence = "space v j", .command = "cursor-down" },
         .{ .sequence = "space v k", .command = "cursor-up" },
-        .{ .sequence = "space v o", .command = "target-open-focused" },
-        .{ .sequence = "space v e", .command = "field-edit" },
-        .{ .sequence = "space v y", .command = "selection-copy" },
-        .{ .sequence = "space v x", .command = "selection-cut" },
-        .{ .sequence = "space v d", .command = "selection-delete" },
-        .{ .sequence = "space v p", .command = "selection-paste-after" },
-        .{ .sequence = "space v P", .command = "selection-paste-before" },
-        .{ .sequence = "space v r", .command = "view-refresh" },
-        .{ .sequence = "space v R", .command = "view-revert" },
-        .{ .sequence = "space v a", .command = "view-apply" },
+        .{ .sequence = "space v o", .command = semantic.action.standard.open },
+        .{ .sequence = "space v e", .command = semantic.action.standard.edit },
+        .{ .sequence = "space v y", .command = semantic.action.standard.copy },
+        .{ .sequence = "space v x", .command = semantic.action.standard.cut },
+        .{ .sequence = "space v d", .command = semantic.action.standard.delete },
+        .{ .sequence = "space v p", .command = semantic.action.standard.paste_after },
+        .{ .sequence = "space v P", .command = semantic.action.standard.paste_before },
+        .{ .sequence = "space v r", .command = semantic.action.standard.refresh },
+        .{ .sequence = "space v R", .command = semantic.action.standard.revert },
+        .{ .sequence = "space v a", .command = semantic.action.standard.apply },
     };
     for (structured_view_bindings) |binding| {
         try t.expectEqualStrings(binding.command, ed.keymap.resolveExact("normal", binding.sequence).?);
