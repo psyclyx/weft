@@ -107,6 +107,7 @@ pub const Fake = struct {
     }
 
     pub fn sameRoot(self: *Fake, left: contract.Root, right: contract.Root) contract.Error!bool {
+        _ = self;
         try validateRoot(left);
         try validateRoot(right);
         return left.eql(right);

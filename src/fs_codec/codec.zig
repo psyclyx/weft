@@ -49,6 +49,18 @@ pub const OwnedListing = Owned(c.Listing);
 pub const OwnedPlan = Owned(c.Plan);
 pub const OwnedApplyReport = Owned(c.ApplyReport);
 
+/// A request to turn one observed direct child directory into an independently
+/// confined semantic target. The parent target is the authority-bearing
+/// capability; the entry handle and opaque revision are only guarded
+/// identifiers within that authority.
+pub const ChildDirectory = struct {
+    parent: semantic.target.Located,
+    entry: c.EntryRef,
+    revision: c.Revision,
+};
+
+pub const OwnedChildDirectory = Owned(ChildDirectory);
+
 const Writer = struct {
     bytes: std.ArrayList(u8) = .empty,
     gpa: std.mem.Allocator,
@@ -203,6 +215,7 @@ const magic = "WFS";
 const listing_kind: u8 = 1;
 const plan_kind: u8 = 2;
 const report_kind: u8 = 3;
+const child_directory_kind: u8 = 4;
 
 fn header(w: *Writer, kind: u8) Error!void {
     try w.append(magic);
@@ -640,6 +653,44 @@ pub fn decodeListing(gpa: std.mem.Allocator, bytes: []const u8) Error!OwnedListi
     return owned;
 }
 
+/// Encode the minimum immutable evidence needed to derive a child directory
+/// target. Names deliberately do not cross this request: the authority
+/// provider re-reads the direct child and supplies its current raw name.
+pub fn encodeChildDirectory(gpa: std.mem.Allocator, request: ChildDirectory) Error![]u8 {
+    if (request.parent.revision == 0) return error.InvalidData;
+    switch (request.parent.location) {
+        .whole => {},
+        else => return error.InvalidData,
+    }
+    var w = Writer.init(gpa);
+    defer w.deinit();
+    try header(&w, child_directory_kind);
+    try writeHandle(&w, request.parent.target);
+    try w.writeU64(request.parent.revision);
+    try writeHandle(&w, request.entry);
+    try writeRevision(&w, request.revision);
+    return try w.finish();
+}
+
+pub fn decodeChildDirectory(gpa: std.mem.Allocator, bytes: []const u8) Error!OwnedChildDirectory {
+    var owned = OwnedChildDirectory.init(gpa);
+    errdefer owned.deinit();
+    var r = try Reader.init(bytes);
+    try checkHeader(&r, child_directory_kind);
+    const parent = try readHandle(semantic.target.Ref, &r);
+    const parent_revision = try r.readU64();
+    if (parent_revision == 0) return error.InvalidData;
+    const entry = try readHandle(c.EntryRef, &r);
+    const revision = try readRevision(&r, owned.allocator());
+    try r.done();
+    owned.value = .{
+        .parent = .{ .target = parent, .revision = parent_revision },
+        .entry = entry,
+        .revision = revision,
+    };
+    return owned;
+}
+
 pub fn encodePlan(gpa: std.mem.Allocator, plan: c.Plan) Error![]u8 {
     var w = Writer.init(gpa);
     defer w.deinit();
@@ -719,6 +770,34 @@ test "filesystem codec round trips every listing value, raw bytes, metadata, and
     var decoded = try decodeListing(std.testing.allocator, bytes);
     defer decoded.deinit();
     try std.testing.expectEqualDeep(input, decoded.value);
+}
+
+test "filesystem codec round trips guarded child directory requests" {
+    const h = testHandles();
+    const input: ChildDirectory = .{
+        .parent = .{
+            .target = .{ .authority = @enumFromInt(31), .slot = 37, .generation = 41 },
+            .revision = 43,
+        },
+        .entry = h.entry,
+        .revision = .{ .token = &[_]u8{ 0, 0xff, 7 } },
+    };
+    const bytes = try encodeChildDirectory(std.testing.allocator, input);
+    defer std.testing.allocator.free(bytes);
+    var decoded = try decodeChildDirectory(std.testing.allocator, bytes);
+    defer decoded.deinit();
+    try std.testing.expectEqualDeep(input, decoded.value);
+
+    var trailing = try std.testing.allocator.alloc(u8, bytes.len + 1);
+    defer std.testing.allocator.free(trailing);
+    @memcpy(trailing[0..bytes.len], bytes);
+    trailing[bytes.len] = 1;
+    try std.testing.expectError(error.Corrupt, decodeChildDirectory(std.testing.allocator, trailing));
+    try std.testing.expectError(error.InvalidData, encodeChildDirectory(std.testing.allocator, .{
+        .parent = .{ .target = input.parent.target, .revision = 0 },
+        .entry = input.entry,
+        .revision = input.revision,
+    }));
 }
 
 test "filesystem codec round trips every operation and source variant" {
