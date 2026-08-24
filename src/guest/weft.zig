@@ -158,6 +158,8 @@ extern "weft" fn wl_yank_range(start: u32, end: u32, linewise: u32) void;
 extern "weft" fn wl_register_text(out_ptr: u32, out_cap: u32) u32;
 extern "weft" fn wl_register_linewise() u32;
 extern "weft" fn wl_paste_at(base: u32) void;
+extern "weft" fn wl_semantic_active() u32;
+extern "weft" fn wl_semantic_action(action: u32, action_len: u32) i32;
 extern "weft" fn wl_shell_insert(ptr: u32, len: u32) void;
 extern "weft" fn wl_repl_start(cmd: u32, cmd_len: u32, name: u32, name_len: u32) i32;
 extern "weft" fn wl_repl_send(handle: u32, ptr: u32, len: u32) void;
@@ -201,7 +203,7 @@ fn ZigType(comptime v: contract_data.ValType) type {
 // compile time, pointing at the offending name, instead of silently
 // desyncing the guest and host halves of the membrane again.
 comptime {
-    @setEvalBranchQuota(50_000); // n≈124 entries, each doing a small const-eval
+    @setEvalBranchQuota(50_000); // n≈130 entries, each doing a small const-eval
     for (contract_data.imports) |entry| {
         const Fn = @typeInfo(@TypeOf(@field(@This(), entry.name))).@"fn";
         if (Fn.params.len != entry.params.len) @compileError(std.fmt.comptimePrint(
@@ -981,6 +983,27 @@ pub fn registerLinewise() bool {
 /// a plain insert with no call — or a register with no payloads — creates none.
 pub fn pasteAt(base: usize) void {
     wl_paste_at(@intCast(base));
+}
+
+// ── Generic semantic views ────────────────────────────────────────────
+/// Whether the dispatching head currently focuses a live semantic view.
+/// Editor plugins use this to translate their normal interaction model into
+/// open actions; no tool identity or mode crosses this boundary.
+pub fn semanticActive() bool {
+    return wl_semantic_active() != 0;
+}
+
+pub const SemanticActionResult = enum(i32) {
+    unavailable = 0,
+    handled = 1,
+    transfer_stored = 2,
+    interaction_opened = 3,
+    failed = -1,
+    _,
+};
+
+pub fn semanticAction(action: []const u8) SemanticActionResult {
+    return @enumFromInt(wl_semantic_action(p(action.ptr), @intCast(action.len)));
 }
 
 // ── Effects (perm-gated) ─────────────────────────────────────────────

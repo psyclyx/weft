@@ -121,6 +121,45 @@ pub const Services = struct {
         return effect;
     }
 
+    /// Invoke an action against the deepest node on the active focus path that
+    /// advertises it. Tool projections can therefore keep behavior on a row
+    /// container while the editable field inside that row owns keyboard focus.
+    /// `null` means there is no live semantic view on this head.
+    pub fn invokeFocusedAction(
+        self: *Services,
+        stack: *view_runtime.interaction.Stack,
+        head: *Head,
+        gpa: std.mem.Allocator,
+        action: []const u8,
+    ) InvokeActionError!?ActionEffect {
+        const path = head.semantic_focus.path() orelse return null;
+        const instance = self.views.get(path.view) orelse {
+            head.semantic_focus.clear();
+            return null;
+        };
+        var index = path.nodes.len;
+        while (index > 0) {
+            index -= 1;
+            const node = instance.node(path.nodes[index]) orelse continue;
+            for (node.actions) |candidate| {
+                if (!std.mem.eql(u8, candidate.id, action)) continue;
+                return try self.invokeAction(stack, gpa, .{
+                    .action = action,
+                    .view = path.view,
+                    .subject = node.id,
+                });
+            }
+        }
+        return error.ActionUnavailable;
+    }
+
+    pub fn hasActiveView(self: *const Services, head: *const Head) bool {
+        const path = head.semantic_focus.path() orelse return false;
+        const instance = self.views.get(path.view) orelse return false;
+        const leaf = path.leaf() orelse return false;
+        return instance.node(leaf) != null;
+    }
+
     /// Compose two otherwise-independent mechanisms at their one real
     /// invariant: an interaction root must name a node in its declared view.
     pub fn openInteraction(
@@ -387,8 +426,18 @@ test "ordinary editor input targets semantic fields and focus order" {
     };
     const view_ref = try services.views.publish(std.testing.allocator, "tool", null, 1, .{
         .id = @enumFromInt(1),
+        .actions = &.{.{ .id = kernel.action.standard.copy }},
         .content = .{ .container = .{ .children = &children } },
     });
+    const Actions = struct {
+        calls: usize = 0,
+        pub fn invoke(self: *@This(), _: kernel.action.Request) view_runtime.action.ProviderError!kernel.action.Outcome {
+            self.calls += 1;
+            return .handled;
+        }
+    };
+    var actions: Actions = .{};
+    try services.actions.register(std.testing.allocator, "tool", .init(&actions));
     var head: Head = .empty;
     defer head.deinit(std.testing.allocator);
     try head.semantic_focus.set(std.testing.allocator, .{ .view = view_ref, .nodes = &.{ @enumFromInt(1), @enumFromInt(2) }, .field = first_ref });
@@ -398,6 +447,8 @@ test "ordinary editor input targets semantic fields and focus order" {
     try std.testing.expect(try services.moveHeadFocus(&head, std.testing.allocator, .next));
     try std.testing.expectEqual(@as(kernel.scene.NodeId, @enumFromInt(3)), head.semantic_focus.path().?.leaf().?);
     try std.testing.expect(head.semantic_focus.path().?.field.?.eql(second_ref));
+    try std.testing.expect((try services.invokeFocusedAction(&head.interactions, &head, std.testing.allocator, kernel.action.standard.copy)).? == .handled);
+    try std.testing.expectEqual(@as(usize, 1), actions.calls);
 
     // A single-line field consumes a newline without changing its bytes.
     try std.testing.expect(try services.inputFocusedField(&head, std.testing.allocator, .{ .replace_selection = "\n" }));

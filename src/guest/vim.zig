@@ -721,12 +721,27 @@ fn changeLine() void {
 }
 
 // ── Register + paste ─────────────────────────────────────────────────
+fn semanticDid(action: []const u8) bool {
+    return switch (weft.semanticAction(action)) {
+        .handled, .transfer_stored, .interaction_opened => true,
+        .unavailable, .failed, _ => false,
+    };
+}
+
 fn yankLine() void {
+    if (weft.semanticActive()) {
+        _ = semanticDid("selection.copy");
+        return;
+    }
     const l = weft.lineAt(weft.cursor());
     weft.yankRange(l.start, l.end, true);
     weft.flash(l.start, l.end); // vim-goggles
 }
 fn paste() void {
+    if (weft.semanticActive()) {
+        _ = semanticDid("selection.paste-after");
+        return;
+    }
     if (weft.registerLinewise()) {
         const l = weft.lineAt(weft.cursor());
         const r = weft.registerText();
@@ -744,6 +759,10 @@ fn paste() void {
     }
 }
 fn pasteBefore() void {
+    if (weft.semanticActive()) {
+        _ = semanticDid("selection.paste-before");
+        return;
+    }
     if (weft.registerLinewise()) {
         const l = weft.lineAt(weft.cursor());
         const r = weft.registerText();
@@ -830,6 +849,16 @@ fn opCancel() void {
 }
 /// dd / cc / yy — linewise. The operator char repeated (bound in op-pending).
 fn opLine() void {
+    if (weft.semanticActive()) {
+        if (op_copies) _ = semanticDid("selection.copy");
+        const semantic_edit = op_edit_cmd orelse {
+            weft.setMode("normal");
+            return;
+        };
+        if (std.mem.eql(u8, semantic_edit, "op.delete")) _ = semanticDid("selection.delete");
+        weft.setMode(op_after);
+        return;
+    }
     const l = weft.lineAt(weft.cursor());
     if (op_copies) weft.yankRange(l.start, l.end, true);
     const edit = op_edit_cmd orelse {
