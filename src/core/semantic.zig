@@ -552,6 +552,7 @@ pub const Services = struct {
         const action = active.actionForInput(input) orelse return null;
         const interaction_ref = active.descriptor.ref;
         const disposition = action.disposition;
+        const prior_focus = head.semantic_focus.path();
         const effect = self.invokeInteractionAction(stack, gpa, .{
             .action = action.id,
             .view = active.descriptor.view,
@@ -566,7 +567,7 @@ pub const Services = struct {
             },
             else => return err,
         };
-        try self.applyActionFocus(head, gpa, effect);
+        try self.applyActionFocus(head, gpa, prior_focus, effect);
         if (disposition == .close_on_handled) switch (effect) {
             .handled, .transfer_stored, .target_opened, .focus_requested => try stack.close(gpa, interaction_ref),
             .declined, .interaction_opened => {},
@@ -607,22 +608,39 @@ pub const Services = struct {
             const node = instance.node(path.nodes[index]) orelse continue;
             for (node.actions) |candidate| {
                 if (!std.mem.eql(u8, candidate.id, action)) continue;
+                const prior_focus = head.semantic_focus.path();
                 const effect = try self.invokeAction(stack, gpa, .{
                     .action = action,
                     .view = path.view,
                     .subject = node.id,
                 });
-                try self.applyActionFocus(head, gpa, effect);
+                try self.applyActionFocus(head, gpa, prior_focus, effect);
                 return effect;
             }
         }
         return error.ActionUnavailable;
     }
 
-    fn applyActionFocus(self: *const Services, head: *Head, gpa: std.mem.Allocator, effect: ActionEffect) FocusError!void {
+    fn applyActionFocus(
+        self: *const Services,
+        head: *Head,
+        gpa: std.mem.Allocator,
+        prior_focus: ?semantic.focus.Path,
+        effect: ActionEffect,
+    ) FocusError!void {
         switch (effect) {
             .target_opened => |view| _ = try self.focusView(head, gpa, view, null),
-            .focus_requested => |focus| _ = try self.focusView(head, gpa, focus.view, focus.node),
+            .focus_requested => |focus| {
+                const anchor = if (prior_focus) |path|
+                    if (path.view.eql(focus.view))
+                        head.semantic_focus.navigation_anchor orelse path.leaf()
+                    else
+                        null
+                else
+                    null;
+                _ = try self.focusView(head, gpa, focus.view, focus.node);
+                if (anchor) |node| head.semantic_focus.setNavigationAnchor(node);
+            },
             else => {},
         }
     }
@@ -676,7 +694,12 @@ pub const Services = struct {
             head.semantic_focus.clear();
             return false;
         };
-        const next = instance.move(path.leaf(), movement) orelse return true;
+        const current = head.semantic_focus.navigation_anchor orelse path.leaf();
+        // The anchor is a one-shot override for this movement intent. A
+        // failed edge movement must not make later movement reinterpret the
+        // still-focused secondary node as the row anchor.
+        head.semantic_focus.setNavigationAnchor(null);
+        const next = instance.move(current, movement) orelse return true;
         var storage: [1026]semantic.scene.NodeId = undefined;
         const next_path = (try instance.focusPath(next, &storage)) orelse return true;
         try head.semantic_focus.set(gpa, next_path);
@@ -916,25 +939,56 @@ test "semantic action focus stays inside its retained view" {
             return .{ .focus = self.target };
         }
     };
+    const Field = struct {
+        edits: usize = 0,
+
+        pub fn snapshot(_: *@This(), gpa: std.mem.Allocator) view_runtime.field.Error!view_runtime.field.OwnedSnapshot {
+            var owned = view_runtime.field.OwnedSnapshot.init(gpa);
+            owned.value = .{
+                .revision = "1",
+                .bytes = "old",
+                .selection = .{ .anchor = 0, .caret = 3 },
+                .single_line = true,
+            };
+            return owned;
+        }
+
+        pub fn edit(self: *@This(), expected: []const u8, _: view_runtime.field.Edit) view_runtime.field.Error!void {
+            if (!std.mem.eql(u8, expected, "1")) return error.Stale;
+            self.edits += 1;
+        }
+    };
 
     var services = Services.init(.here);
     defer services.deinit(std.testing.allocator);
     const owner = try services.acquireOwner();
-    const row: semantic.scene.Node = .{
+    var field: Field = .{};
+    const field_ref = try services.insertField(std.testing.allocator, owner, .init(&field));
+    const first: semantic.scene.Node = .{
         .id = @enumFromInt(2),
+        .focusable = true,
+        .content = .{ .label = "first" },
+    };
+    const row: semantic.scene.Node = .{
+        .id = @enumFromInt(3),
         .focusable = true,
         .actions = &.{.{ .id = "field.secondary" }},
         .content = .{ .label = "row" },
     };
     const secondary: semantic.scene.Node = .{
-        .id = @enumFromInt(3),
+        .id = @enumFromInt(4),
         // Secondary nodes need not participate in ordinary row traversal.
         .focusable = false,
-        .content = .{ .label = "secondary field" },
+        .content = .{ .field = .{ .ref = field_ref, .single_line = true } },
+    };
+    const last: semantic.scene.Node = .{
+        .id = @enumFromInt(5),
+        .focusable = true,
+        .content = .{ .label = "last" },
     };
     const view_ref = try services.publishView(std.testing.allocator, owner, null, 1, .{
         .id = @enumFromInt(1),
-        .content = .{ .container = .{ .children = &.{ row, secondary } } },
+        .content = .{ .container = .{ .children = &.{ first, row, secondary, last } } },
     });
     var provider: Provider = .{ .target = secondary.id };
     try services.registerActionProvider(std.testing.allocator, owner, .init(&provider));
@@ -945,6 +999,18 @@ test "semantic action focus stays inside its retained view" {
     const effect = (try services.invokeFocusedAction(&head.interactions, &head, std.testing.allocator, "field.secondary")).?;
     try std.testing.expect(effect == .focus_requested);
     try std.testing.expectEqual(secondary.id, head.semantic_focus.path().?.leaf().?);
+    try std.testing.expect(head.semantic_focus.path().?.field.?.eql(field_ref));
+    try std.testing.expect(try services.inputFocusedField(&head, std.testing.allocator, .{ .replace_selection = "new" }));
+    try std.testing.expectEqual(@as(usize, 1), field.edits);
+    try std.testing.expect(try services.moveHeadFocus(&head, std.testing.allocator, .next));
+    try std.testing.expectEqual(last.id, head.semantic_focus.path().?.leaf().?);
+
+    // Re-enter the secondary field from the middle row and move backwards:
+    // the one-shot anchor is the row, not the non-focusable field node.
+    _ = try services.focusView(&head, std.testing.allocator, view_ref, row.id);
+    _ = try services.invokeFocusedAction(&head.interactions, &head, std.testing.allocator, "field.secondary");
+    try std.testing.expect(try services.moveHeadFocus(&head, std.testing.allocator, .previous));
+    try std.testing.expectEqual(first.id, head.semantic_focus.path().?.leaf().?);
 
     provider.target = @enumFromInt(99);
     try std.testing.expectError(error.UnknownFocusTarget, services.invokeAction(&head.interactions, std.testing.allocator, .{
@@ -952,7 +1018,7 @@ test "semantic action focus stays inside its retained view" {
         .view = view_ref,
         .subject = row.id,
     }));
-    try std.testing.expectEqual(secondary.id, head.semantic_focus.path().?.leaf().?);
+    try std.testing.expectEqual(first.id, head.semantic_focus.path().?.leaf().?);
 }
 
 test "semantic target relations resolve, stay absent, and reject stale or ambiguous edges" {

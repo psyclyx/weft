@@ -114,6 +114,10 @@ pub const SemanticFocus = struct {
     view: ?semantic.view.Ref = null,
     nodes: std.ArrayList(semantic.scene.NodeId) = .empty,
     field: ?semantic.scene.FieldRef = null,
+    /// A one-shot row anchor used when an action temporarily focuses a
+    /// secondary, non-focusable node in this same view. It is head-local so
+    /// another head can navigate the same view independently.
+    navigation_anchor: ?semantic.scene.NodeId = null,
 
     pub const empty: SemanticFocus = .{};
 
@@ -128,12 +132,18 @@ pub const SemanticFocus = struct {
         self.nodes.appendSliceAssumeCapacity(next.nodes);
         self.view = next.view;
         self.field = next.field;
+        self.navigation_anchor = null;
     }
 
     pub fn clear(self: *SemanticFocus) void {
         self.view = null;
         self.nodes.clearRetainingCapacity();
         self.field = null;
+        self.navigation_anchor = null;
+    }
+
+    pub fn setNavigationAnchor(self: *SemanticFocus, anchor: ?semantic.scene.NodeId) void {
+        self.navigation_anchor = anchor;
     }
 
     pub fn path(self: *const SemanticFocus) ?semantic.focus.Path {
