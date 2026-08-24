@@ -233,18 +233,30 @@ weft.bind("normal", "SPC t c", "comment-line");
 // SPC v — generic structured-view controls. These commands address the
 // semantic focus/action protocol, so the same bindings work for a directory
 // view, a picker, or any other plugin-owned scene that advertises them.
-weft.bind("normal", "SPC v j", "cursor-down");
-weft.bind("normal", "SPC v k", "cursor-up");
-weft.bind("normal", "SPC v o", "target-open-focused");
-weft.bind("normal", "SPC v e", "field-edit");
-weft.bind("normal", "SPC v y", "selection-copy");
-weft.bind("normal", "SPC v x", "selection-cut");
-weft.bind("normal", "SPC v d", "selection-delete");
-weft.bind("normal", "SPC v p", "selection-paste-after");
-weft.bind("normal", "SPC v P", "selection-paste-before");
-weft.bind("normal", "SPC v r", "view-refresh");
-weft.bind("normal", "SPC v R", "view-revert");
-weft.bind("normal", "SPC v a", "view-apply");
+// Keep the declaration data-shaped so plugins can share the surface without
+// knowing which tool or config supplied it. Dialog inputs remain interaction-
+// local and are intentionally not global which-key bindings.
+function bindActionGroup(mode, prefix, bindings) {
+  for (var i = 0; i < bindings.length; i++) {
+    var binding = bindings[i];
+    weft.bind(mode, prefix + " " + binding[0], binding[1]);
+  }
+}
+
+bindActionGroup("normal", "SPC v", [
+  ["j", "cursor-down"],
+  ["k", "cursor-up"],
+  ["o", "target-open-focused"],
+  ["e", "field-edit"],
+  ["y", "selection-copy"],
+  ["x", "selection-cut"],
+  ["d", "selection-delete"],
+  ["p", "selection-paste-after"],
+  ["P", "selection-paste-before"],
+  ["r", "view-refresh"],
+  ["R", "view-revert"],
+  ["a", "view-apply"],
+]);
 
 weft.bind("normal", "C-a", "increment-number");
 weft.bind("normal", "C-x", "decrement-number");

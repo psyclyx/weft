@@ -340,6 +340,11 @@ test "e2e/config: the sample config boots; SPC g i is discoverable via which-key
     try t.expectEqual(@as(usize, 1), actions.reverts);
     try t.expectEqual(@as(usize, 1), actions.applies);
     try t.expectEqualStrings("config-fixture", ed.head.interactions.active().?.descriptor.presentation);
+    // `y` is also Vim's normal-mode operator prefix. The active dialog owns
+    // the input locally, while the global keymap remains untouched; this is
+    // the contract that keeps confirmation out of which-key/global modes.
+    try t.expectEqualStrings("enter-op-yank", ed.keymap.resolveExact("normal", "y").?);
+    try t.expectEqualStrings(semantic.action.standard.confirm, ed.head.interactions.actionForInput("y").?.id);
     ed.press("y", "y");
     try t.expectEqual(@as(usize, 1), actions.confirms);
     try t.expect(ed.head.interactions.active() == null);

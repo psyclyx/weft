@@ -9,6 +9,7 @@
 const std = @import("std");
 const weft = @import("weft");
 const ex_mod = @import("ex.zig");
+const semantic_action = weft.semantic.action.standard;
 
 /// The `:` command line: vim's resting mode is `normal`, its command-line
 /// keymap mode is `ex`. Owns the classic abbreviated ex commands (w/q/s/…) and
@@ -730,7 +731,7 @@ fn semanticDid(action: []const u8) bool {
 
 fn yankLine() void {
     if (weft.semanticActive()) {
-        _ = semanticDid("selection.copy");
+        _ = semanticDid(semantic_action.copy);
         return;
     }
     const l = weft.lineAt(weft.cursor());
@@ -739,7 +740,7 @@ fn yankLine() void {
 }
 fn paste() void {
     if (weft.semanticActive()) {
-        _ = semanticDid("selection.paste-after");
+        _ = semanticDid(semantic_action.paste_after);
         return;
     }
     if (weft.registerLinewise()) {
@@ -760,7 +761,7 @@ fn paste() void {
 }
 fn pasteBefore() void {
     if (weft.semanticActive()) {
-        _ = semanticDid("selection.paste-before");
+        _ = semanticDid(semantic_action.paste_before);
         return;
     }
     if (weft.registerLinewise()) {
@@ -850,12 +851,12 @@ fn opCancel() void {
 /// dd / cc / yy — linewise. The operator char repeated (bound in op-pending).
 fn opLine() void {
     if (weft.semanticActive()) {
-        if (op_copies) _ = semanticDid("selection.copy");
+        if (op_copies) _ = semanticDid(semantic_action.copy);
         const semantic_edit = op_edit_cmd orelse {
             weft.setMode("normal");
             return;
         };
-        if (std.mem.eql(u8, semantic_edit, "op.delete")) _ = semanticDid("selection.delete");
+        if (std.mem.eql(u8, semantic_edit, "op.delete")) _ = semanticDid(semantic_action.delete);
         weft.setMode(op_after);
         return;
     }
