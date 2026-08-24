@@ -1437,6 +1437,144 @@ test "captured transfer keeps old name across source rename or deletion" {
     try std.testing.expectEqualStrings("new", destination.row(pasted_after_delete).?.draft.name);
 }
 
+test "captured entry survives external deletion and same-name replacement" {
+    var model = Model.init(std.testing.allocator, .{ .authority = .here, .slot = 101, .generation = 1 });
+    defer model.deinit();
+    try model.reconcile(.{ .entries = &.{.{
+        .identity = ref(102, 1),
+        .name = "same-name",
+        .revision = "old-revision",
+        .kind = .regular,
+    }} });
+    var item = try model.yank(model.rows.items[0].id, .copy);
+    defer item.deinit();
+
+    // The original object disappears, then a different object takes its name.
+    // The transfer must remain addressed to the captured identity/revision,
+    // rather than being retargeted by visible name during paste or apply.
+    try model.reconcile(.{ .revision = "directory-r2", .entries = &.{} });
+    try model.reconcile(.{ .revision = "directory-r3", .entries = &.{.{
+        .identity = ref(102, 2),
+        .name = "same-name",
+        .revision = "replacement-revision",
+        .kind = .regular,
+    }} });
+    const pasted = try model.paste(null, &item);
+    try std.testing.expectEqualSlices(u8, "same-name", model.row(pasted).?.draft.name);
+
+    var plan = try model.buildPlan();
+    defer plan.deinit();
+    try std.testing.expectEqual(@as(usize, 1), plan.value.operations.len);
+    const copy = plan.value.operations[0].operation.copy;
+    try std.testing.expectEqual(ref(102, 1), copy.source.entry.ref);
+    try std.testing.expectEqualStrings("old-revision", copy.source.entry.revision.token);
+    try std.testing.expectEqualSlices(u8, "same-name", copy.destination.name.bytes);
+}
+
+test "captured copy retains revision guard across external refresh" {
+    var source = Model.init(std.testing.allocator, .{ .authority = .here, .slot = 109, .generation = 1 });
+    defer source.deinit();
+    try source.reconcile(.{ .revision = "directory-r1", .entries = &.{.{
+        .identity = ref(110, 1),
+        .name = "file",
+        .revision = "entry-r1",
+        .kind = .regular,
+    }} });
+    var item = try source.yank(source.rows.items[0].id, .copy);
+    defer item.deinit();
+
+    // The row is clean, so reconciliation accepts the newer observation, but
+    // the already captured transfer must remain guarded by entry-r1. A
+    // provider can then reject that operation atomically if the TOCTOU check
+    // observes the external mutation.
+    try source.reconcile(.{ .revision = "directory-r2", .entries = &.{.{
+        .identity = ref(110, 1),
+        .name = "file",
+        .revision = "entry-r2",
+        .kind = .regular,
+    }} });
+    var destination = Model.init(std.testing.allocator, source.root);
+    defer destination.deinit();
+    _ = try destination.paste(null, &item);
+    var plan = try destination.buildPlan();
+    defer plan.deinit();
+    try std.testing.expectEqualStrings("entry-r1", plan.value.operations[0].operation.copy.source.entry.revision.token);
+    try std.testing.expectEqual(ref(110, 1), plan.value.operations[0].operation.copy.source.entry.ref);
+}
+
+test "symlink copy and source deletion preserve guarded source ordering" {
+    var model = Model.init(std.testing.allocator, .{ .authority = .here, .slot = 103, .generation = 1 });
+    defer model.deinit();
+    try model.reconcile(.{ .entries = &.{.{
+        .identity = ref(104, 1),
+        .name = "link",
+        .revision = "link-r1",
+        .kind = .symlink,
+        .link_target = "target\x80",
+    }} });
+    var item = try model.yank(model.rows.items[0].id, .copy);
+    defer item.deinit();
+    const pasted = try model.paste(null, &item);
+    try model.rename(pasted, "link-copy");
+    try model.markDelete(model.rows.items[0].id);
+
+    try std.testing.expectEqual(contract.Kind.symlink, model.row(pasted).?.draft.kind);
+    var plan = try model.buildPlan();
+    defer plan.deinit();
+    try std.testing.expectEqual(@as(usize, 2), plan.value.operations.len);
+    try std.testing.expectEqual(std.meta.activeTag(plan.value.operations[0].operation), .copy);
+    try std.testing.expectEqual(std.meta.activeTag(plan.value.operations[1].operation), .remove);
+    try std.testing.expectEqual(@as(usize, 1), plan.value.operations[1].depends_on.len);
+    try std.testing.expectEqual(@as(usize, 0), plan.value.operations[1].depends_on[0]);
+    try std.testing.expectEqual(ref(104, 1), plan.value.operations[0].operation.copy.source.entry.ref);
+    try std.testing.expectEqualStrings("link-copy", plan.value.operations[0].operation.copy.destination.name.bytes);
+}
+
+test "raw byte names round-trip through capture, paste, and plan" {
+    const raw_name = [_]u8{ 0x80, 0xfe, '\n', '-', '[', ']' };
+    var source = Model.init(std.testing.allocator, .{ .authority = .here, .slot = 105, .generation = 1 });
+    defer source.deinit();
+    try source.reconcile(.{ .entries = &.{.{
+        .identity = ref(106, 1),
+        .name = &raw_name,
+        .revision = "raw-r1",
+        .kind = .regular,
+    }} });
+    var item = try source.yank(source.rows.items[0].id, .copy);
+    defer item.deinit();
+
+    var destination = Model.init(std.testing.allocator, .{ .authority = .here, .slot = 107, .generation = 1 });
+    defer destination.deinit();
+    const pasted = try destination.paste(null, &item);
+    try std.testing.expectEqualSlices(u8, &raw_name, destination.row(pasted).?.draft.name);
+    var plan = try destination.buildPlan();
+    defer plan.deinit();
+    try std.testing.expectEqualSlices(u8, &raw_name, plan.value.operations[0].operation.copy.destination.name.bytes);
+}
+
+test "deleted pending subtree contributes no source operations after paste" {
+    var model = Model.init(std.testing.allocator, .{ .authority = .here, .slot = 108, .generation = 1 });
+    defer model.deinit();
+    const original = try model.addDirectory(null, "original", null);
+    _ = try model.addFile(original, "leaf", "contents", null);
+    var item = try model.yank(original, .copy);
+    defer item.deinit();
+    try model.markDelete(original);
+    const pasted = try model.paste(null, &item);
+    try std.testing.expectEqual(Pending.added, model.row(pasted).?.pending);
+
+    var plan = try model.buildPlan();
+    defer plan.deinit();
+    // The original pending subtree is only a clipboard source. Its deletion
+    // and descendants are suppressed; only the independent pasted tree is
+    // materialized in the effect plan.
+    try std.testing.expectEqual(@as(usize, 2), plan.value.operations.len);
+    try std.testing.expectEqual(std.meta.activeTag(plan.value.operations[0].operation), .create_directory);
+    try std.testing.expectEqual(std.meta.activeTag(plan.value.operations[1].operation), .create_file);
+    try std.testing.expectEqual(@as(usize, 1), plan.value.operations[1].depends_on.len);
+    try std.testing.expectEqual(@as(usize, 0), plan.value.operations[1].depends_on[0]);
+}
+
 test "empty names retain rows as deletions and typing revives their origin" {
     var dired = Model.init(std.testing.allocator, .{ .authority = .here, .slot = 32, .generation = 1 });
     defer dired.deinit();
