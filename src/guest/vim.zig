@@ -565,7 +565,7 @@ export fn init() void {
         .{ "S-Right", "vim-win-move-right" },
     };
     // Bound in `global` as `C-w <key>` SEQUENCES, so the window prefix works
-    // from EVERY mode (insert, dired, magit, mid-editing) — the same universal
+    // from EVERY mode (insert, structured views, mid-editing) — the same universal
     // reach the old single global `C-w` menu key had, now a real chord. `C-w`
     // alone holds pending; which-key lists these as its completions. `space C-w`
     // is still inert (a distinct chord), never this — global matches only at a
@@ -700,8 +700,8 @@ fn normal() void {
     // barrier; this covers the mode-change boundary a motion doesn't.)
     weft.run("undo-barrier");
     weft.run("clear-selection");
-    // Return to the buffer's RESTING mode: normal for a file, but `dired` for the
-    // dired projection — so its view keys stay live after an in-place edit.
+    // Return to the buffer's declared RESTING mode. Ordinary text buffers land
+    // in Vim's normal mode, while any projection can declare its own posture.
     weft.exitToResting();
 }
 fn deleteEol() void {

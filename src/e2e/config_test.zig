@@ -42,6 +42,7 @@ const napUs = h.napUs;
 
 const ConfigField = struct {
     snapshot_calls: usize = 0,
+    edits: usize = 0,
 
     pub fn snapshot(self: *ConfigField, gpa: std.mem.Allocator) view_runtime.field.Error!view_runtime.field.OwnedSnapshot {
         self.snapshot_calls += 1;
@@ -57,8 +58,8 @@ const ConfigField = struct {
         return owned;
     }
 
-    pub fn edit(_: *ConfigField, _: []const u8, _: view_runtime.field.Edit) view_runtime.field.Error!void {
-        return error.Unsupported;
+    pub fn edit(self: *ConfigField, _: []const u8, _: view_runtime.field.Edit) view_runtime.field.Error!void {
+        self.edits += 1;
     }
 };
 
@@ -465,6 +466,31 @@ test "e2e/config: the sample config boots; SPC g i is discoverable via which-key
     try t.expectEqual(@as(usize, 1), relation_provider.queries);
     try t.expectEqual(@as(usize, 2), target_handler.opens);
     try t.expectEqual(target_view, ed.head.semantic_focus.path().?.view);
+
+    // Vim's modal editing remains a generic semantic-view consumer. A field
+    // enters the ordinary insert posture, and Escape returns to the buffer's
+    // resting mode; no tool-specific mode or keymap is involved. The normal
+    // yy/dd/paste/open-container keys then resolve through the same advertised
+    // semantic actions as the config chords above.
+    _ = try semantic_services.focusView(ed.head, gpa, fixture_view, field_node.id);
+    ed.press("i", "");
+    try t.expectEqualStrings("insert", ed.head.currentMode());
+    ed.typeText("x");
+    try t.expectEqual(@as(usize, 1), field.edits);
+    ed.press("Escape", "");
+    try t.expectEqualStrings("normal", ed.head.currentMode());
+    ed.press("y", "");
+    ed.press("y", "");
+    ed.press("p", "");
+    ed.press("d", "");
+    ed.press("d", "");
+    ed.press("minus", "");
+    try t.expectEqual(@as(usize, 3), actions.copies);
+    try t.expectEqual(@as(usize, 2), actions.paste_after);
+    try t.expectEqual(@as(usize, 2), actions.deletes);
+    try t.expectEqual(@as(usize, 2), actions.container_opens);
+    try t.expectEqual(@as(usize, 2), relation_provider.queries);
+    try t.expectEqual(@as(usize, 3), target_handler.opens);
 
     // SPC : must open the command PALETTE (pick-commands), not the ex line.
     // Typing `:` needs Shift, and a real keyboard sends that Shift_L press as its
