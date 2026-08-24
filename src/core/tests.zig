@@ -1125,20 +1125,20 @@ test "buffers: a fresh buffer opens in default_mode — a tool mode never leaks"
     try host.head.setModeRaw(gpa, "normal");
     try host.buffers.setDefaultMode(gpa, "normal");
 
-    // Enter a tool buffer and put it in its own (tool) mode, as dired/magit do.
-    _ = try run(&host.commands, &host.ctx, "buffer-create", &.{.{ .string = "*dired*" }});
-    try host.head.setModeRaw(gpa, "dired");
-    try t.expectEqualStrings("dired", host.head.currentMode());
+    // Enter a tool buffer and put it in its own tool mode.
+    _ = try run(&host.commands, &host.ctx, "buffer-create", &.{.{ .string = "*tool*" }});
+    try host.head.setModeRaw(gpa, "tool");
+    try t.expectEqualStrings("tool", host.head.currentMode());
 
     // Open a file FROM the tool buffer — a fresh buffer. Structurally it must
-    // start in default_mode, never inherit "dired" (the bug this makes
+    // start in default_mode, never inherit "tool" (the bug this makes
     // impossible to express: a tool mode sticking after you open a file).
     _ = try run(&host.commands, &host.ctx, "open", &.{.{ .string = "/tmp/weft-mode-test.zig" }});
     try t.expectEqualStrings("normal", host.head.currentMode());
 
     // Going back to the tool buffer still restores its mode (per-buffer intact).
     _ = try run(&host.commands, &host.ctx, "buffer-switch", &.{.{ .integer = 1 }});
-    try t.expectEqualStrings("dired", host.head.currentMode());
+    try t.expectEqualStrings("tool", host.head.currentMode());
 }
 
 test "editor: bulk load — big file opens as a compacted base, edits and saves" {

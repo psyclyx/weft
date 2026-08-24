@@ -520,18 +520,18 @@ test "action: a projection scopes save by its tool identity, in any mode" {
     var acts = Actions.init(t.allocator, &container);
     defer acts.deinit();
 
-    // Core's default save (file write), and dired's save for its projection.
+    // Core's default save (file write), and a projection's save provider.
     try acts.provide(.{ .action = "save", .command = "save-file" });
-    try acts.provide(.{ .action = "save", .when = .{ .tool = "dired" }, .command = "dired-save" });
+    try acts.provide(.{ .action = "save", .when = .{ .tool = "projection" }, .command = "projection-save" });
 
-    // In the dired projection, dired's provider wins — REGARDLESS of mode
+    // In the projection, its provider wins — REGARDLESS of mode
     // (normal while you :w, insert while you type): the tool identity is stable.
-    try t.expectEqualStrings("dired-save", acts.resolve("save", .{ .mode = "normal", .tool = "dired" }).?);
-    try t.expectEqualStrings("dired-save", acts.resolve("save", .{ .mode = "insert", .tool = "dired" }).?);
+    try t.expectEqualStrings("projection-save", acts.resolve("save", .{ .mode = "normal", .tool = "projection" }).?);
+    try t.expectEqualStrings("projection-save", acts.resolve("save", .{ .mode = "insert", .tool = "projection" }).?);
     // A normal file buffer (no tool) falls to the default file write.
     try t.expectEqualStrings("save-file", acts.resolve("save", .{ .mode = "normal", .lang = "zig", .tool = "" }).?);
-    // A different projection doesn't get dired's save.
-    try t.expectEqualStrings("save-file", acts.resolve("save", .{ .mode = "normal", .tool = "magit" }).?);
+    // A different projection doesn't get the first projection's save.
+    try t.expectEqualStrings("save-file", acts.resolve("save", .{ .mode = "normal", .tool = "other" }).?);
 }
 
 test "action: declare is idempotent and provider load-order-independent" {

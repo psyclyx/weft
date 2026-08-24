@@ -812,10 +812,10 @@ test "keymap: the global layer applies under every mode, overridable locally" {
     try t.expectEqualStrings("which-key-now", km.lookup("normal", "F1").?);
     // In a standalone tool mode with NO fallback chain, F1 still works —
     // that's the whole point (before, tool modes were islands).
-    try t.expectEqualStrings("which-key-now", km.lookup("dired", "F1").?);
+    try t.expectEqualStrings("which-key-now", km.lookup("tool", "F1").?);
     // A mode still overrides a global key by binding it locally.
-    try km.bind(gpa, "dired", "F1", "dired-help", prio_plugin, "dired");
-    try t.expectEqualStrings("dired-help", km.lookup("dired", "F1").?);
+    try km.bind(gpa, "tool", "F1", "tool-help", prio_plugin, "tool");
+    try t.expectEqualStrings("tool-help", km.lookup("tool", "F1").?);
 }
 
 test "keymap: a menu inherits the menu-nav base for nav keys; baseMode stops at the menu" {

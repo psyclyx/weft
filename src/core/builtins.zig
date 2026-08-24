@@ -589,10 +589,9 @@ test "builtins: explain-binding is a real consumer of Container.explain" {
     defer commands.deinit(gpa);
     try install(gpa, &commands, &keymap, &head, &actions);
 
-    // A second, higher-priority "save" provider (as a projection like dired
-    // would register), so `explain-binding` has more than one eligible
-    // binding to report on.
-    try actions.provide(.{ .action = "save", .command = "dired-save", .priority = 10, .owner = "dired" });
+    // A second, higher-priority projection provider, so `explain-binding` has
+    // more than one eligible binding to report on.
+    try actions.provide(.{ .action = "save", .command = "projection-save", .priority = 10, .owner = "projection" });
 
     var ctx: Context = .{
         .gpa = gpa,
@@ -606,7 +605,7 @@ test "builtins: explain-binding is a real consumer of Container.explain" {
     };
 
     _ = try command.run(&commands, &ctx, "explain-binding", &.{.{ .string = "save" }});
-    try t.expect(std.mem.indexOf(u8, head.echo.items, "dired-save") != null);
+    try t.expect(std.mem.indexOf(u8, head.echo.items, "projection-save") != null);
     try t.expect(std.mem.indexOf(u8, head.echo.items, "2 eligible") != null);
 
     // An unknown slot: no eligible bindings, no crash, an honest echo.

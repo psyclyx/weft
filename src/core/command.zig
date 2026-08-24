@@ -818,8 +818,8 @@ test "command: read-only refuses interactive edit, allows render (in depth)" {
 
     // RENDER (content production) is a DIFFERENT door — it bypasses read-only,
     // so a projection's renderer (ANY plugin, not one owner) can redraw it.
-    var dired = Peer{ .gpa = gpa, .name = "dired" };
-    ctx.principal = .{ .role = .plugin, .name = "dired", .ctx = &dired, .resolve = Peer.resolve };
+    var plugin_peer = Peer{ .gpa = gpa, .name = "plugin-peer" };
+    ctx.principal = .{ .role = .plugin, .name = "plugin-peer", .ctx = &plugin_peer, .resolve = Peer.resolve };
     try ctx.render(.{ .start = 0, .end = 4 }, "TREE");
     const out = try ctx.document().text().toOwnedSlice(gpa);
     defer gpa.free(out);
