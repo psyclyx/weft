@@ -5,7 +5,7 @@ const kernel = @import("weft_kernel");
 
 pub const Error = kernel.scene.ValidationError || std.mem.Allocator.Error || error{ StaleView, FocusPathTooDeep };
 
-pub const Movement = enum { previous, next, first, last };
+pub const Movement = kernel.focus.Movement;
 
 pub const Instance = struct {
     arena: std.heap.ArenaAllocator,

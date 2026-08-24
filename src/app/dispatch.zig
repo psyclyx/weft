@@ -247,12 +247,14 @@ fn viewOf(data: ?*anyopaque) *view_mod.View {
 
 pub fn cursorUpHandler(ctx: *core.command.Context, data: ?*anyopaque, args: []const core.command.Value) anyerror!core.command.Value {
     _ = args;
+    if (ctx.semantic) |services| if (try services.moveHeadFocus(ctx.head, ctx.gpa, .previous)) return .nil;
     try visualVertical(ctx.editor(), viewOf(data), -1);
     return .nil;
 }
 
 pub fn cursorDownHandler(ctx: *core.command.Context, data: ?*anyopaque, args: []const core.command.Value) anyerror!core.command.Value {
     _ = args;
+    if (ctx.semantic) |services| if (try services.moveHeadFocus(ctx.head, ctx.gpa, .next)) return .nil;
     try visualVertical(ctx.editor(), viewOf(data), 1);
     return .nil;
 }

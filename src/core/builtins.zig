@@ -15,6 +15,16 @@ const Actions = @import("action.zig");
 
 const ok: Value = .nil;
 
+fn semanticFieldInput(ctx: *Context, input: @import("semantic.zig").Services.FieldInput) !bool {
+    const services = ctx.semantic orelse return false;
+    return services.inputFocusedField(ctx.head, ctx.gpa, input);
+}
+
+fn semanticMove(ctx: *Context, movement: @import("weft_kernel").focus.Movement) !bool {
+    const services = ctx.semantic orelse return false;
+    return services.moveHeadFocus(ctx.head, ctx.gpa, movement);
+}
+
 /// Map an edit refusal to a visible status echo. Keymap dispatch only
 /// `log.warn`s command errors, so a grade refusal would be silent; surface
 /// it honestly and swallow it (a `view` peer editing is not an error, just
@@ -27,6 +37,7 @@ fn editErr(ctx: *Context, e: anyerror) anyerror!Value {
 }
 
 fn cInsertText(ctx: *Context, args: struct { text: []const u8 }) anyerror!Value {
+    if (try semanticFieldInput(ctx, .{ .replace_selection = args.text })) return ok;
     if (ctx.buffer().read_only) return ok;
     ctx.edit(ctx.editor().insertRange(), args.text) catch |e| return editErr(ctx, e);
     return ok;
@@ -34,6 +45,7 @@ fn cInsertText(ctx: *Context, args: struct { text: []const u8 }) anyerror!Value 
 
 fn cDeleteBackward(ctx: *Context, args: struct {}) anyerror!Value {
     _ = args;
+    if (try semanticFieldInput(ctx, .delete_previous)) return ok;
     if (ctx.buffer().read_only) return ok;
     const r = ctx.editor().backspaceRange() orelse return ok;
     ctx.edit(r, "") catch |e| return editErr(ctx, e);
@@ -42,6 +54,7 @@ fn cDeleteBackward(ctx: *Context, args: struct {}) anyerror!Value {
 
 fn cDeleteForward(ctx: *Context, args: struct {}) anyerror!Value {
     _ = args;
+    if (try semanticFieldInput(ctx, .delete_next)) return ok;
     if (ctx.buffer().read_only) return ok;
     const r = ctx.editor().forwardRange() orelse return ok;
     ctx.edit(r, "") catch |e| return editErr(ctx, e);
@@ -71,24 +84,28 @@ fn cSaveFile(ctx: *Context, args: struct {}) anyerror!Value {
 
 fn cCursorLeft(ctx: *Context, args: struct {}) anyerror!Value {
     _ = args;
+    if (try semanticFieldInput(ctx, .move_previous)) return ok;
     ctx.editor().moveLeft();
     return ok;
 }
 
 fn cCursorRight(ctx: *Context, args: struct {}) anyerror!Value {
     _ = args;
+    if (try semanticFieldInput(ctx, .move_next)) return ok;
     ctx.editor().moveRight();
     return ok;
 }
 
 fn cCursorUp(ctx: *Context, args: struct {}) anyerror!Value {
     _ = args;
+    if (try semanticMove(ctx, .previous)) return ok;
     ctx.editor().moveUp();
     return ok;
 }
 
 fn cCursorDown(ctx: *Context, args: struct {}) anyerror!Value {
     _ = args;
+    if (try semanticMove(ctx, .next)) return ok;
     ctx.editor().moveDown();
     return ok;
 }
@@ -141,6 +158,7 @@ fn cQuit(ctx: *Context, args: struct {}) anyerror!Value {
 
 fn cInsertNewline(ctx: *Context, args: struct {}) anyerror!Value {
     _ = args;
+    if (try semanticFieldInput(ctx, .{ .replace_selection = "\n" })) return ok;
     if (ctx.buffer().read_only) return ok;
     ctx.edit(ctx.editor().insertRange(), "\n") catch |e| return editErr(ctx, e);
     return ok;
@@ -148,6 +166,7 @@ fn cInsertNewline(ctx: *Context, args: struct {}) anyerror!Value {
 
 fn cInsertTab(ctx: *Context, args: struct {}) anyerror!Value {
     _ = args;
+    if (try semanticFieldInput(ctx, .{ .replace_selection = "\t" })) return ok;
     if (ctx.buffer().read_only) return ok;
     ctx.edit(ctx.editor().insertRange(), "\t") catch |e| return editErr(ctx, e);
     return ok;

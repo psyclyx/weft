@@ -6,6 +6,7 @@ const std = @import("std");
 const kernel = @import("weft_kernel");
 const target_runtime = @import("weft_target_runtime");
 const view_runtime = @import("weft_view_runtime");
+const Head = @import("Head.zig");
 
 pub const Services = struct {
     targets: target_runtime.target.Registry,
@@ -43,6 +44,20 @@ pub const Services = struct {
 
     pub const InvokeActionError = view_runtime.action.Error || OpenInteractionError || kernel.transfer.ValidationError;
     pub const InvokeInputError = InvokeActionError || view_runtime.interaction.Error;
+
+    pub const FocusError = view_runtime.view.Error;
+    pub const FieldInputError = view_runtime.field.Error || error{StaleField};
+
+    /// The small generic editing vocabulary used by ordinary editor commands
+    /// when focus belongs to a semantic field. Byte offsets are deliberate:
+    /// fields may contain raw filesystem names, not necessarily UTF-8 text.
+    pub const FieldInput = union(enum) {
+        replace_selection: []const u8,
+        delete_previous,
+        delete_next,
+        move_previous,
+        move_next,
+    };
 
     pub const ActionEffect = union(enum) {
         declined,
@@ -118,7 +133,106 @@ pub const Services = struct {
         if (instance.node(definition.root) == null) return error.UnknownRoot;
         return stack.open(gpa, definition);
     }
+
+    /// Move one head through the active view's declared focus order. `false`
+    /// means this head has no live semantic view, so a caller may fall back to
+    /// its text-editor movement. A live view consumes the intent even when it
+    /// has no focusable nodes or is already at an edge.
+    pub fn moveHeadFocus(
+        self: *const Services,
+        head: *Head,
+        gpa: std.mem.Allocator,
+        movement: kernel.focus.Movement,
+    ) FocusError!bool {
+        const path = head.semantic_focus.path() orelse return false;
+        const instance = self.views.get(path.view) orelse {
+            head.semantic_focus.clear();
+            return false;
+        };
+        const next = instance.move(path.leaf(), movement) orelse return true;
+        var storage: [1026]kernel.scene.NodeId = undefined;
+        const next_path = (try instance.focusPath(next, &storage)) orelse return true;
+        try head.semantic_focus.set(gpa, next_path);
+        return true;
+    }
+
+    /// Apply ordinary text-editing intent to the active semantic field. The
+    /// field provider remains the authority for revision checks and mutation;
+    /// this adapter only translates common editor commands into its raw-byte
+    /// edit contract. A semantic non-field node still consumes text input, so
+    /// typing can never leak into a hidden backing document.
+    pub fn inputFocusedField(
+        self: *const Services,
+        head: *Head,
+        gpa: std.mem.Allocator,
+        input: FieldInput,
+    ) FieldInputError!bool {
+        const path = head.semantic_focus.path() orelse return false;
+        const instance = self.views.get(path.view) orelse {
+            head.semantic_focus.clear();
+            return false;
+        };
+        const field_ref = path.field orelse return true;
+        const leaf = path.leaf() orelse return error.StaleField;
+        const node = instance.node(leaf) orelse return error.StaleField;
+        switch (node.content) {
+            .field => |field| if (!field.ref.eql(field_ref)) return error.StaleField,
+            else => return error.StaleField,
+        }
+        const provider = self.fields.get(field_ref) orelse return error.StaleField;
+        var snapshot = try provider.snapshot(gpa);
+        defer snapshot.deinit();
+        const value = snapshot.value;
+        const anchor: usize = @intCast(value.selection.anchor);
+        const caret: usize = @intCast(value.selection.caret);
+        const selection_start = @min(anchor, caret);
+        const selection_end = @max(anchor, caret);
+        const edit: view_runtime.field.Edit = switch (input) {
+            .replace_selection => |replacement| blk: {
+                if (value.single_line and std.mem.indexOfAny(u8, replacement, "\r\n") != null)
+                    return true;
+                break :blk .{
+                    .start = selection_start,
+                    .end = selection_end,
+                    .replacement = replacement,
+                    .selection_after = collapsed(selection_start + replacement.len),
+                };
+            },
+            .delete_previous => blk: {
+                const start = if (selection_start != selection_end) selection_start else selection_start -| 1;
+                break :blk .{
+                    .start = start,
+                    .end = selection_end,
+                    .replacement = &.{},
+                    .selection_after = collapsed(start),
+                };
+            },
+            .delete_next => blk: {
+                const end = if (selection_start != selection_end) selection_end else @min(selection_end + 1, value.bytes.len);
+                break :blk .{
+                    .start = selection_start,
+                    .end = end,
+                    .replacement = &.{},
+                    .selection_after = collapsed(selection_start),
+                };
+            },
+            .move_previous => blk: {
+                const offset = if (selection_start != selection_end) selection_start else selection_start -| 1;
+                break :blk .{ .start = offset, .end = offset, .replacement = &.{}, .selection_after = collapsed(offset) };
+            },
+            .move_next => blk: {
+                const offset = if (selection_start != selection_end) selection_end else @min(selection_end + 1, value.bytes.len);
+                break :blk .{ .start = offset, .end = offset, .replacement = &.{}, .selection_after = collapsed(offset) };
+            },
+        };
+        try provider.edit(value.revision, edit);
+        return true;
+    }
 };
+
+fn collapsed(offset: usize) view_runtime.field.Selection {
+    return .{ .anchor = offset, .caret = offset };
+}
 
 test "semantic services keep target, view, and field namespaces typed" {
     var services = Services.init(.here);
@@ -217,4 +331,75 @@ test "interaction-local input invokes semantic action and closes explicitly" {
     try std.testing.expect((try services.invokeInteractionInput(&interactions, std.testing.allocator, "y")).? == .handled);
     try std.testing.expectEqual(@as(usize, 1), handler.calls);
     try std.testing.expect(interactions.active() == null);
+}
+
+test "ordinary editor input targets semantic fields and focus order" {
+    const Memory = struct {
+        bytes: std.ArrayList(u8) = .empty,
+        selection: view_runtime.field.Selection = .{ .anchor = 0, .caret = 0 },
+        revision: u64 = 1,
+
+        fn deinit(self: *@This(), gpa: std.mem.Allocator) void {
+            self.bytes.deinit(gpa);
+        }
+
+        pub fn snapshot(self: *@This(), gpa: std.mem.Allocator) view_runtime.field.Error!view_runtime.field.OwnedSnapshot {
+            var owned = view_runtime.field.OwnedSnapshot.init(gpa);
+            errdefer owned.deinit();
+            const arena = owned.allocator();
+            owned.value = .{
+                .revision = try std.fmt.allocPrint(arena, "{d}", .{self.revision}),
+                .bytes = try arena.dupe(u8, self.bytes.items),
+                .selection = self.selection,
+                .single_line = true,
+            };
+            return owned;
+        }
+
+        pub fn edit(self: *@This(), expected: []const u8, value: view_runtime.field.Edit) view_runtime.field.Error!void {
+            var revision_buf: [32]u8 = undefined;
+            const revision = std.fmt.bufPrint(&revision_buf, "{d}", .{self.revision}) catch unreachable;
+            if (!std.mem.eql(u8, expected, revision)) return error.Stale;
+            const start: usize = @intCast(value.start);
+            const end: usize = @intCast(value.end);
+            if (start > end or end > self.bytes.items.len) return error.InvalidRange;
+            try self.bytes.replaceRange(std.testing.allocator, start, end - start, value.replacement);
+            if (value.selection_after) |selection| self.selection = selection;
+            self.revision += 1;
+        }
+    };
+
+    var first: Memory = .{};
+    defer first.deinit(std.testing.allocator);
+    try first.bytes.appendSlice(std.testing.allocator, "old");
+    first.selection = .{ .anchor = 0, .caret = 3 };
+    var second: Memory = .{};
+    defer second.deinit(std.testing.allocator);
+    try second.bytes.appendSlice(std.testing.allocator, "next");
+
+    var services = Services.init(.here);
+    defer services.deinit(std.testing.allocator);
+    const first_ref = try services.fields.insert(std.testing.allocator, .init(&first));
+    const second_ref = try services.fields.insert(std.testing.allocator, .init(&second));
+    const children = [_]kernel.scene.Node{
+        .{ .id = @enumFromInt(2), .focusable = true, .content = .{ .field = .{ .ref = first_ref, .single_line = true } } },
+        .{ .id = @enumFromInt(3), .focusable = true, .content = .{ .field = .{ .ref = second_ref, .single_line = true } } },
+    };
+    const view_ref = try services.views.publish(std.testing.allocator, "tool", null, 1, .{
+        .id = @enumFromInt(1),
+        .content = .{ .container = .{ .children = &children } },
+    });
+    var head: Head = .empty;
+    defer head.deinit(std.testing.allocator);
+    try head.semantic_focus.set(std.testing.allocator, .{ .view = view_ref, .nodes = &.{ @enumFromInt(1), @enumFromInt(2) }, .field = first_ref });
+
+    try std.testing.expect(try services.inputFocusedField(&head, std.testing.allocator, .{ .replace_selection = "new" }));
+    try std.testing.expectEqualStrings("new", first.bytes.items);
+    try std.testing.expect(try services.moveHeadFocus(&head, std.testing.allocator, .next));
+    try std.testing.expectEqual(@as(kernel.scene.NodeId, @enumFromInt(3)), head.semantic_focus.path().?.leaf().?);
+    try std.testing.expect(head.semantic_focus.path().?.field.?.eql(second_ref));
+
+    // A single-line field consumes a newline without changing its bytes.
+    try std.testing.expect(try services.inputFocusedField(&head, std.testing.allocator, .{ .replace_selection = "\n" }));
+    try std.testing.expectEqualStrings("next", second.bytes.items);
 }
