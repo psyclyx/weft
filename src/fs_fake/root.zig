@@ -123,12 +123,12 @@ pub const Fake = struct {
         return owned;
     }
 
-    pub fn read(self: *Fake, gpa: std.mem.Allocator, root_ref: contract.Root, request: contract.ReadRequest) contract.Error!contract.OwnedReadResult {
-        try validateRoot(root_ref);
+    pub fn read(self: *Fake, gpa: std.mem.Allocator, request: contract.ReadRequest) contract.Error!contract.OwnedReadResult {
         const source = switch (request.source) {
             .entry => |entry| entry,
             .lease => return error.Unsupported,
         };
+        try validateRoot(source.root);
         const index = try self.entryIndex(source.ref);
         const record = &self.records.items[index];
         if (!revisionMatches(record.revision, source.revision)) return error.Stale;
@@ -241,6 +241,7 @@ pub const Fake = struct {
             .entry => |entry| entry,
             .lease => return .unsupported,
         };
+        validateRoot(source.root) catch return .unsupported;
         const source_index = self.entryIndex(source.ref) catch return .stale;
         if (!revisionMatches(self.records.items[source_index].revision, source.revision)) return .stale;
         const parent = try self.parentIndex(operation.destination.parent, outputs);
@@ -254,9 +255,10 @@ pub const Fake = struct {
     }
 
     fn rename(self: *Fake, outputs: []?contract.EntryRef, operation: anytype) contract.Error!contract.Outcome {
-        const source_index = self.entryIndex(operation.source) catch return .stale;
+        validateRoot(operation.source.root) catch return .unsupported;
+        const source_index = self.entryIndex(operation.source.ref) catch return .stale;
         const source = &self.records.items[source_index];
-        if (!revisionMatches(source.revision, operation.source_revision)) return .stale;
+        if (!revisionMatches(source.revision, operation.source.revision)) return .stale;
         const parent = try self.parentIndex(operation.destination.parent, outputs);
         if (source.parent == parent and std.mem.eql(u8, source.name, operation.destination.name.bytes)) return .already_satisfied;
         if (source.kind == .directory and parent != null and self.isWithin(parent.?, source_index))
@@ -273,17 +275,19 @@ pub const Fake = struct {
     }
 
     fn remove(self: *Fake, operation: anytype) contract.Error!contract.Outcome {
-        const index = self.entryIndex(operation.source) catch return .stale;
-        if (!revisionMatches(self.records.items[index].revision, operation.revision)) return .stale;
+        validateRoot(operation.source.root) catch return .unsupported;
+        const index = self.entryIndex(operation.source.ref) catch return .stale;
+        if (!revisionMatches(self.records.items[index].revision, operation.source.revision)) return .stale;
         self.removeTree(index);
         self.root_revision +%= 1;
         return .{ .applied = null };
     }
 
     fn setPermissions(self: *Fake, operation: anytype) contract.Error!contract.Outcome {
-        const index = self.entryIndex(operation.source) catch return .stale;
+        validateRoot(operation.source.root) catch return .unsupported;
+        const index = self.entryIndex(operation.source.ref) catch return .stale;
         const record = &self.records.items[index];
-        if (!revisionMatches(record.revision, operation.revision)) return .stale;
+        if (!revisionMatches(record.revision, operation.source.revision)) return .stale;
         record.mode = operation.mode;
         self.bump(index);
         return .{ .applied = null };
@@ -497,7 +501,11 @@ test "fake provider reports stale observations after external deletion" {
 
     const operations = [_]contract.Planned{.{
         .id = opId(3),
-        .operation = .{ .remove = .{ .source = entry, .revision = observed.value.revision } },
+        .operation = .{ .remove = .{ .source = .{
+            .root = Fake.root(),
+            .ref = entry,
+            .revision = observed.value.revision,
+        } } },
     }};
     const effect_plan: contract.Plan = .{ .root = Fake.root(), .base_revision = &.{}, .operations = &operations };
     var report = try provider.apply(std.testing.allocator, effect_plan);
@@ -515,7 +523,7 @@ test "fake provider copies symlinks as entries without following them" {
     const operations = [_]contract.Planned{.{
         .id = opId(4),
         .operation = .{ .copy = .{
-            .source = .{ .entry = .{ .ref = link, .revision = observed.value.revision } },
+            .source = .{ .entry = .{ .root = Fake.root(), .ref = link, .revision = observed.value.revision } },
             .destination = .{ .parent = .root, .name = try .init("link-copy") },
         } },
     }};
@@ -560,13 +568,34 @@ test "fake provider refuses recursive copy into the source subtree" {
     const operations = [_]contract.Planned{.{
         .id = opId(7),
         .operation = .{ .copy = .{
-            .source = .{ .entry = .{ .ref = directory, .revision = observed.value.revision } },
+            .source = .{ .entry = .{ .root = Fake.root(), .ref = directory, .revision = observed.value.revision } },
             .destination = .{ .parent = .{ .entry = directory }, .name = try .init("again") },
         } },
     }};
     var report = try provider.apply(std.testing.allocator, .{ .root = Fake.root(), .base_revision = &.{}, .operations = &operations });
     defer report.deinit();
     try std.testing.expectEqual(std.meta.Tag(contract.Outcome).conflict, std.meta.activeTag(report.value.entries[0].outcome));
+}
+
+test "fake provider does not reinterpret a foreign-root source" {
+    var fake = Fake.init(std.testing.allocator);
+    defer fake.deinit();
+    const source = try fake.seed(.root, "source", .regular, "payload");
+    const provider = fake.provider();
+    var observed = try provider.observe(std.testing.allocator, Fake.root(), .{ .entry = source });
+    defer observed.deinit();
+
+    const foreign_root: contract.Root = .{ .authority = .here, .slot = 9, .generation = 1 };
+    const operations = [_]contract.Planned{.{
+        .id = opId(8),
+        .operation = .{ .copy = .{
+            .source = .{ .entry = .{ .root = foreign_root, .ref = source, .revision = observed.value.revision } },
+            .destination = .{ .parent = .root, .name = try .init("copy") },
+        } },
+    }};
+    var report = try provider.apply(std.testing.allocator, .{ .root = Fake.root(), .base_revision = &.{}, .operations = &operations });
+    defer report.deinit();
+    try std.testing.expectEqual(std.meta.Tag(contract.Outcome).unsupported, std.meta.activeTag(report.value.entries[0].outcome));
 }
 
 test {

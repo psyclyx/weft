@@ -117,12 +117,26 @@ pub const Expected = union(enum) {
     },
 };
 
+/// A guarded entry address is complete: the root establishes the namespace,
+/// the opaque ref establishes identity within its provider, and the revision
+/// is the consumer's observation. Keeping the root here is what makes a
+/// captured source portable to a plan whose destination is a different root;
+/// executors may perform it directly, bridge providers, or report Unsupported,
+/// but they can never silently reinterpret the entry in the destination root.
+pub const EntrySource = struct {
+    root: Root,
+    ref: EntryRef,
+    revision: Revision,
+};
+
+pub const LeaseSource = struct {
+    root: Root,
+    ref: LeaseRef,
+};
+
 pub const Source = union(enum) {
-    entry: struct {
-        ref: EntryRef,
-        revision: Revision,
-    },
-    lease: LeaseRef,
+    entry: EntrySource,
+    lease: LeaseSource,
 };
 
 pub const RemovePolicy = enum { quarantine, permanent };
@@ -150,19 +164,16 @@ pub const Operation = union(enum) {
         expected: Expected = .absent,
     },
     rename: struct {
-        source: EntryRef,
-        source_revision: Revision,
+        source: EntrySource,
         destination: Slot,
         expected: Expected = .absent,
     },
     remove: struct {
-        source: EntryRef,
-        revision: Revision,
+        source: EntrySource,
         policy: RemovePolicy = .quarantine,
     },
     set_permissions: struct {
-        source: EntryRef,
-        revision: Revision,
+        source: EntrySource,
         mode: u32,
         follow_symlink: bool = false,
     },

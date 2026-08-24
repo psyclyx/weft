@@ -19,7 +19,7 @@ pub const Provider = struct {
         capabilities: *const fn (*anyopaque, contract.Root) contract.Error!contract.Capabilities,
         observe: *const fn (*anyopaque, std.mem.Allocator, contract.Root, contract.NodeRef) contract.Error!contract.OwnedObservation,
         list: *const fn (*anyopaque, std.mem.Allocator, contract.Root, contract.NodeRef) contract.Error!contract.OwnedListing,
-        read: *const fn (*anyopaque, std.mem.Allocator, contract.Root, contract.ReadRequest) contract.Error!contract.OwnedReadResult,
+        read: *const fn (*anyopaque, std.mem.Allocator, contract.ReadRequest) contract.Error!contract.OwnedReadResult,
         apply: *const fn (*anyopaque, std.mem.Allocator, contract.Plan) contract.Error!contract.OwnedApplyReport,
         watch: *const fn (*anyopaque, contract.Root, contract.NodeRef, bool) contract.Error!contract.WatchRef,
         poll_invalidation: *const fn (*anyopaque, contract.WatchRef) contract.Error!?contract.Invalidation,
@@ -56,8 +56,8 @@ pub const Provider = struct {
                 return self(raw).list(gpa, root, directory);
             }
 
-            fn read(raw: *anyopaque, gpa: std.mem.Allocator, root: contract.Root, request: contract.ReadRequest) contract.Error!contract.OwnedReadResult {
-                return self(raw).read(gpa, root, request);
+            fn read(raw: *anyopaque, gpa: std.mem.Allocator, request: contract.ReadRequest) contract.Error!contract.OwnedReadResult {
+                return self(raw).read(gpa, request);
             }
 
             fn apply(raw: *anyopaque, gpa: std.mem.Allocator, effect_plan: contract.Plan) contract.Error!contract.OwnedApplyReport {
@@ -103,8 +103,8 @@ pub const Provider = struct {
         return self.vtable.list(self.context, gpa, root, directory);
     }
 
-    pub fn read(self: Provider, gpa: std.mem.Allocator, root: contract.Root, request: contract.ReadRequest) contract.Error!contract.OwnedReadResult {
-        return self.vtable.read(self.context, gpa, root, request);
+    pub fn read(self: Provider, gpa: std.mem.Allocator, request: contract.ReadRequest) contract.Error!contract.OwnedReadResult {
+        return self.vtable.read(self.context, gpa, request);
     }
 
     pub fn apply(self: Provider, gpa: std.mem.Allocator, effect_plan: contract.Plan) ApplyError!contract.OwnedApplyReport {
