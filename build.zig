@@ -372,17 +372,29 @@ pub fn build(b: *std.Build) void {
     // Dired's draft/reconcile model is a plugin-local pure module. It sees
     // only the named generic kernel/filesystem contracts; the existing dired
     // guest is intentionally not wired to this draft yet.
-    const dired_model = b.createModule(.{
+    const dired_facade = b.createModule(.{
         .root_source_file = b.path("src/plugins/dired/root.zig"),
         .target = target,
         .optimize = optimize,
     });
-    dired_model.addImport("weft_kernel", architecture.kernel);
-    dired_model.addImport("weft_fs", architecture.fs);
-    const dired_model_tests = b.addTest(.{ .root_module = dired_model });
-    const run_dired_model_tests = b.addRunArtifact(dired_model_tests);
-    const dired_model_step = b.step("test-dired-model", "Run the pure dired draft/reconcile model tests");
-    dired_model_step.dependOn(&run_dired_model_tests.step);
+    const dired_model = b.createModule(.{
+        .root_source_file = b.path("src/plugins/dired/model.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    const dired_projection = b.createModule(.{
+        .root_source_file = b.path("src/plugins/dired/projection.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    const dired_model_step = b.step("test-dired-model", "Run the pure dired model and semantic projection tests");
+    inline for (.{ dired_facade, dired_model, dired_projection }) |dired_module| {
+        dired_module.addImport("weft_kernel", architecture.kernel);
+        dired_module.addImport("weft_fs", architecture.fs);
+        const dired_tests = b.addTest(.{ .root_module = dired_module });
+        const run_dired_tests = b.addRunArtifact(dired_tests);
+        dired_model_step.dependOn(&run_dired_tests.step);
+    }
 
     const fs_runtime_tests = b.addTest(.{ .root_module = architecture.fs_runtime });
     const run_fs_runtime_tests = b.addRunArtifact(fs_runtime_tests);
