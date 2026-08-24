@@ -416,10 +416,9 @@ const wm_base_listener = c.xdg_wm_base_listener{
 
 fn xdgSurfaceConfigure(data: ?*anyopaque, xdg_surface: ?*c.xdg_surface, serial: u32) callconv(.c) void {
     const self = selfFrom(data);
-    // Wayland ordering is intentional: acknowledge first, then send the
-    // newest coalesced geometry and commit.  Main cannot acquire/present a
-    // new Vulkan image until this callback has completed and the resulting
-    // resize has been applied.
+    // Acknowledge first, then stage the newest coalesced geometry.  Do not
+    // commit an empty surface here: the next rendered buffer is the commit
+    // that must carry this configure's geometry and resize.
     c.xdg_surface_ack_configure(xdg_surface.?, serial);
     const decision = self.resize_state.surfaceConfigure();
     c.xdg_surface_set_window_geometry(
@@ -429,7 +428,6 @@ fn xdgSurfaceConfigure(data: ?*anyopaque, xdg_surface: ?*c.xdg_surface, serial: 
         @intCast(decision.extent.width),
         @intCast(decision.extent.height),
     );
-    c.wl_surface_commit(self.surface);
 }
 
 const xdg_surface_listener = c.xdg_surface_listener{

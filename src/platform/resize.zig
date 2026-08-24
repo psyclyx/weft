@@ -22,8 +22,9 @@ pub const ToplevelConfigure = struct {
 };
 
 pub const SurfaceConfigure = struct {
-    /// The caller sends this after acknowledging the configure and commits
-    /// before attempting a present.
+    /// The caller obtains this after acknowledging the configure and stages
+    /// the returned extent as surface geometry.  The next rendered buffer
+    /// commit applies that geometry; no empty commit is needed here.
     extent: Extent,
     extent_changed: bool,
 };
@@ -49,8 +50,9 @@ pub const State = struct {
     }
 
     /// Consume the newest toplevel configure at the protocol's ack boundary.
-    /// The caller performs the actual ack first, then applies the extent and
-    /// commits, preserving Wayland's required ordering.
+    /// The caller performs the actual ack first, then stages the extent and
+    /// commits the next rendered buffer, preserving Wayland's required
+    /// ordering.
     pub fn surfaceConfigure(self: *State) SurfaceConfigure {
         const next = self.pending_extent orelse self.extent;
         self.pending_extent = null;
@@ -157,4 +159,25 @@ test "configure reducer keeps logical and framebuffer extents distinct across sc
     try std.testing.expectEqual(@as(u32, 1), state.bufferScale());
     try std.testing.expectEqual(Extent{ .width = 1365, .height = 777 }, state.framebufferExtent());
     try std.testing.expect(state.consumeResized());
+}
+
+test "configure reducer publishes one compositor resize edge for layout" {
+    // A compositor may supersede a toplevel configure before delivering the
+    // xdg_surface configure, and output-enter can update the scale in the
+    // same event turn.  The layout/render seam must see the newest logical
+    // extent and its framebuffer extent together.
+    var state = State.init(800, 600);
+    state.toplevelConfigure(.{ .width = 1024, .height = 768 });
+    state.toplevelConfigure(.{ .width = 1200, .height = 700 });
+    try std.testing.expect(state.setScale(2));
+
+    const configured = state.surfaceConfigure();
+    try std.testing.expect(configured.extent_changed);
+    try std.testing.expectEqual(Extent{ .width = 1200, .height = 700 }, configured.extent);
+    try std.testing.expectEqual(Extent{ .width = 2400, .height = 1400 }, state.framebufferExtent());
+
+    // The edge remains observable by the frame loop exactly once.  A later
+    // layout pass can therefore consume it after rebuilding the swapchain.
+    try std.testing.expect(state.consumeResized());
+    try std.testing.expect(!state.consumeResized());
 }
