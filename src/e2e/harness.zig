@@ -98,6 +98,8 @@ pub const Editor = struct {
     win_ctx: window_cmds.WindowCtx = .{},
     /// Stable backing for the window commands' data pointers (registerCommands).
     win_actions: [window_cmds.cmd_count]window_cmds.WindowActionCtx = undefined,
+    /// Stable composition data for provider-aware buffer and target opening.
+    buffer_commands: app_buffers_cmds.Context = undefined,
     /// Last render's pane frame — geometry for focus/move-by-direction intents.
     last_frame_rect: region.Rect = .{ .x = 0, .y = 0, .w = app_w, .h = app_h },
 
@@ -151,7 +153,14 @@ pub const Editor = struct {
         // The app's provider-aware open/close (shadows the core versions): opening
         // a file now attaches syntax + a language server per the lsp-add registry,
         // exactly as main() does, so a .zig buffer gets zls.
-        try app_buffers_cmds.registerCommands(gpa, self.commands, &self.prov.attach_deps);
+        self.buffer_commands = .{
+            .attachments = &self.prov.attach_deps,
+            .directories = .{
+                .context = &self.session,
+                .open = app_session.Session.openLocalDirectoryOpaque,
+            },
+        };
+        try app_buffers_cmds.registerCommands(gpa, self.commands, &self.buffer_commands);
         self.last_active = self.buffers.active_id;
     }
 

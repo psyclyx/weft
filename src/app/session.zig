@@ -43,6 +43,10 @@ const setup = @import("setup.zig");
 const frame = @import("frame.zig");
 const ui_mesh = @import("../gfx/view.zig").ui_mesh;
 const fs_platform = @import("weft_fs_platform");
+const fs = @import("weft_fs");
+const fs_runtime = @import("weft_fs_runtime");
+const semantic = @import("weft_semantic");
+const target_runtime = @import("weft_target_runtime");
 
 pub const Session = struct {
     gpa: std.mem.Allocator,
@@ -65,6 +69,12 @@ pub const Session = struct {
     /// owns only the generic router; this app-owned storage can be replaced by
     /// a Darwin provider without changing core or plugins.
     filesystem_provider: fs_platform.Provider,
+    /// App-owned local directory roots and their trusted semantic
+    /// publications. Core sees only ordinary targets and the generic
+    /// filesystem router; the build-selected platform provider remains here.
+    directory_targets: std.ArrayList(DirectoryTarget) = .empty,
+    filesystem_system: *core.System,
+    filesystem_owner: semantic.owner.Id,
 
     // ── This process's one head (north-star-plan section 6 W2a-1) — APP
     //    GLUE, not a System field: a head is a cursor INTO whichever system
@@ -107,6 +117,7 @@ pub const Session = struct {
     ) !void {
         self.gpa = gpa;
         self.filesystem_provider = fs_platform.Provider.init(gpa);
+        self.directory_targets = .empty;
         errdefer self.filesystem_provider.deinit();
         self.host = core.System.Host.init(gpa);
         errdefer self.host.deinit();
@@ -114,7 +125,9 @@ pub const Session = struct {
         errdefer sys.destroy();
         try self.host.hostSystem(sys);
         self.system = sys;
+        self.filesystem_system = sys;
         try self.system.filesystems.register(.here, self.filesystem_provider.provider());
+        self.filesystem_owner = try self.system.semantic.acquireOwner();
         self.head = .empty;
         // `System.create`'s `builtins.install` already set `sys.default_head`
         // into the modeless floor's "default" mode (the headless dispatch
@@ -145,10 +158,83 @@ pub const Session = struct {
     /// — buffers/caps/keymap/commands/plugins/..., per-system, in
     /// `System.destroy`'s documented order). (completion_ui owns no heap.)
     pub fn deinit(self: *Session, gpa: std.mem.Allocator) void {
+        while (self.directory_targets.items.len != 0)
+            self.closeDirectoryTarget(self.directory_targets.items.len - 1);
+        self.directory_targets.deinit(gpa);
         self.cursor_cfg.deinit();
         self.head.deinit(gpa);
         self.host.deinit();
         self.filesystem_provider.deinit();
+    }
+
+    /// Classify and open a local directory through the same semantic target
+    /// resolver every other locus uses. `false` means the platform provider
+    /// did not classify the path as a directory, so an app shell may continue
+    /// with its ordinary file-opening behavior.
+    pub fn openLocalDirectory(self: *Session, ctx: *core.command.Context, path: []const u8) anyerror!bool {
+        const system = self.filesystem_system;
+        if (ctx.semantic != &system.semantic or ctx.filesystems != &system.filesystems)
+            return error.SemanticUnavailable;
+
+        var index: usize = 0;
+        while (index < self.directory_targets.items.len) : (index += 1) {
+            const existing = &self.directory_targets.items[index];
+            if (!std.mem.eql(u8, existing.path, path)) continue;
+            const descriptor = system.semantic.targets.get(existing.publication.ref);
+            if (descriptor == null or descriptor.?.revision != existing.publication.revision) {
+                self.closeDirectoryTarget(index);
+                break;
+            }
+            _ = system.filesystems.authorizedDirectory(existing.publication.ref, existing.publication.revision) catch {
+                self.closeDirectoryTarget(index);
+                break;
+            };
+            try focusDirectoryTarget(&system.semantic, ctx.head, ctx.gpa, existing.publication.ref);
+            return true;
+        }
+
+        const root = self.filesystem_provider.acquireRoot(path) catch |err| return switch (err) {
+            error.NotFound, error.NotDirectory, error.Unsupported => false,
+            else => err,
+        };
+        errdefer self.filesystem_provider.releaseRoot(root);
+        try self.directory_targets.ensureUnusedCapacity(ctx.gpa, 1);
+        const owned_path = try ctx.gpa.dupe(u8, path);
+        errdefer ctx.gpa.free(owned_path);
+        var publication = try fs_runtime.publication.publish(
+            ctx.gpa,
+            &system.semantic.targets,
+            &system.filesystems,
+            self.filesystem_owner,
+            .{ .display_name = path, .directory = .{ .root = root } },
+        );
+        errdefer _ = publication.close(ctx.gpa, &system.semantic.targets, &system.filesystems);
+        try focusDirectoryTarget(&system.semantic, ctx.head, ctx.gpa, publication.ref);
+        self.directory_targets.appendAssumeCapacity(.{
+            .path = owned_path,
+            .root = root,
+            .publication = publication,
+        });
+        return true;
+    }
+
+    /// Type-erased callback used by app command composition. The command
+    /// layer depends on this behavior interface, not on Session or a concrete
+    /// platform filesystem type.
+    pub fn openLocalDirectoryOpaque(raw: *anyopaque, ctx: *core.command.Context, path: []const u8) anyerror!bool {
+        const self: *Session = @ptrCast(@alignCast(raw));
+        return self.openLocalDirectory(ctx, path);
+    }
+
+    fn closeDirectoryTarget(self: *Session, index: usize) void {
+        var removed = self.directory_targets.swapRemove(index);
+        _ = removed.publication.close(
+            self.gpa,
+            &self.filesystem_system.semantic.targets,
+            &self.filesystem_system.filesystems,
+        );
+        self.filesystem_provider.releaseRoot(removed.root);
+        self.gpa.free(removed.path);
     }
 
     /// Delegating facade: the echo line lives on `head` now (north-star-plan
@@ -222,6 +308,25 @@ pub const Session = struct {
     }
 };
 
+const DirectoryTarget = struct {
+    path: []u8,
+    root: fs.contract.Root,
+    publication: fs_runtime.publication.Registration,
+};
+
+fn focusDirectoryTarget(
+    services: *core.semantic.Services,
+    head: *core.Head,
+    gpa: std.mem.Allocator,
+    target: semantic.target.Ref,
+) anyerror!void {
+    switch (try core.target_open.openAndFocus(services, head, gpa, target)) {
+        .opened => {},
+        .no_handler => return error.NoTargetHandler,
+        .ambiguous => return error.AmbiguousTargetHandlers,
+    }
+}
+
 // ── Tests: task #19 item 1/4's live gate, against the REAL production
 //    Session (not `core/System.zig`'s synthetic fixtures) ──
 
@@ -256,6 +361,60 @@ test "session: RUNS ON a System — init hosts \"editor\", cmd_ctx is wired to i
     const got = try sess.cmd_ctx.editor().text().toOwnedSlice(gpa);
     defer gpa.free(got);
     try t.expectEqualStrings("hi", got);
+}
+
+test "session: local directories become deduplicated semantic targets while files fall through" {
+    const Handler = struct {
+        services: *core.semantic.Services,
+        owner: semantic.owner.Id,
+        opens: usize = 0,
+        last_target: ?semantic.target.Ref = null,
+
+        pub fn probe(_: *@This(), descriptor: semantic.target.Descriptor) target_runtime.resolver.ProbeError!?semantic.target.Match {
+            return if (descriptor.kind == .directory) .exact else null;
+        }
+
+        pub fn open(self: *@This(), located: semantic.target.Located) target_runtime.resolver.OpenError!semantic.view.Ref {
+            self.opens += 1;
+            self.last_target = located.target;
+            return self.services.publishView(t.allocator, self.owner, located.target, self.opens, .{
+                .id = @enumFromInt(1),
+                .focusable = true,
+                .content = .{ .label = "directory tool" },
+            }) catch return error.Failed;
+        }
+    };
+
+    const gpa = t.allocator;
+    const pool = try core.task.Pool.init(gpa, .{ .threads = 1 });
+    defer pool.deinit();
+    var grammars = try testGrammars(gpa);
+    defer grammars.deinit(gpa);
+    var tmp = t.tmpDir(.{});
+    defer tmp.cleanup();
+    try tmp.dir.makeDir("odd\n\xff");
+    const directory_path = try tmp.dir.realpathAlloc(gpa, "odd\n\xff");
+    defer gpa.free(directory_path);
+    try tmp.dir.writeFile(.{ .sub_path = "plain-file", .data = "contents" });
+    const file_path = try tmp.dir.realpathAlloc(gpa, "plain-file");
+    defer gpa.free(file_path);
+
+    var sess: Session = undefined;
+    try sess.init(gpa, pool, "user", &grammars);
+    defer sess.deinit(gpa);
+    const handler_owner = try sess.system.semantic.acquireOwner();
+    var handler: Handler = .{ .services = &sess.system.semantic, .owner = handler_owner };
+    _ = try sess.system.semantic.registerTargetHandler(gpa, handler_owner, "test.directory", .init(&handler));
+
+    try t.expect(try sess.openLocalDirectory(&sess.cmd_ctx, directory_path));
+    const first_target = handler.last_target.?;
+    try t.expectEqual(@as(usize, 1), sess.directory_targets.items.len);
+    try t.expect(try sess.openLocalDirectory(&sess.cmd_ctx, directory_path));
+    try t.expectEqual(first_target, handler.last_target.?);
+    try t.expectEqual(@as(usize, 1), sess.directory_targets.items.len);
+    try t.expectEqual(@as(usize, 2), handler.opens);
+    try t.expect(!try sess.openLocalDirectory(&sess.cmd_ctx, file_path));
+    try t.expectEqual(@as(usize, 1), sess.directory_targets.items.len);
 }
 
 test "session: GATE — system-swap live-rebinds the REAL Session's head; buffers/commands/keymap switch, refuses on an open transient" {

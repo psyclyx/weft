@@ -9,13 +9,27 @@ const std = @import("std");
 const core = @import("../core/core.zig");
 const providers = @import("providers.zig");
 const AttachDeps = providers.AttachDeps;
+
+/// Optional target-producing behavior supplied by the app shell. This is a
+/// generic composition point: buffer commands do not know which tool, if any,
+/// will claim the resulting target.
+pub const DirectoryOpener = struct {
+    context: *anyopaque,
+    open: *const fn (*anyopaque, *core.command.Context, []const u8) anyerror!bool,
+};
+
+pub const Context = struct {
+    attachments: *AttachDeps,
+    directories: ?DirectoryOpener = null,
+};
 const attachProviders = providers.attachProviders;
 const detachProviders = providers.detachProviders;
 
 /// `open <path>` — dedupe by path; `host:path` opens over a persistent
 /// ssh shell (the coreutils tier); providers attach either way.
 pub fn openBufferHandler(ctx: *core.command.Context, data: ?*anyopaque, args: []const core.command.Value) anyerror!core.command.Value {
-    const deps: *AttachDeps = @ptrCast(@alignCast(data.?));
+    const command_context: *Context = @ptrCast(@alignCast(data.?));
+    const deps = command_context.attachments;
     if (args.len != 1 or args[0] != .string) return error.TypeMismatch;
     const spec = args[0].string;
     if (ctx.buffers.findByPath(spec)) |id| {
@@ -44,6 +58,11 @@ pub fn openBufferHandler(ctx: *core.command.Context, data: ?*anyopaque, args: []
                 else => {},
             }
         }
+    }
+
+    if (remote == null) {
+        if (command_context.directories) |directories|
+            if (try directories.open(directories.context, ctx, spec)) return .nil;
     }
 
     const id = try ctx.buffers.create(ctx.gpa, std.fs.path.basename(spec));
@@ -76,7 +95,8 @@ const RemoteBrowse = struct {
 /// `browse-remote <host> <path>` — list a remote directory over the
 /// persistent ssh shell and pick over it (streamed by fs_source).
 pub fn browseRemoteHandler(ctx: *core.command.Context, data: ?*anyopaque, args: []const core.command.Value) anyerror!core.command.Value {
-    const deps: *AttachDeps = @ptrCast(@alignCast(data.?));
+    const command_context: *Context = @ptrCast(@alignCast(data.?));
+    const deps = command_context.attachments;
     if (args.len != 2 or args[0] != .string or args[1] != .string) return error.TypeMismatch;
     const host = args[0].string;
     const path = args[1].string;
@@ -153,7 +173,8 @@ fn joinPath(gpa: std.mem.Allocator, base: []const u8, name: []const u8) ![]u8 {
 }
 
 pub fn closeBufferHandler(ctx: *core.command.Context, data: ?*anyopaque, args: []const core.command.Value) anyerror!core.command.Value {
-    const deps: *AttachDeps = @ptrCast(@alignCast(data.?));
+    const command_context: *Context = @ptrCast(@alignCast(data.?));
+    const deps = command_context.attachments;
     if (args.len != 0) return error.ArityMismatch;
     const b = ctx.buffer();
     if (b.editor.isDirty(ctx.gpa) catch true) return .{ .string = "dirty" };
@@ -178,20 +199,20 @@ pub fn closeBufferHandler(ctx: *core.command.Context, data: ?*anyopaque, args: [
 /// all pointing at the caller-owned `attach_deps`. These shadow the core
 /// versions (registry last-wins): they know about providers and remote
 /// shells, so they must register AFTER `core.builtins.install`.
-pub fn registerCommands(gpa: std.mem.Allocator, commands: *core.command.Commands, attach_deps: *AttachDeps) !void {
+pub fn registerCommands(gpa: std.mem.Allocator, commands: *core.command.Commands, context: *Context) !void {
     _ = try commands.bind(gpa, "open", .{
         .name = "open",
         .summary = "Open a local file or host:path over a shell, with providers.",
         .args = &.{.{ .name = "path", .type = .string }},
         .handler = openBufferHandler,
-        .data = attach_deps,
+        .data = context,
     });
     _ = try commands.bind(gpa, "buffer-close", .{
         .name = "buffer-close",
         .summary = "Close the active buffer (refuses when dirty), detaching providers.",
         .args = &.{},
         .handler = closeBufferHandler,
-        .data = attach_deps,
+        .data = context,
     });
     _ = try commands.bind(gpa, "browse-remote", .{
         .name = "browse-remote",
@@ -201,6 +222,6 @@ pub fn registerCommands(gpa: std.mem.Allocator, commands: *core.command.Commands
             .{ .name = "path", .type = .string },
         },
         .handler = browseRemoteHandler,
-        .data = attach_deps,
+        .data = context,
     });
 }

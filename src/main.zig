@@ -337,7 +337,14 @@ pub fn main(init: std.process.Init) !void {
     try attachProviders(attach_deps, buffers.active());
     // The graphical shell's open/close know about providers and remote
     // shells; they shadow the core versions (registry last-wins).
-    try buffers_cmds.registerCommands(gpa, &session.system.commands, attach_deps);
+    var buffer_command_context: buffers_cmds.Context = .{
+        .attachments = attach_deps,
+        .directories = .{
+            .context = &session,
+            .open = Session.openLocalDirectoryOpaque,
+        },
+    };
+    try buffers_cmds.registerCommands(gpa, &session.system.commands, &buffer_command_context);
 
     // ── Connection (wire v1.1: N shared buffers over one session) ──
     // `Collab` owns the whole connection cluster (outbound conn/session/partial,
