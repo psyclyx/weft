@@ -50,6 +50,7 @@ const register = @import("../wasm_host/register.zig");
 const semantic = @import("../wasm_host/semantic.zig");
 const semantic_action = @import("../wasm_host/semantic_action.zig");
 const semantic_field = @import("../wasm_host/semantic_field.zig");
+const semantic_target = @import("../wasm_host/semantic_target.zig");
 const sessions = @import("../wasm_host/sessions.zig");
 const slot = @import("../wasm_host/slot.zig");
 const surface = @import("../wasm_host/surface.zig");
@@ -232,6 +233,12 @@ const handlers = [_]struct { name: []const u8, handler: HostFn }{
     .{ .name = "wl_semantic_action_request_len", .handler = semantic_action.hRequestLen },
     .{ .name = "wl_semantic_action_request", .handler = semantic_action.hRequest },
     .{ .name = "wl_semantic_action_respond", .handler = semantic_action.hRespond },
+    .{ .name = "wl_semantic_target_handler_register", .handler = semantic_target.hRegister },
+    .{ .name = "wl_semantic_target_handler_close", .handler = semantic_target.hClose },
+    .{ .name = "wl_semantic_target_handler_request_len", .handler = semantic_target.hRequestLen },
+    .{ .name = "wl_semantic_target_handler_request", .handler = semantic_target.hRequest },
+    .{ .name = "wl_semantic_target_handler_probe_respond", .handler = semantic_target.hProbeRespond },
+    .{ .name = "wl_semantic_target_handler_open_respond", .handler = semantic_target.hOpenRespond },
 
     // ── proc.zig — perm-gated off-thread process effects ───────────────
     .{ .name = "wl_shell_insert", .handler = proc.hShellInsert },

@@ -251,6 +251,11 @@ semantic_fields: plugin_semantic.field.Bridge = .empty,
 /// as canonical portable values; no guest pointer survives the callback.
 semantic_actions: plugin_semantic.action.Bridge = .empty,
 
+// ── Sandboxed semantic target handlers ──
+/// Tokenized discovery/open endpoints. Registry entries are owner-revoked
+/// before their stable proxy storage is released during plugin teardown.
+semantic_targets: plugin_semantic.target.Bridge = .empty,
+
 // ── Completion provider (host→guest data-gather) ──
 /// The caps provider id this plugin registered (owned), torn down on
 /// unload. Null until it calls `provideCompletion`.
@@ -364,6 +369,7 @@ pub fn deinit(self: *WasmPlugin) void {
     }
     self.semantic_fields.deinit();
     self.semantic_actions.deinit();
+    self.semantic_targets.deinit();
     // Completion provider dies with the plugin (unregister before freeing
     // its id — the caps registry holds the id by reference).
     if (self.provider_id) |id| {
