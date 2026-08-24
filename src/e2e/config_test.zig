@@ -349,6 +349,13 @@ test "e2e/config: the sample config boots; SPC g i is discoverable via which-key
     );
     try t.expect(ed.buffers.findByName("*dired*") == null);
 
+    // The alternate open binding is the same ordinary launcher contract. It
+    // must reuse the retained semantic target/view rather than introducing a
+    // second tool-specific surface for the same directory.
+    ed.chord("SPC o d");
+    try t.expectEqual(configured_directory_view, ed.head.semantic_focus.path().?.view);
+    try t.expect(ed.buffers.findByName("*dired*") == null);
+
     // Now drive those bindings against a real retained scene. This fixture is
     // intentionally generic: it owns fields, actions, a target link, and an
     // interaction, but has no directory/file/Vim branch. The sample config is
@@ -486,6 +493,15 @@ test "e2e/config: the sample config boots; SPC g i is discoverable via which-key
     try t.expectEqualStrings("enter-op-yank", ed.keymap.resolveExact("normal", "y").?);
     try t.expectEqualStrings(semantic.action.standard.confirm, ed.head.interactions.actionForInput("y").?.id);
     ed.press("y", "y");
+    try t.expectEqual(@as(usize, 1), actions.confirms);
+    try t.expect(ed.head.interactions.active() == null);
+
+    // Cancellation is interaction-local too: it is not a global config/Vim
+    // command and must not leak into which-key or ordinary normal-mode input.
+    ed.chord("SPC v a");
+    try t.expect(ed.head.interactions.active() != null);
+    try t.expectEqualStrings(semantic.action.standard.cancel, ed.head.interactions.actionForInput("n").?.id);
+    ed.press("n", "n");
     try t.expectEqual(@as(usize, 1), actions.confirms);
     try t.expect(ed.head.interactions.active() == null);
 
