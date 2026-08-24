@@ -414,6 +414,20 @@ pub fn build(b: *std.Build) void {
     fs_runtime_step.dependOn(&run_fs_runtime_tests.step);
     contract_step.dependOn(&run_fs_runtime_tests.step);
 
+    // Linux filesystem provider gate. Its module has one dependency edge —
+    // the named portable contract — so legacy core/app/platform code cannot
+    // leak into the native provider unnoticed.
+    const fs_linux = b.createModule(.{
+        .root_source_file = b.path("src/fs_linux/root.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    fs_linux.addImport("weft_fs", architecture.fs);
+    const fs_linux_tests = b.addTest(.{ .root_module = fs_linux });
+    const run_fs_linux_tests = b.addRunArtifact(fs_linux_tests);
+    const fs_linux_step = b.step("test-fs-linux", "Run the Linux filesystem provider tests");
+    fs_linux_step.dependOn(&run_fs_linux_tests.step);
+
     // The `weft` module owns the core/gfx/app files, so its own unit tests run in
     // a second test binary; the `test` step runs both. The two binaries run as
     // sibling, unordered dependencies of `test_step` — Zig's build runner is
