@@ -11,29 +11,40 @@ const fs = @import("weft_fs");
 
 const contract = fs.contract;
 
-pub const Error = contract.Error || fs.plan.ValidationError || fs.plan.ReportValidationError || error{
+pub const Error = contract.Error || fs.plan.ValidationError || fs.plan.ReportValidationError || fs.target.Error || error{
     AuthorityAlreadyRegistered,
     AuthorityRetired,
     UnknownAuthority,
     InvalidHandle,
+    TargetAlreadyBound,
+    TargetUnbound,
+    StaleTarget,
+};
+
+pub const TargetBinding = struct {
+    revision: u64,
+    directory: fs.target.Directory,
 };
 
 pub const Router = struct {
     allocator: std.mem.Allocator,
     providers: std.AutoHashMap(semantic.handle.Authority, fs.service.Provider),
     retired: std.AutoHashMap(semantic.handle.Authority, void),
+    target_bindings: std.AutoHashMap(u128, TargetBinding),
 
     pub fn init(allocator: std.mem.Allocator) Router {
         return .{
             .allocator = allocator,
             .providers = .init(allocator),
             .retired = .init(allocator),
+            .target_bindings = .init(allocator),
         };
     }
 
     pub fn deinit(self: *Router) void {
         self.providers.deinit();
         self.retired.deinit();
+        self.target_bindings.deinit();
         self.* = undefined;
     }
 
@@ -53,9 +64,50 @@ pub const Router = struct {
             if (self.retired.contains(authority)) return error.AuthorityRetired;
             return error.UnknownAuthority;
         }
-        // Retire first.  If allocation fails the live route remains intact.
+        var stale: std.ArrayList(u128) = .empty;
+        defer stale.deinit(self.allocator);
+        var bindings = self.target_bindings.iterator();
+        while (bindings.next()) |entry| {
+            if (entry.value_ptr.directory.root.authority == authority)
+                try stale.append(self.allocator, entry.key_ptr.*);
+        }
+        // Retire only after every potentially failing allocation succeeds.
+        // If either table insertion or stale-key collection fails, the live
+        // route and its bindings remain intact.
         try self.retired.put(authority, {});
         _ = self.providers.remove(authority);
+        for (stale.items) |key| _ = self.target_bindings.remove(key);
+    }
+
+    fn targetKey(target: semantic.target.Ref) u128 {
+        return (@as(u128, @intFromEnum(target.authority)) << 64) |
+            (@as(u128, target.slot) << 32) |
+            @as(u128, target.generation);
+    }
+
+    /// Bind one target revision to a provider-owned filesystem directory.
+    /// This is the authority-bearing counterpart to the target's descriptive
+    /// `weft.fs.directory.v1` fact.  Callers must unbind before closing a
+    /// target or replacing its revision.
+    pub fn bindTarget(self: *Router, target: semantic.target.Ref, revision: u64, directory: fs.target.Directory) Error!void {
+        if (target.generation == 0) return error.InvalidHandle;
+        try fs.target.validate(directory);
+        const key = targetKey(target);
+        if (self.target_bindings.contains(key)) return error.TargetAlreadyBound;
+        try self.target_bindings.put(key, .{ .revision = revision, .directory = directory });
+    }
+
+    pub fn unbindTarget(self: *Router, target: semantic.target.Ref) bool {
+        return self.target_bindings.remove(targetKey(target));
+    }
+
+    /// Return only a binding minted by the in-process filesystem authority.
+    /// A target fact, a root handle, or a matching revision alone is not
+    /// sufficient to authorize a sandbox filesystem operation.
+    pub fn authorizedDirectory(self: *const Router, target: semantic.target.Ref, revision: u64) Error!fs.target.Directory {
+        const binding = self.target_bindings.get(targetKey(target)) orelse return error.TargetUnbound;
+        if (binding.revision != revision) return error.StaleTarget;
+        return binding.directory;
     }
 
     fn providerFor(self: *Router, authority: semantic.handle.Authority) Error!fs.service.Provider {
@@ -348,6 +400,25 @@ test "unregister rejects stale and unknown authorities" {
     try std.testing.expectError(error.AuthorityRetired, router.register(.here, local.asProvider()));
     try std.testing.expectError(error.UnknownAuthority, router.capabilities(makeRoot(@enumFromInt(91))));
     try std.testing.expectError(error.AuthorityRetired, router.pollInvalidation(.{ .authority = .here, .slot = 0, .generation = 1 }));
+}
+
+test "target bindings are explicit, revision-stamped, and retired with their authority" {
+    var provider = TestProvider{ .authority = .here };
+    var router = Router.init(std.testing.allocator);
+    defer router.deinit();
+    const target: semantic.target.Ref = .{ .authority = .here, .slot = 4, .generation = 3 };
+    const directory: fs.target.Directory = .{ .root = makeRoot(.here), .node = .root };
+    try std.testing.expectError(error.TargetUnbound, router.authorizedDirectory(target, 1));
+    try router.bindTarget(target, 1, directory);
+    try std.testing.expectEqual(directory, try router.authorizedDirectory(target, 1));
+    try std.testing.expectError(error.StaleTarget, router.authorizedDirectory(target, 2));
+    try std.testing.expectError(error.TargetAlreadyBound, router.bindTarget(target, 1, directory));
+    try std.testing.expect(router.unbindTarget(target));
+    try std.testing.expectError(error.TargetUnbound, router.authorizedDirectory(target, 1));
+    try router.bindTarget(target, 1, directory);
+    try router.register(.here, provider.asProvider());
+    try router.unregister(.here);
+    try std.testing.expectError(error.TargetUnbound, router.authorizedDirectory(target, 1));
 }
 
 test "apply refuses a cross-provider plan before provider execution" {

@@ -12,6 +12,7 @@ const wasm = @import("../wasm.zig");
 const semantic = @import("weft_semantic");
 const fs = @import("weft_fs");
 const fs_codec = @import("weft_fs_codec");
+const fs_runtime = @import("weft_fs_runtime");
 
 const shared = @import("plugin.zig");
 const WasmPlugin = shared.WasmPlugin;
@@ -30,8 +31,6 @@ pub const Status = enum(i32) {
     output_too_small = -6,
 };
 
-const max_revision_bytes = 8;
-
 const AuthorizationError = error{
     Unavailable,
     StaleTarget,
@@ -39,7 +38,7 @@ const AuthorizationError = error{
     InvalidTarget,
 };
 
-const Authorization = struct {
+pub const AuthorizedDirectory = struct {
     root: fs.contract.Root,
     node: fs.contract.NodeRef,
 };
@@ -67,18 +66,62 @@ fn targetFromArgs(args: []const i32) ?semantic.target.Ref {
 /// Re-derive the filesystem authority from the live semantic target.  The
 /// descriptor revision is part of the request specifically so replacing a
 /// target cannot retarget an old plugin request to a different directory.
-fn authorize(plugin: *WasmPlugin, target: semantic.target.Ref, revision: u64) AuthorizationError!Authorization {
-    const scope = plugin.semanticScope() orelse return error.Unavailable;
-    const descriptor = scope.services.targets.get(target) orelse return error.StaleTarget;
+pub fn authorizeDirectory(
+    router: *const fs_runtime.Router,
+    descriptor: semantic.target.Descriptor,
+    target: semantic.target.Ref,
+    revision: u64,
+) AuthorizationError!AuthorizedDirectory {
+    if (descriptor.ref.eql(target)) {} else return error.StaleTarget;
     if (descriptor.revision != revision) return error.StaleTarget;
     if (descriptor.kind != .directory) return error.Unsupported;
     const directory = fs.target.find(descriptor.facts) catch return error.InvalidTarget;
     const value = directory orelse return error.Unsupported;
-    return .{ .root = value.root, .node = value.node };
+    const bound = router.authorizedDirectory(target, revision) catch |err| switch (err) {
+        error.StaleTarget => return error.StaleTarget,
+        error.TargetUnbound => return error.InvalidTarget,
+        else => return error.InvalidTarget,
+    };
+    if (!sameRoot(value.root, bound.root) or !sameNode(value.node, bound.node)) return error.InvalidTarget;
+    // A target attached to an existing entry is not a confinement boundary:
+    // the plan contract names only its provider root. Until providers mint a
+    // genuinely confined subroot, sandbox calls must stay root-backed.
+    switch (bound.node) {
+        .root => {},
+        .entry => return error.Unsupported,
+    }
+    return .{ .root = bound.root, .node = bound.node };
+}
+
+fn authorize(plugin: *WasmPlugin, target: semantic.target.Ref, revision: u64) AuthorizationError!AuthorizedDirectory {
+    const scope = plugin.semanticScope() orelse return error.Unavailable;
+    const router = plugin.activeCtx().filesystems orelse return error.Unavailable;
+    const descriptor = scope.services.targets.get(target) orelse return error.StaleTarget;
+    return authorizeDirectory(router, descriptor.*, target, revision);
 }
 
 fn sameRoot(a: fs.contract.Root, b: fs.contract.Root) bool {
     return a.authority == b.authority and a.slot == b.slot and a.generation == b.generation;
+}
+
+fn sameNode(a: fs.contract.NodeRef, b: fs.contract.NodeRef) bool {
+    return switch (a) {
+        .root => b == .root,
+        .entry => |left| switch (b) {
+            .root => false,
+            .entry => |right| left.eql(right),
+        },
+    };
+}
+
+fn requireUnrestricted(plugin: *WasmPlugin, caller: *wasm.Caller, comptime perm: shared.Perm) bool {
+    switch (shared.limitFor(plugin, perm)) {
+        .none => return true,
+        .fs_root, .doc_region, .graph_subtree => {
+            caller.trap("plugin '{s}' denied capability '{s}': typed filesystem targets cannot be proven against a path-limited grant", .{ plugin.name, perm.label() });
+            return false;
+        },
+    }
 }
 
 /// V1 intentionally keeps the membrane's authority boundary simple and
@@ -109,6 +152,7 @@ pub fn hList(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32, results
     const plugin: *WasmPlugin = @ptrCast(@alignCast(data.?));
     results[0] = @intFromEnum(Status.unavailable);
     if (!requirePerm(plugin, caller, .fs_read)) return;
+    if (!requireUnrestricted(plugin, caller, .fs_read)) return;
     const target = targetFromArgs(args) orelse {
         results[0] = @intFromEnum(Status.invalid);
         return;
@@ -144,6 +188,7 @@ pub fn hApply(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32, result
     const plugin: *WasmPlugin = @ptrCast(@alignCast(data.?));
     results[0] = @intFromEnum(Status.unavailable);
     if (!requirePerm(plugin, caller, .fs_write)) return;
+    if (!requireUnrestricted(plugin, caller, .fs_write)) return;
     const target = targetFromArgs(args) orelse {
         results[0] = @intFromEnum(Status.invalid);
         return;
@@ -199,4 +244,36 @@ test "typed filesystem plans cannot cross the target root boundary" {
         .operation = .{ .copy = .{ .source = .{ .entry = source }, .destination = destination } },
     }};
     try std.testing.expectError(error.Unsupported, validatePlanRoot(.{ .root = root, .base_revision = &.{}, .operations = &operations }, root));
+}
+
+test "typed filesystem authorization rejects forged facts and entry attachments" {
+    const target: semantic.target.Ref = .{ .authority = .here, .slot = 7, .generation = 1 };
+    const root: fs.contract.Root = .{ .authority = .here, .slot = 1, .generation = 2 };
+    const other_root: fs.contract.Root = .{ .authority = .here, .slot = 9, .generation = 2 };
+    const encoded = try fs.target.encode(std.testing.allocator, .{ .root = root });
+    defer std.testing.allocator.free(encoded);
+    const forged = try fs.target.encode(std.testing.allocator, .{ .root = other_root });
+    defer std.testing.allocator.free(forged);
+    const entry_encoded = try fs.target.encode(std.testing.allocator, .{
+        .root = root,
+        .node = .{ .entry = .{ .authority = .here, .slot = 2, .generation = 1 } },
+    });
+    defer std.testing.allocator.free(entry_encoded);
+    var descriptor: semantic.target.Descriptor = .{
+        .ref = target,
+        .kind = .directory,
+        .display_name = "directory",
+        .facts = &.{.{ .name = fs.target.fact_name, .value = encoded }},
+    };
+    var router = fs_runtime.Router.init(std.testing.allocator);
+    defer router.deinit();
+    try std.testing.expectError(error.TargetUnbound, router.authorizedDirectory(target, 1));
+    try router.bindTarget(target, 1, .{ .root = root });
+    try std.testing.expectEqual(root, (try authorizeDirectory(&router, descriptor, target, 1)).root);
+    descriptor.facts = &.{.{ .name = fs.target.fact_name, .value = forged }};
+    try std.testing.expectError(error.InvalidTarget, authorizeDirectory(&router, descriptor, target, 1));
+    descriptor.facts = &.{.{ .name = fs.target.fact_name, .value = entry_encoded }};
+    try std.testing.expect(router.unbindTarget(target));
+    try router.bindTarget(target, 1, .{ .root = root, .node = .{ .entry = .{ .authority = .here, .slot = 2, .generation = 1 } } });
+    try std.testing.expectError(error.Unsupported, authorizeDirectory(&router, descriptor, target, 1));
 }

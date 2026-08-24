@@ -66,7 +66,7 @@ pub fn find(facts: []const @import("weft_semantic").target.Fact) Error!?Director
     return null;
 }
 
-fn validate(directory: Directory) error{InvalidDirectoryTarget}!void {
+pub fn validate(directory: Directory) error{InvalidDirectoryTarget}!void {
     if (directory.root.generation == 0) return error.InvalidDirectoryTarget;
     switch (directory.node) {
         .root => {},

@@ -7,6 +7,7 @@ pub const router = @import("router.zig");
 
 pub const Error = router.Error;
 pub const Router = router.Router;
+pub const TargetBinding = router.TargetBinding;
 
 test {
     @import("std").testing.refAllDecls(@This());
