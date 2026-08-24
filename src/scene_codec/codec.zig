@@ -292,6 +292,14 @@ fn validateSceneNode(gpa: std.mem.Allocator, node: kernel.scene.Node, seen: *std
         const result = try fact_names.getOrPut(gpa, fact.name);
         if (result.found_existing) return error.Duplicate;
     }
+    if (node.actions.len > Limits.max_actions) return error.LimitExceeded;
+    var action_ids: std.StringHashMapUnmanaged(void) = .empty;
+    defer action_ids.deinit(gpa);
+    for (node.actions) |action| {
+        if (action.id.len == 0 or action.id.len > Limits.max_string_bytes or action.label.len > Limits.max_string_bytes) return error.InvalidData;
+        const result = try action_ids.getOrPut(gpa, action.id);
+        if (result.found_existing) return error.Duplicate;
+    }
     switch (node.content) {
         .container => |container| {
             if (container.children.len > Limits.max_children) return error.LimitExceeded;
@@ -323,6 +331,12 @@ fn encodeSceneNode(writer: *Writer, node: kernel.scene.Node, parent: u32, index:
     for (node.facts) |fact| {
         try writer.string(fact.name);
         try writer.string(fact.value);
+    }
+    try writer.count(node.actions.len, Limits.max_actions);
+    for (node.actions) |action| {
+        try writer.string(action.id);
+        try writer.string(action.label);
+        try writer.byte(if (action.enabled) 1 else 0);
     }
     try writer.writeU16(node.layout.grow);
     try writer.byte(if (node.layout.column != null) 1 else 0);
@@ -383,6 +397,7 @@ const TempNode = struct {
     parent: u32,
     role: []const u8,
     facts: []const kernel.scene.Fact,
+    actions: []const kernel.scene.Action,
     layout: kernel.scene.Layout,
     focusable: bool,
     content: TempContent,
@@ -412,12 +427,28 @@ fn readFacts(reader: *Reader, arena: std.mem.Allocator) Error![]const kernel.sce
     return facts;
 }
 
+fn readActions(reader: *Reader, arena: std.mem.Allocator) Error![]const kernel.scene.Action {
+    const actions = try arena.alloc(kernel.scene.Action, try reader.count(Limits.max_actions));
+    var ids: std.StringHashMapUnmanaged(void) = .empty;
+    defer ids.deinit(arena);
+    for (actions) |*action| {
+        action.id = try reader.string(arena);
+        action.label = try reader.string(arena);
+        action.enabled = try reader.strictBool();
+        if (action.id.len == 0) return error.InvalidData;
+        const result = try ids.getOrPut(arena, action.id);
+        if (result.found_existing) return error.Duplicate;
+    }
+    return actions;
+}
+
 fn readTempNode(reader: *Reader, arena: std.mem.Allocator) Error!TempNode {
     const id = try nodeId(try reader.readU64());
     const parent_raw = try reader.uv();
     if (parent_raw > root_parent) return error.BadReference;
     const role = try reader.string(arena);
     const facts = try readFacts(reader, arena);
+    const actions = try readActions(reader, arena);
     const grow = try reader.readU16();
     const column = if (try reader.strictBool()) try reader.readU16() else null;
     const min_cells = if (try reader.strictBool()) try reader.readU16() else null;
@@ -434,6 +465,7 @@ fn readTempNode(reader: *Reader, arena: std.mem.Allocator) Error!TempNode {
         .parent = @intCast(parent_raw),
         .role = role,
         .facts = facts,
+        .actions = actions,
         .layout = .{ .grow = grow, .column = column, .min_cells = min_cells },
         .focusable = focusable,
         .content = content,
@@ -488,7 +520,7 @@ fn materializeNode(arena: std.mem.Allocator, records: []const TempNode, index: u
     if (depth > Limits.max_depth or index >= records.len) return error.BadReference;
     const record = records[index];
     const node = try arena.create(kernel.scene.Node);
-    node.* = .{ .id = record.id, .role = record.role, .facts = record.facts, .layout = record.layout, .focusable = record.focusable, .content = undefined };
+    node.* = .{ .id = record.id, .role = record.role, .facts = record.facts, .actions = record.actions, .layout = record.layout, .focusable = record.focusable, .content = undefined };
     switch (record.content) {
         .container => |container| {
             const children = try arena.alloc(kernel.scene.Node, container.children.len);
@@ -709,7 +741,7 @@ const t = std.testing;
 
 test "scene codec: preorder scene round-trip preserves semantic fields" {
     const field_ref: kernel.scene.FieldRef = .{ .authority = .here, .slot = 4, .generation = 2 };
-    const leaf = kernel.scene.Node{ .id = @enumFromInt(2), .role = "button", .facts = &.{.{ .name = "kind", .value = "ok" }}, .layout = .{ .grow = 3, .column = 2 }, .focusable = true, .content = .{ .field = .{ .ref = field_ref, .placeholder = "name", .single_line = true } } };
+    const leaf = kernel.scene.Node{ .id = @enumFromInt(2), .role = "button", .facts = &.{.{ .name = "kind", .value = "ok" }}, .actions = &.{.{ .id = "save", .label = "Save", .enabled = false }}, .layout = .{ .grow = 3, .column = 2 }, .focusable = true, .content = .{ .field = .{ .ref = field_ref, .placeholder = "name", .single_line = true } } };
     const root = kernel.scene.Node{ .id = @enumFromInt(1), .role = "root", .content = .{ .container = .{ .axis = .horizontal, .children = &.{leaf} } } };
     const bytes = try encodeScene(t.allocator, root);
     defer t.allocator.free(bytes);
@@ -723,6 +755,8 @@ test "scene codec: preorder scene round-trip preserves semantic fields" {
     try t.expectEqual(@as(u64, 2), @intFromEnum(child.id));
     try t.expectEqualStrings("name", child.content.field.placeholder);
     try t.expectEqual(field_ref, child.content.field.ref);
+    try t.expectEqualStrings("save", child.actions[0].id);
+    try t.expect(!child.actions[0].enabled);
 }
 
 test "interaction and target codecs round-trip defaults, handles, variants, and facts" {
@@ -767,6 +801,12 @@ test "scene codec: duplicate facts/actions/bindings and invalid interaction tags
         .content = .{ .label = "x" },
     };
     try t.expectError(error.Duplicate, encodeScene(t.allocator, duplicate_facts));
+    const duplicate_node_actions: kernel.scene.Node = .{
+        .id = @enumFromInt(1),
+        .actions = &.{ .{ .id = "same", .label = "a" }, .{ .id = "same", .label = "b" } },
+        .content = .{ .label = "x" },
+    };
+    try t.expectError(error.Duplicate, encodeScene(t.allocator, duplicate_node_actions));
 
     const duplicate_actions: kernel.interaction.Definition = .{
         .view = .{ .authority = .here, .slot = 1, .generation = 1 },
