@@ -3,6 +3,7 @@
 //! Input plugins see only whether the dispatching head has a semantic view and
 //! an open action name. They never learn a tool kind or call dired directly.
 
+const std = @import("std");
 const wasm = @import("../wasm.zig");
 const semantic = @import("weft_semantic");
 const scene_codec = @import("weft_scene_codec");
@@ -77,6 +78,45 @@ pub fn hSemanticTargetClose(data: ?*anyopaque, _: *wasm.Caller, args: []const i3
         return;
     };
     results[0] = @intFromBool(scope.services.closeTarget(plugin.gpa, scope.owner, ref));
+}
+
+/// Encode one live target descriptor as the canonical scene-codec snapshot.
+/// `Registry.get` validates both authority and handle generation; the codec
+/// additionally rejects zero revisions before any bytes reach the guest.
+fn describeTarget(plugin: *WasmPlugin, ref: semantic.target.Ref) ?[]u8 {
+    const scope = plugin.semanticScope() orelse return null;
+    const descriptor = scope.services.targets.get(ref) orelse return null;
+    if (!descriptor.ref.eql(ref) or descriptor.revision == 0) return null;
+    return scene_codec.encodeTargetDescriptor(plugin.gpa, descriptor.*) catch null;
+}
+
+/// Return the bounded byte length of the current descriptor snapshot, or -1
+/// for a stale/invalid target. The guest follows this with the copy import;
+/// if a replacement races that second call it must retry or reject, never use
+/// an older descriptor.
+pub fn hSemanticTargetDescribeLen(data: ?*anyopaque, _: *wasm.Caller, args: []const i32, results: []i32) void {
+    const plugin: *WasmPlugin = @ptrCast(@alignCast(data.?));
+    results[0] = -1;
+    const ref = wire_util.readHandle(semantic.target.Ref, args[0..3]) orelse return;
+    const bytes = describeTarget(plugin, ref) orelse return;
+    defer plugin.gpa.free(bytes);
+    if (bytes.len > std.math.maxInt(i32)) return;
+    results[0] = @intCast(bytes.len);
+}
+
+/// Copy one canonical target descriptor snapshot into guest memory. The host
+/// owns the temporary encoding and retains no guest pointer or byte slice.
+pub fn hSemanticTargetDescribe(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32, results: []i32) void {
+    const plugin: *WasmPlugin = @ptrCast(@alignCast(data.?));
+    results[0] = -1;
+    const ref = wire_util.readHandle(semantic.target.Ref, args[0..3]) orelse return;
+    const bytes = describeTarget(plugin, ref) orelse return;
+    defer plugin.gpa.free(bytes);
+    const out_ptr: u32 = @bitCast(args[3]);
+    const out_cap: u32 = @bitCast(args[4]);
+    if (out_cap < bytes.len) return;
+    const written = caller.writeMemory(out_ptr, out_cap, bytes) catch return;
+    if (written == bytes.len) results[0] = @intCast(written);
 }
 
 /// Publish a retained semantic scene. A generation-zero all-zero target wire

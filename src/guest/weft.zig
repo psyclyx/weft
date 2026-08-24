@@ -174,6 +174,8 @@ extern "weft" fn wl_semantic_action(action: u32, action_len: u32) i32;
 extern "weft" fn wl_semantic_target_publish(payload: u32, payload_len: u32, out: u32, out_cap: u32) i32;
 extern "weft" fn wl_semantic_target_replace(authority: u32, slot: u32, generation: u32, payload: u32, payload_len: u32) i32;
 extern "weft" fn wl_semantic_target_close(authority: u32, slot: u32, generation: u32) u32;
+extern "weft" fn wl_semantic_target_describe_len(authority: u32, slot: u32, generation: u32) i32;
+extern "weft" fn wl_semantic_target_describe(authority: u32, slot: u32, generation: u32, out: u32, out_cap: u32) i32;
 extern "weft" fn wl_semantic_view_publish(payload: u32, payload_len: u32, target_authority: u32, target_slot: u32, target_generation: u32, revision: u32, out: u32, out_cap: u32) i32;
 extern "weft" fn wl_semantic_view_replace(authority: u32, slot: u32, generation: u32, revision: u32, payload: u32, payload_len: u32) i32;
 extern "weft" fn wl_semantic_view_close(authority: u32, slot: u32, generation: u32) u32;
@@ -1124,6 +1126,8 @@ pub fn semanticActionInteraction(definition: semantic.interaction.Definition) Se
 
 pub const SemanticPublishError = semantic_codec.Error || error{Rejected};
 
+pub const SemanticTargetDescribeError = semantic_codec.Error || error{Rejected};
+
 fn readSemanticHandle(comptime Ref: type, bytes: *const [12]u8) SemanticPublishError!Ref {
     const wire: semantic.handle.Wire = .{
         .authority = std.mem.readInt(u32, bytes[0..4], .little),
@@ -1155,6 +1159,27 @@ pub fn semanticTargetReplace(ref: semantic.target.Ref, definition: semantic.targ
 pub fn semanticTargetClose(ref: semantic.target.Ref) bool {
     const wire = ref.toWire();
     return wl_semantic_target_close(wire.authority, wire.slot, wire.generation) != 0;
+}
+
+/// Read a live target descriptor as one canonical, owned snapshot. The host
+/// validates the authority/generation before encoding; the guest validates
+/// that the returned descriptor still names the requested generation and has
+/// a non-zero revision. A replacement racing the length/copy pair fails
+/// closed rather than returning an ambiguous partial value.
+pub fn semanticTargetDescribe(ref: semantic.target.Ref, gpa: std.mem.Allocator) SemanticTargetDescribeError!semantic_codec.target.OwnedDescriptor {
+    const wire = ref.toWire();
+    const raw_len = wl_semantic_target_describe_len(wire.authority, wire.slot, wire.generation);
+    if (raw_len <= 0) return error.Rejected;
+    const len: usize = @intCast(raw_len);
+    if (len > semantic_codec.Limits.max_payload_bytes) return error.LimitExceeded;
+    const bytes = try gpa.alloc(u8, len);
+    defer gpa.free(bytes);
+    const written = wl_semantic_target_describe(wire.authority, wire.slot, wire.generation, p(bytes.ptr), @intCast(bytes.len));
+    if (written != raw_len) return error.Rejected;
+    var descriptor = try semantic_codec.target.decodeDescriptor(gpa, bytes);
+    errdefer descriptor.deinit();
+    if (!descriptor.value.ref.eql(ref) or descriptor.value.revision == 0) return error.Rejected;
+    return descriptor;
 }
 
 // ── Generic target-handler callbacks ─────────────────────────────────

@@ -221,6 +221,8 @@ const handlers = [_]struct { name: []const u8, handler: HostFn }{
     .{ .name = "wl_semantic_target_publish", .handler = semantic.hSemanticTargetPublish },
     .{ .name = "wl_semantic_target_replace", .handler = semantic.hSemanticTargetReplace },
     .{ .name = "wl_semantic_target_close", .handler = semantic.hSemanticTargetClose },
+    .{ .name = "wl_semantic_target_describe_len", .handler = semantic.hSemanticTargetDescribeLen },
+    .{ .name = "wl_semantic_target_describe", .handler = semantic.hSemanticTargetDescribe },
     .{ .name = "wl_semantic_view_publish", .handler = semantic.hSemanticViewPublish },
     .{ .name = "wl_semantic_view_replace", .handler = semantic.hSemanticViewReplace },
     .{ .name = "wl_semantic_view_close", .handler = semantic.hSemanticViewClose },

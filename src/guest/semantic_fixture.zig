@@ -11,11 +11,22 @@ var view_ref: semantic.view.Ref = undefined;
 
 export fn init() void {
     if (!weft.semanticActionProvider()) unreachable;
-    target_ref = weft.semanticTargetPublish(.{
+    const target_definition: semantic.target.Definition = .{
         .kind = .directory,
         .display_name = "fixture directory",
         .facts = &.{.{ .name = "locus", .value = "synthetic:test" }},
-    }) catch unreachable;
+    };
+    target_ref = weft.semanticTargetPublish(target_definition) catch unreachable;
+    var initial_target = weft.semanticTargetDescribe(target_ref, weft.allocator) catch unreachable;
+    defer initial_target.deinit();
+    if (!initial_target.value.ref.eql(target_ref) or initial_target.value.revision != 1 or
+        !std.mem.eql(u8, initial_target.value.display_name, "fixture directory")) unreachable;
+    const stale_ref: semantic.target.Ref = .{ .authority = target_ref.authority, .slot = target_ref.slot, .generation = target_ref.generation + 1 };
+    if (weft.semanticTargetDescribe(stale_ref, weft.allocator)) |_| unreachable else |_| {}
+    weft.semanticTargetReplace(target_ref, target_definition) catch unreachable;
+    var replaced_target = weft.semanticTargetDescribe(target_ref, weft.allocator) catch unreachable;
+    defer replaced_target.deinit();
+    if (replaced_target.value.revision != 2 or !replaced_target.value.ref.eql(target_ref)) unreachable;
     _ = weft.semanticTargetHandlerRegister(77, "fixture-directory") catch unreachable;
     field_ref = weft.semanticFieldRegister(41, .{
         .revision = "1",
@@ -78,7 +89,7 @@ export fn on_semantic_target_probe(token: u32) void {
     };
     defer request.deinit();
     const descriptor = request.value;
-    if (descriptor.kind != .directory or descriptor.revision != 1 or
+    if (descriptor.kind != .directory or descriptor.revision != 2 or
         !descriptor.ref.eql(target_ref) or !hasFact(descriptor, "locus", "synthetic:test"))
     {
         _ = weft.semanticTargetHandlerProbeNone();
@@ -101,7 +112,7 @@ export fn on_semantic_target_open(token: u32) void {
         return;
     };
     defer request.deinit();
-    if (!request.value.target.eql(target_ref) or request.value.revision != 1) {
+    if (!request.value.target.eql(target_ref) or request.value.revision != 2) {
         _ = weft.semanticTargetHandlerOpenError(error.StaleTarget);
         return;
     }

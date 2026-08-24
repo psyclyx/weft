@@ -48,7 +48,7 @@ test "wasm plugin: canonical targets and scenes cross the semantic membrane" {
     const view_ref: @import("weft_semantic").view.Ref = .{ .authority = .here, .slot = 0, .generation = 1 };
     const view = semantic.views.get(view_ref).?;
     try t.expect(view.descriptor.target.?.ref.eql(target_ref));
-    try t.expectEqual(@as(u64, 1), view.descriptor.target.?.revision);
+    try t.expectEqual(@as(u64, 2), view.descriptor.target.?.revision);
     try t.expectEqual(@as(u64, 7), view.descriptor.revision);
 
     // The same retained target is discoverable through the generic resolver,
