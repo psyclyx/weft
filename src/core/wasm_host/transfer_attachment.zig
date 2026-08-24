@@ -133,8 +133,14 @@ pub const Registry = struct {
             lease_resource.release();
             return err;
         };
-        errdefer state.collectIfUnused();
-        try self.entries.put(attachment, state);
+        // The state owns the initial guest reference. If the registry cannot
+        // publish the mapping, release that reference before collecting so
+        // both the state allocation and provider lease are reclaimed.
+        self.entries.put(attachment, state) catch |err| {
+            state.guest_refs = 0;
+            state.collectIfUnused();
+            return err;
+        };
         return attachment;
     }
 

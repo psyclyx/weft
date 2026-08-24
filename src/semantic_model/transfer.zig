@@ -55,6 +55,7 @@ pub const Source = struct {
 pub const ValidationError = error{
     NoRepresentations,
     InvalidMediaType,
+    InvalidAttachment,
     DuplicateRepresentation,
 } || std.mem.Allocator.Error;
 
@@ -70,6 +71,9 @@ pub const Item = struct {
         defer seen.deinit(gpa);
         for (self.representations) |candidate| {
             if (candidate.media_type.len == 0) return error.InvalidMediaType;
+            if (candidate.attachment) |attachment| {
+                if (attachment.generation == 0) return error.InvalidAttachment;
+            }
             const result = try seen.getOrPut(gpa, candidate.media_type);
             if (result.found_existing) return error.DuplicateRepresentation;
         }
@@ -144,6 +148,16 @@ test "transfer requires unique typed representations" {
     };
     const item: Item = .{ .intent = .copy, .representations = &reps };
     try std.testing.expectError(error.DuplicateRepresentation, item.validate(std.testing.allocator));
+}
+
+test "transfer rejects malformed attachment generations before transport" {
+    const reps = [_]Representation{.{
+        .media_type = "application/test",
+        .payload = "payload",
+        .attachment = Attachment.fromWire(.{ .authority = 7, .slot = 1, .generation = 0 }),
+    }};
+    const item: Item = .{ .intent = .copy, .representations = &reps };
+    try std.testing.expectError(error.InvalidAttachment, item.validate(std.testing.allocator));
 }
 
 test "owned transfer survives mutation of producer storage" {
