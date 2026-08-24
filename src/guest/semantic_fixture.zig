@@ -19,16 +19,19 @@ export fn init() void {
         .single_line = true,
     }) catch unreachable;
     const child: kernel.scene.Node = .{
-        .id = @enumFromInt(2),
+        // Deliberately above wasm32's word width: the focus import must carry
+        // the canonical NodeId without truncating its high half.
+        .id = @enumFromInt(0x1_0000_0002),
         .focusable = true,
         .actions = &.{.{ .id = "fixture.open", .label = "Open" }},
         .content = .{ .field = .{ .ref = field_ref, .placeholder = "name", .single_line = true } },
     };
-    _ = weft.semanticViewPublish(.{
+    const view = weft.semanticViewPublish(.{
         .id = @enumFromInt(1),
         .role = "fixture",
         .content = .{ .container = .{ .children = &.{child} } },
     }, target, 7) catch unreachable;
+    if (!weft.semanticViewFocus(view, child.id)) unreachable;
 }
 
 export fn on_semantic_field_edit(token: u32) void {

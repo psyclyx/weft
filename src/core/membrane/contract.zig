@@ -211,6 +211,7 @@ const handlers = [_]struct { name: []const u8, handler: HostFn }{
 
     // ── semantic.zig — generic focused-view actions ───────────────────
     .{ .name = "wl_semantic_active", .handler = semantic.hSemanticActive },
+    .{ .name = "wl_semantic_view_focus", .handler = semantic.hSemanticViewFocus },
     .{ .name = "wl_semantic_action", .handler = semantic.hSemanticAction },
     .{ .name = "wl_semantic_target_publish", .handler = semantic.hSemanticTargetPublish },
     .{ .name = "wl_semantic_target_replace", .handler = semantic.hSemanticTargetReplace },

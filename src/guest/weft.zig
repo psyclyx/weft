@@ -165,6 +165,7 @@ extern "weft" fn wl_register_text(out_ptr: u32, out_cap: u32) u32;
 extern "weft" fn wl_register_linewise() u32;
 extern "weft" fn wl_paste_at(base: u32) void;
 extern "weft" fn wl_semantic_active() u32;
+extern "weft" fn wl_semantic_view_focus(authority: u32, slot: u32, generation: u32, preferred_low: u32, preferred_high: u32, has_preferred: u32) i32;
 extern "weft" fn wl_semantic_action(action: u32, action_len: u32) i32;
 extern "weft" fn wl_semantic_target_publish(payload: u32, payload_len: u32, out: u32, out_cap: u32) i32;
 extern "weft" fn wl_semantic_target_replace(authority: u32, slot: u32, generation: u32, payload: u32, payload_len: u32) i32;
@@ -1009,6 +1010,17 @@ pub fn pasteAt(base: usize) void {
 /// open actions; no tool identity or mode crosses this boundary.
 pub fn semanticActive() bool {
     return wl_semantic_active() != 0;
+}
+
+/// Attach a retained semantic view to this head. NodeId is canonically split
+/// into two wasm32 words; the explicit presence bit keeps an absent preference
+/// distinct from any raw u64 value.
+pub fn semanticViewFocus(ref: semantic_kernel.view.Ref, preferred: ?semantic_kernel.scene.NodeId) bool {
+    const wire = ref.toWire();
+    const raw: u64 = if (preferred) |node| @intFromEnum(node) else 0;
+    const low: u32 = @truncate(raw);
+    const high: u32 = @truncate(raw >> 32);
+    return wl_semantic_view_focus(wire.authority, wire.slot, wire.generation, low, high, @intFromBool(preferred != null)) != 0;
 }
 
 pub const SemanticActionResult = enum(i32) {

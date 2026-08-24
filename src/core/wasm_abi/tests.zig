@@ -63,6 +63,7 @@ test "wasm plugin: canonical targets and scenes cross the semantic membrane" {
     try t.expectEqualStrings("2", snapshot.value.revision);
     try t.expectEqualStrings("renamed", snapshot.value.bytes);
     try t.expectEqual(@as(u64, 7), snapshot.value.selection.caret);
+    try t.expectEqual(@as(@import("weft_kernel").scene.NodeId, @enumFromInt(0x1_0000_0002)), env.head.semantic_focus.path().?.leaf().?);
 
     plugin.deinit();
     try t.expect(semantic.targets.get(target_ref) == null);

@@ -283,6 +283,7 @@ pub const imports = [_]Entry{
 
     // ── semantic.zig — tool-neutral focused-view actions ───────────────
     .{ .name = "wl_semantic_active", .params = &.{}, .results = &.{.u32}, .group = .semantic, .doc = "whether this head currently focuses a live semantic view" },
+    .{ .name = "wl_semantic_view_focus", .params = &.{ .u32, .u32, .u32, .u32, .u32, .u32 }, .results = &.{.i32}, .group = .semantic, .head_gated = true, .doc = "attach a live semantic view to this head, using an optional canonical u64 NodeId preference" },
     .{ .name = "wl_semantic_action", .params = &.{ .u32, .u32 }, .results = &.{.i32}, .group = .semantic, .head_gated = true, .doc = "invoke an open action on the deepest advertising node of the focused semantic view" },
     .{ .name = "wl_semantic_target_publish", .params = &.{ .u32, .u32, .u32, .u32 }, .results = &.{.i32}, .group = .semantic, .doc = "admit a canonical target definition and write its typed handle" },
     .{ .name = "wl_semantic_target_replace", .params = &.{ .u32, .u32, .u32, .u32, .u32 }, .results = &.{.i32}, .group = .semantic, .doc = "replace an owned target definition without changing its identity" },
@@ -351,7 +352,7 @@ pub const imports = [_]Entry{
 /// half-finished edit — fails the build with a pointed message instead of
 /// silently drifting the two ~124-entry tables apart again (the exact class
 /// this table exists to kill).
-const expected_import_count = 142;
+const expected_import_count = 143;
 
 /// A host→guest EXPORT entrypoint (design doc/north-star-plan.md §2.5, task
 /// W0a-D extension 2): every `instance.callVoid("name", args)` the host

@@ -133,6 +133,27 @@ pub fn hSemanticActive(data: ?*anyopaque, _: *wasm.Caller, _: []const i32, resul
     results[0] = @intFromBool(services.hasActiveView(plugin.activeCtx().head));
 }
 
+/// Attach a live semantic view to the dispatching head. NodeId is a u64 in
+/// the kernel, so the wasm32 ABI carries explicit low/high words plus a
+/// presence bit; neither side narrows it through an i32 result or handle.
+pub fn hSemanticViewFocus(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32, results: []i32) void {
+    const plugin: *WasmPlugin = @ptrCast(@alignCast(data.?));
+    results[0] = 0;
+    if (!requireDispatch(plugin, caller, "wl_semantic_view_focus")) return;
+    const ref = wire_util.readHandle(kernel.view.Ref, args[0..3]) orelse return;
+    const has_preferred: u32 = @bitCast(args[5]);
+    if (has_preferred > 1) return;
+    const preferred: ?kernel.scene.NodeId = if (has_preferred == 0) null else blk: {
+        const low: u64 = @as(u64, @bitCast(args[3]));
+        const high: u64 = @as(u64, @bitCast(args[4]));
+        break :blk @enumFromInt((high << 32) | low);
+    };
+    const ctx = plugin.activeCtx();
+    const services = ctx.semantic orelse return;
+    _ = services.focusView(&ctx.head, plugin.gpa, ref, preferred) catch return;
+    results[0] = 1;
+}
+
 /// Return values are transport status, not policy: 0 unavailable/declined,
 /// 1 handled, 2 transfer stored, 3 interaction opened, -1 refused/failed.
 pub fn hSemanticAction(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32, results: []i32) void {

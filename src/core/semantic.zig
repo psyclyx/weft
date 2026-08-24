@@ -165,6 +165,29 @@ pub const Services = struct {
     pub const FocusError = view_runtime.view.Error;
     pub const FieldInputError = view_runtime.field.Error || error{StaleField};
 
+    /// Attach one live retained view to exactly one head. A preferred node is
+    /// accepted only while it exists in that view; stale preferences recover
+    /// to the view's first focusable node, or its root when none are
+    /// focusable. The path is copied into the head, so no view or scene
+    /// storage escapes this call.
+    pub fn focusView(
+        self: *const Services,
+        head: *Head,
+        gpa: std.mem.Allocator,
+        ref: kernel.view.Ref,
+        preferred: ?kernel.scene.NodeId,
+    ) FocusError!kernel.scene.NodeId {
+        const instance = self.views.get(ref) orelse return error.StaleView;
+        const selected = if (preferred) |candidate|
+            if (instance.node(candidate) != null) candidate else instance.reconcileFocus(null) orelse instance.descriptor.root
+        else
+            instance.reconcileFocus(null) orelse instance.descriptor.root;
+        var storage: [1026]kernel.scene.NodeId = undefined;
+        const path = (try instance.focusPath(selected, &storage)) orelse return error.StaleView;
+        try head.semantic_focus.set(gpa, path);
+        return selected;
+    }
+
     /// The small generic editing vocabulary used by ordinary editor commands
     /// when focus belongs to a semantic field. Byte offsets are deliberate:
     /// fields may contain raw filesystem names, not necessarily UTF-8 text.
@@ -473,6 +496,46 @@ test "semantic services keep target, view, and field namespaces typed" {
     try std.testing.expect(services.targets.get(target_ref) == null);
     try std.testing.expect(services.views.get(view_ref) == null);
     try std.testing.expectEqual(Services.Released{}, services.releaseOwner(std.testing.allocator, "test"));
+}
+
+test "semantic view focus is head-scoped with preferred and root fallback" {
+    var services = Services.init(.here);
+    defer services.deinit(std.testing.allocator);
+    const children = [_]kernel.scene.Node{
+        .{ .id = @enumFromInt(2), .focusable = true, .content = .{ .label = "first" } },
+        .{ .id = @enumFromInt(3), .focusable = true, .content = .{ .label = "second" } },
+    };
+    const view_ref = try services.publishView(std.testing.allocator, "focus", null, 1, .{
+        .id = @enumFromInt(1),
+        .content = .{ .container = .{ .children = &children } },
+    });
+    var head_a: Head = .empty;
+    defer head_a.deinit(std.testing.allocator);
+    var head_b: Head = .empty;
+    defer head_b.deinit(std.testing.allocator);
+
+    try std.testing.expectEqual(@as(kernel.scene.NodeId, @enumFromInt(3)), try services.focusView(&head_a, std.testing.allocator, view_ref, @enumFromInt(3)));
+    try std.testing.expectEqual(@as(kernel.scene.NodeId, @enumFromInt(3)), head_a.semantic_focus.path().?.leaf().?);
+    try std.testing.expectEqual(@as(kernel.scene.NodeId, @enumFromInt(2)), try services.focusView(&head_b, std.testing.allocator, view_ref, null));
+    try std.testing.expectEqual(@as(kernel.scene.NodeId, @enumFromInt(2)), head_b.semantic_focus.path().?.leaf().?);
+    // An unknown preference recovers without disturbing the other head.
+    try std.testing.expectEqual(@as(kernel.scene.NodeId, @enumFromInt(2)), try services.focusView(&head_a, std.testing.allocator, view_ref, @enumFromInt(99)));
+    try std.testing.expectEqual(@as(kernel.scene.NodeId, @enumFromInt(2)), head_a.semantic_focus.path().?.leaf().?);
+    try std.testing.expectEqual(@as(kernel.scene.NodeId, @enumFromInt(2)), head_b.semantic_focus.path().?.leaf().?);
+
+    var foreign = view_ref;
+    foreign.authority = @enumFromInt(42);
+    try std.testing.expectError(error.StaleView, services.focusView(&head_a, std.testing.allocator, foreign, null));
+    try std.testing.expectEqual(@as(kernel.scene.NodeId, @enumFromInt(2)), head_a.semantic_focus.path().?.leaf().?);
+    try services.closeView(std.testing.allocator, "focus", view_ref);
+    try std.testing.expectError(error.StaleView, services.focusView(&head_b, std.testing.allocator, view_ref, null));
+
+    const root_only = try services.publishView(std.testing.allocator, "root-only", null, 1, .{
+        .id = @enumFromInt(10),
+        .content = .{ .label = "root" },
+    });
+    try std.testing.expectEqual(@as(kernel.scene.NodeId, @enumFromInt(10)), try services.focusView(&head_b, std.testing.allocator, root_only, null));
+    try std.testing.expectEqual(@as(kernel.scene.NodeId, @enumFromInt(10)), head_b.semantic_focus.path().?.leaf().?);
 }
 
 test "interaction-local input invokes semantic action and closes explicitly" {
