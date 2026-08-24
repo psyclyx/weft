@@ -313,25 +313,25 @@ pub const Model = struct {
     fn appendPending(self: *Model, parent: ?NodeId, name: []const u8, kind: contract.Kind, mode: ?u32, contents: []const u8, link_target: []const u8, pending: Pending) !NodeId {
         if (name.len > max_transfer_name) return error.TransferTooLarge;
         try self.validateParent(parent);
+        const insertion_index = try self.parentInsertionIndex(parent);
         _ = try contract.Name.init(name);
         const id = self.next_id;
         var pending_row = try self.makePendingRow(id, parent, name, kind, mode, contents, link_target, pending);
         var committed = false;
         errdefer if (!committed) self.freeRow(&pending_row);
-        try self.rows.append(self.gpa, pending_row);
-        self.next_id += 1;
+        _ = try self.insertOwnedRows(insertion_index, &.{pending_row});
         committed = true;
         return id;
     }
 
     fn appendCopied(self: *Model, parent: ?NodeId, name: []const u8, captured: EntryCapture, intent: transfer.Intent) !NodeId {
         try self.validateParent(parent);
+        const insertion_index = try self.parentInsertionIndex(parent);
         const id = self.next_id;
         var copied_row = try self.makeCopiedRow(id, parent, name, captured, intent);
         var committed = false;
         errdefer if (!committed) self.freeRow(&copied_row);
-        try self.rows.append(self.gpa, copied_row);
-        self.next_id += 1;
+        _ = try self.insertOwnedRows(insertion_index, &.{copied_row});
         committed = true;
         return id;
     }
@@ -377,8 +377,15 @@ pub const Model = struct {
             try seen.put(self.gpa, id, {});
             const parent_row = self.row(id) orelse return error.UnknownParent;
             if (parent_row.draft.kind != .directory) return error.NotDirectory;
+            if (parent_row.pending == .deleted or parent_row.conflict == .stale) return error.StaleParent;
             cursor = parent_row.parent;
         }
+    }
+
+    fn parentInsertionIndex(self: *const Model, parent: ?NodeId) !usize {
+        const id = parent orelse return self.rows.items.len;
+        const index = self.indexOf(id) orelse return error.UnknownParent;
+        return self.subtreeEnd(index);
     }
 
     fn anchorIndex(self: *const Model, anchor: PasteAnchor, placement: PastePlacement) !usize {
@@ -389,6 +396,7 @@ pub const Model = struct {
         if (anchor.parent) |parent| {
             const parent_row = self.row(parent) orelse return error.StaleAnchor;
             if (parent_row.draft.kind != .directory) return error.NotDirectory;
+            if (parent_row.pending == .deleted or parent_row.conflict == .stale) return error.StaleAnchor;
         }
         return switch (placement) {
             .before => anchor_index,
@@ -477,7 +485,8 @@ pub const Model = struct {
     }
 
     fn decodeTree(self: *Model, parent: ?NodeId, root_name: []const u8, payload: []const u8, intent: transfer.Intent) !NodeId {
-        return self.decodeTreeAt(parent, root_name, payload, intent, self.rows.items.len);
+        const insertion_index = try self.parentInsertionIndex(parent);
+        return self.decodeTreeAt(parent, root_name, payload, intent, insertion_index);
     }
 
     fn decodeTreeAt(self: *Model, parent: ?NodeId, root_name: []const u8, payload: []const u8, intent: transfer.Intent, insertion_index: usize) !NodeId {
@@ -959,6 +968,38 @@ test "pending subtree paste stays contiguous preorder around siblings after sour
     try std.testing.expectEqualStrings("right", destination.rows.items[5].draft.name);
 }
 
+test "late pending child is inserted after its parent subtree, not after later siblings" {
+    var model = Model.init(std.testing.allocator, .{ .authority = .here, .slot = 60, .generation = 1 });
+    defer model.deinit();
+    const parent = try model.addDirectory(null, "parent", null);
+    _ = try model.addFile(null, "sibling", "", null);
+    const child = try model.addFile(parent, "child", "", null);
+    try std.testing.expectEqual(parent, model.rows.items[0].id);
+    try std.testing.expectEqual(child, model.rows.items[1].id);
+    try std.testing.expectEqualStrings("sibling", model.rows.items[2].draft.name);
+}
+
+test "paste after directory lands after its complete existing subtree" {
+    var source = Model.init(std.testing.allocator, .{ .authority = .here, .slot = 61, .generation = 1 });
+    defer source.deinit();
+    try source.reconcile(.{ .entries = &.{.{ .identity = ref(62, 1), .name = "copy", .revision = "r", .kind = .regular }} });
+    var item = try source.yank(source.rows.items[0].id, .copy);
+    defer item.deinit();
+
+    var destination = Model.init(std.testing.allocator, .{ .authority = .here, .slot = 63, .generation = 1 });
+    defer destination.deinit();
+    const directory = try destination.addDirectory(null, "directory", null);
+    _ = try destination.addFile(directory, "child", "", null);
+    _ = try destination.addFile(null, "sibling", "", null);
+    _ = try destination.paste(directory, &item);
+    _ = try destination.pasteAt(.{ .row = directory, .parent = null }, .after, &item);
+    try std.testing.expectEqualStrings("directory", destination.rows.items[0].draft.name);
+    try std.testing.expectEqualStrings("child", destination.rows.items[1].draft.name);
+    try std.testing.expectEqualStrings("copy", destination.rows.items[2].draft.name);
+    try std.testing.expectEqualStrings("copy", destination.rows.items[3].draft.name);
+    try std.testing.expectEqualStrings("sibling", destination.rows.items[4].draft.name);
+}
+
 test "paste placement rejects stale anchors without changing draft rows" {
     var source = Model.init(std.testing.allocator, .{ .authority = .here, .slot = 50, .generation = 1 });
     defer source.deinit();
@@ -979,6 +1020,24 @@ test "paste placement rejects stale anchors without changing draft rows" {
     try std.testing.expectError(error.StaleAnchor, destination.pasteAt(.{ .row = anchor, .parent = null }, .before, &item));
     try std.testing.expectEqual(before_rows, destination.rows.items.len);
     try std.testing.expectEqual(before_next, destination.next_id);
+
+    const parent = try destination.addDirectory(null, "parent", null);
+    const child = try destination.addFile(parent, "child", "", null);
+    try destination.markDelete(parent);
+    const parent_before_rows = destination.rows.items.len;
+    const parent_before_next = destination.next_id;
+    try std.testing.expectError(error.StaleAnchor, destination.pasteAt(.{ .row = child, .parent = parent }, .before, &item));
+    try std.testing.expectEqual(parent_before_rows, destination.rows.items.len);
+    try std.testing.expectEqual(parent_before_next, destination.next_id);
+
+    var stale_model = Model.init(std.testing.allocator, .{ .authority = .here, .slot = 53, .generation = 1 });
+    defer stale_model.deinit();
+    try stale_model.reconcile(.{ .entries = &.{.{ .identity = ref(54, 1), .name = "parent", .revision = "r", .kind = .directory }} });
+    const stale_parent = stale_model.rows.items[0].id;
+    try stale_model.rename(stale_parent, "draft-parent");
+    const stale_child = try stale_model.addFile(stale_parent, "child", "", null);
+    try stale_model.reconcile(.{ .entries = &.{} });
+    try std.testing.expectError(error.StaleAnchor, stale_model.pasteAt(.{ .row = stale_child, .parent = stale_parent }, .before, &item));
 }
 
 test "dirty external mutation is stale and duplicate snapshots are rejected transactionally" {
