@@ -154,7 +154,7 @@ pub const Plugin = struct {
                     session.controller.capture = staged_controller.takeCapture();
                     return .{ .transfer = session.controller.captured().? };
                 },
-                .declined, .interaction => {},
+                .declined, .interaction, .open_target => {},
             }
             return outcome;
         }
