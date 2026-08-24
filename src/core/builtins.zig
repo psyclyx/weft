@@ -12,6 +12,8 @@ const Value = command.Value;
 const facts = @import("facts.zig");
 const container_mod = @import("container.zig");
 const Actions = @import("action.zig");
+const target_open = @import("target_open.zig");
+const semantic_model = @import("weft_semantic");
 
 const ok: Value = .nil;
 
@@ -239,6 +241,31 @@ fn cOpen(ctx: *Context, args: struct { path: []const u8 }) anyerror!Value {
     return .{ .integer = @intCast(id) };
 }
 
+/// Open a previously published semantic target on this dispatching head.
+/// The three words are the portable target handle; publication belongs to a
+/// filesystem or other producer, never to this generic command.  A missing or
+/// ambiguous handler is surfaced as an error so a UI can choose a policy
+/// (picker, fallback, or a visible refusal) instead of inheriting one here.
+fn cOpenTarget(ctx: *Context, args: struct { authority: i64, slot: i64, generation: i64 }) anyerror!Value {
+    const services = ctx.semantic orelse return error.SemanticUnavailable;
+    const wire = semantic_model.handle.Wire{
+        .authority = try targetWord(args.authority),
+        .slot = try targetWord(args.slot),
+        .generation = try targetWord(args.generation),
+    };
+    const result = try target_open.openAndFocus(services, ctx.head, ctx.gpa, semantic_model.target.Ref.fromWire(wire));
+    return switch (result) {
+        .opened => .nil,
+        .no_handler => error.NoTargetHandler,
+        .ambiguous => error.AmbiguousTargetHandlers,
+    };
+}
+
+fn targetWord(value: i64) error{TypeMismatch}!u32 {
+    if (value < 0 or value > std.math.maxInt(u32)) return error.TypeMismatch;
+    return @intCast(value);
+}
+
 /// Re-point the buffer at a new local path and save. Refuses to
 /// clobber an existing file (create-guarded) — open it instead if you
 /// mean to overwrite its history.
@@ -328,6 +355,7 @@ const table = [_]command.Command{
     command.define("buffer-close", "Close the active buffer (refuses when dirty).", cBufferClose),
     command.define("buffer-read-only", "Set/clear the active buffer's read-only flag.", cBufferReadOnly),
     command.define("open", "Open a file in a buffer (dedupes by path).", cOpen),
+    command.define("open-target", "Open and focus a published semantic target.", cOpenTarget),
     command.define("echo", "Show a message on the status line.", cEcho),
     command.define("save-as", "Save to a new path (refuses to clobber an existing file).", cSaveAs),
     command.define("delete-backward", "Delete the selection or the character before the cursor.", cDeleteBackward),
