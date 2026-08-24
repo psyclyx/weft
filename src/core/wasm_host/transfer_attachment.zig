@@ -213,6 +213,41 @@ fn attachmentFromArgs(args: []const i32) semantic.transfer.Attachment {
     };
 }
 
+const TestProvider = struct {
+    released: usize = 0,
+
+    pub fn capabilities(_: *@This(), _: contract.Root) contract.Error!contract.Capabilities {
+        return .{ .durable_lease = .{ .regular_file_max_bytes = 1024, .symlink_target_max_bytes = 1024 } };
+    }
+    pub fn observe(_: *@This(), gpa: std.mem.Allocator, _: contract.Root, node: contract.NodeRef) contract.Error!contract.OwnedObservation {
+        var value = contract.OwnedObservation.init(gpa);
+        value.value = .{ .node = node, .revision = .{ .token = "r" }, .kind = .regular };
+        return value;
+    }
+    pub fn list(_: *@This(), _: std.mem.Allocator, _: contract.Root, _: contract.NodeRef) contract.Error!contract.OwnedListing {
+        return error.Unsupported;
+    }
+    pub fn read(_: *@This(), _: std.mem.Allocator, _: contract.ReadRequest) contract.Error!contract.OwnedReadResult {
+        return error.Unsupported;
+    }
+    pub fn capture(_: *@This(), _: contract.EntrySource) contract.Error!contract.LeaseRef {
+        return .{ .authority = .here, .slot = 11, .generation = 1 };
+    }
+    pub fn releaseLease(self: *@This(), _: contract.LeaseSource) void {
+        self.released += 1;
+    }
+    pub fn apply(_: *@This(), _: std.mem.Allocator, _: contract.Plan) contract.Error!contract.OwnedApplyReport {
+        return error.Unsupported;
+    }
+    pub fn watch(_: *@This(), _: contract.Root, _: contract.NodeRef, _: bool) contract.Error!contract.WatchRef {
+        return error.Unsupported;
+    }
+    pub fn pollInvalidation(_: *@This(), _: contract.WatchRef) contract.Error!?contract.Invalidation {
+        return error.Unsupported;
+    }
+    pub fn closeWatch(_: *@This(), _: contract.WatchRef) void {}
+};
+
 /// Capture a typed filesystem entry into a generic semantic transfer
 /// attachment.  The target binding is the authority source; the raw root and
 /// entry identifiers are checked against it before the provider sees them.
@@ -301,42 +336,7 @@ pub fn hRelease(data: ?*anyopaque, _: *wasm.Caller, args: []const i32, results: 
 }
 
 test "attachment ownership spans clipboard replacement and pending paste" {
-    const Provider = struct {
-        released: usize = 0,
-
-        pub fn capabilities(_: *@This(), _: contract.Root) contract.Error!contract.Capabilities {
-            return .{ .durable_lease = .{ .regular_file_max_bytes = 1024, .symlink_target_max_bytes = 1024 } };
-        }
-        pub fn observe(_: *@This(), gpa: std.mem.Allocator, _: contract.Root, node: contract.NodeRef) contract.Error!contract.OwnedObservation {
-            var value = contract.OwnedObservation.init(gpa);
-            value.value = .{ .node = node, .revision = .{ .token = "r" }, .kind = .regular };
-            return value;
-        }
-        pub fn list(_: *@This(), _: std.mem.Allocator, _: contract.Root, _: contract.NodeRef) contract.Error!contract.OwnedListing {
-            return error.Unsupported;
-        }
-        pub fn read(_: *@This(), _: std.mem.Allocator, _: contract.ReadRequest) contract.Error!contract.OwnedReadResult {
-            return error.Unsupported;
-        }
-        pub fn capture(_: *@This(), _: contract.EntrySource) contract.Error!contract.LeaseRef {
-            return .{ .authority = .here, .slot = 11, .generation = 1 };
-        }
-        pub fn releaseLease(self: *@This(), _: contract.LeaseSource) void {
-            self.released += 1;
-        }
-        pub fn apply(_: *@This(), _: std.mem.Allocator, _: contract.Plan) contract.Error!contract.OwnedApplyReport {
-            return error.Unsupported;
-        }
-        pub fn watch(_: *@This(), _: contract.Root, _: contract.NodeRef, _: bool) contract.Error!contract.WatchRef {
-            return error.Unsupported;
-        }
-        pub fn pollInvalidation(_: *@This(), _: contract.WatchRef) contract.Error!?contract.Invalidation {
-            return error.Unsupported;
-        }
-        pub fn closeWatch(_: *@This(), _: contract.WatchRef) void {}
-    };
-
-    var provider: Provider = .{};
+    var provider: TestProvider = .{};
     var router = fs_runtime.Router.init(std.testing.allocator);
     defer router.deinit();
     try router.register(.here, .init(&provider));
@@ -390,4 +390,24 @@ test "attachment ownership spans clipboard replacement and pending paste" {
     try std.testing.expectEqual(@as(usize, 1), provider.released);
     surviving_wire.deinit();
     try std.testing.expectEqual(@as(usize, 2), provider.released);
+}
+
+test "capture releases lease when attachment publication runs out of memory" {
+    var provider: TestProvider = .{};
+    var router = fs_runtime.Router.init(std.testing.allocator);
+    defer router.deinit();
+    try router.register(.here, .init(&provider));
+
+    // capture allocates the provider resource and attachment state first;
+    // the third allocation is the registry's first hash-table publication.
+    var failing = std.testing.FailingAllocator.init(std.testing.allocator, .{ .fail_index = 2 });
+    var registry = Registry.init(failing.allocator());
+    defer registry.deinit();
+    const result = registry.capture(&router, .{
+        .root = .{ .authority = .here, .slot = 1, .generation = 1 },
+        .ref = .{ .authority = .here, .slot = 2, .generation = 1 },
+        .revision = .{ .token = "r" },
+    });
+    try std.testing.expectError(error.OutOfMemory, result);
+    try std.testing.expectEqual(@as(usize, 1), provider.released);
 }
