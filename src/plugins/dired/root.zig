@@ -4,6 +4,8 @@
 //! intentionally exports only the stable plugin contract and keeps the
 //! dedicated named-module build entrypoint small.
 
+const std = @import("std");
+
 pub const model = @import("model.zig");
 pub const projection = @import("projection.zig");
 
@@ -26,3 +28,10 @@ pub const max_transfer_revision = model.max_transfer_revision;
 pub const FieldBinding = projection.FieldBinding;
 pub const OwnedScene = projection.OwnedScene;
 pub const project = projection.project;
+pub const metadata_column = projection.metadata_column;
+pub const name_column = projection.name_column;
+pub const original_column = projection.original_column;
+
+test {
+    std.testing.refAllDecls(@This());
+}
