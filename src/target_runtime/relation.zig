@@ -270,5 +270,14 @@ test "relation providers are independent from target handlers" {
     var resolution = try registry.query(std.testing.allocator, .{ .source = source, .name = "container" });
     defer resolution.deinit();
     try std.testing.expectEqual(@as(usize, 1), resolution.value.candidates.len);
-    try std.testing.expectEqual(destination, resolution.value.candidates[0].relation.target);
+    const resolved = resolution.value.candidates[0].relation.target;
+    try std.testing.expectEqual(destination.target, resolved.target);
+    try std.testing.expectEqual(destination.revision, resolved.revision);
+    switch (resolved.location) {
+        .provider => |provider| {
+            try std.testing.expectEqualStrings("tree", provider.schema);
+            try std.testing.expectEqualStrings("root", provider.payload);
+        },
+        else => return error.TestUnexpectedResult,
+    }
 }
