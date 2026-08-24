@@ -7,10 +7,14 @@
 
 const std = @import("std");
 const weft = @import("weft");
+const ordering = @import("buffer_order.zig");
 
 const buf_pick = 0;
 var ids: [1024]i32 = undefined;
 var n_rows: usize = 0;
+
+var candidates: [1024]ordering.Candidate = undefined;
+var order: [1024]usize = undefined;
 
 const Cmd = struct { name: []const u8, handler: *const fn () void };
 const cmds = [_]Cmd{
@@ -38,12 +42,24 @@ fn bufPick() void {
     n_rows = 0;
     weft.pickBegin("buffer", buf_pick);
     const count = weft.bufferCount();
+    var n_candidates: usize = 0;
     var i: usize = 0;
-    while (i < count and n_rows < ids.len) : (i += 1) {
+    while (i < count and n_candidates < candidates.len) : (i += 1) {
         const id = weft.bufferId(i) orelse continue;
-        const name = weft.bufferName(i) orelse continue;
-        weft.pickAdd(name, if (weft.bufferReadOnly(i)) "ro" else "");
-        ids[n_rows] = id;
+        candidates[n_candidates] = .{
+            .buffer_index = i,
+            .id = id,
+            .active = weft.bufferActive(i),
+        };
+        n_candidates += 1;
+    }
+    const n_ordered = ordering.activeLastOrder(candidates[0..n_candidates], order[0..n_candidates]);
+    var row: usize = 0;
+    while (row < n_ordered and n_rows < ids.len) : (row += 1) {
+        const candidate = candidates[order[row]];
+        const name = weft.bufferName(candidate.buffer_index) orelse continue;
+        weft.pickAdd(name, if (weft.bufferReadOnly(candidate.buffer_index)) "ro" else "");
+        ids[n_rows] = candidate.id;
         n_rows += 1;
     }
     weft.pickEnd();
