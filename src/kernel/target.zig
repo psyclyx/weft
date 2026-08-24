@@ -18,8 +18,15 @@ pub const Fact = struct {
     value: []const u8,
 };
 
+pub const Definition = struct {
+    kind: Kind,
+    display_name: []const u8,
+    facts: []const Fact = &.{},
+};
+
 pub const Descriptor = struct {
     ref: Ref,
+    revision: u64 = 1,
     kind: Kind,
     display_name: []const u8,
     facts: []const Fact = &.{},

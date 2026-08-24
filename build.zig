@@ -25,6 +25,7 @@ const ArchitectureModules = struct {
     kernel: *std.Build.Module,
     fs: *std.Build.Module,
     view_runtime: *std.Build.Module,
+    target_runtime: *std.Build.Module,
 };
 
 fn createArchitectureModules(
@@ -61,7 +62,20 @@ fn createArchitectureModules(
         .optimize = optimize,
     });
     view_runtime.addImport("weft_kernel", kernel);
-    return .{ .wire = wire, .schema = schema, .kernel = kernel, .fs = fs, .view_runtime = view_runtime };
+    const target_runtime = b.createModule(.{
+        .root_source_file = b.path("src/target_runtime/root.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    target_runtime.addImport("weft_kernel", kernel);
+    return .{
+        .wire = wire,
+        .schema = schema,
+        .kernel = kernel,
+        .fs = fs,
+        .view_runtime = view_runtime,
+        .target_runtime = target_runtime,
+    };
 }
 
 fn addArchitectureImports(mod: *std.Build.Module, architecture: ArchitectureModules) void {
@@ -70,6 +84,7 @@ fn addArchitectureImports(mod: *std.Build.Module, architecture: ArchitectureModu
     mod.addImport("weft_kernel", architecture.kernel);
     mod.addImport("weft_fs", architecture.fs);
     mod.addImport("weft_view_runtime", architecture.view_runtime);
+    mod.addImport("weft_target_runtime", architecture.target_runtime);
 }
 
 const guests = [_]Guest{
@@ -319,7 +334,7 @@ pub fn build(b: *std.Build) void {
     // Portable contract gate: deliberately separate from the application
     // suite so these roots cannot acquire app/platform dependencies unnoticed.
     const contract_step = b.step("test-contract", "Run portable schema/kernel/filesystem contract tests");
-    inline for (.{ architecture.wire, architecture.schema, architecture.kernel, architecture.fs, architecture.view_runtime }) |contract_mod| {
+    inline for (.{ architecture.wire, architecture.schema, architecture.kernel, architecture.fs, architecture.view_runtime, architecture.target_runtime }) |contract_mod| {
         const contract_tests = b.addTest(.{ .root_module = contract_mod });
         const run_contract_tests = b.addRunArtifact(contract_tests);
         contract_step.dependOn(&run_contract_tests.step);
