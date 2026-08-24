@@ -237,6 +237,21 @@ fn roleFromTag(raw: u8) Error!kernel.interaction.Role {
     };
 }
 
+fn dispositionTag(disposition: kernel.interaction.Disposition) u8 {
+    return switch (disposition) {
+        .keep_open => 0,
+        .close_on_handled => 1,
+    };
+}
+
+fn dispositionFromTag(raw: u8) Error!kernel.interaction.Disposition {
+    return switch (raw) {
+        0 => .keep_open,
+        1 => .close_on_handled,
+        else => error.Corrupt,
+    };
+}
+
 fn targetKindTag(kind: kernel.target.Kind) u8 {
     return switch (kind) {
         .unknown => 0,
@@ -605,6 +620,7 @@ pub fn encodeInteraction(gpa: std.mem.Allocator, definition: kernel.interaction.
         try writer.string(action.id);
         try writer.string(action.label);
         try writer.byte(if (action.enabled) 1 else 0);
+        try writer.byte(dispositionTag(action.disposition));
     }
     try writer.count(definition.bindings.len, Limits.max_bindings);
     for (definition.bindings) |binding| {
@@ -643,6 +659,7 @@ pub fn decodeInteraction(gpa: std.mem.Allocator, bytes: []const u8) Error!OwnedI
         action.id = try reader.string(arena);
         action.label = try reader.string(arena);
         action.enabled = try reader.strictBool();
+        action.disposition = try dispositionFromTag(try reader.byte());
         const result = try action_ids.getOrPut(arena, action.id);
         if (result.found_existing or action.id.len == 0) return error.Duplicate;
     }
@@ -760,12 +777,13 @@ test "scene codec: preorder scene round-trip preserves semantic fields" {
 }
 
 test "interaction and target codecs round-trip defaults, handles, variants, and facts" {
-    const definition: kernel.interaction.Definition = .{ .view = .{ .authority = .here, .slot = 3, .generation = 4 }, .role = .picker, .root = @enumFromInt(9), .actions = &.{.{ .id = "ok", .label = "OK", .enabled = true }}, .bindings = &.{.{ .input = "enter", .action = "ok" }}, .default_action = "ok", .cancel_action = null, .presentation = "compact" };
+    const definition: kernel.interaction.Definition = .{ .view = .{ .authority = .here, .slot = 3, .generation = 4 }, .role = .picker, .root = @enumFromInt(9), .actions = &.{.{ .id = "ok", .label = "OK", .enabled = true, .disposition = .close_on_handled }}, .bindings = &.{.{ .input = "enter", .action = "ok" }}, .default_action = "ok", .cancel_action = null, .presentation = "compact" };
     const interaction_bytes = try encodeInteraction(t.allocator, definition);
     defer t.allocator.free(interaction_bytes);
     var interaction_value = try decodeInteraction(t.allocator, interaction_bytes);
     defer interaction_value.deinit();
     try t.expectEqual(definition.view, interaction_value.value.view);
+    try t.expectEqual(kernel.interaction.Disposition.close_on_handled, interaction_value.value.actions[0].disposition);
     try t.expectEqualStrings("ok", interaction_value.value.default_action.?);
     try t.expectEqualStrings("enter", interaction_value.value.bindings[0].input);
 
@@ -838,6 +856,22 @@ test "scene codec: duplicate facts/actions/bindings and invalid interaction tags
     // Header is 5 bytes; a view handle is three little-endian u32s.
     invalid[5 + 12] = 0xff;
     try t.expectError(error.Corrupt, decodeInteraction(t.allocator, invalid));
+
+    var invalid_disposition = try t.allocator.dupe(u8, encoded);
+    defer t.allocator.free(invalid_disposition);
+    var disposition_reader = try Reader.init(invalid_disposition);
+    try checkHeader(&disposition_reader, interaction_kind);
+    _ = try readViewHandle(&disposition_reader);
+    _ = try roleFromTag(try disposition_reader.byte());
+    _ = try disposition_reader.readU64();
+    _ = try disposition_reader.count(Limits.max_actions);
+    var disposition_arena = std.heap.ArenaAllocator.init(t.allocator);
+    defer disposition_arena.deinit();
+    _ = try disposition_reader.string(disposition_arena.allocator());
+    _ = try disposition_reader.string(disposition_arena.allocator());
+    _ = try disposition_reader.strictBool();
+    invalid_disposition[disposition_reader.pos] = 0xff;
+    try t.expectError(error.Corrupt, decodeInteraction(t.allocator, invalid_disposition));
 }
 
 test "scene codec: forward parent references and invalid target tags refuse" {
