@@ -675,6 +675,58 @@ test "e2e/config: the sample config boots; SPC g i is discoverable via which-key
     try t.expect(ed.pick.active); // the palette (a pick), not the ex prompt
 }
 
+test "e2e/config: SPC , keeps stable order and places the active buffer last" {
+    const gpa = t.allocator;
+    var proj: Project = undefined;
+    try proj.init(gpa);
+    defer proj.deinit();
+    _ = try proj.oracle("printf alpha > alpha.txt; printf bravo > bravo.txt");
+
+    var ed: Editor = undefined;
+    try Editor.init(gpa, &ed);
+    defer ed.deinit();
+    const config_dir = try std.fmt.allocPrint(gpa, "{s}/config", .{proj.prev_cwd});
+    defer gpa.free(config_dir);
+    var loader_state: ConfigLoader = .{ .ed = &ed };
+    defer loader_state.deinit();
+    try bootConfig(&ed, config_dir, &loader_state);
+
+    ed.runStr("open", "alpha.txt");
+    ed.runStr("open", "bravo.txt");
+    try t.expectEqualStrings("bravo.txt", ed.bufferName());
+
+    // This is the real config binding and the real resident buffers plugin;
+    // the assertion observes the picker's candidate add-order, before any
+    // query ranking can obscure the ordering policy.
+    ed.chord("SPC ,");
+    ed.settle(2);
+    try t.expectEqualStrings("pick", ed.mode());
+    try t.expectEqual(@as(usize, 3), ed.pick.items.items.len);
+    try t.expectEqualStrings("*scratch*", ed.pick.items.items[0]);
+    try t.expectEqualStrings("alpha.txt", ed.pick.items.items[1]);
+    try t.expectEqualStrings("bravo.txt", ed.pick.items.items[2]);
+
+    // The accepted row is resolved by the plugin's recorded buffer id, not
+    // by re-scanning names after active-last reordering.
+    ed.typeText("alpha");
+    ed.settle(2);
+    ed.press("Return", "");
+    try t.expectEqualStrings("alpha.txt", ed.bufferName());
+
+    // Reopening from the other active buffer moves only that buffer to the
+    // tail; the inactive candidates retain their deterministic source order.
+    ed.chord("SPC ,");
+    ed.settle(2);
+    try t.expectEqual(@as(usize, 3), ed.pick.items.items.len);
+    try t.expectEqualStrings("*scratch*", ed.pick.items.items[0]);
+    try t.expectEqualStrings("bravo.txt", ed.pick.items.items[1]);
+    try t.expectEqualStrings("alpha.txt", ed.pick.items.items[2]);
+    ed.typeText("bravo");
+    ed.settle(2);
+    ed.press("Return", "");
+    try t.expectEqualStrings("bravo.txt", ed.bufferName());
+}
+
 // ── M3/M4 parity: config.js vs config.northstar.js (north-star-plan §8) ──
 //
 // north-star-config.js is doc/north-star-config.js's forcing-function
