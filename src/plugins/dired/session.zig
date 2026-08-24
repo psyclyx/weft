@@ -65,11 +65,17 @@ pub const Plugin = struct {
         self.* = undefined;
     }
 
-    /// Claim only an attachment that the provider currently observes as a
-    /// directory. Decoding a fact proves its shape, not its referent's kind.
+    /// Claim only an attachment that the trusted filesystem publisher bound
+    /// to this exact target revision and the provider still observes as a
+    /// directory. A decodable fact is descriptive, never authority.
     pub fn probe(self: *Plugin, descriptor: semantic.target.Descriptor) target_runtime.resolver.ProbeError!?semantic.target.Match {
         if (descriptor.kind != .directory) return null;
-        const directory = (fs.target.find(descriptor.facts) catch return error.InvalidTarget) orelse return null;
+        const described = (fs.target.find(descriptor.facts) catch return error.InvalidTarget) orelse return null;
+        const directory = self.host.filesystems.authorizedDirectory(descriptor.ref, descriptor.revision) catch |err| return switch (err) {
+            error.TargetUnbound, error.StaleTarget, error.InvalidHandle, error.NotFound, error.NotDirectory => error.InvalidTarget,
+            else => error.Unavailable,
+        };
+        if (!sameDirectory(described, directory)) return error.InvalidTarget;
         var observed = self.host.filesystems.observe(self.gpa, directory.root, directory.node) catch |err| return switch (err) {
             error.InvalidHandle, error.NotFound, error.NotDirectory => error.InvalidTarget,
             else => error.Unavailable,
@@ -93,7 +99,13 @@ pub const Plugin = struct {
             if (session.target.eql(located.target) and session.target_revision == located.revision)
                 return session.view_ref;
         }
-        const directory = (fs.target.find(descriptor.facts) catch return error.Rejected) orelse return error.Rejected;
+        const described = (fs.target.find(descriptor.facts) catch return error.Rejected) orelse return error.Rejected;
+        const directory = self.host.filesystems.authorizedDirectory(located.target, located.revision) catch |err| return switch (err) {
+            error.TargetUnbound, error.StaleTarget, error.InvalidHandle => error.StaleTarget,
+            error.UnknownAuthority, error.AuthorityRetired => error.Unavailable,
+            else => error.Rejected,
+        };
+        if (!sameDirectory(described, directory)) return error.Rejected;
         const session = self.gpa.create(Session) catch return error.Failed;
         errdefer self.gpa.destroy(session);
         session.* = Session.init(self, located.target, located.revision, directory);
@@ -342,8 +354,9 @@ pub const Session = struct {
     fn validateTarget(self: *const Session) !void {
         const descriptor = self.plugin.host.targets.get(self.target) orelse return error.StaleTarget;
         if (descriptor.revision != self.target_revision or descriptor.kind != .directory) return error.StaleTarget;
-        const directory = (try fs.target.find(descriptor.facts)) orelse return error.StaleTarget;
-        if (!sameDirectory(directory, self.directory)) return error.StaleTarget;
+        const described = (try fs.target.find(descriptor.facts)) orelse return error.StaleTarget;
+        const authorized = try self.plugin.host.filesystems.authorizedDirectory(self.target, self.target_revision);
+        if (!sameDirectory(described, authorized) or !sameDirectory(authorized, self.directory)) return error.StaleTarget;
     }
 
     /// Publish a staged model's scene first, then commit it with an infallible
@@ -528,13 +541,12 @@ test "plugin opens typed directory targets as independent semantic sessions" {
     var action_registry: view_runtime.action.Registry = .{};
     defer action_registry.deinit(std.testing.allocator);
 
-    const binding = try fs.target.encode(std.testing.allocator, .{ .root = rootRef() });
-    defer std.testing.allocator.free(binding);
-    const target = try targets.publish(std.testing.allocator, @enumFromInt(1), .{
-        .kind = .directory,
+    var publication = try fs_runtime.publication.publish(std.testing.allocator, &targets, &router, @enumFromInt(1), .{
         .display_name = "fixture",
-        .facts = &.{.{ .name = fs.target.fact_name, .value = binding }},
+        .directory = .{ .root = rootRef() },
     });
+    defer _ = publication.close(std.testing.allocator, &targets, &router);
+    const target = publication.ref;
     var plugin = Plugin.init(std.testing.allocator, @enumFromInt(2), .{
         .filesystems = &router,
         .targets = &targets,
@@ -545,6 +557,19 @@ test "plugin opens typed directory targets as independent semantic sessions" {
     });
     try plugin.start();
     defer plugin.deinit();
+
+    const forged_fact = try fs.target.encode(std.testing.allocator, .{ .root = rootRef() });
+    defer std.testing.allocator.free(forged_fact);
+    const forged = try targets.publish(std.testing.allocator, @enumFromInt(3), .{
+        .kind = .directory,
+        .display_name = "descriptive only",
+        .facts = &.{.{ .name = fs.target.fact_name, .value = forged_fact }},
+    });
+    var forged_resolution = try handlers.resolve(std.testing.allocator, targets.get(forged).?.*);
+    defer forged_resolution.deinit();
+    try std.testing.expectEqual(@as(usize, 0), forged_resolution.value.candidates.len);
+    try std.testing.expectEqual(@as(usize, 1), forged_resolution.value.failures.len);
+    try std.testing.expectEqual(target_runtime.resolver.ProbeError.InvalidTarget, forged_resolution.value.failures[0].reason);
 
     var resolution = try handlers.resolve(std.testing.allocator, targets.get(target).?.*);
     defer resolution.deinit();
@@ -644,7 +669,7 @@ test "failed scene replacement leaves action and field drafts unchanged" {
     try std.testing.expectEqualSlices(u8, before.value.revision, after.value.revision);
 }
 
-test "target replacement and closure make existing sessions explicitly stale" {
+test "target replacement makes the session stale and cannot inherit old authority" {
     var fixture: Fixture = undefined;
     try fixture.init();
     defer fixture.deinit();
@@ -674,11 +699,11 @@ test "target replacement and closure make existing sessions explicitly stale" {
 
     var resolution = try fixture.handlers.resolve(std.testing.allocator, fixture.targets.get(fixture.target).?.*);
     defer resolution.deinit();
-    _ = try fixture.handlers.open(resolution.value.decide().selected, .{ .target = fixture.target, .revision = 2 });
-    try std.testing.expectEqual(@as(usize, 2), fixture.plugin.sessions.items.len);
-    const current_session = fixture.plugin.sessions.items[1];
-    try std.testing.expect(fixture.targets.close(std.testing.allocator, @enumFromInt(1), fixture.target));
-    try std.testing.expectError(error.StaleTarget, current_session.refresh());
+    try std.testing.expectEqual(@as(usize, 0), resolution.value.candidates.len);
+    try std.testing.expectEqual(@as(usize, 1), resolution.value.failures.len);
+    try std.testing.expectEqual(target_runtime.resolver.ProbeError.InvalidTarget, resolution.value.failures[0].reason);
+    try std.testing.expect(fixture.publication.close(std.testing.allocator, &fixture.targets, &fixture.router));
+    try std.testing.expectError(error.TargetUnbound, fixture.router.authorizedDirectory(fixture.target, 1));
 }
 
 test "directory listing boundary rejects retargeted and invalid entries" {
@@ -865,6 +890,7 @@ const Fixture = struct {
     fields: view_runtime.field.Registry,
     actions: view_runtime.action.Registry,
     target: semantic.target.Ref,
+    publication: fs_runtime.publication.Registration,
     plugin: Plugin,
 
     fn init(self: *Fixture) !void {
@@ -881,17 +907,16 @@ const Fixture = struct {
             .fields = .init(.here),
             .actions = .{},
             .target = undefined,
+            .publication = undefined,
             .plugin = undefined,
         };
         try self.fake.set(&.{.{ .name = "kept", .ref = entryRef(8), .revision = "1", .kind = .regular }});
         try self.router.register(.here, .init(&self.fake));
-        const binding = try fs.target.encode(std.testing.allocator, directory);
-        defer std.testing.allocator.free(binding);
-        self.target = try self.targets.publish(std.testing.allocator, @enumFromInt(1), .{
-            .kind = .directory,
+        self.publication = try fs_runtime.publication.publish(std.testing.allocator, &self.targets, &self.router, @enumFromInt(1), .{
             .display_name = "fixture",
-            .facts = &.{.{ .name = fs.target.fact_name, .value = binding }},
+            .directory = directory,
         });
+        self.target = self.publication.ref;
         self.plugin = .init(std.testing.allocator, @enumFromInt(2), .{
             .filesystems = &self.router,
             .targets = &self.targets,
@@ -912,6 +937,7 @@ const Fixture = struct {
         self.fields.deinit(std.testing.allocator);
         self.views.deinit(std.testing.allocator);
         self.handlers.deinit(std.testing.allocator);
+        _ = self.publication.close(std.testing.allocator, &self.targets, &self.router);
         self.targets.deinit(std.testing.allocator);
         self.router.deinit();
         self.fake.deinit();
