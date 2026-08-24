@@ -39,6 +39,7 @@ const ArchitectureModules = struct {
     fs: *std.Build.Module,
     fs_codec: *std.Build.Module,
     fs_runtime: *std.Build.Module,
+    fs_remote: *std.Build.Module,
     view_runtime: *std.Build.Module,
     target_runtime: *std.Build.Module,
     plugin_semantic: *std.Build.Module,
@@ -109,6 +110,14 @@ fn createArchitectureModules(
     // target registry owns descriptive identity, while the filesystem router
     // owns executable authority. Neither contract reaches through the other.
     fs_runtime.addImport("weft_target_runtime", target_runtime);
+    const fs_remote = b.createModule(.{
+        .root_source_file = b.path("src/fs_remote/root.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    fs_remote.addImport("weft_semantic", semantic);
+    fs_remote.addImport("weft_fs", fs);
+    fs_remote.addImport("weft_fs_codec", fs_codec);
     const plugin_semantic = b.createModule(.{
         .root_source_file = b.path("src/plugin_semantic/root.zig"),
         .target = target,
@@ -127,6 +136,7 @@ fn createArchitectureModules(
         .fs = fs,
         .fs_codec = fs_codec,
         .fs_runtime = fs_runtime,
+        .fs_remote = fs_remote,
         .view_runtime = view_runtime,
         .target_runtime = target_runtime,
         .plugin_semantic = plugin_semantic,
@@ -205,6 +215,7 @@ fn addArchitectureImports(mod: *std.Build.Module, architecture: ArchitectureModu
     mod.addImport("weft_fs", architecture.fs);
     mod.addImport("weft_fs_codec", architecture.fs_codec);
     mod.addImport("weft_fs_runtime", architecture.fs_runtime);
+    mod.addImport("weft_fs_remote", architecture.fs_remote);
     mod.addImport("weft_view_runtime", architecture.view_runtime);
     mod.addImport("weft_target_runtime", architecture.target_runtime);
     mod.addImport("weft_plugin_semantic", architecture.plugin_semantic);
@@ -569,6 +580,13 @@ pub fn build(b: *std.Build) void {
     const fs_runtime_step = b.step("test-fs-runtime", "Run filesystem provider routing tests");
     fs_runtime_step.dependOn(&run_fs_runtime_tests.step);
     contract_step.dependOn(&run_fs_runtime_tests.step);
+
+    const fs_remote_tests = b.addTest(.{ .root_module = architecture.fs_remote });
+    const run_fs_remote_tests = b.addRunArtifact(fs_remote_tests);
+    const fs_remote_step = b.step("test-fs-remote", "Run transport-neutral remote filesystem provider tests");
+    fs_remote_step.dependOn(&run_fs_remote_tests.step);
+    contract_step.dependOn(&run_fs_remote_tests.step);
+    test_step.dependOn(&run_fs_remote_tests.step);
 
     const fs_linux_step = b.step("test-fs-linux", "Run the Linux filesystem provider tests");
     if (target.result.os.tag == .linux) {

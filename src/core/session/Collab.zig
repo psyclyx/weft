@@ -76,6 +76,7 @@ blob_server: ?*BlobServer = null,
 /// opened a root and granted access).
 peer_fs_root: ?*@import("../rooted_fs.zig").RootedFs = null,
 fs_grant: @import("../peer_fs.zig").Grant = .{},
+peer_fs_service: ?@import("../peer_fs.zig").Service = null,
 /// Client side: correlate .peer fs replies (LIST/READ/WRITE).
 remote_fs: ?*RemoteFs = null,
 /// Client side: fold blob replies into the read-only viewer.
@@ -283,7 +284,7 @@ pub fn handleFrame(self: *Collab, frame: wire.Decoder.Decoded) !bool {
                     var cur: []const u8 = frame.payload;
                     const id = wire.getUv(&cur) catch return changed;
                     const root = self.peer_fs_root orelse return changed;
-                    const resp = peer_fs.handle(gpa, root, self.fs_grant, cur) catch return changed;
+                    const resp = peer_fs.handleWithService(gpa, root, self.fs_grant, self.peer_fs_service, cur) catch return changed;
                     defer gpa.free(resp);
                     var reply: std.ArrayList(u8) = .empty;
                     defer reply.deinit(gpa);

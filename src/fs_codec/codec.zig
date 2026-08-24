@@ -48,6 +48,8 @@ pub fn Owned(comptime T: type) type {
 }
 
 pub const OwnedListing = Owned(c.Listing);
+pub const OwnedObservation = Owned(c.Observation);
+pub const OwnedReadResult = Owned(c.ReadResult);
 pub const OwnedPlan = Owned(c.Plan);
 pub const OwnedApplyReport = Owned(c.ApplyReport);
 
@@ -219,6 +221,8 @@ const plan_kind: u8 = 2;
 const report_kind: u8 = 3;
 const child_directory_kind: u8 = 4;
 const capabilities_kind: u8 = 5;
+const observation_kind: u8 = 6;
+const read_result_kind: u8 = 7;
 
 fn header(w: *Writer, kind: u8) Error!void {
     try w.append(magic);
@@ -656,6 +660,49 @@ pub fn decodeListing(gpa: std.mem.Allocator, bytes: []const u8) Error!OwnedListi
     return owned;
 }
 
+pub fn encodeObservation(gpa: std.mem.Allocator, observation: c.Observation) Error![]u8 {
+    var w = Writer.init(gpa);
+    defer w.deinit();
+    try header(&w, observation_kind);
+    try writeObservation(&w, observation);
+    return try w.finish();
+}
+
+pub fn decodeObservation(gpa: std.mem.Allocator, bytes: []const u8) Error!OwnedObservation {
+    var owned = OwnedObservation.init(gpa);
+    errdefer owned.deinit();
+    var r = try Reader.init(bytes);
+    try checkHeader(&r, observation_kind);
+    owned.value = try readObservation(&r, owned.allocator());
+    try r.done();
+    return owned;
+}
+
+pub fn encodeReadResult(gpa: std.mem.Allocator, result: c.ReadResult) Error![]u8 {
+    var w = Writer.init(gpa);
+    defer w.deinit();
+    try header(&w, read_result_kind);
+    try writeObservation(&w, result.observation);
+    try w.bytesField(result.bytes, false);
+    try w.byte(@intFromBool(result.eof));
+    return try w.finish();
+}
+
+pub fn decodeReadResult(gpa: std.mem.Allocator, bytes: []const u8) Error!OwnedReadResult {
+    var owned = OwnedReadResult.init(gpa);
+    errdefer owned.deinit();
+    var r = try Reader.init(bytes);
+    try checkHeader(&r, read_result_kind);
+    const arena = owned.allocator();
+    owned.value = .{
+        .observation = try readObservation(&r, arena),
+        .bytes = try r.field(arena, false),
+        .eof = try r.strictBool(),
+    };
+    try r.done();
+    return owned;
+}
+
 /// Encode the provider capability set for an authorized target.  Capabilities
 /// are descriptive policy, not authority: the host still re-authorizes every
 /// operation against the target revision before routing it to a provider.
@@ -839,6 +886,37 @@ test "filesystem codec round trips every listing value, raw bytes, metadata, and
     var decoded = try decodeListing(std.testing.allocator, bytes);
     defer decoded.deinit();
     try std.testing.expectEqualDeep(input, decoded.value);
+}
+
+test "filesystem codec round trips observations and bounded reads" {
+    const h = testHandles();
+    const observation: c.Observation = .{
+        .node = .{ .entry = h.entry },
+        .revision = .{ .token = &[_]u8{ 0, 0xff, 7 } },
+        .kind = .symlink,
+        .metadata = .{
+            .mode = 0o777,
+            .size = 19,
+            .modified_ns = -42,
+            .link_target = &[_]u8{ '.', '.', '/', 0xff },
+        },
+    };
+    const observation_bytes = try encodeObservation(std.testing.allocator, observation);
+    defer std.testing.allocator.free(observation_bytes);
+    var decoded_observation = try decodeObservation(std.testing.allocator, observation_bytes);
+    defer decoded_observation.deinit();
+    try std.testing.expectEqualDeep(observation, decoded_observation.value);
+
+    const read_result: c.ReadResult = .{
+        .observation = observation,
+        .bytes = &[_]u8{ 0, '\n', 0xff },
+        .eof = false,
+    };
+    const read_bytes = try encodeReadResult(std.testing.allocator, read_result);
+    defer std.testing.allocator.free(read_bytes);
+    var decoded_read = try decodeReadResult(std.testing.allocator, read_bytes);
+    defer decoded_read.deinit();
+    try std.testing.expectEqualDeep(read_result, decoded_read.value);
 }
 
 test "filesystem codec round trips provider capabilities" {

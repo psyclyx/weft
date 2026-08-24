@@ -9,6 +9,11 @@ const std = @import("std");
 const core = @import("../core/core.zig");
 const window_layout = @import("../gfx/window_layout.zig");
 const setEcho = @import("handler.zig").setEcho;
+const fs = @import("weft_fs");
+const fs_platform = @import("weft_fs_platform");
+const fs_remote = @import("weft_fs_remote");
+const fs_runtime = @import("weft_fs_runtime");
+const semantic = @import("weft_semantic");
 
 /// Status-line chip for a peer's trust grade (null = don't show).
 pub fn hostTrustChip(trust: core.known_peers.Trust) ?[]const u8 {
@@ -61,6 +66,10 @@ pub const ShareCtx = struct {
     /// served to peers, and the grant. Null root ⇒ serve no fs (default).
     peer_fs_root: ?*core.rooted_fs.RootedFs = null,
     fs_grant: core.peer_fs.Grant = .{},
+    peer_fs_service: ?core.peer_fs.Service = null,
+    /// Published by `Collab.reconcileRemoteFilesystem`; commands only see an
+    /// ordinary located target and use the generic target resolver.
+    remote_fs_target: ?semantic.target.Located = null,
     /// Commands record INTENTS here; the frame loop applies them
     /// outside the input hot section (connect blocks on TCP, disconnect
     /// joins session threads).
@@ -122,9 +131,22 @@ pub const Collab = struct {
 
     // ── Opt-in filesystem sharing + the async .peer fs bridge ──
     peer_fs_root: ?core.rooted_fs.RootedFs,
+    shared_fs_provider: fs_platform.Provider,
+    shared_fs_root: ?fs.contract.Root,
+    shared_fs_server: ?fs_remote.Server,
     remote_fs: core.session.RemoteFs,
     peer_fs_bridge: core.wasm_host.PeerFsBridge,
     peer_fs_inflight: std.AutoHashMapUnmanaged(u64, []u8),
+
+    // ── Semantic remote filesystem client (ordinary provider + target) ──
+    remote_exchange: RemoteExchange,
+    remote_provider: ?fs_remote.Provider,
+    remote_root: ?fs.contract.Root,
+    remote_system: ?*core.System,
+    remote_owner: ?semantic.owner.Id,
+    remote_publication: ?fs_runtime.publication.Registration,
+    next_remote_authority: u32,
+    remote_attempted_session: ?*core.session.Session,
 
     // ── The share intent surface (self-referential: points at siblings) ──
     share_ctx: ShareCtx,
@@ -161,6 +183,9 @@ pub const Collab = struct {
         // Opt-in filesystem sharing (host side): a confined root served to peers.
         // Default off — a peer gets nothing unless the host passed --share-root.
         self.peer_fs_root = null;
+        self.shared_fs_provider = fs_platform.Provider.init(gpa);
+        self.shared_fs_root = null;
+        self.shared_fs_server = null;
         if (share_root) |root_dir| {
             if (gpa.dupeZ(u8, root_dir)) |rz| {
                 defer gpa.free(rz);
@@ -169,6 +194,24 @@ pub const Collab = struct {
                     break :blk null;
                 };
             } else |_| {}
+            const root = self.shared_fs_provider.acquireRoot(root_dir) catch |err| blk: {
+                std.log.warn("share-root: semantic filesystem unavailable for '{s}': {t}", .{ root_dir, err });
+                break :blk null;
+            };
+            if (root) |shared_root| {
+                self.shared_fs_root = shared_root;
+                if (share_fs != .none) {
+                    self.shared_fs_server = fs_remote.Server.init(
+                        gpa,
+                        self.shared_fs_provider.provider(),
+                        shared_root,
+                        if (share_fs == .read_write) .read_write else .read,
+                    ) catch |err| blk: {
+                        std.log.warn("share-root: semantic peer service unavailable: {t}", .{err});
+                        break :blk null;
+                    };
+                }
+            }
         }
         // Client side: correlate .peer fs replies, and the bridge the guest queues
         // async LIST requests through (dired-on-a-peer).
@@ -176,6 +219,14 @@ pub const Collab = struct {
         self.peer_fs_bridge = .{ .gpa = gpa };
         core.wasm_host.setPeerFsBridge(&self.peer_fs_bridge);
         self.peer_fs_inflight = .empty;
+        self.remote_exchange = .{ .collab = self };
+        self.remote_provider = null;
+        self.remote_root = null;
+        self.remote_system = null;
+        self.remote_owner = null;
+        self.remote_publication = null;
+        self.next_remote_authority = 1;
+        self.remote_attempted_session = null;
         // Best-effort: a failed eventfd create (fd exhaustion) falls back to
         // the scheduler's bounded background-services poll rather than
         // making this infallible init fail the whole run over it.
@@ -194,6 +245,7 @@ pub const Collab = struct {
             .known = known,
             .peer_fs_root = if (self.peer_fs_root) |*r| r else null,
             .fs_grant = .{ .access = share_fs },
+            .peer_fs_service = if (self.shared_fs_server) |*server| core.peer_fs.Service.init(server) else null,
             .conn_wake_fd = conn_wake_fd,
         };
         // Boot --listen folds onto the runtime listen path (one code path): seed
@@ -282,13 +334,133 @@ pub const Collab = struct {
         }
         core.wasm_host.setPeerFsBridge(null);
         self.peer_fs_bridge.deinit();
+        self.detachRemoteFilesystem();
         self.remote_fs.deinit();
+        if (self.shared_fs_server) |*server| server.deinit();
+        if (self.shared_fs_root) |root| self.shared_fs_provider.releaseRoot(root);
+        self.shared_fs_provider.deinit();
         if (self.peer_fs_root) |*r| r.close();
         if (self.hub) |*h| h.deinit();
         if (self.partial_state) |*p| p.deinit();
         if (self.conn) |*c| c.deinit();
         if (self.collab_session) |s| s.destroy();
         if (self.share_ctx.conn_wake_fd >= 0) core.scheduler.closeWakeFd(self.share_ctx.conn_wake_fd);
+    }
+
+    /// Attach or retire the outbound peer's shared filesystem as connection
+    /// liveness changes. This is app composition only: the System receives a
+    /// normal authority-routed provider and a normal directory target.
+    pub fn reconcileRemoteFilesystem(self: *Collab, system: *core.System) !bool {
+        const connected = if (self.collab_session) |session| switch (session.liveness()) {
+            .connected, .degraded => self.conn != null,
+            else => false,
+        } else false;
+        if (!connected) {
+            self.remote_attempted_session = null;
+            if (self.remote_publication == null) return false;
+            self.detachRemoteFilesystem();
+            return true;
+        }
+        if (self.remote_publication != null) return false;
+        const active_session = self.collab_session.?;
+        if (self.remote_attempted_session == active_session) return false;
+        self.remote_attempted_session = active_session;
+
+        var authority_raw = self.next_remote_authority;
+        while (authority_raw == 0) : (authority_raw +%= 1) {}
+        self.next_remote_authority = authority_raw +% 1;
+        if (self.next_remote_authority == 0) self.next_remote_authority = 1;
+        const authority: semantic.handle.Authority = @enumFromInt(authority_raw);
+        self.remote_provider = try fs_remote.Provider.init(authority, .init(&self.remote_exchange));
+        var provider_registered = false;
+        errdefer {
+            if (provider_registered) _ = system.filesystems.unregister(authority) catch {};
+            self.remote_provider = null;
+        }
+        try system.filesystems.register(authority, self.remote_provider.?.provider());
+        provider_registered = true;
+
+        const owner = try system.semantic.acquireOwner();
+        var owner_owned = true;
+        errdefer if (owner_owned) {
+            _ = system.semantic.releaseOwner(self.gpa, owner);
+        };
+        const root = try self.remote_provider.?.acquireRoot();
+        var root_owned = true;
+        errdefer if (root_owned) self.remote_provider.?.releaseRoot(root);
+        var publication = try fs_runtime.publication.publish(
+            self.gpa,
+            &system.semantic.targets,
+            &system.filesystems,
+            owner,
+            .{ .display_name = "peer shared files", .directory = .{ .root = root } },
+        );
+        errdefer _ = publication.close(self.gpa, &system.semantic.targets, &system.filesystems);
+
+        self.remote_system = system;
+        self.remote_owner = owner;
+        self.remote_root = root;
+        self.remote_publication = publication;
+        self.share_ctx.remote_fs_target = publication.located();
+        owner_owned = false;
+        root_owned = false;
+        provider_registered = false;
+        return true;
+    }
+
+    fn detachRemoteFilesystem(self: *Collab) void {
+        const system = self.remote_system orelse return;
+        self.share_ctx.remote_fs_target = null;
+        if (self.remote_publication) |*publication|
+            _ = publication.close(self.gpa, &system.semantic.targets, &system.filesystems);
+        const transport_live = if (self.collab_session) |session| switch (session.liveness()) {
+            .connected, .degraded => self.conn != null,
+            else => false,
+        } else false;
+        // Root release is advisory at this edge: the host owns final server
+        // cleanup. Never turn an offline disconnect/teardown into a timeout.
+        if (transport_live) if (self.remote_root) |root| if (self.remote_provider) |*provider| provider.releaseRoot(root);
+        if (self.remote_provider) |provider| _ = system.filesystems.unregister(provider.authority) catch {};
+        if (self.remote_owner) |owner| _ = system.semantic.releaseOwner(self.gpa, owner);
+        self.remote_publication = null;
+        self.remote_root = null;
+        self.remote_owner = null;
+        self.remote_provider = null;
+        self.remote_system = null;
+    }
+
+    fn roundTripRemoteFilesystem(self: *Collab, gpa: std.mem.Allocator, request: []const u8) fs.contract.Error![]u8 {
+        const session = self.collab_session orelse return error.Io;
+        const connection = if (self.conn) |*value| value else return error.Io;
+        const envelope = try core.peer_fs.encodeService(gpa, request);
+        defer gpa.free(envelope);
+        const id = self.remote_fs.request(session, 0, envelope) catch return error.Io;
+        const deadline = core.task.nowNs() + 10 * std.time.ns_per_s;
+        while (core.task.nowNs() < deadline) {
+            _ = connection.tick(0) catch return error.Io;
+            if (self.remote_fs.take(id)) |response| {
+                defer self.gpa.free(response);
+                const decoded = core.peer_fs.decodeResponse(response) orelse return error.Io;
+                return switch (decoded.status) {
+                    .ok => try gpa.dupe(u8, decoded.payload),
+                    .denied => error.PermissionDenied,
+                    .not_found => error.NotFound,
+                    .confined => error.Confined,
+                    .stale => error.Stale,
+                    .io, .bad => error.Io,
+                };
+            }
+            std.Thread.yield() catch {};
+        }
+        return error.Io;
+    }
+};
+
+const RemoteExchange = struct {
+    collab: *Collab,
+
+    pub fn roundTrip(self: *RemoteExchange, gpa: std.mem.Allocator, request: []const u8) fs.contract.Error![]u8 {
+        return self.collab.roundTripRemoteFilesystem(gpa, request);
     }
 };
 
@@ -305,6 +477,7 @@ pub fn wireHubShare(sc: *ShareCtx, peer: *core.hub.Peer, col: *core.session.Coll
     // peer gets nothing unless the host passed --share-root/--share-fs).
     col.peer_fs_root = sc.peer_fs_root;
     col.fs_grant = sc.fs_grant;
+    col.peer_fs_service = sc.peer_fs_service;
 }
 
 /// Bind a newly joined hub peer: the primary doc at quad 0, then replay

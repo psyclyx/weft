@@ -740,6 +740,10 @@ pub fn main(init: std.process.Init) !void {
         // ── Collab tick (adopt/publish/relay, partial fetch, peer-fs, reconnect) ──
         if (try collab.tickCollab(&collab_state.share_ctx, &session.cmd_ctx, ed0, win_layout, &collab_state.peer_fs_bridge, &collab_state.remote_fs, &collab_state.peer_fs_inflight, &collab_state.noted_host_fp, &collab_state.last_liveness, &collab_state.reconnect, &collab_state.next_reconnect_ns, &collab_state.fd_link, &my_identity, pool, args.connect, args.token, session.echo()))
             view_dirty = true;
+        if (collab_state.reconcileRemoteFilesystem(session.system) catch |err| blk: {
+            std.log.warn("peer filesystem publication unavailable: {t}", .{err});
+            break :blk false;
+        }) view_dirty = true;
         // The hub's wake-fd source tracks the Hub struct's own lifetime
         // (listen/stop-listen, connect/disconnect are all funneled through
         // `applyIntents`/`tickCollab` above) — reconcile once per wake.

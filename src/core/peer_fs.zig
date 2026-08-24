@@ -22,13 +22,49 @@ const std = @import("std");
 const Allocator = std.mem.Allocator;
 const RootedFs = @import("rooted_fs.zig").RootedFs;
 
-pub const Op = enum(u8) { list = 0, read = 1, write = 2, stat = 3, _ };
+pub const Op = enum(u8) { list = 0, read = 1, write = 2, stat = 3, service = 4, _ };
 pub const Status = enum(u8) { ok = 0, denied = 1, not_found = 2, confined = 3, stale = 4, io = 5, bad = 6 };
 
 /// fs-scoped access a host grants a peer for the shared root. Distinct from the
 /// document-level session `Access`. Default `none` (deny).
 pub const Access = enum(u8) { none = 0, read = 1, read_write = 2 };
 pub const Grant = struct { access: Access = .none };
+
+/// Optional protocol extension owned outside core. The encrypted peer channel
+/// transports opaque bounded bytes; app composition may install a semantic
+/// filesystem server, while core remains unaware of providers, handles, or
+/// target vocabularies.
+pub const Service = struct {
+    context: *anyopaque,
+    vtable: *const VTable,
+
+    pub const VTable = struct {
+        handle: *const fn (*anyopaque, Allocator, []const u8) Allocator.Error![]u8,
+    };
+
+    pub fn init(pointer: anytype) Service {
+        const Pointer = @TypeOf(pointer);
+        const info = switch (@typeInfo(Pointer)) {
+            .pointer => |value| value,
+            else => @compileError("peer filesystem service requires a pointer"),
+        };
+        if (info.size != .one or info.is_const)
+            @compileError("peer filesystem service requires a mutable single-item pointer");
+        const Implementation = info.child;
+        const Adapter = struct {
+            fn handle(raw: *anyopaque, gpa: Allocator, request: []const u8) Allocator.Error![]u8 {
+                const self: *Implementation = @ptrCast(@alignCast(raw));
+                return self.handle(gpa, request);
+            }
+            const vtable: VTable = .{ .handle = @This().handle };
+        };
+        return .{ .context = pointer, .vtable = &Adapter.vtable };
+    }
+
+    pub fn handle(self: Service, gpa: Allocator, request: []const u8) Allocator.Error![]u8 {
+        return self.vtable.handle(self.context, gpa, request);
+    }
+};
 
 /// An opaque content token (a hash of the file's bytes), returned by READ/STAT
 /// and echoed by WRITE as its precondition.
@@ -85,6 +121,9 @@ pub fn encodeRead(gpa: Allocator, path: []const u8) Allocator.Error![]u8 {
 }
 pub fn encodeStat(gpa: Allocator, path: []const u8) Allocator.Error![]u8 {
     return encodeSimple(gpa, .stat, path);
+}
+pub fn encodeService(gpa: Allocator, request: []const u8) Allocator.Error![]u8 {
+    return encodeSimple(gpa, .service, request);
 }
 fn encodeSimple(gpa: Allocator, op: Op, path: []const u8) Allocator.Error![]u8 {
     var out: std.ArrayList(u8) = .empty;
@@ -143,6 +182,10 @@ fn statusOf(e: anyerror) Status {
 /// an owned response the caller writes back to the peer. Never touches anything
 /// outside the shared root, and never acts beyond the grant.
 pub fn handle(gpa: Allocator, fs: *const RootedFs, grant: Grant, req: []const u8) Allocator.Error![]u8 {
+    return handleWithService(gpa, fs, grant, null, req);
+}
+
+pub fn handleWithService(gpa: Allocator, fs: *const RootedFs, grant: Grant, service: ?Service, req: []const u8) Allocator.Error![]u8 {
     if (req.len == 0) return reply(gpa, .bad, "");
     const op: Op = @enumFromInt(req[0]);
     var cur = req[1..];
@@ -188,6 +231,13 @@ pub fn handle(gpa: Allocator, fs: *const RootedFs, grant: Grant, req: []const u8
             fs.write(pz.ptr, data) catch |e| return reply(gpa, statusOf(e), "");
             const new_tok = tokenOf(data);
             return reply(gpa, .ok, &new_tok);
+        },
+        .service => {
+            if (grant.access == .none) return reply(gpa, .denied, "");
+            const implementation = service orelse return reply(gpa, .bad, "");
+            const response = implementation.handle(gpa, path) catch return reply(gpa, .io, "");
+            defer gpa.free(response);
+            return reply(gpa, .ok, response);
         },
         _ => return reply(gpa, .bad, ""),
     }
@@ -299,6 +349,41 @@ test "peer_fs: grant gates ops; list/read/write round-trip; stale write refused"
         defer gpa.free(resp);
         try t.expectEqual(Status.ok, decodeResponse(resp).?.status);
     }
+}
+
+test "peer_fs: semantic service bytes share the granted encrypted channel" {
+    const gpa = t.allocator;
+    var pbuf: [128]u8 = undefined;
+    const root_path = try tmpRoot(&pbuf);
+    var fs = try RootedFs.open(root_path.ptr);
+    defer fs.close();
+    defer _ = linux.rmdir(root_path.ptr);
+
+    var implementation = struct {
+        calls: usize = 0,
+        pub fn handle(self: *@This(), allocator: Allocator, request: []const u8) Allocator.Error![]u8 {
+            self.calls += 1;
+            const result = try allocator.alloc(u8, request.len + 1);
+            result[0] = 0xaa;
+            @memcpy(result[1..], request);
+            return result;
+        }
+    }{};
+    const service = Service.init(&implementation);
+    const request = try encodeService(gpa, &[_]u8{ 0, 0xff, '\n' });
+    defer gpa.free(request);
+
+    const denied = try handleWithService(gpa, &fs, .{}, service, request);
+    defer gpa.free(denied);
+    try t.expectEqual(Status.denied, decodeResponse(denied).?.status);
+    try t.expectEqual(@as(usize, 0), implementation.calls);
+
+    const response = try handleWithService(gpa, &fs, .{ .access = .read }, service, request);
+    defer gpa.free(response);
+    const decoded = decodeResponse(response).?;
+    try t.expectEqual(Status.ok, decoded.status);
+    try t.expectEqualSlices(u8, &[_]u8{ 0xaa, 0, 0xff, '\n' }, decoded.payload);
+    try t.expectEqual(@as(usize, 1), implementation.calls);
 }
 
 test {
