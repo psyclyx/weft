@@ -557,6 +557,7 @@ const Builder = struct {
     operations: std.ArrayList(contract.Planned) = .empty,
     emitted: std.ArrayList(NodeId) = .empty,
     create_operations: std.ArrayList(struct { id: NodeId, index: usize }) = .empty,
+    capture_operations: std.ArrayList(struct { source: contract.EntrySource, index: usize }) = .empty,
     visiting: std.ArrayList(NodeId) = .empty,
 
     fn init(arena: std.mem.Allocator, model: *const Model) Builder {
@@ -564,6 +565,15 @@ const Builder = struct {
     }
 
     fn build(self: *Builder) !void {
+        // Captured transfers are immutable references to an observed source.
+        // Emit them in their own phase before source-local rename/remove
+        // effects, regardless of where a pasted row sits in the listing.
+        // This is the planner's ordering invariant; row order is only draft
+        // presentation state and cannot establish source lifetime.
+        for (self.model.rows.items) |row| {
+            if (row.pending == .copied or row.pending == .copied_renamed)
+                try self.emit(row.id);
+        }
         for (self.model.rows.items) |row| if (isDirty(&row)) try self.emit(row.id);
     }
 
@@ -590,7 +600,13 @@ const Builder = struct {
         const parent_ref = try self.parentRef(row_ptr);
         if (row_ptr.pending == .deleted) {
             const source = baseSource(self.model, row_ptr) orelse return error.Stale;
-            try self.add(.{ .remove = .{ .source = try self.copyEntrySource(source) } }, row_ptr, null);
+            // A captured copy/cut still needs this exact source identity and
+            // revision.  Do not queue a removal that would invalidate that
+            // effect (and would make a later destination conflict destructive).
+            // The source is intentionally preserved; provider policy belongs
+            // to the executor, not this pure draft planner.
+            if (!self.hasDependentCapture(source))
+                try self.add(.{ .remove = .{ .source = try self.copyEntrySource(source) } }, row_ptr, null);
         } else if (row_ptr.pending == .added) {
             try self.addCreate(row_ptr, parent_ref, row_ptr.draft.name);
         } else if (row_ptr.pending == .copied or row_ptr.pending == .copied_renamed) {
@@ -648,15 +664,22 @@ const Builder = struct {
 
     fn add(self: *Builder, operation: contract.Operation, row_ptr: *const Row, parent: ?contract.ParentRef) !void {
         const index = self.operations.items.len;
-        const depends_on: []const usize = if (parent) |parent_ref| switch (parent_ref) {
-            .root, .entry => &.{},
-            .planned => |dependency| blk: {
-                const values = try self.arena.alloc(usize, 1);
-                values[0] = dependency;
-                break :blk values;
-            },
-        } else &.{};
+        var dependencies: std.ArrayList(usize) = .empty;
+        if (parent) |parent_ref| switch (parent_ref) {
+            .root, .entry => {},
+            .planned => |dependency| try appendDependency(self.arena, &dependencies, dependency),
+        };
+        // A source mutation must not run ahead of any captured effect that
+        // uses the same root/ref/revision. These are real plan dependencies,
+        // not an assumption about how rows happened to be listed.
+        if (operationSource(operation)) |source| if (row_ptr.pending != .copied and row_ptr.pending != .copied_renamed) {
+            for (self.capture_operations.items) |capture|
+                if (sameSource(capture.source, source)) try appendDependency(self.arena, &dependencies, capture.index);
+        };
+        const depends_on = try dependencies.toOwnedSlice(self.arena);
         try self.operations.append(self.arena, .{ .id = opId(index), .operation = operation, .depends_on = depends_on });
+        if (captureSource(row_ptr, operation)) |source|
+            try self.capture_operations.append(self.arena, .{ .source = source, .index = index });
         if ((row_ptr.pending == .added or row_ptr.pending == .copied or row_ptr.pending == .copied_renamed) and
             !self.hasCreateOperation(row_ptr.id))
             try self.create_operations.append(self.arena, .{ .id = row_ptr.id, .index = index });
@@ -664,6 +687,17 @@ const Builder = struct {
 
     fn hasCreateOperation(self: *const Builder, id: NodeId) bool {
         for (self.create_operations.items) |planned| if (planned.id == id) return true;
+        return false;
+    }
+
+    fn hasDependentCapture(self: *const Builder, source: contract.EntrySource) bool {
+        for (self.model.rows.items) |row| {
+            if (row.pending != .copied and row.pending != .copied_renamed) continue;
+            const captured = row.copy_source orelse continue;
+            if (sameRoot(captured.root, source.root) and
+                sameEntry(captured.entry, source.ref) and
+                std.mem.eql(u8, captured.revision, source.revision.token)) return true;
+        }
         return false;
     }
 
@@ -686,6 +720,38 @@ const Builder = struct {
         return false;
     }
 };
+
+fn appendDependency(arena: std.mem.Allocator, dependencies: *std.ArrayList(usize), value: usize) !void {
+    for (dependencies.items) |existing| if (existing == value) return;
+    try dependencies.append(arena, value);
+}
+
+fn operationSource(operation: contract.Operation) ?contract.EntrySource {
+    return switch (operation) {
+        .rename => |value| value.source,
+        .remove => |value| value.source,
+        .set_permissions => |value| value.source,
+        else => null,
+    };
+}
+
+fn captureSource(row_ptr: *const Row, operation: contract.Operation) ?contract.EntrySource {
+    if (row_ptr.pending != .copied and row_ptr.pending != .copied_renamed) return null;
+    return switch (operation) {
+        .copy => |value| switch (value.source) {
+            .entry => |source| source,
+            .lease => null,
+        },
+        // A cut is represented as rename, but its source is still a captured
+        // transfer and must participate in the same ordering invariant.
+        .rename => |value| value.source,
+        else => null,
+    };
+}
+
+fn sameSource(a: contract.EntrySource, b: contract.EntrySource) bool {
+    return sameRoot(a.root, b.root) and sameEntry(a.ref, b.ref) and std.mem.eql(u8, a.revision.token, b.revision.token);
+}
 
 const EntryCapture = struct {
     root: contract.Root,
@@ -854,6 +920,10 @@ fn copyName(arena: std.mem.Allocator, value: []const u8) !contract.Name {
 }
 
 fn sameEntry(a: contract.EntryRef, b: contract.EntryRef) bool {
+    return a.authority == b.authority and a.slot == b.slot and a.generation == b.generation;
+}
+
+fn sameRoot(a: contract.Root, b: contract.Root) bool {
     return a.authority == b.authority and a.slot == b.slot and a.generation == b.generation;
 }
 
@@ -1078,6 +1148,77 @@ test "captured transfer keeps old name across source rename or deletion" {
     try source.reconcile(.{ .entries = &.{} });
     const pasted_after_delete = try destination.paste(null, &deleted_item);
     try std.testing.expectEqualStrings("new", destination.row(pasted_after_delete).?.draft.name);
+}
+
+test "planner captures before source rename independent of row order" {
+    var model = Model.init(std.testing.allocator, .{ .authority = .here, .slot = 70, .generation = 1 });
+    defer model.deinit();
+    try model.reconcile(.{ .entries = &.{.{ .identity = ref(71, 1), .name = "old", .revision = "r1", .kind = .regular }} });
+    const source = model.rows.items[0].id;
+    var item = try model.yank(source, .copy);
+    defer item.deinit();
+    try model.rename(source, "new");
+    const pasted = try model.paste(null, &item);
+    try std.testing.expectEqualStrings("old", model.row(pasted).?.draft.name);
+
+    var plan = try model.buildPlan();
+    defer plan.deinit();
+    // The copied source is captured at r1 and must be consumed before the
+    // source rename mutates that identity/revision. This ordering comes from
+    // Builder's capture phase, not the visible row positions.
+    try std.testing.expectEqual(@as(usize, 2), plan.value.operations.len);
+    try std.testing.expectEqual(std.meta.activeTag(plan.value.operations[0].operation), .copy);
+    try std.testing.expectEqual(std.meta.activeTag(plan.value.operations[1].operation), .rename);
+    try std.testing.expectEqual(@as(usize, 1), plan.value.operations[1].depends_on.len);
+    try std.testing.expectEqual(@as(usize, 0), plan.value.operations[1].depends_on[0]);
+    try std.testing.expectEqualStrings("old", plan.value.operations[0].operation.copy.destination.name.bytes);
+    try std.testing.expectEqualStrings("new", plan.value.operations[1].operation.rename.destination.name.bytes);
+    try fs.plan.validate(std.testing.allocator, plan.value);
+}
+
+test "planner preserves deleted captured source for multiple pastes" {
+    var model = Model.init(std.testing.allocator, .{ .authority = .here, .slot = 72, .generation = 1 });
+    defer model.deinit();
+    try model.reconcile(.{ .entries = &.{.{ .identity = ref(73, 1), .name = "captured", .revision = "r1", .kind = .regular }} });
+    const source = model.rows.items[0].id;
+    var item = try model.yank(source, .copy);
+    defer item.deinit();
+    try model.markDelete(source);
+    _ = try model.paste(null, &item);
+    _ = try model.paste(null, &item);
+
+    var plan = try model.buildPlan();
+    defer plan.deinit();
+    // Both copies retain the immutable source capture. There is deliberately
+    // no remove: deleting the source would invalidate one or both effects.
+    try std.testing.expectEqual(@as(usize, 2), plan.value.operations.len);
+    for (plan.value.operations) |planned|
+        try std.testing.expectEqual(std.meta.activeTag(planned.operation), .copy);
+    try std.testing.expectEqual(@as(u32, 72), plan.value.operations[0].operation.copy.source.entry.root.slot);
+    try std.testing.expectEqual(@as(u32, 73), plan.value.operations[0].operation.copy.source.entry.ref.slot);
+}
+
+test "dependent capture preserves source when destination name is occupied" {
+    var model = Model.init(std.testing.allocator, .{ .authority = .here, .slot = 74, .generation = 1 });
+    defer model.deinit();
+    try model.reconcile(.{ .entries = &.{
+        .{ .identity = ref(75, 1), .name = "captured", .revision = "r1", .kind = .regular },
+        .{ .identity = ref(76, 1), .name = "other", .revision = "r1", .kind = .regular },
+    } });
+    const source = model.rows.items[0].id;
+    var item = try model.yank(source, .copy);
+    defer item.deinit();
+    try model.markDelete(source);
+    const pasted = try model.paste(null, &item);
+    try std.testing.expectEqualStrings("captured", model.row(pasted).?.draft.name);
+
+    var plan = try model.buildPlan();
+    defer plan.deinit();
+    // The provider will report the occupied destination as a copy conflict;
+    // this planner must not turn that conflict into source removal.
+    try std.testing.expectEqual(@as(usize, 1), plan.value.operations.len);
+    try std.testing.expectEqual(std.meta.activeTag(plan.value.operations[0].operation), .copy);
+    try std.testing.expectEqualStrings("captured", plan.value.operations[0].operation.copy.destination.name.bytes);
 }
 
 test "foreign source root remains explicit in copied effect" {
