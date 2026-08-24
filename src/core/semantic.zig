@@ -56,6 +56,20 @@ pub const Services = struct {
         return self.targets.publish(gpa, owner, definition);
     }
 
+    pub fn replaceTarget(
+        self: *Services,
+        gpa: std.mem.Allocator,
+        owner: []const u8,
+        ref: kernel.target.Ref,
+        definition: kernel.target.Definition,
+    ) target_runtime.target.Error!void {
+        return self.targets.replace(gpa, owner, ref, definition);
+    }
+
+    pub fn closeTarget(self: *Services, gpa: std.mem.Allocator, owner: []const u8, ref: kernel.target.Ref) bool {
+        return self.targets.close(gpa, owner, ref);
+    }
+
     pub fn publishView(
         self: *Services,
         gpa: std.mem.Allocator,

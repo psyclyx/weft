@@ -211,6 +211,12 @@ const handlers = [_]struct { name: []const u8, handler: HostFn }{
     // ── semantic.zig — generic focused-view actions ───────────────────
     .{ .name = "wl_semantic_active", .handler = semantic.hSemanticActive },
     .{ .name = "wl_semantic_action", .handler = semantic.hSemanticAction },
+    .{ .name = "wl_semantic_target_publish", .handler = semantic.hSemanticTargetPublish },
+    .{ .name = "wl_semantic_target_replace", .handler = semantic.hSemanticTargetReplace },
+    .{ .name = "wl_semantic_target_close", .handler = semantic.hSemanticTargetClose },
+    .{ .name = "wl_semantic_view_publish", .handler = semantic.hSemanticViewPublish },
+    .{ .name = "wl_semantic_view_replace", .handler = semantic.hSemanticViewReplace },
+    .{ .name = "wl_semantic_view_close", .handler = semantic.hSemanticViewClose },
 
     // ── proc.zig — perm-gated off-thread process effects ───────────────
     .{ .name = "wl_shell_insert", .handler = proc.hShellInsert },

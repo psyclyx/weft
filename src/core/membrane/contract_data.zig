@@ -284,6 +284,12 @@ pub const imports = [_]Entry{
     // ── semantic.zig — tool-neutral focused-view actions ───────────────
     .{ .name = "wl_semantic_active", .params = &.{}, .results = &.{.u32}, .group = .semantic, .doc = "whether this head currently focuses a live semantic view" },
     .{ .name = "wl_semantic_action", .params = &.{ .u32, .u32 }, .results = &.{.i32}, .group = .semantic, .head_gated = true, .doc = "invoke an open action on the deepest advertising node of the focused semantic view" },
+    .{ .name = "wl_semantic_target_publish", .params = &.{ .u32, .u32, .u32, .u32 }, .results = &.{.i32}, .group = .semantic, .doc = "admit a canonical target definition and write its typed handle" },
+    .{ .name = "wl_semantic_target_replace", .params = &.{ .u32, .u32, .u32, .u32, .u32 }, .results = &.{.i32}, .group = .semantic, .doc = "replace an owned target definition without changing its identity" },
+    .{ .name = "wl_semantic_target_close", .params = &.{ .u32, .u32, .u32 }, .results = &.{.u32}, .group = .semantic, .doc = "close an owned target and invalidate its generation" },
+    .{ .name = "wl_semantic_view_publish", .params = &.{ .u32, .u32, .u32, .u32, .u32, .u32, .u32, .u32 }, .results = &.{.i32}, .group = .semantic, .doc = "admit a canonical semantic scene and write its typed view handle" },
+    .{ .name = "wl_semantic_view_replace", .params = &.{ .u32, .u32, .u32, .u32, .u32, .u32 }, .results = &.{.i32}, .group = .semantic, .doc = "replace an owned retained scene at an explicit revision" },
+    .{ .name = "wl_semantic_view_close", .params = &.{ .u32, .u32, .u32 }, .results = &.{.u32}, .group = .semantic, .doc = "close an owned view and invalidate its generation" },
 
     // ── proc.zig — perm-gated off-thread process effects ───────────────
     .{ .name = "wl_shell_insert", .params = &.{ .u32, .u32 }, .results = &.{}, .group = .proc, .perm = .proc_timer, .doc = "run `<cmd>` off-thread and insert its stdout at the cursor when done" },
@@ -339,7 +345,7 @@ pub const imports = [_]Entry{
 /// half-finished edit — fails the build with a pointed message instead of
 /// silently drifting the two ~124-entry tables apart again (the exact class
 /// this table exists to kill).
-const expected_import_count = 130;
+const expected_import_count = 136;
 
 /// A host→guest EXPORT entrypoint (design doc/north-star-plan.md §2.5, task
 /// W0a-D extension 2): every `instance.callVoid("name", args)` the host

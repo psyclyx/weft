@@ -13,6 +13,7 @@ const pick_mod = @import("../pick.zig");
 const subbuffer = @import("../subbuffer.zig");
 const register = @import("../register.zig");
 const surface_mod = @import("../surface.zig");
+const semantic_mod = @import("../semantic.zig");
 const async_loop = @import("../async.zig");
 const net_session = @import("../net_session.zig");
 const wasm_host = @import("../wasm_host.zig");
@@ -25,6 +26,36 @@ const loadPlugin = wasm_abi.loadPlugin;
 const guest_hello = wasm_abi.guest_hello;
 
 const t = std.testing;
+
+test "wasm plugin: canonical targets and scenes cross the semantic membrane" {
+    const gpa = t.allocator;
+    var env: Env = undefined;
+    try Env.init(gpa, &env);
+    defer env.deinit(gpa);
+    var semantic = semantic_mod.Services.init(.here);
+    defer semantic.deinit(gpa);
+    env.ctx.semantic = &semantic;
+
+    var engine = try wasm.Engine.init();
+    defer engine.deinit();
+    const plugin = try loadPlugin(&engine, &env.ctx, "semantic-fixture", @embedFile("guest_semantic_wasm"), .{});
+
+    const target_ref: @import("weft_kernel").target.Ref = .{ .authority = .here, .slot = 0, .generation = 1 };
+    const target = semantic.targets.get(target_ref).?;
+    try t.expectEqualStrings("fixture directory", target.display_name);
+    try t.expect(target.kind == .directory);
+
+    const view_ref: @import("weft_kernel").view.Ref = .{ .authority = .here, .slot = 0, .generation = 1 };
+    const view = semantic.views.get(view_ref).?;
+    try t.expect(view.descriptor.target.?.eql(target_ref));
+    try t.expectEqual(@as(u64, 7), view.descriptor.revision);
+    try t.expectEqualStrings("fixture", view.scene.role);
+    try t.expectEqualStrings("hello", view.scene.content.container.children[0].content.label);
+
+    plugin.deinit();
+    try t.expect(semantic.targets.get(target_ref) == null);
+    try t.expect(semantic.views.get(view_ref) == null);
+}
 
 test "wasm plugin: a .wasm guest edits the buffer through the host ABI, as its peer" {
     const gpa = t.allocator;

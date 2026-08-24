@@ -38,6 +38,12 @@ const contract_data = @import("membrane_contract_data");
 /// §3.3 fallback arm, always available with zero codegen).
 pub const schema = @import("weft_schema");
 
+/// Portable semantic values and their canonical codec. These are named build
+/// modules under the wasm target too: a plugin can author scenes and targets,
+/// but cannot import host runtime implementation files sideways.
+pub const semantic_kernel = @import("weft_kernel");
+pub const semantic_codec = @import("weft_scene_codec");
+
 // ── Raw host imports (the grants). Named `wl_*` to keep the ergonomic
 // wrappers below as the surface guest code actually calls. Hand-written —
 // Zig 0.16 can't synthesize an `extern fn` declaration from a comptime loop
@@ -160,6 +166,12 @@ extern "weft" fn wl_register_linewise() u32;
 extern "weft" fn wl_paste_at(base: u32) void;
 extern "weft" fn wl_semantic_active() u32;
 extern "weft" fn wl_semantic_action(action: u32, action_len: u32) i32;
+extern "weft" fn wl_semantic_target_publish(payload: u32, payload_len: u32, out: u32, out_cap: u32) i32;
+extern "weft" fn wl_semantic_target_replace(authority: u32, slot: u32, generation: u32, payload: u32, payload_len: u32) i32;
+extern "weft" fn wl_semantic_target_close(authority: u32, slot: u32, generation: u32) u32;
+extern "weft" fn wl_semantic_view_publish(payload: u32, payload_len: u32, target_authority: u32, target_slot: u32, target_generation: u32, revision: u32, out: u32, out_cap: u32) i32;
+extern "weft" fn wl_semantic_view_replace(authority: u32, slot: u32, generation: u32, revision: u32, payload: u32, payload_len: u32) i32;
+extern "weft" fn wl_semantic_view_close(authority: u32, slot: u32, generation: u32) u32;
 extern "weft" fn wl_shell_insert(ptr: u32, len: u32) void;
 extern "weft" fn wl_repl_start(cmd: u32, cmd_len: u32, name: u32, name_len: u32) i32;
 extern "weft" fn wl_repl_send(handle: u32, ptr: u32, len: u32) void;
@@ -1004,6 +1016,74 @@ pub const SemanticActionResult = enum(i32) {
 
 pub fn semanticAction(action: []const u8) SemanticActionResult {
     return @enumFromInt(wl_semantic_action(p(action.ptr), @intCast(action.len)));
+}
+
+pub const SemanticPublishError = semantic_codec.Error || error{Rejected};
+
+fn readSemanticHandle(comptime Ref: type, bytes: *const [12]u8) SemanticPublishError!Ref {
+    const wire: semantic_kernel.handle.Wire = .{
+        .authority = std.mem.readInt(u32, bytes[0..4], .little),
+        .slot = std.mem.readInt(u32, bytes[4..8], .little),
+        .generation = std.mem.readInt(u32, bytes[8..12], .little),
+    };
+    if (wire.generation == 0) return error.Rejected;
+    return Ref.fromWire(wire);
+}
+
+/// Publish a resource descriptor. Paths and schemes remain ordinary target
+/// facts; target-handler plugins, not this SDK, decide what can open them.
+pub fn semanticTargetPublish(definition: semantic_kernel.target.Definition) SemanticPublishError!semantic_kernel.target.Ref {
+    const payload = try semantic_codec.encodeTarget(allocator, definition);
+    defer allocator.free(payload);
+    var out: [12]u8 = undefined;
+    if (wl_semantic_target_publish(p(payload.ptr), @intCast(payload.len), p(&out), out.len) != 1) return error.Rejected;
+    return readSemanticHandle(semantic_kernel.target.Ref, &out);
+}
+
+pub fn semanticTargetReplace(ref: semantic_kernel.target.Ref, definition: semantic_kernel.target.Definition) SemanticPublishError!void {
+    const payload = try semantic_codec.encodeTarget(allocator, definition);
+    defer allocator.free(payload);
+    const wire = ref.toWire();
+    if (wl_semantic_target_replace(wire.authority, wire.slot, wire.generation, p(payload.ptr), @intCast(payload.len)) != 1)
+        return error.Rejected;
+}
+
+pub fn semanticTargetClose(ref: semantic_kernel.target.Ref) bool {
+    const wire = ref.toWire();
+    return wl_semantic_target_close(wire.authority, wire.slot, wire.generation) != 0;
+}
+
+/// Publish a retained scene. A null target is represented canonically by an
+/// all-zero wire tuple and cannot be confused with a live generation.
+pub fn semanticViewPublish(root: semantic_kernel.scene.Node, target: ?semantic_kernel.target.Ref, revision: u32) SemanticPublishError!semantic_kernel.view.Ref {
+    const payload = try semantic_codec.encodeScene(allocator, root);
+    defer allocator.free(payload);
+    const target_wire: semantic_kernel.handle.Wire = if (target) |ref| ref.toWire() else .{ .authority = 0, .slot = 0, .generation = 0 };
+    var out: [12]u8 = undefined;
+    if (wl_semantic_view_publish(
+        p(payload.ptr),
+        @intCast(payload.len),
+        target_wire.authority,
+        target_wire.slot,
+        target_wire.generation,
+        revision,
+        p(&out),
+        out.len,
+    ) != 1) return error.Rejected;
+    return readSemanticHandle(semantic_kernel.view.Ref, &out);
+}
+
+pub fn semanticViewReplace(ref: semantic_kernel.view.Ref, revision: u32, root: semantic_kernel.scene.Node) SemanticPublishError!void {
+    const payload = try semantic_codec.encodeScene(allocator, root);
+    defer allocator.free(payload);
+    const wire = ref.toWire();
+    if (wl_semantic_view_replace(wire.authority, wire.slot, wire.generation, revision, p(payload.ptr), @intCast(payload.len)) != 1)
+        return error.Rejected;
+}
+
+pub fn semanticViewClose(ref: semantic_kernel.view.Ref) bool {
+    const wire = ref.toWire();
+    return wl_semantic_view_close(wire.authority, wire.slot, wire.generation) != 0;
 }
 
 // ── Effects (perm-gated) ─────────────────────────────────────────────

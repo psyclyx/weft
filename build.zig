@@ -118,6 +118,7 @@ const guests = [_]Guest{
     // D2's worked example (doc/d2-schema-payloads.md §6) — a third-party
     // slot the wasm-membrane suite proves end to end; never shipped.
     .{ .src = "src/guest/badge.zig", .import = "guest_badge_wasm", .install = false },
+    .{ .src = "src/guest/semantic_fixture.zig", .import = "guest_semantic_wasm", .install = false },
     .{ .src = "src/guest/edit.zig", .import = "guest_edit_wasm", .install = true },
     .{ .src = "src/guest/complete.zig", .import = "guest_complete_wasm", .install = true },
     .{ .src = "src/guest/project.zig", .import = "guest_project_wasm", .install = true },
@@ -593,6 +594,21 @@ fn buildGuest(b: *std.Build, src: []const u8) *std.Build.Step.Compile {
     });
     guest_sdk.addImport("membrane_contract_data", contract_data);
     guest_sdk.addImport("weft_schema", schema);
+    const kernel = b.createModule(.{
+        .root_source_file = b.path("src/kernel/root.zig"),
+        .target = wasm_target,
+        .optimize = .ReleaseSmall,
+    });
+    kernel.addImport("weft_schema", schema);
+    const scene_codec = b.createModule(.{
+        .root_source_file = b.path("src/scene_codec/root.zig"),
+        .target = wasm_target,
+        .optimize = .ReleaseSmall,
+    });
+    scene_codec.addImport("weft_kernel", kernel);
+    scene_codec.addImport("weft_schema", schema);
+    guest_sdk.addImport("weft_kernel", kernel);
+    guest_sdk.addImport("weft_scene_codec", scene_codec);
     guest_mod.addImport("weft", guest_sdk);
     const guest = b.addExecutable(.{
         .name = std.fs.path.stem(src),
