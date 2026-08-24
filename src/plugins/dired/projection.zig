@@ -15,10 +15,19 @@ const contract = fs.contract;
 
 pub const FieldBinding = struct {
     row: model.NodeId,
+    /// The row's primary navigation field. Ordinary focus traversal visits
+    /// exactly this field once per row.
     field: scene.FieldRef,
+    /// An optional, provider-capability-dependent POSIX mode editor. It is a
+    /// secondary field entered by an advertised action, not another primary
+    /// traversal stop.
+    mode_field: ?scene.FieldRef = null,
 };
 
+pub const permissions_edit_action = "fs.permissions.edit";
+
 pub const metadata_column: u16 = 0;
+pub const mode_column: u16 = 10;
 pub const name_column: u16 = 16;
 pub const original_column: u16 = 48;
 
@@ -36,6 +45,7 @@ const row_domain: u64 = 1;
 const field_domain: u64 = 2;
 const metadata_domain: u64 = 3;
 const original_domain: u64 = 4;
+const mode_domain: u64 = 5;
 const root_id: scene.NodeId = @enumFromInt((7 << 61) | 1);
 const id_payload_mask: u64 = (@as(u64, 1) << 61) - 1;
 
@@ -49,7 +59,7 @@ pub fn project(gpa: std.mem.Allocator, rows: []const model.Row, bindings: []cons
     const children = try arena.alloc(scene.Node, rows.len);
     for (rows, children) |row, *child| {
         const binding = findBinding(bindings, row.id).?;
-        child.* = try projectRow(arena, row, binding.field);
+        child.* = try projectRow(arena, row, binding);
     }
     owned.value = .{
         .id = root_id,
@@ -81,24 +91,42 @@ fn validateInputs(rows: []const model.Row, bindings: []const FieldBinding) !void
         _ = try stableId(row.id, row_domain);
         _ = try stableId(row.id, field_domain);
         _ = try stableId(row.id, metadata_domain);
+        _ = try stableId(row.id, mode_domain);
         if (isOriginalVisible(row)) _ = try stableId(row.id, original_domain);
         for (rows[index + 1 ..]) |later| if (row.id == later.id) return error.DuplicateRow;
     }
     for (bindings, 0..) |binding, index| {
-        if (binding.row == 0 or binding.field.generation == 0) return error.InvalidField;
+        if (binding.row == 0 or binding.field.generation == 0 or
+            (binding.mode_field != null and binding.mode_field.?.generation == 0))
+            return error.InvalidField;
         if (findRow(rows, binding.row) == null) return error.UnknownBinding;
+        if (binding.mode_field) |mode_field| {
+            if (sameField(binding.field, mode_field)) return error.DuplicateBinding;
+        }
         for (bindings[index + 1 ..]) |later| {
             if (binding.row == later.row) return error.DuplicateBinding;
             if (sameField(binding.field, later.field)) return error.DuplicateBinding;
+            if (later.mode_field) |later_mode| {
+                if (sameField(binding.field, later_mode)) return error.DuplicateBinding;
+            }
+            if (binding.mode_field) |mode_field| {
+                if (sameField(mode_field, later.field)) return error.DuplicateBinding;
+                if (later.mode_field) |later_mode| {
+                    if (sameField(mode_field, later_mode)) return error.DuplicateBinding;
+                }
+            }
         }
     }
     if (rows.len != bindings.len) return error.MissingBinding;
     for (rows) |row| if (findBinding(bindings, row.id) == null) return error.MissingBinding;
 }
 
-fn projectRow(arena: std.mem.Allocator, row: model.Row, field: scene.FieldRef) !scene.Node {
+fn projectRow(arena: std.mem.Allocator, row: model.Row, binding: FieldBinding) !scene.Node {
     const original_visible = isOriginalVisible(row);
-    const child_count: usize = 2 + @as(usize, if (original_visible) 1 else 0);
+    // Metadata, mode, and name are structural columns even when the provider
+    // cannot edit modes. Rows therefore never shift horizontally as their
+    // kind or capability changes.
+    const child_count: usize = 3 + @as(usize, if (original_visible) 1 else 0);
     const children = try arena.alloc(scene.Node, child_count);
     const leaf_facts = try toneFacts(arena, row);
     children[0] = .{
@@ -106,19 +134,29 @@ fn projectRow(arena: std.mem.Allocator, row: model.Row, field: scene.FieldRef) !
         .role = "dired.metadata",
         .layout = .{ .column = metadata_column },
         .facts = leaf_facts,
-        .content = .{ .label = try metadataLabel(arena, row) },
+        .content = .{ .label = kindName(row.draft.kind) },
     };
     children[1] = .{
+        .id = try stableId(row.id, mode_domain),
+        .role = "dired.mode",
+        .layout = .{ .column = mode_column, .min_cells = 4 },
+        .facts = leaf_facts,
+        .content = if (binding.mode_field) |mode_field|
+            .{ .field = .{ .ref = mode_field, .placeholder = "mode", .single_line = true } }
+        else
+            .{ .label = try modeLabel(arena, row.draft.mode) },
+    };
+    children[2] = .{
         .id = try stableId(row.id, field_domain),
         .role = "dired.name",
         .layout = .{ .column = name_column },
         .facts = leaf_facts,
         .focusable = true,
-        .content = .{ .field = .{ .ref = field, .single_line = true } },
+        .content = .{ .field = .{ .ref = binding.field, .single_line = true } },
     };
     if (original_visible) {
         const original = row.base.?.name;
-        children[2] = .{
+        children[3] = .{
             .id = try stableId(row.id, original_domain),
             .role = "dired.original-name",
             .layout = .{ .column = original_column },
@@ -128,7 +166,7 @@ fn projectRow(arena: std.mem.Allocator, row: model.Row, field: scene.FieldRef) !
     }
 
     const facts = try rowFacts(arena, row);
-    const actions = try rowActions(arena, row);
+    const actions = try rowActions(arena, row, binding.mode_field != null);
     return .{
         .id = try stableId(row.id, row_domain),
         .role = "dired.row",
@@ -160,8 +198,8 @@ fn rowFacts(arena: std.mem.Allocator, row: model.Row) ![]scene.Fact {
     return facts;
 }
 
-fn rowActions(arena: std.mem.Allocator, row: model.Row) ![]scene.Action {
-    const actions = try arena.alloc(scene.Action, 7);
+fn rowActions(arena: std.mem.Allocator, row: model.Row, mode_editable: bool) ![]scene.Action {
+    const actions = try arena.alloc(scene.Action, 7 + @as(usize, if (mode_editable) 1 else 0));
     const unavailable = row.pending == .deleted or row.conflict == .stale;
     actions[0] = .{ .id = standard.open, .label = "Open", .enabled = !unavailable };
     actions[1] = .{ .id = standard.edit, .label = "Edit name", .enabled = row.pending != .deleted };
@@ -170,12 +208,17 @@ fn rowActions(arena: std.mem.Allocator, row: model.Row) ![]scene.Action {
     actions[4] = .{ .id = standard.delete, .label = "Delete", .enabled = row.pending != .deleted };
     actions[5] = .{ .id = standard.paste_before, .label = "Paste before", .enabled = row.conflict != .stale };
     actions[6] = .{ .id = standard.paste_after, .label = "Paste after", .enabled = row.conflict != .stale };
+    if (mode_editable) actions[7] = .{
+        .id = permissions_edit_action,
+        .label = "Edit permissions",
+        .enabled = !unavailable,
+    };
     return actions;
 }
 
-fn metadataLabel(arena: std.mem.Allocator, row: model.Row) ![]const u8 {
-    if (row.draft.mode) |mode| return std.fmt.allocPrint(arena, "kind={s} mode={d}", .{ kindName(row.draft.kind), mode });
-    return std.fmt.allocPrint(arena, "kind={s}", .{kindName(row.draft.kind)});
+fn modeLabel(arena: std.mem.Allocator, mode: ?u32) ![]const u8 {
+    if (mode) |value| return std.fmt.allocPrint(arena, "{o:0>4}", .{value});
+    return arena.dupe(u8, "----");
 }
 
 fn prefixedEscapedLabel(arena: std.mem.Allocator, prefix: []const u8, value: []const u8) ![]const u8 {
@@ -267,6 +310,11 @@ pub fn rowNodeId(raw: model.NodeId) !scene.NodeId {
     return stableId(raw, row_domain);
 }
 
+/// Stable identity of a row's secondary permissions field/label node.
+pub fn modeNodeId(raw: model.NodeId) !scene.NodeId {
+    return stableId(raw, mode_domain);
+}
+
 pub fn rootNodeId() scene.NodeId {
     return root_id;
 }
@@ -335,9 +383,9 @@ test "projection keeps deleted rows visible and labels original renamed name" {
     defer output.deinit();
     const row = output.value.content.container.children[0];
     try std.testing.expectEqualStrings("delete", row.facts[0].value);
-    try std.testing.expectEqual(@as(usize, 3), row.content.container.children.len);
-    try std.testing.expectEqualStrings("original: old", row.content.container.children[2].content.label);
-    try std.testing.expectEqualStrings("deleted", row.content.container.children[2].facts[0].value);
+    try std.testing.expectEqual(@as(usize, 4), row.content.container.children.len);
+    try std.testing.expectEqualStrings("original: old", row.content.container.children[3].content.label);
+    try std.testing.expectEqualStrings("deleted", row.content.container.children[3].facts[0].value);
     try std.testing.expectEqualStrings(standard.paste_before, row.actions[5].id);
     try std.testing.expectEqualStrings(standard.paste_after, row.actions[6].id);
     try std.testing.expect(row.actions[5].enabled and row.actions[6].enabled);
@@ -351,7 +399,9 @@ test "projection reports add copy and stale facts with metadata" {
     var added_output = try project(std.testing.allocator, dired.rows.items, &refs);
     defer added_output.deinit();
     try std.testing.expectEqualStrings("add", added_output.value.content.container.children[0].facts[0].value);
-    try std.testing.expectEqualStrings("kind=directory mode=0", added_output.value.content.container.children[0].content.container.children[0].content.label);
+    const added_children = added_output.value.content.container.children[0].content.container.children;
+    try std.testing.expectEqualStrings("directory", added_children[0].content.label);
+    try std.testing.expectEqualStrings("0000", added_children[1].content.label);
 
     try dired.markDelete(added);
     var stale_output = try project(std.testing.allocator, dired.rows.items, &refs);
@@ -390,20 +440,32 @@ test "projection fixes metadata field columns and styles mode-only modifications
     try dired.reconcile(.{ .entries = &.{.{ .identity = .{ .authority = .here, .slot = 30, .generation = 1 }, .name = "mode", .revision = "1", .kind = .regular, .mode = 0o644 }} });
     const id = dired.rows.items[0].id;
     try dired.setMode(id, 0);
-    const refs = [_]FieldBinding{.{ .row = id, .field = .{ .authority = .here, .slot = 17, .generation = 1 } }};
+    const refs = [_]FieldBinding{.{
+        .row = id,
+        .field = .{ .authority = .here, .slot = 17, .generation = 1 },
+        .mode_field = .{ .authority = .here, .slot = 18, .generation = 1 },
+    }};
     var output = try project(std.testing.allocator, dired.rows.items, &refs);
     defer output.deinit();
     const row = output.value.content.container.children[0];
     const children = row.content.container.children;
-    try std.testing.expectEqual(@as(usize, 2), children.len);
+    try std.testing.expectEqual(@as(usize, 3), children.len);
     try std.testing.expectEqual(metadata_column, children[0].layout.column.?);
-    try std.testing.expectEqual(name_column, children[1].layout.column.?);
+    try std.testing.expectEqual(mode_column, children[1].layout.column.?);
+    try std.testing.expectEqual(name_column, children[2].layout.column.?);
+    try std.testing.expect(!children[1].focusable);
+    try std.testing.expectEqual(refs[0].mode_field.?, children[1].content.field.ref);
+    try std.testing.expectEqual(try modeNodeId(id), children[1].id);
     try std.testing.expectEqualStrings("modify", row.facts[0].value);
     try std.testing.expectEqualStrings("changed", row.facts[2].value);
     try std.testing.expectEqualStrings("changed", children[0].facts[0].value);
     try std.testing.expectEqualStrings("changed", children[1].facts[0].value);
+    try std.testing.expectEqualStrings("changed", children[2].facts[0].value);
     try std.testing.expectEqualStrings(standard.paste_before, row.actions[5].id);
     try std.testing.expect(row.actions[5].enabled and row.actions[6].enabled);
+    try std.testing.expectEqual(@as(usize, 8), row.actions.len);
+    try std.testing.expectEqualStrings(permissions_edit_action, row.actions[7].id);
+    try std.testing.expect(row.actions[7].enabled);
 }
 
 test "projection rejects duplicate missing and generation-zero bindings" {
@@ -419,6 +481,12 @@ test "projection rejects duplicate missing and generation-zero bindings" {
     try std.testing.expectError(error.DuplicateBinding, project(std.testing.allocator, dired.rows.items, &duplicate));
     const zero = [_]FieldBinding{.{ .row = id, .field = .{ .authority = .here, .slot = 14, .generation = 0 } }};
     try std.testing.expectError(error.InvalidField, project(std.testing.allocator, dired.rows.items, &zero));
+    const same_mode = [_]FieldBinding{.{
+        .row = id,
+        .field = .{ .authority = .here, .slot = 14, .generation = 1 },
+        .mode_field = .{ .authority = .here, .slot = 14, .generation = 1 },
+    }};
+    try std.testing.expectError(error.DuplicateBinding, project(std.testing.allocator, dired.rows.items, &same_mode));
 }
 
 test "projection leaves unusual raw names in model provider data" {

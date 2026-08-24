@@ -72,6 +72,15 @@ pub const Controller = struct {
         const subject = try self.resolveRow(request.subject, is_paste);
         const selected = try self.resolveSelection(request, subject, is_paste);
         defer self.gpa.free(selected);
+        if (std.mem.eql(u8, request.action, projection.permissions_edit_action)) {
+            if (selected.len != 1) return error.AmbiguousSubject;
+            const row = self.model.row(selected[0]) orelse return error.UnknownSubject;
+            switch (row.draft.kind) {
+                .regular, .directory => {},
+                .symlink, .other => return error.InvalidSelection,
+            }
+            return .{ .focus = projection.modeNodeId(selected[0]) catch return error.UnknownSubject };
+        }
         if (std.mem.eql(u8, request.action, action.standard.copy) or
             std.mem.eql(u8, request.action, action.standard.cut))
         {
@@ -243,4 +252,30 @@ test "dired actions reject unknown and stale subjects transactionally" {
     try dired.reconcile(.{ .entries = &.{} });
     try std.testing.expectError(error.StaleSubject, controller.invoke(.{ .action = action.standard.delete, .view = controller.view_ref, .subject = rowNode(id) }));
     try std.testing.expectEqual(model.Pending.renamed, dired.row(id).?.pending);
+}
+
+test "permissions action requests a secondary field focus without editing policy" {
+    var dired = model.Model.init(std.testing.allocator, .{ .authority = .here, .slot = 30, .generation = 1 });
+    defer dired.deinit();
+    try dired.reconcile(.{ .entries = &.{
+        .{ .identity = ref(30, 1), .name = "regular", .revision = "r", .kind = .regular, .mode = 0o644 },
+        .{ .identity = ref(31, 1), .name = "link", .revision = "r", .kind = .symlink },
+    } });
+    var controller = Controller.init(std.testing.allocator, &dired, .{ .authority = .here, .slot = 8, .generation = 1 });
+    defer controller.deinit();
+
+    const regular = dired.rows.items[0].id;
+    const outcome = try controller.invoke(.{
+        .action = projection.permissions_edit_action,
+        .view = controller.view_ref,
+        .subject = rowNode(regular),
+    });
+    try std.testing.expectEqual(try projection.modeNodeId(regular), outcome.focus);
+
+    const link = dired.rows.items[1].id;
+    try std.testing.expectError(error.InvalidSelection, controller.invoke(.{
+        .action = projection.permissions_edit_action,
+        .view = controller.view_ref,
+        .subject = rowNode(link),
+    }));
 }

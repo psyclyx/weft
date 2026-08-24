@@ -1,7 +1,7 @@
 //! Plugin-owned dired sessions over generic filesystem and semantic services.
 //!
 //! This is adapter code, not editor core: it turns one typed directory target
-//! into an independent draft model, retained scene, editable name fields, and
+//! into an independent draft model, retained scene, editable draft fields, and
 //! semantic action endpoint. It knows no Vim modes, text buffers, local paths,
 //! syscalls, renderer, or dialog presentation.
 
@@ -248,7 +248,7 @@ pub const Session = struct {
     target_revision: u64,
     directory: fs.target.Directory,
     draft: model.Model,
-    fields: std.ArrayList(*NameField) = .empty,
+    fields: std.ArrayList(*DraftField) = .empty,
     view_ref: semantic.view.Ref = undefined,
     controller: actions.Controller = undefined,
     loaded: bool = false,
@@ -256,6 +256,7 @@ pub const Session = struct {
     /// second confirmation may refresh state but must never replay the plan.
     apply_committed: bool = false,
     scene_revision: u64 = 1,
+    posix_mode: bool = false,
 
     fn init(plugin: *Plugin, target: semantic.target.Ref, target_revision: u64, directory: fs.target.Directory) Session {
         return .{
@@ -268,6 +269,7 @@ pub const Session = struct {
     }
 
     fn load(self: *Session) !void {
+        self.posix_mode = (try self.plugin.host.filesystems.capabilities(self.directory.root)).posix_mode;
         var initial = try self.refreshedDraft(true);
         defer initial.deinit();
         const previous = self.draft;
@@ -451,18 +453,23 @@ pub const Session = struct {
     /// cannot publish a scene containing a missing field.
     fn prepareFieldsFor(self: *Session, draft: *const model.Model) !void {
         for (draft.rows.items) |row| {
-            if (self.fieldFor(row.id) != null) continue;
-            const field = try self.plugin.gpa.create(NameField);
-            errdefer self.plugin.gpa.destroy(field);
-            field.* = .{ .session = self, .row = row.id };
-            field.ref = try self.plugin.host.fields.insert(
-                self.plugin.gpa,
-                self.plugin.owner,
-                .init(field),
-            );
-            errdefer _ = self.plugin.host.fields.remove(self.plugin.gpa, self.plugin.owner, field.ref);
-            try self.fields.append(self.plugin.gpa, field);
+            try self.ensureField(row.id, .name);
+            if (self.modeEditable(row)) try self.ensureField(row.id, .mode);
         }
+    }
+
+    fn ensureField(self: *Session, row: model.NodeId, kind: DraftField.Kind) !void {
+        if (self.draftFieldFor(row, kind) != null) return;
+        const field = try self.plugin.gpa.create(DraftField);
+        errdefer self.plugin.gpa.destroy(field);
+        field.* = .{ .session = self, .row = row, .kind = kind };
+        field.ref = try self.plugin.host.fields.insert(
+            self.plugin.gpa,
+            self.plugin.owner,
+            .init(field),
+        );
+        errdefer _ = self.plugin.host.fields.remove(self.plugin.gpa, self.plugin.owner, field.ref);
+        try self.fields.append(self.plugin.gpa, field);
     }
 
     fn rollbackFieldsFrom(self: *Session, first: usize) void {
@@ -478,7 +485,9 @@ pub const Session = struct {
         while (index > 0) {
             index -= 1;
             const field = self.fields.items[index];
-            if (self.draft.row(field.row) != null) continue;
+            if (self.draft.row(field.row)) |row| {
+                if (field.kind == .name or self.modeEditable(row.*)) continue;
+            }
             _ = self.plugin.host.fields.remove(self.plugin.gpa, self.plugin.owner, field.ref);
             _ = self.fields.swapRemove(index);
             self.plugin.gpa.destroy(field);
@@ -491,13 +500,30 @@ pub const Session = struct {
         for (draft.rows.items, bindings) |row, *binding| binding.* = .{
             .row = row.id,
             .field = self.fieldFor(row.id).?.ref,
+            .mode_field = if (self.modeFieldFor(row.id)) |field| field.ref else null,
         };
         return projection.project(self.plugin.gpa, draft.rows.items, bindings);
     }
 
-    fn fieldFor(self: *const Session, row: model.NodeId) ?*NameField {
-        for (self.fields.items) |field| if (field.row == row) return field;
+    fn draftFieldFor(self: *const Session, row: model.NodeId, kind: DraftField.Kind) ?*DraftField {
+        for (self.fields.items) |field| if (field.row == row and field.kind == kind) return field;
         return null;
+    }
+
+    fn fieldFor(self: *const Session, row: model.NodeId) ?*DraftField {
+        return self.draftFieldFor(row, .name);
+    }
+
+    fn modeFieldFor(self: *const Session, row: model.NodeId) ?*DraftField {
+        return self.draftFieldFor(row, .mode);
+    }
+
+    fn modeEditable(self: *const Session, row: model.Row) bool {
+        if (!self.posix_mode) return false;
+        return switch (row.draft.kind) {
+            .regular, .directory => true,
+            .symlink, .other => false,
+        };
     }
 
     fn bumpFieldRevisions(self: *Session) void {
@@ -523,21 +549,30 @@ fn sameDirectory(a: fs.target.Directory, b: fs.target.Directory) bool {
     return a.root.eql(b.root) and std.meta.eql(a.node, b.node);
 }
 
-const NameField = struct {
+const DraftField = struct {
     session: *Session,
     row: model.NodeId,
+    kind: Kind,
     ref: semantic.scene.FieldRef = undefined,
     revision: u64 = 1,
     selection: view_runtime.field.Selection = .{ .anchor = 0, .caret = 0 },
 
-    pub fn snapshot(self: *NameField, gpa: std.mem.Allocator) view_runtime.field.Error!view_runtime.field.OwnedSnapshot {
+    const Kind = enum { name, mode };
+
+    pub fn snapshot(self: *DraftField, gpa: std.mem.Allocator) view_runtime.field.Error!view_runtime.field.OwnedSnapshot {
         const row = self.session.draft.row(self.row) orelse return error.Stale;
         var owned = view_runtime.field.OwnedSnapshot.init(gpa);
         errdefer owned.deinit();
         const arena = owned.allocator();
         const revision = try arena.alloc(u8, @sizeOf(u64));
         std.mem.writeInt(u64, revision[0..8], self.revision, .little);
-        const bytes = try arena.dupe(u8, row.draft.name);
+        const bytes = switch (self.kind) {
+            .name => try arena.dupe(u8, row.draft.name),
+            .mode => if (row.draft.mode) |mode|
+                try std.fmt.allocPrint(arena, "{o:0>4}", .{mode})
+            else
+                try arena.alloc(u8, 0),
+        };
         const end: u64 = @intCast(bytes.len);
         if (self.selection.anchor > end or self.selection.caret > end)
             self.selection = .{ .anchor = end, .caret = end };
@@ -545,39 +580,66 @@ const NameField = struct {
             .revision = revision,
             .bytes = bytes,
             .selection = self.selection,
-            .read_only = row.pending == .deleted or row.conflict == .stale,
+            .read_only = row.pending == .deleted or row.conflict == .stale or
+                (self.kind == .mode and !self.session.modeEditable(row.*)),
             .single_line = true,
         };
         return owned;
     }
 
-    pub fn edit(self: *NameField, expected_revision: []const u8, edit_value: view_runtime.field.Edit) view_runtime.field.Error!void {
+    pub fn edit(self: *DraftField, expected_revision: []const u8, edit_value: view_runtime.field.Edit) view_runtime.field.Error!void {
         self.session.validateTarget() catch return error.Stale;
         if (expected_revision.len != @sizeOf(u64) or
             std.mem.readInt(u64, expected_revision[0..8], .little) != self.revision)
             return error.Stale;
         const row = self.session.draft.row(self.row) orelse return error.Stale;
         if (row.pending == .deleted or row.conflict == .stale) return error.ReadOnly;
-        if (edit_value.start > edit_value.end or edit_value.end > row.draft.name.len) return error.InvalidRange;
+        if (self.kind == .mode and !self.session.modeEditable(row.*)) return error.ReadOnly;
+        var owned_current: ?[]u8 = null;
+        defer if (owned_current) |bytes| self.session.plugin.gpa.free(bytes);
+        const current = switch (self.kind) {
+            .name => row.draft.name,
+            .mode => blk: {
+                const bytes = if (row.draft.mode) |mode|
+                    std.fmt.allocPrint(self.session.plugin.gpa, "{o:0>4}", .{mode}) catch return error.OutOfMemory
+                else
+                    self.session.plugin.gpa.alloc(u8, 0) catch return error.OutOfMemory;
+                owned_current = bytes;
+                break :blk bytes;
+            },
+        };
+        if (edit_value.start > edit_value.end or edit_value.end > current.len) return error.InvalidRange;
         const start: usize = @intCast(edit_value.start);
         const end: usize = @intCast(edit_value.end);
-        const next_len = std.math.add(usize, row.draft.name.len - (end - start), edit_value.replacement.len) catch return error.Failed;
+        const next_len = std.math.add(usize, current.len - (end - start), edit_value.replacement.len) catch return error.Failed;
         const next = self.session.plugin.gpa.alloc(u8, next_len) catch return error.OutOfMemory;
         defer self.session.plugin.gpa.free(next);
-        @memcpy(next[0..start], row.draft.name[0..start]);
+        @memcpy(next[0..start], current[0..start]);
         @memcpy(next[start..][0..edit_value.replacement.len], edit_value.replacement);
-        @memcpy(next[start + edit_value.replacement.len ..], row.draft.name[end..]);
+        @memcpy(next[start + edit_value.replacement.len ..], current[end..]);
         var staged = self.session.draft.duplicate() catch return error.OutOfMemory;
         defer staged.deinit();
-        staged.rename(self.row, next) catch |err| return switch (err) {
-            error.OutOfMemory => error.OutOfMemory,
-            else => error.Unsupported,
-        };
+        switch (self.kind) {
+            .name => staged.rename(self.row, next) catch |err| return switch (err) {
+                error.OutOfMemory => error.OutOfMemory,
+                else => error.Unsupported,
+            },
+            .mode => staged.setMode(self.row, parseMode(next) catch return error.Unsupported) catch return error.Unsupported,
+        }
         const caret: u64 = @intCast(start + edit_value.replacement.len);
         self.session.publishDraft(&staged) catch return error.Failed;
         self.selection = edit_value.selection_after orelse .{ .anchor = caret, .caret = caret };
     }
 };
+
+fn parseMode(bytes: []const u8) !u32 {
+    const digits = if (std.mem.startsWith(u8, bytes, "0o")) bytes[2..] else bytes;
+    if (digits.len == 0 or digits.len > 4) return error.InvalidMode;
+    for (digits) |byte| if (byte < '0' or byte > '7') return error.InvalidMode;
+    const value = std.fmt.parseInt(u32, digits, 8) catch return error.InvalidMode;
+    if (value > 0o7777) return error.InvalidMode;
+    return value;
+}
 
 test "plugin opens typed directory targets as independent semantic sessions" {
     var fake: FakeFilesystem = .{};
@@ -643,6 +705,8 @@ test "plugin opens typed directory targets as independent semantic sessions" {
     try std.testing.expectEqualStrings("dired", views.get(view_ref).?.scene.role);
 
     const first_field = session.fieldFor(session.draft.rows.items[0].id).?;
+    try std.testing.expect(session.modeFieldFor(session.draft.rows.items[0].id) != null);
+    try std.testing.expect(session.modeFieldFor(session.draft.rows.items[1].id) == null);
     var snapshot = try fields.get(first_field.ref).?.snapshot(std.testing.allocator);
     defer snapshot.deinit();
     try std.testing.expectEqualStrings("alpha", snapshot.value.bytes);
@@ -650,6 +714,53 @@ test "plugin opens typed directory targets as independent semantic sessions" {
     try std.testing.expectEqualStrings("renamed", session.draft.rows.items[0].draft.name);
     const scene_row = views.get(view_ref).?.scene.content.container.children[0];
     try std.testing.expectEqualStrings("rename", scene_row.facts[0].value);
+}
+
+test "provider capabilities expose permissions as an ordinary secondary action and field" {
+    var fixture: Fixture = undefined;
+    try fixture.init();
+    defer fixture.deinit();
+    const session = fixture.plugin.sessions.items[0];
+    const row = session.draft.rows.items[0].id;
+    const subject = try projection.rowNodeId(row);
+    const mode_field = session.modeFieldFor(row).?;
+
+    const scene_row = fixture.views.get(session.view_ref).?.scene.content.container.children[0];
+    try std.testing.expectEqualStrings(projection.permissions_edit_action, scene_row.actions[7].id);
+    try std.testing.expectEqual(mode_field.ref, scene_row.content.container.children[1].content.field.ref);
+    try std.testing.expect(!scene_row.content.container.children[1].focusable);
+
+    const focus = try fixture.actions.invoke(&fixture.views, .{
+        .action = projection.permissions_edit_action,
+        .view = session.view_ref,
+        .subject = subject,
+    });
+    try std.testing.expectEqual(try projection.modeNodeId(row), focus.focus);
+
+    var before = try fixture.fields.get(mode_field.ref).?.snapshot(std.testing.allocator);
+    defer before.deinit();
+    try std.testing.expectEqualStrings("0644", before.value.bytes);
+    try fixture.fields.get(mode_field.ref).?.edit(before.value.revision, .{
+        .start = 0,
+        .end = before.value.bytes.len,
+        .replacement = "0600",
+    });
+    try std.testing.expectEqual(@as(?u32, 0o600), session.draft.row(row).?.draft.mode);
+
+    var effect_plan = try session.buildPlan();
+    defer effect_plan.deinit();
+    try std.testing.expectEqual(@as(usize, 1), effect_plan.value.operations.len);
+    try std.testing.expectEqual(std.meta.activeTag(effect_plan.value.operations[0].operation), .set_permissions);
+    try std.testing.expectEqual(@as(u32, 0o600), effect_plan.value.operations[0].operation.set_permissions.mode);
+
+    var current = try fixture.fields.get(mode_field.ref).?.snapshot(std.testing.allocator);
+    defer current.deinit();
+    try std.testing.expectError(error.Unsupported, fixture.fields.get(mode_field.ref).?.edit(current.value.revision, .{
+        .start = 0,
+        .end = current.value.bytes.len,
+        .replacement = "0788",
+    }));
+    try std.testing.expectEqual(@as(?u32, 0o600), session.draft.row(row).?.draft.mode);
 }
 
 test "actions retain deleted rows as portable paste anchors and revert discards the draft" {
@@ -1049,7 +1160,7 @@ const Fixture = struct {
             .publication = undefined,
             .plugin = undefined,
         };
-        try self.fake.set(&.{.{ .name = "kept", .ref = entryRef(8), .revision = "1", .kind = .regular }});
+        try self.fake.set(&.{.{ .name = "kept", .ref = entryRef(8), .revision = "1", .kind = .regular, .mode = 0o644 }});
         try self.router.register(.here, .init(&self.fake));
         self.publication = try fs_runtime.publication.publish(std.testing.allocator, &self.targets, &self.router, @enumFromInt(1), .{
             .display_name = "fixture",
