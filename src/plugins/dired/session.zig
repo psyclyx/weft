@@ -54,7 +54,6 @@ pub const Plugin = struct {
             "dired.container",
             .init(&self.relation_provider),
         ) catch |err| {
-            _ = self.host.actions.unregister(self.gpa, self.owner);
             return err;
         };
         errdefer if (self.relation_ref) |ref| {
@@ -199,7 +198,7 @@ pub const Plugin = struct {
                     session.controller.capture = captured;
                     return .{ .transfer = session.controller.captured().? };
                 },
-                .declined, .interaction, .open_target, .focus => {},
+                .declined, .interaction, .open_target, .open_relation, .focus => {},
             }
             return outcome;
         }
@@ -345,11 +344,11 @@ pub const Session = struct {
     }
 
     pub fn deinit(self: *Session) void {
-        self.closeAllRowTargets();
         if (self.loaded) {
             self.controller.deinit();
             _ = self.plugin.host.views.close(self.plugin.gpa, self.plugin.owner, self.view_ref);
         }
+        self.closeAllRowTargets();
         for (self.fields.items) |field| {
             _ = self.plugin.host.fields.remove(self.plugin.gpa, self.plugin.owner, field.ref);
             self.plugin.gpa.destroy(field);
@@ -529,16 +528,22 @@ pub const Session = struct {
                 break;
             }
             if (retained) continue;
-            const registration = try fs_runtime.publication.publish(self.plugin.gpa, self.plugin.host.targets, self.plugin.host.filesystems, self.plugin.owner, .{
+            var registration = try fs_runtime.publication.publish(self.plugin.gpa, self.plugin.host.targets, self.plugin.host.filesystems, self.plugin.owner, .{
                 .display_name = row.draft.name,
                 .directory = directory,
             });
+            var retained_registration = false;
+            defer {
+                if (!retained_registration)
+                    _ = registration.close(self.plugin.gpa, self.plugin.host.targets, self.plugin.host.filesystems);
+            }
             try self.row_targets.append(self.plugin.gpa, .{
                 .row = row.id,
                 .directory = directory,
                 .registration = registration,
                 .fresh = true,
             });
+            retained_registration = true;
         }
     }
 
