@@ -25,6 +25,7 @@ const ArchitectureModules = struct {
     semantic: *std.Build.Module,
     scene_codec: *std.Build.Module,
     fs: *std.Build.Module,
+    fs_codec: *std.Build.Module,
     fs_runtime: *std.Build.Module,
     view_runtime: *std.Build.Module,
     target_runtime: *std.Build.Module,
@@ -66,6 +67,13 @@ fn createArchitectureModules(
         .optimize = optimize,
     });
     fs.addImport("weft_semantic", semantic);
+    const fs_codec = b.createModule(.{
+        .root_source_file = b.path("src/fs_codec/root.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    fs_codec.addImport("weft_semantic", semantic);
+    fs_codec.addImport("weft_fs", fs);
     const fs_runtime = b.createModule(.{
         .root_source_file = b.path("src/fs_runtime/root.zig"),
         .target = target,
@@ -100,6 +108,7 @@ fn createArchitectureModules(
         .semantic = semantic,
         .scene_codec = scene_codec,
         .fs = fs,
+        .fs_codec = fs_codec,
         .fs_runtime = fs_runtime,
         .view_runtime = view_runtime,
         .target_runtime = target_runtime,
@@ -113,6 +122,7 @@ fn addArchitectureImports(mod: *std.Build.Module, architecture: ArchitectureModu
     mod.addImport("weft_semantic", architecture.semantic);
     mod.addImport("weft_scene_codec", architecture.scene_codec);
     mod.addImport("weft_fs", architecture.fs);
+    mod.addImport("weft_fs_codec", architecture.fs_codec);
     mod.addImport("weft_fs_runtime", architecture.fs_runtime);
     mod.addImport("weft_view_runtime", architecture.view_runtime);
     mod.addImport("weft_target_runtime", architecture.target_runtime);
@@ -380,7 +390,7 @@ pub fn build(b: *std.Build) void {
     // Portable contract gate: deliberately separate from the application
     // suite so these roots cannot acquire app/platform dependencies unnoticed.
     const contract_step = b.step("test-contract", "Run portable schema/semantic/filesystem contract tests");
-    inline for (.{ architecture.wire, architecture.schema, architecture.semantic, architecture.scene_codec, architecture.fs, architecture.fs_runtime, architecture.view_runtime, architecture.target_runtime, architecture.plugin_semantic }) |contract_mod| {
+    inline for (.{ architecture.wire, architecture.schema, architecture.semantic, architecture.scene_codec, architecture.fs, architecture.fs_codec, architecture.fs_runtime, architecture.view_runtime, architecture.target_runtime, architecture.plugin_semantic }) |contract_mod| {
         const contract_tests = b.addTest(.{ .root_module = contract_mod });
         const run_contract_tests = b.addRunArtifact(contract_tests);
         contract_step.dependOn(&run_contract_tests.step);

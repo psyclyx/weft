@@ -11,6 +11,7 @@ const schema = @import("weft_schema");
 const semantic = @import("weft_semantic");
 const scene_codec = @import("weft_scene_codec");
 const fs = @import("weft_fs");
+const fs_codec = @import("weft_fs_codec");
 const fs_runtime = @import("weft_fs_runtime");
 const view_runtime = @import("weft_view_runtime");
 const target_runtime = @import("weft_target_runtime");
@@ -22,6 +23,7 @@ comptime {
     std.testing.refAllDecls(semantic);
     std.testing.refAllDecls(scene_codec);
     std.testing.refAllDecls(fs);
+    std.testing.refAllDecls(fs_codec);
     std.testing.refAllDecls(fs_runtime);
     std.testing.refAllDecls(view_runtime);
     std.testing.refAllDecls(target_runtime);
