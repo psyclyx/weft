@@ -199,8 +199,13 @@ pub fn publishChildDirectory(
 const TestProvider = struct {
     authority: semantic.handle.Authority,
     observed_kind: fs.contract.Kind = .directory,
+    /// Optional kind override for the derived child root.  This lets the
+    /// publication contract test the bind-after-derive failure path without
+    /// making the parent itself unpublishable.
+    derived_observed_kind: ?fs.contract.Kind = null,
     observe_calls: usize = 0,
     list_enabled: bool = false,
+    list_parent_only: bool = false,
     listed_name: []const u8 = "child",
     listed_ref: fs.contract.EntryRef = .{ .authority = .here, .slot = 4, .generation = 1 },
     listed_kind: fs.contract.Kind = .directory,
@@ -238,7 +243,11 @@ const TestProvider = struct {
         if (root.authority != self.authority) return error.Confined;
         self.observe_calls += 1;
         var owned = fs.contract.OwnedObservation.init(gpa);
-        owned.value = .{ .node = node, .revision = .{ .token = &.{} }, .kind = self.observed_kind };
+        const kind = if (self.derived_observed_kind != null and root.slot == 4)
+            self.derived_observed_kind.?
+        else
+            self.observed_kind;
+        owned.value = .{ .node = node, .revision = .{ .token = &.{} }, .kind = kind };
         return owned;
     }
 
@@ -248,22 +257,24 @@ const TestProvider = struct {
         errdefer owned.deinit();
         const arena = owned.allocator();
         const token = try arena.dupe(u8, self.listed_revision);
-        const entries = try arena.alloc(fs.contract.DirEntry, 1);
-        const name = try arena.dupe(u8, self.listed_name);
-        entries[0] = .{
-            .name = fs.contract.Name.init(name) catch unreachable,
-            .observation = .{
-                .node = .{ .entry = self.listed_ref },
-                .revision = .{ .token = token },
-                .kind = self.listed_kind,
-            },
-        };
+        const entry_count: usize = @intFromBool(!self.list_parent_only or root.slot == 3);
+        const entries = try arena.alloc(fs.contract.DirEntry, entry_count);
+        if (entry_count != 0) {
+            const name = try arena.dupe(u8, self.listed_name);
+            entries[0] = .{
+                .name = fs.contract.Name.init(name) catch unreachable,
+                .observation = .{
+                    .node = .{ .entry = self.listed_ref },
+                    .revision = .{ .token = token },
+                    .kind = self.listed_kind,
+                },
+            };
+        }
         owned.value = .{
             .directory = .{ .node = node, .revision = .{ .token = token }, .kind = .directory },
             .revision = .{ .token = token },
             .entries = entries,
         };
-        _ = root;
         return owned;
     }
 
@@ -362,6 +373,48 @@ test "publication rolls back descriptive targets when authority cannot bind" {
     try std.testing.expectEqual(@as(usize, 0), targets.closeOwner(gpa, owner));
 }
 
+test "child publication rolls back its target and derived root when binding fails" {
+    const gpa = std.testing.allocator;
+    const fs_authority: semantic.handle.Authority = @enumFromInt(44);
+    const target_authority: semantic.handle.Authority = @enumFromInt(76);
+    const owner: semantic.owner.Id = @enumFromInt(13);
+    const child_ref: fs.contract.EntryRef = .{ .authority = fs_authority, .slot = 8, .generation = 1 };
+    var provider = TestProvider{
+        .authority = fs_authority,
+        .list_enabled = true,
+        .listed_ref = child_ref,
+        .derived_observed_kind = .regular,
+    };
+    var router = router_mod.Router.init(gpa);
+    defer router.deinit();
+    try router.register(fs_authority, provider.provider());
+    var targets = target_runtime.target.Registry.init(target_authority);
+    defer targets.deinit(gpa);
+
+    var parent = try publish(gpa, &targets, &router, owner, .{
+        .display_name = "parent",
+        .directory = .{ .root = testRoot(fs_authority) },
+    });
+    defer _ = parent.close(gpa, &targets, &router);
+    const child_target: semantic.target.Ref = .{
+        .authority = target_authority,
+        .slot = 1,
+        .generation = 1,
+    };
+    try std.testing.expectError(error.NotDirectory, publishChildDirectory(gpa, &targets, &router, owner, .{
+        .parent = parent.located(),
+        .entry = child_ref,
+        .entry_revision = .{ .token = "child-revision" },
+    }));
+    // The descriptive target and provider-derived root are both reclaimed;
+    // only the independently published parent remains live.
+    try std.testing.expect(targets.get(child_target) == null);
+    try std.testing.expectError(error.TargetUnbound, router.authorizedDirectory(child_target, 1));
+    try std.testing.expectEqual(@as(usize, 1), provider.derive_calls);
+    try std.testing.expectEqual(@as(usize, 1), provider.release_calls);
+    try std.testing.expectEqual(@as(usize, 1), targets.closeOwner(gpa, owner));
+}
+
 test "child publication proves direct identity, owns derived root, and preserves raw name" {
     const gpa = std.testing.allocator;
     const fs_authority: semantic.handle.Authority = @enumFromInt(43);
@@ -374,6 +427,7 @@ test "child publication proves direct identity, owns derived root, and preserves
         .list_enabled = true,
         .listed_name = "line\n-[]'\xff",
         .listed_ref = child_ref,
+        .list_parent_only = true,
     };
     var router = router_mod.Router.init(gpa);
     defer router.deinit();
@@ -396,6 +450,12 @@ test "child publication proves direct identity, owns derived root, and preserves
     try std.testing.expectEqual(@as(u32, parent_root.slot + 1), child.derived_root.slot);
     try std.testing.expectEqual(child.registration.ref, child.located().target);
     try std.testing.expectEqual(@as(usize, 2), provider.observe_calls);
+    const child_directory = try router.authorizedDirectory(child.registration.ref, child.registration.revision);
+    try std.testing.expect(!child_directory.root.eql(parent_root));
+    try std.testing.expectError(error.StaleTarget, router.authorizedDirectory(child.registration.ref, child.registration.revision + 1));
+    var child_listing = try router.list(gpa, child_directory.root, child_directory.node);
+    defer child_listing.deinit();
+    try std.testing.expectEqual(@as(usize, 0), child_listing.value.entries.len);
     try std.testing.expect(child.close(gpa, &targets));
     try std.testing.expectEqual(@as(usize, 1), provider.release_calls);
     try std.testing.expectError(error.TargetUnbound, router.authorizedDirectory(child.registration.ref, child.registration.revision));

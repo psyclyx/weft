@@ -272,6 +272,13 @@ test "wasm plugin: guarded child directories publish and revoke complete authori
     try t.expectEqualStrings(Provider.child_name, semantic.targets.get(first_child.ref).?.display_name);
     const first_authorized = try router.authorizedDirectory(first_child.ref, first_child.revision);
     try t.expectEqual(provider.childRoot(), first_authorized.root);
+    // The child carries the provider-derived root, never the parent's broad
+    // namespace. Authorization is stamped to the exact child revision.
+    try t.expect(!first_authorized.root.eql(Provider.parent_root));
+    try t.expectError(error.StaleTarget, router.authorizedDirectory(first_child.ref, first_child.revision + 1));
+    var child_listing = try router.list(gpa, first_authorized.root, first_authorized.node);
+    defer child_listing.deinit();
+    try t.expectEqual(@as(usize, 0), child_listing.value.entries.len);
     try t.expectEqual(@as(usize, 1), provider.derive_calls);
 
     const closed = try command.run(&env.commands, &env.ctx, "fixture-close-child-directory", &.{});
@@ -307,7 +314,9 @@ test "wasm plugin: guarded child directories publish and revoke complete authori
         @embedFile("guest_dired_semantic_wasm"),
         .{},
     );
-    defer dired_plugin.deinit();
+    var dired_live = true;
+    defer if (dired_live) dired_plugin.deinit();
+    const release_before_dired = provider.release_calls;
     var resolution = try semantic.target_handlers.resolve(gpa, semantic.targets.get(parent.ref).?.*);
     defer resolution.deinit();
     const selected = resolution.value.decide().selected;
@@ -363,6 +372,18 @@ test "wasm plugin: guarded child directories publish and revoke complete authori
     const reverted = semantic.views.get(view_ref) orelse return error.TestUnexpectedResult;
     try t.expectEqual(row_id, reverted.scene.content.container.children[0].id);
     try t.expect(reverted.scene.content.container.children[0].content.container.children[2].target != null);
+
+    // Session/plugin retirement closes the retained child publication as well
+    // as the generic semantic view. The provider root must not outlive the
+    // sandbox instance that derived it.
+    const dired_child = dired_plugin.semantic_directories.items[0].registration;
+    dired_plugin.deinit();
+    dired_live = false;
+    // Delete retires the first row target; revert derives a replacement, and
+    // plugin teardown retires that replacement.
+    try t.expectEqual(release_before_dired + 2, provider.release_calls);
+    try t.expect(semantic.targets.get(dired_child.ref) == null);
+    try t.expectError(error.TargetUnbound, router.authorizedDirectory(dired_child.ref, dired_child.revision));
 }
 
 test "wasm plugin: semantic ownership is instance-specific and system-local" {
