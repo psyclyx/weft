@@ -37,8 +37,10 @@ pub const encodeEntryTransfer = model.encodeEntryTransfer;
 pub const decodeEntryTransfer = model.decodeEntryTransfer;
 
 pub const FieldBinding = projection.FieldBinding;
+pub const ProjectionOptions = projection.Options;
 pub const OwnedScene = projection.OwnedScene;
 pub const project = projection.project;
+pub const projectWith = projection.projectWith;
 pub const metadata_column = projection.metadata_column;
 pub const mode_column = projection.mode_column;
 pub const name_column = projection.name_column;

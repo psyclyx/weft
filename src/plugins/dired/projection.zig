@@ -30,6 +30,12 @@ pub const FieldBinding = struct {
 
 pub const permissions_edit_action = "fs.permissions.edit";
 
+/// Root-level capabilities are supplied by the session adapter. The pure
+/// projection does not query target registries or infer hierarchy from paths.
+pub const Options = struct {
+    has_container: bool = false,
+};
+
 pub const metadata_column: u16 = 0;
 pub const mode_column: u16 = 10;
 pub const name_column: u16 = 16;
@@ -55,6 +61,10 @@ const id_payload_mask: u64 = (@as(u64, 1) << 61) - 1;
 
 /// Validate all external bindings before allocating any published scene.
 pub fn project(gpa: std.mem.Allocator, rows: []const model.Row, bindings: []const FieldBinding) !OwnedScene {
+    return projectWith(gpa, rows, bindings, .{});
+}
+
+pub fn projectWith(gpa: std.mem.Allocator, rows: []const model.Row, bindings: []const FieldBinding, options: Options) !OwnedScene {
     try validateInputs(rows, bindings);
 
     var owned: OwnedScene = .{ .arena = .init(gpa), .value = undefined };
@@ -68,13 +78,13 @@ pub fn project(gpa: std.mem.Allocator, rows: []const model.Row, bindings: []cons
     owned.value = .{
         .id = root_id,
         .role = "dired",
-        .actions = try rootActions(arena, rows),
+        .actions = try rootActions(arena, rows, options),
         .content = .{ .container = .{ .axis = .vertical, .children = children } },
     };
     return owned;
 }
 
-fn rootActions(arena: std.mem.Allocator, rows: []const model.Row) ![]scene.Action {
+fn rootActions(arena: std.mem.Allocator, rows: []const model.Row, options: Options) ![]scene.Action {
     var dirty = false;
     for (rows) |*row| {
         if (model.rowHasPendingChanges(row)) {
@@ -82,10 +92,15 @@ fn rootActions(arena: std.mem.Allocator, rows: []const model.Row) ![]scene.Actio
             break;
         }
     }
-    const result = try arena.alloc(scene.Action, 3);
-    result[0] = .{ .id = standard.refresh, .label = "Refresh" };
-    result[1] = .{ .id = standard.apply, .label = "Apply draft", .enabled = dirty };
-    result[2] = .{ .id = standard.revert, .label = "Revert draft", .enabled = dirty };
+    const result = try arena.alloc(scene.Action, 3 + @as(usize, @intFromBool(options.has_container)));
+    var index: usize = 0;
+    if (options.has_container) {
+        result[index] = .{ .id = standard.open_container, .label = "Open container" };
+        index += 1;
+    }
+    result[index] = .{ .id = standard.refresh, .label = "Refresh" };
+    result[index + 1] = .{ .id = standard.apply, .label = "Apply draft", .enabled = dirty };
+    result[index + 2] = .{ .id = standard.revert, .label = "Revert draft", .enabled = dirty };
     return result;
 }
 
@@ -365,6 +380,10 @@ test "projection keeps row ids and order stable across draft rename" {
     try std.testing.expectEqualStrings(standard.refresh, first.value.actions[0].id);
     try std.testing.expect(first.value.actions[0].enabled);
     try std.testing.expect(!first.value.actions[1].enabled);
+    var with_container = try projectWith(std.testing.allocator, dired.rows.items, &refs, .{ .has_container = true });
+    defer with_container.deinit();
+    try std.testing.expectEqualStrings(standard.open_container, with_container.value.actions[0].id);
+    try std.testing.expectEqualStrings(standard.refresh, with_container.value.actions[1].id);
     const first_ids = [_]scene.NodeId{ first.value.content.container.children[0].id, first.value.content.container.children[1].id };
     try dired.rename(dired.rows.items[0].id, "renamed");
     var second = try project(std.testing.allocator, dired.rows.items, &refs);

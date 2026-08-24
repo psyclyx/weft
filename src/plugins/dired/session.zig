@@ -169,6 +169,12 @@ pub const Plugin = struct {
                 if (session.apply_committed or !session.draft.hasPendingChanges()) return error.Rejected;
                 return .{ .interaction = session.applyConfirmation() };
             }
+            if (std.mem.eql(u8, request.action, semantic.action.standard.open_container)) {
+                return .{ .open_relation = .{
+                    .source = .{ .target = session.target, .revision = session.target_revision },
+                    .name = "container",
+                } };
+            }
             if (std.mem.eql(u8, request.action, semantic.action.standard.revert)) {
                 session.revert() catch |err| return mapActionError(err);
                 return .handled;
@@ -633,7 +639,9 @@ pub const Session = struct {
             .mode_field = if (self.modeFieldFor(row.id)) |field| field.ref else null,
             .target = self.rowTargetFor(row.id),
         };
-        return projection.project(self.plugin.gpa, draft.rows.items, bindings);
+        return projection.projectWith(self.plugin.gpa, draft.rows.items, bindings, .{
+            .has_container = try self.hasContainer(),
+        });
     }
 
     fn draftFieldFor(self: *const Session, row: model.NodeId, kind: DraftField.Kind) ?*DraftField {
@@ -665,6 +673,21 @@ pub const Session = struct {
         for (self.row_targets.items) |row_target| if (row_target.active and row_target.row == row)
             return row_target.registration.located();
         return null;
+    }
+
+    /// Action availability is a projection of the independent relation
+    /// registry, not a filesystem-path guess. Exactly one live edge is
+    /// actionable; absent and ambiguous containment stay unadvertised.
+    fn hasContainer(self: *const Session) !bool {
+        var resolution = try self.plugin.host.target_relations.query(self.plugin.gpa, .{
+            .source = .{ .target = self.target, .revision = self.target_revision },
+            .name = "container",
+        });
+        defer resolution.deinit();
+        if (resolution.value.candidates.len != 1) return false;
+        const located = resolution.value.candidates[0].relation.target;
+        const descriptor = self.plugin.host.targets.get(located.target) orelse return false;
+        return descriptor.revision == located.revision;
     }
 };
 
@@ -1183,12 +1206,26 @@ test "observed directory rows publish exact links and independent containment" {
     var resolution = try fixture.handlers.resolve(std.testing.allocator, fixture.targets.get(row_target.target).?.*);
     defer resolution.deinit();
     const selected = resolution.value.decide().selected;
-    _ = try fixture.handlers.open(selected, row_target);
+    const child_view = try fixture.handlers.open(selected, row_target);
     var relation = try fixture.relations.query(std.testing.allocator, .{ .source = row_target, .name = "container" });
     defer relation.deinit();
     try std.testing.expectEqual(@as(usize, 1), relation.value.candidates.len);
     try std.testing.expectEqual(session.target, relation.value.candidates[0].relation.target.target);
     try std.testing.expectEqual(session.target_revision, relation.value.candidates[0].relation.target.revision);
+
+    // The child view discovers containment through the registry and exposes
+    // the same generic action config and Vim bind. The action returns a value;
+    // dired never opens or focuses the parent directly.
+    const child_scene = fixture.views.get(child_view).?.scene;
+    try std.testing.expectEqualStrings(semantic.action.standard.open_container, child_scene.actions[0].id);
+    const parent_request = try fixture.actions.invoke(&fixture.views, .{
+        .action = semantic.action.standard.open_container,
+        .view = child_view,
+        .subject = projection.rootNodeId(),
+    });
+    try std.testing.expectEqual(row_target.target, parent_request.open_relation.source.target);
+    try std.testing.expectEqual(row_target.revision, parent_request.open_relation.source.revision);
+    try std.testing.expectEqualStrings("container", parent_request.open_relation.name);
 
     const stable_id = session.draft.row(row_id).?.id;
     try fixture.fake.set(&.{
