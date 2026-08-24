@@ -1722,19 +1722,21 @@ pub fn semanticTransferCapture(
     );
     try semanticTransferError(result);
     if (result != out.len) return error.Failed;
-    return .{
+    return semantic.transfer.Attachment.fromWire(.{
         .authority = std.mem.readInt(u32, out[0..4], .little),
         .slot = std.mem.readInt(u32, out[4..8], .little),
         .generation = std.mem.readInt(u32, out[8..12], .little),
-    };
+    });
 }
 
 pub fn semanticTransferRetain(attachment: semantic.transfer.Attachment) bool {
-    return wl_semantic_transfer_retain(attachment.authority, attachment.slot, attachment.generation) == 1;
+    const wire = attachment.toWire();
+    return wl_semantic_transfer_retain(wire.authority, wire.slot, wire.generation) == 1;
 }
 
 pub fn semanticTransferRelease(attachment: semantic.transfer.Attachment) bool {
-    return wl_semantic_transfer_release(attachment.authority, attachment.slot, attachment.generation) == 1;
+    const wire = attachment.toWire();
+    return wl_semantic_transfer_release(wire.authority, wire.slot, wire.generation) == 1;
 }
 
 // ── D2: generic, schema-directed slots (doc/d2-schema-payloads.md §6) ────

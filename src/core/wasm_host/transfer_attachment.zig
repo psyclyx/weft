@@ -3,8 +3,8 @@
 //! An attachment is a wire identifier, never a pointer or an authority by
 //! itself.  This registry binds it to a provider lease only after the live
 //! filesystem target membrane has authorized the source.  The registry's
-//! reference is the guest's explicit capture/retain/release lifetime; each
-//! decoded transfer representation retains the host resource independently.
+//! guest reference is the guest's explicit capture/retain/release lifetime;
+//! each decoded transfer representation retains the host resource independently.
 
 const std = @import("std");
 const wasm = @import("../wasm.zig");
@@ -33,26 +33,82 @@ const CaptureStatus = enum(i32) {
     output_too_small = -6,
 };
 
-const Entry = struct {
-    resource: semantic.transfer.Resource,
+const AttachmentState = struct {
+    gpa: std.mem.Allocator,
+    provider_resource: semantic.transfer.Resource,
+    handle: semantic.transfer.Attachment,
+    registry: ?*Registry,
     guest_refs: usize = 1,
+    host_refs: usize = 0,
+
+    const vtable: semantic.transfer.Resource.VTable = .{
+        .retain = retainHost,
+        .release = releaseHost,
+    };
+
+    fn create(
+        gpa: std.mem.Allocator,
+        provider_resource: semantic.transfer.Resource,
+        handle: semantic.transfer.Attachment,
+        registry: *Registry,
+    ) !*AttachmentState {
+        const state = try gpa.create(AttachmentState);
+        state.* = .{
+            .gpa = gpa,
+            .provider_resource = provider_resource,
+            .handle = handle,
+            .registry = registry,
+        };
+        return state;
+    }
+
+    fn resource(self: *AttachmentState) semantic.transfer.Resource {
+        return .{ .context = self, .vtable = &vtable };
+    }
+
+    fn retainHost(raw: *anyopaque) void {
+        const self: *AttachmentState = @ptrCast(@alignCast(raw));
+        if (self.host_refs == std.math.maxInt(usize)) @panic("semantic attachment reference overflow");
+        self.host_refs += 1;
+    }
+
+    fn releaseHost(raw: *anyopaque) void {
+        const self: *AttachmentState = @ptrCast(@alignCast(raw));
+        if (self.host_refs == 0) @panic("semantic attachment released without ownership");
+        self.host_refs -= 1;
+        self.collectIfUnused();
+    }
+
+    fn collectIfUnused(self: *AttachmentState) void {
+        if (self.guest_refs != 0 or self.host_refs != 0) return;
+        if (self.registry) |registry| {
+            registry.detach(self);
+            self.registry = null;
+        }
+        self.provider_resource.release();
+        self.gpa.destroy(self);
+    }
 };
 
 pub const Registry = struct {
     gpa: std.mem.Allocator,
-    entries: std.AutoHashMap(semantic.transfer.Attachment, Entry),
+    entries: std.AutoHashMap(semantic.transfer.Attachment, *AttachmentState),
     next_slot: u32 = 1,
 
     pub fn init(gpa: std.mem.Allocator) Registry {
         return .{ .gpa = gpa, .entries = .init(gpa) };
     }
 
-    /// Drops only the guest-side references.  A transfer that already
-    /// retained a resource remains valid after this call and can outlive the
-    /// plugin instance.
+    /// Detaches all guest handles. States with host transfer references stay
+    /// alive without a registry back-pointer and release their provider lease
+    /// when the last host owner drops it.
     pub fn deinit(self: *Registry) void {
         var values = self.entries.valueIterator();
-        while (values.next()) |entry| entry.resource.release();
+        while (values.next()) |state| {
+            state.*.registry = null;
+            state.*.guest_refs = 0;
+            state.*.collectIfUnused();
+        }
         self.entries.deinit();
         self.* = undefined;
     }
@@ -67,34 +123,40 @@ pub const Registry = struct {
             router.release(lease) catch {};
             return err;
         };
-        errdefer lease_resource.release();
         const attachment: semantic.transfer.Attachment = .{
-            .authority = @intFromEnum(lease.root.authority),
+            .authority = lease.root.authority,
             .slot = self.next_slot,
             .generation = 1,
         };
         self.next_slot +%= 1;
-        try self.entries.put(attachment, .{ .resource = lease_resource });
+        const state = AttachmentState.create(self.gpa, lease_resource, attachment, self) catch |err| {
+            lease_resource.release();
+            return err;
+        };
+        errdefer state.collectIfUnused();
+        try self.entries.put(attachment, state);
         return attachment;
     }
 
-    pub fn retain(self: *Registry, attachment_wire: semantic.transfer.Attachment) Error!void {
-        const entry = self.entries.getPtr(attachment_wire) orelse return error.InvalidAttachment;
-        if (entry.guest_refs == std.math.maxInt(usize)) return error.AttachmentExhausted;
-        entry.guest_refs += 1;
+    pub fn retain(self: *Registry, attachment: semantic.transfer.Attachment) Error!void {
+        const state = self.entries.get(attachment) orelse return error.InvalidAttachment;
+        if (state.guest_refs == std.math.maxInt(usize)) return error.AttachmentExhausted;
+        state.guest_refs += 1;
     }
 
-    pub fn release(self: *Registry, attachment_wire: semantic.transfer.Attachment) Error!void {
-        const entry = self.entries.getPtr(attachment_wire) orelse return error.InvalidAttachment;
-        if (entry.guest_refs == 0) return error.InvalidAttachment;
-        entry.guest_refs -= 1;
-        if (entry.guest_refs != 0) return;
-        const removed = self.entries.fetchRemove(attachment_wire) orelse return error.InvalidAttachment;
-        removed.value.resource.release();
+    pub fn release(self: *Registry, attachment: semantic.transfer.Attachment) Error!void {
+        const state = self.entries.get(attachment) orelse return error.InvalidAttachment;
+        if (state.guest_refs == 0) return error.InvalidAttachment;
+        state.guest_refs -= 1;
+        state.collectIfUnused();
     }
 
-    fn lookupResource(self: *const Registry, attachment_wire: semantic.transfer.Attachment) ?semantic.transfer.Resource {
-        return if (self.entries.get(attachment_wire)) |entry| entry.resource else null;
+    fn detach(self: *Registry, state: *AttachmentState) void {
+        if (self.entries.get(state.handle) == state) _ = self.entries.remove(state.handle);
+    }
+
+    fn lookupState(self: *const Registry, attachment: semantic.transfer.Attachment) ?*AttachmentState {
+        return self.entries.get(attachment);
     }
 
     /// Resolve every wire attachment transactionally.  The codec owns the
@@ -103,14 +165,15 @@ pub const Registry = struct {
     /// process pointer crosses the wasm boundary.
     pub fn resolve(self: *const Registry, owned: *scene_codec.transfer.Owned) Error!void {
         for (owned.value.representations) |representation| {
-            if (representation.attachment) |attachment_wire| {
-                if (representation.resource != null or self.lookupResource(attachment_wire) == null)
+            if (representation.attachment) |attachment| {
+                if (representation.resource != null or self.lookupState(attachment) == null)
                     return error.InvalidAttachment;
             }
         }
         for (@constCast(owned.value.representations)) |*representation| {
-            if (representation.attachment) |attachment_wire| {
-                const resource = self.lookupResource(attachment_wire).?;
+            if (representation.attachment) |attachment| {
+                const state = self.lookupState(attachment).?;
+                const resource = state.resource();
                 resource.retain();
                 representation.resource = resource;
             }
@@ -137,7 +200,11 @@ fn sourceEntry(args: []const i32) fs.contract.EntryRef {
 }
 
 fn attachmentFromArgs(args: []const i32) semantic.transfer.Attachment {
-    return .{ .authority = @bitCast(args[0]), .slot = @bitCast(args[1]), .generation = @bitCast(args[2]) };
+    return .{
+        .authority = @enumFromInt(@as(u32, @bitCast(args[0]))),
+        .slot = @bitCast(args[1]),
+        .generation = @bitCast(args[2]),
+    };
 }
 
 /// Capture a typed filesystem entry into a generic semantic transfer
@@ -197,9 +264,10 @@ pub fn hCapture(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32, resu
         return;
     }
     var bytes: [12]u8 = undefined;
-    std.mem.writeInt(u32, bytes[0..4], result.authority, .little);
-    std.mem.writeInt(u32, bytes[4..8], result.slot, .little);
-    std.mem.writeInt(u32, bytes[8..12], result.generation, .little);
+    const wire = result.toWire();
+    std.mem.writeInt(u32, bytes[0..4], wire.authority, .little);
+    std.mem.writeInt(u32, bytes[4..8], wire.slot, .little);
+    std.mem.writeInt(u32, bytes[8..12], wire.generation, .little);
     _ = caller.writeMemory(out_ptr, out_cap, &bytes) catch {
         plugin.semantic_attachments.release(result) catch {};
         results[0] = @intFromEnum(CaptureStatus.failed);
@@ -226,7 +294,7 @@ pub fn hRelease(data: ?*anyopaque, _: *wasm.Caller, args: []const i32, results: 
     results[0] = 1;
 }
 
-test "attachment resource survives registry unload after transfer resolution" {
+test "attachment ownership spans clipboard replacement and pending paste" {
     const Provider = struct {
         released: usize = 0,
 
@@ -280,8 +348,40 @@ test "attachment resource survives registry unload after transfer resolution" {
     defer std.testing.allocator.free(encoded);
     var wire = try scene_codec.transfer.decode(std.testing.allocator, encoded);
     try registry.resolve(&wire);
-    registry.deinit();
-    try std.testing.expectEqual(@as(usize, 0), provider.released);
+
+    // Returning the transfer transfers host ownership to the clipboard. The
+    // guest may release its capture handle immediately; the identifier must
+    // remain resolvable for a later paste.
+    try registry.release(captured);
+    var pending = try scene_codec.transfer.decode(std.testing.allocator, encoded);
+    try registry.resolve(&pending);
+    try registry.retain(captured);
+
+    // Replacing the clipboard drops only its representation reference. The
+    // pending row remains live until apply/revert releases its reference.
     wire.deinit();
+    try std.testing.expectEqual(@as(usize, 0), provider.released);
+    pending.deinit();
+    try std.testing.expectEqual(@as(usize, 0), provider.released);
+    try registry.release(captured);
     try std.testing.expectEqual(@as(usize, 1), provider.released);
+
+    // Unloading the plugin detaches guest handles but cannot invalidate a
+    // host transfer that is still held by another view.
+    const surviving = try registry.capture(&router, .{
+        .root = root,
+        .ref = .{ .authority = .here, .slot = 3, .generation = 1 },
+        .revision = .{ .token = "r" },
+    });
+    const surviving_bytes = try scene_codec.transfer.encode(std.testing.allocator, .{
+        .intent = .copy,
+        .representations = &.{.{ .media_type = "application/test", .attachment = surviving, .payload = "x" }},
+    });
+    defer std.testing.allocator.free(surviving_bytes);
+    var surviving_wire = try scene_codec.transfer.decode(std.testing.allocator, surviving_bytes);
+    try registry.resolve(&surviving_wire);
+    registry.deinit();
+    try std.testing.expectEqual(@as(usize, 1), provider.released);
+    surviving_wire.deinit();
+    try std.testing.expectEqual(@as(usize, 2), provider.released);
 }

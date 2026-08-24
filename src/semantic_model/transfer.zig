@@ -10,7 +10,8 @@ pub const Intent = enum { copy, cut };
 /// owner-scoped membrane that minted it; its fields are never an OS handle or
 /// a pointer.  The host resolves it while the issuing plugin is live, then
 /// transfers retain the resolved resource independently of this identifier.
-pub const Attachment = handle.Wire;
+pub const AttachmentTag = struct {};
+pub const Attachment = handle.Handle(AttachmentTag);
 
 pub const Representation = struct {
     media_type: []const u8,
