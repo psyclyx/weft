@@ -163,6 +163,10 @@ const Reader = struct {
                 if (used > 0 and bits == 0) return error.Corrupt;
                 return value;
             }
+            // There are only ten bytes in a u64 varint. In particular, do
+            // not advance a u6 shift after byte ten: malformed input must
+            // become Corrupt rather than relying on integer-overflow mode.
+            if (used == 9) return error.Corrupt;
             shift += 7;
         }
         return error.Corrupt;
@@ -789,6 +793,22 @@ test "filesystem codec rejects tags, names, handles, trailing data, and malforme
     // The generation sits at the end of the entry handle in this report.
     bad_handle[33] = 0;
     try std.testing.expectError(error.InvalidHandle, decodeApplyReport(std.testing.allocator, bad_handle));
+}
+
+test "filesystem codec rejects unterminated and overflowing tenth varints" {
+    // Header, root node tag, then a revision length. Both malformed lengths
+    // reach the public listing decoder, so this protects the wire boundary
+    // rather than only exercising Reader in isolation.
+    var unterminated: [16]u8 = .{
+        'W',  'F',  'S',  1,    1,    0,
+        0x80, 0x80, 0x80, 0x80, 0x80, 0x80,
+        0x80, 0x80, 0x80, 0x80,
+    };
+    try std.testing.expectError(error.Corrupt, decodeListing(std.testing.allocator, &unterminated));
+
+    var overflowing = unterminated;
+    overflowing[15] = 0x02;
+    try std.testing.expectError(error.Corrupt, decodeListing(std.testing.allocator, &overflowing));
 }
 
 test "filesystem codec rejects duplicate and forward plan dependencies" {
