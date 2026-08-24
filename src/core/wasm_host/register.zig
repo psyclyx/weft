@@ -85,3 +85,11 @@ pub fn hPasteAt(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32, resu
     const slot = reg.get(slotArg(args[1]) orelse return) orelse return;
     slot.restamp(p.gpa, subs, &ed.doc, @intCast(args[0]));
 }
+
+test "register membrane accepts only canonical slots" {
+    try std.testing.expectEqual(@as(?u8, 0), slotArg(0));
+    try std.testing.expectEqual(@as(?u8, 26), slotArg(26));
+    try std.testing.expectEqual(@as(?u8, null), slotArg(-1));
+    try std.testing.expectEqual(@as(?u8, null), slotArg(27));
+    try std.testing.expectEqual(@as(?u8, null), slotArg(std.math.maxInt(i32)));
+}
