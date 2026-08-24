@@ -85,7 +85,6 @@ fn sceneNodeWithFact(node: semantic.scene.Node, role: []const u8, name: []const 
         else => null,
     };
 }
-
 const ConfigField = struct {
     snapshot_calls: usize = 0,
     edits: usize = 0,
@@ -127,6 +126,7 @@ const ConfigActions = struct {
     file_creates: usize = 0,
     directory_creates: usize = 0,
     container_opens: usize = 0,
+    workspace_cds: usize = 0,
     relation_source: semantic.target.Located = undefined,
 
     pub fn invoke(self: *ConfigActions, request: semantic.action.Request) view_runtime.action.ProviderError!semantic.action.Outcome {
@@ -142,6 +142,10 @@ const ConfigActions = struct {
         if (std.mem.eql(u8, action, semantic.action.standard.open_container)) {
             self.container_opens += 1;
             return .{ .open_relation = .{ .source = self.relation_source, .name = "container" } };
+        }
+        if (std.mem.eql(u8, action, semantic.action.standard.set_working_target)) {
+            self.workspace_cds += 1;
+            return .handled;
         }
         if (std.mem.eql(u8, action, "fs.entry.create-file")) {
             self.file_creates += 1;
@@ -295,6 +299,7 @@ test "e2e/config: the sample config boots; SPC g i is discoverable via which-key
     const structured_view_actions = [_][]const u8{
         semantic.action.standard.open,
         semantic.action.standard.open_container,
+        semantic.action.standard.set_working_target,
         semantic.action.standard.edit,
         semantic.action.standard.copy,
         semantic.action.standard.cut,
@@ -347,6 +352,7 @@ test "e2e/config: the sample config boots; SPC g i is discoverable via which-key
     try t.expect(whichKeyShows(&ed, semantic.action.standard.paste_after));
     try t.expect(whichKeyShows(&ed, semantic.action.standard.open));
     try t.expect(whichKeyShows(&ed, semantic.action.standard.open_container));
+    try t.expect(whichKeyShows(&ed, semantic.action.standard.set_working_target));
     try t.expect(whichKeyShows(&ed, semantic.action.standard.refresh));
     try t.expect(whichKeyShows(&ed, semantic.action.standard.revert));
     try t.expect(whichKeyShows(&ed, semantic.action.standard.apply));
@@ -367,6 +373,7 @@ test "e2e/config: the sample config boots; SPC g i is discoverable via which-key
         .{ .sequence = "space v k", .command = "cursor-up" },
         .{ .sequence = "space v o", .command = semantic.action.standard.open },
         .{ .sequence = "space v minus", .command = semantic.action.standard.open_container },
+        .{ .sequence = "space v c", .command = semantic.action.standard.set_working_target },
         .{ .sequence = "space v e", .command = semantic.action.standard.edit },
         .{ .sequence = "space v y", .command = semantic.action.standard.copy },
         .{ .sequence = "space v x", .command = semantic.action.standard.cut },
@@ -541,6 +548,7 @@ test "e2e/config: the sample config boots; SPC g i is discoverable via which-key
     };
     const root_actions = [_]semantic.scene.Action{
         .{ .id = semantic.action.standard.open_container },
+        .{ .id = semantic.action.standard.set_working_target },
         .{ .id = semantic.action.standard.refresh },
         .{ .id = semantic.action.standard.revert },
         .{ .id = semantic.action.standard.apply },
@@ -572,6 +580,7 @@ test "e2e/config: the sample config boots; SPC g i is discoverable via which-key
     ed.chord("SPC v x");
     ed.chord("SPC v P");
     ed.chord("SPC v d");
+    ed.chord("SPC v c");
     ed.chord("SPC v m");
     ed.chord("SPC v n");
     ed.chord("SPC v N");
@@ -580,6 +589,7 @@ test "e2e/config: the sample config boots; SPC g i is discoverable via which-key
     try t.expectEqual(@as(usize, 1), actions.paste_after);
     try t.expectEqual(@as(usize, 1), actions.paste_before);
     try t.expectEqual(@as(usize, 1), actions.deletes);
+    try t.expectEqual(@as(usize, 1), actions.workspace_cds);
     try t.expectEqual(@as(usize, 1), actions.permission_edits);
     try t.expectEqual(@as(usize, 1), actions.file_creates);
     try t.expectEqual(@as(usize, 1), actions.directory_creates);
