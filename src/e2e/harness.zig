@@ -1199,6 +1199,10 @@ pub const Project = struct {
         self.demo_frame_hook = hook;
     }
 
+    pub fn clearDemoFrameHook(self: *Project) void {
+        self.demo_frame_hook = null;
+    }
+
     pub fn deinit(self: *Project) void {
         if (self.video) |*video| {
             video.finish();
