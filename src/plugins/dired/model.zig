@@ -73,6 +73,7 @@ const CopySource = struct {
     mode: ?u32,
     intent: transfer.Intent,
     resource: ?transfer.Resource = null,
+    attachment: ?transfer.Attachment = null,
 };
 
 pub const Row = struct {
@@ -269,7 +270,7 @@ pub const Model = struct {
                 reps[0] = .{ .media_type = tree_media, .schema = tree_schema, .payload = payload };
             } else {
                 payload = try encodeEntryTransfer(self.gpa, source.source, source.kind, source.mode);
-                reps[0] = .{ .media_type = entry_media, .schema = entry_schema, .payload = payload, .resource = source.resource };
+                reps[0] = .{ .media_type = entry_media, .schema = entry_schema, .payload = payload, .resource = source.resource, .attachment = source.attachment };
             }
         } else {
             payload = try self.encodeTree(id);
@@ -290,7 +291,7 @@ pub const Model = struct {
         if (value.representation(entry_media)) |representation| {
             const schema = representation.schema orelse return error.InvalidTransfer;
             if (!isEntryTransferSchema(schema)) return error.InvalidTransfer;
-            const captured = try decodeEntryTransfer(representation.payload, schema, representation.resource);
+            const captured = try decodeEntryTransferWithAttachment(representation.payload, schema, representation.resource, representation.attachment);
             return self.appendCopied(parent, value.suggested_name, captured, value.intent);
         }
         const representation = value.representation(tree_media) orelse return error.UnsupportedTransfer;
@@ -308,7 +309,7 @@ pub const Model = struct {
         if (value.representation(entry_media)) |representation| {
             const schema = representation.schema orelse return error.InvalidTransfer;
             if (!isEntryTransferSchema(schema)) return error.InvalidTransfer;
-            const captured = try decodeEntryTransfer(representation.payload, schema, representation.resource);
+            const captured = try decodeEntryTransferWithAttachment(representation.payload, schema, representation.resource, representation.attachment);
             var copied_row = try self.makeCopiedRow(self.next_id, anchor.parent, value.suggested_name, captured, value.intent);
             var committed = false;
             errdefer if (!committed) self.freeRow(&copied_row);
@@ -433,7 +434,7 @@ pub const Model = struct {
         };
         if (captured.resource) |resource| resource.retain();
         errdefer if (captured.resource != null) captured.resource.?.release();
-        copied_row.copy_source = .{ .source = source, .kind = captured.kind, .mode = captured.mode, .intent = intent, .resource = captured.resource };
+        copied_row.copy_source = .{ .source = source, .kind = captured.kind, .mode = captured.mode, .intent = intent, .resource = captured.resource, .attachment = captured.attachment };
         return copied_row;
     }
 
@@ -855,12 +856,13 @@ pub const EntryCapture = struct {
     kind: contract.Kind,
     mode: ?u32 = null,
     resource: ?transfer.Resource = null,
+    attachment: ?transfer.Attachment = null,
 };
 
-fn sourceFor(model: *const Model, row_ptr: *const Row) ?struct { source: contract.Source, kind: contract.Kind, mode: ?u32, resource: ?transfer.Resource } {
-    if (row_ptr.copy_source) |source| return .{ .source = source.source, .kind = source.kind, .mode = source.mode, .resource = source.resource };
+fn sourceFor(model: *const Model, row_ptr: *const Row) ?struct { source: contract.Source, kind: contract.Kind, mode: ?u32, resource: ?transfer.Resource, attachment: ?transfer.Attachment } {
+    if (row_ptr.copy_source) |source| return .{ .source = source.source, .kind = source.kind, .mode = source.mode, .resource = source.resource, .attachment = source.attachment };
     const observed = row_ptr.current orelse row_ptr.base orelse return null;
-    return .{ .source = .{ .entry = .{ .root = model.root, .ref = observed.identity, .revision = .{ .token = observed.revision } } }, .kind = observed.kind, .mode = observed.mode, .resource = null };
+    return .{ .source = .{ .entry = .{ .root = model.root, .ref = observed.identity, .revision = .{ .token = observed.revision } } }, .kind = observed.kind, .mode = observed.mode, .resource = null, .attachment = null };
 }
 
 fn baseSource(model: *const Model, row_ptr: *const Row) ?contract.EntrySource {
@@ -977,6 +979,7 @@ fn cloneRow(gpa: std.mem.Allocator, source: Row) !Row {
             .mode = copy_source.mode,
             .intent = copy_source.intent,
             .resource = copy_source.resource,
+            .attachment = copy_source.attachment,
         };
     }
     return row_copy;
@@ -1044,8 +1047,12 @@ pub fn encodeEntryTransfer(gpa: std.mem.Allocator, source: contract.Source, kind
 }
 
 pub fn decodeEntryTransfer(payload: []const u8, schema: []const u8, resource: ?transfer.Resource) !EntryCapture {
+    return decodeEntryTransferWithAttachment(payload, schema, resource, null);
+}
+
+pub fn decodeEntryTransferWithAttachment(payload: []const u8, schema: []const u8, resource: ?transfer.Resource, attachment: ?transfer.Attachment) !EntryCapture {
     if (!isEntryTransferSchema(schema) or payload.len > max_transfer_payload) return error.InvalidTransfer;
-    if (std.mem.eql(u8, schema, entry_schema_v2)) return decodeLegacyEntry(payload, resource);
+    if (std.mem.eql(u8, schema, entry_schema_v2)) return decodeLegacyEntry(payload, resource, attachment);
     if (!std.mem.startsWith(u8, payload, entry_magic)) return error.InvalidTransfer;
     var cursor: usize = entry_magic.len;
     const source_tag = try getU8(payload, &cursor);
@@ -1075,10 +1082,10 @@ pub fn decodeEntryTransfer(payload: []const u8, schema: []const u8, resource: ?t
         .entry => {},
         .lease => return error.InvalidTransfer,
     };
-    return .{ .source = source, .kind = @enumFromInt(raw_kind), .mode = if (has_mode == 0) null else mode, .resource = resource };
+    return .{ .source = source, .kind = @enumFromInt(raw_kind), .mode = if (has_mode == 0) null else mode, .resource = resource, .attachment = attachment };
 }
 
-fn decodeLegacyEntry(payload: []const u8, resource: ?transfer.Resource) !EntryCapture {
+fn decodeLegacyEntry(payload: []const u8, resource: ?transfer.Resource, attachment: ?transfer.Attachment) !EntryCapture {
     if (!std.mem.startsWith(u8, payload, entry_magic_v2)) return error.InvalidTransfer;
     var cursor: usize = entry_magic_v2.len;
     const root = try getRoot(payload, &cursor);
@@ -1090,7 +1097,7 @@ fn decodeLegacyEntry(payload: []const u8, resource: ?transfer.Resource) !EntryCa
     if (has_mode > 1) return error.InvalidTransfer;
     const mode = try getU32(payload, &cursor);
     if (cursor != payload.len or root.authority != entry_ref.authority) return error.InvalidTransfer;
-    return .{ .source = .{ .entry = .{ .root = root, .ref = entry_ref, .revision = .{ .token = revision } } }, .kind = @enumFromInt(raw_kind), .mode = if (has_mode == 0) null else mode, .resource = resource };
+    return .{ .source = .{ .entry = .{ .root = root, .ref = entry_ref, .revision = .{ .token = revision } } }, .kind = @enumFromInt(raw_kind), .mode = if (has_mode == 0) null else mode, .resource = resource, .attachment = attachment };
 }
 
 fn putHandle(gpa: std.mem.Allocator, bytes: *std.ArrayList(u8), authority: semantic.handle.Authority, slot: u32, generation: u32) !void {
@@ -1650,7 +1657,8 @@ test "pasted resource outlives clipboard and duplicates retain independently" {
     } };
     const payload = try encodeEntryTransfer(std.testing.allocator, source, .regular, null);
     defer std.testing.allocator.free(payload);
-    const reps = [_]transfer.Representation{.{ .media_type = entry_media, .schema = entry_schema, .payload = payload, .resource = resource }};
+    const attachment = transfer.Attachment.fromWire(.{ .authority = 7, .slot = 8, .generation = 1 });
+    const reps = [_]transfer.Representation{.{ .media_type = entry_media, .schema = entry_schema, .payload = payload, .resource = resource, .attachment = attachment }};
     var item = try transfer.OwnedItem.init(std.testing.allocator, .{ .intent = .copy, .suggested_name = "leased", .representations = &reps });
     resource.release();
 
@@ -1659,12 +1667,12 @@ test "pasted resource outlives clipboard and duplicates retain independently" {
     item.deinit();
     try std.testing.expectEqual(@as(usize, 2), probe.retains);
     try std.testing.expectEqual(@as(usize, 2), probe.releases);
+    try std.testing.expectEqual(attachment, model.row(pasted).?.copy_source.?.attachment.?);
     var duplicate = try model.duplicate();
     try std.testing.expectEqual(@as(usize, 3), probe.retains);
     var plan = try duplicate.buildPlan();
     defer plan.deinit();
     try std.testing.expectEqual(@as(u32, 90), plan.value.operations[0].operation.copy.source.lease.root.slot);
-    _ = pasted;
     model.deinit();
     try std.testing.expectEqual(@as(usize, 3), probe.releases);
     duplicate.deinit();

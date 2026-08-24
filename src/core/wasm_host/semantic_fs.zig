@@ -36,6 +36,7 @@ const AuthorizationError = error{
     StaleTarget,
     Unsupported,
     InvalidTarget,
+    InvalidAttachment,
 };
 
 pub const AuthorizedDirectory = struct {
@@ -48,7 +49,7 @@ fn status(err: anyerror) i32 {
         error.Unavailable => Status.unavailable,
         error.StaleTarget => Status.stale_target,
         error.Unsupported => Status.unsupported,
-        error.InvalidTarget, error.InvalidDirectoryTarget => Status.invalid,
+        error.InvalidTarget, error.InvalidDirectoryTarget, error.InvalidAttachment => Status.invalid,
         else => Status.failed,
     });
 }
@@ -130,20 +131,36 @@ pub fn requireUnrestricted(plugin: *WasmPlugin, caller: *wasm.Caller, comptime p
 /// a provider-issued durable lease; accepting a raw foreign root here would
 /// turn an identifier into an ambient capability.
 pub fn validatePlanRoot(effect_plan: fs.contract.Plan, authorized_root: fs.contract.Root) AuthorizationError!void {
+    return validatePlanRootInner(effect_plan, authorized_root, false);
+}
+
+/// Validate a guest plan against its live target and this plugin's attachment
+/// membrane. Lease-backed copies may cross the target root only after the
+/// registry proves the exact provider lease was minted by this plugin.
+pub fn validatePlanForPlugin(plugin: *WasmPlugin, effect_plan: fs.contract.Plan, authorized_root: fs.contract.Root) AuthorizationError!void {
+    plugin.semantic_attachments.authorizePlan(effect_plan) catch return error.InvalidAttachment;
+    return validatePlanRootInner(effect_plan, authorized_root, true);
+}
+
+fn validatePlanRootInner(effect_plan: fs.contract.Plan, authorized_root: fs.contract.Root, allow_foreign_lease: bool) AuthorizationError!void {
     if (!sameRoot(effect_plan.root, authorized_root)) return error.Unsupported;
     for (effect_plan.operations) |planned| switch (planned.operation) {
-        .copy => |copy| try validateSourceRoot(copy.source, authorized_root),
-        .rename => |rename| try validateSourceRoot(.{ .entry = rename.source }, authorized_root),
-        .remove => |remove| try validateSourceRoot(.{ .entry = remove.source }, authorized_root),
-        .set_permissions => |permissions| try validateSourceRoot(.{ .entry = permissions.source }, authorized_root),
+        .copy => |copy| try validateSourceRoot(copy.source, authorized_root, allow_foreign_lease),
+        .rename => |rename| try validateSourceRoot(.{ .entry = rename.source }, authorized_root, false),
+        .remove => |remove| try validateSourceRoot(.{ .entry = remove.source }, authorized_root, false),
+        .set_permissions => |permissions| try validateSourceRoot(.{ .entry = permissions.source }, authorized_root, false),
         .create_file, .create_directory, .create_symlink => {},
     };
 }
 
-fn validateSourceRoot(source: fs.contract.Source, authorized_root: fs.contract.Root) AuthorizationError!void {
+fn validateSourceRoot(source: fs.contract.Source, authorized_root: fs.contract.Root, allow_foreign_lease: bool) AuthorizationError!void {
     const root = switch (source) {
         .entry => |entry| entry.root,
         .lease => |lease| lease.root,
+    };
+    if (allow_foreign_lease) switch (source) {
+        .lease => return,
+        .entry => {},
     };
     if (!sameRoot(root, authorized_root)) return error.Unsupported;
 }
@@ -207,7 +224,7 @@ pub fn hApply(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32, result
         return;
     };
     defer decoded.deinit();
-    validatePlanRoot(decoded.value, authorized.root) catch |err| {
+    validatePlanForPlugin(plugin, decoded.value, authorized.root) catch |err| {
         results[0] = status(err);
         return;
     };

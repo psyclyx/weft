@@ -1694,15 +1694,21 @@ fn semanticTransferError(code: i32) SemanticTransferError!void {
 }
 
 /// Materialize an authorized filesystem entry for use by a semantic
-/// transfer. The result is an owner-scoped wire identifier, never a pointer
-/// or an ambient filesystem capability.
+/// transfer. The result carries an owner-scoped wire identifier and the
+/// provider lease source it may name in a plan; neither is an ambient
+/// filesystem capability without host-side registry authorization.
+pub const SemanticTransferCapture = struct {
+    attachment: semantic.transfer.Attachment,
+    source: fs.contract.LeaseSource,
+};
+
 pub fn semanticTransferCapture(
     target: semantic.target.Ref,
     target_revision: u64,
     source: fs.contract.EntrySource,
-) SemanticTransferError!semantic.transfer.Attachment {
+) SemanticTransferError!SemanticTransferCapture {
     const target_wire = target.toWire();
-    var out: [12]u8 = undefined;
+    var out: [36]u8 = undefined;
     const result = wl_semantic_transfer_capture(
         target_wire.authority,
         target_wire.slot,
@@ -1722,11 +1728,25 @@ pub fn semanticTransferCapture(
     );
     try semanticTransferError(result);
     if (result != out.len) return error.Failed;
-    return semantic.transfer.Attachment.fromWire(.{
-        .authority = std.mem.readInt(u32, out[0..4], .little),
-        .slot = std.mem.readInt(u32, out[4..8], .little),
-        .generation = std.mem.readInt(u32, out[8..12], .little),
-    });
+    return .{
+        .attachment = semantic.transfer.Attachment.fromWire(.{
+            .authority = std.mem.readInt(u32, out[0..4], .little),
+            .slot = std.mem.readInt(u32, out[4..8], .little),
+            .generation = std.mem.readInt(u32, out[8..12], .little),
+        }),
+        .source = .{
+            .root = .{
+                .authority = @enumFromInt(std.mem.readInt(u32, out[12..16], .little)),
+                .slot = std.mem.readInt(u32, out[16..20], .little),
+                .generation = std.mem.readInt(u32, out[20..24], .little),
+            },
+            .ref = .{
+                .authority = @enumFromInt(std.mem.readInt(u32, out[24..28], .little)),
+                .slot = std.mem.readInt(u32, out[28..32], .little),
+                .generation = std.mem.readInt(u32, out[32..36], .little),
+            },
+        },
+    };
 }
 
 pub fn semanticTransferRetain(attachment: semantic.transfer.Attachment) bool {

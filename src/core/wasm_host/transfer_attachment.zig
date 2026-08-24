@@ -24,6 +24,15 @@ pub const Error = fs_runtime.Error || error{
     AttachmentExhausted,
 };
 
+/// The guest receives both the opaque transfer identity and the exact lease
+/// source it may carry in a provider-neutral filesystem plan. The source is
+/// still only usable when `authorizeLease` proves that this registry minted
+/// and currently owns it.
+pub const CaptureResult = struct {
+    attachment: semantic.transfer.Attachment,
+    source: contract.LeaseSource,
+};
+
 const CaptureStatus = enum(i32) {
     unavailable = -1,
     stale_target = -2,
@@ -37,6 +46,7 @@ const AttachmentState = struct {
     gpa: std.mem.Allocator,
     provider_resource: semantic.transfer.Resource,
     handle: semantic.transfer.Attachment,
+    source: contract.LeaseSource,
     registry: ?*Registry,
     guest_refs: usize = 1,
     host_refs: usize = 0,
@@ -50,6 +60,7 @@ const AttachmentState = struct {
         gpa: std.mem.Allocator,
         provider_resource: semantic.transfer.Resource,
         handle: semantic.transfer.Attachment,
+        source: contract.LeaseSource,
         registry: *Registry,
     ) !*AttachmentState {
         const state = try gpa.create(AttachmentState);
@@ -57,6 +68,7 @@ const AttachmentState = struct {
             .gpa = gpa,
             .provider_resource = provider_resource,
             .handle = handle,
+            .source = source,
             .registry = registry,
         };
         return state;
@@ -116,7 +128,7 @@ pub const Registry = struct {
     /// Capture a source after the caller has checked its root against a live
     /// target binding.  The router still performs its own authority and entry
     /// validation; this registry adds only ownership and wire identity.
-    pub fn capture(self: *Registry, router: *fs_runtime.Router, source: contract.EntrySource) Error!semantic.transfer.Attachment {
+    pub fn capture(self: *Registry, router: *fs_runtime.Router, source: contract.EntrySource) Error!CaptureResult {
         if (self.next_slot == 0) return error.AttachmentExhausted;
         const lease = router.capture(source) catch |err| return err;
         const lease_resource = fs_runtime.LeaseResource.create(self.gpa, router, lease) catch |err| {
@@ -129,7 +141,7 @@ pub const Registry = struct {
             .generation = 1,
         };
         self.next_slot +%= 1;
-        const state = AttachmentState.create(self.gpa, lease_resource, attachment, self) catch |err| {
+        const state = AttachmentState.create(self.gpa, lease_resource, attachment, lease, self) catch |err| {
             lease_resource.release();
             return err;
         };
@@ -141,7 +153,7 @@ pub const Registry = struct {
             state.collectIfUnused();
             return err;
         };
-        return attachment;
+        return .{ .attachment = attachment, .source = lease };
     }
 
     pub fn retain(self: *Registry, attachment: semantic.transfer.Attachment) Error!void {
@@ -157,12 +169,45 @@ pub const Registry = struct {
         state.collectIfUnused();
     }
 
+    /// Authorize a lease source only if it is the exact lease minted by this
+    /// live plugin registry. This preserves cross-root transfers without
+    /// treating a raw provider lease identifier as ambient authority.
+    pub fn authorizeLease(self: *const Registry, source: contract.LeaseSource) Error!void {
+        var values = self.entries.valueIterator();
+        while (values.next()) |state| {
+            if (sameLease(state.*.source, source)) return;
+        }
+        return error.InvalidAttachment;
+    }
+
+    /// Check all lease-backed copy sources in a generic filesystem plan. The
+    /// destination root is intentionally not consulted here; semantic-fs
+    /// validates that independently before admitting this proof.
+    pub fn authorizePlan(self: *const Registry, plan: contract.Plan) Error!void {
+        for (plan.operations) |planned| switch (planned.operation) {
+            .copy => |copy| switch (copy.source) {
+                .entry => {},
+                .lease => |lease| try self.authorizeLease(lease),
+            },
+            else => {},
+        };
+    }
+
     fn detach(self: *Registry, state: *AttachmentState) void {
         if (self.entries.get(state.handle) == state) _ = self.entries.remove(state.handle);
     }
 
     fn lookupState(self: *const Registry, attachment: semantic.transfer.Attachment) ?*AttachmentState {
         return self.entries.get(attachment);
+    }
+
+    fn sameLease(a: contract.LeaseSource, b: contract.LeaseSource) bool {
+        return a.root.authority == b.root.authority and
+            a.root.slot == b.root.slot and
+            a.root.generation == b.root.generation and
+            a.ref.authority == b.ref.authority and
+            a.ref.slot == b.ref.slot and
+            a.ref.generation == b.ref.generation;
     }
 
     /// Resolve every wire attachment transactionally.  The codec owns the
@@ -299,22 +344,31 @@ pub fn hCapture(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32, resu
     };
     const out_ptr: u32 = @bitCast(args[13]);
     const out_cap: u32 = @bitCast(args[14]);
-    if (out_cap < 12) {
-        plugin.semantic_attachments.release(result) catch {};
+    if (out_cap < 36) {
+        plugin.semantic_attachments.release(result.attachment) catch {};
         results[0] = @intFromEnum(CaptureStatus.output_too_small);
         return;
     }
     var bytes: [12]u8 = undefined;
-    const wire = result.toWire();
+    const wire = result.attachment.toWire();
     std.mem.writeInt(u32, bytes[0..4], wire.authority, .little);
     std.mem.writeInt(u32, bytes[4..8], wire.slot, .little);
     std.mem.writeInt(u32, bytes[8..12], wire.generation, .little);
-    _ = caller.writeMemory(out_ptr, out_cap, &bytes) catch {
-        plugin.semantic_attachments.release(result) catch {};
+    var output: [36]u8 = undefined;
+    @memcpy(output[0..12], &bytes);
+    const root_wire = result.source.root;
+    std.mem.writeInt(u32, output[12..16], @intFromEnum(root_wire.authority), .little);
+    std.mem.writeInt(u32, output[16..20], root_wire.slot, .little);
+    std.mem.writeInt(u32, output[20..24], root_wire.generation, .little);
+    std.mem.writeInt(u32, output[24..28], @intFromEnum(result.source.ref.authority), .little);
+    std.mem.writeInt(u32, output[28..32], result.source.ref.slot, .little);
+    std.mem.writeInt(u32, output[32..36], result.source.ref.generation, .little);
+    _ = caller.writeMemory(out_ptr, out_cap, &output) catch {
+        plugin.semantic_attachments.release(result.attachment) catch {};
         results[0] = @intFromEnum(CaptureStatus.failed);
         return;
     };
-    results[0] = 12;
+    results[0] = 36;
 }
 
 pub fn hRetain(data: ?*anyopaque, _: *wasm.Caller, args: []const i32, results: []i32) void {
@@ -342,11 +396,38 @@ test "attachment ownership spans clipboard replacement and pending paste" {
     try router.register(.here, .init(&provider));
     var registry = Registry.init(std.testing.allocator);
     const root: contract.Root = .{ .authority = .here, .slot = 1, .generation = 1 };
-    const captured = try registry.capture(&router, .{
+    const captured_result = try registry.capture(&router, .{
         .root = root,
         .ref = .{ .authority = .here, .slot = 2, .generation = 1 },
         .revision = .{ .token = "r" },
     });
+    const captured = captured_result.attachment;
+    const cross_root_plan = contract.Plan{
+        .root = .{ .authority = .here, .slot = 99, .generation = 1 },
+        .base_revision = &.{},
+        .operations = &.{.{
+            .id = [_]u8{1} ** 16,
+            .operation = .{ .copy = .{
+                .source = .{ .lease = captured_result.source },
+                .destination = .{ .parent = .root, .name = try contract.Name.init("paste") },
+            } },
+        }},
+    };
+    try registry.authorizePlan(cross_root_plan);
+    var forged_source = captured_result.source;
+    forged_source.ref.slot +%= 1;
+    const forged_plan = contract.Plan{
+        .root = cross_root_plan.root,
+        .base_revision = &.{},
+        .operations = &.{.{
+            .id = [_]u8{2} ** 16,
+            .operation = .{ .copy = .{
+                .source = .{ .lease = forged_source },
+                .destination = .{ .parent = .root, .name = try contract.Name.init("paste") },
+            } },
+        }},
+    };
+    try std.testing.expectError(error.InvalidAttachment, registry.authorizePlan(forged_plan));
     const encoded = try scene_codec.transfer.encode(std.testing.allocator, .{
         .intent = .copy,
         .representations = &.{.{ .media_type = "application/test", .attachment = captured, .payload = "x" }},
@@ -372,13 +453,32 @@ test "attachment ownership spans clipboard replacement and pending paste" {
     try registry.release(captured);
     try std.testing.expectEqual(@as(usize, 1), provider.released);
 
+    const unattached = try registry.capture(&router, .{
+        .root = root,
+        .ref = .{ .authority = .here, .slot = 4, .generation = 1 },
+        .revision = .{ .token = "r" },
+    });
+    try registry.release(unattached.attachment);
+    try std.testing.expectError(error.InvalidAttachment, registry.authorizePlan(.{
+        .root = cross_root_plan.root,
+        .base_revision = &.{},
+        .operations = &.{.{
+            .id = [_]u8{3} ** 16,
+            .operation = .{ .copy = .{
+                .source = .{ .lease = unattached.source },
+                .destination = .{ .parent = .root, .name = try contract.Name.init("paste") },
+            } },
+        }},
+    }));
+    try std.testing.expectEqual(@as(usize, 2), provider.released);
+
     // Unloading the plugin detaches guest handles but cannot invalidate a
     // host transfer that is still held by another view.
-    const surviving = try registry.capture(&router, .{
+    const surviving = (try registry.capture(&router, .{
         .root = root,
         .ref = .{ .authority = .here, .slot = 3, .generation = 1 },
         .revision = .{ .token = "r" },
-    });
+    })).attachment;
     const surviving_bytes = try scene_codec.transfer.encode(std.testing.allocator, .{
         .intent = .copy,
         .representations = &.{.{ .media_type = "application/test", .attachment = surviving, .payload = "x" }},
@@ -387,9 +487,9 @@ test "attachment ownership spans clipboard replacement and pending paste" {
     var surviving_wire = try scene_codec.transfer.decode(std.testing.allocator, surviving_bytes);
     try registry.resolve(&surviving_wire);
     registry.deinit();
-    try std.testing.expectEqual(@as(usize, 1), provider.released);
-    surviving_wire.deinit();
     try std.testing.expectEqual(@as(usize, 2), provider.released);
+    surviving_wire.deinit();
+    try std.testing.expectEqual(@as(usize, 3), provider.released);
 }
 
 test "capture releases lease when attachment publication runs out of memory" {

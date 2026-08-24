@@ -434,6 +434,7 @@ const perm_gated = [_]struct { name: []const u8, perm: Perm }{
     .{ .name = "wl_fs_list_async", .perm = .fs_read }, // fs.zig hFsListAsync: .fs_read
     .{ .name = "wl_semantic_fs_list", .perm = .fs_read }, // semantic_fs.zig hList: .fs_read
     .{ .name = "wl_semantic_fs_apply", .perm = .fs_write }, // semantic_fs.zig hApply: .fs_write
+    .{ .name = "wl_semantic_transfer_capture", .perm = .fs_read }, // transfer_attachment.zig hCapture: .fs_read
 };
 
 test "membrane contract: table .perm metadata agrees with the handlers' actual requirePerm gates" {

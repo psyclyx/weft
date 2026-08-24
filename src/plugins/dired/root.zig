@@ -35,6 +35,7 @@ pub const entry_schema_legacy = model.entry_schema_legacy;
 pub const isEntryTransferSchema = model.isEntryTransferSchema;
 pub const encodeEntryTransfer = model.encodeEntryTransfer;
 pub const decodeEntryTransfer = model.decodeEntryTransfer;
+pub const decodeEntryTransferWithAttachment = model.decodeEntryTransferWithAttachment;
 
 pub const FieldBinding = projection.FieldBinding;
 pub const ProjectionOptions = projection.Options;

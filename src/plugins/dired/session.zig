@@ -225,7 +225,7 @@ pub const Plugin = struct {
         if (captured.value.intent != .copy) return;
         const representation = captured.value.representation(model.entry_media_type) orelse return;
         const schema = representation.schema orelse return error.InvalidTransfer;
-        const decoded = try model.decodeEntryTransfer(representation.payload, schema, representation.resource);
+        const decoded = try model.decodeEntryTransferWithAttachment(representation.payload, schema, representation.resource, representation.attachment);
         const entry = switch (decoded.source) {
             .entry => |value| value,
             .lease => return,
@@ -1053,7 +1053,7 @@ test "durable copy survives clipboard replacement and restores a deleted source 
     });
     try std.testing.expectEqual(@as(usize, 1), fixture.fake.capture_calls);
     const representation = copied.transfer.representation(model.entry_media_type).?;
-    const decoded = try model.decodeEntryTransfer(representation.payload, representation.schema.?, representation.resource);
+    const decoded = try model.decodeEntryTransferWithAttachment(representation.payload, representation.schema.?, representation.resource, representation.attachment);
     try std.testing.expect(decoded.source == .lease);
     try std.testing.expect(representation.resource != null);
 
