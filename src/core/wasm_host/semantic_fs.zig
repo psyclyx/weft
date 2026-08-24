@@ -241,6 +241,45 @@ fn validateSourceRoot(source: fs.contract.Source, authorized_root: fs.contract.R
     if (!sameRoot(root, authorized_root)) return error.Unsupported;
 }
 
+/// Return provider policy for the exact authorized semantic target revision.
+/// Capabilities are advisory metadata for guest tools; they never grant a
+/// filesystem operation, and each later list/apply request repeats the same
+/// target and attachment checks.
+pub fn hCapabilities(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32, results: []i32) void {
+    const plugin: *WasmPlugin = @ptrCast(@alignCast(data.?));
+    results[0] = @intFromEnum(Status.unavailable);
+    if (!requirePerm(plugin, caller, .fs_read)) return;
+    if (!requireUnrestricted(plugin, caller, .fs_read)) return;
+    const target = targetFromArgs(args) orelse {
+        results[0] = @intFromEnum(Status.invalid);
+        return;
+    };
+    const authorized = authorize(plugin, target, revisionFromArgs(args)) catch |err| {
+        results[0] = status(err);
+        return;
+    };
+    const router = plugin.activeCtx().filesystems orelse return;
+    const capabilities = router.capabilities(authorized.root) catch |err| {
+        results[0] = status(err);
+        return;
+    };
+    const encoded = fs_codec.encodeCapabilities(plugin.gpa, capabilities) catch |err| {
+        results[0] = status(err);
+        return;
+    };
+    defer plugin.gpa.free(encoded);
+    const out_ptr: u32 = @bitCast(args[5]);
+    const out_cap: u32 = @bitCast(args[6]);
+    if (out_cap < encoded.len) {
+        results[0] = @intFromEnum(Status.output_too_small);
+        return;
+    }
+    results[0] = @intCast(caller.writeMemory(out_ptr, out_cap, encoded) catch {
+        results[0] = @intFromEnum(Status.failed);
+        return;
+    });
+}
+
 pub fn hList(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32, results: []i32) void {
     const plugin: *WasmPlugin = @ptrCast(@alignCast(data.?));
     results[0] = @intFromEnum(Status.unavailable);

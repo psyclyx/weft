@@ -6,6 +6,8 @@ const semantic = @import("weft_semantic");
 
 const c = fs.contract;
 
+pub const Capabilities = c.Capabilities;
+
 pub const Limits = struct {
     pub const max_payload_bytes: usize = 16 * 1024 * 1024;
     pub const max_count: usize = 16 * 1024;
@@ -216,6 +218,7 @@ const listing_kind: u8 = 1;
 const plan_kind: u8 = 2;
 const report_kind: u8 = 3;
 const child_directory_kind: u8 = 4;
+const capabilities_kind: u8 = 5;
 
 fn header(w: *Writer, kind: u8) Error!void {
     try w.append(magic);
@@ -653,6 +656,72 @@ pub fn decodeListing(gpa: std.mem.Allocator, bytes: []const u8) Error!OwnedListi
     return owned;
 }
 
+/// Encode the provider capability set for an authorized target.  Capabilities
+/// are descriptive policy, not authority: the host still re-authorizes every
+/// operation against the target revision before routing it to a provider.
+pub fn encodeCapabilities(gpa: std.mem.Allocator, capabilities: c.Capabilities) Error![]u8 {
+    var w = Writer.init(gpa);
+    defer w.deinit();
+    try header(&w, capabilities_kind);
+    try w.byte(@intFromBool(capabilities.exclusive_create));
+    try w.byte(@intFromBool(capabilities.atomic_exchange));
+    try w.byte(@intFromBool(capabilities.durable_lease != null));
+    if (capabilities.durable_lease) |lease| {
+        try w.writeU64(lease.regular_file_max_bytes);
+        try w.writeU64(lease.symlink_target_max_bytes);
+    }
+    try w.byte(@intFromBool(capabilities.tree_snapshot));
+    try w.byte(@intFromBool(capabilities.symlink));
+    try w.byte(@intFromBool(capabilities.posix_mode));
+    try w.byte(@intFromBool(capabilities.quarantine));
+    try w.byte(@intFromBool(capabilities.clone_acceleration));
+    try w.byte(@intFromEnum(capabilities.guard_strength));
+    try w.byte(@intFromEnum(capabilities.watch));
+    return try w.finish();
+}
+
+pub fn decodeCapabilities(gpa: std.mem.Allocator, bytes: []const u8) Error!c.Capabilities {
+    _ = gpa;
+    var r = try Reader.init(bytes);
+    try checkHeader(&r, capabilities_kind);
+    const exclusive_create = try r.strictBool();
+    const atomic_exchange = try r.strictBool();
+    const durable_lease = if (try r.strictBool()) c.LeaseCapability{
+        .regular_file_max_bytes = try r.readU64(),
+        .symlink_target_max_bytes = try r.readU64(),
+    } else null;
+    const tree_snapshot = try r.strictBool();
+    const symlink = try r.strictBool();
+    const posix_mode = try r.strictBool();
+    const quarantine = try r.strictBool();
+    const clone_acceleration = try r.strictBool();
+    const guard_strength: c.GuardStrength = switch (try r.byte()) {
+        0 => .preflight,
+        1 => .claimed,
+        2 => .atomic,
+        else => return error.Corrupt,
+    };
+    const watch: c.WatchPrecision = switch (try r.byte()) {
+        0 => .none,
+        1 => .invalidation,
+        2 => .recursive_invalidation,
+        else => return error.Corrupt,
+    };
+    try r.done();
+    return .{
+        .exclusive_create = exclusive_create,
+        .atomic_exchange = atomic_exchange,
+        .durable_lease = durable_lease,
+        .tree_snapshot = tree_snapshot,
+        .symlink = symlink,
+        .posix_mode = posix_mode,
+        .quarantine = quarantine,
+        .clone_acceleration = clone_acceleration,
+        .guard_strength = guard_strength,
+        .watch = watch,
+    };
+}
+
 /// Encode the minimum immutable evidence needed to derive a child directory
 /// target. Names deliberately do not cross this request: the authority
 /// provider re-reads the direct child and supplies its current raw name.
@@ -770,6 +839,35 @@ test "filesystem codec round trips every listing value, raw bytes, metadata, and
     var decoded = try decodeListing(std.testing.allocator, bytes);
     defer decoded.deinit();
     try std.testing.expectEqualDeep(input, decoded.value);
+}
+
+test "filesystem codec round trips provider capabilities" {
+    const input: c.Capabilities = .{
+        .exclusive_create = true,
+        .atomic_exchange = true,
+        .durable_lease = .{ .regular_file_max_bytes = 123, .symlink_target_max_bytes = 456 },
+        .tree_snapshot = true,
+        .symlink = true,
+        .posix_mode = true,
+        .quarantine = true,
+        .clone_acceleration = true,
+        .guard_strength = .atomic,
+        .watch = .recursive_invalidation,
+    };
+    const bytes = try encodeCapabilities(std.testing.allocator, input);
+    defer std.testing.allocator.free(bytes);
+    try std.testing.expectEqualDeep(input, try decodeCapabilities(std.testing.allocator, bytes));
+
+    var bad_enum = try std.testing.allocator.dupe(u8, bytes);
+    defer std.testing.allocator.free(bad_enum);
+    bad_enum[bytes.len - 2] = 3;
+    try std.testing.expectError(error.Corrupt, decodeCapabilities(std.testing.allocator, bad_enum));
+
+    var trailing = try std.testing.allocator.alloc(u8, bytes.len + 1);
+    defer std.testing.allocator.free(trailing);
+    @memcpy(trailing[0..bytes.len], bytes);
+    trailing[bytes.len] = 1;
+    try std.testing.expectError(error.Corrupt, decodeCapabilities(std.testing.allocator, trailing));
 }
 
 test "filesystem codec round trips guarded child directory requests" {

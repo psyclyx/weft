@@ -147,7 +147,12 @@ test "wasm plugin: guarded child directories publish and revoke complete authori
         }
 
         pub fn capabilities(_: *@This(), _: fs_contract.Root) fs_contract.Error!fs_contract.Capabilities {
-            return .{};
+            return .{
+                .durable_lease = .{ .regular_file_max_bytes = 128, .symlink_target_max_bytes = 64 },
+                .posix_mode = true,
+                .guard_strength = .claimed,
+                .watch = .invalidation,
+            };
         }
 
         pub fn sameRoot(self: *@This(), left: fs_contract.Root, right: fs_contract.Root) fs_contract.Error!bool {

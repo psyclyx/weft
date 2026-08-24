@@ -14,6 +14,7 @@ pub const OwnedPlan = codec.OwnedPlan;
 pub const OwnedApplyReport = codec.OwnedApplyReport;
 pub const ChildDirectory = codec.ChildDirectory;
 pub const OwnedChildDirectory = codec.OwnedChildDirectory;
+pub const Capabilities = codec.Capabilities;
 pub const listing = struct {
     pub const encode = codec.encodeListing;
     pub const decode = codec.decodeListing;
@@ -35,6 +36,10 @@ pub const child_directory = struct {
     pub const decode = codec.decodeChildDirectory;
     pub const Owned = codec.OwnedChildDirectory;
 };
+pub const capabilities = struct {
+    pub const encode = codec.encodeCapabilities;
+    pub const decode = codec.decodeCapabilities;
+};
 
 pub const encodeListing = codec.encodeListing;
 pub const decodeListing = codec.decodeListing;
@@ -44,6 +49,8 @@ pub const encodeApplyReport = codec.encodeApplyReport;
 pub const decodeApplyReport = codec.decodeApplyReport;
 pub const encodeChildDirectory = codec.encodeChildDirectory;
 pub const decodeChildDirectory = codec.decodeChildDirectory;
+pub const encodeCapabilities = codec.encodeCapabilities;
+pub const decodeCapabilities = codec.decodeCapabilities;
 
 test {
     @import("std").testing.refAllDecls(@This());

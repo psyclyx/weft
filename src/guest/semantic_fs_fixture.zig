@@ -22,6 +22,9 @@ export fn init() void {
     var listing = weft.semanticFsList(weft.allocator, parent.target, parent.revision) catch unreachable;
     defer listing.deinit();
     if (listing.value.entries.len != 1) unreachable;
+    const capabilities = weft.semanticFsCapabilities(weft.allocator, parent.target, parent.revision) catch unreachable;
+    if (!capabilities.posix_mode or capabilities.durable_lease == null or
+        capabilities.guard_strength != .claimed or capabilities.watch != .invalidation) unreachable;
     const entry = listing.value.entries[0];
     if (entry.observation.kind != .directory) unreachable;
     const entry_ref = switch (entry.observation.node) {

@@ -232,6 +232,7 @@ extern "weft" fn wl_fs_append(path: u32, path_len: u32, ptr: u32, len: u32) i32;
 extern "weft" fn wl_fs_list(auth: u32, auth_len: u32, path: u32, path_len: u32, out_ptr: u32, out_cap: u32) i32;
 extern "weft" fn wl_fs_list_async(auth: u32, auth_len: u32, path: u32, path_len: u32, dest: u32, dest_len: u32) i32;
 extern "weft" fn wl_semantic_fs_publish_child_directory(request_ptr: u32, request_len: u32, out_ptr: u32, out_cap: u32) i32;
+extern "weft" fn wl_semantic_fs_capabilities(target_authority: u32, target_slot: u32, target_generation: u32, revision_low: u32, revision_high: u32, out_ptr: u32, out_cap: u32) i32;
 extern "weft" fn wl_semantic_fs_list(target_authority: u32, target_slot: u32, target_generation: u32, revision_low: u32, revision_high: u32, out_ptr: u32, out_cap: u32) i32;
 extern "weft" fn wl_semantic_fs_apply(target_authority: u32, target_slot: u32, target_generation: u32, revision_low: u32, revision_high: u32, plan_ptr: u32, plan_len: u32, out_ptr: u32, out_cap: u32) i32;
 // D2's generic, schema-directed slot verbs (doc/d2-schema-payloads.md §3.2).
@@ -1734,6 +1735,41 @@ pub fn semanticFsPublishChildDirectory(
         else => return error.InvalidTarget,
     }
     return located.value;
+}
+
+/// Query provider policy for the exact target revision.  The result is
+/// descriptive only: the host re-authorizes every filesystem operation, so a
+/// capability bit can never be used as an ambient root or operation grant.
+pub fn semanticFsCapabilities(
+    gpa: std.mem.Allocator,
+    target: semantic.target.Ref,
+    revision: u64,
+) SemanticFsError!fs.contract.Capabilities {
+    const wire = target.toWire();
+    var capacity: usize = 64;
+    while (true) {
+        if (capacity > fs_codec.Limits.max_payload_bytes) capacity = fs_codec.Limits.max_payload_bytes;
+        const bytes = try gpa.alloc(u8, capacity);
+        defer gpa.free(bytes);
+        const result = wl_semantic_fs_capabilities(
+            wire.authority,
+            wire.slot,
+            wire.generation,
+            semanticFsRevisionLow(revision),
+            semanticFsRevisionHigh(revision),
+            p(bytes.ptr),
+            @intCast(bytes.len),
+        );
+        if (result == -6) {
+            if (capacity == fs_codec.Limits.max_payload_bytes) return error.LimitExceeded;
+            capacity = @min(capacity * 2, fs_codec.Limits.max_payload_bytes);
+            continue;
+        }
+        try semanticFsError(result);
+        const result_len: usize = @intCast(result);
+        if (result_len > bytes.len) return error.Failed;
+        return fs_codec.decodeCapabilities(gpa, bytes[0..result_len]);
+    }
 }
 
 /// List the exact directory attachment of a live target revision.  The
