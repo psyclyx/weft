@@ -62,6 +62,8 @@ const CopySource = struct {
     root: contract.Root,
     entry: contract.EntryRef,
     revision: []u8,
+    kind: contract.Kind,
+    mode: ?u32,
     intent: transfer.Intent,
 };
 
@@ -91,10 +93,10 @@ pub const OwnedPlan = struct {
 };
 
 const entry_media = "application/x-weft-dired-entry";
-const entry_schema = "weft.dired.entry.v1";
+const entry_schema = "weft.dired.entry.v2";
 const tree_media = "application/x-weft-dired-tree";
 const tree_schema = "weft.dired.tree.v1";
-const entry_magic = "weft-dired-entry-v1\x00";
+const entry_magic = "weft-dired-entry-v2\x00";
 const tree_magic = "weft-dired-tree-v1\x00";
 const no_parent = std.math.maxInt(u32);
 
@@ -130,6 +132,7 @@ pub const Model = struct {
     /// Reconcile by identity, never by listing position or visible name.
     /// Dirty rows remain present when their source disappears, marked stale.
     pub fn reconcile(self: *Model, snapshot: Snapshot) !void {
+        try validateSnapshot(snapshot);
         var seen = std.AutoHashMapUnmanaged(NodeId, void).empty;
         defer seen.deinit(self.gpa);
         for (snapshot.entries) |entry| {
@@ -137,14 +140,28 @@ pub const Model = struct {
                 const row_ptr = self.rowMutable(id).?;
                 try seen.put(self.gpa, id, {});
                 if (isDirty(row_ptr)) {
-                    self.replaceObservation(&row_ptr.current, entry) catch return error.OutOfMemory;
-                    row_ptr.conflict = .none;
+                    const external_change = if (row_ptr.base) |base| !observationMatches(base, entry) else true;
+                    const latest = try cloneObservation(self.gpa, entry);
+                    self.freeObservation(&row_ptr.current);
+                    row_ptr.current = latest;
+                    if (external_change) row_ptr.conflict = .stale;
                 } else {
+                    const next_base = try cloneObservation(self.gpa, entry);
+                    errdefer freeObservationWith(self.gpa, &next_base);
+                    const next_current = try cloneObservation(self.gpa, entry);
+                    errdefer freeObservationWith(self.gpa, &next_current);
+                    const next_draft = try draftFrom(self.gpa, entry);
+                    errdefer freeDraftWith(self.gpa, &next_draft);
                     self.freeObservation(&row_ptr.base);
                     self.freeObservation(&row_ptr.current);
-                    row_ptr.base = try cloneObservation(self.gpa, entry);
-                    row_ptr.current = try cloneObservation(self.gpa, entry);
-                    try self.replaceDraftFromSnapshot(row_ptr, entry);
+                    freeDraftWith(self.gpa, &row_ptr.draft);
+                    row_ptr.base = next_base;
+                    row_ptr.current = next_current;
+                    row_ptr.draft = next_draft;
+                    row_ptr.name_dirty = false;
+                    row_ptr.mode_dirty = false;
+                    row_ptr.pending = .observed;
+                    row_ptr.copy_source = null;
                     row_ptr.conflict = .none;
                 }
             } else {
@@ -207,7 +224,7 @@ pub const Model = struct {
         defer if (payload.len != 0) self.gpa.free(payload);
         var reps: [1]transfer.Representation = undefined;
         if (sourceFor(self, row_ptr)) |source| {
-            payload = try encodeEntry(self.gpa, source.root, source.entry, source.revision);
+            payload = try encodeEntry(self.gpa, source.root, source.entry, source.revision, source.kind, source.mode);
             reps[0] = .{ .media_type = entry_media, .schema = entry_schema, .payload = payload };
         } else {
             payload = try self.encodeTree(id);
@@ -269,8 +286,11 @@ pub const Model = struct {
         if (name.len > max_transfer_name) return error.TransferTooLarge;
         try self.validateParent(parent);
         _ = try contract.Name.init(name);
-        const draft = Draft{ .name = try self.gpa.dupe(u8, name), .kind = kind, .mode = mode, .contents = try self.gpa.dupe(u8, contents), .link_target = try self.gpa.dupe(u8, link_target) };
+        var draft = Draft{ .name = &.{}, .kind = kind, .mode = mode, .contents = &.{}, .link_target = &.{} };
         errdefer freeDraftWith(self.gpa, &draft);
+        draft.name = try self.gpa.dupe(u8, name);
+        draft.contents = try self.gpa.dupe(u8, contents);
+        draft.link_target = try self.gpa.dupe(u8, link_target);
         const id = self.next_id;
         self.next_id += 1;
         try self.rows.append(self.gpa, .{ .id = id, .parent = parent, .base = null, .current = null, .draft = draft, .pending = pending });
@@ -279,22 +299,12 @@ pub const Model = struct {
 
     fn appendCopied(self: *Model, parent: ?NodeId, name: []const u8, captured: EntryCapture, intent: transfer.Intent) !NodeId {
         try self.validateParent(parent);
+        const revision = try self.gpa.dupe(u8, captured.revision);
+        errdefer self.gpa.free(revision);
         const id = try self.appendPending(parent, name, captured.kind, captured.mode, &.{}, &.{}, .copied);
         const row_ptr = self.rowMutable(id).?;
-        row_ptr.copy_source = .{ .root = captured.root, .entry = captured.entry, .revision = try self.gpa.dupe(u8, captured.revision), .intent = intent };
+        row_ptr.copy_source = .{ .root = captured.root, .entry = captured.entry, .revision = revision, .kind = captured.kind, .mode = captured.mode, .intent = intent };
         return id;
-    }
-
-    fn replaceDraftFromSnapshot(self: *Model, row_ptr: *Row, entry: SnapshotEntry) !void {
-        try self.replaceBytes(&row_ptr.draft.name, entry.name);
-        row_ptr.draft.kind = entry.kind;
-        row_ptr.draft.mode = entry.mode;
-        try self.replaceBytes(&row_ptr.draft.contents, entry.contents);
-        try self.replaceBytes(&row_ptr.draft.link_target, entry.link_target);
-        row_ptr.name_dirty = false;
-        row_ptr.mode_dirty = false;
-        row_ptr.pending = .observed;
-        row_ptr.copy_source = null;
     }
 
     fn validateParent(self: *const Model, parent: ?NodeId) !void {
@@ -308,11 +318,6 @@ pub const Model = struct {
             if (parent_row.draft.kind != .directory) return error.NotDirectory;
             cursor = parent_row.parent;
         }
-    }
-
-    fn replaceObservation(self: *Model, slot: *?Observation, entry: SnapshotEntry) !void {
-        self.freeObservation(slot);
-        slot.* = try cloneObservation(self.gpa, entry);
     }
 
     fn replaceBytes(self: *Model, slot: *[]u8, value: []const u8) !void {
@@ -380,34 +385,51 @@ pub const Model = struct {
 
     fn decodeTree(self: *Model, parent: ?NodeId, root_name: []const u8, payload: []const u8, intent: transfer.Intent) !NodeId {
         if (payload.len > max_transfer_payload or !std.mem.startsWith(u8, payload, tree_magic)) return error.InvalidTransfer;
+        if (root_name.len > max_transfer_name) return error.TransferTooLarge;
+        _ = try contract.Name.init(root_name);
         var cursor: usize = tree_magic.len;
         const count = try getU32(payload, &cursor);
         if (count == 0 or count > max_transfer_records) return error.InvalidTransfer;
-        const ids = try self.gpa.alloc(NodeId, count);
-        defer self.gpa.free(ids);
-        for (ids) |*slot| slot.* = 0;
-        for (ids, 0..) |*slot, index| {
+        const DecodedNode = struct {
+            parent_index: u32,
+            kind: contract.Kind,
+            mode: ?u32,
+            name: []const u8,
+            contents: []const u8,
+            link_target: []const u8,
+        };
+        var decoded: std.ArrayList(DecodedNode) = .empty;
+        defer decoded.deinit(self.gpa);
+        try decoded.ensureTotalCapacity(self.gpa, count);
+        for (0..count) |index| {
             const parent_index = try getU32(payload, &cursor);
             const raw_kind = try getU8(payload, &cursor);
             if (raw_kind > @intFromEnum(contract.Kind.other) or cursor >= payload.len) return error.InvalidTransfer;
             const kind: contract.Kind = @enumFromInt(raw_kind);
             const has_mode = try getU8(payload, &cursor);
+            if (has_mode > 1) return error.InvalidTransfer;
             const mode_value = try getU32(payload, &cursor);
             const name = try getBytes(payload, &cursor, max_transfer_name);
             const contents = try getBytes(payload, &cursor, max_transfer_payload);
             const link_target = try getBytes(payload, &cursor, max_transfer_payload);
-            const row_parent = if (parent_index == no_parent) parent else blk: {
-                if (parent_index >= index or ids[parent_index] == 0) return error.InvalidTransfer;
-                break :blk ids[parent_index];
-            };
-            const actual_name = if (index == 0) root_name else name;
-            if (index == 0 and !std.mem.eql(u8, actual_name, name)) {
-                _ = try contract.Name.init(actual_name);
+            _ = try contract.Name.init(name);
+            if (index == 0) {
+                if (parent_index != no_parent) return error.InvalidTransfer;
+            } else {
+                if (parent_index == no_parent or parent_index >= index) return error.InvalidTransfer;
+                if (decoded.items[parent_index].kind != .directory) return error.NotDirectory;
             }
-            const id = try self.appendPending(row_parent, actual_name, kind, if (has_mode == 0) null else mode_value, contents, link_target, .added);
-            slot.* = id;
+            try decoded.append(self.gpa, .{ .parent_index = parent_index, .kind = kind, .mode = if (has_mode == 0) null else mode_value, .name = name, .contents = contents, .link_target = link_target });
         }
         if (cursor != payload.len) return error.InvalidTransfer;
+        try self.validateParent(parent);
+        const ids = try self.gpa.alloc(NodeId, count);
+        defer self.gpa.free(ids);
+        for (decoded.items, 0..) |node, index| {
+            const row_parent = if (index == 0) parent else ids[node.parent_index];
+            const actual_name = if (index == 0) root_name else node.name;
+            ids[index] = try self.appendPending(row_parent, actual_name, node.kind, node.mode, node.contents, node.link_target, .added);
+        }
         _ = intent;
         return ids[0];
     }
@@ -435,19 +457,11 @@ const Builder = struct {
         const row_ptr = self.model.row(id) orelse return error.UnknownNode;
         if (row_ptr.conflict == .stale) return error.Stale;
         // A pending-only subtree deleted before apply has no filesystem
-        // operation to emit.  Suppress its descendants too; their captured
-        // draft data remains available to any independent pasted subtree.
-        if (row_ptr.pending == .deleted and row_ptr.base == null) {
+        // operation to emit. Suppress descendants at any depth; their
+        // captured draft data remains available to an independent paste.
+        if (try self.suppressedByDeletedAncestor(id)) {
             try self.emitted.append(self.arena, id);
             return;
-        }
-        if (row_ptr.parent) |parent| {
-            if (self.model.row(parent)) |parent_row| {
-                if (parent_row.pending == .deleted and parent_row.base == null) {
-                    try self.emitted.append(self.arena, id);
-                    return;
-                }
-            }
         }
         try self.visiting.append(self.arena, id);
         defer _ = self.visiting.pop();
@@ -459,27 +473,27 @@ const Builder = struct {
         }
         const parent_ref = try self.parentRef(row_ptr);
         if (row_ptr.pending == .deleted) {
-            const source = baseSource(row_ptr) orelse return error.Stale;
-            try self.add(.{ .remove = .{ .source = source.entry, .revision = try self.revision(source.revision) } }, row_ptr, null);
+            const source = baseSource(self.model, row_ptr) orelse return error.Stale;
+            try self.add(.{ .remove = .{ .source = try self.copyEntrySource(source) } }, row_ptr, null);
         } else if (row_ptr.pending == .added) {
             try self.addCreate(row_ptr, parent_ref, row_ptr.draft.name);
         } else if (row_ptr.pending == .copied or row_ptr.pending == .copied_renamed) {
             const source = row_ptr.copy_source orelse return error.Stale;
             const name = try copyName(self.arena, row_ptr.draft.name);
             const destination = contract.Slot{ .parent = parent_ref, .name = name };
-            const captured_revision = contract.Revision{ .token = try self.arena.dupe(u8, source.revision) };
+            const captured_source = try self.capturedSource(source);
             const operation: contract.Operation = switch (source.intent) {
-                .copy => .{ .copy = .{ .source = .{ .entry = .{ .ref = source.entry, .revision = captured_revision } }, .destination = destination } },
-                .cut => .{ .rename = .{ .source = source.entry, .source_revision = captured_revision, .destination = destination } },
+                .copy => .{ .copy = .{ .source = .{ .entry = captured_source }, .destination = destination } },
+                .cut => .{ .rename = .{ .source = captured_source, .destination = destination } },
             };
             try self.add(operation, row_ptr, parent_ref);
         } else {
-            const source = baseSource(row_ptr) orelse return error.Stale;
+            const source = baseSource(self.model, row_ptr) orelse return error.Stale;
             if (row_ptr.name_dirty) {
-                try self.add(.{ .rename = .{ .source = source.entry, .source_revision = try self.revision(source.revision), .destination = .{ .parent = parent_ref, .name = try copyName(self.arena, row_ptr.draft.name) } } }, row_ptr, parent_ref);
+                try self.add(.{ .rename = .{ .source = try self.copyEntrySource(source), .destination = .{ .parent = parent_ref, .name = try copyName(self.arena, row_ptr.draft.name) } } }, row_ptr, parent_ref);
             }
             if (row_ptr.mode_dirty) {
-                try self.add(.{ .set_permissions = .{ .source = source.entry, .revision = try self.revision(source.revision), .mode = row_ptr.draft.mode orelse return error.InvalidMode } }, row_ptr, null);
+                try self.add(.{ .set_permissions = .{ .source = try self.copyEntrySource(source), .mode = row_ptr.draft.mode orelse return error.InvalidMode } }, row_ptr, null);
             }
         }
         try self.emitted.append(self.arena, id);
@@ -496,8 +510,12 @@ const Builder = struct {
         try self.add(operation, row_ptr, parent);
     }
 
-    fn revision(self: *const Builder, value: []const u8) !contract.Revision {
-        return .{ .token = try self.arena.dupe(u8, value) };
+    fn copyEntrySource(self: *const Builder, value: contract.EntrySource) !contract.EntrySource {
+        return .{ .root = value.root, .ref = value.ref, .revision = .{ .token = try self.arena.dupe(u8, value.revision.token) } };
+    }
+
+    fn capturedSource(self: *const Builder, value: CopySource) !contract.EntrySource {
+        return .{ .root = value.root, .ref = value.entry, .revision = .{ .token = try self.arena.dupe(u8, value.revision) } };
     }
 
     fn parentRef(self: *Builder, row_ptr: *const Row) !contract.ParentRef {
@@ -533,6 +551,20 @@ const Builder = struct {
         return false;
     }
 
+    fn suppressedByDeletedAncestor(self: *const Builder, id: NodeId) !bool {
+        var seen: std.AutoHashMapUnmanaged(NodeId, void) = .empty;
+        defer seen.deinit(self.arena);
+        var cursor: ?NodeId = id;
+        while (cursor) |candidate| {
+            if (seen.contains(candidate)) return error.ParentCycle;
+            try seen.put(self.arena, candidate, {});
+            const row_ptr = self.model.row(candidate) orelse return error.UnknownParent;
+            if (row_ptr.pending == .deleted and row_ptr.base == null) return true;
+            cursor = row_ptr.parent;
+        }
+        return false;
+    }
+
     fn contains(values: []const NodeId, value: NodeId) bool {
         for (values) |candidate| if (candidate == value) return true;
         return false;
@@ -543,31 +575,57 @@ const EntryCapture = struct {
     root: contract.Root,
     entry: contract.EntryRef,
     revision: []const u8,
-    kind: contract.Kind = .other,
+    kind: contract.Kind,
     mode: ?u32 = null,
 };
 
-fn sourceFor(model: *const Model, row_ptr: *const Row) ?struct { root: contract.Root, entry: contract.EntryRef, revision: []const u8 } {
-    if (row_ptr.copy_source) |source| return .{ .root = source.root, .entry = source.entry, .revision = source.revision };
+fn sourceFor(model: *const Model, row_ptr: *const Row) ?struct { root: contract.Root, entry: contract.EntryRef, revision: []const u8, kind: contract.Kind, mode: ?u32 } {
+    if (row_ptr.copy_source) |source| return .{ .root = source.root, .entry = source.entry, .revision = source.revision, .kind = source.kind, .mode = source.mode };
     const observed = row_ptr.current orelse row_ptr.base orelse return null;
-    return .{ .root = model.root, .entry = observed.identity, .revision = observed.revision };
+    return .{ .root = model.root, .entry = observed.identity, .revision = observed.revision, .kind = observed.kind, .mode = observed.mode };
 }
 
-fn baseSource(row_ptr: *const Row) ?struct { entry: contract.EntryRef, revision: []const u8 } {
+fn baseSource(model: *const Model, row_ptr: *const Row) ?contract.EntrySource {
     const observed = row_ptr.base orelse return null;
-    return .{ .entry = observed.identity, .revision = observed.revision };
+    return .{ .root = model.root, .ref = observed.identity, .revision = .{ .token = observed.revision } };
 }
 
 fn isDirty(row_ptr: *const Row) bool {
     return row_ptr.pending != .observed or row_ptr.name_dirty or row_ptr.mode_dirty or row_ptr.conflict != .none;
 }
 
+fn validateSnapshot(snapshot: Snapshot) !void {
+    for (snapshot.entries, 0..) |entry, index| {
+        _ = entry;
+        for (snapshot.entries[index + 1 ..]) |later| {
+            if (sameEntry(snapshot.entries[index].identity, later.identity)) return error.DuplicateIdentity;
+        }
+    }
+}
+
+fn observationMatches(base: Observation, latest: SnapshotEntry) bool {
+    return sameEntry(base.identity, latest.identity) and
+        std.mem.eql(u8, base.revision, latest.revision) and
+        std.mem.eql(u8, base.name, latest.name) and
+        base.kind == latest.kind and
+        base.mode == latest.mode;
+}
+
 fn cloneObservation(gpa: std.mem.Allocator, entry: SnapshotEntry) !Observation {
-    return .{ .identity = entry.identity, .revision = try gpa.dupe(u8, entry.revision), .name = try gpa.dupe(u8, entry.name), .kind = entry.kind, .mode = entry.mode };
+    var observation = Observation{ .identity = entry.identity, .revision = &.{}, .name = &.{}, .kind = entry.kind, .mode = entry.mode };
+    errdefer freeObservationWith(gpa, &observation);
+    observation.revision = try gpa.dupe(u8, entry.revision);
+    observation.name = try gpa.dupe(u8, entry.name);
+    return observation;
 }
 
 fn draftFrom(gpa: std.mem.Allocator, entry: SnapshotEntry) !Draft {
-    return .{ .name = try gpa.dupe(u8, entry.name), .kind = entry.kind, .mode = entry.mode, .contents = try gpa.dupe(u8, entry.contents), .link_target = try gpa.dupe(u8, entry.link_target) };
+    var draft = Draft{ .name = &.{}, .kind = entry.kind, .mode = entry.mode, .contents = &.{}, .link_target = &.{} };
+    errdefer freeDraftWith(gpa, &draft);
+    draft.name = try gpa.dupe(u8, entry.name);
+    draft.contents = try gpa.dupe(u8, entry.contents);
+    draft.link_target = try gpa.dupe(u8, entry.link_target);
+    return draft;
 }
 
 fn freeObservationWith(gpa: std.mem.Allocator, observation: *const Observation) void {
@@ -587,7 +645,7 @@ fn collect(model: *const Model, id: NodeId, nodes: *std.ArrayList(NodeId)) !void
     for (model.rows.items) |row| if (row.parent == id) try collect(model, row.id, nodes);
 }
 
-fn encodeEntry(gpa: std.mem.Allocator, root: contract.Root, entry_ref: contract.EntryRef, revision: []const u8) ![]u8 {
+fn encodeEntry(gpa: std.mem.Allocator, root: contract.Root, entry_ref: contract.EntryRef, revision: []const u8, kind: contract.Kind, mode: ?u32) ![]u8 {
     if (revision.len > max_transfer_revision) return error.TransferTooLarge;
     var bytes: std.ArrayList(u8) = .empty;
     errdefer bytes.deinit(gpa);
@@ -595,6 +653,9 @@ fn encodeEntry(gpa: std.mem.Allocator, root: contract.Root, entry_ref: contract.
     try putHandle(gpa, &bytes, root.authority, root.slot, root.generation);
     try putHandle(gpa, &bytes, entry_ref.authority, entry_ref.slot, entry_ref.generation);
     try putBytes(gpa, &bytes, revision, max_transfer_revision);
+    try bytes.append(gpa, @intFromEnum(kind));
+    try bytes.append(gpa, if (mode != null) 1 else 0);
+    try putU32(gpa, &bytes, mode orelse 0);
     if (bytes.items.len > max_transfer_payload) return error.TransferTooLarge;
     return bytes.toOwnedSlice(gpa);
 }
@@ -605,22 +666,36 @@ fn decodeEntry(payload: []const u8) !EntryCapture {
     const root = try getRoot(payload, &cursor);
     const entry_ref = try getEntry(payload, &cursor);
     const revision = try getBytes(payload, &cursor, max_transfer_revision);
+    const raw_kind = try getU8(payload, &cursor);
+    if (raw_kind > @intFromEnum(contract.Kind.other)) return error.InvalidTransfer;
+    const has_mode = try getU8(payload, &cursor);
+    if (has_mode > 1) return error.InvalidTransfer;
+    const mode = try getU32(payload, &cursor);
     if (cursor != payload.len) return error.InvalidTransfer;
-    return .{ .root = root, .entry = entry_ref, .revision = revision };
+    return .{ .root = root, .entry = entry_ref, .revision = revision, .kind = @enumFromInt(raw_kind), .mode = if (has_mode == 0) null else mode };
 }
 
 fn putHandle(gpa: std.mem.Allocator, bytes: *std.ArrayList(u8), authority: kernel.handle.Authority, slot: u32, generation: u32) !void {
+    if (generation == 0) return error.InvalidTransfer;
     try putU32(gpa, bytes, @intFromEnum(authority));
     try putU32(gpa, bytes, slot);
     try putU32(gpa, bytes, generation);
 }
 
 fn getRoot(payload: []const u8, cursor: *usize) !contract.Root {
-    return .{ .authority = @enumFromInt(try getU32(payload, cursor)), .slot = try getU32(payload, cursor), .generation = try getU32(payload, cursor) };
+    const authority = try getU32(payload, cursor);
+    const slot = try getU32(payload, cursor);
+    const generation = try getU32(payload, cursor);
+    if (generation == 0) return error.InvalidTransfer;
+    return .{ .authority = @enumFromInt(authority), .slot = slot, .generation = generation };
 }
 
 fn getEntry(payload: []const u8, cursor: *usize) !contract.EntryRef {
-    return .{ .authority = @enumFromInt(try getU32(payload, cursor)), .slot = try getU32(payload, cursor), .generation = try getU32(payload, cursor) };
+    const authority = try getU32(payload, cursor);
+    const slot = try getU32(payload, cursor);
+    const generation = try getU32(payload, cursor);
+    if (generation == 0) return error.InvalidTransfer;
+    return .{ .authority = @enumFromInt(authority), .slot = slot, .generation = generation };
 }
 
 fn putU32(gpa: std.mem.Allocator, bytes: *std.ArrayList(u8), value: u32) !void {
@@ -651,6 +726,7 @@ fn getU32(payload: []const u8, cursor: *usize) !u32 {
 
 fn getBytes(payload: []const u8, cursor: *usize, limit: usize) ![]const u8 {
     const length = try getU32(payload, cursor);
+    if (cursor.* > payload.len) return error.InvalidTransfer;
     if (length > limit or length > payload.len - cursor.*) return error.InvalidTransfer;
     const value = payload[cursor.*..][0..length];
     cursor.* += length;
@@ -699,16 +775,40 @@ test "owned copy and cut transfers work in same and different instances" {
 test "paste rows are visible and plan follows edited destination draft" {
     var source = Model.init(std.testing.allocator, .{ .authority = .here, .slot = 0, .generation = 1 });
     defer source.deinit();
-    try source.reconcile(.{ .entries = &.{.{ .identity = ref(2, 1), .name = "old", .revision = "rev", .kind = .regular }} });
+    try source.reconcile(.{ .entries = &.{.{ .identity = ref(2, 1), .name = "old", .revision = "rev", .kind = .regular, .mode = 0o600 }} });
     var item = try source.yank(source.rows.items[0].id, .copy);
     defer item.deinit();
     var destination = Model.init(std.testing.allocator, source.root);
     defer destination.deinit();
     const copied = try destination.paste(null, &item);
+    try std.testing.expectEqual(contract.Kind.regular, destination.row(copied).?.draft.kind);
+    try std.testing.expectEqual(@as(?u32, 0o600), destination.row(copied).?.draft.mode);
     try destination.rename(copied, "edited");
     var plan = try destination.buildPlan();
     defer plan.deinit();
     try std.testing.expectEqualStrings("edited", plan.value.operations[0].operation.copy.destination.name.bytes);
+    try std.testing.expectEqual(source.root, plan.value.operations[0].operation.copy.source.entry.root);
+}
+
+test "dirty external mutation is stale and duplicate snapshots are rejected transactionally" {
+    var model = Model.init(std.testing.allocator, .{ .authority = .here, .slot = 0, .generation = 1 });
+    defer model.deinit();
+    try model.reconcile(.{ .entries = &.{.{ .identity = ref(21, 1), .name = "base", .revision = "r1", .kind = .regular, .mode = 0o644 }} });
+    const id = model.rows.items[0].id;
+    try model.rename(id, "draft");
+    try model.reconcile(.{ .entries = &.{.{ .identity = ref(21, 1), .name = "external", .revision = "r2", .kind = .directory, .mode = 0 }} });
+    try std.testing.expectEqual(Conflict.stale, model.row(id).?.conflict);
+    try std.testing.expectEqualStrings("external", model.row(id).?.current.?.name);
+    try std.testing.expectEqualStrings("draft", model.row(id).?.draft.name);
+
+    const before_rows = model.rows.items.len;
+    const before_next = model.next_id;
+    try std.testing.expectError(error.DuplicateIdentity, model.reconcile(.{ .entries = &.{
+        .{ .identity = ref(30, 1), .name = "one", .revision = "a", .kind = .regular },
+        .{ .identity = ref(30, 1), .name = "two", .revision = "b", .kind = .regular },
+    } }));
+    try std.testing.expectEqual(before_rows, model.rows.items.len);
+    try std.testing.expectEqual(before_next, model.next_id);
 }
 
 test "captured transfer keeps old name across source rename or deletion" {
@@ -728,6 +828,21 @@ test "captured transfer keeps old name across source rename or deletion" {
     try source.reconcile(.{ .entries = &.{} });
     const pasted_after_delete = try destination.paste(null, &deleted_item);
     try std.testing.expectEqualStrings("new", destination.row(pasted_after_delete).?.draft.name);
+}
+
+test "foreign source root remains explicit in copied effect" {
+    var source = Model.init(std.testing.allocator, .{ .authority = .here, .slot = 11, .generation = 1 });
+    defer source.deinit();
+    try source.reconcile(.{ .entries = &.{.{ .identity = ref(22, 1), .name = "foreign", .revision = "r", .kind = .regular }} });
+    var item = try source.yank(source.rows.items[0].id, .copy);
+    defer item.deinit();
+    var destination = Model.init(std.testing.allocator, .{ .authority = .here, .slot = 33, .generation = 1 });
+    defer destination.deinit();
+    _ = try destination.paste(null, &item);
+    var plan = try destination.buildPlan();
+    defer plan.deinit();
+    try std.testing.expectEqual(@as(u32, 11), plan.value.operations[0].operation.copy.source.entry.root.slot);
+    try std.testing.expectEqual(@as(u32, 33), plan.value.root.slot);
 }
 
 test "rename delete permissions and mode zero build guarded plans" {
@@ -769,13 +884,15 @@ test "pending subtree paste survives deletion, preserves symlink and planned par
     defer model.deinit();
     const directory = try model.addDirectory(null, "tree", @as(?u32, 0));
     _ = try model.addSymlink(directory, "link", "target");
+    const nested = try model.addDirectory(directory, "nested", null);
+    _ = try model.addFile(nested, "leaf", "contents", null);
     var item = try model.yank(directory, .copy);
     defer item.deinit();
     try model.markDelete(directory);
     _ = try model.paste(null, &item);
     var plan = try model.buildPlan();
     defer plan.deinit();
-    try std.testing.expectEqual(@as(usize, 2), plan.value.operations.len);
+    try std.testing.expectEqual(@as(usize, 4), plan.value.operations.len);
     try std.testing.expectEqual(@as(?u32, 0), plan.value.operations[0].operation.create_directory.mode);
     try std.testing.expect(plan.value.operations[1].depends_on.len == 1);
     try std.testing.expect(std.meta.activeTag(plan.value.operations[1].operation) == .create_symlink);
@@ -809,6 +926,70 @@ test "malformed and oversized transfer payloads are rejected" {
     var oversized = try transfer.OwnedItem.init(std.testing.allocator, .{ .intent = .copy, .representations = &huge_reps });
     defer oversized.deinit();
     try std.testing.expectError(error.InvalidTransfer, model.paste(null, &oversized));
+
+    const directory = try model.addDirectory(null, "tree", null);
+    var valid_tree = try model.yank(directory, .copy);
+    defer valid_tree.deinit();
+    const tree_payload = valid_tree.value.representations[0].payload;
+    const before_rows = model.rows.items.len;
+    const before_next = model.next_id;
+    const malformed_payload = try std.testing.allocator.alloc(u8, tree_payload.len + 1);
+    defer std.testing.allocator.free(malformed_payload);
+    @memcpy(malformed_payload[0..tree_payload.len], tree_payload);
+    malformed_payload[tree_payload.len] = 0xff;
+    const malformed_reps = [_]transfer.Representation{.{ .media_type = tree_media, .schema = tree_schema, .payload = malformed_payload }};
+    var malformed = try transfer.OwnedItem.init(std.testing.allocator, .{ .intent = .copy, .suggested_name = "tree", .representations = &malformed_reps });
+    defer malformed.deinit();
+    try std.testing.expectError(error.InvalidTransfer, model.paste(null, &malformed));
+    try std.testing.expectEqual(before_rows, model.rows.items.len);
+    try std.testing.expectEqual(before_next, model.next_id);
+
+    const invalid_mode_payload = try std.testing.allocator.dupe(u8, tree_payload);
+    defer std.testing.allocator.free(invalid_mode_payload);
+    invalid_mode_payload[tree_magic.len + 9] = 2;
+    const invalid_mode_reps = [_]transfer.Representation{.{ .media_type = tree_media, .schema = tree_schema, .payload = invalid_mode_payload }};
+    var invalid_mode = try transfer.OwnedItem.init(std.testing.allocator, .{ .intent = .copy, .suggested_name = "tree", .representations = &invalid_mode_reps });
+    defer invalid_mode.deinit();
+    try std.testing.expectError(error.InvalidTransfer, model.paste(null, &invalid_mode));
+    try std.testing.expectEqual(before_rows, model.rows.items.len);
+    try std.testing.expectEqual(before_next, model.next_id);
+
+    var forest: std.ArrayList(u8) = .empty;
+    defer forest.deinit(std.testing.allocator);
+    try forest.appendSlice(std.testing.allocator, tree_magic);
+    try putU32(std.testing.allocator, &forest, 2);
+    try putU32(std.testing.allocator, &forest, no_parent);
+    try forest.append(std.testing.allocator, @intFromEnum(contract.Kind.directory));
+    try forest.append(std.testing.allocator, 0);
+    try putU32(std.testing.allocator, &forest, 0);
+    try putBytes(std.testing.allocator, &forest, "root", max_transfer_name);
+    try putBytes(std.testing.allocator, &forest, &.{}, max_transfer_payload);
+    try putBytes(std.testing.allocator, &forest, &.{}, max_transfer_payload);
+    try putU32(std.testing.allocator, &forest, no_parent);
+    try forest.append(std.testing.allocator, @intFromEnum(contract.Kind.regular));
+    try forest.append(std.testing.allocator, 0);
+    try putU32(std.testing.allocator, &forest, 0);
+    try putBytes(std.testing.allocator, &forest, "child", max_transfer_name);
+    try putBytes(std.testing.allocator, &forest, &.{}, max_transfer_payload);
+    try putBytes(std.testing.allocator, &forest, &.{}, max_transfer_payload);
+    const forest_payload = try forest.toOwnedSlice(std.testing.allocator);
+    defer std.testing.allocator.free(forest_payload);
+    const forest_reps = [_]transfer.Representation{.{ .media_type = tree_media, .schema = tree_schema, .payload = forest_payload }};
+    var forest_item = try transfer.OwnedItem.init(std.testing.allocator, .{ .intent = .copy, .suggested_name = "root", .representations = &forest_reps });
+    defer forest_item.deinit();
+    try std.testing.expectError(error.InvalidTransfer, model.paste(null, &forest_item));
+
+    try model.reconcile(.{ .entries = &.{.{ .identity = ref(40, 1), .name = "entry", .revision = "r", .kind = .regular }} });
+    var valid_entry = try model.yank(model.rowForIdentity(ref(40, 1)).?, .copy);
+    defer valid_entry.deinit();
+    const entry_payload = valid_entry.value.representations[0].payload;
+    const invalid_generation_payload = try std.testing.allocator.dupe(u8, entry_payload);
+    defer std.testing.allocator.free(invalid_generation_payload);
+    std.mem.writeInt(u32, invalid_generation_payload[entry_magic.len + 8 ..][0..4], 0, .little);
+    const invalid_generation_reps = [_]transfer.Representation{.{ .media_type = entry_media, .schema = entry_schema, .payload = invalid_generation_payload }};
+    var invalid_generation = try transfer.OwnedItem.init(std.testing.allocator, .{ .intent = .copy, .suggested_name = "entry", .representations = &invalid_generation_reps });
+    defer invalid_generation.deinit();
+    try std.testing.expectError(error.InvalidTransfer, model.paste(null, &invalid_generation));
 }
 
 test "build plan rejects missing parent, non-directory parent, and cycles" {
