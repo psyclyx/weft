@@ -18,6 +18,9 @@ pub const snail = @import("snail");
 // in build.zig (src/weft.zig barrel) — no `../` reach-arounds across the tree.
 const weft = @import("weft");
 pub const core = weft.core;
+pub const semantic_model = weft.semantic_model;
+pub const view_runtime = weft.view_runtime;
+pub const target_runtime = weft.target_runtime;
 const view_mod = weft.view;
 const harness = weft.gfx_harness;
 pub const window_layout = weft.window_layout;

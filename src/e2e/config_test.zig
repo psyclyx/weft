@@ -15,6 +15,9 @@ const harness = h.gfx_harness;
 const app_providers = h.app_providers;
 const app_session = h.app_session;
 const app_collab = h.app_collab;
+const semantic = h.semantic_model;
+const view_runtime = h.view_runtime;
+const target_runtime = h.target_runtime;
 
 const Editor = h.Editor;
 const Loopback = h.Loopback;
@@ -36,6 +39,120 @@ const drainUntilOracle = h.drainUntilOracle;
 const tmpPath = h.tmpPath;
 const socketPair = h.socketPair;
 const napUs = h.napUs;
+
+const ConfigField = struct {
+    snapshot_calls: usize = 0,
+
+    pub fn snapshot(self: *ConfigField, gpa: std.mem.Allocator) view_runtime.field.Error!view_runtime.field.OwnedSnapshot {
+        self.snapshot_calls += 1;
+        var owned = view_runtime.field.OwnedSnapshot.init(gpa);
+        errdefer owned.deinit();
+        const arena = owned.allocator();
+        owned.value = .{
+            .revision = try arena.dupe(u8, "1"),
+            .bytes = try arena.dupe(u8, "name"),
+            .selection = .{ .anchor = 0, .caret = 4 },
+            .single_line = true,
+        };
+        return owned;
+    }
+
+    pub fn edit(_: *ConfigField, _: []const u8, _: view_runtime.field.Edit) view_runtime.field.Error!void {
+        return error.Unsupported;
+    }
+};
+
+const ConfigActions = struct {
+    view: semantic.view.Ref = undefined,
+    edit_requests: usize = 0,
+    copies: usize = 0,
+    cuts: usize = 0,
+    deletes: usize = 0,
+    paste_before: usize = 0,
+    paste_after: usize = 0,
+    refreshes: usize = 0,
+    reverts: usize = 0,
+    applies: usize = 0,
+    confirms: usize = 0,
+
+    pub fn invoke(self: *ConfigActions, request: semantic.action.Request) view_runtime.action.ProviderError!semantic.action.Outcome {
+        const action = request.action;
+        if (std.mem.eql(u8, action, semantic.action.standard.edit)) {
+            self.edit_requests += 1;
+            return .declined; // generic field endpoint remains the fallback
+        }
+        if (std.mem.eql(u8, action, semantic.action.standard.copy) or
+            std.mem.eql(u8, action, semantic.action.standard.cut))
+        {
+            const is_cut = std.mem.eql(u8, action, semantic.action.standard.cut);
+            if (is_cut) self.cuts += 1 else self.copies += 1;
+            return .{ .transfer = .{
+                .intent = if (is_cut) .cut else .copy,
+                .suggested_name = "captured",
+                .representations = &.{.{ .media_type = "application/x-weft-config-fixture", .payload = "value" }},
+            } };
+        }
+        if (std.mem.eql(u8, action, semantic.action.standard.paste_before) or
+            std.mem.eql(u8, action, semantic.action.standard.paste_after))
+        {
+            if (request.transfer == null) return error.Failed;
+            if (std.mem.eql(u8, action, semantic.action.standard.paste_before))
+                self.paste_before += 1
+            else
+                self.paste_after += 1;
+            return .handled;
+        }
+        if (std.mem.eql(u8, action, semantic.action.standard.delete)) {
+            self.deletes += 1;
+            return .handled;
+        }
+        if (std.mem.eql(u8, action, semantic.action.standard.refresh)) {
+            self.refreshes += 1;
+            return .handled;
+        }
+        if (std.mem.eql(u8, action, semantic.action.standard.revert)) {
+            self.reverts += 1;
+            return .handled;
+        }
+        if (std.mem.eql(u8, action, semantic.action.standard.apply)) {
+            self.applies += 1;
+            return .{ .interaction = .{
+                .role = .dialog,
+                .view = self.view,
+                .root = @enumFromInt(1),
+                .actions = &.{
+                    .{ .id = semantic.action.standard.confirm, .label = "Apply", .disposition = .close_on_handled },
+                    .{ .id = semantic.action.standard.cancel, .label = "Cancel", .disposition = .close_on_handled },
+                },
+                .bindings = &.{
+                    .{ .input = "y", .action = semantic.action.standard.confirm },
+                    .{ .input = "n", .action = semantic.action.standard.cancel },
+                },
+                .presentation = "config-fixture",
+            } };
+        }
+        if (std.mem.eql(u8, action, semantic.action.standard.confirm)) {
+            self.confirms += 1;
+            return .handled;
+        }
+        if (std.mem.eql(u8, action, semantic.action.standard.cancel)) return .handled;
+        return .declined;
+    }
+};
+
+const ConfigTargetHandler = struct {
+    view: semantic.view.Ref,
+    opens: usize = 0,
+
+    pub fn probe(_: *ConfigTargetHandler, _: semantic.target.Descriptor) target_runtime.resolver.ProbeError!?target_runtime.resolver.Strength {
+        return .exact;
+    }
+
+    pub fn open(self: *ConfigTargetHandler, _: semantic.target.Located) target_runtime.resolver.OpenError!semantic.view.Ref {
+        self.opens += 1;
+        return self.view;
+    }
+};
 
 // ── Driving the REAL config as a user (chords + which-key) ──────────
 //
@@ -97,13 +214,12 @@ test "e2e/config: the sample config boots; SPC g i is discoverable via which-key
     try t.expectEqualStrings("", ed.head.pending);
 
     // Structured views use the same generic semantic action commands from
-    // config: no dired-specific keymap or dispatch branch is needed.  The
-    // names are visible through which-key, which also proves the config can
-    // exercise focus, field, transfer, target, and view-lifecycle intents.
+    // config: no dired-specific keymap or dispatch branch is needed. The
+    // non-baseline names are visible through which-key. (The plugin
+    // intentionally filters ordinary cursor movement from its hints.)
     ed.press("SPC", "");
     ed.press("v", "");
     try t.expectEqualStrings("space v", ed.head.pending);
-    try t.expect(whichKeyShows(&ed, "cursor-down"));
     try t.expect(whichKeyShows(&ed, "field-edit"));
     try t.expect(whichKeyShows(&ed, "selection-copy"));
     try t.expect(whichKeyShows(&ed, "selection-cut"));
@@ -115,6 +231,122 @@ test "e2e/config: the sample config boots; SPC g i is discoverable via which-key
     try t.expect(whichKeyShows(&ed, "view-revert"));
     try t.expect(whichKeyShows(&ed, "view-apply"));
     ed.press("Escape", "");
+
+    // Assert the complete config surface directly, including the cursor
+    // commands which which-key classifies as noise. This is the public
+    // integration contract: config can name every intent as an ordinary
+    // command, while the focused scene/provider decides whether to handle it.
+    const structured_view_bindings = [_]struct { sequence: []const u8, command: []const u8 }{
+        .{ .sequence = "space v j", .command = "cursor-down" },
+        .{ .sequence = "space v k", .command = "cursor-up" },
+        .{ .sequence = "space v o", .command = "target-open-focused" },
+        .{ .sequence = "space v e", .command = "field-edit" },
+        .{ .sequence = "space v y", .command = "selection-copy" },
+        .{ .sequence = "space v x", .command = "selection-cut" },
+        .{ .sequence = "space v d", .command = "selection-delete" },
+        .{ .sequence = "space v p", .command = "selection-paste-after" },
+        .{ .sequence = "space v P", .command = "selection-paste-before" },
+        .{ .sequence = "space v r", .command = "view-refresh" },
+        .{ .sequence = "space v R", .command = "view-revert" },
+        .{ .sequence = "space v a", .command = "view-apply" },
+    };
+    for (structured_view_bindings) |binding| {
+        try t.expectEqualStrings(binding.command, ed.keymap.resolveExact("normal", binding.sequence).?);
+    }
+
+    // Now drive those bindings against a real retained scene. This fixture is
+    // intentionally generic: it owns fields, actions, a target link, and an
+    // interaction, but has no directory/file/Vim branch. The sample config is
+    // therefore proving the same path any tool plugin receives.
+    var field: ConfigField = .{};
+    const semantic_services = &ed.session.system.semantic;
+    const owner = try semantic_services.acquireOwner();
+    const field_ref = try semantic_services.insertField(gpa, owner, .init(&field));
+    const target_ref = try semantic_services.publishTarget(gpa, owner, .{
+        .kind = .{ .synthetic = "config-fixture" },
+        .display_name = "config fixture target",
+    });
+    const target_view = try semantic_services.publishView(gpa, owner, target_ref, 1, .{
+        .id = @enumFromInt(100),
+        .focusable = true,
+        .content = .{ .label = "opened target" },
+    });
+    var target_handler: ConfigTargetHandler = .{ .view = target_view };
+    _ = try semantic_services.registerTargetHandler(gpa, owner, "config-fixture", .init(&target_handler));
+
+    const field_node: semantic.scene.Node = .{
+        .id = @enumFromInt(3),
+        .focusable = true,
+        .target = .{ .target = target_ref, .revision = 1, .location = .{ .node = "config" } },
+        .content = .{ .field = .{ .ref = field_ref, .single_line = true } },
+    };
+    const row_actions = [_]semantic.scene.Action{
+        .{ .id = semantic.action.standard.open },
+        .{ .id = semantic.action.standard.edit },
+        .{ .id = semantic.action.standard.copy },
+        .{ .id = semantic.action.standard.cut },
+        .{ .id = semantic.action.standard.delete },
+        .{ .id = semantic.action.standard.paste_before },
+        .{ .id = semantic.action.standard.paste_after },
+    };
+    const first_row: semantic.scene.Node = .{
+        .id = @enumFromInt(2),
+        .actions = &row_actions,
+        .content = .{ .container = .{ .children = &.{field_node} } },
+    };
+    const second_row: semantic.scene.Node = .{
+        .id = @enumFromInt(4),
+        .focusable = true,
+        .content = .{ .label = "second row" },
+    };
+    const root_actions = [_]semantic.scene.Action{
+        .{ .id = semantic.action.standard.refresh },
+        .{ .id = semantic.action.standard.revert },
+        .{ .id = semantic.action.standard.apply },
+    };
+    const fixture_view = try semantic_services.publishView(gpa, owner, null, 1, .{
+        .id = @enumFromInt(1),
+        .actions = &root_actions,
+        .content = .{ .container = .{ .children = &.{ first_row, second_row } } },
+    });
+    var actions: ConfigActions = .{ .view = fixture_view };
+    try semantic_services.registerActionProvider(gpa, owner, .init(&actions));
+    _ = try semantic_services.focusView(ed.head, gpa, fixture_view, field_node.id);
+
+    ed.chord("SPC v j");
+    try t.expectEqual(second_row.id, ed.head.semantic_focus.path().?.leaf().?);
+    ed.chord("SPC v k");
+    try t.expectEqual(field_node.id, ed.head.semantic_focus.path().?.leaf().?);
+    ed.chord("SPC v e");
+    try t.expectEqual(@as(usize, 1), actions.edit_requests);
+    try t.expectEqual(@as(usize, 1), field.snapshot_calls);
+    try t.expectEqualStrings("normal", ed.head.currentMode());
+
+    ed.chord("SPC v y");
+    ed.chord("SPC v p");
+    ed.chord("SPC v x");
+    ed.chord("SPC v P");
+    ed.chord("SPC v d");
+    try t.expectEqual(@as(usize, 1), actions.copies);
+    try t.expectEqual(@as(usize, 1), actions.cuts);
+    try t.expectEqual(@as(usize, 1), actions.paste_after);
+    try t.expectEqual(@as(usize, 1), actions.paste_before);
+    try t.expectEqual(@as(usize, 1), actions.deletes);
+
+    ed.chord("SPC v r");
+    ed.chord("SPC v R");
+    ed.chord("SPC v a");
+    try t.expectEqual(@as(usize, 1), actions.refreshes);
+    try t.expectEqual(@as(usize, 1), actions.reverts);
+    try t.expectEqual(@as(usize, 1), actions.applies);
+    try t.expectEqualStrings("config-fixture", ed.head.interactions.active().?.descriptor.presentation);
+    ed.press("y", "y");
+    try t.expectEqual(@as(usize, 1), actions.confirms);
+    try t.expect(ed.head.interactions.active() == null);
+
+    ed.chord("SPC v o");
+    try t.expectEqual(@as(usize, 1), target_handler.opens);
+    try t.expectEqual(target_view, ed.head.semantic_focus.path().?.view);
 
     // SPC : must open the command PALETTE (pick-commands), not the ex line.
     // Typing `:` needs Shift, and a real keyboard sends that Shift_L press as its
