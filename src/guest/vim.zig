@@ -294,6 +294,7 @@ const static_cmds = [_]Cmd{
     .{ .name = "yank-line", .handler = yankLine },
     .{ .name = "paste", .handler = paste },
     .{ .name = "paste-before", .handler = pasteBefore },
+    .{ .name = "vim-open-focused", .handler = openFocused },
     .{ .name = "vim-open-container", .handler = openContainer },
     .{ .name = "join-lines", .handler = joinLines },
     .{ .name = "enter-op-delete", .handler = enterOpDelete },
@@ -440,6 +441,7 @@ export fn init() void {
         .{ "u", "undo" },                   .{ "C-r", "redo" },
         .{ "v", "vim-visual" },             .{ "Y", "yank-line" },
         .{ "p", "paste" },                  .{ "P", "paste-before" },
+        .{ "Return", "vim-open-focused" },  .{ "KP_Enter", "vim-open-focused" },
         .{ "minus", "vim-open-container" }, .{ "d", "enter-op-delete" },
         .{ "c", "enter-op-change" },        .{ "y", "enter-op-yank" },
     };
@@ -741,6 +743,25 @@ fn semanticDid(action: []const u8) bool {
         .handled, .transfer_stored, .interaction_opened, .target_opened, .focus_changed, .relation_opened => true,
         .unavailable, .failed, _ => false,
     };
+}
+
+/// Return follows the nearest typed target on a structured view. Core owns
+/// target resolution and handler choice, so Vim sees neither target kind nor
+/// provider identity. Outside a structured view this is Vim's ordinary `+`
+/// motion: next line, first non-blank.
+fn openFocused() void {
+    if (weft.semanticActive()) {
+        weft.run("target-open-focused");
+        return;
+    }
+    const down = weft.runRange("motion.down") orelse return;
+    const down_range = weft.rangeEnds(down) orelse return;
+    const current = weft.cursor();
+    weft.jump(if (down_range.end == current) down_range.start else down_range.end);
+    const first = weft.runRange("motion.first-non-blank") orelse return;
+    const first_range = weft.rangeEnds(first) orelse return;
+    const after_down = weft.cursor();
+    weft.jump(if (first_range.end == after_down) first_range.start else first_range.end);
 }
 
 /// `-` is action-first on a structured view and retains Vim's ordinary

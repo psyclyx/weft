@@ -277,6 +277,40 @@ test "dired: semantic field editing keeps the view focused and returns to normal
     try t.expectEqualStrings("xnote.txt", after.value.bytes);
 }
 
+test "dired: Vim Return and minus follow generic target relations" {
+    const gpa = t.allocator;
+    var app: App = undefined;
+    try app.init(gpa);
+    defer app.deinit();
+    const ed = &app.ed;
+
+    try core.file.writeBytesMakingDirs(gpa, "child", "child/note.txt", "hello\n");
+    ed.runStr("open", ".");
+    const parent_view = ed.head.semantic_focus.path().?.view;
+    const parent = ed.session.system.semantic.views.get(parent_view).?;
+    var child_name: ?semantic.scene.NodeId = null;
+    for (parent.scene.content.container.children) |row| {
+        const node = row.content.container.children[2];
+        var snapshot = try ed.session.system.semantic.fields.get(node.content.field.ref).?.snapshot(gpa);
+        defer snapshot.deinit();
+        if (std.mem.eql(u8, snapshot.value.bytes, "child")) child_name = node.id;
+    }
+    _ = try ed.session.system.semantic.focusView(ed.head, gpa, parent_view, child_name orelse return error.TestExpectedEqual);
+
+    // Vim supplies only its ordinary Return interaction. Core follows the
+    // focused typed link and the directory plugin happens to claim the target.
+    ed.press("Return", "");
+    const child_view = ed.head.semantic_focus.path().?.view;
+    try t.expect(!child_view.eql(parent_view));
+    try t.expectEqualStrings("dired", ed.session.system.semantic.views.get(child_view).?.scene.role);
+
+    // `-` likewise follows the open `container` relation. The child target's
+    // publisher supplies that edge; Vim and dired do not import one another.
+    ed.press("minus", "");
+    try t.expectEqual(parent_view, ed.head.semantic_focus.path().?.view);
+    try t.expectEqualStrings("normal", ed.mode());
+}
+
 test "authoring: switching back to an open file lands in an editable mode" {
     const gpa = t.allocator;
     var app: App = undefined;
