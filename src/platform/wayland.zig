@@ -70,6 +70,7 @@ pub const Window = struct {
     buffer_scale: u32 = 1,
     resize_state: resize.State,
     outputs: [max_outputs]OutputInfo = [_]OutputInfo{.{}} ** max_outputs,
+    initial_configured: bool = false,
     resized: bool = false,
     close_requested: bool = false,
     focused: bool = true,
@@ -427,6 +428,7 @@ fn xdgSurfaceConfigure(data: ?*anyopaque, xdg_surface: ?*c.xdg_surface, serial: 
     // resize has been applied.
     c.xdg_surface_ack_configure(xdg_surface.?, serial);
     const decision = self.resize_state.surfaceConfigure();
+    self.initial_configured = true;
     self.width = decision.extent.width;
     self.height = decision.extent.height;
     if (decision.extent_changed) self.resized = true;
@@ -457,11 +459,19 @@ fn xdgToplevelConfigure(
     // A zero extent is retained as an explicit minimized state.  A later
     // positive configure restores it; state-only configures are represented
     // by the reducer's null extent and do not disturb framebuffer geometry.
-    const extent: resize.Extent = .{
-        .width = if (width > 0) @intCast(width) else 0,
-        .height = if (height > 0) @intCast(height) else 0,
-    };
-    self.resize_state.toplevelConfigure(.{ .extent = extent });
+    // Initial xdg-shell configures commonly carry (0, 0) to say “client
+    // chooses”; retain the requested startup size until that first surface
+    // configure is acknowledged. After startup, zero is the explicit
+    // minimized extent handled by the reducer.
+    if (!self.initial_configured and width <= 0 and height <= 0) {
+        self.resize_state.toplevelConfigure(.{});
+    } else {
+        const extent: resize.Extent = .{
+            .width = if (width > 0) @intCast(width) else 0,
+            .height = if (height > 0) @intCast(height) else 0,
+        };
+        self.resize_state.toplevelConfigure(.{ .extent = extent });
+    }
 }
 
 fn xdgToplevelClose(data: ?*anyopaque, _: ?*c.xdg_toplevel) callconv(.c) void {
