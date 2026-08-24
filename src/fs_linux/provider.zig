@@ -56,14 +56,26 @@ pub const LinuxFs = struct {
         birth_sec: i64,
         birth_nsec: u32,
 
-        fn eql(a: Identity, b: Identity) bool {
+        /// A `(device, mount, inode)` tuple is useful for reasoning about
+        /// already-open descriptors, but it is not proof that two path
+        /// lookups named the same object: inode reuse can make a replacement
+        /// look identical when the filesystem does not provide birth time.
+        fn locationEql(a: Identity, b: Identity) bool {
             return a.dev_major == b.dev_major and
                 a.dev_minor == b.dev_minor and
                 a.mount_id == b.mount_id and
-                a.inode == b.inode and
-                a.has_birth_time == b.has_birth_time and
-                (!a.has_birth_time or
-                    (a.birth_sec == b.birth_sec and a.birth_nsec == b.birth_nsec));
+                a.inode == b.inode;
+        }
+
+        /// Exact object identity is intentionally unavailable when either
+        /// statx result lacks BTIME. We do not retain one fd per entry just to
+        /// manufacture that guarantee; callers must report stale/ambiguous
+        /// instead of accepting an unprovable replacement.
+        fn eql(a: Identity, b: Identity) bool {
+            return a.has_birth_time and b.has_birth_time and
+                a.locationEql(b) and
+                a.birth_sec == b.birth_sec and
+                a.birth_nsec == b.birth_nsec;
         }
     };
 
@@ -269,20 +281,33 @@ pub const LinuxFs = struct {
 
         const finish = try statFd(resolved.fd);
         if (!sameRevision(finish, start)) return error.Stale;
-        const refs = try self.reconcileDirectory(arena, root, directory, pending.items);
         const entries = try arena.alloc(contract.DirEntry, pending.items.len);
-        for (pending.items, refs, entries) |candidate, entry_ref, *entry| {
+        const entry_revisions = try arena.alloc([revision_len]u8, pending.items.len);
+        for (pending.items, entry_revisions) |candidate, *revision| revision.* = revisionBytes(&candidate.snapshot);
+        const directory_revision = try arena.create([revision_len]u8);
+        directory_revision.* = revisionBytes(&finish);
+
+        // Every allocation needed to publish the listing is complete before
+        // reconciliation can invalidate or reuse an entry slot. The commit
+        // loop below only assigns preallocated values and cannot fail.
+        const refs = try self.reconcileDirectory(arena, root, directory, pending.items);
+        for (pending.items, refs, entry_revisions, entries) |candidate, entry_ref, *revision, *entry| {
             entry.* = .{
                 .name = contract.Name.init(candidate.name) catch unreachable,
-                .observation = try self.observationValue(
-                    arena,
+                .observation = self.observationWithRevision(
                     .{ .entry = entry_ref },
                     candidate.snapshot,
                     candidate.link_target,
+                    revision[0..],
                 ),
             };
         }
-        const directory_observation = try self.observation(arena, directory, finish, null, null);
+        const directory_observation = self.observationWithRevision(
+            directory,
+            finish,
+            null,
+            directory_revision[0..],
+        );
         owned.value = .{
             .directory = directory_observation,
             .revision = directory_observation.revision,
@@ -522,7 +547,7 @@ pub const LinuxFs = struct {
 
         if (resolved.snapshot.kind == .directory) {
             const same_namespace = source.root.eql(destination_root) or
-                (try self.rootState(source.root)).identity.eql((try self.rootState(destination_root)).identity);
+                (try self.rootState(source.root)).identity.locationEql((try self.rootState(destination_root)).identity);
             if (!same_namespace) return error.Unsupported;
             if (try self.wouldCycle(destination_root, resolved.snapshot.identity, destination.fd))
                 return .{ .outcome = .{ .conflict = "cannot copy a directory inside itself" } };
@@ -560,12 +585,12 @@ pub const LinuxFs = struct {
 
         const source_parent_snapshot = try statFd(source.parent_fd);
         const destination_parent_snapshot = try statFd(destination.fd);
-        if (source_parent_snapshot.identity.eql(destination_parent_snapshot.identity) and
+        if (source_parent_snapshot.identity.locationEql(destination_parent_snapshot.identity) and
             std.mem.eql(u8, source.state.name, rename_op.destination.name.bytes)) return .{ .outcome = .already_satisfied };
 
         if (source.snapshot.kind == .directory) {
             const same_namespace = rename_op.source.root.eql(destination_root) or
-                (try self.rootState(rename_op.source.root)).identity.eql((try self.rootState(destination_root)).identity);
+                (try self.rootState(rename_op.source.root)).identity.locationEql((try self.rootState(destination_root)).identity);
             if (!same_namespace) return error.Unsupported;
             if (try self.wouldCycle(destination_root, source.snapshot.identity, destination.fd))
                 return .{ .outcome = .{ .conflict = "cannot move a directory inside itself" } };
@@ -845,7 +870,7 @@ pub const LinuxFs = struct {
                 const fd = try openDirectoryAt(state.fd, ".");
                 errdefer closeFd(fd);
                 const snapshot = try statFd(fd);
-                if (!snapshot.identity.eql(state.identity)) return error.Stale;
+                if (!snapshot.identity.locationEql(state.identity)) return error.Stale;
                 break :blk .{ .fd = fd, .node = .root, .snapshot = snapshot };
             },
             .entry => |entry| blk: {
@@ -882,10 +907,10 @@ pub const LinuxFs = struct {
         while (true) {
             const current = try statFd(current_fd);
             if (current.identity.eql(source)) return true;
-            if (current.identity.eql(root_identity)) return false;
+            if (current.identity.locationEql(root_identity)) return false;
             const parent_fd = try openDirectoryAt(current_fd, "..");
             const parent = try statFd(parent_fd);
-            if (parent.identity.eql(current.identity)) {
+            if (parent.identity.locationEql(current.identity)) {
                 closeFd(parent_fd);
                 return error.Confined;
             }
@@ -934,12 +959,22 @@ pub const LinuxFs = struct {
         snapshot: Snapshot,
         link_target: ?[]const u8,
     ) contract.Error!contract.Observation {
-        _ = self;
         const revision_bytes = revisionBytes(&snapshot);
         const token = try arena.dupe(u8, &revision_bytes);
+        return self.observationWithRevision(node, snapshot, link_target, token);
+    }
+
+    fn observationWithRevision(
+        self: *LinuxFs,
+        node: contract.NodeRef,
+        snapshot: Snapshot,
+        link_target: ?[]const u8,
+        revision_token: []const u8,
+    ) contract.Observation {
+        _ = self;
         return .{
             .node = node,
-            .revision = .{ .token = token },
+            .revision = .{ .token = revision_token },
             .kind = snapshot.kind,
             .metadata = .{
                 .mode = snapshot.mode,
@@ -1321,7 +1356,17 @@ fn readlinkAt(gpa: std.mem.Allocator, parent_fd: i32, name: []const u8) contract
         const rc = linux.readlinkat(parent_fd, name_z.ptr, buffer.ptr, buffer.len);
         switch (linux.errno(rc)) {
             .SUCCESS => {
-                if (rc < buffer.len) return gpa.realloc(buffer, rc);
+                if (rc < buffer.len) {
+                    const resized = gpa.realloc(buffer, rc) catch |err| {
+                        // realloc is allowed to leave the original allocation
+                        // live when it cannot resize or move it. This buffer
+                        // is owned by this helper, so release it before
+                        // propagating OOM rather than leaking on a long link.
+                        gpa.free(buffer);
+                        return err;
+                    };
+                    return resized;
+                }
                 gpa.free(buffer);
             },
             .NOENT => {
@@ -2107,6 +2152,178 @@ test "linux provider generation-invalidates a same-name replacement on relist" {
     try t.expectEqual(old_ref.slot, new_ref.slot);
     try t.expect(old_ref.generation != new_ref.generation);
     try t.expectError(error.Stale, provider.observe(t.allocator, fixture.root, .{ .entry = old_ref }));
+}
+
+test "linux identity requires birth time for exact entry reuse" {
+    const weak: LinuxFs.Identity = .{
+        .dev_major = 8,
+        .dev_minor = 1,
+        .mount_id = 7,
+        .inode = 42,
+        .has_birth_time = false,
+        .birth_sec = 0,
+        .birth_nsec = 0,
+    };
+    try t.expect(weak.locationEql(weak));
+    try t.expect(!weak.eql(weak));
+
+    var strong: LinuxFs.Identity = weak;
+    strong.has_birth_time = true;
+    strong.birth_sec = 123;
+    strong.birth_nsec = 456;
+    try t.expect(strong.eql(strong));
+    try t.expect(!strong.eql(weak));
+}
+
+test "linux reconciliation leaves registry untouched when publication growth fails" {
+    var failing_state = t.FailingAllocator.init(t.allocator, .{ .resize_fail_index = 0 });
+    const gpa = failing_state.allocator();
+    var provider = LinuxFs.init(gpa);
+    defer provider.deinit();
+
+    const root: contract.Root = .{ .authority = .here, .slot = 0, .generation = 1 };
+    const unrelated_parent: contract.NodeRef = .{ .entry = .{
+        .authority = .here,
+        .slot = 99,
+        .generation = 1,
+    } };
+    const identity: LinuxFs.Identity = .{
+        .dev_major = 8,
+        .dev_minor = 1,
+        .mount_id = 7,
+        .inode = 42,
+        .has_birth_time = true,
+        .birth_sec = 123,
+        .birth_nsec = 456,
+    };
+    const snapshot: LinuxFs.Snapshot = .{
+        .identity = identity,
+        .kind = .regular,
+        .mode = 0o600,
+        .size = 0,
+        .nlink = 1,
+        .modified_sec = 0,
+        .modified_nsec = 0,
+        .changed_sec = 0,
+        .changed_nsec = 0,
+    };
+
+    try provider.entries.ensureTotalCapacityPrecise(gpa, 1);
+    const original_name = try gpa.dupe(u8, "unrelated");
+    provider.entries.appendAssumeCapacity(.{
+        .generation = 1,
+        .value = .{
+            .root = root,
+            .parent = unrelated_parent,
+            .name = original_name,
+            .identity = identity,
+            .revision = revisionBytes(&snapshot),
+        },
+    });
+    const old_generation = provider.entries.items[0].generation;
+    const old_capacity = provider.entries.capacity;
+    const allocations_before = failing_state.alloc_index;
+    // The staged name allocation succeeds; the following registry growth
+    // allocation fails. This is the fallible publication boundary.
+    failing_state.fail_index = allocations_before + 1;
+
+    const pending = [_]LinuxFs.PendingEntry{.{
+        .name = "new",
+        .snapshot = snapshot,
+        .link_target = null,
+    }};
+    var scratch_arena = std.heap.ArenaAllocator.init(t.allocator);
+    defer scratch_arena.deinit();
+    try t.expectError(error.OutOfMemory, provider.reconcileDirectory(scratch_arena.allocator(), root, .root, &pending));
+    try t.expectEqual(@as(usize, 1), provider.entries.items.len);
+    try t.expectEqual(old_capacity, provider.entries.capacity);
+    try t.expectEqual(old_generation, provider.entries.items[0].generation);
+    try t.expectEqualStrings("unrelated", provider.entries.items[0].value.?.name);
+}
+
+test "linux listing allocation failures never publish partial reconciliation" {
+    const entry_count = 96;
+    var name_buffer: [32]u8 = undefined;
+    var counted_fixture = try Fixture.init(t.allocator);
+    defer counted_fixture.deinit();
+    for (0..entry_count) |index| {
+        const name = try std.fmt.bufPrint(&name_buffer, "old-{d}", .{index});
+        try externalCreateEmpty(&counted_fixture.local, counted_fixture.root, name);
+    }
+    var counted_initial = try counted_fixture.local.provider().list(t.allocator, counted_fixture.root, .root);
+    defer counted_initial.deinit();
+
+    // Determine every allocator boundary in a representative listing. Each
+    // failure point is replayed against a fresh provider below; failures must
+    // leave the pre-reconciliation slot, generation, and name intact.
+    var counting_state = t.FailingAllocator.init(t.allocator, .{});
+    var counted_listing = try counted_fixture.local.provider().list(
+        counting_state.allocator(),
+        counted_fixture.root,
+        .root,
+    );
+    counted_listing.deinit();
+    try t.expect(counting_state.alloc_index > 0);
+
+    for (0..counting_state.alloc_index) |fail_index| {
+        var fixture = try Fixture.init(t.allocator);
+        defer fixture.deinit();
+        for (0..entry_count) |index| {
+            const name = try std.fmt.bufPrint(&name_buffer, "old-{d}", .{index});
+            try externalCreateEmpty(&fixture.local, fixture.root, name);
+        }
+        var before = try fixture.local.provider().list(t.allocator, fixture.root, .root);
+        defer before.deinit();
+        const old = findEntry(before.value, "old-0") orelse return error.TestExpectedEqual;
+        const old_ref = old.observation.node.entry;
+        try externalRename(&fixture.local, fixture.root, "old-0", "new-0");
+
+        var failing_state = t.FailingAllocator.init(t.allocator, .{ .fail_index = fail_index });
+        const result = fixture.local.provider().list(failing_state.allocator(), fixture.root, .root);
+        if (result) |listing| {
+            var owned = listing;
+            owned.deinit();
+        } else |err| switch (err) {
+            error.OutOfMemory => {
+                const slot = &fixture.local.entries.items[old_ref.slot];
+                try t.expectEqual(old_ref.generation, slot.generation);
+                const state = slot.value orelse return error.TestExpectedEqual;
+                try t.expectEqualStrings("old-0", state.name);
+            },
+            else => return err,
+        }
+    }
+}
+
+test "linux readlink releases its buffer when shrinking realloc fails" {
+    var fixture = try Fixture.init(t.allocator);
+    defer fixture.deinit();
+    const provider = fixture.local.provider();
+    const setup = [_]contract.Planned{.{
+        .id = opId(91),
+        .operation = .{ .create_symlink = .{
+            .destination = .{ .parent = .root, .name = try .init("link") },
+            .target = "target",
+        } },
+    }};
+    var report = try provider.apply(t.allocator, .{
+        .root = fixture.root,
+        .base_revision = &.{},
+        .operations = &setup,
+    });
+    defer report.deinit();
+    try expectOutcome(.applied, report.value.entries[0].outcome);
+
+    var failing_state = t.FailingAllocator.init(t.allocator, .{
+        .fail_index = 2,
+        .resize_fail_index = 0,
+    });
+    try t.expectError(error.OutOfMemory, readlinkAt(
+        failing_state.allocator(),
+        (try fixture.local.rootState(fixture.root)).fd,
+        "link",
+    ));
+    try t.expectEqual(failing_state.allocations, failing_state.deallocations);
 }
 
 test "linux provider closes root fds and generation-checks reused root slots" {
