@@ -9,6 +9,7 @@ const h = @import("harness.zig");
 
 const core = h.core;
 const App = h.App;
+const semantic = h.semantic_model;
 const authorFile = h.authorFile;
 const toolText = h.toolText;
 const drainToolContains = h.drainToolContains;
@@ -242,25 +243,33 @@ test "authoring: `>`/`<` indent operators — line, text object, visual" {
     }
 }
 
-test "dired: after an in-place edit, Escape returns to dired mode (not normal)" {
+test "dired: semantic field editing keeps the view focused and returns to normal" {
     const gpa = t.allocator;
     var app: App = undefined;
     try app.init(gpa);
     defer app.deinit();
     const ed = &app.ed;
 
-    // A file to browse, then open dired on the project dir.
+    // Open the current directory through the ordinary provider-aware `open`
+    // command. The app Session composes the dired plugin as a semantic target
+    // handler; there is no dired buffer or dired mode involved.
     authorFile(ed, "note.txt", "hello\n");
-    ed.run("dired");
-    try t.expectEqualStrings("dired", ed.mode());
+    ed.runStr("open", ".");
+    try t.expectEqual(@as(usize, 1), ed.session.dired_plugin.sessions.items.len);
+    const dired = ed.session.dired_plugin.sessions.items[0];
+    try t.expectEqual(dired.view_ref, ed.head.semantic_focus.path().?.view);
+    try t.expectEqualStrings("dired", ed.session.system.semantic.views.get(dired.view_ref).?.scene.role);
+    try t.expectEqualStrings("note.txt", dired.draft.rows.items[0].draft.name);
 
-    // Edit a name in place, then Escape. Before resting-mode-aware exit this
-    // stranded you in `normal` (dired's view keys asleep); now it returns to
-    // dired — the buffer's declared resting mode, no core-baked "normal".
+    // Enter the ordinary Vim insert posture on the focused semantic field,
+    // type through the generic field provider, then leave it. The plugin owns
+    // the draft; Vim owns only the editing posture.
     ed.press("i", "");
     ed.typeText("x");
     ed.press("Escape", "");
-    try t.expectEqualStrings("dired", ed.mode());
+    try t.expectEqualStrings("normal", ed.mode());
+    try t.expectEqual(dired.view_ref, ed.head.semantic_focus.path().?.view);
+    try t.expectEqualStrings("xnote.txt", dired.draft.rows.items[0].draft.name);
 }
 
 test "authoring: switching back to an open file lands in an editable mode" {
@@ -1380,47 +1389,45 @@ test "debug: set a breakpoint on a line — gutter marker, list, toggle off" {
     try t.expect(std.mem.indexOf(u8, ed.echoText(), "0 breakpoint") != null);
 }
 
-test "authoring/dired: rename a file in place — edit the name, :w, confirm the plan" {
+test "authoring/dired: rename a semantic field, apply its dialog, and verify disk" {
     const gpa = t.allocator;
     var app: App = undefined;
     try app.init(gpa);
     defer app.deinit();
     const ed = &app.ed;
 
-    // A file on disk; open the directory editor.
+    // A file on disk; open its containing directory through the generic
+    // provider-aware command. The semantic scene is the dired plugin's public
+    // surface, not a legacy `*dired*` text buffer.
     authorFile(ed, "old.txt", "keep me\n");
-    ed.run("dired");
-    try t.expect(drainToolContains(ed, "*dired*", "old.txt"));
+    ed.runStr("open", ".");
+    try t.expectEqual(@as(usize, 1), ed.session.dired_plugin.sessions.items.len);
+    const dired = ed.session.dired_plugin.sessions.items[0];
+    try t.expectEqualStrings("dired", ed.session.system.semantic.views.get(dired.view_ref).?.scene.role);
+    try t.expectEqual(dired.view_ref, ed.head.semantic_focus.path().?.view);
+    try t.expectEqualStrings("old.txt", dired.draft.rows.items[0].draft.name);
 
-    // Rename IN PLACE: jump to the name (/), change the word old→new, as if it
-    // were any text buffer (the editable projection).
-    ed.press("/", "");
-    ed.settle(10);
-    ed.typeText("old");
-    ed.settle(10);
-    ed.press("Return", "");
-    ed.press("c", "");
-    ed.press("w", "");
-    ed.typeText("new");
+    // Replace the raw name through generic semantic field editing. The field
+    // starts at byte offset zero; Delete is the core field operation inherited
+    // by Vim's insert mode, so this path is valid for unusual raw names too.
+    ed.press("i", "");
+    for (0..7) |_| ed.press("Delete", ""); // `old.txt`
+    ed.typeText("new.txt");
     ed.press("Escape", "");
-    try t.expect(drainToolContains(ed, "*dired*", "new.txt")); // the buffer shows the new name
+    try t.expectEqualStrings("new.txt", dired.draft.rows.items[0].draft.name);
+    try t.expectEqual(dired.view_ref, ed.head.semantic_focus.path().?.view);
 
-    // Save RECONCILES, but safely: it previews an ordered plan behind a y/n
-    // confirm rather than touching the disk blind.
-    ed.press("colon", "");
-    ed.typeText("w");
-    ed.press("Return", "");
-    try t.expectEqualStrings("dired-confirm", ed.mode());
-    {
-        const plan = toolText(ed, "*dired-plan*") orelse return error.NoPlan;
-        defer gpa.free(plan);
-        try t.expect(std.mem.indexOf(u8, plan, "rename") != null);
-        try t.expect(std.mem.indexOf(u8, plan, "old.txt") != null);
-        try t.expect(std.mem.indexOf(u8, plan, "new.txt") != null);
-    }
-    ed.press("y", ""); // apply the plan
+    // Apply is an advertised semantic action. Its provider opens a head-local
+    // interaction; the dialog owns `y`, rather than introducing a dired mode or
+    // polluting which-key/global bindings.
+    ed.chord("SPC v a");
+    try t.expectEqualStrings("which-key-like", ed.head.interactions.active().?.descriptor.presentation);
+    try t.expectEqualStrings(semantic.action.standard.confirm, ed.head.interactions.actionForInput("y").?.id);
+    ed.press("y", "y");
+    try t.expect(ed.head.interactions.active() == null);
 
-    // On disk: the file was RENAMED (not copied/deleted), content preserved.
+    // On disk: the provider applied the immutable plan as a rename, preserving
+    // content and removing the old name.
     try t.expect(drainUntilOracle(&app.proj, ed, "ls", "new.txt"));
     const ls = try app.proj.oracle("ls");
     defer gpa.free(ls);

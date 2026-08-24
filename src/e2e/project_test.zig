@@ -15,6 +15,7 @@ const harness = h.gfx_harness;
 const app_providers = h.app_providers;
 const app_session = h.app_session;
 const app_collab = h.app_collab;
+const semantic = h.semantic_model;
 
 const Editor = h.Editor;
 const Loopback = h.Loopback;
@@ -448,15 +449,43 @@ test "e2e/web: author js + html, grep across them, run it with node" {
     try t.expect(drainToolContains(&ed, "*output*", "hello weft"));
     proj.shot(&ed, "web-2-run");
 
-    // ── 4. Browse the project as a file tree with dired. ──
-    ed.run("dired");
-    try t.expect(drainToolContains(&ed, "*dired*", "app.js"));
-    {
-        const tree = toolText(&ed, "*dired*") orelse return error.NoDiredBuffer;
-        defer gpa.free(tree);
-        try t.expect(std.mem.indexOf(u8, tree, "app.js") != null);
-        try t.expect(std.mem.indexOf(u8, tree, "index.html") != null);
-    }
-    try t.expectEqualStrings("dired", ed.mode());
+    // ── 4. Browse the project through the provider-aware `open` command. ──
+    // The app Session publishes a typed directory target and the composed dired
+    // plugin claims it as an ordinary semantic view. There is no *dired* text
+    // buffer and no dired-specific mode for this acceptance path.
+    ed.runStr("open", ".");
+    try t.expectEqual(@as(usize, 1), ed.session.dired_plugin.sessions.items.len);
+    const dired = ed.session.dired_plugin.sessions.items[0];
+    try t.expectEqual(dired.view_ref, ed.head.semantic_focus.path().?.view);
+    const scene = ed.session.system.semantic.views.get(dired.view_ref).?.scene;
+    try t.expectEqualStrings("dired", scene.role);
+    try t.expect(ed.buffers.findByName("*dired*") == null);
+
+    const children = switch (scene.content) {
+        .container => |container| container.children,
+        else => return error.DiredSceneNotContainer,
+    };
+    try t.expectEqual(@as(usize, 2), children.len);
+    try t.expectEqualStrings("dired.row", children[0].role);
+    try t.expectEqualStrings("dired.row", children[1].role);
+    try t.expectEqualStrings("app.js", dired.draft.rows.items[0].draft.name);
+    try t.expectEqualStrings("index.html", dired.draft.rows.items[1].draft.name);
+
+    // Vim's ordinary j/k motions consume the generic semantic focus protocol;
+    // the plugin does not need to know that the caller happens to be Vim.
+    const first_focus = ed.head.semantic_focus.path().?.leaf().?;
+    ed.press("j", "");
+    const second_focus = ed.head.semantic_focus.path().?.leaf().?;
+    try t.expect(first_focus != second_focus);
+    ed.press("k", "");
+    try t.expectEqual(first_focus, ed.head.semantic_focus.path().?.leaf().?);
+    try t.expectEqualStrings("normal", ed.mode());
+
+    // The same view can be refreshed through the generic action endpoint. It
+    // remains retained and focused, rather than being reconstructed as a tool
+    // buffer or dropping the head back into a dired mode.
+    ed.run("view-refresh");
+    try t.expectEqual(dired.view_ref, ed.head.semantic_focus.path().?.view);
+    try t.expectEqualStrings("dired", ed.session.system.semantic.views.get(dired.view_ref).?.scene.role);
     proj.shot(&ed, "web-3-dired");
 }
