@@ -399,8 +399,13 @@ pub fn build(b: *std.Build) void {
         .target = target,
         .optimize = optimize,
     });
+    const dired_actions = b.createModule(.{
+        .root_source_file = b.path("src/plugins/dired/actions.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
     const dired_model_step = b.step("test-dired-model", "Run the pure dired model and semantic projection tests");
-    inline for (.{ dired_facade, dired_model, dired_projection }) |dired_module| {
+    inline for (.{ dired_facade, dired_model, dired_projection, dired_actions }) |dired_module| {
         dired_module.addImport("weft_semantic", architecture.semantic);
         dired_module.addImport("weft_fs", architecture.fs);
         const dired_tests = b.addTest(.{ .root_module = dired_module });

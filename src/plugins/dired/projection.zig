@@ -152,8 +152,8 @@ fn rowActions(arena: std.mem.Allocator, row: model.Row) ![]scene.Action {
     actions[2] = .{ .id = standard.copy, .label = "Copy", .enabled = !unavailable };
     actions[3] = .{ .id = standard.cut, .label = "Cut", .enabled = !unavailable };
     actions[4] = .{ .id = standard.delete, .label = "Delete", .enabled = row.pending != .deleted };
-    actions[5] = .{ .id = standard.paste_before, .label = "Paste before", .enabled = !unavailable };
-    actions[6] = .{ .id = standard.paste_after, .label = "Paste after", .enabled = !unavailable };
+    actions[5] = .{ .id = standard.paste_before, .label = "Paste before", .enabled = row.conflict != .stale };
+    actions[6] = .{ .id = standard.paste_after, .label = "Paste after", .enabled = row.conflict != .stale };
     return actions;
 }
 
@@ -245,6 +245,21 @@ fn stableId(raw: model.NodeId, domain: u64) !scene.NodeId {
     return @enumFromInt((domain << 61) | raw);
 }
 
+/// Stable semantic identity for the row node corresponding to a model row.
+/// Providers use this instead of visible position or a renderer-local index.
+pub fn rowNodeId(raw: model.NodeId) !scene.NodeId {
+    return stableId(raw, row_domain);
+}
+
+/// Resolve only row-domain scene identities back to model identity.
+pub fn modelRowId(node: scene.NodeId) !model.NodeId {
+    const raw = @intFromEnum(node);
+    if (raw >> 61 != row_domain) return error.UnknownRow;
+    const id = raw & id_payload_mask;
+    if (id == 0) return error.UnknownRow;
+    return id;
+}
+
 fn findRow(rows: []const model.Row, id: model.NodeId) ?usize {
     for (rows, 0..) |row, index| if (row.id == id) return index;
     return null;
@@ -301,7 +316,7 @@ test "projection keeps deleted rows visible and labels original renamed name" {
     try std.testing.expectEqualStrings("deleted", row.content.container.children[2].facts[0].value);
     try std.testing.expectEqualStrings(standard.paste_before, row.actions[5].id);
     try std.testing.expectEqualStrings(standard.paste_after, row.actions[6].id);
-    try std.testing.expect(!row.actions[5].enabled and !row.actions[6].enabled);
+    try std.testing.expect(row.actions[5].enabled and row.actions[6].enabled);
 }
 
 test "projection reports add copy and stale facts with metadata" {

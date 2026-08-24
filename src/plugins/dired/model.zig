@@ -392,7 +392,9 @@ pub const Model = struct {
         const anchor_index = self.indexOf(anchor.row) orelse return error.UnknownAnchor;
         const anchor_row = &self.rows.items[anchor_index];
         if (!sameOptionalId(anchor_row.parent, anchor.parent)) return error.StaleAnchor;
-        if (anchor_row.conflict == .stale or anchor_row.pending == .deleted) return error.StaleAnchor;
+        // Deleted rows deliberately remain stable visual anchors until apply;
+        // pasting beside one must not depend on a shifting neighbor index.
+        if (anchor_row.conflict == .stale) return error.StaleAnchor;
         if (anchor.parent) |parent| {
             const parent_row = self.row(parent) orelse return error.StaleAnchor;
             if (parent_row.draft.kind != .directory) return error.NotDirectory;
@@ -1058,7 +1060,7 @@ test "paste after directory lands after its complete existing subtree" {
     try std.testing.expectEqualStrings("sibling", destination.rows.items[4].draft.name);
 }
 
-test "paste placement rejects stale anchors without changing draft rows" {
+test "paste placement rejects stale anchors and retains deleted row anchors" {
     var source = Model.init(std.testing.allocator, .{ .authority = .here, .slot = 50, .generation = 1 });
     defer source.deinit();
     try source.reconcile(.{ .entries = &.{.{ .identity = ref(51, 1), .name = "source", .revision = "r", .kind = .regular }} });
@@ -1075,9 +1077,11 @@ test "paste placement rejects stale anchors without changing draft rows" {
     try std.testing.expectEqual(before_next, destination.next_id);
     try std.testing.expectError(error.UnknownAnchor, destination.pasteAt(.{ .row = 99, .parent = null }, .after, &item));
     try destination.markDelete(anchor);
-    try std.testing.expectError(error.StaleAnchor, destination.pasteAt(.{ .row = anchor, .parent = null }, .before, &item));
-    try std.testing.expectEqual(before_rows, destination.rows.items.len);
-    try std.testing.expectEqual(before_next, destination.next_id);
+    _ = try destination.pasteAt(.{ .row = anchor, .parent = null }, .before, &item);
+    try std.testing.expectEqual(before_rows + 1, destination.rows.items.len);
+    try std.testing.expectEqual(before_next + 1, destination.next_id);
+    try std.testing.expectEqual(Pending.copied, destination.rows.items[0].pending);
+    try std.testing.expectEqual(Pending.deleted, destination.row(anchor).?.pending);
 
     const parent = try destination.addDirectory(null, "parent", null);
     const child = try destination.addFile(parent, "child", "", null);

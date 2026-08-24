@@ -8,6 +8,7 @@ const std = @import("std");
 
 pub const model = @import("model.zig");
 pub const projection = @import("projection.zig");
+pub const actions = @import("actions.zig");
 
 pub const Model = model.Model;
 pub const NodeId = model.NodeId;
@@ -33,6 +34,11 @@ pub const project = projection.project;
 pub const metadata_column = projection.metadata_column;
 pub const name_column = projection.name_column;
 pub const original_column = projection.original_column;
+pub const rowNodeId = projection.rowNodeId;
+pub const modelRowId = projection.modelRowId;
+
+pub const ActionController = actions.Controller;
+pub const ActionError = actions.Error;
 
 test {
     std.testing.refAllDecls(@This());
