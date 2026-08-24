@@ -22,9 +22,9 @@ pub const QueryError = error{ Unavailable, InvalidRelation, StaleTarget, Failed 
 pub const Query = struct {
     source: semantic.target.Located,
     name: []const u8,
-    /// Optional provider-owned selector/argument. Core treats this as raw
-    /// opaque bytes; an absent selector preserves the legacy query contract.
-    argument: ?[]const u8 = null,
+    /// Optional provider-owned selector. Core treats this as raw opaque bytes;
+    /// an absent selector preserves the legacy query contract.
+    selector: ?[]const u8 = null,
 };
 
 pub const standard = struct {

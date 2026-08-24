@@ -134,7 +134,7 @@ pub fn openRelative(
     source: semantic_model.target.Located,
     name: []const u8,
 ) Error!RelativeOpenResult {
-    var relation = try services.resolveTargetRelationWithArgument(
+    var relation = try services.resolveTargetRelationWithSelector(
         gpa,
         source,
         target_runtime.relation.standard.child,

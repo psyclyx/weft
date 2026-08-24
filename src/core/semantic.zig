@@ -316,14 +316,16 @@ pub const Services = struct {
     /// provider owns vocabulary and lookup policy; this service only routes
     /// the immutable query and admits a live, revision-stamped destination.
     /// The returned result owns any provider location bytes; callers must
-    /// call `deinit` after consuming it.
+    /// call `deinit` after consuming it. A selector is borrowed for this
+    /// synchronous provider query; core never parses, normalizes, or retains
+    /// it.
     pub fn resolveTargetRelation(
         self: *const Services,
         gpa: std.mem.Allocator,
         source: semantic.target.Located,
         name: []const u8,
     ) TargetRelationError!OwnedTargetRelationResult {
-        return self.resolveTargetRelationWithArgument(gpa, source, name, null);
+        return self.resolveTargetRelationWithSelector(gpa, source, name, null);
     }
 
     /// Query an independent relation provider with an optional raw selector.
@@ -331,12 +333,12 @@ pub const Services = struct {
     /// core; it is copied only as part of the provider's returned location.
     /// This is the generic seam for names below a working target (for example
     /// relation `child`) and works equally for remote or synthetic publishers.
-    pub fn resolveTargetRelationWithArgument(
+    pub fn resolveTargetRelationWithSelector(
         self: *const Services,
         gpa: std.mem.Allocator,
         source: semantic.target.Located,
         name: []const u8,
-        argument: ?[]const u8,
+        selector: ?[]const u8,
     ) TargetRelationError!OwnedTargetRelationResult {
         if (!validRelationName(name)) return error.InvalidRelation;
         if (source.target.authority != self.targets.authority) return error.StaleTarget;
@@ -346,7 +348,7 @@ pub const Services = struct {
 
         var output = OwnedTargetRelationResult.init(gpa);
         errdefer output.deinit();
-        var relations = try self.target_relations.query(gpa, .{ .source = source, .name = name, .argument = argument });
+        var relations = try self.target_relations.query(gpa, .{ .source = source, .name = name, .selector = selector });
         defer relations.deinit();
         if (relations.value.candidates.len == 0) {
             // Preserve explicit provider knowledge about a relation that was
@@ -1162,14 +1164,14 @@ test "semantic target relations resolve, stay absent, and reject stale or ambigu
         foreign_authority: bool = false,
         unavailable: bool = false,
         failed: bool = false,
-        expected_argument: ?[]const u8 = null,
+        expected_selector: ?[]const u8 = null,
 
         pub fn query(self: *@This(), request: target_runtime.relation.Query) target_runtime.relation.QueryError!?target_runtime.relation.Relation {
             if (self.unavailable) return error.Unavailable;
             if (self.failed) return error.Failed;
             if (!std.mem.eql(u8, request.name, "container")) return null;
-            if (self.expected_argument) |expected| {
-                const actual = request.argument orelse return null;
+            if (self.expected_selector) |expected| {
+                const actual = request.selector orelse return null;
                 if (!std.mem.eql(u8, actual, expected)) return null;
             }
             var target = self.destination;
@@ -1209,9 +1211,14 @@ test "semantic target relations resolve, stay absent, and reject stale or ambigu
         },
         else => return error.TestUnexpectedResult,
     }
-    var selected = RelationProvider{ .destination = destination, .expected_argument = "odd\n\xff" };
+    var selected = RelationProvider{ .destination = destination, .expected_selector = "odd\n\xff" };
     const selected_ref = try services.registerTargetRelationProvider(std.testing.allocator, relation_owner, "relations-selector", .init(&selected));
-    var selected_resolution = try services.resolveTargetRelationWithArgument(
+    // The unqualified provider above intentionally answers every argument. A
+    // query with an opaque selector therefore has two valid answers until it
+    // is removed; isolate this selector gate so the result below exercises
+    // selector forwarding rather than ambiguity handling.
+    try std.testing.expect(services.target_relations.unregister(std.testing.allocator, relation_ref));
+    var selected_resolution = try services.resolveTargetRelationWithSelector(
         std.testing.allocator,
         source,
         "container",
@@ -1231,6 +1238,9 @@ test "semantic target relations resolve, stay absent, and reject stale or ambigu
     try std.testing.expectError(error.StaleTarget, services.resolveTargetRelation(std.testing.allocator, source, "container"));
     try std.testing.expect(services.target_relations.unregister(std.testing.allocator, stale_handler));
 
+    // Restore the broad provider after the selector-specific gate so the
+    // following assertions exercise the intended two-provider ambiguity.
+    _ = try services.registerTargetRelationProvider(std.testing.allocator, relation_owner, "relations-a-again", .init(&first));
     var second = RelationProvider{ .destination = destination };
     _ = try services.registerTargetRelationProvider(std.testing.allocator, relation_owner, "relations-b", .init(&second));
     var ambiguous = try services.resolveTargetRelation(std.testing.allocator, source, "container");

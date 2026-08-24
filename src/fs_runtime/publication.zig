@@ -269,6 +269,48 @@ pub fn publishChildDirectory(
     };
 }
 
+/// Provider-neutral child lookup. The caller supplies only an opaque raw leaf
+/// name; Router-owned listing and the existing guarded publishers establish
+/// the entry identity and kind. This keeps namespace interpretation reusable
+/// by local, remote, and synthetic Router providers instead of putting it in
+/// an app/session implementation.
+pub const ChildPublication = union(enum) {
+    directory: ChildRegistration,
+    file: Registration,
+};
+
+pub fn publishChildByName(
+    gpa: std.mem.Allocator,
+    targets: *target_runtime.target.Registry,
+    router: *router_mod.Router,
+    owner: semantic.owner.Id,
+    parent: semantic.target.Located,
+    name: []const u8,
+) Error!?ChildPublication {
+    if (name.len == 0) return error.InvalidName;
+    const directory = try router.authorizedDirectory(parent.target, parent.revision);
+    var listing = try router.list(gpa, directory.root, directory.node);
+    defer listing.deinit();
+    for (listing.value.entries) |entry| {
+        if (!std.mem.eql(u8, entry.name.bytes, name)) continue;
+        const entry_ref = switch (entry.observation.node) {
+            .root => return error.InvalidHandle,
+            .entry => |ref| ref,
+        };
+        const definition: ChildDefinition = .{
+            .parent = parent,
+            .entry = entry_ref,
+            .entry_revision = entry.observation.revision,
+        };
+        return switch (entry.observation.kind) {
+            .directory => .{ .directory = try publishChildDirectory(gpa, targets, router, owner, definition) },
+            .regular => .{ .file = try publishChildFile(gpa, targets, router, owner, definition) },
+            .symlink, .other => null,
+        };
+    }
+    return null;
+}
+
 const TestProvider = struct {
     authority: semantic.handle.Authority,
     observed_kind: fs.contract.Kind = .directory,
@@ -608,11 +650,17 @@ test "ordinary-file publication composes an opaque entry fact and guarded bindin
     });
     defer _ = parent.close(gpa, &targets, &router);
 
-    const registration = try publishChildFile(gpa, &targets, &router, owner, .{
-        .parent = parent.located(),
-        .entry = child_ref,
-        .entry_revision = .{ .token = "child-revision" },
-    });
+    const registration = switch ((try publishChildByName(
+        gpa,
+        &targets,
+        &router,
+        owner,
+        parent.located(),
+        "ordinary\nfile\xff",
+    )).?) {
+        .file => |value| value,
+        .directory => return error.TestUnexpectedResult,
+    };
     var file = registration;
     defer _ = file.close(gpa, &targets, &router);
     const descriptor = targets.get(registration.ref).?;
