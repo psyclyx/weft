@@ -4,17 +4,17 @@
 //! Darwin providers translate these semantic operations at the outer edge.
 
 const std = @import("std");
-const kernel = @import("weft_kernel");
+const semantic = @import("weft_semantic");
 
 pub const RootTag = struct {};
 pub const EntryTag = struct {};
 pub const LeaseTag = struct {};
 pub const WatchTag = struct {};
 
-pub const Root = kernel.handle.Handle(RootTag);
-pub const EntryRef = kernel.handle.Handle(EntryTag);
-pub const LeaseRef = kernel.handle.Handle(LeaseTag);
-pub const WatchRef = kernel.handle.Handle(WatchTag);
+pub const Root = semantic.handle.Handle(RootTag);
+pub const EntryRef = semantic.handle.Handle(EntryTag);
+pub const LeaseRef = semantic.handle.Handle(LeaseTag);
+pub const WatchRef = semantic.handle.Handle(WatchTag);
 
 /// A root is a directory object in its own right, but it deliberately has no
 /// synthetic entry handle. Keeping that distinction explicit avoids sentinel

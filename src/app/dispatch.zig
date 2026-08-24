@@ -44,7 +44,7 @@
 //! unmodified by this migration.
 
 const std = @import("std");
-const kernel = @import("weft_kernel");
+const semantic = @import("weft_semantic");
 const core = @import("../core/core.zig");
 const view_mod = @import("../gfx/view.zig");
 const region = @import("../gfx/region.zig");
@@ -94,7 +94,7 @@ pub fn handlePointer(
         } else if (view.hasSemanticInput()) {
             if (view.semanticHitAtPoint(px, py)) |hit| {
                 if (semantic_services.views.get(hit.view)) |instance| {
-                    var path_nodes: [130]kernel.scene.NodeId = undefined;
+                    var path_nodes: [130]semantic.scene.NodeId = undefined;
                     if (try instance.focusPath(hit.node, &path_nodes)) |path|
                         try head.semantic_focus.set(gpa, path);
                 }

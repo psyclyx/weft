@@ -10,7 +10,7 @@
 //!   `read_write`). Absent ⇒ deny, so a random client gets nothing; same-project
 //!   collab grants the tree. It is NOT the doc-level `Access` — it is fs-scoped.
 //! - **Confinement** (round-2 D3): every path goes through `rooted_fs`, so `..`
-//!   / absolute / symlink escapes are refused in the kernel.
+//!   / absolute / symlink escapes are refused in the semantic.
 //! - **Write precondition** (round-2 D6): WRITE carries the content token the
 //!   client last READ; the server refuses (`stale`) if the file changed since,
 //!   so concurrent writers don't clobber. STAT/READ return the token.

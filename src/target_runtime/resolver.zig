@@ -2,10 +2,10 @@
 //! plugin registration order silently decide which handler wins a tie.
 
 const std = @import("std");
-const kernel = @import("weft_kernel");
+const semantic = @import("weft_semantic");
 
 pub const HandlerTag = struct {};
-pub const HandlerRef = kernel.handle.Handle(HandlerTag);
+pub const HandlerRef = semantic.handle.Handle(HandlerTag);
 
 pub const Strength = enum(u8) {
     fallback,
@@ -22,8 +22,8 @@ pub const Provider = struct {
     vtable: *const VTable,
 
     pub const VTable = struct {
-        probe: *const fn (*anyopaque, kernel.target.Descriptor) ProbeError!?Strength,
-        open: *const fn (*anyopaque, kernel.target.Located) OpenError!kernel.view.Ref,
+        probe: *const fn (*anyopaque, semantic.target.Descriptor) ProbeError!?Strength,
+        open: *const fn (*anyopaque, semantic.target.Located) OpenError!semantic.view.Ref,
     };
 
     pub fn init(pointer: anytype) Provider {
@@ -39,10 +39,10 @@ pub const Provider = struct {
             fn self(raw: *anyopaque) *Implementation {
                 return @ptrCast(@alignCast(raw));
             }
-            fn probe(raw: *anyopaque, descriptor: kernel.target.Descriptor) ProbeError!?Strength {
+            fn probe(raw: *anyopaque, descriptor: semantic.target.Descriptor) ProbeError!?Strength {
                 return self(raw).probe(descriptor);
             }
-            fn open(raw: *anyopaque, located: kernel.target.Located) OpenError!kernel.view.Ref {
+            fn open(raw: *anyopaque, located: semantic.target.Located) OpenError!semantic.view.Ref {
                 return self(raw).open(located);
             }
             const vtable: VTable = .{ .probe = @This().probe, .open = @This().open };
@@ -50,18 +50,18 @@ pub const Provider = struct {
         return .{ .context = pointer, .vtable = &Adapter.vtable };
     }
 
-    pub fn probe(self: Provider, descriptor: kernel.target.Descriptor) ProbeError!?Strength {
+    pub fn probe(self: Provider, descriptor: semantic.target.Descriptor) ProbeError!?Strength {
         return self.vtable.probe(self.context, descriptor);
     }
 
-    pub fn open(self: Provider, located: kernel.target.Located) OpenError!kernel.view.Ref {
+    pub fn open(self: Provider, located: semantic.target.Located) OpenError!semantic.view.Ref {
         return self.vtable.open(self.context, located);
     }
 };
 
 pub const HandlerDescriptor = struct {
     ref: HandlerRef,
-    owner: []const u8,
+    owner: semantic.owner.Id,
     id: []const u8,
 };
 
@@ -118,7 +118,7 @@ pub const Error = std.mem.Allocator.Error || error{
 };
 
 pub const Registry = struct {
-    authority: kernel.handle.Authority,
+    authority: semantic.handle.Authority,
     slots: std.ArrayList(Slot) = .empty,
 
     const Slot = struct {
@@ -134,7 +134,7 @@ pub const Registry = struct {
         fn create(
             gpa: std.mem.Allocator,
             ref: HandlerRef,
-            owner: []const u8,
+            owner: semantic.owner.Id,
             id: []const u8,
             provider: Provider,
         ) std.mem.Allocator.Error!*Instance {
@@ -145,7 +145,7 @@ pub const Registry = struct {
             const arena = self.arena.allocator();
             self.descriptor = .{
                 .ref = ref,
-                .owner = try arena.dupe(u8, owner),
+                .owner = owner,
                 .id = try arena.dupe(u8, id),
             };
             self.provider = provider;
@@ -158,7 +158,7 @@ pub const Registry = struct {
         }
     };
 
-    pub fn init(authority: kernel.handle.Authority) Registry {
+    pub fn init(authority: semantic.handle.Authority) Registry {
         return .{ .authority = authority };
     }
 
@@ -170,13 +170,13 @@ pub const Registry = struct {
     pub fn register(
         self: *Registry,
         gpa: std.mem.Allocator,
-        owner: []const u8,
+        owner: semantic.owner.Id,
         id: []const u8,
         provider: Provider,
     ) Error!HandlerRef {
-        if (owner.len == 0 or id.len == 0) return error.InvalidHandler;
+        if (!owner.isValid() or id.len == 0) return error.InvalidHandler;
         for (self.slots.items) |slot| if (slot.instance) |handler| {
-            if (std.mem.eql(u8, handler.descriptor.owner, owner) and
+            if (handler.descriptor.owner == owner and
                 std.mem.eql(u8, handler.descriptor.id, id)) return error.DuplicateHandler;
         };
         for (self.slots.items, 0..) |*slot, index| {
@@ -210,11 +210,11 @@ pub const Registry = struct {
         return true;
     }
 
-    pub fn unregisterOwner(self: *Registry, gpa: std.mem.Allocator, owner: []const u8) usize {
+    pub fn unregisterOwner(self: *Registry, gpa: std.mem.Allocator, owner: semantic.owner.Id) usize {
         var removed: usize = 0;
         for (self.slots.items) |*slot| {
             const handler = slot.instance orelse continue;
-            if (!std.mem.eql(u8, handler.descriptor.owner, owner)) continue;
+            if (handler.descriptor.owner != owner) continue;
             handler.destroy(gpa);
             slot.instance = null;
             slot.generation +%= 1;
@@ -227,7 +227,7 @@ pub const Registry = struct {
     pub fn resolve(
         self: *const Registry,
         gpa: std.mem.Allocator,
-        target_descriptor: kernel.target.Descriptor,
+        target_descriptor: semantic.target.Descriptor,
     ) std.mem.Allocator.Error!OwnedResolution {
         var owned: OwnedResolution = .{ .arena = .init(gpa) };
         errdefer owned.deinit();
@@ -251,7 +251,7 @@ pub const Registry = struct {
         return owned;
     }
 
-    pub fn open(self: *const Registry, ref: HandlerRef, located: kernel.target.Located) (Error || OpenError)!kernel.view.Ref {
+    pub fn open(self: *const Registry, ref: HandlerRef, located: semantic.target.Located) (Error || OpenError)!semantic.view.Ref {
         const handler = self.lookup(ref) orelse return error.StaleHandler;
         return handler.provider.open(located);
     }
@@ -268,22 +268,23 @@ pub const Registry = struct {
     }
 };
 
-fn fact(descriptor: kernel.target.Descriptor, name: []const u8) ?[]const u8 {
+fn fact(descriptor: semantic.target.Descriptor, name: []const u8) ?[]const u8 {
     for (descriptor.facts) |candidate|
         if (std.mem.eql(u8, candidate.name, name)) return candidate.value;
     return null;
 }
 
 test "directory handlers claim local and remote targets from the same facts" {
+    const owner: semantic.owner.Id = @enumFromInt(1);
     const Directory = struct {
         opened: usize = 0,
 
-        fn probe(_: *@This(), descriptor: kernel.target.Descriptor) ProbeError!?Strength {
+        fn probe(_: *@This(), descriptor: semantic.target.Descriptor) ProbeError!?Strength {
             if (descriptor.kind != .directory) return null;
             return if (fact(descriptor, "locus") != null) .exact else .preferred;
         }
 
-        fn open(self: *@This(), _: kernel.target.Located) OpenError!kernel.view.Ref {
+        fn open(self: *@This(), _: semantic.target.Located) OpenError!semantic.view.Ref {
             self.opened += 1;
             return .{ .authority = .here, .slot = 8, .generation = 1 };
         }
@@ -291,8 +292,8 @@ test "directory handlers claim local and remote targets from the same facts" {
     var directory: Directory = .{};
     var handlers = Registry.init(.here);
     defer handlers.deinit(std.testing.allocator);
-    const handler = try handlers.register(std.testing.allocator, "dired", "directory", .init(&directory));
-    const descriptor: kernel.target.Descriptor = .{
+    const handler = try handlers.register(std.testing.allocator, owner, "directory", .init(&directory));
+    const descriptor: semantic.target.Descriptor = .{
         .ref = .{ .authority = .here, .slot = 1, .generation = 1 },
         .kind = .directory,
         .display_name = "peer project",
@@ -302,21 +303,23 @@ test "directory handlers claim local and remote targets from the same facts" {
     defer resolution.deinit();
     const selected = resolution.value.decide().selected;
     try std.testing.expect(selected.eql(handler));
-    _ = try handlers.open(selected, .{ .target = descriptor.ref });
+    _ = try handlers.open(selected, .{ .target = descriptor.ref, .revision = descriptor.revision });
     try std.testing.expectEqual(@as(usize, 1), directory.opened);
-    try std.testing.expectEqual(@as(usize, 1), handlers.unregisterOwner(std.testing.allocator, "dired"));
-    try std.testing.expectError(error.StaleHandler, handlers.open(handler, .{ .target = descriptor.ref }));
+    try std.testing.expectEqual(@as(usize, 1), handlers.unregisterOwner(std.testing.allocator, owner));
+    try std.testing.expectError(error.StaleHandler, handlers.open(handler, .{ .target = descriptor.ref, .revision = descriptor.revision }));
 }
 
 test "equal handler claims are ambiguous rather than registration ordered" {
+    const first_owner: semantic.owner.Id = @enumFromInt(1);
+    const second_owner: semantic.owner.Id = @enumFromInt(2);
     const Synthetic = struct {
-        fn probe(_: *@This(), descriptor: kernel.target.Descriptor) ProbeError!?Strength {
+        fn probe(_: *@This(), descriptor: semantic.target.Descriptor) ProbeError!?Strength {
             return switch (descriptor.kind) {
                 .synthetic => .exact,
                 else => null,
             };
         }
-        fn open(_: *@This(), _: kernel.target.Located) OpenError!kernel.view.Ref {
+        fn open(_: *@This(), _: semantic.target.Located) OpenError!semantic.view.Ref {
             return error.Rejected;
         }
     };
@@ -324,9 +327,9 @@ test "equal handler claims are ambiguous rather than registration ordered" {
     var second: Synthetic = .{};
     var handlers = Registry.init(.here);
     defer handlers.deinit(std.testing.allocator);
-    _ = try handlers.register(std.testing.allocator, "one", "logs", .init(&first));
-    _ = try handlers.register(std.testing.allocator, "two", "logs", .init(&second));
-    const descriptor: kernel.target.Descriptor = .{
+    _ = try handlers.register(std.testing.allocator, first_owner, "logs", .init(&first));
+    _ = try handlers.register(std.testing.allocator, second_owner, "logs", .init(&second));
+    const descriptor: semantic.target.Descriptor = .{
         .ref = .{ .authority = .here, .slot = 2, .generation = 1 },
         .kind = .{ .synthetic = "logs" },
         .display_name = "logs",
@@ -337,13 +340,15 @@ test "equal handler claims are ambiguous rather than registration ordered" {
 }
 
 test "probe failures remain visible without suppressing valid claims" {
+    const broken_owner: semantic.owner.Id = @enumFromInt(1);
+    const healthy_owner: semantic.owner.Id = @enumFromInt(2);
     const Broken = struct {
         fail: bool,
-        fn probe(self: *@This(), _: kernel.target.Descriptor) ProbeError!?Strength {
+        fn probe(self: *@This(), _: semantic.target.Descriptor) ProbeError!?Strength {
             if (self.fail) return error.Unavailable;
             return .compatible;
         }
-        fn open(_: *@This(), _: kernel.target.Located) OpenError!kernel.view.Ref {
+        fn open(_: *@This(), _: semantic.target.Located) OpenError!semantic.view.Ref {
             return error.Rejected;
         }
     };
@@ -351,9 +356,9 @@ test "probe failures remain visible without suppressing valid claims" {
     var healthy: Broken = .{ .fail = false };
     var handlers = Registry.init(.here);
     defer handlers.deinit(std.testing.allocator);
-    _ = try handlers.register(std.testing.allocator, "broken", "handler", .init(&broken));
-    _ = try handlers.register(std.testing.allocator, "healthy", "handler", .init(&healthy));
-    const descriptor: kernel.target.Descriptor = .{
+    _ = try handlers.register(std.testing.allocator, broken_owner, "handler", .init(&broken));
+    _ = try handlers.register(std.testing.allocator, healthy_owner, "handler", .init(&healthy));
+    const descriptor: semantic.target.Descriptor = .{
         .ref = .{ .authority = .here, .slot = 3, .generation = 1 },
         .kind = .file,
         .display_name = "file",

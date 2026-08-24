@@ -26,7 +26,7 @@
 
 const std = @import("std");
 const Allocator = std.mem.Allocator;
-const kernel = @import("weft_kernel");
+const semantic = @import("weft_semantic");
 const view_runtime = @import("weft_view_runtime");
 
 const Keymap = @import("Keymap.zig");
@@ -111,9 +111,9 @@ transient_stack: std.ArrayList(TransientFrame) = .empty,
 pub const empty: Head = .{};
 
 pub const SemanticFocus = struct {
-    view: ?kernel.view.Ref = null,
-    nodes: std.ArrayList(kernel.scene.NodeId) = .empty,
-    field: ?kernel.scene.FieldRef = null,
+    view: ?semantic.view.Ref = null,
+    nodes: std.ArrayList(semantic.scene.NodeId) = .empty,
+    field: ?semantic.scene.FieldRef = null,
 
     pub const empty: SemanticFocus = .{};
 
@@ -122,7 +122,7 @@ pub const SemanticFocus = struct {
         self.* = .{};
     }
 
-    pub fn set(self: *SemanticFocus, gpa: Allocator, next: kernel.focus.Path) Allocator.Error!void {
+    pub fn set(self: *SemanticFocus, gpa: Allocator, next: semantic.focus.Path) Allocator.Error!void {
         try self.nodes.ensureTotalCapacity(gpa, next.nodes.len);
         self.nodes.clearRetainingCapacity();
         self.nodes.appendSliceAssumeCapacity(next.nodes);
@@ -136,7 +136,7 @@ pub const SemanticFocus = struct {
         self.field = null;
     }
 
-    pub fn path(self: *const SemanticFocus) ?kernel.focus.Path {
+    pub fn path(self: *const SemanticFocus) ?semantic.focus.Path {
         return .{
             .view = self.view orelse return null,
             .nodes = self.nodes.items,
@@ -766,14 +766,14 @@ test "head: semantic focus and interaction scopes are independent" {
     var b: Head = .empty;
     defer b.deinit(gpa);
 
-    const view_ref: kernel.view.Ref = .{ .authority = .here, .slot = 7, .generation = 2 };
-    const field_ref: kernel.scene.FieldRef = .{ .authority = .here, .slot = 3, .generation = 4 };
-    const nodes = [_]kernel.scene.NodeId{ @enumFromInt(11), @enumFromInt(12) };
+    const view_ref: semantic.view.Ref = .{ .authority = .here, .slot = 7, .generation = 2 };
+    const field_ref: semantic.scene.FieldRef = .{ .authority = .here, .slot = 3, .generation = 4 };
+    const nodes = [_]semantic.scene.NodeId{ @enumFromInt(11), @enumFromInt(12) };
     try a.semantic_focus.set(gpa, .{ .view = view_ref, .nodes = &nodes, .field = field_ref });
     try t.expectEqual(@as(usize, 2), a.semantic_focus.path().?.nodes.len);
     try t.expect(b.semantic_focus.path() == null);
 
-    const definition: kernel.interaction.Definition = .{
+    const definition: semantic.interaction.Definition = .{
         .role = .dialog,
         .view = view_ref,
         .root = @enumFromInt(20),

@@ -10,7 +10,7 @@
 //! state; the headless harness drives `view.build` directly (gfx/harness.zig).
 
 const std = @import("std");
-const kernel = @import("weft_kernel");
+const semantic = @import("weft_semantic");
 const snail = @import("snail");
 const stemma = @import("stemma");
 const view_mod = @import("../gfx/view.zig");
@@ -86,7 +86,7 @@ fn expireIfStale(surf: *core.surface.Surface, gpa: std.mem.Allocator, rope: *con
     if (stale) surf.close(gpa);
 }
 
-fn containsSemanticNode(root: *const kernel.scene.Node, wanted: kernel.scene.NodeId) bool {
+fn containsSemanticNode(root: *const semantic.scene.Node, wanted: semantic.scene.NodeId) bool {
     if (root.id == wanted) return true;
     return switch (root.content) {
         .container => |container| blk: {
@@ -97,7 +97,7 @@ fn containsSemanticNode(root: *const kernel.scene.Node, wanted: kernel.scene.Nod
     };
 }
 
-fn firstFocusableSemanticNode(root: *const kernel.scene.Node) ?kernel.scene.NodeId {
+fn firstFocusableSemanticNode(root: *const semantic.scene.Node) ?semantic.scene.NodeId {
     if (root.focusable) return root.id;
     return switch (root.content) {
         .container => |container| blk: {
@@ -108,7 +108,7 @@ fn firstFocusableSemanticNode(root: *const kernel.scene.Node) ?kernel.scene.Node
     };
 }
 
-fn focusedSemanticNode(head: *const core.Head, view_ref: kernel.view.Ref, root: *const kernel.scene.Node) ?kernel.scene.NodeId {
+fn focusedSemanticNode(head: *const core.Head, view_ref: semantic.view.Ref, root: *const semantic.scene.Node) ?semantic.scene.NodeId {
     const path = head.semantic_focus.path() orelse return firstFocusableSemanticNode(root);
     if (!path.view.eql(view_ref) or path.nodes.len == 0) return firstFocusableSemanticNode(root);
     const wanted = path.nodes[path.nodes.len - 1];

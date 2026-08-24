@@ -221,6 +221,7 @@ fn construct(engine: *wasm.Engine, ctx: *command.Context, name: []const u8, opts
     errdefer gpa.destroy(p);
     const name_dup = try gpa.dupe(u8, name);
     errdefer gpa.free(name_dup);
+    const semantic_owner = if (ctx.semantic) |services| try services.acquireOwner() else null;
     var module = try compileCached(engine, gpa, opts.module_cache_dir, wasm_bytes);
     errdefer module.deinit();
     var linker = try wasm.Linker.init(engine);
@@ -230,6 +231,7 @@ fn construct(engine: *wasm.Engine, ctx: *command.Context, name: []const u8, opts
         .ctx = ctx,
         .active_ctx = ctx,
         .name = name_dup,
+        .semantic_owner = semantic_owner,
         .store = opts.kv,
         .config_store = opts.config,
         .pool = opts.pool,

@@ -2,13 +2,13 @@
 //! generation-checked handles before constructing these values; the renderer
 //! sees only a scene root, stable focus identity, and generic field services.
 
-const kernel = @import("weft_kernel");
+const semantic = @import("weft_semantic");
 const view_runtime = @import("weft_view_runtime");
 
 pub const Document = struct {
-    view: kernel.view.Ref,
-    root: *const kernel.scene.Node,
-    focused: ?kernel.scene.NodeId = null,
+    view: semantic.view.Ref,
+    root: *const semantic.scene.Node,
+    focused: ?semantic.scene.NodeId = null,
     fields: *const view_runtime.field.Registry,
 };
 

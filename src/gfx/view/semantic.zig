@@ -1,13 +1,13 @@
 //! Bundled presenter for provider-authored semantic scenes.
 //!
-//! This is deliberately downstream of the kernel and view runtime: plugins
+//! This is deliberately downstream of the semantic and view runtime: plugins
 //! publish stable nodes, facts, actions, and generic editable fields; this
 //! renderer chooses rows, colors, and popup geometry. A radically different
 //! presenter can consume the same scene without changing dired, vim, or core.
 
 const std = @import("std");
 const Allocator = std.mem.Allocator;
-const kernel = @import("weft_kernel");
+const semantic = @import("weft_semantic");
 
 const region = @import("../region.zig");
 const view = @import("../view.zig");
@@ -26,7 +26,7 @@ pub const max_visual_bytes = 1 << 16;
 pub const Tone = enum { normal, muted, accent, positive, negative, warning, conflict };
 
 pub const Span = struct {
-    node: kernel.scene.NodeId,
+    node: semantic.scene.NodeId,
     text: []const u8,
     column: u16,
     tone: Tone,
@@ -39,8 +39,8 @@ pub const Row = struct {
 };
 
 pub const Hit = struct {
-    view: kernel.view.Ref,
-    node: kernel.scene.NodeId,
+    view: semantic.view.Ref,
+    node: semantic.scene.NodeId,
     rect: region.Rect,
 };
 
@@ -59,7 +59,7 @@ const Builder = struct {
     rows: std.ArrayList(Row) = .empty,
     span_count: usize = 0,
 
-    fn appendNode(self: *Builder, node: *const kernel.scene.Node, depth: usize, row: ?*std.ArrayList(Span)) Allocator.Error!void {
+    fn appendNode(self: *Builder, node: *const semantic.scene.Node, depth: usize, row: ?*std.ArrayList(Span)) Allocator.Error!void {
         if (depth > max_depth or self.rows.items.len >= max_rows) return;
         switch (node.content) {
             .container => |container| switch (container.axis) {
@@ -97,7 +97,7 @@ const Builder = struct {
         try self.rows.append(self.arena, .{ .spans = owned, .focused = focused });
     }
 
-    fn spanFor(self: *Builder, node: *const kernel.scene.Node, depth: usize, preceding: []const Span) Allocator.Error!Span {
+    fn spanFor(self: *Builder, node: *const semantic.scene.Node, depth: usize, preceding: []const Span) Allocator.Error!Span {
         const text = switch (node.content) {
             .label => |label| try displayBytes(self.arena, label),
             .action => |action| blk: {
@@ -176,7 +176,7 @@ pub fn drawOverlay(v: *View, scratch: Allocator, hit_arena: Allocator, runs: *st
     return hits.toOwnedSlice(hit_arena);
 }
 
-fn drawRows(v: *View, scratch: Allocator, hit_arena: Allocator, runs: *std.ArrayList(Run), rects: *std.ArrayList(Rect), hits: *std.ArrayList(Hit), view_ref: kernel.view.Ref, rows: []const Row, body: region.Rect, clip_width: bool) !void {
+fn drawRows(v: *View, scratch: Allocator, hit_arena: Allocator, runs: *std.ArrayList(Run), rects: *std.ArrayList(Rect), hits: *std.ArrayList(Hit), view_ref: semantic.view.Ref, rows: []const Row, body: region.Rect, clip_width: bool) !void {
     const count = @min(rows.len, @as(usize, @intFromFloat(@max(0, body.h) / v.line_h)));
     for (rows[0..count], 0..) |row, index| {
         const y = body.y + @as(f32, @floatFromInt(index)) * v.line_h;
@@ -205,7 +205,7 @@ fn colorFor(v: *const View, tone: Tone) [4]f32 {
     };
 }
 
-fn toneFor(node: *const kernel.scene.Node) Tone {
+fn toneFor(node: *const semantic.scene.Node) Tone {
     var value = node.role;
     for (node.facts) |fact| if (std.mem.eql(u8, fact.name, "tone")) {
         value = fact.value;
@@ -276,11 +276,11 @@ test "semantic rows preserve stable focus and field columns" {
     var fields = view_runtime.field.Registry.init(.here);
     defer fields.deinit(std.testing.allocator);
     const field_ref = try fields.insert(std.testing.allocator, "test", .init(&memory));
-    const children = [_]kernel.scene.Node{
+    const children = [_]semantic.scene.Node{
         .{ .id = @enumFromInt(2), .layout = .{ .column = 0 }, .content = .{ .label = "0644" } },
         .{ .id = @enumFromInt(3), .layout = .{ .column = 8 }, .focusable = true, .content = .{ .field = .{ .ref = field_ref } } },
     };
-    const root: kernel.scene.Node = .{ .id = @enumFromInt(1), .content = .{ .container = .{ .axis = .horizontal, .children = &children } } };
+    const root: semantic.scene.Node = .{ .id = @enumFromInt(1), .content = .{ .container = .{ .axis = .horizontal, .children = &children } } };
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
     const rows = try rowsFor(arena.allocator(), .{ .view = .{ .authority = .here, .slot = 0, .generation = 1 }, .root = &root, .focused = @enumFromInt(3), .fields = &fields });

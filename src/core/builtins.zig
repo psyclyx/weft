@@ -20,7 +20,7 @@ fn semanticFieldInput(ctx: *Context, input: @import("semantic.zig").Services.Fie
     return services.inputFocusedField(ctx.head, ctx.gpa, input);
 }
 
-fn semanticMove(ctx: *Context, movement: @import("weft_kernel").focus.Movement) !bool {
+fn semanticMove(ctx: *Context, movement: @import("weft_semantic").focus.Movement) !bool {
     const services = ctx.semantic orelse return false;
     return services.moveHeadFocus(ctx.head, ctx.gpa, movement);
 }

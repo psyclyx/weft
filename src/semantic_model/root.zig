@@ -1,10 +1,12 @@
-//! weft-kernel: portable editor/view contracts.
+//! weft-semantic: portable editor/view contracts.
 //!
 //! This is a real Zig module root. Code outside this directory imports it as
-//! `weft_kernel`; it must not reach into `src/kernel/*` by relative path.
+//! `weft_semantic`; it must not reach into `src/semantic_model/*` by relative
+//! path.
 
 pub const schema = @import("weft_schema");
 pub const handle = @import("handle.zig");
+pub const owner = @import("owner.zig");
 pub const target = @import("target.zig");
 pub const scene = @import("scene.zig");
 pub const view = @import("view.zig");

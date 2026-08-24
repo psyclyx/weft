@@ -2,7 +2,7 @@
 //!
 //! This is a real module root. Consumers import it as `weft_scene_codec` and
 //! cannot reach the implementation through a relative path. The codec itself
-//! only depends on the named `weft_kernel` and `weft_schema` modules (plus Zig
+//! only depends on the named `weft_semantic` and `weft_schema` modules (plus Zig
 //! std), so it is suitable for the platform-free contract gate and wasm guests.
 
 pub const codec = @import("codec.zig");
@@ -23,6 +23,12 @@ pub const target = struct {
     pub const encode = codec.encodeTarget;
     pub const decode = codec.decodeTarget;
     pub const Owned = codec.OwnedTarget;
+    pub const encodeDescriptor = codec.encodeTargetDescriptor;
+    pub const decodeDescriptor = codec.decodeTargetDescriptor;
+    pub const OwnedDescriptor = codec.OwnedTargetDescriptor;
+    pub const encodeLocated = codec.encodeLocatedTarget;
+    pub const decodeLocated = codec.decodeLocatedTarget;
+    pub const OwnedLocated = codec.OwnedLocatedTarget;
 };
 pub const transfer = struct {
     pub const encode = codec.encodeTransfer;
@@ -43,6 +49,10 @@ pub const encodeInteraction = codec.encodeInteraction;
 pub const decodeInteraction = codec.decodeInteraction;
 pub const encodeTarget = codec.encodeTarget;
 pub const decodeTarget = codec.decodeTarget;
+pub const encodeTargetDescriptor = codec.encodeTargetDescriptor;
+pub const decodeTargetDescriptor = codec.decodeTargetDescriptor;
+pub const encodeLocatedTarget = codec.encodeLocatedTarget;
+pub const decodeLocatedTarget = codec.decodeLocatedTarget;
 pub const encodeTransfer = codec.encodeTransfer;
 pub const decodeTransfer = codec.decodeTransfer;
 pub const encodeActionRequest = codec.encodeActionRequest;

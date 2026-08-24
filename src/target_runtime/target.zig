@@ -2,7 +2,7 @@
 //! they do not choose the plugin or view that will handle them.
 
 const std = @import("std");
-const kernel = @import("weft_kernel");
+const semantic = @import("weft_semantic");
 
 pub const Error = std.mem.Allocator.Error || error{
     InvalidOwner,
@@ -14,15 +14,15 @@ pub const Error = std.mem.Allocator.Error || error{
 
 pub const Instance = struct {
     arena: std.heap.ArenaAllocator,
-    owner: []const u8,
-    descriptor: kernel.target.Descriptor,
+    owner: semantic.owner.Id,
+    descriptor: semantic.target.Descriptor,
 
     fn create(
         gpa: std.mem.Allocator,
-        owner: []const u8,
-        ref: kernel.target.Ref,
+        owner: semantic.owner.Id,
+        ref: semantic.target.Ref,
         revision: u64,
-        definition: kernel.target.Definition,
+        definition: semantic.target.Definition,
     ) Error!*Instance {
         try validate(gpa, definition);
         const self = try gpa.create(Instance);
@@ -30,8 +30,8 @@ pub const Instance = struct {
         self.arena = .init(gpa);
         errdefer self.arena.deinit();
         const arena = self.arena.allocator();
-        self.owner = try arena.dupe(u8, owner);
-        const facts = try arena.alloc(kernel.target.Fact, definition.facts.len);
+        self.owner = owner;
+        const facts = try arena.alloc(semantic.target.Fact, definition.facts.len);
         for (definition.facts, facts) |source, *destination| destination.* = .{
             .name = try arena.dupe(u8, source.name),
             .value = try arena.dupe(u8, source.value),
@@ -56,7 +56,7 @@ pub const Instance = struct {
 };
 
 pub const Registry = struct {
-    authority: kernel.handle.Authority,
+    authority: semantic.handle.Authority,
     slots: std.ArrayList(Slot) = .empty,
 
     const Slot = struct {
@@ -64,7 +64,7 @@ pub const Registry = struct {
         instance: ?*Instance = null,
     };
 
-    pub fn init(authority: kernel.handle.Authority) Registry {
+    pub fn init(authority: semantic.handle.Authority) Registry {
         return .{ .authority = authority };
     }
 
@@ -76,10 +76,10 @@ pub const Registry = struct {
     pub fn publish(
         self: *Registry,
         gpa: std.mem.Allocator,
-        owner: []const u8,
-        definition: kernel.target.Definition,
-    ) Error!kernel.target.Ref {
-        if (owner.len == 0) return error.InvalidOwner;
+        owner: semantic.owner.Id,
+        definition: semantic.target.Definition,
+    ) Error!semantic.target.Ref {
+        if (!owner.isValid()) return error.InvalidOwner;
         for (self.slots.items, 0..) |*slot, index| {
             if (slot.instance != null) continue;
             const ref = self.refFor(index, slot.generation);
@@ -94,7 +94,7 @@ pub const Registry = struct {
         return ref;
     }
 
-    pub fn get(self: *const Registry, ref: kernel.target.Ref) ?*const kernel.target.Descriptor {
+    pub fn get(self: *const Registry, ref: semantic.target.Ref) ?*const semantic.target.Descriptor {
         if (ref.authority != self.authority or ref.slot >= self.slots.items.len) return null;
         const slot = self.slots.items[ref.slot];
         if (slot.generation != ref.generation) return null;
@@ -105,35 +105,35 @@ pub const Registry = struct {
     pub fn replace(
         self: *Registry,
         gpa: std.mem.Allocator,
-        owner: []const u8,
-        ref: kernel.target.Ref,
-        definition: kernel.target.Definition,
+        owner: semantic.owner.Id,
+        ref: semantic.target.Ref,
+        definition: semantic.target.Definition,
     ) Error!void {
         if (ref.authority != self.authority or ref.slot >= self.slots.items.len) return error.StaleTarget;
         const slot = &self.slots.items[ref.slot];
         if (slot.generation != ref.generation) return error.StaleTarget;
         const prior = slot.instance orelse return error.StaleTarget;
-        if (!std.mem.eql(u8, prior.owner, owner)) return error.OwnerMismatch;
+        if (prior.owner != owner) return error.OwnerMismatch;
         const next = try Instance.create(gpa, prior.owner, ref, prior.descriptor.revision +| 1, definition);
         slot.instance = next;
         prior.destroy(gpa);
     }
 
-    pub fn close(self: *Registry, gpa: std.mem.Allocator, owner: []const u8, ref: kernel.target.Ref) bool {
+    pub fn close(self: *Registry, gpa: std.mem.Allocator, owner: semantic.owner.Id, ref: semantic.target.Ref) bool {
         if (ref.authority != self.authority or ref.slot >= self.slots.items.len) return false;
         const slot = &self.slots.items[ref.slot];
         if (slot.generation != ref.generation) return false;
         const instance = slot.instance orelse return false;
-        if (!std.mem.eql(u8, instance.owner, owner)) return false;
+        if (instance.owner != owner) return false;
         self.retire(gpa, slot);
         return true;
     }
 
-    pub fn closeOwner(self: *Registry, gpa: std.mem.Allocator, owner: []const u8) usize {
+    pub fn closeOwner(self: *Registry, gpa: std.mem.Allocator, owner: semantic.owner.Id) usize {
         var closed: usize = 0;
         for (self.slots.items) |*slot| {
             const instance = slot.instance orelse continue;
-            if (!std.mem.eql(u8, instance.owner, owner)) continue;
+            if (instance.owner != owner) continue;
             self.retire(gpa, slot);
             closed += 1;
         }
@@ -147,12 +147,12 @@ pub const Registry = struct {
         if (slot.generation == 0) slot.generation = 1;
     }
 
-    fn refFor(self: *const Registry, index: usize, generation: u32) kernel.target.Ref {
+    fn refFor(self: *const Registry, index: usize, generation: u32) semantic.target.Ref {
         return .{ .authority = self.authority, .slot = @intCast(index), .generation = generation };
     }
 };
 
-fn validate(gpa: std.mem.Allocator, definition: kernel.target.Definition) Error!void {
+fn validate(gpa: std.mem.Allocator, definition: semantic.target.Definition) Error!void {
     var facts: std.StringHashMapUnmanaged(void) = .empty;
     defer facts.deinit(gpa);
     for (definition.facts) |fact| {
@@ -165,24 +165,26 @@ fn validate(gpa: std.mem.Allocator, definition: kernel.target.Definition) Error!
 test "target descriptors update without changing identity" {
     var targets = Registry.init(.here);
     defer targets.deinit(std.testing.allocator);
-    const ref = try targets.publish(std.testing.allocator, "producer", .{
+    const producer: semantic.owner.Id = @enumFromInt(1);
+    const other: semantic.owner.Id = @enumFromInt(2);
+    const ref = try targets.publish(std.testing.allocator, producer, .{
         .kind = .directory,
         .display_name = "remote project",
         .facts = &.{.{ .name = "locus", .value = "peer:alice" }},
     });
     const before = targets.get(ref).?.revision;
-    try std.testing.expectError(error.OwnerMismatch, targets.replace(std.testing.allocator, "other", ref, .{
+    try std.testing.expectError(error.OwnerMismatch, targets.replace(std.testing.allocator, other, ref, .{
         .kind = .directory,
         .display_name = "not theirs",
     }));
-    try targets.replace(std.testing.allocator, "producer", ref, .{
+    try targets.replace(std.testing.allocator, producer, ref, .{
         .kind = .directory,
         .display_name = "renamed project",
         .facts = &.{.{ .name = "locus", .value = "peer:alice" }},
     });
     try std.testing.expectEqual(before + 1, targets.get(ref).?.revision);
     try std.testing.expectEqualStrings("renamed project", targets.get(ref).?.display_name);
-    try std.testing.expect(!targets.close(std.testing.allocator, "other", ref));
-    try std.testing.expect(targets.close(std.testing.allocator, "producer", ref));
+    try std.testing.expect(!targets.close(std.testing.allocator, other, ref));
+    try std.testing.expect(targets.close(std.testing.allocator, producer, ref));
     try std.testing.expect(targets.get(ref) == null);
 }

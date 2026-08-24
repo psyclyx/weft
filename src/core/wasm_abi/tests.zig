@@ -40,12 +40,12 @@ test "wasm plugin: canonical targets and scenes cross the semantic membrane" {
     defer engine.deinit();
     const plugin = try loadPlugin(&engine, &env.ctx, "semantic-fixture", @embedFile("guest_semantic_wasm"), .{});
 
-    const target_ref: @import("weft_kernel").target.Ref = .{ .authority = .here, .slot = 0, .generation = 1 };
+    const target_ref: @import("weft_semantic").target.Ref = .{ .authority = .here, .slot = 0, .generation = 1 };
     const target = semantic.targets.get(target_ref).?;
     try t.expectEqualStrings("fixture directory", target.display_name);
     try t.expect(target.kind == .directory);
 
-    const view_ref: @import("weft_kernel").view.Ref = .{ .authority = .here, .slot = 0, .generation = 1 };
+    const view_ref: @import("weft_semantic").view.Ref = .{ .authority = .here, .slot = 0, .generation = 1 };
     const view = semantic.views.get(view_ref).?;
     try t.expect(view.descriptor.target.?.eql(target_ref));
     try t.expectEqual(@as(u64, 7), view.descriptor.revision);
@@ -53,7 +53,7 @@ test "wasm plugin: canonical targets and scenes cross the semantic membrane" {
     const field_ref = view.scene.content.container.children[0].content.field.ref;
     const interaction = env.head.interactions.active().?;
     try t.expectEqual(view_ref, interaction.descriptor.view);
-    try t.expectEqual(@as(@import("weft_kernel").scene.NodeId, @enumFromInt(1)), interaction.descriptor.root);
+    try t.expectEqual(@as(@import("weft_semantic").scene.NodeId, @enumFromInt(1)), interaction.descriptor.root);
     try t.expectEqualStrings("fixture-dialog", interaction.descriptor.presentation);
     try t.expectEqualStrings("fixture.yes", interaction.actionForInput("y").?.id);
     try t.expectEqualStrings("fixture.no", interaction.actionForInput("n").?.id);
@@ -76,7 +76,7 @@ test "wasm plugin: canonical targets and scenes cross the semantic membrane" {
     try t.expectEqualStrings("2", snapshot.value.revision);
     try t.expectEqualStrings("renamed", snapshot.value.bytes);
     try t.expectEqual(@as(u64, 7), snapshot.value.selection.caret);
-    const child_id: @import("weft_kernel").scene.NodeId = @enumFromInt(0x1_0000_0002);
+    const child_id: @import("weft_semantic").scene.NodeId = @enumFromInt(0x1_0000_0002);
     try t.expectEqual(child_id, env.head.semantic_focus.path().?.leaf().?);
     try t.expect((try semantic.actions.invoke(&semantic.views, .{
         .action = "fixture.open",
@@ -94,6 +94,66 @@ test "wasm plugin: canonical targets and scenes cross the semantic membrane" {
         .view = view_ref,
         .subject = child_id,
     }));
+}
+
+test "wasm plugin: semantic ownership is instance-specific and system-local" {
+    const gpa = t.allocator;
+    var env: Env = undefined;
+    try Env.init(gpa, &env);
+    defer env.deinit(gpa);
+    var home = semantic_mod.Services.init(.here);
+    defer home.deinit(gpa);
+    env.ctx.semantic = &home;
+
+    var engine = try wasm.Engine.init();
+    defer engine.deinit();
+    const bytes = @embedFile("guest_semantic_wasm");
+    const first = try loadPlugin(&engine, &env.ctx, "same-name", bytes, .{});
+    var first_live = true;
+    defer if (first_live) first.deinit();
+    const second = try loadPlugin(&engine, &env.ctx, "same-name", bytes, .{});
+    var second_live = true;
+    defer if (second_live) second.deinit();
+    try t.expect(first.semantic_owner.? != second.semantic_owner.?);
+
+    const first_target: @import("weft_semantic").target.Ref = .{ .authority = .here, .slot = 0, .generation = 1 };
+    const first_view: @import("weft_semantic").view.Ref = .{ .authority = .here, .slot = 0, .generation = 1 };
+    const second_target: @import("weft_semantic").target.Ref = .{ .authority = .here, .slot = 1, .generation = 1 };
+    const second_view: @import("weft_semantic").view.Ref = .{ .authority = .here, .slot = 1, .generation = 1 };
+    try t.expect(home.targets.get(first_target) != null);
+    try t.expect(home.targets.get(second_target) != null);
+
+    // A dispatch can borrow another head in the same system, but persistent
+    // endpoints may never escape into a different system's registries.
+    var foreign = semantic_mod.Services.init(@enumFromInt(9));
+    defer foreign.deinit(gpa);
+    var foreign_ctx = env.ctx;
+    foreign_ctx.semantic = &foreign;
+    first.active_ctx = &foreign_ctx;
+    try t.expect(first.semanticScope() == null);
+    var ignored: [1]i32 = .{-1};
+    @import("../wasm_host/semantic_action.zig").hProvider(first, undefined, &.{}, &ignored);
+    try t.expectEqual(@as(i32, 0), ignored[0]);
+    try t.expect(!foreign.releaseOwner(gpa, first.semantic_owner.?).action_provider);
+    first.active_ctx = first.ctx;
+
+    second.deinit();
+    second_live = false;
+    try t.expect(home.targets.get(second_target) == null);
+    try t.expect(home.views.get(second_view) == null);
+    try t.expect(home.targets.get(first_target) != null);
+    try t.expect(home.views.get(first_view) != null);
+    try t.expect((try home.actions.invoke(&home.views, .{
+        .action = "fixture.open",
+        .view = first_view,
+        .subject = @enumFromInt(0x1_0000_0002),
+        .selection = .{ .nodes = &.{@enumFromInt(0x1_0000_0002)} },
+    })) == .handled);
+
+    first.deinit();
+    first_live = false;
+    try t.expect(home.targets.get(first_target) == null);
+    try t.expect(home.views.get(first_view) == null);
 }
 
 test "wasm plugin: a .wasm guest edits the buffer through the host ABI, as its peer" {
@@ -1939,7 +1999,7 @@ test "wasm plugin: an fs_root-limited grant confines fs through a REAL guest —
     const in_path = try std.fmt.bufPrint(&in_path_buf, "{s}/note.txt", .{root});
 
     // In-root write, then read, succeed — across the membrane, through the
-    // REAL split semantic bodies + the kernel-confined RootedFs backstop.
+    // REAL split semantic bodies + the semantic-confined RootedFs backstop.
     const wr = try command.run(&env.commands, &env.ctx, "try-write", &.{ .{ .string = in_path }, .{ .string = "hi from guest" } });
     try t.expectEqual(command.Value{ .integer = 1 }, wr);
     const rr = try command.run(&env.commands, &env.ctx, "try-read", &.{.{ .string = in_path }});

@@ -1,4 +1,4 @@
-//! Opaque, generation-checked handles shared by kernel contracts.
+//! Opaque, generation-checked handles shared by semantic contracts.
 //!
 //! A handle is portable between view instances in one authority, but it is
 //! never an OS descriptor or a pointer.  The table that minted it remains the

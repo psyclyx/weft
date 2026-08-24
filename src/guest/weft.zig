@@ -41,7 +41,7 @@ pub const schema = @import("weft_schema");
 /// Portable semantic values and their canonical codec. These are named build
 /// modules under the wasm target too: a plugin can author scenes and targets,
 /// but cannot import host runtime implementation files sideways.
-pub const semantic_kernel = @import("weft_kernel");
+pub const semantic = @import("weft_semantic");
 pub const semantic_codec = @import("weft_scene_codec");
 
 // ── Raw host imports (the grants). Named `wl_*` to keep the ergonomic
@@ -1021,7 +1021,7 @@ pub fn semanticActive() bool {
 /// Attach a retained semantic view to this head. NodeId is canonically split
 /// into two wasm32 words; the explicit presence bit keeps an absent preference
 /// distinct from any raw u64 value.
-pub fn semanticViewFocus(ref: semantic_kernel.view.Ref, preferred: ?semantic_kernel.scene.NodeId) bool {
+pub fn semanticViewFocus(ref: semantic.view.Ref, preferred: ?semantic.scene.NodeId) bool {
     const wire = ref.toWire();
     const raw: u64 = if (preferred) |node| @intFromEnum(node) else 0;
     const low: u32 = @truncate(raw);
@@ -1031,16 +1031,16 @@ pub fn semanticViewFocus(ref: semantic_kernel.view.Ref, preferred: ?semantic_ker
 
 /// Open a bounded head-local interaction definition using the canonical
 /// scene codec. The host owns the decoded descriptor and returns a typed ref.
-pub fn semanticInteractionOpen(definition: semantic_kernel.interaction.Definition) SemanticPublishError!semantic_kernel.interaction.Ref {
+pub fn semanticInteractionOpen(definition: semantic.interaction.Definition) SemanticPublishError!semantic.interaction.Ref {
     const payload = try semantic_codec.encodeInteraction(allocator, definition);
     defer allocator.free(payload);
     var out: [12]u8 = undefined;
     if (wl_semantic_interaction_open(p(payload.ptr), @intCast(payload.len), p(&out), out.len) != 1) return error.Rejected;
-    return readSemanticHandle(semantic_kernel.interaction.Ref, &out);
+    return readSemanticHandle(semantic.interaction.Ref, &out);
 }
 
 /// Close only the currently active interaction named by this typed ref.
-pub fn semanticInteractionClose(ref: semantic_kernel.interaction.Ref) bool {
+pub fn semanticInteractionClose(ref: semantic.interaction.Ref) bool {
     const wire = ref.toWire();
     return wl_semantic_interaction_close(wire.authority, wire.slot, wire.generation) != 0;
 }
@@ -1094,14 +1094,14 @@ pub fn semanticActionHandled() bool {
     return semanticActionRespondEmpty(.handled);
 }
 
-pub fn semanticActionTransfer(item: semantic_kernel.transfer.Item) SemanticPublishError!void {
+pub fn semanticActionTransfer(item: semantic.transfer.Item) SemanticPublishError!void {
     const payload = try semantic_codec.transfer.encode(allocator, item);
     defer allocator.free(payload);
     if (wl_semantic_action_respond(@intFromEnum(SemanticActionResponse.transfer), p(payload.ptr), @intCast(payload.len)) != 1)
         return error.Rejected;
 }
 
-pub fn semanticActionInteraction(definition: semantic_kernel.interaction.Definition) SemanticPublishError!void {
+pub fn semanticActionInteraction(definition: semantic.interaction.Definition) SemanticPublishError!void {
     const payload = try semantic_codec.interaction.encode(allocator, definition);
     defer allocator.free(payload);
     if (wl_semantic_action_respond(@intFromEnum(SemanticActionResponse.interaction), p(payload.ptr), @intCast(payload.len)) != 1)
@@ -1111,7 +1111,7 @@ pub fn semanticActionInteraction(definition: semantic_kernel.interaction.Definit
 pub const SemanticPublishError = semantic_codec.Error || error{Rejected};
 
 fn readSemanticHandle(comptime Ref: type, bytes: *const [12]u8) SemanticPublishError!Ref {
-    const wire: semantic_kernel.handle.Wire = .{
+    const wire: semantic.handle.Wire = .{
         .authority = std.mem.readInt(u32, bytes[0..4], .little),
         .slot = std.mem.readInt(u32, bytes[4..8], .little),
         .generation = std.mem.readInt(u32, bytes[8..12], .little),
@@ -1122,15 +1122,15 @@ fn readSemanticHandle(comptime Ref: type, bytes: *const [12]u8) SemanticPublishE
 
 /// Publish a resource descriptor. Paths and schemes remain ordinary target
 /// facts; target-handler plugins, not this SDK, decide what can open them.
-pub fn semanticTargetPublish(definition: semantic_kernel.target.Definition) SemanticPublishError!semantic_kernel.target.Ref {
+pub fn semanticTargetPublish(definition: semantic.target.Definition) SemanticPublishError!semantic.target.Ref {
     const payload = try semantic_codec.encodeTarget(allocator, definition);
     defer allocator.free(payload);
     var out: [12]u8 = undefined;
     if (wl_semantic_target_publish(p(payload.ptr), @intCast(payload.len), p(&out), out.len) != 1) return error.Rejected;
-    return readSemanticHandle(semantic_kernel.target.Ref, &out);
+    return readSemanticHandle(semantic.target.Ref, &out);
 }
 
-pub fn semanticTargetReplace(ref: semantic_kernel.target.Ref, definition: semantic_kernel.target.Definition) SemanticPublishError!void {
+pub fn semanticTargetReplace(ref: semantic.target.Ref, definition: semantic.target.Definition) SemanticPublishError!void {
     const payload = try semantic_codec.encodeTarget(allocator, definition);
     defer allocator.free(payload);
     const wire = ref.toWire();
@@ -1138,17 +1138,17 @@ pub fn semanticTargetReplace(ref: semantic_kernel.target.Ref, definition: semant
         return error.Rejected;
 }
 
-pub fn semanticTargetClose(ref: semantic_kernel.target.Ref) bool {
+pub fn semanticTargetClose(ref: semantic.target.Ref) bool {
     const wire = ref.toWire();
     return wl_semantic_target_close(wire.authority, wire.slot, wire.generation) != 0;
 }
 
 /// Publish a retained scene. A null target is represented canonically by an
 /// all-zero wire tuple and cannot be confused with a live generation.
-pub fn semanticViewPublish(root: semantic_kernel.scene.Node, target: ?semantic_kernel.target.Ref, revision: u32) SemanticPublishError!semantic_kernel.view.Ref {
+pub fn semanticViewPublish(root: semantic.scene.Node, target: ?semantic.target.Ref, revision: u32) SemanticPublishError!semantic.view.Ref {
     const payload = try semantic_codec.encodeScene(allocator, root);
     defer allocator.free(payload);
-    const target_wire: semantic_kernel.handle.Wire = if (target) |ref| ref.toWire() else .{ .authority = 0, .slot = 0, .generation = 0 };
+    const target_wire: semantic.handle.Wire = if (target) |ref| ref.toWire() else .{ .authority = 0, .slot = 0, .generation = 0 };
     var out: [12]u8 = undefined;
     if (wl_semantic_view_publish(
         p(payload.ptr),
@@ -1160,10 +1160,10 @@ pub fn semanticViewPublish(root: semantic_kernel.scene.Node, target: ?semantic_k
         p(&out),
         out.len,
     ) != 1) return error.Rejected;
-    return readSemanticHandle(semantic_kernel.view.Ref, &out);
+    return readSemanticHandle(semantic.view.Ref, &out);
 }
 
-pub fn semanticViewReplace(ref: semantic_kernel.view.Ref, revision: u32, root: semantic_kernel.scene.Node) SemanticPublishError!void {
+pub fn semanticViewReplace(ref: semantic.view.Ref, revision: u32, root: semantic.scene.Node) SemanticPublishError!void {
     const payload = try semantic_codec.encodeScene(allocator, root);
     defer allocator.free(payload);
     const wire = ref.toWire();
@@ -1171,7 +1171,7 @@ pub fn semanticViewReplace(ref: semantic_kernel.view.Ref, revision: u32, root: s
         return error.Rejected;
 }
 
-pub fn semanticViewClose(ref: semantic_kernel.view.Ref) bool {
+pub fn semanticViewClose(ref: semantic.view.Ref) bool {
     const wire = ref.toWire();
     return wl_semantic_view_close(wire.authority, wire.slot, wire.generation) != 0;
 }
@@ -1194,7 +1194,7 @@ fn semanticFieldFlags(snapshot: SemanticFieldSnapshot) u32 {
         (@as(u32, @intFromBool(snapshot.single_line)) << 1);
 }
 
-pub fn semanticFieldRegister(token: u32, snapshot: SemanticFieldSnapshot) SemanticPublishError!semantic_kernel.scene.FieldRef {
+pub fn semanticFieldRegister(token: u32, snapshot: SemanticFieldSnapshot) SemanticPublishError!semantic.scene.FieldRef {
     var out: [12]u8 = undefined;
     if (wl_semantic_field_register(
         token,
@@ -1208,10 +1208,10 @@ pub fn semanticFieldRegister(token: u32, snapshot: SemanticFieldSnapshot) Semant
         p(&out),
         out.len,
     ) != 1) return error.Rejected;
-    return readSemanticHandle(semantic_kernel.scene.FieldRef, &out);
+    return readSemanticHandle(semantic.scene.FieldRef, &out);
 }
 
-pub fn semanticFieldUpdate(ref: semantic_kernel.scene.FieldRef, snapshot: SemanticFieldSnapshot) SemanticPublishError!void {
+pub fn semanticFieldUpdate(ref: semantic.scene.FieldRef, snapshot: SemanticFieldSnapshot) SemanticPublishError!void {
     const wire = ref.toWire();
     if (wl_semantic_field_update(
         wire.authority,
@@ -1227,7 +1227,7 @@ pub fn semanticFieldUpdate(ref: semantic_kernel.scene.FieldRef, snapshot: Semant
     ) != 1) return error.Rejected;
 }
 
-pub fn semanticFieldClose(ref: semantic_kernel.scene.FieldRef) bool {
+pub fn semanticFieldClose(ref: semantic.scene.FieldRef) bool {
     const wire = ref.toWire();
     return wl_semantic_field_close(wire.authority, wire.slot, wire.generation) != 0;
 }

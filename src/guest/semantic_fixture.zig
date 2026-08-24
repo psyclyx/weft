@@ -2,10 +2,10 @@
 //! membrane without importing host runtime implementation.
 
 const weft = @import("weft");
-const kernel = weft.semantic_kernel;
+const semantic = weft.semantic;
 const std = @import("std");
 
-var field_ref: kernel.scene.FieldRef = undefined;
+var field_ref: semantic.scene.FieldRef = undefined;
 
 export fn init() void {
     if (!weft.semanticActionProvider()) unreachable;
@@ -20,7 +20,7 @@ export fn init() void {
         .selection = .{ .anchor = 0, .caret = 4 },
         .single_line = true,
     }) catch unreachable;
-    const child: kernel.scene.Node = .{
+    const child: semantic.scene.Node = .{
         // Deliberately above wasm32's word width: the focus import must carry
         // the canonical NodeId without truncating its high half.
         .id = @enumFromInt(0x1_0000_0002),
@@ -35,7 +35,7 @@ export fn init() void {
     }, target, 7) catch unreachable;
     if (!weft.semanticViewFocus(view, child.id)) unreachable;
 
-    const definition: kernel.interaction.Definition = .{
+    const definition: semantic.interaction.Definition = .{
         .role = .dialog,
         .view = view,
         .root = @enumFromInt(1),

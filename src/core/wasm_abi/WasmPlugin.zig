@@ -23,6 +23,8 @@ const proc_stream = @import("../proc_stream.zig");
 const Pool = @import("../task.zig").Pool;
 const grants_mod = @import("../grants.zig");
 const plugin_semantic = @import("weft_plugin_semantic");
+const semantic_model = @import("weft_semantic");
+const semantic_runtime = @import("../semantic.zig");
 
 // The host-import table operates on `WasmPlugin` (principal() routes edits
 // through its peer resolver); the two @import each other (Zig allows it).
@@ -125,6 +127,9 @@ in_dispatch: bool = false,
 /// nest with itself).
 loading: bool = false,
 name: []u8,
+/// Opaque identity for this loaded instance's persistent semantic resources.
+/// Two concurrent/reloading instances may share `name` but never this value.
+semantic_owner: ?semantic_model.owner.Id = null,
 /// A transient author identity, set only for the duration of a single
 /// `wl_edit_as` call: subsequent edits (and the peer resolver) author as this
 /// named `role=.agent` sub-peer instead of the plugin's own peer. Borrowed (the
@@ -312,6 +317,22 @@ pub fn activeCtx(self: *WasmPlugin) *command.Context {
     return self.active_ctx;
 }
 
+pub const SemanticScope = struct {
+    services: *semantic_runtime.Services,
+    owner: semantic_model.owner.Id,
+};
+
+/// Persistent semantic endpoints are owned by the system that loaded the
+/// plugin. A dispatch may borrow another head in that same system, but it may
+/// not publish provider pointers into a different system's registries.
+pub fn semanticScope(self: *WasmPlugin) ?SemanticScope {
+    const owner = self.semantic_owner orelse return null;
+    const home = self.ctx.semantic orelse return null;
+    const active = self.active_ctx.semantic orelse return null;
+    if (active != home) return null;
+    return .{ .services = home, .owner = owner };
+}
+
 pub fn declaresCommand(self: *WasmPlugin, name: []const u8) bool {
     for (self.declared.items) |d| if (std.mem.eql(u8, d, name)) return true;
     return false;
@@ -338,7 +359,9 @@ pub fn deinit(self: *WasmPlugin) void {
     // Semantic resources hold provider pointers into this plugin. Revoke the
     // whole owner namespace while the guest instance is still alive; every
     // retained handle becomes stale before either side can dangle.
-    if (self.ctx.semantic) |services| _ = services.releaseOwner(gpa, self.name);
+    if (self.semantic_owner) |owner| {
+        if (self.ctx.semantic) |services| _ = services.releaseOwner(gpa, owner);
+    }
     self.semantic_fields.deinit();
     self.semantic_actions.deinit();
     // Completion provider dies with the plugin (unregister before freeing

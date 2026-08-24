@@ -2,12 +2,12 @@
 
 const std = @import("std");
 const wasm = @import("../wasm.zig");
-const kernel = @import("weft_kernel");
+const semantic = @import("weft_semantic");
 
-pub const handle_bytes = @sizeOf(kernel.handle.Wire);
+pub const handle_bytes = @sizeOf(semantic.handle.Wire);
 
 pub fn readHandle(comptime Ref: type, args: []const i32) ?Ref {
-    const wire: kernel.handle.Wire = .{
+    const wire: semantic.handle.Wire = .{
         .authority = @bitCast(args[0]),
         .slot = @bitCast(args[1]),
         .generation = @bitCast(args[2]),

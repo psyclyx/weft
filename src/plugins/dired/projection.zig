@@ -5,12 +5,12 @@
 //! never imports view runtime or mutates the dired model.
 
 const std = @import("std");
-const kernel = @import("weft_kernel");
+const semantic = @import("weft_semantic");
 const fs = @import("weft_fs");
 const model = @import("model.zig");
 
-const scene = kernel.scene;
-const standard = kernel.action.standard;
+const scene = semantic.scene;
+const standard = semantic.action.standard;
 const contract = fs.contract;
 
 pub const FieldBinding = struct {

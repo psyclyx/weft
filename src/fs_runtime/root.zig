@@ -1,7 +1,7 @@
 //! weft-fs-runtime: authority-scoped routing over filesystem providers.
 //!
 //! This root is deliberately only a facade. The module depends on the named
-//! `weft_kernel` and `weft_fs` contracts; platform providers remain outside.
+//! `weft_semantic` and `weft_fs` contracts; platform providers remain outside.
 
 pub const router = @import("router.zig");
 

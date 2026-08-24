@@ -41,6 +41,9 @@ pub const Location = union(enum) {
 
 pub const Located = struct {
     target: Ref,
+    /// Descriptor revision selected during handler resolution. Opening after
+    /// replacement is stale even though the target handle generation is live.
+    revision: u64,
     location: Location = .whole,
 };
 

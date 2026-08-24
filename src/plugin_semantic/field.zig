@@ -7,7 +7,7 @@
 //! exposing guest pointers or baking an editor/tool model into the contract.
 
 const std = @import("std");
-const kernel = @import("weft_kernel");
+const semantic = @import("weft_semantic");
 const view_runtime = @import("weft_view_runtime");
 
 pub const max_revision_bytes: usize = 4096;
@@ -27,7 +27,7 @@ pub const Error = view_runtime.field.Error || error{
 };
 
 pub const CurrentEdit = struct {
-    field: kernel.scene.FieldRef,
+    field: semantic.scene.FieldRef,
     token: u32,
     expected_revision: []const u8,
     edit: view_runtime.field.Edit,
@@ -63,7 +63,7 @@ const State = struct {
 const Proxy = struct {
     bridge: *Bridge,
     token: u32,
-    ref: kernel.scene.FieldRef = undefined,
+    ref: semantic.scene.FieldRef = undefined,
     state: State,
 
     pub fn snapshot(self: *Proxy, gpa: std.mem.Allocator) view_runtime.field.Error!view_runtime.field.OwnedSnapshot {
@@ -139,10 +139,10 @@ pub const Bridge = struct {
     pub fn register(
         self: *Bridge,
         fields: *view_runtime.field.Registry,
-        owner: []const u8,
+        owner: semantic.owner.Id,
         token: u32,
         initial: view_runtime.field.Snapshot,
-    ) Error!kernel.scene.FieldRef {
+    ) Error!semantic.scene.FieldRef {
         if (!self.initialized) return error.Failed;
         for (self.proxies.items) |proxy| if (proxy.token == token) return error.DuplicateToken;
         const proxy = try self.gpa.create(Proxy);
@@ -156,7 +156,7 @@ pub const Bridge = struct {
         return ref;
     }
 
-    pub fn update(self: *Bridge, ref: kernel.scene.FieldRef, value: view_runtime.field.Snapshot) Error!void {
+    pub fn update(self: *Bridge, ref: semantic.scene.FieldRef, value: view_runtime.field.Snapshot) Error!void {
         const proxy = self.find(ref) orelse return error.UnknownField;
         if (self.current) |current| {
             if (current.value.field.eql(ref) and std.mem.eql(u8, current.value.expected_revision, value.revision))
@@ -174,8 +174,8 @@ pub const Bridge = struct {
     pub fn remove(
         self: *Bridge,
         fields: *view_runtime.field.Registry,
-        owner: []const u8,
-        ref: kernel.scene.FieldRef,
+        owner: semantic.owner.Id,
+        ref: semantic.scene.FieldRef,
     ) Error!void {
         if (self.current) |current| if (current.value.field.eql(ref)) return error.Busy;
         for (self.proxies.items, 0..) |proxy, index| {
@@ -192,7 +192,7 @@ pub const Bridge = struct {
         return if (self.current) |current| current.value else null;
     }
 
-    fn find(self: *const Bridge, ref: kernel.scene.FieldRef) ?*Proxy {
+    fn find(self: *const Bridge, ref: semantic.scene.FieldRef) ?*Proxy {
         for (self.proxies.items) |proxy| if (proxy.ref.eql(ref)) return proxy;
         return null;
     }
@@ -204,9 +204,10 @@ pub const Bridge = struct {
 };
 
 test "sandbox field accepts an edit only through a revision-changing update" {
+    const owner: semantic.owner.Id = @enumFromInt(1);
     const Fixture = struct {
         bridge: *Bridge = undefined,
-        ref: kernel.scene.FieldRef = undefined,
+        ref: semantic.scene.FieldRef = undefined,
         calls: usize = 0,
 
         fn invoke(raw: *anyopaque, token: u32) CallbackError!void {
@@ -228,7 +229,7 @@ test "sandbox field accepts an edit only through a revision-changing update" {
     var bridge = Bridge.init(std.testing.allocator, .{ .context = &fixture, .invoke_edit = Fixture.invoke });
     defer bridge.deinit();
     fixture.bridge = &bridge;
-    fixture.ref = try bridge.register(&fields, "tool", 7, .{
+    fixture.ref = try bridge.register(&fields, owner, 7, .{
         .revision = "1",
         .bytes = "name",
         .selection = .{ .anchor = 0, .caret = 4 },
@@ -245,6 +246,7 @@ test "sandbox field accepts an edit only through a revision-changing update" {
 }
 
 test "sandbox field rejects duplicate tokens and callbacks that do not update" {
+    const owner: semantic.owner.Id = @enumFromInt(1);
     const Decline = struct {
         fn invoke(_: *anyopaque, _: u32) CallbackError!void {}
     };
@@ -253,9 +255,9 @@ test "sandbox field rejects duplicate tokens and callbacks that do not update" {
     var marker: u8 = 0;
     var bridge = Bridge.init(std.testing.allocator, .{ .context = &marker, .invoke_edit = Decline.invoke });
     defer bridge.deinit();
-    const ref = try bridge.register(&fields, "tool", 1, .{ .revision = "1", .bytes = "x", .selection = .{ .anchor = 1, .caret = 1 } });
-    try std.testing.expectError(error.DuplicateToken, bridge.register(&fields, "tool", 1, .{ .revision = "1", .bytes = "y", .selection = .{ .anchor = 0, .caret = 0 } }));
+    const ref = try bridge.register(&fields, owner, 1, .{ .revision = "1", .bytes = "x", .selection = .{ .anchor = 1, .caret = 1 } });
+    try std.testing.expectError(error.DuplicateToken, bridge.register(&fields, owner, 1, .{ .revision = "1", .bytes = "y", .selection = .{ .anchor = 0, .caret = 0 } }));
     try std.testing.expectError(error.Failed, fields.get(ref).?.edit("1", .{ .start = 1, .end = 1, .replacement = "!" }));
-    try bridge.remove(&fields, "tool", ref);
+    try bridge.remove(&fields, owner, ref);
     try std.testing.expect(fields.get(ref) == null);
 }

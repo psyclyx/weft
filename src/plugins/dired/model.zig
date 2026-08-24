@@ -6,10 +6,10 @@
 //! another dired instance.
 
 const std = @import("std");
-const kernel = @import("weft_kernel");
+const semantic = @import("weft_semantic");
 const fs = @import("weft_fs");
 
-const transfer = kernel.transfer;
+const transfer = semantic.transfer;
 const contract = fs.contract;
 
 pub const NodeId = u64;
@@ -845,7 +845,7 @@ fn decodeEntry(payload: []const u8) !EntryCapture {
     return .{ .root = root, .entry = entry_ref, .revision = revision, .kind = @enumFromInt(raw_kind), .mode = if (has_mode == 0) null else mode };
 }
 
-fn putHandle(gpa: std.mem.Allocator, bytes: *std.ArrayList(u8), authority: kernel.handle.Authority, slot: u32, generation: u32) !void {
+fn putHandle(gpa: std.mem.Allocator, bytes: *std.ArrayList(u8), authority: semantic.handle.Authority, slot: u32, generation: u32) !void {
     if (generation == 0) return error.InvalidTransfer;
     try putU32(gpa, bytes, @intFromEnum(authority));
     try putU32(gpa, bytes, slot);

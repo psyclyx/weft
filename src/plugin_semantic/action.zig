@@ -5,7 +5,7 @@
 //! It knows no editor mode, tool kind, wasm runtime, or clipboard policy.
 
 const std = @import("std");
-const kernel = @import("weft_kernel");
+const semantic = @import("weft_semantic");
 const scene_codec = @import("weft_scene_codec");
 const view_runtime = @import("weft_view_runtime");
 
@@ -36,7 +36,7 @@ const OwnedOutcome = union(enum) {
         self.* = undefined;
     }
 
-    fn borrowed(self: *const OwnedOutcome) kernel.action.Outcome {
+    fn borrowed(self: *const OwnedOutcome) semantic.action.Outcome {
         return switch (self.*) {
             .declined => .declined,
             .handled => .handled,
@@ -69,7 +69,7 @@ pub const Bridge = struct {
 
     /// Implements `weft_view_runtime.action.Provider`. Returned aggregate data
     /// is borrowed from this bridge until the next invocation or deinit.
-    pub fn invoke(self: *Bridge, request: kernel.action.Request) view_runtime.action.ProviderError!kernel.action.Outcome {
+    pub fn invoke(self: *Bridge, request: semantic.action.Request) view_runtime.action.ProviderError!semantic.action.Outcome {
         if (!self.initialized or self.request_wire != null) return error.Failed;
         self.clearResponse();
         self.request_wire = scene_codec.action.encodeRequest(self.gpa, request) catch return error.Failed;
@@ -186,7 +186,7 @@ test "sandbox action bridge requires exactly one response during callback" {
     var bridge = Bridge.init(std.testing.allocator, .{ .context = &fixture, .invoke = Fixture.invoke });
     defer bridge.deinit();
     fixture.bridge = &bridge;
-    const request: kernel.action.Request = .{
+    const request: semantic.action.Request = .{
         .action = "go",
         .view = .{ .authority = .here, .slot = 1, .generation = 1 },
         .subject = @enumFromInt(1),

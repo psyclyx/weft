@@ -1,7 +1,7 @@
-//! Canonical, bounded wire codec for the portable semantic kernel values.
+//! Canonical, bounded wire codec for portable semantic values.
 
 const std = @import("std");
-const kernel = @import("weft_kernel");
+const semantic = @import("weft_semantic");
 const schema = @import("weft_schema");
 
 /// Re-exporting the named schema dependency makes the shared architecture
@@ -35,6 +35,8 @@ const interaction_kind: u8 = 2;
 const target_kind: u8 = 3;
 const transfer_kind: u8 = 4;
 const action_request_kind: u8 = 5;
+const target_descriptor_kind: u8 = 6;
+const located_target_kind: u8 = 7;
 const root_parent: u64 = std.math.maxInt(u32);
 
 const Writer = struct {
@@ -210,12 +212,12 @@ fn checkHeader(reader: *Reader, expected_kind: u8) Error!void {
     if (try reader.byte() != protocol_version or try reader.byte() != expected_kind) return error.Corrupt;
 }
 
-fn nodeId(raw: u64) Error!kernel.scene.NodeId {
+fn nodeId(raw: u64) Error!semantic.scene.NodeId {
     if (raw == 0) return error.InvalidData;
     return @enumFromInt(raw);
 }
 
-fn axisTag(axis: kernel.scene.Axis) u8 {
+fn axisTag(axis: semantic.scene.Axis) u8 {
     return switch (axis) {
         .horizontal => 0,
         .vertical => 1,
@@ -223,7 +225,7 @@ fn axisTag(axis: kernel.scene.Axis) u8 {
     };
 }
 
-fn axisFromTag(raw: u8) Error!kernel.scene.Axis {
+fn axisFromTag(raw: u8) Error!semantic.scene.Axis {
     return switch (raw) {
         0 => .horizontal,
         1 => .vertical,
@@ -232,7 +234,7 @@ fn axisFromTag(raw: u8) Error!kernel.scene.Axis {
     };
 }
 
-fn roleTag(role: kernel.interaction.Role) u8 {
+fn roleTag(role: semantic.interaction.Role) u8 {
     return switch (role) {
         .dialog => 0,
         .picker => 1,
@@ -241,7 +243,7 @@ fn roleTag(role: kernel.interaction.Role) u8 {
     };
 }
 
-fn roleFromTag(raw: u8) Error!kernel.interaction.Role {
+fn roleFromTag(raw: u8) Error!semantic.interaction.Role {
     return switch (raw) {
         0 => .dialog,
         1 => .picker,
@@ -251,14 +253,14 @@ fn roleFromTag(raw: u8) Error!kernel.interaction.Role {
     };
 }
 
-fn dispositionTag(disposition: kernel.interaction.Disposition) u8 {
+fn dispositionTag(disposition: semantic.interaction.Disposition) u8 {
     return switch (disposition) {
         .keep_open => 0,
         .close_on_handled => 1,
     };
 }
 
-fn dispositionFromTag(raw: u8) Error!kernel.interaction.Disposition {
+fn dispositionFromTag(raw: u8) Error!semantic.interaction.Disposition {
     return switch (raw) {
         0 => .keep_open,
         1 => .close_on_handled,
@@ -266,7 +268,7 @@ fn dispositionFromTag(raw: u8) Error!kernel.interaction.Disposition {
     };
 }
 
-fn targetKindTag(kind: kernel.target.Kind) u8 {
+fn targetKindTag(kind: semantic.target.Kind) u8 {
     return switch (kind) {
         .unknown => 0,
         .file => 1,
@@ -283,7 +285,7 @@ fn writeHandle(writer: *Writer, handle: anytype) Error!void {
     try writer.writeU32(wire.generation);
 }
 
-fn readFieldHandle(reader: *Reader) Error!kernel.scene.FieldRef {
+fn readFieldHandle(reader: *Reader) Error!semantic.scene.FieldRef {
     const authority = try reader.readU32();
     const slot = try reader.readU32();
     const generation = try reader.readU32();
@@ -291,7 +293,7 @@ fn readFieldHandle(reader: *Reader) Error!kernel.scene.FieldRef {
     return .fromWire(.{ .authority = authority, .slot = slot, .generation = generation });
 }
 
-fn readViewHandle(reader: *Reader) Error!kernel.view.Ref {
+fn readViewHandle(reader: *Reader) Error!semantic.view.Ref {
     const authority = try reader.readU32();
     const slot = try reader.readU32();
     const generation = try reader.readU32();
@@ -299,7 +301,7 @@ fn readViewHandle(reader: *Reader) Error!kernel.view.Ref {
     return .fromWire(.{ .authority = authority, .slot = slot, .generation = generation });
 }
 
-fn readTargetHandle(reader: *Reader) Error!kernel.target.Ref {
+fn readTargetHandle(reader: *Reader) Error!semantic.target.Ref {
     const authority = try reader.readU32();
     const slot = try reader.readU32();
     const generation = try reader.readU32();
@@ -311,7 +313,7 @@ fn readTargetHandle(reader: *Reader) Error!kernel.target.Ref {
 
 const SceneCount = struct { nodes: usize = 0 };
 
-fn validateSceneNode(gpa: std.mem.Allocator, node: kernel.scene.Node, seen: *std.AutoHashMapUnmanaged(u64, void), depth: usize, count: *SceneCount) Error!void {
+fn validateSceneNode(gpa: std.mem.Allocator, node: semantic.scene.Node, seen: *std.AutoHashMapUnmanaged(u64, void), depth: usize, count: *SceneCount) Error!void {
     if (depth > Limits.max_depth) return error.LimitExceeded;
     count.nodes += 1;
     if (count.nodes > Limits.max_nodes) return error.LimitExceeded;
@@ -351,7 +353,7 @@ fn validateSceneNode(gpa: std.mem.Allocator, node: kernel.scene.Node, seen: *std
     }
 }
 
-fn countScene(gpa: std.mem.Allocator, root: kernel.scene.Node) Error!usize {
+fn countScene(gpa: std.mem.Allocator, root: semantic.scene.Node) Error!usize {
     var seen: std.AutoHashMapUnmanaged(u64, void) = .empty;
     defer seen.deinit(gpa);
     var count: SceneCount = .{};
@@ -359,7 +361,7 @@ fn countScene(gpa: std.mem.Allocator, root: kernel.scene.Node) Error!usize {
     return count.nodes;
 }
 
-fn encodeSceneNode(writer: *Writer, node: kernel.scene.Node, parent: u32, index: *u32) Error!void {
+fn encodeSceneNode(writer: *Writer, node: semantic.scene.Node, parent: u32, index: *u32) Error!void {
     const this_index = index.*;
     index.* += 1;
     try writer.writeU64(@intFromEnum(node.id));
@@ -408,7 +410,7 @@ fn encodeSceneNode(writer: *Writer, node: kernel.scene.Node, parent: u32, index:
     }
 }
 
-pub fn encodeScene(gpa: std.mem.Allocator, root: kernel.scene.Node) Error![]u8 {
+pub fn encodeScene(gpa: std.mem.Allocator, root: semantic.scene.Node) Error![]u8 {
     const count = try countScene(gpa, root);
     var writer = Writer.init(gpa);
     errdefer writer.deinit();
@@ -419,8 +421,8 @@ pub fn encodeScene(gpa: std.mem.Allocator, root: kernel.scene.Node) Error![]u8 {
     return writer.finish();
 }
 
-const TempContainer = struct { axis: kernel.scene.Axis, child_count: usize, children: []u32 = &.{} };
-const TempField = struct { ref: kernel.scene.FieldRef, placeholder: []const u8, single_line: bool };
+const TempContainer = struct { axis: semantic.scene.Axis, child_count: usize, children: []u32 = &.{} };
+const TempField = struct { ref: semantic.scene.FieldRef, placeholder: []const u8, single_line: bool };
 const TempAction = struct { action: []const u8, label: []const u8, enabled: bool };
 
 const TempContent = union(enum) {
@@ -431,19 +433,19 @@ const TempContent = union(enum) {
 };
 
 const TempNode = struct {
-    id: kernel.scene.NodeId,
+    id: semantic.scene.NodeId,
     parent: u32,
     role: []const u8,
-    facts: []const kernel.scene.Fact,
-    actions: []const kernel.scene.Action,
-    layout: kernel.scene.Layout,
+    facts: []const semantic.scene.Fact,
+    actions: []const semantic.scene.Action,
+    layout: semantic.scene.Layout,
     focusable: bool,
     content: TempContent,
 };
 
 pub const OwnedScene = struct {
     arena: std.heap.ArenaAllocator,
-    root: *const kernel.scene.Node,
+    root: *const semantic.scene.Node,
 
     pub fn deinit(self: *OwnedScene) void {
         self.arena.deinit();
@@ -451,9 +453,9 @@ pub const OwnedScene = struct {
     }
 };
 
-fn readFacts(reader: *Reader, arena: std.mem.Allocator) Error![]const kernel.scene.Fact {
+fn readFacts(reader: *Reader, arena: std.mem.Allocator) Error![]const semantic.scene.Fact {
     const count = try reader.count(Limits.max_facts);
-    const facts = try arena.alloc(kernel.scene.Fact, count);
+    const facts = try arena.alloc(semantic.scene.Fact, count);
     var names: std.StringHashMapUnmanaged(void) = .empty;
     defer names.deinit(arena);
     for (facts) |*fact| {
@@ -466,8 +468,8 @@ fn readFacts(reader: *Reader, arena: std.mem.Allocator) Error![]const kernel.sce
     return facts;
 }
 
-fn readActions(reader: *Reader, arena: std.mem.Allocator) Error![]const kernel.scene.Action {
-    const actions = try arena.alloc(kernel.scene.Action, try reader.count(Limits.max_actions));
+fn readActions(reader: *Reader, arena: std.mem.Allocator) Error![]const semantic.scene.Action {
+    const actions = try arena.alloc(semantic.scene.Action, try reader.count(Limits.max_actions));
     var ids: std.StringHashMapUnmanaged(void) = .empty;
     defer ids.deinit(arena);
     for (actions) |*action| {
@@ -559,14 +561,14 @@ fn validateParents(arena: std.mem.Allocator, records: []TempNode) Error!void {
     }
 }
 
-fn materializeNode(arena: std.mem.Allocator, records: []const TempNode, index: usize, depth: usize) Error!*kernel.scene.Node {
+fn materializeNode(arena: std.mem.Allocator, records: []const TempNode, index: usize, depth: usize) Error!*semantic.scene.Node {
     if (depth > Limits.max_depth or index >= records.len) return error.BadReference;
     const record = records[index];
-    const node = try arena.create(kernel.scene.Node);
+    const node = try arena.create(semantic.scene.Node);
     node.* = .{ .id = record.id, .role = record.role, .facts = record.facts, .actions = record.actions, .layout = record.layout, .focusable = record.focusable, .content = undefined };
     switch (record.content) {
         .container => |container| {
-            const children = try arena.alloc(kernel.scene.Node, container.children.len);
+            const children = try arena.alloc(semantic.scene.Node, container.children.len);
             for (children, container.children) |*child, child_index| child.* = (try materializeNode(arena, records, child_index, depth + 1)).*;
             node.content = .{ .container = .{ .axis = container.axis, .children = children } };
         },
@@ -595,7 +597,7 @@ pub fn decodeScene(gpa: std.mem.Allocator, bytes: []const u8) Error!OwnedScene {
 
 // ── Interaction ─────────────────────────────────────────────────────────
 
-fn validateActionLists(gpa: std.mem.Allocator, actions: []const kernel.interaction.Action, bindings: []const kernel.interaction.Binding) Error!void {
+fn validateActionLists(gpa: std.mem.Allocator, actions: []const semantic.interaction.Action, bindings: []const semantic.interaction.Binding) Error!void {
     if (actions.len > Limits.max_actions or bindings.len > Limits.max_bindings) return error.LimitExceeded;
     var action_ids: std.StringHashMapUnmanaged(void) = .empty;
     defer action_ids.deinit(gpa);
@@ -631,7 +633,7 @@ fn readOptionalString(reader: *Reader, arena: std.mem.Allocator) Error!?[]const 
     return value;
 }
 
-pub fn encodeInteraction(gpa: std.mem.Allocator, definition: kernel.interaction.Definition) Error![]u8 {
+pub fn encodeInteraction(gpa: std.mem.Allocator, definition: semantic.interaction.Definition) Error![]u8 {
     try validateActionLists(gpa, definition.actions, definition.bindings);
     if (definition.presentation.len > Limits.max_string_bytes) return error.LimitExceeded;
     if (@intFromEnum(definition.root) == 0) return error.InvalidData;
@@ -672,7 +674,7 @@ pub fn encodeInteraction(gpa: std.mem.Allocator, definition: kernel.interaction.
 
 pub const OwnedInteraction = struct {
     arena: std.heap.ArenaAllocator,
-    value: kernel.interaction.Definition,
+    value: semantic.interaction.Definition,
 
     pub fn deinit(self: *OwnedInteraction) void {
         self.arena.deinit();
@@ -689,7 +691,7 @@ pub fn decodeInteraction(gpa: std.mem.Allocator, bytes: []const u8) Error!OwnedI
     const view_ref = try readViewHandle(&reader);
     const role = try roleFromTag(try reader.byte());
     const root = try nodeId(try reader.readU64());
-    const actions = try arena.alloc(kernel.interaction.Action, try reader.count(Limits.max_actions));
+    const actions = try arena.alloc(semantic.interaction.Action, try reader.count(Limits.max_actions));
     var action_ids = std.StringHashMapUnmanaged(void).empty;
     defer action_ids.deinit(arena);
     for (actions) |*action| {
@@ -701,7 +703,7 @@ pub fn decodeInteraction(gpa: std.mem.Allocator, bytes: []const u8) Error!OwnedI
         const result = try action_ids.getOrPut(arena, action.id);
         if (result.found_existing) return error.Duplicate;
     }
-    const bindings = try arena.alloc(kernel.interaction.Binding, try reader.count(Limits.max_bindings));
+    const bindings = try arena.alloc(semantic.interaction.Binding, try reader.count(Limits.max_bindings));
     var inputs = std.StringHashMapUnmanaged(void).empty;
     defer inputs.deinit(arena);
     for (bindings) |*binding| {
@@ -724,7 +726,7 @@ pub fn decodeInteraction(gpa: std.mem.Allocator, bytes: []const u8) Error!OwnedI
 
 // ── Target ──────────────────────────────────────────────────────────────
 
-fn validateFacts(gpa: std.mem.Allocator, facts: []const kernel.target.Fact) Error!void {
+fn validateFacts(gpa: std.mem.Allocator, facts: []const semantic.target.Fact) Error!void {
     if (facts.len > Limits.max_facts) return error.LimitExceeded;
     var names = std.StringHashMapUnmanaged(void).empty;
     defer names.deinit(gpa);
@@ -736,26 +738,58 @@ fn validateFacts(gpa: std.mem.Allocator, facts: []const kernel.target.Fact) Erro
     }
 }
 
-pub fn encodeTarget(gpa: std.mem.Allocator, definition: kernel.target.Definition) Error![]u8 {
+fn writeTargetBody(writer: *Writer, kind: semantic.target.Kind, display_name: []const u8, facts: []const semantic.target.Fact) Error!void {
+    try writer.byte(targetKindTag(kind));
+    if (kind == .synthetic) try writer.string(kind.synthetic);
+    try writer.string(display_name);
+    try writer.count(facts.len, Limits.max_facts);
+    for (facts) |fact| {
+        try writer.string(fact.name);
+        try writer.string(fact.value);
+    }
+}
+
+const TargetBody = struct {
+    kind: semantic.target.Kind,
+    display_name: []const u8,
+    facts: []const semantic.target.Fact,
+};
+
+fn readTargetBody(reader: *Reader, arena: std.mem.Allocator) Error!TargetBody {
+    const kind: semantic.target.Kind = switch (try reader.byte()) {
+        0 => .unknown,
+        1 => .file,
+        2 => .directory,
+        3 => .{ .synthetic = try reader.string(arena) },
+        else => return error.Corrupt,
+    };
+    const display_name = try reader.string(arena);
+    const facts = try arena.alloc(semantic.target.Fact, try reader.count(Limits.max_facts));
+    var names = std.StringHashMapUnmanaged(void).empty;
+    defer names.deinit(arena);
+    for (facts) |*fact| {
+        fact.name = try reader.string(arena);
+        fact.value = try reader.string(arena);
+        if (fact.name.len == 0) return error.InvalidData;
+        const result = try names.getOrPut(arena, fact.name);
+        if (result.found_existing) return error.Duplicate;
+    }
+    return .{ .kind = kind, .display_name = display_name, .facts = facts };
+}
+
+pub fn encodeTarget(gpa: std.mem.Allocator, definition: semantic.target.Definition) Error![]u8 {
     try validateFacts(gpa, definition.facts);
     if (definition.display_name.len > Limits.max_string_bytes) return error.LimitExceeded;
     var writer = Writer.init(gpa);
     errdefer writer.deinit();
     try header(&writer, target_kind);
-    try writer.byte(targetKindTag(definition.kind));
-    if (definition.kind == .synthetic) try writer.string(definition.kind.synthetic);
-    try writer.string(definition.display_name);
-    try writer.count(definition.facts.len, Limits.max_facts);
-    for (definition.facts) |fact| {
-        try writer.string(fact.name);
-        try writer.string(fact.value);
-    }
+    try writeTargetBody(&writer, definition.kind, definition.display_name, definition.facts);
     return writer.finish();
 }
 
 pub const OwnedTarget = struct {
     arena: std.heap.ArenaAllocator,
-    value: kernel.target.Definition,
+    value: semantic.target.Definition,
 
     pub fn deinit(self: *OwnedTarget) void {
         self.arena.deinit();
@@ -769,33 +803,126 @@ pub fn decodeTarget(gpa: std.mem.Allocator, bytes: []const u8) Error!OwnedTarget
     var owned: OwnedTarget = .{ .arena = std.heap.ArenaAllocator.init(gpa), .value = undefined };
     errdefer owned.arena.deinit();
     const arena = owned.arena.allocator();
-    const kind_tag = try reader.byte();
-    const kind: kernel.target.Kind = switch (kind_tag) {
-        0 => .unknown,
-        1 => .file,
-        2 => .directory,
-        3 => .{ .synthetic = try reader.string(arena) },
+    const body = try readTargetBody(&reader, arena);
+    try reader.done();
+    owned.value = .{ .kind = body.kind, .display_name = body.display_name, .facts = body.facts };
+    return owned;
+}
+
+pub fn encodeTargetDescriptor(gpa: std.mem.Allocator, descriptor: semantic.target.Descriptor) Error![]u8 {
+    if (descriptor.ref.generation == 0 or descriptor.revision == 0) return error.InvalidData;
+    try validateFacts(gpa, descriptor.facts);
+    if (descriptor.display_name.len > Limits.max_string_bytes) return error.LimitExceeded;
+    var writer = Writer.init(gpa);
+    errdefer writer.deinit();
+    try header(&writer, target_descriptor_kind);
+    try writeHandle(&writer, descriptor.ref);
+    try writer.writeU64(descriptor.revision);
+    try writeTargetBody(&writer, descriptor.kind, descriptor.display_name, descriptor.facts);
+    return writer.finish();
+}
+
+pub const OwnedTargetDescriptor = struct {
+    arena: std.heap.ArenaAllocator,
+    value: semantic.target.Descriptor,
+
+    pub fn deinit(self: *OwnedTargetDescriptor) void {
+        self.arena.deinit();
+        self.* = undefined;
+    }
+};
+
+pub fn decodeTargetDescriptor(gpa: std.mem.Allocator, bytes: []const u8) Error!OwnedTargetDescriptor {
+    var reader = try Reader.init(bytes);
+    try checkHeader(&reader, target_descriptor_kind);
+    var owned: OwnedTargetDescriptor = .{ .arena = .init(gpa), .value = undefined };
+    errdefer owned.arena.deinit();
+    const ref = try readTargetHandle(&reader);
+    const revision = try reader.readU64();
+    if (revision == 0) return error.InvalidData;
+    const body = try readTargetBody(&reader, owned.arena.allocator());
+    try reader.done();
+    owned.value = .{ .ref = ref, .revision = revision, .kind = body.kind, .display_name = body.display_name, .facts = body.facts };
+    return owned;
+}
+
+pub fn encodeLocatedTarget(gpa: std.mem.Allocator, located: semantic.target.Located) Error![]u8 {
+    if (located.target.generation == 0 or located.revision == 0) return error.InvalidData;
+    var writer = Writer.init(gpa);
+    errdefer writer.deinit();
+    try header(&writer, located_target_kind);
+    try writeHandle(&writer, located.target);
+    try writer.writeU64(located.revision);
+    switch (located.location) {
+        .whole => try writer.byte(0),
+        .text => |range| {
+            if (range.start > range.end) return error.InvalidData;
+            try writer.byte(1);
+            try writer.writeU64(range.start);
+            try writer.writeU64(range.end);
+        },
+        .node => |node| {
+            if (node.len == 0) return error.InvalidData;
+            try writer.byte(2);
+            try writer.blob(node);
+        },
+        .provider => |provider| {
+            if (provider.schema.len == 0) return error.InvalidData;
+            try writer.byte(3);
+            try writer.string(provider.schema);
+            try writer.blob(provider.payload);
+        },
+    }
+    return writer.finish();
+}
+
+pub const OwnedLocatedTarget = struct {
+    arena: std.heap.ArenaAllocator,
+    value: semantic.target.Located,
+
+    pub fn deinit(self: *OwnedLocatedTarget) void {
+        self.arena.deinit();
+        self.* = undefined;
+    }
+};
+
+pub fn decodeLocatedTarget(gpa: std.mem.Allocator, bytes: []const u8) Error!OwnedLocatedTarget {
+    var reader = try Reader.init(bytes);
+    try checkHeader(&reader, located_target_kind);
+    var owned: OwnedLocatedTarget = .{ .arena = .init(gpa), .value = undefined };
+    errdefer owned.arena.deinit();
+    const target_ref = try readTargetHandle(&reader);
+    const revision = try reader.readU64();
+    if (revision == 0) return error.InvalidData;
+    const arena = owned.arena.allocator();
+    const location: semantic.target.Location = switch (try reader.byte()) {
+        0 => .whole,
+        1 => blk: {
+            const start = try reader.readU64();
+            const end = try reader.readU64();
+            if (start > end) return error.InvalidData;
+            break :blk .{ .text = .{ .start = start, .end = end } };
+        },
+        2 => blk: {
+            const node = try reader.blob(arena);
+            if (node.len == 0) return error.InvalidData;
+            break :blk .{ .node = node };
+        },
+        3 => blk: {
+            const schema_value = try reader.string(arena);
+            if (schema_value.len == 0) return error.InvalidData;
+            break :blk .{ .provider = .{ .schema = schema_value, .payload = try reader.blob(arena) } };
+        },
         else => return error.Corrupt,
     };
-    const display_name = try reader.string(arena);
-    const facts = try arena.alloc(kernel.target.Fact, try reader.count(Limits.max_facts));
-    var names = std.StringHashMapUnmanaged(void).empty;
-    defer names.deinit(arena);
-    for (facts) |*fact| {
-        fact.name = try reader.string(arena);
-        fact.value = try reader.string(arena);
-        if (fact.name.len == 0) return error.InvalidData;
-        const result = try names.getOrPut(arena, fact.name);
-        if (result.found_existing) return error.Duplicate;
-    }
     try reader.done();
-    owned.value = .{ .kind = kind, .display_name = display_name, .facts = facts };
+    owned.value = .{ .target = target_ref, .revision = revision, .location = location };
     return owned;
 }
 
 // ── Transfer ────────────────────────────────────────────────────────────
 
-fn validateTransfer(gpa: std.mem.Allocator, item: kernel.transfer.Item) Error!void {
+fn validateTransfer(gpa: std.mem.Allocator, item: semantic.transfer.Item) Error!void {
     if (item.representations.len == 0) return error.InvalidData;
     if (item.representations.len > Limits.max_representations) return error.LimitExceeded;
     if (item.suggested_name.len > Limits.max_string_bytes) return error.LimitExceeded;
@@ -818,7 +945,7 @@ fn validateTransfer(gpa: std.mem.Allocator, item: kernel.transfer.Item) Error!vo
     }
 }
 
-fn writeTransferBody(writer: *Writer, item: kernel.transfer.Item) Error!void {
+fn writeTransferBody(writer: *Writer, item: semantic.transfer.Item) Error!void {
     try writer.byte(switch (item.intent) {
         .copy => 0,
         .cut => 1,
@@ -837,19 +964,19 @@ fn writeTransferBody(writer: *Writer, item: kernel.transfer.Item) Error!void {
     }
 }
 
-fn readTransferBody(reader: *Reader, arena: std.mem.Allocator) Error!kernel.transfer.Item {
-    const intent: kernel.transfer.Intent = switch (try reader.byte()) {
+fn readTransferBody(reader: *Reader, arena: std.mem.Allocator) Error!semantic.transfer.Item {
+    const intent: semantic.transfer.Intent = switch (try reader.byte()) {
         0 => .copy,
         1 => .cut,
         else => return error.Corrupt,
     };
     const suggested_name = try reader.string(arena);
-    const source: ?kernel.transfer.Source = if (try reader.strictBool()) .{
+    const source: ?semantic.transfer.Source = if (try reader.strictBool()) .{
         .target = try readTargetHandle(reader),
         .revision = try reader.string(arena),
     } else null;
     if (source) |value| if (value.revision.len == 0) return error.InvalidData;
-    const representations = try arena.alloc(kernel.transfer.Representation, try reader.count(Limits.max_representations));
+    const representations = try arena.alloc(semantic.transfer.Representation, try reader.count(Limits.max_representations));
     if (representations.len == 0) return error.InvalidData;
     var media_types: std.StringHashMapUnmanaged(void) = .empty;
     defer media_types.deinit(arena);
@@ -864,7 +991,7 @@ fn readTransferBody(reader: *Reader, arena: std.mem.Allocator) Error!kernel.tran
     return .{ .intent = intent, .suggested_name = suggested_name, .source = source, .representations = representations };
 }
 
-pub fn encodeTransfer(gpa: std.mem.Allocator, item: kernel.transfer.Item) Error![]u8 {
+pub fn encodeTransfer(gpa: std.mem.Allocator, item: semantic.transfer.Item) Error![]u8 {
     try validateTransfer(gpa, item);
     var writer = Writer.init(gpa);
     errdefer writer.deinit();
@@ -875,7 +1002,7 @@ pub fn encodeTransfer(gpa: std.mem.Allocator, item: kernel.transfer.Item) Error!
 
 pub const OwnedTransfer = struct {
     arena: std.heap.ArenaAllocator,
-    value: kernel.transfer.Item,
+    value: semantic.transfer.Item,
 
     pub fn deinit(self: *OwnedTransfer) void {
         self.arena.deinit();
@@ -895,7 +1022,7 @@ pub fn decodeTransfer(gpa: std.mem.Allocator, bytes: []const u8) Error!OwnedTran
 
 // ── Action request ──────────────────────────────────────────────────────
 
-fn validateSelection(selection: kernel.selection.Selection) Error!void {
+fn validateSelection(selection: semantic.selection.Selection) Error!void {
     switch (selection) {
         .none => {},
         .text => |range| {
@@ -912,7 +1039,7 @@ fn validateSelection(selection: kernel.selection.Selection) Error!void {
     }
 }
 
-fn writeSelection(writer: *Writer, selection: kernel.selection.Selection) Error!void {
+fn writeSelection(writer: *Writer, selection: semantic.selection.Selection) Error!void {
     switch (selection) {
         .none => try writer.byte(0),
         .text => |range| {
@@ -935,7 +1062,7 @@ fn writeSelection(writer: *Writer, selection: kernel.selection.Selection) Error!
     }
 }
 
-fn readSelection(reader: *Reader, arena: std.mem.Allocator) Error!kernel.selection.Selection {
+fn readSelection(reader: *Reader, arena: std.mem.Allocator) Error!semantic.selection.Selection {
     return switch (try reader.byte()) {
         0 => .none,
         1 => blk: {
@@ -946,7 +1073,7 @@ fn readSelection(reader: *Reader, arena: std.mem.Allocator) Error!kernel.selecti
             break :blk .{ .text = .{ .field = field, .start = start, .end = end, .linewise = try reader.strictBool() } };
         },
         2 => blk: {
-            const nodes = try arena.alloc(kernel.scene.NodeId, try reader.count(Limits.max_nodes));
+            const nodes = try arena.alloc(semantic.scene.NodeId, try reader.count(Limits.max_nodes));
             for (nodes) |*node| {
                 const raw = try reader.readU64();
                 if (raw == 0) return error.InvalidData;
@@ -963,7 +1090,7 @@ fn readSelection(reader: *Reader, arena: std.mem.Allocator) Error!kernel.selecti
     };
 }
 
-pub fn encodeActionRequest(gpa: std.mem.Allocator, request: kernel.action.Request) Error![]u8 {
+pub fn encodeActionRequest(gpa: std.mem.Allocator, request: semantic.action.Request) Error![]u8 {
     if (request.action.len == 0) return error.InvalidData;
     if (request.action.len > Limits.max_string_bytes) return error.LimitExceeded;
     if (request.view.generation == 0 or @intFromEnum(request.subject) == 0) return error.InvalidData;
@@ -983,7 +1110,7 @@ pub fn encodeActionRequest(gpa: std.mem.Allocator, request: kernel.action.Reques
 
 pub const OwnedActionRequest = struct {
     arena: std.heap.ArenaAllocator,
-    value: kernel.action.Request,
+    value: semantic.action.Request,
 
     pub fn deinit(self: *OwnedActionRequest) void {
         self.arena.deinit();
@@ -1003,7 +1130,7 @@ pub fn decodeActionRequest(gpa: std.mem.Allocator, bytes: []const u8) Error!Owne
     const subject_raw = try reader.readU64();
     if (subject_raw == 0) return error.InvalidData;
     const selection = try readSelection(&reader, arena);
-    const transfer: ?kernel.transfer.Item = if (try reader.strictBool()) try readTransferBody(&reader, arena) else null;
+    const transfer: ?semantic.transfer.Item = if (try reader.strictBool()) try readTransferBody(&reader, arena) else null;
     try reader.done();
     owned.value = .{ .action = action, .view = view, .subject = @enumFromInt(subject_raw), .selection = selection, .transfer = transfer };
     return owned;
@@ -1014,16 +1141,16 @@ pub fn decodeActionRequest(gpa: std.mem.Allocator, bytes: []const u8) Error!Owne
 const t = std.testing;
 
 test "scene codec: preorder scene round-trip preserves semantic fields" {
-    const field_ref: kernel.scene.FieldRef = .{ .authority = .here, .slot = 4, .generation = 2 };
-    const leaf = kernel.scene.Node{ .id = @enumFromInt(2), .role = "button", .facts = &.{.{ .name = "kind", .value = "ok" }}, .actions = &.{.{ .id = "save", .label = "Save", .enabled = false }}, .layout = .{ .grow = 3, .column = 2 }, .focusable = true, .content = .{ .field = .{ .ref = field_ref, .placeholder = "name", .single_line = true } } };
-    const root = kernel.scene.Node{ .id = @enumFromInt(1), .role = "root", .content = .{ .container = .{ .axis = .horizontal, .children = &.{leaf} } } };
+    const field_ref: semantic.scene.FieldRef = .{ .authority = .here, .slot = 4, .generation = 2 };
+    const leaf = semantic.scene.Node{ .id = @enumFromInt(2), .role = "button", .facts = &.{.{ .name = "kind", .value = "ok" }}, .actions = &.{.{ .id = "save", .label = "Save", .enabled = false }}, .layout = .{ .grow = 3, .column = 2 }, .focusable = true, .content = .{ .field = .{ .ref = field_ref, .placeholder = "name", .single_line = true } } };
+    const root = semantic.scene.Node{ .id = @enumFromInt(1), .role = "root", .content = .{ .container = .{ .axis = .horizontal, .children = &.{leaf} } } };
     const bytes = try encodeScene(t.allocator, root);
     defer t.allocator.free(bytes);
     var decoded = try decodeScene(t.allocator, bytes);
     defer decoded.deinit();
     try t.expectEqual(@as(u64, 1), @intFromEnum(decoded.root.id));
     try t.expectEqualStrings("root", decoded.root.role);
-    try t.expectEqual(kernel.scene.Axis.horizontal, decoded.root.content.container.axis);
+    try t.expectEqual(semantic.scene.Axis.horizontal, decoded.root.content.container.axis);
     try t.expectEqual(@as(usize, 1), decoded.root.content.container.children.len);
     const child = &decoded.root.content.container.children[0];
     try t.expectEqual(@as(u64, 2), @intFromEnum(child.id));
@@ -1034,17 +1161,17 @@ test "scene codec: preorder scene round-trip preserves semantic fields" {
 }
 
 test "interaction and target codecs round-trip defaults, handles, variants, and facts" {
-    const definition: kernel.interaction.Definition = .{ .view = .{ .authority = .here, .slot = 3, .generation = 4 }, .role = .picker, .root = @enumFromInt(9), .actions = &.{.{ .id = "ok", .label = "OK", .enabled = true, .disposition = .close_on_handled }}, .bindings = &.{.{ .input = "enter", .action = "ok" }}, .default_action = "ok", .cancel_action = null, .presentation = "compact" };
+    const definition: semantic.interaction.Definition = .{ .view = .{ .authority = .here, .slot = 3, .generation = 4 }, .role = .picker, .root = @enumFromInt(9), .actions = &.{.{ .id = "ok", .label = "OK", .enabled = true, .disposition = .close_on_handled }}, .bindings = &.{.{ .input = "enter", .action = "ok" }}, .default_action = "ok", .cancel_action = null, .presentation = "compact" };
     const interaction_bytes = try encodeInteraction(t.allocator, definition);
     defer t.allocator.free(interaction_bytes);
     var interaction_value = try decodeInteraction(t.allocator, interaction_bytes);
     defer interaction_value.deinit();
     try t.expectEqual(definition.view, interaction_value.value.view);
-    try t.expectEqual(kernel.interaction.Disposition.close_on_handled, interaction_value.value.actions[0].disposition);
+    try t.expectEqual(semantic.interaction.Disposition.close_on_handled, interaction_value.value.actions[0].disposition);
     try t.expectEqualStrings("ok", interaction_value.value.default_action.?);
     try t.expectEqualStrings("enter", interaction_value.value.bindings[0].input);
 
-    const target_definition: kernel.target.Definition = .{ .kind = .{ .synthetic = "dired" }, .display_name = "Files", .facts = &.{.{ .name = "scope", .value = "project" }} };
+    const target_definition: semantic.target.Definition = .{ .kind = .{ .synthetic = "dired" }, .display_name = "Files", .facts = &.{.{ .name = "scope", .value = "project" }} };
     const target_bytes = try encodeTarget(t.allocator, target_definition);
     defer t.allocator.free(target_bytes);
     var target_value = try decodeTarget(t.allocator, target_bytes);
@@ -1053,12 +1180,61 @@ test "interaction and target codecs round-trip defaults, handles, variants, and 
     try t.expectEqualStrings("project", target_value.value.facts[0].value);
 }
 
+test "target descriptor and located codecs preserve revisions and opaque locations" {
+    const ref: semantic.target.Ref = .{ .authority = @enumFromInt(7), .slot = 11, .generation = 3 };
+    const descriptor: semantic.target.Descriptor = .{
+        .ref = ref,
+        .revision = 42,
+        .kind = .directory,
+        .display_name = "remote bytes",
+        .facts = &.{.{ .name = "locus", .value = "peer:alice" }},
+    };
+    const descriptor_bytes = try encodeTargetDescriptor(t.allocator, descriptor);
+    defer t.allocator.free(descriptor_bytes);
+    var decoded_descriptor = try decodeTargetDescriptor(t.allocator, descriptor_bytes);
+    defer decoded_descriptor.deinit();
+    try t.expectEqual(ref, decoded_descriptor.value.ref);
+    try t.expectEqual(@as(u64, 42), decoded_descriptor.value.revision);
+    try t.expectEqualStrings("peer:alice", decoded_descriptor.value.facts[0].value);
+
+    const located: semantic.target.Located = .{
+        .target = ref,
+        .revision = 42,
+        .location = .{ .provider = .{ .schema = "remote/node-v1", .payload = &.{ 0, 0xff, '/', '\n' } } },
+    };
+    const located_bytes = try encodeLocatedTarget(t.allocator, located);
+    defer t.allocator.free(located_bytes);
+    var decoded_located = try decodeLocatedTarget(t.allocator, located_bytes);
+    defer decoded_located.deinit();
+    try t.expectEqual(ref, decoded_located.value.target);
+    try t.expectEqual(@as(u64, 42), decoded_located.value.revision);
+    try t.expectEqualStrings("remote/node-v1", decoded_located.value.location.provider.schema);
+    try t.expectEqualSlices(u8, located.location.provider.payload, decoded_located.value.location.provider.payload);
+
+    try t.expectError(error.InvalidData, encodeTargetDescriptor(t.allocator, .{
+        .ref = ref,
+        .revision = 0,
+        .kind = .file,
+        .display_name = "stale",
+    }));
+    try t.expectError(error.InvalidData, encodeLocatedTarget(t.allocator, .{
+        .target = ref,
+        .revision = 42,
+        .location = .{ .text = .{ .start = 9, .end = 2 } },
+    }));
+    try t.expectError(error.InvalidData, encodeLocatedTarget(t.allocator, .{
+        .target = ref,
+        .revision = 42,
+        .location = .{ .node = &.{} },
+    }));
+}
+
 test "transfer and action request codecs preserve captured data and wide node ids" {
-    const representations = [_]kernel.transfer.Representation{
+    const representations = [_]semantic.transfer.Representation{
         .{ .media_type = "application/vnd.weft.file", .schema = "file/v1", .payload = &.{ 0, 0xff, '/', '\n' } },
         .{ .media_type = "text/plain", .payload = "display" },
     };
-    const transfer_value: kernel.transfer.Item = .{
+    const transfer_value: semantic.transfer.Item = .{
         .intent = .cut,
         .suggested_name = "raw-name",
         .source = .{ .target = .{ .authority = .here, .slot = 5, .generation = 9 }, .revision = "opaque-revision" },
@@ -1068,13 +1244,13 @@ test "transfer and action request codecs preserve captured data and wide node id
     defer t.allocator.free(transfer_bytes);
     var decoded_transfer = try decodeTransfer(t.allocator, transfer_bytes);
     defer decoded_transfer.deinit();
-    try t.expectEqual(kernel.transfer.Intent.cut, decoded_transfer.value.intent);
+    try t.expectEqual(semantic.transfer.Intent.cut, decoded_transfer.value.intent);
     try t.expectEqualStrings("opaque-revision", decoded_transfer.value.source.?.revision);
     try t.expectEqualSlices(u8, representations[0].payload, decoded_transfer.value.representations[0].payload);
 
-    const wide_node: kernel.scene.NodeId = @enumFromInt(0x1_0000_0002);
-    const request: kernel.action.Request = .{
-        .action = kernel.action.standard.paste_after,
+    const wide_node: semantic.scene.NodeId = @enumFromInt(0x1_0000_0002);
+    const request: semantic.action.Request = .{
+        .action = semantic.action.standard.paste_after,
         .view = .{ .authority = .here, .slot = 8, .generation = 3 },
         .subject = wide_node,
         .selection = .{ .nodes = &.{ wide_node, @enumFromInt(7) } },
@@ -1084,14 +1260,14 @@ test "transfer and action request codecs preserve captured data and wide node id
     defer t.allocator.free(request_bytes);
     var decoded_request = try decodeActionRequest(t.allocator, request_bytes);
     defer decoded_request.deinit();
-    try t.expectEqualStrings(kernel.action.standard.paste_after, decoded_request.value.action);
+    try t.expectEqualStrings(semantic.action.standard.paste_after, decoded_request.value.action);
     try t.expectEqual(@as(u64, 0x1_0000_0002), @intFromEnum(decoded_request.value.subject));
     try t.expectEqual(@as(u64, 0x1_0000_0002), @intFromEnum(decoded_request.value.selection.nodes[0]));
     try t.expectEqualStrings("application/vnd.weft.file", decoded_request.value.transfer.?.representations[0].media_type);
 }
 
 test "transfer and action request codecs reject ambiguous or malformed values" {
-    const duplicates = [_]kernel.transfer.Representation{
+    const duplicates = [_]semantic.transfer.Representation{
         .{ .media_type = "same", .payload = "a" },
         .{ .media_type = "same", .payload = "b" },
     };
@@ -1135,7 +1311,7 @@ test "transfer and action request codecs reject ambiguous or malformed values" {
 }
 
 test "scene codec: hostile tags, truncation, trailing bytes, and duplicate IDs refuse" {
-    const root: kernel.scene.Node = .{ .id = @enumFromInt(1), .content = .{ .label = "x" } };
+    const root: semantic.scene.Node = .{ .id = @enumFromInt(1), .content = .{ .label = "x" } };
     const bytes = try encodeScene(t.allocator, root);
     defer t.allocator.free(bytes);
     try t.expectError(error.Corrupt, decodeScene(t.allocator, bytes[0 .. bytes.len - 1]));
@@ -1146,35 +1322,35 @@ test "scene codec: hostile tags, truncation, trailing bytes, and duplicate IDs r
     try t.expectError(error.Corrupt, decodeScene(t.allocator, trailing));
     try t.expectError(error.Corrupt, decodeTarget(t.allocator, &.{ 'W', 'S', 'C', 1, target_kind, 99 }));
 
-    const duplicate = kernel.scene.Node{ .id = @enumFromInt(1), .content = .{ .container = .{ .children = &.{.{ .id = @enumFromInt(1), .content = .{ .label = "bad" } }} } } };
+    const duplicate = semantic.scene.Node{ .id = @enumFromInt(1), .content = .{ .container = .{ .children = &.{.{ .id = @enumFromInt(1), .content = .{ .label = "bad" } }} } } };
     try t.expectError(error.Duplicate, encodeScene(t.allocator, duplicate));
 }
 
 test "scene codec: reject empty names, action ids, and zero-generation handles" {
-    const empty_fact_scene: kernel.scene.Node = .{
+    const empty_fact_scene: semantic.scene.Node = .{
         .id = @enumFromInt(1),
         .facts = &.{.{ .name = "", .value = "value" }},
         .content = .{ .label = "row" },
     };
     try t.expectError(error.InvalidData, encodeScene(t.allocator, empty_fact_scene));
-    const empty_content_action: kernel.scene.Node = .{
+    const empty_content_action: semantic.scene.Node = .{
         .id = @enumFromInt(1),
         .content = .{ .action = .{ .action = "", .label = "Run" } },
     };
     try t.expectError(error.InvalidData, encodeScene(t.allocator, empty_content_action));
-    const empty_fact_target: kernel.target.Definition = .{
+    const empty_fact_target: semantic.target.Definition = .{
         .kind = .file,
         .display_name = "file",
         .facts = &.{.{ .name = "", .value = "value" }},
     };
     try t.expectError(error.InvalidData, encodeTarget(t.allocator, empty_fact_target));
 
-    const zero_field: kernel.scene.Node = .{
+    const zero_field: semantic.scene.Node = .{
         .id = @enumFromInt(1),
         .content = .{ .field = .{ .ref = .{ .authority = .here, .slot = 1, .generation = 0 } } },
     };
     try t.expectError(error.InvalidData, encodeScene(t.allocator, zero_field));
-    const zero_view: kernel.interaction.Definition = .{
+    const zero_view: semantic.interaction.Definition = .{
         .view = .{ .authority = .here, .slot = 1, .generation = 0 },
         .role = .dialog,
         .root = @enumFromInt(1),
@@ -1235,20 +1411,20 @@ test "scene codec: reject empty names, action ids, and zero-generation handles" 
 }
 
 test "scene codec: duplicate facts/actions/bindings and invalid interaction tags refuse" {
-    const duplicate_facts: kernel.scene.Node = .{
+    const duplicate_facts: semantic.scene.Node = .{
         .id = @enumFromInt(1),
         .facts = &.{ .{ .name = "same", .value = "a" }, .{ .name = "same", .value = "b" } },
         .content = .{ .label = "x" },
     };
     try t.expectError(error.Duplicate, encodeScene(t.allocator, duplicate_facts));
-    const duplicate_node_actions: kernel.scene.Node = .{
+    const duplicate_node_actions: semantic.scene.Node = .{
         .id = @enumFromInt(1),
         .actions = &.{ .{ .id = "same", .label = "a" }, .{ .id = "same", .label = "b" } },
         .content = .{ .label = "x" },
     };
     try t.expectError(error.Duplicate, encodeScene(t.allocator, duplicate_node_actions));
 
-    const duplicate_actions: kernel.interaction.Definition = .{
+    const duplicate_actions: semantic.interaction.Definition = .{
         .view = .{ .authority = .here, .slot = 1, .generation = 1 },
         .role = .dialog,
         .root = @enumFromInt(1),
@@ -1256,7 +1432,7 @@ test "scene codec: duplicate facts/actions/bindings and invalid interaction tags
     };
     try t.expectError(error.Duplicate, encodeInteraction(t.allocator, duplicate_actions));
 
-    const duplicate_bindings: kernel.interaction.Definition = .{
+    const duplicate_bindings: semantic.interaction.Definition = .{
         .view = .{ .authority = .here, .slot = 1, .generation = 1 },
         .role = .dialog,
         .root = @enumFromInt(1),
@@ -1265,7 +1441,7 @@ test "scene codec: duplicate facts/actions/bindings and invalid interaction tags
     };
     try t.expectError(error.Duplicate, encodeInteraction(t.allocator, duplicate_bindings));
 
-    const interaction_definition: kernel.interaction.Definition = .{
+    const interaction_definition: semantic.interaction.Definition = .{
         .view = .{ .authority = .here, .slot = 1, .generation = 1 },
         .role = .dialog,
         .root = @enumFromInt(1),
@@ -1300,7 +1476,7 @@ test "scene codec: duplicate facts/actions/bindings and invalid interaction tags
     @memset(invalid_view_generation[13..17], 0);
     try t.expectError(error.InvalidData, decodeInteraction(t.allocator, invalid_view_generation));
 
-    const field_node: kernel.scene.Node = .{
+    const field_node: semantic.scene.Node = .{
         .id = @enumFromInt(1),
         .content = .{ .field = .{ .ref = .{ .authority = .here, .slot = 1, .generation = 1 } } },
     };
@@ -1328,8 +1504,8 @@ test "scene codec: duplicate facts/actions/bindings and invalid interaction tags
 }
 
 test "scene codec: forward parent references and invalid target tags refuse" {
-    const child: kernel.scene.Node = .{ .id = @enumFromInt(2), .content = .{ .label = "child" } };
-    const root: kernel.scene.Node = .{ .id = @enumFromInt(1), .content = .{ .container = .{ .children = &.{child} } } };
+    const child: semantic.scene.Node = .{ .id = @enumFromInt(2), .content = .{ .label = "child" } };
+    const root: semantic.scene.Node = .{ .id = @enumFromInt(1), .content = .{ .container = .{ .children = &.{child} } } };
     const encoded = try encodeScene(t.allocator, root);
     defer t.allocator.free(encoded);
     var invalid = try t.allocator.dupe(u8, encoded);
@@ -1345,7 +1521,7 @@ test "scene codec: forward parent references and invalid target tags refuse" {
     invalid[reader.pos] = 2; // parent index must be earlier, not forward.
     try t.expectError(error.BadReference, decodeScene(t.allocator, invalid));
 
-    const target_definition: kernel.target.Definition = .{ .kind = .file, .display_name = "f" };
+    const target_definition: semantic.target.Definition = .{ .kind = .file, .display_name = "f" };
     const target_bytes = try encodeTarget(t.allocator, target_definition);
     defer t.allocator.free(target_bytes);
     var invalid_target = try t.allocator.dupe(u8, target_bytes);
@@ -1355,8 +1531,8 @@ test "scene codec: forward parent references and invalid target tags refuse" {
 }
 
 test "scene codec: limits reject excessive child counts and action bindings" {
-    var children: [Limits.max_children + 1]kernel.scene.Node = undefined;
+    var children: [Limits.max_children + 1]semantic.scene.Node = undefined;
     for (&children, 0..) |*child, i| child.* = .{ .id = @enumFromInt(@as(u64, i + 2)), .content = .{ .label = "x" } };
-    const too_many: kernel.scene.Node = .{ .id = @enumFromInt(1), .content = .{ .container = .{ .children = &children } } };
+    const too_many: semantic.scene.Node = .{ .id = @enumFromInt(1), .content = .{ .container = .{ .children = &children } } };
     try t.expectError(error.LimitExceeded, encodeScene(t.allocator, too_many));
 }

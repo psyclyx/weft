@@ -2,7 +2,7 @@
 //! Input plugins name intent; they never need to know the tool implementation.
 
 const std = @import("std");
-const kernel = @import("weft_kernel");
+const semantic = @import("weft_semantic");
 const view_runtime = @import("view.zig");
 
 pub const ProviderError = error{ Rejected, Stale, Failed };
@@ -12,7 +12,7 @@ pub const Provider = struct {
     vtable: *const VTable,
 
     pub const VTable = struct {
-        invoke: *const fn (*anyopaque, kernel.action.Request) ProviderError!kernel.action.Outcome,
+        invoke: *const fn (*anyopaque, semantic.action.Request) ProviderError!semantic.action.Outcome,
     };
 
     pub fn init(pointer: anytype) Provider {
@@ -28,7 +28,7 @@ pub const Provider = struct {
             fn self(raw: *anyopaque) *Implementation {
                 return @ptrCast(@alignCast(raw));
             }
-            fn invoke(raw: *anyopaque, request: kernel.action.Request) ProviderError!kernel.action.Outcome {
+            fn invoke(raw: *anyopaque, request: semantic.action.Request) ProviderError!semantic.action.Outcome {
                 return self(raw).invoke(request);
             }
             const vtable: VTable = .{ .invoke = @This().invoke };
@@ -36,7 +36,7 @@ pub const Provider = struct {
         return .{ .context = pointer, .vtable = &Adapter.vtable };
     }
 
-    pub fn invoke(self: Provider, request: kernel.action.Request) ProviderError!kernel.action.Outcome {
+    pub fn invoke(self: Provider, request: semantic.action.Request) ProviderError!semantic.action.Outcome {
         return self.vtable.invoke(self.context, request);
     }
 };
@@ -55,28 +55,24 @@ pub const Registry = struct {
     entries: std.ArrayList(Entry) = .empty,
 
     const Entry = struct {
-        owner: []u8,
+        owner: semantic.owner.Id,
         provider: Provider,
     };
 
     pub fn deinit(self: *Registry, gpa: std.mem.Allocator) void {
-        for (self.entries.items) |entry| gpa.free(entry.owner);
         self.entries.deinit(gpa);
     }
 
-    pub fn register(self: *Registry, gpa: std.mem.Allocator, owner: []const u8, provider: Provider) Error!void {
-        if (owner.len == 0) return error.InvalidOwner;
+    pub fn register(self: *Registry, gpa: std.mem.Allocator, owner: semantic.owner.Id, provider: Provider) Error!void {
+        if (!owner.isValid()) return error.InvalidOwner;
         if (self.find(owner) != null) return error.DuplicateOwner;
-        const owned = try gpa.dupe(u8, owner);
-        errdefer gpa.free(owned);
-        try self.entries.append(gpa, .{ .owner = owned, .provider = provider });
+        try self.entries.append(gpa, .{ .owner = owner, .provider = provider });
     }
 
-    pub fn unregister(self: *Registry, gpa: std.mem.Allocator, owner: []const u8) bool {
+    pub fn unregister(self: *Registry, _: std.mem.Allocator, owner: semantic.owner.Id) bool {
         for (self.entries.items, 0..) |entry, index| {
-            if (!std.mem.eql(u8, entry.owner, owner)) continue;
-            const removed = self.entries.swapRemove(index);
-            gpa.free(removed.owner);
+            if (entry.owner != owner) continue;
+            _ = self.entries.swapRemove(index);
             return true;
         }
         return false;
@@ -85,8 +81,8 @@ pub const Registry = struct {
     pub fn invoke(
         self: *const Registry,
         views: *const view_runtime.Registry,
-        request: kernel.action.Request,
-    ) Error!kernel.action.Outcome {
+        request: semantic.action.Request,
+    ) Error!semantic.action.Outcome {
         const view_instance = views.get(request.view) orelse return error.StaleView;
         const subject = view_instance.node(request.subject) orelse return error.UnknownSubject;
         var advertised = false;
@@ -102,14 +98,14 @@ pub const Registry = struct {
         return provider.invoke(request);
     }
 
-    fn find(self: *const Registry, owner: []const u8) ?Provider {
+    fn find(self: *const Registry, owner: semantic.owner.Id) ?Provider {
         for (self.entries.items) |entry|
-            if (std.mem.eql(u8, entry.owner, owner)) return entry.provider;
+            if (entry.owner == owner) return entry.provider;
         return null;
     }
 };
 
-fn selectionBelongsToView(instance: *const view_runtime.Instance, selection: kernel.selection.Selection) bool {
+fn selectionBelongsToView(instance: *const view_runtime.Instance, selection: semantic.selection.Selection) bool {
     return switch (selection) {
         .none, .custom => true,
         .nodes => |nodes| blk: {
@@ -123,7 +119,7 @@ fn selectionBelongsToView(instance: *const view_runtime.Instance, selection: ker
     };
 }
 
-fn nodeHasField(node: *const kernel.scene.Node, field: kernel.scene.FieldRef) bool {
+fn nodeHasField(node: *const semantic.scene.Node, field: semantic.scene.FieldRef) bool {
     switch (node.content) {
         .field => |value| if (value.ref.eql(field)) return true,
         .container => |container| for (container.children) |*child|
@@ -134,32 +130,33 @@ fn nodeHasField(node: *const kernel.scene.Node, field: kernel.scene.FieldRef) bo
 }
 
 test "an input action routes by view ownership and advertised node action" {
+    const owner: semantic.owner.Id = @enumFromInt(1);
     const Handler = struct {
         calls: usize = 0,
-        fn invoke(self: *@This(), _: kernel.action.Request) ProviderError!kernel.action.Outcome {
+        fn invoke(self: *@This(), _: semantic.action.Request) ProviderError!semantic.action.Outcome {
             self.calls += 1;
             return .handled;
         }
     };
-    const child: kernel.scene.Node = .{
+    const child: semantic.scene.Node = .{
         .id = @enumFromInt(2),
         .focusable = true,
-        .actions = &.{.{ .id = kernel.action.standard.delete, .label = "Delete" }},
+        .actions = &.{.{ .id = semantic.action.standard.delete, .label = "Delete" }},
         .content = .{ .label = "row" },
     };
-    const root: kernel.scene.Node = .{
+    const root: semantic.scene.Node = .{
         .id = @enumFromInt(1),
         .content = .{ .container = .{ .children = &.{child} } },
     };
     var views = view_runtime.Registry.init(.here);
     defer views.deinit(std.testing.allocator);
-    const view_ref = try views.publish(std.testing.allocator, "tool", null, 1, root);
+    const view_ref = try views.publish(std.testing.allocator, owner, null, 1, root);
     var handler: Handler = .{};
     var actions: Registry = .{};
     defer actions.deinit(std.testing.allocator);
-    try actions.register(std.testing.allocator, "tool", .init(&handler));
+    try actions.register(std.testing.allocator, owner, .init(&handler));
     const outcome = try actions.invoke(&views, .{
-        .action = kernel.action.standard.delete,
+        .action = semantic.action.standard.delete,
         .view = view_ref,
         .subject = @enumFromInt(2),
         .selection = .{ .nodes = &.{@enumFromInt(2)} },
@@ -169,21 +166,22 @@ test "an input action routes by view ownership and advertised node action" {
 }
 
 test "actions not advertised by the subject are unavailable" {
+    const owner: semantic.owner.Id = @enumFromInt(1);
     const Handler = struct {
-        fn invoke(_: *@This(), _: kernel.action.Request) ProviderError!kernel.action.Outcome {
+        fn invoke(_: *@This(), _: semantic.action.Request) ProviderError!semantic.action.Outcome {
             return .handled;
         }
     };
-    const root: kernel.scene.Node = .{ .id = @enumFromInt(1), .content = .{ .label = "row" } };
+    const root: semantic.scene.Node = .{ .id = @enumFromInt(1), .content = .{ .label = "row" } };
     var views = view_runtime.Registry.init(.here);
     defer views.deinit(std.testing.allocator);
-    const view_ref = try views.publish(std.testing.allocator, "tool", null, 1, root);
+    const view_ref = try views.publish(std.testing.allocator, owner, null, 1, root);
     var handler: Handler = .{};
     var actions: Registry = .{};
     defer actions.deinit(std.testing.allocator);
-    try actions.register(std.testing.allocator, "tool", .init(&handler));
+    try actions.register(std.testing.allocator, owner, .init(&handler));
     try std.testing.expectError(error.ActionUnavailable, actions.invoke(&views, .{
-        .action = kernel.action.standard.delete,
+        .action = semantic.action.standard.delete,
         .view = view_ref,
         .subject = @enumFromInt(1),
     }));

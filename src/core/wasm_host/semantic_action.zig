@@ -26,8 +26,8 @@ fn invokeGuest(raw: *anyopaque) plugin_semantic.action.CallbackError!void {
 pub fn hProvider(data: ?*anyopaque, _: *wasm.Caller, _: []const i32, results: []i32) void {
     const plugin: *WasmPlugin = @ptrCast(@alignCast(data.?));
     results[0] = 0;
-    const services = plugin.activeCtx().semantic orelse return;
-    services.actions.register(plugin.gpa, plugin.name, view_runtime.action.Provider.init(&plugin.semantic_actions)) catch return;
+    const scope = plugin.semanticScope() orelse return;
+    scope.services.actions.register(plugin.gpa, scope.owner, view_runtime.action.Provider.init(&plugin.semantic_actions)) catch return;
     results[0] = 1;
 }
 

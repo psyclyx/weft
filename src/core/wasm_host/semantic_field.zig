@@ -8,7 +8,7 @@
 const std = @import("std");
 const wasm = @import("../wasm.zig");
 const contract = @import("../membrane/contract.zig");
-const kernel = @import("weft_kernel");
+const semantic = @import("weft_semantic");
 const plugin_semantic = @import("weft_plugin_semantic");
 const view_runtime = @import("weft_view_runtime");
 const wire_util = @import("semantic_wire.zig");
@@ -68,13 +68,14 @@ fn readSnapshot(plugin: *WasmPlugin, caller: *wasm.Caller, args: []const i32) ?O
 pub fn hFieldRegister(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32, results: []i32) void {
     const plugin: *WasmPlugin = @ptrCast(@alignCast(data.?));
     results[0] = 0;
-    const services = plugin.activeCtx().semantic orelse return;
+    const scope = plugin.semanticScope() orelse return;
+    const services = scope.services;
     var snapshot = readSnapshot(plugin, caller, args[1..8]) orelse return;
     defer snapshot.deinit(plugin.gpa);
     const token: u32 = @bitCast(args[0]);
-    const ref = plugin.semantic_fields.register(&services.fields, plugin.name, token, snapshot.value) catch return;
+    const ref = plugin.semantic_fields.register(&services.fields, scope.owner, token, snapshot.value) catch return;
     if (!wire_util.writeHandle(caller, @bitCast(args[8]), @bitCast(args[9]), ref)) {
-        plugin.semantic_fields.remove(&services.fields, plugin.name, ref) catch {};
+        plugin.semantic_fields.remove(&services.fields, scope.owner, ref) catch {};
         return;
     }
     results[0] = 1;
@@ -83,7 +84,7 @@ pub fn hFieldRegister(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32
 pub fn hFieldUpdate(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32, results: []i32) void {
     const plugin: *WasmPlugin = @ptrCast(@alignCast(data.?));
     results[0] = 0;
-    const ref = wire_util.readHandle(kernel.scene.FieldRef, args[0..3]) orelse return;
+    const ref = wire_util.readHandle(semantic.scene.FieldRef, args[0..3]) orelse return;
     var snapshot = readSnapshot(plugin, caller, args[3..10]) orelse return;
     defer snapshot.deinit(plugin.gpa);
     plugin.semantic_fields.update(ref, snapshot.value) catch return;
@@ -93,9 +94,9 @@ pub fn hFieldUpdate(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32, 
 pub fn hFieldClose(data: ?*anyopaque, _: *wasm.Caller, args: []const i32, results: []i32) void {
     const plugin: *WasmPlugin = @ptrCast(@alignCast(data.?));
     results[0] = 0;
-    const services = plugin.activeCtx().semantic orelse return;
-    const ref = wire_util.readHandle(kernel.scene.FieldRef, args[0..3]) orelse return;
-    plugin.semantic_fields.remove(&services.fields, plugin.name, ref) catch return;
+    const scope = plugin.semanticScope() orelse return;
+    const ref = wire_util.readHandle(semantic.scene.FieldRef, args[0..3]) orelse return;
+    plugin.semantic_fields.remove(&scope.services.fields, scope.owner, ref) catch return;
     results[0] = 1;
 }
 

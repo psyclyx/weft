@@ -6,7 +6,7 @@
 //! makes roots and watches portable values rather than ambient global state.
 
 const std = @import("std");
-const kernel = @import("weft_kernel");
+const semantic = @import("weft_semantic");
 const fs = @import("weft_fs");
 
 const contract = fs.contract;
@@ -20,8 +20,8 @@ pub const Error = contract.Error || fs.plan.ValidationError || error{
 
 pub const Router = struct {
     allocator: std.mem.Allocator,
-    providers: std.AutoHashMap(kernel.handle.Authority, fs.service.Provider),
-    retired: std.AutoHashMap(kernel.handle.Authority, void),
+    providers: std.AutoHashMap(semantic.handle.Authority, fs.service.Provider),
+    retired: std.AutoHashMap(semantic.handle.Authority, void),
 
     pub fn init(allocator: std.mem.Allocator) Router {
         return .{
@@ -41,14 +41,14 @@ pub const Router = struct {
     /// authority is a provider identity, not a reusable table index: keeping
     /// it retired after unregister prevents old roots from being silently
     /// interpreted by a newly attached provider.
-    pub fn register(self: *Router, authority: kernel.handle.Authority, provider: fs.service.Provider) Error!void {
+    pub fn register(self: *Router, authority: semantic.handle.Authority, provider: fs.service.Provider) Error!void {
         if (self.retired.contains(authority)) return error.AuthorityRetired;
         const result = try self.providers.getOrPut(authority);
         if (result.found_existing) return error.AuthorityAlreadyRegistered;
         result.value_ptr.* = provider;
     }
 
-    pub fn unregister(self: *Router, authority: kernel.handle.Authority) Error!void {
+    pub fn unregister(self: *Router, authority: semantic.handle.Authority) Error!void {
         if (!self.providers.contains(authority)) {
             if (self.retired.contains(authority)) return error.AuthorityRetired;
             return error.UnknownAuthority;
@@ -58,7 +58,7 @@ pub const Router = struct {
         _ = self.providers.remove(authority);
     }
 
-    fn providerFor(self: *Router, authority: kernel.handle.Authority) Error!fs.service.Provider {
+    fn providerFor(self: *Router, authority: semantic.handle.Authority) Error!fs.service.Provider {
         if (self.providers.get(authority)) |provider| return provider;
         if (self.retired.contains(authority)) return error.AuthorityRetired;
         return error.UnknownAuthority;
@@ -171,7 +171,7 @@ pub const Router = struct {
         }
     }
 
-    fn checkSourceForPlan(self: *Router, destination_authority: kernel.handle.Authority, source: contract.Source) Error!void {
+    fn checkSourceForPlan(self: *Router, destination_authority: semantic.handle.Authority, source: contract.Source) Error!void {
         _ = try self.checkSource(source);
         const source_authority = switch (source) {
             .entry => |entry| entry.root.authority,
@@ -206,7 +206,7 @@ test {
 }
 
 const TestProvider = struct {
-    authority: kernel.handle.Authority,
+    authority: semantic.handle.Authority,
     capabilities_calls: usize = 0,
     observe_calls: usize = 0,
     list_calls: usize = 0,
@@ -279,11 +279,11 @@ const TestProvider = struct {
     }
 };
 
-fn makeRoot(authority: kernel.handle.Authority) contract.Root {
+fn makeRoot(authority: semantic.handle.Authority) contract.Root {
     return .{ .authority = authority, .slot = 0, .generation = 1 };
 }
 
-fn makeEntry(authority: kernel.handle.Authority) contract.EntryRef {
+fn makeEntry(authority: semantic.handle.Authority) contract.EntryRef {
     return .{ .authority = authority, .slot = 0, .generation = 1 };
 }
 

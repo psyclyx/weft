@@ -1,5 +1,5 @@
-//! Runtime facade for provider-authored semantic views. The kernel beneath
-//! this module is immutable vocabulary; this module owns host-side lifetimes.
+//! Runtime facade for provider-authored semantic views. `weft_semantic` is
+//! immutable vocabulary; this module owns host-side lifetimes.
 
 const std = @import("std");
 

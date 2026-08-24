@@ -22,7 +22,7 @@ const Guest = struct { src: []const u8, import: []const u8, install: bool };
 const ArchitectureModules = struct {
     wire: *std.Build.Module,
     schema: *std.Build.Module,
-    kernel: *std.Build.Module,
+    semantic: *std.Build.Module,
     scene_codec: *std.Build.Module,
     fs: *std.Build.Module,
     fs_runtime: *std.Build.Module,
@@ -47,56 +47,56 @@ fn createArchitectureModules(
         .optimize = optimize,
     });
     schema.addImport("weft_wire", wire);
-    const kernel = b.createModule(.{
-        .root_source_file = b.path("src/kernel/root.zig"),
+    const semantic = b.createModule(.{
+        .root_source_file = b.path("src/semantic_model/root.zig"),
         .target = target,
         .optimize = optimize,
     });
-    kernel.addImport("weft_schema", schema);
+    semantic.addImport("weft_schema", schema);
     const scene_codec = b.createModule(.{
         .root_source_file = b.path("src/scene_codec/root.zig"),
         .target = target,
         .optimize = optimize,
     });
-    scene_codec.addImport("weft_kernel", kernel);
+    scene_codec.addImport("weft_semantic", semantic);
     scene_codec.addImport("weft_schema", schema);
     const fs = b.createModule(.{
         .root_source_file = b.path("src/fs/root.zig"),
         .target = target,
         .optimize = optimize,
     });
-    fs.addImport("weft_kernel", kernel);
+    fs.addImport("weft_semantic", semantic);
     const fs_runtime = b.createModule(.{
         .root_source_file = b.path("src/fs_runtime/root.zig"),
         .target = target,
         .optimize = optimize,
     });
-    fs_runtime.addImport("weft_kernel", kernel);
+    fs_runtime.addImport("weft_semantic", semantic);
     fs_runtime.addImport("weft_fs", fs);
     const view_runtime = b.createModule(.{
         .root_source_file = b.path("src/view_runtime/root.zig"),
         .target = target,
         .optimize = optimize,
     });
-    view_runtime.addImport("weft_kernel", kernel);
+    view_runtime.addImport("weft_semantic", semantic);
     const target_runtime = b.createModule(.{
         .root_source_file = b.path("src/target_runtime/root.zig"),
         .target = target,
         .optimize = optimize,
     });
-    target_runtime.addImport("weft_kernel", kernel);
+    target_runtime.addImport("weft_semantic", semantic);
     const plugin_semantic = b.createModule(.{
         .root_source_file = b.path("src/plugin_semantic/root.zig"),
         .target = target,
         .optimize = optimize,
     });
-    plugin_semantic.addImport("weft_kernel", kernel);
+    plugin_semantic.addImport("weft_semantic", semantic);
     plugin_semantic.addImport("weft_view_runtime", view_runtime);
     plugin_semantic.addImport("weft_scene_codec", scene_codec);
     return .{
         .wire = wire,
         .schema = schema,
-        .kernel = kernel,
+        .semantic = semantic,
         .scene_codec = scene_codec,
         .fs = fs,
         .fs_runtime = fs_runtime,
@@ -109,7 +109,7 @@ fn createArchitectureModules(
 fn addArchitectureImports(mod: *std.Build.Module, architecture: ArchitectureModules) void {
     mod.addImport("weft_wire", architecture.wire);
     mod.addImport("weft_schema", architecture.schema);
-    mod.addImport("weft_kernel", architecture.kernel);
+    mod.addImport("weft_semantic", architecture.semantic);
     mod.addImport("weft_scene_codec", architecture.scene_codec);
     mod.addImport("weft_fs", architecture.fs);
     mod.addImport("weft_fs_runtime", architecture.fs_runtime);
@@ -365,8 +365,8 @@ pub fn build(b: *std.Build) void {
 
     // Portable contract gate: deliberately separate from the application
     // suite so these roots cannot acquire app/platform dependencies unnoticed.
-    const contract_step = b.step("test-contract", "Run portable schema/kernel/filesystem contract tests");
-    inline for (.{ architecture.wire, architecture.schema, architecture.kernel, architecture.scene_codec, architecture.fs, architecture.fs_runtime, architecture.view_runtime, architecture.target_runtime, architecture.plugin_semantic }) |contract_mod| {
+    const contract_step = b.step("test-contract", "Run portable schema/semantic/filesystem contract tests");
+    inline for (.{ architecture.wire, architecture.schema, architecture.semantic, architecture.scene_codec, architecture.fs, architecture.fs_runtime, architecture.view_runtime, architecture.target_runtime, architecture.plugin_semantic }) |contract_mod| {
         const contract_tests = b.addTest(.{ .root_module = contract_mod });
         const run_contract_tests = b.addRunArtifact(contract_tests);
         contract_step.dependOn(&run_contract_tests.step);
@@ -382,7 +382,7 @@ pub fn build(b: *std.Build) void {
     contract_step.dependOn(&run_fs_fake_tests.step);
 
     // Dired's draft/reconcile model is a plugin-local pure module. It sees
-    // only the named generic kernel/filesystem contracts; the existing dired
+    // only the named generic semantic/filesystem contracts; the existing dired
     // guest is intentionally not wired to this draft yet.
     const dired_facade = b.createModule(.{
         .root_source_file = b.path("src/plugins/dired/root.zig"),
@@ -401,7 +401,7 @@ pub fn build(b: *std.Build) void {
     });
     const dired_model_step = b.step("test-dired-model", "Run the pure dired model and semantic projection tests");
     inline for (.{ dired_facade, dired_model, dired_projection }) |dired_module| {
-        dired_module.addImport("weft_kernel", architecture.kernel);
+        dired_module.addImport("weft_semantic", architecture.semantic);
         dired_module.addImport("weft_fs", architecture.fs);
         const dired_tests = b.addTest(.{ .root_module = dired_module });
         const run_dired_tests = b.addRunArtifact(dired_tests);
@@ -605,20 +605,20 @@ fn buildGuest(b: *std.Build, src: []const u8) *std.Build.Step.Compile {
     });
     guest_sdk.addImport("membrane_contract_data", contract_data);
     guest_sdk.addImport("weft_schema", schema);
-    const kernel = b.createModule(.{
-        .root_source_file = b.path("src/kernel/root.zig"),
+    const semantic = b.createModule(.{
+        .root_source_file = b.path("src/semantic_model/root.zig"),
         .target = wasm_target,
         .optimize = .ReleaseSmall,
     });
-    kernel.addImport("weft_schema", schema);
+    semantic.addImport("weft_schema", schema);
     const scene_codec = b.createModule(.{
         .root_source_file = b.path("src/scene_codec/root.zig"),
         .target = wasm_target,
         .optimize = .ReleaseSmall,
     });
-    scene_codec.addImport("weft_kernel", kernel);
+    scene_codec.addImport("weft_semantic", semantic);
     scene_codec.addImport("weft_schema", schema);
-    guest_sdk.addImport("weft_kernel", kernel);
+    guest_sdk.addImport("weft_semantic", semantic);
     guest_sdk.addImport("weft_scene_codec", scene_codec);
     guest_mod.addImport("weft", guest_sdk);
     const guest = b.addExecutable(.{

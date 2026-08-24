@@ -3,7 +3,7 @@
 //! semantic actions, while a head routes input to only its active interaction.
 
 const std = @import("std");
-const kernel = @import("weft_kernel");
+const semantic = @import("weft_semantic");
 
 pub const Error = std.mem.Allocator.Error || error{
     InvalidRoot,
@@ -17,12 +17,12 @@ pub const Error = std.mem.Allocator.Error || error{
 
 pub const Instance = struct {
     arena: std.heap.ArenaAllocator,
-    descriptor: kernel.interaction.Descriptor,
+    descriptor: semantic.interaction.Descriptor,
 
     fn create(
         gpa: std.mem.Allocator,
-        ref: kernel.interaction.Ref,
-        definition: kernel.interaction.Definition,
+        ref: semantic.interaction.Ref,
+        definition: semantic.interaction.Definition,
     ) Error!*Instance {
         try validate(gpa, definition);
         const self = try gpa.create(Instance);
@@ -31,14 +31,14 @@ pub const Instance = struct {
         errdefer self.arena.deinit();
         const arena = self.arena.allocator();
 
-        const actions = try arena.alloc(kernel.interaction.Action, definition.actions.len);
+        const actions = try arena.alloc(semantic.interaction.Action, definition.actions.len);
         for (definition.actions, actions) |source, *destination| destination.* = .{
             .id = try arena.dupe(u8, source.id),
             .label = try arena.dupe(u8, source.label),
             .enabled = source.enabled,
             .disposition = source.disposition,
         };
-        const bindings = try arena.alloc(kernel.interaction.Binding, definition.bindings.len);
+        const bindings = try arena.alloc(semantic.interaction.Binding, definition.bindings.len);
         for (definition.bindings, bindings) |source, *destination| destination.* = .{
             .input = try arena.dupe(u8, source.input),
             .action = try arena.dupe(u8, source.action),
@@ -62,14 +62,14 @@ pub const Instance = struct {
         gpa.destroy(self);
     }
 
-    pub fn action(self: *const Instance, id: []const u8) ?*const kernel.interaction.Action {
+    pub fn action(self: *const Instance, id: []const u8) ?*const semantic.interaction.Action {
         for (self.descriptor.actions) |*candidate| {
             if (std.mem.eql(u8, candidate.id, id)) return candidate;
         }
         return null;
     }
 
-    pub fn actionForInput(self: *const Instance, input: []const u8) ?*const kernel.interaction.Action {
+    pub fn actionForInput(self: *const Instance, input: []const u8) ?*const semantic.interaction.Action {
         for (self.descriptor.bindings) |binding| {
             if (!std.mem.eql(u8, binding.input, input)) continue;
             const candidate = self.action(binding.action) orelse return null;
@@ -82,9 +82,9 @@ pub const Instance = struct {
 /// A LIFO interaction scope owned by one head. Closing out of order is an
 /// explicit error, so one plugin cannot accidentally expose a buried dialog.
 pub const Stack = struct {
-    authority: kernel.handle.Authority = .here,
+    authority: semantic.handle.Authority = .here,
     slots: std.ArrayList(Slot) = .empty,
-    order: std.ArrayList(kernel.interaction.Ref) = .empty,
+    order: std.ArrayList(semantic.interaction.Ref) = .empty,
 
     const Slot = struct {
         generation: u32 = 1,
@@ -93,7 +93,7 @@ pub const Stack = struct {
 
     pub const empty: Stack = .{};
 
-    pub fn init(authority: kernel.handle.Authority) Stack {
+    pub fn init(authority: semantic.handle.Authority) Stack {
         return .{ .authority = authority };
     }
 
@@ -107,8 +107,8 @@ pub const Stack = struct {
     pub fn open(
         self: *Stack,
         gpa: std.mem.Allocator,
-        definition: kernel.interaction.Definition,
-    ) Error!kernel.interaction.Ref {
+        definition: semantic.interaction.Definition,
+    ) Error!semantic.interaction.Ref {
         var slot_index: usize = self.slots.items.len;
         for (self.slots.items, 0..) |slot, index| {
             if (slot.instance == null) {
@@ -118,7 +118,7 @@ pub const Stack = struct {
         }
         if (slot_index == self.slots.items.len) try self.slots.append(gpa, .{});
         const slot = &self.slots.items[slot_index];
-        const ref: kernel.interaction.Ref = .{
+        const ref: semantic.interaction.Ref = .{
             .authority = self.authority,
             .slot = @intCast(slot_index),
             .generation = slot.generation,
@@ -135,14 +135,14 @@ pub const Stack = struct {
         return self.get(self.order.items[self.order.items.len - 1]);
     }
 
-    pub fn get(self: *const Stack, ref: kernel.interaction.Ref) ?*const Instance {
+    pub fn get(self: *const Stack, ref: semantic.interaction.Ref) ?*const Instance {
         if (ref.authority != self.authority or ref.slot >= self.slots.items.len) return null;
         const slot = self.slots.items[ref.slot];
         if (slot.generation != ref.generation) return null;
         return slot.instance;
     }
 
-    pub fn close(self: *Stack, gpa: std.mem.Allocator, ref: kernel.interaction.Ref) Error!void {
+    pub fn close(self: *Stack, gpa: std.mem.Allocator, ref: semantic.interaction.Ref) Error!void {
         if (self.order.items.len == 0 or !self.order.items[self.order.items.len - 1].eql(ref))
             return error.NotActive;
         const slot = &self.slots.items[ref.slot];
@@ -154,13 +154,13 @@ pub const Stack = struct {
         if (slot.generation == 0) slot.generation = 1;
     }
 
-    pub fn actionForInput(self: *const Stack, input: []const u8) ?*const kernel.interaction.Action {
+    pub fn actionForInput(self: *const Stack, input: []const u8) ?*const semantic.interaction.Action {
         const current = self.active() orelse return null;
         return current.actionForInput(input);
     }
 };
 
-fn validate(gpa: std.mem.Allocator, definition: kernel.interaction.Definition) Error!void {
+fn validate(gpa: std.mem.Allocator, definition: semantic.interaction.Definition) Error!void {
     if (@intFromEnum(definition.root) == 0) return error.InvalidRoot;
     var actions: std.StringHashMapUnmanaged(void) = .empty;
     defer actions.deinit(gpa);
@@ -181,7 +181,7 @@ fn validate(gpa: std.mem.Allocator, definition: kernel.interaction.Definition) E
     if (definition.cancel_action) |id| if (!actions.contains(id)) return error.UnknownAction;
 }
 
-const confirm_definition: kernel.interaction.Definition = .{
+const confirm_definition: semantic.interaction.Definition = .{
     .role = .dialog,
     .view = .{ .authority = .here, .slot = 1, .generation = 1 },
     .root = @enumFromInt(1),
