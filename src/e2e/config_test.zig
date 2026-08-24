@@ -347,7 +347,7 @@ test "e2e/config: the sample config boots; SPC g i is discoverable via which-key
     ed.chord("SPC v x");
     ed.chord("SPC v P");
     ed.chord("SPC v d");
-    ed.chord("SPC v z");
+    ed.chord("SPC v m");
     try t.expectEqual(@as(usize, 1), actions.copies);
     try t.expectEqual(@as(usize, 1), actions.cuts);
     try t.expectEqual(@as(usize, 1), actions.paste_after);
@@ -355,7 +355,7 @@ test "e2e/config: the sample config boots; SPC g i is discoverable via which-key
     try t.expectEqual(@as(usize, 1), actions.deletes);
     try t.expectEqual(@as(usize, 1), actions.permission_edits);
 
-    ed.chord("SPC v m");
+    ed.chord("SPC v z");
     try t.expectEqual(@as(usize, 1), actions.plugin_actions);
 
     ed.chord("SPC v r");
