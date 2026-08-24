@@ -11,6 +11,8 @@ const fs = @import("weft_fs");
 const target_runtime = @import("weft_target_runtime");
 const router_mod = @import("router.zig");
 
+const contract = fs.contract;
+
 pub const Error = target_runtime.target.Error || router_mod.Error;
 
 pub const Definition = struct {
@@ -20,6 +22,15 @@ pub const Definition = struct {
     /// second filesystem-directory fact is rejected by the registry just like
     /// any other duplicate vocabulary name.
     facts: []const semantic.target.Fact = &.{},
+};
+
+/// A direct child publication request contains only an observed opaque entry
+/// and its revision. The parent target is the authority boundary; callers
+/// cannot supply a path, raw root, or display name.
+pub const ChildDefinition = struct {
+    parent: semantic.target.Located,
+    entry: contract.EntryRef,
+    entry_revision: contract.Revision,
 };
 
 /// The two-part lifetime created by `publish`. Keeping it as a value makes
@@ -47,6 +58,52 @@ pub const Registration = struct {
         if (!self.active) return false;
         if (!targets.close(gpa, self.owner, self.ref)) return false;
         _ = router.unbindTarget(self.ref);
+        self.active = false;
+        return true;
+    }
+};
+
+/// Owns both halves of a child publication: the semantic target/binding and
+/// the provider root derived from the guarded child entry. A copied value is
+/// not an additional owner; callers close the original value exactly once.
+pub const ChildRegistration = struct {
+    registration: Registration,
+    derived_root: contract.Root,
+    router: *router_mod.Router,
+    active: bool = true,
+
+    pub fn located(self: ChildRegistration) semantic.target.Located {
+        return self.registration.located();
+    }
+
+    pub fn close(
+        self: *ChildRegistration,
+        gpa: std.mem.Allocator,
+        targets: *target_runtime.target.Registry,
+    ) bool {
+        if (!self.active) return false;
+        if (!self.registration.close(gpa, targets, self.router)) return false;
+        // Provider retirement may already have reclaimed the descriptor. The
+        // target lifetime is still closed in that case, and deinit owns the
+        // final provider cleanup.
+        _ = self.router.releaseRoot(self.derived_root) catch {};
+        self.active = false;
+        return true;
+    }
+
+    /// Host-owned teardown path. Unlike `close`, this is intentionally not
+    /// contingent on the target still being present: owner cleanup must not
+    /// leak the provider root when a semantic registry was already revoked.
+    /// The stored owner remains the only authority used to retire the target.
+    pub fn revoke(
+        self: *ChildRegistration,
+        gpa: std.mem.Allocator,
+        targets: *target_runtime.target.Registry,
+    ) bool {
+        if (!self.active) return false;
+        _ = self.registration.close(gpa, targets, self.router);
+        _ = self.router.unbindTarget(self.registration.ref);
+        _ = self.router.releaseRoot(self.derived_root) catch {};
         self.active = false;
         return true;
     }
@@ -82,10 +139,74 @@ pub fn publish(
     return .{ .ref = ref, .revision = descriptor.revision, .owner = owner };
 }
 
+/// Publish a directory target from a live, directly listed child. Listing is
+/// the relation proof: the entry must occur in the authorized parent's
+/// current listing with the exact opaque identity, revision, and directory
+/// kind requested. The provider then repeats its own no-follow checks while
+/// deriving the confined root, so this composition remains honest about the
+/// unavoidable TOCTOU interval.
+pub fn publishChildDirectory(
+    gpa: std.mem.Allocator,
+    targets: *target_runtime.target.Registry,
+    router: *router_mod.Router,
+    owner: semantic.owner.Id,
+    definition: ChildDefinition,
+) Error!ChildRegistration {
+    switch (definition.parent.location) {
+        .whole => {},
+        else => return error.Unsupported,
+    }
+    const parent_descriptor = targets.get(definition.parent.target) orelse return error.StaleTarget;
+    if (parent_descriptor.revision != definition.parent.revision or parent_descriptor.kind != .directory)
+        return error.StaleTarget;
+    const parent = router.authorizedDirectory(definition.parent.target, definition.parent.revision) catch |err| return err;
+
+    var listing = try router.list(gpa, parent.root, parent.node);
+    defer listing.deinit();
+    var found: ?contract.DirEntry = null;
+    for (listing.value.entries) |entry| {
+        const entry_ref = switch (entry.observation.node) {
+            .root => continue,
+            .entry => |ref| ref,
+        };
+        if (!entry_ref.eql(definition.entry)) continue;
+        if (!std.mem.eql(u8, entry.observation.revision.token, definition.entry_revision.token))
+            return error.Stale;
+        if (entry.observation.kind != .directory) return error.NotDirectory;
+        found = entry;
+        break;
+    }
+    const direct = found orelse return error.Stale;
+    const child_source: contract.EntrySource = .{
+        .root = parent.root,
+        .ref = definition.entry,
+        .revision = direct.observation.revision,
+    };
+    const derived_root = try router.deriveRoot(child_source);
+    errdefer router.releaseRoot(derived_root) catch {};
+
+    const registration = try publish(gpa, targets, router, owner, .{
+        .display_name = direct.name.bytes,
+        .directory = .{ .root = derived_root },
+    });
+    return .{
+        .registration = registration,
+        .derived_root = derived_root,
+        .router = router,
+    };
+}
+
 const TestProvider = struct {
     authority: semantic.handle.Authority,
     observed_kind: fs.contract.Kind = .directory,
     observe_calls: usize = 0,
+    list_enabled: bool = false,
+    listed_name: []const u8 = "child",
+    listed_ref: fs.contract.EntryRef = .{ .authority = .here, .slot = 4, .generation = 1 },
+    listed_kind: fs.contract.Kind = .directory,
+    listed_revision: []const u8 = "child-revision",
+    derive_calls: usize = 0,
+    release_calls: usize = 0,
 
     fn provider(self: *TestProvider) fs.service.Provider {
         return .init(self);
@@ -100,6 +221,19 @@ const TestProvider = struct {
         return left.eql(right);
     }
 
+    pub fn deriveRoot(self: *TestProvider, source: fs.contract.EntrySource) fs.contract.Error!fs.contract.Root {
+        if (source.root.authority != self.authority) return error.Confined;
+        if (!self.list_enabled or !source.ref.eql(self.listed_ref)) return error.Stale;
+        if (!std.mem.eql(u8, source.revision.token, self.listed_revision)) return error.Stale;
+        if (self.listed_kind != .directory) return error.NotDirectory;
+        self.derive_calls += 1;
+        return .{ .authority = source.root.authority, .slot = source.root.slot + 1, .generation = 1 };
+    }
+
+    pub fn releaseRoot(self: *TestProvider, _: fs.contract.Root) void {
+        self.release_calls += 1;
+    }
+
     pub fn observe(self: *TestProvider, gpa: std.mem.Allocator, root: fs.contract.Root, node: fs.contract.NodeRef) fs.contract.Error!fs.contract.OwnedObservation {
         if (root.authority != self.authority) return error.Confined;
         self.observe_calls += 1;
@@ -108,8 +242,29 @@ const TestProvider = struct {
         return owned;
     }
 
-    pub fn list(_: *TestProvider, _: std.mem.Allocator, _: fs.contract.Root, _: fs.contract.NodeRef) fs.contract.Error!fs.contract.OwnedListing {
-        return error.Unsupported;
+    pub fn list(self: *TestProvider, gpa: std.mem.Allocator, root: fs.contract.Root, node: fs.contract.NodeRef) fs.contract.Error!fs.contract.OwnedListing {
+        if (!self.list_enabled) return error.Unsupported;
+        var owned = fs.contract.OwnedListing.init(gpa);
+        errdefer owned.deinit();
+        const arena = owned.allocator();
+        const token = try arena.dupe(u8, self.listed_revision);
+        const entries = try arena.alloc(fs.contract.DirEntry, 1);
+        const name = try arena.dupe(u8, self.listed_name);
+        entries[0] = .{
+            .name = fs.contract.Name.init(name) catch unreachable,
+            .observation = .{
+                .node = .{ .entry = self.listed_ref },
+                .revision = .{ .token = token },
+                .kind = self.listed_kind,
+            },
+        };
+        owned.value = .{
+            .directory = .{ .node = node, .revision = .{ .token = token }, .kind = .directory },
+            .revision = .{ .token = token },
+            .entries = entries,
+        };
+        _ = root;
+        return owned;
     }
 
     pub fn read(_: *TestProvider, _: std.mem.Allocator, _: fs.contract.ReadRequest) fs.contract.Error!fs.contract.OwnedReadResult {
@@ -205,4 +360,87 @@ test "publication rolls back descriptive targets when authority cannot bind" {
         .facts = &.{.{ .name = fs.target.fact_name, .value = encoded }},
     }));
     try std.testing.expectEqual(@as(usize, 0), targets.closeOwner(gpa, owner));
+}
+
+test "child publication proves direct identity, owns derived root, and preserves raw name" {
+    const gpa = std.testing.allocator;
+    const fs_authority: semantic.handle.Authority = @enumFromInt(43);
+    const target_authority: semantic.handle.Authority = @enumFromInt(75);
+    const owner: semantic.owner.Id = @enumFromInt(12);
+    const parent_root = testRoot(fs_authority);
+    const child_ref: fs.contract.EntryRef = .{ .authority = fs_authority, .slot = 8, .generation = 1 };
+    var provider = TestProvider{
+        .authority = fs_authority,
+        .list_enabled = true,
+        .listed_name = "line\n-[]'\xff",
+        .listed_ref = child_ref,
+    };
+    var router = router_mod.Router.init(gpa);
+    defer router.deinit();
+    try router.register(fs_authority, provider.provider());
+    var targets = target_runtime.target.Registry.init(target_authority);
+    defer targets.deinit(gpa);
+
+    var parent = try publish(gpa, &targets, &router, owner, .{
+        .display_name = "parent",
+        .directory = .{ .root = parent_root },
+    });
+    defer _ = parent.close(gpa, &targets, &router);
+    var child = try publishChildDirectory(gpa, &targets, &router, owner, .{
+        .parent = parent.located(),
+        .entry = child_ref,
+        .entry_revision = .{ .token = "child-revision" },
+    });
+    try std.testing.expectEqualStrings("line\n-[]'\xff", targets.get(child.registration.ref).?.display_name);
+    try std.testing.expectEqual(@as(usize, 1), provider.derive_calls);
+    try std.testing.expectEqual(@as(u32, parent_root.slot + 1), child.derived_root.slot);
+    try std.testing.expectEqual(child.registration.ref, child.located().target);
+    try std.testing.expectEqual(@as(usize, 2), provider.observe_calls);
+    try std.testing.expect(child.close(gpa, &targets));
+    try std.testing.expectEqual(@as(usize, 1), provider.release_calls);
+    try std.testing.expectError(error.TargetUnbound, router.authorizedDirectory(child.registration.ref, child.registration.revision));
+    try std.testing.expect(!child.close(gpa, &targets));
+
+    provider.listed_kind = .regular;
+    try std.testing.expectError(error.NotDirectory, publishChildDirectory(gpa, &targets, &router, owner, .{
+        .parent = parent.located(),
+        .entry = child_ref,
+        .entry_revision = .{ .token = "child-revision" },
+    }));
+    provider.listed_kind = .symlink;
+    try std.testing.expectError(error.NotDirectory, publishChildDirectory(gpa, &targets, &router, owner, .{
+        .parent = parent.located(),
+        .entry = child_ref,
+        .entry_revision = .{ .token = "child-revision" },
+    }));
+    provider.listed_kind = .directory;
+    try std.testing.expectError(error.Stale, publishChildDirectory(gpa, &targets, &router, owner, .{
+        .parent = parent.located(),
+        .entry = child_ref,
+        .entry_revision = .{ .token = "old" },
+    }));
+    const foreign: fs.contract.EntryRef = .{ .authority = fs_authority, .slot = 99, .generation = 1 };
+    try std.testing.expectError(error.Stale, publishChildDirectory(gpa, &targets, &router, owner, .{
+        .parent = parent.located(),
+        .entry = foreign,
+        .entry_revision = .{ .token = "child-revision" },
+    }));
+
+    try std.testing.expectError(error.Unsupported, publishChildDirectory(gpa, &targets, &router, owner, .{
+        .parent = .{ .target = parent.ref, .revision = parent.revision, .location = .{ .node = "not-whole" } },
+        .entry = child_ref,
+        .entry_revision = .{ .token = "child-revision" },
+    }));
+
+    var revoked = try publishChildDirectory(gpa, &targets, &router, owner, .{
+        .parent = parent.located(),
+        .entry = child_ref,
+        .entry_revision = .{ .token = "child-revision" },
+    });
+    // Simulate semantic owner teardown happening before the host's resource
+    // collection gets to release its child registration.
+    try std.testing.expectEqual(@as(usize, 2), targets.closeOwner(gpa, owner));
+    try std.testing.expect(revoked.revoke(gpa, &targets));
+    try std.testing.expectEqual(@as(usize, 2), provider.release_calls);
+    try std.testing.expect(!revoked.revoke(gpa, &targets));
 }

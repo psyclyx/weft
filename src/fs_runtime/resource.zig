@@ -99,6 +99,12 @@ test "lease resource delegates final release to its filesystem router" {
         pub fn sameRoot(_: *@This(), left: contract.Root, right: contract.Root) contract.Error!bool {
             return left.eql(right);
         }
+
+        pub fn deriveRoot(_: *@This(), _: contract.EntrySource) contract.Error!contract.Root {
+            return error.Unsupported;
+        }
+
+        pub fn releaseRoot(_: *@This(), _: contract.Root) void {}
         pub fn observe(_: *@This(), gpa: std.mem.Allocator, _: contract.Root, node: contract.NodeRef) contract.Error!contract.OwnedObservation {
             var result = contract.OwnedObservation.init(gpa);
             result.value = .{ .node = node, .revision = .{ .token = &.{} }, .kind = .directory };

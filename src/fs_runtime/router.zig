@@ -177,6 +177,25 @@ pub const Router = struct {
         return provider.sameRoot(left, right);
     }
 
+    /// Ask the owning provider to derive a confined root from a guarded entry.
+    /// The router validates only the portable authority envelope; the provider
+    /// owns the namespace identity, revision, and no-follow checks.
+    pub fn deriveRoot(self: *Router, source: contract.EntrySource) Error!contract.Root {
+        const provider = try self.checkRoot(source.root);
+        try checkEntry(source.root, source.ref);
+        const root = try provider.deriveRoot(source);
+        if (root.generation == 0 or root.authority != source.root.authority) return error.InvalidHandle;
+        return root;
+    }
+
+    /// Release a provider-owned root through its authority route. This keeps
+    /// descriptor/handle lifetime out of target and plugin registries.
+    pub fn releaseRoot(self: *Router, root: contract.Root) Error!void {
+        if (root.generation == 0) return error.InvalidHandle;
+        const provider = try self.providerFor(root.authority);
+        provider.releaseRoot(root);
+    }
+
     pub fn observe(self: *Router, allocator: std.mem.Allocator, root: contract.Root, node: contract.NodeRef) Error!contract.OwnedObservation {
         const provider = try self.checkRoot(root);
         try checkNode(root, node);
@@ -328,6 +347,13 @@ const TestProvider = struct {
         if (left.authority != self.authority or right.authority != self.authority) return error.Confined;
         return left.eql(right);
     }
+
+    pub fn deriveRoot(self: *TestProvider, source: contract.EntrySource) contract.Error!contract.Root {
+        if (source.root.authority != self.authority) return error.Confined;
+        return source.root;
+    }
+
+    pub fn releaseRoot(_: *TestProvider, _: contract.Root) void {}
 
     pub fn observe(self: *TestProvider, gpa: std.mem.Allocator, root: contract.Root, node: contract.NodeRef) contract.Error!contract.OwnedObservation {
         if (root.authority != self.authority) return error.Confined;

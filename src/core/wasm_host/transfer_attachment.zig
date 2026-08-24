@@ -279,6 +279,10 @@ const TestProvider = struct {
     pub fn sameRoot(_: *@This(), left: contract.Root, right: contract.Root) contract.Error!bool {
         return left.eql(right);
     }
+    pub fn deriveRoot(_: *@This(), _: contract.EntrySource) contract.Error!contract.Root {
+        return error.Unsupported;
+    }
+    pub fn releaseRoot(_: *@This(), _: contract.Root) void {}
     pub fn observe(_: *@This(), gpa: std.mem.Allocator, _: contract.Root, node: contract.NodeRef) contract.Error!contract.OwnedObservation {
         var value = contract.OwnedObservation.init(gpa);
         value.value = .{ .node = node, .revision = .{ .token = "r" }, .kind = .regular };

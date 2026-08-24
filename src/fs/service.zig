@@ -18,6 +18,8 @@ pub const Provider = struct {
     pub const VTable = struct {
         capabilities: *const fn (*anyopaque, contract.Root) contract.Error!contract.Capabilities,
         same_root: *const fn (*anyopaque, contract.Root, contract.Root) contract.Error!bool,
+        derive_root: *const fn (*anyopaque, contract.EntrySource) contract.Error!contract.Root,
+        release_root: *const fn (*anyopaque, contract.Root) void,
         observe: *const fn (*anyopaque, std.mem.Allocator, contract.Root, contract.NodeRef) contract.Error!contract.OwnedObservation,
         list: *const fn (*anyopaque, std.mem.Allocator, contract.Root, contract.NodeRef) contract.Error!contract.OwnedListing,
         read: *const fn (*anyopaque, std.mem.Allocator, contract.ReadRequest) contract.Error!contract.OwnedReadResult,
@@ -59,6 +61,14 @@ pub const Provider = struct {
                 return self(raw).sameRoot(left, right);
             }
 
+            fn deriveRoot(raw: *anyopaque, source: contract.EntrySource) contract.Error!contract.Root {
+                return self(raw).deriveRoot(source);
+            }
+
+            fn releaseRoot(raw: *anyopaque, root: contract.Root) void {
+                self(raw).releaseRoot(root);
+            }
+
             fn list(raw: *anyopaque, gpa: std.mem.Allocator, root: contract.Root, directory: contract.NodeRef) contract.Error!contract.OwnedListing {
                 return self(raw).list(gpa, root, directory);
             }
@@ -94,6 +104,8 @@ pub const Provider = struct {
             const vtable: VTable = .{
                 .capabilities = @This().capabilities,
                 .same_root = @This().sameRoot,
+                .derive_root = @This().deriveRoot,
+                .release_root = @This().releaseRoot,
                 .observe = @This().observe,
                 .list = @This().list,
                 .read = @This().read,
@@ -120,6 +132,19 @@ pub const Provider = struct {
     /// remote implementations can use their own stable identity mechanism.
     pub fn sameRoot(self: Provider, left: contract.Root, right: contract.Root) contract.Error!bool {
         return self.vtable.same_root(self.context, left, right);
+    }
+
+    /// Derive a new provider-owned directory root from a guarded entry. The
+    /// provider performs the final no-follow identity and revision checks;
+    /// callers never turn a name or descriptive target fact into authority.
+    pub fn deriveRoot(self: Provider, source: contract.EntrySource) contract.Error!contract.Root {
+        return self.vtable.derive_root(self.context, source);
+    }
+
+    /// Release a root previously returned by `deriveRoot` or root acquisition.
+    /// Providers own the descriptor/identity behind the opaque handle.
+    pub fn releaseRoot(self: Provider, root: contract.Root) void {
+        self.vtable.release_root(self.context, root);
     }
 
     pub fn observe(self: Provider, gpa: std.mem.Allocator, root: contract.Root, node: contract.NodeRef) contract.Error!contract.OwnedObservation {

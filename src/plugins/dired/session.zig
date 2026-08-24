@@ -1431,6 +1431,10 @@ const FakeFilesystem = struct {
     pub fn sameRoot(_: *FakeFilesystem, left: contract.Root, right: contract.Root) contract.Error!bool {
         return left.eql(right);
     }
+    pub fn deriveRoot(_: *FakeFilesystem, _: contract.EntrySource) contract.Error!contract.Root {
+        return error.Unsupported;
+    }
+    pub fn releaseRoot(_: *FakeFilesystem, _: contract.Root) void {}
 
     pub fn observe(_: *FakeFilesystem, gpa: std.mem.Allocator, _: contract.Root, node: contract.NodeRef) contract.Error!contract.OwnedObservation {
         var owned = contract.OwnedObservation.init(gpa);

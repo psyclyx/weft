@@ -113,6 +113,15 @@ pub const Fake = struct {
         return left.eql(right);
     }
 
+    /// The fake models one shared root but does not model descriptor
+    /// confinement for derived roots. Keeping this explicit prevents tests
+    /// from accidentally treating descriptive entries as authority.
+    pub fn deriveRoot(_: *Fake, _: contract.EntrySource) contract.Error!contract.Root {
+        return error.Unsupported;
+    }
+
+    pub fn releaseRoot(_: *Fake, _: contract.Root) void {}
+
     pub fn observe(self: *Fake, gpa: std.mem.Allocator, root_ref: contract.Root, node: contract.NodeRef) contract.Error!contract.OwnedObservation {
         try validateRoot(root_ref);
         var owned = contract.OwnedObservation.init(gpa);

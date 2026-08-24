@@ -271,6 +271,10 @@ test "typed filesystem authorization rejects forged facts and entry attachments"
         pub fn sameRoot(_: *@This(), left: fs.contract.Root, right: fs.contract.Root) fs.contract.Error!bool {
             return left.eql(right);
         }
+        pub fn deriveRoot(_: *@This(), _: fs.contract.EntrySource) fs.contract.Error!fs.contract.Root {
+            return error.Unsupported;
+        }
+        pub fn releaseRoot(_: *@This(), _: fs.contract.Root) void {}
         pub fn observe(_: *@This(), gpa: std.mem.Allocator, _: fs.contract.Root, node: fs.contract.NodeRef) fs.contract.Error!fs.contract.OwnedObservation {
             var owned = fs.contract.OwnedObservation.init(gpa);
             owned.value = .{ .node = node, .revision = .{ .token = &.{} }, .kind = .directory };

@@ -197,6 +197,26 @@ pub const LinuxFs = struct {
         return left_state.identity.locationEql(right_state.identity);
     }
 
+    /// Pin a directory entry as a new root without converting its name into
+    /// authority. The entry's provider-owned parent handle is resolved first,
+    /// then the raw leaf is opened with `O_NOFOLLOW`; both the observed
+    /// revision and exact object identity are checked before publication.
+    /// A symlink therefore remains a symlink and can never become a root.
+    pub fn deriveRoot(self: *LinuxFs, source: contract.EntrySource) contract.Error!contract.Root {
+        const resolved = try self.resolveEntry(source.root, source.ref);
+        defer resolved.close();
+        if (!revisionMatches(resolved.snapshot, source.revision)) return error.Stale;
+        if (resolved.snapshot.kind != .directory) return error.NotDirectory;
+
+        const fd = try openDirectoryAt(resolved.parent_fd, resolved.state.name);
+        errdefer closeFd(fd);
+        const opened = try statFd(fd);
+        if (opened.kind != .directory) return error.Stale;
+        if (!opened.identity.eql(resolved.snapshot.identity)) return error.Stale;
+        if (!revisionMatches(opened, source.revision)) return error.Stale;
+        return self.pinRootFd(fd, opened.identity);
+    }
+
     /// Pin the actual parent of an already-pinned directory without resolving
     /// its original pathname again. `null` means the directory is its own
     /// parent (the filesystem root). This is deliberately platform mechanism:
@@ -1752,6 +1772,74 @@ test "linux provider pins a directory parent by fd after external rename" {
     defer listing.deinit();
     try t.expectEqual(@as(usize, 1), listing.value.entries.len);
     try t.expectEqualStrings("child", listing.value.entries[0].name.bytes);
+}
+
+test "linux derives child roots with raw names, revisions, and no-follow authority" {
+    var fixture = try Fixture.init(t.allocator);
+    defer fixture.deinit();
+    const provider = fixture.local.provider();
+    const unusual = "line\n-[]'\xff";
+    const setup = [_]contract.Planned{
+        .{ .id = opId(240), .operation = .{ .create_directory = .{
+            .destination = .{ .parent = .root, .name = try .init(unusual) },
+        } } },
+        .{ .id = opId(241), .operation = .{ .create_file = .{
+            .destination = .{ .parent = .root, .name = try .init("plain") },
+            .contents = "payload",
+        } } },
+        .{ .id = opId(242), .operation = .{ .create_symlink = .{
+            .destination = .{ .parent = .root, .name = try .init("link") },
+            .target = unusual,
+        } } },
+    };
+    var report = try provider.apply(t.allocator, .{ .root = fixture.root, .base_revision = &.{}, .operations = &setup });
+    defer report.deinit();
+    var listing = try provider.list(t.allocator, fixture.root, .root);
+    defer listing.deinit();
+    const child = findEntry(listing.value, unusual) orelse return error.TestExpectedEqual;
+    const plain = findEntry(listing.value, "plain") orelse return error.TestExpectedEqual;
+    const link = findEntry(listing.value, "link") orelse return error.TestExpectedEqual;
+    try t.expectEqual(contract.Kind.directory, child.observation.kind);
+    try t.expectEqual(contract.Kind.symlink, link.observation.kind);
+
+    const child_source: contract.EntrySource = .{
+        .root = fixture.root,
+        .ref = child.observation.node.entry,
+        .revision = child.observation.revision,
+    };
+    const derived = try provider.deriveRoot(child_source);
+    var derived_listing = try provider.list(t.allocator, derived, .root);
+    defer derived_listing.deinit();
+    try t.expectEqual(@as(usize, 0), derived_listing.value.entries.len);
+    provider.releaseRoot(derived);
+    try t.expectError(error.Stale, fixture.local.rootState(derived));
+
+    try t.expectError(error.NotDirectory, provider.deriveRoot(.{
+        .root = fixture.root,
+        .ref = plain.observation.node.entry,
+        .revision = plain.observation.revision,
+    }));
+    try t.expectError(error.NotDirectory, provider.deriveRoot(.{
+        .root = fixture.root,
+        .ref = link.observation.node.entry,
+        .revision = link.observation.revision,
+    }));
+    try t.expectError(error.Stale, provider.deriveRoot(.{
+        .root = fixture.root,
+        .ref = child.observation.node.entry,
+        .revision = .{ .token = "stale" },
+    }));
+
+    const second_root = try fixture.local.acquireRoot(fixture.path);
+    var second_listing = try provider.list(t.allocator, second_root, .root);
+    defer second_listing.deinit();
+    const foreign = findEntry(second_listing.value, unusual) orelse return error.TestExpectedEqual;
+    try t.expectError(error.Stale, provider.deriveRoot(.{
+        .root = fixture.root,
+        .ref = foreign.observation.node.entry,
+        .revision = foreign.observation.revision,
+    }));
+    fixture.local.releaseRoot(second_root);
 }
 
 fn opId(byte: u8) contract.OperationId {
