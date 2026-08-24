@@ -93,6 +93,10 @@ fn createArchitectureModules(
         .optimize = optimize,
     });
     target_runtime.addImport("weft_semantic", semantic);
+    // Filesystem publication composes two independent named interfaces: the
+    // target registry owns descriptive identity, while the filesystem router
+    // owns executable authority. Neither contract reaches through the other.
+    fs_runtime.addImport("weft_target_runtime", target_runtime);
     const plugin_semantic = b.createModule(.{
         .root_source_file = b.path("src/plugin_semantic/root.zig"),
         .target = target,

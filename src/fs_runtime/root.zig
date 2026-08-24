@@ -4,6 +4,7 @@
 //! `weft_semantic` and `weft_fs` contracts; platform providers remain outside.
 
 pub const router = @import("router.zig");
+pub const publication = @import("publication.zig");
 
 pub const Error = router.Error;
 pub const Router = router.Router;
