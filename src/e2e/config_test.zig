@@ -417,7 +417,7 @@ test "e2e/config: the sample config boots; SPC g i is discoverable via which-key
 
     // First walk the actual scene and reject any newly advertised action that
     // lacks a config binding. This catches additions as well as removals; the
-    // explicit table below also makes the required public contract readable.
+    // shared table above also makes the required public contract readable.
     var advertised_actions: std.ArrayList([]const u8) = .empty;
     defer advertised_actions.deinit(gpa);
     try collectSceneActions(gpa, dired_scene, &advertised_actions);
