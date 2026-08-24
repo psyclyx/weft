@@ -17,7 +17,13 @@ pub const Provider = struct {
     vtable: *const VTable,
 
     pub const VTable = struct {
+        /// Claim an immutable descriptor without selecting a view or
+        /// interpreting its location.  Facts are intentionally opaque to
+        /// this registry: each provider owns the vocabulary it understands.
         probe: *const fn (*anyopaque, semantic.target.Descriptor) ProbeError!?Strength,
+        /// Open the exact revision and provider-owned location supplied by
+        /// the caller.  The resolver never turns a local path, remote URI, or
+        /// synthetic node into a special core case.
         open: *const fn (*anyopaque, semantic.target.Located) OpenError!semantic.view.Ref,
     };
 
@@ -302,6 +308,147 @@ test "directory handlers claim local and remote targets from the same facts" {
     try std.testing.expectEqual(@as(usize, 1), directory.opened);
     try std.testing.expectEqual(@as(usize, 1), handlers.unregisterOwner(std.testing.allocator, owner));
     try std.testing.expectError(error.StaleHandler, handlers.open(handler, .{ .target = descriptor.ref, .revision = descriptor.revision }));
+}
+
+test "claims route local, remote, and synthetic targets without locus branches" {
+    const owner: semantic.owner.Id = @enumFromInt(1);
+    const Flavor = enum { directory, file, synthetic };
+    const Claim = struct {
+        flavor: Flavor,
+        locus: []const u8,
+        location_schema: []const u8,
+        location_payload: []const u8,
+        view: semantic.view.Ref,
+        opens: usize = 0,
+
+        fn probe(self: *@This(), descriptor: semantic.target.Descriptor) ProbeError!?Strength {
+            const kind_matches = switch (self.flavor) {
+                .directory => descriptor.kind == .directory,
+                .file => descriptor.kind == .file,
+                .synthetic => switch (descriptor.kind) {
+                    .synthetic => true,
+                    else => false,
+                },
+            };
+            if (!kind_matches) return null;
+            return if (fact(descriptor, "locus")) |value|
+                if (std.mem.eql(u8, value, self.locus)) .exact else null
+            else
+                null;
+        }
+
+        fn open(self: *@This(), located: semantic.target.Located) OpenError!semantic.view.Ref {
+            const provider = switch (located.location) {
+                .provider => |value| value,
+                else => return error.Rejected,
+            };
+            if (!std.mem.eql(u8, provider.schema, self.location_schema) or
+                !std.mem.eql(u8, provider.payload, self.location_payload)) return error.Rejected;
+            self.opens += 1;
+            return self.view;
+        }
+    };
+
+    var local_directory: Claim = .{
+        .flavor = .directory,
+        .locus = "local",
+        .location_schema = "fd",
+        .location_payload = "dir:4",
+        .view = .{ .authority = .here, .slot = 10, .generation = 1 },
+    };
+    var local_file: Claim = .{
+        .flavor = .file,
+        .locus = "local",
+        .location_schema = "fd",
+        .location_payload = "file:5",
+        .view = .{ .authority = .here, .slot = 11, .generation = 1 },
+    };
+    var remote_file: Claim = .{
+        .flavor = .file,
+        .locus = "ssh:build",
+        .location_schema = "ssh",
+        .location_payload = "build:/src/main.zig",
+        .view = .{ .authority = .here, .slot = 12, .generation = 1 },
+    };
+    var synthetic: Claim = .{
+        .flavor = .synthetic,
+        .locus = "diagnostics",
+        .location_schema = "diagnostic-set",
+        .location_payload = "buffer:7",
+        .view = .{ .authority = .here, .slot = 13, .generation = 1 },
+    };
+
+    var handlers = Registry.init(.here);
+    defer handlers.deinit(std.testing.allocator);
+    const local_directory_ref = try handlers.register(std.testing.allocator, owner, "local-directory", .init(&local_directory));
+    const local_file_ref = try handlers.register(std.testing.allocator, owner, "local-file", .init(&local_file));
+    const remote_file_ref = try handlers.register(std.testing.allocator, owner, "remote-file", .init(&remote_file));
+    const synthetic_ref = try handlers.register(std.testing.allocator, owner, "diagnostics", .init(&synthetic));
+
+    const cases = .{
+        .{
+            .descriptor = semantic.target.Descriptor{
+                .ref = .{ .authority = .here, .slot = 1, .generation = 1 },
+                .kind = .directory,
+                .display_name = "/tmp/project",
+                .facts = &.{.{ .name = "locus", .value = "local" }},
+            },
+            .location = semantic.target.Location{ .provider = .{ .schema = "fd", .payload = "dir:4" } },
+            .handler = local_directory_ref,
+            .claim = &local_directory,
+        },
+        .{
+            .descriptor = semantic.target.Descriptor{
+                .ref = .{ .authority = .here, .slot = 2, .generation = 1 },
+                .kind = .file,
+                .display_name = "/tmp/project/main.zig",
+                .facts = &.{.{ .name = "locus", .value = "local" }},
+            },
+            .location = semantic.target.Location{ .provider = .{ .schema = "fd", .payload = "file:5" } },
+            .handler = local_file_ref,
+            .claim = &local_file,
+        },
+        .{
+            .descriptor = semantic.target.Descriptor{
+                .ref = .{ .authority = .here, .slot = 3, .generation = 1 },
+                .kind = .file,
+                .display_name = "main.zig",
+                .facts = &.{.{ .name = "locus", .value = "ssh:build" }},
+            },
+            .location = semantic.target.Location{ .provider = .{ .schema = "ssh", .payload = "build:/src/main.zig" } },
+            .handler = remote_file_ref,
+            .claim = &remote_file,
+        },
+        .{
+            .descriptor = semantic.target.Descriptor{
+                .ref = .{ .authority = .here, .slot = 4, .generation = 1 },
+                .kind = .{ .synthetic = "diagnostics" },
+                .display_name = "Diagnostics",
+                .facts = &.{.{ .name = "locus", .value = "diagnostics" }},
+            },
+            .location = semantic.target.Location{ .provider = .{ .schema = "diagnostic-set", .payload = "buffer:7" } },
+            .handler = synthetic_ref,
+            .claim = &synthetic,
+        },
+    };
+
+    inline for (cases) |case| {
+        var resolution = try handlers.resolve(std.testing.allocator, case.descriptor);
+        defer resolution.deinit();
+        try std.testing.expectEqual(@as(usize, 1), resolution.value.candidates.len);
+        const selected = switch (resolution.value.decide()) {
+            .selected => |value| value,
+            else => return error.TestUnexpectedResult,
+        };
+        try std.testing.expect(selected.eql(case.handler));
+        const opened = try handlers.open(selected, .{
+            .target = case.descriptor.ref,
+            .revision = case.descriptor.revision,
+            .location = case.location,
+        });
+        try std.testing.expectEqual(case.claim.view, opened);
+        try std.testing.expectEqual(@as(usize, 1), case.claim.opens);
+    }
 }
 
 test "equal handler claims are ambiguous rather than registration ordered" {
