@@ -247,6 +247,36 @@ test "typed filesystem plans cannot cross the target root boundary" {
 }
 
 test "typed filesystem authorization rejects forged facts and entry attachments" {
+    const Provider = struct {
+        pub fn capabilities(_: *@This(), _: fs.contract.Root) fs.contract.Error!fs.contract.Capabilities {
+            return .{};
+        }
+        pub fn observe(_: *@This(), gpa: std.mem.Allocator, _: fs.contract.Root, node: fs.contract.NodeRef) fs.contract.Error!fs.contract.OwnedObservation {
+            var owned = fs.contract.OwnedObservation.init(gpa);
+            owned.value = .{ .node = node, .revision = .{ .token = &.{} }, .kind = .directory };
+            return owned;
+        }
+        pub fn list(_: *@This(), _: std.mem.Allocator, _: fs.contract.Root, _: fs.contract.NodeRef) fs.contract.Error!fs.contract.OwnedListing {
+            return error.Unsupported;
+        }
+        pub fn read(_: *@This(), _: std.mem.Allocator, _: fs.contract.ReadRequest) fs.contract.Error!fs.contract.OwnedReadResult {
+            return error.Unsupported;
+        }
+        pub fn capture(_: *@This(), _: fs.contract.EntrySource) fs.contract.Error!fs.contract.LeaseRef {
+            return error.Unsupported;
+        }
+        pub fn releaseLease(_: *@This(), _: fs.contract.LeaseSource) void {}
+        pub fn apply(_: *@This(), _: std.mem.Allocator, _: fs.contract.Plan) fs.contract.Error!fs.contract.OwnedApplyReport {
+            return error.Unsupported;
+        }
+        pub fn watch(_: *@This(), _: fs.contract.Root, _: fs.contract.NodeRef, _: bool) fs.contract.Error!fs.contract.WatchRef {
+            return error.Unsupported;
+        }
+        pub fn pollInvalidation(_: *@This(), _: fs.contract.WatchRef) fs.contract.Error!?fs.contract.Invalidation {
+            return error.Unsupported;
+        }
+        pub fn closeWatch(_: *@This(), _: fs.contract.WatchRef) void {}
+    };
     const target: semantic.target.Ref = .{ .authority = .here, .slot = 7, .generation = 1 };
     const root: fs.contract.Root = .{ .authority = .here, .slot = 1, .generation = 2 };
     const other_root: fs.contract.Root = .{ .authority = .here, .slot = 9, .generation = 2 };
@@ -267,6 +297,8 @@ test "typed filesystem authorization rejects forged facts and entry attachments"
     };
     var router = fs_runtime.Router.init(std.testing.allocator);
     defer router.deinit();
+    var provider: Provider = .{};
+    try router.register(.here, .init(&provider));
     try std.testing.expectError(error.TargetUnbound, router.authorizedDirectory(target, 1));
     try router.bindTarget(target, 1, .{ .root = root });
     try std.testing.expectEqual(root, (try authorizeDirectory(&router, descriptor, target, 1)).root);
