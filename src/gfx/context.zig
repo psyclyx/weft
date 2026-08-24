@@ -6,6 +6,7 @@ const std = @import("std");
 const vkmod = @import("../vk.zig");
 const vk = vkmod.c;
 const build_options = @import("build_options");
+const swapchain_state = @import("swapchain_state.zig");
 
 pub const max_frames_in_flight = 2;
 
@@ -447,7 +448,7 @@ pub const Context = struct {
                 return error.VulkanFailed;
             }
             self.destroySwapchain();
-            self.swapchain_stale = true;
+            _ = swapchain_state.recreated(&self.swapchain_stale, fb_width, fb_height);
             return error.ZeroExtent;
         }
 
@@ -474,7 +475,7 @@ pub const Context = struct {
         }
         self.destroySwapchain();
         self.installSwapchain(&next);
-        self.swapchain_stale = false;
+        std.debug.assert(swapchain_state.recreated(&self.swapchain_stale, fb_width, fb_height));
     }
 
     fn createFrameState(self: *Context) !void {
@@ -532,6 +533,10 @@ pub const Context = struct {
     /// unbounded one (worst case: seconds, if the GPU is behind on other
     /// work), the acquire is bounded by the display's own refresh cadence.
     pub fn beginFrame(self: *Context) !?vk.VkCommandBuffer {
+        // The platform loop normally rebuilds before reaching this method.
+        // Keep the boundary defensive: an out-of-date acquire or a zero-size
+        // configure must never turn into an acquire on a retired/null chain.
+        if (self.swapchain_stale or self.swapchain == null) return null;
         const frame = self.current_frame;
         const wait = vk.vkWaitForFences(self.device, 1, &self.in_flight[frame], vk.VK_TRUE, 0);
         if (wait == vk.VK_TIMEOUT) return null;
@@ -548,10 +553,13 @@ pub const Context = struct {
         );
         switch (acquire) {
             vk.VK_ERROR_OUT_OF_DATE_KHR => {
-                self.swapchain_stale = true;
+                _ = swapchain_state.acquired(&self.swapchain_stale, .out_of_date);
                 return null;
             },
-            vk.VK_SUCCESS, vk.VK_SUBOPTIMAL_KHR => {},
+            vk.VK_SUCCESS => {},
+            vk.VK_SUBOPTIMAL_KHR => {
+                _ = swapchain_state.acquired(&self.swapchain_stale, .suboptimal);
+            },
             else => return error.VulkanFailed,
         }
         self.image_index = image_index;
@@ -618,7 +626,12 @@ pub const Context = struct {
         };
         const present = vk.vkQueuePresentKHR(self.queue, &present_info);
         switch (present) {
-            vk.VK_ERROR_OUT_OF_DATE_KHR, vk.VK_SUBOPTIMAL_KHR => self.swapchain_stale = true,
+            vk.VK_ERROR_OUT_OF_DATE_KHR => {
+                _ = swapchain_state.presented(&self.swapchain_stale, .out_of_date);
+            },
+            vk.VK_SUBOPTIMAL_KHR => {
+                _ = swapchain_state.presented(&self.swapchain_stale, .suboptimal);
+            },
             vk.VK_SUCCESS => {},
             else => return error.VulkanFailed,
         }

@@ -131,3 +131,30 @@ test "configure reducer handles scale and state-only configures" {
     try std.testing.expect(state.setScale(0));
     try std.testing.expectEqual(@as(u32, 800), state.framebufferExtent().width);
 }
+
+test "configure reducer keeps logical and framebuffer extents distinct across scale changes" {
+    // Non-divisible logical dimensions model a compositor resize while the
+    // surface moves between outputs.  Wayland's current protocol seam uses
+    // integer buffer scales; the dimensions deliberately make the conversion
+    // observable rather than hiding it behind round numbers.
+    var state = State.init(1279, 719);
+    state.toplevelConfigure(.{ .width = 1365, .height = 777 });
+    const configured = state.surfaceConfigure();
+    try std.testing.expectEqual(@as(u32, 1365), configured.extent.width);
+    try std.testing.expectEqual(@as(u32, 777), configured.extent.height);
+    try std.testing.expectEqual(Extent{ .width = 1365, .height = 777 }, state.extent);
+    try std.testing.expectEqual(Extent{ .width = 1365, .height = 777 }, state.framebufferExtent());
+
+    try std.testing.expect(state.setScale(3));
+    try std.testing.expectEqual(Extent{ .width = 4095, .height = 2331 }, state.framebufferExtent());
+    try std.testing.expect(state.consumeResized());
+
+    // An output callback can report an invalid/non-positive scale.  The
+    // reducer clamps it to one and still emits the resize edge, which keeps
+    // restore deterministic after a fractional-scale protocol is absent or
+    // withdrawn by the compositor.
+    try std.testing.expect(state.setScale(0));
+    try std.testing.expectEqual(@as(u32, 1), state.bufferScale());
+    try std.testing.expectEqual(Extent{ .width = 1365, .height = 777 }, state.framebufferExtent());
+    try std.testing.expect(state.consumeResized());
+}
