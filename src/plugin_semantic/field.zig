@@ -94,13 +94,23 @@ const Proxy = struct {
             if (selection.anchor > final_len or selection.caret > final_len) return error.InvalidRange;
         if (self.bridge.current != null) return error.Unsupported;
 
+        const original_revision = try self.bridge.gpa.dupe(u8, before.revision);
+        const original_bytes = self.bridge.gpa.dupe(u8, before.bytes) catch |err| {
+            self.bridge.gpa.free(original_revision);
+            return err;
+        };
         self.bridge.current = .{ .value = .{
             .field = self.ref,
             .token = self.token,
             .expected_revision = expected_revision,
             .edit = value,
-        } };
-        defer self.bridge.current = null;
+        }, .original_revision = original_revision, .original_bytes = original_bytes, .original_selection = before.selection, .original_read_only = before.read_only, .original_single_line = before.single_line };
+        defer {
+            const in_flight = self.bridge.current.?;
+            self.bridge.gpa.free(in_flight.original_revision);
+            self.bridge.gpa.free(in_flight.original_bytes);
+            self.bridge.current = null;
+        }
         self.bridge.callback.invoke_edit(self.bridge.callback.context, self.token) catch return error.Failed;
         const current = &self.bridge.current.?.value;
         if (!self.bridge.current.?.updated) return error.Failed;
@@ -110,6 +120,11 @@ const Proxy = struct {
 
 const InFlight = struct {
     value: CurrentEdit,
+    original_revision: []u8,
+    original_bytes: []u8,
+    original_selection: view_runtime.field.Selection,
+    original_read_only: bool,
+    original_single_line: bool,
     updated: bool = false,
 };
 
@@ -158,16 +173,29 @@ pub const Bridge = struct {
 
     pub fn update(self: *Bridge, ref: semantic.scene.FieldRef, value: view_runtime.field.Snapshot) Error!void {
         const proxy = self.find(ref) orelse return error.UnknownField;
+        var restoring = false;
         if (self.current) |current| {
-            if (current.value.field.eql(ref) and std.mem.eql(u8, current.value.expected_revision, value.revision))
-                return error.InvalidRevision;
+            if (current.value.field.eql(ref) and std.mem.eql(u8, current.value.expected_revision, value.revision)) {
+                // A failed provider callback may need to restore the exact
+                // pre-edit snapshot. Permit that one rollback after an
+                // accepted update, but keep it unaccepted so Proxy.edit still
+                // reports the callback failure to its caller.
+                restoring = current.updated and
+                    std.mem.eql(u8, current.original_revision, value.revision) and
+                    std.mem.eql(u8, current.original_bytes, value.bytes) and
+                    current.original_selection.anchor == value.selection.anchor and
+                    current.original_selection.caret == value.selection.caret and
+                    current.original_read_only == value.read_only and
+                    current.original_single_line == value.single_line;
+                if (!restoring) return error.InvalidRevision;
+            }
         }
         const next = try State.init(self.gpa, value);
         var prior = proxy.state;
         proxy.state = next;
         prior.deinit();
         if (self.current) |*current| {
-            if (current.value.field.eql(ref)) current.updated = true;
+            if (current.value.field.eql(ref)) current.updated = !restoring;
         }
     }
 

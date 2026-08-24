@@ -373,6 +373,74 @@ test "wasm plugin: guarded child directories publish and revoke complete authori
     try t.expectEqual(row_id, reverted.scene.content.container.children[0].id);
     try t.expect(reverted.scene.content.container.children[0].content.container.children[2].target != null);
 
+    // Replacing the exact target descriptor revision does not let an already
+    // open session inherit the new authority. Rebind the same provider root
+    // under the new revision to model an intentional host-side replacement;
+    // the old view must still decline before touching its draft.
+    const prior_parent = semantic.targets.get(parent.ref) orelse return error.TestUnexpectedResult;
+    try semantic.replaceTarget(gpa, host_owner, parent.ref, .{
+        .kind = .directory,
+        .display_name = "parent-replaced",
+        .facts = prior_parent.facts,
+    });
+    const replaced_parent = semantic.targets.get(parent.ref) orelse return error.TestUnexpectedResult;
+    try t.expectEqual(parent.revision + 1, replaced_parent.revision);
+    try t.expect(router.unbindTarget(parent.ref));
+    try router.bindTarget(parent.ref, replaced_parent.revision, .{ .root = Provider.parent_root });
+    try t.expect((try semantic.actions.invoke(&semantic.views, .{
+        .action = @import("weft_fs").action.entry_create_file,
+        .view = view_ref,
+        .subject = reverted.scene.id,
+    })) == .declined);
+    var stale_action_field = try field.snapshot(gpa);
+    defer stale_action_field.deinit();
+    try t.expectEqualStrings(Provider.child_name, stale_action_field.value.bytes);
+
+    // Opening the replacement creates a distinct session. The old session's
+    // child target is busy and therefore cannot be adopted by the new one;
+    // its row remains descriptive until the new session derives its own
+    // authority, rather than inheriting a stale child capability.
+    var replaced_resolution = try semantic.target_handlers.resolve(gpa, replaced_parent.*);
+    defer replaced_resolution.deinit();
+    const replaced_selected = replaced_resolution.value.decide().selected;
+    const replaced_view_ref = try semantic.target_handlers.open(replaced_selected, .{
+        .target = parent.ref,
+        .revision = replaced_parent.revision,
+    });
+    try t.expect(!replaced_view_ref.eql(view_ref));
+    const replaced_view = semantic.views.get(replaced_view_ref) orelse return error.TestUnexpectedResult;
+    try t.expectEqual(replaced_parent.revision, replaced_view.descriptor.target.?.revision);
+    const replaced_row = replaced_view.scene.content.container.children[0];
+    try t.expect(replaced_row.content.container.children[2].target == null);
+
+    // Drive a failed view replacement through the real sandbox callback. The
+    // host closes only the retained scene; the guest session and fields remain
+    // live, so both an action draft and a field edit must remain unchanged.
+    const replaced_field_ref = replaced_row.content.container.children[2].content.field.ref;
+    const replaced_field = semantic.fields.get(replaced_field_ref) orelse return error.TestUnexpectedResult;
+    var replaced_before = try replaced_field.snapshot(gpa);
+    defer replaced_before.deinit();
+    const field_count = dired_plugin.semantic_fields.proxies.items.len;
+    try t.expect(semantic.closeView(gpa, dired_plugin.semantic_owner.?, replaced_view_ref));
+    const failed_action = try dired_plugin.semantic_actions.invoke(.{
+        .action = @import("weft_fs").action.entry_create_file,
+        .view = replaced_view_ref,
+        .subject = replaced_view.scene.id,
+    });
+    try t.expect(failed_action == .declined);
+    try t.expectEqual(field_count, dired_plugin.semantic_fields.proxies.items.len);
+    try t.expectError(error.Failed, replaced_field.edit(replaced_before.value.revision, .{
+        .start = 0,
+        .end = replaced_before.value.bytes.len,
+        .replacement = "must-not-publish",
+        .selection_after = .{ .anchor = 3, .caret = 3 },
+    }));
+    var replaced_after = try replaced_field.snapshot(gpa);
+    defer replaced_after.deinit();
+    try t.expectEqualStrings(replaced_before.value.revision, replaced_after.value.revision);
+    try t.expectEqualStrings(replaced_before.value.bytes, replaced_after.value.bytes);
+    try t.expectEqual(replaced_before.value.selection, replaced_after.value.selection);
+
     // Session/plugin retirement closes the retained child publication as well
     // as the generic semantic view. The provider root must not outlive the
     // sandbox instance that derived it.
