@@ -457,13 +457,14 @@ pub const Model = struct {
 
     fn insertOwnedRows(self: *Model, index: usize, rows: []const Row) !NodeId {
         if (rows.len == 0 or index > self.rows.items.len) return error.InvalidPlacement;
-        if (self.next_id > std.math.maxInt(NodeId) - rows.len) return error.TooManyRows;
+        const row_count = std.math.cast(NodeId, rows.len) orelse return error.TooManyRows;
+        if (self.next_id > std.math.maxInt(NodeId) - row_count) return error.TooManyRows;
         try self.rows.ensureTotalCapacity(self.gpa, self.rows.items.len + rows.len);
         const old_len = self.rows.items.len;
         self.rows.items.len = old_len + rows.len;
         std.mem.copyBackwards(Row, self.rows.items[index + rows.len .. old_len + rows.len], self.rows.items[index..old_len]);
         std.mem.copyForwards(Row, self.rows.items[index .. index + rows.len], rows);
-        self.next_id += @intCast(rows.len);
+        self.next_id += row_count;
         return rows[0].id;
     }
 

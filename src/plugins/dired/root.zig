@@ -60,6 +60,7 @@ pub const create_directory_action = projection.create_directory_action;
 pub const rowNodeId = projection.rowNodeId;
 pub const nameNodeId = projection.nameNodeId;
 pub const modeNodeId = projection.modeNodeId;
+pub const rootNodeId = projection.rootNodeId;
 pub const modelRowId = projection.modelRowId;
 
 pub const ActionController = actions.Controller;

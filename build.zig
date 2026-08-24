@@ -265,6 +265,7 @@ const guests = [_]Guest{
     .{ .src = "src/guest/badge.zig", .import = "guest_badge_wasm", .install = false },
     .{ .src = "src/guest/semantic_fixture.zig", .import = "guest_semantic_wasm", .install = false },
     .{ .src = "src/guest/semantic_fs_fixture.zig", .import = "guest_semantic_fs_wasm", .install = false },
+    .{ .src = "src/guest/dired_semantic_fixture.zig", .import = "guest_dired_semantic_wasm", .install = false, .libraries = .{ .dired = true } },
     .{ .src = "src/guest/edit.zig", .import = "guest_edit_wasm", .install = true },
     .{ .src = "src/guest/complete.zig", .import = "guest_complete_wasm", .install = true },
     .{ .src = "src/guest/project.zig", .import = "guest_project_wasm", .install = true },
@@ -823,6 +824,14 @@ fn buildGuest(b: *std.Build, guest_spec: Guest) *std.Build.Step.Compile {
     if (guest_spec.libraries.dired) {
         const dired = createDiredPortableModules(b, wasm_target, .ReleaseSmall, semantic, fs);
         guest_mod.addImport("weft_dired", dired.facade);
+        const dired_guest = b.createModule(.{
+            .root_source_file = b.path("src/plugins/dired/guest.zig"),
+            .target = wasm_target,
+            .optimize = .ReleaseSmall,
+        });
+        dired_guest.addImport("weft", guest_sdk);
+        dired_guest.addImport("weft_dired", dired.facade);
+        guest_mod.addImport("weft_dired_guest", dired_guest);
     }
     const guest = b.addExecutable(.{
         .name = std.fs.path.stem(src),

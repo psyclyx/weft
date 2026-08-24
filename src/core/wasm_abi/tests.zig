@@ -295,6 +295,74 @@ test "wasm plugin: guarded child directories publish and revoke complete authori
     try t.expectEqual(@as(usize, 2), provider.release_calls);
     try t.expect(semantic.targets.get(second_child.ref) == null);
     try t.expectError(error.TargetUnbound, router.authorizedDirectory(second_child.ref, second_child.revision));
+
+    // The real sandbox adapter consumes only public target/fs/view/field/
+    // action contracts. Opening the same parent publishes a retained dired
+    // scene and a separately confined child target without native dired
+    // composition in this environment.
+    const dired_plugin = try loadPlugin(
+        &engine,
+        &env.ctx,
+        "dired-semantic-fixture",
+        @embedFile("guest_dired_semantic_wasm"),
+        .{},
+    );
+    defer dired_plugin.deinit();
+    var resolution = try semantic.target_handlers.resolve(gpa, semantic.targets.get(parent.ref).?.*);
+    defer resolution.deinit();
+    const selected = resolution.value.decide().selected;
+    const view_ref = try semantic.target_handlers.open(selected, parent.located());
+    try t.expectEqual(@as(usize, 1), dired_plugin.semantic_directories.items.len);
+    const initial_view = semantic.views.get(view_ref) orelse return error.TestUnexpectedResult;
+    const initial_view_revision = initial_view.descriptor.revision;
+    try t.expectEqualStrings("dired", initial_view.scene.role);
+    const initial_rows = initial_view.scene.content.container.children;
+    try t.expectEqual(@as(usize, 1), initial_rows.len);
+    const row_id = initial_rows[0].id;
+    const name_node = initial_rows[0].content.container.children[2];
+    try t.expect(name_node.target != null);
+    const field_ref = name_node.content.field.ref;
+    const field = semantic.fields.get(field_ref) orelse return error.TestUnexpectedResult;
+    var before = try field.snapshot(gpa);
+    defer before.deinit();
+    try t.expectEqualStrings(Provider.child_name, before.value.bytes);
+
+    // Ordinary field editing preserves the row and its opaque identity; the
+    // sandbox guest republishes the diff scene at a new view revision.
+    try field.edit(before.value.revision, .{
+        .start = 0,
+        .end = before.value.bytes.len,
+        .replacement = "renamed",
+        .selection_after = .{ .anchor = 7, .caret = 7 },
+    });
+    var renamed = try field.snapshot(gpa);
+    defer renamed.deinit();
+    try t.expectEqualStrings("renamed", renamed.value.bytes);
+    const renamed_view = semantic.views.get(view_ref) orelse return error.TestUnexpectedResult;
+    try t.expect(renamed_view.descriptor.revision > initial_view_revision);
+    try t.expectEqual(row_id, renamed_view.scene.content.container.children[0].id);
+
+    // Generic delete marks the retained row and retires its child authority;
+    // generic revert reconstructs it from the provider listing.
+    try t.expect((try semantic.actions.invoke(&semantic.views, .{
+        .action = semantic_model.action.standard.delete,
+        .view = view_ref,
+        .subject = row_id,
+    })) == .handled);
+    try t.expectEqual(@as(usize, 0), dired_plugin.semantic_directories.items.len);
+    const deleted_view = semantic.views.get(view_ref) orelse return error.TestUnexpectedResult;
+    const deleted_row = deleted_view.scene.content.container.children[0];
+    try t.expectEqual(row_id, deleted_row.id);
+    try t.expect(deleted_row.content.container.children[2].target == null);
+    try t.expect((try semantic.actions.invoke(&semantic.views, .{
+        .action = semantic_model.action.standard.revert,
+        .view = view_ref,
+        .subject = deleted_view.scene.id,
+    })) == .handled);
+    try t.expectEqual(@as(usize, 1), dired_plugin.semantic_directories.items.len);
+    const reverted = semantic.views.get(view_ref) orelse return error.TestUnexpectedResult;
+    try t.expectEqual(row_id, reverted.scene.content.container.children[0].id);
+    try t.expect(reverted.scene.content.container.children[0].content.container.children[2].target != null);
 }
 
 test "wasm plugin: semantic ownership is instance-specific and system-local" {
