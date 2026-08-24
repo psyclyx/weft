@@ -1078,6 +1078,7 @@ fn readTransferBody(reader: *Reader, arena: std.mem.Allocator) Error!semantic.tr
     var media_types: std.StringHashMapUnmanaged(void) = .empty;
     defer media_types.deinit(arena);
     for (representations) |*representation| {
+        representation.resource = null;
         representation.media_type = try reader.string(arena);
         representation.schema = try readOptionalString(reader, arena);
         representation.payload = try reader.blob(arena);
@@ -1445,6 +1446,9 @@ test "transfer and action request codecs preserve captured data and wide node id
     try t.expectEqual(semantic.transfer.Intent.cut, decoded_transfer.value.intent);
     try t.expectEqualStrings("opaque-revision", decoded_transfer.value.source.?.revision);
     try t.expectEqualSlices(u8, representations[0].payload, decoded_transfer.value.representations[0].payload);
+    var owned_transfer = try semantic.transfer.OwnedItem.init(t.allocator, decoded_transfer.value);
+    defer owned_transfer.deinit();
+    try t.expect(owned_transfer.value.representations[0].resource == null);
 
     const wide_node: semantic.scene.NodeId = @enumFromInt(0x1_0000_0002);
     const request: semantic.action.Request = .{

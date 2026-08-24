@@ -16,8 +16,9 @@ pub const Representation = struct {
 };
 
 pub const Resource = struct {
-    /// Provenance only: a retained resource may move between view owners.
-    owner: handle.Authority,
+    /// Provider authority provenance; a retained resource may move between
+    /// semantic view owners within that authority.
+    authority: handle.Authority,
     context: *anyopaque,
     vtable: *const VTable,
 
@@ -167,12 +168,12 @@ test "owned transfer replaces and releases host resources exactly once" {
     var first_probe: Probe = .{};
     var second_probe: Probe = .{};
     const first_resource: Resource = .{
-        .owner = .here,
+        .authority = .here,
         .context = &first_probe,
         .vtable = &.{ .retain = Probe.retain, .release = Probe.release },
     };
     const second_resource: Resource = .{
-        .owner = @enumFromInt(9),
+        .authority = @enumFromInt(9),
         .context = &second_probe,
         .vtable = &.{ .retain = Probe.retain, .release = Probe.release },
     };
@@ -191,7 +192,7 @@ test "owned transfer replaces and releases host resources exactly once" {
     try std.testing.expectEqual(@as(usize, 2), first_probe.releases);
     try std.testing.expectEqual(@as(usize, 1), second_probe.retains);
     try std.testing.expectEqual(@as(usize, 1), second_probe.releases);
-    try std.testing.expectEqual(@enumFromInt(9), item.value.representations[0].resource.?.owner);
+    try std.testing.expectEqual(@enumFromInt(9), item.value.representations[0].resource.?.authority);
 }
 
 test "retained resource survives a cross-owner transfer copy" {
@@ -211,7 +212,7 @@ test "retained resource survives a cross-owner transfer copy" {
     };
     var probe: Probe = .{};
     const resource: Resource = .{
-        .owner = .here,
+        .authority = .here,
         .context = &probe,
         .vtable = &.{ .retain = Probe.retain, .release = Probe.release },
     };
@@ -225,5 +226,5 @@ test "retained resource survives a cross-owner transfer copy" {
     source.deinit();
     try std.testing.expectEqual(@as(usize, 2), probe.retains);
     try std.testing.expectEqual(@as(usize, 2), probe.releases);
-    try std.testing.expectEqual(resource.owner, destination.value.representations[0].resource.?.owner);
+    try std.testing.expectEqual(resource.authority, destination.value.representations[0].resource.?.authority);
 }

@@ -2,7 +2,8 @@
 //!
 //! Semantic transfer values know only the opaque retain/release callbacks.
 //! This adapter keeps the provider lease and its router association alive
-//! independently of any dired/session object.
+//! independently of any dired/session object. The Router must outlive every
+//! Resource it creates; final release calls back through that Router.
 
 const std = @import("std");
 const semantic = @import("weft_semantic");
@@ -28,6 +29,7 @@ pub const LeaseResource = struct {
     /// an OwnedItem should let OwnedItem retain its copy, then release this
     /// initial reference; this makes ownership transfer explicit and supports
     /// cross-view copies without tying them to the source session.
+    /// The Router must remain initialized until all such references release.
     pub fn create(
         gpa: std.mem.Allocator,
         router: *router_mod.Router,
@@ -37,7 +39,7 @@ pub const LeaseResource = struct {
         const state = try gpa.create(LeaseResource);
         state.* = .{ .gpa = gpa, .router = router, .source = source };
         return .{
-            .owner = source.root.authority,
+            .authority = source.root.authority,
             .context = state,
             .vtable = &vtable,
         };
@@ -45,7 +47,11 @@ pub const LeaseResource = struct {
 
     fn retain(raw: *anyopaque) void {
         const self: *LeaseResource = @ptrCast(@alignCast(raw));
-        _ = self.refs.fetchAdd(1, .monotonic);
+        while (true) {
+            const current = self.refs.load(.acquire);
+            std.debug.assert(current != std.math.maxInt(usize));
+            if (self.refs.cmpxchgWeak(current, current + 1, .acquire, .monotonic) == null) break;
+        }
     }
 
     fn release(raw: *anyopaque) void {
@@ -75,7 +81,7 @@ test "lease resources retain across transfer owners and release once" {
     };
     var probe: Probe = .{};
     const resource: semantic.transfer.Resource = .{
-        .owner = .here,
+        .authority = .here,
         .context = &probe,
         .vtable = &.{ .retain = Probe.retain, .release = Probe.release },
     };
