@@ -408,107 +408,57 @@ test "which-key: on_menu builds a corner surface from the current menu's binding
     try t.expect(!plugin.surface.active);
 }
 
-test "dired: gathers a directory tree via proc and renders the model (async)" {
+const OpenCommandProbe = struct {
+    gpa: Allocator,
+    calls: usize = 0,
+    target: ?[]u8 = null,
+
+    fn deinit(self: *OpenCommandProbe) void {
+        if (self.target) |target| self.gpa.free(target);
+    }
+
+    fn handle(ctx: *command.Context, data: ?*anyopaque, args: []const command.Value) anyerror!command.Value {
+        const self: *OpenCommandProbe = @ptrCast(@alignCast(data.?));
+        if (args.len != 1 or args[0] != .string) return error.InvalidOpenTarget;
+        if (self.target) |target| self.gpa.free(target);
+        self.target = try ctx.gpa.dupe(u8, args[0].string);
+        self.calls += 1;
+        return .nil;
+    }
+};
+
+test "dired wasm launcher: delegates to the ordinary open command at cwd" {
     const gpa = t.allocator;
     var env: Env = undefined;
     try Env.init(gpa, &env);
     defer env.deinit(gpa);
-    try @import("../builtins.zig").install(gpa, &env.commands, &env.keymap, &env.head, &env.actions); // buffer-create
 
-    var loop = async_loop.Loop.init(gpa, env.pool, @import("../task.zig").nowNs);
-    defer loop.deinit();
-    var subs: subbuffer.SubBuffers = .empty;
-    defer subs.deinit(gpa);
-    var reg: register.Register = .empty;
-    defer reg.deinit(gpa);
+    var open_probe = OpenCommandProbe{ .gpa = gpa };
+    defer open_probe.deinit();
+    _ = try env.commands.bind(gpa, "open", .{
+        .name = "open",
+        .summary = "Open a target.",
+        .args = &.{.{ .name = "target", .type = .string }},
+        .handler = OpenCommandProbe.handle,
+        .data = &open_probe,
+    });
 
     var engine = try wasm.Engine.init();
     defer engine.deinit();
-    // dired runs `ls` via proc, parses the marked blocks into a directory TREE,
-    // and renders it as ONE always-editable name-only *dired* buffer (metadata is
-    // decoration). Wire the subbuffer + register services so its per-row id-spans
-    // + the yank/paste ferry work.
-    const plugin = try loadPlugin(&engine, &env.ctx, "dired", @embedFile("guest_dired_wasm"), .{ .loop = &loop, .subbuffers = &subs, .register = &reg });
+    // The shipped dired guest is a thin launcher. This ABI gate intentionally
+    // supplies only the ordinary command surface: dired owns no proc/fs
+    // authority, text buffer, mode, or filesystem implementation.
+    const plugin = try loadPlugin(&engine, &env.ctx, "dired", @embedFile("guest_dired_wasm"), .{});
     defer plugin.deinit();
-    try t.expect(plugin.perms[wasm_host.perm_proc] and plugin.perms[wasm_host.perm_timer]);
+    try t.expect(env.commands.resolve("dired") != null);
 
     _ = try command.run(&env.commands, &env.ctx, "dired", &.{});
-    // The model buffer was created + focused synchronously; it entered dired mode.
-    try t.expectEqualStrings("dired", env.head.currentMode());
-    const buf = blk: {
-        var it = env.buffers.iterator();
-        while (it.next()) |b| if (std.mem.eql(u8, b.name, "*dired*")) break :blk b;
-        break :blk null;
-    };
-    try t.expect(buf != null);
+    try t.expectEqual(@as(usize, 1), open_probe.calls);
 
-    // Drive the async loop until `ls` lands (bounded; "." always lists).
-    var rounds: usize = 0;
-    while (rounds < 20_000_000 and buf.?.editor.text().byteLen() == 0) : (rounds += 1) {
-        _ = loop.tick();
-        std.Thread.yield() catch {};
-    }
-    if (buf.?.editor.text().byteLen() > 0) {
-        // on_fill parsed the raw ls output and re-rendered: the buffer holds the
-        // name tree — no `ls`/sentinel bytes leak through.
-        const s = try buf.?.editor.text().toOwnedSlice(gpa);
-        defer gpa.free(s);
-        try t.expect(std.mem.indexOf(u8, s, "\x1e\x1e") == null); // sentinels repainted away
-    }
-
-    // The sandbox `ls` yields no entries, so drive the guest deterministically:
-    // author a synthetic marked `ls -l` block into *dired* and fire `on_fill`
-    // directly (the same export the proc bridge calls), so the guest parses a
-    // real 2-entry tree (a file + a dir) and rebuilds the editable projection.
-    const synth =
-        "\x1e\x1e.\n" ++
-        "total 8\n" ++
-        "-rw-r--r-- 1 alice alice 42 2024-01-01 12:00 alpha.txt\n" ++
-        "drwxr-xr-x 2 alice alice 4096 2024-01-01 12:00 subdir\n";
-    try buf.?.editor.applyUserEdit(gpa, .{ .start = 0, .end = buf.?.editor.text().byteLen() }, synth);
-    try contract.callOptionalExport("on_fill", &plugin.instance, .{});
-
-    // The buffer is the always-editable name tree — just indented names, no
-    // header/perms/glyphs in the TEXT — and it's marked this plugin's tool
-    // projection, so a save reconciles it.
-    try t.expectEqualStrings("dired", buf.?.editor.toolName().?); // code-backed
-    {
-        const s = try buf.?.editor.text().toOwnedSlice(gpa);
-        defer gpa.free(s);
-        try t.expect(std.mem.indexOf(u8, s, "alpha.txt") != null);
-        try t.expect(std.mem.indexOf(u8, s, "subdir/") != null);
-        try t.expect(std.mem.indexOf(u8, s, "Directory:") == null);
-        try t.expect(std.mem.indexOf(u8, s, "rw-r--r--") == null); // perms are decoration
-    }
-
-    // Edit in place: APPEND a new row (a create) — the existing rows keep their
-    // hidden id-spans intact, so reconcile reads them back as unchanged by EXACT
-    // identity, and the new (id-less) row is a create. Appending (not a full
-    // replace) is how a user actually types a new file with `o`.
-    const probe = "weft_new_probe.txt";
-    const end = buf.?.editor.text().byteLen();
-    try buf.?.editor.applyUserEdit(gpa, .{ .start = end, .end = end }, probe ++ "\n");
-
-    // `save` on the *dired* projection resolves — via the `save` ACTION scoped to
-    // `When{.tool="dired"}` — to `dired-commit`, which reconciles by id, previews
-    // the ordered plan in *dired-plan*, and stages it behind the y/n confirm (it
-    // does NOT touch the filesystem itself; the confirm runs the ops via proc).
-    _ = try command.run(&env.commands, &env.ctx, "save", &.{});
-    try t.expectEqualStrings("dired-confirm", env.head.currentMode());
-    const plan = blk: {
-        var it = env.buffers.iterator();
-        while (it.next()) |b| if (std.mem.eql(u8, b.name, "*dired-plan*")) break :blk b;
-        break :blk null;
-    };
-    try t.expect(plan != null);
-    const ps = try plan.?.editor.text().toOwnedSlice(gpa);
-    defer gpa.free(ps);
-    try t.expect(std.mem.indexOf(u8, ps, "pending changes") != null);
-    try t.expect(std.mem.indexOf(u8, ps, "create  " ++ probe) != null);
-    // The id-exact reconcile leaves the untouched rows alone — no spurious
-    // rename/move/delete of alpha.txt or subdir from a heuristic misfire.
-    try t.expect(std.mem.indexOf(u8, ps, "alpha.txt") == null);
-    try t.expect(std.mem.indexOf(u8, ps, "delete") == null);
+    var cwd_buf: [4096]u8 = undefined;
+    const cwd_ptr = std.c.getcwd(&cwd_buf, cwd_buf.len) orelse return error.GetCwd;
+    const cwd = std.mem.sliceTo(cwd_ptr, 0);
+    try t.expectEqualStrings(cwd, open_probe.target.?);
 }
 
 test "helix: a second modal editor loads in its OWN mode namespace" {
