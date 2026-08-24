@@ -488,6 +488,15 @@ pub fn build(b: *std.Build) void {
     const test_step = b.step("test", "Run unit tests");
     test_step.dependOn(&run_tests.step);
 
+    // A focused entry point for the whole-app spine narrative.  Keeping the
+    // filter in the build graph makes the opt-in video command reproducible:
+    // it cannot accidentally run another Project test and reuse the requested
+    // output path.  The ordinary `test` step above remains the full suite.
+    const demo_tests = b.addTest(.{ .root_module = test_mod, .filters = &.{"e2e/spine"} });
+    const run_demo_tests = b.addRunArtifact(demo_tests);
+    const demo_step = b.step("e2e-demo", "Run the whole-app spine narrative (optionally record WEFT_E2E_VIDEO)");
+    demo_step.dependOn(&run_demo_tests.step);
+
     // Portable contract gate: deliberately separate from the application
     // suite so these roots cannot acquire app/platform dependencies unnoticed.
     const contract_step = b.step("test-contract", "Run portable schema/semantic/filesystem contract tests");

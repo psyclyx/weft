@@ -221,6 +221,22 @@ captures frames, `wtype` injects input. Assertions are on layout geometry
 (caret x, line heights) rather than pixel-exact glyphs, since fontconfig
 makes glyph coverage machine-dependent.
 
+### Recording a demo video
+
+The whole-app spine test can optionally turn its existing milestone screenshots
+into an H.264 MP4. This is opt-in, so ordinary test runs remain unchanged:
+
+```sh
+WEFT_E2E_VIDEO=/tmp/weft-spine.mp4 \
+  zig build e2e-demo --summary all
+```
+
+The recorder writes two frames per second and keeps the numbered PPM staging
+frames beside the requested output (`/tmp/weft-spine.mp4.frames-*`). If
+`ffmpeg` is unavailable or cannot encode, the test still passes and those raw
+frames remain available for manual conversion. The focused `e2e-demo` step
+ensures the path names only this narrative's output.
+
 ## Remote
 
 Every weft is a peer; there is no separate agent binary. Host a document

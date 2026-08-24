@@ -965,6 +965,107 @@ pub fn makeSystemTmpDir(gpa: Allocator) ![]u8 {
     return gpa.dupe(u8, std.mem.span(made));
 }
 
+/// Opt-in encoder for the durable screenshots emitted by Project.shot.
+///
+/// The recorder deliberately stages ordinary PPM files first.  This keeps the
+/// test's observation boundary deterministic and leaves useful evidence when
+/// ffmpeg is unavailable or fails.  The encoder is only constructed when
+/// WEFT_E2E_VIDEO is set; normal e2e runs do not touch this path.
+pub const VideoRecorder = struct {
+    gpa: Allocator,
+    output_path: []u8,
+    frame_dir: []u8,
+    frame_count: usize = 0,
+
+    const fps = 2;
+    const encode_timeout: std.Io.Timeout = .{ .duration = .{ .raw = .fromSeconds(60), .clock = .awake } };
+
+    pub fn init(gpa: Allocator, requested_path: []const u8, base_dir: []const u8) !VideoRecorder {
+        const output_path = if (std.fs.path.isAbsolute(requested_path))
+            try gpa.dupe(u8, requested_path)
+        else
+            try std.fs.path.join(gpa, &.{ base_dir, requested_path });
+        errdefer gpa.free(output_path);
+
+        // A unique staging directory prevents stale frames from a previous
+        // run from entering the numbered image2 sequence.  It is retained on
+        // purpose: when encoding fails, the raw frames are still the demo
+        // artifact and can be encoded manually.
+        const frame_dir = try std.fmt.allocPrint(
+            gpa,
+            "{s}.frames-{d}",
+            .{ output_path, core.task.nowNs() },
+        );
+        errdefer gpa.free(frame_dir);
+
+        var threaded: std.Io.Threaded = .init(gpa, .{});
+        defer threaded.deinit();
+        try std.Io.Dir.cwd().createDirPath(threaded.io(), frame_dir);
+
+        return .{
+            .gpa = gpa,
+            .output_path = output_path,
+            .frame_dir = frame_dir,
+        };
+    }
+
+    pub fn record(self: *VideoRecorder, pixels: []const u8, width: u32, height: u32) !void {
+        const frame_number = self.frame_count + 1;
+        const path = try std.fmt.allocPrint(
+            self.gpa,
+            "{s}/frame-{d:0>6}.ppm",
+            .{ self.frame_dir, frame_number },
+        );
+        defer self.gpa.free(path);
+        try harness.writePpm(self.gpa, path, pixels, width, height);
+        self.frame_count = frame_number;
+    }
+
+    /// Encode the staged sequence to an H.264 MP4.  The command is routed
+    /// through /bin/sh only to resolve ffmpeg from PATH; all user-controlled
+    /// values are positional parameters, never interpolated shell text.
+    pub fn finish(self: *VideoRecorder) void {
+        if (self.frame_count == 0) {
+            std.log.warn("e2e video: no frames were recorded for {s}", .{self.output_path});
+            return;
+        }
+
+        var result = core.proc.runDeadline(
+            self.gpa,
+            &.{
+                "/bin/sh",
+                "-c",
+                "exec \"$0\" -hide_banner -loglevel error -y -framerate 2 -i frame-%06d.ppm -c:v libx264 -pix_fmt yuv420p \"$1\"",
+                "ffmpeg",
+                self.output_path,
+            },
+            .{ .cwd = self.frame_dir, .environ = parentEnviron() },
+            encode_timeout,
+        ) catch |err| {
+            std.log.warn(
+                "e2e video: ffmpeg unavailable or failed ({t}); raw frames retained at {s}",
+                .{ err, self.frame_dir },
+            );
+            return;
+        };
+        defer result.deinit(self.gpa);
+        if (!result.succeeded()) {
+            std.log.warn(
+                "e2e video: ffmpeg exited unsuccessfully ({?}); raw frames retained at {s}",
+                .{ result.exitCode(), self.frame_dir },
+            );
+            return;
+        }
+        std.log.info("e2e video: wrote {s} ({d} frames at {d} fps)", .{ self.output_path, self.frame_count, fps });
+    }
+
+    pub fn deinit(self: *VideoRecorder) void {
+        self.gpa.free(self.output_path);
+        self.gpa.free(self.frame_dir);
+        self.* = undefined;
+    }
+};
+
 // ── Project: weft launched IN a real on-disk project ────────────────
 //
 // The whole-app e2e drives weft the way a person starts a project: in a
@@ -982,9 +1083,11 @@ pub const Project = struct {
     gpa: Allocator,
     root: []u8, // absolute path to the project dir (the process cwd while live)
     prev_cwd: []u8, // absolute cwd to restore on deinit
+    video: ?VideoRecorder = null,
 
     pub fn init(self: *Project, gpa: Allocator) !void {
         self.gpa = gpa;
+        self.video = null;
         self.prev_cwd = try getCwdAlloc(gpa);
         errdefer gpa.free(self.prev_cwd);
         // A real isolated dir in the system tmp — NOT under this repo — so the
@@ -992,9 +1095,21 @@ pub const Project = struct {
         self.root = try makeSystemTmpDir(gpa);
         errdefer gpa.free(self.root);
         try chdirTo(self.root);
+        errdefer chdirTo(self.prev_cwd) catch {};
+
+        if (std.c.getenv("WEFT_E2E_VIDEO")) |raw_path| {
+            const requested_path = std.mem.sliceTo(raw_path, 0);
+            if (requested_path.len != 0) {
+                self.video = try VideoRecorder.init(gpa, requested_path, self.prev_cwd);
+            }
+        }
     }
 
     pub fn deinit(self: *Project) void {
+        if (self.video) |*video| {
+            video.finish();
+            video.deinit();
+        }
         chdirTo(self.prev_cwd) catch {};
         // Remove the throwaway tree. `$0` carries the path as an argv, so spaces
         // and specials can't break the command; run from prev_cwd, not inside it.
@@ -1057,6 +1172,11 @@ pub const Project = struct {
         const fname = std.fmt.allocPrint(self.gpa, "{s}/.zig-cache/tmp/weft-e2e-{s}.ppm", .{ self.prev_cwd, name }) catch return;
         defer self.gpa.free(fname);
         harness.writePpm(self.gpa, fname, pixels, app_w, app_h) catch {};
+        if (self.video) |*video| {
+            video.record(pixels, app_w, app_h) catch |err| {
+                std.log.warn("e2e video: could not write frame {d}: {t}", .{ video.frame_count, err });
+            };
+        }
     }
 };
 
