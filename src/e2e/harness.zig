@@ -741,7 +741,10 @@ pub const Loopback = struct {
     }
 
     /// One sync round: drain+handle+push each side, publishing live cursors.
-    fn tickOnce(self: *Loopback) !void {
+    /// Advance both peers exactly once. Scenarios that synchronize rendering
+    /// with collaboration use this narrow clock edge; bounded convergence
+    /// assertions should normally prefer `pumpUntil` below.
+    pub fn tick(self: *Loopback) !void {
         _ = try self.host_col.tick(self.host_ed.buffers.active().editor.cursorOffset());
         _ = try self.peer_col.tick(self.peer_ed.buffers.active().editor.cursorOffset());
     }
@@ -756,7 +759,7 @@ pub const Loopback = struct {
         // it holds, so the happy path is fast.
         const deadline = core.task.nowNs() + 5 * std.time.ns_per_s;
         while (core.task.nowNs() < deadline) {
-            try self.tickOnce();
+            try self.tick();
             if (pred(ctx)) return true;
             napUs(300);
         }
