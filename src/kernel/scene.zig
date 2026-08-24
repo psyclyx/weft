@@ -99,6 +99,7 @@ fn validateNode(gpa: std.mem.Allocator, seen: *std.AutoHashMapUnmanaged(u64, voi
     switch (node.content) {
         .container => |container| for (container.children) |child|
             try validateNode(gpa, seen, child, depth + 1),
+        .action => |action| if (action.action.len == 0) return error.InvalidAction,
         else => {},
     }
 }
@@ -128,4 +129,12 @@ test "scene validation rejects ambiguous fact and action names" {
         .content = .{ .label = "row" },
     };
     try std.testing.expectError(error.DuplicateAction, validate(std.testing.allocator, duplicate_actions));
+}
+
+test "scene validation rejects empty content action ids" {
+    const node: Node = .{
+        .id = @enumFromInt(1),
+        .content = .{ .action = .{ .action = "", .label = "Run" } },
+    };
+    try std.testing.expectError(error.InvalidAction, validate(std.testing.allocator, node));
 }

@@ -263,35 +263,34 @@ fn targetKindTag(kind: kernel.target.Kind) u8 {
 
 fn writeHandle(writer: *Writer, handle: anytype) Error!void {
     const wire = handle.toWire();
+    if (wire.generation == 0) return error.InvalidData;
     try writer.writeU32(wire.authority);
     try writer.writeU32(wire.slot);
     try writer.writeU32(wire.generation);
 }
 
 fn readFieldHandle(reader: *Reader) Error!kernel.scene.FieldRef {
-    return .fromWire(.{ .authority = try reader.readU32(), .slot = try reader.readU32(), .generation = try reader.readU32() });
+    const authority = try reader.readU32();
+    const slot = try reader.readU32();
+    const generation = try reader.readU32();
+    if (generation == 0) return error.InvalidData;
+    return .fromWire(.{ .authority = authority, .slot = slot, .generation = generation });
 }
 
 fn readViewHandle(reader: *Reader) Error!kernel.view.Ref {
-    return .fromWire(.{ .authority = try reader.readU32(), .slot = try reader.readU32(), .generation = try reader.readU32() });
-}
-
-fn ensureUnique(gpa: std.mem.Allocator, values: []const []const u8) Error!void {
-    var seen: std.StringHashMapUnmanaged(void) = .empty;
-    defer seen.deinit(gpa);
-    for (values) |value| {
-        const result = try seen.getOrPut(gpa, value);
-        if (result.found_existing) return error.Duplicate;
-    }
+    const authority = try reader.readU32();
+    const slot = try reader.readU32();
+    const generation = try reader.readU32();
+    if (generation == 0) return error.InvalidData;
+    return .fromWire(.{ .authority = authority, .slot = slot, .generation = generation });
 }
 
 // ── Scene ────────────────────────────────────────────────────────────────
 
-const SceneCount = struct { nodes: usize = 0, depth: usize = 0 };
+const SceneCount = struct { nodes: usize = 0 };
 
 fn validateSceneNode(gpa: std.mem.Allocator, node: kernel.scene.Node, seen: *std.AutoHashMapUnmanaged(u64, void), depth: usize, count: *SceneCount) Error!void {
     if (depth > Limits.max_depth) return error.LimitExceeded;
-    count.depth = @max(count.depth, depth);
     count.nodes += 1;
     if (count.nodes > Limits.max_nodes) return error.LimitExceeded;
     const raw_id = @intFromEnum(node.id);
@@ -303,6 +302,7 @@ fn validateSceneNode(gpa: std.mem.Allocator, node: kernel.scene.Node, seen: *std
     var fact_names: std.StringHashMapUnmanaged(void) = .empty;
     defer fact_names.deinit(gpa);
     for (node.facts) |fact| {
+        if (fact.name.len == 0) return error.InvalidData;
         if (fact.name.len > Limits.max_string_bytes or fact.value.len > Limits.max_string_bytes) return error.LimitExceeded;
         const result = try fact_names.getOrPut(gpa, fact.name);
         if (result.found_existing) return error.Duplicate;
@@ -323,6 +323,7 @@ fn validateSceneNode(gpa: std.mem.Allocator, node: kernel.scene.Node, seen: *std
         .label => |label| if (label.len > Limits.max_string_bytes) return error.LimitExceeded,
         .field => |field| if (field.placeholder.len > Limits.max_string_bytes) return error.LimitExceeded,
         .action => |action| {
+            if (action.action.len == 0) return error.InvalidData;
             if (action.action.len > Limits.max_string_bytes or action.label.len > Limits.max_string_bytes) return error.LimitExceeded;
         },
     }
@@ -436,6 +437,7 @@ fn readFacts(reader: *Reader, arena: std.mem.Allocator) Error![]const kernel.sce
     for (facts) |*fact| {
         fact.name = try reader.string(arena);
         fact.value = try reader.string(arena);
+        if (fact.name.len == 0) return error.InvalidData;
         const result = try names.getOrPut(arena, fact.name);
         if (result.found_existing) return error.Duplicate;
     }
@@ -472,7 +474,11 @@ fn readTempNode(reader: *Reader, arena: std.mem.Allocator) Error!TempNode {
         0 => .{ .container = TempContainer{ .axis = try axisFromTag(try reader.byte()), .child_count = try reader.count(Limits.max_children) } },
         1 => .{ .label = try reader.string(arena) },
         2 => .{ .field = TempField{ .ref = try readFieldHandle(reader), .placeholder = try reader.string(arena), .single_line = try reader.strictBool() } },
-        3 => .{ .action = TempAction{ .action = try reader.string(arena), .label = try reader.string(arena), .enabled = try reader.strictBool() } },
+        3 => blk: {
+            const action = try reader.string(arena);
+            if (action.len == 0) return error.InvalidData;
+            break :blk .{ .action = TempAction{ .action = action, .label = try reader.string(arena), .enabled = try reader.strictBool() } };
+        },
         else => return error.Corrupt,
     };
     return .{
@@ -597,7 +603,10 @@ fn optionalString(writer: *Writer, value: ?[]const u8) Error!void {
 }
 
 fn readOptionalString(reader: *Reader, arena: std.mem.Allocator) Error!?[]const u8 {
-    return if (try reader.strictBool()) try reader.string(arena) else null;
+    if (!try reader.strictBool()) return null;
+    const value = try reader.string(arena);
+    if (value.len == 0) return error.InvalidData;
+    return value;
 }
 
 pub fn encodeInteraction(gpa: std.mem.Allocator, definition: kernel.interaction.Definition) Error![]u8 {
@@ -607,8 +616,14 @@ pub fn encodeInteraction(gpa: std.mem.Allocator, definition: kernel.interaction.
     var action_ids = std.ArrayList([]const u8).empty;
     defer action_ids.deinit(gpa);
     for (definition.actions) |action| try action_ids.append(gpa, action.id);
-    if (definition.default_action) |id| if (!containsString(action_ids.items, id)) return error.BadReference;
-    if (definition.cancel_action) |id| if (!containsString(action_ids.items, id)) return error.BadReference;
+    if (definition.default_action) |id| {
+        if (id.len == 0) return error.InvalidData;
+        if (!containsString(action_ids.items, id)) return error.BadReference;
+    }
+    if (definition.cancel_action) |id| {
+        if (id.len == 0) return error.InvalidData;
+        if (!containsString(action_ids.items, id)) return error.BadReference;
+    }
     var writer = Writer.init(gpa);
     errdefer writer.deinit();
     try header(&writer, interaction_kind);
@@ -660,8 +675,9 @@ pub fn decodeInteraction(gpa: std.mem.Allocator, bytes: []const u8) Error!OwnedI
         action.label = try reader.string(arena);
         action.enabled = try reader.strictBool();
         action.disposition = try dispositionFromTag(try reader.byte());
+        if (action.id.len == 0) return error.InvalidData;
         const result = try action_ids.getOrPut(arena, action.id);
-        if (result.found_existing or action.id.len == 0) return error.Duplicate;
+        if (result.found_existing) return error.Duplicate;
     }
     const bindings = try arena.alloc(kernel.interaction.Binding, try reader.count(Limits.max_bindings));
     var inputs = std.StringHashMapUnmanaged(void).empty;
@@ -669,7 +685,8 @@ pub fn decodeInteraction(gpa: std.mem.Allocator, bytes: []const u8) Error!OwnedI
     for (bindings) |*binding| {
         binding.input = try reader.string(arena);
         binding.action = try reader.string(arena);
-        if (binding.input.len == 0 or !action_ids.contains(binding.action)) return error.BadReference;
+        if (binding.input.len == 0 or binding.action.len == 0) return error.InvalidData;
+        if (!action_ids.contains(binding.action)) return error.BadReference;
         const result = try inputs.getOrPut(arena, binding.input);
         if (result.found_existing) return error.Duplicate;
     }
@@ -690,6 +707,7 @@ fn validateFacts(gpa: std.mem.Allocator, facts: []const kernel.target.Fact) Erro
     var names = std.StringHashMapUnmanaged(void).empty;
     defer names.deinit(gpa);
     for (facts) |fact| {
+        if (fact.name.len == 0) return error.InvalidData;
         if (fact.name.len > Limits.max_string_bytes or fact.value.len > Limits.max_string_bytes) return error.LimitExceeded;
         const result = try names.getOrPut(gpa, fact.name);
         if (result.found_existing) return error.Duplicate;
@@ -744,6 +762,7 @@ pub fn decodeTarget(gpa: std.mem.Allocator, bytes: []const u8) Error!OwnedTarget
     for (facts) |*fact| {
         fact.name = try reader.string(arena);
         fact.value = try reader.string(arena);
+        if (fact.name.len == 0) return error.InvalidData;
         const result = try names.getOrPut(arena, fact.name);
         if (result.found_existing) return error.Duplicate;
     }
@@ -812,6 +831,90 @@ test "scene codec: hostile tags, truncation, trailing bytes, and duplicate IDs r
     try t.expectError(error.Duplicate, encodeScene(t.allocator, duplicate));
 }
 
+test "scene codec: reject empty names, action ids, and zero-generation handles" {
+    const empty_fact_scene: kernel.scene.Node = .{
+        .id = @enumFromInt(1),
+        .facts = &.{.{ .name = "", .value = "value" }},
+        .content = .{ .label = "row" },
+    };
+    try t.expectError(error.InvalidData, encodeScene(t.allocator, empty_fact_scene));
+    const empty_content_action: kernel.scene.Node = .{
+        .id = @enumFromInt(1),
+        .content = .{ .action = .{ .action = "", .label = "Run" } },
+    };
+    try t.expectError(error.InvalidData, encodeScene(t.allocator, empty_content_action));
+    const empty_fact_target: kernel.target.Definition = .{
+        .kind = .file,
+        .display_name = "file",
+        .facts = &.{.{ .name = "", .value = "value" }},
+    };
+    try t.expectError(error.InvalidData, encodeTarget(t.allocator, empty_fact_target));
+
+    const zero_field: kernel.scene.Node = .{
+        .id = @enumFromInt(1),
+        .content = .{ .field = .{ .ref = .{ .authority = .here, .slot = 1, .generation = 0 } } },
+    };
+    try t.expectError(error.InvalidData, encodeScene(t.allocator, zero_field));
+    const zero_view: kernel.interaction.Definition = .{
+        .view = .{ .authority = .here, .slot = 1, .generation = 0 },
+        .role = .dialog,
+        .root = @enumFromInt(1),
+        .actions = &.{},
+    };
+    try t.expectError(error.InvalidData, encodeInteraction(t.allocator, zero_view));
+
+    var scene_writer = Writer.init(t.allocator);
+    try header(&scene_writer, scene_kind);
+    try scene_writer.count(1, Limits.max_nodes);
+    try scene_writer.writeU64(1);
+    try scene_writer.uv(root_parent);
+    try scene_writer.string("root");
+    try scene_writer.count(1, Limits.max_facts);
+    try scene_writer.string("");
+    try scene_writer.string("value");
+    try scene_writer.count(0, Limits.max_actions);
+    try scene_writer.writeU16(0);
+    try scene_writer.byte(0);
+    try scene_writer.byte(0);
+    try scene_writer.byte(0);
+    try scene_writer.byte(1);
+    try scene_writer.string("row");
+    const empty_fact_scene_bytes = try scene_writer.finish();
+    defer t.allocator.free(empty_fact_scene_bytes);
+    try t.expectError(error.InvalidData, decodeScene(t.allocator, empty_fact_scene_bytes));
+
+    var action_writer = Writer.init(t.allocator);
+    try header(&action_writer, scene_kind);
+    try action_writer.count(1, Limits.max_nodes);
+    try action_writer.writeU64(1);
+    try action_writer.uv(root_parent);
+    try action_writer.string("root");
+    try action_writer.count(0, Limits.max_facts);
+    try action_writer.count(0, Limits.max_actions);
+    try action_writer.writeU16(0);
+    try action_writer.byte(0);
+    try action_writer.byte(0);
+    try action_writer.byte(0);
+    try action_writer.byte(3);
+    try action_writer.string("");
+    try action_writer.string("Run");
+    try action_writer.byte(1);
+    const empty_content_action_bytes = try action_writer.finish();
+    defer t.allocator.free(empty_content_action_bytes);
+    try t.expectError(error.InvalidData, decodeScene(t.allocator, empty_content_action_bytes));
+
+    var target_writer = Writer.init(t.allocator);
+    try header(&target_writer, target_kind);
+    try target_writer.byte(targetKindTag(.file));
+    try target_writer.string("file");
+    try target_writer.count(1, Limits.max_facts);
+    try target_writer.string("");
+    try target_writer.string("value");
+    const empty_fact_target_bytes = try target_writer.finish();
+    defer t.allocator.free(empty_fact_target_bytes);
+    try t.expectError(error.InvalidData, decodeTarget(t.allocator, empty_fact_target_bytes));
+}
+
 test "scene codec: duplicate facts/actions/bindings and invalid interaction tags refuse" {
     const duplicate_facts: kernel.scene.Node = .{
         .id = @enumFromInt(1),
@@ -872,6 +975,37 @@ test "scene codec: duplicate facts/actions/bindings and invalid interaction tags
     _ = try disposition_reader.strictBool();
     invalid_disposition[disposition_reader.pos] = 0xff;
     try t.expectError(error.Corrupt, decodeInteraction(t.allocator, invalid_disposition));
+
+    var invalid_view_generation = try t.allocator.dupe(u8, encoded);
+    defer t.allocator.free(invalid_view_generation);
+    @memset(invalid_view_generation[13..17], 0);
+    try t.expectError(error.InvalidData, decodeInteraction(t.allocator, invalid_view_generation));
+
+    const field_node: kernel.scene.Node = .{
+        .id = @enumFromInt(1),
+        .content = .{ .field = .{ .ref = .{ .authority = .here, .slot = 1, .generation = 1 } } },
+    };
+    const field_encoded = try encodeScene(t.allocator, field_node);
+    defer t.allocator.free(field_encoded);
+    var invalid_field_generation = try t.allocator.dupe(u8, field_encoded);
+    defer t.allocator.free(invalid_field_generation);
+    var field_reader = try Reader.init(invalid_field_generation);
+    var field_arena = std.heap.ArenaAllocator.init(t.allocator);
+    defer field_arena.deinit();
+    try checkHeader(&field_reader, scene_kind);
+    _ = try field_reader.count(Limits.max_nodes);
+    _ = try field_reader.readU64();
+    _ = try field_reader.uv();
+    _ = try field_reader.string(field_arena.allocator());
+    _ = try field_reader.count(Limits.max_facts);
+    _ = try field_reader.count(Limits.max_actions);
+    _ = try field_reader.readU16();
+    _ = try field_reader.strictBool();
+    _ = try field_reader.strictBool();
+    _ = try field_reader.strictBool();
+    try t.expectEqual(@as(u8, 2), try field_reader.byte());
+    @memset(invalid_field_generation[field_reader.pos + 8 .. field_reader.pos + 12], 0);
+    try t.expectError(error.InvalidData, decodeScene(t.allocator, invalid_field_generation));
 }
 
 test "scene codec: forward parent references and invalid target tags refuse" {
