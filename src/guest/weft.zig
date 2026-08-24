@@ -199,6 +199,9 @@ extern "weft" fn wl_semantic_target_handler_request_len() i32;
 extern "weft" fn wl_semantic_target_handler_request(out: u32, out_cap: u32) i32;
 extern "weft" fn wl_semantic_target_handler_probe_respond(kind: u32) i32;
 extern "weft" fn wl_semantic_target_handler_open_respond(kind: u32, authority: u32, slot: u32, generation: u32) i32;
+extern "weft" fn wl_semantic_transfer_capture(target_authority: u32, target_slot: u32, target_generation: u32, revision_low: u32, revision_high: u32, source_root_authority: u32, source_root_slot: u32, source_root_generation: u32, source_ref_authority: u32, source_ref_slot: u32, source_ref_generation: u32, revision_ptr: u32, revision_len: u32, out: u32, out_cap: u32) i32;
+extern "weft" fn wl_semantic_transfer_retain(authority: u32, slot: u32, generation: u32) i32;
+extern "weft" fn wl_semantic_transfer_release(authority: u32, slot: u32, generation: u32) i32;
 extern "weft" fn wl_shell_insert(ptr: u32, len: u32) void;
 extern "weft" fn wl_repl_start(cmd: u32, cmd_len: u32, name: u32, name_len: u32) i32;
 extern "weft" fn wl_repl_send(handle: u32, ptr: u32, len: u32) void;
@@ -1674,6 +1677,64 @@ pub fn semanticFsApply(gpa: std.mem.Allocator, target: semantic.target.Ref, revi
         if (result_len > bytes.len) return error.Failed;
         return fs_codec.decodeApplyReport(gpa, bytes[0..result_len]);
     }
+}
+
+pub const SemanticTransferError = SemanticFsError || error{InvalidAttachment};
+
+fn semanticTransferError(code: i32) SemanticTransferError!void {
+    switch (code) {
+        -1 => return error.Unavailable,
+        -2 => return error.StaleTarget,
+        -3 => return error.Unsupported,
+        -4 => return error.InvalidAttachment,
+        -5 => return error.Failed,
+        -6 => return error.LimitExceeded,
+        else => if (code < 0) return error.Failed,
+    }
+}
+
+/// Materialize an authorized filesystem entry for use by a semantic
+/// transfer. The result is an owner-scoped wire identifier, never a pointer
+/// or an ambient filesystem capability.
+pub fn semanticTransferCapture(
+    target: semantic.target.Ref,
+    target_revision: u64,
+    source: fs.contract.EntrySource,
+) SemanticTransferError!semantic.transfer.Attachment {
+    const target_wire = target.toWire();
+    var out: [12]u8 = undefined;
+    const result = wl_semantic_transfer_capture(
+        target_wire.authority,
+        target_wire.slot,
+        target_wire.generation,
+        semanticFsRevisionLow(target_revision),
+        semanticFsRevisionHigh(target_revision),
+        @intFromEnum(source.root.authority),
+        source.root.slot,
+        source.root.generation,
+        @intFromEnum(source.ref.authority),
+        source.ref.slot,
+        source.ref.generation,
+        p(source.revision.token.ptr),
+        @intCast(source.revision.token.len),
+        p(&out),
+        out.len,
+    );
+    try semanticTransferError(result);
+    if (result != out.len) return error.Failed;
+    return .{
+        .authority = std.mem.readInt(u32, out[0..4], .little),
+        .slot = std.mem.readInt(u32, out[4..8], .little),
+        .generation = std.mem.readInt(u32, out[8..12], .little),
+    };
+}
+
+pub fn semanticTransferRetain(attachment: semantic.transfer.Attachment) bool {
+    return wl_semantic_transfer_retain(attachment.authority, attachment.slot, attachment.generation) == 1;
+}
+
+pub fn semanticTransferRelease(attachment: semantic.transfer.Attachment) bool {
+    return wl_semantic_transfer_release(attachment.authority, attachment.slot, attachment.generation) == 1;
 }
 
 // ── D2: generic, schema-directed slots (doc/d2-schema-payloads.md §6) ────

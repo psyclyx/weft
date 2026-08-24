@@ -311,6 +311,9 @@ pub const imports = [_]Entry{
     .{ .name = "wl_semantic_target_handler_request", .params = &.{ .u32, .u32 }, .results = &.{.i32}, .group = .semantic, .doc = "host-to-guest callback read: copy the current canonical target-handler request" },
     .{ .name = "wl_semantic_target_handler_probe_respond", .params = &.{.u32}, .results = &.{.i32}, .group = .semantic, .doc = "answer one target probe with no claim, a match strength, or a typed failure" },
     .{ .name = "wl_semantic_target_handler_open_respond", .params = &.{ .u32, .u32, .u32, .u32 }, .results = &.{.i32}, .group = .semantic, .doc = "answer one target open with a typed view handle or typed failure" },
+    .{ .name = "wl_semantic_transfer_capture", .params = &.{ .u32, .u32, .u32, .u32, .u32, .u32, .u32, .u32, .u32, .u32, .u32, .u32, .u32, .u32, .u32 }, .results = &.{.i32}, .group = .semantic, .perm = .fs_read, .doc = "capture an authorized filesystem entry into an owner-scoped semantic transfer attachment" },
+    .{ .name = "wl_semantic_transfer_retain", .params = &.{ .u32, .u32, .u32 }, .results = &.{.i32}, .group = .semantic, .doc = "retain an owner-scoped semantic transfer attachment" },
+    .{ .name = "wl_semantic_transfer_release", .params = &.{ .u32, .u32, .u32 }, .results = &.{.i32}, .group = .semantic, .doc = "release an owner-scoped semantic transfer attachment" },
 
     // ── proc.zig — perm-gated off-thread process effects ───────────────
     .{ .name = "wl_shell_insert", .params = &.{ .u32, .u32 }, .results = &.{}, .group = .proc, .perm = .proc_timer, .doc = "run `<cmd>` off-thread and insert its stdout at the cursor when done" },
@@ -368,7 +371,7 @@ pub const imports = [_]Entry{
 /// half-finished edit — fails the build with a pointed message instead of
 /// silently drifting the two ~124-entry tables apart again (the exact class
 /// this table exists to kill).
-const expected_import_count = 159;
+const expected_import_count = 162;
 
 /// A host→guest EXPORT entrypoint (design doc/north-star-plan.md §2.5, task
 /// W0a-D extension 2): every `instance.callVoid("name", args)` the host

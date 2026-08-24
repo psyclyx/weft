@@ -243,6 +243,7 @@ fn construct(engine: *wasm.Engine, ctx: *command.Context, name: []const u8, opts
         .module = module,
         .linker = linker,
         .instance = undefined,
+        .semantic_attachments = .init(gpa),
     };
     try wasm_host.defineImports(&p.linker, p);
     p.instance = try p.linker.instantiate(&p.module);

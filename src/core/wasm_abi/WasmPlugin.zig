@@ -25,6 +25,7 @@ const grants_mod = @import("../grants.zig");
 const plugin_semantic = @import("weft_plugin_semantic");
 const semantic_model = @import("weft_semantic");
 const semantic_runtime = @import("../semantic.zig");
+const transfer_attachment = @import("../wasm_host/transfer_attachment.zig");
 
 // The host-import table operates on `WasmPlugin` (principal() routes edits
 // through its peer resolver); the two @import each other (Zig allows it).
@@ -256,6 +257,11 @@ semantic_actions: plugin_semantic.action.Bridge = .empty,
 /// before their stable proxy storage is released during plugin teardown.
 semantic_targets: plugin_semantic.target.Bridge = .empty,
 
+// ── Sandboxed semantic transfer attachments ──
+/// Guest references are owner-scoped and are revoked with this plugin. Host
+/// transfer owners retain the resolved resource independently.
+semantic_attachments: transfer_attachment.Registry,
+
 // ── Completion provider (host→guest data-gather) ──
 /// The caps provider id this plugin registered (owned), torn down on
 /// unload. Null until it calls `provideCompletion`.
@@ -370,6 +376,7 @@ pub fn deinit(self: *WasmPlugin) void {
     self.semantic_fields.deinit();
     self.semantic_actions.deinit();
     self.semantic_targets.deinit();
+    self.semantic_attachments.deinit();
     // Completion provider dies with the plugin (unregister before freeing
     // its id — the caps registry holds the id by reference).
     if (self.provider_id) |id| {

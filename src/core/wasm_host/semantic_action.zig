@@ -75,6 +75,10 @@ pub fn hRespond(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32, resu
             defer plugin.gpa.free(payload);
             if (kind == 2) {
                 var decoded = scene_codec.transfer.decode(plugin.gpa, payload) catch return;
+                plugin.semantic_attachments.resolve(&decoded) catch {
+                    decoded.deinit();
+                    return;
+                };
                 plugin.semantic_actions.adoptTransfer(&decoded) catch {
                     decoded.deinit();
                     return;

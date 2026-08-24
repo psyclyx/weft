@@ -52,6 +52,7 @@ const semantic_action = @import("../wasm_host/semantic_action.zig");
 const semantic_field = @import("../wasm_host/semantic_field.zig");
 const semantic_target = @import("../wasm_host/semantic_target.zig");
 const semantic_fs = @import("../wasm_host/semantic_fs.zig");
+const transfer_attachment = @import("../wasm_host/transfer_attachment.zig");
 const sessions = @import("../wasm_host/sessions.zig");
 const slot = @import("../wasm_host/slot.zig");
 const surface = @import("../wasm_host/surface.zig");
@@ -242,6 +243,9 @@ const handlers = [_]struct { name: []const u8, handler: HostFn }{
     .{ .name = "wl_semantic_target_handler_request", .handler = semantic_target.hRequest },
     .{ .name = "wl_semantic_target_handler_probe_respond", .handler = semantic_target.hProbeRespond },
     .{ .name = "wl_semantic_target_handler_open_respond", .handler = semantic_target.hOpenRespond },
+    .{ .name = "wl_semantic_transfer_capture", .handler = transfer_attachment.hCapture },
+    .{ .name = "wl_semantic_transfer_retain", .handler = transfer_attachment.hRetain },
+    .{ .name = "wl_semantic_transfer_release", .handler = transfer_attachment.hRelease },
 
     // ── proc.zig — perm-gated off-thread process effects ───────────────
     .{ .name = "wl_shell_insert", .handler = proc.hShellInsert },

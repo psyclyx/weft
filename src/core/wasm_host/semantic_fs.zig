@@ -114,7 +114,7 @@ fn sameNode(a: fs.contract.NodeRef, b: fs.contract.NodeRef) bool {
     };
 }
 
-fn requireUnrestricted(plugin: *WasmPlugin, caller: *wasm.Caller, comptime perm: shared.Perm) bool {
+pub fn requireUnrestricted(plugin: *WasmPlugin, caller: *wasm.Caller, comptime perm: shared.Perm) bool {
     switch (shared.limitFor(plugin, perm)) {
         .none => return true,
         .fs_root, .doc_region, .graph_subtree => {

@@ -39,6 +39,10 @@ const interaction_kind: u8 = 2;
 const target_kind: u8 = 3;
 const transfer_kind: u8 = 4;
 const action_request_kind: u8 = 5;
+// 9 is target_relation_kind; keep attachment-bearing transfer forms on
+// distinct protocol tags so adding relation transport cannot alias them.
+const transfer_kind_v2: u8 = 11;
+const action_request_kind_v2: u8 = 12;
 const target_descriptor_kind: u8 = 6;
 const located_target_kind: u8 = 7;
 const target_relation_kind: u8 = 9;
@@ -1073,12 +1077,15 @@ fn validateTransfer(gpa: std.mem.Allocator, item: semantic.transfer.Item) Error!
             if (value.len == 0) return error.InvalidData;
             if (value.len > Limits.max_string_bytes) return error.LimitExceeded;
         }
+        if (representation.attachment) |attachment| {
+            if (attachment.generation == 0) return error.InvalidData;
+        }
         const result = try media_types.getOrPut(gpa, representation.media_type);
         if (result.found_existing) return error.Duplicate;
     }
 }
 
-fn writeTransferBody(writer: *Writer, item: semantic.transfer.Item) Error!void {
+fn writeTransferBody(writer: *Writer, item: semantic.transfer.Item, include_attachments: bool) Error!void {
     try writer.byte(switch (item.intent) {
         .copy => 0,
         .cut => 1,
@@ -1093,11 +1100,20 @@ fn writeTransferBody(writer: *Writer, item: semantic.transfer.Item) Error!void {
     for (item.representations) |representation| {
         try writer.string(representation.media_type);
         try optionalString(writer, representation.schema);
+        if (include_attachments) {
+            try writer.byte(@intFromBool(representation.attachment != null));
+            if (representation.attachment) |attachment| {
+                const wire = attachment.toWire();
+                try writer.writeU32(wire.authority);
+                try writer.writeU32(wire.slot);
+                try writer.writeU32(wire.generation);
+            }
+        }
         try writer.blob(representation.payload);
     }
 }
 
-fn readTransferBody(reader: *Reader, arena: std.mem.Allocator) Error!semantic.transfer.Item {
+fn readTransferBody(reader: *Reader, arena: std.mem.Allocator, include_attachments: bool) Error!semantic.transfer.Item {
     const intent: semantic.transfer.Intent = switch (try reader.byte()) {
         0 => .copy,
         1 => .cut,
@@ -1117,6 +1133,12 @@ fn readTransferBody(reader: *Reader, arena: std.mem.Allocator) Error!semantic.tr
         representation.resource = null;
         representation.media_type = try reader.string(arena);
         representation.schema = try readOptionalString(reader, arena);
+        representation.attachment = if (include_attachments and try reader.strictBool()) semantic.transfer.Attachment.fromWire(.{
+            .authority = try reader.readU32(),
+            .slot = try reader.readU32(),
+            .generation = try reader.readU32(),
+        }) else null;
+        if (representation.attachment) |attachment| if (attachment.generation == 0) return error.InvalidData;
         representation.payload = try reader.blob(arena);
         if (representation.media_type.len == 0) return error.InvalidData;
         const result = try media_types.getOrPut(arena, representation.media_type);
@@ -1129,8 +1151,8 @@ pub fn encodeTransfer(gpa: std.mem.Allocator, item: semantic.transfer.Item) Erro
     try validateTransfer(gpa, item);
     var writer = Writer.init(gpa);
     errdefer writer.deinit();
-    try header(&writer, transfer_kind);
-    try writeTransferBody(&writer, item);
+    try header(&writer, transfer_kind_v2);
+    try writeTransferBody(&writer, item, true);
     return writer.finish();
 }
 
@@ -1139,6 +1161,8 @@ pub const OwnedTransfer = struct {
     value: semantic.transfer.Item,
 
     pub fn deinit(self: *OwnedTransfer) void {
+        for (self.value.representations) |representation|
+            if (representation.resource) |resource| resource.release();
         self.arena.deinit();
         self.* = undefined;
     }
@@ -1146,10 +1170,13 @@ pub const OwnedTransfer = struct {
 
 pub fn decodeTransfer(gpa: std.mem.Allocator, bytes: []const u8) Error!OwnedTransfer {
     var reader = try Reader.init(bytes);
-    try checkHeader(&reader, transfer_kind);
+    if (!std.mem.eql(u8, try reader.take(magic.len), magic)) return error.Corrupt;
+    if (try reader.byte() != protocol_version) return error.Corrupt;
+    const kind = try reader.byte();
+    if (kind != transfer_kind and kind != transfer_kind_v2) return error.Corrupt;
     var owned: OwnedTransfer = .{ .arena = .init(gpa), .value = undefined };
     errdefer owned.arena.deinit();
-    owned.value = try readTransferBody(&reader, owned.arena.allocator());
+    owned.value = try readTransferBody(&reader, owned.arena.allocator(), kind == transfer_kind_v2);
     try reader.done();
     return owned;
 }
@@ -1232,13 +1259,13 @@ pub fn encodeActionRequest(gpa: std.mem.Allocator, request: semantic.action.Requ
     if (request.transfer) |item| try validateTransfer(gpa, item);
     var writer = Writer.init(gpa);
     errdefer writer.deinit();
-    try header(&writer, action_request_kind);
+    try header(&writer, action_request_kind_v2);
     try writer.string(request.action);
     try writeHandle(&writer, request.view);
     try writer.writeU64(@intFromEnum(request.subject));
     try writeSelection(&writer, request.selection);
     try writer.byte(@intFromBool(request.transfer != null));
-    if (request.transfer) |item| try writeTransferBody(&writer, item);
+    if (request.transfer) |item| try writeTransferBody(&writer, item, true);
     return writer.finish();
 }
 
@@ -1254,7 +1281,10 @@ pub const OwnedActionRequest = struct {
 
 pub fn decodeActionRequest(gpa: std.mem.Allocator, bytes: []const u8) Error!OwnedActionRequest {
     var reader = try Reader.init(bytes);
-    try checkHeader(&reader, action_request_kind);
+    if (!std.mem.eql(u8, try reader.take(magic.len), magic)) return error.Corrupt;
+    if (try reader.byte() != protocol_version) return error.Corrupt;
+    const kind = try reader.byte();
+    if (kind != action_request_kind and kind != action_request_kind_v2) return error.Corrupt;
     var owned: OwnedActionRequest = .{ .arena = .init(gpa), .value = undefined };
     errdefer owned.arena.deinit();
     const arena = owned.arena.allocator();
@@ -1264,7 +1294,7 @@ pub fn decodeActionRequest(gpa: std.mem.Allocator, bytes: []const u8) Error!Owne
     const subject_raw = try reader.readU64();
     if (subject_raw == 0) return error.InvalidData;
     const selection = try readSelection(&reader, arena);
-    const transfer: ?semantic.transfer.Item = if (try reader.strictBool()) try readTransferBody(&reader, arena) else null;
+    const transfer: ?semantic.transfer.Item = if (try reader.strictBool()) try readTransferBody(&reader, arena, kind == action_request_kind_v2) else null;
     try reader.done();
     owned.value = .{ .action = action, .view = view, .subject = @enumFromInt(subject_raw), .selection = selection, .transfer = transfer };
     return owned;
@@ -1482,7 +1512,10 @@ test "transfer and action request codecs preserve captured data and wide node id
         .intent = .cut,
         .suggested_name = "raw-name",
         .source = .{ .target = .{ .authority = .here, .slot = 5, .generation = 9 }, .revision = "opaque-revision" },
-        .representations = &representations,
+        .representations = &.{
+            .{ .media_type = "application/vnd.weft.file", .schema = "file/v1", .payload = &.{ 0, 0xff, '/', '\n' }, .resource = process_resource, .attachment = semantic.transfer.Attachment.fromWire(.{ .authority = 7, .slot = 12, .generation = 3 }) },
+            .{ .media_type = "text/plain", .payload = "display" },
+        },
     };
     const transfer_bytes = try encodeTransfer(t.allocator, transfer_value);
     defer t.allocator.free(transfer_bytes);
@@ -1492,6 +1525,8 @@ test "transfer and action request codecs preserve captured data and wide node id
     try t.expectEqualStrings("opaque-revision", decoded_transfer.value.source.?.revision);
     try t.expectEqualSlices(u8, representations[0].payload, decoded_transfer.value.representations[0].payload);
     try t.expect(decoded_transfer.value.representations[0].resource == null);
+    try t.expectEqual(@as(u32, 7), @intFromEnum(decoded_transfer.value.representations[0].attachment.?.authority));
+    try t.expectEqual(@as(u32, 12), decoded_transfer.value.representations[0].attachment.?.slot);
     var owned_transfer = try semantic.transfer.OwnedItem.init(t.allocator, decoded_transfer.value);
     defer owned_transfer.deinit();
     try t.expect(owned_transfer.value.representations[0].resource == null);
@@ -1533,6 +1568,22 @@ test "target relation action codec preserves source revision, location, and name
     try t.expectEqualStrings(request.source.location.provider.schema, decoded.value.source.location.provider.schema);
     try t.expectEqualSlices(u8, request.source.location.provider.payload, decoded.value.source.location.provider.payload);
     try t.expectError(error.InvalidData, encodeTargetRelation(t.allocator, .{ .source = request.source, .name = "" }));
+}
+
+test "transfer codec remains readable when an older sender has no attachment field" {
+    var writer = Writer.init(t.allocator);
+    defer writer.deinit();
+    try header(&writer, transfer_kind);
+    try writeTransferBody(&writer, .{
+        .intent = .copy,
+        .representations = &.{.{ .media_type = "text/plain", .payload = "old" }},
+    }, false);
+    const bytes = try writer.finish();
+    defer t.allocator.free(bytes);
+    var decoded = try decodeTransfer(t.allocator, bytes);
+    defer decoded.deinit();
+    try t.expect(decoded.value.representations[0].attachment == null);
+    try t.expectEqualStrings("old", decoded.value.representations[0].payload);
 }
 
 test "transfer and action request codecs reject ambiguous or malformed values" {

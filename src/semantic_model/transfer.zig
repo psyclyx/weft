@@ -2,8 +2,15 @@
 
 const std = @import("std");
 const target = @import("target.zig");
+const handle = @import("handle.zig");
 
 pub const Intent = enum { copy, cut };
+
+/// A provider-owned attachment identifier.  It is only meaningful to the
+/// owner-scoped membrane that minted it; its fields are never an OS handle or
+/// a pointer.  The host resolves it while the issuing plugin is live, then
+/// transfers retain the resolved resource independently of this identifier.
+pub const Attachment = handle.Wire;
 
 pub const Representation = struct {
     media_type: []const u8,
@@ -12,6 +19,10 @@ pub const Representation = struct {
     /// Host-local ownership is opaque to semantic core and is not serialized.
     /// It may represent a durable lease or another retained native resource.
     resource: ?Resource = null,
+    /// A portable, owner-scoped reference to a host attachment.  This is
+    /// serialized; `resource` is not.  Host transports resolve the reference
+    /// before admitting the value into a process-local transfer owner.
+    attachment: ?Attachment = null,
 };
 
 pub const Resource = struct {
@@ -94,6 +105,7 @@ pub const OwnedItem = struct {
         for (source_item.representations, representations) |source, *destination| {
             destination.resource = source.resource;
             if (source.resource) |resource| resource.retain();
+            destination.attachment = source.attachment;
             destination.media_type = try arena.dupe(u8, source.media_type);
             destination.schema = if (source.schema) |schema| try arena.dupe(u8, schema) else null;
             destination.payload = try arena.dupe(u8, source.payload);
