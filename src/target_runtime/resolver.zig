@@ -210,6 +210,20 @@ pub const Registry = struct {
         return true;
     }
 
+    pub fn unregisterOwner(self: *Registry, gpa: std.mem.Allocator, owner: []const u8) usize {
+        var removed: usize = 0;
+        for (self.slots.items) |*slot| {
+            const handler = slot.instance orelse continue;
+            if (!std.mem.eql(u8, handler.descriptor.owner, owner)) continue;
+            handler.destroy(gpa);
+            slot.instance = null;
+            slot.generation +%= 1;
+            if (slot.generation == 0) slot.generation = 1;
+            removed += 1;
+        }
+        return removed;
+    }
+
     pub fn resolve(
         self: *const Registry,
         gpa: std.mem.Allocator,
@@ -290,6 +304,8 @@ test "directory handlers claim local and remote targets from the same facts" {
     try std.testing.expect(selected.eql(handler));
     _ = try handlers.open(selected, .{ .target = descriptor.ref });
     try std.testing.expectEqual(@as(usize, 1), directory.opened);
+    try std.testing.expectEqual(@as(usize, 1), handlers.unregisterOwner(std.testing.allocator, "dired"));
+    try std.testing.expectError(error.StaleHandler, handlers.open(handler, .{ .target = descriptor.ref }));
 }
 
 test "equal handler claims are ambiguous rather than registration ordered" {

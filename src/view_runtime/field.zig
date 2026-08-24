@@ -42,7 +42,7 @@ pub const Edit = struct {
     selection_after: ?Selection = null,
 };
 
-pub const Error = error{ InvalidRange, Stale, ReadOnly, Unsupported } || std.mem.Allocator.Error;
+pub const Error = error{ InvalidOwner, InvalidRange, Stale, ReadOnly, Unsupported } || std.mem.Allocator.Error;
 
 pub const Provider = struct {
     context: *anyopaque,
@@ -100,6 +100,7 @@ pub const Registry = struct {
 
     const Slot = struct {
         generation: u32 = 1,
+        owner: ?[]u8 = null,
         provider: ?Provider = null,
     };
 
@@ -108,17 +109,23 @@ pub const Registry = struct {
     }
 
     pub fn deinit(self: *Registry, gpa: std.mem.Allocator) void {
+        for (self.slots.items) |slot| if (slot.owner) |owner| gpa.free(owner);
         self.slots.deinit(gpa);
     }
 
-    pub fn insert(self: *Registry, gpa: std.mem.Allocator, provider: Provider) std.mem.Allocator.Error!kernel.scene.FieldRef {
+    pub fn insert(self: *Registry, gpa: std.mem.Allocator, owner: []const u8, provider: Provider) Error!kernel.scene.FieldRef {
+        if (owner.len == 0) return error.InvalidOwner;
+        const owned = try gpa.dupe(u8, owner);
+        errdefer gpa.free(owned);
         for (self.slots.items, 0..) |*slot, index| {
             if (slot.provider == null) {
+                std.debug.assert(slot.owner == null);
+                slot.owner = owned;
                 slot.provider = provider;
                 return .{ .authority = self.authority, .slot = @intCast(index), .generation = slot.generation };
             }
         }
-        try self.slots.append(gpa, .{ .provider = provider });
+        try self.slots.append(gpa, .{ .owner = owned, .provider = provider });
         return .{ .authority = self.authority, .slot = @intCast(self.slots.items.len - 1), .generation = 1 };
     }
 
@@ -129,14 +136,35 @@ pub const Registry = struct {
         return slot.provider;
     }
 
-    pub fn remove(self: *Registry, ref: kernel.scene.FieldRef) bool {
+    pub fn remove(self: *Registry, gpa: std.mem.Allocator, owner: []const u8, ref: kernel.scene.FieldRef) bool {
         if (ref.authority != self.authority or ref.slot >= self.slots.items.len) return false;
         const slot = &self.slots.items[ref.slot];
         if (slot.generation != ref.generation or slot.provider == null) return false;
+        if (!std.mem.eql(u8, slot.owner orelse return false, owner)) return false;
+        self.retire(gpa, slot);
+        return true;
+    }
+
+    /// Invalidate every endpoint owned by a departing plugin before its
+    /// provider objects are freed. Slots remain reusable, but old scene refs
+    /// can never resolve to a replacement provider.
+    pub fn removeOwner(self: *Registry, gpa: std.mem.Allocator, owner: []const u8) usize {
+        var removed: usize = 0;
+        for (self.slots.items) |*slot| {
+            const candidate = slot.owner orelse continue;
+            if (!std.mem.eql(u8, candidate, owner)) continue;
+            self.retire(gpa, slot);
+            removed += 1;
+        }
+        return removed;
+    }
+
+    fn retire(_: *Registry, gpa: std.mem.Allocator, slot: *Slot) void {
+        gpa.free(slot.owner.?);
+        slot.owner = null;
         slot.provider = null;
         slot.generation +%= 1;
         if (slot.generation == 0) slot.generation = 1;
-        return true;
     }
 };
 
@@ -154,13 +182,16 @@ test "field registry rejects a removed generation" {
     var memory: Memory = .{};
     var fields = Registry.init(.here);
     defer fields.deinit(std.testing.allocator);
-    const first = try fields.insert(std.testing.allocator, .init(&memory));
+    const first = try fields.insert(std.testing.allocator, "tool", .init(&memory));
     try std.testing.expect(fields.get(first) != null);
-    try std.testing.expect(fields.remove(first));
+    try std.testing.expect(!fields.remove(std.testing.allocator, "other", first));
+    try std.testing.expect(fields.remove(std.testing.allocator, "tool", first));
     try std.testing.expect(fields.get(first) == null);
-    const second = try fields.insert(std.testing.allocator, .init(&memory));
+    const second = try fields.insert(std.testing.allocator, "tool", .init(&memory));
     try std.testing.expectEqual(first.slot, second.slot);
     try std.testing.expect(first.generation != second.generation);
+    try std.testing.expectEqual(@as(usize, 1), fields.removeOwner(std.testing.allocator, "tool"));
+    try std.testing.expect(fields.get(second) == null);
 }
 
 test "field provider rejects malformed values at its boundary" {

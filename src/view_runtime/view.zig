@@ -3,7 +3,7 @@
 const std = @import("std");
 const kernel = @import("weft_kernel");
 
-pub const Error = kernel.scene.ValidationError || std.mem.Allocator.Error || error{ StaleView, FocusPathTooDeep };
+pub const Error = kernel.scene.ValidationError || std.mem.Allocator.Error || error{ InvalidOwner, OwnerMismatch, StaleView, FocusPathTooDeep };
 
 pub const Movement = kernel.focus.Movement;
 
@@ -117,6 +117,7 @@ pub const Registry = struct {
         revision: u64,
         root: kernel.scene.Node,
     ) Error!kernel.view.Ref {
+        if (owner.len == 0) return error.InvalidOwner;
         for (self.slots.items, 0..) |*slot, index| {
             if (slot.instance != null) continue;
             const ref: kernel.view.Ref = .{ .authority = self.authority, .slot = @intCast(index), .generation = slot.generation };
@@ -138,26 +139,43 @@ pub const Registry = struct {
         return slot.instance;
     }
 
-    pub fn replace(self: *Registry, gpa: std.mem.Allocator, ref: kernel.view.Ref, revision: u64, root: kernel.scene.Node) Error!void {
+    pub fn replace(self: *Registry, gpa: std.mem.Allocator, owner: []const u8, ref: kernel.view.Ref, revision: u64, root: kernel.scene.Node) Error!void {
         if (ref.authority != self.authority or ref.slot >= self.slots.items.len) return error.StaleView;
         const slot = &self.slots.items[ref.slot];
         if (slot.generation != ref.generation) return error.StaleView;
         const prior = slot.instance orelse return error.StaleView;
+        if (!std.mem.eql(u8, prior.descriptor.owner, owner)) return error.OwnerMismatch;
         const next = try Instance.create(gpa, ref, prior.descriptor.owner, prior.descriptor.target, revision, root);
         slot.instance = next;
         prior.destroy(gpa);
     }
 
-    pub fn close(self: *Registry, gpa: std.mem.Allocator, ref: kernel.view.Ref) bool {
+    pub fn close(self: *Registry, gpa: std.mem.Allocator, owner: []const u8, ref: kernel.view.Ref) bool {
         if (ref.authority != self.authority or ref.slot >= self.slots.items.len) return false;
         const slot = &self.slots.items[ref.slot];
         if (slot.generation != ref.generation) return false;
         const instance = slot.instance orelse return false;
-        instance.destroy(gpa);
+        if (!std.mem.eql(u8, instance.descriptor.owner, owner)) return false;
+        self.retire(gpa, slot);
+        return true;
+    }
+
+    pub fn closeOwner(self: *Registry, gpa: std.mem.Allocator, owner: []const u8) usize {
+        var closed: usize = 0;
+        for (self.slots.items) |*slot| {
+            const instance = slot.instance orelse continue;
+            if (!std.mem.eql(u8, instance.descriptor.owner, owner)) continue;
+            self.retire(gpa, slot);
+            closed += 1;
+        }
+        return closed;
+    }
+
+    fn retire(_: *Registry, gpa: std.mem.Allocator, slot: *Slot) void {
+        slot.instance.?.destroy(gpa);
         slot.instance = null;
         slot.generation +%= 1;
         if (slot.generation == 0) slot.generation = 1;
-        return true;
     }
 };
 
@@ -248,7 +266,8 @@ test "stable focus survives row reorder without text anchors" {
 
     const reordered_children = [_]kernel.scene.Node{ labelNode(3, "b"), labelNode(2, "a") };
     const reordered: kernel.scene.Node = .{ .id = @enumFromInt(1), .content = .{ .container = .{ .children = &reordered_children } } };
-    try views.replace(std.testing.allocator, ref, 2, reordered);
+    try std.testing.expectError(error.OwnerMismatch, views.replace(std.testing.allocator, "other", ref, 2, reordered));
+    try views.replace(std.testing.allocator, "test", ref, 2, reordered);
     const instance = views.get(ref).?;
     try std.testing.expectEqual(@as(?kernel.scene.NodeId, @enumFromInt(3)), instance.reconcileFocus(@enumFromInt(3)));
     try std.testing.expectEqual(@as(?kernel.scene.NodeId, @enumFromInt(2)), instance.move(@enumFromInt(3), .next));
@@ -265,4 +284,6 @@ test "focus path identifies a field semantically" {
     const path = (try views.get(ref).?.focusPath(@enumFromInt(2), &path_storage)).?;
     try std.testing.expectEqual(@as(usize, 2), path.nodes.len);
     try std.testing.expectEqual(field_ref, path.field.?);
+    try std.testing.expectEqual(@as(usize, 1), views.closeOwner(std.testing.allocator, "test"));
+    try std.testing.expect(views.get(ref) == null);
 }

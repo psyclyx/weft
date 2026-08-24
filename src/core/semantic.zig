@@ -16,6 +16,16 @@ pub const Services = struct {
     actions: view_runtime.action.Registry = .{},
     transfer: ?kernel.transfer.OwnedItem = null,
 
+    pub const Released = struct {
+        targets: usize = 0,
+        target_handlers: usize = 0,
+        views: usize = 0,
+        fields: usize = 0,
+        action_provider: bool = false,
+    };
+
+    pub const ViewAdmissionError = view_runtime.view.Error || error{ StaleTarget, StaleField };
+
     pub fn init(authority: kernel.handle.Authority) Services {
         return .{
             .targets = .init(authority),
@@ -35,6 +45,99 @@ pub const Services = struct {
         self.target_handlers.deinit(gpa);
         self.targets.deinit(gpa);
         self.* = undefined;
+    }
+
+    pub fn publishTarget(
+        self: *Services,
+        gpa: std.mem.Allocator,
+        owner: []const u8,
+        definition: kernel.target.Definition,
+    ) target_runtime.target.Error!kernel.target.Ref {
+        return self.targets.publish(gpa, owner, definition);
+    }
+
+    pub fn publishView(
+        self: *Services,
+        gpa: std.mem.Allocator,
+        owner: []const u8,
+        target: ?kernel.target.Ref,
+        revision: u64,
+        root: kernel.scene.Node,
+    ) ViewAdmissionError!kernel.view.Ref {
+        if (target) |ref| if (self.targets.get(ref) == null) return error.StaleTarget;
+        try self.validateFieldRefs(root, 0);
+        return self.views.publish(gpa, owner, target, revision, root);
+    }
+
+    pub fn replaceView(
+        self: *Services,
+        gpa: std.mem.Allocator,
+        owner: []const u8,
+        ref: kernel.view.Ref,
+        revision: u64,
+        root: kernel.scene.Node,
+    ) ViewAdmissionError!void {
+        try self.validateFieldRefs(root, 0);
+        return self.views.replace(gpa, owner, ref, revision, root);
+    }
+
+    pub fn closeView(self: *Services, gpa: std.mem.Allocator, owner: []const u8, ref: kernel.view.Ref) bool {
+        return self.views.close(gpa, owner, ref);
+    }
+
+    pub fn insertField(
+        self: *Services,
+        gpa: std.mem.Allocator,
+        owner: []const u8,
+        provider: view_runtime.field.Provider,
+    ) view_runtime.field.Error!kernel.scene.FieldRef {
+        return self.fields.insert(gpa, owner, provider);
+    }
+
+    pub fn registerActionProvider(
+        self: *Services,
+        gpa: std.mem.Allocator,
+        owner: []const u8,
+        provider: view_runtime.action.Provider,
+    ) view_runtime.action.Error!void {
+        return self.actions.register(gpa, owner, provider);
+    }
+
+    pub fn registerTargetHandler(
+        self: *Services,
+        gpa: std.mem.Allocator,
+        owner: []const u8,
+        id: []const u8,
+        provider: target_runtime.resolver.Provider,
+    ) target_runtime.resolver.Error!target_runtime.resolver.HandlerRef {
+        return self.target_handlers.register(gpa, owner, id, provider);
+    }
+
+    /// Revoke behavior-bearing endpoints before the plugin frees the objects
+    /// behind them. Generation bumps make every retained view/field/target or
+    /// handler reference stale; resources belonging to other plugins remain.
+    pub fn releaseOwner(self: *Services, gpa: std.mem.Allocator, owner: []const u8) Released {
+        const target_handlers = self.target_handlers.unregisterOwner(gpa, owner);
+        const action_provider = self.actions.unregister(gpa, owner);
+        const views = self.views.closeOwner(gpa, owner);
+        const fields = self.fields.removeOwner(gpa, owner);
+        const targets = self.targets.closeOwner(gpa, owner);
+        return .{
+            .targets = targets,
+            .target_handlers = target_handlers,
+            .views = views,
+            .fields = fields,
+            .action_provider = action_provider,
+        };
+    }
+
+    fn validateFieldRefs(self: *const Services, node: kernel.scene.Node, depth: usize) error{ StaleField, TooDeep }!void {
+        if (depth > 1024) return error.TooDeep;
+        switch (node.content) {
+            .field => |field| if (self.fields.get(field.ref) == null) return error.StaleField,
+            .container => |container| for (container.children) |child| try self.validateFieldRefs(child, depth + 1),
+            .label, .action => {},
+        }
     }
 
     pub const OpenInteractionError = view_runtime.interaction.Error || error{
@@ -109,11 +212,20 @@ pub const Services = struct {
         const action = active.actionForInput(input) orelse return null;
         const interaction_ref = active.descriptor.ref;
         const disposition = action.disposition;
-        const effect = try self.invokeAction(stack, gpa, .{
+        const effect = self.invokeAction(stack, gpa, .{
             .action = action.id,
             .view = active.descriptor.view,
             .subject = active.descriptor.root,
-        });
+        }) catch |err| switch (err) {
+            // Views are generation-checked and may disappear when their owner
+            // unloads. Retire the now-invisible interaction lazily on any
+            // head; consume its bound key so it cannot leak into the editor.
+            error.StaleView => {
+                try stack.close(gpa, interaction_ref);
+                return ActionEffect.declined;
+            },
+            else => return err,
+        };
         if (disposition == .close_on_handled) switch (effect) {
             .handled, .transfer_stored => try stack.close(gpa, interaction_ref),
             .declined, .interaction_opened => {},
@@ -276,11 +388,15 @@ fn collapsed(offset: usize) view_runtime.field.Selection {
 test "semantic services keep target, view, and field namespaces typed" {
     var services = Services.init(.here);
     defer services.deinit(std.testing.allocator);
-    const target_ref = try services.targets.publish(std.testing.allocator, .{
+    try std.testing.expectError(error.StaleField, services.publishView(std.testing.allocator, "test", null, 1, .{
+        .id = @enumFromInt(99),
+        .content = .{ .field = .{ .ref = .{ .authority = .here, .slot = 99, .generation = 1 } } },
+    }));
+    const target_ref = try services.publishTarget(std.testing.allocator, "test", .{
         .kind = .directory,
         .display_name = "directory",
     });
-    const view_ref = try services.views.publish(std.testing.allocator, "test", target_ref, 1, .{
+    const view_ref = try services.publishView(std.testing.allocator, "test", target_ref, 1, .{
         .id = @enumFromInt(1),
         .actions = &.{
             .{ .id = kernel.action.standard.copy },
@@ -322,7 +438,7 @@ test "semantic services keep target, view, and field namespaces typed" {
         }
     };
     var handler: Handler = .{ .view = view_ref };
-    try services.actions.register(std.testing.allocator, "test", .init(&handler));
+    try services.registerActionProvider(std.testing.allocator, "test", .init(&handler));
     const request: kernel.action.Request = .{
         .action = kernel.action.standard.copy,
         .view = view_ref,
@@ -336,6 +452,13 @@ test "semantic services keep target, view, and field namespaces typed" {
     var confirm = request;
     confirm.action = "confirm";
     try std.testing.expect((try services.invokeAction(&interactions, std.testing.allocator, confirm)) == .interaction_opened);
+    const released = services.releaseOwner(std.testing.allocator, "test");
+    try std.testing.expectEqual(@as(usize, 1), released.targets);
+    try std.testing.expectEqual(@as(usize, 1), released.views);
+    try std.testing.expect(released.action_provider);
+    try std.testing.expect(services.targets.get(target_ref) == null);
+    try std.testing.expect(services.views.get(view_ref) == null);
+    try std.testing.expectEqual(Services.Released{}, services.releaseOwner(std.testing.allocator, "test"));
 }
 
 test "interaction-local input invokes semantic action and closes explicitly" {
@@ -346,7 +469,7 @@ test "interaction-local input invokes semantic action and closes explicitly" {
         .actions = &.{.{ .id = "confirm" }},
         .content = .{ .label = "Apply changes?" },
     };
-    const view_ref = try services.views.publish(std.testing.allocator, "dialog-owner", null, 1, root);
+    const view_ref = try services.publishView(std.testing.allocator, "dialog-owner", null, 1, root);
     const Handler = struct {
         calls: usize = 0,
         pub fn invoke(self: *@This(), _: kernel.action.Request) view_runtime.action.ProviderError!kernel.action.Outcome {
@@ -355,7 +478,7 @@ test "interaction-local input invokes semantic action and closes explicitly" {
         }
     };
     var handler: Handler = .{};
-    try services.actions.register(std.testing.allocator, "dialog-owner", .init(&handler));
+    try services.registerActionProvider(std.testing.allocator, "dialog-owner", .init(&handler));
     var interactions: view_runtime.interaction.Stack = .empty;
     defer interactions.deinit(std.testing.allocator);
     _ = try services.openInteraction(&interactions, std.testing.allocator, .{
@@ -369,6 +492,17 @@ test "interaction-local input invokes semantic action and closes explicitly" {
     try std.testing.expect(try services.invokeInteractionInput(&interactions, std.testing.allocator, "x") == null);
     try std.testing.expect((try services.invokeInteractionInput(&interactions, std.testing.allocator, "y")).? == .handled);
     try std.testing.expectEqual(@as(usize, 1), handler.calls);
+    try std.testing.expect(interactions.active() == null);
+
+    _ = try services.openInteraction(&interactions, std.testing.allocator, .{
+        .role = .dialog,
+        .view = view_ref,
+        .root = @enumFromInt(1),
+        .actions = &.{.{ .id = "confirm" }},
+        .bindings = &.{.{ .input = "y", .action = "confirm" }},
+    });
+    _ = services.releaseOwner(std.testing.allocator, "dialog-owner");
+    try std.testing.expect((try services.invokeInteractionInput(&interactions, std.testing.allocator, "y")).? == .declined);
     try std.testing.expect(interactions.active() == null);
 }
 
@@ -418,13 +552,13 @@ test "ordinary editor input targets semantic fields and focus order" {
 
     var services = Services.init(.here);
     defer services.deinit(std.testing.allocator);
-    const first_ref = try services.fields.insert(std.testing.allocator, .init(&first));
-    const second_ref = try services.fields.insert(std.testing.allocator, .init(&second));
+    const first_ref = try services.insertField(std.testing.allocator, "tool", .init(&first));
+    const second_ref = try services.insertField(std.testing.allocator, "tool", .init(&second));
     const children = [_]kernel.scene.Node{
         .{ .id = @enumFromInt(2), .focusable = true, .content = .{ .field = .{ .ref = first_ref, .single_line = true } } },
         .{ .id = @enumFromInt(3), .focusable = true, .content = .{ .field = .{ .ref = second_ref, .single_line = true } } },
     };
-    const view_ref = try services.views.publish(std.testing.allocator, "tool", null, 1, .{
+    const view_ref = try services.publishView(std.testing.allocator, "tool", null, 1, .{
         .id = @enumFromInt(1),
         .actions = &.{.{ .id = kernel.action.standard.copy }},
         .content = .{ .container = .{ .children = &children } },
@@ -437,7 +571,7 @@ test "ordinary editor input targets semantic fields and focus order" {
         }
     };
     var actions: Actions = .{};
-    try services.actions.register(std.testing.allocator, "tool", .init(&actions));
+    try services.registerActionProvider(std.testing.allocator, "tool", .init(&actions));
     var head: Head = .empty;
     defer head.deinit(std.testing.allocator);
     try head.semantic_focus.set(std.testing.allocator, .{ .view = view_ref, .nodes = &.{ @enumFromInt(1), @enumFromInt(2) }, .field = first_ref });
@@ -453,4 +587,11 @@ test "ordinary editor input targets semantic fields and focus order" {
     // A single-line field consumes a newline without changing its bytes.
     try std.testing.expect(try services.inputFocusedField(&head, std.testing.allocator, .{ .replace_selection = "\n" }));
     try std.testing.expectEqualStrings("next", second.bytes.items);
+    const released = services.releaseOwner(std.testing.allocator, "tool");
+    try std.testing.expectEqual(@as(usize, 1), released.views);
+    try std.testing.expectEqual(@as(usize, 2), released.fields);
+    try std.testing.expect(released.action_provider);
+    try std.testing.expect(services.fields.get(first_ref) == null);
+    try std.testing.expect(!try services.moveHeadFocus(&head, std.testing.allocator, .next));
+    try std.testing.expect(head.semantic_focus.path() == null);
 }

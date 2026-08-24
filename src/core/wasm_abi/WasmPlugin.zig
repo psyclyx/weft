@@ -323,6 +323,10 @@ pub fn principal(self: *WasmPlugin) command.Principal {
 
 pub fn deinit(self: *WasmPlugin) void {
     const gpa = self.gpa;
+    // Semantic resources hold provider pointers into this plugin. Revoke the
+    // whole owner namespace while the guest instance is still alive; every
+    // retained handle becomes stale before either side can dangle.
+    if (self.ctx.semantic) |services| _ = services.releaseOwner(gpa, self.name);
     // Completion provider dies with the plugin (unregister before freeing
     // its id — the caps registry holds the id by reference).
     if (self.provider_id) |id| {
