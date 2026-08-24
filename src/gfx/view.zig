@@ -33,6 +33,8 @@ pub const Theme = @import("view/Theme.zig");
 /// `popup.layoutCaretSurface`/`popup.layoutDockSurface` directly, over a
 /// live `Pick` or plain text, without hand-building a `core.surface.Surface`.
 pub const popup = @import("view/popup.zig");
+pub const semantic = @import("view/semantic.zig");
+pub const semantic_data = @import("view/semantic_data.zig");
 
 /// The UI mesh's `ui/statusline-seg` + `ui/gutter-segment` slots (north-star-
 /// plan §6 W3-1) — host-side providers + the fire/compose helpers
@@ -53,5 +55,6 @@ test {
     _ = @import("view/decoration.zig");
     _ = @import("view/linelayout.zig");
     _ = @import("view/render.zig");
+    _ = semantic;
     _ = ui_mesh;
 }

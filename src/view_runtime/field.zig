@@ -122,9 +122,9 @@ pub const Registry = struct {
         return .{ .authority = self.authority, .slot = @intCast(self.slots.items.len - 1), .generation = 1 };
     }
 
-    pub fn get(self: *Registry, ref: kernel.scene.FieldRef) ?Provider {
+    pub fn get(self: *const Registry, ref: kernel.scene.FieldRef) ?Provider {
         if (ref.authority != self.authority or ref.slot >= self.slots.items.len) return null;
-        const slot = &self.slots.items[ref.slot];
+        const slot = self.slots.items[ref.slot];
         if (slot.generation != ref.generation) return null;
         return slot.provider;
     }

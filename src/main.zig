@@ -524,6 +524,7 @@ pub fn main(init: std.process.Init) !void {
         .keymap = &session.system.keymap,
         .ui_mesh = &session.system.container,
         .head = &session.head,
+        .semantic = &session.system.semantic,
         .cursor_cfg = &session.cursor_cfg,
         .plugins = &plug.list,
         .conn = &collab_state.conn,
@@ -697,7 +698,7 @@ pub fn main(init: std.process.Init) !void {
         }
 
         // ── Pointer → caret (click-to-place; drag extends a selection) ──
-        if (try dispatch.handlePointer(whead.window, win_layout, &session.head, view, editor, &win_ctx, gpa, last_frame_rect, &drag_anchor, &drag_selecting, &had_input))
+        if (try dispatch.handlePointer(whead.window, win_layout, &session.head, fx.semantic, view, editor, &win_ctx, gpa, last_frame_rect, &drag_anchor, &drag_selecting, &had_input))
             view_dirty = true;
 
         // Caret blink: any input shows a solid caret and restarts the

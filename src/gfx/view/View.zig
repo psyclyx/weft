@@ -30,6 +30,7 @@ const region = @import("../region.zig");
 const fonts = @import("../fonts.zig");
 const statusline = @import("statusline.zig");
 const popup = @import("popup.zig");
+const semantic = @import("semantic.zig");
 const decoration = @import("decoration.zig");
 const linelayout = @import("linelayout.zig");
 const render = @import("render.zig");
@@ -104,6 +105,10 @@ top_row: usize = 0,
 /// between frames reads last frame's map (one-frame latency, unseen).
 layout_arena: std.heap.ArenaAllocator,
 frame_layout: layout.Layout = .{ .lines = &.{} },
+/// Hit regions for the focused pane's semantic body or active interaction.
+/// Like `frame_layout`, these live in `layout_arena` until the next frame.
+semantic_hits: []const semantic.Hit = &.{},
+semantic_active: bool = false,
 /// The current build's content origin (its frame inset by `margin`) — a
 /// pane renders into its own region, so layout and HUD baselines derive
 /// from here rather than the whole framebuffer. Defaults to the
@@ -287,6 +292,22 @@ pub fn scrollBy(top_row: *usize, delta_rows: i32) void {
 /// once, then builds each pane (their geometry maps coexist in it).
 pub fn resetFrame(self: *View) void {
     _ = self.layout_arena.reset(.retain_capacity);
+    self.semantic_hits = &.{};
+    self.semantic_active = false;
+}
+
+pub fn semanticHitAtPoint(self: *const View, x: f32, y: f32) ?semantic.Hit {
+    var index = self.semantic_hits.len;
+    while (index > 0) {
+        index -= 1;
+        const hit = self.semantic_hits[index];
+        if (hit.rect.contains(x, y)) return hit;
+    }
+    return null;
+}
+
+pub fn hasSemanticInput(self: *const View) bool {
+    return self.semantic_active;
 }
 
 /// Keep the cursor's row inside a pane's body viewport.
@@ -340,14 +361,11 @@ pub fn build(
     const panel_rect = panel_cut.strip;
     const body_rect = panel_cut.rest;
     self.body_h = body_rect.h;
-    self.md_active = hud.md_inline != null;
+    self.md_active = hud.semantic_view == null and hud.md_inline != null;
 
     const rows_visible: usize = @intFromFloat(@max(1, @floor(body_rect.h / self.line_h)));
-    scrollToCursor(editor, top_row, rows_visible);
     const total_rows = rope.lineCount();
-    if (top_row.* >= total_rows) top_row.* = total_rows -| 1;
     const cursor_off = editor.cursorOffset();
-    const selection = editor.selectedRange();
 
     var runs: std.ArrayList(Run) = .empty;
     defer {
@@ -357,62 +375,56 @@ pub fn build(
     var rects: std.ArrayList(Rect) = .empty;
     defer rects.deinit(scratch);
 
-    const styles = try linelayout.resolveStyleInputs(self, scratch, hud, rope, rows_visible, total_rows);
+    if (hud.semantic_view) |document| {
+        // Tool views subscribe to semantic nodes directly. Clearing the text
+        // geometry map prevents stale document hit-testing from leaking into
+        // a pane whose visible identity/focus is node-based.
+        self.frame_layout = .{ .lines = &.{} };
+        self.semantic_active = true;
+        self.semantic_hits = try semantic.drawDocument(self, scratch, self.layout_arena.allocator(), &runs, &rects, document, body_rect);
+    } else {
+        scrollToCursor(editor, top_row, rows_visible);
+        if (top_row.* >= total_rows) top_row.* = total_rows -| 1;
+        const styles = try linelayout.resolveStyleInputs(self, scratch, hud, rope, rows_visible, total_rows);
+        const flip_off: ?usize = if (hud.cursor_on and hud.cursor_style == .block) cursor_off else null;
 
-    // A block caret recolors the glyph under it to cursor_text; a
-    // bar/underline never does. Only when the caret is shown this frame.
-    const flip_off: ?usize =
-        if (hud.cursor_on and hud.cursor_style == .block) cursor_off else null;
-
-    // Lay out the body's visible rows into the frame arena (the geometry
-    // map outlives the frame for hit-testing). The caller resets the
-    // arena once per frame (resetFrame) so split panes' maps coexist.
-    const la = self.layout_arena.allocator();
-    var lines: std.ArrayList(layout.VisualLine) = .empty;
-    var y_top: f32 = body_rect.y;
-    const body_limit_y = body_rect.y + body_rect.h;
-    var row = top_row.*;
-    var shown: usize = 0; // VISIBLE rows emitted (folded rows are skipped)
-    while (row < total_rows and shown < rows_visible and y_top < body_limit_y) : (row += 1) {
-        // Fold: a hidden row isn't drawn (and vertical motion skips it), so
-        // the folded body collapses to nothing while its header stays.
-        if (editor.rowHidden(row)) continue;
-        const runs_mark = runs.items.len;
-        const vl = try linelayout.layoutLine(self, scratch, la, &runs, rope, row, y_top, cols_visible, hud.md_inline, styles, flip_off);
-        // A proportional/heading row can be taller than a mono line, so a
-        // row whose top is in-bounds can still paint past the body onto the
-        // status bar. Gate on the ACTUAL scaled height: discard an
-        // overflowing row's glyphs (truncate the arena-backed runs) rather
-        // than draw them out of region. Always keep the first row so an
-        // absurdly short window still shows something.
-        if (shown != 0 and y_top + vl.height > body_limit_y) {
-            runs.items.len = runs_mark;
-            break;
-        }
-        try lines.append(la, vl);
-        y_top += vl.height;
-        shown += 1;
-    }
-    self.frame_layout = .{ .lines = try lines.toOwnedSlice(la) };
-
-    // Decorations, from the geometry map: selection behind, then caret,
-    // then each remote peer's selection + caret in its own color.
-    if (selection) |sel| try decoration.selectionRects(self, scratch, &rects, sel, self.theme.selection);
-    // vim-goggles: a transient flash over a just-operated range (e.g. yank).
-    if (hud.flash) |fl| try decoration.selectionRects(self, scratch, &rects, fl, self.theme.accent);
-    if (hud.cursor_on) try decoration.caretRect(self, scratch, &rects, cursor_off, hud.cursor_style, self.theme.cursor);
-    if (hud.presence_layer) |pl| {
-        for (0..pl.spanCount()) |i| {
-            const span = pl.resolvedSpan(i);
-            // A peer span packs its identity hue in kind's low 16 bits;
-            // bit 16 marks which end holds the caret (see session.zig
-            // republishPresence). start==end ⇒ a caret with no selection.
-            const hue = @as(f32, @floatFromInt(span.kind & 0xffff)) / 65535.0;
-            if (span.end > span.start) {
-                try decoration.selectionRects(self, scratch, &rects, .{ .start = span.start, .end = span.end }, decoration.peerColor(hue, 0.55, 0.28));
+        // Lay out the body's visible rows into the frame arena (the geometry
+        // map outlives the frame for hit-testing). The caller resets the
+        // arena once per frame (resetFrame) so split panes' maps coexist.
+        const la = self.layout_arena.allocator();
+        var lines: std.ArrayList(layout.VisualLine) = .empty;
+        var y_top: f32 = body_rect.y;
+        const body_limit_y = body_rect.y + body_rect.h;
+        var row = top_row.*;
+        var shown: usize = 0;
+        while (row < total_rows and shown < rows_visible and y_top < body_limit_y) : (row += 1) {
+            if (editor.rowHidden(row)) continue;
+            const runs_mark = runs.items.len;
+            const vl = try linelayout.layoutLine(self, scratch, la, &runs, rope, row, y_top, cols_visible, hud.md_inline, styles, flip_off);
+            if (shown != 0 and y_top + vl.height > body_limit_y) {
+                runs.items.len = runs_mark;
+                break;
             }
-            const head = if (span.kind & 0x10000 == 0) span.start else span.end;
-            try decoration.caretRect(self, scratch, &rects, head, .bar, decoration.peerColor(hue, 0.62, 1.0));
+            try lines.append(la, vl);
+            y_top += vl.height;
+            shown += 1;
+        }
+        self.frame_layout = .{ .lines = try lines.toOwnedSlice(la) };
+
+        const selection = editor.selectedRange();
+        if (selection) |sel| try decoration.selectionRects(self, scratch, &rects, sel, self.theme.selection);
+        if (hud.flash) |fl| try decoration.selectionRects(self, scratch, &rects, fl, self.theme.accent);
+        if (hud.cursor_on) try decoration.caretRect(self, scratch, &rects, cursor_off, hud.cursor_style, self.theme.cursor);
+        if (hud.presence_layer) |pl| {
+            for (0..pl.spanCount()) |i| {
+                const span = pl.resolvedSpan(i);
+                const hue = @as(f32, @floatFromInt(span.kind & 0xffff)) / 65535.0;
+                if (span.end > span.start) {
+                    try decoration.selectionRects(self, scratch, &rects, .{ .start = span.start, .end = span.end }, decoration.peerColor(hue, 0.55, 0.28));
+                }
+                const head = if (span.kind & 0x10000 == 0) span.start else span.end;
+                try decoration.caretRect(self, scratch, &rects, head, .bar, decoration.peerColor(hue, 0.62, 1.0));
+            }
         }
     }
 
@@ -455,6 +467,13 @@ pub fn build(
     if (hud.hover) |hv| {
         if (popup.textCaretSurface(scratch, hv.text, hv.offset, Hud.max_hover_rows)) |surf|
             try popup.drawCaretSurface(self, scratch, &runs, &rects, &surf, body_rect);
+    }
+    // A dialog is the active head-local interaction and therefore paints
+    // above passive/legacy surfaces. Its keys still route through the
+    // interaction stack, not through an editor mode or which-key.
+    if (hud.semantic_overlay) |overlay| {
+        self.semantic_active = true;
+        self.semantic_hits = try semantic.drawOverlay(self, scratch, self.layout_arena.allocator(), &runs, &rects, overlay, body_rect);
     }
 
     // Thin pane dividers: a 1px line on each internal (shared) edge of

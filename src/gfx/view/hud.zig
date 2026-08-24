@@ -11,6 +11,7 @@ const stemma = @import("stemma");
 const core = @import("../../core/core.zig");
 const region = @import("../region.zig");
 const ui_mesh = @import("ui_mesh.zig");
+const semantic_data = @import("semantic_data.zig");
 
 const InlineAttr = core.capability.InlineAttr;
 
@@ -121,6 +122,13 @@ pub const Hud = struct {
     /// corner/center placements overlay the body; bottom is reserved for the
     /// dock (the picker/which-key path).
     surfaces: []const *const core.surface.Surface = &.{},
+    /// A semantic tool document replaces the text projection in this pane.
+    /// The renderer consumes nodes and generic fields; it does not know which
+    /// plugin authored them or whether the interaction style is modal.
+    semantic_view: ?semantic_data.Document = null,
+    /// The active head-local interaction, rendered above the document. Local
+    /// bindings are resolved by the interaction stack, not global which-key.
+    semantic_overlay: ?semantic_data.Overlay = null,
     /// Which edges of this pane's frame are internal (shared with a
     /// neighbor) and get a 1px divider line. Empty for a single pane.
     pane_border: region.Edges = .{},

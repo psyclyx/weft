@@ -44,6 +44,7 @@
 //! unmodified by this migration.
 
 const std = @import("std");
+const kernel = @import("weft_kernel");
 const core = @import("../core/core.zig");
 const view_mod = @import("../gfx/view.zig");
 const region = @import("../gfx/region.zig");
@@ -61,6 +62,7 @@ pub fn handlePointer(
     window: *wayland.Window,
     win_layout: *window_layout.Layout,
     head: *core.Head,
+    semantic_services: *core.semantic.Services,
     view: *view_mod.View,
     editor: *core.Editor,
     win_ctx: *window_cmds.WindowCtx,
@@ -89,6 +91,18 @@ pub fn handlePointer(
             win_ctx.click_y = py;
             had_input.* = true;
             dirty = true;
+        } else if (view.hasSemanticInput()) {
+            if (view.semanticHitAtPoint(px, py)) |hit| {
+                if (semantic_services.views.get(hit.view)) |instance| {
+                    var path_nodes: [130]kernel.scene.NodeId = undefined;
+                    if (try instance.focusPath(hit.node, &path_nodes)) |path|
+                        try head.semantic_focus.set(gpa, path);
+                }
+            }
+            drag_anchor.* = null;
+            drag_selecting.* = false;
+            had_input.* = true;
+            dirty = true;
         } else {
             const off = view.offsetAtPoint(px, py);
             editor.clearSelection();
@@ -98,7 +112,7 @@ pub fn handlePointer(
             had_input.* = true;
             dirty = true;
         }
-    } else if (window.mouse_down[0] and !click_in_peek) {
+    } else if (window.mouse_down[0] and !click_in_peek and !view.hasSemanticInput()) {
         if (drag_anchor.*) |anchor| {
             const off = view.offsetAtPoint(px, py);
             if (off != editor.cursorOffset()) {

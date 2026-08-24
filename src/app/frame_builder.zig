@@ -10,6 +10,7 @@
 //! state; the headless harness drives `view.build` directly (gfx/harness.zig).
 
 const std = @import("std");
+const kernel = @import("weft_kernel");
 const snail = @import("snail");
 const stemma = @import("stemma");
 const view_mod = @import("../gfx/view.zig");
@@ -83,6 +84,62 @@ fn expireIfStale(surf: *core.surface.Surface, gpa: std.mem.Allocator, rope: *con
     const cur_row = rope.offsetToPoint(cursor_off).row;
     const stale = a > rope.byteLen() or rope.offsetToPoint(a).row != cur_row;
     if (stale) surf.close(gpa);
+}
+
+fn containsSemanticNode(root: *const kernel.scene.Node, wanted: kernel.scene.NodeId) bool {
+    if (root.id == wanted) return true;
+    return switch (root.content) {
+        .container => |container| blk: {
+            for (container.children) |*child| if (containsSemanticNode(child, wanted)) break :blk true;
+            break :blk false;
+        },
+        else => false,
+    };
+}
+
+fn firstFocusableSemanticNode(root: *const kernel.scene.Node) ?kernel.scene.NodeId {
+    if (root.focusable) return root.id;
+    return switch (root.content) {
+        .container => |container| blk: {
+            for (container.children) |*child| if (firstFocusableSemanticNode(child)) |id| break :blk id;
+            break :blk null;
+        },
+        else => null,
+    };
+}
+
+fn focusedSemanticNode(head: *const core.Head, view_ref: kernel.view.Ref, root: *const kernel.scene.Node) ?kernel.scene.NodeId {
+    const path = head.semantic_focus.path() orelse return firstFocusableSemanticNode(root);
+    if (!path.view.eql(view_ref) or path.nodes.len == 0) return firstFocusableSemanticNode(root);
+    const wanted = path.nodes[path.nodes.len - 1];
+    return if (containsSemanticNode(root, wanted)) wanted else firstFocusableSemanticNode(root);
+}
+
+fn semanticDocument(fx: *const FrameCtx) ?view_mod.semantic_data.Document {
+    const path = fx.head.semantic_focus.path() orelse return null;
+    const instance = fx.semantic.views.get(path.view) orelse return null;
+    return .{
+        .view = path.view,
+        .root = &instance.scene,
+        .focused = focusedSemanticNode(fx.head, path.view, &instance.scene),
+        .fields = &fx.semantic.fields,
+    };
+}
+
+fn semanticOverlay(fx: *const FrameCtx) ?view_mod.semantic_data.Overlay {
+    const active = fx.head.interactions.active() orelse return null;
+    const descriptor = active.descriptor;
+    const instance = fx.semantic.views.get(descriptor.view) orelse return null;
+    const root = instance.node(descriptor.root) orelse return null;
+    return .{
+        .document = .{
+            .view = descriptor.view,
+            .root = root,
+            .focused = focusedSemanticNode(fx.head, descriptor.view, root),
+            .fields = &fx.semantic.fields,
+        },
+        .presentation = descriptor.presentation,
+    };
 }
 
 pub const FrameBuilder = struct {
@@ -319,7 +376,7 @@ pub const FrameBuilder = struct {
         // appeared — the "corner first, then middle" jump.
         var wk_hints: std.ArrayList(core.Keymap.Binding) = .empty;
         defer wk_hints.deinit(gpa);
-        if (act.menu_shown and surface_n == 0 and !fx.head.pick.active and fx.keymap.isMenuMode(fx.head.currentMode())) {
+        if (act.menu_shown and surface_n == 0 and !fx.head.pick.active and fx.head.interactions.active() == null and fx.keymap.isMenuMode(fx.head.currentMode())) {
             fx.keymap.ownBindings(gpa, fx.head.currentMode(), &wk_hints) catch {};
         }
         // Buffer tab strip (only with more than one buffer open). Name
@@ -375,6 +432,8 @@ pub const FrameBuilder = struct {
             .mode = fx.head.currentMode(),
             .which_key = if (wk_hints.items.len > 0) wk_hints.items else null,
             .surfaces = surface_buf[0..surface_n],
+            .semantic_view = semanticDocument(fx),
+            .semantic_overlay = semanticOverlay(fx),
             .flash = flash_range,
             // Rendering P2: hover is a LIVE producer now — the `lsp` guest
             // plugin emits its own `.caret` surface (`wl_surface_caret`)

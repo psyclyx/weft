@@ -141,6 +141,9 @@ pub const FrameCtx = struct {
     /// This frame's (today, singular) head — current mode, pending chord,
     /// pick session, echo line (north-star-plan §6 W2a-1).
     head: *core.Head,
+    /// System-scoped semantic registries. Views and fields live with the
+    /// system; only focus and interaction stacks live on the head above.
+    semantic: *core.semantic.Services,
 
     // ── Config read by the HUD ──
     cursor_cfg: *cursor_config.CursorConfig,
