@@ -241,6 +241,31 @@ test "e2e/config: the sample config boots; SPC g i is discoverable via which-key
     // The config ran to completion (its last line echoes this).
     try t.expect(std.mem.indexOf(u8, ed.echoText(), "config.js loaded") != null);
 
+    // Every open structured-view action exposed by the sample configuration
+    // is a real semantic command, not merely an unvalidated keymap string.
+    // This keeps the config surface honest for any plugin-owned scene: a
+    // provider can advertise the same protocol without adding a core command
+    // or a tool-specific dispatch branch.
+    const structured_view_actions = [_][]const u8{
+        semantic.action.standard.open,
+        semantic.action.standard.open_container,
+        semantic.action.standard.edit,
+        semantic.action.standard.copy,
+        semantic.action.standard.cut,
+        semantic.action.standard.delete,
+        "fs.permissions.edit",
+        "fs.entry.create-file",
+        "fs.entry.create-directory",
+        semantic.action.standard.paste_after,
+        semantic.action.standard.paste_before,
+        semantic.action.standard.refresh,
+        semantic.action.standard.revert,
+        semantic.action.standard.apply,
+    };
+    for (structured_view_actions) |action_name| {
+        try t.expect(ed.commands.resolve(action_name) != null);
+    }
+
     // A user who forgets the git keys reaches for the leader and READS the
     // which-key overlay — so we assert on what the which_key plugin actually
     // renders to the surface, not on the keymap the harness could introspect.
