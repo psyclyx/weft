@@ -39,7 +39,6 @@ pub const LeaseResource = struct {
         const state = try gpa.create(LeaseResource);
         state.* = .{ .gpa = gpa, .router = router, .source = source };
         return .{
-            .authority = source.root.authority,
             .context = state,
             .vtable = &vtable,
         };
@@ -48,15 +47,17 @@ pub const LeaseResource = struct {
     fn retain(raw: *anyopaque) void {
         const self: *LeaseResource = @ptrCast(@alignCast(raw));
         while (true) {
-            const current = self.refs.load(.acquire);
-            std.debug.assert(current != std.math.maxInt(usize));
-            if (self.refs.cmpxchgWeak(current, current + 1, .acquire, .monotonic) == null) break;
+            const current = self.refs.load(.monotonic);
+            if (current == std.math.maxInt(usize)) @panic("filesystem lease resource reference overflow");
+            if (self.refs.cmpxchgWeak(current, current + 1, .monotonic, .monotonic) == null) break;
         }
     }
 
     fn release(raw: *anyopaque) void {
         const self: *LeaseResource = @ptrCast(@alignCast(raw));
-        if (self.refs.fetchSub(1, .acq_rel) != 1) return;
+        const previous = self.refs.fetchSub(1, .acq_rel);
+        if (previous == 0) @panic("filesystem lease resource released without ownership");
+        if (previous != 1) return;
         _ = self.router.release(self.source) catch {};
         self.gpa.destroy(self);
     }
@@ -80,11 +81,7 @@ test "lease resources retain across transfer owners and release once" {
         }
     };
     var probe: Probe = .{};
-    const resource: semantic.transfer.Resource = .{
-        .authority = .here,
-        .context = &probe,
-        .vtable = &.{ .retain = Probe.retain, .release = Probe.release },
-    };
+    const resource: semantic.transfer.Resource = .{ .context = &probe, .vtable = &.{ .retain = Probe.retain, .release = Probe.release } };
     resource.retain();
     resource.release();
     resource.release();

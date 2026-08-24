@@ -1,7 +1,6 @@
 //! Portable, multi-representation transfer values.
 
 const std = @import("std");
-const handle = @import("handle.zig");
 const target = @import("target.zig");
 
 pub const Intent = enum { copy, cut };
@@ -16,9 +15,9 @@ pub const Representation = struct {
 };
 
 pub const Resource = struct {
-    /// Provider authority provenance; a retained resource may move between
-    /// semantic view owners within that authority.
-    authority: handle.Authority,
+    /// Process-local retention only. Canonical codecs intentionally serialize
+    /// the representation data and omit this callback; the host-side owned
+    /// transfer keeps it live while a sandbox consumes the portable payload.
     context: *anyopaque,
     vtable: *const VTable,
 
@@ -167,16 +166,8 @@ test "owned transfer replaces and releases host resources exactly once" {
     };
     var first_probe: Probe = .{};
     var second_probe: Probe = .{};
-    const first_resource: Resource = .{
-        .authority = .here,
-        .context = &first_probe,
-        .vtable = &.{ .retain = Probe.retain, .release = Probe.release },
-    };
-    const second_resource: Resource = .{
-        .authority = @enumFromInt(9),
-        .context = &second_probe,
-        .vtable = &.{ .retain = Probe.retain, .release = Probe.release },
-    };
+    const first_resource: Resource = .{ .context = &first_probe, .vtable = &.{ .retain = Probe.retain, .release = Probe.release } };
+    const second_resource: Resource = .{ .context = &second_probe, .vtable = &.{ .retain = Probe.retain, .release = Probe.release } };
     var item = try OwnedItem.init(std.testing.allocator, .{
         .intent = .copy,
         .representations = &.{.{ .media_type = "application/test", .payload = "one", .resource = first_resource }},
@@ -192,10 +183,10 @@ test "owned transfer replaces and releases host resources exactly once" {
     try std.testing.expectEqual(@as(usize, 2), first_probe.releases);
     try std.testing.expectEqual(@as(usize, 1), second_probe.retains);
     try std.testing.expectEqual(@as(usize, 1), second_probe.releases);
-    try std.testing.expectEqual(@enumFromInt(9), item.value.representations[0].resource.?.authority);
+    try std.testing.expect(item.value.representations[0].resource != null);
 }
 
-test "retained resource survives a cross-owner transfer copy" {
+test "retained resource survives an independent transfer copy" {
     const Probe = struct {
         retains: usize = 0,
         releases: usize = 0,
@@ -211,11 +202,7 @@ test "retained resource survives a cross-owner transfer copy" {
         }
     };
     var probe: Probe = .{};
-    const resource: Resource = .{
-        .authority = .here,
-        .context = &probe,
-        .vtable = &.{ .retain = Probe.retain, .release = Probe.release },
-    };
+    const resource: Resource = .{ .context = &probe, .vtable = &.{ .retain = Probe.retain, .release = Probe.release } };
     var source = try OwnedItem.init(std.testing.allocator, .{
         .intent = .copy,
         .representations = &.{.{ .media_type = "application/test", .payload = "data", .resource = resource }},
@@ -226,5 +213,5 @@ test "retained resource survives a cross-owner transfer copy" {
     source.deinit();
     try std.testing.expectEqual(@as(usize, 2), probe.retains);
     try std.testing.expectEqual(@as(usize, 2), probe.releases);
-    try std.testing.expectEqual(resource.authority, destination.value.representations[0].resource.?.authority);
+    try std.testing.expect(destination.value.representations[0].resource != null);
 }

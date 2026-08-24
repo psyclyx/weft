@@ -1429,8 +1429,17 @@ test "target descriptor and located codecs preserve revisions and opaque locatio
 }
 
 test "transfer and action request codecs preserve captured data and wide node ids" {
+    const ProcessResource = struct {
+        fn retain(_: *anyopaque) void {}
+        fn release(_: *anyopaque) void {}
+    };
+    var process_resource_context: u8 = 0;
+    const process_resource: semantic.transfer.Resource = .{
+        .context = &process_resource_context,
+        .vtable = &.{ .retain = ProcessResource.retain, .release = ProcessResource.release },
+    };
     const representations = [_]semantic.transfer.Representation{
-        .{ .media_type = "application/vnd.weft.file", .schema = "file/v1", .payload = &.{ 0, 0xff, '/', '\n' } },
+        .{ .media_type = "application/vnd.weft.file", .schema = "file/v1", .payload = &.{ 0, 0xff, '/', '\n' }, .resource = process_resource },
         .{ .media_type = "text/plain", .payload = "display" },
     };
     const transfer_value: semantic.transfer.Item = .{
@@ -1446,6 +1455,7 @@ test "transfer and action request codecs preserve captured data and wide node id
     try t.expectEqual(semantic.transfer.Intent.cut, decoded_transfer.value.intent);
     try t.expectEqualStrings("opaque-revision", decoded_transfer.value.source.?.revision);
     try t.expectEqualSlices(u8, representations[0].payload, decoded_transfer.value.representations[0].payload);
+    try t.expect(decoded_transfer.value.representations[0].resource == null);
     var owned_transfer = try semantic.transfer.OwnedItem.init(t.allocator, decoded_transfer.value);
     defer owned_transfer.deinit();
     try t.expect(owned_transfer.value.representations[0].resource == null);
