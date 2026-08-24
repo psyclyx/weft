@@ -287,6 +287,7 @@ weft.bind("normal", "SPC v j", "cursor-down");
 weft.bind("normal", "SPC v k", "cursor-up");
 bindActionGroup("normal", "SPC v", [
   ["o", "target.open"],
+  ["-", "target.open-container"],
   ["e", "field.edit"],
   ["y", "selection.copy"],
   ["x", "selection.cut"],

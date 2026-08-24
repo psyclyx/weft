@@ -77,6 +77,8 @@ const ConfigActions = struct {
     confirms: usize = 0,
     plugin_actions: usize = 0,
     permission_edits: usize = 0,
+    container_opens: usize = 0,
+    relation_source: semantic.target.Located = undefined,
 
     pub fn invoke(self: *ConfigActions, request: semantic.action.Request) view_runtime.action.ProviderError!semantic.action.Outcome {
         const action = request.action;
@@ -87,6 +89,10 @@ const ConfigActions = struct {
         if (std.mem.eql(u8, action, "fs.permissions.edit")) {
             self.permission_edits += 1;
             return .{ .focus = self.permission_target };
+        }
+        if (std.mem.eql(u8, action, semantic.action.standard.open_container)) {
+            self.container_opens += 1;
+            return .{ .open_relation = .{ .source = self.relation_source, .name = "container" } };
         }
         if (std.mem.eql(u8, action, semantic.action.standard.edit)) {
             self.edit_requests += 1;
@@ -162,6 +168,20 @@ const ConfigTargetHandler = struct {
     pub fn open(self: *ConfigTargetHandler, _: semantic.target.Located) target_runtime.resolver.OpenError!semantic.view.Ref {
         self.opens += 1;
         return self.view;
+    }
+};
+
+const ConfigRelationProvider = struct {
+    source: semantic.target.Located,
+    destination: semantic.target.Located,
+    queries: usize = 0,
+
+    pub fn query(self: *ConfigRelationProvider, request: target_runtime.relation.Query) target_runtime.relation.QueryError!?target_runtime.relation.Relation {
+        if (!std.mem.eql(u8, request.name, "container")) return null;
+        if (!request.source.target.eql(self.source.target) or request.source.revision != self.source.revision)
+            return null;
+        self.queries += 1;
+        return .{ .name = request.name, .target = self.destination };
     }
 };
 
@@ -244,6 +264,7 @@ test "e2e/config: the sample config boots; SPC g i is discoverable via which-key
     try t.expect(whichKeyShows(&ed, semantic.action.standard.paste_before));
     try t.expect(whichKeyShows(&ed, semantic.action.standard.paste_after));
     try t.expect(whichKeyShows(&ed, semantic.action.standard.open));
+    try t.expect(whichKeyShows(&ed, semantic.action.standard.open_container));
     try t.expect(whichKeyShows(&ed, semantic.action.standard.refresh));
     try t.expect(whichKeyShows(&ed, semantic.action.standard.revert));
     try t.expect(whichKeyShows(&ed, semantic.action.standard.apply));
@@ -258,6 +279,7 @@ test "e2e/config: the sample config boots; SPC g i is discoverable via which-key
         .{ .sequence = "space v j", .command = "cursor-down" },
         .{ .sequence = "space v k", .command = "cursor-up" },
         .{ .sequence = "space v o", .command = semantic.action.standard.open },
+        .{ .sequence = "space v minus", .command = semantic.action.standard.open_container },
         .{ .sequence = "space v e", .command = semantic.action.standard.edit },
         .{ .sequence = "space v y", .command = semantic.action.standard.copy },
         .{ .sequence = "space v x", .command = semantic.action.standard.cut },
@@ -287,6 +309,10 @@ test "e2e/config: the sample config boots; SPC g i is discoverable via which-key
         .kind = .{ .synthetic = "config-fixture" },
         .display_name = "config fixture target",
     });
+    const relation_source_ref = try semantic_services.publishTarget(gpa, owner, .{
+        .kind = .{ .synthetic = "config-source" },
+        .display_name = "config fixture source",
+    });
     const target_view = try semantic_services.publishView(gpa, owner, target_ref, 1, .{
         .id = @enumFromInt(100),
         .focusable = true,
@@ -294,6 +320,12 @@ test "e2e/config: the sample config boots; SPC g i is discoverable via which-key
     });
     var target_handler: ConfigTargetHandler = .{ .view = target_view };
     _ = try semantic_services.registerTargetHandler(gpa, owner, "config-fixture", .init(&target_handler));
+    const relation_source: semantic.target.Located = .{ .target = relation_source_ref, .revision = 1 };
+    var relation_provider: ConfigRelationProvider = .{
+        .source = relation_source,
+        .destination = .{ .target = target_ref, .revision = 1 },
+    };
+    _ = try semantic_services.registerTargetRelationProvider(gpa, owner, "config-container", .init(&relation_provider));
 
     const field_node: semantic.scene.Node = .{
         .id = @enumFromInt(3),
@@ -330,16 +362,21 @@ test "e2e/config: the sample config boots; SPC g i is discoverable via which-key
         .content = .{ .label = "second row" },
     };
     const root_actions = [_]semantic.scene.Action{
+        .{ .id = semantic.action.standard.open_container },
         .{ .id = semantic.action.standard.refresh },
         .{ .id = semantic.action.standard.revert },
         .{ .id = semantic.action.standard.apply },
     };
-    const fixture_view = try semantic_services.publishView(gpa, owner, null, 1, .{
+    const fixture_view = try semantic_services.publishView(gpa, owner, relation_source_ref, 1, .{
         .id = @enumFromInt(1),
         .actions = &root_actions,
         .content = .{ .container = .{ .children = &.{ first_row, second_row } } },
     });
-    var actions: ConfigActions = .{ .view = fixture_view, .permission_target = permission_node.id };
+    var actions: ConfigActions = .{
+        .view = fixture_view,
+        .permission_target = permission_node.id,
+        .relation_source = relation_source,
+    };
     try semantic_services.registerActionProvider(gpa, owner, .init(&actions));
     _ = try semantic_services.focusView(ed.head, gpa, fixture_view, field_node.id);
 
@@ -394,6 +431,16 @@ test "e2e/config: the sample config boots; SPC g i is discoverable via which-key
 
     ed.chord("SPC v o");
     try t.expectEqual(@as(usize, 1), target_handler.opens);
+    try t.expectEqual(target_view, ed.head.semantic_focus.path().?.view);
+
+    // The config knows only an open action name. The view provider supplies a
+    // named edge, an independent relation provider resolves it, and the usual
+    // target handler opens the destination.
+    _ = try semantic_services.focusView(ed.head, gpa, fixture_view, field_node.id);
+    ed.chord("SPC v -");
+    try t.expectEqual(@as(usize, 1), actions.container_opens);
+    try t.expectEqual(@as(usize, 1), relation_provider.queries);
+    try t.expectEqual(@as(usize, 2), target_handler.opens);
     try t.expectEqual(target_view, ed.head.semantic_focus.path().?.view);
 
     // SPC : must open the command PALETTE (pick-commands), not the ex line.

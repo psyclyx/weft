@@ -61,6 +61,10 @@ pub const standard = struct {
     pub const paste_before = "selection.paste-before";
     pub const paste_after = "selection.paste-after";
     pub const open = "target.open";
+    /// Follow the provider-owned `container` relation of the focused view's
+    /// target. A directory parent is one use; archives, remote loci, and
+    /// synthetic hierarchies can expose the same interaction.
+    pub const open_container = "target.open-container";
     pub const edit = "field.edit";
     /// Lifecycle intents for retained, structured views.  They are open
     /// protocol names: a provider advertises only the ones it supports, while

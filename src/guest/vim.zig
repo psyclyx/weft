@@ -281,6 +281,7 @@ const static_cmds = [_]Cmd{
     .{ .name = "yank-line", .handler = yankLine },
     .{ .name = "paste", .handler = paste },
     .{ .name = "paste-before", .handler = pasteBefore },
+    .{ .name = "vim-open-container", .handler = openContainer },
     .{ .name = "join-lines", .handler = joinLines },
     .{ .name = "enter-op-delete", .handler = enterOpDelete },
     .{ .name = "enter-op-change", .handler = enterOpChange },
@@ -417,17 +418,17 @@ export fn init() void {
 
     // Normal-mode non-motion keys (edit primitives + vim compounds).
     const nb = [_][2][]const u8{
-        .{ "i", "vim-insert" },      .{ "a", "vim-append" },
-        .{ "o", "vim-open-below" },  .{ "O", "vim-open-above" },
-        .{ "x", "delete-forward" },  .{ "X", "delete-backward" },
-        .{ "A", "vim-append-line" }, .{ "I", "vim-insert-line" },
-        .{ "D", "vim-delete-eol" },  .{ "C", "vim-change-eol" },
-        .{ "S", "vim-change-line" }, .{ "J", "join-lines" },
-        .{ "u", "undo" },            .{ "C-r", "redo" },
-        .{ "v", "vim-visual" },      .{ "Y", "yank-line" },
-        .{ "p", "paste" },           .{ "P", "paste-before" },
-        .{ "d", "enter-op-delete" }, .{ "c", "enter-op-change" },
-        .{ "y", "enter-op-yank" },
+        .{ "i", "vim-insert" },             .{ "a", "vim-append" },
+        .{ "o", "vim-open-below" },         .{ "O", "vim-open-above" },
+        .{ "x", "delete-forward" },         .{ "X", "delete-backward" },
+        .{ "A", "vim-append-line" },        .{ "I", "vim-insert-line" },
+        .{ "D", "vim-delete-eol" },         .{ "C", "vim-change-eol" },
+        .{ "S", "vim-change-line" },        .{ "J", "join-lines" },
+        .{ "u", "undo" },                   .{ "C-r", "redo" },
+        .{ "v", "vim-visual" },             .{ "Y", "yank-line" },
+        .{ "p", "paste" },                  .{ "P", "paste-before" },
+        .{ "minus", "vim-open-container" }, .{ "d", "enter-op-delete" },
+        .{ "c", "enter-op-change" },        .{ "y", "enter-op-yank" },
     };
     for (nb) |b| weft.bindKey("normal", b[0], b[1]);
 
@@ -727,6 +728,22 @@ fn semanticDid(action: []const u8) bool {
         .handled, .transfer_stored, .interaction_opened, .target_opened, .focus_changed, .relation_opened => true,
         .unavailable, .failed, _ => false,
     };
+}
+
+/// `-` is action-first on a structured view and retains Vim's ordinary
+/// previous-line/first-non-blank behavior everywhere else. The decision is
+/// made solely by the focused scene's open protocol; Vim knows no directory
+/// role, target kind, or tool mode.
+fn openContainer() void {
+    if (weft.semanticActive() and semanticDid(semantic_action.open_container)) return;
+    const up = weft.runRange("motion.up") orelse return;
+    const up_range = weft.rangeEnds(up) orelse return;
+    const current = weft.cursor();
+    weft.jump(if (up_range.end == current) up_range.start else up_range.end);
+    const first = weft.runRange("motion.first-non-blank") orelse return;
+    const first_range = weft.rangeEnds(first) orelse return;
+    const after_up = weft.cursor();
+    weft.jump(if (first_range.end == after_up) first_range.start else first_range.end);
 }
 
 fn yankLine() void {
