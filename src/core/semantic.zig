@@ -11,6 +11,7 @@ const Head = @import("Head.zig");
 pub const Services = struct {
     targets: target_runtime.target.Registry,
     target_handlers: target_runtime.resolver.Registry,
+    target_relations: target_runtime.relation.Registry,
     views: view_runtime.view.Registry,
     fields: view_runtime.field.Registry,
     actions: view_runtime.action.Registry = .{},
@@ -24,6 +25,7 @@ pub const Services = struct {
     pub const Released = struct {
         targets: usize = 0,
         target_handlers: usize = 0,
+        target_relations: usize = 0,
         views: usize = 0,
         fields: usize = 0,
         action_provider: bool = false,
@@ -46,6 +48,7 @@ pub const Services = struct {
         return .{
             .targets = .init(authority),
             .target_handlers = .init(authority),
+            .target_relations = .init(authority),
             .views = .init(authority),
             .fields = .init(authority),
         };
@@ -64,6 +67,7 @@ pub const Services = struct {
         self.fields.deinit(gpa);
         self.views.deinit(gpa);
         self.target_handlers.deinit(gpa);
+        self.target_relations.deinit(gpa);
         self.targets.deinit(gpa);
         self.* = undefined;
     }
@@ -165,6 +169,16 @@ pub const Services = struct {
         return self.target_handlers.register(gpa, owner, id, provider);
     }
 
+    pub fn registerTargetRelationProvider(
+        self: *Services,
+        gpa: std.mem.Allocator,
+        owner: semantic.owner.Id,
+        id: []const u8,
+        provider: target_runtime.relation.Provider,
+    ) target_runtime.relation.Error!target_runtime.relation.ProviderRef {
+        return self.target_relations.register(gpa, owner, id, provider);
+    }
+
     pub const ResolvedTarget = struct {
         target: semantic.target.Ref,
         revision: u64,
@@ -204,6 +218,20 @@ pub const Services = struct {
         ViewTargetMismatch,
         NoTargetHandler,
         AmbiguousTargetHandlers,
+    };
+
+    pub const TargetRelationError = std.mem.Allocator.Error || error{
+        InvalidLocation,
+        InvalidRelation,
+        RelationFailed,
+        RelationUnavailable,
+        StaleTarget,
+    };
+
+    pub const TargetRelationResult = union(enum) {
+        absent,
+        resolved: semantic.target.Located,
+        ambiguous: struct { count: usize },
     };
 
     pub const LocatedOpenResult = union(enum) {
@@ -266,11 +294,58 @@ pub const Services = struct {
         return view_ref;
     }
 
+    /// Query a named edge published by an independent relation provider. The
+    /// provider owns vocabulary and lookup policy; this service only routes
+    /// the immutable query and admits a live, revision-stamped destination.
+    pub fn resolveTargetRelation(
+        self: *const Services,
+        gpa: std.mem.Allocator,
+        source: semantic.target.Located,
+        name: []const u8,
+    ) TargetRelationError!TargetRelationResult {
+        if (!validRelationName(name)) return error.InvalidRelation;
+        if (source.target.authority != self.targets.authority) return error.StaleTarget;
+        const source_descriptor = self.targets.get(source.target) orelse return error.StaleTarget;
+        if (source_descriptor.revision != source.revision) return error.StaleTarget;
+        try validateLocation(source.location);
+
+        var relations = try self.target_relations.query(gpa, .{ .source = source, .name = name });
+        defer relations.deinit();
+        if (relations.value.candidates.len == 0) {
+            // Preserve explicit provider knowledge about a relation that was
+            // invalidated or could not be answered. Only a provider that
+            // explicitly declines the name contributes to `.absent`.
+            for (relations.value.failures) |failure| switch (failure.reason) {
+                .InvalidRelation => return error.InvalidRelation,
+                .Failed => return error.RelationFailed,
+                .Unavailable => return error.RelationUnavailable,
+                .StaleTarget => return error.StaleTarget,
+            };
+            return .absent;
+        }
+
+        // A malformed or stale edge is never allowed to become a different
+        // valid edge by provider registration order.  Validate every result
+        // before deciding whether one or several providers answered.
+        for (relations.value.candidates) |candidate| {
+            if (!std.mem.eql(u8, candidate.relation.name, name)) return error.InvalidRelation;
+            const located = candidate.relation.target;
+            if (located.target.authority != self.targets.authority) return error.InvalidRelation;
+            const descriptor = self.targets.get(located.target) orelse return error.StaleTarget;
+            if (descriptor.revision != located.revision) return error.StaleTarget;
+            validateLocation(located.location) catch return error.InvalidRelation;
+        }
+        if (relations.value.candidates.len != 1)
+            return .{ .ambiguous = .{ .count = relations.value.candidates.len } };
+        return .{ .resolved = relations.value.candidates[0].relation.target };
+    }
+
     /// Revoke behavior-bearing endpoints before the plugin frees the objects
     /// behind them. Generation bumps make every retained view/field/target or
     /// handler reference stale; resources belonging to other plugins remain.
     pub fn releaseOwner(self: *Services, gpa: std.mem.Allocator, owner: semantic.owner.Id) Released {
         const target_handlers = self.target_handlers.unregisterOwner(gpa, owner);
+        const target_relations = self.target_relations.unregisterOwner(gpa, owner);
         const action_provider = self.actions.unregister(gpa, owner);
         const views = self.views.closeOwner(gpa, owner);
         const fields = self.fields.removeOwner(gpa, owner);
@@ -278,6 +353,7 @@ pub const Services = struct {
         return .{
             .targets = targets,
             .target_handlers = target_handlers,
+            .target_relations = target_relations,
             .views = views,
             .fields = fields,
             .action_provider = action_provider,
@@ -688,6 +764,12 @@ fn validateLocation(location: semantic.target.Location) error{InvalidLocation}!v
     }
 }
 
+fn validRelationName(name: []const u8) bool {
+    if (name.len == 0) return false;
+    for (name) |byte| if (byte == 0) return false;
+    return true;
+}
+
 fn collapsed(offset: usize) view_runtime.field.Selection {
     return .{ .anchor = offset, .caret = offset };
 }
@@ -772,6 +854,88 @@ test "semantic services keep target, view, and field namespaces typed" {
     try std.testing.expect(services.targets.get(target_ref) == null);
     try std.testing.expect(services.views.get(view_ref) == null);
     try std.testing.expectEqual(Services.Released{}, services.releaseOwner(std.testing.allocator, owner));
+}
+
+test "semantic target relations resolve, stay absent, and reject stale or ambiguous edges" {
+    const Opener = struct {
+        pub fn probe(_: *@This(), _: semantic.target.Descriptor) target_runtime.resolver.ProbeError!?target_runtime.resolver.Strength {
+            return null;
+        }
+        pub fn open(_: *@This(), _: semantic.target.Located) target_runtime.resolver.OpenError!semantic.view.Ref {
+            return error.Rejected;
+        }
+    };
+    const RelationProvider = struct {
+        destination: semantic.target.Located,
+        wrong_name: bool = false,
+        foreign_authority: bool = false,
+        unavailable: bool = false,
+        failed: bool = false,
+
+        pub fn query(self: *@This(), query: target_runtime.relation.Query) target_runtime.relation.QueryError!?target_runtime.relation.Relation {
+            if (self.unavailable) return error.Unavailable;
+            if (self.failed) return error.Failed;
+            if (!std.mem.eql(u8, query.name, "container")) return null;
+            var target = self.destination;
+            if (self.foreign_authority) target.target.authority = @enumFromInt(99);
+            return .{ .name = if (self.wrong_name) "other" else query.name, .target = target };
+        }
+    };
+
+    var services = Services.init(.here);
+    defer services.deinit(std.testing.allocator);
+    const target_owner: semantic.owner.Id = @enumFromInt(1);
+    const opener_owner: semantic.owner.Id = @enumFromInt(2);
+    const relation_owner: semantic.owner.Id = @enumFromInt(3);
+    const source_ref = try services.publishTarget(std.testing.allocator, target_owner, .{ .kind = .file, .display_name = "child" });
+    const parent_ref = try services.publishTarget(std.testing.allocator, target_owner, .{ .kind = .directory, .display_name = "parent" });
+    const source = semantic.target.Located{ .target = source_ref, .revision = 1 };
+    const destination = semantic.target.Located{
+        .target = parent_ref,
+        .revision = 1,
+        .location = .{ .provider = .{ .schema = "tree", .payload = "root" } },
+    };
+    var opener = Opener{};
+    const opener_ref = try services.registerTargetHandler(std.testing.allocator, opener_owner, "opener", .init(&opener));
+    var first = RelationProvider{ .destination = destination };
+    const relation_ref = try services.registerTargetRelationProvider(std.testing.allocator, relation_owner, "relations-a", .init(&first));
+    try std.testing.expectEqual(opener_owner, services.target_handlers.descriptor(opener_ref).?.owner);
+    try std.testing.expectEqual(relation_owner, services.target_relations.descriptor(relation_ref).?.owner);
+
+    const resolved = try services.resolveTargetRelation(std.testing.allocator, source, "container");
+    try std.testing.expectEqual(destination, resolved.resolved);
+    try std.testing.expectEqual(TargetRelationResult.absent, try services.resolveTargetRelation(std.testing.allocator, source, "parent"));
+    try std.testing.expectError(error.StaleTarget, services.resolveTargetRelation(std.testing.allocator, .{ .target = source_ref, .revision = 2 }, "container"));
+    try std.testing.expectError(error.InvalidRelation, services.resolveTargetRelation(std.testing.allocator, source, ""));
+
+    var stale = RelationProvider{ .destination = .{ .target = parent_ref, .revision = 2 } };
+    const stale_handler = try services.registerTargetRelationProvider(std.testing.allocator, relation_owner, "relations-stale", .init(&stale));
+    try std.testing.expectError(error.StaleTarget, services.resolveTargetRelation(std.testing.allocator, source, "container"));
+    try std.testing.expect(services.target_relations.unregister(std.testing.allocator, stale_handler));
+
+    var second = RelationProvider{ .destination = destination };
+    _ = try services.registerTargetRelationProvider(std.testing.allocator, relation_owner, "relations-b", .init(&second));
+    const ambiguous = try services.resolveTargetRelation(std.testing.allocator, source, "container");
+    try std.testing.expectEqual(@as(usize, 2), ambiguous.ambiguous.count);
+
+    var malformed = RelationProvider{ .destination = destination, .wrong_name = true };
+    _ = try services.registerTargetRelationProvider(std.testing.allocator, relation_owner, "relations-c", .init(&malformed));
+    try std.testing.expectError(error.InvalidRelation, services.resolveTargetRelation(std.testing.allocator, source, "container"));
+
+    var foreign = RelationProvider{ .destination = destination, .foreign_authority = true };
+    _ = try services.registerTargetRelationProvider(std.testing.allocator, relation_owner, "relations-d", .init(&foreign));
+    try std.testing.expectError(error.InvalidRelation, services.resolveTargetRelation(std.testing.allocator, source, "container"));
+    const released = services.releaseOwner(std.testing.allocator, relation_owner);
+    try std.testing.expectEqual(@as(usize, 4), released.target_relations);
+    try std.testing.expect(services.target_handlers.descriptor(opener_ref) != null);
+
+    var unavailable = RelationProvider{ .destination = destination, .unavailable = true };
+    _ = try services.registerTargetRelationProvider(std.testing.allocator, relation_owner, "unavailable", .init(&unavailable));
+    try std.testing.expectError(error.RelationUnavailable, services.resolveTargetRelation(std.testing.allocator, source, "container"));
+    _ = services.releaseOwner(std.testing.allocator, relation_owner);
+    var failed = RelationProvider{ .destination = destination, .failed = true };
+    _ = try services.registerTargetRelationProvider(std.testing.allocator, relation_owner, "failed", .init(&failed));
+    try std.testing.expectError(error.RelationFailed, services.resolveTargetRelation(std.testing.allocator, source, "container"));
 }
 
 test "target opening is revision guarded and confines handlers to their own attached views" {

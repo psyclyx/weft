@@ -56,6 +56,16 @@ pub const Located = struct {
     location: Location = .whole,
 };
 
+/// A named edge from one target publisher's view of the world to another
+/// revision-stamped target.  The source is carried by the query, while this
+/// value deliberately contains only the edge name and destination.  Keeping
+/// the destination as `Located` means relations cannot silently drop target
+/// authority, descriptor revision, or a provider-specific location.
+pub const Relation = struct {
+    name: []const u8,
+    target: Located,
+};
+
 test "target handles retain their typed wire identity" {
     const testing = @import("std").testing;
     const ref: Ref = .{ .authority = .here, .slot = 3, .generation = 8 };
