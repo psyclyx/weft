@@ -323,6 +323,15 @@ pub const Session = struct {
                 .name = "container",
             },
         };
+        if (std.mem.eql(u8, request.action, semantic.action.standard.set_working_target)) {
+            if (request.subject == dired.rootNodeId()) return .{ .set_working_target = .{
+                .target = self.target,
+                .revision = self.target_revision,
+            } };
+            const row = dired.modelRowId(request.subject) catch return .declined;
+            const target = self.rowTarget(row) orelse return .declined;
+            return .{ .set_working_target = target };
+        }
         if (std.mem.eql(u8, request.action, dired.create_file_action))
             return .{ .focus = try self.addPending(.regular) };
         if (std.mem.eql(u8, request.action, dired.create_directory_action))
@@ -848,5 +857,6 @@ fn respondOutcome(outcome: semantic.action.Outcome) !void {
         .open_target => |located| try weft.semanticActionOpenTarget(located),
         .focus => |node| if (!weft.semanticActionFocus(node)) return error.Rejected,
         .open_relation => |request| try weft.semanticActionOpenRelation(request),
+        .set_working_target => |located| try weft.semanticActionSetWorkingTarget(located),
     }
 }

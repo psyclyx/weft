@@ -185,6 +185,33 @@ pub fn hSemanticActive(data: ?*anyopaque, _: *wasm.Caller, _: []const i32, resul
     results[0] = @intFromBool(services.hasActiveView(plugin.activeCtx().head));
 }
 
+/// Copy the dispatching head's exact working target. Stale revisions are
+/// cleared by the semantic service and reported as unavailable to the guest.
+pub fn hSemanticWorkingTarget(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32, results: []i32) void {
+    const plugin: *WasmPlugin = @ptrCast(@alignCast(data.?));
+    results[0] = -1;
+    if (!requireDispatch(plugin, caller, "wl_semantic_working_target")) return;
+    const ctx = plugin.activeCtx();
+    const services = ctx.semantic orelse {
+        results[0] = 0;
+        return;
+    };
+    const working = services.workingTarget(ctx.head) catch {
+        results[0] = 0;
+        return;
+    } orelse {
+        results[0] = 0;
+        return;
+    };
+    const payload = scene_codec.target.encodeLocated(plugin.gpa, working.located()) catch return;
+    defer plugin.gpa.free(payload);
+    const out_ptr: u32 = @bitCast(args[0]);
+    const out_cap: u32 = @bitCast(args[1]);
+    if (out_cap < payload.len) return;
+    const written = caller.writeMemory(out_ptr, out_cap, payload) catch return;
+    if (written == payload.len) results[0] = @intCast(written);
+}
+
 /// Attach a live semantic view to the dispatching head. NodeId is a u64 in
 /// the semantic, so the wasm32 ABI carries explicit low/high words plus a
 /// presence bit; neither side narrows it through an i32 result or handle.
@@ -266,6 +293,7 @@ pub fn hSemanticAction(data: ?*anyopaque, caller: *wasm.Caller, args: []const i3
         .interaction_opened => 3,
         .target_opened => 4,
         .relation_opened => 6,
+        .working_target_requested => 7,
         .focus_requested => 5,
     } else 0;
 }

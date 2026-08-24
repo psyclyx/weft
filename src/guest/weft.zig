@@ -167,6 +167,7 @@ extern "weft" fn wl_register_text(out_ptr: u32, out_cap: u32, name: u32) u32;
 extern "weft" fn wl_register_linewise(name: u32) u32;
 extern "weft" fn wl_paste_at(base: u32, name: u32) void;
 extern "weft" fn wl_semantic_active() u32;
+extern "weft" fn wl_semantic_working_target(out: u32, out_cap: u32) i32;
 extern "weft" fn wl_semantic_view_focus(authority: u32, slot: u32, generation: u32, preferred_low: u32, preferred_high: u32, has_preferred: u32) i32;
 extern "weft" fn wl_semantic_interaction_open(payload: u32, payload_len: u32, out: u32, out_cap: u32) i32;
 extern "weft" fn wl_semantic_interaction_close(authority: u32, slot: u32, generation: u32) u32;
@@ -1059,6 +1060,17 @@ pub fn semanticActive() bool {
     return wl_semantic_active() != 0;
 }
 
+/// Copy the dispatching head's validated working target. The returned value
+/// owns its canonical decode and remains provider-neutral.
+pub fn semanticWorkingTarget(gpa: std.mem.Allocator) (semantic_codec.Error || error{Rejected})!?semantic_codec.target.OwnedLocated {
+    const result = wl_semantic_working_target(p(&scratch), scratch.len);
+    if (result == 0) return null;
+    if (result < 0) return error.Rejected;
+    const len: usize = @intCast(result);
+    if (len > scratch.len) return error.Rejected;
+    return try semantic_codec.target.decodeLocated(gpa, scratch[0..len]);
+}
+
 /// Attach a retained semantic view to this head. NodeId is canonically split
 /// into two wasm32 words; the explicit presence bit keeps an absent preference
 /// distinct from any raw u64 value.
@@ -1094,6 +1106,7 @@ pub const SemanticActionResult = enum(i32) {
     target_opened = 4,
     focus_changed = 5,
     relation_opened = 6,
+    working_target_changed = 7,
     failed = -1,
     _,
 };
@@ -1119,6 +1132,7 @@ pub const SemanticActionResponse = enum(u32) {
     open_target = 4,
     focus = 5,
     open_relation = 6,
+    set_working_target = 7,
 };
 
 /// Read the request available only during `on_semantic_action()`.
@@ -1184,6 +1198,15 @@ pub fn semanticActionOpenRelation(request: semantic.action.RelationRequest) Sema
     const payload = try semantic_codec.action.encodeRelation(allocator, request);
     defer allocator.free(payload);
     if (wl_semantic_action_respond(@intFromEnum(SemanticActionResponse.open_relation), p(payload.ptr), @intCast(payload.len)) != 1)
+        return error.Rejected;
+}
+
+/// Ask core to make one exact whole target the dispatching head's working
+/// container. No process cwd or provider path crosses this boundary.
+pub fn semanticActionSetWorkingTarget(located: semantic.target.Located) SemanticPublishError!void {
+    const payload = try semantic_codec.encodeLocatedTarget(allocator, located);
+    defer allocator.free(payload);
+    if (wl_semantic_action_respond(@intFromEnum(SemanticActionResponse.set_working_target), p(payload.ptr), @intCast(payload.len)) != 1)
         return error.Rejected;
 }
 

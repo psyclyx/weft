@@ -29,6 +29,7 @@ const OwnedOutcome = union(enum) {
     open_target: scene_codec.target.OwnedLocated,
     focus: semantic.scene.NodeId,
     open_relation: scene_codec.action.OwnedRelation,
+    set_working_target: scene_codec.target.OwnedLocated,
 
     fn deinit(self: *OwnedOutcome) void {
         switch (self.*) {
@@ -37,6 +38,7 @@ const OwnedOutcome = union(enum) {
             .interaction => |*value| value.deinit(),
             .open_target => |*value| value.deinit(),
             .open_relation => |*value| value.deinit(),
+            .set_working_target => |*value| value.deinit(),
         }
         self.* = undefined;
     }
@@ -50,6 +52,7 @@ const OwnedOutcome = union(enum) {
             .open_target => |value| .{ .open_target = value.value },
             .focus => |value| .{ .focus = value },
             .open_relation => |value| .{ .open_relation = value.value },
+            .set_working_target => |value| .{ .set_working_target = value.value },
         };
     }
 };
@@ -140,6 +143,14 @@ pub const Bridge = struct {
     pub fn adoptOpenRelation(self: *Bridge, owned: *scene_codec.action.OwnedRelation) ResponseError!void {
         try self.beginResponse();
         self.response = .{ .open_relation = owned.* };
+        owned.* = undefined;
+    }
+
+    /// Move an exact whole-target request into the bridge. Core validates the
+    /// descriptor revision and location before changing any head state.
+    pub fn adoptWorkingTarget(self: *Bridge, owned: *scene_codec.target.OwnedLocated) ResponseError!void {
+        try self.beginResponse();
+        self.response = .{ .set_working_target = owned.* };
         owned.* = undefined;
     }
 

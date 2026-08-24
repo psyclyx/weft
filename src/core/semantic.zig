@@ -402,12 +402,29 @@ pub const Services = struct {
         }
     }
 
+    fn viewContainsTarget(instance: *const view_runtime.view.Instance, located: semantic.target.Located) bool {
+        if (instance.descriptor.target) |binding|
+            if (binding.ref.eql(located.target) and binding.revision == located.revision) return true;
+        return nodeContainsTarget(instance.scene, located);
+    }
+
+    fn nodeContainsTarget(node: semantic.scene.Node, located: semantic.target.Located) bool {
+        if (node.target) |link|
+            if (link.target.eql(located.target) and link.revision == located.revision) return true;
+        return switch (node.content) {
+            .container => |container| for (container.children) |child| {
+                if (nodeContainsTarget(child, located)) break true;
+            } else false,
+            .field, .label, .action => false,
+        };
+    }
+
     pub const OpenInteractionError = view_runtime.interaction.Error || error{
         StaleView,
         UnknownRoot,
     };
 
-    pub const InvokeActionError = view_runtime.action.Error || OpenInteractionError || semantic.transfer.ValidationError || ResolveTargetError || TargetRelationError || OpenTargetError || FocusError || error{ InvalidRegister, InvalidWorkingTarget, UnknownFocusTarget, NoTargetRelation, AmbiguousTargetRelations };
+    pub const InvokeActionError = view_runtime.action.Error || OpenInteractionError || semantic.transfer.ValidationError || ResolveTargetError || TargetRelationError || OpenTargetError || FocusError || error{ InvalidRegister, InvalidWorkingTarget, UnauthorizedWorkingTarget, UnknownFocusTarget, NoTargetRelation, AmbiguousTargetRelations };
     pub const InvokeInputError = InvokeActionError || view_runtime.interaction.Error;
 
     pub const FocusError = view_runtime.view.Error;
@@ -460,6 +477,26 @@ pub const Services = struct {
             return link;
         }
         return null;
+    }
+
+    /// Validate and return this head's working container. Target publishers
+    /// remain external authorities and may replace or retire descriptors at
+    /// any time, so stale state is cleared lazily instead of being silently
+    /// reinterpreted against a new revision.
+    pub fn workingTarget(
+        self: *const Services,
+        head: *Head,
+    ) FocusedTargetError!?Head.WorkingTarget {
+        const working = head.working_target orelse return null;
+        const descriptor = self.targets.get(working.target) orelse {
+            head.working_target = null;
+            return error.StaleTarget;
+        };
+        if (descriptor.revision != working.revision) {
+            head.working_target = null;
+            return error.StaleTarget;
+        }
+        return working;
     }
 
     /// The small generic editing vocabulary used by ordinary editor commands
@@ -584,6 +621,8 @@ pub const Services = struct {
                 }
                 const descriptor = self.targets.get(located.target) orelse return error.StaleTarget;
                 if (descriptor.revision != located.revision) return error.StaleTarget;
+                const instance = self.views.get(view) orelse return error.StaleView;
+                if (!viewContainsTarget(instance, located)) return error.UnauthorizedWorkingTarget;
                 break :blk .{ .working_target_requested = .{
                     .target = located.target,
                     .revision = located.revision,
@@ -1446,6 +1485,89 @@ test "semantic open-target actions use the nearest subject and preserve fallback
     _ = try services.registerTargetHandler(std.testing.allocator, owner, "ambiguous-b", .init(&ambiguous_handler_b));
     action_provider.located = .{ .target = ambiguous_target, .revision = 1 };
     try std.testing.expectError(error.AmbiguousTargetHandlers, services.invokeFocusedAction(&head.interactions, &head, std.testing.allocator, "open"));
+}
+
+test "semantic working targets are exact, whole, and head-local" {
+    const Provider = struct {
+        located: semantic.target.Located,
+
+        pub fn invoke(self: *@This(), request: semantic.action.Request) view_runtime.action.ProviderError!semantic.action.Outcome {
+            if (!std.mem.eql(u8, request.action, semantic.action.standard.set_working_target)) return .declined;
+            return .{ .set_working_target = self.located };
+        }
+    };
+
+    var services = Services.init(.here);
+    defer services.deinit(std.testing.allocator);
+    const owner = try services.acquireOwner();
+    const target = try services.publishTarget(std.testing.allocator, owner, .{
+        .kind = .directory,
+        .display_name = "workspace",
+    });
+    const unrelated = try services.publishTarget(std.testing.allocator, owner, .{
+        .kind = .directory,
+        .display_name = "unrelated",
+    });
+    const view = try services.publishView(std.testing.allocator, owner, target, 1, .{
+        .id = @enumFromInt(1),
+        .focusable = true,
+        .actions = &.{.{ .id = semantic.action.standard.set_working_target }},
+        .content = .{ .label = "workspace" },
+    });
+    var provider: Provider = .{ .located = .{ .target = target, .revision = 1 } };
+    try services.registerActionProvider(std.testing.allocator, owner, .init(&provider));
+
+    var first: Head = .empty;
+    defer first.deinit(std.testing.allocator);
+    var second: Head = .empty;
+    defer second.deinit(std.testing.allocator);
+    _ = try services.focusView(&first, std.testing.allocator, view, null);
+    _ = try services.focusView(&second, std.testing.allocator, view, null);
+
+    const effect = (try services.invokeFocusedAction(
+        &first.interactions,
+        &first,
+        std.testing.allocator,
+        semantic.action.standard.set_working_target,
+    )).?;
+    try std.testing.expectEqual(target, effect.working_target_requested.target);
+    try std.testing.expectEqual(@as(u64, 1), effect.working_target_requested.revision);
+    try std.testing.expectEqual(target, first.working_target.?.target);
+    try std.testing.expect(second.working_target == null);
+
+    provider.located = .{ .target = unrelated, .revision = 1 };
+    try std.testing.expectError(error.UnauthorizedWorkingTarget, services.invokeFocusedAction(
+        &first.interactions,
+        &first,
+        std.testing.allocator,
+        semantic.action.standard.set_working_target,
+    ));
+    try std.testing.expectEqual(target, first.working_target.?.target);
+
+    provider.located = .{ .target = target, .revision = 1 };
+    provider.located.location = .{ .node = "borrowed" };
+    try std.testing.expectError(error.InvalidWorkingTarget, services.invokeFocusedAction(
+        &first.interactions,
+        &first,
+        std.testing.allocator,
+        semantic.action.standard.set_working_target,
+    ));
+    try std.testing.expectEqual(target, first.working_target.?.target);
+
+    provider.located.location = .whole;
+    try services.replaceTarget(std.testing.allocator, owner, target, .{
+        .kind = .directory,
+        .display_name = "workspace replaced",
+    });
+    try std.testing.expectError(error.StaleTarget, services.invokeFocusedAction(
+        &first.interactions,
+        &first,
+        std.testing.allocator,
+        semantic.action.standard.set_working_target,
+    ));
+    try std.testing.expectEqual(@as(u64, 1), first.working_target.?.revision);
+    try std.testing.expectError(error.StaleTarget, services.workingTarget(&first));
+    try std.testing.expect(first.working_target == null);
 }
 
 test "semantic view focus is head-scoped with preferred and root fallback" {

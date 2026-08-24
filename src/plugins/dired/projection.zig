@@ -98,7 +98,7 @@ fn rootActions(arena: std.mem.Allocator, rows: []const model.Row, options: Optio
             break;
         }
     }
-    const result = try arena.alloc(scene.Action, 7 + @as(usize, @intFromBool(options.has_container)));
+    const result = try arena.alloc(scene.Action, 8 + @as(usize, @intFromBool(options.has_container)));
     var index: usize = 0;
     if (options.has_container) {
         result[index] = .{ .id = standard.open_container, .label = "Open container" };
@@ -111,6 +111,7 @@ fn rootActions(arena: std.mem.Allocator, rows: []const model.Row, options: Optio
     result[index + 4] = .{ .id = standard.paste_before, .label = "Paste into directory" };
     result[index + 5] = .{ .id = standard.apply, .label = "Apply draft", .enabled = dirty };
     result[index + 6] = .{ .id = standard.revert, .label = "Revert draft", .enabled = dirty };
+    result[index + 7] = .{ .id = standard.set_working_target, .label = "Use as working target" };
     return result;
 }
 
@@ -231,8 +232,11 @@ fn rowFacts(arena: std.mem.Allocator, row: model.Row) ![]scene.Fact {
 }
 
 fn rowActions(arena: std.mem.Allocator, row: model.Row, mode_editable: bool, has_target: bool) ![]scene.Action {
-    const actions = try arena.alloc(scene.Action, 9 + @as(usize, if (mode_editable) 1 else 0));
     const unavailable = row.pending == .deleted or row.conflict == .stale;
+    const can_set_working = row.draft.kind == .directory and has_target and !unavailable;
+    const actions = try arena.alloc(scene.Action, 9 +
+        @as(usize, @intFromBool(mode_editable)) +
+        @as(usize, @intFromBool(can_set_working)));
     actions[0] = .{ .id = standard.open, .label = "Open", .enabled = !unavailable and has_target };
     // Deletion is a reversible draft state, not the destruction of this row.
     // Keep its name editor advertised so any input policy can revive it; only
@@ -245,10 +249,18 @@ fn rowActions(arena: std.mem.Allocator, row: model.Row, mode_editable: bool, has
     actions[6] = .{ .id = standard.paste_after, .label = "Paste after", .enabled = row.conflict != .stale };
     actions[7] = .{ .id = create_file_action, .label = "New file" };
     actions[8] = .{ .id = create_directory_action, .label = "New directory" };
-    if (mode_editable) actions[9] = .{
-        .id = permissions_edit_action,
-        .label = "Edit permissions",
-        .enabled = !unavailable,
+    var index: usize = 9;
+    if (mode_editable) {
+        actions[index] = .{
+            .id = permissions_edit_action,
+            .label = "Edit permissions",
+            .enabled = !unavailable,
+        };
+        index += 1;
+    }
+    if (can_set_working) actions[index] = .{
+        .id = standard.set_working_target,
+        .label = "Use as working target",
     };
     return actions;
 }
@@ -404,10 +416,12 @@ test "projection keeps row ids and order stable across draft rename" {
     try std.testing.expectEqualStrings(standard.paste_after, first.value.actions[3].id);
     try std.testing.expect(first.value.actions[3].enabled);
     try std.testing.expect(!first.value.actions[5].enabled);
+    try std.testing.expectEqualStrings(standard.set_working_target, first.value.actions[7].id);
     var with_container = try projectWith(std.testing.allocator, dired.rows.items, &refs, .{ .has_container = true });
     defer with_container.deinit();
     try std.testing.expectEqualStrings(standard.open_container, with_container.value.actions[0].id);
     try std.testing.expectEqualStrings(standard.refresh, with_container.value.actions[1].id);
+    try std.testing.expectEqualStrings(standard.set_working_target, with_container.value.actions[8].id);
     const first_ids = [_]scene.NodeId{ first.value.content.container.children[0].id, first.value.content.container.children[1].id };
     try dired.rename(dired.rows.items[0].id, "renamed");
     var second = try project(std.testing.allocator, dired.rows.items, &refs);

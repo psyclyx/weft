@@ -802,7 +802,7 @@ fn yankCurrent(start: usize, end: usize, linewise: bool) void {
 fn semanticDid(action: []const u8) bool {
     const register = consumeRegister();
     const result = switch (weft.semanticActionIn(action, register)) {
-        .handled, .transfer_stored, .interaction_opened, .target_opened, .focus_changed, .relation_opened => true,
+        .handled, .transfer_stored, .interaction_opened, .target_opened, .focus_changed, .relation_opened, .working_target_changed => true,
         .unavailable, .failed, _ => false,
     };
     return result;

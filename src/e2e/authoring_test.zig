@@ -311,6 +311,34 @@ test "dired: Vim Return and minus follow generic target relations" {
     try t.expectEqualStrings("normal", ed.mode());
 }
 
+test "dired: configured working-target action changes locus without opening a view" {
+    const gpa = t.allocator;
+    var app: App = undefined;
+    try app.init(gpa);
+    defer app.deinit();
+    const ed = &app.ed;
+
+    try core.file.writeBytesMakingDirs(gpa, "workspace/child", "workspace/child/.seed", "");
+    core.file.deleteFile(gpa, "workspace/child/.seed");
+    ed.runStr("open", "workspace");
+    const parent_view_ref = ed.head.semantic_focus.path().?.view;
+    const parent_view = ed.session.system.semantic.views.get(parent_view_ref).?;
+    try t.expectEqual(@as(usize, 1), parent_view.scene.content.container.children.len);
+    const child = parent_view.scene.content.container.children[0];
+    const child_target = child.target orelse return error.TestExpectedEqual;
+    try t.expect(ed.head.working_target == null);
+
+    // Config knows only the open semantic action name. The dired provider
+    // returns an exact target request, core validates it, and the dispatching
+    // head records it without opening/focusing another tool view.
+    ed.chord("SPC v c");
+    try t.expectEqual(parent_view_ref, ed.head.semantic_focus.path().?.view);
+    const working = (try ed.session.system.semantic.workingTarget(ed.head)).?;
+    try t.expectEqual(child_target.target, working.target);
+    try t.expectEqual(child_target.revision, working.revision);
+    try t.expectEqualStrings("normal", ed.mode());
+}
+
 test "authoring: switching back to an open file lands in an editable mode" {
     const gpa = t.allocator;
     var app: App = undefined;

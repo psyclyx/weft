@@ -283,6 +283,7 @@ pub const imports = [_]Entry{
 
     // ── semantic.zig — tool-neutral focused-view actions ───────────────
     .{ .name = "wl_semantic_active", .params = &.{}, .results = &.{.u32}, .group = .semantic, .doc = "whether this head currently focuses a live semantic view" },
+    .{ .name = "wl_semantic_working_target", .params = &.{ .u32, .u32 }, .results = &.{.i32}, .group = .semantic, .head_gated = true, .doc = "copy this head's validated exact working target, return zero when absent" },
     .{ .name = "wl_semantic_view_focus", .params = &.{ .u32, .u32, .u32, .u32, .u32, .u32 }, .results = &.{.i32}, .group = .semantic, .head_gated = true, .doc = "attach a live semantic view to this head, using an optional canonical u64 NodeId preference" },
     .{ .name = "wl_semantic_interaction_open", .params = &.{ .u32, .u32, .u32, .u32 }, .results = &.{.i32}, .group = .semantic, .head_gated = true, .doc = "decode and open a bounded interaction definition on this head, writing its typed ref" },
     .{ .name = "wl_semantic_interaction_close", .params = &.{ .u32, .u32, .u32 }, .results = &.{.u32}, .group = .semantic, .head_gated = true, .doc = "close the active head-local interaction named by a typed ref" },
@@ -304,7 +305,7 @@ pub const imports = [_]Entry{
     .{ .name = "wl_semantic_action_provider", .params = &.{}, .results = &.{.i32}, .group = .semantic, .doc = "register this owner as a semantic action provider" },
     .{ .name = "wl_semantic_action_request_len", .params = &.{}, .results = &.{.i32}, .group = .semantic, .doc = "host-to-guest callback read: byte length of the current canonical action request" },
     .{ .name = "wl_semantic_action_request", .params = &.{ .u32, .u32 }, .results = &.{.i32}, .group = .semantic, .doc = "host-to-guest callback read: copy the current canonical action request" },
-    .{ .name = "wl_semantic_action_respond", .params = &.{ .u32, .u32, .u32 }, .results = &.{.i32}, .group = .semantic, .doc = "answer the current action once: declined, handled, canonical transfer/interaction/target, or same-view focus" },
+    .{ .name = "wl_semantic_action_respond", .params = &.{ .u32, .u32, .u32 }, .results = &.{.i32}, .group = .semantic, .doc = "answer the current action once: declined, handled, canonical transfer/interaction/target, same-view focus, relation, or working-target request" },
     .{ .name = "wl_semantic_target_handler_register", .params = &.{ .u32, .u32, .u32, .u32, .u32 }, .results = &.{.i32}, .group = .semantic, .doc = "register a tokenized owner-scoped target handler and write its typed handle" },
     .{ .name = "wl_semantic_target_handler_close", .params = &.{ .u32, .u32, .u32 }, .results = &.{.u32}, .group = .semantic, .doc = "close an owned target handler and invalidate its generation" },
     .{ .name = "wl_semantic_target_handler_request_len", .params = &.{}, .results = &.{.i32}, .group = .semantic, .doc = "host-to-guest callback read: byte length of the current canonical descriptor or located target" },
@@ -378,7 +379,7 @@ pub const imports = [_]Entry{
 /// half-finished edit — fails the build with a pointed message instead of
 /// silently drifting the two ~124-entry tables apart again (the exact class
 /// this table exists to kill).
-const expected_import_count = 169;
+const expected_import_count = 170;
 
 /// A host→guest EXPORT entrypoint (design doc/north-star-plan.md §2.5, task
 /// W0a-D extension 2): every `instance.callVoid("name", args)` the host

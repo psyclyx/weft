@@ -497,6 +497,10 @@ pub const Host = struct {
     ///     already handle (a replay against a genuinely different buffer is
     ///     the SAME case dot-repeat already treats as "can't repeat here" —
     ///     see `dispatch.zig`'s `dotAtRest`). No new mechanism needed.
+    ///   - `head.working_target`: CLEARED. It is a revision-stamped handle
+    ///     into the old system's semantic target registry; carrying it into a
+    ///     different registry could make equal wire bits name unrelated
+    ///     authority. A no-op swap preserves it because no registry changes.
     pub fn swap(self: *Host, gpa: Allocator, c: *command.Context, head: *Head, target: []const u8) SwapError!void {
         const to = self.get(target) orelse return error.UnknownSystem;
         if (head.hasOpenTransients()) {
@@ -508,6 +512,7 @@ pub const Host = struct {
             try from.detachHead(gpa, head);
         }
         head.pick.cancelActive(gpa);
+        head.working_target = null;
         c.buffers = &to.buffers;
         c.commands = &to.commands;
         c.keymap = &to.keymap;
@@ -727,12 +732,19 @@ test "system: GATE (b) — a head re-binds editor<->agent-ux live: tables switch
     // "chat" bind is nowhere in the editor's table.
     try t.expect(editor_sys.keymap.lookup("normal", "i") != null);
     try t.expectEqual(@as(?[]const u8, null), editor_sys.keymap.lookup("chat", "q"));
+    head.working_target = .{
+        .target = .{ .authority = .here, .slot = 7, .generation = 1 },
+        .revision = 3,
+    };
+    try host.swap(gpa, &c, &head, "editor");
+    try t.expect(head.working_target != null); // a no-op keeps the same registry
 
     // Swap onto agent-ux: keymap tables switch (head now resolves AGENT's
     // binds, not the editor's), and the OLD (editor) system's active buffer
     // remembers "visual"'s BASE (normal) — the detach-time resting rule —
     // exactly as `Buffers.switchTo` would for an ordinary buffer switch.
     try host.swap(gpa, &c, &head, "agent-ux");
+    try t.expect(head.working_target == null);
     try t.expectEqualStrings("normal", editor_sys.buffers.active().mode);
     try t.expect(c.buffers == &agent_sys.buffers);
     try t.expect(c.keymap == &agent_sys.keymap);
