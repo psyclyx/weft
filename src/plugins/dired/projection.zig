@@ -22,6 +22,10 @@ pub const FieldBinding = struct {
     /// secondary field entered by an advertised action, not another primary
     /// traversal stop.
     mode_field: ?scene.FieldRef = null,
+    /// An exact, revision-stamped target for an observed directory row. A
+    /// missing link is intentional for pending, deleted, stale, and
+    /// provider-unobserved rows.
+    target: ?scene.TargetLink = null,
 };
 
 pub const permissions_edit_action = "fs.permissions.edit";
@@ -99,6 +103,7 @@ fn validateInputs(rows: []const model.Row, bindings: []const FieldBinding) !void
         if (binding.row == 0 or binding.field.generation == 0 or
             (binding.mode_field != null and binding.mode_field.?.generation == 0))
             return error.InvalidField;
+        if (binding.target) |target| try scene.validateTargetLink(target);
         if (findRow(rows, binding.row) == null) return error.UnknownBinding;
         if (binding.mode_field) |mode_field| {
             if (sameField(binding.field, mode_field)) return error.DuplicateBinding;
@@ -151,6 +156,7 @@ fn projectRow(arena: std.mem.Allocator, row: model.Row, binding: FieldBinding) !
         .role = "dired.name",
         .layout = .{ .column = name_column },
         .facts = leaf_facts,
+        .target = binding.target,
         .focusable = true,
         .content = .{ .field = .{ .ref = binding.field, .single_line = true } },
     };
@@ -166,12 +172,13 @@ fn projectRow(arena: std.mem.Allocator, row: model.Row, binding: FieldBinding) !
     }
 
     const facts = try rowFacts(arena, row);
-    const actions = try rowActions(arena, row, binding.mode_field != null);
+    const actions = try rowActions(arena, row, binding.mode_field != null, binding.target != null);
     return .{
         .id = try stableId(row.id, row_domain),
         .role = "dired.row",
         .facts = facts,
         .actions = actions,
+        .target = binding.target,
         .content = .{ .container = .{ .axis = .horizontal, .children = children } },
     };
 }
@@ -198,10 +205,10 @@ fn rowFacts(arena: std.mem.Allocator, row: model.Row) ![]scene.Fact {
     return facts;
 }
 
-fn rowActions(arena: std.mem.Allocator, row: model.Row, mode_editable: bool) ![]scene.Action {
+fn rowActions(arena: std.mem.Allocator, row: model.Row, mode_editable: bool, has_target: bool) ![]scene.Action {
     const actions = try arena.alloc(scene.Action, 7 + @as(usize, if (mode_editable) 1 else 0));
     const unavailable = row.pending == .deleted or row.conflict == .stale;
-    actions[0] = .{ .id = standard.open, .label = "Open", .enabled = !unavailable };
+    actions[0] = .{ .id = standard.open, .label = "Open", .enabled = !unavailable and has_target };
     actions[1] = .{ .id = standard.edit, .label = "Edit name", .enabled = row.pending != .deleted };
     actions[2] = .{ .id = standard.copy, .label = "Copy", .enabled = !unavailable };
     actions[3] = .{ .id = standard.cut, .label = "Cut", .enabled = !unavailable };

@@ -23,12 +23,15 @@ pub const Plugin = struct {
     host: Host,
     sessions: std.ArrayList(*Session) = .empty,
     handler_ref: ?target_runtime.resolver.HandlerRef = null,
+    relation_ref: ?target_runtime.relation.ProviderRef = null,
+    relation_provider: RelationProvider = undefined,
     started: bool = false,
 
     pub const Host = struct {
         filesystems: *fs_runtime.Router,
         targets: *target_runtime.target.Registry,
         target_handlers: *target_runtime.resolver.Registry,
+        target_relations: *target_runtime.relation.Registry,
         views: *view_runtime.view.Registry,
         fields: *view_runtime.field.Registry,
         actions: *view_runtime.action.Registry,
@@ -44,6 +47,20 @@ pub const Plugin = struct {
         if (self.started or !self.owner.isValid()) return error.InvalidPlugin;
         try self.host.actions.register(self.gpa, self.owner, .init(self));
         errdefer _ = self.host.actions.unregister(self.gpa, self.owner);
+        self.relation_provider = .{ .plugin = self };
+        self.relation_ref = self.host.target_relations.register(
+            self.gpa,
+            self.owner,
+            "dired.container",
+            .init(&self.relation_provider),
+        ) catch |err| {
+            _ = self.host.actions.unregister(self.gpa, self.owner);
+            return err;
+        };
+        errdefer if (self.relation_ref) |ref| {
+            _ = self.host.target_relations.unregister(self.gpa, ref);
+            self.relation_ref = null;
+        };
         self.handler_ref = try self.host.target_handlers.register(
             self.gpa,
             self.owner,
@@ -55,6 +72,7 @@ pub const Plugin = struct {
 
     /// Retire every behavior endpoint before freeing the objects behind it.
     pub fn deinit(self: *Plugin) void {
+        if (self.relation_ref) |ref| _ = self.host.target_relations.unregister(self.gpa, ref);
         if (self.handler_ref) |ref| _ = self.host.target_handlers.unregister(self.gpa, ref);
         if (self.started) _ = self.host.actions.unregister(self.gpa, self.owner);
         for (self.sessions.items) |session| {
@@ -64,6 +82,30 @@ pub const Plugin = struct {
         self.sessions.deinit(self.gpa);
         self.* = undefined;
     }
+
+    const RelationProvider = struct {
+        plugin: *Plugin,
+
+        pub fn query(self: *@This(), request: target_runtime.relation.Query) target_runtime.relation.QueryError!?target_runtime.relation.Relation {
+            if (!std.mem.eql(u8, request.name, "container")) return null;
+            if (request.source.location != .whole) return error.InvalidRelation;
+            for (self.plugin.sessions.items) |session| {
+                for (session.row_targets.items) |row_target| {
+                    if (!row_target.active) continue;
+                    if (!row_target.registration.ref.eql(request.source.target)) continue;
+                    if (row_target.registration.revision != request.source.revision) return error.StaleTarget;
+                    const descriptor = self.plugin.host.targets.get(request.source.target) orelse return error.StaleTarget;
+                    if (descriptor.revision != request.source.revision or descriptor.kind != .directory)
+                        return error.StaleTarget;
+                    return .{
+                        .name = request.name,
+                        .target = .{ .target = session.target, .revision = session.target_revision },
+                    };
+                }
+            }
+            return null;
+        }
+    };
 
     /// Claim only an attachment that the trusted filesystem publisher bound
     /// to this exact target revision and the provider still observes as a
@@ -243,6 +285,14 @@ pub const Plugin = struct {
 };
 
 pub const Session = struct {
+    const RowTarget = struct {
+        row: model.NodeId,
+        directory: fs.target.Directory,
+        registration: fs_runtime.publication.Registration,
+        active: bool = true,
+        fresh: bool = false,
+    };
+
     plugin: *Plugin,
     target: semantic.target.Ref,
     target_revision: u64,
@@ -257,6 +307,7 @@ pub const Session = struct {
     apply_committed: bool = false,
     scene_revision: u64 = 1,
     posix_mode: bool = false,
+    row_targets: std.ArrayList(RowTarget) = .empty,
 
     fn init(plugin: *Plugin, target: semantic.target.Ref, target_revision: u64, directory: fs.target.Directory) Session {
         return .{
@@ -275,6 +326,8 @@ pub const Session = struct {
         const previous = self.draft;
         self.draft = initial;
         initial = previous;
+        try self.prepareRowTargets(&self.draft);
+        errdefer self.closeAllRowTargets();
         try self.prepareFieldsFor(&self.draft);
         var scene = try self.projectSceneFor(&self.draft);
         defer scene.deinit();
@@ -288,9 +341,11 @@ pub const Session = struct {
         self.controller = .init(self.plugin.gpa, &self.draft, self.view_ref);
         self.loaded = true;
         self.pruneFields();
+        self.retireRowTargets();
     }
 
     pub fn deinit(self: *Session) void {
+        self.closeAllRowTargets();
         if (self.loaded) {
             self.controller.deinit();
             _ = self.plugin.host.views.close(self.plugin.gpa, self.plugin.owner, self.view_ref);
@@ -427,6 +482,8 @@ pub const Session = struct {
         const old_fields_len = self.fields.items.len;
         var committed = false;
         defer if (!committed) self.rollbackFieldsFrom(old_fields_len);
+        try self.prepareRowTargets(staged);
+        errdefer self.abortRowTargets();
         try self.prepareFieldsFor(staged);
         var scene = try self.projectSceneFor(staged);
         defer scene.deinit();
@@ -445,7 +502,75 @@ pub const Session = struct {
         self.controller.model = &self.draft;
         self.bumpFieldRevisions();
         self.pruneFields();
+        self.retireRowTargets();
         committed = true;
+    }
+
+    /// Retain one trusted filesystem publication per observed directory row.
+    /// The row id is model identity, so reorder does not churn the target.
+    fn prepareRowTargets(self: *Session, draft: *const model.Model) !void {
+        for (self.row_targets.items) |*row_target| row_target.active = false;
+        const old_len = self.row_targets.items.len;
+        errdefer {
+            while (self.row_targets.items.len > old_len) {
+                var row_target = self.row_targets.pop().?;
+                _ = row_target.registration.close(self.plugin.gpa, self.plugin.host.targets, self.plugin.host.filesystems);
+            }
+            for (self.row_targets.items) |*row_target| row_target.active = true;
+        }
+        for (draft.rows.items) |row| {
+            const directory = observedDirectory(self.directory, row) orelse continue;
+            var retained = false;
+            for (self.row_targets.items) |*row_target| {
+                if (row_target.row != row.id or !sameDirectory(row_target.directory, directory)) continue;
+                row_target.active = true;
+                row_target.fresh = false;
+                retained = true;
+                break;
+            }
+            if (retained) continue;
+            const registration = try fs_runtime.publication.publish(self.plugin.gpa, self.plugin.host.targets, self.plugin.host.filesystems, self.plugin.owner, .{
+                .display_name = row.draft.name,
+                .directory = directory,
+            });
+            try self.row_targets.append(self.plugin.gpa, .{
+                .row = row.id,
+                .directory = directory,
+                .registration = registration,
+                .fresh = true,
+            });
+        }
+    }
+
+    fn abortRowTargets(self: *Session) void {
+        var index: usize = self.row_targets.items.len;
+        while (index > 0) {
+            index -= 1;
+            if (!self.row_targets.items[index].fresh) continue;
+            var row_target = self.row_targets.swapRemove(index);
+            _ = row_target.registration.close(self.plugin.gpa, self.plugin.host.targets, self.plugin.host.filesystems);
+        }
+        for (self.row_targets.items) |*row_target| {
+            row_target.active = true;
+            row_target.fresh = false;
+        }
+    }
+
+    fn retireRowTargets(self: *Session) void {
+        var index: usize = self.row_targets.items.len;
+        while (index > 0) {
+            index -= 1;
+            if (self.row_targets.items[index].active) continue;
+            var row_target = self.row_targets.swapRemove(index);
+            _ = row_target.registration.close(self.plugin.gpa, self.plugin.host.targets, self.plugin.host.filesystems);
+        }
+        for (self.row_targets.items) |*row_target| row_target.fresh = false;
+    }
+
+    fn closeAllRowTargets(self: *Session) void {
+        for (self.row_targets.items) |*row_target|
+            _ = row_target.registration.close(self.plugin.gpa, self.plugin.host.targets, self.plugin.host.filesystems);
+        self.row_targets.deinit(self.plugin.gpa);
     }
 
     /// Additions are staged before scene replacement; obsolete field refs are
@@ -501,6 +626,7 @@ pub const Session = struct {
             .row = row.id,
             .field = self.fieldFor(row.id).?.ref,
             .mode_field = if (self.modeFieldFor(row.id)) |field| field.ref else null,
+            .target = self.rowTargetFor(row.id),
         };
         return projection.project(self.plugin.gpa, draft.rows.items, bindings);
     }
@@ -529,7 +655,20 @@ pub const Session = struct {
     fn bumpFieldRevisions(self: *Session) void {
         for (self.fields.items) |field| field.revision +|= 1;
     }
+
+    fn rowTargetFor(self: *const Session, row: model.NodeId) ?semantic.scene.TargetLink {
+        for (self.row_targets.items) |row_target| if (row_target.active and row_target.row == row)
+            return row_target.registration.located();
+        return null;
+    }
 };
+
+fn observedDirectory(parent: fs.target.Directory, row: model.Row) ?fs.target.Directory {
+    if (row.conflict == .stale or row.pending == .deleted or row.draft.kind != .directory) return null;
+    const observation = row.current orelse return null;
+    if (observation.kind != .directory or observation.identity.authority != parent.root.authority) return null;
+    return .{ .root = parent.root, .node = .{ .entry = observation.identity } };
+}
 
 fn validateListing(directory: fs.target.Directory, listing: contract.Listing) !void {
     if (!std.meta.eql(listing.directory.node, directory.node) or listing.directory.kind != .directory)
@@ -655,6 +794,8 @@ test "plugin opens typed directory targets as independent semantic sessions" {
     defer targets.deinit(std.testing.allocator);
     var handlers = target_runtime.resolver.Registry.init(.here);
     defer handlers.deinit(std.testing.allocator);
+    var relations = target_runtime.relation.Registry.init(.here);
+    defer relations.deinit(std.testing.allocator);
     var views = view_runtime.view.Registry.init(.here);
     defer views.deinit(std.testing.allocator);
     var fields = view_runtime.field.Registry.init(.here);
@@ -672,6 +813,7 @@ test "plugin opens typed directory targets as independent semantic sessions" {
         .filesystems = &router,
         .targets = &targets,
         .target_handlers = &handlers,
+        .target_relations = &relations,
         .views = &views,
         .fields = &fields,
         .actions = &action_registry,
@@ -1005,6 +1147,87 @@ test "draft apply is a generic confirmation interaction and revert action" {
     try std.testing.expectEqualStrings("kept", session.draft.rows.items[0].draft.name);
 }
 
+test "observed directory rows publish exact links and independent containment" {
+    var fixture: Fixture = undefined;
+    try fixture.init();
+    defer fixture.deinit();
+    const session = fixture.plugin.sessions.items[0];
+    try fixture.fake.set(&.{
+        .{ .name = "kept", .ref = entryRef(8), .revision = "1", .kind = .regular, .mode = 0o644 },
+        .{ .name = "child", .ref = entryRef(9), .revision = "1", .kind = .directory },
+        .{ .name = "link", .ref = entryRef(10), .revision = "1", .kind = .symlink, .link_target = "child" },
+    });
+    try session.refresh();
+
+    var directory_row: ?model.NodeId = null;
+    var symlink_row: ?model.NodeId = null;
+    for (session.draft.rows.items) |row| switch (row.draft.kind) {
+        .directory => directory_row = row.id,
+        .symlink => symlink_row = row.id,
+        else => {},
+    };
+    const row_id = directory_row orelse return error.TestUnexpectedResult;
+    const symlink_id = symlink_row orelse return error.TestUnexpectedResult;
+    const row_target = session.rowTargetFor(row_id) orelse return error.TestUnexpectedResult;
+    try std.testing.expect(session.rowTargetFor(symlink_id) == null);
+    const scene_row = fixture.views.get(session.view_ref).?.scene.content.container.children[1];
+    try std.testing.expectEqual(row_target, scene_row.target.?);
+    try std.testing.expectEqual(row_target, scene_row.content.container.children[2].target.?);
+    try std.testing.expect(scene_row.actions[0].enabled);
+
+    var resolution = try fixture.handlers.resolve(std.testing.allocator, fixture.targets.get(row_target.target).?.*);
+    defer resolution.deinit();
+    const selected = resolution.value.decide().selected;
+    _ = try fixture.handlers.open(selected, row_target);
+    var relation = try fixture.relations.query(std.testing.allocator, .{ .source = row_target, .name = "container" });
+    defer relation.deinit();
+    try std.testing.expectEqual(@as(usize, 1), relation.value.candidates.len);
+    try std.testing.expectEqual(session.target, relation.value.candidates[0].relation.target.target);
+    try std.testing.expectEqual(session.target_revision, relation.value.candidates[0].relation.target.revision);
+
+    const stable_id = session.draft.row(row_id).?.id;
+    try fixture.fake.set(&.{
+        .{ .name = "link", .ref = entryRef(10), .revision = "1", .kind = .symlink, .link_target = "child" },
+        .{ .name = "child", .ref = entryRef(9), .revision = "1", .kind = .directory },
+        .{ .name = "kept", .ref = entryRef(8), .revision = "1", .kind = .regular, .mode = 0o644 },
+    });
+    try session.refresh();
+    try std.testing.expectEqual(stable_id, session.draft.row(row_id).?.id);
+    try std.testing.expectEqual(row_target.target, session.rowTargetFor(row_id).?.target);
+
+    var pending = try session.draft.duplicate();
+    defer pending.deinit();
+    const pending_id = try pending.addDirectory(null, "pending", null);
+    try session.publishDraft(&pending);
+    try std.testing.expect(session.rowTargetFor(pending_id) == null);
+
+    try session.draft.rename(row_id, "draft-child");
+    try fixture.fake.set(&.{
+        .{ .name = "link", .ref = entryRef(10), .revision = "1", .kind = .symlink, .link_target = "child" },
+        .{ .name = "kept", .ref = entryRef(8), .revision = "1", .kind = .regular, .mode = 0o644 },
+    });
+    try session.refresh();
+    try std.testing.expectEqual(model.Conflict.stale, session.draft.row(row_id).?.conflict);
+    try std.testing.expect(session.rowTargetFor(row_id) == null);
+}
+
+test "row target publication is closed when its session retires" {
+    var fixture: Fixture = undefined;
+    try fixture.init();
+    const session = fixture.plugin.sessions.items[0];
+    try fixture.fake.set(&.{.{ .name = "child", .ref = entryRef(9), .revision = "1", .kind = .directory }});
+    try session.refresh();
+    const row_target = session.rowTargetFor(session.draft.rows.items[0].id) orelse return error.TestUnexpectedResult;
+    const retired = fixture.plugin.sessions.pop().?;
+    retired.deinit();
+    fixture.plugin.gpa.destroy(retired);
+    try std.testing.expect(fixture.targets.get(row_target.target) == null);
+    var relation = try fixture.relations.query(std.testing.allocator, .{ .source = row_target, .name = "container" });
+    defer relation.deinit();
+    try std.testing.expectEqual(@as(usize, 0), relation.value.candidates.len);
+    fixture.deinit();
+}
+
 const FakeEntry = struct {
     name: []const u8,
     ref: contract.EntryRef,
@@ -1136,6 +1359,7 @@ const Fixture = struct {
     router: fs_runtime.Router,
     targets: target_runtime.target.Registry,
     handlers: target_runtime.resolver.Registry,
+    relations: target_runtime.relation.Registry,
     views: view_runtime.view.Registry,
     fields: view_runtime.field.Registry,
     actions: view_runtime.action.Registry,
@@ -1153,6 +1377,7 @@ const Fixture = struct {
             .router = .init(std.testing.allocator),
             .targets = .init(.here),
             .handlers = .init(.here),
+            .relations = .init(.here),
             .views = .init(.here),
             .fields = .init(.here),
             .actions = .{},
@@ -1171,6 +1396,7 @@ const Fixture = struct {
             .filesystems = &self.router,
             .targets = &self.targets,
             .target_handlers = &self.handlers,
+            .target_relations = &self.relations,
             .views = &self.views,
             .fields = &self.fields,
             .actions = &self.actions,
@@ -1187,6 +1413,7 @@ const Fixture = struct {
         self.fields.deinit(std.testing.allocator);
         self.views.deinit(std.testing.allocator);
         self.handlers.deinit(std.testing.allocator);
+        self.relations.deinit(std.testing.allocator);
         _ = self.publication.close(std.testing.allocator, &self.targets, &self.router);
         self.targets.deinit(std.testing.allocator);
         self.router.deinit();
