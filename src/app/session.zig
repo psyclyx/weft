@@ -42,6 +42,7 @@ const providers = @import("providers.zig");
 const setup = @import("setup.zig");
 const frame = @import("frame.zig");
 const ui_mesh = @import("../gfx/view.zig").ui_mesh;
+const fs_platform = @import("weft_fs_platform");
 
 pub const Session = struct {
     gpa: std.mem.Allocator,
@@ -59,6 +60,11 @@ pub const Session = struct {
     /// Kept in sync by `rebindSystem` so app code that wants "the active
     /// system's X" reads naturally (`session.system.buffers`).
     system: *core.System,
+
+    /// Concrete local filesystem mechanism selected by build.zig. The System
+    /// owns only the generic router; this app-owned storage can be replaced by
+    /// a Darwin provider without changing core or plugins.
+    filesystem_provider: fs_platform.Provider,
 
     // ── This process's one head (north-star-plan section 6 W2a-1) — APP
     //    GLUE, not a System field: a head is a cursor INTO whichever system
@@ -100,12 +106,15 @@ pub const Session = struct {
         grammars: *core.syntax.Runtime,
     ) !void {
         self.gpa = gpa;
+        self.filesystem_provider = fs_platform.Provider.init(gpa);
+        errdefer self.filesystem_provider.deinit();
         self.host = core.System.Host.init(gpa);
         errdefer self.host.deinit();
         const sys = try core.System.create(gpa, pool, "editor", user);
         errdefer sys.destroy();
         try self.host.hostSystem(sys);
         self.system = sys;
+        try self.system.filesystems.register(.here, self.filesystem_provider.provider());
         self.head = .empty;
         // `System.create`'s `builtins.install` already set `sys.default_head`
         // into the modeless floor's "default" mode (the headless dispatch
@@ -139,6 +148,7 @@ pub const Session = struct {
         self.cursor_cfg.deinit();
         self.head.deinit(gpa);
         self.host.deinit();
+        self.filesystem_provider.deinit();
     }
 
     /// Delegating facade: the echo line lives on `head` now (north-star-plan

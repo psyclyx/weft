@@ -85,6 +85,7 @@ const subbuffer = @import("subbuffer.zig");
 const register_mod = @import("register.zig");
 const grants_mod = @import("grants.zig");
 const semantic_mod = @import("semantic.zig");
+const fs_runtime = @import("weft_fs_runtime");
 
 pub const System = @This();
 
@@ -178,6 +179,9 @@ grants: grants_mod.HandleTable = undefined,
 /// the system, just like buffers and commands. Heads carry only focus and
 /// active interactions into whichever system they are attached to.
 semantic: semantic_mod.Services,
+/// Authority routes are system state; concrete provider storage belongs to
+/// the embedder and can be swapped without changing this interface.
+filesystems: fs_runtime.Router,
 
 /// Build a system from scratch: fresh buffers (one scratch buffer, per
 /// `Buffers.init`), empty commands/keymap, and the built-in command/keymap
@@ -196,9 +200,11 @@ pub fn create(gpa: Allocator, pool: *task.Pool, name: []const u8, user: []const 
         .actions = undefined,
         .grants = grants_mod.HandleTable.init(gpa),
         .semantic = .init(.here),
+        .filesystems = .init(gpa),
     };
     errdefer self.buffers.deinit(gpa);
     errdefer self.semantic.deinit(gpa);
+    errdefer self.filesystems.deinit();
     // `caps`/`actions` borrow `&self.container` (task #19's shared-Container
     // fold-in) — set AFTER the struct literal above so `self.container`
     // already holds its final value at a stable address (`self` is already
@@ -220,6 +226,7 @@ pub fn destroy(self: *System) void {
     // buffers/commands unwind).
     if (self.plugins) |*p| p.deinit(gpa);
     self.semantic.deinit(gpa);
+    self.filesystems.deinit();
     if (self.applied_manifest) |m| m.destroy();
     self.default_head.deinit(gpa);
     self.actions.deinit();
@@ -253,6 +260,7 @@ pub fn contextFor(self: *System, head: *Head) command.Context {
         .head = head,
         .grant_table = &self.grants,
         .semantic = &self.semantic,
+        .filesystems = &self.filesystems,
     };
 }
 
@@ -508,6 +516,7 @@ pub const Host = struct {
         c.quit = &to.quit;
         c.grant_table = &to.grants;
         c.semantic = &to.semantic;
+        c.filesystems = &to.filesystems;
         try to.attachHead(gpa, head);
     }
 };
@@ -732,6 +741,8 @@ test "system: GATE (b) — a head re-binds editor<->agent-ux live: tables switch
     try t.expect(c.actions == &agent_sys.actions);
     try t.expect(c.caps == &agent_sys.caps);
     try t.expect(c.quit == &agent_sys.quit);
+    try t.expect(c.semantic.? == &agent_sys.semantic);
+    try t.expect(c.filesystems.? == &agent_sys.filesystems);
     // W4 slice 1: the grant table repoints too — a captured Ctx after a
     // swap must resolve against the NEW system's grants, never the old
     // one's (each system owns its own table, `System.create`'s doc).
@@ -749,6 +760,7 @@ test "system: GATE (b) — a head re-binds editor<->agent-ux live: tables switch
     try host.swap(gpa, &c, &head, "editor");
     try t.expectEqualStrings("normal", head.currentMode());
     try t.expect(c.keymap == &editor_sys.keymap);
+    try t.expect(c.filesystems.? == &editor_sys.filesystems);
 }
 
 test "system: GATE (b) via the system-swap COMMAND — same mechanism, real command.run" {

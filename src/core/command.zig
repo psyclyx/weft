@@ -110,6 +110,10 @@ pub const Context = struct {
     /// System-scoped semantic identity and provider registries. Optional for
     /// small/headless embeddings that expose only the text command surface.
     semantic: ?*@import("semantic.zig").Services = null,
+    /// Authority-routed filesystem services. Providers are installed by the
+    /// embedding app (Linux today, Darwin/remote/synthetic independently);
+    /// commands and plugins see only this platform-neutral router.
+    filesystems: ?*@import("weft_fs_runtime").Router = null,
 
     pub fn buffer(self: *Context) *Buffers.Buffer {
         return self.buffers.active();

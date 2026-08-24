@@ -185,6 +185,17 @@ pub fn build(b: *std.Build) void {
     const snail_dep = snail_opt orelse return;
     const stemma_dep = stemma_opt orelse return;
     const architecture = createArchitectureModules(b, target, optimize);
+    // The app imports one stable platform-provider facade. Provider mechanism
+    // is selected here; portable modules and plugins never import it.
+    const fs_platform = b.createModule(.{
+        .root_source_file = b.path(if (target.result.os.tag == .linux)
+            "src/fs_linux/root.zig"
+        else
+            "src/fs_unavailable/root.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    fs_platform.addImport("weft_fs", architecture.fs);
 
     // ── Desktop (Wayland) executable ──
     const exe_mod = b.createModule(.{
@@ -194,6 +205,7 @@ pub fn build(b: *std.Build) void {
         .link_libc = true,
     });
     addArchitectureImports(exe_mod, architecture);
+    exe_mod.addImport("weft_fs_platform", fs_platform);
     exe_mod.addImport("snail", snail_dep.module("snail"));
     // SPIR-V-only shader scope: slangc runs inside snail's build; weft
     // consumes blobs + the reflection ABI through this module. Snail-renderer
@@ -261,6 +273,7 @@ pub fn build(b: *std.Build) void {
         .link_libc = true,
     });
     addArchitectureImports(weft_mod, architecture);
+    weft_mod.addImport("weft_fs_platform", fs_platform);
     weft_mod.addImport("snail", snail_dep.module("snail"));
     weft_mod.addImport("snail-raster", snail_dep.module("snail-raster"));
     weft_mod.addImport("stemma", stemma_dep.module("stemma"));
@@ -461,17 +474,7 @@ pub fn build(b: *std.Build) void {
 
     const fs_linux_step = b.step("test-fs-linux", "Run the Linux filesystem provider tests");
     if (target.result.os.tag == .linux) {
-        // One dependency edge — the named portable contract — prevents
-        // legacy core/app/platform code from leaking into the provider.
-        // Keeping module creation inside this branch also means Darwin builds
-        // never analyze Linux syscall declarations.
-        const fs_linux = b.createModule(.{
-            .root_source_file = b.path("src/fs_linux/root.zig"),
-            .target = target,
-            .optimize = optimize,
-        });
-        fs_linux.addImport("weft_fs", architecture.fs);
-        const fs_linux_tests = b.addTest(.{ .root_module = fs_linux });
+        const fs_linux_tests = b.addTest(.{ .root_module = fs_platform });
         const run_fs_linux_tests = b.addRunArtifact(fs_linux_tests);
         fs_linux_step.dependOn(&run_fs_linux_tests.step);
         contract_step.dependOn(&run_fs_linux_tests.step);

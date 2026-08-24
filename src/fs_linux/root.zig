@@ -6,7 +6,10 @@
 
 const implementation = @import("provider.zig");
 
-pub const LinuxFs = implementation.LinuxFs;
+/// The app-facing name remains stable when build.zig selects a future Darwin
+/// implementation. The Linux-specific alias stays available to focused tests.
+pub const Provider = implementation.LinuxFs;
+pub const LinuxFs = Provider;
 
 test {
     _ = implementation;
