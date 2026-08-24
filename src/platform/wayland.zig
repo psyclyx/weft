@@ -426,8 +426,8 @@ fn xdgSurfaceConfigure(data: ?*anyopaque, xdg_surface: ?*c.xdg_surface, serial: 
         xdg_surface.?,
         0,
         0,
-        @intCast(decision.geometry.width),
-        @intCast(decision.geometry.height),
+        @intCast(decision.extent.width),
+        @intCast(decision.extent.height),
     );
     c.wl_surface_commit(self.surface);
 }

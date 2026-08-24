@@ -24,7 +24,6 @@ pub const ToplevelConfigure = struct {
 pub const SurfaceConfigure = struct {
     /// The caller sends this after acknowledging the configure and commits
     /// before attempting a present.
-    geometry: Extent,
     extent: Extent,
     extent_changed: bool,
 };
@@ -50,8 +49,8 @@ pub const State = struct {
     }
 
     /// Consume the newest toplevel configure at the protocol's ack boundary.
-    /// The caller performs the actual ack first, then applies `geometry` and
-    /// commits (if non-null), preserving Wayland's required ordering.
+    /// The caller performs the actual ack first, then applies the extent and
+    /// commits, preserving Wayland's required ordering.
     pub fn surfaceConfigure(self: *State) SurfaceConfigure {
         const next = self.pending_extent orelse self.extent;
         self.pending_extent = null;
@@ -59,7 +58,6 @@ pub const State = struct {
         self.extent = next;
         if (changed) self.resize_pending = true;
         return .{
-            .geometry = next,
             .extent = next,
             .extent_changed = changed,
         };
@@ -98,7 +96,7 @@ test "configure reducer coalesces superseded extents at the ack boundary" {
     try std.testing.expect(result.extent_changed);
     try std.testing.expectEqual(@as(u32, 1280), result.extent.width);
     try std.testing.expectEqual(@as(u32, 720), result.extent.height);
-    try std.testing.expectEqual(@as(u32, 1280), result.geometry.width);
+    try std.testing.expectEqual(@as(u32, 1280), result.extent.width);
     try std.testing.expect(state.consumeResized());
     try std.testing.expect(!state.consumeResized());
 }

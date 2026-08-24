@@ -427,12 +427,25 @@ pub const Context = struct {
         self.extent = .{ .width = 0, .height = 0 };
     }
 
+    /// Drop a swapchain after a recreation path has made the old handle
+    /// unusable. The queue wait is best-effort here: on a device-loss/error
+    /// path no future acquire is permitted, and an explicit null handle is
+    /// safer than retaining a retired chain.
+    fn abandonSwapchain(self: *Context) void {
+        _ = vk.vkQueueWaitIdle(self.queue);
+        self.destroySwapchain();
+        self.swapchain_stale = true;
+    }
+
     pub fn recreateSwapchain(self: *Context, fb_width: u32, fb_height: u32) !void {
         // Defensively handle a zero surface extent without attempting to
         // create a non-presentable swapchain; another platform may still
         // report a usable extent on a later resize.
         if (fb_width == 0 or fb_height == 0) {
-            try check(vk.vkQueueWaitIdle(self.queue));
+            if (vk.vkQueueWaitIdle(self.queue) != vk.VK_SUCCESS) {
+                self.abandonSwapchain();
+                return error.VulkanFailed;
+            }
             self.destroySwapchain();
             self.swapchain_stale = true;
             return error.ZeroExtent;
@@ -443,9 +456,22 @@ pub const Context = struct {
         // is the narrowly-scoped retirement barrier: it proves old images,
         // views, framebuffers, and present semaphores are no longer in use
         // without vkDeviceWaitIdle on every configure.
-        var next = try self.buildSwapchain(fb_width, fb_height, self.swapchain);
+        const old_swapchain = self.swapchain;
+        var next = self.buildSwapchain(fb_width, fb_height, old_swapchain) catch |err| {
+            if (old_swapchain != null) {
+                // Once vkCreateSwapchainKHR accepted oldSwapchain, the old
+                // chain is retired even if later resource setup fails.  Do
+                // not leave that handle installed: retire the queue and put
+                // Context in an explicit stale/no-swapchain state.
+                self.abandonSwapchain();
+            }
+            return err;
+        };
         errdefer self.destroySwapchainResources(&next);
-        try check(vk.vkQueueWaitIdle(self.queue));
+        if (vk.vkQueueWaitIdle(self.queue) != vk.VK_SUCCESS) {
+            self.abandonSwapchain();
+            return error.VulkanFailed;
+        }
         self.destroySwapchain();
         self.installSwapchain(&next);
         self.swapchain_stale = false;
