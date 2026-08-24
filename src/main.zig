@@ -597,7 +597,7 @@ pub fn main(init: std.process.Init) !void {
     // immediate re-check (the fence-poll in `Context.beginFrame` never
     // blocks, so this is a tight but self-limiting loop, not a busy spin —
     // it only runs while there is genuinely a frame waiting to go out).
-    // Suppressed while `ctx.swapchain_stale` (minimized/zero-extent) — see
+    // Suppressed while `ctx.swapchain_stale` at a zero extent — see
     // `PresentRetryCtx`'s doc for why that guard is load-bearing, not
     // cosmetic.
     var present_pending = false;
@@ -626,16 +626,16 @@ pub fn main(init: std.process.Init) !void {
         // before building a frame; no present may use retired resources.
         const resized = whead.window.consumeResized();
         const req = whead.window.framebufferSize();
-        // A minimized surface has no work to retry: do not queue-idle on
+        // A zero-size surface has no work to retry: do not queue-idle on
         // every scheduler wake while the stale marker is intentionally held.
         if (resized or (whead.ctx.swapchain_stale and req[0] != 0 and req[1] != 0)) {
             whead.ctx.recreateSwapchain(req[0], req[1]) catch |e| switch (e) {
-                // Minimized / zero-size surface: the swapchain is torn down and
-                // can't be recreated yet. Skip this frame and retry next one
+                // Zero-size surface: the swapchain is torn down and can't be
+                // recreated yet. Skip this frame until a usable extent arrives
                 // (don't render into a destroyed swapchain).
                 error.ZeroExtent => {
                     whead.ctx.swapchain_stale = true;
-                    // Nothing is presentable while minimized — drop any
+                    // Nothing is presentable at zero extent — drop any
                     // latched present so `present_retry` (also gated on
                     // `swapchain_stale` directly, belt-and-suspenders)
                     // has nothing to spin on. The next real resize sets

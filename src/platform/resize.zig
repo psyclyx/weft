@@ -18,22 +18,20 @@ pub const Extent = struct {
 };
 
 pub const ToplevelConfigure = struct {
-    /// Null means a state-only configure: retain the last accepted extent.
-    /// A zero extent is deliberately distinct and represents the minimized
-    /// state, for which no Vulkan swapchain can be made presentable.
-    extent: ?Extent = null,
+    /// xdg-shell uses a non-positive dimension to mean that the client
+    /// chooses that dimension.  Keep the last accepted value independently
+    /// for width and height.
+    width: i32,
+    height: i32,
 };
 
 pub const SurfaceConfigure = struct {
-    /// Every xdg_surface.configure must be acknowledged, including a
-    /// minimized/state-only configure.
-    ack: bool = true,
-    /// Geometry is sent only for a usable extent.  The caller must send it
-    /// after `ack` and commit the surface before attempting a present.
+    /// Geometry is sent only for a usable extent. The caller must send it
+    /// after acknowledging the configure and commit before attempting a
+    /// present.
     geometry: ?Extent = null,
     extent: Extent,
     extent_changed: bool,
-    minimized: bool,
 };
 
 pub const State = struct {
@@ -47,9 +45,13 @@ pub const State = struct {
     }
 
     /// Coalesce all superseded toplevel extents until the next surface
-    /// configure.  A null extent is a state-only configure.
+    /// configure, retaining each non-positive dimension independently.
     pub fn toplevelConfigure(self: *State, configure: ToplevelConfigure) void {
-        if (configure.extent) |extent| self.pending_extent = extent;
+        const base = self.pending_extent orelse self.extent;
+        self.pending_extent = .{
+            .width = if (configure.width > 0) @intCast(configure.width) else base.width,
+            .height = if (configure.height > 0) @intCast(configure.height) else base.height,
+        };
     }
 
     /// Consume the newest toplevel configure at the protocol's ack boundary.
@@ -65,7 +67,6 @@ pub const State = struct {
             .geometry = if (next.nonZero()) next else null,
             .extent = next,
             .extent_changed = changed,
-            .minimized = !next.nonZero(),
         };
     }
 
@@ -83,6 +84,10 @@ pub const State = struct {
         return .{ .width = self.extent.width * @max(self.scale, 1), .height = self.extent.height * @max(self.scale, 1) };
     }
 
+    pub fn bufferScale(self: *const State) u32 {
+        return @max(self.scale, 1);
+    }
+
     pub fn consumeResized(self: *State) bool {
         const changed = self.resize_pending;
         self.resize_pending = false;
@@ -92,10 +97,9 @@ pub const State = struct {
 
 test "configure reducer coalesces superseded extents at the ack boundary" {
     var state = State.init(800, 600);
-    state.toplevelConfigure(.{ .extent = .{ .width = 1024, .height = 768 } });
-    state.toplevelConfigure(.{ .extent = .{ .width = 1280, .height = 720 } });
+    state.toplevelConfigure(.{ .width = 1024, .height = 768 });
+    state.toplevelConfigure(.{ .width = 1280, .height = 720 });
     const result = state.surfaceConfigure();
-    try std.testing.expect(result.ack);
     try std.testing.expect(result.extent_changed);
     try std.testing.expectEqual(@as(u32, 1280), result.extent.width);
     try std.testing.expectEqual(@as(u32, 720), result.extent.height);
@@ -104,28 +108,26 @@ test "configure reducer coalesces superseded extents at the ack boundary" {
     try std.testing.expect(!state.consumeResized());
 }
 
-test "configure reducer represents minimize and restore" {
+test "configure reducer retains unspecified dimensions" {
     var state = State.init(800, 600);
-    state.toplevelConfigure(.{ .extent = .{ .width = 0, .height = 0 } });
-    const minimized = state.surfaceConfigure();
-    try std.testing.expect(minimized.ack);
-    try std.testing.expect(minimized.minimized);
-    try std.testing.expect(minimized.geometry == null);
-    try std.testing.expectEqual(@as(u32, 0), state.framebufferExtent().width);
+    state.toplevelConfigure(.{ .width = 1024, .height = 0 });
+    const width_only = state.surfaceConfigure();
+    try std.testing.expect(width_only.extent_changed);
+    try std.testing.expectEqual(@as(u32, 1024), width_only.extent.width);
+    try std.testing.expectEqual(@as(u32, 600), width_only.extent.height);
     try std.testing.expect(state.consumeResized());
 
-    state.toplevelConfigure(.{ .extent = .{ .width = 640, .height = 480 } });
-    const restored = state.surfaceConfigure();
-    try std.testing.expect(!restored.minimized);
-    try std.testing.expectEqual(@as(u32, 640), restored.extent.width);
+    state.toplevelConfigure(.{ .width = 0, .height = 480 });
+    const height_only = state.surfaceConfigure();
+    try std.testing.expectEqual(@as(u32, 1024), height_only.extent.width);
+    try std.testing.expectEqual(@as(u32, 480), height_only.extent.height);
     try std.testing.expect(state.consumeResized());
 }
 
 test "configure reducer handles scale and state-only configures" {
     var state = State.init(800, 600);
-    state.toplevelConfigure(.{});
+    state.toplevelConfigure(.{ .width = 0, .height = 0 });
     const state_only = state.surfaceConfigure();
-    try std.testing.expect(state_only.ack);
     try std.testing.expect(!state_only.extent_changed);
     try std.testing.expect(!state.consumeResized());
 

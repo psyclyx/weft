@@ -45,8 +45,9 @@
 //!   (`app/loop_sources.zig:keyRepeatDue`).
 //! Plus fields sampled directly (no method — they're read-mostly state, not
 //! edge-triggered events): `display`/`surface` (raw native handles — see
-//! "the SurfaceSource leak" below), `buffer_scale`, `mouse_x`/`mouse_y`/
-//! `mouse_down` (`app/dispatch.zig:handlePointer` reads all four every frame).
+//! "the SurfaceSource leak" below), `mouse_x`/`mouse_y`/`mouse_down`.
+//! `bufferScale()` is a method so accepted scale and resize-pending state
+//! remain owned by the platform reducer.
 //!
 //! `consumeWheel` exists on `Window` but is dead — no caller wires it to a
 //! scroll command today. Left OUT of the contract deliberately: the
@@ -132,7 +133,7 @@ pub const KeyEvent = struct {
 };
 
 /// Verify `T` implements the Platform contract enumerated above: the ten
-/// lifecycle/query/event methods, plus the six directly-sampled fields.
+/// lifecycle/query/event methods, plus the five directly-sampled fields.
 /// Deliberately duck-typed (decl-by-name + "is a function"/"field exists"),
 /// not signature-exact — pinning exact parameter/field TYPES here would
 /// falsely claim the seam already abstracts over e.g. the native
@@ -147,6 +148,7 @@ pub fn assertPlatform(comptime T: type) void {
         "shouldClose",
         "framebufferSize",
         "consumeResized",
+        "bufferScale",
         "nextKeyEvent",
         "consumeMousePressed",
         "repeatDueNs",
@@ -162,7 +164,6 @@ pub fn assertPlatform(comptime T: type) void {
     inline for (.{
         "display",
         "surface",
-        "buffer_scale",
         "mouse_x",
         "mouse_y",
         "mouse_down",
@@ -186,7 +187,6 @@ const HeadlessPlatformSkeleton = struct {
     fb_h: u32 = 0,
     display: usize = 0, // stand-in "native handle" — any type satisfies @hasField
     surface: usize = 0,
-    buffer_scale: u32 = 1,
     mouse_x: f64 = 0,
     mouse_y: f64 = 0,
     mouse_down: [3]bool = @splat(false),
@@ -215,6 +215,10 @@ const HeadlessPlatformSkeleton = struct {
     fn consumeResized(self: *HeadlessPlatformSkeleton) bool {
         _ = self;
         return false;
+    }
+    fn bufferScale(self: *const HeadlessPlatformSkeleton) u32 {
+        _ = self;
+        return 1;
     }
     fn nextKeyEvent(self: *HeadlessPlatformSkeleton) ?KeyEvent {
         _ = self;

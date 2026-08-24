@@ -428,8 +428,9 @@ pub const Context = struct {
     }
 
     pub fn recreateSwapchain(self: *Context, fb_width: u32, fb_height: u32) !void {
-        // A zero surface is a real minimized state. Retire old images but
-        // leave the device alive; a later positive configure restores them.
+        // Defensively handle a zero surface extent without attempting to
+        // create a non-presentable swapchain; another platform may still
+        // report a usable extent on a later resize.
         if (fb_width == 0 or fb_height == 0) {
             try check(vk.vkQueueWaitIdle(self.queue));
             self.destroySwapchain();

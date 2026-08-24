@@ -71,7 +71,7 @@ pub fn handlePointer(
     had_input: *bool,
 ) !bool {
     var dirty = false;
-    const scale: f32 = @floatFromInt(@max(window.buffer_scale, 1));
+    const scale: f32 = @floatFromInt(window.bufferScale());
     const px = @as(f32, @floatCast(window.mouse_x)) * scale;
     const py = @as(f32, @floatCast(window.mouse_y)) * scale;
     // Pane routing: a click outside the focused pane's rect focuses the

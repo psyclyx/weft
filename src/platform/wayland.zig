@@ -65,13 +65,10 @@ pub const Window = struct {
     repeat_rate: i32 = 25,
     repeat_delay_ms: i32 = 400,
 
-    width: u32,
-    height: u32,
-    buffer_scale: u32 = 1,
+    // Single source of truth for accepted logical extent, buffer scale, and
+    // pending resize edges; no mirrored width/height/scale flags live here.
     resize_state: resize.State,
     outputs: [max_outputs]OutputInfo = [_]OutputInfo{.{}} ** max_outputs,
-    initial_configured: bool = false,
-    resized: bool = false,
     close_requested: bool = false,
     focused: bool = true,
 
@@ -112,8 +109,6 @@ pub const Window = struct {
             .surface = undefined,
             .xdg_surface = undefined,
             .toplevel = undefined,
-            .width = width,
-            .height = height,
             .resize_state = resize.State.init(width, height),
         };
 
@@ -260,9 +255,11 @@ pub const Window = struct {
     }
 
     pub fn consumeResized(self: *Window) bool {
-        const changed = self.resized;
-        self.resized = false;
-        return changed;
+        return self.resize_state.consumeResized();
+    }
+
+    pub fn bufferScale(self: *const Window) u32 {
+        return self.resize_state.bufferScale();
     }
 
     /// Next key event in press order, or null.
@@ -330,10 +327,7 @@ pub const Window = struct {
 
     fn refreshBufferScale(self: *Window) void {
         const next = self.currentBufferScale();
-        if (next == self.buffer_scale) return;
-        self.buffer_scale = next;
-        _ = self.resize_state.setScale(next);
-        self.resized = true;
+        if (!self.resize_state.setScale(next)) return;
         c.wl_surface_set_buffer_scale(self.surface, @intCast(next));
     }
 
@@ -428,10 +422,6 @@ fn xdgSurfaceConfigure(data: ?*anyopaque, xdg_surface: ?*c.xdg_surface, serial: 
     // resize has been applied.
     c.xdg_surface_ack_configure(xdg_surface.?, serial);
     const decision = self.resize_state.surfaceConfigure();
-    self.initial_configured = true;
-    self.width = decision.extent.width;
-    self.height = decision.extent.height;
-    if (decision.extent_changed) self.resized = true;
     if (decision.geometry) |geometry| {
         c.xdg_surface_set_window_geometry(
             xdg_surface.?,
@@ -456,22 +446,9 @@ fn xdgToplevelConfigure(
     _: ?*c.wl_array,
 ) callconv(.c) void {
     const self = selfFrom(data);
-    // A zero extent is retained as an explicit minimized state.  A later
-    // positive configure restores it; state-only configures are represented
-    // by the reducer's null extent and do not disturb framebuffer geometry.
-    // Initial xdg-shell configures commonly carry (0, 0) to say “client
-    // chooses”; retain the requested startup size until that first surface
-    // configure is acknowledged. After startup, zero is the explicit
-    // minimized extent handled by the reducer.
-    if (!self.initial_configured and width <= 0 and height <= 0) {
-        self.resize_state.toplevelConfigure(.{});
-    } else {
-        const extent: resize.Extent = .{
-            .width = if (width > 0) @intCast(width) else 0,
-            .height = if (height > 0) @intCast(height) else 0,
-        };
-        self.resize_state.toplevelConfigure(.{ .extent = extent });
-    }
+    // xdg-shell's non-positive dimensions mean that the client chooses that
+    // dimension; the reducer retains its last accepted value per axis.
+    self.resize_state.toplevelConfigure(.{ .width = width, .height = height });
 }
 
 fn xdgToplevelClose(data: ?*anyopaque, _: ?*c.xdg_toplevel) callconv(.c) void {
