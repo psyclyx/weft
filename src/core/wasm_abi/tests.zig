@@ -49,6 +49,17 @@ test "wasm plugin: canonical targets and scenes cross the semantic membrane" {
     const view = semantic.views.get(view_ref).?;
     try t.expect(view.descriptor.target.?.eql(target_ref));
     try t.expectEqual(@as(u64, 7), view.descriptor.revision);
+
+    // The same retained target is discoverable through the generic resolver,
+    // and the selected guest handler opens only the view it owns.  This is the
+    // end-to-end membrane path: descriptor -> guest probe -> selection ->
+    // located open -> typed view, with no dired- or Vim-specific coupling.
+    var resolution = try semantic.resolveTarget(gpa, target_ref);
+    defer resolution.deinit();
+    try t.expectEqual(@as(usize, 1), resolution.handlers.value.candidates.len);
+    const selected = resolution.handlers.value.decide().selected;
+    try t.expectEqual(view_ref, try semantic.openTarget(selected, resolution.located(.whole)));
+
     try t.expectEqualStrings("fixture", view.scene.role);
     const field_ref = view.scene.content.container.children[0].content.field.ref;
     const interaction = env.head.interactions.active().?;
