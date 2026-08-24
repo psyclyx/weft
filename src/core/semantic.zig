@@ -336,10 +336,10 @@ pub const Services = struct {
             // invalidated or could not be answered. Only a provider that
             // explicitly declines the name contributes to `.absent`.
             for (relations.value.failures) |failure| switch (failure.reason) {
-                .InvalidRelation => return error.InvalidRelation,
-                .Failed => return error.RelationFailed,
-                .Unavailable => return error.RelationUnavailable,
-                .StaleTarget => return error.StaleTarget,
+                error.InvalidRelation => return error.InvalidRelation,
+                error.Failed => return error.RelationFailed,
+                error.Unavailable => return error.RelationUnavailable,
+                error.StaleTarget => return error.StaleTarget,
             };
             output.value = .absent;
             return output;
@@ -524,7 +524,7 @@ pub const Services = struct {
             },
             .interaction => |definition| .{ .interaction_opened = try self.openInteraction(stack, gpa, definition) },
             .open_target => |located| switch (try self.openLocatedTarget(gpa, located)) {
-                .opened => |view| .{ .target_opened = view },
+                .opened => |opened_view| .{ .target_opened = opened_view },
                 .no_handler => error.NoTargetHandler,
                 .ambiguous => error.AmbiguousTargetHandlers,
             },
@@ -1037,13 +1037,13 @@ test "semantic target relations resolve, stay absent, and reject stale or ambigu
         unavailable: bool = false,
         failed: bool = false,
 
-        pub fn query(self: *@This(), query: target_runtime.relation.Query) target_runtime.relation.QueryError!?target_runtime.relation.Relation {
+        pub fn query(self: *@This(), request: target_runtime.relation.Query) target_runtime.relation.QueryError!?target_runtime.relation.Relation {
             if (self.unavailable) return error.Unavailable;
             if (self.failed) return error.Failed;
-            if (!std.mem.eql(u8, query.name, "container")) return null;
+            if (!std.mem.eql(u8, request.name, "container")) return null;
             var target = self.destination;
             if (self.foreign_authority) target.target.authority = @enumFromInt(99);
-            return .{ .name = if (self.wrong_name) "other" else query.name, .target = target };
+            return .{ .name = if (self.wrong_name) "other" else request.name, .target = target };
         }
     };
 
@@ -1080,7 +1080,7 @@ test "semantic target relations resolve, stay absent, and reject stale or ambigu
     }
     var absent = try services.resolveTargetRelation(std.testing.allocator, source, "parent");
     defer absent.deinit();
-    try std.testing.expectEqual(TargetRelationResult.absent, absent.value);
+    try std.testing.expectEqual(Services.TargetRelationResult.absent, absent.value);
     try std.testing.expectError(error.StaleTarget, services.resolveTargetRelation(std.testing.allocator, .{ .target = source_ref, .revision = 2 }, "container"));
     try std.testing.expectError(error.InvalidRelation, services.resolveTargetRelation(std.testing.allocator, source, ""));
 
