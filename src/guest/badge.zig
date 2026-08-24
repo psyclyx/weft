@@ -8,7 +8,7 @@
 //! anywhere in the loop — see `src/core/wasm_abi/tests.zig`'s "D2" test for
 //! the host-side consumer half.
 
-const weft = @import("weft.zig");
+const weft = @import("weft");
 const schema = weft.schema;
 
 // The slot's schema (§6 step 1). Extended one field beyond the design doc's

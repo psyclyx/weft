@@ -31,7 +31,7 @@
 //! the peer listing, fs_write is unused today but reserved for temp-file ops.
 
 const std = @import("std");
-const weft = @import("weft.zig");
+const weft = @import("weft");
 
 // ── Caps (freestanding: no allocator, bounded static state; degrade loud) ──
 const MAX_ENTRIES = 1024; // visible tree nodes

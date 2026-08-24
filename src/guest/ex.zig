@@ -19,7 +19,7 @@
 //! module, so the module-level scratch below never crosses editors.
 
 const std = @import("std");
-const weft = @import("weft.zig");
+const weft = @import("weft");
 
 // ── Caps (bounded; degrade + echo on overflow, never overrun) ──────────────
 const LINE_CAP = 1024; // the typed command line

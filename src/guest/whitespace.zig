@@ -6,7 +6,7 @@
 //! of the current line; `trim-trailing-buffer` rebuilds the whole (capped)
 //! document trimmed and replaces it with one edit.
 
-const weft = @import("weft.zig");
+const weft = @import("weft");
 
 /// Scratch for the rebuilt (trimmed) buffer. Trimming only ever shrinks, so a
 /// buffer the size of the shim's read scratch (64 KiB) always suffices for the

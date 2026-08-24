@@ -42,7 +42,7 @@
 const std = @import("std");
 const Allocator = std.mem.Allocator;
 
-const wire = @import("../wire.zig");
+const wire = @import("weft_wire");
 const Session = @import("Session.zig");
 
 /// `Doc` need only provide `version(*const Doc, Allocator) E![]u8`,

@@ -11,7 +11,7 @@ const linux = std.os.linux;
 
 const identity = @import("../identity.zig");
 const task = @import("../task.zig");
-const wire = @import("../wire.zig");
+const wire = @import("weft_wire");
 const Document = @import("../Document.zig");
 const layers_mod = @import("../layers.zig");
 const subbuffer = @import("../subbuffer.zig");

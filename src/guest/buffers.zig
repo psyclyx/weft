@@ -6,7 +6,7 @@
 //! next/close/save verbs stay the core primitives a config binds directly.
 
 const std = @import("std");
-const weft = @import("weft.zig");
+const weft = @import("weft");
 
 const buf_pick = 0;
 var ids: [1024]i32 = undefined;

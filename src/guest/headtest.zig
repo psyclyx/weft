@@ -33,7 +33,7 @@
 //!     call). Kept as `poked`/`polled` naming so a diff against the
 //!     pre-item-4 fixture reads as "same shape, now denied," not rewritten.
 
-const weft = @import("weft.zig");
+const weft = @import("weft");
 
 var poll_count: i32 = 0;
 

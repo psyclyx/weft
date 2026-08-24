@@ -7,7 +7,7 @@
 //! range is version-stamped, so it rebases like a concurrent peer's edit.
 
 const std = @import("std");
-const weft = @import("weft.zig");
+const weft = @import("weft");
 
 var xform: [1 << 16]u8 = undefined;
 

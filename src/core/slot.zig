@@ -20,7 +20,7 @@ const std = @import("std");
 const Allocator = std.mem.Allocator;
 const container_mod = @import("container.zig");
 const facts_mod = @import("facts.zig");
-const schema_mod = @import("schema.zig");
+const schema_mod = @import("weft_schema");
 
 pub const Schema = schema_mod.Schema;
 pub const Facts = facts_mod.Facts;

@@ -90,7 +90,7 @@
 const std = @import("std");
 const Allocator = std.mem.Allocator;
 
-const wire = @import("../wire.zig");
+const wire = @import("weft_wire");
 const GraphDoc = @import("../graph.zig");
 const NodeRef = GraphDoc.NodeRef;
 

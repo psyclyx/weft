@@ -23,9 +23,9 @@ const wasm = @import("../wasm.zig");
 const contract = @import("../membrane/contract.zig");
 const container_mod = @import("../container.zig");
 const facts_mod = @import("../facts.zig");
-const schema_mod = @import("../schema.zig");
+const schema_mod = @import("weft_schema");
 const slot_mod = @import("../slot.zig");
-const wire_mod = @import("../wire.zig");
+const wire_mod = @import("weft_wire");
 
 const shared = @import("plugin.zig");
 const WasmPlugin = shared.WasmPlugin;

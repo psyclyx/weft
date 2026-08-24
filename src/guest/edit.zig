@@ -6,7 +6,7 @@
 //! plugin runs identically as `.wasm` under the perm handshake.
 
 const std = @import("std");
-const weft = @import("weft.zig");
+const weft = @import("weft");
 
 /// Scratch for building an edit's bytes (no allocator in a freestanding guest).
 var buf: [1 << 16]u8 = undefined;

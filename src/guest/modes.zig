@@ -7,7 +7,7 @@
 //! `{proc, timer}`.
 
 const std = @import("std");
-const weft = @import("weft.zig");
+const weft = @import("weft");
 
 var cmd_buf: [1 << 12]u8 = undefined;
 var echo_buf: [128]u8 = undefined;

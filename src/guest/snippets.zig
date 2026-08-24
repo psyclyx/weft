@@ -6,7 +6,7 @@
 //! `fs` read surface with the edit door.
 
 const std = @import("std");
-const weft = @import("weft.zig");
+const weft = @import("weft");
 
 const default_file = "weft-snippets.txt";
 var trigger_buf: [256]u8 = undefined;

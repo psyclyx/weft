@@ -67,7 +67,7 @@ const container_mod = @import("container.zig");
 const Keymap = @import("Keymap.zig");
 const surface = @import("surface.zig");
 const grants_mod = @import("grants.zig");
-const schema_mod = @import("schema.zig");
+const schema_mod = @import("weft_schema");
 
 pub const Tier = container_mod.Tier;
 

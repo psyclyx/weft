@@ -17,7 +17,7 @@
 const std = @import("std");
 const Allocator = std.mem.Allocator;
 
-const wire = @import("../wire.zig");
+const wire = @import("weft_wire");
 const secure = @import("../secure.zig");
 const identity = @import("../identity.zig");
 const task = @import("../task.zig");

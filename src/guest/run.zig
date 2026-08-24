@@ -7,7 +7,7 @@
 //! or from the current buffer line (`run-line`, for scratch/command notes).
 
 const std = @import("std");
-const weft = @import("weft.zig");
+const weft = @import("weft");
 
 /// Scratch for the shell command line built from a buffer slice (`run-line`),
 /// which borrows `weft`'s read scratch and so must be copied before use.

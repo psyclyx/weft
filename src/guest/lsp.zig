@@ -10,7 +10,7 @@
 //! Each feature is a `Want` variant + a params builder + a response handler.
 
 const std = @import("std");
-const weft = @import("weft.zig");
+const weft = @import("weft");
 const rpc = @import("jsonrpc.zig");
 
 // ── Connection state ─────────────────────────────────────────────────

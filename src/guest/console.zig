@@ -6,7 +6,7 @@
 //! session state) needs a persistent interactive-proc session, the next tier.
 
 const std = @import("std");
-const weft = @import("weft.zig");
+const weft = @import("weft");
 
 const console = "*console*";
 var cmd_buf: [1 << 12]u8 = undefined;

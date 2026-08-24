@@ -8,7 +8,7 @@ const std = @import("std");
 const Allocator = std.mem.Allocator;
 const linux = std.os.linux;
 
-const wire = @import("../wire.zig");
+const wire = @import("weft_wire");
 const Document = @import("../Document.zig");
 const Session = @import("Session.zig");
 

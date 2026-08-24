@@ -5,7 +5,7 @@
 //! by irrelevance — no wire — and identical over a remote buffer.
 
 const std = @import("std");
-const weft = @import("weft.zig");
+const weft = @import("weft");
 
 const Cmd = struct { name: []const u8, handler: *const fn () void };
 const cmds = [_]Cmd{

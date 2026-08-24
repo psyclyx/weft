@@ -6,7 +6,7 @@
 //! hardcoded for now (a shiftwidth/expandtab config comes with the same work that
 //! makes comment's token language-aware).
 
-const weft = @import("weft.zig");
+const weft = @import("weft");
 
 /// One indent level. Two spaces — the web/JS default and what the harness fixtures
 /// use. Dedent peels leading spaces up to this width, or a single leading tab.

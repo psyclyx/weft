@@ -21,7 +21,7 @@
 //! synthesized patch into temp files. grant_max edit (it authors its own buffer).
 
 const std = @import("std");
-const weft = @import("weft.zig");
+const weft = @import("weft");
 
 // ── Caps (freestanding: no allocator, bounded static state; degrade loud) ──
 const MAX_FILES = 128;

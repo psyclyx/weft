@@ -13,7 +13,7 @@
 //! adapter work.
 
 const std = @import("std");
-const weft = @import("weft.zig");
+const weft = @import("weft");
 
 const MAX_BP = 128;
 const PATHLEN = 256;

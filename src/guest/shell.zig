@@ -10,7 +10,7 @@
 //! body host-side. The design anticipated this: "route proc through the
 //! perm-checked host import."
 
-const weft = @import("weft.zig");
+const weft = @import("weft");
 
 var id_insert: u32 = 0;
 

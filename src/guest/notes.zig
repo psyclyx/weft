@@ -6,7 +6,7 @@
 //! multiplayer once the file is a CRDT document.
 
 const std = @import("std");
-const weft = @import("weft.zig");
+const weft = @import("weft");
 
 const default_file = "weft-notes.md";
 var line_buf: [1 << 14]u8 = undefined;

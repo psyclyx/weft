@@ -6,7 +6,7 @@
 //! on_pick_accept. No core privilege; the same door a user's config uses.
 
 const std = @import("std");
-const weft = @import("weft.zig");
+const weft = @import("weft");
 
 var id_palette: u32 = 0;
 var id_help: u32 = 0;

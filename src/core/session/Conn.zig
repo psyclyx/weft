@@ -8,7 +8,7 @@ const std = @import("std");
 const Allocator = std.mem.Allocator;
 const assert = std.debug.assert;
 
-const wire = @import("../wire.zig");
+const wire = @import("weft_wire");
 const secure = @import("../secure.zig");
 const Document = @import("../Document.zig");
 const GraphDoc = @import("../graph.zig");

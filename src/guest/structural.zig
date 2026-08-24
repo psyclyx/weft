@@ -5,7 +5,7 @@
 //! + the edit door — the same substrate textobjects/folding compose from,
 //! now across the membrane.
 
-const weft = @import("weft.zig");
+const weft = @import("weft");
 
 var id_kind: u32 = 0;
 var id_del: u32 = 0;

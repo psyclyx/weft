@@ -5,7 +5,7 @@
 //! that merge like a concurrent editor. perms `{proc, timer}`.
 
 const std = @import("std");
-const weft = @import("weft.zig");
+const weft = @import("weft");
 
 const Cmd = struct { name: []const u8, handler: *const fn () void };
 const cmds = [_]Cmd{

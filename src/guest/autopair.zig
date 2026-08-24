@@ -11,7 +11,7 @@
 //! own delimiters, etc., without touching this plugin (Carve 2).
 
 const std = @import("std");
-const weft = @import("weft.zig");
+const weft = @import("weft");
 
 const Pair = struct { name: []const u8, open: []const u8, close: []const u8 };
 

@@ -15,6 +15,55 @@ const Renderer = enum { skia, snail };
 /// config) exercised only by the wasm-membrane suite, embedded into the test
 /// module below.
 const Guest = struct { src: []const u8, import: []const u8, install: bool };
+
+/// Compiler-enforced subsystem boundaries. Cross-module code imports these
+/// names; relative imports are reserved for implementation files beneath the
+/// corresponding module root.
+const ArchitectureModules = struct {
+    wire: *std.Build.Module,
+    schema: *std.Build.Module,
+    kernel: *std.Build.Module,
+    fs: *std.Build.Module,
+};
+
+fn createArchitectureModules(
+    b: *std.Build,
+    target: std.Build.ResolvedTarget,
+    optimize: std.builtin.OptimizeMode,
+) ArchitectureModules {
+    const wire = b.createModule(.{
+        .root_source_file = b.path("src/core/wire.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    const schema = b.createModule(.{
+        .root_source_file = b.path("src/core/schema.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    schema.addImport("weft_wire", wire);
+    const kernel = b.createModule(.{
+        .root_source_file = b.path("src/kernel/root.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    kernel.addImport("weft_schema", schema);
+    const fs = b.createModule(.{
+        .root_source_file = b.path("src/fs/root.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    fs.addImport("weft_kernel", kernel);
+    return .{ .wire = wire, .schema = schema, .kernel = kernel, .fs = fs };
+}
+
+fn addArchitectureImports(mod: *std.Build.Module, architecture: ArchitectureModules) void {
+    mod.addImport("weft_wire", architecture.wire);
+    mod.addImport("weft_schema", architecture.schema);
+    mod.addImport("weft_kernel", architecture.kernel);
+    mod.addImport("weft_fs", architecture.fs);
+}
+
 const guests = [_]Guest{
     .{ .src = "src/guest/hello.zig", .import = "guest_hello_wasm", .install = false },
     .{ .src = "src/guest/plugin.zig", .import = "guest_plugin_wasm", .install = false },
@@ -79,6 +128,7 @@ pub fn build(b: *std.Build) void {
     // missing fetch in one round rather than one per re-run.
     const snail_dep = snail_opt orelse return;
     const stemma_dep = stemma_opt orelse return;
+    const architecture = createArchitectureModules(b, target, optimize);
 
     // ── Desktop (Wayland) executable ──
     const exe_mod = b.createModule(.{
@@ -87,6 +137,7 @@ pub fn build(b: *std.Build) void {
         .optimize = optimize,
         .link_libc = true,
     });
+    addArchitectureImports(exe_mod, architecture);
     exe_mod.addImport("snail", snail_dep.module("snail"));
     // SPIR-V-only shader scope: slangc runs inside snail's build; weft
     // consumes blobs + the reflection ABI through this module. Snail-renderer
@@ -153,6 +204,7 @@ pub fn build(b: *std.Build) void {
         .optimize = optimize,
         .link_libc = true,
     });
+    addArchitectureImports(weft_mod, architecture);
     weft_mod.addImport("snail", snail_dep.module("snail"));
     weft_mod.addImport("snail-raster", snail_dep.module("snail-raster"));
     weft_mod.addImport("stemma", stemma_dep.module("stemma"));
@@ -255,6 +307,15 @@ pub fn build(b: *std.Build) void {
     const run_tests = b.addRunArtifact(unit_tests);
     const test_step = b.step("test", "Run unit tests");
     test_step.dependOn(&run_tests.step);
+
+    // Portable contract gate: deliberately separate from the application
+    // suite so these roots cannot acquire app/platform dependencies unnoticed.
+    const contract_step = b.step("test-contract", "Run portable schema/kernel/filesystem contract tests");
+    inline for (.{ architecture.wire, architecture.schema, architecture.kernel, architecture.fs }) |contract_mod| {
+        const contract_tests = b.addTest(.{ .root_module = contract_mod });
+        const run_contract_tests = b.addRunArtifact(contract_tests);
+        contract_step.dependOn(&run_contract_tests.step);
+    }
 
     // The `weft` module owns the core/gfx/app files, so its own unit tests run in
     // a second test binary; the `test` step runs both. The two binaries run as
@@ -406,6 +467,8 @@ fn buildGuest(b: *std.Build, src: []const u8) *std.Build.Step.Compile {
         .target = wasm_target,
         .optimize = .ReleaseSmall,
     });
+    // The guest SDK is a real named module. Plugin roots import `weft` and
+    // cannot reach sideways into the SDK implementation by relative path.
     // src/guest/weft.zig comptime-verifies its hand-written externs against
     // core/membrane/contract_data.zig's signedness table (task W0a-D) — a
     // plain relative `@import("../core/membrane/contract_data.zig")` fails
@@ -414,11 +477,11 @@ fn buildGuest(b: *std.Build, src: []const u8) *std.Build.Step.Compile {
     // that root). Wire it as a named import instead, same target as the
     // guest itself (contract_data.zig has zero host-only deps — no
     // wasmtime, no wasm_host — by design, so it compiles fine here too).
-    guest_mod.addImport("membrane_contract_data", b.createModule(.{
+    const contract_data = b.createModule(.{
         .root_source_file = b.path("src/core/membrane/contract_data.zig"),
         .target = wasm_target,
         .optimize = .ReleaseSmall,
-    }));
+    });
     // D2 (doc/d2-schema-payloads.md §3.2/§3.3): the guest SDK imports the
     // IDENTICAL core/schema.zig the host does — same zero-host-dependency
     // posture as contract_data.zig above, same reason it needs a named
@@ -427,11 +490,25 @@ fn buildGuest(b: *std.Build, src: []const u8) *std.Build.Step.Compile {
     // guest's own `parseSchema`/`decodeCursor`/`canonicalizeSchema` calls
     // (weft.zig's `schemaEncode`/`slotBind` ergonomic wrappers) the SAME
     // implementation the host runs, not a second one.
-    guest_mod.addImport("weft_schema", b.createModule(.{
+    const schema = b.createModule(.{
         .root_source_file = b.path("src/core/schema.zig"),
         .target = wasm_target,
         .optimize = .ReleaseSmall,
-    }));
+    });
+    const wire = b.createModule(.{
+        .root_source_file = b.path("src/core/wire.zig"),
+        .target = wasm_target,
+        .optimize = .ReleaseSmall,
+    });
+    schema.addImport("weft_wire", wire);
+    const guest_sdk = b.createModule(.{
+        .root_source_file = b.path("src/guest/weft.zig"),
+        .target = wasm_target,
+        .optimize = .ReleaseSmall,
+    });
+    guest_sdk.addImport("membrane_contract_data", contract_data);
+    guest_sdk.addImport("weft_schema", schema);
+    guest_mod.addImport("weft", guest_sdk);
     const guest = b.addExecutable(.{
         .name = std.fs.path.stem(src),
         .root_module = guest_mod,

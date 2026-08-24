@@ -6,7 +6,7 @@
 //! non-trivial pure computation (prepend/dedup/cap) ports unchanged.
 
 const std = @import("std");
-const weft = @import("weft.zig");
+const weft = @import("weft");
 
 const recent_key = "recent";
 const root_key = "root"; // the current project's root (last detected)

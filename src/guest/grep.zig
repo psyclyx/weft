@@ -7,7 +7,7 @@
 //! the cursor and searches for that — search-for-the-thing-I'm-on.
 
 const std = @import("std");
-const weft = @import("weft.zig");
+const weft = @import("weft");
 
 /// Scratch for the assembled shell command line (pattern + rg flags).
 var cmd_buf: [1 << 12]u8 = undefined;

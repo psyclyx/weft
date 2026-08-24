@@ -6,7 +6,7 @@
 //! through the host edit gate (authored as this plugin's peer, grade-gated).
 //! This is the bidirectional host↔guest ABI every `.wasm` catalog plugin uses.
 
-const weft = @import("weft.zig");
+const weft = @import("weft");
 
 /// Declare-phase (no authority): announce the command the host will cross-check
 /// every `register` against.

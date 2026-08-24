@@ -49,7 +49,7 @@
 const std = @import("std");
 const Allocator = std.mem.Allocator;
 const facts_mod = @import("facts.zig");
-const schema_mod = @import("schema.zig");
+const schema_mod = @import("weft_schema");
 
 pub const Facts = facts_mod.Facts;
 pub const Predicate = facts_mod.Predicate;

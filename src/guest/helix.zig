@@ -12,7 +12,7 @@
 //! change verbs act over a motion's range via the operators plugin.
 
 const std = @import("std");
-const weft = @import("weft.zig");
+const weft = @import("weft");
 const ex_mod = @import("ex.zig");
 
 /// The `:` command line, in helix's own mode namespace (`helix-normal` resting,

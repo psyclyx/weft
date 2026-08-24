@@ -14,7 +14,7 @@
 //! next `next()`); a returned `Value` is valid until then.
 
 const std = @import("std");
-const weft = @import("weft.zig");
+const weft = @import("weft");
 
 pub const Value = std.json.Value;
 

@@ -6,7 +6,7 @@
 //! richer client keys many.
 
 const std = @import("std");
-const weft = @import("weft.zig");
+const weft = @import("weft");
 
 const net_buf = "*net*";
 var host_buf: [512]u8 = undefined;

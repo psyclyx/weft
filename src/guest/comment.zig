@@ -6,7 +6,7 @@
 //! non-blank column, never column zero. The comment token is hardcoded for now
 //! (language-aware tokens come later).
 
-const weft = @import("weft.zig");
+const weft = @import("weft");
 
 /// The line-comment token. Add inserts the full `// `; remove peels `// ` when
 /// present, else the bare `//`.

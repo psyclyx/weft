@@ -6,7 +6,7 @@
 //! session state between sends — a real read-eval-print loop.
 
 const std = @import("std");
-const weft = @import("weft.zig");
+const weft = @import("weft");
 
 const repl_buf = "*repl*";
 var session: ?u32 = null;

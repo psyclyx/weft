@@ -4,7 +4,7 @@
 //! reaching the editor only through the config surface the sandbox grants —
 //! exactly how a user's config.js does, one tier down.
 
-const weft = @import("weft.zig");
+const weft = @import("weft");
 
 var id_dup_up: u32 = 0;
 

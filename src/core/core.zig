@@ -66,7 +66,7 @@ pub const proc_stream = @import("proc_stream.zig");
 pub const status_feed = @import("status_feed.zig");
 pub const complete_ui = @import("complete_ui.zig");
 // nav_ui (hover/definition/symbols consumers) removed — moved to the `lsp` plugin.
-pub const wire = @import("wire.zig");
+pub const wire = @import("weft_wire");
 pub const secure = @import("secure.zig");
 pub const identity = @import("identity.zig");
 pub const known_peers = @import("known_peers.zig");

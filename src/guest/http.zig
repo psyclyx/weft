@@ -5,7 +5,7 @@
 //! `net.connect` transport into something an agent adapter can build on.
 
 const std = @import("std");
-const weft = @import("weft.zig");
+const weft = @import("weft");
 
 const http_buf = "*http*";
 var url_buf: [1024]u8 = undefined;

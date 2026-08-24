@@ -10,7 +10,7 @@
 //! menus fall back to) scroll it, and a footer shows the position.
 
 const std = @import("std");
-const weft = @import("weft.zig");
+const weft = @import("weft");
 
 /// Rows of bindings per page (before the position footer). A long menu — or a
 /// mode's whole resolved set on an F1 peek — paginates instead of overflowing.

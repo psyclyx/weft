@@ -7,7 +7,7 @@
 //! The core knows nothing of vim; delete it and weft is modeless.
 
 const std = @import("std");
-const weft = @import("weft.zig");
+const weft = @import("weft");
 const ex_mod = @import("ex.zig");
 
 /// The `:` command line: vim's resting mode is `normal`, its command-line

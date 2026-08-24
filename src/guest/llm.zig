@@ -6,7 +6,7 @@
 //! `net.connect` + `spawnPeer`); it is the honest minimum that runs today.
 
 const std = @import("std");
-const weft = @import("weft.zig");
+const weft = @import("weft");
 
 const prompt_file = "weft-llm-prompt.txt";
 

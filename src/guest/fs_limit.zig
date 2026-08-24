@@ -10,7 +10,7 @@
 //! perm-gating): a call that's out of the grant's root must TRAP, never
 //! hand back a fake result the guest could observe and keep running past.
 
-const weft = @import("weft.zig");
+const weft = @import("weft");
 
 const Cmd = struct { name: []const u8, handler: *const fn () void };
 const cmds = [_]Cmd{

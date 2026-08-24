@@ -6,7 +6,7 @@
 //! first source; grep/imenu/mark join as their inputs (proc, symbols) land.
 
 const std = @import("std");
-const weft = @import("weft.zig");
+const weft = @import("weft");
 
 const line_pick = 0;
 const sym_pick = 1;

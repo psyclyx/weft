@@ -11,7 +11,7 @@
 //! Delete this plugin and weft is still modeless — `default` is the floor.
 
 const std = @import("std");
-const weft = @import("weft.zig");
+const weft = @import("weft");
 
 const file_pick = 0;
 

@@ -5,7 +5,7 @@
 //! its own grammar. Exercises the subbuffer handle across the membrane: claim
 //! returns an opaque handle the guest holds, then attaches a fact to it.
 
-const weft = @import("weft.zig");
+const weft = @import("weft");
 
 var id_mark: u32 = 0;
 

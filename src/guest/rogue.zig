@@ -3,7 +3,7 @@
 //! partial load back, exactly as abi.zig does for an in-process plugin. This
 //! is the perm handshake proving itself across the membrane.
 
-const weft = @import("weft.zig");
+const weft = @import("weft");
 
 export fn describe() void {
     weft.declareCommand("declared"); // declares one name…

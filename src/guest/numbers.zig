@@ -7,7 +7,7 @@
 //! all scanning/formatting happens in fixed module scratch, no allocator.
 
 const std = @import("std");
-const weft = @import("weft.zig");
+const weft = @import("weft");
 
 /// Registration order == the id the host hands `on_command`.
 const Cmd = struct { name: []const u8, handler: *const fn () void };

@@ -5,7 +5,7 @@
 //! the guest could silently ignore. Mirrors `rogue.zig`'s pattern of a guest
 //! built to misbehave for the test it backs.
 
-const weft = @import("weft.zig");
+const weft = @import("weft");
 
 export fn describe() void {
     weft.declareCommand("go");

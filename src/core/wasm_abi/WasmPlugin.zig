@@ -254,7 +254,7 @@ caps_builder_session: u64 = 0,
 // (Container itself never frees a slot's schema/a binding's predicate — see
 // `container.SlotDecl.schema`'s doc — so whichever side allocated it owns
 // the free; here, that's this plugin).
-declared_schemas: std.ArrayList(*const @import("../schema.zig").Schema) = .empty,
+declared_schemas: std.ArrayList(*const @import("weft_schema").Schema) = .empty,
 slot_predicate_strs: std.ArrayList([]u8) = .empty,
 
 /// Stamp `[start, end)` against the current document version and hand the
@@ -340,7 +340,7 @@ pub fn deinit(self: *WasmPlugin) void {
     // Container has no slot-removal API (matches every other domain's
     // "declarations outlive a single provider" convention).
     if (self.ctx.slot_host) |host| host.unregisterByOwnerPrefix(self.name);
-    for (self.declared_schemas.items) |s| @import("../schema.zig").freeSchema(gpa, s);
+    for (self.declared_schemas.items) |s| @import("weft_schema").freeSchema(gpa, s);
     self.declared_schemas.deinit(gpa);
     for (self.slot_predicate_strs.items) |s| gpa.free(s);
     self.slot_predicate_strs.deinit(gpa);

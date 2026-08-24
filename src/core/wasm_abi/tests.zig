@@ -707,7 +707,7 @@ test "D2: a wasm guest declares+binds a NOVEL 'ui/badge' slot; the host fires, r
     // completion, but through the generic verbs, and with an explicit fired
     // VERSION the host will restamp every `range` field to (§4), no matter
     // what version the guest's payload claims.
-    const schema_mod = @import("../schema.zig");
+    const schema_mod = @import("weft_schema");
     const fired_version = "fired-session-version-42";
     const id = (try env.slot_host.fire("ui/badge", .{}, fired_version, .{})).?;
     const session = env.slot_host.session(id).?;
