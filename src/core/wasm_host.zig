@@ -72,6 +72,8 @@ const semantic_action = @import("wasm_host/semantic_action.zig");
 pub const initSemanticActionBridge = semantic_action.initBridge;
 const semantic_target = @import("wasm_host/semantic_target.zig");
 pub const initSemanticTargetBridge = semantic_target.initBridge;
+const semantic_relation = @import("wasm_host/semantic_relation.zig");
+pub const initSemanticRelationBridge = semantic_relation.initBridge;
 
 /// Bind the full `weft.*` host-import membrane (the guest-side surface in
 /// src/guest/weft.zig) by walking `membrane/contract.zig`'s table — one

@@ -199,6 +199,14 @@ extern "weft" fn wl_semantic_target_handler_request_len() i32;
 extern "weft" fn wl_semantic_target_handler_request(out: u32, out_cap: u32) i32;
 extern "weft" fn wl_semantic_target_handler_probe_respond(kind: u32) i32;
 extern "weft" fn wl_semantic_target_handler_open_respond(kind: u32, authority: u32, slot: u32, generation: u32) i32;
+// Synchronous named-relation providers. A response carries only the located
+// destination: the host retains the requested relation name and validates the
+// returned target revision/location before admitting it.
+extern "weft" fn wl_semantic_relation_provider_register(token: u32, id: u32, id_len: u32, out: u32, out_cap: u32) i32;
+extern "weft" fn wl_semantic_relation_provider_close(authority: u32, slot: u32, generation: u32) u32;
+extern "weft" fn wl_semantic_relation_request_len() i32;
+extern "weft" fn wl_semantic_relation_request(out: u32, out_cap: u32) i32;
+extern "weft" fn wl_semantic_relation_respond(kind: u32, payload: u32, payload_len: u32) i32;
 extern "weft" fn wl_semantic_transfer_capture(target_authority: u32, target_slot: u32, target_generation: u32, revision_low: u32, revision_high: u32, source_root_authority: u32, source_root_slot: u32, source_root_generation: u32, source_ref_authority: u32, source_ref_slot: u32, source_ref_generation: u32, revision_ptr: u32, revision_len: u32, out: u32, out_cap: u32) i32;
 extern "weft" fn wl_semantic_transfer_retain(authority: u32, slot: u32, generation: u32) i32;
 extern "weft" fn wl_semantic_transfer_release(authority: u32, slot: u32, generation: u32) i32;
@@ -1329,6 +1337,66 @@ pub fn semanticTargetHandlerOpenError(err: SemanticTargetOpenError) bool {
         error.Failed => 4,
     };
     return wl_semantic_target_handler_open_respond(code, 0, 0, 0) == 1;
+}
+
+// ── Generic relation-provider callbacks ───────────────────────────────
+// Relation provider references are guest-local phantom handles. The host
+// registry implementation and filesystem mechanisms never cross this API.
+pub const SemanticRelationProviderTag = struct {};
+pub const SemanticRelationProviderRef = semantic.handle.Handle(SemanticRelationProviderTag);
+pub const RelationProviderRef = SemanticRelationProviderRef;
+
+pub const SemanticRelationProviderError = SemanticPublishError;
+pub const SemanticRelationQueryError = error{ Unavailable, InvalidRelation, StaleTarget, Failed };
+
+pub fn semanticRelationProviderRegister(token: u32, id: []const u8) SemanticRelationProviderError!SemanticRelationProviderRef {
+    if (id.len == 0) return error.InvalidData;
+    if (id.len > semantic_codec.Limits.max_string_bytes) return error.LimitExceeded;
+    var out: [12]u8 = undefined;
+    if (wl_semantic_relation_provider_register(token, p(id.ptr), @intCast(id.len), p(&out), out.len) != 1)
+        return error.Rejected;
+    return readSemanticHandle(SemanticRelationProviderRef, &out);
+}
+
+pub fn semanticRelationProviderClose(ref: SemanticRelationProviderRef) bool {
+    const wire = ref.toWire();
+    return wl_semantic_relation_provider_close(wire.authority, wire.slot, wire.generation) != 0;
+}
+
+/// Read the query available only during `on_semantic_relation_query(token)`.
+pub fn semanticRelationCurrentQuery(gpa: std.mem.Allocator) (semantic_codec.Error || error{Rejected})!semantic_codec.action.OwnedRelation {
+    const raw_len = wl_semantic_relation_request_len();
+    if (raw_len <= 0) return error.Rejected;
+    const len: usize = @intCast(raw_len);
+    if (len > semantic_codec.Limits.max_payload_bytes) return error.LimitExceeded;
+    const bytes = try gpa.alloc(u8, len);
+    defer gpa.free(bytes);
+    if (wl_semantic_relation_request(p(bytes.ptr), @intCast(bytes.len)) != raw_len) return error.Rejected;
+    return semantic_codec.action.decodeRelation(gpa, bytes);
+}
+
+pub fn semanticRelationRespondNone() bool {
+    return wl_semantic_relation_respond(0, 0, 0) == 1;
+}
+
+/// Return only the located destination. The host supplies the exact relation
+/// name from the query and validates target liveness before callers can open
+/// it, so a guest cannot rename an edge in its response.
+pub fn semanticRelationRespondTarget(target: semantic.target.Located) SemanticRelationProviderError!void {
+    const payload = try semantic_codec.target.encodeLocated(allocator, target);
+    defer allocator.free(payload);
+    if (wl_semantic_relation_respond(1, p(payload.ptr), @intCast(payload.len)) != 1)
+        return error.Rejected;
+}
+
+pub fn semanticRelationRespondError(err: SemanticRelationQueryError) bool {
+    const kind: u32 = switch (err) {
+        error.Unavailable => 2,
+        error.InvalidRelation => 3,
+        error.StaleTarget => 4,
+        error.Failed => 5,
+    };
+    return wl_semantic_relation_respond(kind, 0, 0) == 1;
 }
 
 /// Publish a retained scene. A null target is represented canonically by an

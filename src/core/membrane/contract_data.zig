@@ -311,6 +311,11 @@ pub const imports = [_]Entry{
     .{ .name = "wl_semantic_target_handler_request", .params = &.{ .u32, .u32 }, .results = &.{.i32}, .group = .semantic, .doc = "host-to-guest callback read: copy the current canonical target-handler request" },
     .{ .name = "wl_semantic_target_handler_probe_respond", .params = &.{.u32}, .results = &.{.i32}, .group = .semantic, .doc = "answer one target probe with no claim, a match strength, or a typed failure" },
     .{ .name = "wl_semantic_target_handler_open_respond", .params = &.{ .u32, .u32, .u32, .u32 }, .results = &.{.i32}, .group = .semantic, .doc = "answer one target open with a typed view handle or typed failure" },
+    .{ .name = "wl_semantic_relation_provider_register", .params = &.{ .u32, .u32, .u32, .u32, .u32 }, .results = &.{.i32}, .group = .semantic, .doc = "register a tokenized owner-scoped relation provider and write its typed handle" },
+    .{ .name = "wl_semantic_relation_provider_close", .params = &.{ .u32, .u32, .u32 }, .results = &.{.u32}, .group = .semantic, .doc = "close an owned relation provider and invalidate its generation" },
+    .{ .name = "wl_semantic_relation_request_len", .params = &.{}, .results = &.{.i32}, .group = .semantic, .doc = "host-to-guest callback read: byte length of the current canonical relation query" },
+    .{ .name = "wl_semantic_relation_request", .params = &.{ .u32, .u32 }, .results = &.{.i32}, .group = .semantic, .doc = "host-to-guest callback read: copy the current canonical relation query" },
+    .{ .name = "wl_semantic_relation_respond", .params = &.{ .u32, .u32, .u32 }, .results = &.{.i32}, .group = .semantic, .doc = "answer one relation query with no edge, a canonical located edge, or a typed failure" },
     .{ .name = "wl_semantic_transfer_capture", .params = &.{ .u32, .u32, .u32, .u32, .u32, .u32, .u32, .u32, .u32, .u32, .u32, .u32, .u32, .u32, .u32 }, .results = &.{.i32}, .group = .semantic, .perm = .fs_read, .doc = "capture an authorized filesystem entry into an owner-scoped semantic transfer attachment" },
     .{ .name = "wl_semantic_transfer_retain", .params = &.{ .u32, .u32, .u32 }, .results = &.{.i32}, .group = .semantic, .doc = "retain an owner-scoped semantic transfer attachment" },
     .{ .name = "wl_semantic_transfer_release", .params = &.{ .u32, .u32, .u32 }, .results = &.{.i32}, .group = .semantic, .doc = "release an owner-scoped semantic transfer attachment" },
@@ -371,7 +376,7 @@ pub const imports = [_]Entry{
 /// half-finished edit — fails the build with a pointed message instead of
 /// silently drifting the two ~124-entry tables apart again (the exact class
 /// this table exists to kill).
-const expected_import_count = 162;
+const expected_import_count = 167;
 
 /// A host→guest EXPORT entrypoint (design doc/north-star-plan.md §2.5, task
 /// W0a-D extension 2): every `instance.callVoid("name", args)` the host
@@ -432,9 +437,10 @@ pub const exports = [_]Export{
     .{ .name = "on_semantic_action", .params = &.{}, .results = &.{}, .required = false, .doc = "answer one semantic action synchronously using the current canonical request" },
     .{ .name = "on_semantic_target_probe", .params = &.{.i32}, .results = &.{}, .required = false, .doc = "probe one immutable target descriptor for a tokenized handler" },
     .{ .name = "on_semantic_target_open", .params = &.{.i32}, .results = &.{}, .required = false, .doc = "open one revision-stamped located target through a tokenized handler" },
+    .{ .name = "on_semantic_relation_query", .params = &.{.i32}, .results = &.{}, .required = false, .doc = "answer one tokenized named-relation query synchronously" },
 };
 
-const expected_export_count = 15;
+const expected_export_count = 16;
 
 comptime {
     @setEvalBranchQuota(50_000); // the O(n²) duplicate-name scans below, n≈124

@@ -28,6 +28,7 @@ export fn init() void {
     defer replaced_target.deinit();
     if (replaced_target.value.revision != 2 or !replaced_target.value.ref.eql(target_ref)) unreachable;
     _ = weft.semanticTargetHandlerRegister(77, "fixture-directory") catch unreachable;
+    _ = weft.semanticRelationProviderRegister(88, "fixture-container") catch unreachable;
     field_ref = weft.semanticFieldRegister(41, .{
         .revision = "1",
         .bytes = "name",
@@ -124,6 +125,30 @@ export fn on_semantic_target_open(token: u32) void {
         },
     }
     _ = weft.semanticTargetHandlerOpenView(view_ref);
+}
+
+/// Relation publication is independent from target handling. This fixture
+/// answers only the named edge for its exact target revision; the response
+/// contains a destination, not an echoed relation name.
+export fn on_semantic_relation_query(token: u32) void {
+    if (token != 88) {
+        _ = weft.semanticRelationRespondNone();
+        return;
+    }
+    var query = weft.semanticRelationCurrentQuery(weft.allocator) catch {
+        _ = weft.semanticRelationRespondError(error.InvalidRelation);
+        return;
+    };
+    defer query.deinit();
+    if (!std.mem.eql(u8, query.value.name, "container") or
+        !query.value.source.target.eql(target_ref) or query.value.source.revision != 2)
+    {
+        _ = weft.semanticRelationRespondNone();
+        return;
+    }
+    weft.semanticRelationRespondTarget(.{ .target = target_ref, .revision = 2 }) catch {
+        _ = weft.semanticRelationRespondError(error.Failed);
+    };
 }
 
 fn hasFact(descriptor: semantic.target.Descriptor, name: []const u8, value: []const u8) bool {

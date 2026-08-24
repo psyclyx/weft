@@ -257,6 +257,11 @@ semantic_actions: plugin_semantic.action.Bridge = .empty,
 /// before their stable proxy storage is released during plugin teardown.
 semantic_targets: plugin_semantic.target.Bridge = .empty,
 
+// ── Sandboxed semantic relation providers ──
+/// Tokenized named-edge providers. Query answers are immutable located target
+/// values; the guest receives no target-registry implementation authority.
+semantic_relations: plugin_semantic.relation.Bridge = .empty,
+
 // ── Sandboxed semantic transfer attachments ──
 /// Guest references are owner-scoped and are revoked with this plugin. Host
 /// transfer owners retain the resolved resource independently.
@@ -376,6 +381,7 @@ pub fn deinit(self: *WasmPlugin) void {
     self.semantic_fields.deinit();
     self.semantic_actions.deinit();
     self.semantic_targets.deinit();
+    self.semantic_relations.deinit();
     self.semantic_attachments.deinit();
     // Completion provider dies with the plugin (unregister before freeing
     // its id — the caps registry holds the id by reference).

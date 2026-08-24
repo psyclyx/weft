@@ -61,6 +61,14 @@ test "wasm plugin: canonical targets and scenes cross the semantic membrane" {
     const selected = resolution.handlers.value.decide().selected;
     try t.expectEqual(view_ref, try semantic.openTarget(selected, resolution.located(.whole)));
 
+    // The guest independently publishes a named edge through the generic
+    // relation bridge. Core supplies the queried name, validates the located
+    // destination, and returns one owned resolution.
+    var container = try semantic.resolveTargetRelation(gpa, resolution.located(.whole), "container");
+    defer container.deinit();
+    try t.expectEqual(target_ref, container.value.resolved.target);
+    try t.expectEqual(@as(u64, 2), container.value.resolved.revision);
+
     try t.expectEqualStrings("fixture", view.scene.role);
     const field_ref = view.scene.content.container.children[0].content.field.ref;
     const interaction = env.head.interactions.active().?;
@@ -101,6 +109,12 @@ test "wasm plugin: canonical targets and scenes cross the semantic membrane" {
     try t.expect(semantic.targets.get(target_ref) == null);
     try t.expect(semantic.views.get(view_ref) == null);
     try t.expect(semantic.fields.get(field_ref) == null);
+    var retired_relations = try semantic.target_relations.query(gpa, .{
+        .source = .{ .target = target_ref, .revision = 2 },
+        .name = "container",
+    });
+    defer retired_relations.deinit();
+    try t.expectEqual(@as(usize, 0), retired_relations.value.candidates.len);
     try t.expectError(error.StaleView, semantic.actions.invoke(&semantic.views, .{
         .action = "fixture.open",
         .view = view_ref,

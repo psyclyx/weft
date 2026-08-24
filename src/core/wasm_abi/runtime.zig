@@ -253,6 +253,7 @@ fn construct(engine: *wasm.Engine, ctx: *command.Context, name: []const u8, opts
     p.semantic_fields = wasm_host.initSemanticFieldBridge(p);
     p.semantic_actions = wasm_host.initSemanticActionBridge(p);
     p.semantic_targets = wasm_host.initSemanticTargetBridge(p);
+    p.semantic_relations = wasm_host.initSemanticRelationBridge(p);
     return p;
 }
 
