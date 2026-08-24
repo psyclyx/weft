@@ -98,7 +98,7 @@ fn rootActions(arena: std.mem.Allocator, rows: []const model.Row, options: Optio
             break;
         }
     }
-    const result = try arena.alloc(scene.Action, 5 + @as(usize, @intFromBool(options.has_container)));
+    const result = try arena.alloc(scene.Action, 7 + @as(usize, @intFromBool(options.has_container)));
     var index: usize = 0;
     if (options.has_container) {
         result[index] = .{ .id = standard.open_container, .label = "Open container" };
@@ -107,8 +107,10 @@ fn rootActions(arena: std.mem.Allocator, rows: []const model.Row, options: Optio
     result[index] = .{ .id = standard.refresh, .label = "Refresh" };
     result[index + 1] = .{ .id = create_file_action, .label = "New file" };
     result[index + 2] = .{ .id = create_directory_action, .label = "New directory" };
-    result[index + 3] = .{ .id = standard.apply, .label = "Apply draft", .enabled = dirty };
-    result[index + 4] = .{ .id = standard.revert, .label = "Revert draft", .enabled = dirty };
+    result[index + 3] = .{ .id = standard.paste_after, .label = "Paste into directory" };
+    result[index + 4] = .{ .id = standard.paste_before, .label = "Paste into directory" };
+    result[index + 5] = .{ .id = standard.apply, .label = "Apply draft", .enabled = dirty };
+    result[index + 6] = .{ .id = standard.revert, .label = "Revert draft", .enabled = dirty };
     return result;
 }
 
@@ -399,7 +401,9 @@ test "projection keeps row ids and order stable across draft rename" {
     defer first.deinit();
     try std.testing.expectEqualStrings(standard.refresh, first.value.actions[0].id);
     try std.testing.expect(first.value.actions[0].enabled);
-    try std.testing.expect(!first.value.actions[3].enabled);
+    try std.testing.expectEqualStrings(standard.paste_after, first.value.actions[3].id);
+    try std.testing.expect(first.value.actions[3].enabled);
+    try std.testing.expect(!first.value.actions[5].enabled);
     var with_container = try projectWith(std.testing.allocator, dired.rows.items, &refs, .{ .has_container = true });
     defer with_container.deinit();
     try std.testing.expectEqualStrings(standard.open_container, with_container.value.actions[0].id);
@@ -408,7 +412,7 @@ test "projection keeps row ids and order stable across draft rename" {
     try dired.rename(dired.rows.items[0].id, "renamed");
     var second = try project(std.testing.allocator, dired.rows.items, &refs);
     defer second.deinit();
-    try std.testing.expect(second.value.actions[3].enabled and second.value.actions[4].enabled);
+    try std.testing.expect(second.value.actions[5].enabled and second.value.actions[6].enabled);
     try std.testing.expectEqual(first_ids[0], second.value.content.container.children[0].id);
     try std.testing.expectEqual(first_ids[1], second.value.content.container.children[1].id);
     try std.testing.expectEqual(

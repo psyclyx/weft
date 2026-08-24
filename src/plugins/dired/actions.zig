@@ -69,6 +69,20 @@ pub const Controller = struct {
 
         const is_paste = std.mem.eql(u8, request.action, action.standard.paste_before) or
             std.mem.eql(u8, request.action, action.standard.paste_after);
+        if (is_paste and request.subject == projection.rootNodeId()) {
+            switch (request.selection) {
+                .none => {},
+                else => return error.InvalidSelection,
+            }
+            const item = request.transfer orelse return error.MissingTransfer;
+            var owned = transfer.OwnedItem.init(self.gpa, item) catch |err| return mapTransferError(err);
+            defer owned.deinit();
+            // With no row anchor both paste directions mean "into this root".
+            // The model owns the resulting stable ordering and plan; the
+            // action layer does not manufacture a placeholder row.
+            _ = self.model.paste(null, &owned) catch |err| return mapModelError(err);
+            return .handled;
+        }
         const subject = try self.resolveRow(request.subject, is_paste);
         const selected = try self.resolveSelection(request, subject, is_paste);
         defer self.gpa.free(selected);
@@ -238,6 +252,33 @@ test "dired actions paste before and after across model instances" {
     _ = try destination_controller.invoke(.{ .action = action.standard.paste_after, .view = destination_controller.view_ref, .subject = rowNode(left), .transfer = captured.transfer });
     try std.testing.expectEqualStrings("left", destination.rows.items[0].draft.name);
     try std.testing.expectEqualStrings("captured", destination.rows.items[1].draft.name);
+}
+
+test "dired actions paste into an empty root without a synthetic anchor" {
+    var source = model.Model.init(std.testing.allocator, .{ .authority = .here, .slot = 13, .generation = 1 });
+    defer source.deinit();
+    try source.reconcile(.{ .entries = &.{.{ .identity = ref(13, 1), .name = "captured", .revision = "r", .kind = .regular }} });
+    var source_controller = Controller.init(std.testing.allocator, &source, .{ .authority = .here, .slot = 13, .generation = 1 });
+    defer source_controller.deinit();
+    const captured = try source_controller.invoke(.{
+        .action = action.standard.copy,
+        .view = source_controller.view_ref,
+        .subject = rowNode(source.rows.items[0].id),
+    });
+
+    var destination = model.Model.init(std.testing.allocator, .{ .authority = .here, .slot = 14, .generation = 1 });
+    defer destination.deinit();
+    var destination_controller = Controller.init(std.testing.allocator, &destination, .{ .authority = .here, .slot = 14, .generation = 1 });
+    defer destination_controller.deinit();
+    try std.testing.expect((try destination_controller.invoke(.{
+        .action = action.standard.paste_after,
+        .view = destination_controller.view_ref,
+        .subject = projection.rootNodeId(),
+        .transfer = captured.transfer,
+    })) == .handled);
+    try std.testing.expectEqual(@as(usize, 1), destination.rows.items.len);
+    try std.testing.expectEqualStrings("captured", destination.rows.items[0].draft.name);
+    try std.testing.expectEqual(model.Pending.copied, destination.rows.items[0].pending);
 }
 
 test "dired actions reject unknown and stale subjects transactionally" {

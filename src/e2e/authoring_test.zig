@@ -1446,6 +1446,76 @@ test "authoring/dired: rename a semantic field, apply its dialog, and verify dis
     try t.expect(std.mem.indexOf(u8, disk, "keep me") != null);
 }
 
+test "authoring/dired: a durable raw-name copy survives rename, deletion, and a different directory view" {
+    const gpa = t.allocator;
+    var app: App = undefined;
+    try app.init(gpa);
+    defer app.deinit();
+    const ed = &app.ed;
+    const raw_name = "odd\n\xff";
+    const source_path = "source/odd\n\xff";
+    const destination_path = "destination/odd\n\xff";
+
+    try core.file.writeBytesMakingDirs(gpa, "source", source_path, "captured before namespace mutation\n");
+    // Leave a genuinely empty destination directory. Pasting at its semantic
+    // root must not require a fake row merely to provide an ordering anchor.
+    try core.file.writeBytesMakingDirs(gpa, "destination", "destination/.seed", "");
+    core.file.deleteFile(gpa, "destination/.seed");
+
+    ed.runStr("open", "source");
+    const source_view_ref = ed.head.semantic_focus.path().?.view;
+    const source_view = ed.session.system.semantic.views.get(source_view_ref).?;
+    const source_row = source_view.scene.content.container.children[0];
+    const source_field_ref = source_row.content.container.children[2].content.field.ref;
+    const source_field = ed.session.system.semantic.fields.get(source_field_ref).?;
+    var source_snapshot = try source_field.snapshot(gpa);
+    defer source_snapshot.deinit();
+    try t.expectEqualStrings(raw_name, source_snapshot.value.bytes);
+
+    // The config knows only the generic action name. The sandboxed provider
+    // materializes a durable lease before core owns the returned transfer.
+    ed.chord("SPC v y");
+    const stored = ed.session.system.semantic.transfer orelse return error.TestUnexpectedResult;
+    try t.expectEqualStrings(raw_name, stored.value.suggested_name);
+    var retained_resource = false;
+    for (stored.value.representations) |representation|
+        retained_resource = retained_resource or representation.resource != null;
+    try t.expect(retained_resource);
+
+    // Mutating the source draft cannot retarget an immutable capture, and an
+    // external deletion cannot invalidate its provider-owned materialization.
+    try source_field.edit(source_snapshot.value.revision, .{
+        .start = 0,
+        .end = source_snapshot.value.bytes.len,
+        .replacement = "renamed-after-copy",
+        .selection_after = .{ .anchor = "renamed-after-copy".len, .caret = "renamed-after-copy".len },
+    });
+    core.file.deleteFile(gpa, source_path);
+
+    ed.runStr("open", "destination");
+    const destination_view_ref = ed.head.semantic_focus.path().?.view;
+    try t.expect(!destination_view_ref.eql(source_view_ref));
+    const empty_view = ed.session.system.semantic.views.get(destination_view_ref).?;
+    try t.expectEqual(@as(usize, 0), empty_view.scene.content.container.children.len);
+    ed.chord("SPC v p");
+
+    const pasted_view = ed.session.system.semantic.views.get(destination_view_ref).?;
+    try t.expectEqual(@as(usize, 1), pasted_view.scene.content.container.children.len);
+    const pasted_field_ref = pasted_view.scene.content.container.children[0].content.container.children[2].content.field.ref;
+    var pasted_snapshot = try ed.session.system.semantic.fields.get(pasted_field_ref).?.snapshot(gpa);
+    defer pasted_snapshot.deinit();
+    try t.expectEqualStrings(raw_name, pasted_snapshot.value.bytes);
+
+    ed.chord("SPC v a");
+    try t.expect(ed.head.interactions.active() != null);
+    ed.press("y", "y");
+    try t.expect(ed.head.interactions.active() == null);
+    const disk = try core.file.readAlloc(gpa, destination_path);
+    defer gpa.free(disk);
+    try t.expectEqualStrings("captured before namespace mutation\n", disk);
+    try t.expectEqual(core.file.Kind.none, core.file.statKind(gpa, source_path));
+}
+
 test "authoring: visual mode — select with a motion, then delete and change" {
     const gpa = t.allocator;
     var app: App = undefined;
