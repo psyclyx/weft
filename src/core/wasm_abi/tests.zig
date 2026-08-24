@@ -1060,6 +1060,14 @@ test "wasm plugins: buf-pick switches to the accepted buffer by recorded id" {
 
     _ = try command.run(&env.commands, &env.ctx, "buf-pick", &.{});
     try t.expect(env.head.pick.active);
+    // The active buffer is intentionally the least convenient fallback: it
+    // stays available at the end while the other buffers keep their stable
+    // id-order.  The guest's accepted-index seam must still resolve rows by
+    // the ids captured when the ordered list was built.
+    try t.expectEqual(@as(usize, 3), env.head.pick.items.items.len);
+    try t.expectEqualStrings("alpha", env.head.pick.items.items[0]);
+    try t.expectEqualStrings("beta", env.head.pick.items.items[1]);
+    try t.expectEqualStrings("*scratch*", env.head.pick.items.items[2]);
     _ = try command.run(&env.commands, &env.ctx, "pick-input", &.{.{ .string = "beta" }});
     _ = try command.run(&env.commands, &env.ctx, "pick-accept", &.{});
     // The accepted row resolved to beta's id → it is now the active buffer.
