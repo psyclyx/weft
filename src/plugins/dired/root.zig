@@ -1,9 +1,9 @@
 //! Portable plugin-facing dired facade.
 //!
 //! This root deliberately contains only the host-independent model,
-//! projection, and action contracts. Host integration is exposed separately
-//! by `host.zig`; keeping that edge out of this facade makes it impossible for
-//! portable dired users to acquire runtime registries accidentally.
+//! projection, workspace, and action contracts. Runtime integration lives in
+//! the sandbox guest adapter, keeping it impossible for portable dired users
+//! to acquire native registries accidentally.
 
 const std = @import("std");
 

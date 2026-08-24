@@ -136,12 +136,6 @@ fn createArchitectureModules(
 /// One plugin's module graph, composed strictly over public architecture
 /// contracts. Keeping this separate makes the build itself reject accidental
 /// plugin-to-app or plugin-to-provider reach-through.
-const DiredModules = struct {
-    portable: DiredPortableModules,
-    session: *std.Build.Module,
-    host: *std.Build.Module,
-};
-
 const DiredPortableModules = struct {
     model: *std.Build.Module,
     workspace: *std.Build.Module,
@@ -201,42 +195,6 @@ fn createDiredPortableModules(
         .actions = actions,
         .facade = facade,
     };
-}
-
-fn createDiredModules(
-    b: *std.Build,
-    target: std.Build.ResolvedTarget,
-    optimize: std.builtin.OptimizeMode,
-    architecture: ArchitectureModules,
-) DiredModules {
-    const portable = createDiredPortableModules(
-        b,
-        target,
-        optimize,
-        architecture.semantic,
-        architecture.fs,
-    );
-    const session = b.createModule(.{
-        .root_source_file = b.path("src/plugins/dired/session.zig"),
-        .target = target,
-        .optimize = optimize,
-    });
-    const host = b.createModule(.{
-        .root_source_file = b.path("src/plugins/dired/host.zig"),
-        .target = target,
-        .optimize = optimize,
-    });
-    session.addImport("weft_semantic", architecture.semantic);
-    session.addImport("weft_fs", architecture.fs);
-    session.addImport("weft_dired_model", portable.model);
-    session.addImport("weft_dired_workspace", portable.workspace);
-    session.addImport("weft_dired_projection", portable.projection);
-    session.addImport("weft_dired_actions", portable.actions);
-    session.addImport("weft_fs_runtime", architecture.fs_runtime);
-    session.addImport("weft_view_runtime", architecture.view_runtime);
-    session.addImport("weft_target_runtime", architecture.target_runtime);
-    host.addImport("weft_dired_session", session);
-    return .{ .portable = portable, .session = session, .host = host };
 }
 
 fn addArchitectureImports(mod: *std.Build.Module, architecture: ArchitectureModules) void {
@@ -320,7 +278,13 @@ pub fn build(b: *std.Build) void {
     const snail_dep = snail_opt orelse return;
     const stemma_dep = stemma_opt orelse return;
     const architecture = createArchitectureModules(b, target, optimize);
-    const dired_modules = createDiredModules(b, target, optimize, architecture);
+    const dired_modules = createDiredPortableModules(
+        b,
+        target,
+        optimize,
+        architecture.semantic,
+        architecture.fs,
+    );
     // The app imports one stable platform-provider facade. Provider mechanism
     // is selected here; portable modules and plugins never import it.
     const fs_platform = b.createModule(.{
@@ -527,14 +491,45 @@ pub fn build(b: *std.Build) void {
     // the Linux provider is created only in the native `.linux` branch below.
     const darwin_target = b.resolveTargetQuery(.{ .cpu_arch = .aarch64, .os_tag = .macos });
     const darwin_architecture = createArchitectureModules(b, darwin_target, optimize);
-    const darwin_dired_modules = createDiredModules(b, darwin_target, optimize, darwin_architecture);
+    const darwin_dired_modules = createDiredPortableModules(
+        b,
+        darwin_target,
+        optimize,
+        darwin_architecture.semantic,
+        darwin_architecture.fs,
+    );
+    const darwin_contract_data = b.createModule(.{
+        .root_source_file = b.path("src/core/membrane/contract_data.zig"),
+        .target = darwin_target,
+        .optimize = optimize,
+    });
+    const darwin_guest_sdk = b.createModule(.{
+        .root_source_file = b.path("src/guest/weft.zig"),
+        .target = darwin_target,
+        .optimize = optimize,
+    });
+    darwin_guest_sdk.addImport("membrane_contract_data", darwin_contract_data);
+    darwin_guest_sdk.addImport("weft_schema", darwin_architecture.schema);
+    darwin_guest_sdk.addImport("weft_semantic", darwin_architecture.semantic);
+    darwin_guest_sdk.addImport("weft_scene_codec", darwin_architecture.scene_codec);
+    darwin_guest_sdk.addImport("weft_fs", darwin_architecture.fs);
+    darwin_guest_sdk.addImport("weft_fs_codec", darwin_architecture.fs_codec);
+    const darwin_dired_guest = b.createModule(.{
+        .root_source_file = b.path("src/plugins/dired/guest.zig"),
+        .target = darwin_target,
+        .optimize = optimize,
+    });
+    darwin_dired_guest.addImport("weft", darwin_guest_sdk);
+    darwin_dired_guest.addImport("weft_dired", darwin_dired_modules.facade);
     const darwin_gate_mod = b.createModule(.{
         .root_source_file = b.path("src/tests/darwin_architecture_gate.zig"),
         .target = darwin_target,
         .optimize = optimize,
     });
     addArchitectureImports(darwin_gate_mod, darwin_architecture);
-    darwin_gate_mod.addImport("weft_dired_host", darwin_dired_modules.host);
+    darwin_gate_mod.addImport("weft_dired", darwin_dired_modules.facade);
+    darwin_gate_mod.addImport("weft_dired_workspace", darwin_dired_modules.workspace);
+    darwin_gate_mod.addImport("weft_dired_guest", darwin_dired_guest);
     const darwin_gate = b.addObject(.{
         .name = "weft-darwin-architecture",
         .root_module = darwin_gate_mod,
@@ -555,11 +550,11 @@ pub fn build(b: *std.Build) void {
 
     const dired_model_step = b.step("test-dired-model", "Run the pure dired model and semantic projection tests");
     inline for (.{
-        dired_modules.portable.facade,
-        dired_modules.portable.model,
-        dired_modules.portable.workspace,
-        dired_modules.portable.projection,
-        dired_modules.portable.actions,
+        dired_modules.facade,
+        dired_modules.model,
+        dired_modules.workspace,
+        dired_modules.projection,
+        dired_modules.actions,
     }) |dired_module| {
         dired_module.addImport("weft_semantic", architecture.semantic);
         dired_module.addImport("weft_fs", architecture.fs);
@@ -568,18 +563,6 @@ pub fn build(b: *std.Build) void {
         dired_model_step.dependOn(&run_dired_tests.step);
         test_step.dependOn(&run_dired_tests.step);
     }
-
-    // Session tests are intentionally a separate host-side gate. The session
-    // adapter sees runtime registries; the portable facade above never does.
-    const dired_session_tests = b.addTest(.{ .root_module = dired_modules.session });
-    const run_dired_session_tests = b.addRunArtifact(dired_session_tests);
-    const dired_host_tests = b.addTest(.{ .root_module = dired_modules.host });
-    const run_dired_host_tests = b.addRunArtifact(dired_host_tests);
-    const dired_host_step = b.step("test-dired-host", "Run host-bound dired session tests");
-    dired_host_step.dependOn(&run_dired_session_tests.step);
-    dired_host_step.dependOn(&run_dired_host_tests.step);
-    test_step.dependOn(&run_dired_session_tests.step);
-    test_step.dependOn(&run_dired_host_tests.step);
 
     const fs_runtime_tests = b.addTest(.{ .root_module = architecture.fs_runtime });
     const run_fs_runtime_tests = b.addRunArtifact(fs_runtime_tests);
