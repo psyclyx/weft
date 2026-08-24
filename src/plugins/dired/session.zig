@@ -258,6 +258,10 @@ pub const Plugin = struct {
             destination.schema = model.entry_schema_current;
             destination.payload = payload;
             destination.resource = resource;
+            // This native session minted a fresh lease outside the sandbox
+            // attachment registry; never carry a stale foreign attachment
+            // identifier alongside it.
+            destination.attachment = null;
             replaced = true;
         }
         if (!replaced) return error.InvalidTransfer;
