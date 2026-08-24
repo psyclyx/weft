@@ -547,19 +547,28 @@ pub const Session = struct {
         var scene = try self.project(staged);
         defer scene.deinit();
 
-        var updated: usize = 0;
+        var updated_fields: std.ArrayList(usize) = .empty;
+        defer updated_fields.deinit(self.plugin.gpa);
         errdefer {
-            for (self.fields.items[0..updated]) |*field|
+            for (updated_fields.items) |field_index| {
+                const field = &self.fields.items[field_index];
                 self.updateField(field, &self.draft, field.revision) catch {};
+            }
         }
-        for (self.fields.items[0..old_fields_len]) |*field| {
+        for (self.fields.items[0..old_fields_len], 0..) |*field, field_index| {
             // A clean row may disappear during refresh. Its field has no
             // staged value to update; pruneFields closes it after the new
             // scene commits. Treating that expected disappearance as stale
             // would reject the entire external reconciliation.
             if (staged.row(field.row) == null) continue;
+            // Reserve the exact tracking slot before changing the host. The
+            // list may contain removed rows interleaved with retained rows;
+            // a positional prefix would restore the wrong fields if scene
+            // replacement fails after one of those gaps. Append only after
+            // the host update succeeds, so rollback names completed updates.
+            try updated_fields.ensureUnusedCapacity(self.plugin.gpa, 1);
             try self.updateField(field, staged, field.revision +| 1);
-            updated += 1;
+            updated_fields.appendAssumeCapacity(field_index);
         }
 
         const next_revision = std.math.add(u32, self.scene_revision, 1) catch return error.RevisionOverflow;

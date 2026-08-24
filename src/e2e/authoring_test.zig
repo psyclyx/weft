@@ -1508,29 +1508,32 @@ test "authoring/dired: refresh reconciles external churn without retargeting a d
     defer app.deinit();
     const ed = &app.ed;
 
-    authorFile(ed, "dirty.txt", "dirty\n");
-    authorFile(ed, "clean.txt", "clean\n");
+    // Create the soon-to-be-removed row first so the refreshed field list has
+    // a removed field before retained fields—the rollback gap this guards.
     authorFile(ed, "removed.txt", "removed\n");
+    authorFile(ed, "dirty.txt", "dirty\n");
+    _ = try app.proj.oracle("mkdir clean-dir");
     ed.runStr("open", ".");
 
     var view_ref = ed.head.semantic_focus.path().?.view;
     var view = ed.session.system.semantic.views.get(view_ref).?;
     var dirty_field: ?semantic.scene.FieldRef = null;
-    var clean_row_id: @TypeOf(view.scene.content.container.children[0].id) = undefined;
     var clean_field: ?semantic.scene.FieldRef = null;
+    var clean_target: ?semantic.scene.TargetLink = null;
     for (view.scene.content.container.children) |row| {
         const name_node = row.content.container.children[2];
         const field_ref = name_node.content.field.ref;
         var snapshot = try ed.session.system.semantic.fields.get(field_ref).?.snapshot(gpa);
         defer snapshot.deinit();
         if (std.mem.eql(u8, snapshot.value.bytes, "dirty.txt")) dirty_field = field_ref;
-        if (std.mem.eql(u8, snapshot.value.bytes, "clean.txt")) {
-            clean_row_id = row.id;
+        if (std.mem.eql(u8, snapshot.value.bytes, "clean-dir")) {
             clean_field = field_ref;
+            clean_target = name_node.target;
         }
     }
     const dirty_ref = dirty_field orelse return error.TestExpectedEqual;
     _ = clean_field orelse return error.TestExpectedEqual;
+    const old_clean_target = clean_target orelse return error.TestExpectedEqual;
 
     var before = try ed.session.system.semantic.fields.get(dirty_ref).?.snapshot(gpa);
     defer before.deinit();
@@ -1548,7 +1551,7 @@ test "authoring/dired: refresh reconciles external churn without retargeting a d
     // exercises external deletion.
     try core.file.writeBytes(gpa, "created.txt", "created\n");
     _ = try app.proj.oracle("mv -- dirty.txt externally-renamed.txt");
-    _ = try app.proj.oracle("mv -- clean.txt renamed.txt");
+    _ = try app.proj.oracle("mv -- clean-dir renamed-dir");
     core.file.deleteFile(gpa, "removed.txt");
 
     ed.chord("SPC v r");
@@ -1565,12 +1568,16 @@ test "authoring/dired: refresh reconciles external churn without retargeting a d
         defer snapshot.deinit();
         if (std.mem.eql(u8, snapshot.value.bytes, "created.txt")) saw_created = true;
         if (std.mem.eql(u8, snapshot.value.bytes, "removed.txt")) saw_removed = true;
-        if (std.mem.eql(u8, snapshot.value.bytes, "renamed.txt")) {
+        if (std.mem.eql(u8, snapshot.value.bytes, "renamed-dir")) {
             saw_renamed = true;
-            // A clean external rename keeps the same row identity and gets a
-            // freshly justified child target rather than a stale target link.
-            try t.expectEqual(clean_row_id, row.id);
+            // The provider publishes a fresh entry handle after an external
+            // rename; the changed observation revision must invalidate the
+            // old child authority rather than silently retaining it.
             try t.expect(name_node.target != null);
+            const new_target = name_node.target.?;
+            try t.expect(new_target.revision != old_clean_target.revision or
+                !new_target.target.eql(old_clean_target.target));
+            try t.expect(ed.session.system.semantic.targets.get(old_clean_target.target) == null);
         }
         if (std.mem.eql(u8, snapshot.value.bytes, "draft.txt")) {
             saw_dirty_stale = true;
@@ -1586,6 +1593,83 @@ test "authoring/dired: refresh reconciles external churn without retargeting a d
     try t.expect(saw_renamed);
     try t.expect(!saw_removed);
     try t.expect(saw_dirty_stale);
+}
+
+test "authoring/dired: refresh rollback restores retained fields after an interleaved removal" {
+    const gpa = t.allocator;
+    var app: App = undefined;
+    try app.init(gpa);
+    defer app.deinit();
+    const ed = &app.ed;
+
+    // Whatever order the provider lists these entries in, the first rendered
+    // field is removed below, followed by two retained fields. This makes the
+    // rollback gap deterministic without depending on directory enumeration
+    // order or a platform-specific sort policy.
+    const fixture_names = [_][]const u8{ "first.txt", "second.txt", "third.txt" };
+    for (fixture_names) |name| authorFile(ed, name, name);
+    ed.runStr("open", ".");
+
+    const view_ref = ed.head.semantic_focus.path().?.view;
+    const view = ed.session.system.semantic.views.get(view_ref).?;
+    var retained_mode_field: ?semantic.scene.FieldRef = null;
+    var tail_field: ?semantic.scene.FieldRef = null;
+    var removed_name: []const u8 = undefined;
+    var retained_name: []const u8 = undefined;
+    for (view.scene.content.container.children, 0..) |row, index| {
+        if (index >= fixture_names.len) return error.TestExpectedEqual;
+        const name_node = row.content.container.children[2];
+        const field_ref = name_node.content.field.ref;
+        var snapshot = try ed.session.system.semantic.fields.get(field_ref).?.snapshot(gpa);
+        defer snapshot.deinit();
+        var expected_name: ?[]const u8 = null;
+        for (fixture_names) |name| {
+            if (std.mem.eql(u8, snapshot.value.bytes, name)) expected_name = name;
+        }
+        _ = expected_name orelse return error.TestExpectedEqual;
+        switch (index) {
+            0 => removed_name = expected_name.?,
+            1 => {
+                retained_name = expected_name.?;
+                retained_mode_field = switch (row.content.container.children[1].content) {
+                    .field => |mode| mode.ref,
+                    else => return error.TestExpectedEqual,
+                };
+            },
+            2 => tail_field = field_ref,
+            else => unreachable,
+        }
+    }
+    const retained_mode_ref = retained_mode_field orelse return error.TestExpectedEqual;
+    const tail_ref = tail_field orelse return error.TestExpectedEqual;
+
+    var before = try ed.session.system.semantic.fields.get(retained_mode_ref).?.snapshot(gpa);
+    defer before.deinit();
+    const chmod_command = try std.fmt.allocPrint(gpa, "chmod 600 -- {s}", .{retained_name});
+    defer gpa.free(chmod_command);
+    _ = try app.proj.oracle(chmod_command);
+    core.file.deleteFile(gpa, removed_name);
+
+    // Remove only the later retained field's host endpoint. Refresh still
+    // reaches the provider, updates the second row's mode first, then fails at
+    // the third row. The rollback must restore that mode to `before`; a
+    // positional prefix would incorrectly restore the already-removed first
+    // row's fields instead.
+    var dired_owner: ?semantic.owner.Id = null;
+    for (ed.plugins.items) |plugin| {
+        if (std.mem.eql(u8, plugin.name, "dired")) {
+            dired_owner = plugin.semantic_owner;
+            break;
+        }
+    }
+    const owner = dired_owner orelse return error.TestExpectedEqual;
+    try t.expect(ed.session.system.semantic.fields.remove(gpa, owner, tail_ref));
+
+    ed.chord("SPC v r");
+
+    var restored = try ed.session.system.semantic.fields.get(retained_mode_ref).?.snapshot(gpa);
+    defer restored.deinit();
+    try t.expectEqualStrings(before.value.bytes, restored.value.bytes);
 }
 
 test "authoring/dired: a durable raw-name copy survives rename, deletion, and a different directory view" {
