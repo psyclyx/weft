@@ -84,6 +84,7 @@ const async_loop = @import("async.zig");
 const subbuffer = @import("subbuffer.zig");
 const register_mod = @import("register.zig");
 const grants_mod = @import("grants.zig");
+const semantic_mod = @import("semantic.zig");
 
 pub const System = @This();
 
@@ -173,6 +174,10 @@ plugins: ?Plugins = null,
 /// `Ctx.capture`'s grant resolution and a loaded plugin's possession checks
 /// both consult exactly one source of truth.
 grants: grants_mod.HandleTable = undefined,
+/// Semantic targets/views/fields and target-handler registrations belong to
+/// the system, just like buffers and commands. Heads carry only focus and
+/// active interactions into whichever system they are attached to.
+semantic: semantic_mod.Services,
 
 /// Build a system from scratch: fresh buffers (one scratch buffer, per
 /// `Buffers.init`), empty commands/keymap, and the built-in command/keymap
@@ -190,8 +195,10 @@ pub fn create(gpa: Allocator, pool: *task.Pool, name: []const u8, user: []const 
         .caps = undefined,
         .actions = undefined,
         .grants = grants_mod.HandleTable.init(gpa),
+        .semantic = .init(.here),
     };
     errdefer self.buffers.deinit(gpa);
+    errdefer self.semantic.deinit(gpa);
     // `caps`/`actions` borrow `&self.container` (task #19's shared-Container
     // fold-in) — set AFTER the struct literal above so `self.container`
     // already holds its final value at a stable address (`self` is already
@@ -212,6 +219,7 @@ pub fn destroy(self: *System) void {
     // that compiled it, and nothing plugin-owned is still resident when
     // buffers/commands unwind).
     if (self.plugins) |*p| p.deinit(gpa);
+    self.semantic.deinit(gpa);
     if (self.applied_manifest) |m| m.destroy();
     self.default_head.deinit(gpa);
     self.actions.deinit();
@@ -244,6 +252,7 @@ pub fn contextFor(self: *System, head: *Head) command.Context {
         .quit = &self.quit,
         .head = head,
         .grant_table = &self.grants,
+        .semantic = &self.semantic,
     };
 }
 
@@ -441,9 +450,9 @@ pub const Host = struct {
     /// named `target` — the `system-swap <name>` mechanism (§6 W2b gate
     /// (b)). If `c` currently targets a DIFFERENT hosted system, that
     /// system's `detachHead` runs first (saving `head`'s resting mode onto
-    /// IT); `c`'s table pointers (buffers/commands/keymap/actions/caps/
-    /// quit) are then repointed at `target` in place — every OTHER holder
-    /// of `c` sees the new system from its next read on — and `target.
+    /// IT); `c`'s table/service pointers (buffers/commands/keymap/actions/
+    /// caps/quit/grants/semantic) are then repointed at `target` in place —
+    /// every OTHER holder of `c` sees the new system from its next read on — and `target.
     /// attachHead` lands `head` in the new system's resting mode. A swap
     /// onto the system `c` already targets is a no-op (not an error).
     ///
@@ -498,6 +507,7 @@ pub const Host = struct {
         c.caps = &to.caps;
         c.quit = &to.quit;
         c.grant_table = &to.grants;
+        c.semantic = &to.semantic;
         try to.attachHead(gpa, head);
     }
 };

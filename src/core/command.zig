@@ -107,6 +107,9 @@ pub const Context = struct {
     /// is unset, so every existing `Context{...}` literal across the tree
     /// compiles unchanged.
     slot_host: ?*@import("slot.zig").SlotHost = null,
+    /// System-scoped semantic identity and provider registries. Optional for
+    /// small/headless embeddings that expose only the text command surface.
+    semantic: ?*@import("semantic.zig").Services = null,
 
     pub fn buffer(self: *Context) *Buffers.Buffer {
         return self.buffers.active();

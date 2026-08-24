@@ -10,7 +10,7 @@
 //! container/config_kv) live on `system` now, not on `Session` itself** —
 //! see `core/System.zig`'s module doc for the full reasoning this
 //! completes: `System.create` heap-pins the bundle (`*System`, never
-//! relocated), so `cmd_ctx`'s six table pointers can be REPOINTED in place
+//! relocated), so `cmd_ctx`'s system-scoped pointers can be REPOINTED in place
 //! by `core.System.Host.swap` instead of dangling on a move. `host` hosts
 //! every system this process knows about (today: "editor", and — if
 //! `config/agent-ux.js` is present — "agent-ux"); `system` is a convenience
@@ -150,8 +150,8 @@ pub const Session = struct {
     }
 
     /// Re-bind `self.head` onto the hosted system named `target` — wraps
-    /// `core.System.Host.swap` (which repoints `cmd_ctx`'s six table
-    /// pointers in place) and keeps `self.system` in sync so subsequent
+    /// `core.System.Host.swap` (which repoints `cmd_ctx`'s system-scoped
+    /// table/service pointers in place) and keeps `self.system` in sync so subsequent
     /// `session.system.X` reads see the NEW system. This is the "extend
     /// `Host.swap`" half of task #19 item 1/2: everything `Host.swap`
     /// already refuses (`error.OpenTransient`) or cancels (an open pick) is
