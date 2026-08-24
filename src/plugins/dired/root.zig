@@ -6,9 +6,10 @@
 
 const std = @import("std");
 
-pub const model = @import("model.zig");
-pub const projection = @import("projection.zig");
-pub const actions = @import("actions.zig");
+pub const model = @import("weft_dired_model");
+pub const projection = @import("weft_dired_projection");
+pub const actions = @import("weft_dired_actions");
+pub const session = @import("weft_dired_session");
 
 pub const Model = model.Model;
 pub const NodeId = model.NodeId;
@@ -39,6 +40,8 @@ pub const modelRowId = projection.modelRowId;
 
 pub const ActionController = actions.Controller;
 pub const ActionError = actions.Error;
+pub const Plugin = session.Plugin;
+pub const Session = session.Session;
 
 test {
     std.testing.refAllDecls(@This());

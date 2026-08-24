@@ -405,13 +405,32 @@ pub fn build(b: *std.Build) void {
         .target = target,
         .optimize = optimize,
     });
+    const dired_session = b.createModule(.{
+        .root_source_file = b.path("src/plugins/dired/session.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    dired_projection.addImport("weft_dired_model", dired_model);
+    dired_actions.addImport("weft_dired_model", dired_model);
+    dired_actions.addImport("weft_dired_projection", dired_projection);
+    dired_session.addImport("weft_dired_model", dired_model);
+    dired_session.addImport("weft_dired_projection", dired_projection);
+    dired_session.addImport("weft_dired_actions", dired_actions);
+    dired_session.addImport("weft_fs_runtime", architecture.fs_runtime);
+    dired_session.addImport("weft_view_runtime", architecture.view_runtime);
+    dired_session.addImport("weft_target_runtime", architecture.target_runtime);
+    dired_facade.addImport("weft_dired_model", dired_model);
+    dired_facade.addImport("weft_dired_projection", dired_projection);
+    dired_facade.addImport("weft_dired_actions", dired_actions);
+    dired_facade.addImport("weft_dired_session", dired_session);
     const dired_model_step = b.step("test-dired-model", "Run the pure dired model and semantic projection tests");
-    inline for (.{ dired_facade, dired_model, dired_projection, dired_actions }) |dired_module| {
+    inline for (.{ dired_facade, dired_model, dired_projection, dired_actions, dired_session }) |dired_module| {
         dired_module.addImport("weft_semantic", architecture.semantic);
         dired_module.addImport("weft_fs", architecture.fs);
         const dired_tests = b.addTest(.{ .root_module = dired_module });
         const run_dired_tests = b.addRunArtifact(dired_tests);
         dired_model_step.dependOn(&run_dired_tests.step);
+        test_step.dependOn(&run_dired_tests.step);
     }
 
     const fs_runtime_tests = b.addTest(.{ .root_module = architecture.fs_runtime });

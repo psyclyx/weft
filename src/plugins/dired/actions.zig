@@ -7,8 +7,8 @@
 const std = @import("std");
 const semantic = @import("weft_semantic");
 const fs = @import("weft_fs");
-const model = @import("model.zig");
-const projection = @import("projection.zig");
+const model = @import("weft_dired_model");
+const projection = @import("weft_dired_projection");
 
 const action = semantic.action;
 const selection = semantic.selection;

@@ -7,7 +7,7 @@
 const std = @import("std");
 const semantic = @import("weft_semantic");
 const fs = @import("weft_fs");
-const model = @import("model.zig");
+const model = @import("weft_dired_model");
 
 const scene = semantic.scene;
 const standard = semantic.action.standard;
