@@ -250,6 +250,9 @@ pub const Model = struct {
     }
 
     fn appendObserved(self: *Model, parent: ?NodeId, entry: SnapshotEntry) !NodeId {
+        if (entry.name.len > max_transfer_name or entry.revision.len > max_transfer_revision or
+            entry.contents.len > max_transfer_payload or entry.link_target.len > max_transfer_payload)
+            return error.TransferTooLarge;
         const base = try cloneObservation(self.gpa, entry);
         errdefer freeObservationWith(self.gpa, &base);
         const current = try cloneObservation(self.gpa, entry);
@@ -263,6 +266,7 @@ pub const Model = struct {
     }
 
     fn appendPending(self: *Model, parent: ?NodeId, name: []const u8, kind: contract.Kind, mode: ?u32, contents: []const u8, link_target: []const u8, pending: Pending) !NodeId {
+        if (name.len > max_transfer_name) return error.TransferTooLarge;
         try self.validateParent(parent);
         _ = try contract.Name.init(name);
         const draft = Draft{ .name = try self.gpa.dupe(u8, name), .kind = kind, .mode = mode, .contents = try self.gpa.dupe(u8, contents), .link_target = try self.gpa.dupe(u8, link_target) };
@@ -578,6 +582,7 @@ fn freeDraftWith(gpa: std.mem.Allocator, draft: *const Draft) void {
 }
 
 fn collect(model: *const Model, id: NodeId, nodes: *std.ArrayList(NodeId)) !void {
+    if (nodes.items.len >= max_transfer_records) return error.TransferTooLarge;
     try nodes.append(model.gpa, id);
     for (model.rows.items) |row| if (row.parent == id) try collect(model, row.id, nodes);
 }
@@ -754,6 +759,9 @@ test "dirty external deletion is retained stale and clean reorder advances" {
     try model.reconcile(.{ .entries = &.{.{ .identity = ref(5, 1), .name = "b2", .revision = "r2", .kind = .regular }} });
     try std.testing.expectEqual(Conflict.stale, model.row(a).?.conflict);
     try std.testing.expectEqualStrings("draft", model.row(a).?.draft.name);
+    try std.testing.expectError(error.Stale, model.buildPlan());
+    const b = model.rowForIdentity(ref(5, 1)).?;
+    try std.testing.expectEqualStrings("b2", model.row(b).?.draft.name);
 }
 
 test "pending subtree paste survives deletion, preserves symlink and planned parent" {
@@ -780,7 +788,9 @@ test "unusual names, source identity reuse, and typed entry schema" {
     var item = try model.yank(model.rows.items[0].id, .copy);
     defer item.deinit();
     try std.testing.expectEqualStrings(entry_schema, item.value.representations[0].schema.?);
+    try model.reconcile(.{ .entries = &.{} });
     try model.reconcile(.{ .entries = &.{.{ .identity = ref(6, 2), .name = "line\n-[]'", .revision = "r-new", .kind = .regular }} });
+    try std.testing.expect(model.rowForIdentity(ref(6, 1)) == null);
     const pasted = try model.paste(null, &item);
     try std.testing.expectEqual(Pending.copied, model.row(pasted).?.pending);
     try std.testing.expectEqual(@as(u32, 6), model.row(pasted).?.copy_source.?.entry.slot);
