@@ -316,6 +316,15 @@ pub fn build(b: *std.Build) void {
         const run_contract_tests = b.addRunArtifact(contract_tests);
         contract_step.dependOn(&run_contract_tests.step);
     }
+    const fs_fake = b.createModule(.{
+        .root_source_file = b.path("src/fs_fake/root.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    fs_fake.addImport("weft_fs", architecture.fs);
+    const fs_fake_tests = b.addTest(.{ .root_module = fs_fake });
+    const run_fs_fake_tests = b.addRunArtifact(fs_fake_tests);
+    contract_step.dependOn(&run_fs_fake_tests.step);
 
     // The `weft` module owns the core/gfx/app files, so its own unit tests run in
     // a second test binary; the `test` step runs both. The two binaries run as
