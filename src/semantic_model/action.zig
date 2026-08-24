@@ -5,6 +5,7 @@
 const interaction = @import("interaction.zig");
 const scene = @import("scene.zig");
 const selection = @import("selection.zig");
+const target = @import("target.zig");
 const transfer = @import("transfer.zig");
 const view = @import("view.zig");
 
@@ -30,6 +31,10 @@ pub const Outcome = union(enum) {
     transfer: transfer.Item,
     /// Request-only: mutation waits for an action on the resulting dialog.
     interaction: interaction.Definition,
+    /// Request-only: ask core to resolve and admit the located target through
+    /// the generic target-handler registry. The provider never chooses a
+    /// handler or manufactures a view handle.
+    open_target: target.Located,
 };
 
 /// Interoperable names are conveniences, not a closed enum. A plugin may

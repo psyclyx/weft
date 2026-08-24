@@ -26,12 +26,14 @@ const OwnedOutcome = union(enum) {
     handled,
     transfer: scene_codec.transfer.Owned,
     interaction: scene_codec.interaction.Owned,
+    open_target: scene_codec.target.OwnedLocated,
 
     fn deinit(self: *OwnedOutcome) void {
         switch (self.*) {
             .declined, .handled => {},
             .transfer => |*value| value.deinit(),
             .interaction => |*value| value.deinit(),
+            .open_target => |*value| value.deinit(),
         }
         self.* = undefined;
     }
@@ -42,6 +44,7 @@ const OwnedOutcome = union(enum) {
             .handled => .handled,
             .transfer => |value| .{ .transfer = value.value },
             .interaction => |value| .{ .interaction = value.value },
+            .open_target => |value| .{ .open_target = value.value },
         };
     }
 };
@@ -112,6 +115,15 @@ pub const Bridge = struct {
     pub fn adoptInteraction(self: *Bridge, owned: *scene_codec.interaction.Owned) ResponseError!void {
         try self.beginResponse();
         self.response = .{ .interaction = owned.* };
+        owned.* = undefined;
+    }
+
+    /// Move a decoded located-target request into the bridge. Core resolves
+    /// its handler and admits its resulting view; the provider supplies only
+    /// the portable target identity, revision, and location.
+    pub fn adoptOpenTarget(self: *Bridge, owned: *scene_codec.target.OwnedLocated) ResponseError!void {
+        try self.beginResponse();
+        self.response = .{ .open_target = owned.* };
         owned.* = undefined;
     }
 

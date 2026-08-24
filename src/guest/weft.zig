@@ -1066,6 +1066,7 @@ pub const SemanticActionResult = enum(i32) {
     handled = 1,
     transfer_stored = 2,
     interaction_opened = 3,
+    target_opened = 4,
     failed = -1,
     _,
 };
@@ -1085,6 +1086,7 @@ pub const SemanticActionResponse = enum(u32) {
     handled = 1,
     transfer = 2,
     interaction = 3,
+    open_target = 4,
 };
 
 /// Read the request available only during `on_semantic_action()`.
@@ -1121,6 +1123,16 @@ pub fn semanticActionInteraction(definition: semantic.interaction.Definition) Se
     const payload = try semantic_codec.interaction.encode(allocator, definition);
     defer allocator.free(payload);
     if (wl_semantic_action_respond(@intFromEnum(SemanticActionResponse.interaction), p(payload.ptr), @intCast(payload.len)) != 1)
+        return error.Rejected;
+}
+
+/// Ask core to resolve and admit one typed located target. Handler choice and
+/// view ownership remain host policy; the guest supplies only this portable
+/// request value.
+pub fn semanticActionOpenTarget(located: semantic.target.Located) SemanticPublishError!void {
+    const payload = try semantic_codec.encodeLocatedTarget(allocator, located);
+    defer allocator.free(payload);
+    if (wl_semantic_action_respond(@intFromEnum(SemanticActionResponse.open_target), p(payload.ptr), @intCast(payload.len)) != 1)
         return error.Rejected;
 }
 

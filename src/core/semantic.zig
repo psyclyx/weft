@@ -179,6 +179,39 @@ pub const Services = struct {
         ViewTargetMismatch,
     };
 
+    pub const LocatedOpenResult = union(enum) {
+        opened: semantic.view.Ref,
+        no_handler,
+        ambiguous: struct {
+            strength: target_runtime.resolver.Strength,
+            count: usize,
+        },
+    };
+
+    /// Resolve and admit the exact located revision requested by a provider.
+    /// A provider can request an open, but cannot select a handler or smuggle
+    /// in a view it does not own. No focus is changed here; callers that have
+    /// a head may focus the admitted view as a separate head-local concern.
+    pub fn openLocatedTarget(
+        self: *const Services,
+        gpa: std.mem.Allocator,
+        located: semantic.target.Located,
+    ) (ResolveTargetError || OpenTargetError)!LocatedOpenResult {
+        try validateLocation(located.location);
+        const descriptor = self.targets.get(located.target) orelse return error.StaleTarget;
+        if (descriptor.revision != located.revision) return error.StaleTarget;
+        var resolution = try self.target_handlers.resolve(gpa, descriptor.*);
+        defer resolution.deinit();
+        return switch (resolution.value.decide()) {
+            .none => .no_handler,
+            .ambiguous => |strength| .{ .ambiguous = .{
+                .strength = strength,
+                .count = equalStrengthCount(resolution.value.candidates, strength),
+            } },
+            .selected => |handler| .{ .opened = try self.openTarget(handler, located) },
+        };
+    }
+
     /// Open only the descriptor revision that was actually resolved. A
     /// provider may return behavior it owns, never another plugin's view or
     /// an unrelated view that merely happens to be live.
@@ -245,7 +278,7 @@ pub const Services = struct {
         UnknownRoot,
     };
 
-    pub const InvokeActionError = view_runtime.action.Error || OpenInteractionError || semantic.transfer.ValidationError;
+    pub const InvokeActionError = view_runtime.action.Error || OpenInteractionError || semantic.transfer.ValidationError || ResolveTargetError || OpenTargetError || FocusError;
     pub const InvokeInputError = InvokeActionError || view_runtime.interaction.Error;
 
     pub const FocusError = view_runtime.view.Error;
@@ -316,6 +349,7 @@ pub const Services = struct {
         handled,
         transfer_stored,
         interaction_opened: semantic.interaction.Ref,
+        target_opened: semantic.view.Ref,
     };
 
     /// Invoke against the view owner's provider, then absorb any cross-view
@@ -357,6 +391,10 @@ pub const Services = struct {
                 break :blk .transfer_stored;
             },
             .interaction => |definition| .{ .interaction_opened = try self.openInteraction(stack, gpa, definition) },
+            .open_target => |located| switch (try self.openLocatedTarget(gpa, located)) {
+                .opened => |view| .{ .target_opened = view },
+                .no_handler, .ambiguous => .declined,
+            },
         };
     }
 
@@ -390,7 +428,7 @@ pub const Services = struct {
             else => return err,
         };
         if (disposition == .close_on_handled) switch (effect) {
-            .handled, .transfer_stored => try stack.close(gpa, interaction_ref),
+            .handled, .transfer_stored, .target_opened => try stack.close(gpa, interaction_ref),
             .declined, .interaction_opened => {},
         };
         return effect;
@@ -429,11 +467,15 @@ pub const Services = struct {
             const node = instance.node(path.nodes[index]) orelse continue;
             for (node.actions) |candidate| {
                 if (!std.mem.eql(u8, candidate.id, action)) continue;
-                return try self.invokeAction(stack, gpa, .{
+                const effect = try self.invokeAction(stack, gpa, .{
                     .action = action,
                     .view = path.view,
                     .subject = node.id,
                 });
+                if (effect == .target_opened) {
+                    _ = try self.focusView(head, gpa, effect.target_opened, null);
+                }
+                return effect;
             }
         }
         return error.ActionUnavailable;
@@ -596,6 +638,14 @@ pub const Services = struct {
         return true;
     }
 };
+
+fn equalStrengthCount(candidates: []const target_runtime.resolver.Candidate, strength: target_runtime.resolver.Strength) usize {
+    var count: usize = 0;
+    for (candidates) |candidate| {
+        if (candidate.strength == strength) count += 1;
+    }
+    return count;
+}
 
 fn validateLocation(location: semantic.target.Location) error{InvalidLocation}!void {
     switch (location) {
@@ -769,6 +819,91 @@ test "target opening is revision guarded and confines handlers to their own atta
     var unrelated: Handler = .{ .view = unrelated_view };
     const unrelated_handler = try services.registerTargetHandler(std.testing.allocator, opener, "unrelated", .init(&unrelated));
     try std.testing.expectError(error.ViewTargetMismatch, services.openTarget(unrelated_handler, current.located(.whole)));
+}
+
+test "semantic open-target actions use the nearest subject and preserve fallback, stale, and provider errors" {
+    const ActionProvider = struct {
+        located: semantic.target.Located,
+        calls: usize = 0,
+        last_subject: semantic.scene.NodeId = @enumFromInt(0),
+
+        pub fn invoke(self: *@This(), request: semantic.action.Request) view_runtime.action.ProviderError!semantic.action.Outcome {
+            self.calls += 1;
+            self.last_subject = request.subject;
+            return .{ .open_target = self.located };
+        }
+    };
+    const TargetHandler = struct {
+        view: semantic.view.Ref,
+        kind: []const u8,
+        fail: bool = false,
+
+        pub fn probe(self: *@This(), descriptor: semantic.target.Descriptor) target_runtime.resolver.ProbeError!?target_runtime.resolver.Strength {
+            return switch (descriptor.kind) {
+                .synthetic => |kind| if (std.mem.eql(u8, kind, self.kind)) .exact else null,
+                else => null,
+            };
+        }
+
+        pub fn open(self: *@This(), _: semantic.target.Located) target_runtime.resolver.OpenError!semantic.view.Ref {
+            if (self.fail) return error.Failed;
+            return self.view;
+        }
+    };
+
+    var services = Services.init(.here);
+    defer services.deinit(std.testing.allocator);
+    const owner = try services.acquireOwner();
+    const target = try services.publishTarget(std.testing.allocator, owner, .{
+        .kind = .{ .synthetic = "resource" },
+        .display_name = "resource",
+    });
+    const child = semantic.scene.Node{ .id = @enumFromInt(2), .actions = &.{.{ .id = "open", .label = "Open" }}, .content = .{ .label = "child" } };
+    const original = try services.publishView(std.testing.allocator, owner, null, 1, .{
+        .id = @enumFromInt(1),
+        .actions = &.{.{ .id = "open", .label = "Open" }},
+        .content = .{ .container = .{ .children = &.{child} } },
+    });
+    const opened_view = try services.publishView(std.testing.allocator, owner, target, 1, .{
+        .id = @enumFromInt(10),
+        .focusable = true,
+        .content = .{ .label = "opened" },
+    });
+    var target_handler: TargetHandler = .{ .view = opened_view, .kind = "resource" };
+    _ = try services.registerTargetHandler(std.testing.allocator, owner, "resource", .init(&target_handler));
+    var action_provider: ActionProvider = .{ .located = .{ .target = target, .revision = 1 } };
+    try services.registerActionProvider(std.testing.allocator, owner, .init(&action_provider));
+
+    var head: Head = .empty;
+    defer head.deinit(std.testing.allocator);
+    _ = try services.focusView(&head, std.testing.allocator, original, @enumFromInt(2));
+    const effect = (try services.invokeFocusedAction(&head.interactions, &head, std.testing.allocator, "open")).?;
+    try std.testing.expectEqual(@as(usize, 1), action_provider.calls);
+    try std.testing.expectEqual(@as(semantic.scene.NodeId, @enumFromInt(2)), action_provider.last_subject);
+    try std.testing.expectEqual(opened_view, effect.target_opened);
+    try std.testing.expectEqual(opened_view, head.semantic_focus.path().?.view);
+    // Re-select the source view for the following requests: opening is a
+    // head-local admission plus focus operation, so the new view is now the
+    // active subject just as it would be for an ordinary user action.
+    _ = try services.focusView(&head, std.testing.allocator, original, @enumFromInt(2));
+
+    // A target replacement invalidates the provider's captured Located value;
+    // it must not fall through as an ordinary unhandled action.
+    try services.replaceTarget(std.testing.allocator, owner, target, .{ .kind = .{ .synthetic = "resource" }, .display_name = "new" });
+    try std.testing.expectError(error.StaleTarget, services.invokeFocusedAction(&head.interactions, &head, std.testing.allocator, "open"));
+
+    // Provider failures remain errors after resolution, while no handler is
+    // the ordinary declined result that lets an input plugin fall back.
+    const error_target = try services.publishTarget(std.testing.allocator, owner, .{ .kind = .{ .synthetic = "error" }, .display_name = "error" });
+    const error_view = try services.publishView(std.testing.allocator, owner, error_target, 1, .{ .id = @enumFromInt(11), .content = .{ .label = "error" } });
+    var failing_handler: TargetHandler = .{ .view = error_view, .kind = "error", .fail = true };
+    _ = try services.registerTargetHandler(std.testing.allocator, owner, "error", .init(&failing_handler));
+    action_provider.located = .{ .target = error_target, .revision = 1 };
+    try std.testing.expectError(error.Failed, services.invokeFocusedAction(&head.interactions, &head, std.testing.allocator, "open"));
+
+    const fallback_target = try services.publishTarget(std.testing.allocator, owner, .{ .kind = .{ .synthetic = "fallback" }, .display_name = "fallback" });
+    action_provider.located = .{ .target = fallback_target, .revision = 1 };
+    try std.testing.expectEqual(Services.ActionEffect.declined, (try services.invokeFocusedAction(&head.interactions, &head, std.testing.allocator, "open")).?);
 }
 
 test "semantic view focus is head-scoped with preferred and root fallback" {

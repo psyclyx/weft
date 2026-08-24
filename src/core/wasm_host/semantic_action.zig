@@ -69,7 +69,7 @@ pub fn hRespond(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32, resu
             if (payload_len != 0) return;
             plugin.semantic_actions.respondHandled() catch return;
         },
-        2, 3 => {
+        2, 3, 4 => {
             const payload = wire_util.readBounded(plugin.gpa, caller, args[1], args[2], 1, scene_codec.Limits.max_payload_bytes) orelse return;
             defer plugin.gpa.free(payload);
             if (kind == 2) {
@@ -78,9 +78,15 @@ pub fn hRespond(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32, resu
                     decoded.deinit();
                     return;
                 };
-            } else {
+            } else if (kind == 3) {
                 var decoded = scene_codec.interaction.decode(plugin.gpa, payload) catch return;
                 plugin.semantic_actions.adoptInteraction(&decoded) catch {
+                    decoded.deinit();
+                    return;
+                };
+            } else {
+                var decoded = scene_codec.target.decodeLocated(plugin.gpa, payload) catch return;
+                plugin.semantic_actions.adoptOpenTarget(&decoded) catch {
                     decoded.deinit();
                     return;
                 };
