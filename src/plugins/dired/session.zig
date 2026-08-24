@@ -1233,6 +1233,36 @@ test "row target publication is closed when its session retires" {
     fixture.deinit();
 }
 
+test "row target publication rolls back when retention allocation fails" {
+    var fixture: Fixture = undefined;
+    try fixture.init();
+    defer fixture.deinit();
+    const session = fixture.plugin.sessions.items[0];
+    var staged = model.Model.init(std.testing.allocator, rootRef());
+    defer staged.deinit();
+    try staged.reconcile(.{ .entries = &.{.{
+        .identity = entryRef(9),
+        .name = "child",
+        .revision = "1",
+        .kind = .directory,
+    }} });
+
+    var counting = std.testing.FailingAllocator.init(std.testing.allocator, .{});
+    fixture.plugin.gpa = counting.allocator();
+    try session.prepareRowTargets(&staged);
+    const allocation_count = counting.alloc_index;
+    session.closeAllRowTargets();
+    session.row_targets = .empty;
+    fixture.plugin.gpa = std.testing.allocator;
+    try std.testing.expect(allocation_count > 0);
+
+    var failing = std.testing.FailingAllocator.init(std.testing.allocator, .{ .fail_index = allocation_count - 1 });
+    fixture.plugin.gpa = failing.allocator();
+    try std.testing.expectError(error.OutOfMemory, session.prepareRowTargets(&staged));
+    try std.testing.expectEqual(@as(usize, 0), fixture.targets.closeOwner(std.testing.allocator, fixture.plugin.owner));
+    fixture.plugin.gpa = std.testing.allocator;
+}
+
 const FakeEntry = struct {
     name: []const u8,
     ref: contract.EntryRef,
