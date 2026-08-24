@@ -283,6 +283,31 @@ test "projection reports add copy and stale facts with metadata" {
     var stale_output = try project(std.testing.allocator, dired.rows.items, &refs);
     defer stale_output.deinit();
     try std.testing.expectEqualStrings("delete", stale_output.value.content.container.children[0].facts[0].value);
+
+    var source = model.Model.init(std.testing.allocator, .{ .authority = .here, .slot = 1, .generation = 1 });
+    defer source.deinit();
+    try source.reconcile(.{ .entries = &.{.{ .identity = .{ .authority = .here, .slot = 20, .generation = 1 }, .name = "source", .revision = "1", .kind = .regular }} });
+    var item = try source.yank(source.rows.items[0].id, .copy);
+    defer item.deinit();
+    const copied = try dired.paste(null, &item);
+    const copy_refs = [_]FieldBinding{
+        .{ .row = added, .field = .{ .authority = .here, .slot = 13, .generation = 1 } },
+        .{ .row = copied, .field = .{ .authority = .here, .slot = 14, .generation = 1 } },
+    };
+    var copy_output = try project(std.testing.allocator, dired.rows.items, &copy_refs);
+    defer copy_output.deinit();
+    try std.testing.expectEqualStrings("copy", copy_output.value.content.container.children[1].facts[0].value);
+
+    var stale_source = model.Model.init(std.testing.allocator, .{ .authority = .here, .slot = 2, .generation = 1 });
+    defer stale_source.deinit();
+    try stale_source.reconcile(.{ .entries = &.{.{ .identity = .{ .authority = .here, .slot = 21, .generation = 1 }, .name = "stale", .revision = "1", .kind = .regular }} });
+    const stale_id = stale_source.rows.items[0].id;
+    try stale_source.rename(stale_id, "draft");
+    try stale_source.reconcile(.{ .entries = &.{} });
+    const stale_refs = [_]FieldBinding{.{ .row = stale_id, .field = .{ .authority = .here, .slot = 15, .generation = 1 } }};
+    var stale_projection = try project(std.testing.allocator, stale_source.rows.items, &stale_refs);
+    defer stale_projection.deinit();
+    try std.testing.expectEqualStrings("stale", stale_projection.value.content.container.children[0].facts[0].value);
 }
 
 test "projection rejects duplicate missing and generation-zero bindings" {
