@@ -148,7 +148,6 @@ pub fn exec(line: []const u8) void {
 
 /// The vim-owned classic commands. Returns true if `kw` matched (and ran).
 fn builtin(kw: []const u8, bang: bool, args: []const u8) bool {
-    _ = bang; // `!` is accepted (force) but weft's save/quit already don't refuse
     if (eqAny(kw, &.{ "w", "wr", "write" })) {
         if (args.len > 0) weft.runStr("save-as", args) else weft.run("save");
         return true;
@@ -168,7 +167,20 @@ fn builtin(kw: []const u8, bang: bool, args: []const u8) bool {
         return true;
     }
     if (eqAny(kw, &.{ "e", "ed", "edit", "o", "op", "open" })) {
-        if (args.len > 0) weft.runStr("open", args) else weft.echo("e: reload unsupported (no revert command)");
+        if (args.len > 0) {
+            weft.runStr("open", args);
+        } else if (weft.semanticActive()) {
+            // Structured views own their revert semantics. This is the same
+            // open action protocol config binds; ex knows neither dired nor
+            // how a provider reconstructs its draft.
+            switch (weft.semanticAction(weft.semantic.action.standard.revert)) {
+                .handled, .transfer_stored, .interaction_opened => {},
+                .unavailable, .failed, _ => weft.echo("e: structured view refused revert"),
+            }
+        } else {
+            _ = bang;
+            weft.echo("e: reload unsupported (no buffer revert command)");
+        }
         return true;
     }
     if (eqAny(kw, &.{ "clo", "close" })) {
