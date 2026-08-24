@@ -48,9 +48,12 @@ pub fn open(
     location: semantic_model.target.Location,
     preferred: ?semantic_model.scene.NodeId,
 ) Error!Result {
-    var resolution = try services.resolveTarget(gpa, target);
-    defer resolution.deinit();
-    return openResolved(services, head, gpa, &resolution, resolution.located(location), preferred);
+    const descriptor = services.targets.get(target) orelse return error.StaleTarget;
+    return admitAndFocus(services, head, gpa, .{
+        .target = target,
+        .revision = descriptor.revision,
+        .location = location,
+    }, preferred);
 }
 
 /// Open an already revision-stamped link. This is the scene-node path: unlike
@@ -63,40 +66,27 @@ pub fn openLocated(
     located: semantic_model.target.Located,
     preferred: ?semantic_model.scene.NodeId,
 ) Error!Result {
-    var resolution = try services.resolveTarget(gpa, located.target);
-    defer resolution.deinit();
-    if (resolution.revision != located.revision) return error.StaleTarget;
-    return openResolved(services, head, gpa, &resolution, located, preferred);
+    return admitAndFocus(services, head, gpa, located, preferred);
 }
 
-fn openResolved(
+fn admitAndFocus(
     services: *Services,
     head: *Head,
     gpa: std.mem.Allocator,
-    resolution: *const Services.ResolvedTarget,
     located: semantic_model.target.Located,
     preferred: ?semantic_model.scene.NodeId,
 ) Error!Result {
-    return switch (resolution.handlers.value.decide()) {
-        .none => .no_handler,
-        .ambiguous => |strength| .{ .ambiguous = .{
-            .strength = strength,
-            .count = equalStrengthCount(resolution.handlers.value.candidates, strength),
+    return switch (try services.openLocatedTarget(gpa, located)) {
+        .no_handler => .no_handler,
+        .ambiguous => |match| .{ .ambiguous = .{
+            .strength = match.strength,
+            .count = match.count,
         } },
-        .selected => |handler| blk: {
-            const view = try services.openTarget(handler, located);
+        .opened => |view| blk: {
             const node = try services.focusView(head, gpa, view, preferred);
             break :blk .{ .opened = .{ .view = view, .node = node } };
         },
     };
-}
-
-fn equalStrengthCount(candidates: []const target_runtime.resolver.Candidate, strength: Match) usize {
-    var count: usize = 0;
-    for (candidates) |candidate| {
-        if (candidate.strength == strength) count += 1;
-    }
-    return count;
 }
 
 /// The command-facing form performs the same operation and focuses the

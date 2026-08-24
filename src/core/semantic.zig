@@ -177,6 +177,8 @@ pub const Services = struct {
         StaleView,
         HandlerOwnerMismatch,
         ViewTargetMismatch,
+        NoTargetHandler,
+        AmbiguousTargetHandlers,
     };
 
     pub const LocatedOpenResult = union(enum) {
@@ -393,7 +395,8 @@ pub const Services = struct {
             .interaction => |definition| .{ .interaction_opened = try self.openInteraction(stack, gpa, definition) },
             .open_target => |located| switch (try self.openLocatedTarget(gpa, located)) {
                 .opened => |view| .{ .target_opened = view },
-                .no_handler, .ambiguous => .declined,
+                .no_handler => error.NoTargetHandler,
+                .ambiguous => error.AmbiguousTargetHandlers,
             },
         };
     }
@@ -406,6 +409,7 @@ pub const Services = struct {
     pub fn invokeInteractionInput(
         self: *Services,
         stack: *view_runtime.interaction.Stack,
+        head: *Head,
         gpa: std.mem.Allocator,
         input: []const u8,
     ) InvokeInputError!?ActionEffect {
@@ -427,6 +431,9 @@ pub const Services = struct {
             },
             else => return err,
         };
+        if (effect == .target_opened) {
+            _ = try self.focusView(head, gpa, effect.target_opened, null);
+        }
         if (disposition == .close_on_handled) switch (effect) {
             .handled, .transfer_stored, .target_opened => try stack.close(gpa, interaction_ref),
             .declined, .interaction_opened => {},
@@ -892,8 +899,8 @@ test "semantic open-target actions use the nearest subject and preserve fallback
     try services.replaceTarget(std.testing.allocator, owner, target, .{ .kind = .{ .synthetic = "resource" }, .display_name = "new" });
     try std.testing.expectError(error.StaleTarget, services.invokeFocusedAction(&head.interactions, &head, std.testing.allocator, "open"));
 
-    // Provider failures remain errors after resolution, while no handler is
-    // the ordinary declined result that lets an input plugin fall back.
+    // Provider failures remain errors after resolution, and an affirmative
+    // open request never silently falls through when no handler exists.
     const error_target = try services.publishTarget(std.testing.allocator, owner, .{ .kind = .{ .synthetic = "error" }, .display_name = "error" });
     const error_view = try services.publishView(std.testing.allocator, owner, error_target, 1, .{ .id = @enumFromInt(11), .content = .{ .label = "error" } });
     var failing_handler: TargetHandler = .{ .view = error_view, .kind = "error", .fail = true };
@@ -903,7 +910,17 @@ test "semantic open-target actions use the nearest subject and preserve fallback
 
     const fallback_target = try services.publishTarget(std.testing.allocator, owner, .{ .kind = .{ .synthetic = "fallback" }, .display_name = "fallback" });
     action_provider.located = .{ .target = fallback_target, .revision = 1 };
-    try std.testing.expectEqual(Services.ActionEffect.declined, (try services.invokeFocusedAction(&head.interactions, &head, std.testing.allocator, "open")).?);
+    try std.testing.expectError(error.NoTargetHandler, services.invokeFocusedAction(&head.interactions, &head, std.testing.allocator, "open"));
+
+    const ambiguous_target = try services.publishTarget(std.testing.allocator, owner, .{ .kind = .{ .synthetic = "ambiguous" }, .display_name = "ambiguous" });
+    const ambiguous_view_a = try services.publishView(std.testing.allocator, owner, ambiguous_target, 1, .{ .id = @enumFromInt(12), .content = .{ .label = "a" } });
+    const ambiguous_view_b = try services.publishView(std.testing.allocator, owner, ambiguous_target, 1, .{ .id = @enumFromInt(13), .content = .{ .label = "b" } });
+    var ambiguous_handler_a: TargetHandler = .{ .view = ambiguous_view_a, .kind = "ambiguous" };
+    var ambiguous_handler_b: TargetHandler = .{ .view = ambiguous_view_b, .kind = "ambiguous" };
+    _ = try services.registerTargetHandler(std.testing.allocator, owner, "ambiguous-a", .init(&ambiguous_handler_a));
+    _ = try services.registerTargetHandler(std.testing.allocator, owner, "ambiguous-b", .init(&ambiguous_handler_b));
+    action_provider.located = .{ .target = ambiguous_target, .revision = 1 };
+    try std.testing.expectError(error.AmbiguousTargetHandlers, services.invokeFocusedAction(&head.interactions, &head, std.testing.allocator, "open"));
 }
 
 test "semantic view focus is head-scoped with preferred and root fallback" {
@@ -976,8 +993,10 @@ test "interaction-local input invokes semantic action and closes explicitly" {
         .bindings = &.{.{ .input = "y", .action = "confirm" }},
         .presentation = "which-key-like",
     });
-    try std.testing.expect(try services.invokeInteractionInput(&interactions, std.testing.allocator, "x") == null);
-    try std.testing.expect((try services.invokeInteractionInput(&interactions, std.testing.allocator, "y")).? == .handled);
+    var head: Head = .empty;
+    defer head.deinit(std.testing.allocator);
+    try std.testing.expect(try services.invokeInteractionInput(&interactions, &head, std.testing.allocator, "x") == null);
+    try std.testing.expect((try services.invokeInteractionInput(&interactions, &head, std.testing.allocator, "y")).? == .handled);
     try std.testing.expectEqual(@as(usize, 1), handler.calls);
     try std.testing.expect(interactions.active() == null);
 
@@ -989,7 +1008,69 @@ test "interaction-local input invokes semantic action and closes explicitly" {
         .bindings = &.{.{ .input = "y", .action = "confirm" }},
     });
     _ = services.releaseOwner(std.testing.allocator, owner);
-    try std.testing.expect((try services.invokeInteractionInput(&interactions, std.testing.allocator, "y")).? == .declined);
+    try std.testing.expect((try services.invokeInteractionInput(&interactions, &head, std.testing.allocator, "y")).? == .declined);
+    try std.testing.expect(interactions.active() == null);
+}
+
+test "interaction-local target opens focus the admitted view on its head" {
+    const ActionProvider = struct {
+        located: semantic.target.Located,
+
+        pub fn invoke(self: *@This(), _: semantic.action.Request) view_runtime.action.ProviderError!semantic.action.Outcome {
+            return .{ .open_target = self.located };
+        }
+    };
+    const TargetHandler = struct {
+        view: semantic.view.Ref,
+
+        pub fn probe(_: *@This(), descriptor: semantic.target.Descriptor) target_runtime.resolver.ProbeError!?target_runtime.resolver.Strength {
+            return switch (descriptor.kind) {
+                .synthetic => |kind| if (std.mem.eql(u8, kind, "interaction-target")) .exact else null,
+                else => null,
+            };
+        }
+
+        pub fn open(self: *@This(), _: semantic.target.Located) target_runtime.resolver.OpenError!semantic.view.Ref {
+            return self.view;
+        }
+    };
+
+    var services = Services.init(.here);
+    defer services.deinit(std.testing.allocator);
+    const owner = try services.acquireOwner();
+    const interaction_view = try services.publishView(std.testing.allocator, owner, null, 1, .{
+        .id = @enumFromInt(1),
+        .actions = &.{.{ .id = "open" }},
+        .content = .{ .label = "dialog" },
+    });
+    const target = try services.publishTarget(std.testing.allocator, owner, .{
+        .kind = .{ .synthetic = "interaction-target" },
+        .display_name = "target",
+    });
+    const opened_view = try services.publishView(std.testing.allocator, owner, target, 1, .{
+        .id = @enumFromInt(2),
+        .focusable = true,
+        .content = .{ .label = "opened" },
+    });
+    var target_handler: TargetHandler = .{ .view = opened_view };
+    _ = try services.registerTargetHandler(std.testing.allocator, owner, "interaction-target", .init(&target_handler));
+    var action_provider: ActionProvider = .{ .located = .{ .target = target, .revision = 1 } };
+    try services.registerActionProvider(std.testing.allocator, owner, .init(&action_provider));
+
+    var interactions: view_runtime.interaction.Stack = .empty;
+    defer interactions.deinit(std.testing.allocator);
+    _ = try services.openInteraction(&interactions, std.testing.allocator, .{
+        .role = .dialog,
+        .view = interaction_view,
+        .root = @enumFromInt(1),
+        .actions = &.{.{ .id = "open", .disposition = .close_on_handled }},
+        .bindings = &.{.{ .input = "y", .action = "open" }},
+    });
+    var head: Head = .empty;
+    defer head.deinit(std.testing.allocator);
+    const effect = (try services.invokeInteractionInput(&interactions, &head, std.testing.allocator, "y")).?;
+    try std.testing.expectEqual(opened_view, effect.target_opened);
+    try std.testing.expectEqual(opened_view, head.semantic_focus.path().?.view);
     try std.testing.expect(interactions.active() == null);
 }
 

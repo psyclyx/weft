@@ -466,7 +466,7 @@ pub fn dispatchSpec(ctx: *core.command.Context, spec: []const u8, text: []const 
     // unbound keys continue normally, while a bound y/n/Escape never leaks to
     // the global keymap or triggers which-key merely because a dialog exists.
     if (ctx.semantic) |services| {
-        if (services.invokeInteractionInput(&ctx.head.interactions, ctx.gpa, spec) catch |err| blk: {
+        if (services.invokeInteractionInput(&ctx.head.interactions, ctx.head, ctx.gpa, spec) catch |err| blk: {
             std.log.warn("interaction input '{s}' failed: {t}", .{ spec, err });
             break :blk @as(?core.semantic.Services.ActionEffect, .declined);
         }) |_| return;
