@@ -654,16 +654,24 @@ const Builder = struct {
     }
 
     fn build(self: *Builder) !void {
-        // Captured transfers are immutable references to an observed source.
-        // Emit them in their own phase before source-local rename/remove
-        // effects, regardless of where a pasted row sits in the listing.
-        // This is the planner's ordering invariant; row order is only draft
-        // presentation state and cannot establish source lifetime.
+        // Guarded entry captures still name the observed namespace object, so
+        // consume them before any local effect can rename/remove that object.
+        // A provider lease is already namespace-independent: defer those
+        // copies until after ordinary effects so deleting and then restoring
+        // the same name cannot collide with the still-live source entry.
+        // Row order remains presentation state, never an effect-order signal.
         for (self.model.rows.items) |row| {
-            if (row.pending == .copied or row.pending == .copied_renamed)
+            if (isCopied(&row) and !isLeaseBackedCopy(&row))
                 try self.emit(row.id);
         }
-        for (self.model.rows.items) |row| if (rowHasPendingChanges(&row)) try self.emit(row.id);
+        for (self.model.rows.items) |row| {
+            if (rowHasPendingChanges(&row) and !isLeaseBackedCopy(&row))
+                try self.emit(row.id);
+        }
+        for (self.model.rows.items) |row| {
+            if (isLeaseBackedCopy(&row))
+                try self.emit(row.id);
+        }
     }
 
     fn emit(self: *Builder, id: NodeId) !void {
@@ -862,6 +870,20 @@ fn baseSource(model: *const Model, row_ptr: *const Row) ?contract.EntrySource {
 
 pub fn rowHasPendingChanges(row_ptr: *const Row) bool {
     return row_ptr.pending != .observed or row_ptr.name_dirty or row_ptr.mode_dirty or row_ptr.conflict != .none;
+}
+
+fn isCopied(row_ptr: *const Row) bool {
+    return row_ptr.pending == .copied or row_ptr.pending == .copied_renamed;
+}
+
+fn isLeaseBackedCopy(row_ptr: *const Row) bool {
+    if (!isCopied(row_ptr)) return false;
+    const copy_source = row_ptr.copy_source orelse return false;
+    if (copy_source.intent != .copy) return false;
+    return switch (copy_source.source) {
+        .lease => true,
+        .entry => false,
+    };
 }
 
 fn validateSnapshot(snapshot: Snapshot, authority: semantic.handle.Authority) !void {
@@ -1442,6 +1464,54 @@ test "planner preserves deleted captured source for multiple pastes" {
     try std.testing.expectEqual(@as(usize, 0), plan.value.operations[2].depends_on[0]);
     try std.testing.expectEqual(@as(usize, 1), plan.value.operations[2].depends_on[1]);
     try fs.plan.validate(std.testing.allocator, plan.value);
+}
+
+test "lease copy restores a deleted source name after namespace effects" {
+    const root: contract.Root = .{ .authority = .here, .slot = 77, .generation = 1 };
+    const leased: contract.Source = .{ .lease = .{
+        .root = root,
+        .ref = .{ .authority = .here, .slot = 9, .generation = 1 },
+    } };
+    const payload = try encodeEntryTransfer(std.testing.allocator, leased, .regular, 0o644);
+    defer std.testing.allocator.free(payload);
+    const representations = [_]transfer.Representation{.{
+        .media_type = entry_media,
+        .schema = entry_schema,
+        .payload = payload,
+    }};
+    var item = try transfer.OwnedItem.init(std.testing.allocator, .{
+        .intent = .copy,
+        .suggested_name = "same",
+        .representations = &representations,
+    });
+    defer item.deinit();
+
+    for ([_]bool{ true, false }) |paste_before_delete| {
+        var model = Model.init(std.testing.allocator, root);
+        defer model.deinit();
+        try model.reconcile(.{ .entries = &.{.{
+            .identity = ref(78, 1),
+            .name = "same",
+            .revision = "r1",
+            .kind = .regular,
+        }} });
+        const source = model.rows.items[0].id;
+        if (paste_before_delete) _ = try model.paste(null, &item);
+        try model.markDelete(source);
+        if (!paste_before_delete) _ = try model.paste(null, &item);
+
+        var plan = try model.buildPlan();
+        defer plan.deinit();
+        try std.testing.expectEqual(@as(usize, 2), plan.value.operations.len);
+        try std.testing.expectEqual(std.meta.activeTag(plan.value.operations[0].operation), .remove);
+        try std.testing.expectEqual(@as(u32, 78), plan.value.operations[0].operation.remove.source.ref.slot);
+        try std.testing.expectEqual(std.meta.activeTag(plan.value.operations[1].operation), .copy);
+        try std.testing.expectEqual(@as(u32, 9), plan.value.operations[1].operation.copy.source.lease.ref.slot);
+        try std.testing.expectEqualStrings("same", plan.value.operations[1].operation.copy.destination.name.bytes);
+        try std.testing.expectEqual(@as(usize, 0), plan.value.operations[0].depends_on.len);
+        try std.testing.expectEqual(@as(usize, 0), plan.value.operations[1].depends_on.len);
+        try fs.plan.validate(std.testing.allocator, plan.value);
+    }
 }
 
 test "dependent capture preserves source when destination name is occupied" {

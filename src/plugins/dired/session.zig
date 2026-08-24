@@ -150,8 +150,11 @@ pub const Plugin = struct {
                     session.publishDraft(&staged) catch return error.Failed;
                 },
                 .transfer => {
+                    var captured = staged_controller.takeCapture() orelse return error.Failed;
+                    errdefer captured.deinit();
+                    self.materializeCapture(&captured) catch |err| return mapActionError(err);
                     session.controller.clearCapture();
-                    session.controller.capture = staged_controller.takeCapture();
+                    session.controller.capture = captured;
                     return .{ .transfer = session.controller.captured().? };
                 },
                 .declined, .interaction, .open_target => {},
@@ -159,6 +162,62 @@ pub const Plugin = struct {
             return outcome;
         }
         return error.Stale;
+    }
+
+    /// Replace a guarded entry address with a provider-owned snapshot when
+    /// that provider advertises durable leases. The transfer remains an
+    /// ordinary immutable plugin value; the opaque resource only keeps the
+    /// provider lease live while a clipboard or pasted draft retains it.
+    fn materializeCapture(self: *Plugin, captured: *semantic.transfer.OwnedItem) !void {
+        if (captured.value.intent != .copy) return;
+        const representation = captured.value.representation(model.entry_media_type) orelse return;
+        const schema = representation.schema orelse return error.InvalidTransfer;
+        const decoded = try model.decodeEntryTransfer(representation.payload, schema, representation.resource);
+        const entry = switch (decoded.source) {
+            .entry => |value| value,
+            .lease => return,
+        };
+        switch (decoded.kind) {
+            .regular, .symlink => {},
+            .directory, .other => return,
+        }
+        const capabilities = try self.host.filesystems.capabilities(entry.root);
+        if (capabilities.durable_lease == null) return;
+
+        const lease = try self.host.filesystems.capture(entry);
+        var release_lease = true;
+        errdefer if (release_lease) {
+            _ = self.host.filesystems.release(lease) catch {};
+        };
+        const resource = try fs_runtime.LeaseResource.create(self.gpa, self.host.filesystems, lease);
+        release_lease = false;
+        var release_resource = true;
+        defer if (release_resource) resource.release();
+
+        const payload = try model.encodeEntryTransfer(self.gpa, .{ .lease = lease }, decoded.kind, decoded.mode);
+        defer self.gpa.free(payload);
+        const representations = try self.gpa.alloc(semantic.transfer.Representation, captured.value.representations.len);
+        defer self.gpa.free(representations);
+        var replaced = false;
+        for (captured.value.representations, representations) |source, *destination| {
+            destination.* = source;
+            if (!std.mem.eql(u8, source.media_type, model.entry_media_type)) continue;
+            destination.schema = model.entry_schema_current;
+            destination.payload = payload;
+            destination.resource = resource;
+            replaced = true;
+        }
+        if (!replaced) return error.InvalidTransfer;
+        const materialized = try semantic.transfer.OwnedItem.init(self.gpa, .{
+            .intent = captured.value.intent,
+            .suggested_name = captured.value.suggested_name,
+            .source = captured.value.source,
+            .representations = representations,
+        });
+        resource.release();
+        release_resource = false;
+        captured.deinit();
+        captured.* = materialized;
     }
 
     fn mapOpenError(err: anyerror) target_runtime.resolver.OpenError {
@@ -171,7 +230,7 @@ pub const Plugin = struct {
 
     fn mapActionError(err: anyerror) view_runtime.action.ProviderError {
         return switch (err) {
-            error.StaleSubject, error.StaleTarget, error.InvalidView => error.Stale,
+            error.Stale, error.StaleSubject, error.StaleTarget, error.InvalidView => error.Stale,
             error.UnknownSubject,
             error.AmbiguousSubject,
             error.InvalidSelection,
@@ -624,6 +683,60 @@ test "actions retain deleted rows as portable paste anchors and revert discards 
     try std.testing.expectEqual(model.Pending.observed, session.draft.rows.items[0].pending);
 }
 
+test "durable copy survives clipboard replacement and restores a deleted source name" {
+    var fixture: Fixture = undefined;
+    try fixture.init();
+    defer fixture.deinit();
+    fixture.fake.durable_leases = true;
+    const session = fixture.plugin.sessions.items[0];
+    const row = session.draft.rows.items[0].id;
+    const subject = try projection.rowNodeId(row);
+
+    const copied = try fixture.actions.invoke(&fixture.views, .{
+        .action = semantic.action.standard.copy,
+        .view = session.view_ref,
+        .subject = subject,
+    });
+    try std.testing.expectEqual(@as(usize, 1), fixture.fake.capture_calls);
+    const representation = copied.transfer.representation(model.entry_media_type).?;
+    const decoded = try model.decodeEntryTransfer(representation.payload, representation.schema.?, representation.resource);
+    try std.testing.expect(decoded.source == .lease);
+    try std.testing.expect(representation.resource != null);
+
+    var clipboard = try semantic.transfer.OwnedItem.init(std.testing.allocator, copied.transfer);
+    var clipboard_live = true;
+    defer if (clipboard_live) clipboard.deinit();
+    _ = try fixture.actions.invoke(&fixture.views, .{
+        .action = semantic.action.standard.delete,
+        .view = session.view_ref,
+        .subject = subject,
+    });
+    _ = try fixture.actions.invoke(&fixture.views, .{
+        .action = semantic.action.standard.paste_after,
+        .view = session.view_ref,
+        .subject = subject,
+        .transfer = clipboard.value,
+    });
+
+    // Replacing the plugin capture and the external clipboard cannot retire
+    // the provider lease while a pasted draft row still names it.
+    session.controller.clearCapture();
+    clipboard.deinit();
+    clipboard_live = false;
+    try std.testing.expectEqual(@as(usize, 0), fixture.fake.release_calls);
+
+    var effect_plan = try session.buildPlan();
+    defer effect_plan.deinit();
+    try std.testing.expectEqual(@as(usize, 2), effect_plan.value.operations.len);
+    try std.testing.expectEqual(std.meta.activeTag(effect_plan.value.operations[0].operation), .remove);
+    try std.testing.expectEqual(std.meta.activeTag(effect_plan.value.operations[1].operation), .copy);
+    try std.testing.expectEqual(@as(u32, 1), effect_plan.value.operations[1].operation.copy.source.lease.ref.slot);
+    try std.testing.expectEqualStrings("kept", effect_plan.value.operations[1].operation.copy.destination.name.bytes);
+
+    try session.revert();
+    try std.testing.expectEqual(@as(usize, 1), fixture.fake.release_calls);
+}
+
 test "entry-backed directory sessions preserve their destination and namespace revision" {
     var fixture: Fixture = undefined;
     const directory: fs.target.Directory = .{ .root = rootRef(), .node = .{ .entry = entryRef(99) } };
@@ -793,6 +906,9 @@ const FakeEntry = struct {
 const FakeFilesystem = struct {
     arena: std.heap.ArenaAllocator = .init(std.testing.allocator),
     entries: []const FakeEntry = &.{},
+    durable_leases: bool = false,
+    capture_calls: usize = 0,
+    release_calls: usize = 0,
 
     fn deinit(self: *FakeFilesystem) void {
         self.arena.deinit();
@@ -814,8 +930,15 @@ const FakeFilesystem = struct {
         self.entries = owned;
     }
 
-    pub fn capabilities(_: *FakeFilesystem, _: contract.Root) contract.Error!contract.Capabilities {
-        return .{ .symlink = true, .posix_mode = true };
+    pub fn capabilities(self: *FakeFilesystem, _: contract.Root) contract.Error!contract.Capabilities {
+        return .{
+            .durable_lease = if (self.durable_leases) .{
+                .regular_file_max_bytes = 1024 * 1024,
+                .symlink_target_max_bytes = 4096,
+            } else null,
+            .symlink = true,
+            .posix_mode = true,
+        };
     }
 
     pub fn observe(_: *FakeFilesystem, gpa: std.mem.Allocator, _: contract.Root, node: contract.NodeRef) contract.Error!contract.OwnedObservation {
@@ -856,11 +979,27 @@ const FakeFilesystem = struct {
         return error.Unsupported;
     }
 
-    pub fn capture(_: *FakeFilesystem, _: contract.EntrySource) contract.Error!contract.LeaseRef {
-        return error.Unsupported;
+    pub fn capture(self: *FakeFilesystem, source: contract.EntrySource) contract.Error!contract.LeaseRef {
+        if (!self.durable_leases) return error.Unsupported;
+        if (!source.root.eql(rootRef())) return error.NotFound;
+        for (self.entries) |entry| {
+            if (!source.ref.eql(entry.ref)) continue;
+            if (!std.mem.eql(u8, source.revision.token, entry.revision)) return error.Stale;
+            if (entry.kind != .regular and entry.kind != .symlink) return error.Unsupported;
+            self.capture_calls += 1;
+            return .{
+                .authority = source.root.authority,
+                .slot = @intCast(self.capture_calls),
+                .generation = 1,
+            };
+        }
+        return error.NotFound;
     }
 
-    pub fn releaseLease(_: *FakeFilesystem, _: contract.LeaseSource) void {}
+    pub fn releaseLease(self: *FakeFilesystem, source: contract.LeaseSource) void {
+        if (!self.durable_leases or !source.root.eql(rootRef()) or source.ref.generation != 1) return;
+        self.release_calls += 1;
+    }
 
     pub fn apply(_: *FakeFilesystem, gpa: std.mem.Allocator, effect_plan: contract.Plan) contract.Error!contract.OwnedApplyReport {
         var owned = contract.OwnedApplyReport.init(gpa);
