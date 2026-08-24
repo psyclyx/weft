@@ -1308,15 +1308,10 @@ pub fn actionSnapshot(gpa: Allocator, ctx: *command.Context, actions: []const []
     return out.toOwnedSlice(gpa);
 }
 
-/// What the which-key overlay actually SHOWS on screen right now, as the text a
-/// user reads. This does NOT re-derive completions from the keymap (that would
-/// test what the harness *thinks* which-key shows) — it fires `on_menu` exactly
-/// as the app's MenuOverlay does, lets the which_key PLUGIN publish its surface
-/// (with its own noise-filtering + config-notation key display), and reads that
-/// surface's spans. So `whichKeyText` is literally the rendered overlay content.
-/// Caller frees. Empty if no plugin published a menu surface.
-pub fn whichKeyText(ed: *Editor, gpa: Allocator) ![]u8 {
-    for (ed.plugins.items) |pl| core.wasm_host.notifyMenu(pl, true); // peek (like F1)
+/// Read the currently retained which-key surface as the text a user reads.
+/// This deliberately does not notify the plugin: doing so would reopen the
+/// menu and reset its pagination offset.
+fn whichKeySurfaceText(ed: *Editor, gpa: Allocator) ![]u8 {
     var out: std.ArrayList(u8) = .empty;
     errdefer out.deinit(gpa);
     for (ed.plugins.items) |pl| {
@@ -1329,16 +1324,55 @@ pub fn whichKeyText(ed: *Editor, gpa: Allocator) ![]u8 {
             try out.append(gpa, '\n');
         }
     }
-    for (ed.plugins.items) |pl| core.wasm_host.notifyMenu(pl, false); // leave
     return out.toOwnedSlice(gpa);
+}
+
+/// What the which-key overlay actually SHOWS on screen right now, as the text a
+/// user reads. This does NOT re-derive completions from the keymap (that would
+/// test what the harness *thinks* which-key shows) — it fires `on_menu` exactly
+/// as the app's MenuOverlay does, lets the which_key PLUGIN publish its surface
+/// (with its own noise-filtering + config-notation key display), and reads that
+/// surface's spans. So `whichKeyText` is literally the rendered overlay content.
+/// Caller frees. Empty if no plugin published a menu surface.
+pub fn whichKeyText(ed: *Editor, gpa: Allocator) ![]u8 {
+    for (ed.plugins.items) |pl| core.wasm_host.notifyMenu(pl, true); // peek (like F1)
+    defer for (ed.plugins.items) |pl| core.wasm_host.notifyMenu(pl, false); // leave, including OOM
+    return whichKeySurfaceText(ed, gpa);
 }
 
 /// Whether the rendered which-key overlay shows `needle` (a key in config
 /// notation, or a command name) — i.e. a user peeking the hint would SEE it.
+/// Long menus are searched through the real menu-nav page command, keeping the
+/// pending prefix intact. This matters when config grows a generic prefix:
+/// each declared action remains discoverable even after it crosses PAGE.
 pub fn whichKeyShows(ed: *Editor, needle: []const u8) bool {
-    const text = whichKeyText(ed, ed.gpa) catch return false;
-    defer ed.gpa.free(text);
-    return std.mem.indexOf(u8, text, needle) != null;
+    defer for (ed.plugins.items) |pl| core.wasm_host.notifyMenu(pl, false);
+    var previous = whichKeyText(ed, ed.gpa) catch return false;
+    while (true) {
+        if (std.mem.indexOf(u8, previous, needle) != null) {
+            ed.gpa.free(previous);
+            return true;
+        }
+
+        // `C-n` is a configured which-key navigation key. It pages the
+        // retained surface without feeding the key into the pending chord.
+        ed.press("C-n", "");
+        const current = whichKeySurfaceText(ed, ed.gpa) catch {
+            ed.gpa.free(previous);
+            return false;
+        };
+
+        // At the final page which-key clamps its offset, so an unchanged
+        // surface is the generic end-of-pages signal. No page count or plugin
+        // knowledge is needed here.
+        if (std.mem.eql(u8, previous, current)) {
+            ed.gpa.free(previous);
+            ed.gpa.free(current);
+            return false;
+        }
+        ed.gpa.free(previous);
+        previous = current;
+    }
 }
 
 /// Author a file the way a person does: open it (adopts the path), enter

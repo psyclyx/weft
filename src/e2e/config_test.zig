@@ -281,6 +281,9 @@ test "e2e/config: the sample config boots; SPC g i is discoverable via which-key
     try t.expect(whichKeyShows(&ed, "fs.permissions.edit"));
     try t.expect(whichKeyShows(&ed, "fs.entry.create-file"));
     try t.expect(whichKeyShows(&ed, "fs.entry.create-directory"));
+    // The fixture action is appended after the sample config's generic view
+    // actions, so this assertion necessarily traverses which-key page 2.
+    try t.expect(whichKeyShows(&ed, "fixture.plugin-action"));
     ed.press("Escape", "");
 
     // Assert the complete config surface directly, including the cursor
