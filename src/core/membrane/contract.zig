@@ -281,6 +281,7 @@ const handlers = [_]struct { name: []const u8, handler: HostFn }{
     .{ .name = "wl_fs_list", .handler = fs.hFsList },
     .{ .name = "wl_fs_list_async", .handler = fs.hFsListAsync },
     .{ .name = "wl_semantic_fs_publish_child_directory", .handler = semantic_fs.hPublishChildDirectory },
+    .{ .name = "wl_semantic_fs_publish_child_file", .handler = semantic_fs.hPublishChildFile },
     .{ .name = "wl_semantic_fs_capabilities", .handler = semantic_fs.hCapabilities },
     .{ .name = "wl_semantic_fs_list", .handler = semantic_fs.hList },
     .{ .name = "wl_semantic_fs_apply", .handler = semantic_fs.hApply },
@@ -442,6 +443,7 @@ const perm_gated = [_]struct { name: []const u8, perm: Perm }{
     .{ .name = "wl_fs_list", .perm = .fs_read }, // fs.zig hFsList: .fs_read
     .{ .name = "wl_fs_list_async", .perm = .fs_read }, // fs.zig hFsListAsync: .fs_read
     .{ .name = "wl_semantic_fs_publish_child_directory", .perm = .fs_read }, // semantic_fs.zig hPublishChildDirectory: .fs_read
+    .{ .name = "wl_semantic_fs_publish_child_file", .perm = .fs_read }, // semantic_fs.zig hPublishChildFile: .fs_read
     .{ .name = "wl_semantic_fs_capabilities", .perm = .fs_read }, // semantic_fs.zig hCapabilities: .fs_read
     .{ .name = "wl_semantic_fs_list", .perm = .fs_read }, // semantic_fs.zig hList: .fs_read
     .{ .name = "wl_semantic_fs_apply", .perm = .fs_write }, // semantic_fs.zig hApply: .fs_write

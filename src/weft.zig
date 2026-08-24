@@ -9,6 +9,7 @@ pub const core = @import("core/core.zig");
 pub const semantic_model = @import("weft_semantic");
 pub const view_runtime = @import("weft_view_runtime");
 pub const target_runtime = @import("weft_target_runtime");
+pub const fs = @import("weft_fs");
 pub const view = @import("gfx/view.zig");
 pub const gfx_harness = @import("gfx/harness.zig");
 pub const region = @import("gfx/region.zig");

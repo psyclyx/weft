@@ -233,6 +233,7 @@ extern "weft" fn wl_fs_append(path: u32, path_len: u32, ptr: u32, len: u32) i32;
 extern "weft" fn wl_fs_list(auth: u32, auth_len: u32, path: u32, path_len: u32, out_ptr: u32, out_cap: u32) i32;
 extern "weft" fn wl_fs_list_async(auth: u32, auth_len: u32, path: u32, path_len: u32, dest: u32, dest_len: u32) i32;
 extern "weft" fn wl_semantic_fs_publish_child_directory(request_ptr: u32, request_len: u32, out_ptr: u32, out_cap: u32) i32;
+extern "weft" fn wl_semantic_fs_publish_child_file(request_ptr: u32, request_len: u32, out_ptr: u32, out_cap: u32) i32;
 extern "weft" fn wl_semantic_fs_capabilities(target_authority: u32, target_slot: u32, target_generation: u32, revision_low: u32, revision_high: u32, out_ptr: u32, out_cap: u32) i32;
 extern "weft" fn wl_semantic_fs_list(target_authority: u32, target_slot: u32, target_generation: u32, revision_low: u32, revision_high: u32, out_ptr: u32, out_cap: u32) i32;
 extern "weft" fn wl_semantic_fs_apply(target_authority: u32, target_slot: u32, target_generation: u32, revision_low: u32, revision_high: u32, plan_ptr: u32, plan_len: u32, out_ptr: u32, out_cap: u32) i32;
@@ -1750,6 +1751,31 @@ pub fn semanticFsPublishChildDirectory(
     entry: fs.contract.EntryRef,
     revision: fs.contract.Revision,
 ) SemanticFsError!semantic.target.Located {
+    return semanticFsPublishChild(.directory, gpa, parent, entry, revision);
+}
+
+/// Publish an observed direct child regular file as an ordinary semantic
+/// target. The guest supplies the same guarded provider identity used for a
+/// directory child; it never supplies a path, root capability, or target
+/// facts. Which plugin, if any, handles the resulting target is independent.
+pub fn semanticFsPublishChildFile(
+    gpa: std.mem.Allocator,
+    parent: semantic.target.Located,
+    entry: fs.contract.EntryRef,
+    revision: fs.contract.Revision,
+) SemanticFsError!semantic.target.Located {
+    return semanticFsPublishChild(.file, gpa, parent, entry, revision);
+}
+
+const SemanticFsChildKind = enum { directory, file };
+
+fn semanticFsPublishChild(
+    comptime kind: SemanticFsChildKind,
+    gpa: std.mem.Allocator,
+    parent: semantic.target.Located,
+    entry: fs.contract.EntryRef,
+    revision: fs.contract.Revision,
+) SemanticFsError!semantic.target.Located {
     const request = try fs_codec.child_directory.encode(gpa, .{
         .parent = parent,
         .entry = entry,
@@ -1757,12 +1783,10 @@ pub fn semanticFsPublishChildDirectory(
     });
     defer gpa.free(request);
     var output: [64]u8 = undefined;
-    const result = wl_semantic_fs_publish_child_directory(
-        p(request.ptr),
-        @intCast(request.len),
-        p(&output),
-        output.len,
-    );
+    const result = switch (kind) {
+        .directory => wl_semantic_fs_publish_child_directory(p(request.ptr), @intCast(request.len), p(&output), output.len),
+        .file => wl_semantic_fs_publish_child_file(p(request.ptr), @intCast(request.len), p(&output), output.len),
+    };
     try semanticFsError(result);
     const result_len: usize = @intCast(result);
     if (result_len > output.len) return error.Failed;

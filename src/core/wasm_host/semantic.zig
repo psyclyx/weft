@@ -62,7 +62,7 @@ pub fn hSemanticTargetReplace(data: ?*anyopaque, caller: *wasm.Caller, args: []c
     // A provider-confined directory target is an immutable authority value.
     // Replacing only its descriptive half would split target revision from
     // router binding; close and derive another target instead.
-    if (plugin.ownsSemanticDirectory(ref)) return;
+    if (plugin.ownsSemanticFilesystemTarget(ref)) return;
     const payload = readPayload(plugin, caller, args[3], args[4]) orelse return;
     defer plugin.gpa.free(payload);
     var decoded = scene_codec.decodeTarget(plugin.gpa, payload) catch return;
@@ -81,7 +81,7 @@ pub fn hSemanticTargetClose(data: ?*anyopaque, _: *wasm.Caller, args: []const i3
         results[0] = 0;
         return;
     };
-    if (plugin.closeSemanticDirectory(&scope.services.targets, ref)) |closed| {
+    if (plugin.closeSemanticFilesystemTarget(&scope.services.targets, ref)) |closed| {
         results[0] = @intFromBool(closed);
         return;
     }

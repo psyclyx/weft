@@ -64,19 +64,27 @@ pub fn reconcileListing(
     return next;
 }
 
-/// Return the guarded identity of an observed direct child directory. The
+/// Return the guarded identity and kind of an observed openable child. The
 /// adapter may feed this value to its generic child-target publication port;
-/// names remain provider-owned and are deliberately absent here.
+/// names remain provider-owned and are deliberately absent here. Symlinks are
+/// entries but not traversal/open targets: following them implicitly here
+/// would discard the provider's no-follow boundary.
 pub fn observedChild(parent: fs.target.Directory, row: model.Row) ?struct {
     entry: contract.EntryRef,
     revision: contract.Revision,
+    kind: contract.Kind,
 } {
-    if (row.conflict == .stale or row.pending == .deleted or row.draft.kind != .directory) return null;
+    if (row.conflict == .stale or row.pending == .deleted) return null;
     const observation = row.current orelse return null;
-    if (observation.kind != .directory or observation.identity.authority != parent.root.authority) return null;
+    switch (observation.kind) {
+        .regular, .directory => {},
+        .symlink, .other => return null,
+    }
+    if (row.draft.kind != observation.kind or observation.identity.authority != parent.root.authority) return null;
     return .{
         .entry = observation.identity,
         .revision = .{ .token = observation.revision },
+        .kind = observation.kind,
     };
 }
 
@@ -127,6 +135,7 @@ test "listing reconciliation is identical for native and sandbox adapters" {
     const child = observedChild(directory, draft.rows.items[0]).?;
     try std.testing.expectEqual(testEntry(4), child.entry);
     try std.testing.expectEqualStrings("child-r1", child.revision.token);
+    try std.testing.expectEqual(contract.Kind.directory, child.kind);
 
     try draft.rename(draft.rows.items[0].id, "pending");
     var reconciled = try reconcileListing(std.testing.allocator, directory, &draft, .{
@@ -137,6 +146,48 @@ test "listing reconciliation is identical for native and sandbox adapters" {
     defer reconciled.deinit();
     try std.testing.expectEqual(model.Conflict.stale, reconciled.rows.items[0].conflict);
     try std.testing.expectEqualStrings("pending", reconciled.rows.items[0].draft.name);
+}
+
+test "openable child observations include regular files but never symlinks" {
+    const root: contract.Root = .{ .authority = .here, .slot = 9, .generation = 1 };
+    const directory: fs.target.Directory = .{ .root = root };
+    const observation: contract.Observation = .{
+        .node = .root,
+        .revision = .{ .token = "directory-r1" },
+        .kind = .directory,
+    };
+    var draft = try reconcileListing(std.testing.allocator, directory, null, .{
+        .directory = observation,
+        .revision = observation.revision,
+        .entries = &.{
+            .{
+                .name = try contract.Name.init("file\n\xff"),
+                .observation = .{
+                    .node = .{ .entry = testEntry(5) },
+                    .revision = .{ .token = "file-r1" },
+                    .kind = .regular,
+                },
+            },
+            .{
+                .name = try contract.Name.init("link"),
+                .observation = .{
+                    .node = .{ .entry = testEntry(6) },
+                    .revision = .{ .token = "link-r1" },
+                    .kind = .symlink,
+                    .metadata = .{ .link_target = "elsewhere" },
+                },
+            },
+        },
+    });
+    defer draft.deinit();
+    const file = observedChild(directory, draft.rows.items[0]).?;
+    try std.testing.expectEqual(contract.Kind.regular, file.kind);
+    try std.testing.expectEqual(testEntry(5), file.entry);
+    try std.testing.expectEqualStrings("file-r1", file.revision.token);
+    try std.testing.expect(observedChild(directory, draft.rows.items[1]) == null);
+
+    try draft.markDelete(draft.rows.items[0].id);
+    try std.testing.expect(observedChild(directory, draft.rows.items[0]) == null);
 }
 
 test "listing rejects retargeted directories and foreign entry authorities" {

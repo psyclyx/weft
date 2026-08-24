@@ -246,6 +246,7 @@ const RowTarget = struct {
     // external rename or metadata change.
     entry: contract.EntryRef,
     entry_revision: []u8,
+    kind: contract.Kind,
     located: semantic.target.Located,
     active: bool = true,
     fresh: bool = false,
@@ -706,7 +707,7 @@ pub const Session = struct {
             while (target_index < self.row_targets.items.len) : (target_index += 1) {
                 const target = &self.row_targets.items[target_index];
                 if (target.row != row.id) continue;
-                if (target.entry.eql(child.entry) and
+                if (target.kind == child.kind and target.entry.eql(child.entry) and
                     std.mem.eql(u8, target.entry_revision, child.revision.token))
                 {
                     target.active = true;
@@ -724,12 +725,21 @@ pub const Session = struct {
                 break;
             }
             if (retained) continue;
-            const located = weft.semanticFsPublishChildDirectory(
-                self.plugin.gpa,
-                .{ .target = self.target, .revision = self.target_revision },
-                child.entry,
-                child.revision,
-            ) catch continue;
+            const located = switch (child.kind) {
+                .directory => weft.semanticFsPublishChildDirectory(
+                    self.plugin.gpa,
+                    .{ .target = self.target, .revision = self.target_revision },
+                    child.entry,
+                    child.revision,
+                ),
+                .regular => weft.semanticFsPublishChildFile(
+                    self.plugin.gpa,
+                    .{ .target = self.target, .revision = self.target_revision },
+                    child.entry,
+                    child.revision,
+                ),
+                .symlink, .other => unreachable,
+            } catch continue;
             var owned = true;
             errdefer {
                 if (owned) _ = weft.semanticTargetClose(located.target);
@@ -741,6 +751,7 @@ pub const Session = struct {
                 .row = row.id,
                 .entry = child.entry,
                 .entry_revision = entry_revision,
+                .kind = child.kind,
                 .located = located,
                 .fresh = true,
             });

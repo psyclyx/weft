@@ -34,6 +34,14 @@ const wasm_host = @import("../wasm_host.zig");
 
 const WasmPlugin = @This();
 
+/// A direct-child ordinary file shares its parent's provider root, so its
+/// paired lifetime is a target registration plus router binding (there is no
+/// derived root to release).
+pub const SemanticFileRegistration = struct {
+    registration: fs_runtime.publication.Registration,
+    router: *fs_runtime.Router,
+};
+
 /// Resolves a buffer's live tree-sitter `Syntax` (kept opaque in the shell's
 /// `Buffer.frontend`) — the host provides this so the membrane can expose
 /// structural reads without core learning the frontend's shape. Mirrors
@@ -270,6 +278,11 @@ semantic_relations: plugin_semantic.relation.Bridge = .empty,
 /// plugin teardown revoke the complete capability, not only its description.
 semantic_directories: std.ArrayList(fs_runtime.publication.ChildRegistration) = .empty,
 
+/// Keeping the router beside each registration makes teardown symmetrical
+/// with `semantic_directories` without teaching the target registry about
+/// filesystem authority.
+semantic_files: std.ArrayList(SemanticFileRegistration) = .empty,
+
 // ── Sandboxed semantic transfer attachments ──
 /// Guest references are owner-scoped and are revoked with this plugin. Host
 /// transfer owners retain the resolved resource independently.
@@ -357,16 +370,18 @@ pub fn semanticScope(self: *WasmPlugin) ?SemanticScope {
     return .{ .services = home, .owner = owner };
 }
 
-pub fn ownsSemanticDirectory(self: *const WasmPlugin, ref: semantic_model.target.Ref) bool {
+pub fn ownsSemanticFilesystemTarget(self: *const WasmPlugin, ref: semantic_model.target.Ref) bool {
     for (self.semantic_directories.items) |directory|
         if (directory.registration.ref.eql(ref)) return true;
+    for (self.semantic_files.items) |file|
+        if (file.registration.ref.eql(ref)) return true;
     return false;
 }
 
 /// Close a provider-confined target through the same generic target-close ABI
 /// every other owned target uses. `null` means the handle is not one of these
 /// paired publications and the ordinary semantic registry should decide it.
-pub fn closeSemanticDirectory(
+pub fn closeSemanticFilesystemTarget(
     self: *WasmPlugin,
     targets: *@import("weft_target_runtime").target.Registry,
     ref: semantic_model.target.Ref,
@@ -375,6 +390,12 @@ pub fn closeSemanticDirectory(
         if (!directory.registration.ref.eql(ref)) continue;
         if (!directory.close(self.gpa, targets)) return false;
         _ = self.semantic_directories.swapRemove(index);
+        return true;
+    }
+    for (self.semantic_files.items, 0..) |*file, index| {
+        if (!file.registration.ref.eql(ref)) continue;
+        if (!file.registration.close(self.gpa, targets, file.router)) return false;
+        _ = self.semantic_files.swapRemove(index);
         return true;
     }
     return null;
@@ -415,10 +436,19 @@ pub fn deinit(self: *WasmPlugin) void {
                 var directory = self.semantic_directories.pop().?;
                 _ = directory.revoke(gpa, &services.targets);
             }
+            while (self.semantic_files.items.len != 0) {
+                var file = self.semantic_files.pop().?;
+                _ = file.registration.close(gpa, &services.targets, file.router);
+                // Be robust to independent target-owner revocation: the
+                // router binding is still ours even if the descriptive half
+                // was already gone.
+                _ = file.router.unbindTarget(file.registration.ref);
+            }
             _ = services.releaseOwner(gpa, owner);
         }
     }
     self.semantic_directories.deinit(gpa);
+    self.semantic_files.deinit(gpa);
     self.semantic_fields.deinit();
     self.semantic_actions.deinit();
     self.semantic_targets.deinit();

@@ -130,7 +130,21 @@ pub fn requireUnrestricted(plugin: *WasmPlugin, caller: *wasm.Caller, comptime p
 /// semantic target as one transaction. The canonical request contains no raw
 /// root or name; `publishChildDirectory` re-lists the authorized parent and
 /// the provider repeats the guarded no-follow check before minting authority.
+const ChildTargetKind = enum { directory, file };
+
 pub fn hPublishChildDirectory(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32, results: []i32) void {
+    publishChildTarget(.directory, data, caller, args, results);
+}
+
+pub fn hPublishChildFile(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32, results: []i32) void {
+    publishChildTarget(.file, data, caller, args, results);
+}
+
+/// One membrane shape publishes either kind of directly observed child. The
+/// kind selects only the trusted host composition: guests send the identical
+/// guarded `(parent target, entry identity, entry revision)` value and never
+/// a root, path, name, or target definition.
+fn publishChildTarget(kind: ChildTargetKind, data: ?*anyopaque, caller: *wasm.Caller, args: []const i32, results: []i32) void {
     const plugin: *WasmPlugin = @ptrCast(@alignCast(data.?));
     results[0] = @intFromEnum(Status.unavailable);
     if (!requirePerm(plugin, caller, .fs_read)) return;
@@ -154,30 +168,55 @@ pub fn hPublishChildDirectory(data: ?*anyopaque, caller: *wasm.Caller, args: []c
         return;
     };
     defer request.deinit();
-    plugin.semantic_directories.ensureUnusedCapacity(plugin.gpa, 1) catch {
+    (switch (kind) {
+        .directory => plugin.semantic_directories.ensureUnusedCapacity(plugin.gpa, 1),
+        .file => plugin.semantic_files.ensureUnusedCapacity(plugin.gpa, 1),
+    }) catch {
         results[0] = @intFromEnum(Status.failed);
         return;
     };
-    var publication = fs_runtime.publication.publishChildDirectory(
-        plugin.gpa,
-        &scope.services.targets,
-        router,
-        scope.owner,
-        .{
-            .parent = request.value.parent,
-            .entry = request.value.entry,
-            .entry_revision = request.value.revision,
-        },
-    ) catch |err| {
-        results[0] = status(err);
-        return;
+    const Published = union(enum) {
+        directory: fs_runtime.publication.ChildRegistration,
+        file: fs_runtime.publication.Registration,
+    };
+    const definition: fs_runtime.publication.ChildDefinition = .{
+        .parent = request.value.parent,
+        .entry = request.value.entry,
+        .entry_revision = request.value.revision,
+    };
+    var publication: Published = switch (kind) {
+        .directory => .{ .directory = fs_runtime.publication.publishChildDirectory(
+            plugin.gpa,
+            &scope.services.targets,
+            router,
+            scope.owner,
+            definition,
+        ) catch |err| {
+            results[0] = status(err);
+            return;
+        } },
+        .file => .{ .file = fs_runtime.publication.publishChildFile(
+            plugin.gpa,
+            &scope.services.targets,
+            router,
+            scope.owner,
+            definition,
+        ) catch |err| {
+            results[0] = status(err);
+            return;
+        } },
     };
     var publication_owned = true;
-    defer {
-        if (publication_owned) _ = publication.close(plugin.gpa, &scope.services.targets);
-    }
+    defer if (publication_owned) switch (publication) {
+        .directory => |*directory| _ = directory.close(plugin.gpa, &scope.services.targets),
+        .file => |*file| _ = file.close(plugin.gpa, &scope.services.targets, router),
+    };
 
-    const encoded = scene_codec.target.encodeLocated(plugin.gpa, publication.located()) catch |err| {
+    const located = switch (publication) {
+        .directory => |directory| directory.located(),
+        .file => |file| file.located(),
+    };
+    const encoded = scene_codec.target.encodeLocated(plugin.gpa, located) catch |err| {
         results[0] = status(err);
         return;
     };
@@ -196,7 +235,10 @@ pub fn hPublishChildDirectory(data: ?*anyopaque, caller: *wasm.Caller, args: []c
         results[0] = @intFromEnum(Status.failed);
         return;
     }
-    plugin.semantic_directories.appendAssumeCapacity(publication);
+    switch (publication) {
+        .directory => |directory| plugin.semantic_directories.appendAssumeCapacity(directory),
+        .file => |file| plugin.semantic_files.appendAssumeCapacity(.{ .registration = file, .router = router }),
+    }
     publication_owned = false;
     results[0] = @intCast(encoded.len);
 }
