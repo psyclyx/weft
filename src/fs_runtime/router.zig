@@ -29,6 +29,15 @@ pub const TargetBinding = struct {
 pub const EntryBinding = struct {
     revision: u64,
     entry: fs.target.Entry,
+    /// Owned by the router. `entry.revision.token` points into this slice;
+    /// keeping the two together makes the borrowed provider observation safe
+    /// after a listing/codec arena is released.
+    revision_token: []u8,
+
+    fn deinit(self: *EntryBinding, allocator: std.mem.Allocator) void {
+        allocator.free(self.revision_token);
+        self.* = undefined;
+    }
 };
 
 pub const Router = struct {
@@ -49,6 +58,8 @@ pub const Router = struct {
     }
 
     pub fn deinit(self: *Router) void {
+        var entry_bindings = self.entry_bindings.valueIterator();
+        while (entry_bindings.next()) |binding| binding.deinit(self.allocator);
         self.providers.deinit();
         self.retired.deinit();
         self.target_bindings.deinit();
@@ -90,7 +101,7 @@ pub const Router = struct {
         try self.retired.put(authority, {});
         _ = self.providers.remove(authority);
         for (stale.items) |key| _ = self.target_bindings.remove(key);
-        for (stale.items) |key| _ = self.entry_bindings.remove(key);
+        for (stale.items) |key| _ = self.removeEntryBinding(key);
     }
 
     fn targetKey(target: semantic.target.Ref) u128 {
@@ -120,7 +131,9 @@ pub const Router = struct {
 
     pub fn unbindTarget(self: *Router, target: semantic.target.Ref) bool {
         const key = targetKey(target);
-        return self.target_bindings.remove(key) or self.entry_bindings.remove(key);
+        const removed_directory = self.target_bindings.remove(key);
+        const removed_entry = self.removeEntryBinding(key);
+        return removed_directory or removed_entry;
     }
 
     /// Return only a binding minted by the in-process filesystem authority.
@@ -151,7 +164,18 @@ pub const Router = struct {
         if (!std.mem.eql(u8, observed.value.revision.token, entry.revision.token)) return error.Stale;
         const key = targetKey(target);
         if (self.target_bindings.contains(key) or self.entry_bindings.contains(key)) return error.TargetAlreadyBound;
-        try self.entry_bindings.put(key, .{ .revision = revision, .entry = entry });
+        const revision_token = try self.allocator.dupe(u8, entry.revision.token);
+        errdefer self.allocator.free(revision_token);
+        var binding: EntryBinding = .{ .revision = revision, .entry = entry, .revision_token = revision_token };
+        binding.entry.revision.token = revision_token;
+        try self.entry_bindings.put(key, binding);
+    }
+
+    fn removeEntryBinding(self: *Router, key: u128) bool {
+        const removed = self.entry_bindings.fetchRemove(key) orelse return false;
+        var binding = removed.value;
+        binding.deinit(self.allocator);
+        return true;
     }
 
     /// Validate the authority envelope for a provider-owned lease without
@@ -572,15 +596,20 @@ test "ordinary file bindings preserve provider entry identity and revision" {
     defer router.deinit();
     try router.register(.here, provider.asProvider());
     const target: semantic.target.Ref = .{ .authority = .here, .slot = 9, .generation = 1 };
+    var source_revision = [_]u8{ 'f', 'i', 'l', 'e', '-', 'r', '1' };
     const source: fs.target.Entry = .{
         .root = makeRoot(.here),
         .ref = makeEntry(.here),
-        .revision = .{ .token = "file-r1" },
+        .revision = .{ .token = &source_revision },
     };
     try router.bindEntry(target, 7, source);
-    try std.testing.expectEqual(source, try router.authorizedEntry(target, 7));
-    try std.testing.expectError(error.StaleTarget, router.authorizedEntry(target, 8));
     try std.testing.expectError(error.TargetAlreadyBound, router.bindEntry(target, 7, source));
+    @memset(&source_revision, 'x');
+    const authorized = try router.authorizedEntry(target, 7);
+    try std.testing.expectEqual(source.root, authorized.root);
+    try std.testing.expectEqual(source.ref, authorized.ref);
+    try std.testing.expectEqualSlices(u8, "file-r1", authorized.revision.token);
+    try std.testing.expectError(error.StaleTarget, router.authorizedEntry(target, 8));
     try std.testing.expect(router.unbindTarget(target));
     try std.testing.expectError(error.TargetUnbound, router.authorizedEntry(target, 7));
 }

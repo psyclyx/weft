@@ -18,6 +18,10 @@ pub const Error = resolver.OpenError || router_mod.Error;
 
 pub const ViewFactory = struct {
     context: *anyopaque,
+    /// The read result and every slice reachable from it are borrowed for the
+    /// duration of this call only. Implementations that retain file bytes
+    /// must copy them before returning; the handler deinitializes the result
+    /// immediately after the factory returns.
     open: *const fn (*anyopaque, semantic.target.Located, *contract.OwnedReadResult) resolver.OpenError!semantic.view.Ref,
 
     pub fn init(pointer: anytype) ViewFactory {
@@ -186,9 +190,11 @@ test "ordinary-file handler opens through the provider and hands bytes to a view
     try router.bindEntry(target, descriptor.revision, source);
 
     const Factory = struct {
-        bytes: []const u8 = &.{},
+        bytes: [5]u8 = undefined,
+        byte_len: usize = 0,
         pub fn open(self: *@This(), _: semantic.target.Located, result: *contract.OwnedReadResult) resolver.OpenError!semantic.view.Ref {
-            self.bytes = result.value.bytes;
+            self.byte_len = result.value.bytes.len;
+            @memcpy(self.bytes[0..self.byte_len], result.value.bytes);
             return .{ .authority = .here, .slot = 8, .generation = 1 };
         }
     };
@@ -197,6 +203,6 @@ test "ordinary-file handler opens through the provider and hands bytes to a view
     try std.testing.expectEqual(.exact, try handler.probe(descriptor.*));
     const opened = try handler.open(.{ .target = target, .revision = descriptor.revision });
     try std.testing.expectEqual(@as(u32, 8), opened.slot);
-    try std.testing.expectEqualStrings("hello", factory.bytes);
+    try std.testing.expectEqualStrings("hello", factory.bytes[0..factory.byte_len]);
     try std.testing.expectError(error.StaleTarget, handler.open(.{ .target = target, .revision = descriptor.revision + 1 }));
 }
