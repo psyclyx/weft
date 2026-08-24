@@ -558,6 +558,52 @@ test "fake provider keeps dependency failures inside the apply report" {
     try std.testing.expectEqual(std.meta.Tag(contract.Outcome).conflict, std.meta.activeTag(report.value.entries[1].outcome));
 }
 
+test "fake provider removes a captured source only after every copy succeeds" {
+    var fake = Fake.init(std.testing.allocator);
+    defer fake.deinit();
+    const source = try fake.seed(.root, "source", .regular, "payload");
+    const provider = fake.provider();
+    var observed = try provider.observe(std.testing.allocator, Fake.root(), .{ .entry = source });
+    defer observed.deinit();
+    const captured: contract.EntrySource = .{ .root = Fake.root(), .ref = source, .revision = observed.value.revision };
+    const successful = [_]contract.Planned{
+        .{ .id = opId(9), .operation = .{ .copy = .{ .source = .{ .entry = captured }, .destination = .{ .parent = .root, .name = try .init("copy-a") } } } },
+        .{ .id = opId(10), .operation = .{ .copy = .{ .source = .{ .entry = captured }, .destination = .{ .parent = .root, .name = try .init("copy-b") } } } },
+        .{ .id = opId(11), .operation = .{ .remove = .{ .source = captured } }, .depends_on = &.{ 0, 1 } },
+    };
+    var report = try provider.apply(std.testing.allocator, .{ .root = Fake.root(), .base_revision = &.{}, .operations = &successful });
+    defer report.deinit();
+    for (report.value.entries) |entry|
+        try std.testing.expectEqual(std.meta.Tag(contract.Outcome).applied, std.meta.activeTag(entry.outcome));
+
+    var listing = try provider.list(std.testing.allocator, Fake.root(), .root);
+    defer listing.deinit();
+    try std.testing.expectEqual(@as(usize, 2), listing.value.entries.len);
+    try std.testing.expectEqualStrings("copy-a", listing.value.entries[0].name.bytes);
+    try std.testing.expectEqualStrings("copy-b", listing.value.entries[1].name.bytes);
+
+    var conflict_fake = Fake.init(std.testing.allocator);
+    defer conflict_fake.deinit();
+    const conflict_source = try conflict_fake.seed(.root, "source", .regular, "payload");
+    _ = try conflict_fake.seed(.root, "occupied", .regular, "existing");
+    const conflict_provider = conflict_fake.provider();
+    var conflict_observed = try conflict_provider.observe(std.testing.allocator, Fake.root(), .{ .entry = conflict_source });
+    defer conflict_observed.deinit();
+    const conflict_capture: contract.EntrySource = .{ .root = Fake.root(), .ref = conflict_source, .revision = conflict_observed.value.revision };
+    const conflicted = [_]contract.Planned{
+        .{ .id = opId(12), .operation = .{ .copy = .{ .source = .{ .entry = conflict_capture }, .destination = .{ .parent = .root, .name = try .init("occupied") } } } },
+        .{ .id = opId(13), .operation = .{ .remove = .{ .source = conflict_capture } }, .depends_on = &.{0} },
+    };
+    var conflict_report = try conflict_provider.apply(std.testing.allocator, .{ .root = Fake.root(), .base_revision = &.{}, .operations = &conflicted });
+    defer conflict_report.deinit();
+    try std.testing.expectEqual(std.meta.Tag(contract.Outcome).conflict, std.meta.activeTag(conflict_report.value.entries[0].outcome));
+    try std.testing.expectEqual(std.meta.Tag(contract.Outcome).conflict, std.meta.activeTag(conflict_report.value.entries[1].outcome));
+    var conflict_listing = try conflict_provider.list(std.testing.allocator, Fake.root(), .root);
+    defer conflict_listing.deinit();
+    try std.testing.expectEqual(@as(usize, 2), conflict_listing.value.entries.len);
+    try std.testing.expectEqualStrings("source", conflict_listing.value.entries[0].name.bytes);
+}
+
 test "fake provider refuses recursive copy into the source subtree" {
     var fake = Fake.init(std.testing.allocator);
     defer fake.deinit();

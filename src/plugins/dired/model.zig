@@ -601,12 +601,11 @@ const Builder = struct {
         if (row_ptr.pending == .deleted) {
             const source = baseSource(self.model, row_ptr) orelse return error.Stale;
             // A captured copy/cut still needs this exact source identity and
-            // revision.  Do not queue a removal that would invalidate that
-            // effect (and would make a later destination conflict destructive).
-            // The source is intentionally preserved; provider policy belongs
-            // to the executor, not this pure draft planner.
-            if (!self.hasDependentCapture(source))
-                try self.add(.{ .remove = .{ .source = try self.copyEntrySource(source) } }, row_ptr, null);
+            // revision. `add` attaches dependencies on every matching
+            // capture, so the remove runs only after all captures apply. A
+            // destination conflict therefore preserves the source while a
+            // fully successful batch still honors the user's deletion.
+            try self.add(.{ .remove = .{ .source = try self.copyEntrySource(source) } }, row_ptr, null);
         } else if (row_ptr.pending == .added) {
             try self.addCreate(row_ptr, parent_ref, row_ptr.draft.name);
         } else if (row_ptr.pending == .copied or row_ptr.pending == .copied_renamed) {
@@ -687,17 +686,6 @@ const Builder = struct {
 
     fn hasCreateOperation(self: *const Builder, id: NodeId) bool {
         for (self.create_operations.items) |planned| if (planned.id == id) return true;
-        return false;
-    }
-
-    fn hasDependentCapture(self: *const Builder, source: contract.EntrySource) bool {
-        for (self.model.rows.items) |row| {
-            if (row.pending != .copied and row.pending != .copied_renamed) continue;
-            const captured = row.copy_source orelse continue;
-            if (sameRoot(captured.root, source.root) and
-                sameEntry(captured.entry, source.ref) and
-                std.mem.eql(u8, captured.revision, source.revision.token)) return true;
-        }
         return false;
     }
 
@@ -1189,13 +1177,19 @@ test "planner preserves deleted captured source for multiple pastes" {
 
     var plan = try model.buildPlan();
     defer plan.deinit();
-    // Both copies retain the immutable source capture. There is deliberately
-    // no remove: deleting the source would invalidate one or both effects.
-    try std.testing.expectEqual(@as(usize, 2), plan.value.operations.len);
-    for (plan.value.operations) |planned|
+    // Both copies retain the immutable source capture. The remove is last
+    // and depends on both copies: a conflict skips it, while two successful
+    // copies preserve the user's deletion intent.
+    try std.testing.expectEqual(@as(usize, 3), plan.value.operations.len);
+    for (plan.value.operations[0..2]) |planned|
         try std.testing.expectEqual(std.meta.activeTag(planned.operation), .copy);
     try std.testing.expectEqual(@as(u32, 72), plan.value.operations[0].operation.copy.source.entry.root.slot);
     try std.testing.expectEqual(@as(u32, 73), plan.value.operations[0].operation.copy.source.entry.ref.slot);
+    try std.testing.expectEqual(std.meta.activeTag(plan.value.operations[2].operation), .remove);
+    try std.testing.expectEqual(@as(usize, 2), plan.value.operations[2].depends_on.len);
+    try std.testing.expectEqual(@as(usize, 0), plan.value.operations[2].depends_on[0]);
+    try std.testing.expectEqual(@as(usize, 1), plan.value.operations[2].depends_on[1]);
+    try fs.plan.validate(std.testing.allocator, plan.value);
 }
 
 test "dependent capture preserves source when destination name is occupied" {
@@ -1215,10 +1209,14 @@ test "dependent capture preserves source when destination name is occupied" {
     var plan = try model.buildPlan();
     defer plan.deinit();
     // The provider will report the occupied destination as a copy conflict;
-    // this planner must not turn that conflict into source removal.
-    try std.testing.expectEqual(@as(usize, 1), plan.value.operations.len);
+    // its dependency prevents the remove, preserving the source.
+    try std.testing.expectEqual(@as(usize, 2), plan.value.operations.len);
     try std.testing.expectEqual(std.meta.activeTag(plan.value.operations[0].operation), .copy);
     try std.testing.expectEqualStrings("captured", plan.value.operations[0].operation.copy.destination.name.bytes);
+    try std.testing.expectEqual(std.meta.activeTag(plan.value.operations[1].operation), .remove);
+    try std.testing.expectEqual(@as(usize, 1), plan.value.operations[1].depends_on.len);
+    try std.testing.expectEqual(@as(usize, 0), plan.value.operations[1].depends_on[0]);
+    try fs.plan.validate(std.testing.allocator, plan.value);
 }
 
 test "foreign source root remains explicit in copied effect" {
