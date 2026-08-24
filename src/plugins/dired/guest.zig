@@ -204,8 +204,39 @@ const Field = struct {
     ref: semantic.scene.FieldRef,
     revision: u64 = 1,
     selection: weft.SemanticFieldSelection = .{ .anchor = 0, .caret = 0 },
+    // Metadata values are typed incrementally just like names. Keep the
+    // provider's exact field bytes separate from the parsed model value so a
+    // partial octal edit ("0" -> "06" -> "060" -> "0600") is not
+    // reformatted to four digits between keystrokes.
+    mode_text: [16]u8 = undefined,
+    mode_text_len: u8 = 0,
 
     const Kind = enum { name, mode };
+
+    fn modeText(self: *const Field) []const u8 {
+        return self.mode_text[0..self.mode_text_len];
+    }
+
+    fn setModeText(self: *Field, bytes: []const u8) !void {
+        if (bytes.len > self.mode_text.len) return error.InvalidMode;
+        @memcpy(self.mode_text[0..bytes.len], bytes);
+        self.mode_text_len = @intCast(bytes.len);
+    }
+
+    fn resetModeText(self: *Field, mode: ?u32) !void {
+        if (mode) |value| {
+            const bytes = std.fmt.bufPrint(&self.mode_text, "{o:0>4}", .{value}) catch return error.InvalidMode;
+            self.mode_text_len = @intCast(bytes.len);
+        } else self.mode_text_len = 0;
+    }
+
+    fn syncModeText(self: *Field, mode: ?u32) !void {
+        if (self.kind != .mode) return;
+        if (mode == null and self.mode_text_len == 0) return;
+        if (parseMode(self.modeText()) catch null) |parsed|
+            if (mode != null and parsed == mode.?) return;
+        try self.resetModeText(mode);
+    }
 };
 
 const RowTarget = struct {
@@ -316,6 +347,12 @@ pub const Session = struct {
                 self.controller.clearCapture();
                 self.controller.capture = captured;
                 return .{ .transfer = self.controller.captured().? };
+            },
+            .focus => if (std.mem.eql(u8, request.action, dired.permissions_edit_action)) {
+                const row = dired.modelRowId(request.subject) catch return error.UnknownSubject;
+                const field = self.fieldFor(row, .mode) orelse return error.MissingField;
+                field.selection = .{ .anchor = 0, .caret = field.mode_text_len };
+                try self.updateField(field, &self.draft, field.revision);
             },
             else => {},
         }
@@ -453,12 +490,8 @@ pub const Session = struct {
         const row = self.draft.row(field.row) orelse return error.Stale;
         const current = switch (field.kind) {
             .name => row.draft.name,
-            .mode => blk: {
-                if (row.draft.mode) |mode| break :blk try std.fmt.allocPrint(self.plugin.gpa, "{o:0>4}", .{mode});
-                break :blk try self.plugin.gpa.alloc(u8, 0);
-            },
+            .mode => field.modeText(),
         };
-        defer if (field.kind == .mode) self.plugin.gpa.free(current);
         const start: usize = edit.start;
         const end: usize = edit.end;
         if (start > end or end > current.len or std.mem.indexOfAny(u8, edit.replacement, "\r\n") != null)
@@ -475,12 +508,21 @@ pub const Session = struct {
             .mode => try staged.setMode(field.row, try parseMode(next)),
         }
         const previous_selection = field.selection;
+        const previous_mode_text = field.mode_text;
+        const previous_mode_text_len = field.mode_text_len;
+        if (field.kind == .mode) try field.setModeText(next);
         field.selection = edit.selection_after orelse .{
             .anchor = @intCast(start + edit.replacement.len),
             .caret = @intCast(start + edit.replacement.len),
         };
         self.publishDraft(&staged) catch |err| {
             field.selection = previous_selection;
+            field.mode_text = previous_mode_text;
+            field.mode_text_len = previous_mode_text_len;
+            // publishDraft restores the authoritative model snapshots; push
+            // this field's exact pre-edit presentation state as well (not a
+            // canonicalized approximation of a partially typed mode).
+            self.updateField(field, &self.draft, field.revision) catch {};
             return err;
         };
     }
@@ -538,7 +580,8 @@ pub const Session = struct {
             .token = token,
             .ref = undefined,
         };
-        _ = draft.row(row) orelse return error.Stale;
+        const draft_row = draft.row(row) orelse return error.Stale;
+        if (kind == .mode) try field.resetModeText(draft_row.draft.mode);
         field.ref = try self.registerField(field, draft);
         errdefer _ = weft.semanticFieldClose(field.ref);
         try self.fields.append(self.plugin.gpa, field);
@@ -548,8 +591,7 @@ pub const Session = struct {
         const row = draft.row(field.row) orelse return error.Stale;
         var revision: [8]u8 = undefined;
         std.mem.writeInt(u64, &revision, field.revision, .little);
-        var mode_bytes: [16]u8 = undefined;
-        const bytes = try fieldBytes(row.*, field.kind, &mode_bytes);
+        const bytes = fieldBytes(row.*, &field);
         return weft.semanticFieldRegister(field.token, .{
             .revision = &revision,
             .bytes = bytes,
@@ -563,8 +605,8 @@ pub const Session = struct {
         const row = draft.row(field.row) orelse return error.Stale;
         var revision: [8]u8 = undefined;
         std.mem.writeInt(u64, &revision, revision_value, .little);
-        var mode_bytes: [16]u8 = undefined;
-        const bytes = try fieldBytes(row.*, field.kind, &mode_bytes);
+        try field.syncModeText(row.draft.mode);
+        const bytes = fieldBytes(row.*, field);
         field.selection = clampSelection(field.selection, bytes.len);
         try weft.semanticFieldUpdate(field.ref, .{
             .revision = &revision,
@@ -711,10 +753,10 @@ pub const Session = struct {
     }
 };
 
-fn fieldBytes(row: dired.Row, kind: Field.Kind, mode_storage: *[16]u8) ![]const u8 {
-    return switch (kind) {
+fn fieldBytes(row: dired.Row, field: *const Field) []const u8 {
+    return switch (field.kind) {
         .name => row.draft.name,
-        .mode => if (row.draft.mode) |mode| std.fmt.bufPrint(mode_storage, "{o:0>4}", .{mode}) catch return error.InvalidMode else &.{},
+        .mode => field.modeText(),
     };
 }
 

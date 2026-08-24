@@ -1516,6 +1516,84 @@ test "authoring/dired: a durable raw-name copy survives rename, deletion, and a 
     try t.expectEqual(core.file.Kind.none, core.file.statKind(gpa, source_path));
 }
 
+test "authoring/dired: generic create and permissions actions apply from an empty directory" {
+    const gpa = t.allocator;
+    var app: App = undefined;
+    try app.init(gpa);
+    defer app.deinit();
+    const ed = &app.ed;
+
+    try core.file.writeBytesMakingDirs(gpa, "workspace", "workspace/.seed", "");
+    core.file.deleteFile(gpa, "workspace/.seed");
+    ed.runStr("open", "workspace");
+    const view_ref = ed.head.semantic_focus.path().?.view;
+    try t.expectEqual(@as(usize, 0), ed.session.system.semantic.views.get(view_ref).?.scene.content.container.children.len);
+
+    // Creation is an open semantic action declared by config. The provider
+    // returns an ordinary field focus; Vim supplies only its normal insert
+    // posture, and the default placeholder selection makes typing replace it.
+    ed.chord("SPC v n");
+    var created_file = try ed.session.system.semantic.fields.get(ed.head.semantic_focus.path().?.field.?).?.snapshot(gpa);
+    defer created_file.deinit();
+    try t.expectEqualStrings("new-file", created_file.value.bytes);
+    try t.expectEqual(@as(u32, 0), created_file.value.selection.anchor);
+    try t.expectEqual(@as(u32, "new-file".len), created_file.value.selection.caret);
+    ed.press("i", "");
+    ed.typeText("made.txt");
+    ed.press("Escape", "");
+
+    // Permissions are a secondary field advertised only because this local
+    // provider reports POSIX-mode capability. No config or editing plugin
+    // knows which structured tool supplied it.
+    ed.chord("SPC v m");
+    const mode_leaf = ed.head.semantic_focus.path().?.leaf().?;
+    try t.expectEqualStrings("dired.mode", ed.session.system.semantic.views.get(view_ref).?.node(mode_leaf).?.role);
+    ed.press("i", "");
+    ed.typeText("0600");
+    ed.press("Escape", "");
+
+    ed.chord("SPC v N");
+    var created_directory = try ed.session.system.semantic.fields.get(ed.head.semantic_focus.path().?.field.?).?.snapshot(gpa);
+    defer created_directory.deinit();
+    try t.expectEqualStrings("new-directory", created_directory.value.bytes);
+    ed.press("i", "");
+    ed.typeText("made-dir");
+    ed.press("Escape", "");
+
+    const staged = ed.session.system.semantic.views.get(view_ref).?;
+    try t.expectEqual(@as(usize, 2), staged.scene.content.container.children.len);
+    for (staged.scene.content.container.children) |row| {
+        const columns = row.content.container.children;
+        try t.expectEqual(@as(usize, 3), columns.len);
+        try t.expectEqualStrings("dired.metadata", columns[0].role);
+        try t.expectEqualStrings("dired.mode", columns[1].role);
+        try t.expectEqualStrings("dired.name", columns[2].role);
+    }
+
+    ed.chord("SPC v a");
+    try t.expectEqualStrings("which-key-like", ed.head.interactions.active().?.descriptor.presentation);
+    ed.press("y", "y");
+    try t.expect(ed.head.interactions.active() == null);
+    try t.expectEqual(core.file.Kind.file, core.file.statKind(gpa, "workspace/made.txt"));
+    try t.expectEqual(core.file.Kind.dir, core.file.statKind(gpa, "workspace/made-dir"));
+
+    // The post-apply refresh comes back from the provider; observing 0600 in
+    // that new snapshot proves the plan reached the filesystem edge.
+    const refreshed = ed.session.system.semantic.views.get(view_ref).?;
+    var found_mode = false;
+    for (refreshed.scene.content.container.children) |row| {
+        const columns = row.content.container.children;
+        var name = try ed.session.system.semantic.fields.get(columns[2].content.field.ref).?.snapshot(gpa);
+        defer name.deinit();
+        if (!std.mem.eql(u8, name.value.bytes, "made.txt")) continue;
+        var mode = try ed.session.system.semantic.fields.get(columns[1].content.field.ref).?.snapshot(gpa);
+        defer mode.deinit();
+        try t.expectEqualStrings("0600", mode.value.bytes);
+        found_mode = true;
+    }
+    try t.expect(found_mode);
+}
+
 test "authoring: visual mode — select with a motion, then delete and change" {
     const gpa = t.allocator;
     var app: App = undefined;
