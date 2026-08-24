@@ -149,7 +149,7 @@ syntax_of: ?SyntaxResolver,
 subbuffers: ?*subbuffer.SubBuffers,
 /// The core register/kill service (shared by every editor). Null = no
 /// register wired: yankRange/pasteAt degrade to no-ops. See register.zig.
-register: ?*register_mod.Register = null,
+register: ?*register_mod.Bank = null,
 loop: ?*async_loop.Loop,
 /// Subbuffers this plugin claimed, indexed by the handle the guest holds.
 /// Owned by the `subbuffers` service; we keep borrowed pointers only.

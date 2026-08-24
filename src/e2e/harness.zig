@@ -84,7 +84,7 @@ pub const Editor = struct {
     config_kv: core.kv.Store = .empty,
     loop: core.async_loop.Loop = undefined,
     subs: core.subbuffer.SubBuffers = .empty,
-    register: core.register = .empty,
+    register: core.register.Bank = .{},
     view: ?view_mod.View = null,
     /// Last active buffer id — so a buffer switch (open, buffer-next) fires
     /// `on_activate` to plugins, exactly as main's loop does.
@@ -117,7 +117,7 @@ pub const Editor = struct {
         self.plugin_kv = .empty;
         self.config_kv = .empty;
         self.subs = .empty;
-        self.register = .empty;
+        self.register = .{};
         self.view = null;
         self.pool = try core.task.Pool.init(gpa, .{ .threads = 2 });
         self.engine = try core.wasm.Engine.init();

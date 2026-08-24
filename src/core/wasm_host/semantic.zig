@@ -256,7 +256,9 @@ pub fn hSemanticAction(data: ?*anyopaque, caller: *wasm.Caller, args: []const i3
         results[0] = 0;
         return;
     };
-    const effect = services.invokeFocusedAction(&ctx.head.interactions, ctx.head, plugin.gpa, action) catch return;
+    if (args[2] < 0 or args[2] > 26) return;
+    const slot: u8 = @intCast(args[2]);
+    const effect = services.invokeFocusedActionInRegister(&ctx.head.interactions, ctx.head, plugin.gpa, action, slot) catch return;
     results[0] = if (effect) |value| switch (value) {
         .declined => 0,
         .handled => 1,

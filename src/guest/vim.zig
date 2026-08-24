@@ -22,6 +22,9 @@ const ex = ex_mod.Ex("normal", "ex");
 // subbuffer facts; `pasteAt` re-stamps them over the inserted text. A scratch
 // for assembling the linewise paste (register text plus a synthesized newline).
 var paste_buf: [(1 << 16) + 1]u8 = undefined;
+// Vim owns the register-prefix grammar; core only receives this transient
+// generic selection and providers never learn which editor chose it.
+var selected_register: u8 = 0;
 
 // ── Pending-operator state (set on d/c/y/gc; consumed by the next motion) ─
 // `op_edit_cmd` is the range-arg operator to apply (null = pure yank); `op_copies`
@@ -214,7 +217,7 @@ fn opByMotion(comptime motion: []const u8) fn () void {
 /// yank (no edit command) flashes and returns to normal.
 fn applyOpRange(hnd: u32) void {
     const r = weft.rangeEnds(hnd) orelse return opCancel();
-    if (op_copies) weft.yankRange(r.start, r.end, false);
+    if (op_copies) yankCurrent(r.start, r.end, false);
     if (op_edit_cmd) |cmd| {
         weft.runRangeArg(cmd, hnd);
         weft.jump(r.start);
@@ -264,6 +267,20 @@ fn enterOpAround() void {
     weft.setMode("op-to");
 }
 
+fn enterRegister() void {
+    selected_register = 0;
+    weft.setMode("register-pending");
+}
+
+fn chooseRegister(comptime index: u8) fn () void {
+    return struct {
+        fn h() void {
+            selected_register = index;
+            weft.setMode("normal");
+        }
+    }.h;
+}
+
 // ── The static command table (registration order == on_command id) ────
 const Cmd = struct { name: []const u8, handler: *const fn () void };
 const static_cmds = [_]Cmd{
@@ -305,6 +322,7 @@ const static_cmds = [_]Cmd{
     .{ .name = "op-line", .handler = opLine },
     .{ .name = "enter-op-inner", .handler = enterOpInner },
     .{ .name = "enter-op-around", .handler = enterOpAround },
+    .{ .name = "enter-register", .handler = enterRegister },
     .{ .name = "find-file", .handler = findFile },
     // `leader-cancel` stays: the f/F/t/T char-capture modes bind Escape to it.
     // The leader/window/goto/zed MENU MODES are gone — those trees are now key
@@ -379,6 +397,14 @@ const gen_cmds: [n_gen]Cmd = blk: {
     }
     break :blk arr;
 };
+const register_cmds: [26]Cmd = blk: {
+    var arr: [26]Cmd = undefined;
+    for (0..26) |i| arr[i] = .{
+        .name = std.fmt.comptimePrint("vim-register-{c}", .{@as(u8, 'a') + @as(u8, @intCast(i))}),
+        .handler = chooseRegister(@intCast(i + 1)),
+    };
+    break :blk arr;
+};
 /// One command per count digit 1–9 (`vim-count-N`), bound to the digit keys.
 const count_cmds: [9]Cmd = blk: {
     var arr: [9]Cmd = undefined;
@@ -388,7 +414,7 @@ const count_cmds: [9]Cmd = blk: {
     };
     break :blk arr;
 };
-const cmds = static_cmds ++ gen_cmds ++ count_cmds;
+const cmds = static_cmds ++ register_cmds ++ gen_cmds ++ count_cmds;
 
 /// Commands that PRESERVE a pending count instead of clearing it: the digit keys
 /// themselves, `0` (which may be a digit), and the operator entries (so `3dw`
@@ -404,6 +430,18 @@ const preserve_count = blk: {
     }
     break :blk arr;
 };
+/// A named slot survives only across the immediate operation that consumes it:
+/// the selector itself and an operator entry preserve it; ordinary motion or
+/// unrelated commands clear it, preventing a stale `"a` from leaking.
+const preserve_register = blk: {
+    @setEvalBranchQuota(4000);
+    var arr: [cmds.len]bool = .{false} ** cmds.len;
+    for (cmds, 0..) |c, i| {
+        if (std.mem.startsWith(u8, c.name, "vim-register-") or
+            std.mem.startsWith(u8, c.name, "enter-op-")) arr[i] = true;
+    }
+    break :blk arr;
+};
 
 export fn describe() void {
     for (cmds) |c| weft.declareCommand(c.name);
@@ -412,6 +450,7 @@ export fn on_command(id: u32) void {
     if (id >= cmds.len) return;
     cmds[id].handler();
     if (!preserve_count[id]) pending_count = 0;
+    if (!preserve_register[id]) selected_register = 0;
 }
 export fn on_pick_accept(pick_id: u32) void {
     if (pick_id == file_pick) openChosen(weft.pickChoice());
@@ -444,6 +483,7 @@ export fn init() void {
         .{ "Return", "vim-open-focused" },  .{ "KP_Enter", "vim-open-focused" },
         .{ "minus", "vim-open-container" }, .{ "d", "enter-op-delete" },
         .{ "c", "enter-op-change" },        .{ "y", "enter-op-yank" },
+        .{ "quotedbl", "enter-register" },
     };
     for (nb) |b| weft.bindKey("normal", b[0], b[1]);
 
@@ -465,6 +505,18 @@ export fn init() void {
     weft.setFallback("op-to", "default");
     weft.bindKey("op-to", "Escape", "op-cancel");
     inline for (otable) |o| weft.bindKey("op-to", o.key, "vim/to/" ++ o.obj);
+
+    // A register prefix is a generic input mode, not a dired/editor special
+    // case. The selected slot is consumed by the next semantic action.
+    weft.textInput("register-pending", null);
+    weft.menuMode("register-pending");
+    weft.setFallback("register-pending", "default");
+    weft.bindKey("register-pending", "Escape", "op-cancel");
+    inline for (0..26) |i| weft.bindKey(
+        "register-pending",
+        std.fmt.comptimePrint("{c}", .{@as(u8, 'a') + @as(u8, @intCast(i))}),
+        std.fmt.comptimePrint("vim-register-{c}", .{@as(u8, 'a') + @as(u8, @intCast(i))}),
+    );
 
     // Count prefix: digits 1-9 accumulate in normal AND operator-pending (so both
     // `3dw` and `d3w` work). `0` becomes digit-or-line-start; `x` becomes
@@ -658,7 +710,7 @@ fn visualLine() void { // V — linewise
 fn visualDelete() void {
     if (weft.selection()) |s0| {
         const s = visualSpan(s0);
-        weft.yankRange(s.start, s.end, visual_linewise);
+        yankCurrent(s.start, s.end, visual_linewise);
         if (weft.stampRange(.{ .start = s.start, .end = s.end })) |h| weft.runRangeArg("op.delete", h);
         weft.jump(s.start);
     }
@@ -669,7 +721,7 @@ fn visualDelete() void {
 fn visualYank() void {
     if (weft.selection()) |s0| {
         const s = visualSpan(s0);
-        weft.yankRange(s.start, s.end, visual_linewise);
+        yankCurrent(s.start, s.end, visual_linewise);
         weft.flash(s.start, s.end); // vim-goggles
     }
     weft.run("clear-selection");
@@ -683,7 +735,7 @@ fn visualYank() void {
 fn visualChange() void {
     if (weft.selection()) |s0| {
         const s = visualSpan(s0);
-        weft.yankRange(s.start, s.end, visual_linewise);
+        yankCurrent(s.start, s.end, visual_linewise);
         if (weft.stampRange(.{ .start = s.start, .end = s.end })) |h| weft.runRangeArg("op.delete", h);
         weft.jump(s.start);
     }
@@ -722,7 +774,7 @@ fn normal() void {
 fn deleteEol() void {
     const cur = weft.cursor();
     const e = lineEndOff();
-    weft.yankRange(cur, e, false);
+    yankCurrent(cur, e, false);
     weft.edit(.{ .start = cur, .end = e }, "");
 }
 fn changeEol() void {
@@ -731,18 +783,29 @@ fn changeEol() void {
 }
 fn changeLine() void {
     const l = weft.lineAt(weft.cursor());
-    weft.yankRange(l.start, l.end, false);
+    yankCurrent(l.start, l.end, false);
     weft.edit(.{ .start = l.start, .end = l.end }, "");
     weft.jump(l.start);
     weft.setMode("insert");
 }
 
 // ── Register + paste ─────────────────────────────────────────────────
+fn consumeRegister() u8 {
+    const value = selected_register;
+    selected_register = 0;
+    return value;
+}
+fn yankCurrent(start: usize, end: usize, linewise: bool) void {
+    const slot = consumeRegister();
+    weft.yankRangeIn(slot, start, end, linewise);
+}
 fn semanticDid(action: []const u8) bool {
-    return switch (weft.semanticAction(action)) {
+    const register = consumeRegister();
+    const result = switch (weft.semanticActionIn(action, register)) {
         .handled, .transfer_stored, .interaction_opened, .target_opened, .focus_changed, .relation_opened => true,
         .unavailable, .failed, _ => false,
     };
+    return result;
 }
 
 /// Return follows the nearest typed target on a structured view. Core owns
@@ -786,7 +849,7 @@ fn yankLine() void {
         return;
     }
     const l = weft.lineAt(weft.cursor());
-    weft.yankRange(l.start, l.end, true);
+    yankCurrent(l.start, l.end, true);
     weft.flash(l.start, l.end); // vim-goggles
 }
 fn paste() void {
@@ -794,20 +857,21 @@ fn paste() void {
         _ = semanticDid(semantic_action.paste_after);
         return;
     }
-    if (weft.registerLinewise()) {
+    const slot = consumeRegister();
+    if (weft.registerLinewiseIn(slot)) {
         const l = weft.lineAt(weft.cursor());
-        const r = weft.registerText();
+        const r = weft.registerTextIn(slot);
         paste_buf[0] = '\n';
         @memcpy(paste_buf[1 .. 1 + r.len], r);
         weft.edit(.{ .start = l.end, .end = l.end }, paste_buf[0 .. 1 + r.len]);
         // The register text lands after the synthesized newline; re-stamp any
         // ferried id-span there so `dd`→`p` is a move, not a delete+create.
-        weft.pasteAt(l.end + 1);
+        weft.pasteAtIn(slot, l.end + 1);
     } else {
         const off = weft.cursor();
-        const r = weft.registerText();
+        const r = weft.registerTextIn(slot);
         weft.edit(.{ .start = off, .end = off }, r);
-        weft.pasteAt(off);
+        weft.pasteAtIn(slot, off);
     }
 }
 fn pasteBefore() void {
@@ -815,18 +879,19 @@ fn pasteBefore() void {
         _ = semanticDid(semantic_action.paste_before);
         return;
     }
-    if (weft.registerLinewise()) {
+    const slot = consumeRegister();
+    if (weft.registerLinewiseIn(slot)) {
         const l = weft.lineAt(weft.cursor());
-        const r = weft.registerText();
+        const r = weft.registerTextIn(slot);
         @memcpy(paste_buf[0..r.len], r);
         paste_buf[r.len] = '\n';
         weft.edit(.{ .start = l.start, .end = l.start }, paste_buf[0 .. r.len + 1]);
-        weft.pasteAt(l.start); // text lands at l.start (the '\n' trails it)
+        weft.pasteAtIn(slot, l.start); // text lands at l.start (the '\n' trails it)
     } else {
         const off = weft.cursor();
-        const r = weft.registerText();
+        const r = weft.registerTextIn(slot);
         weft.edit(.{ .start = off, .end = off }, r);
-        weft.pasteAt(off);
+        weft.pasteAtIn(slot, off);
     }
 }
 fn joinLines() void {
@@ -897,6 +962,7 @@ fn enterOpDedent() void {
     weft.setMode("op-pending");
 }
 fn opCancel() void {
+    selected_register = 0;
     weft.setMode("normal");
 }
 /// dd / cc / yy — linewise. The operator char repeated (bound in op-pending).
@@ -912,7 +978,7 @@ fn opLine() void {
         return;
     }
     const l = weft.lineAt(weft.cursor());
-    if (op_copies) weft.yankRange(l.start, l.end, true);
+    if (op_copies) yankCurrent(l.start, l.end, true);
     const edit = op_edit_cmd orelse {
         weft.setMode("normal"); // yy: yank the line, nothing to edit
         return;

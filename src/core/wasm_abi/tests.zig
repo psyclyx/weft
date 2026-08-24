@@ -7,6 +7,7 @@
 const std = @import("std");
 const wasm = @import("../wasm.zig");
 const command = @import("../command.zig");
+const dispatch = @import("../../app/dispatch.zig");
 const kv = @import("../kv.zig");
 const file = @import("../file.zig");
 const pick_mod = @import("../pick.zig");
@@ -1754,7 +1755,7 @@ test "wasm plugin: vim wires the modal keymap and runs motions/operators as .was
     defer engine.deinit();
     // The register is now a CORE service (register.zig), shared by every editor
     // — vim's yank/paste route through it, so wire one for the yy/p round-trip.
-    var reg: register.Register = .empty;
+    var reg: register.Bank = .{};
     defer reg.deinit(gpa);
     const plugin = try loadPlugin(&engine, &env.ctx, "vim", @embedFile("guest_vim_wasm"), .{ .register = &reg });
     defer plugin.deinit();
@@ -1791,7 +1792,7 @@ test "wasm plugin: vim yank/paste ferries a subbuffer id through the register (d
 
     var engine = try wasm.Engine.init();
     defer engine.deinit();
-    var reg: register.Register = .empty;
+    var reg: register.Bank = .{};
     defer reg.deinit(gpa);
     var subs: subbuffer.SubBuffers = .empty;
     defer subs.deinit(gpa);
@@ -1815,6 +1816,43 @@ test "wasm plugin: vim yank/paste ferries a subbuffer id through the register (d
     try t.expectEqualStrings("row-a\nrow-a", s);
     const pasted = subs.at(&ed.doc, 8) orelse return error.NoIdOnPastedRow;
     try t.expectEqualStrings("42", pasted.fact("id").?);
+}
+
+test "wasm plugin: explicit named text register survives a later delete yank" {
+    const gpa = t.allocator;
+    var env: Env = undefined;
+    try Env.init(gpa, &env);
+    defer env.deinit(gpa);
+    var engine = try wasm.Engine.init();
+    defer engine.deinit();
+    var bank: register.Bank = .{};
+    defer bank.deinit(gpa);
+    const operators = try loadPlugin(&engine, &env.ctx, "operators", @embedFile("guest_operators_wasm"), .{});
+    defer operators.deinit();
+    const plugin = try loadPlugin(&engine, &env.ctx, "vim", @embedFile("guest_vim_wasm"), .{ .register = &bank });
+    defer plugin.deinit();
+
+    const ed = &env.buffers.active().editor;
+    try ed.insertText(gpa, "alpha\nbeta");
+    ed.placeCursor(0);
+    // The command sequence is the wasm equivalent of `"ayy`.
+    try dispatch.dispatchSpec(&env.ctx, "quotedbl", "");
+    try dispatch.dispatchSpec(&env.ctx, "a", "");
+    try dispatch.dispatchSpec(&env.ctx, "y", "");
+    try dispatch.dispatchSpec(&env.ctx, "y", "");
+    // Capture the later line into unnamed (the same capture that precedes
+    // `dd`) and remove it; this keeps the test focused on register routing.
+    ed.placeCursor(6);
+    try dispatch.dispatchSpec(&env.ctx, "d", "");
+    try dispatch.dispatchSpec(&env.ctx, "d", "");
+    // The final sequence is `"ap`; it reads the named slot explicitly.
+    ed.placeCursor(0);
+    try dispatch.dispatchSpec(&env.ctx, "quotedbl", "");
+    try dispatch.dispatchSpec(&env.ctx, "a", "");
+    try dispatch.dispatchSpec(&env.ctx, "p", "");
+    const text = try ed.text().toOwnedSlice(gpa);
+    defer gpa.free(text);
+    try t.expectEqualStrings("alpha\nalpha\n", text);
 }
 
 test "wasm plugins: a motion returns a range an operator awaits + applies (dw)" {

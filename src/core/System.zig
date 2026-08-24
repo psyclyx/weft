@@ -379,7 +379,7 @@ pub const Plugins = struct {
     loop: async_loop.Loop,
     kv: kv.Store = .empty,
     subbuffers: subbuffer.SubBuffers = .empty,
-    register: register_mod.Register = .empty,
+    register: register_mod.Bank = .{},
     list: std.ArrayList(*wasm_abi.WasmPlugin) = .empty,
     js_list: std.ArrayList(*quickjs.JsPlugin) = .empty,
 

@@ -20,6 +20,7 @@ pub const Services = struct {
     /// owned name until the system is torn down.
     semantic_commands: std.ArrayList(*SemanticCommand) = .empty,
     transfer: ?semantic.transfer.OwnedItem = null,
+    named_transfers: [26]?semantic.transfer.OwnedItem = @splat(null),
     next_owner: u64 = 1,
 
     pub const Released = struct {
@@ -58,6 +59,7 @@ pub const Services = struct {
         // Providers are non-owning and must already have unregistered before
         // their plugin dies. The registries only release retained descriptors.
         if (self.transfer) |*item| item.deinit();
+        for (&self.named_transfers) |*item| if (item.*) |*owned| owned.deinit();
         self.actions.deinit(gpa);
         for (self.semantic_commands.items) |entry| {
             gpa.free(entry.name);
@@ -405,7 +407,7 @@ pub const Services = struct {
         UnknownRoot,
     };
 
-    pub const InvokeActionError = view_runtime.action.Error || OpenInteractionError || semantic.transfer.ValidationError || ResolveTargetError || TargetRelationError || OpenTargetError || FocusError || error{ UnknownFocusTarget, NoTargetRelation, AmbiguousTargetRelations };
+    pub const InvokeActionError = view_runtime.action.Error || OpenInteractionError || semantic.transfer.ValidationError || ResolveTargetError || TargetRelationError || OpenTargetError || FocusError || error{ InvalidRegister, UnknownFocusTarget, NoTargetRelation, AmbiguousTargetRelations };
     pub const InvokeInputError = InvokeActionError || view_runtime.interaction.Error;
 
     pub const FocusError = view_runtime.view.Error;
@@ -493,15 +495,30 @@ pub const Services = struct {
         gpa: std.mem.Allocator,
         request: semantic.action.Request,
     ) InvokeActionError!ActionEffect {
-        const with_transfer = self.withCurrentTransfer(request);
-        const outcome = try self.actions.invoke(&self.views, with_transfer);
-        return self.absorbActionOutcome(stack, gpa, with_transfer.view, outcome);
+        return self.invokeActionInRegister(stack, gpa, request, 0);
     }
 
-    fn withCurrentTransfer(self: *Services, request: semantic.action.Request) semantic.action.Request {
+    pub fn invokeActionInRegister(
+        self: *Services,
+        stack: *view_runtime.interaction.Stack,
+        gpa: std.mem.Allocator,
+        request: semantic.action.Request,
+        register: u8,
+    ) InvokeActionError!ActionEffect {
+        if (register > 26) return error.InvalidRegister;
+        const with_transfer = self.withCurrentTransfer(request, register);
+        const outcome = try self.actions.invoke(&self.views, with_transfer);
+        return self.absorbActionOutcome(stack, gpa, with_transfer.view, outcome, register);
+    }
+
+    fn withCurrentTransfer(self: *Services, request: semantic.action.Request, register: u8) semantic.action.Request {
         var with_transfer = request;
         if (with_transfer.transfer == null) {
-            if (self.transfer) |*item| with_transfer.transfer = item.value;
+            if (register != 0) {
+                const slot = if (register <= 26) self.named_transfers[register - 1] else null;
+                if (slot == null) return with_transfer;
+                with_transfer.transfer = slot.?.value;
+            } else if (self.transfer) |*item| with_transfer.transfer = item.value;
         }
         return with_transfer;
     }
@@ -512,15 +529,26 @@ pub const Services = struct {
         gpa: std.mem.Allocator,
         view: semantic.view.Ref,
         outcome: semantic.action.Outcome,
+        register: u8,
     ) InvokeActionError!ActionEffect {
         return switch (outcome) {
             .declined => .declined,
             .handled => .handled,
             .transfer => |item| blk: {
-                var owned = try semantic.transfer.OwnedItem.init(gpa, item);
-                errdefer owned.deinit();
+                var unnamed = try semantic.transfer.OwnedItem.init(gpa, item);
+                errdefer unnamed.deinit();
+                var named: ?semantic.transfer.OwnedItem = null;
+                errdefer if (named) |*value| value.deinit();
+                if (register != 0 and register <= 26)
+                    named = try semantic.transfer.OwnedItem.init(gpa, item);
                 if (self.transfer) |*prior| prior.deinit();
-                self.transfer = owned;
+                self.transfer = unnamed;
+                if (register != 0 and register <= 26) {
+                    const slot = &self.named_transfers[register - 1];
+                    if (slot.*) |*prior| prior.deinit();
+                    slot.* = named.?;
+                    named = null;
+                }
                 break :blk .transfer_stored;
             },
             .interaction => |definition| .{ .interaction_opened = try self.openInteraction(stack, gpa, definition) },
@@ -596,9 +624,9 @@ pub const Services = struct {
         gpa: std.mem.Allocator,
         request: semantic.action.Request,
     ) InvokeActionError!ActionEffect {
-        const with_transfer = self.withCurrentTransfer(request);
+        const with_transfer = self.withCurrentTransfer(request, 0);
         const outcome = try self.actions.invokeInteraction(&self.views, with_transfer);
-        return self.absorbActionOutcome(stack, gpa, with_transfer.view, outcome);
+        return self.absorbActionOutcome(stack, gpa, with_transfer.view, outcome, 0);
     }
 
     /// Invoke an action against the deepest node on the active focus path that
@@ -612,6 +640,17 @@ pub const Services = struct {
         gpa: std.mem.Allocator,
         action: []const u8,
     ) InvokeActionError!?ActionEffect {
+        return self.invokeFocusedActionInRegister(stack, head, gpa, action, 0);
+    }
+
+    pub fn invokeFocusedActionInRegister(
+        self: *Services,
+        stack: *view_runtime.interaction.Stack,
+        head: *Head,
+        gpa: std.mem.Allocator,
+        action: []const u8,
+        register: u8,
+    ) InvokeActionError!?ActionEffect {
         const path = head.semantic_focus.path() orelse return null;
         const instance = self.views.get(path.view) orelse {
             head.semantic_focus.clear();
@@ -624,11 +663,11 @@ pub const Services = struct {
             for (node.actions) |candidate| {
                 if (!std.mem.eql(u8, candidate.id, action)) continue;
                 const prior_focus = head.semantic_focus.path();
-                const effect = try self.invokeAction(stack, gpa, .{
+                const effect = try self.invokeActionInRegister(stack, gpa, .{
                     .action = action,
                     .view = path.view,
                     .subject = node.id,
-                });
+                }, register);
                 try self.applyActionFocus(head, gpa, prior_focus, effect);
                 return effect;
             }
@@ -932,9 +971,12 @@ test "semantic services keep target, view, and field namespaces typed" {
     };
     try std.testing.expect((try services.invokeAction(&interactions, std.testing.allocator, request)) == .transfer_stored);
     try std.testing.expectEqualStrings("snapshot", services.transfer.?.value.representations[0].payload);
+    try std.testing.expect((try services.invokeActionInRegister(&interactions, std.testing.allocator, request, 1)) == .transfer_stored);
+    try std.testing.expectEqualStrings("snapshot", services.named_transfers[0].?.value.representations[0].payload);
     var paste = request;
     paste.action = semantic.action.standard.paste_after;
     try std.testing.expect((try services.invokeAction(&interactions, std.testing.allocator, paste)) == .handled);
+    try std.testing.expect((try services.invokeActionInRegister(&interactions, std.testing.allocator, paste, 1)) == .handled);
     var confirm = request;
     confirm.action = "confirm";
     try std.testing.expect((try services.invokeAction(&interactions, std.testing.allocator, confirm)) == .interaction_opened);

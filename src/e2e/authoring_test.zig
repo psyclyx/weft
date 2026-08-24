@@ -1748,7 +1748,6 @@ test "authoring/dired: symlink rows stay links through generic copy, delete, and
     try app.init(gpa);
     defer app.deinit();
     const ed = &app.ed;
-
     // Keep the referent in a directory whose name sorts after the link. The
     // source listing therefore contains both a link entry and an ordinary
     // directory, while the focus walk below remains independent of ordering.
@@ -1857,6 +1856,40 @@ test "authoring/dired: symlink rows stay links through generic copy, delete, and
     const referent = try core.file.readAlloc(gpa, "z-referents/target.txt");
     defer gpa.free(referent);
     try t.expectEqualStrings("referent survives\n", referent);
+}
+
+test "authoring/dired: Vim named semantic register crosses delete and another view" {
+    const gpa = t.allocator;
+    var app: App = undefined;
+    try app.init(gpa);
+    defer app.deinit();
+    const ed = &app.ed;
+
+    try core.file.writeBytesMakingDirs(gpa, "source", "source/kept.txt", "named transfer\n");
+    try core.file.writeBytesMakingDirs(gpa, "destination", "destination/.seed", "");
+    core.file.deleteFile(gpa, "destination/.seed");
+
+    ed.runStr("open", "source");
+    // Real Vim grammar: `"ayy` captures the focused semantic row into `a`.
+    ed.press("quotedbl", "");
+    ed.press("a", "");
+    ed.press("y", "");
+    ed.press("y", "");
+    // Ordinary `dd` changes unnamed but leaves the named semantic value alone.
+    ed.press("d", "");
+    ed.press("d", "");
+
+    ed.runStr("open", "destination");
+    // `"ap` reads `a` in a fresh dired view, then apply through its dialog.
+    ed.press("quotedbl", "");
+    ed.press("a", "");
+    ed.press("p", "");
+    try t.expectEqual(@as(usize, 1), ed.session.system.semantic.views.get(ed.head.semantic_focus.path().?.view).?.scene.content.container.children.len);
+    ed.chord("SPC v a");
+    ed.press("y", "y");
+    const disk = try core.file.readAlloc(gpa, "destination/kept.txt");
+    defer gpa.free(disk);
+    try t.expectEqualStrings("named transfer\n", disk);
 }
 
 test "authoring/dired: generic create and permissions actions apply from an empty directory" {

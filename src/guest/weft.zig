@@ -162,15 +162,15 @@ extern "weft" fn wl_subbuffer_fact_at(offset: u32, k: u32, kl: u32, out: u32, ca
 extern "weft" fn wl_tool_backing(ptr: u32, len: u32) void;
 // Register/kill service (core, shared by every editor): yank snapshots text +
 // any overlapping subbuffer facts; paste re-stamps them over inserted text.
-extern "weft" fn wl_yank_range(start: u32, end: u32, linewise: u32) void;
-extern "weft" fn wl_register_text(out_ptr: u32, out_cap: u32) u32;
-extern "weft" fn wl_register_linewise() u32;
-extern "weft" fn wl_paste_at(base: u32) void;
+extern "weft" fn wl_yank_range(start: u32, end: u32, linewise: u32, name: u32) void;
+extern "weft" fn wl_register_text(out_ptr: u32, out_cap: u32, name: u32) u32;
+extern "weft" fn wl_register_linewise(name: u32) u32;
+extern "weft" fn wl_paste_at(base: u32, name: u32) void;
 extern "weft" fn wl_semantic_active() u32;
 extern "weft" fn wl_semantic_view_focus(authority: u32, slot: u32, generation: u32, preferred_low: u32, preferred_high: u32, has_preferred: u32) i32;
 extern "weft" fn wl_semantic_interaction_open(payload: u32, payload_len: u32, out: u32, out_cap: u32) i32;
 extern "weft" fn wl_semantic_interaction_close(authority: u32, slot: u32, generation: u32) u32;
-extern "weft" fn wl_semantic_action(action: u32, action_len: u32) i32;
+extern "weft" fn wl_semantic_action(action: u32, action_len: u32, register: u32) i32;
 extern "weft" fn wl_semantic_target_publish(payload: u32, payload_len: u32, out: u32, out_cap: u32) i32;
 extern "weft" fn wl_semantic_target_replace(authority: u32, slot: u32, generation: u32, payload: u32, payload_len: u32) i32;
 extern "weft" fn wl_semantic_target_close(authority: u32, slot: u32, generation: u32) u32;
@@ -1019,24 +1019,36 @@ var reg_scratch: [1 << 16]u8 = undefined;
 /// the one door an editor's yank/delete calls — identity-ferrying is core, not
 /// per-editor, so `dd`→`p` moves an id across editors and buffers alike.
 pub fn yankRange(start: usize, end: usize, linewise: bool) void {
-    wl_yank_range(@intCast(start), @intCast(end), @intFromBool(linewise));
+    yankRangeIn(0, start, end, linewise);
+}
+pub fn yankRangeIn(name: u8, start: usize, end: usize, linewise: bool) void {
+    wl_yank_range(@intCast(start), @intCast(end), @intFromBool(linewise), name);
 }
 /// The register bytes (into a private scratch, valid until the next call) — for
 /// an editor to build its paste. Charwise callers can insert these directly.
 pub fn registerText() []const u8 {
-    const n = wl_register_text(p(&reg_scratch), reg_scratch.len);
+    return registerTextIn(0);
+}
+pub fn registerTextIn(name: u8) []const u8 {
+    const n = wl_register_text(p(&reg_scratch), reg_scratch.len, name);
     return reg_scratch[0..@intCast(n)];
 }
 /// Whether the register holds a linewise yank (the editor's paste-positioning
 /// policy stays its own).
 pub fn registerLinewise() bool {
-    return wl_register_linewise() != 0;
+    return registerLinewiseIn(0);
+}
+pub fn registerLinewiseIn(name: u8) bool {
+    return wl_register_linewise(name) != 0;
 }
 /// Re-stamp any ferried id-spans over register text ALREADY inserted at `base`
 /// (call right after inserting `registerText()`). Turns `dd`→`p` into a MOVE;
 /// a plain insert with no call — or a register with no payloads — creates none.
 pub fn pasteAt(base: usize) void {
-    wl_paste_at(@intCast(base));
+    pasteAtIn(0, base);
+}
+pub fn pasteAtIn(name: u8, base: usize) void {
+    wl_paste_at(@intCast(base), name);
 }
 
 // ── Generic semantic views ────────────────────────────────────────────
@@ -1087,7 +1099,10 @@ pub const SemanticActionResult = enum(i32) {
 };
 
 pub fn semanticAction(action: []const u8) SemanticActionResult {
-    return @enumFromInt(wl_semantic_action(p(action.ptr), @intCast(action.len)));
+    return semanticActionIn(action, 0);
+}
+pub fn semanticActionIn(action: []const u8, slot: u8) SemanticActionResult {
+    return @enumFromInt(wl_semantic_action(p(action.ptr), @intCast(action.len), slot));
 }
 
 /// Register this plugin as the single provider for scenes it owns. Core routes

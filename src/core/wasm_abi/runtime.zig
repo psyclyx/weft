@@ -123,7 +123,7 @@ pub const LoadOptions = struct {
     subbuffers: ?*subbuffer.SubBuffers = null,
     /// The core register/kill service `yankRange`/`pasteAt` operate on (shared
     /// across every editor plugin). Null = register unavailable (both no-op).
-    register: ?*register_mod.Register = null,
+    register: ?*register_mod.Bank = null,
     /// The async loop `shellInsert` schedules its off-thread work on. Null =
     /// shell effects are unavailable (dropped).
     loop: ?*async_loop.Loop = null,

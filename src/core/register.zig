@@ -41,6 +41,46 @@ pub const Payload = struct {
     facts: []Fact,
 };
 
+/// Explicit register slots. Slot zero is unnamed; 1..26 are `a`..`z`.
+/// Named yanks also update unnamed, while every read/restamp names its slot
+/// explicitly so a prefix cannot leak through ambient state.
+pub const Bank = struct {
+    slots: [27]Register = @splat(.empty),
+
+    pub fn deinit(self: *Bank, gpa: Allocator) void {
+        for (&self.slots) |*slot| slot.deinit(gpa);
+        self.* = .{};
+    }
+
+    pub fn get(self: *Bank, name: u8) ?*Register {
+        if (name > 26) return null;
+        return &self.slots[name];
+    }
+
+    pub fn yank(self: *Bank, gpa: Allocator, name: u8, subs: ?*const subbuffer.SubBuffers, doc: *const Document, range: Range, bytes: []const u8, linewise: bool) !void {
+        const selected = self.get(name) orelse return error.InvalidRegister;
+        // Prepare a complete independent snapshot for each destination before
+        // swapping either one. This keeps named+unnamed capture atomic under
+        // allocator failure.
+        var next_selected = Register.empty;
+        errdefer next_selected.deinit(gpa);
+        try next_selected.yank(gpa, subs, doc, range, bytes, linewise);
+        var next_unnamed = Register.empty;
+        if (name != 0) {
+            errdefer next_unnamed.deinit(gpa);
+            try next_unnamed.yank(gpa, subs, doc, range, bytes, linewise);
+        }
+        selected.deinit(gpa);
+        selected.* = next_selected;
+        next_selected = .empty;
+        if (name != 0) {
+            self.slots[0].deinit(gpa);
+            self.slots[0] = next_unnamed;
+            next_unnamed = .empty;
+        }
+    }
+};
+
 text: std.ArrayList(u8) = .empty,
 linewise: bool = false,
 payloads: std.ArrayList(Payload) = .empty,
@@ -191,6 +231,18 @@ test "register: an id-span ferries across yank→restamp; plain text carries non
     const typed_off = doc.text().byteLen() - 2;
     plain.restamp(gpa, &subs, &doc, doc.text().byteLen() - 3);
     try t.expect(subs.at(&doc, typed_off) == null); // no id on the typed line
+}
+
+test "register bank keeps named text after later unnamed delete yank" {
+    var bank: Bank = .{};
+    defer bank.deinit(std.testing.allocator);
+    var doc = try Document.init(std.testing.allocator, "alpha\nbeta");
+    defer doc.deinit(std.testing.allocator);
+    try bank.yank(std.testing.allocator, 1, null, &doc, .{ .start = 0, .end = 5 }, "alpha", true);
+    // A later ordinary delete/yank updates unnamed only; `a` remains stable.
+    try bank.yank(std.testing.allocator, 0, null, &doc, .{ .start = 6, .end = 10 }, "beta", true);
+    try std.testing.expectEqualStrings("alpha", bank.get(1).?.slice());
+    try std.testing.expectEqualStrings("beta", bank.get(0).?.slice());
 }
 
 test {

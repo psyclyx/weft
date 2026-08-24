@@ -276,17 +276,17 @@ pub const imports = [_]Entry{
     .{ .name = "wl_tool_backing", .params = &.{ .u32, .u32 }, .results = &.{}, .group = .tool, .doc = "mark the active buffer as this plugin's tool projection" },
 
     // ── register.zig — the editor-agnostic yank/paste service ──────────
-    .{ .name = "wl_yank_range", .params = &.{ .u32, .u32, .u32 }, .results = &.{}, .group = .register, .doc = "capture `[start,end)` into the register, snapshotting overlapping subbuffer facts" },
-    .{ .name = "wl_register_text", .params = &.{ .u32, .u32 }, .results = &.{.u32}, .group = .register, .doc = "the register's bytes, into guest memory" },
-    .{ .name = "wl_register_linewise", .params = &.{}, .results = &.{.u32}, .group = .register, .doc = "whether the register holds a linewise yank" },
-    .{ .name = "wl_paste_at", .params = &.{.u32}, .results = &.{}, .group = .register, .doc = "re-claim a subbuffer for each ferried payload pasted at `base`" },
+    .{ .name = "wl_yank_range", .params = &.{ .u32, .u32, .u32, .u32 }, .results = &.{}, .group = .register, .doc = "capture `[start,end)` into an explicit register slot" },
+    .{ .name = "wl_register_text", .params = &.{ .u32, .u32, .u32 }, .results = &.{.u32}, .group = .register, .doc = "read an explicit register slot's bytes into guest memory" },
+    .{ .name = "wl_register_linewise", .params = &.{.u32}, .results = &.{.u32}, .group = .register, .doc = "whether an explicit register slot holds a linewise yank" },
+    .{ .name = "wl_paste_at", .params = &.{ .u32, .u32 }, .results = &.{}, .group = .register, .doc = "re-claim an explicit register slot's payloads over inserted text" },
 
     // ── semantic.zig — tool-neutral focused-view actions ───────────────
     .{ .name = "wl_semantic_active", .params = &.{}, .results = &.{.u32}, .group = .semantic, .doc = "whether this head currently focuses a live semantic view" },
     .{ .name = "wl_semantic_view_focus", .params = &.{ .u32, .u32, .u32, .u32, .u32, .u32 }, .results = &.{.i32}, .group = .semantic, .head_gated = true, .doc = "attach a live semantic view to this head, using an optional canonical u64 NodeId preference" },
     .{ .name = "wl_semantic_interaction_open", .params = &.{ .u32, .u32, .u32, .u32 }, .results = &.{.i32}, .group = .semantic, .head_gated = true, .doc = "decode and open a bounded interaction definition on this head, writing its typed ref" },
     .{ .name = "wl_semantic_interaction_close", .params = &.{ .u32, .u32, .u32 }, .results = &.{.u32}, .group = .semantic, .head_gated = true, .doc = "close the active head-local interaction named by a typed ref" },
-    .{ .name = "wl_semantic_action", .params = &.{ .u32, .u32 }, .results = &.{.i32}, .group = .semantic, .head_gated = true, .doc = "invoke an open action on the deepest advertising node of the focused semantic view" },
+    .{ .name = "wl_semantic_action", .params = &.{ .u32, .u32, .u32 }, .results = &.{.i32}, .group = .semantic, .head_gated = true, .doc = "invoke an open action with an explicit transfer-register slot" },
     .{ .name = "wl_semantic_target_publish", .params = &.{ .u32, .u32, .u32, .u32 }, .results = &.{.i32}, .group = .semantic, .doc = "admit a canonical target definition and write its typed handle" },
     .{ .name = "wl_semantic_target_replace", .params = &.{ .u32, .u32, .u32, .u32, .u32 }, .results = &.{.i32}, .group = .semantic, .doc = "replace an owned target definition without changing its identity" },
     .{ .name = "wl_semantic_target_close", .params = &.{ .u32, .u32, .u32 }, .results = &.{.u32}, .group = .semantic, .doc = "close an owned target and invalidate its generation" },
