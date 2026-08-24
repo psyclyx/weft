@@ -12,6 +12,7 @@ const fs_runtime = @import("weft_fs_runtime");
 const view_runtime = @import("weft_view_runtime");
 const target_runtime = @import("weft_target_runtime");
 const model = @import("weft_dired_model");
+const workspace = @import("weft_dired_workspace");
 const projection = @import("weft_dired_projection");
 const actions = @import("weft_dired_actions");
 
@@ -91,8 +92,8 @@ pub const Plugin = struct {
             for (self.plugin.sessions.items) |session| {
                 for (session.row_targets.items) |row_target| {
                     if (!row_target.active) continue;
-                    if (!row_target.registration.ref.eql(request.source.target)) continue;
-                    if (row_target.registration.revision != request.source.revision) return error.StaleTarget;
+                    if (!row_target.registration.registration.ref.eql(request.source.target)) continue;
+                    if (row_target.registration.registration.revision != request.source.revision) return error.StaleTarget;
                     const descriptor = self.plugin.host.targets.get(request.source.target) orelse return error.StaleTarget;
                     if (descriptor.revision != request.source.revision or descriptor.kind != .directory)
                         return error.StaleTarget;
@@ -116,7 +117,7 @@ pub const Plugin = struct {
             error.TargetUnbound, error.StaleTarget, error.InvalidHandle, error.NotFound, error.NotDirectory => error.InvalidTarget,
             else => error.Unavailable,
         };
-        if (!sameDirectory(described, directory)) return error.InvalidTarget;
+        if (!workspace.sameDirectory(described, directory)) return error.InvalidTarget;
         var observed = self.host.filesystems.observe(self.gpa, directory.root, directory.node) catch |err| return switch (err) {
             error.InvalidHandle, error.NotFound, error.NotDirectory => error.InvalidTarget,
             else => error.Unavailable,
@@ -146,7 +147,7 @@ pub const Plugin = struct {
             error.UnknownAuthority, error.AuthorityRetired => error.Unavailable,
             else => error.Rejected,
         };
-        if (!sameDirectory(described, directory)) return error.Rejected;
+        if (!workspace.sameDirectory(described, directory)) return error.Rejected;
         const session = self.gpa.create(Session) catch return error.Failed;
         errdefer self.gpa.destroy(session);
         session.* = Session.init(self, located.target, located.revision, directory);
@@ -302,8 +303,7 @@ pub const Plugin = struct {
 pub const Session = struct {
     const RowTarget = struct {
         row: model.NodeId,
-        directory: fs.target.Directory,
-        registration: fs_runtime.publication.Registration,
+        registration: fs_runtime.publication.ChildRegistration,
         active: bool = true,
         fresh: bool = false,
     };
@@ -479,30 +479,12 @@ pub const Session = struct {
             self.directory.node,
         );
         defer listing.deinit();
-        try validateListing(self.directory, listing.value);
-        const arena = listing.allocator();
-        const entries = try arena.alloc(model.SnapshotEntry, listing.value.entries.len);
-        for (listing.value.entries, entries) |entry, *snapshot| {
-            const identity = switch (entry.observation.node) {
-                .entry => |ref| ref,
-                .root => return error.InvalidListing,
-            };
-            snapshot.* = .{
-                .identity = identity,
-                .name = entry.name.bytes,
-                .revision = entry.observation.revision.token,
-                .kind = entry.observation.kind,
-                .mode = entry.observation.metadata.mode,
-                .link_target = entry.observation.metadata.link_target orelse &.{},
-            };
-        }
-        var staged = if (discard_draft)
-            model.Model.initAt(self.plugin.gpa, self.directory.root, self.directory.node)
-        else
-            try self.draft.duplicate();
-        errdefer staged.deinit();
-        try staged.reconcile(.{ .entries = entries, .revision = listing.value.revision.token });
-        return staged;
+        return workspace.reconcileListing(
+            self.plugin.gpa,
+            self.directory,
+            if (discard_draft) null else &self.draft,
+            listing.value,
+        );
     }
 
     fn validateTarget(self: *const Session) !void {
@@ -510,7 +492,7 @@ pub const Session = struct {
         if (descriptor.revision != self.target_revision or descriptor.kind != .directory) return error.StaleTarget;
         const described = (try fs.target.find(descriptor.facts)) orelse return error.StaleTarget;
         const authorized = try self.plugin.host.filesystems.authorizedDirectory(self.target, self.target_revision);
-        if (!sameDirectory(described, authorized) or !sameDirectory(authorized, self.directory)) return error.StaleTarget;
+        if (!workspace.sameDirectory(described, authorized) or !workspace.sameDirectory(authorized, self.directory)) return error.StaleTarget;
     }
 
     /// Publish a staged model's scene first, then commit it with an infallible
@@ -552,33 +534,39 @@ pub const Session = struct {
         errdefer {
             while (self.row_targets.items.len > old_len) {
                 var row_target = self.row_targets.pop().?;
-                _ = row_target.registration.close(self.plugin.gpa, self.plugin.host.targets, self.plugin.host.filesystems);
+                _ = row_target.registration.close(self.plugin.gpa, self.plugin.host.targets);
             }
             for (self.row_targets.items) |*row_target| row_target.active = true;
         }
         for (draft.rows.items) |row| {
-            const directory = observedDirectory(self.directory, row) orelse continue;
+            const child = workspace.observedChild(self.directory, row) orelse continue;
             var retained = false;
             for (self.row_targets.items) |*row_target| {
-                if (row_target.row != row.id or !sameDirectory(row_target.directory, directory)) continue;
+                if (row_target.row != row.id) continue;
                 row_target.active = true;
                 row_target.fresh = false;
                 retained = true;
                 break;
             }
             if (retained) continue;
-            var registration = try fs_runtime.publication.publish(self.plugin.gpa, self.plugin.host.targets, self.plugin.host.filesystems, self.plugin.owner, .{
-                .display_name = row.draft.name,
-                .directory = directory,
-            });
+            var registration = try fs_runtime.publication.publishChildDirectory(
+                self.plugin.gpa,
+                self.plugin.host.targets,
+                self.plugin.host.filesystems,
+                self.plugin.owner,
+                .{
+                    .parent = .{ .target = self.target, .revision = self.target_revision },
+                    .entry = child.entry,
+                    .entry_revision = child.revision,
+                },
+            );
             var retained_registration = false;
             defer {
                 if (!retained_registration)
-                    _ = registration.close(self.plugin.gpa, self.plugin.host.targets, self.plugin.host.filesystems);
+                    _ = registration.close(self.plugin.gpa, self.plugin.host.targets);
             }
             try self.row_targets.append(self.plugin.gpa, .{
                 .row = row.id,
-                .directory = directory,
                 .registration = registration,
                 .fresh = true,
             });
@@ -592,7 +580,7 @@ pub const Session = struct {
             index -= 1;
             if (!self.row_targets.items[index].fresh) continue;
             var row_target = self.row_targets.swapRemove(index);
-            _ = row_target.registration.close(self.plugin.gpa, self.plugin.host.targets, self.plugin.host.filesystems);
+            _ = row_target.registration.close(self.plugin.gpa, self.plugin.host.targets);
         }
         for (self.row_targets.items) |*row_target| {
             row_target.active = true;
@@ -606,14 +594,14 @@ pub const Session = struct {
             index -= 1;
             if (self.row_targets.items[index].active) continue;
             var row_target = self.row_targets.swapRemove(index);
-            _ = row_target.registration.close(self.plugin.gpa, self.plugin.host.targets, self.plugin.host.filesystems);
+            _ = row_target.registration.close(self.plugin.gpa, self.plugin.host.targets);
         }
         for (self.row_targets.items) |*row_target| row_target.fresh = false;
     }
 
     fn closeAllRowTargets(self: *Session) void {
         for (self.row_targets.items) |*row_target|
-            _ = row_target.registration.close(self.plugin.gpa, self.plugin.host.targets, self.plugin.host.filesystems);
+            _ = row_target.registration.close(self.plugin.gpa, self.plugin.host.targets);
         self.row_targets.deinit(self.plugin.gpa);
     }
 
@@ -723,31 +711,6 @@ pub const Session = struct {
         return descriptor.revision == located.revision;
     }
 };
-
-fn observedDirectory(parent: fs.target.Directory, row: model.Row) ?fs.target.Directory {
-    if (row.conflict == .stale or row.pending == .deleted or row.draft.kind != .directory) return null;
-    const observation = row.current orelse return null;
-    if (observation.kind != .directory or observation.identity.authority != parent.root.authority) return null;
-    return .{ .root = parent.root, .node = .{ .entry = observation.identity } };
-}
-
-fn validateListing(directory: fs.target.Directory, listing: contract.Listing) !void {
-    if (!std.meta.eql(listing.directory.node, directory.node) or listing.directory.kind != .directory)
-        return error.InvalidListing;
-    for (listing.entries) |entry| {
-        _ = contract.Name.init(entry.name.bytes) catch return error.InvalidListing;
-        const identity = switch (entry.observation.node) {
-            .root => return error.InvalidListing,
-            .entry => |ref| ref,
-        };
-        if (identity.generation == 0 or identity.authority != directory.root.authority)
-            return error.InvalidListing;
-    }
-}
-
-fn sameDirectory(a: fs.target.Directory, b: fs.target.Directory) bool {
-    return a.root.eql(b.root) and std.meta.eql(a.node, b.node);
-}
 
 const DraftField = struct {
     session: *Session,
@@ -1181,45 +1144,6 @@ test "target replacement makes the session stale and cannot inherit old authorit
     try std.testing.expectError(error.TargetUnbound, fixture.router.authorizedDirectory(fixture.target, 1));
 }
 
-test "directory listing boundary rejects retargeted and invalid entries" {
-    const directory: fs.target.Directory = .{ .root = rootRef() };
-    const valid_directory: contract.Observation = .{
-        .node = .root,
-        .revision = .{ .token = "r" },
-        .kind = .directory,
-    };
-    try validateListing(directory, .{ .directory = valid_directory, .revision = .{ .token = "r" }, .entries = &.{} });
-    try std.testing.expectError(error.InvalidListing, validateListing(directory, .{
-        .directory = .{ .node = .{ .entry = entryRef(4) }, .revision = .{ .token = "r" }, .kind = .directory },
-        .revision = .{ .token = "r" },
-        .entries = &.{},
-    }));
-    try std.testing.expectError(error.InvalidListing, validateListing(directory, .{
-        .directory = valid_directory,
-        .revision = .{ .token = "r" },
-        .entries = &.{.{
-            .name = .{ .bytes = "bad/name" },
-            .observation = .{
-                .node = .{ .entry = .{ .authority = @enumFromInt(9), .slot = 1, .generation = 1 } },
-                .revision = .{ .token = "r" },
-                .kind = .regular,
-            },
-        }},
-    }));
-    try std.testing.expectError(error.InvalidListing, validateListing(directory, .{
-        .directory = valid_directory,
-        .revision = .{ .token = "r" },
-        .entries = &.{.{
-            .name = try contract.Name.init("other-authority"),
-            .observation = .{
-                .node = .{ .entry = .{ .authority = @enumFromInt(9), .slot = 1, .generation = 1 } },
-                .revision = .{ .token = "r" },
-                .kind = .regular,
-            },
-        }},
-    }));
-}
-
 test "draft apply is a generic confirmation interaction and revert action" {
     var fixture: Fixture = undefined;
     try fixture.init();
@@ -1278,6 +1202,9 @@ test "observed directory rows publish exact links and independent containment" {
     const row_id = directory_row orelse return error.TestUnexpectedResult;
     const symlink_id = symlink_row orelse return error.TestUnexpectedResult;
     const row_target = session.rowTargetFor(row_id) orelse return error.TestUnexpectedResult;
+    const row_authority = try fixture.router.authorizedDirectory(row_target.target, row_target.revision);
+    try std.testing.expect(!row_authority.root.eql(rootRef()));
+    try std.testing.expectEqual(contract.NodeRef.root, row_authority.node);
     try std.testing.expect(session.rowTargetFor(symlink_id) == null);
     const scene_row = fixture.views.get(session.view_ref).?.scene.content.container.children[1];
     try std.testing.expectEqual(row_target, scene_row.target.?);
@@ -1345,6 +1272,7 @@ test "row target publication is closed when its session retires" {
     retired.deinit();
     fixture.plugin.gpa.destroy(retired);
     try std.testing.expect(fixture.targets.get(row_target.target) == null);
+    try std.testing.expectEqual(@as(usize, 1), fixture.fake.release_root_calls);
     var relation = try fixture.relations.query(std.testing.allocator, .{ .source = row_target, .name = "container" });
     defer relation.deinit();
     try std.testing.expectEqual(@as(usize, 0), relation.value.candidates.len);
@@ -1356,6 +1284,7 @@ test "row target publication rolls back when retention allocation fails" {
     try fixture.init();
     defer fixture.deinit();
     const session = fixture.plugin.sessions.items[0];
+    try fixture.fake.set(&.{.{ .name = "child", .ref = entryRef(9), .revision = "1", .kind = .directory }});
     var staged = model.Model.init(std.testing.allocator, rootRef());
     defer staged.deinit();
     try staged.reconcile(.{ .entries = &.{.{
@@ -1396,6 +1325,7 @@ const FakeFilesystem = struct {
     durable_leases: bool = false,
     capture_calls: usize = 0,
     release_calls: usize = 0,
+    release_root_calls: usize = 0,
 
     fn deinit(self: *FakeFilesystem) void {
         self.arena.deinit();
@@ -1431,10 +1361,22 @@ const FakeFilesystem = struct {
     pub fn sameRoot(_: *FakeFilesystem, left: contract.Root, right: contract.Root) contract.Error!bool {
         return left.eql(right);
     }
-    pub fn deriveRoot(_: *FakeFilesystem, _: contract.EntrySource) contract.Error!contract.Root {
-        return error.Unsupported;
+    pub fn deriveRoot(self: *FakeFilesystem, source: contract.EntrySource) contract.Error!contract.Root {
+        for (self.entries) |entry| {
+            if (!source.ref.eql(entry.ref)) continue;
+            if (!std.mem.eql(u8, source.revision.token, entry.revision)) return error.Stale;
+            if (entry.kind != .directory) return error.NotDirectory;
+            return .{
+                .authority = source.root.authority,
+                .slot = 1000 + entry.ref.slot,
+                .generation = entry.ref.generation,
+            };
+        }
+        return error.NotFound;
     }
-    pub fn releaseRoot(_: *FakeFilesystem, _: contract.Root) void {}
+    pub fn releaseRoot(self: *FakeFilesystem, root: contract.Root) void {
+        if (!root.eql(rootRef())) self.release_root_calls += 1;
+    }
 
     pub fn observe(_: *FakeFilesystem, gpa: std.mem.Allocator, _: contract.Root, node: contract.NodeRef) contract.Error!contract.OwnedObservation {
         var owned = contract.OwnedObservation.init(gpa);

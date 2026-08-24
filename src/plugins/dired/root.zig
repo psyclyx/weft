@@ -8,6 +8,7 @@
 const std = @import("std");
 
 pub const model = @import("weft_dired_model");
+pub const workspace = @import("weft_dired_workspace");
 pub const projection = @import("weft_dired_projection");
 pub const actions = @import("weft_dired_actions");
 
@@ -24,6 +25,13 @@ pub const EntryCapture = model.EntryCapture;
 pub const OwnedPlan = model.OwnedPlan;
 pub const PastePlacement = model.PastePlacement;
 pub const PasteAnchor = model.PasteAnchor;
+
+pub const WorkspaceError = workspace.Error;
+pub const directoryFromDescriptor = workspace.directoryFromDescriptor;
+pub const reconcileListing = workspace.reconcileListing;
+pub const observedChild = workspace.observedChild;
+pub const validateListing = workspace.validateListing;
+pub const sameDirectory = workspace.sameDirectory;
 
 pub const max_transfer_payload = model.max_transfer_payload;
 pub const max_transfer_records = model.max_transfer_records;
