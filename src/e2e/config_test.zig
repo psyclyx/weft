@@ -74,9 +74,14 @@ const ConfigActions = struct {
     reverts: usize = 0,
     applies: usize = 0,
     confirms: usize = 0,
+    plugin_actions: usize = 0,
 
     pub fn invoke(self: *ConfigActions, request: semantic.action.Request) view_runtime.action.ProviderError!semantic.action.Outcome {
         const action = request.action;
+        if (std.mem.eql(u8, action, "fixture.plugin-action")) {
+            self.plugin_actions += 1;
+            return .handled;
+        }
         if (std.mem.eql(u8, action, semantic.action.standard.edit)) {
             self.edit_requests += 1;
             return .declined; // generic field endpoint remains the fallback
@@ -178,6 +183,12 @@ test "e2e/config: the sample config boots; SPC g i is discoverable via which-key
     var loader_state: ConfigLoader = .{ .ed = &ed };
     defer loader_state.deinit();
     try bootConfig(&ed, config_dir, &loader_state);
+
+    // A plugin-owned action is deliberately not part of core's standard
+    // vocabulary. The config API declares its focused-view trampoline from
+    // data, then the retained fixture below advertises and handles it.
+    try core.quickjs.evalConfig(&ed.engine, ed.ctx, null, &ed.config_kv, null, "weft.semanticAction('fixture.plugin-action'); weft.bind('normal', 'SPC v m', 'fixture.plugin-action');");
+    try t.expect(ed.commands.resolve("fixture.plugin-action") != null);
 
     // Any plugin the sample config asked for but we couldn't load is a FINDING
     // — named on failure (only then, so a clean boot leaves stderr untouched).
@@ -288,6 +299,7 @@ test "e2e/config: the sample config boots; SPC g i is discoverable via which-key
         .{ .id = semantic.action.standard.delete },
         .{ .id = semantic.action.standard.paste_before },
         .{ .id = semantic.action.standard.paste_after },
+        .{ .id = "fixture.plugin-action" },
     };
     const first_row: semantic.scene.Node = .{
         .id = @enumFromInt(2),
@@ -332,6 +344,9 @@ test "e2e/config: the sample config boots; SPC g i is discoverable via which-key
     try t.expectEqual(@as(usize, 1), actions.paste_after);
     try t.expectEqual(@as(usize, 1), actions.paste_before);
     try t.expectEqual(@as(usize, 1), actions.deletes);
+
+    ed.chord("SPC v m");
+    try t.expectEqual(@as(usize, 1), actions.plugin_actions);
 
     ed.chord("SPC v r");
     ed.chord("SPC v R");

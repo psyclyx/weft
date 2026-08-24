@@ -42,6 +42,36 @@ fn invokeSemanticAction(ctx: *Context, action_name: []const u8) anyerror!Value {
     return ok;
 }
 
+/// Register a command trampoline for an open semantic action name. This is
+/// the config/plugin seam for structured views: the name need not be in core
+/// (or in the standard vocabulary), and the focused view decides whether it
+/// advertises and handles it at invocation time.
+pub fn registerSemanticAction(
+    gpa: std.mem.Allocator,
+    commands: *command.Commands,
+    services: *@import("semantic.zig").Services,
+    name: []const u8,
+) !void {
+    // Keep an existing command's richer compatibility behavior (for example
+    // field-edit's generic-field fallback). Open names only need a trampoline
+    // when no plugin/core command already owns the slot.
+    if (commands.resolve(name) != null) return;
+    const target = try services.declareSemanticCommand(gpa, name);
+    _ = try commands.bind(gpa, name, .{
+        .name = name,
+        .summary = "semantic action",
+        .args = &.{},
+        .handler = semanticActionTrampoline,
+        .data = target,
+    });
+}
+
+fn semanticActionTrampoline(ctx: *Context, data: ?*anyopaque, args: []const Value) anyerror!Value {
+    _ = args;
+    const target: *@import("semantic.zig").Services.SemanticCommand = @ptrCast(@alignCast(data.?));
+    return invokeSemanticAction(ctx, target.name);
+}
+
 fn cSelectionCopy(ctx: *Context, args: struct {}) anyerror!Value {
     _ = args;
     return invokeSemanticAction(ctx, semantic_model.action.standard.copy);

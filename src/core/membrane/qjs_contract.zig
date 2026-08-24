@@ -78,6 +78,7 @@ pub const imports = [_]Entry{
     e("qjs_set", 6, 0, .config, "weft.set(plugin, key, blob): stage config data for a plugin, read at its init"),
     e("qjs_menu", 2, 0, .config, "weft.menu(name): declare a which-key style submenu mode"),
     e("qjs_action", 2, 0, .config, "weft.action(name): declare a pick action + its trampoline command"),
+    e("qjs_semantic_action", 2, 0, .config, "weft.semanticAction(name): declare a focused-view action command"),
     e("qjs_provide", 9, 0, .config, "weft.provide(action, mode, lang, cmd, prio): register a provider"),
     e("qjs_status_segment", 5, 0, .config, "weft.statusSegment(text, role, priority): stage a static ui/statusline-seg segment onto the manifest (north-star-plan task #19)"),
     e("qjs_grant", 6, 0, .config, "weft.grant(plugin, capability, root): stage a GrantDecl onto the manifest — root (\"\" = unrestricted) narrows to Limit.fs_root (north-star-plan §6 W4 slice 4)"),
@@ -107,10 +108,10 @@ pub const imports = [_]Entry{
 /// `qjs_*` import, so a merge conflict or half-finished edit fails the
 /// build instead of silently drifting quickjs.zig's three registration
 /// sites apart.
-const expected_count = 29;
+const expected_count = 30;
 
 comptime {
-    @setEvalBranchQuota(10_000); // O(n²) duplicate scan, n=27
+    @setEvalBranchQuota(10_000); // O(n²) duplicate scan, n=30
     if (imports.len != expected_count) @compileError(std.fmt.comptimePrint(
         "core/membrane/qjs_contract.zig: imports table has {d} entries, expected {d}. " ++
             "If you added or removed a qjs_* import, update `expected_count` here and wire " ++
@@ -152,7 +153,7 @@ test "qjs membrane contract: every entry is well-formed, documented, and unique"
         }
     }
     try t.expectEqual(@as(usize, expected_count), imports.len);
-    try t.expectEqual(@as(usize, 12), config_count); // defineConfigFns' surface
+    try t.expectEqual(@as(usize, 13), config_count); // defineConfigFns' surface
     try t.expectEqual(@as(usize, 17), plugin_count); // the resident-plugin-only surface
 }
 

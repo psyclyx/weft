@@ -110,6 +110,8 @@ __attribute__((import_module("weft"), import_name("qjs_status")))
 extern void host_status(const char *text, int len);
 __attribute__((import_module("weft"), import_name("qjs_action")))
 extern void host_action(const char *name, int name_len);
+__attribute__((import_module("weft"), import_name("qjs_semantic_action")))
+extern void host_semantic_action(const char *name, int name_len);
 __attribute__((import_module("weft"), import_name("qjs_provide")))
 extern void host_provide(const char *action, int action_len,
                          const char *mode, int mode_len,
@@ -296,6 +298,19 @@ static JSValue js_action(JSContext *ctx, JSValueConst this_val,
     return JS_UNDEFINED;
 }
 
+// weft.semanticAction(name) — declare an open focused structured-view action
+// command. The provider/view owns the meaning; config only supplies a keymap
+// name and the generic command trampoline.
+static JSValue js_semantic_action(JSContext *ctx, JSValueConst this_val,
+                                  int argc, JSValueConst *argv) {
+    if (argc < 1) return JS_ThrowTypeError(ctx, "semanticAction(name)");
+    size_t l;
+    const char *s = JS_ToCStringLen(ctx, &l, argv[0]);
+    if (s) host_semantic_action(s, (int)l);
+    JS_FreeCString(ctx, s);
+    return JS_UNDEFINED;
+}
+
 // weft.provide(action, when, cmd[, prio]) — register a provider for `action`.
 // `when` is an object {mode?, lang?}; an absent field is "don't care". The
 // highest-priority provider whose `when` holds in the current context wins when
@@ -424,6 +439,7 @@ static void install_weft(JSContext *ctx) {
     JS_SetPropertyStr(ctx, weft, "set", JS_NewCFunction(ctx, js_set, "set", 3));
     JS_SetPropertyStr(ctx, weft, "menu", JS_NewCFunction(ctx, js_menu, "menu", 1));
     JS_SetPropertyStr(ctx, weft, "action", JS_NewCFunction(ctx, js_action, "action", 1));
+    JS_SetPropertyStr(ctx, weft, "semanticAction", JS_NewCFunction(ctx, js_semantic_action, "semanticAction", 1));
     JS_SetPropertyStr(ctx, weft, "provide", JS_NewCFunction(ctx, js_provide, "provide", 3));
     JS_SetPropertyStr(ctx, weft, "statusSegment", JS_NewCFunction(ctx, js_status_segment, "statusSegment", 2));
     JS_SetPropertyStr(ctx, weft, "grant", JS_NewCFunction(ctx, js_grant, "grant", 2));

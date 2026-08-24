@@ -23,6 +23,8 @@ const manifest_mod = @import("manifest.zig");
 const TranscriptDoc = @import("transcript.zig");
 const GraphDoc = @import("graph.zig");
 const subbuffer = @import("subbuffer.zig");
+const semantic_model = @import("weft_semantic");
+const view_runtime = @import("weft_view_runtime");
 
 /// The embedded engine+shim (built from quickjs-ng + weft_qjs.c by build.zig).
 pub const quickjs_wasm: []const u8 = @embedFile("quickjs_wasm");
@@ -184,6 +186,7 @@ const config_handlers = .{
     .{ .name = "qjs_set", .handler = cSet },
     .{ .name = "qjs_menu", .handler = cMenu },
     .{ .name = "qjs_action", .handler = cAction },
+    .{ .name = "qjs_semantic_action", .handler = cSemanticAction },
     .{ .name = "qjs_provide", .handler = cProvide },
     .{ .name = "qjs_status_segment", .handler = cStatusSegment },
     .{ .name = "qjs_grant", .handler = cGrant },
@@ -1201,6 +1204,23 @@ fn cAction(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32, results: 
     command.registerAction(gpa, br.activeCtx().commands, br.activeCtx().actions, name, .pick) catch {};
 }
 
+/// weft.semanticAction(name) — declare a focused structured-view action
+/// command. Names are open protocol strings; unlike `weft.action`, they do
+/// not enter context/provider resolution.
+fn cSemanticAction(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32, results: []i32) void {
+    _ = results;
+    const br: *Bridge = @ptrCast(@alignCast(data.?));
+    const gpa = br.activeCtx().gpa;
+    const name = readStr(br, caller, args[0], args[1]) orelse return;
+    defer gpa.free(name);
+    if (br.manifest) |m| {
+        m.addSemanticAction(name) catch {};
+        return;
+    }
+    if (br.activeCtx().semantic) |services|
+        @import("builtins.zig").registerSemanticAction(gpa, br.activeCtx().commands, services, name) catch {};
+}
+
 /// weft.provide(action, mode, lang, cmd, prio) — register a provider. Empty
 /// mode/lang strings mean "don't care" (an unconstrained provider). Auto-
 /// declares the action if `weft.action` hasn't run yet (load order is free),
@@ -1375,6 +1395,7 @@ const Env = struct {
     container: @import("container.zig").Container,
     caps: @import("capability.zig").Caps,
     actions: @import("action.zig"),
+    semantic: @import("semantic.zig").Services,
     quit: bool,
     ctx: command.Context,
 
@@ -1387,6 +1408,7 @@ const Env = struct {
         self.container = @import("container.zig").Container.init(gpa);
         self.caps = @import("capability.zig").Caps.init(gpa, task.nowNs, &self.container);
         self.actions = @import("action.zig").init(gpa, &self.container);
+        self.semantic = @import("semantic.zig").Services.init(.here);
         self.quit = false;
         self.ctx = .{
             .gpa = gpa,
@@ -1394,6 +1416,7 @@ const Env = struct {
             .commands = &self.commands,
             .keymap = &self.keymap,
             .actions = &self.actions,
+            .semantic = &self.semantic,
             .caps = &self.caps,
             .quit = &self.quit,
             .head = &self.head,
@@ -1401,6 +1424,7 @@ const Env = struct {
     }
     fn deinit(self: *Env, gpa: Allocator) void {
         self.actions.deinit();
+        self.semantic.deinit(gpa);
         self.caps.deinit();
         self.container.deinit();
         self.head.deinit(gpa);
@@ -1520,6 +1544,44 @@ test "quickjs: weft.action + weft.provide wire the pick dispatch layer" {
     try t.expectEqualStrings("zig-eval", env.ctx.actions.resolve("eval", .{ .mode = "normal", .lang = "zig" }).?);
     try t.expectEqualStrings("python-repl", env.ctx.actions.resolve("eval", .{ .mode = "normal", .lang = "py" }).?);
     try t.expectEqualStrings("eval-line", env.ctx.actions.resolve("eval", .{ .mode = "normal", .lang = "md" }).?);
+}
+
+test "quickjs: semanticAction binds and invokes an open plugin view action" {
+    const gpa = t.allocator;
+    var env: Env = undefined;
+    try Env.init(gpa, &env);
+    defer env.deinit(gpa);
+
+    var engine = try wasm.Engine.init();
+    defer engine.deinit();
+    try evalConfig(&engine, &env.ctx, null, null, null, "weft.semanticAction('fixture.plugin-action'); weft.bind('normal', 'm', 'fixture.plugin-action');");
+    try t.expect(env.commands.resolve("fixture.plugin-action") != null);
+    try env.head.setModeRaw(gpa, "normal");
+    try t.expectEqualStrings("fixture.plugin-action", env.keymap.lookup("normal", "m").?);
+
+    const ActionProvider = struct {
+        calls: usize = 0,
+
+        pub fn invoke(self: *@This(), request: semantic_model.action.Request) view_runtime.action.ProviderError!semantic_model.action.Outcome {
+            if (!std.mem.eql(u8, request.action, "fixture.plugin-action")) return .declined;
+            self.calls += 1;
+            return .handled;
+        }
+    };
+    const owner = try env.semantic.acquireOwner();
+    const actions = [_]semantic_model.scene.Action{.{ .id = "fixture.plugin-action" }};
+    const view = try env.semantic.publishView(gpa, owner, null, 1, .{
+        .id = @enumFromInt(1),
+        .focusable = true,
+        .actions = &actions,
+        .content = .{ .label = "fixture" },
+    });
+    var provider: ActionProvider = .{};
+    try env.semantic.registerActionProvider(gpa, owner, .init(&provider));
+    _ = try env.semantic.focusView(&env.head, gpa, view, null);
+
+    _ = try command.run(&env.commands, &env.ctx, "fixture.plugin-action", &.{});
+    try t.expectEqual(@as(usize, 1), provider.calls);
 }
 
 test "quickjs: a JS plugin registers a command dispatched back into JS" {

@@ -10,6 +10,7 @@
 //                                    in a mode; a multi-key sequence is a chord,
 //                                    its prefixes are which-key menus for free
 //   weft.action(name)              — declare an abstract intent a key can bind to
+//   weft.semanticAction(name)      — declare an open focused-view action command
 //   weft.provide(name, when, cmd[, prio]) — a provider for an action, chosen by
 //                                    {mode, lang} at fire time (the synthetic bind)
 //   weft.set(plugin, key, value)   — hand a plugin config data (overrides defaults)
@@ -274,6 +275,10 @@ weft.bind("normal", "SPC t c", "comment-line");
 function bindActionGroup(mode, prefix, bindings) {
   for (var i = 0; i < bindings.length; i++) {
     var binding = bindings[i];
+    // Semantic action names are an open plugin/view protocol. Declaring the
+    // command here keeps this table data-shaped: a future structured view can
+    // add its own action without a core or Vim/dired special case.
+    weft.semanticAction(binding[1]);
     weft.bind(mode, prefix + " " + binding[0], binding[1]);
   }
 }

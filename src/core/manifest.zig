@@ -62,6 +62,7 @@
 const std = @import("std");
 const Allocator = std.mem.Allocator;
 const command = @import("command.zig");
+const builtins = @import("builtins.zig");
 const kv = @import("kv.zig");
 const container_mod = @import("container.zig");
 const Keymap = @import("Keymap.zig");
@@ -126,6 +127,7 @@ pub const PluginDecl = struct { name: []u8, path_form: bool };
 pub const BindDecl = struct { mode: []u8, key: []u8, command: []u8 };
 pub const MenuDecl = struct { name: []u8 };
 pub const ActionDecl = struct { name: []u8 };
+pub const SemanticActionDecl = struct { name: []u8 };
 pub const ProvideDecl = struct { action: []u8, mode: []u8, lang: []u8, command: []u8, priority: i32 };
 pub const ValueDecl = struct { owner: []u8, key: []u8, value: []u8 };
 pub const RunDecl = struct { command: []u8 };
@@ -308,6 +310,7 @@ pub const Manifest = struct {
     binds: std.ArrayList(BindDecl) = .empty,
     menus: std.ArrayList(MenuDecl) = .empty,
     actions: std.ArrayList(ActionDecl) = .empty,
+    semantic_actions: std.ArrayList(SemanticActionDecl) = .empty,
     provides: std.ArrayList(ProvideDecl) = .empty,
     values: std.ArrayList(ValueDecl) = .empty,
     runs: std.ArrayList(RunDecl) = .empty,
@@ -341,6 +344,8 @@ pub const Manifest = struct {
         self.menus.deinit(gpa);
         for (self.actions.items) |d| gpa.free(d.name);
         self.actions.deinit(gpa);
+        for (self.semantic_actions.items) |d| gpa.free(d.name);
+        self.semantic_actions.deinit(gpa);
         for (self.provides.items) |d| {
             gpa.free(d.action);
             gpa.free(d.mode);
@@ -392,6 +397,13 @@ pub const Manifest = struct {
     }
     pub fn addAction(self: *Manifest, name: []const u8) !void {
         try self.actions.append(self.gpa, .{ .name = try self.gpa.dupe(u8, name) });
+    }
+
+    /// Declare an open semantic-view action command. Unlike `addAction`, this
+    /// does not participate in context/provider resolution; it invokes the
+    /// focused retained view with the exact protocol name.
+    pub fn addSemanticAction(self: *Manifest, name: []const u8) !void {
+        try self.semantic_actions.append(self.gpa, .{ .name = try self.gpa.dupe(u8, name) });
     }
     pub fn addProvide(self: *Manifest, action: []const u8, mode: []const u8, lang: []const u8, cmd: []const u8, priority: i32) !void {
         try self.provides.append(self.gpa, .{
@@ -477,6 +489,8 @@ pub const Manifest = struct {
         for (self.menus.items) |d| hStr(h, d.name);
         hLen(h, self.actions.items.len);
         for (self.actions.items) |d| hStr(h, d.name);
+        hLen(h, self.semantic_actions.items.len);
+        for (self.semantic_actions.items) |d| hStr(h, d.name);
         hLen(h, self.provides.items.len);
         for (self.provides.items) |d| {
             hStr(h, d.action);
@@ -616,6 +630,8 @@ pub const Manifest = struct {
         for (self.binds.items) |d| actx.ctx.keymap.bind(gpa, d.mode, d.key, d.command, prio, self.owner) catch {};
         for (self.menus.items) |d| applyMenu(actx.ctx, gpa, d.name, prio);
         for (self.actions.items) |d| command.registerAction(gpa, actx.ctx.commands, actx.ctx.actions, d.name, .pick) catch {};
+        if (actx.ctx.semantic) |services| for (self.semantic_actions.items) |d|
+            builtins.registerSemanticAction(gpa, actx.ctx.commands, services, d.name) catch {};
         for (self.provides.items) |d| {
             actx.ctx.actions.provide(.{
                 .action = d.action,

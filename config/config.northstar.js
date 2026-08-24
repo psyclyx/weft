@@ -239,6 +239,7 @@ weft.bind("normal", "SPC t c", "comment-line");
 function bindActionGroup(mode, prefix, bindings) {
   for (var i = 0; i < bindings.length; i++) {
     var binding = bindings[i];
+    weft.semanticAction(binding[1]);
     weft.bind(mode, prefix + " " + binding[0], binding[1]);
   }
 }

@@ -14,6 +14,10 @@ pub const Services = struct {
     views: view_runtime.view.Registry,
     fields: view_runtime.field.Registry,
     actions: view_runtime.action.Registry = .{},
+    /// Config/plugin-declared semantic command names. These are open protocol
+    /// strings, not a core vocabulary; the command trampoline borrows this
+    /// owned name until the system is torn down.
+    semantic_commands: std.ArrayList(*SemanticCommand) = .empty,
     transfer: ?semantic.transfer.OwnedItem = null,
     next_owner: u64 = 1,
 
@@ -24,6 +28,8 @@ pub const Services = struct {
         fields: usize = 0,
         action_provider: bool = false,
     };
+
+    pub const SemanticCommand = struct { name: []u8 };
 
     pub const ViewAdmissionError = view_runtime.view.Error || error{ StaleTarget, StaleField };
 
@@ -50,11 +56,30 @@ pub const Services = struct {
         // their plugin dies. The registries only release retained descriptors.
         if (self.transfer) |*item| item.deinit();
         self.actions.deinit(gpa);
+        for (self.semantic_commands.items) |entry| {
+            gpa.free(entry.name);
+            gpa.destroy(entry);
+        }
+        self.semantic_commands.deinit(gpa);
         self.fields.deinit(gpa);
         self.views.deinit(gpa);
         self.target_handlers.deinit(gpa);
         self.targets.deinit(gpa);
         self.* = undefined;
+    }
+
+    /// Own one open semantic action name for a command trampoline. Repeated
+    /// declarations are idempotent, matching `weft.action`'s command side.
+    pub fn declareSemanticCommand(self: *Services, gpa: std.mem.Allocator, name: []const u8) !*SemanticCommand {
+        for (self.semantic_commands.items) |entry| {
+            if (std.mem.eql(u8, entry.name, name)) return entry;
+        }
+        const entry = try gpa.create(SemanticCommand);
+        errdefer gpa.destroy(entry);
+        entry.* = .{ .name = try gpa.dupe(u8, name) };
+        errdefer gpa.free(entry.name);
+        try self.semantic_commands.append(gpa, entry);
+        return entry;
     }
 
     pub fn publishTarget(
