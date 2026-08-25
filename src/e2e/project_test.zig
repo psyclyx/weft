@@ -40,44 +40,26 @@ const tmpPath = h.tmpPath;
 const socketPair = h.socketPair;
 const napUs = h.napUs;
 
-/// Compare only the editor body of two completed production frames. The tab
-/// strip and status line are excluded so a mode/position label cannot make a
-/// missing remote caret look rendered.
-fn bodyPixelsDiffer(before: []const u8, after: []const u8) bool {
-    if (before.len != after.len or before.len != @as(usize, h.app_w) * h.app_h * 4) return false;
-    const stride = @as(usize, h.app_w) * 4;
+/// Compare one editor body inside two completed side-by-side production
+/// frames. The tab strip and status line are excluded so a position label
+/// cannot make a missing remote caret look rendered.
+fn pairBodyChanged(before: []const u8, after: []const u8, right: bool) bool {
+    const pair_width = @as(usize, h.app_w) * 2;
+    if (before.len != after.len or before.len != pair_width * h.app_h * 4) return false;
+    const stride = pair_width * 4;
+    const x_offset = @as(usize, if (right) h.app_w else 0) * 4;
+    const half_bytes = @as(usize, h.app_w) * 4;
     var changed: usize = 0;
     var y: usize = 28;
     while (y < h.app_h - 52) : (y += 1) {
-        const start = y * stride;
-        for (before[start .. start + stride], after[start .. start + stride]) |a, b| {
+        const start = y * stride + x_offset;
+        for (before[start .. start + half_bytes], after[start .. start + half_bytes]) |a, b| {
             changed += @intFromBool(a != b);
         }
     }
     // A two-pixel presence bar across one text row changes dozens of channel
     // bytes. Keep the floor above antialiasing noise but far below a caret.
     return changed >= 16;
-}
-
-/// Move `mover` through ordinary configured Vim input and require that the
-/// other editor's completed framebuffer changes in its body. No layer,
-/// cursor, scene, or renderer internals are inspected: if remote presence is
-/// dropped anywhere before pixels, this cannot pass.
-fn expectRemoteCaretMoveRendered(link: *Loopback, observer: *Editor, mover: *Editor, key: []const u8) !void {
-    const before = try observer.renderComposite();
-    defer observer.gpa.free(before);
-    mover.press(key, "");
-
-    const deadline = core.task.nowNs() + 5 * std.time.ns_per_s;
-    while (core.task.nowNs() < deadline) {
-        try link.tick();
-        const after = try observer.renderComposite();
-        const visible = bodyPixelsDiffer(before, after);
-        observer.gpa.free(after);
-        if (visible) return;
-        napUs(300);
-    }
-    return error.RemoteCaretMissingFromFrame;
 }
 
 // This is intentionally the plugin inventory from the shipped config, not a
@@ -137,7 +119,7 @@ const SpineCollabClock = struct {
     tick_error: ?anyerror = null,
 
     pub fn beforeDemoFrame(self: *SpineCollabClock) void {
-        self.link.tick() catch |err| {
+        self.link.synchronize() catch |err| {
             self.tick_error = err;
         };
     }
@@ -472,8 +454,19 @@ test "e2e/spine: write a file, init a repo, stage and commit — all through wef
             return false;
         }
     }.pred));
-    try expectRemoteCaretMoveRendered(&link, &ed, &mirror, "k");
-    try expectRemoteCaretMoveRendered(&link, &mirror, &ed, "j");
+    try link.synchronize();
+    const caret_before = try proj.capturePairPixels();
+    defer gpa.free(caret_before);
+    mirror.press("k", "");
+    const bob_moved = try proj.capturePairPixels();
+    defer gpa.free(bob_moved);
+    try t.expect(pairBodyChanged(caret_before, bob_moved, false));
+    try t.expect(pairBodyChanged(caret_before, bob_moved, true));
+    ed.press("j", "");
+    const alice_moved = try proj.capturePairPixels();
+    defer gpa.free(alice_moved);
+    try t.expect(pairBodyChanged(bob_moved, alice_moved, false));
+    try t.expect(pairBodyChanged(bob_moved, alice_moved, true));
     ed.run("save");
     ed.waitSave();
 

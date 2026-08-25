@@ -770,6 +770,31 @@ pub const Loopback = struct {
         _ = try self.peer_col.tick(self.peer_ed.buffers.active().editor.cursorOffset());
     }
 
+    fn sees(collab: *const session.Collab, name: []const u8, offset: usize) bool {
+        for (collab.presence_names.items, collab.presence_offsets.items) |candidate, seen| {
+            if (std.mem.eql(u8, candidate, name)) return seen == offset;
+        }
+        return false;
+    }
+
+    /// Drive the transport until both replicas have folded the cursor state
+    /// at this logical frame boundary. A single host-then-peer tick is
+    /// asymmetric: the peer posts after the host has already drained, which
+    /// made the left screen one half-frame stale. The capture/recorder knows
+    /// none of this; the collaboration participant owns its quiescence rule.
+    pub fn synchronize(self: *Loopback) !void {
+        const host_offset = self.host_ed.buffers.active().editor.cursorOffset();
+        const peer_offset = self.peer_ed.buffers.active().editor.cursorOffset();
+        const deadline = core.task.nowNs() + 5 * std.time.ns_per_s;
+        while (core.task.nowNs() < deadline) {
+            try self.tick();
+            if (sees(&self.host_col, self.peer_col.name, peer_offset) and
+                sees(&self.peer_col, self.host_col.name, host_offset)) return;
+            napUs(300);
+        }
+        return error.PresenceDidNotSynchronize;
+    }
+
     /// Pump sync rounds (bounded by wall clock, since the session threads need
     /// real time) until `pred` holds or the timeout elapses. Returns whether it
     /// converged.
@@ -1317,6 +1342,14 @@ pub const Project = struct {
             @memcpy(dst[app_w * 4 ..], src_right);
         }
         return out;
+    }
+
+    /// Return one synchronized, completed-frame pair for framebuffer-only
+    /// assertions. This is the exact sink operation recording uses, without
+    /// writing an artifact or consulting either editor's model.
+    pub fn capturePairPixels(self: *Project) ![]u8 {
+        if (self.demo_frame_hook) |hook| hook.run(hook.context);
+        return self.pairPixels();
     }
 
     fn frame(self: *Project) void {
