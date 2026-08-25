@@ -443,11 +443,37 @@ pub const Provider = struct {
 };
 
 pub const Server = struct {
+    /// A Server is the lifetime boundary for the wire connection. Handles
+    /// minted by this server are not transferable to another Server, even if
+    /// both servers wrap the same provider authority. There is no client id
+    /// in the wire protocol, so requests made through one Server instance are
+    /// intentionally one trust domain; the typed registries below are the
+    /// complete ownership membrane at that boundary.
+    const RootLease = struct {
+        handle: c.Root,
+        /// The shared root is borrowed from the server owner. Derived roots
+        /// are owned once per successful derive_root result.
+        owned: bool,
+        count: usize = 1,
+    };
+
+    const Lease = struct {
+        source: c.LeaseSource,
+        count: usize = 1,
+    };
+
+    const Watch = struct {
+        handle: c.WatchRef,
+        count: usize = 1,
+    };
+
     gpa: std.mem.Allocator,
     provider: fs.service.Provider,
     shared_root: c.Root,
     access: Access,
-    roots: std.AutoHashMap(u128, void),
+    roots: std.AutoHashMap(u128, RootLease),
+    leases: std.AutoHashMap(u128, Lease),
+    watches: std.AutoHashMap(u128, Watch),
 
     pub fn init(gpa: std.mem.Allocator, provider: fs.service.Provider, shared_root: c.Root, access: Access) !Server {
         if (shared_root.generation == 0) return error.InvalidHandle;
@@ -457,9 +483,15 @@ pub const Server = struct {
             .shared_root = shared_root,
             .access = access,
             .roots = .init(gpa),
+            .leases = .init(gpa),
+            .watches = .init(gpa),
         };
-        errdefer result.roots.deinit();
-        try result.roots.put(handleKey(shared_root), {});
+        errdefer {
+            result.roots.deinit();
+            result.leases.deinit();
+            result.watches.deinit();
+        }
+        try result.roots.put(handleKey(shared_root), .{ .handle = shared_root, .owned = false });
         var observation = try provider.observe(gpa, shared_root, .root);
         defer observation.deinit();
         if (observation.value.kind != .directory) return error.NotDirectory;
@@ -467,7 +499,25 @@ pub const Server = struct {
     }
 
     pub fn deinit(self: *Server) void {
+        var roots = self.roots.valueIterator();
+        while (roots.next()) |record| {
+            if (!record.owned) continue;
+            var remaining = record.count;
+            while (remaining != 0) : (remaining -= 1) self.provider.releaseRoot(record.handle);
+        }
+        var leases = self.leases.valueIterator();
+        while (leases.next()) |record| {
+            var remaining = record.count;
+            while (remaining != 0) : (remaining -= 1) self.provider.releaseLease(record.source);
+        }
+        var watches = self.watches.valueIterator();
+        while (watches.next()) |record| {
+            var remaining = record.count;
+            while (remaining != 0) : (remaining -= 1) self.provider.closeWatch(record.handle);
+        }
         self.roots.deinit();
+        self.leases.deinit();
+        self.watches.deinit();
         self.* = undefined;
     }
 
@@ -509,20 +559,25 @@ pub const Server = struct {
                 try reader.done();
                 try self.authorizeRoot(source.root);
                 const root = try self.provider.deriveRoot(source);
-                errdefer self.provider.releaseRoot(root);
+                var retained = false;
+                errdefer if (!retained) self.provider.releaseRoot(root);
                 if (root.authority != self.shared_root.authority or root.generation == 0) return error.Io;
-                try self.roots.put(handleKey(root), {});
+                try self.retainRoot(root, true);
+                retained = true;
+                var committed = false;
+                errdefer if (!committed) self.releaseRoot(root) catch {};
                 var payload = Writer.init(gpa);
                 defer payload.deinit();
                 try writeHandle(&payload, root, self.shared_root.authority, wire_authority);
-                break :blk try okReply(gpa, &payload);
+                const result = try okReply(gpa, &payload);
+                committed = true;
+                break :blk result;
             },
             .release_root => blk: {
                 const root = try self.readRoot(&reader);
                 try reader.done();
                 if (!root.eql(self.shared_root)) {
-                    _ = self.roots.remove(handleKey(root));
-                    self.provider.releaseRoot(root);
+                    try self.releaseRoot(root);
                 }
                 break :blk try reply(gpa, .ok, &.{});
             },
@@ -566,16 +621,24 @@ pub const Server = struct {
                 try reader.done();
                 try self.authorizeRoot(source.root);
                 const lease = try self.provider.capture(source);
+                var retained = false;
+                errdefer if (!retained) self.provider.releaseLease(.{ .root = source.root, .ref = lease });
                 if (lease.authority != self.shared_root.authority or lease.generation == 0) return error.Io;
+                try self.retainLease(.{ .root = source.root, .ref = lease });
+                retained = true;
+                var committed = false;
+                errdefer if (!committed) self.releaseLease(.{ .root = source.root, .ref = lease }) catch {};
                 var payload = Writer.init(gpa);
                 defer payload.deinit();
                 try writeHandle(&payload, lease, self.shared_root.authority, wire_authority);
-                break :blk try okReply(gpa, &payload);
+                const result = try okReply(gpa, &payload);
+                committed = true;
+                break :blk result;
             },
             .release_lease => blk: {
                 const source = try readLeaseSource(&reader, wire_authority, self.shared_root.authority);
                 try reader.done();
-                self.provider.releaseLease(source);
+                try self.releaseLease(source);
                 break :blk try reply(gpa, .ok, &.{});
             },
             .apply => blk: {
@@ -602,15 +665,24 @@ pub const Server = struct {
                 const recursive = try reader.boolValue();
                 try reader.done();
                 const watch_ref = try self.provider.watch(root, node, recursive);
+                var retained = false;
+                errdefer if (!retained) self.provider.closeWatch(watch_ref);
                 if (watch_ref.authority != self.shared_root.authority or watch_ref.generation == 0) return error.Io;
+                try self.retainWatch(watch_ref);
+                retained = true;
+                var committed = false;
+                errdefer if (!committed) self.releaseWatch(watch_ref) catch {};
                 var payload = Writer.init(gpa);
                 defer payload.deinit();
                 try writeHandle(&payload, watch_ref, self.shared_root.authority, wire_authority);
-                break :blk try okReply(gpa, &payload);
+                const result = try okReply(gpa, &payload);
+                committed = true;
+                break :blk result;
             },
             .poll_invalidation => blk: {
                 const watch_ref = try readHandle(c.WatchRef, &reader, wire_authority, self.shared_root.authority);
                 try reader.done();
+                try self.authorizeWatch(watch_ref);
                 const invalidation = try self.provider.pollInvalidation(watch_ref);
                 var payload = Writer.init(gpa);
                 defer payload.deinit();
@@ -621,7 +693,7 @@ pub const Server = struct {
             .close_watch => blk: {
                 const watch_ref = try readHandle(c.WatchRef, &reader, wire_authority, self.shared_root.authority);
                 try reader.done();
-                self.provider.closeWatch(watch_ref);
+                try self.releaseWatch(watch_ref);
                 break :blk try reply(gpa, .ok, &.{});
             },
         };
@@ -640,8 +712,85 @@ pub const Server = struct {
     fn authorizeSource(self: *const Server, source: c.Source) c.Error!void {
         switch (source) {
             .entry => |entry| try self.authorizeRoot(entry.root),
-            .lease => |lease| if (lease.root.authority != self.shared_root.authority) return error.Confined,
+            .lease => |lease| try self.authorizeLease(lease),
         }
+    }
+
+    fn retainRoot(self: *Server, root: c.Root, owned: bool) c.Error!void {
+        const key = handleKey(root);
+        if (self.roots.getPtr(key)) |record| {
+            if (!record.handle.eql(root) or record.owned != owned) return error.Io;
+            record.count += 1;
+            return;
+        }
+        try self.roots.put(key, .{ .handle = root, .owned = owned });
+    }
+
+    fn releaseRoot(self: *Server, root: c.Root) c.Error!void {
+        const key = handleKey(root);
+        const record = self.roots.getPtr(key) orelse return error.Confined;
+        if (!record.handle.eql(root)) return error.Confined;
+        if (!record.owned) return;
+        if (record.count > 1) {
+            record.count -= 1;
+            return;
+        }
+        _ = self.roots.remove(key);
+        self.provider.releaseRoot(record.handle);
+    }
+
+    fn retainLease(self: *Server, source: c.LeaseSource) c.Error!void {
+        const key = handleKey(source.ref);
+        if (self.leases.getPtr(key)) |record| {
+            if (!record.source.root.eql(source.root) or !record.source.ref.eql(source.ref)) return error.Io;
+            record.count += 1;
+            return;
+        }
+        try self.leases.put(key, .{ .source = source });
+    }
+
+    fn authorizeLease(self: *const Server, source: c.LeaseSource) c.Error!void {
+        const record = self.leases.getPtr(handleKey(source.ref)) orelse return error.Confined;
+        if (!record.source.root.eql(source.root) or !record.source.ref.eql(source.ref)) return error.Confined;
+    }
+
+    fn releaseLease(self: *Server, source: c.LeaseSource) c.Error!void {
+        try self.authorizeLease(source);
+        const key = handleKey(source.ref);
+        const record = self.leases.getPtr(key).?;
+        if (record.count > 1) {
+            record.count -= 1;
+            return;
+        }
+        const owned = self.leases.fetchRemove(key).?.value;
+        self.provider.releaseLease(owned.source);
+    }
+
+    fn retainWatch(self: *Server, watch_ref: c.WatchRef) c.Error!void {
+        const key = handleKey(watch_ref);
+        if (self.watches.getPtr(key)) |record| {
+            if (!record.handle.eql(watch_ref)) return error.Io;
+            record.count += 1;
+            return;
+        }
+        try self.watches.put(key, .{ .handle = watch_ref });
+    }
+
+    fn authorizeWatch(self: *const Server, watch_ref: c.WatchRef) c.Error!void {
+        const record = self.watches.getPtr(handleKey(watch_ref)) orelse return error.Confined;
+        if (!record.handle.eql(watch_ref)) return error.Confined;
+    }
+
+    fn releaseWatch(self: *Server, watch_ref: c.WatchRef) c.Error!void {
+        try self.authorizeWatch(watch_ref);
+        const key = handleKey(watch_ref);
+        const record = self.watches.getPtr(key).?;
+        if (record.count > 1) {
+            record.count -= 1;
+            return;
+        }
+        const owned = self.watches.fetchRemove(key).?.value;
+        self.provider.closeWatch(owned.handle);
     }
 
     fn authorizePlan(self: *const Server, plan: c.Plan) c.Error!void {
@@ -1005,6 +1154,9 @@ const TestProvider = struct {
     authority: semantic.handle.Authority = @enumFromInt(9),
     stale: bool = false,
     applied: bool = false,
+    released_roots: usize = 0,
+    released_leases: usize = 0,
+    closed_watches: usize = 0,
 
     fn service(self: *TestProvider) fs.service.Provider {
         return .init(self);
@@ -1020,7 +1172,9 @@ const TestProvider = struct {
         if (!std.mem.eql(u8, source.revision.token, "entry-r1")) return error.Stale;
         return .{ .authority = source.root.authority, .slot = 2, .generation = 1 };
     }
-    pub fn releaseRoot(_: *TestProvider, _: c.Root) void {}
+    pub fn releaseRoot(self: *TestProvider, _: c.Root) void {
+        self.released_roots += 1;
+    }
     pub fn observe(self: *TestProvider, gpa: std.mem.Allocator, _: c.Root, node: c.NodeRef) c.Error!c.OwnedObservation {
         if (self.stale) return error.Stale;
         var result = c.OwnedObservation.init(gpa);
@@ -1068,7 +1222,9 @@ const TestProvider = struct {
     pub fn capture(self: *TestProvider, _: c.EntrySource) c.Error!c.LeaseRef {
         return .{ .authority = self.authority, .slot = 6, .generation = 1 };
     }
-    pub fn releaseLease(_: *TestProvider, _: c.LeaseSource) void {}
+    pub fn releaseLease(self: *TestProvider, _: c.LeaseSource) void {
+        self.released_leases += 1;
+    }
     pub fn apply(self: *TestProvider, gpa: std.mem.Allocator, plan: c.Plan) c.Error!c.OwnedApplyReport {
         self.applied = true;
         var result = c.OwnedApplyReport.init(gpa);
@@ -1083,7 +1239,9 @@ const TestProvider = struct {
     pub fn pollInvalidation(self: *TestProvider, _: c.WatchRef) c.Error!?c.Invalidation {
         return .{ .changed = .{ .authority = self.authority, .slot = 4, .generation = 1 } };
     }
-    pub fn closeWatch(_: *TestProvider, _: c.WatchRef) void {}
+    pub fn closeWatch(self: *TestProvider, _: c.WatchRef) void {
+        self.closed_watches += 1;
+    }
 };
 
 const Loopback = struct {
@@ -1092,6 +1250,29 @@ const Loopback = struct {
         return self.server.handle(gpa, request);
     }
 };
+
+fn wireRoot(root: c.Root) c.Root {
+    return .{ .authority = wire_authority, .slot = root.slot, .generation = root.generation };
+}
+
+fn wireLease(source: c.LeaseSource) c.LeaseSource {
+    return .{ .root = wireRoot(source.root), .ref = .{ .authority = wire_authority, .slot = source.ref.slot, .generation = source.ref.generation } };
+}
+
+fn wireWatch(watch: c.WatchRef) c.WatchRef {
+    return .{ .authority = wire_authority, .slot = watch.slot, .generation = watch.generation };
+}
+
+fn requestStatus(gpa: std.mem.Allocator, server: *Server, request: *Writer) !Status {
+    const bytes = try request.finish();
+    defer gpa.free(bytes);
+    const response = try server.handle(gpa, bytes);
+    defer gpa.free(response);
+    var reader = try Reader.init(response);
+    const status = try reader.responseHeader();
+    try reader.done();
+    return status;
+}
 
 test "remote provider preserves opaque authority raw names symlinks guards and mutations" {
     const gpa = std.testing.allocator;
@@ -1150,4 +1331,88 @@ test "read-only remote provider advertises and enforces the same policy" {
     };
     try std.testing.expectError(error.PermissionDenied, remote.apply(gpa, .{ .root = root, .base_revision = "", .operations = &.{operation} }));
     try std.testing.expect(!implementation.applied);
+}
+
+test "remote server rejects foreign and already-released derived handles" {
+    const gpa = std.testing.allocator;
+    var implementation: TestProvider = .{};
+    const server_root: c.Root = .{ .authority = implementation.authority, .slot = 1, .generation = 1 };
+    var first_server = try Server.init(gpa, implementation.service(), server_root, .read_write);
+    defer first_server.deinit();
+    var second_server = try Server.init(gpa, implementation.service(), server_root, .read_write);
+    defer second_server.deinit();
+
+    var first_loopback: Loopback = .{ .server = &first_server };
+    var first_remote = try Provider.init(@enumFromInt(43), .init(&first_loopback));
+    const first_root = try first_remote.acquireRoot();
+    var listing = try first_remote.list(gpa, first_root, .root);
+    defer listing.deinit();
+    const child = try first_remote.deriveRoot(.{
+        .root = first_root,
+        .ref = listing.value.entries[0].observation.node.entry,
+        .revision = listing.value.entries[0].observation.revision,
+    });
+
+    var foreign_release = try beginRequest(gpa, .release_root);
+    defer foreign_release.deinit();
+    try writeHandle(&foreign_release, wireRoot(child), wire_authority, wire_authority);
+    try std.testing.expectEqual(Status.confined, try requestStatus(gpa, &second_server, &foreign_release));
+
+    first_remote.releaseRoot(child);
+    var stale_release = try beginRequest(gpa, .release_root);
+    defer stale_release.deinit();
+    try writeHandle(&stale_release, wireRoot(child), wire_authority, wire_authority);
+    try std.testing.expectEqual(Status.confined, try requestStatus(gpa, &first_server, &stale_release));
+
+    const lease = try first_remote.capture(.{
+        .root = first_root,
+        .ref = listing.value.entries[0].observation.node.entry,
+        .revision = listing.value.entries[0].observation.revision,
+    });
+    const lease_source: c.LeaseSource = .{ .root = first_root, .ref = lease };
+    var foreign_lease_release = try beginRequest(gpa, .release_lease);
+    defer foreign_lease_release.deinit();
+    try writeLeaseSource(&foreign_lease_release, wireLease(lease_source), wire_authority, wire_authority);
+    try std.testing.expectEqual(Status.confined, try requestStatus(gpa, &second_server, &foreign_lease_release));
+    first_remote.releaseLease(lease_source);
+
+    const watch = try first_remote.watch(first_root, .root, false);
+    var foreign_poll = try beginRequest(gpa, .poll_invalidation);
+    defer foreign_poll.deinit();
+    try writeHandle(&foreign_poll, wireWatch(watch), wire_authority, wire_authority);
+    try std.testing.expectEqual(Status.confined, try requestStatus(gpa, &second_server, &foreign_poll));
+    first_remote.closeWatch(watch);
+
+    var stale_watch_close = try beginRequest(gpa, .close_watch);
+    defer stale_watch_close.deinit();
+    try writeHandle(&stale_watch_close, wireWatch(watch), wire_authority, wire_authority);
+    try std.testing.expectEqual(Status.confined, try requestStatus(gpa, &first_server, &stale_watch_close));
+}
+
+test "remote server teardown drains roots leases and watches" {
+    const gpa = std.testing.allocator;
+    var implementation: TestProvider = .{};
+    const server_root: c.Root = .{ .authority = implementation.authority, .slot = 1, .generation = 1 };
+    var server = try Server.init(gpa, implementation.service(), server_root, .read_write);
+    var loopback: Loopback = .{ .server = &server };
+    var remote = try Provider.init(@enumFromInt(44), .init(&loopback));
+    const root = try remote.acquireRoot();
+    var listing = try remote.list(gpa, root, .root);
+    defer listing.deinit();
+    _ = try remote.deriveRoot(.{
+        .root = root,
+        .ref = listing.value.entries[0].observation.node.entry,
+        .revision = listing.value.entries[0].observation.revision,
+    });
+    _ = try remote.capture(.{
+        .root = root,
+        .ref = listing.value.entries[0].observation.node.entry,
+        .revision = listing.value.entries[0].observation.revision,
+    });
+    _ = try remote.watch(root, .root, true);
+
+    server.deinit();
+    try std.testing.expectEqual(@as(usize, 1), implementation.released_roots);
+    try std.testing.expectEqual(@as(usize, 1), implementation.released_leases);
+    try std.testing.expectEqual(@as(usize, 1), implementation.closed_watches);
 }
