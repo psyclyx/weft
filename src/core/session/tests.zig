@@ -583,6 +583,35 @@ test "tcpConnect: connects to a live listener and the fd is blocking again" {
     try t.expectEqualStrings("hi", buf[0..got]);
 }
 
+test "Session: authenticated identities survive a real TCP connection" {
+    const listener = session.tcpListener(0) catch return;
+    defer _ = linux.close(listener);
+    const port = try session.tcpListenerPort(listener);
+    const hostport = try std.fmt.allocPrint(t.allocator, "127.0.0.1:{d}", .{port});
+    defer t.allocator.free(hostport);
+
+    const client_fd = try session.tcpConnect(hostport);
+    const server_fd = try session.tcpAccept(listener);
+    var server_link: session.FdLink = .{ .fd = server_fd };
+    var client_link: session.FdLink = .{ .fd = client_fd };
+    var server_id = identity.Identity.generate();
+    var client_id = identity.Identity.generate();
+    const server = try session.Session.create(t.allocator, server_link.link(), .server, "tcp-auth-test", .own, &server_id);
+    defer server.destroy();
+    const client = try session.Session.create(t.allocator, client_link.link(), .client, "tcp-auth-test", .own, &client_id);
+    defer client.destroy();
+
+    var waited: usize = 0;
+    while (waited < 2000) : (waited += 1) {
+        if (server.established.load(.acquire) and client.established.load(.acquire)) break;
+        napUs(300);
+    }
+    try t.expect(server.established.load(.acquire) and client.established.load(.acquire));
+    try t.expectEqualSlices(u8, &client_id.fingerprint(), &server.peerFingerprint().?);
+    try t.expectEqualSlices(u8, &server_id.fingerprint(), &client.peerFingerprint().?);
+    try t.expectEqualSlices(u8, &server.sas().?, &client.sas().?);
+}
+
 test "partial checkout: multi-GB sparse file — jump to end, tail growth, viewed-only materialization" {
     const gpa = t.allocator;
     // A 3GB sparse file with known content at the tail.

@@ -7,10 +7,10 @@
 //! STILL-OPEN gaps (fix + promote into a granular test as each gains its piece):
 //!   • debugger — no debug/DAP plugin or `debug-*` commands, so "set a breakpoint
 //!     and step" has no keys to press (the biggest missing IDE capability).
-//!   • full collab frame-loop path — the loopback exercises the session/Collab
-//!     sync layer directly; wrapping it in collab.tickCollab (hub multi-peer
-//!     adoption, partial checkout, reconnect) needs the ShareCtx + main() locals
-//!     stood up headlessly.
+//!   • full collab frame-loop path — the loopback exercises the authenticated
+//!     TCP session/Collab sync layer; wrapping it in collab.tickCollab (hub
+//!     multi-peer adoption, partial checkout, reconnect) needs the ShareCtx +
+//!     main() locals stood up headlessly.
 
 test {
     _ = @import("editing_test.zig");

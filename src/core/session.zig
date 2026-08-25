@@ -62,6 +62,18 @@ pub fn tcpListener(port: u16) !i32 {
     return fd;
 }
 
+/// Return the port currently bound to a TCP listener. This is especially
+/// useful for callers that ask the OS for an ephemeral port (`port == 0`):
+/// the endpoint remains owned by the listener, while callers can advertise
+/// the resolved port without reaching into platform socket details.
+pub fn tcpListenerPort(listener: i32) !u16 {
+    var addr: linux.sockaddr.in = undefined;
+    var addr_len: linux.socklen_t = @sizeOf(linux.sockaddr.in);
+    if (linux.errno(linux.getsockname(listener, @ptrCast(&addr), &addr_len)) != .SUCCESS)
+        return error.SocketName;
+    return std.mem.bigToNative(u16, addr.port);
+}
+
 pub fn tcpAccept(listener: i32) !i32 {
     const conn_rc = linux.accept4(listener, null, null, 0);
     if (linux.errno(conn_rc) != .SUCCESS) return error.Accept;

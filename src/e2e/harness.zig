@@ -755,14 +755,14 @@ pub const TestHead = struct {
     }
 };
 
-// ── In-process multiplayer loopback ─────────────────────────────────
+// ── Loopback TCP multiplayer transport ──────────────────────────────
 //
-// Two live encrypted Sessions over a socketpair, each syncing one editor's
-// document through a real `Collab`. This is the harness analogue of two peers
-// connected over TCP — it drives the REAL session sync path (Session handshake
-// + Collab drain/handleFrame/push), the same code `collab.tickCollab` calls
-// under the hood, without standing up a socket server. It closes the "no
-// in-process collab loopback" gap the project notes called out.
+// Two live encrypted Sessions over an actual loopback TCP connection, each
+// syncing one editor's document through a real `Collab`. The scenario retains
+// the same narrow participant interface, but its transport now exercises the
+// production TCP byte stream and the complete authenticated Session handshake.
+// Identities are generated in memory for this participant only; no user key
+// store is loaded or modified.
 
 const linux = std.os.linux;
 
@@ -789,6 +789,9 @@ pub const Loopback = struct {
     gpa: Allocator,
     host_ed: *Editor,
     peer_ed: *Editor,
+    listener: i32 = -1,
+    host_identity: core.identity.Identity,
+    peer_identity: core.identity.Identity,
     // FdLinks live here at stable addresses: each Session's Link borrows &fd.
     host_fd: session.FdLink,
     peer_fd: session.FdLink,
@@ -807,18 +810,60 @@ pub const Loopback = struct {
         host_name: []const u8,
         peer_name: []const u8,
     ) !void {
-        const fds = try socketPair();
         self.gpa = gpa;
         self.host_ed = host_ed;
         self.peer_ed = peer_ed;
-        self.host_fd = .{ .fd = fds[0] };
-        self.peer_fd = .{ .fd = fds[1] };
+        self.host_identity = core.identity.Identity.generate();
+        self.peer_identity = core.identity.Identity.generate();
+
+        // Bind an ephemeral TCP listener first, then connect through the same
+        // session transport used by the application. Accepting synchronously
+        // is safe here: connect() completes once the kernel has queued the
+        // connection, and Session owns the blocking connected fds thereafter.
+        self.listener = try session.tcpListener(0);
+        errdefer {
+            _ = linux.close(self.listener);
+            self.listener = -1;
+        }
+        const port = try session.tcpListenerPort(self.listener);
+        const hostport = try std.fmt.allocPrint(gpa, "127.0.0.1:{d}", .{port});
+        defer gpa.free(hostport);
+        const peer_fd = try session.tcpConnect(hostport);
+        errdefer _ = linux.close(peer_fd);
+        const host_fd = try session.tcpAccept(self.listener);
+        errdefer _ = linux.close(host_fd);
+        _ = linux.close(self.listener);
+        self.listener = -1;
+        self.host_fd = .{ .fd = host_fd };
+        self.peer_fd = .{ .fd = peer_fd };
         const host_doc = &host_ed.buffers.active().editor.doc;
         const peer_doc = &peer_ed.buffers.active().editor.doc;
-        self.host_sess = try session.Session.create(gpa, self.host_fd.link(), .server, "loopback", .own, null);
+        self.host_sess = try session.Session.create(gpa, self.host_fd.link(), .server, "loopback", .own, &self.host_identity);
         errdefer self.host_sess.destroy();
-        self.peer_sess = try session.Session.create(gpa, self.peer_fd.link(), .client, "loopback", .own, null);
+        self.peer_sess = try session.Session.create(gpa, self.peer_fd.link(), .client, "loopback", .own, &self.peer_identity);
         errdefer self.peer_sess.destroy();
+
+        // The frame builder reads this narrow optional session seam for the
+        // ordinary connection-status chip. Keep it pointed at the live,
+        // authenticated transport rather than inventing harness-only status.
+        host_ed.frame_collab_session = self.host_sess;
+        peer_ed.frame_collab_session = self.peer_sess;
+        errdefer {
+            host_ed.frame_collab_session = null;
+            peer_ed.frame_collab_session = null;
+        }
+
+        const deadline = core.task.nowNs() + 5 * std.time.ns_per_s;
+        while ((!self.host_sess.established.load(.acquire) or
+            !self.peer_sess.established.load(.acquire)) and
+            core.task.nowNs() < deadline) napUs(300);
+        if (!self.host_sess.established.load(.acquire) or
+            !self.peer_sess.established.load(.acquire)) return error.AuthenticationFailed;
+        const host_peer_fp = self.host_sess.peerFingerprint() orelse return error.AuthenticationFailed;
+        const peer_peer_fp = self.peer_sess.peerFingerprint() orelse return error.AuthenticationFailed;
+        if (!std.mem.eql(u8, &host_peer_fp, &self.peer_identity.fingerprint()) or
+            !std.mem.eql(u8, &peer_peer_fp, &self.host_identity.fingerprint()))
+            return error.IdentityMismatch;
         self.host_col = try session.Collab.init(gpa, self.host_sess, host_doc, host_name);
         errdefer self.host_col.deinit();
         self.peer_col = try session.Collab.init(gpa, self.peer_sess, peer_doc, peer_name);
@@ -830,10 +875,16 @@ pub const Loopback = struct {
     }
 
     pub fn deinit(self: *Loopback) void {
-        self.host_sess.destroy();
-        self.peer_sess.destroy();
+        if (self.listener >= 0) {
+            _ = linux.close(self.listener);
+            self.listener = -1;
+        }
+        self.host_ed.frame_collab_session = null;
+        self.peer_ed.frame_collab_session = null;
         self.host_col.deinit();
         self.peer_col.deinit();
+        self.host_sess.destroy();
+        self.peer_sess.destroy();
     }
 
     /// One sync round: drain+handle+push each side, publishing live cursors.
