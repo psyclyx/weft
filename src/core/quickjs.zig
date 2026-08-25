@@ -1129,6 +1129,7 @@ fn cRun(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32, results: []i
     const gpa = br.activeCtx().gpa;
     const cmd = readStr(br, caller, args[0], args[1]) orelse return;
     defer gpa.free(cmd);
+    if (args[3] < 0) return;
     const count: usize = @intCast(args[3]);
     if (count > maxRunArgs) return;
     var values: [maxRunArgs]command.Value = undefined;
@@ -1136,6 +1137,7 @@ fn cRun(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32, results: []i
     defer for (values[0..decoded]) |value| gpa.free(value.string);
     var total: usize = 0;
     if (count > 0) {
+        if (args[2] < 0) return;
         const record_bytes = std.math.mul(usize, count, 8) catch return;
         const records = caller.readMemory(gpa, @intCast(args[2]), record_bytes) catch return;
         defer gpa.free(records);
