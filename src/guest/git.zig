@@ -344,6 +344,9 @@ export fn init() void {
     // The commit message buffer is EDITABLE: fall back to `default` for the text
     // command + editing keys, then layer a C-c prefix (finish/abort/resume).
     weft.setFallback("git-commit", "default");
+    // Commit messages are ordinary editable fields even when configuration
+    // changes the fallback chain beneath this plugin-owned mode.
+    weft.textInput("git-commit", "insert-text");
     weft.bindKey("git-commit", "C-c", "git-commit-menu");
     weft.menuMode("git-commit-menu");
     weft.bindKey("git-commit-menu", "C-c", "git-commit-finish");
