@@ -350,7 +350,7 @@ test "two heads: A closing its pane does not strand B on a freed/retyped node â€
     // and re-homes B's handle there, asserted directly here (not just
     // inferred from "nothing crashed").
     const survivor = ed.win_layout.root; // per `closeFocused`'s shape: the parent (root, in a 2-leaf tree) becomes the surviving leaf in place
-    try t.expectEqual(survivor, window_layout.headFocus(&ed.win_layout, &b.head));
+    try t.expectEqual(survivor, window_layout.headFocus(ed.win_layout, &b.head));
 
     // And B can keep dispatching real window commands from its RECOVERED
     // focus â€” no invalid access, no stuck state.

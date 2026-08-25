@@ -31,7 +31,8 @@ pub const dispatch = weft.dispatch;
 pub const app_session = weft.app_session;
 pub const app_providers = weft.app_providers;
 pub const app_collab = weft.app_collab;
-pub const app_frame_builder = weft.app_frame_builder;
+const app_frame = weft.app_frame;
+const app_render_memory = weft.app_render_memory;
 pub const region = weft.region;
 
 // Re-exports so the per-concern test files can alias what they need from this
@@ -86,7 +87,19 @@ pub const Editor = struct {
     loop: core.async_loop.Loop = undefined,
     subs: core.subbuffer.SubBuffers = .empty,
     register: core.register.Bank = .{},
-    view: ?view_mod.View = null,
+    /// The complete production frame path, ending in a memory-backed present
+    /// target. Tests and recorders only receive its finished framebuffer.
+    render: app_render_memory.RenderState = undefined,
+    frame_known_peers: core.known_peers.KnownPeers = undefined,
+    frame_conn: ?core.session.Conn = null,
+    frame_hub: ?core.hub.Hub = null,
+    frame_collab_session: ?*core.session.Session = null,
+    frame_partial_state: ?core.session.PartialDoc = null,
+    frame_noted_host_fp: ?[24]u8 = null,
+    frame_dirty: bool = true,
+    frame_flash_gen: u64 = 0,
+    frame_flash_start_ns: u64 = 0,
+    frame_flash_was_active: bool = false,
     /// Last active buffer id — so a buffer switch (open, buffer-next) fires
     /// `on_activate` to plugins, exactly as main's loop does.
     last_active: core.Buffers.Id = 0,
@@ -95,7 +108,9 @@ pub const Editor = struct {
     /// The recursive pane tree, driven by the REAL window-layout commands
     /// (window-split/focus/move) through `window_cmds.applyIntents`, exactly as
     /// main's frame loop drives it.
-    win_layout: window_layout.Layout = undefined,
+    /// Alias of `render.fb.win_layout`: input, layout, rendering, and capture
+    /// share one pane tree. There is no capture-only layout to drift.
+    win_layout: *window_layout.Layout = undefined,
     win_ctx: window_cmds.WindowCtx = .{},
     /// Stable backing for the window commands' data pointers (registerCommands).
     win_actions: [window_cmds.cmd_count]window_cmds.WindowActionCtx = undefined,
@@ -119,7 +134,15 @@ pub const Editor = struct {
         self.config_kv = .empty;
         self.subs = .empty;
         self.register = .{};
-        self.view = null;
+        self.frame_conn = null;
+        self.frame_hub = null;
+        self.frame_collab_session = null;
+        self.frame_partial_state = null;
+        self.frame_noted_host_fp = null;
+        self.frame_dirty = true;
+        self.frame_flash_gen = 0;
+        self.frame_flash_start_ns = 0;
+        self.frame_flash_was_active = false;
         self.pool = try core.task.Pool.init(gpa, .{ .threads = 2 });
         self.engine = try core.wasm.Engine.init();
         self.loop = core.async_loop.Loop.init(gpa, self.pool, core.task.nowNs);
@@ -149,7 +172,9 @@ pub const Editor = struct {
         // Window layout: own the real pane tree + bind the real window commands.
         self.win_ctx = .{};
         self.last_frame_rect = .{ .x = 0, .y = 0, .w = app_w, .h = app_h };
-        self.win_layout = try window_layout.Layout.init(gpa, self.buffers.active_id);
+        try self.render.init(gpa, @embedFile("font_mono"), app_em, self.buffers.active_id);
+        self.win_layout = &self.render.fb.win_layout;
+        self.frame_known_peers = try core.known_peers.KnownPeers.load(gpa, parentEnviron());
         try window_cmds.registerCommands(gpa, self.commands, &self.win_ctx, &self.win_actions);
         // The app's provider-aware open/close (shadows the core versions): opening
         // a file now attaches syntax + a language server per the lsp-add registry,
@@ -178,12 +203,12 @@ pub const Editor = struct {
 
     pub fn deinit(self: *Editor) void {
         const gpa = self.gpa;
-        self.win_layout.deinit();
+        self.render.deinit();
+        self.frame_known_peers.deinit();
         for (self.js_plugins.items) |jp| jp.deinit();
         self.js_plugins.deinit(gpa);
         for (self.plugins.items) |p| p.deinit();
         self.plugins.deinit(gpa);
-        if (self.view) |*v| v.deinit();
         self.loop.deinit();
         self.subs.deinit(gpa);
         self.register.deinit(gpa);
@@ -395,27 +420,13 @@ pub const Editor = struct {
     /// frame geometry deliberately) instead of the fixed `app_w`/`app_h`
     /// `snapshot`/`snapshotPanes` use.
     pub fn ensureView(self: *Editor) !*view_mod.View {
-        if (self.view == null) self.view = try view_mod.View.init(self.gpa, @embedFile("font_mono"), app_em);
-        return &self.view.?;
+        return &self.render.fb.view;
     }
 
     /// Write a PPM screenshot of the current frame under `.zig-cache/tmp/` (an
     /// artifact to eyeball; best-effort, never asserts).
     pub fn snapshot(self: *Editor, name: []const u8) void {
-        const v = self.ensureView() catch return;
-        var args: view_mod.ui_mesh.StatuslineArgs = .{
-            .facts = .{ .mode = self.head.currentMode() },
-            .file = self.buffers.active().name,
-            .theme = &v.theme,
-        };
-        const segs = view_mod.ui_mesh.fireStatusline(&self.session.system.container, self.gpa, &args) catch &.{};
-        defer view_mod.ui_mesh.freeSegs(self.gpa, segs);
-        const hud: view_mod.Hud = .{
-            .mode = self.head.currentMode(),
-            .statusline_segs = segs,
-            .pick = if (self.pick.active) self.pick else null,
-        };
-        const pixels = harness.renderView(self.gpa, v, &self.buffers.active().editor, hud, app_w, app_h) catch return;
+        const pixels = self.renderComposite() catch return;
         defer self.gpa.free(pixels);
         var buf: [128]u8 = undefined;
         const path = std.fmt.bufPrint(&buf, ".zig-cache/tmp/weft-e2e-{s}.ppm", .{name}) catch return;
@@ -429,8 +440,7 @@ pub const Editor = struct {
     /// pane tree and keeping the focused pane on the active buffer. Mirrors
     /// main()'s `window_cmds.applyIntents` call.
     pub fn applyWindow(self: *Editor) void {
-        const v = self.ensureView() catch return;
-        _ = window_cmds.applyIntents(&self.win_ctx, &self.win_layout, v, self.buffers, self.gpa, self.head, self.keymap, self.last_frame_rect);
+        _ = window_cmds.applyIntents(&self.win_ctx, self.win_layout, &self.render.fb.view, self.buffers, self.gpa, self.head, self.keymap, self.last_frame_rect);
     }
 
     /// Number of panes currently tiled.
@@ -438,52 +448,64 @@ pub const Editor = struct {
         return self.win_layout.count();
     }
 
-    /// Render EVERY pane headlessly and composite into one RGBA8 framebuffer
-    /// (caller frees) — the headless analogue of the frame loop's `renderPanes`
-    /// + `present`. Panes are laid out by the real window layout; each builds its
-    /// own buffer into its slot rect (identity transform); the focused pane uses
-    /// the shared view scroll + caret, the others their own scroll. Records
-    /// `last_frame_rect` so subsequent focus/move-by-direction intents resolve
-    /// against real geometry.
+    /// Ask the editor's production render owner for one complete frame. This
+    /// method supplies ordinary frame-loop state and provider attachments; it
+    /// does not assemble a HUD, inspect a layer, or choose which surfaces draw.
+    /// The returned pixels are copied from the memory present target and owned
+    /// by the caller.
     pub fn renderComposite(self: *Editor) ![]u8 {
-        const gpa = self.gpa;
-        const v = try self.ensureView();
-        const frame: region.Rect = .{ .x = 0, .y = 0, .w = @floatFromInt(app_w), .h = @floatFromInt(app_h) };
-        self.last_frame_rect = frame;
-        var slots: [window_layout.max_panes]window_layout.Slot = undefined;
-        const focused = window_layout.headFocus(&self.win_layout, self.head);
-        const n = self.win_layout.collect(focused, frame, &slots);
+        const active = self.buffers.active();
+        try app_providers.attachProviders(&self.prov.attach_deps, active);
+        const AttachVisible = struct {
+            deps: *app_providers.AttachDeps,
+            buffers: *core.Buffers,
+            fn visit(state: *@This(), pane: *window_layout.Pane) void {
+                const buffer = state.buffers.get(pane.buffer_id) orelse return;
+                app_providers.attachProviders(state.deps, buffer) catch {};
+            }
+        };
+        var visible = AttachVisible{ .deps = &self.prov.attach_deps, .buffers = self.buffers };
+        self.win_layout.eachPane(&visible, AttachVisible.visit);
 
-        const projection = snail.Mat4.ortho(0, @floatFromInt(app_w), @floatFromInt(app_h), 0, -1, 1);
-        const w2p = snail.mvpToScenePixel(projection, @floatFromInt(app_w), @floatFromInt(app_h)) orelse unreachable;
-        var arena = std.heap.ArenaAllocator.init(gpa);
-        defer arena.deinit();
-        v.resetFrame();
-
-        var built: std.ArrayList(view_mod.Built) = .empty;
-        defer {
-            for (built.items) |*b| b.deinit(gpa);
-            built.deinit(gpa);
-        }
-        for (slots[0..n]) |slot| {
-            const b = self.buffers.get(slot.pane.buffer_id) orelse self.buffers.active();
-            var args: view_mod.ui_mesh.StatuslineArgs = .{
-                .facts = .{ .mode = self.head.currentMode() },
-                .file = b.editor.backingPath() orelse b.name,
-                .theme = &v.theme,
-            };
-            const segs = try view_mod.ui_mesh.fireStatusline(&self.session.system.container, arena.allocator(), &args);
-            const hud: view_mod.Hud = .{
-                .mode = self.head.currentMode(),
-                .statusline_segs = segs,
-                .cursor_on = slot.focused, // the caret belongs to the focused pane
-                .pane_border = slot.border,
-            };
-            const top_row: *usize = if (slot.focused) &v.top_row else &slot.pane.top_row;
-            const bp = try v.build(arena.allocator(), &b.editor, hud, top_row, slot.rect, .{}, w2p);
-            try built.append(gpa, bp);
-        }
-        return harness.renderBuilt(gpa, v, built.items, app_w, app_h);
+        const attach: *app_providers.Attach = @ptrCast(@alignCast(active.frontend.?));
+        const ed0 = self.buffers.get(0) orelse active;
+        self.last_frame_rect = .{ .x = 0, .y = 0, .w = @floatFromInt(app_w), .h = @floatFromInt(app_h) };
+        self.frame_dirty = true;
+        const fx: app_frame.FrameCtx = .{
+            .gpa = self.gpa,
+            .buffers = self.buffers,
+            .caps = self.caps,
+            .keymap = self.keymap,
+            .ui_mesh = &self.session.system.container,
+            .head = self.head,
+            .semantic = &self.session.system.semantic,
+            .cursor_cfg = &self.session.cursor_cfg,
+            .plugins = &self.plugins,
+            .conn = &self.frame_conn,
+            .hub = &self.frame_hub,
+            .collab_session = &self.frame_collab_session,
+            .partial_state = &self.frame_partial_state,
+            .ed0 = &ed0.editor,
+            .known_peers = &self.frame_known_peers,
+            .noted_host_fp = &self.frame_noted_host_fp,
+            .view_dirty = &self.frame_dirty,
+            .last_frame_rect = &self.last_frame_rect,
+            .flash_gen = &self.frame_flash_gen,
+            .flash_start_ns = &self.frame_flash_start_ns,
+            .flash_was_active = &self.frame_flash_was_active,
+            .flash_duration_ns = 600 * std.time.ns_per_ms,
+        };
+        try self.render.buildFrame(&fx, .{
+            .editor = &active.editor,
+            .abuf = active,
+            .attach = attach,
+            .frame_start = core.task.nowNs(),
+            .fb = .{ app_w, app_h },
+            .blink_on = true,
+            .menu_shown = self.session.menu_overlay.shown,
+        });
+        const complete = try self.render.present(.{ app_w, app_h });
+        return self.gpa.dupe(u8, complete.pixels);
     }
 
     /// Composite all panes and write a PPM artifact (best-effort; never asserts).
@@ -576,8 +598,7 @@ pub const SecondHead = struct {
     /// (north-star-plan §6 W2a GATE) drives real split/close/focus
     /// sequences "as" each head through this.
     pub fn applyWindow(self: *SecondHead, ed: *Editor) void {
-        const v = ed.ensureView() catch return;
-        _ = window_cmds.applyIntents(&ed.win_ctx, &ed.win_layout, v, ed.buffers, ed.gpa, &self.head, ed.keymap, ed.last_frame_rect);
+        _ = window_cmds.applyIntents(&ed.win_ctx, ed.win_layout, &ed.render.fb.view, ed.buffers, ed.gpa, &self.head, ed.keymap, ed.last_frame_rect);
     }
 
     pub fn mode(self: *SecondHead) []const u8 {

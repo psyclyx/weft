@@ -20,7 +20,9 @@ pub const app_session = @import("app/session.zig");
 pub const app_providers = @import("app/providers.zig");
 pub const app_buffers_cmds = @import("app/buffers_cmds.zig");
 pub const app_collab = @import("app/collab.zig");
+pub const app_frame = @import("app/frame.zig");
 pub const app_frame_builder = @import("app/frame_builder.zig");
+pub const app_render_memory = @import("app/render_memory.zig");
 
 // This module OWNS the core/gfx/app tree, so it also runs their display-free
 // unit tests (moved here from src/tests.zig — those files can only belong to one
@@ -43,6 +45,7 @@ test {
     _ = window_layout;
     _ = @import("app/frame.zig"); // which-key menu-overlay timing
     _ = @import("app/frame_builder.zig"); // rendering P2: caret-surface auto-expiry
+    _ = app_render_memory;
     _ = @import("app/config_load.zig"); // W4 slice 4: the production plugin/grant-table loader
     // P3 (doc/rendering.md): the Rasterizer/Platform seam contracts + their
     // compile-time-only skeleton proofs. Neither needs Vulkan/wayland to
