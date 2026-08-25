@@ -434,15 +434,11 @@ pub fn deinit(self: *WasmPlugin) void {
             // lifetime that the semantic registry neither knows nor owns.
             while (self.semantic_directories.items.len != 0) {
                 var directory = self.semantic_directories.pop().?;
-                _ = directory.revoke(gpa, &services.targets);
+                _ = directory.close(gpa, &services.targets);
             }
             while (self.semantic_files.items.len != 0) {
                 var file = self.semantic_files.pop().?;
                 _ = file.registration.close(gpa, &services.targets, file.router);
-                // Be robust to independent target-owner revocation: the
-                // router binding is still ours even if the descriptive half
-                // was already gone.
-                _ = file.router.unbindTarget(file.registration.ref);
             }
             _ = services.releaseOwner(gpa, owner);
         }

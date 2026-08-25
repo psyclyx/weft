@@ -51,10 +51,10 @@ pub const Registration = struct {
         return .{ .target = self.ref, .revision = self.revision };
     }
 
-    /// Close only when the target registry accepts the same owner. A stale or
-    /// fabricated registration therefore cannot remove somebody else's live
-    /// filesystem authority. Provider retirement may already have removed the
-    /// binding; target closure still succeeds in that case.
+    /// Retire both halves exactly once. Either half may already be absent due
+    /// to independent owner/provider teardown; absence never prevents cleanup
+    /// of the other half. Exact owner and revision checks keep a stale or
+    /// fabricated registration away from a newer or foreign publication.
     pub fn close(
         self: *Registration,
         gpa: std.mem.Allocator,
@@ -62,8 +62,10 @@ pub const Registration = struct {
         router: *router_mod.Router,
     ) bool {
         if (!self.active) return false;
-        if (!targets.close(gpa, self.owner, self.ref)) return false;
-        _ = router.unbindTarget(self.ref);
+        if (targets.ownerOf(self.ref)) |owner| if (owner != self.owner) return false;
+        if (router.bindingOwner(self.ref)) |owner| if (owner != self.owner) return false;
+        _ = targets.closeRevision(gpa, self.owner, self.ref, self.revision);
+        _ = router.unbindTargetOwned(self.owner, self.ref, self.revision);
         self.active = false;
         return true;
     }
@@ -96,23 +98,6 @@ pub const ChildRegistration = struct {
         self.active = false;
         return true;
     }
-
-    /// Host-owned teardown path. Unlike `close`, this is intentionally not
-    /// contingent on the target still being present: owner cleanup must not
-    /// leak the provider root when a semantic registry was already revoked.
-    /// The stored owner remains the only authority used to retire the target.
-    pub fn revoke(
-        self: *ChildRegistration,
-        gpa: std.mem.Allocator,
-        targets: *target_runtime.target.Registry,
-    ) bool {
-        if (!self.active) return false;
-        _ = self.registration.close(gpa, targets, self.router);
-        _ = self.router.unbindTarget(self.registration.ref);
-        _ = self.router.releaseRoot(self.derived_root) catch {};
-        self.active = false;
-        return true;
-    }
 };
 
 /// Publish one directory target as an all-or-nothing composition. Failure to
@@ -141,7 +126,7 @@ pub fn publish(
     errdefer _ = targets.close(gpa, owner, ref);
 
     const descriptor = targets.get(ref) orelse return error.StaleTarget;
-    try router.bindTarget(ref, descriptor.revision, definition.directory);
+    try router.bindTarget(owner, ref, descriptor.revision, definition.directory);
     return .{ .ref = ref, .revision = descriptor.revision, .owner = owner };
 }
 
@@ -171,7 +156,7 @@ pub fn publishEntry(
     });
     errdefer _ = targets.close(gpa, owner, ref);
     const descriptor = targets.get(ref) orelse return error.StaleTarget;
-    try router.bindEntry(ref, descriptor.revision, definition.entry);
+    try router.bindEntry(owner, ref, descriptor.revision, definition.entry);
     return .{ .ref = ref, .revision = descriptor.revision, .owner = owner };
 }
 
@@ -620,9 +605,39 @@ test "child publication proves direct identity, owns derived root, and preserves
     // Simulate semantic owner teardown happening before the host's resource
     // collection gets to release its child registration.
     try std.testing.expectEqual(@as(usize, 2), targets.closeOwner(gpa, owner));
-    try std.testing.expect(revoked.revoke(gpa, &targets));
+    try std.testing.expect(revoked.close(gpa, &targets));
     try std.testing.expectEqual(@as(usize, 2), provider.release_calls);
-    try std.testing.expect(!revoked.revoke(gpa, &targets));
+    try std.testing.expectError(error.TargetUnbound, router.authorizedDirectory(revoked.registration.ref, revoked.registration.revision));
+    try std.testing.expect(!revoked.close(gpa, &targets));
+}
+
+test "stale registration closes only its exact authority revision" {
+    const gpa = std.testing.allocator;
+    const fs_authority: semantic.handle.Authority = @enumFromInt(48);
+    const target_authority: semantic.handle.Authority = @enumFromInt(78);
+    const owner: semantic.owner.Id = @enumFromInt(15);
+    const directory: fs.target.Directory = .{ .root = testRoot(fs_authority) };
+
+    var provider = TestProvider{ .authority = fs_authority };
+    var router = router_mod.Router.init(gpa);
+    defer router.deinit();
+    try router.register(fs_authority, provider.provider());
+    var targets = target_runtime.target.Registry.init(target_authority);
+    defer targets.deinit(gpa);
+
+    var registration = try publish(gpa, &targets, &router, owner, .{
+        .display_name = "before",
+        .directory = directory,
+    });
+    try targets.replace(gpa, owner, registration.ref, .{
+        .kind = .directory,
+        .display_name = "after",
+    });
+    try std.testing.expectEqual(@as(u64, 2), targets.get(registration.ref).?.revision);
+
+    try std.testing.expect(registration.close(gpa, &targets, &router));
+    try std.testing.expectEqualStrings("after", targets.get(registration.ref).?.display_name);
+    try std.testing.expectError(error.TargetUnbound, router.authorizedDirectory(registration.ref, 1));
 }
 
 test "ordinary-file publication composes an opaque entry fact and guarded binding" {

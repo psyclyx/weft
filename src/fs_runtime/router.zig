@@ -22,11 +22,13 @@ pub const Error = contract.Error || fs.plan.ValidationError || fs.plan.ReportVal
 };
 
 pub const TargetBinding = struct {
+    owner: semantic.owner.Id,
     revision: u64,
     directory: fs.target.Directory,
 };
 
 pub const EntryBinding = struct {
+    owner: semantic.owner.Id,
     revision: u64,
     entry: fs.target.Entry,
     /// Owned by the router. `entry.revision.token` points into this slice;
@@ -114,8 +116,8 @@ pub const Router = struct {
     /// This is the authority-bearing counterpart to the target's descriptive
     /// `weft.fs.directory.v1` fact.  Callers must unbind before closing a
     /// target or replacing its revision.
-    pub fn bindTarget(self: *Router, target: semantic.target.Ref, revision: u64, directory: fs.target.Directory) Error!void {
-        if (target.generation == 0 or revision == 0) return error.InvalidHandle;
+    pub fn bindTarget(self: *Router, owner: semantic.owner.Id, target: semantic.target.Ref, revision: u64, directory: fs.target.Directory) Error!void {
+        if (!owner.isValid() or target.generation == 0 or revision == 0) return error.InvalidHandle;
         try fs.target.validate(directory);
         // Binding is the authority-minting step, so establish that the route
         // and exact node are live directories now. Descriptive target facts
@@ -126,7 +128,7 @@ pub const Router = struct {
         if (observed.value.kind != .directory) return error.NotDirectory;
         const key = targetKey(target);
         if (self.target_bindings.contains(key)) return error.TargetAlreadyBound;
-        try self.target_bindings.put(key, .{ .revision = revision, .directory = directory });
+        try self.target_bindings.put(key, .{ .owner = owner, .revision = revision, .directory = directory });
     }
 
     pub fn unbindTarget(self: *Router, target: semantic.target.Ref) bool {
@@ -134,6 +136,34 @@ pub const Router = struct {
         const removed_directory = self.target_bindings.remove(key);
         const removed_entry = self.removeEntryBinding(key);
         return removed_directory or removed_entry;
+    }
+
+    /// Retire only the binding minted by one exact semantic publication.
+    /// This is the ordinary close path; the unscoped form above remains the
+    /// explicit host teardown primitive used when an authority is revoked.
+    pub fn unbindTargetOwned(
+        self: *Router,
+        owner: semantic.owner.Id,
+        target: semantic.target.Ref,
+        revision: u64,
+    ) bool {
+        const key = targetKey(target);
+        if (self.target_bindings.get(key)) |binding| {
+            if (binding.owner != owner or binding.revision != revision) return false;
+            return self.target_bindings.remove(key);
+        }
+        if (self.entry_bindings.get(key)) |binding| {
+            if (binding.owner != owner or binding.revision != revision) return false;
+            return self.removeEntryBinding(key);
+        }
+        return false;
+    }
+
+    pub fn bindingOwner(self: *const Router, target: semantic.target.Ref) ?semantic.owner.Id {
+        const key = targetKey(target);
+        if (self.target_bindings.get(key)) |binding| return binding.owner;
+        if (self.entry_bindings.get(key)) |binding| return binding.owner;
+        return null;
     }
 
     /// Return only a binding minted by the in-process filesystem authority.
@@ -154,8 +184,8 @@ pub const Router = struct {
         return binding.entry;
     }
 
-    pub fn bindEntry(self: *Router, target: semantic.target.Ref, revision: u64, entry: fs.target.Entry) Error!void {
-        if (target.generation == 0 or revision == 0) return error.InvalidHandle;
+    pub fn bindEntry(self: *Router, owner: semantic.owner.Id, target: semantic.target.Ref, revision: u64, entry: fs.target.Entry) Error!void {
+        if (!owner.isValid() or target.generation == 0 or revision == 0) return error.InvalidHandle;
         try fs.target.validateEntry(entry);
         var observed = try self.observe(self.allocator, entry.root, .{ .entry = entry.ref });
         defer observed.deinit();
@@ -166,7 +196,7 @@ pub const Router = struct {
         if (self.target_bindings.contains(key) or self.entry_bindings.contains(key)) return error.TargetAlreadyBound;
         const revision_token = try self.allocator.dupe(u8, entry.revision.token);
         errdefer self.allocator.free(revision_token);
-        var binding: EntryBinding = .{ .revision = revision, .entry = entry, .revision_token = revision_token };
+        var binding: EntryBinding = .{ .owner = owner, .revision = revision, .entry = entry, .revision_token = revision_token };
         binding.entry.revision.token = revision_token;
         try self.entry_bindings.put(key, binding);
     }
@@ -570,27 +600,32 @@ test "unregister rejects stale and unknown authorities" {
 }
 
 test "target bindings are explicit, revision-stamped, and retired with their authority" {
+    const owner: semantic.owner.Id = @enumFromInt(1);
     var provider = TestProvider{ .authority = .here };
     var router = Router.init(std.testing.allocator);
     defer router.deinit();
     const target: semantic.target.Ref = .{ .authority = .here, .slot = 4, .generation = 3 };
     const directory: fs.target.Directory = .{ .root = makeRoot(.here), .node = .root };
     try std.testing.expectError(error.TargetUnbound, router.authorizedDirectory(target, 1));
-    try std.testing.expectError(error.UnknownAuthority, router.bindTarget(target, 1, directory));
+    try std.testing.expectError(error.UnknownAuthority, router.bindTarget(owner, target, 1, directory));
     try router.register(.here, provider.asProvider());
-    try router.bindTarget(target, 1, directory);
+    try router.bindTarget(owner, target, 1, directory);
     try std.testing.expectEqual(directory, try router.authorizedDirectory(target, 1));
     try std.testing.expectError(error.StaleTarget, router.authorizedDirectory(target, 2));
-    try std.testing.expectError(error.InvalidHandle, router.bindTarget(target, 0, directory));
-    try std.testing.expectError(error.TargetAlreadyBound, router.bindTarget(target, 1, directory));
+    try std.testing.expect(!router.unbindTargetOwned(@enumFromInt(2), target, 1));
+    try std.testing.expect(!router.unbindTargetOwned(owner, target, 2));
+    try std.testing.expectEqual(directory, try router.authorizedDirectory(target, 1));
+    try std.testing.expectError(error.InvalidHandle, router.bindTarget(owner, target, 0, directory));
+    try std.testing.expectError(error.TargetAlreadyBound, router.bindTarget(owner, target, 1, directory));
     try std.testing.expect(router.unbindTarget(target));
     try std.testing.expectError(error.TargetUnbound, router.authorizedDirectory(target, 1));
-    try router.bindTarget(target, 1, directory);
+    try router.bindTarget(owner, target, 1, directory);
     try router.unregister(.here);
     try std.testing.expectError(error.TargetUnbound, router.authorizedDirectory(target, 1));
 }
 
 test "ordinary file bindings preserve provider entry identity and revision" {
+    const owner: semantic.owner.Id = @enumFromInt(1);
     var provider = TestProvider{ .authority = .here, .observed_kind = .regular, .observed_revision = "file-r1" };
     var router = Router.init(std.testing.allocator);
     defer router.deinit();
@@ -602,14 +637,17 @@ test "ordinary file bindings preserve provider entry identity and revision" {
         .ref = makeEntry(.here),
         .revision = .{ .token = &source_revision },
     };
-    try router.bindEntry(target, 7, source);
-    try std.testing.expectError(error.TargetAlreadyBound, router.bindEntry(target, 7, source));
+    try router.bindEntry(owner, target, 7, source);
+    try std.testing.expectError(error.TargetAlreadyBound, router.bindEntry(owner, target, 7, source));
     @memset(&source_revision, 'x');
     const authorized = try router.authorizedEntry(target, 7);
     try std.testing.expectEqual(source.root, authorized.root);
     try std.testing.expectEqual(source.ref, authorized.ref);
     try std.testing.expectEqualSlices(u8, "file-r1", authorized.revision.token);
     try std.testing.expectError(error.StaleTarget, router.authorizedEntry(target, 8));
+    try std.testing.expect(!router.unbindTargetOwned(@enumFromInt(2), target, 7));
+    try std.testing.expect(!router.unbindTargetOwned(owner, target, 8));
+    _ = try router.authorizedEntry(target, 7);
     try std.testing.expect(router.unbindTarget(target));
     try std.testing.expectError(error.TargetUnbound, router.authorizedEntry(target, 7));
 }

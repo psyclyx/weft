@@ -387,7 +387,7 @@ test "wasm plugin: guarded child directories publish and revoke complete authori
     const replaced_parent = semantic.targets.get(parent.ref) orelse return error.TestUnexpectedResult;
     try t.expectEqual(parent.revision + 1, replaced_parent.revision);
     try t.expect(router.unbindTarget(parent.ref));
-    try router.bindTarget(parent.ref, replaced_parent.revision, .{ .root = Provider.parent_root });
+    try router.bindTarget(host_owner, parent.ref, replaced_parent.revision, .{ .root = Provider.parent_root });
     try t.expect((try semantic.actions.invoke(&semantic.views, .{
         .action = @import("weft_fs").action.entry_create_file,
         .view = view_ref,

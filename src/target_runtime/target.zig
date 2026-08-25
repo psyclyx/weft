@@ -102,6 +102,17 @@ pub const Registry = struct {
         return &instance.descriptor;
     }
 
+    /// Return the principal that owns a live target identity.  Descriptors are
+    /// intentionally public facts; ownership is a separate lifetime concern
+    /// used by trusted composition layers when retiring paired resources.
+    pub fn ownerOf(self: *const Registry, ref: semantic.target.Ref) ?semantic.owner.Id {
+        if (ref.authority != self.authority or ref.slot >= self.slots.items.len) return null;
+        const slot = self.slots.items[ref.slot];
+        if (slot.generation != ref.generation) return null;
+        const instance = slot.instance orelse return null;
+        return instance.owner;
+    }
+
     pub fn replace(
         self: *Registry,
         gpa: std.mem.Allocator,
@@ -125,6 +136,25 @@ pub const Registry = struct {
         if (slot.generation != ref.generation) return false;
         const instance = slot.instance orelse return false;
         if (instance.owner != owner) return false;
+        self.retire(gpa, slot);
+        return true;
+    }
+
+    /// Close only the exact descriptor revision a composite registration
+    /// admitted.  A stale registration must not retire a newer replacement
+    /// that retained the same stable target identity.
+    pub fn closeRevision(
+        self: *Registry,
+        gpa: std.mem.Allocator,
+        owner: semantic.owner.Id,
+        ref: semantic.target.Ref,
+        revision: u64,
+    ) bool {
+        if (ref.authority != self.authority or ref.slot >= self.slots.items.len) return false;
+        const slot = &self.slots.items[ref.slot];
+        if (slot.generation != ref.generation) return false;
+        const instance = slot.instance orelse return false;
+        if (instance.owner != owner or instance.descriptor.revision != revision) return false;
         self.retire(gpa, slot);
         return true;
     }

@@ -187,7 +187,7 @@ test "ordinary-file handler opens through the provider and hands bytes to a view
         .facts = &.{.{ .name = fs.target.entry_fact_name, .value = encoded }},
     });
     const descriptor = targets.get(target).?;
-    try router.bindEntry(target, descriptor.revision, source);
+    try router.bindEntry(owner, target, descriptor.revision, source);
 
     const Factory = struct {
         bytes: [5]u8 = undefined,

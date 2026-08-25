@@ -421,6 +421,7 @@ test "typed filesystem plans cannot cross the target root boundary" {
 }
 
 test "typed filesystem authorization rejects forged facts and entry attachments" {
+    const owner: semantic.owner.Id = @enumFromInt(1);
     const Provider = struct {
         pub fn capabilities(_: *@This(), _: fs.contract.Root) fs.contract.Error!fs.contract.Capabilities {
             return .{};
@@ -481,12 +482,12 @@ test "typed filesystem authorization rejects forged facts and entry attachments"
     var provider: Provider = .{};
     try router.register(.here, .init(&provider));
     try std.testing.expectError(error.TargetUnbound, router.authorizedDirectory(target, 1));
-    try router.bindTarget(target, 1, .{ .root = root });
+    try router.bindTarget(owner, target, 1, .{ .root = root });
     try std.testing.expectEqual(root, (try authorizeDirectory(&router, descriptor, target, 1)).root);
     descriptor.facts = &.{.{ .name = fs.target.fact_name, .value = forged }};
     try std.testing.expectError(error.InvalidTarget, authorizeDirectory(&router, descriptor, target, 1));
     descriptor.facts = &.{.{ .name = fs.target.fact_name, .value = entry_encoded }};
     try std.testing.expect(router.unbindTarget(target));
-    try router.bindTarget(target, 1, .{ .root = root, .node = .{ .entry = .{ .authority = .here, .slot = 2, .generation = 1 } } });
+    try router.bindTarget(owner, target, 1, .{ .root = root, .node = .{ .entry = .{ .authority = .here, .slot = 2, .generation = 1 } } });
     try std.testing.expectError(error.Unsupported, authorizeDirectory(&router, descriptor, target, 1));
 }
