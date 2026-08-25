@@ -508,7 +508,7 @@ test "claims route local, remote, and synthetic targets without locus branches" 
             .revision = case.descriptor.revision,
             .location = case.location,
         });
-        try std.testing.expectEqual(case.claim.view, opened);
+        try std.testing.expectEqual(case.claim.view, opened.view());
         try std.testing.expectEqual(@as(usize, 1), case.claim.opens);
     }
 }
