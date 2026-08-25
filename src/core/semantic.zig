@@ -309,7 +309,10 @@ pub const Services = struct {
     ) (ResolveTargetError || OpenTargetError)!LocatedOpenResult {
         return switch (try self.beginLocatedTargetOpen(gpa, located)) {
             .no_handler => .no_handler,
-            .ambiguous => |match| .{ .ambiguous = match },
+            .ambiguous => |match| .{ .ambiguous = .{
+                .strength = match.strength,
+                .count = match.count,
+            } },
             .opened => |pending_value| blk: {
                 var pending = pending_value;
                 const view_ref = pending.view();
