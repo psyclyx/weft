@@ -8,6 +8,7 @@ const std = @import("std");
 const Allocator = std.mem.Allocator;
 const wasm = @import("../wasm.zig");
 const command = @import("../command.zig");
+const pick = @import("../pick.zig");
 const kv = @import("../kv.zig");
 const Buffers = @import("../Buffers.zig");
 const syntax = @import("../syntax.zig");
@@ -242,8 +243,10 @@ proc_streams: std.ArrayList(?*proc_stream.ProcStream) = .empty,
 pick_prompt: std.ArrayList(u8) = .empty,
 pick_id: u32 = 0,
 pick_items: std.ArrayList(PendingItem) = .empty,
-/// The accepted choice, valid only during an `on_pick_accept` call.
-cur_choice: []const u8 = &.{},
+/// The immutable terminal event, valid only during `on_pick_accept`. The
+/// trampoline saves/restores it, so nested guest dispatch cannot overwrite an
+/// outer callback's acceptance facts.
+cur_pick_outcome: ?pick.Outcome = null,
 
 // ── Surface (retained overlay: which-key/dired/magit render here) ──
 /// This plugin's retained overlay, populated via the surface membrane and

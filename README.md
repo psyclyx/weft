@@ -224,16 +224,27 @@ WEFT_E2E_VIDEO=/tmp/weft-spine.mp4 \
   zig build e2e-demo --summary all
 ```
 
-The output is 30 fps by default, with the source and observer screens composed
-side-by-side into each frame from one capture operation. The demo path types at
-75 ms per character and lingers on milestone states for 1000 ms. Tune those
-values without changing the scenario:
+The output is 1920×600 at 30 fps by default, with two complete 960×600 editors
+composed side-by-side in one synchronized capture operation. The collaboration
+segment uses an authenticated localhost TCP connection, fresh in-memory keys
+for both peers, and deterministic 25–120 ms one-way transport latency. The demo
+types at 110 ms per character, holds ordinary milestones for 1500 ms, and rests
+for 2500 ms at important collaboration beats. Ordinary tests use the same
+scenario with no injected pacing or network latency.
+
+Tune the recording without changing the scenario:
 
 ```sh
 WEFT_E2E_VIDEO=/tmp/weft-spine.mp4 \
-WEFT_E2E_VIDEO_FPS=30 WEFT_E2E_TYPING_MS=55 WEFT_E2E_LINGER_MS=1500 \
+WEFT_E2E_VIDEO_FPS=30 WEFT_E2E_TYPING_MS=140 \
+WEFT_E2E_LINGER_MS=1800 WEFT_E2E_REST_MS=3000 \
+WEFT_E2E_TRANSPORT_BASE_MS=30 WEFT_E2E_TRANSPORT_JITTER_MS=140 \
   zig build e2e-demo --summary all
 ```
+
+`WEFT_E2E_TRANSPORT_SEED` selects a repeatable jitter sequence. The latency is
+applied by the session byte-stream links around the real TCP sockets, including
+authentication; it is not simulated by delaying the rendered frames.
 
 Frames are streamed directly to `ffmpeg` through a bounded one-frame PPM
 buffer; no raw frame sequence is retained. If `ffmpeg` is unavailable, the

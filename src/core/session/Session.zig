@@ -152,6 +152,14 @@ pub fn peerFingerprint(self: *const Session) ?[24]u8 {
     return identity.fingerprintOf(self.their_id);
 }
 
+/// Public, per-handshake identity of this concrete connection lifetime. The
+/// ephemeral key is freshly generated for every Session and already travels
+/// in the authenticated transcript, so it distinguishes a same-peer
+/// reconnect without adding a platform RNG dependency at the Conn layer.
+pub fn incarnation(self: *const Session) [secure.pub_len]u8 {
+    return self.eph.public;
+}
+
 /// The peer's identity hue seed (for a stable per-peer color), or null
 /// before the handshake completes.
 pub fn peerHue(self: *const Session) ?f32 {

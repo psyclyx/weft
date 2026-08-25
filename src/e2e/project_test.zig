@@ -118,9 +118,21 @@ const SpineCollabClock = struct {
     tick_error: ?anyerror = null,
 
     pub fn beforeDemoFrame(self: *SpineCollabClock) void {
-        self.link.synchronize() catch |err| {
-            self.tick_error = err;
-        };
+        // Animation frames advance the real transport without imposing a
+        // distributed quiescence barrier at 30 fps. Named narrative
+        // milestones call `synchronize` explicitly before capture.
+        // In recording mode this also advances deterministic, per-direction
+        // latency on the real authenticated TCP links. It is deliberately a
+        // participant clock operation, not a renderer/video effect.
+        self.link.advanceDemoTransport();
+        var rounds: usize = 0;
+        while (rounds < 2) : (rounds += 1) {
+            self.link.tick() catch |err| {
+                self.tick_error = err;
+                return;
+            };
+            napUs(300);
+        }
     }
 };
 
@@ -408,19 +420,69 @@ test "e2e/spine: write a file, init a repo, stage and commit — all through wef
     ed.runStr("open", "main.zig");
     mirror.runStr("open", "helper.lua");
     mirror.runStr("open", "main.zig");
+    // Establish the visual baseline before transport/authentication. Recording
+    // mode rests here; the ordinary scenario only captures the same real UI.
+    proj.capture(&ed, "spine-collaboration-disconnected");
+    // Keep that baseline's useful config-loaded echo, then clear it through
+    // the ordinary action so the connection chip remains visible while the
+    // shared file later becomes dirty.
+    ed.runStr("echo", "");
+    mirror.runStr("echo", "");
     try Loopback.init(&link, gpa, &ed, &mirror, "alice", "bob");
     have_link = true;
     collab_clock = .{ .link = &link };
     proj.bindDemoFrameHook(h.DemoFrameHook.init(&collab_clock));
+    try link.synchronize();
+    // The status line now comes from each editor's authenticated live session,
+    // so the demo visibly transitions from disconnected to connected.
+    proj.capture(&ed, "spine-collaboration-connected");
+    proj.rest();
 
-    // Alice and Bob author concurrently through their own Vim surfaces. The
-    // loopback is the real transport/CRDT path; the demo hook merely advances
-    // that same clock before a synchronized capture.
+    // Alice establishes a small shared scaffold first. Starting concurrent
+    // insertions at the same empty CRDT anchor would correctly interleave
+    // their character streams, but it would be a poor editing demo. The two
+    // peers instead navigate independently to named slots, then replace those
+    // distinct ranges concurrently through their own Vim surfaces.
     ed.press("i", "");
-    proj.typeText(&ed, "const helper = @import(\"helper.zig\");\n\npub fn main() void {\n    _ = helper.value;\n}\n");
+    proj.typeText(
+        &ed,
+        "const helper = @import(\"helper.zig\");\n\npub fn main() void {\n    ALICE_SLOT\n    BOB_SLOT\n}\n",
+    );
     ed.press("Escape", "");
-    mirror.press("i", "");
-    proj.typeText(&mirror, "// bob was here\n");
+    const SpineScaffold = struct {
+        a: *Editor,
+        b: *Editor,
+        fn pred(c: @This()) bool {
+            const at = c.a.buffers.active().editor.text().toOwnedSlice(c.a.gpa) catch return false;
+            defer c.a.gpa.free(at);
+            const bt = c.b.buffers.active().editor.text().toOwnedSlice(c.b.gpa) catch return false;
+            defer c.b.gpa.free(bt);
+            return std.mem.indexOf(u8, at, "ALICE_SLOT") != null and
+                std.mem.indexOf(u8, at, "BOB_SLOT") != null and
+                std.mem.eql(u8, at, bt);
+        }
+    };
+    try t.expect(try link.pumpUntil(SpineScaffold{ .a = &ed, .b = &mirror }, SpineScaffold.pred));
+    try link.synchronize();
+    proj.capture(&ed, "spine-collaboration-scaffold");
+
+    ed.press("/", "");
+    proj.typeText(&ed, "ALICE_SLOT");
+    ed.press("Return", "");
+    ed.press("c", "");
+    ed.press("w", "");
+    mirror.press("/", "");
+    proj.typeText(&mirror, "BOB_SLOT");
+    mirror.press("Return", "");
+    mirror.press("c", "");
+    mirror.press("w", "");
+    proj.typeConcurrently(
+        &ed,
+        "const answer = helper.value; // alice edits here",
+        &mirror,
+        "std.debug.print(\"{d}\\n\", .{answer}); // bob was here",
+    );
+    ed.press("Escape", "");
     mirror.press("Escape", "");
     const SpineConverged = struct {
         a: *Editor,
@@ -430,13 +492,17 @@ test "e2e/spine: write a file, init a repo, stage and commit — all through wef
             defer c.a.gpa.free(at);
             const bt = c.b.buffers.active().editor.text().toOwnedSlice(c.b.gpa) catch return false;
             defer c.b.gpa.free(bt);
-            return std.mem.indexOf(u8, at, "pub fn main") != null and
+            return std.mem.indexOf(u8, at, "alice edits here") != null and
                 std.mem.indexOf(u8, at, "bob was here") != null and
+                std.mem.indexOf(u8, at, "SLOT") == null and
                 std.mem.eql(u8, at, bt);
         }
     };
     try t.expect(try link.pumpUntil(SpineConverged{ .a = &ed, .b = &mirror }, SpineConverged.pred));
+    try link.synchronize();
     try t.expect(collab_clock.tick_error == null);
+    proj.capture(&ed, "spine-collaboration-concurrent-edit");
+    proj.rest();
     // Deliberately separate the two carets before recording. Each peer then
     // moves once while the OTHER peer's completed pixels are observed. This
     // is the visual gate the old hand-built capture path failed: one local
@@ -456,16 +522,32 @@ test "e2e/spine: write a file, init a repo, stage and commit — all through wef
     try link.synchronize();
     const caret_before = try proj.capturePairPixels();
     defer gpa.free(caret_before);
+    proj.capture(&ed, "spine-cursors-separated");
+    proj.rest();
+    const alice_before_bob_move = ed.buffers.active().editor.cursorOffset();
+    const bob_before_move = mirror.buffers.active().editor.cursorOffset();
     mirror.press("k", "");
+    try t.expectEqual(alice_before_bob_move, ed.buffers.active().editor.cursorOffset());
+    try t.expect(bob_before_move != mirror.buffers.active().editor.cursorOffset());
+    try link.synchronize();
     const bob_moved = try proj.capturePairPixels();
     defer gpa.free(bob_moved);
     try t.expect(pairBodyChanged(caret_before, bob_moved, false));
     try t.expect(pairBodyChanged(caret_before, bob_moved, true));
+    proj.capture(&ed, "spine-cursor-bob-moved");
+    proj.rest();
+    const alice_before_move = ed.buffers.active().editor.cursorOffset();
+    const bob_before_alice_move = mirror.buffers.active().editor.cursorOffset();
     ed.press("j", "");
+    try t.expect(alice_before_move != ed.buffers.active().editor.cursorOffset());
+    try t.expectEqual(bob_before_alice_move, mirror.buffers.active().editor.cursorOffset());
+    try link.synchronize();
     const alice_moved = try proj.capturePairPixels();
     defer gpa.free(alice_moved);
     try t.expect(pairBodyChanged(bob_moved, alice_moved, false));
     try t.expect(pairBodyChanged(bob_moved, alice_moved, true));
+    proj.capture(&ed, "spine-cursor-alice-moved");
+    proj.rest();
     ed.run("save");
     ed.waitSave();
 

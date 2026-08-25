@@ -198,16 +198,18 @@ weft.command("acp-open-permission-pick", () => {
   weft.pick(pp.prompt, pp.opts);
 });
 
-// A permission pick was accepted: answer the agent with the chosen option (or
-// cancelled for an out-of-range / dismissed choice).
-weft.onPick((index) => {
+// A permission pick completed: answer the agent with the chosen option, or
+// cancelled for a dismissed/invalid outcome. `weft.pick` delivers one object
+// so the callback cannot confuse free input with a candidate ordinal.
+weft.onPick((outcome) => {
   if (!pendingPerm) return;
   const p = pendingPerm;
   pendingPerm = null;
-  if (index < 0 || index >= p.optionIds.length) {
+  if (!outcome || outcome.kind !== "candidate" ||
+      outcome.index < 0 || outcome.index >= p.optionIds.length) {
     respond(p.id, { outcome: { outcome: "cancelled" } });
   } else {
-    respond(p.id, { outcome: { outcome: "selected", optionId: p.optionIds[index] } });
+    respond(p.id, { outcome: { outcome: "selected", optionId: p.optionIds[outcome.index] } });
   }
 });
 

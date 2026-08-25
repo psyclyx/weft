@@ -82,7 +82,13 @@ fn status() void {
 }
 
 export fn on_pick_accept(pick_id: u32) void {
-    const choice = weft.pickChoice();
+    var outcome = (weft.pickOutcome(weft.allocator) catch return) orelse return;
+    defer outcome.deinit(weft.allocator);
+    const choice = switch (outcome) {
+        .candidate => |candidate| candidate.text,
+        .input => |input| input,
+        .cancelled => return,
+    };
     if (pick_id == pick_commands) {
         weft.run(choice);
     } else if (pick_id == pick_buffers) {

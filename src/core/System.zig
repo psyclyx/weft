@@ -66,6 +66,7 @@
 const std = @import("std");
 const Allocator = std.mem.Allocator;
 const command = @import("command.zig");
+const pick = @import("pick.zig");
 const Buffers = @import("Buffers.zig");
 const Keymap = @import("Keymap.zig");
 const Head = @import("Head.zig");
@@ -217,7 +218,12 @@ pub fn create(gpa: Allocator, pool: *task.Pool, name: []const u8, user: []const 
 
 pub fn destroy(self: *System) void {
     const gpa = self.gpa;
-    // Plugins die FIRST — before any of this system's OTHER state (buffers,
+    // A pick's acceptor belongs to the plugin plane, so deliver its terminal
+    // cancellation while both the dispatch context and plugin still exist.
+    var ctx = self.contextFor(&self.default_head);
+    self.default_head.pick.terminate(&ctx);
+    // After interaction cancellation, plugins die before any of this
+    // system's OTHER state (buffers,
     // commands, caps) — mirroring `main.zig`'s pre-System defer order
     // exactly (every plugin/engine/loop-related defer ran before
     // `Session`'s own, so a plugin's registered command — its `.data`
@@ -452,7 +458,7 @@ pub const Host = struct {
         return null;
     }
 
-    pub const SwapError = error{ UnknownSystem, OpenTransient } || Allocator.Error;
+    pub const SwapError = error{ UnknownSystem, OpenTransient, PickReopenedDuringCancellation } || Allocator.Error;
 
     /// Re-bind `head` (dispatching through `c`) onto the hosted system
     /// named `target` — the `system-swap <name>` mechanism (§6 W2b gate
@@ -484,7 +490,9 @@ pub const Host = struct {
     ///     can't reach (accept would dispatch through the NEW system's
     ///     commands against picks built from the OLD one). Frecency
     ///     (learned ranking) is untouched — `cancelActive`, unlike
-    ///     `deinit`, doesn't wipe it.
+    ///     `deinit`, doesn't wipe it. If the cancellation callback opens a
+    ///     replacement pick, the swap refuses rather than carrying that new
+    ///     old-system session across the boundary.
     ///   - `head.dot` (dot-repeat register) and `head.echo` (status line):
     ///     KEPT, untouched. Both are head-PERSONAL, not system-referencing
     ///     state: `echo` is just displayed text, harmless anywhere. `dot`
@@ -509,9 +517,10 @@ pub const Host = struct {
         }
         if (self.systemOf(c)) |from| {
             if (from == to) return;
+            head.pick.cancelActive(c);
+            if (head.pick.active) return error.PickReopenedDuringCancellation;
             try from.detachHead(gpa, head);
         }
-        head.pick.cancelActive(gpa);
         head.working_target = null;
         c.buffers = &to.buffers;
         c.commands = &to.commands;
@@ -856,9 +865,14 @@ test "system: F1 — swap CANCELS an open pick (references the system being left
     // A live pick session, opened against the EDITOR system (its acceptor/
     // items are meaningless once `c` points elsewhere).
     const Sink = struct {
-        fn accept(_: *command.Context, _: ?*anyopaque, _: []const u8) anyerror!void {}
+        cancelled: bool = false,
+        fn accept(_: *command.Context, data: ?*anyopaque, outcome: pick.Outcome) anyerror!void {
+            const self: *@This() = @ptrCast(@alignCast(data.?));
+            self.cancelled = outcome == .cancelled;
+        }
     };
-    try head.pick.open(&c, "find", &.{.{ .text = "apple" }}, .{ .handler = Sink.accept });
+    var sink: Sink = .{};
+    try head.pick.open(&c, "find", &.{.{ .text = "apple" }}, .{ .handler = Sink.accept, .data = &sink });
     try t.expect(head.pick.active);
 
     // Head-personal state that should SURVIVE the swap untouched.
@@ -871,6 +885,7 @@ test "system: F1 — swap CANCELS an open pick (references the system being left
 
     // The pick is gone (cancelled, not carried across).
     try t.expect(!head.pick.active);
+    try t.expect(sink.cancelled);
     // dot/echo untouched — head-personal, not system-referencing.
     try t.expectEqualStrings("kept across swap", head.echo.items);
     try t.expectEqual(@as(usize, 1), head.dot.reg_n);

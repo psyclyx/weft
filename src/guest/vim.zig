@@ -453,7 +453,15 @@ export fn on_command(id: u32) void {
     if (!preserve_register[id]) selected_register = 0;
 }
 export fn on_pick_accept(pick_id: u32) void {
-    if (pick_id == file_pick) openChosen(weft.pickChoice());
+    if (pick_id != file_pick) return;
+    var outcome = (weft.pickOutcome(weft.allocator) catch return) orelse return;
+    defer outcome.deinit(weft.allocator);
+    const path = switch (outcome) {
+        .candidate => |candidate| candidate.text,
+        .input => |input| input,
+        .cancelled => return,
+    };
+    openChosen(path);
 }
 
 export fn init() void {

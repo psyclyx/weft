@@ -1,7 +1,7 @@
-//! The pick's configuration/callback value types: the `Acceptor` a caller
-//! hands `open`, the async candidate `Source`, the `open` `Options`, and the
-//! `Entry` value type. Pure data + function pointers — the `Pick` state
-//! machine in `state.zig` is built out of these.
+//! The pick's configuration/callback value types: immutable acceptance
+//! outcomes, the `Acceptor` a caller hands `open`, the async candidate
+//! `Source`, the `open` `Options`, and the `Entry` value type. Pure data +
+//! function pointers — the `Pick` state machine is built out of these.
 
 const std = @import("std");
 const Allocator = std.mem.Allocator;
@@ -12,8 +12,49 @@ const match = @import("match.zig");
 /// How the query filters candidates.
 pub const Style = match.Style;
 
+/// Match evidence captured at the same instant as candidate acceptance.
+/// Offsets are bytes relative to the candidate's matchable `Entry.text`, not
+/// to any document a source may have projected that text from.
+pub const Match = struct {
+    start: usize,
+    span: usize,
+};
+
+/// One selected candidate. `index` is its stable add-order identity within
+/// this pick, `text` is its accepted presentation value, and `query`/`match`
+/// are the facts produced by the picker. Resolving those facts to a document,
+/// buffer, remote offer, or synthetic target remains source policy.
+pub const Candidate = struct {
+    index: usize,
+    text: []const u8,
+    query: []const u8,
+    match: Match,
+};
+
+/// The terminal result of one pick session. Cancellation is an event, not
+/// merely cleanup, and free input is distinct from a candidate whose text
+/// happens to equal the query. An acceptor receives exactly one of these
+/// cases for every runtime termination of its interaction.
+pub const Outcome = union(enum) {
+    candidate: Candidate,
+    input: []const u8,
+    cancelled,
+
+    pub fn text(self: Outcome) ?[]const u8 {
+        return switch (self) {
+            .candidate => |candidate| candidate.text,
+            .input => |input| input,
+            .cancelled => null,
+        };
+    }
+};
+
 pub const Acceptor = struct {
-    handler: *const fn (ctx: *command.Context, data: ?*anyopaque, choice: []const u8) anyerror!void,
+    /// Called exactly once when a live pick accepts or is cancelled. Every
+    /// slice in `outcome` is callback-scoped and immutable. A picker owner
+    /// must terminate before destroying its command context; `Pick.deinit`
+    /// asserts that no live acceptor is being silently discarded.
+    handler: *const fn (ctx: *command.Context, data: ?*anyopaque, outcome: Outcome) anyerror!void,
     /// Called exactly once when the pick closes (accept or cancel).
     cleanup: ?*const fn (data: ?*anyopaque, gpa: Allocator) void = null,
     data: ?*anyopaque = null,

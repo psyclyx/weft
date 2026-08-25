@@ -131,9 +131,12 @@ extern "weft" fn wl_pick_begin(prompt_ptr: u32, prompt_len: u32, pick_id: u32) v
 extern "weft" fn wl_pick_add(t: u32, tl: u32, d: u32, dl: u32) void;
 extern "weft" fn wl_pick_end() void;
 extern "weft" fn wl_open_file_pick(prompt_ptr: u32, prompt_len: u32, root_ptr: u32, root_len: u32, pick_id: u32) void;
-extern "weft" fn wl_pick_choice(out_ptr: u32, out_cap: u32) i32;
-extern "weft" fn wl_pick_choice_index() i32;
-extern "weft" fn wl_pick_choice_match_start() i32;
+extern "weft" fn wl_pick_outcome_kind() i32;
+extern "weft" fn wl_pick_outcome_text(out_ptr: u32, out_cap: u32) i32;
+extern "weft" fn wl_pick_outcome_query(out_ptr: u32, out_cap: u32) i32;
+extern "weft" fn wl_pick_outcome_index() i32;
+extern "weft" fn wl_pick_outcome_match_start() i32;
+extern "weft" fn wl_pick_outcome_match_span() i32;
 extern "weft" fn wl_surface_begin(placement: u32) void;
 extern "weft" fn wl_surface_caret(offset: u32) void;
 extern "weft" fn wl_surface_row() void;
@@ -857,24 +860,79 @@ pub fn menuBindingCmd(i: usize) []const u8 {
 pub fn menuBindingIsGroup(i: usize) bool {
     return wl_menu_binding_is_group(@intCast(i)) != 0;
 }
-/// The accepted choice (valid during `on_pick_accept`), into `scratch`.
-pub fn pickChoice() []const u8 {
-    const n = wl_pick_choice(p(&scratch), scratch.len);
-    return scratch[0..@intCast(n)];
+pub const PickMatch = struct { start: usize, span: usize };
+pub const PickCandidate = struct {
+    /// Stable add-order identity within this pick, including duplicate text.
+    index: usize,
+    /// Owned accepted candidate presentation; released by `PickOutcome.deinit`.
+    text: []const u8,
+    /// Owned query which produced `match`; released by `PickOutcome.deinit`.
+    query: []const u8,
+    /// Candidate-relative byte evidence. Resolving it to a document or other
+    /// target remains the source plugin's policy.
+    match: PickMatch,
+};
+pub const PickOutcome = union(enum) {
+    cancelled,
+    input: []const u8,
+    candidate: PickCandidate,
+
+    pub fn deinit(self: *PickOutcome, gpa: std.mem.Allocator) void {
+        switch (self.*) {
+            .cancelled => {},
+            .input => |input| gpa.free(input),
+            .candidate => |candidate| {
+                gpa.free(candidate.text);
+                gpa.free(candidate.query);
+            },
+        }
+        self.* = .cancelled;
+    }
+};
+
+/// One coherent, immutable outcome for the current `on_pick_accept` callback.
+/// Returns null outside that callback. Accepted bytes are exact owned copies;
+/// the caller must `deinit` the result. The two-pass host read refuses a short
+/// destination instead of silently truncating a candidate or its query.
+pub fn pickOutcome(gpa: std.mem.Allocator) (std.mem.Allocator.Error || error{InvalidPickOutcome})!?PickOutcome {
+    return switch (wl_pick_outcome_kind()) {
+        0 => .cancelled,
+        1 => blk: {
+            break :blk .{ .input = try readPickOutcomeBytes(gpa, wl_pick_outcome_text) };
+        },
+        2 => blk: {
+            const text = try readPickOutcomeBytes(gpa, wl_pick_outcome_text);
+            errdefer gpa.free(text);
+            const accepted_query = try readPickOutcomeBytes(gpa, wl_pick_outcome_query);
+            const index = wl_pick_outcome_index();
+            const start = wl_pick_outcome_match_start();
+            const span = wl_pick_outcome_match_span();
+            if (index < 0 or start < 0 or span < 0) {
+                gpa.free(accepted_query);
+                return error.InvalidPickOutcome;
+            }
+            break :blk .{ .candidate = .{
+                .index = @intCast(index),
+                .text = text,
+                .query = accepted_query,
+                .match = .{ .start = @intCast(start), .span = @intCast(span) },
+            } };
+        },
+        else => null,
+    };
 }
-/// The add-order index of the accepted candidate (the position in your
-/// `pickAdd` sequence), or null for free text — resolve it against your own
-/// parallel data to get the real target, robust under duplicate rows.
-pub fn pickChoiceIndex() ?usize {
-    const i = wl_pick_choice_index();
-    return if (i < 0) null else @intCast(i);
-}
-/// The byte offset of the selected candidate's match against the accepted
-/// query, or null for free-text acceptance. This is relative to the candidate
-/// text supplied through `pickAdd`, not to the document that produced it.
-pub fn pickChoiceMatchStart() ?usize {
-    const i = wl_pick_choice_match_start();
-    return if (i < 0) null else @intCast(i);
+
+fn readPickOutcomeBytes(
+    gpa: std.mem.Allocator,
+    comptime read: fn (out_ptr: u32, out_cap: u32) callconv(.c) i32,
+) (std.mem.Allocator.Error || error{InvalidPickOutcome})![]u8 {
+    const needed = read(0, 0);
+    if (needed < 0) return error.InvalidPickOutcome;
+    const bytes = try gpa.alloc(u8, @intCast(needed));
+    errdefer gpa.free(bytes);
+    const written = read(p(bytes.ptr), @intCast(bytes.len));
+    if (written != needed) return error.InvalidPickOutcome;
+    return bytes;
 }
 
 // ── Completion provider (the sel/completion domain) ──────────────────

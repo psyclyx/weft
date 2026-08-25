@@ -168,6 +168,10 @@ pub const Session = struct {
     /// — buffers/caps/keymap/commands/plugins/..., per-system, in
     /// `System.destroy`'s documented order). (completion_ui owns no heap.)
     pub fn deinit(self: *Session, gpa: std.mem.Allocator) void {
+        // Cancellation is plugin code and may dispatch through any registered
+        // service. Terminate before releasing even the first callback-visible
+        // target; layered owners may call this idempotently.
+        self.head.pick.terminate(&self.cmd_ctx);
         while (self.directory_targets.items.len != 0)
             self.closeDirectoryTarget(self.directory_targets.items.len - 1);
         self.directory_targets.deinit(gpa);

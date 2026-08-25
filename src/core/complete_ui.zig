@@ -176,7 +176,12 @@ pub const CompletionUi = struct {
         };
     }
 
-    fn accept(ctx: *command.Context, data: ?*anyopaque, choice: []const u8) anyerror!void {
+    fn accept(ctx: *command.Context, data: ?*anyopaque, outcome: pick_mod.Outcome) anyerror!void {
+        const choice = switch (outcome) {
+            .cancelled => return,
+            .candidate => |candidate| candidate.text,
+            .input => |input| input,
+        };
         const self: *CompletionUi = @ptrCast(@alignCast(data.?));
         const target = self.buffer orelse return;
         const buffer = ctx.buffers.resolve(target) orelse return;

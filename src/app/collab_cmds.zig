@@ -245,26 +245,115 @@ pub fn shareHandler(ctx: *core.command.Context, data: ?*anyopaque, args: []const
     return .nil;
 }
 
-/// One openable offer across all connections: the owning Conn, the hub
-/// peer it belongs to (null for the outbound connection), the Conn-local
-/// offer index, and its display name (borrowed).
+/// One openable offer across all connections. `base` is the offer's stable
+/// identity on its owning connection; the array index is only a snapshot used
+/// while building the display list and must never be used to resolve an
+/// acceptance later.
 const OfferRef = struct {
     conn: *core.session.Conn,
-    peer: ?*core.hub.Peer,
-    index: usize,
+    incarnation: [core.secure.pub_len]u8,
+    fingerprint: [24]u8,
+    base: u64,
     name: []const u8,
 };
 
+/// The target table belongs to one pick session. It owns the names used to
+/// label the candidates, while `(conn, incarnation, fingerprint, base)` is
+/// the source-defined target identity. The connection pointer is only a token until
+/// `resolveOffer` proves it is still a live outbound/hub connection.
+const OpenSharedState = struct {
+    sc: *ShareCtx,
+    targets: std.ArrayList(Target) = .empty,
+
+    const Target = struct {
+        /// Pointer is opaque until found in the current live set. Incarnation
+        /// closes reconnect/address ABA; fingerprint proves the peer identity.
+        conn: *core.session.Conn,
+        incarnation: [core.secure.pub_len]u8,
+        fingerprint: [24]u8,
+        base: u64,
+        name: []u8,
+    };
+
+    fn deinit(self: *OpenSharedState, gpa: std.mem.Allocator) void {
+        for (self.targets.items) |target| gpa.free(target.name);
+        self.targets.deinit(gpa);
+    }
+};
+
+fn openSharedCleanup(data: ?*anyopaque, gpa: std.mem.Allocator) void {
+    const state: *OpenSharedState = @ptrCast(@alignCast(data.?));
+    state.deinit(gpa);
+    gpa.destroy(state);
+}
+
+const LiveOffer = struct {
+    conn: *core.session.Conn,
+    peer: ?*core.hub.Peer,
+    index: usize,
+};
+
+fn resolveOfferOnConn(
+    target: OpenSharedState.Target,
+    conn: *core.session.Conn,
+    incarnation: [core.secure.pub_len]u8,
+    fingerprint: [24]u8,
+    peer: ?*core.hub.Peer,
+) ?LiveOffer {
+    if (conn != target.conn or
+        !std.mem.eql(u8, &incarnation, &target.incarnation) or
+        !std.mem.eql(u8, &fingerprint, &target.fingerprint)) return null;
+    for (conn.offers.items, 0..) |offer, i| {
+        if (offer.base == target.base and !offer.opened)
+            return .{ .conn = conn, .peer = peer, .index = i };
+    }
+    return null;
+}
+
+/// Re-resolve a snapshotted target without consulting the current display
+/// ordering. Pointer comparison is safe before dereference: a disconnected
+/// outbound Conn or removed hub Peer simply fails the identity check.
+fn resolveOffer(sc: *ShareCtx, target: OpenSharedState.Target) ?LiveOffer {
+    if (sc.conn.*) |*conn| {
+        if (conn == target.conn) {
+            const fingerprint = conn.session.peerFingerprint() orelse return null;
+            return resolveOfferOnConn(target, conn, conn.session.incarnation(), fingerprint, null);
+        }
+    }
+    if (sc.hub.*) |*hub| {
+        for (hub.clients.items) |peer| {
+            if (&peer.conn != target.conn) continue;
+            const fingerprint = peer.sess.peerFingerprint() orelse return null;
+            return resolveOfferOnConn(target, &peer.conn, peer.sess.incarnation(), fingerprint, peer);
+        }
+    }
+    return null;
+}
+
 fn collectOffers(sc: *ShareCtx, gpa: std.mem.Allocator, out: *std.ArrayList(OfferRef)) !void {
     if (sc.conn.*) |*c| {
-        for (c.offers.items, 0..) |o, i| {
-            if (!o.opened) try out.append(gpa, .{ .conn = c, .peer = null, .index = i, .name = o.name });
+        const fingerprint = c.session.peerFingerprint();
+        for (c.offers.items) |o| {
+            if (!o.opened and fingerprint != null) try out.append(gpa, .{
+                .conn = c,
+                .incarnation = c.session.incarnation(),
+                .fingerprint = fingerprint.?,
+                .base = o.base,
+                .name = o.name,
+            });
         }
     }
     if (sc.hub.*) |*h| {
         for (h.clients.items) |peer| {
-            for (peer.conn.offers.items, 0..) |o, i| {
-                if (!o.opened) try out.append(gpa, .{ .conn = &peer.conn, .peer = peer, .index = i, .name = o.name });
+            const fingerprint = peer.sess.peerFingerprint();
+            for (peer.conn.offers.items) |o| {
+                if (!o.opened and fingerprint != null) try out.append(gpa, .{
+                    .conn = &peer.conn,
+                    .incarnation = peer.sess.incarnation(),
+                    .fingerprint = fingerprint.?,
+                    .base = o.base,
+                    .name = o.name,
+                });
             }
         }
     }
@@ -286,27 +375,45 @@ pub fn openSharedHandler(ctx: *core.command.Context, data: ?*anyopaque, args: []
     }
     var entries: std.ArrayList(core.pick.Entry) = .empty;
     defer entries.deinit(ctx.gpa);
+    const state = try ctx.gpa.create(OpenSharedState);
+    state.* = .{ .sc = sc };
+    errdefer openSharedCleanup(state, ctx.gpa);
     for (refs.items, 0..) |r, i| {
         const text = try std.fmt.allocPrint(ctx.gpa, "{d}: @{s}", .{ i, r.name });
         try texts.append(ctx.gpa, text);
         try entries.append(ctx.gpa, .{ .text = text, .doc = "shared by a peer — open to collaborate" });
+        const name = try ctx.gpa.dupe(u8, r.name);
+        state.targets.append(ctx.gpa, .{
+            .conn = r.conn,
+            .incarnation = r.incarnation,
+            .fingerprint = r.fingerprint,
+            .base = r.base,
+            .name = name,
+        }) catch |err| {
+            ctx.gpa.free(name);
+            return err;
+        };
     }
-    try ctx.head.pick.open(ctx, "shared", entries.items, .{ .handler = openSharedAccept, .data = sc });
+    try ctx.head.pick.open(ctx, "shared", entries.items, .{
+        .handler = openSharedAccept,
+        .cleanup = openSharedCleanup,
+        .data = state,
+    });
     return .nil;
 }
 
-fn openSharedAccept(ctx: *core.command.Context, data: ?*anyopaque, choice: []const u8) anyerror!void {
-    const sc: *ShareCtx = @ptrCast(@alignCast(data.?));
-    const colon = std.mem.indexOfScalar(u8, choice, ':') orelse return;
-    const list_idx = std.fmt.parseInt(usize, choice[0..colon], 10) catch return;
-    var refs: std.ArrayList(OfferRef) = .empty;
-    defer refs.deinit(ctx.gpa);
-    collectOffers(sc, ctx.gpa, &refs) catch return;
-    if (list_idx >= refs.items.len) return;
-    const ref = refs.items[list_idx];
-    if (ref.index >= ref.conn.offers.items.len or ref.conn.offers.items[ref.index].opened) return;
+fn openSharedAccept(ctx: *core.command.Context, data: ?*anyopaque, outcome: core.pick.Outcome) anyerror!void {
+    const state: *OpenSharedState = @ptrCast(@alignCast(data.?));
+    const candidate = switch (outcome) {
+        .cancelled => return,
+        .candidate => |candidate| candidate,
+        .input => return,
+    };
+    if (candidate.index >= state.targets.items.len) return;
+    const target = state.targets.items[candidate.index];
+    const ref = resolveOffer(state.sc, target) orelse return;
 
-    const display = try std.fmt.allocPrint(ctx.gpa, "@{s}", .{ref.name});
+    const display = try std.fmt.allocPrint(ctx.gpa, "@{s}", .{target.name});
     defer ctx.gpa.free(display);
     const id = try ctx.buffers.create(ctx.gpa, display);
     const buf = ctx.buffers.get(id).?;
@@ -314,12 +421,12 @@ fn openSharedAccept(ctx: *core.command.Context, data: ?*anyopaque, choice: []con
     const col = try ref.conn.openOffer(ref.index, doc, id);
     if (ref.peer) |peer| {
         // A hub peer shared a buffer to us: participate + relay it.
-        try wireHubShare(sc, peer, col, doc);
-        _ = sc.caps.layers.claim(ctx.gpa, doc, "presence", .replicated, "collab") catch {};
+        try wireHubShare(state.sc, peer, col, doc);
+        _ = state.sc.caps.layers.claim(ctx.gpa, doc, "presence", .replicated, "collab") catch {};
     } else {
         // Offered by the host we connected out to.
-        col.presence_layer = try sc.caps.layers.claim(ctx.gpa, doc, "presence", .replicated, "collab");
-        col.import_diag_layer = try sc.caps.layers.claim(ctx.gpa, doc, "diagnostics", .host, "remote-host");
+        col.presence_layer = try state.sc.caps.layers.claim(ctx.gpa, doc, "presence", .replicated, "collab");
+        col.import_diag_layer = try state.sc.caps.layers.claim(ctx.gpa, doc, "diagnostics", .host, "remote-host");
     }
     try ctx.buffers.switchTo(ctx.gpa, id, ctx.head, ctx.keymap);
 }
@@ -420,4 +527,62 @@ pub fn registerCommands(gpa: std.mem.Allocator, commands: *core.command.Commands
         .handler = grantHandler,
         .data = sc,
     });
+}
+
+test "open-shared resolves the snapshotted offer base after display reordering" {
+    const gpa = std.testing.allocator;
+    var conn_slot: ?core.session.Conn = .{
+        .gpa = gpa,
+        .session = undefined,
+        .name = &.{},
+        .role = .client,
+        .next_base = 20,
+    };
+    const conn = &conn_slot.?;
+    defer {
+        for (conn.offers.items) |offer| gpa.free(offer.name);
+        conn.offers.deinit(gpa);
+    }
+    try conn.offers.append(gpa, .{ .base = 16, .name = try gpa.dupe(u8, "first") });
+    try conn.offers.append(gpa, .{ .base = 24, .name = try gpa.dupe(u8, "second") });
+
+    const fingerprint: [24]u8 = @splat(7);
+    const incarnation: [core.secure.pub_len]u8 = @splat(11);
+    const target: OpenSharedState.Target = .{
+        .conn = conn,
+        .incarnation = incarnation,
+        .fingerprint = fingerprint,
+        .base = 24,
+        .name = &.{},
+    };
+
+    // A new offer can arrive before acceptance, changing the display index.
+    // The target must still resolve by its connection identity + base.
+    try conn.offers.insert(gpa, 0, .{ .base = 8, .name = try gpa.dupe(u8, "new") });
+    const resolved = resolveOfferOnConn(target, conn, incarnation, fingerprint, null) orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqual(@as(usize, 2), resolved.index);
+    try std.testing.expectEqual(@as(u64, 24), resolved.conn.offers.items[resolved.index].base);
+
+    // Once that same offer is consumed, acceptance degrades to a no-op rather
+    // than opening whichever row now occupies its old slot.
+    conn.offers.items[resolved.index].opened = true;
+    try std.testing.expect(resolveOfferOnConn(target, conn, incarnation, fingerprint, null) == null);
+
+    // A vanished offer follows the same safe path.
+    const removed = conn.offers.orderedRemove(resolved.index);
+    gpa.free(removed.name);
+    try std.testing.expect(resolveOfferOnConn(target, conn, incarnation, fingerprint, null) == null);
+
+    // Pointer reuse alone is not identity: a different authenticated peer at
+    // the same address cannot inherit the old pick target.
+    var other_fingerprint = fingerprint;
+    other_fingerprint[0] +%= 1;
+    try std.testing.expect(resolveOfferOnConn(target, conn, incarnation, other_fingerprint, null) == null);
+
+    // The same authenticated peer can reconnect and restart its base counter.
+    // A new lifetime at the same allocator address is still not this target.
+    try conn.offers.append(gpa, .{ .base = target.base, .name = try gpa.dupe(u8, "reconnected") });
+    var other_incarnation = incarnation;
+    other_incarnation[0] +%= 1;
+    try std.testing.expect(resolveOfferOnConn(target, conn, other_incarnation, fingerprint, null) == null);
 }

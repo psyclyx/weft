@@ -586,8 +586,8 @@ test "e2e/popup-layout: caret-popup layout goldens" {
     try t.expect(!any_mismatch);
 }
 
-fn noopAccept(ctx: *core.command.Context, data: ?*anyopaque, choice: []const u8) anyerror!void {
+fn noopAccept(ctx: *core.command.Context, data: ?*anyopaque, outcome: core.pick.Outcome) anyerror!void {
     _ = ctx;
     _ = data;
-    _ = choice;
+    _ = outcome;
 }

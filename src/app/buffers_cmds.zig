@@ -122,8 +122,9 @@ pub fn browseRemoteHandler(ctx: *core.command.Context, data: ?*anyopaque, args: 
     return .nil;
 }
 
-fn browseRemoteAccept(ctx: *core.command.Context, data: ?*anyopaque, choice: []const u8) anyerror!void {
+fn browseRemoteAccept(ctx: *core.command.Context, data: ?*anyopaque, outcome: core.pick.Outcome) anyerror!void {
     const rb: *RemoteBrowse = @ptrCast(@alignCast(data.?));
+    const choice = outcome.text() orelse return;
     const gpa = ctx.gpa;
     if (std.mem.eql(u8, choice, "../")) {
         const up = parentPath(rb.path);

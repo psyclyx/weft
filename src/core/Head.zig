@@ -302,9 +302,20 @@ pub fn currentMode(self: *const Head) []const u8 {
 /// tests that exercise `Head` directly with no `command.Context` in scope).
 pub fn setModeRaw(self: *Head, gpa: Allocator, mode: []const u8) Allocator.Error!void {
     const owned = try gpa.dupe(u8, mode);
+    self.setModeRawOwned(gpa, owned);
+}
+
+/// The commit half of `setModeRaw`: consume a caller-owned mode string and
+/// replace the current mode without allocating. A state machine which must
+/// prepare a transition transactionally (the picker close path) duplicates
+/// its destination first, then uses this after its own fallible work is done.
+/// This remains RAW mechanism with the same narrow call-site rules as
+/// `setModeRaw`; ordinary dispatch code goes through `Ctx.setMode`.
+pub fn setModeRawOwned(self: *Head, gpa: Allocator, owned_mode: []u8) void {
     gpa.free(self.mode);
-    self.mode = owned;
-    try self.setPending(gpa, "");
+    self.mode = owned_mode;
+    gpa.free(self.pending);
+    self.pending = &.{};
 }
 
 /// **MECHANISM, not policy** — see `setModeRaw`'s doc; same naming
@@ -748,7 +759,7 @@ test "head: two heads over one system hold independent mode, chord, pick, and ec
 
     // Distinct pick sessions: opening one doesn't touch the other.
     const Sink = struct {
-        fn accept(_: *@import("command.zig").Context, _: ?*anyopaque, _: []const u8) anyerror!void {}
+        fn accept(_: *@import("command.zig").Context, _: ?*anyopaque, _: @import("pick.zig").Outcome) anyerror!void {}
     };
     var ctx_a = try TestCtx.init(gpa, &head_a, &km);
     defer ctx_a.deinit();
@@ -777,10 +788,8 @@ test "head: two heads over one system hold independent mode, chord, pick, and ec
     // that neither's `setMode` call touched the other's `mode` storage; a
     // shared cursor would show cross-talk under interleaving, e.g. one head's
     // close() restoring into the other's prev mode. Verified directly below.)
-    head_a.pick.deinit(gpa);
-    head_a.pick = .empty;
-    head_b.pick.deinit(gpa);
-    head_b.pick = .empty;
+    try head_a.pick.dismiss(&ctx_a.ctx);
+    try head_b.pick.dismiss(&ctx_b.ctx);
 }
 
 test "head: semantic focus and interaction scopes are independent" {

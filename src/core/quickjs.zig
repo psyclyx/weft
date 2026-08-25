@@ -849,13 +849,22 @@ fn cFileRead(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32, results
     results[0] = @intCast(caller.writeMemory(@intCast(args[2]), @intCast(args[3]), bytes) catch 0);
 }
 
-/// A JS plugin's open pick — dispatches the accepted index back into the
+/// A JS plugin's open pick — dispatches a structured outcome back into the
 /// instance via `weft_on_pick`. Freed by `jsPickCleanup`.
-const JsBoundPick = struct { plugin: *JsPlugin };
+const JsBoundPick = struct {
+    plugin: *JsPlugin,
+};
+
+fn allocPickBuffer(plugin: *JsPlugin, cap: usize) !i32 {
+    if (cap == 0) return 0;
+    const guest_cap = std.math.cast(i32, cap) orelse return error.PickPayloadTooLarge;
+    const ptr = try plugin.instance.callI32("malloc", &.{guest_cap});
+    return if (ptr == 0) error.OutOfMemory else ptr;
+}
 
 /// weft.pick(prompt, options): open a pick over the newline-joined options,
-/// bound to this JS plugin; the accepted index returns via `weft_on_pick` (the
-/// async approve/deny round-trip — an agent's permission request).
+/// bound to this JS plugin; the structured outcome returns via `weft_on_pick`
+/// (the async approve/deny round-trip — an agent's permission request).
 fn cPick(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32, results: []i32) void {
     _ = results;
     const self: *JsPlugin = @ptrCast(@alignCast(data.?));
@@ -871,7 +880,7 @@ fn cPick(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32, results: []
     var entries: std.ArrayList(pick_mod.Entry) = .empty;
     defer entries.deinit(gpa);
     var it = std.mem.splitScalar(u8, opts, '\n');
-    while (it.next()) |o| if (o.len > 0) entries.append(gpa, .{ .text = o, .doc = "" }) catch {};
+    while (it.next()) |o| entries.append(gpa, .{ .text = o, .doc = "" }) catch {};
     const bp = gpa.create(JsBoundPick) catch return;
     bp.* = .{ .plugin = self };
     // pick.open copies the entry text/doc, so `opts` may free after this.
@@ -880,19 +889,66 @@ fn cPick(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32, results: []
         .handler = jsPickAccept,
         .cleanup = jsPickCleanup,
         .data = bp,
-    }) catch gpa.destroy(bp);
+    }) catch jsPickCleanup(bp, gpa);
 }
 
 /// DISPATCHING (mirrors `wasm_host/pick.zig`'s `wpPickAccept`): `ctx` is the
-/// head whose pick session just accepted. `ctx.head.pick.accepted_index`
-/// itself already reads through it correctly (it's the parameter, not
-/// `self.ctx`); route `bridge.active_ctx` through it too for the
-/// `weft_on_pick` call, so anything the JS handler does in response (echo,
-/// bind, another pick) sees the SAME head, not the plugin's load-time one.
-fn jsPickAccept(ctx: *command.Context, data: ?*anyopaque, choice: []const u8) anyerror!void {
-    _ = choice;
+/// head whose pick session produced the outcome. Route `bridge.active_ctx`
+/// through it too for the `weft_on_pick` call, so anything the JS handler does
+/// in response (echo, bind, another pick) sees the SAME head, not the plugin's
+/// load-time one. If exact guest allocation/copy fails after core has closed,
+/// the allocation-free cancelled case is still delivered exactly once.
+fn jsPickAccept(ctx: *command.Context, data: ?*anyopaque, outcome: pick_mod.Outcome) anyerror!void {
     const bp: *JsBoundPick = @ptrCast(@alignCast(data.?));
-    const idx: i32 = if (ctx.head.pick.accepted_index) |i| @intCast(i) else -1;
+    var kind: i32 = 2; // cancelled
+    var idx: i32 = -1;
+    var text: []const u8 = &.{};
+    var query: []const u8 = &.{};
+    var match_start: i32 = -1;
+    var match_span: i32 = -1;
+    switch (outcome) {
+        .cancelled => {},
+        .candidate => |candidate| {
+            const guest_index = std.math.cast(i32, candidate.index);
+            const guest_match_start = std.math.cast(i32, candidate.match.start);
+            const guest_match_span = std.math.cast(i32, candidate.match.span);
+            if (guest_index != null and guest_match_start != null and guest_match_span != null) {
+                kind = 0;
+                idx = guest_index.?;
+                text = candidate.text;
+                query = candidate.query;
+                match_start = guest_match_start.?;
+                match_span = guest_match_span.?;
+            }
+        },
+        .input => |input| {
+            kind = 1;
+            text = input;
+        },
+    }
+
+    var text_ptr: i32 = 0;
+    defer if (text_ptr != 0) bp.plugin.instance.callVoid("free", &.{text_ptr}) catch {};
+    var query_ptr: i32 = 0;
+    defer if (query_ptr != 0) bp.plugin.instance.callVoid("free", &.{query_ptr}) catch {};
+
+    var copied = false;
+    copy: {
+        text_ptr = allocPickBuffer(bp.plugin, text.len) catch break :copy;
+        query_ptr = allocPickBuffer(bp.plugin, query.len) catch break :copy;
+        if (text.len > 0) bp.plugin.instance.writeGuest(@intCast(text_ptr), text) catch break :copy;
+        if (query.len > 0) bp.plugin.instance.writeGuest(@intCast(query_ptr), query) catch break :copy;
+        copied = true;
+    }
+    if (!copied) {
+        kind = 2;
+        idx = -1;
+        text = &.{};
+        query = &.{};
+        match_start = -1;
+        match_span = -1;
+    }
+
     const saved_ctx = bp.plugin.bridge.active_ctx;
     const saved_dispatch = bp.plugin.bridge.in_dispatch;
     bp.plugin.bridge.active_ctx = ctx;
@@ -901,7 +957,16 @@ fn jsPickAccept(ctx: *command.Context, data: ?*anyopaque, choice: []const u8) an
         bp.plugin.bridge.active_ctx = saved_ctx;
         bp.plugin.bridge.in_dispatch = saved_dispatch;
     }
-    bp.plugin.instance.callVoid("weft_on_pick", &.{idx}) catch {};
+    bp.plugin.instance.callVoid("weft_on_pick", &.{
+        kind,
+        idx,
+        text_ptr,
+        std.math.cast(i32, text.len) orelse 0,
+        query_ptr,
+        std.math.cast(i32, query.len) orelse 0,
+        match_start,
+        match_span,
+    }) catch {};
 }
 
 fn jsPickCleanup(data: ?*anyopaque, gpa: Allocator) void {
@@ -1711,6 +1776,48 @@ test "quickjs: a JS plugin registers a command dispatched back into JS" {
     try t.expect(env.commands.resolve("greet") != null);
     _ = try command.run(&env.commands, &env.ctx, "greet", &.{});
     try t.expectEqualStrings("hi from js", env.head.echo.items);
+}
+
+test "quickjs: weft.pick delivers structured acceptance and cancellation" {
+    const gpa = t.allocator;
+    var env: Env = undefined;
+    try Env.init(gpa, &env);
+    defer env.deinit(gpa);
+    try pick_mod.install(gpa, &env.commands, &env.keymap);
+    var engine = try wasm.Engine.init();
+    defer engine.deinit();
+
+    // Empty options are intentional: the accepted index must remain the
+    // caller's original line ordinal (beta is index 2, not normalized index 1).
+    const src =
+        \\weft.onPick((o) => {
+        \\  if (o.kind === "candidate")
+        \\    weft.echo(o.kind + "|" + o.index + "|" + o.text + "|" + o.query + "|" + o.match.start + "|" + o.match.span);
+        \\  else weft.echo(o.kind);
+        \\});
+        \\weft.command("open-pick", () => weft.pick("choose", "alpha\n\nbeta"));
+    ;
+    var plugin = try JsPlugin.load(gpa, &engine, &env.ctx, env.pool, .empty, "test", null, src);
+    defer plugin.deinit();
+
+    _ = try command.run(&env.commands, &env.ctx, "open-pick", &.{});
+    try t.expect(env.head.pick.active);
+    _ = try command.run(&env.commands, &env.ctx, "pick-input", &.{.{ .string = "beta" }});
+    _ = try command.run(&env.commands, &env.ctx, "pick-accept", &.{});
+    try t.expectEqualStrings("candidate|2|beta|beta|0|4", env.head.echo.items);
+
+    // The live query is not bounded by the original option payload. Preserve
+    // it exactly without sizing guest memory from that unrelated input.
+    const long_query = "                    beta";
+    _ = try command.run(&env.commands, &env.ctx, "open-pick", &.{});
+    _ = try command.run(&env.commands, &env.ctx, "pick-input", &.{.{ .string = long_query }});
+    _ = try command.run(&env.commands, &env.ctx, "pick-accept", &.{});
+    try t.expectEqualStrings("candidate|2|beta|                    beta|0|4", env.head.echo.items);
+
+    _ = try command.run(&env.commands, &env.ctx, "open-pick", &.{});
+    try t.expect(env.head.pick.active);
+    _ = try command.run(&env.commands, &env.ctx, "pick-cancel", &.{});
+    try t.expectEqualStrings("cancelled", env.head.echo.items);
 }
 
 test "quickjs: a JS plugin drives a duplex subprocess and reads its output" {

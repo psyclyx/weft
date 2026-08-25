@@ -1284,7 +1284,7 @@ test "wasm plugin: palette opens a command pick; accept dispatches back and runs
     try t.expectEqualStrings(env.buffers.active().name, env.head.echo.items);
 }
 
-test "wasm plugins: consult-line jumps to the accepted row by its add index" {
+test "wasm plugins: consult-line combines row identity with exact match evidence" {
     const gpa = t.allocator;
     var env: Env = undefined;
     try Env.init(gpa, &env);
@@ -1297,17 +1297,18 @@ test "wasm plugins: consult-line jumps to the accepted row by its add index" {
     defer plugin.deinit();
 
     const ed = &env.buffers.active().editor;
-    try ed.insertText(gpa, "aaa\nbbb\nccc");
+    try ed.insertText(gpa, "aaa\n    ccc");
     ed.placeCursor(0);
 
-    // Open the line pick, narrow to the third line, accept: the guest resolves
-    // the accepted ROW INDEX (2) to the offset it recorded, jumping to line 3.
+    // Candidate identity resolves the source row; candidate-relative match
+    // evidence lands after its indentation. Neither fact substitutes for the
+    // other, and neither is recovered from mutable Pick state.
     _ = try command.run(&env.commands, &env.ctx, "consult-line", &.{});
     try t.expect(env.head.pick.active);
     _ = try command.run(&env.commands, &env.ctx, "pick-input", &.{.{ .string = "ccc" }});
     _ = try command.run(&env.commands, &env.ctx, "pick-accept", &.{});
     try t.expect(!env.head.pick.active);
-    try t.expectEqual(@as(usize, 8), ed.cursorOffset()); // start of "ccc"
+    try t.expectEqual(@as(usize, 8), ed.cursorOffset()); // exact "ccc", not line start 4
 }
 
 test "wasm plugins: consult-imenu picks a definition and jumps to it" {

@@ -110,8 +110,8 @@ extern void host_file_write(const char *path, int path_len, const char *content,
 // The text of the active buffer's current line (at the cursor) — a prompt line.
 __attribute__((import_module("weft"), import_name("qjs_line_text")))
 extern int host_line_text(char *out, int cap);
-// Open a pick (prompt + newline-joined options); the accepted index comes back
-// via weft_on_pick. An async approve/deny for a permission request.
+// Open a pick (prompt + newline-joined options); the structured acceptance
+// comes back via weft_on_pick. An async approve/deny for a permission request.
 __attribute__((import_module("weft"), import_name("qjs_pick")))
 extern void host_pick(const char *prompt, int plen, const char *opts, int olen);
 // Set the status-line chip (the "● agent · waiting" indicator). "" clears it.
@@ -719,8 +719,9 @@ static JSValue js_on_output(JSContext *ctx, JSValueConst this_val,
     return JS_UNDEFINED;
 }
 
-// weft.pick(prompt, options): options is a newline-joined list; the accepted
-// index (or -1 for free text) comes back to weft.onPick's handler.
+// weft.pick(prompt, options): options is a newline-joined list. Empty rows are
+// retained, so the candidate index is the original line ordinal. The handler
+// receives one object describing candidate/input/cancelled acceptance.
 static JSValue js_pick(JSContext *ctx, JSValueConst this_val,
                        int argc, JSValueConst *argv) {
     if (argc < 2) return JS_UNDEFINED;
@@ -744,7 +745,7 @@ static JSValue js_status(JSContext *ctx, JSValueConst this_val,
     return JS_UNDEFINED;
 }
 
-// weft.onPick(fn): register the handler fired with the accepted option index.
+// weft.onPick(fn): register the handler fired with a structured pick outcome.
 static JSValue js_on_pick(JSContext *ctx, JSValueConst this_val,
                           int argc, JSValueConst *argv) {
     if (argc < 1 || !JS_IsFunction(ctx, argv[0])) return JS_UNDEFINED;
@@ -825,11 +826,32 @@ void weft_on_output(int handle) {
     JS_FreeValue(g_ctx, arg);
 }
 
-// weft_on_pick(index): dispatch the accepted pick option index (-1 = free text).
+// weft_on_pick(kind, index, text, text_len, query, query_len, match_start,
+//              match_span): dispatch one structured pick outcome. kind is
+// 0=candidate, 1=input, 2=cancelled.
 __attribute__((export_name("weft_on_pick")))
-void weft_on_pick(int index) {
+void weft_on_pick(int kind, int index, const char *text, int text_len,
+                  const char *query, int query_len, int match_start,
+                  int match_span) {
     if (!g_ctx || !JS_IsFunction(g_ctx, g_on_pick)) return;
-    JSValue arg = JS_NewInt32(g_ctx, index);
+    JSValue arg = JS_NewObject(g_ctx);
+    const char *text_ptr = text ? text : "";
+    const char *query_ptr = query ? query : "";
+    if (kind == 0) {
+        JS_SetPropertyStr(g_ctx, arg, "kind", JS_NewString(g_ctx, "candidate"));
+        JS_SetPropertyStr(g_ctx, arg, "index", JS_NewInt32(g_ctx, index));
+        JS_SetPropertyStr(g_ctx, arg, "text", JS_NewStringLen(g_ctx, text_ptr, (size_t)(text_len < 0 ? 0 : text_len)));
+        JS_SetPropertyStr(g_ctx, arg, "query", JS_NewStringLen(g_ctx, query_ptr, (size_t)(query_len < 0 ? 0 : query_len)));
+        JSValue match = JS_NewObject(g_ctx);
+        JS_SetPropertyStr(g_ctx, match, "start", JS_NewInt32(g_ctx, match_start));
+        JS_SetPropertyStr(g_ctx, match, "span", JS_NewInt32(g_ctx, match_span));
+        JS_SetPropertyStr(g_ctx, arg, "match", match);
+    } else if (kind == 1) {
+        JS_SetPropertyStr(g_ctx, arg, "kind", JS_NewString(g_ctx, "input"));
+        JS_SetPropertyStr(g_ctx, arg, "text", JS_NewStringLen(g_ctx, text_ptr, (size_t)(text_len < 0 ? 0 : text_len)));
+    } else {
+        JS_SetPropertyStr(g_ctx, arg, "kind", JS_NewString(g_ctx, "cancelled"));
+    }
     JSValue r = JS_Call(g_ctx, g_on_pick, JS_UNDEFINED, 1, &arg);
     if (JS_IsException(r)) log_exception(g_ctx);
     JS_FreeValue(g_ctx, r);

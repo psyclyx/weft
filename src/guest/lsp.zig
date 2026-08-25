@@ -167,13 +167,22 @@ export fn on_activate() void {
 
 /// A pick entry was chosen: a location jump, or the rename name.
 export fn on_pick_accept(pick_id: u32) void {
+    var outcome = (weft.pickOutcome(weft.allocator) catch return) orelse return;
+    defer outcome.deinit(weft.allocator);
     if (pick_id == pick_id_results) {
-        const idx = weft.pickChoiceIndex() orelse return;
+        const idx = switch (outcome) {
+            .candidate => |candidate| candidate.index,
+            .input, .cancelled => return,
+        };
         if (idx < pick_n) weft.jump(pick_offsets[idx]);
         return;
     }
     if (pick_id == pick_id_rename) {
-        const name = weft.pickChoice(); // borrows scratch — copy before posOf/params
+        const name = switch (outcome) {
+            .candidate => |candidate| candidate.text,
+            .input => |input| input,
+            .cancelled => return,
+        }; // owned by `outcome` until this callback returns
         if (name.len == 0) return;
         rename_nlen = @min(name.len, rename_name.len);
         @memcpy(rename_name[0..rename_nlen], name[0..rename_nlen]);

@@ -33,7 +33,12 @@ export fn on_command(id: u32) void {
 }
 export fn on_pick_accept(pick_id: u32) void {
     if (pick_id != buf_pick) return;
-    const i = weft.pickChoiceIndex() orelse return;
+    var outcome = (weft.pickOutcome(weft.allocator) catch return) orelse return;
+    defer outcome.deinit(weft.allocator);
+    const i = switch (outcome) {
+        .candidate => |candidate| candidate.index,
+        .input, .cancelled => return,
+    };
     if (i < n_rows) weft.runInt("buffer-switch", ids[i]);
 }
 

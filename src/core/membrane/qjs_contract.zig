@@ -99,7 +99,7 @@ pub const imports = [_]Entry{
     e("qjs_file_read", 4, 1, .plugin, "weft.fileRead(path): the file's live-buffer-or-disk content for an agent read"),
     e("qjs_file_write", 6, 0, .plugin, "weft.fileWrite(path, content): replace the buffer for `path`, authored as the agent peer"),
     e("qjs_line_text", 2, 1, .plugin, "weft.lineText(): the active buffer's current line"),
-    e("qjs_pick", 4, 0, .plugin, "weft.pick(prompt, options): open a pick bound to this JS plugin"),
+    e("qjs_pick", 4, 0, .plugin, "weft.pick(prompt, options): open a pick bound to this JS plugin; onPick receives candidate/input/cancelled outcome"),
     e("qjs_status", 2, 0, .plugin, "weft.status(text): set the generic plugin status chip"),
 };
 

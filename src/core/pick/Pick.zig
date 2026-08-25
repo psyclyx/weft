@@ -31,6 +31,7 @@ const Style = match.Style;
 
 const types = @import("types.zig");
 const Acceptor = types.Acceptor;
+const Outcome = types.Outcome;
 const Source = types.Source;
 const Options = types.Options;
 const Entry = types.Entry;
@@ -38,6 +39,10 @@ const Entry = types.Entry;
 const Pick = @This();
 
 active: bool = false,
+/// Set only while the owning head is being torn down. Cancellation handlers
+/// may normally open a replacement picker; termination closes that door so no
+/// callback can be installed after its plugin/context has begun to die.
+terminating: bool = false,
 prompt: []u8 = &.{},
 items: std.ArrayList([]u8) = .empty,
 /// Parallel to `items`: display-only docstrings ("" when none).
@@ -49,16 +54,6 @@ query: std.ArrayList(u8) = .empty,
 /// Indices into `items`, filtered by `query`, rank order.
 filtered: std.ArrayList(u32) = .empty,
 selected: usize = 0,
-/// The add-order index of the accepted candidate, captured at accept time
-/// (before `close` clears `filtered`/`selected`). Null when the typed text
-/// was accepted (free-text). A source plugin reads it to resolve the choice
-/// to a position it stamped at add time — robust even with duplicate rows.
-accepted_index: ?usize = null,
-/// The byte offset of the selected candidate's match against the accepted
-/// query. Like `accepted_index`, this is captured before close clears the
-/// transient pick state so an acceptor can resolve a search to the actual
-/// match rather than merely the candidate's display anchor.
-accepted_match_start: ?usize = null,
 acceptor: ?Acceptor = null,
 prev_mode: []u8 = &.{},
 /// Accept the typed query, not only a candidate (see `Options`).
@@ -91,6 +86,10 @@ const Frec = struct { uses: u32, last: u64 };
 pub const empty: Pick = .{};
 
 pub fn deinit(self: *Pick, gpa: Allocator) void {
+    // A live acceptor needs a command.Context so it can observe cancellation.
+    // Owners must call terminate before destroying that context;
+    // silently clearing it here would violate the terminal-event contract.
+    std.debug.assert(self.acceptor == null);
     self.clear(gpa);
     var it = self.frecency.keyIterator();
     while (it.next()) |k| gpa.free(k.*);
@@ -109,9 +108,25 @@ pub fn deinit(self: *Pick, gpa: Allocator) void {
 /// swap cancels it here, then lands the mode via the target system's own
 /// resting rule, not via this pick's `prev_mode`, which named a mode in the
 /// system being left).
-pub fn cancelActive(self: *Pick, gpa: Allocator) void {
+pub fn cancelActive(self: *Pick, ctx: *command.Context) void {
     if (!self.active) return;
-    self.clear(gpa);
+    const acceptor = self.acceptor.?;
+    self.acceptor = null;
+    self.clear(ctx.gpa);
+    defer if (acceptor.cleanup) |cleanup| cleanup(acceptor.data, ctx.gpa);
+    acceptor.handler(ctx, acceptor.data, .cancelled) catch |err| {
+        std.log.warn("pick: cancellation handler failed: {t}", .{err});
+    };
+}
+
+/// Permanently end picker interaction for an owning head that is about to be
+/// destroyed. Unlike ordinary cancellation, this rejects a replacement opened
+/// reentrantly by the cancellation handler. Idempotent so layered owners may
+/// each establish the invariant before releasing their own callback targets.
+pub fn terminate(self: *Pick, ctx: *command.Context) void {
+    self.terminating = true;
+    self.cancelActive(ctx);
+    std.debug.assert(!self.active and self.acceptor == null);
 }
 
 fn clear(self: *Pick, gpa: Allocator) void {
@@ -186,10 +201,18 @@ pub fn openWith(
     errdefer if (opts.source) |s| {
         if (s.close) |f| f(s.data, gpa);
     };
-    if (self.active) self.clear(gpa);
+    if (self.terminating) return error.PickTerminating;
+    if (self.active) {
+        try self.finish(ctx, .cancelled);
+        // The displaced pick's callback is arbitrary plugin code. It may have
+        // begun head termination even when it did not leave a replacement
+        // active, so re-check the lifetime gate before this older open commits.
+        if (self.terminating) return error.PickTerminating;
+        // A cancellation handler may legitimately open a replacement of its
+        // own. Do not silently trample that new session with this older open.
+        if (self.active) return error.PickOpenedDuringCancellation;
+    }
     self.prompt = try gpa.dupe(u8, prompt);
-    self.accepted_index = null;
-    self.accepted_match_start = null;
     for (entries) |e| {
         const owned = try gpa.dupe(u8, e.text);
         errdefer gpa.free(owned);
@@ -284,23 +307,26 @@ pub fn appendItems(
     }
 }
 
-fn close(self: *Pick, ctx: *command.Context) !void {
-    const prev = try ctx.gpa.dupe(u8, self.prev_mode);
-    defer ctx.gpa.free(prev);
-    self.clear(ctx.gpa);
+fn prepareClose(self: *Pick, ctx: *command.Context) ![]u8 {
     // mechanism-not-policy (task #19 item 3): Pick's own save/restore — see
     // `openWith`'s comment above for why this bypasses the door.
     // If the pick was opened from a menu (e.g. the palette from leader),
     // restoring prev_mode would leave the user stuck in the menu. Pop to the
     // menu's one-shot return target instead — the pick bypasses the keymap
     // dispatch site, so this is where that class of stickiness is fixed.
-    if (ctx.keymap.isMenuMode(prev)) {
-        if (ctx.head.menuReturn(prev)) |ret| {
-            try ctx.head.setModeRaw(ctx.gpa, ret);
-            return;
-        }
-    }
-    try ctx.head.setModeRaw(ctx.gpa, prev);
+    const restore = if (ctx.keymap.isMenuMode(self.prev_mode))
+        ctx.head.menuReturn(self.prev_mode) orelse self.prev_mode
+    else
+        self.prev_mode;
+    // Prepare the whole fallible transition before clearing the live picker.
+    // Once clear commits, mode restore is an owned-pointer swap and cannot
+    // strand a vanished picker in "pick" mode or lose its terminal event.
+    return ctx.gpa.dupe(u8, restore);
+}
+
+fn commitClose(self: *Pick, ctx: *command.Context, owned_restore: []u8) void {
+    self.clear(ctx.gpa);
+    ctx.head.setModeRawOwned(ctx.gpa, owned_restore);
 }
 
 /// Dismiss a live picker through its ordinary lifecycle: close its source and
@@ -309,13 +335,7 @@ fn close(self: *Pick, ctx: *command.Context) !void {
 /// completion after a buffer switch). This is UI lifecycle, not input policy;
 /// key bindings still invoke the same operation through `pick-cancel`.
 pub fn dismiss(self: *Pick, ctx: *command.Context) !void {
-    if (self.active) {
-        // No accept callback follows a dismissal, so accepted metadata from a
-        // prior pick must not remain observable through the next host query.
-        self.accepted_index = null;
-        self.accepted_match_start = null;
-        try self.close(ctx);
-    }
+    if (self.active) try self.finish(ctx, .cancelled);
 }
 
 fn frecOf(self: *const Pick, text: []const u8) Frec {
@@ -592,18 +612,51 @@ fn cComplete(ctx: *command.Context, args: struct {}) anyerror!Value {
     return .nil;
 }
 
-/// Accept `text` as the choice: hand the acceptor a stable copy and
-/// close FIRST (the acceptor may open another pick), then run it. The
-/// close-before-call dance is the whole reason this is factored out.
-fn acceptText(p: *Pick, ctx: *command.Context, text: []const u8) !void {
-    const choice = try ctx.gpa.dupe(u8, text);
-    defer ctx.gpa.free(choice);
-    p.recordUse(ctx.gpa, text);
+/// Finish one pick with an immutable callback-scoped result. The picker is
+/// closed before dispatch so a handler may open another pick safely. Unlike
+/// the old accepted_* fields, no result survives on mutable `Pick` state.
+fn finish(p: *Pick, ctx: *command.Context, outcome: Outcome) !void {
+    var owned_text: ?[]u8 = null;
+    defer if (owned_text) |text| ctx.gpa.free(text);
+    var owned_query: ?[]u8 = null;
+    defer if (owned_query) |query| ctx.gpa.free(query);
+
+    const stable: Outcome = switch (outcome) {
+        .cancelled => .cancelled,
+        .input => |input| blk: {
+            const text = try ctx.gpa.dupe(u8, input);
+            owned_text = text;
+            break :blk .{ .input = text };
+        },
+        .candidate => |candidate| blk: {
+            const text = try ctx.gpa.dupe(u8, candidate.text);
+            owned_text = text;
+            const query = try ctx.gpa.dupe(u8, candidate.query);
+            owned_query = query;
+            break :blk .{ .candidate = .{
+                .index = candidate.index,
+                .text = text,
+                .query = query,
+                .match = candidate.match,
+            } };
+        },
+    };
     const acceptor = p.acceptor.?;
-    p.acceptor = null; // close() must not run cleanup before the call
-    try p.close(ctx);
-    defer if (acceptor.cleanup) |f| f(acceptor.data, ctx.gpa);
-    try acceptor.handler(ctx, acceptor.data, choice);
+    p.acceptor = null; // close() must not run cleanup before the callback
+    const owned_restore = p.prepareClose(ctx) catch |err| {
+        // prepareClose performs the only fallible close work, so failure
+        // means this exact interaction is still live and can regain ownership.
+        std.debug.assert(p.active);
+        p.acceptor = acceptor;
+        return err;
+    };
+    // All fallible close work is complete, while the originating prompt is
+    // still live. Ranking can now commit under the correct prompt namespace;
+    // commitClose itself is an infallible owned-pointer swap.
+    if (stable.text()) |text| p.recordUse(ctx.gpa, text);
+    p.commitClose(ctx, owned_restore);
+    defer if (acceptor.cleanup) |cleanup| cleanup(acceptor.data, ctx.gpa);
+    try acceptor.handler(ctx, acceptor.data, stable);
 }
 
 fn cAccept(ctx: *command.Context, args: struct {}) anyerror!Value {
@@ -611,17 +664,18 @@ fn cAccept(ctx: *command.Context, args: struct {}) anyerror!Value {
     const p = pickOf(ctx);
     if (!p.active) return .nil;
     if (p.selection()) |sel| {
-        p.accepted_index = p.filtered.items[p.selected]; // capture before close clears it
-        p.accepted_match_start = matchScore(p.style, p.query.items, sel).?.start;
-        try acceptText(p, ctx, sel);
+        const index = p.filtered.items[p.selected];
+        const matched = matchScore(p.style, p.query.items, sel).?;
+        try p.finish(ctx, .{ .candidate = .{
+            .index = index,
+            .text = sel,
+            .query = p.query.items,
+            .match = .{ .start = matched.start, .span = matched.span },
+        } });
     } else if (p.allow_free_text and p.query.items.len > 0) {
-        p.accepted_index = null; // free text — no candidate
-        p.accepted_match_start = null;
-        try acceptText(p, ctx, p.query.items);
+        try p.finish(ctx, .{ .input = p.query.items });
     } else {
-        p.accepted_index = null;
-        p.accepted_match_start = null;
-        try p.close(ctx);
+        try p.finish(ctx, .cancelled);
     }
     return .nil;
 }
@@ -634,9 +688,7 @@ fn cAcceptInput(ctx: *command.Context, args: struct {}) anyerror!Value {
     const p = pickOf(ctx);
     if (!p.active) return .nil;
     if (p.allow_free_text and p.query.items.len > 0) {
-        p.accepted_index = null; // verbatim typed text — no candidate
-        p.accepted_match_start = null;
-        try acceptText(p, ctx, p.query.items);
+        try p.finish(ctx, .{ .input = p.query.items });
         return .nil;
     }
     return cAccept(ctx, .{});
@@ -658,8 +710,9 @@ fn cPalette(ctx: *command.Context, args: struct {}) anyerror!Value {
     return .nil;
 }
 
-fn runChoice(ctx: *command.Context, data: ?*anyopaque, choice: []const u8) anyerror!void {
+fn runChoice(ctx: *command.Context, data: ?*anyopaque, outcome: Outcome) anyerror!void {
     _ = data;
+    const choice = outcome.text() orelse return;
     _ = command.run(ctx.commands, ctx, choice, &.{}) catch |err| {
         std.log.warn("palette: {s} failed: {t}", .{ choice, err });
     };
@@ -824,6 +877,8 @@ const TestEnv = struct {
 
     fn deinit(self: *TestEnv) void {
         const gpa = self.gpa;
+        var pick_ctx = self.ctx();
+        self.head.pick.terminate(&pick_ctx);
         self.head.deinit(gpa);
         self.actions.deinit();
         self.caps.deinit();
@@ -839,13 +894,276 @@ const TestEnv = struct {
 const Sink = struct {
     got: std.ArrayList(u8) = .empty,
     called: bool = false,
-    fn accept(ctx: *command.Context, data: ?*anyopaque, choice: []const u8) anyerror!void {
+    cancelled: bool = false,
+    fn accept(ctx: *command.Context, data: ?*anyopaque, outcome: Outcome) anyerror!void {
         const s: *Sink = @ptrCast(@alignCast(data.?));
         s.called = true;
+        if (outcome == .cancelled) {
+            s.cancelled = true;
+            return;
+        }
+        const choice = outcome.text().?;
         s.got.clearRetainingCapacity();
         try s.got.appendSlice(ctx.gpa, choice);
     }
 };
+
+test "pick: acceptance is one immutable callback value and is reentrant" {
+    const gpa = t.allocator;
+    const env = try TestEnv.init(gpa);
+    defer env.deinit();
+    var ctx = env.ctx();
+
+    const Probe = struct {
+        intact_after_nested_open: bool = false,
+        cancelled: usize = 0,
+        cleanups: usize = 0,
+
+        fn handle(c: *command.Context, data: ?*anyopaque, outcome: Outcome) anyerror!void {
+            const self: *@This() = @ptrCast(@alignCast(data.?));
+            switch (outcome) {
+                .cancelled => {
+                    self.cancelled += 1;
+                    return;
+                },
+                .input => return error.TestUnexpectedResult,
+                .candidate => |candidate| {
+                    try t.expectEqual(@as(usize, 1), candidate.index);
+                    try t.expectEqualStrings("    ALICE_SLOT", candidate.text);
+                    try t.expectEqualStrings("ALICE_SLOT", candidate.query);
+                    try t.expectEqual(@as(usize, 4), candidate.match.start);
+                    try t.expectEqual(@as(usize, 10), candidate.match.span);
+
+                    // The old mutable-side-channel design lost these facts
+                    // here: opening a nested pick reset Head.pick's accepted
+                    // fields. A value argument remains the outer event.
+                    try c.head.pick.open(c, "nested", &.{.{ .text = "next" }}, .{
+                        .handler = handle,
+                        .cleanup = cleanup,
+                        .data = self,
+                    });
+                    self.intact_after_nested_open =
+                        candidate.index == 1 and
+                        std.mem.eql(u8, candidate.text, "    ALICE_SLOT") and
+                        candidate.match.start == 4;
+                },
+            }
+        }
+
+        fn cleanup(data: ?*anyopaque, _: Allocator) void {
+            const self: *@This() = @ptrCast(@alignCast(data.?));
+            self.cleanups += 1;
+        }
+    };
+
+    var probe: Probe = .{};
+    try env.head.pick.open(&ctx, "line", &.{
+        .{ .text = "other" },
+        .{ .text = "    ALICE_SLOT" },
+    }, .{ .handler = Probe.handle, .cleanup = Probe.cleanup, .data = &probe });
+    _ = try cInput(&ctx, .{ .text = "ALICE_SLOT" });
+    _ = try cAccept(&ctx, .{});
+    try t.expect(probe.intact_after_nested_open);
+    try t.expectEqual(@as(usize, 1), probe.cleanups); // outer only
+    try t.expect(env.head.pick.active); // nested pick opened successfully
+
+    try env.head.pick.dismiss(&ctx);
+    try t.expectEqual(@as(usize, 1), probe.cancelled);
+    try t.expectEqual(@as(usize, 2), probe.cleanups);
+}
+
+test "pick: replacement explicitly cancels and cleans the displaced session" {
+    const gpa = t.allocator;
+    const env = try TestEnv.init(gpa);
+    defer env.deinit();
+    var ctx = env.ctx();
+
+    const Probe = struct {
+        cancelled: usize = 0,
+        cleaned: usize = 0,
+        fn handle(_: *command.Context, data: ?*anyopaque, outcome: Outcome) anyerror!void {
+            const self: *@This() = @ptrCast(@alignCast(data.?));
+            if (outcome == .cancelled) self.cancelled += 1;
+        }
+        fn cleanup(data: ?*anyopaque, _: Allocator) void {
+            const self: *@This() = @ptrCast(@alignCast(data.?));
+            self.cleaned += 1;
+        }
+    };
+    var first: Probe = .{};
+    var second: Probe = .{};
+    try env.head.pick.open(&ctx, "first", &.{.{ .text = "one" }}, .{
+        .handler = Probe.handle,
+        .cleanup = Probe.cleanup,
+        .data = &first,
+    });
+    try env.head.pick.open(&ctx, "second", &.{.{ .text = "two" }}, .{
+        .handler = Probe.handle,
+        .cleanup = Probe.cleanup,
+        .data = &second,
+    });
+    try t.expectEqual(@as(usize, 1), first.cancelled);
+    try t.expectEqual(@as(usize, 1), first.cleaned);
+    try t.expectEqualStrings("second", env.head.pick.prompt);
+    try env.head.pick.dismiss(&ctx);
+    try t.expectEqual(@as(usize, 1), second.cancelled);
+    try t.expectEqual(@as(usize, 1), second.cleaned);
+}
+
+test "pick: termination rejects a picker reopened by cancellation" {
+    const gpa = t.allocator;
+    const env = try TestEnv.init(gpa);
+    defer env.deinit();
+    var ctx = env.ctx();
+
+    const Probe = struct {
+        cancellations: usize = 0,
+        cleanups: usize = 0,
+        replacement_rejected: bool = false,
+
+        fn replacement(_: *command.Context, _: ?*anyopaque, _: Outcome) anyerror!void {}
+
+        fn handle(ctx_: *command.Context, data: ?*anyopaque, outcome: Outcome) anyerror!void {
+            const self: *@This() = @ptrCast(@alignCast(data.?));
+            if (outcome != .cancelled) return;
+            self.cancellations += 1;
+            ctx_.head.pick.open(ctx_, "replacement", &.{.{ .text = "late" }}, .{
+                .handler = replacement,
+            }) catch |err| {
+                if (err == error.PickTerminating) {
+                    self.replacement_rejected = true;
+                    return;
+                }
+                return err;
+            };
+        }
+
+        fn cleanup(data: ?*anyopaque, _: Allocator) void {
+            const self: *@This() = @ptrCast(@alignCast(data.?));
+            self.cleanups += 1;
+        }
+    };
+
+    var probe: Probe = .{};
+    try env.head.pick.open(&ctx, "leaving", &.{.{ .text = "one" }}, .{
+        .handler = Probe.handle,
+        .cleanup = Probe.cleanup,
+        .data = &probe,
+    });
+    env.head.pick.terminate(&ctx);
+    try t.expect(probe.replacement_rejected);
+    try t.expectEqual(@as(usize, 1), probe.cancellations);
+    try t.expectEqual(@as(usize, 1), probe.cleanups);
+    try t.expect(!env.head.pick.active);
+    try t.expect(env.head.pick.acceptor == null);
+}
+
+test "pick: replacement cannot resume after cancellation begins termination" {
+    const gpa = t.allocator;
+    const env = try TestEnv.init(gpa);
+    defer env.deinit();
+    var ctx = env.ctx();
+
+    const Probe = struct {
+        cancellations: usize = 0,
+        cleanups: usize = 0,
+
+        fn handle(ctx_: *command.Context, data: ?*anyopaque, outcome: Outcome) anyerror!void {
+            const self: *@This() = @ptrCast(@alignCast(data.?));
+            if (outcome != .cancelled) return;
+            self.cancellations += 1;
+            ctx_.head.pick.terminate(ctx_);
+        }
+
+        fn replacement(_: *command.Context, _: ?*anyopaque, _: Outcome) anyerror!void {}
+
+        fn cleanup(data: ?*anyopaque, _: Allocator) void {
+            const self: *@This() = @ptrCast(@alignCast(data.?));
+            self.cleanups += 1;
+        }
+    };
+
+    var probe: Probe = .{};
+    try env.head.pick.open(&ctx, "first", &.{.{ .text = "one" }}, .{
+        .handler = Probe.handle,
+        .cleanup = Probe.cleanup,
+        .data = &probe,
+    });
+    try t.expectError(error.PickTerminating, env.head.pick.open(
+        &ctx,
+        "too late",
+        &.{.{ .text = "two" }},
+        .{ .handler = Probe.replacement },
+    ));
+    try t.expectEqual(@as(usize, 1), probe.cancellations);
+    try t.expectEqual(@as(usize, 1), probe.cleanups);
+    try t.expect(!env.head.pick.active);
+    try t.expect(env.head.pick.acceptor == null);
+}
+
+test "pick: acceptance records frecency under its originating prompt" {
+    const gpa = t.allocator;
+    const env = try TestEnv.init(gpa);
+    defer env.deinit();
+    var ctx = env.ctx();
+
+    const Probe = struct {
+        fn handle(_: *command.Context, _: ?*anyopaque, _: Outcome) anyerror!void {}
+    };
+    try env.head.pick.open(&ctx, "buffers", &.{.{ .text = "scratch" }}, .{
+        .handler = Probe.handle,
+    });
+    _ = try cAccept(&ctx, .{});
+
+    const namespaced = env.head.pick.frecency.get("buffers\x00scratch") orelse
+        return error.TestUnexpectedResult;
+    try t.expectEqual(@as(u32, 1), namespaced.uses);
+    try t.expect(env.head.pick.frecency.get("\x00scratch") == null);
+}
+
+test "pick: close allocation failure keeps the live acceptor owned" {
+    const gpa = t.allocator;
+    const env = try TestEnv.init(gpa);
+    defer env.deinit();
+    var ctx = env.ctx();
+
+    const Probe = struct {
+        calls: usize = 0,
+        cleanups: usize = 0,
+        fn handle(_: *command.Context, data: ?*anyopaque, _: Outcome) anyerror!void {
+            const self: *@This() = @ptrCast(@alignCast(data.?));
+            self.calls += 1;
+        }
+        fn cleanup(data: ?*anyopaque, _: Allocator) void {
+            const self: *@This() = @ptrCast(@alignCast(data.?));
+            self.cleanups += 1;
+        }
+    };
+    var probe: Probe = .{};
+    try env.head.setModeRaw(gpa, "normal");
+    try env.head.pick.open(&ctx, "line", &.{.{ .text = "    target" }}, .{
+        .handler = Probe.handle,
+        .cleanup = Probe.cleanup,
+        .data = &probe,
+    });
+    _ = try cInput(&ctx, .{ .text = "target" });
+
+    // finish owns two stable string copies before close duplicates prev_mode;
+    // fail that third allocation. The session must remain live with the same
+    // acceptor instead of becoming an active picker which can never finish.
+    var failing = std.testing.FailingAllocator.init(gpa, .{ .fail_index = 2 });
+    var failing_ctx = ctx;
+    failing_ctx.gpa = failing.allocator();
+    try t.expectError(error.OutOfMemory, cAccept(&failing_ctx, .{}));
+    try t.expect(env.head.pick.active);
+    try t.expect(env.head.pick.acceptor != null);
+    try t.expectEqual(@as(usize, 0), probe.calls);
+    try t.expectEqual(@as(usize, 0), probe.cleanups);
+
+    try env.head.pick.dismiss(&ctx);
+    try t.expectEqual(@as(usize, 1), probe.calls);
+    try t.expectEqual(@as(usize, 1), probe.cleanups);
+}
 
 test "pick: free-text accept — typed query when nothing matches" {
     const gpa = t.allocator;
@@ -881,7 +1199,8 @@ test "pick: free-text off — no candidate means no acceptance" {
     });
     _ = try cInput(&ctx, .{ .text = "zzz" });
     _ = try cAccept(&ctx, .{});
-    try t.expect(!sink.called);
+    try t.expect(sink.called);
+    try t.expect(sink.cancelled);
     try t.expect(!env.head.pick.active);
 }
 

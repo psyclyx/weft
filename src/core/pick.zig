@@ -35,6 +35,12 @@ pub const Pool = @import("pick/Pool.zig");
 
 /// The accept callback handed to `open`.
 pub const Acceptor = types.Acceptor;
+/// Match evidence captured with an accepted candidate.
+pub const Match = types.Match;
+/// An accepted candidate: identity, presentation, query, and match facts.
+pub const Candidate = types.Candidate;
+/// A pick's terminal accepted/cancelled event.
+pub const Outcome = types.Outcome;
 /// An async candidate producer driven by the picker's per-frame `tick`.
 pub const Source = types.Source;
 /// Options for `openWith` (free-text accept, an async source, a style).

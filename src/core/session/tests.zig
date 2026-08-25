@@ -893,8 +893,10 @@ test "hub: three-way convergence, presence relay, reconnect rebind" {
     }
     try t.expect(found_alice);
 
-    // Reconnect: alice's link dies; a fresh pair rebinjds both ends and
+    // Reconnect: alice's link dies; a fresh pair rebinds both ends and
     // a post-reconnect edit converges (resync = frontier exchange).
+    const old_incarnation = sa.incarnation();
+    try t.expectEqual(old_incarnation, sa.incarnation());
     sa.destroy();
     const fa2 = try socketPair();
     var la2_h: FdLink = .{ .fd = fa2[0] };
@@ -903,6 +905,8 @@ test "hub: three-way convergence, presence relay, reconnect rebind" {
     defer sh_a2.destroy();
     sa = try Session.create(gpa, la2_c.link(), .client, "tok", .own, null);
     defer sa.destroy();
+    const new_incarnation = sa.incarnation();
+    try t.expect(!std.mem.eql(u8, &old_incarnation, &new_incarnation));
     ch_a.rebind(sh_a2);
     ca.rebind(sa);
 

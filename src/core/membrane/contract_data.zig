@@ -115,11 +115,11 @@ pub const Entry = struct {
     ///     `wl_flash`, every `wl_style*`/`wl_fold*`/`wl_readonly*`/
     ///     `wl_decorate*`) — cursor/selection/document content live on
     ///     `Editor`, not `Head`; flash/styles/folds are buffer layers.
-    ///   - reads of head state (`wl_pick_choice`, `wl_pick_choice_index`,
-    ///     `wl_menu_binding_*`) — `on_menu`'s whole job is reading `Head`
-    ///     through a BACKGROUND entry to render which-key; gating reads
-    ///     would break it. Only MUTATION is gated, mirroring `requirePerm`'s
-    ///     effects-only scope.
+    ///   - reads of head state (`wl_menu_binding_*`) and callback-local
+    ///     values (`wl_pick_outcome_*`) — `on_menu`'s whole job is reading
+    ///     `Head` through a BACKGROUND entry to render which-key; outcome
+    ///     reads simply report no value outside their callback. Only MUTATION
+    ///     is gated, mirroring `requirePerm`'s effects-only scope.
     /// A `true` entry is NOT blanket-denied outside dispatch, though: it is
     /// also legal during the one-time `describe()`/`init()` load handshake
     /// (`WasmPlugin.loading`'s doc) — `wl_set_mode` specifically is exactly
@@ -234,9 +234,12 @@ pub const imports = [_]Entry{
     .{ .name = "wl_pick_add", .params = &.{ .u32, .u32, .u32, .u32 }, .results = &.{}, .group = .pick, .doc = "add a candidate (text, detail) to the pick being built" },
     .{ .name = "wl_pick_end", .params = &.{}, .results = &.{}, .group = .pick, .head_gated = true, .doc = "open the pick built so far" },
     .{ .name = "wl_open_file_pick", .params = &.{ .u32, .u32, .u32, .u32, .u32 }, .results = &.{}, .group = .pick, .head_gated = true, .doc = "open a file-tree pick rooted at `root`" },
-    .{ .name = "wl_pick_choice", .params = &.{ .u32, .u32 }, .results = &.{.i32}, .group = .pick, .doc = "the accepted pick's text, into guest memory" },
-    .{ .name = "wl_pick_choice_index", .params = &.{}, .results = &.{.i32}, .group = .pick, .doc = "the accepted candidate's add-order index, or -1 for free-text" },
-    .{ .name = "wl_pick_choice_match_start", .params = &.{}, .results = &.{.i32}, .group = .pick, .doc = "the accepted candidate's byte match start, or -1 for free-text" },
+    .{ .name = "wl_pick_outcome_kind", .params = &.{}, .results = &.{.i32}, .group = .pick, .doc = "callback-scoped pick outcome: 0 cancelled, 1 input, 2 candidate, -1 outside callback" },
+    .{ .name = "wl_pick_outcome_text", .params = &.{ .u32, .u32 }, .results = &.{.i32}, .group = .pick, .doc = "exact callback-scoped accepted text; cap=0 reports length, short destinations return -2" },
+    .{ .name = "wl_pick_outcome_query", .params = &.{ .u32, .u32 }, .results = &.{.i32}, .group = .pick, .doc = "exact accepted-candidate query; cap=0 reports length, short destinations return -2" },
+    .{ .name = "wl_pick_outcome_index", .params = &.{}, .results = &.{.i32}, .group = .pick, .doc = "the accepted candidate's add-order identity, or -1" },
+    .{ .name = "wl_pick_outcome_match_start", .params = &.{}, .results = &.{.i32}, .group = .pick, .doc = "the accepted candidate's candidate-relative byte match start, or -1" },
+    .{ .name = "wl_pick_outcome_match_span", .params = &.{}, .results = &.{.i32}, .group = .pick, .doc = "the accepted candidate's byte match span, or -1" },
 
     // ── menu.zig — which-key style menu-mode binding introspection ─────
     .{ .name = "wl_menu_binding_count", .params = &.{}, .results = &.{.i32}, .group = .menu, .doc = "the current menu mode's binding-table entry count" },
@@ -381,7 +384,7 @@ pub const imports = [_]Entry{
 /// half-finished edit — fails the build with a pointed message instead of
 /// silently drifting the two ~124-entry tables apart again (the exact class
 /// this table exists to kill).
-const expected_import_count = 172;
+const expected_import_count = 175;
 
 /// A host→guest EXPORT entrypoint (design doc/north-star-plan.md §2.5, task
 /// W0a-D extension 2): every `instance.callVoid("name", args)` the host

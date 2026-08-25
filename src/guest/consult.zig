@@ -33,7 +33,13 @@ export fn on_command(id: u32) void {
 }
 export fn on_pick_accept(pick_id: u32) void {
     if (pick_id != line_pick and pick_id != sym_pick) return;
-    const i = weft.pickChoiceIndex() orelse return; // free text → ignore
+    var outcome = (weft.pickOutcome(weft.allocator) catch return) orelse return;
+    defer outcome.deinit(weft.allocator);
+    const candidate = switch (outcome) {
+        .candidate => |candidate| candidate,
+        .input, .cancelled => return,
+    };
+    const i = candidate.index;
     if (i < n_rows) {
         // A line candidate is presentation-sized, but the pick owns the
         // actual match location. Resolve that location at the accept boundary
@@ -44,14 +50,14 @@ export fn on_pick_accept(pick_id: u32) void {
         // record a semantic target directly; their display text is not the
         // target's coordinate system and must not inherit this adjustment.
         const match_start = if (pick_id == line_pick)
-            (weft.pickChoiceMatchStart() orelse 0)
+            candidate.match.start
         else
             0;
         weft.jump(starts[i] + match_start);
     }
 }
 
-/// Fuzzy-pick a line in the current buffer and jump to its start.
+/// Fuzzy-pick a line in the current buffer and jump to the accepted match.
 fn consultLine() void {
     n_rows = 0;
     weft.pickBegin("line", line_pick);

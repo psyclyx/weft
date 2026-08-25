@@ -1,6 +1,6 @@
 //! The pick membrane: a guest accumulates items between begin/end then opens a
-//! pick whose accept trampolines back into its on_pick_accept; plus the file
-//! pick door (a local finder source) and the accepted choice/index reads.
+//! pick whose terminal outcome trampolines back into `on_pick_accept`; plus
+//! the file-pick door and callback-scoped outcome reads.
 
 const std = @import("std");
 const Allocator = std.mem.Allocator;
@@ -102,51 +102,123 @@ pub fn hOpenFilePick(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32,
     };
 }
 
-pub fn hPickChoice(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32, results: []i32) void {
+fn outcomeOf(data: ?*anyopaque) ?pick_mod.Outcome {
     const p: *WasmPlugin = @ptrCast(@alignCast(data.?));
-    results[0] = @intCast(caller.writeMemory(@intCast(args[0]), @intCast(args[1]), p.cur_choice) catch 0);
+    return p.cur_pick_outcome;
 }
 
-/// The add-order index of the accepted candidate (as the guest supplied them
-/// via `pickAdd`), or -1 for free-text. Lets a source resolve the choice to a
-/// position it recorded at add time, unambiguous under duplicate rows.
-pub fn hPickChoiceIndex(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32, results: []i32) void {
+/// Callback-scoped outcome discriminator: cancelled=0, input=1,
+/// candidate=2, and -1 outside `on_pick_accept`.
+pub fn hPickOutcomeKind(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32, results: []i32) void {
     _ = caller;
     _ = args;
-    const p: *WasmPlugin = @ptrCast(@alignCast(data.?));
-    results[0] = if (p.activeCtx().head.pick.accepted_index) |i| @intCast(i) else -1;
+    results[0] = if (outcomeOf(data)) |outcome| switch (outcome) {
+        .cancelled => 0,
+        .input => 1,
+        .candidate => 2,
+    } else -1;
 }
 
-/// The byte offset of the selected candidate's match against the accepted
-/// query, or -1 for free-text acceptance. Sources that display a larger
-/// candidate (for example, a whole line) can use this to land on the actual
-/// match while keeping candidate identity separate from its presentation.
-pub fn hPickChoiceMatchStart(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32, results: []i32) void {
+fn outcomeText(outcome: pick_mod.Outcome) []const u8 {
+    return switch (outcome) {
+        .cancelled => "",
+        .input => |input| input,
+        .candidate => |candidate| candidate.text,
+    };
+}
+
+pub fn hPickOutcomeText(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32, results: []i32) void {
+    const outcome = outcomeOf(data) orelse {
+        results[0] = -1;
+        return;
+    };
+    writeOutcomeBytes(caller, args, results, outcomeText(outcome));
+}
+
+pub fn hPickOutcomeQuery(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32, results: []i32) void {
+    const outcome = outcomeOf(data) orelse {
+        results[0] = -1;
+        return;
+    };
+    const query = switch (outcome) {
+        .cancelled => "",
+        .input => |input| input,
+        .candidate => |candidate| candidate.query,
+    };
+    writeOutcomeBytes(caller, args, results, query);
+}
+
+/// A two-pass, exact byte read: cap=0 reports the required length; a nonzero
+/// call either writes the complete value or returns -2. Picker outcomes must
+/// never inherit the generic scratch-reader convention of silent truncation.
+fn writeOutcomeBytes(caller: *wasm.Caller, args: []const i32, results: []i32, bytes: []const u8) void {
+    const cap: usize = @intCast(args[1]);
+    if (cap == 0) {
+        results[0] = std.math.cast(i32, bytes.len) orelse -2;
+        return;
+    }
+    if (cap < bytes.len) {
+        results[0] = -2;
+        return;
+    }
+    const written = caller.writeMemory(@intCast(args[0]), cap, bytes) catch {
+        results[0] = -1;
+        return;
+    };
+    results[0] = @intCast(written);
+}
+
+pub fn hPickOutcomeIndex(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32, results: []i32) void {
     _ = caller;
     _ = args;
-    const p: *WasmPlugin = @ptrCast(@alignCast(data.?));
-    results[0] = if (p.activeCtx().head.pick.accepted_match_start) |i| @intCast(i) else -1;
+    results[0] = if (outcomeOf(data)) |outcome| switch (outcome) {
+        .candidate => |candidate| @intCast(candidate.index),
+        .input => -1,
+        .cancelled => -1,
+    } else -1;
 }
 
-/// Pick accept: stash the choice, dispatch to the guest's on_pick_accept.
+pub fn hPickOutcomeMatchStart(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32, results: []i32) void {
+    _ = caller;
+    _ = args;
+    results[0] = if (outcomeOf(data)) |outcome| switch (outcome) {
+        .candidate => |candidate| @intCast(candidate.match.start),
+        .input => -1,
+        .cancelled => -1,
+    } else -1;
+}
+
+pub fn hPickOutcomeMatchSpan(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32, results: []i32) void {
+    _ = caller;
+    _ = args;
+    results[0] = if (outcomeOf(data)) |outcome| switch (outcome) {
+        .candidate => |candidate| @intCast(candidate.match.span),
+        .input => -1,
+        .cancelled => -1,
+    } else -1;
+}
+
+/// Pick completion: frame the immutable outcome, dispatch to the guest's
+/// `on_pick_accept`, then restore any outer callback frame.
 /// DISPATCHING (wasm_host/commands.zig's classification): `ctx` is the head
 /// whose pick session just accepted — route `active_ctx` through it for the
 /// call's duration (save/restore, same reentrancy discipline as
-/// `wpCmdTrampoline`), so `wl_pick_choice`/`wl_pick_choice_index` and anything
-/// else `on_pick_accept` reaches see THAT head's state.
-fn wpPickAccept(ctx: *command.Context, data: ?*anyopaque, choice: []const u8) anyerror!void {
+/// `wpCmdTrampoline`), so `wl_pick_outcome_*` and anything else
+/// `on_pick_accept` reaches see THAT dispatch's state.
+fn wpPickAccept(ctx: *command.Context, data: ?*anyopaque, outcome: pick_mod.Outcome) anyerror!void {
     const bp: *WasmBoundPick = @ptrCast(@alignCast(data.?));
     const p = bp.plugin;
     const saved_ctx = p.active_ctx;
     const saved_dispatch = p.in_dispatch;
+    const saved_outcome = p.cur_pick_outcome;
     p.active_ctx = ctx;
     p.in_dispatch = true; // DISPATCHING (task #19 item 4) — see wpCmdTrampoline's doc
+    p.cur_pick_outcome = outcome;
     defer {
+        p.cur_pick_outcome = saved_outcome;
         p.active_ctx = saved_ctx;
         p.in_dispatch = saved_dispatch;
     }
-    p.cur_choice = choice;
-    defer p.cur_choice = &.{};
     try contract.callRequiredExport("on_pick_accept", &p.instance, .{@as(i32, @intCast(bp.pick_id))});
 }
 

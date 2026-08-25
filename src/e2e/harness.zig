@@ -268,6 +268,11 @@ pub const Editor = struct {
             self.render.deinit();
         }
         self.frame_known_peers.deinit();
+        // A live picker owns a callback into one of the plugin instances
+        // below. Termination delivers cancellation and rejects a reentrant
+        // replacement before those instances are destroyed; Session.deinit's
+        // second call is then an idempotent no-op.
+        self.session.head.pick.terminate(self.ctx);
         for (self.js_plugins.items) |jp| jp.deinit();
         self.js_plugins.deinit(gpa);
         for (self.plugins.items) |p| p.deinit();
@@ -795,10 +800,20 @@ pub const Loopback = struct {
     // FdLinks live here at stable addresses: each Session's Link borrows &fd.
     host_fd: session.FdLink,
     peer_fd: session.FdLink,
+    // Keep the generic transport wrappers at stable addresses too. Sessions
+    // borrow their Link values while their reader/writer threads are live.
+    // The wrappers are zero-latency unless an opt-in demo requests shaping.
+    host_chaos: session.ChaosLink,
+    peer_chaos: session.ChaosLink,
     host_sess: *session.Session,
     peer_sess: *session.Session,
     host_col: session.Collab,
     peer_col: session.Collab,
+    demo_transport_enabled: bool = false,
+    demo_transport_base_ns: u64 = 0,
+    demo_transport_jitter_ns: u64 = 0,
+    demo_transport_seed: u64 = 0,
+    demo_transport_tick: u64 = 0,
 
     /// Init in place (the FdLinks must not move after the sessions capture
     /// their addresses). Binds the two harnesses' active documents on quad 0.
@@ -815,6 +830,15 @@ pub const Loopback = struct {
         self.peer_ed = peer_ed;
         self.host_identity = core.identity.Identity.generate();
         self.peer_identity = core.identity.Identity.generate();
+        // Loopback callers commonly declare `var link: Loopback = undefined`;
+        // default field initializers therefore do not run. Establish the
+        // deterministic zero-latency baseline before any optional demo env is
+        // inspected.
+        self.demo_transport_enabled = false;
+        self.demo_transport_base_ns = 0;
+        self.demo_transport_jitter_ns = 0;
+        self.demo_transport_seed = 0;
+        self.demo_transport_tick = 0;
 
         // Bind an ephemeral TCP listener first, then connect through the same
         // session transport used by the application. Accepting synchronously
@@ -836,11 +860,32 @@ pub const Loopback = struct {
         self.listener = -1;
         self.host_fd = .{ .fd = host_fd };
         self.peer_fd = .{ .fd = peer_fd };
+        self.host_chaos = .{ .inner = self.host_fd.link() };
+        self.peer_chaos = .{ .inner = self.peer_fd.link() };
+        // Network shaping is a recording concern, not an E2E-test concern.
+        // Keep ordinary tests at the same zero-latency TCP path. The request
+        // is checked here rather than in core, so production never acquires
+        // demo policy or environment handling.
+        if (std.c.getenv("WEFT_E2E_VIDEO")) |raw_video| {
+            if (std.mem.sliceTo(raw_video, 0).len != 0) {
+                const base_ms = envU32("WEFT_E2E_TRANSPORT_BASE_MS", 25, 0, 2000);
+                const jitter_ms = envU32("WEFT_E2E_TRANSPORT_JITTER_MS", 95, 0, 2000);
+                const seed = envU32("WEFT_E2E_TRANSPORT_SEED", 0x51_7a_11, 0, std.math.maxInt(u32));
+                self.demo_transport_enabled = true;
+                self.demo_transport_base_ns = @as(u64, base_ms) * std.time.ns_per_ms;
+                self.demo_transport_jitter_ns = @as(u64, jitter_ms) * std.time.ns_per_ms;
+                self.demo_transport_seed = seed;
+            }
+        }
+        // Shape the handshake too: it remains the same real TCP connection
+        // and full identity authentication, only with the demo link's first
+        // deterministic one-way delay.
+        self.advanceDemoTransport();
         const host_doc = &host_ed.buffers.active().editor.doc;
         const peer_doc = &peer_ed.buffers.active().editor.doc;
-        self.host_sess = try session.Session.create(gpa, self.host_fd.link(), .server, "loopback", .own, &self.host_identity);
+        self.host_sess = try session.Session.create(gpa, self.host_chaos.link(), .server, "loopback", .own, &self.host_identity);
         errdefer self.host_sess.destroy();
-        self.peer_sess = try session.Session.create(gpa, self.peer_fd.link(), .client, "loopback", .own, &self.peer_identity);
+        self.peer_sess = try session.Session.create(gpa, self.peer_chaos.link(), .client, "loopback", .own, &self.peer_identity);
         errdefer self.peer_sess.destroy();
 
         // The frame builder reads this narrow optional session seam for the
@@ -894,6 +939,30 @@ pub const Loopback = struct {
     pub fn tick(self: *Loopback) !void {
         _ = try self.host_col.tick(self.host_ed.buffers.active().editor.cursorOffset());
         _ = try self.peer_col.tick(self.peer_ed.buffers.active().editor.cursorOffset());
+    }
+
+    fn splitMix64(value: u64) u64 {
+        var z = value +% 0x9e3779b97f4a7c15;
+        z = (z ^ (z >> 30)) *% 0xbf58476d1ce4e5b9;
+        z = (z ^ (z >> 27)) *% 0x94d049bb133111eb;
+        return z ^ (z >> 31);
+    }
+
+    /// Advance the deterministic demo network clock once per captured frame.
+    /// This changes the actual TCP writer delay on each direction; it is not
+    /// frame pacing or a post-render effect. Calling it is harmless for
+    /// ordinary tests, where the wrappers remain at zero latency.
+    pub fn advanceDemoTransport(self: *Loopback) void {
+        if (!self.demo_transport_enabled) return;
+        self.demo_transport_tick +%= 1;
+        const phase = self.demo_transport_tick *% 0x9e3779b97f4a7c15;
+        const host_sample = splitMix64(self.demo_transport_seed +% phase);
+        const peer_sample = splitMix64(self.demo_transport_seed +% phase +% 0xd1b54a32d192ed03);
+        const span = self.demo_transport_jitter_ns;
+        const host_extra = if (span == 0) 0 else host_sample % (span + 1);
+        const peer_extra = if (span == 0) 0 else peer_sample % (span + 1);
+        self.host_chaos.latency_ns.store(self.demo_transport_base_ns + host_extra, .release);
+        self.peer_chaos.latency_ns.store(self.demo_transport_base_ns + peer_extra, .release);
     }
 
     fn sees(collab: *const session.Collab, name: []const u8, offset: usize) bool {
@@ -1332,8 +1401,9 @@ pub const Project = struct {
     demo_left: ?*Editor = null,
     demo_right: ?*Editor = null,
     demo_frame_hook: ?DemoFrameHook = null,
-    typing_ms: u32 = 75,
-    linger_ms: u32 = 1000,
+    typing_ms: u32 = 110,
+    linger_ms: u32 = 1500,
+    rest_ms: u32 = 2500,
 
     pub fn init(self: *Project, gpa: Allocator) !void {
         self.gpa = gpa;
@@ -1354,8 +1424,9 @@ pub const Project = struct {
             const requested_path = std.mem.sliceTo(raw_path, 0);
             if (requested_path.len != 0) {
                 self.video = try VideoRecorder.init(gpa, requested_path, self.prev_cwd);
-                self.typing_ms = envU32("WEFT_E2E_TYPING_MS", 75, 0, 2000);
-                self.linger_ms = envU32("WEFT_E2E_LINGER_MS", 1000, 0, 10000);
+                self.typing_ms = envU32("WEFT_E2E_TYPING_MS", 110, 0, 2000);
+                self.linger_ms = envU32("WEFT_E2E_LINGER_MS", 1500, 0, 10000);
+                self.rest_ms = envU32("WEFT_E2E_REST_MS", 2500, 0, 10000);
             }
         }
     }
@@ -1526,6 +1597,43 @@ pub const Project = struct {
             self.delay(self.typing_ms);
             i += ch.len;
         }
+    }
+
+    /// Drive two independent editor heads at the same logical cadence. Each
+    /// peer dispatches at most one Unicode scalar before the collaboration
+    /// clock and synchronized renderer advance. Normal tests execute the same
+    /// interleaving without wall-clock delay or extra frames.
+    pub fn typeConcurrently(
+        self: *Project,
+        left: *Editor,
+        left_text: []const u8,
+        right: *Editor,
+        right_text: []const u8,
+    ) void {
+        var left_i: usize = 0;
+        var right_i: usize = 0;
+        while (left_i < left_text.len or right_i < right_text.len) {
+            if (left_i < left_text.len) {
+                const n = std.unicode.utf8ByteSequenceLength(left_text[left_i]) catch 1;
+                const ch = left_text[left_i..@min(left_i + n, left_text.len)];
+                left.typeText(ch);
+                left_i += ch.len;
+            }
+            if (right_i < right_text.len) {
+                const n = std.unicode.utf8ByteSequenceLength(right_text[right_i]) catch 1;
+                const ch = right_text[right_i..@min(right_i + n, right_text.len)];
+                right.typeText(ch);
+                right_i += ch.len;
+            }
+            self.delay(self.typing_ms);
+        }
+    }
+
+    /// Hold the current completed editor frames at a deliberate narrative
+    /// beat. This is a recording concern only; the ordinary E2E scenario has
+    /// no sleep and emits no additional frames.
+    pub fn rest(self: *Project) void {
+        self.delay(self.rest_ms);
     }
 
     /// Capture one synchronized pair whenever two screens are bound. Video
