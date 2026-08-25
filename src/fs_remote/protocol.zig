@@ -720,7 +720,7 @@ pub const Server = struct {
         const key = handleKey(root);
         if (self.roots.getPtr(key)) |record| {
             if (!record.handle.eql(root) or record.owned != owned) return error.Io;
-            record.count += 1;
+            try incrementCount(&record.count);
             return;
         }
         try self.roots.put(key, .{ .handle = root, .owned = owned });
@@ -735,15 +735,16 @@ pub const Server = struct {
             record.count -= 1;
             return;
         }
+        const owned_handle = record.handle;
         _ = self.roots.remove(key);
-        self.provider.releaseRoot(record.handle);
+        self.provider.releaseRoot(owned_handle);
     }
 
     fn retainLease(self: *Server, source: c.LeaseSource) c.Error!void {
         const key = handleKey(source.ref);
         if (self.leases.getPtr(key)) |record| {
             if (!record.source.root.eql(source.root) or !record.source.ref.eql(source.ref)) return error.Io;
-            record.count += 1;
+            try incrementCount(&record.count);
             return;
         }
         try self.leases.put(key, .{ .source = source });
@@ -770,7 +771,7 @@ pub const Server = struct {
         const key = handleKey(watch_ref);
         if (self.watches.getPtr(key)) |record| {
             if (!record.handle.eql(watch_ref)) return error.Io;
-            record.count += 1;
+            try incrementCount(&record.count);
             return;
         }
         try self.watches.put(key, .{ .handle = watch_ref });
@@ -804,6 +805,10 @@ pub const Server = struct {
         };
     }
 };
+
+fn incrementCount(count: *usize) c.Error!void {
+    count.* = std.math.add(usize, count.*, 1) catch return error.LimitExceeded;
+}
 
 fn beginRequest(gpa: std.mem.Allocator, op: Op) !Writer {
     var writer = Writer.init(gpa);
@@ -1358,11 +1363,23 @@ test "remote server rejects foreign and already-released derived handles" {
     try writeHandle(&foreign_release, wireRoot(child), wire_authority, wire_authority);
     try std.testing.expectEqual(Status.confined, try requestStatus(gpa, &second_server, &foreign_release));
 
+    var foreign_list = try beginRequest(gpa, .list);
+    defer foreign_list.deinit();
+    try writeHandle(&foreign_list, wireRoot(child), wire_authority, wire_authority);
+    try writeNode(&foreign_list, .root, wire_authority, wire_authority);
+    try std.testing.expectEqual(Status.confined, try requestStatus(gpa, &second_server, &foreign_list));
+
     first_remote.releaseRoot(child);
     var stale_release = try beginRequest(gpa, .release_root);
     defer stale_release.deinit();
     try writeHandle(&stale_release, wireRoot(child), wire_authority, wire_authority);
     try std.testing.expectEqual(Status.confined, try requestStatus(gpa, &first_server, &stale_release));
+
+    var stale_list = try beginRequest(gpa, .list);
+    defer stale_list.deinit();
+    try writeHandle(&stale_list, wireRoot(child), wire_authority, wire_authority);
+    try writeNode(&stale_list, .root, wire_authority, wire_authority);
+    try std.testing.expectEqual(Status.confined, try requestStatus(gpa, &first_server, &stale_list));
 
     const lease = try first_remote.capture(.{
         .root = first_root,
@@ -1374,7 +1391,21 @@ test "remote server rejects foreign and already-released derived handles" {
     defer foreign_lease_release.deinit();
     try writeLeaseSource(&foreign_lease_release, wireLease(lease_source), wire_authority, wire_authority);
     try std.testing.expectEqual(Status.confined, try requestStatus(gpa, &second_server, &foreign_lease_release));
+
+    var foreign_lease_read = try beginRequest(gpa, .read);
+    defer foreign_lease_read.deinit();
+    try writeSource(&foreign_lease_read, .{ .lease = wireLease(lease_source) }, wire_authority, wire_authority);
+    try foreign_lease_read.u64Value(0);
+    try foreign_lease_read.boolValue(false);
+    try std.testing.expectEqual(Status.confined, try requestStatus(gpa, &second_server, &foreign_lease_read));
     first_remote.releaseLease(lease_source);
+
+    var stale_lease_read = try beginRequest(gpa, .read);
+    defer stale_lease_read.deinit();
+    try writeSource(&stale_lease_read, .{ .lease = wireLease(lease_source) }, wire_authority, wire_authority);
+    try stale_lease_read.u64Value(0);
+    try stale_lease_read.boolValue(false);
+    try std.testing.expectEqual(Status.confined, try requestStatus(gpa, &first_server, &stale_lease_read));
 
     const watch = try first_remote.watch(first_root, .root, false);
     var foreign_poll = try beginRequest(gpa, .poll_invalidation);
