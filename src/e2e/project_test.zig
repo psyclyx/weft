@@ -40,6 +40,32 @@ const tmpPath = h.tmpPath;
 const socketPair = h.socketPair;
 const napUs = h.napUs;
 
+// This is intentionally the plugin inventory from the shipped config, not a
+// hand-picked test fixture. The spine checks that config.js requested every
+// entry and that every non-JS entry loaded successfully. `dap.js` is retained
+// as a requested item but is the one documented headless omission: resident
+// QuickJS UI plugins are not instantiated by the display-free harness.
+const shipped_config_plugins = [_][]const u8{
+    "edit",       "complete",    "project",   "structural", "region",  "shell",     "palette",
+    "motions",    "textobjects", "operators", "vim",        "ts",      "comment",   "indent",
+    "whitespace", "numbers",     "autopair",  "consult",    "git",     "grep",      "run",
+    "make",       "notes",       "fmt",       "buffers",    "windows", "modes",     "snippets",
+    "direnv",     "llm",         "console",   "repl",       "net",     "which_key", "dired",
+    "lsp",        "debug",       "dap.js",
+};
+
+fn assertShippedConfigLoaded(loader: *const ConfigLoader) !void {
+    try t.expectEqual(@as(usize, 0), loader.missing.items.len);
+    try t.expectEqual(@as(usize, 0), loader.failed.items.len);
+    for (shipped_config_plugins) |expected| {
+        var requested = false;
+        for (loader.requested.items) |actual| {
+            requested = requested or std.mem.eql(u8, actual, expected);
+        }
+        try t.expect(requested);
+    }
+}
+
 /// Focus a named field through the generic retained-view focus protocol.  The
 /// scenario uses this only to make directory enumeration order irrelevant;
 /// all edits and actions after the focus change still travel through the
@@ -308,6 +334,7 @@ test "e2e/spine: write a file, init a repo, stage and commit — all through wef
     const config_dir = try std.fmt.allocPrint(gpa, "{s}/config", .{proj.prev_cwd});
     defer gpa.free(config_dir);
     try bootConfig(&ed, config_dir, &loader);
+    try assertShippedConfigLoaded(&loader);
     // Mirror main/App setup: config evaluation installs the editor plugins,
     // then the active Vim posture becomes the buffer default for newly opened
     // tool/input buffers.
@@ -342,6 +369,7 @@ test "e2e/spine: write a file, init a repo, stage and commit — all through wef
         const mirror_config_dir = try std.fmt.allocPrint(gpa, "{s}/config", .{proj.prev_cwd});
         defer gpa.free(mirror_config_dir);
         try bootConfig(&mirror, mirror_config_dir, &mirror_loader);
+        try assertShippedConfigLoaded(&mirror_loader);
         try mirror.buffers.setDefaultMode(gpa, "normal");
         mirror.setMode("normal");
         proj.bindDemoScreens(&ed, &mirror);
@@ -411,6 +439,11 @@ test "e2e/spine: write a file, init a repo, stage and commit — all through wef
 
     proj.capture(&ed, "spine-collaboration");
     try t.expect(collab_clock.tick_error == null);
+    // The assertion is intentionally against the final paired image. Both
+    // halves must contain collaboration-dependent pixels; this catches a
+    // passive mirror or a recorder that silently drops Bob's rendered state
+    // without reaching into either editor's presence/layer representation.
+    try t.expect(proj.last_pair_has_distinct_pixels);
 
     // Leave the shared document before switching either peer to another file;
     // the collab transport is explicitly scoped to the paired document.
@@ -453,6 +486,29 @@ test "e2e/spine: write a file, init a repo, stage and commit — all through wef
         const text = try ed.textAlloc();
         defer gpa.free(text);
         try t.expect(std.mem.indexOf(u8, text, "helper") != null);
+    }
+
+    // Exercise the shipped generic UI/plugin surfaces that are independent of
+    // filesystem semantics: which-key is a surface plugin, windows is a
+    // layout action, and autopair is an insert-mode editing provider. These
+    // are ordinary config binds, not direct command/keymap calls.
+    ed.press("F1", "");
+    ed.press("Escape", "");
+    ed.chord("SPC w v");
+    ed.applyWindow();
+    try t.expectEqual(@as(usize, 2), ed.paneCount());
+    ed.chord("SPC w o");
+    ed.applyWindow();
+    try t.expectEqual(@as(usize, 1), ed.paneCount());
+    ed.run("buf-scratch");
+    ed.press("i", "");
+    ed.press("parenleft", "(");
+    ed.typeText("autopair");
+    ed.press("Escape", "");
+    {
+        const scratch = try ed.textAlloc();
+        defer gpa.free(scratch);
+        try t.expect(std.mem.indexOf(u8, scratch, "(autopair)") != null);
     }
 
     // A generic config action supplied by the editing plugin changes the
