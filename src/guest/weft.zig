@@ -133,6 +133,7 @@ extern "weft" fn wl_pick_end() void;
 extern "weft" fn wl_open_file_pick(prompt_ptr: u32, prompt_len: u32, root_ptr: u32, root_len: u32, pick_id: u32) void;
 extern "weft" fn wl_pick_choice(out_ptr: u32, out_cap: u32) i32;
 extern "weft" fn wl_pick_choice_index() i32;
+extern "weft" fn wl_pick_choice_match_start() i32;
 extern "weft" fn wl_surface_begin(placement: u32) void;
 extern "weft" fn wl_surface_caret(offset: u32) void;
 extern "weft" fn wl_surface_row() void;
@@ -866,6 +867,13 @@ pub fn pickChoice() []const u8 {
 /// parallel data to get the real target, robust under duplicate rows.
 pub fn pickChoiceIndex() ?usize {
     const i = wl_pick_choice_index();
+    return if (i < 0) null else @intCast(i);
+}
+/// The byte offset of the selected candidate's match against the accepted
+/// query, or null for free-text acceptance. This is relative to the candidate
+/// text supplied through `pickAdd`, not to the document that produced it.
+pub fn pickChoiceMatchStart() ?usize {
+    const i = wl_pick_choice_match_start();
     return if (i < 0) null else @intCast(i);
 }
 

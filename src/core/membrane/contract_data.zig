@@ -236,6 +236,7 @@ pub const imports = [_]Entry{
     .{ .name = "wl_open_file_pick", .params = &.{ .u32, .u32, .u32, .u32, .u32 }, .results = &.{}, .group = .pick, .head_gated = true, .doc = "open a file-tree pick rooted at `root`" },
     .{ .name = "wl_pick_choice", .params = &.{ .u32, .u32 }, .results = &.{.i32}, .group = .pick, .doc = "the accepted pick's text, into guest memory" },
     .{ .name = "wl_pick_choice_index", .params = &.{}, .results = &.{.i32}, .group = .pick, .doc = "the accepted candidate's add-order index, or -1 for free-text" },
+    .{ .name = "wl_pick_choice_match_start", .params = &.{}, .results = &.{.i32}, .group = .pick, .doc = "the accepted candidate's byte match start, or -1 for free-text" },
 
     // ── menu.zig — which-key style menu-mode binding introspection ─────
     .{ .name = "wl_menu_binding_count", .params = &.{}, .results = &.{.i32}, .group = .menu, .doc = "the current menu mode's binding-table entry count" },
@@ -380,7 +381,7 @@ pub const imports = [_]Entry{
 /// half-finished edit — fails the build with a pointed message instead of
 /// silently drifting the two ~124-entry tables apart again (the exact class
 /// this table exists to kill).
-const expected_import_count = 171;
+const expected_import_count = 172;
 
 /// A host→guest EXPORT entrypoint (design doc/north-star-plan.md §2.5, task
 /// W0a-D extension 2): every `instance.callVoid("name", args)` the host

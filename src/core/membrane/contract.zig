@@ -169,6 +169,7 @@ const handlers = [_]struct { name: []const u8, handler: HostFn }{
     .{ .name = "wl_open_file_pick", .handler = pick.hOpenFilePick },
     .{ .name = "wl_pick_choice", .handler = pick.hPickChoice },
     .{ .name = "wl_pick_choice_index", .handler = pick.hPickChoiceIndex },
+    .{ .name = "wl_pick_choice_match_start", .handler = pick.hPickChoiceMatchStart },
 
     // ── menu.zig — which-key style menu-mode binding introspection ─────
     .{ .name = "wl_menu_binding_count", .handler = menu.hMenuBindingCount },

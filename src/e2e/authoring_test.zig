@@ -2109,6 +2109,36 @@ test "authoring: `/` searches in the buffer and jumps to the match" {
     try t.expect(std.mem.indexOf(u8, disk, "Xcharlie") != null);
 }
 
+test "authoring: `/` lands on the byte match, so cw preserves indentation" {
+    const gpa = t.allocator;
+    var app: App = undefined;
+    try app.init(gpa);
+    defer app.deinit();
+    const ed = &app.ed;
+
+    ed.runStr("open", "indented.txt");
+    ed.press("i", "");
+    ed.typeText("header\n    ALICE_SLOT tail");
+    ed.press("Escape", "");
+
+    // The candidate is the whole line, but the search target is the exact
+    // byte match inside it. A line-start landing point would make `cw` edit
+    // the four spaces and leave ALICE_SLOT behind.
+    ed.press("/", "");
+    ed.typeText("ALICE_SLOT");
+    ed.settle(10);
+    ed.press("Return", "");
+    ed.press("c", "");
+    ed.press("w", "");
+    try t.expectEqualStrings("insert", ed.mode());
+    ed.typeText("BOB");
+    ed.press("Escape", "");
+
+    const got = try ed.textAlloc();
+    defer gpa.free(got);
+    try t.expectEqualStrings("header\n    BOB tail", got);
+}
+
 test "authoring: switch between two files with the fuzzy buffer picker" {
     const gpa = t.allocator;
     var app: App = undefined;

@@ -117,6 +117,17 @@ pub fn hPickChoiceIndex(data: ?*anyopaque, caller: *wasm.Caller, args: []const i
     results[0] = if (p.activeCtx().head.pick.accepted_index) |i| @intCast(i) else -1;
 }
 
+/// The byte offset of the selected candidate's match against the accepted
+/// query, or -1 for free-text acceptance. Sources that display a larger
+/// candidate (for example, a whole line) can use this to land on the actual
+/// match while keeping candidate identity separate from its presentation.
+pub fn hPickChoiceMatchStart(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32, results: []i32) void {
+    _ = caller;
+    _ = args;
+    const p: *WasmPlugin = @ptrCast(@alignCast(data.?));
+    results[0] = if (p.activeCtx().head.pick.accepted_match_start) |i| @intCast(i) else -1;
+}
+
 /// Pick accept: stash the choice, dispatch to the guest's on_pick_accept.
 /// DISPATCHING (wasm_host/commands.zig's classification): `ctx` is the head
 /// whose pick session just accepted — route `active_ctx` through it for the

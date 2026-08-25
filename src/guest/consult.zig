@@ -34,7 +34,21 @@ export fn on_command(id: u32) void {
 export fn on_pick_accept(pick_id: u32) void {
     if (pick_id != line_pick and pick_id != sym_pick) return;
     const i = weft.pickChoiceIndex() orelse return; // free text → ignore
-    if (i < n_rows) weft.jump(starts[i]);
+    if (i < n_rows) {
+        // A line candidate is presentation-sized, but the pick owns the
+        // actual match location. Resolve that location at the accept boundary
+        // so `/query` lands on the matched bytes (including after indentation)
+        // rather than on the line's display anchor.
+        // `consult-line`'s candidate text is the whole line, so its match
+        // starts relative to the line anchor. Other sources (notably imenu)
+        // record a semantic target directly; their display text is not the
+        // target's coordinate system and must not inherit this adjustment.
+        const match_start = if (pick_id == line_pick)
+            (weft.pickChoiceMatchStart() orelse 0)
+        else
+            0;
+        weft.jump(starts[i] + match_start);
+    }
 }
 
 /// Fuzzy-pick a line in the current buffer and jump to its start.

@@ -54,6 +54,11 @@ selected: usize = 0,
 /// was accepted (free-text). A source plugin reads it to resolve the choice
 /// to a position it stamped at add time — robust even with duplicate rows.
 accepted_index: ?usize = null,
+/// The byte offset of the selected candidate's match against the accepted
+/// query. Like `accepted_index`, this is captured before close clears the
+/// transient pick state so an acceptor can resolve a search to the actual
+/// match rather than merely the candidate's display anchor.
+accepted_match_start: ?usize = null,
 acceptor: ?Acceptor = null,
 prev_mode: []u8 = &.{},
 /// Accept the typed query, not only a candidate (see `Options`).
@@ -183,6 +188,8 @@ pub fn openWith(
     };
     if (self.active) self.clear(gpa);
     self.prompt = try gpa.dupe(u8, prompt);
+    self.accepted_index = null;
+    self.accepted_match_start = null;
     for (entries) |e| {
         const owned = try gpa.dupe(u8, e.text);
         errdefer gpa.free(owned);
@@ -302,7 +309,13 @@ fn close(self: *Pick, ctx: *command.Context) !void {
 /// completion after a buffer switch). This is UI lifecycle, not input policy;
 /// key bindings still invoke the same operation through `pick-cancel`.
 pub fn dismiss(self: *Pick, ctx: *command.Context) !void {
-    if (self.active) try self.close(ctx);
+    if (self.active) {
+        // No accept callback follows a dismissal, so accepted metadata from a
+        // prior pick must not remain observable through the next host query.
+        self.accepted_index = null;
+        self.accepted_match_start = null;
+        try self.close(ctx);
+    }
 }
 
 fn frecOf(self: *const Pick, text: []const u8) Frec {
@@ -599,11 +612,15 @@ fn cAccept(ctx: *command.Context, args: struct {}) anyerror!Value {
     if (!p.active) return .nil;
     if (p.selection()) |sel| {
         p.accepted_index = p.filtered.items[p.selected]; // capture before close clears it
+        p.accepted_match_start = matchScore(p.style, p.query.items, sel).?.start;
         try acceptText(p, ctx, sel);
     } else if (p.allow_free_text and p.query.items.len > 0) {
         p.accepted_index = null; // free text — no candidate
+        p.accepted_match_start = null;
         try acceptText(p, ctx, p.query.items);
     } else {
+        p.accepted_index = null;
+        p.accepted_match_start = null;
         try p.close(ctx);
     }
     return .nil;
@@ -618,6 +635,7 @@ fn cAcceptInput(ctx: *command.Context, args: struct {}) anyerror!Value {
     if (!p.active) return .nil;
     if (p.allow_free_text and p.query.items.len > 0) {
         p.accepted_index = null; // verbatim typed text — no candidate
+        p.accepted_match_start = null;
         try acceptText(p, ctx, p.query.items);
         return .nil;
     }
