@@ -1,6 +1,6 @@
 //! The `WasmPlugin` runtime state — a loaded wasm plugin under the perm
 //! handshake — and the small membrane types the host table hands it by handle
-//! (commands, pending pick items, stamped ranges, query captures). The host
+//! (commands, pending pick items, anchored ranges, query captures). The host
 //! import table (wasm_host) operates on this; the load/run path lives in
 //! wasm_abi/runtime.zig. Split out of the wasm_abi facade to keep each focused.
 
@@ -65,9 +65,25 @@ pub const WasmBoundPick = struct { plugin: *WasmPlugin, pick_id: u32 };
 
 const Phase = enum { describing, active };
 
-/// A stamped range the guest holds by handle (index into `WasmPlugin.stamps`).
-/// The slot owns `version` (the token the range is stamped against).
-pub const StampSlot = struct { range: position.StampedRange, version: []u8 };
+/// A live CRDT range the guest holds by opaque handle. The endpoints are
+/// document-owned anchors, not offsets paired with a version. `buffer` gives
+/// the handles their locus and rejects buffer-identity reuse after one closes.
+pub const RangeSlot = struct {
+    buffer: Buffers.Ref,
+    start: @import("../Document.zig").AnchorHandle,
+    end: @import("../Document.zig").AnchorHandle,
+    /// Ordinary motion/operator handles are dispatch-scoped. Interactive
+    /// tools explicitly retain the ranges they need across callbacks.
+    retained: bool = false,
+};
+
+/// An opaque witness for one active document causal frontier. The frontier is
+/// owned by the plugin until the guest releases the handle; no scalar version
+/// or ordering is exposed across the membrane.
+pub const DocSnapshotSlot = struct {
+    buffer: Buffers.Ref,
+    frontier: []u8,
+};
 
 /// A materialized tree-sitter query capture the guest reads by index (design
 /// §4 `syntax.query` — the tree stays host-side, captures cross). `name` owned.
@@ -206,14 +222,29 @@ cur_args: []const command.Value = &.{},
 /// in-process kv-backed commands give).
 result: command.Value = .nil,
 result_buf: std.ArrayList(u8) = .empty,
+/// Nested command results need distinct backing while the outer guest resumes
+/// and consumes them. Retire these buffers together at the next top-level
+/// dispatch; a nested result can never overwrite its caller's result bytes.
+retired_result_bufs: std.ArrayList(std.ArrayList(u8)) = .empty,
+dispatch_depth: usize = 0,
 
-/// Per-dispatch table of stamped ranges the guest names by `u32` handle
-/// ([FIX 1/3]): a motion stamps a range here and returns its handle, an
-/// operator receives one as an arg and applies an edit through it. The
-/// version token stays host-side (opaque-handle ABI, design §2) — only the
-/// handle crosses the membrane. Reset at the top of every command dispatch;
-/// each slot owns its version bytes.
-stamps: std.ArrayList(StampSlot) = .empty,
+/// Guest-visible live ranges keyed by monotonic, never-recycled capabilities.
+/// A stale release can therefore never hit a later range (no handle ABA).
+/// Ephemeral entries die at the next command dispatch, while a tool may
+/// explicitly retain an entry across asynchronous UI callbacks. The table
+/// owns every document anchor until release or plugin teardown.
+ranges: std.AutoHashMapUnmanaged(u32, RangeSlot) = .empty,
+next_range_handle: u32 = 0,
+/// Issuance log for dispatch-scoped handles. Retention leaves an entry here;
+/// the next top-level dispatch skips retained/live capabilities and clears the
+/// log in one pass. This keeps cleanup O(handles issued), not a table rescan.
+ephemeral_range_handles: std.ArrayList(u32) = .empty,
+
+/// Guest-owned equality witnesses for document snapshots. Handles are
+/// monotonic and never recycled, so a late release cannot target a new
+/// frontier.
+doc_snapshots: std.AutoHashMapUnmanaged(u32, DocSnapshotSlot) = .empty,
+next_doc_snapshot_handle: u32 = 0,
 
 /// The captures from the guest's most recent `syntax.query`, read back by
 /// index. Reset at the start of each query; each entry owns its name.
@@ -314,21 +345,149 @@ caps_builder_session: u64 = 0,
 declared_schemas: std.ArrayList(*const @import("weft_schema").Schema) = .empty,
 slot_predicate_strs: std.ArrayList([]u8) = .empty,
 
-/// Stamp `[start, end)` against the current document version and hand the
-/// guest an opaque handle into `stamps`. Takes ownership of `version_owned`
-/// (freed when the table is reset). Returns the handle.
-pub fn pushRange(self: *WasmPlugin, version_owned: []u8, start: usize, end: usize) !u32 {
-    try self.stamps.append(self.gpa, .{
-        .range = position.StampedRange.at(version_owned, start, end),
-        .version = version_owned,
-    });
-    return @intCast(self.stamps.items.len - 1);
+/// Anchor `[start, end)` in the active CRDT document and hand the guest an
+/// opaque handle. The document advances both endpoints through every local or
+/// merged edit. The slot owns the anchors until it is released.
+pub fn anchorRange(self: *WasmPlugin, start: usize, end: usize) !u32 {
+    const buffer = self.activeCtx().buffers.active();
+    const doc = &buffer.editor.doc;
+    const len = doc.text().byteLen();
+    if (start > end or end > len) return error.InvalidRange;
+    const a = try doc.addAnchor(self.gpa, start, .right);
+    errdefer doc.removeAnchor(a);
+    const b = try doc.addAnchor(self.gpa, end, .left);
+    errdefer doc.removeAnchor(b);
+    const slot: RangeSlot = .{
+        .buffer = buffer.ref(),
+        .start = a,
+        .end = b,
+    };
+    // The wasm ABI reserves negative i32 results for failure, so the positive
+    // half of its 32-bit space is the capability budget. Exhaustion fails
+    // closed; recycling would let a late release or callback target new state.
+    if (self.next_range_handle > std.math.maxInt(i32)) return error.RangeHandlesExhausted;
+    const handle = self.next_range_handle;
+    self.next_range_handle += 1;
+    try self.ranges.putNoClobber(self.gpa, handle, slot);
+    errdefer _ = self.ranges.remove(handle);
+    try self.ephemeral_range_handles.append(self.gpa, handle);
+    return handle;
 }
 
-/// Reset the per-dispatch stamp table, freeing each slot's version token.
-pub fn stampsClear(self: *WasmPlugin) void {
-    for (self.stamps.items) |s| self.gpa.free(s.version);
-    self.stamps.clearRetainingCapacity();
+/// Capture the active document's opaque causal frontier at its current buffer
+/// locus. The guest receives only a capability handle; frontier bytes remain
+/// host-owned and are compared for equality by `docSnapshotIsCurrent`.
+pub fn docSnapshot(self: *WasmPlugin) !u32 {
+    const buffer = self.activeCtx().buffers.active();
+    const frontier = try buffer.editor.doc.version(self.gpa);
+    errdefer self.gpa.free(frontier);
+    if (self.next_doc_snapshot_handle > std.math.maxInt(i32)) return error.DocSnapshotHandlesExhausted;
+    const handle = self.next_doc_snapshot_handle;
+    self.next_doc_snapshot_handle += 1;
+    try self.doc_snapshots.putNoClobber(self.gpa, handle, .{
+        .buffer = buffer.ref(),
+        .frontier = frontier,
+    });
+    return handle;
+}
+
+/// Return true only when the handle still names the active buffer and its
+/// causal frontier is byte-for-byte equal to the document's current frontier.
+/// Any missing buffer or frontier error fails closed.
+pub fn docSnapshotIsCurrent(self: *WasmPlugin, handle: u32) bool {
+    const slot = self.doc_snapshots.get(handle) orelse return false;
+    const buffer = self.activeCtx().buffers.active();
+    if (slot.buffer.id != buffer.id or slot.buffer.generation != buffer.generation) return false;
+    const current = buffer.editor.doc.version(self.gpa) catch return false;
+    defer self.gpa.free(current);
+    return std.mem.eql(u8, slot.frontier, current);
+}
+
+/// Release one document snapshot witness. Stale or repeated releases are
+/// harmless.
+pub fn releaseDocSnapshot(self: *WasmPlugin, handle: u32) void {
+    const removed = self.doc_snapshots.fetchRemove(handle) orelse return;
+    self.gpa.free(removed.value.frontier);
+}
+
+pub fn clearDocSnapshots(self: *WasmPlugin) void {
+    var it = self.doc_snapshots.valueIterator();
+    while (it.next()) |slot| self.gpa.free(slot.frontier);
+    self.doc_snapshots.clearRetainingCapacity();
+}
+
+/// Resolve one opaque range slot only at the buffer locus which minted it.
+/// Handles may cross callbacks; compact buffer ids may not.
+pub fn activeRange(self: *WasmPlugin, handle: u32) ?*const RangeSlot {
+    const slot = self.ranges.getPtr(handle) orelse return null;
+    const active = self.activeCtx().buffers.active().ref();
+    if (slot.buffer.id != active.id or slot.buffer.generation != active.generation) return null;
+    return slot;
+}
+
+/// Resolve an anchored slot in its live buffer. Active-buffer identity is
+/// checked separately by `activeRange` before any guest-visible operation.
+pub fn resolveRange(self: *WasmPlugin, slot: *const RangeSlot) ?@import("stemma").Range {
+    const buffer = self.ctx.buffers.resolve(slot.buffer) orelse return null;
+    const doc = &buffer.editor.doc;
+    const a = doc.anchorOffset(slot.start);
+    const b = doc.anchorOffset(slot.end);
+    return .{ .start = @min(a, b), .end = @max(a, b) };
+}
+
+pub fn borrowedRange(self: *WasmPlugin, slot: *const RangeSlot) ?position.LiveRange {
+    const buffer = self.ctx.buffers.resolve(slot.buffer) orelse return null;
+    return .{ .document = &buffer.editor.doc, .start = slot.start, .end = slot.end };
+}
+
+/// Keep a range alive across command dispatches. This is intentionally
+/// separate from anchoring: the common motion/operator path remains scoped
+/// without asking every guest to clean up on every early return.
+pub fn retainRange(self: *WasmPlugin, handle: u32) bool {
+    const slot = self.ranges.getPtr(handle) orelse return false;
+    slot.retained = true;
+    return true;
+}
+
+fn destroyRange(self: *WasmPlugin, s: RangeSlot) void {
+    const buffer = self.ctx.buffers.resolve(s.buffer) orelse return;
+    buffer.editor.doc.removeAnchor(s.start);
+    buffer.editor.doc.removeAnchor(s.end);
+}
+
+fn releaseRangeAt(self: *WasmPlugin, handle: u32) void {
+    const removed = self.ranges.fetchRemove(handle) orelse return;
+    self.destroyRange(removed.value);
+}
+
+/// Release the dispatch-scoped entries while preserving explicitly retained
+/// tool state. Closed buffers need no special path: `Document.deinit` already
+/// owned and destroyed their anchor sets.
+pub fn clearEphemeralRanges(self: *WasmPlugin) void {
+    for (self.ephemeral_range_handles.items) |handle| {
+        const slot = self.ranges.get(handle) orelse continue;
+        if (!slot.retained) self.releaseRangeAt(handle);
+    }
+    self.ephemeral_range_handles.clearRetainingCapacity();
+}
+
+/// Release one guest-owned range resource. Idempotent: a callback may defer
+/// cleanup without caring whether an earlier stale-target branch released it.
+pub fn releaseRange(self: *WasmPlugin, handle: u32) void {
+    self.releaseRangeAt(handle);
+}
+
+/// Plugin teardown owns retained state too.
+pub fn clearAllRanges(self: *WasmPlugin) void {
+    var it = self.ranges.valueIterator();
+    while (it.next()) |slot| self.destroyRange(slot.*);
+    self.ranges.clearRetainingCapacity();
+    self.ephemeral_range_handles.clearRetainingCapacity();
+}
+
+pub fn clearRetiredResultBuffers(self: *WasmPlugin) void {
+    for (self.retired_result_bufs.items) |*buf| buf.deinit(self.gpa);
+    self.retired_result_bufs.clearRetainingCapacity();
 }
 
 /// Drop the pending completion batch, freeing each item's owned bytes.
@@ -490,10 +649,15 @@ pub fn deinit(self: *WasmPlugin) void {
     self.net_sessions.deinit(gpa);
     for (self.proc_streams.items) |maybe| if (maybe) |s| s.deinit(); // kill + join
     self.proc_streams.deinit(gpa);
-    self.stampsClear();
-    self.stamps.deinit(gpa);
+    self.clearAllRanges();
+    self.ranges.deinit(gpa);
+    self.ephemeral_range_handles.deinit(gpa);
+    self.clearDocSnapshots();
+    self.doc_snapshots.deinit(gpa);
     self.queryCapsClear();
     self.query_caps.deinit(gpa);
+    self.clearRetiredResultBuffers();
+    self.retired_result_bufs.deinit(gpa);
     self.result_buf.deinit(gpa);
     self.pick_prompt.deinit(gpa);
     for (self.pick_items.items) |it| {

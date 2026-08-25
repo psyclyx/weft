@@ -1,8 +1,8 @@
 //! The read/edit/motion surface: read-only reads (cursor/byte_len/slice/line_at/
 //! selection/path), the gated edit + jump, the native `editor` step/selection
-//! primitives, and the stamped-range membrane ([FIX 1/3]) — a motion stamps a
-//! range by handle, an operator awaits/reads one and applies an edit through it
-//! (the version token stays host-side; only the handle crosses).
+//! primitives, and the anchored-range membrane — a motion anchors a range by
+//! handle, an operator awaits/reads one and applies an edit through it. Live
+//! positions never become version-plus-offset pairs.
 
 const std = @import("std");
 const wasm = @import("../wasm.zig");
@@ -11,6 +11,10 @@ const Editor = @import("../Editor.zig");
 
 const shared = @import("plugin.zig");
 const WasmPlugin = shared.WasmPlugin;
+
+fn opaqueHandle(raw: i32) ?u32 {
+    return if (raw < 0) null else @intCast(raw);
+}
 
 pub fn hCursor(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32, results: []i32) void {
     _ = caller;
@@ -26,13 +30,37 @@ pub fn hByteLen(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32, resu
     results[0] = @intCast(p.activeCtx().editor().text().byteLen());
 }
 
-/// The active document's monotonic commit count — a cheap change token. A plugin
-/// (LSP) tracks it to know when to resync (didChange) without diffing the text.
-pub fn hDocRevision(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32, results: []i32) void {
+/// Capture an opaque witness for the active document's current causal
+/// frontier. Negative i32 is reserved for allocation/frontier failure.
+pub fn hDocSnapshot(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32, results: []i32) void {
     _ = caller;
     _ = args;
     const p: *WasmPlugin = @ptrCast(@alignCast(data.?));
-    results[0] = @intCast(p.activeCtx().editor().doc.commitCount());
+    const handle = p.docSnapshot() catch {
+        results[0] = -1;
+        return;
+    };
+    results[0] = @intCast(handle);
+}
+
+/// Equality-only witness check. Missing handles, a different active buffer,
+/// and any frontier read failure all return false.
+pub fn hDocSnapshotIsCurrent(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32, results: []i32) void {
+    _ = caller;
+    const p: *WasmPlugin = @ptrCast(@alignCast(data.?));
+    const handle = opaqueHandle(args[0]) orelse {
+        results[0] = 0;
+        return;
+    };
+    results[0] = @intFromBool(p.docSnapshotIsCurrent(handle));
+}
+
+/// Idempotently release an opaque document snapshot witness.
+pub fn hDocSnapshotRelease(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32, results: []i32) void {
+    _ = caller;
+    _ = results;
+    const p: *WasmPlugin = @ptrCast(@alignCast(data.?));
+    if (opaqueHandle(args[0])) |handle| p.releaseDocSnapshot(handle);
 }
 
 pub fn hSlice(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32, results: []i32) void {
@@ -186,7 +214,7 @@ pub fn hJump(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32, results
     ed.placeCursor(@min(@as(usize, @intCast(args[0])), ed.text().byteLen()));
 }
 
-// ── The native `editor` surface + stamped-range membrane ([FIX 1/3]) ──
+// ── The native `editor` surface + anchored-range membrane ────────────
 
 /// `editor.step(from, dir, kind) -> offset`: the pure step primitive a motion
 /// plugin composes (char boundary or byte-column line motion), no cursor move.
@@ -213,39 +241,35 @@ pub fn hSetSelection(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32,
     ed.placeCursor(@min(@as(usize, @intCast(args[1])), len));
 }
 
-/// Stamp `[start, end)` at the current document version and return an opaque
+/// Anchor `[start, end)` in the current CRDT document and return an opaque
 /// handle into this plugin's per-dispatch table. The one way a guest builds a
-/// range (a motion's target, or a linewise op's line span). -1 on failure.
-pub fn hStampRange(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32, results: []i32) void {
+/// live range (a motion's target, or a linewise op's line span).
+pub fn hAnchorRange(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32, results: []i32) void {
     _ = caller;
     const p: *WasmPlugin = @ptrCast(@alignCast(data.?));
-    const v = p.activeCtx().document().version(p.gpa) catch {
-        results[0] = -1;
-        return;
-    };
-    const h = p.pushRange(v, @intCast(args[0]), @intCast(args[1])) catch {
-        p.gpa.free(v);
+    const h = p.anchorRange(@intCast(args[0]), @intCast(args[1])) catch {
         results[0] = -1;
         return;
     };
     results[0] = @intCast(h);
 }
 
-/// A motion sets its result to a `range` Value from a handle it stamped.
+/// A motion sets its result to a borrowed live `range` Value.
 pub fn hSetResultRange(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32, results: []i32) void {
     _ = caller;
     _ = results;
     const p: *WasmPlugin = @ptrCast(@alignCast(data.?));
-    const h: usize = @intCast(args[0]);
-    if (h >= p.stamps.items.len) return;
-    p.result = .{ .range = p.stamps.items[h].range };
+    const h = opaqueHandle(args[0]) orelse return;
+    const slot = p.activeRange(h) orelse return;
+    const range = p.borrowedRange(slot) orelse return;
+    p.result = .{ .range = range };
 }
 
-/// Run a command by name; if it returns a `range` Value (a motion), rebase it
-/// to the current head, re-stamp into THIS plugin's table, and return the
+/// Run a command by name; if it returns a live `range` Value (a motion), copy
+/// its current anchors into THIS plugin's range table and return the
 /// handle. -1 if the command produced no range. This is how an operator (or
 /// vim) "awaits a motion by name" (design §6.1). Synchronous motions only for
-/// now — a pending/async range would preserve the original version instead.
+/// now. Asynchronous results use the capability/snapshot boundary instead.
 pub fn hRunRange(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32, results: []i32) void {
     const p: *WasmPlugin = @ptrCast(@alignCast(data.?));
     const cmd = caller.readMemory(p.gpa, @intCast(args[0]), @intCast(args[1])) catch {
@@ -261,32 +285,30 @@ pub fn hRunRange(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32, res
         results[0] = -1;
         return;
     }
-    const cur = rv.range.rebase(p.activeCtx().document()) orelse {
+    const cur = rv.range.resolve(p.activeCtx().document()) orelse {
         results[0] = -1;
         return;
     };
-    const v = p.activeCtx().document().version(p.gpa) catch {
-        results[0] = -1;
-        return;
-    };
-    const h = p.pushRange(v, cur.start, cur.end) catch {
-        p.gpa.free(v);
+    const h = p.anchorRange(cur.start, cur.end) catch {
         results[0] = -1;
         return;
     };
     results[0] = @intCast(h);
 }
 
-/// Resolve a stamped-range handle to its current `[start, end)` (two u32 into
-/// the guest). -1 if the handle is unknown or the range rebased away.
+/// Resolve an anchored-range handle to its current `[start, end)` (two u32
+/// into the guest). -1 if its handle or buffer locus is gone.
 pub fn hRangeEnds(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32, results: []i32) void {
     const p: *WasmPlugin = @ptrCast(@alignCast(data.?));
-    const h: usize = @intCast(args[0]);
-    if (h >= p.stamps.items.len) {
+    const h = opaqueHandle(args[0]) orelse {
         results[0] = -1;
         return;
-    }
-    const cur = p.stamps.items[h].range.rebase(p.activeCtx().document()) orelse {
+    };
+    const slot = p.activeRange(h) orelse {
+        results[0] = -1;
+        return;
+    };
+    const cur = p.resolveRange(slot) orelse {
         results[0] = -1;
         return;
     };
@@ -298,20 +320,43 @@ pub fn hRangeEnds(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32, re
     results[0] = 0;
 }
 
-/// Run a command passing a stamped range (by handle) as its single arg — how
+/// Explicitly release one anchored-range resource. Motion/operator handles are
+/// also cleared at the next dispatch; asynchronous interactions release them
+/// when their terminal callback runs.
+pub fn hRangeRelease(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32, results: []i32) void {
+    _ = caller;
+    _ = results;
+    const p: *WasmPlugin = @ptrCast(@alignCast(data.?));
+    const h = opaqueHandle(args[0]) orelse return;
+    p.releaseRange(h);
+}
+
+/// Retain a range across command dispatches. Interactive tools pair this with
+/// an explicit release in their terminal callback; ordinary motions do not.
+pub fn hRangeRetain(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32, results: []i32) void {
+    _ = caller;
+    const p: *WasmPlugin = @ptrCast(@alignCast(data.?));
+    const h = opaqueHandle(args[0]) orelse {
+        results[0] = -1;
+        return;
+    };
+    results[0] = if (p.retainRange(h)) 0 else -1;
+}
+
+/// Run a command passing a live range (by handle) as its single arg — how
 /// vim hands a motion's range to an operator (`op.delete`, …).
 pub fn hRunRangeArg(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32, results: []i32) void {
     _ = results;
     const p: *WasmPlugin = @ptrCast(@alignCast(data.?));
     const cmd = caller.readMemory(p.gpa, @intCast(args[0]), @intCast(args[1])) catch return;
     defer p.gpa.free(cmd);
-    const h: usize = @intCast(args[2]);
-    if (h >= p.stamps.items.len) return;
-    const rv = command.Value{ .range = p.stamps.items[h].range };
+    const h = opaqueHandle(args[2]) orelse return;
+    const slot = p.activeRange(h) orelse return;
+    const rv = command.Value{ .range = p.borrowedRange(slot) orelse return };
     _ = command.run(p.activeCtx().commands, p.activeCtx(), cmd, &.{rv}) catch {};
 }
 
-/// An operator reads its `range` arg: rebase to head, re-stamp into this
+/// An operator reads its live `range` arg and anchors it in this
 /// plugin's table, return the handle. -1 if arg `i` is not a range.
 pub fn hArgRange(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32, results: []i32) void {
     _ = caller;
@@ -321,32 +366,27 @@ pub fn hArgRange(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32, res
         results[0] = -1;
         return;
     }
-    const cur = p.cur_args[i].range.rebase(p.activeCtx().document()) orelse {
+    const cur = p.cur_args[i].range.resolve(p.activeCtx().document()) orelse {
         results[0] = -1;
         return;
     };
-    const v = p.activeCtx().document().version(p.gpa) catch {
-        results[0] = -1;
-        return;
-    };
-    const h = p.pushRange(v, cur.start, cur.end) catch {
-        p.gpa.free(v);
+    const h = p.anchorRange(cur.start, cur.end) catch {
         results[0] = -1;
         return;
     };
     results[0] = @intCast(h);
 }
 
-/// Apply an edit over a stamped-range handle: rebase to head, then the gated
+/// Apply an edit over an anchored-range handle: resolve it, then use the gated
 /// `ctx.edit` door authored as this plugin's peer (same gate/attribution as
 /// `wl_edit`). A `view` grade fails inside `ctx.edit` — zero permission code
 /// in the operator.
 pub fn hEditRange(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32, results: []i32) void {
     _ = results;
     const p: *WasmPlugin = @ptrCast(@alignCast(data.?));
-    const h: usize = @intCast(args[0]);
-    if (h >= p.stamps.items.len) return;
-    const cur = p.stamps.items[h].range.rebase(p.activeCtx().document()) orelse return;
+    const h = opaqueHandle(args[0]) orelse return;
+    const slot = p.activeRange(h) orelse return;
+    const cur = p.resolveRange(slot) orelse return;
     const bytes = caller.readMemory(p.gpa, @intCast(args[1]), @intCast(args[2])) catch return;
     defer p.gpa.free(bytes);
     const saved = p.activeCtx().principal;

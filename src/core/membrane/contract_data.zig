@@ -111,7 +111,7 @@ pub const Entry = struct {
     ///     owns the tables; Head owns only the CURSOR into them — see
     ///     Head.zig's "THE SPLIT"), legal from `init`.
     ///   - buffer/editor-owned state post-W2a (`wl_jump`, `wl_set_selection`,
-    ///     `wl_editor_step`, every `wl_edit*`/stamped-range import,
+    ///     `wl_editor_step`, every `wl_edit*`/anchored-range import,
     ///     `wl_flash`, every `wl_style*`/`wl_fold*`/`wl_readonly*`/
     ///     `wl_decorate*`) — cursor/selection/document content live on
     ///     `Editor`, not `Head`; flash/styles/folds are buffer layers.
@@ -152,10 +152,12 @@ pub const imports = [_]Entry{
     .{ .name = "wl_declare_capability", .params = &.{ .u32, .u32 }, .results = &.{}, .group = .declare, .doc = "describe-phase: declare an abstract capability name this plugin provides" },
     .{ .name = "wl_request_perm", .params = &.{.u32}, .results = &.{}, .group = .declare, .doc = "describe-phase: request a permission bit (fs_read/fs_write/net/proc/timer)" },
 
-    // ── edit.zig — read-only, native editor step, write, stamped ranges ─
+    // ── edit.zig — read-only, native editor step, write, anchored ranges ─
     .{ .name = "wl_cursor", .params = &.{}, .results = &.{.u32}, .group = .edit, .doc = "the cursor's byte offset in the active document" },
     .{ .name = "wl_byte_len", .params = &.{}, .results = &.{.u32}, .group = .edit, .doc = "the active document's byte length" },
-    .{ .name = "wl_doc_revision", .params = &.{}, .results = &.{.u32}, .group = .edit, .doc = "the active document's monotonic commit count (a cheap change token)" },
+    .{ .name = "wl_doc_snapshot", .params = &.{}, .results = &.{.i32}, .group = .edit, .doc = "capture an opaque causal-frontier witness for the active document" },
+    .{ .name = "wl_doc_snapshot_is_current", .params = &.{.u32}, .results = &.{.u32}, .group = .edit, .doc = "test an opaque document witness for equality with the active frontier" },
+    .{ .name = "wl_doc_snapshot_release", .params = &.{.u32}, .results = &.{}, .group = .edit, .doc = "release an opaque document frontier witness (idempotent)" },
     .{ .name = "wl_slice", .params = &.{ .u32, .u32, .u32, .u32 }, .results = &.{.u32}, .group = .edit, .doc = "copy `[start,end)` of the active document into guest memory" },
     .{ .name = "wl_line_at", .params = &.{ .u32, .u32 }, .results = &.{}, .group = .edit, .doc = "write the `[start,end)` byte span of the line containing `offset`" },
     .{ .name = "wl_selection", .params = &.{.u32}, .results = &.{.u32}, .group = .edit, .doc = "the active selection's other endpoint (mark), or the cursor if none" },
@@ -166,13 +168,15 @@ pub const imports = [_]Entry{
     .{ .name = "wl_render", .params = &.{ .u32, .u32, .u32, .u32 }, .results = &.{}, .group = .edit, .doc = "produce derived/streamed content into a buffer, bypassing read-only (output, not user text)" },
     .{ .name = "wl_edit_as", .params = &.{ .u32, .u32, .u32, .u32, .u32, .u32 }, .results = &.{}, .group = .edit, .doc = "like `wl_edit` but authored as a named `.agent` sub-peer (its own selective-undo unit)" },
     .{ .name = "wl_jump", .params = &.{.u32}, .results = &.{}, .group = .edit, .doc = "move the cursor to `offset`" },
-    .{ .name = "wl_stamp_range", .params = &.{ .u32, .u32 }, .results = &.{.i32}, .group = .edit, .doc = "stamp `[start,end)` at the current doc version into this plugin's range table; -1 on failure" },
-    .{ .name = "wl_set_result_range", .params = &.{.u32}, .results = &.{}, .group = .edit, .doc = "set the command result to a `range` Value from a stamped handle" },
-    .{ .name = "wl_run_range", .params = &.{ .u32, .u32 }, .results = &.{.i32}, .group = .edit, .doc = "run a command by name, rebase + re-stamp its returned range (await-a-motion)" },
-    .{ .name = "wl_range_ends", .params = &.{ .u32, .u32 }, .results = &.{.i32}, .group = .edit, .doc = "resolve a stamped-range handle to its current `[start,end)`" },
-    .{ .name = "wl_run_range_arg", .params = &.{ .u32, .u32, .u32 }, .results = &.{}, .group = .edit, .doc = "run a command passing a stamped range (by handle) as its single arg" },
-    .{ .name = "wl_arg_range", .params = &.{.u32}, .results = &.{.i32}, .group = .edit, .doc = "read a `range` command arg: rebase to head, re-stamp into this plugin's table" },
-    .{ .name = "wl_edit_range", .params = &.{ .u32, .u32, .u32 }, .results = &.{}, .group = .edit, .doc = "apply an edit over a stamped-range handle through the gated edit door" },
+    .{ .name = "wl_anchor_range", .params = &.{ .u32, .u32 }, .results = &.{.i32}, .group = .edit, .doc = "anchor `[start,end)` in the active CRDT document and return a dispatch-scoped opaque live-range handle" },
+    .{ .name = "wl_set_result_range", .params = &.{.u32}, .results = &.{}, .group = .edit, .doc = "set the command result from an anchored live-range handle" },
+    .{ .name = "wl_run_range", .params = &.{ .u32, .u32 }, .results = &.{.i32}, .group = .edit, .doc = "run a command by name and import its returned borrowed live range (await-a-motion)" },
+    .{ .name = "wl_range_ends", .params = &.{ .u32, .u32 }, .results = &.{.i32}, .group = .edit, .doc = "resolve an anchored live-range handle to its current `[start,end)`" },
+    .{ .name = "wl_range_retain", .params = &.{.u32}, .results = &.{.i32}, .group = .edit, .doc = "retain a live-range handle across command dispatches; 0 on success" },
+    .{ .name = "wl_range_release", .params = &.{.u32}, .results = &.{}, .group = .edit, .doc = "release one anchored live-range handle (idempotent)" },
+    .{ .name = "wl_run_range_arg", .params = &.{ .u32, .u32, .u32 }, .results = &.{}, .group = .edit, .doc = "run a command passing an anchored live range as its single borrowed argument" },
+    .{ .name = "wl_arg_range", .params = &.{.u32}, .results = &.{.i32}, .group = .edit, .doc = "import a borrowed live-range command arg into this plugin's anchored range table" },
+    .{ .name = "wl_edit_range", .params = &.{ .u32, .u32, .u32 }, .results = &.{}, .group = .edit, .doc = "apply an edit over an anchored live-range handle through the gated edit door" },
 
     // ── layers.zig — flash/style/fold/readonly/decorate/breakpoints ────
     .{ .name = "wl_flash", .params = &.{ .u32, .u32 }, .results = &.{}, .group = .layers, .doc = "vim-goggles: flash `[start,end)` for the frame loop to fade and the view to draw" },
@@ -384,7 +388,7 @@ pub const imports = [_]Entry{
 /// half-finished edit — fails the build with a pointed message instead of
 /// silently drifting the two ~124-entry tables apart again (the exact class
 /// this table exists to kill).
-const expected_import_count = 175;
+const expected_import_count = 179;
 
 /// A host→guest EXPORT entrypoint (design doc/north-star-plan.md §2.5, task
 /// W0a-D extension 2): every `instance.callVoid("name", args)` the host

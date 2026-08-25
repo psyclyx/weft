@@ -85,10 +85,12 @@ const handlers = [_]struct { name: []const u8, handler: HostFn }{
     .{ .name = "wl_declare_capability", .handler = declare.hDeclareCapability },
     .{ .name = "wl_request_perm", .handler = declare.hRequestPerm },
 
-    // ── edit.zig — read-only, native editor step, write, stamped ranges ─
+    // ── edit.zig — read-only, native editor step, write, anchored ranges ─
     .{ .name = "wl_cursor", .handler = edit.hCursor },
     .{ .name = "wl_byte_len", .handler = edit.hByteLen },
-    .{ .name = "wl_doc_revision", .handler = edit.hDocRevision },
+    .{ .name = "wl_doc_snapshot", .handler = edit.hDocSnapshot },
+    .{ .name = "wl_doc_snapshot_is_current", .handler = edit.hDocSnapshotIsCurrent },
+    .{ .name = "wl_doc_snapshot_release", .handler = edit.hDocSnapshotRelease },
     .{ .name = "wl_slice", .handler = edit.hSlice },
     .{ .name = "wl_line_at", .handler = edit.hLineAt },
     .{ .name = "wl_selection", .handler = edit.hSelection },
@@ -99,10 +101,12 @@ const handlers = [_]struct { name: []const u8, handler: HostFn }{
     .{ .name = "wl_render", .handler = edit.hRender },
     .{ .name = "wl_edit_as", .handler = edit.hEditAs },
     .{ .name = "wl_jump", .handler = edit.hJump },
-    .{ .name = "wl_stamp_range", .handler = edit.hStampRange },
+    .{ .name = "wl_anchor_range", .handler = edit.hAnchorRange },
     .{ .name = "wl_set_result_range", .handler = edit.hSetResultRange },
     .{ .name = "wl_run_range", .handler = edit.hRunRange },
     .{ .name = "wl_range_ends", .handler = edit.hRangeEnds },
+    .{ .name = "wl_range_retain", .handler = edit.hRangeRetain },
+    .{ .name = "wl_range_release", .handler = edit.hRangeRelease },
     .{ .name = "wl_run_range_arg", .handler = edit.hRunRangeArg },
     .{ .name = "wl_arg_range", .handler = edit.hArgRange },
     .{ .name = "wl_edit_range", .handler = edit.hEditRange },

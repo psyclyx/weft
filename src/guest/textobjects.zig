@@ -1,6 +1,6 @@
 //! textobjects — the text-object domain (design §6.1), a `.wasm` plugin with NO
-//! core privilege (perms `{}`, view). Like motions, each returns a stamped
-//! `range` ([FIX 1/3]) an operator awaits (`di"`, `ca(`, `yiw`) — but the range
+//! core privilege (perms `{}`, view). Like motions, each returns a borrowed
+//! live `range` an operator awaits (`di"`, `ca(`, `yiw`) — but the range
 //! is absolute (the construct around the cursor), not cursor-anchored. Byte-scan
 //! objects only for now; tree-backed objects (function/class) belong to the `ts`
 //! plugin over `syntax.query`. `inner` excludes delimiters; `a` includes them
@@ -12,7 +12,7 @@ const weft = @import("weft");
 const Obj = struct { s: usize, e: usize };
 fn retObj(o: ?Obj) void {
     const x = o orelse return;
-    if (weft.stampRange(.{ .start = x.s, .end = x.e })) |h| weft.setResultRange(h);
+    if (weft.anchorRange(.{ .start = x.s, .end = x.e })) |h| weft.setResultRange(h);
 }
 
 // One command per (variant, object). Registration order == on_command id; the

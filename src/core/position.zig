@@ -1,10 +1,10 @@
-//! Stamped positions — the only way an offset crosses a public
-//! boundary. A `StampedOffset`/`StampedRange` pairs byte positions with
-//! the version token they were computed against; the sole way back to a
-//! usable offset is `rebase` (maps through the commit log's composed
-//! patches) or null — rebase or discard, decided here, not in
-//! consumers. The mapping kernel (`mapOffset`) moved out of undo.zig,
-//! which now shares it.
+//! Position boundary types. Synchronous command composition carries borrowed
+//! document-owned `LiveOffset`/`LiveRange` anchors. The older
+//! `StampedOffset`/`StampedRange` adapters remain only for asynchronous
+//! snapshot consumers which receive arbitrary offsets computed against an
+//! immutable capability request; those map through the commit log or fail
+//! closed. New live interaction state must use anchors, never these adapters.
+//! The mapping kernel (`mapOffset`) is also shared by undo.
 
 const std = @import("std");
 const Allocator = std.mem.Allocator;
@@ -14,6 +14,36 @@ const Document = @import("Document.zig");
 const patch = @import("patch.zig");
 const Patch = patch.Patch;
 pub const Bias = stemma.Bias;
+
+/// A borrowed live position. The owner of `handle` keeps it registered in
+/// `document` for this value's lifetime; crossing to another document fails
+/// closed. This is the synchronous command ABI's position type—not a snapshot
+/// coordinate and therefore not stamped with a causal frontier.
+pub const LiveOffset = struct {
+    document: *const Document,
+    handle: Document.AnchorHandle,
+
+    pub fn resolve(self: LiveOffset, document: *const Document) ?usize {
+        if (self.document != document) return null;
+        return document.anchorOffset(self.handle);
+    }
+};
+
+/// A borrowed pair of document-owned live anchors. Anchor ownership remains
+/// with the producer; command values are valid only for the synchronous call
+/// chain, just like borrowed strings.
+pub const LiveRange = struct {
+    document: *const Document,
+    start: Document.AnchorHandle,
+    end: Document.AnchorHandle,
+
+    pub fn resolve(self: LiveRange, document: *const Document) ?stemma.Range {
+        if (self.document != document) return null;
+        const start = document.anchorOffset(self.start);
+        const end = document.anchorOffset(self.end);
+        return .{ .start = @min(start, end), .end = @max(start, end) };
+    }
+};
 
 /// Map an offset through one commit's composed patches (old-space →
 /// new-space). `bias` resolves positions at insertion boundaries

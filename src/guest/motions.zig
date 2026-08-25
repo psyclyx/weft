@@ -1,6 +1,6 @@
 //! motions — the motion domain (design §6.1), a `.wasm` plugin with NO core
 //! privilege (perms `{}`, view). Each motion is PURE: it computes a target
-//! offset from the current cursor + a read-only snapshot and RETURNS a stamped
+//! offset from the current cursor + a read-only snapshot and RETURNS a borrowed
 //! `range` ([cursor, target]) — it never moves a shared cursor an operator
 //! races to read back ([FIX 3]). The caller decides: vim moves the cursor in
 //! normal mode; an operator awaits the range and edits. Char/line steps use the
@@ -46,7 +46,7 @@ export fn on_command(id: u32) void {
 /// that isn't the cursor) while an operator gets the span to edit.
 fn ret(target: usize) void {
     const cur = weft.cursor();
-    if (weft.stampRange(.{ .start = @min(cur, target), .end = @max(cur, target) })) |h|
+    if (weft.anchorRange(.{ .start = @min(cur, target), .end = @max(cur, target) })) |h|
         weft.setResultRange(h);
 }
 

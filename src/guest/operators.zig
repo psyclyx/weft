@@ -4,7 +4,7 @@
 //! [FIX 3]) and applies an edit through the gated door, authored as this
 //! plugin's peer. A `view`-grade peer's `op.delete` fails inside the gate with
 //! ZERO permission code here; `op.upcase` on a view doc likewise refuses. The
-//! range is version-stamped, so it rebases like a concurrent peer's edit.
+//! range is document-anchored, so it follows concurrent edits directly.
 
 const std = @import("std");
 const weft = @import("weft");
@@ -28,7 +28,7 @@ export fn on_command(id: u32) void {
     if (id < cmds.len) cmds[id].handler();
 }
 
-/// Delete the awaited range (the edit door, grade-gated + rebased).
+/// Delete the awaited range (the edit door, grade-gated + CRDT-anchored).
 fn delete() void {
     const h = weft.argRange(0) orelse return;
     weft.editRange(h, "");

@@ -31,15 +31,12 @@ pub const Value = union(enum) {
     integer: i64,
     number: f64,
     string: []const u8,
-    /// A version-stamped position ([FIX 1]): the honest way a position
-    /// crosses the ABI. It rebases through the commit log to a current
-    /// offset or to null — never a bare offset that silently breaks under
-    /// concurrent edits. Backed by position.zig; borrowed for the call
-    /// (its version token, like `string`). The prerequisite for
-    /// motions-that-return-ranges and the pick pool's anchor column.
-    anchor: position.StampedOffset,
-    /// A version-stamped range — a stamped `(start, end)`.
-    range: position.StampedRange,
+    /// A borrowed document-owned live anchor. The producer owns its lifetime;
+    /// the value is valid for this synchronous call chain, like `string`.
+    anchor: position.LiveOffset,
+    /// A borrowed pair of live anchors. It resolves through the CRDT document,
+    /// never through a version-plus-offset rebase adapter.
+    range: position.LiveRange,
 };
 
 pub const Type = std.meta.Tag(Value);
@@ -368,8 +365,8 @@ pub fn renderInto(
 /// core-enforced to be the session's FIRE-time version (`Caps.push`'s
 /// restamp — never trusted from the provider), so every `Replacement`'s
 /// `[start,end)` is unambiguously old-space against that ONE token. Each is
-/// rebased to the CURRENT head via `position.StampedRange`, the same
-/// machinery a motion's stamped range rebases through; so is `fired` (the
+/// mapped to the CURRENT head via the asynchronous snapshot adapter; so is
+/// `fired` (the
 /// range the consumer itself licensed at fire time — typically stamped at
 /// the SAME version, but rebased independently so a late apply against a
 /// moved-on document degrades honestly rather than comparing stale numbers).
@@ -592,8 +589,8 @@ fn typeOf(comptime T: type) Type {
         i64 => .integer,
         f64 => .number,
         []const u8 => .string,
-        position.StampedOffset => .anchor,
-        position.StampedRange => .range,
+        position.LiveOffset => .anchor,
+        position.LiveRange => .range,
         Value => .nil, // untyped: schema says nil-able, wrapper passes through
         else => @compileError("unsupported command arg type " ++ @typeName(T)),
     };
@@ -606,8 +603,8 @@ fn unpack(comptime T: type, v: Value) error{TypeMismatch}!T {
         i64 => if (v == .integer) v.integer else error.TypeMismatch,
         f64 => if (v == .number) v.number else error.TypeMismatch,
         []const u8 => if (v == .string) v.string else error.TypeMismatch,
-        position.StampedOffset => if (v == .anchor) v.anchor else error.TypeMismatch,
-        position.StampedRange => if (v == .range) v.range else error.TypeMismatch,
+        position.LiveOffset => if (v == .anchor) v.anchor else error.TypeMismatch,
+        position.LiveRange => if (v == .range) v.range else error.TypeMismatch,
         else => unreachable,
     };
 }
@@ -621,28 +618,29 @@ fn insertText(ctx: *Context, args: struct { offset: i64, text: []const u8 }) any
     return .{ .integer = @intCast(ctx.document().text().byteLen()) };
 }
 
-test "command Value: a stamped range rebases through a concurrent edit or nulls" {
+test "command Value: a borrowed live range follows edits and rejects another document" {
     const gpa = t.allocator;
     var doc = try Document.init(gpa, "user");
     defer doc.deinit(gpa);
     try doc.insert(gpa, 0, "hello");
-    const v0 = try doc.version(gpa);
-    defer gpa.free(v0);
+    const start = try doc.addAnchor(gpa, 0, .right);
+    defer doc.removeAnchor(start);
+    const end = try doc.addAnchor(gpa, 5, .left);
+    defer doc.removeAnchor(end);
 
-    // Carry a stamped range as an ABI Value; a concurrent head insert shifts
-    // it, and it rebases to the current offsets (never a bare stale offset).
-    const val: Value = .{ .range = position.StampedRange.at(v0, 0, 5) };
+    // Carry live anchors as an ABI Value; an intervening edit advances them.
+    const val: Value = .{ .range = .{ .document = &doc, .start = start, .end = end } };
     try doc.insert(gpa, 0, "XYZ");
-    const r = val.range.rebase(&doc).?;
+    const r = val.range.resolve(&doc).?;
     try t.expectEqual(@as(usize, 3), r.start);
     try t.expectEqual(@as(usize, 8), r.end);
 
-    // An unknown version rebases to null — rebase or discard, no third result.
-    const bogus: Value = .{ .range = position.StampedRange.at("nope", 0, 5) };
-    try t.expectEqual(@as(?Document.Range, null), bogus.range.rebase(&doc));
+    var other = try Document.init(gpa, "other");
+    defer other.deinit(gpa);
+    try t.expectEqual(@as(?Document.Range, null), val.range.resolve(&other));
 
     // The value survives the typed-arg door too (unpack round-trips it).
-    try t.expectEqual(Type.range, comptime typeOf(position.StampedRange));
+    try t.expectEqual(Type.range, comptime typeOf(position.LiveRange));
 }
 
 test "command: schema derivation, validation, late-bound run" {

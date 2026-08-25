@@ -15,8 +15,8 @@
     // fetches a tarball. Keep these pins in step with npins/sources.json.
     .dependencies = .{
         .stemma = .{
-            .url = "https://github.com/psyclyx/stemma/archive/refs/tags/v0.5.2.tar.gz",
-            .hash = "stemma-0.5.2-CIOtoD2mCwAUuCPPUTSr-TP_qIsC96rYGvuE7fIK4nKg",
+            .url = "https://github.com/psyclyx/stemma/archive/refs/tags/v0.6.0.tar.gz",
+            .hash = "stemma-0.6.0-CIOtoDDDCwCQW9y-xLfL1Dzi_f-v4DFPqV5L0KF6ZO2U",
             .lazy = true,
         },
         .stemma_local = .{ .path = "../../lib/stemma", .lazy = true },

@@ -1030,6 +1030,69 @@ test "wasm plugin: the SAME head-gated import works from a dispatching entry, an
     try t.expectEqualStrings("after-relay", env.head.echo.items); // written AFTER the nesting, still succeeds
 }
 
+test "wasm plugin: nested same-plugin dispatch preserves its caller's live ranges" {
+    const gpa = t.allocator;
+    var env: Env = undefined;
+    try Env.init(gpa, &env);
+    defer env.deinit(gpa);
+
+    var engine = try wasm.Engine.init();
+    defer engine.deinit();
+    const plugin = try loadPlugin(&engine, &env.ctx, "headtest", @embedFile("guest_headtest_wasm"), .{});
+    defer plugin.deinit();
+
+    try env.buffers.active().editor.insertText(gpa, "abc");
+    const result = try command.run(&env.commands, &env.ctx, "head-range-relay", &.{});
+    try t.expect(result == .range);
+    const resolved = result.range.resolve(&env.buffers.active().editor.doc) orelse return error.TestUnexpectedResult;
+    try t.expectEqual(@as(usize, 1), resolved.start);
+    try t.expectEqual(@as(usize, 2), resolved.end);
+
+    // Released capabilities are never recycled: an arbitrarily late cleanup
+    // for `old` must be harmless to the range allocated afterward.
+    const old = try plugin.anchorRange(0, 1);
+    plugin.releaseRange(old);
+    const fresh = try plugin.anchorRange(1, 2);
+    try t.expect(old != fresh);
+    plugin.releaseRange(old);
+    try t.expect(plugin.activeRange(fresh) != null);
+    plugin.releaseRange(fresh);
+}
+
+test "wasm plugin: document snapshot witnesses are causal, buffer-bound, and idempotent" {
+    const gpa = t.allocator;
+    var env: Env = undefined;
+    try Env.init(gpa, &env);
+    defer env.deinit(gpa);
+
+    var engine = try wasm.Engine.init();
+    defer engine.deinit();
+    const plugin = try loadPlugin(&engine, &env.ctx, "headtest", @embedFile("guest_headtest_wasm"), .{});
+    defer plugin.deinit();
+
+    const before = try plugin.docSnapshot();
+    const same_frontier = try plugin.docSnapshot();
+    try t.expect(before != same_frontier);
+    try t.expect(plugin.docSnapshotIsCurrent(before));
+    try t.expect(plugin.docSnapshotIsCurrent(same_frontier));
+    plugin.releaseDocSnapshot(before);
+    try t.expect(plugin.docSnapshotIsCurrent(same_frontier));
+    try env.buffers.active().editor.insertText(gpa, "abc");
+    try t.expect(!plugin.docSnapshotIsCurrent(before));
+    try t.expect(!plugin.docSnapshotIsCurrent(same_frontier));
+    plugin.releaseDocSnapshot(before);
+    plugin.releaseDocSnapshot(before);
+    try t.expect(!plugin.docSnapshotIsCurrent(before));
+    plugin.releaseDocSnapshot(same_frontier);
+
+    const other = try plugin.docSnapshot();
+    try t.expect(other != before);
+    const other_id = try env.buffers.create(gpa, "other");
+    try env.buffers.switchTo(gpa, other_id, &env.head, &env.keymap);
+    try t.expect(!plugin.docSnapshotIsCurrent(other));
+    plugin.releaseDocSnapshot(other);
+}
+
 test "wasm plugin: init-phase table-config declarations are unaffected by dispatch-gating (task #19 item 4)" {
     const gpa = t.allocator;
     var env: Env = undefined;
@@ -1284,7 +1347,7 @@ test "wasm plugin: palette opens a command pick; accept dispatches back and runs
     try t.expectEqualStrings(env.buffers.active().name, env.head.echo.items);
 }
 
-test "wasm plugins: consult-line combines row identity with exact match evidence" {
+test "wasm plugins: consult-line combines anchored row identity with exact match evidence" {
     const gpa = t.allocator;
     var env: Env = undefined;
     try Env.init(gpa, &env);
@@ -1301,14 +1364,82 @@ test "wasm plugins: consult-line combines row identity with exact match evidence
     ed.placeCursor(0);
 
     // Candidate identity resolves the source row; candidate-relative match
-    // evidence lands after its indentation. Neither fact substitutes for the
-    // other, and neither is recovered from mutable Pick state.
+    // evidence lands after its indentation. Move the document after the pick
+    // has captured candidates: the row's CRDT anchors advance with the merge,
+    // while immutable picker evidence stays presentation-only.
     _ = try command.run(&env.commands, &env.ctx, "consult-line", &.{});
     try t.expect(env.head.pick.active);
     _ = try command.run(&env.commands, &env.ctx, "pick-input", &.{.{ .string = "ccc" }});
+    try ed.doc.insert(gpa, 0, "prefix\n");
     _ = try command.run(&env.commands, &env.ctx, "pick-accept", &.{});
     try t.expect(!env.head.pick.active);
-    try t.expectEqual(@as(usize, 8), ed.cursorOffset()); // exact "ccc", not line start 4
+    try t.expectEqual(@as(usize, 15), ed.cursorOffset()); // exact "ccc", not shifted line start 11
+
+    // Deleting the selected row while the picker is open collapses its
+    // anchored range. Acceptance fails closed: it must not jump to the row or
+    // EOF which happened to inherit the old byte coordinate.
+    ed.placeCursor(0);
+    _ = try command.run(&env.commands, &env.ctx, "consult-line", &.{});
+    _ = try command.run(&env.commands, &env.ctx, "pick-input", &.{.{ .string = "ccc" }});
+    try ed.doc.delete(gpa, .{ .start = 11, .end = 18 });
+    _ = try command.run(&env.commands, &env.ctx, "pick-accept", &.{});
+    try t.expect(!env.head.pick.active);
+    try t.expectEqual(@as(usize, 0), ed.cursorOffset());
+
+    // Reopening the same tool while its picker is live cancels the old
+    // interaction before replacing its retained target table. The old
+    // cancellation callback must not release the new picker's anchors.
+    _ = try command.run(&env.commands, &env.ctx, "consult-line", &.{});
+    _ = try command.run(&env.commands, &env.ctx, "pick-input", &.{.{ .string = "aaa" }});
+    _ = try command.run(&env.commands, &env.ctx, "consult-line", &.{});
+    try t.expect(env.head.pick.active);
+    _ = try command.run(&env.commands, &env.ctx, "pick-input", &.{.{ .string = "aaa" }});
+    _ = try command.run(&env.commands, &env.ctx, "pick-accept", &.{});
+    try t.expect(!env.head.pick.active);
+    try t.expectEqual(@as(usize, 7), ed.cursorOffset());
+
+    // A length-preserving edit inside the selected row does not move either
+    // endpoint. Full-row evidence still detects it and acceptance fails
+    // closed rather than treating anchors alone as proof of unchanged text.
+    ed.placeCursor(0);
+    _ = try command.run(&env.commands, &env.ctx, "consult-line", &.{});
+    _ = try command.run(&env.commands, &env.ctx, "pick-input", &.{.{ .string = "aaa" }});
+    try ed.doc.replaceAll(gpa, &.{.{ .range = .{ .start = 7, .end = 10 }, .bytes = "AAA" }});
+    _ = try command.run(&env.commands, &env.ctx, "pick-accept", &.{});
+    try t.expect(!env.head.pick.active);
+    try t.expectEqual(@as(usize, 0), ed.cursorOffset());
+}
+
+test "wasm plugins: consult-line verifies content beyond its display scratch" {
+    const gpa = t.allocator;
+    var env: Env = undefined;
+    try Env.init(gpa, &env);
+    defer env.deinit(gpa);
+    try @import("../pick.zig").install(gpa, &env.commands, &env.keymap);
+
+    var engine = try wasm.Engine.init();
+    defer engine.deinit();
+    const consult = try loadPlugin(&engine, &env.ctx, "consult", @embedFile("guest_consult_wasm"), .{});
+    defer consult.deinit();
+
+    const ed = &env.buffers.active().editor;
+    const line = try gpa.alloc(u8, 70 * 1024);
+    defer gpa.free(line);
+    @memset(line, 'a');
+    try ed.insertText(gpa, line);
+    ed.placeCursor(0);
+
+    _ = try command.run(&env.commands, &env.ctx, "consult-line", &.{});
+    try t.expect(env.head.pick.active);
+    // Change bytes after the 64-KiB candidate/display window without changing
+    // the row length or its anchor endpoints.
+    try ed.doc.replaceAll(gpa, &.{.{
+        .range = .{ .start = 68 * 1024, .end = 68 * 1024 + 1 },
+        .bytes = "b",
+    }});
+    _ = try command.run(&env.commands, &env.ctx, "pick-accept", &.{});
+    try t.expect(!env.head.pick.active);
+    try t.expectEqual(@as(usize, 0), ed.cursorOffset());
 }
 
 test "wasm plugins: consult-imenu picks a definition and jumps to it" {
@@ -1502,7 +1633,7 @@ test "wasm plugin: region claims a subbuffer + attaches a fact across the membra
     try t.expectEqualStrings("js", plugin.subs.items[0].fact("language").?);
 }
 
-test "wasm plugin: shell insert-shell runs a command off-thread and inserts, rebased" {
+test "wasm plugin: shell insert-shell runs a command off-thread and inserts at its CRDT anchor" {
     const gpa = t.allocator;
     var env: Env = undefined;
     try Env.init(gpa, &env);
@@ -1521,8 +1652,8 @@ test "wasm plugin: shell insert-shell runs a command off-thread and inserts, reb
 
     _ = try command.run(&env.commands, &env.ctx, "insert-shell", &.{.{ .string = "printf hi" }});
 
-    // Concurrently insert at the head: the deferred insert's stamped offset
-    // (1) must rebase to 3 before "hi" lands.
+    // Concurrently insert at the head: the deferred insert's identity anchor
+    // must resolve to 3 before "hi" lands.
     ed.placeCursor(0);
     try ed.insertText(gpa, "YY"); // doc → "YYX"
 
@@ -1533,7 +1664,7 @@ test "wasm plugin: shell insert-shell runs a command off-thread and inserts, reb
     }
     const s = try ed.text().toOwnedSlice(gpa);
     defer gpa.free(s);
-    // "hi" landed at the REBASED offset 3 (after "YYX"), authored as the peer.
+    // "hi" landed at the anchored offset 3 (after "YYX"), authored as the peer.
     try t.expectEqualStrings("YYXhi", s);
     try t.expect(ed.doc.commitAt(ed.doc.commitCount() - 1).author != .user);
 }
@@ -1877,7 +2008,7 @@ test "wasm plugins: a motion returns a range an operator awaits + applies (dw)" 
     try ed.insertText(gpa, "foo bar");
     ed.placeCursor(0);
 
-    // The motion returns a version-stamped RANGE Value across the membrane —
+    // The motion returns a borrowed pair of document-owned live anchors —
     // never a bare offset. Cursor is one end (0), the target the other (4).
     const rv = try command.run(&env.commands, &env.ctx, "motion.word-fwd", &.{});
     try t.expect(rv == .range);
@@ -1891,7 +2022,7 @@ test "wasm plugins: a motion returns a range an operator awaits + applies (dw)" 
     try t.expect(ed.doc.commitAt(ed.doc.commitCount() - 1).author != .user);
 }
 
-test "wasm plugins: an awaited range rebases through a concurrent edit" {
+test "wasm plugins: an awaited live range follows an intervening edit" {
     const gpa = t.allocator;
     var env: Env = undefined;
     try Env.init(gpa, &env);
@@ -1908,19 +2039,19 @@ test "wasm plugins: an awaited range rebases through a concurrent edit" {
     try ed.insertText(gpa, "foo bar");
     ed.placeCursor(0);
 
-    // Compute a word-forward range [0,4) stamped at the current version.
+    // Compute a word-forward range [0,4) as document-owned live anchors.
     const rv = try command.run(&env.commands, &env.ctx, "motion.word-fwd", &.{});
     try t.expect(rv == .range);
 
     // A concurrent edit lands BEFORE the operator applies: insert "XX" at 0.
-    // The stamped range must rebase to [2,6) — "Buffer changed" is inexpressible.
+    // The anchors advance to [2,6) — "Buffer changed" is inexpressible.
     ed.placeCursor(0);
     try ed.insertText(gpa, "XX");
 
     _ = try command.run(&env.commands, &env.ctx, "op.delete", &.{rv});
     const s = try ed.text().toOwnedSlice(gpa);
     defer gpa.free(s);
-    try t.expectEqualStrings("XXbar", s); // "foo " deleted at its rebased site
+    try t.expectEqualStrings("XXbar", s); // "foo " deleted at its anchored site
 }
 
 test "wasm plugins: vim composes motions + operators — dw through the keymap" {

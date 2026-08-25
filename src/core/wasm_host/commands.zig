@@ -55,6 +55,7 @@
 //!   the milestone-2 minimal-ABI proof, given exactly one ctx directly by its
 //!   caller; there is no load-time/dispatch-time distinction to resolve.
 
+const std = @import("std");
 const wasm = @import("../wasm.zig");
 const command = @import("../command.zig");
 const wasm_abi = @import("../wasm_abi.zig");
@@ -188,8 +189,25 @@ pub fn hCommandSummary(data: ?*anyopaque, caller: *wasm.Caller, args: []const i3
 fn wpCmdTrampoline(ctx: *command.Context, data: ?*anyopaque, args: []const command.Value) anyerror!command.Value {
     const wc: *WasmCmd = @ptrCast(@alignCast(data.?));
     const p = wc.plugin;
+    const top_level = p.dispatch_depth == 0;
+    if (top_level) {
+        p.clearEphemeralRanges();
+        p.clearRetiredResultBuffers();
+    } else {
+        // Reserve before entering the guest so moving this call's result
+        // backing into retirement during unwind is infallible.
+        try p.retired_result_bufs.ensureUnusedCapacity(p.gpa, 1);
+    }
     const saved_ctx = p.active_ctx;
     const saved_dispatch = p.in_dispatch;
+    const saved_args = p.cur_args;
+    const saved_result = p.result;
+    var saved_result_buf: std.ArrayList(u8) = .empty;
+    if (!top_level) {
+        saved_result_buf = p.result_buf;
+        p.result_buf = .empty;
+    }
+    p.dispatch_depth += 1;
     p.active_ctx = ctx;
     // DISPATCHING (task #19 item 4, alongside `active_ctx` above): this entry
     // is `on_command` — head-gated imports (`wl_set_mode`, `wl_echo`, …) may
@@ -199,13 +217,19 @@ fn wpCmdTrampoline(ctx: *command.Context, data: ?*anyopaque, args: []const comma
     // nested-from-background case is a sanctioned door, not a bug.
     p.in_dispatch = true;
     defer {
+        p.dispatch_depth -= 1;
         p.active_ctx = saved_ctx;
         p.in_dispatch = saved_dispatch;
+        p.cur_args = saved_args;
+        p.result = saved_result;
+        if (!top_level) {
+            const completed_result_buf = p.result_buf;
+            p.result_buf = saved_result_buf;
+            p.retired_result_bufs.appendAssumeCapacity(completed_result_buf);
+        }
     }
     p.cur_args = args;
     p.result = .nil;
-    p.stampsClear(); // fresh per-dispatch stamp table
-    defer p.cur_args = &.{};
     try contract.callRequiredExport("on_command", &p.instance, .{@as(i32, @intCast(wc.id))});
     return p.result;
 }

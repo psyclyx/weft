@@ -1,9 +1,11 @@
 //! consult — navigation sources over the pick seam (design §6.4), a `.wasm`
 //! plugin with perms `{}` (view). A source gathers candidates, opens a pick,
 //! and on accept resolves the CHOSEN ROW (by its add-order index, not its
-//! text) to a position it recorded at add time — so jumping to a line is
-//! unambiguous even when two lines read identically. `consult-line` is the
-//! first source; grep/imenu/mark join as their inputs (proc, symbols) land.
+//! text) through a CRDT-anchored source range. Presentation match offsets are
+//! used only after the anchored row is verified unchanged, so edits above it
+//! move the target while edits to/deletion of the target make it stale rather
+//! than silently redirecting the jump. `consult-line` is the first source;
+//! grep/imenu/mark join as their inputs (proc, symbols) land.
 
 const std = @import("std");
 const weft = @import("weft");
@@ -11,10 +13,48 @@ const weft = @import("weft");
 const line_pick = 0;
 const sym_pick = 1;
 
-/// Per-row target offsets, parallel to the pickAdd order. The accepted index
-/// maps straight into this — the robustness the string alone can't give.
-var starts: [1 << 15]usize = undefined;
+const Target = struct {
+    range: u32,
+    digest: [32]u8,
+    /// `consult-line` anchors the terminating newline too, when present. It
+    /// gives an otherwise-empty row a real identity and lets deletion collapse
+    /// to a state we can reject. Imenu targets leave this false.
+    has_terminator: bool = false,
+};
+
+/// Per-row opaque CRDT targets, parallel to pickAdd order. The guest neither
+/// sees nor reconstructs document versions or CRDT event identities.
+var targets: [1 << 15]Target = undefined;
 var n_rows: usize = 0;
+
+fn releaseTargets() void {
+    for (targets[0..n_rows]) |target| weft.releaseRange(target.range);
+    n_rows = 0;
+}
+
+fn digestRange(start: usize, end: usize) ?[32]u8 {
+    var hasher = std.crypto.hash.sha2.Sha256.init(.{});
+    var at = start;
+    while (at < end) {
+        const next = @min(end, at + 64 * 1024);
+        const bytes = weft.slice(at, next);
+        if (bytes.len != next - at) return null;
+        hasher.update(bytes);
+        at = next;
+    }
+    var digest: [32]u8 = undefined;
+    hasher.final(&digest);
+    return digest;
+}
+
+/// A Head owns one picker. End the previous interaction while its guest state
+/// is still intact, then release any orphaned targets before constructing the
+/// replacement. `pickEnd` may otherwise cancel the old picker only after this
+/// plugin has overwritten its target table.
+fn beginTargets() void {
+    weft.run("pick-cancel");
+    releaseTargets();
+}
 
 const Cmd = struct { name: []const u8, handler: *const fn () void };
 const cmds = [_]Cmd{
@@ -33,6 +73,7 @@ export fn on_command(id: u32) void {
 }
 export fn on_pick_accept(pick_id: u32) void {
     if (pick_id != line_pick and pick_id != sym_pick) return;
+    defer releaseTargets();
     var outcome = (weft.pickOutcome(weft.allocator) catch return) orelse return;
     defer outcome.deinit(weft.allocator);
     const candidate = switch (outcome) {
@@ -41,38 +82,59 @@ export fn on_pick_accept(pick_id: u32) void {
     };
     const i = candidate.index;
     if (i < n_rows) {
-        // A line candidate is presentation-sized, but the pick owns the
-        // actual match location. Resolve that location at the accept boundary
-        // so `/query` lands on the matched bytes (including after indentation)
-        // rather than on the line's display anchor.
-        // `consult-line`'s candidate text is the whole line, so its match
-        // starts relative to the line anchor. Other sources (notably imenu)
-        // record a semantic target directly; their display text is not the
-        // target's coordinate system and must not inherit this adjustment.
-        const match_start = if (pick_id == line_pick)
-            candidate.match.start
-        else
-            0;
-        weft.jump(starts[i] + match_start);
+        const target = targets[i];
+        const current = weft.rangeEnds(target.range) orelse return;
+        var content_end = current.end;
+        if (target.has_terminator) {
+            if (content_end <= current.start or
+                !std.mem.eql(u8, weft.slice(content_end - 1, content_end), "\n")) return;
+            content_end -= 1;
+        }
+        const current_digest = digestRange(current.start, content_end) orelse return;
+        if (!std.mem.eql(u8, &current_digest, &target.digest)) return;
+        // Match evidence belongs to the candidate snapshot. Reuse it only if
+        // the CRDT-anchored source text still agrees; otherwise the safe result
+        // is stale/no-op, never a jump into whichever bytes inherited an old
+        // coordinate. `slice` and the original candidate share the same 64-KiB
+        // guest read bound, including for unusually long lines.
+        if (candidate.text.len > content_end - current.start) return;
+        const text_end = current.start + candidate.text.len;
+        const text = weft.slice(current.start, text_end);
+        if (!std.mem.eql(u8, text, candidate.text)) return;
+        const relative = if (pick_id == line_pick) candidate.match.start else 0;
+        if (relative > text.len) return;
+        weft.jump(current.start + relative);
     }
 }
 
 /// Fuzzy-pick a line in the current buffer and jump to the accepted match.
 fn consultLine() void {
-    n_rows = 0;
+    beginTargets();
     weft.pickBegin("line", line_pick);
     const len = weft.byteLen();
     // Walk the buffer line by line (bounded by the row table + read scratch).
     var line_start: usize = 0;
     var row: usize = 1;
-    while (line_start <= len and n_rows < starts.len) : (row += 1) {
+    while (line_start <= len and n_rows < targets.len) : (row += 1) {
         const l = weft.lineAt(line_start);
+        const has_terminator = l.end < len;
+        // EOF itself carries no identity. In an empty document, or after a
+        // trailing newline, there is no row target Stemma can distinguish
+        // from deletion of the preceding separator.
+        if (l.start == l.end and !has_terminator) break;
+        const target_end = l.end + @intFromBool(has_terminator);
+        const digest = digestRange(l.start, l.end) orelse break;
         const text = weft.slice(l.start, l.end); // borrows scratch
+        const target = weft.anchorRange(.{ .start = l.start, .end = target_end }) orelse break;
+        if (!weft.retainRange(target)) {
+            weft.releaseRange(target);
+            break;
+        }
         // A short "N: " docstring is display-only; the match text is the line.
         var doc: [16]u8 = undefined;
         const ds = std.fmt.bufPrint(&doc, "L{d}", .{row}) catch "";
         weft.pickAdd(text, ds);
-        starts[n_rows] = l.start;
+        targets[n_rows] = .{ .range = target, .digest = digest, .has_terminator = has_terminator };
         n_rows += 1;
         if (l.end + 1 > len) break; // last line
         line_start = l.end + 1; // past the newline
@@ -95,20 +157,26 @@ const def_types = [_][]const u8{
 /// Fuzzy-pick a definition (function/type/…) in the buffer and jump to it.
 /// Grammar-driven via `syntax.query`; degrades to empty without a grammar.
 fn consultImenu() void {
-    n_rows = 0;
+    beginTargets();
     weft.pickBegin("symbol", sym_pick);
     for (def_types) |ty| {
         var scm_buf: [96]u8 = undefined;
         const scm = std.fmt.bufPrint(&scm_buf, "({s}) @d", .{ty}) catch continue;
         const count = weft.query(scm, .{ .start = 0, .end = weft.byteLen() });
         var i: usize = 0;
-        while (i < count and n_rows < starts.len) : (i += 1) {
+        while (i < count and n_rows < targets.len) : (i += 1) {
             const c = weft.queryCapture(i) orelse continue;
             // Display the definition's first line (its signature).
             const line_end = weft.lineAt(c.start).end;
+            const digest = digestRange(c.start, line_end) orelse continue;
             const text = weft.slice(c.start, line_end); // borrows scratch
+            const target = weft.anchorRange(.{ .start = c.start, .end = line_end }) orelse continue;
+            if (!weft.retainRange(target)) {
+                weft.releaseRange(target);
+                continue;
+            }
             weft.pickAdd(text, ty);
-            starts[n_rows] = c.start;
+            targets[n_rows] = .{ .range = target, .digest = digest };
             n_rows += 1;
         }
     }

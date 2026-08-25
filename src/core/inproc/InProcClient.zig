@@ -1,7 +1,7 @@
 //! InProcClient — the in-process transport's client identity (W0b,
 //! doc/north-star-plan.md §2.5/§2.7): the native counterpart to
 //! `wasm_abi/WasmPlugin.zig`'s identity fields, minus the wasm instance and
-//! the guest-marshalling handle tables (stamps/query_caps/pick items/...) —
+//! the guest-marshalling handle tables (ranges/query_caps/pick items/...) —
 //! an in-process client holds real Zig pointers/slices directly, so it never
 //! needs an opaque handle into a table the way a sandboxed guest does (see
 //! this file's "what's deliberately NOT here" section).
@@ -38,13 +38,13 @@
 //! - No wasm `Module`/`Linker`/`Instance` — there is no guest to sandbox
 //!   (C17: structure against MISTAKES on both transports; malice is
 //!   wasm-only — an in-process client is trusted, first-party code).
-//! - No handle tables (`stamps`, `query_caps`, pick items, sessions,
+//! - No handle tables (`ranges`, `query_caps`, pick items, sessions,
 //!   proc_streams, the caps-provider builder) — those exist ONLY because a
 //!   wasm guest cannot hold a real pointer across the membrane and must name
 //!   host state by an opaque `u32`. An in-process client holds real `*Foo`/
 //!   `[]const u8` values directly; minting a handle for its own use would be
 //!   pure overhead. (A future semantic body that TAKES a handle — e.g. a
-//!   stamped range from `wl_stamp_range` — would still need a table if an
+//!   anchored range from `wl_anchor_range` — would still need a table if an
 //!   in-process client wants to call THAT specific import; none of the
 //!   split imports today do, so this is deferred, not solved — see
 //!   doc/north-star-plan.md's W0b report for the honest coverage note.)

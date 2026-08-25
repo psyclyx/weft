@@ -208,13 +208,20 @@ pub fn hPickOutcomeMatchSpan(data: ?*anyopaque, caller: *wasm.Caller, args: []co
 fn wpPickAccept(ctx: *command.Context, data: ?*anyopaque, outcome: pick_mod.Outcome) anyerror!void {
     const bp: *WasmBoundPick = @ptrCast(@alignCast(data.?));
     const p = bp.plugin;
+    const top_level = p.dispatch_depth == 0;
+    if (top_level) {
+        p.clearEphemeralRanges();
+        p.clearRetiredResultBuffers();
+    }
     const saved_ctx = p.active_ctx;
     const saved_dispatch = p.in_dispatch;
     const saved_outcome = p.cur_pick_outcome;
+    p.dispatch_depth += 1;
     p.active_ctx = ctx;
     p.in_dispatch = true; // DISPATCHING (task #19 item 4) — see wpCmdTrampoline's doc
     p.cur_pick_outcome = outcome;
     defer {
+        p.dispatch_depth -= 1;
         p.cur_pick_outcome = saved_outcome;
         p.active_ctx = saved_ctx;
         p.in_dispatch = saved_dispatch;

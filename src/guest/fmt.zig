@@ -1,7 +1,7 @@
 //! fmt — format + external filters (design §6.2), a `.wasm` plugin over the
 //! native `proc` FILTER surface. `format-buffer` picks a formatter by file
 //! extension and rewrites the buffer through it; `filter` runs any command over
-//! the selection (vim `!`). Both land as async, rebased, plugin-authored edits
+//! the selection (vim `!`). Both land as async, CRDT-anchored, plugin-authored edits
 //! that merge like a concurrent editor. perms `{proc, timer}`.
 
 const std = @import("std");

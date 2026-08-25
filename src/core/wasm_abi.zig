@@ -20,7 +20,7 @@ pub const perm_count = WasmPlugin.perm_count;
 pub const WasmCmd = WasmPlugin.WasmCmd;
 pub const PendingItem = WasmPlugin.PendingItem;
 pub const WasmBoundPick = WasmPlugin.WasmBoundPick;
-pub const StampSlot = WasmPlugin.StampSlot;
+pub const RangeSlot = WasmPlugin.RangeSlot;
 pub const QueryCap = WasmPlugin.QueryCap;
 
 const runtime = @import("wasm_abi/runtime.zig");

@@ -60,7 +60,9 @@ extern "weft" fn wl_declare_capability(ptr: u32, len: u32) void;
 extern "weft" fn wl_request_perm(perm: u32) void;
 extern "weft" fn wl_cursor() u32;
 extern "weft" fn wl_byte_len() u32;
-extern "weft" fn wl_doc_revision() u32;
+extern "weft" fn wl_doc_snapshot() i32;
+extern "weft" fn wl_doc_snapshot_is_current(handle: u32) u32;
+extern "weft" fn wl_doc_snapshot_release(handle: u32) void;
 extern "weft" fn wl_slice(start: u32, end: u32, out_ptr: u32, out_cap: u32) u32;
 extern "weft" fn wl_line_at(offset: u32, out_ptr: u32) void;
 extern "weft" fn wl_selection(out_ptr: u32) u32;
@@ -80,14 +82,16 @@ extern "weft" fn wl_readonly_span(start: u32, end: u32) void;
 extern "weft" fn wl_decorate_clear() void;
 extern "weft" fn wl_decorate(anchor: u32, placement: u32, role: u32, ptr: u32, len: u32) void;
 extern "weft" fn wl_breakpoint_publish(path_ptr: u32, path_len: u32, csv_ptr: u32, csv_len: u32) void;
-// Native `editor` surface + stamped ranges ([FIX 1/3]). A range crosses as an
-// opaque u32 handle into a host-side table (the version token stays host-side).
+// Native `editor` surface + anchored ranges. A range crosses as an opaque u32
+// handle into a host-side table of document-owned anchors.
 extern "weft" fn wl_editor_step(from: u32, dir: u32, kind: u32) u32;
 extern "weft" fn wl_set_selection(start: u32, end: u32) void;
-extern "weft" fn wl_stamp_range(start: u32, end: u32) i32;
+extern "weft" fn wl_anchor_range(start: u32, end: u32) i32;
 extern "weft" fn wl_set_result_range(handle: u32) void;
 extern "weft" fn wl_run_range(ptr: u32, len: u32) i32;
 extern "weft" fn wl_range_ends(handle: u32, out_ptr: u32) i32;
+extern "weft" fn wl_range_retain(handle: u32) i32;
+extern "weft" fn wl_range_release(handle: u32) void;
 extern "weft" fn wl_run_range_arg(ptr: u32, len: u32, handle: u32) void;
 extern "weft" fn wl_arg_range(i: u32) i32;
 extern "weft" fn wl_edit_range(handle: u32, ptr: u32, len: u32) void;
@@ -330,10 +334,21 @@ pub fn cursor() usize {
 pub fn byteLen() usize {
     return wl_byte_len();
 }
-/// The active document's monotonic commit count — a cheap change token (bumps on
-/// every edit). Track it to know when to resync without diffing the text.
-pub fn docRevision() u32 {
-    return wl_doc_revision();
+/// Capture an opaque witness for the active document's current CRDT frontier.
+/// The handle carries no version bytes or ordering information; release it
+/// when the equality check is no longer needed.
+pub fn docSnapshot() ?u32 {
+    const handle = wl_doc_snapshot();
+    return if (handle < 0) null else @intCast(handle);
+}
+/// Test whether the witness still names the active buffer's exact causal
+/// frontier. Missing, stale, or cross-buffer handles return false.
+pub fn docSnapshotIsCurrent(handle: u32) bool {
+    return wl_doc_snapshot_is_current(handle) != 0;
+}
+/// Release a document snapshot witness. Repeated release is harmless.
+pub fn releaseDocSnapshot(handle: u32) void {
+    wl_doc_snapshot_release(handle);
 }
 /// Bytes of `[start, end)` of the active document (clamped). Valid until the
 /// next read call — copy to keep.
@@ -465,7 +480,7 @@ pub fn publishBreakpoints(file: []const u8, line_csv: []const u8) void {
     wl_breakpoint_publish(p(file.ptr), @intCast(file.len), p(line_csv.ptr), @intCast(line_csv.len));
 }
 
-// ── Native editor surface + stamped ranges (motions/operators) ────────
+// ── Native editor surface + anchored ranges (motions/operators) ──────
 pub const Dir = enum(u32) { back = 0, fwd = 1 };
 pub const Kind = enum(u32) { char = 0, line = 1 };
 
@@ -479,15 +494,15 @@ pub fn setSelection(r: Range) void {
     wl_set_selection(@intCast(r.start), @intCast(r.end));
 }
 
-/// Stamp `[r.start, r.end)` at the current version → an opaque range handle
-/// (valid for this dispatch), or null on failure. The one way to build a range.
-pub fn stampRange(r: Range) ?u32 {
-    const h = wl_stamp_range(@intCast(r.start), @intCast(r.end));
+/// Anchor `[r.start, r.end)` in the active CRDT document and return an opaque
+/// live-range handle. The document advances its endpoints through local and
+/// merged edits; call `releaseRange` when retaining it across a callback.
+pub fn anchorRange(r: Range) ?u32 {
+    const h = wl_anchor_range(@intCast(r.start), @intCast(r.end));
     return if (h < 0) null else @intCast(h);
 }
-/// Return the stamped range `handle` as this command's result (the motion
-/// contract): an operator awaiting it via `runRange` gets a version-stamped
-/// range, never a bare offset.
+/// Return the anchored range `handle` as this command's borrowed result. The
+/// live anchors remain document-owned across the synchronous command chain.
 pub fn setResultRange(handle: u32) void {
     wl_set_result_range(handle);
 }
@@ -497,23 +512,33 @@ pub fn runRange(cmd: []const u8) ?u32 {
     const h = wl_run_range(p(cmd.ptr), @intCast(cmd.len));
     return if (h < 0) null else @intCast(h);
 }
-/// Resolve a range handle to its current `[start, end)`, or null if stale.
+/// Resolve a live range handle to its current `[start, end)`, or null if its
+/// buffer/resource no longer exists.
 pub fn rangeEnds(handle: u32) ?Range {
     var pair: [2]u32 = undefined;
     if (wl_range_ends(handle, p(&pair)) < 0) return null;
     return .{ .start = pair[0], .end = pair[1] };
 }
+/// Keep a live range across later command dispatches. Pair a successful retain
+/// with `releaseRange` in the interaction's terminal callback.
+pub fn retainRange(handle: u32) bool {
+    return wl_range_retain(handle) == 0;
+}
+/// Release a live range retained across callbacks. Idempotent.
+pub fn releaseRange(handle: u32) void {
+    wl_range_release(handle);
+}
 /// Run `cmd` (an operator) passing a range `handle` as its single arg.
 pub fn runRangeArg(cmd: []const u8, handle: u32) void {
     wl_run_range_arg(p(cmd.ptr), @intCast(cmd.len), handle);
 }
-/// The `i`-th arg as a stamped-range handle, or null if it is not a range.
+/// Import the `i`-th borrowed live-range argument as an opaque handle, or null.
 pub fn argRange(i: usize) ?u32 {
     const h = wl_arg_range(@intCast(i));
     return if (h < 0) null else @intCast(h);
 }
-/// Replace the stamped range `handle` with `bytes`, authored as this plugin's
-/// peer through the grade gate (rebased to head first).
+/// Replace the anchored range `handle` with `bytes`, authored as this plugin's
+/// peer through the grade gate after resolving its current endpoints.
 pub fn editRange(handle: u32, bytes: []const u8) void {
     wl_edit_range(handle, p(bytes.ptr), @intCast(bytes.len));
 }
@@ -1653,7 +1678,8 @@ pub fn semanticFieldCurrentEdit(gpa: std.mem.Allocator) (std.mem.Allocator.Error
 
 // ── Effects (perm-gated) ─────────────────────────────────────────────
 /// Run `cmd` in a shell off the frame thread; insert its stdout at the cursor
-/// when it finishes, rebased. Perms: proc + timer (declared in `describe`).
+/// when it finishes, resolved through its CRDT identity. Perms: proc + timer
+/// (declared in `describe`).
 pub fn shellInsert(cmd: []const u8) void {
     wl_shell_insert(p(cmd.ptr), @intCast(cmd.len));
 }
@@ -1730,8 +1756,8 @@ pub fn procAppendBuffer(cmd: []const u8, name: []const u8) void {
 
 /// Filter `[r.start, r.end)` through `cmd` (a `{}` placeholder gets a temp file
 /// the range is written to, transformed in place, and read back) and replace
-/// the range with the result — formatters and vim `!`-filters. Async, rebased,
-/// authored as this plugin's peer. Perms: proc + timer.
+/// the range with the result — formatters and vim `!`-filters. Async, CRDT-
+/// anchored, and authored as this plugin's peer. Perms: proc + timer.
 pub fn procFilter(cmd: []const u8, r: Range) void {
     wl_proc_filter(p(cmd.ptr), @intCast(cmd.len), @intCast(r.start), @intCast(r.end));
 }

@@ -1,7 +1,7 @@
 //! vim — modal editing (design §6.1) as a `.wasm` plugin, perms `{}` grant_max
 //! edit. PURE KEYMAP POLICY: it owns modes, registers, and chords, and composes
 //! the `motions` and `operators` plugins BY LATE-BOUND NAME — it contains no
-//! motion or edit logic of its own. A motion returns a stamped `range`; in
+//! motion or edit logic of its own. A motion returns a borrowed live `range`; in
 //! normal mode vim moves the cursor to the target, in operator-pending mode it
 //! hands the range to `op.delete` ([FIX 3] — no shared-cursor side channel).
 //! The core knows nothing of vim; delete it and weft is modeless.
@@ -167,13 +167,13 @@ fn isInclusiveMotion(m: []const u8) bool {
     return std.mem.eql(u8, m, "motion.word-end") or std.mem.eql(u8, m, "motion.WORD-end");
 }
 
-/// Extend a stamped range's end by one byte (clamped to the buffer) — the
+/// Extend an anchored range's end by one byte (clamped to the buffer) — the
 /// inclusive-motion fixup, so the operator covers the endpoint character.
 fn inclusiveEnd(hnd: u32) u32 {
     const r = weft.rangeEnds(hnd) orelse return hnd;
     const end2 = @min(r.end + 1, weft.byteLen());
     if (end2 == r.end) return hnd;
-    return weft.stampRange(.{ .start = r.start, .end = end2 }) orelse hnd;
+    return weft.anchorRange(.{ .start = r.start, .end = end2 }) orelse hnd;
 }
 
 /// Operator-pending motion: run the motion, apply the pending operator over its
@@ -205,13 +205,13 @@ fn opByMotion(comptime motion: []const u8) fn () void {
             const lo = @min(start, target);
             var hi = @max(start, target);
             if (isInclusiveMotion(use)) hi = @min(hi + 1, weft.byteLen());
-            const hnd = weft.stampRange(.{ .start = lo, .end = hi }) orelse return opCancel();
+            const hnd = weft.anchorRange(.{ .start = lo, .end = hi }) orelse return opCancel();
             applyOpRange(hnd);
         }
     }.h;
 }
 
-/// Apply the pending operator over a stamped range. `op_copies` yanks the range
+/// Apply the pending operator over an anchored range. `op_copies` yanks it
 /// into the register first (d/c/y); `op_edit_cmd` then runs the gated edit
 /// (op.delete for d/c, op.comment for gc, …) and enters the after-mode. A pure
 /// yank (no edit command) flashes and returns to normal.
@@ -719,7 +719,7 @@ fn visualDelete() void {
     if (weft.selection()) |s0| {
         const s = visualSpan(s0);
         yankCurrent(s.start, s.end, visual_linewise);
-        if (weft.stampRange(.{ .start = s.start, .end = s.end })) |h| weft.runRangeArg("op.delete", h);
+        if (weft.anchorRange(.{ .start = s.start, .end = s.end })) |h| weft.runRangeArg("op.delete", h);
         weft.jump(s.start);
     }
     weft.run("clear-selection");
@@ -744,7 +744,7 @@ fn visualChange() void {
     if (weft.selection()) |s0| {
         const s = visualSpan(s0);
         yankCurrent(s.start, s.end, visual_linewise);
-        if (weft.stampRange(.{ .start = s.start, .end = s.end })) |h| weft.runRangeArg("op.delete", h);
+        if (weft.anchorRange(.{ .start = s.start, .end = s.end })) |h| weft.runRangeArg("op.delete", h);
         weft.jump(s.start);
     }
     weft.run("clear-selection");
@@ -759,7 +759,7 @@ fn visualOp(comptime cmd: []const u8) fn () void {
         fn h() void {
             if (weft.selection()) |s0| {
                 const s = visualSpan(s0);
-                if (weft.stampRange(.{ .start = s.start, .end = s.end })) |hnd| weft.runRangeArg(cmd, hnd);
+                if (weft.anchorRange(.{ .start = s.start, .end = s.end })) |hnd| weft.runRangeArg(cmd, hnd);
                 weft.jump(s.start);
             }
             weft.run("clear-selection");
@@ -993,20 +993,20 @@ fn opLine() void {
     };
     // A non-delete line operator (gcc) toggles over the line's content in place.
     if (!std.mem.eql(u8, edit, "op.delete")) {
-        if (weft.stampRange(.{ .start = l.start, .end = l.end })) |h| weft.runRangeArg(edit, h);
+        if (weft.anchorRange(.{ .start = l.start, .end = l.end })) |h| weft.runRangeArg(edit, h);
         weft.jump(l.start);
         weft.setMode(op_after);
         return;
     }
     if (std.mem.eql(u8, op_after, "insert")) {
         // cc: clear the line's text, keep the line, enter insert at its start.
-        if (weft.stampRange(.{ .start = l.start, .end = l.end })) |h| weft.runRangeArg("op.delete", h);
+        if (weft.anchorRange(.{ .start = l.start, .end = l.end })) |h| weft.runRangeArg("op.delete", h);
         weft.jump(l.start);
         weft.setMode("insert");
     } else {
         // dd: delete the line and its trailing newline.
         const end = @min(l.end + 1, weft.byteLen());
-        if (weft.stampRange(.{ .start = l.start, .end = end })) |h| weft.runRangeArg("op.delete", h);
+        if (weft.anchorRange(.{ .start = l.start, .end = end })) |h| weft.runRangeArg("op.delete", h);
         weft.jump(l.start);
         weft.setMode("normal");
     }
