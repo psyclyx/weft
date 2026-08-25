@@ -851,18 +851,16 @@ test "lsp: hover popup auto-expires once the cursor leaves its anchor's line —
     ed.typeText("a"); // f a → onto the `a` of `add`
     try t.expect(h.drainSurfaceText(ed, "hover", "i32")); // popup visible, anchored on line 5
 
-    // Move the cursor to a different line through REAL dispatch — the same
-    // motion a person makes after reading the popup, not a synthetic
-    // offset write.
+    // Move the cursor to a different line through REAL application input —
+    // the same motion a person makes after reading the popup, not a synthetic
+    // offset write. Input advances a complete wake, so expiry is observable
+    // immediately instead of waiting for a harness-selected render phase.
     ed.press("j", "");
     ed.press("j", "");
-    try t.expect(h.surfaceHasText(ed, "i32")); // dispatch alone doesn't clear it
+    try t.expect(!h.surfaceHasText(ed, "i32"));
 
-    // Advance one complete production frame. The editor owns the lifecycle
-    // policy and the rendering; this test neither invokes a layer helper nor
-    // reconstructs a partial UI. The returned framebuffer is deliberately
-    // opaque here — the observable under test is that the real frame closed
-    // the now-stale surface.
+    // A later pull observes the same closed state. The returned framebuffer
+    // is deliberately opaque here: the app owns expiry and rendering.
     const frame = try ed.renderComposite();
     defer gpa.free(frame);
 

@@ -619,6 +619,7 @@ test "e2e/spine: write a file, init a repo, stage and commit — all through wef
     // layout action, and autopair is an insert-mode editing provider. These
     // are ordinary config binds, not direct command/keymap calls.
     ed.press("F1", "");
+    try t.expect(h.surfaceHasText(&ed, "repeat-change"));
     proj.capture(&ed, "spine-which-key");
     ed.press("Escape", "");
     ed.chord("SPC w v");
@@ -686,6 +687,7 @@ test "e2e/spine: write a file, init a repo, stage and commit — all through wef
     ed.press("C-SPC", "");
     ed.settle(40);
     try t.expect(ed.pick.active);
+    try t.expectEqualStrings("hermetic_completion", ed.pick.selection() orelse return error.CompletionHasNoVisibleCandidate);
     proj.capture(&ed, "spine-completion");
     ed.press("Escape", "");
 

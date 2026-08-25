@@ -569,9 +569,14 @@ test "e2e/config: the sample config boots; SPC g i is discoverable via which-key
     try t.expectEqual(second_row.id, ed.head.semantic_focus.path().?.leaf().?);
     ed.chord("SPC v k");
     try t.expectEqual(field_node.id, ed.head.semantic_focus.path().?.leaf().?);
+    const snapshots_before_edit = field.snapshot_calls;
     ed.chord("SPC v e");
     try t.expectEqual(@as(usize, 1), actions.edit_requests);
-    try t.expectEqual(@as(usize, 1), field.snapshot_calls);
+    // The action provider declined, so the generic field endpoint had to
+    // validate a live snapshot. Full application wakes may also snapshot the
+    // focused field for rendering; the semantic contract is the new read,
+    // not an obsolete assumption that dispatch happens without a frame.
+    try t.expect(field.snapshot_calls > snapshots_before_edit);
     try t.expectEqualStrings("normal", ed.head.currentMode());
 
     ed.chord("SPC v y");

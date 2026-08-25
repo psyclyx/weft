@@ -34,6 +34,7 @@ const setup = @import("app/setup.zig");
 const session_mod = @import("app/session.zig");
 const Session = session_mod.Session;
 const window_head = @import("app/window_head.zig");
+const application_mod = @import("app/application.zig");
 const frame_mod = @import("app/frame.zig");
 const collab = @import("app/collab.zig");
 const collab_cmds = @import("app/collab_cmds.zig");
@@ -448,18 +449,11 @@ pub fn main(init: std.process.Init) !void {
         }
     }
 
-    var view_dirty = true;
-    // Last activated buffer path (copied — the borrowed slice would dangle).
-    var last_activate_path: [std.fs.max_path_bytes]u8 = undefined;
-    var last_activate_len: usize = 0;
-    var last_frame_rect: region.Rect = .{}; // last render's pane frame, for click routing
     // Liveness, the last-announced host fingerprint, the self-reconnect handle,
     // and the interactive-connect handle/hostport all live on `collab_state` now
     // (its deinit detaches the in-flight handles — a bounded, one-shot leak if a
     // connect worker still borrows the hostport). The status-line trust chip
     // reads its live grade from `known_peers`.
-    var next_backing_poll_ns: u64 = 0;
-    var last_active: core.Buffers.Id = buffers.active_id;
     // Menu-overlay (on_menu) edge detection: fire at the frame boundary when the
     // active menu mode changes, so a which-key plugin re-renders exactly on
     // enter/leave (and never nested inside another guest call). Per-head
@@ -480,9 +474,6 @@ pub fn main(init: std.process.Init) !void {
     };
     // vim-goggles flash timing: a guest sets a range via wl_flash; we draw it
     // for `flash-ms` then clear it. Duration is config (default 150ms).
-    var flash_gen: u64 = 0;
-    var flash_start_ns: u64 = 0;
-    var flash_was_active = false;
     const flash_duration_ns: u64 = blk: {
         if (session.system.config_kv.get("editor", "flash-ms")) |raw| {
             if (config_load.firstConfigRecord(raw)) |s| {
@@ -491,68 +482,117 @@ pub fn main(init: std.process.Init) !void {
         }
         break :blk 150 * std.time.ns_per_ms;
     };
-    // Left-button drag: the source offset the press landed on. A plain
-    // click just moves the caret; motion with the button held extends a
-    // selection from this anchor.
-    var drag_anchor: ?usize = null;
-    var drag_selecting = false;
-    // Caret blink: solid on any input, then toggle on a fixed period. Each
-    // phase flip damages the view so an idle caret still blinks.
-    var blink_on = true;
-    var blink_next_ns: u64 = 0;
-    const blink_period_ns: u64 = 530 * std.time.ns_per_ms;
+    // Platform input and network services plug into the one application
+    // lifecycle. They contribute events/effects; neither can select, skip, or
+    // reorder async, menu, picker, layout, or build phases.
+    const PointerInput = struct {
+        window: @TypeOf(whead.window),
+        drag_anchor: ?usize = null,
+        drag_selecting: bool = false,
 
-    // The frame BUILD's read/borrow surface — pointers to the stable state the
-    // HUD + pane build read each frame (the per-frame active editor/buffer and
-    // clock are passed as `frame.Active`). Owns nothing.
-    //
-    // W0b: swap-blocking (task #19 item 2's borrow audit) — `buffers`/
-    // `.caps`/`.keymap`/`.ui_mesh` are baked ONCE, here, against whichever
-    // system `session.system` is AT THIS LINE (the editor — `hostAgentUx`
-    // above runs before this). A later `system-swap` repoints `session.
-    // cmd_ctx` (so dispatch — key→command→buffer edit — genuinely runs
-    // against the new system) but does NOT repoint these: the render
-    // surface (what's drawn — pane content, the which-key popup's keymap,
-    // capability-driven statusline/gutter segments) keeps showing the
-    // system that was live when `fx` was built, regardless of later swaps.
-    // `win_layout` (below) compounds this: its panes are keyed to THIS
-    // `buffers` instance's id space, which a different system's `Buffers`
-    // cannot resolve. Re-pointing all of this safely is the render-
-    // membrane's "who holds a pointer into the live session" question
-    // (`core/System.zig`'s module doc names it explicitly) — NOT solved
-    // here. `Session.rebindSystem` logs this caveat on every successful
-    // swap so a live user isn't silently confused by it.
-    var frame_driver: frame_mod.Driver = .{
-        .ctx = .{
-            .gpa = gpa,
-            .buffers = buffers,
-            .caps = &session.system.caps,
-            .keymap = &session.system.keymap,
-            .ui_mesh = &session.system.container,
-            .head = &session.head,
-            .semantic = &session.system.semantic,
-            .cursor_cfg = &session.cursor_cfg,
-            .plugins = &plug.list,
-            .conn = &collab_state.conn,
-            .hub = &collab_state.hub,
-            .collab_session = &collab_state.collab_session,
-            .partial_state = &collab_state.partial_state,
-            .ed0 = ed0,
-            .known_peers = &known_peers,
-            .noted_host_fp = &collab_state.noted_host_fp,
-            .view_dirty = &view_dirty,
-            .last_frame_rect = &last_frame_rect,
-            .flash_gen = &flash_gen,
-            .flash_start_ns = &flash_start_ns,
-            .flash_was_active = &flash_was_active,
-            .flash_duration_ns = flash_duration_ns,
-        },
+        fn run(raw: ?*anyopaque, app: *application_mod.Application, active: frame_mod.Driver.Prepared) anyerror!bool {
+            const self: *@This() = @ptrCast(@alignCast(raw.?));
+            var had_input = false;
+            _ = try dispatch.handlePointer(
+                self.window,
+                app.driver.layout,
+                &app.session.head,
+                &app.session.system.semantic,
+                app.driver.view,
+                active.editor,
+                app.driver.window_ctx,
+                app.driver.ctx.gpa,
+                app.last_frame_rect,
+                &self.drag_anchor,
+                &self.drag_selecting,
+                &had_input,
+            );
+            return had_input;
+        }
+    };
+    var pointer_input: PointerInput = .{ .window = whead.window };
+
+    const DesktopServices = struct {
+        state: *collab.Collab,
+        pool: *core.task.Pool,
+        identity: *const core.identity.Identity,
+        connect: ?[]const u8,
+        token: []const u8,
+        user: []const u8,
+
+        fn run(raw: ?*anyopaque, app: *application_mod.Application, _: frame_mod.Driver.Prepared) anyerror!bool {
+            const self: *@This() = @ptrCast(@alignCast(raw.?));
+            const state = self.state;
+            var damaged = collab.applyIntents(
+                &state.share_ctx,
+                &app.session.cmd_ctx,
+                self.pool,
+                &state.connect_task,
+                &state.connect_hostport,
+                &state.fd_link,
+                app.session.echo(),
+                self.identity,
+                self.token,
+                self.user,
+            );
+            if (try collab.tickCollab(
+                &state.share_ctx,
+                &app.session.cmd_ctx,
+                app.driver.ctx.ed0,
+                app.driver.layout,
+                &state.peer_fs_bridge,
+                &state.remote_fs,
+                &state.peer_fs_inflight,
+                &state.noted_host_fp,
+                &state.last_liveness,
+                &state.reconnect,
+                &state.next_reconnect_ns,
+                &state.fd_link,
+                self.identity,
+                self.pool,
+                self.connect,
+                self.token,
+                app.session.echo(),
+            )) damaged = true;
+            if (state.reconcileRemoteFilesystem(app.session.system) catch |err| blk: {
+                std.log.warn("peer filesystem publication unavailable: {t}", .{err});
+                break :blk false;
+            }) damaged = true;
+            return damaged;
+        }
+    };
+    var desktop_services: DesktopServices = .{
+        .state = &collab_state,
+        .pool = pool,
+        .identity = &my_identity,
+        .connect = args.connect,
+        .token = args.token,
+        .user = args.user,
+    };
+
+    var application: application_mod.Application = undefined;
+    application.init(.{
+        .gpa = gpa,
+        .session = &session,
         .attach_deps = attach_deps,
+        .plugin_loop = &plug.loop,
+        .js_plugins = &plug.js_list,
+        .plugins = &plug.list,
+        .conn = &collab_state.conn,
+        .hub = &collab_state.hub,
+        .collab_session = &collab_state.collab_session,
+        .partial_state = &collab_state.partial_state,
+        .ed0 = ed0,
+        .known_peers = &known_peers,
+        .noted_host_fp = &collab_state.noted_host_fp,
         .window_ctx = &win_ctx,
         .layout = win_layout,
         .view = view,
-    };
-    const fx = &frame_driver.ctx;
+        .which_key_delay_ns = which_key_delay_ns,
+        .flash_duration_ns = flash_duration_ns,
+        .before_async = .{ .context = &pointer_input, .run = PointerInput.run },
+        .services = .{ .context = &desktop_services, .run = DesktopServices.run },
+    });
 
     std.log.info("weft: rendering — {d} bytes open, em {d}", .{ ed0.text().byteLen(), args.em });
 
@@ -584,14 +624,14 @@ pub fn main(init: std.process.Init) !void {
         .cursor_cfg = &session.cursor_cfg,
         .keymap = &session.system.keymap,
         .head = &session.head,
-        .blink_next_ns = &blink_next_ns,
+        .blink_next_ns = &application.blink_next_ns,
     };
     _ = try sched.addTimer(&blink_ctx, loop_sources.blinkDue, "caret_blink");
     _ = try sched.addTimer(whead.window, loop_sources.keyRepeatDue, "key_repeat");
     var which_key_ctx: loop_sources.WhichKeyCtx = .{ .menu = &session.menu_overlay, .delay_ns = which_key_delay_ns };
     _ = try sched.addTimer(&which_key_ctx, loop_sources.whichKeyDue, "which_key_delay");
-    _ = try sched.addTimer(&next_backing_poll_ns, loop_sources.backingPollDue, "backing_poll");
-    var flash_ctx: loop_sources.FlashCtx = .{ .flash_start_ns = &flash_start_ns, .flash_duration_ns = flash_duration_ns };
+    _ = try sched.addTimer(&application.next_backing_poll_ns, loop_sources.backingPollDue, "backing_poll");
+    var flash_ctx: loop_sources.FlashCtx = .{ .flash_start_ns = &application.flash_start_ns, .flash_duration_ns = flash_duration_ns };
     _ = try sched.addTimer(&flash_ctx, loop_sources.flashDue, "flash_expiry");
     var reconnect_ctx: loop_sources.ReconnectCtx = .{
         .share_ctx = &collab_state.share_ctx,
@@ -652,7 +692,7 @@ pub fn main(init: std.process.Init) !void {
                     // latched present so `present_retry` (also gated on
                     // `swapchain_stale` directly, belt-and-suspenders)
                     // has nothing to spin on. The next real resize sets
-                    // `view_dirty` unconditionally, which re-latches this
+                    // application damage unconditionally, which re-latches this
                     // through the ordinary dirty path once there's an
                     // actual frame to show again.
                     present_pending = false;
@@ -665,7 +705,7 @@ pub fn main(init: std.process.Init) !void {
             present_pending = false;
             // Geometry follows the swapchain's actual extent, not the request.
             fb = .{ whead.ctx.extent.width, whead.ctx.extent.height };
-            view_dirty = true;
+            application.damage();
         }
 
         // ── Input → commit ──
@@ -677,64 +717,20 @@ pub fn main(init: std.process.Init) !void {
         // `dispatch.dispatchKey` directly) brackets the call under the
         // window-head's `InProcClient` identity (W0b item 3) — see
         // `app/window_head.zig`'s module doc.
-        var had_input = false;
         while (whead.window.nextKeyEvent()) |ev| {
             if (!ev.pressed) continue;
-            had_input = true;
             try whead.dispatchKey(&session.cmd_ctx, ev);
+            application.noteInput();
         }
         if (whead.window.shouldClose()) break;
 
-        // Commands may have created/switched buffers; lazily attach
-        // providers and damage the view on focus change.
-        const prepared = try frame_driver.prepare();
-        const abuf = prepared.buffer;
-        const editor = prepared.editor;
-        const attach = prepared.attach;
-        if (buffers.active_id != last_active) {
-            last_active = buffers.active_id;
-            view_dirty = true;
-        }
-
-        // ── Pointer → caret (click-to-place; drag extends a selection) ──
-        if (try dispatch.handlePointer(whead.window, win_layout, &session.head, fx.semantic, view, editor, &win_ctx, gpa, last_frame_rect, &drag_anchor, &drag_selecting, &had_input))
-            view_dirty = true;
-
-        // Caret blink: any input shows a solid caret and restarts the
-        // timer; otherwise, when the current mode blinks, flip on each
-        // period and damage the view.
-        if (had_input) {
-            blink_on = true;
-            blink_next_ns = frame_start + blink_period_ns;
-        } else if (session.cursor_cfg.blinkFor(session.head.currentMode()) and frame_start >= blink_next_ns) {
-            blink_on = !blink_on;
-            blink_next_ns = frame_start + blink_period_ns;
-            view_dirty = true;
-        }
-
-        // ── Async housekeeping tick (backing/LSP/nav/pick/plugins/activate/menu) ──
-        if (try frame_mod.tickAsync(fx, abuf, &session.cmd_ctx, &plug.loop, &next_backing_poll_ns, &last_activate_path, &last_activate_len, &session.menu_overlay, which_key_delay_ns, frame_start))
-            view_dirty = true;
-        // JS plugins: fire each resident quickjs instance's proc-stream output
-        // handler for streams with new bytes (agent transcripts stream in here).
-        for (plug.js_list.items) |jp| if (jp.tick()) {
-            view_dirty = true;
-        };
-        // ── Connect/disconnect/listen intents (outside the hot section:
-        // connect blocks on TCP, disconnect joins threads). ──
-        if (collab.applyIntents(&collab_state.share_ctx, &session.cmd_ctx, pool, &collab_state.connect_task, &collab_state.connect_hostport, &collab_state.fd_link, session.echo(), &my_identity, args.token, args.user))
-            view_dirty = true;
-        // ── Window-layout intents (outside the input hot section) ──
-        // `keymap` baked to the editor's like `buffers` (W0b consistency: the
-        // whole window subsystem stays on the editor system's state pre-W0b).
-        _ = frame_driver.applyWindowIntents();
-        // ── Collab tick (adopt/publish/relay, partial fetch, peer-fs, reconnect) ──
-        if (try collab.tickCollab(&collab_state.share_ctx, &session.cmd_ctx, ed0, win_layout, &collab_state.peer_fs_bridge, &collab_state.remote_fs, &collab_state.peer_fs_inflight, &collab_state.noted_host_fp, &collab_state.last_liveness, &collab_state.reconnect, &collab_state.next_reconnect_ns, &collab_state.fd_link, &my_identity, pool, args.connect, args.token, session.echo()))
-            view_dirty = true;
-        if (collab_state.reconcileRemoteFilesystem(session.system) catch |err| blk: {
-            std.log.warn("peer filesystem publication unavailable: {t}", .{err});
-            break :blk false;
-        }) view_dirty = true;
+        // One application wake owns every platform-neutral phase through the
+        // completed scene. The desktop contributes input and collaboration via
+        // the hooks installed above; the same call is used by headless capture.
+        const advanced = try application.advance(&whead.render, .{
+            .frame_start = frame_start,
+            .fb = fb,
+        });
         // The hub's wake-fd source tracks the Hub struct's own lifetime
         // (listen/stop-listen, connect/disconnect are all funneled through
         // `applyIntents`/`tickCollab` above) — reconcile once per wake.
@@ -744,20 +740,6 @@ pub fn main(init: std.process.Init) !void {
             sched.removeFd(hub_src_id.?);
             hub_src_id = null;
         }
-        if (editor.doc.commitCount() != attach.seen_commits) {
-            attach.seen_commits = editor.doc.commitCount();
-            view_dirty = true;
-        }
-        if (had_input) view_dirty = true; // cursor moves damage the view
-
-        // ── Rebuild + upload on damage (backend-independent build) ──
-        try frame_driver.build(&whead.render, .{
-            .frame_start = frame_start,
-            .fb = fb,
-            .blink_on = blink_on,
-            .menu_shown = session.menu_overlay.shown,
-        });
-
         // ── Draw ── (the only GPU/swapchain touch; headless skips it)
         // Present discipline (§6 W2a-3 item 4): only when a frame was
         // actually built this wake or one is still outstanding from a
@@ -769,7 +751,7 @@ pub fn main(init: std.process.Init) !void {
         // recheck next step.
         present_pending = present_pending or whead.render.fb.rebuilt;
         if (present_pending) {
-            if (try whead.render.present(whead.ctx, fb, frame_start, had_input)) present_pending = false;
+            if (try whead.render.present(whead.ctx, fb, frame_start, advanced.had_input)) present_pending = false;
         }
     }
     whead.ctx.waitIdle();

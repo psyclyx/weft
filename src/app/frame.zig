@@ -265,11 +265,10 @@ pub const Driver = struct {
         };
     }
 
-    /// Build one whole editor frame through an arbitrary production renderer.
-    /// `renderer` implements the shared render backend contract (`buildFrame`).
-    pub fn build(self: *Driver, renderer: anytype, opts: BuildOptions) !void {
-        _ = self.applyWindowIntents();
-        const active = try self.prepare();
+    /// Build the scene resolved by the application lifecycle. Public only for
+    /// `app/application.zig`: heads and harnesses advance `Application` rather
+    /// than selecting prepare/async/layout phases themselves.
+    pub fn buildPrepared(self: *Driver, renderer: anytype, active: Prepared, opts: BuildOptions) !void {
         if (opts.force_rebuild) self.ctx.view_dirty.* = true;
         try renderer.buildFrame(&self.ctx, .{
             .editor = active.editor,

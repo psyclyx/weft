@@ -32,7 +32,7 @@ pub const dispatch = weft.dispatch;
 pub const app_session = weft.app_session;
 pub const app_providers = weft.app_providers;
 pub const app_collab = weft.app_collab;
-const app_frame = weft.app_frame;
+const app_application = weft.app_application;
 const app_render_memory = weft.app_render_memory;
 const app_headless_vulkan = weft.app_headless_vulkan;
 pub const region = weft.region;
@@ -114,20 +114,13 @@ pub const Editor = struct {
     /// Standard headless Vulkan target + the selected production renderer.
     /// Bound by the authoritative two-editor spine; never imports Wayland.
     vulkan_head: ?*app_headless_vulkan.Head = null,
-    frame_driver: app_frame.Driver = undefined,
+    application: app_application.Application = undefined,
     frame_known_peers: core.known_peers.KnownPeers = undefined,
     frame_conn: ?core.session.Conn = null,
     frame_hub: ?core.hub.Hub = null,
     frame_collab_session: ?*core.session.Session = null,
     frame_partial_state: ?core.session.PartialDoc = null,
     frame_noted_host_fp: ?[24]u8 = null,
-    frame_dirty: bool = true,
-    frame_flash_gen: u64 = 0,
-    frame_flash_start_ns: u64 = 0,
-    frame_flash_was_active: bool = false,
-    /// Last active buffer id — so a buffer switch (open, buffer-next) fires
-    /// `on_activate` to plugins, exactly as main's loop does.
-    last_active: core.Buffers.Id = 0,
 
     // ── Window layout (multi-pane) ──
     /// The recursive pane tree, driven by the REAL window-layout commands
@@ -141,9 +134,6 @@ pub const Editor = struct {
     win_actions: [window_cmds.cmd_count]window_cmds.WindowActionCtx = undefined,
     /// Stable composition data for provider-aware buffer and target opening.
     buffer_commands: app_buffers_cmds.Context = undefined,
-    /// Last render's pane frame — geometry for focus/move-by-direction intents.
-    last_frame_rect: region.Rect = .{ .x = 0, .y = 0, .w = app_w, .h = app_h },
-
     pub fn init(gpa: Allocator, self: *Editor) !void {
         return initNamed(gpa, self, "user");
     }
@@ -164,10 +154,6 @@ pub const Editor = struct {
         self.frame_collab_session = null;
         self.frame_partial_state = null;
         self.frame_noted_host_fp = null;
-        self.frame_dirty = true;
-        self.frame_flash_gen = 0;
-        self.frame_flash_start_ns = 0;
-        self.frame_flash_was_active = false;
         self.vulkan_head = null;
         self.pool = try core.task.Pool.init(gpa, .{ .threads = 2 });
         self.engine = try core.wasm.Engine.init();
@@ -197,42 +183,29 @@ pub const Editor = struct {
 
         // Window layout: own the real pane tree + bind the real window commands.
         self.win_ctx = .{};
-        self.last_frame_rect = .{ .x = 0, .y = 0, .w = app_w, .h = app_h };
         try self.render.init(gpa, weft.font_provider.defaultMono(), app_em, self.buffers.active_id);
         self.memory_render_live = true;
         self.win_layout = &self.render.fb.win_layout;
         self.frame_known_peers = try core.known_peers.KnownPeers.load(gpa, parentEnviron());
         const ed0 = self.buffers.get(0) orelse self.buffers.active();
-        self.frame_driver = .{
-            .ctx = .{
-                .gpa = self.gpa,
-                .buffers = self.buffers,
-                .caps = self.caps,
-                .keymap = self.keymap,
-                .ui_mesh = &self.session.system.container,
-                .head = self.head,
-                .semantic = &self.session.system.semantic,
-                .cursor_cfg = &self.session.cursor_cfg,
-                .plugins = &self.plugins,
-                .conn = &self.frame_conn,
-                .hub = &self.frame_hub,
-                .collab_session = &self.frame_collab_session,
-                .partial_state = &self.frame_partial_state,
-                .ed0 = &ed0.editor,
-                .known_peers = &self.frame_known_peers,
-                .noted_host_fp = &self.frame_noted_host_fp,
-                .view_dirty = &self.frame_dirty,
-                .last_frame_rect = &self.last_frame_rect,
-                .flash_gen = &self.frame_flash_gen,
-                .flash_start_ns = &self.frame_flash_start_ns,
-                .flash_was_active = &self.frame_flash_was_active,
-                .flash_duration_ns = 600 * std.time.ns_per_ms,
-            },
+        self.application.init(.{
+            .gpa = self.gpa,
+            .session = &self.session,
             .attach_deps = &self.prov.attach_deps,
+            .plugin_loop = &self.loop,
+            .js_plugins = &self.js_plugins,
+            .plugins = &self.plugins,
+            .conn = &self.frame_conn,
+            .hub = &self.frame_hub,
+            .collab_session = &self.frame_collab_session,
+            .partial_state = &self.frame_partial_state,
+            .ed0 = &ed0.editor,
+            .known_peers = &self.frame_known_peers,
+            .noted_host_fp = &self.frame_noted_host_fp,
             .window_ctx = &self.win_ctx,
             .layout = self.win_layout,
             .view = &self.render.fb.view,
-        };
+        });
         try window_cmds.registerCommands(gpa, self.commands, &self.win_ctx, &self.win_actions);
         // The app's provider-aware open/close (shadows the core versions): opening
         // a file now attaches syntax + a language server per the lsp-add registry,
@@ -245,18 +218,6 @@ pub const Editor = struct {
             },
         };
         try app_buffers_cmds.registerCommands(gpa, self.commands, &self.buffer_commands);
-        self.last_active = self.buffers.active_id;
-    }
-
-    /// Mirror main's loop: when the active buffer changes, fire `on_activate`
-    /// to every plugin with the new buffer's path — this is what lets the
-    /// `modes` plugin detect a file's language the moment you open it.
-    fn syncActivate(self: *Editor) void {
-        if (self.buffers.active_id == self.last_active) return;
-        self.last_active = self.buffers.active_id;
-        const b = self.buffers.active();
-        const path = b.editor.backingPath() orelse b.name;
-        for (self.plugins.items) |p| core.wasm_host.notifyActivate(p, path);
     }
 
     pub fn deinit(self: *Editor) void {
@@ -350,10 +311,9 @@ pub const Editor = struct {
     /// ONLY — `core.task.nowNs()` (the raw-syscall monotonic clock this
     /// codebase already uses for hot-path timing; `std.time.Timer` needs
     /// `std.Io` plumbing this call site has no reason to carry) bracketing
-    /// `dispatchSpec`. Key-spec normalization and `syncActivate` sit outside
-    /// the timed window, matching what the real key-to-commit path pays (xkb
-    /// translation happens before dispatch too; buffer-switch notification is
-    /// a rare post-effect, not part of "this keystroke's" cost). `press`
+    /// `dispatchSpec`. Key-spec normalization sits outside the timed window,
+    /// matching what the real key-to-commit path pays (xkb translation happens
+    /// before dispatch too). `press`
     /// delegates here and discards the return, so every ordinary keypress in
     /// the whole e2e suite pays two cheap clock reads — negligible next to a
     /// dispatch, and the price of having only one implementation to trust.
@@ -363,13 +323,19 @@ pub const Editor = struct {
     /// for the stats built on top of it, and `latency_test.zig` for the
     /// policy (what/how much to measure, and the regression threshold).
     pub fn pressTimed(self: *Editor, spec_in: []const u8, text: []const u8) u64 {
+        const elapsed = self.inputTimed(spec_in, text);
+        // One injected event is one headless application wake. The lifecycle
+        // work stays outside the dispatch-only latency measurement above.
+        _ = self.advanceAt(core.task.nowNs(), false) catch {};
+        return elapsed;
+    }
+
+    fn inputTimed(self: *Editor, spec_in: []const u8, text: []const u8) u64 {
         var kbuf: [256]u8 = undefined;
         const spec = core.Keymap.normalizeKey(&kbuf, spec_in);
         const start = core.task.nowNs();
-        dispatch.dispatchSpec(self.ctx, spec, text) catch {};
-        const elapsed = core.task.nowNs() -| start;
-        self.syncActivate();
-        return elapsed;
+        self.application.input(spec, text) catch {};
+        return core.task.nowNs() -| start;
     }
 
     /// Press each key of a space-separated chord in turn — the natural way to
@@ -377,7 +343,8 @@ pub const Editor = struct {
     /// SPC→g→i. Non-printable by definition (leader keys), so no text.
     pub fn chord(self: *Editor, seq: []const u8) void {
         var it = std.mem.tokenizeScalar(u8, seq, ' ');
-        while (it.next()) |k| self.press(k, "");
+        while (it.next()) |k| _ = self.inputTimed(k, "");
+        _ = self.advanceAt(core.task.nowNs(), false) catch {};
     }
 
     /// Type a run of text the way a person does — one KEYSTROKE at a time through
@@ -392,26 +359,29 @@ pub const Editor = struct {
             const n = std.unicode.utf8ByteSequenceLength(s[i]) catch 1;
             const ch = s[i..@min(i + n, s.len)];
             if (ch.len == 1 and ch[0] == '\n') {
-                self.press("Return", "\n");
+                _ = self.inputTimed("Return", "\n");
             } else if (ch.len == 1 and ch[0] == '\t') {
-                self.press("Tab", "\t");
+                _ = self.inputTimed("Tab", "\t");
             } else {
-                self.press(ch, ch);
+                _ = self.inputTimed(ch, ch);
             }
             i += ch.len;
         }
+        _ = self.advanceAt(core.task.nowNs(), false) catch {};
     }
 
     /// Run a command by name (a startup action, or a "menu leaf" invoked directly).
     pub fn run(self: *Editor, cmd: []const u8) void {
         _ = command.run(self.commands, self.ctx, cmd, &.{}) catch {};
-        self.syncActivate();
+        self.application.noteInput();
+        _ = self.advanceAt(core.task.nowNs(), false) catch {};
     }
 
     /// Run a command with one string argument (e.g. `open <path>`).
     pub fn runStr(self: *Editor, cmd: []const u8, arg: []const u8) void {
         _ = command.run(self.commands, self.ctx, cmd, &.{.{ .string = arg }}) catch {};
-        self.syncActivate();
+        self.application.noteInput();
+        _ = self.advanceAt(core.task.nowNs(), false) catch {};
     }
 
     /// The current transient echo line (what a plugin last reported to the user).
@@ -419,8 +389,8 @@ pub const Editor = struct {
         return self.session.head.echo.items;
     }
 
-    /// Drive the active buffer's async save to completion (bounded spin), the
-    /// same poll main's loop does — deterministic, no sleep-and-hope.
+    /// Drive complete application wakes until the active buffer's async save
+    /// reaches a terminal state — deterministic, no sleep-and-hope.
     ///
     /// Wall-clock bounded, like every other "wait for the pool" helper in this
     /// file (`drainToolContains`, `drainUntilOracle`, `Loopback.pumpUntil`) —
@@ -442,26 +412,37 @@ pub const Editor = struct {
     pub fn waitSave(self: *Editor) void {
         const deadline = core.task.nowNs() + 30 * std.time.ns_per_s;
         while (core.task.nowNs() < deadline) {
-            if (self.buffers.active().editor.pollSave(self.gpa)) return;
+            _ = self.advanceAt(core.task.nowNs(), false) catch {};
+            if (self.buffers.active().editor.save_state != .saving) return;
             std.Thread.yield() catch {};
         }
     }
 
-    /// Pump async plugin work (proc output, fs listings, completion candidates)
-    /// a bounded number of rounds, yielding real time between ticks so pool
-    /// workers make progress (this Zig's std dropped `Thread.sleep`; napUs is a
-    /// short busy-wait on the monotonic clock, like session.zig's own helper).
+    /// Advance complete application wakes while background work converges.
+    /// This deliberately has no private inventory of async producers: picker,
+    /// menu, plugins, backing state, activation, layout, and rendering advance
+    /// through the same `Application` lifecycle as the desktop.
     pub fn settle(self: *Editor, rounds: usize) void {
         var i: usize = 0;
         while (i < rounds) : (i += 1) {
-            _ = self.loop.tick();
-            for (self.plugins.items) |p| {
-                _ = core.wasm_host.drainReplSessions(p);
-                _ = core.wasm_host.notifyPollIfReady(p); // service raw-proc plugins (lsp)
-            }
-            for (self.js_plugins.items) |jp| _ = jp.tick(); // reactor: drains proc output → onOutput
+            _ = self.advanceAt(core.task.nowNs(), false) catch {};
             napUs(2000);
         }
+    }
+
+    fn advanceAt(self: *Editor, frame_start: u64, force_rebuild: bool) !app_application.Application.AdvanceResult {
+        if (self.vulkan_head) |head| {
+            return self.application.advance(&head.render, .{
+                .frame_start = frame_start,
+                .fb = .{ app_w, app_h },
+                .force_rebuild = force_rebuild,
+            });
+        }
+        return self.application.advance(&self.render, .{
+            .frame_start = frame_start,
+            .fb = .{ app_w, app_h },
+            .force_rebuild = force_rebuild,
+        });
     }
 
     // ── inspectors ──
@@ -506,12 +487,10 @@ pub const Editor = struct {
 
     // ── Window layout (multi-pane), driven through the REAL commands ──
 
-    /// Apply any pending window-layout intents (window-split/focus/move recorded
-    /// by the bound commands) through the REAL frame-loop applier — mutating the
-    /// pane tree and keeping the focused pane on the active buffer. Mirrors
-    /// main()'s `window_cmds.applyIntents` call.
+    /// Advance one ordinary application wake; window intents are one phase of
+    /// that lifecycle, never a harness-selectable operation.
     pub fn applyWindow(self: *Editor) void {
-        _ = self.frame_driver.applyWindowIntents();
+        _ = self.advanceAt(core.task.nowNs(), false) catch {};
     }
 
     /// Number of panes currently tiled.
@@ -532,23 +511,14 @@ pub const Editor = struct {
         self.memory_render_live = false;
         self.vulkan_head = head;
         self.win_layout = &head.render.fb.win_layout;
-        self.frame_driver.layout = self.win_layout;
-        self.frame_driver.view = &head.render.fb.view;
-        self.frame_dirty = true;
+        self.application.bindTarget(self.win_layout, &head.render.fb.view);
     }
 
     /// Build and submit the whole editor frame without waiting for readback.
     /// The paired recorder submits both peers before resolving either fence.
     pub fn submitHeadlessFrameAt(self: *Editor, frame_start: u64) !void {
         const head = self.vulkan_head orelse return error.HeadlessVulkanNotEnabled;
-        self.last_frame_rect = .{ .x = 0, .y = 0, .w = @floatFromInt(app_w), .h = @floatFromInt(app_h) };
-        try self.frame_driver.build(&head.render, .{
-            .frame_start = frame_start,
-            .fb = .{ app_w, app_h },
-            .blink_on = true,
-            .menu_shown = self.session.menu_overlay.shown,
-            .force_rebuild = true,
-        });
+        _ = try self.advanceAt(frame_start, true);
         var attempts: usize = 0;
         while (attempts < 10_000) : (attempts += 1) {
             if (try head.render.present(head.ctx, .{ app_w, app_h }, frame_start, false)) return;
@@ -572,14 +542,7 @@ pub const Editor = struct {
             try self.submitHeadlessFrameAt(frame_start);
             return self.readHeadlessFrame();
         }
-        self.last_frame_rect = .{ .x = 0, .y = 0, .w = @floatFromInt(app_w), .h = @floatFromInt(app_h) };
-        try self.frame_driver.build(&self.render, .{
-            .frame_start = frame_start,
-            .fb = .{ app_w, app_h },
-            .blink_on = true,
-            .menu_shown = self.session.menu_overlay.shown,
-            .force_rebuild = true,
-        });
+        _ = try self.advanceAt(frame_start, true);
         const complete = try self.render.present(.{ app_w, app_h });
         return self.gpa.dupe(u8, complete.pixels);
     }
@@ -678,7 +641,7 @@ pub const SecondHead = struct {
     /// (north-star-plan §6 W2a GATE) drives real split/close/focus
     /// sequences "as" each head through this.
     pub fn applyWindow(self: *SecondHead, ed: *Editor) void {
-        _ = window_cmds.applyIntents(&ed.win_ctx, ed.win_layout, &ed.render.fb.view, ed.buffers, ed.gpa, &self.head, ed.keymap, ed.last_frame_rect);
+        _ = window_cmds.applyIntents(&ed.win_ctx, ed.win_layout, &ed.render.fb.view, ed.buffers, ed.gpa, &self.head, ed.keymap, ed.application.last_frame_rect);
     }
 
     pub fn mode(self: *SecondHead) []const u8 {
@@ -1629,7 +1592,6 @@ pub const Project = struct {
     /// Write a composite screenshot to an absolute artifact path that outlives
     /// the tmpdir (best-effort; the e2e leaves frames to eyeball).
     pub fn shot(self: *Project, ed: *Editor, name: []const u8) void {
-        ed.applyWindow();
         const pixels = ed.renderComposite() catch return;
         defer self.gpa.free(pixels);
         const fname = std.fmt.allocPrint(self.gpa, "{s}/.zig-cache/tmp/weft-e2e-{s}.ppm", .{ self.prev_cwd, name }) catch return;
@@ -2188,10 +2150,10 @@ pub fn drainToolContains(ed: *Editor, name: []const u8, needle: []const u8) bool
     return false;
 }
 
-/// Drive the async loop until it has NO in-flight tasks (every subprocess
-/// this `Editor` scheduled — `wl_proc_to_buffer`'s "mutate ; gather" among
-/// them — has been polled to completion by `loop.tick` and delivered), or a
-/// timeout. `Loop.tasks` (async.zig) is the pool-wake signal itself: an entry
+/// Drive complete application wakes until there are NO in-flight tasks (every
+/// subprocess this `Editor` scheduled — `wl_proc_to_buffer`'s "mutate ;
+/// gather" among them — has been delivered), or a timeout. `Loop.tasks`
+/// (async.zig) is the pool-wake signal itself: an entry
 /// is only removed once `handle.poll()` reports the pool thread actually
 /// finished, so `tasks.items.len == 0` is a direct observation of subprocess
 /// exit — not an inference from elapsed ticks.
@@ -2216,30 +2178,27 @@ pub fn drainToolContains(ed: *Editor, name: []const u8, needle: []const u8) bool
 pub fn drainLoopIdle(ed: *Editor) bool {
     const deadline = core.task.nowNs() + 10 * std.time.ns_per_s;
     while (core.task.nowNs() < deadline) {
-        _ = ed.loop.tick();
+        ed.settle(1);
         if (ed.loop.tasks.items.len == 0) return true;
-        std.Thread.yield() catch {};
     }
     return false;
 }
 
 /// Drive the async loop until the DISK oracle `sh_cmd` reports `needle` (or a
 /// timeout). A magit mutation (stage/commit) shells out asynchronously — the
-/// keypress only SCHEDULES `git add`/`git commit`; the loop tick is what lets
-/// the pool worker run it. Polling the on-disk oracle each round makes the
+/// keypress only SCHEDULES `git add`/`git commit`; application wakes deliver
+/// the pool result. Polling the on-disk oracle each round makes the
 /// assertion deterministic (disk truth), never a sleep-and-hope. git ops
 /// complete in a few ms, so this converges in a handful of rounds.
 pub fn drainUntilOracle(proj: *Project, ed: *Editor, sh_cmd: []const u8, needle: []const u8) bool {
     const deadline = core.task.nowNs() + 10 * std.time.ns_per_s;
     while (core.task.nowNs() < deadline) {
-        _ = ed.loop.tick();
+        ed.settle(1);
         const out = proj.oracle(sh_cmd) catch {
-            std.Thread.yield() catch {};
             continue;
         };
         defer ed.gpa.free(out);
         if (std.mem.indexOf(u8, out, needle) != null) return true;
-        std.Thread.yield() catch {};
     }
     return false;
 }
