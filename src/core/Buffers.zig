@@ -193,6 +193,13 @@ pub fn ensureNamed(self: *Buffers, gpa: Allocator, name: []const u8) Error!Id {
 pub fn switchTo(self: *Buffers, gpa: Allocator, id: Id, head: *Head, keymap: *const Keymap) Error!void {
     const target = self.get(id) orelse return;
     if (id == self.active_id) return;
+    // Semantic focus belongs to the view currently shown in this buffer.  A
+    // buffer switch changes the interaction locus even when the target is a
+    // plain text buffer; retaining a dired/picker field here would make the
+    // next printable key edit that stale field instead of the newly focused
+    // document.  The head owns this focus, so clearing it is the narrow,
+    // head-addressed boundary rather than teaching every tool about buffers.
+    head.semantic_focus.clear();
     const old = self.active();
     // Remember the buffer's RESTING mode — the base of the current mode's
     // fallback chain, not the transient mode itself. So leaving mid-`visual`
