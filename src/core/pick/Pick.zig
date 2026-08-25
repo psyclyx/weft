@@ -296,6 +296,15 @@ fn close(self: *Pick, ctx: *command.Context) !void {
     try ctx.head.setModeRaw(ctx.gpa, prev);
 }
 
+/// Dismiss a live picker through its ordinary lifecycle: close its source and
+/// acceptor, then restore the mode it displaced. Consumers use this when the
+/// target which made a picker meaningful becomes stale (for example, an async
+/// completion after a buffer switch). This is UI lifecycle, not input policy;
+/// key bindings still invoke the same operation through `pick-cancel`.
+pub fn dismiss(self: *Pick, ctx: *command.Context) !void {
+    if (self.active) try self.close(ctx);
+}
+
 fn frecOf(self: *const Pick, text: []const u8) Frec {
     var key_buf: [512]u8 = undefined;
     const key = std.fmt.bufPrint(&key_buf, "{s}\x00{s}", .{ self.prompt, text }) catch return .{ .uses = 0, .last = 0 };
@@ -545,7 +554,7 @@ fn cPrev(ctx: *command.Context, args: struct {}) anyerror!Value {
 fn cCancel(ctx: *command.Context, args: struct {}) anyerror!Value {
     _ = args;
     const p = pickOf(ctx);
-    if (p.active) try p.close(ctx);
+    try p.dismiss(ctx);
     return .nil;
 }
 

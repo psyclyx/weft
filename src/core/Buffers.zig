@@ -5,11 +5,15 @@
 //! an opaque frontend slot where the shell hangs per-buffer providers
 //! (syntax, LSP, collab) — core never looks inside it.
 //!
-//! Identity is a stable `Id` (slot index; buffers are heap-allocated so
-//! `*Buffer`/`*Editor` pointers survive list growth). Exactly one
-//! buffer is active; the set never goes empty (closing the last buffer
-//! replaces it with a scratch). Policy — dirty-close prompts, dedupe on
-//! open — lives with callers; this is mechanism.
+//! A live buffer has a compact `Id` (slot index) and a generation-checked
+//! `Ref`. Use `Id` only while synchronously addressing the current set; use
+//! `Ref` whenever identity crosses time (async work, queued UI actions). Slots
+//! are reused, so an `Id` alone cannot distinguish a closed buffer from its
+//! replacement. Buffers are heap-allocated, therefore `*Buffer`/`*Editor`
+//! pointers survive list growth while the buffer remains live. Exactly one
+//! buffer is active; the set never goes empty (closing the last buffer replaces
+//! it with a scratch). Policy — dirty-close prompts, dedupe on open — lives
+//! with callers; this is mechanism.
 
 const std = @import("std");
 const Allocator = std.mem.Allocator;
@@ -25,6 +29,9 @@ const Buffers = @This();
 pool: *task.Pool,
 user_agent: []u8,
 slots: std.ArrayList(?*Buffer) = .empty,
+/// Monotonic identity component assigned on creation. Zero is reserved so a
+/// default/zeroed `Ref` can never accidentally resolve.
+next_generation: u64 = 1,
 active_id: Id = 0,
 /// The buffer active before the current one — where `buffer-back` returns (so
 /// leaving a tool lands you where you came from, not a fresh scratch). Updated
@@ -39,8 +46,17 @@ default_mode: []u8 = &.{},
 
 pub const Id = u32;
 
+/// Stable buffer identity for work that outlives the synchronous call which
+/// selected the buffer. Resolving fails after close, including when the same
+/// numeric slot has since been reused.
+pub const Ref = struct {
+    id: Id,
+    generation: u64,
+};
+
 pub const Buffer = struct {
     id: Id,
+    generation: u64,
     editor: Editor,
     /// Display name (path basename, tool name, or "*scratch*").
     name: []u8,
@@ -55,6 +71,10 @@ pub const Buffer = struct {
     read_only: bool = false,
     /// The shell's per-buffer attachments (providers); opaque to core.
     frontend: ?*anyopaque = null,
+
+    pub fn ref(self: *const Buffer) Ref {
+        return .{ .id = self.id, .generation = self.generation };
+    }
 };
 
 pub const Error = Allocator.Error;
@@ -106,6 +126,14 @@ pub fn get(self: *const Buffers, id: Id) ?*Buffer {
     return self.slots.items[id];
 }
 
+/// Resolve a stable identity captured earlier. A closed buffer and a new
+/// buffer occupying its old slot are deliberately different identities.
+pub fn resolve(self: *const Buffers, ref: Ref) ?*Buffer {
+    const b = self.get(ref.id) orelse return null;
+    if (ref.generation == 0 or b.generation != ref.generation) return null;
+    return b;
+}
+
 pub fn count(self: *const Buffers) usize {
     var n: usize = 0;
     for (self.slots.items) |s| n += @intFromBool(s != null);
@@ -149,7 +177,10 @@ pub fn create(self: *Buffers, gpa: Allocator, name: []const u8) Error!Id {
         try self.slots.append(gpa, null);
         break :blk @intCast(self.slots.items.len - 1);
     };
-    b.* = .{ .id = id, .editor = editor, .name = owned_name };
+    const generation = self.next_generation;
+    self.next_generation +%= 1;
+    if (self.next_generation == 0) self.next_generation = 1;
+    b.* = .{ .id = id, .generation = generation, .editor = editor, .name = owned_name };
     self.slots.items[id] = b;
     return id;
 }
@@ -173,11 +204,11 @@ pub fn findByName(self: *const Buffers, name: []const u8) ?Id {
 }
 
 /// The buffer named `name`, creating an empty one if absent — returning its
-/// STABLE `Id`. The handle a streamed/async producer (repl/net/proc output)
-/// captures once, instead of re-scanning by name every delivery: buffer ids are
-/// stable across list growth, so a rename or a second same-named buffer can't
-/// misroute output (a plain name scan can). A caller that must react to
-/// creation (mark read-only) should `findByName` + `create` itself.
+/// live-set `Id`. Name-addressed streams (repl/net output) may cache this to
+/// avoid rescanning, but must revalidate the name after slot reuse. Work that
+/// targets this exact buffer rather than the logical name captures `Buffer.ref`
+/// instead. A caller that must react to creation (mark read-only) should
+/// `findByName` + `create` itself.
 pub fn ensureNamed(self: *Buffers, gpa: Allocator, name: []const u8) Error!Id {
     return self.findByName(name) orelse try self.create(gpa, name);
 }
@@ -342,6 +373,33 @@ test "buffers: ensureNamed finds-or-creates by name; the Id is stable" {
     // The stable handle resolves the same buffer regardless of what else opens.
     _ = try bufs.create(gpa, "other.zig");
     try t.expectEqualStrings("*repl*", bufs.get(id).?.name);
+}
+
+test "buffers: Ref rejects a closed generation when its slot is reused" {
+    const t = std.testing;
+    const gpa = t.allocator;
+    var pool = try task.Pool.init(gpa, .{ .threads = 1 });
+    defer pool.deinit();
+    var bufs = try init(gpa, pool, "user");
+    defer bufs.deinit(gpa);
+    var km: Keymap = .empty;
+    defer km.deinit(gpa);
+    var head: Head = .empty;
+    defer head.deinit(gpa);
+
+    const first_id = try bufs.create(gpa, "first");
+    const first_ref = bufs.get(first_id).?.ref();
+    try t.expect(bufs.resolve(first_ref) == bufs.get(first_id).?);
+
+    // The non-active slot is immediately reusable, but not the identity.
+    try bufs.close(gpa, first_id, &head, &km);
+    try t.expect(bufs.resolve(first_ref) == null);
+    const replacement_id = try bufs.create(gpa, "replacement");
+    const replacement_ref = bufs.get(replacement_id).?.ref();
+    try t.expectEqual(first_id, replacement_id);
+    try t.expect(first_ref.generation != replacement_ref.generation);
+    try t.expect(bufs.resolve(first_ref) == null);
+    try t.expect(bufs.resolve(replacement_ref) == bufs.get(replacement_id).?);
 }
 
 test {

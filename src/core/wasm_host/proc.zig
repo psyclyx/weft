@@ -18,20 +18,18 @@ const WasmPlugin = shared.WasmPlugin;
 const requirePerm = shared.requirePerm;
 
 /// A deferred shell insert, owned across the frame→pool→frame hop. Holds no
-/// plugin pointer — it re-resolves the doc + peer by name at delivery, so it
-/// survives the plugin being unloaded mid-flight (mirrors abi.zig's
-/// DeferredEdit). Freed in every terminal case by the sink's deinit.
+/// plugin pointer — it resolves the generation-checked buffer captured at
+/// dispatch and the peer by name at delivery, so a focus change cannot redirect
+/// the edit and a closed/reused buffer safely makes it stale. Freed in every
+/// terminal case by the sink's deinit.
 ///
-/// `ctx` is the DISPATCHING Context captured at request time (activeCtx() —
-/// task #14), not the plugin's load-time one: if a job ever grows a `.head`
-/// read (echo the result to the requesting head), dispatch-time capture is
-/// the right target. The flip side is a real invariant: the captured Context
-/// must OUTLIVE the job. Today that's free (every head's ctx is
-/// session-lifetime and jobs only read the head-independent gpa/document/
-/// buffers fields) — it stops being free the moment a shorter-lived per-head
-/// Context exists. Same applies to ProcJob and FilterJob below.
+/// Deferred jobs retain only the session-owned allocator/registry they need,
+/// never a head's dispatch `Context`. Context is ambient plumbing and its
+/// `document()` intentionally means "active now"; neither is a target token.
 const ShellJob = struct {
-    ctx: *command.Context,
+    gpa: Allocator,
+    buffers: *Buffers,
+    buffer: Buffers.Ref,
     name: []u8,
     version: []u8, // the version `offset` is stamped against
     offset: usize,
@@ -148,13 +146,17 @@ pub fn hShellInsert(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32, 
     const gpa = p.gpa;
     const cmd = caller.readMemory(gpa, @intCast(args[0]), @intCast(args[1])) catch return;
     errdefer gpa.free(cmd);
-    const doc = p.activeCtx().document();
+    const active_ctx = p.activeCtx();
+    const buffer = active_ctx.buffers.active();
+    const doc = &buffer.editor.doc;
     const job = gpa.create(ShellJob) catch {
         gpa.free(cmd);
         return;
     };
     job.* = .{
-        .ctx = p.activeCtx(),
+        .gpa = gpa,
+        .buffers = active_ctx.buffers,
+        .buffer = buffer.ref(),
         .name = gpa.dupe(u8, p.name) catch {
             gpa.destroy(job);
             gpa.free(cmd);
@@ -166,7 +168,7 @@ pub fn hShellInsert(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32, 
             gpa.free(cmd);
             return;
         },
-        .offset = p.activeCtx().editor().cursorOffset(),
+        .offset = buffer.editor.cursorOffset(),
         .cmd = cmd,
     };
     _ = loop.spawn(shellWork, job, .{ .ctx = job, .call = shellDeliver, .deinit = shellFree }) catch {
@@ -189,15 +191,16 @@ fn shellWork(gpa: Allocator, ctx: ?*anyopaque) anyerror![]u8 {
 fn shellDeliver(ctx: ?*anyopaque, result: ?[]const u8) void {
     const job: *ShellJob = @ptrCast(@alignCast(ctx.?));
     const bytes = result orelse return;
-    const gpa = job.ctx.gpa;
-    const doc = job.ctx.document();
+    const gpa = job.gpa;
+    const buffer = job.buffers.resolve(job.buffer) orelse return;
+    const doc = &buffer.editor.doc;
     const at = position.rebaseOffset(doc, job.version, job.offset, .right) orelse return;
     command.renderInto(gpa, doc, .plugin, job.name, &.{.{ .range = .{ .start = at, .end = at }, .bytes = bytes }}) catch return;
 }
 
 fn shellFree(ctx: ?*anyopaque) void {
     const job: *ShellJob = @ptrCast(@alignCast(ctx.?));
-    const gpa = job.ctx.gpa;
+    const gpa = job.gpa;
     gpa.free(job.name);
     gpa.free(job.version);
     gpa.free(job.cmd);
@@ -213,7 +216,8 @@ fn shellFree(ctx: ?*anyopaque) void {
 /// are resident for the app's life (the same residency `notifyActivate` relies
 /// on); it is only ever called on the normal delivery path, never at teardown.
 const ProcJob = struct {
-    ctx: *command.Context,
+    gpa: Allocator,
+    buffers: *Buffers,
     styler: *WasmPlugin, // fires on_fill after delivery (resident)
     plugin: []u8, // authors the buffer content
     buf: []u8, // target buffer name (found-or-created)
@@ -237,7 +241,8 @@ pub fn hProcToBuffer(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32,
     errdefer gpa.free(name);
     const job = gpa.create(ProcJob) catch return;
     job.* = .{
-        .ctx = p.activeCtx(),
+        .gpa = gpa,
+        .buffers = p.activeCtx().buffers,
         .styler = p,
         .plugin = gpa.dupe(u8, p.name) catch {
             gpa.destroy(job);
@@ -266,7 +271,8 @@ pub fn hProcAppendBuffer(data: ?*anyopaque, caller: *wasm.Caller, args: []const 
     errdefer gpa.free(name);
     const job = gpa.create(ProcJob) catch return;
     job.* = .{
-        .ctx = p.activeCtx(),
+        .gpa = gpa,
+        .buffers = p.activeCtx().buffers,
         .styler = p,
         .plugin = gpa.dupe(u8, p.name) catch {
             gpa.destroy(job);
@@ -293,8 +299,8 @@ fn procWork(gpa: Allocator, ctx: ?*anyopaque) anyerror![]u8 {
 fn procDeliver(ctx: ?*anyopaque, result: ?[]const u8) void {
     const job: *ProcJob = @ptrCast(@alignCast(ctx.?));
     const out = result orelse return;
-    const gpa = job.ctx.gpa;
-    const bufs = job.ctx.buffers;
+    const gpa = job.gpa;
+    const bufs = job.buffers;
     // A buffer proc CREATES is a plain tool sink (grep/make output) → read-only.
     // A PRE-created buffer keeps whatever the plugin declared (a projection
     // marks itself read-only via weft.readOnly; an editable one like
@@ -335,7 +341,7 @@ fn procDeliver(ctx: ?*anyopaque, result: ?[]const u8) void {
 
 fn procFree(ctx: ?*anyopaque) void {
     const job: *ProcJob = @ptrCast(@alignCast(ctx.?));
-    const gpa = job.ctx.gpa;
+    const gpa = job.gpa;
     gpa.free(job.plugin);
     gpa.free(job.buf);
     gpa.free(job.cmd);
@@ -347,7 +353,9 @@ fn procFree(ctx: ?*anyopaque) void {
 /// result. The edit is stamped at the version read and lands as the plugin
 /// peer, so it rebases + merges like a concurrent editor (design §6.2 fmt).
 const FilterJob = struct {
-    ctx: *command.Context,
+    gpa: Allocator,
+    buffers: *Buffers,
+    buffer: Buffers.Ref,
     plugin: []u8,
     version: []u8,
     start: usize,
@@ -372,7 +380,9 @@ pub fn hProcFilter(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32, r
     const gpa = p.gpa;
     const cmd = caller.readMemory(gpa, @intCast(args[0]), @intCast(args[1])) catch return;
     errdefer gpa.free(cmd);
-    const rope = p.activeCtx().editor().text();
+    const active_ctx = p.activeCtx();
+    const buffer = active_ctx.buffers.active();
+    const rope = buffer.editor.text();
     const len = rope.byteLen();
     const s = @min(@as(usize, @intCast(args[2])), len);
     const e = @min(@as(usize, @intCast(args[3])), len);
@@ -383,14 +393,16 @@ pub fn hProcFilter(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32, r
         var sr = rope.streamReader(.{ .start = s, .end = e }, &.{});
         sr.interface.readSliceAll(content) catch return;
     }
-    const version = p.activeCtx().document().version(gpa) catch return;
+    const version = buffer.editor.doc.version(gpa) catch return;
     errdefer gpa.free(version);
     filter_counter += 1;
     const tmp = std.fmt.allocPrint(gpa, "/tmp/weft-filter-{d}-{d}", .{ filter_counter, s }) catch return;
     errdefer gpa.free(tmp);
     const job = gpa.create(FilterJob) catch return;
     job.* = .{
-        .ctx = p.activeCtx(),
+        .gpa = gpa,
+        .buffers = active_ctx.buffers,
+        .buffer = buffer.ref(),
         .plugin = gpa.dupe(u8, p.name) catch {
             gpa.destroy(job);
             return;
@@ -426,8 +438,9 @@ fn filterWork(gpa: Allocator, ctx: ?*anyopaque) anyerror![]u8 {
 fn filterDeliver(ctx: ?*anyopaque, result: ?[]const u8) void {
     const job: *FilterJob = @ptrCast(@alignCast(ctx.?));
     const out = result orelse return;
-    const gpa = job.ctx.gpa;
-    const doc = job.ctx.document();
+    const gpa = job.gpa;
+    const buffer = job.buffers.resolve(job.buffer) orelse return;
+    const doc = &buffer.editor.doc;
     const rs = position.rebaseOffset(doc, job.version, job.start, .right) orelse return;
     const re = position.rebaseOffset(doc, job.version, job.end, .left) orelse return;
     command.renderInto(gpa, doc, .plugin, job.plugin, &.{.{ .range = .{ .start = @min(rs, re), .end = @max(rs, re) }, .bytes = out }}) catch return;
@@ -435,7 +448,7 @@ fn filterDeliver(ctx: ?*anyopaque, result: ?[]const u8) void {
 
 fn filterFree(ctx: ?*anyopaque) void {
     const job: *FilterJob = @ptrCast(@alignCast(ctx.?));
-    const gpa = job.ctx.gpa;
+    const gpa = job.gpa;
     gpa.free(job.plugin);
     gpa.free(job.version);
     gpa.free(job.cmd);

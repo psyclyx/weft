@@ -1217,6 +1217,42 @@ test "completion UI: source-driven fold into the pick; accept replaces the prefi
     try t.expectEqualStrings("alpha", text);
 }
 
+test "completion UI: switching buffers dismisses the originating session" {
+    const gpa = t.allocator;
+    var host: TestHost = undefined;
+    try TestHost.init(gpa, &host);
+    defer host.deinit(gpa);
+
+    var comp: core.complete_ui.CompletionUi = .empty;
+    _ = try host.commands.bind(gpa, "complete", comp.commandSpec());
+    try host.caps.register(.{
+        .capability = "edit/completion",
+        .id = "test.instant",
+        .latency = .instant,
+        .handler = instantWords,
+    });
+
+    try host.head.setModeRaw(gpa, "normal");
+    try host.editor().insertText(gpa, "al");
+    _ = try core.command.run(&host.commands, &host.ctx, "complete", &.{});
+    try t.expect(host.head.pick.active);
+    const origin = host.buffers.active().ref();
+
+    const other = try host.buffers.create(gpa, "other");
+    try host.buffers.switchTo(gpa, other, &host.head, &host.keymap);
+    try t.expect((try host.head.pick.tick(&host.ctx)));
+    try t.expect(!host.head.pick.active);
+    try t.expectEqualStrings("normal", host.head.currentMode());
+
+    // The originating document was neither edited nor mistaken for the new
+    // active buffer; the target token still resolves to the exact old buffer.
+    const original = host.buffers.resolve(origin) orelse return error.OriginLost;
+    const original_text = try original.editor.text().toOwnedSlice(gpa);
+    defer gpa.free(original_text);
+    try t.expectEqualStrings("al", original_text);
+    try t.expectEqual(@as(usize, 0), host.editor().text().byteLen());
+}
+
 test "editor: compactNow keeps the backing mirror and saves working" {
     const gpa = t.allocator;
     var tmp_dir = t.tmpDir(.{});

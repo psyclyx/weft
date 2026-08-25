@@ -20,11 +20,16 @@ const Allocator = std.mem.Allocator;
 
 const command = @import("command.zig");
 const capability = @import("capability.zig");
+const Buffers = @import("Buffers.zig");
 const pick_mod = @import("pick.zig");
 const task = @import("task.zig");
 
 pub const CompletionUi = struct {
     session: ?u64 = null,
+    /// Buffer identity the capability request and prefix belong to. Completion
+    /// follows concurrent edits within this buffer, but never ambient focus to
+    /// another buffer (or a replacement which reused its slot).
+    buffer: ?Buffers.Ref = null,
     prefix_len: usize = 0,
     /// Stashed at fire time so the source's `close` (which gets no ctx)
     /// can cancel the session when the pick is dismissed.
@@ -50,10 +55,11 @@ pub const CompletionUi = struct {
             self.session = null;
         }
         self.caps = ctx.caps;
-        const prefix = try ctx.editor().wordPrefix(ctx.gpa);
+        const buffer = ctx.buffer();
+        const prefix = try buffer.editor.wordPrefix(ctx.gpa);
         defer ctx.gpa.free(prefix);
-        const id = try ctx.fireRace(.completion, &ctx.editor().doc, ctx.editor().backingPath(), .{
-            .offset = ctx.editor().cursorOffset(),
+        const id = try ctx.fireRace(.completion, &buffer.editor.doc, buffer.editor.backingPath(), .{
+            .offset = buffer.editor.cursorOffset(),
             .text = prefix,
         }) orelse return .nil;
         errdefer ctx.caps.finish(id);
@@ -66,8 +72,9 @@ pub const CompletionUi = struct {
             .data = self,
         }, .{ .source = self.source() });
         // Draw the completion list as a popup AT the caret, not the bottom dock.
-        ctx.head.pick.caret_anchor = ctx.editor().cursorOffset();
+        ctx.head.pick.caret_anchor = buffer.editor.cursorOffset();
         self.session = id;
+        self.buffer = buffer.ref();
         self.prefix_len = plen;
         // Surface instant-tier results (they answered during fire) now.
         _ = try poll(self, ctx);
@@ -82,6 +89,18 @@ pub const CompletionUi = struct {
     /// the session once every provider has answered (or timed out).
     fn poll(data: ?*anyopaque, ctx: *command.Context) anyerror!bool {
         const self: *CompletionUi = @ptrCast(@alignCast(data.?));
+        const target = self.buffer orelse {
+            try ctx.head.pick.dismiss(ctx);
+            return true;
+        };
+        const buffer = ctx.buffers.resolve(target) orelse {
+            try ctx.head.pick.dismiss(ctx);
+            return true;
+        };
+        if (buffer != ctx.buffer()) {
+            try ctx.head.pick.dismiss(ctx);
+            return true;
+        }
         const id = self.session orelse return false;
         const s = ctx.caps.session(id) orelse {
             self.session = null;
@@ -159,7 +178,10 @@ pub const CompletionUi = struct {
 
     fn accept(ctx: *command.Context, data: ?*anyopaque, choice: []const u8) anyerror!void {
         const self: *CompletionUi = @ptrCast(@alignCast(data.?));
-        const cur = ctx.editor().cursorOffset();
+        const target = self.buffer orelse return;
+        const buffer = ctx.buffers.resolve(target) orelse return;
+        if (buffer != ctx.buffer()) return;
+        const cur = buffer.editor.cursorOffset();
         const start = cur -| self.prefix_len;
         // The one edit door: authored by the invoking principal and grade
         // -gated (a view peer's accept is refused, leaving no ghost). The
@@ -169,7 +191,7 @@ pub const CompletionUi = struct {
             return e;
         };
         // Completion is its own undo unit — the next typing starts fresh.
-        ctx.editor().history.barrier();
+        buffer.editor.history.barrier();
     }
 };
 
