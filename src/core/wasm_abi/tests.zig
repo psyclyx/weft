@@ -321,7 +321,9 @@ test "wasm plugin: guarded child directories publish and revoke complete authori
     var resolution = try semantic.target_handlers.resolve(gpa, semantic.targets.get(parent.ref).?.*);
     defer resolution.deinit();
     const selected = resolution.value.decide().selected;
-    const view_ref = try semantic.target_handlers.open(selected, parent.located());
+    const opened = try semantic.target_handlers.open(selected, parent.located());
+    const view_ref = opened.view();
+    try t.expect(semantic.target_handlers.settle(selected, opened, .accepted));
     try t.expectEqual(@as(usize, 1), dired_plugin.semantic_directories.items.len);
     const initial_view = semantic.views.get(view_ref) orelse return error.TestUnexpectedResult;
     const initial_view_revision = initial_view.descriptor.revision;
@@ -404,10 +406,12 @@ test "wasm plugin: guarded child directories publish and revoke complete authori
     var replaced_resolution = try semantic.target_handlers.resolve(gpa, replaced_parent.*);
     defer replaced_resolution.deinit();
     const replaced_selected = replaced_resolution.value.decide().selected;
-    const replaced_view_ref = try semantic.target_handlers.open(replaced_selected, .{
+    const replaced_opened = try semantic.target_handlers.open(replaced_selected, .{
         .target = parent.ref,
         .revision = replaced_parent.revision,
     });
+    const replaced_view_ref = replaced_opened.view();
+    try t.expect(semantic.target_handlers.settle(replaced_selected, replaced_opened, .accepted));
     try t.expect(!replaced_view_ref.eql(view_ref));
     const replaced_view = semantic.views.get(replaced_view_ref) orelse return error.TestUnexpectedResult;
     try t.expectEqual(replaced_parent.revision, replaced_view.descriptor.target.?.revision);

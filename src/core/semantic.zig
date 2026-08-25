@@ -261,6 +261,43 @@ pub const Services = struct {
         },
     };
 
+    /// One selected handler result that core has not accepted yet. Retained
+    /// views are borrowed and settlement is a no-op; provisional views remain
+    /// the provider's responsibility until `accept` or `reject` is called.
+    pub const PendingTargetOpen = struct {
+        services: *const Services,
+        handler: target_runtime.resolver.HandlerRef,
+        result: target_runtime.resolver.OpenResult,
+        active: bool = true,
+
+        pub fn view(self: PendingTargetOpen) semantic.view.Ref {
+            return self.result.view();
+        }
+
+        pub fn accept(self: *PendingTargetOpen) void {
+            self.settle(.accepted);
+        }
+
+        pub fn reject(self: *PendingTargetOpen) void {
+            self.settle(.rejected);
+        }
+
+        fn settle(self: *PendingTargetOpen, outcome: target_runtime.resolver.AdmissionOutcome) void {
+            if (!self.active) return;
+            _ = self.services.target_handlers.settle(self.handler, self.result, outcome);
+            self.active = false;
+        }
+    };
+
+    pub const PendingLocatedOpenResult = union(enum) {
+        opened: PendingTargetOpen,
+        no_handler,
+        ambiguous: struct {
+            strength: target_runtime.resolver.Strength,
+            count: usize,
+        },
+    };
+
     /// Resolve and admit the exact located revision requested by a provider.
     /// A provider can request an open, but cannot select a handler or smuggle
     /// in a view it does not own. No focus is changed here; callers that have
@@ -270,6 +307,26 @@ pub const Services = struct {
         gpa: std.mem.Allocator,
         located: semantic.target.Located,
     ) (ResolveTargetError || OpenTargetError)!LocatedOpenResult {
+        return switch (try self.beginLocatedTargetOpen(gpa, located)) {
+            .no_handler => .no_handler,
+            .ambiguous => |match| .{ .ambiguous = match },
+            .opened => |pending_value| blk: {
+                var pending = pending_value;
+                const view_ref = pending.view();
+                pending.accept();
+                break :blk .{ .opened = view_ref };
+            },
+        };
+    }
+
+    /// Resolve and begin opening without committing a newly provisioned view.
+    /// Callers that attach the view to head-local state can therefore include
+    /// that attachment in the same admission transaction.
+    pub fn beginLocatedTargetOpen(
+        self: *const Services,
+        gpa: std.mem.Allocator,
+        located: semantic.target.Located,
+    ) (ResolveTargetError || OpenTargetError)!PendingLocatedOpenResult {
         try validateLocation(located.location);
         const descriptor = self.targets.get(located.target) orelse return error.StaleTarget;
         if (descriptor.revision != located.revision) return error.StaleTarget;
@@ -281,7 +338,7 @@ pub const Services = struct {
                 .strength = strength,
                 .count = equalStrengthCount(resolution.value.candidates, strength),
             } },
-            .selected => |handler| .{ .opened = try self.openTarget(handler, located) },
+            .selected => |handler| .{ .opened = try self.beginTargetOpen(handler, located) },
         };
     }
 
@@ -293,10 +350,28 @@ pub const Services = struct {
         handler: target_runtime.resolver.HandlerRef,
         located: semantic.target.Located,
     ) OpenTargetError!semantic.view.Ref {
+        var pending = try self.beginTargetOpen(handler, located);
+        pending.accept();
+        return pending.view();
+    }
+
+    /// Begin one exact handler admission. Any error after provider execution
+    /// rejects a provisional result before returning; retained views are never
+    /// destroyed merely because a caller could not admit them.
+    pub fn beginTargetOpen(
+        self: *const Services,
+        handler: target_runtime.resolver.HandlerRef,
+        located: semantic.target.Located,
+    ) OpenTargetError!PendingTargetOpen {
         try validateLocation(located.location);
         const target_descriptor = self.targets.get(located.target) orelse return error.StaleTarget;
         if (target_descriptor.revision != located.revision) return error.StaleTarget;
-        const view_ref = try self.target_handlers.open(handler, located);
+        const handler_before = self.target_handlers.descriptor(handler) orelse return error.StaleHandler;
+        const owner = handler_before.owner;
+        const opened = try self.target_handlers.open(handler, located);
+        var pending: PendingTargetOpen = .{ .services = self, .handler = handler, .result = opened };
+        errdefer pending.reject();
+        const view_ref = opened.view();
         // The callback may have replaced or closed the target while opening.
         const current_target = self.targets.get(located.target) orelse return error.StaleTarget;
         if (current_target.revision != located.revision) return error.StaleTarget;
@@ -304,12 +379,12 @@ pub const Services = struct {
         // opening cannot leave us dereferencing its former descriptor arena.
         const handler_descriptor = self.target_handlers.descriptor(handler) orelse return error.StaleHandler;
         const view_instance = self.views.get(view_ref) orelse return error.StaleView;
-        if (handler_descriptor.owner != view_instance.descriptor.owner)
+        if (handler_descriptor.owner != owner or owner != view_instance.descriptor.owner)
             return error.HandlerOwnerMismatch;
         const view_target = view_instance.descriptor.target orelse return error.ViewTargetMismatch;
         if (!view_target.ref.eql(located.target) or view_target.revision != located.revision)
             return error.ViewTargetMismatch;
-        return view_ref;
+        return pending;
     }
 
     /// Query a named edge published by an independent relation provider. The
@@ -1431,6 +1506,77 @@ test "target opening is revision guarded and confines handlers to their own atta
     var unrelated: Handler = .{ .view = unrelated_view };
     const unrelated_handler = try services.registerTargetHandler(std.testing.allocator, opener, "unrelated", .init(&unrelated));
     try std.testing.expectError(error.ViewTargetMismatch, services.openTarget(unrelated_handler, current.located(.whole)));
+}
+
+test "provisional target opening rolls back admission failures and commits success" {
+    const Handler = struct {
+        services: *Services,
+        owner: semantic.owner.Id,
+        view_target: semantic.target.Ref,
+        last_view: ?semantic.view.Ref = null,
+        accepted: usize = 0,
+        rejected: usize = 0,
+
+        pub fn probe(_: *@This(), _: semantic.target.Descriptor) target_runtime.resolver.ProbeError!?target_runtime.resolver.Strength {
+            return .exact;
+        }
+
+        pub fn open(self: *@This(), _: semantic.target.Located) target_runtime.resolver.OpenError!target_runtime.resolver.OpenResult {
+            const view_ref = self.services.publishView(std.testing.allocator, self.owner, self.view_target, 1, .{
+                .id = @enumFromInt(1),
+                .focusable = true,
+                .content = .{ .label = "provisional" },
+            }) catch return error.Failed;
+            self.last_view = view_ref;
+            return .{ .provisional = view_ref };
+        }
+
+        pub fn settle(self: *@This(), view_ref: semantic.view.Ref, outcome: target_runtime.resolver.AdmissionOutcome) void {
+            switch (outcome) {
+                .accepted => self.accepted += 1,
+                .rejected => {
+                    self.rejected += 1;
+                    _ = self.services.closeView(std.testing.allocator, self.owner, view_ref);
+                },
+            }
+        }
+    };
+
+    var services = Services.init(.here);
+    defer services.deinit(std.testing.allocator);
+    const producer = try services.acquireOwner();
+    const opener = try services.acquireOwner();
+    const requested = try services.publishTarget(std.testing.allocator, producer, .{
+        .kind = .directory,
+        .display_name = "requested",
+    });
+    const unrelated = try services.publishTarget(std.testing.allocator, producer, .{
+        .kind = .directory,
+        .display_name = "unrelated",
+    });
+    const revision = services.targets.get(requested).?.revision;
+    var handler: Handler = .{ .services = &services, .owner = opener, .view_target = unrelated };
+    const handler_ref = try services.registerTargetHandler(
+        std.testing.allocator,
+        opener,
+        "transactional",
+        .initTransactional(&handler),
+    );
+
+    try std.testing.expectError(error.ViewTargetMismatch, services.openTarget(handler_ref, .{
+        .target = requested,
+        .revision = revision,
+    }));
+    try std.testing.expectEqual(@as(usize, 1), handler.rejected);
+    try std.testing.expect(services.views.get(handler.last_view.?) == null);
+
+    handler.view_target = requested;
+    const accepted_view = try services.openTarget(handler_ref, .{
+        .target = requested,
+        .revision = revision,
+    });
+    try std.testing.expectEqual(@as(usize, 1), handler.accepted);
+    try std.testing.expect(services.views.get(accepted_view) != null);
 }
 
 test "semantic open-target actions use the nearest subject and preserve fallback, stale, and provider errors" {

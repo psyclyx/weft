@@ -22,7 +22,29 @@ pub fn initBridge(plugin: *WasmPlugin) plugin_semantic.target.Bridge {
         .context = plugin,
         .invoke_probe = invokeGuestProbe,
         .invoke_open = invokeGuestOpen,
+        .invoke_settle = invokeGuestSettle,
     });
+}
+
+fn invokeGuestSettle(
+    raw: *anyopaque,
+    token: u32,
+    view: semantic.view.Ref,
+    outcome: target_runtime.resolver.AdmissionOutcome,
+) plugin_semantic.target.CallbackError!void {
+    const plugin: *WasmPlugin = @ptrCast(@alignCast(raw));
+    const wire = view.toWire();
+    contract.callOptionalExport(
+        "on_semantic_target_settle",
+        &plugin.instance,
+        .{
+            @as(i32, @bitCast(token)),
+            @as(i32, @bitCast(wire.authority)),
+            @as(i32, @bitCast(wire.slot)),
+            @as(i32, @bitCast(wire.generation)),
+            @as(i32, @intFromEnum(outcome)),
+        },
+    ) catch return error.Failed;
 }
 
 fn invokeGuestProbe(raw: *anyopaque, token: u32) plugin_semantic.target.CallbackError!void {
@@ -129,6 +151,10 @@ pub fn hOpenRespond(data: ?*anyopaque, _: *wasm.Caller, args: []const i32, resul
         0 => {
             const view = wire_util.readHandle(semantic.view.Ref, args[1..4]) orelse return;
             plugin.semantic_targets.respondOpenView(view) catch return;
+        },
+        5 => {
+            const view = wire_util.readHandle(semantic.view.Ref, args[1..4]) orelse return;
+            plugin.semantic_targets.respondOpenProvisional(view) catch return;
         },
         1, 2, 3, 4 => {
             // Error responses carry no ambient payload. Requiring canonical

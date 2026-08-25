@@ -1370,6 +1370,15 @@ pub fn semanticTargetHandlerOpenView(view: semantic.view.Ref) bool {
     return wl_semantic_target_handler_open_respond(0, wire.authority, wire.slot, wire.generation) == 1;
 }
 
+/// Answer an open with a newly provisioned view. The host settles this view
+/// through `on_semantic_target_settle`; rejection means the plugin must undo
+/// every resource created for the attempted open.
+pub fn semanticTargetHandlerOpenProvisional(view: semantic.view.Ref) bool {
+    if (view.generation == 0) return false;
+    const wire = view.toWire();
+    return wl_semantic_target_handler_open_respond(5, wire.authority, wire.slot, wire.generation) == 1;
+}
+
 pub fn semanticTargetHandlerOpenError(err: SemanticTargetOpenError) bool {
     const code: u32 = switch (err) {
         error.StaleTarget => 1,

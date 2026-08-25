@@ -44,6 +44,15 @@ export fn on_semantic_target_open(token: u32) void {
     plugin.targetOpen(token);
 }
 
+export fn on_semantic_target_settle(token: u32, authority: u32, slot: u32, generation: u32, outcome: u32) void {
+    if (generation == 0 or outcome > 1) return;
+    plugin.targetSettle(token, .{
+        .authority = @enumFromInt(authority),
+        .slot = slot,
+        .generation = generation,
+    }, outcome == 0);
+}
+
 export fn on_semantic_relation_query(token: u32) void {
     plugin.relationQuery(token);
 }

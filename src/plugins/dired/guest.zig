@@ -121,7 +121,16 @@ pub const Plugin = struct {
             _ = weft.semanticTargetHandlerOpenError(error.Failed);
             return;
         };
-        _ = weft.semanticTargetHandlerOpenView(session.view_ref);
+        if (!weft.semanticTargetHandlerOpenProvisional(session.view_ref))
+            _ = self.removeSession(session.view_ref);
+    }
+
+    /// Settle only sessions created by a provisional open. Existing retained
+    /// sessions never receive this callback. Rejection rolls the entire tool
+    /// session back, including its view, fields, and child publications.
+    pub fn targetSettle(self: *Plugin, token: u32, view_ref: semantic.view.Ref, accepted: bool) void {
+        if (!self.started or token != 1 or accepted) return;
+        _ = self.removeSession(view_ref);
     }
 
     pub fn relationQuery(self: *Plugin, token: u32) void {
@@ -187,6 +196,17 @@ pub const Plugin = struct {
     fn sessionForView(self: *Plugin, ref: semantic.view.Ref) ?*Session {
         for (self.sessions.items) |session| if (session.view_ref.eql(ref)) return session;
         return null;
+    }
+
+    fn removeSession(self: *Plugin, ref: semantic.view.Ref) bool {
+        for (self.sessions.items, 0..) |session, index| {
+            if (!session.view_ref.eql(ref)) continue;
+            _ = self.sessions.swapRemove(index);
+            session.deinit();
+            self.gpa.destroy(session);
+            return true;
+        }
+        return false;
     }
 
     fn allocateFieldToken(self: *Plugin) !u32 {

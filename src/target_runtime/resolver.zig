@@ -12,6 +12,22 @@ pub const Strength = semantic.target.Match;
 pub const ProbeError = error{ Unavailable, InvalidTarget, Failed };
 pub const OpenError = error{ StaleTarget, Unavailable, Rejected, Failed };
 
+/// A handler may return a view it already retains, or provision a new view
+/// whose lifetime is not committed until core admits and attaches it.  Core
+/// never guesses from view identity whether rollback is safe.
+pub const OpenResult = union(enum) {
+    retained: semantic.view.Ref,
+    provisional: semantic.view.Ref,
+
+    pub fn view(self: OpenResult) semantic.view.Ref {
+        return switch (self) {
+            inline else => |ref| ref,
+        };
+    }
+};
+
+pub const AdmissionOutcome = enum { accepted, rejected };
+
 pub const Provider = struct {
     context: *anyopaque,
     vtable: *const VTable,
@@ -24,7 +40,10 @@ pub const Provider = struct {
         /// Open the exact revision and provider-owned location supplied by
         /// the caller.  The resolver never turns a local path, remote URI, or
         /// synthetic node into a special core case.
-        open: *const fn (*anyopaque, semantic.target.Located) OpenError!semantic.view.Ref,
+        open: *const fn (*anyopaque, semantic.target.Located) OpenError!OpenResult,
+        /// Settle a provisional result. Retained results never reach this
+        /// callback; accepting or rejecting them does not change ownership.
+        settle: *const fn (*anyopaque, semantic.view.Ref, AdmissionOutcome) void,
     };
 
     pub fn init(pointer: anytype) Provider {
@@ -43,10 +62,40 @@ pub const Provider = struct {
             fn probe(raw: *anyopaque, descriptor: semantic.target.Descriptor) ProbeError!?Strength {
                 return self(raw).probe(descriptor);
             }
-            fn open(raw: *anyopaque, located: semantic.target.Located) OpenError!semantic.view.Ref {
+            fn open(raw: *anyopaque, located: semantic.target.Located) OpenError!OpenResult {
+                return .{ .retained = try self(raw).open(located) };
+            }
+            fn settle(_: *anyopaque, _: semantic.view.Ref, _: AdmissionOutcome) void {}
+            const vtable: VTable = .{ .probe = @This().probe, .open = @This().open, .settle = @This().settle };
+        };
+        return .{ .context = pointer, .vtable = &Adapter.vtable };
+    }
+
+    /// Opt into two-phase admission. The implementation returns an explicit
+    /// retained/provisional result and owns settlement of provisional views.
+    pub fn initTransactional(pointer: anytype) Provider {
+        const Pointer = @TypeOf(pointer);
+        const pointer_info = switch (@typeInfo(Pointer)) {
+            .pointer => |info| info,
+            else => @compileError("target handler must be initialized from a pointer"),
+        };
+        if (pointer_info.size != .one or pointer_info.is_const)
+            @compileError("target handler requires a mutable single-item pointer");
+        const Implementation = pointer_info.child;
+        const Adapter = struct {
+            fn self(raw: *anyopaque) *Implementation {
+                return @ptrCast(@alignCast(raw));
+            }
+            fn probe(raw: *anyopaque, descriptor: semantic.target.Descriptor) ProbeError!?Strength {
+                return self(raw).probe(descriptor);
+            }
+            fn open(raw: *anyopaque, located: semantic.target.Located) OpenError!OpenResult {
                 return self(raw).open(located);
             }
-            const vtable: VTable = .{ .probe = @This().probe, .open = @This().open };
+            fn settle(raw: *anyopaque, view_ref: semantic.view.Ref, outcome: AdmissionOutcome) void {
+                self(raw).settle(view_ref, outcome);
+            }
+            const vtable: VTable = .{ .probe = @This().probe, .open = @This().open, .settle = @This().settle };
         };
         return .{ .context = pointer, .vtable = &Adapter.vtable };
     }
@@ -55,8 +104,15 @@ pub const Provider = struct {
         return self.vtable.probe(self.context, descriptor);
     }
 
-    pub fn open(self: Provider, located: semantic.target.Located) OpenError!semantic.view.Ref {
+    pub fn open(self: Provider, located: semantic.target.Located) OpenError!OpenResult {
         return self.vtable.open(self.context, located);
+    }
+
+    pub fn settle(self: Provider, result: OpenResult, outcome: AdmissionOutcome) void {
+        switch (result) {
+            .retained => {},
+            .provisional => |view_ref| self.vtable.settle(self.context, view_ref, outcome),
+        }
     }
 };
 
@@ -252,9 +308,15 @@ pub const Registry = struct {
         return owned;
     }
 
-    pub fn open(self: *const Registry, ref: HandlerRef, located: semantic.target.Located) (Error || OpenError)!semantic.view.Ref {
+    pub fn open(self: *const Registry, ref: HandlerRef, located: semantic.target.Located) (Error || OpenError)!OpenResult {
         const handler = self.lookup(ref) orelse return error.StaleHandler;
         return handler.provider.open(located);
+    }
+
+    pub fn settle(self: *const Registry, ref: HandlerRef, result: OpenResult, outcome: AdmissionOutcome) bool {
+        const handler = self.lookup(ref) orelse return false;
+        handler.provider.settle(result, outcome);
+        return true;
     }
 
     fn lookup(self: *const Registry, ref: HandlerRef) ?*const Instance {

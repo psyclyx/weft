@@ -441,10 +441,11 @@ pub const exports = [_]Export{
     .{ .name = "on_semantic_action", .params = &.{}, .results = &.{}, .required = false, .doc = "answer one semantic action synchronously using the current canonical request" },
     .{ .name = "on_semantic_target_probe", .params = &.{.i32}, .results = &.{}, .required = false, .doc = "probe one immutable target descriptor for a tokenized handler" },
     .{ .name = "on_semantic_target_open", .params = &.{.i32}, .results = &.{}, .required = false, .doc = "open one revision-stamped located target through a tokenized handler" },
+    .{ .name = "on_semantic_target_settle", .params = &.{ .i32, .i32, .i32, .i32, .i32 }, .results = &.{}, .required = false, .doc = "settle one provisional target view after core admission and focus" },
     .{ .name = "on_semantic_relation_query", .params = &.{.i32}, .results = &.{}, .required = false, .doc = "answer one tokenized named-relation query synchronously" },
 };
 
-const expected_export_count = 16;
+const expected_export_count = 17;
 
 comptime {
     @setEvalBranchQuota(50_000); // the O(n²) duplicate-name scans below, n≈124

@@ -17,6 +17,7 @@ pub const Callback = struct {
     context: *anyopaque,
     invoke_probe: *const fn (*anyopaque, u32) CallbackError!void,
     invoke_open: *const fn (*anyopaque, u32) CallbackError!void,
+    invoke_settle: ?*const fn (*anyopaque, u32, semantic.view.Ref, resolver.AdmissionOutcome) CallbackError!void = null,
 };
 
 pub const Error = resolver.Error || error{
@@ -40,6 +41,7 @@ const Response = union(enum) {
     probe_match: semantic.target.Match,
     probe_error: resolver.ProbeError,
     open_view: semantic.view.Ref,
+    open_provisional: semantic.view.Ref,
     open_error: resolver.OpenError,
 };
 
@@ -67,16 +69,22 @@ const Proxy = struct {
         };
     }
 
-    pub fn open(self: *Proxy, located: semantic.target.Located) resolver.OpenError!semantic.view.Ref {
+    pub fn open(self: *Proxy, located: semantic.target.Located) resolver.OpenError!resolver.OpenResult {
         self.bridge.begin(.open, scene_codec.target.encodeLocated(self.bridge.gpa, located) catch return error.Failed) catch return error.Failed;
         defer self.bridge.end();
         self.bridge.callback.invoke_open(self.bridge.callback.context, self.token) catch return error.Failed;
         const response = self.bridge.current.?.response orelse return error.Failed;
         return switch (response) {
-            .open_view => |view| view,
+            .open_view => |view| .{ .retained = view },
+            .open_provisional => |view| .{ .provisional = view },
             .open_error => |err| err,
             else => error.Failed,
         };
+    }
+
+    pub fn settle(self: *Proxy, view_ref: semantic.view.Ref, outcome: resolver.AdmissionOutcome) void {
+        const callback = self.bridge.callback.invoke_settle orelse return;
+        callback(self.bridge.callback.context, self.token, view_ref, outcome) catch {};
     }
 };
 
@@ -115,7 +123,7 @@ pub const Bridge = struct {
         const proxy = try self.gpa.create(Proxy);
         errdefer self.gpa.destroy(proxy);
         proxy.* = .{ .bridge = self, .token = token };
-        const ref = try registry.register(self.gpa, owner, id, .init(proxy));
+        const ref = try registry.register(self.gpa, owner, id, .initTransactional(proxy));
         errdefer _ = registry.unregister(self.gpa, ref);
         proxy.ref = ref;
         try self.proxies.append(self.gpa, proxy);
@@ -153,6 +161,11 @@ pub const Bridge = struct {
     pub fn respondOpenView(self: *Bridge, view: semantic.view.Ref) ResponseError!void {
         if (view.generation == 0) return error.InvalidView;
         try self.setResponse(.open, .{ .open_view = view });
+    }
+
+    pub fn respondOpenProvisional(self: *Bridge, view: semantic.view.Ref) ResponseError!void {
+        if (view.generation == 0) return error.InvalidView;
+        try self.setResponse(.open, .{ .open_provisional = view });
     }
 
     pub fn respondOpenError(self: *Bridge, err: resolver.OpenError) ResponseError!void {
@@ -230,7 +243,7 @@ test "sandbox target bridge carries canonical probes and typed opens" {
     var resolution = try registry.resolve(std.testing.allocator, descriptor);
     defer resolution.deinit();
     try std.testing.expectEqual(resolver.Strength.exact, resolution.value.candidates[0].strength);
-    try std.testing.expectEqual(view, try registry.open(handler, .{ .target = descriptor.ref, .revision = 4 }));
+    try std.testing.expectEqual(view, (try registry.open(handler, .{ .target = descriptor.ref, .revision = 4 })).view());
     try std.testing.expectEqual(@as(usize, 1), fixture.probes);
     try std.testing.expectEqual(@as(usize, 1), fixture.opens);
     try bridge.remove(&registry, handler);
@@ -266,4 +279,56 @@ test "sandbox target bridge rejects reentrancy wrong phases and duplicate tokens
     _ = try bridge.register(&registry, owner, 1, "one");
     try std.testing.expectError(error.DuplicateToken, bridge.register(&registry, owner, 1, "two"));
     try std.testing.expectError(error.NotInFlight, bridge.respondProbeNone());
+}
+
+test "sandbox target bridge settles provisional views through the owning token" {
+    const Fixture = struct {
+        bridge: *Bridge = undefined,
+        view: semantic.view.Ref,
+        settlements: usize = 0,
+        last_outcome: ?resolver.AdmissionOutcome = null,
+
+        fn probe(raw: *anyopaque, _: u32) CallbackError!void {
+            const self: *@This() = @ptrCast(@alignCast(raw));
+            self.bridge.respondProbeMatch(.exact) catch return error.Failed;
+        }
+
+        fn open(raw: *anyopaque, _: u32) CallbackError!void {
+            const self: *@This() = @ptrCast(@alignCast(raw));
+            self.bridge.respondOpenProvisional(self.view) catch return error.Failed;
+        }
+
+        fn settle(raw: *anyopaque, token: u32, view_ref: semantic.view.Ref, outcome: resolver.AdmissionOutcome) CallbackError!void {
+            const self: *@This() = @ptrCast(@alignCast(raw));
+            if (token != 9 or !view_ref.eql(self.view)) return error.Failed;
+            self.settlements += 1;
+            self.last_outcome = outcome;
+        }
+    };
+
+    const owner: semantic.owner.Id = @enumFromInt(1);
+    const view: semantic.view.Ref = .{ .authority = .here, .slot = 2, .generation = 1 };
+    var fixture: Fixture = .{ .view = view };
+    var bridge = Bridge.init(std.testing.allocator, .{
+        .context = &fixture,
+        .invoke_probe = Fixture.probe,
+        .invoke_open = Fixture.open,
+        .invoke_settle = Fixture.settle,
+    });
+    defer bridge.deinit();
+    fixture.bridge = &bridge;
+    var registry = resolver.Registry.init(.here);
+    defer registry.deinit(std.testing.allocator);
+    const handler = try bridge.register(&registry, owner, 9, "transactional");
+    const descriptor: semantic.target.Descriptor = .{
+        .ref = .{ .authority = .here, .slot = 1, .generation = 1 },
+        .revision = 1,
+        .kind = .directory,
+        .display_name = "directory",
+    };
+    const opened = try registry.open(handler, .{ .target = descriptor.ref, .revision = descriptor.revision });
+    try std.testing.expect(opened == .provisional);
+    try std.testing.expect(registry.settle(handler, opened, .rejected));
+    try std.testing.expectEqual(@as(usize, 1), fixture.settlements);
+    try std.testing.expectEqual(resolver.AdmissionOutcome.rejected, fixture.last_outcome.?);
 }

@@ -84,14 +84,18 @@ fn admitAndFocus(
     located: semantic_model.target.Located,
     preferred: ?semantic_model.scene.NodeId,
 ) Error!Result {
-    return switch (try services.openLocatedTarget(gpa, located)) {
+    return switch (try services.beginLocatedTargetOpen(gpa, located)) {
         .no_handler => .no_handler,
         .ambiguous => |match| .{ .ambiguous = .{
             .strength = match.strength,
             .count = match.count,
         } },
-        .opened => |view| blk: {
+        .opened => |pending_value| blk: {
+            var pending = pending_value;
+            errdefer pending.reject();
+            const view = pending.view();
             const node = try services.focusView(head, gpa, view, preferred);
+            pending.accept();
             break :blk .{ .opened = .{ .view = view, .node = node } };
         },
     };
@@ -196,6 +200,68 @@ test "generic target opening distinguishes none, ambiguity, and focus" {
     const ambiguous = try openAndFocus(&services, &head, std.testing.allocator, target);
     try std.testing.expectEqual(@as(usize, 2), ambiguous.ambiguous.count);
     try std.testing.expectEqual(Match.exact, ambiguous.ambiguous.strength);
+}
+
+test "focus allocation failure rejects a provisional target view" {
+    const semantic = semantic_model;
+    const Handler = struct {
+        services: *Services,
+        owner: semantic.owner.Id,
+        target: semantic.target.Ref,
+        opens: usize = 0,
+        rejected: usize = 0,
+
+        pub fn probe(_: *@This(), _: semantic.target.Descriptor) target_runtime.resolver.ProbeError!?Match {
+            return .exact;
+        }
+
+        pub fn open(self: *@This(), _: semantic.target.Located) target_runtime.resolver.OpenError!target_runtime.resolver.OpenResult {
+            const view_ref = self.services.publishView(std.testing.allocator, self.owner, self.target, 1, .{
+                .id = @enumFromInt(1),
+                .focusable = true,
+                .content = .{ .label = "provisional" },
+            }) catch return error.Failed;
+            self.opens += 1;
+            return .{ .provisional = view_ref };
+        }
+
+        pub fn settle(self: *@This(), view_ref: semantic.view.Ref, outcome: target_runtime.resolver.AdmissionOutcome) void {
+            if (outcome == .rejected) {
+                self.rejected += 1;
+                _ = self.services.closeView(std.testing.allocator, self.owner, view_ref);
+            }
+        }
+    };
+
+    var services = Services.init(.here);
+    defer services.deinit(std.testing.allocator);
+    const owner = try services.acquireOwner();
+    const target = try services.publishTarget(std.testing.allocator, owner, .{
+        .kind = .directory,
+        .display_name = "directory",
+    });
+    var handler: Handler = .{ .services = &services, .owner = owner, .target = target };
+    _ = try services.registerTargetHandler(std.testing.allocator, owner, "transactional", .initTransactional(&handler));
+    var head: Head = .empty;
+    defer head.deinit(std.testing.allocator);
+
+    var observed_focus_failure = false;
+    for (0..32) |fail_index| {
+        var failing = std.testing.FailingAllocator.init(std.testing.allocator, .{ .fail_index = fail_index });
+        const opens_before = handler.opens;
+        const rejected_before = handler.rejected;
+        _ = openAndFocus(&services, &head, failing.allocator(), target) catch |err| {
+            if (err != error.OutOfMemory) return err;
+            if (handler.opens != opens_before) {
+                try std.testing.expectEqual(rejected_before + 1, handler.rejected);
+                observed_focus_failure = true;
+                break;
+            }
+            continue;
+        };
+        break;
+    }
+    try std.testing.expect(observed_focus_failure);
 }
 
 test "focused target opening prefers the nearest revision-stamped scene link" {
