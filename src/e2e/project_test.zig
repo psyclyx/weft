@@ -442,8 +442,7 @@ test "e2e/spine: write a file, init a repo, stage and commit — all through wef
     // peers instead navigate independently to named slots, then replace those
     // distinct ranges concurrently through their own Vim surfaces.
     ed.press("i", "");
-    proj.typeText(
-        &ed,
+    ed.typeText(
         "const helper = @import(\"helper.zig\");\n\npub fn main() void {\n    ALICE_SLOT\n    BOB_SLOT\n}\n",
     );
     ed.press("Escape", "");
@@ -465,12 +464,12 @@ test "e2e/spine: write a file, init a repo, stage and commit — all through wef
     proj.capture(&ed, "spine-collaboration-scaffold");
 
     ed.press("/", "");
-    proj.typeText(&ed, "ALICE_SLOT");
+    ed.typeText("ALICE_SLOT");
     ed.press("Return", "");
     ed.press("c", "");
     ed.press("w", "");
     mirror.press("/", "");
-    proj.typeText(&mirror, "BOB_SLOT");
+    mirror.typeText("BOB_SLOT");
     mirror.press("Return", "");
     mirror.press("c", "");
     mirror.press("w", "");
@@ -575,7 +574,7 @@ test "e2e/spine: write a file, init a repo, stage and commit — all through wef
     // narrative gets the real tree-sitter attachment and the real LSP
     // capability/request path through one hermetic peer.
     for (language_support.cases) |c| {
-        try language_support.authorAndCheckSyntax(&proj, &ed, c);
+        try language_support.authorAndCheckSyntax(&ed, c);
         try language_support.assertLsp(&proj, &ed, c, hermetic_lsp);
         proj.capture(&ed, c.name);
     }
@@ -598,12 +597,12 @@ test "e2e/spine: write a file, init a repo, stage and commit — all through wef
     // and accept the existing buffer, then use the ordinary Vim search to
     // navigate within it.
     ed.chord("SPC ,");
-    proj.typeText(&ed, "main.zig");
+    ed.typeText("main.zig");
     proj.capture(&ed, "spine-buffer-picker");
     ed.press("Return", "");
     try t.expectEqualStrings("main.zig", ed.bufferName());
     ed.press("/", "");
-    proj.typeText(&ed, "helper");
+    ed.typeText("helper");
     ed.press("Return", "");
     {
         const text = try ed.textAlloc();
@@ -629,7 +628,7 @@ test "e2e/spine: write a file, init a repo, stage and commit — all through wef
     ed.run("buf-scratch");
     ed.press("i", "");
     ed.press("parenleft", "(");
-    proj.typeText(&ed, "autopair");
+    ed.typeText("autopair");
     ed.press("Escape", "");
     {
         const scratch = try ed.textAlloc();
@@ -646,7 +645,7 @@ test "e2e/spine: write a file, init a repo, stage and commit — all through wef
     ed.runStr("insert-shell", "printf shell-plugin");
     try t.expect(drainBufferContains(&ed, "shell-plugin"));
     ed.press("o", "");
-    proj.typeText(&ed, "41");
+    ed.typeText("41");
     ed.press("Escape", "");
     ed.press("0", "");
     ed.press("C-a", "");
@@ -729,7 +728,7 @@ test "e2e/spine: write a file, init a repo, stage and commit — all through wef
     ed.runStr("open", "main.zig");
     ed.chord("SPC o c");
     ed.press("i", "");
-    proj.typeText(&ed, "printf console-ok");
+    ed.typeText("printf console-ok");
     ed.press("Escape", "");
     ed.run("console-send");
     try t.expect(drainToolContains(&ed, "*console*", "console-ok"));
@@ -808,7 +807,7 @@ test "e2e/spine: write a file, init a repo, stage and commit — all through wef
     ed.runStr("open", "rename-dir");
     ed.press("i", "");
     for (0..7) |_| ed.press("Delete", "");
-    proj.typeText(&ed, "new.txt");
+    ed.typeText("new.txt");
     ed.press("Escape", "");
     var rename_field = ed.head.semantic_focus.path().?.field.?;
     var renamed = try ed.session.system.semantic.fields.get(rename_field).?.snapshot(gpa);
@@ -817,7 +816,7 @@ test "e2e/spine: write a file, init a repo, stage and commit — all through wef
     // :e! is the generic view.revert action. It restores the provider draft,
     // including its original field identity, without applying anything.
     ed.press("colon", "");
-    proj.typeText(&ed, "e!");
+    ed.typeText("e!");
     ed.press("Return", "");
     try t.expectEqualStrings("normal", ed.mode());
     rename_field = ed.head.semantic_focus.path().?.field.?;
@@ -831,7 +830,7 @@ test "e2e/spine: write a file, init a repo, stage and commit — all through wef
         .selection_after = .{ .anchor = 0, .caret = 0 },
     });
     ed.press("i", "");
-    proj.typeText(&ed, "new.txt");
+    ed.typeText("new.txt");
     ed.press("Escape", "");
     proj.capture(&ed, "spine-dired-rename-plan");
     ed.chord("SPC v a");
@@ -854,15 +853,15 @@ test "e2e/spine: write a file, init a repo, stage and commit — all through wef
     try t.expectEqual(@as(usize, 0), ed.session.system.semantic.views.get(create_view).?.scene.content.container.children.len);
     ed.chord("SPC v n");
     ed.press("i", "");
-    proj.typeText(&ed, "made.txt");
+    ed.typeText("made.txt");
     ed.press("Escape", "");
     ed.chord("SPC v m");
     ed.press("i", "");
-    proj.typeText(&ed, "0600");
+    ed.typeText("0600");
     ed.press("Escape", "");
     ed.chord("SPC v N");
     ed.press("i", "");
-    proj.typeText(&ed, "made-dir");
+    ed.typeText("made-dir");
     ed.press("Escape", "");
     proj.capture(&ed, "spine-dired-create-plan");
     ed.chord("SPC v a");
@@ -927,7 +926,7 @@ test "e2e/spine: write a file, init a repo, stage and commit — all through wef
         .selection_after = .{ .anchor = 0, .caret = 0 },
     });
     ed.press("i", "");
-    proj.typeText(&ed, "draft.txt");
+    ed.typeText("draft.txt");
     ed.press("Escape", "");
     _ = try proj.oracle("mv -- refresh-dir/a-dirty.txt refresh-dir/external.txt");
     core.file.deleteFile(gpa, "refresh-dir/z-clean.txt");
@@ -993,7 +992,7 @@ test "e2e/spine: write a file, init a repo, stage and commit — all through wef
     ed.press("c", ""); // git-commit-dispatch (menu)
     ed.press("c", ""); // git-commit → *git-commit* buffer, mode git-commit
     try t.expectEqualStrings("git-commit", ed.mode());
-    proj.typeText(&ed, "initial commit: weft demo skeleton");
+    ed.typeText("initial commit: weft demo skeleton");
     {
         const msg = try ed.textAlloc();
         defer gpa.free(msg);

@@ -29,10 +29,10 @@ pub fn waitForTree(ed: *h.Editor, syn: *h.core.syntax.Syntax) bool {
     return false;
 }
 
-pub fn authorAndCheckSyntax(proj: *h.Project, ed: *h.Editor, c: Case) !void {
+pub fn authorAndCheckSyntax(ed: *h.Editor, c: Case) !void {
     ed.runStr("open", c.path);
     ed.press("i", "");
-    proj.typeText(ed, c.source);
+    ed.typeText(c.source);
     ed.press("Escape", "");
     ed.run("save");
     ed.waitSave();

@@ -228,15 +228,18 @@ The output is 1920×600 at 30 fps by default, with two complete 960×600 editors
 composed side-by-side in one synchronized capture operation. The collaboration
 segment uses an authenticated localhost TCP connection, fresh in-memory keys
 for both peers, and deterministic 25–120 ms one-way transport latency. The demo
-types at 110 ms per character, holds ordinary milestones for 1500 ms, and rests
-for 2500 ms at important collaboration beats. Ordinary tests use the same
-scenario with no injected pacing or network latency.
+types at 110 ms per character, holds command keys for 500 ms, holds ordinary
+milestones for 1500 ms, and rests for 2500 ms at important collaboration beats.
+Each key in a chord gets its own complete application wake and recorded hold,
+so delayed prefix UI such as which-key is visible before the leaf action runs.
+Ordinary tests use the same scenario with no injected pacing or network latency.
 
 Tune the recording without changing the scenario:
 
 ```sh
 WEFT_E2E_VIDEO=/tmp/weft-spine.mp4 \
 WEFT_E2E_VIDEO_FPS=30 WEFT_E2E_TYPING_MS=140 \
+WEFT_E2E_COMMAND_MS=700 \
 WEFT_E2E_LINGER_MS=1800 WEFT_E2E_REST_MS=3000 \
 WEFT_E2E_TRANSPORT_BASE_MS=30 WEFT_E2E_TRANSPORT_JITTER_MS=140 \
   zig build e2e-demo --summary all

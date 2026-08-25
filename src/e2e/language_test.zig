@@ -12,7 +12,7 @@ test "e2e/languages: every spine language activates its pinned tree-sitter gramm
     defer app.deinit();
     for (lang.cases) |c| {
         try t.expect(app.ed.prov.grammars.forPath(c.path) != null);
-        try lang.authorAndCheckSyntax(&app.proj, &app.ed, c);
+        try lang.authorAndCheckSyntax(&app.ed, c);
     }
 }
 

@@ -46,6 +46,17 @@ pub const view = view_mod; // the View/Built/Hud package, for popup-layout intro
 const Allocator = std.mem.Allocator;
 const command = core.command;
 
+const InputKind = enum { text, command };
+
+const InputObserver = struct {
+    context: *anyopaque,
+    after_input: *const fn (*anyopaque, InputKind) void,
+
+    fn notify(self: InputObserver, kind: InputKind) void {
+        self.after_input(self.context, kind);
+    }
+};
+
 /// The authoritative editor capture canvas. The production frame, Vulkan
 /// target, readback, ordinary PPMs, and each half of the demo video all use
 /// this size. Keep the aspect ratio stable while giving the recorded editor
@@ -121,6 +132,10 @@ pub const Editor = struct {
     frame_collab_session: ?*core.session.Session = null,
     frame_partial_state: ?core.session.PartialDoc = null,
     frame_noted_host_fp: ?[24]u8 = null,
+    /// Optional caller-side observation of completed input wakes. Production
+    /// has no such hook; the demo recorder uses it only to pace the same input
+    /// stream an ordinary E2E test drives.
+    input_observer: ?InputObserver = null,
 
     // ── Window layout (multi-pane) ──
     /// The recursive pane tree, driven by the REAL window-layout commands
@@ -154,6 +169,7 @@ pub const Editor = struct {
         self.frame_collab_session = null;
         self.frame_partial_state = null;
         self.frame_noted_host_fp = null;
+        self.input_observer = null;
         self.vulkan_head = null;
         self.pool = try core.task.Pool.init(gpa, .{ .threads = 2 });
         self.engine = try core.wasm.Engine.init();
@@ -327,6 +343,9 @@ pub const Editor = struct {
         // One injected event is one headless application wake. The lifecycle
         // work stays outside the dispatch-only latency measurement above.
         _ = self.advanceAt(core.task.nowNs(), false) catch {};
+        if (self.input_observer) |observer| {
+            observer.notify(if (text.len == 0) .command else .text);
+        }
         return elapsed;
     }
 
@@ -343,8 +362,7 @@ pub const Editor = struct {
     /// SPC→g→i. Non-printable by definition (leader keys), so no text.
     pub fn chord(self: *Editor, seq: []const u8) void {
         var it = std.mem.tokenizeScalar(u8, seq, ' ');
-        while (it.next()) |k| _ = self.inputTimed(k, "");
-        _ = self.advanceAt(core.task.nowNs(), false) catch {};
+        while (it.next()) |k| self.press(k, "");
     }
 
     /// Type a run of text the way a person does — one KEYSTROKE at a time through
@@ -359,15 +377,14 @@ pub const Editor = struct {
             const n = std.unicode.utf8ByteSequenceLength(s[i]) catch 1;
             const ch = s[i..@min(i + n, s.len)];
             if (ch.len == 1 and ch[0] == '\n') {
-                _ = self.inputTimed("Return", "\n");
+                self.press("Return", "\n");
             } else if (ch.len == 1 and ch[0] == '\t') {
-                _ = self.inputTimed("Tab", "\t");
+                self.press("Tab", "\t");
             } else {
-                _ = self.inputTimed(ch, ch);
+                self.press(ch, ch);
             }
             i += ch.len;
         }
-        _ = self.advanceAt(core.task.nowNs(), false) catch {};
     }
 
     /// Run a command by name (a startup action, or a "menu leaf" invoked directly).
@@ -1332,7 +1349,9 @@ pub const Project = struct {
     demo_left: ?*Editor = null,
     demo_right: ?*Editor = null,
     demo_frame_hook: ?DemoFrameHook = null,
+    input_pacing_suspended: bool = false,
     typing_ms: u32 = 110,
+    command_ms: u32 = 500,
     linger_ms: u32 = 1500,
     rest_ms: u32 = 2500,
 
@@ -1342,6 +1361,11 @@ pub const Project = struct {
         self.demo_left = null;
         self.demo_right = null;
         self.demo_frame_hook = null;
+        self.input_pacing_suspended = false;
+        self.typing_ms = 110;
+        self.command_ms = 500;
+        self.linger_ms = 1500;
+        self.rest_ms = 2500;
         self.prev_cwd = try getCwdAlloc(gpa);
         errdefer gpa.free(self.prev_cwd);
         // A real isolated dir in the system tmp — NOT under this repo — so the
@@ -1356,6 +1380,7 @@ pub const Project = struct {
             if (requested_path.len != 0) {
                 self.video = try VideoRecorder.init(gpa, requested_path, self.prev_cwd);
                 self.typing_ms = envU32("WEFT_E2E_TYPING_MS", 110, 0, 2000);
+                self.command_ms = envU32("WEFT_E2E_COMMAND_MS", 500, 0, 5000);
                 self.linger_ms = envU32("WEFT_E2E_LINGER_MS", 1500, 0, 10000);
                 self.rest_ms = envU32("WEFT_E2E_REST_MS", 2500, 0, 10000);
             }
@@ -1375,6 +1400,23 @@ pub const Project = struct {
         try right.enableHeadlessVulkan();
         self.demo_left = left;
         self.demo_right = right;
+        if (self.demoEnabled()) {
+            const observer: InputObserver = .{
+                .context = self,
+                .after_input = observeDemoInput,
+            };
+            left.input_observer = observer;
+            right.input_observer = observer;
+        }
+    }
+
+    fn observeDemoInput(raw: *anyopaque, kind: InputKind) void {
+        const self: *Project = @ptrCast(@alignCast(raw));
+        if (self.input_pacing_suspended) return;
+        self.delay(switch (kind) {
+            .text => self.typing_ms,
+            .command => self.command_ms,
+        });
     }
 
     /// Add a scenario-owned participant to the synchronized capture clock.
@@ -1513,23 +1555,6 @@ pub const Project = struct {
         }
     }
 
-    /// Type through the same Editor implementation, adding only demo cadence
-    /// and frame emission when recording is active.
-    pub fn typeText(self: *Project, ed: *Editor, text: []const u8) void {
-        if (!self.demoEnabled() or self.demo_left == null or self.demo_right == null) {
-            ed.typeText(text);
-            return;
-        }
-        var i: usize = 0;
-        while (i < text.len) {
-            const n = std.unicode.utf8ByteSequenceLength(text[i]) catch 1;
-            const ch = text[i..@min(i + n, text.len)];
-            ed.typeText(ch);
-            self.delay(self.typing_ms);
-            i += ch.len;
-        }
-    }
-
     /// Drive two independent editor heads at the same logical cadence. Each
     /// peer dispatches at most one Unicode scalar before the collaboration
     /// clock and synchronized renderer advance. Normal tests execute the same
@@ -1544,6 +1569,7 @@ pub const Project = struct {
         var left_i: usize = 0;
         var right_i: usize = 0;
         while (left_i < left_text.len or right_i < right_text.len) {
+            self.input_pacing_suspended = true;
             if (left_i < left_text.len) {
                 const n = std.unicode.utf8ByteSequenceLength(left_text[left_i]) catch 1;
                 const ch = left_text[left_i..@min(left_i + n, left_text.len)];
@@ -1556,6 +1582,7 @@ pub const Project = struct {
                 right.typeText(ch);
                 right_i += ch.len;
             }
+            self.input_pacing_suspended = false;
             self.delay(self.typing_ms);
         }
     }
