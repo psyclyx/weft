@@ -40,6 +40,46 @@ const tmpPath = h.tmpPath;
 const socketPair = h.socketPair;
 const napUs = h.napUs;
 
+/// Compare only the editor body of two completed production frames. The tab
+/// strip and status line are excluded so a mode/position label cannot make a
+/// missing remote caret look rendered.
+fn bodyPixelsDiffer(before: []const u8, after: []const u8) bool {
+    if (before.len != after.len or before.len != @as(usize, h.app_w) * h.app_h * 4) return false;
+    const stride = @as(usize, h.app_w) * 4;
+    var changed: usize = 0;
+    var y: usize = 28;
+    while (y < h.app_h - 52) : (y += 1) {
+        const start = y * stride;
+        for (before[start .. start + stride], after[start .. start + stride]) |a, b| {
+            changed += @intFromBool(a != b);
+        }
+    }
+    // A two-pixel presence bar across one text row changes dozens of channel
+    // bytes. Keep the floor above antialiasing noise but far below a caret.
+    return changed >= 16;
+}
+
+/// Move `mover` through ordinary configured Vim input and require that the
+/// other editor's completed framebuffer changes in its body. No layer,
+/// cursor, scene, or renderer internals are inspected: if remote presence is
+/// dropped anywhere before pixels, this cannot pass.
+fn expectRemoteCaretMoveRendered(link: *Loopback, observer: *Editor, mover: *Editor, key: []const u8) !void {
+    const before = try observer.renderComposite();
+    defer observer.gpa.free(before);
+    mover.press(key, "");
+
+    const deadline = core.task.nowNs() + 5 * std.time.ns_per_s;
+    while (core.task.nowNs() < deadline) {
+        try link.tick();
+        const after = try observer.renderComposite();
+        const visible = bodyPixelsDiffer(before, after);
+        observer.gpa.free(after);
+        if (visible) return;
+        napUs(300);
+    }
+    return error.RemoteCaretMissingFromFrame;
+}
+
 // This is intentionally the plugin inventory from the shipped config, not a
 // hand-picked test fixture. The spine checks that config.js requested every
 // entry and that every non-JS entry loaded successfully. `dap.js` is retained
@@ -416,7 +456,13 @@ test "e2e/spine: write a file, init a repo, stage and commit — all through wef
     };
     try t.expect(try link.pumpUntil(SpineConverged{ .a = &ed, .b = &mirror }, SpineConverged.pred));
     try t.expect(collab_clock.tick_error == null);
-    ed.press("j", "");
+    // Deliberately separate the two carets before recording. Each peer then
+    // moves once while the OTHER peer's completed pixels are observed. This
+    // is the visual gate the old hand-built capture path failed: one local
+    // cursor cannot satisfy either cross-peer framebuffer change.
+    ed.press("g", "");
+    ed.press("g", "");
+    mirror.press("G", "");
     const Presence = struct { link: *Loopback };
     try t.expect(try link.pumpUntil(Presence{ .link = &link }, struct {
         fn pred(c: Presence) bool {
@@ -426,6 +472,8 @@ test "e2e/spine: write a file, init a repo, stage and commit — all through wef
             return false;
         }
     }.pred));
+    try expectRemoteCaretMoveRendered(&link, &ed, &mirror, "k");
+    try expectRemoteCaretMoveRendered(&link, &mirror, &ed, "j");
     ed.run("save");
     ed.waitSave();
 
@@ -439,11 +487,6 @@ test "e2e/spine: write a file, init a repo, stage and commit — all through wef
 
     proj.capture(&ed, "spine-collaboration");
     try t.expect(collab_clock.tick_error == null);
-    // The assertion is intentionally against the final paired image. Both
-    // halves must contain collaboration-dependent pixels; this catches a
-    // passive mirror or a recorder that silently drops Bob's rendered state
-    // without reaching into either editor's presence/layer representation.
-    try t.expect(proj.last_pair_has_distinct_pixels);
 
     // Leave the shared document before switching either peer to another file;
     // the collab transport is explicitly scoped to the paired document.

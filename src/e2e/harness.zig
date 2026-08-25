@@ -1180,10 +1180,6 @@ pub const Project = struct {
     video: ?VideoRecorder = null,
     demo_left: ?*Editor = null,
     demo_right: ?*Editor = null,
-    /// Pixel-level evidence from the most recent paired capture. This is
-    /// deliberately about the submitted image only; it does not expose or
-    /// inspect editor layers, caret state, or semantic nodes.
-    last_pair_has_distinct_pixels: bool = false,
     demo_frame_hook: ?DemoFrameHook = null,
     typing_ms: u32 = 75,
     linger_ms: u32 = 1000,
@@ -1193,7 +1189,6 @@ pub const Project = struct {
         self.video = null;
         self.demo_left = null;
         self.demo_right = null;
-        self.last_pair_has_distinct_pixels = false;
         self.demo_frame_hook = null;
         self.prev_cwd = try getCwdAlloc(gpa);
         errdefer gpa.free(self.prev_cwd);
@@ -1223,7 +1218,6 @@ pub const Project = struct {
     /// Bind the two existing test screens to one capture clock. The caller
     /// owns both Editors and must keep them alive until Project.deinit.
     pub fn bindDemoScreens(self: *Project, left: *Editor, right: *Editor) void {
-        if (!self.demoEnabled()) return;
         self.demo_left = left;
         self.demo_right = right;
     }
@@ -1232,7 +1226,6 @@ pub const Project = struct {
     /// This is deliberately a generic lifecycle seam: the video harness does
     /// not import or identify the subsystem being advanced.
     pub fn bindDemoFrameHook(self: *Project, hook: DemoFrameHook) void {
-        if (!self.demoEnabled()) return;
         self.demo_frame_hook = hook;
     }
 
@@ -1315,7 +1308,6 @@ pub const Project = struct {
         defer self.gpa.free(right_pixels);
         const out_w = app_w * 2;
         const out = try self.gpa.alloc(u8, @as(usize, out_w) * app_h * 4);
-        var distinct: usize = 0;
         var y: usize = 0;
         while (y < app_h) : (y += 1) {
             const dst = out[y * out_w * 4 ..][0 .. out_w * 4];
@@ -1323,15 +1315,7 @@ pub const Project = struct {
             const src_right = right_pixels[y * app_w * 4 ..][0 .. app_w * 4];
             @memcpy(dst[0 .. app_w * 4], src_left);
             @memcpy(dst[app_w * 4 ..], src_right);
-            var x: usize = 0;
-            while (x < app_w * 4) : (x += 1) {
-                if (src_left[x] != src_right[x]) distinct += 1;
-            }
         }
-        // A pair whose halves are byte-identical is a passive mirror or a
-        // broken collaboration projection. Keep this as image evidence at
-        // the sink boundary; no editor model is consulted.
-        self.last_pair_has_distinct_pixels = distinct > 32;
         return out;
     }
 
@@ -1371,10 +1355,11 @@ pub const Project = struct {
         }
     }
 
-    /// Capture one synchronized pair, then linger on the resulting state.
-    /// Normal mode keeps the original one-screen PPM behavior.
+    /// Capture one synchronized pair whenever two screens are bound. Video
+    /// mode adds encoding and linger frames; it never selects a different
+    /// editor/capture path from the ordinary E2E artifact.
     pub fn capture(self: *Project, ed: *Editor, name: []const u8) void {
-        if (self.demoEnabled() and self.demo_left != null and self.demo_right != null) {
+        if (self.demo_left != null and self.demo_right != null) {
             if (self.demo_frame_hook) |hook| hook.run(hook.context);
             const pixels = self.pairPixels() catch return;
             const fname = std.fmt.allocPrint(self.gpa, "{s}/.zig-cache/tmp/weft-e2e-{s}.ppm", .{ self.prev_cwd, name }) catch {
@@ -1383,9 +1368,9 @@ pub const Project = struct {
             };
             defer self.gpa.free(fname);
             harness.writePpm(self.gpa, fname, pixels, app_w * 2, app_h) catch {};
-            self.record(pixels, app_w * 2, app_h);
+            if (self.demoEnabled()) self.record(pixels, app_w * 2, app_h);
             self.gpa.free(pixels);
-            self.delay(self.linger_ms);
+            if (self.demoEnabled()) self.delay(self.linger_ms);
             return;
         }
         self.shot(ed, name);
