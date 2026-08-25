@@ -1,4 +1,4 @@
-//! View — Editor state → snail shapes.
+//! View — editor state to renderer-neutral draw items.
 //!
 //! One layout model, two placements. Every visible line is laid out into
 //! `Run`s and caret `Stop`s by a single primitive; the *same* stops feed
@@ -6,13 +6,13 @@
 //! hit-testing, caret, selection). Plain buffers place each line on the
 //! monospace cell grid (uniform advances — the degenerate case, pixel-crisp
 //! via `CellSnap.grid`); markdown buffers place proportional runs at varying
-//! faces and sizes. Caret and selection are solid rectangles (one resident
-//! unit-square record, placed by an affine transform) — no extra pipeline.
+//! faces and sizes. Caret and selection are explicit solid rectangles in the
+//! same scene list as glyphs — no extra pipeline.
 //!
 //! The view is a pure subscriber: it reads the rope and the editor's
-//! cursor/selection plus published style feeds (highlight, diagnostics,
-//! markdown), and owns only presentation state (scroll, metrics, atlas
-//! residency). Damage is the caller's concern; atlas growth is reported.
+//! cursor/selection plus published style feeds (highlight, diagnostics, and
+//! markdown), and owns only presentation state (scroll and metrics). Damage is
+//! the caller's concern.
 //!
 //! The struct's satellites (Theme, Hud, CursorStyle, …) live in sibling
 //! files and are re-exported by the package root `view.zig`; the extracted
@@ -22,7 +22,9 @@
 const std = @import("std");
 const Allocator = std.mem.Allocator;
 
-const snail = @import("snail");
+const text_engine = @import("weft_text");
+const font_provider = @import("weft_font_provider");
+const scene = @import("weft_scene");
 const stemma = @import("stemma");
 const core = @import("../../core/core.zig");
 const layout = @import("../layout.zig");
@@ -45,11 +47,9 @@ const margin: f32 = 8;
 
 const View = @This();
 
-/// The finished frame: the shapes to submit plus how many atlas records the
-/// build added (so the caller can track atlas growth).
+/// The finished frame: explicit draw items plus its body geometry.
 pub const Built = struct {
-    shapes: []snail.Shape,
-    records_added: u32,
+    items: []scene.DrawItem,
     /// This build's BODY region (the frame after the tab/status/panel chrome
     /// is carved off) — the same rect `drawPick`/`drawHover` passed to
     /// `popup.drawCaretSurface`. Exposed so a caller (the popup-layout e2e
@@ -59,7 +59,7 @@ pub const Built = struct {
     body: region.Rect = .{},
 
     pub fn deinit(self: *Built, gpa: Allocator) void {
-        gpa.free(self.shapes);
+        gpa.free(self.items);
         self.* = undefined;
     }
 };
@@ -69,10 +69,10 @@ pub const Built = struct {
 /// `pub` only so the extracted render/layout submodules can name it — it is
 /// not part of the module's public surface (view.zig re-exports none of it).
 pub const Run = struct {
-    shaped: snail.ShapedText,
+    shaped: text_engine.ShapedText,
     baseline_y: f32,
     place: union(enum) {
-        cell: []snail.Cell,
+        cell: []text_engine.Cell,
         prop: struct { x: f32, em: f32, color: [4]f32 },
     },
 };
@@ -84,14 +84,7 @@ pub const Rect = struct { x: f32, y: f32, w: f32, h: f32, color: [4]f32 };
 
 gpa: Allocator,
 face_set: fonts.FaceSet,
-pool: *snail.PagePool,
-atlas: snail.Atlas,
 theme: Theme,
-/// A resident unit-square geometry record (font_id 0), placed with an
-/// affine transform + `local_color` to paint arbitrary solid rects
-/// (caret, selection) through the one glyph pipeline — no extra
-/// shader, no per-frame path work.
-rect_key: snail.record_key.RecordKey,
 
 em: f32,
 cell_w: f32,
@@ -127,35 +120,6 @@ pub fn init(gpa: Allocator, font_bytes: []const u8, em: f32) !View {
     errdefer face_set.deinit();
     const font = face_set.monoFont();
 
-    // Sized for the mono + sans family. Unhinted records are
-    // size-independent (one per glyph, reused across heading sizes),
-    // so the cost scales with distinct glyphs across ~5 faces, not
-    // with font sizes. Exhaustion surfaces as OutOfLayers on prepare.
-    const pool = try snail.PagePool.init(gpa, .{
-        .max_pages = 24,
-        .curve_words_per_page = 1 << 17,
-        .band_words_per_page = 1 << 14,
-    });
-    errdefer pool.deinit();
-    var atlas = try snail.Atlas.init(gpa, pool);
-    errdefer atlas.deinit();
-
-    // A unit-square fill record, resident for the atlas's life. Placed
-    // by an affine transform it becomes any solid rect (caret/selection).
-    const rect_key = snail.record_key.unhintedGlyph(0, 1);
-    {
-        var path = snail.Path.init(gpa);
-        defer path.deinit();
-        try path.addRect(.{ .x = 0, .y = 0, .w = 1, .h = 1 });
-        var prepared_path = try path.prepare(gpa);
-        defer prepared_path.deinit();
-        var curves = try prepared_path.fillCurves(gpa, gpa);
-        defer curves.deinit();
-        try atlas.extendInPlace(gpa, .{ .entries = &.{
-            .{ .geometry = .{ .key = rect_key, .curves = curves.view() } },
-        } });
-    }
-
     const upem: f32 = @floatFromInt(font.unitsPerEm());
     const lm = try font.lineMetrics();
     const advance = try font.advanceWidth(try font.glyphIndex('M'));
@@ -166,10 +130,7 @@ pub fn init(gpa: Allocator, font_bytes: []const u8, em: f32) !View {
     return .{
         .gpa = gpa,
         .face_set = face_set,
-        .pool = pool,
-        .atlas = atlas,
         .theme = (Theme{}).linearized(),
-        .rect_key = rect_key,
         .em = em,
         .cell_w = em * @as(f32, @floatFromInt(advance)) / upem,
         .line_h = em * (ascent - descent + gap) / upem,
@@ -180,8 +141,6 @@ pub fn init(gpa: Allocator, font_bytes: []const u8, em: f32) !View {
 
 pub fn deinit(self: *View) void {
     self.layout_arena.deinit();
-    self.atlas.deinit();
-    self.pool.deinit();
     self.face_set.deinit();
     self.* = undefined;
 }
@@ -330,7 +289,7 @@ pub fn build(
     top_row: *usize,
     frame: region.Rect,
     pick_dock: region.Rect,
-    world_to_pixel: snail.Transform2D,
+    world_to_pixel: scene.Transform2D,
 ) !Built {
     const rope = editor.text();
     // Carve the pane's frame into regions (no element computes an offset
@@ -514,7 +473,7 @@ const testing = std.testing;
 
 test "literal tabs: a tab advances to the next tab stop; offsets stay exact" {
     const gpa = testing.allocator;
-    var view = try View.init(gpa, @embedFile("font_mono"), 16);
+    var view = try View.init(gpa, font_provider.defaultMono(), 16);
     defer view.deinit();
     // "a\tb": 'a' at col 0, the tab starts at col 1 and advances 'b' to the
     // next tab stop (col 4). Empty frame_layout → the motion path
@@ -538,7 +497,7 @@ test "monospace parity gate: view-computed vertical target == old column target"
     // did: line.start + min(goal_col, line.len()). ASCII only, so every
     // byte is a scalar boundary and snapBoundary is the identity.
     const gpa = testing.allocator;
-    var view = try View.init(gpa, @embedFile("font_mono"), 16);
+    var view = try View.init(gpa, font_provider.defaultMono(), 16);
     defer view.deinit();
 
     var rope = try stemma.Rope.fromSlice(gpa, "hello world\nhi\n\nwide load here\nx");

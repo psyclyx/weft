@@ -16,8 +16,11 @@
 const std = @import("std");
 const core = @import("../core/core.zig");
 const region = @import("../gfx/region.zig");
+const view_mod = @import("../gfx/view.zig");
+const window_layout = @import("../gfx/window_layout.zig");
 const cursor_config = @import("cursor_config.zig");
 const providers = @import("providers.zig");
+const window_cmds = @import("window_cmds.zig");
 
 /// which-key menu-overlay edge detection. Owns the small cluster of state that
 /// tracks whether a menu mode is active and whether its hint popup has fired,
@@ -190,6 +193,94 @@ pub const Active = struct {
     /// The host-side fallback hint gates on this too, so it doesn't flash in
     /// the panel during the delay before a which-key plugin's surface appears.
     menu_shown: bool,
+};
+
+/// App-owned frame driver. Embeddings supply the editor/session borrows once;
+/// every backend and capture sink then asks this object to advance/build the
+/// complete editor frame. The caller cannot select layers, reconstruct HUD
+/// state, attach a partial provider set, or cast `Buffer.frontend` itself.
+pub const Driver = struct {
+    ctx: FrameCtx,
+    attach_deps: *providers.AttachDeps,
+    window_ctx: *window_cmds.WindowCtx,
+    layout: *window_layout.Layout,
+    view: *view_mod.View,
+
+    pub const Prepared = struct {
+        buffer: *core.Buffers.Buffer,
+        editor: *core.Editor,
+        attach: *providers.Attach,
+    };
+
+    pub const BuildOptions = struct {
+        frame_start: u64,
+        fb: [2]u32,
+        blink_on: bool,
+        menu_shown: bool,
+        /// A display-free pull sink has no compositor damage loop. Requesting
+        /// a frame invalidates the app view as a whole; it still goes through
+        /// the same builder and cannot choose what the rebuild contains.
+        force_rebuild: bool = false,
+    };
+
+    /// Apply the ordinary frame-loop window intents. Kept public because the
+    /// desktop loop must do pointer routing and collab work between prepare and
+    /// build; pull-based backends simply let `build` call it.
+    pub fn applyWindowIntents(self: *Driver) bool {
+        const changed = window_cmds.applyIntents(
+            self.window_ctx,
+            self.layout,
+            self.view,
+            self.ctx.buffers,
+            self.ctx.gpa,
+            self.ctx.head,
+            self.ctx.keymap,
+            self.ctx.last_frame_rect.*,
+        );
+        if (changed) self.ctx.view_dirty.* = true;
+        return changed;
+    }
+
+    /// Resolve and attach the complete visible editor set. This is app policy,
+    /// shared by the desktop and memory backends; a sink never inventories
+    /// providers or interprets the opaque frontend attachment.
+    pub fn prepare(self: *Driver) !Prepared {
+        const active = self.ctx.buffers.active();
+        try providers.attachProviders(self.attach_deps, active);
+        const Visible = struct {
+            deps: *providers.AttachDeps,
+            buffers: *core.Buffers,
+            fn visit(state: *@This(), pane: *window_layout.Pane) void {
+                const buffer = state.buffers.get(pane.buffer_id) orelse return;
+                providers.attachProviders(state.deps, buffer) catch {};
+            }
+        };
+        var visible = Visible{ .deps = self.attach_deps, .buffers = self.ctx.buffers };
+        self.layout.eachPane(&visible, Visible.visit);
+        const frontend = active.frontend orelse return error.ProviderAttachmentMissing;
+        return .{
+            .buffer = active,
+            .editor = &active.editor,
+            .attach = @ptrCast(@alignCast(frontend)),
+        };
+    }
+
+    /// Build one whole editor frame through an arbitrary production renderer.
+    /// `renderer` implements the shared render backend contract (`buildFrame`).
+    pub fn build(self: *Driver, renderer: anytype, opts: BuildOptions) !void {
+        _ = self.applyWindowIntents();
+        const active = try self.prepare();
+        if (opts.force_rebuild) self.ctx.view_dirty.* = true;
+        try renderer.buildFrame(&self.ctx, .{
+            .editor = active.editor,
+            .abuf = active.buffer,
+            .attach = active.attach,
+            .frame_start = opts.frame_start,
+            .fb = opts.fb,
+            .blink_on = opts.blink_on,
+            .menu_shown = opts.menu_shown,
+        });
+    }
 };
 
 /// The async housekeeping tick (run each frame, after input): backing

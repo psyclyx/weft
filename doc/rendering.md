@@ -109,7 +109,7 @@ Two core-internal interfaces, so the additive platforms/backends slot in:
   surface creation, the event loop, key/pointer events, vsync/present. Future: X,
   terminal (tty + input), browser (canvas/DOM events), macOS (Cocoa). Platform
   setup stays in CORE — a plugin never touches it.
-- **Rasterizer/Backend** (scene → output): `snail_vk` + `skia` today. Consumes a
+- **Rasterizer/Backend** (scene → output): `skia`. Consumes a
   laid-out scene (boxes, text runs positioned in device space, rects, colors) and
   draws it. Future: **webgpu** (one more Rasterizer — nothing above it changes),
   terminal (a cell rasterizer: boxes → box-drawing chars, colors → SGR, glyphs →
@@ -156,14 +156,12 @@ platform"; neither touches the scene vocabulary or any plugin.
   the frame the cursor leaves its anchor's line — unlike the echo line
   hover replaced, a caret popup paints over body text, so a stale one left
   open is a real regression, not just clutter.
-- **P3 — formalize the backend + platform seams (DONE).** Extract the Rasterizer
-  and Platform interfaces around `snail_vk`/`skia`/`wayland` (no behavior
-  change), so webgpu / X / terminal / browser / macOS are drop-in later. Keep
-  wayland+vulkan as the one live impl. FINDING recorded in `rasterizer.zig`'s
-  module doc: today's RenderState conflates draw (scene→pixels) with surface
-  ownership (present/swapchain) — the future `draw(scene)` /
-  `presentFramebuffer(ctx)` split is what lets the harness's CPU raster become
-  a literal named impl, and is where a terminal/webgpu backend enters.
+- **P3 — formalize the platform and render-target seams (DONE).** The view emits
+  renderer-neutral scene items, Skia is the sole scene→pixels implementation,
+  and the same `RenderState` targets either desktop WSI Vulkan or an ordinary
+  offscreen Vulkan image. Platform input is separate from normalized dispatch.
+  Wayland remains the only desktop provider; macOS still needs a selected
+  window/WSI provider rather than another renderer switch.
 - **P4 — UI-as-plugin.** The completion CONSUMER moves to a guest plugin emitting
   the caret-surface scene through the membrane (needs the caps-fire + live-narrow
   membrane from [[completion-ux-roadmap]]). The completion UI is a plugin, drawn

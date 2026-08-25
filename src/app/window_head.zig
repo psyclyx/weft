@@ -1,14 +1,13 @@
 //! WindowHead — the first-party in-process client that owns the window
 //! (Platform: `platform/wayland.zig`'s `Window`), the GPU device + swapchain
-//! (`gfx/context.zig`'s `Context`), and the Rasterizer (`app/render.zig`'s
+//! (`gfx/context.zig`'s `Context`), and the renderer (`app/render.zig`'s
 //! `RenderState`) — W0b's "window-head" (doc/north-star-plan.md §2.5/§2.7):
 //! rendering.md P5's "bundled scene client" lineage, generalized to own the
 //! platform attachment itself rather than just drawing into one.
 //!
-//! P3 (the Platform + Rasterizer seams, `gfx/context.zig`'s `assertPlatform`
-//! / `app/rasterizer.zig`'s `assertRasterizer`) landed FIRST specifically so
-//! this struct could exist: `window`/`ctx`/`render` below are exactly the
-//! three pieces P3 formalized as comptime-checked contracts — WindowHead is
+//! P3's Platform and render-target seams landed first specifically so this
+//! struct could exist: `window`/`ctx`/`render` below are exactly the three
+//! pieces that boundary separated — WindowHead is
 //! the first thing that owns all three together as one addressable unit
 //! instead of three separate `main()` locals wired by hand.
 //!
@@ -68,7 +67,7 @@ pub const WindowHead = struct {
     /// address in `main()`'s frame — mirrors `render_mod.RenderState.init`'s
     /// own in-place convention one level up), in the SAME order `main()`
     /// used to construct these three by hand: window → its actual
-    /// framebuffer size → the GPU context sized to it → the rasterizer.
+    /// framebuffer size → the GPU context sized to it → the renderer.
     /// `active_ctx` is the `command.Context` this window-head dispatches
     /// through (ordinarily `&session.cmd_ctx`) — stored on `client` so a
     /// future in-process semantic-body call (see module doc) has a `Ctx` to
@@ -102,7 +101,7 @@ pub const WindowHead = struct {
         };
     }
 
-    /// Reverse order: rasterizer resources, then the GPU device/swapchain,
+    /// Reverse order: renderer resources, then the GPU device/swapchain,
     /// then the window — matches `main()`'s old `defer` unwind exactly.
     pub fn deinit(self: *WindowHead) void {
         self.render.deinit();

@@ -10,7 +10,8 @@
 const std = @import("std");
 const Allocator = std.mem.Allocator;
 
-const snail = @import("snail");
+const text_engine = @import("weft_text");
+const font_provider = @import("weft_font_provider");
 const stemma = @import("stemma");
 const core = @import("../../core/core.zig");
 const layout = @import("../layout.zig");
@@ -49,8 +50,8 @@ pub const StyleInputs = struct {
 
 /// The face + size + color a markdown attribute renders as.
 const InlineStyle = struct {
-    faces: *snail.Faces,
-    style: snail.FontStyle,
+    faces: *text_engine.StyleSet,
+    style: text_engine.FontStyle,
     em: f32,
     color: [4]f32,
 
@@ -148,7 +149,7 @@ fn layoutMonoLine(
     const baseline_y = y_top + v.ascent;
     const text = try readLine(scratch, rope, line, cols_visible * 4 + 4);
 
-    var cells: std.ArrayList(snail.Cell) = .empty;
+    var cells: std.ArrayList(text_engine.Cell) = .empty;
     var stops: std.ArrayList(layout.Stop) = .empty;
     // Virtual-text prefix: decorations anchored on this row (dired's metadata/
     // arrow/mark) laid out as leading dimmed cells at the front of the shaped
@@ -196,7 +197,7 @@ fn layoutMonoLine(
         for (shbuf[pfx_len..]) |*b| {
             if (b.* == '\t') b.* = ' ';
         }
-        const shaped = try snail.shape(scratch, &v.face_set.mono, shbuf, .{});
+        const shaped = try text_engine.shape(scratch, &v.face_set.mono, shbuf, .{});
         try runs.append(scratch, .{ .shaped = shaped, .baseline_y = baseline_y, .place = .{ .cell = cells.items } });
     }
     return .{
@@ -225,7 +226,7 @@ fn layoutRowPrefix(
     line: stemma.Range,
     cols_visible: usize,
     pfx_bytes: *std.ArrayList(u8),
-    cells: *std.ArrayList(snail.Cell),
+    cells: *std.ArrayList(text_engine.Cell),
     start_col: usize,
 ) !usize {
     // Collect this row's virtual_before decorations, ordered by anchor so a row
@@ -289,7 +290,7 @@ fn layoutGutterPrefix(
     row: usize,
     cols_visible: usize,
     pfx_bytes: *std.ArrayList(u8),
-    cells: *std.ArrayList(snail.Cell),
+    cells: *std.ArrayList(text_engine.Cell),
 ) !usize {
     if (gf.bindings.len == 0) return 0;
     var args: ui_mesh.GutterLineArgs = .{
@@ -379,7 +380,7 @@ fn layoutMarkdownLine(
         const st = effStyle(v, md, line.start + i, caret_lo, caret_hi);
         var j = i + 1;
         while (j < text.len and effStyle(v, md, line.start + j, caret_lo, caret_hi).eql(st)) j += 1;
-        const shaped = try snail.shape(scratch, st.faces, text[i..j], .{ .style = st.style });
+        const shaped = try text_engine.shape(scratch, st.faces, text[i..j], .{ .style = st.style });
         for (shaped.glyphs) |g| {
             try stops.append(la, .{ .off = @intCast(line.start + i + g.source_start), .x = pen + st.em * g.x_offset });
         }
@@ -478,7 +479,7 @@ const testing = std.testing;
 
 test "styles: a published styles bulk resolves to StyleClass colors; highlight wins" {
     const gpa = testing.allocator;
-    var v = try View.init(gpa, @embedFile("font_mono"), 16);
+    var v = try View.init(gpa, font_provider.defaultMono(), 16);
     defer v.deinit();
 
     // A styles feed (as the host publishes it): one class byte per doc byte.
@@ -504,7 +505,7 @@ test "styles: a published styles bulk resolves to StyleClass colors; highlight w
 
 test "styles: Hud.styles_layer flows through resolveStyleInputs (the render seam)" {
     const gpa = testing.allocator;
-    var v = try View.init(gpa, @embedFile("font_mono"), 16);
+    var v = try View.init(gpa, font_provider.defaultMono(), 16);
     defer v.deinit();
 
     // A plugin-published styles layer, exactly as the host writes it: a zeroed
@@ -536,7 +537,7 @@ test "styles: Hud.styles_layer flows through resolveStyleInputs (the render seam
 
 test "decorations: a virtual_before decoration draws leading cells and shifts the caret; the doc text is only the name" {
     const gpa = testing.allocator;
-    var v = try View.init(gpa, @embedFile("font_mono"), 16);
+    var v = try View.init(gpa, font_provider.defaultMono(), 16);
     defer v.deinit();
 
     // A dired-style row: the document text is ONLY the editable name; the
@@ -577,7 +578,7 @@ test "decorations: a virtual_before decoration draws leading cells and shifts th
 
 test "gutter: a bound line-numbers provider draws leading cells through the real render path" {
     const gpa = testing.allocator;
-    var v = try View.init(gpa, @embedFile("font_mono"), 16);
+    var v = try View.init(gpa, font_provider.defaultMono(), 16);
     defer v.deinit();
 
     var doc = try core.Document.init(gpa, "user");

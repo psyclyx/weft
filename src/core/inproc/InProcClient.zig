@@ -28,10 +28,9 @@
 //! field name on either struct fails to COMPILE the guard call, exactly
 //! like a nominal interface would) while keeping this a genuinely small,
 //! reviewable diff on the wasm side. This mirrors a convention already
-//! established in this codebase for the same reason: `gfx/context.zig`'s
-//! `assertPlatform` / `app/rasterizer.zig`'s Rasterizer contract are
-//! comptime duck-typed decl sets, not vtables or a shared base type —
-//! `assertClientIdentity` below is the identical move one layer down (a
+//! established in this codebase for the same reason: `platform/platform.zig`'s
+//! `assertPlatform` is a comptime duck-typed decl set, not a vtable or a
+//! shared base type — `assertClientIdentity` below is the identical move one layer down (a
 //! shared FIELD shape instead of a shared DECL shape).
 //!
 //! ## what's deliberately NOT here
@@ -182,9 +181,9 @@ pub const InProcClient = struct {
 /// `hasPerm`/`canDispatch` duck-type against (`perms`, `in_dispatch`,
 /// `loading`, `name`) — the compile-time proof that `InProcClient` and
 /// `WasmPlugin` really do share ONE guard contract, not two that happen to
-/// look alike today. Mirrors `gfx/context.zig`'s `assertPlatform` /
-/// `app/rasterizer.zig`'s Rasterizer-contract convention (comptime
-/// duck-typed contract, not a vtable or a shared nominal base).
+/// look alike today. Mirrors `platform/platform.zig`'s `assertPlatform`
+/// convention (comptime duck-typed contract, not a vtable or a shared
+/// nominal base).
 pub fn assertClientIdentity(comptime T: type) void {
     if (@typeInfo(T) != .@"struct") @compileError(@typeName(T) ++ ": a client identity must be a struct");
     inline for (.{ "perms", "in_dispatch", "loading", "name", "grant_table", "grant_handles" }) |name| {

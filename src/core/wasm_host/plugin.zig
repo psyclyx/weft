@@ -94,9 +94,8 @@ pub fn mintGrantHandles(table: *grants_mod.HandleTable, principal: []const u8, p
 /// (`perms`/`grant_table`/`grant_handles` fields) rather than a nominal
 /// shared struct: WasmPlugin and InProcClient hold them under the same
 /// names without either depending on the other's type, mirroring
-/// `gfx/context.zig`'s `assertPlatform`/`app/rasterizer.zig`'s
-/// comptime-contract convention already used for the Platform/Rasterizer
-/// seams (P3) — see `InProcClient.zig`'s `assertClientIdentity` for the
+/// `platform/platform.zig`'s `assertPlatform` comptime-contract convention
+/// already used for the Platform seam (P3) — see `InProcClient.zig`'s `assertClientIdentity` for the
 /// analogous compile-time check on this shape.
 ///
 /// **The migration, precisely** (§6 W4 gate: "the hasPerm migration must be

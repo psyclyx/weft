@@ -24,7 +24,7 @@
 const std = @import("std");
 const Allocator = std.mem.Allocator;
 
-const snail = @import("snail");
+const text_engine = @import("weft_text");
 const core = @import("../../core/core.zig");
 const region = @import("../region.zig");
 const view = @import("../view.zig");
@@ -364,7 +364,7 @@ pub fn outlinedBox(scratch: Allocator, rects: *std.ArrayList(Rect), x: f32, y: f
 /// Shape `text` as one mono run at an explicit world x/baseline + color (a
 /// `.prop` placement — independent of the pane's content origin).
 pub fn propLine(v: *View, scratch: Allocator, runs: *std.ArrayList(Run), text: []const u8, x: f32, baseline_y: f32, color: [4]f32) !void {
-    const shaped = try snail.shape(scratch, &v.face_set.mono, text, .{});
+    const shaped = try text_engine.shape(scratch, &v.face_set.mono, text, .{});
     try runs.append(scratch, .{ .shaped = shaped, .baseline_y = baseline_y, .place = .{ .prop = .{ .x = x, .em = v.em, .color = color } } });
 }
 
@@ -453,7 +453,7 @@ pub fn drawSurfaces(
             const baseline = row_y + v.ascent;
             for (row.spans.items, 0..) |sp, si| {
                 if (si != 0) x += v.cell_w; // gap between spans
-                const shaped = try snail.shape(scratch, &v.face_set.mono, sp.text, .{});
+                const shaped = try text_engine.shape(scratch, &v.face_set.mono, sp.text, .{});
                 try runs.append(scratch, .{
                     .shaped = shaped,
                     .baseline_y = baseline,

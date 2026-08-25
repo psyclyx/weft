@@ -6,7 +6,6 @@ const std = @import("std");
 const t = std.testing;
 
 const stemma = @import("stemma");
-const snail = @import("snail");
 
 // The core/gfx/app unit tests now live in the `weft` module (src/weft.zig),
 // which OWNS those files — build.zig runs that module's test binary too. This
@@ -34,12 +33,4 @@ test "stemma path dep: a document with history" {
     try doc.setAgent(gpa, "weft-test");
     _ = try doc.insert(gpa, 0, "peer zero");
     try t.expectEqual(@as(usize, 9), doc.text().byteLen());
-}
-
-test "snail path dep: module reachable" {
-    // Compile-time reachability is the wiring proof; snail's own suite
-    // covers behavior. Keep one runtime touch so the linker is exercised.
-    comptime {
-        _ = snail;
-    }
 }

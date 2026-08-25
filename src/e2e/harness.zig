@@ -1,9 +1,10 @@
 //! e2e/harness — the HEADLESS integration harness that drives the full editor
 //! the way a person does: boot the real config (or load plugins), press keys
 //! through the keymap (so bound keys, chords, and modes behave exactly as in the
-//! app), type text, run commands, and observe the rendered surface + disk. It
-//! renders frames to PPM artifacts under `.zig-cache/tmp/` so a run leaves
-//! screenshots to eyeball.
+//! app), type text, run commands, and observe the rendered surface + disk. The
+//! authoritative two-editor spine renders with standard headless Vulkan (no
+//! WSI/Wayland); smaller geometry tests retain a CPU target. PPM artifacts live
+//! under `.zig-cache/tmp/`.
 //!
 //! The point (per the design brief): approach a task as "the natural way to do
 //! X in weft is to press Y". If Y doesn't exist, is bound weird, or is more
@@ -13,7 +14,7 @@
 //! teardown) import it and are pulled together by `e2e.zig`.
 
 const std = @import("std");
-pub const snail = @import("snail");
+pub const scene = weft.scene;
 // The weft app (core + gfx + app) reaches this subdir as ONE named module wired
 // in build.zig (src/weft.zig barrel) — no `../` reach-arounds across the tree.
 const weft = @import("weft");
@@ -33,6 +34,7 @@ pub const app_providers = weft.app_providers;
 pub const app_collab = weft.app_collab;
 const app_frame = weft.app_frame;
 const app_render_memory = weft.app_render_memory;
+const app_headless_vulkan = weft.app_headless_vulkan;
 pub const region = weft.region;
 
 // Re-exports so the per-concern test files can alias what they need from this
@@ -90,6 +92,11 @@ pub const Editor = struct {
     /// The complete production frame path, ending in a memory-backed present
     /// target. Tests and recorders only receive its finished framebuffer.
     render: app_render_memory.RenderState = undefined,
+    memory_render_live: bool = false,
+    /// Standard headless Vulkan target + the selected production renderer.
+    /// Bound by the authoritative two-editor spine; never imports Wayland.
+    vulkan_head: ?*app_headless_vulkan.Head = null,
+    frame_driver: app_frame.Driver = undefined,
     frame_known_peers: core.known_peers.KnownPeers = undefined,
     frame_conn: ?core.session.Conn = null,
     frame_hub: ?core.hub.Hub = null,
@@ -143,6 +150,7 @@ pub const Editor = struct {
         self.frame_flash_gen = 0;
         self.frame_flash_start_ns = 0;
         self.frame_flash_was_active = false;
+        self.vulkan_head = null;
         self.pool = try core.task.Pool.init(gpa, .{ .threads = 2 });
         self.engine = try core.wasm.Engine.init();
         self.loop = core.async_loop.Loop.init(gpa, self.pool, core.task.nowNs);
@@ -172,9 +180,41 @@ pub const Editor = struct {
         // Window layout: own the real pane tree + bind the real window commands.
         self.win_ctx = .{};
         self.last_frame_rect = .{ .x = 0, .y = 0, .w = app_w, .h = app_h };
-        try self.render.init(gpa, @embedFile("font_mono"), app_em, self.buffers.active_id);
+        try self.render.init(gpa, weft.font_provider.defaultMono(), app_em, self.buffers.active_id);
+        self.memory_render_live = true;
         self.win_layout = &self.render.fb.win_layout;
         self.frame_known_peers = try core.known_peers.KnownPeers.load(gpa, parentEnviron());
+        const ed0 = self.buffers.get(0) orelse self.buffers.active();
+        self.frame_driver = .{
+            .ctx = .{
+                .gpa = self.gpa,
+                .buffers = self.buffers,
+                .caps = self.caps,
+                .keymap = self.keymap,
+                .ui_mesh = &self.session.system.container,
+                .head = self.head,
+                .semantic = &self.session.system.semantic,
+                .cursor_cfg = &self.session.cursor_cfg,
+                .plugins = &self.plugins,
+                .conn = &self.frame_conn,
+                .hub = &self.frame_hub,
+                .collab_session = &self.frame_collab_session,
+                .partial_state = &self.frame_partial_state,
+                .ed0 = &ed0.editor,
+                .known_peers = &self.frame_known_peers,
+                .noted_host_fp = &self.frame_noted_host_fp,
+                .view_dirty = &self.frame_dirty,
+                .last_frame_rect = &self.last_frame_rect,
+                .flash_gen = &self.frame_flash_gen,
+                .flash_start_ns = &self.frame_flash_start_ns,
+                .flash_was_active = &self.frame_flash_was_active,
+                .flash_duration_ns = 600 * std.time.ns_per_ms,
+            },
+            .attach_deps = &self.prov.attach_deps,
+            .window_ctx = &self.win_ctx,
+            .layout = self.win_layout,
+            .view = &self.render.fb.view,
+        };
         try window_cmds.registerCommands(gpa, self.commands, &self.win_ctx, &self.win_actions);
         // The app's provider-aware open/close (shadows the core versions): opening
         // a file now attaches syntax + a language server per the lsp-add registry,
@@ -203,7 +243,12 @@ pub const Editor = struct {
 
     pub fn deinit(self: *Editor) void {
         const gpa = self.gpa;
-        self.render.deinit();
+        if (self.vulkan_head) |head| {
+            head.deinit();
+            gpa.destroy(head);
+        } else if (self.memory_render_live) {
+            self.render.deinit();
+        }
         self.frame_known_peers.deinit();
         for (self.js_plugins.items) |jp| jp.deinit();
         self.js_plugins.deinit(gpa);
@@ -422,6 +467,7 @@ pub const Editor = struct {
     /// frame geometry deliberately) instead of the fixed `app_w`/`app_h`
     /// `snapshot`/`snapshotPanes` use.
     pub fn ensureView(self: *Editor) !*view_mod.View {
+        if (self.vulkan_head) |head| return &head.render.fb.view;
         return &self.render.fb.view;
     }
 
@@ -442,7 +488,7 @@ pub const Editor = struct {
     /// pane tree and keeping the focused pane on the active buffer. Mirrors
     /// main()'s `window_cmds.applyIntents` call.
     pub fn applyWindow(self: *Editor) void {
-        _ = window_cmds.applyIntents(&self.win_ctx, self.win_layout, &self.render.fb.view, self.buffers, self.gpa, self.head, self.keymap, self.last_frame_rect);
+        _ = self.frame_driver.applyWindowIntents();
     }
 
     /// Number of panes currently tiled.
@@ -450,64 +496,73 @@ pub const Editor = struct {
         return self.win_layout.count();
     }
 
-    /// Ask the editor's production render owner for one complete frame. This
-    /// method supplies ordinary frame-loop state and provider attachments; it
-    /// does not assemble a HUD, inspect a layer, or choose which surfaces draw.
-    /// The returned pixels are copied from the memory present target and owned
-    /// by the caller.
-    pub fn renderComposite(self: *Editor) ![]u8 {
-        const active = self.buffers.active();
-        try app_providers.attachProviders(&self.prov.attach_deps, active);
-        const AttachVisible = struct {
-            deps: *app_providers.AttachDeps,
-            buffers: *core.Buffers,
-            fn visit(state: *@This(), pane: *window_layout.Pane) void {
-                const buffer = state.buffers.get(pane.buffer_id) orelse return;
-                app_providers.attachProviders(state.deps, buffer) catch {};
-            }
-        };
-        var visible = AttachVisible{ .deps = &self.prov.attach_deps, .buffers = self.buffers };
-        self.win_layout.eachPane(&visible, AttachVisible.visit);
-
-        const attach: *app_providers.Attach = @ptrCast(@alignCast(active.frontend.?));
-        const ed0 = self.buffers.get(0) orelse active;
-        self.last_frame_rect = .{ .x = 0, .y = 0, .w = @floatFromInt(app_w), .h = @floatFromInt(app_h) };
+    /// Cut this editor over to the selected production renderer on a standard
+    /// offscreen Vulkan image. There is no surface, swapchain, WSI extension,
+    /// compositor, or platform event pump involved.
+    pub fn enableHeadlessVulkan(self: *Editor) !void {
+        if (self.vulkan_head != null) return;
+        const head = try self.gpa.create(app_headless_vulkan.Head);
+        errdefer self.gpa.destroy(head);
+        try head.init(self.gpa, app_w, app_h, weft.font_provider.defaultMono(), app_em, self.buffers.active_id);
+        errdefer head.deinit();
+        self.render.deinit();
+        self.memory_render_live = false;
+        self.vulkan_head = head;
+        self.win_layout = &head.render.fb.win_layout;
+        self.frame_driver.layout = self.win_layout;
+        self.frame_driver.view = &head.render.fb.view;
         self.frame_dirty = true;
-        const fx: app_frame.FrameCtx = .{
-            .gpa = self.gpa,
-            .buffers = self.buffers,
-            .caps = self.caps,
-            .keymap = self.keymap,
-            .ui_mesh = &self.session.system.container,
-            .head = self.head,
-            .semantic = &self.session.system.semantic,
-            .cursor_cfg = &self.session.cursor_cfg,
-            .plugins = &self.plugins,
-            .conn = &self.frame_conn,
-            .hub = &self.frame_hub,
-            .collab_session = &self.frame_collab_session,
-            .partial_state = &self.frame_partial_state,
-            .ed0 = &ed0.editor,
-            .known_peers = &self.frame_known_peers,
-            .noted_host_fp = &self.frame_noted_host_fp,
-            .view_dirty = &self.frame_dirty,
-            .last_frame_rect = &self.last_frame_rect,
-            .flash_gen = &self.frame_flash_gen,
-            .flash_start_ns = &self.frame_flash_start_ns,
-            .flash_was_active = &self.frame_flash_was_active,
-            .flash_duration_ns = 600 * std.time.ns_per_ms,
-        };
-        try self.render.buildFrame(&fx, .{
-            .editor = &active.editor,
-            .abuf = active,
-            .attach = attach,
-            .frame_start = core.task.nowNs(),
+    }
+
+    /// Build and submit the whole editor frame without waiting for readback.
+    /// The paired recorder submits both peers before resolving either fence.
+    pub fn submitHeadlessFrameAt(self: *Editor, frame_start: u64) !void {
+        const head = self.vulkan_head orelse return error.HeadlessVulkanNotEnabled;
+        self.last_frame_rect = .{ .x = 0, .y = 0, .w = @floatFromInt(app_w), .h = @floatFromInt(app_h) };
+        try self.frame_driver.build(&head.render, .{
+            .frame_start = frame_start,
             .fb = .{ app_w, app_h },
             .blink_on = true,
             .menu_shown = self.session.menu_overlay.shown,
+            .force_rebuild = true,
+        });
+        var attempts: usize = 0;
+        while (attempts < 10_000) : (attempts += 1) {
+            if (try head.render.present(head.ctx, .{ app_w, app_h }, frame_start, false)) return;
+            std.Thread.yield() catch {};
+        }
+        return error.VulkanSubmitDeferred;
+    }
+
+    pub fn readHeadlessFrame(self: *Editor) ![]u8 {
+        const head = self.vulkan_head orelse return error.HeadlessVulkanNotEnabled;
+        return head.ctx.readFrame(self.gpa);
+    }
+
+    /// Ask the editor's production render owner for one complete frame. This
+    /// method supplies ordinary frame-loop state and provider attachments; it
+    /// does not assemble a HUD, inspect a layer, or choose which surfaces draw.
+    /// The returned pixels are copied from the active frame target and owned by
+    /// the caller.
+    pub fn renderCompositeAt(self: *Editor, frame_start: u64) ![]u8 {
+        if (self.vulkan_head != null) {
+            try self.submitHeadlessFrameAt(frame_start);
+            return self.readHeadlessFrame();
+        }
+        self.last_frame_rect = .{ .x = 0, .y = 0, .w = @floatFromInt(app_w), .h = @floatFromInt(app_h) };
+        try self.frame_driver.build(&self.render, .{
+            .frame_start = frame_start,
+            .fb = .{ app_w, app_h },
+            .blink_on = true,
+            .menu_shown = self.session.menu_overlay.shown,
+            .force_rebuild = true,
         });
         const complete = try self.render.present(.{ app_w, app_h });
         return self.gpa.dupe(u8, complete.pixels);
+    }
+
+    pub fn renderComposite(self: *Editor) ![]u8 {
+        return self.renderCompositeAt(core.task.nowNs());
     }
 
     /// Composite all panes and write a PPM artifact (best-effort; never asserts).
@@ -1244,7 +1299,9 @@ pub const Project = struct {
 
     /// Bind the two existing test screens to one capture clock. The caller
     /// owns both Editors and must keep them alive until Project.deinit.
-    pub fn bindDemoScreens(self: *Project, left: *Editor, right: *Editor) void {
+    pub fn bindDemoScreens(self: *Project, left: *Editor, right: *Editor) !void {
+        try left.enableHeadlessVulkan();
+        try right.enableHeadlessVulkan();
         self.demo_left = left;
         self.demo_right = right;
     }
@@ -1325,13 +1382,26 @@ pub const Project = struct {
     fn pairPixels(self: *Project) ![]u8 {
         const left = self.demo_left orelse return error.NoDemoScreens;
         const right = self.demo_right orelse return error.NoDemoScreens;
-        left.applyWindow();
-        right.applyWindow();
         // Both renders happen inside this one capture operation. There is no
-        // per-screen timer: the pair is one logical frame at one frame index.
-        const left_pixels = try left.renderComposite();
+        // per-screen timer: the pair shares one logical frame timestamp.
+        const frame_start = core.task.nowNs();
+        if (left.vulkan_head != null and right.vulkan_head != null) {
+            try left.submitHeadlessFrameAt(frame_start);
+            right.submitHeadlessFrameAt(frame_start) catch |err| {
+                const orphan = try left.readHeadlessFrame();
+                self.gpa.free(orphan);
+                return err;
+            };
+        }
+        const left_pixels = if (left.vulkan_head != null)
+            try left.readHeadlessFrame()
+        else
+            try left.renderCompositeAt(frame_start);
         defer self.gpa.free(left_pixels);
-        const right_pixels = try right.renderComposite();
+        const right_pixels = if (right.vulkan_head != null)
+            try right.readHeadlessFrame()
+        else
+            try right.renderCompositeAt(frame_start);
         defer self.gpa.free(right_pixels);
         const out_w = app_w * 2;
         const out = try self.gpa.alloc(u8, @as(usize, out_w) * app_h * 4);

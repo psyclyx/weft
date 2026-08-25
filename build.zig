@@ -1,12 +1,5 @@
 const std = @import("std");
 
-/// Which renderer to compile+link. Mutually exclusive: exactly one backend's
-/// code and deps are pulled in. `skia` (default) links the C++ Skia shim and
-/// libskia; `snail` links snail's own Vulkan pipeline + SPIR-V shaders. The
-/// choice is surfaced to Zig as `build_options.renderer`, and `app/render.zig`
-/// comptime-switches on it so the unselected backend is never analyzed.
-const Renderer = enum { skia, snail };
-
 /// The reference wasm guest plugins (src/guest/*.zig). `install` plugins are
 /// the shippable reference catalog: built to `.wasm` and installed to
 /// `lib/weft/plugins/` as external artifacts a user loads with `--plugin` —
@@ -280,14 +273,55 @@ const guests = [_]Guest{
 pub fn build(b: *std.Build) void {
     const target = b.standardTargetOptions(.{});
     const optimize = b.standardOptimizeOption(.{});
-    const renderer = b.option(Renderer, "renderer", "GPU renderer backend (skia|snail); default skia") orelse .skia;
-
-    const snail_opt = depOrOverride(b, "snail", "NPINS_OVERRIDE_SNAIL", .{ .target = target, .optimize = optimize });
     const stemma_opt = depOrOverride(b, "stemma", "NPINS_OVERRIDE_STEMMA", .{ .target = target, .optimize = optimize });
-    // Both queried before unwrapping so a first-ever build discovers every
-    // missing fetch in one round rather than one per re-run.
-    const snail_dep = snail_opt orelse return;
     const stemma_dep = stemma_opt orelse return;
+    // Pinned, portable fallback bytes supplied by the build environment. Face
+    // family resolution is a separate named provider below, selected by target;
+    // a Darwin provider can replace fontconfig without changing `weft_text`,
+    // the view, or this deterministic default.
+    const mono_font_file = b.graph.environ_map.get("WEFT_DEFAULT_MONO") orelse
+        @panic("WEFT_DEFAULT_MONO not set — build inside the nix shell");
+    const mono_font: std.Build.LazyPath = .{ .cwd_relative = mono_font_file };
+    const font_provider_contract = b.createModule(.{
+        .root_source_file = b.path("src/gfx/font_provider/contract.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    const font_provider_impl = b.createModule(.{
+        .root_source_file = b.path(if (target.result.os.tag == .linux)
+            "src/gfx/font_provider/fontconfig.zig"
+        else
+            "src/gfx/font_provider/unavailable.zig"),
+        .target = target,
+        .optimize = optimize,
+        .link_libc = target.result.os.tag == .linux,
+    });
+    font_provider_impl.addImport("contract", font_provider_contract);
+    if (target.result.os.tag == .linux)
+        font_provider_impl.linkSystemLibrary("fontconfig", .{});
+    const font_provider_mod = b.createModule(.{
+        .root_source_file = b.path("src/gfx/font_provider/root.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    font_provider_mod.addImport("contract", font_provider_contract);
+    font_provider_mod.addImport("implementation", font_provider_impl);
+    font_provider_mod.addAnonymousImport("font_mono", .{ .root_source_file = mono_font });
+    const scene_mod = b.createModule(.{
+        .root_source_file = b.path("src/gfx/scene/root.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    const text_mod = b.createModule(.{
+        .root_source_file = b.path("src/gfx/text/root.zig"),
+        .target = target,
+        .optimize = optimize,
+        .link_libc = true,
+    });
+    text_mod.linkSystemLibrary("harfbuzz", .{});
+    text_mod.addAnonymousImport("font_mono", .{
+        .root_source_file = mono_font,
+    });
     const architecture = createArchitectureModules(b, target, optimize);
     const dired_modules = createDiredPortableModules(
         b,
@@ -317,29 +351,19 @@ pub fn build(b: *std.Build) void {
     });
     addArchitectureImports(exe_mod, architecture);
     exe_mod.addImport("weft_fs_platform", fs_platform);
-    exe_mod.addImport("snail", snail_dep.module("snail"));
-    // SPIR-V-only shader scope: slangc runs inside snail's build; weft
-    // consumes blobs + the reflection ABI through this module. Snail-renderer
-    // only — a Skia build never analyzes snail_vk, so it must not pull the
-    // shader compile either (mutual exclusivity, requirement 1).
-    if (renderer == .snail) exe_mod.addImport("snail_shaders", snail_dep.module("snail-shaders-vk"));
+    exe_mod.addImport("weft_font_provider", font_provider_mod);
+    exe_mod.addImport("weft_scene", scene_mod);
+    exe_mod.addImport("weft_text", text_mod);
     exe_mod.addImport("stemma", stemma_dep.module("stemma"));
-    // Default monospace face, embedded from snail's asset set (DejaVu:
-    // free license, full box-drawing coverage). `--font` overrides.
-    exe_mod.addAnonymousImport("font_mono", .{
-        .root_source_file = snail_dep.path("assets/DejaVuSansMono.ttf"),
-    });
     exe_mod.linkSystemLibrary("wayland-client", .{});
     exe_mod.linkSystemLibrary("xkbcommon", .{});
     exe_mod.linkSystemLibrary("vulkan", .{});
-    // Runtime font-family resolution (sans/mono, weight, slant). System
-    // fonts, not pinned — see src/gfx/fonts.zig.
-    exe_mod.linkSystemLibrary("fontconfig", .{});
+    // Runtime font-family resolution is owned by `weft_font_provider`.
     addWaylandProtocols(b, exe_mod);
-    addSyntax(b, exe_mod, renderer);
+    addSyntax(b, exe_mod);
     addWasm(b, exe_mod);
     addQuickjs(b, exe_mod);
-    if (renderer == .skia) addSkia(b, exe_mod);
+    addSkia(b, exe_mod);
 
     const exe = b.addExecutable(.{
         .name = "weft",
@@ -364,8 +388,8 @@ pub fn build(b: *std.Build) void {
     run_step.dependOn(&run_cmd.step);
 
     // ── Tests ──
-    // Platform-free logic tests (input queue etc.) plus dependency smoke
-    // tests proving the snail/stemma wiring; no display server required.
+    // Platform-free logic tests and dependency smoke tests; no display server
+    // required.
     const test_mod = b.createModule(.{
         .root_source_file = b.path("src/tests.zig"),
         .target = target,
@@ -385,23 +409,24 @@ pub fn build(b: *std.Build) void {
     });
     addArchitectureImports(weft_mod, architecture);
     weft_mod.addImport("weft_fs_platform", fs_platform);
-    weft_mod.addImport("snail", snail_dep.module("snail"));
-    weft_mod.addImport("snail-raster", snail_dep.module("snail-raster"));
+    weft_mod.addImport("weft_font_provider", font_provider_mod);
+    weft_mod.addImport("weft_scene", scene_mod);
+    weft_mod.addImport("weft_text", text_mod);
     weft_mod.addImport("stemma", stemma_dep.module("stemma"));
-    weft_mod.addAnonymousImport("font_mono", .{
-        .root_source_file = snail_dep.path("assets/DejaVuSansMono.ttf"),
-    });
     // Resident JS catalog entries are data dependencies of the full headless
     // editor too. Route them through the module graph; the E2E config loader
     // must not reach out of `src/` to impersonate the installed catalog.
     weft_mod.addAnonymousImport("dap_js", .{
         .root_source_file = b.path("config/plugins/dap.js"),
     });
-    weft_mod.linkSystemLibrary("fontconfig", .{});
-    addSyntax(b, weft_mod, renderer);
+    // The authoritative E2E renderer uses ordinary offscreen Vulkan images;
+    // it deliberately has no WSI, compositor, or platform-input dependency.
+    weft_mod.linkSystemLibrary("vulkan", .{});
+    addSyntax(b, weft_mod);
     addWasm(b, weft_mod);
     embedGuests(b, weft_mod); // core's own wasm-membrane tests @embedFile the catalog
     addQuickjs(b, weft_mod);
+    addSkia(b, weft_mod);
 
     // `test_mod` (the `test` step) and `latency_mod` (the `e2e-latency` step,
     // below) are two SEPARATE module objects, wired IDENTICALLY through this
@@ -409,7 +434,7 @@ pub fn build(b: *std.Build) void {
     // separate objects. Same doctrine as harness.zig's `press` delegating to
     // `pressTimed`: one implementation of the wiring, not two copies that can
     // quietly drift apart.
-    configureTestModule(b, test_mod, snail_dep, stemma_dep, weft_mod, renderer);
+    configureTestModule(b, test_mod, stemma_dep, weft_mod);
 
     // The dispatch-latency instrument's record/compare switch (north-star-plan
     // W0a/C10 — src/e2e/latency_test.zig). `test_mod` — the module the plain
@@ -639,7 +664,7 @@ pub fn build(b: *std.Build) void {
         .optimize = optimize,
         .link_libc = true,
     });
-    configureTestModule(b, latency_mod, snail_dep, stemma_dep, weft_mod, renderer);
+    configureTestModule(b, latency_mod, stemma_dep, weft_mod);
     const latency_opts = b.addOptions();
     latency_opts.addOption(bool, "record", record_latency);
     latency_mod.addOptions("latency_options", latency_opts);
@@ -672,7 +697,7 @@ pub fn build(b: *std.Build) void {
         .optimize = optimize,
         .link_libc = true,
     });
-    configureTestModule(b, popup_layout_mod, snail_dep, stemma_dep, weft_mod, renderer);
+    configureTestModule(b, popup_layout_mod, stemma_dep, weft_mod);
     const popup_layout_opts = b.addOptions();
     popup_layout_opts.addOption(bool, "record_popup_layout", record_popup_layout);
     popup_layout_mod.addOptions("popup_layout_options", popup_layout_opts);
@@ -700,7 +725,7 @@ pub fn build(b: *std.Build) void {
     // Reuses `weft_mod` directly (it already carries `addWasm`, so
     // `src/e2e/trap_kinds_main.zig` reaches `weft.core.wasm` unmodified) —
     // no `configureTestModule` needed here since this isn't a test binary
-    // and touches none of snail/stemma/fonts/syntax.
+    // and touches none of the editor's text, scene, font, or syntax modules.
     const trap_kinds_mod = b.createModule(.{
         .root_source_file = b.path("src/e2e/trap_kinds_main.zig"),
         .target = target,
@@ -714,8 +739,8 @@ pub fn build(b: *std.Build) void {
     trap_kinds_step.dependOn(&run_trap_kinds.step);
 }
 
-/// Wire the shared test-module dependency set (snail/snail-raster/stemma/
-/// embedded font/fontconfig/syntax/wasmtime/embedded guests/quickjs/weft)
+/// Wire the shared test-module dependency set (stemma/syntax/wasmtime/
+/// embedded guests/quickjs/weft)
 /// onto `mod`. `test_mod` (the `test` step) and `latency_mod` (the
 /// `e2e-latency` step) both call this — it's the ONLY place that wiring is
 /// written, so the two binaries cannot drift apart the way two hand-copied
@@ -725,24 +750,11 @@ pub fn build(b: *std.Build) void {
 fn configureTestModule(
     b: *std.Build,
     mod: *std.Build.Module,
-    snail_dep: *std.Build.Dependency,
     stemma_dep: *std.Build.Dependency,
     weft_mod: *std.Build.Module,
-    renderer: Renderer,
 ) void {
-    mod.addImport("snail", snail_dep.module("snail"));
-    // CPU rasterizer — a display-free render-to-pixels harness for the
-    // view (gfx/harness.zig), so layout/decoration output can be asserted
-    // and dumped to an image without a compositor.
-    mod.addImport("snail-raster", snail_dep.module("snail-raster"));
     mod.addImport("stemma", stemma_dep.module("stemma"));
-    // Same embedded mono face the exe uses — lets layout tests prove the
-    // monospace-as-degenerate-case parity (stop.x == margin + col*cell_w).
-    mod.addAnonymousImport("font_mono", .{
-        .root_source_file = snail_dep.path("assets/DejaVuSansMono.ttf"),
-    });
-    mod.linkSystemLibrary("fontconfig", .{}); // View tests resolve faces
-    addSyntax(b, mod, renderer);
+    addSyntax(b, mod);
     addWasm(b, mod);
     embedGuests(b, mod);
     addQuickjs(b, mod);
@@ -970,13 +982,9 @@ fn addSkia(b: *std.Build, mod: *std.Build.Module) void {
     mod.addObjectFile(.{ .cwd_relative = libstdcpp });
 }
 
-fn addSyntax(b: *std.Build, mod: *std.Build.Module, renderer: Renderer) void {
+fn addSyntax(b: *std.Build, mod: *std.Build.Module) void {
     mod.linkSystemLibrary("tree-sitter", .{});
     const opts = b.addOptions();
-    // The selected renderer, read by gfx/context.zig + app/render.zig to
-    // comptime-switch backends (skia vs snail_vk). Shares the one
-    // `build_options` module the grammar paths already ride on.
-    opts.addOption(Renderer, "renderer", renderer);
     const grammars = [_]struct {
         env: []const u8,
         opt: []const u8,

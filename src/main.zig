@@ -1,5 +1,5 @@
 //! weft — the assembled editor: a Wayland window presenting a
-//! `core.Editor` through snail's analytic glyph pipeline, all behavior
+//! `core.Editor` through the renderer-neutral view and Skia, all behavior
 //! routed key → keymap → command ABI (built-ins and config/plugin
 //! commands through the same door). The frame loop's only wait is the
 //! swapchain (FIFO vsync); the input→commit→render path is bracketed by
@@ -14,11 +14,11 @@ const view_mod = @import("gfx/view.zig");
 const region = @import("gfx/region.zig");
 const window_layout = @import("gfx/window_layout.zig");
 const stats_mod = @import("gfx/stats.zig");
-const snail = @import("snail");
 const stemma = @import("stemma");
 const vk = @import("vk.zig").c;
+const font_provider = @import("weft_font_provider");
 
-const embedded_font = @embedFile("font_mono");
+const embedded_font = font_provider.defaultMono();
 
 const headless = @import("headless.zig");
 
@@ -44,7 +44,6 @@ const selectionAnchorOf = collab.selectionAnchorOf;
 const identityHandler = collab_cmds.identityHandler;
 const guiConfigure = collab.guiConfigure;
 const providers = @import("app/providers.zig");
-const Attach = providers.Attach;
 const attachProviders = providers.attachProviders;
 const detachProviders = providers.detachProviders;
 const resolveSyntax = providers.resolveSyntax;
@@ -136,7 +135,6 @@ pub fn main(init: std.process.Init) !void {
     try session.init(gpa, pool, args.user, &providers_state.grammars);
     defer session.deinit(gpa);
     const buffers = &session.system.buffers;
-    const editor_keymap = &session.system.keymap; // baked, like `buffers` — see applyIntents
     if (args.file) |path| {
         const b0 = buffers.active();
         gpa.free(b0.name);
@@ -524,30 +522,37 @@ pub fn main(init: std.process.Init) !void {
     // (`core/System.zig`'s module doc names it explicitly) — NOT solved
     // here. `Session.rebindSystem` logs this caveat on every successful
     // swap so a live user isn't silently confused by it.
-    const fx: frame_mod.FrameCtx = .{
-        .gpa = gpa,
-        .buffers = buffers,
-        .caps = &session.system.caps,
-        .keymap = &session.system.keymap,
-        .ui_mesh = &session.system.container,
-        .head = &session.head,
-        .semantic = &session.system.semantic,
-        .cursor_cfg = &session.cursor_cfg,
-        .plugins = &plug.list,
-        .conn = &collab_state.conn,
-        .hub = &collab_state.hub,
-        .collab_session = &collab_state.collab_session,
-        .partial_state = &collab_state.partial_state,
-        .ed0 = ed0,
-        .known_peers = &known_peers,
-        .noted_host_fp = &collab_state.noted_host_fp,
-        .view_dirty = &view_dirty,
-        .last_frame_rect = &last_frame_rect,
-        .flash_gen = &flash_gen,
-        .flash_start_ns = &flash_start_ns,
-        .flash_was_active = &flash_was_active,
-        .flash_duration_ns = flash_duration_ns,
+    var frame_driver: frame_mod.Driver = .{
+        .ctx = .{
+            .gpa = gpa,
+            .buffers = buffers,
+            .caps = &session.system.caps,
+            .keymap = &session.system.keymap,
+            .ui_mesh = &session.system.container,
+            .head = &session.head,
+            .semantic = &session.system.semantic,
+            .cursor_cfg = &session.cursor_cfg,
+            .plugins = &plug.list,
+            .conn = &collab_state.conn,
+            .hub = &collab_state.hub,
+            .collab_session = &collab_state.collab_session,
+            .partial_state = &collab_state.partial_state,
+            .ed0 = ed0,
+            .known_peers = &known_peers,
+            .noted_host_fp = &collab_state.noted_host_fp,
+            .view_dirty = &view_dirty,
+            .last_frame_rect = &last_frame_rect,
+            .flash_gen = &flash_gen,
+            .flash_start_ns = &flash_start_ns,
+            .flash_was_active = &flash_was_active,
+            .flash_duration_ns = flash_duration_ns,
+        },
+        .attach_deps = attach_deps,
+        .window_ctx = &win_ctx,
+        .layout = win_layout,
+        .view = view,
     };
+    const fx = &frame_driver.ctx;
 
     std.log.info("weft: rendering — {d} bytes open, em {d}", .{ ed0.text().byteLen(), args.em });
 
@@ -682,23 +687,10 @@ pub fn main(init: std.process.Init) !void {
 
         // Commands may have created/switched buffers; lazily attach
         // providers and damage the view on focus change.
-        const abuf = buffers.active();
-        try attachProviders(attach_deps, abuf);
-        // Attach providers to EVERY visible pane's buffer, not just the active
-        // one — so each split gets its own syntax grammar and highlights (the
-        // frame builder reparses each visible pane; without an attachment its
-        // resolveSyntax is null and the split stays unhighlighted).
-        const PaneAttach = struct {
-            deps: @TypeOf(attach_deps),
-            bufs: @TypeOf(buffers),
-            fn visit(pa: *const @This(), pane: *window_layout.Pane) void {
-                if (pa.bufs.get(pane.buffer_id)) |b| attachProviders(pa.deps, b) catch {};
-            }
-        };
-        var pane_attach = PaneAttach{ .deps = attach_deps, .bufs = buffers };
-        win_layout.eachPane(&pane_attach, PaneAttach.visit);
-        const editor = &abuf.editor;
-        const attach: *Attach = @ptrCast(@alignCast(abuf.frontend.?));
+        const prepared = try frame_driver.prepare();
+        const abuf = prepared.buffer;
+        const editor = prepared.editor;
+        const attach = prepared.attach;
         if (buffers.active_id != last_active) {
             last_active = buffers.active_id;
             view_dirty = true;
@@ -721,7 +713,7 @@ pub fn main(init: std.process.Init) !void {
         }
 
         // ── Async housekeeping tick (backing/LSP/nav/pick/plugins/activate/menu) ──
-        if (try frame_mod.tickAsync(&fx, abuf, &session.cmd_ctx, &plug.loop, &next_backing_poll_ns, &last_activate_path, &last_activate_len, &session.menu_overlay, which_key_delay_ns, frame_start))
+        if (try frame_mod.tickAsync(fx, abuf, &session.cmd_ctx, &plug.loop, &next_backing_poll_ns, &last_activate_path, &last_activate_len, &session.menu_overlay, which_key_delay_ns, frame_start))
             view_dirty = true;
         // JS plugins: fire each resident quickjs instance's proc-stream output
         // handler for streams with new bytes (agent transcripts stream in here).
@@ -735,8 +727,7 @@ pub fn main(init: std.process.Init) !void {
         // ── Window-layout intents (outside the input hot section) ──
         // `keymap` baked to the editor's like `buffers` (W0b consistency: the
         // whole window subsystem stays on the editor system's state pre-W0b).
-        if (window_cmds.applyIntents(&win_ctx, win_layout, view, buffers, gpa, &session.head, editor_keymap, last_frame_rect))
-            view_dirty = true;
+        _ = frame_driver.applyWindowIntents();
         // ── Collab tick (adopt/publish/relay, partial fetch, peer-fs, reconnect) ──
         if (try collab.tickCollab(&collab_state.share_ctx, &session.cmd_ctx, ed0, win_layout, &collab_state.peer_fs_bridge, &collab_state.remote_fs, &collab_state.peer_fs_inflight, &collab_state.noted_host_fp, &collab_state.last_liveness, &collab_state.reconnect, &collab_state.next_reconnect_ns, &collab_state.fd_link, &my_identity, pool, args.connect, args.token, session.echo()))
             view_dirty = true;
@@ -760,10 +751,7 @@ pub fn main(init: std.process.Init) !void {
         if (had_input) view_dirty = true; // cursor moves damage the view
 
         // ── Rebuild + upload on damage (backend-independent build) ──
-        try whead.render.buildFrame(&fx, .{
-            .editor = editor,
-            .abuf = abuf,
-            .attach = attach,
+        try frame_driver.build(&whead.render, .{
             .frame_start = frame_start,
             .fb = fb,
             .blink_on = blink_on,

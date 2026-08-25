@@ -1,9 +1,9 @@
 // C ABI membrane between Zig and Skia (C++). Only C scalar/pointer types
 // cross here; the Zig side (gfx/skia/root.zig) declares these `extern "C"`.
-// The renderer draws editor content — the view's per-pane snail Shapes,
-// decoded on the Zig side into text-run glyphs + filled rects — onto an
+// The renderer draws editor content — explicit text glyphs and filled rects
+// decoded on the Zig side — onto an
 // SkCanvas, then hands back the rasterized pixels for the Vulkan backend to
-// copy into the swapchain image. Two backing paths, same draw calls: Ganesh
+// copy into its target image. Two backing paths, same draw calls: Ganesh
 // (GrDirectContexts::MakeVulkan, sharing weft's VkDevice) or SkSurfaces raster.
 
 #ifndef WEFT_SKIA_SHIM_H
@@ -29,6 +29,10 @@ typedef struct {
     uint32_t queue_family;
     void* get_instance_proc_addr;  // PFN_vkGetInstanceProcAddr
     uint32_t api_version;          // e.g. VK_API_VERSION_1_1
+    const char* const* instance_extensions;
+    uint32_t instance_extension_count;
+    const char* const* device_extensions;
+    uint32_t device_extension_count;
 } WeftSkiaVulkan;
 
 // Create the renderer. `want_gpu` selects the Ganesh Vulkan backend; if 0 (or
@@ -46,14 +50,14 @@ void weft_skia_register_font(WeftSkia*, uint32_t font_id, const uint8_t* bytes, 
 
 // Begin a frame at `width`x`height` (allocates/resizes the target). Returns 0
 // on success. Colors below are straight sRGB in [0,1] (the Zig side converts
-// snail's linear theme colors to sRGB before calling).
+// the scene's linear theme colors to sRGB before calling).
 int weft_skia_begin(WeftSkia*, uint32_t width, uint32_t height);
 void weft_skia_clear(WeftSkia*, float r, float g, float b, float a);
 void weft_skia_draw_rect(WeftSkia*, float x, float y, float w, float h,
                          float r, float g, float b, float a);
-// One glyph by index (matches HarfBuzz/snail's glyph_id for the same face),
+// One glyph by index (the HarfBuzz glyph id for the same face),
 // baseline origin (x,y), pixel size, straight sRGB color.
-void weft_skia_draw_glyph(WeftSkia*, uint32_t font_id, uint16_t glyph_id,
+void weft_skia_draw_glyph(WeftSkia*, uint32_t font_id, uint32_t glyph_id,
                           float x, float y, float size,
                           float r, float g, float b, float a);
 

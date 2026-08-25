@@ -1,20 +1,18 @@
-//! Display-free render harness — rasterizes a `View` frame to an RGBA8
-//! pixel buffer on the CPU (snail-raster), so layout and decoration output
-//! can be asserted programmatically and dumped to an image, without a
-//! Wayland compositor or a GPU. Test-only; not part of the shipped binary.
+//! Display-free render harness — rasterizes a `View` frame through Skia's CPU
+//! backend so layout and decoration output can be asserted programmatically.
+//! Test-only; not part of the shipped binary.
 //!
 //! Convert a dump to PNG for eyeballing:  convert out.ppm out.png
 
 const std = @import("std");
-const snail = @import("snail");
-const raster = @import("snail-raster");
+const font_provider = @import("weft_font_provider");
+const scene = @import("weft_scene");
 const stemma = @import("stemma");
 const core = @import("../core/core.zig");
 const view_mod = @import("view.zig");
 const region = @import("region.zig");
 const window_layout = @import("window_layout.zig");
-
-const records = snail.render.records;
+const skia_mod = @import("skia/root.zig");
 
 fn fullFrame(w: u32, h: u32) region.Rect {
     return .{ .x = 0, .y = 0, .w = @floatFromInt(w), .h = @floatFromInt(h) };
@@ -25,7 +23,7 @@ fn fullFrame(w: u32, h: u32) region.Rect {
 pub const bg: [4]u8 = .{ 22, 23, 26, 255 };
 
 /// Render one full-frame `View` picture into a fresh RGBA8 buffer (caller
-/// owns it). Mirrors the exe's emit→draw pipeline on the CPU rasterizer.
+/// owns it). Uses the same scene decoder as the production renderer.
 pub fn renderView(
     gpa: std.mem.Allocator,
     view: *view_mod.View,
@@ -34,8 +32,8 @@ pub fn renderView(
     w: u32,
     h: u32,
 ) ![]u8 {
-    const projection = snail.Mat4.ortho(0, @floatFromInt(w), @floatFromInt(h), 0, -1, 1);
-    const w2p = snail.mvpToScenePixel(projection, @floatFromInt(w), @floatFromInt(h)) orelse unreachable;
+    const projection = scene.Mat4.ortho(0, @floatFromInt(w), @floatFromInt(h), 0, -1, 1);
+    const w2p = scene.mvpToScenePixel(projection, @floatFromInt(w), @floatFromInt(h)) orelse unreachable;
 
     var arena = std.heap.ArenaAllocator.init(gpa);
     defer arena.deinit();
@@ -44,14 +42,12 @@ pub fn renderView(
     var built = try view.build(arena.allocator(), editor, hud, &top_row, fullFrame(w, h), .{}, w2p);
     defer built.deinit(gpa);
 
-    return try rasterize(gpa, view, &.{built.shapes}, w, h);
+    return try rasterize(gpa, view, &.{built.items}, w, h);
 }
 
 /// Rasterize a set of panes already built into their own absolute sub-rects
 /// (via `view.build`, one `Built` per pane) into ONE composited RGBA8
-/// framebuffer — the headless analogue of `RenderState.present`'s emit + draw.
-/// `view.atlas` must still hold the glyph records the builds appended. Caller
-/// owns the returned pixels.
+/// framebuffer. Caller owns the returned pixels.
 pub fn renderBuilt(
     gpa: std.mem.Allocator,
     view: *view_mod.View,
@@ -59,61 +55,35 @@ pub fn renderBuilt(
     w: u32,
     h: u32,
 ) ![]u8 {
-    const lists = try gpa.alloc([]snail.Shape, built.len);
+    const lists = try gpa.alloc([]scene.DrawItem, built.len);
     defer gpa.free(lists);
-    for (built, 0..) |b, i| lists[i] = b.shapes;
+    for (built, 0..) |b, i| lists[i] = b.items;
     return rasterize(gpa, view, lists, w, h);
 }
 
 /// Rasterize already-built shape lists (one per pane) into one buffer.
 /// Panes are built into their own region rects (absolute coords), so every
-/// list emits with the identity transform. `view.atlas` holds the glyph
-/// records from the preceding build() calls.
+/// list is already in absolute framebuffer coordinates.
 pub fn rasterize(
     gpa: std.mem.Allocator,
     view: *view_mod.View,
-    shape_lists: []const []snail.Shape,
+    item_lists: []const []scene.DrawItem,
     w: u32,
     h: u32,
 ) ![]u8 {
-    const projection = snail.Mat4.ortho(0, @floatFromInt(w), @floatFromInt(h), 0, -1, 1);
-
-    var cache = try raster.DeviceAtlas.init(gpa, view.pool, .{
-        .max_bindings = 1,
-        .layer_info_height = 64,
-        .max_images = 0,
-    });
-    defer cache.deinit();
-    var bindings: [1]records.Binding = undefined;
-    try cache.upload(gpa, &.{&view.atlas}, &bindings);
-
+    var renderer = try skia_mod.Skia.init(null, false, false);
+    defer renderer.deinit();
+    for (view.face_set.bytes, 1..) |bytes, id| renderer.registerFont(@intCast(id), bytes);
+    try renderer.begin(w, h, view.theme.background);
+    for (item_lists) |items| renderer.drawItems(items);
+    const frame = try renderer.end(w, h);
     const pixels = try gpa.alloc(u8, @as(usize, w) * h * 4);
     errdefer gpa.free(pixels);
-    var pi: usize = 0;
-    while (pi < pixels.len) : (pi += 4) pixels[pi..][0..4].* = bg;
-
-    var renderer = try raster.Renderer.init(pixels, w, h, w * 4, .rgba8_unorm);
-    const ds: raster.DrawState = .{
-        .mvp = projection,
-        .surface = .{ .pixel_width = w, .pixel_height = h, .encoding = .srgb },
-        .raster = .{ .subpixel_order = .none },
-    };
-
-    // Accumulate every pane into ONE instance/batch stream, one draw —
-    // exactly as the exe does (carried emit cursors + a per-pane translate).
-    var total: usize = 0;
-    for (shape_lists) |shapes| total += shapes.len;
-    const inst = try gpa.alloc(records.Instance, @max(total, 1));
-    defer gpa.free(inst);
-    const bat = try gpa.alloc(records.DrawBatch, @max(total, 1));
-    defer gpa.free(bat);
-    var ilen: usize = 0;
-    var blen: usize = 0;
-    for (shape_lists) |shapes| {
-        if (shapes.len == 0) continue;
-        _ = try snail.emit.emit(inst, bat, &ilen, &blen, bindings[0], &view.atlas, shapes, .identity, .{ 1, 1, 1, 1 });
+    for (0..h) |row| {
+        const src = frame.pixels[row * frame.row_bytes ..][0 .. @as(usize, w) * 4];
+        const dst = pixels[row * @as(usize, w) * 4 ..][0 .. @as(usize, w) * 4];
+        @memcpy(dst, src);
     }
-    try raster.draw(&renderer, ds, .{ .instances = inst[0..ilen], .batches = bat[0..blen] }, &.{&cache}, null);
     return pixels;
 }
 
@@ -167,7 +137,7 @@ test "harness: a single pane renders text into the body" {
     const gpa = t.allocator;
     const pool = try core.task.Pool.init(gpa, .{ .threads = 1 });
     defer pool.deinit();
-    var view = try view_mod.View.init(gpa, @embedFile("font_mono"), 16);
+    var view = try view_mod.View.init(gpa, font_provider.defaultMono(), 16);
     defer view.deinit();
     var ed = try makeEditor(gpa, pool, "hello harness\nsecond line\n");
     defer ed.deinit(gpa);
@@ -187,7 +157,7 @@ test "harness: which-key panel does not collide with the status line" {
     const gpa = t.allocator;
     const pool = try core.task.Pool.init(gpa, .{ .threads = 1 });
     defer pool.deinit();
-    var view = try view_mod.View.init(gpa, @embedFile("font_mono"), 16);
+    var view = try view_mod.View.init(gpa, font_provider.defaultMono(), 16);
     defer view.deinit();
     // Enough lines to fill the body.
     var ed = try makeEditor(gpa, pool, "L1\nL2\nL3\nL4\nL5\nL6\nL7\nL8\nL9\nL10\n");
@@ -221,7 +191,7 @@ test "harness: the picker docks below the panes — cannot overlap body or statu
     const gpa = t.allocator;
     const pool = try core.task.Pool.init(gpa, .{ .threads = 1 });
     defer pool.deinit();
-    var view = try view_mod.View.init(gpa, @embedFile("font_mono"), 16);
+    var view = try view_mod.View.init(gpa, font_provider.defaultMono(), 16);
     defer view.deinit();
     var ed = try makeEditor(gpa, pool, "body line one\nbody line two\nbody line three\n");
     defer ed.deinit(gpa);
@@ -250,15 +220,15 @@ test "harness: the picker docks below the panes — cannot overlap body or statu
     // The dock and the panes touch exactly — no overlap, no gap.
     try t.expectApproxEqAbs(panes.y + panes.h, dock.y, 0.5);
 
-    const projection = snail.Mat4.ortho(0, @floatFromInt(w), @floatFromInt(h), 0, -1, 1);
-    const w2p = snail.mvpToScenePixel(projection, @floatFromInt(w), @floatFromInt(h)) orelse unreachable;
+    const projection = scene.Mat4.ortho(0, @floatFromInt(w), @floatFromInt(h), 0, -1, 1);
+    const w2p = scene.mvpToScenePixel(projection, @floatFromInt(w), @floatFromInt(h)) orelse unreachable;
     var arena = std.heap.ArenaAllocator.init(gpa);
     defer arena.deinit();
     view.resetFrame();
     var tr: usize = 0;
     var built = try view.build(arena.allocator(), &ed, .{ .mode = "normal", .pick = &pick }, &tr, panes, dock, w2p);
     defer built.deinit(gpa);
-    const pixels = try rasterize(gpa, &view, &.{built.shapes}, w, h);
+    const pixels = try rasterize(gpa, &view, &.{built.items}, w, h);
     defer gpa.free(pixels);
     writePpm(gpa, ".zig-cache/tmp/weft-harness-pick.ppm", pixels, w, h) catch {};
 
@@ -274,7 +244,7 @@ test "harness: a vertical split renders a buffer in each column" {
     const gpa = t.allocator;
     const pool = try core.task.Pool.init(gpa, .{ .threads = 1 });
     defer pool.deinit();
-    var view = try view_mod.View.init(gpa, @embedFile("font_mono"), 16);
+    var view = try view_mod.View.init(gpa, font_provider.defaultMono(), 16);
     defer view.deinit();
     var left = try makeEditor(gpa, pool, "LEFT PANE\nalpha bravo\n");
     defer left.deinit(gpa);
@@ -285,8 +255,8 @@ test "harness: a vertical split renders a buffer in each column" {
     const h: u32 = 160;
     const half: u32 = w / 2;
 
-    const projection = snail.Mat4.ortho(0, @floatFromInt(w), @floatFromInt(h), 0, -1, 1);
-    const w2p = snail.mvpToScenePixel(projection, @floatFromInt(w), @floatFromInt(h)) orelse unreachable;
+    const projection = scene.Mat4.ortho(0, @floatFromInt(w), @floatFromInt(h), 0, -1, 1);
+    const w2p = scene.mvpToScenePixel(projection, @floatFromInt(w), @floatFromInt(h)) orelse unreachable;
     var arena = std.heap.ArenaAllocator.init(gpa);
     defer arena.deinit();
 
@@ -302,7 +272,7 @@ test "harness: a vertical split renders a buffer in each column" {
     const right_layout = view.frame_layout;
     try t.expect(left_layout.lines.len > 0 and right_layout.lines.len > 0);
 
-    const pixels = try rasterize(gpa, &view, &.{ lb.shapes, rb.shapes }, w, h);
+    const pixels = try rasterize(gpa, &view, &.{ lb.items, rb.items }, w, h);
     defer gpa.free(pixels);
     defer {
         var b1 = lb;
@@ -323,7 +293,7 @@ test "harness: renderBuilt composites panes laid out by the real window layout" 
     const gpa = t.allocator;
     const pool = try core.task.Pool.init(gpa, .{ .threads = 1 });
     defer pool.deinit();
-    var view = try view_mod.View.init(gpa, @embedFile("font_mono"), 16);
+    var view = try view_mod.View.init(gpa, font_provider.defaultMono(), 16);
     defer view.deinit();
     var left = try makeEditor(gpa, pool, "LEFT PANE\nalpha\n");
     defer left.deinit(gpa);
@@ -342,8 +312,8 @@ test "harness: renderBuilt composites panes laid out by the real window layout" 
     const n = layout.collect(focused, frame, &slots);
     try t.expectEqual(@as(usize, 2), n);
 
-    const projection = snail.Mat4.ortho(0, @floatFromInt(w), @floatFromInt(h), 0, -1, 1);
-    const w2p = snail.mvpToScenePixel(projection, @floatFromInt(w), @floatFromInt(h)) orelse unreachable;
+    const projection = scene.Mat4.ortho(0, @floatFromInt(w), @floatFromInt(h), 0, -1, 1);
+    const w2p = scene.mvpToScenePixel(projection, @floatFromInt(w), @floatFromInt(h)) orelse unreachable;
     var arena = std.heap.ArenaAllocator.init(gpa);
     defer arena.deinit();
     view.resetFrame();
@@ -374,7 +344,7 @@ test "harness: a horizontal split stacks a buffer in each row" {
     const gpa = t.allocator;
     const pool = try core.task.Pool.init(gpa, .{ .threads = 1 });
     defer pool.deinit();
-    var view = try view_mod.View.init(gpa, @embedFile("font_mono"), 16);
+    var view = try view_mod.View.init(gpa, font_provider.defaultMono(), 16);
     defer view.deinit();
     var top = try makeEditor(gpa, pool, "TOP PANE\nalpha bravo\n");
     defer top.deinit(gpa);
@@ -384,8 +354,8 @@ test "harness: a horizontal split stacks a buffer in each row" {
     const w: u32 = 320;
     const h: u32 = 320;
     const half: u32 = h / 2;
-    const projection = snail.Mat4.ortho(0, @floatFromInt(w), @floatFromInt(h), 0, -1, 1);
-    const w2p = snail.mvpToScenePixel(projection, @floatFromInt(w), @floatFromInt(h)) orelse unreachable;
+    const projection = scene.Mat4.ortho(0, @floatFromInt(w), @floatFromInt(h), 0, -1, 1);
+    const w2p = scene.mvpToScenePixel(projection, @floatFromInt(w), @floatFromInt(h)) orelse unreachable;
     var arena = std.heap.ArenaAllocator.init(gpa);
     defer arena.deinit();
 
@@ -406,7 +376,7 @@ test "harness: a horizontal split stacks a buffer in each row" {
         b2.deinit(gpa);
     }
 
-    const pixels = try rasterize(gpa, &view, &.{ tb.shapes, bb.shapes }, w, h);
+    const pixels = try rasterize(gpa, &view, &.{ tb.items, bb.items }, w, h);
     defer gpa.free(pixels);
     // Content in both rows' body tops; the bottom pane's first text row sits
     // just below the seam.

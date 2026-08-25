@@ -7,7 +7,7 @@
 # Enter it before running the suite so the tools are on PATH for the proc
 # children (which inherit weft's environment):
 #
-#     nix-shell src/e2e/shell.nix --run 'zig build test -Drenderer=snail'
+#     nix-shell src/e2e/shell.nix --run 'zig build test'
 #
 # Tests that need a specific tool probe for it and skip cleanly when it is absent,
 # so `zig build test` still passes outside this shell — but LSP/DAP coverage only

@@ -8,7 +8,6 @@ const h = @import("harness.zig");
 const language_support = @import("language_support.zig");
 
 const core = h.core;
-const snail = h.snail;
 const session = h.session;
 const region = h.region;
 const window_layout = h.window_layout;
@@ -394,7 +393,7 @@ test "e2e/spine: write a file, init a repo, stage and commit — all through wef
         try assertShippedConfigLoaded(&mirror_loader);
         try mirror.buffers.setDefaultMode(gpa, "normal");
         mirror.setMode("normal");
-        proj.bindDemoScreens(&ed, &mirror);
+        try proj.bindDemoScreens(&ed, &mirror);
     }
 
     // ── 1. Pair two named peers on the same empty document. ──
@@ -514,12 +513,12 @@ test "e2e/spine: write a file, init a repo, stage and commit — all through wef
     // and accept the existing buffer, then use the ordinary Vim search to
     // navigate within it.
     ed.chord("SPC ,");
-    ed.typeText("main.zig");
+    proj.typeText(&ed, "main.zig");
     proj.capture(&ed, "spine-buffer-picker");
     ed.press("Return", "");
     try t.expectEqualStrings("main.zig", ed.bufferName());
     ed.press("/", "");
-    ed.typeText("helper");
+    proj.typeText(&ed, "helper");
     ed.press("Return", "");
     {
         const text = try ed.textAlloc();
@@ -544,7 +543,7 @@ test "e2e/spine: write a file, init a repo, stage and commit — all through wef
     ed.run("buf-scratch");
     ed.press("i", "");
     ed.press("parenleft", "(");
-    ed.typeText("autopair");
+    proj.typeText(&ed, "autopair");
     ed.press("Escape", "");
     {
         const scratch = try ed.textAlloc();
@@ -561,7 +560,7 @@ test "e2e/spine: write a file, init a repo, stage and commit — all through wef
     ed.runStr("insert-shell", "printf shell-plugin");
     try t.expect(drainBufferContains(&ed, "shell-plugin"));
     ed.press("o", "");
-    ed.typeText("41");
+    proj.typeText(&ed, "41");
     ed.press("Escape", "");
     ed.press("0", "");
     ed.press("C-a", "");
@@ -643,7 +642,7 @@ test "e2e/spine: write a file, init a repo, stage and commit — all through wef
     ed.runStr("open", "main.zig");
     ed.chord("SPC o c");
     ed.press("i", "");
-    ed.typeText("printf console-ok");
+    proj.typeText(&ed, "printf console-ok");
     ed.press("Escape", "");
     ed.run("console-send");
     try t.expect(drainToolContains(&ed, "*console*", "console-ok"));
@@ -722,7 +721,7 @@ test "e2e/spine: write a file, init a repo, stage and commit — all through wef
     ed.runStr("open", "rename-dir");
     ed.press("i", "");
     for (0..7) |_| ed.press("Delete", "");
-    ed.typeText("new.txt");
+    proj.typeText(&ed, "new.txt");
     ed.press("Escape", "");
     var rename_field = ed.head.semantic_focus.path().?.field.?;
     var renamed = try ed.session.system.semantic.fields.get(rename_field).?.snapshot(gpa);
@@ -731,7 +730,7 @@ test "e2e/spine: write a file, init a repo, stage and commit — all through wef
     // :e! is the generic view.revert action. It restores the provider draft,
     // including its original field identity, without applying anything.
     ed.press("colon", "");
-    ed.typeText("e!");
+    proj.typeText(&ed, "e!");
     ed.press("Return", "");
     try t.expectEqualStrings("normal", ed.mode());
     rename_field = ed.head.semantic_focus.path().?.field.?;
@@ -745,7 +744,7 @@ test "e2e/spine: write a file, init a repo, stage and commit — all through wef
         .selection_after = .{ .anchor = 0, .caret = 0 },
     });
     ed.press("i", "");
-    ed.typeText("new.txt");
+    proj.typeText(&ed, "new.txt");
     ed.press("Escape", "");
     proj.capture(&ed, "spine-dired-rename-plan");
     ed.chord("SPC v a");
@@ -768,15 +767,15 @@ test "e2e/spine: write a file, init a repo, stage and commit — all through wef
     try t.expectEqual(@as(usize, 0), ed.session.system.semantic.views.get(create_view).?.scene.content.container.children.len);
     ed.chord("SPC v n");
     ed.press("i", "");
-    ed.typeText("made.txt");
+    proj.typeText(&ed, "made.txt");
     ed.press("Escape", "");
     ed.chord("SPC v m");
     ed.press("i", "");
-    ed.typeText("0600");
+    proj.typeText(&ed, "0600");
     ed.press("Escape", "");
     ed.chord("SPC v N");
     ed.press("i", "");
-    ed.typeText("made-dir");
+    proj.typeText(&ed, "made-dir");
     ed.press("Escape", "");
     proj.capture(&ed, "spine-dired-create-plan");
     ed.chord("SPC v a");
@@ -841,7 +840,7 @@ test "e2e/spine: write a file, init a repo, stage and commit — all through wef
         .selection_after = .{ .anchor = 0, .caret = 0 },
     });
     ed.press("i", "");
-    ed.typeText("draft.txt");
+    proj.typeText(&ed, "draft.txt");
     ed.press("Escape", "");
     _ = try proj.oracle("mv -- refresh-dir/a-dirty.txt refresh-dir/external.txt");
     core.file.deleteFile(gpa, "refresh-dir/z-clean.txt");

@@ -9,7 +9,7 @@
 //!
 //! A `Layout` is a per-frame value: a list of `VisualLine`s, each with a
 //! baseline and an ascending list of `Stop`s — the caret x at each source
-//! byte offset, read directly from snail's shaped glyphs (each glyph
+//! byte offset, read directly from shaped glyphs (each glyph
 //! carries its absolute cumulative pen `x_offset` in em units plus the
 //! source byte range it came from). The same `buildRowStops` primitive
 //! builds these lines AND answers off-screen vertical motion, so the map
@@ -19,7 +19,8 @@ const std = @import("std");
 const Allocator = std.mem.Allocator;
 const assert = std.debug.assert;
 
-const snail = @import("snail");
+const text = @import("weft_text");
+const font_provider = @import("weft_font_provider");
 const stemma = @import("stemma");
 
 /// Caret x at a source byte offset. Stops are emitted in ascending
@@ -178,7 +179,7 @@ pub fn tabStopAfter(col: usize) usize {
 /// tab stop — a display substitution, the document is untouched.
 pub fn buildRowStops(
     arena: Allocator,
-    faces: *snail.Faces,
+    faces: *text.StyleSet,
     rope: *const stemma.Rope,
     row: usize,
     m: RowMetrics,
@@ -196,7 +197,7 @@ pub fn buildRowStops(
         for (shbuf) |*b| {
             if (b.* == '\t') b.* = ' ';
         }
-        const shaped = try snail.shape(arena, faces, shbuf, .{});
+        const shaped = try text.shape(arena, faces, shbuf, .{});
         // A glyph's absolute pen x in em units is `x_offset`; world x is
         // `margin + em*x_offset`, plus the accumulated tab shift. Its
         // source cluster starts at `src.start + source_start`.
@@ -327,8 +328,9 @@ test "buildRowStops: monospace is the degenerate case (stop.x == margin + col*ce
     defer arena_state.deinit();
     const arena = arena_state.allocator();
 
-    var font = try snail.Font.init(@embedFile("font_mono"));
-    var faces = try snail.Faces.build(gpa, &.{.{ .font = &font, .font_id = 1 }});
+    var font = try text.Font.init(font_provider.defaultMono());
+    defer font.deinit();
+    var faces = try text.StyleSet.build(gpa, &.{.{ .font = &font, .font_id = 1 }});
     defer faces.deinit();
 
     const em: f32 = 16;

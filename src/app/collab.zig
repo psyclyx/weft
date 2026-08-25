@@ -437,7 +437,7 @@ pub const Collab = struct {
         const id = self.remote_fs.request(session, 0, envelope) catch return error.Io;
         const deadline = core.task.nowNs() + 10 * std.time.ns_per_s;
         while (core.task.nowNs() < deadline) {
-            _ = connection.tick(0) catch return error.Io;
+            _ = connection.tick() catch return error.Io;
             if (self.remote_fs.take(id)) |response| {
                 defer self.gpa.free(response);
                 const decoded = core.peer_fs.decodeResponse(response) orelse return error.Io;

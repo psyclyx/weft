@@ -1,13 +1,13 @@
 //! Theme — the view's color palette (data + small lookups).
 //!
-//! sRGB-authored, converted to linear at init (snail's color ABI is linear,
+//! sRGB-authored, converted to linear at init (the scene color ABI is linear,
 //! straight alpha). Pure data plus the semantic-role → color lookups the
 //! render path consults; a colorscheme change is a mutation here, never a
 //! per-span branch. Split out of `view.zig` and re-exported by it.
 
 const std = @import("std");
 
-const snail = @import("snail");
+const scene = @import("weft_scene");
 const core = @import("../../core/core.zig");
 
 const HighlightClass = core.capability.HighlightClass;
@@ -43,7 +43,7 @@ md_link: [4]f32 = .{ 0.53, 0.70, 0.92, 1 },
 pub fn linearized(self: Theme) Theme {
     var out: Theme = undefined;
     inline for (@typeInfo(Theme).@"struct".fields) |f| {
-        @field(out, f.name) = snail.color.srgbToLinearColor(@field(self, f.name));
+        @field(out, f.name) = scene.srgbToLinearColor(@field(self, f.name));
     }
     return out;
 }
@@ -57,7 +57,7 @@ pub fn setColor(self: *Theme, name: []const u8, hex: []const u8) bool {
     const srgb = parseHexColor(hex) orelse return false;
     inline for (@typeInfo(Theme).@"struct".fields) |f| {
         if (std.mem.eql(u8, f.name, name)) {
-            @field(self, f.name) = snail.color.srgbToLinearColor(srgb);
+            @field(self, f.name) = scene.srgbToLinearColor(srgb);
             return true;
         }
     }

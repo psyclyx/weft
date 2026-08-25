@@ -1,14 +1,12 @@
-//! Rendering — prepare every run's records, then place runs + rects as shapes.
+//! Lower laid-out text runs and rectangles into explicit scene draw items.
 //!
-//! Free functions over `*View`. `render` is the tail of `build`: it prepares
-//! the atlas records (reporting growth), counts the shapes, then emits rects
-//! first (they draw behind the text — a block caret sits behind its recolored
-//! glyph) and each run in its placement. Split out of `view.zig`.
+//! This is the only placement step between view layout and a renderer. It has
+//! no glyph cache, atlas, backend record, or GPU dependency.
 
 const std = @import("std");
 
-const snail = @import("snail");
-const prepare = @import("../prepare.zig");
+const text_engine = @import("weft_text");
+const scene = @import("weft_scene");
 const view = @import("../view.zig");
 
 const View = view.View;
@@ -16,87 +14,122 @@ const Run = view.Run;
 const Rect = view.Rect;
 const Built = view.Built;
 
-pub fn render(v: *View, world_to_pixel: snail.Transform2D, runs: []Run, rects: []const Rect) !Built {
-    // Prepare every glyph run's records (idempotent for resident ones).
-    const run_ptrs = try v.gpa.alloc(*const snail.ShapedText, runs.len);
-    defer v.gpa.free(run_ptrs);
-    for (runs, run_ptrs) |*r, *out| out.* = &r.shaped;
-    const sources = v.face_set.sources();
-    const before = v.atlas.recordCount();
-    try prepare.run(v.gpa, &v.atlas, &sources, run_ptrs, .{ .unhinted = .{ .colr = .layers } });
-    const after = v.atlas.recordCount();
-
-    var count: usize = rects.len;
-    for (runs) |*r| count += try runShapeCount(v, r, world_to_pixel);
-    const shapes = try v.gpa.alloc(snail.Shape, count);
-    errdefer v.gpa.free(shapes);
+pub fn render(v: *View, world_to_pixel: scene.Transform2D, runs: []Run, rects: []const Rect) !Built {
+    var count = rects.len;
+    for (runs) |run| count += run.shaped.glyphs.len;
+    const items = try v.gpa.alloc(scene.DrawItem, count);
+    errdefer v.gpa.free(items);
 
     var at: usize = 0;
-    // Rects first — they draw behind the text (a block caret sits
-    // behind its recolored glyph).
-    for (rects) |rc| {
-        shapes[at] = rectShape(v, rc);
+    for (rects) |rect| {
+        items[at] = .{ .rect = .{
+            .x = rect.x,
+            .y = rect.y,
+            .w = rect.w,
+            .h = rect.h,
+            .color = rect.color,
+        } };
         at += 1;
     }
-    for (runs) |*r| {
-        const placed = try placeRunInto(v, shapes[at..], r, world_to_pixel);
-        at += placed.len;
+    for (runs) |*run| {
+        at += switch (run.place) {
+            .cell => |cells| try placeCells(items[at..], &run.shaped, cells, .{
+                .baseline = .{ .x = v.origin_x, .y = run.baseline_y },
+                .cell_width = v.cell_w,
+                .em = v.em,
+                .world_to_pixel = world_to_pixel,
+            }),
+            .prop => |prop| placeProportional(items[at..], &run.shaped, .{
+                .baseline = .{ .x = prop.x, .y = run.baseline_y },
+                .em = prop.em,
+                .color = prop.color,
+            }),
+        };
     }
-    std.debug.assert(at == shapes.len);
-    return .{ .shapes = shapes, .records_added = after - before };
+    std.debug.assert(at == items.len);
+    return .{ .items = items };
 }
 
-fn runShapeCount(v: *View, r: *const Run, w2p: snail.Transform2D) !usize {
-    return switch (r.place) {
-        .cell => |cells| try snail.placedCellRunShapeCount(&r.shaped, &v.face_set.mono, cells, cellPlacement(v, r.baseline_y, w2p)),
-        .prop => try snail.placedRunShapeCount(&r.shaped, null, propPlacement(r, w2p)),
-    };
+const CellPlacement = struct {
+    baseline: scene.Vec2,
+    cell_width: f32,
+    em: f32,
+    world_to_pixel: scene.Transform2D,
+};
+
+fn placeCells(
+    out: []scene.DrawItem,
+    shaped: *const text_engine.ShapedText,
+    cells: []const text_engine.Cell,
+    placement: CellPlacement,
+) !usize {
+    if (out.len < shaped.glyphs.len) return error.BufferTooSmall;
+    const inverse = placement.world_to_pixel.inverse() orelse return error.InvalidTransform;
+    const base_device = placement.world_to_pixel.applyPoint(placement.baseline);
+    const device_cell_width = @round(placement.world_to_pixel.xx * placement.cell_width);
+    if (!std.math.isFinite(device_cell_width) or device_cell_width == 0)
+        return error.InvalidTransform;
+
+    for (shaped.glyphs, 0..) |glyph, index| {
+        const cell = cellForSource(cells, glyph.source_start) orelse return error.NoCellForGlyph;
+        const cluster_pen = clusterPen(shaped.glyphs, glyph.source_start);
+        const device_origin = scene.Vec2{
+            .x = @round(base_device.x) + @as(f32, @floatFromInt(cell.column)) * device_cell_width,
+            .y = @round(base_device.y),
+        };
+        const cell_origin = inverse.applyPoint(device_origin);
+        out[index] = .{ .glyph = .{
+            .font_id = glyph.font_id,
+            .glyph_id = glyph.glyph_id,
+            .x = cell_origin.x + placement.em * (glyph.x_offset - cluster_pen.x),
+            .y = cell_origin.y + placement.em * (glyph.y_offset - cluster_pen.y),
+            .size = placement.em,
+            .color = cell.color,
+        } };
+    }
+    return shaped.glyphs.len;
 }
 
-fn placeRunInto(v: *View, out: []snail.Shape, r: *const Run, w2p: snail.Transform2D) ![]snail.Shape {
-    return switch (r.place) {
-        .cell => |cells| try snail.placeCellRun(out, &r.shaped, &v.face_set.mono, cells, cellPlacement(v, r.baseline_y, w2p)),
-        .prop => try snail.placeRun(out, &r.shaped, null, propPlacement(r, w2p)),
-    };
+const ProportionalPlacement = struct {
+    baseline: scene.Vec2,
+    em: f32,
+    color: scene.Color,
+};
+
+fn placeProportional(out: []scene.DrawItem, shaped: *const text_engine.ShapedText, placement: ProportionalPlacement) usize {
+    std.debug.assert(out.len >= shaped.glyphs.len);
+    for (shaped.glyphs, 0..) |glyph, index| {
+        out[index] = .{ .glyph = .{
+            .font_id = glyph.font_id,
+            .glyph_id = glyph.glyph_id,
+            .x = placement.baseline.x + placement.em * glyph.x_offset,
+            .y = placement.baseline.y + placement.em * glyph.y_offset,
+            .size = placement.em,
+            .color = placement.color,
+        } };
+    }
+    return shaped.glyphs.len;
 }
 
-fn cellPlacement(v: *const View, baseline_y: f32, world_to_pixel: snail.Transform2D) snail.CellRunPlacement {
-    return .{
-        .baseline = .{ .x = v.origin_x, .y = baseline_y },
-        .cell_width = v.cell_w,
-        .em = v.em,
-        .snap = .grid,
-        .y_axis = .down,
-        .world_to_pixel = world_to_pixel,
-    };
+fn cellForSource(cells: []const text_engine.Cell, source_start: u32) ?text_engine.Cell {
+    var low: usize = 0;
+    var high = cells.len;
+    while (low < high) {
+        const mid = low + (high - low) / 2;
+        if (cells[mid].source.start <= source_start)
+            low = mid + 1
+        else
+            high = mid;
+    }
+    if (low == 0) return null;
+    const cell = cells[low - 1];
+    return if (source_start < cell.source.end) cell else null;
 }
 
-fn propPlacement(r: *const Run, world_to_pixel: snail.Transform2D) snail.RunPlacement {
-    const p = r.place.prop;
-    return .{
-        .baseline = .{ .x = p.x, .y = r.baseline_y },
-        .em = p.em,
-        .color = p.color,
-        .mode = .unhinted,
-        .snap = .origins,
-        .y_axis = .down,
-        .world_to_pixel = world_to_pixel,
-    };
-}
-
-fn rectShape(v: *const View, r: Rect) snail.Shape {
-    // The unit-square record spans [-1, 1]² (centered), so the affine
-    // maps its center to the rect's center with half-extent scales.
-    return .{
-        .key = v.rect_key,
-        .local_transform = .{
-            .xx = r.w / 2,
-            .xy = 0,
-            .tx = r.x + r.w / 2,
-            .yx = 0,
-            .yy = r.h / 2,
-            .ty = r.y + r.h / 2,
-        },
-        .local_color = r.color,
-    };
+fn clusterPen(glyphs: []const text_engine.ShapedText.Glyph, source_start: u32) scene.Vec2 {
+    for (glyphs) |glyph| {
+        if (glyph.source_start == source_start)
+            return .{ .x = glyph.x_offset, .y = glyph.y_offset };
+    }
+    unreachable;
 }

@@ -1,9 +1,9 @@
 let
   npins = import ./npins;
 
-  # No nix package yet: weft's Zig dependencies (snail, stemma) are path
-  # deps into the monorepo checkout, which a sandboxed nix build cannot
-  # reach. Once psyclyx/stemma is pushed, both become npins pins consumed
+  # No nix package yet: weft's Stemma Zig dependency is a path dep into the
+  # monorepo checkout, which a sandboxed nix build cannot reach. Once
+  # psyclyx/stemma is pushed, it becomes an npins pin consumed
   # via `zig build --system` (the goop pattern) and a nix/weft.nix package
   # lands here. Until then: `nix-shell` + `zig build` is the build.
   mkPackages = _pkgs: { };

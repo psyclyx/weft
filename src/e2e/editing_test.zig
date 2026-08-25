@@ -7,7 +7,6 @@ const t = std.testing;
 const h = @import("harness.zig");
 
 const core = h.core;
-const snail = h.snail;
 const session = h.session;
 const region = h.region;
 const window_layout = h.window_layout;

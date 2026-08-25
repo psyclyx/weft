@@ -1,6 +1,6 @@
 //! view — the View package root: the `View` type plus its satellites.
 //!
-//! `View` (Editor state → snail shapes) is the dominant type and lives in
+//! `View` (editor state to draw items) is the dominant type and lives in
 //! its own struct file `view/View.zig`; this root is a thin, curated
 //! re-export so importers name `view.View` / `view.Hud` / `view.Theme` /
 //! `view.Built` (and the render submodules name `view.Run` / `view.Rect`)
@@ -9,7 +9,7 @@
 //! (statusline/popup/decoration/linelayout/render) are free-function
 //! namespaces over `*View` in their own files.
 
-/// The main type: Editor state → snail shapes. Its associated output
+/// The main type: editor state to draw items. Its associated output
 /// vocabulary (`Built`, `Run`, `Rect`) hangs off it as public decls.
 pub const View = @import("view/View.zig");
 pub const Built = View.Built;

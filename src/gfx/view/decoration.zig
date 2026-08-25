@@ -7,7 +7,7 @@
 const std = @import("std");
 const Allocator = std.mem.Allocator;
 
-const snail = @import("snail");
+const scene = @import("weft_scene");
 const stemma = @import("stemma");
 const layout = @import("../layout.zig");
 const view = @import("../view.zig");
@@ -38,7 +38,7 @@ pub fn selectionRects(v: *View, scratch: Allocator, rects: *std.ArrayList(Rect),
 /// a selection reads as a translucent wash). Authored in sRGB, returned
 /// linear like the rest of the theme.
 pub fn peerColor(hue: f32, light: f32, alpha: f32) [4]f32 {
-    return snail.color.srgbToLinearColor(hslToSrgb(hue, 0.65, light, alpha));
+    return scene.srgbToLinearColor(hslToSrgb(hue, 0.65, light, alpha));
 }
 
 fn hslToSrgb(h: f32, s: f32, l: f32, a: f32) [4]f32 {

@@ -1,20 +1,18 @@
 //! Skia backend `RenderState` (the default renderer). It embeds the shared
 //! `FrameBuilder` (View + pane tree + built panes) and adds the Skia renderer +
-//! the Vulkan glue that lands its output on screen. Skia rasterizes the frame
+//! the Vulkan glue that lands its output in the target image. Skia rasterizes the frame
 //! into its own surface (Ganesh Vulkan when a real GPU exists, else CPU raster);
-//! `present` copies those pixels into the acquired swapchain image via a
-//! host-visible staging buffer and the Context's render-pass-free `submitPresent`
-//! — so Vulkan still owns device/queue/swapchain/present, only Skia's
+//! `present` copies those pixels into the acquired Vulkan image via a
+//! host-visible staging buffer and the target's render-pass-free terminal submit
+//! — so Vulkan still owns device/queue/output, only Skia's
 //! rasterization moves (and, on CPU fallback, off the GPU entirely).
 //!
-//! The content boundary is snail's `[]Shape`: `buildFrame` (shared) lowers each
-//! pane to affine-placed glyph records + fill rects; `skia.drawShapes` decodes
-//! those to SkCanvas calls. No snail Vulkan pipeline or SPIR-V is pulled in.
+//! The content boundary is Weft's renderer-neutral draw list: `buildFrame`
+//! lowers each pane to explicit glyphs and fill rects, which Skia decodes into
+//! SkCanvas calls.
 
 const std = @import("std");
 const vk = @import("../vk.zig").c;
-const context = @import("../gfx/context.zig");
-const Context = context.Context;
 const skia = @import("../gfx/skia/root.zig");
 const stats_mod = @import("../gfx/stats.zig");
 const frame = @import("frame.zig");
@@ -33,12 +31,12 @@ pub const RenderState = struct {
     fb: FrameBuilder,
     skia: skia.Skia,
     /// Host-visible buffer holding the last rasterized frame, copied into the
-    /// swapchain image each present. Resized on framebuffer resize.
+    /// target image each submit. Resized with the framebuffer.
     staging: Staging,
     /// A frame has been rasterized and is ready to copy (guards the first
     /// present before any build has run).
     have_frame: bool,
-    /// Output byte order (true = BGRA to match a B8G8R8A8 swapchain).
+    /// Output byte order (true = BGRA to match a B8G8R8A8 target).
     bgra: bool,
     /// One-shot: the WEFT_SKIA_DUMP debug dump has fired.
     dumped: bool,
@@ -46,7 +44,7 @@ pub const RenderState = struct {
     pub fn init(
         self: *RenderState,
         gpa: std.mem.Allocator,
-        ctx: *Context,
+        ctx: anytype,
         font_bytes: []const u8,
         em: f32,
         active_id: core.Buffers.Id,
@@ -55,14 +53,15 @@ pub const RenderState = struct {
         try self.fb.init(gpa, font_bytes, em, active_id);
         errdefer self.fb.deinit();
 
-        // Match the shim's byte order to the swapchain format so the copy is a
-        // straight blit; both common formats are sRGB-encoded (see context.zig).
-        const fmt = ctx.surface_format.format;
+        // Match the shim's byte order to the target format so the copy is a
+        // straight blit.
+        const fmt = ctx.colorFormat();
         const bgra = fmt == vk.VK_FORMAT_B8G8R8A8_SRGB or fmt == vk.VK_FORMAT_B8G8R8A8_UNORM;
 
         // CPU raster when there is no real GPU, or when WEFT_SKIA_CPU is set.
         const force_cpu = std.c.getenv(cpu_env) != null;
         const want_gpu = ctx.has_real_gpu and !force_cpu;
+        const extensions = ctx.vulkanExtensions();
         var vkinfo: skia.VulkanInfo = .{
             .instance = ctx.instance,
             .physical_device = ctx.physical_device,
@@ -71,6 +70,10 @@ pub const RenderState = struct {
             .queue_family = ctx.queue_family,
             .get_instance_proc_addr = @ptrCast(&vk.vkGetInstanceProcAddr),
             .api_version = vk.VK_API_VERSION_1_1,
+            .instance_extensions = if (extensions.instance.len == 0) null else extensions.instance.ptr,
+            .instance_extension_count = @intCast(extensions.instance.len),
+            .device_extensions = if (extensions.device.len == 0) null else extensions.device.ptr,
+            .device_extension_count = @intCast(extensions.device.len),
         };
         self.skia = try skia.Skia.init(&vkinfo, want_gpu, bgra);
         errdefer self.skia.deinit();
@@ -79,8 +82,8 @@ pub const RenderState = struct {
             if (!ctx.has_real_gpu) " (no dedicated GPU)" else if (force_cpu) " (WEFT_SKIA_CPU)" else "",
         });
 
-        // Register every owned face by its stable font_id (1..5) so glyph ids
-        // in the shapes resolve to the same outlines snail shaped from.
+        // Register every owned face by its stable font_id (1..5) so shaped
+        // glyph ids resolve against the same font bytes.
         const face_set = &self.fb.view.face_set;
         for (0..face_set.bytes.len) |i| self.skia.registerFont(@intCast(i + 1), face_set.bytes[i]);
 
@@ -105,11 +108,11 @@ pub const RenderState = struct {
 
     /// Rasterize the built panes with Skia into the staging buffer. Runs only on
     /// rebuilt frames; the buffer persists so clean frames re-present it.
-    fn rasterize(self: *RenderState, ctx: *Context) !void {
+    fn rasterize(self: *RenderState, ctx: anytype) !void {
         const w = ctx.extent.width;
         const h = ctx.extent.height;
         try self.skia.begin(w, h, self.fb.view.theme.background);
-        for (self.fb.built_panes.items) |bp| self.skia.drawShapes(bp.shapes);
+        for (self.fb.built_panes.items) |bp| self.skia.drawItems(bp.items);
         const f = try self.skia.end(w, h);
 
         const total = @as(usize, f.height) * f.row_bytes;
@@ -125,23 +128,21 @@ pub const RenderState = struct {
         }
     }
 
-    /// Present: (re)rasterize on damage, then acquire a swapchain image, copy the
-    /// staged pixels into it, and submit/present. The only method touching the
-    /// swapchain — mirrors the snail backend's `present` seam, including the
-    /// `bool` return (see its doc: whether a frame was actually submitted, so
-    /// the caller can retry a deferred present on the next scheduler wake).
-    pub fn present(self: *RenderState, ctx: *Context, fb: [2]u32, frame_start: u64, had_input: bool) !bool {
+    /// Terminal render: (re)rasterize on damage, acquire the target image, copy
+    /// the staged pixels into it, and submit. The boolean reports whether a
+    /// frame was submitted, so the caller can retry a deferred target frame on
+    /// the next scheduler wake.
+    pub fn present(self: *RenderState, ctx: anytype, fb: [2]u32, frame_start: u64, had_input: bool) !bool {
         _ = fb; // geometry follows ctx.extent (kept in sync by main)
         if (self.fb.rebuilt) {
             self.fb.rebuilt = false;
-            self.fb.records_added = 0;
             try self.rasterize(ctx);
         }
         if (!self.have_frame) return false;
 
         const cmd = try ctx.beginFrame() orelse return false;
-        self.copyToSwapchain(ctx, cmd);
-        try ctx.submitPresent(cmd);
+        self.copyToTarget(ctx, cmd);
+        try ctx.submitFrame(cmd);
 
         const frame_ns = stats_mod.nowNs() - frame_start;
         self.fb.stats.recordFrame(frame_ns);
@@ -150,11 +151,11 @@ pub const RenderState = struct {
         return true;
     }
 
-    /// Record the staged pixels → acquired swapchain image copy: transition to
-    /// TRANSFER_DST, copy the full extent, transition to PRESENT_SRC. Contents
-    /// are not preserved (UNDEFINED old layout), which is correct — the whole
-    /// frame is overwritten.
-    fn copyToSwapchain(self: *RenderState, ctx: *Context, cmd: vk.VkCommandBuffer) void {
+    /// Record staged pixels → acquired target image: transition to
+    /// TRANSFER_DST, copy the full extent, then enter the target's final layout
+    /// (PRESENT for WSI, TRANSFER_SRC for headless readback). The whole frame is
+    /// overwritten, so UNDEFINED is the correct old layout.
+    fn copyToTarget(self: *RenderState, ctx: anytype, cmd: vk.VkCommandBuffer) void {
         const image = ctx.images[ctx.image_index];
         const range = vk.VkImageSubresourceRange{
             .aspectMask = vk.VK_IMAGE_ASPECT_COLOR_BIT,
@@ -188,13 +189,14 @@ pub const RenderState = struct {
         };
         vk.vkCmdCopyBufferToImage(cmd, self.staging.buffer, image, vk.VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &region);
 
+        const final_layout = ctx.targetFinalLayout();
         barrier(cmd, image, range, .{
             .old_layout = vk.VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
-            .new_layout = vk.VK_IMAGE_LAYOUT_PRESENT_SRC_KHR,
+            .new_layout = final_layout,
             .src_access = vk.VK_ACCESS_TRANSFER_WRITE_BIT,
-            .dst_access = 0,
+            .dst_access = if (final_layout == vk.VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL) vk.VK_ACCESS_TRANSFER_READ_BIT else 0,
             .src_stage = vk.VK_PIPELINE_STAGE_TRANSFER_BIT,
-            .dst_stage = vk.VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT,
+            .dst_stage = if (final_layout == vk.VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL) vk.VK_PIPELINE_STAGE_TRANSFER_BIT else vk.VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT,
         });
     }
 };
@@ -249,15 +251,16 @@ fn barrier(cmd: vk.VkCommandBuffer, image: vk.VkImage, range: vk.VkImageSubresou
 }
 
 /// A host-visible, coherent buffer for streaming Skia's rasterized frame to the
-/// swapchain image. It borrows the device from the Context passed to `ensure`.
+/// target image. It borrows the device from the target passed to `ensure`.
 const Staging = struct {
     buffer: vk.VkBuffer = null,
     memory: vk.VkDeviceMemory = null,
     mapped: [*]u8 = undefined,
+    is_mapped: bool = false,
     size: usize = 0,
     device: vk.VkDevice = null,
 
-    fn ensure(self: *Staging, ctx: *Context, need: usize) !void {
+    fn ensure(self: *Staging, ctx: anytype, need: usize) !void {
         if (self.buffer != null and self.size >= need) return;
         self.free();
         self.device = ctx.device;
@@ -285,13 +288,14 @@ const Staging = struct {
         var ptr: ?*anyopaque = null;
         if (vk.vkMapMemory(ctx.device, self.memory, 0, need, 0, &ptr) != vk.VK_SUCCESS) return error.VulkanFailed;
         self.mapped = @ptrCast(ptr.?);
+        self.is_mapped = true;
         self.size = need;
     }
 
     fn free(self: *Staging) void {
         if (self.device == null) return;
         if (self.memory != null) {
-            vk.vkUnmapMemory(self.device, self.memory);
+            if (self.is_mapped) vk.vkUnmapMemory(self.device, self.memory);
             vk.vkFreeMemory(self.device, self.memory, null);
             self.memory = null;
         }
@@ -299,6 +303,7 @@ const Staging = struct {
             vk.vkDestroyBuffer(self.device, self.buffer, null);
             self.buffer = null;
         }
+        self.is_mapped = false;
         self.size = 0;
     }
 

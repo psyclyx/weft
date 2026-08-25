@@ -10,9 +10,10 @@ pkgs.mkShell {
     pkg-config
     perl # Hermetic JSON::PP peer for the spine's LSP protocol gate.
     wayland-scanner
-    shader-slang # slangc, for snail shader compilation (render milestone)
+    # No renderer shader compiler is needed; Skia is the sole production
+    # renderer.
 
-    # Libraries weft (and snail through it) links against.
+    # Libraries Weft links against.
     wayland
     wayland-protocols
     libxkbcommon
@@ -21,8 +22,9 @@ pkgs.mkShell {
     vulkan-validation-layers
     harfbuzz
     fontconfig # runtime font-family resolution (sans/mono, weight, slant)
+    dejavu_fonts # deterministic embedded default mono face
 
-    # Skia (default renderer): the C++ 2D library. Ships a skia.pc, so build.zig
+    # Skia: the C++ 2D library. Ships a skia.pc, so build.zig
     # resolves it through pkg-config (include for the g++ shim, -L/-lskia for the
     # link) — as a buildInput its pkgconfig is on PKG_CONFIG_PATH automatically.
     skia
@@ -57,7 +59,7 @@ pkgs.mkShell {
       harfbuzz
       fontconfig
       wasmtime.lib # libwasmtime.so at runtime (test + run)
-      skia # libskia.so at runtime (the default renderer's shim links it)
+      skia # libskia.so at runtime (the renderer shim links it)
       stdenv.cc.cc.lib # libstdc++.so.6 for the Skia C++ shim at runtime
     ]
   );
@@ -66,6 +68,11 @@ pkgs.mkShell {
   # pkg-config is shipped, so build.zig consumes these paths directly.
   WEFT_WASMTIME_DEV = "${pkgs.wasmtime.dev}";
   WEFT_WASMTIME_LIB = "${pkgs.wasmtime.lib}";
+
+  # Renderer-independent default font bytes. Keeping this in the pinned Nix
+  # environment makes layout/test geometry deterministic on Linux and Darwin;
+  # the runtime provider remains free to resolve optional prose faces natively.
+  WEFT_DEFAULT_MONO = "${pkgs.dejavu_fonts}/share/fonts/truetype/DejaVuSansMono.ttf";
 
   # QuickJS-ng source (milestone 5 / 06B): user config runs as `config.js` in
   # `quickjs.wasm`. build.zig compiles the engine to a wasm32-wasi reactor with

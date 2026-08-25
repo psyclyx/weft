@@ -1,8 +1,8 @@
 // Skia C++ shim behind the C ABI in shim.h. Compiled with g++ (see build.zig
 // addSkia) and linked into the Zig exe. Renders the editor's per-pane content
-// (filled rects + glyph runs, decoded from snail Shapes on the Zig side) onto
+// (filled rects + positioned glyphs, decoded on the Zig side) onto
 // an SkCanvas, then reads the pixels back for the Vulkan backend to copy into
-// the swapchain image. Backends: Ganesh Vulkan (sharing weft's VkDevice) or,
+// its target image. Backends: Ganesh Vulkan (sharing weft's VkDevice) or,
 // when there is no real GPU / WEFT_SKIA_CPU is set, the CPU raster path.
 
 #include "shim.h"
@@ -73,13 +73,13 @@ extern "C" WeftSkia* weft_skia_create(const WeftSkiaVulkan* vk, int want_gpu, in
                 return gipa(inst, name);
             };
 
-        // The extensions weft enabled (context.zig): instance surface pair,
-        // device swapchain. Skia queries these to decide capabilities.
-        static const char* kInstExt[] = {"VK_KHR_surface", "VK_KHR_wayland_surface"};
-        static const char* kDevExt[] = {"VK_KHR_swapchain"};
+        // Advertise exactly the extensions enabled by this Vulkan target.
+        // The offscreen target supplies empty lists; a desktop target supplies
+        // its WSI extensions. Skia must never infer platform capabilities.
         skgpu::VulkanExtensions ext;
         ext.init(getProc, instance, reinterpret_cast<VkPhysicalDevice>(vk->physical_device),
-                 2, kInstExt, 1, kDevExt);
+                 vk->instance_extension_count, vk->instance_extensions,
+                 vk->device_extension_count, vk->device_extensions);
 
         skgpu::VulkanBackendContext bc{};
         bc.fInstance = instance;
@@ -150,7 +150,7 @@ extern "C" void weft_skia_draw_rect(WeftSkia* s, float x, float y, float w, floa
     s->canvas->drawRect(SkRect::MakeXYWH(x, y, w, h), paint);
 }
 
-extern "C" void weft_skia_draw_glyph(WeftSkia* s, uint32_t font_id, uint16_t glyph_id,
+extern "C" void weft_skia_draw_glyph(WeftSkia* s, uint32_t font_id, uint32_t glyph_id,
                                      float x, float y, float size,
                                      float r, float g, float b, float a) {
     if (!s || !s->canvas) return;
@@ -160,13 +160,13 @@ extern "C" void weft_skia_draw_glyph(WeftSkia* s, uint32_t font_id, uint16_t gly
     SkFont font(it->second, size);
     font.setEdging(SkFont::Edging::kAntiAlias);
     font.setSubpixel(true);
-    font.setHinting(SkFontHinting::kNone);  // snail places unhinted glyphs
+    font.setHinting(SkFontHinting::kNone);  // positions come from HarfBuzz
 
     SkPaint paint;
     paint.setColor4f(SkColor4f{r, g, b, a}, nullptr);
     paint.setAntiAlias(true);
 
-    const SkGlyphID gid = glyph_id;
+    const SkGlyphID gid = static_cast<SkGlyphID>(glyph_id);
     const SkPoint pos = SkPoint::Make(0, 0);
     s->canvas->drawGlyphs(SkSpan<const SkGlyphID>(&gid, 1), SkSpan<const SkPoint>(&pos, 1),
                           SkPoint::Make(x, y), font, paint);

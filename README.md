@@ -108,17 +108,13 @@ the config plane crossing the same membrane, one tier down.
 
 ## Render (`src/gfx/`)
 
-Two interchangeable renderers, chosen at build time by
-`-Drenderer={skia,snail}` (default **skia**; exactly one is compiled and
-linked). Both share the Vulkan backend in `context.zig` (device, queue,
-swapchain, present) and the backend-neutral `FrameBuilder` (View + pane
-tree). The seam is per-pane draw content: `view.build` lowers each pane to
-snail `Shape`s (affine-placed glyph records keyed by font_id/glyph_id, plus
-unit-square fill rects) — already renderer-neutral geometry that each
-backend consumes.
+Skia is the sole renderer. `FrameBuilder` and `View` lower editor state into
+Weft-owned scene data: explicit filled rectangles and positioned HarfBuzz
+glyphs. The renderer does not know whether its Vulkan target is a desktop
+swapchain or a standard offscreen image used by E2E capture.
 
 - **skia** — a C++ shim (`src/gfx/skia/shim.cpp`, built with g++, linked
-  against libskia) draws the decoded shapes onto an `SkCanvas`
+  against libskia) draws those items onto an `SkCanvas`
   (`SkFont`/glyph ids + `SkPaint` rects, reusing the same font bytes so
   metrics match). GPU path: Skia's Ganesh Vulkan backend
   (`GrDirectContexts::MakeVulkan`) sharing weft's `VkInstance`/device/queue;
@@ -126,16 +122,15 @@ backend consumes.
   GPU — or `WEFT_SKIA_CPU=1` is set — it falls back to Skia's CPU raster
   (`SkSurfaces::WrapPixels`), still presented through Vulkan. `WEFT_SKIA_DUMP=<path>`
   writes the first frame to a PPM for debugging.
-- **snail** — snail's analytic glyph pipeline on Vulkan (curve/band texel
-  buffers, SPIR-V from `snail-shaders-vk`), the original path, byte-for-byte
-  unchanged.
 
 `view.zig` owns the layout model above; `layout.zig` is the offset ↔
 geometry map. `pickDevice` prefers a dedicated GPU and treats
-llvmpipe/lavapipe/CPU as a last resort. Fonts resolve at runtime via
-fontconfig — a mono face for code, a sans family
-(regular/bold/italic/bold-italic) for prose. Rebuilds are damage-driven;
-frame and input-latency percentiles log continuously.
+llvmpipe/lavapipe/CPU as a last resort. The pinned build environment supplies
+a deterministic DejaVu Sans Mono face to embed; `--font` may replace it. Proportional
+prose faces resolve at runtime through fontconfig. Keeping both choices
+outside `weft_text` lets another platform provide fonts without changing the
+HarfBuzz shaping interface or the view. Rebuilds are damage-driven; frame and
+input-latency percentiles log continuously.
 
 ## Syntax and LSP
 
@@ -162,35 +157,31 @@ offset↔geometry map, and the markdown analyzer.
 
 ## Build
 
-Internal libraries ([snail](https://github.com/psyclyx/snail),
-[stemma](https://github.com/psyclyx/stemma)) resolve to GitHub release
-pins by default — a standalone clone of weft builds with no monorepo
-around it, and `npins/sources.json` carries the same pins for the nix
-layer. To iterate against a local checkout, set the npins override
-variable and both layers follow:
+The internal [stemma](https://github.com/psyclyx/stemma) library resolves to a
+GitHub release pin by default, and `npins/sources.json` carries the same pin for
+the nix layer. To iterate against a local checkout, set the override variable:
 
 ```sh
-NPINS_OVERRIDE_STEMMA=../../lib/stemma zig build test   # and/or NPINS_OVERRIDE_SNAIL
+NPINS_OVERRIDE_STEMMA=../../lib/stemma zig build test
 ```
 
 (The zon path twin is static, so the override must name the monorepo
 location `../../lib/<name>` — anything else is a loud refusal, not a
 silently ignored setting. Keep `build.zig.zon`'s pins and
 `npins/sources.json` on the same tags.) System libraries — wayland, libxkbcommon,
-vulkan-loader, harfbuzz, tree-sitter, wasmtime, skia (default renderer,
-resolved through `pkg-config`; its C++ shim is built with the shell's g++),
-the QuickJS-ng source, and the build-time wayland-scanner/pkg-config/slangc
+vulkan-loader, harfbuzz, fontconfig, tree-sitter, wasmtime, and skia — resolve
+through `pkg-config`; Skia's C++ shim is built with the shell's g++. The
+QuickJS-ng source and the build-time wayland-scanner/pkg-config tools
 — come from npins-pinned nixpkgs via `shell.nix`, not the ambient PATH.
 
-Fonts are the deliberate exception: weft resolves faces through fontconfig
-against the *system's* installed fonts, so rendered frames depend on what
-is installed. The embedded DejaVu mono is a fallback, and `--font`
-overrides the mono face.
+Proportional fonts are the deliberate exception: runtime fontconfig resolves
+them from the system, so prose rendering depends on configured fonts. The
+default mono face is pinned with the build for deterministic editor geometry;
+`--font` overrides it.
 
 ```sh
 nix-shell          # or direnv allow
 zig build run      # open the window (skia renderer)
-zig build run -Drenderer=snail   # snail's analytic-glyph pipeline instead
 zig build test     # display-free tests
 ```
 
@@ -215,11 +206,12 @@ highlighting over the monospace grid.
 
 ## Headless testing
 
-The render path is verified without a desktop: a headless sway
-(`WLR_BACKENDS=headless`, a fixed output) hosts the window, `grim`
-captures frames, `wtype` injects input. Assertions are on layout geometry
-(caret x, line heights) rather than pixel-exact glyphs, since fontconfig
-makes glyph coverage machine-dependent.
+The render path is verified without a display server. The production Skia
+renderer targets an ordinary offscreen Vulkan `VkImage`; the harness injects
+platform-neutral key specifications through normal dispatch and reads the
+completed image back through Vulkan. Captures are full editor frames, not a
+test-side reconstruction. Two collaborating editors are submitted together
+and read together so their side-by-side captures describe the same test step.
 
 ### Recording a demo video
 

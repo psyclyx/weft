@@ -69,7 +69,7 @@ const log = std.log.scoped(.@"e2e-popup-layout");
 const core = h.core;
 const view = h.view;
 const region = h.region;
-const snail = h.snail;
+const scene = h.scene;
 const gfx_harness = h.gfx_harness;
 const Editor = h.Editor;
 const capability = core.capability;
@@ -127,8 +127,8 @@ const Frame = struct { v: *view.View, built: view.Built };
 fn buildFrame(ed: *Editor, gpa: std.mem.Allocator, hud: view.Hud, fw: u32, fh: u32) !Frame {
     const v = try ed.ensureView();
     const frame: region.Rect = .{ .x = 0, .y = 0, .w = @floatFromInt(fw), .h = @floatFromInt(fh) };
-    const projection = snail.Mat4.ortho(0, @floatFromInt(fw), @floatFromInt(fh), 0, -1, 1);
-    const w2p = snail.mvpToScenePixel(projection, @floatFromInt(fw), @floatFromInt(fh)) orelse unreachable;
+    const projection = scene.Mat4.ortho(0, @floatFromInt(fw), @floatFromInt(fh), 0, -1, 1);
+    const w2p = scene.mvpToScenePixel(projection, @floatFromInt(fw), @floatFromInt(fh)) orelse unreachable;
     var arena = std.heap.ArenaAllocator.init(gpa);
     defer arena.deinit();
     v.resetFrame();
@@ -286,7 +286,7 @@ test "e2e/popup-layout: caret-popup layout goldens" {
         try t.expectEqual(@as(usize, 2), cl.col_x.len); // the annotation column is present
         try t.expect(cl.rows[2].selected);
 
-        const pixels = try gfx_harness.rasterize(gpa, fr.v, &.{fr.built.shapes}, fw, fh);
+        const pixels = try gfx_harness.rasterize(gpa, fr.v, &.{fr.built.items}, fw, fh);
         defer gpa.free(pixels);
         const x0: u32 = @intFromFloat(@floor(cl.x));
         const y0: u32 = @intFromFloat(@floor(cl.y));

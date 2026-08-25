@@ -180,7 +180,8 @@ pub fn peerFilesHandler(ctx: *core.command.Context, data: ?*anyopaque, args: []c
     const sc: *ShareCtx = @ptrCast(@alignCast(data.?));
     if (args.len != 0) return error.ArityMismatch;
     const target = sc.remote_fs_target orelse return ok_echo(ctx, "peer has no shared filesystem");
-    return switch (try core.target_open.openLocated(ctx.semantic, ctx.head, ctx.gpa, target, null)) {
+    const semantic = ctx.semantic orelse return ok_echo(ctx, "semantic targets are unavailable");
+    return switch (try core.target_open.openLocated(semantic, ctx.head, ctx.gpa, target, null)) {
         .opened => .nil,
         .no_handler => ok_echo(ctx, "no plugin handles the peer filesystem target"),
         .ambiguous => ok_echo(ctx, "multiple plugins claim the peer filesystem target"),

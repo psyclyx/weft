@@ -7,7 +7,7 @@
 const std = @import("std");
 const Allocator = std.mem.Allocator;
 
-const snail = @import("snail");
+const text_engine = @import("weft_text");
 const region = @import("../region.zig");
 const view = @import("../view.zig");
 
@@ -148,7 +148,7 @@ fn segRun(
             .color = bgc,
         });
     }
-    var cells: std.ArrayList(snail.Cell) = .empty;
+    var cells: std.ArrayList(text_engine.Cell) = .empty;
     var it = (std.unicode.Utf8View.init(text) catch return start_col).iterator();
     var col = start_col;
     var byte: usize = 0;
@@ -164,7 +164,7 @@ fn segRun(
         last_byte = byte;
     }
     if (cells.items.len == 0) return start_col;
-    const shaped = try snail.shape(scratch, &v.face_set.mono, text[0..last_byte], .{});
+    const shaped = try text_engine.shape(scratch, &v.face_set.mono, text[0..last_byte], .{});
     try runs.append(scratch, .{ .shaped = shaped, .baseline_y = baseline_y, .place = .{ .cell = cells.items } });
     return col;
 }
@@ -191,7 +191,7 @@ pub fn appendPlainRun(
             .color = bgc,
         });
     }
-    var cells: std.ArrayList(snail.Cell) = .empty;
+    var cells: std.ArrayList(text_engine.Cell) = .empty;
     var it = (std.unicode.Utf8View.init(text) catch return error.InvalidUtf8).iterator();
     var col: usize = 0;
     var byte: usize = 0;
@@ -205,6 +205,6 @@ pub fn appendPlainRun(
         byte += s.len;
     }
     if (cells.items.len == 0) return;
-    const shaped = try snail.shape(scratch, &v.face_set.mono, text[0..byte], .{});
+    const shaped = try text_engine.shape(scratch, &v.face_set.mono, text[0..byte], .{});
     try runs.append(scratch, .{ .shaped = shaped, .baseline_y = baseline_y, .place = .{ .cell = cells.items } });
 }

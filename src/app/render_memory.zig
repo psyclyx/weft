@@ -1,15 +1,9 @@
-//! In-memory render target for a complete Weft editor frame.
+//! CPU render target for display-free unit and geometry tests.
 //!
-//! This is a real render backend, not a screenshot assembler. It owns the
-//! same `FrameBuilder` as the window backends and rasterizes every pane and
-//! every piece of chrome produced by that builder into one framebuffer. A
-//! consumer can only observe the completed pixels; it cannot ask this target
-//! to omit syntax, semantic tools, popups, presence, or any other layer.
-//!
-//! The module is linked only into display-free/test applications today. Its
-//! boundary is intentionally useful outside tests too: a future remote UI or
-//! platform backend can consume the same complete frame without learning the
-//! editor's internal layer model.
+//! This exercises the shared `FrameBuilder` without Vulkan and is useful for
+//! small tests that deliberately inspect geometry. It is not the authoritative
+//! E2E screenshot/video path: that binds the selected production renderer to
+//! `gfx/headless_vulkan.zig` and reads the completed offscreen GPU image.
 
 const std = @import("std");
 const core = @import("../core/core.zig");
@@ -72,7 +66,6 @@ pub const RenderState = struct {
             self.extent = extent;
             self.sequence +%= 1;
             self.fb.rebuilt = false;
-            self.fb.records_added = 0;
         }
         const pixels = self.pixels orelse return error.NoFrame;
         return .{

@@ -1,14 +1,20 @@
-//! Vulkan bootstrap: instance, surface, device, swapchain, render pass,
-//! per-frame command buffers and synchronization. Platform-neutral; the
-//! caller hands in the native window handles.
+//! Vulkan bootstrap: instance, surface, device, swapchain, per-frame command
+//! buffers, and synchronization. Platform-neutral; the caller hands in the
+//! native window handles. Skia owns rasterization; this target only acquires,
+//! copies, submits, and presents swapchain images.
 
 const std = @import("std");
 const vkmod = @import("../vk.zig");
 const vk = vkmod.c;
-const build_options = @import("build_options");
 const swapchain_state = @import("swapchain_state.zig");
 
 pub const max_frames_in_flight = 2;
+
+const instance_extensions = [_][*:0]const u8{
+    vk.VK_KHR_SURFACE_EXTENSION_NAME,
+    vk.VK_KHR_WAYLAND_SURFACE_EXTENSION_NAME,
+};
+const device_extensions = [_][*:0]const u8{vk.VK_KHR_SWAPCHAIN_EXTENSION_NAME};
 
 // W-later: platform-specific WSI shape (vkCreateWaylandSurfaceKHR has no
 // backend-neutral form) — see platform.zig's leak #1 for the seam note; the
@@ -29,8 +35,6 @@ const SwapchainResources = struct {
     swapchain: vk.VkSwapchainKHR = null,
     extent: vk.VkExtent2D = .{ .width = 0, .height = 0 },
     images: []vk.VkImage = &.{},
-    views: []vk.VkImageView = &.{},
-    framebuffers: []vk.VkFramebuffer = &.{},
     render_finished: []vk.VkSemaphore = &.{},
 };
 
@@ -44,17 +48,14 @@ pub const Context = struct {
     queue: vk.VkQueue = null,
     queue_family: u32 = 0,
     /// Whether `pickDevice` found a real (non-software, non-CPU) GPU. The Skia
-    /// backend consults this to choose Ganesh (GPU) vs its CPU raster path;
-    /// snail ignores it. False ⇒ only lavapipe/llvmpipe/CPU was available.
+    /// backend consults this to choose Ganesh (GPU) vs its CPU raster path.
+    /// False means only lavapipe/llvmpipe/CPU was available.
     has_real_gpu: bool = false,
 
     surface_format: vk.VkSurfaceFormatKHR = undefined,
     swapchain: vk.VkSwapchainKHR = null,
     extent: vk.VkExtent2D = .{ .width = 0, .height = 0 },
     images: []vk.VkImage = &.{},
-    views: []vk.VkImageView = &.{},
-    framebuffers: []vk.VkFramebuffer = &.{},
-    render_pass: vk.VkRenderPass = null,
 
     command_pool: vk.VkCommandPool = null,
     command_buffers: [max_frames_in_flight]vk.VkCommandBuffer = @splat(null),
@@ -91,7 +92,6 @@ pub const Context = struct {
         errdefer vk.vkDestroyDevice(self.device, null);
 
         try self.chooseSurfaceFormat();
-        try self.createRenderPass();
         try self.createSwapchain(fb_width, fb_height);
         try self.createFrameState();
 
@@ -104,7 +104,6 @@ pub const Context = struct {
         for (self.in_flight) |fence| vk.vkDestroyFence(self.device, fence, null);
         vk.vkDestroyCommandPool(self.device, self.command_pool, null);
         self.destroySwapchain();
-        vk.vkDestroyRenderPass(self.device, self.render_pass, null);
         vk.vkDestroyDevice(self.device, null);
         vk.vkDestroySurfaceKHR(self.instance, self.surface, null);
         vk.vkDestroyInstance(self.instance, null);
@@ -112,8 +111,6 @@ pub const Context = struct {
     }
 
     fn createInstance(self: *Context, app_name: [*:0]const u8) !void {
-        const extensions = [_][*:0]const u8{ vk.VK_KHR_SURFACE_EXTENSION_NAME, vk.VK_KHR_WAYLAND_SURFACE_EXTENSION_NAME };
-
         const app_info = vk.VkApplicationInfo{
             .sType = vk.VK_STRUCTURE_TYPE_APPLICATION_INFO,
             .pApplicationName = app_name,
@@ -126,8 +123,8 @@ pub const Context = struct {
         const create_info = vk.VkInstanceCreateInfo{
             .sType = vk.VK_STRUCTURE_TYPE_INSTANCE_CREATE_INFO,
             .pApplicationInfo = &app_info,
-            .enabledExtensionCount = extensions.len,
-            .ppEnabledExtensionNames = @ptrCast(&extensions),
+            .enabledExtensionCount = instance_extensions.len,
+            .ppEnabledExtensionNames = @ptrCast(&instance_extensions),
         };
         try check(vk.vkCreateInstance(&create_info, null, &self.instance));
     }
@@ -210,13 +207,12 @@ pub const Context = struct {
             .queueCount = 1,
             .pQueuePriorities = &priority,
         };
-        const extensions = [_][*:0]const u8{vk.VK_KHR_SWAPCHAIN_EXTENSION_NAME};
         const create_info = vk.VkDeviceCreateInfo{
             .sType = vk.VK_STRUCTURE_TYPE_DEVICE_CREATE_INFO,
             .queueCreateInfoCount = 1,
             .pQueueCreateInfos = &queue_info,
-            .enabledExtensionCount = extensions.len,
-            .ppEnabledExtensionNames = @ptrCast(&extensions),
+            .enabledExtensionCount = device_extensions.len,
+            .ppEnabledExtensionNames = @ptrCast(&device_extensions),
         };
         try check(vk.vkCreateDevice(self.physical_device, &create_info, null, &self.device));
         vk.vkGetDeviceQueue(self.device, self.queue_family, 0, &self.queue);
@@ -229,8 +225,8 @@ pub const Context = struct {
         defer self.allocator.free(formats);
         try check(vk.vkGetPhysicalDeviceSurfaceFormatsKHR(self.physical_device, self.surface, &count, formats.ptr));
 
-        // Prefer an sRGB-encoded format: snail's stages output linear
-        // premultiplied color and expect the attachment to encode.
+        // Prefer an sRGB-encoded format so the target attachment performs the
+        // final color encoding for Skia's linear output.
         var chosen: ?vk.VkSurfaceFormatKHR = null;
         for (formats[0..count]) |format| {
             if (format.colorSpace != vk.VK_COLOR_SPACE_SRGB_NONLINEAR_KHR) continue;
@@ -250,49 +246,22 @@ pub const Context = struct {
 
     /// True when the swapchain attachment hardware-encodes sRGB; if false
     /// the shader must encode (PushConstants.output_srgb = 1).
-    pub fn surfaceEncodesSrgb(self: *const Context) bool {
-        return self.surface_format.format == vk.VK_FORMAT_B8G8R8A8_SRGB or
-            self.surface_format.format == vk.VK_FORMAT_R8G8B8A8_SRGB;
+    pub fn colorFormat(self: *const Context) vk.VkFormat {
+        return self.surface_format.format;
     }
 
-    fn createRenderPass(self: *Context) !void {
-        const attachment = vk.VkAttachmentDescription{
-            .format = self.surface_format.format,
-            .samples = vk.VK_SAMPLE_COUNT_1_BIT,
-            .loadOp = vk.VK_ATTACHMENT_LOAD_OP_CLEAR,
-            .storeOp = vk.VK_ATTACHMENT_STORE_OP_STORE,
-            .stencilLoadOp = vk.VK_ATTACHMENT_LOAD_OP_DONT_CARE,
-            .stencilStoreOp = vk.VK_ATTACHMENT_STORE_OP_DONT_CARE,
-            .initialLayout = vk.VK_IMAGE_LAYOUT_UNDEFINED,
-            .finalLayout = vk.VK_IMAGE_LAYOUT_PRESENT_SRC_KHR,
-        };
-        const color_ref = vk.VkAttachmentReference{
-            .attachment = 0,
-            .layout = vk.VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
-        };
-        const subpass = vk.VkSubpassDescription{
-            .pipelineBindPoint = vk.VK_PIPELINE_BIND_POINT_GRAPHICS,
-            .colorAttachmentCount = 1,
-            .pColorAttachments = &color_ref,
-        };
-        const dependency = vk.VkSubpassDependency{
-            .srcSubpass = vk.VK_SUBPASS_EXTERNAL,
-            .dstSubpass = 0,
-            .srcStageMask = vk.VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT,
-            .srcAccessMask = 0,
-            .dstStageMask = vk.VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT,
-            .dstAccessMask = vk.VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT,
-        };
-        const create_info = vk.VkRenderPassCreateInfo{
-            .sType = vk.VK_STRUCTURE_TYPE_RENDER_PASS_CREATE_INFO,
-            .attachmentCount = 1,
-            .pAttachments = &attachment,
-            .subpassCount = 1,
-            .pSubpasses = &subpass,
-            .dependencyCount = 1,
-            .pDependencies = &dependency,
-        };
-        try check(vk.vkCreateRenderPass(self.device, &create_info, null, &self.render_pass));
+    pub fn vulkanExtensions(_: *const Context) struct {
+        instance: []const [*:0]const u8,
+        device: []const [*:0]const u8,
+    } {
+        return .{ .instance = &instance_extensions, .device = &device_extensions };
+    }
+
+    /// Layout required by this target after a renderer has populated the full
+    /// color image. The WSI target presents; the standard headless target uses
+    /// TRANSFER_SRC and implements the same structural renderer surface.
+    pub fn targetFinalLayout(_: *const Context) vk.VkImageLayout {
+        return vk.VK_IMAGE_LAYOUT_PRESENT_SRC_KHR;
     }
 
     fn buildSwapchain(self: *Context, fb_width: u32, fb_height: u32, old_swapchain: vk.VkSwapchainKHR) !SwapchainResources {
@@ -323,10 +292,8 @@ pub const Context = struct {
             .imageExtent = extent,
             .imageArrayLayers = 1,
             // Skia rasterizes into its own surface and copies the result into
-            // the swapchain image, so it needs TRANSFER_DST. snail draws
-            // straight into it as a color attachment (unchanged).
-            .imageUsage = vk.VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT |
-                (if (build_options.renderer == .skia) vk.VK_IMAGE_USAGE_TRANSFER_DST_BIT else 0),
+            // the swapchain image.
+            .imageUsage = vk.VK_IMAGE_USAGE_TRANSFER_DST_BIT,
             .imageSharingMode = vk.VK_SHARING_MODE_EXCLUSIVE,
             .preTransform = caps.currentTransform,
             .compositeAlpha = vk.VK_COMPOSITE_ALPHA_OPAQUE_BIT_KHR,
@@ -342,39 +309,9 @@ pub const Context = struct {
         resources.images = try self.allocator.alloc(vk.VkImage, actual);
         try check(vk.vkGetSwapchainImagesKHR(self.device, resources.swapchain, &actual, resources.images.ptr));
 
-        resources.views = try self.allocator.alloc(vk.VkImageView, actual);
-        resources.framebuffers = try self.allocator.alloc(vk.VkFramebuffer, actual);
         resources.render_finished = try self.allocator.alloc(vk.VkSemaphore, actual);
-        for (resources.views) |*view| view.* = null;
-        for (resources.framebuffers) |*framebuffer| framebuffer.* = null;
-        for (resources.render_finished) |*sem| sem.* = null;
-        for (resources.images, resources.views, resources.framebuffers, resources.render_finished) |image, *view, *framebuffer, *sem| {
-            const view_info = vk.VkImageViewCreateInfo{
-                .sType = vk.VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO,
-                .image = image,
-                .viewType = vk.VK_IMAGE_VIEW_TYPE_2D,
-                .format = self.surface_format.format,
-                .subresourceRange = .{
-                    .aspectMask = vk.VK_IMAGE_ASPECT_COLOR_BIT,
-                    .baseMipLevel = 0,
-                    .levelCount = 1,
-                    .baseArrayLayer = 0,
-                    .layerCount = 1,
-                },
-            };
-            try check(vk.vkCreateImageView(self.device, &view_info, null, view));
-
-            const fb_info = vk.VkFramebufferCreateInfo{
-                .sType = vk.VK_STRUCTURE_TYPE_FRAMEBUFFER_CREATE_INFO,
-                .renderPass = self.render_pass,
-                .attachmentCount = 1,
-                .pAttachments = view,
-                .width = extent.width,
-                .height = extent.height,
-                .layers = 1,
-            };
-            try check(vk.vkCreateFramebuffer(self.device, &fb_info, null, framebuffer));
-
+        for (resources.render_finished) |*sem| {
+            sem.* = null;
             const sem_info = vk.VkSemaphoreCreateInfo{
                 .sType = vk.VK_STRUCTURE_TYPE_SEMAPHORE_CREATE_INFO,
             };
@@ -385,11 +322,7 @@ pub const Context = struct {
 
     fn destroySwapchainResources(self: *Context, resources: *SwapchainResources) void {
         for (resources.render_finished) |sem| if (sem != null) vk.vkDestroySemaphore(self.device, sem, null);
-        for (resources.framebuffers) |framebuffer| if (framebuffer != null) vk.vkDestroyFramebuffer(self.device, framebuffer, null);
-        for (resources.views) |view| if (view != null) vk.vkDestroyImageView(self.device, view, null);
         self.allocator.free(resources.render_finished);
-        self.allocator.free(resources.framebuffers);
-        self.allocator.free(resources.views);
         self.allocator.free(resources.images);
         if (resources.swapchain != null) vk.vkDestroySwapchainKHR(self.device, resources.swapchain, null);
         resources.* = .{};
@@ -399,8 +332,6 @@ pub const Context = struct {
         self.swapchain = resources.swapchain;
         self.extent = resources.extent;
         self.images = resources.images;
-        self.views = resources.views;
-        self.framebuffers = resources.framebuffers;
         self.render_finished = resources.render_finished;
         resources.* = .{};
     }
@@ -415,14 +346,10 @@ pub const Context = struct {
             .swapchain = self.swapchain,
             .extent = self.extent,
             .images = self.images,
-            .views = self.views,
-            .framebuffers = self.framebuffers,
             .render_finished = self.render_finished,
         };
         self.swapchain = null;
         self.images = &.{};
-        self.views = &.{};
-        self.framebuffers = &.{};
         self.render_finished = &.{};
         self.destroySwapchainResources(&resources);
         self.extent = .{ .width = 0, .height = 0 };
@@ -454,8 +381,8 @@ pub const Context = struct {
 
         // Keep the old handle/resources alive while creating its successor,
         // as required by VK_KHR_swapchain's oldSwapchain contract. Queue-idle
-        // is the narrowly-scoped retirement barrier: it proves old images,
-        // views, framebuffers, and present semaphores are no longer in use
+        // is the narrowly-scoped retirement barrier: it proves old images and
+        // present semaphores are no longer in use
         // without vkDeviceWaitIdle on every configure.
         const old_swapchain = self.swapchain;
         var next = self.buildSwapchain(fb_width, fb_height, old_swapchain) catch |err| {
@@ -507,9 +434,8 @@ pub const Context = struct {
         }
     }
 
-    /// Wait for the frame slot, acquire an image, and begin recording.
-    /// The render pass is NOT begun yet — record transfer work (texture
-    /// uploads) first, then call `beginRenderPass`. Returns null when the
+    /// Wait for the frame slot, acquire an image, and begin recording transfer
+    /// work. Returns null when the
     /// swapchain needs recreation, OR when the previous frame's GPU work
     /// hasn't finished yet (north-star-plan §6 W2a-3 / §2.7: "the kernel
     /// must never block on a GPU fence") — the FENCE is polled with a ZERO
@@ -575,35 +501,14 @@ pub const Context = struct {
         return cmd;
     }
 
-    pub fn beginRenderPass(self: *Context, cmd: vk.VkCommandBuffer, clear_linear: [4]f32) void {
-        const clear = vk.VkClearValue{ .color = .{ .float32 = clear_linear } };
-        const pass_info = vk.VkRenderPassBeginInfo{
-            .sType = vk.VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO,
-            .renderPass = self.render_pass,
-            .framebuffer = self.framebuffers[self.image_index],
-            .renderArea = .{ .offset = .{ .x = 0, .y = 0 }, .extent = self.extent },
-            .clearValueCount = 1,
-            .pClearValues = &clear,
-        };
-        vk.vkCmdBeginRenderPass(cmd, &pass_info, vk.VK_SUBPASS_CONTENTS_INLINE);
-    }
-
-    pub fn endFrame(self: *Context) !void {
-        const cmd = self.command_buffers[self.current_frame];
-        vk.vkCmdEndRenderPass(cmd);
-        try self.submitPresent(cmd);
-    }
-
-    /// Finish, submit and present a frame's command buffer WITHOUT ending a
-    /// render pass — the path a renderer that records raw transfer/blit work
-    /// (Skia copies its rasterized surface into the swapchain image) uses in
-    /// place of `endFrame`. Waits on `image_available`, signals the image's
-    /// `render_finished`, and advances the frame index exactly like `endFrame`.
-    pub fn submitPresent(self: *Context, cmd: vk.VkCommandBuffer) !void {
+    /// Finish, submit, and present a frame's transfer command buffer. Waits
+    /// on `image_available`, signals the image's `render_finished`, and
+    /// advances the frame index.
+    pub fn submitFrame(self: *Context, cmd: vk.VkCommandBuffer) !void {
         const frame = self.current_frame;
         try check(vk.vkEndCommandBuffer(cmd));
 
-        const wait_stage: vk.VkPipelineStageFlags = vk.VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT;
+        const wait_stage: vk.VkPipelineStageFlags = vk.VK_PIPELINE_STAGE_TRANSFER_BIT;
         const submit_info = vk.VkSubmitInfo{
             .sType = vk.VK_STRUCTURE_TYPE_SUBMIT_INFO,
             .waitSemaphoreCount = 1,

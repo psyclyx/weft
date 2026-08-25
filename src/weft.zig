@@ -10,6 +10,9 @@ pub const semantic_model = @import("weft_semantic");
 pub const view_runtime = @import("weft_view_runtime");
 pub const target_runtime = @import("weft_target_runtime");
 pub const fs = @import("weft_fs");
+pub const font_provider = @import("weft_font_provider");
+pub const scene = @import("weft_scene");
+pub const text_engine = @import("weft_text");
 pub const view = @import("gfx/view.zig");
 pub const gfx_harness = @import("gfx/harness.zig");
 pub const region = @import("gfx/region.zig");
@@ -23,6 +26,7 @@ pub const app_collab = @import("app/collab.zig");
 pub const app_frame = @import("app/frame.zig");
 pub const app_frame_builder = @import("app/frame_builder.zig");
 pub const app_render_memory = @import("app/render_memory.zig");
+pub const app_headless_vulkan = @import("app/headless_vulkan.zig");
 pub const dap_js = @embedFile("dap_js");
 
 // This module OWNS the core/gfx/app tree, so it also runs their display-free
@@ -42,16 +46,14 @@ test {
     _ = @import("gfx/layout.zig");
     _ = view;
     _ = gfx_harness;
+    _ = scene;
+    _ = text_engine;
     _ = region;
     _ = window_layout;
     _ = @import("app/frame.zig"); // which-key menu-overlay timing
     _ = @import("app/frame_builder.zig"); // rendering P2: caret-surface auto-expiry
     _ = app_render_memory;
     _ = @import("app/config_load.zig"); // W4 slice 4: the production plugin/grant-table loader
-    // P3 (doc/rendering.md): the Rasterizer/Platform seam contracts + their
-    // compile-time-only skeleton proofs. Neither needs Vulkan/wayland to
-    // typecheck (see each file's module doc), so they run under the
-    // display-free `test` step too, not only the windowed exe build.
-    _ = @import("app/rasterizer.zig");
+    // Platform seam contract tests remain display-free.
     _ = @import("platform/platform.zig");
 }

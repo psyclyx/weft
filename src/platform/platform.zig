@@ -1,5 +1,5 @@
 //! P3 — the Platform seam (doc/rendering.md P3: "formalize the backend +
-//! platform seams... around snail_vk/skia/wayland (no behavior change)").
+//! platform seams around skia/wayland (no behavior change).
 //! Platform = window + input + present-surface + event-source. This file
 //! names the contract `src/platform/wayland.zig`'s `Window` already
 //! satisfies — extracted by AUDIT (grepping every `window.<decl>` call site
@@ -9,21 +9,14 @@
 //! the ONE live implementation; nothing here changes what it does.
 //!
 //! ## comptime, not vtable
-//! Same call as the Rasterizer seam (`app/rasterizer.zig` — see its module
-//! doc for the fuller justification, which applies verbatim): exactly one
-//! Platform is ever compiled in, chosen at BUILD time (there is no
-//! `-Dplatform` flag today, but the shape mirrors `-Drenderer`'s comptime
-//! switch — see `app/render.zig`). A vtable buys runtime polymorphism
-//! nothing here uses; `assertPlatform` below is the same "duck-typed decl
-//! set, checked at compile time" contract `assertRasterizer` uses, so
-//! upgrading either seam to a vtable later is the same mechanical step:
-//! wrap the concrete type in a small dispatch struct built from this exact
-//! decl list.
+//! Exactly one Platform is compiled in, chosen at build time (there is no
+//! `-Dplatform` flag today). A vtable buys runtime polymorphism nothing here
+//! uses; `assertPlatform` is a duck-typed declaration set checked at compile
+//! time. If runtime selection becomes useful later, this exact declaration
+//! list is the vocabulary a small dispatch value must carry.
 //!
 //! ## the decl surface, enumerated by audit
-//! - `init`/`deinit` — lifecycle. Unlike `Rasterizer` (which the caller
-//!   places in-place inside its own frame and initializes with
-//!   `init(self: *Self, …)`), a Platform owns its own heap address:
+//! - `init`/`deinit` — lifecycle. A Platform owns its own heap address:
 //!   `Window.init` allocates and returns `!*Self`. This asymmetry is real,
 //!   not an oversight — `main.zig` needs the window's address BEFORE it can
 //!   build the Vulkan surface (`Context.init` takes `window.display`/
