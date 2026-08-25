@@ -323,6 +323,15 @@ pub fn build(b: *std.Build) void {
         .root_source_file = mono_font,
     });
     const architecture = createArchitectureModules(b, target, optimize);
+    // Application-wake policy is deliberately a dependency-free module. The
+    // concrete app adapter supplies phases; this build edge makes it
+    // impossible for sequencing policy to reach into core, gfx, plugins, or a
+    // platform implementation.
+    const application_mod = b.createModule(.{
+        .root_source_file = b.path("src/application/root.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
     const dired_modules = createDiredPortableModules(
         b,
         target,
@@ -354,6 +363,7 @@ pub fn build(b: *std.Build) void {
     exe_mod.addImport("weft_font_provider", font_provider_mod);
     exe_mod.addImport("weft_scene", scene_mod);
     exe_mod.addImport("weft_text", text_mod);
+    exe_mod.addImport("weft_application", application_mod);
     exe_mod.addImport("stemma", stemma_dep.module("stemma"));
     exe_mod.linkSystemLibrary("wayland-client", .{});
     exe_mod.linkSystemLibrary("xkbcommon", .{});
@@ -412,6 +422,7 @@ pub fn build(b: *std.Build) void {
     weft_mod.addImport("weft_font_provider", font_provider_mod);
     weft_mod.addImport("weft_scene", scene_mod);
     weft_mod.addImport("weft_text", text_mod);
+    weft_mod.addImport("weft_application", application_mod);
     weft_mod.addImport("stemma", stemma_dep.module("stemma"));
     // Resident JS catalog entries are data dependencies of the full headless
     // editor too. Route them through the module graph; the E2E config loader
@@ -518,6 +529,9 @@ pub fn build(b: *std.Build) void {
     const run_tests = b.addRunArtifact(unit_tests);
     const test_step = b.step("test", "Run unit tests");
     test_step.dependOn(&run_tests.step);
+    const application_tests = b.addTest(.{ .root_module = application_mod });
+    const run_application_tests = b.addRunArtifact(application_tests);
+    test_step.dependOn(&run_application_tests.step);
 
     // A focused entry point for the whole-app spine narrative.  Keeping the
     // filter in the build graph makes the opt-in video command reproducible:
@@ -531,6 +545,7 @@ pub fn build(b: *std.Build) void {
     // Portable contract gate: deliberately separate from the application
     // suite so these roots cannot acquire app/platform dependencies unnoticed.
     const contract_step = b.step("test-contract", "Run portable schema/semantic/filesystem contract tests");
+    contract_step.dependOn(&run_application_tests.step);
     inline for (.{ architecture.wire, architecture.schema, architecture.semantic, architecture.scene_codec, architecture.fs, architecture.fs_codec, architecture.fs_runtime, architecture.view_runtime, architecture.target_runtime, architecture.plugin_semantic }) |contract_mod| {
         const contract_tests = b.addTest(.{ .root_module = contract_mod });
         const run_contract_tests = b.addRunArtifact(contract_tests);

@@ -624,7 +624,7 @@ pub fn main(init: std.process.Init) !void {
         .cursor_cfg = &session.cursor_cfg,
         .keymap = &session.system.keymap,
         .head = &session.head,
-        .blink_next_ns = &application.blink_next_ns,
+        .blink_next_ns = application.blinkDeadline(),
     };
     _ = try sched.addTimer(&blink_ctx, loop_sources.blinkDue, "caret_blink");
     _ = try sched.addTimer(whead.window, loop_sources.keyRepeatDue, "key_repeat");

@@ -6,6 +6,7 @@
 //! platform nor a test harness is allowed to select lifecycle phases.
 
 const std = @import("std");
+const application = @import("weft_application");
 const core = @import("../core/core.zig");
 const region = @import("../gfx/region.zig");
 const window_layout = @import("../gfx/window_layout.zig");
@@ -32,11 +33,8 @@ pub const Application = struct {
     last_activate_path: [std.fs.max_path_bytes]u8 = undefined,
     last_activate_len: usize = 0,
     last_active: core.Buffers.Id,
-    blink_on: bool = true,
-    blink_next_ns: u64 = 0,
-    blink_period_ns: u64,
     which_key_delay_ns: u64,
-    input_pending: bool = false,
+    lifecycle: application.Lifecycle,
 
     before_async: Hook = .{},
     services: Hook = .{},
@@ -82,8 +80,8 @@ pub const Application = struct {
             .plugin_loop = args.plugin_loop,
             .js_plugins = args.js_plugins,
             .last_active = args.session.system.buffers.active_id,
-            .blink_period_ns = args.blink_period_ns,
             .which_key_delay_ns = args.which_key_delay_ns,
+            .lifecycle = .{ .blink_period_ns = args.blink_period_ns },
             .before_async = args.before_async,
             .services = args.services,
         };
@@ -123,13 +121,13 @@ pub const Application = struct {
     /// platform uses. The next `advance` consumes the input damage edge.
     pub fn input(self: *Application, spec: []const u8, text: []const u8) !void {
         try dispatch.dispatchSpec(&self.session.cmd_ctx, spec, text);
-        self.input_pending = true;
+        self.lifecycle.noteInput();
     }
 
     /// Record input already translated by a platform adapter (pointer input or
     /// a platform head which bracketed dispatch under its own identity).
     pub fn noteInput(self: *Application) void {
-        self.input_pending = true;
+        self.lifecycle.noteInput();
     }
 
     pub fn damage(self: *Application) void {
@@ -145,41 +143,35 @@ pub const Application = struct {
         self.view_dirty = true;
     }
 
-    pub const AdvanceOptions = struct {
-        frame_start: u64,
-        fb: [2]u32,
-        force_rebuild: bool = false,
-    };
-
-    pub const AdvanceResult = struct {
-        active: frame.Driver.Prepared,
-        had_input: bool,
-        damaged: bool,
-        blink_on: bool,
-    };
+    pub const AdvanceOptions = application.AdvanceOptions;
+    pub const AdvanceResult = application.AdvanceResult;
 
     /// Advance one complete application wake through an arbitrary production
     /// renderer. This is the only application-owned route to `buildFrame`:
     /// prepare, platform-neutral input effects, async/plugin/menu work,
     /// services such as collaboration, layout intents, damage, then build.
     pub fn advance(self: *Application, renderer: anytype, opts: AdvanceOptions) !AdvanceResult {
-        var active = try self.driver.prepare();
-        if (try self.before_async.call(self, active)) self.input_pending = true;
+        return self.lifecycle.advance(self, renderer, opts);
+    }
 
-        const had_input = self.input_pending;
-        self.input_pending = false;
-        var damaged = false;
+    pub fn blinkDeadline(self: *Application) *u64 {
+        return &self.lifecycle.blink_next_ns;
+    }
 
-        if (had_input) {
-            self.blink_on = true;
-            self.blink_next_ns = opts.frame_start + self.blink_period_ns;
-        } else if (self.session.cursor_cfg.blinkFor(self.session.head.currentMode()) and opts.frame_start >= self.blink_next_ns) {
-            self.blink_on = !self.blink_on;
-            self.blink_next_ns = opts.frame_start + self.blink_period_ns;
-            damaged = true;
-        }
+    pub fn prepare(self: *Application) !frame.Driver.Prepared {
+        return self.driver.prepare();
+    }
 
-        if (try frame.tickAsync(
+    pub fn beforeAsync(self: *Application, active: frame.Driver.Prepared) !bool {
+        return self.before_async.call(self, active);
+    }
+
+    pub fn blinkEnabled(self: *Application) bool {
+        return self.session.cursor_cfg.blinkFor(self.session.head.currentMode());
+    }
+
+    pub fn tickAsync(self: *Application, active: frame.Driver.Prepared, frame_start: u64) !bool {
+        var damaged = try frame.tickAsync(
             &self.driver.ctx,
             active.buffer,
             &self.session.cmd_ctx,
@@ -189,16 +181,22 @@ pub const Application = struct {
             &self.last_activate_len,
             &self.session.menu_overlay,
             self.which_key_delay_ns,
-            opts.frame_start,
-        )) damaged = true;
+            frame_start,
+        );
 
         for (self.js_plugins.items) |plugin| if (plugin.tick()) {
             damaged = true;
         };
         if (try self.services.call(self, active)) damaged = true;
+        return damaged;
+    }
 
-        if (self.driver.applyWindowIntents()) damaged = true;
-        active = try self.driver.prepare();
+    pub fn applyWindowIntents(self: *Application) bool {
+        return self.driver.applyWindowIntents();
+    }
+
+    pub fn observe(self: *Application, active: frame.Driver.Prepared) bool {
+        var damaged = false;
         if (self.driver.ctx.buffers.active_id != self.last_active) {
             self.last_active = self.driver.ctx.buffers.active_id;
             damaged = true;
@@ -207,21 +205,16 @@ pub const Application = struct {
             active.attach.seen_commits = active.editor.doc.commitCount();
             damaged = true;
         }
-        if (had_input or opts.force_rebuild) damaged = true;
-        if (damaged) self.view_dirty = true;
+        return damaged;
+    }
 
+    pub fn buildPrepared(self: *Application, renderer: anytype, active: frame.Driver.Prepared, opts: anytype) !void {
         try self.driver.buildPrepared(renderer, active, .{
             .frame_start = opts.frame_start,
             .fb = opts.fb,
-            .blink_on = self.blink_on,
+            .blink_on = opts.blink_on,
             .menu_shown = self.session.menu_overlay.shown,
             .force_rebuild = opts.force_rebuild,
         });
-        return .{
-            .active = active,
-            .had_input = had_input,
-            .damaged = damaged,
-            .blink_on = self.blink_on,
-        };
     }
 };
