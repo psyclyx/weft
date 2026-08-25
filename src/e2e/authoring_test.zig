@@ -856,18 +856,15 @@ test "lsp: hover popup auto-expires once the cursor leaves its anchor's line —
     // offset write.
     ed.press("j", "");
     ed.press("j", "");
-    try t.expect(h.surfaceHasText(ed, "i32")); // sanity: dispatch alone doesn't clear it —
-    // this is core's per-FRAME policy, and this harness never runs a real
-    // render loop (see `popup_layout_test.zig`'s module doc for why: this
-    // suite drives the editor/dispatch stack directly). So call the exact
-    // function `frame_builder.buildFrame` calls every real frame — proving
-    // the SHIPPED policy (not a reimplementation of it) actually closes
-    // this real, dispatch-driven popup once the cursor has genuinely moved.
-    h.app_frame_builder.expireStaleCaretSurfaces(
-        ed.plugins.items,
-        ed.buffers.active().editor.text(),
-        ed.buffers.active().editor.cursorOffset(),
-    );
+    try t.expect(h.surfaceHasText(ed, "i32")); // dispatch alone doesn't clear it
+
+    // Advance one complete production frame. The editor owns the lifecycle
+    // policy and the rendering; this test neither invokes a layer helper nor
+    // reconstructs a partial UI. The returned framebuffer is deliberately
+    // opaque here — the observable under test is that the real frame closed
+    // the now-stale surface.
+    const frame = try ed.renderComposite();
+    defer gpa.free(frame);
 
     try t.expect(!h.surfaceHasText(ed, "i32")); // the popup is gone
     for (ed.plugins.items) |pl| {

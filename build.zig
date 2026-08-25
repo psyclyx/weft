@@ -391,6 +391,12 @@ pub fn build(b: *std.Build) void {
     weft_mod.addAnonymousImport("font_mono", .{
         .root_source_file = snail_dep.path("assets/DejaVuSansMono.ttf"),
     });
+    // Resident JS catalog entries are data dependencies of the full headless
+    // editor too. Route them through the module graph; the E2E config loader
+    // must not reach out of `src/` to impersonate the installed catalog.
+    weft_mod.addAnonymousImport("dap_js", .{
+        .root_source_file = b.path("config/plugins/dap.js"),
+    });
     weft_mod.linkSystemLibrary("fontconfig", .{});
     addSyntax(b, weft_mod, renderer);
     addWasm(b, weft_mod);

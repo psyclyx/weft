@@ -235,7 +235,9 @@ pub const Editor = struct {
             .loop = &self.loop,
             .subbuffers = &self.subs,
             .register = &self.register,
+            .syntax_of = app_providers.resolveSyntax,
             .pool = self.pool,
+            .grant_table = &self.session.system.grants,
         });
         try self.plugins.append(self.gpa, p);
     }
@@ -1488,8 +1490,7 @@ pub const ConfigLoader = struct {
     /// M3/M4 parity harness's "plugin load-list set-equality" evidence
     /// (config_test.zig): recorded regardless of catalog/load outcome (a
     /// `.js` name included), so two configs with the same catalog list
-    /// produce the same set here even though `.js` plugins aren't
-    /// instantiated headlessly.
+    /// produce the same set here.
     requested: std.ArrayList([]const u8) = .empty,
 
     pub fn deinit(self: *ConfigLoader) void {
@@ -1505,7 +1506,16 @@ pub const ConfigLoader = struct {
         const self: *ConfigLoader = @ptrCast(@alignCast(ctx));
         const gpa = self.ed.gpa;
         self.requested.append(gpa, gpa.dupe(u8, name) catch return) catch {};
-        if (std.mem.endsWith(u8, name, ".js")) return; // JS plugins aren't wired headlessly yet
+        if (std.mem.eql(u8, name, "dap.js")) {
+            self.ed.loadJs("dap", weft.dap_js) catch {
+                self.failed.append(gpa, gpa.dupe(u8, name) catch return) catch {};
+            };
+            return;
+        }
+        if (std.mem.endsWith(u8, name, ".js")) {
+            self.missing.append(gpa, gpa.dupe(u8, name) catch return) catch {};
+            return;
+        }
         const bytes = plugin_catalog.get(name) orelse {
             self.missing.append(gpa, gpa.dupe(u8, name) catch return) catch {};
             return;
@@ -1951,13 +1961,14 @@ pub fn drainDiagnostics(ed: *Editor) bool {
 pub fn drainToolContains(ed: *Editor, name: []const u8, needle: []const u8) bool {
     const deadline = core.task.nowNs() + 10 * std.time.ns_per_s;
     while (core.task.nowNs() < deadline) {
-        _ = ed.loop.tick();
-        for (ed.js_plugins.items) |jp| _ = jp.tick(); // drive JS reactors (DAP/ACP proc I/O)
+        // Advance the editor's whole frame step: async deliveries, persistent
+        // REPL/net streams, wasm polls, and resident JS reactors. A waiter must
+        // not maintain its own partial inventory of producers.
+        ed.settle(1);
         if (toolText(ed, name)) |txt| {
             defer ed.gpa.free(txt);
             if (std.mem.indexOf(u8, txt, needle) != null) return true;
         }
-        std.Thread.yield() catch {};
     }
     return false;
 }

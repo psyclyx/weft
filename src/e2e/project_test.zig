@@ -33,6 +33,7 @@ const whichKeyText = h.whichKeyText;
 const whichKeyShows = h.whichKeyShows;
 const authorFile = h.authorFile;
 const toolText = h.toolText;
+const drainBufferContains = h.drainBufferContains;
 const drainToolContains = h.drainToolContains;
 const drainUntilOracle = h.drainUntilOracle;
 const drainLoopIdle = h.drainLoopIdle;
@@ -64,9 +65,8 @@ fn pairBodyChanged(before: []const u8, after: []const u8, right: bool) bool {
 
 // This is intentionally the plugin inventory from the shipped config, not a
 // hand-picked test fixture. The spine checks that config.js requested every
-// entry and that every non-JS entry loaded successfully. `dap.js` is retained
-// as a requested item but is the one documented headless omission: resident
-// QuickJS UI plugins are not instantiated by the display-free harness.
+// entry and that every entry loaded successfully, including the resident
+// `dap.js` plugin through the same QuickJS reactor used by the desktop app.
 const shipped_config_plugins = [_][]const u8{
     "edit",       "complete",    "project",   "structural", "region",  "shell",     "palette",
     "motions",    "textobjects", "operators", "vim",        "ts",      "comment",   "indent",
@@ -501,10 +501,12 @@ test "e2e/spine: write a file, init a repo, stage and commit — all through wef
     // likewise navigable without knowing the producer's implementation.
     ed.runStr("grep", "pub fn main");
     try t.expect(drainToolContains(&ed, "*grep*", "main.zig"));
+    proj.capture(&ed, "spine-grep-results");
     ed.press("Return", "");
     try t.expect(!std.mem.eql(u8, ed.mode(), "grep"));
     ed.runStr("run-command", "printf 'main.zig:1: run ok\\n'");
     try t.expect(drainToolContains(&ed, "*output*", "main.zig:1"));
+    proj.capture(&ed, "spine-run-output");
     ed.press("Return", "");
     try t.expect(!std.mem.eql(u8, ed.mode(), "output"));
 
@@ -513,6 +515,7 @@ test "e2e/spine: write a file, init a repo, stage and commit — all through wef
     // navigate within it.
     ed.chord("SPC ,");
     ed.typeText("main.zig");
+    proj.capture(&ed, "spine-buffer-picker");
     ed.press("Return", "");
     try t.expectEqualStrings("main.zig", ed.bufferName());
     ed.press("/", "");
@@ -529,10 +532,12 @@ test "e2e/spine: write a file, init a repo, stage and commit — all through wef
     // layout action, and autopair is an insert-mode editing provider. These
     // are ordinary config binds, not direct command/keymap calls.
     ed.press("F1", "");
+    proj.capture(&ed, "spine-which-key");
     ed.press("Escape", "");
     ed.chord("SPC w v");
     ed.applyWindow();
     try t.expectEqual(@as(usize, 2), ed.paneCount());
+    proj.capture(&ed, "spine-window-split");
     ed.chord("SPC w o");
     ed.applyWindow();
     try t.expectEqual(@as(usize, 1), ed.paneCount());
@@ -546,6 +551,131 @@ test "e2e/spine: write a file, init a repo, stage and commit — all through wef
         defer gpa.free(scratch);
         try t.expect(std.mem.indexOf(u8, scratch, "(autopair)") != null);
     }
+
+    // The catalog's smaller composable providers get real effects too; being
+    // present in the config manifest is not behavioral coverage.
+    ed.run("duplicate-line");
+    ed.run("upcase-line");
+    ed.runStr("mark-region", "text");
+    try t.expect(ed.subs.list.items.len > 0);
+    ed.runStr("insert-shell", "printf shell-plugin");
+    try t.expect(drainBufferContains(&ed, "shell-plugin"));
+    ed.press("o", "");
+    ed.typeText("41");
+    ed.press("Escape", "");
+    ed.press("0", "");
+    ed.press("C-a", "");
+    {
+        const numbered = try ed.textAlloc();
+        defer gpa.free(numbered);
+        try t.expect(std.mem.indexOf(u8, numbered, "42") != null);
+    }
+    try core.file.writeBytesMakingDirs(gpa, proj.root, "weft-snippets.txt", "demo\tSNIPPET\\nBODY\n");
+    ed.runStr("snippets-expand", "demo");
+    {
+        const expanded = try ed.textAlloc();
+        defer gpa.free(expanded);
+        try t.expect(std.mem.indexOf(u8, expanded, "SNIPPET\nBODY") != null);
+    }
+    proj.capture(&ed, "spine-autopair");
+
+    ed.chord("SPC :");
+    try t.expect(ed.pick.active);
+    proj.capture(&ed, "spine-command-palette");
+    ed.press("Escape", "");
+
+    // Continue the same config.js surface tour on a real authored buffer.
+    // Every operation enters through a shipped key/action. Captures happen
+    // while a surface or visible decoration is live, so the demo and test
+    // cannot silently exercise behavior that never reaches the editor.
+    ed.runStr("open", "main.zig");
+    const main_syntax = language_support.attachedSyntax(&ed) orelse return error.SyntaxDidNotAttach;
+    try t.expect(language_support.waitForTree(&ed, main_syntax));
+    const node_kind = try core.command.run(ed.commands, ed.ctx, "node-kind", &.{});
+    try t.expect(node_kind == .string and node_kind.string.len > 0);
+    ed.chord("SPC p R");
+    try t.expect(ed.echoText().len > 0);
+    proj.capture(&ed, "spine-project-root");
+    ed.press("C-SPC", "");
+    ed.settle(40);
+    try t.expect(ed.pick.active);
+    proj.capture(&ed, "spine-completion");
+    ed.press("Escape", "");
+
+    ed.chord("SPC c e");
+    proj.capture(&ed, "spine-tree-sitter-selection");
+    ed.press("Escape", "");
+    ed.chord("SPC c n");
+    proj.capture(&ed, "spine-tree-sitter-node");
+    ed.press("Escape", "");
+
+    ed.press(">", "");
+    ed.press(">", "");
+    ed.press("<", "");
+    ed.press("<", "");
+    ed.chord("SPC t w");
+    ed.press("F9", "");
+    proj.capture(&ed, "spine-breakpoint-gutter");
+    ed.press("F9", "");
+    ed.chord("SPC d d");
+    try t.expect(std.mem.indexOf(u8, ed.echoText(), "set an adapter") != null);
+    proj.capture(&ed, "spine-dap-configuration");
+    ed.chord("SPC c f");
+    try t.expect(drainBufferContains(&ed, "pub fn main"));
+
+    // Tool-producing actions use the real proc/fs doors. This project is
+    // intentionally not a Weft checkout, so make/direnv may display their
+    // honest failure/status output; that output is still the plugin's real UI.
+    ed.chord("SPC c b");
+    ed.settle(20);
+    proj.capture(&ed, "spine-make-build");
+    ed.runStr("open", "main.zig");
+    ed.chord("SPC c t");
+    ed.settle(20);
+    proj.capture(&ed, "spine-make-test");
+    ed.runStr("open", "main.zig");
+    ed.chord("SPC n n");
+    proj.capture(&ed, "spine-notes");
+    ed.runStr("open", "main.zig");
+    ed.chord("SPC o e");
+    ed.settle(12);
+    proj.capture(&ed, "spine-direnv");
+    ed.runStr("open", "main.zig");
+    ed.chord("SPC o c");
+    ed.press("i", "");
+    ed.typeText("printf console-ok");
+    ed.press("Escape", "");
+    ed.run("console-send");
+    try t.expect(drainToolContains(&ed, "*console*", "console-ok"));
+    proj.capture(&ed, "spine-console");
+    ed.runStr("open", "main.zig");
+    ed.chord("SPC o r");
+    ed.runStr("repl-send", "printf 'repl-ok\\n'\n");
+    try t.expect(drainToolContains(&ed, "*repl*", "repl-ok"));
+    proj.capture(&ed, "spine-repl");
+    ed.run("repl-quit");
+    ed.runStr("open", "main.zig");
+    ed.runStr("net-open", "127.0.0.1:1");
+    ed.settle(12);
+    proj.capture(&ed, "spine-net-local-failure");
+    ed.run("net-close");
+    ed.runStr("open", "main.zig");
+
+    // The minimal agent adapter is exercised with a hermetic CLI selected
+    // through its ordinary plugin config. This drives its real fs-write + proc
+    // path and produces the same *llm* tool buffer as a user's `llm` binary.
+    try ed.setConfig("llm", "cmd", "sed 's/^/assistant: /'");
+    ed.runStr("llm-ask", "demo prompt");
+    try t.expect(drainToolContains(&ed, "*llm*", "assistant: demo prompt"));
+    proj.capture(&ed, "spine-llm-agent");
+    ed.runStr("open", "main.zig");
+
+    // Coverage map for the shipped catalog. Concrete interactions above and
+    // below cover the ordinary editing stack, syntax/LSP, pickers, project,
+    // proc tools, retained semantic tools, windows, collaboration, and debug
+    // decoration. The LLM adapter and REPL use hermetic local commands, and net
+    // takes a bounded localhost refusal. Every shipped plugin has a concrete
+    // behavior in this one scenario; manifest loading alone gets no credit.
 
     // A generic config action supplied by the editing plugin changes the
     // focused line; it is intentionally reached through SPC c c, not a
