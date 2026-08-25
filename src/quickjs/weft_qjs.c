@@ -19,12 +19,21 @@
 // ── Host imports (grants), module "weft" — the same membrane the Zig plugin
 // shim uses. Strings cross as (ptr,len) into this module's linear memory,
 // which the host reads. ──
+#define WEFT_RUN_MAX_ARGS 8
+#define WEFT_RUN_MAX_ARG_BYTES 1024
+#define WEFT_RUN_MAX_TOTAL_BYTES 4096
+typedef struct {
+    const char *ptr;
+    int len;
+} WeftRunArg;
+
 __attribute__((import_module("weft"), import_name("qjs_bind_key")))
 extern void host_bind_key(const char *mode, int mode_len,
                           const char *key, int key_len,
                           const char *cmd, int cmd_len);
 __attribute__((import_module("weft"), import_name("qjs_run")))
-extern void host_run(const char *cmd, int cmd_len);
+extern void host_run(const char *cmd, int cmd_len,
+                     const WeftRunArg *args, int arg_count);
 __attribute__((import_module("weft"), import_name("qjs_echo")))
 extern void host_echo(const char *msg, int msg_len);
 __attribute__((import_module("weft"), import_name("qjs_log")))
@@ -133,7 +142,9 @@ extern void host_grant(const char *plugin, int plugin_len,
                        const char *root, int root_len);
 
 // ── JS → host trampolines. Each pulls its string args out of the JS values
-// and forwards to the host import. ──
+// and forwards to the host import. `weft.run` is the generic command door:
+// zero arguments remains valid, while bounded string arguments are carried as
+// borrowed ptr/len records for the duration of the host call. ──
 
 static JSValue js_bind_key(JSContext *ctx, JSValueConst this_val,
                            int argc, JSValueConst *argv) {
@@ -151,10 +162,42 @@ static JSValue js_bind_key(JSContext *ctx, JSValueConst this_val,
 
 static JSValue js_run(JSContext *ctx, JSValueConst this_val,
                       int argc, JSValueConst *argv) {
-    if (argc < 1) return JS_ThrowTypeError(ctx, "run(cmd)");
+    if (argc < 1 || argc > WEFT_RUN_MAX_ARGS + 1)
+        return JS_ThrowTypeError(ctx, "run(cmd, ...stringArgs): at most 8 args");
     size_t cl;
     const char *c = JS_ToCStringLen(ctx, &cl, argv[0]);
-    if (c) host_run(c, (int)cl);
+    if (!c) return JS_EXCEPTION;
+    if (cl > WEFT_RUN_MAX_ARG_BYTES) {
+        JS_FreeCString(ctx, c);
+        return JS_ThrowRangeError(ctx, "run command name is too large");
+    }
+    WeftRunArg args[WEFT_RUN_MAX_ARGS];
+    int total = 0;
+    int converted = 0;
+    for (int i = 1; i < argc; ++i) {
+        if (!JS_IsString(argv[i])) {
+            for (int j = 0; j < converted; ++j) JS_FreeCString(ctx, args[j].ptr);
+            JS_FreeCString(ctx, c);
+            return JS_ThrowTypeError(ctx, "run arguments must be strings");
+        }
+        size_t len;
+        const char *arg = JS_ToCStringLen(ctx, &len, argv[i]);
+        if (!arg) {
+            for (int j = 0; j < converted; ++j) JS_FreeCString(ctx, args[j].ptr);
+            JS_FreeCString(ctx, c);
+            return JS_EXCEPTION;
+        }
+        if (len > WEFT_RUN_MAX_ARG_BYTES || total > WEFT_RUN_MAX_TOTAL_BYTES - (int)len) {
+            JS_FreeCString(ctx, arg);
+            for (int j = 0; j < converted; ++j) JS_FreeCString(ctx, args[j].ptr);
+            JS_FreeCString(ctx, c);
+            return JS_ThrowRangeError(ctx, "run argument payload is too large");
+        }
+        args[converted++] = (WeftRunArg){ .ptr = arg, .len = (int)len };
+        total += (int)len;
+    }
+    host_run(c, (int)cl, args, converted);
+    for (int i = 0; i < converted; ++i) JS_FreeCString(ctx, args[i].ptr);
     JS_FreeCString(ctx, c);
     return JS_UNDEFINED;
 }

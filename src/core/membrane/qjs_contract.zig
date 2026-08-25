@@ -1,7 +1,7 @@
 //! core/membrane/qjs_contract.zig — the `weft.*` membrane's THIRD surface
 //! (doc/north-star-plan.md §2.5, task W0a-D extension 3): the `qjs_*` import
 //! table `src/core/quickjs.zig` binds onto quickjs.wasm's Linker, today
-//! hand-listed at THREE call sites (`defineConfigFns`'s 11 config-plane
+//! hand-listed at THREE call sites (`defineConfigFns`'s 13 config-plane
 //! imports, `evalConfig`'s 15 plugin-plane stubs, `JsPlugin.load`'s 15
 //! plugin-plane real handlers) that must all agree on every name's arity.
 //!
@@ -31,7 +31,7 @@ const std = @import("std");
 
 pub const ValType = enum { i32 };
 
-/// Which linker(s) an entry is bound on. `.config` — the 12 `weft.*` calls
+/// Which linker(s) an entry is bound on. `.config` — the 13 `weft.*` calls
 /// every config/plugin script can make (bind/run/echo/log/plugin/use/set/
 /// menu/action/provide/statusSegment/grant) — real handlers always. `.plugin` — the 15 calls
 /// only a RESIDENT JS plugin makes (register/proc/buffer/config/
@@ -70,7 +70,7 @@ fn e(name: []const u8, comptime np: usize, comptime nr: usize, group: Group, doc
 pub const imports = [_]Entry{
     // ── the config plane: real handlers on every linker ─────────────────
     e("qjs_bind_key", 6, 0, .config, "bind a key chord in mode `m` to command `c` (config plane)"),
-    e("qjs_run", 2, 0, .config, "run a command by name (weft.run)"),
+    e("qjs_run", 4, 0, .config, "run a command by name with up to eight bounded string args (weft.run)"),
     e("qjs_echo", 2, 0, .config, "print a message to the echo area"),
     e("qjs_log", 2, 0, .config, "write a guest log line"),
     e("qjs_plugin", 2, 0, .config, "weft.plugin(name): stage a plugin load onto the manifest"),

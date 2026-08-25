@@ -1119,14 +1119,42 @@ fn cUse(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32, results: []i
     m.addImport(sub) catch sub.destroy();
 }
 
+const maxRunArgs = 8;
+const maxRunArgBytes = 1024;
+const maxRunArgTotal = 4096;
+
 fn cRun(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32, results: []i32) void {
     _ = results;
     const br: *Bridge = @ptrCast(@alignCast(data.?));
     const gpa = br.activeCtx().gpa;
     const cmd = readStr(br, caller, args[0], args[1]) orelse return;
     defer gpa.free(cmd);
+    const count: usize = @intCast(args[3]);
+    if (count > maxRunArgs) return;
+    var values: [maxRunArgs]command.Value = undefined;
+    var total: usize = 0;
+    if (count > 0) {
+        const record_bytes = std.math.mul(usize, count, 8) catch return;
+        const records = caller.readMemory(gpa, @intCast(args[2]), record_bytes) catch return;
+        defer gpa.free(records);
+        for (0..count) |i| {
+            const off = i * 8;
+            var ptr_bytes: [4]u8 = undefined;
+            var len_bytes: [4]u8 = undefined;
+            @memcpy(&ptr_bytes, records[off .. off + 4]);
+            @memcpy(&len_bytes, records[off + 4 .. off + 8]);
+            const ptr = std.mem.readInt(i32, &ptr_bytes, .little);
+            const len = std.mem.readInt(i32, &len_bytes, .little);
+            if (ptr < 0 or len < 0 or len > maxRunArgBytes) return;
+            total = std.math.add(usize, total, @intCast(len)) catch return;
+            if (total > maxRunArgTotal) return;
+            const value = readStr(br, caller, ptr, len) orelse return;
+            values[i] = .{ .string = value };
+        }
+    }
+    defer for (values[0..count]) |value| gpa.free(value.string);
     if (br.manifest) |m| {
-        m.addRun(cmd) catch {};
+        m.addRun(cmd, values[0..count]) catch {};
         return;
     }
     // LIVE mode (task #19 item 4): NOW dispatches for real — a resident JS
@@ -1142,7 +1170,7 @@ fn cRun(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32, results: []i
     // `cmd` resolves to a command bound by ANOTHER plugin (wasm or JS), this
     // runs THAT one too — same "by name, system-wide" semantics `wl_run`
     // already has, not scoped to the calling plugin.
-    _ = command.run(br.activeCtx().commands, br.activeCtx(), cmd, &.{}) catch {};
+    _ = command.run(br.activeCtx().commands, br.activeCtx(), cmd, values[0..count]) catch {};
 }
 
 /// weft.set(plugin, key, blob) — stage config data for a plugin (read at its
@@ -1435,6 +1463,33 @@ const Env = struct {
     }
 };
 
+fn bindRunArgsFixture(gpa: Allocator, env: *Env) !void {
+    const H = struct {
+        fn invoke(ctx: *command.Context, data: ?*anyopaque, args: []const command.Value) anyerror!command.Value {
+            _ = data;
+            if (args.len != 3) return error.FixtureArity;
+            if (args[0] != .string or args[1] != .string or args[2] != .string) return error.FixtureType;
+            if (!std.mem.eql(u8, args[0].string, ".foo") or
+                !std.mem.eql(u8, args[1].string, "/tmp/grammar") or
+                !std.mem.eql(u8, args[2].string, "tree_sitter_fixture")) return error.FixtureValue;
+            ctx.head.echo.clearRetainingCapacity();
+            try ctx.head.echo.appendSlice(ctx.gpa, "run-args-ok");
+            return .nil;
+        }
+    };
+    _ = try env.commands.bind(gpa, "fixture-run-args", .{
+        .name = "fixture-run-args",
+        .summary = "argument-bearing config fixture",
+        .args = &.{
+            .{ .name = "ext", .type = .string },
+            .{ .name = "dir", .type = .string },
+            .{ .name = "symbol", .type = .string },
+        },
+        .handler = H.invoke,
+        .data = null,
+    });
+}
+
 test "quickjs: config.js drives the weft ABI — binds a key and echoes" {
     const gpa = t.allocator;
     var env: Env = undefined;
@@ -1511,6 +1566,54 @@ test "quickjs: config.js can run a registered command through weft.run" {
     defer engine.deinit();
     try evalConfig(&engine, &env.ctx, null, null, null, "weft.run(\"mark\");");
     try t.expectEqualStrings("ran!", env.head.echo.items);
+}
+
+test "quickjs: config weft.run carries bounded string args through the generic command door" {
+    const gpa = t.allocator;
+    var env: Env = undefined;
+    try Env.init(gpa, &env);
+    defer env.deinit(gpa);
+    try bindRunArgsFixture(gpa, &env);
+    var engine = try wasm.Engine.init();
+    defer engine.deinit();
+
+    try evalConfig(&engine, &env.ctx, null, null, null, "weft.run('fixture-run-args', '.foo', '/tmp/grammar', 'tree_sitter_fixture');");
+    try t.expectEqualStrings("run-args-ok", env.head.echo.items);
+}
+
+test "quickjs: manifest run declarations retain args until apply" {
+    const gpa = t.allocator;
+    var env: Env = undefined;
+    try Env.init(gpa, &env);
+    defer env.deinit(gpa);
+    try bindRunArgsFixture(gpa, &env);
+    var engine = try wasm.Engine.init();
+    defer engine.deinit();
+
+    const m = try evalToManifest(&engine, &env.ctx, null, null, null, "weft.run('fixture-run-args', '.foo', '/tmp/grammar', 'tree_sitter_fixture');", .config, "config");
+    defer m.destroy();
+    try t.expectEqual(@as(usize, 1), m.runs.items.len);
+    try t.expectEqualStrings("/tmp/grammar", m.runs.items[0].args[1].value);
+    var actx: manifest_mod.Manifest.ApplyCtx = .{ .ctx = &env.ctx, .loader = null, .config = null };
+    try m.apply(gpa, &actx);
+    try t.expectEqualStrings("run-args-ok", env.head.echo.items);
+}
+
+test "quickjs: argument-bearing weft.run rejects invalid shape before staging" {
+    const gpa = t.allocator;
+    var engine = try wasm.Engine.init();
+    defer engine.deinit();
+    const cases = [_][]const u8{
+        "weft.run('fixture', 1);",
+        "weft.run('fixture', '1','2','3','4','5','6','7','8','9');",
+        "weft.run('fixture', new Array(1025).fill('x').join(''));",
+    };
+    for (cases) |source| {
+        var env: Env = undefined;
+        try Env.init(gpa, &env);
+        defer env.deinit(gpa);
+        try t.expectError(error.ConfigException, evalToManifest(&engine, &env.ctx, null, null, null, source, .config, "config"));
+    }
 }
 
 test "quickjs: weft.action + weft.provide wire the pick dispatch layer" {

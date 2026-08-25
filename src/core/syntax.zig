@@ -213,7 +213,9 @@ pub const Runtime = struct {
     }
 };
 
-pub fn forPath(path: []const u8) ?*const LanguageSpec {
+/// Test/embedding escape hatch for the compile-time catalog. Application code
+/// must resolve through `Runtime.forPath`, so config-added grammars participate.
+pub fn builtinForPath(path: []const u8) ?*const LanguageSpec {
     for (&languages) |*spec| {
         for (spec.extensions) |ext| {
             if (std.mem.endsWith(u8, path, ext)) return spec;

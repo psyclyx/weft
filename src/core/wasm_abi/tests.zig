@@ -1321,7 +1321,7 @@ test "wasm plugins: consult-imenu picks a definition and jumps to it" {
     const ed = &env.buffers.active().editor;
     try ed.insertText(gpa, src);
     const sx = @import("../syntax.zig");
-    const syn = try sx.Syntax.create(gpa, sx.forPath("t.zig").?, &ed.doc);
+    const syn = try sx.Syntax.create(gpa, sx.builtinForPath("t.zig").?, &ed.doc);
     defer syn.destroy();
     env.buffers.active().frontend = syn;
     const R = struct {
@@ -1410,7 +1410,7 @@ test "wasm plugin: ts expands selection to the enclosing node + runs a query" {
     // Attach a real zig grammar via the buffer's frontend slot; a resolver hands
     // it to the membrane (the host owns that slot).
     const sx = @import("../syntax.zig");
-    const syn = try sx.Syntax.create(gpa, sx.forPath("t.zig").?, &ed.doc);
+    const syn = try sx.Syntax.create(gpa, sx.builtinForPath("t.zig").?, &ed.doc);
     defer syn.destroy();
     env.buffers.active().frontend = syn;
     const R = struct {
@@ -1450,7 +1450,7 @@ test "wasm plugins: a tree text object (a-function) an operator deletes (daf)" {
     try ed.insertText(gpa, src);
 
     const sx = @import("../syntax.zig");
-    const syn = try sx.Syntax.create(gpa, sx.forPath("t.zig").?, &ed.doc);
+    const syn = try sx.Syntax.create(gpa, sx.builtinForPath("t.zig").?, &ed.doc);
     defer syn.destroy();
     env.buffers.active().frontend = syn;
     const R = struct {

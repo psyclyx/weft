@@ -30,7 +30,7 @@
 //! (`bind_key`/`run`/`echo`/`log`/`plugin`/`use`/`set`/`menu`/`action`/
 //! `provide`/`statusSegment`/`grant` — see `membrane/qjs_contract.zig`'s
 //! `.config` group) is the ONLY channel a config script can use to affect a
-//! `Manifest`; none of those twelve imports reads wall-clock, environment,
+//! `Manifest`; none of those thirteen imports reads wall-clock, environment,
 //! or filesystem outside
 //! the config's own directory (`qjs_use`'s file read is confined to
 //! `<config_dir>/<name>.js`) — verified by
@@ -130,7 +130,11 @@ pub const ActionDecl = struct { name: []u8 };
 pub const SemanticActionDecl = struct { name: []u8 };
 pub const ProvideDecl = struct { action: []u8, mode: []u8, lang: []u8, command: []u8, priority: i32 };
 pub const ValueDecl = struct { owner: []u8, key: []u8, value: []u8 };
-pub const RunDecl = struct { command: []u8 };
+pub const RunArg = struct { value: []u8 };
+pub const RunDecl = struct { command: []u8, args: []RunArg };
+const maxRunArgs = 8;
+const maxRunArgBytes = 1024;
+const maxRunArgTotal = 4096;
 pub const EchoDecl = struct { message: []u8 };
 pub const LogDecl = struct { message: []u8 };
 /// `weft.statusSegment(text, role, priority)` (north-star-plan §6 W3, task
@@ -359,7 +363,11 @@ pub const Manifest = struct {
             gpa.free(d.value);
         }
         self.values.deinit(gpa);
-        for (self.runs.items) |d| gpa.free(d.command);
+        for (self.runs.items) |d| {
+            gpa.free(d.command);
+            for (d.args) |a| gpa.free(a.value);
+            gpa.free(d.args);
+        }
         self.runs.deinit(gpa);
         for (self.echoes.items) |d| gpa.free(d.message);
         self.echoes.deinit(gpa);
@@ -417,8 +425,27 @@ pub const Manifest = struct {
     pub fn addValue(self: *Manifest, owner: []const u8, key: []const u8, value: []const u8) !void {
         try self.values.append(self.gpa, .{ .owner = try self.gpa.dupe(u8, owner), .key = try self.gpa.dupe(u8, key), .value = try self.gpa.dupe(u8, value) });
     }
-    pub fn addRun(self: *Manifest, cmd: []const u8) !void {
-        try self.runs.append(self.gpa, .{ .command = try self.gpa.dupe(u8, cmd) });
+    pub fn addRun(self: *Manifest, cmd: []const u8, values: []const command.Value) !void {
+        if (cmd.len > maxRunArgBytes) return error.RunCommandTooLarge;
+        if (values.len > maxRunArgs) return error.RunArgumentsTooMany;
+        var total: usize = 0;
+        for (values) |value| {
+            if (value != .string) return error.RunArgumentType;
+            if (value.string.len > maxRunArgBytes) return error.RunArgumentTooLarge;
+            total = std.math.add(usize, total, value.string.len) catch return error.RunArgumentsTooLarge;
+        }
+        if (total > maxRunArgTotal) return error.RunArgumentsTooLarge;
+        const command_owned = try self.gpa.dupe(u8, cmd);
+        errdefer self.gpa.free(command_owned);
+        const args_owned = try self.gpa.alloc(RunArg, values.len);
+        errdefer self.gpa.free(args_owned);
+        var copied: usize = 0;
+        errdefer for (args_owned[0..copied]) |a| self.gpa.free(a.value);
+        for (values, 0..) |value, i| {
+            args_owned[i] = .{ .value = try self.gpa.dupe(u8, value.string) };
+            copied += 1;
+        }
+        try self.runs.append(self.gpa, .{ .command = command_owned, .args = args_owned });
     }
     pub fn addEcho(self: *Manifest, message: []const u8) !void {
         try self.echoes.append(self.gpa, .{ .message = try self.gpa.dupe(u8, message) });
@@ -506,7 +533,11 @@ pub const Manifest = struct {
             hStr(h, d.value);
         }
         hLen(h, self.runs.items.len);
-        for (self.runs.items) |d| hStr(h, d.command);
+        for (self.runs.items) |d| {
+            hStr(h, d.command);
+            hLen(h, d.args.len);
+            for (d.args) |a| hStr(h, a.value);
+        }
         hLen(h, self.echoes.items.len);
         for (self.echoes.items) |d| hStr(h, d.message);
         hLen(h, self.logs.items.len);
@@ -610,9 +641,33 @@ pub const Manifest = struct {
         for (self.plugins.items) |d| try out.append(gpa, d.name);
     }
 
+    fn appendRunKeyPart(gpa: Allocator, out: *std.ArrayList(u8), bytes: []const u8) !void {
+        var len: [4]u8 = undefined;
+        std.mem.writeInt(u32, &len, @intCast(bytes.len), .little);
+        try out.appendSlice(gpa, &len);
+        try out.appendSlice(gpa, bytes);
+    }
+
+    /// A length-framed identity for add-only run reconciliation. Arguments are
+    /// part of identity: changing `grammar-add`'s package or symbol must run the
+    /// new invocation even though its command name is unchanged.
+    fn runKey(gpa: Allocator, d: RunDecl) ![]u8 {
+        var out: std.ArrayList(u8) = .empty;
+        errdefer out.deinit(gpa);
+        try appendRunKeyPart(gpa, &out, d.command);
+        for (d.args) |a| try appendRunKeyPart(gpa, &out, a.value);
+        return out.toOwnedSlice(gpa);
+    }
+
+    fn runOne(actx: *ApplyCtx, d: RunDecl) void {
+        var values: [maxRunArgs]command.Value = undefined;
+        for (d.args, 0..) |a, i| values[i] = .{ .string = a.value };
+        _ = command.run(actx.ctx.commands, actx.ctx, d.command, values[0..d.args.len]) catch {};
+    }
+
     fn collectRunCommands(self: *const Manifest, gpa: Allocator, out: *std.ArrayList([]const u8)) !void {
         for (self.imports.items) |imp| try imp.collectRunCommands(gpa, out);
-        for (self.runs.items) |d| try out.append(gpa, d.command);
+        for (self.runs.items) |d| try out.append(gpa, try runKey(gpa, d));
     }
 
     /// Apply binds/menus/actions/provides/values/echoes/logs — everything
@@ -702,7 +757,7 @@ pub const Manifest = struct {
 
     fn runCommands(self: *const Manifest, actx: *ApplyCtx) !void {
         for (self.imports.items) |imp| try imp.runCommands(actx);
-        for (self.runs.items) |d| _ = command.run(actx.ctx.commands, actx.ctx, d.command, &.{}) catch {};
+        for (self.runs.items) |d| runOne(actx, d);
     }
 
     // ── Reconcile (§2.3, §6: config reload is a diff against the
@@ -786,6 +841,7 @@ pub const Manifest = struct {
             defer old_run_list.deinit(gpa);
             try o.collectRunCommands(gpa, &old_run_list);
             for (old_run_list.items) |c| try old_runs.put(gpa, c, {});
+            defer for (old_run_list.items) |c| gpa.free(c);
         }
         try new.runCommandsDiffed(actx, &old_runs);
     }
@@ -805,8 +861,10 @@ pub const Manifest = struct {
     fn runCommandsDiffed(self: *const Manifest, actx: *ApplyCtx, old_runs: *const std.StringHashMapUnmanaged(void)) !void {
         for (self.imports.items) |imp| try imp.runCommandsDiffed(actx, old_runs);
         for (self.runs.items) |d| {
-            if (old_runs.contains(d.command)) continue; // already ran on a prior load
-            _ = command.run(actx.ctx.commands, actx.ctx, d.command, &.{}) catch {};
+            const key = runKey(actx.ctx.gpa, d) catch continue;
+            defer actx.ctx.gpa.free(key);
+            if (old_runs.contains(key)) continue; // already ran on a prior load
+            runOne(actx, d);
         }
     }
 
@@ -1181,6 +1239,32 @@ test "manifest: staging + hash — two identical manifests hash identically" {
 
     // A changed manifest hashes differently.
     try b.addBind("normal", "k", "cursor-up");
+    try t.expect(a.hash() != b.hash());
+}
+
+test "manifest: argument-bearing runs are owned and hash-sensitive" {
+    const gpa = t.allocator;
+    const args = [_]command.Value{
+        .{ .string = ".foo" },
+        .{ .string = "/tmp/grammar" },
+        .{ .string = "tree_sitter_fixture" },
+    };
+    const a = try Manifest.create(gpa, "config", .config);
+    defer a.destroy();
+    try a.addRun("grammar-add", &args);
+
+    const b = try Manifest.create(gpa, "config", .config);
+    defer b.destroy();
+    try b.addRun("grammar-add", &args);
+    try t.expectEqual(a.hash(), b.hash());
+    try t.expectEqualStrings("/tmp/grammar", a.runs.items[0].args[1].value);
+
+    const changed = [_]command.Value{
+        .{ .string = ".foo" },
+        .{ .string = "/tmp/grammar" },
+        .{ .string = "other_symbol" },
+    };
+    try b.addRun("grammar-add", &changed);
     try t.expect(a.hash() != b.hash());
 }
 

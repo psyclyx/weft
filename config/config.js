@@ -14,7 +14,8 @@
 //   weft.provide(name, when, cmd[, prio]) — a provider for an action, chosen by
 //                                    {mode, lang} at fire time (the synthetic bind)
 //   weft.set(plugin, key, value)   — hand a plugin config data (overrides defaults)
-//   weft.run(command)              — invoke a command now (startup actions)
+//   weft.run(command, ...args)     — invoke a command now; up to eight bounded
+//                                    string args (e.g. grammar-add)
 //   weft.echo(message)             — a transient status-line message
 //   weft.log(message)              — a line to the editor log
 
