@@ -519,10 +519,7 @@ test "e2e/spine: write a file, init a repo, stage and commit — all through wef
     const Presence = struct { link: *Loopback };
     try t.expect(try link.pumpUntil(Presence{ .link = &link }, struct {
         fn pred(c: Presence) bool {
-            for (c.link.peer_col.presence_names.items) |name| {
-                if (std.mem.eql(u8, name, "alice")) return true;
-            }
-            return false;
+            return c.link.peer_col.presenceNamed("alice") != null;
         }
     }.pred));
     try link.synchronize();

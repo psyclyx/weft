@@ -141,7 +141,7 @@ reaped: bool = false,
 /// Set by `rebind`; cleared by the next `push` once it has re-announced
 /// every region we still hold to the fresh session — presence parity
 /// (`Collab.rebind` forces a presence republish by resetting
-/// `last_presence_offset`; §5.2 promises leases are "re-announced like
+/// its cached published presence; §5.2 promises leases are "re-announced like
 /// presence"). Without this, a peer who reaped our leases across the
 /// disconnect (§5.2's own lifetime discipline) never re-learns we still
 /// hold them, and their next fresh acquire would fold against nothing —

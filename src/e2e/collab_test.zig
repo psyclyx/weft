@@ -218,10 +218,7 @@ test "app/collab: peer A types, it converges into peer B's buffer + cursor" {
     const PCtx = struct { link: *Loopback };
     const saw_alice = try link.pumpUntil(PCtx{ .link = &link }, struct {
         fn pred(c: PCtx) bool {
-            for (c.link.peer_col.presence_names.items) |name| {
-                if (std.mem.eql(u8, name, "alice")) return true;
-            }
-            return false;
+            return c.link.peer_col.presenceNamed("alice") != null;
         }
     }.pred);
     try t.expect(saw_alice);

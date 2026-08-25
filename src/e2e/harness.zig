@@ -898,10 +898,9 @@ pub const Loopback = struct {
     }
 
     fn sees(collab: *const session.Collab, name: []const u8, offset: usize) bool {
-        for (collab.presence_names.items, collab.presence_offsets.items) |candidate, seen| {
-            if (std.mem.eql(u8, candidate, name)) return seen == offset;
-        }
-        return false;
+        const presence = collab.presenceNamed(name) orelse return false;
+        const resolved = collab.resolvePresence(presence) orelse return false;
+        return resolved.head == offset;
     }
 
     /// Drive the transport until both replicas have folded the cursor state

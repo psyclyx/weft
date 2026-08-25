@@ -278,31 +278,24 @@ pub fn relayPresence(ctx: ?*anyopaque, key: u64, payload: []const u8) void {
 pub fn unionPresence(self: *Hub, doc: *Document, layer: *layers.Layer, gpa: Allocator) !void {
     var spans: std.ArrayList(layers.SpanIn) = .empty;
     defer spans.deinit(gpa);
-    const limit = doc.text().byteLen();
     for (self.clients.items) |peer| {
         for (peer.conn.collabs.items) |col| {
             if (col.doc != doc) continue;
-            for (
-                col.presence_names.items,
-                col.presence_offsets.items,
-                col.presence_anchors.items,
-                col.presence_hues.items,
-            ) |n, head, anchor, hue16| {
+            for (col.presence.items) |*presence| {
+                const resolved = col.resolvePresence(presence) orelse continue;
                 var dup = false;
                 for (spans.items) |s| {
-                    if (std.mem.eql(u8, s.message, n)) {
+                    if (std.mem.eql(u8, s.message, resolved.name)) {
                         dup = true;
                         break;
                     }
                 }
                 if (dup) continue;
-                const h = @min(head, limit);
-                const a = @min(anchor, limit);
                 try spans.append(gpa, .{
-                    .start = @min(h, a),
-                    .end = @max(h, a),
-                    .kind = session.Collab.packPresenceKind(hue16, h <= a),
-                    .message = n,
+                    .start = @min(resolved.head, resolved.selection_anchor),
+                    .end = @max(resolved.head, resolved.selection_anchor),
+                    .kind = session.Collab.packPresenceKind(resolved.hue16, resolved.head <= resolved.selection_anchor),
+                    .message = resolved.name,
                 });
             }
         }

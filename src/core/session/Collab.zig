@@ -55,15 +55,12 @@ last_sent_grant: ?Access = null,
 /// read `self.session` at deinit (tests bind with an `undefined` one).
 client_bound: bool = false,
 presence_layer: ?*layers_mod.Layer = null,
-last_presence_offset: usize = std.math.maxInt(usize),
-last_presence_anchor: usize = std.math.maxInt(usize),
-/// Peer presence by name; the FULL set republishes into the layer on
-/// every change, so any number of peers coexist. Parallel arrays:
-/// caret (head), selection anchor, and identity hue quantized to u16.
-presence_names: std.ArrayList([]u8) = .empty,
-presence_offsets: std.ArrayList(usize) = .empty,
-presence_anchors: std.ArrayList(usize) = .empty,
-presence_hues: std.ArrayList(u32) = .empty,
+last_presence: ?PublishedPresence = null,
+/// Peer presence is stored in its portable CRDT form. Offsets are derived only
+/// at the display edge, against this replica's current projection; retaining a
+/// projected offset here would silently attach it to the wrong character after
+/// concurrent edits.
+presence: std.ArrayList(PeerPresence) = .empty,
 /// Publish our own cursor (a headless hub has none — it relays).
 publish_presence: bool = true,
 /// Hub relay: re-publish received presence to the other sessions.
@@ -89,6 +86,66 @@ export_diag_gen: usize = 0,
 /// Client side: imported host-scoped diagnostics land here.
 import_diag_layer: ?*layers_mod.Layer = null,
 
+const PresencePosition = struct {
+    head: Document.EventAnchor,
+    selection_anchor: Document.EventAnchor,
+    collapsed: bool,
+    /// Local input coordinates are only a coalescing cache. They never cross
+    /// the wire or resolve on another replica; the portable anchors above are
+    /// the presence value.
+    source_head: usize,
+    source_selection_anchor: usize,
+
+    fn selected(self: *const PresencePosition) Document.EventAnchor {
+        return if (self.collapsed) self.head else self.selection_anchor;
+    }
+
+    fn deinit(self: *PresencePosition, gpa: Allocator) void {
+        gpa.free(self.head.agent);
+        if (!self.collapsed) gpa.free(self.selection_anchor.agent);
+        self.* = undefined;
+    }
+};
+
+const SourcePosition = struct {
+    head: usize,
+    selection_anchor: usize,
+};
+
+const PublishedPresence = union(enum) {
+    absent: SourcePosition,
+    position: PresencePosition,
+
+    fn deinit(self: *PublishedPresence, gpa: Allocator) void {
+        switch (self.*) {
+            .absent => {},
+            .position => |*position| position.deinit(gpa),
+        }
+        self.* = undefined;
+    }
+};
+
+pub const PeerPresence = struct {
+    name: []u8,
+    head: Document.EventAnchor,
+    selection_anchor: Document.EventAnchor,
+    hue16: u32,
+
+    fn deinit(self: *PeerPresence, gpa: Allocator) void {
+        gpa.free(self.name);
+        gpa.free(self.head.agent);
+        gpa.free(self.selection_anchor.agent);
+        self.* = undefined;
+    }
+};
+
+pub const ResolvedPresence = struct {
+    name: []const u8,
+    head: usize,
+    selection_anchor: usize,
+    hue16: u32,
+};
+
 pub fn init(gpa: Allocator, session: *Session, doc: *Document, name: []const u8) !Collab {
     return .{
         .gpa = gpa,
@@ -104,11 +161,9 @@ pub fn deinit(self: *Collab) void {
     // before the doc is freed — the doc always outlives this).
     if (self.client_bound) self.doc.my_grant = .own;
     self.core.deinit(self.gpa);
-    for (self.presence_names.items) |n| self.gpa.free(n);
-    self.presence_names.deinit(self.gpa);
-    self.presence_offsets.deinit(self.gpa);
-    self.presence_anchors.deinit(self.gpa);
-    self.presence_hues.deinit(self.gpa);
+    self.clearLastPresence();
+    for (self.presence.items) |*peer| peer.deinit(self.gpa);
+    self.presence.deinit(self.gpa);
     self.gpa.free(self.name);
 }
 
@@ -121,8 +176,12 @@ pub fn rebind(self: *Collab, new_session: *Session) void {
     // Re-announce the grant after a reconnect (host side); the client
     // keeps its current my_grant so there is no read-only flash.
     self.last_sent_grant = null;
-    self.last_presence_offset = std.math.maxInt(usize);
-    self.last_presence_anchor = std.math.maxInt(usize);
+    self.clearLastPresence();
+}
+
+fn clearLastPresence(self: *Collab) void {
+    if (self.last_presence) |*last| last.deinit(self.gpa);
+    self.last_presence = null;
 }
 
 /// Per-frame (solo use): drain inbound frames, handle the ones in
@@ -183,6 +242,10 @@ pub fn handleFrame(self: *Collab, frame: wire.Decoder.Decoded) !bool {
                         break :blk false;
                     };
                     changed = changed or merged;
+                    // A presence feed can legitimately arrive before the op
+                    // which introduces its anchor's event. Keep the identity
+                    // and try the display projection again after every merge.
+                    if (merged) try self.republishPresence();
                 },
                 .frontier => {
                     try self.core.setTheirFrontier(gpa, frame.payload);
@@ -235,20 +298,35 @@ pub fn handleFrame(self: *Collab, frame: wire.Decoder.Decoded) !bool {
                 changed = true;
             }
         } else if (frame.channel == self.base + 1) {
-            // Presence: uv name_len | name | uv head | uv anchor | uv
-            // hue16 (the last two additive — an older peer sends only
-            // head, so anchor defaults to head and the hue to a stable
-            // per-name fallback). Fold, republish, and (in hub role)
-            // relay to the other sessions.
+            // Presence is soft state, but its positions are CRDT identities:
+            // uv name_len | name | byte present |, when present,
+            // anchor head | anchor selection | uv hue16. A missing identity
+            // stays retained and resolves after its introducing op arrives;
+            // malformed or compacted identities fail closed at the display
+            // edge instead of being guessed from a projected offset.
             var cur: []const u8 = frame.payload;
             const nlen = wire.getUv(&cur) catch return false;
             if (nlen > cur.len) return false;
             const peer_name = cur[0..nlen];
             cur = cur[nlen..];
-            const head = wire.getUv(&cur) catch return false;
-            const anchor = wire.getUv(&cur) catch head;
-            const hue16 = wire.getUv(&cur) catch (nameKey(peer_name) & 0xffff);
-            try self.updatePeerPresence(peer_name, @intCast(head), @intCast(anchor), @intCast(hue16 & 0xffff));
+            if (cur.len == 0) return false;
+            const present = cur[0];
+            cur = cur[1..];
+            if (present == 0) {
+                self.removePeerPresence(peer_name);
+            } else if (present == 1) {
+                const head_wire = wire.getAnchor(&cur) catch return false;
+                const selection_wire = wire.getAnchor(&cur) catch return false;
+                const head_side = std.enums.fromInt(Document.AnchorSide, head_wire.side) orelse return false;
+                const selection_side = std.enums.fromInt(Document.AnchorSide, selection_wire.side) orelse return false;
+                const hue16 = wire.getUv(&cur) catch return false;
+                try self.updatePeerPresence(
+                    peer_name,
+                    .{ .agent = head_wire.agent, .seq = head_wire.seq, .side = head_side },
+                    .{ .agent = selection_wire.agent, .seq = selection_wire.seq, .side = selection_side },
+                    @intCast(hue16 & 0xffff),
+                );
+            } else return false;
             try self.republishPresence();
             changed = true;
             if (self.relay) |r| r(self.relay_ctx, nameKey(peer_name), frame.payload);
@@ -355,50 +433,184 @@ pub fn push(self: *Collab) !bool {
         }
     }
 
-    if (self.publish_presence and
-        (self.cursor_offset != self.last_presence_offset or self.selection_anchor != self.last_presence_anchor))
-    {
-        self.last_presence_offset = self.cursor_offset;
-        self.last_presence_anchor = self.selection_anchor;
-        var payload: std.ArrayList(u8) = .empty;
-        defer payload.deinit(gpa);
-        // uv name_len | name | uv head | uv anchor | uv hue16. The
-        // trailing fields are additive: an older peer's decoder reads
-        // name+head and ignores the rest (frame length-delimited).
-        try wire.putUv(gpa, &payload, self.name.len);
-        try payload.appendSlice(gpa, self.name);
-        try wire.putUv(gpa, &payload, self.cursor_offset);
-        try wire.putUv(gpa, &payload, self.selection_anchor);
-        const hue16: u32 = @intFromFloat(self.session.id.hue() * 65535.0);
-        try wire.putUv(gpa, &payload, hue16);
-        // Coalescing key is per-peer: N cursors never collapse.
-        try self.session.postFeed(self.base + 1, nameKey(self.name), payload.items);
-    }
+    if (self.publish_presence) try self.publishPresence();
     return false;
+}
+
+fn publishPresence(self: *Collab) !void {
+    // No local movement means the already-published identity remains the
+    // right value: remote and local document edits resolve that same identity
+    // independently. Avoid replaying CRDT history merely to rediscover it on
+    // every idle application wake.
+    if (self.last_presence) |last| switch (last) {
+        .absent => |prior| if (prior.head == self.cursor_offset and
+            prior.selection_anchor == self.selection_anchor) return,
+        .position => |prior| if (prior.source_head == self.cursor_offset and
+            prior.source_selection_anchor == self.selection_anchor) return,
+    };
+
+    var position = self.capturePresence() catch |err| switch (err) {
+        // Compaction deliberately erases the identity needed to name an
+        // interior position. Absence is safer than a plausible-but-wrong raw
+        // offset, and a later move to an anchorable event republishes normally.
+        error.Compacted, error.MissingDependency => return self.publishPresenceAbsent(),
+        else => return err,
+    };
+    errdefer position.deinit(self.gpa);
+
+    if (self.last_presence) |*last| switch (last.*) {
+        .absent => {},
+        .position => |*prior| if (presencePositionEql(prior.*, position)) {
+            prior.source_head = position.source_head;
+            prior.source_selection_anchor = position.source_selection_anchor;
+            position.deinit(self.gpa);
+            return;
+        },
+    };
+
+    var payload: std.ArrayList(u8) = .empty;
+    defer payload.deinit(self.gpa);
+    try wire.putUv(self.gpa, &payload, self.name.len);
+    try payload.appendSlice(self.gpa, self.name);
+    try payload.append(self.gpa, 1);
+    try putEventAnchor(self.gpa, &payload, position.head);
+    try putEventAnchor(self.gpa, &payload, position.selected());
+    const hue16: u32 = @intFromFloat(self.session.id.hue() * 65535.0);
+    try wire.putUv(self.gpa, &payload, hue16);
+    // Coalescing key is per-peer: N cursors never collapse.
+    try self.session.postFeed(self.base + 1, nameKey(self.name), payload.items);
+
+    self.clearLastPresence();
+    self.last_presence = .{ .position = position };
+}
+
+fn publishPresenceAbsent(self: *Collab) !void {
+    if (self.last_presence) |last| switch (last) {
+        .absent => |prior| if (prior.head == self.cursor_offset and
+            prior.selection_anchor == self.selection_anchor) return,
+        .position => {},
+    };
+    var payload: std.ArrayList(u8) = .empty;
+    defer payload.deinit(self.gpa);
+    try wire.putUv(self.gpa, &payload, self.name.len);
+    try payload.appendSlice(self.gpa, self.name);
+    try payload.append(self.gpa, 0);
+    try self.session.postFeed(self.base + 1, nameKey(self.name), payload.items);
+    self.clearLastPresence();
+    self.last_presence = .{ .absent = .{
+        .head = self.cursor_offset,
+        .selection_anchor = self.selection_anchor,
+    } };
+}
+
+fn capturePresence(self: *const Collab) Document.ExportAnchorError!PresencePosition {
+    const head = try self.doc.exportAnchor(self.gpa, self.cursor_offset, .after);
+    errdefer self.gpa.free(head.agent);
+    if (self.cursor_offset == self.selection_anchor) {
+        return .{
+            .head = head,
+            .selection_anchor = head,
+            .collapsed = true,
+            .source_head = self.cursor_offset,
+            .source_selection_anchor = self.selection_anchor,
+        };
+    }
+    return .{
+        .head = head,
+        // Editor selections keep their mark left-biased. Preserve that
+        // boundary behavior independently of the right-biased caret.
+        .selection_anchor = try self.doc.exportAnchor(self.gpa, self.selection_anchor, .before),
+        .collapsed = false,
+        .source_head = self.cursor_offset,
+        .source_selection_anchor = self.selection_anchor,
+    };
+}
+
+fn putEventAnchor(gpa: Allocator, payload: *std.ArrayList(u8), anchor: Document.EventAnchor) !void {
+    try wire.putAnchor(gpa, payload, .{
+        .agent = anchor.agent,
+        .seq = anchor.seq,
+        .side = @intFromEnum(anchor.side),
+    });
+}
+
+fn eventAnchorEql(a: Document.EventAnchor, b: Document.EventAnchor) bool {
+    return a.seq == b.seq and a.side == b.side and std.mem.eql(u8, a.agent, b.agent);
+}
+
+fn presencePositionEql(a: PresencePosition, b: PresencePosition) bool {
+    return eventAnchorEql(a.head, b.head) and eventAnchorEql(a.selected(), b.selected());
 }
 
 fn nameKey(name: []const u8) u64 {
     return std.hash.Fnv1a_64.hash(name);
 }
 
-fn updatePeerPresence(self: *Collab, peer_name: []const u8, head: usize, anchor: usize, hue16: u32) !void {
-    for (self.presence_names.items, 0..) |n, i| {
-        if (std.mem.eql(u8, n, peer_name)) {
-            self.presence_offsets.items[i] = head;
-            self.presence_anchors.items[i] = anchor;
-            self.presence_hues.items[i] = hue16;
-            return;
-        }
+fn updatePeerPresence(
+    self: *Collab,
+    peer_name: []const u8,
+    head: Document.EventAnchor,
+    selection_anchor: Document.EventAnchor,
+    hue16: u32,
+) !void {
+    const owned_head = try dupeEventAnchor(self.gpa, head);
+    errdefer self.gpa.free(owned_head.agent);
+    const owned_selection = try dupeEventAnchor(self.gpa, selection_anchor);
+    errdefer self.gpa.free(owned_selection.agent);
+
+    for (self.presence.items) |*peer| {
+        if (!std.mem.eql(u8, peer.name, peer_name)) continue;
+        self.gpa.free(peer.head.agent);
+        self.gpa.free(peer.selection_anchor.agent);
+        peer.head = owned_head;
+        peer.selection_anchor = owned_selection;
+        peer.hue16 = hue16;
+        return;
     }
-    const owned = try self.gpa.dupe(u8, peer_name);
-    errdefer self.gpa.free(owned);
-    try self.presence_names.append(self.gpa, owned);
-    errdefer _ = self.presence_names.pop();
-    try self.presence_offsets.append(self.gpa, head);
-    errdefer _ = self.presence_offsets.pop();
-    try self.presence_anchors.append(self.gpa, anchor);
-    errdefer _ = self.presence_anchors.pop();
-    try self.presence_hues.append(self.gpa, hue16);
+
+    const owned_name = try self.gpa.dupe(u8, peer_name);
+    errdefer self.gpa.free(owned_name);
+    try self.presence.append(self.gpa, .{
+        .name = owned_name,
+        .head = owned_head,
+        .selection_anchor = owned_selection,
+        .hue16 = hue16,
+    });
+}
+
+fn dupeEventAnchor(gpa: Allocator, anchor: Document.EventAnchor) !Document.EventAnchor {
+    return .{
+        .agent = try gpa.dupe(u8, anchor.agent),
+        .seq = anchor.seq,
+        .side = anchor.side,
+    };
+}
+
+fn removePeerPresence(self: *Collab, peer_name: []const u8) void {
+    for (self.presence.items, 0..) |*peer, i| {
+        if (!std.mem.eql(u8, peer.name, peer_name)) continue;
+        var removed = self.presence.orderedRemove(i);
+        removed.deinit(self.gpa);
+        return;
+    }
+}
+
+pub fn presenceNamed(self: *const Collab, peer_name: []const u8) ?*const PeerPresence {
+    for (self.presence.items) |*peer| {
+        if (std.mem.eql(u8, peer.name, peer_name)) return peer;
+    }
+    return null;
+}
+
+pub fn resolvePresence(self: *const Collab, peer: *const PeerPresence) ?ResolvedPresence {
+    var offsets: [2]usize = undefined;
+    self.doc.resolveAnchors(self.gpa, &.{ peer.head, peer.selection_anchor }, &offsets) catch return null;
+    return .{
+        .name = peer.name,
+        .head = offsets[0],
+        .selection_anchor = offsets[1],
+        .hue16 = peer.hue16,
+    };
 }
 
 /// Build one presence span per peer: [lo,hi) is the selection (a bare
@@ -410,20 +622,13 @@ fn republishPresence(self: *Collab) !void {
     const gpa = self.gpa;
     var spans: std.ArrayList(layers_mod.SpanIn) = .empty;
     defer spans.deinit(gpa);
-    const limit = self.doc.text().byteLen();
-    for (
-        self.presence_names.items,
-        self.presence_offsets.items,
-        self.presence_anchors.items,
-        self.presence_hues.items,
-    ) |n, head, anchor, hue16| {
-        const h = @min(head, limit);
-        const a = @min(anchor, limit);
+    for (self.presence.items) |*peer| {
+        const resolved = self.resolvePresence(peer) orelse continue;
         try spans.append(gpa, .{
-            .start = @min(h, a),
-            .end = @max(h, a),
-            .kind = packPresenceKind(hue16, h <= a),
-            .message = n,
+            .start = @min(resolved.head, resolved.selection_anchor),
+            .end = @max(resolved.head, resolved.selection_anchor),
+            .kind = packPresenceKind(resolved.hue16, resolved.head <= resolved.selection_anchor),
+            .message = resolved.name,
         });
     }
     try layer.publishSpans(gpa, spans.items);
@@ -469,7 +674,11 @@ test "presence: a peer selection publishes a colored range with the caret side" 
     c.presence_layer = layer;
 
     // Peer "bob": caret at 2, selection anchor at 7, hue index 100.
-    try c.updatePeerPresence("bob", 2, 7, 100);
+    const head = try doc.exportAnchor(gpa, 2, .after);
+    defer gpa.free(head.agent);
+    const selection = try doc.exportAnchor(gpa, 7, .before);
+    defer gpa.free(selection.agent);
+    try c.updatePeerPresence("bob", head, selection, 100);
     try c.republishPresence();
     try t.expectEqual(@as(usize, 1), layer.spanCount());
     const s = layer.resolvedSpan(0);
@@ -480,10 +689,84 @@ test "presence: a peer selection publishes a colored range with the caret side" 
     try t.expectEqual(@as(u32, 0), s.kind >> 16); // caret at lower end (2<=7)
 
     // Backward selection: caret at 7, anchor at 2 → same range, caret flag set.
-    try c.updatePeerPresence("bob", 7, 2, 100);
+    const backward_head = try doc.exportAnchor(gpa, 7, .after);
+    defer gpa.free(backward_head.agent);
+    const backward_selection = try doc.exportAnchor(gpa, 2, .before);
+    defer gpa.free(backward_selection.agent);
+    try c.updatePeerPresence("bob", backward_head, backward_selection, 100);
     try c.republishPresence();
     const s2 = layer.resolvedSpan(0);
     try t.expectEqual(@as(usize, 2), s2.start);
     try t.expectEqual(@as(usize, 7), s2.end);
     try t.expectEqual(@as(u32, 1), s2.kind >> 16); // caret at upper end
+}
+
+test "presence: portable cursor identity survives a concurrent prefix insert" {
+    const gpa = t.allocator;
+    var sender = try Document.init(gpa, "alice");
+    defer sender.deinit(gpa);
+    try sender.insert(gpa, 0, "abcdef");
+
+    var receiver = try Document.init(gpa, "bob");
+    defer receiver.deinit(gpa);
+    const bootstrap = try sender.serialize(gpa);
+    defer gpa.free(bootstrap);
+    _ = try receiver.mergeRemote(gpa, bootstrap);
+
+    // Alice's caret is between c and d. Bob inserts independently at the
+    // beginning before the presence feed arrives; numeric offset 3 now points
+    // inside Bob's insertion, while Alice's character identity still resolves
+    // to the logical boundary after c.
+    const alice_caret = try sender.exportAnchor(gpa, 3, .after);
+    defer gpa.free(alice_caret.agent);
+    try receiver.insert(gpa, 0, "BOB");
+
+    var layers: layers_mod.Layers = .empty;
+    defer layers.deinit(gpa);
+    const layer = try layers.claim(gpa, &receiver, "presence", .replicated, "collab");
+    var c = try Collab.init(gpa, undefined, &receiver, "bob");
+    defer c.deinit();
+    c.presence_layer = layer;
+    try c.updatePeerPresence("alice", alice_caret, alice_caret, 123);
+    try c.republishPresence();
+
+    try t.expectEqual(@as(usize, 1), layer.spanCount());
+    try t.expectEqual(@as(usize, 6), layer.resolvedSpan(0).start);
+    try t.expectEqual(@as(usize, 6), layer.resolvedSpan(0).end);
+}
+
+test "presence: an anchor arriving before its op resolves after merge" {
+    const gpa = t.allocator;
+    var sender = try Document.init(gpa, "alice");
+    defer sender.deinit(gpa);
+    try sender.insert(gpa, 0, "base");
+
+    var receiver = try Document.init(gpa, "bob");
+    defer receiver.deinit(gpa);
+    const base = try sender.serialize(gpa);
+    defer gpa.free(base);
+    _ = try receiver.mergeRemote(gpa, base);
+
+    try sender.insert(gpa, 4, "!");
+    const future_caret = try sender.exportAnchor(gpa, 5, .after);
+    defer gpa.free(future_caret.agent);
+
+    var layers: layers_mod.Layers = .empty;
+    defer layers.deinit(gpa);
+    const layer = try layers.claim(gpa, &receiver, "presence", .replicated, "collab");
+    var c = try Collab.init(gpa, undefined, &receiver, "bob");
+    defer c.deinit();
+    c.presence_layer = layer;
+
+    // Feed first: retain the identity but show nothing until it is knowable.
+    try c.updatePeerPresence("alice", future_caret, future_caret, 321);
+    try c.republishPresence();
+    try t.expectEqual(@as(usize, 0), layer.spanCount());
+
+    const with_future = try sender.serialize(gpa);
+    defer gpa.free(with_future);
+    try t.expect(try receiver.mergeRemote(gpa, with_future));
+    try c.republishPresence();
+    try t.expectEqual(@as(usize, 1), layer.spanCount());
+    try t.expectEqual(@as(usize, 5), layer.resolvedSpan(0).start);
 }

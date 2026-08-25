@@ -8,7 +8,7 @@ const std = @import("std");
 const Allocator = std.mem.Allocator;
 const assert = std.debug.assert;
 
-pub const version: u16 = 1;
+pub const version: u16 = 2;
 
 pub const Class = enum(u8) {
     control = 0,
@@ -76,6 +76,38 @@ pub fn getUv(cur: *[]const u8) error{Corrupt}!u64 {
         shift += 7;
     }
     return error.Corrupt;
+}
+
+/// Portable CRDT position on the wire. This mirrors Stemma's identity anchor
+/// structurally without making the transport codec depend on Stemma: an
+/// inserting agent and sequence identify the character, while `side` selects
+/// the boundary before or after it. An empty agent is a document boundary.
+pub const AnchorWire = struct {
+    agent: []const u8,
+    seq: u64,
+    side: u8,
+};
+
+/// Encode one identity anchor. The agent bytes are opaque here; the CRDT
+/// adapter owns their meaning and validates `side` against its anchor enum.
+pub fn putAnchor(gpa: Allocator, out: *std.ArrayList(u8), anchor: AnchorWire) Allocator.Error!void {
+    try putUv(gpa, out, anchor.agent.len);
+    try out.appendSlice(gpa, anchor.agent);
+    try putUv(gpa, out, anchor.seq);
+    try out.append(gpa, anchor.side);
+}
+
+/// Decode one borrowed identity anchor and advance `cur` past it.
+pub fn getAnchor(cur: *[]const u8) error{Corrupt}!AnchorWire {
+    const agent_len = try getUv(cur);
+    if (agent_len > cur.len) return error.Corrupt;
+    const agent = cur.*[0..@intCast(agent_len)];
+    cur.* = cur.*[@intCast(agent_len)..];
+    const seq = try getUv(cur);
+    if (cur.len == 0) return error.Corrupt;
+    const side = cur.*[0];
+    cur.* = cur.*[1..];
+    return .{ .agent = agent, .seq = seq, .side = side };
 }
 
 /// Encode one frame (length-prefixed). Caller owns.
@@ -235,6 +267,23 @@ test "wire: frame round trip, split delivery, corrupt class rejected" {
     try bad.appendSlice(gpa, &.{ 3, 0, 0, 0, 9, 0, 0 });
     try d.feed(gpa, bad.items);
     try t.expectError(error.Corrupt, d.next(gpa));
+}
+
+test "wire: portable identity anchor round trips and rejects truncation" {
+    const gpa = t.allocator;
+    var encoded: std.ArrayList(u8) = .empty;
+    defer encoded.deinit(gpa);
+    try putAnchor(gpa, &encoded, .{ .agent = "alice", .seq = 42, .side = 1 });
+
+    var cur: []const u8 = encoded.items;
+    const decoded = try getAnchor(&cur);
+    try t.expectEqualStrings("alice", decoded.agent);
+    try t.expectEqual(@as(u64, 42), decoded.seq);
+    try t.expectEqual(@as(u8, 1), decoded.side);
+    try t.expectEqual(@as(usize, 0), cur.len);
+
+    var truncated: []const u8 = encoded.items[0 .. encoded.items.len - 1];
+    try t.expectError(error.Corrupt, getAnchor(&truncated));
 }
 
 test "wire: outbox priority order and feed coalescing" {

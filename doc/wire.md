@@ -1,6 +1,6 @@
-# weft wire protocol v1 (ABI)
+# weft wire protocol v2 (ABI)
 
-Version-negotiated in the handshake; this document is normative, the
+Version-checked in the handshake; this document is normative, the
 conformance tests in `src/core/wire.zig` are the executable spec.
 
 ## Transport
@@ -74,11 +74,13 @@ exchange — nothing else needs resuming.
 
 ## Handshake sequence
 
-    C→S  hello   { client_eph_pub, client_id_pub }
-    S→C  hello2  { server_eph_pub, server_id_pub, mac_s = MAC(k_s, transcript) }
+    C→S  hello   { u16le wire_version, client_eph_pub, client_id_pub }
+    S→C  hello2  { u16le wire_version, server_eph_pub, server_id_pub, mac_s = MAC(k_s, transcript) }
     C→S  finish  { mac_c = MAC(k_c, transcript) }   (encrypted from here on)
 
 MAC failure on either side closes the link before any document data.
+An unequal wire version closes it before key derivation; there is one codec,
+not a compatibility branch that can silently reinterpret a feed.
 Identity keys are sent in the clear (public keys are public); this
 leaks *who* is connecting to a passive observer but not the session
 contents — acceptable for the current threat model, and the point where
@@ -113,6 +115,20 @@ Channels are allocated in **quads**: `base` carries op batches,
 blob requests. The pre-sharing protocol is exactly quad 0 (ops 0,
 presence 1, diagnostics 2, blob 3), bound by convention on both ends —
 nothing changed on the wire for the primary document.
+
+Presence on `base+1` is latest-wins soft state keyed by peer name, but its
+positions are never projected byte offsets:
+
+    uv name_len | name | u8 present
+    if present:
+      anchor head | anchor selection | uv hue16
+
+An anchor is `uv agent_len | agent | uv event_seq | u8 side`, the portable
+Stemma event identity. Empty `agent` denotes a document boundary. A receiver
+retains an anchor whose introducing op has not arrived yet and resolves it
+after the op merge; a compacted or malformed identity is omitted rather than
+guessed. `present=0` removes a previously published cursor, including when the
+sender cannot name an interior compacted position safely.
 
 A buffer is shared with an op-class `share` frame (kind 2) on channel
 0: payload = `uv base | uv name_len | name`. Base allocation is

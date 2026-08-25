@@ -1,4 +1,4 @@
-//! `Session` — one encrypted, multiplexed peer link (wire v1): the
+//! `Session` — one encrypted, multiplexed peer link (wire v2): the
 //! reader/writer threads, the handshake, liveness, and crypto state.
 //!
 //! Threading mirrors the LSP transport: a reader thread decodes the
@@ -335,8 +335,10 @@ fn handshake(self: *Session) !void {
     var their_pub: [P]u8 = undefined;
     switch (self.role) {
         .client => {
+            try self.writeWireVersion();
             try self.link.write(&self.eph.public);
             try self.link.write(&self.id.public);
+            try self.readWireVersion();
             try self.readExact(&their_pub);
             try self.readExact(&self.their_id);
             const keys = try secure.derive(
@@ -359,8 +361,10 @@ fn handshake(self: *Session) !void {
             self.sas_bytes = keys.sas;
         },
         .server => {
+            try self.readWireVersion();
             try self.readExact(&their_pub);
             try self.readExact(&self.their_id);
+            try self.writeWireVersion();
             try self.link.write(&self.eph.public);
             try self.link.write(&self.id.public);
             const keys = try secure.derive(
@@ -386,6 +390,18 @@ fn handshake(self: *Session) !void {
     self.established.store(true, .release);
     self.wakeWriter();
     self.notifyWake(); // the peer's fingerprint/SAS just became readable
+}
+
+fn writeWireVersion(self: *Session) !void {
+    var bytes: [2]u8 = undefined;
+    std.mem.writeInt(u16, &bytes, wire.version, .little);
+    try self.link.write(&bytes);
+}
+
+fn readWireVersion(self: *Session) !void {
+    var bytes: [2]u8 = undefined;
+    try self.readExact(&bytes);
+    if (std.mem.readInt(u16, &bytes, .little) != wire.version) return error.UnsupportedWireVersion;
 }
 
 // ── Writer: priority drain + heartbeat clock ────────────────

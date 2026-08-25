@@ -104,7 +104,7 @@ pub const Schema = union(enum) {
 /// host-side adapter converts between this and `Document.EventAnchor`).
 /// `side` is the raw `AnchorSide` byte (0/1 by that enum's own tag order);
 /// this file never interprets it, only carries it through.
-pub const AnchorWire = struct { agent: []const u8, seq: u64, side: u8 };
+pub const AnchorWire = wire.AnchorWire;
 
 /// The wire form of a `range`-marked field — `(version, start, end)`, the
 /// `StampedRange` shape restated structurally (same reasoning as
@@ -249,11 +249,7 @@ fn encodeInto(gpa: Allocator, list: *std.ArrayList(u8), schema: *const Schema, v
         },
         .anchor => {
             if (value != .anchor) return error.SchemaMismatch;
-            const a = value.anchor;
-            try wire.putUv(gpa, list, a.agent.len);
-            try list.appendSlice(gpa, a.agent);
-            try wire.putUv(gpa, list, a.seq);
-            try list.append(gpa, a.side);
+            try wire.putAnchor(gpa, list, value.anchor);
         },
         .range => {
             if (value != .range) return error.SchemaMismatch;
@@ -331,16 +327,8 @@ pub const Cursor = struct {
             },
             .anchor => {
                 var cur = self.bytes;
-                const alen = wire.getUv(&cur) catch return error.Corrupt;
-                var consumed = self.bytes.len - cur.len;
-                if (alen > cur.len) return error.Corrupt;
-                consumed += @as(usize, @intCast(alen));
-                if (consumed > self.bytes.len) return error.Corrupt;
-                cur = self.bytes[consumed..];
-                _ = wire.getUv(&cur) catch return error.Corrupt; // seq
-                consumed = self.bytes.len - cur.len;
-                if (consumed >= self.bytes.len) return error.Corrupt; // 1 side byte still needed
-                return consumed + 1;
+                _ = wire.getAnchor(&cur) catch return error.Corrupt;
+                return self.bytes.len - cur.len;
             },
             .range => {
                 var cur = self.bytes;
@@ -415,13 +403,7 @@ pub const Cursor = struct {
     pub fn asAnchor(self: Cursor) DecodeError!AnchorWire {
         if (self.schema.* != .anchor) return error.SchemaMismatch;
         var cur = self.bytes;
-        const alen = wire.getUv(&cur) catch return error.Corrupt;
-        if (alen > cur.len) return error.Corrupt;
-        const agent = cur[0..@intCast(alen)];
-        cur = cur[@intCast(alen)..];
-        const seq = wire.getUv(&cur) catch return error.Corrupt;
-        if (cur.len < 1) return error.Corrupt;
-        return .{ .agent = agent, .seq = seq, .side = cur[0] };
+        return wire.getAnchor(&cur) catch return error.Corrupt;
     }
     pub fn asRange(self: Cursor) DecodeError!RangeWire {
         if (self.schema.* != .range) return error.SchemaMismatch;
@@ -655,10 +637,7 @@ fn walkInto(gpa: Allocator, out: *std.ArrayList(u8), schema: *const Schema, byte
             const cur: Cursor = .{ .schema = schema, .bytes = bytes };
             const a = try cur.asAnchor();
             if (visitor.on_anchor) |cb| cb(visitor.ctx, a);
-            try wire.putUv(gpa, out, a.agent.len);
-            try out.appendSlice(gpa, a.agent);
-            try wire.putUv(gpa, out, a.seq);
-            try out.append(gpa, a.side);
+            try wire.putAnchor(gpa, out, a);
             return try cur.skip();
         },
         .range => {
