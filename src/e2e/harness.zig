@@ -46,9 +46,27 @@ pub const view = view_mod; // the View/Built/Hud package, for popup-layout intro
 const Allocator = std.mem.Allocator;
 const command = core.command;
 
-/// Headless framebuffer geometry for the App harness's composite snapshots.
-pub const app_w: u32 = 640;
-pub const app_h: u32 = 400;
+/// The authoritative editor capture canvas. The production frame, Vulkan
+/// target, readback, ordinary PPMs, and each half of the demo video all use
+/// this size. Keep the aspect ratio stable while giving the recorded editor
+/// enough pixels for text and plugin surfaces to remain legible.
+pub const CaptureCanvas = struct {
+    width: u32,
+    height: u32,
+};
+
+pub const editor_canvas = CaptureCanvas{ .width = 960, .height = 600 };
+pub const pair_canvas = CaptureCanvas{
+    .width = editor_canvas.width * 2,
+    .height = editor_canvas.height,
+};
+
+// Compatibility aliases used by the geometry tests. They remain derived from
+// the one editor-canvas declaration above rather than being independent sizes.
+pub const app_w: u32 = editor_canvas.width;
+pub const app_h: u32 = editor_canvas.height;
+pub const pair_w: u32 = pair_canvas.width;
+pub const pair_h: u32 = pair_canvas.height;
 pub const app_em: f32 = 16;
 
 /// A full editor, headless — built around the REAL app state. It owns an
@@ -1403,11 +1421,10 @@ pub const Project = struct {
         else
             try right.renderCompositeAt(frame_start);
         defer self.gpa.free(right_pixels);
-        const out_w = app_w * 2;
-        const out = try self.gpa.alloc(u8, @as(usize, out_w) * app_h * 4);
+        const out = try self.gpa.alloc(u8, @as(usize, pair_w) * pair_h * 4);
         var y: usize = 0;
-        while (y < app_h) : (y += 1) {
-            const dst = out[y * out_w * 4 ..][0 .. out_w * 4];
+        while (y < pair_h) : (y += 1) {
+            const dst = out[y * pair_w * 4 ..][0 .. pair_w * 4];
             const src_left = left_pixels[y * app_w * 4 ..][0 .. app_w * 4];
             const src_right = right_pixels[y * app_w * 4 ..][0 .. app_w * 4];
             @memcpy(dst[0 .. app_w * 4], src_left);
@@ -1428,7 +1445,7 @@ pub const Project = struct {
         if (self.demo_frame_hook) |hook| hook.run(hook.context);
         const pixels = self.pairPixels() catch return;
         defer self.gpa.free(pixels);
-        self.record(pixels, app_w * 2, app_h);
+        self.record(pixels, pair_w, pair_h);
     }
 
     fn delay(self: *Project, ms: u32) void {
@@ -1472,8 +1489,8 @@ pub const Project = struct {
                 return;
             };
             defer self.gpa.free(fname);
-            harness.writePpm(self.gpa, fname, pixels, app_w * 2, app_h) catch {};
-            if (self.demoEnabled()) self.record(pixels, app_w * 2, app_h);
+            harness.writePpm(self.gpa, fname, pixels, pair_w, pair_h) catch {};
+            if (self.demoEnabled()) self.record(pixels, pair_w, pair_h);
             self.gpa.free(pixels);
             if (self.demoEnabled()) self.delay(self.linger_ms);
             return;
