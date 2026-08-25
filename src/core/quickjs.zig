@@ -1132,6 +1132,8 @@ fn cRun(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32, results: []i
     const count: usize = @intCast(args[3]);
     if (count > maxRunArgs) return;
     var values: [maxRunArgs]command.Value = undefined;
+    var decoded: usize = 0;
+    defer for (values[0..decoded]) |value| gpa.free(value.string);
     var total: usize = 0;
     if (count > 0) {
         const record_bytes = std.math.mul(usize, count, 8) catch return;
@@ -1149,12 +1151,12 @@ fn cRun(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32, results: []i
             total = std.math.add(usize, total, @intCast(len)) catch return;
             if (total > maxRunArgTotal) return;
             const value = readStr(br, caller, ptr, len) orelse return;
-            values[i] = .{ .string = value };
+            values[decoded] = .{ .string = value };
+            decoded += 1;
         }
     }
-    defer for (values[0..count]) |value| gpa.free(value.string);
     if (br.manifest) |m| {
-        m.addRun(cmd, values[0..count]) catch {};
+        m.addRun(cmd, values[0..decoded]) catch {};
         return;
     }
     // LIVE mode (task #19 item 4): NOW dispatches for real — a resident JS
@@ -1170,7 +1172,7 @@ fn cRun(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32, results: []i
     // `cmd` resolves to a command bound by ANOTHER plugin (wasm or JS), this
     // runs THAT one too — same "by name, system-wide" semantics `wl_run`
     // already has, not scoped to the calling plugin.
-    _ = command.run(br.activeCtx().commands, br.activeCtx(), cmd, values[0..count]) catch {};
+    _ = command.run(br.activeCtx().commands, br.activeCtx(), cmd, values[0..decoded]) catch {};
 }
 
 /// weft.set(plugin, key, blob) — stage config data for a plugin (read at its

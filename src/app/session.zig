@@ -616,6 +616,47 @@ test "session: RUNS ON a System — init hosts \"editor\", cmd_ctx is wired to i
     try t.expectEqualStrings("hi", got);
 }
 
+test "session: config manifest invokes the production grammar-add command with args" {
+    const gpa = t.allocator;
+    const pool = try core.task.Pool.init(gpa, .{ .threads = 1 });
+    defer pool.deinit();
+    var grammars = try testGrammars(gpa);
+    defer grammars.deinit(gpa);
+
+    var sess: Session = undefined;
+    try sess.init(gpa, pool, "user", &grammars);
+    defer sess.deinit(gpa);
+
+    var tmp = t.tmpDir(.{});
+    defer tmp.cleanup();
+    try tmp.dir.createDirPath(t.io, "grammar/queries");
+    try tmp.dir.writeFile(t.io, .{ .sub_path = "grammar/queries/highlights.scm", .data = "" });
+    const tmp_path = try std.fmt.allocPrint(gpa, ".zig-cache/tmp/{s}/grammar", .{tmp.sub_path});
+    defer gpa.free(tmp_path);
+    const source = try std.fmt.allocPrint(gpa, "weft.run('grammar-add', '.fixture', '{s}', 'tree_sitter_fixture');", .{tmp_path});
+    defer gpa.free(source);
+
+    var engine = try core.wasm.Engine.init();
+    defer engine.deinit();
+    const manifest = try core.quickjs.evalToManifest(
+        &engine,
+        &sess.cmd_ctx,
+        null,
+        &sess.system.config_kv,
+        null,
+        source,
+        .config,
+        "config",
+    );
+    defer manifest.destroy();
+    try t.expectEqual(@as(usize, 1), manifest.runs.items.len);
+    try t.expectEqualStrings(tmp_path, manifest.runs.items[0].args[1].value);
+
+    var actx: core.manifest.Manifest.ApplyCtx = .{ .ctx = &sess.cmd_ctx, .loader = null, .config = &sess.system.config_kv };
+    try manifest.apply(gpa, &actx);
+    try t.expect(grammars.forPath("fixture.fixture") != null);
+}
+
 test "session: local directories become deduplicated semantic targets while files fall through" {
     const gpa = t.allocator;
     const pool = try core.task.Pool.init(gpa, .{ .threads = 1 });
