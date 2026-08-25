@@ -112,8 +112,20 @@ const SourcePosition = struct {
     selection_anchor: usize,
 };
 
+const AbsenceRecheck = enum {
+    source_change,
+    projection_change,
+};
+
+const AbsentPresence = struct {
+    source: SourcePosition,
+    /// Invalid/missing inputs can become nameable as sync advances without a
+    /// local cursor move. Compacted identity requires a new source position.
+    recheck: AbsenceRecheck,
+};
+
 const PublishedPresence = union(enum) {
-    absent: SourcePosition,
+    absent: AbsentPresence,
     position: PresencePosition,
 
     fn deinit(self: *PublishedPresence, gpa: Allocator) void {
@@ -443,8 +455,9 @@ fn publishPresence(self: *Collab) !void {
     // independently. Avoid replaying CRDT history merely to rediscover it on
     // every idle application wake.
     if (self.last_presence) |last| switch (last) {
-        .absent => |prior| if (prior.head == self.cursor_offset and
-            prior.selection_anchor == self.selection_anchor) return,
+        .absent => |prior| if (prior.recheck == .source_change and
+            prior.source.head == self.cursor_offset and
+            prior.source.selection_anchor == self.selection_anchor) return,
         .position => |prior| if (prior.source_head == self.cursor_offset and
             prior.source_selection_anchor == self.selection_anchor) return,
     };
@@ -453,7 +466,8 @@ fn publishPresence(self: *Collab) !void {
         // Compaction deliberately erases the identity needed to name an
         // interior position. Absence is safer than a plausible-but-wrong raw
         // offset, and a later move to an anchorable event republishes normally.
-        error.Compacted, error.MissingDependency => return self.publishPresenceAbsent(),
+        error.Compacted => return self.publishPresenceAbsent(.source_change),
+        error.InvalidOffset, error.MissingDependency => return self.publishPresenceAbsent(.projection_change),
         else => return err,
     };
     errdefer position.deinit(self.gpa);
@@ -484,10 +498,11 @@ fn publishPresence(self: *Collab) !void {
     self.last_presence = .{ .position = position };
 }
 
-fn publishPresenceAbsent(self: *Collab) !void {
+fn publishPresenceAbsent(self: *Collab, recheck: AbsenceRecheck) !void {
     if (self.last_presence) |last| switch (last) {
-        .absent => |prior| if (prior.head == self.cursor_offset and
-            prior.selection_anchor == self.selection_anchor) return,
+        .absent => |prior| if (prior.recheck == recheck and
+            prior.source.head == self.cursor_offset and
+            prior.source.selection_anchor == self.selection_anchor) return,
         .position => {},
     };
     var payload: std.ArrayList(u8) = .empty;
@@ -498,8 +513,11 @@ fn publishPresenceAbsent(self: *Collab) !void {
     try self.session.postFeed(self.base + 1, nameKey(self.name), payload.items);
     self.clearLastPresence();
     self.last_presence = .{ .absent = .{
-        .head = self.cursor_offset,
-        .selection_anchor = self.selection_anchor,
+        .source = .{
+            .head = self.cursor_offset,
+            .selection_anchor = self.selection_anchor,
+        },
+        .recheck = recheck,
     } };
 }
 

@@ -663,13 +663,14 @@ pub fn removeAnchor(self: *Document, h: AnchorHandle) void {
     self.anchors.remove(h);
 }
 
-pub const ExportAnchorError = ObjectDoc.AnchorError;
+pub const ExportAnchorError = ObjectDoc.AnchorError || error{InvalidOffset};
 
 /// A portable identity anchor for `offset` at the current head: names
 /// the character's inserting event, survives concurrent edits, resolves
 /// on any replica that has seen the event. `EventAnchor.agent` is
 /// gpa-owned.
 pub fn exportAnchor(self: *const Document, gpa: Allocator, offset: usize, side: AnchorSide) ExportAnchorError!EventAnchor {
+    if (offset > self.text().byteLen()) return error.InvalidOffset;
     return self.doc.objectAnchorAt(gpa, self.body, offset, side);
 }
 
@@ -697,6 +698,13 @@ pub fn textAt(self: *const Document, gpa: Allocator, version_token: []const u8) 
 
 test {
     std.testing.refAllDecls(@This());
+}
+
+test "portable anchor rejects a projected offset outside the document" {
+    const gpa = std.testing.allocator;
+    var document = try Document.init(gpa, "anchor-boundary");
+    defer document.deinit(gpa);
+    try std.testing.expectError(error.InvalidOffset, document.exportAnchor(gpa, 1, .after));
 }
 
 // ── Partial checkout (stemma hole-bases) ────────────────────────────
