@@ -118,13 +118,11 @@ const SpineCollabClock = struct {
     tick_error: ?anyerror = null,
 
     pub fn beforeDemoFrame(self: *SpineCollabClock) void {
-        // Animation frames advance the real transport without imposing a
+        // Animation frames service collaboration without imposing a
         // distributed quiescence barrier at 30 fps. Named narrative
-        // milestones call `synchronize` explicitly before capture.
-        // In recording mode this also advances deterministic, per-direction
-        // latency on the real authenticated TCP links. It is deliberately a
-        // participant clock operation, not a renderer/video effect.
-        self.link.advanceDemoTransport();
+        // milestones call `synchronize` explicitly before capture. Transport
+        // jitter samples at queued-write boundaries, independently of this
+        // recorder/application-frame cadence.
         var rounds: usize = 0;
         while (rounds < 2) : (rounds += 1) {
             self.link.tick() catch |err| {
@@ -498,7 +496,15 @@ test "e2e/spine: write a file, init a repo, stage and commit — all through wef
                 std.mem.eql(u8, at, bt);
         }
     };
-    try t.expect(try link.pumpUntil(SpineConverged{ .a = &ed, .b = &mirror }, SpineConverged.pred));
+    const spine_converged = try link.pumpUntil(SpineConverged{ .a = &ed, .b = &mirror }, SpineConverged.pred);
+    if (!spine_converged) {
+        const alice_text = try ed.buffers.active().editor.text().toOwnedSlice(gpa);
+        defer gpa.free(alice_text);
+        const bob_text = try mirror.buffers.active().editor.text().toOwnedSlice(gpa);
+        defer gpa.free(bob_text);
+        std.debug.print("spine convergence failed\n--- alice ---\n{s}\n--- bob ---\n{s}\n", .{ alice_text, bob_text });
+    }
+    try t.expect(spine_converged);
     try link.synchronize();
     try t.expect(collab_clock.tick_error == null);
     proj.capture(&ed, "spine-collaboration-concurrent-edit");

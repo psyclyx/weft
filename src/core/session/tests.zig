@@ -713,13 +713,43 @@ test "partial checkout: multi-GB sparse file — jump to end, tail growth, viewe
     try t.expectEqualStrings("++GREW", &grew);
 }
 
+test "chaos: propagation latency pipelines writes without throttling the sender" {
+    const gpa = t.allocator;
+    const fds = try socketPair();
+    var sender: FdLink = .{ .fd = fds[0] };
+    var receiver: FdLink = .{ .fd = fds[1] };
+    defer receiver.link().close();
+    var chaos: ChaosLink = .{};
+    try chaos.start(gpa, sender.link());
+    defer chaos.close();
+    chaos.configureLatency(200 * std.time.ns_per_ms, 0, 0);
+
+    const started = task.nowNs();
+    const link = chaos.link();
+    try link.write("abc");
+    try link.write("def");
+    // Propagation delay belongs to delivery, not to each caller. The old
+    // implementation blocked here for ~400ms (one sleep per write).
+    try t.expect(task.nowNs() - started < 50 * std.time.ns_per_ms);
+
+    var got: [6]u8 = undefined;
+    var used: usize = 0;
+    while (used < got.len) used += try receiver.link().read(got[used..]);
+    try t.expectEqualStrings("abcdef", &got);
+    try t.expect(task.nowNs() - started >= 150 * std.time.ns_per_ms);
+}
+
 test "chaos: partition observed in liveness, heals as one exchange; typing stays instant" {
     const gpa = t.allocator;
     const fds = try socketPair();
     var raw_a: FdLink = .{ .fd = fds[0] };
     var raw_b: FdLink = .{ .fd = fds[1] };
-    var chaos_a: ChaosLink = .{ .inner = raw_a.link() };
-    var chaos_b: ChaosLink = .{ .inner = raw_b.link() };
+    var chaos_a: ChaosLink = .{};
+    try chaos_a.start(gpa, raw_a.link());
+    errdefer chaos_a.close();
+    var chaos_b: ChaosLink = .{};
+    try chaos_b.start(gpa, raw_b.link());
+    errdefer chaos_b.close();
 
     var doc_a = try Document.init(gpa, "alice");
     defer doc_a.deinit(gpa);
@@ -792,7 +822,7 @@ test "chaos: partition observed in liveness, heals as one exchange; typing stays
 
     // Injected latency: the link stays connected, remote lags, local
     // stays instant.
-    chaos_a.latency_ns.store(100 * std.time.ns_per_ms, .release);
+    chaos_a.configureLatency(100 * std.time.ns_per_ms, 0, 0);
     const t1 = task.nowNs();
     try doc_a.insert(gpa, 0, "L");
     try t.expect(task.nowNs() - t1 < 50 * std.time.ns_per_ms);

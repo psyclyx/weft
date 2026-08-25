@@ -5,6 +5,8 @@
 
 const std = @import("std");
 const linux = std.os.linux;
+const Allocator = std.mem.Allocator;
+const task = @import("../task.zig");
 
 // ── Small primitives ────────────────────────────────────────────────
 
@@ -104,20 +106,88 @@ pub const FdLink = struct {
 
 // ── Chaos link (fault injection without root) ───────────────────────
 
-/// Wraps a Link with injected latency and partitions. Stream semantics
-/// are preserved (bytes delay or stall, never corrupt — loss on a
-/// reliable stream is modeled as stall/partition, exactly what TCP
-/// gives you on a lossy path).
+/// Wraps a Link with injected propagation latency and partitions. Writes are
+/// copied into an ordered delivery queue and return once enqueued: real TCP
+/// pipelines bytes rather than charging one full network delay to every
+/// sender syscall. A single delivery worker releases each queued write at its
+/// sampled deadline, preserving stream order even when later jitter samples
+/// are shorter. Loss on a reliable stream remains a stall/partition.
+///
+/// Call `start` only after the ChaosLink has reached its stable address; the
+/// delivery thread borrows `self`. `Link.close` joins it and is idempotent.
 pub const ChaosLink = struct {
-    inner: Link,
-    /// One-way added latency per write.
-    latency_ns: std.atomic.Value(u64) = .init(0),
-    /// While true, writes block (the cable is out).
+    gpa: Allocator = undefined,
+    inner: Link = undefined,
+    /// Deterministic one-way propagation model. Sampling belongs to the
+    /// transport write boundary: renderer cadence and encoder backpressure can
+    /// never alter which delay a queued write receives.
+    latency_mutex: Mutex = .{},
+    latency_base_ns: u64 = 0,
+    latency_jitter_ns: u64 = 0,
+    latency_seed: u64 = 0,
+    latency_sample: u64 = 0,
+    /// While true, delivery stalls (the cable is out).
     partitioned: std.atomic.Value(bool) = .init(false),
     park: std.atomic.Value(u32) = .init(0),
+    mutex: Mutex = .{},
+    head: ?*Pending = null,
+    tail: ?*Pending = null,
+    shutdown: std.atomic.Value(bool) = .init(false),
+    failed: std.atomic.Value(bool) = .init(false),
+    inner_closed: std.atomic.Value(bool) = .init(false),
+    close_started: std.atomic.Value(bool) = .init(false),
+    delivery_thread: ?std.Thread = null,
+
+    const Pending = struct {
+        next: ?*Pending = null,
+        eligible_ns: u64,
+        bytes: []u8,
+    };
+
+    pub fn start(self: *ChaosLink, gpa: Allocator, inner: Link) !void {
+        self.* = .{ .gpa = gpa, .inner = inner };
+        self.delivery_thread = try std.Thread.spawn(.{}, deliveryMain, .{self});
+    }
 
     pub fn link(self: *ChaosLink) Link {
+        std.debug.assert(self.delivery_thread != null);
         return .{ .ctx = self, .readFn = readC, .writeFn = writeC, .closeFn = closeC };
+    }
+
+    pub fn close(self: *ChaosLink) void {
+        closeC(self);
+    }
+
+    /// Configure deterministic propagation latency for subsequent writes.
+    /// Safe before or during use; resetting configuration starts a fresh
+    /// sample sequence. Ordinary tests leave the zero defaults untouched.
+    pub fn configureLatency(self: *ChaosLink, base_ns: u64, jitter_ns: u64, seed: u64) void {
+        self.latency_mutex.lock();
+        defer self.latency_mutex.unlock();
+        self.latency_base_ns = base_ns;
+        self.latency_jitter_ns = jitter_ns;
+        self.latency_seed = seed;
+        self.latency_sample = 0;
+    }
+
+    fn splitMix64(value: u64) u64 {
+        var z = value +% 0x9e3779b97f4a7c15;
+        z = (z ^ (z >> 30)) *% 0xbf58476d1ce4e5b9;
+        z = (z ^ (z >> 27)) *% 0x94d049bb133111eb;
+        return z ^ (z >> 31);
+    }
+
+    fn sampleLatency(self: *ChaosLink) u64 {
+        self.latency_mutex.lock();
+        defer self.latency_mutex.unlock();
+        const base = self.latency_base_ns;
+        const span = self.latency_jitter_ns;
+        if (span == 0) return base;
+        const ordinal = self.latency_sample;
+        self.latency_sample +%= 1;
+        const sample = splitMix64(self.latency_seed +% ordinal *% 0x9e3779b97f4a7c15);
+        const extra = if (span == std.math.maxInt(u64)) sample else sample % (span + 1);
+        return base +| extra;
     }
 
     fn readC(ctx: ?*anyopaque, buf: []u8) anyerror!usize {
@@ -127,17 +197,106 @@ pub const ChaosLink = struct {
 
     fn writeC(ctx: ?*anyopaque, bytes: []const u8) anyerror!void {
         const self: *ChaosLink = @ptrCast(@alignCast(ctx.?));
-        while (self.partitioned.load(.acquire)) {
-            futexWaitTimed(&self.park, self.park.load(.acquire), 20 * std.time.ns_per_ms);
+        if (self.shutdown.load(.acquire) or self.failed.load(.acquire)) return error.LinkBroken;
+
+        const node = try self.gpa.create(Pending);
+        errdefer self.gpa.destroy(node);
+        const owned = try self.gpa.dupe(u8, bytes);
+        errdefer self.gpa.free(owned);
+        const lat = self.sampleLatency();
+        node.* = .{ .eligible_ns = task.nowNs() +| lat, .bytes = owned };
+
+        self.mutex.lock();
+        defer self.mutex.unlock();
+        // closeC may have started while allocation was in progress.
+        if (self.shutdown.load(.acquire) or self.failed.load(.acquire)) return error.LinkBroken;
+        if (self.tail) |tail| {
+            tail.next = node;
+        } else {
+            self.head = node;
         }
-        const lat = self.latency_ns.load(.acquire);
-        if (lat > 0) futexWaitTimed(&self.park, self.park.load(.acquire), lat);
-        return self.inner.write(bytes);
+        self.tail = node;
+        _ = self.park.fetchAdd(1, .release);
+        futexWake(&self.park, 1);
+        // Queue owns both allocations from here.
+        return;
     }
 
     fn closeC(ctx: ?*anyopaque) void {
         const self: *ChaosLink = @ptrCast(@alignCast(ctx.?));
+        if (self.close_started.swap(true, .acq_rel)) return;
+        self.shutdown.store(true, .release);
         self.partitioned.store(false, .release);
-        self.inner.close();
+        _ = self.park.fetchAdd(1, .release);
+        futexWake(&self.park, std.math.maxInt(i32));
+        self.closeInner();
+        if (self.delivery_thread) |thread| thread.join();
+        self.delivery_thread = null;
+        self.discardPending();
+    }
+
+    fn closeInner(self: *ChaosLink) void {
+        if (!self.inner_closed.swap(true, .acq_rel)) self.inner.close();
+    }
+
+    fn discardPending(self: *ChaosLink) void {
+        self.mutex.lock();
+        var node = self.head;
+        self.head = null;
+        self.tail = null;
+        self.mutex.unlock();
+        while (node) |pending| {
+            node = pending.next;
+            self.gpa.free(pending.bytes);
+            self.gpa.destroy(pending);
+        }
+    }
+
+    fn deliveryMain(self: *ChaosLink) void {
+        while (!self.shutdown.load(.acquire)) {
+            if (self.partitioned.load(.acquire)) {
+                const generation = self.park.load(.acquire);
+                futexWaitTimed(&self.park, generation, 20 * std.time.ns_per_ms);
+                continue;
+            }
+
+            self.mutex.lock();
+            const pending = self.head;
+            self.mutex.unlock();
+            const node = pending orelse {
+                const generation = self.park.load(.acquire);
+                if (!self.shutdown.load(.acquire))
+                    futexWaitTimed(&self.park, generation, 20 * std.time.ns_per_ms);
+                continue;
+            };
+
+            const now = task.nowNs();
+            if (now < node.eligible_ns) {
+                const generation = self.park.load(.acquire);
+                futexWaitTimed(&self.park, generation, @min(node.eligible_ns - now, 20 * std.time.ns_per_ms));
+                continue;
+            }
+
+            self.mutex.lock();
+            // This worker is the only consumer, so the peeked FIFO head cannot
+            // change while the lock is released; producers only append.
+            std.debug.assert(self.head == node);
+            self.head = node.next;
+            if (self.head == null) self.tail = null;
+            self.mutex.unlock();
+
+            self.inner.write(node.bytes) catch {
+                self.gpa.free(node.bytes);
+                self.gpa.destroy(node);
+                self.failed.store(true, .release);
+                self.shutdown.store(true, .release);
+                self.closeInner();
+                _ = self.park.fetchAdd(1, .release);
+                futexWake(&self.park, std.math.maxInt(i32));
+                return;
+            };
+            self.gpa.free(node.bytes);
+            self.gpa.destroy(node);
+        }
     }
 };

@@ -809,11 +809,6 @@ pub const Loopback = struct {
     peer_sess: *session.Session,
     host_col: session.Collab,
     peer_col: session.Collab,
-    demo_transport_enabled: bool = false,
-    demo_transport_base_ns: u64 = 0,
-    demo_transport_jitter_ns: u64 = 0,
-    demo_transport_seed: u64 = 0,
-    demo_transport_tick: u64 = 0,
 
     /// Init in place (the FdLinks must not move after the sessions capture
     /// their addresses). Binds the two harnesses' active documents on quad 0.
@@ -834,12 +829,6 @@ pub const Loopback = struct {
         // default field initializers therefore do not run. Establish the
         // deterministic zero-latency baseline before any optional demo env is
         // inspected.
-        self.demo_transport_enabled = false;
-        self.demo_transport_base_ns = 0;
-        self.demo_transport_jitter_ns = 0;
-        self.demo_transport_seed = 0;
-        self.demo_transport_tick = 0;
-
         // Bind an ephemeral TCP listener first, then connect through the same
         // session transport used by the application. Accepting synchronously
         // is safe here: connect() completes once the kernel has queued the
@@ -860,8 +849,12 @@ pub const Loopback = struct {
         self.listener = -1;
         self.host_fd = .{ .fd = host_fd };
         self.peer_fd = .{ .fd = peer_fd };
-        self.host_chaos = .{ .inner = self.host_fd.link() };
-        self.peer_chaos = .{ .inner = self.peer_fd.link() };
+        self.host_chaos = .{};
+        try self.host_chaos.start(gpa, self.host_fd.link());
+        errdefer self.host_chaos.close();
+        self.peer_chaos = .{};
+        try self.peer_chaos.start(gpa, self.peer_fd.link());
+        errdefer self.peer_chaos.close();
         // Network shaping is a recording concern, not an E2E-test concern.
         // Keep ordinary tests at the same zero-latency TCP path. The request
         // is checked here rather than in core, so production never acquires
@@ -871,16 +864,16 @@ pub const Loopback = struct {
                 const base_ms = envU32("WEFT_E2E_TRANSPORT_BASE_MS", 25, 0, 2000);
                 const jitter_ms = envU32("WEFT_E2E_TRANSPORT_JITTER_MS", 95, 0, 2000);
                 const seed = envU32("WEFT_E2E_TRANSPORT_SEED", 0x51_7a_11, 0, std.math.maxInt(u32));
-                self.demo_transport_enabled = true;
-                self.demo_transport_base_ns = @as(u64, base_ms) * std.time.ns_per_ms;
-                self.demo_transport_jitter_ns = @as(u64, jitter_ms) * std.time.ns_per_ms;
-                self.demo_transport_seed = seed;
+                const base_ns = @as(u64, base_ms) * std.time.ns_per_ms;
+                const jitter_ns = @as(u64, jitter_ms) * std.time.ns_per_ms;
+                const seed64: u64 = seed;
+                self.host_chaos.configureLatency(base_ns, jitter_ns, seed64);
+                self.peer_chaos.configureLatency(base_ns, jitter_ns, seed64 +% 0xd1b54a32d192ed03);
             }
         }
-        // Shape the handshake too: it remains the same real TCP connection
-        // and full identity authentication, only with the demo link's first
-        // deterministic one-way delay.
-        self.advanceDemoTransport();
+        // The transport samples the handshake and every later queued write at
+        // its own boundary. Capturing more or fewer video frames cannot alter
+        // the deterministic network trace.
         const host_doc = &host_ed.buffers.active().editor.doc;
         const peer_doc = &peer_ed.buffers.active().editor.doc;
         self.host_sess = try session.Session.create(gpa, self.host_chaos.link(), .server, "loopback", .own, &self.host_identity);
@@ -939,30 +932,6 @@ pub const Loopback = struct {
     pub fn tick(self: *Loopback) !void {
         _ = try self.host_col.tick(self.host_ed.buffers.active().editor.cursorOffset());
         _ = try self.peer_col.tick(self.peer_ed.buffers.active().editor.cursorOffset());
-    }
-
-    fn splitMix64(value: u64) u64 {
-        var z = value +% 0x9e3779b97f4a7c15;
-        z = (z ^ (z >> 30)) *% 0xbf58476d1ce4e5b9;
-        z = (z ^ (z >> 27)) *% 0x94d049bb133111eb;
-        return z ^ (z >> 31);
-    }
-
-    /// Advance the deterministic demo network clock once per captured frame.
-    /// This changes the actual TCP writer delay on each direction; it is not
-    /// frame pacing or a post-render effect. Calling it is harmless for
-    /// ordinary tests, where the wrappers remain at zero latency.
-    pub fn advanceDemoTransport(self: *Loopback) void {
-        if (!self.demo_transport_enabled) return;
-        self.demo_transport_tick +%= 1;
-        const phase = self.demo_transport_tick *% 0x9e3779b97f4a7c15;
-        const host_sample = splitMix64(self.demo_transport_seed +% phase);
-        const peer_sample = splitMix64(self.demo_transport_seed +% phase +% 0xd1b54a32d192ed03);
-        const span = self.demo_transport_jitter_ns;
-        const host_extra = if (span == 0) 0 else host_sample % (span + 1);
-        const peer_extra = if (span == 0) 0 else peer_sample % (span + 1);
-        self.host_chaos.latency_ns.store(self.demo_transport_base_ns + host_extra, .release);
-        self.peer_chaos.latency_ns.store(self.demo_transport_base_ns + peer_extra, .release);
     }
 
     fn sees(collab: *const session.Collab, name: []const u8, offset: usize) bool {
