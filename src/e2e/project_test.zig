@@ -5,6 +5,7 @@
 const std = @import("std");
 const t = std.testing;
 const h = @import("harness.zig");
+const language_support = @import("language_support.zig");
 
 const core = h.core;
 const snail = h.snail;
@@ -228,7 +229,7 @@ test "e2e/spine: write a file, init a repo, stage and commit — all through wef
     var ed: Editor = undefined;
     try Editor.init(gpa, &ed);
     defer ed.deinit();
-    try loadWorkspace(&ed);
+    try h.loadSpine(&ed);
 
     // Demo mode observes this same scenario with a second existing test
     // screen. Normal runs do not construct it; recording composes both views
@@ -239,19 +240,18 @@ test "e2e/spine: write a file, init a repo, stage and commit — all through wef
     if (proj.demoEnabled()) {
         try Editor.init(gpa, &mirror);
         have_mirror = true;
-        try loadWorkspace(&mirror);
+        try h.loadSpine(&mirror);
         proj.bindDemoScreens(&ed, &mirror);
     }
 
     // ── 1. Write the first file the way a person does: open, type, save. ──
     // (Mode starts `normal`; edit BEFORE entering any tool buffer, so no
     // tool-mode ever swallows the typing — see [[mode-leak-class]].)
-    ed.runStr("open", "index.html");
-    ed.press("i", "");
-    proj.typeText(&ed, "<!doctype html>\n<title>weft demo</title>\n");
-    ed.press("Escape", "");
-    ed.run("save");
-    ed.waitSave();
+    const html_case = language_support.cases[5];
+    try language_support.authorAndCheckSyntax(&proj, &ed, html_case);
+    const hermetic_lsp = try language_support.fakeServerCommand(gpa);
+    defer gpa.free(hermetic_lsp);
+    try language_support.assertLsp(&proj, &ed, html_case, hermetic_lsp);
     if (have_mirror) mirror.runStr("open", "index.html");
 
     // CONTENT is verified on disk (the artifact a human checks), not via the
@@ -260,6 +260,16 @@ test "e2e/spine: write a file, init a repo, stage and commit — all through wef
         const disk = try core.file.readAlloc(gpa, "index.html");
         defer gpa.free(disk);
         try t.expect(std.mem.indexOf(u8, disk, "<title>weft demo</title>") != null);
+    }
+
+    // The same spine now exercises every grammar and the same LSP guest path
+    // for each source language. Project.typeText keeps demo pacing/capture in
+    // the existing scenario; normal runs remain the original fast keystrokes.
+    for (language_support.cases[0..5]) |c| {
+        try language_support.authorAndCheckSyntax(&proj, &ed, c);
+        try language_support.assertLsp(&proj, &ed, c, hermetic_lsp);
+        if (have_mirror) mirror.runStr("open", c.path);
+        proj.capture(&ed, c.name);
     }
 
     // ── 1.5. git-status BEFORE a repo exists says so — and points the way. ──
@@ -321,7 +331,7 @@ test "e2e/spine: write a file, init a repo, stage and commit — all through wef
     {
         const tracked = try proj.oracle("git ls-files");
         defer gpa.free(tracked);
-        try t.expectEqualStrings("index.html", tracked);
+        try t.expectEqualStrings("app.js\nbuild.fnl\nbuild.lua\nflake.nix\nindex.html\nmain.zig", tracked);
     }
 }
 

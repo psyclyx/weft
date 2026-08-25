@@ -858,6 +858,14 @@ pub fn loadWorkspace(ed: *Editor) !void {
     try ed.load("git", guest.git);
 }
 
+/// The whole-app spine's plugin surface for the direct Editor harness. The
+/// config-driven App already owns lsp through config.js; it does not call this
+/// helper, so there is no duplicate plugin instance.
+pub fn loadSpine(ed: *Editor) !void {
+    try loadWorkspace(ed);
+    try ed.load("lsp", guest.lsp);
+}
+
 /// The workspace plus the project navigation/build tools — the surface a person
 /// uses to actually work a codebase: dired (file tree), grep (rg search),
 /// run/make (shell out a build/run), fmt (format a buffer). Used by the

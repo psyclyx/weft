@@ -8,6 +8,7 @@ pkgs.mkShell {
 
     # Build-time tools.
     pkg-config
+    perl # Hermetic JSON::PP peer for the spine's LSP protocol gate.
     wayland-scanner
     shader-slang # slangc, for snail shader compilation (render milestone)
 
@@ -79,6 +80,8 @@ pkgs.mkShell {
   WEFT_TS_FENNEL = "${pkgs.tree-sitter-grammars.tree-sitter-fennel}";
   WEFT_TS_LUA = "${pkgs.tree-sitter-grammars.tree-sitter-lua}";
   WEFT_TS_NIX = "${pkgs.tree-sitter-grammars.tree-sitter-nix}";
+  WEFT_TS_JAVASCRIPT = "${pkgs.tree-sitter-grammars.tree-sitter-javascript}";
+  WEFT_TS_HTML = "${pkgs.tree-sitter-grammars.tree-sitter-html}";
 
   # Let the Vulkan loader find the host ICDs on NixOS.
   XDG_DATA_DIRS = "/run/opengl-driver/share";

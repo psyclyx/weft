@@ -987,6 +987,8 @@ fn addSyntax(b: *std.Build, mod: *std.Build.Module, renderer: Renderer) void {
         },
         .{ .env = "WEFT_TS_LUA", .opt = "ts_lua", .import = "ts_lua_highlights" },
         .{ .env = "WEFT_TS_NIX", .opt = "ts_nix", .import = "ts_nix_highlights" },
+        .{ .env = "WEFT_TS_JAVASCRIPT", .opt = "ts_javascript", .import = "ts_javascript_highlights" },
+        .{ .env = "WEFT_TS_HTML", .opt = "ts_html", .import = "ts_html_highlights" },
     };
     inline for (grammars) |g| {
         const dir = b.graph.environ_map.get(g.env) orelse

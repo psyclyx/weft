@@ -117,6 +117,21 @@ pub const languages = [_]LanguageSpec{
         .symbol = "tree_sitter_nix",
         .highlights = @embedFile("ts_nix_highlights"),
     },
+    .{
+        .name = "javascript",
+        .extensions = &.{ ".js", ".jsx", ".mjs", ".cjs" },
+        .parser_dir = build_options.ts_javascript,
+        .symbol = "tree_sitter_javascript",
+        .highlights = @embedFile("ts_javascript_highlights"),
+        .symbol_kinds = &.{ "function_declaration", "class_declaration", "lexical_declaration" },
+    },
+    .{
+        .name = "html",
+        .extensions = &.{ ".html", ".htm" },
+        .parser_dir = build_options.ts_html,
+        .symbol = "tree_sitter_html",
+        .highlights = @embedFile("ts_html_highlights"),
+    },
 };
 
 /// The runtime grammar registry: seeded with the built-ins, extended by
