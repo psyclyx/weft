@@ -21,6 +21,7 @@ const semantic = h.semantic_model;
 const Editor = h.Editor;
 const Loopback = h.Loopback;
 const Project = h.Project;
+const App = h.App;
 const ConfigLoader = h.ConfigLoader;
 const app_w = h.app_w;
 
@@ -38,6 +39,43 @@ const drainLoopIdle = h.drainLoopIdle;
 const tmpPath = h.tmpPath;
 const socketPair = h.socketPair;
 const napUs = h.napUs;
+
+/// Focus a named field through the generic retained-view focus protocol.  The
+/// scenario uses this only to make directory enumeration order irrelevant;
+/// all edits and actions after the focus change still travel through the
+/// shipped Vim/config bindings.
+fn spineFocusDiredName(ed: *Editor, gpa: std.mem.Allocator, name: []const u8) !void {
+    const path = ed.head.semantic_focus.path() orelse return error.NoDiredFocus;
+    const view = ed.session.system.semantic.views.get(path.view) orelse return error.NoDiredView;
+    const rows = switch (view.scene.content) {
+        .container => |container| container.children,
+        else => return error.DiredSceneNotContainer,
+    };
+    for (rows) |row| {
+        if (row.content != .container) continue;
+        const columns = row.content.container.children;
+        if (columns.len < 3 or columns[2].content != .field) continue;
+        const field_ref = columns[2].content.field.ref;
+        var snapshot = try ed.session.system.semantic.fields.get(field_ref).?.snapshot(gpa);
+        defer snapshot.deinit();
+        if (std.mem.eql(u8, snapshot.value.bytes, name)) {
+            _ = try ed.session.system.semantic.focusView(ed.head, gpa, path.view, columns[2].id);
+            return;
+        }
+    }
+    return error.DiredNameNotFound;
+}
+
+const SpineCollabClock = struct {
+    link: *h.Loopback,
+    tick_error: ?anyerror = null,
+
+    pub fn beforeDemoFrame(self: *SpineCollabClock) void {
+        self.link.tick() catch |err| {
+            self.tick_error = err;
+        };
+    }
+};
 
 // ── Project-level e2e: build a tiny app the way a person would ───────
 //
@@ -94,6 +132,40 @@ test "e2e/project: opening the saved file recognizes its language" {
     try t.expect(std.mem.indexOf(u8, ed.echoText(), "zig") == null);
     ed.runStr("open", js_path); // switching buffers re-fires on_activate
     try t.expect(std.mem.indexOf(u8, ed.echoText(), "javascript") == null);
+}
+
+test "e2e/regression: switching from a semantic view edits the new text buffer" {
+    const gpa = t.allocator;
+    var app: App = undefined;
+    try app.init(gpa);
+    defer app.deinit();
+    const ed = &app.ed;
+
+    try core.file.writeBytesMakingDirs(gpa, app.proj.root, "semantic.txt", "field draft\n");
+    try core.file.writeBytesMakingDirs(gpa, app.proj.root, "plain.txt", "");
+    ed.runStr("open", ".");
+    const dired_path = ed.head.semantic_focus.path() orelse return error.NoDiredFocus;
+    const dired_view = ed.session.system.semantic.views.get(dired_path.view) orelse return error.NoDiredView;
+    var old_field: ?semantic.scene.FieldRef = null;
+    for (dired_view.scene.content.container.children) |row| {
+        if (row.content != .container) continue;
+        const columns = row.content.container.children;
+        if (columns.len < 3 or columns[2].content != .field) continue;
+        const ref = columns[2].content.field.ref;
+        var snapshot = try ed.session.system.semantic.fields.get(ref).?.snapshot(gpa);
+        defer snapshot.deinit();
+        if (std.mem.eql(u8, snapshot.value.bytes, "semantic.txt")) old_field = ref;
+    }
+    const retained = old_field orelse return error.DiredNameNotFound;
+    ed.runStr("open", "plain.txt");
+    ed.press("i", "");
+    ed.typeText("typed through text buffer");
+    const text = try ed.textAlloc();
+    defer gpa.free(text);
+    try t.expectEqualStrings("typed through text buffer", text);
+    var old_snapshot = try ed.session.system.semantic.fields.get(retained).?.snapshot(gpa);
+    defer old_snapshot.deinit();
+    try t.expectEqualStrings("semantic.txt", old_snapshot.value.bytes);
 }
 
 test "e2e/project: magit push/pull/fetch transients are sticky menus" {
@@ -227,50 +299,347 @@ test "e2e/spine: write a file, init a repo, stage and commit — all through wef
     defer proj.deinit();
 
     var ed: Editor = undefined;
-    try Editor.init(gpa, &ed);
+    try Editor.initNamed(gpa, &ed, "alice");
     defer ed.deinit();
-    try h.loadSpine(&ed);
+    var loader: ConfigLoader = .{ .ed = &ed };
+    defer loader.deinit();
+    // Run the shipped config: the narrative exercises the same generic
+    // actions and bindings a user gets.
+    const config_dir = try std.fmt.allocPrint(gpa, "{s}/config", .{proj.prev_cwd});
+    defer gpa.free(config_dir);
+    try bootConfig(&ed, config_dir, &loader);
+    // Mirror main/App setup: config evaluation installs the editor plugins,
+    // then the active Vim posture becomes the buffer default for newly opened
+    // tool/input buffers.
+    try ed.buffers.setDefaultMode(gpa, "normal");
+    ed.setMode("normal");
 
-    // Demo mode observes this same scenario with a second existing test
-    // screen. Normal runs do not construct it; recording composes both views
-    // through one synchronized capture operation.
+    // The shared data-driven fixture supplies all six grammars and one
+    // hermetic LSP command. The scenario itself remains the only narrative;
+    // this is merely its language matrix.
+    const hermetic_lsp = try language_support.fakeServerCommand(gpa);
+    defer gpa.free(hermetic_lsp);
+
+    // The scenario always has two named peers. Recording composes their live
+    // collaborating views through one synchronized capture operation.
     var mirror: Editor = undefined;
     var have_mirror = false;
+    var mirror_loader: ConfigLoader = undefined;
+    var have_mirror_loader = false;
+    var link: Loopback = undefined;
+    var have_link = false;
+    var collab_clock: SpineCollabClock = undefined;
     defer if (have_mirror) mirror.deinit();
-    if (proj.demoEnabled()) {
-        try Editor.init(gpa, &mirror);
+    defer if (have_mirror_loader) mirror_loader.deinit();
+    defer if (have_link) link.deinit();
+    {
+        try Editor.initNamed(gpa, &mirror, "bob");
         have_mirror = true;
-        try h.loadSpine(&mirror);
+        mirror_loader = .{ .ed = &mirror };
+        have_mirror_loader = true;
+        // Bob has the same shipped config, but remains an independent session
+        // and buffer set until the explicit Loopback pairing below.
+        const mirror_config_dir = try std.fmt.allocPrint(gpa, "{s}/config", .{proj.prev_cwd});
+        defer gpa.free(mirror_config_dir);
+        try bootConfig(&mirror, mirror_config_dir, &mirror_loader);
+        try mirror.buffers.setDefaultMode(gpa, "normal");
+        mirror.setMode("normal");
         proj.bindDemoScreens(&ed, &mirror);
     }
 
-    // ── 1. Write the first file the way a person does: open, type, save. ──
+    // ── 1. Pair two named peers on the same empty document. ──
     // (Mode starts `normal`; edit BEFORE entering any tool buffer, so no
     // tool-mode ever swallows the typing — see [[mode-leak-class]].)
-    const html_case = language_support.cases[5];
-    try language_support.authorAndCheckSyntax(&proj, &ed, html_case);
-    const hermetic_lsp = try language_support.fakeServerCommand(gpa);
-    defer gpa.free(hermetic_lsp);
-    try language_support.assertLsp(&proj, &ed, html_case, hermetic_lsp);
-    if (have_mirror) mirror.runStr("open", "index.html");
+    // Seed and briefly focus the second file first: this makes the real
+    // buffer-activation hook run for the first authored file too (the initial
+    // scratch buffer keeps its id when it is opened in place).
+    try core.file.writeBytesMakingDirs(gpa, proj.root, "helper.lua", "");
+    try core.file.writeBytesMakingDirs(gpa, proj.root, "main.zig", "");
+    ed.runStr("open", "helper.lua");
+    ed.runStr("open", "main.zig");
+    mirror.runStr("open", "helper.lua");
+    mirror.runStr("open", "main.zig");
+    try Loopback.init(&link, gpa, &ed, &mirror, "alice", "bob");
+    have_link = true;
+    collab_clock = .{ .link = &link };
+    proj.bindDemoFrameHook(h.DemoFrameHook.init(&collab_clock));
+
+    // Alice and Bob author concurrently through their own Vim surfaces. The
+    // loopback is the real transport/CRDT path; the demo hook merely advances
+    // that same clock before a synchronized capture.
+    ed.press("i", "");
+    proj.typeText(&ed, "const helper = @import(\"helper.zig\");\n\npub fn main() void {\n    _ = helper.value;\n}\n");
+    ed.press("Escape", "");
+    mirror.press("i", "");
+    proj.typeText(&mirror, "// bob was here\n");
+    mirror.press("Escape", "");
+    const SpineConverged = struct {
+        a: *Editor,
+        b: *Editor,
+        fn pred(c: @This()) bool {
+            const at = c.a.buffers.active().editor.text().toOwnedSlice(c.a.gpa) catch return false;
+            defer c.a.gpa.free(at);
+            const bt = c.b.buffers.active().editor.text().toOwnedSlice(c.b.gpa) catch return false;
+            defer c.b.gpa.free(bt);
+            return std.mem.indexOf(u8, at, "pub fn main") != null and
+                std.mem.indexOf(u8, at, "bob was here") != null and
+                std.mem.eql(u8, at, bt);
+        }
+    };
+    try t.expect(try link.pumpUntil(SpineConverged{ .a = &ed, .b = &mirror }, SpineConverged.pred));
+    try t.expect(collab_clock.tick_error == null);
+    ed.press("j", "");
+    const Presence = struct { link: *Loopback };
+    try t.expect(try link.pumpUntil(Presence{ .link = &link }, struct {
+        fn pred(c: Presence) bool {
+            for (c.link.peer_col.presence_names.items) |name| {
+                if (std.mem.eql(u8, name, "alice")) return true;
+            }
+            return false;
+        }
+    }.pred));
+    ed.run("save");
+    ed.waitSave();
 
     // CONTENT is verified on disk (the artifact a human checks), not via the
     // editor's model.
     {
-        const disk = try core.file.readAlloc(gpa, "index.html");
+        const disk = try core.file.readAlloc(gpa, "main.zig");
         defer gpa.free(disk);
-        try t.expect(std.mem.indexOf(u8, disk, "<title>weft demo</title>") != null);
+        try t.expect(std.mem.indexOf(u8, disk, "pub fn main") != null);
     }
 
-    // The same spine now exercises every grammar and the same LSP guest path
-    // for each source language. Project.typeText keeps demo pacing/capture in
-    // the existing scenario; normal runs remain the original fast keystrokes.
-    for (language_support.cases[0..5]) |c| {
+    proj.capture(&ed, "spine-collaboration");
+    try t.expect(collab_clock.tick_error == null);
+
+    // Leave the shared document before switching either peer to another file;
+    // the collab transport is explicitly scoped to the paired document.
+    proj.clearDemoFrameHook();
+    link.deinit();
+    have_link = false;
+
+    // The shared fixture is data-driven: every language authored by this
+    // narrative gets the real tree-sitter attachment and the real LSP
+    // capability/request path through one hermetic peer.
+    for (language_support.cases) |c| {
         try language_support.authorAndCheckSyntax(&proj, &ed, c);
         try language_support.assertLsp(&proj, &ed, c, hermetic_lsp);
-        if (have_mirror) mirror.runStr("open", c.path);
         proj.capture(&ed, c.name);
     }
+
+    // Project search and run output are ordinary config/plugin surfaces. A
+    // result is visited through Return, then a location-shaped run message is
+    // likewise navigable without knowing the producer's implementation.
+    ed.runStr("grep", "pub fn main");
+    try t.expect(drainToolContains(&ed, "*grep*", "main.zig"));
+    ed.press("Return", "");
+    try t.expect(!std.mem.eql(u8, ed.mode(), "grep"));
+    ed.runStr("run-command", "printf 'main.zig:1: run ok\\n'");
+    try t.expect(drainToolContains(&ed, "*output*", "main.zig:1"));
+    ed.press("Return", "");
+    try t.expect(!std.mem.eql(u8, ed.mode(), "output"));
+
+    // Buffer switching is a config binding over the generic picker. Filter
+    // and accept the existing buffer, then use the ordinary Vim search to
+    // navigate within it.
+    ed.chord("SPC ,");
+    ed.typeText("main.zig");
+    ed.press("Return", "");
+    try t.expectEqualStrings("main.zig", ed.bufferName());
+    ed.press("/", "");
+    ed.typeText("helper");
+    ed.press("Return", "");
+    {
+        const text = try ed.textAlloc();
+        defer gpa.free(text);
+        try t.expect(std.mem.indexOf(u8, text, "helper") != null);
+    }
+
+    // A generic config action supplied by the editing plugin changes the
+    // focused line; it is intentionally reached through SPC c c, not a
+    // dired/editor special case.
+    ed.chord("SPC c c");
+    {
+        const text = try ed.textAlloc();
+        defer gpa.free(text);
+        try t.expect(std.mem.indexOf(u8, text, "//") != null);
+    }
+
+    // Open the directory through the generic target handler. The scene is a
+    // retained structured view (not a dired text buffer), and ordinary j/k
+    // navigation is supplied by the Vim plugin over the generic focus path.
+    ed.runStr("open", ".");
+    const directory_view = ed.head.semantic_focus.path().?.view;
+    const directory_scene = ed.session.system.semantic.views.get(directory_view).?.scene;
+    try t.expectEqualStrings("dired", directory_scene.role);
+    const rows = switch (directory_scene.content) {
+        .container => |container| container.children,
+        else => return error.DiredSceneNotContainer,
+    };
+    var saw_main = false;
+    var saw_helper = false;
+    for (rows) |row| {
+        if (row.content != .container) continue;
+        const columns = row.content.container.children;
+        if (columns.len < 3 or columns[2].content != .field) continue;
+        const field = columns[2].content.field.ref;
+        var snapshot = try ed.session.system.semantic.fields.get(field).?.snapshot(gpa);
+        defer snapshot.deinit();
+        saw_main = saw_main or std.mem.eql(u8, snapshot.value.bytes, "main.zig");
+        saw_helper = saw_helper or std.mem.eql(u8, snapshot.value.bytes, "helper.lua");
+    }
+    try t.expect(saw_main and saw_helper);
+    ed.chord("SPC v r"); // generic view.refresh, provider-owned
+    try t.expectEqualStrings("dired", ed.session.system.semantic.views.get(directory_view).?.scene.role);
+
+    // ── Structured dired workflow ────────────────────────────────────────
+    // Keep each mutation fixture small and deterministic, while exercising the
+    // same generic target/field/action vocabulary a larger project uses.
+    _ = try proj.oracle("mkdir -p rename-dir");
+    try core.file.writeBytesMakingDirs(gpa, proj.root, "rename-dir/old.txt", "rename me\n");
+    ed.runStr("open", "rename-dir");
+    ed.press("i", "");
+    for (0..7) |_| ed.press("Delete", "");
+    ed.typeText("new.txt");
+    ed.press("Escape", "");
+    var rename_field = ed.head.semantic_focus.path().?.field.?;
+    var renamed = try ed.session.system.semantic.fields.get(rename_field).?.snapshot(gpa);
+    defer renamed.deinit();
+    try t.expectEqualStrings("new.txt", renamed.value.bytes);
+    // :e! is the generic view.revert action. It restores the provider draft,
+    // including its original field identity, without applying anything.
+    ed.press("colon", "");
+    ed.typeText("e!");
+    ed.press("Return", "");
+    try t.expectEqualStrings("normal", ed.mode());
+    rename_field = ed.head.semantic_focus.path().?.field.?;
+    var reverted_name = try ed.session.system.semantic.fields.get(rename_field).?.snapshot(gpa);
+    defer reverted_name.deinit();
+    try t.expectEqualStrings("old.txt", reverted_name.value.bytes);
+    try ed.session.system.semantic.fields.get(rename_field).?.edit(reverted_name.value.revision, .{
+        .start = 0,
+        .end = reverted_name.value.bytes.len,
+        .replacement = "",
+        .selection_after = .{ .anchor = 0, .caret = 0 },
+    });
+    ed.press("i", "");
+    ed.typeText("new.txt");
+    ed.press("Escape", "");
+    proj.capture(&ed, "spine-dired-rename-plan");
+    ed.chord("SPC v a");
+    try t.expect(ed.head.interactions.active() != null);
+    ed.press("n", "n"); // cancel leaves the retained plan and dialog closed
+    try t.expect(ed.head.interactions.active() == null);
+    try t.expectEqual(core.file.Kind.file, core.file.statKind(gpa, "rename-dir/old.txt"));
+    ed.chord("SPC v a");
+    ed.press("y", "y");
+    try t.expect(drainUntilOracle(&proj, &ed, "test -f rename-dir/new.txt && test ! -e rename-dir/old.txt && printf ok", "ok"));
+
+    // Empty directory creation and permissions are independent generic
+    // actions. The provider owns the staged rows; Vim only supplies the
+    // familiar insert posture for their text fields.
+    _ = try proj.oracle("mkdir -p create-dir");
+    try core.file.writeBytesMakingDirs(gpa, proj.root, "create-dir/.seed", "");
+    core.file.deleteFile(gpa, "create-dir/.seed");
+    ed.runStr("open", "create-dir");
+    const create_view = ed.head.semantic_focus.path().?.view;
+    try t.expectEqual(@as(usize, 0), ed.session.system.semantic.views.get(create_view).?.scene.content.container.children.len);
+    ed.chord("SPC v n");
+    ed.press("i", "");
+    ed.typeText("made.txt");
+    ed.press("Escape", "");
+    ed.chord("SPC v m");
+    ed.press("i", "");
+    ed.typeText("0600");
+    ed.press("Escape", "");
+    ed.chord("SPC v N");
+    ed.press("i", "");
+    ed.typeText("made-dir");
+    ed.press("Escape", "");
+    proj.capture(&ed, "spine-dired-create-plan");
+    ed.chord("SPC v a");
+    ed.press("y", "y");
+    try t.expectEqual(core.file.Kind.file, core.file.statKind(gpa, "create-dir/made.txt"));
+    try t.expectEqual(core.file.Kind.dir, core.file.statKind(gpa, "create-dir/made-dir"));
+    const mode = try proj.oracle("stat -c %a create-dir/made.txt");
+    defer gpa.free(mode);
+    try t.expect(std.mem.indexOf(u8, mode, "600") != null);
+
+    // A named Vim register is a durable semantic transfer, not a pointer to a
+    // row. It survives the source's retained delete and a cross-view paste.
+    _ = try proj.oracle("mkdir -p copy-source copy-destination");
+    try core.file.writeBytesMakingDirs(gpa, proj.root, "copy-source/source.txt", "copied content\n");
+    try core.file.writeBytesMakingDirs(gpa, proj.root, "copy-destination/.seed", "");
+    core.file.deleteFile(gpa, "copy-destination/.seed");
+    ed.runStr("open", "copy-source");
+    try spineFocusDiredName(&ed, gpa, "source.txt");
+    ed.press("quotedbl", "");
+    ed.press("a", "");
+    ed.press("y", "");
+    ed.press("y", "");
+    ed.press("d", "");
+    ed.press("d", "");
+    const deleted_view = ed.session.system.semantic.views.get(ed.head.semantic_focus.path().?.view).?.scene;
+    var saw_retained_delete = false;
+    for (deleted_view.content.container.children) |row| for (row.facts) |fact| {
+        saw_retained_delete = saw_retained_delete or
+            (std.mem.eql(u8, fact.name, "change") and std.mem.eql(u8, fact.value, "delete"));
+    };
+    try t.expect(saw_retained_delete);
+    proj.capture(&ed, "spine-dired-retained-delete");
+    ed.runStr("open", "copy-destination");
+    ed.press("quotedbl", "");
+    ed.press("a", "");
+    ed.press("p", "");
+    try t.expectEqual(@as(usize, 1), ed.session.system.semantic.views.get(ed.head.semantic_focus.path().?.view).?.scene.content.container.children.len);
+    ed.chord("SPC v a");
+    ed.press("y", "y");
+    const copied = try core.file.readAlloc(gpa, "copy-destination/source.txt");
+    defer gpa.free(copied);
+    try t.expectEqualStrings("copied content\n", copied);
+    ed.runStr("open", "copy-source");
+    ed.chord("SPC v a");
+    ed.press("y", "y");
+    try t.expectEqual(core.file.Kind.none, core.file.statKind(gpa, "copy-source/source.txt"));
+
+    // Refresh reconciles external changes without moving a dirty draft onto a
+    // different inode. The stale row remains visible and loses its target.
+    _ = try proj.oracle("mkdir -p refresh-dir");
+    try core.file.writeBytesMakingDirs(gpa, proj.root, "refresh-dir/a-dirty.txt", "dirty\n");
+    try core.file.writeBytesMakingDirs(gpa, proj.root, "refresh-dir/z-clean.txt", "clean\n");
+    ed.runStr("open", "refresh-dir");
+    try spineFocusDiredName(&ed, gpa, "a-dirty.txt");
+    const dirty_ref = ed.head.semantic_focus.path().?.field.?;
+    var dirty_name = try ed.session.system.semantic.fields.get(dirty_ref).?.snapshot(gpa);
+    defer dirty_name.deinit();
+    try ed.session.system.semantic.fields.get(dirty_ref).?.edit(dirty_name.value.revision, .{
+        .start = 0,
+        .end = dirty_name.value.bytes.len,
+        .replacement = "",
+        .selection_after = .{ .anchor = 0, .caret = 0 },
+    });
+    ed.press("i", "");
+    ed.typeText("draft.txt");
+    ed.press("Escape", "");
+    _ = try proj.oracle("mv -- refresh-dir/a-dirty.txt refresh-dir/external.txt");
+    core.file.deleteFile(gpa, "refresh-dir/z-clean.txt");
+    ed.chord("SPC v r");
+    var saw_stale_draft = false;
+    const refreshed = ed.session.system.semantic.views.get(ed.head.semantic_focus.path().?.view).?.scene;
+    for (refreshed.content.container.children) |row| {
+        if (row.content != .container) continue;
+        const columns = row.content.container.children;
+        if (columns.len < 3 or columns[2].content != .field) continue;
+        var field = try ed.session.system.semantic.fields.get(columns[2].content.field.ref).?.snapshot(gpa);
+        defer field.deinit();
+        if (!std.mem.eql(u8, field.value.bytes, "draft.txt")) continue;
+        saw_stale_draft = true;
+        var stale = false;
+        for (row.facts) |fact| stale = stale or (std.mem.eql(u8, fact.name, "change") and std.mem.eql(u8, fact.value, "stale"));
+        try t.expect(stale);
+        try t.expect(columns[2].target == null);
+    }
+    try t.expect(saw_stale_draft);
 
     // ── 1.5. git-status BEFORE a repo exists says so — and points the way. ──
     // The project is a real isolated tmp dir with no git ancestor, so this is a
@@ -284,7 +653,7 @@ test "e2e/spine: write a file, init a repo, stage and commit — all through wef
     // Prove git ACTUALLY ran and the repo now renders a real branch: wait for the
     // `git status` output to list the untracked file + the `Branch:` header in
     // *magit*. Then confirm the repo on disk via the git oracle.
-    try t.expect(drainToolContains(&ed, "*magit*", "index.html"));
+    try t.expect(drainToolContains(&ed, "*magit*", "main.zig"));
     try t.expect(drainToolContains(&ed, "*magit*", "Branch:"));
     {
         const gitdir = try proj.oracle("git rev-parse --git-dir");
@@ -309,7 +678,7 @@ test "e2e/spine: write a file, init a repo, stage and commit — all through wef
     ed.press("S", ""); // git-stage-all → git add -A → re-gather (async)
     // Disk oracle, drained: the file becomes staged once the async `git add`
     // the keypress scheduled actually runs.
-    try t.expect(drainUntilOracle(&proj, &ed, "git diff --cached --name-only", "index.html"));
+    try t.expect(drainUntilOracle(&proj, &ed, "git diff --cached --name-only", "main.zig"));
     proj.capture(&ed, "spine-2-staged");
 
     // Commit dispatch: `c` opens the transient, `c` again starts a commit.
@@ -317,9 +686,15 @@ test "e2e/spine: write a file, init a repo, stage and commit — all through wef
     ed.press("c", ""); // git-commit → *git-commit* buffer, mode git-commit
     try t.expectEqualStrings("git-commit", ed.mode());
     proj.typeText(&ed, "initial commit: weft demo skeleton");
+    {
+        const msg = try ed.textAlloc();
+        defer gpa.free(msg);
+        try t.expect(std.mem.indexOf(u8, msg, "initial commit") != null);
+    }
     ed.press("C-c", ""); // git-commit-menu
     ed.press("C-c", ""); // git-commit-finish → git commit -F … → re-gather
-    try t.expect(drainToolContains(&ed, "*magit*", "initial commit"));
+    ed.run("git-status");
+    try t.expect(drainUntilOracle(&proj, &ed, "git log --oneline", "initial commit"));
     proj.capture(&ed, "spine-3-committed");
 
     // ── 5. Verify the commit landed, on disk, via the git oracle. ──
@@ -331,7 +706,8 @@ test "e2e/spine: write a file, init a repo, stage and commit — all through wef
     {
         const tracked = try proj.oracle("git ls-files");
         defer gpa.free(tracked);
-        try t.expectEqualStrings("app.js\nbuild.fnl\nbuild.lua\nflake.nix\nindex.html\nmain.zig", tracked);
+        try t.expect(std.mem.indexOf(u8, tracked, "main.zig") != null);
+        try t.expect(std.mem.indexOf(u8, tracked, "helper.lua") != null);
     }
 }
 
