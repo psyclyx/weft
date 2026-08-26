@@ -53,7 +53,6 @@ fn show(cmd: []const u8) void {
 /// anywhere — zig `src/foo.zig:10:5: error`, node `at f (/abs/app.js:4:13)` — so
 /// we scan the line for the first `<path>:<digits>` whose path looks like a file
 /// (has a `.` or `/`), stopping the path at a space/quote/paren boundary.
-var path_buf: [1024]u8 = undefined;
 fn outputVisit() void {
     const l = weft.lineAt(weft.cursor());
     const text = weft.slice(l.start, l.end); // borrows the read scratch
@@ -76,9 +75,14 @@ fn outputVisit() void {
         if (std.mem.indexOfScalar(u8, path, '.') == null and std.mem.indexOfScalar(u8, path, '/') == null) continue;
         var line_no: usize = 0;
         for (text[ds..j]) |d| line_no = line_no * 10 + (d - '0');
-        const pn = @min(path.len, path_buf.len);
-        @memcpy(path_buf[0..pn], path[0..pn]); // copy out of scratch before open reuses it
-        weft.runStr("open", path_buf[0..pn]);
+        // Heap-copy the path OUT of the scratch before open reuses it — full
+        // copy, never truncated, so we never open a path that isn't the real one.
+        const path_copy = weft.allocator.dupe(u8, path) catch {
+            weft.echo("run: out of memory copying path");
+            return;
+        };
+        defer weft.allocator.free(path_copy);
+        weft.runStr("open", path_copy);
         weft.jump(lineStartOffset(line_no));
         return;
     }

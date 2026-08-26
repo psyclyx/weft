@@ -76,7 +76,6 @@ fn runGrep(pattern: []const u8) void {
 /// Return in `*grep*`: open the file at the `path:line` under the cursor. rg
 /// emits `path:line:content`; we reuse that shape (the same prefix on_fill
 /// colors as a location) to navigate — grep results you can actually jump to.
-var path_buf: [1024]u8 = undefined;
 fn grepVisit() void {
     const l = weft.lineAt(weft.cursor());
     const text = weft.slice(l.start, l.end); // borrows the read scratch
@@ -86,13 +85,17 @@ fn grepVisit() void {
     while (j < text.len and text[j] >= '0' and text[j] <= '9') j += 1;
     if (j == ds) return; // no line number → not a result line
     // Parse the line number and copy the path OUT of the scratch before opening
-    // (open reuses the read scratch, which would clobber `text`).
+    // (open reuses the read scratch, which would clobber `text`) — heap-copied
+    // in full, never truncated, so we never open a path that isn't the real one.
     var line_no: usize = 0;
     for (text[ds..j]) |d| line_no = line_no * 10 + (d - '0');
     const path = text[0..c1];
-    const pn = @min(path.len, path_buf.len);
-    @memcpy(path_buf[0..pn], path[0..pn]);
-    weft.runStr("open", path_buf[0..pn]);
+    const path_copy = weft.allocator.dupe(u8, path) catch {
+        weft.echo("grep: out of memory copying path");
+        return;
+    };
+    defer weft.allocator.free(path_copy);
+    weft.runStr("open", path_copy);
     weft.jump(lineStartOffset(line_no));
 }
 
@@ -129,8 +132,7 @@ fn grep() void {
 // --line-number` line is `path:line:content`; color the `path:line:` prefix as
 // a location and a literal match of the pattern in the content as emphasis.
 export fn on_fill() void {
-    const name = activeName();
-    if (!std.mem.eql(u8, name, "*grep*")) return;
+    if (!activeNameIs("*grep*")) return;
     weft.styleClear();
     const text = weft.slice(0, weft.byteLen()); // clamped to the read scratch
     var i: usize = 0;
@@ -142,19 +144,17 @@ export fn on_fill() void {
     }
 }
 
-var name_buf: [256]u8 = undefined;
-/// The active buffer's name, copied out of the shared read scratch.
-fn activeName() []const u8 {
+/// True when the active buffer's name is exactly `want` (never truncates the
+/// name, so a long name can only ever compare unequal, not falsely match).
+fn activeNameIs(want: []const u8) bool {
     const count = weft.bufferCount();
     var i: usize = 0;
     while (i < count) : (i += 1) {
         if (!weft.bufferActive(i)) continue;
-        const bn = weft.bufferName(i) orelse return "";
-        const n = @min(bn.len, name_buf.len);
-        @memcpy(name_buf[0..n], bn[0..n]);
-        return name_buf[0..n];
+        const bn = weft.bufferName(i) orelse return false;
+        return std.mem.eql(u8, bn, want);
     }
-    return "";
+    return false;
 }
 
 fn styleGrepLine(base: usize, line: []const u8) void {
