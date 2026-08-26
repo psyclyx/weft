@@ -318,16 +318,16 @@ test "editor: typing, movement, selection, vim-flavored undo units" {
         defer gpa.free(s);
         try t.expectEqualStrings(">> hello world", s);
     }
-    try t.expect(try ed.undo(gpa));
+    try t.expect(try ed.undo(gpa, .user_driven));
     {
         const s = try ed.text().toOwnedSlice(gpa);
         defer gpa.free(s);
         try t.expectEqualStrings("hello world", s);
     }
-    try t.expect(try ed.undo(gpa));
+    try t.expect(try ed.undo(gpa, .user_driven));
     try t.expectEqual(@as(usize, 0), ed.text().byteLen());
-    try t.expect(try ed.redo(gpa));
-    try t.expect(try ed.redo(gpa));
+    try t.expect(try ed.redo(gpa, .user_driven));
+    try t.expect(try ed.redo(gpa, .user_driven));
 
     // Selection replace is one undoable unit.
     ed.placeCursor(0);
@@ -341,7 +341,7 @@ test "editor: typing, movement, selection, vim-flavored undo units" {
         defer gpa.free(s);
         try t.expectEqualStrings("**hello world", s);
     }
-    try t.expect(try ed.undo(gpa));
+    try t.expect(try ed.undo(gpa, .user_driven));
     {
         const s = try ed.text().toOwnedSlice(gpa);
         defer gpa.free(s);
@@ -445,7 +445,7 @@ test "editor: save request round trip + dirty tracking" {
     defer gpa.free(s);
     try t.expectEqualStrings("content to keep\n", s);
     // The load is not undoable (host mutation, not user).
-    try t.expect(!try ed2.undo(gpa));
+    try t.expect(!try ed2.undo(gpa, .user_driven));
 }
 
 // ── Plugins (milestone 5) ───────────────────────────────────────────

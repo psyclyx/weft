@@ -16,6 +16,13 @@
 //! `barrier()` (the editor calls it on cursor motion, mode change,
 //! command boundaries — vim-flavored units for free).
 //!
+//! Authority: applying an inverse is applying an edit, so `undo`/`redo`
+//! take a `Gate` the one apply site must clear — a narrowed principal
+//! cannot reach past its grant by asking for undo instead of a forward
+//! edit. A refused unit stays on its stack; when a unit spans several
+//! commits, inverses applied before the refusal remain as ordinary
+//! commits (the document stays consistent, the unwind is partial).
+//!
 //! Honesty note: transforming positions through concurrent edits is a
 //! positional rebase. If a concurrent edit landed *inside* the range an
 //! undo re-deletes, the collapse is bias-resolved (foreign insertions at
@@ -35,6 +42,29 @@ const Bias = stemma.Bias;
 /// The offset-mapping kernel lives in position.zig (shared with the
 /// capability system's stamped-position rebasing).
 const mapOffset = @import("position.zig").mapOffset;
+
+/// Why an undo application was refused — the SAME vocabulary the edit door
+/// (`command.Context.edit`) speaks, since it is the same authority question.
+pub const Refusal = error{ Unauthorized, OutOfLimit, Collapsed };
+
+pub const Error = Allocator.Error || Refusal;
+
+/// The authority gate every undo application must clear. Undo lands text
+/// through inverse ops, so without a gate a narrowed principal could reach
+/// past its grant by asking for undo instead of a forward edit. It is a
+/// REQUIRED argument of `undo`/`redo`: a caller must NAME its authority
+/// (`command.Context.undoGate` for a dispatching principal, `.user_driven`
+/// for a human at the keyboard), so no path is silently ungated.
+pub const Gate = struct {
+    ctx: ?*anyopaque = null,
+    admits: *const fn (ctx: ?*anyopaque, repls: []const Document.Replacement) Refusal!void,
+
+    /// A human unwinding their own history on their own keypress — not an
+    /// autonomous principal acting, so no grant narrows it.
+    pub const user_driven: Gate = .{ .admits = admitAll };
+
+    fn admitAll(_: ?*anyopaque, _: []const Document.Replacement) Refusal!void {}
+};
 
 const Group = struct {
     /// Log indices of the commits in this unit, ascending.
@@ -120,23 +150,30 @@ pub const UndoLog = struct {
         return self.redoable.items.len > 0;
     }
 
-    /// Undo the newest unit. Returns false if there is nothing to undo.
-    pub fn undo(self: *UndoLog, gpa: Allocator, doc: *Document) Allocator.Error!bool {
+    /// Undo the newest unit. Returns false if there is nothing to undo;
+    /// refuses (leaving the unit undoable) when `gate` denies the inverse.
+    pub fn undo(self: *UndoLog, gpa: Allocator, doc: *Document, gate: Gate) Error!bool {
         try self.ingest(gpa, doc);
         self.barrier();
         var group = self.undoable.pop() orelse return false;
+        const inverse = self.invertGroup(gpa, doc, group.indices.items, gate) catch |e| {
+            self.undoable.appendAssumeCapacity(group); // the pop left this slot free
+            return e;
+        };
         defer group.deinit(gpa);
-        const inverse = try self.invertGroup(gpa, doc, group.indices.items);
         try self.redoable.append(gpa, inverse);
         return true;
     }
 
     /// Redo the newest undone unit. Returns false if there is none.
-    pub fn redo(self: *UndoLog, gpa: Allocator, doc: *Document) Allocator.Error!bool {
+    pub fn redo(self: *UndoLog, gpa: Allocator, doc: *Document, gate: Gate) Error!bool {
         try self.ingest(gpa, doc);
         var group = self.redoable.pop() orelse return false;
+        const inverse = self.invertGroup(gpa, doc, group.indices.items, gate) catch |e| {
+            self.redoable.appendAssumeCapacity(group);
+            return e;
+        };
         defer group.deinit(gpa);
-        const inverse = try self.invertGroup(gpa, doc, group.indices.items);
         try self.undoable.append(gpa, inverse);
         self.open = false;
         return true;
@@ -147,14 +184,14 @@ pub const UndoLog = struct {
     /// and return the resulting commits as a new unit. The commits this
     /// creates are consumed directly (cursor advanced past them), never
     /// re-ingested as undoable.
-    fn invertGroup(self: *UndoLog, gpa: Allocator, doc: *Document, indices: []const usize) Allocator.Error!Group {
+    fn invertGroup(self: *UndoLog, gpa: Allocator, doc: *Document, indices: []const usize, gate: Gate) Error!Group {
         var out: Group = .{};
         errdefer out.deinit(gpa);
         var i = indices.len;
         while (i > 0) {
             i -= 1;
             const before = doc.commitCount();
-            try self.invertCommit(gpa, doc, indices[i]);
+            try self.invertCommit(gpa, doc, indices[i], gate);
             // 0 or 1 commit results (empty inverses are not logged).
             assert(doc.commitCount() <= before + 1);
             if (doc.commitCount() > before) {
@@ -169,7 +206,7 @@ pub const UndoLog = struct {
     /// Build the inverse of log commit `index`, transform it through
     /// every later commit (skipping balanced pairs — see `pairs`), and
     /// apply it as one fresh user commit.
-    fn invertCommit(self: *UndoLog, gpa: Allocator, doc: *Document, index: usize) Allocator.Error!void {
+    fn invertCommit(self: *UndoLog, gpa: Allocator, doc: *Document, index: usize, gate: Gate) Error!void {
         const c = doc.commitAt(index);
 
         var repls: std.ArrayList(Document.Replacement) = .empty;
@@ -201,21 +238,14 @@ pub const UndoLog = struct {
         // Replacements can lose ascending order or overlap only if later
         // commits collapsed ranges together; merge conservatively.
         normalize(&repls);
+        // THE apply site, hence the ONE place the invoking principal's
+        // authority is asked about: an inverse reaches wherever the
+        // original commit did, so a narrowed principal must clear the same
+        // check a forward edit of these ranges would (see `Gate`). A
+        // commit's whole replacement set is judged before any of it lands.
+        try gate.admits(gate.ctx, repls.items);
         // Author the inverse as THIS log's identity so it is that peer's
         // own unit (a spawned peer's undo never lands as the user's edit).
-        //
-        // NAMED GAP (W4 slice 3 review): this calls `Document.replaceAll`/
-        // `peerReplaceAll` directly — NOT through `command.Context.edit` —
-        // so a `.doc_region` grant's `checkDocRegion` gate is NEVER
-        // consulted here. Safe TODAY because undo is always USER-DRIVEN
-        // (a human invoking undo/redo, even over an agent's own history,
-        // per this file's module doc — "never state restoration," an
-        // ordinary inverse-op replay, not an autonomous principal acting).
-        // A FUTURE "agent undo" verb (an agent programmatically unwinding
-        // its OWN edits as an autonomous action, not on a human's keypress)
-        // would need to route through `ctx.edit` — or re-derive the SAME
-        // gate here — so a scoped grant's boundary can't be bypassed by
-        // asking for undo instead of a forward edit.
         if (self.author == .user) {
             try doc.replaceAll(gpa, repls.items);
         } else {
@@ -291,35 +321,35 @@ test "undo: solo round trip — undo-all restores, redo-all replays" {
     try t.expectEqualStrings("very best base text", full);
 
     // Undo delete, then the coalesced insert pair, then the seed.
-    try t.expect(try log.undo(gpa, &doc));
+    try t.expect(try log.undo(gpa, &doc, .user_driven));
     {
         const s = try doc.text().toOwnedSlice(gpa);
         defer gpa.free(s);
         try t.expectEqualStrings("the very best base text", s);
     }
-    try t.expect(try log.undo(gpa, &doc));
+    try t.expect(try log.undo(gpa, &doc, .user_driven));
     {
         const s = try doc.text().toOwnedSlice(gpa);
         defer gpa.free(s);
         try t.expectEqualStrings("the base text", s);
     }
-    try t.expect(try log.undo(gpa, &doc));
+    try t.expect(try log.undo(gpa, &doc, .user_driven));
     try t.expectEqual(@as(usize, 0), doc.text().byteLen());
-    try t.expect(!try log.undo(gpa, &doc));
+    try t.expect(!try log.undo(gpa, &doc, .user_driven));
 
     // Redo everything back.
-    try t.expect(try log.redo(gpa, &doc));
-    try t.expect(try log.redo(gpa, &doc));
-    try t.expect(try log.redo(gpa, &doc));
+    try t.expect(try log.redo(gpa, &doc, .user_driven));
+    try t.expect(try log.redo(gpa, &doc, .user_driven));
+    try t.expect(try log.redo(gpa, &doc, .user_driven));
     {
         const s = try doc.text().toOwnedSlice(gpa);
         defer gpa.free(s);
         try t.expectEqualStrings("very best base text", s);
     }
-    try t.expect(!try log.redo(gpa, &doc));
+    try t.expect(!try log.redo(gpa, &doc, .user_driven));
 
     // And back again — the stacks stay coherent through cycles.
-    try t.expect(try log.undo(gpa, &doc));
+    try t.expect(try log.undo(gpa, &doc, .user_driven));
     {
         const s = try doc.text().toOwnedSlice(gpa);
         defer gpa.free(s);
@@ -357,7 +387,7 @@ test "undo: selective — own edits unwind, concurrent peer edits survive" {
     }
 
     // Undo own insertion: peer's wrapping must be untouched.
-    try t.expect(try log.undo(gpa, &doc));
+    try t.expect(try log.undo(gpa, &doc, .user_driven));
     {
         const s = try doc.text().toOwnedSlice(gpa);
         defer gpa.free(s);
@@ -365,7 +395,7 @@ test "undo: selective — own edits unwind, concurrent peer edits survive" {
     }
 
     // Redo it: comes back inside the (still present) peer wrapping.
-    try t.expect(try log.redo(gpa, &doc));
+    try t.expect(try log.redo(gpa, &doc, .user_driven));
     {
         const s = try doc.text().toOwnedSlice(gpa);
         defer gpa.free(s);
@@ -374,8 +404,8 @@ test "undo: selective — own edits unwind, concurrent peer edits survive" {
 
     // Undo does NOT touch the peer's commit even as the newest change:
     // only own units are undoable.
-    try t.expect(try log.undo(gpa, &doc));
-    try t.expect(try log.undo(gpa, &doc)); // seed
+    try t.expect(try log.undo(gpa, &doc, .user_driven));
+    try t.expect(try log.undo(gpa, &doc, .user_driven)); // seed
     {
         const s = try doc.text().toOwnedSlice(gpa);
         defer gpa.free(s);
@@ -413,22 +443,22 @@ test "undo: spawned peers each undo only their own edits" {
     }
 
     // A undoes: only A's insertion unwinds; B's survives (distinct undo).
-    try t.expect(try log_a.undo(gpa, &doc));
+    try t.expect(try log_a.undo(gpa, &doc, .user_driven));
     {
         const s = try doc.text().toOwnedSlice(gpa);
         defer gpa.free(s);
         try t.expectEqualStrings("base-B-", s);
     }
     // B undoes: only B's insertion unwinds.
-    try t.expect(try log_b.undo(gpa, &doc));
+    try t.expect(try log_b.undo(gpa, &doc, .user_driven));
     {
         const s = try doc.text().toOwnedSlice(gpa);
         defer gpa.free(s);
         try t.expectEqualStrings("base", s);
     }
     // A's log cannot undo B's work and vice versa — each is empty now.
-    try t.expect(!try log_a.undo(gpa, &doc));
-    try t.expect(!try log_b.undo(gpa, &doc));
+    try t.expect(!try log_a.undo(gpa, &doc, .user_driven));
+    try t.expect(!try log_b.undo(gpa, &doc, .user_driven));
 }
 
 test "undo: new own commit clears redo" {
@@ -439,10 +469,10 @@ test "undo: new own commit clears redo" {
     defer log.deinit(gpa);
 
     try doc.insert(gpa, 0, "abc");
-    try t.expect(try log.undo(gpa, &doc));
+    try t.expect(try log.undo(gpa, &doc, .user_driven));
     try t.expect(log.canRedo());
     try doc.insert(gpa, 0, "xyz");
     try log.ingest(gpa, &doc);
     try t.expect(!log.canRedo());
-    try t.expect(!try log.redo(gpa, &doc));
+    try t.expect(!try log.redo(gpa, &doc, .user_driven));
 }

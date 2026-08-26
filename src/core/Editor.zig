@@ -504,14 +504,17 @@ pub fn deleteRange(self: *Editor, gpa: Allocator, r: Range) Allocator.Error!void
     try self.applyUserEdit(gpa, r, "");
 }
 
-pub fn undo(self: *Editor, gpa: Allocator) Allocator.Error!bool {
-    const did = try self.history.undo(gpa, &self.doc);
+/// `gate` is the invoking principal's authority over the inverse edit —
+/// `command.Context.undoGate` on the dispatch path, `.user_driven` where a
+/// human's keypress is the only possible source.
+pub fn undo(self: *Editor, gpa: Allocator, gate: undo_mod.Gate) undo_mod.Error!bool {
+    const did = try self.history.undo(gpa, &self.doc, gate);
     self.clearGoal();
     return did;
 }
 
-pub fn redo(self: *Editor, gpa: Allocator) Allocator.Error!bool {
-    const did = try self.history.redo(gpa, &self.doc);
+pub fn redo(self: *Editor, gpa: Allocator, gate: undo_mod.Gate) undo_mod.Error!bool {
+    const did = try self.history.redo(gpa, &self.doc, gate);
     self.clearGoal();
     return did;
 }

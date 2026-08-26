@@ -186,16 +186,25 @@ fn cDeleteForward(ctx: *Context, args: struct {}) anyerror!Value {
     return ok;
 }
 
+/// A refused unwind reports "nothing happened" — the door already announced
+/// why on the echo line.
+fn undid(result: @import("undo.zig").Error!bool) anyerror!Value {
+    return .{ .boolean = result catch |e| switch (e) {
+        error.Unauthorized, error.OutOfLimit, error.Collapsed => false,
+        else => return e,
+    } };
+}
+
 fn cUndo(ctx: *Context, args: struct {}) anyerror!Value {
     _ = args;
     const ed = ctx.textEditor() catch return .{ .boolean = false };
-    return .{ .boolean = try ed.undo(ctx.gpa) };
+    return undid(ed.undo(ctx.gpa, ctx.undoGate()));
 }
 
 fn cRedo(ctx: *Context, args: struct {}) anyerror!Value {
     _ = args;
     const ed = ctx.textEditor() catch return .{ .boolean = false };
-    return .{ .boolean = try ed.redo(ctx.gpa) };
+    return undid(ed.redo(ctx.gpa, ctx.undoGate()));
 }
 
 /// The default `save` provider: write the buffer to its file backing. `save` is

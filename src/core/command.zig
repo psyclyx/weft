@@ -19,6 +19,8 @@ const capability = @import("capability.zig");
 const authority = @import("authority.zig");
 const position = @import("position.zig");
 const grants_mod = @import("grants.zig");
+const undo_mod = @import("undo.zig");
+const status_feed = @import("status_feed.zig");
 
 pub const Principal = authority.Principal;
 pub const Grade = authority.Grade;
@@ -279,6 +281,35 @@ pub const Context = struct {
         return self.applyEdit(r, bytes, self.user_initiated);
     }
 
+    /// The UNDO door: this principal's authority over an inverse edit, as the
+    /// gate `undo.UndoLog` must clear at its apply site. Undo re-applies text,
+    /// so it asks exactly what `edit` asks — the grade gate, then
+    /// `checkDocRegion` over every replacement — and a narrowed principal can
+    /// no more reach outside its region by unwinding history than by typing.
+    pub fn undoGate(self: *Context) undo_mod.Gate {
+        return .{ .ctx = self, .admits = admitUndo };
+    }
+
+    fn admitUndo(gate_ctx: ?*anyopaque, repls: []const Document.Replacement) undo_mod.Refusal!void {
+        const self: *Context = @ptrCast(@alignCast(gate_ctx.?));
+        const doc = self.document() orelse return;
+        if (!self.gradeOn(doc).canEdit()) {
+            self.noteRefusal("read-only: view access");
+            return error.Unauthorized;
+        }
+        for (repls) |r| switch (self.checkDocRegion(r.range.start, r.range.end)) {
+            .ok => {},
+            .out_of_limit => {
+                self.noteRefusal("undo reaches outside the granted region");
+                return error.OutOfLimit;
+            },
+            .collapsed => {
+                self.noteRefusal("granted region collapsed; re-grant needed");
+                return error.Collapsed;
+            },
+        };
+    }
+
     /// Announce a refusal on the dispatching head's echo line and return the
     /// refusal. The door owns visibility as well as enforcement, so a denied
     /// edit is equally honest whichever runtime asked — a builtin, a wasm
@@ -363,6 +394,11 @@ pub const RenderError = Document.AddPeerError || error{Unauthorized};
 /// user's undo. Producers MUST route through this instead of re-deriving the
 /// gate (`gradeMin` + `peerNamed` + `peerReplaceAll`) — a fragmented gate is a
 /// policy that drifts when per-plugin manifests tighten the `.edit` cap.
+///
+/// Refusals are ANNOUNCED here (`noteRenderRefusal`), because this door has no
+/// `Head` to echo on and its callers are background producers that can only
+/// drop the error: silence would make a denied render indistinguishable from
+/// a plugin that simply produced nothing.
 pub fn renderInto(
     gpa: Allocator,
     doc: *Document,
@@ -374,9 +410,23 @@ pub fn renderInto(
         .user, .remote => doc.my_grant,
         .plugin, .agent => authority.gradeMin(doc.my_grant, .edit),
     };
-    if (!grade.canEdit()) return error.Unauthorized;
+    if (!grade.canEdit()) {
+        noteRenderRefusal(name, "view access");
+        return error.Unauthorized;
+    }
     const pid = try doc.peerNamed(gpa, name);
     doc.peerReplaceAll(gpa, pid, items) catch {};
+}
+
+/// Make a background refusal observable: a host log line always, plus the
+/// generic `weft.status` chip the status line already renders — the same
+/// surface a plugin publishes progress on, so a denied producer is visible
+/// to the user without inventing a UI for it.
+fn noteRenderRefusal(name: []const u8, why: []const u8) void {
+    std.log.warn("render refused: '{s}' — {s}", .{ name, why });
+    var buf: [96]u8 = undefined;
+    const text = std.fmt.bufPrint(&buf, "render refused: {s} ({s})", .{ name, why }) catch "render refused";
+    status_feed.set(text);
 }
 
 /// [FIX 2] (doc/extensibility.md, release-blocking): apply a capability
@@ -1382,4 +1432,77 @@ test "command: W4 slice 3 [FIX 2] — applyActionResult applies an in-range batc
     const last = doc.commitAt(doc.commitCount() - 1);
     try t.expectEqual(provider_peer, last.author);
     env.caps.finish(good_session);
+}
+
+test "command: the undo door — a region-narrowed principal cannot smuggle an out-of-region change through undo" {
+    const gpa = t.allocator;
+    var env = try DocRegionEnv.init(gpa);
+    defer env.deinit();
+    const ctx = &env.ctx;
+    const doc = ctx.document().?;
+    const ed = try ctx.textEditor();
+
+    // Three user units: the seed, an edit OUTSIDE the coming region, an
+    // edit INSIDE it.
+    ctx.principal = .user;
+    ctx.user_initiated = true;
+    try ctx.edit(.{ .start = 0, .end = 0 }, "0123456789");
+    ed.history.barrier();
+    try ctx.edit(.{ .start = 0, .end = 1 }, "U"); // "U123456789"
+    ed.history.barrier();
+
+    const start_anchor = try doc.exportAnchor(gpa, 3, .after);
+    defer gpa.free(start_anchor.agent);
+    const end_anchor = try doc.exportAnchor(gpa, 7, .before);
+    defer gpa.free(end_anchor.agent);
+    try ctx.edit(.{ .start = 4, .end = 5 }, "X"); // "U123X56789", inside [3,7)
+    ctx.user_initiated = false;
+
+    _ = try env.table.grant(.{
+        .capability = "doc.edit",
+        .limit = .{ .doc_region = .{ .doc_id = ctx.buffer().name, .start = start_anchor, .end = end_anchor } },
+    }, "agent", null);
+
+    var agent_ident = NamedPeer{ .gpa = gpa, .name = "agent" };
+    ctx.principal = .{ .role = .agent, .name = "agent", .ctx = &agent_ident, .resolve = NamedPeer.resolve };
+
+    // Unwinding the in-region unit is within the grant — the gate is the
+    // region, not a blanket "no undo for agents".
+    try t.expect(try ed.undo(gpa, ctx.undoGate()));
+    const in_region = try doc.text().toOwnedSlice(gpa);
+    defer gpa.free(in_region);
+    try t.expectEqualStrings("U123456789", in_region); // "X" reverted to "4"
+
+    // The next unit's inverse lands at [0,1) — outside the grant. Refused,
+    // with no ghost commit, and the unit stays undoable.
+    try t.expectError(error.OutOfLimit, ed.undo(gpa, ctx.undoGate()));
+    const unchanged = try doc.text().toOwnedSlice(gpa);
+    defer gpa.free(unchanged);
+    try t.expectEqualStrings("U123456789", unchanged);
+
+    // The user, holding no such grant, still unwinds it.
+    ctx.principal = .user;
+    try t.expect(try ed.undo(gpa, ctx.undoGate()));
+    const restored = try doc.text().toOwnedSlice(gpa);
+    defer gpa.free(restored);
+    try t.expectEqualStrings("0123456789", restored);
+}
+
+test "command: a refused background render is observable (log + status chip)" {
+    const gpa = t.allocator;
+    var env = try DocRegionEnv.init(gpa);
+    defer env.deinit();
+    const doc = env.ctx.document().?;
+
+    status_feed.set("");
+    doc.my_grant = .view; // this replica may read, never write
+    try t.expectError(error.Unauthorized, renderInto(gpa, doc, .plugin, "ci-plugin", &.{
+        .{ .range = .{ .start = 0, .end = 0 }, .bytes = "3 failing" },
+    }));
+
+    // No Head to echo on, so the chip is the user-visible seam.
+    const chip = status_feed.get() orelse return error.TestUnexpectedResult;
+    try t.expect(std.mem.indexOf(u8, chip, "ci-plugin") != null);
+    try t.expect(std.mem.indexOf(u8, chip, "refused") != null);
+    status_feed.set("");
 }
