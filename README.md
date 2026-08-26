@@ -186,6 +186,26 @@ zig build run      # open the window (skia renderer)
 zig build test     # display-free tests
 ```
 
+### Iterating
+
+Run the narrowest step that covers what you are changing. Edit-to-verdict on
+this box: `test-fs-runtime` 0.6s, `test-dired-model` 0.8s, `test-contract`
+1.7s, `e2e-popup-layout` 3.3s — the last is the cheapest whole-app rebuild.
+`zig build --watch <step>` re-runs one on every save and is worth it for the
+ergonomics, not the clock: measured here it lands within a few percent of
+typing the command again (0.65s and 3.3s for those two steps), because
+without incremental compilation a watch rebuild is the same full compilation.
+
+Do NOT add `-fincremental` on Zig 0.16. It swaps in the self-hosted linker,
+which cannot parse the linker scripts nixpkgs ships as `libpthread.so` and
+`libtree-sitter.so` (`error: bad ident`), so no app-sized step links at all;
+the portable steps that do link produce binaries that SEGV on the first test.
+
+Keep the full `zig build test` as a gate, not a loop: it is around 200s, of
+which under 10s is compilation. Nearly all the rest is one test —
+`src/e2e/latency_test.zig` drives ~11k real keystrokes through the whole
+application wake path.
+
 ## Config
 
 `config.js` (JavaScript, evaluated in QuickJS) loads plugins and wires keys
