@@ -1331,7 +1331,7 @@ test "GraphDoc over the wire: an edit through the on_save PROJECTION converges o
 }
 
 // ── W6 check-in: TranscriptDoc live over the wire, confined by a subtree
-// grant (doc/north-star-plan.md §6 W6 gate, in full: "attach to the
+// grant (doc/substrate.md, in full: "attach to the
 // daemon's headless agent session, observe via slot-fired scenes,
 // intervene under grant, detach, session unaffected"). CORRECTED CLAIM (an
 // earlier version of this comment overstated what this test drives): the
@@ -1718,7 +1718,7 @@ test "W6 check-in: a home session streams a live transcript; a remote observer c
     // authority was revoked but because it would always ride bundled with
     // this one. That is why intervene #2 (proving the grant survives
     // reconnect) had to run BEFORE this, not after — an earlier draft of
-    // this test tried the order the north-star-plan gate text lists
+    // this test tried the order the doc/cwa-prior-docs-audit.md §5 gate text lists
     // ("intervene converges → out-of-grant refuses → detach → ... →
     // re-attach → converged") with a THIRD intervene after re-attach, and
     // it failed for exactly this reason: real shipped behavior, not a
@@ -1750,7 +1750,7 @@ test "W6 check-in: a home session streams a live transcript; a remote observer c
 }
 
 // ── W6 slice 1: the per-region lease over the REAL wire ─────────────────
-// (doc/d1-live-reconcile.md §5, §6). Two regions ("room1"/"room2") on a
+// (doc/substrate.md §4). Two regions ("room1"/"room2") on a
 // plain `GraphDoc` shared alice(server)↔bob(client) exactly like the
 // GraphDoc-over-the-wire tests above; `GraphCollab.bindLeases` opts each
 // side's quad into per-region admission on top of the ordinary frontier
@@ -2170,9 +2170,9 @@ test "lease: announce frame is version-tolerant — missing hue, extra trailing 
     try t.expectEqual(@as(u32, 42), table.hueOf(region).?);
 }
 
-// ── W6 slice 2: identity-anchored SUBTREE GRANTS (doc/north-star-plan.md
-// §6 W6, d1-live-reconcile.md §5.2) — the second predicate over
-// `GraphCollab.admitRegions`, composing with the W6 slice 1 lease above.
+// ── W6 slice 2: identity-anchored SUBTREE GRANTS (doc/substrate.md §4)
+// — the second predicate over `GraphCollab.admitRegions`, composing with
+// the W6 slice 1 lease above.
 //
 // Post-review REQUIRED FIX 1 changed the trust model these tests exercise:
 // authority is now keyed on `Session.peerFingerprint()` — the AUTHENTICATED
@@ -2769,7 +2769,7 @@ test "subtree grant: confinement over the REAL wire (socketpair e2e) — admitte
 }
 
 // ── D3 — stuck-authority-refusal PREVENTION + RECOVERY (task #24,
-// doc/d3-refusal-recovery.md, in full: "how a stuck replica recovers, and —
+// doc/substrate.md §5, in full: "how a stuck replica recovers, and —
 // more importantly — how the stuck state is made unreachable in the first
 // place"). The seven falsifiable tests from that doc's §6, in order:
 // two TRACE LOCKS guarding the dead designs (§1.1/§1.2's findings against
@@ -2819,7 +2819,7 @@ test "D3 §6 test 1 (trace lock, falsifies design #1): revert-in-same-batch (ins
     // Bob (out-of-grant) inserts then deletes the SAME bytes, in ONE local
     // batch — nets zero visible content, but both the insert and the
     // delete are real, applied `Change`s naming the out-of-grant text
-    // object (doc/d3-refusal-recovery.md §1.1: coalescing an insert+delete
+    // object (doc/substrate.md §5: coalescing an insert+delete
     // pair does NOT fold to nothing, and even when adjacent same-direction
     // edits DO coalesce, the change still carries the object).
     const b_text = try docs.bob.resolve(text_ref);
@@ -2930,10 +2930,11 @@ test "D3 §6 test 3 (prevention): an announced subtree grant reaches the grantee
     try t.expect(try rig.gb.mayEditNode(gpa, room1_obj));
     try t.expect(!(try rig.gb.mayEditNode(gpa, room2_obj)));
 
-    // The honest client discipline this predicate exists to support (D3
-    // §2.1's "before committing the local op AND before it can ride a
-    // batch"): consult it BEFORE minting anything. In-grant: the check
-    // passes, the edit is minted, sent, and admitted.
+    // The honest client discipline this predicate exists to support
+    // (doc/substrate.md §5's "before committing the local op AND before
+    // it can ride a batch"): consult it BEFORE minting anything.
+    // In-grant: the check passes, the edit is minted, sent, and
+    // admitted.
     _ = try rig.joiner.set(gpa, room1_obj, "granted-edit", .{ .str = "ok" });
     {
         const land_deadline = task.nowNs() + 5 * std.time.ns_per_s;
@@ -3073,7 +3074,7 @@ test "D3 §6 test 5 (recovery): re-bootstrap heals a poisoned replica — fronti
     // ── Drive the poison: an out-of-grant edit is refused, then a
     // SUBSEQUENT in-grant edit is refused TOO — by bundling with the
     // still-unmerged refusal (the W6 check-in test's own negative case;
-    // doc/d3-refusal-recovery.md §0's "the refuser's frontier never
+    // doc/substrate.md §5's "the refuser's frontier never
     // advances past the refused op"). ──
     const b1_outside = try remote1.resolve(outside_ref);
     _ = try remote1.set(gpa, b1_outside, "poison", .{ .str = "bad" });
@@ -3312,10 +3313,10 @@ test "D3 §6 test 7 (collapse composes with recovery): a sole grant root's colla
     try t.expect(docs.bob.root().mapGet("inside") == null);
 }
 
-// ── W7b — THE FLAGSHIP GATE (doc/w7-rebase.md §4 W7b, north-star-plan.md
-// §6 W7): a function-level subtree grant on a CODE buffer, keyed by node
-// identity, surviving a peer's concurrent in-function edit AND a peer's
-// move/reorder of the function, OR trapping loudly on its deletion.
+// ── W7b — THE FLAGSHIP GATE (doc/substrate.md §9): a function-level
+// subtree grant on a CODE buffer, keyed by node identity, surviving a
+// peer's concurrent in-function edit AND a peer's move/reorder of the
+// function, OR trapping loudly on its deletion.
 //
 // "Code buffer" here is a `GraphDoc` reconciled by `syntax_claim.reconcile`
 // (W7b piece 2) into one struct node per function, each owning its OWN
@@ -3486,7 +3487,7 @@ test "W7b gate: function-level subtree grant survives a concurrent in-function e
     // ── (b) the HOST MOVES functionB: reparented under helperA's OWN
     // struct node — a real structural move (not a cosmetic reorder),
     // exercising piece 1's nested struct-forest containment too. An
-    // anchor-pair grant (w7-rebase.md §2.2) could not survive this AT ALL
+    // anchor-pair grant (doc/substrate.md §1) could not survive this AT ALL
     // (a move in a shared-buffer model is a cut+paste, minting new
     // insertion identity and collapsing the pair) — here NOTHING about
     // functionB's own `ObjId` or its `"body"` object changes, so the

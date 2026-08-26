@@ -1764,7 +1764,7 @@ pub fn procFilter(cmd: []const u8, r: Range) void {
 
 // ── fs (perm-gated fs_read / fs_write) — local, cwd-relative ──────────
 // A missing perm never reaches these as -1/null: the host traps the call
-// outright (doc/north-star-plan.md §2.4 review C9), so a plugin that hasn't
+// outright (doc/contextual-workspace-architecture.md §13.5), so a plugin that hasn't
 // requested the perm never even gets back here. The degrade values below are
 // for legitimate misses (not found / too big / not a directory) only.
 /// Read a file into `scratch` (valid until the next read call), or null (not

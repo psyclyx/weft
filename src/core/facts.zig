@@ -1,5 +1,5 @@
 //! Facts — the merged context vocabulary the Container resolves against
-//! (north-star-plan §2.1/§2.2, W1). `Facts` is the union of two vocabularies
+//! (doc/cwa-prior-docs-audit.md §5). `Facts` is the union of two vocabularies
 //! that used to live in separate, incompatible predicate systems:
 //!
 //!   - the buffer-resource axis (`mode.zig`'s `Resource`: ext/shebang/glob
@@ -13,7 +13,7 @@
 //! narrower `Resource` — so a cross-axis conjunction (`mode=normal AND
 //! ext=.nix`) is an ORDINARY predicate, not something a single-scope matcher
 //! has no home for. This is the repair review finding A1/C-F5 asked for
-//! (north-star-plan §9): the old single-scope eligibility made cross-axis
+//! (doc/cwa-prior-docs-audit.md §5): the old single-scope eligibility made cross-axis
 //! predicates inexpressible, which is what forced scope-depth dominance,
 //! which is what resurrected [FIX 5]'s bug. There is no scope concept here
 //! at all — see container.zig's total order for why that is load-bearing,
@@ -54,7 +54,7 @@ pub const Facts = struct {
     /// The active buffer's tool-backing identity, or "" when not a
     /// projection (`action.Ctx.tool`'s exact convention).
     tool: []const u8 = "",
-    /// The focused pane handle (north-star-plan §5 F4: "`pane` is a fact on
+    /// The focused pane handle (doc/cwa-prior-docs-audit.md §5: "`pane` is a fact on
     /// head scopes, `principal` is identity, never a scope axis"). Mirrors
     /// `Head.focused_pane` — 0 is not a sentinel here either (see that
     /// field's doc); a predicate that cares about a SPECIFIC pane compares
@@ -71,7 +71,7 @@ pub const Facts = struct {
 /// A host-evaluated predicate over `Facts`. `mode.zig`'s vocabulary
 /// (`ext,shebang,glob,tag,locus,all,any,not`) plus the interaction axis
 /// (`mode,tool,lang`) — the generalization W1 was pulled forward to build
-/// (north-star-plan §6 W1, review C-F5).
+/// (doc/configuration.md §7, review C-F5).
 pub const Predicate = union(enum) {
     /// Path ends with this suffix (".rs", ".test.zig").
     ext: []const u8,
@@ -160,7 +160,7 @@ pub const Predicate = union(enum) {
 ///     both sides true at once).
 ///
 /// Getting this backwards is the bug a caps-adapter regression proved live
-/// (north-star-plan W1 review): `predicateFromExtensions` emits `any(ext,
+/// (doc/configuration.md §7 review): `predicateFromExtensions` emits `any(ext,
 /// ext, ...)` for a multi-extension provider, and treating `any` as one
 /// opaque non-disjoint atom (the pre-fix behavior) made two DIFFERENT
 /// languages' tree-sitter providers — same slot, same priority, same

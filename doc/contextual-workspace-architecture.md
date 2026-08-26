@@ -1329,8 +1329,9 @@ collaboration threat model moves to Phase 6's doorstep.
    for WASM, JavaScript, in-process, and remote paths — closing today's
    ungated JS effect plane and the missing buffer-mutation authority.
 3. Introduce invocation IDs, cancellation, deadlines, and audit records.
-4. Build the dispatch-latency instrument and capture the pre-migration
-   baseline.
+4. The dispatch-latency instrument and its pre-migration baseline ALREADY
+   EXIST (`src/e2e/latency_test.zig`, `src/e2e/latency_baseline.zon`); re-point
+   them at the new dispatch path rather than building them again.
 
 ### Phase 2: runtime endpoints and workspace separation
 

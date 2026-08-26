@@ -6,7 +6,7 @@
 //! The window/Vulkan half of weft is simply never initialized.
 //!
 //! The loop is the SAME `core/scheduler.zig` kernel `main.zig` drives
-//! (north-star-plan §6 W2a-3 item 5's unification) — collab (the hub's
+//! (doc/contextual-workspace-architecture.md §7) — collab (the hub's
 //! wake-fd) and pool sources, no window/present sources at all. The old
 //! shape here was a fixed 15ms futex park regardless of whether anything
 //! was pending; that's gone — an idle host with no peers, no in-flight
@@ -15,7 +15,7 @@
 //! pool signals a finished task, or the autosave-idle deadline (armed only
 //! while a change is actually pending) comes due.
 //!
-//! **W0b's headed/headless gate (doc/north-star-plan.md §6): `sys` below is
+//! **W0b's headed/headless gate (doc/cwa-prior-docs-audit.md §5): `sys` below is
 //! built with `core.System.create` — the SAME construction `app/session.zig`'s
 //! `Session.init` uses for the windowed binary's "editor" system (buffers,
 //! commands, keymap, caps, actions, container, the built-in command/keymap
@@ -162,7 +162,7 @@ fn wake(ctx: ?*anyopaque) anyerror!void {
     }
 }
 
-/// Pure query (north-star-plan §6 W2a-3): dormant while no change is
+/// Pure query (doc/contextual-workspace-architecture.md §7): dormant while no change is
 /// pending; otherwise the same "2s of quiet since the last change" line
 /// the old inline compare used, now told to the scheduler instead of
 /// discovered by accident on the next 15ms park.

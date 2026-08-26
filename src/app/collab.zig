@@ -111,7 +111,7 @@ pub const ShareCtx = struct {
     /// C-g: drop queued connect/listen intents and abort an in-flight
     /// connect. Applied in the frame loop (which owns the connect handle).
     cancel_requested: bool = false,
-    /// Scheduler wake-fd (north-star-plan §6 W2a-3) for the OUTBOUND
+    /// Scheduler wake-fd (doc/contextual-workspace-architecture.md §7) for the OUTBOUND
     /// session: wired onto every `core.session.Session` this run creates
     /// for it (initial connect, runtime connect, reconnect rebind) so tick
     /// servicing wakes on real inbox activity. `-1` when creating the fd

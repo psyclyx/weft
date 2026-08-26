@@ -96,7 +96,7 @@ pub const Loop = struct {
     /// there are none — a pure query so a scheduler deadline source can
     /// sleep exactly until this loop's next timer needs `tick` instead of
     /// being serviced by accident on whatever cadence something else wakes
-    /// the frame thread (north-star-plan §6 W2a-3).
+    /// the frame thread (doc/contextual-workspace-architecture.md §7).
     pub fn nextDueNs(self: *const Loop) ?u64 {
         var min: ?u64 = null;
         for (self.timers.items) |tm| {

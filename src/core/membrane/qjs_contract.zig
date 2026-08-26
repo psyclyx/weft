@@ -1,5 +1,5 @@
 //! core/membrane/qjs_contract.zig — the `weft.*` membrane's THIRD surface
-//! (doc/north-star-plan.md §2.5, task W0a-D extension 3): the `qjs_*` import
+//! (doc/extensibility-native-surface.md, task W0a-D extension 3): the `qjs_*` import
 //! table `src/core/quickjs.zig` binds onto quickjs.wasm's Linker, today
 //! hand-listed at THREE call sites (`defineConfigFns`'s 13 config-plane
 //! imports, `evalConfig`'s 15 plugin-plane stubs, `JsPlugin.load`'s 15
@@ -41,8 +41,9 @@ pub const denied: i32 = -2;
 
 /// Which linker(s) an entry is bound on. `.config` — the 13 `weft.*` calls
 /// every config/plugin script can make (bind/run/echo/log/plugin/use/set/
-/// menu/action/provide/statusSegment/grant) — real handlers always. `.plugin` — the 15 calls
-/// only a RESIDENT JS plugin makes (register/proc/buffer/config/
+/// menu/action/provide/statusSegment/grant) — real handlers always.
+/// `.plugin` — the 15 calls only a RESIDENT JS plugin makes
+/// (register/proc/buffer/config/
 /// breakpoints/fileRead/fileWrite/lineText/pick/status); stubbed on the
 /// config-eval linker (present to satisfy quickjs.wasm's shared import
 /// list, never actually called there), real on a plugin's linker.
@@ -88,8 +89,8 @@ pub const imports = [_]Entry{
     e("qjs_action", 2, 0, .config, "weft.action(name): declare a pick action + its trampoline command"),
     e("qjs_semantic_action", 2, 0, .config, "weft.semanticAction(name): declare a focused-view action command"),
     e("qjs_provide", 9, 0, .config, "weft.provide(action, mode, lang, cmd, prio): register a provider"),
-    e("qjs_status_segment", 5, 0, .config, "weft.statusSegment(text, role, priority): stage a static ui/statusline-seg segment onto the manifest (north-star-plan task #19)"),
-    e("qjs_grant", 6, 0, .config, "weft.grant(plugin, capability, root): stage a GrantDecl onto the manifest — root (\"\" = unrestricted) narrows to Limit.fs_root (north-star-plan §6 W4 slice 4)"),
+    e("qjs_status_segment", 5, 0, .config, "weft.statusSegment(text, role, priority): stage a static ui/statusline-seg segment onto the manifest (doc/cwa-prior-docs-audit.md §5)"),
+    e("qjs_grant", 6, 0, .config, "weft.grant(plugin, capability, root): stage a GrantDecl onto the manifest — root (\"\" = unrestricted) narrows to Limit.fs_root (doc/contextual-workspace-architecture.md §13.5)"),
 
     // ── the plugin plane: stubbed on the config linker, real on a JsPlugin's ─
     e("qjs_register", 2, 1, .plugin, "bind a command name to this JS plugin's on_command; returns its id"),
@@ -165,7 +166,7 @@ test "qjs membrane contract: every entry is well-formed, documented, and unique"
     try t.expectEqual(@as(usize, 17), plugin_count); // the resident-plugin-only surface
 }
 
-// Sealed eval (north-star-plan §2.3/§4 C11; manifest.zig's module doc):
+// Sealed eval (doc/configuration.md §5 C11; manifest.zig's module doc):
 // the `.config` group is the ENTIRE channel a config script (or a
 // `weft.use`-imported one) has to affect the world. This asserts, by
 // inspecting the table rather than trusting a comment, that none of those

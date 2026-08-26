@@ -1,4 +1,4 @@
-//! e2e/popup-layout — rendering P2's guard (north-star-plan rendering P1/P2):
+//! e2e/popup-layout — rendering P2's guard (doc/rendering.md):
 //! P1 (commit 2088854) re-expressed the completion popup + hover box through
 //! one generic `popup.drawCaretSurface`, and in doing so found
 //! `doc/rendering.md`'s "the snapshot tests are the guard" claim was

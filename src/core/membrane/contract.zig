@@ -11,7 +11,7 @@
 //! arity drifts from its host import's arity because someone edited one side
 //! and forgot the other.
 //!
-//! Scope (doc/north-star-plan.md §2.5, task W0a-D): this file covers the
+//! Scope (doc/extensibility-native-surface.md, task W0a-D): this file covers the
 //! HOST import side (zipping `contract_data.imports` with `handlers`) and
 //! the host→guest export call-site helpers. It does NOT generate the guest
 //! externs in src/guest/weft.zig (Zig 0.16 cannot reify a decl from a

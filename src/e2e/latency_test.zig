@@ -1,9 +1,10 @@
-//! e2e/latency — the keystroke-to-dispatch latency instrument (north-star-plan
-//! §6 W0a / §4 C10): times `dispatchSpec` — key event in, command executed /
-//! edit committed out — for a few representative categories, against a
-//! realistically-sized buffer. Two modes, selected by the `-Drecord-latency`
-//! build option (see build.zig's `e2e-latency` step — the flag has no effect
-//! on the plain `test` step, deliberately: see build.zig's `latency_mod`):
+//! e2e/latency — the keystroke-to-dispatch latency instrument
+//! (doc/cwa-prior-docs-audit.md §5): times `dispatchSpec` —
+//! key event in, command executed / edit committed out — for a few
+//! representative categories, against a realistically-sized buffer. Two
+//! modes, selected by the `-Drecord-latency` build option (see build.zig's
+//! `e2e-latency` step — the flag has no effect on the plain `test` step,
+//! deliberately: see build.zig's `latency_mod`):
 //!
 //!   compare (default, what `zig build test` runs): measure, load the
 //!   committed baseline (`latency_baseline.zon`), and fail on a >2x median (or

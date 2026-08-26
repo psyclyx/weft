@@ -22,9 +22,9 @@ pub const perm_net = 2;
 pub const perm_proc = 3;
 pub const perm_timer = 4;
 
-/// The membrane's one grant-gate vocabulary (doc/architecture.md §2.4 /
-/// doc/north-star-plan.md review C9), enum-closed so a new perm can't be
-/// checked without a name for its trap message.
+/// The membrane's one grant-gate vocabulary
+/// (doc/contextual-workspace-architecture.md §13.5), enum-closed so a
+/// new perm can't be checked without a name for its trap message.
 pub const Perm = enum(u32) {
     fs_read = perm_fs_read,
     fs_write = perm_fs_write,
@@ -44,30 +44,32 @@ pub const Perm = enum(u32) {
 };
 
 /// Translate a plugin's DECLARED perms (the `describe()` boolean handshake)
-/// into `grants.HandleTable` rows, at LOAD time (north-star-plan §6 W4 slice
-/// 1, task item 1: "the System's grant table is POPULATED from the loaded
-/// plugins' declared perms ... translated into GrantDecls, so the machinery
-/// runs on real data without a new config verb"). Called once, from
-/// `wasm_abi/runtime.zig`'s `loadPlugin` right after `describe()` finishes
-/// (`perms` is final at that point) — a plugin loaded WITHOUT a table wired
-/// (`opts.grant_table == null`, every headless test today) never calls this;
-/// see `hasPerm`'s doc for what that means for it.
+/// into `grants.HandleTable` rows, at LOAD time
+/// (doc/contextual-workspace-architecture.md §13.5 slice 1, task item 1:
+/// "the System's grant table is POPULATED from the loaded plugins' declared
+/// perms ... translated into GrantDecls, so the machinery runs on real data
+/// without a new config verb"). Called once, from `wasm_abi/runtime.zig`'s
+/// `loadPlugin` right after `describe()` finishes (`perms` is final at that
+/// point) — a plugin loaded WITHOUT a table wired (`opts.grant_table ==
+/// null`, every headless test today) never calls this; see `hasPerm`'s doc
+/// for what that means for it.
 ///
-/// **The composition rule (W4 slice 4, north-star-plan §2.4)**: BEFORE
-/// minting a fresh boolean-derived row for a declared perm, this checks
+/// **The composition rule (W4 slice 4,
+/// doc/contextual-workspace-architecture.md §13.5)**: BEFORE minting a
+/// fresh boolean-derived row for a declared perm, this checks
 /// `table.findLive` for an ALREADY-live row on the exact same (principal,
-/// capability) pair — one a config-authored `weft.grant`
-/// (`manifest.zig`'s `reconcileGrants`) mints strictly before
-/// this call runs (`Manifest.apply`/`.reconcile` order: grants, then
-/// `loadPlugins`). If found, that row's handle is REUSED as-is — a
-/// config-authored grant NARROWS/REPLACES the describe() baseline for that
-/// pair, never sits alongside it as a second, unrestricted row a confused
-/// deputy could reach for instead. If not found (the ordinary case — no
-/// `weft.grant` named this plugin+capability), a fresh unrestricted
-/// (`.none`-limit) row is minted exactly as before this slice. A `grant`
-/// failure (OOM) degrades to `CapHandle.none` for that one perm — logged,
-/// not fatal: the plugin loses that capability rather than the whole load
-/// failing on an allocator hiccup unrelated to the wasm module itself.
+/// capability) pair — one a config-authored `weft.grant` (`manifest.zig`'s
+/// `reconcileGrants`) mints strictly before this call runs
+/// (`Manifest.apply`/`.reconcile` order: grants, then `loadPlugins`). If
+/// found, that row's handle is REUSED as-is — a config-authored grant
+/// NARROWS/REPLACES the describe() baseline for that pair, never sits
+/// alongside it as a second, unrestricted row a confused deputy could
+/// reach for instead. If not found (the ordinary case — no `weft.grant`
+/// named this plugin+capability), a fresh unrestricted (`.none`-limit) row
+/// is minted exactly as before this slice. A `grant` failure (OOM)
+/// degrades to `CapHandle.none` for that one perm — logged, not fatal: the
+/// plugin loses that capability rather than the whole load failing on an
+/// allocator hiccup unrelated to the wasm module itself.
 pub fn mintGrantHandles(table: *grants_mod.HandleTable, principal: []const u8, perms: [WasmPlugin.perm_count]bool, out: *[WasmPlugin.perm_count]grants_mod.CapHandle) void {
     inline for (0..WasmPlugin.perm_count) |i| {
         if (perms[i]) {
@@ -99,19 +101,19 @@ pub fn adoptGrantHandles(table: *grants_mod.HandleTable, principal: []const u8, 
     }
 }
 
-/// The PURE grant check (W0b — doc/north-star-plan.md §2.5, migrated to the
+/// The PURE grant check (W0b — doc/extensibility-native-surface.md, migrated to the
 /// handle table by W4 §6/§2.4): whether `id` currently POSSESSES `perm`.
-/// Deliberately `anytype`, not `*WasmPlugin`: this is the ONE piece of logic
-/// that must never drift between the wasm transport and the in-process
-/// transport (C7's "one contract, two transports"), so it is factored out
-/// where BOTH `requirePerm` (below, wasm) and `core/inproc/InProcClient.zig`
-/// (in-process) call it — neither reimplements the check. `id` is duck-typed
-/// (`perms`/`grant_table`/`grant_handles` fields) rather than a nominal
-/// shared struct: WasmPlugin and InProcClient hold them under the same
-/// names without either depending on the other's type, mirroring
-/// `platform/platform.zig`'s `assertPlatform` comptime-contract convention
-/// already used for the Platform seam (P3) — see `InProcClient.zig`'s `assertClientIdentity` for the
-/// analogous compile-time check on this shape.
+/// Deliberately `anytype`, not `*WasmPlugin`: this is the ONE piece of logic that
+/// must never drift between the wasm transport and the in-process transport (C7's
+/// "one contract, two transports"), so it is factored out where BOTH `requirePerm`
+/// (below, wasm) and `core/inproc/InProcClient.zig` (in-process) call it — neither
+/// reimplements the check. `id` is duck-typed
+/// (`perms`/`grant_table`/`grant_handles` fields) rather than a nominal shared
+/// struct: WasmPlugin and InProcClient hold them under the same names without
+/// either depending on the other's type, mirroring `platform/platform.zig`'s
+/// `assertPlatform` comptime-contract convention already used for the Platform seam
+/// (P3) — see `InProcClient.zig`'s `assertClientIdentity` for the analogous
+/// compile-time check on this shape.
 ///
 /// **The migration, precisely** (§6 W4 gate: "the hasPerm migration must be
 /// behavior-identical for granted plugins"): when `id.grant_table` is wired
@@ -157,7 +159,7 @@ pub fn limitFor(id: anytype, comptime perm: Perm) grants_mod.Limit {
 /// wasm trampoline's `catch` arm, without re-deriving the message or
 /// double-checking the bit `hasPerm` already decided. `requirePerm` below is
 /// this plus the check, kept for the ~117 handlers not yet split (task W0b
-/// item 1 — see doc/north-star-plan.md's honest coverage note): behavior is
+/// item 1 — see doc/cwa-prior-docs-audit.md §5): behavior is
 /// byte-identical to before this refactor, MODULO the message: a table-wired
 /// plugin now gets a REVOCATION-specific reason, distinct from "never
 /// requested" (§6 W4 gate) — a plugin with no table wired keeps the exact
@@ -205,11 +207,11 @@ pub fn trapOutOfLimit(p: *WasmPlugin, caller: *wasm.Caller, comptime perm: Perm,
 /// the whole gate — there is no second way to spell "denied" at a call site,
 /// so a site that forgets this call has no perm check at all (loud in
 /// review), and no site can hand back a success-shaped value on denial
-/// (doc/north-star-plan.md §2.4: "denied effects trap", review C9/[FIX 10]).
-/// The trap message names the plugin and the missing capability; it surfaces
-/// through the same guest-trap log path every other wasm trap already gets
-/// (`wasm.zig`'s `checkErr`/`checkTrap`), so denial is loud exactly like any
-/// other guest fault.
+/// (doc/contextual-workspace-architecture.md §13.5: "denied effects trap",
+/// review C9/[FIX 10]). The trap message names the plugin and the missing
+/// capability; it surfaces through the same guest-trap log path every other
+/// wasm trap already gets (`wasm.zig`'s `checkErr`/`checkTrap`), so denial is
+/// loud exactly like any other guest fault.
 pub fn requirePerm(p: *WasmPlugin, caller: *wasm.Caller, comptime perm: Perm) bool {
     if (hasPerm(p, perm)) return true;
     trapPermDenied(p, caller, perm);

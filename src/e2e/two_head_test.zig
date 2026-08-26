@@ -1,4 +1,4 @@
-//! e2e test file — THE TWO-HEAD GATE (north-star-plan §6 W2a GATE): drives
+//! e2e test file — THE TWO-HEAD GATE (doc/contextual-workspace-architecture.md §7): drives
 //! TWO independent `core.Head`s over ONE session/system (`h.SecondHead`,
 //! harness.zig) through the REAL dispatch path (`dispatch.dispatchSpec` /
 //! `command.run`), proving the per-head split W2a-1/W2a-2 built (mode,
@@ -21,7 +21,7 @@
 //! the layer W2a-2 touched (dispatch.zig + core.Head), not entangled with
 //! the guest-ABI gap below.
 //!
-//! GUEST-ABI HEAD ADDRESSING (task #14, north-star-plan §2.1/§2.7): the
+//! GUEST-ABI HEAD ADDRESSING (task #14, doc/cwa-prior-docs-audit.md §5): the
 //! tests at the bottom of this file close a gap this file's header used to
 //! report rather than patch — `wasm_host/commands.zig`'s `wpCmdTrampoline`
 //! used to run a WASM-plugin-backed command's `on_command` against the

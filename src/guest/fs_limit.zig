@@ -1,14 +1,15 @@
-//! fs_limit — a guest fixture (north-star-plan §6 W4 slice 2, task #8's item
-//! 1: proving `.fs_root` limit enforcement THROUGH a real wasm guest, not
-//! just the in-process semantic bodies). Requests fs_read + fs_write, then
-//! exposes each path-taking primitive as a command reading its path (and,
-//! for write, its content) from the command's own args — so the host-side
-//! test controls exactly which path to try against whichever grant it
-//! minted (in-root, out-of-root, a `..` traversal) without needing a
-//! separate fixture per scenario. Mirrors `deny.zig`'s "a guest built for
-//! the test it backs" pattern, one door over (limit-gating, not
-//! perm-gating): a call that's out of the grant's root must TRAP, never
-//! hand back a fake result the guest could observe and keep running past.
+//! fs_limit — a guest fixture (doc/contextual-workspace-architecture.md
+//! §13.5, task #8's item 1: proving `.fs_root` limit enforcement THROUGH a
+//! real wasm guest, not just the in-process semantic bodies). Requests
+//! fs_read + fs_write, then exposes each path-taking primitive as a
+//! command reading its path (and, for write, its content) from the
+//! command's own args — so the host-side test controls exactly which path
+//! to try against whichever grant it minted (in-root, out-of-root, a `..`
+//! traversal) without needing a separate fixture per scenario. Mirrors
+//! `deny.zig`'s "a guest built for the test it backs" pattern, one door
+//! over (limit-gating, not perm-gating): a call that's out of the grant's
+//! root must TRAP, never hand back a fake result the guest could observe
+//! and keep running past.
 
 const weft = @import("weft");
 

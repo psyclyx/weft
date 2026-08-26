@@ -1,5 +1,5 @@
 //! InProcClient — the in-process transport's client identity (W0b,
-//! doc/north-star-plan.md §2.5/§2.7): the native counterpart to
+//! doc/extensibility-native-surface.md): the native counterpart to
 //! `wasm_abi/WasmPlugin.zig`'s identity fields, minus the wasm instance and
 //! the guest-marshalling handle tables (ranges/query_caps/pick items/...) —
 //! an in-process client holds real Zig pointers/slices directly, so it never
@@ -47,7 +47,7 @@
 //!   anchored range from `wl_anchor_range` — would still need a table if an
 //!   in-process client wants to call THAT specific import; none of the
 //!   split imports today do, so this is deferred, not solved — see
-//!   doc/north-star-plan.md's W0b report for the honest coverage note.)
+//!   doc/cwa-prior-docs-audit.md §5 for the honest coverage note.)
 //! - No `author_override`/agent sub-peer machinery — an in-process client
 //!   that wants a distinct edit identity sets `Principal` directly (already
 //!   general enough, see `command.Principal`/`authority.zig`); it doesn't
@@ -82,7 +82,7 @@ pub const InProcClient = struct {
     /// Declared grants — see this file's module doc, "no real capture-time
     /// GRANT machinery" above.
     perms: [perm_count]bool = @splat(false),
-    /// north-star-plan §6 W4 slice 1 — mirrors `WasmPlugin.grant_table`
+    /// doc/contextual-workspace-architecture.md §13.5 — mirrors `WasmPlugin.grant_table`
     /// exactly (see that field's doc). `null` for every client today (the
     /// two first-party clients this module's doc names self-grant `perms`
     /// directly and are never routed through a `System`'s table) — kept

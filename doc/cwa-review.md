@@ -7,8 +7,8 @@ catalog and latency commitments, the sentence-level dispositions, thinned
 Phase 1, new gates, and the §20 rewrite). The companions are written: `substrate.md`
 (normative re-homing of the d1/d3/w7/sessions decisions) and
 `configuration.md` (the config model; naming grammar and bind arity decided
-there). Still owed: only the 232 dangling source citations, fixed as phases
-touch each module. The pre-revision draft is preserved as
+there). The dangling source citations have since been swept (see
+"Post-review corrections"). The pre-revision draft is preserved as
 `contextual-workspace-architecture.orig.md`. Subject:
 `doc/contextual-workspace-architecture.md` (2026-08-25 draft). How produced: three independent code-verification passes over
 the working tree, an absorption audit of the nine deleted design docs (full
@@ -397,3 +397,28 @@ phase. Unify the two roadmap clocks.
    docs for config (see `cwa-config-decisions.md` — written alongside, the
    sidebar is its acceptance test), input/dispatch (total order, postures,
    interaction routing), and substrate.
+
+## Post-review corrections (2026-08-26)
+
+Four claims above describe a tree that has since moved on; recorded here rather
+than edited in place, so the review stays a record of what it saw.
+
+1. **The dispatch-latency instrument already existed.** `src/e2e/latency_test.zig`
+   times `dispatchSpec` across representative categories and compares against a
+   committed baseline (`src/e2e/latency_baseline.zon`, landed in `a277cb2`).
+   Phase 1's item 4 is therefore a re-point, not a build.
+2. **`schema.zig` already had `variant`.** The D2 amendment asking for a variant
+   constructor was already satisfied: `Schema.variant` is a bounded tagged union
+   with `VariantValue` payloads and encode/decode support.
+3. **`cAgentWrite` was already authorized.** The JS plane's `qjs_file_write`
+   routes through `command.renderInto`, whose grade gate caps `.agent`/`.plugin`
+   at the doc's own grant and refuses `Unauthorized`. The ungated-effect finding
+   stands for `cProcSpawn`/`cFileRead`, not for buffer mutation.
+4. **The premise audit describes the pre-wave tree.** Waves 1 and 2 have landed
+   since this review was written; findings that read as open should be checked
+   against the current tree before being scheduled.
+5. **The dangling source citations are swept.** All 232 comment references to
+   the nine deleted docs now point at their current owner (`substrate.md`,
+   `configuration.md`, `contextual-workspace-architecture.md`,
+   `extensibility-native-surface.md`, or `cwa-prior-docs-audit.md` where only
+   the historical record holds the decision).

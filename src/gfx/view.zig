@@ -36,9 +36,9 @@ pub const popup = @import("view/popup.zig");
 pub const semantic = @import("view/semantic.zig");
 pub const semantic_data = @import("view/semantic_data.zig");
 
-/// The UI mesh's `ui/statusline-seg` + `ui/gutter-segment` slots (north-star-
-/// plan §6 W3-1) — host-side providers + the fire/compose helpers
-/// `frame_builder.zig` drives each frame.
+/// The UI mesh's `ui/statusline-seg` + `ui/gutter-segment` slots
+/// (doc/contextual-workspace-architecture.md §11) — host-side providers
+/// + the fire/compose helpers `frame_builder.zig` drives each frame.
 pub const ui_mesh = @import("view/ui_mesh.zig");
 
 // ── Tests ──

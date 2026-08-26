@@ -1,5 +1,5 @@
 //! `transcript.zig` — the agent transcript: W5's REQUIRED first `graph.zig`
-//! client (doc/north-star-plan.md §2.6, §5 "W5 ordering — transcript
+//! client (doc/substrate.md "W5 ordering — transcript
 //! first, DECIDED"; review A7b: W6's check-in scenario needs a real graph
 //! document to attach to, not magit, which stays on the current
 //! tool-buffer machinery). A transcript is a sequence of role-tagged
@@ -223,7 +223,7 @@ pub const node_fact = "node";
 /// carrying fact `node_fact` = the entry's portable `NodeRef` token.
 /// `subs.at(doc, some_offset)` then answers "which graph node produced
 /// the byte under the caret" without any position-based guessing (exactly
-/// the id-span mechanism `subbuffer.zig`/`doc/editable-projection.md`
+/// the id-span mechanism `subbuffer.zig`/doc/contextual-workspace-architecture.md §11.8
 /// already use for dired's rows).
 ///
 /// The claimed span covers the BODY ONLY — `"role: "` is decoration, not
@@ -303,7 +303,7 @@ pub fn lastRowClaim(subs: *const subbuffer.SubBuffers, doc: *const Document) ?*s
 }
 
 /// The model→buffer PUSH trigger for a REMOTE change (W6 check-in,
-/// north-star-plan.md §6 W6/W5's "the model replicates over a session"
+/// doc/substrate.md, "the model replicates over a session"
 /// gate). `fill` above is deliberately PULL — it recomputes from the model
 /// whenever called, on no particular schedule. A LOCAL producer already
 /// knows it just changed something, so it needs no help from this
@@ -340,7 +340,7 @@ pub fn refillOnChange(gpa: Allocator, tr: *const TranscriptDoc, doc: *Document, 
 // the premature abstraction this plan refuses. What's built here is the
 // concrete `on_save` INSTANCE for transcript, now that a second real
 // on_save-shaped mechanism exists to check the shape against — dired's
-// (`doc/editable-projection.md`, wired through the `save` ACTION scoped
+// (doc/contextual-workspace-architecture.md §11.8, wired through the `save` ACTION scoped
 // to tool identity, `action.zig`'s `When{.tool=...}`). Transcript reuses
 // that SAME mechanism (a tool-scoped `save` provider — see `install`
 // below), not a parallel one: the two diverge only in what "reconcile"
@@ -418,9 +418,10 @@ pub const SaveReport = struct {
     /// discarded and counted here, never guessed at and never allowed to
     /// block every OTHER row's legitimate edit from landing. A caller
     /// that wants to surface this to the user (dired's pending-changes
-    /// confirm popup is the general affordance `doc/editable-projection.
-    /// md` names — not built for transcript this slice, see `install`'s
-    /// doc comment) reads this count; it is never silently dropped.
+    /// confirm popup is the general affordance
+    /// `doc/contextual-workspace-architecture.md` §11.8 names — not
+    /// built for transcript this slice, see `install`'s doc comment)
+    /// reads this count; it is never silently dropped.
     stale: usize = 0,
 };
 
@@ -458,7 +459,7 @@ pub const SaveReport = struct {
 /// refuses the whole save as a structural edit. Loud, never a silent
 /// drop, but it means this reconcile handles only edits strictly interior
 /// to an existing body. The limit dissolves when the transcript moves to
-/// `live (text)` (d1-live-reconcile.md §2.2's seam note) and per-edit
+/// `live (text)` (doc/substrate.md §3's seam note) and per-edit
 /// translation replaces save-time diffing; until then any real save UI
 /// wired to this must surface the refusal, not swallow it.
 pub fn reconcileOnSave(gpa: Allocator, tr: *TranscriptDoc, doc: *Document, subs: *const subbuffer.SubBuffers) ReconcileError!SaveReport {
@@ -557,7 +558,7 @@ fn cTranscriptSave(ctx: *command.Context, data: ?*anyopaque, args: []const comma
     const ed = ctx.textEditor() catch return .nil;
     const report = reconcileOnSave(gpa, bind.tr, &ed.doc, bind.subs) catch |err| {
         // Loud, never silent — the general pending-changes CONFIRM popup
-        // `doc/editable-projection.md` step 4 envisions is dired's UI
+        // doc/contextual-workspace-architecture.md §11.8 step 4 envisions is dired's UI
         // surface to build, not duplicated here; the honest floor for
         // this slice is an echoed refusal reason on the one channel every
         // command already reports through.

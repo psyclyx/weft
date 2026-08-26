@@ -66,7 +66,7 @@ pub const Context = struct {
     quit: *bool,
     /// The interaction state of the head DISPATCHING this call — current
     /// mode, pending chord, pick session, echo line, dot-repeat register
-    /// (north-star-plan §2.7/§4 C14/§6 W2a). The SINGLE way core code reaches
+    /// (doc/contextual-workspace-architecture.md §7). The SINGLE way core code reaches
     /// interaction state; two heads on one system get two `Head`s (a second
     /// `Context` differing only in `.head`), so there is no shared mode/
     /// pick/echo/dot-repeat left to collide on — proven live by the e2e
@@ -85,7 +85,7 @@ pub const Context = struct {
     /// streaming), whose edits stay their own peer — the per-principal
     /// selective-undo property we keep for collaborators and agents.
     user_initiated: bool = false,
-    /// The System's grant table (north-star-plan §2.4/§6 W4 slice 1) —
+    /// The System's grant table (doc/contextual-workspace-architecture.md §13.5) —
     /// `null` everywhere this isn't wired (every headless test fixture, and
     /// production until a caller opts in), in which case `Ctx.capture`
     /// resolves an empty grant list and the wasm/in-process membrane's
@@ -118,7 +118,7 @@ pub const Context = struct {
         return self.buffers.active();
     }
 
-    /// Reach the captured `Ctx` value (north-star-plan §2.1/§6 W2b) — the
+    /// Reach the captured `Ctx` value (doc/cwa-prior-docs-audit.md §5) — the
     /// door this struct GAINS to the scope/principal/locus/grant snapshot,
     /// without `Context` itself becoming that value. `Context` stays the
     /// PLUMBING struct (long-lived pointers into the system's live state);
@@ -132,7 +132,7 @@ pub const Context = struct {
     /// Snapshot the ambient facts an action's `when` predicate resolves
     /// against, narrowed to the `Actions.Ctx` (mode/lang/tool) view — the
     /// F5-adapter vocabulary `Actions.resolve` still takes. **Not the
-    /// dispatch path anymore** (north-star-plan §5 F5/§6 W3): `actionTrampoline`
+    /// dispatch path anymore** (doc/cwa-prior-docs-audit.md §5): `actionTrampoline`
     /// below now calls `ctx.actions.container.resolveOne` directly against
     /// the FULL `capturedCtx().mergedFacts()`, so the hot path no longer
     /// narrows-then-rebuilds a `Facts` through this type. What's left of this
@@ -195,7 +195,7 @@ pub const Context = struct {
         };
     }
 
-    /// `checkDocRegion`'s answer (north-star-plan §2.4/§6 W4 slice 3, review
+    /// `checkDocRegion`'s answer (doc/contextual-workspace-architecture.md §13.5, review
     /// B2's repair) — see `grants.DocRegion`'s doc for the full policy this
     /// implements (side semantics, collapse conditions).
     pub const DocRegionVerdict = union(enum) {
@@ -429,7 +429,7 @@ fn noteRenderRefusal(name: []const u8, why: []const u8) void {
     status_feed.set(text);
 }
 
-/// [FIX 2] (doc/extensibility.md, release-blocking): apply a capability
+/// [FIX 2] (doc/extensibility-native-surface.md, release-blocking): apply a capability
 /// `.edits`-shaped `Result` (the format/rename/code-action `action` shape —
 /// `capability.Kind.format`/`.rename`, `Payload.edits`) through the SAME
 /// content-production gate `renderInto` already provides — grade-capped, one
@@ -560,7 +560,7 @@ pub fn run(commands: *const Commands, ctx: *Context, name: []const u8, args: []c
 /// synchronous trampoline resolves nothing (its providers answer over time
 /// through `Caps`); it's a no-op here by design, surfaced as such.
 ///
-/// **F5/W3, the resolve-path fold (north-star-plan §5 F5/§6 W3).** This is
+/// **F5/W3, the resolve-path fold (doc/cwa-prior-docs-audit.md §5).** This is
 /// now a bare `container.Container.resolveOne` call against the captured
 /// `Ctx`'s FULL merged facts — not `Actions.resolve`/`Context.actionCtx`'s
 /// narrowed mode/lang/tool round trip (snapshot the full `Facts`, throw away
@@ -923,10 +923,10 @@ test "command: read-only refuses interactive edit, allows render (in depth)" {
 }
 
 // ── W4 slice 3: doc_region grants + action-result clamping ─────────────
-// (north-star-plan §2.4/§6 W4, review B2's repair; doc/extensibility.md
-// [FIX 2]). Shared fixture: a real Buffers/Document-backed Context with a
-// wired grant_table — mirrors the tests above, factored out because this
-// section needs it five times.
+// (doc/contextual-workspace-architecture.md §13.5, review B2's repair;
+// doc/extensibility-native-surface.md [FIX 2]). Shared fixture: a real
+// Buffers/Document-backed Context with a wired grant_table — mirrors the
+// tests above, factored out because this section needs it five times.
 
 const DocRegionEnv = struct {
     gpa: Allocator,

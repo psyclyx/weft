@@ -2,7 +2,7 @@
 //! a trampoline that dispatches back into its on_command export; runs commands by
 //! name (with int/str args); and introspects the registry (count/name/summary).
 //!
-//! HEAD ADDRESSING (north-star-plan §2.1/§2.7, W2a follow-up): a guest-backed
+//! HEAD ADDRESSING (doc/cwa-prior-docs-audit.md §5): a guest-backed
 //! command dispatched "as" head B must see head B's interaction state (mode/
 //! pending/pick/echo/dot-repeat), not whichever head happened to load the
 //! plugin. Every `wasm_host/*` handler reaches state through `p.activeCtx()`

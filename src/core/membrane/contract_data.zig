@@ -7,7 +7,7 @@
 //! directly by src/guest/weft.zig (the guest-side comptime tripwire) as well
 //! as by core/membrane/contract.zig (the host-side handler binding).
 //!
-//! Split from contract.zig (doc/north-star-plan.md §2.5, task W0a-D): the
+//! Split from contract.zig (doc/extensibility-native-surface.md, task W0a-D): the
 //! ORIGINAL table interleaved this data with `HostFn` handler pointers,
 //! which drags in wasmtime (`wasm.zig`) and the whole `wasm_host/*` tree —
 //! neither of which links for a wasm32 guest. contract.zig now zips this
@@ -390,7 +390,7 @@ pub const imports = [_]Entry{
 /// this table exists to kill).
 const expected_import_count = 179;
 
-/// A host→guest EXPORT entrypoint (design doc/north-star-plan.md §2.5, task
+/// A host→guest EXPORT entrypoint (design doc/extensibility-native-surface.md, task
 /// W0a-D extension 2): every `instance.callVoid("name", args)` the host
 /// tree fires INTO a loaded guest, named once here instead of as a bare
 /// string literal at each call site. `required = true` means the guest is

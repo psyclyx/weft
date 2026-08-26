@@ -1,4 +1,5 @@
-// config/agent-ux.js — a minimal SECOND system (north-star-plan §6 W2b gate).
+// config/agent-ux.js — a minimal SECOND system
+// (doc/contextual-workspace-architecture.md §7 gate).
 //
 // This is NOT loaded by config.js's weft.plugin/weft.use chain — it is a
 // standalone manifest, evaluated into its OWN `core.System` exactly the way

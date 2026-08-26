@@ -1,9 +1,9 @@
-//! The kernel event loop (north-star-plan §6 W2a-3, re-diagnosed at §4 C16):
-//! registered SOURCES — each an fd (POLLIN/POLLOUT readiness) or a deadline
-//! TIMER — and one `poll()`-based wait per `step` that sleeps until the
-//! nearest due timer or fd readiness. No fixed-cadence sleep, no
-//! zero-timeout spin unless a source's due time genuinely IS now (a pending
-//! present retry, say).
+//! The kernel event loop (doc/contextual-workspace-architecture.md §7,
+//! re-diagnosed at §4 C16): registered SOURCES — each an fd (POLLIN/POLLOUT
+//! readiness) or a deadline TIMER — and one `poll()`-based wait per `step`
+//! that sleeps until the nearest due timer or fd readiness. No
+//! fixed-cadence sleep, no zero-timeout spin unless a source's due time
+//! genuinely IS now (a pending present retry, say).
 //!
 //! Dependency-free by design (`std.posix`/`std.os.linux` only, plus an
 //! injected clock) so it knows nothing about wayland, vulkan, or collab —
@@ -91,7 +91,7 @@ pub const Scheduler = struct {
     next_id: u32 = 1,
     running: bool = true,
     /// Bumped once per completed `step` — the idle-wakeup instrument
-    /// (north-star-plan §6 W2a-3's gate) reads this instead of counting
+    /// (doc/contextual-workspace-architecture.md §7's gate) reads this instead of counting
     /// frames, so it measures the scheduler's own wake rate directly.
     steps: u64 = 0,
 
@@ -297,7 +297,7 @@ pub const Scheduler = struct {
     /// `step` forever, running `onWake` once after each step that fired —
     /// the shape main()'s loop and headless's loop both reduce to (window
     /// sources for main; collab/pool sources and no window/present sources
-    /// for headless — north-star-plan §6 W2a-3 item 5's unification).
+    /// for headless — doc/contextual-workspace-architecture.md §7).
     pub fn run(self: *Scheduler, ctx: ?*anyopaque, onWake: *const fn (ctx: ?*anyopaque) anyerror!void) !void {
         while (self.running) {
             _ = try self.step();

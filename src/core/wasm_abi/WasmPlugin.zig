@@ -191,7 +191,7 @@ declared: std.ArrayList([]u8) = .empty,
 /// Capability names the guest declared during `describe()` (owned).
 declared_caps: std.ArrayList([]u8) = .empty,
 perms: [perm_count]bool = @splat(false),
-/// north-star-plan §6 W4 slice 1 — the grant table this plugin's possessed
+/// doc/contextual-workspace-architecture.md §13.5 — the grant table this plugin's possessed
 /// handles (`grant_handles`, below) are checked against. `null` (the default
 /// every pre-W4 construction gets) means "no table wired": `hasPerm` then
 /// falls back to reading `perms` directly, exactly as before this slice —

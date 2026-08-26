@@ -398,7 +398,7 @@ pub const RemoteFs = struct {
 /// right place for that defense is centrally in stemma, once, not
 /// duplicated at every caller. Removed rather than loosened.
 ///
-/// W7a mechanical change (w7-rebase.md §3.2's "serveBase's TextDoc-only
+/// W7a mechanical change (doc/substrate.md §2's "serveBase's TextDoc-only
 /// base_bytes read"): `TextDoc` had one whole-document `base_bytes`
 /// field; `ObjectDoc` compacts PER OBJECT (`text_bases`, keyed by the
 /// object's `ObjId`) — this now reads `doc.doc.text_bases.get(doc.body)`

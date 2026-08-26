@@ -1,6 +1,6 @@
 //! `SyncCore` — the doc-agnostic sync core shared by `Collab` (TextDoc) and
 //! `GraphCollab` (GraphDoc), lifted out after a review (stemma delta 5,
-//! doc/north-star-plan.md §2.6/§4 C19/§6 W5) found `GraphCollab` had
+//! doc/substrate.md) found `GraphCollab` had
 //! reimplemented seven blocks byte-identical to `Collab`: frontier
 //! tracking, announce-once, push-on-move, the batch/frontier WIRE FRAMING
 //! (encode + decode), batch decode + the view-peer admission gate, the

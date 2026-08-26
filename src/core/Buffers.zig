@@ -268,7 +268,7 @@ pub fn ensureNamed(self: *Buffers, gpa: Allocator, name: []const u8) Error!Id {
 /// when you opened a file from it. The mode a buffer shows is always
 /// determined by the buffer; WHICH head sees that mode is `head` — the saved
 /// mode itself stays a buffer property (system-scoped), only the active
-/// cursor being restored into is per-head (north-star-plan §6 W2a-1).
+/// cursor being restored into is per-head (doc/contextual-workspace-architecture.md §7).
 pub fn switchTo(self: *Buffers, gpa: Allocator, id: Id, head: *Head, keymap: *const Keymap) Error!void {
     const target = self.get(id) orelse return;
     if (id == self.active_id) return;

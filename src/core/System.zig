@@ -1,5 +1,5 @@
 //! System — the system-scoped state bundle a manifest applies INTO
-//! (north-star-plan §2.3/§2.7, W2b): the keymap TABLES, the buffer set, the
+//! (doc/configuration.md §5): the keymap TABLES, the buffer set, the
 //! command/action/capability surfaces, the config-value store, and a
 //! headless "default" `Head` background/direct-`command.run` dispatch
 //! targets. A `Host` (below) is the container-level registry: "the
@@ -114,7 +114,7 @@ commands: command.Commands = .empty,
 keymap: Keymap = .empty,
 /// The ONE `container.Container` this system's `caps`/`actions` bind into,
 /// and the target `gfx/view/ui_mesh.zig`'s `declareSlots`/
-/// `bindDefaultStatusline` are pointed at by an embedder (north-star-plan
+/// `bindDefaultStatusline` are pointed at by an embedder (doc/cwa-prior-docs-audit.md §5
 /// task #19, the shared-Container fold-in). Action names, `edit/*`
 /// capability names, and `ui/*` mesh names are one flat slot namespace —
 /// they already couldn't collide (see `container.zig`'s doc) — so folding
@@ -165,7 +165,7 @@ applied_manifest: ?*manifest.Manifest = null,
 /// change: reading a manifest's own `weft.plugin(...)` calls against
 /// `--plugin`-style resolution for a non-editor system).
 plugins: ?Plugins = null,
-/// The GRANT TABLE this system owns (north-star-plan §2.4/§6 W4 slice 1:
+/// The GRANT TABLE this system owns (doc/contextual-workspace-architecture.md §13.5:
 /// "the GRANT TABLE a System owns"). Wire `&self.grants` into a plugin
 /// load's `wasm_abi.LoadOptions.grant_table` to make its `describe()`-
 /// declared perms revocable rows instead of static booleans — see

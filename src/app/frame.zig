@@ -27,15 +27,16 @@ const window_cmds = @import("window_cmds.zig");
 /// so `on_menu(open/close)` fire exactly once per enter/leave at the frame
 /// boundary (never nested inside another guest call). `.{}` is the idle state.
 ///
-/// PER-HEAD (north-star-plan §6 W2a-2): a menu popup opening for head A must
-/// not suppress/idle-time head B's, so this struct's storage lives beside
-/// whichever `core.Head` it tracks (`app.Session.menu_overlay` for the app's
-/// one head today; a second head's own instance for a second). It can't live
-/// ON `core.Head` itself — `Head` is core and this type is app-layer (it
-/// notifies wasm plugins) — so `update` stays a pure-ish function of an
-/// explicit `*core.Head` (mirroring the Keymap-tables/Head-cursor split),
-/// and the CALLER is responsible for pairing the right overlay instance with
-/// the right head, exactly as it already pairs `head`/`keymap`/`plugins`.
+/// PER-HEAD (doc/contextual-workspace-architecture.md §7): a menu popup
+/// opening for head A must not suppress/idle-time head B's, so this struct's
+/// storage lives beside whichever `core.Head` it tracks
+/// (`app.Session.menu_overlay` for the app's one head today; a second head's
+/// own instance for a second). It can't live ON `core.Head` itself — `Head`
+/// is core and this type is app-layer (it notifies wasm plugins) — so
+/// `update` stays a pure-ish function of an explicit `*core.Head` (mirroring
+/// the Keymap-tables/Head-cursor split), and the CALLER is responsible for
+/// pairing the right overlay instance with the right head, exactly as it
+/// already pairs `head`/`keymap`/`plugins`.
 pub const MenuOverlay = struct {
     open: bool = false,
     shown: bool = false, // has on_menu(open) fired for the current menu?
@@ -91,7 +92,7 @@ pub const MenuOverlay = struct {
         // idle state outside any menu. The old `active and self.open and
         // !changed` was false whenever `active` was false REGARDLESS of
         // `self.open`, so this returned `dirty = true` on every single call
-        // while idle outside a menu (north-star-plan §6 W2a-3: found via
+        // while idle outside a menu (doc/contextual-workspace-architecture.md §7: found via
         // the idle-wakeup measurement — dirty-gated present is meaningless
         // if something marks dirty unconditionally every wake). `changed`
         // is already false whenever `self.open` is false (see its
@@ -142,7 +143,7 @@ pub const FrameCtx = struct {
     /// every reader here only ever fires `ui/*` slots on it.
     ui_mesh: *core.container.Container,
     /// This frame's (today, singular) head — current mode, pending chord,
-    /// pick session, echo line (north-star-plan §6 W2a-1).
+    /// pick session, echo line (doc/contextual-workspace-architecture.md §7).
     head: *core.Head,
     /// System-scoped semantic registries. Views and fields live with the
     /// system; only focus and interaction stacks live on the head above.
@@ -488,7 +489,7 @@ test "menu overlay: leaving the peeked mode ends the forced peek" {
 }
 
 test "menu overlay: idle outside any menu is a stable state — no dirty every call" {
-    // north-star-plan §6 W2a-3: this is the exact bug the idle-wakeup
+    // doc/contextual-workspace-architecture.md §7: this is the exact bug the idle-wakeup
     // measurement caught — `update` must report NOT dirty on a second
     // consecutive call with nothing changed, or dirty-gated present is
     // meaningless (every wake would rebuild regardless of real damage).

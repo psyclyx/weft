@@ -1,4 +1,4 @@
-//! The Container — ONE resolution engine (north-star-plan §2.2, W1). Named
+//! The Container — ONE resolution engine (doc/configuration.md §7). Named
 //! `container.zig` because `registry.zig` is taken by the late-binding NAME
 //! registry (command shadowing) — a different, smaller mechanism this module
 //! does not replace in W1 (that's a later fold-in). This module subsumes the
@@ -203,7 +203,7 @@ pub const Container = struct {
     /// backing storage. Callers must `unbindOwnerPrefix` before freeing the
     /// memory a binding borrows.
     bindings: std.ArrayList(Binding) = .empty,
-    /// TRUE EPOCH (north-star-plan task #19 item 2 — CONTAINER-WIDE, not
+    /// TRUE EPOCH (doc/cwa-prior-docs-audit.md §5 — CONTAINER-WIDE, not
     /// per-slot; see the body below): a monotonic counter bumped on every
     /// successful `declareSlot`/`bind`/
     /// `unbindOwnerPrefix`/`unbindOwnerExact` call — i.e. every mutation of
@@ -682,10 +682,10 @@ test "container: host-side client declares a new slot end-to-end (declare/bind/r
 }
 
 test "container: ui_provider — an erased host fn/ctx round-trips through bind/resolve, Container never dereferences it" {
-    // Proves the shape north-star-plan §6 W3 needs: Container stores the fn
-    // pointer + ctx opaquely (like caps_provider's id/seq) and the CALLER
-    // (an adapter, not Container) is the one who knows the concrete Args
-    // type and invokes `call`.
+    // Proves the shape doc/contextual-workspace-architecture.md §11
+    // needs: Container stores the fn pointer + ctx opaquely (like
+    // caps_provider's id/seq) and the CALLER (an adapter, not Container)
+    // is the one who knows the concrete Args type and invokes `call`.
     const gpa = t.allocator;
     var c = Container.init(gpa);
     defer c.deinit();

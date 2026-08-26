@@ -101,13 +101,14 @@ pub const Pool = struct {
     /// Futex word: bumped on every state change workers care about.
     wake: std.atomic.Value(u32) = .init(0),
     shutdown: std.atomic.Value(bool) = .init(false),
-    /// Optional scheduler wake-fd (north-star-plan §6 W2a-3): signaled once
-    /// after any task completes, so `core/scheduler.zig` learns "a pool
-    /// task finished" without polling every handle every wake. Coalesced by
-    /// construction (an eventfd counter, not a per-task message) — a burst
-    /// of completions between two scheduler steps collapses to one wake,
-    /// which is exactly right (the caller still has to poll every handle to
-    /// find out WHICH ones finished; this is only "go look").
+    /// Optional scheduler wake-fd (doc/contextual-workspace-architecture.md
+    /// §7): signaled once after any task completes, so `core/scheduler.zig`
+    /// learns "a pool task finished" without polling every handle every
+    /// wake. Coalesced by construction (an eventfd counter, not a per-task
+    /// message) — a burst of completions between two scheduler steps
+    /// collapses to one wake, which is exactly right (the caller still has
+    /// to poll every handle to find out WHICH ones finished; this is only
+    /// "go look").
     notify_fd: ?std.posix.fd_t = null,
 
     pub const Options = struct {

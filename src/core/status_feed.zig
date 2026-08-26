@@ -5,7 +5,7 @@
 //! set it without threading a new field through every Context construction site;
 //! the frame builder reads it into the `Hud` each frame. Empty = no chip.
 //!
-//! W2a-2 note (north-star-plan §6): this is a plugin→user BROADCAST (a
+//! W2a-2 note (doc/cwa-prior-docs-audit.md §5): this is a plugin→user BROADCAST (a
 //! system-scoped event — one plugin publishing "building…" means it for
 //! every head looking at this system), not per-head interaction state like
 //! `echo`/`pick`/dot-repeat — there is no per-head cursor into it here to

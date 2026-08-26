@@ -437,7 +437,7 @@ pub const Context = struct {
     /// Wait for the frame slot, acquire an image, and begin recording transfer
     /// work. Returns null when the
     /// swapchain needs recreation, OR when the previous frame's GPU work
-    /// hasn't finished yet (north-star-plan §6 W2a-3 / §2.7: "the kernel
+    /// hasn't finished yet (doc/contextual-workspace-architecture.md §7: "the kernel
     /// must never block on a GPU fence") — the FENCE is polled with a ZERO
     /// timeout, never awaited, so THAT wait can never stall the scheduler
     /// thread. A caller that gets `null` for this reason should retry on

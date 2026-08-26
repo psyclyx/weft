@@ -1,7 +1,7 @@
 //! `Session` — `main()`'s APP GLUE for the ONE hosted `core.System` the
-//! desktop binary runs today (north-star-plan task #19 item 1,
+//! desktop binary runs today (doc/cwa-prior-docs-audit.md §5,
 //! "Session-on-System"): the one `Head` this process drives (its
-//! mode/pending/pick/echo — section 6 W2a-1), the which-key menu-overlay
+//! mode/pending/pick/echo), the which-key menu-overlay
 //! tracker beside it, the capability-consumer UIs (completion, definition,
 //! symbols, hover), the caret config, and the self-referential `cmd_ctx`
 //! dozens of `main.zig`/`app/*.zig` call sites hold a pointer to.
@@ -77,7 +77,7 @@ pub const Session = struct {
     filesystem_system: *core.System,
     filesystem_owner: semantic.owner.Id,
     filesystem_relations: LocalDirectoryRelations,
-    // ── This process's one head (north-star-plan section 6 W2a-1) — APP
+    // ── This process's one head (doc/cwa-prior-docs-audit.md §5) — APP
     //    GLUE, not a System field: a head is a cursor INTO whichever system
     //    it's attached to, so it survives a swap unchanged (see
     //    `rebindSystem`).
@@ -86,7 +86,7 @@ pub const Session = struct {
     /// open_ns) — app-layer state that can't live ON `core.Head` (see
     /// `frame.MenuOverlay`'s doc), but is exactly as per-head as `head`
     /// itself; `Session` is the nearest thing to a "per-head bundle" the app
-    /// has today, so it lives here beside it (north-star-plan section 6
+    /// has today, so it lives here beside it (doc/cwa-prior-docs-audit.md §5
     /// W2a-2). A second head (the e2e two-head gate) pairs its own instance
     /// the same way, alongside its own ad hoc `Head`.
     menu_overlay: frame.MenuOverlay,
@@ -357,7 +357,7 @@ pub const Session = struct {
         );
     }
 
-    /// Delegating facade: the echo line lives on `head` now (north-star-plan
+    /// Delegating facade: the echo line lives on `head` now (doc/cwa-prior-docs-audit.md §5
     /// section 6 W2a-1 moved it out of `Session`'s own storage) — this is
     /// the one spot app-side code says `session.echo()` instead of reaching
     /// into `session.head.echo` directly.

@@ -130,7 +130,7 @@ pub fn writeRopeGuarded(
     defer gpa.free(bytes);
 
     // Test: the disk still matches the state the caller merged with.
-    // (Check-then-rename — vim's own race window; see sessions-design.)
+    // (Check-then-rename — vim's own race window; see doc/substrate.md §2.)
     if (expected) |token| {
         const disk = readAlloc(gpa, path) catch |e| switch (e) {
             error.FileNotFound => return error.Stale, // deleted under us

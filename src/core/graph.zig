@@ -1,5 +1,5 @@
 //! `graph.zig` — the weft-side facade over stemma's `ObjectDoc`: the graph
-//! substrate named in doc/north-star-plan.md §2.6 ("the graph substrate,
+//! substrate named in doc/substrate.md ("the graph substrate,
 //! projections, and the path to the inversion"). `GraphDoc` mirrors
 //! `Document.zig`'s shape for the pieces that generalize across BOTH
 //! substrates — one owning agent, one replica, `version`/`eventsSince`/
@@ -39,7 +39,7 @@
 //!
 //! ## F3 — why `seq*` exists and `list*` doesn't
 //!
-//! F3 (north-star-plan.md §5, VALIDATED) picks parent-register +
+//! F3 (doc/cwa-prior-docs-audit.md §5) picks parent-register +
 //! fractional-order-keys for STRUCTURAL children (a file tree, a staging
 //! set) — anything that can be identity-preservingly MOVED between
 //! parents — and reserves ObjectDoc's built-in list op for LEAF SEQUENCES
@@ -66,7 +66,7 @@
 //! that reasoning stated against the actual model, not just in the
 //! abstract.
 //!
-//! ## The struct forest — exposed (W7b, doc/w7-rebase.md §4)
+//! ## The struct forest — exposed (W7b, doc/substrate.md §1)
 //!
 //! The paragraph above was true at W5/W6 slice time — stemma's F3
 //! parent-register mechanism lived only in the test-only
@@ -76,7 +76,7 @@
 //! `structMove`/`structDelete`/`structParent`/`structChildren`/
 //! `structCycleBroken` (delta 6) — and W7b's flagship (a function-level
 //! subtree grant that survives a peer's MOVE of the function,
-//! w7-rebase.md §2.2 point 1: "an anchor-pair CANNOT [survive a move];
+//! doc/substrate.md §1 point 1: "an anchor-pair CANNOT [survive a move];
 //! ... only real on the graph substrate") needs exactly this. So it is
 //! exposed below, straight through, as its own accessor group.
 //!
@@ -117,7 +117,7 @@
 //! type. What DID change (W5 slice 3): `on_save` itself — one arm of that
 //! sketched union — is now a real, concrete MECHANISM with two
 //! independent instances proving its shape instead of one: dired's
-//! (guest/wasm, `doc/editable-projection.md`, ordered rename/move/delete/
+//! (guest/wasm, doc/contextual-workspace-architecture.md §11.8, ordered rename/move/delete/
 //! create file ops inferred from a path snapshot) and `transcript.zig`'s
 //! (host/in-process, `reconcileOnSave`, a per-row text-CRDT diff
 //! reconciled BY NODEREF — no snapshot needed, since each row's own
@@ -132,7 +132,7 @@
 //! edit refusal/re-target rules; this file just anchors where the second
 //! real case lives, since a THIRD client is what would finally justify
 //! promoting `ReconcileMode` to an actual generic type here. `live`
-//! remains exactly as undesigned as before (D1, north-star-plan.md §7.1);
+//! remains exactly as undesigned as before (D1, doc/cwa-prior-docs-audit.md §5);
 //! `authoritative` remains unneeded by anything built.
 
 const std = @import("std");
@@ -275,7 +275,7 @@ pub fn structCreate(self: *GraphDoc, gpa: Allocator, parent: StructRef, order_ke
 /// Identity-preserving move: `node` keeps its `ObjId` — hence keeps any
 /// grant keyed on it (`grants.GraphSubtree`) — while its EFFECTIVE parent
 /// register changes. This is precisely the capability an `EventAnchor`
-/// PAIR cannot express (w7-rebase.md §2.2: a cut+paste relocate mints new
+/// PAIR cannot express (doc/substrate.md §1: a cut+paste relocate mints new
 /// insertion identity and collapses an anchor-pair grant; a struct node's
 /// identity is untouched by a move because nothing about the node's OWN
 /// fields/text changed, only its placement in the forest).
@@ -335,7 +335,7 @@ pub const orderKeyBetween = ObjectDoc.orderKeyBetween;
 // ── Per-object identity anchors (delta 3, already shipped) — exposed here
 // for a struct node's OWN body text object: "does this position inside a
 // granted function's body still name the same CHARACTER after a
-// concurrent edit shifts it" (doc/w7-rebase.md §4 W7b's "identity
+// concurrent edit shifts it" (doc/substrate.md §1's "identity
 // persistence across an in-function edit" gate assertion; D1 §4's ledgered
 // "REQUIRED — delta 3", SHIPPED at this pin). Thin wrappers, same idiom as
 // everything above: raw local `ObjId` in, no boundary crossed. ──────────
@@ -418,25 +418,25 @@ pub fn merge(self: *GraphDoc, gpa: Allocator, bytes: []const u8) MergeError![]Ch
 ///
 /// ## Why this exists, and why it's shaped as a dry-run instead of a decode
 ///
-/// W6 slice 1's per-region admission (doc/d1-live-reconcile.md §5.2,
-/// §0 "admission is per-document and coarse") needs to know which `ObjId`s
-/// an INCOMING batch targets *before* deciding whether to merge it — a
-/// batch touching a region leased by another principal must never be
-/// merged at all (§6 test 5: "assert B's op is NOT merged" — not merged
-/// then reverted, not merged then compensated, never merged). `ObjectDoc`
-/// hands back exactly this mapping (`Change.obj`) from `merge` itself
-/// (ObjectDoc.zig:611-684), but only AFTER applying the batch — too late,
-/// and `ObjectDoc`'s batch decoder (`Decoder`, ObjectDoc.zig:1030) is a
-/// private implementation type, not a public pre-merge peek API. Two other
-/// options were weighed and rejected: merge-then-roll-back the REAL doc has
-/// no undo (events are permanent in `history`; a "rollback" that only
-/// reverted the materialized tree would still leave the events integrated,
-/// so a future `serialize`/`eventsSince` on this replica would silently
-/// forward the refused ops to a THIRD peer — exactly the silent divergence
-/// this mechanism exists to prevent). Admit-then-compensate (merge for
-/// real, then apply an undo op) fails test 5's letter directly ("NOT
-/// merged") and, worse, the compensating op is itself a new causal event
-/// that races with what a third replica sees.
+/// W6 slice 1's per-region admission (doc/substrate.md §4: "admission is
+/// per-document and coarse") needs to know which `ObjId`s an INCOMING batch
+/// targets *before* deciding whether to merge it — a batch touching a
+/// region leased by another principal must never be merged at all (§6 test
+/// 5: "assert B's op is NOT merged" — not merged then reverted, not merged
+/// then compensated, never merged). `ObjectDoc` hands back exactly this
+/// mapping (`Change.obj`) from `merge` itself (ObjectDoc.zig:611-684), but
+/// only AFTER applying the batch — too late, and `ObjectDoc`'s batch
+/// decoder (`Decoder`, ObjectDoc.zig:1030) is a private implementation
+/// type, not a public pre-merge peek API. Two other options were weighed
+/// and rejected: merge-then-roll-back the REAL doc has no undo (events are
+/// permanent in `history`; a "rollback" that only reverted the materialized
+/// tree would still leave the events integrated, so a future
+/// `serialize`/`eventsSince` on this replica would silently forward the
+/// refused ops to a THIRD peer — exactly the silent divergence this
+/// mechanism exists to prevent). Admit-then-compensate (merge for real,
+/// then apply an undo op) fails test 5's letter directly ("NOT merged")
+/// and, worse, the compensating op is itself a new causal event that races
+/// with what a third replica sees.
 ///
 /// So: merge the batch into a throwaway CLONE (`serialize` + `open` — both
 /// already public), read the clone's `Change` stream, mint portable tokens
@@ -579,7 +579,7 @@ pub fn touchedRegionsWithin(self: *const GraphDoc, gpa: Allocator, batch: []cons
     return out.toOwnedSlice(gpa);
 }
 
-/// ## MOVE-ADMISSION RULE, DECIDED (W7b, doc/w7-rebase.md §4) — REVISED
+/// ## MOVE-ADMISSION RULE, DECIDED (W7b, doc/substrate.md §1) — REVISED
 /// after review found the first version's reasoning self-contradictory
 /// (a `struct_create`/`struct_move` whose region is `node`, already known
 /// `within` the peer's granted union by the caller's node-containment
@@ -760,13 +760,13 @@ pub fn serialize(self: *const GraphDoc, gpa: Allocator) Allocator.Error![]u8 {
 }
 
 // ── Ancestry / reachability — the identity-anchored SUBTREE GRANT ────────
-// predicate (W6 slice 2, doc/north-star-plan.md §6 W6, §2.4's "on graph
-// docs, limits key on ObjId subtrees and are exact"; d1-live-reconcile.md
-// §5.2's "the same [per-region admission] machinery W6 needs for
-// identity-anchored subtree grants... used for mutual exclusion instead of
-// authority"; D1 §3/§4's "small facade addition: a reachability/trash
-// predicate ... buildable now"; W7b, doc/w7-rebase.md §4, taught this walk
-// the STRUCT FOREST — see "Containment semantics" below).
+// predicate (W6 slice 2, doc/substrate.md's "on graph docs, limits key on
+// ObjId subtrees and are exact"; doc/substrate.md §4's "the same
+// [per-region admission] machinery W6 needs for identity-anchored subtree
+// grants... used for mutual exclusion instead of authority"; D1 §3/§4's
+// "small facade addition: a reachability/trash predicate ... buildable
+// now"; W7b, doc/substrate.md §1, taught this walk the STRUCT FOREST — see
+// "Containment semantics" below).
 //
 // Two predicates, one walk:
 //   - `contains(root, target)` — is `target` within the subtree rooted at

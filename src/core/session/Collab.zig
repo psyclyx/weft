@@ -292,7 +292,7 @@ pub fn handleFrame(self: *Collab, frame: wire.Decoder.Decoded) !bool {
                     }
                 },
                 // Graph-doc-only (W6 slice 1's per-region lease,
-                // doc/d1-live-reconcile.md §5): a text doc has no regions
+                // doc/substrate.md §4): a text doc has no regions
                 // to refuse against, so nothing to fold here. Named
                 // explicitly rather than caught by an `else` so a THIRD
                 // `OpKind` addition still forces a decision at this site.

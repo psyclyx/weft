@@ -2,11 +2,11 @@
 //! peer**: the user, plugins, host agents, remote collaborators. Solo
 //! editing is the degenerate one-replica case.
 //!
-//! ## The substrate (W7a — doc/w7-rebase.md)
+//! ## The substrate (W7a — doc/substrate.md §2)
 //! `Document` is backed by `stemma.ObjectDoc`, the one graph doc-core,
 //! degenerated to its simplest shape: a root map holding exactly one key
 //! (`body_key`, below) whose value is a single text object — "text is a
-//! degenerate graph doc" (w7-rebase.md §2.3). Every text operation routes
+//! degenerate graph doc" (doc/substrate.md §1). Every text operation routes
 //! through that one object (`self.body`, an `ObjId` resolved once and
 //! cached — see its doc comment for why that caching is safe). This
 //! replaces the prior `stemma.TextDoc` backing; the public API below is
@@ -21,7 +21,7 @@
 //! (no await, no lock, no channel). Every other peer holds a literal
 //! shadow `stemma.ObjectDoc` replica of its own (heavier than the old
 //! `TextDoc` shadow — a whole graph doc per peer, not just a rope + one
-//! sequence's history — accepted per w7-rebase.md §3.2):
+//! sequence's history — accepted per doc/substrate.md §2):
 //!
 //! 1. `peerSnapshot` syncs the shadow to the main replica and hands out
 //!    an immutable rope snapshot + opaque version token — the version the
@@ -74,10 +74,10 @@ const ObjectDoc = stemma.ObjectDoc;
 const ObjId = ObjectDoc.ObjId;
 
 /// The document's one text object lives under this root-map key.
-/// `w7-rebase.md`'s brief named "body" (attributing it to a "transcript
+/// The retired W7a brief named "body" (attributing it to a "transcript
 /// precedent") or "text" as the two candidates; checked against the
 /// actual code rather than the brief's paraphrase (this project's own
-/// method, per w7-rebase.md's own header) — `transcript.zig`'s `Entry`
+/// method — doc/cwa-prior-docs-audit.md §9) — `transcript.zig`'s `Entry`
 /// (the one other place weft puts a single text object under a map key,
 /// `transcript.zig:163,186`) uses `"text"`, not `"body"` ("body" appears
 /// only as a local variable name in one `graph.zig` test, not a key
@@ -289,7 +289,7 @@ pub fn snapshot(self: *const Document, gpa: Allocator) Error!Snapshot {
 }
 
 /// Adapt an `ObjectDoc.merge` change stream to the flat `[]Edit` stream
-/// `TextDoc.merge` returned directly (w7-rebase.md's "Change→Edit
+/// `TextDoc.merge` returned directly (doc/substrate.md §2's "Change→Edit
 /// adaptation"). `Document` is a one-text-node doc, so the only change
 /// any well-formed batch from another `Document`-shaped peer ever
 /// produces is `.text{obj: body, edit}` — `ObjectDoc.appendTextChange`

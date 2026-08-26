@@ -424,7 +424,7 @@ pub const Caller = struct {
     caller: *c.wasmtime_caller_t,
     /// Set by `trap()` to abort the current host call with a real wasm trap
     /// instead of returning normally. This is the membrane's ONLY path for a
-    /// denied effect (design doc/architecture.md §2.4, review C9): the
+    /// denied effect (doc/contextual-workspace-architecture.md §13.5, review C9): the
     /// trampoline checks this after the callback returns and, if set, raises
     /// a `wasm_trap_t` instead of handing results back — the guest observes
     /// no return value, never a fake success. Points into `trap_buf`.
@@ -629,7 +629,7 @@ test "wasm: a host callback that calls Caller.trap aborts the guest's call with 
     // guest's `run` never completes, and the host sees `error.Trap`, not a
     // return value built from whatever `results` happened to hold (this is
     // the mechanism `wasm_host/plugin.zig`'s `requirePerm` rides for
-    // trap-on-deny, doc/north-star-plan.md §2.4 review C9).
+    // trap-on-deny, doc/contextual-workspace-architecture.md §13.5).
     try t.expectError(error.Trap, instance.callI32("run", &.{5}));
     // Task #8: this trap is HOST-raised (`hostDeny` calls `caller.trap`),
     // so it comes back through `checkErr` (this file's module doc's channel

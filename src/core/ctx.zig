@@ -1,4 +1,4 @@
-//! Ctx — the captured interaction value (north-star-plan §2.1, W2b). A
+//! Ctx — the captured interaction value (doc/cwa-prior-docs-audit.md §5). A
 //! `Ctx` is a snapshot taken at dispatch entry: the live scope stack
 //! (workspace → system → head → buffer → subbuffer → mode → transient,
 //! F4's seven kinds — `pane` is a FACT on the head scope, `principal` is
@@ -20,7 +20,7 @@
 //!
 //! **The POLICY door, not the mechanism.** `Head.setModeRaw`/
 //! `Head.enterModeRaw` stay the mechanism (unchanged, still the thing that
-//! actually mutates `Head.mode`) — see north-star-plan §5 "Mode changes —
+//! actually mutates `Head.mode`) — see doc/cwa-prior-docs-audit.md §5 "Mode changes —
 //! REVISED": the user's call was that the imperative call STAYS, what
 //! changes is where it lives. `Ctx.setMode`/`Ctx.enterMode` are the ONLY
 //! door core/host/guest-membrane code should call it through going
@@ -127,7 +127,7 @@ pub const Principal = authority.Principal;
 pub const Locus = locus_mod.Locus;
 pub const CapHandle = grants_mod.CapHandle;
 
-/// The seven scope kinds (north-star-plan F4, DECIDED): "The seven scope
+/// The seven scope kinds (doc/cwa-prior-docs-audit.md §5, DECIDED): "The seven scope
 /// kinds; `pane` is a fact on head scopes; `principal` is identity, never a
 /// scope axis." Order matters for `mergedFacts`: outermost first, innermost
 /// (later) shadows — §2.1's "facts merge across ALL live scopes ... buffer/
@@ -193,10 +193,10 @@ pub const ScopeList = struct {
     }
 };
 
-/// Fixed capacity for one capture's resolved-grant list (north-star-plan
-/// §2.4/§6 W4 slice 1). Generous, not derived from anything load-bearing
-/// today (the only production population is plugin-lifetime — a handful of
-/// perms per plugin, §6 W4's honest-v1 note) — sized so a future
+/// Fixed capacity for one capture's resolved-grant list
+/// (doc/contextual-workspace-architecture.md §13.5). Generous, not derived
+/// from anything load-bearing today (the only production population is
+/// plugin-lifetime — a handful of perms per plugin) — sized so a future
 /// predicate-scoped decl or two doesn't need a resize, same "belt-and-
 /// suspenders, log loudly, never allocate" policy `ScopeList.append` uses.
 pub const max_grants = 16;

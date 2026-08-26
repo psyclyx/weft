@@ -5,10 +5,11 @@
 //! only the *mutable* tree region.Tree can't hold: which buffer a leaf
 //! shows and its scroll.
 //!
-//! FOCUS is deliberately NOT part of `Layout`'s own storage (north-star-plan
-//! §6 W2a-2): the split TREE is session-scoped, shared by every head looking
-//! at it, but which leaf a given head considers focused is per-head — two
-//! heads over the same layout can focus different panes.
+//! FOCUS is deliberately NOT part of `Layout`'s own storage
+//! (doc/contextual-workspace-architecture.md §7): the split TREE is
+//! session-scoped, shared by every head looking at it, but which leaf a
+//! given head considers focused is per-head — two heads over the same
+//! layout can focus different panes.
 //!
 //! Structure invariant: a focus value is always a `.leaf` node that lives in
 //! `root`'s tree. Operations mutate nodes IN PLACE (splitFocused turns a leaf
@@ -38,8 +39,9 @@
 //! panes (`app.FrameBuilder` builds one `Layout` and reads one head's focus
 //! into it each frame — see its module doc) — a second rendered head is a
 //! bigger, later change (a second `FrameBuilder`/window/swapchain). What's
-//! true today, and proven by the two-head e2e gate (north-star-plan §6 W2a
-//! GATE, `e2e/two_head_test.zig`): two heads can each hold an independent,
+//! true today, and proven by the two-head e2e gate
+//! (doc/contextual-workspace-architecture.md §7 GATE,
+//! `e2e/two_head_test.zig`): two heads can each hold an independent,
 //! generation-checked handle into one shared tree; window commands
 //! (split/close/focus/move) dispatched "as" one head never move the other's
 //! focus; and when an ACTING head's structural op (a close) invalidates a

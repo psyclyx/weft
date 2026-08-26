@@ -1,4 +1,4 @@
-//! grants — the GRANT TABLE (north-star-plan §2.4, §6 W4 slice 1: "the
+//! grants — the GRANT TABLE (doc/contextual-workspace-architecture.md §13.5: "the
 //! capture-time grant powerbox"). Read the plan section in full before
 //! touching this file; this comment is the compressed version.
 //!
@@ -106,7 +106,7 @@
 //! `grant()`; a future runtime-side verb (a command a loaded plugin/keybind
 //! invokes against a live buffer) is what would populate this in production.
 //!
-//! **`Limit.graph_subtree` (W6 slice 2, north-star-plan §6 W6)**: the
+//! **`Limit.graph_subtree` (W6 slice 2, doc/substrate.md)**: the
 //! graph-doc analog of `.doc_region` — see `GraphSubtree`'s doc for the
 //! shape, collapse policy, and the union-of-grants confinement decision.
 //! ENFORCEMENT lives at `session/GraphCollab.zig`'s `admitRegions` (that
@@ -143,7 +143,7 @@ pub const Predicate = facts_mod.Predicate;
 pub const EventAnchor = Document.EventAnchor;
 pub const AnchorSide = Document.AnchorSide;
 
-/// A `.doc_region` limit (north-star-plan §2.4/§6 W4 slice 3, review B2's
+/// A `.doc_region` limit (doc/contextual-workspace-architecture.md §13.5, review B2's
 /// repair): "text-region limits are identity-anchored, not
 /// position-anchored." `doc_id` names the target document — a grant table is
 /// System-scoped (many buffers share it), so a region limit must say WHICH
@@ -221,9 +221,9 @@ pub const DocRegion = struct {
     end: EventAnchor,
 };
 
-/// The graph-doc analog of `DocRegion` (W6 slice 2, north-star-plan §6 W6):
+/// The graph-doc analog of `DocRegion` (W6 slice 2, doc/substrate.md):
 /// identity-anchored, not position-anchored, EXACTLY like the text form —
-/// §2.4's "on graph docs, limits key on `ObjId` subtrees and are exact."
+/// doc/substrate.md §5's "on graph docs, limits key on `ObjId` subtrees and are exact."
 /// `root` is a portable `graph.zig#GraphDoc.NodeRef`, never a raw `ObjId`
 /// (see that type's own doc comment for why a doc-local handle can't be
 /// stored in a row meant to outlive one merge). `doc_id` mirrors
@@ -259,13 +259,14 @@ pub const GraphSubtree = struct {
     root: graph.NodeRef,
 };
 
-/// A limit narrowing a grant (north-star-plan §2.4). `.none` = unrestricted
-/// within the capability; `.fs_root` = confined to a subtree; `.doc_region` =
-/// confined to an identity-anchored text span (`DocRegion`'s doc — §6 W4
-/// slice 3, review B2's repair); `.graph_subtree` = confined to an
-/// identity-anchored graph subtree (`GraphSubtree`'s doc — §6 W6). A tagged
-/// union, not a bare string, so a future limit kind (a net host) is a new
-/// variant, never a stringly-typed convention.
+/// A limit narrowing a grant (doc/contextual-workspace-architecture.md
+/// §13.5). `.none` = unrestricted within the capability; `.fs_root` =
+/// confined to a subtree; `.doc_region` = confined to an identity-anchored
+/// text span (`DocRegion`'s doc — §6 W4 slice 3, review B2's repair);
+/// `.graph_subtree` = confined to an identity-anchored graph subtree
+/// (`GraphSubtree`'s doc — §6 W6). A tagged union, not a bare string, so a
+/// future limit kind (a net host) is a new variant, never a stringly-typed
+/// convention.
 pub const Limit = union(enum) {
     none,
     fs_root: []const u8,
@@ -434,7 +435,7 @@ pub const HandleTable = struct {
         return self.rows.items[h.idx].limit;
     }
 
-    /// The composition rule's read side (north-star-plan §2.4/§6 W4 slice 4:
+    /// The composition rule's read side (doc/contextual-workspace-architecture.md §13.5:
     /// "a config-authored `weft.grant` NARROWS/REPLACES the describe()-boolean
     /// baseline for that exact (principal, capability) pair"). Returns the
     /// first LIVE row's handle for `(principal, capability)`, or `null` if

@@ -473,13 +473,13 @@ fn providerLabel(p: container_mod.ProviderRef) []const u8 {
     };
 }
 
-/// `explain-binding <slot>` — the Container's `explain` (north-star-plan
-/// §2.2/§6 W1) wired to a REAL consumer, not a debug printf: echoes which
-/// bindings on an ACTION slot are eligible for the active buffer's facts and
-/// why the winner won. The facts mirror `Context.actionCtx` (same
-/// mode/lang/tool) plus the buffer's path/name, so `explain-binding eval`
-/// answers exactly the question `Actions.resolve("eval", ...)` would have
-/// asked.
+/// `explain-binding <slot>` — the Container's `explain`
+/// (doc/configuration.md §7) wired to a REAL consumer, not a debug printf:
+/// echoes which bindings on an ACTION slot are eligible for the active
+/// buffer's facts and why the winner won. The facts mirror
+/// `Context.actionCtx` (same mode/lang/tool) plus the buffer's path/name, so
+/// `explain-binding eval` answers exactly the question
+/// `Actions.resolve("eval", ...)` would have asked.
 fn cExplainBinding(ctx: *Context, args: struct { slot: []const u8 }) anyerror!Value {
     const entry = ctx.buffer();
     const f: facts.Facts = .{

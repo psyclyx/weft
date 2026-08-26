@@ -80,12 +80,12 @@ pub const Hub = struct {
     incoming: std.atomic.Value(?*FdNode) = .init(null),
     listener: ?i32 = null,
     accept_thread: ?std.Thread = null,
-    /// Scheduler wake-fd (north-star-plan §6 W2a-3): signaled by the accept
-    /// thread on a new incoming connection and by every peer's reader
-    /// thread on new inbox data (`Session.wake_fd`, set on each peer at
-    /// `adopt`) — ONE fd shared across N peers (an eventfd counter tolerates
-    /// concurrent writers fine). The caller registers it as a scheduler fd
-    /// source for the hub's lifetime.
+    /// Scheduler wake-fd (doc/contextual-workspace-architecture.md §7):
+    /// signaled by the accept thread on a new incoming connection and by
+    /// every peer's reader thread on new inbox data (`Session.wake_fd`, set
+    /// on each peer at `adopt`) — ONE fd shared across N peers (an eventfd
+    /// counter tolerates concurrent writers fine). The caller registers it
+    /// as a scheduler fd source for the hub's lifetime.
     wake_fd: std.posix.fd_t,
 
     /// A hub with no listener yet — call `listen` once it is stored at a

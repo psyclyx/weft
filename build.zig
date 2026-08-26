@@ -447,15 +447,16 @@ pub fn build(b: *std.Build) void {
     // quietly drift apart.
     configureTestModule(b, test_mod, stemma_dep, weft_mod);
 
-    // The dispatch-latency instrument's record/compare switch (north-star-plan
-    // W0a/C10 — src/e2e/latency_test.zig). `test_mod` — the module the plain
-    // `test` step compiles — is HARDCODED to compare-only, always, regardless
-    // of `-Drecord-latency`: it's a module OBJECT, shared verbatim by every
-    // Step.Compile rooted at it, so wiring the live CLI flag into it would let
-    // `zig build test -Drecord-latency=true` silently overwrite the committed
-    // baseline as a side effect of an ordinary test run. The live flag is
-    // wired only into `latency_mod` below, a separate module used exclusively
-    // by the dedicated `e2e-latency` step.
+    // The dispatch-latency instrument's record/compare switch
+    // (doc/cwa-prior-docs-audit.md §5 — src/e2e/latency_test.zig).
+    // `test_mod` — the module the plain `test` step compiles — is HARDCODED to
+    // compare-only, always, regardless of `-Drecord-latency`: it's a module
+    // OBJECT, shared verbatim by every Step.Compile rooted at it, so wiring
+    // the live CLI flag into it would let `zig build test
+    // -Drecord-latency=true` silently overwrite the committed baseline as a
+    // side effect of an ordinary test run. The live flag is wired only into
+    // `latency_mod` below, a separate module used exclusively by the dedicated
+    // `e2e-latency` step.
     const compare_only_opts = b.addOptions();
     compare_only_opts.addOption(bool, "record", false);
     test_mod.addOptions("latency_options", compare_only_opts);

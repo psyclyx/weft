@@ -1,6 +1,6 @@
 //! Test fixture ONLY (not installed — see build.zig's `guests` table): a
 //! minimal guest exercising the guest-ABI head-addressing fix (task #14,
-//! doc/north-star-plan.md §2.1/§2.7) AND its structural closure (task #19
+//! doc/cwa-prior-docs-audit.md §5) AND its structural closure (task #19
 //! item 4). Six commands plus an `on_poll` export, sized exactly for what
 //! `src/e2e/two_head_test.zig` needs to prove:
 //!

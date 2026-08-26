@@ -1,8 +1,7 @@
 //! `GraphCollab` — the per-doc sync driver for ONE `GraphDoc` over one
-//! channel quad of a `Session` (stemma delta 5, doc/north-star-plan.md
-//! §2.6/§4 C19/§6 W5: "ObjectDoc's version/eventsSince/merge already speak
-//! the same token model [as TextDoc], so it is binding work, not protocol
-//! work").
+//! channel quad of a `Session` (stemma delta 5, doc/substrate.md §2:
+//! "ObjectDoc's version/eventsSince/merge already speak the same token
+//! model [as TextDoc], so it is binding work, not protocol work").
 //!
 //! ## The seam this file IS the answer to
 //!
@@ -39,32 +38,31 @@
 //!
 //! The `base` channel carries `OpKind.batch`/`.frontier`/`.region_refused`/
 //! `.grant` (`.share` is consumed by `Conn`). `base + 1` (W6 slice 1,
-//! doc/d1-live-reconcile.md §5) carries the per-region LEASE
-//! announce/release feed — the same slot `Collab` claims for presence, left
-//! unclaimed here until that slice; leases are presence-shaped data (§5.2:
-//! "a lease is a presence span with a locked flag"), so reusing the slot
-//! instead of minting a new one is deliberate. `base + 2` (diagnostics) and
-//! `base + 3` (blob/`.peer`-fs) remain unclaimed; a graph quad still
-//! reserves the full 4-wide slot (`Conn`'s `next_base` counter is shared
-//! with text shares, so bases never collide either way). W6 slice 2
-//! (identity-anchored SUBTREE GRANTS, north-star-plan.md §6 W6) claimed no
-//! new channel: grants are HOST-declared and enforced entirely locally
-//! (`bindGrants`/`grantSubtree` below). **D3 (doc/d3-refusal-recovery.md
-//! §2.1) now ALSO announces**: `base`'s `OpKind.grant` — precedented by
-//! `Collab`'s own per-doc grade announce (`Collab.zig`'s `.grant` emit at
-//! `push`/consume in `handleFrame`, the one-for-one template this mirrors)
-//! and previously unconsumed here — carries this peer's live, reachable
-//! granted root `NodeRef` tokens on a GRAPH quad (a bare `Access` byte on a
-//! TEXT quad, unchanged; disambiguated by quad type, exactly like
-//! `region_refused` already is graph-only). This is DISPLAY/PREVENTION
-//! state for the grantee (`granted_roots`, `mayEditNode` below) — the host
-//! still enforces at `admitRegions`; the announcement can never widen
-//! authority, only let a grantee refuse its own out-of-grant edits LOCALLY
-//! instead of discovering the boundary by being refused. `.region_refused`'s
-//! payload gains one trailing byte (a `RefusalReason`) so a refused sender
-//! can tell a lease refusal from an authority one from a collapsed-grant
-//! one — additive, same version-tolerance convention as the lease frame's
-//! trailing `hue16`.
+//! doc/substrate.md §4) carries the per-region LEASE announce/release feed —
+//! the same slot `Collab` claims for presence, left unclaimed here until
+//! that slice; leases are presence-shaped data (§5.2: "a lease is a presence
+//! span with a locked flag"), so reusing the slot instead of minting a new
+//! one is deliberate. `base + 2` (diagnostics) and `base + 3`
+//! (blob/`.peer`-fs) remain unclaimed; a graph quad still reserves the full
+//! 4-wide slot (`Conn`'s `next_base` counter is shared with text shares, so
+//! bases never collide either way). W6 slice 2 (identity-anchored SUBTREE
+//! GRANTS, doc/substrate.md) claimed no new channel: grants are
+//! HOST-declared and enforced entirely locally (`bindGrants`/`grantSubtree`
+//! below). **D3 (doc/substrate.md §5) now ALSO announces**: `base`'s
+//! `OpKind.grant` — precedented by `Collab`'s own per-doc grade announce
+//! (`Collab.zig`'s `.grant` emit at `push`/consume in `handleFrame`, the
+//! one-for-one template this mirrors) and previously unconsumed here —
+//! carries this peer's live, reachable granted root `NodeRef` tokens on a
+//! GRAPH quad (a bare `Access` byte on a TEXT quad, unchanged; disambiguated
+//! by quad type, exactly like `region_refused` already is graph-only). This
+//! is DISPLAY/PREVENTION state for the grantee (`granted_roots`,
+//! `mayEditNode` below) — the host still enforces at `admitRegions`; the
+//! announcement can never widen authority, only let a grantee refuse its own
+//! out-of-grant edits LOCALLY instead of discovering the boundary by being
+//! refused. `.region_refused`'s payload gains one trailing byte (a
+//! `RefusalReason`) so a refused sender can tell a lease refusal from an
+//! authority one from a collapsed-grant one — additive, same
+//! version-tolerance convention as the lease frame's trailing `hue16`.
 //!
 //! ## Bootstrap = the frontier exchange itself
 //!
@@ -115,7 +113,7 @@ tag: u64 = 0,
 /// applies here, so every call site below passes `skip = false`.
 core: sync_core.SyncCore(GraphDoc) = .{},
 
-// ── W6 slice 1: the per-region lease (doc/d1-live-reconcile.md §5) ────
+// ── W6 slice 1: the per-region lease (doc/substrate.md §4) ────
 // Reuses `base + 1` — the presence slot `Collab` claims but this quad has
 // left unclaimed until now (see the module doc comment's "Quad layout").
 // `leases` is NOT owned here: it is one table per REPLICA's view of this
@@ -131,7 +129,7 @@ leases: ?*LeaseTable = null,
 /// peer has announced at least one lease.
 peer_name: ?[]u8 = null,
 /// A batch we refused at the per-region admission hook, echoed to us as
-/// the LOUD refusal (never a silent drop — d1-live-reconcile.md §5.2, §6
+/// the LOUD refusal (never a silent drop — doc/substrate.md §4
 /// test 5). Append-only; the caller drains/inspects and is responsible for
 /// freeing each entry's owned fields (`Refusal.free`).
 refusals: std.ArrayList(Refusal) = .empty,
@@ -148,17 +146,16 @@ reaped: bool = false,
 /// silently taking a region we never released.
 needs_lease_reannounce: bool = false,
 
-// ── W6 slice 2: identity-anchored SUBTREE GRANTS (doc/north-star-plan.md
-// §6 W6, d1-live-reconcile.md §5.2's "the same [per-region admission]
-// machinery W6 needs for identity-anchored subtree grants... used for
-// mutual exclusion instead of authority") — the SECOND predicate
-// `admitRegions`'s doc comment names, composing over the SAME
-// `touchedRegions` call the lease predicate already uses, ANDed into the
-// same admit/refuse control flow (see `admitRegions` below). `grants` is
-// NOT owned here — same "one table per REPLICA, bound in, not built in"
+// ── W6 slice 2: identity-anchored SUBTREE GRANTS (doc/substrate.md §4's
+// "the same [per-region admission] machinery W6 needs for identity-anchored
+// subtree grants... used for mutual exclusion instead of authority") — the
+// SECOND predicate `admitRegions`'s doc comment names, composing over the
+// SAME `touchedRegions` call the lease predicate already uses, ANDed into
+// the same admit/refuse control flow (see `admitRegions` below). `grants`
+// is NOT owned here — same "one table per REPLICA, bound in, not built in"
 // shape as `leases` — `null` (the default) means no grant enforcement, so
-// every existing caller of this driver keeps today's canEdit-only
-// admission unchanged. Reuses `grants.zig`'s `HandleTable` wholesale
+// every existing caller of this driver keeps today's canEdit-only admission
+// unchanged. Reuses `grants.zig`'s `HandleTable` wholesale
 // (`Row`/`CapHandle`/`revoke`/`Reason` machinery already built, tested, and
 // System-agnostic — nothing about it requires the plugin/Ctx apparatus
 // `System.grants` happens to also use it for) rather than growing a THIRD
@@ -185,7 +182,7 @@ grants: ?*grants_mod.HandleTable = null,
 peer_fingerprint: ?[24]u8 = null,
 
 // ── D3: PREVENTION — announce the subtree grant to its grantee
-// (doc/d3-refusal-recovery.md §2.1) ─────────────────────────────────────
+// (doc/substrate.md §5) ─────────────────────────────────────
 // The HOST side of this pair (`needs_grant_reannounce`/`announceGrant`)
 // posts this peer's live granted-root set over the graph quad's
 // `OpKind.grant` frame — the SAME host→client authority-announce shape
@@ -193,7 +190,7 @@ peer_fingerprint: ?[24]u8 = null,
 // `handleFrame`, client-role-only, never a reverse vector). The GRANTEE
 // side (`granted_roots`/`mayEditNode`) is what a grantee's edit path
 // consults BEFORE minting a local op, so the stuck-authority-refusal class
-// doc/d3-refusal-recovery.md §0 names becomes UNREACHABLE for a grantee
+// doc/substrate.md §5 names becomes UNREACHABLE for a grantee
 // that consults it, rather than merely recoverable (§2.2, `needsRebootstrap`
 // below) after the fact.
 
@@ -304,10 +301,10 @@ pub fn bindGrants(self: *GraphCollab, table: *grants_mod.HandleTable) void {
     self.grants = table;
 }
 
-/// The HOST-side subtree-grant declaration API (W6 slice 2, north-star-
-/// plan.md §6 W6 / d1-live-reconcile.md §5.2's admission hook, second
-/// predicate): declare that the peer AUTHENTICATED at the other end of
-/// THIS quad's `session` may edit within `root`'s subtree on THIS doc.
+/// The HOST-side subtree-grant declaration API (W6 slice 2,
+/// doc/substrate.md §4's admission hook, second predicate): declare
+/// that the peer AUTHENTICATED at the other end of THIS quad's
+/// `session` may edit within `root`'s subtree on THIS doc.
 ///
 /// **The identity-binding shape, DECIDED (post-review REQUIRED FIX 1) —
 /// keyed on `session.peerFingerprint()`, never a self-declared name.** The
@@ -358,7 +355,7 @@ pub fn bindGrants(self: *GraphCollab, table: *grants_mod.HandleTable) void {
 ///
 /// **Deferred, named**: no config/manifest surface exists yet — see
 /// `Limit.graph_subtree`'s module-doc entry in grants.zig for why.
-/// **D3 correction (doc/d3-refusal-recovery.md §2.1) to the claim this
+/// **D3 correction (doc/substrate.md §5) to the claim this
 /// comment used to make**: an EARLIER version said "nothing here crosses
 /// the wire" — no longer true. `push` now announces this peer's resulting
 /// live, reachable granted-root set over the graph quad's `OpKind.grant`
@@ -556,18 +553,17 @@ pub fn handleFrame(self: *GraphCollab, frame: wire.Decoder.Decoded) !bool {
     return false;
 }
 
-/// Which regions (portable `NodeRef`s) `batch` touches, checked against
-/// the bound lease table AND the bound grant table — the GENERAL per-region
-/// admission hook (doc/d1-live-reconcile.md §5.2: "the same per-region
-/// admission W6 needs for identity-anchored subtree grants"; north-star-
-/// plan.md §6 W6). The lease was this hook's FIRST client (W6 slice 1); the
-/// subtree grant (`gatherGrantRoots` + the authority loop in
-/// `admitRegions`, W6 slice 2) is its SECOND — another predicate over the
-/// exact same dry-run pass, ANDed into the same admit/refuse control flow,
-/// not a second, parallel admission path. See this file's `.batch` handler
-/// for where this whole function sits relative to `sync_core`'s coarse
-/// gate, and `admitRegions`'s own doc comment for the authority-then-lease
-/// composition order.
+/// Which regions (portable `NodeRef`s) `batch` touches, checked against the
+/// bound lease table AND the bound grant table — the GENERAL per-region
+/// admission hook (doc/substrate.md §4: "the same per-region admission W6
+/// needs for identity-anchored subtree grants"). The lease was this hook's
+/// FIRST client (W6 slice 1); the subtree grant (`gatherGrantRoots` + the
+/// authority loop in `admitRegions`, W6 slice 2) is its SECOND — another
+/// predicate over the exact same dry-run pass, ANDed into the same
+/// admit/refuse control flow, not a second, parallel admission path. See
+/// this file's `.batch` handler for where this whole function sits relative
+/// to `sync_core`'s coarse gate, and `admitRegions`'s own doc comment for
+/// the authority-then-lease composition order.
 ///
 /// ## "Refused" is deferred-until-release, not a permanent verdict
 ///
@@ -675,7 +671,7 @@ fn gatherGrantRoots(self: *GraphCollab, gpa: Allocator) !GrantContext {
     return ctx;
 }
 
-/// **Composition order, DECIDED (W6 slice 2, north-star-plan.md §6 W6): canEdit (per-doc,
+/// **Composition order, DECIDED (W6 slice 2, doc/substrate.md): canEdit (per-doc,
 /// `sync_core.admitBatch` — already run by the caller BEFORE this function)
 /// → subtree grants (AUTHORITY) → lease (OCCUPANCY).** Authority runs before
 /// occupancy at this chokepoint because it is the more fundamental — and
@@ -782,17 +778,17 @@ pub fn admitRegions(self: *GraphCollab, gpa: Allocator, batch: []const u8) !Regi
     return .admit;
 }
 
-/// D3 PREVENTION, the grantee-side pre-flight (doc/d3-refusal-recovery.md
-/// §2.1's "pre-flight"): is `node`, as it exists RIGHT NOW on THIS
-/// replica's own live `self.doc`, within any of the announced
-/// `granted_roots`? Answers via `GraphDoc.contains` directly against
-/// `self.doc` — no scratch clone needed, unlike `admitRegions`'
-/// `touchedRegionsWithin` dry-run: THAT function must handle a batch-fresh
-/// node that doesn't exist on the enforcer's pre-merge replica yet (REQUIRED
-/// FIX 2's whole reason for being); a client calling `mayEditNode` is asking
-/// about a node that already exists on ITS OWN live doc at edit time (you
-/// can't type into a node your own replica hasn't created), so there is no
-/// equivalent "doesn't exist yet" case to clone around.
+/// D3 PREVENTION, the grantee-side pre-flight (doc/substrate.md §5's
+/// "pre-flight"): is `node`, as it exists RIGHT NOW on THIS replica's own
+/// live `self.doc`, within any of the announced `granted_roots`? Answers via
+/// `GraphDoc.contains` directly against `self.doc` — no scratch clone
+/// needed, unlike `admitRegions`' `touchedRegionsWithin` dry-run: THAT
+/// function must handle a batch-fresh node that doesn't exist on the
+/// enforcer's pre-merge replica yet (REQUIRED FIX 2's whole reason for
+/// being); a client calling `mayEditNode` is asking about a node that
+/// already exists on ITS OWN live doc at edit time (you can't type into a
+/// node your own replica hasn't created), so there is no equivalent "doesn't
+/// exist yet" case to clone around.
 ///
 /// **Unannounced/empty `granted_roots` = unconfined (`true`)** — today's
 /// behavior, mirroring `admitRegions`' "absence of a grant row keeps
@@ -828,25 +824,24 @@ pub fn mayEditNode(self: *const GraphCollab, gpa: Allocator, node: GraphDoc.ObjI
     return false;
 }
 
-/// D3 RECOVERY, the trigger-honesty predicate (doc/d3-refusal-recovery.md
-/// §2.2, §6 test 6): does `self.refusals` hold any `.authority`/
-/// `.collapsed` entry — the taxonomy that has NO release to wait for (only
-/// `.lease` self-heals, `admitRegions`' own "deferred-until-release, not
-/// permanent rejection" doc comment)? `true` is the client's OWN policy
-/// signal to RE-BOOTSTRAP (discard this doc, `GraphDoc.init` fresh,
-/// re-attach, replay wanted in-grant edits, §2.2/§1.3) — never to keep
-/// waiting: nothing about a subtree-grant boundary ever releases, so
-/// sitting and re-riding the refused op (the LEASE-only healing property)
-/// degenerates to a permanent poison for authority, exactly as
-/// doc/d3-refusal-recovery.md §0 traces. This is a HELPER, not a recipe: it
-/// answers the one question this driver can answer on its own state
-/// (refusals it already tracks); the re-bootstrap SEQUENCE itself
-/// (discard/init/rebind/replay) is inherently session- and model-specific —
-/// it needs a live `Session`/`Conn` this driver doesn't own and a "which
-/// edits are still wanted" answer only the model-owning caller (a
-/// `TranscriptDoc`, say) can give — so it stays a documented recipe, proven
-/// end to end by the §6 test 5 recovery test, not generalized into a second
-/// helper here.
+/// D3 RECOVERY, the trigger-honesty predicate (doc/substrate.md §5): does
+/// `self.refusals` hold any `.authority`/ `.collapsed` entry — the taxonomy
+/// that has NO release to wait for (only `.lease` self-heals,
+/// `admitRegions`' own "deferred-until-release, not permanent rejection"
+/// doc comment)? `true` is the client's OWN policy signal to RE-BOOTSTRAP
+/// (discard this doc, `GraphDoc.init` fresh, re-attach, replay wanted
+/// in-grant edits, §2.2/§1.3) — never to keep waiting: nothing about a
+/// subtree-grant boundary ever releases, so sitting and re-riding the
+/// refused op (the LEASE-only healing property) degenerates to a permanent
+/// poison for authority, exactly as doc/substrate.md §5 traces. This is a
+/// HELPER, not a recipe: it answers the one question this driver can answer
+/// on its own state (refusals it already tracks); the re-bootstrap SEQUENCE
+/// itself (discard/init/rebind/replay) is inherently session- and
+/// model-specific — it needs a live `Session`/`Conn` this driver doesn't
+/// own and a "which edits are still wanted" answer only the model-owning
+/// caller (a `TranscriptDoc`, say) can give — so it stays a documented
+/// recipe, proven end to end by the §6 test 5 recovery test, not
+/// generalized into a second helper here.
 pub fn needsRebootstrap(self: *const GraphCollab) bool {
     for (self.refusals.items) |r| {
         if (r.reason == .authority or r.reason == .collapsed) return true;
@@ -992,7 +987,7 @@ fn announceLease(self: *GraphCollab, region: NodeRef, acquired: bool) !void {
     try self.session.postFeed(self.base + 1, key, payload.items);
 }
 
-/// The LOCAL "I want this region" intent (d1-live-reconcile.md §5.2's
+/// The LOCAL "I want this region" intent (doc/substrate.md §4's
 /// acquire, "granted iff no other principal holds it"). Announces to the
 /// peer on grant so their admission gate and display learn about it too;
 /// the conflict answer (already held by X) is returned as data, never a
@@ -1006,7 +1001,7 @@ pub fn acquireLease(self: *GraphCollab, region: NodeRef) !LeaseTable.AcquireResu
     return res;
 }
 
-/// Explicit release (d1-live-reconcile.md §5.2). A no-op if we don't hold
+/// Explicit release (doc/substrate.md §4). A no-op if we don't hold
 /// it (`LeaseTable.release`'s holder-matched guard).
 pub fn releaseLease(self: *GraphCollab, region: NodeRef) !void {
     const table = self.leases orelse return;

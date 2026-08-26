@@ -514,7 +514,7 @@ pub fn dispatchSpec(ctx: *core.command.Context, spec: []const u8, text: []const 
         .text => {}, // a lone unbound key — fall through to text insertion
         .run => |cmd_name| {
             // A bound key whose command NAMES a menu mode enters it — the
-            // PAIRED-TRANSIENT push (task #19 item 2, north-star-plan §2.1/§5,
+            // PAIRED-TRANSIENT push (task #19 item 2, doc/cwa-prior-docs-audit.md §5,
             // `ctx.zig`'s `Ctx.pushTransient`): `Head.transient_stack` durably
             // records the pre-push mode as this frame's return target, so
             // leaving (the leaf auto-pop below, or `menu-escape`) is the

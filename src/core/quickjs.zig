@@ -52,7 +52,7 @@ pub const PluginLoader = manifest_mod.PluginLoader;
 ///
 ///   - CONFIG-EVAL mode (`manifest` set, by `evalToManifest`): every
 ///     `weft.*` call STAGES a declaration onto the `Manifest` instead of
-///     touching the editor — sealed evaluation (north-star-plan §2.3).
+///     touching the editor — sealed evaluation (doc/configuration.md §5).
 ///     Applying the result is a separate step (`Manifest.apply`/
 ///     `.reconcile`), never done here.
 ///   - LIVE mode (`manifest` null — a resident `JsPlugin`, see below): a
@@ -249,7 +249,7 @@ fn cStubVoid(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32, results
 /// `quickjs.wasm` under WASI with the `weft.*` config surface bound in
 /// CONFIG-EVAL (staging) mode, run its reactor init, marshal the source into
 /// the guest, and eval it — every `weft.*` call the source makes appends one
-/// declaration to the returned manifest (north-star-plan §2.3: "nothing
+/// declaration to the returned manifest (doc/configuration.md §5: "nothing
 /// mutates the editor during eval"). A JS exception surfaces as
 /// `error.ConfigException` (the shim logs its message) and the partial
 /// manifest is destroyed — never a partial, silent half-applied config.
@@ -298,7 +298,7 @@ pub fn evalToManifest(engine: *wasm.Engine, ctx: *command.Context, loader: ?Plug
 }
 
 /// Evaluate `src` as the user config AND apply it — `evalToManifest` plus
-/// the hash-log + fresh `apply` pass (north-star-plan §2.3's "the approved
+/// the hash-log + fresh `apply` pass (doc/configuration.md §5's "the approved
 /// artifact is the manifest value plus its hash"). This is the convenience
 /// entry point for a FIRST load; a config-reload wired against a previous
 /// manifest should call `evalToManifest` + `Manifest.reconcile` directly
@@ -355,7 +355,7 @@ pub const JsPlugin = struct {
     /// A closed slot is left null so handles stay stable (never reused).
     streams: std.ArrayList(?*proc_stream.ProcStream) = .empty,
     /// This plugin's single-instance live transcript MODEL (W6 check-in
-    /// producer seam, doc/north-star-plan.md §6 W5/W6) — created on first
+    /// producer seam, doc/contextual-workspace-architecture.md §12) — created on first
     /// `weft.transcriptEntry` call. Single-instance, the SAME limitation
     /// `transcript.zig`'s `SaveBinding` documents (no per-buffer registry
     /// yet — named, not silently dropped): one JS plugin drives at most one
@@ -1251,7 +1251,7 @@ fn cBindKey(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32, results:
 /// `weft.use(name)` backing: evaluate `<config_dir>/<name>.js` into ITS OWN
 /// manifest — a NESTED, independent `evalToManifest` call (its own fresh
 /// quickjs runtime, exactly like the top-level config's own eval), attached
-/// as an import at `.imported` tier (north-star-plan §2.2/§2.3: "imported
+/// as an import at `.imported` tier (doc/configuration.md §7: "imported
 /// manifests land one tier below the importer"). A no-op (no result to
 /// report — `weft.use` has always been fire-and-forget from JS) when: this
 /// isn't config-eval mode (a resident JS plugin's `weft.use` — no config_dir
@@ -1464,13 +1464,14 @@ fn cProvide(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32, results:
 }
 
 /// weft.statusSegment(text, role, priority) — stage a static `ui/statusline-
-/// seg` segment onto the manifest (north-star-plan §6 W3, task #19 item 3's
-/// mesh-reachability verb). CONFIG-ONLY: unlike `weft.provide`/`weft.action`
-/// this has no LIVE (resident-JS-plugin, `br.manifest == null`) behavior —
-/// the direct-bind path would need this (core-layer) module to know the
-/// gfx-layer `ui_mesh.zig` provider shape, exactly the dependency
-/// `manifest.StatusSegBinder`'s doc explains core can't take; a resident
-/// plugin reaching `ui/*` live is a later step (D2/W0b), not this one.
+/// seg` segment onto the manifest (doc/contextual-workspace-architecture.md
+/// §11, the mesh-reachability verb). CONFIG-ONLY: unlike
+/// `weft.provide`/`weft.action` this has no LIVE (resident-JS-plugin,
+/// `br.manifest == null`) behavior — the direct-bind path would need this
+/// (core-layer) module to know the gfx-layer `ui_mesh.zig` provider shape,
+/// exactly the dependency `manifest.StatusSegBinder`'s doc explains core
+/// can't take; a resident plugin reaching `ui/*` live is a later step
+/// (D2/W0b), not this one.
 fn cStatusSegment(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32, results: []i32) void {
     _ = results;
     const br: *Bridge = @ptrCast(@alignCast(data.?));
@@ -1488,14 +1489,15 @@ fn cStatusSegment(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32, re
 }
 
 /// weft.grant(plugin, capability, opts) — stage a `GrantDecl` onto the
-/// manifest (north-star-plan §6 W4 slice 4, the deferred verb `grants.zig`'s
-/// module doc named). `root` is already the flattened `opts.root` string by
-/// the time it reaches here (the C shim, `js_grant`, pulls it out of the JS
-/// object — this handler stays as string-only as every other `.config`
-/// import). CONFIG-EVAL mode only — same precedent as `cStatusSegment`
-/// above: authority delegation is a declarative, sealed-eval-time act (§2.3),
-/// not something a resident plugin's live code should be able to conjure for
-/// ANOTHER principal at any point in its lifetime.
+/// manifest (doc/contextual-workspace-architecture.md §13.5, the deferred
+/// verb `grants.zig`'s module doc named). `root` is already the flattened
+/// `opts.root` string by the time it reaches here (the C shim, `js_grant`,
+/// pulls it out of the JS object — this handler stays as string-only as every
+/// other `.config` import). CONFIG-EVAL mode only — same precedent as
+/// `cStatusSegment` above: authority delegation is a declarative,
+/// sealed-eval-time act (§2.3), not something a resident plugin's live code
+/// should be able to conjure for ANOTHER principal at any point in its
+/// lifetime.
 fn cGrant(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32, results: []i32) void {
     _ = results;
     const br: *Bridge = @ptrCast(@alignCast(data.?));

@@ -21,7 +21,7 @@ pub fn loadJsConfig(gpa: std.mem.Allocator, ctx: *core.command.Context, path: []
     try core.quickjs.evalConfig(&engine, ctx, loader, config, dir, src);
 }
 
-/// A LIVE config binding (north-star-plan §2.3/§6): remembers the manifest
+/// A LIVE config binding (doc/configuration.md §5): remembers the manifest
 /// last applied so a `config-reload` is a `Manifest.reconcile` against it
 /// (an unchanged reload is a verified no-op; a changed one tears down what
 /// it owned and applies the delta) instead of a blind re-run of the whole
@@ -34,11 +34,12 @@ pub const ConfigSession = struct {
     loader: ?core.quickjs.PluginLoader,
     config: *core.kv.Store,
     last: ?*core.manifest.Manifest = null,
-    /// `weft.statusSegment` mesh-reachability seam (north-star-plan task
-    /// #19 item 3; see `core.manifest.StatusSegBinder`'s doc) — unset
-    /// (`null`) by default, so every existing caller of `init` compiles and
-    /// behaves unchanged. `main.zig` sets this field directly after `init`
-    /// returns (`cs.ui_bind = .{ .ctx = &session.container, .bind =
+    /// `weft.statusSegment` mesh-reachability seam
+    /// (doc/cwa-prior-docs-audit.md §5; see
+    /// `core.manifest.StatusSegBinder`'s doc) — unset (`null`) by default,
+    /// so every existing caller of `init` compiles and behaves unchanged.
+    /// `main.zig` sets this field directly after `init` returns
+    /// (`cs.ui_bind = .{ .ctx = &session.container, .bind =
     /// view_mod.ui_mesh.bindManifestSegment }`) rather than threading it
     /// through `init`'s own parameter list, which would force every OTHER
     /// caller (tests, a headless embedder with no UI mesh at all) to pass
@@ -216,7 +217,7 @@ pub const PluginHost = struct {
 };
 
 // ── Tests ───────────────────────────────────────────────────────────
-// north-star-plan §6 W4 slice 4: "this slice makes grants REAL in the
+// doc/contextual-workspace-architecture.md §13.5: "this slice makes grants REAL in the
 // desktop — loadPlugin's grant_table must be wired where plugins actually
 // load." These drive `PluginHost.load` itself (main.zig's exact production
 // entry point — a real `System`, `System.initPlugins`'s real `Plugins`

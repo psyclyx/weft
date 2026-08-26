@@ -84,7 +84,7 @@ pub const Hud = struct {
     /// Peer trust chip: "✓ verified" | "⚠ unverified" | null (the host we
     /// connected out to; see known_peers / the SAS).
     trust: ?[]const u8 = null,
-    /// The `ui/statusline-seg` mesh's composed output (north-star-plan §6
+    /// The `ui/statusline-seg` mesh's composed output (doc/cwa-prior-docs-audit.md §5
     /// W3-1) — mode chip, buffer position, file/path, collab liveness (left
     /// cluster) and the diagnostics count (right-anchored) all come from
     /// here now; `statusline.zig` renders this list, it no longer formats

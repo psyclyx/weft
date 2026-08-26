@@ -10,7 +10,7 @@
 //! Modes are the vim enabler: bindings live per mode; mode SWITCHING is
 //! itself just a command.
 //!
-//! THE SPLIT (north-star-plan §2.7/§4 C14/§6 W2a-1): this struct used to
+//! THE SPLIT (doc/contextual-workspace-architecture.md §7): this struct used to
 //! ALSO hold the mutable CURSOR into these tables — `mode` (which mode is
 //! current), `pending` (the half-typed chord), `menu_return` (per-menu
 //! return targets), and the which-key render scratch. That made "current
@@ -39,7 +39,7 @@ const Bindings = std.StringArrayHashMapUnmanaged(BindEntry);
 
 pub const prio_core = -100;
 pub const prio_plugin = 0;
-/// A `weft.use(name)`-imported manifest's rung (north-star-plan §2.2/§4 C11):
+/// A `weft.use(name)`-imported manifest's rung (doc/configuration.md §7 C11):
 /// strictly between `prio_plugin` and `prio_config`, so `defaults.js`'s
 /// binds always lose to `config.js`'s own later binds — by TIER, not by
 /// which one happened to be applied last (the old load-order-dependent
@@ -154,7 +154,7 @@ pub fn bind(self: *Keymap, gpa: Allocator, mode: []const u8, key_in: []const u8,
 
 /// Remove the binding at `mode`/`key` IFF it is currently owned by `owner`
 /// (else a no-op — never steal a slot a different, or since-rebound, owner
-/// holds). Used by `manifest.zig`'s reconcile teardown (north-star-plan §6):
+/// holds). Used by `manifest.zig`'s reconcile teardown (doc/cwa-prior-docs-audit.md §5):
 /// a bind declared by a PREVIOUS config manifest but absent from the
 /// reloaded one must not leave a ghost binding behind. Frees the entry's
 /// owned strings on removal.

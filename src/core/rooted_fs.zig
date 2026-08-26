@@ -110,7 +110,7 @@ pub const RootedFs = struct {
     /// Append `bytes` to `rel` (confined, created if absent) — the append
     /// counterpart to `write`, above (O_APPEND instead of O_TRUNC). Used by
     /// `wasm_host/fs.zig`'s `fsAppend` when a `.fs_root` grant limits the
-    /// call (north-star-plan §6 W4 slice 2).
+    /// call (doc/contextual-workspace-architecture.md §13.5).
     pub fn append(self: *const RootedFs, rel: [*:0]const u8, bytes: []const u8) Error!void {
         const fd = try self.openBeneath(
             rel,

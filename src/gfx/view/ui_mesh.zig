@@ -1,11 +1,11 @@
 //! ui_mesh — the UI mesh's first two ordered-union slots, `ui/statusline-seg`
-//! and `ui/gutter-segment` (north-star-plan §6 W3-1; doc/rendering.md "The UI
-//! as a mesh of narrow capabilities"). Host-side PROVIDERS re-express today's
-//! statusline chips (and, inertly until bound, gutter marks) as
-//! `core.container.Container` bindings instead of code baked directly into
-//! `statusline.zig`/`frame_builder.zig` — proving the mesh's composition
-//! machinery (declare/bind/eligible/unbind, strict-weak-order priority,
-//! swap-one-piece) on real UI before P2 opens any slot to a guest.
+//! and `ui/gutter-segment` (doc/contextual-workspace-architecture.md §11;
+//! doc/rendering.md "The UI as a mesh of narrow capabilities"). Host-side
+//! PROVIDERS re-express today's statusline chips (and, inertly until bound,
+//! gutter marks) as `core.container.Container` bindings instead of code baked
+//! directly into `statusline.zig`/`frame_builder.zig` — proving the mesh's
+//! composition machinery (declare/bind/eligible/unbind, strict-weak-order
+//! priority, swap-one-piece) on real UI before P2 opens any slot to a guest.
 //!
 //! **Two interfaces settled here** (reported in the W3-1 writeup):
 //!
@@ -291,7 +291,7 @@ pub fn declareSlots(c: *container.Container) !void {
 /// order: mode, position, file, collab-liveness (left cluster); diagnostics
 /// count (right-anchored, `align_right`).
 ///
-/// **Reachability (north-star-plan task #19, DONE):** two paths reach this
+/// **Reachability (doc/cwa-prior-docs-audit.md §5):** two paths reach this
 /// Container now. (1) The shared-Container fold-in: `action.zig`'s
 /// `Actions` and `capability.zig`'s `Caps` bind into the SAME instance
 /// `declareSlots`/`bindDefaultStatusline` target (one `container.Container`
@@ -325,7 +325,7 @@ pub fn bindDefaultGutter(c: *container.Container) !void {
     try c.bind(.{ .slot = "ui/gutter-segment", .provider = .{ .ui_provider = .{ .call = breakpointMarksProvider } }, .predicate = all, .tier = .core, .priority = 80, .owner = owner, .domain = .ui, .decl_index = 2 });
 }
 
-/// `weft.statusSegment`'s mesh-reachability seam (north-star-plan task #19
+/// `weft.statusSegment`'s mesh-reachability seam (doc/cwa-prior-docs-audit.md §5
 /// item 3) — matches `core.manifest.StatusSegBinder.bind`'s signature
 /// exactly, so an embedder wires `.{ .ctx = &session.container, .bind =
 /// bindManifestSegment }` directly (`main.zig` does). Binds `decl` — BORROWED

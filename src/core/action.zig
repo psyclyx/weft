@@ -28,7 +28,7 @@
 //! reserved policy and delegate to `Caps` at their (few, UI-bound) call sites,
 //! folded in incrementally rather than migrated wholesale.
 //!
-//! **F5 Container adapter, W3 RESOLVED (north-star-plan §2.2/§5/§6 W1/W3).**
+//! **F5 Container adapter, W3 RESOLVED (doc/configuration.md §7).**
 //! `pick` resolution is a query against `container.Container`: each
 //! `provide()` call binds a Container `Binding` on a slot named for the
 //! action, using `When`/`ProvideSpec` only to TRANSLATE into a `Binding` at
@@ -283,7 +283,7 @@ pub const ProvideSpec = struct {
     /// Policy to auto-declare the action with if it doesn't exist yet — a
     /// provider can arrive before its `declare` (load order is free).
     declare_policy: Policy = .pick,
-    /// The Container tier this provider binds at (north-star-plan §2.2/§6
+    /// The Container tier this provider binds at (doc/configuration.md §7
     /// W1: "action provides carry Container Tier.imported vs Tier.config").
     /// Defaults to `.plugin` — every `.wasm`/JS-plugin call site through
     /// `capability.zig`-style registration keeps today's uniform-plugin-tier
@@ -368,7 +368,7 @@ pub fn provide(self: *Actions, spec: ProvideSpec) !void {
         // JS-plugin capability registration path), not a blanket rule.
         // `manifest.zig`'s config-manifest `apply` is the one caller that
         // now passes `.config`/`.imported` — the W2b-pending stratification
-        // arriving for the config plane specifically (north-star-plan §6):
+        // arriving for the config plane specifically (doc/cwa-prior-docs-audit.md §5):
         // a config manifest's OWN providers stay relatively ordered by
         // priority/specificity exactly as before (they're all the SAME
         // tier, `.config`), so the "config sets a low-priority default"

@@ -8,7 +8,7 @@
 //! hot path; callers run these on task-pool workers. One in-flight
 //! command at a time (mutex); the shell is a serial channel.
 //!
-//! Concurrency contract (doc/sessions-design.md rev 4): `hashToken`
+//! Concurrency contract (doc/substrate.md §7): `hashToken`
 //! detects external writers; `writeGuarded` is a remote test-and-set —
 //! it replaces the file only if the target still hashes to the state the
 //! caller's merge was based on, else `error.Stale` (merge the new disk

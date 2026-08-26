@@ -105,7 +105,7 @@ rx: secure.Channel = undefined,
 
 last_rx_ns: std.atomic.Value(u64) = .init(0),
 
-/// Optional scheduler wake-fd (north-star-plan §6 W2a-3): the reader
+/// Optional scheduler wake-fd (doc/contextual-workspace-architecture.md §7): the reader
 /// thread signals it whenever it pushes fresh inbox data, and at
 /// terminal reader exit (a liveness transition worth noticing promptly
 /// too) — the fd Hub/Collab register as a scheduler source so tick

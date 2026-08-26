@@ -969,12 +969,13 @@ test "wasm plugin: a denied effect traps rather than returning a fake result" {
     defer plugin.deinit();
     try t.expect(!plugin.perms[wasm_host.perm_fs_read]);
 
-    // The membrane's ONE deny path (doc/north-star-plan.md §2.4, review C9):
-    // the host import traps the guest's call outright — command.run surfaces
-    // it as error.Trap, never a normal return with a fabricated result. If
-    // the guest's on_command ever DID resume after the denied call (a
-    // regression back to the old silent -1), it would set its result string
-    // to "did not trap" instead — so a bug here fails loud either way.
+    // The membrane's ONE deny path (doc/contextual-workspace-architecture.md
+    // §13.5, review C9): the host import traps the guest's call outright —
+    // command.run surfaces it as error.Trap, never a normal return with a
+    // fabricated result. If the guest's on_command ever DID resume after the
+    // denied call (a regression back to the old silent -1), it would set its
+    // result string to "did not trap" instead — so a bug here fails loud
+    // either way.
     try t.expectError(error.Trap, command.run(&env.commands, &env.ctx, "go", &.{}));
 }
 

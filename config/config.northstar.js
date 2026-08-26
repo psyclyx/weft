@@ -1,4 +1,4 @@
-// north-star-config.js — the FORCING FUNCTION artifact for doc/north-star-plan.md:
+// north-star-config.js — the FORCING FUNCTION artifact for doc/cwa-prior-docs-audit.md §5:
 // today's editor, byte-for-byte behavior, expressed as a north-star config.
 // Companion to config/config.js (the shipping original). The test this file
 // exists to run: "the degenerate case must stay degenerate" — if reproducing

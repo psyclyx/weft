@@ -18,7 +18,7 @@
 //! (completion), first-wins-by-priority (hover/definition/symbols/
 //! actions), union (references, diagnostics-by-layer).
 //!
-//! **F5 Container adapter, W3 RESOLVED (north-star-plan §2.2/§5/§6 W1/W3).**
+//! **F5 Container adapter, W3 RESOLVED (doc/configuration.md §7).**
 //! The "which providers match this fire" step — the extension filter
 //! formerly inline in `fire` — is a `container.Container` query: `register`
 //! binds each provider as a `Binding` (predicate built from its

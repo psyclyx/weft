@@ -3,14 +3,14 @@
 //! frame loop) and the shared buffer-delivery used by both proc output and the
 //! peer listing reply.
 //!
-//! **W0b split (doc/north-star-plan.md §2.5, task W0b item 1 — the perm-gated
+//! **W0b split (doc/extensibility-native-surface.md, task W0b item 1 — the perm-gated
 //! representative set)**: `fsRead`/`fsExists`/`fsWrite`/`fsAppend`/`fsList`
 //! below are the SEMANTIC bodies — guard (`shared.hasPerm`) + native-typed
 //! state access, zero wasm awareness (no `*wasm.Caller`, no ptr+len, no
 //! marshalling) — and `hFsRead`/etc. are thin wasm TRAMPOLINES: decode args
 //! out of guest memory, call the semantic body, encode the result (or trap on
 //! `error.PermissionDenied`). This is the ONE body per import the split
-//! demands (doc/north-star-plan.md §2.5 W0b: "the wasm path and the
+//! demands (doc/extensibility-native-surface.md: "the wasm path and the
 //! in-process path may not diverge"). One acknowledged deviation from
 //! byte-identical: the guard now runs INSIDE the body (after arg decode),
 //! where the pre-split trampolines checked before readMemory — observable
@@ -30,16 +30,16 @@
 //! bridge directly) — forcing this handler into the same
 //! guard+native-body+encode shape as the other five would manufacture an
 //! in-process "async" primitive nothing needs yet. Honest boundary, not an
-//! oversight (see doc/north-star-plan.md's W0b honesty note). It is also
+//! oversight (see doc/cwa-prior-docs-audit.md §5). It is also
 //! left OUT of the limit enforcement below: it only ever serves the
 //! `.peer` authority (a REMOTE root, already the collab session's own
 //! confinement, see `PeerFsBridge`), never `"here"` — a local `.fs_root`
 //! grant has nothing to say about it.
 //!
-//! **Limit enforcement (north-star-plan §6 W4 slice 2, task #8's item 1):**
-//! after the `hasPerm` possession check, each of the five split bodies below
-//! reads the checked handle's `Limit` (`shared.limitFor`) and, for
-//! `.fs_root(root)`, confines `path` to `root` before touching the
+//! **Limit enforcement (doc/contextual-workspace-architecture.md §13.5, task
+//! #8's item 1):** after the `hasPerm` possession check, each of the five
+//! split bodies below reads the checked handle's `Limit` (`shared.limitFor`)
+//! and, for `.fs_root(root)`, confines `path` to `root` before touching the
 //! filesystem. Two layers, deliberately different costs for a reason:
 //!   1. **`rootRelative` — a LEXICAL gate**, pure string comparison, no
 //!      syscalls: `path` must literally BE `root` or be prefixed by

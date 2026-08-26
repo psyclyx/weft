@@ -41,10 +41,10 @@ pub const StyleInputs = struct {
     /// the text, never in the document. dired's metadata/arrow/mark ride this,
     /// so the buffer text is only the editable name (yy yanks the name alone).
     deco: ?*const core.layers.Layer = null,
-    /// The `ui/gutter-segment` mesh's per-frame resolution (north-star-plan
-    /// §6 W3-1), passed through from `Hud.gutter` unchanged — null (today's
-    /// default) means no gutter cells render, at the cost of one pointer
-    /// copy per frame.
+    /// The `ui/gutter-segment` mesh's per-frame resolution
+    /// (doc/contextual-workspace-architecture.md §11), passed through
+    /// from `Hud.gutter` unchanged — null (today's default) means no
+    /// gutter cells render, at the cost of one pointer copy per frame.
     gutter: ?ui_mesh.GutterFrame = null,
 };
 
@@ -272,16 +272,17 @@ fn layoutRowPrefix(
     return col;
 }
 
-/// Lay out this row's `ui/gutter-segment` cells (north-star-plan §6 W3-1) as
-/// leading dimmed cells, BEFORE the decoration prefix `layoutRowPrefix`
-/// builds — the same leading-cell mechanism, generalized to a second
-/// producer. `gf.bindings` is the ALREADY-RESOLVED, priority-sorted provider
-/// list (`ui_mesh.gutterBindings`, fired once for the whole frame); this
-/// call is the "invoke per visible row" half — no Container scan here, one
+/// Lay out this row's `ui/gutter-segment` cells
+/// (doc/contextual-workspace-architecture.md §11) as leading dimmed cells,
+/// BEFORE the decoration prefix `layoutRowPrefix` builds — the same
+/// leading-cell mechanism, generalized to a second producer. `gf.bindings`
+/// is the ALREADY-RESOLVED, priority-sorted provider list
+/// (`ui_mesh.gutterBindings`, fired once for the whole frame); this call is
+/// the "invoke per visible row" half — no Container scan here, one
 /// fn-pointer call per (row × eligible provider). Empty `bindings` (nothing
 /// bound — today's default) returns 0 immediately without allocating or
-/// calling anything past the length check. Returns the first column past
-/// the gutter, so the decoration/real-text prefixes continue from there.
+/// calling anything past the length check. Returns the first column past the
+/// gutter, so the decoration/real-text prefixes continue from there.
 fn layoutGutterPrefix(
     v: *View,
     scratch: Allocator,

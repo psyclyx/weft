@@ -98,7 +98,7 @@ pub fn hProvide(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32, resu
 pub const DispatchError = error{NotDispatching};
 
 /// `weft.setMode(mode)` semantic body (task #19 item 3's POLICY DOOR,
-/// HEAD-GATED per task #19 item 4 — W0b split, doc/north-star-plan.md §2.5):
+/// HEAD-GATED per task #19 item 4 — W0b split, doc/extensibility-native-surface.md):
 /// the mode-leak class's founding bug ("background forces a mode") is
 /// `shared.canDispatch(id)` here — SAME check `requireDispatch`'s wasm trap
 /// uses, shared not reimplemented. Compare `hMenuMode`/`hLockedMode`/

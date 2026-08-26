@@ -218,7 +218,7 @@ pub const Window = struct {
     }
 
     /// Next due time for synthesized key-repeat, or null when no key is
-    /// currently held repeatable — a pure query (north-star-plan §6
+    /// currently held repeatable — a pure query (doc/cwa-prior-docs-audit.md §5
     /// W2a-3): the scheduler sleeps until this instant instead of
     /// relying on vsync to happen to service `emitKeyRepeats` in time.
     /// The synthesis itself still runs inside `pumpEvents` (called on

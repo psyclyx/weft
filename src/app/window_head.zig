@@ -1,7 +1,7 @@
 //! WindowHead — the first-party in-process client that owns the window
 //! (Platform: `platform/wayland.zig`'s `Window`), the GPU device + swapchain
 //! (`gfx/context.zig`'s `Context`), and the renderer (`app/render.zig`'s
-//! `RenderState`) — W0b's "window-head" (doc/north-star-plan.md §2.5/§2.7):
+//! `RenderState`) — W0b's "window-head" (doc/extensibility-native-surface.md):
 //! rendering.md P5's "bundled scene client" lineage, generalized to own the
 //! platform attachment itself rather than just drawing into one.
 //!
@@ -31,7 +31,7 @@
 //! `std.fs` call, say) correct by construction instead of a retrofit.
 //!
 //! **Deliberately NOT done here** (the W2a-3 review's relabeling caution,
-//! doc/north-star-plan.md §6, applies verbatim): this struct does NOT own
+//! doc/cwa-prior-docs-audit.md §5, applies verbatim): this struct does NOT own
 //! the frame LOOP. `main()` still drives it — `pumpEvents`, the
 //! input→commit→build→present sequence, and the scheduler sources for
 //! timers/fd unrelated to the window itself (blink/key-repeat/which-key/

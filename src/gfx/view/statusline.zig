@@ -49,11 +49,12 @@ pub fn buildHud(
     });
 
     var col: usize = 0;
-    // `ui/statusline-seg` mesh (north-star-plan §6 W3-1): mode chip, buffer
-    // position, file/path, collab liveness — composed by `frame_builder` in
-    // Container total order and rendered here as plain segments. The
-    // diagnostics count rides the SAME mesh call but is `align_right`, so it
-    // joins the right-anchored cluster below instead of this loop.
+    // `ui/statusline-seg` mesh (doc/contextual-workspace-architecture.md
+    // §11): mode chip, buffer position, file/path, collab liveness —
+    // composed by `frame_builder` in Container total order and rendered here
+    // as plain segments. The diagnostics count rides the SAME mesh call but
+    // is `align_right`, so it joins the right-anchored cluster below instead
+    // of this loop.
     for (hud.statusline_segs) |seg| {
         if (seg.align_right) continue;
         const color = seg.fg_override orelse v.theme.roleColor(seg.role);

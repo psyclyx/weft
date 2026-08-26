@@ -1,5 +1,5 @@
 //! The reified implicit timers + fd sources for the app-layer scheduler
-//! loop (north-star-plan §6 W2a-3 / §4 C16). Every entry here replaces a
+//! loop (doc/contextual-workspace-architecture.md §7). Every entry here replaces a
 //! `now >= some_deadline` check that used to be serviced *by accident*
 //! because the old loop unconditionally woke every vsync — the check
 //! itself (the actual state mutation: flip the caret, fire the which-key
@@ -18,7 +18,7 @@
 //! several reasons at once and still run one coherent pass.
 //!
 //! `headless.zig` shares the fd-drain helpers and the pool/hub source
-//! shapes with `main.zig` (north-star-plan §6 W2a-3 item 5's unification)
+//! shapes with `main.zig` (doc/contextual-workspace-architecture.md §7)
 //! but not the window-shaped timers below (blink/repeat/which-key/flash/
 //! pointer are all window concerns headless has none of).
 
@@ -145,13 +145,14 @@ pub fn pickDebounceDue(ctx: ?*anyopaque, now: u64) ?u64 {
 
 // ── 8. Present retry — new (no old site): a frame was BUILT but the GPU
 // fence wasn't signaled yet (`Context.beginFrame` returning null rather
-// than blocking — north-star-plan §2.7's "never block on a GPU fence").
-// Demands immediacy (returns `now`) exactly while a present is
-// outstanding; fully dormant otherwise. As of the lost-wakeup ordering
-// fix (`scheduler.zig`'s `step`), "demands immediacy" is no longer
-// aspirational — the very next `step` (not one step later) sees a
-// `present_pending` this source's own caller just set, so a present that
-// was deferred for a busy fence really does retry on the next wake.
+// than blocking — doc/contextual-workspace-architecture.md §7's "never
+// block on a GPU fence"). Demands immediacy (returns `now`) exactly
+// while a present is outstanding; fully dormant otherwise. As of the
+// lost-wakeup ordering fix (`scheduler.zig`'s `step`), "demands
+// immediacy" is no longer aspirational — the very next `step` (not one
+// step later) sees a `present_pending` this source's own caller just
+// set, so a present that was deferred for a busy fence really does retry
+// on the next wake.
 //
 // Suppressed while the swapchain is stale/zero-extent (review fix: a
 // minimized window leaves `present_pending` latched with nothing
@@ -186,7 +187,7 @@ pub fn pluginLoopDue(ctx: ?*anyopaque, now: u64) ?u64 {
 }
 
 // ── 10. Background services fallback — a deliberate, bounded-latency
-// compromise (see the report / north-star-plan follow-up), NOT a
+// compromise (see the report / doc/cwa-prior-docs-audit.md §5 follow-up), NOT a
 // per-subsystem reification: collab hub/conn ticking has a real push
 // wakeup (Session/Hub's `wake_fd`, registered as fd sources below), but
 // REPL/LSP proc-stream readiness (`wasm_host.notifyPollIfReady`/

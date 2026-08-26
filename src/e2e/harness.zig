@@ -587,7 +587,8 @@ pub const Editor = struct {
     }
 };
 
-// ── A second head over the SAME session (north-star-plan §6 W2a GATE) ──────
+// ── A second head over the SAME session
+// (doc/contextual-workspace-architecture.md §7) ──────
 //
 // Proves two heads sharing one system don't collide: distinct mode/pending
 // chord, distinct pick session, distinct echo line, distinct dot-repeat
@@ -664,7 +665,7 @@ pub const SecondHead = struct {
     /// `win_ctx`/`win_layout` with `self.head` as the acting head, so a
     /// focus/split/close recorded by a command THIS head ran lands on
     /// THIS head's handle, not `ed`'s own. The two-head window-op gate
-    /// (north-star-plan §6 W2a GATE) drives real split/close/focus
+    /// (doc/contextual-workspace-architecture.md §7) drives real split/close/focus
     /// sequences "as" each head through this.
     pub fn applyWindow(self: *SecondHead, ed: *Editor) void {
         _ = window_cmds.applyIntents(&ed.win_ctx, ed.win_layout, &ed.render.fb.view, ed.buffers, ed.gpa, &self.head, ed.keymap, ed.application.last_frame_rect);
@@ -680,7 +681,7 @@ pub const SecondHead = struct {
 };
 
 /// TestHead — the SECOND head implementation W0b's gate asks for (task W0b
-/// item 4, doc/north-star-plan.md §6: "a second head implementation (tty or
+/// item 4, doc/cwa-prior-docs-audit.md §5: "a second head implementation (tty or
 /// test-head) attaches through the same grant"): a minimal, harness-driven
 /// client wrapping `SecondHead` (above — already "a second `core.Head` on
 /// the real session, driven through the real dispatch") with its own named
@@ -1868,7 +1869,7 @@ pub fn bootConfig(ed: *Editor, config_dir: []const u8, loader_state: *ConfigLoad
 }
 
 /// Like `bootConfig`, but the config FILE within `config_dir` is named
-/// explicitly — the M3/M4 parity harness's door (north-star-plan §8): boot
+/// explicitly — the M3/M4 parity harness's door (doc/configuration.md §7): boot
 /// `config.js` and `config.northstar.js` from the SAME directory (so both
 /// resolve `weft.use("defaults")` identically) into two separate `Editor`s.
 pub fn bootConfigNamed(ed: *Editor, config_dir: []const u8, filename: []const u8, loader_state: *ConfigLoader) !void {

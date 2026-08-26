@@ -28,7 +28,7 @@ pub const ControlKind = enum(u8) { hello = 0, hello2 = 1, finish = 2, accept = 3
 /// (`Access`). The client sets `Document.my_grant` from it so it can refuse
 /// a local edit its ops would only be dropped for — see session.zig.
 /// `region_refused` (GraphDoc quads only, W6 slice 1's per-region lease —
-/// doc/d1-live-reconcile.md §5) is the LOUD counterpart to a batch that was
+/// doc/substrate.md §4) is the LOUD counterpart to a batch that was
 /// decoded and passed the coarse `canEdit` gate but was refused at the
 /// per-region admission hook because the sender doesn't hold the lease on
 /// a region its ops touch: uv region_token_len | region_token | uv

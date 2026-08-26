@@ -84,23 +84,23 @@ function sendPrompt(text) {
 // entry happens to be open, matching the flat-stream behavior this replaces
 // rather than a new limitation.
 //
-// The old per-chunk `bufferFold`/`paintStyle` richness (role colors, folded
-// tool output) is ALSO dropped here, but not lost for good — its return
-// path is concrete, not a vague "later": `TranscriptDoc.fill`'s plain
-// "role: text" projection is now the one and only content path (never a
-// decoration a plugin paints over a SEPARATELY-driven raw append — that
-// would resurrect exactly the parallel transcript representation the model
-// exists to replace). Richness comes back as a DECORATION PROVIDER over
-// THAT SAME projection's existing per-row subbuffer claims — the identical
-// id-span mechanism `fill` already mints one of per entry (`node_fact`,
-// carrying the entry's portable `NodeRef`) and dired's decoration renderer
-// already consumes for its own rows (editable-projection Phase 2,
-// doc/editable-projection.md: "the decoration renderer" — read a claim's
-// facts, e.g. this entry's `role` looked up back through its `NodeRef`, and
+// The old per-chunk `bufferFold`/`paintStyle` richness (role colors, folded tool
+// output) is ALSO dropped here, but not lost for good — its return path is concrete,
+// not a vague "later": `TranscriptDoc.fill`'s plain "role: text" projection is now
+// the one and only content path (never a decoration a plugin paints over a
+// SEPARATELY-driven raw append — that would resurrect exactly the parallel
+// transcript representation the model exists to replace). Richness comes back as a
+// DECORATION PROVIDER over THAT SAME projection's existing per-row subbuffer claims
+// — the identical id-span mechanism `fill` already mints one of per entry
+// (`node_fact`, carrying the entry's portable `NodeRef`) and dired's decoration
+// renderer already consumes for its own rows
+// (doc/contextual-workspace-architecture.md §11.8,
+// doc/contextual-workspace-architecture.md §11.8: "the decoration renderer" — read a
+// claim's facts, e.g. this entry's `role` looked up back through its `NodeRef`, and
 // a tool entry's `kind`, and paint/fold purely from THAT, never from
-// separately-tracked byte ranges a plugin keeps in sync by hand). Until
-// that provider is built, the transcript reads as plain "role: text" rows —
-// correct and honest, just undecorated.
+// separately-tracked byte ranges a plugin keeps in sync by hand). Until that
+// provider is built, the transcript reads as plain "role: text" rows — correct and
+// honest, just undecorated.
 function renderToolContent(u) {
   const items = u.content || [];
   if (!items.length) return;

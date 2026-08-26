@@ -1,4 +1,4 @@
-//! Head — per-head interaction state (north-star-plan §2.7, §4 C14, §6 W2a-1).
+//! Head — per-head interaction state (doc/contextual-workspace-architecture.md §7).
 //! A head is a platform attachment (window+input); heads and systems have
 //! independent lifetimes. TWO heads on one system must not share a keymap
 //! mode, a pending chord, a pick session, or an echo line — this struct is
@@ -183,7 +183,7 @@ pub const SemanticFocus = struct {
 };
 
 /// One live "paired transient" push (`ctx.zig`'s `Ctx.pushTransient`) —
-/// north-star-plan §2.1's "transient/menu modes are structurally paired
+/// doc/cwa-prior-docs-audit.md §5's "transient/menu modes are structurally paired
 /// (`ctx.push(transient)` returns a value whose going-out-of-scope IS the
 /// pop)". `mode` is what this frame entered; `return_to` is the mode to
 /// restore on pop, captured at push time (so nested pushes each remember
@@ -243,7 +243,7 @@ pub const DotRepeat = struct {
     /// buffer 0 already has edits (buffer ids start at 0 — `Buffers.init`'s
     /// doc) would see `buf == 0` "match" its own unsynced default and
     /// misread the gap since its creation as one giant in-progress change.
-    /// Two-head gate gap (north-star-plan §6 W2a GATE): the original
+    /// Two-head gate gap (doc/contextual-workspace-architecture.md §7): the original
     /// single-head design never needed this because the one head always
     /// existed before the first edit.
     synced: bool = false,
@@ -299,7 +299,7 @@ pub fn currentMode(self: *const Head) []const u8 {
     return self.mode;
 }
 
-/// **MECHANISM, not policy (task #19 item 3 — north-star-plan §2.1/§5
+/// **MECHANISM, not policy (task #19 item 3 — doc/cwa-prior-docs-audit.md §5
 /// "Mode changes — REVISED").** Host-side (or generic) mode set: no
 /// menu-return bookkeeping. Abandons any half-typed chord (a stale
 /// `space f` must not combine with the new mode's next key). Used for
@@ -422,7 +422,7 @@ pub fn popTransientMode(self: *Head, gpa: Allocator, depth: usize) (Allocator.Er
 }
 
 /// Whether this head has a transient pushed but never popped — the
-/// leak-detecting query north-star-plan §6 W2b gate (d) asks for ("a
+/// leak-detecting query doc/contextual-workspace-architecture.md §7 gate (d) asks for ("a
 /// transient/menu push cannot outlive its scope ... else runtime-paired
 /// with a leak-detecting test").
 pub fn hasOpenTransients(self: *const Head) bool {

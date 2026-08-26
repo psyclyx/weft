@@ -742,7 +742,7 @@ test "e2e/config: SPC , keeps stable order and places the active buffer last" {
     try t.expectEqualStrings("bravo.txt", ed.bufferName());
 }
 
-// ── M3/M4 parity: config.js vs config.northstar.js (north-star-plan §8) ──
+// ── M3/M4 parity: config.js vs config.northstar.js (doc/configuration.md §7) ──
 //
 // north-star-config.js is doc/north-star-config.js's forcing-function
 // argument made real: today's editor, reproduced as a config that evaluates
@@ -885,9 +885,9 @@ test "e2e/config: config.js and config.northstar.js reach the same manifest surf
 // quickjs.zig): the DOCUMENTED ACP setup — `weft.set("acp", "cmd", …)`
 // before `weft.plugin("acp.js")` — must still land its value. `acp.js` is a
 // path-form `.js` name; its config-store identity is the STEM ("acp"), not
-// the raw declared name, and the value-ownership check (north-star-plan
-// §2.4) must recognize that or a real, pre-M3-working config setup breaks
-// silently (M4 parity item 6).
+// the raw declared name, and the value-ownership check
+// (doc/contextual-workspace-architecture.md §13.5) must recognize that or a
+// real, pre-M3-working config setup breaks silently (M4 parity item 6).
 test "e2e/config: R1 — weft.set(\"acp\", ...) before weft.plugin(\"acp.js\") is not dropped" {
     const gpa = t.allocator;
     var proj: Project = undefined;

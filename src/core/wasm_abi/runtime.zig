@@ -48,13 +48,13 @@ fn hostCursor(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32, result
     results[0] = @intCast(ed.cursorOffset());
 }
 
-/// W4 slice 3 (north-star-plan §2.4/§6, review B2's repair): `hostEdit` is a
-/// wasm-transport trampoline too (this minimal ABI's `run` door, per the
-/// module doc's "milestone-2 proof" — `caller` is a real `*wasm.Caller`, not
-/// a stand-in), so the SAME "denied effects trap" bar
-/// `wasm_host/edit.zig`'s `hEdit`/`hEditAs`/`hEditRange` meet applies here.
-/// A twin of that file's `trapDocRegion` (kept separate rather than shared:
-/// this ABI's `HostCtx` carries a `*command.Context` directly, not a
+/// W4 slice 3 (doc/contextual-workspace-architecture.md §13.5, review B2's
+/// repair): `hostEdit` is a wasm-transport trampoline too (this minimal
+/// ABI's `run` door, per the module doc's "milestone-2 proof" — `caller` is
+/// a real `*wasm.Caller`, not a stand-in), so the SAME "denied effects trap"
+/// bar `wasm_host/edit.zig`'s `hEdit`/`hEditAs`/`hEditRange` meet applies
+/// here. A twin of that file's `trapDocRegion` (kept separate rather than
+/// shared: this ABI's `HostCtx` carries a `*command.Context` directly, not a
 /// `*WasmPlugin` — sharing would need a needless duck-typed coupling for one
 /// caller).
 fn trapDocRegion(h: *HostCtx, caller: *wasm.Caller, start: usize, end: usize, err: anyerror) void {
@@ -131,7 +131,7 @@ pub const LoadOptions = struct {
     loop: ?*async_loop.Loop = null,
     /// The task pool interactive REPL sessions run on. Null = repl-start drops.
     pool: ?*Pool = null,
-    /// north-star-plan §6 W4 slice 1 — the grant table this plugin's
+    /// doc/contextual-workspace-architecture.md §13.5 — the grant table this plugin's
     /// `describe()`-declared perms mint POSSESSED handles into (see
     /// `WasmPlugin.grant_table`/`grant_handles`). Null = no table (the
     /// pre-W4 default): `hasPerm` degrades to reading `perms` directly, and
@@ -171,7 +171,7 @@ pub fn loadPlugin(engine: *wasm.Engine, ctx: *command.Context, name: []const u8,
         if (e != error.MissingExport) return failLoad(p, e);
     };
     p.phase = .active;
-    // north-star-plan §6 W4 slice 1: `perms` is final now (describe() has
+    // doc/contextual-workspace-architecture.md §13.5: `perms` is final now (describe() has
     // run) — if a grant table is wired, mint this plugin's POSSESSED
     // handles from it before `init()` runs, so even init-time fs/proc/etc
     // calls already go through the revocable handle path (see

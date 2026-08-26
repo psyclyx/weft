@@ -1,11 +1,11 @@
-//! `syntax_claim` — the SYNTAX-CLAIM RECONCILE (W7b, doc/w7-rebase.md §4,
-//! doc/d1-live-reconcile.md §1.3's id-diff discipline, reused). This is the
+//! `syntax_claim` — the SYNTAX-CLAIM RECONCILE (W7b, doc/substrate.md §8,
+//! doc/substrate.md §3's id-diff discipline, reused). This is the
 //! genuinely novel piece the flagship needs: a code buffer's function-shaped
 //! regions, minted as `graph.zig#GraphDoc` STRUCT NODES (W7b's other new
 //! piece — see `graph.zig`'s "The struct forest — exposed" module doc
 //! comment) whose identity persists across edits AND across a peer's move
 //! of the function, which an `EventAnchor` pair cannot do
-//! (doc/w7-rebase.md §2.2 point 1).
+//! (doc/substrate.md §1 point 1).
 //!
 //! ## The model this reconcile maintains
 //!
@@ -34,7 +34,7 @@
 //!   function's own `ObjId` and its `"body"` text object are completely
 //!   untouched. Contrast a flat shared buffer, where "moving" a function
 //!   is unavoidably a cut (delete) + paste (insert) — new insertion
-//!   identity, collapsed anchors, a trapped grant (w7-rebase.md §2.2: "a
+//!   identity, collapsed anchors, a trapped grant (doc/substrate.md §1: "a
 //!   genuine cut+paste mints new insertion identity, so the pair collapses
 //!   and traps... only real on the graph substrate"). Decoupling "where a
 //!   function sits" from "what a function's content IS" is exactly what
@@ -66,7 +66,7 @@
 //! content-anchor matching, and what upgrading to that would buy). A
 //! MATCHED node is left completely alone: its `"body"` text object is
 //! NEVER overwritten by this reconcile, because in-function text edits are
-//! already convergent by construction (doc/d1-live-reconcile.md §1.2 — "no
+//! already convergent by construction (doc/substrate.md §3 — "no
 //! commit point, because there is nothing a commit point would buy") —
 //! reconcile's job is EXISTENCE (does a node for this name exist?), not
 //! content sync. An unmatched OLD node (its name no longer appears)

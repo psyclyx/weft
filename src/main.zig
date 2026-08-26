@@ -223,8 +223,9 @@ pub fn main(init: std.process.Init) !void {
         .gpa = gpa,
         .engine = &plug.engine,
         .ctx = &session.cmd_ctx,
-        // `.grant_table = &session.system.grants` (north-star-plan §6 W4
-        // slice 4 — "this slice makes grants REAL in the desktop"): the
+        // `.grant_table = &session.system.grants`
+        // (doc/contextual-workspace-architecture.md §13.5 slice 4 —
+        // "this slice makes grants REAL in the desktop"): the
         // production loader now mints every loaded plugin's perms as
         // REVOCABLE handle-table rows instead of bare booleans, and
         // couples with `Ctx.capture`'s already-wired `ctx.grant_table`
@@ -236,11 +237,11 @@ pub fn main(init: std.process.Init) !void {
         .js_list = &plug.js_list,
         .dir = plugin_dir,
     };
-    // The live `revoke`/`grants-show` debug commands (north-star-plan §6 W4
-    // slice 4) — opt-in, per-embedder wiring (see their own docs for why
-    // `builtins.install` doesn't bind them unconditionally): bound onto the
-    // editor system now that its grant table actually holds real,
-    // production-minted rows.
+    // The live `revoke`/`grants-show` debug commands
+    // (doc/contextual-workspace-architecture.md §13.5 slice 4) — opt-in,
+    // per-embedder wiring (see their own docs for why `builtins.install`
+    // doesn't bind them unconditionally): bound onto the editor system now
+    // that its grant table actually holds real, production-minted rows.
     try core.System.registerRevokeCommand(gpa, &session.system.commands, session.system);
     try core.System.registerGrantsShowCommand(gpa, &session.system.commands, session.system);
     // Explicit --plugin flags load first, in order.
@@ -256,8 +257,9 @@ pub fn main(init: std.process.Init) !void {
     //
     // `config_session` outlives this block (held for the whole run) so
     // `config-reload` can `Manifest.reconcile` against the manifest actually
-    // applied, rather than blindly re-running the JS program (north-star-plan
-    // §2.3/§6). Only wired when a config path was given.
+    // applied, rather than blindly re-running the JS program
+    // (doc/configuration.md §5). Only wired when a config
+    // path was given.
     var config_session: ?config_load.ConfigSession = null;
     defer if (config_session) |*cs| cs.deinit();
     if (args.config) |config_path| {
@@ -265,7 +267,7 @@ pub fn main(init: std.process.Init) !void {
             std.log.warn("config: {s} failed to load: {t}", .{ config_path, e });
             break :blk null;
         };
-        // `weft.statusSegment` mesh reachability (north-star-plan task #19
+        // `weft.statusSegment` mesh reachability (doc/cwa-prior-docs-audit.md §5
         // item 3): binds straight into `session.system.container` — the same
         // shared Container `session.system.caps`/`.actions` already use.
         if (config_session) |*cs| cs.ui_bind = .{ .ctx = &session.system.container, .bind = view_mod.ui_mesh.bindManifestSegment };
@@ -284,9 +286,9 @@ pub fn main(init: std.process.Init) !void {
     // mode (dired/magit) can never leak into a file opened from it.
     session.system.buffers.setDefaultMode(gpa, session.head.currentMode()) catch {};
 
-    // ── A second hosted system: agent-ux (north-star-plan task #19 items
-    //    1/4) ── A minimal SECOND system, hosted alongside "editor" on the
-    // SAME `session.host` — proves `system-swap` works on the REAL desktop
+    // ── A second hosted system: agent-ux (doc/cwa-prior-docs-audit.md §5)
+    // ── A minimal SECOND system, hosted alongside "editor" on the SAME
+    // `session.host` — proves `system-swap` works on the REAL desktop
     // session, not just `System.zig`'s synthetic gate fixtures.
     // `config/agent-ux.js` is a dev-checkout GATE FIXTURE, not an installed
     // file (see its own module doc — no `build.zig install` rule ships it);
@@ -403,7 +405,7 @@ pub fn main(init: std.process.Init) !void {
     try window_cmds.registerCommands(gpa, &session.system.commands, &win_ctx, &window_action_ctx);
 
     // ── Window + Vulkan + Rasterizer, as ONE unit: the window-head (W0b,
-    //    doc/north-star-plan.md §2.5/§2.7) — an in-process client owning the
+    //    doc/extensibility-native-surface.md) — an in-process client owning the
     //    platform attachment, under its own named identity. See
     //    `app/window_head.zig`'s module doc for what this does and
     //    deliberately does NOT extract (the frame loop stays here).
@@ -470,11 +472,11 @@ pub fn main(init: std.process.Init) !void {
     // active menu mode changes, so a which-key plugin re-renders exactly on
     // enter/leave (and never nested inside another guest call). Per-head
     // storage: `session.menu_overlay` lives beside `session.head` (see
-    // `Session`'s doc — north-star-plan §6 W2a-2).
+    // `Session`'s doc — doc/contextual-workspace-architecture.md §7).
     // which-key idle delay (doom-style): don't pop the hint until the menu has
     // been held this long — unless which-key-now (F1) forces it. Config sets it
     // via weft.set("which_key", "delay-ms", "200") — owned by the which_key
-    // plugin's namespace, not the old "editor" grab-bag (north-star-plan §8's
+    // plugin's namespace, not the old "editor" grab-bag (doc/configuration.md §7's
     // forcing-function finding: every config value needs an owner).
     const which_key_delay_ns: u64 = blk: {
         if (session.system.config_kv.get("which_key", "delay-ms")) |raw| {
@@ -608,15 +610,15 @@ pub fn main(init: std.process.Init) !void {
 
     std.log.info("weft: rendering — {d} bytes open, em {d}", .{ ed0.text().byteLen(), args.em });
 
-    // ── The scheduler (north-star-plan §6 W2a-3): registered SOURCES, one
-    // poll()-based wait per iteration. `main()`'s per-wake body below is
-    // UNCHANGED from the pre-scheduler loop (same input→commit→build→
-    // present shape) except: it now runs once per genuine wake (an fd
-    // ready, or a deadline reached) instead of once per vsync regardless
-    // of whether anything happened, and the final present is gated on
-    // `render.fb.rebuilt` (see `loop_sources.zig`'s module doc + the
-    // per-source doc comments below for the old clock-polled site each
-    // timer replaces).
+    // ── The scheduler (doc/contextual-workspace-architecture.md §7):
+    // registered SOURCES, one poll()-based wait per iteration.
+    // `main()`'s per-wake body below is UNCHANGED from the pre-scheduler
+    // loop (same input→commit→build→ present shape) except: it now runs
+    // once per genuine wake (an fd ready, or a deadline reached) instead
+    // of once per vsync regardless of whether anything happened, and the
+    // final present is gated on `render.fb.rebuilt` (see
+    // `loop_sources.zig`'s module doc + the per-source doc comments
+    // below for the old clock-polled site each timer replaces).
     var sched = scheduler.Scheduler.init(gpa, stats_mod.nowNs);
     defer sched.deinit();
 

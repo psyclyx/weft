@@ -1,4 +1,4 @@
-//! Manifest — config evaluation's output VALUE (north-star-plan §2.3, M3).
+//! Manifest — config evaluation's output VALUE (doc/configuration.md §5, M3).
 //! `quickjs.zig`'s `weft.*` config surface used to mutate the editor
 //! DIRECTLY, inline, as each JS call landed (with `weft.plugin`/`weft.run`
 //! deferred by hand to a tail replay — see quickjs.zig's old module doc).
@@ -137,17 +137,17 @@ const maxRunArgBytes = 1024;
 const maxRunArgTotal = 4096;
 pub const EchoDecl = struct { message: []u8 };
 pub const LogDecl = struct { message: []u8 };
-/// `weft.statusSegment(text, role, priority)` (north-star-plan §6 W3, task
-/// #19 item 3's mesh-reachability verb) — a STATIC status-line segment:
-/// literal `text`, a `role` naming a `core.surface.Role`, and `priority`
-/// (the `ui/statusline-seg` slot's ordinary ordered_union sort key).
-/// Deliberately NOT `text_or_command` despite the field name a first draft
-/// of this verb used in review notes: a command-BACKED dynamic segment
-/// (re-evaluated per HUD build) needs a `ui_provider` whose `call`
-/// re-invokes `command.run` — a real, separate feature (needs a
-/// `*command.Context` at fire time, which a config-time `StatusSegmentDecl`
-/// doesn't have and shouldn't fake) left for a later step; this type stays
-/// honestly static-only until that lands.
+/// `weft.statusSegment(text, role, priority)`
+/// (doc/contextual-workspace-architecture.md §11, the mesh-reachability
+/// verb) — a STATIC status-line segment: literal `text`, a `role` naming a
+/// `core.surface.Role`, and `priority` (the `ui/statusline-seg` slot's
+/// ordinary ordered_union sort key). Deliberately NOT `text_or_command`
+/// despite the field name a first draft of this verb used in review notes:
+/// a command-BACKED dynamic segment (re-evaluated per HUD build) needs a
+/// `ui_provider` whose `call` re-invokes `command.run` — a real, separate
+/// feature (needs a `*command.Context` at fire time, which a config-time
+/// `StatusSegmentDecl` doesn't have and shouldn't fake) left for a later
+/// step; this type stays honestly static-only until that lands.
 pub const StatusSegmentDecl = struct {
     text: []u8,
     role: []u8,
@@ -164,12 +164,13 @@ pub const StatusSegmentDecl = struct {
     resolved_role: surface.Role = .normal,
 };
 
-/// `weft.grant(plugin, capability, opts)` (north-star-plan §2.4/§6 W4 slice
-/// 4 — the deferred verb `grants.zig`'s module doc named): stage a
-/// `GrantDecl` onto the manifest, minted into the System's `grants.
-/// HandleTable` by `reconcileGrants` (see that function's doc — `apply`
-/// calls it too, with `old = null`) strictly BEFORE the named plugin's
-/// `describe()` handshake runs.
+/// `weft.grant(plugin, capability, opts)`
+/// (doc/contextual-workspace-architecture.md §13.5 — the deferred verb
+/// `grants.zig`'s module doc named): stage a `GrantDecl` onto the
+/// manifest, minted into the System's `grants. HandleTable` by
+/// `reconcileGrants` (see that function's doc — `apply` calls it too,
+/// with `old = null`) strictly BEFORE the named plugin's `describe()`
+/// handshake runs.
 ///
 /// `root` is `opts.root` flattened to a plain string by the qjs shim before
 /// it ever reaches `manifest.zig` (`quickjs.zig`'s `cGrant`) — `""` (the
@@ -229,7 +230,7 @@ pub const SlotDeclDecl = struct {
 };
 
 /// Whether a `weft.plugin(name)` names the bundled catalog or an explicit
-/// path — the trust-root choke point (north-star-plan §5 "Trust root —
+/// path — the trust-root choke point (doc/cwa-prior-docs-audit.md §5 "Trust root —
 /// DECIDED", §4 C17). A bare name ("vim") resolves against the bundled
 /// plugin directory and is accepted under the catalog's curated grant
 /// bundle — today's behavior, no prompt. A path-form name (contains '/', or
@@ -285,9 +286,10 @@ pub fn keymapPriorityForTier(tier: Tier) i32 {
 }
 
 /// Value namespaces core itself owns (not a loaded plugin's name) — see
-/// `Manifest.applyDecls`'s ownership check (north-star-plan §2.4 "`weft.set`
-/// value namespaces are closed by default"). `"theme"` (`view.Theme`'s
-/// fields) and `"editor"` (generic core knobs with no plugin owner — e.g.
+/// `Manifest.applyDecls`'s ownership check
+/// (doc/contextual-workspace-architecture.md §13.5 "`weft.set` value
+/// namespaces are closed by default"). `"theme"` (`view.Theme`'s fields)
+/// and `"editor"` (generic core knobs with no plugin owner — e.g.
 /// `flash-ms`) are legitimate DECLARED core namespaces; the finding §8's
 /// forcing function surfaced was narrower than "kill 'editor'" — it was
 /// specifically that `which-key-delay-ms` belongs to the `which_key`
@@ -868,7 +870,7 @@ pub const Manifest = struct {
         }
     }
 
-    // ── Grants (north-star-plan §2.4/§6 W4 slice 4: `weft.grant` — the
+    // ── Grants (doc/contextual-workspace-architecture.md §13.5: `weft.grant` — the
     // deferred verb `grants.zig`'s module doc named) ───────────────────────
 
     fn collectGrants(self: *const Manifest, gpa: Allocator, out: *std.ArrayList(ManifestGrantDecl)) !void {
@@ -903,7 +905,8 @@ pub const Manifest = struct {
     /// decl (present, byte-identical, in both) is left completely alone, so
     /// whatever already holds its handle keeps holding a LIVE one.
     ///
-    /// **The composition-rule round trip (north-star-plan §2.4, the honest
+    /// **The composition-rule round trip
+    /// (doc/contextual-workspace-architecture.md §13.5, the honest
     /// answer)**: when a `weft.grant` decl is REMOVED, `revoke` invalidates
     /// every live row for that (principal, capability) — normally exactly
     /// ONE row, since `wasm_host/plugin.zig`'s `mintGrantHandles` never

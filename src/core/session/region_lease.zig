@@ -1,9 +1,9 @@
-//! `LeaseTable` — W6 slice 1's per-region lease (doc/d1-live-reconcile.md
-//! §5, the declared single-writer-per-region fallback D1 designed). One
-//! table per replica's view of ONE `GraphDoc`: a region (a `GraphDoc.
-//! NodeRef` — one `ObjId`, per §1.1) maps to the principal currently
-//! holding it, soft-state, re-announced and reaped exactly like presence
-//! (§5.2 "leases are soft-state, re-announced like presence and reaped on
+//! `LeaseTable` — W6 slice 1's per-region lease (doc/substrate.md §4, the
+//! declared single-writer-per-region fallback D1 designed). One table per
+//! replica's view of ONE `GraphDoc`: a region (a `GraphDoc. NodeRef` —
+//! one `ObjId`, per §1.1) maps to the principal currently holding it,
+//! soft-state, re-announced and reaped exactly like presence (§5.2
+//! "leases are soft-state, re-announced like presence and reaped on
 //! disconnect").
 //!
 //! ## Trust model, stated honestly
@@ -238,12 +238,12 @@ pub const Span = struct {
     /// Same bit layout as `Collab.packPresenceKind` (hue in bits 0..15) —
     /// bit 16 is always set (locked), not a caret side. A future unified
     /// span renderer can share the low-16 hue decode; see
-    /// `d1-live-reconcile.md` §5.2 "a lease is a presence span with a
+    /// `doc/substrate.md` §4 "a lease is a presence span with a
     /// locked flag, in the holder's hue".
     kind: u32,
 };
 
-/// Display plumbing (not full UI — d1-live-reconcile.md §5's wire-the-data-
+/// Display plumbing (not full UI — doc/substrate.md §4's wire-the-data-
 /// path scope): every held region as a presence-shaped span. Rendering
 /// into an actual buffer range is a projection's job (needs the region's
 /// subbuffer span, `fill`/`Viewport` machinery not yet plumbed per

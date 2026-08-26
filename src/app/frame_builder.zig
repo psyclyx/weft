@@ -458,14 +458,15 @@ pub const FrameBuilder = struct {
             const len = (editor orelse break :fblk null).text().byteLen();
             break :fblk .{ .start = @min(fs.start, len), .end = @min(fs.end, len) };
         };
-        // `ui/statusline-seg` (north-star-plan §6 W3-1): fire the mesh with
-        // this frame's mode/file/position/diagnostics/link — the same
-        // values the pre-mesh direct assembly used — and hand the composed
-        // segments to the Hud. `ui/gutter-segment` resolves its eligible
-        // provider list once too (empty by default: `Session.init` never
-        // binds the default gutter providers, so this is one cheap linear
-        // scan over a handful of bindings that always comes back empty in
-        // production today — see `ui_mesh.zig`'s module doc).
+        // `ui/statusline-seg` (doc/contextual-workspace-architecture.md
+        // §11): fire the mesh with this frame's
+        // mode/file/position/diagnostics/link — the same values the
+        // pre-mesh direct assembly used — and hand the composed segments
+        // to the Hud. `ui/gutter-segment` resolves its eligible provider
+        // list once too (empty by default: `Session.init` never binds the
+        // default gutter providers, so this is one cheap linear scan over
+        // a handful of bindings that always comes back empty in production
+        // today — see `ui_mesh.zig`'s module doc).
         var statusline_args: view_mod.ui_mesh.StatuslineArgs = .{
             .facts = .{ .mode = fx.head.currentMode(), .path = file_name },
             .file = file_name,

@@ -29,7 +29,7 @@ pub const perm_net = plugin.perm_net;
 pub const perm_proc = plugin.perm_proc;
 pub const perm_timer = plugin.perm_timer;
 pub const setEnviron = plugin.setEnviron;
-// The shared guard predicates (W0b, doc/north-star-plan.md §2.5) — the ONE
+// The shared guard predicates (W0b, doc/extensibility-native-surface.md) — the ONE
 // grant/dispatch check both the wasm transport (`requirePerm`/
 // `requireDispatch` below) and the in-process transport
 // (`core/inproc/InProcClient.zig`) read. Re-exported so app/e2e code (which
@@ -37,7 +37,7 @@ pub const setEnviron = plugin.setEnviron;
 // into `wasm_host/*.zig` — see `e2e/test_head_test.zig`) can name them too.
 pub const hasPerm = plugin.hasPerm;
 pub const canDispatch = plugin.canDispatch;
-// north-star-plan §6 W4 slice 1 — the grant-table minting step
+// doc/contextual-workspace-architecture.md §13.5 — the grant-table minting step
 // (`wasm_abi/runtime.zig`'s `loadPlugin` calls this once, right after
 // `describe()`) and the `Perm` vocabulary it's keyed on.
 pub const mintGrantHandles = plugin.mintGrantHandles;

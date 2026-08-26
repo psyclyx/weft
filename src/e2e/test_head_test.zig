@@ -1,4 +1,4 @@
-//! e2e test file — W0b's SECOND HEAD gate (doc/north-star-plan.md §6:
+//! e2e test file — W0b's SECOND HEAD gate (doc/cwa-prior-docs-audit.md §5:
 //! "the headless variant is the SAME composition minus the window-head
 //! binding ... a second head implementation (tty or test-head) attaches
 //! through the same grant"). `h.TestHead` (harness.zig) wraps `h.SecondHead`
