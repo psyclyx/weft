@@ -201,10 +201,11 @@ which cannot parse the linker scripts nixpkgs ships as `libpthread.so` and
 `libtree-sitter.so` (`error: bad ident`), so no app-sized step links at all;
 the portable steps that do link produce binaries that SEGV on the first test.
 
-Keep the full `zig build test` as a gate, not a loop: it is around 200s, of
-which under 10s is compilation. Nearly all the rest is one test —
+Keep the full `zig build test` as a gate, not a loop: it is around 75s, of
+which under 10s is compilation. Roughly 50s of the rest is one test —
 `src/e2e/latency_test.zig` drives ~11k real keystrokes through the whole
-application wake path.
+application wake path, and runs with the box to itself so its wall-clock
+samples mean something.
 
 ## Config
 
