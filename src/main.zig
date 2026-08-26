@@ -365,9 +365,10 @@ pub fn main(init: std.process.Init) !void {
     // otherwise leave it silently bound to a system's buffers that stopped
     // being the one dispatch/rendering targets. While dormant (no
     // connection), the stale borrow is inert.
+
     // This is the interactive editor, so sharing pre-selects presence and every
-    // share path says so; the flag, `weft.set("collab", "share-presence", "off")`,
-    // and the `share-presence` command each opt out.
+    // share path says so; `--no-share-presence`, `weft.set("collab",
+    // "share-presence", "off")`, and the `share-presence` command each opt out.
     const share_presence = collab.presenceDefault(args.share_presence, blk: {
         const raw = session.system.config_kv.get("collab", "share-presence") orelse break :blk null;
         break :blk config_load.firstConfigRecord(raw);
