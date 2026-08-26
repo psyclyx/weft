@@ -24,7 +24,10 @@
 //!   overwrite the baseline file, stamped with this build's mode + host.
 //!   Re-record whenever a real, EXPLAINED latency shift lands (e.g. W1's
 //!   Container swap-in) — never to silence a regression that hasn't been
-//!   understood.
+//!   understood. A re-record earns its honesty by ALSO measuring the
+//!   pre-change commit on the same box in the same session: a number that is
+//!   at-or-better than that is a shift, a number worse than it is a
+//!   regression wearing a new baseline.
 //!
 //! The measurement mechanism (`Editor.pressTimed`, `core.task.nowNs()`
 //! bracketing `dispatchSpec` from the CALLER side) lives in harness.zig; the
@@ -51,6 +54,19 @@
 //! worse with provider count, allocates where it didn't, adds a syscall —
 //! not a constant-factor regression smaller than this box's sample noise
 //! (tens to low hundreds of ns), and it says nothing about correctness.
+//!
+//! What it does NOT measure, and must not be sized by: the application WAKE
+//! each keystroke triggers (`Editor.pressTimed` advances one, outside the
+//! timed window, so the state a keystroke lands in stays realistic). That
+//! wake is the production frame BUILD — `Application.advance` →
+//! `FrameBuilder.buildFrame`, the same path the desktop runs, minus
+//! rasterization. Profiled per phase on this box (Debug, 267KB zig buffer),
+//! it is ~4ms: an incremental tree-sitter reparse ~2.4ms, `Syntax.paint`
+//! ~1.7ms, `Editor.isDirty` ~0.1ms rising past 1.5ms as unsaved commits pile
+//! up (it is O(history since save) — a per-frame causal comparison for a
+//! status-line chip), and the pane build ~0.8ms. Nothing here needs the wake
+//! to be slow; where the fixture could pick a cheap realistic state over an
+//! expensive pathological one, it does — see `scratch_line`.
 
 const std = @import("std");
 const t = std.testing;
@@ -275,10 +291,11 @@ fn registerActionFixture(gpa: std.mem.Allocator, ed: *Editor) !void {
     try ed.keymap.bind(gpa, "normal", "F2", "latency-action", core.Keymap.prio_config, "latency-test");
 }
 
-/// ~5000 lines of zig-shaped filler (~250KB) — a realistically-sized source
+/// ~5000 lines of zig-shaped filler (~260KB) — a realistically-sized source
 /// buffer, big enough that an accidental O(n) table scan on the dispatch path
 /// would show up in the numbers, small enough the e2e suite doesn't notice
-/// generating it.
+/// generating it. The trailing comment is where `insert` types (see
+/// `scratch_line` and this file's module doc).
 fn writeFixture(gpa: std.mem.Allocator, path: []const u8) !void {
     var buf: std.ArrayList(u8) = .empty;
     defer buf.deinit(gpa);
@@ -286,7 +303,35 @@ fn writeFixture(gpa: std.mem.Allocator, path: []const u8) !void {
     while (i < 5000) : (i += 1) {
         try buf.print(gpa, "fn f{d}(a: i32, b: i32) i32 {{ return a + b + {d}; }}\n", .{ i, i });
     }
+    try buf.appendSlice(gpa, scratch_line);
     try core.file.writeBytes(gpa, path, buf.items);
+}
+
+/// The fixture's last line: an ordinary comment the `insert` category appends
+/// to, reached with `G` (doc-end) then `A` (append at end of line). Left
+/// unterminated so `G` lands on the comment itself, not an empty line past it.
+///
+/// Why not just type where the buffer opens: prose at offset 0 of a `.zig`
+/// file makes the whole document unparseable, and tree-sitter answers a broken
+/// document by re-reading and re-parsing ALL of it every keystroke — measured
+/// at 277ms per wake, against 2.4ms once the file is valid again. That was
+/// ~130s of this instrument's ~180s wall, none of it inside the timed window
+/// (`dispatchSpec` alone). Appending to a comment commits through the same
+/// dispatch path — same keymap, same rope, same commit and undo machinery —
+/// and leaves the wake realistic instead of pathological. The reparse cost is
+/// a real product finding, not something this instrument is here to measure.
+const scratch_line = "// scratch";
+
+/// The insert category's premise, asserted rather than assumed: the warmup
+/// keystrokes landed at the END of the trailing comment, so the fixture is
+/// still valid zig. Rebinding `G`/`A` (or dropping the comment) fails HERE
+/// instead of quietly restoring the whole-document reparse.
+fn expectTypingInScratchComment(gpa: std.mem.Allocator, ed: *Editor) !void {
+    const text = try ed.textAlloc();
+    defer gpa.free(text);
+    const last = text[(std.mem.lastIndexOfScalar(u8, text, '\n') orelse 0) + 1 ..];
+    try t.expect(std.mem.startsWith(u8, last, scratch_line));
+    try t.expect(last.len > scratch_line.len); // the warmup went in here
 }
 
 test "e2e/latency: dispatch keystroke latency vs baseline" {
@@ -340,11 +385,13 @@ test "e2e/latency: dispatch keystroke latency vs baseline" {
     const Result = struct { name: []const u8, samples: usize, stats: latency.Stats };
     var results: [5]Result = undefined;
 
-    // insert
+    // insert — into the fixture's trailing comment (`scratch_line`)
     {
         var d: InsertDriver = .{ .ed = &ed };
-        ed.press("i", "");
+        ed.chord("G A");
+        try t.expectEqualStrings("insert", ed.mode());
         for (0..warmup) |_| _ = d.step();
+        try expectTypingInScratchComment(gpa, &ed);
         results[0] = .{ .name = "insert", .samples = runs * iters, .stats = try latency.measure(gpa, scratch, runs, iters, &d, sampleInsert) };
         ed.press("Escape", "");
     }
