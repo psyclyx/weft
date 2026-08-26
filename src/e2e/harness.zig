@@ -768,12 +768,18 @@ pub fn socketPair() ![2]i32 {
     return fds;
 }
 
-/// Yield for roughly `us` microseconds of wall-clock — enough to let each
-/// session's reader/writer threads make progress (a tight spin would starve
-/// them). Mirrors session.zig's own test helper.
+/// Sleep for roughly `us` microseconds of wall-clock — enough to let each
+/// session's reader/writer threads make progress. A raw nanosleep, like
+/// watch.zig's `napMs`: `std.Thread.sleep` left std in 0.16, and a yield-spin
+/// would hold a core the readers need (every caller waits hundreds of
+/// microseconds or more, so nanosleep's granularity is ample).
 pub fn napUs(us: u64) void {
-    const deadline = core.task.nowNs() + us * std.time.ns_per_us;
-    while (core.task.nowNs() < deadline) std.Thread.yield() catch {};
+    const ns = us * std.time.ns_per_us;
+    var req: linux.timespec = .{
+        .sec = @intCast(ns / std.time.ns_per_s),
+        .nsec = @intCast(ns % std.time.ns_per_s),
+    };
+    while (linux.errno(linux.nanosleep(&req, &req)) == .INTR) {}
 }
 
 /// A two-peer, in-process collab pair binding two editors' active documents.
