@@ -2400,7 +2400,7 @@ test "quickjs: weft.plugin loads a real .wasm, then its command runs" {
         fn load(cx: *anyopaque, name: []const u8) void {
             const self: *@This() = @ptrCast(@alignCast(cx));
             std.debug.assert(std.mem.eql(u8, name, "edit"));
-            self.held = wasm_abi.loadPlugin(self.engine, self.ctx, "edit", @embedFile("guest_edit_wasm"), .{}) catch null;
+            self.held = wasm_abi.loadPlugin(self.engine, self.ctx, "edit", @embedFile("guest_edit_wasm"), .{ .module_cache_dir = wasm_abi.testModuleCacheDir() }) catch null;
         }
     };
     var loader: Loader = .{ .engine = &engine, .ctx = &env.ctx };
@@ -2480,7 +2480,7 @@ test "quickjs: deferred load — weft.set before the plugin line reaches its ini
         fn load(cx: *anyopaque, name: []const u8) void {
             const self: *@This() = @ptrCast(@alignCast(cx));
             std.debug.assert(std.mem.eql(u8, name, "autopair"));
-            self.held = wasm_abi.loadPlugin(self.engine, self.ctx, "autopair", @embedFile("guest_autopair_wasm"), .{ .config = self.config }) catch null;
+            self.held = wasm_abi.loadPlugin(self.engine, self.ctx, "autopair", @embedFile("guest_autopair_wasm"), .{ .config = self.config, .module_cache_dir = wasm_abi.testModuleCacheDir() }) catch null;
         }
     };
     var loader: Loader = .{ .engine = &engine, .ctx = &env.ctx, .config = &config };

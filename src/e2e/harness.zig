@@ -283,6 +283,7 @@ pub const Editor = struct {
             .syntax_of = app_providers.resolveSyntax,
             .pool = self.pool,
             .grant_table = &self.session.system.grants,
+            .module_cache_dir = core.wasm_abi.testModuleCacheDir(),
         });
         try self.plugins.append(self.gpa, p);
     }

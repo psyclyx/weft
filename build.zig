@@ -527,6 +527,7 @@ pub fn build(b: *std.Build) void {
     // here instead, at the one place a reader hits it.
     const unit_tests = b.addTest(.{ .root_module = test_mod });
     const run_tests = b.addRunArtifact(unit_tests);
+    shareModuleCache(b, run_tests);
     const test_step = b.step("test", "Run unit tests");
     test_step.dependOn(&run_tests.step);
     const application_tests = b.addTest(.{ .root_module = application_mod });
@@ -539,6 +540,7 @@ pub fn build(b: *std.Build) void {
     // output path.  The ordinary `test` step above remains the full suite.
     const demo_tests = b.addTest(.{ .root_module = test_mod, .filters = &.{"e2e/spine"} });
     const run_demo_tests = b.addRunArtifact(demo_tests);
+    shareModuleCache(b, run_demo_tests);
     const demo_step = b.step("e2e-demo", "Run the whole-app spine narrative (optionally record WEFT_E2E_VIDEO)");
     demo_step.dependOn(&run_demo_tests.step);
 
@@ -660,6 +662,7 @@ pub fn build(b: *std.Build) void {
     // (e.g. e2e/latency_test.zig) run under `test_mod`.
     const weft_tests = b.addTest(.{ .root_module = weft_mod });
     const run_weft_tests = b.addRunArtifact(weft_tests);
+    shareModuleCache(b, run_weft_tests);
     test_step.dependOn(&run_weft_tests.step);
 
     // A second copy of `test_mod`'s wiring — same `configureTestModule` call,
@@ -691,6 +694,7 @@ pub fn build(b: *std.Build) void {
     //   zig build e2e-latency -Drecord-latency=true     # (re-)record the baseline
     const latency_tests = b.addTest(.{ .root_module = latency_mod, .filters = &.{"e2e/latency"} });
     const run_latency_tests = b.addRunArtifact(latency_tests);
+    shareModuleCache(b, run_latency_tests);
     const latency_step = b.step("e2e-latency", "Run (or, with -Drecord-latency=true, record) the dispatch-latency baseline");
     latency_step.dependOn(&run_latency_tests.step);
 
@@ -729,6 +733,7 @@ pub fn build(b: *std.Build) void {
     //     themselves, so a fresh recording needs this by hand before it's committed.
     const popup_layout_tests = b.addTest(.{ .root_module = popup_layout_mod, .filters = &.{"e2e/popup-layout"} });
     const run_popup_layout_tests = b.addRunArtifact(popup_layout_tests);
+    shareModuleCache(b, run_popup_layout_tests);
     const popup_layout_step = b.step("e2e-popup-layout", "Run (or, with -Drecord-popup-layout=true, record) the caret-popup layout goldens");
     popup_layout_step.dependOn(&run_popup_layout_tests.step);
 
@@ -762,6 +767,18 @@ pub fn build(b: *std.Build) void {
 /// blocks eventually would. The one thing that may legitimately differ
 /// between callers is added AFTER this returns: which `latency_options`
 /// value they attach.
+/// Point a test binary at the compiled-module (`.cwasm`) cache every test
+/// binary shares — a stable directory under the project cache root, so the
+/// wasm guest catalog compiles once per content hash instead of once per
+/// binary per run (see `wasm_abi/runtime.zig`'s `testModuleCacheDir`). The
+/// path is made absolute here: the e2e Project harness chdirs into a tmpdir
+/// mid-suite, so a cwd-relative one would scatter and vanish with it.
+fn shareModuleCache(b: *std.Build, run: *std.Build.Step.Run) void {
+    const path = b.cache_root.join(b.allocator, &.{"weft-cwasm"}) catch @panic("OOM");
+    const abs = if (std.fs.path.isAbsolute(path)) path else b.pathFromRoot(path);
+    run.setEnvironmentVariable("WEFT_TEST_MODULE_CACHE", abs);
+}
+
 fn configureTestModule(
     b: *std.Build,
     mod: *std.Build.Module,

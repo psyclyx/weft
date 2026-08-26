@@ -60,12 +60,20 @@ pub fn writeBytes(gpa: Allocator, path: []const u8, bytes: []const u8) WriteErro
 /// Write `bytes` to `path`, creating `dir` (and any missing parents) first.
 /// `dir` should be `path`'s directory. Used for the compiled-module cache,
 /// where the cache directory may not exist yet. Absolute paths are fine.
+/// Atomic, through a pid-tagged sibling temp file: concurrent writers of the
+/// same path each land their own temp, and a reader only ever sees a whole
+/// file (what lets several test binaries share one `.cwasm` cache).
 pub fn writeBytesMakingDirs(gpa: Allocator, dir: []const u8, path: []const u8, bytes: []const u8) WriteError!void {
     var threaded: std.Io.Threaded = .init(gpa, .{});
     defer threaded.deinit();
     const io = threaded.io();
-    std.Io.Dir.cwd().createDirPath(io, dir) catch {};
-    try std.Io.Dir.cwd().writeFile(io, .{ .sub_path = path, .data = bytes });
+    const cwd = std.Io.Dir.cwd();
+    cwd.createDirPath(io, dir) catch {};
+    const tmp = try std.fmt.allocPrint(gpa, "{s}.{d}.weft-tmp", .{ path, std.os.linux.getpid() });
+    defer gpa.free(tmp);
+    errdefer cwd.deleteFile(io, tmp) catch {};
+    try cwd.writeFile(io, .{ .sub_path = tmp, .data = bytes });
+    try std.Io.Dir.rename(cwd, tmp, cwd, path, io);
 }
 
 /// Append `bytes` to `path` (created if absent) via read-concat-write — small

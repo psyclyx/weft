@@ -98,9 +98,10 @@ fn resolvePeer(ctx: *anyopaque, doc: *Document) Document.AddPeerError!Document.P
 }
 
 /// Instantiate `wasm_bytes` with the weft ABI imports bound over `ctx`
-/// (authored as `name`) and call its `run` export.
-pub fn runGuest(engine: *wasm.Engine, ctx: *command.Context, name: []const u8, wasm_bytes: []const u8) !void {
-    var module = try engine.compile(wasm_bytes);
+/// (authored as `name`) and call its `run` export. `cache_dir` is the `.cwasm`
+/// cache `loadPlugin` uses (null = compile fresh).
+pub fn runGuest(engine: *wasm.Engine, ctx: *command.Context, name: []const u8, wasm_bytes: []const u8, cache_dir: ?[]const u8) !void {
+    var module = try compileCached(engine, ctx.gpa, cache_dir, wasm_bytes);
     defer module.deinit();
     var host: HostCtx = .{ .ctx = ctx, .name = name };
     var linker = try wasm.Linker.init(engine);
@@ -134,10 +135,11 @@ pub const LoadOptions = struct {
     /// The task pool interactive REPL sessions run on. Null = repl-start drops.
     pool: ?*Pool = null,
     /// Directory for the compiled-module (`.cwasm`) cache. Null = no caching
-    /// (always compile fresh — the default, and what tests use). When set, a
-    /// module is keyed by content hash: deserialize on a hit, else compile +
-    /// serialize + persist. wasmtime validates engine/version on deserialize,
-    /// so a stale image is rejected and recompiled safely.
+    /// (always compile fresh — the default). When set, a module is keyed by
+    /// content hash: deserialize on a hit, else compile + serialize + persist.
+    /// wasmtime validates engine/version on deserialize, so a stale image is
+    /// rejected and recompiled safely. Production resolves this from the user
+    /// cache dir; test binaries from `testModuleCacheDir`.
     module_cache_dir: ?[]const u8 = null,
     /// north-star-plan §6 W4 slice 1 — the grant table this plugin's
     /// `describe()`-declared perms mint POSSESSED handles into (see
@@ -189,6 +191,15 @@ pub fn loadPlugin(engine: *wasm.Engine, ctx: *command.Context, name: []const u8,
     p.loading = false;
     if (p.load_error) |e| return failLoad(p, e);
     return p;
+}
+
+/// The `.cwasm` cache every test binary shares: `$WEFT_TEST_MODULE_CACHE`,
+/// which build.zig points at a stable directory under the project cache root,
+/// so a guest compiles once per content hash instead of once per test run.
+/// Null outside `zig build test` — then every load compiles fresh.
+pub fn testModuleCacheDir() ?[]const u8 {
+    const dir = std.c.getenv("WEFT_TEST_MODULE_CACHE") orelse return null;
+    return std.mem.span(dir);
 }
 
 /// Compile `wasm_bytes`, using an on-disk `.cwasm` cache under `cache_dir` when

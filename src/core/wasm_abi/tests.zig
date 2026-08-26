@@ -25,9 +25,22 @@ const fs_runtime = @import("weft_fs_runtime");
 const Allocator = std.mem.Allocator;
 
 const wasm_abi = @import("../wasm_abi.zig");
-const runGuest = wasm_abi.runGuest;
-const loadPlugin = wasm_abi.loadPlugin;
 const guest_hello = wasm_abi.guest_hello;
+
+// Every guest in this suite loads through the shared `.cwasm` cache
+// (`wasm_abi.testModuleCacheDir`). JIT-compiling the catalog from scratch is
+// the suite's dominant cost, and the cache is content-addressed, so a changed
+// guest still compiles exactly once.
+
+fn loadPlugin(engine: *wasm.Engine, ctx: *command.Context, name: []const u8, wasm_bytes: []const u8, opts: wasm_abi.LoadOptions) !*wasm_abi.WasmPlugin {
+    var cached = opts;
+    cached.module_cache_dir = wasm_abi.testModuleCacheDir();
+    return wasm_abi.loadPlugin(engine, ctx, name, wasm_bytes, cached);
+}
+
+fn runGuest(engine: *wasm.Engine, ctx: *command.Context, name: []const u8, wasm_bytes: []const u8) !void {
+    return wasm_abi.runGuest(engine, ctx, name, wasm_bytes, wasm_abi.testModuleCacheDir());
+}
 
 const t = std.testing;
 
