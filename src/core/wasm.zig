@@ -106,7 +106,9 @@ fn checkTrap(trap: ?*c.wasm_trap_t) Error!void {
 /// is the engine's, so is its MEMO: `compileCached` compiles an image once
 /// per engine (and, with `cache_dir`, once per machine) and hands out handles
 /// to that one immutable body of code. Nothing mutable is shared — every
-/// instantiation still gets its own store.
+/// instantiation still gets its own store. The memo itself is unsynchronized,
+/// so `compileCached` belongs to the thread that owns plugin loading; `compile`
+/// stays as thread-safe as wasmtime makes it.
 pub const Engine = struct {
     engine: *c.wasm_engine_t,
     gpa: Allocator,

@@ -769,8 +769,8 @@ pub fn build(b: *std.Build) void {
 /// value they attach.
 /// Point a test binary at the compiled-module (`.cwasm`) cache every test
 /// binary shares — a stable directory under the project cache root, so the
-/// wasm guest catalog compiles once per content hash instead of once per
-/// binary per run (see `wasm_abi/runtime.zig`'s `testModuleCacheDir`). The
+/// wasm guest catalog and the quickjs runtime compile once per content hash
+/// instead of once per binary per run (see `wasm.zig`'s `Engine.cache_dir`). The
 /// path is made absolute here: the e2e Project harness chdirs into a tmpdir
 /// mid-suite, so a cwd-relative one would scatter and vanish with it.
 fn shareModuleCache(b: *std.Build, run: *std.Build.Step.Run) void {
