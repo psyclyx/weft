@@ -113,8 +113,14 @@ pub const FdLink = struct {
 /// sampled deadline, preserving stream order even when later jitter samples
 /// are shorter. Loss on a reliable stream remains a stall/partition.
 ///
+/// Closing is graceful: writes stop, the queued tail goes out with its
+/// remaining propagation delay collapsed (a FIN once the send buffer drains),
+/// and only then does the inner link close. `sever` is the crash — whatever is
+/// still queued is dropped, which is what a loss test wants.
+///
 /// Call `start` only after the ChaosLink has reached its stable address; the
-/// delivery thread borrows `self`. `Link.close` joins it and is idempotent.
+/// delivery thread borrows `self`. Both `close` and `sever` join it, and
+/// either one is idempotent and excludes the other.
 pub const ChaosLink = struct {
     gpa: Allocator = undefined,
     inner: Link = undefined,
@@ -132,11 +138,16 @@ pub const ChaosLink = struct {
     mutex: Mutex = .{},
     head: ?*Pending = null,
     tail: ?*Pending = null,
+    /// Graceful close in progress: no new writes, deliver what is queued.
+    draining: std.atomic.Value(bool) = .init(false),
     shutdown: std.atomic.Value(bool) = .init(false),
     failed: std.atomic.Value(bool) = .init(false),
     inner_closed: std.atomic.Value(bool) = .init(false),
     close_started: std.atomic.Value(bool) = .init(false),
     delivery_thread: ?std.Thread = null,
+    /// Cap on the graceful drain: a peer that stopped reading must not
+    /// wedge close.
+    drain_timeout_ns: u64 = 2 * std.time.ns_per_s,
 
     const Pending = struct {
         next: ?*Pending = null,
@@ -156,6 +167,15 @@ pub const ChaosLink = struct {
 
     pub fn close(self: *ChaosLink) void {
         closeC(self);
+    }
+
+    /// Crash semantics: cut the cable now and drop whatever was still in
+    /// flight. For tests that exercise loss, where a graceful close would
+    /// deliver the tail instead.
+    pub fn sever(self: *ChaosLink) void {
+        if (self.close_started.swap(true, .acq_rel)) return;
+        self.partitioned.store(false, .release);
+        self.stop();
     }
 
     /// Configure deterministic propagation latency for subsequent writes.
@@ -197,7 +217,7 @@ pub const ChaosLink = struct {
 
     fn writeC(ctx: ?*anyopaque, bytes: []const u8) anyerror!void {
         const self: *ChaosLink = @ptrCast(@alignCast(ctx.?));
-        if (self.shutdown.load(.acquire) or self.failed.load(.acquire)) return error.LinkBroken;
+        if (self.closed()) return error.LinkBroken;
 
         const node = try self.gpa.create(Pending);
         errdefer self.gpa.destroy(node);
@@ -208,8 +228,10 @@ pub const ChaosLink = struct {
 
         self.mutex.lock();
         defer self.mutex.unlock();
-        // closeC may have started while allocation was in progress.
-        if (self.shutdown.load(.acquire) or self.failed.load(.acquire)) return error.LinkBroken;
+        // A close may have started while allocation was in progress. The
+        // delivery worker flips `shutdown` under this same lock once the
+        // drain finds the queue empty, so nothing lands after the tail.
+        if (self.closed()) return error.LinkBroken;
         if (self.tail) |tail| {
             tail.next = node;
         } else {
@@ -225,14 +247,50 @@ pub const ChaosLink = struct {
     fn closeC(ctx: ?*anyopaque) void {
         const self: *ChaosLink = @ptrCast(@alignCast(ctx.?));
         if (self.close_started.swap(true, .acq_rel)) return;
-        self.shutdown.store(true, .release);
+        // Refuse further writes but keep delivering: closing is a FIN once
+        // the send buffer drains, and the close itself lifts a partition
+        // hold that would otherwise strand the tail.
+        self.draining.store(true, .release);
         self.partitioned.store(false, .release);
-        _ = self.park.fetchAdd(1, .release);
-        futexWake(&self.park, std.math.maxInt(i32));
+        self.wake();
+        self.awaitDrain();
+        self.stop();
+    }
+
+    /// Tear the worker down and free the queue. After a graceful close
+    /// the queue is empty; after `sever`, or a drain that hit its cap, it
+    /// holds exactly the bytes that never made it out.
+    fn stop(self: *ChaosLink) void {
+        self.shutdown.store(true, .release);
+        self.wake();
         self.closeInner();
         if (self.delivery_thread) |thread| thread.join();
         self.delivery_thread = null;
         self.discardPending();
+    }
+
+    /// Wait for the queued tail to go out. The worker signals by flipping
+    /// `shutdown`; the cap keeps a wedged inner link from wedging close.
+    fn awaitDrain(self: *ChaosLink) void {
+        if (self.delivery_thread == null) return; // no worker, nothing queued
+        const deadline = task.nowNs() +| self.drain_timeout_ns;
+        while (!self.shutdown.load(.acquire)) {
+            const now = task.nowNs();
+            if (now >= deadline) return;
+            const generation = self.park.load(.acquire);
+            if (self.shutdown.load(.acquire)) return;
+            futexWaitTimed(&self.park, generation, @min(deadline - now, std.time.ns_per_ms));
+        }
+    }
+
+    fn closed(self: *const ChaosLink) bool {
+        return self.draining.load(.acquire) or self.shutdown.load(.acquire) or
+            self.failed.load(.acquire);
+    }
+
+    fn wake(self: *ChaosLink) void {
+        _ = self.park.fetchAdd(1, .release);
+        futexWake(&self.park, std.math.maxInt(i32));
     }
 
     fn closeInner(self: *ChaosLink) void {
@@ -254,7 +312,8 @@ pub const ChaosLink = struct {
 
     fn deliveryMain(self: *ChaosLink) void {
         while (!self.shutdown.load(.acquire)) {
-            if (self.partitioned.load(.acquire)) {
+            const draining = self.draining.load(.acquire);
+            if (self.partitioned.load(.acquire) and !draining) {
                 const generation = self.park.load(.acquire);
                 futexWaitTimed(&self.park, generation, 20 * std.time.ns_per_ms);
                 continue;
@@ -264,14 +323,20 @@ pub const ChaosLink = struct {
             const pending = self.head;
             self.mutex.unlock();
             const node = pending orelse {
+                if (draining) {
+                    if (self.finishDrain()) return;
+                    continue; // a write beat the flag; take it too
+                }
                 const generation = self.park.load(.acquire);
                 if (!self.shutdown.load(.acquire))
                     futexWaitTimed(&self.park, generation, 20 * std.time.ns_per_ms);
                 continue;
             };
 
+            // Closing collapses eligibility: the queued tail goes out at
+            // once instead of waiting out its propagation delay.
             const now = task.nowNs();
-            if (now < node.eligible_ns) {
+            if (!draining and now < node.eligible_ns) {
                 const generation = self.park.load(.acquire);
                 futexWaitTimed(&self.park, generation, @min(node.eligible_ns - now, 20 * std.time.ns_per_ms));
                 continue;
@@ -291,12 +356,23 @@ pub const ChaosLink = struct {
                 self.failed.store(true, .release);
                 self.shutdown.store(true, .release);
                 self.closeInner();
-                _ = self.park.fetchAdd(1, .release);
-                futexWake(&self.park, std.math.maxInt(i32));
+                self.wake();
                 return;
             };
             self.gpa.free(node.bytes);
             self.gpa.destroy(node);
         }
+    }
+
+    /// End a graceful close once the queue is empty. The flag flips under
+    /// the queue lock, so a racing `writeC` is refused rather than
+    /// enqueueing behind a worker that has already left.
+    fn finishDrain(self: *ChaosLink) bool {
+        self.mutex.lock();
+        defer self.mutex.unlock();
+        if (self.head != null) return false;
+        self.shutdown.store(true, .release);
+        self.wake();
+        return true;
     }
 };
