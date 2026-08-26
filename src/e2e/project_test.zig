@@ -450,9 +450,9 @@ test "e2e/spine: write a file, init a repo, stage and commit — all through wef
         a: *Editor,
         b: *Editor,
         fn pred(c: @This()) bool {
-            const at = c.a.buffers.active().editor.text().toOwnedSlice(c.a.gpa) catch return false;
+            const at = c.a.buffers.active().textEditor().?.text().toOwnedSlice(c.a.gpa) catch return false;
             defer c.a.gpa.free(at);
-            const bt = c.b.buffers.active().editor.text().toOwnedSlice(c.b.gpa) catch return false;
+            const bt = c.b.buffers.active().textEditor().?.text().toOwnedSlice(c.b.gpa) catch return false;
             defer c.b.gpa.free(bt);
             return std.mem.indexOf(u8, at, "ALICE_SLOT") != null and
                 std.mem.indexOf(u8, at, "BOB_SLOT") != null and
@@ -485,9 +485,9 @@ test "e2e/spine: write a file, init a repo, stage and commit — all through wef
         a: *Editor,
         b: *Editor,
         fn pred(c: @This()) bool {
-            const at = c.a.buffers.active().editor.text().toOwnedSlice(c.a.gpa) catch return false;
+            const at = c.a.buffers.active().textEditor().?.text().toOwnedSlice(c.a.gpa) catch return false;
             defer c.a.gpa.free(at);
-            const bt = c.b.buffers.active().editor.text().toOwnedSlice(c.b.gpa) catch return false;
+            const bt = c.b.buffers.active().textEditor().?.text().toOwnedSlice(c.b.gpa) catch return false;
             defer c.b.gpa.free(bt);
             return std.mem.indexOf(u8, at, "alice edits here") != null and
                 std.mem.indexOf(u8, at, "bob was here") != null and
@@ -497,9 +497,9 @@ test "e2e/spine: write a file, init a repo, stage and commit — all through wef
     };
     const spine_converged = try link.pumpUntil(SpineConverged{ .a = &ed, .b = &mirror }, SpineConverged.pred);
     if (!spine_converged) {
-        const alice_text = try ed.buffers.active().editor.text().toOwnedSlice(gpa);
+        const alice_text = try ed.buffers.active().textEditor().?.text().toOwnedSlice(gpa);
         defer gpa.free(alice_text);
-        const bob_text = try mirror.buffers.active().editor.text().toOwnedSlice(gpa);
+        const bob_text = try mirror.buffers.active().textEditor().?.text().toOwnedSlice(gpa);
         defer gpa.free(bob_text);
         std.debug.print("spine convergence failed\n--- alice ---\n{s}\n--- bob ---\n{s}\n", .{ alice_text, bob_text });
     }
@@ -526,11 +526,11 @@ test "e2e/spine: write a file, init a repo, stage and commit — all through wef
     defer gpa.free(caret_before);
     proj.capture(&ed, "spine-cursors-separated");
     proj.rest();
-    const alice_before_bob_move = ed.buffers.active().editor.cursorOffset();
-    const bob_before_move = mirror.buffers.active().editor.cursorOffset();
+    const alice_before_bob_move = ed.buffers.active().textEditor().?.cursorOffset();
+    const bob_before_move = mirror.buffers.active().textEditor().?.cursorOffset();
     mirror.press("k", "");
-    try t.expectEqual(alice_before_bob_move, ed.buffers.active().editor.cursorOffset());
-    try t.expect(bob_before_move != mirror.buffers.active().editor.cursorOffset());
+    try t.expectEqual(alice_before_bob_move, ed.buffers.active().textEditor().?.cursorOffset());
+    try t.expect(bob_before_move != mirror.buffers.active().textEditor().?.cursorOffset());
     try link.synchronize();
     const bob_moved = try proj.capturePairPixels();
     defer gpa.free(bob_moved);
@@ -538,11 +538,11 @@ test "e2e/spine: write a file, init a repo, stage and commit — all through wef
     try t.expect(pairBodyChanged(caret_before, bob_moved, true));
     proj.capture(&ed, "spine-cursor-bob-moved");
     proj.rest();
-    const alice_before_move = ed.buffers.active().editor.cursorOffset();
-    const bob_before_alice_move = mirror.buffers.active().editor.cursorOffset();
+    const alice_before_move = ed.buffers.active().textEditor().?.cursorOffset();
+    const bob_before_alice_move = mirror.buffers.active().textEditor().?.cursorOffset();
     ed.press("j", "");
-    try t.expect(alice_before_move != ed.buffers.active().editor.cursorOffset());
-    try t.expectEqual(bob_before_alice_move, mirror.buffers.active().editor.cursorOffset());
+    try t.expect(alice_before_move != ed.buffers.active().textEditor().?.cursorOffset());
+    try t.expectEqual(bob_before_alice_move, mirror.buffers.active().textEditor().?.cursorOffset());
     try link.synchronize();
     const alice_moved = try proj.capturePairPixels();
     defer gpa.free(alice_moved);
@@ -1166,7 +1166,7 @@ test "e2e/web: author js + html, grep across them, run it with node" {
     const scene = ed.session.system.semantic.views.get(view_ref).?.scene;
     try t.expectEqualStrings("files", scene.role);
     try t.expect(std.mem.startsWith(u8, ed.buffers.active().name, "files: "));
-    try t.expectEqualStrings("files", ed.buffers.active().editor.toolName().?);
+    try t.expectEqualStrings("files", ed.buffers.active().tool);
 
     const children = switch (scene.content) {
         .container => |container| container.children,

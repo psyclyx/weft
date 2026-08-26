@@ -617,7 +617,7 @@ test "session: RUNS ON a System — init hosts \"editor\", cmd_ctx is wired to i
     // A real command through the real Session's cmd_ctx.
     try t.expect(!sess.system.quit);
     _ = try core.command.run(&sess.system.commands, &sess.cmd_ctx, "insert-text", &.{.{ .string = "hi" }});
-    const got = try sess.cmd_ctx.editor().text().toOwnedSlice(gpa);
+    const got = try (try sess.cmd_ctx.textEditor()).text().toOwnedSlice(gpa);
     defer gpa.free(got);
     try t.expectEqualStrings("hi", got);
 }
@@ -740,7 +740,7 @@ test "session: local directories become deduplicated semantic targets while file
     try t.expectEqualStrings("directory-test", scene.role);
     try t.expect(scene.focusable);
     try t.expect(std.mem.startsWith(u8, sess.system.buffers.active().name, "files: "));
-    try t.expectEqualStrings("files", sess.system.buffers.active().editor.toolName().?);
+    try t.expectEqualStrings("files", sess.system.buffers.active().tool);
 
     // Containment is publisher-owned and lazy. Resolving it pins the parent
     // independently of the generic handler's view state.
@@ -905,10 +905,10 @@ test "session: GATE — system-swap live-rebinds the REAL Session's head; buffer
     // Editing now lands on the NEW system's buffer — the editor's own text
     // from before the swap is untouched.
     _ = try core.command.run(&agent_sys.commands, &sess.cmd_ctx, "insert-text", &.{.{ .string = "agent text" }});
-    const agent_got = try agent_sys.buffers.active().editor.text().toOwnedSlice(gpa);
+    const agent_got = try agent_sys.buffers.active().textEditor().?.text().toOwnedSlice(gpa);
     defer gpa.free(agent_got);
     try t.expectEqualStrings("agent text", agent_got);
-    const editor_got = try editor_sys.buffers.active().editor.text().toOwnedSlice(gpa);
+    const editor_got = try editor_sys.buffers.active().textEditor().?.text().toOwnedSlice(gpa);
     defer gpa.free(editor_got);
     try t.expectEqualStrings("editor text", editor_got);
 

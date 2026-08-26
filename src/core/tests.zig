@@ -487,7 +487,7 @@ const TestHost = struct {
     }
 
     fn editor(host: *TestHost) *Editor {
-        return &host.buffers.active().editor;
+        return host.buffers.active().textEditor().?;
     }
 
     fn deinit(host: *TestHost, gpa: Allocator) void {
@@ -530,6 +530,36 @@ test "authority: a view grade refuses edits, forms no ghost, and echoes" {
     _ = try core.command.run(&host.commands, &host.ctx, "insert-text", &.{.{ .string = "x" }});
     try t.expectEqual(before + 1, host.editor().text().byteLen());
     try t.expectEqualStrings("read-only buffer", host.head.echo.items);
+}
+
+test "entries: a view carries no editor — text ops refuse politely, undo is a no-op" {
+    const gpa = t.allocator;
+    var host: TestHost = undefined;
+    try TestHost.init(gpa, &host);
+    defer host.deinit(gpa);
+
+    const view = try host.buffers.createView(gpa, "files: /tmp", "files");
+    try host.buffers.switchTo(gpa, view, &host.head, &host.keymap);
+    const entry = host.buffers.get(view).?;
+    try t.expect(entry.textEditor() == null);
+    try t.expectEqualStrings("files", entry.tool); // still resolves providers
+
+    // Typing, deleting, and moving the caret are echoed refusals, not errors —
+    // the same door the grade gate and read-only flag report through.
+    for ([_][]const u8{ "delete-backward", "cursor-left", "undo-barrier" }) |cmd| {
+        host.head.echo.clearRetainingCapacity();
+        _ = try core.command.run(&host.commands, &host.ctx, cmd, &.{});
+        try t.expectEqualStrings("no text in this view", host.head.echo.items);
+    }
+    host.head.echo.clearRetainingCapacity();
+    _ = try core.command.run(&host.commands, &host.ctx, "insert-text", &.{.{ .string = "x" }});
+    try t.expectEqualStrings("no text in this view", host.head.echo.items);
+
+    // Undo reports "nothing undone" instead of reaching a stand-in history.
+    host.head.echo.clearRetainingCapacity();
+    const undone = try core.command.run(&host.commands, &host.ctx, "undo", &.{});
+    try t.expect(undone.boolean == false);
+    try t.expectEqualStrings("no text in this view", host.head.echo.items);
 }
 
 // ── Syntax (milestone 7) ────────────────────────────────────────────
@@ -1255,7 +1285,7 @@ test "completion UI: switching buffers dismisses the originating session" {
     // The originating document was neither edited nor mistaken for the new
     // active buffer; the target token still resolves to the exact old buffer.
     const original = host.buffers.resolve(origin) orelse return error.OriginLost;
-    const original_text = try original.editor.text().toOwnedSlice(gpa);
+    const original_text = try original.textEditor().?.text().toOwnedSlice(gpa);
     defer gpa.free(original_text);
     try t.expectEqualStrings("al", original_text);
     try t.expectEqual(@as(usize, 0), host.editor().text().byteLen());

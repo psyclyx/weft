@@ -43,7 +43,11 @@ fn hostCursor(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32, result
     _ = caller;
     _ = args;
     const h: *HostCtx = @ptrCast(@alignCast(data.?));
-    results[0] = @intCast(h.ctx.editor().cursorOffset());
+    const ed = h.ctx.buffers.active().textEditor() orelse {
+        results[0] = 0;
+        return;
+    };
+    results[0] = @intCast(ed.cursorOffset());
 }
 
 /// W4 slice 3 (north-star-plan §2.4/§6, review B2's repair): `hostEdit` is a

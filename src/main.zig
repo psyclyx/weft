@@ -138,6 +138,7 @@ pub fn main(init: std.process.Init) !void {
     const buffers = &session.system.buffers;
     if (args.file) |path| {
         const b0 = buffers.active();
+        const ed = b0.textEditor().?;
         gpa.free(b0.name);
         b0.name = try gpa.dupe(u8, std.fs.path.basename(path));
         if (args.connect != null) {
@@ -145,11 +146,11 @@ pub fn main(init: std.process.Init) !void {
             // status line); content arrives over the wire from the
             // host. Nothing is read locally. A partial checkout keeps
             // the document virgin (adoptPartial replaces it wholesale).
-            if (!args.partial) try b0.editor.adoptPath(gpa, path);
-        } else b0.editor.openFile(gpa, path) catch |err| switch (err) {
+            if (!args.partial) try ed.adoptPath(gpa, path);
+        } else ed.openFile(gpa, path) catch |err| switch (err) {
             error.FileNotFound => {
                 // New file: adopt the path, save creates it.
-                try b0.editor.adoptPath(gpa, path);
+                try ed.adoptPath(gpa, path);
             },
             else => |e| return e,
         };
@@ -167,7 +168,7 @@ pub fn main(init: std.process.Init) !void {
         }
     }
     // Stable: buffer 0 outlives the run; wire v1 collab binds to it.
-    const ed0 = &buffers.active().editor;
+    const ed0 = buffers.active().textEditor().?;
 
     // This machine's long-term identity (generated + persisted on first
     // run). Names us to peers; the fingerprint is what a human verifies.

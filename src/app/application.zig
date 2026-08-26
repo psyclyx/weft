@@ -201,9 +201,11 @@ pub const Application = struct {
             self.last_active = self.driver.ctx.buffers.active_id;
             damaged = true;
         }
-        if (active.editor.doc.commitCount() != active.attach.seen_commits) {
-            active.attach.seen_commits = active.editor.doc.commitCount();
-            damaged = true;
+        if (active.editor) |ed| {
+            if (ed.doc.commitCount() != active.attach.seen_commits) {
+                active.attach.seen_commits = ed.doc.commitCount();
+                damaged = true;
+            }
         }
         return damaged;
     }

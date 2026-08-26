@@ -64,7 +64,9 @@ pub fn handlePointer(
     head: *core.Head,
     semantic_services: *core.semantic.Services,
     view: *view_mod.View,
-    editor: *core.Editor,
+    /// Null when the focused entry holds no text: only the semantic hit path
+    /// can act on a click.
+    editor: ?*core.Editor,
     win_ctx: *window_cmds.WindowCtx,
     gpa: std.mem.Allocator,
     last_frame_rect: region.Rect,
@@ -103,30 +105,30 @@ pub fn handlePointer(
             drag_selecting.* = false;
             had_input.* = true;
             dirty = true;
-        } else {
+        } else if (editor) |ed| {
             const off = view.offsetAtPoint(px, py);
-            editor.clearSelection();
-            editor.placeCursor(off);
+            ed.clearSelection();
+            ed.placeCursor(off);
             drag_anchor.* = off;
             drag_selecting.* = false;
             had_input.* = true;
             dirty = true;
         }
     } else if (window.mouse_down[0] and !click_in_peek and !view.hasSemanticInput()) {
-        if (drag_anchor.*) |anchor| {
+        if (drag_anchor.*) |anchor| if (editor) |ed| {
             const off = view.offsetAtPoint(px, py);
-            if (off != editor.cursorOffset()) {
+            if (off != ed.cursorOffset()) {
                 if (!drag_selecting.*) {
                     // First motion: anchor the mark, then drag the caret.
-                    editor.placeCursor(anchor);
-                    try editor.setMark(gpa);
+                    ed.placeCursor(anchor);
+                    try ed.setMark(gpa);
                     drag_selecting.* = true;
                 }
-                editor.placeCursor(off);
+                ed.placeCursor(off);
                 had_input.* = true;
                 dirty = true;
             }
-        }
+        };
     } else {
         drag_anchor.* = null;
         drag_selecting.* = false;
@@ -248,20 +250,23 @@ fn viewOf(data: ?*anyopaque) *view_mod.View {
 pub fn cursorUpHandler(ctx: *core.command.Context, data: ?*anyopaque, args: []const core.command.Value) anyerror!core.command.Value {
     _ = args;
     if (ctx.semantic) |services| if (try services.moveHeadFocus(ctx.head, ctx.gpa, .previous)) return .nil;
-    try visualVertical(ctx.editor(), viewOf(data), -1);
+    const ed = ctx.textEditor() catch return .nil;
+    try visualVertical(ed, viewOf(data), -1);
     return .nil;
 }
 
 pub fn cursorDownHandler(ctx: *core.command.Context, data: ?*anyopaque, args: []const core.command.Value) anyerror!core.command.Value {
     _ = args;
     if (ctx.semantic) |services| if (try services.moveHeadFocus(ctx.head, ctx.gpa, .next)) return .nil;
-    try visualVertical(ctx.editor(), viewOf(data), 1);
+    const ed = ctx.textEditor() catch return .nil;
+    try visualVertical(ed, viewOf(data), 1);
     return .nil;
 }
 
 fn pageBy(ctx: *core.command.Context, view: *view_mod.View, dir: i32) !void {
     const rows = view.bodyRows();
-    for (0..rows) |_| try visualVertical(ctx.editor(), view, dir);
+    const ed = ctx.textEditor() catch return;
+    for (0..rows) |_| try visualVertical(ed, view, dir);
 }
 
 pub fn scrollPageUpHandler(ctx: *core.command.Context, data: ?*anyopaque, args: []const core.command.Value) anyerror!core.command.Value {
@@ -321,6 +326,14 @@ fn dotAtRest(ctx: *core.command.Context) bool {
 fn dotBoundary(ctx: *core.command.Context) void {
     const dot = &ctx.head.dot;
     const bid = ctx.buffers.active_id;
+    // An entry with no text has no commits or cursor to compare against, so
+    // there is no change boundary to observe here. Desync, so the next text
+    // entry resyncs rather than comparing across the gap.
+    const ed = ctx.buffers.active().textEditor() orelse {
+        dot.synced = false;
+        dot.pending_n = 0;
+        return;
+    };
     // Buffer switch (or this head's very first dispatch ever — `synced`
     // catches it even when `bid` coincidentally equals the zero default,
     // e.g. a head attaching on buffer 0 — see `DotRepeat.synced`'s doc):
@@ -328,14 +341,14 @@ fn dotBoundary(ctx: *core.command.Context) void {
     if (!dot.synced or bid != dot.buf) {
         dot.synced = true;
         dot.buf = bid;
-        dot.commits = ctx.editor().doc.commitCount();
-        dot.cursor = ctx.editor().cursorOffset();
+        dot.commits = ed.doc.commitCount();
+        dot.cursor = ed.cursorOffset();
         dot.pending_n = 0;
         return;
     }
     if (!dotAtRest(ctx)) return; // mid-command — keep accumulating
-    const now = ctx.editor().doc.commitCount();
-    const cur = ctx.editor().cursorOffset();
+    const now = ed.doc.commitCount();
+    const cur = ed.cursorOffset();
     if (dot.suppress) {
         dot.suppress = false; // the repeat key itself: leave the register intact
     } else if (now != dot.commits and dot.pending_n > 0) {

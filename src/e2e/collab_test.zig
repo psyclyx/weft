@@ -72,9 +72,9 @@ test "app/collab: an emacs coworker joins — vim + emacs peers converge" {
     const Ctx = struct { a: *Editor, b: *Editor };
     const converged = try link.pumpUntil(Ctx{ .a = &a, .b = &b }, struct {
         fn pred(c: Ctx) bool {
-            const at = c.a.buffers.active().editor.text().toOwnedSlice(c.a.gpa) catch return false;
+            const at = c.a.buffers.active().textEditor().?.text().toOwnedSlice(c.a.gpa) catch return false;
             defer c.a.gpa.free(at);
-            const bt = c.b.buffers.active().editor.text().toOwnedSlice(c.b.gpa) catch return false;
+            const bt = c.b.buffers.active().textEditor().?.text().toOwnedSlice(c.b.gpa) catch return false;
             defer c.b.gpa.free(bt);
             return std.mem.indexOf(u8, at, "ALICE") != null and std.mem.indexOf(u8, at, "BOB") != null and
                 std.mem.indexOf(u8, bt, "ALICE") != null and std.mem.indexOf(u8, bt, "BOB") != null;
@@ -82,9 +82,9 @@ test "app/collab: an emacs coworker joins — vim + emacs peers converge" {
     }.pred);
     try t.expect(converged);
 
-    const at = try a.buffers.active().editor.text().toOwnedSlice(gpa);
+    const at = try a.buffers.active().textEditor().?.text().toOwnedSlice(gpa);
     defer gpa.free(at);
-    const bt = try b.buffers.active().editor.text().toOwnedSlice(gpa);
+    const bt = try b.buffers.active().textEditor().?.text().toOwnedSlice(gpa);
     defer gpa.free(bt);
     try t.expectEqualStrings(at, bt); // identical on both, despite different editors
 }
@@ -117,9 +117,9 @@ test "app/collab: a helix coworker joins — vim + helix peers converge" {
     const Ctx = struct { a: *Editor, b: *Editor };
     const ok = try link.pumpUntil(Ctx{ .a = &a, .b = &b }, struct {
         fn pred(c: Ctx) bool {
-            const at = c.a.buffers.active().editor.text().toOwnedSlice(c.a.gpa) catch return false;
+            const at = c.a.buffers.active().textEditor().?.text().toOwnedSlice(c.a.gpa) catch return false;
             defer c.a.gpa.free(at);
-            const bt = c.b.buffers.active().editor.text().toOwnedSlice(c.b.gpa) catch return false;
+            const bt = c.b.buffers.active().textEditor().?.text().toOwnedSlice(c.b.gpa) catch return false;
             defer c.b.gpa.free(bt);
             return std.mem.indexOf(u8, at, "ALICE") != null and std.mem.indexOf(u8, at, "HELIX") != null and
                 std.mem.indexOf(u8, bt, "ALICE") != null and std.mem.indexOf(u8, bt, "HELIX") != null;
@@ -151,9 +151,9 @@ test "app/collab: emacs + helix coworkers converge (no vim in sight)" {
     const Ctx = struct { a: *Editor, b: *Editor };
     const ok = try link.pumpUntil(Ctx{ .a = &a, .b = &b }, struct {
         fn pred(c: Ctx) bool {
-            const at = c.a.buffers.active().editor.text().toOwnedSlice(c.a.gpa) catch return false;
+            const at = c.a.buffers.active().textEditor().?.text().toOwnedSlice(c.a.gpa) catch return false;
             defer c.a.gpa.free(at);
-            const bt = c.b.buffers.active().editor.text().toOwnedSlice(c.b.gpa) catch return false;
+            const bt = c.b.buffers.active().textEditor().?.text().toOwnedSlice(c.b.gpa) catch return false;
             defer c.b.gpa.free(bt);
             return std.mem.indexOf(u8, at, "EMACS") != null and std.mem.indexOf(u8, at, "HELIX") != null and
                 std.mem.indexOf(u8, bt, "EMACS") != null and std.mem.indexOf(u8, bt, "HELIX") != null;
@@ -186,15 +186,15 @@ test "app/collab: peer A types, it converges into peer B's buffer + cursor" {
     const Ctx = struct { b: *Editor };
     const converged = try link.pumpUntil(Ctx{ .b = &b }, struct {
         fn pred(c: Ctx) bool {
-            const txt = c.b.buffers.active().editor.text().toOwnedSlice(c.b.gpa) catch return false;
+            const txt = c.b.buffers.active().textEditor().?.text().toOwnedSlice(c.b.gpa) catch return false;
             defer c.b.gpa.free(txt);
             return std.mem.indexOf(u8, txt, "hello from alice") != null;
         }
     }.pred);
     if (!converged) {
-        const at0 = a.buffers.active().editor.text().toOwnedSlice(gpa) catch &.{};
+        const at0 = a.buffers.active().textEditor().?.text().toOwnedSlice(gpa) catch &.{};
         defer gpa.free(at0);
-        const bt0 = b.buffers.active().editor.text().toOwnedSlice(gpa) catch &.{};
+        const bt0 = b.buffers.active().textEditor().?.text().toOwnedSlice(gpa) catch &.{};
         defer gpa.free(bt0);
         std.debug.print("\n[CONVERGE-FAIL] host_live={} peer_live={} alice='{s}' bob='{s}' host_announced={} peer_announced={}\n", .{
             link.host_sess.liveness(),    link.peer_sess.liveness(),    at0, bt0,
@@ -204,9 +204,9 @@ test "app/collab: peer A types, it converges into peer B's buffer + cursor" {
     try t.expect(converged);
 
     // Both replicas hold identical text — convergence, not just delivery.
-    const at = try a.buffers.active().editor.text().toOwnedSlice(gpa);
+    const at = try a.buffers.active().textEditor().?.text().toOwnedSlice(gpa);
     defer gpa.free(at);
-    const bt = try b.buffers.active().editor.text().toOwnedSlice(gpa);
+    const bt = try b.buffers.active().textEditor().?.text().toOwnedSlice(gpa);
     defer gpa.free(bt);
     try t.expectEqualStrings(at, bt);
 
@@ -231,7 +231,7 @@ test "app/collab: peer A types, it converges into peer B's buffer + cursor" {
     const Ctx2 = struct { a: *Editor };
     const back = try link.pumpUntil(Ctx2{ .a = &a }, struct {
         fn pred(c: Ctx2) bool {
-            const txt = c.a.buffers.active().editor.text().toOwnedSlice(c.a.gpa) catch return false;
+            const txt = c.a.buffers.active().textEditor().?.text().toOwnedSlice(c.a.gpa) catch return false;
             defer c.a.gpa.free(txt);
             return std.mem.indexOf(u8, txt, "bob") != null;
         }

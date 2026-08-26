@@ -85,7 +85,7 @@ const baseline_path = "src/e2e/popup_layout_baseline.zon";
 /// character through the keymap.
 fn openFixtureBuffer(gpa: std.mem.Allocator, ed: *Editor, name: []const u8, text: []const u8) !void {
     ed.runStr("open", name);
-    try ed.buffers.active().editor.insertText(gpa, text);
+    try ed.buffers.active().textEditor().?.insertText(gpa, text);
 }
 
 /// A synthetic `edit/completion` provider: pushes whatever `data` points at,
@@ -105,7 +105,7 @@ fn fixtureCompletionHandler(data: ?*anyopaque, caps: *core.Caps, req: *const cap
 /// handler above runs SYNCHRONOUSLY inside `run("complete")`), and fire the
 /// real `complete` command — the same command `C-n`/LSP completion binds to.
 fn fireCompletion(ed: *Editor, items: *[]capability.CompletionItem, cursor_off: usize) !void {
-    ed.buffers.active().editor.placeCursor(cursor_off);
+    ed.buffers.active().textEditor().?.placeCursor(cursor_off);
     try ed.caps.register(.{
         .capability = "edit/completion",
         .id = "fixture.popup-layout",
@@ -133,7 +133,7 @@ fn buildFrame(ed: *Editor, gpa: std.mem.Allocator, hud: view.Hud, fw: u32, fh: u
     defer arena.deinit();
     v.resetFrame();
     var top_row: usize = 0;
-    const built = try v.build(arena.allocator(), &ed.buffers.active().editor, hud, &top_row, frame, .{}, w2p);
+    const built = try v.build(arena.allocator(), ed.buffers.active().textEditor().?, hud, &top_row, frame, .{}, w2p);
     return .{ .v = v, .built = built };
 }
 
@@ -255,7 +255,7 @@ test "e2e/popup-layout: caret-popup layout goldens" {
         defer ed_storage.deinit();
         const ed = &ed_storage;
         try openFixtureBuffer(gpa, ed, "below.txt", "line zero\nline one\nline two\nline three\nline four\nline five\n");
-        const rope = ed.buffers.active().editor.text();
+        const rope = ed.buffers.active().textEditor().?.text();
         const cur_off = rope.lineRange(2).start;
 
         var items = [_]capability.CompletionItem{
@@ -309,7 +309,7 @@ test "e2e/popup-layout: caret-popup layout goldens" {
         const rows_visible: f32 = 5; // == the buffer's line count, so the last line sits at the body's bottom
         const fw: u32 = 800;
         const fh: u32 = @intFromFloat(2 * margin + v0.line_h * (1 + rows_visible)); // +1 row for the status line
-        const rope = ed.buffers.active().editor.text();
+        const rope = ed.buffers.active().textEditor().?.text();
         const cur_off = rope.lineRange(4).start; // the last (bottom) line
 
         var items = [_]capability.CompletionItem{
@@ -343,7 +343,7 @@ test "e2e/popup-layout: caret-popup layout goldens" {
         const body_cols: f32 = 20; // narrow body — the popup (10 cols wide) doesn't fit past column 10
         const fw: u32 = @intFromFloat(2 * margin + v0.cell_w * body_cols);
         const fh: u32 = 600;
-        const rope = ed.buffers.active().editor.text();
+        const rope = ed.buffers.active().textEditor().?.text();
         const cur_off = rope.lineRange(0).start + 25; // column 25 — well past body_cols - box_w
 
         var items = [_]capability.CompletionItem{.{ .text = @constCast("ok"), .rank = 0 }};
@@ -367,7 +367,7 @@ test "e2e/popup-layout: caret-popup layout goldens" {
         defer ed_storage.deinit();
         const ed = &ed_storage;
         try openFixtureBuffer(gpa, ed, "inforight.txt", "line zero\nline one\nline two\n");
-        const rope = ed.buffers.active().editor.text();
+        const rope = ed.buffers.active().textEditor().?.text();
         const cur_off = rope.lineRange(1).start;
 
         var items = [_]capability.CompletionItem{
@@ -401,7 +401,7 @@ test "e2e/popup-layout: caret-popup layout goldens" {
         const body_cols: f32 = 20;
         const fw: u32 = @intFromFloat(2 * margin + v0.cell_w * body_cols);
         const fh: u32 = 600;
-        const rope = ed.buffers.active().editor.text();
+        const rope = ed.buffers.active().textEditor().?.text();
         const cur_off = rope.lineRange(0).start + 25;
 
         var items = [_]capability.CompletionItem{
@@ -430,9 +430,9 @@ test "e2e/popup-layout: caret-popup layout goldens" {
         defer ed_storage.deinit();
         const ed = &ed_storage;
         try openFixtureBuffer(gpa, ed, "hover.txt", "target line for hover\nsecond line\n");
-        const rope = ed.buffers.active().editor.text();
+        const rope = ed.buffers.active().textEditor().?.text();
         const cur_off = rope.lineRange(0).start + 3;
-        ed.buffers.active().editor.placeCursor(cur_off);
+        ed.buffers.active().textEditor().?.placeCursor(cur_off);
 
         const hover_text = "signature: fn example(x: i32) i32\nReturns x, unmodified.\nSee also: identity.";
         var fr = try buildFrame(ed, gpa, .{ .mode = ed.mode(), .hover = .{ .text = hover_text, .offset = cur_off } }, 800, 600);
@@ -455,7 +455,7 @@ test "e2e/popup-layout: caret-popup layout goldens" {
         defer ed_storage.deinit();
         const ed = &ed_storage;
         try openFixtureBuffer(gpa, ed, "nonotes.txt", "line zero\nline one\n");
-        const rope = ed.buffers.active().editor.text();
+        const rope = ed.buffers.active().textEditor().?.text();
         const cur_off = rope.lineRange(1).start;
 
         // Default `.kind`/`.detail` (0/"") → `complete_ui.annotate` returns ""
@@ -484,7 +484,7 @@ test "e2e/popup-layout: caret-popup layout goldens" {
         defer ed_storage.deinit();
         const ed = &ed_storage;
         try openFixtureBuffer(gpa, ed, "scroll.txt", "line zero\nline one\n");
-        const rope = ed.buffers.active().editor.text();
+        const rope = ed.buffers.active().textEditor().?.text();
         const cur_off = rope.lineRange(1).start;
 
         var items: [12]capability.CompletionItem = undefined;

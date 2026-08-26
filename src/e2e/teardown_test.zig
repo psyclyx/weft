@@ -80,7 +80,7 @@ test "app/teardown: shells outlive buffers through an in-flight shell save" {
 
     // Back buffer 0 by that shell and kick an in-flight save: the pool worker now
     // holds `fs`, and Editor.deinit will spin-wait it out at teardown.
-    const ed = &sess.system.buffers.active().editor;
+    const ed = sess.system.buffers.active().textEditor().?;
     try ed.openShell(gpa, fs, path);
     try ed.doc.insert(gpa, ed.text().byteLen(), "an unsaved edit\n");
     try ed.requestSave(gpa);
@@ -135,7 +135,7 @@ test "app/teardown: unconnected Collab constructs + tears down clean" {
 
     var col: app_collab.Collab = undefined;
     col.initBase(gpa, &sess.system.buffers, &sess.system.caps, &known, null, .none, false, null, .view);
-    try col.connect(gpa, &sess.system.buffers.active().editor, &sess.system.caps, &id, null, "tok", "user", false);
+    try col.connect(gpa, sess.system.buffers.active().textEditor().?, &sess.system.caps, &id, null, "tok", "user", false);
     // main()'s order: Collab before Session (it reads the session caps + must
     // unbind before the doc layers drop).
     col.deinit(gpa);

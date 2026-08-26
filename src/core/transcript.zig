@@ -554,7 +554,8 @@ fn cTranscriptSave(ctx: *command.Context, data: ?*anyopaque, args: []const comma
     _ = args;
     const bind: *SaveBinding = @ptrCast(@alignCast(data.?));
     const gpa = ctx.gpa;
-    const report = reconcileOnSave(gpa, bind.tr, &ctx.editor().doc, bind.subs) catch |err| {
+    const ed = ctx.textEditor() catch return .nil;
+    const report = reconcileOnSave(gpa, bind.tr, &ed.doc, bind.subs) catch |err| {
         // Loud, never silent — the general pending-changes CONFIRM popup
         // `doc/editable-projection.md` step 4 envisions is dired's UI
         // surface to build, not duplicated here; the honest floor for
@@ -571,7 +572,7 @@ fn cTranscriptSave(ctx: *command.Context, data: ?*anyopaque, args: []const comma
     // coarseness left imprecise, and drops the `stale` rows' now-inert
     // claims) — the same "re-gather after apply" discipline dired's
     // `on_save_apply` follows.
-    try fill(gpa, bind.tr, &ctx.editor().doc, bind.subs);
+    try fill(gpa, bind.tr, &(try ctx.textEditor()).doc, bind.subs);
     if (report.stale > 0) {
         ctx.head.echo.clearRetainingCapacity();
         var buf: [64]u8 = undefined;
@@ -605,7 +606,7 @@ pub fn install(gpa: Allocator, commands: *command.Commands, actions: *Actions, b
 }
 
 /// Create a tool-backed buffer suitable for `fill`/`on_save` — the
-/// tool-buffer machinery `dired`/`magit` use (`Editor.setToolBacking`),
+/// tool-buffer machinery `dired`/`magit` use (`Buffers.Buffer.setTool`),
 /// wired up host-side instead of from a wasm guest's `on_fill` (per
 /// `graph.zig`'s "where the graph-side plugin code runs": this client's
 /// model AND its projection are host/in-process). NOT read-only: an
@@ -615,7 +616,7 @@ pub fn install(gpa: Allocator, commands: *command.Commands, actions: *Actions, b
 pub fn openBuffer(gpa: Allocator, buffers: *Buffers, display_name: []const u8) Buffers.Error!Buffers.Id {
     const id = try buffers.create(gpa, display_name);
     const buf = buffers.get(id).?;
-    try buf.editor.setToolBacking(gpa, projection_author);
+    try buf.setTool(gpa, projection_author);
     return id;
 }
 
@@ -968,7 +969,7 @@ test "install: `save` dispatches to transcript-save through the same tool-scoped
 
     const buf_id = try openBuffer(gpa, &buffers, "*transcript*");
     buffers.active_id = buf_id;
-    const doc = &buffers.get(buf_id).?.editor.doc;
+    const doc = &buffers.get(buf_id).?.textEditor().?.doc;
     try fill(gpa, &tr, doc, &subs);
 
     var bind: SaveBinding = .{ .tr = &tr, .subs = &subs };

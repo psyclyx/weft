@@ -183,7 +183,9 @@ pub const FrameCtx = struct {
 /// editor/buffer/provider attachment plus the frame's clock/geometry), kept
 /// distinct from the stable `FrameCtx` borrows.
 pub const Active = struct {
-    editor: *core.Editor,
+    /// Null when the active entry holds no text — the pane presents its view
+    /// instead of a document.
+    editor: ?*core.Editor,
     abuf: *core.Buffers.Buffer,
     attach: *providers.Attach,
     frame_start: u64,
@@ -208,7 +210,7 @@ pub const Driver = struct {
 
     pub const Prepared = struct {
         buffer: *core.Buffers.Buffer,
-        editor: *core.Editor,
+        editor: ?*core.Editor,
         attach: *providers.Attach,
     };
 
@@ -260,7 +262,7 @@ pub const Driver = struct {
         const frontend = active.frontend orelse return error.ProviderAttachmentMissing;
         return .{
             .buffer = active,
-            .editor = &active.editor,
+            .editor = active.textEditor(),
             .attach = @ptrCast(@alignCast(frontend)),
         };
     }
@@ -308,11 +310,12 @@ pub fn tickAsync(
         if (poll_due) next_backing_poll_ns.* = core.task.nowNs() + 2 * std.time.ns_per_s;
         var mit = fx.buffers.iterator();
         while (mit.next()) |b| {
-            if (b.editor.pollSave(gpa) and b == abuf) dirty = true;
-            const was_stale = b.editor.save_state == .stale;
-            if (try b.editor.pollBacking(gpa) and b == abuf) dirty = true;
-            if (was_stale and b.editor.save_state == .idle) try b.editor.requestSave(gpa);
-            if (poll_due or b.editor.save_state == .stale) try b.editor.requestBackingPoll(gpa);
+            const ed = b.textEditor() orelse continue;
+            if (ed.pollSave(gpa) and b == abuf) dirty = true;
+            const was_stale = ed.save_state == .stale;
+            if (try ed.pollBacking(gpa) and b == abuf) dirty = true;
+            if (was_stale and ed.save_state == .idle) try ed.requestSave(gpa);
+            if (poll_due or ed.save_state == .stale) try ed.requestBackingPoll(gpa);
         }
     }
     // Drive any async pick source (completion race-and-refine, file
@@ -331,7 +334,7 @@ pub fn tickAsync(
     // Fire the activation event when the focused buffer's path changes, so
     // language-aware plugins (`modes`) can attach keymaps/facts.
     {
-        const cur_path = fx.buffers.active().editor.backingPath() orelse "";
+        const cur_path = if (fx.buffers.active().textEditor()) |ed| ed.backingPath() orelse "" else "";
         if (!std.mem.eql(u8, cur_path, last_activate_path[0..last_activate_len.*])) {
             for (fx.plugins.items) |pl| core.wasm_host.notifyActivate(pl, cur_path);
             const n = @min(cur_path.len, last_activate_path.len);

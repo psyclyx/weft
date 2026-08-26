@@ -140,7 +140,10 @@ pub fn hClaimSubbuffer(data: ?*anyopaque, caller: *wasm.Caller, args: []const i3
         results[0] = -1;
         return;
     };
-    const ed = p.activeCtx().editor();
+    const ed = p.activeCtx().buffers.active().textEditor() orelse {
+        results[0] = -1;
+        return;
+    };
     const sub = subs.claim(p.gpa, &ed.doc, .{ .start = @intCast(args[0]), .end = @intCast(args[1]) }) catch {
         results[0] = -1;
         return;
@@ -191,7 +194,10 @@ pub fn hSubbufferFactAt(data: ?*anyopaque, caller: *wasm.Caller, args: []const i
         results[0] = -1;
         return;
     };
-    const ed = p.activeCtx().editor();
+    const ed = p.activeCtx().buffers.active().textEditor() orelse {
+        results[0] = -1;
+        return;
+    };
     const sub = subs.at(&ed.doc, @intCast(@as(u32, @bitCast(args[0])))) orelse {
         results[0] = -1;
         return;

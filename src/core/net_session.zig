@@ -133,8 +133,9 @@ pub const Session = struct {
             s.buf_id = id;
             break :blk bufs.get(id) orelse return false;
         };
-        const doc = &b.editor.doc;
-        const end = b.editor.text().byteLen();
+        const ed = b.textEditor() orelse return false;
+        const doc = &ed.doc;
+        const end = ed.text().byteLen();
         command.renderInto(s.gpa, doc, .plugin, s.plugin, &.{.{ .range = .{ .start = end, .end = end }, .bytes = s.out_buf.items }}) catch {
             s.out_buf.clearRetainingCapacity();
             return false;

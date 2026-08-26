@@ -56,10 +56,11 @@ pub const CompletionUi = struct {
         }
         self.caps = ctx.caps;
         const buffer = ctx.buffer();
-        const prefix = try buffer.editor.wordPrefix(ctx.gpa);
+        const editor = buffer.textEditor() orelse return .nil;
+        const prefix = try editor.wordPrefix(ctx.gpa);
         defer ctx.gpa.free(prefix);
-        const id = try ctx.fireRace(.completion, &buffer.editor.doc, buffer.editor.backingPath(), .{
-            .offset = buffer.editor.cursorOffset(),
+        const id = try ctx.fireRace(.completion, &editor.doc, editor.backingPath(), .{
+            .offset = editor.cursorOffset(),
             .text = prefix,
         }) orelse return .nil;
         errdefer ctx.caps.finish(id);
@@ -72,7 +73,7 @@ pub const CompletionUi = struct {
             .data = self,
         }, .{ .source = self.source() });
         // Draw the completion list as a popup AT the caret, not the bottom dock.
-        ctx.head.pick.caret_anchor = buffer.editor.cursorOffset();
+        ctx.head.pick.caret_anchor = editor.cursorOffset();
         self.session = id;
         self.buffer = buffer.ref();
         self.prefix_len = plen;
@@ -186,7 +187,8 @@ pub const CompletionUi = struct {
         const target = self.buffer orelse return;
         const buffer = ctx.buffers.resolve(target) orelse return;
         if (buffer != ctx.buffer()) return;
-        const cur = buffer.editor.cursorOffset();
+        const editor = buffer.textEditor() orelse return;
+        const cur = editor.cursorOffset();
         const start = cur -| self.prefix_len;
         // The one edit door: authored by the invoking principal and grade
         // -gated (a view peer's accept is refused, leaving no ghost). The
@@ -196,7 +198,7 @@ pub const CompletionUi = struct {
             return e;
         };
         // Completion is its own undo unit — the next typing starts fresh.
-        buffer.editor.history.barrier();
+        editor.history.barrier();
     }
 };
 

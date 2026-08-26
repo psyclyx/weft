@@ -220,7 +220,7 @@ pub fn shareHandler(ctx: *core.command.Context, data: ?*anyopaque, args: []const
     if (args.len != 0) return error.ArityMismatch;
     if (sc.conn.* == null and sc.hub.* == null) return .{ .string = "not connected" };
     const buf = ctx.buffer();
-    const doc = &buf.editor.doc;
+    const doc = &(buf.textEditor() orelse return .{ .string = "no text to share" }).doc;
     var did = false;
 
     if (sc.conn.*) |*c| {
@@ -441,7 +441,7 @@ fn openSharedAccept(ctx: *core.command.Context, data: ?*anyopaque, outcome: core
     defer ctx.gpa.free(display);
     const id = try ctx.buffers.create(ctx.gpa, display);
     const buf = ctx.buffers.get(id).?;
-    const doc = &buf.editor.doc;
+    const doc = &buf.textEditor().?.doc;
     const col = try ref.conn.openOffer(ref.index, doc, id);
     if (ref.peer) |peer| {
         // A hub peer shared a buffer to us: participate + relay it.

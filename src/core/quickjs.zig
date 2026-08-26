@@ -654,8 +654,9 @@ const transcript_peer = "agent-ui";
 fn appendNamed(ctx: *command.Context, gpa: Allocator, name: []const u8, text: []const u8, class: u8) void {
     const bufs = ctx.buffers;
     const b = bufs.get(bufs.ensureNamed(gpa, name) catch return) orelse return;
-    const doc = &b.editor.doc;
-    const start = b.editor.text().byteLen();
+    const ed = b.textEditor() orelse return;
+    const doc = &ed.doc;
+    const start = ed.text().byteLen();
     command.renderInto(gpa, doc, .plugin, transcript_peer, &.{.{ .range = .{ .start = start, .end = start }, .bytes = text }}) catch return;
     if (class != 0) paintStyle(ctx, gpa, doc, start, start + text.len, class);
 }
@@ -697,7 +698,7 @@ fn namedBuffer(ctx: *command.Context, gpa: Allocator, name: []const u8) ?*Buffer
 fn foldNamed(ctx: *command.Context, gpa: Allocator, name: []const u8, start: usize, end: usize) void {
     if (end <= start) return;
     const b = namedBuffer(ctx, gpa, name) orelse return;
-    const doc = &b.editor.doc;
+    const doc = &(b.textEditor() orelse return).doc;
     const layer = ctx.caps.layers.find(doc, "folds") orelse
         (ctx.caps.layers.claim(gpa, doc, "folds", .local, transcript_peer) catch return);
     layer.appendSpan(gpa, .{ .start = start, .end = end, .kind = 0, .message = "", .face = .{ .invisible = true, .foldable = true } }) catch {};
@@ -724,7 +725,7 @@ fn cBufferLen(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32, result
         results[0] = 0;
         return;
     };
-    results[0] = @intCast(b.editor.text().byteLen());
+    results[0] = @intCast((b.textEditor() orelse return).text().byteLen());
 }
 
 fn cBufferAppend(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32, results: []i32) void {
@@ -782,13 +783,14 @@ fn transcriptEntry(self: *JsPlugin, gpa: Allocator, name: []const u8, role: []co
     // "fall back to a full fill", which is always correct.
     self.transcript_live_sub = null;
     const b = namedBuffer(self.bridge.activeCtx(), gpa, name) orelse return;
-    try b.editor.setToolBacking(gpa, TranscriptDoc.projection_author);
-    try TranscriptDoc.fill(gpa, tr, &b.editor.doc, &self.transcript_subs);
+    const ed = b.textEditor() orelse return;
+    try b.setTool(gpa, TranscriptDoc.projection_author);
+    try TranscriptDoc.fill(gpa, tr, &ed.doc, &self.transcript_subs);
     // Cache the fresh row's claim for `cTranscriptAppend`'s incremental
     // path — see `transcript.lastRowClaim`'s doc comment for why this is
     // safe to grab right here (nothing else claims on `b.editor.doc`
     // between the `fill` above and this line).
-    self.transcript_live_sub = TranscriptDoc.lastRowClaim(&self.transcript_subs, &b.editor.doc);
+    self.transcript_live_sub = TranscriptDoc.lastRowClaim(&self.transcript_subs, &ed.doc);
 }
 
 /// weft.transcriptAppend(name, text): stream `text` onto the currently-open
@@ -842,7 +844,7 @@ fn transcriptAppend(self: *JsPlugin, gpa: Allocator, name: []const u8, text: []c
     self.transcript_live_len += text.len;
 
     const b = namedBuffer(self.bridge.activeCtx(), gpa, name) orelse return;
-    const doc = &b.editor.doc;
+    const doc = &(b.textEditor() orelse return).doc;
     const sub = self.transcript_live_sub;
     if (sub == null or sub.?.doc != doc) {
         // Slow path: no trustworthy cached claim (see this fn's doc
@@ -933,7 +935,7 @@ fn cFileRead(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32, results
             return;
         }
         const b = ctx.buffers.get(id) orelse break :open;
-        const text = b.editor.text().toOwnedSlice(gpa) catch break :open;
+        const text = (b.textEditor() orelse break :open).text().toOwnedSlice(gpa) catch break :open;
         defer gpa.free(text);
         results[0] = @intCast(caller.writeMemory(@intCast(args[2]), @intCast(args[3]), text) catch 0);
         return;
@@ -1092,7 +1094,10 @@ fn cStatus(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32, results: 
 /// prompt line. Written into the guest's receive buffer.
 fn cLineText(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32, results: []i32) void {
     const self: *JsPlugin = @ptrCast(@alignCast(data.?));
-    const ed = self.bridge.activeCtx().editor();
+    const ed = self.bridge.activeCtx().buffers.active().textEditor() orelse {
+        results[0] = 0;
+        return;
+    };
     const rope = ed.text();
     const row = rope.offsetToPoint(@min(ed.cursorOffset(), rope.byteLen())).row;
     const line = rope.lineRange(row);
@@ -1134,12 +1139,13 @@ fn cAgentWrite(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32, resul
     const id = bufs.findByPath(path) orelse blk: {
         const new_id = bufs.create(gpa, std.fs.path.basename(path)) catch return;
         const nb = bufs.get(new_id) orelse return;
-        nb.editor.adoptPath(gpa, path) catch return; // bind the path (save creates it)
+        (nb.textEditor() orelse return).adoptPath(gpa, path) catch return; // bind the path (save creates it)
         break :blk new_id;
     };
     const b = bufs.get(id) orelse return;
-    const doc = &b.editor.doc;
-    const end = b.editor.text().byteLen();
+    const ed = b.textEditor() orelse return;
+    const doc = &ed.doc;
+    const end = ed.text().byteLen();
     command.renderInto(gpa, doc, .agent, peer, &.{.{ .range = .{ .start = 0, .end = end }, .bytes = content }}) catch return;
 }
 
@@ -2038,7 +2044,7 @@ test "quickjs: the ACP plugin drives a mock agent's message into the transcript"
         var it = env.buffers.iterator();
         while (it.next()) |b| {
             if (!std.mem.eql(u8, b.name, "*agent*")) continue;
-            const txt = try b.editor.text().toOwnedSlice(gpa);
+            const txt = try b.textEditor().?.text().toOwnedSlice(gpa);
             defer gpa.free(txt);
             if (std.mem.indexOf(u8, txt, "hello from agent") != null) found = true;
         }
@@ -2072,7 +2078,7 @@ test "quickjs: transcriptEntry/transcriptAppend — role tagging, streamed-body 
         fn get(e: *Env, gpa2: Allocator) ![]u8 {
             var it = e.buffers.iterator();
             while (it.next()) |b| {
-                if (std.mem.eql(u8, b.name, "*t*")) return b.editor.text().toOwnedSlice(gpa2);
+                if (std.mem.eql(u8, b.name, "*t*")) return b.textEditor().?.text().toOwnedSlice(gpa2);
             }
             return error.NoBuffer;
         }
@@ -2314,7 +2320,7 @@ test "quickjs: an OPEN buffer doesn't launder a narrowed fs_read grant" {
     try @import("file.zig").writeBytesMakingDirs(gpa, dir, outside, "top secret");
 
     const id = try env.buffers.create(gpa, "secret.txt");
-    try env.buffers.get(id).?.editor.openFile(gpa, outside);
+    try env.buffers.get(id).?.textEditor().?.openFile(gpa, outside);
 
     const src = try std.fmt.allocPrint(gpa,
         \\weft.command("go", () => {{
@@ -2353,11 +2359,11 @@ test "quickjs: a JS plugin writes a file as an attributed agent peer edit" {
 
     const id = env.buffers.findByPath("/tmp/weft-agent-out.zig") orelse return error.NoAgentBuffer;
     const b = env.buffers.get(id).?;
-    const txt = try b.editor.text().toOwnedSlice(gpa);
+    const txt = try b.textEditor().?.text().toOwnedSlice(gpa);
     defer gpa.free(txt);
     try t.expectEqualStrings("const x = 1;", txt);
     // Authored by a non-user peer — the agent, not the user's undo history.
-    const doc = &b.editor.doc;
+    const doc = &b.textEditor().?.doc;
     try t.expect(doc.commitAt(doc.commitCount() - 1).author != .user);
 }
 
@@ -2416,10 +2422,10 @@ test "quickjs: weft.plugin loads a real .wasm, then its command runs" {
     try t.expectEqualStrings("duplicate-line", env.keymap.lookup(env.head.currentMode(), "D").?);
 
     // And the command actually runs through the membrane: duplicate a line.
-    try env.buffers.active().editor.insertText(gpa, "hi");
-    env.buffers.active().editor.placeCursor(0);
+    try env.buffers.active().textEditor().?.insertText(gpa, "hi");
+    env.buffers.active().textEditor().?.placeCursor(0);
     _ = try command.run(&env.commands, &env.ctx, "duplicate-line", &.{});
-    const s = try env.buffers.active().editor.text().toOwnedSlice(gpa);
+    const s = try env.buffers.active().textEditor().?.text().toOwnedSlice(gpa);
     defer gpa.free(s);
     try t.expectEqualStrings("hi\nhi", s);
 }
@@ -2500,7 +2506,7 @@ test "quickjs: deferred load — weft.set before the plugin line reaches its ini
 
     // And it runs through the membrane: inserts the configured backtick pair.
     _ = try command.run(&env.commands, &env.ctx, "pair-tick", &.{});
-    const s = try env.buffers.active().editor.text().toOwnedSlice(gpa);
+    const s = try env.buffers.active().textEditor().?.text().toOwnedSlice(gpa);
     defer gpa.free(s);
     try t.expectEqualStrings("``", s);
 }

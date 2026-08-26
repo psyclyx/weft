@@ -906,7 +906,7 @@ test "lsp: completion via the lsp plugin — async caps provider commits real zl
     const needle = "= answ";
     const idx = std.mem.indexOf(u8, txt, needle).?;
     const off = idx + needle.len;
-    ed.buffers.active().editor.placeCursor(off);
+    ed.buffers.active().textEditor().?.placeCursor(off);
     try t.expect(h.drainLspCompletion(ed, off, "answ"));
 }
 
@@ -919,7 +919,7 @@ test "complete: the caret popup narrows as you type" {
 
     // Buffer-word candidates sharing the prefix `al`; the cursor sits after a
     // trailing `al`, which is the completion prefix.
-    const core_ed = &ed.buffers.active().editor;
+    const core_ed = ed.buffers.active().textEditor().?;
     try core_ed.insertText(gpa, "alphabet alpine beta al");
     ed.run("complete");
     try t.expect(ed.pick.active); // the popup opened (in "pick" mode)
@@ -963,7 +963,7 @@ test "lsp: didChange — an edit after open syncs, so completion sees new symbol
     // Introduce a top-level decl with a real edit — this bumps the commit count,
     // so the plugin sends didChange before the next request. Without didChange the
     // server's copy is the stale snapshot and `zqxable` never completes.
-    const core_ed = &ed.buffers.active().editor;
+    const core_ed = ed.buffers.active().textEditor().?;
     core_ed.placeCursor(0);
     try core_ed.insertText(gpa, "const zqxable = 7;\n");
 
@@ -1241,7 +1241,7 @@ test "lsp: open returns immediately, before the server's handshake — real zls"
 
     // The buffer is immediately editable through the real insert path —
     // never stalled waiting for zls to become ready.
-    const core_ed = &ed.buffers.active().editor;
+    const core_ed = ed.buffers.active().textEditor().?;
     try core_ed.insertText(gpa, "// touched before any handshake could finish\n");
     const txt = try ed.textAlloc();
     defer gpa.free(txt);
@@ -1278,7 +1278,7 @@ test "lsp: a configured server binary that doesn't exist degrades silently — n
     try t.expect(elapsed < 2 * std.time.ns_per_s); // generous hang backstop, not a perf gate
 
     // Usable immediately regardless of the absent server.
-    const core_ed = &ed.buffers.active().editor;
+    const core_ed = ed.buffers.active().textEditor().?;
     try core_ed.insertText(gpa, "world\n");
 
     // No LSP feature can ever answer (there is nothing to answer with) — a

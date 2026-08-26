@@ -50,7 +50,7 @@ pub fn openBufferHandler(ctx: *core.command.Context, data: ?*anyopaque, args: []
         const fs0 = deps.shells.get(r.host);
         var rit = ctx.buffers.iterator();
         while (rit.next()) |b| {
-            switch (b.editor.backing) {
+            switch ((b.textEditor() orelse continue).backing) {
                 .shell => |s| if (s.fs == fs0 and std.mem.eql(u8, s.path, r.path)) {
                     try ctx.buffers.switchTo(ctx.gpa, b.id, ctx.head, ctx.keymap);
                     return .{ .integer = @intCast(b.id) };
@@ -68,12 +68,13 @@ pub fn openBufferHandler(ctx: *core.command.Context, data: ?*anyopaque, args: []
     const id = try ctx.buffers.create(ctx.gpa, std.fs.path.basename(spec));
     errdefer ctx.buffers.close(ctx.gpa, id, ctx.head, ctx.keymap) catch {};
     const buf = ctx.buffers.get(id).?;
+    const editor = buf.textEditor().?;
     if (remote) |r| {
         const fs = try deps.shellFor(r.host);
-        try buf.editor.openShell(ctx.gpa, fs, r.path);
+        try editor.openShell(ctx.gpa, fs, r.path);
     } else {
-        buf.editor.openFile(ctx.gpa, spec) catch |err| switch (err) {
-            error.FileNotFound => try buf.editor.adoptPath(ctx.gpa, spec),
+        editor.openFile(ctx.gpa, spec) catch |err| switch (err) {
+            error.FileNotFound => try editor.adoptPath(ctx.gpa, spec),
             else => |e| return e,
         };
     }
@@ -178,7 +179,9 @@ pub fn closeBufferHandler(ctx: *core.command.Context, data: ?*anyopaque, args: [
     const deps = command_context.attachments;
     if (args.len != 0) return error.ArityMismatch;
     const b = ctx.buffer();
-    if (b.editor.isDirty(ctx.gpa) catch true) return .{ .string = "dirty" };
+    if (b.textEditor()) |ed| {
+        if (ed.isDirty(ctx.gpa) catch true) return .{ .string = "dirty" };
+    }
     // Order matters: shares reference the doc and its layers.
     if (deps.share) |sc| {
         if (sc.conn.*) |*c| c.unbindTag(b.id);

@@ -215,7 +215,7 @@ pub const Editor = struct {
             .hub = &self.frame_hub,
             .collab_session = &self.frame_collab_session,
             .partial_state = &self.frame_partial_state,
-            .ed0 = &ed0.editor,
+            .ed0 = ed0.textEditor().?,
             .known_peers = &self.frame_known_peers,
             .noted_host_fp = &self.frame_noted_host_fp,
             .window_ctx = &self.win_ctx,
@@ -439,7 +439,7 @@ pub const Editor = struct {
         const deadline = core.task.nowNs() + 30 * std.time.ns_per_s;
         while (core.task.nowNs() < deadline) {
             _ = self.advanceAt(core.task.nowNs(), false) catch {};
-            if (self.buffers.active().editor.save_state != .saving) return;
+            if (self.buffers.active().textEditor().?.save_state != .saving) return;
             std.Thread.yield() catch {};
         }
     }
@@ -473,7 +473,7 @@ pub const Editor = struct {
 
     // ── inspectors ──
     pub fn textAlloc(self: *Editor) ![]u8 {
-        return self.buffers.active().editor.text().toOwnedSlice(self.gpa);
+        return self.buffers.active().textEditor().?.text().toOwnedSlice(self.gpa);
     }
     pub fn mode(self: *Editor) []const u8 {
         return self.head.currentMode();
@@ -863,8 +863,8 @@ pub const Loopback = struct {
         // The transport samples the handshake and every later queued write at
         // its own boundary. Capturing more or fewer video frames cannot alter
         // the deterministic network trace.
-        const host_doc = &host_ed.buffers.active().editor.doc;
-        const peer_doc = &peer_ed.buffers.active().editor.doc;
+        const host_doc = &host_ed.buffers.active().textEditor().?.doc;
+        const peer_doc = &peer_ed.buffers.active().textEditor().?.doc;
         self.host_sess = try session.Session.create(gpa, self.host_chaos.link(), .server, "loopback", .own, &self.host_identity);
         errdefer self.host_sess.destroy();
         self.peer_sess = try session.Session.create(gpa, self.peer_chaos.link(), .client, "loopback", .own, &self.peer_identity);
@@ -921,8 +921,8 @@ pub const Loopback = struct {
     /// with collaboration use this narrow clock edge; bounded convergence
     /// assertions should normally prefer `pumpUntil` below.
     pub fn tick(self: *Loopback) !void {
-        _ = try self.host_col.tick(self.host_ed.buffers.active().editor.cursorOffset());
-        _ = try self.peer_col.tick(self.peer_ed.buffers.active().editor.cursorOffset());
+        _ = try self.host_col.tick(self.host_ed.buffers.active().textEditor().?.cursorOffset());
+        _ = try self.peer_col.tick(self.peer_ed.buffers.active().textEditor().?.cursorOffset());
     }
 
     fn sees(collab: *const session.Collab, name: []const u8, offset: usize) bool {
@@ -937,8 +937,8 @@ pub const Loopback = struct {
     /// made the left screen one half-frame stale. The capture/recorder knows
     /// none of this; the collaboration participant owns its quiescence rule.
     pub fn synchronize(self: *Loopback) !void {
-        const host_offset = self.host_ed.buffers.active().editor.cursorOffset();
-        const peer_offset = self.peer_ed.buffers.active().editor.cursorOffset();
+        const host_offset = self.host_ed.buffers.active().textEditor().?.cursorOffset();
+        const peer_offset = self.peer_ed.buffers.active().textEditor().?.cursorOffset();
         const deadline = core.task.nowNs() + 5 * std.time.ns_per_s;
         while (core.task.nowNs() < deadline) {
             try self.tick();
@@ -1982,7 +1982,7 @@ pub fn toolText(ed: *Editor, name: []const u8) ?[]u8 {
     var it = ed.buffers.iterator();
     while (it.next()) |b| {
         if (std.mem.eql(u8, b.name, name))
-            return b.editor.text().toOwnedSlice(ed.gpa) catch null;
+            return b.textEditor().?.text().toOwnedSlice(ed.gpa) catch null;
     }
     return null;
 }
@@ -2075,7 +2075,7 @@ pub fn drainLspCompletion(ed: *Editor, off: usize, prefix: []const u8) bool {
     var attempt: usize = 0;
     while (attempt < 60) : (attempt += 1) {
         const b = ed.buffers.active();
-        const sid = (ed.caps.fire(.completion, &b.editor.doc, b.editor.backingPath(), .{
+        const sid = (ed.caps.fire(.completion, &b.textEditor().?.doc, b.textEditor().?.backingPath(), .{
             .offset = off,
             .text = prefix,
         }) catch {
@@ -2116,7 +2116,7 @@ pub fn drainCompletionText(ed: *Editor, off: usize, prefix: []const u8, needle: 
     var attempt: usize = 0;
     while (attempt < 60) : (attempt += 1) {
         const b = ed.buffers.active();
-        const sid = (ed.caps.fire(.completion, &b.editor.doc, b.editor.backingPath(), .{
+        const sid = (ed.caps.fire(.completion, &b.textEditor().?.doc, b.textEditor().?.backingPath(), .{
             .offset = off,
             .text = prefix,
         }) catch {

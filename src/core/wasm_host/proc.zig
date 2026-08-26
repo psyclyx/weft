@@ -149,8 +149,9 @@ pub fn hShellInsert(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32, 
     defer if (cmd_owned) gpa.free(cmd);
     const active_ctx = p.activeCtx();
     const buffer = active_ctx.buffers.active();
-    const doc = &buffer.editor.doc;
-    const target = doc.exportAnchor(gpa, buffer.editor.cursorOffset(), .before) catch return;
+    const editor = buffer.textEditor() orelse return;
+    const doc = &editor.doc;
+    const target = doc.exportAnchor(gpa, editor.cursorOffset(), .before) catch return;
     var target_owned = true;
     defer if (target_owned) gpa.free(target.agent);
     const job = gpa.create(ShellJob) catch {
@@ -192,7 +193,7 @@ fn shellDeliver(ctx: ?*anyopaque, result: ?[]const u8) void {
     const bytes = result orelse return;
     const gpa = job.gpa;
     const buffer = job.buffers.resolve(job.buffer) orelse return;
-    const doc = &buffer.editor.doc;
+    const doc = &(buffer.textEditor() orelse return).doc;
     var resolved: [1]usize = undefined;
     doc.resolveAnchors(gpa, &.{job.target}, &resolved) catch return;
     const at = resolved[0];
@@ -313,8 +314,9 @@ fn procDeliver(ctx: ?*anyopaque, result: ?[]const u8) void {
         nb.read_only = true;
         break :blk nb;
     };
-    const doc = &b.editor.doc;
-    const end = b.editor.text().byteLen();
+    const editor = b.textEditor() orelse return;
+    const doc = &editor.doc;
+    const end = editor.text().byteLen();
     if (job.append) {
         // Append below the existing content (a console log), separated by a
         // newline once there is prior output.
@@ -383,7 +385,8 @@ pub fn hProcFilter(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32, r
     defer if (cmd_owned) gpa.free(cmd);
     const active_ctx = p.activeCtx();
     const buffer = active_ctx.buffers.active();
-    const rope = buffer.editor.text();
+    const editor = buffer.textEditor() orelse return;
+    const rope = editor.text();
     const len = rope.byteLen();
     const s = @min(@as(usize, @intCast(args[2])), len);
     const e = @min(@as(usize, @intCast(args[3])), len);
@@ -395,10 +398,10 @@ pub fn hProcFilter(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32, r
         var sr = rope.streamReader(.{ .start = s, .end = e }, &.{});
         sr.interface.readSliceAll(content) catch return;
     }
-    const start = buffer.editor.doc.exportAnchor(gpa, s, .before) catch return;
+    const start = editor.doc.exportAnchor(gpa, s, .before) catch return;
     var start_owned = true;
     defer if (start_owned) gpa.free(start.agent);
-    const end = buffer.editor.doc.exportAnchor(gpa, e, .after) catch return;
+    const end = editor.doc.exportAnchor(gpa, e, .after) catch return;
     var end_owned = true;
     defer if (end_owned) gpa.free(end.agent);
     filter_counter += 1;
@@ -452,7 +455,7 @@ fn filterDeliver(ctx: ?*anyopaque, result: ?[]const u8) void {
     const out = result orelse return;
     const gpa = job.gpa;
     const buffer = job.buffers.resolve(job.buffer) orelse return;
-    const doc = &buffer.editor.doc;
+    const doc = &(buffer.textEditor() orelse return).doc;
     var resolved: [2]usize = undefined;
     doc.resolveAnchors(gpa, &.{ job.start, job.end }, &resolved) catch return;
     const rs = resolved[0];

@@ -298,7 +298,7 @@ pub const Ctx = struct {
             .path = buf.name,
             .name = buf.name,
             .lang = action_mod.langOfName(buf.name),
-            .tool = ctx.editor().toolName() orelse "",
+            .tool = buf.tool,
         } });
         self.scopes.append(.{ .kind = .subbuffer });
         self.scopes.append(.{ .kind = .mode, .facts = .{ .mode = ctx.head.currentMode() } });
@@ -623,7 +623,7 @@ test "ctx: epoch is the shared Container's TRUE per-mutation counter — task #1
     // `System.generation` — removed — never actually delivered, since
     // nothing wired it to `Ctx.capture` in the first place).
     try env.head.setModeRaw(gpa, "insert");
-    try env.buffers.active().editor.insertText(gpa, "hi");
+    try env.buffers.active().textEditor().?.insertText(gpa, "hi");
     const c3 = Ctx.capture(&env.ctx);
     try t.expectEqual(e2, c3.epoch);
 }

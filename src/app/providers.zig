@@ -102,14 +102,15 @@ pub const AttachDeps = struct {
 
 /// Idempotent: give a buffer its provider bundle (syntax by extension,
 /// LSP when locally placed). Buffers without a path get an empty
-/// bundle (tool/scratch).
+/// bundle (tool/scratch); so does an entry with no text to parse.
 pub fn attachProviders(deps: *AttachDeps, buf: *core.Buffers.Buffer) !void {
     if (buf.frontend != null) return;
     const gpa = deps.gpa;
     const at = try gpa.create(Attach);
     at.* = .{};
     buf.frontend = at;
-    const doc = &buf.editor.doc;
+    const editor = buf.textEditor() orelse return;
+    const doc = &editor.doc;
 
     // The buffer's *language* is identified by its name/path hint —
     // independent of where the bytes live. A shared (remote) buffer holds
@@ -117,7 +118,7 @@ pub fn attachProviders(deps: *AttachDeps, buf: *core.Buffers.Buffer) !void {
     // even with no local file backing. (Local) LSP is different: the
     // server needs the file on this machine, so it attaches only to a
     // locally-backed buffer, below.
-    const lang_path = buf.editor.backingPath() orelse buf.name;
+    const lang_path = editor.backingPath() orelse buf.name;
 
     if (deps.grammars.forPath(lang_path)) |spec| {
         // `createAsync`, not `create`: the initial full parse costs the
@@ -125,7 +126,7 @@ pub fn attachProviders(deps: *AttachDeps, buf: *core.Buffers.Buffer) !void {
         // tree-sitter does that part for free), so it runs on the
         // buffer's own pool worker instead of blocking `open`. See
         // src/core/syntax.zig's module doc for how the tree lands.
-        at.syntax = core.syntax.Syntax.createAsync(gpa, buf.editor.pool, spec, doc) catch |err| blk: {
+        at.syntax = core.syntax.Syntax.createAsync(gpa, editor.pool, spec, doc) catch |err| blk: {
             std.log.warn("syntax {s} unavailable: {t}", .{ spec.name, err });
             break :blk null;
         };
@@ -141,7 +142,7 @@ pub fn attachProviders(deps: *AttachDeps, buf: *core.Buffers.Buffer) !void {
 pub fn detachProviders(deps: *AttachDeps, buf: *core.Buffers.Buffer) void {
     const at: *Attach = @ptrCast(@alignCast(buf.frontend orelse return));
     if (at.syntax) |s| s.destroy();
-    deps.caps.layers.dropDoc(deps.gpa, &buf.editor.doc);
+    if (buf.textEditor()) |ed| deps.caps.layers.dropDoc(deps.gpa, &ed.doc);
     deps.gpa.destroy(at);
     buf.frontend = null;
 }

@@ -281,17 +281,18 @@ fn scrollToCursor(editor: *const core.Editor, top_row: *usize, body_rows: usize)
 /// Build the visible picture: lay out each body row into runs + the
 /// geometry map, derive decoration rects (selection, caret, peers)
 /// from that map, add the HUD, then place everything into shapes.
+/// A null `editor` is an entry that holds no text: the body is the HUD's
+/// semantic view (or nothing), with no rope and no caret.
 pub fn build(
     self: *View,
     scratch: Allocator,
-    editor: *const core.Editor,
+    editor: ?*const core.Editor,
     hud: Hud,
     top_row: *usize,
     frame: region.Rect,
     pick_dock: region.Rect,
     world_to_pixel: scene.Transform2D,
 ) !Built {
-    const rope = editor.text();
     // Carve the pane's frame into regions (no element computes an offset
     // against another): content is the frame inset by `margin`; a top
     // tab strip and a bottom HUD (status line + optional panel) are cut
@@ -323,8 +324,7 @@ pub fn build(
     self.md_active = hud.semantic_view == null and hud.md_inline != null;
 
     const rows_visible: usize = @intFromFloat(@max(1, @floor(body_rect.h / self.line_h)));
-    const total_rows = rope.lineCount();
-    const cursor_off = editor.cursorOffset();
+    const cursor_off = if (editor) |ed| ed.cursorOffset() else 0;
 
     var runs: std.ArrayList(Run) = .empty;
     defer {
@@ -341,8 +341,10 @@ pub fn build(
         self.frame_layout = .{ .lines = &.{} };
         self.semantic_active = true;
         self.semantic_hits = try semantic.drawDocument(self, scratch, self.layout_arena.allocator(), &runs, &rects, document, body_rect);
-    } else {
-        scrollToCursor(editor, top_row, rows_visible);
+    } else if (editor) |ed| {
+        const rope = ed.text();
+        const total_rows = rope.lineCount();
+        scrollToCursor(ed, top_row, rows_visible);
         if (top_row.* >= total_rows) top_row.* = total_rows -| 1;
         const styles = try linelayout.resolveStyleInputs(self, scratch, hud, rope, rows_visible, total_rows);
         const flip_off: ?usize = if (hud.cursor_on and hud.cursor_style == .block) cursor_off else null;
@@ -357,7 +359,7 @@ pub fn build(
         var row = top_row.*;
         var shown: usize = 0;
         while (row < total_rows and shown < rows_visible and y_top < body_limit_y) : (row += 1) {
-            if (editor.rowHidden(row)) continue;
+            if (ed.rowHidden(row)) continue;
             const runs_mark = runs.items.len;
             const vl = try linelayout.layoutLine(self, scratch, la, &runs, rope, row, y_top, cols_visible, hud.md_inline, styles, flip_off);
             if (shown != 0 and y_top + vl.height > body_limit_y) {
@@ -370,7 +372,7 @@ pub fn build(
         }
         self.frame_layout = .{ .lines = try lines.toOwnedSlice(la) };
 
-        const selection = editor.selectedRange();
+        const selection = ed.selectedRange();
         if (selection) |sel| try decoration.selectionRects(self, scratch, &rects, sel, self.theme.selection);
         if (hud.flash) |fl| try decoration.selectionRects(self, scratch, &rects, fl, self.theme.accent);
         if (hud.cursor_on) try decoration.caretRect(self, scratch, &rects, cursor_off, hud.cursor_style, self.theme.cursor);
@@ -385,6 +387,11 @@ pub fn build(
                 try decoration.caretRect(self, scratch, &rects, head, .bar, decoration.peerColor(hue, 0.62, 1.0));
             }
         }
+    } else {
+        // Neither text nor a view to present: an empty body. Clear the
+        // geometry map rather than leave last frame's lines pointing into the
+        // arena `resetFrame` just reclaimed.
+        self.frame_layout = .{ .lines = &.{} };
     }
 
     // Top buffer-tab strip, into its own region.

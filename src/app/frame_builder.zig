@@ -112,6 +112,74 @@ fn focusedSemanticNode(head: *const core.Head, view_ref: semantic.view.Ref, root
     return if (containsSemanticNode(root, wanted)) wanted else firstFocusableSemanticNode(root);
 }
 
+/// The layers a pane's body paints from. An entry that holds no text has no
+/// document, and therefore none of them.
+const DocLayers = struct {
+    highlight: ?*const core.layers.Layer = null,
+    styles: ?*const core.layers.Layer = null,
+    diagnostics: ?*const core.layers.Layer = null,
+    decorations: ?*const core.layers.Layer = null,
+    presence: ?*const core.layers.Layer = null,
+
+    fn of(caps: *core.Caps, editor: ?*core.Editor) DocLayers {
+        const ed = editor orelse return .{};
+        return .{
+            .highlight = caps.layers.find(&ed.doc, "highlight"),
+            .styles = caps.layers.find(&ed.doc, "styles"),
+            .diagnostics = caps.layers.find(&ed.doc, "diagnostics"),
+            .decorations = caps.layers.find(&ed.doc, "decorations"),
+            .presence = caps.layers.find(&ed.doc, "presence"),
+        };
+    }
+};
+
+/// What a TEXT entry reports on the status line. An entry that holds no text
+/// has nothing to save, realize, or diagnose.
+const DocStatus = struct {
+    dirty: bool = false,
+    save_failed: bool = false,
+    save_note: ?[]const u8 = null,
+    unfetched_pct: ?u8 = null,
+    peers: usize = 0,
+    cursor_diag: ?[]const u8 = null,
+
+    fn of(gpa: std.mem.Allocator, editor: ?*core.Editor, doc_layers: DocLayers) DocStatus {
+        const ed = editor orelse return .{};
+        return .{
+            .dirty = ed.isDirty(gpa) catch true,
+            .save_failed = ed.save_state == .failed,
+            .save_note = switch (ed.save_state) {
+                .saving => "saving…",
+                .stale => "save stale",
+                else => null,
+            },
+            .unfetched_pct = unfetchedPct(ed),
+            .peers = if (doc_layers.presence) |pl| pl.spanCount() else 0,
+            .cursor_diag = cursorDiag(doc_layers.diagnostics, ed.cursorOffset()),
+        };
+    }
+};
+
+/// Share of a partial checkout still unfetched, for the realization chip.
+fn unfetchedPct(editor: *core.Editor) ?u8 {
+    var unfetched: usize = 0;
+    for (editor.doc.unrealizedBase()) |h| unfetched += h.bytes;
+    if (unfetched == 0) return null;
+    const total_len = editor.text().byteLen();
+    if (total_len == 0) return null;
+    return @intCast(@min(99, unfetched * 100 / total_len));
+}
+
+/// The diagnostic message under the caret, if any.
+fn cursorDiag(diag_layer: ?*const core.layers.Layer, cursor: usize) ?[]const u8 {
+    const dl = diag_layer orelse return null;
+    for (0..dl.spanCount()) |i| {
+        const d = dl.resolvedSpan(i);
+        if (cursor >= d.start and cursor <= d.end) return d.message;
+    }
+    return null;
+}
+
 fn semanticDocument(fx: *const FrameCtx) ?view_mod.semantic_data.Document {
     const path = fx.head.semantic_focus.path() orelse return null;
     const instance = fx.semantic.views.get(path.view) orelse return null;
@@ -265,7 +333,7 @@ pub const FrameBuilder = struct {
         const projection = scene.Mat4.ortho(0, @floatFromInt(fb[0]), @floatFromInt(fb[1]), 0, -1, 1);
         const world_to_pixel = scene.mvpToScenePixel(projection, @floatFromInt(fb[0]), @floatFromInt(fb[1])) orelse unreachable;
 
-        if (attach.syntax) |syn| try self.publishHighlight(gpa, editor, syn, fx.caps, self.view.top_row);
+        if (attach.syntax) |syn| if (editor) |ed| try self.publishHighlight(gpa, ed, syn, fx.caps, self.view.top_row);
 
         // Markdown styling for .md buffers: analyze a window (whole doc
         // when small) into per-byte attributes each damage frame — a
@@ -276,9 +344,11 @@ pub const FrameBuilder = struct {
         var md_arena = std.heap.ArenaAllocator.init(gpa);
         defer md_arena.deinit();
         const mesh_gpa = md_arena.allocator();
-        const file_name = editor.backingPath() orelse abuf.name;
-        const md_inline = mdInlineFor(mesh_gpa, editor, file_name, self.view.top_row);
-        const diag_layer = fx.caps.layers.find(&editor.doc, "diagnostics");
+        const file_name = if (editor) |ed| ed.backingPath() orelse abuf.name else abuf.name;
+        const md_inline = if (editor) |ed| mdInlineFor(mesh_gpa, ed, file_name, self.view.top_row) else null;
+        const doc_layers = DocLayers.of(fx.caps, editor);
+        const doc_status = DocStatus.of(gpa, editor, doc_layers);
+        const diag_layer = doc_layers.diagnostics;
 
         var pos_buf: [24]u8 = undefined;
         const buffer_pos = blk: {
@@ -302,19 +372,10 @@ pub const FrameBuilder = struct {
             }
             break :blk false;
         };
-        const backing_chip: ?[]const u8 = switch (editor.backing) {
+        const backing_chip: ?[]const u8 = if (abuf.tool.len > 0) "tool" else switch (if (editor) |ed| ed.backing else .none) {
             .none => if (shared_here) "@shared" else null,
             .file => if (shared_here) "file+shared" else "file",
             .shell => if (shared_here) "shell+shared" else "shell",
-            .tool => "tool",
-        };
-        const unfetched_pct: ?u8 = blk: {
-            var unfetched: usize = 0;
-            for (editor.doc.unrealizedBase()) |h| unfetched += h.bytes;
-            if (unfetched == 0) break :blk null;
-            const total_len = editor.text().byteLen();
-            if (total_len == 0) break :blk null;
-            break :blk @intCast(@min(99, unfetched * 100 / total_len));
         };
         var listen_buf: [40]u8 = undefined;
         const link_note: ?[]const u8 = if (fx.collab_session.*) |s|
@@ -342,7 +403,7 @@ pub const FrameBuilder = struct {
         // every frame with the live anchor, so it can never go stale the
         // same way (verified: typing narrows completion with no flicker —
         // `authoring_test.zig`'s existing narrowing test stays green).
-        expireStaleCaretSurfaces(fx.plugins.items, editor.text(), editor.cursorOffset());
+        if (editor) |ed| expireStaleCaretSurfaces(fx.plugins.items, ed.text(), ed.cursorOffset());
 
         // Collect the plugins' live overlays for this frame (which-key,
         // dired, magit … render through the retained surface door) plus the
@@ -379,7 +440,7 @@ pub const FrameBuilder = struct {
         if (fx.buffers.count() > 1) {
             var bit3 = fx.buffers.iterator();
             while (bit3.next()) |b| {
-                const nm = b.editor.backingPath() orelse b.name;
+                const nm = if (b.textEditor()) |ed| ed.backingPath() orelse b.name else b.name;
                 tab_list.append(gpa, .{ .name = std.fs.path.basename(nm), .active = b == abuf }) catch {};
             }
         }
@@ -394,7 +455,7 @@ pub const FrameBuilder = struct {
             if (active or fx.flash_was_active.*) fx.view_dirty.* = true; // draw it, then clear it
             fx.flash_was_active.* = active;
             if (!active) break :fblk null;
-            const len = editor.text().byteLen();
+            const len = (editor orelse break :fblk null).text().byteLen();
             break :fblk .{ .start = @min(fs.start, len), .end = @min(fs.end, len) };
         };
         // `ui/statusline-seg` (north-star-plan §6 W3-1): fire the mesh with
@@ -440,40 +501,28 @@ pub const FrameBuilder = struct {
             .cursor_on = if (fx.cursor_cfg.blinkFor(fx.cursor_cfg.resolveMode(fx.keymap, fx.head, fx.head.currentMode()))) act.blink_on else true,
             .statusline_segs = statusline_segs,
             .gutter = gutter_frame,
-            .dirty = editor.isDirty(gpa) catch true,
-            .save_failed = editor.save_state == .failed,
+            .dirty = doc_status.dirty,
+            .save_failed = doc_status.save_failed,
             .backing = backing_chip,
-            .save_note = switch (editor.save_state) {
-                .saving => "saving…",
-                .stale => "save stale",
-                else => null,
-            },
-            .unfetched_pct = unfetched_pct,
-            .peers = if (fx.caps.layers.find(&editor.doc, "presence")) |pl| pl.spanCount() else 0,
+            .save_note = doc_status.save_note,
+            .unfetched_pct = doc_status.unfetched_pct,
+            .peers = doc_status.peers,
             .echo = if (fx.head.echo.items.len > 0) fx.head.echo.items else null,
             .plugin_status = core.status_feed.get(),
             // Rendering P2: the picker's scene already went into
             // `hud.surfaces` (`pick_surface_storage`, above) — this field is
             // dead in production; see `View.build`'s doc.
             .pick = null,
-            .highlight_layer = fx.caps.layers.find(&editor.doc, "highlight"),
-            .styles_layer = fx.caps.layers.find(&editor.doc, "styles"),
+            .highlight_layer = doc_layers.highlight,
+            .styles_layer = doc_layers.styles,
             .diag_layer = diag_layer,
-            .decorations_layer = fx.caps.layers.find(&editor.doc, "decorations"),
-            .presence_layer = fx.caps.layers.find(&editor.doc, "presence"),
+            .decorations_layer = doc_layers.decorations,
+            .presence_layer = doc_layers.presence,
             .trust = if (fx.collab_session.* != null) blk: {
                 const fp = fx.noted_host_fp.* orelse break :blk null;
                 break :blk collab.hostTrustChip(fx.known_peers.trust(fp));
             } else null,
-            .cursor_diag = blk: {
-                const dl = diag_layer orelse break :blk null;
-                const cur = editor.cursorOffset();
-                for (0..dl.spanCount()) |i| {
-                    const d = dl.resolvedSpan(i);
-                    if (cur >= d.start and cur <= d.end) break :blk d.message;
-                }
-                break :blk null;
-            },
+            .cursor_diag = doc_status.cursor_diag,
         };
         try self.renderPanes(fx, act, hud, world_to_pixel);
     }
@@ -519,15 +568,19 @@ pub const FrameBuilder = struct {
                 continue; // the focused pane builds last, below
             }
             const ob = fx.buffers.get(slot.pane.buffer_id) orelse continue;
-            ob.editor.fold_layer = fx.caps.layers.find(&ob.editor.doc, "folds");
-            ob.editor.readonly_layer = fx.caps.layers.find(&ob.editor.doc, "readonly");
-            // Highlight this split too — reparse + publish its syntax (was
-            // focused-pane-only, hence "one split at a time"). Its buffer is
-            // attached by main's visible-pane loop, so resolveSyntax finds it.
-            if (providers.resolveSyntax(ob)) |syn|
-                self.publishHighlight(gpa, &ob.editor, syn, fx.caps, slot.pane.top_row) catch {};
-            const other_name = ob.editor.backingPath() orelse ob.name;
-            const other_diag = fx.caps.layers.find(&ob.editor.doc, "diagnostics");
+            const oed = ob.textEditor();
+            if (oed) |e| {
+                e.fold_layer = fx.caps.layers.find(&e.doc, "folds");
+                e.readonly_layer = fx.caps.layers.find(&e.doc, "readonly");
+                // Highlight this split too — reparse + publish its syntax (was
+                // focused-pane-only, hence "one split at a time"). Its buffer is
+                // attached by main's visible-pane loop, so resolveSyntax finds it.
+                if (providers.resolveSyntax(ob)) |syn|
+                    self.publishHighlight(gpa, e, syn, fx.caps, slot.pane.top_row) catch {};
+            }
+            const other_name = if (oed) |e| e.backingPath() orelse ob.name else ob.name;
+            const other_layers = DocLayers.of(fx.caps, oed);
+            const other_diag = other_layers.diagnostics;
             // A peeked pane's own `ui/statusline-seg` fire: mode + file only
             // (no buffer position/link — matches today's peeked-pane
             // rendering, which never showed those either) plus its own
@@ -551,21 +604,23 @@ pub const FrameBuilder = struct {
                 .cursor_on = false, // the caret belongs to the focused pane
                 .pane_border = slot.border,
                 // A peeked pane keeps its syntax + markdown + tool colors + diagnostics.
-                .highlight_layer = fx.caps.layers.find(&ob.editor.doc, "highlight"),
-                .md_inline = mdInlineFor(arena_state.allocator(), &ob.editor, other_name, slot.pane.top_row),
-                .styles_layer = fx.caps.layers.find(&ob.editor.doc, "styles"),
+                .highlight_layer = other_layers.highlight,
+                .md_inline = if (oed) |e| mdInlineFor(arena_state.allocator(), e, other_name, slot.pane.top_row) else null,
+                .styles_layer = other_layers.styles,
                 .diag_layer = other_diag,
-                .decorations_layer = fx.caps.layers.find(&ob.editor.doc, "decorations"),
+                .decorations_layer = other_layers.decorations,
             };
-            const bo = try self.view.build(arena_state.allocator(), &ob.editor, other_hud, &slot.pane.top_row, slot.rect, .{}, world_to_pixel);
+            const bo = try self.view.build(arena_state.allocator(), oed, other_hud, &slot.pane.top_row, slot.rect, .{}, world_to_pixel);
             try self.built_panes.append(gpa, bo);
         }
 
         // The focused pane: active buffer, full HUD, caret, picker dock.
         var fhud = hud;
         fhud.pane_border = foc_border;
-        editor.fold_layer = fx.caps.layers.find(&editor.doc, "folds");
-        editor.readonly_layer = fx.caps.layers.find(&editor.doc, "readonly");
+        if (editor) |ed| {
+            ed.fold_layer = fx.caps.layers.find(&ed.doc, "folds");
+            ed.readonly_layer = fx.caps.layers.find(&ed.doc, "readonly");
+        }
         const b = try self.view.build(arena_state.allocator(), editor, fhud, &self.view.top_row, foc_rect, pick_dock, world_to_pixel);
         try self.built_panes.append(gpa, b);
         focused.pane().top_row = self.view.top_row; // scrollToCursor may have moved it

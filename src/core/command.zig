@@ -161,12 +161,22 @@ pub const Context = struct {
         return self.caps.fire(kind, doc, path, opts);
     }
 
-    pub fn editor(self: *Context) *Editor {
-        return &self.buffers.active().editor;
+    /// The active entry's text editor, or a REFUSAL: an entry that holds no
+    /// text (a semantic view) has no document, cursor, or undo history to
+    /// operate on. Refusing here — echoed, like every other refusal — makes a
+    /// text op on such an entry one polite no-op instead of a guard each call
+    /// site invents for itself (`builtins.editErr` swallows it).
+    pub fn textEditor(self: *Context) error{Unauthorized}!*Editor {
+        return self.buffers.active().textEditor() orelse {
+            self.noteRefusal("no text in this view");
+            return error.Unauthorized;
+        };
     }
 
-    pub fn document(self: *Context) *Document {
-        return &self.buffers.active().editor.doc;
+    /// The active entry's document, when it holds text.
+    pub fn document(self: *Context) ?*Document {
+        const ed = self.buffers.active().textEditor() orelse return null;
+        return &ed.doc;
     }
 
     pub const EditError = Document.AddPeerError || error{ Unauthorized, OutOfLimit, Collapsed };
@@ -219,7 +229,7 @@ pub const Context = struct {
     /// `weft.grant` verb, mints one).
     pub fn checkDocRegion(self: *Context, start: usize, end: usize) DocRegionVerdict {
         const table = self.grant_table orelse return .ok;
-        const doc = self.document();
+        const doc = self.document() orelse return .ok;
         const c = self.capturedCtx();
         for (c.grants.constSlice()) |h| {
             const region = switch (table.limitFor(h)) {
@@ -276,9 +286,15 @@ pub const Context = struct {
     /// reporting to keep in sync. Only the refusal path touches the echo; an
     /// allowed keystroke allocates nothing here.
     fn refuse(self: *Context, why: []const u8) EditError {
+        self.noteRefusal(why);
+        return error.Unauthorized;
+    }
+
+    /// The visibility half of a refusal, for the callers that own the error
+    /// value themselves.
+    fn noteRefusal(self: *Context, why: []const u8) void {
         self.head.echo.clearRetainingCapacity();
         self.head.echo.appendSlice(self.gpa, why) catch {};
-        return error.Unauthorized;
     }
 
     /// Whether `r` overlaps a read-only SPAN of the active buffer — the
@@ -286,7 +302,8 @@ pub const Context = struct {
     /// editable). A caret AT a span boundary may still type (insert adjacent);
     /// only a range that actually reaches into read-only content is refused.
     fn readOnlyOverlaps(self: *Context, r: Document.Range) bool {
-        const layer = self.buffer().editor.readonly_layer orelse return false;
+        const ed = self.buffer().textEditor() orelse return false;
+        const layer = ed.readonly_layer orelse return false;
         var i: usize = 0;
         const n = layer.spanCount();
         while (i < n) : (i += 1) {
@@ -316,12 +333,13 @@ pub const Context = struct {
     /// intent — set for interactive edits, cleared for renders/autonomous work.
     /// An `.agent`/`.remote` NEVER joins the user's undo even under a keystroke.
     fn applyEdit(self: *Context, r: Document.Range, bytes: []const u8, join_user: bool) EditError!void {
-        const doc = self.document();
+        const ed = try self.textEditor();
+        const doc = &ed.doc;
         if (!self.gradeOn(doc).canEdit()) return self.refuse("read-only: view access");
         const joins_user_undo = self.principal.role == .user or
             (join_user and self.principal.role == .plugin);
         if (joins_user_undo) {
-            try self.editor().applyUserEdit(self.gpa, r, bytes);
+            try ed.applyUserEdit(self.gpa, r, bytes);
             return;
         }
         const pid = try self.principal.peerOn(doc);
@@ -627,8 +645,8 @@ fn unpack(comptime T: type, v: Value) error{TypeMismatch}!T {
 const t = std.testing;
 
 fn insertText(ctx: *Context, args: struct { offset: i64, text: []const u8 }) anyerror!Value {
-    try ctx.document().insert(ctx.gpa, @intCast(args.offset), args.text);
-    return .{ .integer = @intCast(ctx.document().text().byteLen()) };
+    try ctx.document().?.insert(ctx.gpa, @intCast(args.offset), args.text);
+    return .{ .integer = @intCast(ctx.document().?.text().byteLen()) };
 }
 
 test "command Value: a borrowed live range follows edits and rejects another document" {
@@ -703,13 +721,13 @@ test "command: schema derivation, validation, late-bound run" {
     try t.expectError(error.TypeMismatch, run(&commands, &ctx, "insert-text", &.{
         .{ .string = "oops" }, .{ .string = "hi" },
     }));
-    try t.expectEqual(@as(usize, 0), buffers.active().editor.text().byteLen());
+    try t.expectEqual(@as(usize, 0), buffers.active().textEditor().?.text().byteLen());
 
     const res = try run(&commands, &ctx, "insert-text", &.{
         .{ .integer = 0 }, .{ .string = "graft" },
     });
     try t.expectEqual(Value{ .integer = 5 }, res);
-    try t.expectEqual(@as(usize, 5), buffers.active().editor.text().byteLen());
+    try t.expectEqual(@as(usize, 5), buffers.active().textEditor().?.text().byteLen());
 }
 
 test "command: an agent principal authors as its own peer even under a keystroke" {
@@ -742,7 +760,7 @@ test "command: an agent principal authors as its own peer even under a keystroke
         .quit = &quit,
         .head = &head,
     };
-    const doc = ctx.document();
+    const doc = ctx.document().?;
 
     // Seed as the user (a keystroke): realizes the base + a user-authored commit.
     ctx.user_initiated = true;
@@ -823,7 +841,7 @@ test "command: read-only refuses interactive edit, allows render (in depth)" {
     var ops = Peer{ .gpa = gpa, .name = "operators" };
     ctx.principal = .{ .role = .plugin, .name = "operators", .ctx = &ops, .resolve = Peer.resolve };
     try t.expectError(error.Unauthorized, ctx.edit(.{ .start = 0, .end = 1 }, ""));
-    const mid = try ctx.document().text().toOwnedSlice(gpa);
+    const mid = try ctx.document().?.text().toOwnedSlice(gpa);
     defer gpa.free(mid);
     try t.expectEqualStrings("tree", mid);
 
@@ -832,7 +850,7 @@ test "command: read-only refuses interactive edit, allows render (in depth)" {
     var plugin_peer = Peer{ .gpa = gpa, .name = "plugin-peer" };
     ctx.principal = .{ .role = .plugin, .name = "plugin-peer", .ctx = &plugin_peer, .resolve = Peer.resolve };
     try ctx.render(.{ .start = 0, .end = 4 }, "TREE");
-    const out = try ctx.document().text().toOwnedSlice(gpa);
+    const out = try ctx.document().?.text().toOwnedSlice(gpa);
     defer gpa.free(out);
     try t.expectEqualStrings("TREE", out);
 
@@ -841,15 +859,15 @@ test "command: read-only refuses interactive edit, allows render (in depth)" {
     ctx.buffer().read_only = false;
     ctx.principal = .user;
     ctx.user_initiated = true;
-    const doc2 = ctx.document();
+    const doc2 = ctx.document().?;
     const ro = try ctx.caps.layers.claim(gpa, doc2, "readonly", .local, "test");
     try ro.appendSpan(gpa, .{ .start = 0, .end = 2, .kind = 0, .message = "", .face = .{} });
-    ctx.buffer().editor.readonly_layer = ctx.caps.layers.find(doc2, "readonly");
+    ctx.buffer().textEditor().?.readonly_layer = ctx.caps.layers.find(doc2, "readonly");
     // "TREE": [0,2) is read-only; an edit reaching into it is refused, an edit
     // past it (the "input line") is allowed.
     try t.expectError(error.Unauthorized, ctx.edit(.{ .start = 1, .end = 2 }, "x"));
     try ctx.edit(.{ .start = 4, .end = 4 }, "!"); // append after the RO span → ok
-    const out2 = try ctx.document().text().toOwnedSlice(gpa);
+    const out2 = try ctx.document().?.text().toOwnedSlice(gpa);
     defer gpa.free(out2);
     try t.expectEqualStrings("TREE!", out2);
 }
@@ -936,7 +954,7 @@ test "command: W4 slice 3 — doc_region grant follows concurrent edits elsewher
     var env = try DocRegionEnv.init(gpa);
     defer env.deinit();
     const ctx = &env.ctx;
-    const doc = ctx.document();
+    const doc = ctx.document().?;
 
     // Seed "0123456789" as the user.
     ctx.principal = .user;
@@ -1031,7 +1049,7 @@ test "command: W4 slice 3 — deleting a doc_region's entire text collapses the 
     var env = try DocRegionEnv.init(gpa);
     defer env.deinit();
     const ctx = &env.ctx;
-    const doc = ctx.document();
+    const doc = ctx.document().?;
 
     ctx.principal = .user;
     ctx.user_initiated = true;
@@ -1069,7 +1087,7 @@ test "command: W4 slice 3 — compaction collapses a doc_region grant (trap, not
     var env = try DocRegionEnv.init(gpa);
     defer env.deinit();
     const ctx = &env.ctx;
-    const doc = ctx.document();
+    const doc = ctx.document().?;
 
     ctx.principal = .user;
     ctx.user_initiated = true;
@@ -1104,7 +1122,7 @@ test "command: W4 slice 3 — a single-commit rewrite of the WHOLE region surviv
     var env = try DocRegionEnv.init(gpa);
     defer env.deinit();
     const ctx = &env.ctx;
-    const doc = ctx.document();
+    const doc = ctx.document().?;
 
     ctx.principal = .user;
     ctx.user_initiated = true;
@@ -1141,7 +1159,7 @@ test "command: W4 slice 3 (B2 adversarial a) — a peer's paste INSIDE the regio
     var env = try DocRegionEnv.init(gpa);
     defer env.deinit();
     const ctx = &env.ctx;
-    const doc = ctx.document();
+    const doc = ctx.document().?;
 
     ctx.principal = .user;
     ctx.user_initiated = true;
@@ -1189,7 +1207,7 @@ test "command: W4 slice 3 (B2 adversarial b) — cut-inside-then-paste-outside t
     var env = try DocRegionEnv.init(gpa);
     defer env.deinit();
     const ctx = &env.ctx;
-    const doc = ctx.document();
+    const doc = ctx.document().?;
 
     ctx.principal = .user;
     ctx.user_initiated = true;
@@ -1231,7 +1249,7 @@ test "command: W4 slice 3 — multiple doc_region grants for one principal: the 
     var env = try DocRegionEnv.init(gpa);
     defer env.deinit();
     const ctx = &env.ctx;
-    const doc = ctx.document();
+    const doc = ctx.document().?;
 
     ctx.principal = .user;
     ctx.user_initiated = true;
@@ -1277,7 +1295,7 @@ test "command: W4 slice 3 [FIX 2] — applyActionResult refuses an out-of-range 
     var env = try DocRegionEnv.init(gpa);
     defer env.deinit();
     const ctx = &env.ctx;
-    const doc = ctx.document();
+    const doc = ctx.document().?;
 
     ctx.principal = .user;
     ctx.user_initiated = true;
@@ -1321,7 +1339,7 @@ test "command: W4 slice 3 [FIX 2] — applyActionResult applies an in-range batc
     var env = try DocRegionEnv.init(gpa);
     defer env.deinit();
     const ctx = &env.ctx;
-    const doc = ctx.document();
+    const doc = ctx.document().?;
 
     ctx.principal = .user;
     ctx.user_initiated = true;

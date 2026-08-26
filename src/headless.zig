@@ -58,7 +58,7 @@ pub fn run(gpa: std.mem.Allocator, args: Args, environ: std.process.Environ) !vo
     const sys = try core.System.create(gpa, pool, "host", "host");
     defer sys.destroy();
     const buffers = &sys.buffers;
-    const editor = &buffers.active().editor;
+    const editor = buffers.active().textEditor().?;
     if (args.file) |p| {
         editor.openFile(gpa, p) catch |err| switch (err) {
             error.FileNotFound => try editor.adoptPath(gpa, p),

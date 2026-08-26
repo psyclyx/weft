@@ -1,9 +1,11 @@
-//! Buffers — the editor's open-buffer set. A buffer is an `Editor`
-//! (document + cursor + undo + backing) plus its interaction state:
-//! a buffer-local keymap mode (vim state per buffer, saved/restored on
-//! focus switch), a read-only flag (tool buffers), a display name, and
-//! an opaque frontend slot where the shell hangs per-buffer providers
-//! (syntax, LSP, collab) — core never looks inside it.
+//! Buffers — the workspace's open-entry set. An entry is a display name, a
+//! buffer-local keymap mode (vim state per buffer, saved/restored on focus
+//! switch), an optional tool identity, an opaque frontend slot where the shell
+//! hangs per-buffer providers (syntax, LSP, collab) — core never looks inside
+//! it — and, only when it holds TEXT, an `Editor` (document + cursor + undo +
+//! backing). A semantic/tool entry carries none: it has no document to edit,
+//! so text operations on it are refused at `command.Context`'s edit door
+//! rather than absorbed by an empty stand-in document.
 //!
 //! A live buffer has a compact `Id` (slot index) and a generation-checked
 //! `Ref`. Use `Id` only while synchronously addressing the current set; use
@@ -19,6 +21,7 @@ const std = @import("std");
 const Allocator = std.mem.Allocator;
 const assert = std.debug.assert;
 
+const semantic = @import("weft_semantic");
 const Editor = @import("Editor.zig");
 const Keymap = @import("Keymap.zig");
 const Head = @import("Head.zig");
@@ -57,9 +60,17 @@ pub const Ref = struct {
 pub const Buffer = struct {
     id: Id,
     generation: u64,
-    editor: Editor,
+    /// Text storage and text-editing state — present only for entries that
+    /// HOLD text. Null for a semantic view, whose content is its tool's
+    /// presentation. Reach it through `textEditor`.
+    editor: ?Editor,
     /// Display name (path basename, tool name, or "*scratch*").
     name: []u8,
+    /// The plugin projection this entry represents (`dired`, `files`), or
+    /// empty. An ambient fact providers scope on — a projection registers its
+    /// `save` under `When{ .tool = … }` so it wins in its own entry, in any
+    /// mode — and independent of whether the entry stores text.
+    tool: []u8 = &.{},
     /// Keymap mode restored when this buffer takes focus. Empty =
     /// never visited — inherits whatever mode is current.
     mode: []u8 = &.{},
@@ -69,15 +80,27 @@ pub const Buffer = struct {
     /// between operations. An editable projection (mini.files dired) is simply
     /// NOT read-only and takes `edit`.
     read_only: bool = false,
-    /// A structured view is still an ordinary buffer. Its text document is a
-    /// harmless empty backing store; this is the buffer-local semantic cursor
-    /// restored when the buffer is selected again.
+    /// The buffer-local semantic cursor, restored when the buffer is selected
+    /// again.
     semantic_focus: Head.SemanticFocus = .empty,
     /// The shell's per-buffer attachments (providers); opaque to core.
     frontend: ?*anyopaque = null,
 
     pub fn ref(self: *const Buffer) Ref {
         return .{ .id = self.id, .generation = self.generation };
+    }
+
+    /// This entry's text editor, or null when it holds no text.
+    pub fn textEditor(self: *Buffer) ?*Editor {
+        if (self.editor) |*ed| return ed;
+        return null;
+    }
+
+    /// Name the projection this entry represents. Idempotent.
+    pub fn setTool(self: *Buffer, gpa: Allocator, name: []const u8) Error!void {
+        const owned = try gpa.dupe(u8, name);
+        gpa.free(self.tool);
+        self.tool = owned;
     }
 };
 
@@ -115,9 +138,10 @@ pub fn setDefaultMode(self: *Buffers, gpa: Allocator, mode: []const u8) Error!vo
 
 fn destroyBuffer(self: *Buffers, gpa: Allocator, b: *Buffer) void {
     _ = self;
-    b.editor.deinit(gpa);
+    if (b.textEditor()) |ed| ed.deinit(gpa);
     b.semantic_focus.deinit(gpa);
     gpa.free(b.name);
+    gpa.free(b.tool);
     gpa.free(b.mode);
     gpa.destroy(b);
 }
@@ -164,15 +188,27 @@ pub const Iterator = struct {
     }
 };
 
-/// Create an empty buffer (no backing yet — callers open/adopt on its
-/// editor, or leave it scratch). Does not focus it.
+/// Create a text buffer (no backing yet — callers open/adopt on its editor,
+/// or leave it scratch). Does not focus it.
 pub fn create(self: *Buffers, gpa: Allocator, name: []const u8) Error!Id {
+    var editor = try Editor.init(gpa, self.pool, self.user_agent);
+    errdefer editor.deinit(gpa);
+    return self.insert(gpa, name, editor, "");
+}
+
+/// Create an entry with NO text: a semantic view of `tool`, whose content is
+/// that tool's presentation rather than a document. Does not focus it.
+pub fn createView(self: *Buffers, gpa: Allocator, name: []const u8, tool: []const u8) Error!Id {
+    return self.insert(gpa, name, null, tool);
+}
+
+fn insert(self: *Buffers, gpa: Allocator, name: []const u8, editor: ?Editor, tool: []const u8) Error!Id {
     const b = try gpa.create(Buffer);
     errdefer gpa.destroy(b);
     const owned_name = try gpa.dupe(u8, name);
     errdefer gpa.free(owned_name);
-    var editor = try Editor.init(gpa, self.pool, self.user_agent);
-    errdefer editor.deinit(gpa);
+    const owned_tool = try gpa.dupe(u8, tool);
+    errdefer gpa.free(owned_tool);
 
     // Reuse the lowest free slot, else append.
     const id: Id = blk: {
@@ -185,7 +221,13 @@ pub fn create(self: *Buffers, gpa: Allocator, name: []const u8) Error!Id {
     const generation = self.next_generation;
     self.next_generation +%= 1;
     if (self.next_generation == 0) self.next_generation = 1;
-    b.* = .{ .id = id, .generation = generation, .editor = editor, .name = owned_name };
+    b.* = .{
+        .id = id,
+        .generation = generation,
+        .editor = editor,
+        .name = owned_name,
+        .tool = owned_tool,
+    };
     self.slots.items[id] = b;
     return id;
 }
@@ -194,7 +236,8 @@ pub fn create(self: *Buffers, gpa: Allocator, name: []const u8) Error!Id {
 pub fn findByPath(self: *const Buffers, path: []const u8) ?Id {
     var it = self.iterator();
     while (it.next()) |b| {
-        if (b.editor.backingPath()) |p| {
+        const ed = b.textEditor() orelse continue;
+        if (ed.backingPath()) |p| {
             if (std.mem.eql(u8, p, path)) return b.id;
         }
     }
@@ -277,10 +320,10 @@ pub fn switchTo(self: *Buffers, gpa: Allocator, id: Id, head: *Head, keymap: *co
     self.active_id = id;
 }
 
-/// Turn the view currently focused on `head` into (or reattach it to) a real
-/// buffer, then focus that buffer. The caller supplies presentation policy
-/// (display name and tool fact); semantic identity provides
-/// deduplication.
+/// Turn the view currently focused on `head` into (or reattach it to) a
+/// workspace entry, then focus it. The caller supplies presentation policy
+/// (display name and tool fact); semantic identity provides deduplication.
+/// The entry carries NO editor — it presents the view, it does not store text.
 pub fn attachFocusedSemanticView(
     self: *Buffers,
     gpa: Allocator,
@@ -298,13 +341,8 @@ pub fn attachFocusedSemanticView(
             break;
         };
     }
-    const target_id = id orelse try self.create(gpa, name);
+    const target_id = id orelse try self.createView(gpa, name, tool);
     const target = self.get(target_id).?;
-    if (id == null) {
-        errdefer self.close(gpa, target_id, head, keymap) catch {};
-        try target.editor.setToolBacking(gpa, tool);
-        target.read_only = true;
-    }
     // Capture the just-opened path on its destination before switchTo saves
     // the outgoing buffer. Then clear the head so the outgoing buffer records
     // no foreign semantic cursor.
@@ -414,6 +452,33 @@ test "buffers: ensureNamed finds-or-creates by name; the Id is stable" {
     // The stable handle resolves the same buffer regardless of what else opens.
     _ = try bufs.create(gpa, "other.zig");
     try t.expectEqualStrings("*repl*", bufs.get(id).?.name);
+}
+
+test "buffers: attaching a focused view makes an entry with no editor" {
+    const t = std.testing;
+    const gpa = t.allocator;
+    var pool = try task.Pool.init(gpa, .{ .threads = 1 });
+    defer pool.deinit();
+    var bufs = try init(gpa, pool, "user");
+    defer bufs.deinit(gpa);
+    var km: Keymap = .empty;
+    defer km.deinit(gpa);
+    var head: Head = .empty;
+    defer head.deinit(gpa);
+
+    const view: semantic.view.Ref = .{ .authority = .here, .slot = 1, .generation = 7 };
+    try head.semantic_focus.set(gpa, .{ .view = view, .nodes = &.{} });
+    const id = try bufs.attachFocusedSemanticView(gpa, &head, &km, "files: /tmp", "files");
+
+    const entry = bufs.get(id).?;
+    try t.expect(entry.textEditor() == null);
+    try t.expectEqualStrings("files", entry.tool);
+    // A scratch entry, by contrast, holds text.
+    try t.expect(bufs.get(0).?.textEditor() != null);
+
+    // Re-attaching the same view reuses the entry rather than opening a second.
+    try head.semantic_focus.set(gpa, .{ .view = view, .nodes = &.{} });
+    try t.expectEqual(id, try bufs.attachFocusedSemanticView(gpa, &head, &km, "files: /tmp", "files"));
 }
 
 test "buffers: Ref rejects a closed generation when its slot is reused" {

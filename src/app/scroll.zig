@@ -46,7 +46,7 @@ fn viewportRows(sc: *ScrollCtx) usize {
 /// Move the focused pane's viewport by `delta` rows, optionally carrying
 /// the cursor with it (vim C-d/C-u/C-f/C-b move the cursor; C-e/C-y do not).
 fn doScroll(ctx: *core.command.Context, sc: *ScrollCtx, delta: i64, move_cursor: bool) void {
-    const ed = ctx.editor();
+    const ed = ctx.buffers.active().textEditor() orelse return;
     const rope = ed.text();
     const last = rope.lineCount() -| 1;
     if (delta >= 0)
@@ -94,7 +94,7 @@ pub fn scrollPageUp(ctx: *core.command.Context, data: ?*anyopaque, _: []const co
 }
 pub fn centerLine(ctx: *core.command.Context, data: ?*anyopaque, _: []const core.command.Value) anyerror!core.command.Value {
     const sc = scrollOf(data);
-    const ed = ctx.editor();
+    const ed = ctx.buffers.active().textEditor() orelse return .nil;
     const cur_row = ed.text().offsetToPoint(ed.cursorOffset()).row;
     sc.view.top_row = cur_row -| (viewportRows(sc) / 2);
     return .nil;

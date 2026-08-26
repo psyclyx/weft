@@ -550,20 +550,20 @@ test "wasm plugin: a .wasm guest edits the buffer through the host ABI, as its p
         .head = &head,
     };
 
-    try buffers.active().editor.insertText(gpa, "ab");
-    buffers.active().editor.placeCursor(1); // between 'a' and 'b'
+    try buffers.active().textEditor().?.insertText(gpa, "ab");
+    buffers.active().textEditor().?.placeCursor(1); // between 'a' and 'b'
 
     var engine = try wasm.Engine.init();
     defer engine.deinit();
     try runGuest(&engine, &ctx, "wasm.hello", guest_hello);
 
     // The .wasm guest inserted "wasm!" at the cursor through the host edit.
-    const s = try buffers.active().editor.text().toOwnedSlice(gpa);
+    const s = try buffers.active().textEditor().?.text().toOwnedSlice(gpa);
     defer gpa.free(s);
     try t.expectEqualStrings("awasm!b", s);
     // Authored as the wasm plugin's peer, not the user (the authority gate
     // holds across the membrane).
-    const doc = &buffers.active().editor.doc;
+    const doc = buffers.active().textEditor().?.doc;
     try t.expect(doc.commitAt(doc.commitCount() - 1).author != .user);
 }
 
@@ -608,13 +608,13 @@ test "wasm plugin: init registers a command that dispatches back into the guest"
 
     // Running it dispatches back into the guest, which edits via the host
     // gate — authored as the plugin's peer, across the membrane.
-    try buffers.active().editor.insertText(gpa, "xy");
-    buffers.active().editor.placeCursor(1);
+    try buffers.active().textEditor().?.insertText(gpa, "xy");
+    buffers.active().textEditor().?.placeCursor(1);
     _ = try command.run(&commands, &ctx, "wasm-mark", &.{});
-    const s = try buffers.active().editor.text().toOwnedSlice(gpa);
+    const s = try buffers.active().textEditor().?.text().toOwnedSlice(gpa);
     defer gpa.free(s);
     try t.expectEqualStrings("x[wasm]y", s);
-    const doc = &buffers.active().editor.doc;
+    const doc = buffers.active().textEditor().?.doc;
     try t.expect(doc.commitAt(doc.commitCount() - 1).author != .user);
 }
 
@@ -689,7 +689,7 @@ test "wasm plugin: the edit catalog plugin runs identically as .wasm (duplicate-
     try t.expect(env.commands.resolve("duplicate-line") != null);
     try t.expect(env.commands.resolve("upcase-line") != null);
 
-    const ed = &env.buffers.active().editor;
+    const ed = env.buffers.active().textEditor().?;
     try ed.insertText(gpa, "hello\nworld");
     ed.placeCursor(2); // inside the first line
 
@@ -881,7 +881,7 @@ test "vim ex: `:` opens a command line; :N gotos, :%s substitutes, unknown falls
     // text-input mode routing keystrokes to `ex-type`.
     try t.expectEqualStrings("vim-ex", env.keymap.lookup(env.head.currentMode(), "colon").?);
 
-    const ed = &env.buffers.active().editor;
+    const ed = env.buffers.active().textEditor().?;
     try ed.insertText(gpa, "l1\nl2\nl3\nl4\nl5");
     ed.placeCursor(0);
 
@@ -923,7 +923,7 @@ test "wasm plugin: upcase-line edits in place across the membrane" {
     const plugin = try loadPlugin(&engine, &env.ctx, "edit", @embedFile("guest_edit_wasm"), .{});
     defer plugin.deinit();
 
-    const ed = &env.buffers.active().editor;
+    const ed = env.buffers.active().textEditor().?;
     try ed.insertText(gpa, "abc\ndef");
     ed.placeCursor(5); // inside "def"
     _ = try command.run(&env.commands, &env.ctx, "upcase-line", &.{});
@@ -1041,10 +1041,10 @@ test "wasm plugin: nested same-plugin dispatch preserves its caller's live range
     const plugin = try loadPlugin(&engine, &env.ctx, "headtest", @embedFile("guest_headtest_wasm"), .{});
     defer plugin.deinit();
 
-    try env.buffers.active().editor.insertText(gpa, "abc");
+    try env.buffers.active().textEditor().?.insertText(gpa, "abc");
     const result = try command.run(&env.commands, &env.ctx, "head-range-relay", &.{});
     try t.expect(result == .range);
-    const resolved = result.range.resolve(&env.buffers.active().editor.doc) orelse return error.TestUnexpectedResult;
+    const resolved = result.range.resolve(&env.buffers.active().textEditor().?.doc) orelse return error.TestUnexpectedResult;
     try t.expectEqual(@as(usize, 1), resolved.start);
     try t.expectEqual(@as(usize, 2), resolved.end);
 
@@ -1077,7 +1077,7 @@ test "wasm plugin: document snapshot witnesses are causal, buffer-bound, and ide
     try t.expect(plugin.docSnapshotIsCurrent(same_frontier));
     plugin.releaseDocSnapshot(before);
     try t.expect(plugin.docSnapshotIsCurrent(same_frontier));
-    try env.buffers.active().editor.insertText(gpa, "abc");
+    try env.buffers.active().textEditor().?.insertText(gpa, "abc");
     try t.expect(!plugin.docSnapshotIsCurrent(before));
     try t.expect(!plugin.docSnapshotIsCurrent(same_frontier));
     plugin.releaseDocSnapshot(before);
@@ -1119,7 +1119,7 @@ test "wasm plugin: hot-reload — teardown unbinds, re-instantiation is clean" {
     var engine = try wasm.Engine.init();
     defer engine.deinit();
 
-    const ed = &env.buffers.active().editor;
+    const ed = env.buffers.active().textEditor().?;
     try ed.insertText(gpa, "x");
     ed.placeCursor(0);
 
@@ -1159,7 +1159,7 @@ test "wasm plugin: a completion provider gathers candidates across the membrane"
     const plugin = try loadPlugin(&engine, &env.ctx, "complete", @embedFile("guest_complete_wasm"), .{});
     defer plugin.deinit();
 
-    const ed = &env.buffers.active().editor;
+    const ed = env.buffers.active().textEditor().?;
     try ed.insertText(gpa, "alpha alphabet beta alpha");
 
     // Fire a completion for prefix "alph": the host calls the guest's
@@ -1270,7 +1270,7 @@ test "wasm plugin: demo-config composes commands + binds a key (config surface)"
     try env.head.setModeRaw(gpa, "default");
     try t.expectEqualStrings("dup-up", env.keymap.lookup(env.head.currentMode(), "C-d").?);
 
-    const ed = &env.buffers.active().editor;
+    const ed = env.buffers.active().textEditor().?;
     try ed.insertText(gpa, "ab");
     ed.placeCursor(0);
     _ = try command.run(&env.commands, &env.ctx, "dup-up", &.{});
@@ -1360,7 +1360,7 @@ test "wasm plugins: consult-line combines anchored row identity with exact match
     const plugin = try loadPlugin(&engine, &env.ctx, "consult", @embedFile("guest_consult_wasm"), .{});
     defer plugin.deinit();
 
-    const ed = &env.buffers.active().editor;
+    const ed = env.buffers.active().textEditor().?;
     try ed.insertText(gpa, "aaa\n    ccc");
     ed.placeCursor(0);
 
@@ -1423,7 +1423,7 @@ test "wasm plugins: consult-line verifies content beyond its display scratch" {
     const consult = try loadPlugin(&engine, &env.ctx, "consult", @embedFile("guest_consult_wasm"), .{});
     defer consult.deinit();
 
-    const ed = &env.buffers.active().editor;
+    const ed = env.buffers.active().textEditor().?;
     const line = try gpa.alloc(u8, 70 * 1024);
     defer gpa.free(line);
     @memset(line, 'a');
@@ -1451,7 +1451,7 @@ test "wasm plugins: consult-imenu picks a definition and jumps to it" {
     try @import("../pick.zig").install(gpa, &env.commands, &env.keymap);
 
     const src = "fn foo() void {}\nfn bar() void {}";
-    const ed = &env.buffers.active().editor;
+    const ed = env.buffers.active().textEditor().?;
     try ed.insertText(gpa, src);
     const sx = @import("../syntax.zig");
     const syn = try sx.Syntax.create(gpa, sx.builtinForPath("t.zig").?, &ed.doc);
@@ -1521,7 +1521,7 @@ test "wasm plugin: structural node-kind/delete-node degrade honestly with no gra
     const plugin = try loadPlugin(&engine, &env.ctx, "structural", @embedFile("guest_structural_wasm"), .{});
     defer plugin.deinit();
 
-    const ed = &env.buffers.active().editor;
+    const ed = env.buffers.active().textEditor().?;
     try ed.insertText(gpa, "foo");
     const r1 = try command.run(&env.commands, &env.ctx, "node-kind", &.{});
     try t.expect(r1 == .nil); // no grammar → nil
@@ -1537,7 +1537,7 @@ test "wasm plugin: ts expands selection to the enclosing node + runs a query" {
     defer env.deinit(gpa);
 
     const src = "const x = 42;";
-    const ed = &env.buffers.active().editor;
+    const ed = env.buffers.active().textEditor().?;
     try ed.insertText(gpa, src);
 
     // Attach a real zig grammar via the buffer's frontend slot; a resolver hands
@@ -1579,7 +1579,7 @@ test "wasm plugins: a tree text object (a-function) an operator deletes (daf)" {
     defer env.deinit(gpa);
 
     const src = "fn foo() void {}\nconst x = 1;";
-    const ed = &env.buffers.active().editor;
+    const ed = env.buffers.active().textEditor().?;
     try ed.insertText(gpa, src);
 
     const sx = @import("../syntax.zig");
@@ -1624,7 +1624,7 @@ test "wasm plugin: region claims a subbuffer + attaches a fact across the membra
     const plugin = try loadPlugin(&engine, &env.ctx, "region", @embedFile("guest_region_wasm"), .{ .subbuffers = &subs });
     defer plugin.deinit();
 
-    const ed = &env.buffers.active().editor;
+    const ed = env.buffers.active().textEditor().?;
     try ed.insertText(gpa, "line one\nline two");
     ed.placeCursor(2); // inside the first line ("line one" — 8 bytes)
 
@@ -1647,7 +1647,7 @@ test "wasm plugin: shell insert-shell runs a command off-thread and inserts at i
     const plugin = try loadPlugin(&engine, &env.ctx, "shell", @embedFile("guest_shell_wasm"), .{ .loop = &loop });
     defer plugin.deinit();
 
-    const ed = &env.buffers.active().editor;
+    const ed = env.buffers.active().textEditor().?;
     try ed.insertText(gpa, "X");
     ed.placeCursor(1); // capture the insert point at offset 1
 
@@ -1684,7 +1684,7 @@ test "wasm plugin: shell insert is a no-op when the async service is absent" {
     defer plugin.deinit();
     try t.expect(plugin.perms[wasm_host.perm_proc] and plugin.perms[wasm_host.perm_timer]); // declared
 
-    const ed = &env.buffers.active().editor;
+    const ed = env.buffers.active().textEditor().?;
     try ed.insertText(gpa, "Z");
     _ = try command.run(&env.commands, &env.ctx, "insert-shell", &.{.{ .string = "printf hi" }});
     try t.expect(ed.text().byteLen() == 1); // nothing inserted
@@ -1727,22 +1727,22 @@ test "wasm plugin: git-status runs git into a focused tool buffer (async)" {
     // git checkout). If git is unavailable the buffer stays empty — the
     // structural checks above still hold.
     var rounds: usize = 0;
-    while (rounds < 20_000_000 and buf.?.editor.text().byteLen() == 0) : (rounds += 1) {
+    while (rounds < 20_000_000 and buf.?.textEditor().?.text().byteLen() == 0) : (rounds += 1) {
         _ = loop.tick();
         std.Thread.yield() catch {};
     }
-    if (buf.?.editor.text().byteLen() > 0) {
+    if (buf.?.textEditor().?.text().byteLen() > 0) {
         // on_fill parsed the raw git output and re-rendered the MODEL: the buffer
         // holds the pretty projection, never the porcelain. Whether the ambient
         // cwd is a repo or not, we get a model header — `Branch:` in a repo, or
         // `Not a git repository.` outside one — but never a raw `## `/`#` line.
-        const s = try buf.?.editor.text().toOwnedSlice(gpa);
+        const s = try buf.?.textEditor().?.text().toOwnedSlice(gpa);
         defer gpa.free(s);
         const is_repo = std.mem.indexOf(u8, s, "Branch:") != null;
         const not_repo = std.mem.indexOf(u8, s, "Not a git repository.") != null;
         try t.expect(is_repo or not_repo);
         try t.expect(!std.mem.startsWith(u8, s, "## ")); // porcelain never leaks through
-        const doc = &buf.?.editor.doc;
+        const doc = buf.?.textEditor().?.doc;
         try t.expect(doc.commitAt(doc.commitCount() - 1).author != .user); // the plugin peer
     }
 }
@@ -1770,14 +1770,14 @@ test "wasm plugin: run-command runs a shell command into a tool buffer (async)" 
     };
     try t.expect(buf != null);
     var rounds: usize = 0;
-    while (rounds < 20_000_000 and buf.?.editor.text().byteLen() == 0) : (rounds += 1) {
+    while (rounds < 20_000_000 and buf.?.textEditor().?.text().byteLen() == 0) : (rounds += 1) {
         _ = loop.tick();
         std.Thread.yield() catch {};
     }
-    const s = try buf.?.editor.text().toOwnedSlice(gpa);
+    const s = try buf.?.textEditor().?.text().toOwnedSlice(gpa);
     defer gpa.free(s);
     try t.expectEqualStrings("weft-ok", s); // stdout, trailing newline trimmed
-    const doc = &buf.?.editor.doc;
+    const doc = buf.?.textEditor().?.doc;
     try t.expect(doc.commitAt(doc.commitCount() - 1).author != .user); // the plugin peer
 }
 
@@ -1794,7 +1794,7 @@ test "wasm plugin: fmt filters a range through a command (async, in-place tmp)" 
     const plugin = try loadPlugin(&engine, &env.ctx, "fmt", @embedFile("guest_fmt_wasm"), .{ .loop = &loop });
     defer plugin.deinit();
 
-    const ed = &env.buffers.active().editor;
+    const ed = env.buffers.active().textEditor().?;
     try ed.insertText(gpa, "foo foo");
     const before = ed.doc.commitCount();
     // Filter the whole buffer through sed (in /usr/bin — no nix PATH needed):
@@ -1844,11 +1844,11 @@ test "wasm plugin: repl runs a persistent process and streams its output back" {
     // Drive the frame drain until cat's echo streams into *repl* (bounded — a
     // timeout fails the assert rather than hanging).
     var rounds: usize = 0;
-    while (rounds < 5_000_000 and buf.?.editor.text().byteLen() == 0) : (rounds += 1) {
+    while (rounds < 5_000_000 and buf.?.textEditor().?.text().byteLen() == 0) : (rounds += 1) {
         _ = wasm_host.drainReplSessions(plugin);
         std.Thread.yield() catch {};
     }
-    const s = try buf.?.editor.text().toOwnedSlice(gpa);
+    const s = try buf.?.textEditor().?.text().toOwnedSlice(gpa);
     defer gpa.free(s);
     try t.expect(std.mem.indexOf(u8, s, "ping") != null); // the echoed line
 }
@@ -1868,7 +1868,7 @@ test "wasm plugin: console-send runs the current line and appends output" {
     defer plugin.deinit();
 
     _ = try command.run(&env.commands, &env.ctx, "console-open", &.{}); // focus *console*
-    const ed = &env.buffers.active().editor;
+    const ed = env.buffers.active().textEditor().?;
     try ed.insertText(gpa, "echo con-ok"); // type a command line
     const before = ed.doc.commitCount();
     _ = try command.run(&env.commands, &env.ctx, "console-send", &.{});
@@ -1910,7 +1910,7 @@ test "wasm plugin: vim wires the modal keymap and runs motions/operators as .was
     try t.expectEqualStrings("normal", env.head.currentMode());
 
     // yank-line + paste duplicates the current line (through the core register).
-    const ed = &env.buffers.active().editor;
+    const ed = env.buffers.active().textEditor().?;
     try ed.insertText(gpa, "hello");
     ed.placeCursor(0);
     _ = try command.run(&env.commands, &env.ctx, "yank-line", &.{});
@@ -1936,7 +1936,7 @@ test "wasm plugin: vim yank/paste ferries a subbuffer id through the register (d
     const plugin = try loadPlugin(&engine, &env.ctx, "vim", @embedFile("guest_vim_wasm"), .{ .register = &reg, .subbuffers = &subs });
     defer plugin.deinit();
 
-    const ed = &env.buffers.active().editor;
+    const ed = env.buffers.active().textEditor().?;
     try ed.insertText(gpa, "row-a");
     // A projection row: its name carries a hidden id (exactly as dired claims).
     const row = try subs.claim(gpa, &ed.doc, .{ .start = 0, .end = 5 });
@@ -1969,7 +1969,7 @@ test "wasm plugin: explicit named text register survives a later delete yank" {
     const plugin = try loadPlugin(&engine, &env.ctx, "vim", @embedFile("guest_vim_wasm"), .{ .register = &bank });
     defer plugin.deinit();
 
-    const ed = &env.buffers.active().editor;
+    const ed = env.buffers.active().textEditor().?;
     try ed.insertText(gpa, "alpha\nbeta");
     ed.placeCursor(0);
     // The command sequence is the wasm equivalent of `"ayy`.
@@ -2005,7 +2005,7 @@ test "wasm plugins: a motion returns a range an operator awaits + applies (dw)" 
     const operators = try loadPlugin(&engine, &env.ctx, "operators", @embedFile("guest_operators_wasm"), .{});
     defer operators.deinit();
 
-    const ed = &env.buffers.active().editor;
+    const ed = env.buffers.active().textEditor().?;
     try ed.insertText(gpa, "foo bar");
     ed.placeCursor(0);
 
@@ -2036,7 +2036,7 @@ test "wasm plugins: an awaited live range follows an intervening edit" {
     const operators = try loadPlugin(&engine, &env.ctx, "operators", @embedFile("guest_operators_wasm"), .{});
     defer operators.deinit();
 
-    const ed = &env.buffers.active().editor;
+    const ed = env.buffers.active().textEditor().?;
     try ed.insertText(gpa, "foo bar");
     ed.placeCursor(0);
 
@@ -2070,7 +2070,7 @@ test "wasm plugins: vim composes motions + operators — dw through the keymap" 
     const vim = try loadPlugin(&engine, &env.ctx, "vim", @embedFile("guest_vim_wasm"), .{});
     defer vim.deinit();
 
-    const ed = &env.buffers.active().editor;
+    const ed = env.buffers.active().textEditor().?;
     try ed.insertText(gpa, "foo bar");
     ed.placeCursor(0);
 
@@ -2100,7 +2100,7 @@ test "wasm plugins: a text object returns a range an operator applies (di\")" {
     const operators = try loadPlugin(&engine, &env.ctx, "operators", @embedFile("guest_operators_wasm"), .{});
     defer operators.deinit();
 
-    const ed = &env.buffers.active().editor;
+    const ed = env.buffers.active().textEditor().?;
     try ed.insertText(gpa, "say \"hi\" ok");
     ed.placeCursor(5); // inside the quotes
 
@@ -2129,7 +2129,7 @@ test "wasm plugins: vim di( through the keymap (operator + text object)" {
     const vim = try loadPlugin(&engine, &env.ctx, "vim", @embedFile("guest_vim_wasm"), .{});
     defer vim.deinit();
 
-    const ed = &env.buffers.active().editor;
+    const ed = env.buffers.active().textEditor().?;
     try ed.insertText(gpa, "f(a, b)");
     ed.placeCursor(4); // inside the parens
 
@@ -2158,7 +2158,7 @@ test "wasm plugins: a view-grade peer's op.delete refuses (zero permission code)
     const operators = try loadPlugin(&engine, &env.ctx, "operators", @embedFile("guest_operators_wasm"), .{});
     defer operators.deinit();
 
-    const ed = &env.buffers.active().editor;
+    const ed = env.buffers.active().textEditor().?;
     try ed.insertText(gpa, "foo bar");
     ed.placeCursor(0);
     ed.doc.my_grant = .view; // the document is read-only for us
@@ -2193,7 +2193,7 @@ test "wasm plugins: a read-only buffer refuses a guest edit and says so" {
     const operators = try loadPlugin(&engine, &env.ctx, "operators", @embedFile("guest_operators_wasm"), .{});
     defer operators.deinit();
 
-    const ed = &env.buffers.active().editor;
+    const ed = env.buffers.active().textEditor().?;
     try ed.insertText(gpa, "foo bar");
     ed.placeCursor(0);
     env.buffers.active().read_only = true;
@@ -2217,7 +2217,7 @@ test "wasm plugin: comment toggles a line comment, preserving indent" {
     const plugin = try loadPlugin(&engine, &env.ctx, "comment", @embedFile("guest_comment_wasm"), .{});
     defer plugin.deinit();
 
-    const ed = &env.buffers.active().editor;
+    const ed = env.buffers.active().textEditor().?;
     try ed.insertText(gpa, "  hi");
     ed.placeCursor(4);
     _ = try command.run(&env.commands, &env.ctx, "comment-line", &.{});
@@ -2242,7 +2242,7 @@ test "wasm plugin: whitespace trims trailing spaces on the line" {
     const plugin = try loadPlugin(&engine, &env.ctx, "whitespace", @embedFile("guest_whitespace_wasm"), .{});
     defer plugin.deinit();
 
-    const ed = &env.buffers.active().editor;
+    const ed = env.buffers.active().textEditor().?;
     try ed.insertText(gpa, "hi   \nok");
     ed.placeCursor(0);
     _ = try command.run(&env.commands, &env.ctx, "trim-trailing-line", &.{});
@@ -2261,7 +2261,7 @@ test "wasm plugin: numbers increments the integer under the cursor" {
     const plugin = try loadPlugin(&engine, &env.ctx, "numbers", @embedFile("guest_numbers_wasm"), .{});
     defer plugin.deinit();
 
-    const ed = &env.buffers.active().editor;
+    const ed = env.buffers.active().textEditor().?;
     try ed.insertText(gpa, "x 41 y");
     ed.placeCursor(2); // on the '4'
     _ = try command.run(&env.commands, &env.ctx, "increment-number", &.{});
@@ -2280,7 +2280,7 @@ test "wasm plugin: autopair inserts a matched pair around the cursor" {
     const plugin = try loadPlugin(&engine, &env.ctx, "autopair", @embedFile("guest_autopair_wasm"), .{});
     defer plugin.deinit();
 
-    const ed = &env.buffers.active().editor;
+    const ed = env.buffers.active().textEditor().?;
     try ed.insertText(gpa, "ab");
     ed.placeCursor(0);
     _ = try command.run(&env.commands, &env.ctx, "pair-paren", &.{});
@@ -2318,7 +2318,7 @@ test "wasm plugin: notes capture appends via fs and open reads it back" {
         break :blk null;
     };
     try t.expect(buf != null);
-    const s = try buf.?.editor.text().toOwnedSlice(gpa);
+    const s = try buf.?.textEditor().?.text().toOwnedSlice(gpa);
     defer gpa.free(s);
     try t.expectEqualStrings("todo x\ntodo y\n", s);
 }
@@ -2415,7 +2415,7 @@ test "wasm plugin: snippets-expand inserts a template body from an fs file" {
     defer plugin.deinit();
     try t.expect(plugin.perms[wasm_host.perm_fs_read]);
 
-    const ed = &env.buffers.active().editor;
+    const ed = env.buffers.active().textEditor().?;
     ed.placeCursor(0);
     _ = try command.run(&env.commands, &env.ctx, "snippets-expand", &.{ .{ .string = "fn" }, .{ .string = tmp } });
     const s = try ed.text().toOwnedSlice(gpa);
@@ -2446,7 +2446,7 @@ test "net_session: streams a socket into a buffer, teardown clean" {
             _ = s.drain();
             var it = env.buffers.iterator();
             while (it.next()) |b| if (std.mem.eql(u8, b.name, "*net*")) {
-                if (b.editor.text().byteLen() > 0) break :blk b;
+                if (b.textEditor().?.text().byteLen() > 0) break :blk b;
             };
             std.Thread.yield() catch {};
         }
@@ -2457,7 +2457,7 @@ test "net_session: streams a socket into a buffer, teardown clean" {
     _ = linux.close(fds[1]);
     peer_open = false;
     try t.expect(buf != null);
-    const str = try buf.?.editor.text().toOwnedSlice(gpa);
+    const str = try buf.?.textEditor().?.text().toOwnedSlice(gpa);
     defer gpa.free(str);
     try t.expectEqualStrings("net-ok", str);
 }

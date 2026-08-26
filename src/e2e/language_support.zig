@@ -23,7 +23,7 @@ pub fn waitForTree(ed: *h.Editor, syn: *h.core.syntax.Syntax) bool {
     const deadline = h.core.task.nowNs() + 5 * std.time.ns_per_s;
     while (h.core.task.nowNs() < deadline) {
         ed.settle(2);
-        _ = syn.sync(ed.gpa, &ed.buffers.active().editor.doc) catch {};
+        _ = syn.sync(ed.gpa, &ed.buffers.active().textEditor().?.doc) catch {};
         if (syn.tree != null) return true;
     }
     return false;
@@ -40,7 +40,7 @@ pub fn authorAndCheckSyntax(ed: *h.Editor, c: Case) !void {
     try std.testing.expectEqualStrings(c.name, syn.spec.name);
     try std.testing.expect(waitForTree(ed, syn));
     try std.testing.expect(syn.nodeAt(0) != null);
-    const painted = try syn.paint(ed.gpa, .{ .start = 0, .end = ed.buffers.active().editor.doc.text().byteLen() });
+    const painted = try syn.paint(ed.gpa, .{ .start = 0, .end = ed.buffers.active().textEditor().?.doc.text().byteLen() });
     defer ed.gpa.free(painted);
     try std.testing.expect(painted.len > 0);
 }
@@ -126,8 +126,8 @@ pub fn assertLsp(proj: *h.Project, ed: *h.Editor, c: Case, command: []const u8) 
     try std.testing.expect(h.drainUntilOracle(proj, ed, "test -s .lsp-started && echo yes", "yes"));
     try std.testing.expect(h.drainUntilOracle(proj, ed, "test -s .lsp-init && echo yes", "yes"));
     ed.settle(100);
-    const path = ed.buffers.active().editor.backingPath() orelse c.path;
-    const id = (try ed.caps.fire(.completion, &ed.buffers.active().editor.doc, path, .{})) orelse
+    const path = ed.buffers.active().textEditor().?.backingPath() orelse c.path;
+    const id = (try ed.caps.fire(.completion, &ed.buffers.active().textEditor().?.doc, path, .{})) orelse
         return error.NoLspCapabilityProvider;
     defer ed.caps.finish(id);
     try std.testing.expect(h.drainUntilOracle(proj, ed, "test -s .lsp-completion && echo yes", "yes"));

@@ -516,7 +516,7 @@ pub fn startListen(
     my_identity: *const core.identity.Identity,
     echo: *std.ArrayList(u8),
 ) void {
-    sc.primary_doc = &buffers.active().editor.doc;
+    sc.primary_doc = if (buffers.active().textEditor()) |ed| &ed.doc else null;
     sc.primary_tag = buffers.active_id;
     hub_slot.* = core.hub.Hub.init(gpa, token, access, my_identity) catch {
         setEcho(echo, gpa, "listen: out of memory");
@@ -680,8 +680,10 @@ pub fn tickCollab(
         for (h.clients.items) |peer| {
             for (peer.conn.collabs.items) |col| {
                 if (sc.buffers.get(@intCast(col.tag))) |b| {
-                    col.cursor_offset = b.editor.cursorOffset();
-                    col.selection_anchor = selectionAnchorOf(&b.editor);
+                    if (b.textEditor()) |ed| {
+                        col.cursor_offset = ed.cursorOffset();
+                        col.selection_anchor = selectionAnchorOf(ed);
+                    }
                 }
             }
         }
@@ -700,8 +702,10 @@ pub fn tickCollab(
         // Each bound buffer publishes its own cursor + selection.
         for (c.collabs.items) |col| {
             if (sc.buffers.get(@intCast(col.tag))) |b| {
-                col.cursor_offset = b.editor.cursorOffset();
-                col.selection_anchor = selectionAnchorOf(&b.editor);
+                if (b.textEditor()) |ed| {
+                    col.cursor_offset = ed.cursorOffset();
+                    col.selection_anchor = selectionAnchorOf(ed);
+                }
             }
         }
         // Partial checkout: realize content around the cursor (the
@@ -836,9 +840,10 @@ pub fn runtimeConnectFinish(
     defer gpa.free(display);
     const id = try ctx.buffers.create(gpa, display);
     const buf = ctx.buffers.get(id).?;
-    const col = try c.bindPrimary(&buf.editor.doc, id);
-    col.presence_layer = try sc.caps.layers.claim(gpa, &buf.editor.doc, "presence", .replicated, "collab");
-    col.import_diag_layer = try sc.caps.layers.claim(gpa, &buf.editor.doc, "diagnostics", .host, "remote-host");
+    const doc = &buf.textEditor().?.doc;
+    const col = try c.bindPrimary(doc, id);
+    col.presence_layer = try sc.caps.layers.claim(gpa, doc, "presence", .replicated, "collab");
+    col.import_diag_layer = try sc.caps.layers.claim(gpa, doc, "diagnostics", .host, "remote-host");
     col.publish_presence = sc.publish_presence;
     sc.session.* = sess;
     sc.conn.* = c;

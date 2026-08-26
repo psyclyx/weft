@@ -664,7 +664,7 @@ test "system: create/destroy — a fresh headless system services command.run im
     var c = sys.contextFor(&sys.default_head);
     try sys.default_head.setModeRaw(gpa, "default");
     _ = try command.run(&sys.commands, &c, "insert-text", &.{.{ .string = "hi" }});
-    const rope = c.editor().text();
+    const rope = (try c.textEditor()).text();
     const got = try rope.toOwnedSlice(gpa);
     defer gpa.free(got);
     try t.expectEqualStrings("hi", got);
@@ -697,11 +697,11 @@ test "system: GATE (a) — the container hosts TWO systems concurrently, one hea
     _ = try command.run(&agent_sys.commands, &ac, "insert-text", &.{.{ .string = "agent text" }});
 
     // Both landed on their OWN buffer, entirely independent of the other.
-    const editor_got = try ec.editor().text().toOwnedSlice(gpa);
+    const editor_got = try (try ec.textEditor()).text().toOwnedSlice(gpa);
     defer gpa.free(editor_got);
     try t.expectEqualStrings("editor text", editor_got);
 
-    const agent_got = try ac.editor().text().toOwnedSlice(gpa);
+    const agent_got = try (try ac.textEditor()).text().toOwnedSlice(gpa);
     defer gpa.free(agent_got);
     try t.expectEqualStrings("agent text", agent_got);
 

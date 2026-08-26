@@ -12,6 +12,13 @@ const Editor = @import("../Editor.zig");
 const shared = @import("plugin.zig");
 const WasmPlugin = shared.WasmPlugin;
 
+/// The active entry's editor, for the handlers that have nothing to answer
+/// without one: a guest asking about text in an entry that holds none gets the
+/// same reply it gets for an empty document.
+fn activeEditor(p: *WasmPlugin) ?*Editor {
+    return p.activeCtx().buffers.active().textEditor();
+}
+
 fn opaqueHandle(raw: i32) ?u32 {
     return if (raw < 0) null else @intCast(raw);
 }
@@ -20,14 +27,22 @@ pub fn hCursor(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32, resul
     _ = caller;
     _ = args;
     const p: *WasmPlugin = @ptrCast(@alignCast(data.?));
-    results[0] = @intCast(p.activeCtx().editor().cursorOffset());
+    const ed = activeEditor(p) orelse {
+        results[0] = 0;
+        return;
+    };
+    results[0] = @intCast(ed.cursorOffset());
 }
 
 pub fn hByteLen(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32, results: []i32) void {
     _ = caller;
     _ = args;
     const p: *WasmPlugin = @ptrCast(@alignCast(data.?));
-    results[0] = @intCast(p.activeCtx().editor().text().byteLen());
+    const ed = activeEditor(p) orelse {
+        results[0] = 0;
+        return;
+    };
+    results[0] = @intCast(ed.text().byteLen());
 }
 
 /// Capture an opaque witness for the active document's current causal
@@ -65,7 +80,11 @@ pub fn hDocSnapshotRelease(data: ?*anyopaque, caller: *wasm.Caller, args: []cons
 
 pub fn hSlice(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32, results: []i32) void {
     const p: *WasmPlugin = @ptrCast(@alignCast(data.?));
-    const rope = p.activeCtx().editor().text();
+    const ed = activeEditor(p) orelse {
+        results[0] = 0;
+        return;
+    };
+    const rope = ed.text();
     const len = rope.byteLen();
     const s = @min(@as(usize, @intCast(args[0])), len);
     const e = @min(@as(usize, @intCast(args[1])), len);
@@ -90,7 +109,7 @@ pub fn hSlice(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32, result
 pub fn hLineAt(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32, results: []i32) void {
     _ = results;
     const p: *WasmPlugin = @ptrCast(@alignCast(data.?));
-    const rope = p.activeCtx().editor().text();
+    const rope = (activeEditor(p) orelse return).text();
     const row = rope.offsetToPoint(@min(@as(usize, @intCast(args[0])), rope.byteLen())).row;
     const line = rope.lineRange(row);
     const pair = [2]u32{ @intCast(line.start), @intCast(line.end) };
@@ -99,7 +118,11 @@ pub fn hLineAt(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32, resul
 
 pub fn hSelection(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32, results: []i32) void {
     const p: *WasmPlugin = @ptrCast(@alignCast(data.?));
-    const sel = p.activeCtx().editor().selectedRange() orelse {
+    const ed = activeEditor(p) orelse {
+        results[0] = 0;
+        return;
+    };
+    const sel = ed.selectedRange() orelse {
         results[0] = 0;
         return;
     };
@@ -110,7 +133,11 @@ pub fn hSelection(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32, re
 
 pub fn hPath(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32, results: []i32) void {
     const p: *WasmPlugin = @ptrCast(@alignCast(data.?));
-    const path = p.activeCtx().editor().backingPath() orelse {
+    const ed = activeEditor(p) orelse {
+        results[0] = -1;
+        return;
+    };
+    const path = ed.backingPath() orelse {
         results[0] = -1;
         return;
     };
@@ -207,7 +234,7 @@ pub fn hJump(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32, results
     _ = caller;
     _ = results;
     const p: *WasmPlugin = @ptrCast(@alignCast(data.?));
-    const ed = p.activeCtx().editor();
+    const ed = activeEditor(p) orelse return;
     ed.placeCursor(@min(@as(usize, @intCast(args[0])), ed.text().byteLen()));
 }
 
@@ -221,7 +248,11 @@ pub fn hEditorStep(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32, r
     const from: usize = @intCast(args[0]);
     const dir: Editor.StepDir = @enumFromInt(@as(u32, @intCast(args[1])));
     const kind: Editor.StepKind = @enumFromInt(@as(u32, @intCast(args[2])));
-    results[0] = @intCast(p.activeCtx().editor().stepOffset(from, dir, kind));
+    const ed = activeEditor(p) orelse {
+        results[0] = @intCast(from);
+        return;
+    };
+    results[0] = @intCast(ed.stepOffset(from, dir, kind));
 }
 
 /// `editor.setSelection(start, end)`: select `[start, end)` (mark at start,
@@ -231,7 +262,7 @@ pub fn hSetSelection(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32,
     _ = caller;
     _ = results;
     const p: *WasmPlugin = @ptrCast(@alignCast(data.?));
-    const ed = p.activeCtx().editor();
+    const ed = activeEditor(p) orelse return;
     const len = ed.text().byteLen();
     ed.placeCursor(@min(@as(usize, @intCast(args[0])), len));
     ed.setMark(p.gpa) catch {};
@@ -282,7 +313,11 @@ pub fn hRunRange(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32, res
         results[0] = -1;
         return;
     }
-    const cur = rv.range.resolve(p.activeCtx().document()) orelse {
+    const doc = p.activeCtx().document() orelse {
+        results[0] = -1;
+        return;
+    };
+    const cur = rv.range.resolve(doc) orelse {
         results[0] = -1;
         return;
     };
@@ -363,7 +398,11 @@ pub fn hArgRange(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32, res
         results[0] = -1;
         return;
     }
-    const cur = p.cur_args[i].range.resolve(p.activeCtx().document()) orelse {
+    const doc = p.activeCtx().document() orelse {
+        results[0] = -1;
+        return;
+    };
+    const cur = p.cur_args[i].range.resolve(doc) orelse {
         results[0] = -1;
         return;
     };

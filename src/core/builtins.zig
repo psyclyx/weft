@@ -152,8 +152,9 @@ fn cViewApply(ctx: *Context, args: struct {}) anyerror!Value {
     return invokeSemanticAction(ctx, semantic_model.action.standard.apply);
 }
 
-/// Swallow an edit refusal. `Context.edit` already enforced it and echoed
-/// why, so a `view` peer typing is not a command error, just a no-op. Other
+/// Swallow a refusal. The door (`Context.edit`, `Context.textEditor`) already
+/// enforced it and echoed why, so a `view` peer typing — or a text op aimed at
+/// an entry that holds no text — is not a command error, just a no-op. Other
 /// errors propagate.
 fn editErr(e: anyerror) anyerror!Value {
     if (e != error.Unauthorized) return e;
@@ -162,14 +163,16 @@ fn editErr(e: anyerror) anyerror!Value {
 
 fn cInsertText(ctx: *Context, args: struct { text: []const u8 }) anyerror!Value {
     if (try semanticFieldInput(ctx, .{ .replace_selection = args.text })) return ok;
-    ctx.edit(ctx.editor().insertRange(), args.text) catch |e| return editErr(e);
+    const ed = ctx.textEditor() catch |e| return editErr(e);
+    ctx.edit(ed.insertRange(), args.text) catch |e| return editErr(e);
     return ok;
 }
 
 fn cDeleteBackward(ctx: *Context, args: struct {}) anyerror!Value {
     _ = args;
     if (try semanticFieldInput(ctx, .delete_previous)) return ok;
-    const r = ctx.editor().backspaceRange() orelse return ok;
+    const ed = ctx.textEditor() catch |e| return editErr(e);
+    const r = ed.backspaceRange() orelse return ok;
     ctx.edit(r, "") catch |e| return editErr(e);
     return ok;
 }
@@ -177,19 +180,22 @@ fn cDeleteBackward(ctx: *Context, args: struct {}) anyerror!Value {
 fn cDeleteForward(ctx: *Context, args: struct {}) anyerror!Value {
     _ = args;
     if (try semanticFieldInput(ctx, .delete_next)) return ok;
-    const r = ctx.editor().forwardRange() orelse return ok;
+    const ed = ctx.textEditor() catch |e| return editErr(e);
+    const r = ed.forwardRange() orelse return ok;
     ctx.edit(r, "") catch |e| return editErr(e);
     return ok;
 }
 
 fn cUndo(ctx: *Context, args: struct {}) anyerror!Value {
     _ = args;
-    return .{ .boolean = try ctx.editor().undo(ctx.gpa) };
+    const ed = ctx.textEditor() catch return .{ .boolean = false };
+    return .{ .boolean = try ed.undo(ctx.gpa) };
 }
 
 fn cRedo(ctx: *Context, args: struct {}) anyerror!Value {
     _ = args;
-    return .{ .boolean = try ctx.editor().redo(ctx.gpa) };
+    const ed = ctx.textEditor() catch return .{ .boolean = false };
+    return .{ .boolean = try ed.redo(ctx.gpa) };
 }
 
 /// The default `save` provider: write the buffer to its file backing. `save` is
@@ -199,35 +205,40 @@ fn cRedo(ctx: *Context, args: struct {}) anyerror!Value {
 /// projection-agnostic: no `if (isTool)` branch lives here.
 fn cSaveFile(ctx: *Context, args: struct {}) anyerror!Value {
     _ = args;
-    try ctx.editor().requestSave(ctx.gpa);
+    const ed = ctx.textEditor() catch |e| return editErr(e);
+    try ed.requestSave(ctx.gpa);
     return ok;
 }
 
 fn cCursorLeft(ctx: *Context, args: struct {}) anyerror!Value {
     _ = args;
     if (try semanticFieldInput(ctx, .move_previous)) return ok;
-    ctx.editor().moveLeft();
+    const ed = ctx.textEditor() catch |e| return editErr(e);
+    ed.moveLeft();
     return ok;
 }
 
 fn cCursorRight(ctx: *Context, args: struct {}) anyerror!Value {
     _ = args;
     if (try semanticFieldInput(ctx, .move_next)) return ok;
-    ctx.editor().moveRight();
+    const ed = ctx.textEditor() catch |e| return editErr(e);
+    ed.moveRight();
     return ok;
 }
 
 fn cCursorUp(ctx: *Context, args: struct {}) anyerror!Value {
     _ = args;
     if (try semanticMove(ctx, .previous)) return ok;
-    ctx.editor().moveUp();
+    const ed = ctx.textEditor() catch |e| return editErr(e);
+    ed.moveUp();
     return ok;
 }
 
 fn cCursorDown(ctx: *Context, args: struct {}) anyerror!Value {
     _ = args;
     if (try semanticMove(ctx, .next)) return ok;
-    ctx.editor().moveDown();
+    const ed = ctx.textEditor() catch |e| return editErr(e);
+    ed.moveDown();
     return ok;
 }
 
@@ -238,13 +249,15 @@ fn cCursorDown(ctx: *Context, args: struct {}) anyerror!Value {
 
 fn cSetMark(ctx: *Context, args: struct {}) anyerror!Value {
     _ = args;
-    try ctx.editor().setMark(ctx.gpa);
+    const ed = ctx.textEditor() catch |e| return editErr(e);
+    try ed.setMark(ctx.gpa);
     return ok;
 }
 
 fn cClearSelection(ctx: *Context, args: struct {}) anyerror!Value {
     _ = args;
-    ctx.editor().clearSelection();
+    const ed = ctx.textEditor() catch |e| return editErr(e);
+    ed.clearSelection();
     return ok;
 }
 
@@ -256,7 +269,8 @@ fn cUndoBarrier(ctx: *Context, args: struct {}) anyerror!Value {
     // notably LEAVING insert (vim's `i…Esc` is one undo unit; the next command
     // must be its own, or `Esc` then `dd` then `u` reverses BOTH the typing and
     // the delete instead of just the delete).
-    ctx.editor().history.barrier();
+    const ed = ctx.textEditor() catch |e| return editErr(e);
+    ed.history.barrier();
     return ok;
 }
 
@@ -280,14 +294,16 @@ fn cQuit(ctx: *Context, args: struct {}) anyerror!Value {
 fn cInsertNewline(ctx: *Context, args: struct {}) anyerror!Value {
     _ = args;
     if (try semanticFieldInput(ctx, .{ .replace_selection = "\n" })) return ok;
-    ctx.edit(ctx.editor().insertRange(), "\n") catch |e| return editErr(e);
+    const ed = ctx.textEditor() catch |e| return editErr(e);
+    ctx.edit(ed.insertRange(), "\n") catch |e| return editErr(e);
     return ok;
 }
 
 fn cInsertTab(ctx: *Context, args: struct {}) anyerror!Value {
     _ = args;
     if (try semanticFieldInput(ctx, .{ .replace_selection = "\t" })) return ok;
-    ctx.edit(ctx.editor().insertRange(), "\t") catch |e| return editErr(e);
+    const ed = ctx.textEditor() catch |e| return editErr(e);
+    ctx.edit(ed.insertRange(), "\t") catch |e| return editErr(e);
     return ok;
 }
 
@@ -332,7 +348,9 @@ fn cBufferReadOnly(ctx: *Context, args: struct { on: bool }) anyerror!Value {
 fn cBufferClose(ctx: *Context, args: struct {}) anyerror!Value {
     _ = args;
     const b = ctx.buffer();
-    if (b.editor.isDirty(ctx.gpa) catch true) return .{ .string = "dirty" };
+    if (b.textEditor()) |ed| {
+        if (ed.isDirty(ctx.gpa) catch true) return .{ .string = "dirty" };
+    }
     try ctx.buffers.close(ctx.gpa, b.id, ctx.head, ctx.keymap);
     return ok;
 }
@@ -346,7 +364,7 @@ fn cOpen(ctx: *Context, args: struct { path: []const u8 }) anyerror!Value {
         return .{ .integer = @intCast(id) };
     }
     const id = try ctx.buffers.create(ctx.gpa, std.fs.path.basename(args.path));
-    const ed = &ctx.buffers.get(id).?.editor;
+    const ed = ctx.buffers.get(id).?.textEditor().?;
     ed.openFile(ctx.gpa, args.path) catch |err| switch (err) {
         error.FileNotFound => try ed.adoptPath(ctx.gpa, args.path),
         else => |e| {
@@ -409,7 +427,8 @@ fn targetWord(value: i64) error{TypeMismatch}!u32 {
 /// clobber an existing file (create-guarded) — open it instead if you
 /// mean to overwrite its history.
 fn cSaveAs(ctx: *Context, args: struct { path: []const u8 }) anyerror!Value {
-    const ed = ctx.editor();
+    if (ctx.buffer().tool.len > 0) return .{ .string = "a projection has no file to write" };
+    const ed = ctx.textEditor() catch |e| return editErr(e);
     switch (ed.backing) {
         .none => try ed.adoptPath(ctx.gpa, args.path),
         .file => |*f| {
@@ -421,7 +440,7 @@ fn cSaveAs(ctx: *Context, args: struct { path: []const u8 }) anyerror!Value {
                 f.sync.token = null; // guard on non-existence at the new path
             }
         },
-        .shell, .tool => return .{ .string = "unsupported backing for save-as" },
+        .shell => return .{ .string = "unsupported backing for save-as" },
     }
     try ed.requestSave(ctx.gpa);
     return ok;
@@ -453,12 +472,13 @@ fn providerLabel(p: container_mod.ProviderRef) []const u8 {
 /// answers exactly the question `Actions.resolve("eval", ...)` would have
 /// asked.
 fn cExplainBinding(ctx: *Context, args: struct { slot: []const u8 }) anyerror!Value {
+    const entry = ctx.buffer();
     const f: facts.Facts = .{
-        .path = ctx.editor().backingPath(),
-        .name = ctx.buffers.active().name,
+        .path = if (entry.textEditor()) |ed| ed.backingPath() else null,
+        .name = entry.name,
         .mode = ctx.head.currentMode(),
-        .lang = Actions.langOfName(ctx.buffers.active().name),
-        .tool = ctx.editor().toolName() orelse "",
+        .lang = Actions.langOfName(entry.name),
+        .tool = entry.tool,
     };
     var ex = try ctx.actions.container.explain(ctx.gpa, args.slot, f);
     defer ex.deinit();

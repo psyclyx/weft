@@ -451,8 +451,9 @@ pub fn deliverToBuffer(ctx: *command.Context, buf_name: []const u8, author: []co
     const gpa = ctx.gpa;
     const bufs = ctx.buffers;
     const b = bufs.get(bufs.ensureNamed(gpa, buf_name) catch return) orelse return;
-    const doc = &b.editor.doc;
-    const end = b.editor.text().byteLen();
+    const ed = b.textEditor() orelse return;
+    const doc = &ed.doc;
+    const end = ed.text().byteLen();
     // Proc output + peer-listing delivery, authored as the plugin peer.
     command.renderInto(gpa, doc, .plugin, author, &.{.{ .range = .{ .start = 0, .end = end }, .bytes = content }}) catch return;
 }

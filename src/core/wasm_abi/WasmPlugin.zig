@@ -350,7 +350,8 @@ slot_predicate_strs: std.ArrayList([]u8) = .empty,
 /// merged edit. The slot owns the anchors until it is released.
 pub fn anchorRange(self: *WasmPlugin, start: usize, end: usize) !u32 {
     const buffer = self.activeCtx().buffers.active();
-    const doc = &buffer.editor.doc;
+    const editor = buffer.textEditor() orelse return error.InvalidRange;
+    const doc = &editor.doc;
     const len = doc.text().byteLen();
     if (start > end or end > len) return error.InvalidRange;
     const a = try doc.addAnchor(self.gpa, start, .right);
@@ -379,7 +380,8 @@ pub fn anchorRange(self: *WasmPlugin, start: usize, end: usize) !u32 {
 /// host-owned and are compared for equality by `docSnapshotIsCurrent`.
 pub fn docSnapshot(self: *WasmPlugin) !u32 {
     const buffer = self.activeCtx().buffers.active();
-    const frontier = try buffer.editor.doc.version(self.gpa);
+    const editor = buffer.textEditor() orelse return error.InvalidRange;
+    const frontier = try editor.doc.version(self.gpa);
     errdefer self.gpa.free(frontier);
     if (self.next_doc_snapshot_handle > std.math.maxInt(i32)) return error.DocSnapshotHandlesExhausted;
     const handle = self.next_doc_snapshot_handle;
@@ -398,7 +400,8 @@ pub fn docSnapshotIsCurrent(self: *WasmPlugin, handle: u32) bool {
     const slot = self.doc_snapshots.get(handle) orelse return false;
     const buffer = self.activeCtx().buffers.active();
     if (slot.buffer.id != buffer.id or slot.buffer.generation != buffer.generation) return false;
-    const current = buffer.editor.doc.version(self.gpa) catch return false;
+    const editor = buffer.textEditor() orelse return false;
+    const current = editor.doc.version(self.gpa) catch return false;
     defer self.gpa.free(current);
     return std.mem.eql(u8, slot.frontier, current);
 }
@@ -429,7 +432,7 @@ pub fn activeRange(self: *WasmPlugin, handle: u32) ?*const RangeSlot {
 /// checked separately by `activeRange` before any guest-visible operation.
 pub fn resolveRange(self: *WasmPlugin, slot: *const RangeSlot) ?@import("stemma").Range {
     const buffer = self.ctx.buffers.resolve(slot.buffer) orelse return null;
-    const doc = &buffer.editor.doc;
+    const doc = &(buffer.textEditor() orelse return null).doc;
     const a = doc.anchorOffset(slot.start);
     const b = doc.anchorOffset(slot.end);
     return .{ .start = @min(a, b), .end = @max(a, b) };
@@ -437,7 +440,7 @@ pub fn resolveRange(self: *WasmPlugin, slot: *const RangeSlot) ?@import("stemma"
 
 pub fn borrowedRange(self: *WasmPlugin, slot: *const RangeSlot) ?position.LiveRange {
     const buffer = self.ctx.buffers.resolve(slot.buffer) orelse return null;
-    return .{ .document = &buffer.editor.doc, .start = slot.start, .end = slot.end };
+    return .{ .document = &(buffer.textEditor() orelse return null).doc, .start = slot.start, .end = slot.end };
 }
 
 /// Keep a range alive across command dispatches. This is intentionally
@@ -451,8 +454,9 @@ pub fn retainRange(self: *WasmPlugin, handle: u32) bool {
 
 fn destroyRange(self: *WasmPlugin, s: RangeSlot) void {
     const buffer = self.ctx.buffers.resolve(s.buffer) orelse return;
-    buffer.editor.doc.removeAnchor(s.start);
-    buffer.editor.doc.removeAnchor(s.end);
+    const doc = &(buffer.textEditor() orelse return).doc;
+    doc.removeAnchor(s.start);
+    doc.removeAnchor(s.end);
 }
 
 fn releaseRangeAt(self: *WasmPlugin, handle: u32) void {
