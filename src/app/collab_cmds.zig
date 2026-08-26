@@ -137,6 +137,8 @@ pub fn listenHandler(ctx: *core.command.Context, data: ?*anyopaque, args: []cons
 /// `share-presence <on|off>` — select cursor sharing, separately from
 /// sharing a document. Off by default, so shared text emits no caret;
 /// the choice applies to every already-shared document and to later ones.
+/// `off` stops emission; the wire carries no retraction, so a peer keeps
+/// rendering the last caret it received until the collab tears down.
 pub fn sharePresenceHandler(ctx: *core.command.Context, data: ?*anyopaque, args: []const core.command.Value) anyerror!core.command.Value {
     const sc: *ShareCtx = @ptrCast(@alignCast(data.?));
     if (args.len != 1 or args[0] != .string) return error.TypeMismatch;
