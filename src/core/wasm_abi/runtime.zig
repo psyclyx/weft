@@ -12,12 +12,10 @@
 //! transport is wasm, the shape is unchanged.
 
 const std = @import("std");
-const Allocator = std.mem.Allocator;
 const wasm = @import("../wasm.zig");
 const command = @import("../command.zig");
 const Document = @import("../Document.zig");
 const kv = @import("../kv.zig");
-const file = @import("../file.zig");
 const subbuffer = @import("../subbuffer.zig");
 const register_mod = @import("../register.zig");
 const async_loop = @import("../async.zig");
@@ -98,10 +96,9 @@ fn resolvePeer(ctx: *anyopaque, doc: *Document) Document.AddPeerError!Document.P
 }
 
 /// Instantiate `wasm_bytes` with the weft ABI imports bound over `ctx`
-/// (authored as `name`) and call its `run` export. `cache_dir` is the `.cwasm`
-/// cache `loadPlugin` uses (null = compile fresh).
-pub fn runGuest(engine: *wasm.Engine, ctx: *command.Context, name: []const u8, wasm_bytes: []const u8, cache_dir: ?[]const u8) !void {
-    var module = try compileCached(engine, ctx.gpa, cache_dir, wasm_bytes);
+/// (authored as `name`) and call its `run` export.
+pub fn runGuest(engine: *wasm.Engine, ctx: *command.Context, name: []const u8, wasm_bytes: []const u8) !void {
+    var module = try engine.compileCached(wasm_bytes);
     defer module.deinit();
     var host: HostCtx = .{ .ctx = ctx, .name = name };
     var linker = try wasm.Linker.init(engine);
@@ -134,13 +131,6 @@ pub const LoadOptions = struct {
     loop: ?*async_loop.Loop = null,
     /// The task pool interactive REPL sessions run on. Null = repl-start drops.
     pool: ?*Pool = null,
-    /// Directory for the compiled-module (`.cwasm`) cache. Null = no caching
-    /// (always compile fresh — the default). When set, a module is keyed by
-    /// content hash: deserialize on a hit, else compile + serialize + persist.
-    /// wasmtime validates engine/version on deserialize, so a stale image is
-    /// rejected and recompiled safely. Production resolves this from the user
-    /// cache dir; test binaries from `testModuleCacheDir`.
-    module_cache_dir: ?[]const u8 = null,
     /// north-star-plan §6 W4 slice 1 — the grant table this plugin's
     /// `describe()`-declared perms mint POSSESSED handles into (see
     /// `WasmPlugin.grant_table`/`grant_handles`). Null = no table (the
@@ -193,39 +183,6 @@ pub fn loadPlugin(engine: *wasm.Engine, ctx: *command.Context, name: []const u8,
     return p;
 }
 
-/// The `.cwasm` cache every test binary shares: `$WEFT_TEST_MODULE_CACHE`,
-/// which build.zig points at a stable directory under the project cache root,
-/// so a guest compiles once per content hash instead of once per test run.
-/// Null outside `zig build test` — then every load compiles fresh.
-pub fn testModuleCacheDir() ?[]const u8 {
-    const dir = std.c.getenv("WEFT_TEST_MODULE_CACHE") orelse return null;
-    return std.mem.span(dir);
-}
-
-/// Compile `wasm_bytes`, using an on-disk `.cwasm` cache under `cache_dir` when
-/// set. Keyed by content hash (auto-invalidates on any plugin/build change);
-/// a stale image (different wasmtime) is rejected on deserialize and recompiled.
-/// All cache I/O is best-effort — a miss or a failed read/write just costs a
-/// fresh compile, never a load failure.
-pub fn compileCached(engine: *wasm.Engine, gpa: Allocator, cache_dir: ?[]const u8, wasm_bytes: []const u8) !wasm.Module {
-    const dir = cache_dir orelse return engine.compile(wasm_bytes);
-    const hash = std.hash.Wyhash.hash(0, wasm_bytes);
-    var path_buf: [std.fs.max_path_bytes]u8 = undefined;
-    const path = std.fmt.bufPrint(&path_buf, "{s}/{x}.cwasm", .{ dir, hash }) catch
-        return engine.compile(wasm_bytes);
-    if (file.readAlloc(gpa, path)) |image| {
-        defer gpa.free(image);
-        if (engine.deserialize(image)) |m| return m;
-    } else |_| {}
-    // Miss or stale: compile fresh, then persist the image for next start.
-    var module = try engine.compile(wasm_bytes);
-    if (module.serialize(gpa)) |image| {
-        defer gpa.free(image);
-        file.writeBytesMakingDirs(gpa, dir, path, image) catch {};
-    } else |_| {}
-    return module;
-}
-
 /// Build the plugin up through instantiation. Every step's errdefer frees
 /// exactly what preceded it, and `p` is destroyed WITHOUT `deinit` on failure
 /// — so no resource is released twice. On success the returned `p` is fully
@@ -240,7 +197,7 @@ fn construct(engine: *wasm.Engine, ctx: *command.Context, name: []const u8, opts
     errdefer if (semantic_owner) |owner| if (ctx.semantic) |services| {
         _ = services.releaseOwner(gpa, owner);
     };
-    var module = try compileCached(engine, gpa, opts.module_cache_dir, wasm_bytes);
+    var module = try engine.compileCached(wasm_bytes);
     errdefer module.deinit();
     var linker = try wasm.Linker.init(engine);
     errdefer linker.deinit();

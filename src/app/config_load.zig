@@ -14,7 +14,7 @@ const core = @import("../core/core.zig");
 pub fn loadJsConfig(gpa: std.mem.Allocator, ctx: *core.command.Context, path: []const u8, loader: ?core.quickjs.PluginLoader, config: *core.kv.Store) !void {
     const src = try core.file.readAlloc(gpa, path);
     defer gpa.free(src);
-    var engine = try core.wasm.Engine.init();
+    var engine = try core.wasm.Engine.init(gpa);
     defer engine.deinit();
     // `weft.use(name)` resolves against the config's own directory.
     const dir = std.fs.path.dirname(path);
@@ -62,7 +62,7 @@ pub const ConfigSession = struct {
     pub fn reload(self: *ConfigSession) !void {
         const src = try core.file.readAlloc(self.gpa, self.path);
         defer self.gpa.free(src);
-        var engine = try core.wasm.Engine.init();
+        var engine = try core.wasm.Engine.init(self.gpa);
         defer engine.deinit();
         const dir = std.fs.path.dirname(self.path);
         const new = try core.quickjs.evalToManifest(&engine, self.ctx, self.loader, self.config, dir, src, .config, "config");

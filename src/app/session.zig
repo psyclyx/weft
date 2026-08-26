@@ -642,7 +642,7 @@ test "session: config manifest invokes the production grammar-add command with a
     const source = try std.fmt.allocPrint(gpa, "weft.run('grammar-add', '.fixture', '{s}', 'tree_sitter_fixture');", .{tmp_path});
     defer gpa.free(source);
 
-    var engine = try core.wasm.Engine.init();
+    var engine = try core.wasm.Engine.init(gpa);
     defer engine.deinit();
     const manifest = try core.quickjs.evalToManifest(
         &engine,

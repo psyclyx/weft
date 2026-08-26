@@ -70,7 +70,7 @@ const parseArgs = arg_parse.parseArgs;
 fn hostAgentUx(gpa: std.mem.Allocator, pool: *core.task.Pool, host: *core.System.Host, user: []const u8, src: []const u8) !void {
     const sys = try core.System.create(gpa, pool, "agent-ux", user);
     errdefer sys.destroy();
-    var engine = try core.wasm.Engine.init();
+    var engine = try core.wasm.Engine.init(gpa);
     defer engine.deinit();
     var c = sys.contextFor(&sys.default_head);
     const m = try core.quickjs.evalToManifest(&engine, &c, null, &sys.config_kv, "config", src, .config, "agent-ux");
@@ -214,8 +214,11 @@ pub fn main(init: std.process.Init) !void {
     core.wasm_host.setEnviron(init.minimal.environ);
     const plugin_dir = config_load.pluginDir(gpa);
     defer gpa.free(plugin_dir);
+    // Compiled images persist here, so quickjs.wasm and the guest catalog are
+    // deserialized at launch instead of Cranelift-compiled every start.
     const module_cache_dir = config_load.moduleCacheDir(gpa);
     defer if (module_cache_dir) |d| gpa.free(d);
+    plug.engine.cache_dir = module_cache_dir;
     var plugin_host: config_load.PluginHost = .{
         .gpa = gpa,
         .engine = &plug.engine,
@@ -228,7 +231,7 @@ pub fn main(init: std.process.Init) !void {
         // (`System.contextFor`) so the capture-time powerbox and a
         // plugin's own possession checks agree — see `ctx.zig`'s
         // `Ctx.grants` field doc for the coupling rule this closes.
-        .opts = .{ .kv = &plug.kv, .config = &session.system.config_kv, .loop = &plug.loop, .subbuffers = &plug.subbuffers, .register = &plug.register, .syntax_of = resolveSyntax, .pool = pool, .module_cache_dir = module_cache_dir, .grant_table = &session.system.grants },
+        .opts = .{ .kv = &plug.kv, .config = &session.system.config_kv, .loop = &plug.loop, .subbuffers = &plug.subbuffers, .register = &plug.register, .syntax_of = resolveSyntax, .pool = pool, .grant_table = &session.system.grants },
         .list = &plug.list,
         .js_list = &plug.js_list,
         .dir = plugin_dir,

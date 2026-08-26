@@ -38,13 +38,6 @@ const perm_count = perm_gate.WasmPlugin.perm_count;
 /// The embedded engine+shim (built from quickjs-ng + weft_qjs.c by build.zig).
 pub const quickjs_wasm: []const u8 = @embedFile("quickjs_wasm");
 
-const wasm_abi = @import("wasm_abi.zig");
-
-/// quickjs.wasm is megabyte-scale; compile once through the module cache.
-fn qjsModule(engine: *wasm.Engine, gpa: std.mem.Allocator) !wasm.Module {
-    return wasm_abi.compileCached(engine, gpa, wasm_abi.testModuleCacheDir(), quickjs_wasm);
-}
-
 pub const EvalError = error{ConfigException} || wasm.Error;
 
 /// How `weft.plugin(name)` reaches the host's plugin loader. Defined in
@@ -269,7 +262,7 @@ pub fn evalToManifest(engine: *wasm.Engine, ctx: *command.Context, loader: ?Plug
 
     var bridge: Bridge = .{ .ctx = ctx, .loader = loader, .config = config, .config_dir = config_dir, .engine = engine, .manifest = m };
 
-    var module = try qjsModule(engine, ctx.gpa);
+    var module = try engine.compileCached(quickjs_wasm);
     defer module.deinit();
     var linker = try wasm.Linker.init(engine);
     defer linker.deinit();
@@ -433,7 +426,7 @@ pub const JsPlugin = struct {
             // JS plugin's `weft.*` calls mutate the editor immediately, not
             // staged.
             .bridge = .{ .ctx = ctx, .loader = null, .config = null, .engine = engine },
-            .module = try qjsModule(engine, gpa),
+            .module = try engine.compileCached(quickjs_wasm),
             .linker = undefined,
             .instance = undefined,
         };
@@ -1698,7 +1691,7 @@ test "quickjs: config.js drives the weft ABI — binds a key and echoes" {
     try Env.init(gpa, &env);
     defer env.deinit(gpa);
 
-    var engine = try wasm.Engine.init();
+    var engine = try wasm.Engine.init(gpa);
     defer engine.deinit();
 
     const cfg =
@@ -1721,7 +1714,7 @@ test "quickjs: weft.use includes a shared bindings module from the config dir" {
     try Env.init(gpa, &env);
     defer env.deinit(gpa);
 
-    var engine = try wasm.Engine.init();
+    var engine = try wasm.Engine.init(gpa);
     defer engine.deinit();
 
     // A shared defaults file the config pulls in with `weft.use`. It binds a
@@ -1764,7 +1757,7 @@ test "quickjs: config.js can run a registered command through weft.run" {
     };
     _ = try env.commands.bind(gpa, "mark", .{ .name = "mark", .summary = "", .args = &.{}, .handler = H.mark, .data = null });
 
-    var engine = try wasm.Engine.init();
+    var engine = try wasm.Engine.init(gpa);
     defer engine.deinit();
     try evalConfig(&engine, &env.ctx, null, null, null, "weft.run(\"mark\");");
     try t.expectEqualStrings("ran!", env.head.echo.items);
@@ -1776,7 +1769,7 @@ test "quickjs: config weft.run carries bounded string args through the generic c
     try Env.init(gpa, &env);
     defer env.deinit(gpa);
     try bindRunArgsFixture(gpa, &env);
-    var engine = try wasm.Engine.init();
+    var engine = try wasm.Engine.init(gpa);
     defer engine.deinit();
 
     try evalConfig(&engine, &env.ctx, null, null, null, "weft.run('fixture-run-args', '.foo', '/tmp/grammar', 'tree_sitter_fixture');");
@@ -1789,7 +1782,7 @@ test "quickjs: manifest run declarations retain args until apply" {
     try Env.init(gpa, &env);
     defer env.deinit(gpa);
     try bindRunArgsFixture(gpa, &env);
-    var engine = try wasm.Engine.init();
+    var engine = try wasm.Engine.init(gpa);
     defer engine.deinit();
 
     const m = try evalToManifest(&engine, &env.ctx, null, null, null, "weft.run('fixture-run-args', '.foo', '/tmp/grammar', 'tree_sitter_fixture');", .config, "config");
@@ -1803,7 +1796,7 @@ test "quickjs: manifest run declarations retain args until apply" {
 
 test "quickjs: argument-bearing weft.run rejects invalid shape before staging" {
     const gpa = t.allocator;
-    var engine = try wasm.Engine.init();
+    var engine = try wasm.Engine.init(gpa);
     defer engine.deinit();
     const cases = [_][]const u8{
         "weft.run('fixture', 1);",
@@ -1824,7 +1817,7 @@ test "quickjs: weft.action + weft.provide wire the pick dispatch layer" {
     try Env.init(gpa, &env);
     defer env.deinit(gpa);
 
-    var engine = try wasm.Engine.init();
+    var engine = try wasm.Engine.init(gpa);
     defer engine.deinit();
     // Declare an abstract intent, provide language-specific and default
     // implementations, and bind a key to the intent — the synthetic bind.
@@ -1857,7 +1850,7 @@ test "quickjs: semanticAction binds and invokes an open plugin view action" {
     try Env.init(gpa, &env);
     defer env.deinit(gpa);
 
-    var engine = try wasm.Engine.init();
+    var engine = try wasm.Engine.init(gpa);
     defer engine.deinit();
     try evalConfig(&engine, &env.ctx, null, null, null, "weft.semanticAction('fixture.plugin-action'); weft.bind('normal', 'm', 'fixture.plugin-action');");
     try t.expect(env.commands.resolve("fixture.plugin-action") != null);
@@ -1894,7 +1887,7 @@ test "quickjs: a JS plugin registers a command dispatched back into JS" {
     var env: Env = undefined;
     try Env.init(gpa, &env);
     defer env.deinit(gpa);
-    var engine = try wasm.Engine.init();
+    var engine = try wasm.Engine.init(gpa);
     defer engine.deinit();
 
     // The plugin plane: a PERSISTENT quickjs instance that registers a command
@@ -1917,7 +1910,7 @@ test "quickjs: weft.pick delivers structured acceptance and cancellation" {
     try Env.init(gpa, &env);
     defer env.deinit(gpa);
     try pick_mod.install(gpa, &env.commands, &env.keymap);
-    var engine = try wasm.Engine.init();
+    var engine = try wasm.Engine.init(gpa);
     defer engine.deinit();
 
     // Empty options are intentional: the accepted index must remain the
@@ -1958,7 +1951,7 @@ test "quickjs: a JS plugin drives a duplex subprocess and reads its output" {
     var env: Env = undefined;
     try Env.init(gpa, &env);
     defer env.deinit(gpa);
-    var engine = try wasm.Engine.init();
+    var engine = try wasm.Engine.init(gpa);
     defer engine.deinit();
 
     // The plugin spawns a child (sh builtins, hermetic .empty env), sends it a
@@ -2012,7 +2005,7 @@ test "quickjs: the ACP plugin drives a mock agent's message into the transcript"
     var env: Env = undefined;
     try Env.init(gpa, &env);
     defer env.deinit(gpa);
-    var engine = try wasm.Engine.init();
+    var engine = try wasm.Engine.init(gpa);
     defer engine.deinit();
 
     // A fire-and-forget mock ACP agent (sh builtins only — printf): emits the
@@ -2065,7 +2058,7 @@ test "quickjs: transcriptEntry/transcriptAppend — role tagging, streamed-body 
     var env: Env = undefined;
     try Env.init(gpa, &env);
     defer env.deinit(gpa);
-    var engine = try wasm.Engine.init();
+    var engine = try wasm.Engine.init(gpa);
     defer engine.deinit();
 
     // Four commands, one per step, so the Zig side can peek host state
@@ -2172,7 +2165,7 @@ test "quickjs: a JS plugin reads a file through weft.fileRead" {
     var env: Env = undefined;
     try Env.init(gpa, &env);
     defer env.deinit(gpa);
-    var engine = try wasm.Engine.init();
+    var engine = try wasm.Engine.init(gpa);
     defer engine.deinit();
 
     var tmp = t.tmpDir(.{});
@@ -2219,7 +2212,7 @@ test "quickjs: a JS plugin with NO declared grants gets NO effect capability —
     var env: Env = undefined;
     try Env.init(gpa, &env);
     defer env.deinit(gpa);
-    var engine = try wasm.Engine.init();
+    var engine = try wasm.Engine.init(gpa);
     defer engine.deinit();
 
     // Nothing granted: fail closed on every effect door, and loudly.
@@ -2241,7 +2234,7 @@ test "quickjs: a granted JS plugin spawns — and revoking `proc` stops it on th
     var env: Env = undefined;
     try Env.init(gpa, &env);
     defer env.deinit(gpa);
-    var engine = try wasm.Engine.init();
+    var engine = try wasm.Engine.init(gpa);
     defer engine.deinit();
 
     try env.grant("gated", "proc");
@@ -2265,7 +2258,7 @@ test "quickjs: an fs_read grant narrowed to a root confines a JS plugin (guest/f
     var env: Env = undefined;
     try Env.init(gpa, &env);
     defer env.deinit(gpa);
-    var engine = try wasm.Engine.init();
+    var engine = try wasm.Engine.init(gpa);
     defer engine.deinit();
 
     var tmp = t.tmpDir(.{});
@@ -2313,7 +2306,7 @@ test "quickjs: an OPEN buffer doesn't launder a narrowed fs_read grant" {
     var env: Env = undefined;
     try Env.init(gpa, &env);
     defer env.deinit(gpa);
-    var engine = try wasm.Engine.init();
+    var engine = try wasm.Engine.init(gpa);
     defer engine.deinit();
 
     // The live-buffer branch of `cFileRead` — the one with no descriptor to
@@ -2352,7 +2345,7 @@ test "quickjs: a JS plugin writes a file as an attributed agent peer edit" {
     var env: Env = undefined;
     try Env.init(gpa, &env);
     defer env.deinit(gpa);
-    var engine = try wasm.Engine.init();
+    var engine = try wasm.Engine.init(gpa);
     defer engine.deinit();
 
     // fs/write to a path that isn't open → weft binds a buffer to it and applies
@@ -2380,7 +2373,7 @@ test "quickjs: a config syntax error surfaces as ConfigException, not silent" {
     try Env.init(gpa, &env);
     defer env.deinit(gpa);
 
-    var engine = try wasm.Engine.init();
+    var engine = try wasm.Engine.init(gpa);
     defer engine.deinit();
     // Malformed JS: the eval must fail loudly, and nothing was bound.
     try t.expectError(error.ConfigException, evalConfig(&engine, &env.ctx, null, null, null, "this is (not valid javascript"));
@@ -2393,12 +2386,13 @@ test "quickjs: weft.plugin loads a real .wasm, then its command runs" {
     try Env.init(gpa, &env);
     defer env.deinit(gpa);
 
-    var engine = try wasm.Engine.init();
+    var engine = try wasm.Engine.init(gpa);
     defer engine.deinit();
 
     // A minimal loader over the resident engine: resolve the guest "edit"
     // plugin from its embedded bytes and load it under the perm handshake —
     // the same shape main.zig's PluginHost has, minus disk/name resolution.
+    const wasm_abi = @import("wasm_abi.zig");
     const Loader = struct {
         engine: *wasm.Engine,
         ctx: *command.Context,
@@ -2406,7 +2400,7 @@ test "quickjs: weft.plugin loads a real .wasm, then its command runs" {
         fn load(cx: *anyopaque, name: []const u8) void {
             const self: *@This() = @ptrCast(@alignCast(cx));
             std.debug.assert(std.mem.eql(u8, name, "edit"));
-            self.held = wasm_abi.loadPlugin(self.engine, self.ctx, "edit", @embedFile("guest_edit_wasm"), .{ .module_cache_dir = wasm_abi.testModuleCacheDir() }) catch null;
+            self.held = wasm_abi.loadPlugin(self.engine, self.ctx, "edit", @embedFile("guest_edit_wasm"), .{}) catch null;
         }
     };
     var loader: Loader = .{ .engine = &engine, .ctx = &env.ctx };
@@ -2441,7 +2435,7 @@ test "quickjs: R1 regression — weft.set for a .js plugin's STEM identity is no
     var env: Env = undefined;
     try Env.init(gpa, &env);
     defer env.deinit(gpa);
-    var engine = try wasm.Engine.init();
+    var engine = try wasm.Engine.init(gpa);
     defer engine.deinit();
 
     var cfgstore: kv.Store = .empty;
@@ -2471,12 +2465,13 @@ test "quickjs: deferred load — weft.set before the plugin line reaches its ini
     try Env.init(gpa, &env);
     defer env.deinit(gpa);
 
-    var engine = try wasm.Engine.init();
+    var engine = try wasm.Engine.init(gpa);
     defer engine.deinit();
 
     var config: kv.Store = .empty;
     defer config.deinit(gpa);
 
+    const wasm_abi = @import("wasm_abi.zig");
     const Loader = struct {
         engine: *wasm.Engine,
         ctx: *command.Context,
@@ -2485,7 +2480,7 @@ test "quickjs: deferred load — weft.set before the plugin line reaches its ini
         fn load(cx: *anyopaque, name: []const u8) void {
             const self: *@This() = @ptrCast(@alignCast(cx));
             std.debug.assert(std.mem.eql(u8, name, "autopair"));
-            self.held = wasm_abi.loadPlugin(self.engine, self.ctx, "autopair", @embedFile("guest_autopair_wasm"), .{ .config = self.config, .module_cache_dir = wasm_abi.testModuleCacheDir() }) catch null;
+            self.held = wasm_abi.loadPlugin(self.engine, self.ctx, "autopair", @embedFile("guest_autopair_wasm"), .{ .config = self.config }) catch null;
         }
     };
     var loader: Loader = .{ .engine = &engine, .ctx = &env.ctx, .config = &config };
@@ -2522,7 +2517,7 @@ test "quickjs: weft.menu declares a submenu the leader tree enters (doom-style)"
     try Env.init(gpa, &env);
     defer env.deinit(gpa);
 
-    var engine = try wasm.Engine.init();
+    var engine = try wasm.Engine.init(gpa);
     defer engine.deinit();
 
     const cfg =
@@ -2559,7 +2554,7 @@ test "quickjs: every shipped example config evals without a JS error" {
         "config/config.js", "config/config.northstar.js", "config/vim-minimal.js",
         "config/helix.js",  "config/dual.js",             "config/agent-ux.js",
     };
-    var engine = try wasm.Engine.init();
+    var engine = try wasm.Engine.init(gpa);
     defer engine.deinit();
     for (paths) |path| {
         const src = file.readAlloc(gpa, path) catch continue; // skip if run outside the repo
@@ -2578,7 +2573,7 @@ test "quickjs: every shipped example config evals without a JS error" {
 
 test "quickjs: sealed eval — two evals of the same config produce identical manifest hashes" {
     const gpa = t.allocator;
-    var engine = try wasm.Engine.init();
+    var engine = try wasm.Engine.init(gpa);
     defer engine.deinit();
 
     const cfg =
@@ -2622,7 +2617,7 @@ test "quickjs: sealed eval — two evals of the same config produce identical ma
 
 test "quickjs: R2 — Date.now()/Math.random() are SEALED (fixed, deterministic across evals)" {
     const gpa = t.allocator;
-    var engine = try wasm.Engine.init();
+    var engine = try wasm.Engine.init(gpa);
     defer engine.deinit();
 
     // A config that FEEDS the two nondeterministic engine builtins into
@@ -2668,7 +2663,7 @@ test "quickjs: R2 — Date.now()/Math.random() are SEALED (fixed, deterministic 
 
 test "quickjs: weft.grant stages a GrantDecl onto the manifest, and the hash is sensitive to it (§6 W4 slice 4)" {
     const gpa = t.allocator;
-    var engine = try wasm.Engine.init();
+    var engine = try wasm.Engine.init(gpa);
     defer engine.deinit();
 
     const cfg =
@@ -2715,7 +2710,7 @@ test "quickjs: weft.grant stages a GrantDecl onto the manifest, and the hash is 
 
 test "quickjs: weft.grant FAILS CLOSED — a non-string/undefined opts.root throws, eval fails loudly (review nit 1)" {
     const gpa = t.allocator;
-    var engine = try wasm.Engine.init();
+    var engine = try wasm.Engine.init(gpa);
     defer engine.deinit();
 
     // A mistyped narrowing — {root: 123} — must NEVER silently degrade to
@@ -2766,7 +2761,7 @@ test "quickjs: weft.grant is config-plane only — a resident JS plugin's call i
     var env: Env = undefined;
     try Env.init(gpa, &env);
     defer env.deinit(gpa);
-    var engine = try wasm.Engine.init();
+    var engine = try wasm.Engine.init(gpa);
     defer engine.deinit();
 
     // A JS plugin registers a command that calls weft.grant from a LIVE
@@ -2790,7 +2785,7 @@ test "quickjs: weft.use produces a real imported sub-manifest at the imported ti
     var env: Env = undefined;
     try Env.init(gpa, &env);
     defer env.deinit(gpa);
-    var engine = try wasm.Engine.init();
+    var engine = try wasm.Engine.init(gpa);
     defer engine.deinit();
 
     const dir = ".zig-cache/tmp/weft-use-manifest-test";
@@ -2817,7 +2812,7 @@ test "quickjs: reconcile — reapplying the identical config is a verified no-op
     var env: Env = undefined;
     try Env.init(gpa, &env);
     defer env.deinit(gpa);
-    var engine = try wasm.Engine.init();
+    var engine = try wasm.Engine.init(gpa);
     defer engine.deinit();
 
     const cfg =
@@ -2860,7 +2855,7 @@ test "quickjs: W4 slice 4 — reconcile round trip: a weft.grant removed leaves 
     var env: Env = undefined;
     try Env.init(gpa, &env);
     defer env.deinit(gpa);
-    var engine = try wasm.Engine.init();
+    var engine = try wasm.Engine.init(gpa);
     defer engine.deinit();
 
     const cfg1 = "weft.grant(\"git\", \"fs_write\", { root: \"repo\" });\n";
@@ -2896,7 +2891,7 @@ test "quickjs: W4 slice 4 — an UNCHANGED weft.grant survives a reload that cha
     var env: Env = undefined;
     try Env.init(gpa, &env);
     defer env.deinit(gpa);
-    var engine = try wasm.Engine.init();
+    var engine = try wasm.Engine.init(gpa);
     defer engine.deinit();
 
     const cfg1 =

@@ -80,7 +80,7 @@ pub fn main(init: std.process.Init) !void {
     {
         saw_err_this_scenario = false;
         last_level = null;
-        var engine = try wasm.Engine.init();
+        var engine = try wasm.Engine.init(gpa);
         defer engine.deinit();
         var module = try engine.compile(&boom_wasm);
         defer module.deinit();
@@ -105,7 +105,7 @@ pub fn main(init: std.process.Init) !void {
     {
         saw_err_this_scenario = false;
         last_level = null;
-        var engine = try wasm.Engine.init();
+        var engine = try wasm.Engine.init(gpa);
         defer engine.deinit();
         var module = try engine.compile(&deny_wasm);
         defer module.deinit();

@@ -391,7 +391,7 @@ pub const Plugins = struct {
 
     pub fn init(gpa: Allocator, pool: *task.Pool) !Plugins {
         return .{
-            .engine = try wasm.Engine.init(),
+            .engine = try wasm.Engine.init(gpa),
             .loop = async_loop.Loop.init(gpa, pool, task.nowNs),
         };
     }
@@ -936,7 +936,7 @@ test "system: the real config/agent-ux.js manifest hosts a SECOND system end-to-
     const agent_sys = try testSystem(gpa, pool, "agent-ux");
     defer agent_sys.destroy();
 
-    var engine = try wasm.Engine.init();
+    var engine = try wasm.Engine.init(gpa);
     defer engine.deinit();
 
     var c = agent_sys.contextFor(&agent_sys.default_head);

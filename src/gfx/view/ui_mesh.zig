@@ -619,7 +619,7 @@ test "ui_mesh: MESH REACHABILITY — weft.statusSegment reaches ui/statusline-se
     try declareSlots(&sys.container);
     try bindDefaultStatusline(&sys.container);
 
-    var engine = try core.wasm.Engine.init();
+    var engine = try core.wasm.Engine.init(gpa);
     defer engine.deinit();
     var c = sys.contextFor(&sys.default_head);
     const src = "weft.statusSegment(\"BUILD OK\", \"accent\", 500);";
@@ -663,7 +663,7 @@ test "ui_mesh: weft.statusSegment with NO binder wired is a logged no-op, not a 
     try declareSlots(&sys.container);
     try bindDefaultStatusline(&sys.container);
 
-    var engine = try core.wasm.Engine.init();
+    var engine = try core.wasm.Engine.init(gpa);
     defer engine.deinit();
     var c = sys.contextFor(&sys.default_head);
     const src = "weft.statusSegment(\"unreachable\", \"accent\", 500);";

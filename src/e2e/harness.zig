@@ -172,7 +172,7 @@ pub const Editor = struct {
         self.input_observer = null;
         self.vulkan_head = null;
         self.pool = try core.task.Pool.init(gpa, .{ .threads = 2 });
-        self.engine = try core.wasm.Engine.init();
+        self.engine = try core.wasm.Engine.init(gpa);
         self.loop = core.async_loop.Loop.init(gpa, self.pool, core.task.nowNs);
 
         // Stand up the REAL app state, in main()'s construction order: Providers'
@@ -283,7 +283,6 @@ pub const Editor = struct {
             .syntax_of = app_providers.resolveSyntax,
             .pool = self.pool,
             .grant_table = &self.session.system.grants,
-            .module_cache_dir = core.wasm_abi.testModuleCacheDir(),
         });
         try self.plugins.append(self.gpa, p);
     }

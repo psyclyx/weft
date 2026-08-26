@@ -27,20 +27,13 @@ const Allocator = std.mem.Allocator;
 const wasm_abi = @import("../wasm_abi.zig");
 const guest_hello = wasm_abi.guest_hello;
 
-// Every guest in this suite loads through the shared `.cwasm` cache
-// (`wasm_abi.testModuleCacheDir`). JIT-compiling the catalog from scratch is
-// the suite's dominant cost, and the cache is content-addressed, so a changed
+// Every guest in this suite loads through the engine's compiled-module cache
+// (`wasm.Engine.cache_dir`, which a test binary inherits from
+// `$WEFT_TEST_MODULE_CACHE`). JIT-compiling the catalog from scratch is the
+// suite's dominant cost, and the cache is content-addressed, so a changed
 // guest still compiles exactly once.
-
-fn loadPlugin(engine: *wasm.Engine, ctx: *command.Context, name: []const u8, wasm_bytes: []const u8, opts: wasm_abi.LoadOptions) !*wasm_abi.WasmPlugin {
-    var cached = opts;
-    cached.module_cache_dir = wasm_abi.testModuleCacheDir();
-    return wasm_abi.loadPlugin(engine, ctx, name, wasm_bytes, cached);
-}
-
-fn runGuest(engine: *wasm.Engine, ctx: *command.Context, name: []const u8, wasm_bytes: []const u8) !void {
-    return wasm_abi.runGuest(engine, ctx, name, wasm_bytes, wasm_abi.testModuleCacheDir());
-}
+const loadPlugin = wasm_abi.loadPlugin;
+const runGuest = wasm_abi.runGuest;
 
 const t = std.testing;
 
@@ -53,7 +46,7 @@ test "wasm plugin: canonical targets and scenes cross the semantic membrane" {
     defer semantic.deinit(gpa);
     env.ctx.semantic = &semantic;
 
-    var engine = try wasm.Engine.init();
+    var engine = try wasm.Engine.init(gpa);
     defer engine.deinit();
     const plugin = try loadPlugin(&engine, &env.ctx, "semantic-fixture", @embedFile("guest_semantic_wasm"), .{});
 
@@ -274,7 +267,7 @@ test "wasm plugin: guarded child directories publish and revoke complete authori
     );
     defer _ = parent.close(gpa, &semantic.targets, &router);
 
-    var engine = try wasm.Engine.init();
+    var engine = try wasm.Engine.init(gpa);
     defer engine.deinit();
     const fixture_bytes = @embedFile("guest_semantic_fs_wasm");
 
@@ -481,7 +474,7 @@ test "wasm plugin: semantic ownership is instance-specific and system-local" {
     defer home.deinit(gpa);
     env.ctx.semantic = &home;
 
-    var engine = try wasm.Engine.init();
+    var engine = try wasm.Engine.init(gpa);
     defer engine.deinit();
     const bytes = @embedFile("guest_semantic_wasm");
     const first = try loadPlugin(&engine, &env.ctx, "same-name", bytes, .{});
@@ -566,7 +559,7 @@ test "wasm plugin: a .wasm guest edits the buffer through the host ABI, as its p
     try buffers.active().textEditor().?.insertText(gpa, "ab");
     buffers.active().textEditor().?.placeCursor(1); // between 'a' and 'b'
 
-    var engine = try wasm.Engine.init();
+    var engine = try wasm.Engine.init(gpa);
     defer engine.deinit();
     try runGuest(&engine, &ctx, "wasm.hello", guest_hello);
 
@@ -611,7 +604,7 @@ test "wasm plugin: init registers a command that dispatches back into the guest"
         .head = &head,
     };
 
-    var engine = try wasm.Engine.init();
+    var engine = try wasm.Engine.init(gpa);
     defer engine.deinit();
     const plugin = try loadPlugin(&engine, &ctx, "wasm.plugin", @embedFile("guest_plugin_wasm"), .{});
     defer plugin.deinit();
@@ -693,7 +686,7 @@ test "wasm plugin: the edit catalog plugin runs identically as .wasm (duplicate-
     try Env.init(gpa, &env);
     defer env.deinit(gpa);
 
-    var engine = try wasm.Engine.init();
+    var engine = try wasm.Engine.init(gpa);
     defer engine.deinit();
     const plugin = try loadPlugin(&engine, &env.ctx, "edit", @embedFile("guest_edit_wasm"), .{});
     defer plugin.deinit();
@@ -716,7 +709,7 @@ test "wasm plugin: the edit catalog plugin runs identically as .wasm (duplicate-
 }
 
 test "wasm: compiled-module image serialize→deserialize round-trips; garbage rejected" {
-    var engine = try wasm.Engine.init();
+    var engine = try wasm.Engine.init(t.allocator);
     defer engine.deinit();
 
     var module = try engine.compile(@embedFile("guest_edit_wasm"));
@@ -741,7 +734,7 @@ test "which-key: on_menu builds a corner surface from the current menu's binding
     try Env.init(gpa, &env);
     defer env.deinit(gpa);
 
-    var engine = try wasm.Engine.init();
+    var engine = try wasm.Engine.init(gpa);
     defer engine.deinit();
     const plugin = try loadPlugin(&engine, &env.ctx, "which_key", @embedFile("guest_which_key_wasm"), .{});
     defer plugin.deinit();
@@ -807,7 +800,7 @@ test "dired wasm launcher: delegates to the ordinary open command at cwd" {
         .data = &open_probe,
     });
 
-    var engine = try wasm.Engine.init();
+    var engine = try wasm.Engine.init(gpa);
     defer engine.deinit();
     // The shipped dired guest is a thin launcher. This ABI gate intentionally
     // supplies only the ordinary command surface: dired owns no proc/fs
@@ -831,7 +824,7 @@ test "helix: a second modal editor loads in its OWN mode namespace" {
     try Env.init(gpa, &env);
     defer env.deinit(gpa);
 
-    var engine = try wasm.Engine.init();
+    var engine = try wasm.Engine.init(gpa);
     defer engine.deinit();
     const plugin = try loadPlugin(&engine, &env.ctx, "helix", @embedFile("guest_helix_wasm"), .{});
     defer plugin.deinit();
@@ -859,7 +852,7 @@ test "emacs: a modeless editor loads; motion/kill chords, C-x is a chord not a m
     try Env.init(gpa, &env);
     defer env.deinit(gpa);
 
-    var engine = try wasm.Engine.init();
+    var engine = try wasm.Engine.init(gpa);
     defer engine.deinit();
     const plugin = try loadPlugin(&engine, &env.ctx, "emacs", @embedFile("guest_emacs_wasm"), .{});
     defer plugin.deinit();
@@ -885,7 +878,7 @@ test "vim ex: `:` opens a command line; :N gotos, :%s substitutes, unknown falls
     try Env.init(gpa, &env);
     defer env.deinit(gpa);
 
-    var engine = try wasm.Engine.init();
+    var engine = try wasm.Engine.init(gpa);
     defer engine.deinit();
     const plugin = try loadPlugin(&engine, &env.ctx, "vim", @embedFile("guest_vim_wasm"), .{});
     defer plugin.deinit();
@@ -931,7 +924,7 @@ test "wasm plugin: upcase-line edits in place across the membrane" {
     try Env.init(gpa, &env);
     defer env.deinit(gpa);
 
-    var engine = try wasm.Engine.init();
+    var engine = try wasm.Engine.init(gpa);
     defer engine.deinit();
     const plugin = try loadPlugin(&engine, &env.ctx, "edit", @embedFile("guest_edit_wasm"), .{});
     defer plugin.deinit();
@@ -951,7 +944,7 @@ test "wasm plugin: an undeclared registration fails the load (perm handshake)" {
     try Env.init(gpa, &env);
     defer env.deinit(gpa);
 
-    var engine = try wasm.Engine.init();
+    var engine = try wasm.Engine.init(gpa);
     defer engine.deinit();
     // The guest registers a command it never declared — the cross-check must
     // reject it and roll back, exactly as abi.zig does in-process.
@@ -967,7 +960,7 @@ test "wasm plugin: a denied effect traps rather than returning a fake result" {
     try Env.init(gpa, &env);
     defer env.deinit(gpa);
 
-    var engine = try wasm.Engine.init();
+    var engine = try wasm.Engine.init(gpa);
     defer engine.deinit();
     // The guest never requests fs_read (see src/guest/deny.zig) but calls
     // fs.read from its command handler anyway. The load itself succeeds (no
@@ -1001,7 +994,7 @@ test "wasm plugin: a background entry's head-gated import traps (task #19 item 4
     defer env.deinit(gpa);
     try env.head.setModeRaw(gpa, "start"); // an observable baseline the trap must not move
 
-    var engine = try wasm.Engine.init();
+    var engine = try wasm.Engine.init(gpa);
     defer engine.deinit();
     const plugin = try loadPlugin(&engine, &env.ctx, "headtest", @embedFile("guest_headtest_wasm"), .{});
     defer plugin.deinit();
@@ -1021,7 +1014,7 @@ test "wasm plugin: the SAME head-gated import works from a dispatching entry, an
     defer env.deinit(gpa);
     try env.head.setModeRaw(gpa, "start");
 
-    var engine = try wasm.Engine.init();
+    var engine = try wasm.Engine.init(gpa);
     defer engine.deinit();
     const plugin = try loadPlugin(&engine, &env.ctx, "headtest", @embedFile("guest_headtest_wasm"), .{});
     defer plugin.deinit();
@@ -1049,7 +1042,7 @@ test "wasm plugin: nested same-plugin dispatch preserves its caller's live range
     try Env.init(gpa, &env);
     defer env.deinit(gpa);
 
-    var engine = try wasm.Engine.init();
+    var engine = try wasm.Engine.init(gpa);
     defer engine.deinit();
     const plugin = try loadPlugin(&engine, &env.ctx, "headtest", @embedFile("guest_headtest_wasm"), .{});
     defer plugin.deinit();
@@ -1078,7 +1071,7 @@ test "wasm plugin: document snapshot witnesses are causal, buffer-bound, and ide
     try Env.init(gpa, &env);
     defer env.deinit(gpa);
 
-    var engine = try wasm.Engine.init();
+    var engine = try wasm.Engine.init(gpa);
     defer engine.deinit();
     const plugin = try loadPlugin(&engine, &env.ctx, "headtest", @embedFile("guest_headtest_wasm"), .{});
     defer plugin.deinit();
@@ -1112,7 +1105,7 @@ test "wasm plugin: init-phase table-config declarations are unaffected by dispat
     try Env.init(gpa, &env);
     defer env.deinit(gpa);
 
-    var engine = try wasm.Engine.init();
+    var engine = try wasm.Engine.init(gpa);
     defer engine.deinit();
     // headtest's `init()` (a BACKGROUND entry) calls `weft.restingMode("poked")`
     // — a mode TABLE declaration (Keymap-owned, not Head-owned; see
@@ -1129,7 +1122,7 @@ test "wasm plugin: hot-reload — teardown unbinds, re-instantiation is clean" {
     try Env.init(gpa, &env);
     defer env.deinit(gpa);
 
-    var engine = try wasm.Engine.init();
+    var engine = try wasm.Engine.init(gpa);
     defer engine.deinit();
 
     const ed = env.buffers.active().textEditor().?;
@@ -1167,7 +1160,7 @@ test "wasm plugin: a completion provider gathers candidates across the membrane"
     try Env.init(gpa, &env);
     defer env.deinit(gpa);
 
-    var engine = try wasm.Engine.init();
+    var engine = try wasm.Engine.init(gpa);
     defer engine.deinit();
     const plugin = try loadPlugin(&engine, &env.ctx, "complete", @embedFile("guest_complete_wasm"), .{});
     defer plugin.deinit();
@@ -1208,7 +1201,7 @@ test "D2: a wasm guest declares+binds a NOVEL 'ui/badge' slot; the host fires, r
     try Env.init(gpa, &env);
     defer env.deinit(gpa);
 
-    var engine = try wasm.Engine.init();
+    var engine = try wasm.Engine.init(gpa);
     defer engine.deinit();
     const plugin = try loadPlugin(&engine, &env.ctx, "badge", @embedFile("guest_badge_wasm"), .{});
     defer plugin.deinit();
@@ -1270,7 +1263,7 @@ test "wasm plugin: demo-config composes commands + binds a key (config surface)"
     try Env.init(gpa, &env);
     defer env.deinit(gpa);
 
-    var engine = try wasm.Engine.init();
+    var engine = try wasm.Engine.init(gpa);
     defer engine.deinit();
     // Load the edit plugin (provides duplicate-line/upcase-line) then the
     // config that composes them — the same layering as std + user config.
@@ -1302,7 +1295,7 @@ test "wasm plugin: project command args/result + kv cross the membrane" {
     var store: kv.Store = .empty;
     defer store.deinit(gpa);
 
-    var engine = try wasm.Engine.init();
+    var engine = try wasm.Engine.init(gpa);
     defer engine.deinit();
     const plugin = try loadPlugin(&engine, &env.ctx, "project", @embedFile("guest_project_wasm"), .{ .kv = &store });
     defer plugin.deinit();
@@ -1325,7 +1318,7 @@ test "wasm plugin: palette status echoes the active buffer (introspection)" {
     try Env.init(gpa, &env);
     defer env.deinit(gpa);
 
-    var engine = try wasm.Engine.init();
+    var engine = try wasm.Engine.init(gpa);
     defer engine.deinit();
     const plugin = try loadPlugin(&engine, &env.ctx, "std", @embedFile("guest_palette_wasm"), .{});
     defer plugin.deinit();
@@ -1344,7 +1337,7 @@ test "wasm plugin: palette opens a command pick; accept dispatches back and runs
     // The pick UI is ordinary commands in the "pick" keymap mode.
     try pick_mod.install(gpa, &env.commands, &env.keymap);
 
-    var engine = try wasm.Engine.init();
+    var engine = try wasm.Engine.init(gpa);
     defer engine.deinit();
     const plugin = try loadPlugin(&engine, &env.ctx, "std", @embedFile("guest_palette_wasm"), .{});
     defer plugin.deinit();
@@ -1368,7 +1361,7 @@ test "wasm plugins: consult-line combines anchored row identity with exact match
     defer env.deinit(gpa);
     try @import("../pick.zig").install(gpa, &env.commands, &env.keymap);
 
-    var engine = try wasm.Engine.init();
+    var engine = try wasm.Engine.init(gpa);
     defer engine.deinit();
     const plugin = try loadPlugin(&engine, &env.ctx, "consult", @embedFile("guest_consult_wasm"), .{});
     defer plugin.deinit();
@@ -1431,7 +1424,7 @@ test "wasm plugins: consult-line verifies content beyond its display scratch" {
     defer env.deinit(gpa);
     try @import("../pick.zig").install(gpa, &env.commands, &env.keymap);
 
-    var engine = try wasm.Engine.init();
+    var engine = try wasm.Engine.init(gpa);
     defer engine.deinit();
     const consult = try loadPlugin(&engine, &env.ctx, "consult", @embedFile("guest_consult_wasm"), .{});
     defer consult.deinit();
@@ -1476,7 +1469,7 @@ test "wasm plugins: consult-imenu picks a definition and jumps to it" {
         }
     };
 
-    var engine = try wasm.Engine.init();
+    var engine = try wasm.Engine.init(gpa);
     defer engine.deinit();
     const plugin = try loadPlugin(&engine, &env.ctx, "consult", @embedFile("guest_consult_wasm"), .{ .syntax_of = R.resolve });
     defer plugin.deinit();
@@ -1501,7 +1494,7 @@ test "wasm plugins: buf-pick switches to the accepted buffer by recorded id" {
     _ = try env.buffers.create(gpa, "alpha");
     _ = try env.buffers.create(gpa, "beta");
 
-    var engine = try wasm.Engine.init();
+    var engine = try wasm.Engine.init(gpa);
     defer engine.deinit();
     const plugin = try loadPlugin(&engine, &env.ctx, "buffers", @embedFile("guest_buffers_wasm"), .{});
     defer plugin.deinit();
@@ -1528,7 +1521,7 @@ test "wasm plugin: structural node-kind/delete-node degrade honestly with no gra
     try Env.init(gpa, &env);
     defer env.deinit(gpa);
 
-    var engine = try wasm.Engine.init();
+    var engine = try wasm.Engine.init(gpa);
     defer engine.deinit();
     // No syntax service wired → nodeAt reports "no node" across the membrane.
     const plugin = try loadPlugin(&engine, &env.ctx, "structural", @embedFile("guest_structural_wasm"), .{});
@@ -1565,7 +1558,7 @@ test "wasm plugin: ts expands selection to the enclosing node + runs a query" {
         }
     };
 
-    var engine = try wasm.Engine.init();
+    var engine = try wasm.Engine.init(gpa);
     defer engine.deinit();
     const plugin = try loadPlugin(&engine, &env.ctx, "ts", @embedFile("guest_ts_wasm"), .{ .syntax_of = R.resolve });
     defer plugin.deinit();
@@ -1605,7 +1598,7 @@ test "wasm plugins: a tree text object (a-function) an operator deletes (daf)" {
         }
     };
 
-    var engine = try wasm.Engine.init();
+    var engine = try wasm.Engine.init(gpa);
     defer engine.deinit();
     const textobjects = try loadPlugin(&engine, &env.ctx, "textobjects", @embedFile("guest_textobjects_wasm"), .{ .syntax_of = R.resolve });
     defer textobjects.deinit();
@@ -1632,7 +1625,7 @@ test "wasm plugin: region claims a subbuffer + attaches a fact across the membra
     var subs: subbuffer.SubBuffers = .empty;
     defer subs.deinit(gpa); // frees the claimed entries (runs after plugin.deinit)
 
-    var engine = try wasm.Engine.init();
+    var engine = try wasm.Engine.init(gpa);
     defer engine.deinit();
     const plugin = try loadPlugin(&engine, &env.ctx, "region", @embedFile("guest_region_wasm"), .{ .subbuffers = &subs });
     defer plugin.deinit();
@@ -1655,7 +1648,7 @@ test "wasm plugin: shell insert-shell runs a command off-thread and inserts at i
     var loop = async_loop.Loop.init(gpa, env.pool, @import("../task.zig").nowNs);
     defer loop.deinit();
 
-    var engine = try wasm.Engine.init();
+    var engine = try wasm.Engine.init(gpa);
     defer engine.deinit();
     const plugin = try loadPlugin(&engine, &env.ctx, "shell", @embedFile("guest_shell_wasm"), .{ .loop = &loop });
     defer plugin.deinit();
@@ -1689,7 +1682,7 @@ test "wasm plugin: shell insert is a no-op when the async service is absent" {
     try Env.init(gpa, &env);
     defer env.deinit(gpa);
 
-    var engine = try wasm.Engine.init();
+    var engine = try wasm.Engine.init(gpa);
     defer engine.deinit();
     // No loop wired: the shell plugin declared proc+timer, but with no async
     // service the effect drops honestly (no ghost edit).
@@ -1713,7 +1706,7 @@ test "wasm plugin: git-status runs git into a focused tool buffer (async)" {
     var loop = async_loop.Loop.init(gpa, env.pool, @import("../task.zig").nowNs);
     defer loop.deinit();
 
-    var engine = try wasm.Engine.init();
+    var engine = try wasm.Engine.init(gpa);
     defer engine.deinit();
     const plugin = try loadPlugin(&engine, &env.ctx, "git", @embedFile("guest_git_wasm"), .{ .loop = &loop });
     defer plugin.deinit();
@@ -1769,7 +1762,7 @@ test "wasm plugin: run-command runs a shell command into a tool buffer (async)" 
 
     var loop = async_loop.Loop.init(gpa, env.pool, @import("../task.zig").nowNs);
     defer loop.deinit();
-    var engine = try wasm.Engine.init();
+    var engine = try wasm.Engine.init(gpa);
     defer engine.deinit();
     const plugin = try loadPlugin(&engine, &env.ctx, "run", @embedFile("guest_run_wasm"), .{ .loop = &loop });
     defer plugin.deinit();
@@ -1802,7 +1795,7 @@ test "wasm plugin: fmt filters a range through a command (async, in-place tmp)" 
 
     var loop = async_loop.Loop.init(gpa, env.pool, @import("../task.zig").nowNs);
     defer loop.deinit();
-    var engine = try wasm.Engine.init();
+    var engine = try wasm.Engine.init(gpa);
     defer engine.deinit();
     const plugin = try loadPlugin(&engine, &env.ctx, "fmt", @embedFile("guest_fmt_wasm"), .{ .loop = &loop });
     defer plugin.deinit();
@@ -1837,7 +1830,7 @@ test "wasm plugin: repl runs a persistent process and streams its output back" {
 
     var loop = async_loop.Loop.init(gpa, env.pool, @import("../task.zig").nowNs);
     defer loop.deinit();
-    var engine = try wasm.Engine.init();
+    var engine = try wasm.Engine.init(gpa);
     defer engine.deinit();
     // `cat` is a persistent echo REPL — stateful proof the child stays alive.
     const plugin = try loadPlugin(&engine, &env.ctx, "repl", @embedFile("guest_repl_wasm"), .{ .loop = &loop, .pool = env.pool });
@@ -1875,7 +1868,7 @@ test "wasm plugin: console-send runs the current line and appends output" {
 
     var loop = async_loop.Loop.init(gpa, env.pool, @import("../task.zig").nowNs);
     defer loop.deinit();
-    var engine = try wasm.Engine.init();
+    var engine = try wasm.Engine.init(gpa);
     defer engine.deinit();
     const plugin = try loadPlugin(&engine, &env.ctx, "console", @embedFile("guest_console_wasm"), .{ .loop = &loop });
     defer plugin.deinit();
@@ -1901,7 +1894,7 @@ test "wasm plugin: vim wires the modal keymap and runs motions/operators as .was
     try Env.init(gpa, &env);
     defer env.deinit(gpa);
 
-    var engine = try wasm.Engine.init();
+    var engine = try wasm.Engine.init(gpa);
     defer engine.deinit();
     // The register is now a CORE service (register.zig), shared by every editor
     // — vim's yank/paste route through it, so wire one for the yy/p round-trip.
@@ -1940,7 +1933,7 @@ test "wasm plugin: vim yank/paste ferries a subbuffer id through the register (d
     try Env.init(gpa, &env);
     defer env.deinit(gpa);
 
-    var engine = try wasm.Engine.init();
+    var engine = try wasm.Engine.init(gpa);
     defer engine.deinit();
     var reg: register.Bank = .{};
     defer reg.deinit(gpa);
@@ -1973,7 +1966,7 @@ test "wasm plugin: explicit named text register survives a later delete yank" {
     var env: Env = undefined;
     try Env.init(gpa, &env);
     defer env.deinit(gpa);
-    var engine = try wasm.Engine.init();
+    var engine = try wasm.Engine.init(gpa);
     defer engine.deinit();
     var bank: register.Bank = .{};
     defer bank.deinit(gpa);
@@ -2011,7 +2004,7 @@ test "wasm plugins: a motion returns a range an operator awaits + applies (dw)" 
     try Env.init(gpa, &env);
     defer env.deinit(gpa);
 
-    var engine = try wasm.Engine.init();
+    var engine = try wasm.Engine.init(gpa);
     defer engine.deinit();
     const motions = try loadPlugin(&engine, &env.ctx, "motions", @embedFile("guest_motions_wasm"), .{});
     defer motions.deinit();
@@ -2042,7 +2035,7 @@ test "wasm plugins: an awaited live range follows an intervening edit" {
     try Env.init(gpa, &env);
     defer env.deinit(gpa);
 
-    var engine = try wasm.Engine.init();
+    var engine = try wasm.Engine.init(gpa);
     defer engine.deinit();
     const motions = try loadPlugin(&engine, &env.ctx, "motions", @embedFile("guest_motions_wasm"), .{});
     defer motions.deinit();
@@ -2074,7 +2067,7 @@ test "wasm plugins: vim composes motions + operators — dw through the keymap" 
     try Env.init(gpa, &env);
     defer env.deinit(gpa);
 
-    var engine = try wasm.Engine.init();
+    var engine = try wasm.Engine.init(gpa);
     defer engine.deinit();
     const motions = try loadPlugin(&engine, &env.ctx, "motions", @embedFile("guest_motions_wasm"), .{});
     defer motions.deinit();
@@ -2106,7 +2099,7 @@ test "wasm plugins: a text object returns a range an operator applies (di\")" {
     try Env.init(gpa, &env);
     defer env.deinit(gpa);
 
-    var engine = try wasm.Engine.init();
+    var engine = try wasm.Engine.init(gpa);
     defer engine.deinit();
     const textobjects = try loadPlugin(&engine, &env.ctx, "textobjects", @embedFile("guest_textobjects_wasm"), .{});
     defer textobjects.deinit();
@@ -2133,7 +2126,7 @@ test "wasm plugins: vim di( through the keymap (operator + text object)" {
     try Env.init(gpa, &env);
     defer env.deinit(gpa);
 
-    var engine = try wasm.Engine.init();
+    var engine = try wasm.Engine.init(gpa);
     defer engine.deinit();
     const textobjects = try loadPlugin(&engine, &env.ctx, "textobjects", @embedFile("guest_textobjects_wasm"), .{});
     defer textobjects.deinit();
@@ -2164,7 +2157,7 @@ test "wasm plugins: a view-grade peer's op.delete refuses (zero permission code)
     try Env.init(gpa, &env);
     defer env.deinit(gpa);
 
-    var engine = try wasm.Engine.init();
+    var engine = try wasm.Engine.init(gpa);
     defer engine.deinit();
     const motions = try loadPlugin(&engine, &env.ctx, "motions", @embedFile("guest_motions_wasm"), .{});
     defer motions.deinit();
@@ -2199,7 +2192,7 @@ test "wasm plugins: a read-only buffer refuses a guest edit and says so" {
     try Env.init(gpa, &env);
     defer env.deinit(gpa);
 
-    var engine = try wasm.Engine.init();
+    var engine = try wasm.Engine.init(gpa);
     defer engine.deinit();
     const motions = try loadPlugin(&engine, &env.ctx, "motions", @embedFile("guest_motions_wasm"), .{});
     defer motions.deinit();
@@ -2225,7 +2218,7 @@ test "wasm plugin: comment toggles a line comment, preserving indent" {
     var env: Env = undefined;
     try Env.init(gpa, &env);
     defer env.deinit(gpa);
-    var engine = try wasm.Engine.init();
+    var engine = try wasm.Engine.init(gpa);
     defer engine.deinit();
     const plugin = try loadPlugin(&engine, &env.ctx, "comment", @embedFile("guest_comment_wasm"), .{});
     defer plugin.deinit();
@@ -2250,7 +2243,7 @@ test "wasm plugin: whitespace trims trailing spaces on the line" {
     var env: Env = undefined;
     try Env.init(gpa, &env);
     defer env.deinit(gpa);
-    var engine = try wasm.Engine.init();
+    var engine = try wasm.Engine.init(gpa);
     defer engine.deinit();
     const plugin = try loadPlugin(&engine, &env.ctx, "whitespace", @embedFile("guest_whitespace_wasm"), .{});
     defer plugin.deinit();
@@ -2269,7 +2262,7 @@ test "wasm plugin: numbers increments the integer under the cursor" {
     var env: Env = undefined;
     try Env.init(gpa, &env);
     defer env.deinit(gpa);
-    var engine = try wasm.Engine.init();
+    var engine = try wasm.Engine.init(gpa);
     defer engine.deinit();
     const plugin = try loadPlugin(&engine, &env.ctx, "numbers", @embedFile("guest_numbers_wasm"), .{});
     defer plugin.deinit();
@@ -2288,7 +2281,7 @@ test "wasm plugin: autopair inserts a matched pair around the cursor" {
     var env: Env = undefined;
     try Env.init(gpa, &env);
     defer env.deinit(gpa);
-    var engine = try wasm.Engine.init();
+    var engine = try wasm.Engine.init(gpa);
     defer engine.deinit();
     const plugin = try loadPlugin(&engine, &env.ctx, "autopair", @embedFile("guest_autopair_wasm"), .{});
     defer plugin.deinit();
@@ -2314,7 +2307,7 @@ test "wasm plugin: notes capture appends via fs and open reads it back" {
     file.deleteFile(gpa, tmp);
     defer file.deleteFile(gpa, tmp);
 
-    var engine = try wasm.Engine.init();
+    var engine = try wasm.Engine.init(gpa);
     defer engine.deinit();
     const plugin = try loadPlugin(&engine, &env.ctx, "notes", @embedFile("guest_notes_wasm"), .{});
     defer plugin.deinit();
@@ -2347,7 +2340,7 @@ test "wasm plugin: W4 slice 1 GATE — revoking fs from a RUNNING plugin traps i
     file.deleteFile(gpa, tmp);
     defer file.deleteFile(gpa, tmp);
 
-    var engine = try wasm.Engine.init();
+    var engine = try wasm.Engine.init(gpa);
     defer engine.deinit();
 
     const grants_mod = @import("../grants.zig");
@@ -2389,7 +2382,7 @@ test "wasm plugin: modes reacts to the activation event by language, without tou
     try Env.init(gpa, &env);
     defer env.deinit(gpa);
 
-    var engine = try wasm.Engine.init();
+    var engine = try wasm.Engine.init(gpa);
     defer engine.deinit();
     const plugin = try loadPlugin(&engine, &env.ctx, "modes", @embedFile("guest_modes_wasm"), .{});
     defer plugin.deinit();
@@ -2422,7 +2415,7 @@ test "wasm plugin: snippets-expand inserts a template body from an fs file" {
     try file.writeBytes(gpa, tmp, "fn\tfn foo() {\\n}\nlog\tstd.log.info(\"\", .{});");
     defer file.deleteFile(gpa, tmp);
 
-    var engine = try wasm.Engine.init();
+    var engine = try wasm.Engine.init(gpa);
     defer engine.deinit();
     const plugin = try loadPlugin(&engine, &env.ctx, "snippets", @embedFile("guest_snippets_wasm"), .{});
     defer plugin.deinit();
@@ -2483,7 +2476,7 @@ test "wasm plugin: kv admin round-trips across the membrane, namespaced" {
     var store: kv.Store = .empty;
     defer store.deinit(gpa);
 
-    var engine = try wasm.Engine.init();
+    var engine = try wasm.Engine.init(gpa);
     defer engine.deinit();
     const plugin = try loadPlugin(&engine, &env.ctx, "edit", @embedFile("guest_edit_wasm"), .{ .kv = &store });
     defer plugin.deinit();
@@ -2518,7 +2511,7 @@ test "wasm plugin: an fs_root-limited grant confines fs through a REAL guest —
     var table = @import("../grants.zig").HandleTable.init(gpa);
     defer table.deinit();
 
-    var engine = try wasm.Engine.init();
+    var engine = try wasm.Engine.init(gpa);
     defer engine.deinit();
     const plugin = try loadPlugin(&engine, &env.ctx, "fs_limit", @embedFile("guest_fs_limit_wasm"), .{ .grant_table = &table });
     defer plugin.deinit();
@@ -2566,7 +2559,7 @@ test "wasm_host/plugin.zig: trap message taxonomy — each Reason gets a distinc
     var table = @import("../grants.zig").HandleTable.init(gpa);
     defer table.deinit();
 
-    var engine = try wasm.Engine.init();
+    var engine = try wasm.Engine.init(gpa);
     defer engine.deinit();
     // fs_limit requests fs_read+fs_write; loadPlugin mints a plugin-lifetime
     // row for each via mintGrantHandles. This ONE plugin's table + handles

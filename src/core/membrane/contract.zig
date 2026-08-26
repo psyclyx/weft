@@ -408,7 +408,7 @@ test "membrane contract: defineImports binds every table entry onto a real linke
     // later guest calls, which this test never makes.
     const wasm_host = @import("../wasm_host.zig");
     const WasmPlugin = @import("../wasm_abi/WasmPlugin.zig");
-    var engine = try wasm.Engine.init();
+    var engine = try wasm.Engine.init(t.allocator);
     defer engine.deinit();
     var linker = try wasm.Linker.init(&engine);
     defer linker.deinit();

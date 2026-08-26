@@ -15,6 +15,8 @@
 const std = @import("std");
 const Allocator = std.mem.Allocator;
 
+const file = @import("file.zig");
+
 pub const c = @cImport({
     @cInclude("wasmtime.h");
 });
@@ -100,11 +102,23 @@ fn checkTrap(trap: ?*c.wasm_trap_t) Error!void {
 }
 
 /// One wasmtime engine — thread-safe, shareable across stores. Compiling a
-/// module is engine-scoped; running it is store-scoped.
+/// module is engine-scoped; running it is store-scoped. Because compilation
+/// is the engine's, so is its MEMO: `compileCached` compiles an image once
+/// per engine (and, with `cache_dir`, once per machine) and hands out handles
+/// to that one immutable body of code. Nothing mutable is shared — every
+/// instantiation still gets its own store.
 pub const Engine = struct {
     engine: *c.wasm_engine_t,
+    gpa: Allocator,
+    /// Where compiled images persist between runs (`.cwasm` files, keyed by
+    /// content hash). Null = memo in memory only, recompile each start. The
+    /// app points this at the user cache dir; a test binary inherits
+    /// `$WEFT_TEST_MODULE_CACHE` (see `testCacheDir`).
+    cache_dir: ?[]const u8,
+    /// Images already compiled by this engine, by content hash.
+    compiled: std.AutoHashMapUnmanaged(u64, Module) = .empty,
 
-    pub fn init() Error!Engine {
+    pub fn init(gpa: Allocator) Error!Engine {
         // Single-threaded compilation: wasmtime's default parallel path spins
         // up a persistent (process-lifetime) rayon worker pool that would
         // compete with weft's own frame/collab threads. Plugin modules are
@@ -112,10 +126,26 @@ pub const Engine = struct {
         // a good citizen among the editor's timing-sensitive subsystems.
         const config = c.wasm_config_new() orelse return error.OutOfMemory;
         c.wasmtime_config_parallel_compilation_set(config, false);
-        return .{ .engine = c.wasm_engine_new_with_config(config) orelse return error.OutOfMemory };
+        return .{
+            .engine = c.wasm_engine_new_with_config(config) orelse return error.OutOfMemory,
+            .gpa = gpa,
+            .cache_dir = testCacheDir(),
+        };
+    }
+
+    /// The `.cwasm` cache every test binary shares: `$WEFT_TEST_MODULE_CACHE`,
+    /// which build.zig points at a stable directory under the project cache
+    /// root, so an image compiles once per content hash instead of once per
+    /// engine. Null outside `zig build test`.
+    fn testCacheDir() ?[]const u8 {
+        const dir = std.c.getenv("WEFT_TEST_MODULE_CACHE") orelse return null;
+        return std.mem.span(dir);
     }
 
     pub fn deinit(self: *Engine) void {
+        var it = self.compiled.valueIterator();
+        while (it.next()) |m| m.deinit();
+        self.compiled.deinit(self.gpa);
         c.wasm_engine_delete(self.engine);
         self.* = undefined;
     }
@@ -125,6 +155,38 @@ pub const Engine = struct {
         var module: ?*c.wasmtime_module_t = null;
         try checkErr(c.wasmtime_module_new(self.engine, wasm.ptr, wasm.len, &module), error.Compile);
         return .{ .module = module.? };
+    }
+
+    /// `compile`, memoized on the image's content hash: a memo hit is a new
+    /// handle to code already compiled, a `.cwasm` hit deserializes it, and a
+    /// miss compiles then persists it. The caller owns the returned module
+    /// exactly as it owns a `compile`d one. Cache I/O is best-effort — a
+    /// failed read or write costs a compile, never a load failure.
+    pub fn compileCached(self: *Engine, wasm: []const u8) Error!Module {
+        const hash = std.hash.Wyhash.hash(0, wasm);
+        if (self.compiled.get(hash)) |m| return m.clone();
+        const module = try self.fromDiskOrCompile(hash, wasm);
+        // A memo the engine can't record still compiles correctly; it just
+        // costs the next caller another lookup.
+        self.compiled.put(self.gpa, hash, module) catch return module;
+        return module.clone();
+    }
+
+    fn fromDiskOrCompile(self: *Engine, hash: u64, wasm: []const u8) Error!Module {
+        const dir = self.cache_dir orelse return self.compile(wasm);
+        var path_buf: [std.fs.max_path_bytes]u8 = undefined;
+        const path = std.fmt.bufPrint(&path_buf, "{s}/{x}.cwasm", .{ dir, hash }) catch
+            return self.compile(wasm);
+        if (file.readAlloc(self.gpa, path)) |image| {
+            defer self.gpa.free(image);
+            if (self.deserialize(image)) |m| return m;
+        } else |_| {}
+        const module = try self.compile(wasm);
+        if (module.serialize(self.gpa)) |image| {
+            defer self.gpa.free(image);
+            file.writeBytesMakingDirs(self.gpa, dir, path, image) catch {};
+        } else |_| {}
+        return module;
     }
 
     /// Reconstruct a module from a serialized compiled image (a `.cwasm` cache
@@ -148,6 +210,12 @@ pub const Module = struct {
     pub fn deinit(self: *Module) void {
         c.wasmtime_module_delete(self.module);
         self.* = undefined;
+    }
+
+    /// Another owning handle to the same compiled code (wasmtime refcounts the
+    /// image), so one compile can serve many owners.
+    pub fn clone(self: *const Module) Module {
+        return .{ .module = c.wasmtime_module_clone(self.module).? };
     }
 
     /// Serialize this module's compiled image into an owned byte slice, for the
@@ -474,7 +542,7 @@ const add_wasm = [_]u8{
 };
 
 test "wasm: compile, instantiate, and call a guest export" {
-    var engine = try Engine.init();
+    var engine = try Engine.init(std.testing.allocator);
     defer engine.deinit();
     var module = try engine.compile(&add_wasm);
     defer module.deinit();
@@ -513,7 +581,7 @@ fn hostAdd1(data: ?*anyopaque, caller: *Caller, args: []const i32, results: []i3
 
 test "wasm: the guest reaches the host only through a defined import" {
     host_calls = 0;
-    var engine = try Engine.init();
+    var engine = try Engine.init(std.testing.allocator);
     defer engine.deinit();
     var module = try engine.compile(&import_wasm);
     defer module.deinit();
@@ -543,7 +611,7 @@ fn hostDeny(data: ?*anyopaque, caller: *Caller, args: []const i32, results: []i3
 }
 
 test "wasm: a host callback that calls Caller.trap aborts the guest's call with a real wasm trap" {
-    var engine = try Engine.init();
+    var engine = try Engine.init(std.testing.allocator);
     defer engine.deinit();
     var module = try engine.compile(&import_wasm);
     defer module.deinit();
@@ -592,7 +660,7 @@ const mem_wasm = [_]u8{
 
 test "wasm: the host copies bulk bytes out of the guest's linear memory" {
     const gpa = t.allocator;
-    var engine = try Engine.init();
+    var engine = try Engine.init(gpa);
     defer engine.deinit();
     var module = try engine.compile(&mem_wasm);
     defer module.deinit();

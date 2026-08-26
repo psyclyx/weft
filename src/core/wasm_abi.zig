@@ -28,8 +28,6 @@ pub const guest_hello = runtime.guest_hello;
 pub const runGuest = runtime.runGuest;
 pub const LoadOptions = runtime.LoadOptions;
 pub const loadPlugin = runtime.loadPlugin;
-pub const testModuleCacheDir = runtime.testModuleCacheDir;
-pub const compileCached = runtime.compileCached;
 
 test {
     std.testing.refAllDecls(@This());
