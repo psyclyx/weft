@@ -15,7 +15,10 @@
 //!   as a real (timing) bug to isolate, not a tune-the-test shrug. The
 //!   comparison HARD-FAILS on a build-mode mismatch (a Debug run against a
 //!   ReleaseFast baseline isn't a measurement of the same program) and SKIPS
-//!   on a hostname mismatch (different hardware, not a regression).
+//!   on a hostname mismatch (different hardware, not a regression). The
+//!   thresholds below assume this binary has the box to itself; build.zig's
+//!   `runAlone` is what makes that true under `zig build test`, which is
+//!   otherwise free to run sibling suites alongside it.
 //!
 //!   record (`zig build e2e-latency -Drecord-latency=true`): measure and
 //!   overwrite the baseline file, stamped with this build's mode + host.

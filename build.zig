@@ -656,11 +656,10 @@ pub fn build(b: *std.Build) void {
     }
 
     // The `weft` module owns the core/gfx/app files, so its own unit tests run in
-    // a second test binary; the `test` step runs both. The two binaries run as
-    // sibling, unordered dependencies of `test_step` — Zig's build runner is
-    // free to run them CONCURRENTLY (subject to `-j`/available job slots), so
-    // don't assume serial execution when reasoning about timing-sensitive tests
-    // (e.g. e2e/latency_test.zig) run under `test_mod`.
+    // a second test binary; the `test` step runs both. Every sibling of
+    // `run_tests` runs CONCURRENTLY with it by default — `runAlone` at the end
+    // of this function orders `run_tests` after all of them, because it carries
+    // the wall-clock latency instrument.
     const weft_tests = b.addTest(.{ .root_module = weft_mod });
     const run_weft_tests = b.addRunArtifact(weft_tests);
     shareModuleCache(b, run_weft_tests);
@@ -758,6 +757,29 @@ pub fn build(b: *std.Build) void {
     const run_trap_kinds = b.addRunArtifact(trap_kinds_exe);
     const trap_kinds_step = b.step("e2e-trap-kinds", "Prove task #8's deny-vs-crash channel split: a native guest fault logs .err, a host-raised deny logs .warn and never .err");
     trap_kinds_step.dependOn(&run_trap_kinds.step);
+
+    // LAST in `build()` so it sees every sibling `test_step` will ever have.
+    runAlone(test_step, &run_tests.step);
+}
+
+/// Order `last` after every OTHER direct dependency of `step`, so it has the
+/// machine to itself when it runs.
+///
+/// `zig build test` runs its steps in parallel, and `run_tests` carries the
+/// keystroke-latency instrument (src/e2e/latency_test.zig) — microsecond
+/// wall-clock samples compared against a baseline recorded on an idle box.
+/// Measured beside a sibling test binary it measures the SIBLING: the `action`
+/// category, whose baseline p95 is 4.2us, has been observed at 25us — six times
+/// its threshold — purely from a concurrent suite, which reports the machine as
+/// a regression. Wall-clock is the right unit (it is what a typist feels), so
+/// the fix is to stop sharing the box rather than to measure something else.
+///
+/// Taken from the step's own dependency list rather than a hand-kept one, so a
+/// test binary added later is serialized too without anyone remembering to.
+fn runAlone(step: *std.Build.Step, last: *std.Build.Step) void {
+    for (step.dependencies.items) |dep| {
+        if (dep != last) last.dependOn(dep);
+    }
 }
 
 /// Wire the shared test-module dependency set (stemma/syntax/wasmtime/
