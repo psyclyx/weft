@@ -22,6 +22,7 @@ const secure = @import("../secure.zig");
 const identity = @import("../identity.zig");
 const task = @import("../task.zig");
 
+const Clock = @import("clock.zig").Clock;
 const link_mod = @import("link.zig");
 const Link = link_mod.Link;
 const Mutex = link_mod.Mutex;
@@ -72,6 +73,8 @@ token: []u8,
 /// host this is the grade granted to that peer; on a client it is
 /// `.own` (we trust the host we chose to reach out to).
 access: Access,
+/// Time source for the liveness windows and the heartbeat cadence.
+clock: Clock,
 
 reader_thread: ?std.Thread = null,
 writer_thread: ?std.Thread = null,
@@ -128,6 +131,20 @@ pub fn create(
     access: Access,
     id: ?*const identity.Identity,
 ) !*Session {
+    return createOn(gpa, link, role, token, access, id, .real);
+}
+
+/// `create` against an injected clock. The threads sample it as soon as
+/// they spawn, so the clock has to be chosen here rather than set after.
+pub fn createOn(
+    gpa: Allocator,
+    link: Link,
+    role: secure.Role,
+    token: []const u8,
+    access: Access,
+    id: ?*const identity.Identity,
+    clock: Clock,
+) !*Session {
     const self = try gpa.create(Session);
     errdefer gpa.destroy(self);
     self.* = .{
@@ -136,10 +153,11 @@ pub fn create(
         .role = role,
         .token = try gpa.dupe(u8, token),
         .access = access,
+        .clock = clock,
         .eph = secure.Ephemeral.generate(),
         .id = if (id) |i| i.* else identity.Identity.generate(),
     };
-    self.last_rx_ns.store(task.nowNs(), .release);
+    self.last_rx_ns.store(clock.nowNs(), .release);
     self.reader_thread = try std.Thread.spawn(.{}, readerMain, .{self});
     self.writer_thread = try std.Thread.spawn(.{}, writerMain, .{self});
     return self;
@@ -199,7 +217,7 @@ pub fn destroy(self: *Session) void {
 pub fn liveness(self: *const Session) Liveness {
     if (self.dead.load(.acquire)) return .offline;
     if (!self.established.load(.acquire)) return .connecting;
-    const silent = task.nowNs() -| self.last_rx_ns.load(.acquire);
+    const silent = self.clock.nowNs() -| self.last_rx_ns.load(.acquire);
     if (silent > 10 * std.time.ns_per_s) return .offline;
     if (silent > 3 * std.time.ns_per_s) return .degraded;
     return .connected;
@@ -285,7 +303,7 @@ fn runReader(self: *Session) !void {
             defer dec.deinit(gpa);
             try dec.feed(gpa, plain);
             while (try dec.next(gpa)) |frame| {
-                self.last_rx_ns.store(task.nowNs(), .release);
+                self.last_rx_ns.store(self.clock.nowNs(), .release);
                 if (frame.class == .control) {
                     gpa.free(frame.payload);
                     continue; // heartbeats etc.
@@ -415,7 +433,7 @@ fn writerMain(self: *Session) void {
             futexWaitTimed(&self.out_wake, gen, 200 * std.time.ns_per_ms);
             continue;
         }
-        const now = task.nowNs();
+        const now = self.clock.nowNs();
         if (now - last_hb >= std.time.ns_per_s) {
             last_hb = now;
             const hb = wire.encode(gpa, .{

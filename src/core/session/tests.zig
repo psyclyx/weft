@@ -32,6 +32,7 @@ const link_mod = @import("link.zig");
 const FdLink = link_mod.FdLink;
 const ChaosLink = link_mod.ChaosLink;
 const futexWaitTimed = link_mod.futexWaitTimed;
+const VirtualClock = @import("clock.zig").Virtual;
 
 const remote_fs = @import("remote_fs.zig");
 const BlobServer = remote_fs.BlobServer;
@@ -61,6 +62,13 @@ fn napUs(us: u64) void {
 fn testPark(ms: u64) void {
     var w: std.atomic.Value(u32) = .init(0);
     futexWaitTimed(&w, 0, ms * std.time.ns_per_ms);
+}
+
+/// Is anything queued on `fd` right now? Asserting the ABSENCE of delivery
+/// needs a question that answers immediately; a read would just block.
+fn readable(fd: i32) bool {
+    var pfd: linux.pollfd = .{ .fd = fd, .events = linux.POLL.IN, .revents = 0 };
+    return linux.poll(@ptrCast(&pfd), 1, 0) == 1;
 }
 
 test "session: a view-only peer's ops are dropped by the host" {
@@ -775,8 +783,9 @@ test "chaos: propagation latency pipelines writes without throttling the sender"
     var sender: FdLink = .{ .fd = fds[0] };
     var receiver: FdLink = .{ .fd = fds[1] };
     defer receiver.link().close();
+    var virtual: VirtualClock = .{};
     var chaos: ChaosLink = .{};
-    try chaos.start(gpa, sender.link());
+    try chaos.startOn(gpa, sender.link(), virtual.clock());
     defer chaos.close();
     chaos.configureLatency(200 * std.time.ns_per_ms, 0, 0);
 
@@ -788,11 +797,69 @@ test "chaos: propagation latency pipelines writes without throttling the sender"
     // implementation blocked here for ~400ms (one sleep per write).
     try t.expect(task.nowNs() - started < 50 * std.time.ns_per_ms);
 
+    // The delay still gates the wire, it just costs no wall time: the
+    // worker has had every chance to run and has delivered nothing,
+    // because modelled time has not reached eligibility.
+    testPark(20);
+    try t.expect(!readable(fds[1]));
+
+    virtual.advance(200 * std.time.ns_per_ms);
     var got: [6]u8 = undefined;
     var used: usize = 0;
     while (used < got.len) used += try receiver.link().read(got[used..]);
     try t.expectEqualStrings("abcdef", &got);
-    try t.expect(task.nowNs() - started >= 150 * std.time.ns_per_ms);
+    try t.expect(task.nowNs() - started < 200 * std.time.ns_per_ms);
+}
+
+test "session: modelled silence walks liveness connected → degraded → offline" {
+    const gpa = t.allocator;
+    const fds = try socketPair();
+    var raw_a: FdLink = .{ .fd = fds[0] };
+    var raw_b: FdLink = .{ .fd = fds[1] };
+    var virtual: VirtualClock = .{};
+
+    // The cable comes out before any modelled time passes, which is what
+    // makes this deterministic rather than merely fast: the writer's
+    // heartbeat is itself on the injected clock, so at a frozen zero no
+    // heartbeat is ever produced, and once partitioned none can land and
+    // refresh a last-receive stamp. Liveness is then a pure function of
+    // the clock this test holds.
+    var chaos_a: ChaosLink = .{};
+    try chaos_a.startOn(gpa, raw_a.link(), virtual.clock());
+    defer chaos_a.close();
+    var chaos_b: ChaosLink = .{};
+    try chaos_b.startOn(gpa, raw_b.link(), virtual.clock());
+    defer chaos_b.close();
+
+    const sa = try Session.createOn(gpa, chaos_a.link(), .server, "tok", .own, null, virtual.clock());
+    defer sa.destroy();
+    const sb = try Session.createOn(gpa, chaos_b.link(), .client, "tok", .own, null, virtual.clock());
+    defer sb.destroy();
+
+    var waited: usize = 0;
+    while (waited < 2000) : (waited += 1) {
+        if (sa.established.load(.acquire) and sb.established.load(.acquire)) break;
+        napUs(300);
+    }
+    try t.expectEqual(Session.Liveness.connected, sa.liveness());
+    try t.expectEqual(Session.Liveness.connected, sb.liveness());
+
+    chaos_a.partitioned.store(true, .release);
+    chaos_b.partitioned.store(true, .release);
+
+    // Both thresholds are exclusive: sitting exactly on one is still the
+    // gentler grade.
+    virtual.advance(3 * std.time.ns_per_s);
+    try t.expectEqual(Session.Liveness.connected, sa.liveness());
+    virtual.advance(std.time.ns_per_s);
+    try t.expectEqual(Session.Liveness.degraded, sa.liveness());
+    try t.expectEqual(Session.Liveness.degraded, sb.liveness());
+
+    virtual.advance(6 * std.time.ns_per_s);
+    try t.expectEqual(Session.Liveness.degraded, sa.liveness());
+    virtual.advance(std.time.ns_per_s);
+    try t.expectEqual(Session.Liveness.offline, sa.liveness());
+    try t.expectEqual(Session.Liveness.offline, sb.liveness());
 }
 
 test "chaos: partition observed in liveness, heals as one exchange; typing stays instant" {
@@ -845,9 +912,9 @@ test "chaos: partition observed in liveness, heals as one exchange; typing stays
     const local_latency = task.nowNs() - t0;
     try t.expect(local_latency < 50 * std.time.ns_per_ms); // network-free
 
-    // Pump during the partition: no convergence, and (with patience the
-    // test doesn't have for the full 3s window) liveness degrades — we
-    // assert divergence here and the state machine transition below.
+    // Pump during the partition: no convergence. The liveness degrade the
+    // same silence produces is proved on an injected clock by the
+    // connected → degraded → offline test above.
     for (0..20) |_| {
         _ = try ca.tick(0);
         _ = try cb.tick(0);

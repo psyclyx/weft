@@ -7,6 +7,7 @@ const std = @import("std");
 const linux = std.os.linux;
 const Allocator = std.mem.Allocator;
 const task = @import("../task.zig");
+const Clock = @import("clock.zig").Clock;
 
 // ── Small primitives ────────────────────────────────────────────────
 
@@ -124,6 +125,9 @@ pub const FdLink = struct {
 pub const ChaosLink = struct {
     gpa: Allocator = undefined,
     inner: Link = undefined,
+    /// Time source for propagation eligibility. A virtual clock lets a test
+    /// hold a write in flight for a modelled second without spending one.
+    clock: Clock = .real,
     /// Deterministic one-way propagation model. Sampling belongs to the
     /// transport write boundary: renderer cadence and encoder backpressure can
     /// never alter which delay a queued write receives.
@@ -156,7 +160,13 @@ pub const ChaosLink = struct {
     };
 
     pub fn start(self: *ChaosLink, gpa: Allocator, inner: Link) !void {
-        self.* = .{ .gpa = gpa, .inner = inner };
+        return self.startOn(gpa, inner, .real);
+    }
+
+    /// `start` against an injected clock; the delivery worker samples it as
+    /// soon as it spawns, so the clock has to be chosen here.
+    pub fn startOn(self: *ChaosLink, gpa: Allocator, inner: Link, clock: Clock) !void {
+        self.* = .{ .gpa = gpa, .inner = inner, .clock = clock };
         self.delivery_thread = try std.Thread.spawn(.{}, deliveryMain, .{self});
     }
 
@@ -224,7 +234,7 @@ pub const ChaosLink = struct {
         const owned = try self.gpa.dupe(u8, bytes);
         errdefer self.gpa.free(owned);
         const lat = self.sampleLatency();
-        node.* = .{ .eligible_ns = task.nowNs() +| lat, .bytes = owned };
+        node.* = .{ .eligible_ns = self.clock.nowNs() +| lat, .bytes = owned };
 
         self.mutex.lock();
         defer self.mutex.unlock();
@@ -271,6 +281,9 @@ pub const ChaosLink = struct {
 
     /// Wait for the queued tail to go out. The worker signals by flipping
     /// `shutdown`; the cap keeps a wedged inner link from wedging close.
+    /// That cap stays on the wall clock deliberately — it guards against a
+    /// peer that stopped reading, not a modelled delay, so a frozen virtual
+    /// clock must not be able to turn it into the hang it exists to prevent.
     fn awaitDrain(self: *ChaosLink) void {
         if (self.delivery_thread == null) return; // no worker, nothing queued
         const deadline = task.nowNs() +| self.drain_timeout_ns;
@@ -335,7 +348,7 @@ pub const ChaosLink = struct {
 
             // Closing collapses eligibility: the queued tail goes out at
             // once instead of waiting out its propagation delay.
-            const now = task.nowNs();
+            const now = self.clock.nowNs();
             if (!draining and now < node.eligible_ns) {
                 const generation = self.park.load(.acquire);
                 futexWaitTimed(&self.park, generation, @min(node.eligible_ns - now, 20 * std.time.ns_per_ms));

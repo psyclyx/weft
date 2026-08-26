@@ -6,6 +6,9 @@
 //!
 //! - `session/link.zig`      — `Link`/`FdLink`/`ChaosLink` transport +
 //!                             the futex `Mutex` (a namespace).
+//! - `session/clock.zig`     — the monotonic `Clock` that liveness,
+//!                             heartbeats and chaos eligibility read
+//!                             through, plus the hand-advanced `Virtual`.
 //! - `session/Session.zig`   — `Session` (reader/writer threads, handshake,
 //!                             liveness, crypto), with `Access`/`Liveness`.
 //! - `session/requests.zig`  — class-2 request ids with a deadline each
@@ -28,6 +31,10 @@ const std = @import("std");
 const linux = std.os.linux;
 
 // ── Curated re-exports ──────────────────────────────────────────────
+
+const clock_mod = @import("session/clock.zig");
+pub const Clock = clock_mod.Clock;
+pub const VirtualClock = clock_mod.Virtual;
 
 const link_mod = @import("session/link.zig");
 pub const Link = link_mod.Link;
@@ -145,5 +152,6 @@ pub fn tcpConnect(hostport: []const u8) !i32 {
 
 test {
     std.testing.refAllDecls(@This());
+    _ = @import("session/clock.zig");
     _ = @import("session/tests.zig");
 }
