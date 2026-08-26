@@ -439,12 +439,12 @@ pub fn build(b: *std.Build) void {
     addQuickjs(b, weft_mod);
     addSkia(b, weft_mod);
 
-    // `test_mod` (the `test` step) and `latency_mod` (the `e2e-latency` step,
-    // below) are two SEPARATE module objects, wired IDENTICALLY through this
-    // one function — see the note by `latency_mod` for why they must be
-    // separate objects. Same doctrine as harness.zig's `press` delegating to
-    // `pressTimed`: one implementation of the wiring, not two copies that can
-    // quietly drift apart.
+    // `test_mod` (the `test` step) and `instrument_mod` (the `e2e-latency` /
+    // `e2e-popup-layout` steps, below) are two SEPARATE module objects, wired
+    // IDENTICALLY through this one function — see the note by `instrument_mod`
+    // for why they must be separate objects. Same doctrine as harness.zig's
+    // `press` delegating to `pressTimed`: one implementation of the wiring, not
+    // two copies that can quietly drift apart.
     configureTestModule(b, test_mod, stemma_dep, weft_mod);
 
     // The dispatch-latency instrument's record/compare switch
@@ -455,8 +455,7 @@ pub fn build(b: *std.Build) void {
     // the live CLI flag into it would let `zig build test
     // -Drecord-latency=true` silently overwrite the committed baseline as a
     // side effect of an ordinary test run. The live flag is wired only into
-    // `latency_mod` below, a separate module used exclusively by the dedicated
-    // `e2e-latency` step.
+    // `instrument_mod` below, a separate module the `test` step never builds.
     const compare_only_opts = b.addOptions();
     compare_only_opts.addOption(bool, "record", false);
     test_mod.addOptions("latency_options", compare_only_opts);
@@ -466,7 +465,7 @@ pub fn build(b: *std.Build) void {
     // HARDCODED to compare-only for the identical reason (a plain `zig build
     // test -Drecord-popup-layout=true` must never be able to overwrite the
     // committed goldens as a side effect of an ordinary run). The live flag
-    // is wired only into `popup_layout_mod` below.
+    // is wired only into `instrument_mod` below.
     //
     // The option's FIELD NAME is `record_popup_layout`, not `record` (unlike
     // `latency_options` above) — purely so the generated options SOURCE FILE
@@ -665,77 +664,66 @@ pub fn build(b: *std.Build) void {
     shareModuleCache(b, run_weft_tests);
     test_step.dependOn(&run_weft_tests.step);
 
-    // A second copy of `test_mod`'s wiring — same `configureTestModule` call,
-    // so it cannot drift — used ONLY by the `e2e-latency` step below.
-    // `-Drecord-latency` is a COMPTIME option here, not a runtime env var: it
-    // has to change this module's compiled output, or `zig build`'s artifact
-    // caching would happily replay a stale cached run instead of re-executing
-    // in the new mode.
+    // ── The recordable instruments ──
+    // The dispatch-latency baseline and the popup-layout goldens share ONE
+    // module object, and so one compiled binary: a second copy of `test_mod`'s
+    // wiring, made by the same `configureTestModule` call so it cannot drift.
+    // Both `-Drecord-*` flags are COMPTIME options here, not runtime env vars:
+    // a record flag has to change the compiled output, or `zig build`'s
+    // artifact caching would happily replay a stale cached run instead of
+    // re-executing in the new mode.
+    //
+    // What keeps a baseline un-overwritable from `zig build test` is a property
+    // of the module GRAPH, not of how many modules there are: the `test` step
+    // builds nothing rooted here, and `test_mod` above carries its own
+    // hardcoded compare-only options, so `zig build test -Drecord-latency=true`
+    // still cannot reach a recording path. Sharing costs one visible coupling —
+    // recording either baseline rebuilds the other instrument, which then
+    // re-runs in COMPARE mode — a re-comparison, never a second overwrite.
     const record_latency = b.option(
         bool,
         "record-latency",
         "With `zig build e2e-latency`: record the dispatch-latency baseline (src/e2e/latency_baseline.zon) instead of comparing against it. No effect on the `test` step.",
     ) orelse false;
-    const latency_mod = b.createModule(.{
-        .root_source_file = b.path("src/tests.zig"),
-        .target = target,
-        .optimize = optimize,
-        .link_libc = true,
-    });
-    configureTestModule(b, latency_mod, stemma_dep, weft_mod);
-    const latency_opts = b.addOptions();
-    latency_opts.addOption(bool, "record", record_latency);
-    latency_mod.addOptions("latency_options", latency_opts);
-
-    // A dedicated step for the latency instrument alone (the full `test` step
-    // already runs it too, in compare mode, as part of the e2e suite) — a fast
-    // way to iterate on it, and the documented way to re-record:
-    //   zig build e2e-latency                          # compare against the baseline
-    //   zig build e2e-latency -Drecord-latency=true     # (re-)record the baseline
-    const latency_tests = b.addTest(.{ .root_module = latency_mod, .filters = &.{"e2e/latency"} });
-    const run_latency_tests = b.addRunArtifact(latency_tests);
-    shareModuleCache(b, run_latency_tests);
-    const latency_step = b.step("e2e-latency", "Run (or, with -Drecord-latency=true, record) the dispatch-latency baseline");
-    latency_step.dependOn(&run_latency_tests.step);
-
-    // Same doctrine, third instrument: the popup-layout golden gate
-    // (rendering P2's guard). A THIRD separate module object — not reused
-    // from `latency_mod` — for the identical reason `latency_mod` isn't
-    // `test_mod`: the record flag has to be baked into the compiled output,
-    // and two instruments sharing one module would mean recording one
-    // baseline silently forces a rebuild (and re-run) of the other under the
-    // same flag, which is a surprising coupling neither instrument asked for.
     const record_popup_layout = b.option(
         bool,
         "record-popup-layout",
         "With `zig build e2e-popup-layout`: record the caret-popup layout goldens (src/e2e/popup_layout_baseline.zon) instead of comparing against them. No effect on the `test` step.",
     ) orelse false;
-    const popup_layout_mod = b.createModule(.{
+    const instrument_mod = b.createModule(.{
         .root_source_file = b.path("src/tests.zig"),
         .target = target,
         .optimize = optimize,
         .link_libc = true,
     });
-    configureTestModule(b, popup_layout_mod, stemma_dep, weft_mod);
+    configureTestModule(b, instrument_mod, stemma_dep, weft_mod);
+    const latency_opts = b.addOptions();
+    latency_opts.addOption(bool, "record", record_latency);
+    instrument_mod.addOptions("latency_options", latency_opts);
     const popup_layout_opts = b.addOptions();
     popup_layout_opts.addOption(bool, "record_popup_layout", record_popup_layout);
-    popup_layout_mod.addOptions("popup_layout_options", popup_layout_opts);
+    instrument_mod.addOptions("popup_layout_options", popup_layout_opts);
 
-    // A dedicated step for the popup-layout gate alone (the full `test` step
-    // already runs it too, in compare mode) — the documented way to re-record
-    // after a deliberate, EXPLAINED layout change:
+    // Dedicated entry points for the instruments (the full `test` step already
+    // runs both, in compare mode, as part of the e2e suite) — a fast way to
+    // iterate on one, and the documented way to re-record:
+    //   zig build e2e-latency                                     # compare against the baseline
+    //   zig build e2e-latency -Drecord-latency=true               # (re-)record the baseline
     //   zig build e2e-popup-layout                                # compare
-    //   zig build e2e-popup-layout -Drecord-popup-layout=true      # re-record
-    //   zig fmt src/e2e/popup_layout_baseline.zon                  # then canonicalize it —
+    //   zig build e2e-popup-layout -Drecord-popup-layout=true     # re-record
+    //   zig fmt src/e2e/popup_layout_baseline.zon                 # then canonicalize it —
     //     `std.zon.stringify`'s raw output isn't always zig-fmt's chosen layout for
     //     deeply nested data (unlike the flatter `latency_baseline.zon`, which happens
     //     to already match); the `test`/`e2e-popup-layout` steps don't run `zig fmt`
     //     themselves, so a fresh recording needs this by hand before it's committed.
-    const popup_layout_tests = b.addTest(.{ .root_module = popup_layout_mod, .filters = &.{"e2e/popup-layout"} });
-    const run_popup_layout_tests = b.addRunArtifact(popup_layout_tests);
-    shareModuleCache(b, run_popup_layout_tests);
+    const instrument_tests = b.addTest(.{
+        .root_module = instrument_mod,
+        .filters = &.{ "e2e/latency", "e2e/popup-layout" },
+    });
+    const latency_step = b.step("e2e-latency", "Run (or, with -Drecord-latency=true, record) the dispatch-latency baseline");
+    latency_step.dependOn(&runInstrument(b, instrument_tests, "latency").step);
     const popup_layout_step = b.step("e2e-popup-layout", "Run (or, with -Drecord-popup-layout=true, record) the caret-popup layout goldens");
-    popup_layout_step.dependOn(&run_popup_layout_tests.step);
+    popup_layout_step.dependOn(&runInstrument(b, instrument_tests, "popup-layout").step);
 
     // task #8's deny-vs-crash channel split (src/e2e/trap_kinds_main.zig):
     // a PLAIN EXECUTABLE, not `addTest`, deliberately — this is the one
@@ -782,14 +770,16 @@ fn runAlone(step: *std.Build.Step, last: *std.Build.Step) void {
     }
 }
 
-/// Wire the shared test-module dependency set (stemma/syntax/wasmtime/
-/// embedded guests/quickjs/weft)
-/// onto `mod`. `test_mod` (the `test` step) and `latency_mod` (the
-/// `e2e-latency` step) both call this — it's the ONLY place that wiring is
-/// written, so the two binaries cannot drift apart the way two hand-copied
-/// blocks eventually would. The one thing that may legitimately differ
-/// between callers is added AFTER this returns: which `latency_options`
-/// value they attach.
+/// Run the shared instrument binary for ONE instrument; the others skip
+/// themselves (src/e2e/instrument.zig). Each name is a distinct Run step over
+/// the same artifact, so selecting one costs a run, not a compilation.
+fn runInstrument(b: *std.Build, tests: *std.Build.Step.Compile, name: []const u8) *std.Build.Step.Run {
+    const run = b.addRunArtifact(tests);
+    run.setEnvironmentVariable("WEFT_INSTRUMENT", name);
+    shareModuleCache(b, run);
+    return run;
+}
+
 /// Point a test binary at the compiled-module (`.cwasm`) cache every test
 /// binary shares — a stable directory under the project cache root, so the
 /// wasm guest catalog and the quickjs runtime compile once per content hash
@@ -802,6 +792,13 @@ fn shareModuleCache(b: *std.Build, run: *std.Build.Step.Run) void {
     run.setEnvironmentVariable("WEFT_TEST_MODULE_CACHE", abs);
 }
 
+/// Wire the shared test-module dependency set (stemma/syntax/wasmtime/embedded
+/// guests/quickjs/weft) onto `mod`. `test_mod` (the `test` step) and
+/// `instrument_mod` (the instrument steps) both call this — it's the ONLY place
+/// that wiring is written, so the two binaries cannot drift apart the way two
+/// hand-copied blocks eventually would. The one thing that may legitimately
+/// differ between callers is added AFTER this returns: which
+/// `latency_options`/`popup_layout_options` values they attach.
 fn configureTestModule(
     b: *std.Build,
     mod: *std.Build.Module,

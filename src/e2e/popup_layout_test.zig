@@ -51,11 +51,11 @@
 //! straight to `View.build`.
 //!
 //! RECORD FLAG: mirrors `latency_test.zig`/build.zig's `-Drecord-latency`
-//! idiom exactly — see build.zig's `popup_layout_mod` for why record mode is
-//! a SEPARATE module object (a comptime `popup_layout_options.record_popup_layout`, not a
-//! runtime flag) scoped to its OWN `e2e-popup-layout` step, so a plain `zig
-//! build test -Drecord-popup-layout=true` cannot silently overwrite the
-//! committed goldens as a side effect of an ordinary test run:
+//! idiom exactly — see build.zig's `instrument_mod` for why record mode is a
+//! comptime `popup_layout_options.record_popup_layout` on a module object the
+//! `test` step never builds, rather than a runtime flag, so a plain `zig build
+//! test -Drecord-popup-layout=true` cannot silently overwrite the committed
+//! goldens as a side effect of an ordinary test run:
 //!   zig build e2e-popup-layout                                # compare
 //!   zig build e2e-popup-layout -Drecord-popup-layout=true      # re-record
 
@@ -63,6 +63,7 @@ const std = @import("std");
 const t = std.testing;
 const h = @import("harness.zig");
 const popup_golden = @import("popup_golden.zig");
+const instrument = @import("instrument.zig");
 const popup_layout_options = @import("popup_layout_options");
 const log = std.log.scoped(.@"e2e-popup-layout");
 
@@ -220,6 +221,7 @@ fn checkOrRecordDock(
 }
 
 test "e2e/popup-layout: caret-popup layout goldens" {
+    if (!instrument.selected("popup-layout")) return error.SkipZigTest;
     const gpa = t.allocator;
 
     var loaded: ?popup_golden.GoldenFile = null;
