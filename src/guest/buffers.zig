@@ -68,6 +68,8 @@ fn bufPick() void {
         n_rows += 1;
     }
     weft.pickEnd();
+    // The candidate table filled with buffers still unvisited.
+    if (i < count) weft.echo(std.fmt.comptimePrint("buffers: >{d} buffers — some omitted", .{candidates.len}));
 }
 
 /// Switch to the scratch buffer — reusing the existing one if present, else

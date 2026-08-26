@@ -115,7 +115,12 @@ fn consultLine() void {
     // Walk the buffer line by line (bounded by the row table + read scratch).
     var line_start: usize = 0;
     var row: usize = 1;
-    while (line_start <= len and n_rows < targets.len) : (row += 1) {
+    var truncated = false;
+    while (line_start <= len) : (row += 1) {
+        if (n_rows >= targets.len) {
+            truncated = true;
+            break;
+        }
         const l = weft.lineAt(line_start);
         const has_terminator = l.end < len;
         // EOF itself carries no identity. In an empty document, or after a
@@ -140,6 +145,7 @@ fn consultLine() void {
         line_start = l.end + 1; // past the newline
     }
     weft.pickEnd();
+    if (truncated) weft.echo(std.fmt.comptimePrint("consult: >{d} lines — some omitted", .{targets.len}));
 }
 
 /// Common definition node types across languages. A query for a type the
@@ -159,12 +165,17 @@ const def_types = [_][]const u8{
 fn consultImenu() void {
     beginTargets();
     weft.pickBegin("symbol", sym_pick);
-    for (def_types) |ty| {
+    var truncated = false;
+    outer: for (def_types) |ty| {
         var scm_buf: [96]u8 = undefined;
         const scm = std.fmt.bufPrint(&scm_buf, "({s}) @d", .{ty}) catch continue;
         const count = weft.query(scm, .{ .start = 0, .end = weft.byteLen() });
         var i: usize = 0;
-        while (i < count and n_rows < targets.len) : (i += 1) {
+        while (i < count) : (i += 1) {
+            if (n_rows >= targets.len) {
+                truncated = true;
+                break :outer;
+            }
             const c = weft.queryCapture(i) orelse continue;
             // Display the definition's first line (its signature).
             const line_end = weft.lineAt(c.start).end;
@@ -181,4 +192,5 @@ fn consultImenu() void {
         }
     }
     weft.pickEnd();
+    if (truncated) weft.echo(std.fmt.comptimePrint("consult: >{d} symbols — some omitted", .{targets.len}));
 }

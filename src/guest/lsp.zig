@@ -757,6 +757,7 @@ fn onDiagnostics(params: ?rpc.Value) void {
     releaseDiagnostics();
     diag_snapshot = weft.docSnapshot() orelse return;
     var mw: usize = 0;
+    var dropped = false;
     weft.decorateClear();
     const list = p.object.get("diagnostics") orelse {
         releaseDiagnostics();
@@ -767,7 +768,11 @@ fn onDiagnostics(params: ?rpc.Value) void {
         return;
     }
     for (list.array.items) |d| {
-        if (d != .object or diag_n >= MAX_DIAG) continue;
+        if (d != .object) continue;
+        if (diag_n >= MAX_DIAG) {
+            dropped = true;
+            continue;
+        }
         const rng = d.object.get("range") orelse continue;
         const pos = posInRange(rng) orelse continue;
         const off = offsetOf(pos.line, pos.col);
@@ -784,6 +789,7 @@ fn onDiagnostics(params: ?rpc.Value) void {
         weft.decorate(weft.lineAt(off).start, .gutter, if (sev == 1) .removed else .emphasis, if (sev == 1) "\u{25CF}" else "\u{25B2}");
     }
     if (diag_n == 0) releaseDiagnostics();
+    if (dropped) weft.echo(std.fmt.comptimePrint("lsp: >{d} diagnostics — some omitted", .{MAX_DIAG}));
 }
 
 /// Code actions for the line. Applies the first action that carries an inline
@@ -901,12 +907,16 @@ fn presentDefinition(result: rpc.Value) void {
 
 fn presentLocations(result: rpc.Value, prompt: []const u8) void {
     resetPickTargets();
+    var dropped = false;
     if (result == .array) {
         weft.pickBegin(prompt, pick_id_results);
         for (result.array.items) |item| {
             const loc = locationOf(item) orelse continue;
             if (!sameUri(loc.uri)) continue; // cross-file later
-            if (pick_n >= pick_targets.len) break;
+            if (pick_n >= pick_targets.len) {
+                dropped = true;
+                break;
+            }
             if (!addPickTarget(offsetOf(loc.line, loc.col))) continue;
             var lbl: [32]u8 = undefined;
             const s = std.fmt.bufPrint(&lbl, "line {d}", .{loc.line + 1}) catch "?";
@@ -915,22 +925,31 @@ fn presentLocations(result: rpc.Value, prompt: []const u8) void {
         weft.pickEnd();
     }
     if (pick_n == 0) weft.echo("lsp: no references");
+    if (dropped) weft.echo(std.fmt.comptimePrint("lsp: >{d} references — some omitted", .{pick_targets.len}));
 }
+
+var symbols_dropped = false;
 
 fn presentSymbols(result: rpc.Value) void {
     resetPickTargets();
+    symbols_dropped = false;
     if (result == .array) {
         weft.pickBegin("symbol", pick_id_results);
         for (result.array.items) |item| addSymbol(item);
         weft.pickEnd();
     }
     if (pick_n == 0) weft.echo("lsp: no symbols");
+    if (symbols_dropped) weft.echo(std.fmt.comptimePrint("lsp: >{d} symbols — some omitted", .{pick_targets.len}));
 }
 
 /// A DocumentSymbol (nested, has selectionRange/children) or a SymbolInformation
 /// (flat, has location). Add it + recurse children (bounded).
 fn addSymbol(item: rpc.Value) void {
-    if (item != .object or pick_n >= pick_targets.len) return;
+    if (item != .object) return;
+    if (pick_n >= pick_targets.len) {
+        symbols_dropped = true;
+        return;
+    }
     const o = item.object;
     const name = if (o.get("name")) |n| (if (n == .string) n.string else "?") else "?";
     // Prefer selectionRange (DocumentSymbol), else range, else location.range.
