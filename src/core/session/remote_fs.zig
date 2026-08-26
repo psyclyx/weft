@@ -9,8 +9,10 @@ const Allocator = std.mem.Allocator;
 const linux = std.os.linux;
 
 const wire = @import("weft_wire");
+const task = @import("../task.zig");
 const Document = @import("../Document.zig");
 const Session = @import("Session.zig");
+const requests = @import("requests.zig");
 
 // ── Request class: the blob channel (partial checkout) ──────────────
 // Channel 3. Calls: payload = uv id | u8 op | body. op 0 = stat
@@ -88,14 +90,16 @@ pub const BlobServer = struct {
 pub const RemoteFile = struct {
     gpa: Allocator,
     rope: @import("stemma").Rope,
-    next_call: u64 = 1,
-    /// call id → requested range (reads) or 0-len (stat).
-    inflight: std.AutoHashMapUnmanaged(u64, [2]u64) = .empty,
+    /// Calls awaiting a reply, each under its deadline.
+    inflight: requests.Inflight(Span) = .{},
     known_size: u64 = 0,
     cache_dir: ?[]u8 = null,
     manifest_path: ?[]u8 = null,
 
     pub const chunk = 64 * 1024;
+
+    /// The byte range a call asks for; a zero `len` is a stat.
+    pub const Span = struct { offset: u64, len: u64 };
 
     pub fn init(gpa: Allocator) RemoteFile {
         return .{ .gpa = gpa, .rope = .empty };
@@ -106,6 +110,18 @@ pub const RemoteFile = struct {
         self.inflight.deinit(self.gpa);
         if (self.cache_dir) |d| self.gpa.free(d);
         if (self.manifest_path) |m| self.gpa.free(m);
+    }
+
+    /// How long a blob call waits for its reply before it is failed.
+    pub fn setTimeout(self: *RemoteFile, ns: u64) void {
+        self.inflight.timeout_ns = ns;
+    }
+
+    /// This call will not be answered (a peer `err`, or its deadline
+    /// passed). The span stays a hole; the viewport asks again if it
+    /// still wants it.
+    pub fn onFailure(self: *RemoteFile, id: u64) void {
+        _ = self.inflight.settle(id);
     }
 
     /// Optional cross-session cache under `dir` for remote `name`.
@@ -119,11 +135,9 @@ pub const RemoteFile = struct {
     pub fn postStat(self: *RemoteFile, session: *Session) !void {
         var p: std.ArrayList(u8) = .empty;
         defer p.deinit(self.gpa);
-        const id = self.next_call;
-        self.next_call += 1;
+        const id = try self.inflight.issue(self.gpa, .{ .offset = 0, .len = 0 });
         try wire.putUv(self.gpa, &p, id);
         try p.append(self.gpa, @intFromEnum(BlobOp.stat));
-        try self.inflight.put(self.gpa, id, .{ 0, 0 });
         try session.post(.request, @intFromEnum(wire.RequestKind.call), blob_channel, p.items);
     }
 
@@ -140,9 +154,9 @@ pub const RemoteFile = struct {
             if (clen == 0) break;
             if (self.rope.isRealized(.{ .start = @intCast(at), .end = @intCast(at + clen) })) continue;
             var skip = false;
-            var it = self.inflight.valueIterator();
-            while (it.next()) |r| {
-                if (r[0] == at) {
+            var it = self.inflight.pending();
+            while (it.next()) |e| {
+                if (e.ctx.offset == at) {
                     skip = true;
                     break;
                 }
@@ -151,13 +165,11 @@ pub const RemoteFile = struct {
             if (try self.tryCache(at, clen)) continue;
             var p: std.ArrayList(u8) = .empty;
             defer p.deinit(gpa);
-            const id = self.next_call;
-            self.next_call += 1;
+            const id = try self.inflight.issue(gpa, .{ .offset = at, .len = clen });
             try wire.putUv(gpa, &p, id);
             try p.append(gpa, @intFromEnum(BlobOp.read));
             try wire.putUv(gpa, &p, at);
             try wire.putUv(gpa, &p, clen);
-            try self.inflight.put(gpa, id, .{ at, clen });
             try session.post(.request, @intFromEnum(wire.RequestKind.call), blob_channel, p.items);
         }
     }
@@ -167,9 +179,8 @@ pub const RemoteFile = struct {
         const gpa = self.gpa;
         var cur: []const u8 = payload;
         const id = try wire.getUv(&cur);
-        const kv = self.inflight.fetchRemove(id) orelse return false;
-        const range = kv.value;
-        if (range[1] == 0) {
+        const span = self.inflight.settle(id) orelse return false;
+        if (span.len == 0) {
             // stat reply: grow (or create) the hole rope.
             const sz = try wire.getUv(&cur);
             if (sz > self.known_size) {
@@ -183,9 +194,9 @@ pub const RemoteFile = struct {
             return false;
         }
         if (cur.len == 0) return false;
-        const n = @min(cur.len, range[1]);
-        try self.rope.realize(gpa, @intCast(range[0]), cur[0..n]);
-        self.storeCache(range[0], cur[0..n]);
+        const n = @min(cur.len, span.len);
+        try self.rope.realize(gpa, @intCast(span.offset), cur[0..n]);
+        self.storeCache(span.offset, cur[0..n]);
         return true;
     }
 
@@ -279,24 +290,37 @@ pub const RemoteFile = struct {
 /// no blocking round-trip on the frame thread (round-2 D1).
 pub const RemoteFs = struct {
     gpa: Allocator,
-    next_call: u64 = 1,
-    /// Completed replies by call id (owned `peer_fs` response bytes).
-    replies: std.AutoHashMapUnmanaged(u64, []u8) = .empty,
+    /// Calls awaiting a reply, each under its deadline.
+    inflight: requests.Inflight(void) = .{},
+    /// Settled calls by id, until the caller takes them.
+    settled: std.AutoHashMapUnmanaged(u64, Outcome) = .empty,
+
+    /// What a call came back as: the peer's response bytes, or the peer
+    /// saying it could not serve it.
+    const Outcome = union(enum) { reply: []u8, failed };
 
     pub fn init(gpa: Allocator) RemoteFs {
         return .{ .gpa = gpa };
     }
     pub fn deinit(self: *RemoteFs) void {
-        var it = self.replies.valueIterator();
-        while (it.next()) |v| self.gpa.free(v.*);
-        self.replies.deinit(self.gpa);
+        var it = self.settled.valueIterator();
+        while (it.next()) |v| switch (v.*) {
+            .reply => |bytes| self.gpa.free(bytes),
+            .failed => {},
+        };
+        self.settled.deinit(self.gpa);
+        self.inflight.deinit(self.gpa);
+    }
+
+    /// How long a call waits for its reply before `take` fails it.
+    pub fn setTimeout(self: *RemoteFs, ns: u64) void {
+        self.inflight.timeout_ns = ns;
     }
 
     /// Post a `peer_fs`-encoded request on `base+3`; returns the call id the
     /// reply will mirror. `req` is from `peer_fs.encodeList/Read/Write/Stat`.
     pub fn request(self: *RemoteFs, session: *Session, base: u64, req: []const u8) !u64 {
-        const id = self.next_call;
-        self.next_call += 1;
+        const id = try self.inflight.issue(self.gpa, {});
         var p: std.ArrayList(u8) = .empty;
         defer p.deinit(self.gpa);
         try wire.putUv(self.gpa, &p, id);
@@ -310,15 +334,35 @@ pub const RemoteFs = struct {
         var cur: []const u8 = payload;
         const id = wire.getUv(&cur) catch return;
         const owned = try gpa.dupe(u8, cur);
-        const gop = try self.replies.getOrPut(gpa, id);
-        if (gop.found_existing) gpa.free(gop.value_ptr.*);
-        gop.value_ptr.* = owned;
+        errdefer gpa.free(owned);
+        try self.put(gpa, id, .{ .reply = owned });
     }
 
-    /// Take the completed response for `id` (owned; caller frees), or null if it
-    /// has not arrived yet.
-    pub fn take(self: *RemoteFs, id: u64) ?[]u8 {
-        if (self.replies.fetchRemove(id)) |kv| return kv.value;
+    /// The peer cannot serve `id` (an `fs_err` frame). The caller takes
+    /// the failure now rather than waiting out its deadline.
+    pub fn onFailure(self: *RemoteFs, gpa: Allocator, id: u64) void {
+        self.put(gpa, id, .failed) catch {};
+    }
+
+    fn put(self: *RemoteFs, gpa: Allocator, id: u64, outcome: Outcome) !void {
+        const gop = try self.settled.getOrPut(gpa, id);
+        if (gop.found_existing) switch (gop.value_ptr.*) {
+            .reply => |bytes| gpa.free(bytes),
+            .failed => {},
+        };
+        gop.value_ptr.* = outcome;
+        _ = self.inflight.settle(id);
+    }
+
+    /// Take the completed response for `id` (owned; caller frees), or null
+    /// while it is still in flight. A peer that refused the call, or a
+    /// deadline that passed, is an error — never an endless wait.
+    pub fn take(self: *RemoteFs, id: u64) requests.Error!?[]u8 {
+        if (self.settled.fetchRemove(id)) |kv| switch (kv.value) {
+            .reply => |bytes| return bytes,
+            .failed => return error.RequestFailed,
+        };
+        if (self.inflight.timedOut(id, task.nowNs())) return error.RequestTimeout;
         return null;
     }
 };

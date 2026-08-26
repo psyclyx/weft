@@ -8,6 +8,8 @@
 //!                             the futex `Mutex` (a namespace).
 //! - `session/Session.zig`   — `Session` (reader/writer threads, handshake,
 //!                             liveness, crypto), with `Access`/`Liveness`.
+//! - `session/requests.zig`  — class-2 request ids with a deadline each
+//!                             (a namespace).
 //! - `session/remote_fs.zig` — `BlobServer`/`serveBase` (host serving),
 //!                             `RemoteFile`/`RemoteFs`, `BlobOp` (a namespace).
 //! - `session/PartialDoc.zig`— editable partial checkout.
@@ -35,6 +37,8 @@ pub const ChaosLink = link_mod.ChaosLink;
 pub const Session = @import("session/Session.zig");
 pub const Liveness = Session.Liveness;
 pub const Access = Session.Access;
+
+pub const requests = @import("session/requests.zig");
 
 const remote_fs = @import("session/remote_fs.zig");
 pub const blob_channel = remote_fs.blob_channel;

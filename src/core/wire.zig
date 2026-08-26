@@ -39,9 +39,15 @@ pub const ControlKind = enum(u8) { hello = 0, hello2 = 1, finish = 2, accept = 3
 /// regions to refuse.
 pub const OpKind = enum(u8) { batch = 0, frontier = 1, share = 2, grant = 3, region_refused = 4 };
 // call/ok/err/cancel are the blob (partial-checkout) request cycle; fs_call/
-// fs_ok are the .peer filesystem cycle (peer_fs) — a DISTINCT kind, so fs ops
-// never collide with the blob op-space (which routes by op-byte value).
-pub const RequestKind = enum(u8) { call = 0, ok = 1, err = 2, cancel = 3, fs_call = 4, fs_ok = 5 };
+// fs_ok/fs_err are the .peer filesystem cycle (peer_fs) — DISTINCT kinds, so
+// fs ops never collide with the blob op-space (which routes by op-byte value)
+// and neither does a failure reply, since the two cycles number their ids
+// independently.
+// `err`/`fs_err` carry `uv id` alone: the responder cannot serve that call, so
+// the requester settles it now instead of waiting out its deadline (see
+// session/requests.zig). A peer built before them ignores an unknown request
+// kind, which degrades to exactly the old behaviour — the deadline.
+pub const RequestKind = enum(u8) { call = 0, ok = 1, err = 2, cancel = 3, fs_call = 4, fs_ok = 5, fs_err = 6 };
 pub const FeedKind = enum(u8) { publish = 0 };
 
 pub const Frame = struct {

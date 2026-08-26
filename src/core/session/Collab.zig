@@ -8,6 +8,7 @@ const std = @import("std");
 const Allocator = std.mem.Allocator;
 
 const wire = @import("weft_wire");
+const task = @import("../task.zig");
 const Document = @import("../Document.zig");
 const layers_mod = @import("../layers.zig");
 
@@ -231,7 +232,7 @@ pub fn handleFrame(self: *Collab, frame: wire.Decoder.Decoded) !bool {
     // adopted — answering a frontier announce now would elicit a
     // full-history bootstrap and defeat the partial checkout.
     if (self.partial) |p| {
-        if (p.state != .open and p.state != .unsupported and frame.class == .op) return false;
+        if (!p.ready() and frame.class == .op) return false;
     }
     var changed = false;
     switch (frame.class) {
@@ -354,19 +355,16 @@ pub fn handleFrame(self: *Collab, frame: wire.Decoder.Decoded) !bool {
         .request => if (frame.channel == self.base + 3) {
             switch (std.enums.fromInt(wire.RequestKind, frame.kind) orelse return false) {
                 .call => {
-                    // Peek the op: file ops go to the blob server,
-                    // base ops are served from our document's base.
                     var peek: []const u8 = frame.payload;
-                    _ = wire.getUv(&peek) catch return changed;
+                    const id = wire.getUv(&peek) catch return changed;
                     if (peek.len == 0) return changed;
-                    const reply = if (peek[0] >= @intFromEnum(BlobOp.base_open))
-                        serveBase(gpa, self.doc, frame.payload) catch return changed
-                    else if (self.blob_server) |bs|
-                        bs.handle(gpa, frame.payload) catch return changed
-                    else
-                        return changed;
-                    defer gpa.free(reply);
-                    try self.session.post(.request, @intFromEnum(wire.RequestKind.ok), self.base + 3, reply);
+                    // A call we cannot serve fails LOUDLY: the requester
+                    // settles now instead of waiting out its deadline.
+                    const reply = self.serveCall(peek[0], frame.payload) catch null;
+                    if (reply) |bytes| {
+                        defer gpa.free(bytes);
+                        try self.session.post(.request, @intFromEnum(wire.RequestKind.ok), self.base + 3, bytes);
+                    } else try self.postFailure(.err, id);
                 },
                 .ok => if (self.partial) |p| {
                     const c = p.onReply(self.session, self.base, frame.payload) catch false;
@@ -375,26 +373,37 @@ pub fn handleFrame(self: *Collab, frame: wire.Decoder.Decoded) !bool {
                     const c = rf.onReply(frame.payload) catch false;
                     changed = changed or c;
                 },
+                .err => {
+                    var cur: []const u8 = frame.payload;
+                    const id = wire.getUv(&cur) catch return changed;
+                    if (self.partial) |p| p.onFailure(id) else if (self.remote_file) |rf| rf.onFailure(id);
+                },
                 // .peer filesystem: serve a client's request against the
                 // shared root (confined + granted), reply mirroring the id.
                 .fs_call => {
-                    const peer_fs = @import("../peer_fs.zig");
                     var cur: []const u8 = frame.payload;
                     const id = wire.getUv(&cur) catch return changed;
-                    const root = self.peer_fs_root orelse return changed;
-                    const resp = peer_fs.handleWithService(gpa, root, self.fs_grant, self.peer_fs_service, cur) catch return changed;
-                    defer gpa.free(resp);
-                    var reply: std.ArrayList(u8) = .empty;
-                    defer reply.deinit(gpa);
-                    wire.putUv(gpa, &reply, id) catch return changed;
-                    reply.appendSlice(gpa, resp) catch return changed;
-                    try self.session.post(.request, @intFromEnum(wire.RequestKind.fs_ok), self.base + 3, reply.items);
+                    const resp = self.serveFsCall(cur) catch null;
+                    if (resp) |bytes| {
+                        defer gpa.free(bytes);
+                        var reply: std.ArrayList(u8) = .empty;
+                        defer reply.deinit(gpa);
+                        try wire.putUv(gpa, &reply, id);
+                        try reply.appendSlice(gpa, bytes);
+                        try self.session.post(.request, @intFromEnum(wire.RequestKind.fs_ok), self.base + 3, reply.items);
+                    } else try self.postFailure(.fs_err, id);
                 },
                 .fs_ok => if (self.remote_fs) |rf| {
                     rf.onReply(gpa, frame.payload) catch {};
                     changed = true;
                 },
-                else => {},
+                .fs_err => if (self.remote_fs) |rf| {
+                    var cur: []const u8 = frame.payload;
+                    const id = wire.getUv(&cur) catch return changed;
+                    rf.onFailure(gpa, id);
+                    changed = true;
+                },
+                .cancel => {}, // every call here is served inline: nothing to abandon
             }
         },
         .control => {},
@@ -402,16 +411,60 @@ pub fn handleFrame(self: *Collab, frame: wire.Decoder.Decoded) !bool {
     return changed;
 }
 
+/// Serve one blob/base call: file ops go to the blob server, base ops
+/// come from our document's base. Null when we host neither.
+fn serveCall(self: *Collab, op: u8, payload: []const u8) !?[]u8 {
+    if (op >= @intFromEnum(BlobOp.base_open)) return try serveBase(self.gpa, self.doc, payload);
+    const server = self.blob_server orelse return null;
+    return try server.handle(self.gpa, payload);
+}
+
+/// Serve one `.peer` filesystem call against the shared root. Null when
+/// no root is shared — a grade refusal is a served `denied` response,
+/// but an absent root is nothing to answer with.
+fn serveFsCall(self: *Collab, req: []const u8) !?[]u8 {
+    const peer_fs = @import("../peer_fs.zig");
+    const root = self.peer_fs_root orelse return null;
+    return try peer_fs.handleWithService(self.gpa, root, self.fs_grant, self.peer_fs_service, req);
+}
+
+/// Tell the requester its call will never be answered (payload: `uv id`).
+fn postFailure(self: *Collab, kind: wire.RequestKind, id: u64) !void {
+    var payload: std.ArrayList(u8) = .empty;
+    defer payload.deinit(self.gpa);
+    try wire.putUv(self.gpa, &payload, id);
+    try self.session.post(.request, @intFromEnum(kind), self.base + 3, payload.items);
+}
+
+/// Settle every request whose deadline has passed. A reply that never
+/// came is a failure the requester can act on, not a wait without end.
+fn failStaleRequests(self: *Collab) void {
+    const now = task.nowNs();
+    if (self.remote_file) |rf| {
+        while (rf.inflight.nextTimedOut(now)) |expired|
+            std.log.warn("collab: blob call {d} timed out", .{expired.id});
+    }
+    if (self.partial) |p| {
+        while (p.inflight.nextTimedOut(now)) |expired| {
+            p.fail(expired.ctx);
+            std.log.warn("collab: base call {d} timed out", .{expired.id});
+        }
+    }
+}
+
 /// Announce once, then push whenever our head moved; forward
 /// diagnostics and presence. Call after the frames of a tick.
 pub fn push(self: *Collab) !bool {
     const gpa = self.gpa;
+    // Ahead of the liveness gate: an offline link is exactly when a
+    // request stops being answerable.
+    self.failStaleRequests();
     const live = self.session.liveness();
     if (live != .connected and live != .degraded) return false;
 
     if (self.partial) |p| {
         try p.requestOpen(self.session, self.base);
-        if (p.state != .open and p.state != .unsupported) return false;
+        if (!p.ready()) return false;
         try p.pump(self.session, self.base);
     }
 

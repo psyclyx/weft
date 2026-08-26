@@ -37,6 +37,7 @@ const remote_fs = @import("remote_fs.zig");
 const BlobServer = remote_fs.BlobServer;
 const RemoteFile = remote_fs.RemoteFile;
 const RemoteFs = remote_fs.RemoteFs;
+const requests = @import("requests.zig");
 
 const syntax_claim = @import("../syntax_claim.zig");
 
@@ -537,7 +538,7 @@ test "peer_fs over the wire: a client lists a host's confined shared root" {
     while (resp == null and task.nowNs() < deadline) {
         _ = ch.tick(0) catch {};
         _ = cc.tick(0) catch {};
-        resp = rfs.take(id);
+        resp = try rfs.take(id);
         if (resp == null) futexWaitTimed(&sb.out_wake, sb.out_wake.load(.acquire), std.time.ns_per_ms);
     }
     try t.expect(resp != null);
@@ -3849,4 +3850,140 @@ test "W7b move-admission (5/5): NULL-ORIGIN ADOPTION refused — a peer cannot b
     // exactly like every other refused/failed admission attempt.)
     const alice_plain = try docs.alice.resolve(docs.plain);
     try t.expect(docs.alice.structParent(alice_plain) == null);
+}
+
+test "requests: a lost reply fails the caller at its own deadline, not forever" {
+    const gpa = t.allocator;
+    const peer_fs = @import("../peer_fs.zig");
+    const fds = try socketPair();
+    var la: FdLink = .{ .fd = fds[0] };
+    var lb: FdLink = .{ .fd = fds[1] };
+    // The far end is never serviced: the call goes out, nothing comes back.
+    defer lb.link().close();
+    const sb = try Session.create(gpa, la.link(), .client, "tok", .own, null);
+    defer sb.destroy();
+
+    var rfs = RemoteFs.init(gpa);
+    defer rfs.deinit();
+    rfs.setTimeout(50 * std.time.ns_per_ms);
+
+    const req = try peer_fs.encodeList(gpa, ".");
+    defer gpa.free(req);
+    const started = task.nowNs();
+    const id = try rfs.request(sb, 0, req);
+
+    var settled: ?requests.Error = null;
+    const guard = started + 5 * std.time.ns_per_s;
+    while (task.nowNs() < guard) {
+        if (rfs.take(id)) |response| {
+            try t.expect(response == null); // nobody ever answers
+        } else |err| {
+            settled = err;
+            break;
+        }
+        testPark(1);
+    }
+    try t.expectEqual(@as(?requests.Error, error.RequestTimeout), settled);
+    // Its own deadline bounds the wait — not the 10s default, not forever.
+    const waited = task.nowNs() - started;
+    try t.expect(waited >= 50 * std.time.ns_per_ms);
+    try t.expect(waited < std.time.ns_per_s);
+}
+
+test "requests: a host with nothing to serve refuses out loud instead of going quiet" {
+    const gpa = t.allocator;
+    const peer_fs = @import("../peer_fs.zig");
+    const fds = try socketPair();
+    var la: FdLink = .{ .fd = fds[0] };
+    var lb: FdLink = .{ .fd = fds[1] };
+    var host = try Document.init(gpa, "host");
+    defer host.deinit(gpa);
+    var client = try Document.init(gpa, "client");
+    defer client.deinit(gpa);
+    const sa = try Session.create(gpa, la.link(), .server, "tok", .own, null);
+    defer sa.destroy();
+    const sb = try Session.create(gpa, lb.link(), .client, "tok", .own, null);
+    defer sb.destroy();
+    var ch = try Collab.init(gpa, sa, &host, "host");
+    defer ch.deinit();
+    var cc = try Collab.init(gpa, sb, &client, "client");
+    defer cc.deinit();
+
+    // No shared root on the host: it has nothing to answer a LIST with.
+    var rfs = RemoteFs.init(gpa);
+    defer rfs.deinit();
+    cc.remote_fs = &rfs;
+
+    var settle: usize = 0;
+    while (settle < 80) : (settle += 1) {
+        _ = ch.tick(0) catch {};
+        _ = cc.tick(0) catch {};
+        futexWaitTimed(&sb.out_wake, sb.out_wake.load(.acquire), std.time.ns_per_ms);
+    }
+    const req = try peer_fs.encodeList(gpa, ".");
+    defer gpa.free(req);
+    const id = try rfs.request(sb, cc.base, req);
+
+    var settled: ?requests.Error = null;
+    const guard = task.nowNs() + 5 * std.time.ns_per_s;
+    while (task.nowNs() < guard) {
+        _ = ch.tick(0) catch {};
+        _ = cc.tick(0) catch {};
+        if (rfs.take(id)) |response| {
+            try t.expect(response == null);
+        } else |err| {
+            settled = err;
+            break;
+        }
+        futexWaitTimed(&sb.out_wake, sb.out_wake.load(.acquire), std.time.ns_per_ms);
+    }
+    // The refusal crosses the wire as `fs_err`, well inside the deadline
+    // the client would otherwise have had to sit out.
+    try t.expectEqual(@as(?requests.Error, error.RequestFailed), settled);
+}
+
+test "chaos: a graceful close delivers the queued tail; sever drops it" {
+    const gpa = t.allocator;
+
+    // Closing is a FIN once the send buffer drains: the hold lifts, the
+    // remaining propagation delay collapses, and the tail lands.
+    {
+        const fds = try socketPair();
+        var sender: FdLink = .{ .fd = fds[0] };
+        var receiver: FdLink = .{ .fd = fds[1] };
+        defer receiver.link().close();
+        var chaos: ChaosLink = .{};
+        try chaos.start(gpa, sender.link());
+        defer chaos.close();
+        chaos.configureLatency(400 * std.time.ns_per_ms, 0, 0);
+        chaos.partitioned.store(true, .release);
+        try chaos.link().write("tail");
+
+        const started = task.nowNs();
+        chaos.close();
+        try t.expect(task.nowNs() - started < 300 * std.time.ns_per_ms);
+
+        var got: [4]u8 = undefined;
+        var used: usize = 0;
+        while (used < got.len) used += try receiver.link().read(got[used..]);
+        try t.expectEqualStrings("tail", &got);
+    }
+
+    // Severing is the crash the loss tests want: the queue never lands and
+    // the peer sees the link end.
+    {
+        const fds = try socketPair();
+        var sender: FdLink = .{ .fd = fds[0] };
+        var receiver: FdLink = .{ .fd = fds[1] };
+        defer receiver.link().close();
+        var chaos: ChaosLink = .{};
+        try chaos.start(gpa, sender.link());
+        defer chaos.close();
+        chaos.configureLatency(400 * std.time.ns_per_ms, 0, 0);
+        try chaos.link().write("tail");
+        chaos.sever();
+
+        var got: [4]u8 = undefined;
+        try t.expectEqual(@as(usize, 0), try receiver.link().read(&got));
+    }
 }

@@ -58,6 +58,15 @@ Every frame belongs to exactly one class — ambiguity is a spec bug:
   missing subgraph (`eventsSince`). Offline/reconnect is only this.
 - **2 request** — client-generated u64 ids (dedup across reconnects),
   explicit timeout/cancel/failure kinds. Save/fetch/spawn live here.
+  Every call is issued under a **requester-side deadline** (10 s by
+  default, settable per request): when it passes, the caller gets an
+  explicit failure — never an unbounded wait for a reply that is not
+  coming. A responder that cannot serve a call says so, with `err`
+  (blob/base) or `fs_err` (`.peer` filesystem), payload `uv id` alone;
+  the two cycles number their ids independently, which is why the
+  failure kind is split exactly like `ok`/`fs_ok`. A peer that predates
+  a failure kind ignores it and falls back to the deadline. Retrying is
+  the caller's policy, never the transport's.
 - **3 feed** — latest-wins per (channel, key): the sender-side queue
   coalesces under backpressure by replacing the queued payload for a
   key. Droppable by definition. Presence (cursor per peer) rides here.

@@ -14,14 +14,18 @@ const wire = @import("weft_wire");
 const Document = @import("../Document.zig");
 const Session = @import("Session.zig");
 const BlobOp = @import("remote_fs.zig").BlobOp;
+const requests = @import("requests.zig");
 
 const PartialDoc = @This();
 
 gpa: Allocator,
 doc: *Document,
-next_call: u64 = 1,
-inflight: std.AutoHashMapUnmanaged(u64, Req) = .empty,
-state: enum { idle, opening, open, unsupported } = .idle,
+/// Base calls awaiting a reply, each under its deadline.
+inflight: requests.Inflight(Req) = .{},
+/// `unsupported`: the host has no base worth serving. `failed`: it never
+/// answered. Both mean the same thing downstream — no partial checkout,
+/// so sync the ordinary way.
+state: enum { idle, opening, open, unsupported, failed } = .idle,
 /// A batch that bounced off unrealized spans; retried after every
 /// realization (idempotent — duplicate events are no-ops).
 pending_batch: ?[]u8 = null,
@@ -29,7 +33,7 @@ pending_batch: ?[]u8 = null,
 /// the base is fully realized.
 fetch_all: bool = false,
 
-const Req = union(enum) { open, read: u64 };
+pub const Req = union(enum) { open, read: u64 };
 const max_inflight_reads = 8;
 
 pub fn init(gpa: Allocator, doc: *Document) PartialDoc {
@@ -41,17 +45,42 @@ pub fn deinit(self: *PartialDoc) void {
     if (self.pending_batch) |b| self.gpa.free(b);
 }
 
+/// How long a base call waits for its reply before it is failed.
+pub fn setTimeout(self: *PartialDoc, ns: u64) void {
+    self.inflight.timeout_ns = ns;
+}
+
+/// Whether op traffic may flow: until the base is adopted — or until we
+/// know it never will be — answering a frontier announce would elicit a
+/// full-history bootstrap and defeat the partial checkout.
+pub fn ready(self: *const PartialDoc) bool {
+    return switch (self.state) {
+        .open, .unsupported, .failed => true,
+        .idle, .opening => false,
+    };
+}
+
+/// This call will not be answered (a peer `err`, or its deadline passed).
+/// An open that never lands means no partial checkout: fall back to a
+/// full sync rather than gate op traffic forever.
+pub fn fail(self: *PartialDoc, req: Req) void {
+    if (req == .open) self.state = .failed;
+}
+
+/// Same, addressed by call id.
+pub fn onFailure(self: *PartialDoc, id: u64) void {
+    if (self.inflight.settle(id)) |req| self.fail(req);
+}
+
 /// Ask the host for its base table (once).
 pub fn requestOpen(self: *PartialDoc, session: *Session, base: u64) !void {
     if (self.state != .idle) return;
     self.state = .opening;
     var p: std.ArrayList(u8) = .empty;
     defer p.deinit(self.gpa);
-    const id = self.next_call;
-    self.next_call += 1;
+    const id = try self.inflight.issue(self.gpa, .open);
     try wire.putUv(self.gpa, &p, id);
     try p.append(self.gpa, @intFromEnum(BlobOp.base_open));
-    try self.inflight.put(self.gpa, id, .open);
     try session.post(.request, @intFromEnum(wire.RequestKind.call), base + 3, p.items);
 }
 
@@ -86,23 +115,21 @@ pub fn pump(self: *PartialDoc, session: *Session, base: u64) !void {
 
 fn requestRead(self: *PartialDoc, session: *Session, base: u64, base_offset: usize, len: usize) !void {
     var reads: usize = 0;
-    var it = self.inflight.valueIterator();
-    while (it.next()) |r| {
-        if (r.* == .read) {
-            if (r.read == base_offset) return; // already inflight
+    var it = self.inflight.pending();
+    while (it.next()) |e| {
+        if (e.ctx == .read) {
+            if (e.ctx.read == base_offset) return; // already inflight
             reads += 1;
         }
     }
     if (reads >= max_inflight_reads) return;
     var p: std.ArrayList(u8) = .empty;
     defer p.deinit(self.gpa);
-    const id = self.next_call;
-    self.next_call += 1;
+    const id = try self.inflight.issue(self.gpa, .{ .read = base_offset });
     try wire.putUv(self.gpa, &p, id);
     try p.append(self.gpa, @intFromEnum(BlobOp.base_read));
     try wire.putUv(self.gpa, &p, base_offset);
     try wire.putUv(self.gpa, &p, len);
-    try self.inflight.put(self.gpa, id, .{ .read = base_offset });
     try session.post(.request, @intFromEnum(wire.RequestKind.call), base + 3, p.items);
 }
 
@@ -113,11 +140,11 @@ pub fn onReply(self: *PartialDoc, session: *Session, base: u64, payload: []const
     const gpa = self.gpa;
     var cur: []const u8 = payload;
     const id = try wire.getUv(&cur);
-    const kv = self.inflight.fetchRemove(id) orelse return false;
+    const req = self.inflight.settle(id) orelse return false;
     if (cur.len == 0) return false;
     const ok = cur[0] == 1;
     cur = cur[1..];
-    switch (kv.value) {
+    switch (req) {
         .open => {
             if (!ok) {
                 self.state = .unsupported; // host not compacted: full sync

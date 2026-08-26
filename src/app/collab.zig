@@ -442,10 +442,11 @@ pub const Collab = struct {
         const envelope = try core.peer_fs.encodeService(gpa, request);
         defer gpa.free(envelope);
         const id = self.remote_fs.request(session, 0, envelope) catch return error.Io;
-        const deadline = core.task.nowNs() + 10 * std.time.ns_per_s;
-        while (core.task.nowNs() < deadline) {
+        // The request carries its own deadline: a lost reply fails here
+        // rather than parking this caller forever.
+        while (true) {
             _ = connection.tick() catch return error.Io;
-            if (self.remote_fs.take(id)) |response| {
+            if (self.remote_fs.take(id) catch return error.Io) |response| {
                 defer self.gpa.free(response);
                 const decoded = core.peer_fs.decodeResponse(response) orelse return error.Io;
                 return switch (decoded.status) {
@@ -459,7 +460,6 @@ pub const Collab = struct {
             }
             std.Thread.yield() catch {};
         }
-        return error.Io;
     }
 };
 
@@ -748,19 +748,28 @@ pub fn tickCollab(
             var dn: usize = 0;
             var pit = peer_fs_inflight.iterator();
             while (pit.next()) |e| {
-                if (remote_fs.take(e.key_ptr.*)) |resp| {
+                const id = e.key_ptr.*;
+                const dest = e.value_ptr.*;
+                // Served or failed, the call is over. One that never
+                // settled would pin its destination buffer forever.
+                var served: ?[]u8 = null;
+                if (remote_fs.take(id)) |resp| {
+                    if (resp == null) continue; // still in flight
+                    served = resp;
+                } else |_| {}
+                if (served) |resp| {
                     defer gpa.free(resp);
                     if (core.peer_fs.decodeResponse(resp)) |dec| {
                         if (dec.status == .ok)
-                            core.wasm_host.deliverToBuffer(cmd_ctx, e.value_ptr.*, "peer-fs", dec.payload);
+                            core.wasm_host.deliverToBuffer(cmd_ctx, dest, "peer-fs", dec.payload);
                     }
-                    gpa.free(e.value_ptr.*);
-                    if (dn < done.len) {
-                        done[dn] = e.key_ptr.*;
-                        dn += 1;
-                    }
-                    dirty = true;
                 }
+                gpa.free(dest);
+                if (dn < done.len) {
+                    done[dn] = id;
+                    dn += 1;
+                }
+                dirty = true;
             }
             for (done[0..dn]) |id| _ = peer_fs_inflight.remove(id);
         }
