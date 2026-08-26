@@ -1093,14 +1093,40 @@ pub fn tmpPath(gpa: Allocator, sub_path: []const u8, name: []const u8) ![]u8 {
     return std.fmt.allocPrint(gpa, ".zig-cache/tmp/{s}/{s}", .{ sub_path, name });
 }
 
+/// Fixture `git` must not read the developer's own config: a global
+/// `commit.gpgsign`, `core.hooksPath`, or credential helper there would
+/// reshape every fixture commit — or block one on a prompt no test can
+/// answer. Prepended below, so these win over an inherited value (getenv
+/// takes the first match).
+const git_pins = [_]?[*:0]const u8{
+    "GIT_CONFIG_GLOBAL=/dev/null",
+    "GIT_CONFIG_NOSYSTEM=1",
+    "GIT_TERMINAL_PROMPT=0",
+};
+
+/// `git_pins` ++ the parent environment, built once and never freed — it
+/// outlives every child, exactly as `std.c.environ` does. The suite is
+/// sequential (like the chdir below), so the lazy build needs no lock.
+var pinned_environ: ?[:null]const ?[*:0]const u8 = null;
+
 /// The parent process's environment as a `std.process.Environ` (the harness
-/// links libc, so `std.c.environ` is populated). Proc-backed plugins (git/run/
-/// grep) need PATH to resolve `git` etc. inside their `/bin/sh -c`, so the
-/// harness must hand this to the wasm host exactly as `main()` does at startup
-/// (core.wasm_host.setEnviron) — otherwise every subprocess runs PATH-less and
-/// silently fails to find its tool. The same block feeds the test's own oracle.
+/// links libc, so `std.c.environ` is populated), with the git pins on front.
+/// Proc-backed plugins (git/run/grep) need PATH to resolve `git` etc. inside
+/// their `/bin/sh -c`, so the harness must hand this to the wasm host exactly
+/// as `main()` does at startup (core.wasm_host.setEnviron) — otherwise every
+/// subprocess runs PATH-less and silently fails to find its tool. The same
+/// block feeds the test's own oracle.
 pub fn parentEnviron() std.process.Environ {
-    return .{ .block = .{ .slice = std.mem.span(std.c.environ) } };
+    const block = pinned_environ orelse pin: {
+        const gpa = std.heap.page_allocator;
+        var entries: std.ArrayList(?[*:0]const u8) = .empty;
+        entries.appendSlice(gpa, &git_pins) catch @panic("OOM");
+        for (std.mem.span(std.c.environ)) |entry| entries.append(gpa, entry) catch @panic("OOM");
+        const block = entries.toOwnedSliceSentinel(gpa, null) catch @panic("OOM");
+        pinned_environ = block;
+        break :pin block;
+    };
+    return .{ .block = .{ .slice = block } };
 }
 
 /// LEB128 uvarint, appended to `out` — for framing a config blob (see setConfig).
