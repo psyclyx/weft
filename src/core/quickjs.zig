@@ -38,6 +38,13 @@ const perm_count = perm_gate.WasmPlugin.perm_count;
 /// The embedded engine+shim (built from quickjs-ng + weft_qjs.c by build.zig).
 pub const quickjs_wasm: []const u8 = @embedFile("quickjs_wasm");
 
+const wasm_abi = @import("wasm_abi.zig");
+
+/// quickjs.wasm is megabyte-scale; compile once through the module cache.
+fn qjsModule(engine: *wasm.Engine, gpa: std.mem.Allocator) !wasm.Module {
+    return wasm_abi.compileCached(engine, gpa, wasm_abi.testModuleCacheDir(), quickjs_wasm);
+}
+
 pub const EvalError = error{ConfigException} || wasm.Error;
 
 /// How `weft.plugin(name)` reaches the host's plugin loader. Defined in
@@ -262,7 +269,7 @@ pub fn evalToManifest(engine: *wasm.Engine, ctx: *command.Context, loader: ?Plug
 
     var bridge: Bridge = .{ .ctx = ctx, .loader = loader, .config = config, .config_dir = config_dir, .engine = engine, .manifest = m };
 
-    var module = try engine.compile(quickjs_wasm);
+    var module = try qjsModule(engine, ctx.gpa);
     defer module.deinit();
     var linker = try wasm.Linker.init(engine);
     defer linker.deinit();
@@ -426,7 +433,7 @@ pub const JsPlugin = struct {
             // JS plugin's `weft.*` calls mutate the editor immediately, not
             // staged.
             .bridge = .{ .ctx = ctx, .loader = null, .config = null, .engine = engine },
-            .module = try engine.compile(quickjs_wasm),
+            .module = try qjsModule(engine, gpa),
             .linker = undefined,
             .instance = undefined,
         };
@@ -2392,7 +2399,6 @@ test "quickjs: weft.plugin loads a real .wasm, then its command runs" {
     // A minimal loader over the resident engine: resolve the guest "edit"
     // plugin from its embedded bytes and load it under the perm handshake —
     // the same shape main.zig's PluginHost has, minus disk/name resolution.
-    const wasm_abi = @import("wasm_abi.zig");
     const Loader = struct {
         engine: *wasm.Engine,
         ctx: *command.Context,
@@ -2471,7 +2477,6 @@ test "quickjs: deferred load — weft.set before the plugin line reaches its ini
     var config: kv.Store = .empty;
     defer config.deinit(gpa);
 
-    const wasm_abi = @import("wasm_abi.zig");
     const Loader = struct {
         engine: *wasm.Engine,
         ctx: *command.Context,

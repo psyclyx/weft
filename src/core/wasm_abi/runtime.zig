@@ -207,7 +207,7 @@ pub fn testModuleCacheDir() ?[]const u8 {
 /// a stale image (different wasmtime) is rejected on deserialize and recompiled.
 /// All cache I/O is best-effort — a miss or a failed read/write just costs a
 /// fresh compile, never a load failure.
-fn compileCached(engine: *wasm.Engine, gpa: Allocator, cache_dir: ?[]const u8, wasm_bytes: []const u8) !wasm.Module {
+pub fn compileCached(engine: *wasm.Engine, gpa: Allocator, cache_dir: ?[]const u8, wasm_bytes: []const u8) !wasm.Module {
     const dir = cache_dir orelse return engine.compile(wasm_bytes);
     const hash = std.hash.Wyhash.hash(0, wasm_bytes);
     var path_buf: [std.fs.max_path_bytes]u8 = undefined;
