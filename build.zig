@@ -745,6 +745,11 @@ pub fn build(b: *std.Build) void {
     const run_trap_kinds = b.addRunArtifact(trap_kinds_exe);
     const trap_kinds_step = b.step("e2e-trap-kinds", "Prove task #8's deny-vs-crash channel split: a native guest fault logs .err, a host-raised deny logs .warn and never .err");
     trap_kinds_step.dependOn(&run_trap_kinds.step);
+    // Nothing in `test` RUNS this binary (the whole point is that it's allowed
+    // to log `.err`), but nothing built it either, so it sat un-compiled and
+    // rotted — `zig build e2e-trap-kinds` failed to compile at all until this
+    // branch. COMPILING it is in the gate; running it stays opt-in.
+    test_step.dependOn(&trap_kinds_exe.step);
 
     // LAST in `build()` so it sees every sibling `test_step` will ever have.
     runAlone(test_step, &run_tests.step);

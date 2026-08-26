@@ -73,6 +73,13 @@ fn denyCallback(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32, resu
 
 pub fn main(init: std.process.Init) !void {
     _ = init;
+    // A leak-checking allocator: both scenarios below deliberately trap a
+    // guest, and a trap that stranded engine memory is worth knowing about.
+    // The failure path exits before this deinit, which is fine — a run that
+    // already reported FAILED has nothing to add.
+    var debug_allocator: std.heap.DebugAllocator(.{}) = .init;
+    defer _ = debug_allocator.deinit();
+    const gpa = debug_allocator.allocator();
     var ok = true;
 
     // Scenario 1: a genuine guest crash — must log .err (task #8's core ask:
