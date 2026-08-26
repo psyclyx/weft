@@ -214,11 +214,6 @@ pub fn main(init: std.process.Init) !void {
     core.wasm_host.setEnviron(init.minimal.environ);
     const plugin_dir = config_load.pluginDir(gpa);
     defer gpa.free(plugin_dir);
-    // Compiled images persist here, so quickjs.wasm and the guest catalog are
-    // deserialized at launch instead of Cranelift-compiled every start.
-    const module_cache_dir = config_load.moduleCacheDir(gpa);
-    defer if (module_cache_dir) |d| gpa.free(d);
-    plug.engine.cache_dir = module_cache_dir;
     var plugin_host: config_load.PluginHost = .{
         .gpa = gpa,
         .engine = &plug.engine,

@@ -113,10 +113,13 @@ pub const Engine = struct {
     engine: *c.wasm_engine_t,
     gpa: Allocator,
     /// Where compiled images persist between runs (`.cwasm` files, keyed by
-    /// content hash). Null = memo in memory only, recompile each start. The
-    /// app points this at the user cache dir; a test binary inherits
-    /// `$WEFT_TEST_MODULE_CACHE` (see `testCacheDir`).
-    cache_dir: ?[]const u8,
+    /// content hash), owned by this engine. Null = memo in memory only,
+    /// recompile each start. Resolved by `cacheDir` at construction, for every
+    /// engine, so that no caller can forget to: an engine that is only alive
+    /// long enough to evaluate `config.js` still pays quickjs.wasm's
+    /// compilation, and paying it once per launch instead of once per machine
+    /// is startup cost nobody asked for.
+    cache_dir: ?[]u8,
     /// Images already compiled by this engine, by content hash.
     compiled: std.AutoHashMapUnmanaged(u64, Module) = .empty,
 
@@ -131,23 +134,33 @@ pub const Engine = struct {
         return .{
             .engine = c.wasm_engine_new_with_config(config) orelse return error.OutOfMemory,
             .gpa = gpa,
-            .cache_dir = testCacheDir(),
+            .cache_dir = cacheDir(gpa),
         };
     }
 
-    /// The `.cwasm` cache every test binary shares: `$WEFT_TEST_MODULE_CACHE`,
-    /// which build.zig points at a stable directory under the project cache
-    /// root, so an image compiles once per content hash instead of once per
-    /// engine. Null outside `zig build test`.
-    fn testCacheDir() ?[]const u8 {
-        const dir = std.c.getenv("WEFT_TEST_MODULE_CACHE") orelse return null;
-        return std.mem.span(dir);
+    /// Where this engine persists compiled images. `$WEFT_TEST_MODULE_CACHE`
+    /// wins: build.zig points every test binary at one directory under the
+    /// project cache root, so a test run shares images with its siblings and
+    /// never writes the user's cache. Otherwise `$WEFT_CACHE_DIR`, else
+    /// `$XDG_CACHE_HOME/weft/modules`, else `$HOME/.cache/weft/modules`. Null
+    /// when no base resolves — caching off, the editor still runs and just
+    /// recompiles each start. Caller (this engine) owns the result.
+    fn cacheDir(gpa: Allocator) ?[]u8 {
+        inline for (.{ "WEFT_TEST_MODULE_CACHE", "WEFT_CACHE_DIR" }) |name| {
+            if (std.c.getenv(name)) |d| return gpa.dupe(u8, std.mem.span(d)) catch null;
+        }
+        if (std.c.getenv("XDG_CACHE_HOME")) |d|
+            return std.fs.path.join(gpa, &.{ std.mem.span(d), "weft", "modules" }) catch null;
+        if (std.c.getenv("HOME")) |d|
+            return std.fs.path.join(gpa, &.{ std.mem.span(d), ".cache", "weft", "modules" }) catch null;
+        return null;
     }
 
     pub fn deinit(self: *Engine) void {
         var it = self.compiled.valueIterator();
         while (it.next()) |m| m.deinit();
         self.compiled.deinit(self.gpa);
+        if (self.cache_dir) |dir| self.gpa.free(dir);
         c.wasm_engine_delete(self.engine);
         self.* = undefined;
     }

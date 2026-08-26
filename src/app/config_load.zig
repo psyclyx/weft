@@ -125,19 +125,6 @@ pub fn pluginDir(gpa: std.mem.Allocator) []const u8 {
         gpa.dupe(u8, "plugins") catch "plugins";
 }
 
-/// The compiled-module (`.cwasm`) cache directory: `$WEFT_CACHE_DIR`, else
-/// `$XDG_CACHE_HOME/weft/modules`, else `$HOME/.cache/weft/modules`. Null when
-/// no writable base can be resolved (caching disabled — the editor still runs,
-/// just recompiles each start). Caller owns the result.
-pub fn moduleCacheDir(gpa: std.mem.Allocator) ?[]const u8 {
-    if (std.c.getenv("WEFT_CACHE_DIR")) |d| return gpa.dupe(u8, std.mem.span(d)) catch null;
-    if (std.c.getenv("XDG_CACHE_HOME")) |d|
-        return std.fs.path.join(gpa, &.{ std.mem.span(d), "weft", "modules" }) catch null;
-    if (std.c.getenv("HOME")) |d|
-        return std.fs.path.join(gpa, &.{ std.mem.span(d), ".cache", "weft", "modules" }) catch null;
-    return null;
-}
-
 /// The resident wasm-plugin loader: holds the engine, the editor context, the
 /// effect services, and the live plugin list. Both `--plugin` and the config's
 /// `weft.plugin(name)` funnel through `load`, so name resolution and lifetime
