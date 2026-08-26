@@ -913,3 +913,41 @@ test "e2e/config: R1 — weft.set(\"acp\", ...) before weft.plugin(\"acp.js\") i
     const blob = ed.config_kv.get("acp", "cmd") orelse return error.ValueWronglyDropped;
     try t.expect(std.mem.indexOf(u8, blob, "codex-acp") != null);
 }
+
+// A resident `.js` plugin has no `describe()` handshake to request perms
+// with, so a config `weft.grant` is its ONLY route to an effect. This is that
+// route end to end: config → manifest → the System's grant table → the
+// plugin's adopted handles. (Revocation of a running JS plugin is proven in
+// `core/quickjs.zig`'s own gate test, where the table isn't reached by
+// name — see this branch's note on `HandleTable.Row`'s borrowed strings.)
+test "e2e/config: weft.grant is a resident .js plugin's only authority — adopted at load" {
+    const gpa = t.allocator;
+    var proj: Project = undefined;
+    try proj.init(gpa);
+    defer proj.deinit();
+
+    var ed: Editor = undefined;
+    try Editor.init(gpa, &ed);
+    defer ed.deinit();
+    var loader_state: ConfigLoader = .{ .ed = &ed };
+    defer loader_state.deinit();
+
+    const dir = ".zig-cache/tmp/e2e-js-grant";
+    const cfg_path = dir ++ "/config.js";
+    try core.file.writeBytesMakingDirs(gpa, dir, cfg_path,
+        \\weft.grant("dap", "proc");
+        \\weft.plugin("dap.js");
+    );
+    defer core.file.deleteFile(gpa, cfg_path);
+
+    try bootConfigNamed(&ed, dir, "config.js", &loader_state);
+
+    try t.expectEqual(@as(usize, 1), ed.js_plugins.items.len);
+    const dap = ed.js_plugins.items[0];
+    try t.expect(core.wasm_host.hasPerm(dap, .proc));
+    // One capability is not the others — nothing else was declared.
+    try t.expect(!core.wasm_host.hasPerm(dap, .fs_read));
+    try t.expect(!core.wasm_host.hasPerm(dap, .fs_write));
+    try t.expect(!core.wasm_host.hasPerm(dap, .net));
+    try t.expect(!core.wasm_host.hasPerm(dap, .timer));
+}

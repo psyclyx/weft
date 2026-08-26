@@ -131,6 +131,18 @@ fn rootRelative(root_in: []const u8, path: []const u8) ?[]const u8 {
     return path[root.len + 1 ..];
 }
 
+/// Layer 1 alone, for a reader that has NO file descriptor to root against
+/// — `quickjs.zig`'s `cFileRead` answering out of a LIVE buffer rather than
+/// off disk. Fails closed on a limit kind that isn't fs-path-shaped, exactly
+/// like the bodies below.
+pub fn pathWithinLimit(id: anytype, comptime perm: shared.Perm, path: []const u8) bool {
+    return switch (shared.limitFor(id, perm)) {
+        .none => true,
+        .fs_root => |root| rootRelative(root, path) != null,
+        .doc_region, .graph_subtree => false,
+    };
+}
+
 /// Open the confined root for a `.fs_root(root)` limit (layer 2 — see the
 /// module doc). `null` on a missing/inaccessible root: a config/admin
 /// problem (the grant names a root that isn't there), not a guest attack,

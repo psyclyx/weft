@@ -31,6 +31,14 @@ const std = @import("std");
 
 pub const ValType = enum { i32 };
 
+/// The result an i32-returning EFFECT import answers when the calling plugin
+/// holds no grant for the capability it needs (`quickjs.zig`'s `denyPerm`).
+/// Distinct from `-1`/`0` — those are mundane failures a plugin may ignore —
+/// because denial must never be success-shaped: `weft_qjs.c` turns this
+/// exact value into a thrown JS exception at the `weft.*` call site
+/// (`WEFT_DENIED` there; the two numbers must agree).
+pub const denied: i32 = -2;
+
 /// Which linker(s) an entry is bound on. `.config` — the 13 `weft.*` calls
 /// every config/plugin script can make (bind/run/echo/log/plugin/use/set/
 /// menu/action/provide/statusSegment/grant) — real handlers always. `.plugin` — the 15 calls

@@ -61,6 +61,12 @@ weft.plugin("files");       // file browser; the target handler owns its semanti
 weft.plugin("lsp");         // language server client (hover/def/… over jsonrpc)
 weft.set("lsp", "zig", "zls"); // server per language: weft.set("lsp","<lang>","<cmd>")
 weft.plugin("debug");       // breakpoints (gutter markers) — the debugger's first slice
+// A `.js` plugin declares nothing about itself, so `weft.grant` is its ONLY
+// door to an effect: with no grant it fails closed and every weft.procSpawn /
+// weft.fileRead call throws. The DAP client needs `proc` — it drives a debug
+// adapter over stdio. (Grants apply as their own pass before any plugin
+// loads, so this reads next to the load purely for the reader's sake.)
+weft.grant("dap", "proc");
 weft.plugin("dap.js");      // DAP client: run/step/inspect (set weft.set("dap","cmd",<adapter>))
 
 // Shared, editor-agnostic key bindings (the picker, and — below — which-key nav):
@@ -202,6 +208,9 @@ weft.bind("normal", "K", "hover");
 // (weft assumes nothing about how it's installed — NixOS-friendly):
 //   weft.set("acp", "cmd", "codex-acp");   // or claude-agent-acp / gemini --experimental-acp / …
 //   weft.set("acp", "prompt", "Summarize this project.");
+//   weft.grant("acp", "proc");             // spawn + drive the agent over stdio
+//   weft.grant("acp", "fs_read");          // answer the agent's fs/read_text_file
+//   weft.grant("acp", "fs_write");         // answer its fs/write_text_file
 //   weft.plugin("acp.js");                 // the ACP client (a JS plugin)
 //   weft.bind("normal", "SPC o A", "agent-start"); // SPC o A — start the agent
 //   weft.bind("normal", "SPC o s", "agent-send");  // SPC o s — send this line

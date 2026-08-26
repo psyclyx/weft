@@ -84,6 +84,21 @@ pub fn mintGrantHandles(table: *grants_mod.HandleTable, principal: []const u8, p
     }
 }
 
+/// `mintGrantHandles`'s counterpart for a principal with NO `describe()`
+/// handshake — the resident JS plane (`quickjs.zig`'s `JsPlugin.load`). A
+/// `.js` plugin declares nothing about itself, so there are no booleans to
+/// derive a baseline row from: the only authority it can hold is one the
+/// config plane already minted for it (`weft.grant` →
+/// `manifest.zig`'s `reconcileGrants`, which runs strictly before plugins
+/// load). Adopts exactly those rows; every unmatched perm stays
+/// `CapHandle.none`, which `check`s false forever — fail closed.
+pub fn adoptGrantHandles(table: *grants_mod.HandleTable, principal: []const u8, out: *[WasmPlugin.perm_count]grants_mod.CapHandle) void {
+    inline for (0..WasmPlugin.perm_count) |i| {
+        const p: Perm = @enumFromInt(i);
+        out[i] = table.findLive(principal, p.label()) orelse grants_mod.CapHandle.none;
+    }
+}
+
 /// The PURE grant check (W0b — doc/north-star-plan.md §2.5, migrated to the
 /// handle table by W4 §6/§2.4): whether `id` currently POSSESSES `perm`.
 /// Deliberately `anytype`, not `*WasmPlugin`: this is the ONE piece of logic

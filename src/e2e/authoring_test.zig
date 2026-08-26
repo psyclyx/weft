@@ -1311,6 +1311,7 @@ test "debug: a real DAP session — launch, hit a breakpoint, see the stack, con
     defer gpa.free(dap_src);
     const src = try core.file.readAlloc(gpa, dap_src);
     defer gpa.free(src);
+    try ed.grant("dap", "proc"); // what `weft.grant("dap", "proc")` mints in config
     try ed.loadJs("dap", src);
 
     // Start a debug session. The client drives initialize → launch →
@@ -1370,6 +1371,7 @@ test "debug: a REAL lldb-dap session — compile C, break on a line, stop, conti
     defer gpa.free(dap_src);
     const js = try core.file.readAlloc(gpa, dap_src);
     defer gpa.free(js);
+    try ed.grant("dap", "proc"); // what `weft.grant("dap", "proc")` mints in config
     try ed.loadJs("dap", js);
 
     // A real debugger: launch → stop at the breakpoint → report the stack line.
@@ -1413,6 +1415,7 @@ test "debug: the gutter breakpoint IS the DAP breakpoint — mark a line, stop t
     defer gpa.free(dap_src);
     const src = try core.file.readAlloc(gpa, dap_src);
     defer gpa.free(src);
+    try ed.grant("dap", "proc"); // what `weft.grant("dap", "proc")` mints in config
     try ed.loadJs("dap", src);
 
     ed.run("debug-start");

@@ -287,6 +287,15 @@ pub const Editor = struct {
         try self.plugins.append(self.gpa, p);
     }
 
+    /// Mint what `weft.grant(plugin, capability)` mints from config — for a
+    /// test that loads a `.js` plugin DIRECTLY (`loadJs`) instead of through
+    /// a config manifest, which would mint these itself. Must precede
+    /// `loadJs`: that is when a plugin adopts its rows. `plugin`/`capability`
+    /// are borrowed by the table (string literals at every call site).
+    pub fn grant(self: *Editor, plugin: []const u8, capability: []const u8) !void {
+        _ = try self.session.system.grants.grant(.{ .capability = capability }, plugin, null);
+    }
+
     /// Load a resident JS plugin (a quickjs reactor — acp.js / dap.js), named so
     /// it reads its config namespace `weft.set("<name>", …)`. Ticked in settle().
     pub fn loadJs(self: *Editor, name: []const u8, src: []const u8) !void {

@@ -67,6 +67,9 @@ weft.plugin("files");       // file browser; the target handler owns its semanti
 weft.plugin("lsp");         // grant bundle: proc + fs.read
 weft.set("lsp", "zig", "zls");
 weft.plugin("debug");       // breakpoints (gutter markers)
+// A `.js` plugin has no describe() handshake — `weft.grant` is its only door
+// to an effect, and without one it fails closed.
+weft.grant("dap", "proc");
 weft.plugin("dap.js");      // grant bundle: proc (adapter)
 
 // Shared editor-agnostic bindings — a manifest IMPORT, exactly as today.
@@ -170,6 +173,9 @@ weft.bind("normal", "K", "hover");
 // ── Coding agents (ACP) — commented as in the original. Under the north star
 // this block is where a SECOND system would first appear:
 //   weft.system("agent-ux", (s) => {
+//     s.grant("acp", "proc");
+//     s.grant("acp", "fs_read");
+//     s.grant("acp", "fs_write");
 //     s.plugin("acp.js");
 //     s.set("acp", "cmd", "codex-acp");
 //     s.bind("normal", "SPC o A", "agent-start");

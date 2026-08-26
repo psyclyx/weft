@@ -141,6 +141,19 @@ extern void host_grant(const char *plugin, int plugin_len,
                        const char *capability, int capability_len,
                        const char *root, int root_len);
 
+// The result an i32-returning effect import answers when this plugin holds no
+// grant for the capability it needs (core/membrane/qjs_contract.zig's
+// `denied` — the two numbers must agree). Distinct from -1/0, which are
+// mundane failures a plugin may ignore: a denial becomes a thrown JS
+// exception at the weft.* call site, so it can never read as success.
+#define WEFT_DENIED (-2)
+
+static JSValue weft_throw_denied(JSContext *ctx, const char *verb) {
+    return JS_ThrowInternalError(
+        ctx, "weft.%s: permission denied — this plugin holds no grant for it "
+             "(declare one with weft.grant in your config)", verb);
+}
+
 // ── JS → host trampolines. Each pulls its string args out of the JS values
 // and forwards to the host import. `weft.run` is the generic command door:
 // zero arguments remains valid, while bounded string arguments are carried as
@@ -517,6 +530,7 @@ static JSValue js_command(JSContext *ctx, JSValueConst this_val,
 }
 
 // weft.procSpawn(cmd[, cwd]) -> handle (or -1): a persistent duplex child.
+// Throws when the plugin holds no `proc` grant.
 static JSValue js_proc_spawn(JSContext *ctx, JSValueConst this_val,
                              int argc, JSValueConst *argv) {
     if (argc < 1) return JS_ThrowTypeError(ctx, "procSpawn(cmd[, cwd])");
@@ -529,6 +543,7 @@ static JSValue js_proc_spawn(JSContext *ctx, JSValueConst this_val,
     if (cmd) h = host_proc_spawn(cmd, (int)cl, cwd ? cwd : "", (int)wl);
     JS_FreeCString(ctx, cmd);
     if (cwd) JS_FreeCString(ctx, cwd);
+    if (h == WEFT_DENIED) return weft_throw_denied(ctx, "procSpawn");
     return JS_NewInt32(ctx, h);
 }
 
@@ -554,6 +569,7 @@ static JSValue js_proc_read(JSContext *ctx, JSValueConst this_val,
     int h;
     JS_ToInt32(ctx, &h, argv[0]);
     int n = host_proc_read(h, g_read_buf, (int)sizeof g_read_buf);
+    if (n == WEFT_DENIED) return weft_throw_denied(ctx, "procRead");
     if (n <= 0) return JS_NewStringLen(ctx, "", 0);
     return JS_NewStringLen(ctx, g_read_buf, (size_t)n);
 }
@@ -670,7 +686,8 @@ static JSValue js_breakpoints(JSContext *ctx, JSValueConst this_val,
 }
 
 // weft.fileRead(path) -> string: a file's content (live buffer or disk), "" if
-// unreadable. Shares g_read_buf (large; capped at its size for a first cut).
+// unreadable. Throws when the plugin holds no `fs_read` grant. Shares
+// g_read_buf (large; capped at its size for a first cut).
 static JSValue js_file_read(JSContext *ctx, JSValueConst this_val,
                             int argc, JSValueConst *argv) {
     if (argc < 1) return JS_NewStringLen(ctx, "", 0);
@@ -679,6 +696,7 @@ static JSValue js_file_read(JSContext *ctx, JSValueConst this_val,
     int n = 0;
     if (path) n = host_file_read(path, (int)pl, g_read_buf, (int)sizeof g_read_buf);
     JS_FreeCString(ctx, path);
+    if (n == WEFT_DENIED) return weft_throw_denied(ctx, "fileRead");
     if (n <= 0) return JS_NewStringLen(ctx, "", 0);
     return JS_NewStringLen(ctx, g_read_buf, (size_t)n);
 }

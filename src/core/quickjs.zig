@@ -25,6 +25,15 @@ const GraphDoc = @import("graph.zig");
 const subbuffer = @import("subbuffer.zig");
 const semantic_model = @import("weft_semantic");
 const view_runtime = @import("weft_view_runtime");
+const grants_mod = @import("grants.zig");
+/// The membrane's ONE perm vocabulary and check — shared with the wasm plane
+/// verbatim (`Perm`, `hasPerm`), never reimplemented here.
+const perm_gate = @import("wasm_host/plugin.zig");
+/// The fs semantic bodies, shared with the wasm plane so `.fs_root`
+/// confinement has ONE implementation (`cFileRead`).
+const fs_gate = @import("wasm_host/fs.zig");
+const Perm = perm_gate.Perm;
+const perm_count = perm_gate.WasmPlugin.perm_count;
 
 /// The embedded engine+shim (built from quickjs-ng + weft_qjs.c by build.zig).
 pub const quickjs_wasm: []const u8 = @embedFile("quickjs_wasm");
@@ -324,6 +333,17 @@ pub const JsPlugin = struct {
     config_store: ?*kv.Store,
     /// The child environment agent subprocesses inherit (so they resolve PATH).
     environ: std.process.Environ,
+    /// This plugin's authority, in `wasm_host/plugin.zig`'s `hasPerm` duck
+    /// type (same three field names, so the JS plane runs literally the same
+    /// check the wasm plane does — see that file's `hasPerm` doc for the
+    /// contract). A `.js` plugin has NO `describe()` handshake, so `perms`
+    /// is never populated from the guest: config's `weft.grant` is the only
+    /// door, adopted from the table at load (`adoptGrantHandles`). No table
+    /// wired (headless fixtures) → `perms`, which is all-false unless a test
+    /// pokes it — fail closed either way.
+    perms: [perm_count]bool = @splat(false),
+    grant_table: ?*grants_mod.HandleTable = null,
+    grant_handles: [perm_count]grants_mod.CapHandle = @splat(.none),
     bridge: Bridge,
     module: wasm.Module,
     linker: wasm.Linker,
@@ -387,7 +407,10 @@ pub const JsPlugin = struct {
     /// plugin body (`src`), which registers its commands. Heap-owned so the
     /// membrane's `&self.bridge` and the trampolines' `plugin` pointers stay
     /// valid (the instance is resident for the plugin's life). `pool`/`environ`
-    /// back the proc-stream membrane (agent subprocesses).
+    /// back the proc-stream membrane (agent subprocesses). Authority comes
+    /// from `ctx.grant_table` — whatever `weft.grant` already minted for
+    /// `name`, adopted BEFORE the body runs, so the plugin's very first
+    /// statement is already gated.
     pub fn load(gpa: Allocator, engine: *wasm.Engine, ctx: *command.Context, pool: *task.Pool, environ: std.process.Environ, name: []const u8, config_store: ?*kv.Store, src: []const u8) !*JsPlugin {
         const self = try gpa.create(JsPlugin);
         errdefer gpa.destroy(self);
@@ -398,6 +421,7 @@ pub const JsPlugin = struct {
             .name = try gpa.dupe(u8, name),
             .config_store = config_store,
             .environ = environ,
+            .grant_table = ctx.grant_table,
             // LIVE mode (`manifest` left null) — see Bridge's doc: a resident
             // JS plugin's `weft.*` calls mutate the editor immediately, not
             // staged.
@@ -410,6 +434,7 @@ pub const JsPlugin = struct {
             gpa.free(self.name);
             self.module.deinit();
         }
+        if (self.grant_table) |table| perm_gate.adoptGrantHandles(table, self.name, &self.grant_handles);
         self.linker = try wasm.Linker.init(engine);
         errdefer self.linker.deinit();
         try self.linker.defineWasi();
@@ -480,6 +505,39 @@ pub const JsPlugin = struct {
         return fired;
     }
 
+    /// The JS plane's ONE deny path — `wasm_host/plugin.zig`'s `requirePerm`
+    /// twin, over the SAME `hasPerm`. Granted → true, the effect proceeds.
+    /// Denied → a host log naming the plugin, the capability and the
+    /// `weft.grant` line that would fix it, and false: the caller answers
+    /// `qjs_contract.denied`, which `weft_qjs.c` throws as a JS exception at
+    /// the `weft.*` call site. Denial is never success-shaped and never
+    /// silent. Not a trap (the wasm plane's answer): this instance is
+    /// RESIDENT — trapping a routine, fail-closed denial would tear down a
+    /// live QuickJS runtime the next command still needs.
+    fn requirePerm(self: *JsPlugin, comptime perm: Perm) bool {
+        if (perm_gate.hasPerm(self, perm)) return true;
+        self.denyPerm(perm);
+        return false;
+    }
+
+    /// `requirePerm`'s log half, callable on its own from a site whose
+    /// possession check already ran inside a shared semantic body (see
+    /// `cFileRead`, which delegates the disk half to `wasm_host/fs.zig`).
+    fn denyPerm(self: *JsPlugin, comptime perm: Perm) void {
+        std.log.warn("js plugin '{s}': denied capability '{s}' — declare it in your config with weft.grant(\"{s}\", \"{s}\")", .{ self.name, perm.label(), self.name, perm.label() });
+    }
+
+    /// The other denial: the capability IS possessed, but its `.fs_root`
+    /// limit doesn't reach `path`. Names both, like the wasm plane's
+    /// `trapOutOfLimit`, so a narrowed grant is diagnosable.
+    fn denyOutOfLimit(self: *JsPlugin, comptime perm: Perm, path: []const u8) void {
+        const root: []const u8 = switch (perm_gate.limitFor(self, perm)) {
+            .fs_root => |r| r,
+            .none, .doc_region, .graph_subtree => "?",
+        };
+        std.log.warn("js plugin '{s}': '{s}' path '{s}' is outside the granted root '{s}'", .{ self.name, perm.label(), path, root });
+    }
+
     pub fn deinit(self: *JsPlugin) void {
         const gpa = self.gpa;
         gpa.free(self.name);
@@ -500,10 +558,19 @@ pub const JsPlugin = struct {
 };
 
 // ── The proc-stream membrane (plugin plane): spawn/send/read/close a duplex
-// child, handles indexing the plugin's `streams`. ──
+// child, handles indexing the plugin's `streams`. Every one that reaches the
+// child is `proc`-gated: spawn is where the authority is MINTED into a
+// handle, send/read where it keeps being exercised — so a revoked `proc`
+// grant stops an already-running agent on its next call, not merely its next
+// spawn. `cProcClose` is deliberately ungated: it only RELEASES authority,
+// and denying it would strand a live subprocess with no way to reap it. ──
 
 fn cProcSpawn(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32, results: []i32) void {
     const self: *JsPlugin = @ptrCast(@alignCast(data.?));
+    if (!self.requirePerm(.proc)) {
+        results[0] = qjs_contract.denied;
+        return;
+    }
     const gpa = self.gpa;
     const cmd = caller.readMemory(gpa, @intCast(args[0]), @intCast(args[1])) catch {
         results[0] = -1;
@@ -533,9 +600,14 @@ fn streamAt(self: *JsPlugin, h: i32) ?*proc_stream.ProcStream {
     return self.streams.items[@intCast(h)];
 }
 
+/// Denial here has no result channel to carry it (the import returns
+/// nothing), so the host log `requirePerm` writes is the whole signal — it
+/// is only reachable by REVOKING `proc` out from under a plugin that already
+/// spawned, never by an ungranted plugin, which can hold no handle at all.
 fn cProcSend(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32, results: []i32) void {
     _ = results;
     const self: *JsPlugin = @ptrCast(@alignCast(data.?));
+    if (!self.requirePerm(.proc)) return;
     const s = streamAt(self, args[0]) orelse return;
     const bytes = caller.readMemory(self.gpa, @intCast(args[1]), @intCast(args[2])) catch return;
     defer self.gpa.free(bytes);
@@ -544,6 +616,10 @@ fn cProcSend(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32, results
 
 fn cProcRead(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32, results: []i32) void {
     const self: *JsPlugin = @ptrCast(@alignCast(data.?));
+    if (!self.requirePerm(.proc)) {
+        results[0] = qjs_contract.denied;
+        return;
+    }
     const s = streamAt(self, args[0]) orelse {
         results[0] = 0;
         return;
@@ -828,6 +904,14 @@ fn cBreakpoints(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32, resu
 /// buffer text if the file is open (uncommitted edits included — the honest
 /// current state, not stale disk), else the disk file. Capped at the guest's
 /// receive buffer for now.
+///
+/// ONE `fs_read` grant, two sources, the same confinement on both: the DISK
+/// half is `wasm_host/fs.zig`'s semantic body verbatim (possession,
+/// `.fs_root` root-relativity, and the rooted open that stops a symlink
+/// escape), so the JS plane never re-derives fs policy; the BUFFER half has
+/// no descriptor to root against, so it takes that file's lexical layer
+/// (`pathWithinLimit`) — otherwise merely OPENING a file would launder it
+/// past a narrowed grant.
 fn cFileRead(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32, results: []i32) void {
     const self: *JsPlugin = @ptrCast(@alignCast(data.?));
     const gpa = self.gpa;
@@ -836,12 +920,33 @@ fn cFileRead(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32, results
         return;
     };
     defer gpa.free(path);
-    var content: ?[]u8 = null;
-    if (self.bridge.activeCtx().buffers.findByPath(path)) |id| {
-        if (self.bridge.activeCtx().buffers.get(id)) |b| content = b.editor.text().toOwnedSlice(gpa) catch null;
+
+    const ctx = self.bridge.activeCtx();
+    if (ctx.buffers.findByPath(path)) |id| open: {
+        if (!self.requirePerm(.fs_read)) {
+            results[0] = qjs_contract.denied;
+            return;
+        }
+        if (!fs_gate.pathWithinLimit(self, .fs_read, path)) {
+            self.denyOutOfLimit(.fs_read, path);
+            results[0] = qjs_contract.denied;
+            return;
+        }
+        const b = ctx.buffers.get(id) orelse break :open;
+        const text = b.editor.text().toOwnedSlice(gpa) catch break :open;
+        defer gpa.free(text);
+        results[0] = @intCast(caller.writeMemory(@intCast(args[2]), @intCast(args[3]), text) catch 0);
+        return;
     }
-    if (content == null) content = @import("file.zig").readAlloc(gpa, path) catch null;
-    const bytes = content orelse {
+
+    const bytes = fs_gate.fsRead(gpa, self, path) catch |e| {
+        switch (e) {
+            error.PermissionDenied => self.denyPerm(.fs_read),
+            error.OutOfLimit => self.denyOutOfLimit(.fs_read, path),
+        }
+        results[0] = qjs_contract.denied;
+        return;
+    } orelse {
         results[0] = 0;
         return;
     };
@@ -1494,6 +1599,10 @@ const Env = struct {
     actions: @import("action.zig"),
     semantic: @import("semantic.zig").Services,
     quit: bool,
+    /// A real grant table, as `System.create` wires one — so a JS plugin
+    /// loaded here adopts its authority exactly the way production does
+    /// (`grant` below stands in for the config plane's `weft.grant`).
+    grants: grants_mod.HandleTable,
     ctx: command.Context,
 
     fn init(gpa: Allocator, self: *Env) !void {
@@ -1507,6 +1616,7 @@ const Env = struct {
         self.actions = @import("action.zig").init(gpa, &self.container);
         self.semantic = @import("semantic.zig").Services.init(.here);
         self.quit = false;
+        self.grants = grants_mod.HandleTable.init(gpa);
         self.ctx = .{
             .gpa = gpa,
             .buffers = &self.buffers,
@@ -1517,9 +1627,19 @@ const Env = struct {
             .caps = &self.caps,
             .quit = &self.quit,
             .head = &self.head,
+            .grant_table = &self.grants,
         };
     }
+
+    /// Mint what `weft.grant(plugin, capability)` would mint — call BEFORE
+    /// `JsPlugin.load`, which is when a plugin adopts its rows. `plugin`
+    /// and `capability` are borrowed by the table (string literals here).
+    fn grant(self: *Env, plugin: []const u8, capability: []const u8) !void {
+        _ = try self.grants.grant(.{ .capability = capability }, plugin, null);
+    }
+
     fn deinit(self: *Env, gpa: Allocator) void {
+        self.grants.deinit();
         self.actions.deinit();
         self.semantic.deinit(gpa);
         self.caps.deinit();
@@ -1845,6 +1965,7 @@ test "quickjs: a JS plugin drives a duplex subprocess and reads its output" {
         \\  weft.procSend(h, "ping\n");
         \\});
     ;
+    try env.grant("test", "proc");
     var plugin = try JsPlugin.load(gpa, &engine, &env.ctx, env.pool, .empty, "test", null, src);
     defer plugin.deinit();
 
@@ -1904,6 +2025,7 @@ test "quickjs: the ACP plugin drives a mock agent's message into the transcript"
     const src = try std.fmt.allocPrint(gpa, "{s}\nstartAgent(\"/bin/sh {s}\", \"hi\");\n", .{ acp, mock_path });
     defer gpa.free(src);
 
+    try env.grant("test", "proc"); // what config/config.js's weft.grant("acp", "proc") mints
     var plugin = try JsPlugin.load(gpa, &engine, &env.ctx, env.pool, .empty, "test", null, src);
     defer plugin.deinit();
 
@@ -2050,11 +2172,166 @@ test "quickjs: a JS plugin reads a file through weft.fileRead" {
     // a file for the agent.
     const src = try std.fmt.allocPrint(gpa, "weft.command(\"r\", () => weft.echo(weft.fileRead(\"{s}\")));", .{fpath});
     defer gpa.free(src);
+    try env.grant("test", "fs_read");
     var plugin = try JsPlugin.load(gpa, &engine, &env.ctx, env.pool, .empty, "test", null, src);
     defer plugin.deinit();
 
     _ = try command.run(&env.commands, &env.ctx, "r", &.{});
     try t.expectEqualStrings("file contents here", env.head.echo.items);
+}
+
+// ── The JS plane's grant gate (`guest/deny.zig`'s twin, one layer up under
+// the JS engine): a resident `.js` plugin declares nothing about itself, so a
+// config `weft.grant` is the ONLY thing that can give it an effect. The
+// fixture is the plugin source itself — each command wraps its effect in
+// try/catch and echoes which arm ran, so the test can tell a THROWN denial
+// apart from a value the plugin could have silently ignored. ──
+
+/// A plugin that reports, through the echo line, whether its effect ran or
+/// was denied. `weft.echo` is head-gated, so both arms defer nothing — they
+/// run inside the dispatching command that called them.
+const grant_gate_js =
+    \\weft.command("spawn", () => {
+    \\  try { weft.procSpawn("true"); weft.echo("spawned"); }
+    \\  catch (e) { weft.echo("threw: " + e.message); }
+    \\});
+    \\weft.command("read", () => {
+    \\  try { weft.echo("read:" + weft.fileRead("/etc/hostname")); }
+    \\  catch (e) { weft.echo("threw: " + e.message); }
+    \\});
+;
+
+test "quickjs: a JS plugin with NO declared grants gets NO effect capability — the call throws" {
+    const gpa = t.allocator;
+    var env: Env = undefined;
+    try Env.init(gpa, &env);
+    defer env.deinit(gpa);
+    var engine = try wasm.Engine.init();
+    defer engine.deinit();
+
+    // Nothing granted: fail closed on every effect door, and loudly.
+    var plugin = try JsPlugin.load(gpa, &engine, &env.ctx, env.pool, .empty, "ungranted", null, grant_gate_js);
+    defer plugin.deinit();
+
+    _ = try command.run(&env.commands, &env.ctx, "spawn", &.{});
+    try t.expect(std.mem.startsWith(u8, env.head.echo.items, "threw: "));
+    try t.expect(std.mem.indexOf(u8, env.head.echo.items, "permission denied") != null);
+    // Denial is not a spawn that merely failed — no child was ever started.
+    try t.expectEqual(@as(usize, 0), plugin.streams.items.len);
+
+    _ = try command.run(&env.commands, &env.ctx, "read", &.{});
+    try t.expect(std.mem.startsWith(u8, env.head.echo.items, "threw: "));
+}
+
+test "quickjs: a granted JS plugin spawns — and revoking `proc` stops it on the very next call" {
+    const gpa = t.allocator;
+    var env: Env = undefined;
+    try Env.init(gpa, &env);
+    defer env.deinit(gpa);
+    var engine = try wasm.Engine.init();
+    defer engine.deinit();
+
+    try env.grant("gated", "proc");
+    var plugin = try JsPlugin.load(gpa, &engine, &env.ctx, env.pool, .empty, "gated", null, grant_gate_js);
+    defer plugin.deinit();
+
+    _ = try command.run(&env.commands, &env.ctx, "spawn", &.{});
+    try t.expectEqualStrings("spawned", env.head.echo.items);
+    // `fs_read` was never granted — one capability is not the others.
+    _ = try command.run(&env.commands, &env.ctx, "read", &.{});
+    try t.expect(std.mem.startsWith(u8, env.head.echo.items, "threw: "));
+
+    // Possession, not a cached boolean: the plugin re-checks the SAME row.
+    try t.expectEqual(@as(usize, 1), env.grants.revoke("gated", "proc"));
+    _ = try command.run(&env.commands, &env.ctx, "spawn", &.{});
+    try t.expect(std.mem.startsWith(u8, env.head.echo.items, "threw: "));
+}
+
+test "quickjs: an fs_read grant narrowed to a root confines a JS plugin (guest/fs_limit.zig's twin)" {
+    const gpa = t.allocator;
+    var env: Env = undefined;
+    try Env.init(gpa, &env);
+    defer env.deinit(gpa);
+    var engine = try wasm.Engine.init();
+    defer engine.deinit();
+
+    var tmp = t.tmpDir(.{});
+    defer tmp.cleanup();
+    const file = @import("file.zig");
+    const root = try std.fmt.allocPrint(gpa, ".zig-cache/tmp/{s}/root", .{tmp.sub_path});
+    defer gpa.free(root);
+    const inside = try std.fmt.allocPrint(gpa, "{s}/ok.txt", .{root});
+    defer gpa.free(inside);
+    const outside = try std.fmt.allocPrint(gpa, ".zig-cache/tmp/{s}/secret.txt", .{tmp.sub_path});
+    defer gpa.free(outside);
+    const traversal = try std.fmt.allocPrint(gpa, "{s}/../secret.txt", .{root});
+    defer gpa.free(traversal);
+    try file.writeBytesMakingDirs(gpa, root, inside, "in root");
+    try file.writeBytes(gpa, outside, "out of root");
+
+    const src = try std.fmt.allocPrint(gpa,
+        \\function reader(name, path) {{
+        \\  weft.command(name, () => {{
+        \\    try {{ weft.echo("read:" + weft.fileRead(path)); }}
+        \\    catch (e) {{ weft.echo("threw"); }}
+        \\  }});
+        \\}}
+        \\reader("in", "{s}");
+        \\reader("out", "{s}");
+        \\reader("up", "{s}");
+    , .{ inside, outside, traversal });
+    defer gpa.free(src);
+
+    _ = try env.grants.grant(.{ .capability = "fs_read", .limit = .{ .fs_root = root } }, "confined", null);
+    var plugin = try JsPlugin.load(gpa, &engine, &env.ctx, env.pool, .empty, "confined", null, src);
+    defer plugin.deinit();
+
+    _ = try command.run(&env.commands, &env.ctx, "in", &.{});
+    try t.expectEqualStrings("read:in root", env.head.echo.items);
+    // Possessed, but out of the granted root — a denial, not an empty read.
+    _ = try command.run(&env.commands, &env.ctx, "out", &.{});
+    try t.expectEqualStrings("threw", env.head.echo.items);
+    _ = try command.run(&env.commands, &env.ctx, "up", &.{});
+    try t.expectEqualStrings("threw", env.head.echo.items);
+}
+
+test "quickjs: an OPEN buffer doesn't launder a narrowed fs_read grant" {
+    const gpa = t.allocator;
+    var env: Env = undefined;
+    try Env.init(gpa, &env);
+    defer env.deinit(gpa);
+    var engine = try wasm.Engine.init();
+    defer engine.deinit();
+
+    // The live-buffer branch of `cFileRead` — the one with no descriptor to
+    // root against. Opening a file must not make it readable past the limit.
+    var tmp = t.tmpDir(.{});
+    defer tmp.cleanup();
+    const dir = try std.fmt.allocPrint(gpa, ".zig-cache/tmp/{s}", .{tmp.sub_path});
+    defer gpa.free(dir);
+    const outside = try std.fmt.allocPrint(gpa, "{s}/secret.txt", .{dir});
+    defer gpa.free(outside);
+    try @import("file.zig").writeBytesMakingDirs(gpa, dir, outside, "top secret");
+
+    const id = try env.buffers.create(gpa, "secret.txt");
+    try env.buffers.get(id).?.editor.openFile(gpa, outside);
+
+    const src = try std.fmt.allocPrint(gpa,
+        \\weft.command("go", () => {{
+        \\  try {{ weft.echo("read:" + weft.fileRead("{s}")); }}
+        \\  catch (e) {{ weft.echo("threw"); }}
+        \\}});
+    , .{outside});
+    defer gpa.free(src);
+
+    const root = try std.fmt.allocPrint(gpa, "{s}/notes", .{dir});
+    defer gpa.free(root);
+    _ = try env.grants.grant(.{ .capability = "fs_read", .limit = .{ .fs_root = root } }, "confined", null);
+    var plugin = try JsPlugin.load(gpa, &engine, &env.ctx, env.pool, .empty, "confined", null, src);
+    defer plugin.deinit();
+
+    _ = try command.run(&env.commands, &env.ctx, "go", &.{});
+    try t.expectEqualStrings("threw", env.head.echo.items);
 }
 
 test "quickjs: a JS plugin writes a file as an attributed agent peer edit" {
@@ -2575,20 +2852,15 @@ test "quickjs: W4 slice 4 — reconcile round trip: a weft.grant removed leaves 
     var engine = try wasm.Engine.init();
     defer engine.deinit();
 
-    const grants_mod = @import("grants.zig");
-    var table = grants_mod.HandleTable.init(gpa);
-    defer table.deinit();
-    env.ctx.grant_table = &table;
-
     const cfg1 = "weft.grant(\"git\", \"fs_write\", { root: \"repo\" });\n";
     const m1 = try evalToManifest(&engine, &env.ctx, null, null, null, cfg1, .config, "config");
     defer m1.destroy();
     var actx: manifest_mod.Manifest.ApplyCtx = .{ .ctx = &env.ctx, .loader = null, .config = null };
     try manifest_mod.Manifest.reconcile(gpa, null, m1, &actx);
 
-    const h = table.findLive("git", "fs_write").?;
-    try t.expect(table.check(h));
-    switch (table.limitFor(h)) {
+    const h = env.grants.findLive("git", "fs_write").?;
+    try t.expect(env.grants.check(h));
+    switch (env.grants.limitFor(h)) {
         .fs_root => |root| try t.expectEqualStrings("repo", root),
         .none, .doc_region, .graph_subtree => return error.TestUnexpectedResult,
     }
@@ -2598,14 +2870,14 @@ test "quickjs: W4 slice 4 — reconcile round trip: a weft.grant removed leaves 
     defer m2.destroy();
     try manifest_mod.Manifest.reconcile(gpa, m1, m2, &actx);
 
-    try t.expect(!table.check(h));
-    try t.expectEqual(grants_mod.Reason.revoked, table.reasonFor(h));
+    try t.expect(!env.grants.check(h));
+    try t.expectEqual(grants_mod.Reason.revoked, env.grants.reasonFor(h));
     // The composition rule's honest consequence (grants.zig's module doc):
     // no separate describe()-boolean baseline row was ever minted for a
     // config-narrowed pair, so there is nothing to "fall back" to — the
     // pair reads as fully ungranted now, not silently reverted to
     // unrestricted.
-    try t.expectEqual(@as(?grants_mod.CapHandle, null), table.findLive("git", "fs_write"));
+    try t.expectEqual(@as(?grants_mod.CapHandle, null), env.grants.findLive("git", "fs_write"));
 }
 
 test "quickjs: W4 slice 4 — an UNCHANGED weft.grant survives a reload that changes something else (no orphaned handle)" {
@@ -2616,11 +2888,6 @@ test "quickjs: W4 slice 4 — an UNCHANGED weft.grant survives a reload that cha
     var engine = try wasm.Engine.init();
     defer engine.deinit();
 
-    const grants_mod = @import("grants.zig");
-    var table = grants_mod.HandleTable.init(gpa);
-    defer table.deinit();
-    env.ctx.grant_table = &table;
-
     const cfg1 =
         \\weft.grant("git", "fs_write", { root: "repo" });
         \\weft.bind("normal", "j", "cursor-down");
@@ -2629,7 +2896,7 @@ test "quickjs: W4 slice 4 — an UNCHANGED weft.grant survives a reload that cha
     defer m1.destroy();
     var actx: manifest_mod.Manifest.ApplyCtx = .{ .ctx = &env.ctx, .loader = null, .config = null };
     try manifest_mod.Manifest.reconcile(gpa, null, m1, &actx);
-    const h = table.findLive("git", "fs_write").?;
+    const h = env.grants.findLive("git", "fs_write").?;
 
     // Reload with the SAME grant decl but a DIFFERENT, unrelated bind — the
     // manifest's hash differs (reconcile's teardown+reapply DOES run), but
@@ -2645,8 +2912,8 @@ test "quickjs: W4 slice 4 — an UNCHANGED weft.grant survives a reload that cha
     defer m2.destroy();
     try manifest_mod.Manifest.reconcile(gpa, m1, m2, &actx);
 
-    try t.expect(table.check(h)); // still the SAME live handle
-    const h2 = table.findLive("git", "fs_write").?;
+    try t.expect(env.grants.check(h)); // still the SAME live handle
+    const h2 = env.grants.findLive("git", "fs_write").?;
     try t.expectEqual(h.idx, h2.idx);
     try t.expectEqual(h.gen, h2.gen);
 }
