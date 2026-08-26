@@ -275,6 +275,45 @@ pub const FrameBuilder = struct {
         return false;
     }
 
+    /// The byte range a pane scrolled to `top_row` paints from: the viewport
+    /// plus a generous margin either side (a scroll can outrun a frame —
+    /// `view.build` may move `top_row` itself), clamped to the document.
+    /// Every per-byte analysis (syntax paint, markdown attributes) sizes
+    /// itself from this, so their cost follows the VIEWPORT, not the file. The
+    /// view reads only inside the published window: `resolveStyleInputs`
+    /// resolves against `bulk.start` and bounds-checks each lookup, and a
+    /// scroll damages the frame, which republishes around the new `top_row`.
+    /// Measured on a 267KB zig buffer (Debug, `Syntax.paint`): whole document
+    /// 41.0ms, this window 1.6ms — per damage frame.
+    fn paintWindow(rope: *const stemma.Rope, top_row: usize) stemma.Range {
+        const rows = rope.lineCount();
+        if (rows == 0) return .{ .start = 0, .end = rope.byteLen() };
+        const first = top_row -| 100;
+        const last = @min(rows - 1, top_row + 200);
+        return .{ .start = rope.lineRange(first).start, .end = rope.lineRange(last).end };
+    }
+
+    /// Reparse + publish a buffer's syntax highlight over that pane's paint
+    /// window. Called once per rendered pane, immediately before that pane
+    /// builds — two panes on one buffer at different scrolls each paint their
+    /// own window, and the last publish is always the one the next build reads.
+    fn publishHighlight(self: *FrameBuilder, gpa: std.mem.Allocator, editor: *core.Editor, syn: *core.syntax.Syntax, caps: *core.Caps, top_row: usize) !void {
+        _ = self;
+        _ = try syn.sync(gpa, &editor.doc);
+        const hl = caps.layers.find(&editor.doc, "highlight") orelse return;
+        try syn.publishHighlight(gpa, &editor.doc, hl, paintWindow(editor.text(), top_row));
+    }
+
+    /// Per-byte markdown attributes for a `.md` buffer over that pane's paint
+    /// window, into `arena` (must outlive the pane build). Null for non-md.
+    /// Shared by the focused pane and every peeked split.
+    fn mdInlineFor(arena: std.mem.Allocator, editor: *core.Editor, name: []const u8, top_row: usize) ?view_mod.MdInline {
+        if (!cursor_config.isMarkdownPath(name)) return null;
+        const range = paintWindow(editor.text(), top_row);
+        const attrs = core.markdown.analyze(arena, editor.text(), range) catch return null;
+        return .{ .base = range.start, .attrs = attrs };
+    }
+
     /// Backend-independent frame BUILD: gate on damage + partial-checkout
     /// realization, sync syntax highlight, assemble the whole-app `Hud`, then
     /// lay out and build every pane's shapes. NO swapchain, command-buffer, or
@@ -282,49 +321,10 @@ pub const FrameBuilder = struct {
     /// by the `rebuilt` signal this sets. A clean, unblocked
     /// frame keeps last frame's build and returns early (leaving `rebuilt`
     /// false, so `present` skips the re-upload/re-emit).
-    /// Reparse + publish a buffer's syntax highlight over a window around
-    /// `top_row` (whole doc when small). Runs for EVERY visible pane's buffer,
-    /// not just the focused one — so all splits highlight, not one at a time.
-    fn publishHighlight(self: *FrameBuilder, gpa: std.mem.Allocator, editor: *core.Editor, syn: *core.syntax.Syntax, caps: *core.Caps, top_row: usize) !void {
-        _ = self;
-        _ = try syn.sync(gpa, &editor.doc);
-        const hl = caps.layers.find(&editor.doc, "highlight") orelse return;
-        const rope = editor.text();
-        const total = rope.byteLen();
-        const range = blk: {
-            if (total <= 256 * 1024) break :blk stemma.Range{ .start = 0, .end = total };
-            const rows = rope.lineCount();
-            const first = top_row -| 100;
-            const last = @min(rows - 1, top_row + 200);
-            break :blk stemma.Range{ .start = rope.lineRange(first).start, .end = rope.lineRange(last).end };
-        };
-        try syn.publishHighlight(gpa, &editor.doc, hl, range);
-    }
-
-    /// Per-byte markdown attributes for a `.md` buffer over a window around
-    /// `top_row`, into `arena` (must outlive the pane build). Null for non-md.
-    /// Shared by the focused pane and every peeked split.
-    fn mdInlineFor(arena: std.mem.Allocator, editor: *core.Editor, name: []const u8, top_row: usize) ?view_mod.MdInline {
-        if (!cursor_config.isMarkdownPath(name)) return null;
-        const rope = editor.text();
-        const total = rope.byteLen();
-        const range = if (total <= 256 * 1024)
-            stemma.Range{ .start = 0, .end = total }
-        else rng: {
-            const rows = rope.lineCount();
-            const first = top_row -| 100;
-            const last = @min(rows -| 1, top_row + 200);
-            break :rng stemma.Range{ .start = rope.lineRange(first).start, .end = rope.lineRange(last).end };
-        };
-        const attrs = core.markdown.analyze(arena, rope, range) catch return null;
-        return .{ .base = range.start, .attrs = attrs };
-    }
-
     pub fn buildFrame(self: *FrameBuilder, fx: *const FrameCtx, act: Active) !void {
         const gpa = fx.gpa;
         const editor = act.editor;
         const abuf = act.abuf;
-        const attach = act.attach;
         const fb = act.fb;
 
         if (!(fx.view_dirty.* and !self.partialBlocked(fx))) return;
@@ -333,10 +333,8 @@ pub const FrameBuilder = struct {
         const projection = scene.Mat4.ortho(0, @floatFromInt(fb[0]), @floatFromInt(fb[1]), 0, -1, 1);
         const world_to_pixel = scene.mvpToScenePixel(projection, @floatFromInt(fb[0]), @floatFromInt(fb[1])) orelse unreachable;
 
-        if (attach.syntax) |syn| if (editor) |ed| try self.publishHighlight(gpa, ed, syn, fx.caps, self.view.top_row);
-
-        // Markdown styling for .md buffers: analyze a window (whole doc
-        // when small) into per-byte attributes each damage frame — a
+        // Markdown styling for .md buffers: analyze this pane's paint
+        // window into per-byte attributes each damage frame — a
         // stale paint is slightly-old truth, like highlight bulk. Reused
         // below for the `ui/statusline-seg`/`ui/gutter-segment` mesh output
         // (segment text, the eligible-bindings slice) — both are per-frame
@@ -618,6 +616,7 @@ pub const FrameBuilder = struct {
         // The focused pane: active buffer, full HUD, caret, picker dock.
         var fhud = hud;
         fhud.pane_border = foc_border;
+        if (act.attach.syntax) |syn| if (editor) |ed| try self.publishHighlight(gpa, ed, syn, fx.caps, self.view.top_row);
         if (editor) |ed| {
             ed.fold_layer = fx.caps.layers.find(&ed.doc, "folds");
             ed.readonly_layer = fx.caps.layers.find(&ed.doc, "readonly");
