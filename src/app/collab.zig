@@ -530,7 +530,7 @@ pub fn startListen(
         hub_slot.* = null;
         return;
     };
-    _ = caps.layers.claim(gpa, sc.primary_doc.?, "presence", .replicated, "collab") catch {};
+    if (sc.primary_doc) |pd| _ = caps.layers.claim(gpa, pd, "presence", .replicated, "collab") catch {};
     var buf: [32]u8 = undefined;
     setEcho(echo, gpa, std.fmt.bufPrint(&buf, "listening on {d}", .{port}) catch "listening");
 }

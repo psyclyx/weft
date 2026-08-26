@@ -788,7 +788,7 @@ fn transcriptEntry(self: *JsPlugin, gpa: Allocator, name: []const u8, role: []co
     try TranscriptDoc.fill(gpa, tr, &ed.doc, &self.transcript_subs);
     // Cache the fresh row's claim for `cTranscriptAppend`'s incremental
     // path — see `transcript.lastRowClaim`'s doc comment for why this is
-    // safe to grab right here (nothing else claims on `b.editor.doc`
+    // safe to grab right here (nothing else claims on `ed.doc`
     // between the `fill` above and this line).
     self.transcript_live_sub = TranscriptDoc.lastRowClaim(&self.transcript_subs, &ed.doc);
 }
