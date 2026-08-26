@@ -951,8 +951,14 @@ Sharing attaches to exported protocols, not an entire resource:
 | Endpoint | Owner-authoritative query/feed/action | Files hierarchy, Git status/stage, LSP, debugger |
 | Derived | Recomputable local observation/presentation | syntax, local projections, toolbar layout, cached status rendering |
 
-Presence is an optional lossy feed derived from private head state. Sharing text
-does not enable it automatically.
+Presence is an optional lossy feed derived from private head state. The
+mechanism bundles nothing: a text export carries presence only when presence is
+selected. The layers differ in who selects. Mechanism-level exports — hubs,
+programmatic and scripted shares — select nothing on anyone's behalf.
+Interactive share paths pre-select presence and show that selection where the
+person can see and change it (§13.6's checked "See my cursor"), because someone
+sharing a document is telling a peer where they are. Withdrawing presence
+retracts the published cursor rather than leaving the last position on screen.
 
 ### 13.2 Publications
 
@@ -1445,8 +1451,11 @@ The architecture is not complete until all of these hold:
 
 ### Collaboration
 
-- Sharing text emits no layout, input mode, clipboard, fold, easymotion,
-  presence, diagnostics, or LSP data unless separately selected.
+- No emission without a legible selection: sharing text carries no layout, input
+  mode, clipboard, fold, easymotion, presence, diagnostics, or LSP data that was
+  not selected. A mechanism-level export selects nothing; an interactive preset
+  may pre-select presence only where the person sees the selection, can change
+  it in one step, and withdrawing it retracts what was already published.
 - Peers can use different input and presentation plugins over the same replica
   or remote resource.
 - A peer without Files or Git UI receives usable generic presentation and
@@ -1513,7 +1522,7 @@ The following must be absent before declaring the migration finished:
 - singleton state for instantiable sessions;
 - silent fixed caps;
 - JS/WASM/local/remote authority divergence;
-- automatic presence or diagnostics bundled with text sharing;
+- presence or diagnostics emitted without a selection the sharer can see;
 - opaque remote service tunnels;
 - approval dialogs rendering provider-supplied labels for grants; and
 - persisted `dired` or `magit` terminology.

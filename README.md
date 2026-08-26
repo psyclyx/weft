@@ -275,7 +275,11 @@ weft --connect host:7777 --token SECRET file.zig
 ```
 
 Two editors can also pair directly (`--listen` in one, `--connect` in the
-other); partitions heal as one frontier exchange.
+other); partitions heal as one frontier exchange. Pairing interactively also
+shares your cursor, and says so when it starts; `--no-share-presence`,
+`weft.set("collab", "share-presence", "off")`, or `share-presence off` hides it
+and retracts the caret your peer is already seeing. A headless host publishes
+no cursor of its own.
 
 Authentication and authorization are separate. The token proves you *may
 connect* (it derives the link encryption); the access grade proves what

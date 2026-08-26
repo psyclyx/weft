@@ -365,8 +365,15 @@ pub fn main(init: std.process.Init) !void {
     // otherwise leave it silently bound to a system's buffers that stopped
     // being the one dispatch/rendering targets. While dormant (no
     // connection), the stale borrow is inert.
+    // This is the interactive editor, so sharing pre-selects presence and every
+    // share path says so; the flag, `weft.set("collab", "share-presence", "off")`,
+    // and the `share-presence` command each opt out.
+    const share_presence = collab.presenceDefault(args.share_presence, blk: {
+        const raw = session.system.config_kv.get("collab", "share-presence") orelse break :blk null;
+        break :blk config_load.firstConfigRecord(raw);
+    });
     var collab_state: collab.Collab = undefined;
-    collab_state.initBase(gpa, buffers, &session.system.caps, &known_peers, args.share_root, args.share_fs, args.share_presence, args.listen, args.access);
+    collab_state.initBase(gpa, buffers, &session.system.caps, &known_peers, args.share_root, args.share_fs, share_presence, args.listen, args.access);
     defer collab_state.deinit(gpa);
     try collab_state.connect(gpa, ed0, &session.system.caps, &my_identity, args.connect, args.token, args.user, args.partial);
     // The buffer close path unbinds shares before the doc dies (Providers borrows

@@ -135,10 +135,8 @@ pub fn listenHandler(ctx: *core.command.Context, data: ?*anyopaque, args: []cons
 }
 
 /// `share-presence <on|off>` — select cursor sharing, separately from
-/// sharing a document. Off by default, so shared text emits no caret;
-/// the choice applies to every already-shared document and to later ones.
-/// `off` stops emission; the wire carries no retraction, so a peer keeps
-/// rendering the last caret it received until the collab tears down.
+/// sharing a document. The choice applies to every already-shared document
+/// and to later ones; `off` retracts the caret peers are already rendering.
 pub fn sharePresenceHandler(ctx: *core.command.Context, data: ?*anyopaque, args: []const core.command.Value) anyerror!core.command.Value {
     const sc: *ShareCtx = @ptrCast(@alignCast(data.?));
     if (args.len != 1 or args[0] != .string) return error.TypeMismatch;
@@ -150,11 +148,11 @@ pub fn sharePresenceHandler(ctx: *core.command.Context, data: ?*anyopaque, args:
         return .{ .string = "share-presence must be on|off" };
 
     sc.publish_presence = on;
-    if (sc.conn.*) |*c| for (c.collabs.items) |col| col.setPublishPresence(on);
+    if (sc.conn.*) |*c| for (c.collabs.items) |col| try col.setPublishPresence(on);
     if (sc.hub.*) |*h| for (h.clients.items) |peer| {
-        for (peer.conn.collabs.items) |col| col.setPublishPresence(on);
+        for (peer.conn.collabs.items) |col| try col.setPublishPresence(on);
     };
-    return ok_echo(ctx, if (on) "sharing your cursor" else "no longer sharing your cursor");
+    return ok_echo(ctx, if (on) "sharing your cursor" else "cursor hidden — peers no longer see it");
 }
 
 /// `stop-listening` — stop accepting new peers; connected peers stay.
@@ -266,7 +264,11 @@ pub fn shareHandler(ctx: *core.command.Context, data: ?*anyopaque, args: []const
 
     if (!did) return .{ .string = "already shared" };
     std.log.info("shared buffer {s}", .{buf.name});
-    return .nil;
+    var echo: [160]u8 = undefined;
+    return ok_echo(ctx, std.fmt.bufPrint(&echo, "shared {s} ({s})", .{
+        buf.name,
+        collab.presenceNote(sc.publish_presence),
+    }) catch "shared");
 }
 
 /// One openable offer across all connections. `base` is the offer's stable
@@ -498,7 +500,7 @@ pub fn registerCommands(gpa: std.mem.Allocator, commands: *core.command.Commands
     });
     _ = try commands.bind(gpa, "share-presence", .{
         .name = "share-presence",
-        .summary = "Share your cursor with peers (on|off); off by default, separate from sharing a buffer.",
+        .summary = "Share your cursor with peers (on|off); off retracts it, separate from sharing a buffer.",
         .args = &.{.{ .name = "state", .type = .string }},
         .handler = sharePresenceHandler,
         .data = sc,

@@ -62,8 +62,10 @@ last_presence: ?PublishedPresence = null,
 /// projected offset here would silently attach it to the wrong character after
 /// concurrent edits.
 presence: std.ArrayList(PeerPresence) = .empty,
-/// Publish our own cursor. Opt-in: sharing a document emits no presence
-/// unless the sharer separately selects it.
+/// Publish our own cursor. The mechanism bundles nothing: sharing a document
+/// emits no presence unless the sharer selects it. Interactive share paths
+/// pre-select it visibly (`app/collab.zig`); hubs and programmatic shares
+/// leave it off.
 publish_presence: bool = false,
 /// Hub relay: re-publish received presence to the other sessions.
 relay: ?*const fn (?*anyopaque, key: u64, payload: []const u8) void = null,
@@ -194,10 +196,14 @@ pub fn rebind(self: *Collab, new_session: *Session) void {
 }
 
 /// Select or withdraw cursor publishing. Selecting it republishes on the
-/// next tick even when the caret has not moved since.
-pub fn setPublishPresence(self: *Collab, on: bool) void {
-    if (on and !self.publish_presence) self.clearLastPresence();
+/// next tick even when the caret has not moved since; withdrawing it retracts
+/// the published cursor, so a peer stops rendering it instead of holding the
+/// last position we sent.
+pub fn setPublishPresence(self: *Collab, on: bool) !void {
+    if (on == self.publish_presence) return;
     self.publish_presence = on;
+    self.clearLastPresence();
+    if (!on) try self.postPresenceRemoval();
 }
 
 fn clearLastPresence(self: *Collab) void {
@@ -559,6 +565,16 @@ fn publishPresence(self: *Collab) !void {
     self.last_presence = .{ .position = position };
 }
 
+/// `present=0`: remove our published cursor on every peer.
+fn postPresenceRemoval(self: *Collab) !void {
+    var payload: std.ArrayList(u8) = .empty;
+    defer payload.deinit(self.gpa);
+    try wire.putUv(self.gpa, &payload, self.name.len);
+    try payload.appendSlice(self.gpa, self.name);
+    try payload.append(self.gpa, 0);
+    try self.session.postFeed(self.base + 1, nameKey(self.name), payload.items);
+}
+
 fn publishPresenceAbsent(self: *Collab, recheck: AbsenceRecheck) !void {
     if (self.last_presence) |last| switch (last) {
         .absent => |prior| if (prior.recheck == recheck and
@@ -566,12 +582,7 @@ fn publishPresenceAbsent(self: *Collab, recheck: AbsenceRecheck) !void {
             prior.source.selection_anchor == self.selection_anchor) return,
         .position => {},
     };
-    var payload: std.ArrayList(u8) = .empty;
-    defer payload.deinit(self.gpa);
-    try wire.putUv(self.gpa, &payload, self.name.len);
-    try payload.appendSlice(self.gpa, self.name);
-    try payload.append(self.gpa, 0);
-    try self.session.postFeed(self.base + 1, nameKey(self.name), payload.items);
+    try self.postPresenceRemoval();
     self.clearLastPresence();
     self.last_presence = .{ .absent = .{
         .source = .{

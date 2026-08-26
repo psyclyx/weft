@@ -210,7 +210,7 @@ test "session+collab: two instances converge over an encrypted link with presenc
     try t.expectEqualStrings("alice", cb.presence_layer.?.resolvedSpan(0).message);
 }
 
-test "collab: sharing text emits no presence until the sharer selects it" {
+test "collab: a programmatic share emits no presence; selecting it publishes, withdrawing retracts" {
     const gpa = t.allocator;
     const fds = try socketPair();
     var la: FdLink = .{ .fd = fds[0] };
@@ -252,7 +252,7 @@ test "collab: sharing text emits no presence until the sharer selects it" {
     try t.expectEqual(@as(usize, 0), cb.presence_layer.?.spanCount());
 
     // Selecting it publishes over the same link, without a further move.
-    ca.setPublishPresence(true);
+    try ca.setPublishPresence(true);
     const presence_deadline = task.nowNs() + 5 * std.time.ns_per_s;
     while (task.nowNs() < presence_deadline and cb.presence_layer.?.spanCount() == 0) {
         _ = try ca.tick(3);
@@ -261,6 +261,17 @@ test "collab: sharing text emits no presence until the sharer selects it" {
     }
     try t.expect(cb.presence_layer.?.spanCount() > 0);
     try t.expectEqualStrings("alice", cb.presence_layer.?.resolvedSpan(0).message);
+
+    // Withdrawing it retracts the caret rather than leaving bob rendering
+    // alice's last position forever.
+    try ca.setPublishPresence(false);
+    const retract_deadline = task.nowNs() + 5 * std.time.ns_per_s;
+    while (task.nowNs() < retract_deadline and cb.presence_layer.?.spanCount() > 0) {
+        _ = try ca.tick(3);
+        _ = try cb.tick(0);
+        futexWaitTimed(&sb.out_wake, sb.out_wake.load(.acquire), std.time.ns_per_ms);
+    }
+    try t.expectEqual(@as(usize, 0), cb.presence_layer.?.spanCount());
 }
 
 test "conn: shared buffers both ways over one link — offers, open, converge, presence per quad" {

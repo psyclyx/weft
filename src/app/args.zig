@@ -36,10 +36,11 @@ pub const Args = struct {
     /// --share-fs <none|read|rw>: the access peers get to --share-root. Default
     /// none (deny) even when a root is set, so sharing is a deliberate choice.
     share_fs: core.peer_fs.Access = .none,
-    /// --share-presence: publish our caret to peers. Default off — sharing a
-    /// document emits no presence unless it is separately selected (the
-    /// `share-presence` command flips it at runtime).
-    share_presence: bool = false,
+    /// --share-presence / --no-share-presence: publish our caret to peers.
+    /// Null = unstated, leaving the choice to config and then the interactive
+    /// default (`collab.presenceDefault`); the `share-presence` command flips
+    /// it at runtime.
+    share_presence: ?bool = null,
 };
 
 pub fn parseArgs(process_args: std.process.Args) Args {
@@ -73,6 +74,8 @@ pub fn parseArgs(process_args: std.process.Args) Args {
                 .none;
         } else if (std.mem.eql(u8, a, "--share-presence")) {
             out.share_presence = true;
+        } else if (std.mem.eql(u8, a, "--no-share-presence")) {
+            out.share_presence = false;
         } else if (std.mem.eql(u8, a, "--connect")) {
             out.connect = it.next() orelse out.connect;
         } else if (std.mem.eql(u8, a, "--token")) {

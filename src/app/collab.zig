@@ -33,6 +33,29 @@ pub fn selectionAnchorOf(ed: *const core.Editor) usize {
     return cur;
 }
 
+// ── Presence policy ─────────────────────────────────────────────────
+
+/// Whether the interactive editor pre-selects cursor sharing. A person who
+/// shares a document expects their peer to see where they are, so the
+/// interactive default is on and every share path says so; `flag`
+/// (`--share-presence`/`--no-share-presence`) and then `configured` (the
+/// `collab.share-presence` record, `on`|`off`) opt out. Mechanism-level
+/// paths — hubs, programmatic shares — never consult this: they stay off.
+pub fn presenceDefault(flag: ?bool, configured: ?[]const u8) bool {
+    if (flag) |on| return on;
+    if (configured) |value| return !std.mem.eql(u8, value, "off");
+    return true;
+}
+
+/// The presence half of a share echo: what a peer will see of your cursor,
+/// and the command that changes it.
+pub fn presenceNote(on: bool) []const u8 {
+    return if (on)
+        "presence on — share-presence off to hide your cursor"
+    else
+        "presence off";
+}
+
 // ── Buffer sharing over the connection ──────────────────────────────
 
 /// A buffer shared over the hub, remembered so late-joining peers can be
@@ -66,9 +89,11 @@ pub const ShareCtx = struct {
     /// served to peers, and the grant. Null root ⇒ serve no fs (default).
     peer_fs_root: ?*core.rooted_fs.RootedFs = null,
     fs_grant: core.peer_fs.Grant = .{},
-    /// Opt-in cursor sharing (--share-presence / the `share-presence`
-    /// command): read at share time to decide whether a newly wired collab
-    /// emits our caret. False ⇒ sharing text emits no presence.
+    /// Cursor sharing: read at share time to decide whether a newly wired
+    /// collab emits our caret. False ⇒ sharing text emits no presence — the
+    /// mechanism default, kept by hubs and programmatic shares. The
+    /// interactive editor sets it from `presenceDefault` at startup and the
+    /// `share-presence` command flips it at runtime.
     publish_presence: bool = false,
     peer_fs_service: ?core.peer_fs.Service = null,
     /// Published by `Collab.reconcileRemoteFilesystem`; commands only see an
@@ -299,6 +324,7 @@ pub const Collab = struct {
             self.partial_state = core.session.PartialDoc.init(gpa, &ed0.doc);
             col.partial = &self.partial_state.?;
         }
+        std.log.info("connected to {s} ({s})", .{ hp, presenceNote(self.share_ctx.publish_presence) });
     }
 
     /// Whether THIS `Collab` is bound to a live connection right now — an
@@ -531,8 +557,8 @@ pub fn startListen(
         return;
     };
     if (sc.primary_doc) |pd| _ = caps.layers.claim(gpa, pd, "presence", .replicated, "collab") catch {};
-    var buf: [32]u8 = undefined;
-    setEcho(echo, gpa, std.fmt.bufPrint(&buf, "listening on {d}", .{port}) catch "listening");
+    var buf: [96]u8 = undefined;
+    setEcho(echo, gpa, std.fmt.bufPrint(&buf, "listening on {d} ({s})", .{ port, presenceNote(sc.publish_presence) }) catch "listening");
 }
 
 /// Pooled TCP connect (a copy of providers.reconnectTask, kept local so
@@ -601,7 +627,8 @@ pub fn applyIntents(
         } else if (pool.spawn(reconnectTask, .{hostport})) |h| {
             connect_task.* = h;
             connect_hostport.* = hostport; // freed when the handle is polled
-            setEcho(echo, gpa, "connecting…");
+            var buf: [96]u8 = undefined;
+            setEcho(echo, gpa, std.fmt.bufPrint(&buf, "connecting… ({s})", .{presenceNote(sc.publish_presence)}) catch "connecting…");
         } else |_| {
             gpa.free(hostport);
             setEcho(echo, gpa, "connect: out of memory");
@@ -857,5 +884,31 @@ pub fn runtimeConnectFinish(
     sc.session.* = sess;
     sc.conn.* = c;
     try ctx.buffers.switchTo(gpa, id, ctx.head, ctx.keymap);
-    std.log.info("connected to {s}", .{hostport});
+    std.log.info("connected to {s} ({s})", .{ hostport, presenceNote(sc.publish_presence) });
+}
+
+test "presence: interactive sharing pre-selects a legible cursor; the mechanism bundles nothing" {
+    const expect = std.testing.expect;
+    // Interactive default: on, and the echo names the way out.
+    try expect(presenceDefault(null, null));
+    try std.testing.expectEqualStrings(
+        "presence on — share-presence off to hide your cursor",
+        presenceNote(presenceDefault(null, null)),
+    );
+    // Each opt-out, in precedence order.
+    try expect(!presenceDefault(false, null));
+    try expect(!presenceDefault(null, "off"));
+    try expect(presenceDefault(true, "off"));
+    try expect(presenceDefault(null, "on"));
+    // A share surface built without that selection emits nothing.
+    const sc: ShareCtx = .{
+        .gpa = std.testing.allocator,
+        .buffers = undefined,
+        .conn = undefined,
+        .hub = undefined,
+        .caps = undefined,
+        .partial = undefined,
+    };
+    try expect(!sc.publish_presence);
+    try std.testing.expectEqualStrings("presence off", presenceNote(sc.publish_presence));
 }
