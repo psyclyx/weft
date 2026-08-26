@@ -1106,6 +1106,136 @@ test "e2e/output: Return on a `file:line` in run output jumps there" {
     try t.expect(std.mem.indexOf(u8, disk, "const b = 2;") != null);
 }
 
+// ── Truncate-then-act: a path or a name must cross whole or not at all ──
+//
+// grep-visit and output-visit once copied the matched path into a fixed
+// 1024-byte scratch before opening it, and the tool plugins compared a buffer
+// name through a 256-byte copy. Both caps are gone; these fixtures keep them
+// gone by working paths and names that overflow them.
+
+/// A relative path under `dir_count` 200-byte directories, ending in `leaf` —
+/// longer than any fixed scratch a plugin might copy it into. Caller frees.
+fn deepPath(gpa: std.mem.Allocator, dir_count: usize, leaf: []const u8) ![]u8 {
+    var out: std.ArrayList(u8) = .empty;
+    errdefer out.deinit(gpa);
+    for (0..dir_count) |i| {
+        try out.appendNTimes(gpa, 'a' + @as(u8, @intCast(i)), 200);
+        try out.append(gpa, '/');
+    }
+    try out.appendSlice(gpa, leaf);
+    return out.toOwnedSlice(gpa);
+}
+
+/// Create `path`'s parents and write `body` into it, through the shell oracle.
+fn writeDeepFile(proj: *Project, path: []const u8, body: []const u8) !void {
+    const cmd = try std.fmt.allocPrint(
+        proj.gpa,
+        "mkdir -p -- \"$(dirname -- '{s}')\" && printf '{s}' > '{s}'",
+        .{ path, body, path },
+    );
+    defer proj.gpa.free(cmd);
+    const out = try proj.oracle(cmd);
+    proj.gpa.free(out);
+}
+
+test "e2e/regression: a >1024-byte match path opens the file it names, whole" {
+    const gpa = t.allocator;
+    var proj: Project = undefined;
+    try proj.init(gpa);
+    defer proj.deinit();
+
+    var ed: Editor = undefined;
+    try Editor.init(gpa, &ed);
+    defer ed.deinit();
+    try loadWebIde(&ed);
+
+    const deep = try deepPath(gpa, 6, "app.js");
+    defer gpa.free(deep);
+    try t.expect(deep.len > 1024);
+    try writeDeepFile(&proj, deep, "const a = 1;\\nconst target = 42;\\nconst b = 2;\\n");
+
+    // grep's Return: rg reports the whole path, so the visit must open the
+    // whole path — a truncated prefix names a directory that isn't a file.
+    ed.runStr("grep", "target");
+    try t.expect(drainToolContains(&ed, "*grep*", "app.js:2:"));
+    ed.press("k", "");
+    ed.press("k", "");
+    ed.press("Return", "");
+    try t.expectEqualStrings("normal", ed.mode());
+
+    // Deleting the current line proves we landed on the match inside the real
+    // file, and the disk read proves which file that was.
+    ed.chord("d d");
+    ed.run("save");
+    ed.waitSave();
+    {
+        const disk = try core.file.readAlloc(gpa, deep);
+        defer gpa.free(disk);
+        try t.expect(std.mem.indexOf(u8, disk, "target") == null);
+        try t.expect(std.mem.indexOf(u8, disk, "const a = 1;") != null);
+    }
+
+    // run's Return takes the same path out of a mid-line location.
+    const trace = try std.fmt.allocPrint(gpa, "echo 'trace: {s}:2:5 boom'", .{deep});
+    defer gpa.free(trace);
+    ed.runStr("run-command", trace);
+    try t.expect(drainToolContains(&ed, "*output*", "app.js:2:5"));
+    ed.press("k", "");
+    ed.press("Return", "");
+    try t.expectEqualStrings("normal", ed.mode());
+
+    ed.chord("d d");
+    ed.run("save");
+    ed.waitSave();
+    {
+        const disk = try core.file.readAlloc(gpa, deep);
+        defer gpa.free(disk);
+        try t.expect(std.mem.indexOf(u8, disk, "const b = 2;") == null); // line 2 by now
+        try t.expect(std.mem.indexOf(u8, disk, "const a = 1;") != null);
+    }
+}
+
+test "e2e/regression: a >256-byte buffer name reaches a plugin whole" {
+    const gpa = t.allocator;
+    var app: App = undefined;
+    try app.init(gpa);
+    defer app.deinit();
+    const ed = &app.ed;
+
+    // A directory named to NAME_MAX: its `files:` view buffer is named past
+    // the 256-byte scratch the tool plugins used to copy a name into.
+    const dir_name = try gpa.alloc(u8, 255);
+    defer gpa.free(dir_name);
+    @memset(dir_name, 'd');
+    {
+        const cmd = try std.fmt.allocPrint(gpa, "mkdir -- '{s}' && printf 'const a = 1;\\n' > '{s}'/app.js", .{ dir_name, dir_name });
+        defer gpa.free(cmd);
+        const out = try app.proj.oracle(cmd);
+        gpa.free(out);
+    }
+
+    ed.runStr("open", dir_name);
+    const view_name = try gpa.dupe(u8, ed.bufferName());
+    defer gpa.free(view_name);
+    try t.expect(view_name.len > 256);
+    try t.expectEqualStrings("files: ", view_name[0..7]);
+    try t.expectEqualStrings(dir_name, view_name[7..]);
+
+    // The buffer picker is a plugin reading every buffer's name across the
+    // membrane: the long one arrives whole, so picking it lands back on it.
+    ed.chord("SPC ,");
+    ed.settle(2);
+    try t.expectEqualStrings("pick", ed.mode());
+    var listed = false;
+    for (ed.pick.items.items) |row| listed = listed or std.mem.eql(u8, row, view_name);
+    try t.expect(listed);
+
+    ed.typeText("dddd");
+    ed.settle(2);
+    ed.press("Return", "");
+    try t.expectEqualStrings(view_name, ed.bufferName());
+}
+
 test "e2e/web: author js + html, grep across them, run it with node" {
     const gpa = t.allocator;
     var proj: Project = undefined;

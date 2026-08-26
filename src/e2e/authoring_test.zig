@@ -755,6 +755,14 @@ test "authoring: format the buffer (SPC c f) — zig fmt via the format action" 
     try t.expectEqualStrings("const x = 1;\n", disk); // zig fmt's canonical form
 }
 
+// ── Real zls / lldb-dap: one server per test, deliberately ──
+//
+// A server belongs to the editor that spawned it, so pooling one across the
+// tests below means pooling the editor too — one buffer set, one document
+// version stream, one diagnostics state shared by every scenario. What that
+// buys is a fraction of a second per test; what it costs is a state-bleed
+// class. Each test boots its own editor and gets its own server.
+
 test "lsp: hover + goto-definition via the lsp plugin — real zls" {
     const gpa = t.allocator;
     var app: App = undefined;
