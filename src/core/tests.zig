@@ -516,12 +516,20 @@ test "authority: a view grade refuses edits, forms no ghost, and echoes" {
     // and an honest echo is set — no divergent local ghost.
     _ = try core.command.run(&host.commands, &host.ctx, "insert-text", &.{.{ .string = "x" }});
     try t.expectEqual(before, host.editor().text().byteLen());
-    try t.expect(host.head.echo.items.len > 0);
+    try t.expectEqualStrings("read-only: view access", host.head.echo.items);
 
     // With edit grade restored, the same command applies.
     host.editor().doc.my_grant = .own;
     _ = try core.command.run(&host.commands, &host.ctx, "insert-text", &.{.{ .string = "x" }});
     try t.expectEqual(before + 1, host.editor().text().byteLen());
+
+    // A read-only buffer is refused by the same door, and says which refusal
+    // it was — the builtin holds no permission check of its own.
+    host.buffers.active().read_only = true;
+    host.head.echo.clearRetainingCapacity();
+    _ = try core.command.run(&host.commands, &host.ctx, "insert-text", &.{.{ .string = "x" }});
+    try t.expectEqual(before + 1, host.editor().text().byteLen());
+    try t.expectEqualStrings("read-only buffer", host.head.echo.items);
 }
 
 // ── Syntax (milestone 7) ────────────────────────────────────────────

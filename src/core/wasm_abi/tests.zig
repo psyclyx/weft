@@ -2168,11 +2168,42 @@ test "wasm plugins: a view-grade peer's op.delete refuses (zero permission code)
     // But the operator's edit dies at the gate: the buffer is unchanged, and no
     // ghost commit was authored.
     const before = ed.doc.commitCount();
+    env.head.echo.clearRetainingCapacity();
     _ = try command.run(&env.commands, &env.ctx, "op.delete", &.{rv});
     const s = try ed.text().toOwnedSlice(gpa);
     defer gpa.free(s);
     try t.expectEqualStrings("foo bar", s);
     try t.expectEqual(before, ed.doc.commitCount());
+    // The guest door is silent, so the refusal is only honest because the ONE
+    // edit door echoed it — same feedback a builtin's refusal gets.
+    try t.expectEqualStrings("read-only: view access", env.head.echo.items);
+}
+
+test "wasm plugins: a read-only buffer refuses a guest edit and says so" {
+    const gpa = t.allocator;
+    var env: Env = undefined;
+    try Env.init(gpa, &env);
+    defer env.deinit(gpa);
+
+    var engine = try wasm.Engine.init();
+    defer engine.deinit();
+    const motions = try loadPlugin(&engine, &env.ctx, "motions", @embedFile("guest_motions_wasm"), .{});
+    defer motions.deinit();
+    const operators = try loadPlugin(&engine, &env.ctx, "operators", @embedFile("guest_operators_wasm"), .{});
+    defer operators.deinit();
+
+    const ed = &env.buffers.active().editor;
+    try ed.insertText(gpa, "foo bar");
+    ed.placeCursor(0);
+    env.buffers.active().read_only = true;
+
+    const rv = try command.run(&env.commands, &env.ctx, "motion.word-fwd", &.{});
+    env.head.echo.clearRetainingCapacity();
+    _ = try command.run(&env.commands, &env.ctx, "op.delete", &.{rv});
+    const s = try ed.text().toOwnedSlice(gpa);
+    defer gpa.free(s);
+    try t.expectEqualStrings("foo bar", s);
+    try t.expectEqualStrings("read-only buffer", env.head.echo.items);
 }
 
 test "wasm plugin: comment toggles a line comment, preserving indent" {

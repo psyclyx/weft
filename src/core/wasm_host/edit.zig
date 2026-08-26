@@ -121,18 +121,15 @@ pub fn hPath(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32, results
     results[0] = @intCast(n);
 }
 
-/// W4 slice 3 (north-star-plan §2.4/§6, review B2's repair): the doc-region
-/// half of the deny taxonomy — `command.Context.edit`'s NEW `error.OutOfLimit`/
-/// `error.Collapsed` (a `.doc_region` grant narrowing this edit, or that
-/// grant's identity anchors no longer resolving) MUST trap here, not
-/// silently no-op like the pre-existing `catch {}` still does for
-/// `error.Unauthorized`/`Document.AddPeerError` (a PRE-EXISTING gap this
-/// slice does not expand scope to close — see the W4 slice 3 report). [FIX
-/// 10]/§6 W4's gate is explicit: "TRAPS on identity collapse (not silently
-/// drifts)". Re-derives the resolved bounds via a second, cheap
-/// `checkDocRegion` call for the message — the same "second cheap read, not
-/// threaded through the error" convention `wasm_host/plugin.zig`'s
-/// `trapOutOfLimit` already uses for `.fs_root`.
+/// The doc-region half of the deny taxonomy: a `.doc_region` grant narrowing
+/// this edit (`error.OutOfLimit`), or that grant's identity anchors no longer
+/// resolving (`error.Collapsed`), is a FAULT — the guest asked for authority
+/// it was scoped out of, so it traps rather than drifting. A plain grade
+/// refusal (`error.Unauthorized`) is not a fault: the door already echoed it,
+/// and the guest simply gets no edit. Re-derives the resolved bounds via a
+/// second, cheap `checkDocRegion` call for the message — the same "second
+/// cheap read, not threaded through the error" convention
+/// `wasm_host/plugin.zig`'s `trapOutOfLimit` uses for `.fs_root`.
 fn trapDocRegion(p: *WasmPlugin, caller: *wasm.Caller, start: usize, end: usize, err: anyerror) void {
     switch (err) {
         error.OutOfLimit => switch (p.activeCtx().checkDocRegion(start, end)) {

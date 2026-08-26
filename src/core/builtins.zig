@@ -152,39 +152,33 @@ fn cViewApply(ctx: *Context, args: struct {}) anyerror!Value {
     return invokeSemanticAction(ctx, semantic_model.action.standard.apply);
 }
 
-/// Map an edit refusal to a visible status echo. Keymap dispatch only
-/// `log.warn`s command errors, so a grade refusal would be silent; surface
-/// it honestly and swallow it (a `view` peer editing is not an error, just
-/// not allowed). Other errors propagate.
-fn editErr(ctx: *Context, e: anyerror) anyerror!Value {
+/// Swallow an edit refusal. `Context.edit` already enforced it and echoed
+/// why, so a `view` peer typing is not a command error, just a no-op. Other
+/// errors propagate.
+fn editErr(e: anyerror) anyerror!Value {
     if (e != error.Unauthorized) return e;
-    ctx.head.echo.clearRetainingCapacity();
-    try ctx.head.echo.appendSlice(ctx.gpa, "read-only: view access");
     return ok;
 }
 
 fn cInsertText(ctx: *Context, args: struct { text: []const u8 }) anyerror!Value {
     if (try semanticFieldInput(ctx, .{ .replace_selection = args.text })) return ok;
-    if (ctx.buffer().read_only) return ok;
-    ctx.edit(ctx.editor().insertRange(), args.text) catch |e| return editErr(ctx, e);
+    ctx.edit(ctx.editor().insertRange(), args.text) catch |e| return editErr(e);
     return ok;
 }
 
 fn cDeleteBackward(ctx: *Context, args: struct {}) anyerror!Value {
     _ = args;
     if (try semanticFieldInput(ctx, .delete_previous)) return ok;
-    if (ctx.buffer().read_only) return ok;
     const r = ctx.editor().backspaceRange() orelse return ok;
-    ctx.edit(r, "") catch |e| return editErr(ctx, e);
+    ctx.edit(r, "") catch |e| return editErr(e);
     return ok;
 }
 
 fn cDeleteForward(ctx: *Context, args: struct {}) anyerror!Value {
     _ = args;
     if (try semanticFieldInput(ctx, .delete_next)) return ok;
-    if (ctx.buffer().read_only) return ok;
     const r = ctx.editor().forwardRange() orelse return ok;
-    ctx.edit(r, "") catch |e| return editErr(ctx, e);
+    ctx.edit(r, "") catch |e| return editErr(e);
     return ok;
 }
 
@@ -286,16 +280,14 @@ fn cQuit(ctx: *Context, args: struct {}) anyerror!Value {
 fn cInsertNewline(ctx: *Context, args: struct {}) anyerror!Value {
     _ = args;
     if (try semanticFieldInput(ctx, .{ .replace_selection = "\n" })) return ok;
-    if (ctx.buffer().read_only) return ok;
-    ctx.edit(ctx.editor().insertRange(), "\n") catch |e| return editErr(ctx, e);
+    ctx.edit(ctx.editor().insertRange(), "\n") catch |e| return editErr(e);
     return ok;
 }
 
 fn cInsertTab(ctx: *Context, args: struct {}) anyerror!Value {
     _ = args;
     if (try semanticFieldInput(ctx, .{ .replace_selection = "\t" })) return ok;
-    if (ctx.buffer().read_only) return ok;
-    ctx.edit(ctx.editor().insertRange(), "\t") catch |e| return editErr(ctx, e);
+    ctx.edit(ctx.editor().insertRange(), "\t") catch |e| return editErr(e);
     return ok;
 }
 

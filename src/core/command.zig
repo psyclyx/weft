@@ -259,13 +259,26 @@ pub const Context = struct {
     /// PRODUCTION (a re-render from a model), not a principal editing text
     /// it holds a scoped grant over.
     pub fn edit(self: *Context, r: Document.Range, bytes: []const u8) EditError!void {
-        if (self.buffer().read_only or self.readOnlyOverlaps(r)) return error.Unauthorized;
+        if (self.buffer().read_only) return self.refuse("read-only buffer");
+        if (self.readOnlyOverlaps(r)) return self.refuse("read-only region");
         switch (self.checkDocRegion(r.start, r.end)) {
             .ok => {},
             .out_of_limit => return error.OutOfLimit,
             .collapsed => return error.Collapsed,
         }
         return self.applyEdit(r, bytes, self.user_initiated);
+    }
+
+    /// Announce a refusal on the dispatching head's echo line and return the
+    /// refusal. The door owns visibility as well as enforcement, so a denied
+    /// edit is equally honest whichever runtime asked — a builtin, a wasm
+    /// guest's `wl_edit`, quickjs, the completion UI — with no per-call-site
+    /// reporting to keep in sync. Only the refusal path touches the echo; an
+    /// allowed keystroke allocates nothing here.
+    fn refuse(self: *Context, why: []const u8) EditError {
+        self.head.echo.clearRetainingCapacity();
+        self.head.echo.appendSlice(self.gpa, why) catch {};
+        return error.Unauthorized;
     }
 
     /// Whether `r` overlaps a read-only SPAN of the active buffer — the
@@ -304,7 +317,7 @@ pub const Context = struct {
     /// An `.agent`/`.remote` NEVER joins the user's undo even under a keystroke.
     fn applyEdit(self: *Context, r: Document.Range, bytes: []const u8, join_user: bool) EditError!void {
         const doc = self.document();
-        if (!self.gradeOn(doc).canEdit()) return error.Unauthorized;
+        if (!self.gradeOn(doc).canEdit()) return self.refuse("read-only: view access");
         const joins_user_undo = self.principal.role == .user or
             (join_user and self.principal.role == .plugin);
         if (joins_user_undo) {
