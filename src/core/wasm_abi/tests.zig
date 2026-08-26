@@ -1231,16 +1231,17 @@ test "D2: a wasm guest declares+binds a NOVEL 'ui/badge' slot; the host fires, r
     try t.expectEqualStrings("3 failing", try (try cur.field("text")).?.asStr());
     try t.expectEqual(@as(u32, 3), try (try cur.field("count")).?.asU32());
 
-    // `where` (anchor) rides through UNCHANGED — an anchor is resolved, not
-    // restamped (§4); this slice records it, doesn't resolve it (named, not
-    // built — see core/slot.zig's `push` doc).
+    // `where` is an effect-path locator: it rides through UNCHANGED, because
+    // an anchor is resolved, not restamped (§4); this slice records it,
+    // doesn't resolve it (see core/slot.zig's `push` doc).
     const where = try (try cur.field("where")).?.asAnchor();
     try t.expectEqualStrings("ci", where.agent);
     try t.expectEqual(@as(u64, 5), where.seq);
 
-    // `loc` (range) is RESTAMPED: the guest's claimed "stale-guest-claimed-
-    // version" never survives — the fired session version does. This is
-    // schema.walk's `.on_range` arm, live on `SlotHost.push`'s path (§4).
+    // `loc` is an observation-path locator, so it is RESTAMPED: the guest's
+    // claimed "stale-guest-claimed-version" never survives — the fired
+    // session version does. This is schema.walk's observation arm, live on
+    // `SlotHost.push`'s path (§4).
     const loc = try (try cur.field("loc")).?.asRange();
     try t.expectEqualStrings(fired_version, loc.version);
     try t.expect(!std.mem.eql(u8, loc.version, "stale-guest-claimed-version"));

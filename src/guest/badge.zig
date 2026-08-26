@@ -12,19 +12,16 @@ const weft = @import("weft");
 const schema = weft.schema;
 
 // The slot's schema (§6 step 1). Extended one field beyond the design doc's
-// minimal `{text, count, where}` example with a `loc: range` field — see
-// this repo's D2 slice report: a `range`-marked field gives the restamp
-// assertion (§4's "on_range live on the new path") something real to check,
-// not just a passthrough `anchor`.
+// minimal `{text, count, where}` example with a `loc` field: an
+// observation-path locator gives the restamp assertion something real to
+// check, next to the effect-path `where` the host carries through.
 const str_ty: schema.Schema = .str;
 const u32_ty: schema.Schema = .{ .scalar = .u32 };
-const anchor_ty: schema.Schema = .anchor;
-const range_ty: schema.Schema = .range;
 const fields = [_]schema.Schema.Field{
     .{ .name = "text", .ty = &str_ty },
     .{ .name = "count", .ty = &u32_ty },
-    .{ .name = "where", .ty = &anchor_ty },
-    .{ .name = "loc", .ty = &range_ty },
+    .{ .name = "where", .ty = &schema.anchor },
+    .{ .name = "loc", .ty = &schema.range },
 };
 pub const badge_schema: schema.Schema = .{ .@"struct" = &fields };
 

@@ -14,7 +14,7 @@
 //! `wl_*` imports exist, their arity, their perm gate). This file only knows
 //! how to turn a `Schema` tree + a `Value` tree into bytes and back
 //! (`encode`/`decodeCursor`), how to walk those bytes by SHAPE alone
-//! (`walk`, the restamp/anchor visitor, §4), and how a `Schema` VALUE itself
+//! (`walk`, the policy-split locator visitor, §4), and how a `Schema` VALUE itself
 //! serializes (`canonicalizeSchema`/`parseSchema`, the "meta-schema", §2.2
 //! form 2). The four new `wl_slot_*`/`wl_payload_*` imports
 //! (core/membrane/contract_data.zig) carry `(SchemaRef version, ptr, len)`
@@ -53,13 +53,14 @@ const wire = @import("weft_wire");
 
 /// Fixed-width, little-endian, C-packed. No varint for scalars — a schema
 /// field's width is known from its type, so this is both compact and
-/// zero-ambiguity (uv stays reserved for lengths/counts, where the value IS
-/// a size and varint pays off).
-pub const Scalar = enum(u8) { bool, i32, i64, u32, u64, f32, f64 };
+/// zero-ambiguity. The varint form is the separate `Schema.uv` constructor,
+/// for lengths/counts and for the pre-existing wire shapes a locator
+/// protocol registers.
+pub const Scalar = enum(u8) { bool, i32, i64, u32, u64, f32, f64, u8 };
 
 fn scalarWidth(s: Scalar) usize {
     return switch (s) {
-        .bool => 1,
+        .bool, .u8 => 1,
         .i32, .u32, .f32 => 4,
         .i64, .u64, .f64 => 8,
     };
@@ -83,10 +84,15 @@ pub const Schema = union(enum) {
     @"struct": []const Field,
     /// one presence byte (0/1), then the element if present.
     optional: *const Schema,
-    /// schema-MARKED: a stemma EventAnchor (identity) — §4's `.on_anchor`.
-    anchor,
-    /// schema-MARKED: a StampedRange (version + [s,e)) — §4's `.on_range`.
-    range,
+    /// a uv-framed unsigned — how a pre-existing wire shape spells an
+    /// integer whose width is not fixed by its type (`scalar` stays the
+    /// C-packed form; this exists so a locator protocol can state the bytes
+    /// it already carries).
+    uv,
+    /// schema-MARKED identity: a locator in the NAMED protocol (§4). The
+    /// payload shape and the walk policy come from the registration, so the
+    /// mark set is open; an unregistered name fails closed everywhere.
+    locator: []const u8,
     /// bounded tag (a case index), followed by the selected case payload.
     variant: []const Case,
 
@@ -106,10 +112,127 @@ pub const Schema = union(enum) {
 /// this file never interprets it, only carries it through.
 pub const AnchorWire = wire.AnchorWire;
 
-/// The wire form of a `range`-marked field — `(version, start, end)`, the
-/// `StampedRange` shape restated structurally (same reasoning as
+/// The wire form of a `std.text.range` locator — `(version, start, end)`,
+/// the `StampedRange` shape restated structurally (same reasoning as
 /// `AnchorWire`: no `position.zig` import needed, only the wire shape).
 pub const RangeWire = struct { version: []const u8, start: u64, end: u64 };
+
+/// Write a `std.text.range` payload — `wire.putAnchor`'s sibling for the
+/// other standard locator, so a restamping observer can rebuild the bytes it
+/// returns without restating the layout.
+pub fn putRange(gpa: Allocator, out: *std.ArrayList(u8), r: RangeWire) Allocator.Error!void {
+    try wire.putUv(gpa, out, r.version.len);
+    try out.appendSlice(gpa, r.version);
+    try wire.putUv(gpa, out, r.start);
+    try wire.putUv(gpa, out, r.end);
+}
+
+/// Read one borrowed `std.text.range` payload and advance `cur` past it.
+pub fn getRange(cur: *[]const u8) error{Corrupt}!RangeWire {
+    const vlen = try wire.getUv(cur);
+    if (vlen > cur.len) return error.Corrupt;
+    const version = cur.*[0..@intCast(vlen)];
+    cur.* = cur.*[@intCast(vlen)..];
+    const start = try wire.getUv(cur);
+    const end = try wire.getUv(cur);
+    return .{ .version = version, .start = start, .end = end };
+}
+
+// ── Locator protocols (§4) ──────────────────────────────────────────────
+
+/// What a `locator` mark names. The protocol NAME is the major version unit
+/// (`configuration.md` §5.1): a protocol never changes its payload shape or
+/// its policy — it gets a new name.
+pub const Protocol = struct {
+    name: []const u8,
+    /// The payload's wire shape — all a walker that knows nothing else about
+    /// the protocol needs in order to cross it.
+    shape: *const Schema,
+    policy: Policy,
+
+    /// Which half of §4 a locator belongs to. Observation-path locators are
+    /// host-restamped, because a provider's claimed version is never
+    /// trusted. Effect-path locators are carried verbatim: refusing or
+    /// re-resolving a stale effect locator is the caller's decision, and a
+    /// host rewrite would forge the very identity the caller must check.
+    pub const Policy = enum(u8) { observation_restamp, effect_opaque };
+};
+
+const bytes_ty: Schema = .bytes;
+const uv_ty: Schema = .uv;
+const u8_ty: Schema = .{ .scalar = .u8 };
+
+const anchor_shape_fields = [_]Schema.Field{
+    .{ .name = "agent", .ty = &bytes_ty },
+    .{ .name = "seq", .ty = &uv_ty },
+    .{ .name = "side", .ty = &u8_ty },
+};
+const anchor_shape: Schema = .{ .@"struct" = &anchor_shape_fields };
+
+const range_shape_fields = [_]Schema.Field{
+    .{ .name = "version", .ty = &bytes_ty },
+    .{ .name = "start", .ty = &uv_ty },
+    .{ .name = "end", .ty = &uv_ty },
+};
+const range_shape: Schema = .{ .@"struct" = &range_shape_fields };
+
+pub const anchor_protocol = "std.text.anchor";
+pub const range_protocol = "std.text.range";
+
+/// The two identity models D2 shipped as closed marks, restated as ordinary
+/// registrations — same payload bytes, same canonical tags. An anchor is an
+/// `(agent, seq, side)` identity resolved against a live document, so it is
+/// effect-path; a range's version token is what the host stamps, so it is
+/// observation-path.
+const standard = [_]Protocol{
+    .{ .name = anchor_protocol, .shape = &anchor_shape, .policy = .effect_opaque },
+    .{ .name = range_protocol, .shape = &range_shape, .policy = .observation_restamp },
+};
+
+/// The standard locators keep the single-byte canonical tags D2 shipped;
+/// every other protocol canonicalizes as `tag_locator` plus its name.
+const standard_tags = [standard.len]u8{ tag_anchor, tag_range };
+
+/// D2's `anchor` mark, spelled as the locator it is.
+pub const anchor: Schema = .{ .locator = anchor_protocol };
+/// D2's `range` mark, spelled as the locator it is.
+pub const range: Schema = .{ .locator = range_protocol };
+
+const max_registered_protocols = 62;
+var registered: [max_registered_protocols]Protocol = undefined;
+var registered_len: usize = 0;
+
+pub const RegisterError = error{ ProtocolExists, ProtocolLimit };
+
+/// Register a locator protocol. `name` and `shape` must outlive every schema
+/// that names the protocol — a parsed tree borrows the registration's name
+/// rather than owning a copy. Every party that decodes a payload carrying
+/// this mark must register it: an unregistered name is refused, never
+/// decoded as opaque bytes.
+pub fn registerProtocol(p: Protocol) RegisterError!void {
+    if (protocol(p.name) != null) return error.ProtocolExists;
+    if (registered_len == registered.len) return error.ProtocolLimit;
+    registered[registered_len] = p;
+    registered_len += 1;
+}
+
+/// The registration for `name`, or `null` when nothing registered it.
+pub fn protocol(name: []const u8) ?Protocol {
+    for (standard) |p| if (std.mem.eql(u8, p.name, name)) return p;
+    for (registered[0..registered_len]) |p| if (std.mem.eql(u8, p.name, name)) return p;
+    return null;
+}
+
+fn standardTag(name: []const u8) ?u8 {
+    for (standard, standard_tags) |p, tag| {
+        if (std.mem.eql(u8, p.name, name)) return tag;
+    }
+    return null;
+}
+
+fn marks(schema: *const Schema, name: []const u8) bool {
+    return schema.* == .locator and std.mem.eql(u8, schema.locator, name);
+}
 
 /// A tagged leaf/branch value fed to `encode` — the source `encode` walks in
 /// lockstep with a `Schema` tree. Positional for `struct` (matching the
@@ -119,15 +242,23 @@ pub const RangeWire = struct { version: []const u8, start: u64, end: u64 };
 /// value is distinct from a JSON schema.
 pub const Value = union(enum) {
     scalar: ScalarValue,
+    uv: u64,
     str: []const u8,
     bytes: []const u8,
     array: []const Value,
     @"struct": []const Value,
     optional: ?*const Value,
+    /// The typed spelling of a `std.text.anchor` locator.
     anchor: AnchorWire,
+    /// The typed spelling of a `std.text.range` locator.
     range: RangeWire,
+    locator: LocatorValue,
     variant: VariantValue,
 };
+
+/// A locator payload for a protocol this file has no typed spelling for:
+/// `payload` is a value of the registration's `shape`.
+pub const LocatorValue = struct { protocol: []const u8, payload: *const Value };
 
 /// The selected payload for a `Schema.variant`. `tag` is an index into the
 /// schema's case table, not an open-ended wire enum. A pointer keeps the
@@ -144,11 +275,12 @@ pub const ScalarValue = union(Scalar) {
     u64: u64,
     f32: f32,
     f64: f64,
+    u8: u8,
 };
 
 // ── Encode (§3.1: a pre-order walk, no tags, no padding) ────────────────
 
-pub const EncodeError = error{SchemaMismatch} || Allocator.Error;
+pub const EncodeError = error{ SchemaMismatch, UnknownProtocol } || Allocator.Error;
 
 /// Encode `value` against `schema` — a pre-order walk emitting bytes with NO
 /// tags and NO padding (§3.1). `error.SchemaMismatch` when `value`'s shape
@@ -190,6 +322,7 @@ pub fn splitVersion(bytes: []const u8) DecodeError!VersionedPayload {
 fn writeScalar(gpa: Allocator, list: *std.ArrayList(u8), v: ScalarValue) Allocator.Error!void {
     switch (v) {
         .bool => |b| try list.append(gpa, @intFromBool(b)),
+        .u8 => |x| try list.append(gpa, x),
         inline .i32, .u32 => |x| {
             var buf: [4]u8 = undefined;
             std.mem.writeInt(@TypeOf(x), &buf, x, .little);
@@ -247,17 +380,27 @@ fn encodeInto(gpa: Allocator, list: *std.ArrayList(u8), schema: *const Schema, v
                 try list.append(gpa, 0);
             }
         },
-        .anchor => {
-            if (value != .anchor) return error.SchemaMismatch;
-            try wire.putAnchor(gpa, list, value.anchor);
+        .uv => {
+            if (value != .uv) return error.SchemaMismatch;
+            try wire.putUv(gpa, list, value.uv);
         },
-        .range => {
-            if (value != .range) return error.SchemaMismatch;
-            const r = value.range;
-            try wire.putUv(gpa, list, r.version.len);
-            try list.appendSlice(gpa, r.version);
-            try wire.putUv(gpa, list, r.start);
-            try wire.putUv(gpa, list, r.end);
+        .locator => |name| {
+            const p = protocol(name) orelse return error.UnknownProtocol;
+            switch (value) {
+                .anchor => |a| {
+                    if (!std.mem.eql(u8, name, anchor_protocol)) return error.SchemaMismatch;
+                    try wire.putAnchor(gpa, list, a);
+                },
+                .range => |r| {
+                    if (!std.mem.eql(u8, name, range_protocol)) return error.SchemaMismatch;
+                    try putRange(gpa, list, r);
+                },
+                .locator => |l| {
+                    if (!std.mem.eql(u8, l.protocol, name)) return error.SchemaMismatch;
+                    try encodeInto(gpa, list, p.shape, l.payload.*);
+                },
+                else => return error.SchemaMismatch,
+            }
         },
         .variant => |cases| {
             if (value != .variant or value.variant.tag >= cases.len) return error.SchemaMismatch;
@@ -269,7 +412,7 @@ fn encodeInto(gpa: Allocator, list: *std.ArrayList(u8), schema: *const Schema, v
 
 // ── Decode: the dynamic cursor (§3.1/§3.3 — the runtime interpreter path) ─
 
-pub const DecodeError = error{ Corrupt, SchemaMismatch };
+pub const DecodeError = error{ Corrupt, SchemaMismatch, UnknownProtocol };
 
 /// A value's position in a schema-encoded buffer: WHAT it should be
 /// (`schema`) and WHERE its bytes start (`bytes`, which may extend past the
@@ -325,22 +468,15 @@ pub const Cursor = struct {
                 const sub: Cursor = .{ .schema = elem, .bytes = self.bytes[1..] };
                 return 1 + try sub.skip();
             },
-            .anchor => {
+            .uv => {
                 var cur = self.bytes;
-                _ = wire.getAnchor(&cur) catch return error.Corrupt;
+                _ = wire.getUv(&cur) catch return error.Corrupt;
                 return self.bytes.len - cur.len;
             },
-            .range => {
-                var cur = self.bytes;
-                const vlen = wire.getUv(&cur) catch return error.Corrupt;
-                var consumed = self.bytes.len - cur.len;
-                if (vlen > cur.len) return error.Corrupt;
-                consumed += @as(usize, @intCast(vlen));
-                if (consumed > self.bytes.len) return error.Corrupt;
-                cur = self.bytes[consumed..];
-                _ = wire.getUv(&cur) catch return error.Corrupt; // start
-                _ = wire.getUv(&cur) catch return error.Corrupt; // end
-                return self.bytes.len - cur.len;
+            .locator => |name| {
+                const p = protocol(name) orelse return error.UnknownProtocol;
+                const sub: Cursor = .{ .schema = p.shape, .bytes = self.bytes };
+                return sub.skip();
             },
             .variant => |cases| {
                 var cur = self.bytes;
@@ -364,6 +500,14 @@ pub const Cursor = struct {
     pub fn asBool(self: Cursor) DecodeError!bool {
         const b = try self.requireScalar(.bool);
         return b[0] != 0;
+    }
+    pub fn asU8(self: Cursor) DecodeError!u8 {
+        return (try self.requireScalar(.u8))[0];
+    }
+    pub fn asUv(self: Cursor) DecodeError!u64 {
+        if (self.schema.* != .uv) return error.SchemaMismatch;
+        var cur = self.bytes;
+        return wire.getUv(&cur) catch error.Corrupt;
     }
     pub fn asI32(self: Cursor) DecodeError!i32 {
         return std.mem.readInt(i32, &(try self.requireScalar(.i32)), .little);
@@ -401,20 +545,22 @@ pub const Cursor = struct {
         return cur[0..@intCast(n)];
     }
     pub fn asAnchor(self: Cursor) DecodeError!AnchorWire {
-        if (self.schema.* != .anchor) return error.SchemaMismatch;
+        if (!marks(self.schema, anchor_protocol)) return error.SchemaMismatch;
         var cur = self.bytes;
         return wire.getAnchor(&cur) catch return error.Corrupt;
     }
     pub fn asRange(self: Cursor) DecodeError!RangeWire {
-        if (self.schema.* != .range) return error.SchemaMismatch;
+        if (!marks(self.schema, range_protocol)) return error.SchemaMismatch;
         var cur = self.bytes;
-        const vlen = wire.getUv(&cur) catch return error.Corrupt;
-        if (vlen > cur.len) return error.Corrupt;
-        const version = cur[0..@intCast(vlen)];
-        cur = cur[@intCast(vlen)..];
-        const start = wire.getUv(&cur) catch return error.Corrupt;
-        const end = wire.getUv(&cur) catch return error.Corrupt;
-        return .{ .version = version, .start = start, .end = end };
+        return getRange(&cur) catch return error.Corrupt;
+    }
+
+    /// The generic locator accessor: the registration plus a cursor over the
+    /// payload, for a protocol this file has no typed reader for.
+    pub fn enterLocator(self: Cursor) DecodeError!LocatorCursor {
+        const name = if (self.schema.* == .locator) self.schema.locator else return error.SchemaMismatch;
+        const p = protocol(name) orelse return error.UnknownProtocol;
+        return .{ .protocol = p, .payload = .{ .schema = p.shape, .bytes = self.bytes } };
     }
 
     /// Enter a tagged variant and validate its bounded case index. The
@@ -471,6 +617,13 @@ pub const ArrayCursor = struct {
         self.idx += 1;
         return cur;
     }
+};
+
+/// A dynamically decoded locator: its registration and a cursor positioned
+/// at the payload, described by the registration's `shape`.
+pub const LocatorCursor = struct {
+    protocol: Protocol,
+    payload: Cursor,
 };
 
 /// A dynamically decoded variant. `tag` is guaranteed to be in `cases`; use
@@ -551,35 +704,43 @@ pub fn decodeCursor(schema: *const Schema, bytes: []const u8) Cursor {
 
 // ── walk: the restamp/grant visitor (§4) ─────────────────────────────────
 
-/// `.on_range` is called once per `range`-marked field, given its CURRENT
-/// wire form, and returns the version bytes to stamp instead (§4: "the host
-/// rewrites field.version := fired_version... the provider's claimed
-/// version is never trusted"); returning the SAME bytes it was given is a
-/// legal no-op rewrite. `.on_anchor` is called once per `anchor`-marked
-/// field, read-only (§4: "an anchor is NOT restamped — it is RESOLVED
-/// against the live document"); this file has no live document to resolve
-/// against, so it only ever offers the raw wire form up to the caller.
-/// Either callback may be `null` (a walk that only cares about one mark).
+/// One locator the walk crossed: its registration and the payload bytes,
+/// borrowed from the buffer being walked.
+pub const LocatorWire = struct { protocol: Protocol, payload: []const u8 };
+
+/// The walk is split by the crossed locator's POLICY, not by its protocol —
+/// which is what keeps the mark set open.
+///
+/// `.on_observation` fires for every `observation_restamp` locator: append a
+/// replacement payload to `out` and return `true` to restamp it, or return
+/// `false` to carry the provider's bytes through (§4: "the provider's
+/// claimed version is never trusted"). `.on_effect` fires for every
+/// `effect_opaque` locator and is read-only — the host never rewrites an
+/// effect locator, because refusing or re-resolving a stale one is the
+/// caller's decision and a rewrite would forge the identity the caller must
+/// check. Either callback may be `null`.
 pub const RestampVisitor = struct {
     ctx: ?*anyopaque = null,
-    on_range: ?*const fn (ctx: ?*anyopaque, r: RangeWire) []const u8 = null,
-    on_anchor: ?*const fn (ctx: ?*anyopaque, a: AnchorWire) void = null,
+    on_observation: ?*const fn (
+        ctx: ?*anyopaque,
+        loc: LocatorWire,
+        gpa: Allocator,
+        out: *std.ArrayList(u8),
+    ) (DecodeError || Allocator.Error)!bool = null,
+    on_effect: ?*const fn (ctx: ?*anyopaque, loc: LocatorWire) void = null,
 };
 
 /// Generalizes `capability.zig`'s three hand-walked `switch`es
 /// (`restamp`/`dupePayload`/`Result.deinit`) into ONE schema-directed walk
 /// (§4): copies `bytes` structurally (every scalar/str/bytes/array/struct/
-/// optional field verbatim), calling `visitor.on_range`/`.on_anchor` for
-/// each marked field it crosses. Returns a FRESH buffer rather than
-/// mutating `bytes` in place — §4's pseudocode reads like an in-place
-/// rewrite, but a `range`'s version token is a variable-length STRING
-/// (`position.StampedRange._version: []const u8`, restated here as
-/// `RangeWire.version`); a new stamp of a different byte length cannot
-/// always be written into the old one's slot without shifting every byte
-/// after it, so this walk allocates and copies once instead of mutating in
-/// place. Still ONE traversal, one implementation, replacing three —
-/// `SlotHost.push` (core/slot.zig) is this walk's first live caller (§4's
-/// "on_range live on the new path").
+/// optional field verbatim), dispatching each `locator` mark it crosses to
+/// the visitor arm its protocol's policy selects. Returns a FRESH buffer
+/// rather than mutating `bytes` in place — §4's pseudocode reads like an
+/// in-place rewrite, but a restamped payload (a range's version token is a
+/// variable-length STRING) need not be the byte length it replaces, so this
+/// walk allocates and copies once instead of shifting everything after it.
+/// Still ONE traversal, one implementation, replacing three —
+/// `SlotHost.push` (core/slot.zig) is this walk's first live caller.
 pub fn walk(gpa: Allocator, schema: *const Schema, bytes: []const u8, visitor: RestampVisitor) (DecodeError || Allocator.Error)![]u8 {
     var out: std.ArrayList(u8) = .empty;
     errdefer out.deinit(gpa);
@@ -633,22 +794,29 @@ fn walkInto(gpa: Allocator, out: *std.ArrayList(u8), schema: *const Schema, byte
             try out.append(gpa, 1);
             return 1 + try walkInto(gpa, out, elem, bytes[1..], visitor);
         },
-        .anchor => {
-            const cur: Cursor = .{ .schema = schema, .bytes = bytes };
-            const a = try cur.asAnchor();
-            if (visitor.on_anchor) |cb| cb(visitor.ctx, a);
-            try wire.putAnchor(gpa, out, a);
-            return try cur.skip();
+        .uv => {
+            var cur = bytes;
+            const n = wire.getUv(&cur) catch return error.Corrupt;
+            try wire.putUv(gpa, out, n);
+            return bytes.len - cur.len;
         },
-        .range => {
-            const cur: Cursor = .{ .schema = schema, .bytes = bytes };
-            const r = try cur.asRange();
+        .locator => |name| {
+            const p = protocol(name) orelse return error.UnknownProtocol;
+            const cur: Cursor = .{ .schema = p.shape, .bytes = bytes };
             const consumed = try cur.skip();
-            const new_version = if (visitor.on_range) |cb| cb(visitor.ctx, r) else r.version;
-            try wire.putUv(gpa, out, new_version.len);
-            try out.appendSlice(gpa, new_version);
-            try wire.putUv(gpa, out, r.start);
-            try wire.putUv(gpa, out, r.end);
+            if (consumed > bytes.len) return error.Corrupt;
+            const loc: LocatorWire = .{ .protocol = p, .payload = bytes[0..consumed] };
+            switch (p.policy) {
+                .observation_restamp => {
+                    if (visitor.on_observation) |cb| {
+                        if (try cb(visitor.ctx, loc, gpa, out)) return consumed;
+                    }
+                },
+                .effect_opaque => {
+                    if (visitor.on_effect) |cb| cb(visitor.ctx, loc);
+                },
+            }
+            try out.appendSlice(gpa, loc.payload);
             return consumed;
         },
         .variant => |cases| {
@@ -696,10 +864,14 @@ const tag_optional: u8 = 11;
 const tag_anchor: u8 = 12;
 const tag_range: u8 = 13;
 const tag_variant: u8 = 14;
+const tag_u8: u8 = 15;
+const tag_uv: u8 = 16;
+const tag_locator: u8 = 17;
 
 fn scalarTag(s: Scalar) u8 {
     return switch (s) {
         .bool => tag_bool,
+        .u8 => tag_u8,
         .i32 => tag_i32,
         .i64 => tag_i64,
         .u32 => tag_u32,
@@ -736,7 +908,8 @@ fn validateSchemaInner(schema: *const Schema, state: *ValidationState, depth: us
     if (depth > maxSchemaDepth or state.nodes >= maxSchemaNodes) return error.InvalidSchema;
     state.nodes += 1;
     switch (schema.*) {
-        .scalar, .str, .bytes, .anchor, .range => {},
+        .scalar, .str, .bytes, .uv => {},
+        .locator => |name| if (protocol(name) == null) return error.InvalidSchema,
         .array => |elem| try validateSchemaInner(elem, state, depth + 1),
         .optional => |elem| try validateSchemaInner(elem, state, depth + 1),
         .variant => |cases| {
@@ -792,8 +965,16 @@ fn canonicalizeInto(gpa: Allocator, list: *std.ArrayList(u8), schema: *const Sch
             try list.append(gpa, tag_optional);
             try canonicalizeInto(gpa, list, elem);
         },
-        .anchor => try list.append(gpa, tag_anchor),
-        .range => try list.append(gpa, tag_range),
+        .uv => try list.append(gpa, tag_uv),
+        .locator => |name| {
+            if (standardTag(name)) |tag| {
+                try list.append(gpa, tag);
+            } else {
+                try list.append(gpa, tag_locator);
+                try wire.putUv(gpa, list, name.len);
+                try list.appendSlice(gpa, name);
+            }
+        },
         .variant => |cases| {
             try list.append(gpa, tag_variant);
             try wire.putUv(gpa, list, cases.len);
@@ -845,10 +1026,22 @@ fn parseOne(state: *ParseState, cur: *[]const u8, depth: usize) (DecodeError || 
         tag_u64 => .{ .scalar = .u64 },
         tag_f32 => .{ .scalar = .f32 },
         tag_f64 => .{ .scalar = .f64 },
+        tag_u8 => .{ .scalar = .u8 },
         tag_str => .str,
         tag_bytes => .bytes,
-        tag_anchor => .anchor,
-        tag_range => .range,
+        tag_uv => .uv,
+        tag_anchor => anchor,
+        tag_range => range,
+        tag_locator => blk: {
+            const nlen = wire.getUv(cur) catch return error.Corrupt;
+            if (nlen == 0 or nlen > maxSchemaName or nlen > cur.len) return error.Corrupt;
+            const name = cur.*[0..@intCast(nlen)];
+            cur.* = cur.*[@intCast(nlen)..];
+            // A standard locator has exactly one canonical spelling.
+            if (standardTag(name) != null) return error.Corrupt;
+            const p = protocol(name) orelse return error.UnknownProtocol;
+            break :blk .{ .locator = p.name };
+        },
         tag_array => .{ .array = try parseOne(state, cur, depth + 1) },
         tag_optional => .{ .optional = try parseOne(state, cur, depth + 1) },
         tag_struct => blk: {
@@ -962,7 +1155,7 @@ pub fn freeSchema(gpa: Allocator, schema: *const Schema) void {
             }
             gpa.free(@constCast(cases));
         },
-        .scalar, .str, .bytes, .anchor, .range => {},
+        .scalar, .str, .bytes, .uv, .locator => {},
     }
     gpa.destroy(@as(*Schema, @constCast(schema)));
 }
@@ -974,7 +1167,8 @@ pub fn schemaEql(a: *const Schema, b: *const Schema) bool {
     if (@as(std.meta.Tag(Schema), a.*) != @as(std.meta.Tag(Schema), b.*)) return false;
     return switch (a.*) {
         .scalar => a.scalar == b.scalar,
-        .str, .bytes, .anchor, .range => true,
+        .str, .bytes, .uv => true,
+        .locator => std.mem.eql(u8, a.locator, b.locator),
         .array => schemaEql(a.array, b.array),
         .optional => schemaEql(a.optional, b.optional),
         .variant => blk: {
@@ -1003,6 +1197,27 @@ pub fn schemaEql(a: *const Schema, b: *const Schema) bool {
 
 const t = std.testing;
 
+/// A host that stamps every observation locator it understands with its own
+/// version and refuses one it doesn't — the fail-closed shape `SlotHost`
+/// uses on the live path.
+const RestampCtx = struct {
+    version: []const u8,
+
+    fn restamp(
+        c: ?*anyopaque,
+        loc: LocatorWire,
+        gpa: Allocator,
+        out: *std.ArrayList(u8),
+    ) (DecodeError || Allocator.Error)!bool {
+        if (!std.mem.eql(u8, loc.protocol.name, range_protocol)) return error.UnknownProtocol;
+        var cur = loc.payload;
+        const r = try getRange(&cur);
+        const self: *RestampCtx = @ptrCast(@alignCast(c.?));
+        try putRange(gpa, out, .{ .version = self.version, .start = r.start, .end = r.end });
+        return true;
+    }
+};
+
 test "schema: scalar round-trip, every Scalar kind" {
     const gpa = t.allocator;
     inline for (std.meta.fields(Scalar)) |f| {
@@ -1010,6 +1225,7 @@ test "schema: scalar round-trip, every Scalar kind" {
         const schema: Schema = .{ .scalar = sk };
         const value: Value = .{ .scalar = switch (sk) {
             .bool => .{ .bool = true },
+            .u8 => .{ .u8 = 200 },
             .i32 => .{ .i32 = -42 },
             .i64 => .{ .i64 = -424242 },
             .u32 => .{ .u32 = 42 },
@@ -1023,6 +1239,7 @@ test "schema: scalar round-trip, every Scalar kind" {
         const cur = decodeCursor(&schema, bytes);
         switch (sk) {
             .bool => try t.expectEqual(true, try cur.asBool()),
+            .u8 => try t.expectEqual(@as(u8, 200), try cur.asU8()),
             .i32 => try t.expectEqual(@as(i32, -42), try cur.asI32()),
             .i64 => try t.expectEqual(@as(i64, -424242), try cur.asI64()),
             .u32 => try t.expectEqual(@as(u32, 42), try cur.asU32()),
@@ -1147,24 +1364,14 @@ test "schema: variant encodes a bounded tag and selected payload" {
 
 test "schema: variant walks selected nested marks and refuses unknown/truncated tags" {
     const gpa = t.allocator;
-    const range_ty: Schema = .range;
-    const cases = [_]Schema.Case{.{ .name = "location", .ty = &range_ty }};
+    const cases = [_]Schema.Case{.{ .name = "location", .ty = &range }};
     const schema: Schema = .{ .variant = &cases };
     const value: Value = .{ .range = .{ .version = "stale", .start = 4, .end = 9 } };
     const bytes = try encode(gpa, &schema, .{ .variant = .{ .tag = 0, .payload = &value } });
     defer gpa.free(bytes);
 
-    const Ctx = struct { version: []const u8 };
-    var ctx: Ctx = .{ .version = "fresh" };
-    const rewritten = try walk(gpa, &schema, bytes, .{
-        .ctx = &ctx,
-        .on_range = struct {
-            fn cb(c: ?*anyopaque, r: RangeWire) []const u8 {
-                _ = r;
-                return @as(*Ctx, @ptrCast(@alignCast(c.?))).version;
-            }
-        }.cb,
-    });
+    var ctx: RestampCtx = .{ .version = "fresh" };
+    const rewritten = try walk(gpa, &schema, bytes, .{ .ctx = &ctx, .on_observation = RestampCtx.restamp });
     defer gpa.free(rewritten);
     const variant = try decodeCursor(&schema, rewritten).enterVariant();
     try t.expectEqualStrings("fresh", (try variant.selected().asRange()).version);
@@ -1205,23 +1412,131 @@ test "schema: variant canonicalization preserves case metadata and validates it"
     try t.expectError(error.Corrupt, parseSchema(gpa, &.{ tag_variant, 1, 1, 'x', tag_str, 255 }));
 }
 
-test "schema: anchor/range round-trip (the two schema marks)" {
+test "schema: anchor/range round-trip (the two standard locators)" {
     const gpa = t.allocator;
-    const anchor_schema: Schema = .anchor;
-    const a_bytes = try encode(gpa, &anchor_schema, .{ .anchor = .{ .agent = "alice", .seq = 9, .side = 1 } });
+    const a_bytes = try encode(gpa, &anchor, .{ .anchor = .{ .agent = "alice", .seq = 9, .side = 1 } });
     defer gpa.free(a_bytes);
-    const a = try decodeCursor(&anchor_schema, a_bytes).asAnchor();
+    const a = try decodeCursor(&anchor, a_bytes).asAnchor();
     try t.expectEqualStrings("alice", a.agent);
     try t.expectEqual(@as(u64, 9), a.seq);
     try t.expectEqual(@as(u8, 1), a.side);
 
-    const range_schema: Schema = .range;
-    const r_bytes = try encode(gpa, &range_schema, .{ .range = .{ .version = "v1", .start = 3, .end = 7 } });
+    const r_bytes = try encode(gpa, &range, .{ .range = .{ .version = "v1", .start = 3, .end = 7 } });
     defer gpa.free(r_bytes);
-    const r = try decodeCursor(&range_schema, r_bytes).asRange();
+    const r = try decodeCursor(&range, r_bytes).asRange();
     try t.expectEqualStrings("v1", r.version);
     try t.expectEqual(@as(u64, 3), r.start);
     try t.expectEqual(@as(u64, 7), r.end);
+
+    // Each typed value only encodes, and only decodes, under its own mark.
+    try t.expectError(error.SchemaMismatch, encode(gpa, &anchor, .{ .range = r }));
+    try t.expectError(error.SchemaMismatch, encode(gpa, &range, .{ .anchor = a }));
+    try t.expectError(error.SchemaMismatch, decodeCursor(&anchor, r_bytes).asRange());
+}
+
+test "schema: the standard locators register the bytes they already carried" {
+    const gpa = t.allocator;
+    // The registered SHAPE is the pre-existing wire form, byte for byte: a
+    // generic, shape-directed encode of the same values reproduces exactly
+    // what `wire.putAnchor`/`putRange` write, so a walker that knows only
+    // the registration crosses these payloads correctly.
+    const a: AnchorWire = .{ .agent = "alice", .seq = 300, .side = 1 };
+    const typed_anchor = try encode(gpa, &anchor, .{ .anchor = a });
+    defer gpa.free(typed_anchor);
+    const anchor_parts = [_]Value{ .{ .bytes = a.agent }, .{ .uv = a.seq }, .{ .scalar = .{ .u8 = a.side } } };
+    const shaped_anchor: Value = .{ .@"struct" = &anchor_parts };
+    const generic_anchor = try encode(gpa, &anchor, .{ .locator = .{ .protocol = anchor_protocol, .payload = &shaped_anchor } });
+    defer gpa.free(generic_anchor);
+    try t.expectEqualSlices(u8, typed_anchor, generic_anchor);
+    try t.expectEqual(typed_anchor.len, try decodeCursor(&anchor, typed_anchor).skip());
+
+    const r: RangeWire = .{ .version = "v1", .start = 3, .end = 7 };
+    const typed_range = try encode(gpa, &range, .{ .range = r });
+    defer gpa.free(typed_range);
+    const range_parts = [_]Value{ .{ .bytes = r.version }, .{ .uv = r.start }, .{ .uv = r.end } };
+    const shaped_range: Value = .{ .@"struct" = &range_parts };
+    const generic_range = try encode(gpa, &range, .{ .locator = .{ .protocol = range_protocol, .payload = &shaped_range } });
+    defer gpa.free(generic_range);
+    try t.expectEqualSlices(u8, typed_range, generic_range);
+    try t.expectEqual(typed_range.len, try decodeCursor(&range, typed_range).skip());
+
+    // And their canonical schema tags are the single bytes D2 shipped.
+    const a_blob = try canonicalizeSchema(gpa, &anchor);
+    defer gpa.free(a_blob);
+    try t.expectEqualSlices(u8, &.{tag_anchor}, a_blob);
+    const r_blob = try canonicalizeSchema(gpa, &range);
+    defer gpa.free(r_blob);
+    try t.expectEqualSlices(u8, &.{tag_range}, r_blob);
+}
+
+const oid_protocol = "plugin.git.oid";
+const oid_str_ty: Schema = .str;
+const oid_fields = [_]Schema.Field{
+    .{ .name = "oid", .ty = &oid_str_ty },
+    .{ .name = "path", .ty = &oid_str_ty },
+};
+const oid_shape: Schema = .{ .@"struct" = &oid_fields };
+const oid_locator: Schema = .{ .locator = oid_protocol };
+
+/// Registration is process-wide, so the tests that need the fixture protocol
+/// share one — a second `registerProtocol` of the same name is the duplicate
+/// refusal, not a setup step.
+fn registerOidProtocol() !void {
+    registerProtocol(.{ .name = oid_protocol, .shape = &oid_shape, .policy = .effect_opaque }) catch |err| switch (err) {
+        error.ProtocolExists => {},
+        else => return err,
+    };
+}
+
+test "schema: a third-party locator walks, canonicalizes, and stays opaque to the host" {
+    const gpa = t.allocator;
+    try registerOidProtocol();
+    try t.expectError(error.ProtocolExists, registerProtocol(.{ .name = oid_protocol, .shape = &oid_shape, .policy = .observation_restamp }));
+
+    const parts = [_]Value{ .{ .str = "deadbeef" }, .{ .str = "src/main.zig" } };
+    const payload: Value = .{ .@"struct" = &parts };
+    const bytes = try encode(gpa, &oid_locator, .{ .locator = .{ .protocol = oid_protocol, .payload = &payload } });
+    defer gpa.free(bytes);
+
+    const loc = try decodeCursor(&oid_locator, bytes).enterLocator();
+    try t.expectEqualStrings(oid_protocol, loc.protocol.name);
+    const sc = try loc.payload.enterStruct();
+    try t.expectEqualStrings("deadbeef", try (try sc.field("oid")).?.asStr());
+
+    // An effect-path locator is never rewritten, even by a walk whose
+    // observation arm is armed.
+    var ctx: RestampCtx = .{ .version = "fresh" };
+    const walked = try walk(gpa, &oid_locator, bytes, .{ .ctx = &ctx, .on_observation = RestampCtx.restamp });
+    defer gpa.free(walked);
+    try t.expectEqualSlices(u8, bytes, walked);
+
+    // A non-standard protocol canonicalizes as its NAME, and round-trips.
+    const blob = try canonicalizeSchema(gpa, &oid_locator);
+    defer gpa.free(blob);
+    try t.expectEqual(tag_locator, blob[0]);
+    const parsed = try parseSchema(gpa, blob);
+    defer freeSchema(gpa, parsed);
+    try t.expect(schemaEql(&oid_locator, parsed));
+}
+
+test "schema: an unregistered protocol fails closed everywhere" {
+    const gpa = t.allocator;
+    const unknown: Schema = .{ .locator = "plugin.nobody.locator" };
+    const value: Value = .{ .str = "x" };
+
+    try t.expectEqual(@as(?Protocol, null), protocol("plugin.nobody.locator"));
+    try t.expectError(error.InvalidSchema, validateSchema(&unknown));
+    try t.expectError(error.InvalidSchema, canonicalizeSchema(gpa, &unknown));
+    try t.expectError(error.UnknownProtocol, encode(gpa, &unknown, .{ .locator = .{ .protocol = "plugin.nobody.locator", .payload = &value } }));
+    try t.expectError(error.UnknownProtocol, walk(gpa, &unknown, &.{ 1, 'x' }, .{}));
+    try t.expectError(error.UnknownProtocol, decodeCursor(&unknown, &.{ 1, 'x' }).enterLocator());
+
+    // A canonical blob naming a protocol this process never registered is
+    // refused, never skipped as opaque bytes.
+    try t.expectError(error.UnknownProtocol, parseSchema(gpa, &.{ tag_locator, 4, 'n', 'o', 'p', 'e' }));
+    // The standard locators have exactly one canonical spelling.
+    const long_form = [_]u8{ tag_locator, range_protocol.len } ++ range_protocol.*;
+    try t.expectError(error.Corrupt, parseSchema(gpa, &long_form));
 }
 
 test "schema: encode rejects a value that doesn't match the schema's shape" {
@@ -1332,10 +1647,8 @@ test "schema: hostile input — truncated/garbage payloads trap (Corrupt), never
     try t.expect((try arr.next()) != null);
     try t.expectError(error.Corrupt, arr.next());
 
-    const anchor_schema: Schema = .anchor;
-    try t.expectError(error.Corrupt, decodeCursor(&anchor_schema, &.{}).asAnchor());
-    const range_schema: Schema = .range;
-    try t.expectError(error.Corrupt, decodeCursor(&range_schema, &.{}).asRange());
+    try t.expectError(error.Corrupt, decodeCursor(&anchor, &.{}).asAnchor());
+    try t.expectError(error.Corrupt, decodeCursor(&range, &.{}).asRange());
 
     // A garbage top-level tag never panics `parseSchema` either.
     const gpa = t.allocator;
@@ -1352,15 +1665,13 @@ test "schema: versioned wire prefix round-trips (SchemaRef, §2.3)" {
     try t.expectEqual(@as(u32, 42), try decodeCursor(&schema, split.rest).asU32());
 }
 
-test "schema: walk — on_range rewrites the version, on_anchor is read-only" {
+test "schema: walk — observation locators restamp, effect locators are read-only" {
     const gpa = t.allocator;
     const str_ty: Schema = .str;
-    const range_ty: Schema = .range;
-    const anchor_ty: Schema = .anchor;
     const fields = [_]Schema.Field{
         .{ .name = "label", .ty = &str_ty },
-        .{ .name = "loc", .ty = &range_ty },
-        .{ .name = "where", .ty = &anchor_ty },
+        .{ .name = "loc", .ty = &range },
+        .{ .name = "where", .ty = &anchor },
     };
     const schema: Schema = .{ .@"struct" = &fields };
     const vals = [_]Value{
@@ -1371,26 +1682,18 @@ test "schema: walk — on_range rewrites the version, on_anchor is read-only" {
     const bytes = try encode(gpa, &schema, .{ .@"struct" = &vals });
     defer gpa.free(bytes);
 
-    var seen_anchor: ?AnchorWire = null;
-    const Ctx = struct { fired: []const u8 };
-    var ctx: Ctx = .{ .fired = "fresh-v7" };
+    var ctx: RestampCtx = .{ .version = "fresh-v7" };
+    seen_effect_slot = null;
     const rewritten = try walk(gpa, &schema, bytes, .{
         .ctx = &ctx,
-        .on_range = struct {
-            fn cb(c: ?*anyopaque, r: RangeWire) []const u8 {
-                _ = r;
-                const self: *Ctx = @ptrCast(@alignCast(c.?));
-                return self.fired;
-            }
-        }.cb,
-        .on_anchor = struct {
-            fn cb(c: ?*anyopaque, a: AnchorWire) void {
+        .on_observation = RestampCtx.restamp,
+        .on_effect = struct {
+            fn cb(c: ?*anyopaque, loc: LocatorWire) void {
                 _ = c;
-                seen_anchor_slot = a;
+                seen_effect_slot = loc.protocol.name;
             }
         }.cb,
     });
-    _ = &seen_anchor;
     defer gpa.free(rewritten);
 
     const sc = try decodeCursor(&schema, rewritten).enterStruct();
@@ -1402,27 +1705,32 @@ test "schema: walk — on_range rewrites the version, on_anchor is read-only" {
     const where = try (try sc.field("where")).?.asAnchor();
     try t.expectEqualStrings("bob", where.agent);
     try t.expectEqual(@as(u64, 3), where.seq);
+    try t.expectEqualStrings(anchor_protocol, seen_effect_slot.?);
+
+    // A walk with no visitor carries every locator through untouched.
+    const untouched = try walk(gpa, &schema, bytes, .{});
+    defer gpa.free(untouched);
+    try t.expectEqualSlices(u8, bytes, untouched);
 }
 
-// A module-level slot the anchor callback above writes through — Zig
+// A module-level slot the effect callback above writes through — Zig
 // closures can't capture by reference into a plain `*const fn`, so the test
 // uses a file-scope var the same way other test files in this repo stash
 // callback-observed state (kept `threadlocal`-free: `zig build test` runs
 // this file's tests single-threaded within their own process, matching
 // every other pure-function test module here).
-var seen_anchor_slot: AnchorWire = undefined;
+var seen_effect_slot: ?[]const u8 = null;
 
 test "schema: canonicalizeSchema/parseSchema round-trip — the meta-schema self-hosting the SAME wire primitives" {
     const gpa = t.allocator;
     const str_ty: Schema = .str;
     const u32_ty: Schema = .{ .scalar = .u32 };
-    const anchor_ty: Schema = .anchor;
     const opt_ty: Schema = .{ .optional = &str_ty };
     const arr_ty: Schema = .{ .array = &u32_ty };
     const fields = [_]Schema.Field{
         .{ .name = "text", .ty = &str_ty },
         .{ .name = "count", .ty = &u32_ty },
-        .{ .name = "where", .ty = &anchor_ty },
+        .{ .name = "where", .ty = &anchor },
         .{ .name = "doc", .ty = &opt_ty },
         .{ .name = "tags", .ty = &arr_ty },
     };

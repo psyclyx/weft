@@ -123,7 +123,9 @@ pub const Schema = union(enum) {
   union-shaped cases the language otherwise excludes (§7).
 - **`anchor`** and **`range`** are the SCHEMA MARKS — the whole point of the
   fork. They are not free-form data; they are the two identity models already
-  in the code, given a wire form (§4).
+  in the code, given a wire form (§4). AMENDED: they are the two standard
+  registrations of the single `locator(P)` mark, which any protocol may join
+  — see §4.1.
 
 **Unions/enums are DELIBERATELY EXCLUDED** (DECIDED — F6's "deliberately
 small"). This is not an oversight, and §7 states exactly where it bites. The
@@ -389,6 +391,80 @@ says reuse the same walk:
   resolves outside traps (`error.OutOfLimit`); one whose anchor collapsed
   traps (`error.Collapsed`) — the exact three outcomes
   `wasm_abi/runtime.zig`'s `trapDocRegion` already distinguishes.
+
+### 4.1 The locator mark
+
+Two marks were one mark too few. `anchor` and `range` are the two identity
+models that happened to exist when D2 was written, and freezing them into the
+constructor set says the payload language knows every identity anyone will
+ever locate — which is false the moment a plugin carries a commit OID, a
+snapshot-scoped hunk, a filesystem entry, or a field path. The alternative
+those payloads fall back to is `str`/`bytes`, which loses the walk entirely:
+core cannot restamp, grant-check, or even skip what it cannot see.
+
+So the mark is ONE constructor, `locator(P)`, naming a protocol. The
+protocol's registration carries what the mark used to hard-code:
+
+```zig
+Protocol {
+    name: []const u8,          // the identity, and the version unit
+    shape: *const Schema,      // the payload's wire form
+    policy: enum { observation_restamp, effect_opaque },
+}
+```
+
+`shape` is what makes an unfamiliar locator crossable: a walker that knows
+nothing about `plugin.git.oid` still knows how many bytes it occupies, so a
+payload carrying it stays walkable, skippable, and restampable around it.
+Nothing else changes about the walk — it is still one traversal over shape
+alone.
+
+Registration is the trust boundary: an unregistered protocol name is REFUSED
+(`error.UnknownProtocol`), at declaration, at parse, at encode, and at the
+walk. There is no "carry it as opaque bytes" third result, for the same
+reason §2.3 has no silent skew result — a locator core cannot describe is a
+locator core cannot enforce a policy on.
+
+### 4.2 Restamp for observations, refuse for effects
+
+The policy field is the split §4 already implies but never states. The host
+restamps an OBSERVATION — a diagnostic's span, a symbol's range, anything a
+provider reports about a document it does not own — because the provider's
+claimed version is not evidence, and a stamp taken from the fired session is.
+That is anti-spoofing, and it is safe precisely because an observation is
+inert: rewriting the stamp on a report changes nothing but the report's
+honesty.
+
+The host never rewrites an EFFECT locator. An edit's anchor, a hunk to apply,
+a file to rename — those name what the caller will change, and a host that
+silently re-stamped them would forge agreement to a target the caller never
+chose. A stale effect locator has exactly two honest answers, and both belong
+to the caller: refuse (`error.Collapsed` / `error.OutOfLimit`, the outcomes
+§4's grant walk already produces), or re-resolve against the live state and
+ask again. Both are the caller's call because only the caller knows whether
+the intent survives the drift.
+
+`anchor` and `range` become the two standard registrations of this rule:
+`std.text.anchor` is effect-path (an anchor is resolved, never rewritten) and
+`std.text.range` is observation-path (its version token is exactly what the
+host stamps). Their payload bytes and their single-byte canonical tags are
+unchanged — this is an additive generalization, and nothing already on the
+wire re-encodes.
+
+### 4.3 Protocol names are the major version
+
+§2.3 makes the slot name the compatibility unit for payloads; the protocol
+name is the same unit for identity. A protocol never changes its shape or its
+policy — changing either produces a new name (`@N` where a version suffix
+reads better than a new noun). Additive evolution inside a protocol's payload
+follows §2.3's struct rule unchanged.
+
+Content-derived digests are deliberately NOT the identity. A digest is a
+negotiation instrument, not a name: it answers "do we hold the same bytes for
+this thing?", which only matters where two heads must agree before decoding —
+the collaboration membrane, where a peer fetches an unknown slot's schema
+blob (§2.2 form 2). Inside one head, a name resolves through the registry and
+a digest would buy nothing but a rebuild-sensitive identity.
 
 ---
 

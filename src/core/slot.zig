@@ -57,7 +57,7 @@ pub const Provider = struct {
 pub const Result = struct {
     provider: []u8,
     /// Schema-encoded payload bytes, RESTAMPED against the session's fired
-    /// version via `schema.walk`'s `.on_range` arm (§4) before storage — owned.
+    /// version via `schema.walk`'s observation arm (§4) before storage — owned.
     payload: []u8,
 
     fn deinit(self: *Result, gpa: Allocator) void {
@@ -258,21 +258,19 @@ pub const SlotHost = struct {
     pub const From = struct { owner: []const u8 };
 
     /// A provider pushes a schema-encoded payload for `id` (§3.2's
-    /// `wl_payload_push`) — restamped ONCE via `schema.walk`'s `.on_range`
+    /// `wl_payload_push`) — restamped ONCE via `schema.walk`'s observation
     /// arm against the session's fired version (§4: "the provider's claimed
-    /// version is never trusted... the host restamps every `range` field's
-    /// version to the fired version"). This is the restamp walk's first live
+    /// version is never trusted"). This is the restamp walk's first live
     /// caller — the mechanical proof `doc/d2-schema-payloads.md` §4 asks for
     /// ("`SlotHost.push` is this walk's first live caller").
     ///
-    /// `.on_anchor` is intentionally left unwired HERE (schema.walk still
-    /// visits anchor-marked fields and passes them through unchanged, per
-    /// §4: "an anchor is NOT restamped — it is RESOLVED"): resolving an
-    /// anchor needs a LIVE `Document` this generic, document-agnostic host
-    /// has no handle to, and consolidating that resolution into
+    /// The effect arm is intentionally left unwired HERE (the walk still
+    /// carries effect-path locators through unchanged): resolving one needs
+    /// a LIVE `Document` this generic, document-agnostic host has no handle
+    /// to, and consolidating that resolution into
     /// `command.Context.checkDocRegion` (§4's last paragraph) is an EDIT
     /// chokepoint — a query-shaped UI/badge slot fired here is not an edit
-    /// action. Named, not built, in this slice; see the D2 slice report.
+    /// action.
     pub fn push(self: *SlotHost, id: u64, from: From, payload: []const u8) !void {
         const s = self.sessions.get(id) orelse return;
         const gpa = self.gpa;
@@ -280,11 +278,21 @@ pub const SlotHost = struct {
         var ctx: Ctx = .{ .version = s.version };
         const restamped = try schema_mod.walk(gpa, s.schema, payload, .{
             .ctx = &ctx,
-            .on_range = struct {
-                fn cb(c: ?*anyopaque, r: schema_mod.RangeWire) []const u8 {
-                    _ = r; // the provider's claimed version is never trusted
+            .on_observation = struct {
+                fn cb(
+                    c: ?*anyopaque,
+                    loc: schema_mod.LocatorWire,
+                    gpa2: Allocator,
+                    out: *std.ArrayList(u8),
+                ) (schema_mod.DecodeError || Allocator.Error)!bool {
+                    // An observation locator this host cannot stamp is
+                    // refused rather than trusted at the provider's word.
+                    if (!std.mem.eql(u8, loc.protocol.name, schema_mod.range_protocol)) return error.UnknownProtocol;
+                    var cur = loc.payload;
+                    const r = try schema_mod.getRange(&cur);
                     const self2: *Ctx = @ptrCast(@alignCast(c.?));
-                    return self2.version;
+                    try schema_mod.putRange(gpa2, out, .{ .version = self2.version, .start = r.start, .end = r.end });
+                    return true;
                 }
             }.cb,
         });
@@ -313,10 +321,9 @@ test "slot: declare/bind/fire/push round-trips a schema-encoded payload, restamp
     defer container.deinit();
 
     const str_ty: Schema = .str;
-    const range_ty: Schema = .range;
     const fields = [_]Schema.Field{
         .{ .name = "label", .ty = &str_ty },
-        .{ .name = "loc", .ty = &range_ty },
+        .{ .name = "loc", .ty = &schema_mod.range },
     };
     const schema: Schema = .{ .@"struct" = &fields };
 
