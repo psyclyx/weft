@@ -510,8 +510,7 @@ export fn on_fill() void {
     }
 }
 
-/// True when the active buffer's name is exactly `want` (never truncates the
-/// name, so a long name can only ever compare unequal, not falsely match).
+/// True when the active buffer's name is exactly `want`.
 fn activeNameIs(want: []const u8) bool {
     const count = weft.bufferCount();
     var i: usize = 0;

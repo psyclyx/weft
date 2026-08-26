@@ -85,8 +85,7 @@ fn grepVisit() void {
     while (j < text.len and text[j] >= '0' and text[j] <= '9') j += 1;
     if (j == ds) return; // no line number → not a result line
     // Parse the line number and copy the path OUT of the scratch before opening
-    // (open reuses the read scratch, which would clobber `text`) — heap-copied
-    // in full, never truncated, so we never open a path that isn't the real one.
+    // (open reuses the read scratch, which would clobber `text`).
     var line_no: usize = 0;
     for (text[ds..j]) |d| line_no = line_no * 10 + (d - '0');
     const path = text[0..c1];
@@ -144,8 +143,7 @@ export fn on_fill() void {
     }
 }
 
-/// True when the active buffer's name is exactly `want` (never truncates the
-/// name, so a long name can only ever compare unequal, not falsely match).
+/// True when the active buffer's name is exactly `want`.
 fn activeNameIs(want: []const u8) bool {
     const count = weft.bufferCount();
     var i: usize = 0;

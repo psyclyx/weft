@@ -75,8 +75,7 @@ fn outputVisit() void {
         if (std.mem.indexOfScalar(u8, path, '.') == null and std.mem.indexOfScalar(u8, path, '/') == null) continue;
         var line_no: usize = 0;
         for (text[ds..j]) |d| line_no = line_no * 10 + (d - '0');
-        // Heap-copy the path OUT of the scratch before open reuses it — full
-        // copy, never truncated, so we never open a path that isn't the real one.
+        // Copy the path out of the scratch before open reuses it.
         const path_copy = weft.allocator.dupe(u8, path) catch {
             weft.echo("run: out of memory copying path");
             return;
