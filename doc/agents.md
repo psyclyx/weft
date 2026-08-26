@@ -110,7 +110,10 @@ The ACP client works end-to-end and is launchable in the running editor:
   **agent-peer** edit — the harness payoff). Verified end-to-end against a mock
   ACP agent (no agent binary or display needed). **A working coding agent:**
   reads + writes your files + streams responses. Launchable: `weft.set("acp",
-  "cmd",…)` + `weft.plugin("acp.js")` + `agent-start`.
+  "cmd",…)` + `weft.grant("acp", "proc"|"fs_read"|"fs_write")` +
+  `weft.plugin("acp.js")` + `agent-start`. The grants are not optional: a
+  `.js` plugin declares nothing about itself, so an ungranted `weft.procSpawn`
+  / `weft.fileRead` throws.
 
 **Multi-turn:** `weft.lineText()` + the `agent-send` command send the current
 line as the next prompt on the running session (a real conversation), and

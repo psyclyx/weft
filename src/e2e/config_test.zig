@@ -917,9 +917,10 @@ test "e2e/config: R1 — weft.set(\"acp\", ...) before weft.plugin(\"acp.js\") i
 // A resident `.js` plugin has no `describe()` handshake to request perms
 // with, so a config `weft.grant` is its ONLY route to an effect. This is that
 // route end to end: config → manifest → the System's grant table → the
-// plugin's adopted handles. (Revocation of a running JS plugin is proven in
-// `core/quickjs.zig`'s own gate test, where the table isn't reached by
-// name — see this branch's note on `HandleTable.Row`'s borrowed strings.)
+// plugin's adopted handles. Revocation of a running JS plugin is proven in
+// `core/quickjs.zig`'s own gate test instead: `HandleTable.Row` BORROWS its
+// principal/capability strings, and a config's manifest — which owns them
+// here — dies with the load, so `revoke` by name has nothing left to match.
 test "e2e/config: weft.grant is a resident .js plugin's only authority — adopted at load" {
     const gpa = t.allocator;
     var proj: Project = undefined;
