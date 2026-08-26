@@ -66,6 +66,10 @@ pub const ShareCtx = struct {
     /// served to peers, and the grant. Null root ⇒ serve no fs (default).
     peer_fs_root: ?*core.rooted_fs.RootedFs = null,
     fs_grant: core.peer_fs.Grant = .{},
+    /// Opt-in cursor sharing (--share-presence / the `share-presence`
+    /// command): read at share time to decide whether a newly wired collab
+    /// emits our caret. False ⇒ sharing text emits no presence.
+    publish_presence: bool = false,
     peer_fs_service: ?core.peer_fs.Service = null,
     /// Published by `Collab.reconcileRemoteFilesystem`; commands only see an
     /// ordinary located target and use the generic target resolver.
@@ -171,6 +175,7 @@ pub const Collab = struct {
         known: *core.known_peers.KnownPeers,
         share_root: ?[]const u8,
         share_fs: core.peer_fs.Access,
+        share_presence: bool,
         listen: ?u16,
         access: core.session.Access,
     ) void {
@@ -245,6 +250,7 @@ pub const Collab = struct {
             .known = known,
             .peer_fs_root = if (self.peer_fs_root) |*r| r else null,
             .fs_grant = .{ .access = share_fs },
+            .publish_presence = share_presence,
             .peer_fs_service = if (self.shared_fs_server) |*server| core.peer_fs.Service.init(server) else null,
             .conn_wake_fd = conn_wake_fd,
         };
@@ -285,6 +291,7 @@ pub const Collab = struct {
         self.conn = try core.session.Conn.init(gpa, self.collab_session.?, user, .client);
         const col = try self.conn.?.bindPrimary(&ed0.doc, 0);
         col.presence_layer = try caps.layers.claim(gpa, &ed0.doc, "presence", .replicated, "collab");
+        col.publish_presence = self.share_ctx.publish_presence;
         // Host-scoped feeds (diagnostics) arrive over the wire.
         col.import_diag_layer = try caps.layers.claim(gpa, &ed0.doc, "diagnostics", .host, "remote-host");
         col.remote_fs = &self.remote_fs; // client can list/read the host's shared root
@@ -466,11 +473,11 @@ const RemoteExchange = struct {
 
 /// Wire a hub-side collab as a participant-and-relay: no local presence
 /// layer (the frame loop unions all peers into one), publish our own
-/// cursor, relay peers to each other.
+/// cursor when presence sharing was selected, relay peers to each other.
 pub fn wireHubShare(sc: *ShareCtx, peer: *core.hub.Peer, col: *core.session.Collab, doc: *core.Document) !void {
     col.presence_layer = null;
     col.export_diag_layer = sc.caps.layers.find(doc, "diagnostics");
-    col.publish_presence = true;
+    col.publish_presence = sc.publish_presence;
     col.relay = core.hub.relayPresence;
     col.relay_ctx = try peer.relayFor(doc);
     // Serve the opt-in shared filesystem root to this peer (default: none, so a
@@ -611,7 +618,7 @@ pub fn applyIntents(
                 connect_hostport.* = null;
             }
             if (res) |fd| {
-                runtimeConnectFinish(gpa, cmd_ctx, sc.session, sc.conn, fd_link, fd, hp, token, user, sc.caps, my_identity, sc.conn_wake_fd) catch |err| {
+                runtimeConnectFinish(gpa, cmd_ctx, sc, fd_link, fd, hp, token, user, my_identity) catch |err| {
                     _ = std.os.linux.close(fd);
                     var buf: [96]u8 = undefined;
                     setEcho(echo, gpa, std.fmt.bufPrint(&buf, "connect failed: {t}", .{err}) catch "connect failed");
@@ -810,21 +817,18 @@ pub fn tickCollab(
 pub fn runtimeConnectFinish(
     gpa: std.mem.Allocator,
     ctx: *core.command.Context,
-    session_slot: *?*core.session.Session,
-    conn_slot: *?core.session.Conn,
+    sc: *ShareCtx,
     fd_link: *core.session.FdLink,
     fd: i32,
     hostport: []const u8,
     token: []const u8,
     user: []const u8,
-    caps: *core.Caps,
     my_identity: *const core.identity.Identity,
-    conn_wake_fd: std.posix.fd_t,
 ) !void {
     fd_link.* = .{ .fd = fd };
     const sess = try core.session.Session.create(gpa, fd_link.link(), .client, token, .own, my_identity);
     errdefer sess.destroy();
-    if (conn_wake_fd >= 0) sess.setWakeFd(conn_wake_fd);
+    if (sc.conn_wake_fd >= 0) sess.setWakeFd(sc.conn_wake_fd);
     var c = try core.session.Conn.init(gpa, sess, user, .client);
     errdefer c.deinit();
 
@@ -833,10 +837,11 @@ pub fn runtimeConnectFinish(
     const id = try ctx.buffers.create(gpa, display);
     const buf = ctx.buffers.get(id).?;
     const col = try c.bindPrimary(&buf.editor.doc, id);
-    col.presence_layer = try caps.layers.claim(gpa, &buf.editor.doc, "presence", .replicated, "collab");
-    col.import_diag_layer = try caps.layers.claim(gpa, &buf.editor.doc, "diagnostics", .host, "remote-host");
-    session_slot.* = sess;
-    conn_slot.* = c;
+    col.presence_layer = try sc.caps.layers.claim(gpa, &buf.editor.doc, "presence", .replicated, "collab");
+    col.import_diag_layer = try sc.caps.layers.claim(gpa, &buf.editor.doc, "diagnostics", .host, "remote-host");
+    col.publish_presence = sc.publish_presence;
+    sc.session.* = sess;
+    sc.conn.* = c;
     try ctx.buffers.switchTo(gpa, id, ctx.head, ctx.keymap);
     std.log.info("connected to {s}", .{hostport});
 }

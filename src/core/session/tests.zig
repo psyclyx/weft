@@ -155,6 +155,7 @@ test "session+collab: two instances converge over an encrypted link with presenc
     var layers: layers_mod.Layers = .empty;
     defer layers.deinit(gpa);
     cb.presence_layer = try layers.claim(gpa, &doc_b, "presence", .replicated, "collab");
+    ca.publish_presence = true; // alice selects cursor sharing
 
     // Pump both sides; concurrent edits mid-stream. The bound is a generous
     // yield-spin timeout, not the expected cost: convergence is a couple of
@@ -197,6 +198,59 @@ test "session+collab: two instances converge over an encrypted link with presenc
         std.Thread.yield() catch {};
     }
     try t.expect(saw_presence);
+    try t.expectEqualStrings("alice", cb.presence_layer.?.resolvedSpan(0).message);
+}
+
+test "collab: sharing text emits no presence until the sharer selects it" {
+    const gpa = t.allocator;
+    const fds = try socketPair();
+    var la: FdLink = .{ .fd = fds[0] };
+    var lb: FdLink = .{ .fd = fds[1] };
+
+    var doc_a = try Document.init(gpa, "alice");
+    defer doc_a.deinit(gpa);
+    var doc_b = try Document.init(gpa, "bob");
+    defer doc_b.deinit(gpa);
+    try doc_a.insert(gpa, 0, "shared ground\n");
+
+    const sa = try Session.create(gpa, la.link(), .server, "tok", .own, null);
+    defer sa.destroy();
+    const sb = try Session.create(gpa, lb.link(), .client, "tok", .own, null);
+    defer sb.destroy();
+
+    var ca = try Collab.init(gpa, sa, &doc_a, "alice");
+    defer ca.deinit();
+    var cb = try Collab.init(gpa, sb, &doc_b, "bob");
+    defer cb.deinit();
+
+    var layers: layers_mod.Layers = .empty;
+    defer layers.deinit(gpa);
+    cb.presence_layer = try layers.claim(gpa, &doc_b, "presence", .replicated, "collab");
+
+    // Text converges with alice's caret parked at 3 — and bob sees no caret.
+    const converge_deadline = task.nowNs() + 5 * std.time.ns_per_s;
+    while (task.nowNs() < converge_deadline and doc_b.text().byteLen() < doc_a.text().byteLen()) {
+        _ = try ca.tick(3);
+        _ = try cb.tick(0);
+        futexWaitTimed(&sb.out_wake, sb.out_wake.load(.acquire), std.time.ns_per_ms);
+    }
+    try t.expectEqual(doc_a.text().byteLen(), doc_b.text().byteLen());
+    for (0..200) |_| {
+        _ = try ca.tick(3);
+        _ = try cb.tick(0);
+        std.Thread.yield() catch {};
+    }
+    try t.expectEqual(@as(usize, 0), cb.presence_layer.?.spanCount());
+
+    // Selecting it publishes over the same link, without a further move.
+    ca.setPublishPresence(true);
+    const presence_deadline = task.nowNs() + 5 * std.time.ns_per_s;
+    while (task.nowNs() < presence_deadline and cb.presence_layer.?.spanCount() == 0) {
+        _ = try ca.tick(3);
+        _ = try cb.tick(0);
+        futexWaitTimed(&sb.out_wake, sb.out_wake.load(.acquire), std.time.ns_per_ms);
+    }
+    try t.expect(cb.presence_layer.?.spanCount() > 0);
     try t.expectEqualStrings("alice", cb.presence_layer.?.resolvedSpan(0).message);
 }
 
@@ -297,9 +351,10 @@ test "conn: shared buffers both ways over one link — offers, open, converge, p
     for (cb.collabs.items) |c| {
         if (c.doc == &b_todo) c.presence_layer = todo_layer;
     }
-    // Move alice's cursor in notes only (no selection: anchor == caret,
-    // so the presence span is a bare caret at 3).
+    // Alice selects cursor sharing, then moves her cursor in notes only
+    // (no selection: anchor == caret, so the span is a bare caret at 3).
     for (ca.collabs.items) |c| {
+        c.publish_presence = true;
         if (c.doc == &a_notes) {
             c.cursor_offset = 3;
             c.selection_anchor = 3;
@@ -853,14 +908,14 @@ test "hub: three-way convergence, presence relay, reconnect rebind" {
     var sb = try Session.create(gpa, lb_c.link(), .client, "tok", .own, null);
     defer sb.destroy();
 
+    // The hub relays presence; it has no cursor of its own to publish.
     var ch_a = try Collab.init(gpa, sh_a, &doc_h, "hub");
     defer ch_a.deinit();
-    ch_a.publish_presence = false;
     var ch_b = try Collab.init(gpa, sh_b, &doc_h, "hub");
     defer ch_b.deinit();
-    ch_b.publish_presence = false;
     var ca = try Collab.init(gpa, sa, &doc_a, "alice");
     defer ca.deinit();
+    ca.publish_presence = true; // alice selects cursor sharing
     var cb = try Collab.init(gpa, sb, &doc_b, "bob");
     defer cb.deinit();
 

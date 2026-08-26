@@ -365,7 +365,7 @@ pub fn main(init: std.process.Init) !void {
     // being the one dispatch/rendering targets. While dormant (no
     // connection), the stale borrow is inert.
     var collab_state: collab.Collab = undefined;
-    collab_state.initBase(gpa, buffers, &session.system.caps, &known_peers, args.share_root, args.share_fs, args.listen, args.access);
+    collab_state.initBase(gpa, buffers, &session.system.caps, &known_peers, args.share_root, args.share_fs, args.share_presence, args.listen, args.access);
     defer collab_state.deinit(gpa);
     try collab_state.connect(gpa, ed0, &session.system.caps, &my_identity, args.connect, args.token, args.user, args.partial);
     // The buffer close path unbinds shares before the doc dies (Providers borrows

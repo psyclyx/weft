@@ -61,8 +61,9 @@ last_presence: ?PublishedPresence = null,
 /// projected offset here would silently attach it to the wrong character after
 /// concurrent edits.
 presence: std.ArrayList(PeerPresence) = .empty,
-/// Publish our own cursor (a headless hub has none — it relays).
-publish_presence: bool = true,
+/// Publish our own cursor. Opt-in: sharing a document emits no presence
+/// unless the sharer separately selects it.
+publish_presence: bool = false,
 /// Hub relay: re-publish received presence to the other sessions.
 relay: ?*const fn (?*anyopaque, key: u64, payload: []const u8) void = null,
 relay_ctx: ?*anyopaque = null,
@@ -189,6 +190,13 @@ pub fn rebind(self: *Collab, new_session: *Session) void {
     // keeps its current my_grant so there is no read-only flash.
     self.last_sent_grant = null;
     self.clearLastPresence();
+}
+
+/// Select or withdraw cursor publishing. Selecting it republishes on the
+/// next tick even when the caret has not moved since.
+pub fn setPublishPresence(self: *Collab, on: bool) void {
+    if (on and !self.publish_presence) self.clearLastPresence();
+    self.publish_presence = on;
 }
 
 fn clearLastPresence(self: *Collab) void {

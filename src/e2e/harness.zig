@@ -887,9 +887,11 @@ pub const Loopback = struct {
         self.peer_col = try session.Collab.init(gpa, self.peer_sess, peer_doc, peer_name);
         // Replicate cursors: each side folds the other's presence into its own
         // "presence" layer (claimed via the harness caps), exactly as the collab
-        // wiring does. Publishing is on by default.
+        // wiring does. Both scenario participants select cursor sharing.
         self.host_col.presence_layer = try host_ed.caps.layers.claim(gpa, host_doc, "presence", .replicated, "collab");
         self.peer_col.presence_layer = try peer_ed.caps.layers.claim(gpa, peer_doc, "presence", .replicated, "collab");
+        self.host_col.publish_presence = true;
+        self.peer_col.publish_presence = true;
     }
 
     pub fn deinit(self: *Loopback) void {

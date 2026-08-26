@@ -134,7 +134,7 @@ test "app/teardown: unconnected Collab constructs + tears down clean" {
     var id = core.identity.Identity.generate();
 
     var col: app_collab.Collab = undefined;
-    col.initBase(gpa, &sess.system.buffers, &sess.system.caps, &known, null, .none, null, .view);
+    col.initBase(gpa, &sess.system.buffers, &sess.system.caps, &known, null, .none, false, null, .view);
     try col.connect(gpa, &sess.system.buffers.active().editor, &sess.system.caps, &id, null, "tok", "user", false);
     // main()'s order: Collab before Session (it reads the session caps + must
     // unbind before the doc layers drop).

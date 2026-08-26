@@ -366,6 +366,9 @@ test "hub: two peers converge; presence relays and unions" {
     defer cb.deinit();
     ca.presence_layer = try store.claim(gpa, &doc_a, "presence", .replicated, "collab");
     cb.presence_layer = try store.claim(gpa, &doc_b, "presence", .replicated, "collab");
+    // Both peers select cursor sharing.
+    ca.publish_presence = true;
+    cb.publish_presence = true;
 
     try doc_a.insert(gpa, 0, "A! ");
     try doc_b.insert(gpa, 0, "B! ");

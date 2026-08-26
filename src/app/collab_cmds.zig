@@ -134,6 +134,27 @@ pub fn listenHandler(ctx: *core.command.Context, data: ?*anyopaque, args: []cons
     return ok_echo(ctx, std.fmt.bufPrint(&buf, "listening ({s} access)…", .{access.label()}) catch "listening…");
 }
 
+/// `share-presence <on|off>` — select cursor sharing, separately from
+/// sharing a document. Off by default, so shared text emits no caret;
+/// the choice applies to every already-shared document and to later ones.
+pub fn sharePresenceHandler(ctx: *core.command.Context, data: ?*anyopaque, args: []const core.command.Value) anyerror!core.command.Value {
+    const sc: *ShareCtx = @ptrCast(@alignCast(data.?));
+    if (args.len != 1 or args[0] != .string) return error.TypeMismatch;
+    const on = if (std.mem.eql(u8, args[0].string, "on"))
+        true
+    else if (std.mem.eql(u8, args[0].string, "off"))
+        false
+    else
+        return .{ .string = "share-presence must be on|off" };
+
+    sc.publish_presence = on;
+    if (sc.conn.*) |*c| for (c.collabs.items) |col| col.setPublishPresence(on);
+    if (sc.hub.*) |*h| for (h.clients.items) |peer| {
+        for (peer.conn.collabs.items) |col| col.setPublishPresence(on);
+    };
+    return ok_echo(ctx, if (on) "sharing your cursor" else "no longer sharing your cursor");
+}
+
 /// `stop-listening` — stop accepting new peers; connected peers stay.
 pub fn stopListeningHandler(ctx: *core.command.Context, data: ?*anyopaque, args: []const core.command.Value) anyerror!core.command.Value {
     const sc: *ShareCtx = @ptrCast(@alignCast(data.?));
@@ -210,6 +231,7 @@ pub fn shareHandler(ctx: *core.command.Context, data: ?*anyopaque, args: []const
             const col = try c.share(doc, buf.name, buf.id);
             col.presence_layer = try sc.caps.layers.claim(ctx.gpa, doc, "presence", .replicated, "collab");
             col.export_diag_layer = sc.caps.layers.find(doc, "diagnostics");
+            col.publish_presence = sc.publish_presence;
             did = true;
         }
     }
@@ -427,6 +449,7 @@ fn openSharedAccept(ctx: *core.command.Context, data: ?*anyopaque, outcome: core
         // Offered by the host we connected out to.
         col.presence_layer = try state.sc.caps.layers.claim(ctx.gpa, doc, "presence", .replicated, "collab");
         col.import_diag_layer = try state.sc.caps.layers.claim(ctx.gpa, doc, "diagnostics", .host, "remote-host");
+        col.publish_presence = state.sc.publish_presence;
     }
     try ctx.buffers.switchTo(ctx.gpa, id, ctx.head, ctx.keymap);
 }
@@ -469,6 +492,13 @@ pub fn registerCommands(gpa: std.mem.Allocator, commands: *core.command.Commands
         .summary = "Share the active buffer over the connection.",
         .args = &.{},
         .handler = shareHandler,
+        .data = sc,
+    });
+    _ = try commands.bind(gpa, "share-presence", .{
+        .name = "share-presence",
+        .summary = "Share your cursor with peers (on|off); off by default, separate from sharing a buffer.",
+        .args = &.{.{ .name = "state", .type = .string }},
+        .handler = sharePresenceHandler,
         .data = sc,
     });
     _ = try commands.bind(gpa, "open-shared", .{
