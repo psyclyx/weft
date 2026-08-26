@@ -63,7 +63,7 @@ weft.plugin("console");     // grant bundle: proc
 weft.plugin("repl");        // grant bundle: proc (persistent subprocess)
 weft.plugin("net");         // grant bundle: net
 weft.plugin("which_key");   // menu-hint overlay over the surface door
-weft.plugin("dired");       // directory launcher; the target handler owns its semantic scene/actions
+weft.plugin("files");       // file browser; the target handler owns its semantic scene/actions
 weft.plugin("lsp");         // grant bundle: proc + fs.read
 weft.set("lsp", "zig", "zls");
 weft.plugin("debug");       // breakpoints (gutter markers)
@@ -93,7 +93,7 @@ weft.bind("normal", "SPC f f", "find-file");
 weft.bind("normal", "SPC f s", "save");
 weft.bind("normal", "SPC f S", "save-as");
 weft.bind("normal", "SPC f r", "project-recent");
-weft.bind("normal", "SPC f d", "dired");
+weft.bind("normal", "SPC f d", "files");
 
 // SPC b — buffers
 weft.bind("normal", "SPC b b", "buf-pick");
@@ -103,7 +103,7 @@ weft.bind("normal", "SPC b n", "buffer-next");
 weft.bind("normal", "SPC b s", "save");
 weft.bind("normal", "SPC b N", "buf-scratch");
 
-// SPC g — git (the magit buffer runs its own keymap mode, exactly as today;
+// SPC g — git (the git buffer runs its own keymap mode, exactly as today;
 // under W5 its MODEL becomes an ObjectDoc, which changes nothing here).
 weft.bind("normal", "SPC g g", "git-status");
 weft.bind("normal", "SPC g i", "git-init");
@@ -177,7 +177,7 @@ weft.bind("normal", "K", "hover");
 // …but reproducing TODAY's editor needs none of it, which is the point.
 
 // SPC o — open / tools
-weft.bind("normal", "SPC o d", "dired");
+weft.bind("normal", "SPC o d", "files");
 weft.bind("normal", "SPC o r", "repl-start");
 weft.bind("normal", "SPC o c", "console-open");
 weft.bind("normal", "SPC o e", "direnv-status");

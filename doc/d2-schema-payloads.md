@@ -600,8 +600,9 @@ the order it will bite):
   "codegen typed bindings" is honored in the build-time and runtime-fallback
   arms, not in a comptime arm that cannot exist.
 
-See north-star-plan.md §5 F6/§7 (the decision + the stake), rendering.md
-(scenes wire-safe, the UI mesh, `ui_provider` as in-process transport),
+See contextual-workspace-architecture.md (typed protocols and negotiated
+schemas), rendering.md (scenes wire-safe, the UI mesh, `ui_provider` as
+in-process transport),
 `core/capability.zig` (the closed union + the three hand-walks D2 collapses),
 `core/membrane/contract_data.zig` (the machinery D2 rhymes with and the
 comptime wall it obeys), `core/container.zig` (`SlotDecl`/`SchemaRef`/

@@ -7,7 +7,7 @@
 // same engine the vim leader uses (`C-x` holds pending, which-key shows its
 // completions, `C-x C-f` completes) — NOT modes. This is the forcing function:
 // it drives the sequence model from the modeless side and exercises the whole
-// catalog (magit, dired, grep, make, repl, …) over a different editor plugin.
+// catalog (git, files, grep, make, repl, …) over a different editor plugin.
 //
 // Keys are written the way you'd say them — "C-x C-f", "M-x", "M-<" — and the
 // one keyspec normalizer canonicalizes them; which-key shows them back the same.
@@ -18,7 +18,7 @@
   "motions", "textobjects", "operators", "emacs",
   "ts", "comment", "whitespace", "numbers", "autopair", "consult",
   "git", "grep", "run", "make", "notes", "fmt", "buffers", "windows",
-  "modes", "snippets", "direnv", "llm", "console", "repl", "which_key", "dired",
+  "modes", "snippets", "direnv", "llm", "console", "repl", "which_key", "files",
 ].forEach((p) => weft.plugin(p));
 weft.use("defaults"); // shared picker + which-key nav bindings
 
@@ -44,8 +44,8 @@ weft.bind("emacs", "C-x 2", "window-split"); //  split-window-below
 weft.bind("emacs", "C-x 3", "window-vsplit"); // split-window-right
 weft.bind("emacs", "C-x 0", "window-close"); //  delete-window
 weft.bind("emacs", "C-x o", "window-focus-right"); // other-window (cycle)
-weft.bind("emacs", "C-x d", "dired"); //         dired
-weft.bind("emacs", "C-x g", "git-status"); //    magit-status
+weft.bind("emacs", "C-x d", "files"); //         file browser
+weft.bind("emacs", "C-x g", "git-status"); //    git-status
 weft.bind("emacs", "C-x u", "undo"); //          undo
 
 // ── C-c — mode/user commands (the second prefix SEQUENCE) ──
@@ -110,4 +110,4 @@ weft.set("theme", "accent", "#81a2be");
 weft.set("theme", "cursor", "#c5c8c6");
 weft.set("theme", "selection", "#373b41");
 
-weft.echo("weft: emacs config — C-x/C-c chords, M-x palette, C-x g magit");
+weft.echo("weft: emacs config — C-x/C-c chords, M-x palette, C-x g git");

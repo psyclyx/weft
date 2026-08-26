@@ -26,8 +26,8 @@ pub const Plugin = struct {
     pub fn start(self: *Plugin) !void {
         if (self.started) return error.AlreadyStarted;
         if (!weft.semanticActionProvider()) return error.Rejected;
-        _ = try weft.semanticTargetHandlerRegister(1, "dired.directory");
-        _ = try weft.semanticRelationProviderRegister(1, "dired.container");
+        _ = try weft.semanticTargetHandlerRegister(1, "files.directory");
+        _ = try weft.semanticRelationProviderRegister(1, "files.container");
         self.started = true;
     }
 

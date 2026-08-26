@@ -313,6 +313,7 @@ const static_cmds = [_]Cmd{
     .{ .name = "paste-before", .handler = pasteBefore },
     .{ .name = "vim-open-focused", .handler = openFocused },
     .{ .name = "vim-open-container", .handler = openContainer },
+    .{ .name = "vim-semantic-back", .handler = semanticBack },
     .{ .name = "join-lines", .handler = joinLines },
     .{ .name = "enter-op-delete", .handler = enterOpDelete },
     .{ .name = "enter-op-change", .handler = enterOpChange },
@@ -491,7 +492,7 @@ export fn init() void {
         .{ "Return", "vim-open-focused" },  .{ "KP_Enter", "vim-open-focused" },
         .{ "minus", "vim-open-container" }, .{ "d", "enter-op-delete" },
         .{ "c", "enter-op-change" },        .{ "y", "enter-op-yank" },
-        .{ "quotedbl", "enter-register" },
+        .{ "quotedbl", "enter-register" },  .{ "q", "vim-semantic-back" },
     };
     for (nb) |b| weft.bindKey("normal", b[0], b[1]);
 
@@ -775,9 +776,11 @@ fn normal() void {
     // barrier; this covers the mode-change boundary a motion doesn't.)
     weft.run("undo-barrier");
     weft.run("clear-selection");
-    // Return to the buffer's declared RESTING mode. Ordinary text buffers land
-    // in Vim's normal mode, while any projection can declare its own posture.
-    weft.exitToResting();
+    // A structured buffer has no provider-owned editor posture: Vim returns
+    // to its own normal mode. Text projections may still declare a specialized
+    // resting mode (git, comint, etc.), so retain the generic restoration path
+    // outside semantic views.
+    if (weft.semanticActive()) weft.setMode("normal") else weft.exitToResting();
 }
 fn deleteEol() void {
     const cur = weft.cursor();
@@ -814,6 +817,13 @@ fn semanticDid(action: []const u8) bool {
         .unavailable, .failed, _ => false,
     };
     return result;
+}
+
+/// Vim maps `q` to the generic back intent only while a structured buffer is
+/// active. The view provider is not named here, and the provider never names
+/// Vim; another input plugin can map its own key to the same intent.
+fn semanticBack() void {
+    if (weft.semanticActive()) weft.run("navigate-back");
 }
 
 /// Return follows the nearest typed target on a structured view. Core owns

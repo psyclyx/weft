@@ -12,7 +12,7 @@
 [
   "edit", "complete", "project", "palette", "motions", "textobjects", "operators", "helix",
   "comment", "autopair", "consult", "git", "grep", "make", "run", "fmt", "buffers",
-  "windows", "modes", "dired", "which_key",
+  "windows", "modes", "files", "which_key",
 ].forEach((p) => weft.plugin(p));
 weft.use("defaults"); // shared pick/editing/menu-nav bindings
 
@@ -50,7 +50,7 @@ weft.provide("format", {}, "format-buffer");
 weft.bind("helix-normal", "SPC f f", "find-file");
 weft.bind("helix-normal", "SPC f s", "save");
 weft.bind("helix-normal", "SPC f r", "project-recent"); // recent files
-weft.bind("helix-normal", "SPC f d", "dired");
+weft.bind("helix-normal", "SPC f d", "files");
 weft.bind("helix-normal", "SPC b b", "buf-pick");
 weft.bind("helix-normal", "SPC b d", "buffer-close");
 weft.bind("helix-normal", "SPC b n", "buffer-next");
@@ -68,7 +68,7 @@ weft.bind("helix-normal", "SPC c f", "format"); // the format action
 weft.bind("helix-normal", "SPC c e", "eval"); //   SPC c e — eval/run by language
 weft.bind("helix-normal", "SPC c b", "make-build");
 weft.bind("helix-normal", "SPC c t", "make-test");
-weft.bind("helix-normal", "SPC o d", "dired");
+weft.bind("helix-normal", "SPC o d", "files");
 weft.bind("helix-normal", "SPC o c", "console-open");
 weft.bind("helix-normal", "SPC w v", "win-vsplit");
 weft.bind("helix-normal", "SPC w s", "win-split");

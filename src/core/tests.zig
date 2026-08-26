@@ -1082,15 +1082,15 @@ test "buffers: switch restores modes, close/create keep the set sane" {
     _ = try run(&host.commands, &host.ctx, "buffer-create", &.{.{ .string = "*tool*" }});
     try t.expectEqual(@as(usize, 2), host.buffers.count());
     try t.expectEqualStrings("*tool*", host.buffers.active().name);
-    try host.head.setModeRaw(gpa, "magit");
+    try host.head.setModeRaw(gpa, "git");
 
-    // Switching away saves "magit" on the tool buffer and restores the
-    // scratch buffer's "normal"; switching back restores "magit".
+    // Switching away saves "git" on the tool buffer and restores the
+    // scratch buffer's "normal"; switching back restores "git".
     _ = try run(&host.commands, &host.ctx, "buffer-switch", &.{.{ .integer = @intCast(scratch_id) }});
     try t.expectEqualStrings("normal", host.head.currentMode());
     _ = try run(&host.commands, &host.ctx, "buffer-next", &.{});
     try t.expectEqualStrings("*tool*", host.buffers.active().name);
-    try t.expectEqualStrings("magit", host.head.currentMode());
+    try t.expectEqualStrings("git", host.head.currentMode());
 
     // Read-only swallows text commands but not others.
     _ = try run(&host.commands, &host.ctx, "buffer-read-only", &.{.{ .boolean = true }});

@@ -545,6 +545,12 @@ pub fn install(gpa: std.mem.Allocator, commands: *command.Commands, keymap: *@im
     try command.registerAction(gpa, commands, actions, "save", .pick);
     try actions.provide(.{ .action = "save", .command = "save-file", .owner = "core" });
 
+    // Input models express leaving a transient/tool locus as an intent. Vim's
+    // `q` is one such mapping; another editor can choose another key, and a
+    // more specific provider can override this buffer-history implementation.
+    try command.registerAction(gpa, commands, actions, "navigate-back", .pick);
+    try actions.provide(.{ .action = "navigate-back", .command = "buffer-back", .owner = "core" });
+
     // The "default" (modeless) mode's baseline editing keys — so BARE weft (run
     // with no config at all) can still type/edit. These are the ONE binding set
     // core ships, precisely because they must exist before any config loads; a

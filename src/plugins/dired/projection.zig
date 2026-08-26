@@ -39,8 +39,8 @@ pub const Options = struct {
 };
 
 pub const metadata_column: u16 = 0;
-pub const mode_column: u16 = 10;
-pub const name_column: u16 = 16;
+pub const mode_column: u16 = 4;
+pub const name_column: u16 = 11;
 pub const original_column: u16 = 48;
 
 pub const OwnedScene = struct {
@@ -79,7 +79,7 @@ pub fn projectWith(gpa: std.mem.Allocator, rows: []const model.Row, bindings: []
     }
     owned.value = .{
         .id = root_id,
-        .role = "dired",
+        .role = "files",
         // The container itself is a focus stop only when there is no ordinary
         // name field to select. Root actions remain reachable through every
         // row's ancestor path in non-empty directories.
@@ -162,14 +162,14 @@ fn projectRow(arena: std.mem.Allocator, row: model.Row, binding: FieldBinding) !
     const leaf_facts = try toneFacts(arena, row);
     children[0] = .{
         .id = try stableId(row.id, metadata_domain),
-        .role = "dired.metadata",
+        .role = "files.metadata",
         .layout = .{ .column = metadata_column },
         .facts = leaf_facts,
-        .content = .{ .label = kindName(row.draft.kind) },
+        .content = .{ .label = kindGlyph(row.draft.kind) },
     };
     children[1] = .{
         .id = try stableId(row.id, mode_domain),
-        .role = "dired.mode",
+        .role = "files.mode",
         .layout = .{ .column = mode_column, .min_cells = 4 },
         .facts = leaf_facts,
         .content = if (binding.mode_field) |mode_field|
@@ -179,7 +179,7 @@ fn projectRow(arena: std.mem.Allocator, row: model.Row, binding: FieldBinding) !
     };
     children[2] = .{
         .id = try stableId(row.id, field_domain),
-        .role = "dired.name",
+        .role = "files.name",
         .layout = .{ .column = name_column },
         .facts = leaf_facts,
         .target = binding.target,
@@ -190,7 +190,7 @@ fn projectRow(arena: std.mem.Allocator, row: model.Row, binding: FieldBinding) !
         const original = row.base.?.name;
         children[3] = .{
             .id = try stableId(row.id, original_domain),
-            .role = "dired.original-name",
+            .role = "files.original-name",
             .layout = .{ .column = original_column },
             .facts = leaf_facts,
             .content = .{ .label = try prefixedEscapedLabel(arena, "original: ", original) },
@@ -201,7 +201,7 @@ fn projectRow(arena: std.mem.Allocator, row: model.Row, binding: FieldBinding) !
     const actions = try rowActions(arena, row, binding.mode_field != null, binding.target != null);
     return .{
         .id = try stableId(row.id, row_domain),
-        .role = "dired.row",
+        .role = "files.row",
         .facts = facts,
         .actions = actions,
         .target = binding.target,
@@ -344,6 +344,15 @@ fn kindName(kind: contract.Kind) []const u8 {
     };
 }
 
+fn kindGlyph(kind: contract.Kind) []const u8 {
+    return switch (kind) {
+        .regular => "·",
+        .directory => "▸",
+        .symlink => "↗",
+        .other => "?",
+    };
+}
+
 fn isOriginalVisible(row: model.Row) bool {
     return row.base != null and row.name_dirty;
 }
@@ -466,7 +475,7 @@ test "projection reports add copy and stale facts with metadata" {
     defer added_output.deinit();
     try std.testing.expectEqualStrings("add", added_output.value.content.container.children[0].facts[0].value);
     const added_children = added_output.value.content.container.children[0].content.container.children;
-    try std.testing.expectEqualStrings("directory", added_children[0].content.label);
+    try std.testing.expectEqualStrings("▸", added_children[0].content.label);
     try std.testing.expectEqualStrings("0000", added_children[1].content.label);
 
     try dired.markDelete(added);

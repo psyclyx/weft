@@ -1056,12 +1056,12 @@ pub fn loadSpine(ed: *Editor) !void {
 }
 
 /// The workspace plus the project navigation/build tools — the surface a person
-/// uses to actually work a codebase: dired (file tree), grep (rg search),
+/// uses to actually work a codebase: files (file tree), grep (rg search),
 /// run/make (shell out a build/run), fmt (format a buffer). Used by the
 /// whole-app "web" e2e verticals.
 pub fn loadWebIde(ed: *Editor) !void {
     try loadWorkspace(ed);
-    try ed.load("dired", guest.dired);
+    try ed.load("files", guest.dired);
     try ed.load("grep", guest.grep);
     try ed.load("run", guest.run);
     try ed.load("make", guest.make);
@@ -1676,7 +1676,7 @@ const plugin_catalog = std.StaticStringMap([]const u8).initComptime(.{
     .{ "net", @embedFile("guest_net_wasm") },
     .{ "http", @embedFile("guest_http_wasm") },
     .{ "which_key", @embedFile("guest_which_key_wasm") },
-    .{ "dired", @embedFile("guest_dired_wasm") },
+    .{ "files", @embedFile("guest_dired_wasm") },
     .{ "helix", @embedFile("guest_helix_wasm") },
     .{ "emacs", @embedFile("guest_emacs_wasm") },
     .{ "debug", @embedFile("guest_debug_wasm") },

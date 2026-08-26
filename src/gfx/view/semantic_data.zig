@@ -8,6 +8,9 @@ const view_runtime = @import("weft_view_runtime");
 pub const Document = struct {
     view: semantic.view.Ref,
     root: *const semantic.scene.Node,
+    /// Buffer-owned presentation label. Providers publish meaning; the shell
+    /// supplies the buffer name without baking file-browser chrome into them.
+    title: []const u8 = &.{},
     focused: ?semantic.scene.NodeId = null,
     fields: *const view_runtime.field.Registry,
 };

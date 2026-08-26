@@ -71,7 +71,7 @@ const shipped_config_plugins = [_][]const u8{
     "motions",    "textobjects", "operators", "vim",        "ts",      "comment",   "indent",
     "whitespace", "numbers",     "autopair",  "consult",    "git",     "grep",      "run",
     "make",       "notes",       "fmt",       "buffers",    "windows", "modes",     "snippets",
-    "direnv",     "llm",         "console",   "repl",       "net",     "which_key", "dired",
+    "direnv",     "llm",         "console",   "repl",       "net",     "which_key", "files",
     "lsp",        "debug",       "dap.js",
 };
 
@@ -225,7 +225,7 @@ test "e2e/regression: switching from a semantic view edits the new text buffer" 
     try t.expectEqualStrings("semantic.txt", old_snapshot.value.bytes);
 }
 
-test "e2e/project: magit push/pull/fetch transients are sticky menus" {
+test "e2e/project: git push/pull/fetch transients are sticky menus" {
     const gpa = t.allocator;
     var ed: Editor = undefined;
     try Editor.init(gpa, &ed);
@@ -248,10 +248,10 @@ test "e2e/project: magit push/pull/fetch transients are sticky menus" {
 // what the user needs next). Before the fix that re-set was undone by
 // dispatch.zig's leaf auto-pop: a leaf that leaves the mode UNCHANGED in a
 // non-sticky menu reads as "did nothing, pop it" — so `i` bounced straight
-// back to *magit*. `git-rebase-menu` is now STICKY (matching git-push/pull/
+// back to *git*. `git-rebase-menu` is now STICKY (matching git-push/pull/
 // fetch-menu's idiom): a same-mode re-set no longer auto-pops, while c/a/s
 // still close normally because each explicitly `weft.setMode`s to a
-// DIFFERENT mode (magit), which dispatch's "leaf moved us elsewhere" branch
+// DIFFERENT mode (git), which dispatch's "leaf moved us elsewhere" branch
 // honors regardless of stickiness. Drives a REAL conflicted rebase (two
 // branches editing the same line) so `.git/rebase-merge` exists for real —
 // not a faked marker directory.
@@ -290,13 +290,13 @@ test "e2e/project: git-rebase-interactive keeps git-rebase-menu open on a real c
         try t.expectEqualStrings("yes", marker); // the real precondition `rebaseInProgress` checks
     }
 
-    // ── Open magit on the now-conflicted repo. ──
+    // ── Open git on the now-conflicted repo. ──
     ed.run("git-status");
-    try t.expect(drainToolContains(&ed, "*magit*", "Branch:"));
-    try t.expectEqualStrings("magit", ed.mode());
+    try t.expect(drainToolContains(&ed, "*git*", "Branch:"));
+    try t.expectEqualStrings("git", ed.mode());
 
     // ── `r` opens the rebase transient; `i`, with a rebase mid-flight, must
-    // leave the user IN it (the bug: it used to bounce back to magit). ──
+    // leave the user IN it (the bug: it used to bounce back to git). ──
     ed.press("r", ""); // git-rebase-menu (paired-transient push)
     try t.expectEqualStrings("git-rebase-menu", ed.mode());
     try t.expectEqual(@as(usize, 1), ed.head.transient_stack.items.len);
@@ -305,13 +305,13 @@ test "e2e/project: git-rebase-interactive keeps git-rebase-menu open on a real c
     try t.expectEqualStrings("git-rebase-menu", ed.mode());
     try t.expectEqual(@as(usize, 1), ed.head.transient_stack.items.len); // not grown, not popped
 
-    // ── `c` (continue) still closes to magit, even though the conflict is
+    // ── `c` (continue) still closes to git, even though the conflict is
     // still unresolved and `git rebase --continue` itself fails — gatherAfter
-    // Seq's `;`-sequenced re-gather always leaves via `weft.setMode("magit")`,
+    // Seq's `;`-sequenced re-gather always leaves via `weft.setMode("git")`,
     // a DIFFERENT mode than git-rebase-menu, so it closes regardless of
     // stickiness. ──
     ed.press("c", ""); // git-rebase-continue
-    try t.expectEqualStrings("magit", ed.mode());
+    try t.expectEqualStrings("git", ed.mode());
     try t.expect(!ed.head.hasOpenTransients());
     // Drain `c`'s async `git rebase --continue` (it fails fast — conflict
     // unresolved — but still runs a real subprocess in the SAME repo) before
@@ -327,15 +327,15 @@ test "e2e/project: git-rebase-interactive keeps git-rebase-menu open on a real c
     ed.press("i", "");
     try t.expectEqualStrings("git-rebase-menu", ed.mode());
 
-    // ── `a` (abort) closes to magit too, and this time actually clears the
+    // ── `a` (abort) closes to git too, and this time actually clears the
     // paused rebase. Mode flips synchronously (`gatherAfterSeq`'s `setMode`
     // runs before the subprocess even starts), but the abort itself is
-    // async — poll the on-disk oracle (not `drainToolContains`: *magit*'s
+    // async — poll the on-disk oracle (not `drainToolContains`: *git*'s
     // buffer already contains a stale "Branch:" from the `c` step's
     // re-gather, so a text-containment check would pass before the abort's
     // OWN re-gather actually lands). ──
     ed.press("a", ""); // git-rebase-abort
-    try t.expectEqualStrings("magit", ed.mode());
+    try t.expectEqualStrings("git", ed.mode());
     try t.expect(!ed.head.hasOpenTransients());
     try t.expect(drainUntilOracle(&proj, &ed, "test -d .git/rebase-merge && echo yes || echo no", "no"));
 }
@@ -778,7 +778,7 @@ test "e2e/spine: write a file, init a repo, stage and commit — all through wef
     ed.runStr("open", ".");
     const directory_view = ed.head.semantic_focus.path().?.view;
     const directory_scene = ed.session.system.semantic.views.get(directory_view).?.scene;
-    try t.expectEqualStrings("dired", directory_scene.role);
+    try t.expectEqualStrings("files", directory_scene.role);
     const rows = switch (directory_scene.content) {
         .container => |container| container.children,
         else => return error.DiredSceneNotContainer,
@@ -797,7 +797,7 @@ test "e2e/spine: write a file, init a repo, stage and commit — all through wef
     }
     try t.expect(saw_main and saw_helper);
     ed.chord("SPC v r"); // generic view.refresh, provider-owned
-    try t.expectEqualStrings("dired", ed.session.system.semantic.views.get(directory_view).?.scene.role);
+    try t.expectEqualStrings("files", ed.session.system.semantic.views.get(directory_view).?.scene.role);
 
     // ── Structured dired workflow ────────────────────────────────────────
     // Keep each mutation fixture small and deterministic, while exercising the
@@ -950,18 +950,18 @@ test "e2e/spine: write a file, init a repo, stage and commit — all through wef
 
     // ── 1.5. git-status BEFORE a repo exists says so — and points the way. ──
     // The project is a real isolated tmp dir with no git ancestor, so this is a
-    // genuine clean slate (magit used to render a fake `Branch: (no branch)`).
+    // genuine clean slate (git used to render a fake `Branch: (no branch)`).
     ed.run("git-status");
-    try t.expect(drainToolContains(&ed, "*magit*", "Not a git repository."));
-    try t.expect(drainToolContains(&ed, "*magit*", "git-init")); // and it names the fix
+    try t.expect(drainToolContains(&ed, "*git*", "Not a git repository."));
+    try t.expect(drainToolContains(&ed, "*git*", "git-init")); // and it names the fix
 
     // ── 2. Start version control from INSIDE the editor (the new git-init). ──
     ed.run("git-init");
     // Prove git ACTUALLY ran and the repo now renders a real branch: wait for the
     // `git status` output to list the untracked file + the `Branch:` header in
-    // *magit*. Then confirm the repo on disk via the git oracle.
-    try t.expect(drainToolContains(&ed, "*magit*", "main.zig"));
-    try t.expect(drainToolContains(&ed, "*magit*", "Branch:"));
+    // *git*. Then confirm the repo on disk via the git oracle.
+    try t.expect(drainToolContains(&ed, "*git*", "main.zig"));
+    try t.expect(drainToolContains(&ed, "*git*", "Branch:"));
     {
         const gitdir = try proj.oracle("git rev-parse --git-dir");
         defer gpa.free(gitdir);
@@ -978,10 +978,10 @@ test "e2e/spine: write a file, init a repo, stage and commit — all through wef
         gpa.free(e2);
     }
 
-    // ── 4. Stage everything with the magit key `S`, then commit with `c c`. ──
-    // We're in the *magit* buffer (git-init focused it), so these are real
-    // magit keypresses, not command invocations.
-    try t.expectEqualStrings("magit", ed.mode());
+    // ── 4. Stage everything with the git key `S`, then commit with `c c`. ──
+    // We're in the *git* buffer (git-init focused it), so these are real
+    // git keypresses, not command invocations.
+    try t.expectEqualStrings("git", ed.mode());
     ed.press("S", ""); // git-stage-all → git add -A → re-gather (async)
     // Disk oracle, drained: the file becomes staged once the async `git add`
     // the keypress scheduled actually runs.
@@ -1158,23 +1158,23 @@ test "e2e/web: author js + html, grep across them, run it with node" {
 
     // ── 4. Browse the project through the provider-aware `open` command. ──
     // The app Session publishes a typed directory target and the composed dired
-    // plugin claims it as an ordinary semantic view. There is no *dired* text
-    // buffer and no dired-specific mode for this acceptance path.
-    const input_posture = try gpa.dupe(u8, ed.mode());
-    defer gpa.free(input_posture);
+    // plugin claims it as an ordinary semantic view attached to a real tool
+    // buffer. The input posture remains Vim's; the browser owns no keymap.
+    const prior_buffer = ed.buffers.active().id;
     ed.runStr("open", ".");
     const view_ref = ed.head.semantic_focus.path().?.view;
     const scene = ed.session.system.semantic.views.get(view_ref).?.scene;
-    try t.expectEqualStrings("dired", scene.role);
-    try t.expect(ed.buffers.findByName("*dired*") == null);
+    try t.expectEqualStrings("files", scene.role);
+    try t.expect(std.mem.startsWith(u8, ed.buffers.active().name, "files: "));
+    try t.expectEqualStrings("files", ed.buffers.active().editor.toolName().?);
 
     const children = switch (scene.content) {
         .container => |container| container.children,
         else => return error.DiredSceneNotContainer,
     };
     try t.expectEqual(@as(usize, 2), children.len);
-    try t.expectEqualStrings("dired.row", children[0].role);
-    try t.expectEqualStrings("dired.row", children[1].role);
+    try t.expectEqualStrings("files.row", children[0].role);
+    try t.expectEqualStrings("files.row", children[1].role);
     var saw_app = false;
     var saw_index = false;
     for (children) |row| {
@@ -1194,13 +1194,19 @@ test "e2e/web: author js + html, grep across them, run it with node" {
     try t.expect(first_focus != second_focus);
     ed.press("k", "");
     try t.expectEqual(first_focus, ed.head.semantic_focus.path().?.leaf().?);
-    try t.expectEqualStrings(input_posture, ed.mode());
+    try t.expectEqualStrings("normal", ed.mode());
 
     // The same view can be refreshed through the generic action endpoint. It
     // remains retained and focused, rather than being reconstructed as a tool
     // buffer or dropping the head back into a dired mode.
     ed.run("view-refresh");
     try t.expectEqual(view_ref, ed.head.semantic_focus.path().?.view);
-    try t.expectEqualStrings("dired", ed.session.system.semantic.views.get(view_ref).?.scene.role);
-    proj.shot(&ed, "web-3-dired");
+    try t.expectEqualStrings("files", ed.session.system.semantic.views.get(view_ref).?.scene.role);
+    proj.shot(&ed, "web-3-files");
+
+    // Vim maps q to the generic navigate-back action. The file browser knows
+    // neither that key nor Vim, and buffer history performs the transition.
+    ed.press("q", "");
+    try t.expectEqual(prior_buffer, ed.buffers.active().id);
+    try t.expect(ed.head.semantic_focus.path() == null);
 }

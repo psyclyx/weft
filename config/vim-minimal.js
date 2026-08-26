@@ -10,7 +10,7 @@
 [
   "edit", "complete", "project", "palette", "motions", "textobjects", "operators", "vim",
   "comment", "autopair", "consult", "git", "grep", "make", "run", "fmt", "buffers",
-  "windows", "modes", "dired", "which_key",
+  "windows", "modes", "files", "which_key",
 ].forEach((p) => weft.plugin(p));
 weft.use("defaults"); // shared pick/editing/menu-nav bindings
 
@@ -39,7 +39,7 @@ weft.bind("normal", "SPC b", "buf-pick"); //          SPC b — switch buffer
 weft.bind("normal", "SPC s", "save"); //              SPC s — save
 weft.bind("normal", "SPC g", "git-status"); //        SPC g — git
 weft.bind("normal", "SPC e", "consult-line"); //      SPC e — jump to a line
-weft.bind("normal", "SPC d", "dired"); //             SPC d — dired
+weft.bind("normal", "SPC d", "files"); //             SPC d — files
 weft.bind("normal", "SPC c", "comment-line"); //      SPC c — toggle comment
 weft.bind("normal", "SPC =", "format"); //        SPC = — format (the action)
 weft.bind("normal", "SPC r", "eval"); //              SPC r — eval/run by language

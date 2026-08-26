@@ -10,7 +10,7 @@
 //! `enterMode`.** A bound key whose command NAMES a declared menu mode
 //! (`ctx.keymap.isMenuMode(cmd_name)`, in `dispatchSpec`'s `.run` case) is
 //! the actual production shape of a menu open — real examples:
-//! `src/guest/git.zig`'s `weft.bindKey("magit", "c", "git-commit-dispatch")`,
+//! `src/guest/git.zig`'s `weft.bindKey("git", "c", "git-commit-dispatch")`,
 //! `git-branch-menu`, `git-stash-menu`, `git-log-menu`, `git-rebase-menu`,
 //! `git-commit-menu`, `git-input-menu`. Entering one now PUSHES a paired
 //! transient (`core/ctx.zig`'s `Ctx.pushTransient`, backed by

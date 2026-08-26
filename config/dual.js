@@ -13,7 +13,7 @@
   "edit", "complete", "project", "palette", "motions", "textobjects", "operators",
   "helix", "vim",
   "comment", "indent", "autopair", "consult", "git", "grep", "make", "run", "fmt", "buffers",
-  "windows", "modes", "dired", "which_key",
+  "windows", "modes", "files", "which_key",
 ].forEach((p) => weft.plugin(p));
 weft.use("defaults"); // shared pick/editing/menu-nav bindings
 
@@ -46,7 +46,7 @@ function leaderMap(m) {
   weft.bind(m, "SPC f f", "find-file");
   weft.bind(m, "SPC f s", "save");
   weft.bind(m, "SPC f r", "project-recent"); // recent files
-  weft.bind(m, "SPC f d", "dired");
+  weft.bind(m, "SPC f d", "files");
   weft.bind(m, "SPC b b", "buf-pick");
   weft.bind(m, "SPC b d", "buffer-close");
   weft.bind(m, "SPC b n", "buffer-next");

@@ -231,7 +231,7 @@ pub const Session = struct {
             };
             self.filesystem_provider.releaseRoot(root);
             root_owned = false;
-            try focusDirectoryTarget(&system.semantic, ctx.head, ctx.gpa, existing.publication.ref);
+            try focusDirectoryTarget(ctx, existing.publication.ref);
             return true;
         }
 
@@ -265,7 +265,7 @@ pub const Session = struct {
         // transaction back if handler admission or focus fails.
         errdefer while (self.directory_targets.items.len > first_new_target)
             self.closeDirectoryTarget(self.directory_targets.items.len - 1);
-        try focusDirectoryTarget(&system.semantic, ctx.head, ctx.gpa, publication.ref);
+        try focusDirectoryTarget(ctx, publication.ref);
         return true;
     }
 
@@ -571,14 +571,16 @@ const LocalDirectoryRelations = struct {
     }
 };
 
-fn focusDirectoryTarget(
-    services: *core.semantic.Services,
-    head: *core.Head,
-    gpa: std.mem.Allocator,
-    target: semantic.target.Ref,
-) anyerror!void {
-    switch (try core.target_open.openAndFocus(services, head, gpa, target)) {
-        .opened => {},
+fn focusDirectoryTarget(ctx: *core.command.Context, target: semantic.target.Ref) anyerror!void {
+    const services = ctx.semantic orelse return error.SemanticUnavailable;
+    switch (try core.target_open.openAndFocus(services, ctx.head, ctx.gpa, target)) {
+        .opened => {
+            const descriptor = services.targets.get(target) orelse return error.StaleTarget;
+            const base = std.fs.path.basename(descriptor.display_name);
+            const name = try std.fmt.allocPrint(ctx.gpa, "files: {s}", .{if (base.len == 0) descriptor.display_name else base});
+            defer ctx.gpa.free(name);
+            _ = try ctx.buffers.attachFocusedSemanticView(ctx.gpa, ctx.head, ctx.keymap, name, "files");
+        },
         .no_handler => return error.NoTargetHandler,
         .ambiguous => return error.AmbiguousTargetHandlers,
     }
@@ -737,7 +739,8 @@ test "session: local directories become deduplicated semantic targets while file
     const scene = sess.system.semantic.views.get(first_view).?.scene;
     try t.expectEqualStrings("directory-test", scene.role);
     try t.expect(scene.focusable);
-    try t.expect(sess.system.buffers.findByName("*dired*") == null);
+    try t.expect(std.mem.startsWith(u8, sess.system.buffers.active().name, "files: "));
+    try t.expectEqualStrings("files", sess.system.buffers.active().editor.toolName().?);
 
     // Containment is publisher-owned and lazy. Resolving it pins the parent
     // independently of the generic handler's view state.

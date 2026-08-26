@@ -1,6 +1,6 @@
-//! Sandboxed directory-tool plugin.
+//! Sandboxed file-browser plugin.
 //!
-//! The named `weft_dired_guest` library composes the portable draft model,
+//! The internal `weft_dired_guest` library composes the portable draft model,
 //! semantic projection, and public target-scoped filesystem ABI. This root
 //! contributes only wasm callbacks plus the user-facing launcher. It owns no
 //! text projection, editor mode, keymap, shell command, syscall, or platform
@@ -9,7 +9,7 @@
 const weft = @import("weft");
 const dired_guest = @import("weft_dired_guest");
 
-const command_name = "dired";
+const command_name = "files";
 var plugin: dired_guest.Plugin = undefined;
 
 export fn describe() void {
@@ -30,7 +30,7 @@ export fn on_command(id: u32) void {
     if (id != 0) return;
     const directory = weft.cwd();
     if (directory.len == 0) {
-        weft.echo("dired: current directory unavailable");
+        weft.echo("files: current directory unavailable");
         return;
     }
     weft.runStr("open", directory);

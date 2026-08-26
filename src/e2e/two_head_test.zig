@@ -157,11 +157,11 @@ test "two heads: A in a menu mode does not move B out of normal" {
     defer ed.deinit();
     try ed.head.setModeRaw(gpa, "normal");
 
-    // A magit-style special mode: locked (no text command — typing doesn't
+    // A git-style special mode: locked (no text command — typing doesn't
     // fall through to self-insert) AND reachable as a one-shot menu, the
     // same shape `dispatch.dispatchSpec` gives any bound command whose name
     // NAMES a menu mode (see its "legacy mode-menu path" comment) — the
-    // same mechanism a real magit-status keybinding uses.
+    // same mechanism a real git-status keybinding uses.
     try ed.keymap.markMenuMode(gpa, "tool-mode");
     try ed.keymap.markLockedMode(gpa, "tool-mode");
     try ed.keymap.bind(gpa, "normal", "g", "tool-mode", core.Keymap.prio_config, "test");

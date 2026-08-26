@@ -7,7 +7,7 @@
 //! guest config) — through the SAME shape `dispatch.zig`'s `.run` branch
 //! gives any real bound command whose name IS a declared menu mode (the
 //! actual production example: `src/guest/git.zig`'s
-//! `weft.bindKey("magit", "c", "git-commit-dispatch")`, exercised end to end
+//! `weft.bindKey("git", "c", "git-commit-dispatch")`, exercised end to end
 //! by `project_test.zig`'s "write a file, init a repo, stage and commit"
 //! spine test — unmodified by this migration, still green).
 

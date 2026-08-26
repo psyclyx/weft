@@ -118,6 +118,7 @@ fn semanticDocument(fx: *const FrameCtx) ?view_mod.semantic_data.Document {
     return .{
         .view = path.view,
         .root = &instance.scene,
+        .title = fx.buffers.active().name,
         .focused = focusedSemanticNode(fx.head, path.view, &instance.scene),
         .fields = &fx.semantic.fields,
     };

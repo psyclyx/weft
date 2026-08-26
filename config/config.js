@@ -57,7 +57,7 @@ weft.plugin("console");     // a command console — run a line, append output
 weft.plugin("repl");        // a stateful interactive REPL (persistent subprocess)
 weft.plugin("net");         // raw TCP/TLS transport (net.connect)
 weft.plugin("which_key");   // menu-hint overlay, as a plugin over the surface door
-weft.plugin("dired");       // directory launcher; the target handler owns its semantic scene/actions
+weft.plugin("files");       // file browser; the target handler owns its semantic scene/actions
 weft.plugin("lsp");         // language server client (hover/def/… over jsonrpc)
 weft.set("lsp", "zig", "zls"); // server per language: weft.set("lsp","<lang>","<cmd>")
 weft.plugin("debug");       // breakpoints (gutter markers) — the debugger's first slice
@@ -93,7 +93,7 @@ weft.bind("normal", "SPC f f", "find-file");
 weft.bind("normal", "SPC f s", "save");
 weft.bind("normal", "SPC f S", "save-as");
 weft.bind("normal", "SPC f r", "project-recent");
-weft.bind("normal", "SPC f d", "dired");
+weft.bind("normal", "SPC f d", "files");
 
 // SPC b — buffers
 weft.bind("normal", "SPC b b", "buf-pick");
@@ -103,8 +103,8 @@ weft.bind("normal", "SPC b n", "buffer-next");
 weft.bind("normal", "SPC b s", "save");
 weft.bind("normal", "SPC b N", "buf-scratch");
 
-// SPC g — git. `git-status` opens the *magit* model buffer, which runs its own
-// `magit` keymap: j/k move, TAB folds, s/u stage/unstage (file/hunk/region),
+// SPC g — git. `git-status` opens the *git* model buffer, which runs its own
+// `git` keymap: j/k move, TAB folds, s/u stage/unstage (file/hunk/region),
 // S/U stage-all, g refresh, RET visits a file (or shows a commit), q leaves.
 // The Phase-2b/2c transients (which-key renders each menu mode):
 //   c  commit dispatch  — c commit · a amend · e extend · w reword ·
@@ -207,7 +207,7 @@ weft.bind("normal", "K", "hover");
 //   weft.bind("normal", "SPC o s", "agent-send");  // SPC o s — send this line
 
 // SPC o — open / tools
-weft.bind("normal", "SPC o d", "dired");
+weft.bind("normal", "SPC o d", "files");
 weft.bind("normal", "SPC o r", "repl-start");
 weft.bind("normal", "SPC o c", "console-open");
 weft.bind("normal", "SPC o e", "direnv-status");
@@ -278,7 +278,7 @@ function bindActionGroup(mode, prefix, bindings) {
     var binding = bindings[i];
     // Semantic action names are an open plugin/view protocol. Declaring the
     // command here keeps this table data-shaped: a future structured view can
-    // add its own action without a core or Vim/dired special case.
+    // add its own action without a core or Vim/file-browser special case.
     weft.semanticAction(binding[1]);
     weft.bind(mode, prefix + " " + binding[0], binding[1]);
   }

@@ -850,19 +850,19 @@ test "keymap: a locked projection mode refuses to leave for an editing mode" {
     const gpa = t.allocator;
     var km: Keymap = .empty;
     defer km.deinit(gpa);
-    try km.markLockedMode(gpa, "magit");
+    try km.markLockedMode(gpa, "git");
     try km.markMenuMode(gpa, "git-branch-menu");
 
     // From the locked projection you may NOT jump to a different editing mode
     // (the "normal-in-magit" leak) — that's now inexpressible...
-    try t.expect(!km.mayLeaveLocked("magit", "normal"));
-    try t.expect(!km.mayLeaveLocked("magit", "insert"));
+    try t.expect(!km.mayLeaveLocked("git", "normal"));
+    try t.expect(!km.mayLeaveLocked("git", "insert"));
     // ...but a menu (transient) and staying put are fine.
-    try t.expect(km.mayLeaveLocked("magit", "git-branch-menu"));
-    try t.expect(km.mayLeaveLocked("magit", "magit"));
+    try t.expect(km.mayLeaveLocked("git", "git-branch-menu"));
+    try t.expect(km.mayLeaveLocked("git", "git"));
 
     // From a menu (current mode not locked), returning to magit is allowed.
-    try t.expect(km.mayLeaveLocked("git-branch-menu", "magit"));
+    try t.expect(km.mayLeaveLocked("git-branch-menu", "git"));
     // A non-locked mode never gates (ordinary editing).
     try t.expect(km.mayLeaveLocked("normal", "insert"));
 }

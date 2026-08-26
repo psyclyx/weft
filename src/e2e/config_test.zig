@@ -398,21 +398,22 @@ test "e2e/config: the sample config boots; SPC g i is discoverable via which-key
 
     // The sample's ordinary file-group binding reaches the shipped launcher,
     // which delegates to generic target opening. Its observable result is a
-    // retained semantic scene—not a dired keymap mode or text buffer.
+    // retained semantic scene attached to an ordinary tool buffer, without a
+    // file-browser-owned keymap mode.
     ed.chord("SPC f d");
     const configured_directory_view = ed.head.semantic_focus.path().?.view;
     try t.expectEqualStrings(
-        "dired",
+        "files",
         ed.session.system.semantic.views.get(configured_directory_view).?.scene.role,
     );
-    try t.expect(ed.buffers.findByName("*dired*") == null);
+    try t.expect(std.mem.startsWith(u8, ed.buffers.active().name, "files: "));
 
     // The alternate open binding is the same ordinary launcher contract. It
     // must reuse the retained semantic target/view rather than introducing a
     // second tool-specific surface for the same directory.
     ed.chord("SPC o d");
     try t.expectEqual(configured_directory_view, ed.head.semantic_focus.path().?.view);
-    try t.expect(ed.buffers.findByName("*dired*") == null);
+    try t.expect(std.mem.startsWith(u8, ed.buffers.active().name, "files: "));
 
     // The config surface must cover the actions the REAL directory scene
     // advertises, not merely a hand-built generic fixture. This is deliberately
@@ -455,8 +456,8 @@ test "e2e/config: the sample config boots; SPC g i is discoverable via which-key
         try t.expect(ed.commands.resolve(binding.command) != null);
         try t.expectEqualStrings(binding.command, ed.keymap.resolveExact("normal", binding.sequence).?);
     }
-    try t.expect(sceneNodeWithFact(dired_scene, "dired.row", "kind", "regular") != null);
-    const directory_row = sceneNodeWithFact(dired_scene, "dired.row", "kind", "directory") orelse return error.MissingDirectoryRow;
+    try t.expect(sceneNodeWithFact(dired_scene, "files.row", "kind", "regular") != null);
+    const directory_row = sceneNodeWithFact(dired_scene, "files.row", "kind", "directory") orelse return error.MissingDirectoryRow;
     try t.expectEqualStrings("cursor-down", ed.keymap.resolveExact("normal", "space v j").?);
     try t.expectEqualStrings("cursor-up", ed.keymap.resolveExact("normal", "space v k").?);
     // Return/minus are generic Vim input policy, not dired bindings. Keep the
@@ -468,12 +469,12 @@ test "e2e/config: the sample config boots; SPC g i is discoverable via which-key
     // Exercise that policy against the real row: Return opens the child target
     // through generic target resolution, and minus follows its generic
     // `container` relation back to this directory. No dired keymap is involved.
-    const dired_name = sceneNodeWithRole(directory_row, "dired.name") orelse return error.MissingNameField;
+    const dired_name = sceneNodeWithRole(directory_row, "files.name") orelse return error.MissingNameField;
     _ = try ed.session.system.semantic.focusView(ed.head, gpa, configured_directory_view, dired_name.id);
     ed.press("Return", "");
     const child_view = ed.head.semantic_focus.path().?.view;
     try t.expect(!child_view.eql(configured_directory_view));
-    try t.expectEqualStrings("dired", ed.session.system.semantic.views.get(child_view).?.scene.role);
+    try t.expectEqualStrings("files", ed.session.system.semantic.views.get(child_view).?.scene.role);
     ed.press("minus", "");
     try t.expectEqual(configured_directory_view, ed.head.semantic_focus.path().?.view);
 

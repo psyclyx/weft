@@ -138,7 +138,25 @@ const Builder = struct {
 pub fn drawDocument(v: *View, scratch: Allocator, hit_arena: Allocator, runs: *std.ArrayList(Run), rects: *std.ArrayList(Rect), document: data.Document, body: region.Rect) ![]const Hit {
     const rows = try rowsFor(scratch, document);
     var hits: std.ArrayList(Hit) = .empty;
-    try drawRows(v, scratch, hit_arena, runs, rects, &hits, document.view, rows, body, false);
+    var content = body;
+    if (document.title.len != 0 and body.h >= 2 * v.line_h) {
+        const inset = v.cell_w;
+        try popup.propLine(v, scratch, runs, document.title, body.x + inset, body.y + v.ascent, v.theme.accent);
+        try rects.append(scratch, .{
+            .x = body.x + inset,
+            .y = body.y + v.line_h - 1,
+            .w = @max(0, body.w - 2 * inset),
+            .h = 1,
+            .color = v.theme.status,
+        });
+        content = .{
+            .x = body.x + inset,
+            .y = body.y + v.line_h * 1.5,
+            .w = @max(0, body.w - 2 * inset),
+            .h = @max(0, body.h - v.line_h * 1.5),
+        };
+    }
+    try drawRows(v, scratch, hit_arena, runs, rects, &hits, document.view, rows, content, false);
     return hits.toOwnedSlice(hit_arena);
 }
 
@@ -217,6 +235,14 @@ fn toneFor(node: *const semantic.scene.Node) Tone {
     if (std.mem.eql(u8, value, "negative") or std.mem.eql(u8, value, "deleted")) return .negative;
     if (std.mem.eql(u8, value, "warning") or std.mem.eql(u8, value, "changed")) return .warning;
     if (std.mem.eql(u8, value, "conflict")) return .conflict;
+    if (std.mem.eql(u8, node.role, "files.metadata") or
+        std.mem.eql(u8, node.role, "files.mode") or
+        std.mem.eql(u8, node.role, "files.original-name")) return .muted;
+    if (std.mem.eql(u8, node.role, "files.name")) for (node.facts) |fact| {
+        if (!std.mem.eql(u8, fact.name, "kind")) continue;
+        if (std.mem.eql(u8, fact.value, "directory")) return .accent;
+        if (std.mem.eql(u8, fact.value, "symlink")) return .warning;
+    };
     return .normal;
 }
 

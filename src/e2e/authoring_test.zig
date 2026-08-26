@@ -258,7 +258,7 @@ test "dired: semantic field editing keeps the view focused and returns to normal
     ed.runStr("open", ".");
     const view_ref = ed.head.semantic_focus.path().?.view;
     const view = ed.session.system.semantic.views.get(view_ref).?;
-    try t.expectEqualStrings("dired", view.scene.role);
+    try t.expectEqualStrings("files", view.scene.role);
     const leaf = ed.head.semantic_focus.path().?.leaf().?;
     const field_ref = view.node(leaf).?.content.field.ref;
     var before = try ed.session.system.semantic.fields.get(field_ref).?.snapshot(gpa);
@@ -303,7 +303,7 @@ test "dired: Vim Return and minus follow generic target relations" {
     ed.press("Return", "");
     const child_view = ed.head.semantic_focus.path().?.view;
     try t.expect(!child_view.eql(parent_view));
-    try t.expectEqualStrings("dired", ed.session.system.semantic.views.get(child_view).?.scene.role);
+    try t.expectEqualStrings("files", ed.session.system.semantic.views.get(child_view).?.scene.role);
 
     // `-` likewise follows the open `container` relation. The child target's
     // publisher supplies that edge; Vim and dired do not import one another.
@@ -1466,7 +1466,7 @@ test "authoring/dired: rename a semantic field, apply its dialog, and verify dis
     ed.runStr("open", ".");
     const view_ref = ed.head.semantic_focus.path().?.view;
     const view = ed.session.system.semantic.views.get(view_ref).?;
-    try t.expectEqualStrings("dired", view.scene.role);
+    try t.expectEqualStrings("files", view.scene.role);
     const name_node = view.node(ed.head.semantic_focus.path().?.leaf().?).?;
     const file_link = name_node.target orelse return error.TestExpectedEqual;
     const file_descriptor = ed.session.system.semantic.targets.get(file_link.target) orelse return error.TestExpectedEqual;
@@ -1690,7 +1690,7 @@ test "authoring/dired: refresh rollback restores retained fields after an interl
     // row's fields instead.
     var dired_owner: ?semantic.owner.Id = null;
     for (ed.plugins.items) |plugin| {
-        if (std.mem.eql(u8, plugin.name, "dired")) {
+        if (std.mem.eql(u8, plugin.name, "files")) {
             dired_owner = plugin.semantic_owner;
             break;
         }
@@ -1802,7 +1802,7 @@ test "authoring/dired: symlink rows stay links through generic copy, delete, and
         if (!std.mem.eql(u8, snapshot.value.bytes, "a-link")) continue;
         found_link = true;
         link_leaf = columns[2].id;
-        try t.expectEqualStrings("symlink", columns[0].content.label);
+        try t.expectEqualStrings("↗", columns[0].content.label);
         // A symlink is an entry, not a directory target. It must not offer
         // traversal or a no-follow permission edit the provider cannot safely
         // perform through this semantic surface.
@@ -1867,7 +1867,7 @@ test "authoring/dired: symlink rows stay links through generic copy, delete, and
     try t.expectEqual(@as(usize, 1), pasted.scene.content.container.children.len);
     const pasted_row = pasted.scene.content.container.children[0];
     const pasted_columns = pasted_row.content.container.children;
-    try t.expectEqualStrings("symlink", pasted_columns[0].content.label);
+    try t.expectEqualStrings("↗", pasted_columns[0].content.label);
     var pasted_name = try ed.session.system.semantic.fields.get(pasted_columns[2].content.field.ref).?.snapshot(gpa);
     defer pasted_name.deinit();
     try t.expectEqualStrings("a-link", pasted_name.value.bytes);
@@ -1956,7 +1956,7 @@ test "authoring/dired: generic create and permissions actions apply from an empt
     // knows which structured tool supplied it.
     ed.chord("SPC v m");
     const mode_leaf = ed.head.semantic_focus.path().?.leaf().?;
-    try t.expectEqualStrings("dired.mode", ed.session.system.semantic.views.get(view_ref).?.node(mode_leaf).?.role);
+    try t.expectEqualStrings("files.mode", ed.session.system.semantic.views.get(view_ref).?.node(mode_leaf).?.role);
     ed.press("i", "");
     ed.typeText("0600");
     ed.press("Escape", "");
@@ -1974,9 +1974,9 @@ test "authoring/dired: generic create and permissions actions apply from an empt
     for (staged.scene.content.container.children) |row| {
         const columns = row.content.container.children;
         try t.expectEqual(@as(usize, 3), columns.len);
-        try t.expectEqualStrings("dired.metadata", columns[0].role);
-        try t.expectEqualStrings("dired.mode", columns[1].role);
-        try t.expectEqualStrings("dired.name", columns[2].role);
+        try t.expectEqualStrings("files.metadata", columns[0].role);
+        try t.expectEqualStrings("files.mode", columns[1].role);
+        try t.expectEqualStrings("files.name", columns[2].role);
     }
 
     ed.chord("SPC v a");

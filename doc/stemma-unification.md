@@ -1,8 +1,8 @@
 # stemma unification — TextDoc/ObjectDoc doc-core, precisely
 
-Status: STUDY, READ-ONLY (2026-08-22). Companion to north-star-plan.md §5 F1/F3,
-§6 W5/W7, and d1-live-reconcile.md §4. Everything below was checked against
-`lib/stemma` source, file:line, not against either doc's prose header. Where the
+Status: STUDY, READ-ONLY (2026-08-22). Retained as a substrate architecture
+reference. Everything below was checked against `lib/stemma` source, file:line,
+not against planning prose. Where the
 header's claim ("the same FugueMax semantics as TextDoc," ObjectDoc.zig:3–5)
 turns out to be literally true at the code level, that is noted as such; where
 it understates or overstates, the gap is named.
@@ -81,8 +81,8 @@ parent-register + fractional-order-key design is validated ONLY in
 NOT via `stemma_mod`; `structure_sketch.zig:1–14` states this explicitly).
 `ObjectDoc`'s facade also structurally forecloses it today: `mapSet`/
 `listInsert` "accept only FRESH `Value`s, never an existing `ObjId`"
-(cited by d1-live-reconcile.md:340 against `ObjectDoc.zig`'s op shapes —
-confirmed: `ObjectOp` (`objects_state.zig:42–49`) has no `move` variant).
+(confirmed directly: `ObjectOp` (`objects_state.zig:42–49`) has no `move`
+variant).
 
 ---
 
@@ -152,8 +152,8 @@ ONCE, against `SeqWalker` + `EventGraph(Op)`, generic over `Op`:**
   TextDoc-specific. Generalized to `SeqWalker`, TextDoc's own anchors become
   a call-through, and ObjectDoc gets per-text-object (and, for free,
   per-LIST-object) anchors by calling the same function against each
-  object's `SeqWalker` instance. **This is delta 3, and it is the D1
-  blocker** (d1-live-reconcile.md §4: "the hard blocker for the text half").
+   object's `SeqWalker` instance. **This is delta 3 and the hard blocker for
+   identity-preserving live text reconciliation.**
 - `compact`'s GRAPH-LEVEL half — rebuild `new_graph` with raised watermarks
   and renumbered `lv`s (`TextDoc.zig:888–917`) — is already generic over
   `Op` (it never inspects `TextOp`, only `EventGraph` shape: `parentsOf`,
@@ -233,8 +233,8 @@ weft-side, out of `lib/stemma`.
    `anchorAt` becomes a call-through; ObjectDoc gains
    `objectAnchorAt(obj, byte_offset, stickiness)` /
    `resolveObjectAnchors(obj, anchors, out)` per text (and, incidentally,
-   list) object. **This is delta 3 — the D1 hard blocker for live text
-   reconcile** (d1-live-reconcile.md §4, §6 test 6). Est. **~200 lines new/
+   list) object. **This is delta 3 — the hard blocker for identity-preserving
+   live text reconciliation.** Est. **~200 lines new/
    moved in the shared layer, ~150 lines new ObjectDoc-facing API in
    ObjectDoc.zig, ~12–15 new tests** (mirror `TextDoc.zig:779–796`'s anchor
    tests, one battery per object kind, plus a cross-object isolation test —
@@ -255,8 +255,7 @@ weft-side, out of `lib/stemma`.
    content, new mechanism, largest single step.** New `ObjectOp.move`
    variant; the NEW global-Lamport cross-node cycle-break mechanism
    (`structure_sketch.zig:464–488`'s `computeLamport`/`CanonCtx`, genuinely
-   not reused from anywhere else in stemma — north-star-plan.md's F3 caveat
-   1 and d1-live-reconcile.md §4 both flag this as net-new, not a port of
+   not reused from anywhere else in stemma and therefore net-new, not a port of
    ObjectDoc's per-key MV rule); `objects_state.Walker` gains a
    parent-register discipline per structural node, replacing
    `structure_sketch.zig`'s from-scratch `materialize` with the incremental
@@ -271,13 +270,11 @@ weft-side, out of `lib/stemma`.
    property campaign as one `zig build test` entry). This step can start any
    time after step 2 (it doesn't depend on anchors/compaction) but the plan
    places it last because it is deferred until a structural-editor client
-   needs it (north-star-plan.md §5 F3, §6: "deferred until a structural
-   editor client").
+   needs it.
 6. **weft-side: `Document` re-bases on the unified core (W7).** Out of
-   `lib/stemma`'s scope but gated on steps 1+3 at minimum (delta 3, per
-   north-star-plan.md's named F1 trigger: "when doc-core unification +
-   in-node identity anchors land (stemma deltas 1+3), weft's `Document`
-   re-bases onto the unified core"). Whether this means swapping
+   `lib/stemma`'s scope but gated on steps 1+3 at minimum: doc-core
+   unification and in-node identity anchors must land before weft's
+   `Document` re-bases onto the unified core. Whether this means swapping
    `Document`'s backing type to `ObjectDoc` with one root text node, or
    keeping `TextDoc`'s facade over the now-shared internals, is a weft-side
    decision this study does not make (see §2.3) — flagged for the
@@ -509,6 +506,5 @@ single unit of work and the only one that changes wire content (additively).
 - `lib/stemma/src/stemma/collab/core.zig` — shared version-token protocol.
 - `lib/stemma/src/stemma/collab/structure_sketch.zig` — F3 validation
   (test-only, not in the public module — `build.zig:29–43`).
-- `app/weft/doc/north-star-plan.md` §5 F1/F3, §6 W5/W7 — the mandate.
-- `app/weft/doc/d1-live-reconcile.md` §4 — the dependency analysis this
-  study extends with function-level citations.
+- `app/weft/doc/contextual-workspace-architecture.md` — the current workspace,
+  identity, protocol, and presentation architecture.

@@ -69,21 +69,30 @@ one-level context.)
 
 ## The substrate is stemma's object graph, not text
 
-The deepest application of the method. Our first instinct — "a document is text" —
-is the degenerate case. The real thing is **stemma's object graph**: structured
-nodes, lazy, holey, multi-gig. Text is a **projection** of the graph (a
-linearization for one view); dired is a projection of the filesystem graph; a
-symbol outline, a diff, a magit status, an agent transcript — all projections of
-the same graph. So the capability mesh, the scene, editing, collab, and permissions
-should all operate over the GRAPH, with text as one projection among many:
+The deepest application of the method — now scoped per domain (decided
+2026-08-26; see `contextual-workspace-architecture.md` §1.1). Our first
+instinct — "a document is text" — is the degenerate case. The real thing for
+**owned and replicated state** — documents, notes, drafts, transcripts, plans —
+is **stemma's object graph**: structured nodes, lazy, holey, multi-gig. Text is
+a **projection** of the graph (a linearization for one view); a symbol outline,
+an agent transcript — projections of the same graph. **External authorities** —
+the filesystem, a git repository, a language server, a debugger — are NOT
+mirrored into the graph: they are owner-authoritative endpoints spoken to
+through typed protocols (a mirror lies about authority and staleness). Dired
+and magit are *presentations* of those endpoints, with drafts — small owned
+graphs of pending mutations — as the editable middle. So the capability mesh,
+the scene, editing, collab, and permissions operate over the GRAPH where weft
+owns the state and over protocol endpoints where it does not, with text as one
+projection among many:
 
 - **Capabilities act on nodes**, not offsets: `edit/completion` at a node,
   `ui/gutter-segment` for a node's line, a rename that edits the graph and every
   projection re-renders. Offsets are a text-projection detail.
 - **The scene projects nodes → primitives.** `ui/viewport` is "project these graph
   nodes into rows/spans"; a structural editor projects the same nodes differently.
-  Editing a projection mutates the graph (the editable-projection work — dired —
-  is the first instance: name-is-content, save-reconciles the graph).
+  Editing a projection mutates the model through editable fields (the
+  editable-projection work — dired — is the first instance: name-is-content,
+  save reconciles the draft, the draft applies to the authority).
 - **Grants are per-node/subtree.** "This peer may edit that subtree", "this agent
   may read but not write these nodes" — authority scoped to graph regions, the same
   grant tuple as everything else.
@@ -147,4 +156,4 @@ rest (the editor view as a slot — P5 — agent-UX as a sibling composition, st
 collab as graph-reconciliation) falls out of the same primitives.
 
 See [[rendering-decomplection]], [[completion-ux-roadmap]], [[abstraction-audit]],
-`capabilities.md`, `extensibility.md`.
+`capabilities.md`, and `contextual-workspace-architecture.md`.

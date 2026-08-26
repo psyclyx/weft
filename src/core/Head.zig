@@ -156,6 +156,19 @@ pub const SemanticFocus = struct {
         self.navigation_anchor = null;
     }
 
+    /// Replace this focus with an owned copy of another head/buffer focus.
+    /// Buffer switches use this to save and restore semantic tools with the
+    /// same lifetime rules as cursor/mode state; the scene itself remains in
+    /// the semantic view registry.
+    pub fn copyFrom(self: *SemanticFocus, gpa: Allocator, other: *const SemanticFocus) Allocator.Error!void {
+        try self.nodes.ensureTotalCapacity(gpa, other.nodes.items.len);
+        self.nodes.clearRetainingCapacity();
+        self.nodes.appendSliceAssumeCapacity(other.nodes.items);
+        self.view = other.view;
+        self.field = other.field;
+        self.navigation_anchor = other.navigation_anchor;
+    }
+
     pub fn setNavigationAnchor(self: *SemanticFocus, anchor: ?semantic.scene.NodeId) void {
         self.navigation_anchor = anchor;
     }

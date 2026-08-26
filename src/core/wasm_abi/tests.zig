@@ -327,7 +327,7 @@ test "wasm plugin: guarded child directories publish and revoke complete authori
     try t.expectEqual(@as(usize, 1), dired_plugin.semantic_directories.items.len);
     const initial_view = semantic.views.get(view_ref) orelse return error.TestUnexpectedResult;
     const initial_view_revision = initial_view.descriptor.revision;
-    try t.expectEqualStrings("dired", initial_view.scene.role);
+    try t.expectEqualStrings("files", initial_view.scene.role);
     const initial_rows = initial_view.scene.content.container.children;
     try t.expectEqual(@as(usize, 1), initial_rows.len);
     const row_id = initial_rows[0].id;
@@ -799,11 +799,11 @@ test "dired wasm launcher: delegates to the ordinary open command at cwd" {
     // The shipped dired guest is a thin launcher. This ABI gate intentionally
     // supplies only the ordinary command surface: dired owns no proc/fs
     // authority, text buffer, mode, or filesystem implementation.
-    const plugin = try loadPlugin(&engine, &env.ctx, "dired", @embedFile("guest_dired_wasm"), .{});
+    const plugin = try loadPlugin(&engine, &env.ctx, "files", @embedFile("guest_dired_wasm"), .{});
     defer plugin.deinit();
-    try t.expect(env.commands.resolve("dired") != null);
+    try t.expect(env.commands.resolve("files") != null);
 
-    _ = try command.run(&env.commands, &env.ctx, "dired", &.{});
+    _ = try command.run(&env.commands, &env.ctx, "files", &.{});
     try t.expectEqual(@as(usize, 1), open_probe.calls);
 
     var cwd_buf: [4096]u8 = undefined;
@@ -1717,7 +1717,7 @@ test "wasm plugin: git-status runs git into a focused tool buffer (async)" {
     // The magit model buffer was created + focused synchronously (before output).
     const buf = blk: {
         var it = env.buffers.iterator();
-        while (it.next()) |b| if (std.mem.eql(u8, b.name, "*magit*")) break :blk b;
+        while (it.next()) |b| if (std.mem.eql(u8, b.name, "*git*")) break :blk b;
         break :blk null;
     };
     try t.expect(buf != null);

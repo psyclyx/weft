@@ -1,5 +1,5 @@
-//! git — magit as a MODEL rendered into a foldable buffer (design §6.6), a
-//! `.wasm` plugin. The `*magit*` buffer is READ-ONLY and owned entirely by this
+//! git — git as a MODEL rendered into a foldable buffer (design §6.6), a
+//! `.wasm` plugin. The `*git*` buffer is READ-ONLY and owned entirely by this
 //! plugin: one combined `git status`/`git diff`/`git diff --cached`/`git log`
 //! runs via `procToBuffer`, its raw output lands in the buffer, the host fires
 //! `on_fill`, and we PARSE that output into a section→file→hunk tree then
@@ -12,7 +12,7 @@
 //! Staging is pure plugin logic: file → `git add`/`git reset`; hunk → synthesize
 //! a one-file/one-hunk patch (kept diff header + the `@@` hunk) and
 //! `git apply --cached [--reverse]`; a selected line-range → a PARTIAL hunk
-//! (magit's line algorithm: drop unselected `+`, turn unselected `-` into
+//! (git's line algorithm: drop unselected `+`, turn unselected `-` into
 //! context) applied the same way. Every mutation chains a re-gather in ONE shell
 //! command so the buffer reflects the new index (the old `stageThenRefresh`
 //! discipline). `k`/discard is destructive, gated behind a y/n confirm mode.
@@ -40,7 +40,7 @@ var body_out: [PATCH_CAP]u8 = undefined;
 /// Temp files, cwd-relative (the locus the shell command runs in). Removed by
 /// the same command that consumes them.
 const commit_tmp = ".weft-commit-msg";
-const patch_tmp = ".weft-magit.patch";
+const patch_tmp = ".weft-git.patch";
 const rebase_tmp = ".weft-rebase.todo";
 
 // ── Phase 2b/2c transient state (all bounded; see the caps note above) ──
@@ -86,7 +86,7 @@ const MARK_U = "\x1e\x1eU";
 const MARK_S = "\x1e\x1eS";
 const MARK_R = "\x1e\x1eR";
 
-const buf_name = "*magit*";
+const buf_name = "*git*";
 
 // ── The model ────────────────────────────────────────────────────────────
 const Section = enum(u8) { untracked = 0, unstaged = 1, staged = 2, recent = 3 };
@@ -147,7 +147,7 @@ var recent_end: usize = 0;
 /// collapsed Recent stays collapsed through a refresh/stage. Files rebuild each
 /// gather (default expanded); only the section posture is remembered. Recent
 /// defaults EXPANDED so a commit is directly actionable (RET/A/V/x/fixup) on a
-/// fresh `*magit*` without a TAB first; TAB still toggles it.
+/// fresh `*git*` without a TAB first; TAB still toggles it.
 var sec_folded = [_]bool{ false, false, false, false };
 var sec_present = [_]bool{ false, false, false, false };
 var sec_rstart = [_]usize{ 0, 0, 0, 0 };
@@ -289,42 +289,42 @@ export fn describe() void {
 }
 export fn init() void {
     for (cmds) |c| _ = weft.register(c.name);
-    // magit mode: navigation-only (swallows typing), plus the interactive verbs.
+    // git mode: navigation-only (swallows typing), plus the interactive verbs.
     // No fallback — nothing leaks insert into the read-only status buffer.
-    weft.textInput("magit", null);
+    weft.textInput("git", null);
     // A read-only projection: its keymap is PINNED — you can't drop into a
-    // generic editing mode (`normal`) inside it, so magit's keys never go dead.
-    // The framework enforces it; magit just declares it (no defensive handling).
-    weft.lockedMode("magit");
-    weft.bindKey("magit", "j", "cursor-down"); // fold-aware in core
-    weft.bindKey("magit", "k", "cursor-up");
-    weft.bindKey("magit", "Down", "cursor-down");
-    weft.bindKey("magit", "Up", "cursor-up");
-    weft.bindKey("magit", "Tab", "git-toggle-fold");
-    weft.bindKey("magit", "s", "git-stage");
-    weft.bindKey("magit", "u", "git-unstage");
-    weft.bindKey("magit", "S", "git-stage-all");
-    weft.bindKey("magit", "U", "git-unstage-all");
-    // Discard is destructive; `x` (not magit's `k`, which we spend on vim-style
+    // generic editing mode (`normal`) inside it, so git's keys never go dead.
+    // The framework enforces it; git just declares it (no defensive handling).
+    weft.lockedMode("git");
+    weft.bindKey("git", "j", "cursor-down"); // fold-aware in core
+    weft.bindKey("git", "k", "cursor-up");
+    weft.bindKey("git", "Down", "cursor-down");
+    weft.bindKey("git", "Up", "cursor-up");
+    weft.bindKey("git", "Tab", "git-toggle-fold");
+    weft.bindKey("git", "s", "git-stage");
+    weft.bindKey("git", "u", "git-unstage");
+    weft.bindKey("git", "S", "git-stage-all");
+    weft.bindKey("git", "U", "git-unstage-all");
+    // Discard is destructive; `x` (not git's `k`, which we spend on vim-style
     // up-motion) enters the y/n confirm before anything is thrown away.
     // `x` dispatches by node kind (file/hunk → discard; commit → reset menu).
-    weft.bindKey("magit", "x", "git-discard");
+    weft.bindKey("git", "x", "git-discard");
     // `c` opens the commit dispatch transient (which-key renders it).
-    weft.bindKey("magit", "c", "git-commit-dispatch");
-    weft.bindKey("magit", "b", "git-branch-menu");
-    weft.bindKey("magit", "z", "git-stash-menu");
-    weft.bindKey("magit", "l", "git-log-menu");
-    weft.bindKey("magit", "r", "git-rebase-menu");
+    weft.bindKey("git", "c", "git-commit-dispatch");
+    weft.bindKey("git", "b", "git-branch-menu");
+    weft.bindKey("git", "z", "git-stash-menu");
+    weft.bindKey("git", "l", "git-log-menu");
+    weft.bindKey("git", "r", "git-rebase-menu");
     // Cherry-pick / revert the commit under point (resolve the hash live).
-    weft.bindKey("magit", "A", "git-cherry-pick");
-    weft.bindKey("magit", "V", "git-revert");
-    weft.bindKey("magit", "P", "git-push");
-    weft.bindKey("magit", "F", "git-pull");
-    weft.bindKey("magit", "f", "git-fetch");
-    weft.bindKey("magit", "g", "git-refresh");
+    weft.bindKey("git", "A", "git-cherry-pick");
+    weft.bindKey("git", "V", "git-revert");
+    weft.bindKey("git", "P", "git-push");
+    weft.bindKey("git", "F", "git-pull");
+    weft.bindKey("git", "f", "git-fetch");
+    weft.bindKey("git", "g", "git-refresh");
     // RET dispatches: file/hunk → visit; commit → show.
-    weft.bindKey("magit", "Return", "git-visit");
-    weft.bindKey("magit", "q", "buffer-back");
+    weft.bindKey("git", "Return", "git-visit");
+    weft.bindKey("git", "q", "buffer-back");
 
     // Discard confirm: a tiny menu mode — y does it, n/Escape backs out.
     weft.menuMode("git-confirm");
@@ -355,7 +355,7 @@ export fn init() void {
     weft.bindKey("git-commit-menu", "C-g", "git-commit-resume");
 
     // Commit dispatch (`c`): a which-key transient. Each key is terminal, so the
-    // core's one-shot menu auto-return lands back in magit for free.
+    // core's one-shot menu auto-return lands back in git for free.
     weft.menuMode("git-commit-dispatch");
     weft.bindKey("git-commit-dispatch", "c", "git-commit");
     weft.bindKey("git-commit-dispatch", "a", "git-amend");
@@ -408,7 +408,7 @@ export fn init() void {
     // menu open (dispatch.zig's leaf auto-pop otherwise treats "still the same
     // mode after the leaf" as "did nothing, pop it" — undoing the re-set).
     // c/a/s/`i`-when-clean all still close normally: each explicitly leaves via
-    // `weft.setMode` to a DIFFERENT mode (magit or git-input), which dispatch's
+    // `weft.setMode` to a DIFFERENT mode (git or git-input), which dispatch's
     // "leaf moved us elsewhere" branch honors regardless of stickiness — same
     // as git-push-menu's sticky toggles vs. its mode-changing `-do` leaf.
     weft.stickyMenu("git-rebase-menu");
@@ -432,7 +432,7 @@ export fn init() void {
     // Push/pull/fetch flag transients: STICKY menu modes. Sticky means a leaf key
     // does NOT one-shot auto-pop — the transient stays open while flags
     // accumulate (a toggle re-renders and we're still in the mode); only the
-    // execute key (p/RET, which re-gathers into magit) or Escape/q leaves. Being
+    // execute key (p/RET, which re-gathers into git) or Escape/q leaves. Being
     // menu modes, which-key lists the keys, AND our own surface paints the live
     // flag state (see renderPushSurface & co.).
     weft.stickyMenu("git-push-menu");
@@ -479,9 +479,9 @@ export fn init() void {
     weft.bindKey("git-rebase-cc", "C-g", "git-rebase-resume");
 
     // A shared read-only view mode for the show/log/stash buffers (own their own
-    // buffers, so magit's mutating keys never fire against a stale model).
+    // buffers, so git's mutating keys never fire against a stale model).
     weft.textInput("git-view", null);
-    weft.lockedMode("git-view"); // read-only projection: keymap pinned (see magit)
+    weft.lockedMode("git-view"); // read-only projection: keymap pinned (see git)
     weft.bindKey("git-view", "j", "cursor-down");
     weft.bindKey("git-view", "k", "cursor-up");
     weft.bindKey("git-view", "Down", "cursor-down");
@@ -577,9 +577,9 @@ fn noteDrops() void {
 }
 
 fn gitNoteDropsDeliver() void {
-    if (dropped_files) weft.echo("magit: >128 files — some omitted");
-    if (dropped_hunks) weft.echo("magit: >512 hunks — some omitted");
-    if (truncated_raw) weft.echo("magit: output > 256 KiB — diff truncated");
+    if (dropped_files) weft.echo("git: >128 files — some omitted");
+    if (dropped_hunks) weft.echo("git: >512 hunks — some omitted");
+    if (truncated_raw) weft.echo("git: output > 256 KiB — diff truncated");
 }
 
 // ── Parse ──────────────────────────────────────────────────────────────────
@@ -744,7 +744,7 @@ fn setCollapsed(pth: []const u8, on: bool) void {
     if (on) {
         if (collapsedIndex(pth) != null) return;
         if (collapsed_count >= MAX_COLLAPSED) {
-            weft.echo("magit: >64 folded files — this fold won't persist");
+            weft.echo("git: >64 folded files — this fold won't persist");
             return;
         }
         const n = @min(pth.len, collapsed_paths[collapsed_count].len);
@@ -995,11 +995,11 @@ fn nodeAt(off: usize) Node {
 fn gitStatus() void {
     restore_cursor = false;
     show(GATHER, buf_name);
-    weft.setMode("magit");
+    weft.setMode("git");
 }
 
 /// Start version control from inside the editor: `git init` in the project,
-/// then gather straight into `*magit*`. Without this, `git-status` on a
+/// then gather straight into `*git*`. Without this, `git-status` on a
 /// non-repo just shows an empty buffer and there is no in-editor way to create
 /// the repo — you had to drop to a shell. Reuses the same gather scaffolding as
 /// every other mutation (no git-init special-casing); after init, GATHER's
@@ -1011,7 +1011,7 @@ fn gitInit() void {
 fn gitRefresh() void {
     markRestore();
     show(GATHER, buf_name);
-    weft.setMode("magit");
+    weft.setMode("git");
 }
 
 /// TAB: flip the fold of the section/file under point, re-render (no re-gather —
@@ -1174,7 +1174,7 @@ fn gitDiscard() void {
     }
 }
 fn gitDiscardCancel() void {
-    weft.setMode("magit");
+    weft.setMode("git");
     weft.echo("discard cancelled");
 }
 /// The confirmed destructive path. Re-resolves the node from the (unmoved)
@@ -1187,7 +1187,7 @@ fn gitDiscardDo() void {
             const h = &hunks[n.idx];
             const staged = files[h.file].section == .staged;
             // Reverse the worktree change; for a staged hunk, drop it from the
-            // index too (magit's discard reverts both sides).
+            // index too (git's discard reverts both sides).
             discardHunk(h, sel, staged);
         },
         .file => {
@@ -1199,11 +1199,11 @@ fn gitDiscardDo() void {
                     const mut = std.fmt.bufPrint(&msg_buf, "git reset -q HEAD -- '{s}' && git checkout -- '{s}'", .{ f.path_(), f.path_() }) catch return;
                     gatherAfter(mut);
                 },
-                .recent => weft.setMode("magit"),
+                .recent => weft.setMode("git"),
             }
         },
         .section => discardSection(@enumFromInt(n.idx)),
-        .none => weft.setMode("magit"),
+        .none => weft.setMode("git"),
     }
 }
 
@@ -1225,7 +1225,7 @@ fn discardSection(sec: Section) void {
         any = true;
     }
     if (!any) {
-        weft.setMode("magit");
+        weft.setMode("git");
         return;
     }
     gatherAfter(cmd_buf[0..w]);
@@ -1237,11 +1237,11 @@ fn discardSection(sec: Section) void {
 /// the whole hunk. Index-only — the worktree is never touched.
 fn applyHunk(h: *const Hunk, sel: ?weft.Range, reverse: bool) void {
     const patch = buildPatch(h, sel) orelse {
-        weft.echo("magit: patch too large");
+        weft.echo("git: patch too large");
         return;
     };
     if (!weft.fsWrite(patch_tmp, patch)) {
-        weft.echo("magit: could not write patch");
+        weft.echo("git: could not write patch");
         return;
     }
     gatherAfterPatch(if (reverse) "--cached --reverse" else "--cached", false);
@@ -1251,22 +1251,22 @@ fn applyHunk(h: *const Hunk, sel: ?weft.Range, reverse: bool) void {
 /// it from the index. Two `git apply`s, chained before the re-gather.
 fn discardHunk(h: *const Hunk, sel: ?weft.Range, staged: bool) void {
     const patch = buildPatch(h, sel) orelse {
-        weft.echo("magit: patch too large");
-        weft.setMode("magit");
+        weft.echo("git: patch too large");
+        weft.setMode("git");
         return;
     };
     if (!weft.fsWrite(patch_tmp, patch)) {
-        weft.setMode("magit");
+        weft.setMode("git");
         return;
     }
     // Unstaged hunk: reverse it out of the worktree. Staged hunk: reverse it out
     // of the index (`--cached --reverse`) AND the worktree (the trailing
-    // `--reverse` gatherAfterPatch adds) — magit discards the change entirely.
+    // `--reverse` gatherAfterPatch adds) — git discards the change entirely.
     if (staged) gatherAfterPatch("--cached --reverse", true) else gatherAfterPatch("--reverse", false);
 }
 
 /// Build a one-file/one-hunk patch: the file's kept diff header + the hunk. With
-/// `sel`, transform the hunk to only the selected +/- lines (magit's algorithm:
+/// `sel`, transform the hunk to only the selected +/- lines (git's algorithm:
 /// unselected `+` dropped, unselected `-` demoted to context) and recompute the
 /// `@@` counts. Returns null if it won't fit.
 fn buildPatch(h: *const Hunk, sel: ?weft.Range) ?[]const u8 {
@@ -1447,12 +1447,12 @@ fn gitCommitFinish() void {
     ) catch return;
     restore_cursor = false;
     show(cmd, buf_name);
-    weft.setMode("magit");
+    weft.setMode("git");
 }
 fn gitCommitAbort() void {
     restore_cursor = false;
     show(GATHER, buf_name);
-    weft.setMode("magit");
+    weft.setMode("git");
 }
 fn gitCommitResume() void {
     weft.setMode("git-commit");
@@ -1474,9 +1474,9 @@ fn focusBuffer(name: []const u8) bool {
 
 // ── push/pull/fetch: flag transients (sticky menu + our own surface) ─────────
 // Flags accumulate in globals; a single key executes. On execute we refresh
-// *magit* (the branch header's ahead/behind reflects the result) rather than
+// *git* (the branch header's ahead/behind reflects the result) rather than
 // dumping normal output. NOTE: `procToBuffer` captures only stdout, so op
-// output is suppressed for a clean re-gather — the post-op magit state IS the
+// output is suppressed for a clean re-gather — the post-op git state IS the
 // feedback; hard errors surface via the host log, not a buffer (see report).
 fn flagRow(key: []const u8, label: []const u8, on: bool) void {
     weft.surfaceRow();
@@ -1580,10 +1580,10 @@ fn gitFetchDo() void {
 }
 fn gitMenuCancelSurface() void {
     weft.surfaceClose();
-    weft.setMode("magit");
+    weft.setMode("git");
 }
 fn gitMenuCancel() void {
-    weft.setMode("magit");
+    weft.setMode("git");
 }
 
 // ── The SPC-g read-only views (unchanged behavior) ──────────────────────────
@@ -1619,37 +1619,37 @@ fn markRestore() void {
     captureIdentity();
 }
 
-/// `mutation && GATHER` into *magit* — the index reflects the mutation with no
+/// `mutation && GATHER` into *git* — the index reflects the mutation with no
 /// async read/write race.
 fn gatherAfter(mutation: []const u8) void {
     markRestore();
     const cmd = std.fmt.bufPrint(&cmd_buf, "{s} && " ++ GATHER, .{mutation}) catch return;
     show(cmd, buf_name);
-    weft.setMode("magit");
+    weft.setMode("git");
 }
 /// Same, but the mutation is a `fmt` with a single path arg.
 fn gatherAfter1(comptime fmt: []const u8, pth: []const u8) void {
     markRestore();
     const cmd = std.fmt.bufPrint(&cmd_buf, fmt ++ " && " ++ GATHER, .{pth}) catch return;
     show(cmd, buf_name);
-    weft.setMode("magit");
+    weft.setMode("git");
 }
 /// Like `gatherAfter` but SEQUENCES with `;` (not `&&`) and swallows the op's
-/// stdout — the op runs, then we ALWAYS re-gather so *magit* reflects the real
+/// stdout — the op runs, then we ALWAYS re-gather so *git* reflects the real
 /// post-op state even when the op "failed" (a cherry-pick conflict, a reset, a
 /// push that left us still-ahead). Used by every Phase-2b/2c mutation.
 fn gatherAfterSeq(mutation: []const u8) void {
     markRestore();
     const cmd = std.fmt.bufPrint(&cmd_buf, "{s} >/dev/null 2>&1; " ++ GATHER, .{mutation}) catch return;
     show(cmd, buf_name);
-    weft.setMode("magit");
+    weft.setMode("git");
 }
 /// Same, with a single `{s}` arg (a hash or a quoted name) in `fmt`.
 fn gatherAfterSeq1(comptime fmt: []const u8, arg: []const u8) void {
     markRestore();
     const cmd = std.fmt.bufPrint(&cmd_buf, fmt ++ " >/dev/null 2>&1; " ++ GATHER, .{arg}) catch return;
     show(cmd, buf_name);
-    weft.setMode("magit");
+    weft.setMode("git");
 }
 
 /// `git apply <flags> <patch>` (optionally also reverse it from the worktree for
@@ -1661,7 +1661,7 @@ fn gatherAfterPatch(flags: []const u8, also_worktree: bool) void {
     else
         std.fmt.bufPrint(&cmd_buf, "git apply {s} {s}; rm -f {s}; " ++ GATHER, .{ flags, patch_tmp, patch_tmp }) catch return;
     show(cmd, buf_name);
-    weft.setMode("magit");
+    weft.setMode("git");
 }
 
 // ── Commit-node resolution: the hash on the rendered line under point ───────
@@ -1785,7 +1785,7 @@ fn gitConfirmYes() void {
     gatherAfterSeq(confirm_cmd[0..confirm_len]);
 }
 fn gitConfirmNo() void {
-    weft.setMode("magit");
+    weft.setMode("git");
     weft.echo("cancelled");
 }
 
@@ -1880,7 +1880,7 @@ fn openInput(action: InputAction, prompt: []const u8) void {
 }
 fn gitInputAbort() void {
     input_action = .none;
-    weft.setMode("magit");
+    weft.setMode("git");
     weft.echo("cancelled");
 }
 fn gitInputResume() void {
@@ -1912,7 +1912,7 @@ fn gitInputFinish() void {
             confirmThen(cmd, "delete branch? y/n");
         },
         .rebase_start => startRebase(name),
-        .none => weft.setMode("magit"),
+        .none => weft.setMode("git"),
     }
 }
 
@@ -1940,7 +1940,7 @@ fn gitRebaseInteractive() void {
 fn startRebase(nstr: []const u8) void {
     for (nstr) |c| if (c < '0' or c > '9') {
         weft.echo("rebase: expected a number");
-        weft.setMode("magit");
+        weft.setMode("git");
         return;
     };
     const base = std.fmt.bufPrint(&rebase_base, "HEAD~{s}", .{nstr}) catch return;
@@ -2000,10 +2000,10 @@ fn gitRebaseResume() void {
     weft.setMode("git-rebase");
 }
 fn gitRebaseCancel() void {
-    // Nothing was started (we only drafted the todo) — just return to magit.
+    // Nothing was started (we only drafted the todo) — just return to git.
     restore_cursor = false;
     show(GATHER, buf_name);
-    weft.setMode("magit");
+    weft.setMode("git");
 }
 /// Finish: write the edited todo to a temp file and run the rebase with a
 /// sequence editor that `cp`s our todo over git's generated one. GIT_EDITOR=true
@@ -2015,7 +2015,7 @@ fn gitRebaseFinish() void {
     @memcpy(msg_buf[0..n], text[0..n]);
     if (!weft.fsWrite(rebase_tmp, msg_buf[0..n])) {
         weft.echo("rebase: could not write todo");
-        weft.setMode("magit");
+        weft.setMode("git");
         return;
     }
     const cmd = std.fmt.bufPrint(
@@ -2025,7 +2025,7 @@ fn gitRebaseFinish() void {
     ) catch return;
     restore_cursor = false;
     show(cmd, buf_name);
-    weft.setMode("magit");
+    weft.setMode("git");
 }
 fn gitRebaseContinue() void {
     gatherAfterSeq("GIT_EDITOR=true git rebase --continue");

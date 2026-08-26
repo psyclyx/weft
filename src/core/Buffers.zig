@@ -40,7 +40,7 @@ prev_id: Id = 0,
 /// The mode a FRESH buffer (no saved mode) starts in — the config's base
 /// editing mode ("normal"/"helix-normal"), captured once after config load.
 /// A fresh buffer NEVER inherits the current keymap mode: that let a tool
-/// buffer's mode (dired/magit) leak into a file opened from it. Captured from
+/// buffer's mode (dired/git) leak into a file opened from it. Captured from
 /// the base — never from a buffer switch — so no tool mode can pollute it.
 default_mode: []u8 = &.{},
 
@@ -69,6 +69,10 @@ pub const Buffer = struct {
     /// between operations. An editable projection (mini.files dired) is simply
     /// NOT read-only and takes `edit`.
     read_only: bool = false,
+    /// A structured view is still an ordinary buffer. Its text document is a
+    /// harmless empty backing store; this is the buffer-local semantic cursor
+    /// restored when the buffer is selected again.
+    semantic_focus: Head.SemanticFocus = .empty,
     /// The shell's per-buffer attachments (providers); opaque to core.
     frontend: ?*anyopaque = null,
 
@@ -112,6 +116,7 @@ pub fn setDefaultMode(self: *Buffers, gpa: Allocator, mode: []const u8) Error!vo
 fn destroyBuffer(self: *Buffers, gpa: Allocator, b: *Buffer) void {
     _ = self;
     b.editor.deinit(gpa);
+    b.semantic_focus.deinit(gpa);
     gpa.free(b.name);
     gpa.free(b.mode);
     gpa.destroy(b);
@@ -216,7 +221,7 @@ pub fn ensureNamed(self: *Buffers, gpa: Allocator, name: []const u8) Error!Id {
 /// Focus `id`: the outgoing buffer saves `head`'s current keymap mode; the
 /// incoming buffer's mode is restored INTO `head` (its saved mode, or — when
 /// it's fresh — the base `default_mode`). A fresh buffer does NOT inherit the
-/// outgoing mode: that is what let a tool buffer's mode (dired/magit) stick
+/// outgoing mode: that is what let a tool buffer's mode (dired/git) stick
 /// when you opened a file from it. The mode a buffer shows is always
 /// determined by the buffer; WHICH head sees that mode is `head` — the saved
 /// mode itself stays a buffer property (system-scoped), only the active
@@ -224,14 +229,12 @@ pub fn ensureNamed(self: *Buffers, gpa: Allocator, name: []const u8) Error!Id {
 pub fn switchTo(self: *Buffers, gpa: Allocator, id: Id, head: *Head, keymap: *const Keymap) Error!void {
     const target = self.get(id) orelse return;
     if (id == self.active_id) return;
-    // Semantic focus belongs to the view currently shown in this buffer.  A
-    // buffer switch changes the interaction locus even when the target is a
-    // plain text buffer; retaining a dired/picker field here would make the
-    // next printable key edit that stale field instead of the newly focused
-    // document.  The head owns this focus, so clearing it is the narrow,
-    // head-addressed boundary rather than teaching every tool about buffers.
-    head.semantic_focus.clear();
     const old = self.active();
+    // Semantic focus is buffer-local, just like the saved keymap posture.
+    // Save before leaving and restore the incoming buffer's cursor. This also
+    // guarantees a text buffer never inherits a tool's editable field.
+    try old.semantic_focus.copyFrom(gpa, &head.semantic_focus);
+    try head.semantic_focus.copyFrom(gpa, &target.semantic_focus);
     // Remember the buffer's RESTING mode — the base of the current mode's
     // fallback chain, not the transient mode itself. So leaving mid-`visual`
     // (or `insert`, or `op-pending`) remembers `normal`, and a switch made from
@@ -272,6 +275,44 @@ pub fn switchTo(self: *Buffers, gpa: Allocator, id: Id, head: *Head, keymap: *co
         target.mode = try gpa.dupe(u8, self.default_mode);
     }
     self.active_id = id;
+}
+
+/// Turn the view currently focused on `head` into (or reattach it to) a real
+/// buffer, then focus that buffer. The caller supplies presentation policy
+/// (display name and tool fact); semantic identity provides
+/// deduplication.
+pub fn attachFocusedSemanticView(
+    self: *Buffers,
+    gpa: Allocator,
+    head: *Head,
+    keymap: *const Keymap,
+    name: []const u8,
+    tool: []const u8,
+) Error!Id {
+    const view = head.semantic_focus.view orelse return self.active_id;
+    var id: ?Id = null;
+    var it = self.iterator();
+    while (it.next()) |buffer| {
+        if (buffer.semantic_focus.view) |candidate| if (candidate.eql(view)) {
+            id = buffer.id;
+            break;
+        };
+    }
+    const target_id = id orelse try self.create(gpa, name);
+    const target = self.get(target_id).?;
+    if (id == null) {
+        errdefer self.close(gpa, target_id, head, keymap) catch {};
+        try target.editor.setToolBacking(gpa, tool);
+        target.read_only = true;
+    }
+    // Capture the just-opened path on its destination before switchTo saves
+    // the outgoing buffer. Then clear the head so the outgoing buffer records
+    // no foreign semantic cursor.
+    try target.semantic_focus.copyFrom(gpa, &head.semantic_focus);
+    if (target_id == self.active_id) return target_id;
+    head.semantic_focus.clear();
+    try self.switchTo(gpa, target_id, head, keymap);
+    return target_id;
 }
 
 /// Switch to the buffer active before this one (where a tool's `q` returns).
@@ -330,27 +371,27 @@ test "buffers: switchTo remembers the base mode + skips menus; back returns" {
     defer head.deinit(gpa);
 
     const code = try bufs.create(gpa, "code.zig");
-    const magit = try bufs.create(gpa, "*magit*");
+    const git = try bufs.create(gpa, "*git*");
 
     try head.setModeRaw(gpa, "normal");
     try bufs.switchTo(gpa, code, &head, &km);
 
     // Leaving `code` mid-VISUAL remembers its BASE mode (normal), not visual.
     try head.setModeRaw(gpa, "visual");
-    try bufs.switchTo(gpa, magit, &head, &km);
+    try bufs.switchTo(gpa, git, &head, &km);
     try t.expectEqualStrings("normal", bufs.get(code).?.mode);
 
-    // Leaving `magit` in magit mode remembers magit.
-    try head.setModeRaw(gpa, "magit");
+    // Leaving `git` in git mode remembers git.
+    try head.setModeRaw(gpa, "git");
     try bufs.switchTo(gpa, code, &head, &km);
-    try t.expectEqualStrings("magit", bufs.get(magit).?.mode);
+    try t.expectEqualStrings("git", bufs.get(git).?.mode);
 
     // A switch made from inside a MENU (git-status while `leader-git` is up)
     // must NOT stamp the buffer being left with the menu mode.
     try head.setModeRaw(gpa, "leader-git");
-    try bufs.switchTo(gpa, magit, &head, &km); // restores magit's own mode
+    try bufs.switchTo(gpa, git, &head, &km); // restores git's own mode
     try t.expectEqualStrings("normal", bufs.get(code).?.mode); // still normal, not leader-git
-    try t.expectEqualStrings("magit", head.currentMode());
+    try t.expectEqualStrings("git", head.currentMode());
 
     // `back` returns to the previous buffer (code), in its base mode (normal).
     try bufs.back(gpa, &head, &km);

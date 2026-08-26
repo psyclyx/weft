@@ -76,7 +76,8 @@ with a `when` predicate, resolved to a concrete command in the current
 buffer) → the **command** registry (name → handler). Binding a key to an
 action gives context-sensitive dispatch for free; the async capability
 system (completion/hover/definition) is the same idea at a different
-latency. See `doc/dispatch.md`.
+latency. The intended replacement is specified in
+`doc/contextual-workspace-architecture.md`.
 
 Every plugin runs as **wasm**, sandboxed under wasmtime — nothing is linked
 or trusted in-process. A guest reaches the editor only through host imports
@@ -88,8 +89,8 @@ and knows nothing of vim.
 The reference catalog (`src/guest/`, ~40 plugins) is authored in Zig against
 the ABI with no core privilege — modal editing (`vim`, `helix`) with `:` ex
 commands, motions/text-objects/operators, buffer-word completion, a
-command/buffer palette and status line, a magit-style `git` and an editable
-`dired` (both foldable model buffers), `grep`/`make`/`run`/`repl`/`console`,
+command/buffer palette and status line, a git-style `git` and an editable
+`files` (both foldable model buffers), `grep`/`make`/`run`/`repl`/`console`,
 tree-sitter (`structural`, `ts`) edits, autopair/comment/format, a
 `which-key` overlay, notes, and project history — built to `.wasm` artifacts
 installed under `lib/weft/plugins/`, external files a user loads by name.

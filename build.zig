@@ -264,7 +264,7 @@ const guests = [_]Guest{
     .{ .src = "src/guest/net.zig", .import = "guest_net_wasm", .install = true },
     .{ .src = "src/guest/http.zig", .import = "guest_http_wasm", .install = true },
     .{ .src = "src/guest/which_key.zig", .import = "guest_which_key_wasm", .install = true },
-    .{ .src = "src/guest/dired.zig", .import = "guest_dired_wasm", .install = true, .libraries = .{ .dired = true } },
+    .{ .src = "src/guest/files.zig", .import = "guest_dired_wasm", .install = true, .libraries = .{ .dired = true } },
     .{ .src = "src/guest/helix.zig", .import = "guest_helix_wasm", .install = true },
     .{ .src = "src/guest/emacs.zig", .import = "guest_emacs_wasm", .install = true },
     .{ .src = "src/guest/debug.zig", .import = "guest_debug_wasm", .install = true },
