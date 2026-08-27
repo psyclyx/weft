@@ -5,6 +5,12 @@
 //! plugin command. Adding a shape beyond identity (a payload schema, an
 //! effect grade) is future work; for now the catalog needs only the name and
 //! its one-line meaning.
+//!
+//! The §5.1 grammar itself lives in `catalog.zig`, which validates at its
+//! interner; this table is checked against that one validator rather than
+//! carrying a second copy free to disagree with it.
+
+const std = @import("std");
 
 /// One standard intention: its dotted `std.*` name and a one-line meaning.
 /// No behavior lives here — resolution is each domain's, per protocol.
@@ -36,61 +42,18 @@ pub const std_intentions = [_]Intention{
 comptime {
     for (std_intentions, 0..) |a, i| {
         for (std_intentions[i + 1 ..]) |b| {
-            if (@import("std").mem.eql(u8, a.name, b.name)) {
+            if (std.mem.eql(u8, a.name, b.name)) {
                 @compileError("duplicate std intention name: " ++ a.name);
             }
         }
     }
 }
 
-/// True when `segment` is a non-empty run of lowercase ascii letters, digits,
-/// and internal hyphens (no leading/trailing/doubled hyphen).
-fn isValidSegment(segment: []const u8) bool {
-    if (segment.len == 0) return false;
-    if (segment[0] == '-' or segment[segment.len - 1] == '-') return false;
-    var prev_hyphen = false;
-    for (segment) |c| {
-        switch (c) {
-            'a'...'z', '0'...'9' => prev_hyphen = false,
-            '-' => {
-                if (prev_hyphen) return false;
-                prev_hyphen = true;
-            },
-            else => return false,
-        }
-    }
-    return true;
-}
+const t = std.testing;
 
-/// True when `name` is `std.<package>.<operation>` — lowercase dotted
-/// segments, `std.` prefix, at least three segments (doc/configuration.md
-/// §5.1).
-pub fn isValidStdName(name: []const u8) bool {
-    const std_lib = @import("std");
-    var it = std_lib.mem.splitScalar(u8, name, '.');
-    var count: usize = 0;
-    while (it.next()) |segment| {
-        if (!isValidSegment(segment)) return false;
-        count += 1;
-    }
-    if (count < 3) return false;
-    var first = std_lib.mem.splitScalar(u8, name, '.');
-    return std_lib.mem.eql(u8, first.next().?, "std");
-}
-
-const t = @import("std").testing;
-
-test "every std intention name parses under the naming grammar" {
+test "every std intention name parses under the catalog's §5.1 grammar" {
+    const catalog = @import("catalog.zig");
     for (std_intentions) |intention| {
-        try t.expect(isValidStdName(intention.name));
+        try catalog.validateIntentionName(intention.name);
     }
-}
-
-test "isValidStdName rejects malformed names" {
-    try t.expect(!isValidStdName("target.activate")); // missing std. prefix
-    try t.expect(!isValidStdName("std.Target.Activate")); // uppercase
-    try t.expect(!isValidStdName("std.target")); // too few segments
-    try t.expect(!isValidStdName("std..activate")); // empty segment
-    try t.expect(!isValidStdName("std.target.-activate")); // leading hyphen
-    try t.expect(!isValidStdName("std.target.activate_now")); // underscore
 }
