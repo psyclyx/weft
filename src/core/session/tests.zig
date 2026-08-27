@@ -34,6 +34,8 @@ const ChaosLink = link_mod.ChaosLink;
 const futexWaitTimed = link_mod.futexWaitTimed;
 const VirtualClock = @import("clock.zig").Virtual;
 
+const peer_fs = @import("../peer_fs.zig");
+const rooted_fs = @import("../rooted_fs.zig");
 const remote_fs = @import("remote_fs.zig");
 const BlobServer = remote_fs.BlobServer;
 const RemoteFile = remote_fs.RemoteFile;
@@ -502,8 +504,6 @@ test "partial checkout: adopt base over the wire, edit around holes, bounce-real
 
 test "peer_fs over the wire: a client lists a host's confined shared root" {
     const gpa = t.allocator;
-    const rooted_fs = @import("../rooted_fs.zig");
-    const peer_fs = @import("../peer_fs.zig");
 
     // Host shared root: a temp dir with a file.
     var pbuf: [128]u8 = undefined;
@@ -536,7 +536,7 @@ test "peer_fs over the wire: a client lists a host's confined shared root" {
 
     // Host serves its root with a read grant; client drives a RemoteFs.
     ch.peer_fs_root = &root;
-    ch.fs_grant = .{ .access = .read };
+    ch.fs_grant = .read;
     var rfs = RemoteFs.init(gpa);
     defer rfs.deinit();
     cc.remote_fs = &rfs;
@@ -3933,7 +3933,6 @@ test "W7b move-admission (5/5): NULL-ORIGIN ADOPTION refused — a peer cannot b
 
 test "requests: a lost reply fails the caller at its own deadline, not forever" {
     const gpa = t.allocator;
-    const peer_fs = @import("../peer_fs.zig");
     const fds = try socketPair();
     var la: FdLink = .{ .fd = fds[0] };
     var lb: FdLink = .{ .fd = fds[1] };
@@ -3971,7 +3970,6 @@ test "requests: a lost reply fails the caller at its own deadline, not forever" 
 
 test "requests: a host with nothing to serve refuses out loud instead of going quiet" {
     const gpa = t.allocator;
-    const peer_fs = @import("../peer_fs.zig");
     const fds = try socketPair();
     var la: FdLink = .{ .fd = fds[0] };
     var lb: FdLink = .{ .fd = fds[1] };
@@ -4602,4 +4600,176 @@ test "export grants: the connection grade is a CEILING over the wire — an expo
     defer gpa.free(th);
     try t.expect(std.mem.indexOf(u8, th, "PEER") == null);
     try t.expectEqual(grants.Reason.out_of_ops, rig.ch.last_refusal.?);
+}
+
+/// Two `Collab`s over a socket pair, the host serving `root` under `grant`.
+/// The shape every export-surface test below drives its requests through.
+const FsPair = struct {
+    fds: [2]i32,
+    la: FdLink,
+    lb: FdLink,
+    host: Document,
+    client: Document,
+    sa: *Session,
+    sb: *Session,
+    ch: Collab,
+    cc: Collab,
+    rfs: RemoteFs,
+
+    fn init(gpa: std.mem.Allocator, self: *FsPair, root: *rooted_fs.RootedFs, grant: peer_fs.Grant) !void {
+        self.fds = try socketPair();
+        self.la = .{ .fd = self.fds[0] };
+        self.lb = .{ .fd = self.fds[1] };
+        self.host = try Document.init(gpa, "host");
+        self.client = try Document.init(gpa, "client");
+        self.sa = try Session.create(gpa, self.la.link(), .server, "tok", .own, null);
+        self.sb = try Session.create(gpa, self.lb.link(), .client, "tok", .own, null);
+        self.ch = try Collab.init(gpa, self.sa, &self.host, "host");
+        self.cc = try Collab.init(gpa, self.sb, &self.client, "client");
+        self.rfs = RemoteFs.init(gpa);
+        self.ch.peer_fs_root = root;
+        self.ch.fs_grant = grant;
+        self.cc.remote_fs = &self.rfs;
+        var settle: usize = 0;
+        while (settle < 80) : (settle += 1) self.turn();
+    }
+
+    fn deinit(self: *FsPair, gpa: std.mem.Allocator) void {
+        self.rfs.deinit();
+        self.cc.deinit();
+        self.ch.deinit();
+        self.sb.destroy();
+        self.sa.destroy();
+        self.client.deinit(gpa);
+        self.host.deinit(gpa);
+    }
+
+    fn turn(self: *FsPair) void {
+        _ = self.ch.tick(0) catch {};
+        _ = self.cc.tick(0) catch {};
+        futexWaitTimed(&self.sb.out_wake, self.sb.out_wake.load(.acquire), std.time.ns_per_ms);
+    }
+
+    /// Post `req` and drive both ends until it settles — a response, the
+    /// host's refusal, or (never, here) its own deadline.
+    fn call(self: *FsPair, req: []const u8) requests.Error!?[]u8 {
+        const id = self.rfs.request(self.sb, self.cc.base, req) catch return null;
+        const guard = task.nowNs() + 5 * std.time.ns_per_s;
+        while (task.nowNs() < guard) {
+            if (try self.rfs.take(id)) |response| return response;
+            self.turn();
+        }
+        return null;
+    }
+};
+
+test "peer_fs exports: a hierarchy-only peer lists, and is refused the bytes by name" {
+    const gpa = t.allocator;
+    var pbuf: [128]u8 = undefined;
+    const root_path = try std.fmt.bufPrintZ(&pbuf, "/tmp/weft-peerexports-{d}", .{linux.getpid()});
+    _ = linux.rmdir(root_path.ptr);
+    if (linux.errno(linux.mkdir(root_path.ptr, 0o755)) != .SUCCESS) return error.Mkdir;
+    var root = try rooted_fs.RootedFs.open(root_path.ptr);
+    defer root.close();
+    defer {
+        _ = linux.unlinkat(root.root_fd, "secret.txt", 0);
+        _ = linux.rmdir(root_path.ptr);
+    }
+    try root.write("secret.txt", "contents");
+
+    var pair: FsPair = undefined;
+    try FsPair.init(gpa, &pair, &root, .{ .hierarchy = true });
+    defer pair.deinit(gpa);
+
+    // The one granted surface answers.
+    const list_req = try peer_fs.encodeList(gpa, ".");
+    defer gpa.free(list_req);
+    const listing = (try pair.call(list_req)).?;
+    defer gpa.free(listing);
+    const decoded = peer_fs.decodeResponse(listing).?;
+    try t.expectEqual(peer_fs.Status.ok, decoded.status);
+    try t.expect(std.mem.indexOf(u8, decoded.payload, "secret.txt") != null);
+
+    // The other two refuse out loud, as "not granted" rather than a deadline
+    // the requester sits out — and never as file contents.
+    const read_req = try peer_fs.encodeRead(gpa, "secret.txt");
+    defer gpa.free(read_req);
+    try t.expectError(error.RequestDenied, pair.call(read_req));
+    const write_req = try peer_fs.encodeWrite(gpa, "secret.txt", peer_fs.tokenOf("contents"), "overwritten");
+    defer gpa.free(write_req);
+    try t.expectError(error.RequestDenied, pair.call(write_req));
+
+    // Refused at the surface, not at the file: the bytes never changed.
+    const still = try root.read(gpa, "secret.txt");
+    defer gpa.free(still);
+    try t.expectEqualStrings("contents", still);
+}
+
+test "peer_fs exports: mutate is granted on its own, not as the top of a ladder" {
+    const gpa = t.allocator;
+    var pbuf: [128]u8 = undefined;
+    const root_path = try std.fmt.bufPrintZ(&pbuf, "/tmp/weft-peermutate-{d}", .{linux.getpid()});
+    _ = linux.rmdir(root_path.ptr);
+    if (linux.errno(linux.mkdir(root_path.ptr, 0o755)) != .SUCCESS) return error.Mkdir;
+    var root = try rooted_fs.RootedFs.open(root_path.ptr);
+    defer root.close();
+    defer {
+        _ = linux.unlinkat(root.root_fd, "note.txt", 0);
+        _ = linux.rmdir(root_path.ptr);
+    }
+
+    var pair: FsPair = undefined;
+    try FsPair.init(gpa, &pair, &root, .{ .mutate = true });
+    defer pair.deinit(gpa);
+
+    // A fresh create against the zero token: writing needs no read grant.
+    const write_req = try peer_fs.encodeWrite(gpa, "note.txt", peer_fs.tokenOf(""), "written");
+    defer gpa.free(write_req);
+    const written = (try pair.call(write_req)).?;
+    defer gpa.free(written);
+    try t.expectEqual(peer_fs.Status.ok, peer_fs.decodeResponse(written).?.status);
+    const got = try root.read(gpa, "note.txt");
+    defer gpa.free(got);
+    try t.expectEqualStrings("written", got);
+
+    // Listing the tree it may write to is a surface it was not granted.
+    const list_req = try peer_fs.encodeList(gpa, ".");
+    defer gpa.free(list_req);
+    try t.expectError(error.RequestDenied, pair.call(list_req));
+}
+
+test "peer_fs exports: the legacy read preset still lists and reads" {
+    const gpa = t.allocator;
+    var pbuf: [128]u8 = undefined;
+    const root_path = try std.fmt.bufPrintZ(&pbuf, "/tmp/weft-peerlegacy-{d}", .{linux.getpid()});
+    _ = linux.rmdir(root_path.ptr);
+    if (linux.errno(linux.mkdir(root_path.ptr, 0o755)) != .SUCCESS) return error.Mkdir;
+    var root = try rooted_fs.RootedFs.open(root_path.ptr);
+    defer root.close();
+    defer {
+        _ = linux.unlinkat(root.root_fd, "hello.txt", 0);
+        _ = linux.rmdir(root_path.ptr);
+    }
+    try root.write("hello.txt", "shared bytes");
+
+    var pair: FsPair = undefined;
+    try FsPair.init(gpa, &pair, &root, .read);
+    defer pair.deinit(gpa);
+
+    const list_req = try peer_fs.encodeList(gpa, ".");
+    defer gpa.free(list_req);
+    const listing = (try pair.call(list_req)).?;
+    defer gpa.free(listing);
+    try t.expectEqual(peer_fs.Status.ok, peer_fs.decodeResponse(listing).?.status);
+
+    const read_req = try peer_fs.encodeRead(gpa, "hello.txt");
+    defer gpa.free(read_req);
+    const bytes = (try pair.call(read_req)).?;
+    defer gpa.free(bytes);
+    try t.expectEqualStrings("shared bytes", peer_fs.decodeResponse(bytes).?.payload);
+
+    // The preset stops where it always did: it carries no mutate surface.
+    const write_req = try peer_fs.encodeWrite(gpa, "hello.txt", peer_fs.tokenOf("shared bytes"), "clobbered");
+    defer gpa.free(write_req);
+    try t.expectError(error.RequestDenied, pair.call(write_req));
 }
