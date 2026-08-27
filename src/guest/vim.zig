@@ -498,11 +498,12 @@ export fn init() void {
     const intended = [_][3][]const u8{
         .{ "Return", "std.target.activate", "vim-open-focused" },
         .{ "KP_Enter", "std.target.activate", "vim-open-focused" },
-        .{ "Tab", "std.hierarchy.toggle-expanded", "insert-tab" },
         .{ "u", "std.history.undo", "undo" },
         .{ "C-r", "std.history.redo", "redo" },
     };
     for (intended) |b| weft.bindKeys("normal", b[0], &.{ b[1], b[2] });
+    // Normal-mode Tab folds or nothing — it never inserts.
+    weft.bindKeys("normal", "Tab", &.{"std.hierarchy.toggle-expanded"});
     weft.bindKeys("normal", "q", &.{"std.navigation.back"});
     // The line break is the other half of §10.2's `Return` list — vim commits
     // one from insert, never from normal, so the two entries live in the two
