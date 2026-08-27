@@ -589,8 +589,6 @@ pub fn install(gpa: std.mem.Allocator, commands: *command.Commands, keymap: *@im
     const binds = [_][2][]const u8{
         .{ "BackSpace", "delete-backward" },
         .{ "Delete", "delete-forward" },
-        .{ "Return", "insert-newline" },
-        .{ "KP_Enter", "insert-newline" },
         .{ "Tab", "insert-tab" },
         .{ "Left", "cursor-left" },
         .{ "Right", "cursor-right" },
@@ -607,6 +605,14 @@ pub fn install(gpa: std.mem.Allocator, commands: *command.Commands, keymap: *@im
     };
     const Keymap = @import("Keymap.zig");
     for (binds) |b| try keymap.bind(gpa, "default", b[0], b[1], Keymap.prio_core, "core");
+    // Return is the fallback-list case (architecture §10.2): activate the
+    // focused target if anything offers that here, else break the line. In a
+    // text entry only the second arm has an offer, so this is the modeless
+    // floor's `insert-newline`, reached through the catalog instead of by
+    // name.
+    const enter = [_][]const u8{ "std.target.activate", "std.editing.insert-line-break" };
+    for ([_][]const u8{ "Return", "KP_Enter" }) |key|
+        try keymap.bindArms(gpa, "default", key, &enter, Keymap.prio_core, "core");
     try keymap.setCommitCommand(gpa, "default", "insert-text");
 
     try @import("pick.zig").install(gpa, commands, keymap);

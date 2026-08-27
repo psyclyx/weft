@@ -34,6 +34,7 @@ const drainUntilOracle = h.drainUntilOracle;
 const tmpPath = h.tmpPath;
 const socketPair = h.socketPair;
 const napUs = h.napUs;
+const dispatch = h.dispatch;
 
 test "workflow: vim — insert text, escape, and it lands in the buffer" {
     const gpa = t.allocator;
@@ -226,4 +227,43 @@ test "workflow: modes — opening a file detects its language on activate, witho
 
     ed.runStr("open", "/tmp/weft-nonexistent-app.js");
     try t.expect(std.mem.indexOf(u8, ed.echoText(), "javascript") == null);
+}
+
+test "workflow: intentions — Return resolves its fallback list through the catalog" {
+    const gpa = t.allocator;
+    var ed: Editor = undefined;
+    try Editor.init(gpa, &ed);
+    defer ed.deinit();
+
+    // The modeless floor binds Return to an authored fallback list
+    // (architecture §10.2), not to a command name.
+    const arm_names = ed.keymap.lookupArms("default", "Return").?;
+    try t.expectEqual(@as(usize, 2), arm_names.len);
+    try t.expectEqualStrings("std.target.activate", arm_names[0]);
+    try t.expectEqualStrings("std.editing.insert-line-break", arm_names[1]);
+
+    // In a text entry nothing offers activation, so the SECOND arm wins and
+    // the line break lands exactly as the old `insert-newline` bind did.
+    ed.typeText("ab\ncd");
+    const got = try ed.textAlloc();
+    defer gpa.free(got);
+    try t.expectEqualStrings("ab\ncd", got);
+
+    // The trace shows the whole walk — both arms, first-applicable order —
+    // from the same pure resolver dispatch just ran, against the same context.
+    const plane = ed.ctx.intent.?;
+    const cat_ctx = dispatch.catalogContext(ed.ctx);
+    const snap = try plane.catalog.snapshot(cat_ctx);
+    var ids: [2]core.catalog.IntentionId = undefined;
+    const arms = try plane.armIds(arm_names, &ids);
+    var trace = try plane.catalog.explain(gpa, snap, cat_ctx, arms);
+    defer trace.deinit();
+
+    try t.expectEqual(@as(usize, 2), trace.arms.len);
+    try t.expectEqual(core.catalog.ArmStatus.nonapplicable, trace.arms[0].status);
+    try t.expectEqual(@as(usize, 0), trace.arms[0].candidates.len);
+    try t.expectEqual(core.catalog.ArmStatus.won, trace.arms[1].status);
+    try t.expect(trace.outcome == .decision);
+    try t.expectEqual(@as(u32, 1), trace.outcome.decision.arm);
+    try t.expectEqualStrings("core.editing", plane.catalog.providerName(trace.outcome.decision.provider));
 }
