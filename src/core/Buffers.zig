@@ -252,13 +252,22 @@ pub fn findByName(self: *const Buffers, name: []const u8) ?Id {
 }
 
 /// The buffer named `name`, creating an empty one if absent — returning its
-/// live-set `Id`. Name-addressed streams (repl/net output) may cache this to
-/// avoid rescanning, but must revalidate the name after slot reuse. Work that
-/// targets this exact buffer rather than the logical name captures `Buffer.ref`
-/// instead. A caller that must react to creation (mark read-only) should
-/// `findByName` + `create` itself.
+/// live-set `Id`. Work that targets one exact buffer rather than the logical
+/// name captures `Buffer.ref` instead (see `resolveSink`). A caller that must
+/// react to creation (mark read-only) should `findByName` + `create` itself.
 pub fn ensureNamed(self: *Buffers, gpa: Allocator, name: []const u8) Error!Id {
     return self.findByName(name) orelse try self.create(gpa, name);
+}
+
+/// A live stream's sink: the entry `held` captured, or — once that entry has
+/// been closed — a fresh one under `name`, re-captured into `held`. Streams
+/// (repl/net output) are name-ADDRESSED but identity-HELD, so no rename, slot
+/// reuse, or second same-named buffer can steal a drain mid-session.
+pub fn resolveSink(self: *Buffers, gpa: Allocator, held: *?Ref, name: []const u8) ?*Buffer {
+    if (held.*) |ref| if (self.resolve(ref)) |b| return b;
+    const b = self.get(self.ensureNamed(gpa, name) catch return null) orelse return null;
+    held.* = b.ref();
+    return b;
 }
 
 /// Focus `id`: the outgoing buffer saves `head`'s current keymap mode; the

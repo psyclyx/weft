@@ -17,7 +17,7 @@ pub const Session = struct {
     ctx: *command.Context,
     plugin: []u8, // authors the comint output
     buf: []u8, // the comint buffer name (found-or-created)
-    buf_id: ?Buffers.Id = null, // stable handle, captured on first delivery
+    entry: ?Buffers.Ref = null, // the sink, captured by identity on first delivery
     io_threaded: std.Io.Threaded, // frame-thread io (stdin writes)
     child: std.process.Child,
     out_mutex: task.Mutex = .{},
@@ -93,17 +93,10 @@ pub const Session = struct {
         defer s.out_mutex.unlock();
         if (s.out_buf.items.len == 0) return false;
         const bufs = s.ctx.buffers;
-        // Resolve via the stable Id captured on first delivery — not a name scan
-        // every tick (a rename or a second same-named buffer would misroute).
-        // Re-resolve if the slot was reused (buffer closed + a new one created).
-        const b = blk: {
-            if (s.buf_id) |id| {
-                if (bufs.get(id)) |b| if (std.mem.eql(u8, b.name, s.buf)) break :blk b;
-            }
-            const id = bufs.ensureNamed(s.gpa, s.buf) catch return false;
-            s.buf_id = id;
-            break :blk bufs.get(id) orelse return false;
-        };
+        // Generation-checked identity, captured on first delivery — never a name
+        // scan per tick, so a rename or a second same-named buffer cannot
+        // misroute the stream. A closed sink is re-created once, under the name.
+        const b = bufs.resolveSink(s.gpa, &s.entry, s.buf) orelse return false;
         const ed = b.textEditor() orelse return false;
         const doc = &ed.doc;
         const end = ed.text().byteLen();
