@@ -527,8 +527,10 @@ pub fn build(b: *std.Build) void {
     // here instead, at the one place a reader hits it.
     const unit_tests = b.addTest(.{ .root_module = test_mod });
     const run_tests = b.addRunArtifact(unit_tests);
-    shareModuleCache(b, run_tests);
+
     const test_step = b.step("test", "Run unit tests");
+    // A green gate leaves a fresh zig-out: install rides along.
+    test_step.dependOn(b.getInstallStep());
     test_step.dependOn(&run_tests.step);
     const application_tests = b.addTest(.{ .root_module = application_mod });
     const run_application_tests = b.addRunArtifact(application_tests);
@@ -540,7 +542,7 @@ pub fn build(b: *std.Build) void {
     // output path.  The ordinary `test` step above remains the full suite.
     const demo_tests = b.addTest(.{ .root_module = test_mod, .filters = &.{"e2e/spine"} });
     const run_demo_tests = b.addRunArtifact(demo_tests);
-    shareModuleCache(b, run_demo_tests);
+
     const demo_step = b.step("e2e-demo", "Run the whole-app spine narrative (optionally record WEFT_E2E_VIDEO)");
     demo_step.dependOn(&run_demo_tests.step);
 
@@ -661,7 +663,7 @@ pub fn build(b: *std.Build) void {
     // the wall-clock latency instrument.
     const weft_tests = b.addTest(.{ .root_module = weft_mod });
     const run_weft_tests = b.addRunArtifact(weft_tests);
-    shareModuleCache(b, run_weft_tests);
+
     test_step.dependOn(&run_weft_tests.step);
 
     // ── The recordable instruments ──
@@ -781,7 +783,7 @@ fn runAlone(step: *std.Build.Step, last: *std.Build.Step) void {
 fn runInstrument(b: *std.Build, tests: *std.Build.Step.Compile, name: []const u8) *std.Build.Step.Run {
     const run = b.addRunArtifact(tests);
     run.setEnvironmentVariable("WEFT_INSTRUMENT", name);
-    shareModuleCache(b, run);
+
     return run;
 }
 
@@ -791,12 +793,6 @@ fn runInstrument(b: *std.Build, tests: *std.Build.Step.Compile, name: []const u8
 /// instead of once per binary per run (see `wasm.zig`'s `Engine.cache_dir`). The
 /// path is made absolute here: the e2e Project harness chdirs into a tmpdir
 /// mid-suite, so a cwd-relative one would scatter and vanish with it.
-fn shareModuleCache(b: *std.Build, run: *std.Build.Step.Run) void {
-    const path = b.cache_root.join(b.allocator, &.{"weft-cwasm"}) catch @panic("OOM");
-    const abs = if (std.fs.path.isAbsolute(path)) path else b.pathFromRoot(path);
-    run.setEnvironmentVariable("WEFT_TEST_MODULE_CACHE", abs);
-}
-
 /// Wire the shared test-module dependency set (stemma/syntax/wasmtime/embedded
 /// guests/quickjs/weft) onto `mod`. `test_mod` (the `test` step) and
 /// `instrument_mod` (the instrument steps) both call this — it's the ONLY place
@@ -1007,6 +1003,12 @@ fn addWasm(b: *std.Build, mod: *std.Build.Module) void {
     mod.addIncludePath(.{ .cwd_relative = b.pathJoin(&.{ dev, "include" }) });
     mod.addLibraryPath(.{ .cwd_relative = b.pathJoin(&.{ lib, "lib" }) });
     mod.linkSystemLibrary("wasmtime", .{});
+    // Test artifacts cache compiled modules HERE, comptime-baked — they never
+    // consult the user environment (Engine.cacheDir prunes that branch).
+    const cache_path = b.cache_root.join(b.allocator, &.{"weft-cwasm"}) catch @panic("OOM");
+    const cache_opts = b.addOptions();
+    cache_opts.addOption([]const u8, "test_dir", if (std.fs.path.isAbsolute(cache_path)) cache_path else b.pathFromRoot(cache_path));
+    mod.addOptions("module_cache_options", cache_opts);
 }
 
 /// Skia (default renderer): compile the C++ shim (src/gfx/skia/shim.cpp) with

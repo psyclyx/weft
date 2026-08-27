@@ -29,7 +29,7 @@ const guest_hello = wasm_abi.guest_hello;
 
 // Every guest in this suite loads through the engine's compiled-module cache
 // (`wasm.Engine.cache_dir`, which a test binary inherits from
-// `$WEFT_TEST_MODULE_CACHE`). JIT-compiling the catalog from scratch is the
+// the build-baked module cache). JIT-compiling the catalog from scratch is the
 // suite's dominant cost, and the cache is content-addressed, so a changed
 // guest still compiles exactly once.
 const loadPlugin = wasm_abi.loadPlugin;

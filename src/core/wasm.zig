@@ -138,22 +138,30 @@ pub const Engine = struct {
         };
     }
 
-    /// Where this engine persists compiled images. `$WEFT_TEST_MODULE_CACHE`
-    /// wins: build.zig points every test binary at one directory under the
-    /// project cache root, so a test run shares images with its siblings and
-    /// never writes the user's cache. Otherwise `$WEFT_CACHE_DIR`, else
+    /// Where this engine persists compiled images. Test artifacts use the
+    /// build-baked directory (`module_cache_options.test_dir`, under the
+    /// project cache root) — the user-environment branch below is comptime-
+    /// pruned from them, so a bare-run test binary cannot touch the user's
+    /// cache. Production resolves `$WEFT_CACHE_DIR`, else
     /// `$XDG_CACHE_HOME/weft/modules`, else `$HOME/.cache/weft/modules`. Null
-    /// when no base resolves — caching off, the editor still runs and just
-    /// recompiles each start. Caller (this engine) owns the result.
+    /// = caching off; the editor still runs and just recompiles each start.
+    /// Caller (this engine) owns the result.
     fn cacheDir(gpa: Allocator) ?[]u8 {
-        inline for (.{ "WEFT_TEST_MODULE_CACHE", "WEFT_CACHE_DIR" }) |name| {
-            if (std.c.getenv(name)) |d| return gpa.dupe(u8, std.mem.span(d)) catch null;
-        }
+        if (@import("builtin").is_test)
+            return gpa.dupe(u8, @import("module_cache_options").test_dir) catch null;
+        if (std.c.getenv("WEFT_CACHE_DIR")) |d| return gpa.dupe(u8, std.mem.span(d)) catch null;
         if (std.c.getenv("XDG_CACHE_HOME")) |d|
             return std.fs.path.join(gpa, &.{ std.mem.span(d), "weft", "modules" }) catch null;
         if (std.c.getenv("HOME")) |d|
             return std.fs.path.join(gpa, &.{ std.mem.span(d), ".cache", "weft", "modules" }) catch null;
         return null;
+    }
+
+    test "wasm: a test build's module cache is the build-baked directory" {
+        const dir = cacheDir(t.allocator).?;
+        defer t.allocator.free(dir);
+        try t.expectEqualStrings(@import("module_cache_options").test_dir, dir);
+        try t.expect(std.fs.path.isAbsolute(dir));
     }
 
     pub fn deinit(self: *Engine) void {
