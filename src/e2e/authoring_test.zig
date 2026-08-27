@@ -2267,3 +2267,76 @@ test "input: a tool entry's field takes commits only — an unbound key and Tab 
     try t.expectEqualStrings("xnote.txt", name);
     try t.expectEqual(view_ref, ed.head.semantic_focus.path().?.view);
 }
+
+/// The name column of the focused files view's row whose draft reads `want`.
+fn filesRowNamed(ed: *h.Editor, gpa: std.mem.Allocator, want: []const u8) !?semantic.scene.Node {
+    const path = ed.head.semantic_focus.path() orelse return null;
+    const view = ed.session.system.semantic.views.get(path.view) orelse return null;
+    for (view.scene.content.container.children) |row| {
+        const column = row.content.container.children[2];
+        var snapshot = try ed.session.system.semantic.fields.get(column.content.field.ref).?.snapshot(gpa);
+        defer snapshot.deinit();
+        if (std.mem.eql(u8, snapshot.value.bytes, want)) return column;
+    }
+    return null;
+}
+
+fn focusFilesRow(ed: *h.Editor, gpa: std.mem.Allocator, want: []const u8) !void {
+    const column = (try filesRowNamed(ed, gpa, want)) orelse return error.TestExpectedEqual;
+    const view = ed.head.semantic_focus.path().?.view;
+    _ = try ed.session.system.semantic.focusView(ed.head, gpa, view, column.id);
+}
+
+test "authoring/dired: Vim Tab folds a directory open in place and back shut" {
+    const gpa = t.allocator;
+    var app: App = undefined;
+    try app.init(gpa);
+    defer app.deinit();
+    const ed = &app.ed;
+
+    try core.file.writeBytesMakingDirs(gpa, "nest", "nest/inner.txt", "inner\n");
+    authorFile(ed, "beside.txt", "beside\n");
+    ed.runStr("open", ".");
+    const view_ref = ed.head.semantic_focus.path().?.view;
+
+    // A rename staged beside the directory about to be folded. Vim supplies
+    // only its ordinary insert posture; the draft lives in the browser.
+    try focusFilesRow(ed, gpa, "beside.txt");
+    ed.press("i", "");
+    ed.typeText("draft-");
+    ed.press("Escape", "");
+
+    // Vim's Tab is `std.hierarchy.toggle-expanded` with a text fallback. On a
+    // directory row the intention resolves, so the fallback never runs and no
+    // byte reaches the rename draft under the cursor.
+    try focusFilesRow(ed, gpa, "nest");
+    ed.press("Tab", "\t");
+    try t.expectEqual(view_ref, ed.head.semantic_focus.path().?.view);
+    try t.expectEqualStrings("normal", ed.mode());
+    {
+        const nest = (try filesRowNamed(ed, gpa, "nest")) orelse return error.TestExpectedEqual;
+        const inner = (try filesRowNamed(ed, gpa, "inner.txt")) orelse return error.TestExpectedEqual;
+        // Spliced into the same view, indented, and still the same row focused.
+        try t.expect(inner.layout.column.? > nest.layout.column.?);
+        try t.expectEqual(nest.id, ed.head.semantic_focus.path().?.leaf().?);
+    }
+
+    // A draft made INSIDE the folded-open directory, so the round trip below
+    // has something of its own to preserve.
+    try focusFilesRow(ed, gpa, "inner.txt");
+    ed.press("i", "");
+    ed.typeText("kept-");
+    ed.press("Escape", "");
+
+    try focusFilesRow(ed, gpa, "nest");
+    ed.press("Tab", "\t");
+    try t.expect((try filesRowNamed(ed, gpa, "kept-inner.txt")) == null);
+    try t.expect((try filesRowNamed(ed, gpa, "draft-beside.txt")) != null);
+
+    // Re-opening re-reads the directory, and the draft folded away comes back
+    // with it rather than being reset to what is on disk.
+    ed.press("Tab", "\t");
+    try t.expect((try filesRowNamed(ed, gpa, "kept-inner.txt")) != null);
+    try t.expect((try filesRowNamed(ed, gpa, "draft-beside.txt")) != null);
+    try t.expectEqual(view_ref, ed.head.semantic_focus.path().?.view);
+}

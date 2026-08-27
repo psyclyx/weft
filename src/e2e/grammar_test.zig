@@ -8,11 +8,10 @@
 //! — no vim, helix, or emacs — so every key below is one the synthetic
 //! grammar bound to a standard intention that the focused view resolves.
 //!
-//! `std.hierarchy.toggle-expanded` is BOUND here and offered by nobody: the
-//! browser projects no expandable container yet. That is stated as what it
-//! is — an unavailable intention, which the gates require to be silent — and
-//! becomes a toggle, with no change to this grammar or these tests' setup,
-//! when in-place projection lands.
+//! `std.hierarchy.toggle-expanded` is BOUND here and offered by the rows that
+//! own children — the browser advertises the open/close route on a directory
+//! row and on nothing else — so the same key folds a directory open and stays
+//! silent on a file.
 
 const std = @import("std");
 const t = std.testing;
@@ -78,20 +77,9 @@ fn fieldText(ed: *h.Editor, gpa: std.mem.Allocator, ref: semantic.scene.FieldRef
     return gpa.dupe(u8, snap.value.bytes);
 }
 
-fn collectNames(
-    ed: *h.Editor,
-    gpa: std.mem.Allocator,
-    node: semantic.scene.Node,
-    out: *std.ArrayList([]u8),
-) !void {
-    switch (node.content) {
-        .container => |c| for (c.children) |child| try collectNames(ed, gpa, child, out),
-        .field => |f| try out.append(gpa, try fieldText(ed, gpa, f.ref)),
-        else => {},
-    }
-}
-
-/// Every row name the focused view currently shows, in scene order.
+/// The name column of every row the focused view currently shows, in scene
+/// order. `column` is where the projection placed it, which is how nesting
+/// reaches the surface.
 fn rowNames(ed: *h.Editor, gpa: std.mem.Allocator) !std.ArrayList([]u8) {
     var out: std.ArrayList([]u8) = .empty;
     errdefer {
@@ -99,8 +87,33 @@ fn rowNames(ed: *h.Editor, gpa: std.mem.Allocator) !std.ArrayList([]u8) {
         out.deinit(gpa);
     }
     const view = focusedView(ed) orelse return error.TestExpectedEqual;
-    try collectNames(ed, gpa, view.scene, &out);
+    for (view.scene.content.container.children) |row| {
+        const name = nameNode(row) orelse continue;
+        try out.append(gpa, try fieldText(ed, gpa, name.content.field.ref));
+    }
     return out;
+}
+
+/// A files row's editable name column, the one focus traversal stops on.
+fn nameNode(row: semantic.scene.Node) ?semantic.scene.Node {
+    const columns = switch (row.content) {
+        .container => |c| c.children,
+        else => return null,
+    };
+    for (columns) |column| if (column.focusable and column.content == .field) return column;
+    return null;
+}
+
+/// Where the projection placed a named row's name column.
+fn nameColumn(ed: *h.Editor, gpa: std.mem.Allocator, want: []const u8) !?u16 {
+    const view = focusedView(ed) orelse return error.TestExpectedEqual;
+    for (view.scene.content.container.children) |row| {
+        const name = nameNode(row) orelse continue;
+        const text = try fieldText(ed, gpa, name.content.field.ref);
+        defer gpa.free(text);
+        if (std.mem.eql(u8, text, want)) return name.layout.column;
+    }
+    return null;
 }
 
 fn freeNames(gpa: std.mem.Allocator, names: *std.ArrayList([]u8)) void {
@@ -181,18 +194,35 @@ test "e2e/grammar: GATE 1 — a synthetic std-only grammar drives Files like the
         try t.expectEqualStrings(first, back);
     }
 
-    // Tab — std.hierarchy.toggle-expanded — is bound and offered by nobody
-    // here: the browser projects no expandable container yet, so the key is
-    // UNAVAILABLE and the view is untouched (GATE 2 states the whole rule).
-    // In-place expansion is the editable-projection wave's; when it lands
-    // this key reveals `inner.txt` with no change to this grammar.
+    // Tab — std.hierarchy.toggle-expanded — folds the focused directory open
+    // IN PLACE: `inner.txt` joins the rows already on the surface, under the
+    // row it belongs to, in the same view and with the same row focused.
+    // Pressing it again folds it shut. The grammar names no plugin, no
+    // directory, and no expansion command.
     try focusRowByName(ed, gpa, "child");
     ed.press("Tab", "\t");
     try t.expectEqual(view_ref, ed.head.semantic_focus.path().?.view);
     {
         var names = try rowNames(ed, gpa);
         defer freeNames(gpa, &names);
+        const parent = indexOfName(names.items, "child") orelse return error.TestExpectedEqual;
+        const child = indexOfName(names.items, "inner.txt") orelse return error.TestExpectedEqual;
+        try t.expectEqual(parent + 1, child);
+        // Depth reaches the surface as the name column the projection chose;
+        // no second renderer and no nested view are involved.
+        const parent_column = (try nameColumn(ed, gpa, "child")).?;
+        const child_column = (try nameColumn(ed, gpa, "inner.txt")).?;
+        try t.expect(child_column > parent_column);
+        const focused = try focusedName(ed, gpa);
+        defer gpa.free(focused);
+        try t.expectEqualStrings("child", focused);
+    }
+    ed.press("Tab", "\t");
+    {
+        var names = try rowNames(ed, gpa);
+        defer freeNames(gpa, &names);
         try t.expect(indexOfName(names.items, "child") != null);
+        try t.expect(indexOfName(names.items, "inner.txt") == null);
     }
 
     // Return — std.target.activate — acts on the focused row's target the way
@@ -234,10 +264,9 @@ test "e2e/grammar: GATE 2 — Tab inserts where it is bound, does nothing where 
         try t.expectEqualStrings("\t", text);
     }
 
-    // (2) In a structural context, on a row whose hierarchy nothing offers to
-    // open, Tab does nothing at all: no insertion, no error, no mode change.
-    // The structural mode commits no text, so the unresolved intention cannot
-    // fall through to a keystroke's bytes.
+    // (2) In a structural context, on a row that DOES offer its hierarchy,
+    // the same key is the toggle — and it is still not text: the rows change,
+    // the buffer holds no document to have inserted into.
     {
         var app: GrammarApp = undefined;
         try app.init(gpa);
@@ -245,7 +274,35 @@ test "e2e/grammar: GATE 2 — Tab inserts where it is bound, does nothing where 
         const ed = &app.ed;
         try authorTree(ed);
         ed.runStr("open", ".");
-        try focusRowByName(ed, gpa, "child"); // a directory row: still no offer
+        try focusRowByName(ed, gpa, "child");
+
+        ed.press("Tab", "\t");
+        {
+            var opened = try rowNames(ed, gpa);
+            defer freeNames(gpa, &opened);
+            try t.expect(indexOfName(opened.items, "inner.txt") != null);
+        }
+        try t.expect((try documentText(ed, gpa)) == null);
+        try t.expectEqualStrings("gramtest", ed.mode());
+
+        ed.press("Tab", "\t");
+        var closed = try rowNames(ed, gpa);
+        defer freeNames(gpa, &closed);
+        try t.expect(indexOfName(closed.items, "inner.txt") == null);
+    }
+
+    // (3) On a row whose hierarchy nothing offers to open, Tab does nothing at
+    // all: no insertion, no error, no mode change. The structural mode commits
+    // no text, so the unresolved intention cannot fall through to a
+    // keystroke's bytes.
+    {
+        var app: GrammarApp = undefined;
+        try app.init(gpa);
+        defer app.deinit();
+        const ed = &app.ed;
+        try authorTree(ed);
+        ed.runStr("open", ".");
+        try focusRowByName(ed, gpa, "top.txt"); // a file row: nothing to open
         var before = try rowNames(ed, gpa);
         defer freeNames(gpa, &before);
         const name_before = try focusedName(ed, gpa);
