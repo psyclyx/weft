@@ -1739,7 +1739,7 @@ test "wasm plugin: git-status runs git into a focused tool buffer (async)" {
         std.Thread.yield() catch {};
     }
     if (buf.?.textEditor().?.text().byteLen() > 0) {
-        // on_fill parsed the raw git output and re-rendered the MODEL: the buffer
+        // on_fill_token parsed the raw git output and re-rendered the MODEL: the buffer
         // holds the pretty projection, never the porcelain. Whether the ambient
         // cwd is a repo or not, we get a model header — `Branch:` in a repo, or
         // `Not a git repository.` outside one — but never a raw `## `/`#` line.
@@ -2656,4 +2656,126 @@ test "wasm plugin: the conformance fixture binds std intentions only" {
     }
     // The mode commits no text: a key it leaves unbound can never insert.
     try t.expect(env.ctx.keymap.commitCommand("gramtest") == null);
+}
+
+// ── Async results route by captured ref, never by focus ────────────────────
+// doc/contextual-workspace-architecture.md §2.6, and §18's gate "background
+// callbacks never inspect the active editor or head": a proc fill captures its
+// target entry at spawn, so nothing the user does while the command runs can
+// redirect the output — and an entry that is gone drops it rather than letting
+// it land on a bystander.
+
+fn namedBuffer(buffers: anytype, name: []const u8) ?*@import("../Buffers.zig").Buffer {
+    var it = buffers.iterator();
+    while (it.next()) |b| if (std.mem.eql(u8, b.name, name)) return b;
+    return null;
+}
+
+/// Run the loop until every spawned job has delivered (or been dropped).
+fn drainJobs(loop: *async_loop.Loop) void {
+    var rounds: usize = 0;
+    while (rounds < 20_000_000 and loop.tasks.items.len > 0) : (rounds += 1) {
+        _ = loop.tick();
+        std.Thread.yield() catch {};
+    }
+}
+
+test "wasm plugin: a proc fill lands in the entry it captured, not the focused one" {
+    const gpa = t.allocator;
+    var env: Env = undefined;
+    try Env.init(gpa, &env);
+    defer env.deinit(gpa);
+    try @import("../builtins.zig").install(gpa, &env.commands, &env.keymap, &env.head, &env.actions);
+
+    var loop = async_loop.Loop.init(gpa, env.pool, @import("../task.zig").nowNs);
+    defer loop.deinit();
+    var engine = try wasm.Engine.init(gpa);
+    defer engine.deinit();
+    const plugin = try loadPlugin(&engine, &env.ctx, "run", @embedFile("guest_run_wasm"), .{ .loop = &loop });
+    defer plugin.deinit();
+
+    _ = try command.run(&env.commands, &env.ctx, "run-command", &.{.{ .string = "echo captured" }});
+    const out = namedBuffer(&env.buffers, "*output*") orelse return error.TestExpectedEqual;
+
+    // Focus moves on while the command is still running — the ordinary case
+    // the old "deliver to whoever is active" routing got wrong.
+    _ = try command.run(&env.commands, &env.ctx, "buffer-create", &.{.{ .string = "*elsewhere*" }});
+    const elsewhere = env.buffers.active();
+    try t.expectEqualStrings("*elsewhere*", elsewhere.name);
+
+    drainJobs(&loop);
+
+    const s = try out.textEditor().?.text().toOwnedSlice(gpa);
+    defer gpa.free(s);
+    try t.expectEqualStrings("captured", s); // the ORIGINATING entry
+    try t.expectEqual(@as(usize, 0), elsewhere.textEditor().?.text().byteLen());
+    try t.expectEqualStrings("*elsewhere*", env.buffers.active().name); // delivery never refocuses
+}
+
+test "wasm plugin: a proc fill whose entry closed is dropped, never redirected" {
+    const gpa = t.allocator;
+    var env: Env = undefined;
+    try Env.init(gpa, &env);
+    defer env.deinit(gpa);
+    try @import("../builtins.zig").install(gpa, &env.commands, &env.keymap, &env.head, &env.actions);
+
+    var loop = async_loop.Loop.init(gpa, env.pool, @import("../task.zig").nowNs);
+    defer loop.deinit();
+    var engine = try wasm.Engine.init(gpa);
+    defer engine.deinit();
+    const plugin = try loadPlugin(&engine, &env.ctx, "run", @embedFile("guest_run_wasm"), .{ .loop = &loop });
+    defer plugin.deinit();
+
+    _ = try command.run(&env.commands, &env.ctx, "run-command", &.{.{ .string = "echo vanished" }});
+    try t.expect(namedBuffer(&env.buffers, "*output*") != null);
+
+    // Close it while the command runs: the captured generation is now dead.
+    _ = try command.run(&env.commands, &env.ctx, "buffer-close", &.{});
+    try t.expect(namedBuffer(&env.buffers, "*output*") == null);
+
+    drainJobs(&loop);
+
+    // The output went nowhere — not onto the survivor, not into a resurrected
+    // buffer of the same name. It is noted once and dropped.
+    try t.expect(namedBuffer(&env.buffers, "*output*") == null);
+    var it = env.buffers.iterator();
+    while (it.next()) |b| {
+        const ed = b.textEditor() orelse continue;
+        const s = try ed.text().toOwnedSlice(gpa);
+        defer gpa.free(s);
+        try t.expect(std.mem.indexOf(u8, s, "vanished") == null);
+    }
+}
+
+test "wasm plugin: on_fill_token paints the entry its fill captured, off-focus" {
+    const gpa = t.allocator;
+    var env: Env = undefined;
+    try Env.init(gpa, &env);
+    defer env.deinit(gpa);
+    try @import("../builtins.zig").install(gpa, &env.commands, &env.keymap, &env.head, &env.actions);
+
+    var loop = async_loop.Loop.init(gpa, env.pool, @import("../task.zig").nowNs);
+    defer loop.deinit();
+    var engine = try wasm.Engine.init(gpa);
+    defer engine.deinit();
+    const plugin = try loadPlugin(&engine, &env.ctx, "git", @embedFile("guest_git_wasm"), .{ .loop = &loop });
+    defer plugin.deinit();
+
+    _ = try command.run(&env.commands, &env.ctx, "git-status", &.{});
+    const model = namedBuffer(&env.buffers, "*git*") orelse return error.TestExpectedEqual;
+    _ = try command.run(&env.commands, &env.ctx, "buffer-create", &.{.{ .string = "*elsewhere*" }});
+
+    drainJobs(&loop);
+
+    // The guest's fill handler ran against the BOUND entry, not the focused
+    // one: `*git*` holds the parsed model — never the raw porcelain — and the
+    // bystander it could have painted instead stayed empty.
+    const s = try model.textEditor().?.text().toOwnedSlice(gpa);
+    defer gpa.free(s);
+    if (s.len > 0) { // git unavailable → empty, and the routing check still holds
+        try t.expect(std.mem.indexOf(u8, s, "Branch:") != null or
+            std.mem.indexOf(u8, s, "Not a git repository.") != null);
+        try t.expect(!std.mem.startsWith(u8, s, "## "));
+    }
+    try t.expectEqual(@as(usize, 0), env.buffers.active().textEditor().?.text().byteLen());
 }
