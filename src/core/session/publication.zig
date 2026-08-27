@@ -311,8 +311,10 @@ fn requestAddress(kind: u8, payload: []const u8) Address {
             .stat, .read => .{ .surface = .fs_bytes },
         },
         .fs_call => switch (@as(peer_fs.Op, @enumFromInt(cur[0]))) {
-            .list, .stat => .{ .surface = .fs_hierarchy },
-            .read => .{ .surface = .fs_bytes },
+            .list => .{ .surface = .fs_hierarchy },
+            // A stat's token is a digest OF THE BYTES: serving it to a
+            // hierarchy-only peer hands it a content oracle.
+            .stat, .read => .{ .surface = .fs_bytes },
             .write => .{ .surface = .fs_mutate },
             // An opaque extension core cannot see inside: gate it at the
             // widest fs surface it could reach.
