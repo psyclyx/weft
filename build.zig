@@ -670,6 +670,18 @@ pub fn build(b: *std.Build) void {
 
     test_step.dependOn(&run_weft_tests.step);
 
+    // A guest library with no wasm import environment (guest/output_targets.zig
+    // — the row → location table `run`/`make`/`grep` navigate by) compiles for
+    // the host too, so its logic is tested natively rather than only through a
+    // plugin.
+    const guest_pure = b.createModule(.{
+        .root_source_file = b.path("src/guest/output_targets.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    const guest_pure_tests = b.addTest(.{ .root_module = guest_pure });
+    test_step.dependOn(&b.addRunArtifact(guest_pure_tests).step);
+
     // ── The recordable instruments ──
     // The dispatch-latency baseline and the popup-layout goldens share ONE
     // module object, and so one compiled binary: a second copy of `test_mod`'s

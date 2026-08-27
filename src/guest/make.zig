@@ -4,15 +4,20 @@
 //! as this plugin's peer, off the frame thread. perms `{proc, timer}`; it only
 //! writes its own tool buffers. Commands are hardcoded for now; project-aware
 //! detection (which runner, which target) arrives with the project plugin.
+//! Build output is navigable exactly like `run`'s because both consume
+//! `output.zig` — same table, same visit — not because `make` borrows `run`'s
+//! mode: it owns `build`, and works whether or not `run` is loaded.
 
 const std = @import("std");
 const weft = @import("weft");
+const output = @import("output.zig");
 
 const Cmd = struct { name: []const u8, handler: *const fn () void };
 const cmds = [_]Cmd{
     .{ .name = "make-build", .handler = makeBuild },
     .{ .name = "make-test", .handler = makeTest },
     .{ .name = "make-run", .handler = makeRun },
+    .{ .name = "make-visit", .handler = output.visit },
 };
 
 export fn describe() void {
@@ -22,27 +27,26 @@ export fn describe() void {
 }
 export fn init() void {
     for (cmds) |c| _ = weft.register(c.name);
+    // Return jumps to the compiler error the focused row points at.
+    output.installMode("build", "make-visit");
 }
 export fn on_command(id: u32) void {
     if (id < cmds.len) cmds[id].handler();
 }
 
-/// Create+focus the tool buffer, then fill it with `cmd`'s output async. Build
-/// and test output is command output like `run`'s, so it enters the same shared
-/// `output` mode — Return jumps to a compiler error's `file:line` (the `run`
-/// plugin owns the mode + output-visit; if it isn't loaded this is an inert
-/// no-op). weft modes are global, so this is reuse, not a hard dependency.
-fn run(cmd: []const u8, name: []const u8) void {
-    weft.runStr("buffer-create", name); // creates + focuses an empty scratch
-    weft.setMode("output"); // navigable: Return visits a file:line (see run.zig)
-    weft.procToBuffer(cmd, name, 0);
+/// The fill landed: capture each row's location before the text is anyone's
+/// to restyle. The host bound the entry this fill captured, so nothing here
+/// asks what is focused.
+export fn on_fill_token(token: u32) void {
+    output.fill(token, null);
 }
+
 fn makeBuild() void {
-    run("zig build", "*build*");
+    output.show("zig build", "*build*", "build");
 }
 fn makeTest() void {
-    run("zig build test", "*test*");
+    output.show("zig build test", "*test*", "build");
 }
 fn makeRun() void {
-    run("make", "*build*");
+    output.show("make", "*build*", "build");
 }

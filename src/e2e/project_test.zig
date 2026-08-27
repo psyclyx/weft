@@ -1415,3 +1415,82 @@ test "e2e/session: two LLM asks in flight land in their own conversations" {
         try t.expect(std.mem.indexOf(u8, first, "second") == null);
     }
 }
+
+// ── Output locations are values, not a re-parse of the screen (§14.6) ───────
+
+/// Replace a tool buffer's whole text as a plugin peer — a renderer rewriting
+/// what a row SHOWS, after the output that produced it landed.
+fn reformatTool(ed: *Editor, name: []const u8, body: []const u8) !void {
+    var it = ed.buffers.iterator();
+    while (it.next()) |b| {
+        if (!std.mem.eql(u8, b.name, name)) continue;
+        const editor = b.textEditor().?;
+        const end = editor.text().byteLen();
+        try core.command.renderInto(ed.gpa, &editor.doc, .plugin, "reformat", &.{
+            .{ .range = .{ .start = 0, .end = end }, .bytes = body },
+        });
+        return;
+    }
+    return error.NoSuchToolBuffer;
+}
+
+test "e2e/output: a row visits the location it captured, not the text it shows" {
+    const gpa = t.allocator;
+    var proj: Project = undefined;
+    try proj.init(gpa);
+    defer proj.deinit();
+
+    var ed: Editor = undefined;
+    try Editor.init(gpa, &ed);
+    defer ed.deinit();
+    try loadWebIde(&ed);
+
+    {
+        const r = try proj.oracle("printf 'const a = 1;\\nconst target = 42;\\nconst b = 2;\\n' > app.js");
+        gpa.free(r);
+    }
+
+    ed.runStr("run-command", "echo 'trace: app.js:2:5 boom'");
+    try t.expect(drainToolContains(&ed, "*output*", "app.js:2:5"));
+
+    // Reformat the row after the fill — the rendered text now names no file at
+    // all. A visit that re-parsed the screen has nothing left to read.
+    try reformatTool(&ed, "*output*", "boom");
+    {
+        const shown = toolText(&ed, "*output*").?;
+        defer gpa.free(shown);
+        try t.expect(std.mem.indexOf(u8, shown, "app.js") == null);
+    }
+
+    // Return still lands on app.js:2 — the row's captured location is the
+    // source of truth. Deleting the line proves where we landed.
+    ed.press("Return", "");
+    try t.expectEqualStrings("normal", ed.mode());
+    ed.chord("d d");
+    ed.run("save");
+    ed.waitSave();
+
+    const disk = try core.file.readAlloc(gpa, "app.js");
+    defer gpa.free(disk);
+    try t.expect(std.mem.indexOf(u8, disk, "target") == null);
+    try t.expect(std.mem.indexOf(u8, disk, "const a = 1;") != null);
+    try t.expect(std.mem.indexOf(u8, disk, "const b = 2;") != null);
+}
+
+test "e2e/output: build output navigates on its own mode, not run's" {
+    const gpa = t.allocator;
+    var ed: Editor = undefined;
+    try Editor.init(gpa, &ed);
+    defer ed.deinit();
+    try loadWebIde(&ed);
+
+    // `make` and `run` share one implementation (guest/output.zig), not one
+    // mode: each binds Return to the visit over ITS OWN captured rows, so a
+    // build buffer is navigable whether or not `run` is loaded.
+    const keys = try h.keymapSnapshot(gpa, ed.keymap);
+    defer gpa.free(keys);
+    try t.expect(std.mem.indexOf(u8, keys, "build\x00Return\x00make-visit\n") != null);
+    try t.expect(std.mem.indexOf(u8, keys, "output\x00Return\x00output-visit\n") != null);
+    try t.expect(std.mem.indexOf(u8, keys, "grep\x00Return\x00grep-visit\n") != null);
+    try t.expect(ed.keymap.isRestingMode("build"));
+}
