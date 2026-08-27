@@ -1727,6 +1727,10 @@ const plugin_catalog = std.StaticStringMap([]const u8).initComptime(.{
     .{ "helix", @embedFile("guest_helix_wasm") },
     .{ "emacs", @embedFile("guest_emacs_wasm") },
     .{ "debug", @embedFile("guest_debug_wasm") },
+    // The synthetic third-party grammar of the Files conformance gate
+    // (src/guest/gramtest.zig) — catalog-resolvable so the gate's config
+    // loads it the way a config loads any grammar.
+    .{ "gramtest", @embedFile("guest_gramtest_wasm") },
 });
 
 /// The PluginLoader `weft.plugin(name)` funnels through during a config boot.
@@ -1775,7 +1779,7 @@ pub const ConfigLoader = struct {
         };
     }
 
-    fn loader(self: *ConfigLoader) core.quickjs.PluginLoader {
+    pub fn loader(self: *ConfigLoader) core.quickjs.PluginLoader {
         return .{ .ctx = self, .load = loadFn };
     }
 };

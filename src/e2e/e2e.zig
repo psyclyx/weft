@@ -26,4 +26,5 @@ test {
     _ = @import("latency_test.zig");
     _ = @import("popup_layout_test.zig");
     _ = @import("language_test.zig");
+    _ = @import("grammar_test.zig");
 }
