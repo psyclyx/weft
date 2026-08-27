@@ -1494,3 +1494,129 @@ test "e2e/output: build output navigates on its own mode, not run's" {
     try t.expect(std.mem.indexOf(u8, keys, "grep\x00Return\x00grep-visit\n") != null);
     try t.expect(ed.keymap.isRestingMode("build"));
 }
+
+// ── Repository sessions (design §14.3; gate §18 "two repositories … remain
+// isolated") ────────────────────────────────────────────────────────────────
+//
+// git is keyed by REPOSITORY, not by plugin: opening git in a buffer whose
+// repository differs mints a second session with its own instanced buffer
+// (`*git:2*`), its own model and its own staging. Both repositories are real
+// ones on disk, set up through the oracle (a person's own git usage); every
+// editor step is the shipped command or keybinding.
+test "e2e/project: two repositories list their own files and stage independently" {
+    const gpa = t.allocator;
+    var proj: Project = undefined;
+    try proj.init(gpa);
+    defer proj.deinit();
+
+    var ed: Editor = undefined;
+    try Editor.init(gpa, &ed);
+    defer ed.deinit();
+    try loadWorkspace(&ed);
+
+    for ([_][]const u8{
+        "mkdir -p alpha beta",
+        "cd alpha && git init -q -b main && git config user.email e2e@weft.test && git config user.name weft-e2e",
+        "cd alpha && printf 'a1\\n' > alpha.txt && git add -A && git commit -q -m alpha && printf 'a2\\n' >> alpha.txt",
+        "cd beta && git init -q -b main && git config user.email e2e@weft.test && git config user.name weft-e2e",
+        "cd beta && printf 'b1\\n' > beta.txt && git add -A && git commit -q -m beta && printf 'b2\\n' >> beta.txt",
+    }) |cmd| {
+        const out = try proj.oracle(cmd);
+        gpa.free(out);
+    }
+
+    // A file in the first repository: git opens THAT repository in `*git*`.
+    ed.runStr("open", "alpha/alpha.txt");
+    ed.run("git-status");
+    try t.expect(drainToolContains(&ed, "*git*", "alpha.txt"));
+
+    // A file in the second: a different repository, so a second session and a
+    // second instanced buffer — not a re-gather over the first one.
+    ed.runStr("open", "beta/beta.txt");
+    ed.run("git-status");
+    try t.expect(drainToolContains(&ed, "*git:2*", "beta.txt"));
+
+    // Neither projection knows anything about the other's working tree.
+    {
+        const first = toolText(&ed, "*git*") orelse return error.NoGitBuffer;
+        defer gpa.free(first);
+        try t.expect(std.mem.indexOf(u8, first, "beta.txt") == null);
+        const second = toolText(&ed, "*git:2*") orelse return error.NoSecondGitBuffer;
+        defer gpa.free(second);
+        try t.expect(std.mem.indexOf(u8, second, "alpha.txt") == null);
+    }
+
+    // `s` in the second repository's buffer stages in the second repository —
+    // the command routes to the session whose buffer is focused.
+    try t.expectEqualStrings("git", ed.mode());
+    ed.press("s", "");
+    try t.expect(drainUntilOracle(&proj, &ed, "cd beta && git diff --cached --name-only", "beta.txt"));
+    {
+        const other = try proj.oracle("cd alpha && git diff --cached --name-only");
+        defer gpa.free(other);
+        try t.expectEqualStrings("", other); // the first repository never moved
+    }
+}
+
+// Working paths and hunks are SNAPSHOT-SCOPED (§14.3): an action designated
+// against a status the model has moved past must refuse, not act on whatever
+// node now occupies that spot (§2.4's disease; §18's "revision changes between
+// resolution and invocation produce no mutation"). The check lives at git's one
+// command funnel, so both shapes below are the same rule — a gather in flight
+// (the projection is provisional), and a confirm armed before a newer status
+// landed under it.
+test "e2e/project: a stale snapshot refuses the action and refreshes instead" {
+    const gpa = t.allocator;
+    var proj: Project = undefined;
+    try proj.init(gpa);
+    defer proj.deinit();
+
+    var ed: Editor = undefined;
+    try Editor.init(gpa, &ed);
+    defer ed.deinit();
+    try loadWorkspace(&ed);
+
+    for ([_][]const u8{
+        "git init -q -b main",
+        "git config user.email e2e@weft.test",
+        "git config user.name weft-e2e",
+        "printf 'one\\n' > one.txt && printf 'two\\n' > two.txt && git add -A && git commit -q -m base",
+        "printf 'one-edit\\n' > one.txt && printf 'two-edit\\n' > two.txt",
+    }) |cmd| {
+        const out = try proj.oracle(cmd);
+        gpa.free(out);
+    }
+
+    ed.run("git-status");
+    try t.expect(drainToolContains(&ed, "*git*", "Unstaged changes"));
+
+    // ── A gather in flight makes the visible projection provisional. ──
+    ed.press("s", ""); // stage the file under point: `git add` + re-gather spawn
+    try t.expect(ed.loop.tasks.items.len > 0); // the precondition, observed
+    ed.press("s", ""); // a second stage would act on already-shifted nodes
+    try t.expect(std.mem.indexOf(u8, ed.echoText(), "stale") != null);
+    try t.expect(drainLoopIdle(&ed));
+    try t.expect(drainToolContains(&ed, "*git*", "Staged changes"));
+
+    // ── A confirm armed against a snapshot the model then moved past. ──
+    ed.run("git-status"); // land the cursor on the remaining unstaged file
+    try t.expect(drainLoopIdle(&ed));
+    ed.press("x", ""); // arm the discard confirm
+    try t.expectEqualStrings("git-confirm", ed.mode());
+    ed.run("git-refresh"); // a newer status lands under the armed confirm
+    try t.expect(drainLoopIdle(&ed));
+    ed.run("git-discard-do"); // the confirmed destructive step
+    try t.expect(std.mem.indexOf(u8, ed.echoText(), "stale") != null);
+    {
+        const body = try proj.oracle("cat two.txt");
+        defer gpa.free(body);
+        try t.expectEqualStrings("two-edit", body); // nothing was thrown away
+    }
+
+    // ── The gate refuses staleness, not the verb: armed and answered against
+    // ONE snapshot, the same discard runs. ──
+    ed.press("x", "");
+    try t.expectEqualStrings("git-confirm", ed.mode());
+    ed.press("y", "");
+    try t.expect(drainUntilOracle(&proj, &ed, "git status --porcelain -- two.txt", ""));
+}
