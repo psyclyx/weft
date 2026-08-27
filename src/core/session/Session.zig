@@ -21,6 +21,7 @@ const wire = @import("weft_wire");
 const secure = @import("../secure.zig");
 const identity = @import("../identity.zig");
 const task = @import("../task.zig");
+const grants = @import("../grants.zig");
 
 const Clock = @import("clock.zig").Clock;
 const link_mod = @import("link.zig");
@@ -56,6 +57,34 @@ pub const Access = enum {
     pub fn parse(s: []const u8) ?Access {
         return std.meta.stringToEnum(Access, s);
     }
+
+    /// The preset BUNDLE this grade stands for (§13.5: "connection-level
+    /// roles may exist as user-facing presets or maxima"). This is the whole
+    /// remaining meaning of a grade — the legacy one-byte grant frame is
+    /// read through here, and `authorize` applies it as a ceiling over any
+    /// per-export grant.
+    ///
+    /// Endpoint ops are deliberately absent from every preset: the grade
+    /// byte never governed the `.peer` filesystem or the blob cycle (their
+    /// own `peer_fs.Grant` does), so a preset bundle must not start claiming
+    /// authority the grade never carried.
+    pub fn ops(self: Access) grants.OpSet {
+        const view_ops = grants.OpSet.of(&.{ .replica_read, .presence_read, .presence_publish });
+        return switch (self) {
+            .view => view_ops,
+            .edit => view_ops.with(.replica_write),
+            .own => view_ops.with(.replica_write).with(.admin),
+        };
+    }
+
+    /// The coarsest grade whose preset covers `set` — what a peer that only
+    /// speaks the legacy grade byte must be told so it degrades to the same
+    /// authority, never a wider one.
+    pub fn fromOps(set: grants.OpSet) Access {
+        if (set.has(.admin)) return .own;
+        if (set.has(.replica_write)) return .edit;
+        return .view;
+    }
 };
 
 const InNode = struct {
@@ -75,6 +104,11 @@ token: []u8,
 access: Access,
 /// Time source for the liveness windows and the heartbeat cadence.
 clock: Clock,
+/// Owner side: this link's per-export grant book (§13.5). Not owned — one
+/// book per link, bound by whoever publishes a quad's resource
+/// (`Collab.publish`). `null` keeps the grade-only authority this session
+/// had before per-export grants existed, byte for byte.
+exports: ?*grants.ExportBook = null,
 
 reader_thread: ?std.Thread = null,
 writer_thread: ?std.Thread = null,
@@ -212,6 +246,36 @@ pub fn destroy(self: *Session) void {
     self.out_mutex.unlock();
     gpa.free(self.token);
     gpa.destroy(self);
+}
+
+/// THE remote-authority decision (§13.5's intersection, as much of it as
+/// this process can evaluate): may this link's peer perform `op` on
+/// `pub_ref`? Every enforcement point calls exactly this — there is no
+/// second way to spell "authorized" on a session.
+///
+/// The intersection, in order:
+///   1. **the connection grade, as a MAXIMUM** — a preset ceiling, never a
+///      grant. `edit` no longer means "may write"; it means "may not write
+///      more than a writer".
+///   2. **the publication's own book**, when one is bound AND knows this
+///      publication. A publication this book never heard of is not its to
+///      decide: the grade alone governs, exactly as before this slice — the
+///      one and only permissive fallback, and it is a fallback to the
+///      PREVIOUS behavior, never to unrestricted.
+///   3. **an authenticated grantee**. A confined publication whose sender
+///      cannot be attributed to any identity fails CLOSED.
+///
+/// The remaining two terms of §13.5's intersection are enforced elsewhere
+/// and deliberately not folded in here: the requester's grant to its
+/// invoking local plugin is the `HandleTable` check at the plugin membrane,
+/// and a designation scope is checked at its own live-document chokepoint
+/// (`checkDocRegion` / `admitRegions`). Each narrows; none widens.
+pub fn authorize(self: *const Session, pub_ref: grants.PublicationRef, op: grants.Op) grants.Reason {
+    if (!self.access.ops().has(op)) return .out_of_ops;
+    const book = self.exports orelse return .ok;
+    if (!book.knows(pub_ref.id)) return .ok;
+    const fp = self.peerFingerprint() orelse return .never_granted;
+    return book.check(fp, pub_ref, op);
 }
 
 pub fn liveness(self: *const Session) Liveness {

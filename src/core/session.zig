@@ -50,6 +50,10 @@ pub const Access = Session.Access;
 
 pub const requests = @import("session/requests.zig");
 
+/// The `grant` frame's per-export payload (§13.5) + the grantee-side
+/// `Announced` state its preflight reads.
+pub const export_grants = @import("session/export_grants.zig");
+
 const remote_fs = @import("session/remote_fs.zig");
 pub const blob_channel = remote_fs.blob_channel;
 pub const BlobOp = remote_fs.BlobOp;
@@ -160,5 +164,6 @@ pub fn tcpConnect(hostport: []const u8) !i32 {
 test {
     std.testing.refAllDecls(@This());
     _ = @import("session/clock.zig");
+    _ = @import("session/export_grants.zig");
     _ = @import("session/tests.zig");
 }
