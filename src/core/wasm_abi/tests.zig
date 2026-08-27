@@ -2297,12 +2297,12 @@ test "wasm plugin: autopair inserts a matched pair around the cursor" {
     try t.expectEqual(@as(usize, 1), ed.cursorOffset());
 }
 
-test "wasm plugin: notes capture appends via fs and open reads it back" {
+test "wasm plugin: notes capture appends via fs and open opens the real file, not a scratch copy" {
     const gpa = t.allocator;
     var env: Env = undefined;
     try Env.init(gpa, &env);
     defer env.deinit(gpa);
-    try @import("../builtins.zig").install(gpa, &env.commands, &env.keymap, &env.head, &env.actions); // buffer-create
+    try @import("../builtins.zig").install(gpa, &env.commands, &env.keymap, &env.head, &env.actions); // buffer-create, open
 
     const tmp = "weft-notes-test.md"; // cwd-relative; cleaned up below
     file.deleteFile(gpa, tmp);
@@ -2312,20 +2312,25 @@ test "wasm plugin: notes capture appends via fs and open reads it back" {
     defer engine.deinit();
     const plugin = try loadPlugin(&engine, &env.ctx, "notes", @embedFile("guest_notes_wasm"), .{});
     defer plugin.deinit();
-    try t.expect(plugin.perms[wasm_host.perm_fs_read] and plugin.perms[wasm_host.perm_fs_write]);
+    // No fs_read: `open` is a host command, not an fs.read import.
+    try t.expect(!plugin.perms[wasm_host.perm_fs_read] and plugin.perms[wasm_host.perm_fs_write]);
 
-    // Two captures append to the file; open reads it into *notes*.
+    // Two captures append to the file; open opens the note target itself.
     _ = try command.run(&env.commands, &env.ctx, "notes-capture", &.{ .{ .string = "todo x" }, .{ .string = tmp } });
     _ = try command.run(&env.commands, &env.ctx, "notes-capture", &.{ .{ .string = "todo y" }, .{ .string = tmp } });
     _ = try command.run(&env.commands, &env.ctx, "notes-open", &.{.{ .string = tmp }});
 
-    const buf = blk: {
+    // No scratch "*notes*" buffer — the opened buffer is path-backed.
+    const scratch = blk: {
         var it = env.buffers.iterator();
         while (it.next()) |b| if (std.mem.eql(u8, b.name, "*notes*")) break :blk b;
         break :blk null;
     };
-    try t.expect(buf != null);
-    const s = try buf.?.textEditor().?.text().toOwnedSlice(gpa);
+    try t.expect(scratch == null);
+
+    const id = env.buffers.findByPath(tmp) orelse return error.TestExpectedNotesFileOpen;
+    const buf = env.buffers.get(id).?;
+    const s = try buf.textEditor().?.text().toOwnedSlice(gpa);
     defer gpa.free(s);
     try t.expectEqualStrings("todo x\ntodo y\n", s);
 }

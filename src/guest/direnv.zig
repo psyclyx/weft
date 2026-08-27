@@ -5,6 +5,13 @@
 //! reload. Applying the exported env to sibling `proc`/LSP calls (the
 //! `direnv.env-for` provider) is the next step, once a per-project env overlay
 //! crosses the membrane.
+//!
+//! No session/handle state here, unlike net/http/repl: every action is a
+//! one-shot `proc.spawnHere` at the current locus, not a held connection, so
+//! there's nothing to instance. The fixed `*direnv*` buffer is honest too — a
+//! direnv environment is a property of ONE project root (`direnv.env-for`
+//! will key by `(root, locus, .envrc hashToken)`, not by an arbitrary
+//! instance count); this view shows the one direnv currently in view.
 
 const std = @import("std");
 const weft = @import("weft");

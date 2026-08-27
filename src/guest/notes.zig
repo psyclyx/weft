@@ -1,9 +1,12 @@
 //! notes — capture + review over plain files (design §6.6, org-lite), a `.wasm`
 //! plugin. `notes-capture` appends a line to a notes file via `fs.append`;
-//! `notes-open` reads it into a tool buffer via `fs.read`. perms
-//! `{fs_read, fs_write}`. Agenda/backlinks (grep over the notes) compose the
-//! consult + proc plugins; capture into a shared vault is inherently
-//! multiplayer once the file is a CRDT document.
+//! `notes-open` opens it through the ordinary `open` path — a real,
+//! path-backed buffer (dedupes, editable, adopts the path if the file is new)
+//! — not a copy into an unrelated scratch buffer. perms `{fs_write}`; `open`
+//! is a host command, not an `fs.read` import, so no `fs_read` grant is
+//! needed here. Agenda/backlinks (grep over the notes) compose the consult +
+//! proc plugins; capture into a shared vault is inherently multiplayer once
+//! the file is a CRDT document.
 
 const std = @import("std");
 const weft = @import("weft");
@@ -19,7 +22,6 @@ const cmds = [_]Cmd{
 
 export fn describe() void {
     for (cmds) |c| weft.declareCommand(c.name);
-    weft.requestPerm(.fs_read);
     weft.requestPerm(.fs_write);
 }
 export fn init() void {
@@ -40,11 +42,9 @@ fn capture() void {
     _ = weft.fsAppend(path, line_buf[0 .. n + 1]);
 }
 
-/// Read the notes file (arg0, or the default) into the *notes* tool buffer.
+/// Open the notes file (arg0, or the default) as the note target itself —
+/// the real file, not a copy.
 fn open() void {
     const path = weft.argStr(0) orelse default_file;
-    weft.runStr("buffer-create", "*notes*"); // create + focus it empty
-    const content = weft.fsRead(path) orelse ""; // into shim scratch
-    weft.edit(.{ .start = 0, .end = weft.byteLen() }, content);
-    weft.jump(0);
+    weft.runStr("open", path);
 }
