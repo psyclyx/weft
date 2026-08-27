@@ -2185,3 +2185,85 @@ test "authoring: switch between two files with the fuzzy buffer picker" {
     ed.press("Return", ""); // pick-accept → switch buffers
     try t.expectEqualStrings("alpha.js", ed.bufferName());
 }
+
+// ── The input boundary (architecture §10.1): physical keys vs text commits ──
+//
+// The class gates. Text reaches an editable endpoint ONLY through a mode that
+// DECLARES it commits text; a key the grammar leaves unhandled stays
+// unhandled, in a document and in a field alike.
+
+test "input: an unbound key commits nothing in a structural mode, and commits in an insert one" {
+    const gpa = t.allocator;
+    var app: App = undefined;
+    try app.init(gpa);
+    defer app.deinit();
+    const ed = &app.ed;
+
+    ed.runStr("open", "note.txt");
+    try t.expectEqualStrings("normal", ed.mode());
+    // `&` is genuinely unbound in normal — not a binding, not a chord prefix.
+    try t.expect(ed.keymap.lookup("normal", "ampersand") == null);
+    try t.expect(!ed.keymap.isPrefix("normal", "ampersand"));
+
+    ed.press("ampersand", "&");
+    {
+        const got = try ed.textAlloc();
+        defer gpa.free(got);
+        try t.expectEqualStrings("", got); // nothing synthesized
+    }
+
+    // The same keystroke in a mode that declares it commits text does commit.
+    ed.press("i", "");
+    ed.press("ampersand", "&");
+    const got = try ed.textAlloc();
+    defer gpa.free(got);
+    try t.expectEqualStrings("&", got);
+}
+
+test "input: a tool entry's field takes commits only — an unbound key and Tab write nothing" {
+    const gpa = t.allocator;
+    var app: App = undefined;
+    try app.init(gpa);
+    defer app.deinit();
+    const ed = &app.ed;
+
+    authorFile(ed, "note.txt", "hello\n");
+    ed.runStr("open", ".");
+    const view_ref = ed.head.semantic_focus.path().?.view;
+    const view = ed.session.system.semantic.views.get(view_ref).?;
+    const leaf = ed.head.semantic_focus.path().?.leaf().?;
+    const field_ref = view.node(leaf).?.content.field.ref;
+    const draft = struct {
+        fn bytes(e: *h.Editor, ref: semantic.scene.FieldRef, a: std.mem.Allocator) ![]u8 {
+            var snap = try e.session.system.semantic.fields.get(ref).?.snapshot(a);
+            defer snap.deinit();
+            return a.dupe(u8, snap.value.bytes);
+        }
+    }.bytes;
+
+    // Structural posture: the file browser's mode never commits, so an unbound
+    // printable key reaches neither the draft nor a hidden backing document.
+    ed.press("ampersand", "&");
+    {
+        const name = try draft(ed, field_ref, gpa);
+        defer gpa.free(name);
+        try t.expectEqualStrings("note.txt", name);
+    }
+
+    // Insert posture commits typed text into the field...
+    ed.press("i", "");
+    ed.typeText("x");
+    {
+        const name = try draft(ed, field_ref, gpa);
+        defer gpa.free(name);
+        try t.expectEqualStrings("xnote.txt", name);
+    }
+
+    // ...but Tab is a physical key, not a commit: the field consumes it and the
+    // rename draft never gains a literal tab byte (§2.2's flagship symptom).
+    ed.press("Tab", "\t");
+    const name = try draft(ed, field_ref, gpa);
+    defer gpa.free(name);
+    try t.expectEqualStrings("xnote.txt", name);
+    try t.expectEqual(view_ref, ed.head.semantic_focus.path().?.view);
+}
