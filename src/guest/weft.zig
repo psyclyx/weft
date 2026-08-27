@@ -903,6 +903,61 @@ pub fn bufferReadOnly(i: usize) bool {
     return wl_buffer_readonly(@intCast(i)) != 0;
 }
 
+// ── Instanced tool buffers ───────────────────────────────────────────
+//
+// A tool that holds state (a REPL child, a console log, an LLM conversation)
+// is instantiable: each instance owns a buffer, and its buffer NAME is its
+// identity. Two instances therefore never share a sink, and a command routes
+// to the instance whose buffer is focused. `out` must not alias the read
+// scratch these helpers use — pass a caller-owned array.
+
+/// The active buffer's display name, copied into `out` (so it survives the
+/// next read call). Null if it does not fit or no buffer is active.
+pub fn activeBufferName(out: []u8) ?[]const u8 {
+    var i: usize = 0;
+    while (i < bufferCount()) : (i += 1) {
+        if (!bufferActive(i)) continue;
+        const name = bufferName(i) orelse return null;
+        if (name.len > out.len) return null;
+        @memcpy(out[0..name.len], name);
+        return out[0..name.len];
+    }
+    return null;
+}
+
+/// Whether a buffer is displayed under `name`.
+pub fn bufferNamed(name: []const u8) bool {
+    var i: usize = 0;
+    while (i < bufferCount()) : (i += 1) {
+        const other = bufferName(i) orelse continue;
+        if (std.mem.eql(u8, other, name)) return true;
+    }
+    return false;
+}
+
+/// The instance-`n` buffer name for `base`: `*base*` at 1, `*base:n*` above.
+pub fn instanceName(base: []const u8, n: u32, out: []u8) ?[]const u8 {
+    const written = if (n <= 1)
+        std.fmt.bufPrint(out, "*{s}*", .{base})
+    else
+        std.fmt.bufPrint(out, "*{s}:{d}*", .{ base, n });
+    return written catch null;
+}
+
+/// The lowest instance ordinal of `base` no buffer holds — the identity a new
+/// instance takes. Null when the tool is saturated.
+pub fn instanceOrdinal(base: []const u8) ?u32 {
+    var name_buf: [128]u8 = undefined;
+    var n: u32 = 1;
+    while (n <= max_instances) : (n += 1) {
+        const name = instanceName(base, n, &name_buf) orelse return null;
+        if (!bufferNamed(name)) return n;
+    }
+    return null;
+}
+
+const max_instances = 64;
+
 // ── Fuzzy pick (open one incrementally; accept → on_pick_accept) ──────
 /// Begin a pick with `prompt`; `pick_id` is the guest's tag for its accept
 /// logic (dispatched to `on_pick_accept`).
