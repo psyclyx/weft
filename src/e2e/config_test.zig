@@ -465,7 +465,7 @@ test "e2e/config: the sample config boots; SPC g i is discoverable via which-key
     // path into and out of a focused semantic target. Return leads with the
     // standard activation intention and keeps vim's `+` as its fallback
     // (architecture §10.2) — the list, in order, is the binding.
-    const activate = ed.keymap.resolveExactList("normal", "Return").?;
+    const activate = ed.keymap.resolveExactArms("normal", "Return").?;
     try t.expectEqual(@as(usize, 2), activate.len);
     try t.expectEqualStrings("std.target.activate", activate[0]);
     try t.expectEqualStrings("vim-open-focused", activate[1]);

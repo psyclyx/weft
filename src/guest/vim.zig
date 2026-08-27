@@ -9,6 +9,7 @@
 const std = @import("std");
 const weft = @import("weft");
 const ex_mod = @import("ex.zig");
+const semantic_action = weft.semantic.action.standard;
 
 /// The `:` command line: vim's resting mode is `normal`, its command-line
 /// keymap mode is `ex`. Owns the classic abbreviated ex commands (w/q/s/…) and
@@ -67,10 +68,10 @@ const MB = struct {
     intention: ?[]const u8 = null,
 };
 const mtable = [_]MB{
-    .{ .key = "h", .motion = "motion.left", .in_op = false, .intention = "std.navigate.left" },
-    .{ .key = "l", .motion = "motion.right", .in_op = false, .intention = "std.navigate.right" },
-    .{ .key = "j", .motion = "motion.down", .in_op = false, .intention = "std.navigate.down" },
-    .{ .key = "k", .motion = "motion.up", .in_op = false, .intention = "std.navigate.up" },
+    .{ .key = "h", .motion = "motion.left", .in_op = false, .intention = "std.navigation.left" },
+    .{ .key = "l", .motion = "motion.right", .in_op = false, .intention = "std.navigation.right" },
+    .{ .key = "j", .motion = "motion.down", .in_op = false, .intention = "std.navigation.down" },
+    .{ .key = "k", .motion = "motion.up", .in_op = false, .intention = "std.navigation.up" },
     .{ .key = "w", .motion = "motion.word-fwd", .in_op = true },
     .{ .key = "b", .motion = "motion.word-back", .in_op = true },
     .{ .key = "e", .motion = "motion.word-end", .in_op = true },
@@ -481,10 +482,10 @@ export fn init() void {
     // The arrows carry the same row/column intentions as h/j/k/l; their text
     // fallbacks are the modeless floor's own cursor commands.
     const arrows = [_][3][]const u8{
-        .{ "Left", "std.navigate.left", "cursor-left" },
-        .{ "Right", "std.navigate.right", "cursor-right" },
-        .{ "Up", "std.navigate.up", "cursor-up" },
-        .{ "Down", "std.navigate.down", "cursor-down" },
+        .{ "Left", "std.navigation.left", "cursor-left" },
+        .{ "Right", "std.navigation.right", "cursor-right" },
+        .{ "Up", "std.navigation.up", "cursor-up" },
+        .{ "Down", "std.navigation.down", "cursor-down" },
     };
     for (arrows) |a| weft.bindKeys("normal", a[0], &.{ a[1], a[2] });
 
@@ -836,6 +837,18 @@ fn yankCurrent(start: usize, end: usize, linewise: bool) void {
     const slot = consumeRegister();
     weft.yankRangeIn(slot, start, end, linewise);
 }
+
+/// The TRANSFER half (Y/p/P, and a doubled operator on a projection row) has
+/// no word in the standard vocabulary yet, so these four keys still ask
+/// whether a structured view is focused. They are the last such fork, and
+/// they go the way of the rest the moment `std.transfer.*` exists.
+fn semanticDid(action: []const u8) bool {
+    const register = consumeRegister();
+    return switch (weft.semanticActionIn(action, register)) {
+        .handled, .transfer_stored, .interaction_opened, .target_opened, .focus_changed, .relation_opened, .working_target_changed => true,
+        .unavailable, .failed, _ => false,
+    };
+}
 /// `Return`'s fallback: vim's ordinary `+` — next line, first non-blank. The
 /// activation half is the `std.target.activate` entry bound ahead of it.
 fn openFocused() void {
@@ -849,10 +862,12 @@ fn openFocused() void {
     weft.jump(if (first_range.end == after_down) first_range.start else first_range.end);
 }
 
-/// `-` — vim's previous-line/first-non-blank. Leaving a container is column
-/// navigation now (`h`/`Left` → `std.navigate.left`), not a second door only
-/// this key knows about.
+/// `-` — leave the focused container where the scene advertises that action,
+/// vim's previous-line/first-non-blank everywhere else. Leaving a container
+/// has no word in the standard vocabulary yet (`toggle-expanded` opens the
+/// focused one, it does not step out), so this fork stays until it does.
 fn openContainer() void {
+    if (weft.semanticActive() and semanticDid(semantic_action.open_container)) return;
     const up = weft.runRange("motion.up") orelse return;
     const up_range = weft.rangeEnds(up) orelse return;
     const current = weft.cursor();
@@ -864,11 +879,19 @@ fn openContainer() void {
 }
 
 fn yankLine() void {
+    if (weft.semanticActive()) {
+        _ = semanticDid(semantic_action.copy);
+        return;
+    }
     const l = weft.lineAt(weft.cursor());
     yankCurrent(l.start, l.end, true);
     weft.flash(l.start, l.end); // vim-goggles
 }
 fn paste() void {
+    if (weft.semanticActive()) {
+        _ = semanticDid(semantic_action.paste_after);
+        return;
+    }
     const slot = consumeRegister();
     if (weft.registerLinewiseIn(slot)) {
         const l = weft.lineAt(weft.cursor());
@@ -887,6 +910,10 @@ fn paste() void {
     }
 }
 fn pasteBefore() void {
+    if (weft.semanticActive()) {
+        _ = semanticDid(semantic_action.paste_before);
+        return;
+    }
     const slot = consumeRegister();
     if (weft.registerLinewiseIn(slot)) {
         const l = weft.lineAt(weft.cursor());
@@ -975,6 +1002,16 @@ fn opCancel() void {
 }
 /// dd / cc / yy — linewise. The operator char repeated (bound in op-pending).
 fn opLine() void {
+    if (weft.semanticActive()) {
+        if (op_copies) _ = semanticDid(semantic_action.copy);
+        const semantic_edit = op_edit_cmd orelse {
+            weft.setMode("normal");
+            return;
+        };
+        if (std.mem.eql(u8, semantic_edit, "op.delete")) _ = semanticDid(semantic_action.delete);
+        weft.setMode(op_after);
+        return;
+    }
     const l = weft.lineAt(weft.cursor());
     if (op_copies) yankCurrent(l.start, l.end, true);
     const edit = op_edit_cmd orelse {
