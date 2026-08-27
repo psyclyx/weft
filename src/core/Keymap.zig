@@ -1,4 +1,7 @@
-//! Keymap — modal key → command-name TABLES. Pure string domain: a
+//! Keymap — modal key → NAME-LIST tables (a plain command binding is a
+//! one-entry list; a fallback list of intentions is the general case,
+//! doc/configuration.md §5.2). The keymap never resolves a list — it hands
+//! it whole to dispatch. Pure string domain: a
 //! keyspec is `[C-][M-][S-]<xkb keysym name>`. Shift usually lives in
 //! the keysym (`a` vs `A`); the explicit `S-` is only for keys with no
 //! shifted keysym — `S-Return`, `S-Tab` (specials keep their names —
@@ -34,7 +37,11 @@ const Keymap = @This();
 /// so the resolved keymap is a pure function of the declaration set — never
 /// load-order-dependent. Precedence tiers: core defaults (−100) < plugins (0)
 /// < user config (100).
-const BindEntry = struct { command: []u8, priority: i32, owner: []u8 };
+/// `commands` is the authored fallback ARM LIST (doc/configuration.md §5.2,
+/// architecture §10.2), resolved first-applicable at dispatch. A plain
+/// command binding is a one-entry list — one representation, no second
+/// shape for the single case.
+const BindEntry = struct { commands: [][]const u8, priority: i32, owner: []u8 };
 const Bindings = std.StringArrayHashMapUnmanaged(BindEntry);
 
 pub const prio_core = -100;
@@ -94,7 +101,7 @@ pub fn deinit(self: *Keymap, gpa: Allocator) void {
         gpa.free(mode_name);
         for (bindings.keys(), bindings.values()) |k, v| {
             gpa.free(k);
-            gpa.free(v.command);
+            freeArms(gpa, v.commands);
             gpa.free(v.owner);
         }
         bindings.deinit(gpa);
@@ -128,6 +135,15 @@ pub fn deinit(self: *Keymap, gpa: Allocator) void {
 /// equal-priority bind from a *different* owner is a collision — surfaced as a
 /// warning; last one wins.
 pub fn bind(self: *Keymap, gpa: Allocator, mode: []const u8, key_in: []const u8, command: []const u8, priority: i32, owner: []const u8) Allocator.Error!void {
+    return self.bindArms(gpa, mode, key_in, &.{command}, priority, owner);
+}
+
+/// Bind an authored fallback ARM LIST (doc/configuration.md §5.2) — the
+/// general form; `bind` is its one-entry case. The keymap never resolves the
+/// list: it carries it whole to dispatch, which resolves first-applicable
+/// against the catalog (architecture §10.2).
+pub fn bindArms(self: *Keymap, gpa: Allocator, mode: []const u8, key_in: []const u8, commands: []const []const u8, priority: i32, owner: []const u8) Allocator.Error!void {
+    std.debug.assert(commands.len > 0);
     var kbuf: [256]u8 = undefined;
     const key = normalizeKey(&kbuf, key_in);
     const gop = try self.modes.getOrPut(gpa, mode);
@@ -141,16 +157,33 @@ pub fn bind(self: *Keymap, gpa: Allocator, mode: []const u8, key_in: []const u8,
         if (priority < cur.priority) return; // a lower tier can't shadow a higher one
         if (priority == cur.priority and !std.mem.eql(u8, cur.owner, owner))
             std.log.warn("keymap: '{s}' in mode '{s}' bound by both '{s}' and '{s}' at priority {d}", .{ key, mode, cur.owner, owner, priority });
-        gpa.free(cur.command);
+        freeArms(gpa, cur.commands);
         gpa.free(cur.owner);
     } else {
         bgop.key_ptr.* = try gpa.dupe(u8, key);
     }
     bgop.value_ptr.* = .{
-        .command = try gpa.dupe(u8, command),
+        .commands = try dupeArms(gpa, commands),
         .priority = priority,
         .owner = try gpa.dupe(u8, owner),
     };
+}
+
+fn dupeArms(gpa: Allocator, commands: []const []const u8) Allocator.Error![][]const u8 {
+    const out = try gpa.alloc([]const u8, commands.len);
+    errdefer gpa.free(out);
+    var n: usize = 0;
+    errdefer for (out[0..n]) |c| gpa.free(c);
+    for (commands, 0..) |c, i| {
+        out[i] = try gpa.dupe(u8, c);
+        n += 1;
+    }
+    return out;
+}
+
+fn freeArms(gpa: Allocator, commands: [][]const u8) void {
+    for (commands) |c| gpa.free(c);
+    gpa.free(commands);
 }
 
 /// Remove the binding at `mode`/`key` IFF it is currently owned by `owner`
@@ -167,7 +200,7 @@ pub fn unbind(self: *Keymap, gpa: Allocator, mode: []const u8, key_in: []const u
     if (!std.mem.eql(u8, entry.owner, owner)) return;
     if (bindings.fetchSwapRemove(key)) |removed| {
         gpa.free(removed.key);
-        gpa.free(removed.value.command);
+        freeArms(gpa, removed.value.commands);
         gpa.free(removed.value.owner);
     }
 }
@@ -183,24 +216,32 @@ pub const global_mode = "global";
 /// `global` layer, if any. Pure function of `(tables, mode, key)` — a head
 /// calls this with its own current mode (see `Head.lookup`).
 pub fn lookup(self: *const Keymap, mode: []const u8, key: []const u8) ?[]const u8 {
+    const arms = self.lookupArms(mode, key) orelse return null;
+    return arms[0];
+}
+
+/// `lookup`'s general form: the whole authored fallback list. Callers that
+/// only DISPLAY a binding (which-key, tests) want `lookup`'s first arm;
+/// dispatch wants this.
+pub fn lookupArms(self: *const Keymap, mode: []const u8, key: []const u8) ?[]const []const u8 {
     var m: []const u8 = mode;
     var depth: usize = 0;
     while (depth < 8) : (depth += 1) {
         if (self.modes.getPtr(m)) |bindings| {
-            if (bindings.get(key)) |entry| return entry.command;
+            if (bindings.get(key)) |entry| return entry.commands;
         }
         m = self.parents.get(m) orelse break;
     }
     // Universal fallback: `global` binds apply under every mode.
     if (self.modes.getPtr(global_mode)) |bindings| {
-        if (bindings.get(key)) |entry| return entry.command;
+        if (bindings.get(key)) |entry| return entry.commands;
     }
     return null;
 }
 
 /// What feeding a key produced (see `Head.feed`).
 pub const Feed = union(enum) {
-    run: []const u8, // a full sequence resolved — run this command (borrowed)
+    run: []const []const u8, // a full sequence resolved — its authored arm list (borrowed)
     pending, // extended the pending chord — which-key shows its completions
     unbound, // a lone key the grammar does not bind — it may still COMMIT text
     none, // a dead-end chord — reset, nothing to do
@@ -214,13 +255,20 @@ pub const Feed = union(enum) {
 /// the "global is too global" problem.) Called by `Head.feed` with the
 /// head's own mode + pending-extended candidate.
 pub fn resolveExact(self: *const Keymap, mode: []const u8, seq: []const u8) ?[]const u8 {
+    const arms = self.resolveExactArms(mode, seq) orelse return null;
+    return arms[0];
+}
+
+/// `resolveExact`'s general form — the whole authored arm list, which is
+/// what `Head.feed` hands dispatch.
+pub fn resolveExactArms(self: *const Keymap, mode: []const u8, seq: []const u8) ?[]const []const u8 {
     var m: []const u8 = mode;
     var depth: usize = 0;
     while (depth < 8) : (depth += 1) {
-        if (self.modes.getPtr(m)) |b| if (b.get(seq)) |e| return e.command;
+        if (self.modes.getPtr(m)) |b| if (b.get(seq)) |e| return e.commands;
         m = self.parents.get(m) orelse break;
     }
-    if (self.modes.getPtr(global_mode)) |b| if (b.get(seq)) |e| return e.command;
+    if (self.modes.getPtr(global_mode)) |b| if (b.get(seq)) |e| return e.commands;
     return null;
 }
 
@@ -333,7 +381,7 @@ pub const menu_nav_mode = "menu-nav";
 /// (page down/up) acts on the hint instead of dead-ending the sequence.
 pub fn navCommand(self: *const Keymap, key: []const u8) ?[]const u8 {
     const b = self.modes.getPtr(menu_nav_mode) orelse return null;
-    return if (b.get(key)) |e| e.command else null;
+    return if (b.get(key)) |e| e.commands[0] else null;
 }
 
 /// Declare `mode` a prefix menu (config policy — the leader/chord tables).
@@ -404,7 +452,7 @@ pub fn mayLeaveLocked(self: *const Keymap, current: []const u8, target: []const 
 /// For which-key: a leaf menu mode's whole table.
 pub fn ownBindings(self: *const Keymap, gpa: Allocator, mode: []const u8, out: *std.ArrayList(Binding)) Allocator.Error!void {
     const b = self.modes.getPtr(mode) orelse return;
-    for (b.keys(), b.values()) |k, v| try out.append(gpa, .{ .key = k, .command = v.command });
+    for (b.keys(), b.values()) |k, v| try out.append(gpa, .{ .key = k, .command = v.commands[0] });
 }
 
 /// Number of bindings in `mode`'s own table (for which-key enumeration via the
@@ -419,7 +467,7 @@ pub fn bindingCount(self: *const Keymap, mode: []const u8) usize {
 pub fn bindingAt(self: *const Keymap, mode: []const u8, i: usize) ?Binding {
     const b = self.modes.getPtr(mode) orelse return null;
     if (i >= b.count()) return null;
-    return .{ .key = b.keys()[i], .command = b.values()[i].command };
+    return .{ .key = b.keys()[i], .command = b.values()[i].commands[0] };
 }
 
 /// Build the RESOLVED set of bindings AVAILABLE in `mode` into `out`/
@@ -453,8 +501,8 @@ fn addResolvedInto(self: *const Keymap, gpa: Allocator, mode: []const u8, out: *
         for (out.items) |existing| {
             if (std.mem.eql(u8, existing.key, k)) continue :outer;
         }
-        try out.append(gpa, .{ .key = k, .command = v.command });
-        try out_group.append(gpa, self.isMenuMode(v.command));
+        try out.append(gpa, .{ .key = k, .command = v.commands[0] });
+        try out_group.append(gpa, self.isMenuMode(v.commands[0]));
     }
 }
 
@@ -503,7 +551,7 @@ fn addCompletionsInto(self: *const Keymap, gpa: Allocator, mode: []const u8, pre
         for (out.items) |existing| {
             if (std.mem.eql(u8, existing.key, seg)) break; // already offered — dedup
         } else {
-            try out.append(gpa, .{ .key = seg, .command = if (is_leaf) v.command else "+prefix" });
+            try out.append(gpa, .{ .key = seg, .command = if (is_leaf) v.commands[0] else "+prefix" });
             try out_group.append(gpa, !is_leaf);
         }
     }

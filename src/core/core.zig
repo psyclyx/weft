@@ -60,6 +60,7 @@ pub const facts = @import("facts.zig");
 pub const container = @import("container.zig");
 pub const catalog = @import("catalog.zig");
 pub const Catalog = catalog.Catalog;
+pub const intent = @import("intent.zig");
 pub const manifest = @import("manifest.zig");
 pub const ctx = @import("ctx.zig");
 pub const Ctx = ctx.Ctx;

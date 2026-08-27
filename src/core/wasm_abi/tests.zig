@@ -843,7 +843,7 @@ test "helix: a second modal editor loads in its OWN mode namespace" {
     try t.expect(env.keymap.isMenuMode("helix-op"));
     try t.expect((try env.head.feed(gpa, &env.keymap, "space")) == .pending);
     try t.expect((try env.head.feed(gpa, &env.keymap, "g")) == .pending);
-    try t.expectEqualStrings("git-status", (try env.head.feed(gpa, &env.keymap, "g")).run);
+    try t.expectEqualStrings("git-status", (try env.head.feed(gpa, &env.keymap, "g")).run[0]);
 }
 
 test "emacs: a modeless editor loads; motion/kill chords, C-x is a chord not a mode" {

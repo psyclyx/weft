@@ -5,7 +5,9 @@
 // including config's own later binds override these (higher priority / last-wins).
 
 // ── The fuzzy picker / command palette (the "pick" mode) ──────────────
-weft.bind("pick", "Return", "pick-accept");
+// An authored fallback list (doc/configuration.md §5.2): accept the
+// highlighted candidate, else accept whatever was typed.
+weft.bind("pick", "Return", ["pick-accept", "pick-accept-input"]);
 weft.bind("pick", "Escape", "pick-cancel");
 weft.bind("pick", "C-g", "pick-cancel");
 weft.bind("pick", "BackSpace", "pick-backspace");

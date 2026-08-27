@@ -1884,8 +1884,9 @@ pub fn bootConfigNamed(ed: *Editor, config_dir: []const u8, filename: []const u8
 }
 
 /// A stable, sorted text snapshot of the RESOLVED keymap: every (mode, key)
-/// this editor's keymap tables hold, across every mode, mapped to the
-/// command it resolves to — `owner`/`priority` deliberately excluded (two
+/// this editor's keymap tables hold, across every mode, mapped to its
+/// authored arm list (`|`-joined, so a fallback list is compared whole) —
+/// `owner`/`priority` deliberately excluded (two
 /// manifests reaching the same resolved table through different tiers is
 /// exactly the point being tested, not a difference). Comparable with
 /// `expectEqualStrings` between two editors booted from different configs.
@@ -1899,7 +1900,13 @@ pub fn keymapSnapshot(gpa: Allocator, km: *core.Keymap) ![]u8 {
     while (mit.next()) |me| {
         var kit = me.value_ptr.iterator();
         while (kit.next()) |ke| {
-            const line = try std.fmt.allocPrint(gpa, "{s}\x00{s}\x00{s}\n", .{ me.key_ptr.*, ke.key_ptr.*, ke.value_ptr.command });
+            var arms: std.ArrayList(u8) = .empty;
+            defer arms.deinit(gpa);
+            for (ke.value_ptr.commands, 0..) |c, i| {
+                if (i > 0) try arms.append(gpa, '|');
+                try arms.appendSlice(gpa, c);
+            }
+            const line = try std.fmt.allocPrint(gpa, "{s}\x00{s}\x00{s}\n", .{ me.key_ptr.*, ke.key_ptr.*, arms.items });
             try lines.append(gpa, line);
         }
     }

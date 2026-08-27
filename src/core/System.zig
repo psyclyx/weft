@@ -86,6 +86,7 @@ const subbuffer = @import("subbuffer.zig");
 const register_mod = @import("register.zig");
 const grants_mod = @import("grants.zig");
 const semantic_mod = @import("semantic.zig");
+const intent_mod = @import("intent.zig");
 const fs_runtime = @import("weft_fs_runtime");
 
 pub const System = @This();
@@ -183,6 +184,12 @@ semantic: semantic_mod.Services,
 /// Authority routes are system state; concrete provider storage belongs to
 /// the embedder and can be swapped without changing this interface.
 filesystems: fs_runtime.Router,
+/// This system's intention plane (`intent.zig`) — the offer catalog every
+/// provider publishes into and the invoker registry decisions run through.
+/// System-scoped like the keymap tables: heads resolve against it, they do
+/// not own it. Pinned (the published core table borrows a field of it),
+/// which `System`'s own no-relocation invariant already guarantees.
+intent: intent_mod.Plane = undefined,
 
 /// Build a system from scratch: fresh buffers (one scratch buffer, per
 /// `Buffers.init`), empty commands/keymap, and the built-in command/keymap
@@ -212,6 +219,8 @@ pub fn create(gpa: Allocator, pool: *task.Pool, name: []const u8, user: []const 
     // heap-allocated) before anything points into it.
     self.caps = Caps.init(gpa, task.nowNs, &self.container);
     self.actions = Actions.init(gpa, &self.container);
+    try self.intent.init(gpa);
+    errdefer self.intent.deinit(gpa);
     try builtins.install(gpa, &self.commands, &self.keymap, &self.default_head, &self.actions);
     return self;
 }
@@ -241,6 +250,7 @@ pub fn destroy(self: *System) void {
     // touches it) — torn down here, once, by its owner. See `action.zig`'s/
     // `capability.zig`'s `deinit` docs for why the relative order is safe.
     self.container.deinit();
+    self.intent.deinit(gpa);
     self.keymap.deinit(gpa);
     self.commands.deinit(gpa);
     self.buffers.deinit(gpa);
@@ -267,6 +277,7 @@ pub fn contextFor(self: *System, head: *Head) command.Context {
         .grant_table = &self.grants,
         .semantic = &self.semantic,
         .filesystems = &self.filesystems,
+        .intent = &self.intent,
     };
 }
 
@@ -531,6 +542,7 @@ pub const Host = struct {
         c.grant_table = &to.grants;
         c.semantic = &to.semantic;
         c.filesystems = &to.filesystems;
+        c.intent = &to.intent;
         try to.attachHead(gpa, head);
     }
 };

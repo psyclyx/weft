@@ -104,6 +104,16 @@ pub fn validateClassName(name: []const u8) NameError!void {
     if (n != 2) return error.WrongSegmentCount;
 }
 
+/// Does a bound name REFER to an intention rather than name a command?
+/// One grammar (doc/configuration.md §5.1): the §5.1 spelling IS the
+/// reference, so a flat name (`insert-newline`) and a dotted name under an
+/// unknown root (`git.commit`) both stay commands, and there is no second
+/// sigil to keep in sync with the validator above.
+pub fn isIntentionName(name: []const u8) bool {
+    validateIntentionName(name) catch return false;
+    return true;
+}
+
 fn rootSegment(name: []const u8) []const u8 {
     const dot = std.mem.indexOfScalar(u8, name, '.') orelse return name;
     return name[0..dot];

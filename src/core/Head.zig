@@ -113,7 +113,39 @@ focused_pane_gen: u32 = 0,
 /// `TransientFrame`'s doc below.
 transient_stack: std.ArrayList(TransientFrame) = .empty,
 
+/// This head's catalog context clock (`catalog.Context`'s caller-owned
+/// half — see that struct's doc). `key` names the focused entry/viewport a
+/// snapshot is cached under; `revision` is the clock a rebuild keys on.
+catalog_clock: CatalogClock = .{},
+
 pub const empty: Head = .{};
+
+/// The caller-owned half of `catalog.Context`, DERIVED rather than pushed:
+/// `observe` folds this head's focus/scene inputs into one signature and
+/// bumps `revision` when it moves. Deriving it at the one place resolution
+/// happens is why no focus or scene chokepoint can be missed — there is no
+/// second site that must remember to bump.
+///
+/// `key` mixes a process-unique head id with the focused entry, so two heads
+/// on one system never share a cached snapshot and a freed head's cache
+/// entry can never be inherited by a later head at the same address.
+pub const CatalogClock = struct {
+    key: u64 = 0,
+    revision: u64 = 0,
+    signature: u64 = 0,
+    id: u64 = 0,
+
+    var next_id: std.atomic.Value(u64) = .init(1);
+
+    pub fn observe(self: *CatalogClock, entry: u64, signature: u64) void {
+        if (self.id == 0) self.id = next_id.fetchAdd(1, .monotonic);
+        const key = std.hash.Wyhash.hash(self.id, std.mem.asBytes(&entry));
+        if (self.revision != 0 and self.key == key and self.signature == signature) return;
+        self.key = key;
+        self.signature = signature;
+        self.revision += 1;
+    }
+};
 
 pub const WorkingTarget = struct {
     target: semantic.target.Ref,
@@ -484,15 +516,15 @@ pub fn commitCommand(self: *const Head, km: *const Keymap) ?[]const u8 {
 
 /// Feed one keyspec through THIS HEAD's pending sequence — see
 /// `Keymap.Feed`/the module doc on chords. Mutates `self.pending`; a `.run`
-/// command name borrows `km` — use it before any rebind.
+/// arm list borrows `km` — use it before any rebind.
 pub fn feed(self: *Head, gpa: Allocator, km: *const Keymap, key: []const u8) Allocator.Error!Keymap.Feed {
     const at_top = self.pending.len == 0;
     const cand = if (at_top) key else try std.fmt.allocPrint(gpa, "{s} {s}", .{ self.pending, key });
     defer if (!at_top) gpa.free(cand);
 
-    if (km.resolveExact(self.mode, cand)) |cmd| {
+    if (km.resolveExactArms(self.mode, cand)) |arms| {
         try self.setPending(gpa, "");
-        return .{ .run = cmd };
+        return .{ .run = arms };
     }
     if (km.isPrefix(self.mode, cand)) {
         try self.setPending(gpa, cand);
@@ -549,7 +581,7 @@ test "head: setMode/feed/pending are per-head — Keymap holds only tables" {
     {
         const r = try h.feed(gpa, &km, "f");
         try t.expect(r == .run);
-        try t.expectEqualStrings("find-file", r.run);
+        try t.expectEqualStrings("find-file", r.run[0]);
     }
     try t.expectEqual(@as(usize, 0), h.pending.len);
 }
@@ -572,7 +604,7 @@ test "head: prefix sequences — a chord resolves; a menu is a prefix, not a mod
     {
         const r = try h.feed(gpa, &km, "i");
         try t.expect(r == .run);
-        try t.expectEqualStrings("vim-insert", r.run);
+        try t.expectEqualStrings("vim-insert", r.run[0]);
         try t.expectEqual(@as(usize, 0), h.pending.len);
     }
     // SPC is a prefix -> pending; f -> still pending; f -> completes -> run.
@@ -583,7 +615,7 @@ test "head: prefix sequences — a chord resolves; a menu is a prefix, not a mod
     {
         const r = try h.feed(gpa, &km, "f");
         try t.expect(r == .run);
-        try t.expectEqualStrings("find-file", r.run);
+        try t.expectEqualStrings("find-file", r.run[0]);
         try t.expectEqual(@as(usize, 0), h.pending.len);
     }
     // The "global is too global" fix falls out: SPC then C-w is the CHORD
@@ -595,7 +627,7 @@ test "head: prefix sequences — a chord resolves; a menu is a prefix, not a mod
     {
         const r = try h.feed(gpa, &km, "C-w");
         try t.expect(r == .run);
-        try t.expectEqualStrings("window-thing", r.run);
+        try t.expectEqualStrings("window-thing", r.run[0]);
     }
     // A lone key the grammar does not bind is `unbound` — the caller decides
     // whether it commits text; the keymap never says "insert this".

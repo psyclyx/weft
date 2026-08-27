@@ -707,9 +707,14 @@ pub const Manifest = struct {
         for (self.imports.items) |imp| try imp.applyDecls(gpa, actx, known);
 
         const prio = keymapPriorityForTier(self.tier);
-        // Fallback lists bind their FIRST entry; the rest ride inertly on the
-        // decl until the intention catalog resolves them.
-        for (self.binds.items) |d| actx.ctx.keymap.bind(gpa, d.mode, d.key, d.commands[0], prio, self.owner) catch {};
+        for (self.binds.items) |d| {
+            actx.ctx.keymap.bindArms(gpa, d.mode, d.key, d.commands, prio, self.owner) catch {};
+            // Intern the intention names now, so resolving this binding on
+            // the keystroke path is a lookup and never a first-use allocation.
+            if (actx.ctx.intent) |plane| for (d.commands) |name| {
+                _ = plane.catalog.intention(name) catch {};
+            };
+        }
         for (self.menus.items) |d| applyMenu(actx.ctx, gpa, d.name, prio);
         for (self.actions.items) |d| command.registerAction(gpa, actx.ctx.commands, actx.ctx.actions, d.name, .pick) catch {};
         if (actx.ctx.semantic) |services| for (self.semantic_actions.items) |d|

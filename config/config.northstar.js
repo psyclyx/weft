@@ -83,9 +83,9 @@ weft.bind("global", "F1", "which-key-now");  // "global" = the workspace-scope k
 
 // ── BIND ARITY (doc/configuration.md §5.2): the third argument may be a LIST,
 // an authored first-applicable fallback — accept the highlighted candidate,
-// else accept whatever was typed. Until the intention catalog resolves
-// fallbacks at fire time, applying this binds the first entry (the same
-// binding defaults.js already reaches) and carries the rest on the decl.
+// else accept whatever was typed. The keymap carries the whole list to
+// dispatch; concrete command names (as here) still run the first arm, while
+// an INTENTION list resolves against the catalog at fire time.
 weft.bind("pick", "Return", ["pick-accept", "pick-accept-input"]);
 
 // ── Everything from here to the theme block is UNCHANGED from config/config.js.

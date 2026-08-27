@@ -109,6 +109,12 @@ pub const Context = struct {
     /// System-scoped semantic identity and provider registries. Optional for
     /// small/headless embeddings that expose only the text command surface.
     semantic: ?*@import("semantic.zig").Services = null,
+    /// The system's intention plane (`intent.zig`): the offer catalog, the
+    /// endpoint-token invoker registry, and core's own editing provider —
+    /// one value, so a half-wired pair is unrepresentable. `null` in
+    /// embeddings that expose only the concrete command surface; dispatch
+    /// then treats an intention binding as unresolvable and says so.
+    intent: ?*@import("intent.zig").Plane = null,
     /// Authority-routed filesystem services. Providers are installed by the
     /// embedding app (Linux today, Darwin/remote/synthetic independently);
     /// commands and plugins see only this platform-neutral router.
