@@ -10,6 +10,7 @@ const ok_echo = handler.ok_echo;
 const collab = @import("collab.zig");
 const ShareCtx = collab.ShareCtx;
 const wireHubShare = collab.wireHubShare;
+const presets = @import("collab_presets.zig");
 
 // ── Peer trust + identity ───────────────────────────────────────────
 
@@ -246,16 +247,32 @@ pub fn peerFilesHandler(ctx: *core.command.Context, data: ?*anyopaque, args: []c
     };
 }
 
-/// `share` — announce the active buffer to the peer(s): over the
+/// `share [preset]` — announce the active buffer to the peer(s): over the
 /// outbound connection AND to every hub peer, remembering it for late
 /// joiners. One history root; the peer's frontier exchange bootstraps
 /// content. The hub's primary buffer is already served, so it is skipped.
+///
+/// An optional preset name (doc/contextual-workspace-architecture.md §13.6:
+/// "look_together" | "pair" | "review") compiles to a `collab_presets`
+/// `GrantBundle`; the echo below is rendered FROM that bundle
+/// (`collab_presets.echo`), never from a preset-supplied string — the text
+/// approved and the authority selected are the same value. v1 wires only the
+/// bundle's `.presence` toggle against `share-presence`'s existing effect;
+/// document-edit/code-intel/project-scope authority enforcement is the
+/// export-grant machinery this seam is meant to compile into once it lands.
 pub fn shareHandler(ctx: *core.command.Context, data: ?*anyopaque, args: []const core.command.Value) anyerror!core.command.Value {
     const sc: *ShareCtx = @ptrCast(@alignCast(data.?));
-    if (args.len != 0) return error.ArityMismatch;
+    if (args.len > 1) return error.ArityMismatch;
+    var bundle: ?presets.GrantBundle = null;
+    if (args.len == 1) {
+        if (args[0] != .string) return error.TypeMismatch;
+        bundle = presets.find(args[0].string) orelse
+            return ok_echo(ctx, "share: preset must be look_together|pair|review");
+    }
     if (sc.conn.* == null and sc.hub.* == null) return .{ .string = "not connected" };
     const buf = ctx.buffer();
     const doc = &(buf.textEditor() orelse return .{ .string = "no text to share" }).doc;
+    if (bundle) |b| sc.publish_presence = b.has(.presence);
     var did = false;
 
     if (sc.conn.*) |*c| {
@@ -301,8 +318,9 @@ pub fn shareHandler(ctx: *core.command.Context, data: ?*anyopaque, args: []const
 
     if (!did) return .{ .string = "already shared" };
     std.log.info("shared buffer {s}", .{buf.name});
-    var echo: [160]u8 = undefined;
-    return ok_echo(ctx, std.fmt.bufPrint(&echo, "shared {s} ({s})", .{
+    var echo_buf: [256]u8 = undefined;
+    if (bundle) |b| return ok_echo(ctx, presets.echo(&echo_buf, buf.name, b));
+    return ok_echo(ctx, std.fmt.bufPrint(&echo_buf, "shared {s} ({s})", .{
         buf.name,
         collab.presenceNote(sc.publish_presence),
     }) catch "shared");
@@ -530,8 +548,8 @@ pub fn registerCommands(gpa: std.mem.Allocator, commands: *core.command.Commands
     });
     _ = try commands.bind(gpa, "share", .{
         .name = "share",
-        .summary = "Share the active buffer over the connection.",
-        .args = &.{},
+        .summary = "Share the active buffer over the connection; an optional preset (look_together|pair|review) compiles to a grant bundle.",
+        .args = &.{.{ .name = "preset", .type = .string }},
         .handler = shareHandler,
         .data = sc,
     });

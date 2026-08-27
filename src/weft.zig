@@ -23,6 +23,7 @@ pub const app_session = @import("app/session.zig");
 pub const app_providers = @import("app/providers.zig");
 pub const app_buffers_cmds = @import("app/buffers_cmds.zig");
 pub const app_collab = @import("app/collab.zig");
+pub const app_collab_presets = @import("app/collab_presets.zig");
 pub const app_application = @import("app/application.zig");
 pub const app_frame = @import("app/frame.zig");
 pub const app_frame_builder = @import("app/frame_builder.zig");
@@ -55,6 +56,7 @@ test {
     _ = @import("app/frame.zig"); // which-key menu-overlay timing
     _ = @import("app/frame_builder.zig"); // rendering P2: caret-surface auto-expiry
     _ = app_render_memory;
+    _ = app_collab_presets; // §13.6 preset grant bundles: echo derives from bundle values only
     _ = @import("app/config_load.zig"); // W4 slice 4: the production plugin/grant-table loader
     // Platform seam contract tests remain display-free.
     _ = @import("platform/platform.zig");
