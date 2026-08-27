@@ -404,6 +404,30 @@ pub const Snapshot = struct {
         return self.candidates[lo..end];
     }
 
+    /// How many intentions have an offer at all here — the length of the
+    /// enumeration a UI (the palette) lists. Absence is nonapplicable, so an
+    /// intention nobody offers simply is not in this count (§9.3).
+    pub fn intentionCount(self: *const Snapshot) usize {
+        var n: usize = 0;
+        for (self.candidates, 0..) |c, i| {
+            if (i == 0 or self.candidates[i - 1].intention != c.intention) n += 1;
+        }
+        return n;
+    }
+
+    /// The strongest candidate for the `i`-th offered intention. Stable
+    /// order (intention id), so a UI can address a row by index across the
+    /// name/provider/availability reads that build it.
+    pub fn leader(self: *const Snapshot, i: usize) ?Candidate {
+        var n: usize = 0;
+        for (self.candidates, 0..) |c, j| {
+            if (j != 0 and self.candidates[j - 1].intention == c.intention) continue;
+            if (n == i) return c;
+            n += 1;
+        }
+        return null;
+    }
+
     /// Resolve an authored fallback list first-applicable (§10.2), before
     /// anything is invoked. No allocator, no provider code, no allocation.
     ///

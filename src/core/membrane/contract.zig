@@ -41,6 +41,7 @@ const declare = @import("../wasm_host/declare.zig");
 const dispatch = @import("../wasm_host/dispatch.zig");
 const edit = @import("../wasm_host/edit.zig");
 const fs = @import("../wasm_host/fs.zig");
+const intent = @import("../wasm_host/intent.zig");
 const keymap = @import("../wasm_host/keymap.zig");
 const layers = @import("../wasm_host/layers.zig");
 const menu = @import("../wasm_host/menu.zig");
@@ -159,6 +160,13 @@ const handlers = [_]struct { name: []const u8, handler: HostFn }{
     .{ .name = "wl_command_count", .handler = commands.hCommandCount },
     .{ .name = "wl_command_name", .handler = commands.hCommandName },
     .{ .name = "wl_command_summary", .handler = commands.hCommandSummary },
+
+    // ── intent.zig — the focused context's live offers ──────────────────
+    .{ .name = "wl_offer_count", .handler = intent.hOfferCount },
+    .{ .name = "wl_offer_name", .handler = intent.hOfferName },
+    .{ .name = "wl_offer_provider", .handler = intent.hOfferProvider },
+    .{ .name = "wl_offer_reason", .handler = intent.hOfferReason },
+    .{ .name = "wl_intent_invoke", .handler = intent.hIntentInvoke },
 
     // ── buffers.zig — the open-buffer list (introspection) ──────────────
     .{ .name = "wl_buffer_count", .handler = buffers.hBufferCount },

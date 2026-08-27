@@ -125,6 +125,12 @@ extern "weft" fn wl_run_str2(ptr: u32, len: u32, a: u32, al: u32, b: u32, bl: u3
 extern "weft" fn wl_command_count() u32;
 extern "weft" fn wl_command_name(i: u32, out_ptr: u32, out_cap: u32) i32;
 extern "weft" fn wl_command_summary(i: u32, out_ptr: u32, out_cap: u32) i32;
+// The focused context's live offers, and the door one is accepted through.
+extern "weft" fn wl_offer_count() u32;
+extern "weft" fn wl_offer_name(i: u32, out_ptr: u32, out_cap: u32) i32;
+extern "weft" fn wl_offer_provider(i: u32, out_ptr: u32, out_cap: u32) i32;
+extern "weft" fn wl_offer_reason(i: u32, out_ptr: u32, out_cap: u32) i32;
+extern "weft" fn wl_intent_invoke(ptr: u32, len: u32, out_ptr: u32, out_cap: u32) i32;
 extern "weft" fn wl_buffer_count() u32;
 extern "weft" fn wl_buffer_id(i: u32) i32;
 extern "weft" fn wl_buffer_name(i: u32, out_ptr: u32, out_cap: u32) i32;
@@ -303,6 +309,10 @@ var prefix_scratch: [1 << 12]u8 = undefined;
 /// A separate scratch for command-arg strings, so a handler can hold an arg
 /// while it reads the buffer through `slice`.
 var arg_scratch: [1 << 12]u8 = undefined;
+/// A separate scratch for offer reasons and refusals, so a UI can hold an
+/// offer's name and provider (in `scratch`/`arg_scratch`) while it reads why
+/// that offer cannot run.
+var intent_scratch: [1 << 10]u8 = undefined;
 
 fn p(x: anytype) u32 {
     return @intCast(@intFromPtr(x));
@@ -828,6 +838,52 @@ pub fn commandSummary(i: usize) ?[]const u8 {
     if (n < 0) return null;
     return arg_scratch[0..@intCast(n)];
 }
+// ── Live offers (what the FOCUSED context can do right now) ──────────
+/// How many intentions the focused context offers. An intention nobody
+/// offers is absent — absence is nonapplicable, not refused.
+pub fn offerCount() usize {
+    return wl_offer_count();
+}
+/// The `i`-th offered intention's name (into `scratch`).
+pub fn offerName(i: usize) ?[]const u8 {
+    const n = wl_offer_name(@intCast(i), p(&scratch), scratch.len);
+    if (n < 0) return null;
+    return scratch[0..@intCast(n)];
+}
+/// Who wins that offer (into `arg_scratch`, so it survives a paired
+/// `offerName` read).
+pub fn offerProvider(i: usize) ?[]const u8 {
+    const n = wl_offer_provider(@intCast(i), p(&arg_scratch), arg_scratch.len);
+    if (n < 0) return null;
+    return arg_scratch[0..@intCast(n)];
+}
+/// Why the `i`-th offer cannot run right now (into `intent_scratch`), or
+/// null when it can. Relevant but impossible — worth SHOWING, not hiding.
+pub fn offerReason(i: usize) ?[]const u8 {
+    const n = wl_offer_reason(@intCast(i), p(&intent_scratch), intent_scratch.len);
+    if (n <= 0) return null;
+    return intent_scratch[0..@intCast(n)];
+}
+
+/// What `invokeIntention` did. `unknown` is not a refusal: the name is no
+/// intention, so the caller's other vocabulary (commands) still owns it.
+pub const Invocation = union(enum) {
+    invoked,
+    /// Text to show the user; borrows `intent_scratch`.
+    refused: []const u8,
+    unknown,
+};
+
+/// Resolve `name` against the context as it is NOW and invoke the winner
+/// through the effect door. Never a stored decision: a list built earlier
+/// resolves again here, so a stale offer refuses instead of running.
+pub fn invokeIntention(name: []const u8) Invocation {
+    const n = wl_intent_invoke(p(name.ptr), @intCast(name.len), p(&intent_scratch), intent_scratch.len);
+    if (n < 0) return .unknown;
+    if (n == 0) return .invoked;
+    return .{ .refused = intent_scratch[0..@intCast(n)] };
+}
+
 pub fn bufferCount() usize {
     return wl_buffer_count();
 }
@@ -933,8 +989,8 @@ pub fn menuBindingIsGroup(i: usize) bool {
 
 /// Their own scratch, so a hint row can hold key, command, intention and note
 /// at once.
-var intent_scratch: [128]u8 = undefined;
-var intent_note_scratch: [128]u8 = undefined;
+var hint_scratch: [128]u8 = undefined;
+var hint_note_scratch: [128]u8 = undefined;
 
 /// What a binding whose arms name INTENTIONS would actually do here, asked of
 /// the host's resolver. Describing only — reading this runs nothing.
@@ -952,12 +1008,12 @@ pub const MenuIntent = struct {
 pub fn menuBindingIntent(i: usize) ?MenuIntent {
     const status = wl_menu_binding_intent_status(@intCast(i));
     if (status <= 0) return null;
-    const n = wl_menu_binding_intent(@intCast(i), p(&intent_scratch), intent_scratch.len);
+    const n = wl_menu_binding_intent(@intCast(i), p(&hint_scratch), hint_scratch.len);
     if (n < 0) return null;
-    const m = wl_menu_binding_intent_note(@intCast(i), p(&intent_note_scratch), intent_note_scratch.len);
+    const m = wl_menu_binding_intent_note(@intCast(i), p(&hint_note_scratch), hint_note_scratch.len);
     return .{
-        .name = intent_scratch[0..@intCast(n)],
-        .note = if (m < 0) "" else intent_note_scratch[0..@intCast(m)],
+        .name = hint_scratch[0..@intCast(n)],
+        .note = if (m < 0) "" else hint_note_scratch[0..@intCast(m)],
         .ready = status == 1,
     };
 }

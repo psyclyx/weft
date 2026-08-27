@@ -55,6 +55,9 @@ pub const Group = enum {
     dispatch,
     keymap,
     commands,
+    /// `wasm_host/intent.zig` — the focused context's live offers, enumerated
+    /// for a UI, plus the resolve-then-invoke door one is accepted through.
+    intent,
     buffers,
     pick,
     menu,
@@ -227,6 +230,13 @@ pub const imports = [_]Entry{
     .{ .name = "wl_command_name", .params = &.{ .u32, .u32, .u32 }, .results = &.{.i32}, .group = .commands, .doc = "the `i`-th command's name, into guest memory" },
     .{ .name = "wl_command_summary", .params = &.{ .u32, .u32, .u32 }, .results = &.{.i32}, .group = .commands, .doc = "the `i`-th command's one-line summary, into guest memory" },
 
+    // ── intent.zig — the focused context's live offers ──────────────────
+    .{ .name = "wl_offer_count", .params = &.{}, .results = &.{.u32}, .group = .intent, .doc = "the number of intentions offered in the focused context" },
+    .{ .name = "wl_offer_name", .params = &.{ .u32, .u32, .u32 }, .results = &.{.i32}, .group = .intent, .doc = "the `i`-th offered intention's name, into guest memory" },
+    .{ .name = "wl_offer_provider", .params = &.{ .u32, .u32, .u32 }, .results = &.{.i32}, .group = .intent, .doc = "the `i`-th offer's winning provider name, into guest memory" },
+    .{ .name = "wl_offer_reason", .params = &.{ .u32, .u32, .u32 }, .results = &.{.i32}, .group = .intent, .doc = "why the `i`-th offer cannot run (0 = it can), into guest memory" },
+    .{ .name = "wl_intent_invoke", .params = &.{ .u32, .u32, .u32, .u32 }, .results = &.{.i32}, .group = .intent, .doc = "resolve an intention for the CURRENT context and invoke it through the effect door; writes a refusal reason (0 = invoked, -1 = not an intention)" },
+
     // ── buffers.zig — the open-buffer list (introspection) ──────────────
     .{ .name = "wl_buffer_count", .params = &.{}, .results = &.{.u32}, .group = .buffers, .doc = "the number of open buffers" },
     .{ .name = "wl_buffer_id", .params = &.{.u32}, .results = &.{.i32}, .group = .buffers, .doc = "the `i`-th open buffer's id, or -1" },
@@ -392,7 +402,7 @@ pub const imports = [_]Entry{
 /// half-finished edit — fails the build with a pointed message instead of
 /// silently drifting the two ~124-entry tables apart again (the exact class
 /// this table exists to kill).
-const expected_import_count = 183;
+const expected_import_count = 188;
 
 /// A host→guest EXPORT entrypoint (design doc/extensibility-native-surface.md, task
 /// W0a-D extension 2): every `instance.callVoid("name", args)` the host
