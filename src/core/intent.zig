@@ -241,6 +241,20 @@ pub const Plane = struct {
         return out[0..names.len];
     }
 
+    /// The snapshot of everything offered to `ctx` right now — the ONE place
+    /// core's own providers re-publish before a single offer is read. Pushed,
+    /// not probed: eligibility moves because a provider said so. Both syncs
+    /// are value comparisons when nothing moved, and an unchanged context
+    /// leaves the clock alone, so a repeat is a cache hit.
+    pub fn snapshotFor(self: *Plane, ctx: *command.Context) ?*const catalog_mod.Snapshot {
+        self.syncEntryShape(ctx.buffers.active().textEditor() != null) catch {};
+        if (ctx.semantic) |services| self.syncFocus(services, ctx.head) catch {};
+        return self.catalog.snapshot(catalogContext(ctx)) catch |err| {
+            std.log.warn("intent: catalog snapshot failed: {t}", .{err});
+            return null;
+        };
+    }
+
     /// THE EFFECT DOOR. A decision is good only while the table it was
     /// resolved against and the epoch it saw are still current (§9.1); the
     /// invoker then rechecks the endpoint's own generation.
@@ -318,15 +332,16 @@ const unoffered = "not offered here";
 /// same first-applicable order dispatch walks, over the same published
 /// tables, so a hint cannot promise what the keypress would not deliver.
 ///
-/// Explanation conveys no authority by construction: it reads published
-/// offers and mints nothing. No endpoint is invoked, and no provider is asked
-/// to republish — this is a describing read, not the pushed-offer sync the
-/// keystroke path performs.
+/// It resolves against the same freshly synced snapshot dispatch resolves
+/// against, so an explanation cannot answer from a table the keystroke would
+/// not have used.
+///
+/// Explanation conveys no authority by construction: it reads offers and
+/// mints nothing. No endpoint is invoked and no decision leaves this call.
 pub fn explain(ctx: *command.Context, arms: []const []const u8) Explanation {
     const plane = ctx.intent orelse return .none;
     const cat = &plane.catalog;
-    const c = catalogContext(ctx);
-    const snap = cat.snapshot(c) catch return .none;
+    const snap = plane.snapshotFor(ctx) orelse return .none;
     var first: ?[]const u8 = null;
     for (arms) |name| {
         if (!catalog_mod.isIntentionName(name)) {

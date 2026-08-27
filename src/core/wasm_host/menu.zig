@@ -68,8 +68,8 @@ pub fn hMenuBindingIsGroup(data: ?*anyopaque, caller: *wasm.Caller, args: []cons
 // context derivation and the same first-applicable walk dispatch runs), so a
 // hint cannot promise what the keypress would not deliver.
 //
-// They DESCRIBE only: no endpoint is invoked and no provider is asked to
-// republish. Explanation conveys no authority.
+// They DESCRIBE only: no endpoint is invoked. Explanation conveys no
+// authority.
 
 fn explainAt(p: *WasmPlugin, i: usize) intent.Explanation {
     const b = p.activeCtx().head.resolvedAt(i) orelse return .none;

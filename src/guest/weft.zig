@@ -961,6 +961,7 @@ pub fn menuBindingIntent(i: usize) ?MenuIntent {
         .ready = status == 1,
     };
 }
+
 pub const PickMatch = struct { start: usize, span: usize };
 pub const PickCandidate = struct {
     /// Stable add-order identity within this pick, including duplicate text.

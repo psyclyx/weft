@@ -138,11 +138,14 @@ fn focusedName(ed: *h.Editor, gpa: std.mem.Allocator) ![]u8 {
     };
 }
 
-/// Walk the rows with the grammar's own `j` until `want` has the focus. Only
-/// std intentions are pressed; failing to arrive is a failed gate.
+/// Walk the rows with the grammar's own `j` until `want` has the focus,
+/// rewinding with `k` first so the walk starts above every row whatever the
+/// listing order. Only std intentions are pressed; failing to arrive is a
+/// failed gate.
 fn focusRowByName(ed: *h.Editor, gpa: std.mem.Allocator, want: []const u8) !void {
     var names = try rowNames(ed, gpa);
     defer freeNames(gpa, &names);
+    for (0..names.items.len) |_| ed.press("k", "k");
     var steps: usize = 0;
     while (steps <= names.items.len) : (steps += 1) {
         const at = try focusedName(ed, gpa);
@@ -388,6 +391,7 @@ test "e2e/grammar: explaining a binding names its intention and provider, and ru
     // A keystroke first, exactly as in production: dispatch publishes the
     // focused view's table, and only THEN does a menu open and which-key ask.
     ed.press("j", "j");
+    try focusRowByName(ed, gpa, "child");
 
     const focus_before = try focusedName(ed, gpa);
     defer gpa.free(focus_before);
@@ -405,8 +409,22 @@ test "e2e/grammar: explaining a binding names its intention and provider, and ru
         else => return error.TestExpectedReady,
     }
 
-    // `Tab` is bound here and offered by nobody: the hint reports the arm the
-    // binding leads with and why it is dead, instead of promising an expansion.
+    // `Tab` on the directory row: the browser offers it, so the hint names the
+    // provider that would fold it open. Focus moved by command rather than by
+    // keystroke, and the answer still tracks it — explaining syncs the same
+    // tables dispatch would.
+    switch (core.intent.explain(ed.ctx, &.{"std.hierarchy.toggle-expanded"})) {
+        .ready => |r| {
+            try t.expectEqualStrings("std.hierarchy.toggle-expanded", r.intention);
+            try t.expectEqualStrings("core.view", r.provider);
+        },
+        else => return error.TestExpectedReady,
+    }
+
+    // The file row beside it offers nothing to open, so the same binding
+    // reports the arm it leads with and why it is dead, instead of promising
+    // an expansion.
+    try focusRowByName(ed, gpa, "top.txt");
     switch (core.intent.explain(ed.ctx, &.{"std.hierarchy.toggle-expanded"})) {
         .blocked => |b| {
             try t.expectEqualStrings("std.hierarchy.toggle-expanded", b.intention);
@@ -415,6 +433,7 @@ test "e2e/grammar: explaining a binding names its intention and provider, and ru
         },
         else => return error.TestExpectedBlocked,
     }
+    try focusRowByName(ed, gpa, "child");
 
     // A plain command arm is dispatch's, not the catalog's — nothing to explain.
     try t.expect(core.intent.explain(ed.ctx, &.{"open"}) == .none);
