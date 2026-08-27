@@ -3,7 +3,7 @@
 //! config can `weft.pick` its own items with a Fennel callback. State
 //! is plain data the view renders (prompt, query, filtered items,
 //! selection); interaction is ordinary commands bound in the "pick"
-//! keymap mode, with `pick-input` as the mode's text command — the
+//! keymap mode, which declares `pick-input` as its commit command — the
 //! picker adds no new input machinery at all.
 //!
 //! Entries carry an optional docstring the view renders beside the

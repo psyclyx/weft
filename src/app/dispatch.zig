@@ -1,7 +1,8 @@
 //! Key dispatch: one key event → keymap lookup → command. Runs inside the
 //! hot section: dispatch is a table lookup plus the command itself,
-//! allocation-only. Unbound printable input becomes the mode's text command
-//! (itself a command); there is no editing path around the ABI. Vertical
+//! allocation-only. A key the grammar leaves unbound COMMITS its text only in
+//! a mode that declares a commit command (itself a command); there is no
+//! editing path around the ABI, and no synthesis of text from a key. Vertical
 //! motion and paging are view-computed (goal-x over rendered geometry), the
 //! interactive override the core's scalar-column fallback can't do. Also the
 //! menu command handlers (`menu-escape`, `which-key-now`).
@@ -287,8 +288,9 @@ pub fn scrollPageDownHandler(ctx: *core.command.Context, data: ?*anyopaque, args
 // dispatch interface, not commands, so a change made by ANY plugin (vim
 // operators, autopair, comment, a structural edit) repeats out of the box. A
 // "change" is whatever key sequence left the buffer edited between two RESTING
-// points — a mode with no text command and no pending chord (each keymap's
-// normal-equivalent), so this works across vim/helix/emacs without knowing them.
+// points — a mode that commits no text and has no pending chord (each
+// keymap's normal-equivalent), so this works across vim/helix/emacs without
+// knowing them.
 //
 // The recorder's STORAGE is `ctx.head.dot` (`core.Head.DotRepeat`) — per-head,
 // like mode/pending/pick/echo, so two heads pressing keys concurrently record
@@ -297,24 +299,24 @@ pub fn scrollPageDownHandler(ctx: *core.command.Context, data: ?*anyopaque, args
 // app-side because it needs `command.Context` (buffers/editor/keymap), which
 // `Head` must not depend on.
 
-fn dotRecord(dot: *core.Head.DotRepeat, spec: []const u8, text: []const u8) void {
+fn dotRecord(dot: *core.Head.DotRepeat, spec: []const u8, commit: core.TextCommit) void {
     if (dot.pending_n >= core.Head.dot_cap) return;
     var kp: core.Head.KeyPress = .{};
     const s = @min(spec.len, kp.spec.len);
     @memcpy(kp.spec[0..s], spec[0..s]);
     kp.slen = @intCast(s);
-    const tx = @min(text.len, kp.text.len);
-    @memcpy(kp.text[0..tx], text[0..tx]);
+    const tx = @min(commit.bytes.len, kp.text.len);
+    @memcpy(kp.text[0..tx], commit.bytes[0..tx]);
     kp.tlen = @intCast(tx);
     dot.pending[dot.pending_n] = kp;
     dot.pending_n += 1;
 }
 
-/// At rest for change-recording: a mode that swallows typing (no text command),
-/// with no half-typed chord and not inside a menu — the point a command sequence
-/// has fully resolved. Generalizes vim `normal` / helix `normal` / emacs base.
+/// At rest for change-recording: a mode that commits no text, with no
+/// half-typed chord and not inside a menu — the point a command sequence has
+/// fully resolved. Generalizes vim `normal` / helix `normal` / emacs base.
 fn dotAtRest(ctx: *core.command.Context) bool {
-    return ctx.head.textCommand(ctx.keymap) == null and
+    return ctx.head.commitCommand(ctx.keymap) == null and
         ctx.head.pending.len == 0 and
         !ctx.keymap.isMenuMode(ctx.head.currentMode());
 }
@@ -377,7 +379,7 @@ pub fn replayDot(ctx: *core.command.Context) void {
     var i: usize = 0;
     while (i < dot.reg_n) : (i += 1) {
         const kp = dot.reg[i];
-        dispatchSpec(ctx, kp.spec[0..kp.slen], kp.text[0..kp.tlen]) catch {};
+        dispatchSpec(ctx, kp.spec[0..kp.slen], .from(kp.text[0..kp.tlen])) catch {};
     }
     dot.replaying = false;
     dot.suppress = true;
@@ -426,26 +428,29 @@ pub fn dispatchKey(ctx: *core.command.Context, ev: wayland.KeyEvent) !void {
     if (name.len == 0) return;
     var spec_buf: [80]u8 = undefined;
     const spec = core.Keymap.keyspec(&spec_buf, ev.mods.ctrl, ev.mods.alt, ev.mods.shift, name);
-    // A modified (ctrl/alt) key inserts nothing; otherwise the event's printable
-    // text, unless it's a lone control char.
-    const text: []const u8 = if (ev.mods.ctrl or ev.mods.alt) "" else blk: {
-        const tx = ev.text();
-        break :blk if (tx.len > 0 and !(tx.len == 1 and tx[0] < 0x20)) tx else "";
-    };
-    return dispatchSpec(ctx, spec, text);
+    // The PHYSICAL/COMMIT split (architecture §10.1): the keyspec above is the
+    // physical key; this is the text — if any — the keystroke committed. A
+    // ctrl/alt chord is physical input only, and `TextCommit.from` keeps the
+    // control-byte spellings xkb hands back for Tab/Escape/Return out of the
+    // commit entirely.
+    const commit: core.TextCommit = if (ev.mods.ctrl or ev.mods.alt) .none else .from(ev.text());
+    return dispatchSpec(ctx, spec, commit);
 }
 
-/// The general keypress interface: run a canonical keyspec (`spec`) plus the
-/// printable text it would insert (`text`, or "" for a non-text key) through the
-/// keymap. A chord that could still extend is held (which-key shows its
-/// completions off the head's pending chord); a completed binding runs; a lone unbound
-/// key falls to text insertion; a dead-end chord resets. This is what
-/// `dispatchKey` reduces to after xkb translation, and what a headless driver
-/// calls to send a keypress to the REAL app (no parallel dispatch logic).
+/// The general keypress interface: one keystroke as its two independent
+/// halves (architecture §10.1) — the canonical keyspec `spec` (physical input,
+/// which the binding grammar interprets) and `commit` (the text this keystroke
+/// committed, `.none` for a key that committed nothing). A chord that could
+/// still extend is held (which-key shows its completions off the head's
+/// pending chord); a completed binding runs; a dead-end chord resets; a lone
+/// unbound key commits its text ONLY where the mode declares that it commits
+/// text, and is otherwise unhandled. This is what `dispatchKey` reduces to
+/// after xkb translation, and what a headless driver calls to send a keypress
+/// to the REAL app (no parallel dispatch logic).
 ///
 /// Any edit made here — directly or by a helper plugin (dw/autopair) — is the
 /// user's, so it joins the user's undo history (see command.edit).
-pub fn dispatchSpec(ctx: *core.command.Context, spec: []const u8, text: []const u8) !void {
+pub fn dispatchSpec(ctx: *core.command.Context, spec: []const u8, commit: core.TextCommit) !void {
     ctx.user_initiated = true;
     defer ctx.user_initiated = false;
     // THE INTERACTION-BOUNDARY LEAK CHECK (task #19 item 2): every path
@@ -488,7 +493,7 @@ pub fn dispatchSpec(ctx: *core.command.Context, spec: []const u8, text: []const 
     // Dot-repeat: record this keystroke (unless we ARE a replay), and decide at
     // the end of dispatch whether the sequence so far was a repeatable change.
     const dot_recording = !ctx.head.dot.replaying;
-    if (dot_recording) dotRecord(&ctx.head.dot, spec, text);
+    if (dot_recording) dotRecord(&ctx.head.dot, spec, commit);
     defer if (dot_recording) dotBoundary(ctx);
 
     // Mid-chord META keys act on the which-key overlay, NOT the sequence:
@@ -511,7 +516,7 @@ pub fn dispatchSpec(ctx: *core.command.Context, spec: []const u8, text: []const 
     // never fires global `C-w` — a menu is a sequence, not a mode.
     switch (ctx.head.feed(ctx.gpa, ctx.keymap, spec) catch core.Keymap.Feed.none) {
         .pending, .none => return,
-        .text => {}, // a lone unbound key — fall through to text insertion
+        .unbound => {}, // nothing bound it — fall through to the commit path
         .run => |cmd_name| {
             // A bound key whose command NAMES a menu mode enters it — the
             // PAIRED-TRANSIENT push (task #19 item 2, doc/cwa-prior-docs-audit.md §5,
@@ -591,14 +596,16 @@ pub fn dispatchSpec(ctx: *core.command.Context, spec: []const u8, text: []const 
             return;
         },
     }
-    if (text.len == 0) return;
-    // Unbound printable input runs the mode's text command (the modal posture:
-    // normal mode has none and swallows it). This IS the hot typing→commit path —
-    // fence it so an accidental blocking API here trips in Debug.
-    const tc = ctx.head.textCommand(ctx.keymap) orelse return;
+    if (commit.isEmpty()) return;
+    // The commit reaches the editable endpoint ONLY through a mode that
+    // DECLARES it commits text. A structural mode declares none, so an unbound
+    // key there is simply unhandled — nothing is synthesized (§10.1). This IS
+    // the hot typing→commit path — fence it so an accidental blocking API here
+    // trips in Debug.
+    const commit_cmd = ctx.head.commitCommand(ctx.keymap) orelse return;
     core.task.beginHotSection();
     defer core.task.endHotSection();
-    _ = core.command.run(ctx.commands, ctx, tc, &.{.{ .string = text }}) catch |err| {
-        std.log.warn("{s} failed: {t}", .{ tc, err });
+    _ = core.command.run(ctx.commands, ctx, commit_cmd, &.{.{ .string = commit.bytes }}) catch |err| {
+        std.log.warn("{s} failed: {t}", .{ commit_cmd, err });
     };
 }

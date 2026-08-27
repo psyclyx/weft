@@ -348,21 +348,24 @@ pub const Editor = struct {
     /// for the stats built on top of it, and `latency_test.zig` for the
     /// policy (what/how much to measure, and the regression threshold).
     pub fn pressTimed(self: *Editor, spec_in: []const u8, text: []const u8) u64 {
-        const elapsed = self.inputTimed(spec_in, text);
+        // `text` is what this keystroke would commit; the platform's own
+        // translation applies (a control byte commits nothing — §10.1).
+        const commit: core.TextCommit = .from(text);
+        const elapsed = self.inputTimed(spec_in, commit);
         // One injected event is one headless application wake. The lifecycle
         // work stays outside the dispatch-only latency measurement above.
         _ = self.advanceAt(core.task.nowNs(), false) catch {};
         if (self.input_observer) |observer| {
-            observer.notify(if (text.len == 0) .command else .text);
+            observer.notify(if (commit.isEmpty()) .command else .text);
         }
         return elapsed;
     }
 
-    fn inputTimed(self: *Editor, spec_in: []const u8, text: []const u8) u64 {
+    fn inputTimed(self: *Editor, spec_in: []const u8, commit: core.TextCommit) u64 {
         var kbuf: [256]u8 = undefined;
         const spec = core.Keymap.normalizeKey(&kbuf, spec_in);
         const start = core.task.nowNs();
-        self.application.input(spec, text) catch {};
+        self.application.input(spec, commit) catch {};
         return core.task.nowNs() -| start;
     }
 
@@ -629,7 +632,7 @@ pub const SecondHead = struct {
     pub fn press(self: *SecondHead, spec_in: []const u8, text: []const u8) void {
         var kbuf: [256]u8 = undefined;
         const spec = core.Keymap.normalizeKey(&kbuf, spec_in);
-        dispatch.dispatchSpec(&self.ctx, spec, text) catch {};
+        dispatch.dispatchSpec(&self.ctx, spec, .from(text)) catch {};
     }
 
     /// Press each key of a space-separated chord in turn (mirrors `Editor.chord`).
@@ -1826,15 +1829,15 @@ pub fn kvSnapshot(gpa: Allocator, store: *core.kv.Store) ![]u8 {
 }
 
 /// A stable, sorted text snapshot of the keymap's MODE STRUCTURE — which
-/// modes are declared menus/sticky-menus/locked/resting, and each mode's
-/// text-swallow (`textCommand`) setting — the which-key GROUP structure a
+/// modes are declared menus/sticky-menus/locked/resting, and which modes
+/// declare that they commit text (`commitCommand`) — the which-key GROUP structure a
 /// bind-only snapshot can't see (M3/M4 parity item 4).
 pub fn modeStructureSnapshot(gpa: Allocator, km: *core.Keymap) ![]u8 {
     var names: std.StringArrayHashMapUnmanaged(void) = .empty;
     defer names.deinit(gpa);
     for (km.modes.keys()) |k| try names.put(gpa, k, {});
     for (km.menu_modes.keys()) |k| try names.put(gpa, k, {});
-    for (km.text_commands.keys()) |k| try names.put(gpa, k, {});
+    for (km.commit_commands.keys()) |k| try names.put(gpa, k, {});
 
     const list = try gpa.dupe([]const u8, names.keys());
     defer gpa.free(list);
@@ -1844,14 +1847,14 @@ pub fn modeStructureSnapshot(gpa: Allocator, km: *core.Keymap) ![]u8 {
         }
     }.lt);
 
-    // `textCommand` is now a pure function of (tables, mode) — W2a-1's split
+    // `commitCommand` is a pure function of (tables, mode) — W2a-1's split
     // (Head owns the CURRENT-mode cursor; Keymap only holds tables) means
     // probing every mode name needs no save/restore dance against a live
     // head anymore; it never touches one.
     var out: std.ArrayList(u8) = .empty;
     errdefer out.deinit(gpa);
     for (list) |mode| {
-        const txt = km.textCommand(mode) orelse "<inherit>";
+        const txt = km.commitCommand(mode) orelse "<none>";
         const line = try std.fmt.allocPrint(gpa, "{s}|menu={}|sticky={}|locked={}|resting={}|text={s}\n", .{
             mode, km.isMenuMode(mode), km.isStickyMenu(mode), km.isLockedMode(mode), km.isRestingMode(mode), txt,
         });

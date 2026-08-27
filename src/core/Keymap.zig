@@ -52,11 +52,12 @@ modes: std.StringArrayHashMapUnmanaged(Bindings) = .empty,
 /// mode → parent mode: `lookup` walks the chain (vim's visual falls
 /// back to normal falls back to default).
 parents: std.StringArrayHashMapUnmanaged([]u8) = .empty,
-/// mode → command run for unbound printable input (one string arg).
-/// Unset modes swallow text — vim's normal mode is exactly "no text
-/// command"; insert-flavored modes set "insert-text"; a picker sets
-/// its query-append command.
-text_commands: std.StringArrayHashMapUnmanaged([]u8) = .empty,
+/// mode → command a TEXT COMMIT runs in it (one string arg). A mode that
+/// declares one COMMITS TEXT — insert-flavored modes name `insert-text`, a
+/// picker names its query-append command. Never inherited (see
+/// `commitCommand`): a mode that does not declare one cannot commit,
+/// whatever it inherits BINDINGS from.
+commit_commands: std.StringArrayHashMapUnmanaged([]u8) = .empty,
 /// Modes the config declared as prefix menus (leader/chord tables) — the
 /// which-key hint shows their bindings. Policy lives in config; this is
 /// just the mechanism that remembers the declaration. WHICH mode a given
@@ -104,11 +105,11 @@ pub fn deinit(self: *Keymap, gpa: Allocator) void {
         gpa.free(v);
     }
     self.parents.deinit(gpa);
-    for (self.text_commands.keys(), self.text_commands.values()) |k, v| {
+    for (self.commit_commands.keys(), self.commit_commands.values()) |k, v| {
         gpa.free(k);
         gpa.free(v);
     }
-    self.text_commands.deinit(gpa);
+    self.commit_commands.deinit(gpa);
     for (self.menu_modes.keys()) |k| gpa.free(k);
     self.menu_modes.deinit(gpa);
     for (self.sticky_menus.keys()) |k| gpa.free(k);
@@ -201,7 +202,7 @@ pub fn lookup(self: *const Keymap, mode: []const u8, key: []const u8) ?[]const u
 pub const Feed = union(enum) {
     run: []const u8, // a full sequence resolved — run this command (borrowed)
     pending, // extended the pending chord — which-key shows its completions
-    text, // a lone unbound key — the caller inserts it (if printable)
+    unbound, // a lone key the grammar does not bind — it may still COMMIT text
     none, // a dead-end chord — reset, nothing to do
 };
 
@@ -285,32 +286,34 @@ pub fn baseMode(self: *const Keymap, mode: []const u8) []const u8 {
     return cur;
 }
 
-/// Set the command unbound printable input runs in `mode`. `null`
-/// records an *explicit* "swallow text" (the modal posture) — it stops
-/// the fallback walk, so a normal mode inheriting bindings from an
-/// insert-flavored parent does not inherit its text insertion.
-pub fn setTextCommand(self: *Keymap, gpa: Allocator, mode: []const u8, cmd: ?[]const u8) Allocator.Error!void {
-    const gop = try self.text_commands.getOrPut(gpa, mode);
+/// DECLARE that `mode` commits text, running `cmd` on each commit — `null`
+/// withdraws the declaration. This is the whole of a mode's text posture:
+/// no default, and no inheritance to opt out of.
+pub fn setCommitCommand(self: *Keymap, gpa: Allocator, mode: []const u8, cmd: ?[]const u8) Allocator.Error!void {
+    const c = cmd orelse {
+        if (self.commit_commands.fetchSwapRemove(mode)) |old| {
+            gpa.free(old.key);
+            gpa.free(old.value);
+        }
+        return;
+    };
+    const gop = try self.commit_commands.getOrPut(gpa, mode);
     if (gop.found_existing) {
         gpa.free(gop.value_ptr.*);
     } else {
         gop.key_ptr.* = try gpa.dupe(u8, mode);
     }
-    gop.value_ptr.* = try gpa.dupe(u8, cmd orelse "");
+    gop.value_ptr.* = try gpa.dupe(u8, c);
 }
 
-/// `mode`'s text command (chain-walked like `lookup`; an explicit none stops
-/// the walk). Called by `Head.textCommand` with the head's own current mode.
-pub fn textCommand(self: *const Keymap, mode: []const u8) ?[]const u8 {
-    var m: []const u8 = mode;
-    var depth: usize = 0;
-    while (depth < 8) : (depth += 1) {
-        if (self.text_commands.get(m)) |cmd| {
-            return if (cmd.len == 0) null else cmd;
-        }
-        m = self.parents.get(m) orelse return null;
-    }
-    return null;
+/// The command a `TextCommit` runs in `mode`, or null when the mode does not
+/// commit text. Deliberately NOT chain-walked, unlike `lookup`: a fallback
+/// chain carries BINDINGS, never the authority to commit text. So a
+/// structural mode cannot leak insertion by inheriting from an editing base,
+/// and no plugin has to remember to opt out. Called by `Head.commitCommand`
+/// with the head's own current mode.
+pub fn commitCommand(self: *const Keymap, mode: []const u8) ?[]const u8 {
+    return self.commit_commands.get(mode);
 }
 
 pub const Binding = struct { key: []const u8, command: []const u8 };
@@ -906,4 +909,24 @@ test "keymap: keyspec normalization — config writes SPC : / C-x C-f, stores ca
     try t.expectEqualStrings(":", km.displayKey(&buf, "colon")); // a lone segment
     try t.expectEqualStrings("f", km.displayKey(&buf, "f"));
     try t.expectEqualStrings("Escape", km.displayKey(&buf, "Escape"));
+}
+
+test "keymap: committing text is DECLARED per mode — bindings inherit, the declaration never does" {
+    const gpa = t.allocator;
+    var km: Keymap = .empty;
+    defer km.deinit(gpa);
+
+    try km.bind(gpa, "insert", "C-s", "save", prio_core, "core");
+    try km.setCommitCommand(gpa, "insert", "insert-text");
+    // A structural mode inheriting an insert-flavored parent's BINDINGS.
+    try km.setFallback(gpa, "structural", "insert");
+
+    try t.expectEqualStrings("save", km.lookup("structural", "C-s").?); // bindings inherit
+    try t.expectEqualStrings("insert-text", km.commitCommand("insert").?);
+    try t.expect(km.commitCommand("structural") == null); // the authority does not
+    try t.expect(km.commitCommand("never-declared") == null);
+
+    // Withdrawing the declaration leaves the mode unable to commit.
+    try km.setCommitCommand(gpa, "insert", null);
+    try t.expect(km.commitCommand("insert") == null);
 }

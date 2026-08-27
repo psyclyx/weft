@@ -6,6 +6,7 @@ const std = @import("std");
 const semantic = @import("weft_semantic");
 const target_runtime = @import("weft_target_runtime");
 const view_runtime = @import("weft_view_runtime");
+const input = @import("input.zig");
 const Head = @import("Head.zig");
 
 pub const Services = struct {
@@ -597,8 +598,10 @@ pub const Services = struct {
     /// The small generic editing vocabulary used by ordinary editor commands
     /// when focus belongs to a semantic field. Byte offsets are deliberate:
     /// fields may contain raw filesystem names, not necessarily UTF-8 text.
+    /// A field takes TEXT only as a `TextCommit` (architecture §10.1): a key
+    /// the grammar failed to interpret cannot be synthesized into the draft.
     pub const FieldInput = union(enum) {
-        replace_selection: []const u8,
+        commit: input.TextCommit,
         delete_previous,
         delete_next,
         move_previous,
@@ -736,10 +739,10 @@ pub const Services = struct {
         stack: *view_runtime.interaction.Stack,
         head: *Head,
         gpa: std.mem.Allocator,
-        input: []const u8,
+        key: []const u8,
     ) InvokeInputError!?ActionEffect {
         const active = stack.active() orelse return null;
-        const action = active.actionForInput(input) orelse return null;
+        const action = active.actionForInput(key) orelse return null;
         const interaction_ref = active.descriptor.ref;
         const disposition = action.disposition;
         const prior_focus = head.semantic_focus.path();
@@ -918,7 +921,7 @@ pub const Services = struct {
         self: *const Services,
         head: *Head,
         gpa: std.mem.Allocator,
-        input: FieldInput,
+        field_input: FieldInput,
     ) FieldInputError!bool {
         const path = head.semantic_focus.path() orelse return false;
         const instance = self.views.get(path.view) orelse {
@@ -940,15 +943,16 @@ pub const Services = struct {
         const caret: usize = @intCast(value.selection.caret);
         const selection_start = @min(anchor, caret);
         const selection_end = @max(anchor, caret);
-        const edit: view_runtime.field.Edit = switch (input) {
-            .replace_selection => |replacement| blk: {
-                if (value.single_line and std.mem.indexOfAny(u8, replacement, "\r\n") != null)
-                    return true;
+        const edit: view_runtime.field.Edit = switch (field_input) {
+            // A keystroke that committed nothing (Tab, Escape, a line break)
+            // is still CONSUMED by the focused field — it just writes nothing.
+            .commit => |commit| blk: {
+                if (commit.isEmpty()) return true;
                 break :blk .{
                     .start = selection_start,
                     .end = selection_end,
-                    .replacement = replacement,
-                    .selection_after = collapsed(selection_start + replacement.len),
+                    .replacement = commit.bytes,
+                    .selection_after = collapsed(selection_start + commit.bytes.len),
                 };
             },
             .delete_previous => blk: {
@@ -1206,7 +1210,7 @@ test "semantic action focus stays inside its retained view" {
     try std.testing.expect(effect == .focus_requested);
     try std.testing.expectEqual(secondary.id, head.semantic_focus.path().?.leaf().?);
     try std.testing.expect(head.semantic_focus.path().?.field.?.eql(field_ref));
-    try std.testing.expect(try services.inputFocusedField(&head, std.testing.allocator, .{ .replace_selection = "new" }));
+    try std.testing.expect(try services.inputFocusedField(&head, std.testing.allocator, .{ .commit = .from("new") }));
     try std.testing.expectEqual(@as(usize, 1), field.edits);
     try std.testing.expect(try services.moveHeadFocus(&head, std.testing.allocator, .next));
     try std.testing.expectEqual(last.id, head.semantic_focus.path().?.leaf().?);
@@ -2023,7 +2027,7 @@ test "ordinary editor input targets semantic fields and focus order" {
     defer head.deinit(std.testing.allocator);
     try head.semantic_focus.set(std.testing.allocator, .{ .view = view_ref, .nodes = &.{ @enumFromInt(1), @enumFromInt(2) }, .field = first_ref });
 
-    try std.testing.expect(try services.inputFocusedField(&head, std.testing.allocator, .{ .replace_selection = "new" }));
+    try std.testing.expect(try services.inputFocusedField(&head, std.testing.allocator, .{ .commit = .from("new") }));
     try std.testing.expectEqualStrings("new", first.bytes.items);
     try std.testing.expect(try services.moveHeadFocus(&head, std.testing.allocator, .next));
     try std.testing.expectEqual(@as(semantic.scene.NodeId, @enumFromInt(3)), head.semantic_focus.path().?.leaf().?);
@@ -2033,8 +2037,8 @@ test "ordinary editor input targets semantic fields and focus order" {
     try std.testing.expect((try services.invokeFocusedAction(&head.interactions, &head, std.testing.allocator, semantic.action.standard.copy)).? == .handled);
     try std.testing.expectEqual(@as(usize, 1), actions.calls);
 
-    // A single-line field consumes a newline without changing its bytes.
-    try std.testing.expect(try services.inputFocusedField(&head, std.testing.allocator, .{ .replace_selection = "\n" }));
+    // A line break is not a commit: the field consumes it, bytes unchanged.
+    try std.testing.expect(try services.inputFocusedField(&head, std.testing.allocator, .{ .commit = .from("\n") }));
     try std.testing.expectEqualStrings("next", second.bytes.items);
     const released = services.releaseOwner(std.testing.allocator, owner);
     try std.testing.expectEqual(@as(usize, 1), released.views);

@@ -86,7 +86,7 @@ fn enterNormal(ctx: *command.Context, data: ?*anyopaque, args: []const command.V
     return .nil;
 }
 
-/// A minimal modal keymap — "normal" (resting: no text command) / "insert"
+/// A minimal modal keymap — "normal" (resting: commits no text) / "insert"
 /// (self-inserts via core's `insert-text`, the same builtin the modeless
 /// `default` floor uses) — built from plain core commands, no guest plugin.
 /// Mirrors vim's normal/insert shape just enough to exercise dot-repeat's
@@ -101,7 +101,7 @@ fn initModal(gpa: std.mem.Allocator, ed: *Editor) !void {
     // anything" distinction without needing any guest plugin.
     try ed.keymap.bind(gpa, "normal", "l", "cursor-right", core.Keymap.prio_config, "test");
     try ed.keymap.bind(gpa, "insert", "Escape", "enter-normal", core.Keymap.prio_config, "test");
-    try ed.keymap.setTextCommand(gpa, "insert", "insert-text");
+    try ed.keymap.setCommitCommand(gpa, "insert", "insert-text");
     try ed.head.setModeRaw(gpa, "normal");
 }
 
@@ -132,7 +132,7 @@ test "two heads: A mid-chord does not touch B's mode/pending, and B types in ins
     try t.expectEqualStrings("insert", b.mode());
     try t.expectEqual(@as(usize, 0), b.head.pending.len);
 
-    // B types — this dispatch resolves through B's OWN mode's text command
+    // B types — this dispatch resolves through B's OWN mode's commit command
     // (insert-text), not A's half-typed chord.
     b.typeText("hello");
     const text1 = try ed.textAlloc();
@@ -157,8 +157,8 @@ test "two heads: A in a menu mode does not move B out of normal" {
     defer ed.deinit();
     try ed.head.setModeRaw(gpa, "normal");
 
-    // A git-style special mode: locked (no text command — typing doesn't
-    // fall through to self-insert) AND reachable as a one-shot menu, the
+    // A git-style special mode: locked (declares no commit command, so typing
+    // never self-inserts) AND reachable as a one-shot menu, the
     // same shape `dispatch.dispatchSpec` gives any bound command whose name
     // NAMES a menu mode (see its "legacy mode-menu path" comment) — the
     // same mechanism a real git-status keybinding uses.
@@ -212,7 +212,7 @@ test "two heads: distinct pick sessions — opening/typing in one doesn't touch 
     try t.expectEqualStrings("pick", ed.mode());
     try t.expectEqualStrings("pick", b.mode());
 
-    // Typing dispatches through each head's OWN "pick" mode text command
+    // Typing dispatches through each head's OWN "pick" mode commit command
     // (pick-input) into each head's OWN query — not the other's.
     ed.typeText("no");
     try t.expectEqualStrings("no", ed.pick.query.items);

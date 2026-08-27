@@ -186,12 +186,12 @@ pub fn hTextInput(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32, re
     const mode = caller.readMemory(gpa, @intCast(args[0]), @intCast(args[1])) catch return;
     defer gpa.free(mode);
     if (args[4] == 0) {
-        p.activeCtx().keymap.setTextCommand(gpa, mode, null) catch {};
+        p.activeCtx().keymap.setCommitCommand(gpa, mode, null) catch {};
         return;
     }
     const cmd = caller.readMemory(gpa, @intCast(args[2]), @intCast(args[3])) catch return;
     defer gpa.free(cmd);
-    p.activeCtx().keymap.setTextCommand(gpa, mode, cmd) catch {};
+    p.activeCtx().keymap.setCommitCommand(gpa, mode, cmd) catch {};
 }
 
 pub fn hMenuMode(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32, results: []i32) void {

@@ -739,9 +739,9 @@ pub fn install(gpa: Allocator, commands: *command.Commands, keymap: *@import("..
     // The "pick" mode's KEY BINDINGS are config data, not core policy: the
     // shipped `defaults.js` (which every config `weft.use`s) binds Down→pick-next,
     // Return→pick-accept, etc. — so the picker is rebindable like everything
-    // else, and core ships only the COMMANDS + the mode's text command. (The
-    // text command IS mechanism — it names how typed input routes, not a key.)
-    try keymap.setTextCommand(gpa, "pick", "pick-input");
+    // else, and core ships only the COMMANDS + the mode's COMMIT declaration.
+    // (The declaration IS mechanism — it names how typed text routes, not a key.)
+    try keymap.setCommitCommand(gpa, "pick", "pick-input");
     _ = try commands.bind(gpa, "palette", (comptime command.define("palette", "Open the command palette.", cPalette)));
 }
 

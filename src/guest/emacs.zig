@@ -1,10 +1,10 @@
 //! emacs — NON-MODAL editing as a `.wasm` plugin, perms `{}` grant_max edit. The
 //! counterpart to vim.zig: where vim proves the modal path (postures as modes +
 //! chord trees as sequences), emacs proves the MODELESS path. There is ONE
-//! resting mode, `emacs`, that falls back to the core `default` floor — so
-//! printable keys self-insert (default's text command) and the arrows/Backspace
-//! work — and every command is a CONTROL/META chord layered on top. C-x / C-c are
-//! prefix key SEQUENCES (the same engine vim's `SPC f f` uses), not modes: `C-x`
+//! resting mode, `emacs`, that falls back to the core `default` floor for its
+//! BINDINGS (arrows/Backspace) and declares that it commits typed text, so
+//! printable keys self-insert — and every command is a CONTROL/META chord
+//! layered on top. C-x / C-c are prefix key SEQUENCES (the same engine vim's `SPC f f` uses), not modes: `C-x`
 //! holds pending, which-key shows its completions, `C-x C-f` completes. The
 //! editor owns only intra-buffer motion/kill/yank here; the C-x/C-c tree that
 //! reaches other plugins (find-file, magit, dired) is config data (emacs.js).
@@ -130,11 +130,11 @@ export fn on_pick_accept(pick_id: u32) void {
 }
 
 export fn init() void {
-    // The one resting mode: `emacs` inherits the `default` editing floor, so
-    // printable keys self-insert and arrows/Backspace/C-s work; the binds below
-    // layer the emacs chords over it. No textInput override — text falls through
-    // to default's insert-text (modeless).
+    // The one resting mode: `emacs` inherits the `default` editing floor's
+    // BINDINGS (arrows/Backspace/C-s) and layers the emacs chords over it, and
+    // declares that it commits typed text — a declaration, never inherited.
     weft.setFallback("emacs", "default");
+    weft.textInput("emacs", "insert-text");
     weft.restingMode("emacs"); // the base a file buffer rests in
 
     for (cmds) |c| _ = weft.register(c.name);

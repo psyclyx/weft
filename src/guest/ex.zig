@@ -52,7 +52,7 @@ pub fn Ex(comptime normal_mode: []const u8, comptime ex_mode: []const u8) type {
             render();
             weft.setMode(ex_mode);
         }
-        /// A printable keystroke (the ex mode's text command): append + re-echo.
+        /// A committed character (the ex mode's commit command): append + re-echo.
         pub fn onType() void {
             const s = weft.argStr(0) orelse return;
             if (s.len == 0) return;

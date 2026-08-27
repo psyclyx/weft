@@ -1390,7 +1390,6 @@ fn cMenu(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32, results: []
     const km = br.activeCtx().keymap;
     const Keymap = @import("Keymap.zig");
     km.markMenuMode(gpa, name) catch {};
-    km.setTextCommand(gpa, name, null) catch {}; // swallow text — a menu, not typing
     km.bind(gpa, name, "Escape", "menu-escape", Keymap.prio_config, "config") catch {};
     km.bind(gpa, name, "C-g", "menu-escape", Keymap.prio_config, "config") catch {};
     km.bind(gpa, name, "F1", "which-key-now", Keymap.prio_config, "config") catch {}; // force the hint now

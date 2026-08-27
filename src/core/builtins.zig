@@ -162,7 +162,7 @@ fn editErr(e: anyerror) anyerror!Value {
 }
 
 fn cInsertText(ctx: *Context, args: struct { text: []const u8 }) anyerror!Value {
-    if (try semanticFieldInput(ctx, .{ .replace_selection = args.text })) return ok;
+    if (try semanticFieldInput(ctx, .{ .commit = .from(args.text) })) return ok;
     const ed = ctx.textEditor() catch |e| return editErr(e);
     ctx.edit(ed.insertRange(), args.text) catch |e| return editErr(e);
     return ok;
@@ -302,7 +302,9 @@ fn cQuit(ctx: *Context, args: struct {}) anyerror!Value {
 
 fn cInsertNewline(ctx: *Context, args: struct {}) anyerror!Value {
     _ = args;
-    if (try semanticFieldInput(ctx, .{ .replace_selection = "\n" })) return ok;
+    // Return/Tab are physical keys, not commits: a focused field consumes them
+    // (nothing leaks to a backing document) and inserts nothing (§2.2).
+    if (try semanticFieldInput(ctx, .{ .commit = .none })) return ok;
     const ed = ctx.textEditor() catch |e| return editErr(e);
     ctx.edit(ed.insertRange(), "\n") catch |e| return editErr(e);
     return ok;
@@ -310,7 +312,7 @@ fn cInsertNewline(ctx: *Context, args: struct {}) anyerror!Value {
 
 fn cInsertTab(ctx: *Context, args: struct {}) anyerror!Value {
     _ = args;
-    if (try semanticFieldInput(ctx, .{ .replace_selection = "\t" })) return ok;
+    if (try semanticFieldInput(ctx, .{ .commit = .none })) return ok;
     const ed = ctx.textEditor() catch |e| return editErr(e);
     ctx.edit(ed.insertRange(), "\t") catch |e| return editErr(e);
     return ok;
@@ -604,7 +606,7 @@ pub fn install(gpa: std.mem.Allocator, commands: *command.Commands, keymap: *@im
     };
     const Keymap = @import("Keymap.zig");
     for (binds) |b| try keymap.bind(gpa, "default", b[0], b[1], Keymap.prio_core, "core");
-    try keymap.setTextCommand(gpa, "default", "insert-text");
+    try keymap.setCommitCommand(gpa, "default", "insert-text");
 
     try @import("pick.zig").install(gpa, commands, keymap);
 }

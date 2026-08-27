@@ -289,9 +289,8 @@ export fn describe() void {
 }
 export fn init() void {
     for (cmds) |c| _ = weft.register(c.name);
-    // git mode: navigation-only (swallows typing), plus the interactive verbs.
-    // No fallback — nothing leaks insert into the read-only status buffer.
-    weft.textInput("git", null);
+    // git mode: navigation-only plus the interactive verbs. It declares no
+    // text commit, so typing can never reach the read-only status buffer.
     // A read-only projection: its keymap is PINNED — you can't drop into a
     // generic editing mode (`normal`) inside it, so git's keys never go dead.
     // The framework enforces it; git just declares it (no defensive handling).
@@ -422,6 +421,7 @@ export fn init() void {
     // A generic single-line prompt buffer (branch names, rebase depth). Same
     // editable shape as the commit buffer; the pending `input_action` routes it.
     weft.setFallback("git-input", "default");
+    weft.textInput("git-input", "insert-text");
     weft.bindKey("git-input", "C-c", "git-input-menu");
     weft.menuMode("git-input-menu");
     weft.bindKey("git-input-menu", "C-c", "git-input-finish");
@@ -461,8 +461,10 @@ export fn init() void {
     weft.bindKey("git-fetch-menu", "C-g", "git-menu-cancel-surface");
     weft.bindKey("git-fetch-menu", "q", "git-menu-cancel-surface");
 
-    // The rebase-todo buffer is EDITABLE (reorder lines via `default`); the
-    // action letters set the todo verb on the current line, C-c finishes/aborts.
+    // The rebase-todo buffer is STRUCTURAL: the action letters set the todo
+    // verb on the current line, `default`'s editing keys reorder lines, and
+    // C-c finishes/aborts. It commits no typed text — a todo list is a list of
+    // verbs, not prose.
     weft.setFallback("git-rebase", "default");
     weft.bindKey("git-rebase", "p", "git-rebase-pick");
     weft.bindKey("git-rebase", "s", "git-rebase-squash");
@@ -480,7 +482,6 @@ export fn init() void {
 
     // A shared read-only view mode for the show/log/stash buffers (own their own
     // buffers, so git's mutating keys never fire against a stale model).
-    weft.textInput("git-view", null);
     weft.lockedMode("git-view"); // read-only projection: keymap pinned (see git)
     weft.bindKey("git-view", "j", "cursor-down");
     weft.bindKey("git-view", "k", "cursor-up");

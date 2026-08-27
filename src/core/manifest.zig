@@ -1195,7 +1195,6 @@ fn ownerIsKnown(owner: []const u8, known_plugins: *const std.StringHashMapUnmana
 fn applyMenu(ctx: *command.Context, gpa: Allocator, name: []const u8, prio: i32) void {
     const km = ctx.keymap;
     km.markMenuMode(gpa, name) catch {};
-    km.setTextCommand(gpa, name, null) catch {};
     km.bind(gpa, name, "Escape", "menu-escape", prio, "config") catch {};
     km.bind(gpa, name, "C-g", "menu-escape", prio, "config") catch {};
     km.bind(gpa, name, "F1", "which-key-now", prio, "config") catch {};

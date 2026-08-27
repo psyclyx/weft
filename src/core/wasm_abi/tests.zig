@@ -1980,20 +1980,20 @@ test "wasm plugin: explicit named text register survives a later delete yank" {
     try ed.insertText(gpa, "alpha\nbeta");
     ed.placeCursor(0);
     // The command sequence is the wasm equivalent of `"ayy`.
-    try dispatch.dispatchSpec(&env.ctx, "quotedbl", "");
-    try dispatch.dispatchSpec(&env.ctx, "a", "");
-    try dispatch.dispatchSpec(&env.ctx, "y", "");
-    try dispatch.dispatchSpec(&env.ctx, "y", "");
+    try dispatch.dispatchSpec(&env.ctx, "quotedbl", .none);
+    try dispatch.dispatchSpec(&env.ctx, "a", .none);
+    try dispatch.dispatchSpec(&env.ctx, "y", .none);
+    try dispatch.dispatchSpec(&env.ctx, "y", .none);
     // Capture the later line into unnamed (the same capture that precedes
     // `dd`) and remove it; this keeps the test focused on register routing.
     ed.placeCursor(6);
-    try dispatch.dispatchSpec(&env.ctx, "d", "");
-    try dispatch.dispatchSpec(&env.ctx, "d", "");
+    try dispatch.dispatchSpec(&env.ctx, "d", .none);
+    try dispatch.dispatchSpec(&env.ctx, "d", .none);
     // The final sequence is `"ap`; it reads the named slot explicitly.
     ed.placeCursor(0);
-    try dispatch.dispatchSpec(&env.ctx, "quotedbl", "");
-    try dispatch.dispatchSpec(&env.ctx, "a", "");
-    try dispatch.dispatchSpec(&env.ctx, "p", "");
+    try dispatch.dispatchSpec(&env.ctx, "quotedbl", .none);
+    try dispatch.dispatchSpec(&env.ctx, "a", .none);
+    try dispatch.dispatchSpec(&env.ctx, "p", .none);
     const text = try ed.text().toOwnedSlice(gpa);
     defer gpa.free(text);
     try t.expectEqualStrings("alpha\nalpha\n", text);

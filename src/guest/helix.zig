@@ -98,8 +98,8 @@ export fn describe() void {
 export fn init() void {
     for (cmds) |c| _ = weft.register(c.name);
 
-    // helix-normal: swallow text (modal), fall back to nothing of vim's.
-    weft.textInput("helix-normal", null);
+    // Only insert commits typed text; helix-normal is modal and declares
+    // nothing, so nothing can leak into it.
     weft.textInput("helix-insert", "insert-text");
 
     // Movement.
@@ -118,7 +118,6 @@ export fn init() void {
     inline for (mtable) |m| weft.bindKey("helix-normal", m.key, "hx/n/" ++ m.motion);
 
     // helix `d` then a motion deletes over it (a tiny operator-pending mode).
-    weft.textInput("helix-op", null);
     weft.menuMode("helix-op");
     weft.setFallback("helix-op", "helix-normal");
     weft.bindKey("helix-op", "Escape", "hx-normal");

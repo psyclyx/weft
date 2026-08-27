@@ -666,8 +666,10 @@ pub fn setMode(mode: []const u8) void {
 pub fn setFallback(mode: []const u8, parent: []const u8) void {
     wl_set_fallback(p(mode.ptr), @intCast(mode.len), p(parent.ptr), @intCast(parent.len));
 }
-/// Set (or clear, with null) the command unbound printable input runs in
-/// `mode` — the modal posture (normal mode swallows text).
+/// DECLARE that `mode` commits text, running `cmd` on each commit (null
+/// withdraws the declaration). Nothing is inherited: a mode that never
+/// declares this cannot commit typed text, whatever it inherits BINDINGS
+/// from — so a structural mode needs no opt-out.
 pub fn textInput(mode: []const u8, cmd: ?[]const u8) void {
     if (cmd) |c| {
         wl_text_input(p(mode.ptr), @intCast(mode.len), p(c.ptr), @intCast(c.len), 1);

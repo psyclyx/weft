@@ -117,10 +117,11 @@ pub const Application = struct {
         };
     }
 
-    /// Inject one canonical key event through the same dispatch door every
-    /// platform uses. The next `advance` consumes the input damage edge.
-    pub fn input(self: *Application, spec: []const u8, text: []const u8) !void {
-        try dispatch.dispatchSpec(&self.session.cmd_ctx, spec, text);
+    /// Inject one canonical key event — the physical keyspec plus whatever
+    /// text it committed — through the same dispatch door every platform uses.
+    /// The next `advance` consumes the input damage edge.
+    pub fn input(self: *Application, spec: []const u8, commit: core.TextCommit) !void {
+        try dispatch.dispatchSpec(&self.session.cmd_ctx, spec, commit);
         self.lifecycle.noteInput();
     }
 

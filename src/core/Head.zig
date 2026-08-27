@@ -476,9 +476,10 @@ pub fn lookup(self: *const Head, km: *const Keymap, key: []const u8) ?[]const u8
     return km.lookup(self.mode, key);
 }
 
-/// This head's current mode's text command — see `Keymap.textCommand`.
-pub fn textCommand(self: *const Head, km: *const Keymap) ?[]const u8 {
-    return km.textCommand(self.mode);
+/// The command a text commit runs in this head's current mode, or null when
+/// the mode does not commit text — see `Keymap.commitCommand`.
+pub fn commitCommand(self: *const Head, km: *const Keymap) ?[]const u8 {
+    return km.commitCommand(self.mode);
 }
 
 /// Feed one keyspec through THIS HEAD's pending sequence — see
@@ -498,7 +499,7 @@ pub fn feed(self: *Head, gpa: Allocator, km: *const Keymap, key: []const u8) All
         return .pending;
     }
     try self.setPending(gpa, "");
-    return if (at_top) .text else .none;
+    return if (at_top) .unbound else .none;
 }
 
 /// Build the RESOLVED set of bindings available in `mode` into this head's
@@ -596,8 +597,9 @@ test "head: prefix sequences — a chord resolves; a menu is a prefix, not a mod
         try t.expect(r == .run);
         try t.expectEqualStrings("window-thing", r.run);
     }
-    // A lone unbound printable key is `text` (the caller inserts it).
-    try t.expect((try h.feed(gpa, &km, "x")) == .text);
+    // A lone key the grammar does not bind is `unbound` — the caller decides
+    // whether it commits text; the keymap never says "insert this".
+    try t.expect((try h.feed(gpa, &km, "x")) == .unbound);
 
     // Backspace pops one chord level.
     try t.expect((try h.feed(gpa, &km, "space")) == .pending);

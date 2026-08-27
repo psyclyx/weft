@@ -470,8 +470,9 @@ export fn init() void {
     weft.restingMode("normal"); // the base a file buffer rests in (not visual/insert)
     weft.setFallback("visual", "normal");
     weft.setFallback("insert", "default");
-    weft.textInput("normal", null);
-    weft.textInput("visual", null);
+    // Only insert commits typed text. `normal`/`visual` need no opt-out:
+    // a mode commits text ONLY where it says so (architecture §10.1).
+    weft.textInput("insert", "insert-text");
 
     for (cmds) |c| _ = weft.register(c.name);
 
@@ -497,7 +498,6 @@ export fn init() void {
     for (nb) |b| weft.bindKey("normal", b[0], b[1]);
 
     // One operator-pending mode; d/c/y set the pending operator + enter it.
-    weft.textInput("op-pending", null);
     weft.menuMode("op-pending");
     weft.setFallback("op-pending", "default");
     weft.bindKey("op-pending", "Escape", "op-cancel");
@@ -509,7 +509,6 @@ export fn init() void {
     // i/a in operator-pending select a text object (di", ca(, yiw, …).
     weft.bindKey("op-pending", "i", "enter-op-inner");
     weft.bindKey("op-pending", "a", "enter-op-around");
-    weft.textInput("op-to", null);
     weft.menuMode("op-to");
     weft.setFallback("op-to", "default");
     weft.bindKey("op-to", "Escape", "op-cancel");
@@ -517,7 +516,6 @@ export fn init() void {
 
     // A register prefix is a generic input mode, not a dired/editor special
     // case. The selected slot is consumed by the next semantic action.
-    weft.textInput("register-pending", null);
     weft.menuMode("register-pending");
     weft.setFallback("register-pending", "default");
     weft.bindKey("register-pending", "Escape", "op-cancel");
