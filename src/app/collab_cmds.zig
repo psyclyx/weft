@@ -256,10 +256,9 @@ pub fn peerFilesHandler(ctx: *core.command.Context, data: ?*anyopaque, args: []c
 /// "look_together" | "pair" | "review") compiles to a `collab_presets`
 /// `GrantBundle`; the echo below is rendered FROM that bundle
 /// (`collab_presets.echo`), never from a preset-supplied string — the text
-/// approved and the authority selected are the same value. v1 wires only the
-/// bundle's `.presence` toggle against `share-presence`'s existing effect;
-/// document-edit/code-intel/project-scope authority enforcement is the
-/// export-grant machinery this seam is meant to compile into once it lands.
+/// approved and the authority selected are the same value. The bundle
+/// selects the presence toggle and the quad's exported surfaces; the
+/// project-scope, git and process toggles have no export to select yet.
 pub fn shareHandler(ctx: *core.command.Context, data: ?*anyopaque, args: []const core.command.Value) anyerror!core.command.Value {
     const sc: *ShareCtx = @ptrCast(@alignCast(data.?));
     if (args.len > 1) return error.ArityMismatch;
@@ -272,7 +271,12 @@ pub fn shareHandler(ctx: *core.command.Context, data: ?*anyopaque, args: []const
     if (sc.conn.* == null and sc.hub.* == null) return .{ .string = "not connected" };
     const buf = ctx.buffer();
     const doc = &(buf.textEditor() orelse return .{ .string = "no text to share" }).doc;
-    if (bundle) |b| sc.publish_presence = b.has(.presence);
+    // The toggles the preview shows are the ones the quad publishes: a
+    // bundle without code intelligence must not export diagnostics anyway.
+    if (bundle) |b| {
+        sc.publish_presence = b.has(.presence);
+        sc.export_diagnostics = b.has(.code_intel);
+    }
     var did = false;
 
     if (sc.conn.*) |*c| {

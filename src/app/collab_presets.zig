@@ -3,11 +3,14 @@
 //! set of `Toggle`s — never a free-text string a plugin or config author
 //! supplies. `echo` renders the share preview from a bundle's toggles alone,
 //! so the text a human approves and the authority actually granted can never
-//! diverge (the confused-deputy rule §13.6 states explicitly). Sibling
-//! `uc/export-grants` was expected to own the wire `Grant` shape this
-//! compiles into; it does not exist yet, so this module stays a minimal,
-//! self-contained seam — `GrantBundle` is a value a future export-grant
-//! minter can consume, not a stand-in for the wire type itself.
+//! diverge (the confused-deputy rule §13.6 states explicitly).
+//!
+//! A bundle is a SELECTION, not the authority itself: `share` compiles it
+//! into the publication descriptor a quad exports (`ShareCtx.exportSpec`)
+//! and into the presence toggle. Toggles whose surfaces the descriptor does
+//! not yet name — project scope, git, process — are carried and previewed
+//! but select nothing, which is why they are toggles here rather than
+//! fields on a wire type.
 
 const std = @import("std");
 
