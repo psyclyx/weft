@@ -319,7 +319,15 @@ pub const RemoteFs = struct {
 
     /// Post a `peer_fs`-encoded request on `base+3`; returns the call id the
     /// reply will mirror. `req` is from `peer_fs.encodeList/Read/Write/Stat`.
+    ///
+    /// An offline peer refuses here, at once
+    /// (doc/contextual-workspace-architecture.md §13.7: "remote mutation
+    /// actions are never automatically queued"). Enqueuing would put a
+    /// mutation in a buffer whose only honest fates are a silent drop or a
+    /// replay the owner never authorized; the caller gets a reason it can
+    /// show instead of a deadline it must sit out.
     pub fn request(self: *RemoteFs, session: *Session, base: u64, req: []const u8) !u64 {
+        if (session.liveness() == .offline) return error.PeerOffline;
         const id = try self.inflight.issue(self.gpa, {});
         var p: std.ArrayList(u8) = .empty;
         defer p.deinit(self.gpa);

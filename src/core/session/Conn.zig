@@ -394,13 +394,17 @@ fn acceptOffer(self: *Conn, payload: []const u8) !void {
         if (o.base == base) return; // duplicate announce (reconnect)
     }
     if (self.findBase(base) != null or self.findGraphBase(base) != null) return; // already bound
+    // Additive trailing kind byte (see `DocKind`'s doc comment). ABSENT
+    // means `.text` — the only kind an older sender ever announced.
+    // UNRECOGNIZED is a newer sender's export surface we cannot render:
+    // skip the whole announce (§13.4, "unknown required semantics fail
+    // closed"). Defaulting it to `.text` would hand a graph-shaped export
+    // to the text driver and mis-decode every frame on the quad; skipping
+    // costs only that one offer and leaves the connection whole.
+    const trailer = cur[nlen..];
+    const kind: DocKind = if (trailer.len == 0) .text else std.enums.fromInt(DocKind, trailer[0]) orelse return;
     const name = try self.gpa.dupe(u8, cur[0..nlen]);
     errdefer self.gpa.free(name);
-    // Additive trailing kind byte (see `DocKind`'s doc comment) — absent
-    // or unrecognized defaults to `.text`, the only kind an older sender
-    // ever announced.
-    cur = cur[nlen..];
-    const kind: DocKind = if (cur.len > 0) (std.enums.fromInt(DocKind, cur[0]) orelse .text) else .text;
     try self.offers.append(self.gpa, .{ .base = base, .name = name, .kind = kind });
 }
 
