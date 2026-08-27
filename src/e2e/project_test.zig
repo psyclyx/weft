@@ -1494,3 +1494,90 @@ test "e2e/output: build output navigates on its own mode, not run's" {
     try t.expect(std.mem.indexOf(u8, keys, "grep\x00Return\x00grep-visit\n") != null);
     try t.expect(ed.keymap.isRestingMode("build"));
 }
+
+// git's row verbs are OFFERS now: `s`/`u`/`RET` in *git* name an intention,
+// git publishes what the row under point affords (with the reason when it
+// affords nothing), and the effect door invokes the winner. The locked mode
+// that used to make those keys work is gone — the buffer holds no editor, so
+// typing refuses structurally, and `git` is simply its resting mode.
+test "e2e/project: git's row verbs resolve through published offers, and the locked modes are gone" {
+    const gpa = t.allocator;
+    var proj: Project = undefined;
+    try proj.init(gpa);
+    defer proj.deinit();
+
+    var ed: Editor = undefined;
+    try Editor.init(gpa, &ed);
+    defer ed.deinit();
+    try h.loadWorkspaceWithHints(&ed);
+
+    // The projections declare no lock: nothing pins the keymap, because
+    // nothing needs to (§19's demolition).
+    try t.expect(!ed.keymap.isLockedMode("git"));
+    try t.expect(!ed.keymap.isLockedMode("git-view"));
+    try t.expect(ed.keymap.isRestingMode("git"));
+    try t.expect(ed.keymap.isRestingMode("git-view"));
+
+    // A real repo with one tracked file modified in the worktree: an
+    // "Unstaged changes" row is what point lands on.
+    for ([_][]const u8{
+        "git init -q -b main",
+        "git config user.email e2e@weft.test",
+        "git config user.name weft-e2e",
+        "printf 'one\\n' > f.txt && git add f.txt && git commit -q -m base",
+        "printf 'one\\ntwo\\n' > f.txt",
+    }) |cmd| {
+        const out = try proj.oracle(cmd);
+        gpa.free(out);
+    }
+
+    ed.run("git-status");
+    try t.expect(drainToolContains(&ed, "*git*", "Unstaged changes"));
+    try t.expectEqualStrings("git", ed.mode());
+
+    // What the key WOULD do, asked through the same explain path which-key
+    // renders (core.intent.explain, exactly what wasm_host/menu.zig calls):
+    // staging is offered by git itself, unstaging is refused with its reason.
+    switch (core.intent.explain(ed.ctx, &.{"plugin.git.stage"})) {
+        .ready => |r| {
+            try t.expectEqualStrings("plugin.git.stage", r.intention);
+            try t.expectEqualStrings("plugin.git", r.provider);
+        },
+        else => return error.StageNotOffered,
+    }
+    switch (core.intent.explain(ed.ctx, &.{"plugin.git.unstage"})) {
+        .blocked => |b| try t.expectEqualStrings("not-staged", b.reason),
+        else => return error.UnstageNotRefused,
+    }
+    // And the same answer a user SEES: which-key peeks the git mode and
+    // paints the offer rows through that existing path — no new UI.
+    // The rendered row reads `s  plugin.git.stage -> plugin.git`, and the
+    // refused one is dimmed with its reason — painted from the same explain
+    // answer, by the hint plugin that already existed.
+    try t.expect(whichKeyShows(&ed, "plugin.git.stage"));
+    try t.expect(whichKeyShows(&ed, "not-staged"));
+
+    // And what it actually does: `s` resolves the offer and invokes it
+    // through the effect door — the file is staged on disk.
+    ed.press("s", "");
+    try t.expect(drainUntilOracle(&proj, &ed, "git diff --cached --name-only", "f.txt"));
+
+    // The re-gathered model publishes a NEW table: the same row is staged
+    // now, so staging it again is the refused one.
+    try t.expect(drainToolContains(&ed, "*git*", "Staged changes"));
+    switch (core.intent.explain(ed.ctx, &.{"plugin.git.unstage"})) {
+        .ready => |r| try t.expectEqualStrings("plugin.git", r.provider),
+        .blocked => |b| try t.expectEqualStrings("not-staged", b.reason),
+        .none => return error.UnstageNotOffered,
+    }
+
+    // Outside git's own entry nothing of git's is offered at all: absence is
+    // nonapplicable, not a refusal (the offers are about the buffer, not
+    // about a mode being active).
+    ed.run("buffer-back");
+    try t.expect(core.intent.explain(ed.ctx, &.{"plugin.git.stage"}) == .blocked);
+    switch (core.intent.explain(ed.ctx, &.{"plugin.git.stage"})) {
+        .blocked => |b| try t.expectEqualStrings("not offered here", b.reason),
+        else => unreachable,
+    }
+}

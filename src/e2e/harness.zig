@@ -1004,6 +1004,7 @@ const guest = struct {
     const repl = @embedFile("guest_repl_wasm");
     const console = @embedFile("guest_console_wasm");
     const llm = @embedFile("guest_llm_wasm");
+    const which_key = @embedFile("guest_which_key_wasm");
     /// Test fixture only (not installed) — see `src/guest/headtest.zig`'s
     /// module doc: the minimal guest the two-head gate's guest-ABI tests
     /// (`two_head_test.zig`) drive.
@@ -1069,6 +1070,14 @@ pub fn loadWorkspace(ed: *Editor) !void {
     try ed.load("modes", guest.modes);
     try ed.load("notes", guest.notes);
     try ed.load("git", guest.git);
+}
+
+/// The workspace plus the hint overlay — for a test that asserts what a user
+/// SEES when peeking a mode's keys. `whichKeyText`/`whichKeyShows` read the
+/// surface the which_key PLUGIN publishes, so it has to be loaded.
+pub fn loadWorkspaceWithHints(ed: *Editor) !void {
+    try loadWorkspace(ed);
+    try ed.load("which_key", guest.which_key);
 }
 
 /// The whole-app spine's plugin surface for the direct Editor harness. The
