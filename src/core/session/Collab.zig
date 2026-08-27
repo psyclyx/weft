@@ -64,6 +64,9 @@ last_sent_rev: ?u64 = null,
 /// announce-to-grantee). Display and prevention state, never authority —
 /// see `export_grants.zig`. `mayMintOp` is the preflight over it.
 announced: export_grants.Announced,
+/// Guards a single disconnect sweep per dead session (the sweep itself is
+/// idempotent; this just avoids re-walking the book every tick).
+swept: bool = false,
 /// Host side: why the last inbound batch was refused at admission, or
 /// `null` if none was. A text quad has no refusal frame to echo (unlike a
 /// graph quad's `region_refused`), so this is where a refusal is
@@ -214,6 +217,7 @@ pub fn rebind(self: *Collab, new_session: *Session) void {
     // keeps its current my_grant so there is no read-only flash.
     self.last_sent_grant = null;
     self.last_sent_rev = null;
+    self.swept = false; // a fresh session gets its own death to sweep for
     self.clearLastPresence();
 }
 
@@ -529,6 +533,7 @@ pub fn push(self: *Collab) !bool {
     // Ahead of the liveness gate: an offline link is exactly when a
     // request stops being answerable.
     self.failStaleRequests();
+    self.sweepIfDead();
     const live = self.session.liveness();
     if (live != .connected and live != .degraded) return false;
 
@@ -622,6 +627,19 @@ pub fn revokeExports(self: *Collab) usize {
     const book = self.session.exports orelse return 0;
     const fp = self.session.peerFingerprint() orelse return 0;
     return book.revokePeer(fp, self.publication.id);
+}
+
+/// A dead session takes its `until_disconnect` grants with it — the
+/// authority analog of `GraphCollab.reapIfDead`, on the same
+/// `liveness() == .offline` trigger. Owner side only: the grantee never
+/// held the book.
+fn sweepIfDead(self: *Collab) void {
+    if (self.swept or self.session.role != .server) return;
+    if (self.session.liveness() != .offline) return;
+    self.swept = true;
+    const book = self.session.exports orelse return;
+    const fp = self.session.peerFingerprint() orelse return;
+    _ = book.sweepDisconnect(fp);
 }
 
 /// Grantee side: §13.5's preflight. May this replica mint a replicated op
