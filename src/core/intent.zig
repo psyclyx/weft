@@ -13,6 +13,9 @@ const Allocator = std.mem.Allocator;
 const catalog_mod = @import("catalog.zig");
 const command = @import("command.zig");
 const intentions = @import("intentions.zig");
+const semantic = @import("semantic.zig");
+const view_offers = @import("view_offers.zig");
+const Head = @import("Head.zig");
 
 pub const Catalog = catalog_mod.Catalog;
 pub const IntentionId = catalog_mod.IntentionId;
@@ -166,6 +169,11 @@ pub const Plane = struct {
     revision: u64 = 0,
     /// The entry shape the published table was computed for.
     has_text: bool = true,
+    /// Core's other built-in provider: the generic adapter that derives a
+    /// focused view's std offers from its scene (`view_offers.zig`). Held
+    /// here for the same reason as the editing table — a plane without its
+    /// host providers is a half-wired state nothing should be able to build.
+    views: view_offers.Publisher = undefined,
 
     pub fn init(self: *Plane, gpa: Allocator) !void {
         self.* = .{ .catalog = .init(gpa) };
@@ -180,12 +188,23 @@ pub const Plane = struct {
             .endpoint = self.handle.endpoint(@intCast(i)),
         };
         try self.publishCore();
+        self.views = try .init(gpa, self);
     }
 
     pub fn deinit(self: *Plane, gpa: Allocator) void {
         self.invokers.deinit(gpa);
         self.catalog.deinit();
         self.* = undefined;
+    }
+
+    /// Republish the view adapter's table when this head's focus or scene
+    /// moved. A signature comparison when nothing moved; no probe either way.
+    pub fn syncFocus(
+        self: *Plane,
+        services: *const semantic.Services,
+        head: *const Head,
+    ) Allocator.Error!void {
+        _ = try self.views.refresh(&self.catalog, services, head);
     }
 
     /// Republish core's table when the focused entry's shape changes — the

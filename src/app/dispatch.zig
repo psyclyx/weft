@@ -682,9 +682,11 @@ fn resolveIntention(ctx: *core.command.Context, arms: []const []const u8) void {
         std.log.warn("dispatch: '{s}' has {d} arms, over the {d}-arm ceiling", .{ arms[0], arms.len, buf.len });
         return;
     }
-    // Pushed, not probed: the provider re-publishes for the focused entry's
-    // shape here, before resolution reads a single offer.
+    // Pushed, not probed: core's providers re-publish for the focused entry's
+    // shape and the focused view's scene here, before resolution reads a
+    // single offer. Both are value comparisons when nothing moved.
     plane.syncEntryShape(entryHoldsText(ctx)) catch {};
+    if (ctx.semantic) |services| plane.syncFocus(services, ctx.head) catch {};
     const ids = plane.armIds(arms, &buf) catch |err| {
         std.log.warn("dispatch: arm list '{s}' is not resolvable: {t}", .{ arms[0], err });
         return;

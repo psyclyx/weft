@@ -24,6 +24,12 @@ pub const std_intentions = [_]Intention{
     .{ .name = "std.target.activate", .doc = "Act on the target the way its kind defines as primary." },
     .{ .name = "std.editing.insert-line-break", .doc = "Commit a line break at the editing point." },
     .{ .name = "std.navigation.back", .doc = "Return to the previous workspace location." },
+    // Directional movement shares `navigation`'s package: one package per
+    // concept, so `back` and the four moves cannot drift apart.
+    .{ .name = "std.navigation.up", .doc = "Move to the neighbour above on the vertical axis." },
+    .{ .name = "std.navigation.down", .doc = "Move to the neighbour below on the vertical axis." },
+    .{ .name = "std.navigation.left", .doc = "Move to the neighbour left on the horizontal axis." },
+    .{ .name = "std.navigation.right", .doc = "Move to the neighbour right on the horizontal axis." },
     .{ .name = "std.history.undo", .doc = "Reverse the most recent reversible change." },
     .{ .name = "std.history.redo", .doc = "Reapply the most recently undone change." },
     .{ .name = "std.persistence.save", .doc = "Commit pending changes to durable storage." },
