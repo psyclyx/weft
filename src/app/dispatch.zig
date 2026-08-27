@@ -638,8 +638,9 @@ pub fn dispatchSpec(ctx: *core.command.Context, spec: []const u8, commit: core.T
 // of what loaded first.
 
 /// The `catalog.Context` this keystroke resolves against. Core owns the ONE
-/// derivation (`core/intent.zig`); explaining a binding asks with the same
-/// function, so a second, drifting context builder cannot exist.
+/// derivation (`core/intent.zig`); explaining a binding and the palette's
+/// offer membrane ask through the same function, so a second, drifting
+/// context builder cannot exist.
 pub const catalogContext = core.intent.catalogContext;
 
 /// What one keypress will actually do: run a command by name, or invoke the
@@ -671,7 +672,9 @@ fn chooseArm(ctx: *core.command.Context, arms: []const []const u8) ?Arm {
             std.log.debug("dispatch: '{s}' names an intention, but no catalog is wired here", .{name});
             continue;
         };
-        if (snap == null) snap = intentionSnapshot(ctx, plane) orelse return null;
+        // Built lazily, so a binding of plain command names never touches the
+        // catalog.
+        if (snap == null) snap = plane.snapshotFor(ctx) orelse return null;
         const id = plane.catalog.intention(name) catch |err| {
             std.log.warn("dispatch: intention '{s}' is not resolvable: {t}", .{ name, err });
             continue;
@@ -700,20 +703,6 @@ fn chooseArm(ctx: *core.command.Context, arms: []const []const u8) ?Arm {
     return if (core.catalog.isIntentionName(last)) null else .{ .command = last };
 }
 
-/// The snapshot every intention arm of one keypress resolves against. Built
-/// lazily, so a binding of plain command names never touches the catalog.
-fn intentionSnapshot(ctx: *core.command.Context, plane: *core.intent.Plane) ?*const core.catalog.Snapshot {
-    // Pushed, not probed: core's providers re-publish for the focused entry's
-    // shape and the focused view's scene here, before resolution reads a
-    // single offer. Both are value comparisons when nothing moved.
-    plane.syncEntryShape(entryHoldsText(ctx)) catch {};
-    if (ctx.semantic) |services| plane.syncFocus(services, ctx.head) catch {};
-    return plane.catalog.snapshot(catalogContext(ctx)) catch |err| {
-        std.log.warn("dispatch: catalog snapshot failed: {t}", .{err});
-        return null;
-    };
-}
-
 /// Invoke a decision through its endpoint token. The plane rechecks the
 /// epoch, the table revision, and the endpoint's generation — visibility is
 /// never authority.
@@ -722,10 +711,6 @@ fn invokeDecision(ctx: *core.command.Context, d: core.catalog.Decision) void {
     plane.invoke(ctx, d) catch |err| {
         std.log.warn("dispatch: {s} refused at the door: {t}", .{ plane.catalog.intentionName(d.intention), err });
     };
-}
-
-fn entryHoldsText(ctx: *core.command.Context) bool {
-    return ctx.buffers.active().textEditor() != null;
 }
 
 /// The one-line trace an arm that stopped the walk leaves behind (the explain

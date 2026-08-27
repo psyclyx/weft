@@ -10,9 +10,9 @@
 
 const std = @import("std");
 const Allocator = std.mem.Allocator;
+const Actions = @import("action.zig");
 const catalog_mod = @import("catalog.zig");
 const command = @import("command.zig");
-const Actions = @import("action.zig");
 const intentions = @import("intentions.zig");
 const semantic = @import("semantic.zig");
 const view_offers = @import("view_offers.zig");
@@ -264,7 +264,55 @@ pub const Plane = struct {
         if (table.revision != d.revision) return Error.StaleDecision;
         return self.invokers.invoke(ctx, d.endpoint);
     }
+
+    /// Resolve `name` against the CURRENT context and invoke what wins — the
+    /// door a UI (the command palette) accepts an offer through. Resolution
+    /// happens here, at accept time: nothing a list was built with is stored,
+    /// so a snapshot that went stale between listing and accept resolves
+    /// again rather than running yesterday's endpoint.
+    ///
+    /// A refusal is a `reason` to SHOW, never silence (§9.3) — formatted into
+    /// the caller's `buf`, which the returned text borrows.
+    pub fn invokeNamed(
+        self: *Plane,
+        ctx: *command.Context,
+        name: []const u8,
+        buf: []u8,
+    ) Invocation {
+        if (!catalog_mod.isIntentionName(name)) return .unknown;
+        const id = self.catalog.findIntention(name) orelse return .unknown;
+        const snap = self.snapshotFor(ctx) orelse return refused(buf, "{s}: no catalog here", .{name});
+        return switch (snap.resolveOne(id)) {
+            .decision => |d| if (self.invoke(ctx, d)) .invoked else |err| refused(
+                buf,
+                "{s}: refused at the door: {t}",
+                .{ name, err },
+            ),
+            .unavailable => |u| switch (u) {
+                .no_offer => refused(buf, "{s}: nothing offers this here", .{name}),
+                .disabled => |d| refused(buf, "{s}: {s} — {s}", .{ name, d.reason.reason, d.reason.message }),
+                .checking => |c| refused(buf, "{s}: {s} is still computing it", .{
+                    name,
+                    self.catalog.providerName(c.provider),
+                }),
+            },
+            .ambiguous => |a| refused(buf, "{s}: ambiguous — {s} and {s} offer equally", .{ name, a.a.owner, a.b.owner }),
+        };
+    }
 };
+
+/// What `invokeNamed` did. `unknown` is not a refusal: the name is no
+/// intention at all, so the caller's other vocabulary (commands) still owns it.
+pub const Invocation = union(enum) {
+    invoked,
+    /// Relevant but impossible — text to show, borrowed from the caller's buf.
+    refused: []const u8,
+    unknown,
+};
+
+fn refused(buf: []u8, comptime fmt: []const u8, args: anytype) Invocation {
+    return .{ .refused = std.fmt.bufPrint(buf, fmt, args) catch buf };
+}
 
 // ── The question dispatch asks ───────────────────────────────────────
 
@@ -274,9 +322,9 @@ pub const Plane = struct {
 /// place, is why no focus or scene chokepoint can be missed. A repeat in an
 /// unchanged context leaves the revision alone, so `snapshot` is a cache hit.
 ///
-/// Dispatch calls it on the keystroke path; `explain` calls it to ask the
-/// SAME question — a second, drifting context builder is the bug this
-/// prevents.
+/// Dispatch asks it on the keystroke path; `explain` and the palette ask the
+/// SAME question through it — a second, drifting context builder is the bug
+/// this prevents.
 pub fn catalogContext(ctx: *command.Context) catalog_mod.Context {
     const entry = ctx.buffers.active();
     const path = if (entry.textEditor()) |ed| ed.backingPath() else null;
