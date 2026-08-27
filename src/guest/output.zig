@@ -95,10 +95,18 @@ fn captureRow(slot: *Slot, base: usize, line: []const u8) ?Target {
 /// Return in an output buffer: open the location the FOCUSED ROW carries. The
 /// rendered line is never re-read — a row restyled or reformatted after the
 /// fill still visits where its output pointed.
+///
+/// An uncaptured buffer says so rather than falling back to reading the screen:
+/// the host only delivers `on_fill` while the filled buffer is still ACTIVE
+/// (wasm_host/proc.zig), so a fill you looked away from lands untyped. That is
+/// the delivery seam's gap, and a silent re-parse would hide it.
 pub fn visit() void {
     const name = activeName() orelse return;
     defer weft.allocator.free(name);
-    const slot = find(name) orelse return;
+    const slot = find(name) orelse {
+        weft.echo("output: this fill landed without captured locations");
+        return;
+    };
     const target = slot.table.get(cursorRow()) orelse return;
     // The path is the table's; `open` reuses the read scratch, not this.
     weft.runStr("open", target.path);
