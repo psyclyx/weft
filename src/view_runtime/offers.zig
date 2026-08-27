@@ -49,9 +49,6 @@ pub const Item = struct {
 
 pub const Focus = struct {
     path: semantic.focus.Path,
-    /// The head holds a navigation anchor: an action moved focus here from a
-    /// remembered node, so there is somewhere to go back to.
-    anchored: bool = false,
 };
 
 /// One item per intent at most, so callers can size storage exactly.
@@ -93,10 +90,11 @@ pub fn derive(instance: *const view.Instance, focus: Focus, out: *Buffer) []cons
         out[count + 1] = .{ .intent = .navigate_right };
         count += 2;
     }
-    if (focus.anchored) {
-        out[count] = .{ .intent = .back };
-        count += 1;
-    }
+    // Leaving a focused view always lands somewhere — the workspace keeps the
+    // entry it came from, and the route falls back to another live one — so a
+    // live focus is itself the back capability.
+    out[count] = .{ .intent = .back };
+    count += 1;
     return out[0..count];
 }
 
@@ -225,9 +223,9 @@ const Published = struct {
         return self.registry.get(self.ref).?;
     }
 
-    fn focus(self: *Published, node: semantic.scene.NodeId, anchored: bool) !Focus {
+    fn focus(self: *Published, node: semantic.scene.NodeId) !Focus {
         const path = (try self.instance().focusPath(node, &self.storage)).?;
-        return .{ .path = path, .anchored = anchored };
+        return .{ .path = path };
     }
 };
 
@@ -237,7 +235,7 @@ test "a focused files row offers activation and its grid, never expansion" {
     defer published.deinit();
 
     var buffer: Buffer = undefined;
-    const items = derive(published.instance(), try published.focus(@enumFromInt(13), false), &buffer);
+    const items = derive(published.instance(), try published.focus(@enumFromInt(13)), &buffer);
 
     // The name field is a LEAF: absence, not a disabled "not expandable"
     // offer, is how §9.3 says nonapplicable is spelled.
@@ -248,8 +246,9 @@ test "a focused files row offers activation and its grid, never expansion" {
     try t.expect(find(items, .navigate_down) != null);
     try t.expect(find(items, .navigate_left) != null);
     try t.expect(find(items, .navigate_right) != null);
-    // No anchor: `q` has nowhere to return to, so nothing is published.
-    try t.expect(find(items, .back) == null);
+    // A live focus is the back capability: leaving lands on the entry the
+    // workspace came from.
+    try t.expect(find(items, .back) != null);
 }
 
 test "a refused row action is disabled, an absent target is nothing at all" {
@@ -258,7 +257,7 @@ test "a refused row action is disabled, an absent target is nothing at all" {
     defer published.deinit();
 
     var buffer: Buffer = undefined;
-    const refused = derive(published.instance(), try published.focus(@enumFromInt(13), false), &buffer);
+    const refused = derive(published.instance(), try published.focus(@enumFromInt(13)), &buffer);
     try t.expectEqualStrings(provider_disabled, find(refused, .activate).?.disabled.?);
 
     const bare = [_]semantic.scene.Node{
@@ -267,20 +266,20 @@ test "a refused row action is disabled, an absent target is nothing at all" {
     };
     var flat = try Published.open(filesScene(&bare));
     defer flat.deinit();
-    const items = derive(flat.instance(), try flat.focus(@enumFromInt(2), false), &buffer);
+    const items = derive(flat.instance(), try flat.focus(@enumFromInt(2)), &buffer);
     try t.expect(find(items, .activate) == null);
     // A single-column list has no horizontal axis to move along.
     try t.expect(find(items, .navigate_up) != null);
     try t.expect(find(items, .navigate_left) == null);
 }
 
-test "a focused container offers expansion, and an anchored head offers back" {
+test "a focused container offers expansion" {
     const rows = [_]semantic.scene.Node{ filesRow(10, true), filesRow(20, true) };
     var published = try Published.open(filesScene(&rows));
     defer published.deinit();
 
     var buffer: Buffer = undefined;
-    const items = derive(published.instance(), try published.focus(@enumFromInt(10), true), &buffer);
+    const items = derive(published.instance(), try published.focus(@enumFromInt(10)), &buffer);
     try t.expect(find(items, .toggle_expanded).?.disabled == null);
     try t.expect(find(items, .activate) != null);
     try t.expect(find(items, .back) != null);
@@ -308,7 +307,7 @@ test "a container that refuses its own open/close route is disabled, not absent"
     defer published.deinit();
 
     var buffer: Buffer = undefined;
-    const items = derive(published.instance(), try published.focus(@enumFromInt(1), false), &buffer);
+    const items = derive(published.instance(), try published.focus(@enumFromInt(1)), &buffer);
     try t.expectEqualStrings(provider_disabled, find(items, .toggle_expanded).?.disabled.?);
     // One child on the axis: there is no sibling to move to.
     try t.expect(find(items, .navigate_up) == null);

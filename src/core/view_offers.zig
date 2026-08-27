@@ -74,7 +74,6 @@ const Signature = struct {
     view: model.view.Ref,
     leaf: model.scene.NodeId,
     scene: u64,
-    anchored: bool,
 };
 
 /// Owns one provider slot in the catalog and the offer storage behind it.
@@ -127,12 +126,11 @@ pub const Publisher = struct {
             .view = path.view,
             .leaf = leaf,
             .scene = instance.descriptor.revision,
-            .anchored = head.semantic_focus.navigation_anchor != null,
         };
         if (self.signature) |current| if (std.meta.eql(current, next)) return false;
 
         var buffer: offers.Buffer = undefined;
-        const items = offers.derive(instance, .{ .path = path, .anchored = next.anchored }, &buffer);
+        const items = offers.derive(instance, .{ .path = path }, &buffer);
         for (items, self.table[0..items.len]) |item, *offer| {
             const index = @intFromEnum(item.intent);
             offer.* = .{
@@ -288,9 +286,9 @@ test "a focused files row publishes activation and its grid, never expansion" {
 
     const down = try fixture.resolve(&.{"std.navigation.down"});
     try t.expectEqualStrings("cursor-down", fixture.routeOf(down.decision));
-    // A row of columns has a horizontal axis; `q` has nowhere to go back to.
+    // A row of columns has a horizontal axis, and a focused view can be left.
     try t.expect((try fixture.resolve(&.{"std.navigation.right"})) == .decision);
-    try fixture.absent("std.navigation.back");
+    try t.expect((try fixture.resolve(&.{"std.navigation.back"})) == .decision);
 }
 
 test "a refused row action publishes a disabled offer with its reason" {
