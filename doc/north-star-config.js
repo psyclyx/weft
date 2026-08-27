@@ -78,6 +78,13 @@ weft.use("defaults");
 weft.set("which_key", "delay-ms", "200");    // was: weft.set("editor", "which-key-delay-ms", "200")
 weft.bind("global", "F1", "which-key-now");  // "global" = the workspace-scope key layer, as today
 
+// ── BIND ARITY (doc/configuration.md §5.2): the third argument may be a LIST,
+// an authored first-applicable fallback — accept the highlighted candidate,
+// else accept whatever was typed. Until the intention catalog resolves
+// fallbacks at fire time, applying this binds the first entry (the same
+// binding defaults.js already reaches) and carries the rest on the decl.
+weft.bind("pick", "Return", ["pick-accept", "pick-accept-input"]);
+
 // ── Everything from here to the theme block is UNCHANGED from config/config.js.
 // A bind is a binding declared at the named mode's scope, config priority tier —
 // which is what it already meant; it just becomes inspectable data.
