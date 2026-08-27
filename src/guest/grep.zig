@@ -11,11 +11,14 @@ const weft = @import("weft");
 
 /// Scratch for the assembled shell command line (pattern + rg flags).
 var cmd_buf: [1 << 12]u8 = undefined;
-/// The last pattern searched, kept so `on_fill` can emphasize its literal
+/// The last pattern searched, kept so `on_fill_token` can emphasize its literal
 /// occurrences in each result line (regex patterns simply won't match — a
 /// graceful no-op, still colored file:line locations).
 var pattern_buf: [1 << 10]u8 = undefined;
 var pattern_len: usize = 0;
+
+/// The one fill this plugin issues; the host hands it back at delivery.
+const fill_results: u32 = 1;
 
 const Cmd = struct { name: []const u8, handler: *const fn () void };
 const cmds = [_]Cmd{
@@ -70,7 +73,7 @@ fn runGrep(pattern: []const u8) void {
     ) catch return;
     weft.runStr("buffer-create", "*grep*"); // creates + focuses an empty scratch
     weft.setMode("grep"); // navigable results list (Return visits, j/k walk)
-    weft.procToBuffer(cmd, "*grep*");
+    weft.procToBuffer(cmd, "*grep*", fill_results);
 }
 
 /// Return in `*grep*`: open the file at the `path:line` under the cursor. rg
@@ -126,12 +129,13 @@ fn grep() void {
 }
 
 // ── Styling: color the `*grep*` results (file:line locations + match) ───────
-// The host fires `on_fill` once rg's async output has landed, with `*grep*`
-// active, so we read + paint the active buffer. Each `rg --no-heading
-// --line-number` line is `path:line:content`; color the `path:line:` prefix as
-// a location and a literal match of the pattern in the content as emphasis.
-export fn on_fill() void {
-    if (!activeNameIs("*grep*")) return;
+// The host fires `on_fill_token` once rg's async output has landed, bound to
+// the entry the fill captured — so we read + paint THAT entry whatever is
+// focused. Each `rg --no-heading --line-number` line is `path:line:content`;
+// color the `path:line:` prefix as a location and a literal match of the
+// pattern in the content as emphasis.
+export fn on_fill_token(token: u32) void {
+    if (token != fill_results) return;
     weft.styleClear();
     const text = weft.slice(0, weft.byteLen()); // clamped to the read scratch
     var i: usize = 0;
@@ -141,18 +145,6 @@ export fn on_fill() void {
         styleGrepLine(i, text[i..e]);
         i = e + 1;
     }
-}
-
-/// True when the active buffer's name is exactly `want`.
-fn activeNameIs(want: []const u8) bool {
-    const count = weft.bufferCount();
-    var i: usize = 0;
-    while (i < count) : (i += 1) {
-        if (!weft.bufferActive(i)) continue;
-        const bn = weft.bufferName(i) orelse return false;
-        return std.mem.eql(u8, bn, want);
-    }
-    return false;
 }
 
 fn styleGrepLine(base: usize, line: []const u8) void {

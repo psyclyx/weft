@@ -41,5 +41,5 @@ fn send() void {
     if (line.len == 0) return;
     const n = @min(line.len, cmd_buf.len);
     @memcpy(cmd_buf[0..n], line[0..n]); // copy — procAppendBuffer reads later ABI
-    weft.procAppendBuffer(cmd_buf[0..n], console);
+    weft.procAppendBuffer(cmd_buf[0..n], console, 0);
 }

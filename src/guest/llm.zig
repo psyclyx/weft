@@ -41,7 +41,7 @@ fn run(prompt: []const u8) void {
     const cli = if (configured.len > 0) configured else "llm";
     var cmd_buf: [2048]u8 = undefined;
     const cmd = std.fmt.bufPrint(&cmd_buf, "{s} < {s} 2>&1", .{ cli, prompt_file }) catch return;
-    weft.procToBuffer(cmd, "*llm*");
+    weft.procToBuffer(cmd, "*llm*", 0);
 }
 
 /// Ask with the prompt given as arg0.

@@ -98,5 +98,5 @@ fn runSubst(template: []const u8, path: []const u8) void {
         }
     }
     weft.runStr("buffer-create", "*run*");
-    weft.procToBuffer(cmd_buf[0..w], "*run*");
+    weft.procToBuffer(cmd_buf[0..w], "*run*", 0);
 }

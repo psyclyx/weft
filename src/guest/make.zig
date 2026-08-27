@@ -35,7 +35,7 @@ export fn on_command(id: u32) void {
 fn run(cmd: []const u8, name: []const u8) void {
     weft.runStr("buffer-create", name); // creates + focuses an empty scratch
     weft.setMode("output"); // navigable: Return visits a file:line (see run.zig)
-    weft.procToBuffer(cmd, name);
+    weft.procToBuffer(cmd, name, 0);
 }
 fn makeBuild() void {
     run("zig build", "*build*");

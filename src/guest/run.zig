@@ -45,7 +45,7 @@ export fn on_command(id: u32) void {
 fn show(cmd: []const u8) void {
     weft.runStr("buffer-create", out_name); // creates + focuses an empty scratch
     weft.setMode("output"); // navigable: Return visits a file:line under the cursor
-    weft.procToBuffer(cmd, out_name);
+    weft.procToBuffer(cmd, out_name, 0);
 }
 
 /// Return in `*output*`: jump to the `file:line` under the cursor. Unlike grep's

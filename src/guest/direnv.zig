@@ -30,7 +30,7 @@ export fn on_command(id: u32) void {
 
 fn show(cmd: []const u8) void {
     weft.runStr("buffer-create", "*direnv*");
-    weft.procToBuffer(cmd, "*direnv*");
+    weft.procToBuffer(cmd, "*direnv*", 0);
 }
 fn status() void {
     show("direnv status 2>&1");
