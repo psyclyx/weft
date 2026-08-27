@@ -637,44 +637,10 @@ pub fn dispatchSpec(ctx: *core.command.Context, spec: []const u8, commit: core.T
 // answers `Return` is a property of what the focused context offers, never
 // of what loaded first.
 
-/// This head's `catalog.Context` for this keystroke. The clock's signature
-/// folds every input the eligible offer set depends on (focused entry,
-/// entry shape, mode, tool, semantic view and its revision); deriving it
-/// HERE, at the one place resolution happens, is why no focus or scene
-/// chokepoint can be missed. A repeat keystroke in an unchanged context
-/// leaves the revision alone, so `snapshot` is a cache hit. Public because
-/// explaining a binding must ask the catalog the SAME question dispatch
-/// asked — a second, drifting context builder is the bug this prevents.
-pub fn catalogContext(ctx: *core.command.Context) core.catalog.Context {
-    const entry = ctx.buffers.active();
-    const path = if (entry.textEditor()) |ed| ed.backingPath() else null;
-    var h = std.hash.Wyhash.init(0);
-    h.update(ctx.head.currentMode());
-    h.update(entry.tool);
-    h.update(&[_]u8{@intFromBool(path != null)});
-    if (ctx.head.semantic_focus.view) |view| {
-        h.update(std.mem.asBytes(&view.slot));
-        h.update(std.mem.asBytes(&view.generation));
-        const rev: u64 = if (ctx.semantic) |s|
-            if (s.views.get(view)) |inst| inst.descriptor.revision else 0
-        else
-            0;
-        h.update(std.mem.asBytes(&rev));
-    }
-    ctx.head.catalog_clock.observe(ctx.buffers.active_id, h.final());
-    return .{
-        .key = ctx.head.catalog_clock.key,
-        .revision = ctx.head.catalog_clock.revision,
-        .facts = .{
-            .path = path,
-            .name = entry.name,
-            .mode = ctx.head.currentMode(),
-            .lang = core.Actions.langOfName(entry.name),
-            .tool = entry.tool,
-            .pane = ctx.head.focused_pane,
-        },
-    };
-}
+/// The `catalog.Context` this keystroke resolves against. Core owns the ONE
+/// derivation (`core/intent.zig`); explaining a binding asks with the same
+/// function, so a second, drifting context builder cannot exist.
+pub const catalogContext = core.intent.catalogContext;
 
 /// What one keypress will actually do: run a command by name, or invoke the
 /// endpoint an intention resolved to.

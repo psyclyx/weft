@@ -12,6 +12,7 @@ const std = @import("std");
 const Allocator = std.mem.Allocator;
 const catalog_mod = @import("catalog.zig");
 const command = @import("command.zig");
+const Actions = @import("action.zig");
 const intentions = @import("intentions.zig");
 const semantic = @import("semantic.zig");
 const view_offers = @import("view_offers.zig");
@@ -250,6 +251,122 @@ pub const Plane = struct {
         return self.invokers.invoke(ctx, d.endpoint);
     }
 };
+
+// ── The question dispatch asks ───────────────────────────────────────
+
+/// This head's `catalog.Context` for right now. The clock's signature folds
+/// every input the eligible offer set depends on (focused entry, entry shape,
+/// mode, tool, semantic view and its revision); deriving it HERE, in ONE
+/// place, is why no focus or scene chokepoint can be missed. A repeat in an
+/// unchanged context leaves the revision alone, so `snapshot` is a cache hit.
+///
+/// Dispatch calls it on the keystroke path; `explain` calls it to ask the
+/// SAME question — a second, drifting context builder is the bug this
+/// prevents.
+pub fn catalogContext(ctx: *command.Context) catalog_mod.Context {
+    const entry = ctx.buffers.active();
+    const path = if (entry.textEditor()) |ed| ed.backingPath() else null;
+    var h = std.hash.Wyhash.init(0);
+    h.update(ctx.head.currentMode());
+    h.update(entry.tool);
+    h.update(&[_]u8{@intFromBool(path != null)});
+    if (ctx.head.semantic_focus.view) |view| {
+        h.update(std.mem.asBytes(&view.slot));
+        h.update(std.mem.asBytes(&view.generation));
+        const rev: u64 = if (ctx.semantic) |s|
+            if (s.views.get(view)) |inst| inst.descriptor.revision else 0
+        else
+            0;
+        h.update(std.mem.asBytes(&rev));
+    }
+    ctx.head.catalog_clock.observe(ctx.buffers.active_id, h.final());
+    return .{
+        .key = ctx.head.catalog_clock.key,
+        .revision = ctx.head.catalog_clock.revision,
+        .facts = .{
+            .path = path,
+            .name = entry.name,
+            .mode = ctx.head.currentMode(),
+            .lang = Actions.langOfName(entry.name),
+            .tool = entry.tool,
+            .pane = ctx.head.focused_pane,
+        },
+    };
+}
+
+// ── Explanation (architecture §9.5) ──────────────────────────────────
+
+/// What a binding's authored arms WOULD do here — the answer an explain UI
+/// (which-key) renders. Names are catalog- or keymap-owned: borrowed, valid
+/// until either mutates.
+pub const Explanation = union(enum) {
+    /// No arm is a resolvable intention here: nothing offers one, or a flat
+    /// command arm claims the key first. The UI keeps showing the command.
+    none,
+    /// The arm that would win, and the provider that would run it.
+    ready: struct { intention: []const u8, provider: []const u8 },
+    /// The arm that would be reported, and the obstacle it hits (§10.2) —
+    /// either a provider refusing it, or nobody offering it at all (then
+    /// `provider` is empty and the arm named is the first authored one).
+    blocked: struct { intention: []const u8, provider: []const u8, reason: []const u8 },
+};
+
+/// The whole list was applicable to nobody — every arm fell through (§10.2).
+const unoffered = "not offered here";
+
+/// Ask the catalog what `arms` would do, WITHOUT doing it. This walks the
+/// same first-applicable order dispatch walks, over the same published
+/// tables, so a hint cannot promise what the keypress would not deliver.
+///
+/// Explanation conveys no authority by construction: it reads published
+/// offers and mints nothing. No endpoint is invoked, and no provider is asked
+/// to republish — this is a describing read, not the pushed-offer sync the
+/// keystroke path performs.
+pub fn explain(ctx: *command.Context, arms: []const []const u8) Explanation {
+    const plane = ctx.intent orelse return .none;
+    const cat = &plane.catalog;
+    const c = catalogContext(ctx);
+    const snap = cat.snapshot(c) catch return .none;
+    var first: ?[]const u8 = null;
+    for (arms) |name| {
+        if (!catalog_mod.isIntentionName(name)) {
+            // A flat arm that resolves ends the walk exactly as it would for
+            // dispatch — no later intention is ever reached.
+            if (ctx.commands.resolve(name) != null or ctx.keymap.isMenuMode(name)) return .none;
+            continue;
+        }
+        if (first == null) first = name;
+        const id = cat.findIntention(name) orelse continue;
+        switch (snap.resolveOne(id)) {
+            .decision => |d| return .{ .ready = .{
+                .intention = cat.intentionName(d.intention),
+                .provider = cat.providerName(d.provider),
+            } },
+            .unavailable => |u| switch (u) {
+                .no_offer => {}, // nonapplicable — the next arm gets its turn
+                .disabled => |d| return .{ .blocked = .{
+                    .intention = cat.intentionName(d.intention),
+                    .provider = cat.providerName(d.provider),
+                    .reason = d.reason.reason,
+                } },
+                .checking => |ch| return .{ .blocked = .{
+                    .intention = cat.intentionName(ch.intention),
+                    .provider = cat.providerName(ch.provider),
+                    .reason = "checking",
+                } },
+            },
+            .ambiguous => |a| return .{ .blocked = .{
+                .intention = cat.intentionName(a.intention),
+                .provider = a.a.owner,
+                .reason = "ambiguous",
+            } },
+        }
+    }
+    // Every intention arm fell through: name the one the binding leads with,
+    // so the hint says "bound, but nothing here answers it".
+    const led = first orelse return .none;
+    return .{ .blocked = .{ .intention = led, .provider = "", .reason = unoffered } };
+}
 
 // ── Tests ───────────────────────────────────────────────────────────
 

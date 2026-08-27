@@ -375,3 +375,61 @@ test "e2e/grammar: GATE 3 — an unbound printable key in the files view synthes
     try t.expectEqual(doc_before == null, doc_after == null);
     if (doc_before) |b| try t.expectEqualStrings(b, doc_after.?);
 }
+
+test "e2e/grammar: explaining a binding names its intention and provider, and runs nothing" {
+    const gpa = t.allocator;
+    var app: GrammarApp = undefined;
+    try app.init(gpa);
+    defer app.deinit();
+    const ed = &app.ed;
+    try authorTree(ed);
+
+    ed.runStr("open", ".");
+    // A keystroke first, exactly as in production: dispatch publishes the
+    // focused view's table, and only THEN does a menu open and which-key ask.
+    ed.press("j", "j");
+
+    const focus_before = try focusedName(ed, gpa);
+    defer gpa.free(focus_before);
+    const view_before = ed.head.semantic_focus.path().?.view;
+    var rows_before = try rowNames(ed, gpa);
+    defer freeNames(gpa, &rows_before);
+
+    // What which-key prints for `j`: the arm that would win, and the provider
+    // that would run it — from the resolver, not from a second table.
+    switch (core.intent.explain(ed.ctx, &.{"std.navigation.down"})) {
+        .ready => |r| {
+            try t.expectEqualStrings("std.navigation.down", r.intention);
+            try t.expectEqualStrings("core.view", r.provider);
+        },
+        else => return error.TestExpectedReady,
+    }
+
+    // `Tab` is bound here and offered by nobody: the hint reports the arm the
+    // binding leads with and why it is dead, instead of promising an expansion.
+    switch (core.intent.explain(ed.ctx, &.{"std.hierarchy.toggle-expanded"})) {
+        .blocked => |b| {
+            try t.expectEqualStrings("std.hierarchy.toggle-expanded", b.intention);
+            try t.expectEqualStrings("", b.provider); // nobody to name
+            try t.expect(b.reason.len > 0);
+        },
+        else => return error.TestExpectedBlocked,
+    }
+
+    // A plain command arm is dispatch's, not the catalog's — nothing to explain.
+    try t.expect(core.intent.explain(ed.ctx, &.{"open"}) == .none);
+
+    // EXPLANATION CONVEYS NO AUTHORITY. The calls above resolved an endpoint a
+    // keypress would have invoked; it was not invoked, so the focus
+    // `std.navigation.down` moves has not moved, the projection is untouched,
+    // and nothing was echoed.
+    const focus_after = try focusedName(ed, gpa);
+    defer gpa.free(focus_after);
+    try t.expectEqualStrings(focus_before, focus_after);
+    try t.expectEqual(view_before, ed.head.semantic_focus.path().?.view);
+    var rows_after = try rowNames(ed, gpa);
+    defer freeNames(gpa, &rows_after);
+    try t.expectEqual(rows_before.items.len, rows_after.items.len);
+    for (rows_before.items, rows_after.items) |b, a| try t.expectEqualStrings(b, a);
+    try t.expectEqualStrings("", ed.echoText());
+}

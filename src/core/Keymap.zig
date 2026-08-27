@@ -371,7 +371,15 @@ pub fn commitCommand(self: *const Keymap, mode: []const u8) ?[]const u8 {
     return self.commit_commands.get(mode);
 }
 
-pub const Binding = struct { key: []const u8, command: []const u8 };
+/// One enumerated binding: its display key, its FIRST arm (what a plain
+/// command binding shows), and the whole authored arm list — which an explain
+/// UI hands back to the resolver to say what the key would actually do.
+/// Keymap-owned; valid until the next mutation.
+pub const Binding = struct {
+    key: []const u8,
+    command: []const u8,
+    arms: []const []const u8 = &.{},
+};
 
 /// The reserved layer for which-key NAVIGATION keys (paginate the hint) — the
 /// META keys that act on the which-key overlay WITHOUT being part of the chord
@@ -459,7 +467,7 @@ pub fn mayLeaveLocked(self: *const Keymap, current: []const u8, target: []const 
 /// For which-key: a leaf menu mode's whole table.
 pub fn ownBindings(self: *const Keymap, gpa: Allocator, mode: []const u8, out: *std.ArrayList(Binding)) Allocator.Error!void {
     const b = self.modes.getPtr(mode) orelse return;
-    for (b.keys(), b.values()) |k, v| try out.append(gpa, .{ .key = k, .command = v.commands[0] });
+    for (b.keys(), b.values()) |k, v| try out.append(gpa, .{ .key = k, .command = v.commands[0], .arms = v.commands });
 }
 
 /// Number of bindings in `mode`'s own table (for which-key enumeration via the
@@ -508,7 +516,7 @@ fn addResolvedInto(self: *const Keymap, gpa: Allocator, mode: []const u8, out: *
         for (out.items) |existing| {
             if (std.mem.eql(u8, existing.key, k)) continue :outer;
         }
-        try out.append(gpa, .{ .key = k, .command = v.commands[0] });
+        try out.append(gpa, .{ .key = k, .command = v.commands[0], .arms = v.commands });
         try out_group.append(gpa, self.isMenuMode(v.commands[0]));
     }
 }
@@ -558,7 +566,13 @@ fn addCompletionsInto(self: *const Keymap, gpa: Allocator, mode: []const u8, pre
         for (out.items) |existing| {
             if (std.mem.eql(u8, existing.key, seg)) break; // already offered — dedup
         } else {
-            try out.append(gpa, .{ .key = seg, .command = if (is_leaf) v.commands[0] else "+prefix" });
+            // Only a LEAF carries arms: a group's label is a placeholder, and
+            // the chord it opens resolves nothing yet.
+            try out.append(gpa, .{
+                .key = seg,
+                .command = if (is_leaf) v.commands[0] else "+prefix",
+                .arms = if (is_leaf) v.commands else &.{},
+            });
             try out_group.append(gpa, !is_leaf);
         }
     }
