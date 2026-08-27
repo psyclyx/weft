@@ -1001,6 +1001,9 @@ const guest = struct {
     const fmt = @embedFile("guest_fmt_wasm");
     const emacs = @embedFile("guest_emacs_wasm");
     const helix = @embedFile("guest_helix_wasm");
+    const repl = @embedFile("guest_repl_wasm");
+    const console = @embedFile("guest_console_wasm");
+    const llm = @embedFile("guest_llm_wasm");
     /// Test fixture only (not installed) — see `src/guest/headtest.zig`'s
     /// module doc: the minimal guest the two-head gate's guest-ABI tests
     /// (`two_head_test.zig`) drive.
@@ -1087,6 +1090,21 @@ pub fn loadWebIde(ed: *Editor) !void {
     try ed.load("run", guest.run);
     try ed.load("make", guest.make);
     try ed.load("fmt", guest.fmt);
+}
+
+/// The instantiable session tools: REPLs, consoles, and LLM conversations,
+/// each of which owns a buffer per instance.
+pub fn loadSessions(ed: *Editor) !void {
+    try ed.load("repl", guest.repl);
+    try ed.load("console", guest.console);
+    try ed.load("llm", guest.llm);
+}
+
+/// Focus the buffer displayed under `name` — how a user reaches one instance of
+/// an instantiable tool among several.
+pub fn focusBuffer(ed: *Editor, name: []const u8) !void {
+    const id = ed.buffers.findByName(name) orelse return error.NoSuchBuffer;
+    try ed.buffers.switchTo(ed.gpa, id, ed.head, ed.keymap);
 }
 
 /// A writable path inside the test's tmpdir (which lives under

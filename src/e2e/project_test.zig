@@ -27,6 +27,8 @@ const app_w = h.app_w;
 const loadVim = h.loadVim;
 const loadWorkspace = h.loadWorkspace;
 const loadWebIde = h.loadWebIde;
+const loadSessions = h.loadSessions;
+const focusBuffer = h.focusBuffer;
 const bootConfig = h.bootConfig;
 const whichKeyText = h.whichKeyText;
 const whichKeyShows = h.whichKeyShows;
@@ -1339,4 +1341,77 @@ test "e2e/web: author js + html, grep across them, run it with node" {
     ed.press("q", "");
     try t.expectEqual(prior_buffer, ed.buffers.active().id);
     try t.expect(ed.head.semantic_focus.path() == null);
+}
+
+// Two of an instantiable tool stay isolated. A stateful session belongs to the
+// buffer it was started in, not to a module singleton, so a second start does
+// not evict the first and a quit reaches only its own child.
+test "e2e/session: two REPLs evaluate independently and quitting one leaves the other live" {
+    const gpa = t.allocator;
+    var proj: Project = undefined;
+    try proj.init(gpa);
+    defer proj.deinit();
+
+    var ed: Editor = undefined;
+    try Editor.init(gpa, &ed);
+    defer ed.deinit();
+    try loadVim(&ed);
+    try loadSessions(&ed);
+
+    // A shell read-loop is a persistent echo REPL that flushes each line.
+    const echo_loop = "while read l; do echo \"$l\"; done";
+    ed.runStr("repl-start", echo_loop);
+    ed.runStr("repl-start", echo_loop);
+    try t.expect(ed.buffers.findByName("*repl*") != null);
+    try t.expect(ed.buffers.findByName("*repl:2*") != null);
+
+    // Each REPL is addressed by its own buffer, and answers only there.
+    try focusBuffer(&ed, "*repl*");
+    ed.runStr("repl-send", "one\n");
+    try t.expect(drainToolContains(&ed, "*repl*", "one"));
+    try focusBuffer(&ed, "*repl:2*");
+    ed.runStr("repl-send", "two\n");
+    try t.expect(drainToolContains(&ed, "*repl:2*", "two"));
+    {
+        const first = toolText(&ed, "*repl*").?;
+        defer gpa.free(first);
+        try t.expect(std.mem.indexOf(u8, first, "two") == null);
+    }
+
+    // Quitting the focused REPL ends that child only.
+    try focusBuffer(&ed, "*repl*");
+    ed.run("repl-quit");
+    try focusBuffer(&ed, "*repl:2*");
+    ed.runStr("repl-send", "still\n");
+    try t.expect(drainToolContains(&ed, "*repl:2*", "still"));
+}
+
+// Two asks issued back to back overlap in the pool. Neither the prompt handed
+// to the CLI nor the buffer the reply lands in may be shared, or the second ask
+// answers the first's question in the first's conversation.
+test "e2e/session: two LLM asks in flight land in their own conversations" {
+    const gpa = t.allocator;
+    var proj: Project = undefined;
+    try proj.init(gpa);
+    defer proj.deinit();
+
+    var ed: Editor = undefined;
+    try Editor.init(gpa, &ed);
+    defer ed.deinit();
+    try loadVim(&ed);
+    try loadSessions(&ed);
+
+    // A hermetic adapter that answers slowly enough for the second ask to be
+    // issued while the first is still running — real overlap, not a sequence.
+    try ed.setConfig("llm", "cmd", "sh -c 'sleep 0.3; exec sed \"s/^/assistant: /\"'");
+    ed.runStr("llm-ask", "first prompt");
+    ed.runStr("llm-ask", "second prompt");
+
+    try t.expect(drainToolContains(&ed, "*llm*", "assistant: first prompt"));
+    try t.expect(drainToolContains(&ed, "*llm:2*", "assistant: second prompt"));
+    {
+        const first = toolText(&ed, "*llm*").?;
+        defer gpa.free(first);
+        try t.expect(std.mem.indexOf(u8, first, "second") == null);
+    }
 }
