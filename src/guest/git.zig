@@ -26,6 +26,13 @@
 //! shifted hunks. Focus restoration still uses correlation hints; those are
 //! presentation comfort and grant no authority.
 //!
+//! The verbs are published as OFFERS, not hidden behind a locked mode: git
+//! pushes a `plugin.git.*` table (stage/unstage/open-diff/commit/refresh/
+//! push/pull/fetch) scoped to the `*git*` entry's tool identity and stamped
+//! with the model ordinal, so `s`/`u`/`RET` in this buffer resolve what THIS
+//! row affords — with the reason when it affords nothing — and an offer
+//! resolved against a model a mutation replaced dies at the effect door.
+//!
 //! Staging is pure plugin logic: file → `git add`/`git reset`; hunk → synthesize
 //! a one-file/one-hunk patch (kept diff header + the `@@` hunk) and
 //! `git apply --cached [--reverse]`; a selected line-range → a PARTIAL hunk
@@ -90,6 +97,10 @@ const MARK_R = "\x1e\x1eR";
 /// Instance base: session 1 takes `*git*`, session 2 `*git:2*` (weft.zig's
 /// instanced-tool-buffer naming — a buffer name IS an instance's identity).
 const buf_base = "git";
+/// A status entry's tool identity. Every offer we publish is predicated on it,
+/// so the verbs below are about a git buffer — not about whichever mode happens
+/// to be active, and not about a rendered byte range.
+const tool = "git";
 
 // ── The model ────────────────────────────────────────────────────────────
 const Section = enum(u8) { untracked = 0, unstaged = 1, staged = 2, recent = 3 };
@@ -301,6 +312,10 @@ const cmds = [_]Cmd{
     .{ .name = "git-init", .handler = gitInit, .route = .repo },
     .{ .name = "git-refresh", .handler = gitRefresh },
     .{ .name = "git-toggle-fold", .handler = gitToggleFold },
+    // Row motion: core's cursor move, then republish — the offers describe
+    // the row under point, so moving point is a new eligibility fact.
+    .{ .name = "git-next-row", .handler = gitNextRow },
+    .{ .name = "git-prev-row", .handler = gitPrevRow },
     .{ .name = "git-stage", .handler = gitStage, .scope = .snapshot },
     .{ .name = "git-unstage", .handler = gitUnstage, .scope = .snapshot },
     .{ .name = "git-stage-all", .handler = gitStageAll },
@@ -398,19 +413,22 @@ export fn init() void {
     for (&sessions) |*s| s.* = .{};
     cur = &sessions[0];
     for (cmds) |c| _ = weft.register(c.name);
-    // git mode: navigation-only plus the interactive verbs. It declares no
-    // text commit, so typing can never reach the read-only status buffer.
-    // A read-only projection: its keymap is PINNED — you can't drop into a
-    // generic editing mode (`normal`) inside it, so git's keys never go dead.
-    // The framework enforces it; git just declares it (no defensive handling).
-    weft.lockedMode("git");
-    weft.bindKey("git", "j", "cursor-down"); // fold-aware in core
-    weft.bindKey("git", "k", "cursor-up");
-    weft.bindKey("git", "Down", "cursor-down");
-    weft.bindKey("git", "Up", "cursor-up");
+    // git mode: navigation plus the interactive verbs. It declares no text
+    // commit, and the `*git*` entry holds no editor at all, so typing refuses
+    // STRUCTURALLY — there is nothing for a mode lock to protect. It is the
+    // buffer's RESTING mode instead: leaving a transient lands back here
+    // rather than in a generic editing mode with dead keys.
+    weft.restingMode("git");
+    weft.bindKey("git", "j", "git-next-row"); // core's fold-aware move, then republish
+    weft.bindKey("git", "k", "git-prev-row");
+    weft.bindKey("git", "Down", "git-next-row");
+    weft.bindKey("git", "Up", "git-prev-row");
     weft.bindKey("git", "Tab", "git-toggle-fold");
-    weft.bindKey("git", "s", "git-stage");
-    weft.bindKey("git", "u", "git-unstage");
+    // The row verbs resolve OFFERS (see publishOffers): the key names what
+    // the user means, git's published table says whether this row affords it
+    // and why not, and the effect door rechecks the model ordinal.
+    weft.bindKeys("git", "s", &.{"plugin.git.stage"});
+    weft.bindKeys("git", "u", &.{"plugin.git.unstage"});
     weft.bindKey("git", "S", "git-stage-all");
     weft.bindKey("git", "U", "git-unstage-all");
     // Discard is destructive; `x` (not git's `k`, which we spend on vim-style
@@ -426,12 +444,14 @@ export fn init() void {
     // Cherry-pick / revert the commit under point (resolve the hash live).
     weft.bindKey("git", "A", "git-cherry-pick");
     weft.bindKey("git", "V", "git-revert");
-    weft.bindKey("git", "P", "git-push");
-    weft.bindKey("git", "F", "git-pull");
-    weft.bindKey("git", "f", "git-fetch");
-    weft.bindKey("git", "g", "git-refresh");
+    // Entry-level offers: about the repository this buffer projects, not
+    // about the row under point.
+    weft.bindKeys("git", "P", &.{"plugin.git.push"});
+    weft.bindKeys("git", "F", &.{"plugin.git.pull"});
+    weft.bindKeys("git", "f", &.{"plugin.git.fetch"});
+    weft.bindKeys("git", "g", &.{"plugin.git.refresh"});
     // RET dispatches: file/hunk → visit; commit → show.
-    weft.bindKey("git", "Return", "git-visit");
+    weft.bindKeys("git", "Return", &.{"plugin.git.open-diff"});
     weft.bindKey("git", "q", "buffer-back");
 
     // Discard confirm: a tiny menu mode — y does it, n/Escape backs out.
@@ -465,7 +485,7 @@ export fn init() void {
     // Commit dispatch (`c`): a which-key transient. Each key is terminal, so the
     // core's one-shot menu auto-return lands back in git for free.
     weft.menuMode("git-commit-dispatch");
-    weft.bindKey("git-commit-dispatch", "c", "git-commit");
+    weft.bindKeys("git-commit-dispatch", "c", &.{"plugin.git.commit"});
     weft.bindKey("git-commit-dispatch", "a", "git-amend");
     weft.bindKey("git-commit-dispatch", "e", "git-extend");
     weft.bindKey("git-commit-dispatch", "w", "git-reword");
@@ -590,8 +610,10 @@ export fn init() void {
     weft.bindKey("git-rebase-cc", "C-g", "git-rebase-resume");
 
     // A shared read-only view mode for the show/log/stash buffers (own their own
-    // buffers, so git's mutating keys never fire against a stale model).
-    weft.lockedMode("git-view"); // read-only projection: keymap pinned (see git)
+    // buffers, so git's mutating keys never fire against a stale model). Like
+    // `git`, these entries hold no editor — nothing to lock, so it is simply
+    // the mode those buffers rest in.
+    weft.restingMode("git-view");
     weft.bindKey("git-view", "j", "cursor-down");
     weft.bindKey("git-view", "k", "cursor-up");
     weft.bindKey("git-view", "Down", "cursor-down");
@@ -669,6 +691,14 @@ export fn on_fill_token(token: u32) void {
         .log => classify(styleLogLine),
         .rebase => rebaseTodoFill(),
     }
+}
+
+/// A buffer took focus. One offer table is live for the `git` tool identity,
+/// so it has to describe the repository the user is now looking at — this is
+/// the routing entry for focus, exactly as `on_fill_token` is for a delivery.
+export fn on_activate() void {
+    cur = focusedSession() orelse return;
+    publishOffers();
 }
 
 // ── Repository sessions: root detection, minting, routing ──────────────────
@@ -840,6 +870,9 @@ fn parseAndRender() void {
     weft.jump(weft.lineAt(target).start);
     cur.restore_cursor = false;
     cur.restore_kind = .none;
+    // A new model is a new offer table: the previous one described rows that
+    // no longer exist, and its ordinal is now stale at the door.
+    publishOffers();
     noteDrops();
 }
 
@@ -1272,7 +1305,89 @@ fn nodeAt(off: usize) Node {
     return .{ .kind = .none, .idx = 0 };
 }
 
+// ── Published offers: what the row under point affords ─────────────────────
+/// The section a node belongs to — the fact every staging verb turns on.
+fn sectionOf(n: Node) ?Section {
+    return switch (n.kind) {
+        .file => cur.files[n.idx].section,
+        .hunk => cur.files[cur.hunks[n.idx].file].section,
+        .section => @enumFromInt(n.idx),
+        .none => null,
+    };
+}
+
+/// Is point on a commit line of the Recent section?
+fn onCommitLine() bool {
+    var scratch: [64]u8 = undefined;
+    return recentHashToken(&scratch) != null;
+}
+
+fn stageReason(n: Node) []const u8 {
+    return switch (sectionOf(n) orelse return "no-row") {
+        .untracked, .unstaged => "",
+        .staged => "already-staged",
+        .recent => "not-a-change",
+    };
+}
+
+fn unstageReason(n: Node) []const u8 {
+    return if ((sectionOf(n) orelse return "no-row") == .staged) "" else "not-staged";
+}
+
+fn openReason(n: Node) []const u8 {
+    return switch (n.kind) {
+        .file, .hunk => "",
+        .section => if (@as(Section, @enumFromInt(n.idx)) == .recent and onCommitLine()) "" else "no-target",
+        .none => "no-row",
+    };
+}
+
+/// Publish what git affords RIGHT HERE: the row verbs, from the node under
+/// point, and the repository-level verbs, from being in a repo at all. Pushed
+/// on every event that can change either — a new model, a fold, a row move —
+/// so nothing has to probe git mid-resolution.
+///
+/// The table is scoped to git's own tool identity and stamped with the
+/// session's snapshot ordinal: it applies in a status entry, and only while the
+/// model it was computed from is the current one.
+///
+/// Every status entry shares the `git` tool identity, so ONE table is live at a
+/// time and it must describe the FOCUSED repository. A gather landing in an
+/// unfocused session therefore says nothing; `on_activate` republishes when a
+/// git buffer takes focus.
+fn publishOffers() void {
+    if (focusedSession() != cur) return;
+    if (!cur.in_repo) {
+        weft.offersRetract();
+        return;
+    }
+    const n = nodeAt(weft.cursor());
+    weft.offersBegin(tool, cur.snapshot);
+    weft.offer("plugin.git.stage", "git-stage", stageReason(n));
+    weft.offer("plugin.git.unstage", "git-unstage", unstageReason(n));
+    weft.offer("plugin.git.open-diff", "git-visit", openReason(n));
+    weft.offer("plugin.git.commit", "git-commit", "");
+    weft.offer("plugin.git.refresh", "git-refresh", "");
+    weft.offer("plugin.git.push", "git-push", "");
+    weft.offer("plugin.git.pull", "git-pull", "");
+    weft.offer("plugin.git.fetch", "git-fetch", "");
+    weft.offersCommit();
+}
+
 // ── Navigation / folding ────────────────────────────────────────────────────
+/// Core moves point (fold-aware); we republish, because the row under point
+/// IS the offers' subject. A cursor moved by anything else leaves the table
+/// describing the previous row — the verb then refuses out loud when it
+/// re-resolves the node, exactly as it always has.
+fn gitNextRow() void {
+    weft.run("cursor-down");
+    publishOffers();
+}
+fn gitPrevRow() void {
+    weft.run("cursor-up");
+    publishOffers();
+}
+
 fn gitStatus() void {
     cur.restore_cursor = false;
     gather(GATHER);
@@ -1321,6 +1436,7 @@ fn gitToggleFold() void {
     }
     rerender();
     weft.jump(weft.lineAt(head).start);
+    publishOffers(); // every node moved; point landed on a header
 }
 
 /// Repaint the buffer from the model in hand — no re-gather, the model is
@@ -1902,7 +2018,12 @@ fn gitBlame() void {
 fn show(cmd: []const u8, name: []const u8, fill: Fill) void {
     const body = std.fmt.bufPrint(&run_buf, "cd '{s}' || exit 0\n{s}", .{ cur.root(), cmd }) catch return;
     if (!focusBuffer(name)) weft.runStr("buffer-create", name);
-    if (fill == .status) cur.gathering = true; // the projection is now provisional
+    if (fill == .status) {
+        // A status entry carries git's tool identity: it is what the published
+        // offers are ABOUT, and the fact the catalog matches them on.
+        weft.toolBacking(tool);
+        cur.gathering = true; // the projection is now provisional
+    }
     weft.procToBuffer(body, name, fillToken(fill, cur));
 }
 

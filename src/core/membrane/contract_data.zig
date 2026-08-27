@@ -236,6 +236,10 @@ pub const imports = [_]Entry{
     .{ .name = "wl_offer_provider", .params = &.{ .u32, .u32, .u32 }, .results = &.{.i32}, .group = .intent, .doc = "the `i`-th offer's winning provider name, into guest memory" },
     .{ .name = "wl_offer_reason", .params = &.{ .u32, .u32, .u32 }, .results = &.{.i32}, .group = .intent, .doc = "why the `i`-th offer cannot run (0 = it can), into guest memory" },
     .{ .name = "wl_intent_invoke", .params = &.{ .u32, .u32, .u32, .u32 }, .results = &.{.i32}, .group = .intent, .doc = "resolve an intention for the CURRENT context and invoke it through the effect door; writes a refusal reason (0 = invoked, -1 = not an intention)" },
+    .{ .name = "wl_offers_begin", .params = &.{ .u32, .u32, .u32 }, .results = &.{.u32}, .group = .intent, .doc = "start this plugin's offer table for a tool identity, stamped with its model ordinal" },
+    .{ .name = "wl_offer", .params = &.{ .u32, .u32, .u32, .u32, .u32, .u32 }, .results = &.{.u32}, .group = .intent, .doc = "stage one offer row: an intention, one of this plugin's own commands, and the reason it cannot run (empty = enabled)" },
+    .{ .name = "wl_offers_commit", .params = &.{}, .results = &.{.u32}, .group = .intent, .doc = "publish the staged table as this plugin's whole offer set" },
+    .{ .name = "wl_offers_retract", .params = &.{}, .results = &.{}, .group = .intent, .doc = "withdraw this plugin's offers entirely" },
 
     // ── buffers.zig — the open-buffer list (introspection) ──────────────
     .{ .name = "wl_buffer_count", .params = &.{}, .results = &.{.u32}, .group = .buffers, .doc = "the number of open buffers" },
@@ -404,7 +408,7 @@ pub const imports = [_]Entry{
 /// half-finished edit — fails the build with a pointed message instead of
 /// silently drifting the two ~124-entry tables apart again (the exact class
 /// this table exists to kill).
-const expected_import_count = 190;
+const expected_import_count = 194;
 
 /// A host→guest EXPORT entrypoint (design doc/extensibility-native-surface.md, task
 /// W0a-D extension 2): every `instance.callVoid("name", args)` the host

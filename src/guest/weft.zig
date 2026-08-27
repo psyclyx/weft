@@ -131,6 +131,10 @@ extern "weft" fn wl_offer_name(i: u32, out_ptr: u32, out_cap: u32) i32;
 extern "weft" fn wl_offer_provider(i: u32, out_ptr: u32, out_cap: u32) i32;
 extern "weft" fn wl_offer_reason(i: u32, out_ptr: u32, out_cap: u32) i32;
 extern "weft" fn wl_intent_invoke(ptr: u32, len: u32, out_ptr: u32, out_cap: u32) i32;
+extern "weft" fn wl_offers_begin(scope: u32, scope_len: u32, revision: u32) u32;
+extern "weft" fn wl_offer(i: u32, il: u32, c: u32, cl: u32, r: u32, rl: u32) u32;
+extern "weft" fn wl_offers_commit() u32;
+extern "weft" fn wl_offers_retract() void;
 extern "weft" fn wl_buffer_count() u32;
 extern "weft" fn wl_buffer_id(i: u32) i32;
 extern "weft" fn wl_buffer_name(i: u32, out_ptr: u32, out_cap: u32) i32;
@@ -884,6 +888,44 @@ pub fn invokeIntention(name: []const u8) Invocation {
     if (n < 0) return .unknown;
     if (n == 0) return .invoked;
     return .{ .refused = intent_scratch[0..@intCast(n)] };
+}
+
+// ── Publishing THIS plugin's offers ──────────────────────────────────
+/// Start the table this plugin offers about its own projection. `tool` is
+/// that buffer's tool identity (`toolBacking`) — the offers apply there and
+/// nowhere else; empty means every context. `revision` is the plugin's own
+/// MODEL ordinal: bump it whenever the model the offers describe is
+/// replaced, and an offer resolved against the old model dies at the effect
+/// door instead of acting on a row that moved.
+///
+/// A table reaches the catalog whole or not at all: stage rows with `offer`,
+/// then `offersCommit`.
+pub fn offersBegin(tool: []const u8, revision: u32) void {
+    _ = wl_offers_begin(p(tool.ptr), @intCast(tool.len), revision);
+}
+/// Stage one row: `intention` (a `plugin.<id>.<verb>` name) answered by
+/// `cmd`, one of THIS plugin's own commands. `reason` empty is an enabled
+/// offer; otherwise it is the stable code for why it cannot run here — a
+/// fallback list then reports the obstacle instead of running its next arm,
+/// and which-key explains the key without invoking anything.
+pub fn offer(intention: []const u8, cmd: []const u8, reason: []const u8) void {
+    _ = wl_offer(
+        p(intention.ptr),
+        @intCast(intention.len),
+        p(cmd.ptr),
+        @intCast(cmd.len),
+        p(reason.ptr),
+        @intCast(reason.len),
+    );
+}
+/// Publish the staged rows as this plugin's whole offer set.
+pub fn offersCommit() void {
+    _ = wl_offers_commit();
+}
+/// Withdraw them: this plugin offers nothing right now. Absence is
+/// nonapplicable — an empty table would still be a claim.
+pub fn offersRetract() void {
+    wl_offers_retract();
 }
 
 pub fn bufferCount() usize {
