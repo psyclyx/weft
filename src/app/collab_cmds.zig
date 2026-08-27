@@ -155,6 +155,43 @@ pub fn sharePresenceHandler(ctx: *core.command.Context, data: ?*anyopaque, args:
     return ok_echo(ctx, if (on) "sharing your cursor" else "cursor hidden — peers no longer see it");
 }
 
+/// `share-fs <selection>` — select which export surfaces of the shared root
+/// peers hold: `hierarchy`, `bytes`, `write` (comma-separated), or a preset
+/// (`none`/`read`/`rw`). Applies to every connected peer at once and to
+/// later ones; narrowing takes effect on their next request.
+pub fn shareFsHandler(ctx: *core.command.Context, data: ?*anyopaque, args: []const core.command.Value) anyerror!core.command.Value {
+    const sc: *ShareCtx = @ptrCast(@alignCast(data.?));
+    if (args.len != 1 or args[0] != .string) return error.TypeMismatch;
+    const grant = core.peer_fs.parseGrant(args[0].string) orelse
+        return .{ .string = "share-fs takes hierarchy|bytes|write (comma-separated) or none|read|rw" };
+    if (sc.peer_fs_root == null and grant.any()) return .{ .string = "no shared root (start with --share-root)" };
+
+    sc.fs_grant = grant;
+    if (sc.hub.*) |*h| for (h.clients.items) |peer| {
+        for (peer.conn.collabs.items) |col| col.fs_grant = grant;
+    };
+    var buf: [96]u8 = undefined;
+    return ok_echo(ctx, std.fmt.bufPrint(&buf, "peers may {s}", .{fsGrantNote(grant)}) catch "shared filesystem updated");
+}
+
+/// What a peer can do with the shared root, in the words the person picking
+/// it used.
+pub fn fsGrantNote(grant: core.peer_fs.Grant) []const u8 {
+    const surfaces: u3 = @as(u3, @intFromBool(grant.hierarchy)) |
+        @as(u3, @intFromBool(grant.bytes)) << 1 |
+        @as(u3, @intFromBool(grant.mutate)) << 2;
+    return switch (surfaces) {
+        0b000 => "not reach the shared filesystem",
+        0b001 => "list the shared files",
+        0b010 => "read shared file contents",
+        0b011 => "list and read the shared files",
+        0b100 => "write shared files",
+        0b101 => "list and write the shared files",
+        0b110 => "read and write shared file contents",
+        0b111 => "list, read, and write the shared files",
+    };
+}
+
 /// `stop-listening` — stop accepting new peers; connected peers stay.
 pub fn stopListeningHandler(ctx: *core.command.Context, data: ?*anyopaque, args: []const core.command.Value) anyerror!core.command.Value {
     const sc: *ShareCtx = @ptrCast(@alignCast(data.?));
@@ -505,6 +542,13 @@ pub fn registerCommands(gpa: std.mem.Allocator, commands: *core.command.Commands
         .handler = sharePresenceHandler,
         .data = sc,
     });
+    _ = try commands.bind(gpa, "share-fs", .{
+        .name = "share-fs",
+        .summary = "Select which shared-root surfaces peers hold: hierarchy|bytes|write (comma-separated) or none|read|rw.",
+        .args = &.{.{ .name = "surfaces", .type = .string }},
+        .handler = shareFsHandler,
+        .data = sc,
+    });
     _ = try commands.bind(gpa, "open-shared", .{
         .name = "open-shared",
         .summary = "Pick one of the peer's shared buffers and open it.",
@@ -619,4 +663,16 @@ test "open-shared resolves the snapshotted offer base after display reordering" 
     var other_incarnation = incarnation;
     other_incarnation[0] +%= 1;
     try std.testing.expect(resolveOfferOnConn(target, conn, other_incarnation, fingerprint, null) == null);
+}
+
+test "share-fs echoes the surfaces selected, one by one" {
+    const expect = std.testing.expectEqualStrings;
+    try expect("not reach the shared filesystem", fsGrantNote(.none));
+    try expect("list the shared files", fsGrantNote(.{ .hierarchy = true }));
+    try expect("read shared file contents", fsGrantNote(.{ .bytes = true }));
+    try expect("write shared files", fsGrantNote(.{ .mutate = true }));
+    try expect("list and read the shared files", fsGrantNote(.read));
+    try expect("list, read, and write the shared files", fsGrantNote(.read_write));
+    // The selection a person types is the one they are told they made.
+    try expect("list and write the shared files", fsGrantNote(core.peer_fs.parseGrant("hierarchy,write").?));
 }
