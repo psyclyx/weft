@@ -96,10 +96,9 @@ fn captureRow(slot: *Slot, base: usize, line: []const u8) ?Target {
 /// rendered line is never re-read — a row restyled or reformatted after the
 /// fill still visits where its output pointed.
 ///
-/// An uncaptured buffer says so rather than falling back to reading the screen:
-/// the host only delivers `on_fill` while the filled buffer is still ACTIVE
-/// (wasm_host/proc.zig), so a fill you looked away from lands untyped. That is
-/// the delivery seam's gap, and a silent re-parse would hide it.
+/// A buffer this plugin never filled — or one past its table complement — says
+/// so rather than falling back to reading the screen: a silent re-parse would
+/// re-introduce exactly the coupling this table removes.
 pub fn visit() void {
     const name = activeName() orelse return;
     defer weft.allocator.free(name);
