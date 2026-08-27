@@ -20,7 +20,6 @@ const h = @import("harness.zig");
 const core = h.core;
 const semantic = h.semantic_model;
 const App = h.App;
-const authorFile = h.authorFile;
 
 /// The whole configuration under test (doc/configuration.md §5.2): two
 /// `weft.plugin` declarations, no bindings of its own — the grammar owns
@@ -60,10 +59,11 @@ const GrammarApp = struct {
 };
 
 /// The fixture tree the dired e2e drives: a directory with a file in it, plus
-/// a file beside it.
+/// a file beside it. Written to disk directly — this grammar has no insert
+/// mode to author through.
 fn authorTree(ed: *h.Editor) !void {
     try core.file.writeBytesMakingDirs(ed.gpa, "child", "child/inner.txt", "inner\n");
-    authorFile(ed, "top.txt", "top\n");
+    try core.file.writeBytes(ed.gpa, "top.txt", "top\n");
 }
 
 fn focusedView(ed: *h.Editor) ?*const h.view_runtime.view.Instance {
@@ -243,6 +243,26 @@ test "e2e/grammar: GATE 1 — a synthetic std-only grammar drives Files like the
     ed.press("q", "q");
     try t.expect(ed.buffers.active().id != browser_entry);
     try t.expect(ed.head.semantic_focus.path() == null);
+
+    // Return on a FILE row is the same key, the same intention, and the same
+    // route: no tool claims a file, so the shell's placement policy opens it
+    // as an ordinary editor entry. The grammar names neither files nor
+    // buffers, and the browser is left exactly where it was.
+    ed.runStr("open", ".");
+    const files_view = ed.head.semantic_focus.path().?.view;
+    const files_entry = ed.buffers.active().id;
+    try focusRowByName(ed, gpa, "top.txt");
+    ed.press("Return", "\r");
+    try t.expect(ed.buffers.active().id != files_entry);
+    {
+        const text = (try documentText(ed, gpa)).?;
+        defer gpa.free(text);
+        try t.expectEqualStrings("top\n", text);
+    }
+    // The browser entry and its view survive untouched — activating a row
+    // navigated the workspace, not the browser.
+    try t.expect(ed.buffers.get(files_entry) != null);
+    try t.expect(ed.session.system.semantic.views.get(files_view) != null);
 }
 
 test "e2e/grammar: GATE 2 — Tab inserts where it is bound, does nothing where nothing offers it, and is never text" {

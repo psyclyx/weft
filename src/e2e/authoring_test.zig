@@ -2340,3 +2340,31 @@ test "authoring/dired: Vim Tab folds a directory open in place and back shut" {
     try t.expect((try filesRowNamed(ed, gpa, "draft-beside.txt")) != null);
     try t.expectEqual(view_ref, ed.head.semantic_focus.path().?.view);
 }
+
+test "authoring/dired: Vim Return on a file row opens it as an ordinary buffer" {
+    const gpa = t.allocator;
+    var app: App = undefined;
+    try app.init(gpa);
+    defer app.deinit();
+    const ed = &app.ed;
+
+    try core.file.writeBytes(gpa, "note.txt", "hello\n");
+    ed.runStr("open", ".");
+    const view_ref = ed.head.semantic_focus.path().?.view;
+    const browser = ed.buffers.active().id;
+
+    // Vim supplies only its ordinary Return interaction. No plugin renders a
+    // file, so the shell's placement policy opens the focused row as an
+    // editor entry — the same `open` a picker runs, and no new authority.
+    ed.press("Return", "");
+    try t.expect(ed.buffers.active().id != browser);
+    const text = try ed.buffers.active().textEditor().?.text().toOwnedSlice(gpa);
+    defer gpa.free(text);
+    try t.expectEqualStrings("hello\n", text);
+
+    // The browser is left exactly where it was: its entry and its view both
+    // survive, because activation navigated the workspace, not the browser.
+    try t.expect(ed.buffers.get(browser) != null);
+    try t.expect(ed.session.system.semantic.views.get(view_ref) != null);
+    try t.expectEqualStrings("normal", ed.mode());
+}
