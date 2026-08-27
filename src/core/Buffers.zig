@@ -96,6 +96,16 @@ pub const Buffer = struct {
         return null;
     }
 
+    /// Whether closing this entry would drop edits its file backing never
+    /// received. A projection has no file to write (`save`/`save-as` say so
+    /// too), so its text cannot be "unsaved" in that sense — what its content
+    /// is worth is the authoring tool's question, asked its own way.
+    pub fn hasUnsavedFile(self: *Buffer, gpa: Allocator) Allocator.Error!bool {
+        if (self.tool.len > 0) return false;
+        const ed = self.textEditor() orelse return false;
+        return ed.isDirty(gpa);
+    }
+
     /// Name the projection this entry represents. Idempotent.
     pub fn setTool(self: *Buffer, gpa: Allocator, name: []const u8) Error!void {
         const owned = try gpa.dupe(u8, name);

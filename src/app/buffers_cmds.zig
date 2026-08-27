@@ -179,9 +179,7 @@ pub fn closeBufferHandler(ctx: *core.command.Context, data: ?*anyopaque, args: [
     const deps = command_context.attachments;
     if (args.len != 0) return error.ArityMismatch;
     const b = ctx.buffer();
-    if (b.textEditor()) |ed| {
-        if (ed.isDirty(ctx.gpa) catch true) return .{ .string = "dirty" };
-    }
+    if (b.hasUnsavedFile(ctx.gpa) catch true) return .{ .string = "dirty" };
     // Order matters: shares reference the doc and its layers.
     if (deps.share) |sc| {
         if (sc.conn.*) |*c| c.unbindTag(b.id);

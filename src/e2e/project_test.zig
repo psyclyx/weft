@@ -990,18 +990,26 @@ test "e2e/spine: write a file, init a repo, stage and commit — all through wef
     try t.expect(drainUntilOracle(&proj, &ed, "git diff --cached --name-only", "main.zig"));
     proj.capture(&ed, "spine-2-staged");
 
-    // Commit dispatch: `c` opens the transient, `c` again starts a commit.
+    // Commit dispatch: `c` opens the transient, `c` again opens a commit DRAFT —
+    // an ordinary entry in the configuration's own editing modes, not a mode git
+    // owns. So the message is typed the way any other text is.
     ed.press("c", ""); // git-commit-dispatch (menu)
-    ed.press("c", ""); // git-commit → *git-commit* buffer, mode git-commit
-    try t.expectEqualStrings("git-commit", ed.mode());
+    ed.press("c", ""); // git-commit → a *git-commit* draft entry
+    try t.expectEqualStrings("*git-commit*", ed.bufferName());
+    try t.expectEqualStrings("normal", ed.mode());
+    ed.press("i", "");
     ed.typeText("initial commit: weft demo skeleton");
+    ed.press("Escape", "");
     {
         const msg = try ed.textAlloc();
         defer gpa.free(msg);
         try t.expect(std.mem.indexOf(u8, msg, "initial commit") != null);
     }
-    ed.press("C-c", ""); // git-commit-menu
-    ed.press("C-c", ""); // git-commit-finish → git commit -F … → re-gather
+    // Saving the draft IS the commit — the vim `:w` route, through the `save`
+    // action, resolved to git only because the entry carries git's tool identity.
+    ed.press("colon", ""); // the ex line
+    ed.typeText("w");
+    ed.press("Return", "");
     ed.run("git-status");
     try t.expect(drainUntilOracle(&proj, &ed, "git log --oneline", "initial commit"));
     proj.capture(&ed, "spine-3-committed");

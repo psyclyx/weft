@@ -373,9 +373,7 @@ fn cBufferReadOnly(ctx: *Context, args: struct { on: bool }) anyerror!Value {
 fn cBufferClose(ctx: *Context, args: struct {}) anyerror!Value {
     _ = args;
     const b = ctx.buffer();
-    if (b.textEditor()) |ed| {
-        if (ed.isDirty(ctx.gpa) catch true) return .{ .string = "dirty" };
-    }
+    if (b.hasUnsavedFile(ctx.gpa) catch true) return .{ .string = "dirty" };
     try ctx.buffers.close(ctx.gpa, b.id, ctx.head, ctx.keymap);
     return ok;
 }

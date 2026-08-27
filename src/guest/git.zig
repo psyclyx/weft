@@ -18,7 +18,15 @@
 //! command so the buffer reflects the new index (the old `stageThenRefresh`
 //! discipline). `k`/discard is destructive, gated behind a y/n confirm mode.
 //!
-//! perms `{proc, timer, fs_write}` — fs_write drops the commit message and the
+//! A COMMIT DRAFT is not part of that projection: it is an ordinary instanced
+//! text entry (`*git-commit*`, `*git-commit:2*`, …) with no mode and no keys of
+//! its own. It is tool-backed, so `save` in it resolves to `git-commit-save` —
+//! saving the draft IS the commit, aborting it is closing the entry, and
+//! amend/reword/fixup/squash are offers that re-seat the draft rather than
+//! commands with their own buffers. Each draft resolves its repository when it
+//! opens, so a second repository's draft is genuinely a second entry.
+//!
+//! perms `{proc, timer, fs_write}` — fs_write drops each draft's message and the
 //! synthesized patch into temp files. grant_max edit (it authors its own buffer).
 
 const std = @import("std");
@@ -40,7 +48,6 @@ var body_out: [PATCH_CAP]u8 = undefined;
 
 /// Temp files, cwd-relative (the locus the shell command runs in). Removed by
 /// the same command that consumes them.
-const commit_tmp = ".weft-commit-msg";
 const patch_tmp = ".weft-git.patch";
 const rebase_tmp = ".weft-rebase.todo";
 
@@ -58,9 +65,6 @@ var input_name: [256]u8 = undefined;
 var input_name_len: usize = 0;
 const InputAction = enum(u8) { none, branch_checkout, branch_create, branch_new, branch_rename, branch_delete, rebase_start };
 var input_action: InputAction = .none;
-/// Extra flags the commit-finish path passes to `git commit` (amend/reword),
-/// so the ONE editable `*git-commit*` buffer serves commit AND amend/reword.
-var commit_flags: []const u8 = "";
 /// The rebase base ref (`HEAD~N`), used for both the todo listing and the finish.
 var rebase_base: [64]u8 = undefined;
 var rebase_base_len: usize = 0;
@@ -82,10 +86,14 @@ const GATHER =
     "git status --porcelain=v1 --branch 2>/dev/null; " ++
     "printf '\\036\\036U\\n'; git diff 2>/dev/null; " ++
     "printf '\\036\\036S\\n'; git diff --cached 2>/dev/null; " ++
-    "printf '\\036\\036R\\n'; git log --format='%h %s' -10 2>/dev/null";
+    "printf '\\036\\036R\\n'; git log --format='%h %s' -10 2>/dev/null; " ++
+    "printf '\\036\\036T\\n'; git rev-parse --show-toplevel 2>/dev/null";
 const MARK_U = "\x1e\x1eU";
 const MARK_S = "\x1e\x1eS";
 const MARK_R = "\x1e\x1eR";
+const MARK_T = "\x1e\x1eT";
+/// Precedes `git commit`'s exit status in the commit fill.
+const MARK_C = "\x1e\x1eC";
 
 const buf_name = "*git*";
 
@@ -143,6 +151,11 @@ var branch_len: usize = 0;
 var in_repo: bool = false;
 var recent_start: usize = 0; // recent-commits region in `raw`
 var recent_end: usize = 0;
+/// The repository this gather described (its worktree root). A commit draft
+/// copies it when it opens, so the draft keeps committing to the repository it
+/// was written for even after the status buffer moves on.
+var repo_root: [256]u8 = undefined;
+var repo_root_len: usize = 0;
 
 /// Section fold state PERSISTS across gathers (indexed by Section) — so a
 /// collapsed Recent stays collapsed through a refresh/stage. Files rebuild each
@@ -204,16 +217,21 @@ const cmds = [_]Cmd{
     .{ .name = "git-discard-cancel", .handler = gitDiscardCancel },
     .{ .name = "git-visit", .handler = gitVisit },
     .{ .name = "git-commit", .handler = gitCommit },
-    .{ .name = "git-commit-finish", .handler = gitCommitFinish },
-    .{ .name = "git-commit-abort", .handler = gitCommitAbort },
-    .{ .name = "git-commit-resume", .handler = gitCommitResume },
-    // Commit dispatch (the `c` transient): amend/extend/reword reuse the editable
-    // `*git-commit*` buffer; fixup/squash resolve the commit under point.
+    // Saving a draft entry IS its commit; the settle runs on the fill's way back.
+    .{ .name = "git-commit-save", .handler = gitCommitSave },
+    .{ .name = "git-commit-settle", .handler = gitCommitSettle },
+    // Commit dispatch (the `c` transient): each opens a draft for the commit it
+    // means; fixup/squash resolve the commit under point into its message.
     .{ .name = "git-amend", .handler = gitAmend },
     .{ .name = "git-extend", .handler = gitExtend },
     .{ .name = "git-reword", .handler = gitReword },
     .{ .name = "git-fixup", .handler = gitFixup },
     .{ .name = "git-squash", .handler = gitSquash },
+    // The draft entry's own offers — they re-seat the draft under point.
+    .{ .name = "git-draft-amend", .handler = gitDraftAmend },
+    .{ .name = "git-draft-reword", .handler = gitDraftReword },
+    .{ .name = "git-draft-fixup", .handler = gitDraftFixup },
+    .{ .name = "git-draft-squash", .handler = gitDraftSquash },
     // Commit-scoped verbs on a recent-commit node.
     .{ .name = "git-show", .handler = gitShow },
     .{ .name = "git-cherry-pick", .handler = gitCherryPick },
@@ -341,18 +359,16 @@ export fn init() void {
     weft.bindKey("git-confirm2", "Escape", "git-confirm-no");
     weft.bindKey("git-confirm2", "C-g", "git-confirm-no");
 
-    // The commit message buffer is EDITABLE: fall back to `default` for the text
-    // command + editing keys, then layer a C-c prefix (finish/abort/resume).
-    weft.setFallback("git-commit", "default");
-    // Commit messages are ordinary editable fields even when configuration
-    // changes the fallback chain beneath this plugin-owned mode.
-    weft.textInput("git-commit", "insert-text");
-    weft.bindKey("git-commit", "C-c", "git-commit-menu");
-    weft.menuMode("git-commit-menu");
-    weft.bindKey("git-commit-menu", "C-c", "git-commit-finish");
-    weft.bindKey("git-commit-menu", "C-k", "git-commit-abort");
-    weft.bindKey("git-commit-menu", "Escape", "git-commit-resume");
-    weft.bindKey("git-commit-menu", "C-g", "git-commit-resume");
+    // A commit draft owns NO mode and NO keys: it is an ordinary text entry in
+    // the configuration's own editing modes. Its tool identity is what makes it
+    // a draft, and `save` in it resolves here instead of to a file write — so
+    // `:w`, `SPC f s`, and the palette's `std.persistence.save` all commit it.
+    weft.provide("save", .{ .tool = draft_tool }, "git-commit-save", 10);
+    // What else a draft affords, offered rather than bound.
+    weft.provide("plugin.git.amend", .{ .tool = draft_tool }, "git-draft-amend", 0);
+    weft.provide("plugin.git.reword", .{ .tool = draft_tool }, "git-draft-reword", 0);
+    weft.provide("plugin.git.fixup", .{ .tool = draft_tool }, "git-draft-fixup", 0);
+    weft.provide("plugin.git.squash", .{ .tool = draft_tool }, "git-draft-squash", 0);
 
     // Commit dispatch (`c`): a which-key transient. Each key is terminal, so the
     // core's one-shot menu auto-return lands back in git for free.
@@ -500,11 +516,13 @@ export fn on_command(id: u32) void {
 /// the landing output routes to its own handler — never to whichever buffer
 /// happens to be focused when the command finishes.
 const Fill = enum(u32) {
-    none = 0, // nothing to do after (the editable commit seed)
+    none = 0, // nothing to do after
     status, // the `*git*` projection: parse the raw output into the model
     diff, // a raw diff/show listing: color it
     log, // a `git log` listing: color it
     rebase, // the rebase todo: rewrite into editable `pick …` lines
+    draft, // a commit draft's repository + seeded message
+    commit, // a commit's outcome, ahead of the status gather
 };
 
 export fn on_fill_token(token: u32) void {
@@ -515,6 +533,8 @@ export fn on_fill_token(token: u32) void {
         .diff => classify(styleDiffLine),
         .log => classify(styleLogLine),
         .rebase => rebaseTodoFill(),
+        .draft => draftFill(),
+        .commit => commitFill(),
     }
 }
 
@@ -538,6 +558,11 @@ fn loadRaw() void {
 
 fn parseAndRender() void {
     loadRaw();
+    renderStatus();
+}
+
+/// Model → projection, over whatever `raw` currently holds.
+fn renderStatus() void {
     parse();
     render();
     // The projection is authored FIRST; styles/folds then index the new bytes.
@@ -595,12 +620,19 @@ fn parse() void {
     const ui = std.mem.indexOf(u8, data, MARK_U) orelse data.len;
     const si = std.mem.indexOf(u8, data, MARK_S) orelse data.len;
     const ri = std.mem.indexOf(u8, data, MARK_R) orelse data.len;
+    const ti = std.mem.indexOf(u8, data, MARK_T) orelse data.len;
     parsePorcelain(0, ui);
     if (ui < si) parseDiff(ui + MARK_U.len, si, .unstaged);
     if (si < ri) parseDiff(si + MARK_S.len, ri, .staged);
-    if (ri < data.len) {
+    if (ri < ti) {
         recent_start = ri + MARK_R.len;
-        recent_end = data.len;
+        recent_end = ti;
+    }
+    repo_root_len = 0;
+    if (ti < data.len) {
+        const root = std.mem.trim(u8, data[ti + MARK_T.len ..], " \t\r\n");
+        repo_root_len = @min(root.len, repo_root.len);
+        @memcpy(repo_root[0..repo_root_len], root[0..repo_root_len]);
     }
     // Re-apply the remembered file-fold state (files rebuilt default-expanded).
     for (files[0..file_count]) |*f| f.folded = isCollapsed(f.path_());
@@ -1382,73 +1414,259 @@ fn overlaps(r: weft.Range, s: usize, e: usize) bool {
     return r.start < e and r.end > s;
 }
 
-// ── Commit + the commit-dispatch transient (all reuse the ONE editable
-// `*git-commit*` buffer; `commit_flags` selects plain/amend/reword at finish) ─
-/// Open the editable commit buffer. `prefill` (or "") is a shell command whose
-/// stdout pre-populates the message — `git log -1 --format=%B` for amend/reword.
-fn openCommit(flags: []const u8, prefill: []const u8) void {
-    commit_flags = flags;
-    if (!focusBuffer("*git-commit*")) weft.runStr("buffer-create", "*git-commit*");
-    weft.edit(.{ .start = 0, .end = weft.byteLen() }, "");
-    if (prefill.len > 0) {
-        // Async: the message lands via proc under `Fill.none` — nothing runs after,
-        // so it simply becomes the editable seed text.
-        weft.procToBuffer(prefill, "*git-commit*", @intFromEnum(Fill.none));
+// ── The commit draft ───────────────────────────────────────────────────────
+// A draft is an ORDINARY text entry: no mode of its own, no owned keys. It is
+// tool-backed, so `std.persistence.save` resolves to `git-commit-save` in it —
+// saving the draft IS the commit. Aborting is closing the entry. Drafts are
+// instanced, so each repository (and each parallel message) is its own entry.
+
+/// What a draft remembers besides its text: the repository it commits to
+/// (resolved once, when the entry opens) and the flags amend/reword put on it.
+const Draft = struct {
+    root: [256]u8 = undefined,
+    root_len: usize = 0,
+    flags: [64]u8 = undefined,
+    flags_len: usize = 0,
+    /// This draft's message file, named after its entry so two live drafts
+    /// never write over each other.
+    tmp: [64]u8 = undefined,
+    tmp_len: usize = 0,
+
+    /// The `-C` target for this draft's commit. `.` while the root is still
+    /// resolving — the cwd repository, which is what a fresh draft means.
+    fn repo(self: *const Draft) []const u8 {
+        return if (self.root_len == 0) "." else self.root[0..self.root_len];
     }
+    fn flagsOf(self: *const Draft) []const u8 {
+        return self.flags[0..self.flags_len];
+    }
+    fn tmpOf(self: *const Draft) []const u8 {
+        return self.tmp[0..self.tmp_len];
+    }
+};
+/// The tool identity a draft entry carries — what scopes its `save` provider.
+const draft_tool = "git-commit";
+const Drafts = weft.Instances(Draft, 4);
+var drafts: Drafts = .{};
+/// The draft a landing commit fill answers for. One commit is in flight at a
+/// time; a fill that finds none simply has nothing left to tell.
+var committing: ?*Drafts.Slot = null;
+var commit_ok = false;
+/// What git said about the commit, kept for the failure echo.
+var commit_note: [512]u8 = undefined;
+var commit_note_len: usize = 0;
+
+/// Open a commit draft. `prefill` (or "") is a shell command whose stdout seeds
+/// the message — `git log -1 --format=%B` for amend/reword.
+fn openDraft(flags: []const u8, prefill: []const u8) void {
+    const slot = drafts.open(draft_tool) orelse {
+        weft.echo("git: too many commit drafts open");
+        return;
+    };
+    slot.value = .{};
+    setFlags(slot, flags);
+    setTmpPath(slot);
+    slot.value.root_len = repo_root_len;
+    @memcpy(slot.value.root[0..repo_root_len], repo_root[0..repo_root_len]);
+    weft.toolBacking(draft_tool);
+    seedDraft(slot, prefill);
     weft.jump(0);
-    weft.setMode("git-commit");
-    weft.echo("commit: C-c C-c to commit, C-c C-k to abort");
+    weft.echo("commit draft: save to commit, close to abort");
 }
+
+fn setFlags(slot: *Drafts.Slot, flags: []const u8) void {
+    slot.value.flags_len = @min(flags.len, slot.value.flags.len);
+    @memcpy(slot.value.flags[0..slot.value.flags_len], flags[0..slot.value.flags_len]);
+}
+
+fn setTmpPath(slot: *Drafts.Slot) void {
+    const prefix = ".weft-";
+    var w: usize = prefix.len;
+    @memcpy(slot.value.tmp[0..w], prefix);
+    for (slot.name()) |c| {
+        if (w == slot.value.tmp.len) break;
+        const keep: u8 = switch (c) {
+            'a'...'z', '0'...'9' => c,
+            '-', ':' => '-',
+            else => continue,
+        };
+        slot.value.tmp[w] = keep;
+        w += 1;
+    }
+    slot.value.tmp_len = w;
+}
+
+/// Seed a draft's message from `prefill`'s stdout (`git log -1 --format=%B` for
+/// amend, `fixup! …` for a fixup). The empty prefill is the plain commit: the
+/// entry stays exactly as it is, so nothing can land on top of what was typed.
+fn seedDraft(slot: *Drafts.Slot, prefill: []const u8) void {
+    if (prefill.len == 0) return;
+    weft.procToBuffer(prefill, slot.name(), @intFromEnum(Fill.draft));
+}
+
+/// A seeded message landed — start at the top of it.
+fn draftFill() void {
+    weft.jump(0);
+}
+
+/// The draft this command is about — the entry it was invoked in.
+fn currentDraft() ?*Drafts.Slot {
+    return drafts.current("commit draft") orelse {
+        weft.echo("no commit draft here");
+        return null;
+    };
+}
+
+/// `save` in a draft entry: write the message and run the commit it stands for.
+/// The exit status and git's own words come back through the `.commit` fill, so
+/// the draft closes only when git accepted it.
+fn gitCommitSave() void {
+    const slot = currentDraft() orelse return;
+    const text = weft.slice(0, weft.byteLen());
+    if (std.mem.trim(u8, text, " \t\r\n").len == 0) {
+        weft.echo("commit: the message is empty");
+        return;
+    }
+    const n = @min(text.len, msg_buf.len);
+    @memcpy(msg_buf[0..n], text[0..n]);
+    const d = &slot.value;
+    if (!weft.fsWrite(d.tmpOf(), msg_buf[0..n])) {
+        weft.echo("commit: could not write the message");
+        return;
+    }
+    committing = slot;
+    // The message file is cwd-relative and the commit runs in the draft's own
+    // repository, so the path is absolutized before the subshell changes
+    // directory — and the gather that follows still describes the cwd repository.
+    const cmd = std.fmt.bufPrint(
+        &cmd_buf,
+        "m=\"$PWD/{s}\"; (cd '{s}' && git commit {s} -F \"$m\") 2>&1; s=$?; rm -f \"$m\"; " ++
+            "printf '\\036\\036C%d\\n' \"$s\"; " ++ GATHER,
+        .{ d.tmpOf(), d.repo(), d.flagsOf() },
+    ) catch return;
+    restore_cursor = false;
+    weft.procToBuffer(cmd, buf_name, @intFromEnum(Fill.commit));
+}
+
+/// The commit ran: git's output and exit status precede the status gather.
+fn commitFill() void {
+    loadRaw();
+    commit_ok = false;
+    if (std.mem.indexOf(u8, raw[0..raw_len], MARK_C)) |ci| {
+        commit_note_len = @min(ci, commit_note.len);
+        @memcpy(commit_note[0..commit_note_len], raw[0..commit_note_len]);
+        var i = ci + MARK_C.len;
+        var status: usize = 0;
+        while (i < raw_len and raw[i] >= '0' and raw[i] <= '9') : (i += 1) {
+            status = status * 10 + (raw[i] - '0');
+        }
+        commit_ok = status == 0;
+        // Hand `parse` the gather alone — the commit prologue is not status.
+        if (i < raw_len and raw[i] == '\n') i += 1;
+        std.mem.copyForwards(u8, raw[0 .. raw_len - i], raw[i..raw_len]);
+        raw_len -= i;
+    }
+    renderStatus();
+    weft.run("git-commit-settle");
+}
+
+/// Deferred to a dispatching entry (like `git-note-drops-deliver`): a draft git
+/// accepted is closed like any other entry; one it refused stays, with the
+/// refusal shown.
+fn gitCommitSettle() void {
+    const slot = committing orelse return;
+    committing = null;
+    if (!commit_ok) {
+        weft.echo(firstLine(commit_note[0..commit_note_len]));
+        return;
+    }
+    if (focusBuffer(slot.name())) weft.run("buffer-close");
+    drafts.close(slot);
+    _ = focusBuffer(buf_name);
+    weft.echo("committed");
+}
+
+fn firstLine(text: []const u8) []const u8 {
+    var i: usize = 0;
+    while (i < text.len) {
+        var e = i;
+        while (e < text.len and text[e] != '\n') e += 1;
+        const line = std.mem.trim(u8, text[i..e], " \t\r");
+        if (line.len > 0) return line;
+        i = e + 1;
+    }
+    return "commit: refused";
+}
+
+// ── The draft's own offers (amend/reword/fixup/squash) ─────────────────────
+// Each re-seats the draft under point: the entry stays, its meaning changes.
+fn reseat(slot: *Drafts.Slot, flags: []const u8, prefill: []const u8, note: []const u8) void {
+    setFlags(slot, flags);
+    seedDraft(slot, prefill);
+    weft.echo(note);
+}
+const head_message = "git log -1 --format=%B 2>/dev/null";
+fn gitDraftAmend() void {
+    reseat(currentDraft() orelse return, "--amend", head_message, "draft: amends HEAD");
+}
+fn gitDraftReword() void {
+    reseat(currentDraft() orelse return, "--amend --only", head_message, "draft: rewords HEAD");
+}
+fn gitDraftFixup() void {
+    reseatOnto("fixup");
+}
+fn gitDraftSquash() void {
+    reseatOnto("squash");
+}
+/// `fixup!`/`squash!` is a MESSAGE, so a draft expresses it by re-seeding its
+/// text from the named commit's subject — no flag, no separate command path.
+fn reseatOnto(kind: []const u8) void {
+    if (pending_hash_len == 0) {
+        weft.echo("no commit chosen to fix up");
+        return;
+    }
+    const slot = currentDraft() orelse return;
+    const prefill = std.fmt.bufPrint(
+        &op_buf,
+        "git log -1 --format='{s}! %s' {s} 2>/dev/null",
+        .{ kind, pending_hash[0..pending_hash_len] },
+    ) catch return;
+    reseat(slot, "", prefill, kind);
+}
+
+// ── Opening a draft from the status buffer ─────────────────────────────────
 fn gitCommit() void {
-    openCommit("", "");
+    openDraft("", "");
 }
 /// Amend: edit the current message (pre-filled), include staged changes.
 fn gitAmend() void {
-    openCommit("--amend", "git log -1 --format=%B 2>/dev/null");
+    openDraft("--amend", head_message);
 }
 /// Reword: amend the MESSAGE ONLY (`--only`) — staged changes stay staged.
 fn gitReword() void {
-    openCommit("--amend --only", "git log -1 --format=%B 2>/dev/null");
+    openDraft("--amend --only", head_message);
 }
-/// Extend: fold staged changes into HEAD, keep the message (no editor).
+/// Extend: fold staged changes into HEAD, keep the message (no draft).
 fn gitExtend() void {
     gatherAfterSeq("git commit --amend --no-edit");
 }
 fn gitFixup() void {
-    const h = recentHashAt() orelse {
-        weft.echo("fixup: no commit under point");
-        return;
-    };
-    gatherAfterSeq1("git commit --fixup={s}", h);
+    openOnto("fixup");
 }
 fn gitSquash() void {
+    openOnto("squash");
+}
+fn openOnto(kind: []const u8) void {
     const h = recentHashAt() orelse {
-        weft.echo("squash: no commit under point");
+        weft.echo("no commit under point");
         return;
     };
-    gatherAfterSeq1("git commit --squash={s}", h);
-}
-fn gitCommitFinish() void {
-    const text = weft.slice(0, weft.byteLen());
-    const n = @min(text.len, msg_buf.len);
-    @memcpy(msg_buf[0..n], text[0..n]);
-    _ = weft.fsWrite(commit_tmp, msg_buf[0..n]);
-    const cmd = std.fmt.bufPrint(
-        &cmd_buf,
-        "git commit {s} -F {s} >/dev/null 2>&1; rm -f {s}; " ++ GATHER,
-        .{ commit_flags, commit_tmp, commit_tmp },
+    const prefill = std.fmt.bufPrint(
+        &op_buf,
+        "git log -1 --format='{s}! %s' {s} 2>/dev/null",
+        .{ kind, h },
     ) catch return;
-    restore_cursor = false;
-    show(cmd, buf_name, .status);
-    weft.setMode("git");
-}
-fn gitCommitAbort() void {
-    restore_cursor = false;
-    show(GATHER, buf_name, .status);
-    weft.setMode("git");
-}
-fn gitCommitResume() void {
-    weft.setMode("git-commit");
+    openDraft("", prefill);
 }
 
 fn focusBuffer(name: []const u8) bool {
