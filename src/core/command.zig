@@ -21,8 +21,21 @@ const position = @import("position.zig");
 const grants_mod = @import("grants.zig");
 const undo_mod = @import("undo.zig");
 const status_feed = @import("status_feed.zig");
+const semantic_model = @import("weft_semantic");
 
 pub const Principal = authority.Principal;
+
+/// The embedding shell's workspace placement policy for an activated target
+/// (doc/contextual-workspace-architecture.md §9.4). Registered target
+/// handlers are asked first; a target none of them claims is offered here,
+/// and the shell opens it as an ordinary workspace entry — a file row in a
+/// browser therefore reaches the same `open` every other locus uses, without
+/// core learning about paths or a plugin acquiring new authority. `false`
+/// declines, leaving the unhandled target an explicit refusal.
+pub const EntryOpener = struct {
+    context: *anyopaque,
+    open: *const fn (*anyopaque, *Context, semantic_model.target.Located) anyerror!bool,
+};
 pub const Grade = authority.Grade;
 
 /// The portable argument/result ABI. Mirrors what a Lua boundary can
@@ -119,6 +132,8 @@ pub const Context = struct {
     /// embedding app (Linux today, Darwin/remote/synthetic independently);
     /// commands and plugins see only this platform-neutral router.
     filesystems: ?*@import("weft_fs_runtime").Router = null,
+    /// The shell's workspace placement policy, when one is installed.
+    entries: ?EntryOpener = null,
 
     pub fn buffer(self: *Context) *Buffers.Buffer {
         return self.buffers.active();

@@ -114,19 +114,6 @@ pub fn openAndFocus(
     return open(services, head, gpa, target, .whole, null);
 }
 
-/// Follow the nearest typed link on the active focus path. `null` means no
-/// node supplied a link, allowing an input command to fall back to an open
-/// action advertised by a bespoke structured view. A present but stale,
-/// unhandled, or ambiguous link remains explicit.
-pub fn openFocused(
-    services: *Services,
-    head: *Head,
-    gpa: std.mem.Allocator,
-) Error!?Result {
-    const located = try services.focusedTarget(head) orelse return null;
-    return try openLocated(services, head, gpa, located, null);
-}
-
 /// Resolve a raw name through the independent `child` relation of an exact
 /// working target, then admit/open the returned target. Namespace ownership
 /// stays with relation providers; rendering/opening ownership stays with
@@ -155,6 +142,13 @@ pub fn openRelative(
         .ambiguous => |value| .{ .handler_ambiguous = .{ .strength = value.strength, .count = value.count } },
         .opened => |value| .{ .opened = .{ .view = value.view, .node = value.node } },
     };
+}
+
+/// What `target-open-focused` does with the nearest typed link on the focus
+/// path, spelled once for the tests below.
+fn openFocusedLink(services: *Services, head: *Head) !Result {
+    const located = (try services.focusedTarget(head)).?;
+    return openLocated(services, head, std.testing.allocator, located, null);
 }
 
 test "generic target opening distinguishes none, ambiguity, and focus" {
@@ -330,7 +324,7 @@ test "focused target opening prefers the nearest revision-stamped scene link" {
     defer head.deinit(std.testing.allocator);
 
     _ = try services.focusView(&head, std.testing.allocator, host_view, linked_child.id);
-    const leaf_opened = (try openFocused(&services, &head, std.testing.allocator)).?;
+    const leaf_opened = try openFocusedLink(&services, &head);
     try std.testing.expectEqual(leaf_view, leaf_opened.opened.view);
 
     const plain_child: semantic.scene.Node = .{
@@ -345,7 +339,7 @@ test "focused target opening prefers the nearest revision-stamped scene link" {
     };
     try services.replaceView(std.testing.allocator, owner, host_view, 2, ancestor_only);
     _ = try services.focusView(&head, std.testing.allocator, host_view, plain_child.id);
-    const ancestor_opened = (try openFocused(&services, &head, std.testing.allocator)).?;
+    const ancestor_opened = try openFocusedLink(&services, &head);
     try std.testing.expectEqual(ancestor_view, ancestor_opened.opened.view);
 
     try services.replaceView(std.testing.allocator, owner, host_view, 3, linked_root);
@@ -354,6 +348,6 @@ test "focused target opening prefers the nearest revision-stamped scene link" {
         .kind = .{ .synthetic = "leaf" },
         .display_name = "new leaf revision",
     });
-    try std.testing.expectError(error.StaleTarget, openFocused(&services, &head, std.testing.allocator));
+    try std.testing.expectError(error.StaleTarget, openFocusedLink(&services, &head));
     try std.testing.expectEqual(@as(usize, 2), handler.opens);
 }

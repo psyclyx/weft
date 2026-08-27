@@ -152,6 +152,7 @@ pub const Session = struct {
         try self.head.setModeRaw(gpa, self.system.default_head.currentMode());
         self.menu_overlay = .{};
         self.cmd_ctx = self.system.contextFor(&self.head);
+        self.cmd_ctx.entries = .{ .context = self, .open = openWorkspaceEntryOpaque };
         try ui_mesh.declareSlots(&self.system.container);
         try ui_mesh.bindDefaultStatusline(&self.system.container);
         // Capability consumers — written against capability names only.
@@ -335,6 +336,42 @@ pub const Session = struct {
     pub fn openLocalDirectoryOpaque(raw: *anyopaque, ctx: *core.command.Context, path: []const u8) anyerror!bool {
         const self: *Session = @ptrCast(@alignCast(raw));
         return self.openLocalDirectory(ctx, path);
+    }
+
+    /// This shell's placement policy (`core.command.EntryOpener`): a local
+    /// file target no tool claimed becomes an ordinary editor entry, opened
+    /// through the very same `open` a picker or `:e` runs. Activation grants
+    /// nothing new — the router must still authorize the exact revision, and
+    /// the path is reconstructed from a root this session itself opened, so a
+    /// plugin's opaque target never becomes an arbitrary path.
+    pub fn openWorkspaceEntry(
+        self: *Session,
+        ctx: *core.command.Context,
+        located: semantic.target.Located,
+    ) anyerror!bool {
+        if (located.location != .whole) return false;
+        const system = self.filesystem_system;
+        const descriptor = system.semantic.targets.get(located.target) orelse return false;
+        if (descriptor.revision != located.revision or descriptor.kind != .file) return false;
+        const entry = system.filesystems.authorizedEntry(located.target, located.revision) catch return false;
+        for (self.directory_targets.items) |directory| {
+            const same_root = system.filesystems.sameRoot(directory.root, entry.root) catch continue;
+            if (!same_root) continue;
+            const path = try std.fs.path.join(ctx.gpa, &.{ directory.path, descriptor.display_name });
+            defer ctx.gpa.free(path);
+            _ = try core.command.run(ctx.commands, ctx, "open", &.{.{ .string = path }});
+            return true;
+        }
+        return false;
+    }
+
+    pub fn openWorkspaceEntryOpaque(
+        raw: *anyopaque,
+        ctx: *core.command.Context,
+        located: semantic.target.Located,
+    ) anyerror!bool {
+        const self: *Session = @ptrCast(@alignCast(raw));
+        return self.openWorkspaceEntry(ctx, located);
     }
 
     fn closeDirectoryTarget(self: *Session, index: usize) void {

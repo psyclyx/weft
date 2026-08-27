@@ -108,12 +108,20 @@ fn cSelectionPasteAfter(ctx: *Context, args: struct {}) anyerror!Value {
 fn cTargetOpenFocused(ctx: *Context, args: struct {}) anyerror!Value {
     _ = args;
     const services = ctx.semantic orelse return ok;
-    if (try target_open.openFocused(services, ctx.head, ctx.gpa)) |result|
-        return targetOpenResult(result);
     // A scene may deliberately expose custom open behavior without linking a
     // registered target. Preserve that generic action-provider escape hatch;
     // a present typed link never falls through on stale/ambiguous resolution.
-    return invokeSemanticAction(ctx, semantic_model.action.standard.open);
+    const located = try services.focusedTarget(ctx.head) orelse
+        return invokeSemanticAction(ctx, semantic_model.action.standard.open);
+    const result = try target_open.openLocated(services, ctx.head, ctx.gpa, located, null);
+    // No handler renders this kind. The shell's placement policy may still
+    // open it as an ordinary workspace entry (§9.4) — that is an open, not a
+    // claim, so it runs only once every handler has declined.
+    if (result == .no_handler) {
+        if (ctx.entries) |entries|
+            if (try entries.open(entries.context, ctx, located)) return ok;
+    }
+    return targetOpenResult(result);
 }
 
 fn cHierarchyToggleExpanded(ctx: *Context, args: struct {}) anyerror!Value {
