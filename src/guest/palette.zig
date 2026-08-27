@@ -81,7 +81,8 @@ fn buffers() void {
             bid,                                         name,
             if (weft.bufferReadOnly(i)) " [ro]" else "", if (weft.bufferActive(i)) " *" else "",
         }) catch continue;
-        weft.pickAdd(label, "");
+        // The candidate carries the buffer's identity; the label is display.
+        weft.pickAddBuffer(label, "", i);
     }
     weft.pickEnd();
 }
@@ -119,8 +120,13 @@ export fn on_pick_accept(pick_id: u32) void {
             .unknown => weft.run(choice),
         }
     } else if (pick_id == pick_buffers) {
-        const colon = std.mem.indexOfScalar(u8, choice, ':') orelse return;
-        const bid = std.fmt.parseInt(i32, choice[0..colon], 10) catch return;
-        weft.runInt("buffer-switch", bid);
+        // The row NAMES a buffer; its label is display text, never an id to
+        // parse back out — a buffer closed mid-pick refuses instead of
+        // switching to whatever took its slot.
+        const id = switch (outcome) {
+            .candidate => |candidate| candidate.buffer orelse return weft.echo("that buffer is closed"),
+            .input, .cancelled => return,
+        };
+        weft.runInt("buffer-switch", @intCast(id));
     }
 }

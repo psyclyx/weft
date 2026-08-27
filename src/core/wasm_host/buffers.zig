@@ -7,7 +7,7 @@ const shared = @import("plugin.zig");
 const WasmPlugin = shared.WasmPlugin;
 
 /// The i-th open buffer, or null (O(i) walk — the introspection path).
-fn bufferAtIndex(p: *WasmPlugin, i: usize) ?*@import("../Buffers.zig").Buffer {
+pub fn bufferAtIndex(p: *WasmPlugin, i: usize) ?*@import("../Buffers.zig").Buffer {
     var it = p.activeCtx().buffers.iterator();
     var j: usize = 0;
     while (it.next()) |b| : (j += 1) if (j == i) return b;

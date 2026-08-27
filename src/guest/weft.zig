@@ -140,12 +140,14 @@ extern "weft" fn wl_buffer_readonly(i: u32) u32;
 // guest's on_pick_accept export).
 extern "weft" fn wl_pick_begin(prompt_ptr: u32, prompt_len: u32, pick_id: u32) void;
 extern "weft" fn wl_pick_add(t: u32, tl: u32, d: u32, dl: u32) void;
+extern "weft" fn wl_pick_add_buffer(t: u32, tl: u32, d: u32, dl: u32, i: u32) void;
 extern "weft" fn wl_pick_end() void;
 extern "weft" fn wl_open_file_pick(prompt_ptr: u32, prompt_len: u32, root_ptr: u32, root_len: u32, pick_id: u32) void;
 extern "weft" fn wl_pick_outcome_kind() i32;
 extern "weft" fn wl_pick_outcome_text(out_ptr: u32, out_cap: u32) i32;
 extern "weft" fn wl_pick_outcome_query(out_ptr: u32, out_cap: u32) i32;
 extern "weft" fn wl_pick_outcome_index() i32;
+extern "weft" fn wl_pick_outcome_buffer() i32;
 extern "weft" fn wl_pick_outcome_match_start() i32;
 extern "weft" fn wl_pick_outcome_match_span() i32;
 extern "weft" fn wl_surface_begin(placement: u32) void;
@@ -1072,6 +1074,14 @@ pub fn pickBegin(prompt: []const u8, pick_id: u32) void {
 pub fn pickAdd(text: []const u8, doc: []const u8) void {
     wl_pick_add(p(text.ptr), @intCast(text.len), p(doc.ptr), @intCast(doc.len));
 }
+/// Add one item ABOUT the `i`-th open buffer. The candidate carries that
+/// buffer's identity, read back as `PickCandidate.buffer` — so the accept
+/// never has to index a parallel table or parse its own label, and a buffer
+/// closed while the picker was open reads back as null instead of as
+/// whatever took its slot.
+pub fn pickAddBuffer(text: []const u8, doc: []const u8, i: usize) void {
+    wl_pick_add_buffer(p(text.ptr), @intCast(text.len), p(doc.ptr), @intCast(doc.len), @intCast(i));
+}
 /// Open the accumulated pick.
 pub fn pickEnd() void {
     wl_pick_end();
@@ -1188,6 +1198,10 @@ pub const PickCandidate = struct {
     /// Candidate-relative byte evidence. Resolving it to a document or other
     /// target remains the source plugin's policy.
     match: PickMatch,
+    /// The live id of the buffer this candidate NAMED (`pickAddBuffer`), or
+    /// null: the row carried no buffer key, or the buffer it named closed
+    /// while the picker was open. Null is a refusal, never a guess.
+    buffer: ?u32,
 };
 pub const PickOutcome = union(enum) {
     cancelled,
@@ -1228,11 +1242,13 @@ pub fn pickOutcome(gpa: std.mem.Allocator) (std.mem.Allocator.Error || error{Inv
                 gpa.free(accepted_query);
                 return error.InvalidPickOutcome;
             }
+            const buffer = wl_pick_outcome_buffer();
             break :blk .{ .candidate = .{
                 .index = @intCast(index),
                 .text = text,
                 .query = accepted_query,
                 .match = .{ .start = @intCast(start), .span = @intCast(span) },
+                .buffer = if (buffer < 0) null else @intCast(buffer),
             } };
         },
         else => null,

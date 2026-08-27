@@ -1483,7 +1483,7 @@ test "wasm plugins: consult-imenu picks a definition and jumps to it" {
     try t.expectEqual(std.mem.indexOf(u8, src, "fn bar").?, ed.cursorOffset());
 }
 
-test "wasm plugins: buf-pick switches to the accepted buffer by recorded id" {
+test "wasm plugins: buf-pick switches to the accepted buffer by its identity" {
     const gpa = t.allocator;
     var env: Env = undefined;
     try Env.init(gpa, &env);
@@ -1504,8 +1504,8 @@ test "wasm plugins: buf-pick switches to the accepted buffer by recorded id" {
     try t.expect(env.head.pick.active);
     // The active buffer is intentionally the least convenient fallback: it
     // stays available at the end while the other buffers keep their stable
-    // id-order.  The guest's accepted-index seam must still resolve rows by
-    // the ids captured when the ordered list was built.
+    // id-order. The guest resolves the accepted row through the identity the
+    // CANDIDATE carries, not through a table indexed by row.
     try t.expectEqual(@as(usize, 3), env.head.pick.items.items.len);
     try t.expectEqualStrings("alpha", env.head.pick.items.items[0]);
     try t.expectEqualStrings("beta", env.head.pick.items.items[1]);
@@ -2827,4 +2827,42 @@ test "wasm plugin: a second http-get takes its own response buffer" {
 
     try t.expect(env.buffers.findByName("*http*") != null);
     try t.expect(env.buffers.findByName("*http:2*") != null);
+}
+
+// ── A picker's accept names its target, never a row or a label ────────────
+// doc/contextual-workspace-architecture.md §2.6: a buffer closed while the
+// picker is open must be REFUSED, not confused with whatever took its slot —
+// ids are slots, `{id, generation}` is the identity, and the candidate carries
+// it so no parallel table and no parsed label can go stale under the accept.
+
+test "wasm plugins: buf-pick refuses a buffer closed mid-pick, slot reuse and all" {
+    const gpa = t.allocator;
+    var env: Env = undefined;
+    try Env.init(gpa, &env);
+    defer env.deinit(gpa);
+    try @import("../builtins.zig").install(gpa, &env.commands, &env.keymap, &env.head, &env.actions);
+    try @import("../pick.zig").install(gpa, &env.commands, &env.keymap);
+
+    _ = try env.buffers.create(gpa, "alpha");
+    const beta = try env.buffers.create(gpa, "beta");
+
+    var engine = try wasm.Engine.init(gpa);
+    defer engine.deinit();
+    const plugin = try loadPlugin(&engine, &env.ctx, "buffers", @embedFile("guest_buffers_wasm"), .{});
+    defer plugin.deinit();
+
+    _ = try command.run(&env.commands, &env.ctx, "buf-pick", &.{});
+    try t.expect(env.head.pick.active);
+    _ = try command.run(&env.commands, &env.ctx, "pick-input", &.{.{ .string = "beta" }});
+
+    // beta closes while the picker is open, and a new buffer takes its SLOT.
+    try env.buffers.close(gpa, beta, &env.head, &env.keymap);
+    const gamma = try env.buffers.create(gpa, "gamma");
+    try t.expectEqual(beta, gamma); // the same id, a different buffer
+
+    const before = env.buffers.active().id;
+    _ = try command.run(&env.commands, &env.ctx, "pick-accept", &.{});
+    // Refused: the accept did not land on gamma, and did not move at all.
+    try t.expectEqual(before, env.buffers.active().id);
+    try t.expect(!std.mem.eql(u8, env.buffers.active().name, "gamma"));
 }

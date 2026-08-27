@@ -10,6 +10,9 @@ const pick_mod = @import("../pick.zig");
 const fs_source = @import("../fs_source.zig");
 const contract = @import("../membrane/contract.zig");
 
+const buffers = @import("buffers.zig");
+const Buffers = @import("../Buffers.zig");
+
 const shared = @import("plugin.zig");
 const WasmPlugin = shared.WasmPlugin;
 const requireDispatch = shared.requireDispatch;
@@ -34,6 +37,22 @@ pub fn hPickBegin(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32, re
 
 pub fn hPickAdd(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32, results: []i32) void {
     _ = results;
+    addItem(data, caller, args, null);
+}
+
+/// `wl_pick_add_buffer`: like `wl_pick_add`, but the candidate carries the
+/// identity of the `args[4]`-th open buffer as its ACCEPT KEY. Identity
+/// travels WITH the row, so no parallel table and no label parsing can go
+/// stale under the accept — and a buffer closed while the picker is open is
+/// refused rather than confused with whatever took its slot.
+pub fn hPickAddBuffer(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32, results: []i32) void {
+    _ = results;
+    const p: *WasmPlugin = @ptrCast(@alignCast(data.?));
+    const b = buffers.bufferAtIndex(p, @intCast(args[4])) orelse return;
+    addItem(data, caller, args, b.ref());
+}
+
+fn addItem(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32, key: ?Buffers.Ref) void {
     const p: *WasmPlugin = @ptrCast(@alignCast(data.?));
     const gpa = p.gpa;
     const text = caller.readMemory(gpa, @intCast(args[0]), @intCast(args[1])) catch return;
@@ -42,7 +61,7 @@ pub fn hPickAdd(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32, resu
         gpa.free(text);
         return;
     };
-    p.pick_items.append(gpa, .{ .text = text, .doc = doc }) catch {
+    p.pick_items.append(gpa, .{ .text = text, .doc = doc, .buffer = key }) catch {
         gpa.free(text);
         gpa.free(doc);
     };
@@ -59,8 +78,16 @@ pub fn hPickEnd(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32, resu
     if (!requireDispatch(p, caller, "wl_pick_end")) return;
     const gpa = p.gpa;
     const bp = gpa.create(WasmBoundPick) catch return;
-    bp.* = .{ .plugin = p, .pick_id = p.pick_id };
+    // Accept keys move in ONE bulk transfer at open — never a per-candidate
+    // callback the pick would have to make at accept time.
+    const keys = gpa.alloc(?Buffers.Ref, p.pick_items.items.len) catch {
+        gpa.destroy(bp);
+        return;
+    };
+    for (p.pick_items.items, keys) |it, *k| k.* = it.buffer;
+    bp.* = .{ .plugin = p, .pick_id = p.pick_id, .buffer_keys = keys };
     const entries = gpa.alloc(pick_mod.Entry, p.pick_items.items.len) catch {
+        gpa.free(keys);
         gpa.destroy(bp);
         return;
     };
@@ -71,6 +98,7 @@ pub fn hPickEnd(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32, resu
         .cleanup = wpPickCleanup,
         .data = bp,
     }) catch {
+        gpa.free(keys);
         gpa.destroy(bp);
     };
 }
@@ -188,6 +216,27 @@ pub fn hPickOutcomeMatchStart(data: ?*anyopaque, caller: *wasm.Caller, args: []c
     } else -1;
 }
 
+/// The live id of the buffer the accepted candidate NAMED (`wl_pick_add_buffer`),
+/// or -1: free text, a candidate that carries no buffer key, or — the point of
+/// the key — one whose buffer was closed while the picker was open. A refusal,
+/// never the stranger now holding that slot.
+pub fn hPickOutcomeBuffer(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32, results: []i32) void {
+    _ = caller;
+    _ = args;
+    const p: *WasmPlugin = @ptrCast(@alignCast(data.?));
+    results[0] = -1;
+    const bp = p.cur_pick orelse return;
+    const outcome = p.cur_pick_outcome orelse return;
+    const i = switch (outcome) {
+        .candidate => |candidate| candidate.index,
+        .input, .cancelled => return,
+    };
+    if (i >= bp.buffer_keys.len) return; // appended by a live source: no key
+    const ref = bp.buffer_keys[i] orelse return;
+    const b = p.activeCtx().buffers.resolve(ref) orelse return;
+    results[0] = @intCast(b.id);
+}
+
 pub fn hPickOutcomeMatchSpan(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32, results: []i32) void {
     _ = caller;
     _ = args;
@@ -216,13 +265,16 @@ fn wpPickAccept(ctx: *command.Context, data: ?*anyopaque, outcome: pick_mod.Outc
     const saved_ctx = p.active_ctx;
     const saved_dispatch = p.in_dispatch;
     const saved_outcome = p.cur_pick_outcome;
+    const saved_pick = p.cur_pick;
     p.dispatch_depth += 1;
     p.active_ctx = ctx;
     p.in_dispatch = true; // DISPATCHING (task #19 item 4) — see wpCmdTrampoline's doc
     p.cur_pick_outcome = outcome;
+    p.cur_pick = bp;
     defer {
         p.dispatch_depth -= 1;
         p.cur_pick_outcome = saved_outcome;
+        p.cur_pick = saved_pick;
         p.active_ctx = saved_ctx;
         p.in_dispatch = saved_dispatch;
     }
@@ -231,5 +283,6 @@ fn wpPickAccept(ctx: *command.Context, data: ?*anyopaque, outcome: pick_mod.Outc
 
 fn wpPickCleanup(data: ?*anyopaque, gpa: Allocator) void {
     const bp: *WasmBoundPick = @ptrCast(@alignCast(data.?));
+    gpa.free(bp.buffer_keys);
     gpa.destroy(bp);
 }

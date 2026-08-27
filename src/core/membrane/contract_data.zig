@@ -247,12 +247,14 @@ pub const imports = [_]Entry{
     // ── pick.zig — fuzzy pick build/open/accept ─────────────────────────
     .{ .name = "wl_pick_begin", .params = &.{ .u32, .u32, .u32 }, .results = &.{}, .group = .pick, .doc = "start building a fuzzy pick with `prompt`, tagged `pick_id`" },
     .{ .name = "wl_pick_add", .params = &.{ .u32, .u32, .u32, .u32 }, .results = &.{}, .group = .pick, .doc = "add a candidate (text, detail) to the pick being built" },
+    .{ .name = "wl_pick_add_buffer", .params = &.{ .u32, .u32, .u32, .u32, .u32 }, .results = &.{}, .group = .pick, .doc = "add a candidate carrying the `i`-th buffer's identity as its accept key" },
     .{ .name = "wl_pick_end", .params = &.{}, .results = &.{}, .group = .pick, .head_gated = true, .doc = "open the pick built so far" },
     .{ .name = "wl_open_file_pick", .params = &.{ .u32, .u32, .u32, .u32, .u32 }, .results = &.{}, .group = .pick, .head_gated = true, .doc = "open a file-tree pick rooted at `root`" },
     .{ .name = "wl_pick_outcome_kind", .params = &.{}, .results = &.{.i32}, .group = .pick, .doc = "callback-scoped pick outcome: 0 cancelled, 1 input, 2 candidate, -1 outside callback" },
     .{ .name = "wl_pick_outcome_text", .params = &.{ .u32, .u32 }, .results = &.{.i32}, .group = .pick, .doc = "exact callback-scoped accepted text; cap=0 reports length, short destinations return -2" },
     .{ .name = "wl_pick_outcome_query", .params = &.{ .u32, .u32 }, .results = &.{.i32}, .group = .pick, .doc = "exact accepted-candidate query; cap=0 reports length, short destinations return -2" },
     .{ .name = "wl_pick_outcome_index", .params = &.{}, .results = &.{.i32}, .group = .pick, .doc = "the accepted candidate's add-order identity, or -1" },
+    .{ .name = "wl_pick_outcome_buffer", .params = &.{}, .results = &.{.i32}, .group = .pick, .doc = "the live id of the buffer the accepted candidate named, or -1 when it is gone or unkeyed" },
     .{ .name = "wl_pick_outcome_match_start", .params = &.{}, .results = &.{.i32}, .group = .pick, .doc = "the accepted candidate's candidate-relative byte match start, or -1" },
     .{ .name = "wl_pick_outcome_match_span", .params = &.{}, .results = &.{.i32}, .group = .pick, .doc = "the accepted candidate's byte match span, or -1" },
 
@@ -402,7 +404,7 @@ pub const imports = [_]Entry{
 /// half-finished edit — fails the build with a pointed message instead of
 /// silently drifting the two ~124-entry tables apart again (the exact class
 /// this table exists to kill).
-const expected_import_count = 188;
+const expected_import_count = 190;
 
 /// A host→guest EXPORT entrypoint (design doc/extensibility-native-surface.md, task
 /// W0a-D extension 2): every `instance.callVoid("name", args)` the host

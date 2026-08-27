@@ -57,11 +57,20 @@ pub const perm_count = 5;
 pub const WasmCmd = struct { plugin: *WasmPlugin, id: u32, name: []u8 };
 
 /// One accumulated pick item (owned) between `pickBegin` and `pickEnd`.
-pub const PendingItem = struct { text: []u8, doc: []u8 };
+/// `buffer` is the candidate's ACCEPT KEY when it names one: a generation-
+/// checked identity captured at add time, so the accept resolves the buffer
+/// the row was ABOUT rather than whatever now sits in its slot.
+pub const PendingItem = struct { text: []u8, doc: []u8, buffer: ?Buffers.Ref = null };
 
 /// An open pick's binding: which plugin + which of its picks (the guest's
-/// `pick_id`, dispatched to `on_pick_accept`). Freed by the pick's cleanup.
-pub const WasmBoundPick = struct { plugin: *WasmPlugin, pick_id: u32 };
+/// `pick_id`, dispatched to `on_pick_accept`), plus the accept keys taken in
+/// one bulk transfer at open. Freed by the pick's cleanup.
+pub const WasmBoundPick = struct {
+    plugin: *WasmPlugin,
+    pick_id: u32,
+    /// Per-candidate buffer keys, in add order. Owned.
+    buffer_keys: []const ?Buffers.Ref = &.{},
+};
 
 const Phase = enum { describing, active };
 
@@ -278,6 +287,9 @@ pick_items: std.ArrayList(PendingItem) = .empty,
 /// trampoline saves/restores it, so nested guest dispatch cannot overwrite an
 /// outer callback's acceptance facts.
 cur_pick_outcome: ?pick.Outcome = null,
+/// The pick being accepted (for its accept keys), valid over the same call
+/// and saved/restored by the same trampoline.
+cur_pick: ?*const WasmBoundPick = null,
 
 // ── Surface (retained overlay: which-key/dired/magit render here) ──
 /// This plugin's retained overlay, populated via the surface membrane and

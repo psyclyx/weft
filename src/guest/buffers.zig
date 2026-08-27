@@ -1,17 +1,16 @@
 //! buffers — buffer management (design §6.1), a `.wasm` plugin (perms `{}`). It
 //! composes the buffer-introspection reads + the core buffer commands + the
-//! pick candidate-index seam: `buf-pick` fuzzy-switches to a buffer (resolved
-//! by the accepted ROW INDEX → the buffer id it recorded, robust under
-//! duplicate names), `buf-scratch` opens a fresh scratch. The plain
-//! next/close/save verbs stay the core primitives a config binds directly.
+//! pick candidate-key seam: `buf-pick` fuzzy-switches to a buffer (resolved
+//! by the IDENTITY the accepted candidate carries, robust under duplicate
+//! names and under a buffer closing mid-pick), `buf-scratch` opens a fresh
+//! scratch. The plain next/close/save verbs stay the core primitives a config
+//! binds directly.
 
 const std = @import("std");
 const weft = @import("weft");
 const ordering = @import("buffer_order.zig");
 
 const buf_pick = 0;
-var ids: [1024]i32 = undefined;
-var n_rows: usize = 0;
 
 var candidates: [1024]ordering.Candidate = undefined;
 var order: [1024]usize = undefined;
@@ -35,16 +34,15 @@ export fn on_pick_accept(pick_id: u32) void {
     if (pick_id != buf_pick) return;
     var outcome = (weft.pickOutcome(weft.allocator) catch return) orelse return;
     defer outcome.deinit(weft.allocator);
-    const i = switch (outcome) {
-        .candidate => |candidate| candidate.index,
+    const id = switch (outcome) {
+        .candidate => |candidate| candidate.buffer orelse return weft.echo("that buffer is closed"),
         .input, .cancelled => return,
     };
-    if (i < n_rows) weft.runInt("buffer-switch", ids[i]);
+    weft.runInt("buffer-switch", @intCast(id));
 }
 
-/// Fuzzy-pick a live buffer by name and switch to it (by recorded id).
+/// Fuzzy-pick a live buffer by name and switch to it (by its identity).
 fn bufPick() void {
-    n_rows = 0;
     weft.pickBegin("buffer", buf_pick);
     const count = weft.bufferCount();
     var n_candidates: usize = 0;
@@ -60,12 +58,10 @@ fn bufPick() void {
     }
     const n_ordered = ordering.activeLastOrder(candidates[0..n_candidates], order[0..n_candidates]);
     var row: usize = 0;
-    while (row < n_ordered and n_rows < ids.len) : (row += 1) {
+    while (row < n_ordered) : (row += 1) {
         const candidate = candidates[order[row]];
         const name = weft.bufferName(candidate.buffer_index) orelse continue;
-        weft.pickAdd(name, if (weft.bufferReadOnly(candidate.buffer_index)) "ro" else "");
-        ids[n_rows] = candidate.id;
-        n_rows += 1;
+        weft.pickAddBuffer(name, if (weft.bufferReadOnly(candidate.buffer_index)) "ro" else "", candidate.buffer_index);
     }
     weft.pickEnd();
     // The candidate table filled with buffers still unvisited.

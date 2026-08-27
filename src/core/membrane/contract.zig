@@ -178,12 +178,14 @@ const handlers = [_]struct { name: []const u8, handler: HostFn }{
     // ── pick.zig — fuzzy pick build/open/accept ─────────────────────────
     .{ .name = "wl_pick_begin", .handler = pick.hPickBegin },
     .{ .name = "wl_pick_add", .handler = pick.hPickAdd },
+    .{ .name = "wl_pick_add_buffer", .handler = pick.hPickAddBuffer },
     .{ .name = "wl_pick_end", .handler = pick.hPickEnd },
     .{ .name = "wl_open_file_pick", .handler = pick.hOpenFilePick },
     .{ .name = "wl_pick_outcome_kind", .handler = pick.hPickOutcomeKind },
     .{ .name = "wl_pick_outcome_text", .handler = pick.hPickOutcomeText },
     .{ .name = "wl_pick_outcome_query", .handler = pick.hPickOutcomeQuery },
     .{ .name = "wl_pick_outcome_index", .handler = pick.hPickOutcomeIndex },
+    .{ .name = "wl_pick_outcome_buffer", .handler = pick.hPickOutcomeBuffer },
     .{ .name = "wl_pick_outcome_match_start", .handler = pick.hPickOutcomeMatchStart },
     .{ .name = "wl_pick_outcome_match_span", .handler = pick.hPickOutcomeMatchSpan },
 
