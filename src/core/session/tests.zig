@@ -4296,3 +4296,310 @@ test "publication: unpublish advances the epoch, marks the quad stale, and inval
     defer gpa.free(text);
     try t.expectEqualStrings("notes\n", text);
 }
+
+// ── Per-export grants over the wire (§13.5) ─────────────────────────
+//
+// One host, one client, one real encrypted link, one publication. The
+// grade is set to `.own` on the host side in most of these precisely to
+// prove it is only a CEILING: everything the peer may actually do comes
+// from the export grants, and a grade that permits everything grants
+// nothing on its own once a publication is confined.
+
+const ExportRig = struct {
+    la: FdLink,
+    lb: FdLink,
+    host: *Session,
+    peer: *Session,
+    doc_host: Document,
+    doc_peer: Document,
+    ch: Collab,
+    cp: Collab,
+    book: grants.ExportBook,
+
+    /// Out-pointer, same reasoning as `SessionPair.setup`'s doc comment —
+    /// and doubly so here: `Collab` stores `*Document` pointers INTO this
+    /// struct, which a by-value return would strand.
+    fn setup(gpa: Allocator, self: *ExportRig, host_access: session.Access) !void {
+        const fds = try socketPair();
+        self.la = .{ .fd = fds[0] };
+        self.lb = .{ .fd = fds[1] };
+        self.host = try Session.create(gpa, self.la.link(), .server, "tok", host_access, null);
+        errdefer self.host.destroy();
+        self.peer = try Session.create(gpa, self.lb.link(), .client, "tok", .own, null);
+        errdefer self.peer.destroy();
+        const deadline = task.nowNs() + 5 * std.time.ns_per_s;
+        while (!(self.host.established.load(.acquire) and self.peer.established.load(.acquire))) {
+            if (task.nowNs() > deadline) return error.NotEstablished;
+            testPark(2);
+        }
+        self.doc_host = try Document.init(gpa, "host");
+        errdefer self.doc_host.deinit(gpa);
+        self.doc_peer = try Document.init(gpa, "peer");
+        errdefer self.doc_peer.deinit(gpa);
+        self.book = grants.ExportBook.init(gpa);
+        self.ch = try Collab.init(gpa, self.host, &self.doc_host, "host");
+        errdefer self.ch.deinit();
+        self.cp = try Collab.init(gpa, self.peer, &self.doc_peer, "peer");
+        // The client-role fail-safe `Conn.bind` applies at a real join:
+        // hold off local edits until the host's announcement arrives.
+        self.doc_peer.my_grant = .view;
+        self.cp.client_bound = true;
+    }
+
+    fn deinit(self: *ExportRig, gpa: Allocator) void {
+        self.cp.deinit();
+        self.ch.deinit();
+        self.book.deinit();
+        self.doc_peer.deinit(gpa);
+        self.doc_host.deinit(gpa);
+        self.peer.destroy();
+        self.host.destroy();
+    }
+
+    fn pump(self: *ExportRig, rounds: usize) !void {
+        for (0..rounds) |_| {
+            _ = try self.ch.tick(0);
+            _ = try self.cp.tick(0);
+            napUs(300);
+        }
+    }
+
+    /// Pump until the grantee's ANNOUNCED op-set is exactly `want`.
+    fn untilOps(self: *ExportRig, want: grants.OpSet) !bool {
+        for (0..4000) |_| {
+            _ = try self.ch.tick(0);
+            _ = try self.cp.tick(0);
+            if (self.cp.announced.ops().bits == want.bits) return true;
+            napUs(300);
+        }
+        return false;
+    }
+
+    fn untilText(self: *ExportRig, gpa: Allocator, doc: *Document, needle: []const u8) !bool {
+        for (0..4000) |_| {
+            _ = try self.ch.tick(0);
+            _ = try self.cp.tick(0);
+            const txt = try doc.text().toOwnedSlice(gpa);
+            defer gpa.free(txt);
+            if (std.mem.indexOf(u8, txt, needle) != null) return true;
+            napUs(300);
+        }
+        return false;
+    }
+
+    fn hostText(self: *ExportRig, gpa: Allocator) ![]u8 {
+        return self.doc_host.text().toOwnedSlice(gpa);
+    }
+};
+
+const read_export = grants.OpSet.of(&.{ .replica_read, .presence_read, .presence_publish });
+const write_export = read_export.with(.replica_write);
+
+test "export grants: a read-only export refuses at the grantee's own preflight FIRST — the out-of-grant op is never minted, so the frontier never carries it" {
+    const gpa = t.allocator;
+    var rig: ExportRig = undefined;
+    try ExportRig.setup(gpa, &rig, .own); // a grade that permits everything...
+    defer rig.deinit(gpa);
+
+    try rig.doc_host.insert(gpa, 0, "base\n");
+    try rig.ch.publish(&rig.book, 1);
+    // ...grants nothing on its own: this is the whole authority the peer has.
+    _ = try rig.ch.grantExport(read_export, .whole, .until_revoked);
+
+    try t.expect(try rig.untilOps(read_export));
+    // The announcement lands in the ONE existing text edit gate, so the
+    // preflight is structural rather than a second thing to remember.
+    try t.expectEqual(session.Access.view, rig.doc_peer.my_grant);
+    try t.expectEqual(grants.Reason.out_of_ops, rig.cp.mayMintOp());
+    // Reading is exactly what was granted, and it works.
+    try t.expect(try rig.untilText(gpa, &rig.doc_peer, "base"));
+
+    // The edit path (simulated here exactly as a real one would consult it)
+    // asks BEFORE committing. The refusal is local and visible; nothing is
+    // minted, so this replica's own frontier does not move.
+    const before = try rig.doc_peer.version(gpa);
+    defer gpa.free(before);
+    if (rig.cp.mayMintOp() == .ok) try rig.doc_peer.insert(gpa, rig.doc_peer.text().byteLen(), "PEER");
+    const after = try rig.doc_peer.version(gpa);
+    defer gpa.free(after);
+    try t.expectEqualSlices(u8, before, after);
+
+    // No poison: nothing the peer authored ever reached the shared replica,
+    // because nothing was ever authored. (The host still records refusals
+    // here — a read-only peer re-offers its frontier after every merge, and
+    // that echo is refused by the same authority check; the point is that no
+    // OP of the peer's own is in any of them.)
+    try rig.pump(200);
+    const th = try rig.hostText(gpa);
+    defer gpa.free(th);
+    try t.expect(std.mem.indexOf(u8, th, "PEER") == null);
+
+    // Adding the write export opens the SAME preflight — a second grant
+    // widens the union, it does not re-grade the connection.
+    _ = try rig.ch.grantExport(grants.OpSet.of(&.{.replica_write}), .whole, .until_revoked);
+    try t.expect(try rig.untilOps(write_export));
+    try t.expectEqual(grants.Reason.ok, rig.cp.mayMintOp());
+    try t.expectEqual(session.Access.edit, rig.doc_peer.my_grant);
+    try rig.doc_peer.insert(gpa, rig.doc_peer.text().byteLen(), "PEER");
+    try t.expect(try rig.untilText(gpa, &rig.doc_host, "PEER"));
+}
+
+test "export grants: revocation announces, the grantee's preflight closes at once, and an already-flowing stream is re-checked at the admission point" {
+    const gpa = t.allocator;
+    var rig: ExportRig = undefined;
+    try ExportRig.setup(gpa, &rig, .own);
+    defer rig.deinit(gpa);
+
+    try rig.doc_host.insert(gpa, 0, "base\n");
+    try rig.ch.publish(&rig.book, 1);
+    _ = try rig.ch.grantExport(write_export, .whole, .until_revoked);
+    try t.expect(try rig.untilOps(write_export));
+
+    // A live, admitted stream.
+    try rig.doc_peer.insert(gpa, rig.doc_peer.text().byteLen(), "ONE");
+    try t.expect(try rig.untilText(gpa, &rig.doc_host, "ONE"));
+
+    // `setPeerAccess`'s per-export sibling.
+    try t.expectEqual(@as(usize, 1), rig.ch.revokeExports());
+    try t.expect(try rig.untilOps(.empty));
+    try t.expectEqual(grants.Reason.never_granted, rig.cp.mayMintOp());
+    try t.expectEqual(session.Access.view, rig.doc_peer.my_grant);
+
+    // A grantee that IGNORES its preflight (buggy, older, or malicious)
+    // still cannot get an op in: admission re-decides on every frame, which
+    // is the honest in-flight granularity a batched protocol has.
+    rig.ch.last_refusal = null;
+    try rig.doc_peer.insert(gpa, rig.doc_peer.text().byteLen(), "TWO");
+    try rig.pump(400);
+    const th = try rig.hostText(gpa);
+    defer gpa.free(th);
+    try t.expect(std.mem.indexOf(u8, th, "ONE") != null); // the admitted edit stands
+    try t.expect(std.mem.indexOf(u8, th, "TWO") == null);
+    try t.expectEqual(grants.Reason.never_granted, rig.ch.last_refusal.?);
+}
+
+test "export grants: unpublishing kills the epoch — admission refuses with dead_epoch, distinct from never having been granted" {
+    const gpa = t.allocator;
+    var rig: ExportRig = undefined;
+    try ExportRig.setup(gpa, &rig, .own);
+    defer rig.deinit(gpa);
+
+    try rig.doc_host.insert(gpa, 0, "base\n");
+    try rig.ch.publish(&rig.book, 1);
+    _ = try rig.ch.grantExport(write_export, .whole, .until_revoked);
+    try t.expect(try rig.untilOps(write_export));
+    try rig.doc_peer.insert(gpa, rig.doc_peer.text().byteLen(), "ONE");
+    try t.expect(try rig.untilText(gpa, &rig.doc_host, "ONE"));
+
+    // §13.2: unpublishing advances the epoch and invalidates every export
+    // minted against it — no row walk, no window.
+    try rig.ch.unpublish();
+    try t.expect(try rig.untilOps(.empty));
+    // A reference the grantee still holds at the old epoch says so.
+    try t.expectEqual(
+        grants.Reason.dead_epoch,
+        rig.cp.announced.mayAt(.{ .id = 1, .epoch = 1 }, .replica_write),
+    );
+
+    rig.ch.last_refusal = null;
+    try rig.doc_peer.insert(gpa, rig.doc_peer.text().byteLen(), "GHOST");
+    try rig.pump(400);
+    const th = try rig.hostText(gpa);
+    defer gpa.free(th);
+    try t.expect(std.mem.indexOf(u8, th, "GHOST") == null);
+    // The distinct reason is the point: "your grant outlived its
+    // publication" is not "you were never granted anything".
+    try t.expectEqual(grants.Reason.dead_epoch, rig.ch.last_refusal.?);
+}
+
+test "export grants: a legacy grade-only peer is unchanged — one byte in, the preset bundle out, the same ops admitted and dropped" {
+    const gpa = t.allocator;
+    var rig: ExportRig = undefined;
+    // No publish, no book: the wire and the behavior are exactly pre-slice.
+    try ExportRig.setup(gpa, &rig, .edit);
+    defer rig.deinit(gpa);
+
+    try rig.doc_host.insert(gpa, 0, "base\n");
+    try t.expect(try rig.untilOps(session.Access.edit.ops()));
+    try t.expect(!rig.cp.announced.described); // a grade byte, nothing more
+    try t.expectEqual(session.Access.edit, rig.doc_peer.my_grant);
+    try t.expectEqual(grants.Reason.ok, rig.cp.mayMintOp());
+
+    try rig.doc_peer.insert(gpa, rig.doc_peer.text().byteLen(), "ONE");
+    try t.expect(try rig.untilText(gpa, &rig.doc_host, "ONE"));
+
+    // A live downgrade (`setPeerAccess`) still re-announces and still gates.
+    rig.host.access = .view;
+    try t.expect(try rig.untilOps(session.Access.view.ops()));
+    try t.expectEqual(session.Access.view, rig.doc_peer.my_grant);
+    try t.expectEqual(grants.Reason.out_of_ops, rig.cp.mayMintOp());
+
+    rig.ch.last_refusal = null;
+    try rig.doc_peer.insert(gpa, rig.doc_peer.text().byteLen(), "TWO");
+    try rig.pump(400);
+    const th = try rig.hostText(gpa);
+    defer gpa.free(th);
+    try t.expect(std.mem.indexOf(u8, th, "ONE") != null);
+    try t.expect(std.mem.indexOf(u8, th, "TWO") == null);
+    try t.expectEqual(grants.Reason.out_of_ops, rig.ch.last_refusal.?);
+}
+
+test "export grants: surfaces are granted and enforced SEPARATELY — replica access without presence drops the peer's cursor, adding presence lights it up" {
+    const gpa = t.allocator;
+    var rig: ExportRig = undefined;
+    try ExportRig.setup(gpa, &rig, .own);
+    defer rig.deinit(gpa);
+
+    try rig.doc_host.insert(gpa, 0, "0123456789");
+    try rig.ch.publish(&rig.book, 1);
+    // Read the document, but do NOT show me where you are.
+    const replica_only = grants.OpSet.of(&.{ .replica_read, .replica_write });
+    _ = try rig.ch.grantExport(replica_only, .whole, .until_revoked);
+    try t.expect(try rig.untilOps(replica_only));
+
+    try rig.cp.setPublishPresence(true);
+    try t.expect(try rig.untilText(gpa, &rig.doc_peer, "0123456789"));
+    try rig.pump(300);
+    try t.expect(rig.ch.presenceNamed("peer") == null); // dropped at admission
+
+    // The same peer, the same channel, one more export. Presence is
+    // latest-wins soft state, so it re-publishes on the grantee's next caret
+    // move — nothing replays what the host already dropped.
+    _ = try rig.ch.grantExport(grants.OpSet.of(&.{.presence_publish}), .whole, .until_revoked);
+    try t.expect(try rig.untilOps(replica_only.with(.presence_publish)));
+    var seen = false;
+    for (0..4000) |_| {
+        _ = try rig.ch.tick(0);
+        _ = try rig.cp.tick(3);
+        if (rig.ch.presenceNamed("peer") != null) {
+            seen = true;
+            break;
+        }
+        napUs(300);
+    }
+    try t.expect(seen);
+}
+
+test "export grants: the connection grade is a CEILING over the wire — an export the grade forbids never admits, and is never announced as held" {
+    const gpa = t.allocator;
+    var rig: ExportRig = undefined;
+    try ExportRig.setup(gpa, &rig, .view); // the maximum this link may reach
+    defer rig.deinit(gpa);
+
+    try rig.doc_host.insert(gpa, 0, "base\n");
+    try rig.ch.publish(&rig.book, 1);
+    // The owner mints write anyway — the intersection, not the mint, decides.
+    _ = try rig.ch.grantExport(write_export, .whole, .until_revoked);
+
+    try t.expect(try rig.untilOps(write_export.intersect(session.Access.view.ops())));
+    try t.expectEqual(session.Access.view, rig.doc_peer.my_grant);
+    try t.expectEqual(grants.Reason.out_of_ops, rig.cp.mayMintOp());
+
+    rig.ch.last_refusal = null;
+    try rig.doc_peer.insert(gpa, rig.doc_peer.text().byteLen(), "PEER");
+    try rig.pump(400);
+    const th = try rig.hostText(gpa);
+    defer gpa.free(th);
+    try t.expect(std.mem.indexOf(u8, th, "PEER") == null);
+    try t.expectEqual(grants.Reason.out_of_ops, rig.ch.last_refusal.?);
+}
