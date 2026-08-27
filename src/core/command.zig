@@ -63,9 +63,11 @@ pub const ArgSpec = struct {
 
 /// Everything a handler may touch — the whole editor surface, because
 /// commands ARE the editor's features. Commands only ever see this,
-/// never core internals. `editor()`/`document()` always mean the
-/// ACTIVE buffer — a buffer switch mid-command redirects the rest of
-/// the command, which is the honest semantics.
+/// never core internals. `textEditor()`/`document()` mean the ACTIVE
+/// buffer — a buffer switch mid-command redirects the rest of the
+/// command, which is the honest semantics — unless a background
+/// delivery has `bound_entry` set, in which case they mean the entry
+/// that delivery captured at spawn.
 pub const Context = struct {
     gpa: Allocator,
     buffers: *Buffers,
@@ -134,9 +136,33 @@ pub const Context = struct {
     filesystems: ?*@import("weft_fs_runtime").Router = null,
     /// The shell's workspace placement policy, when one is installed.
     entries: ?EntryOpener = null,
+    /// The entry an ASYNC delivery captured at spawn, bound for the duration
+    /// of its callback (`wasm_host/proc.zig`). While set, `buffer`/
+    /// `textEditor`/`document` mean THAT entry rather than whatever is active,
+    /// so a background result cannot follow focus into someone else's buffer
+    /// (doc/contextual-workspace-architecture.md §2.6). The ref is
+    /// generation-checked: an entry closed mid-callback resolves to nothing
+    /// and the text doors refuse rather than fall through to the active one.
+    bound_entry: ?Buffers.Ref = null,
+
+    /// Bind (or clear, with `null`) the async-delivery entry, returning the
+    /// previous binding for the caller to restore.
+    pub fn bindEntry(self: *Context, ref: ?Buffers.Ref) ?Buffers.Ref {
+        defer self.bound_entry = ref;
+        return self.bound_entry;
+    }
+
+    /// The entry this call is about — the bound one while a background
+    /// delivery is in flight, else the active one. `null` only when a bound
+    /// entry has since been closed: a caller that can refuse should, rather
+    /// than fall through to whoever happens to be active.
+    pub fn entry(self: *Context) ?*Buffers.Buffer {
+        const ref = self.bound_entry orelse return self.buffers.active();
+        return self.buffers.resolve(ref);
+    }
 
     pub fn buffer(self: *Context) *Buffers.Buffer {
-        return self.buffers.active();
+        return self.entry() orelse self.buffers.active();
     }
 
     /// Reach the captured `Ctx` value (doc/cwa-prior-docs-audit.md §5) — the
@@ -184,21 +210,26 @@ pub const Context = struct {
         return self.caps.fire(kind, doc, path, opts);
     }
 
-    /// The active entry's text editor, or a REFUSAL: an entry that holds no
+    /// This entry's text editor, or a REFUSAL: an entry that holds no
     /// text (a semantic view) has no document, cursor, or undo history to
     /// operate on. Refusing here — echoed, like every other refusal — makes a
     /// text op on such an entry one polite no-op instead of a guard each call
-    /// site invents for itself (`builtins.editErr` swallows it).
+    /// site invents for itself (`builtins.editErr` swallows it). A bound entry
+    /// that was closed mid-delivery refuses the same way.
     pub fn textEditor(self: *Context) error{Unauthorized}!*Editor {
-        return self.buffers.active().textEditor() orelse {
+        const b = self.entry() orelse {
+            self.noteRefusal("that entry is gone");
+            return error.Unauthorized;
+        };
+        return b.textEditor() orelse {
             self.noteRefusal("no text in this view");
             return error.Unauthorized;
         };
     }
 
-    /// The active entry's document, when it holds text.
+    /// This entry's document, when it holds text.
     pub fn document(self: *Context) ?*Document {
-        const ed = self.buffers.active().textEditor() orelse return null;
+        const ed = (self.entry() orelse return null).textEditor() orelse return null;
         return &ed.doc;
     }
 

@@ -12,11 +12,12 @@ const Editor = @import("../Editor.zig");
 const shared = @import("plugin.zig");
 const WasmPlugin = shared.WasmPlugin;
 
-/// The active entry's editor, for the handlers that have nothing to answer
-/// without one: a guest asking about text in an entry that holds none gets the
-/// same reply it gets for an empty document.
+/// The entry this call is about (`command.Context.entry` — the active one, or
+/// the entry a background delivery captured), for the handlers that have
+/// nothing to answer without an editor: a guest asking about text in an entry
+/// that holds none gets the same reply it gets for an empty document.
 fn activeEditor(p: *WasmPlugin) ?*Editor {
-    return p.activeCtx().buffers.active().textEditor();
+    return (p.activeCtx().entry() orelse return null).textEditor();
 }
 
 fn opaqueHandle(raw: i32) ?u32 {

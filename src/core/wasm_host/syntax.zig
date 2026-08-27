@@ -8,6 +8,12 @@ const wasm = @import("../wasm.zig");
 const shared = @import("plugin.zig");
 const WasmPlugin = shared.WasmPlugin;
 
+/// The editor of the entry this call is about — the active one, or the entry a
+/// background delivery captured (`command.Context.entry`).
+fn entryEditor(p: *WasmPlugin) ?*@import("../Editor.zig") {
+    return (p.activeCtx().entry() orelse return null).textEditor();
+}
+
 pub fn hNodeAt(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32, results: []i32) void {
     const p: *WasmPlugin = @ptrCast(@alignCast(data.?));
     const resolve = p.syntax_of orelse {
@@ -140,7 +146,7 @@ pub fn hClaimSubbuffer(data: ?*anyopaque, caller: *wasm.Caller, args: []const i3
         results[0] = -1;
         return;
     };
-    const ed = p.activeCtx().buffers.active().textEditor() orelse {
+    const ed = entryEditor(p) orelse {
         results[0] = -1;
         return;
     };
@@ -194,7 +200,7 @@ pub fn hSubbufferFactAt(data: ?*anyopaque, caller: *wasm.Caller, args: []const i
         results[0] = -1;
         return;
     };
-    const ed = p.activeCtx().buffers.active().textEditor() orelse {
+    const ed = entryEditor(p) orelse {
         results[0] = -1;
         return;
     };

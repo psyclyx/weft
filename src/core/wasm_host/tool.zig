@@ -20,5 +20,5 @@ pub fn hToolBacking(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32, 
     const p: *WasmPlugin = @ptrCast(@alignCast(data.?));
     const name = caller.readMemory(p.gpa, @intCast(args[0]), @intCast(args[1])) catch return;
     defer p.gpa.free(name);
-    p.activeCtx().buffers.active().setTool(p.gpa, name) catch return;
+    (p.activeCtx().entry() orelse return).setTool(p.gpa, name) catch return;
 }
