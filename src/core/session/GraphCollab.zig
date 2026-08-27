@@ -225,6 +225,17 @@ needs_grant_reannounce: bool = false,
 /// see `announceGrant`), freed in `deinit`.
 granted_roots: []NodeRef = &.{},
 
+/// This quad's publication (§13.2), the key `sync_core.admitBatch`'s
+/// per-export check runs against. `id = 0` = unpublished: the connection
+/// grade alone governs, exactly as before per-export grants — which is
+/// every graph caller today, since a graph quad's sub-document authority
+/// already rides `grants`/`admitRegions` rather than the coarse gate.
+publication: grants_mod.PublicationRef = .{ .id = 0, .epoch = 0 },
+/// Why the last inbound batch was refused at the COARSE gate (per-export
+/// authority / dead epoch), as opposed to the per-region hook, whose
+/// refusals are echoed to the sender in `refusals`.
+last_refusal: ?grants_mod.Reason = null,
+
 /// The capability name every `grantSubtree` row is minted under — a graph
 /// doc's own namespace, distinct from `.doc_region`'s `"doc.edit"` (a
 /// different substrate, a different chokepoint — see `Limit.graph_subtree`'s
@@ -479,7 +490,18 @@ pub fn handleFrame(self: *GraphCollab, frame: wire.Decoder.Decoded) !bool {
                 // of whether we admit their ops, and refusing to record it
                 // would make us think they're behind when they aren't —
                 // spurious resync traffic, not a safety issue either way.
-                const batch = (try self.core.admitBatch(gpa, self.session, frame.payload)) orelse return false;
+                const batch = switch (try self.core.admitBatch(gpa, self.session, self.publication, frame.payload)) {
+                    .idle => return false,
+                    .refused => |why| {
+                        // Loud on the transition, quiet on repeats — see
+                        // `Collab`'s own `.refused` arm for why.
+                        if (self.last_refusal == null or self.last_refusal.? != why)
+                            std.log.warn("graph-collab: batch refused: {t}", .{why});
+                        self.last_refusal = why;
+                        return false;
+                    },
+                    .merge => |b| b,
+                };
                 switch (self.admitRegions(gpa, batch) catch |err| {
                     std.log.warn("graph-collab: region admission check failed: {t}", .{err});
                     return false;

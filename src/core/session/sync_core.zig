@@ -44,6 +44,21 @@ const Allocator = std.mem.Allocator;
 
 const wire = @import("weft_wire");
 const Session = @import("Session.zig");
+const grants = @import("../grants.zig");
+
+/// What the singular replica-op admission point decided about one `.batch`
+/// frame. `.idle` (a corrupt or empty payload) is deliberately NOT spelled
+/// the same as `.refused`: nothing was denied, there was simply nothing to
+/// merge, and collapsing the two would hand every driver a "refused" it
+/// would have to guess the meaning of.
+pub const Admission = union(enum) {
+    /// Authorized: merge these bytes.
+    merge: []const u8,
+    /// Nothing to do — not a refusal.
+    idle,
+    /// Denied by authority, with the reason the enforcement point decided.
+    refused: grants.Reason,
+};
 
 /// `Doc` need only provide `version(*const Doc, Allocator) E![]u8`,
 /// `eventsSince(*const Doc, Allocator, []const u8) E![]u8`, and
@@ -130,24 +145,43 @@ pub fn SyncCore(comptime Doc: type) type {
 
         /// Decode + admit a `.batch` frame payload (`uv token_len | token
         /// | batch`): records `token` as `their_frontier` (tracked even
-        /// for a view-only peer, so frontier resync keeps working), then
-        /// enforces the view-peer admission rule — a peer without edit
-        /// authority never gets its ops merged (and thus never
-        /// re-broadcast to other peers). Returns the batch bytes to
-        /// merge, or `null` if there's nothing to do (corrupt payload,
-        /// unauthorized, or an empty batch); the merge call itself (and
-        /// any doc-specific error recovery) stays with the caller — see
-        /// this file's doc comment on why `merge` isn't part of the core.
-        pub fn admitBatch(self: *Self, gpa: Allocator, session: *Session, payload: []const u8) !?[]const u8 {
+        /// for a refused peer, so frontier resync keeps working), then
+        /// asks `Session.authorize` whether the sender may write this
+        /// publication's replica. **This is the singular replica-op
+        /// enforcement point** — both drivers reach it, and it is the only
+        /// place a remote op is admitted, which is why the per-export
+        /// re-key happened HERE rather than growing a second gate beside
+        /// it. It re-decides on EVERY frame, so a revoke (or an epoch
+        /// advance) lands on the next frame of an already-flowing stream:
+        /// frame granularity is the honest in-flight check a batched
+        /// protocol has.
+        ///
+        /// The merge call itself (and any doc-specific error recovery)
+        /// stays with the caller — see this file's doc comment on why
+        /// `merge` isn't part of the core.
+        pub fn admitBatch(
+            self: *Self,
+            gpa: Allocator,
+            session: *Session,
+            publication: grants.PublicationRef,
+            payload: []const u8,
+        ) !Admission {
             var cur: []const u8 = payload;
-            const tlen = wire.getUv(&cur) catch return null;
-            if (tlen > cur.len) return null;
+            const tlen = wire.getUv(&cur) catch return .idle;
+            if (tlen > cur.len) return .idle;
             const token = cur[0..tlen];
             const batch = cur[tlen..];
             try self.setTheirFrontier(gpa, token);
-            if (!session.access.canEdit()) return null;
-            if (batch.len == 0) return null;
-            return batch;
+            // Emptiness is checked BEFORE authority on purpose: a peer that
+            // merely echoes its frontier (every read-only peer, on every
+            // merge) is carrying no op to admit, and calling that an
+            // authority refusal would turn ordinary sync traffic into a
+            // stream of violations. Nothing is weakened — a batch with any
+            // op in it still goes through `authorize`.
+            if (batch.len == 0) return .idle;
+            const verdict = session.authorize(publication, .replica_write);
+            if (verdict != .ok) return .{ .refused = verdict };
+            return .{ .merge = batch };
         }
     };
 }

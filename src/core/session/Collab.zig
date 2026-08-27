@@ -15,6 +15,8 @@ const layers_mod = @import("../layers.zig");
 const Session = @import("Session.zig");
 const Access = Session.Access;
 const sync_core = @import("sync_core.zig");
+const grants = @import("../grants.zig");
+const export_grants = @import("export_grants.zig");
 
 const remote_fs_mod = @import("remote_fs.zig");
 const BlobOp = remote_fs_mod.BlobOp;
@@ -50,6 +52,23 @@ core: sync_core.SyncCore(Document) = .{},
 /// so `push` re-emits a `grant` only when it changes (initial + on any
 /// `setPeerAccess`). Unused on the client (which receives, never sends).
 last_sent_grant: ?Access = null,
+/// This quad's publication (§13.2). `id = 0` means unpublished — a legacy
+/// quad whose authority is the connection grade alone, exactly as before
+/// per-export grants. Set by `publish`.
+publication: grants.PublicationRef = .{ .id = 0, .epoch = 0 },
+/// Host side: the grant book revision last announced, so `push` re-emits
+/// on any mint/revoke/epoch change — the per-export analog of
+/// `last_sent_grant`'s grade comparison.
+last_sent_rev: ?u64 = null,
+/// Grantee side: what the host last told us we hold here (§13.5's
+/// announce-to-grantee). Display and prevention state, never authority —
+/// see `export_grants.zig`. `mayMintOp` is the preflight over it.
+announced: export_grants.Announced,
+/// Host side: why the last inbound batch was refused at admission, or
+/// `null` if none was. A text quad has no refusal frame to echo (unlike a
+/// graph quad's `region_refused`), so this is where a refusal is
+/// observable instead of being a silent drop.
+last_refusal: ?grants.Reason = null,
 /// Set when a client-role bind lowered this doc's `my_grant` to `.view`
 /// (fail-safe join). On teardown we restore `.own` so the doc, kept as a
 /// local file after disconnect, is editable again. A plain flag — never
@@ -168,6 +187,7 @@ pub fn init(gpa: Allocator, session: *Session, doc: *Document, name: []const u8)
         .session = session,
         .doc = doc,
         .name = try gpa.dupe(u8, name),
+        .announced = .init(gpa),
     };
 }
 
@@ -176,6 +196,7 @@ pub fn deinit(self: *Collab) void {
     // (disconnect keeps the buffer as a local file; buffer-close unbinds
     // before the doc is freed — the doc always outlives this).
     if (self.client_bound) self.doc.my_grant = .own;
+    self.announced.deinit();
     self.core.deinit(self.gpa);
     self.clearLastPresence();
     for (self.presence.items) |*peer| peer.deinit(self.gpa);
@@ -192,6 +213,7 @@ pub fn rebind(self: *Collab, new_session: *Session) void {
     // Re-announce the grant after a reconnect (host side); the client
     // keeps its current my_grant so there is no read-only flash.
     self.last_sent_grant = null;
+    self.last_sent_rev = null;
     self.clearLastPresence();
 }
 
@@ -256,17 +278,30 @@ pub fn handleFrame(self: *Collab, frame: wire.Decoder.Decoded) !bool {
         .op => if (frame.channel == self.base) {
             switch (std.enums.fromInt(wire.OpKind, frame.kind) orelse return false) {
                 .batch => {
-                    // Decode + frontier-track + view-peer admission gate:
-                    // shared with the graph driver
-                    // (`sync_core.SyncCore.admitBatch`) — a view-only
-                    // peer's ops are never admitted to the shared document
-                    // (and thus never propagate to other peers), but their
-                    // frontier is still tracked so sync stays consistent
-                    // and they keep receiving everyone else's edits. The
-                    // merge call + its `Unrealized` recovery stay here —
-                    // `GraphCollab` has no such branch (see
-                    // `sync_core.zig`'s doc comment).
-                    const batch = (try self.core.admitBatch(gpa, self.session, frame.payload)) orelse return changed;
+                    // Decode + frontier-track + the singular per-export
+                    // admission gate: shared with the graph driver
+                    // (`sync_core.SyncCore.admitBatch`) — a sender without
+                    // `replica_write` on this publication at its live epoch
+                    // never gets its ops merged (and thus never propagates
+                    // them to other peers), but their frontier is still
+                    // tracked so sync stays consistent and they keep
+                    // receiving everyone else's edits. The merge call + its
+                    // `Unrealized` recovery stay here — `GraphCollab` has no
+                    // such branch (see `sync_core.zig`'s doc comment).
+                    const batch = switch (try self.core.admitBatch(gpa, self.session, self.publication, frame.payload)) {
+                        .idle => return changed,
+                        .refused => |why| {
+                            // Loud on the TRANSITION, quiet on repeats: a
+                            // peer without write authority re-offers its
+                            // frontier after every merge, so a warn per
+                            // frame would bury the news under the echo.
+                            if (self.last_refusal == null or self.last_refusal.? != why)
+                                std.log.warn("collab: batch refused: {t}", .{why});
+                            self.last_refusal = why;
+                            return changed;
+                        },
+                        .merge => |b| b,
+                    };
                     const merged = self.doc.mergeRemote(gpa, batch) catch |err| blk: {
                         if (err == error.Unrealized) {
                             // Remote edits landed inside spans we
@@ -292,15 +327,24 @@ pub fn handleFrame(self: *Collab, frame: wire.Decoder.Decoded) !bool {
                 // Connection-level; Conn consumes these on channel 0.
                 .share, .publish, .unpublish => {},
                 .grant => {
-                    // The host tells us our grade on this document. Only
-                    // a client accepts it — a host is the authority and
-                    // is never granted by a peer (closes the reverse
+                    // The host tells us what we hold on this document:
+                    // the legacy grade byte, optionally followed by the
+                    // per-export descriptors (§13.5's announce-to-grantee;
+                    // see `export_grants.zig` for the additive layout).
+                    // Only a client accepts it — a host is the authority
+                    // and is never granted by a peer (closes the reverse
                     // vector where a client would gag the host's user).
-                    if (self.session.role == .client and frame.payload.len >= 1) {
-                        if (std.enums.fromInt(Access, frame.payload[0])) |g| {
-                            self.doc.my_grant = g;
-                            changed = true;
-                        }
+                    //
+                    // Projecting the announcement into `doc.my_grant` is
+                    // what makes the preflight STRUCTURAL: the ONE existing
+                    // text edit chokepoint now refuses out-of-grant edits
+                    // for us, so no out-of-grant event is ever minted and
+                    // no new edit-path layer had to be invented for it.
+                    if (self.session.role == .client) {
+                        const before = self.announced.ops();
+                        self.announced.fold(frame.payload);
+                        self.doc.my_grant = self.announced.docGrade();
+                        changed = changed or before.bits != self.announced.ops().bits;
                     }
                 },
                 // Graph-doc-only (W6 slice 1's per-region lease,
@@ -337,6 +381,14 @@ pub fn handleFrame(self: *Collab, frame: wire.Decoder.Decoded) !bool {
                 changed = true;
             }
         } else if (frame.channel == self.base + 1) {
+            // Per-export admission, presence surface: the same singular
+            // decision the replica surface goes through, asked about the op
+            // this channel carries. A publication that granted replica
+            // access but not presence gets its peers' cursors dropped here
+            // rather than rendered — "sharing a document" and "showing where
+            // I am" are different exports (§13.1), so they are separately
+            // grantable and separately enforced.
+            if (self.session.authorize(self.publication, .presence_publish) != .ok) return false;
             // Presence is soft state, but its positions are CRDT identities:
             // uv name_len | name | byte present |, when present,
             // anchor head | anchor selection | uv hue16. A missing identity
@@ -488,17 +540,7 @@ pub fn push(self: *Collab) !bool {
 
     try self.core.announceOnce(gpa, self.session, self.base, self.doc);
 
-    // Host side: announce the grade we grant this peer on this document
-    // (initial + whenever it changes via setPeerAccess/applyGrades), so
-    // the client gates its own edits instead of forming a ghost our op
-    // admission would silently drop. The client never emits this.
-    if (self.session.role == .server and
-        (self.last_sent_grant == null or self.last_sent_grant.? != self.session.access))
-    {
-        self.last_sent_grant = self.session.access;
-        const grade: [1]u8 = .{@intFromEnum(self.session.access)};
-        try self.session.post(.op, @intFromEnum(wire.OpKind.grant), self.base, &grade);
-    }
+    if (self.session.role == .server) try self.announceGrant();
     try self.core.pushOnMove(gpa, self.session, self.base, self.doc, self.partialSkip());
 
     // Forward host-scoped diagnostics when they changed.
@@ -526,6 +568,104 @@ pub fn push(self: *Collab) !bool {
 
     if (self.publish_presence) try self.publishPresence();
     return false;
+}
+
+// ── Per-export grants (§13.5) ────────────────────────────────────────
+
+/// Host side: publish this quad's document into `book` under `id`, and bind
+/// the book to this link's session so `authorize` can reach it. Until this
+/// is called the quad is legacy grade-only, and every existing caller that
+/// never calls it keeps exactly today's behavior.
+pub fn publish(self: *Collab, book: *grants.ExportBook, id: u64) !void {
+    self.session.exports = book;
+    self.publication = try book.publish(id);
+    self.last_sent_rev = null; // the grantee must be told about the new epoch
+}
+
+/// Host side: end this publication (§13.2) — advance its epoch, which
+/// invalidates every grant minted against the old one at once. This quad
+/// keeps its now-dead reference deliberately: an admission against it
+/// refuses with `.dead_epoch` rather than falling back to anything wider.
+pub fn unpublish(self: *Collab) !void {
+    const book = self.session.exports orelse return;
+    try book.unpublish(self.publication.id);
+    self.last_sent_rev = null;
+}
+
+/// Host side: grant this quad's AUTHENTICATED peer an export on this
+/// quad's publication. Keyed on the fingerprint the handshake proved, never
+/// on a self-declared name — the same discipline `GraphCollab.grantSubtree`
+/// documents at length (a name nobody authenticates is authority a grantee
+/// sheds by renaming). `scope`'s bytes are borrowed for the row's lifetime.
+pub fn grantExport(
+    self: *Collab,
+    ops: grants.OpSet,
+    scope: grants.ExportScope,
+    lifetime: grants.Lifetime,
+) !grants.ExportHandle {
+    const book = self.session.exports orelse return error.NotPublished;
+    const fp = self.session.peerFingerprint() orelse return error.PeerNotEstablished;
+    return book.grant(.{
+        .grantee = fp,
+        .publication = self.publication,
+        .ops = ops,
+        .scope = scope,
+        .lifetime = lifetime,
+    });
+}
+
+/// Host side, `setPeerAccess`'s per-export sibling: revoke every export this
+/// quad's peer holds on this publication. The next `push` announces the
+/// shrunken set, so the grantee's own preflight refuses immediately after —
+/// and an already-flowing stream is re-checked at `admitBatch`, per frame.
+pub fn revokeExports(self: *Collab) usize {
+    const book = self.session.exports orelse return 0;
+    const fp = self.session.peerFingerprint() orelse return 0;
+    return book.revokePeer(fp, self.publication.id);
+}
+
+/// Grantee side: §13.5's preflight. May this replica mint a replicated op
+/// right now? Its production wiring is `doc.my_grant`, set from the same
+/// announcement in `handleFrame` — this is the same answer, spelled with a
+/// reason for a caller that wants to say WHY it refused.
+pub fn mayMintOp(self: *const Collab) grants.Reason {
+    return self.announced.may(.replica_write);
+}
+
+/// Host side: (re-)announce what this peer holds here. Emits the LEGACY
+/// one-byte frame, unchanged, when there is no publication to describe —
+/// so a share that never published is byte-identical on the wire to before
+/// this slice — and the additive descriptor payload when there is (whose
+/// leading byte is still that same grade, for any peer that reads no
+/// further; see `export_grants.zig`).
+fn announceGrant(self: *Collab) !void {
+    const gpa = self.gpa;
+    const book = self.session.exports;
+    if (book == null or self.publication.id == 0) {
+        if (self.last_sent_grant != null and self.last_sent_grant.? == self.session.access) return;
+        self.last_sent_grant = self.session.access;
+        const grade: [1]u8 = .{@intFromEnum(self.session.access)};
+        return self.session.post(.op, @intFromEnum(wire.OpKind.grant), self.base, &grade);
+    }
+    const b = book.?;
+    if (self.last_sent_rev != null and self.last_sent_rev.? == b.rev and
+        self.last_sent_grant != null and self.last_sent_grant.? == self.session.access) return;
+    const fp = self.session.peerFingerprint() orelse return; // nothing to announce to yet
+    // Re-read the live epoch: an `unpublish` advanced it out from under this
+    // quad's reference, and announcing the stale one would tell the grantee
+    // it still holds what it lost.
+    self.publication.epoch = b.liveEpoch(self.publication.id) orelse self.publication.epoch;
+
+    var list: std.ArrayList(grants.ExportGrant) = .empty;
+    defer list.deinit(gpa);
+    try b.collect(fp, self.publication.id, &list);
+
+    var payload: std.ArrayList(u8) = .empty;
+    defer payload.deinit(gpa);
+    try export_grants.encode(gpa, &payload, self.session.access, self.publication, list.items);
+    try self.session.post(.op, @intFromEnum(wire.OpKind.grant), self.base, payload.items);
+    self.last_sent_rev = b.rev;
+    self.last_sent_grant = self.session.access;
 }
 
 fn publishPresence(self: *Collab) !void {
