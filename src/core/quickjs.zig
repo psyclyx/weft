@@ -1149,48 +1149,12 @@ fn cAgentWrite(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32, resul
     command.renderInto(gpa, doc, .agent, peer, &.{.{ .range = .{ .start = 0, .end = end }, .bytes = content }}) catch return;
 }
 
-/// Walk a framed blob (uvarint count, then uvarint(len)++bytes per record) —
-/// core-local copy of the app-side decoder. `next` yields null on a short or
-/// malformed buffer, so a truncated blob reads as fewer records, never as
-/// garbage bytes.
-const FramedRecords = struct {
-    cur: []const u8,
-    left: u64,
-
-    fn init(blob: []const u8) ?FramedRecords {
-        var cur = blob;
-        const count = framedUvarint(&cur) orelse return null;
-        return .{ .cur = cur, .left = count };
-    }
-    fn next(self: *FramedRecords) ?[]const u8 {
-        if (self.left == 0) return null;
-        const n = framedUvarint(&self.cur) orelse return null;
-        if (n > self.cur.len) return null;
-        const rec = self.cur[0..@intCast(n)];
-        self.cur = self.cur[@intCast(n)..];
-        self.left -= 1;
-        return rec;
-    }
-};
+/// The framed blob the shim encodes — one decoder, shared with the guest ABI
+/// membrane (see `framed.zig`).
+const FramedRecords = @import("framed.zig").Records;
 
 /// The first record of a framed blob — a single-valued `weft.set`'s value.
-fn firstFramedRecord(blob: []const u8) ?[]const u8 {
-    var it = FramedRecords.init(blob) orelse return null;
-    return it.next();
-}
-fn framedUvarint(cur: *[]const u8) ?u64 {
-    var shift: u6 = 0;
-    var v: u64 = 0;
-    while (cur.len > 0) {
-        const b = cur.*[0];
-        cur.* = cur.*[1..];
-        v |= @as(u64, b & 0x7f) << shift;
-        if (b & 0x80 == 0) return v;
-        if (shift >= 57) return null;
-        shift += 7;
-    }
-    return null;
-}
+const firstFramedRecord = @import("framed.zig").first;
 
 /// The command handler a `weft.command` registers under: dispatch back into the
 /// owning JS plugin by id. `ctx` is the dispatching head's — forwarded to

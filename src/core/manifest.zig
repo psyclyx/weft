@@ -135,8 +135,9 @@ pub const ProvideDecl = struct { action: []u8, mode: []u8, lang: []u8, command: 
 pub const ValueDecl = struct { owner: []u8, key: []u8, value: []u8 };
 pub const RunArg = struct { value: []u8 };
 pub const RunDecl = struct { command: []u8, args: []RunArg };
-/// Fallback-list ceiling, matching the shim's `WEFT_BIND_MAX_CMDS`.
-pub const maxBindCommands = 8;
+/// Fallback-list ceiling, matching the shim's `WEFT_BIND_MAX_CMDS`. One
+/// number, held where bindings live.
+pub const maxBindCommands = Keymap.max_bind_commands;
 const maxRunArgs = 8;
 const maxRunArgBytes = 1024;
 const maxRunArgTotal = 4096;

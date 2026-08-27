@@ -55,6 +55,11 @@ pub const prio_plugin = 0;
 pub const prio_imported = 50;
 pub const prio_config = 100;
 
+/// Ceiling on one binding's authored arm list (`manifest.maxBindCommands`,
+/// the config shim's `WEFT_BIND_MAX_CMDS`) — a fallback chain is a handful
+/// of arms, never an unbounded program.
+pub const max_bind_commands = 8;
+
 modes: std.StringArrayHashMapUnmanaged(Bindings) = .empty,
 /// mode → parent mode: `lookup` walks the chain (vim's visual falls
 /// back to normal falls back to default).
@@ -224,17 +229,25 @@ pub fn lookup(self: *const Keymap, mode: []const u8, key: []const u8) ?[]const u
 /// only DISPLAY a binding (which-key, tests) want `lookup`'s first arm;
 /// dispatch wants this.
 pub fn lookupArms(self: *const Keymap, mode: []const u8, key: []const u8) ?[]const []const u8 {
+    const entry = self.find(mode, key) orelse return null;
+    return entry.commands;
+}
+
+/// The winning entry for `key` under `mode`: the mode's own table, its
+/// fallback chain, then the `global` layer — the ONE walk every lookup here
+/// makes.
+fn find(self: *const Keymap, mode: []const u8, key: []const u8) ?BindEntry {
     var m: []const u8 = mode;
     var depth: usize = 0;
     while (depth < 8) : (depth += 1) {
         if (self.modes.getPtr(m)) |bindings| {
-            if (bindings.get(key)) |entry| return entry.commands;
+            if (bindings.get(key)) |entry| return entry;
         }
         m = self.parents.get(m) orelse break;
     }
     // Universal fallback: `global` binds apply under every mode.
     if (self.modes.getPtr(global_mode)) |bindings| {
-        if (bindings.get(key)) |entry| return entry.commands;
+        if (bindings.get(key)) |entry| return entry;
     }
     return null;
 }
@@ -262,14 +275,8 @@ pub fn resolveExact(self: *const Keymap, mode: []const u8, seq: []const u8) ?[]c
 /// `resolveExact`'s general form — the whole authored arm list, which is
 /// what `Head.feed` hands dispatch.
 pub fn resolveExactArms(self: *const Keymap, mode: []const u8, seq: []const u8) ?[]const []const u8 {
-    var m: []const u8 = mode;
-    var depth: usize = 0;
-    while (depth < 8) : (depth += 1) {
-        if (self.modes.getPtr(m)) |b| if (b.get(seq)) |e| return e.commands;
-        m = self.parents.get(m) orelse break;
-    }
-    if (self.modes.getPtr(global_mode)) |b| if (b.get(seq)) |e| return e.commands;
-    return null;
+    const entry = self.find(mode, seq) orelse return null;
+    return entry.commands;
 }
 
 /// Whether `seq` is a strict PREFIX of some bound sequence in `mode`, its
@@ -977,4 +984,28 @@ test "keymap: committing text is DECLARED per mode — bindings inherit, the dec
     // Withdrawing the declaration leaves the mode unable to commit.
     try km.setCommitCommand(gpa, "insert", null);
     try t.expect(km.commitCommand("insert") == null);
+}
+
+test "keymap: an arm list is stored whole, in authored order; a plain bind is its one-entry case" {
+    const gpa = t.allocator;
+    var km: Keymap = .empty;
+    defer km.deinit(gpa);
+
+    try km.bindArms(gpa, "normal", "Return", &.{ "std.target.activate", "vim-open-focused" }, prio_plugin, "vim");
+    const authored = km.resolveExactArms("normal", "Return").?;
+    try t.expectEqual(@as(usize, 2), authored.len);
+    try t.expectEqualStrings("std.target.activate", authored[0]);
+    try t.expectEqualStrings("vim-open-focused", authored[1]);
+    // The head is what a single-command reader sees — the keymap picks nothing.
+    try t.expectEqualStrings("std.target.activate", km.lookup("normal", "Return").?);
+
+    // Re-binding at a winning tier replaces the WHOLE list, fallbacks included.
+    try km.bind(gpa, "normal", "Return", "insert-newline", prio_config, "config");
+    const rebound = km.resolveExactArms("normal", "Return").?;
+    try t.expectEqual(@as(usize, 1), rebound.len);
+    try t.expectEqualStrings("insert-newline", rebound[0]);
+
+    // A lower tier cannot shadow it.
+    try km.bindArms(gpa, "normal", "Return", &.{"std.target.activate"}, prio_core, "core");
+    try t.expectEqualStrings("insert-newline", km.lookup("normal", "Return").?);
 }
