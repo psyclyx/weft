@@ -4773,3 +4773,437 @@ test "peer_fs exports: the legacy read preset still lists and reads" {
     defer gpa.free(write_req);
     try t.expectError(error.RequestDenied, pair.call(write_req));
 }
+
+// ── §18 collaboration acceptance gates ──────────────────────────────
+// The offline, skew, and asymmetry gates of
+// doc/contextual-workspace-architecture.md §13.7 and §18, each driven
+// through the real wire rather than against a driver's internals.
+
+/// Counts what a session PUTS on the wire, per quad channel — the
+/// instrument gate C needs (see `Session.Tap`). `post` runs only on the
+/// caller's thread, so plain fields are enough: heartbeats are sealed
+/// straight from the writer and never pass here.
+const QuadEmissions = struct {
+    base: u64 = 0,
+    ops: usize = 0,
+    presence: usize = 0,
+    diagnostics: usize = 0,
+    blobs: usize = 0,
+
+    fn tap(self: *QuadEmissions) Session.Tap {
+        return .{ .ctx = self, .postedFn = saw };
+    }
+
+    fn saw(ctx: ?*anyopaque, class: wire.Class, kind: u8, channel: u64) void {
+        _ = kind;
+        const self: *QuadEmissions = @ptrCast(@alignCast(ctx.?));
+        if (class == .control) return;
+        if (channel == self.base) self.ops += 1;
+        if (channel == self.base + 1) self.presence += 1;
+        if (channel == self.base + 2) self.diagnostics += 1;
+        if (channel == self.base + 3) self.blobs += 1;
+    }
+};
+
+/// A `.share` announce built by hand, so a gate can feed the decoder a
+/// descriptor this build was never taught to emit.
+fn craftAnnounce(gpa: Allocator, base: u64, name: []const u8, trailer: []const u8) ![]u8 {
+    var payload: std.ArrayList(u8) = .empty;
+    errdefer payload.deinit(gpa);
+    try wire.putUv(gpa, &payload, base);
+    try wire.putUv(gpa, &payload, name.len);
+    try payload.appendSlice(gpa, name);
+    try payload.appendSlice(gpa, trailer);
+    return payload.toOwnedSlice(gpa);
+}
+
+/// Both documents hold the same number of bytes. A file-scoped pair rather
+/// than a closure: the pump helper takes a plain function.
+var converge_a: *Document = undefined;
+var converge_b: *Document = undefined;
+
+fn convergedByLen() bool {
+    return converge_b.text().byteLen() == converge_a.text().byteLen();
+}
+
+/// Drive both ends until `done`, or give up. Returns whether it held.
+fn pumpCollabsUntil(a: *Collab, b: *Collab, cursor: usize, done: *const fn () bool) !bool {
+    const deadline = task.nowNs() + 5 * std.time.ns_per_s;
+    while (task.nowNs() < deadline) {
+        _ = a.tick(cursor) catch {};
+        _ = b.tick(0) catch {};
+        if (done()) return true;
+        testPark(1);
+    }
+    return done();
+}
+
+/// One `peer_fs` call, pumped to its reply. Returns the owned response.
+fn callPeerFs(h: *Collab, c: *Collab, fs: *RemoteFs, s: *Session, req: []const u8) ![]u8 {
+    const id = try fs.request(s, c.base, req);
+    const deadline = task.nowNs() + 10 * std.time.ns_per_s;
+    while (task.nowNs() < deadline) {
+        _ = h.tick(0) catch {};
+        _ = c.tick(0) catch {};
+        if (try fs.take(id)) |resp| return resp;
+        testPark(1);
+    }
+    return error.NoReply;
+}
+
+test "gate A (§13.7): an offline peer's mutation refuses at once, and reconnecting never replays it" {
+    const gpa = t.allocator;
+
+    var pbuf: [128]u8 = undefined;
+    const root_path = try std.fmt.bufPrintZ(&pbuf, "/tmp/weft-gate-a-{d}", .{linux.getpid()});
+    _ = linux.rmdir(root_path.ptr);
+    if (linux.errno(linux.mkdir(root_path.ptr, 0o755)) != .SUCCESS) return error.Mkdir;
+    var root = try rooted_fs.RootedFs.open(root_path.ptr);
+    defer root.close();
+    defer {
+        _ = linux.unlinkat(root.root_fd, "note.txt", 0);
+        _ = linux.rmdir(root_path.ptr);
+    }
+    try root.write("note.txt", "one");
+
+    var host = try Document.init(gpa, "host");
+    defer host.deinit(gpa);
+    var client = try Document.init(gpa, "client");
+    defer client.deinit(gpa);
+    var rfs = RemoteFs.init(gpa);
+    defer rfs.deinit();
+
+    const fds = try socketPair();
+    var la: FdLink = .{ .fd = fds[0] };
+    var lb: FdLink = .{ .fd = fds[1] };
+    const sa = try Session.create(gpa, la.link(), .server, "tok", .own, null);
+    var sa_live = true;
+    defer if (sa_live) sa.destroy();
+    const sb = try Session.create(gpa, lb.link(), .client, "tok", .own, null);
+    var sb_live = true;
+    defer if (sb_live) sb.destroy();
+
+    var ch = try Collab.init(gpa, sa, &host, "host");
+    defer ch.deinit();
+    var cc = try Collab.init(gpa, sb, &client, "client");
+    defer cc.deinit();
+    ch.peer_fs_root = &root;
+    ch.fs_grant = .read_write;
+    cc.remote_fs = &rfs;
+
+    // A call the peer answers, so the refusal below is about being offline
+    // and nothing else: read the file's token, then write through it.
+    const stat_req = try peer_fs.encodeStat(gpa, "note.txt");
+    defer gpa.free(stat_req);
+    const stat_resp = try callPeerFs(&ch, &cc, &rfs, sb, stat_req);
+    defer gpa.free(stat_resp);
+    const token_bytes = peer_fs.decodeResponse(stat_resp).?.payload;
+    var token: peer_fs.Token = undefined;
+    @memcpy(&token, token_bytes);
+
+    const write_req = try peer_fs.encodeWrite(gpa, "note.txt", token, "two");
+    defer gpa.free(write_req);
+    const write_resp = try callPeerFs(&ch, &cc, &rfs, sb, write_req);
+    defer gpa.free(write_resp);
+    try t.expectEqual(peer_fs.Status.ok, peer_fs.decodeResponse(write_resp).?.status);
+    {
+        const on_disk = try root.read(gpa, "note.txt");
+        defer gpa.free(on_disk);
+        try t.expectEqualStrings("two", on_disk);
+    }
+
+    // The cable goes out.
+    sa.destroy();
+    sa_live = false;
+    const offline_deadline = task.nowNs() + 5 * std.time.ns_per_s;
+    while (task.nowNs() < offline_deadline and sb.liveness() != .offline) {
+        _ = cc.tick(0) catch {};
+        testPark(1);
+    }
+    try t.expectEqual(Session.Liveness.offline, sb.liveness());
+
+    // The mutation refuses HERE, with a reason, rather than queueing for a
+    // reconnect that would replay it against an owner who never saw it.
+    const offline_write = try peer_fs.encodeWrite(gpa, "note.txt", peer_fs.tokenOf("two"), "three");
+    defer gpa.free(offline_write);
+    try t.expectError(error.PeerOffline, rfs.request(sb, cc.base, offline_write));
+
+    // Reconnect. Nothing was held to replay: the file still reads what the
+    // last ADMITTED write left, and the replica resyncs from its frontier.
+    sb.destroy();
+    sb_live = false;
+    const fds2 = try socketPair();
+    var la2: FdLink = .{ .fd = fds2[0] };
+    var lb2: FdLink = .{ .fd = fds2[1] };
+    const sa2 = try Session.create(gpa, la2.link(), .server, "tok", .own, null);
+    defer sa2.destroy();
+    const sb2 = try Session.create(gpa, lb2.link(), .client, "tok", .own, null);
+    defer sb2.destroy();
+    ch.rebind(sa2);
+    cc.rebind(sb2);
+
+    try host.insert(gpa, 0, "resynced\n");
+    converge_a = &host;
+    converge_b = &client;
+    try t.expect(try pumpCollabsUntil(&ch, &cc, 0, convergedByLen));
+
+    const after = try root.read(gpa, "note.txt");
+    defer gpa.free(after);
+    try t.expectEqualStrings("two", after);
+}
+
+test "gate B (§13.4): an unknown op kind and an undecodable export surface are both skipped, peer intact" {
+    const gpa = t.allocator;
+    const fds = try socketPair();
+    var la: FdLink = .{ .fd = fds[0] };
+    var lb: FdLink = .{ .fd = fds[1] };
+    const sa = try Session.create(gpa, la.link(), .server, "tok", .own, null);
+    defer sa.destroy();
+    const sb = try Session.create(gpa, lb.link(), .client, "tok", .own, null);
+    defer sb.destroy();
+    var ca = try Conn.init(gpa, sa, "alice", .server);
+    defer ca.deinit();
+    var cb = try Conn.init(gpa, sb, "bob", .client);
+    defer cb.deinit();
+
+    var doc_a = try Document.init(gpa, "alice");
+    defer doc_a.deinit(gpa);
+    try doc_a.insert(gpa, 0, "hello\n");
+    const shared = try ca.share(&doc_a, "shared", 1);
+
+    // A frame kind from a build this one predates, on the live quad; a
+    // descriptor whose export surface this build cannot decode; and a
+    // KNOWN surface carrying trailing fields this build ignores.
+    try sa.post(.op, 250, shared.base, "from the future");
+    const undecodable = try craftAnnounce(gpa, 64, "future-doc", &.{ 99, 7, 7 });
+    defer gpa.free(undecodable);
+    try sa.post(.op, @intFromEnum(wire.OpKind.share), 0, undecodable);
+    const extended = try craftAnnounce(gpa, 72, "extended-doc", &.{ 0, 1, 2, 3 });
+    defer gpa.free(extended);
+    try sa.post(.op, @intFromEnum(wire.OpKind.share), 0, extended);
+
+    var doc_b = try Document.init(gpa, "bob");
+    defer doc_b.deinit(gpa);
+    var opened = false;
+    const deadline = task.nowNs() + 5 * std.time.ns_per_s;
+    while (task.nowNs() < deadline) {
+        _ = try ca.tick();
+        _ = try cb.tick();
+        if (!opened) {
+            for (cb.offers.items, 0..) |o, i| {
+                if (std.mem.eql(u8, o.name, "shared")) {
+                    _ = try cb.openOffer(i, &doc_b, 1);
+                    opened = true;
+                    break;
+                }
+            }
+        } else if (doc_b.text().byteLen() == doc_a.text().byteLen()) break;
+        testPark(1);
+    }
+    try t.expect(opened);
+
+    // The undecodable descriptor produced no offer at all — mis-reading it
+    // as text would have bound the text driver to a surface it cannot
+    // decode. The extended one is an ordinary text offer.
+    var saw_extended = false;
+    for (cb.offers.items) |o| {
+        try t.expect(!std.mem.eql(u8, o.name, "future-doc"));
+        if (std.mem.eql(u8, o.name, "extended-doc")) {
+            saw_extended = true;
+            try t.expectEqual(Conn.DocKind.text, o.kind);
+        }
+    }
+    try t.expect(saw_extended);
+
+    // And the peer is whole: the shared replica converged across the
+    // unknown frame rather than stalling on it.
+    try t.expectEqual(doc_a.text().byteLen(), doc_b.text().byteLen());
+}
+
+test "gate C (§18): a replica-only share emits nothing else; each selection lights exactly its channel" {
+    const gpa = t.allocator;
+    const fds = try socketPair();
+    var la: FdLink = .{ .fd = fds[0] };
+    var lb: FdLink = .{ .fd = fds[1] };
+
+    var doc_a = try Document.init(gpa, "alice");
+    defer doc_a.deinit(gpa);
+    var doc_b = try Document.init(gpa, "bob");
+    defer doc_b.deinit(gpa);
+    try doc_a.insert(gpa, 0, "shared ground\n");
+
+    const sa = try Session.create(gpa, la.link(), .server, "tok", .own, null);
+    defer sa.destroy();
+    const sb = try Session.create(gpa, lb.link(), .client, "tok", .own, null);
+    defer sb.destroy();
+
+    var emitted: QuadEmissions = .{};
+    sa.tap = emitted.tap();
+
+    var ca = try Collab.init(gpa, sa, &doc_a, "alice");
+    defer ca.deinit();
+    var cb = try Collab.init(gpa, sb, &doc_b, "bob");
+    defer cb.deinit();
+
+    var layers: layers_mod.Layers = .empty;
+    defer layers.deinit(gpa);
+    const export_diag = try layers.claim(gpa, &doc_a, "diagnostics", .local, "gate");
+
+    // Replica export only, with the caret moving the whole time.
+    converge_a = &doc_a;
+    converge_b = &doc_b;
+    try t.expect(try pumpCollabsUntil(&ca, &cb, 3, convergedByLen));
+    for (0..100) |i| {
+        _ = try ca.tick(i % 8);
+        _ = try cb.tick(0);
+    }
+    try t.expect(emitted.ops > 0);
+    try t.expectEqual(@as(usize, 0), emitted.presence);
+    try t.expectEqual(@as(usize, 0), emitted.diagnostics);
+
+    // Presence lights base+1 and only base+1.
+    try ca.setPublishPresence(true);
+    const presence_deadline = task.nowNs() + 5 * std.time.ns_per_s;
+    var moved: usize = 0;
+    while (task.nowNs() < presence_deadline and emitted.presence == 0) : (moved += 1) {
+        _ = try ca.tick(moved % 8);
+        _ = try cb.tick(0);
+        testPark(1);
+    }
+    try t.expect(emitted.presence > 0);
+    try t.expectEqual(@as(usize, 0), emitted.diagnostics);
+
+    // Diagnostics light base+2 and only base+2.
+    const before_presence = emitted.presence;
+    try export_diag.appendSpan(gpa, .{ .start = 0, .end = 5, .kind = 1, .message = "unused" });
+    ca.export_diag_layer = export_diag;
+    const diag_deadline = task.nowNs() + 5 * std.time.ns_per_s;
+    while (task.nowNs() < diag_deadline and emitted.diagnostics == 0) {
+        _ = try ca.tick(3);
+        _ = try cb.tick(0);
+        testPark(1);
+    }
+    try t.expect(emitted.diagnostics > 0);
+    try t.expect(emitted.presence >= before_presence);
+}
+
+test "gate D (§18): a hierarchy-only peer lists names, and is refused every byte and every write" {
+    const gpa = t.allocator;
+
+    var pbuf: [128]u8 = undefined;
+    const root_path = try std.fmt.bufPrintZ(&pbuf, "/tmp/weft-gate-d-{d}", .{linux.getpid()});
+    _ = linux.rmdir(root_path.ptr);
+    if (linux.errno(linux.mkdir(root_path.ptr, 0o755)) != .SUCCESS) return error.Mkdir;
+    var root = try rooted_fs.RootedFs.open(root_path.ptr);
+    defer root.close();
+    defer {
+        _ = linux.unlinkat(root.root_fd, "secret.txt", 0);
+        _ = linux.rmdir(root_path.ptr);
+    }
+    try root.write("secret.txt", "classified");
+
+    const fds = try socketPair();
+    var la: FdLink = .{ .fd = fds[0] };
+    var lb: FdLink = .{ .fd = fds[1] };
+    var host = try Document.init(gpa, "host");
+    defer host.deinit(gpa);
+    var client = try Document.init(gpa, "client");
+    defer client.deinit(gpa);
+    const sa = try Session.create(gpa, la.link(), .server, "tok", .own, null);
+    defer sa.destroy();
+    const sb = try Session.create(gpa, lb.link(), .client, "tok", .own, null);
+    defer sb.destroy();
+    var ch = try Collab.init(gpa, sa, &host, "host");
+    defer ch.deinit();
+    var cc = try Collab.init(gpa, sb, &client, "client");
+    defer cc.deinit();
+
+    ch.peer_fs_root = &root;
+    ch.fs_grant = .{ .hierarchy = true };
+    var rfs = RemoteFs.init(gpa);
+    defer rfs.deinit();
+    cc.remote_fs = &rfs;
+
+    // The hierarchy is granted: names cross.
+    const list_req = try peer_fs.encodeList(gpa, ".");
+    defer gpa.free(list_req);
+    const listing = try callPeerFs(&ch, &cc, &rfs, sb, list_req);
+    defer gpa.free(listing);
+    try t.expectEqual(peer_fs.Status.ok, peer_fs.decodeResponse(listing).?.status);
+    try t.expect(std.mem.indexOf(u8, peer_fs.decodeResponse(listing).?.payload, "secret.txt") != null);
+
+    // The bytes are not, nor is a digest of them, nor is a write. Each
+    // settles as a named refusal, well inside its deadline.
+    const read_req = try peer_fs.encodeRead(gpa, "secret.txt");
+    defer gpa.free(read_req);
+    try t.expectError(error.RequestDenied, callPeerFs(&ch, &cc, &rfs, sb, read_req));
+    {
+        const stat_req = try peer_fs.encodeStat(gpa, "secret.txt");
+        defer gpa.free(stat_req);
+        try t.expectError(error.RequestDenied, callPeerFs(&ch, &cc, &rfs, sb, stat_req));
+    }
+    {
+        const write_req = try peer_fs.encodeWrite(gpa, "secret.txt", peer_fs.tokenOf("classified"), "rewritten");
+        defer gpa.free(write_req);
+        try t.expectError(error.RequestDenied, callPeerFs(&ch, &cc, &rfs, sb, write_req));
+    }
+    {
+        const on_disk = try root.read(gpa, "secret.txt");
+        defer gpa.free(on_disk);
+        try t.expectEqualStrings("classified", on_disk);
+    }
+
+    // The refusals are the EXPORT SET, not a broken path: adding the bytes
+    // surface serves the same read over the same wire.
+    ch.fs_grant = .read;
+    const allowed = try callPeerFs(&ch, &cc, &rfs, sb, read_req);
+    defer gpa.free(allowed);
+    try t.expectEqual(peer_fs.Status.ok, peer_fs.decodeResponse(allowed).?.status);
+    try t.expectEqualStrings("classified", peer_fs.decodeResponse(allowed).?.payload);
+}
+
+test "gate E (§18): revoking an export refuses the next batch and blocks the grantee's next mint" {
+    const gpa = t.allocator;
+    var rig: LeaseRig = undefined;
+    try LeaseRig.setup(gpa, &rig);
+    defer rig.deinit(gpa);
+
+    var grant_table = grants.HandleTable.init(gpa);
+    defer grant_table.deinit();
+    rig.ga.bindGrants(&grant_table);
+    _ = try rig.ga.grantSubtree(rig.room1);
+
+    const announced_deadline = task.nowNs() + 5 * std.time.ns_per_s;
+    while (task.nowNs() < announced_deadline and rig.gb.granted_roots.len != 1) {
+        try rig.pump();
+        testPark(2);
+    }
+    try t.expectEqual(@as(usize, 1), rig.gb.granted_roots.len);
+    const room1_obj = try rig.joiner.resolve(rig.room1);
+    try t.expect(try rig.gb.mayEditNode(gpa, room1_obj));
+
+    try t.expectEqual(@as(usize, 1), rig.ga.revokeSubtreeGrants());
+
+    // The grantee's own preflight closes as soon as the retraction lands —
+    // "narrowed to nothing" is not "never narrowed".
+    const retracted_deadline = task.nowNs() + 5 * std.time.ns_per_s;
+    while (task.nowNs() < retracted_deadline and rig.gb.granted_roots.len != 0) {
+        try rig.pump();
+        testPark(2);
+    }
+    try t.expect(rig.gb.granted_confined);
+    try t.expectEqual(@as(usize, 0), rig.gb.granted_roots.len);
+    try t.expect(!(try rig.gb.mayEditNode(gpa, room1_obj)));
+
+    // And a client that sends anyway — the announcement is advisory — is
+    // refused at the host, in the region it just tried to edit.
+    _ = try rig.joiner.set(gpa, room1_obj, "after-revocation", .{ .str = "no" });
+    const refused_deadline = task.nowNs() + 5 * std.time.ns_per_s;
+    while (task.nowNs() < refused_deadline and rig.gb.refusals.items.len == 0) {
+        try rig.pump();
+        testPark(2);
+    }
+    try t.expect(rig.gb.refusals.items.len > 0);
+    try t.expectEqual(GraphCollab.RefusalReason.authority, rig.gb.refusals.items[0].reason);
+    try t.expect(rig.origin.ref(try rig.origin.resolve(rig.room1)).mapGet("after-revocation") == null);
+}
