@@ -7,7 +7,7 @@
 //! role string is consulted, so a view that says nothing about input still
 //! answers Tab, Return, the motion keys, and `q`.
 //!
-//! Absence means NONAPPLICABLE (§9.3). A focused leaf publishes no
+//! Absence means NONAPPLICABLE (§9.3). A row nothing can open publishes no
 //! `toggle-expanded` at all — not a disabled one with "not expandable" —
 //! because nothing about expansion is relevant there. `disabled` is reserved
 //! for relevant-but-impossible, which here means the scene advertises the
@@ -59,14 +59,18 @@ pub const Buffer = [Intent.count]Item;
 pub fn derive(instance: *const view.Instance, focus: Focus, out: *Buffer) []const Item {
     var count: usize = 0;
     const leaf_id = focus.path.leaf() orelse return out[0..0];
-    const leaf = instance.node(leaf_id) orelse return out[0..0];
+    _ = instance.node(leaf_id) orelse return out[0..0];
 
-    // Expansion acts on the FOCUSED node — a leaf has no children to open, so
-    // it is nonapplicable rather than disabled.
-    if (leaf.content == .container) {
+    // Expansion follows the deepest node on the path that ADVERTISES the
+    // open/close route, the same walk that route itself makes. Shape cannot
+    // stand in for it: a row of columns is a container too, yet only some
+    // rows own children, and only their provider can splice them in. So a
+    // path that names no such node is nonapplicable, never a disabled offer
+    // whose route would reach nobody.
+    if (advertiser(instance, focus.path, standard.toggle_expanded)) |action| {
         out[count] = .{
             .intent = .toggle_expanded,
-            .disabled = actionState(instance, focus.path, standard.open_container),
+            .disabled = if (action.enabled) null else provider_disabled,
         };
         count += 1;
     }
@@ -108,14 +112,17 @@ pub fn find(items: []const Item, intent: Intent) ?Item {
 /// row can refuse on behalf of the field inside it. A path that advertises
 /// the action nowhere makes no claim about it, and stays enabled.
 fn actionState(instance: *const view.Instance, path: semantic.focus.Path, id: []const u8) ?[]const u8 {
+    const action = advertiser(instance, path, id) orelse return null;
+    return if (action.enabled) null else provider_disabled;
+}
+
+/// The action as advertised by the deepest node on the path that names it.
+fn advertiser(instance: *const view.Instance, path: semantic.focus.Path, id: []const u8) ?semantic.scene.Action {
     var index = path.nodes.len;
     while (index > 0) {
         index -= 1;
         const node = instance.node(path.nodes[index]) orelse continue;
-        for (node.actions) |candidate| {
-            if (!std.mem.eql(u8, candidate.id, id)) continue;
-            return if (candidate.enabled) null else provider_disabled;
-        }
+        for (node.actions) |candidate| if (std.mem.eql(u8, candidate.id, id)) return candidate;
     }
     return null;
 }
@@ -178,7 +185,11 @@ fn filesScene(rows: []const semantic.scene.Node) semantic.scene.Node {
     };
 }
 
-fn filesRow(comptime base: u32, comptime open_enabled: bool) semantic.scene.Node {
+/// `open` is the row's activation state; `expand` is present only on a row
+/// whose provider can open or close children under it.
+const RowShape = struct { open: bool = true, expand: ?bool = null };
+
+fn filesRow(comptime base: u32, comptime shape: RowShape) semantic.scene.Node {
     const row = struct {
         const columns = [_]semantic.scene.Node{
             .{ .id = @enumFromInt(base + 1), .role = "files.metadata", .content = .{ .label = "-" } },
@@ -191,14 +202,15 @@ fn filesRow(comptime base: u32, comptime open_enabled: bool) semantic.scene.Node
                 .content = .{ .field = .{ .ref = fieldRef(base), .single_line = true } },
             },
         };
-        const actions = [_]semantic.scene.Action{
-            .{ .id = standard.open, .label = "Open", .enabled = open_enabled },
+        const advertised = [_]semantic.scene.Action{
+            .{ .id = standard.open, .label = "Open", .enabled = shape.open },
+            .{ .id = standard.toggle_expanded, .label = "Expand", .enabled = shape.expand orelse false },
         };
     };
     return .{
         .id = @enumFromInt(base),
         .role = "files.row",
-        .actions = &row.actions,
+        .actions = if (shape.expand == null) row.advertised[0..1] else row.advertised[0..2],
         .target = link(base),
         .content = .{ .container = .{ .axis = .horizontal, .children = &row.columns } },
     };
@@ -230,15 +242,15 @@ const Published = struct {
 };
 
 test "a focused files row offers activation and its grid, never expansion" {
-    const rows = [_]semantic.scene.Node{ filesRow(10, true), filesRow(20, true) };
+    const rows = [_]semantic.scene.Node{ filesRow(10, .{}), filesRow(20, .{}) };
     var published = try Published.open(filesScene(&rows));
     defer published.deinit();
 
     var buffer: Buffer = undefined;
     const items = derive(published.instance(), try published.focus(@enumFromInt(13)), &buffer);
 
-    // The name field is a LEAF: absence, not a disabled "not expandable"
-    // offer, is how §9.3 says nonapplicable is spelled.
+    // Nothing on this path claims to open children: absence, not a disabled
+    // "not expandable" offer, is how §9.3 says nonapplicable is spelled.
     try t.expect(find(items, .toggle_expanded) == null);
     try t.expect(find(items, .activate).?.disabled == null);
     // Vertical list of rows, horizontal columns inside the focused row.
@@ -252,7 +264,7 @@ test "a focused files row offers activation and its grid, never expansion" {
 }
 
 test "a refused row action is disabled, an absent target is nothing at all" {
-    const rows = [_]semantic.scene.Node{ filesRow(10, false), filesRow(20, true) };
+    const rows = [_]semantic.scene.Node{ filesRow(10, .{ .open = false }), filesRow(20, .{}) };
     var published = try Published.open(filesScene(&rows));
     defer published.deinit();
 
@@ -273,42 +285,39 @@ test "a refused row action is disabled, an absent target is nothing at all" {
     try t.expect(find(items, .navigate_left) == null);
 }
 
-test "a focused container offers expansion" {
-    const rows = [_]semantic.scene.Node{ filesRow(10, true), filesRow(20, true) };
+test "an expandable row offers expansion to the field focused inside it" {
+    const rows = [_]semantic.scene.Node{ filesRow(10, .{ .expand = true }), filesRow(20, .{}) };
     var published = try Published.open(filesScene(&rows));
     defer published.deinit();
 
     var buffer: Buffer = undefined;
-    const items = derive(published.instance(), try published.focus(@enumFromInt(10)), &buffer);
+    // The keyboard is on the editable name INSIDE the row that owns children,
+    // which is where a directory browser leaves it while renaming.
+    const items = derive(published.instance(), try published.focus(@enumFromInt(13)), &buffer);
     try t.expect(find(items, .toggle_expanded).?.disabled == null);
     try t.expect(find(items, .activate) != null);
     try t.expect(find(items, .back) != null);
-    // The row's own horizontal axis is BELOW it; only the vertical list it
-    // sits in is a movement axis for the row itself.
-    try t.expect(find(items, .navigate_down) != null);
-    try t.expect(find(items, .navigate_right) == null);
+
+    // The row beside it owns no children, so the same key is nonapplicable.
+    var beside: Buffer = undefined;
+    const flat = derive(published.instance(), try published.focus(@enumFromInt(23)), &beside);
+    try t.expect(find(flat, .toggle_expanded) == null);
 }
 
-test "a container that refuses its own open/close route is disabled, not absent" {
-    const actions = [_]semantic.scene.Action{
-        .{ .id = standard.open_container, .label = "Open container", .enabled = false },
-    };
-    const children = [_]semantic.scene.Node{
-        .{ .id = @enumFromInt(2), .focusable = true, .content = .{ .label = "only" } },
-    };
-    const root: semantic.scene.Node = .{
-        .id = @enumFromInt(1),
-        .role = "files",
-        .focusable = true,
-        .actions = &actions,
-        .content = .{ .container = .{ .axis = .vertical, .children = &children } },
-    };
-    var published = try Published.open(root);
+test "a row that refuses its own open/close route is disabled, not absent" {
+    const rows = [_]semantic.scene.Node{ filesRow(10, .{ .expand = false }), filesRow(20, .{}) };
+    var published = try Published.open(filesScene(&rows));
     defer published.deinit();
 
     var buffer: Buffer = undefined;
-    const items = derive(published.instance(), try published.focus(@enumFromInt(1)), &buffer);
+    const items = derive(published.instance(), try published.focus(@enumFromInt(13)), &buffer);
     try t.expectEqualStrings(provider_disabled, find(items, .toggle_expanded).?.disabled.?);
-    // One child on the axis: there is no sibling to move to.
-    try t.expect(find(items, .navigate_up) == null);
+
+    // A single row on the axis has no sibling to move to.
+    const lone = [_]semantic.scene.Node{filesRow(30, .{})};
+    var only = try Published.open(filesScene(&lone));
+    defer only.deinit();
+    var single: Buffer = undefined;
+    const alone = derive(only.instance(), try only.focus(@enumFromInt(33)), &single);
+    try t.expect(find(alone, .navigate_up) == null);
 }

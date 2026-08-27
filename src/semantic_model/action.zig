@@ -69,6 +69,12 @@ pub const standard = struct {
     /// target. A directory parent is one use; archives, remote loci, and
     /// synthetic hierarchies can expose the same interaction.
     pub const open_container = "target.open-container";
+    /// Open or close the subject's own children IN PLACE. This is the other
+    /// half of hierarchy movement: `open_container` leaves the current locus
+    /// for the one above it, while this one splices a locus into the view
+    /// that already shows it. A node advertises it exactly when something can
+    /// open or close it, which is what the generic Tab offer reads.
+    pub const toggle_expanded = "hierarchy.toggle-expanded";
     /// Set the focused whole target as this head's working container. This is
     /// the target-oriented analogue of `cd`: it applies equally to local,
     /// remote, archive, and synthetic hierarchies.

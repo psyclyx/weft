@@ -43,7 +43,7 @@ pub const Binding = struct {
 };
 
 pub const bindings = [_]Binding{
-    .{ .intent = .toggle_expanded, .intention = "std.hierarchy.toggle-expanded", .route = standard.open_container },
+    .{ .intent = .toggle_expanded, .intention = "std.hierarchy.toggle-expanded", .route = "hierarchy-toggle-expanded" },
     .{ .intent = .activate, .intention = "std.target.activate", .route = "target-open-focused" },
     .{ .intent = .navigate_up, .intention = "std.navigation.up", .route = "cursor-up" },
     .{ .intent = .navigate_down, .intention = "std.navigation.down", .route = "cursor-down" },
