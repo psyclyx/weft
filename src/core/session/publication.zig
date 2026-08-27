@@ -310,18 +310,24 @@ fn requestAddress(kind: u8, payload: []const u8) Address {
             .base_open, .base_read => .replica,
             .stat, .read => .{ .surface = .fs_bytes },
         },
-        .fs_call => switch (@as(peer_fs.Op, @enumFromInt(cur[0]))) {
-            .list => .{ .surface = .fs_hierarchy },
-            // A stat's token is a digest OF THE BYTES: serving it to a
-            // hierarchy-only peer hands it a content oracle.
-            .stat, .read => .{ .surface = .fs_bytes },
-            .write => .{ .surface = .fs_mutate },
-            // An opaque extension core cannot see inside: gate it at the
-            // widest fs surface it could reach.
-            .service => .{ .surface = .fs_mutate },
-            _ => .unclassified,
-        },
+        // One mapping for one fact: the descriptor names the surface
+        // `peer_fs` will enforce on, never a second opinion about it.
+        .fs_call => .{ .surface = fsSurface(@enumFromInt(cur[0])) },
         .ok, .err, .fs_ok, .fs_err, .cancel => .unclassified,
+    };
+}
+
+/// The publication surface a `.peer` fs op draws on, from the one mapping
+/// its own gate uses (`peer_fs.exportOf`). An op with no surface there —
+/// the opaque `service` envelope, or a kind a newer peer invented — is
+/// gated at the widest fs surface it could reach: core cannot see inside
+/// it, so it fails closed.
+fn fsSurface(op: peer_fs.Op) Surface {
+    const e = peer_fs.exportOf(op) orelse return .fs_mutate;
+    return switch (e) {
+        .hierarchy => .fs_hierarchy,
+        .bytes => .fs_bytes,
+        .mutate => .fs_mutate,
     };
 }
 
