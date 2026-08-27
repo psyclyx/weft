@@ -50,11 +50,18 @@ pub const OpKind = enum(u8) { batch = 0, frontier = 1, share = 2, grant = 3, reg
 // fs ops never collide with the blob op-space (which routes by op-byte value)
 // and neither does a failure reply, since the two cycles number their ids
 // independently.
-// `err`/`fs_err` carry `uv id` alone: the responder cannot serve that call, so
-// the requester settles it now instead of waiting out its deadline (see
-// session/requests.zig). A peer built before them ignores an unknown request
-// kind, which degrades to exactly the old behaviour — the deadline.
+// `err`/`fs_err` carry `uv id`, then an ADDITIVE trailing `FailureReason`
+// byte: the responder cannot serve that call, so the requester settles it now
+// instead of waiting out its deadline (see session/requests.zig). A peer built
+// before them ignores an unknown request kind, which degrades to exactly the
+// old behaviour — the deadline.
 pub const RequestKind = enum(u8) { call = 0, ok = 1, err = 2, cancel = 3, fs_call = 4, fs_ok = 5, fs_err = 6 };
+/// Why a call was refused — the trailing byte of an `err`/`fs_err` payload,
+/// which was `uv id` alone before. Absent (an older responder, or a short
+/// payload) reads as `.unspecified`, the failure every requester already
+/// handled; an unknown reason reads the same way. Purely additive: it tells
+/// the requester WHY, it never changes that the call failed.
+pub const FailureReason = enum(u8) { unspecified = 0, not_granted = 1, _ };
 pub const FeedKind = enum(u8) { publish = 0 };
 
 pub const Frame = struct {

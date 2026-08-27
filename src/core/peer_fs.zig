@@ -6,9 +6,15 @@
 //! to DENY. This addresses the round-2 findings that the old blob channel had
 //! no arbitrary-path/list/write ops, no confinement, and no write precondition:
 //!
-//! - **Grant** (round-2 D5): a post-handshake access level (`none`/`read`/
-//!   `read_write`). Absent ⇒ deny, so a random client gets nothing; same-project
-//!   collab grants the tree. It is NOT the doc-level `Access` — it is fs-scoped.
+//! - **Grant** (round-2 D5, restructured per §13.5): NOT one access level but
+//!   three separately granted EXPORT SURFACES — `hierarchy` (list a tree),
+//!   `bytes` (read a file's content), `mutate` (write). `read`/`read_write`
+//!   survive only as PRESETS over those surfaces. Every surface defaults to
+//!   deny, so a random client gets nothing. It is NOT the doc-level `Access` —
+//!   it is fs-scoped. An ungranted surface is refused as `error.NotGranted`,
+//!   which the caller answers with `fs_err`/`.not_granted` (a served `denied`
+//!   status would make "you may not" indistinguishable from "here is a
+//!   listing you are allowed to see").
 //! - **Confinement** (round-2 D3): every path goes through `rooted_fs`, so `..`
 //!   / absolute / symlink escapes are refused in the semantic.
 //! - **Write precondition** (round-2 D6): WRITE carries the content token the
@@ -23,12 +29,85 @@ const Allocator = std.mem.Allocator;
 const RootedFs = @import("rooted_fs.zig").RootedFs;
 
 pub const Op = enum(u8) { list = 0, read = 1, write = 2, stat = 3, service = 4, _ };
+/// `denied` is only ever sent by a host predating the export split, which
+/// answered a refusal with a response instead of `fs_err`; kept so a client
+/// still reads such a host correctly.
 pub const Status = enum(u8) { ok = 0, denied = 1, not_found = 2, confined = 3, stale = 4, io = 5, bad = 6 };
 
-/// fs-scoped access a host grants a peer for the shared root. Distinct from the
-/// document-level session `Access`. Default `none` (deny).
-pub const Access = enum(u8) { none = 0, read = 1, read_write = 2 };
-pub const Grant = struct { access: Access = .none };
+/// The filesystem export surfaces, granted one by one. Listing a tree,
+/// reading bytes out of it, and changing it are three different authorities
+/// over one root — a peer that may see the shape of a project need not be
+/// able to read its contents.
+pub const Export = enum(u8) { hierarchy = 0, bytes = 1, mutate = 2 };
+
+/// Which export surfaces a peer holds for the shared root. Distinct from the
+/// document-level session `Access`; every surface defaults to deny.
+pub const Grant = struct {
+    hierarchy: bool = false,
+    bytes: bool = false,
+    mutate: bool = false,
+
+    /// Presets, the only role-shaped thing left: a maximum a person picks
+    /// from, never the unit authority is checked against.
+    pub const none: Grant = .{};
+    pub const read: Grant = .{ .hierarchy = true, .bytes = true };
+    pub const read_write: Grant = .{ .hierarchy = true, .bytes = true, .mutate = true };
+
+    pub fn allows(self: Grant, surface: Export) bool {
+        return switch (surface) {
+            .hierarchy => self.hierarchy,
+            .bytes => self.bytes,
+            .mutate => self.mutate,
+        };
+    }
+
+    /// Whether any surface at all is granted — what an opaque `service`
+    /// envelope needs before it may reach a semantic server (which splits
+    /// the surfaces again on its own ops).
+    pub fn any(self: Grant) bool {
+        return self.hierarchy or self.bytes or self.mutate;
+    }
+};
+
+/// Parse a selection: comma-separated surfaces (`hierarchy`, `bytes`,
+/// `write`) and/or the legacy presets (`none`, `read`, `rw`). Null on an
+/// unknown word — the caller falls back to `none` rather than guessing wide.
+pub fn parseGrant(spec: []const u8) ?Grant {
+    var out: Grant = .none;
+    var it = std.mem.tokenizeScalar(u8, spec, ',');
+    while (it.next()) |word| {
+        const eql = std.mem.eql;
+        if (eql(u8, word, "none")) continue;
+        if (eql(u8, word, "hierarchy") or eql(u8, word, "list")) {
+            out.hierarchy = true;
+        } else if (eql(u8, word, "bytes")) {
+            out.bytes = true;
+        } else if (eql(u8, word, "write") or eql(u8, word, "mutate")) {
+            out.mutate = true;
+        } else if (eql(u8, word, "read")) {
+            out.hierarchy = true;
+            out.bytes = true;
+        } else if (eql(u8, word, "rw") or eql(u8, word, "read_write")) {
+            out = .read_write;
+        } else return null;
+    }
+    return out;
+}
+
+/// Which export surface an op draws on. Null for `service`, whose surfaces
+/// are the semantic server's own ops, not this envelope's.
+pub fn exportOf(op: Op) ?Export {
+    return switch (op) {
+        .list => .hierarchy,
+        .read, .stat => .bytes,
+        .write => .mutate,
+        .service, _ => null,
+    };
+}
+
+/// The request asks for a surface this peer was not granted. Answered with
+/// `fs_err`, not a response — see the module doc.
+pub const Refusal = error{NotGranted};
 
 /// Optional protocol extension owned outside core. The encrypted peer channel
 /// transports opaque bounded bytes; app composition may install a semantic
@@ -70,7 +149,9 @@ pub const Service = struct {
 /// and echoed by WRITE as its precondition.
 pub const Token = [8]u8;
 
-fn tokenOf(bytes: []const u8) Token {
+/// The token `bytes` hash to — a client echoes the one it last READ, and
+/// `tokenOf("")` is the precondition a path that does not exist matches.
+pub fn tokenOf(bytes: []const u8) Token {
     const h = std.hash.Wyhash.hash(0, bytes);
     var out: Token = undefined;
     std.mem.writeInt(u64, &out, h, .little);
@@ -181,13 +262,18 @@ fn statusOf(e: anyerror) Status {
 /// Handle one wire request. Pure over the confined `fs` + the `grant`; returns
 /// an owned response the caller writes back to the peer. Never touches anything
 /// outside the shared root, and never acts beyond the grant.
-pub fn handle(gpa: Allocator, fs: *const RootedFs, grant: Grant, req: []const u8) Allocator.Error![]u8 {
+pub fn handle(gpa: Allocator, fs: *const RootedFs, grant: Grant, req: []const u8) (Allocator.Error || Refusal)![]u8 {
     return handleWithService(gpa, fs, grant, null, req);
 }
 
-pub fn handleWithService(gpa: Allocator, fs: *const RootedFs, grant: Grant, service: ?Service, req: []const u8) Allocator.Error![]u8 {
+pub fn handleWithService(gpa: Allocator, fs: *const RootedFs, grant: Grant, service: ?Service, req: []const u8) (Allocator.Error || Refusal)![]u8 {
     if (req.len == 0) return reply(gpa, .bad, "");
     const op: Op = @enumFromInt(req[0]);
+    // The surface gate comes before the request is even parsed: an
+    // ungranted export is refused on its own terms, not by what it asked.
+    if (exportOf(op)) |surface| {
+        if (!grant.allows(surface)) return error.NotGranted;
+    } else if (!grant.any()) return error.NotGranted;
     var cur = req[1..];
     const path = getBytes(&cur) orelse return reply(gpa, .bad, "");
     const pz = try dupeZ(gpa, path);
@@ -195,31 +281,27 @@ pub fn handleWithService(gpa: Allocator, fs: *const RootedFs, grant: Grant, serv
 
     switch (op) {
         .list => {
-            if (@intFromEnum(grant.access) < @intFromEnum(Access.read)) return reply(gpa, .denied, "");
             const listing = fs.list(gpa, pz.ptr) catch |e| return reply(gpa, statusOf(e), "");
             defer gpa.free(listing);
             return reply(gpa, .ok, listing);
         },
         .read => {
-            if (@intFromEnum(grant.access) < @intFromEnum(Access.read)) return reply(gpa, .denied, "");
             const bytes = fs.read(gpa, pz.ptr) catch |e| return reply(gpa, statusOf(e), "");
             defer gpa.free(bytes);
             return reply(gpa, .ok, bytes);
         },
         .stat => {
-            if (@intFromEnum(grant.access) < @intFromEnum(Access.read)) return reply(gpa, .denied, "");
             const bytes = fs.read(gpa, pz.ptr) catch |e| return reply(gpa, statusOf(e), "");
             defer gpa.free(bytes);
             const tok = tokenOf(bytes);
             return reply(gpa, .ok, &tok);
         },
         .write => {
-            if (@intFromEnum(grant.access) < @intFromEnum(Access.read_write)) return reply(gpa, .denied, "");
             const token = getBytes(&cur) orelse return reply(gpa, .bad, "");
             const data = getBytes(&cur) orelse return reply(gpa, .bad, "");
             if (token.len != @sizeOf(Token)) return reply(gpa, .bad, "");
             // Precondition: the file must match the token the client last read.
-            // A missing file matches the zero token (a fresh create).
+            // A missing file matches the token of empty content (a fresh create).
             const cur_bytes = fs.read(gpa, pz.ptr) catch |e| switch (e) {
                 error.NotFound => &[_]u8{},
                 else => return reply(gpa, statusOf(e), ""),
@@ -233,7 +315,6 @@ pub fn handleWithService(gpa: Allocator, fs: *const RootedFs, grant: Grant, serv
             return reply(gpa, .ok, &new_tok);
         },
         .service => {
-            if (grant.access == .none) return reply(gpa, .denied, "");
             const implementation = service orelse return reply(gpa, .bad, "");
             const response = implementation.handle(gpa, path) catch return reply(gpa, .io, "");
             defer gpa.free(response);
@@ -268,17 +349,15 @@ test "peer_fs: grant gates ops; list/read/write round-trip; stale write refused"
     }
     try fs.write("a.txt", "one");
 
-    // Default deny: no grant → every op is denied.
+    // Default deny: no grant → every op is refused, out loud.
     {
         const req = try encodeRead(gpa, "a.txt");
         defer gpa.free(req);
-        const resp = try handle(gpa, &fs, .{}, req);
-        defer gpa.free(resp);
-        try t.expectEqual(Status.denied, decodeResponse(resp).?.status);
+        try t.expectError(error.NotGranted, handle(gpa, &fs, .none, req));
     }
 
-    const ro: Grant = .{ .access = .read };
-    const rw: Grant = .{ .access = .read_write };
+    const ro: Grant = .read;
+    const rw: Grant = .read_write;
 
     // READ under a read grant returns the bytes.
     {
@@ -302,13 +381,11 @@ test "peer_fs: grant gates ops; list/read/write round-trip; stale write refused"
         try t.expect(std.mem.indexOf(u8, d.payload, "a.txt") != null);
     }
 
-    // WRITE needs read_write; under read it is denied.
+    // WRITE needs the mutate surface; a read preset does not carry it.
     {
         const req = try encodeWrite(gpa, "a.txt", tokenOf("one"), "two");
         defer gpa.free(req);
-        const resp = try handle(gpa, &fs, ro, req);
-        defer gpa.free(resp);
-        try t.expectEqual(Status.denied, decodeResponse(resp).?.status);
+        try t.expectError(error.NotGranted, handle(gpa, &fs, ro, req));
     }
 
     // WRITE with the correct precondition token succeeds and updates the file.
@@ -373,17 +450,80 @@ test "peer_fs: semantic service bytes share the granted encrypted channel" {
     const request = try encodeService(gpa, &[_]u8{ 0, 0xff, '\n' });
     defer gpa.free(request);
 
-    const denied = try handleWithService(gpa, &fs, .{}, service, request);
-    defer gpa.free(denied);
-    try t.expectEqual(Status.denied, decodeResponse(denied).?.status);
+    try t.expectError(error.NotGranted, handleWithService(gpa, &fs, .none, service, request));
     try t.expectEqual(@as(usize, 0), implementation.calls);
 
-    const response = try handleWithService(gpa, &fs, .{ .access = .read }, service, request);
+    const response = try handleWithService(gpa, &fs, .read, service, request);
     defer gpa.free(response);
     const decoded = decodeResponse(response).?;
     try t.expectEqual(Status.ok, decoded.status);
     try t.expectEqualSlices(u8, &[_]u8{ 0xaa, 0, 0xff, '\n' }, decoded.payload);
     try t.expectEqual(@as(usize, 1), implementation.calls);
+}
+
+test "peer_fs: hierarchy, bytes, and mutate are three separately granted surfaces" {
+    const gpa = t.allocator;
+    var pbuf: [128]u8 = undefined;
+    const root_path = try tmpRoot(&pbuf);
+    var fs = try RootedFs.open(root_path.ptr);
+    defer fs.close();
+    defer {
+        _ = linux.unlinkat(fs.root_fd, "a.txt", 0);
+        _ = linux.rmdir(root_path.ptr);
+    }
+    try fs.write("a.txt", "one");
+
+    const list = try encodeList(gpa, ".");
+    defer gpa.free(list);
+    const read = try encodeRead(gpa, "a.txt");
+    defer gpa.free(read);
+    const stat = try encodeStat(gpa, "a.txt");
+    defer gpa.free(stat);
+    const write = try encodeWrite(gpa, "a.txt", tokenOf("one"), "two");
+    defer gpa.free(write);
+
+    // Hierarchy only: the shape of the tree, never its contents.
+    {
+        const listing = try handle(gpa, &fs, .{ .hierarchy = true }, list);
+        defer gpa.free(listing);
+        try t.expectEqual(Status.ok, decodeResponse(listing).?.status);
+        try t.expectError(error.NotGranted, handle(gpa, &fs, .{ .hierarchy = true }, read));
+        try t.expectError(error.NotGranted, handle(gpa, &fs, .{ .hierarchy = true }, stat));
+        try t.expectError(error.NotGranted, handle(gpa, &fs, .{ .hierarchy = true }, write));
+    }
+
+    // Bytes only: read a path you already know, without enumerating the tree.
+    {
+        const bytes = try handle(gpa, &fs, .{ .bytes = true }, read);
+        defer gpa.free(bytes);
+        try t.expectEqualStrings("one", decodeResponse(bytes).?.payload);
+        const token = try handle(gpa, &fs, .{ .bytes = true }, stat);
+        defer gpa.free(token);
+        try t.expectEqual(Status.ok, decodeResponse(token).?.status);
+        try t.expectError(error.NotGranted, handle(gpa, &fs, .{ .bytes = true }, list));
+        try t.expectError(error.NotGranted, handle(gpa, &fs, .{ .bytes = true }, write));
+    }
+
+    // Mutate is its own surface, not the top of a ladder.
+    {
+        const applied = try handle(gpa, &fs, .{ .mutate = true }, write);
+        defer gpa.free(applied);
+        try t.expectEqual(Status.ok, decodeResponse(applied).?.status);
+        try t.expectError(error.NotGranted, handle(gpa, &fs, .{ .mutate = true }, list));
+        try t.expectError(error.NotGranted, handle(gpa, &fs, .{ .mutate = true }, read));
+    }
+}
+
+test "peer_fs: a selection names surfaces; the presets are only shorthand" {
+    try t.expectEqual(@as(?Grant, .none), parseGrant("none"));
+    try t.expectEqual(@as(?Grant, .read), parseGrant("read"));
+    try t.expectEqual(@as(?Grant, .read_write), parseGrant("rw"));
+    try t.expectEqual(@as(?Grant, .{ .hierarchy = true }), parseGrant("hierarchy"));
+    try t.expectEqual(@as(?Grant, .{ .bytes = true }), parseGrant("bytes"));
+    try t.expectEqual(@as(?Grant, .{ .hierarchy = true, .mutate = true }), parseGrant("hierarchy,write"));
+    try t.expectEqual(@as(?Grant, .read_write), parseGrant("read,write"));
+    // Unknown words fail closed: the caller falls back to no grant at all.
+    try t.expectEqual(@as(?Grant, null), parseGrant("everything"));
 }
 
 test {

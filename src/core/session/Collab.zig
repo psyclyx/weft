@@ -95,10 +95,10 @@ relay_ctx: ?*anyopaque = null,
 /// Agent side: serve blob requests for the hosted file.
 blob_server: ?*BlobServer = null,
 /// Host side: serve .peer filesystem requests, confined to a shared root,
-/// gated by `fs_grant` (default deny — a peer gets nothing unless the host
-/// opened a root and granted access).
+/// gated per EXPORT SURFACE by `fs_grant` (default deny on all three — a
+/// peer gets nothing unless the host opened a root and granted a surface).
 peer_fs_root: ?*@import("../rooted_fs.zig").RootedFs = null,
-fs_grant: @import("../peer_fs.zig").Grant = .{},
+fs_grant: @import("../peer_fs.zig").Grant = .none,
 peer_fs_service: ?@import("../peer_fs.zig").Service = null,
 /// Client side: correlate .peer fs replies (LIST/READ/WRITE).
 remote_fs: ?*RemoteFs = null,
@@ -438,7 +438,7 @@ pub fn handleFrame(self: *Collab, frame: wire.Decoder.Decoded) !bool {
                     if (reply) |bytes| {
                         defer gpa.free(bytes);
                         try self.session.post(.request, @intFromEnum(wire.RequestKind.ok), self.base + 3, bytes);
-                    } else try self.postFailure(.err, id);
+                    } else try self.postFailure(.err, id, .unspecified);
                 },
                 .ok => if (self.partial) |p| {
                     const c = p.onReply(self.session, self.base, frame.payload) catch false;
@@ -457,15 +457,21 @@ pub fn handleFrame(self: *Collab, frame: wire.Decoder.Decoded) !bool {
                 .fs_call => {
                     var cur: []const u8 = frame.payload;
                     const id = wire.getUv(&cur) catch return changed;
-                    const resp = self.serveFsCall(cur) catch null;
-                    if (resp) |bytes| {
-                        defer gpa.free(bytes);
-                        var reply: std.ArrayList(u8) = .empty;
-                        defer reply.deinit(gpa);
-                        try wire.putUv(gpa, &reply, id);
-                        try reply.appendSlice(gpa, bytes);
-                        try self.session.post(.request, @intFromEnum(wire.RequestKind.fs_ok), self.base + 3, reply.items);
-                    } else try self.postFailure(.fs_err, id);
+                    // An export this peer does not hold is refused BY NAME;
+                    // anything else we cannot serve is a plain refusal.
+                    if (self.serveFsCall(cur)) |served| {
+                        if (served) |bytes| {
+                            defer gpa.free(bytes);
+                            var reply: std.ArrayList(u8) = .empty;
+                            defer reply.deinit(gpa);
+                            try wire.putUv(gpa, &reply, id);
+                            try reply.appendSlice(gpa, bytes);
+                            try self.session.post(.request, @intFromEnum(wire.RequestKind.fs_ok), self.base + 3, reply.items);
+                        } else try self.postFailure(.fs_err, id, .unspecified);
+                    } else |err| try self.postFailure(.fs_err, id, switch (err) {
+                        error.NotGranted => .not_granted,
+                        else => .unspecified,
+                    });
                 },
                 .fs_ok => if (self.remote_fs) |rf| {
                     rf.onReply(gpa, frame.payload) catch {};
@@ -474,7 +480,7 @@ pub fn handleFrame(self: *Collab, frame: wire.Decoder.Decoded) !bool {
                 .fs_err => if (self.remote_fs) |rf| {
                     var cur: []const u8 = frame.payload;
                     const id = wire.getUv(&cur) catch return changed;
-                    rf.onFailure(gpa, id);
+                    rf.onFailure(gpa, id, failureReason(cur));
                     changed = true;
                 },
                 .cancel => {}, // every call here is served inline: nothing to abandon
@@ -493,20 +499,28 @@ fn serveCall(self: *Collab, op: u8, payload: []const u8) !?[]u8 {
     return try server.handle(self.gpa, payload);
 }
 
-/// Serve one `.peer` filesystem call against the shared root. Null when
-/// no root is shared — a grade refusal is a served `denied` response,
-/// but an absent root is nothing to answer with.
+/// Serve one `.peer` filesystem call against the shared root. Null when no
+/// root is shared — nothing to answer with; `error.NotGranted` when the call
+/// asks for an export surface this peer does not hold.
 fn serveFsCall(self: *Collab, req: []const u8) !?[]u8 {
     const peer_fs = @import("../peer_fs.zig");
     const root = self.peer_fs_root orelse return null;
     return try peer_fs.handleWithService(self.gpa, root, self.fs_grant, self.peer_fs_service, req);
 }
 
-/// Tell the requester its call will never be answered (payload: `uv id`).
-fn postFailure(self: *Collab, kind: wire.RequestKind, id: u64) !void {
+/// The reason trailing an `err`/`fs_err` payload past its id. Absent or
+/// unrecognized is `.unspecified` — an older responder said only "no".
+fn failureReason(rest: []const u8) wire.FailureReason {
+    return if (rest.len == 0) .unspecified else @enumFromInt(rest[0]);
+}
+
+/// Tell the requester its call will never be answered, and why
+/// (payload: `uv id | u8 reason`).
+fn postFailure(self: *Collab, kind: wire.RequestKind, id: u64, reason: wire.FailureReason) !void {
     var payload: std.ArrayList(u8) = .empty;
     defer payload.deinit(self.gpa);
     try wire.putUv(self.gpa, &payload, id);
+    try payload.append(self.gpa, @intFromEnum(reason));
     try self.session.post(.request, @intFromEnum(kind), self.base + 3, payload.items);
 }
 

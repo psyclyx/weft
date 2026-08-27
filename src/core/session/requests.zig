@@ -15,8 +15,10 @@ const task = @import("../task.zig");
 pub const default_timeout_ns: u64 = 10 * std.time.ns_per_s;
 
 /// Why no usable reply will come: the peer said so (an `err`/`fs_err`
-/// frame), or the deadline passed with nothing at all.
-pub const Error = error{ RequestFailed, RequestTimeout };
+/// frame), it said so because we hold no grant for that export surface, or
+/// the deadline passed with nothing at all. A responder that names no reason
+/// reads as `RequestFailed`, so an older peer degrades to the plain refusal.
+pub const Error = error{ RequestFailed, RequestDenied, RequestTimeout };
 
 /// The requests we are still waiting on, keyed by wire id. `Ctx` is what
 /// the reply means to the requester (a byte span, a call kind, `void`).

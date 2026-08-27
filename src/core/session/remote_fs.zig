@@ -296,8 +296,8 @@ pub const RemoteFs = struct {
     settled: std.AutoHashMapUnmanaged(u64, Outcome) = .empty,
 
     /// What a call came back as: the peer's response bytes, or the peer
-    /// saying it could not serve it.
-    const Outcome = union(enum) { reply: []u8, failed };
+    /// saying it could not serve it, and why.
+    const Outcome = union(enum) { reply: []u8, failed: wire.FailureReason };
 
     pub fn init(gpa: Allocator) RemoteFs {
         return .{ .gpa = gpa };
@@ -338,10 +338,10 @@ pub const RemoteFs = struct {
         try self.put(gpa, id, .{ .reply = owned });
     }
 
-    /// The peer cannot serve `id` (an `fs_err` frame). The caller takes
-    /// the failure now rather than waiting out its deadline.
-    pub fn onFailure(self: *RemoteFs, gpa: Allocator, id: u64) void {
-        self.put(gpa, id, .failed) catch {};
+    /// The peer cannot serve `id` (an `fs_err` frame), for `reason`. The
+    /// caller takes the failure now rather than waiting out its deadline.
+    pub fn onFailure(self: *RemoteFs, gpa: Allocator, id: u64, reason: wire.FailureReason) void {
+        self.put(gpa, id, .{ .failed = reason }) catch {};
     }
 
     fn put(self: *RemoteFs, gpa: Allocator, id: u64, outcome: Outcome) !void {
@@ -356,11 +356,16 @@ pub const RemoteFs = struct {
 
     /// Take the completed response for `id` (owned; caller frees), or null
     /// while it is still in flight. A peer that refused the call, or a
-    /// deadline that passed, is an error — never an endless wait.
+    /// deadline that passed, is an error — never an endless wait. A refusal
+    /// the peer attributed to a missing grant surfaces as `RequestDenied`,
+    /// so a caller can say "not granted" rather than "something failed".
     pub fn take(self: *RemoteFs, id: u64) requests.Error!?[]u8 {
         if (self.settled.fetchRemove(id)) |kv| switch (kv.value) {
             .reply => |bytes| return bytes,
-            .failed => return error.RequestFailed,
+            .failed => |reason| return switch (reason) {
+                .not_granted => error.RequestDenied,
+                else => error.RequestFailed,
+            },
         };
         if (self.inflight.timedOut(id, task.nowNs())) return error.RequestTimeout;
         return null;

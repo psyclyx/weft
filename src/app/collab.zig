@@ -86,9 +86,10 @@ pub const ShareCtx = struct {
     primary_doc: ?*core.Document = null,
     primary_tag: u64 = 0,
     /// Opt-in filesystem sharing (--share-root/--share-fs): a confined root
-    /// served to peers, and the grant. Null root ⇒ serve no fs (default).
+    /// served to peers, and the export surfaces they hold over it. Null root ⇒
+    /// serve no fs (default).
     peer_fs_root: ?*core.rooted_fs.RootedFs = null,
-    fs_grant: core.peer_fs.Grant = .{},
+    fs_grant: core.peer_fs.Grant = .none,
     /// Cursor sharing: read at share time to decide whether a newly wired
     /// collab emits our caret. False ⇒ sharing text emits no presence — the
     /// mechanism default, kept by hubs and programmatic shares. The
@@ -212,7 +213,7 @@ pub const Collab = struct {
         caps: *core.Caps,
         known: *core.known_peers.KnownPeers,
         share_root: ?[]const u8,
-        share_fs: core.peer_fs.Access,
+        share_fs: core.peer_fs.Grant,
         share_presence: bool,
         listen: ?u16,
         access: core.session.Access,
@@ -243,12 +244,16 @@ pub const Collab = struct {
             };
             if (root) |shared_root| {
                 self.shared_fs_root = shared_root;
-                if (share_fs != .none) {
+                if (share_fs.any()) {
                     self.shared_fs_server = fs_remote.Server.init(
                         gpa,
                         self.shared_fs_provider.provider(),
                         shared_root,
-                        if (share_fs == .read_write) .read_write else .read,
+                        .{
+                            .hierarchy = share_fs.hierarchy,
+                            .bytes = share_fs.bytes,
+                            .mutate = share_fs.mutate,
+                        },
                     ) catch |err| blk: {
                         std.log.warn("share-root: semantic peer service unavailable: {t}", .{err});
                         break :blk null;
@@ -287,7 +292,7 @@ pub const Collab = struct {
             .session = &self.collab_session,
             .known = known,
             .peer_fs_root = if (self.peer_fs_root) |*r| r else null,
-            .fs_grant = .{ .access = share_fs },
+            .fs_grant = share_fs,
             .publish_presence = share_presence,
             .peer_fs_service = if (self.shared_fs_server) |*server| core.peer_fs.Service.init(server) else null,
             .conn_wake_fd = conn_wake_fd,
@@ -482,10 +487,15 @@ pub const Collab = struct {
         defer gpa.free(envelope);
         const id = self.remote_fs.request(session, 0, envelope) catch return error.Io;
         // The request carries its own deadline: a lost reply fails here
-        // rather than parking this caller forever.
+        // rather than parking this caller forever. A refusal the host
+        // attributed to a missing grant stays "not permitted" for the caller.
         while (true) {
             _ = connection.tick() catch return error.Io;
-            if (self.remote_fs.take(id) catch return error.Io) |response| {
+            const taken = self.remote_fs.take(id) catch |err| return switch (err) {
+                error.RequestDenied => error.PermissionDenied,
+                else => error.Io,
+            };
+            if (taken) |response| {
                 defer self.gpa.free(response);
                 const decoded = core.peer_fs.decodeResponse(response) orelse return error.Io;
                 return switch (decoded.status) {

@@ -16,7 +16,19 @@ const magic = "WFR";
 const version: u8 = 1;
 const max_packet_bytes = codec.Limits.max_payload_bytes + 1024;
 
-pub const Access = enum { read, read_write };
+/// Which export surfaces of the shared root this server answers for, granted
+/// one by one (`core/peer_fs.zig`'s `Grant` is the same split at the envelope
+/// edge): listing a tree, reading bytes, changing it. Handle plumbing (root
+/// derivation, leases, watches) rides whichever surface asked for it — the
+/// three gates are on the ops that disclose or change something.
+pub const Access = struct {
+    hierarchy: bool = false,
+    bytes: bool = false,
+    mutate: bool = false,
+
+    pub const read: Access = .{ .hierarchy = true, .bytes = true };
+    pub const read_write: Access = .{ .hierarchy = true, .bytes = true, .mutate = true };
+};
 
 const Op = enum(u8) {
     root,
@@ -540,7 +552,7 @@ pub const Server = struct {
                 const root = try self.readRoot(&reader);
                 try reader.done();
                 var capabilities = try self.provider.capabilities(root);
-                if (self.access == .read) capabilities = readOnlyCapabilities(capabilities);
+                if (!self.access.mutate) capabilities = readOnlyCapabilities(capabilities);
                 const encoded = codec.encodeCapabilities(gpa, capabilities) catch return error.LimitExceeded;
                 defer gpa.free(encoded);
                 break :blk try bytesReply(gpa, encoded);
@@ -593,6 +605,7 @@ pub const Server = struct {
                 break :blk try bytesReply(gpa, encoded);
             },
             .list => blk: {
+                if (!self.access.hierarchy) return error.PermissionDenied;
                 const root = try self.readRoot(&reader);
                 const node = try readNode(&reader, wire_authority, self.shared_root.authority);
                 try reader.done();
@@ -604,6 +617,7 @@ pub const Server = struct {
                 break :blk try bytesReply(gpa, encoded);
             },
             .read => blk: {
+                if (!self.access.bytes) return error.PermissionDenied;
                 const source = try readSource(&reader, wire_authority, self.shared_root.authority);
                 try self.authorizeSource(source);
                 const offset = try reader.u64Value();
@@ -642,7 +656,7 @@ pub const Server = struct {
                 break :blk try reply(gpa, .ok, &.{});
             },
             .apply => blk: {
-                if (self.access != .read_write) return error.PermissionDenied;
+                if (!self.access.mutate) return error.PermissionDenied;
                 const encoded_plan = try reader.bytesValue();
                 try reader.done();
                 var plan = codec.decodePlan(gpa, encoded_plan) catch return error.InvalidName;

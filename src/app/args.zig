@@ -33,9 +33,11 @@ pub const Args = struct {
     /// SAFE default (a peer gets nothing). fs access is separate from --access
     /// (that gates the document).
     share_root: ?[]const u8 = null,
-    /// --share-fs <none|read|rw>: the access peers get to --share-root. Default
-    /// none (deny) even when a root is set, so sharing is a deliberate choice.
-    share_fs: core.peer_fs.Access = .none,
+    /// --share-fs <selection>: which export surfaces of --share-root peers get
+    /// — `hierarchy`, `bytes`, `write`, comma-separated, or a preset
+    /// (`none`/`read`/`rw`). Default none (deny) even when a root is set, so
+    /// each surface is a deliberate choice.
+    share_fs: core.peer_fs.Grant = .none,
     /// --share-presence / --no-share-presence: publish our caret to peers.
     /// Null = unstated, leaving the choice to config and then the interactive
     /// default (`collab.presenceDefault`); the `share-presence` command flips
@@ -66,12 +68,8 @@ pub fn parseArgs(process_args: std.process.Args) Args {
         } else if (std.mem.eql(u8, a, "--share-root")) {
             out.share_root = it.next() orelse out.share_root;
         } else if (std.mem.eql(u8, a, "--share-fs")) {
-            if (it.next()) |v| out.share_fs = if (std.mem.eql(u8, v, "read"))
-                .read
-            else if (std.mem.eql(u8, v, "rw") or std.mem.eql(u8, v, "read_write"))
-                .read_write
-            else
-                .none;
+            // An unreadable selection grants nothing, never a guess.
+            if (it.next()) |v| out.share_fs = core.peer_fs.parseGrant(v) orelse .none;
         } else if (std.mem.eql(u8, a, "--share-presence")) {
             out.share_presence = true;
         } else if (std.mem.eql(u8, a, "--no-share-presence")) {

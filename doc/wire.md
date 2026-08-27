@@ -62,11 +62,14 @@ Every frame belongs to exactly one class — ambiguity is a spec bug:
   default, settable per request): when it passes, the caller gets an
   explicit failure — never an unbounded wait for a reply that is not
   coming. A responder that cannot serve a call says so, with `err`
-  (blob/base) or `fs_err` (`.peer` filesystem), payload `uv id` alone;
-  the two cycles number their ids independently, which is why the
-  failure kind is split exactly like `ok`/`fs_ok`. A peer that predates
-  a failure kind ignores it and falls back to the deadline. Retrying is
-  the caller's policy, never the transport's.
+  (blob/base) or `fs_err` (`.peer` filesystem), payload `uv id` and an
+  additive trailing reason byte (`0` unspecified, `1` not-granted — the
+  export surface the call asked for was never granted to this peer); the
+  two cycles number their ids independently, which is why the failure
+  kind is split exactly like `ok`/`fs_ok`. A peer that predates a failure
+  kind ignores it and falls back to the deadline; one that predates the
+  reason byte reads the id and stops, which is exactly the old plain
+  refusal. Retrying is the caller's policy, never the transport's.
 - **3 feed** — latest-wins per (channel, key): the sender-side queue
   coalesces under backpressure by replacing the queued payload for a
   key. Droppable by definition. Presence (cursor per peer) rides here.
