@@ -1494,3 +1494,153 @@ test "e2e/output: build output navigates on its own mode, not run's" {
     try t.expect(std.mem.indexOf(u8, keys, "grep\x00Return\x00grep-visit\n") != null);
     try t.expect(ed.keymap.isRestingMode("build"));
 }
+
+// ── Rendered bytes are display, never domain identity (design §14.3) ────────
+//
+// The `*git*` projection's rendered-range tables map an offset to the row under
+// point. That map is DISPLAY — it hit-tests the cursor and nothing more. What a
+// verb acts on is the IDENTITY the row carries: a path in a section (a
+// revisioned name, re-resolved), a hunk ordinal in a snapshot (scoped to it), a
+// commit OID (durable). These fixtures move the render out from under an armed
+// verb and demand the right node, or a refusal.
+
+/// Run world setup through the project's shell oracle (a human's own git usage,
+/// never the editor).
+fn gitWorld(proj: *Project, setup: []const []const u8) !void {
+    for (setup) |cmd| {
+        const out = try proj.oracle(cmd);
+        proj.gpa.free(out);
+    }
+}
+
+const git_base = [_][]const u8{
+    "git init -q -b main",
+    "git config user.email e2e@weft.test",
+    "git config user.name weft-e2e",
+    "printf 'a1\\na2\\na3\\n' > a.txt && git add a.txt && git commit -q -m base",
+    "printf 'a1\\nTOP-EDIT\\na3\\n' > a.txt",
+};
+
+test "e2e/git: a render shift under an armed discard still hits the file it named" {
+    const gpa = t.allocator;
+    var proj: Project = undefined;
+    try proj.init(gpa);
+    defer proj.deinit();
+
+    var ed: Editor = undefined;
+    try Editor.init(gpa, &ed);
+    defer ed.deinit();
+    try loadWorkspace(&ed);
+    try gitWorld(&proj, &git_base);
+
+    ed.run("git-status");
+    try t.expect(drainToolContains(&ed, "*git*", "a.txt"));
+    try t.expectEqualStrings("git", ed.mode());
+
+    // A fresh open lands on the first file's row — a.txt, the only change.
+    ed.press("x", ""); // arm the discard
+    try t.expectEqualStrings("git-confirm", ed.mode());
+
+    // Move the render out from under it: an untracked file adds a whole
+    // SECTION above a.txt, so every rendered offset below it shifts.
+    try gitWorld(&proj, &.{"printf 'scratch\\n' > zz_new.txt"});
+    ed.run("git-refresh");
+    try t.expect(drainToolContains(&ed, "*git*", "zz_new.txt"));
+
+    // The confirm re-resolves the identity it captured, so it discards a.txt —
+    // not whatever row its old byte range now covers.
+    ed.run("git-discard-do");
+    try t.expect(drainUntilOracle(&proj, &ed, "cat a.txt", "a2"));
+    {
+        const listing = try proj.oracle("git status --porcelain");
+        defer gpa.free(listing);
+        try t.expect(std.mem.indexOf(u8, listing, "zz_new.txt") != null); // untouched
+        try t.expect(std.mem.indexOf(u8, listing, "a.txt") == null); // restored
+    }
+}
+
+test "e2e/git: a discard whose file left its section refuses instead of destroying a neighbour" {
+    const gpa = t.allocator;
+    var proj: Project = undefined;
+    try proj.init(gpa);
+    defer proj.deinit();
+
+    var ed: Editor = undefined;
+    try Editor.init(gpa, &ed);
+    defer ed.deinit();
+    try loadWorkspace(&ed);
+    try gitWorld(&proj, &git_base);
+
+    ed.run("git-status");
+    try t.expect(drainToolContains(&ed, "*git*", "a.txt"));
+    ed.press("x", ""); // arm the discard on the UNSTAGED a.txt
+    try t.expectEqualStrings("git-confirm", ed.mode());
+
+    // The file hops sections underneath the prompt. Its old rendered range now
+    // covers the staged section's rows; its identity is simply gone.
+    try gitWorld(&proj, &.{"git add a.txt"});
+    ed.run("git-refresh");
+    try t.expect(drainToolContains(&ed, "*git*", "Staged changes"));
+
+    ed.run("git-discard-do");
+    try t.expectEqualStrings("git", ed.mode());
+    try t.expect(std.mem.indexOf(u8, ed.echoText(), "refused") != null);
+    {
+        const disk = try core.file.readAlloc(gpa, "a.txt");
+        defer gpa.free(disk);
+        try t.expect(std.mem.indexOf(u8, disk, "TOP-EDIT") != null); // nothing destroyed
+    }
+    {
+        const staged = try proj.oracle("git diff --cached --name-only");
+        defer gpa.free(staged);
+        try t.expect(std.mem.indexOf(u8, staged, "a.txt") != null); // nor unstaged
+    }
+}
+
+test "e2e/git: a hunk armed in one snapshot cannot act in the next" {
+    const gpa = t.allocator;
+    var proj: Project = undefined;
+    try proj.init(gpa);
+    defer proj.deinit();
+
+    var ed: Editor = undefined;
+    try Editor.init(gpa, &ed);
+    defer ed.deinit();
+    try loadWorkspace(&ed);
+    try gitWorld(&proj, &git_base);
+
+    ed.run("git-status");
+    try t.expect(drainToolContains(&ed, "*git*", "@@"));
+    ed.press("j", ""); // off the file row, onto its hunk
+    ed.press("x", ""); // arm the hunk discard
+    try t.expectEqualStrings("git-confirm", ed.mode());
+
+    // Re-gather. a.txt is still unstaged with the same single hunk, so ordinal
+    // 0 still NAMES something — only the snapshot rule can refuse here, and it
+    // must: the diff was re-read, so an ordinal from the old one is a guess.
+    try gitWorld(&proj, &.{"printf 'scratch\\n' > zz_new.txt"});
+    ed.run("git-refresh");
+    try t.expect(drainToolContains(&ed, "*git*", "zz_new.txt"));
+
+    ed.run("git-discard-do");
+    try t.expect(std.mem.indexOf(u8, ed.echoText(), "refused") != null);
+    const disk = try core.file.readAlloc(gpa, "a.txt");
+    defer gpa.free(disk);
+    try t.expect(std.mem.indexOf(u8, disk, "TOP-EDIT") != null);
+}
+
+test "e2e/git: no verb reads a rendered byte range to choose its target" {
+    // By construction, not by review: the plugin is split at a marker, with the
+    // display tables and the projection buffer above it and every verb below.
+    const src = @embedFile("../guest/git.zig");
+    const marker = "Below here nothing reads a rendered byte range";
+    const at = std.mem.indexOf(u8, src, marker) orelse return error.MarkerMissing;
+    const verbs = src[at..];
+    for ([_][]const u8{ "r_start", "r_end", "sec_rstart", "sec_rend", "sec_body", "render_buf" }) |banned| {
+        try t.expect(std.mem.indexOf(u8, verbs, banned) == null);
+    }
+    // And targeting has exactly ONE door: `nodeAt` is declared once and called
+    // once, by `nodeAtCursor`; the old direct cursor hit-test is gone.
+    try t.expectEqual(@as(usize, 2), std.mem.count(u8, src, "nodeAt("));
+    try t.expect(std.mem.indexOf(u8, src, "nodeAt(weft.cursor())") == null);
+}
