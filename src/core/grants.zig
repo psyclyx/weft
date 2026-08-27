@@ -121,6 +121,12 @@
 //! explicitly deferred (it would need the same "runtime identity, not a
 //! config-time one" argument `.doc_region` already makes, plus a live
 //! `GraphDoc` to resolve against — neither exists at config-eval time).
+//!
+//! **`ExportBook` (§13.5's per-export grants)**: this file's SECOND table,
+//! the peer-authority sibling of `HandleTable` — see its own section comment
+//! below for why it is a sibling and not a mode of the first. Grades survive
+//! only as presets/maxima; effective remote authority is per publication
+//! export, at a live epoch, keyed on an authenticated fingerprint.
 
 const std = @import("std");
 const Allocator = std.mem.Allocator;
@@ -358,7 +364,12 @@ pub const Row = struct {
 /// distinct channel from a guest's own native fault — see `wasm.zig`'s
 /// module doc for the mechanics; no enum needed to carry that distinction,
 /// the wasmtime channel already does.
-pub const Reason = enum { ok, never_granted, revoked, scope_expired, out_of_limit, collapsed };
+/// `.dead_epoch`/`.out_of_ops` are the per-export additions (§13.5): decided
+/// by `ExportBook.check`, the peer-authority table below, and never by
+/// `reasonFor` — the same "one enum names every deny in the membrane, even
+/// the ones this table doesn't decide" rule `.out_of_limit`/`.collapsed`
+/// already ride on.
+pub const Reason = enum { ok, never_granted, revoked, scope_expired, out_of_limit, collapsed, out_of_ops, dead_epoch };
 
 /// The System-owned grant table (§2.4's "resolves the principal's
 /// GrantDecls" mechanism; see `System.zig`'s `grants` field). Append-only:
@@ -514,6 +525,342 @@ pub const HandleTable = struct {
             if (!std.mem.eql(u8, r.principal, principal)) continue;
             if (!r.predicate.matches(facts)) continue;
             out.append(.{ .idx = @as(u32, @intCast(i)), .gen = r.gen });
+        }
+    }
+};
+
+// ── Per-export grants (§13.5) ────────────────────────────────────────
+//
+// The SECOND table in this file, and deliberately not a widening of
+// `HandleTable`. `HandleTable` answers "does this local PRINCIPAL (a
+// plugin) possess this capability" — possession, minted at load, checked by
+// handle. `ExportBook` answers "may this authenticated PEER perform this
+// operation on this publication's export, at this epoch" — authority,
+// minted per share, checked by identity. Same vocabulary (designation
+// scopes, revocation by invalidation, one `Reason`), different question and
+// different key, so they are siblings rather than one table with a mode
+// flag. The designation types (`DocRegion`/`GraphSubtree`) ARE shared
+// verbatim: a designation means one thing in this codebase.
+//
+// Grades (`view` < `edit` < `own`) survive only as PRESETS and MAXIMA
+// (§13.5: "connection-level roles may exist as user-facing presets or
+// maxima"). The grade → op-set bundle mapping lives with the grade enum
+// itself (`session/Session.zig`'s `Access.ops`), not here — this file has no
+// opinion about the legacy wire byte.
+
+/// A publication's identity (§13.2): the resource's stable id plus the epoch
+/// it is live at. Unpublishing advances the epoch, which invalidates every
+/// grant minted against the old one WITHOUT touching a single row — the
+/// bulk-revocation primitive §13.2 asks for ("unpublishing revokes its
+/// exports, advances the epoch, and invalidates translated references").
+/// `epoch = 0` is the never-published sentinel.
+pub const PublicationRef = struct {
+    id: u64,
+    epoch: u64 = 0,
+
+    pub fn eql(a: PublicationRef, b: PublicationRef) bool {
+        return a.id == b.id and a.epoch == b.epoch;
+    }
+};
+
+/// The export surface an `Op` belongs to (§13.2's `Export` variants, plus
+/// the administrative surface the `own` preset stands for). Derived from an
+/// `Op`, never stored beside one.
+pub const Surface = enum { replica, presence, endpoint, admin };
+
+/// One exported operation: the export SURFACE and the operation on it, fused
+/// into a single name. Deliberately NOT modelled as a stored `{surface,
+/// op_set}` pair — a surface recorded next to an op-set is two sources of
+/// truth for one fact, and the pair that drifts apart is exactly the silent
+/// widening §2.4 forbids. The surface is derived (`Op.surface`).
+pub const Op = enum(u4) {
+    /// Receive the replica's events (read the shared document).
+    replica_read = 0,
+    /// Author events the owner will admit into the shared replica.
+    replica_write = 1,
+    presence_read = 2,
+    presence_publish = 3,
+    endpoint_query = 4,
+    endpoint_mutate = 5,
+    /// Administrative authority over the publication (re-grant, unpublish).
+    admin = 6,
+
+    pub fn surface(self: Op) Surface {
+        return switch (self) {
+            .replica_read, .replica_write => .replica,
+            .presence_read, .presence_publish => .presence,
+            .endpoint_query, .endpoint_mutate => .endpoint,
+            .admin => .admin,
+        };
+    }
+};
+
+/// A set of `Op`s — the op-set half of an export grant. A plain bitmask so
+/// it copies freely, intersects in one instruction (the §13.5 authority
+/// intersection is `a.intersect(b)`), and rides the wire as one uvarint.
+pub const OpSet = struct {
+    bits: u16 = 0,
+
+    pub const empty: OpSet = .{};
+
+    pub fn of(ops: []const Op) OpSet {
+        var s: OpSet = .{};
+        for (ops) |op| s = s.with(op);
+        return s;
+    }
+
+    pub fn with(self: OpSet, op: Op) OpSet {
+        return .{ .bits = self.bits | bit(op) };
+    }
+
+    pub fn has(self: OpSet, op: Op) bool {
+        return self.bits & bit(op) != 0;
+    }
+
+    pub fn intersect(a: OpSet, b: OpSet) OpSet {
+        return .{ .bits = a.bits & b.bits };
+    }
+
+    pub fn unite(a: OpSet, b: OpSet) OpSet {
+        return .{ .bits = a.bits | b.bits };
+    }
+
+    pub fn isEmpty(self: OpSet) bool {
+        return self.bits == 0;
+    }
+
+    fn bit(op: Op) u16 {
+        return @as(u16, 1) << @intFromEnum(op);
+    }
+};
+
+/// How long a grant lives. `until_disconnect` is swept when the grantee's
+/// session dies (`ExportBook.sweepDisconnect`); `until_revoked` outlives a
+/// reconnect and dies only by explicit revoke or an epoch advance.
+///
+/// §13.6's other two offered lifetimes are deliberately NOT variants here:
+/// "once" is the approving interaction revoking after the invocation it
+/// approved, and "persist for a verified participant" is a stored descriptor
+/// re-minted at connect — both are POLICY over these two mechanisms, and
+/// neither has a caller yet. A variant with no enforcement would be a
+/// lifetime that lies.
+pub const Lifetime = enum(u8) { until_revoked = 0, until_disconnect = 1 };
+
+/// A grant's target scope (§13.5: "may be a designation"). `.whole` = the
+/// entire published resource; the designation forms reuse `DocRegion` and
+/// `GraphSubtree` verbatim, with their collapse-and-trap policies unchanged.
+///
+/// **Where a designation scope is ENFORCED**: at its own existing chokepoint
+/// (`command.Context.checkDocRegion` for text, `GraphCollab.admitRegions`
+/// for graph) — not at `ExportBook.check`, which sees an opaque event batch
+/// and no live document. This book answers the op/epoch/identity question;
+/// the designation narrows further downstream. Effective authority is the
+/// intersection, so carrying the scope here (and ANNOUNCING it) is what lets
+/// a grantee preflight against it before minting.
+///
+/// Borrow convention, same as `Row.principal`: the anchors' `agent` bytes
+/// and a subtree's `root.token` are BORROWED — the minter keeps them alive
+/// for the row's lifetime.
+pub const ExportScope = union(enum) {
+    whole,
+    doc_region: DocRegion,
+    graph_subtree: GraphSubtree,
+};
+
+/// One minted export grant (§13.5's `Grant`). `grantee` is the peer's
+/// AUTHENTICATED fingerprint — never a self-declared name, the same
+/// discipline `GraphCollab.grantSubtree` documents at length: the owner
+/// trusts the authenticated participant, and a name nobody authenticates is
+/// an authority hole a grantee sheds its confinement by renaming through.
+pub const ExportGrant = struct {
+    grantee: [24]u8,
+    publication: PublicationRef,
+    ops: OpSet,
+    scope: ExportScope = .whole,
+    lifetime: Lifetime = .until_revoked,
+};
+
+/// Names one row in an `ExportBook` — index + generation, exactly like
+/// `CapHandle`, so revocation stays table invalidation and a stale handle
+/// simply stops resolving.
+pub const ExportHandle = struct {
+    idx: u32 = std.math.maxInt(u32),
+    gen: u32 = 0,
+
+    pub const none: ExportHandle = .{};
+
+    pub fn isNone(self: ExportHandle) bool {
+        return self.idx == std.math.maxInt(u32);
+    }
+};
+
+/// The owner-side authority table for one link's peer: which publications
+/// are live at which epoch, and which exports their peer holds on them.
+///
+/// **Fail-closed by construction.** `check` never returns `.ok` by accident:
+/// an unknown publication, an unattributable sender, a stale epoch, and a
+/// missing row are four DISTINCT denials, and §13.5's "missing or malformed
+/// grant state never means unrestricted" is why none of them fall through to
+/// a permissive default. The one permissive case lives OUTSIDE this table,
+/// at `Session.authorize`: a publication this book has never heard of is not
+/// this book's to decide, so the connection grade governs it exactly as it
+/// did before per-export grants existed.
+pub const ExportBook = struct {
+    gpa: Allocator,
+    rows: std.ArrayList(ExportRow) = .empty,
+    /// Live epoch per publication id. An id stays here forever once
+    /// published — `unpublish` advances its epoch rather than forgetting it,
+    /// so authority can never fall back OPEN by losing track of a
+    /// publication it was confining.
+    pubs: std.AutoHashMapUnmanaged(u64, u64) = .empty,
+    /// Bumped by every mint, revoke, sweep, and epoch change — the
+    /// announce side's "does the grantee still know what it holds" check
+    /// (`Collab.push` re-announces when this moves).
+    rev: u64 = 0,
+
+    pub const ExportRow = struct {
+        grant: ExportGrant,
+        gen: u32 = 0,
+        alive: bool = true,
+    };
+
+    pub const MintError = error{ NotPublished, DeadEpoch, OutOfMemory };
+
+    pub fn init(gpa: Allocator) ExportBook {
+        return .{ .gpa = gpa };
+    }
+
+    pub fn deinit(self: *ExportBook) void {
+        self.rows.deinit(self.gpa);
+        self.pubs.deinit(self.gpa);
+        self.* = undefined;
+    }
+
+    /// Publish `id` (idempotent): mints epoch 1 on first call, otherwise
+    /// returns the live ref unchanged. Re-publishing after an `unpublish`
+    /// returns the ADVANCED epoch — grants minted against the old one stay
+    /// dead, which is the whole point of advancing it.
+    pub fn publish(self: *ExportBook, id: u64) !PublicationRef {
+        const gop = try self.pubs.getOrPut(self.gpa, id);
+        if (!gop.found_existing) {
+            gop.value_ptr.* = 1;
+            self.rev += 1;
+        }
+        return .{ .id = id, .epoch = gop.value_ptr.* };
+    }
+
+    /// §13.2's unpublish: advance the epoch. Every grant minted at the old
+    /// epoch stops checking, and every reference carrying it now refuses
+    /// with `.dead_epoch` — no row walk, no window where a stale reference
+    /// is still honoured. The id is KEPT (with its new epoch), never
+    /// forgotten: a forgotten publication would read as "not mine to
+    /// decide" and fall back to the connection grade, silently widening
+    /// exactly when authority was meant to end.
+    pub fn unpublish(self: *ExportBook, id: u64) !void {
+        const gop = try self.pubs.getOrPut(self.gpa, id);
+        gop.value_ptr.* = if (gop.found_existing) gop.value_ptr.* + 1 else 1;
+        self.rev += 1;
+    }
+
+    pub fn knows(self: *const ExportBook, id: u64) bool {
+        return self.pubs.contains(id);
+    }
+
+    pub fn liveEpoch(self: *const ExportBook, id: u64) ?u64 {
+        return self.pubs.get(id);
+    }
+
+    /// Mint one grant. PREFLIGHT BEFORE MINTING (doc/substrate.md §5, read
+    /// for the owner side): a grant against an unpublished resource or a
+    /// dead epoch is refused HERE rather than minted and denied later — a
+    /// row that can never check true is not a grant, it is a lie the UI
+    /// would render as authority.
+    pub fn grant(self: *ExportBook, g: ExportGrant) MintError!ExportHandle {
+        const live = self.pubs.get(g.publication.id) orelse return error.NotPublished;
+        if (g.publication.epoch != live) return error.DeadEpoch;
+        const idx: u32 = @intCast(self.rows.items.len);
+        try self.rows.append(self.gpa, .{ .grant = g });
+        self.rev += 1;
+        return .{ .idx = idx, .gen = 0 };
+    }
+
+    /// Revoke exactly one row. `false` if the handle is stale or already
+    /// dead (an idempotent revoke, not an error).
+    pub fn revoke(self: *ExportBook, h: ExportHandle) bool {
+        if (h.isNone() or h.idx >= self.rows.items.len) return false;
+        const r = &self.rows.items[h.idx];
+        if (!r.alive or r.gen != h.gen) return false;
+        r.alive = false;
+        r.gen +%= 1;
+        self.rev += 1;
+        return true;
+    }
+
+    /// `setPeerAccess`'s per-export sibling: revoke every live export
+    /// `grantee` holds on `id`. Returns how many died.
+    pub fn revokePeer(self: *ExportBook, grantee: [24]u8, id: u64) usize {
+        var n: usize = 0;
+        for (self.rows.items) |*r| {
+            if (!r.alive) continue;
+            if (r.grant.publication.id != id) continue;
+            if (!std.mem.eql(u8, &r.grant.grantee, &grantee)) continue;
+            r.alive = false;
+            r.gen +%= 1;
+            n += 1;
+        }
+        if (n > 0) self.rev += 1;
+        return n;
+    }
+
+    /// Sweep `grantee`'s `.until_disconnect` grants (their session died).
+    pub fn sweepDisconnect(self: *ExportBook, grantee: [24]u8) usize {
+        var n: usize = 0;
+        for (self.rows.items) |*r| {
+            if (!r.alive or r.grant.lifetime != .until_disconnect) continue;
+            if (!std.mem.eql(u8, &r.grant.grantee, &grantee)) continue;
+            r.alive = false;
+            r.gen +%= 1;
+            n += 1;
+        }
+        if (n > 0) self.rev += 1;
+        return n;
+    }
+
+    /// THE decision: may `grantee` perform `op` on `pub_ref`? Every denial
+    /// is a distinct reason — `.dead_epoch` for a reference or a row that
+    /// outlived its publication's epoch, `.out_of_ops` for a peer that holds
+    /// this publication but not this operation, `.never_granted` for one
+    /// that holds nothing here at all.
+    pub fn check(self: *const ExportBook, grantee: [24]u8, pub_ref: PublicationRef, op: Op) Reason {
+        const live = self.pubs.get(pub_ref.id) orelse return .never_granted;
+        if (pub_ref.epoch != live) return .dead_epoch;
+        var saw_stale = false;
+        var saw_row = false;
+        for (self.rows.items) |r| {
+            if (!r.alive) continue;
+            if (r.grant.publication.id != pub_ref.id) continue;
+            if (!std.mem.eql(u8, &r.grant.grantee, &grantee)) continue;
+            if (r.grant.publication.epoch != live) {
+                saw_stale = true;
+                continue;
+            }
+            saw_row = true;
+            if (r.grant.ops.has(op)) return .ok;
+        }
+        if (saw_row) return .out_of_ops;
+        return if (saw_stale) .dead_epoch else .never_granted;
+    }
+
+    /// The announce side's read: append every live grant `grantee` holds on
+    /// `id` at the live epoch into `out`. What is announced and what is
+    /// enforced therefore come from the same walk and cannot disagree.
+    pub fn collect(self: *const ExportBook, grantee: [24]u8, id: u64, out: *std.ArrayList(ExportGrant)) !void {
+        const live = self.pubs.get(id) orelse return;
+        for (self.rows.items) |r| {
+            if (!r.alive) continue;
+            if (r.grant.publication.id != id or r.grant.publication.epoch != live) continue;
+            if (!std.mem.eql(u8, &r.grant.grantee, &grantee)) continue;
+            try out.append(self.gpa, r.grant);
         }
     }
 };
@@ -716,4 +1063,158 @@ test "grants: collectForPrincipal — capture-time resolution, predicate-gated, 
 
 test {
     std.testing.refAllDecls(@This());
+}
+
+// ── ExportBook (§13.5's per-export grants) ──────────────────────────
+
+const alice_fp: [24]u8 = @splat(0xa1);
+const bob_fp: [24]u8 = @splat(0xb0);
+
+test "export grants: authority is per SURFACE — a granted op admits, a sibling op on the same publication does not" {
+    var book = ExportBook.init(t.allocator);
+    defer book.deinit();
+
+    const pubref = try book.publish(7);
+    _ = try book.grant(.{
+        .grantee = alice_fp,
+        .publication = pubref,
+        .ops = OpSet.of(&.{ .replica_read, .presence_read }),
+    });
+
+    // Granted surface + op: admitted.
+    try t.expectEqual(Reason.ok, book.check(alice_fp, pubref, .replica_read));
+    try t.expectEqual(Reason.ok, book.check(alice_fp, pubref, .presence_read));
+    // The SAME surface, a different op — the whole point of per-export
+    // grants over a grade: read does not imply write.
+    try t.expectEqual(Reason.out_of_ops, book.check(alice_fp, pubref, .replica_write));
+    // A surface never mentioned at all.
+    try t.expectEqual(Reason.out_of_ops, book.check(alice_fp, pubref, .endpoint_mutate));
+    try t.expectEqual(Reason.out_of_ops, book.check(alice_fp, pubref, .admin));
+    // Another peer holds nothing here — distinct from holding the wrong op.
+    try t.expectEqual(Reason.never_granted, book.check(bob_fp, pubref, .replica_read));
+
+    // Widening is additive and independently revocable, not a re-grade.
+    const write = try book.grant(.{
+        .grantee = alice_fp,
+        .publication = pubref,
+        .ops = OpSet.of(&.{.replica_write}),
+    });
+    try t.expectEqual(Reason.ok, book.check(alice_fp, pubref, .replica_write));
+    try t.expect(book.revoke(write));
+    try t.expectEqual(Reason.out_of_ops, book.check(alice_fp, pubref, .replica_write));
+    try t.expectEqual(Reason.ok, book.check(alice_fp, pubref, .replica_read)); // sibling row untouched
+    try t.expect(!book.revoke(write)); // idempotent, never an error
+}
+
+test "export grants: unpublishing advances the epoch — every grant minted against the old one refuses with dead_epoch" {
+    var book = ExportBook.init(t.allocator);
+    defer book.deinit();
+
+    const first = try book.publish(1);
+    _ = try book.grant(.{ .grantee = alice_fp, .publication = first, .ops = OpSet.of(&.{.replica_write}) });
+    try t.expectEqual(Reason.ok, book.check(alice_fp, first, .replica_write));
+
+    try book.unpublish(1);
+    // The reference the peer is holding is itself stale now.
+    try t.expectEqual(Reason.dead_epoch, book.check(alice_fp, first, .replica_write));
+
+    // And so is the row, checked against the LIVE reference: a dead grant is
+    // never confused with "never granted", and never falls back to the
+    // connection grade — the publication stays known precisely so it can't.
+    const live = try book.publish(1);
+    try t.expect(live.epoch != first.epoch);
+    try t.expect(book.knows(1));
+    try t.expectEqual(Reason.dead_epoch, book.check(alice_fp, live, .replica_write));
+
+    // Minting against a dead epoch is refused AT THE MINT, not silently
+    // recorded as a row that can never check true.
+    try t.expectError(error.DeadEpoch, book.grant(.{
+        .grantee = alice_fp,
+        .publication = first,
+        .ops = OpSet.of(&.{.replica_write}),
+    }));
+    try t.expectError(error.NotPublished, book.grant(.{
+        .grantee = alice_fp,
+        .publication = .{ .id = 99, .epoch = 1 },
+        .ops = OpSet.of(&.{.replica_write}),
+    }));
+
+    // A fresh grant at the live epoch works again.
+    _ = try book.grant(.{ .grantee = alice_fp, .publication = live, .ops = OpSet.of(&.{.replica_write}) });
+    try t.expectEqual(Reason.ok, book.check(alice_fp, live, .replica_write));
+}
+
+test "export grants: revokePeer, disconnect sweep, and collect (announce reads the same rows enforcement does)" {
+    var book = ExportBook.init(t.allocator);
+    defer book.deinit();
+
+    const p = try book.publish(3);
+    _ = try book.grant(.{ .grantee = alice_fp, .publication = p, .ops = OpSet.of(&.{.replica_write}) });
+    _ = try book.grant(.{
+        .grantee = alice_fp,
+        .publication = p,
+        .ops = OpSet.of(&.{.presence_publish}),
+        .lifetime = .until_disconnect,
+    });
+    _ = try book.grant(.{ .grantee = bob_fp, .publication = p, .ops = OpSet.of(&.{.replica_write}) });
+
+    var out: std.ArrayList(ExportGrant) = .empty;
+    defer out.deinit(t.allocator);
+    try book.collect(alice_fp, 3, &out);
+    try t.expectEqual(@as(usize, 2), out.items.len); // alice's rows only — never bob's
+
+    // A dead session takes only the grants that said they'd die with it.
+    try t.expectEqual(@as(usize, 1), book.sweepDisconnect(alice_fp));
+    try t.expectEqual(Reason.out_of_ops, book.check(alice_fp, p, .presence_publish));
+    try t.expectEqual(Reason.ok, book.check(alice_fp, p, .replica_write));
+
+    // setPeerAccess's per-export sibling: everything this peer holds here.
+    try t.expectEqual(@as(usize, 1), book.revokePeer(alice_fp, 3));
+    try t.expectEqual(Reason.never_granted, book.check(alice_fp, p, .replica_write));
+    try t.expectEqual(Reason.ok, book.check(bob_fp, p, .replica_write)); // the other peer is untouched
+    try t.expectEqual(@as(usize, 0), book.revokePeer(alice_fp, 3));
+
+    out.clearRetainingCapacity();
+    try book.collect(alice_fp, 3, &out);
+    try t.expectEqual(@as(usize, 0), out.items.len);
+}
+
+test "export grants: a designation scope rides the row verbatim — one designation type, not two" {
+    var book = ExportBook.init(t.allocator);
+    defer book.deinit();
+
+    const p = try book.publish(5);
+    const h = try book.grant(.{
+        .grantee = alice_fp,
+        .publication = p,
+        .ops = OpSet.of(&.{ .replica_read, .replica_write }),
+        .scope = .{ .doc_region = .{
+            .doc_id = "parser.zig",
+            .start = .{ .agent = "user", .seq = 2, .side = .after },
+            .end = .{ .agent = "user", .seq = 9, .side = .before },
+        } },
+    });
+    switch (book.rows.items[h.idx].grant.scope) {
+        .doc_region => |dr| {
+            try t.expectEqualStrings("parser.zig", dr.doc_id);
+            try t.expectEqual(@as(u64, 9), dr.end.seq);
+        },
+        .whole, .graph_subtree => return error.TestUnexpectedResult,
+    }
+    // The op/epoch question is this table's; the designation narrows further
+    // downstream, so a scoped grant still admits HERE.
+    try t.expectEqual(Reason.ok, book.check(alice_fp, p, .replica_write));
+}
+
+test "export grants: OpSet is a set — union widens, intersection narrows, surfaces are derived" {
+    const read_only = OpSet.of(&.{ .replica_read, .presence_read });
+    const writer = read_only.with(.replica_write);
+    try t.expect(writer.has(.replica_read));
+    try t.expect(!read_only.has(.replica_write));
+    try t.expectEqual(read_only.bits, read_only.intersect(writer).bits);
+    try t.expectEqual(writer.bits, read_only.unite(writer).bits);
+    try t.expect(OpSet.empty.isEmpty());
+    try t.expectEqual(Surface.replica, Op.replica_write.surface());
+    try t.expectEqual(Surface.presence, Op.presence_publish.surface());
+    try t.expectEqual(Surface.admin, Op.admin.surface());
 }

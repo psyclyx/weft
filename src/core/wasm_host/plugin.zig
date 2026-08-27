@@ -172,10 +172,12 @@ pub fn trapPermDenied(p: *WasmPlugin, caller: *wasm.Caller, comptime perm: Perm)
         // can actually correspond to when no limit is in play (this function
         // is only ever called after `hasPerm` already said no); `.out_of_limit`/
         // `.collapsed` are never `reasonFor`'s answer (neither inspects paths
-        // or documents — see `grants.Reason`'s doc) but the switch must stay
-        // exhaustive over the shared enum, so both are bucketed with the same
-        // wording, defensively.
-        .never_granted, .ok, .out_of_limit, .collapsed => "not requested in describe()",
+        // or documents — see `grants.Reason`'s doc), and `.out_of_ops`/
+        // `.dead_epoch` belong to the peer-authority table (`ExportBook`),
+        // which this plugin gate never consults — but the switch must stay
+        // exhaustive over the shared enum, so all four are bucketed with the
+        // same wording, defensively.
+        .never_granted, .ok, .out_of_limit, .collapsed, .out_of_ops, .dead_epoch => "not requested in describe()",
     } else "not requested in describe()";
     caller.trap("plugin '{s}' denied capability '{s}' ({s})", .{ p.name, perm.label(), reason });
 }
