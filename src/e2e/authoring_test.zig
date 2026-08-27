@@ -2260,7 +2260,7 @@ test "input: a tool entry's field takes commits only — an unbound key and Tab 
     }
 
     // ...but Tab is a physical key, not a commit: the field consumes it and the
-    // rename draft never gains a literal tab byte (§2.2's flagship symptom).
+    // rename draft never gains a literal tab byte (doc/cwa-review.md §2.2).
     ed.press("Tab", "\t");
     const name = try draft(ed, field_ref, gpa);
     defer gpa.free(name);

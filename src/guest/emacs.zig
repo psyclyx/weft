@@ -4,10 +4,11 @@
 //! resting mode, `emacs`, that falls back to the core `default` floor for its
 //! BINDINGS (arrows/Backspace) and declares that it commits typed text, so
 //! printable keys self-insert — and every command is a CONTROL/META chord
-//! layered on top. C-x / C-c are prefix key SEQUENCES (the same engine vim's `SPC f f` uses), not modes: `C-x`
-//! holds pending, which-key shows its completions, `C-x C-f` completes. The
-//! editor owns only intra-buffer motion/kill/yank here; the C-x/C-c tree that
-//! reaches other plugins (find-file, magit, dired) is config data (emacs.js).
+//! layered on top. C-x / C-c are prefix key SEQUENCES (the same engine vim's
+//! `SPC f f` uses), not modes: `C-x` holds pending, which-key shows its
+//! completions, `C-x C-f` completes. The editor owns only intra-buffer
+//! motion/kill/yank here; the C-x/C-c tree that reaches other plugins
+//! (find-file, magit, dired) is config data (emacs.js).
 //! Delete this plugin and weft is still modeless — `default` is the floor.
 
 const std = @import("std");

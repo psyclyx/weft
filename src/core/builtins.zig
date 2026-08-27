@@ -303,7 +303,8 @@ fn cQuit(ctx: *Context, args: struct {}) anyerror!Value {
 fn cInsertNewline(ctx: *Context, args: struct {}) anyerror!Value {
     _ = args;
     // Return/Tab are physical keys, not commits: a focused field consumes them
-    // (nothing leaks to a backing document) and inserts nothing (§2.2).
+    // (nothing leaks to a backing document) and inserts nothing
+    // (doc/cwa-review.md §2.2).
     if (try semanticFieldInput(ctx, .{ .commit = .none })) return ok;
     const ed = ctx.textEditor() catch |e| return editErr(e);
     ctx.edit(ed.insertRange(), "\n") catch |e| return editErr(e);

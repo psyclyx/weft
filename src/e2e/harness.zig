@@ -1830,8 +1830,8 @@ pub fn kvSnapshot(gpa: Allocator, store: *core.kv.Store) ![]u8 {
 
 /// A stable, sorted text snapshot of the keymap's MODE STRUCTURE — which
 /// modes are declared menus/sticky-menus/locked/resting, and which modes
-/// declare that they commit text (`commitCommand`) — the which-key GROUP structure a
-/// bind-only snapshot can't see (M3/M4 parity item 4).
+/// declare that they commit text (`commitCommand`) — the which-key GROUP
+/// structure a bind-only snapshot can't see (M3/M4 parity item 4).
 pub fn modeStructureSnapshot(gpa: Allocator, km: *core.Keymap) ![]u8 {
     var names: std.StringArrayHashMapUnmanaged(void) = .empty;
     defer names.deinit(gpa);
