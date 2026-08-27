@@ -148,6 +148,25 @@ last_rx_ns: std.atomic.Value(u64) = .init(0),
 /// Collab owns one for the outbound session across reconnects.
 wake_fd: ?std.posix.fd_t = null,
 
+/// Counts what this session PUTS on the wire (see `Tap`). Null everywhere
+/// but the emission gates.
+tap: ?Tap = null,
+
+/// Observes every frame this session posts, by class, kind and channel,
+/// before sealing. The gates that assert an export emits NOTHING
+/// (doc/contextual-workspace-architecture.md §18, "no emission without a
+/// legible selection") need a seam that counts what was SENT: a receiver
+/// cannot distinguish "never sent" from "sent and dropped", and the bytes
+/// at the `Link` are ciphertext by then.
+pub const Tap = struct {
+    ctx: ?*anyopaque,
+    postedFn: *const fn (ctx: ?*anyopaque, class: wire.Class, kind: u8, channel: u64) void,
+
+    fn saw(self: Tap, class: wire.Class, kind: u8, channel: u64) void {
+        self.postedFn(self.ctx, class, kind, channel);
+    }
+};
+
 pub fn setWakeFd(self: *Session, fd: ?std.posix.fd_t) void {
     self.wake_fd = fd;
 }
@@ -290,6 +309,7 @@ pub fn liveness(self: *const Session) Liveness {
 // ── Posting (main thread; sealed + written by the writer) ───
 
 pub fn post(self: *Session, class: wire.Class, kind: u8, channel: u64, payload: []const u8) !void {
+    if (self.tap) |tap| tap.saw(class, kind, channel);
     const encoded = try wire.encode(self.gpa, .{
         .class = class,
         .kind = kind,
@@ -306,6 +326,7 @@ pub fn post(self: *Session, class: wire.Class, kind: u8, channel: u64, payload: 
 }
 
 pub fn postFeed(self: *Session, channel: u64, key: u64, payload: []const u8) !void {
+    if (self.tap) |tap| tap.saw(.feed, @intFromEnum(wire.FeedKind.publish), channel);
     const encoded = try wire.encode(self.gpa, .{
         .class = .feed,
         .kind = @intFromEnum(wire.FeedKind.publish),
