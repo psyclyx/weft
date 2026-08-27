@@ -38,6 +38,7 @@ const std = @import("std");
 test {
     std.testing.refAllDecls(core); // the core ABI + its property tests
     _ = @import("core/target_open.zig");
+    _ = @import("core/intentions.zig");
     _ = @import("core/tests.zig");
     _ = @import("core/markdown.zig");
     _ = @import("core/identity.zig");

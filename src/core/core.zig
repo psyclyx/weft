@@ -15,6 +15,7 @@ pub const registry = @import("registry.zig");
 pub const Registry = registry.Registry;
 pub const command = @import("command.zig");
 pub const Command = command.Command;
+pub const intentions = @import("intentions.zig");
 pub const authority = @import("authority.zig");
 pub const wasm = @import("wasm.zig");
 pub const wasm_abi = @import("wasm_abi.zig");
