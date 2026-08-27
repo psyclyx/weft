@@ -3,6 +3,13 @@
 //! frames to per-buffer `Collab`s by channel quad (`base = channel & ~3`);
 //! `share` announces a buffer on channel 0, the peer's announcements
 //! surface as `offers` until opened.
+//!
+//! Routing is by quad; MEANING is by publication descriptor
+//! (`publication.zig`). Each base the connection knows may carry one — ours
+//! for a quad we allocated, the peer's for a quad it announced — and an
+//! inbound frame whose surface that descriptor does not export is dropped
+//! with a line in the log. A quad with no descriptor is ungated: that is
+//! exactly an older peer, and it behaves as it always did.
 
 const std = @import("std");
 const Allocator = std.mem.Allocator;
@@ -16,6 +23,9 @@ const GraphDoc = @import("../graph.zig");
 const Session = @import("Session.zig");
 const Collab = @import("Collab.zig");
 const GraphCollab = @import("GraphCollab.zig");
+pub const publication = @import("publication.zig");
+const Publication = publication.Publication;
+pub const ExportSpec = publication.ExportSpec;
 
 const Conn = @This();
 
@@ -37,6 +47,11 @@ share_names: std.AutoHashMapUnmanaged(u64, []u8) = .empty,
 /// Same, for graph-doc shares (kept separate so rebind re-announces each
 /// with its own `DocKind`).
 graph_share_names: std.AutoHashMapUnmanaged(u64, []u8) = .empty,
+/// The descriptor governing each quad, by base: ours for a quad we
+/// allocated, the peer's for one it announced (a base is allocated by
+/// exactly one side, so exactly one side publishes for it). Absent ⇒
+/// ungated legacy bundle.
+publications: std.AutoHashMapUnmanaged(u64, Publication) = .empty,
 next_base: u64,
 
 /// What kind of document a share/offer names — carried as an ADDITIVE
@@ -53,6 +68,9 @@ pub const Offer = struct {
     name: []u8,
     kind: DocKind = .text,
     opened: bool = false,
+    /// The owner unpublished this quad: its exports are revoked and any
+    /// reference translated out of it is invalid.
+    stale: bool = false,
 };
 
 pub fn init(gpa: Allocator, session: *Session, name: []const u8, role: secure.Role) !Conn {
@@ -84,17 +102,22 @@ pub fn deinit(self: *Conn) void {
     var git = self.graph_share_names.valueIterator();
     while (git.next()) |v| self.gpa.free(v.*);
     self.graph_share_names.deinit(self.gpa);
+    var pit = self.publications.valueIterator();
+    while (pit.next()) |p| p.deinit(self.gpa);
+    self.publications.deinit(self.gpa);
     self.gpa.free(self.name);
 }
 
-/// Unbind every Collab tagged `tag` (buffer close): the peer's
-/// frames on that quad drop harmlessly afterwards. The offer, if
-/// any, stays consumed — re-sharing allocates a fresh quad.
+/// Unbind every Collab tagged `tag` (buffer close): a quad we published is
+/// unpublished first, so the peer learns its exports are gone instead of
+/// watching a quad go quiet. The offer, if any, stays consumed —
+/// re-sharing allocates a fresh quad.
 pub fn unbindTag(self: *Conn, tag: u64) void {
     var i: usize = 0;
     while (i < self.collabs.items.len) {
         if (self.collabs.items[i].tag == tag) {
             const c = self.collabs.swapRemove(i);
+            self.unpublish(c.base);
             c.deinit();
             self.gpa.destroy(c);
         } else i += 1;
@@ -103,10 +126,26 @@ pub fn unbindTag(self: *Conn, tag: u64) void {
     while (i < self.graph_collabs.items.len) {
         if (self.graph_collabs.items[i].tag == tag) {
             const c = self.graph_collabs.swapRemove(i);
+            self.unpublish(c.base);
             c.deinit();
             self.gpa.destroy(c);
         } else i += 1;
     }
+}
+
+/// Revoke a quad's exports and tell the peer. Only a quad WE allocated is
+/// ours to unpublish — closing our view of a peer's share revokes nothing.
+/// Best-effort on the wire: a teardown must not fail, and a peer that never
+/// hears it degrades to today's behaviour (the quad stops answering).
+pub fn unpublish(self: *Conn, base: u64) void {
+    if (!self.ownsBase(base)) return;
+    const p = self.publications.getPtr(base) orelse return;
+    if (p.stale) return;
+    p.unpublish(self.gpa);
+    const payload = publication.encodeUnpublish(self.gpa, base, p.epoch) catch return;
+    defer self.gpa.free(payload);
+    self.session.post(.op, @intFromEnum(wire.OpKind.unpublish), 0, payload) catch
+        std.log.warn("publication: could not announce unpublish of quad {d}", .{base});
 }
 
 pub fn findBase(self: *Conn, base: u64) ?*Collab {
@@ -165,8 +204,17 @@ pub fn bindPrimary(self: *Conn, doc: *Document, tag: u64) !*Collab {
 }
 
 /// Share a buffer over this connection: allocate a quad, announce
-/// it, start syncing. Returns the bound Collab.
+/// it, start syncing. Returns the bound Collab. Exports the legacy
+/// bundle — `shareExports` is the same call with a chosen export set.
 pub fn share(self: *Conn, doc: *Document, display_name: []const u8, tag: u64) !*Collab {
+    return self.shareExports(doc, display_name, tag, .legacy);
+}
+
+/// Share a buffer with an explicit export selection (§13.6's bundle,
+/// compiled to a descriptor). The `share` announce still goes out first, so
+/// a peer that knows nothing of publications sees the quad exactly as
+/// before — it just never learns the set was narrowed.
+pub fn shareExports(self: *Conn, doc: *Document, display_name: []const u8, tag: u64, spec: ExportSpec) !*Collab {
     const base = self.next_base;
     self.next_base += 8;
     const c = try self.bind(doc, base, tag);
@@ -174,6 +222,7 @@ pub fn share(self: *Conn, doc: *Document, display_name: []const u8, tag: u64) !*
     errdefer self.gpa.free(owned);
     try self.share_names.put(self.gpa, base, owned);
     try self.announceShare(base, display_name, .text);
+    try self.publish(base, display_name, spec);
     return c;
 }
 
@@ -189,7 +238,40 @@ pub fn shareGraph(self: *Conn, doc: *GraphDoc, display_name: []const u8, tag: u6
     errdefer self.gpa.free(owned);
     try self.graph_share_names.put(self.gpa, base, owned);
     try self.announceShare(base, display_name, .graph);
+    // Graph quads run the per-region admission hook on top of the grade.
+    try self.publish(base, display_name, .{ .replica = .{ .kind = .graph, .admission = .by_region } });
     return c;
+}
+
+/// Record and announce the descriptor for a quad we own.
+fn publish(self: *Conn, base: u64, resource: []const u8, spec: ExportSpec) !void {
+    var p = try publication.fromSpec(self.gpa, base, resource, self.session.peerFingerprint(), spec);
+    errdefer p.deinit(self.gpa);
+    const gop = try self.publications.getOrPut(self.gpa, base);
+    if (gop.found_existing) {
+        p.epoch = gop.value_ptr.epoch;
+        gop.value_ptr.deinit(self.gpa);
+    }
+    gop.value_ptr.* = p;
+    try self.announcePublication(base);
+}
+
+fn announcePublication(self: *Conn, base: u64) !void {
+    const p = self.publications.getPtr(base) orelse return;
+    const payload = try p.encode(self.gpa, base);
+    defer self.gpa.free(payload);
+    try self.session.post(.op, @intFromEnum(wire.OpKind.publish), 0, payload);
+}
+
+/// The descriptor governing `base`, or null when the quad is ungated.
+pub fn publicationFor(self: *const Conn, base: u64) ?*const Publication {
+    return self.publications.getPtr(base);
+}
+
+/// Did WE allocate this quad? A base is allocated by exactly one side, and
+/// only that side publishes or unpublishes for it.
+fn ownsBase(self: *const Conn, base: u64) bool {
+    return self.share_names.contains(base) or self.graph_share_names.contains(base);
 }
 
 fn announceShare(self: *Conn, base: u64, display_name: []const u8, kind: DocKind) !void {
@@ -235,11 +317,17 @@ pub fn rebind(self: *Conn, new_session: *Session) !void {
     self.session = new_session;
     for (self.collabs.items) |c| {
         c.rebind(new_session);
-        if (self.share_names.get(c.base)) |dn| try self.announceShare(c.base, dn, .text);
+        if (self.share_names.get(c.base)) |dn| {
+            try self.announceShare(c.base, dn, .text);
+            try self.announcePublication(c.base);
+        }
     }
     for (self.graph_collabs.items) |c| {
         c.rebind(new_session);
-        if (self.graph_share_names.get(c.base)) |dn| try self.announceShare(c.base, dn, .graph);
+        if (self.graph_share_names.get(c.base)) |dn| {
+            try self.announceShare(c.base, dn, .graph);
+            try self.announcePublication(c.base);
+        }
     }
 }
 
@@ -253,13 +341,34 @@ pub fn tick(self: *Conn) !bool {
     try self.session.drain(gpa, &frames);
     for (frames.items) |frame| {
         defer gpa.free(frame.payload);
-        if (frame.class == .op and frame.channel == 0 and
-            (std.enums.fromInt(wire.OpKind, frame.kind) orelse .batch) == .share)
-        {
-            self.acceptOffer(frame.payload) catch {};
-            continue;
+        if (frame.class == .op and frame.channel == 0) {
+            switch (std.enums.fromInt(wire.OpKind, frame.kind) orelse .batch) {
+                .share => {
+                    self.acceptOffer(frame.payload) catch {};
+                    continue;
+                },
+                .publish => {
+                    self.acceptPublication(frame.payload) catch {};
+                    continue;
+                },
+                .unpublish => {
+                    changed = self.acceptUnpublish(frame.payload) or changed;
+                    continue;
+                },
+                else => {},
+            }
         }
         const base = frame.channel - (frame.channel % 4);
+        // Transport routes by quad; the descriptor says which surfaces are
+        // live. A frame for a surface this quad does not export is dropped
+        // loudly — never a crash, never a silent acceptance.
+        if (self.publications.getPtr(base)) |p| {
+            const at = publication.addressOf(frame.channel - base, frame.class, frame.kind, frame.payload);
+            if (!p.admits(at, frame.class)) {
+                std.log.warn("publication: quad {d} does not export {s} — frame dropped", .{ base, publication.addressLabel(at) });
+                continue;
+            }
+        }
         if (self.findBase(base)) |c| {
             changed = (c.handleFrame(frame) catch false) or changed;
         } else if (self.findGraphBase(base)) |gc| {
@@ -293,4 +402,49 @@ fn acceptOffer(self: *Conn, payload: []const u8) !void {
     cur = cur[nlen..];
     const kind: DocKind = if (cur.len > 0) (std.enums.fromInt(DocKind, cur[0]) orelse .text) else .text;
     try self.offers.append(self.gpa, .{ .base = base, .name = name, .kind = kind });
+}
+
+/// Record the peer's descriptor for one of ITS quads. The owner is the
+/// authenticated peer of this connection, never a field in the payload.
+fn acceptPublication(self: *Conn, payload: []const u8) !void {
+    var decoded = try publication.decode(self.gpa, payload, self.session.peerFingerprint());
+    errdefer decoded.publication.deinit(self.gpa);
+    if (decoded.base % 4 != 0) return error.Corrupt;
+    if (self.ownsBase(decoded.base)) {
+        decoded.publication.deinit(self.gpa);
+        return; // only the owner publishes for a quad
+    }
+    const gop = try self.publications.getOrPut(self.gpa, decoded.base);
+    if (gop.found_existing) {
+        // A re-announce (reconnect) is idempotent; an older epoch is a
+        // stale replay and never resurrects revoked exports.
+        if (decoded.publication.epoch < gop.value_ptr.epoch) {
+            decoded.publication.deinit(self.gpa);
+            return;
+        }
+        gop.value_ptr.deinit(self.gpa);
+    }
+    gop.value_ptr.* = decoded.publication;
+}
+
+/// The peer revoked a quad: advance our recorded epoch, mark it stale, and
+/// invalidate everything we translated out of it (rendered cursors,
+/// imported host diagnostics). Frames on it are dropped from here on.
+fn acceptUnpublish(self: *Conn, payload: []const u8) bool {
+    const msg = publication.decodeUnpublish(payload) catch return false;
+    // A peer revokes ITS publications, never ours — the same reverse-vector
+    // guard the `grant` frame enforces.
+    if (self.ownsBase(msg.base)) return false;
+    const p = self.publications.getPtr(msg.base) orelse return false;
+    if (p.stale) return false;
+    p.unpublish(self.gpa);
+    p.epoch = @max(p.epoch, msg.epoch);
+    for (self.offers.items) |*o| {
+        if (o.base == msg.base) o.stale = true;
+    }
+    if (self.findBase(msg.base)) |c| {
+        c.invalidateTranslated() catch {};
+        return true;
+    }
+    return false;
 }

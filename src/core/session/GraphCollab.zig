@@ -505,8 +505,8 @@ pub fn handleFrame(self: *GraphCollab, frame: wire.Decoder.Decoded) !bool {
                 try self.core.sendBatch(gpa, self.session, self.base, self.doc, false);
                 return false;
             },
-            // `.share` is connection-level (Conn consumes it).
-            .share => return false,
+            // Connection-level (Conn consumes these on channel 0).
+            .share, .publish, .unpublish => return false,
             // D3 §2.1: the host's announced granted-root set. Client role
             // only — same reverse-vector guard `Collab.zig`'s `.grant`
             // consume enforces (a host is the authority; it is never

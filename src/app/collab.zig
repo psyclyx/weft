@@ -95,6 +95,12 @@ pub const ShareCtx = struct {
     /// interactive editor sets it from `presenceDefault` at startup and the
     /// `share-presence` command flips it at runtime.
     publish_presence: bool = false,
+    /// Which endpoint surfaces a newly shared quad EXPORTS (§13.2) — the
+    /// typed export set, distinct from `publish_presence`, which only
+    /// selects whether OUR cursor rides the presence surface. Withdrawing
+    /// our cursor must never silence a peer's, so the two are separate.
+    export_presence: bool = true,
+    export_diagnostics: bool = true,
     peer_fs_service: ?core.peer_fs.Service = null,
     /// Published by `Collab.reconcileRemoteFilesystem`; commands only see an
     /// ordinary located target and use the generic target resolver.
@@ -119,6 +125,13 @@ pub const ShareCtx = struct {
     /// sentinel keeps `initBase` infallible rather than threading a second
     /// optional through every call site.
     conn_wake_fd: std.posix.fd_t = -1,
+
+    /// Compile this surface's selection into a publication descriptor.
+    /// The filesystem surfaces stay at their legacy width: what a peer may
+    /// do with them is `fs_grant`'s call, not this one.
+    pub fn exportSpec(self: *const ShareCtx) core.session.ExportSpec {
+        return .{ .presence = self.export_presence, .diagnostics = self.export_diagnostics };
+    }
 };
 
 /// `Collab` — the cohesive owner of the connection cluster: the outbound client
@@ -502,7 +515,7 @@ const RemoteExchange = struct {
 /// cursor when presence sharing was selected, relay peers to each other.
 pub fn wireHubShare(sc: *ShareCtx, peer: *core.hub.Peer, col: *core.session.Collab, doc: *core.Document) !void {
     col.presence_layer = null;
-    col.export_diag_layer = sc.caps.layers.find(doc, "diagnostics");
+    col.export_diag_layer = if (sc.export_diagnostics) sc.caps.layers.find(doc, "diagnostics") else null;
     col.publish_presence = sc.publish_presence;
     col.relay = core.hub.relayPresence;
     col.relay_ctx = try peer.relayFor(doc);
@@ -522,7 +535,7 @@ pub fn guiConfigure(ctx: ?*anyopaque, peer: *core.hub.Peer) anyerror!void {
     try wireHubShare(sc, peer, col, pd);
     _ = sc.caps.layers.claim(sc.gpa, pd, "presence", .replicated, "collab") catch {};
     for (sc.shared.items) |s| {
-        const scol = try peer.conn.share(s.doc, s.name, s.tag);
+        const scol = try peer.conn.shareExports(s.doc, s.name, s.tag, sc.exportSpec());
         try wireHubShare(sc, peer, scol, s.doc);
         _ = sc.caps.layers.claim(sc.gpa, s.doc, "presence", .replicated, "collab") catch {};
     }

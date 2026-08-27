@@ -164,3 +164,40 @@ one being graded, never the grader), which keeps a peer from gagging the
 host's own user. A peer built before v1.2 ignores kind 3 (unknown op
 kinds are skipped), so the addition is backward-tolerant; the wire
 version is unchanged.
+
+## Publications (v1.3, additive)
+
+A quad is transport. What it MEANS is its **publication descriptor**
+(architecture §13.2): the replica it carries plus the endpoint surfaces
+its owner exports. Two op-class kinds on channel 0 carry it, and they
+replace nothing — `share` still announces the quad.
+
+- **`publish` (kind 5)**: `uv base | uv id | uv epoch | u8 lifetime |
+  uv resource_len | resource | uv export_count | (uv len | body)*`.
+  Each export is length-framed so an unknown tag or surface is skipped
+  export-by-export rather than desynchronizing the payload. A body is
+  `u8 tag=0 | u8 replica_kind | u8 admission` or `u8 tag=1 | u8 surface |
+  u8 ops`. v1 surfaces are `presence | diagnostics | fs_hierarchy |
+  fs_bytes | fs_mutate` — exactly the traffic the quad already carries.
+- **`unpublish` (kind 6)**: `uv base | uv epoch`. Exports are revoked,
+  the epoch advances, the receiver marks the quad stale and invalidates
+  everything it translated out of it (rendered peer cursors, imported
+  host diagnostics). The replica survives as an ordinary local document.
+
+Owner and audience are NOT on the wire: they are the authenticated
+participants of the connection a descriptor arrives on. A self-asserted
+owner would be a spoof, not an authority.
+
+Routing is unchanged — by quad, `base = channel & ~3`. The descriptor
+only decides which surfaces are LIVE: an inbound frame for a surface the
+quad does not export is dropped with one line in the log, never a crash
+and never a silent acceptance. Replies (`ok`/`err`/`fs_ok`/`fs_err`) are
+never gated — an answer to a call we made is not an invocation, and
+settling it beats waiting out a deadline.
+
+**Degradation.** A quad with no descriptor is the legacy bundle — replica
++ presence + diagnostics + blobs — and is ungated. That is exactly what a
+peer built before v1.3 presents: it never emits kinds 5/6 and skips them
+inbound, so both ends behave precisely as they did before. A narrowed
+export set is therefore only observed by peers that understand it; the
+owner still enforces authority at admission either way.

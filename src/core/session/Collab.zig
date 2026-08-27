@@ -206,6 +206,17 @@ pub fn setPublishPresence(self: *Collab, on: bool) !void {
     if (!on) try self.postPresenceRemoval();
 }
 
+/// The owner unpublished this quad: drop everything we translated out of
+/// it — rendered peer cursors and imported host diagnostics — so nothing
+/// keeps resolving against exports that no longer exist. The replica stays
+/// as a local document; only the borrowed views die.
+pub fn invalidateTranslated(self: *Collab) !void {
+    for (self.presence.items) |*peer| peer.deinit(self.gpa);
+    self.presence.clearRetainingCapacity();
+    try self.republishPresence();
+    if (self.import_diag_layer) |layer| try layer.publishSpans(self.gpa, &.{});
+}
+
 fn clearLastPresence(self: *Collab) void {
     if (self.last_presence) |*last| last.deinit(self.gpa);
     self.last_presence = null;
@@ -278,7 +289,8 @@ pub fn handleFrame(self: *Collab, frame: wire.Decoder.Decoded) !bool {
                     try self.core.setTheirFrontier(gpa, frame.payload);
                     try self.sendBatch();
                 },
-                .share => {}, // connection-level; Conn consumes these
+                // Connection-level; Conn consumes these on channel 0.
+                .share, .publish, .unpublish => {},
                 .grant => {
                     // The host tells us our grade on this document. Only
                     // a client accepts it — a host is the authority and

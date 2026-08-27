@@ -37,7 +37,14 @@ pub const ControlKind = enum(u8) { hello = 0, hello2 = 1, finish = 2, accept = 3
 /// `Collab` (text doc) peer that doesn't know this kind ignores it
 /// gracefully (`std.enums.fromInt` returns null); text docs have no
 /// regions to refuse.
-pub const OpKind = enum(u8) { batch = 0, frontier = 1, share = 2, grant = 3, region_refused = 4 };
+/// `publish` (channel 0) announces a quad's PUBLICATION DESCRIPTOR — which
+/// replica and which endpoint surfaces that quad exports (see
+/// session/publication.zig). It replaces nothing: `share` still announces
+/// the quad, and a quad with no descriptor is the legacy bundle (replica +
+/// presence + diagnostics + blobs), which is why an older peer that skips
+/// this kind behaves exactly as before. `unpublish` (channel 0) revokes a
+/// quad's exports and advances its epoch: uv base | uv epoch.
+pub const OpKind = enum(u8) { batch = 0, frontier = 1, share = 2, grant = 3, region_refused = 4, publish = 5, unpublish = 6 };
 // call/ok/err/cancel are the blob (partial-checkout) request cycle; fs_call/
 // fs_ok/fs_err are the .peer filesystem cycle (peer_fs) — DISTINCT kinds, so
 // fs ops never collide with the blob op-space (which routes by op-byte value)

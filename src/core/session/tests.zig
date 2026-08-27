@@ -4066,3 +4066,233 @@ test "chaos: a graceful close delivers the queued tail; sever drops it" {
         try t.expectEqual(@as(usize, 0), try receiver.link().read(&got));
     }
 }
+
+// ── Publications (architecture §13.2) ────────────────────────────────
+//
+// A quad is transport; its publication descriptor says which surfaces are
+// live. Three tests pin the contract end to end over a real socketpair: a
+// peer that never announces a descriptor is ungated (the degradation
+// story), a surface outside the export set is dropped, and unpublish
+// revokes the exports along with everything translated out of them.
+
+/// The `share` announce EXACTLY as a build predating publications emits it:
+/// `uv base | uv name_len | name`, and nothing else on channel 0.
+fn postLegacyShare(gpa: Allocator, sess: *Session, base: u64, name: []const u8) !void {
+    var announce: std.ArrayList(u8) = .empty;
+    defer announce.deinit(gpa);
+    try wire.putUv(gpa, &announce, base);
+    try wire.putUv(gpa, &announce, name.len);
+    try announce.appendSlice(gpa, name);
+    try sess.post(.op, @intFromEnum(wire.OpKind.share), 0, announce.items);
+}
+
+fn postDiagnostic(gpa: Allocator, sess: *Session, channel: u64, start: u64, end: u64, message: []const u8) !void {
+    var payload: std.ArrayList(u8) = .empty;
+    defer payload.deinit(gpa);
+    try wire.putUv(gpa, &payload, start);
+    try wire.putUv(gpa, &payload, end);
+    try wire.putUv(gpa, &payload, 1);
+    try wire.putUv(gpa, &payload, message.len);
+    try payload.appendSlice(gpa, message);
+    try sess.postFeed(channel, 0, payload.items);
+}
+
+test "publication: a peer that never announces a descriptor is ungated — presence and diagnostics land exactly as before" {
+    const gpa = t.allocator;
+    const fds = try socketPair();
+    var la: FdLink = .{ .fd = fds[0] };
+    var lb: FdLink = .{ .fd = fds[1] };
+
+    var a_notes = try Document.init(gpa, "alice");
+    defer a_notes.deinit(gpa);
+    try a_notes.insert(gpa, 0, "notes\n");
+    var b_notes = try Document.init(gpa, "bob");
+    defer b_notes.deinit(gpa);
+
+    const sa = try Session.create(gpa, la.link(), .server, "tok", .own, null);
+    defer sa.destroy();
+    const sb = try Session.create(gpa, lb.link(), .client, "tok", .own, null);
+    defer sb.destroy();
+
+    // Alice is the OLDER build: a hand-rolled share announce and a bare
+    // Collab on the quad. No descriptor is ever sent.
+    const base: u64 = 16;
+    try postLegacyShare(gpa, sa, base, "notes");
+    var acol = try Collab.init(gpa, sa, &a_notes, "alice");
+    defer acol.deinit();
+    acol.base = base;
+    acol.publish_presence = true;
+
+    var cb = try Conn.init(gpa, sb, "bob", .client);
+    defer cb.deinit();
+
+    const offer_deadline = task.nowNs() + 5 * std.time.ns_per_s;
+    while (task.nowNs() < offer_deadline and cb.offers.items.len == 0) {
+        _ = try acol.tick(3);
+        _ = try cb.tick();
+        futexWaitTimed(&sa.out_wake, sa.out_wake.load(.acquire), std.time.ns_per_ms);
+    }
+    try t.expectEqual(@as(usize, 1), cb.offers.items.len);
+    try t.expectEqual(base, cb.offers.items[0].base);
+    // Nothing to gate with: the quad is the legacy bundle.
+    try t.expect(cb.publicationFor(base) == null);
+
+    var layers: layers_mod.Layers = .empty;
+    defer layers.deinit(gpa);
+    const bcol = try cb.openOffer(0, &b_notes, 2);
+    bcol.presence_layer = try layers.claim(gpa, &b_notes, "presence", .replicated, "collab");
+    bcol.import_diag_layer = try layers.claim(gpa, &b_notes, "diagnostics", .host, "remote-host");
+    try postDiagnostic(gpa, sa, base + 2, 0, 5, "boom");
+
+    const deadline = task.nowNs() + 10 * std.time.ns_per_s;
+    var landed = false;
+    while (!landed and task.nowNs() < deadline) {
+        _ = try acol.tick(3);
+        _ = try cb.tick();
+        landed = bcol.presence_layer.?.spanCount() > 0 and bcol.import_diag_layer.?.spanCount() > 0;
+        if (!landed) futexWaitTimed(&sa.out_wake, sa.out_wake.load(.acquire), std.time.ns_per_ms);
+    }
+    try t.expect(landed);
+    try t.expectEqualStrings("alice", bcol.presence_layer.?.resolvedSpan(0).message);
+    try t.expectEqual(@as(usize, 3), bcol.presence_layer.?.resolvedSpan(0).start);
+    try t.expectEqualStrings("boom", bcol.import_diag_layer.?.resolvedSpan(0).message);
+}
+
+test "publication: a surface the descriptor does not export is dropped, while the replica keeps converging" {
+    const gpa = t.allocator;
+    const fds = try socketPair();
+    var la: FdLink = .{ .fd = fds[0] };
+    var lb: FdLink = .{ .fd = fds[1] };
+
+    var a_notes = try Document.init(gpa, "alice");
+    defer a_notes.deinit(gpa);
+    try a_notes.insert(gpa, 0, "notes\n");
+    var b_notes = try Document.init(gpa, "bob");
+    defer b_notes.deinit(gpa);
+
+    const sa = try Session.create(gpa, la.link(), .server, "tok", .own, null);
+    defer sa.destroy();
+    const sb = try Session.create(gpa, lb.link(), .client, "tok", .own, null);
+    defer sb.destroy();
+    var ca = try Conn.init(gpa, sa, "alice", .server);
+    defer ca.deinit();
+    var cb = try Conn.init(gpa, sb, "bob", .client);
+    defer cb.deinit();
+
+    // Shared WITHOUT the presence surface: alice's cursor has nowhere to
+    // ride, even though her driver still publishes it.
+    const acol = try ca.shareExports(&a_notes, "notes", 1, .{ .presence = false });
+    acol.publish_presence = true;
+    acol.cursor_offset = 3;
+    acol.selection_anchor = 3;
+
+    const offer_deadline = task.nowNs() + 5 * std.time.ns_per_s;
+    while (task.nowNs() < offer_deadline and (cb.offers.items.len == 0 or cb.publicationFor(acol.base) == null)) {
+        _ = try ca.tick();
+        _ = try cb.tick();
+        futexWaitTimed(&sa.out_wake, sa.out_wake.load(.acquire), std.time.ns_per_ms);
+    }
+    const descriptor = cb.publicationFor(acol.base) orelse return error.TestUnexpectedResult;
+    try t.expectEqualStrings("notes", descriptor.resource);
+    try t.expect(descriptor.replicaExport() != null);
+    try t.expect(descriptor.surfaceOps(.presence) == null);
+    try t.expect(descriptor.surfaceOps(.diagnostics) != null);
+
+    var layers: layers_mod.Layers = .empty;
+    defer layers.deinit(gpa);
+    const bcol = try cb.openOffer(0, &b_notes, 2);
+    bcol.presence_layer = try layers.claim(gpa, &b_notes, "presence", .replicated, "collab");
+
+    const deadline = task.nowNs() + 10 * std.time.ns_per_s;
+    var converged = false;
+    while (!converged and task.nowNs() < deadline) {
+        _ = try ca.tick();
+        _ = try cb.tick();
+        const text = try b_notes.text().toOwnedSlice(gpa);
+        defer gpa.free(text);
+        converged = std.mem.eql(u8, text, "notes\n");
+        if (!converged) futexWaitTimed(&sa.out_wake, sa.out_wake.load(.acquire), std.time.ns_per_ms);
+    }
+    try t.expect(converged);
+    // The replica is live; the unexported surface never renders a cursor.
+    for (0..64) |_| {
+        _ = try ca.tick();
+        _ = try cb.tick();
+    }
+    try t.expectEqual(@as(usize, 0), bcol.presence_layer.?.spanCount());
+    try t.expectEqual(@as(usize, 0), bcol.presence.items.len);
+}
+
+test "publication: unpublish advances the epoch, marks the quad stale, and invalidates translated references" {
+    const gpa = t.allocator;
+    const fds = try socketPair();
+    var la: FdLink = .{ .fd = fds[0] };
+    var lb: FdLink = .{ .fd = fds[1] };
+
+    var a_notes = try Document.init(gpa, "alice");
+    defer a_notes.deinit(gpa);
+    try a_notes.insert(gpa, 0, "notes\n");
+    var b_notes = try Document.init(gpa, "bob");
+    defer b_notes.deinit(gpa);
+
+    const sa = try Session.create(gpa, la.link(), .server, "tok", .own, null);
+    defer sa.destroy();
+    const sb = try Session.create(gpa, lb.link(), .client, "tok", .own, null);
+    defer sb.destroy();
+    var ca = try Conn.init(gpa, sa, "alice", .server);
+    defer ca.deinit();
+    var cb = try Conn.init(gpa, sb, "bob", .client);
+    defer cb.deinit();
+
+    const acol = try ca.shareExports(&a_notes, "notes", 1, .legacy);
+    const base = acol.base;
+    acol.publish_presence = true;
+    acol.cursor_offset = 3;
+    acol.selection_anchor = 3;
+
+    const offer_deadline = task.nowNs() + 5 * std.time.ns_per_s;
+    while (task.nowNs() < offer_deadline and cb.offers.items.len == 0) {
+        _ = try ca.tick();
+        _ = try cb.tick();
+        futexWaitTimed(&sa.out_wake, sa.out_wake.load(.acquire), std.time.ns_per_ms);
+    }
+    try t.expectEqual(@as(usize, 1), cb.offers.items.len);
+
+    var layers: layers_mod.Layers = .empty;
+    defer layers.deinit(gpa);
+    const bcol = try cb.openOffer(0, &b_notes, 2);
+    bcol.presence_layer = try layers.claim(gpa, &b_notes, "presence", .replicated, "collab");
+    bcol.import_diag_layer = try layers.claim(gpa, &b_notes, "diagnostics", .host, "remote-host");
+    try postDiagnostic(gpa, sa, base + 2, 0, 5, "boom");
+
+    const landed_deadline = task.nowNs() + 10 * std.time.ns_per_s;
+    var landed = false;
+    while (!landed and task.nowNs() < landed_deadline) {
+        _ = try ca.tick();
+        _ = try cb.tick();
+        landed = bcol.presence_layer.?.spanCount() > 0 and bcol.import_diag_layer.?.spanCount() > 0;
+        if (!landed) futexWaitTimed(&sa.out_wake, sa.out_wake.load(.acquire), std.time.ns_per_ms);
+    }
+    try t.expect(landed);
+    try t.expectEqual(@as(u32, 0), cb.publicationFor(base).?.epoch);
+
+    // Closing the shared buffer unpublishes the quad.
+    ca.unbindTag(1);
+    const stale_deadline = task.nowNs() + 10 * std.time.ns_per_s;
+    var stale = false;
+    while (!stale and task.nowNs() < stale_deadline) {
+        _ = try cb.tick();
+        stale = cb.publicationFor(base).?.stale;
+        if (!stale) futexWaitTimed(&sb.out_wake, sb.out_wake.load(.acquire), std.time.ns_per_ms);
+    }
+    try t.expect(stale);
+    try t.expectEqual(@as(u32, 1), cb.publicationFor(base).?.epoch);
+    try t.expect(cb.offers.items[0].stale);
+    // Everything translated out of the publication is gone; the replica
+    // survives as an ordinary local document.
+    try t.expectEqual(@as(usize, 0), bcol.presence_layer.?.spanCount());
+    try t.expectEqual(@as(usize, 0), bcol.import_diag_layer.?.spanCount());
+    const text = try b_notes.text().toOwnedSlice(gpa);
+    defer gpa.free(text);
+    try t.expectEqualStrings("notes\n", text);
+}

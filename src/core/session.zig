@@ -15,6 +15,9 @@
 //!                             (a namespace).
 //! - `session/remote_fs.zig` — `BlobServer`/`serveBase` (host serving),
 //!                             `RemoteFile`/`RemoteFs`, `BlobOp` (a namespace).
+//! - `session/publication.zig` — the typed export set a quad publishes
+//!                             (replica + endpoint surfaces), its wire
+//!                             descriptor, and the frame→surface gate.
 //! - `session/PartialDoc.zig`— editable partial checkout.
 //! - `session/Collab.zig`    — per-document (TextDoc) sync driver.
 //! - `session/GraphCollab.zig` — per-document (GraphDoc) sync driver, the
@@ -53,6 +56,10 @@ pub const BlobOp = remote_fs.BlobOp;
 pub const BlobServer = remote_fs.BlobServer;
 pub const RemoteFile = remote_fs.RemoteFile;
 pub const RemoteFs = remote_fs.RemoteFs;
+
+pub const publication = @import("session/publication.zig");
+pub const Publication = publication.Publication;
+pub const ExportSpec = publication.ExportSpec;
 
 pub const PartialDoc = @import("session/PartialDoc.zig");
 pub const Collab = @import("session/Collab.zig");

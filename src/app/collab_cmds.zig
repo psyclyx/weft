@@ -228,9 +228,9 @@ pub fn shareHandler(ctx: *core.command.Context, data: ?*anyopaque, args: []const
             break;
         };
         if (!already) {
-            const col = try c.share(doc, buf.name, buf.id);
+            const col = try c.shareExports(doc, buf.name, buf.id, sc.exportSpec());
             col.presence_layer = try sc.caps.layers.claim(ctx.gpa, doc, "presence", .replicated, "collab");
-            col.export_diag_layer = sc.caps.layers.find(doc, "diagnostics");
+            col.export_diag_layer = if (sc.export_diagnostics) sc.caps.layers.find(doc, "diagnostics") else null;
             col.publish_presence = sc.publish_presence;
             did = true;
         }
@@ -255,7 +255,7 @@ pub fn shareHandler(ctx: *core.command.Context, data: ?*anyopaque, args: []const
                     break;
                 };
                 if (has) continue;
-                const scol = peer.conn.share(doc, buf.name, buf.id) catch continue;
+                const scol = peer.conn.shareExports(doc, buf.name, buf.id, sc.exportSpec()) catch continue;
                 wireHubShare(sc, peer, scol, doc) catch continue;
             }
             did = true;
