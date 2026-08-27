@@ -217,10 +217,10 @@ needs_grant_reannounce: bool = false,
 /// make `mayEditNode` REFUSE a candidate edit early; it can never cause one
 /// the host would refuse to be ADMITTED (D3 §6 test 4: a grantee that
 /// ignores, misreads, or is fed a wider claim than the host's table
-/// actually holds still can't get an out-of-grant op merged). Empty (the
-/// default) = "no confinement announced" = today's unrestricted behavior,
-/// mirroring the host-side "absence of a grant row keeps today's behavior"
-/// rule. Owned tokens, replaced WHOLESALE on every inbound `.grant` frame
+/// actually holds still can't get an out-of-grant op merged). Empty means
+/// nothing on its own — `granted_confined` says whether that is "never
+/// narrowed" or "narrowed to nothing left". Owned tokens, replaced
+/// WHOLESALE on every inbound `.grant` frame
 /// (the host always announces its current full live set, never a delta —
 /// see `announceGrant`), freed in `deinit`.
 granted_roots: []NodeRef = &.{},
