@@ -236,6 +236,13 @@ publication: grants_mod.PublicationRef = .{ .id = 0, .epoch = 0 },
 /// refusals are echoed to the sender in `refusals`.
 last_refusal: ?grants_mod.Reason = null,
 
+/// Whether the last announcement said this peer is CONFINED at all — the
+/// distinction `granted_roots` alone cannot carry, since "never narrowed"
+/// and "narrowed to nothing left" are both the empty set and mean opposite
+/// things. True with an empty `granted_roots` is total local refusal: every
+/// grant this peer held is revoked or collapsed.
+granted_confined: bool = false,
+
 /// The capability name every `grantSubtree` row is minted under — a graph
 /// doc's own namespace, distinct from `.doc_region`'s `"doc.edit"` (a
 /// different substrate, a different chokepoint — see `Limit.graph_subtree`'s
@@ -670,7 +677,6 @@ fn gatherGrantRoots(self: *GraphCollab, gpa: Allocator) !GrantContext {
     const peer_fp = self.session.peerFingerprint(); // ?[24]u8 — AUTHENTICATED, never peer_name (FIX 1)
 
     for (table.rows.items) |r| {
-        if (!r.alive) continue;
         const gs = switch (r.limit) {
             .graph_subtree => |g| g,
             .none, .fs_root, .doc_region => continue,
@@ -680,6 +686,13 @@ fn gatherGrantRoots(self: *GraphCollab, gpa: Allocator) !GrantContext {
         const fp = peer_fp orelse continue; // not (yet) authenticated — matches no row
         if (!std.mem.eql(u8, r.principal, &fp)) continue;
         ctx.peer_has_grants = true;
+        // A REVOKED row still counts as a grant this peer once held, and
+        // contributes no root — the same total-refusal shape a collapsed
+        // root gets (see `GrantContext`'s doc comment). Skipping dead rows
+        // outright would let revocation WIDEN authority back to
+        // unrestricted, which §13.5's "missing grant state never means
+        // unrestricted" forbids.
+        if (!r.alive) continue;
         const root_obj = self.doc.resolve(gs.root) catch {
             ctx.any_collapsed = true;
             continue;
@@ -838,7 +851,7 @@ pub fn admitRegions(self: *GraphCollab, gpa: Allocator, batch: []const u8) !Regi
 /// future live, per-edit graph-doc client) to call this before applying an
 /// out-of-grant model edit is the named, un-built remainder.
 pub fn mayEditNode(self: *const GraphCollab, gpa: Allocator, node: GraphDoc.ObjId) Allocator.Error!bool {
-    if (self.granted_roots.len == 0) return true;
+    if (self.granted_roots.len == 0) return !self.granted_confined;
     for (self.granted_roots) |root_ref| {
         const root_obj = self.doc.resolve(root_ref) catch continue;
         if (try self.doc.contains(gpa, root_obj, node)) return true;
@@ -914,6 +927,14 @@ fn announceGrant(self: *GraphCollab, gpa: Allocator) !void {
         try wire.putUv(gpa, &payload, root.token.len);
         try payload.appendSlice(gpa, root.token);
     }
+    // ADDITIVE trailing confinement byte: "this peer is confined" is not the
+    // same claim as "here are some roots". Without it, a peer whose only
+    // grant was revoked receives an EMPTY set and reads it as the
+    // unconfined default — its preflight would wave through edits the host
+    // is about to refuse. An older grantee stops after the roots and never
+    // sees this byte, degrading to exactly today's infer-from-non-empty
+    // behavior (which is advisory anyway; the host still enforces).
+    try payload.append(gpa, @intFromBool(ctx.peer_has_grants));
     try self.session.post(.op, @intFromEnum(wire.OpKind.grant), self.base, payload.items);
 }
 
@@ -942,6 +963,10 @@ fn setGrantedRoots(self: *GraphCollab, gpa: Allocator, payload: []const u8) !voi
         cur = cur[tlen..];
         try roots.append(gpa, .{ .token = try gpa.dupe(u8, token) });
     }
+    // Additive trailing confinement byte (see `announceGrant`). Absent — an
+    // older host, or a payload that ran out mid-decode — falls back to
+    // inferring confinement from a non-empty set, today's behavior.
+    const confined = if (cur.len > 0) cur[0] != 0 else roots.items.len > 0;
     // Materialize the new set BEFORE freeing the old one: toOwnedSlice can
     // fail, and freeing first would leave granted_roots dangling for the
     // next deinit/setGrantedRoots to double-free (review-caught, OOM-only).
@@ -949,6 +974,7 @@ fn setGrantedRoots(self: *GraphCollab, gpa: Allocator, payload: []const u8) !voi
     for (self.granted_roots) |r| r.free(gpa);
     gpa.free(self.granted_roots);
     self.granted_roots = new_roots;
+    self.granted_confined = confined;
 }
 
 /// Fold an inbound lease announce/release frame (`base + 1`): uv
