@@ -1,12 +1,13 @@
 //! git — git as a MODEL rendered into a foldable buffer (design §6.6), a
 //! `.wasm` plugin. The `*git*` buffer is READ-ONLY and owned entirely by this
 //! plugin: one combined `git status`/`git diff`/`git diff --cached`/`git log`
-//! runs via `procToBuffer`, its raw output lands in the buffer it captured, the
-//! host fires `on_fill_token`, and we PARSE that output into a section→file→hunk tree then
-//! RE-RENDER the tree as pretty, foldable text over the same buffer (`edit` +
-//! `styleClear`/`style` + `foldClear`/`fold`). Because only we ever write the
-//! buffer, the parallel node table (each node's `[start,end)` byte range) is
-//! never stale — "the thing under point" is the node whose range contains
+//! runs via `procToBuffer`, its raw output lands in the buffer that fill
+//! captured, the host fires `on_fill_token`, and we PARSE that output into a
+//! section→file→hunk tree then RE-RENDER the tree as pretty, foldable text over
+//! the same buffer (`edit` + `styleClear`/`style` + `foldClear`/`fold`). Because
+//! only we ever write the buffer, the parallel node table (each node's
+//! `[start,end)` byte range) is never stale — "the thing under point" is the
+//! node whose range contains
 //! `weft.cursor()`, the pattern `consult.zig` uses.
 //!
 //! Staging is pure plugin logic: file → `git add`/`git reset`; hunk → synthesize
@@ -168,8 +169,8 @@ var collapsed_count: usize = 0;
 // Cursor restoration across a re-gather. Rather than a clamped byte offset
 // (which drifts when a file hops sections), we capture the IDENTITY of the node
 // under point before a mutation — section + file path + hunk ordinal, or a
-// recent commit's hash — and the status fill re-finds it in the NEW model, landing on
-// its rendered start. `pending_cursor` is the fallback when the node is gone
+// recent commit's hash — and the status fill re-finds it in the NEW model,
+// landing on its rendered start. `pending_cursor` is the fallback when the node is gone
 // (e.g. the file was fully staged away). `home_off` is where a fresh open lands.
 var restore_cursor = false;
 var pending_cursor: usize = 0;
@@ -506,16 +507,9 @@ const Fill = enum(u32) {
     rebase, // the rebase todo: rewrite into editable `pick …` lines
 };
 
-/// A token we never issued (or a host that grew one) routes nowhere.
-fn fillOf(token: u32) ?Fill {
-    inline for (@typeInfo(Fill).@"enum".fields) |f| {
-        if (token == f.value) return @enumFromInt(f.value);
-    }
-    return null;
-}
-
 export fn on_fill_token(token: u32) void {
-    switch (fillOf(token) orelse return) {
+    // A token we never issued routes nowhere.
+    switch (std.enums.fromInt(Fill, token) orelse return) {
         .none => {},
         .status => parseAndRender(),
         .diff => classify(styleDiffLine),

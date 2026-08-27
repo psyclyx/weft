@@ -1739,8 +1739,8 @@ test "wasm plugin: git-status runs git into a focused tool buffer (async)" {
         std.Thread.yield() catch {};
     }
     if (buf.?.textEditor().?.text().byteLen() > 0) {
-        // on_fill_token parsed the raw git output and re-rendered the MODEL: the buffer
-        // holds the pretty projection, never the porcelain. Whether the ambient
+        // on_fill_token parsed the raw git output and re-rendered the MODEL: the
+        // buffer holds the pretty projection, never the porcelain. Whether the ambient
         // cwd is a repo or not, we get a model header — `Branch:` in a repo, or
         // `Not a git repository.` outside one — but never a raw `## `/`#` line.
         const s = try buf.?.textEditor().?.text().toOwnedSlice(gpa);

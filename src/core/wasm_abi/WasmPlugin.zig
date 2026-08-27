@@ -147,8 +147,8 @@ in_dispatch: bool = false,
 /// guest's load), not a new hole it opens; a mid-chord stomp is unreachable
 /// (dispatching `config-reload` consumed the chord). The argument stops
 /// holding the instant load finishes — every
-/// LATER background entry (`on_poll`/`on_fill_token`/`on_activate`/`on_complete`/
-/// `on_menu`) still traps, exactly as `in_dispatch` alone would enforce. Set
+/// LATER background entry (`on_poll`/`on_fill_token`/`on_activate`/
+/// `on_complete`/`on_menu`) still traps, exactly as `in_dispatch` would. Set
 /// true/false by `loadPlugin` bracketing `describe()`+`init()`; never true
 /// again after `loadPlugin` returns (no save/restore needed — load doesn't
 /// nest with itself).
@@ -345,11 +345,13 @@ caps_builder_session: u64 = 0,
 declared_schemas: std.ArrayList(*const @import("weft_schema").Schema) = .empty,
 slot_predicate_strs: std.ArrayList([]u8) = .empty,
 
-/// Anchor `[start, end)` in the active CRDT document and hand the guest an
-/// opaque handle. The document advances both endpoints through every local or
-/// merged edit. The slot owns the anchors until it is released.
+/// Anchor `[start, end)` in the CRDT document of the entry this call is about
+/// (`command.Context.entry`: the active one, or the entry a background delivery
+/// captured) and hand the guest an opaque handle. The document advances both
+/// endpoints through every local or merged edit. The slot owns the anchors
+/// until it is released.
 pub fn anchorRange(self: *WasmPlugin, start: usize, end: usize) !u32 {
-    const buffer = self.activeCtx().buffers.active();
+    const buffer = self.activeCtx().entry() orelse return error.InvalidRange;
     const editor = buffer.textEditor() orelse return error.InvalidRange;
     const doc = &editor.doc;
     const len = doc.text().byteLen();
@@ -375,11 +377,11 @@ pub fn anchorRange(self: *WasmPlugin, start: usize, end: usize) !u32 {
     return handle;
 }
 
-/// Capture the active document's opaque causal frontier at its current buffer
-/// locus. The guest receives only a capability handle; frontier bytes remain
-/// host-owned and are compared for equality by `docSnapshotIsCurrent`.
+/// Capture the opaque causal frontier of this call's entry at its current
+/// buffer locus. The guest receives only a capability handle; frontier bytes
+/// remain host-owned and are compared for equality by `docSnapshotIsCurrent`.
 pub fn docSnapshot(self: *WasmPlugin) !u32 {
-    const buffer = self.activeCtx().buffers.active();
+    const buffer = self.activeCtx().entry() orelse return error.InvalidRange;
     const editor = buffer.textEditor() orelse return error.InvalidRange;
     const frontier = try editor.doc.version(self.gpa);
     errdefer self.gpa.free(frontier);
@@ -393,12 +395,12 @@ pub fn docSnapshot(self: *WasmPlugin) !u32 {
     return handle;
 }
 
-/// Return true only when the handle still names the active buffer and its
+/// Return true only when the handle still names this call's entry and its
 /// causal frontier is byte-for-byte equal to the document's current frontier.
 /// Any missing buffer or frontier error fails closed.
 pub fn docSnapshotIsCurrent(self: *WasmPlugin, handle: u32) bool {
     const slot = self.doc_snapshots.get(handle) orelse return false;
-    const buffer = self.activeCtx().buffers.active();
+    const buffer = self.activeCtx().entry() orelse return false;
     if (slot.buffer.id != buffer.id or slot.buffer.generation != buffer.generation) return false;
     const editor = buffer.textEditor() orelse return false;
     const current = editor.doc.version(self.gpa) catch return false;
@@ -423,8 +425,8 @@ pub fn clearDocSnapshots(self: *WasmPlugin) void {
 /// Handles may cross callbacks; compact buffer ids may not.
 pub fn activeRange(self: *WasmPlugin, handle: u32) ?*const RangeSlot {
     const slot = self.ranges.getPtr(handle) orelse return null;
-    const active = self.activeCtx().buffers.active().ref();
-    if (slot.buffer.id != active.id or slot.buffer.generation != active.generation) return null;
+    const here = (self.activeCtx().entry() orelse return null).ref();
+    if (slot.buffer.id != here.id or slot.buffer.generation != here.generation) return null;
     return slot;
 }
 
