@@ -144,7 +144,16 @@ export fn init() void {
     // C-x/C-c prefix TREE (find-file, save, buffers, windows, magit, dired) is
     // config data (emacs.js) since it reaches other plugins; these are the
     // editor's own. C-space (set-mark), C-g (keyboard-quit → clear-selection),
-    // C-s (save), Backspace, and the arrows come from the `default` fallback.
+    // C-s (save), Backspace, and the arrows come from the `default` fallback —
+    // so std.persistence.save (emacs's own convention is C-x C-s) and Return's
+    // std.editing.insert-line-break arm both already resolve there; this
+    // plugin adds no binding for either. C-/ and C-_ are emacs's own undo
+    // chords (bare `u` self-inserts in a modeless editor, unlike vim/helix, so
+    // it stays untouched); there is no established emacs redo chord here, so
+    // std.history.redo is left unbound rather than invented. Tab and `q` are
+    // likewise skipped: Tab already means indent for every keystroke in a
+    // modeless buffer (shadowing it with std.hierarchy.toggle-expanded would
+    // break ordinary typing), and bare `q` is a self-insert letter here too.
     const binds = [_][2][]const u8{
         .{ "C-f", "cursor-right" },        .{ "C-b", "cursor-left" },
         .{ "C-n", "cursor-down" },         .{ "C-p", "cursor-up" },
@@ -154,8 +163,8 @@ export fn init() void {
         .{ "C-v", "scroll-page-down" },    .{ "M-v", "scroll-page-up" },
         .{ "C-d", "delete-forward" },      .{ "C-k", "kill-line" },
         .{ "C-w", "kill-region" },         .{ "M-w", "copy-region" },
-        .{ "C-y", "yank" },                .{ "C-/", "undo" },
-        .{ "C-_", "undo" },                .{ "C-space", "set-mark" },
+        .{ "C-y", "yank" },                .{ "C-/", "std.history.undo" },
+        .{ "C-_", "std.history.undo" },    .{ "C-space", "set-mark" },
     };
     for (binds) |b| weft.bindKey("emacs", b[0], b[1]);
 

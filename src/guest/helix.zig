@@ -99,20 +99,35 @@ export fn init() void {
     for (cmds) |c| _ = weft.register(c.name);
 
     // Only insert commits typed text; helix-normal is modal and declares
-    // nothing, so nothing can leak into it.
+    // nothing, so nothing can leak into it. `helix-insert` falls back to the
+    // core `default` floor for its BINDINGS (Return -> insert-newline, the
+    // std.editing.insert-line-break arm; Backspace, Tab-as-indent) the same
+    // way vim's `insert` mode does — Return's other arm, std.target.activate,
+    // is bound in `helix-normal` above.
+    weft.setFallback("helix-insert", "default");
     weft.textInput("helix-insert", "insert-text");
 
-    // Movement.
+    // Movement. `u`/`C-r` and `Tab`/`Return` bind the shared std intentions
+    // (doc/contextual-workspace-architecture.md §10.2), same shapes vim uses:
+    // undo/redo are grammar-agnostic history operations, Tab reveals a
+    // structured target's children, and Return activates the nearest typed
+    // target (the insert-line-break arm lives in `helix-insert`, which falls
+    // back to `default` below — the two-arm shape lives in the mode chain,
+    // not a single binding). `q` keeps NO binding here: real Helix uses it
+    // for macro record/replay, not back-navigation, and this plugin has no
+    // macro command to give it — binding vim's back semantics onto it would
+    // misrepresent helix's own feel.
     const nb = [_][2][]const u8{
-        .{ "h", "cursor-left" },    .{ "l", "cursor-right" },
-        .{ "j", "cursor-down" },    .{ "k", "cursor-up" },
-        .{ "Left", "cursor-left" }, .{ "Right", "cursor-right" },
-        .{ "Up", "cursor-up" },     .{ "Down", "cursor-down" },
-        .{ "i", "hx-insert" },      .{ "a", "hx-append" },
-        .{ "o", "hx-open-below" },  .{ "x", "delete-forward" },
-        .{ "d", "hx-delete-op" },   .{ "u", "undo" },
-        .{ "C-r", "redo" },         .{ "p", "paste" },
-        .{ "colon", "helix-ex" },
+        .{ "h", "cursor-left" },              .{ "l", "cursor-right" },
+        .{ "j", "cursor-down" },              .{ "k", "cursor-up" },
+        .{ "Left", "cursor-left" },           .{ "Right", "cursor-right" },
+        .{ "Up", "cursor-up" },               .{ "Down", "cursor-down" },
+        .{ "i", "hx-insert" },                .{ "a", "hx-append" },
+        .{ "o", "hx-open-below" },            .{ "x", "delete-forward" },
+        .{ "d", "hx-delete-op" },             .{ "u", "std.history.undo" },
+        .{ "C-r", "std.history.redo" },       .{ "p", "paste" },
+        .{ "colon", "helix-ex" },             .{ "Tab", "std.hierarchy.toggle-expanded" },
+        .{ "Return", "std.target.activate" },
     };
     for (nb) |b| weft.bindKey("helix-normal", b[0], b[1]);
     inline for (mtable) |m| weft.bindKey("helix-normal", m.key, "hx/n/" ++ m.motion);
@@ -132,7 +147,7 @@ export fn init() void {
     // (helix.js) layers a fuller `space …` tree at prio_config; these stay at the
     // same depth so a config leaf never collides with a bare-helix prefix.
     weft.bindKey("helix-normal", "space space", "pick-commands"); // SPC SPC — M-x
-    weft.bindKey("helix-normal", "space f f", "vim-find-file"); // reuse if vim loaded
+    weft.bindKey("helix-normal", "space f f", "find-file"); // the flat command helix.js already binds; config's own bind wins anyway
     weft.bindKey("helix-normal", "space b b", "buf-pick"); // if buffers loaded
     weft.bindKey("helix-normal", "space g g", "git-status"); // if git loaded
     // gg / ge (goto top / end of doc), two-key sequences.
