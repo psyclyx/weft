@@ -167,6 +167,10 @@ const handlers = [_]struct { name: []const u8, handler: HostFn }{
     .{ .name = "wl_offer_provider", .handler = intent.hOfferProvider },
     .{ .name = "wl_offer_reason", .handler = intent.hOfferReason },
     .{ .name = "wl_intent_invoke", .handler = intent.hIntentInvoke },
+    .{ .name = "wl_offers_begin", .handler = intent.hOffersBegin },
+    .{ .name = "wl_offer", .handler = intent.hOffer },
+    .{ .name = "wl_offers_commit", .handler = intent.hOffersCommit },
+    .{ .name = "wl_offers_retract", .handler = intent.hOffersRetract },
 
     // ── buffers.zig — the open-buffer list (introspection) ──────────────
     .{ .name = "wl_buffer_count", .handler = buffers.hBufferCount },

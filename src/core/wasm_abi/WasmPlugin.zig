@@ -28,6 +28,7 @@ const semantic_model = @import("weft_semantic");
 const fs_runtime = @import("weft_fs_runtime");
 const semantic_runtime = @import("../semantic.zig");
 const transfer_attachment = @import("../wasm_host/transfer_attachment.zig");
+const plugin_offers = @import("../plugin_offers.zig");
 
 // The host-import table operates on `WasmPlugin` (principal() routes edits
 // through its peer resolver); the two @import each other (Zig allows it).
@@ -295,6 +296,16 @@ cur_pick: ?*const WasmBoundPick = null,
 /// This plugin's retained overlay, populated via the surface membrane and
 /// drawn every frame by the view while active. One per plugin.
 surface: surface_mod.Surface = .{},
+
+// ── This plugin's pushed offers (plugin_offers.zig) ──
+/// The catalog table this plugin publishes about its own buffer, plus the
+/// invoker its endpoints are minted from. Created on the plugin's FIRST
+/// publication (`wasm_host/intent.zig`'s `publisher`), which is why the
+/// readiness flag rather than an optional: the registered invoker captures
+/// this field's address, and a `WasmPlugin` is heap-allocated, so the
+/// address it captures is the address it keeps.
+offers: plugin_offers.Publisher = undefined,
+offers_ready: bool = false,
 
 // ── Sandboxed semantic field providers ──
 /// Stable heap proxies + host-owned snapshots for fields registered by this
@@ -638,6 +649,9 @@ pub fn deinit(self: *WasmPlugin) void {
     }
     self.capsBuilderClear();
     self.caps_builder.deinit(gpa);
+    // Offers die with the plugin: the table is retracted and every endpoint
+    // it minted is refused from here on (the invoker's generation bumps).
+    if (self.offers_ready) self.offers.deinit(gpa);
     // Action providers this plugin registered (weft.provide) die with it, owned
     // by its name. The declared actions themselves persist (cheap names; another
     // plugin/config may still provide for them).
