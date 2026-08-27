@@ -201,3 +201,58 @@ peer built before v1.3 presents: it never emits kinds 5/6 and skips them
 inbound, so both ends behave precisely as they did before. A narrowed
 export set is therefore only observed by peers that understand it; the
 owner still enforces authority at admission either way.
+
+## Per-export grants (v1.3, additive)
+
+The grade is now only a **preset and a maximum** (architecture §13.5).
+Effective authority is per publication export: a grant names an
+authenticated grantee, a publication id and epoch, an op-set over export
+surfaces (`replica_read`/`replica_write`, `presence_read`/`presence_publish`,
+`endpoint_query`/`endpoint_mutate`, `admin`), an optional designation scope,
+and a lifetime. Grants are minted owner-side and **announced to the
+grantee**: authority must not be asymmetric knowledge, because a refused
+replicated op is poison, not a clean failure (`doc/substrate.md` §5). The
+grantee preflights its own edits against the announced set and refuses
+locally, before minting anything.
+
+The announcement reuses the same `grant` frame, extending its payload:
+
+    u8  grade                          # the v1.2 byte, unchanged in meaning
+    u8  desc_version = 1
+    uv  publication_id
+    uv  publication_epoch
+    uv  n
+    n × ( uv rec_len | rec )
+          rec := uv ops_bits | u8 lifetime | u8 scope_kind | scope
+          scope: 0 whole         -> ()
+                 1 doc_region    -> anchor(start) anchor(end)
+                 2 graph_subtree -> uv token_len | token
+
+The grantee is the receiver, so no fingerprint rides the wire; a
+designation's document is the publication, so no doc id does either.
+
+**Degradation, by construction — every unknown thing narrows.** The grade
+byte stays first and keeps its meaning, so a v1.2 peer reads it alone and
+gets exactly the preset bundle the descriptors add up to (`view` =
+replica-read + presence, `edit` = + replica-write, `own` = + admin), never
+more. A pre-v1.2 peer skips kind 3 entirely and stays at its `view`
+fail-safe. A one-byte payload (an older *host*) decodes as grade-only, so a
+new grantee still preflights, just at grade granularity. An unrecognized
+`desc_version` falls back to the grade byte — which the sender derived as
+the ceiling of what it actually granted. An unknown `scope_kind`, or a
+truncated record, drops that record via its length prefix: one fewer grant,
+never a wider one. Endpoint ops are absent from every preset because the
+grade byte never governed the `.peer` filesystem or the blob cycle.
+
+Enforcement stays singular: a replica op is admitted iff its sender holds
+`replica_write` for that publication at the **live** epoch, decided at the
+one admission point both document drivers share. Unpublishing advances the
+epoch, which invalidates every grant minted against the old one at once; an
+admission against a dead epoch refuses with its own distinct reason rather
+than being confused with never having been granted. Because the decision is
+re-taken per frame, a revocation reaches an already-flowing stream at the
+next frame — the honest in-flight granularity a batched protocol has.
+
+Graph quads keep their own `grant` payload shape (a live granted-root set,
+disambiguated by quad type exactly as `region_refused` already is); the
+descriptor form above is the text-quad announcement.
