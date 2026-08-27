@@ -521,17 +521,20 @@ pub fn dispatchSpec(ctx: *core.command.Context, spec: []const u8, commit: core.T
             // ONE grammar (doc/configuration.md §5.1): a bound name that
             // parses as `std.*`/`plugin.*` REFERS to an intention and is
             // resolved against the catalog; a flat name still names a
-            // command. The authored fallback list rides through whole.
-            const intention_arms: ?[]const []const u8 =
-                if (core.catalog.isIntentionName(arms[0])) arms else null;
-            const cmd_name = arms[0];
+            // command. The authored list is walked first-applicable BEFORE
+            // anything runs, so a list may mix the two.
+            const arm = chooseArm(ctx, arms) orelse return;
+            const cmd_name = switch (arm) {
+                .command => |name| name,
+                .decision => "",
+            };
             // A bound key whose command NAMES a menu mode enters it — the
             // PAIRED-TRANSIENT push (task #19 item 2, doc/cwa-prior-docs-audit.md §5,
             // `ctx.zig`'s `Ctx.pushTransient`): `Head.transient_stack` durably
             // records the pre-push mode as this frame's return target, so
             // leaving (the leaf auto-pop below, or `menu-escape`) is the
             // MATCHING pop, not an independent `menuReturn` lookup.
-            if (intention_arms == null and ctx.keymap.isMenuMode(cmd_name)) {
+            if (arm == .command and ctx.keymap.isMenuMode(cmd_name)) {
                 if (std.mem.eql(u8, ctx.head.currentMode(), cmd_name)) {
                     // Re-entering the menu we're ALREADY in (the bound key
                     // fires again while it's open) is idempotent, not a
@@ -558,14 +561,18 @@ pub fn dispatchSpec(ctx: *core.command.Context, spec: []const u8, commit: core.T
                 null;
             defer if (menu_before) |m| ctx.gpa.free(m);
 
-            const result = if (intention_arms) |ia| blk: {
-                // An intention echoes its own outcome (unavailable/ambiguous);
-                // there is no return value to promote.
-                resolveIntention(ctx, ia);
-                break :blk core.command.Value.nil;
-            } else core.command.run(ctx.commands, ctx, cmd_name, &.{}) catch |err| blk: {
-                std.log.warn("command {s} failed: {t}", .{ cmd_name, err });
-                break :blk core.command.Value.nil;
+            const result = switch (arm) {
+                // An intention runs through its endpoint token; the invoker
+                // reaches the same command door, and there is no return
+                // value to promote.
+                .decision => |d| blk: {
+                    invokeDecision(ctx, d);
+                    break :blk core.command.Value.nil;
+                },
+                .command => core.command.run(ctx.commands, ctx, cmd_name, &.{}) catch |err| blk: {
+                    std.log.warn("command {s} failed: {t}", .{ cmd_name, err });
+                    break :blk core.command.Value.nil;
+                },
             };
             switch (result) {
                 .string => |s| if (s.len > 0) {
@@ -669,51 +676,97 @@ pub fn catalogContext(ctx: *core.command.Context) core.catalog.Context {
     };
 }
 
-/// Resolve one binding's arms and invoke the winner. A decision runs; an
-/// unavailable arm is a no-op plus a one-line trace; an ambiguity is
-/// reported and NEVER broken by load order (§9.2).
-fn resolveIntention(ctx: *core.command.Context, arms: []const []const u8) void {
-    const plane = ctx.intent orelse {
-        std.log.warn("dispatch: '{s}' names an intention, but no catalog is wired here", .{arms[0]});
-        return;
-    };
-    var buf: [core.manifest.maxBindCommands]core.catalog.IntentionId = undefined;
-    if (arms.len > buf.len) {
-        std.log.warn("dispatch: '{s}' has {d} arms, over the {d}-arm ceiling", .{ arms[0], arms.len, buf.len });
-        return;
+/// What one keypress will actually do: run a command by name, or invoke the
+/// endpoint an intention resolved to.
+const Arm = union(enum) {
+    command: []const u8,
+    decision: core.catalog.Decision,
+};
+
+/// Walk the authored list first-applicable (§10.2). An INTENTION arm asks
+/// the catalog: an offer exists and it wins; no offer at all is
+/// nonapplicable, so the walk moves on; `disabled`/`checking` is
+/// relevant-but-impossible and STOPS the walk, so `[std.target.activate,
+/// std.editing.insert-line-break]` cannot quietly insert a line break while
+/// activation is refused. A FLAT arm asks the command registry (a menu mode
+/// is applicable too).
+///
+/// Nothing applicable ends the keypress: an unoffered intention is
+/// unavailable, not a failure. A flat trailing name still runs and reports
+/// itself, so a mistyped bind stays exactly as loud as before.
+fn chooseArm(ctx: *core.command.Context, arms: []const []const u8) ?Arm {
+    var snap: ?*const core.catalog.Snapshot = null;
+    for (arms, 0..) |name, i| {
+        if (!core.catalog.isIntentionName(name)) {
+            if (ctx.commands.resolve(name) != null or ctx.keymap.isMenuMode(name)) return .{ .command = name };
+            continue;
+        }
+        const plane = ctx.intent orelse {
+            std.log.debug("dispatch: '{s}' names an intention, but no catalog is wired here", .{name});
+            continue;
+        };
+        if (snap == null) snap = intentionSnapshot(ctx, plane) orelse return null;
+        const id = plane.catalog.intention(name) catch |err| {
+            std.log.warn("dispatch: intention '{s}' is not resolvable: {t}", .{ name, err });
+            continue;
+        };
+        switch (snap.?.resolveOne(id)) {
+            .decision => |won| {
+                var d = won;
+                d.arm = @intCast(i); // the authored position, for tracing
+                return .{ .decision = d };
+            },
+            .unavailable => |u| switch (u) {
+                .no_offer => {}, // nonapplicable — the next arm gets its turn
+                else => {
+                    traceUnavailable(plane, name, u);
+                    return null;
+                },
+            },
+            .ambiguous => |a| {
+                echoAmbiguity(ctx, plane, a);
+                return null;
+            },
+        }
     }
+    // Nothing applied. A flat name is still a command that should say so.
+    const last = arms[arms.len - 1];
+    return if (core.catalog.isIntentionName(last)) null else .{ .command = last };
+}
+
+/// The snapshot every intention arm of one keypress resolves against. Built
+/// lazily, so a binding of plain command names never touches the catalog.
+fn intentionSnapshot(ctx: *core.command.Context, plane: *core.intent.Plane) ?*const core.catalog.Snapshot {
     // Pushed, not probed: core's providers re-publish for the focused entry's
     // shape and the focused view's scene here, before resolution reads a
     // single offer. Both are value comparisons when nothing moved.
     plane.syncEntryShape(entryHoldsText(ctx)) catch {};
     if (ctx.semantic) |services| plane.syncFocus(services, ctx.head) catch {};
-    const ids = plane.armIds(arms, &buf) catch |err| {
-        std.log.warn("dispatch: arm list '{s}' is not resolvable: {t}", .{ arms[0], err });
-        return;
-    };
-    const snap = plane.catalog.snapshot(catalogContext(ctx)) catch |err| {
+    return plane.catalog.snapshot(catalogContext(ctx)) catch |err| {
         std.log.warn("dispatch: catalog snapshot failed: {t}", .{err});
-        return;
+        return null;
     };
-    switch (snap.resolve(ids)) {
-        .decision => |d| plane.invoke(ctx, d) catch |err| {
-            // Rechecked at the effect door — visibility is never authority.
-            std.log.warn("dispatch: {s} refused at the door: {t}", .{ plane.catalog.intentionName(d.intention), err });
-        },
-        .unavailable => |u| traceUnavailable(plane, arms, u),
-        .ambiguous => |a| echoAmbiguity(ctx, plane, a),
-    }
+}
+
+/// Invoke a decision through its endpoint token. The plane rechecks the
+/// epoch, the table revision, and the endpoint's generation — visibility is
+/// never authority.
+fn invokeDecision(ctx: *core.command.Context, d: core.catalog.Decision) void {
+    const plane = ctx.intent orelse return;
+    plane.invoke(ctx, d) catch |err| {
+        std.log.warn("dispatch: {s} refused at the door: {t}", .{ plane.catalog.intentionName(d.intention), err });
+    };
 }
 
 fn entryHoldsText(ctx: *core.command.Context) bool {
     return ctx.buffers.active().textEditor() != null;
 }
 
-/// The one-line trace an unavailable binding leaves behind (the explain UI
-/// reads the same walk through `Catalog.explain`, later).
-fn traceUnavailable(plane: *const core.intent.Plane, arms: []const []const u8, u: core.catalog.Unavailable) void {
+/// The one-line trace an arm that stopped the walk leaves behind (the explain
+/// UI reads the same walk through `Catalog.explain`, later).
+fn traceUnavailable(plane: *const core.intent.Plane, name: []const u8, u: core.catalog.Unavailable) void {
     switch (u) {
-        .no_offer => std.log.debug("dispatch: nothing offers '{s}' (+{d} arm(s)) here", .{ arms[0], arms.len - 1 }),
+        .no_offer => std.log.debug("dispatch: nothing offers '{s}' here", .{name}),
         .disabled => |d| std.log.debug("dispatch: {s} disabled by {s}: {s}", .{
             plane.catalog.intentionName(d.intention),
             plane.catalog.providerName(d.provider),
