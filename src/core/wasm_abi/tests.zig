@@ -2620,10 +2620,12 @@ test "wasm_host/plugin.zig: trap message taxonomy — each Reason gets a distinc
     }
 }
 
-// The Files conformance-fixture skeleton (src/guest/gramtest.zig): declares
-// itself, binds nothing, and loads clean through the wasm membrane. The gate
-// that walks it against src/core/intentions.zig's std table lands later.
-test "wasm plugin: the conformance-fixture skeleton loads" {
+// The Files conformance fixture (src/guest/gramtest.zig): a synthetic
+// third-party grammar. It loads clean through the wasm membrane, and every
+// key it binds names a STANDARD intention (src/core/intentions.zig) — never a
+// plugin command — which is what makes the Files gates (src/e2e/grammar_test.zig)
+// evidence about protocols rather than about one plugin's vocabulary.
+test "wasm plugin: the conformance fixture binds std intentions only" {
     const gpa = t.allocator;
     var env: Env = undefined;
     try Env.init(gpa, &env);
@@ -2633,4 +2635,25 @@ test "wasm plugin: the conformance-fixture skeleton loads" {
     defer engine.deinit();
     const plugin = try loadPlugin(&engine, &env.ctx, "gramtest", @embedFile("guest_gramtest_wasm"), .{});
     defer plugin.deinit();
+
+    const intentions = @import("../intentions.zig");
+    const bindings = env.ctx.keymap.modes.getPtr("gramtest") orelse return error.TestExpectedEqual;
+    try t.expect(bindings.count() > 0);
+    var it = bindings.iterator();
+    while (it.next()) |entry| {
+        // EVERY arm, not just the first: a fallback naming a plugin command
+        // would make the gates evidence about that plugin.
+        for (entry.value_ptr.commands) |name| {
+            var known = false;
+            for (intentions.std_intentions) |intention| {
+                if (std.mem.eql(u8, intention.name, name)) known = true;
+            }
+            if (!known) {
+                std.debug.print("gramtest binds '{s}', which is not a std intention\n", .{name});
+                return error.TestExpectedEqual;
+            }
+        }
+    }
+    // The mode commits no text: a key it leaves unbound can never insert.
+    try t.expect(env.ctx.keymap.commitCommand("gramtest") == null);
 }

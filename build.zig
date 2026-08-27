@@ -221,9 +221,9 @@ const guests = [_]Guest{
     .{ .src = "src/guest/deny.zig", .import = "guest_deny_wasm", .install = false },
     .{ .src = "src/guest/demo_config.zig", .import = "guest_demo_config_wasm", .install = false },
     .{ .src = "src/guest/headtest.zig", .import = "guest_headtest_wasm", .install = false },
-    // The coming Files conformance gate's fixture skeleton: a synthetic
-    // third-party input grammar using only standard protocols. Declares
-    // itself and binds nothing yet (doc/configuration.md §5.1).
+    // The Files conformance gate's fixture (src/e2e/grammar_test.zig): a
+    // synthetic third-party input grammar binding only standard protocol
+    // intentions (doc/configuration.md §5.1).
     .{ .src = "src/guest/gramtest.zig", .import = "guest_gramtest_wasm", .install = false },
     .{ .src = "src/guest/fs_limit.zig", .import = "guest_fs_limit_wasm", .install = false },
     // D2's worked example (doc/d2-schema-payloads.md §6) — a third-party

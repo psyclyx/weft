@@ -1,11 +1,38 @@
 //! Test fixture ONLY (not installed — see build.zig's `guests` table): the
-//! skeleton of the coming Files conformance gate — a synthetic third-party
-//! input grammar built using only standard protocols (doc/configuration.md
-//! §5.1's `std.*` intentions, src/core/intentions.zig). It declares itself
-//! and binds nothing yet; the gate that walks it against the std intention
-//! table lands in a later wave. For now the one thing under test is that it
-//! loads through the wasm membrane like any other guest.
+//! synthetic third-party input grammar of the Files conformance gate
+//! (doc/contextual-workspace-architecture.md §18, §14.2). It knows no domain
+//! plugin: no command name, no mode of anyone else's, no semantic ABI call —
+//! one structural mode whose keys name `std.*` protocol intentions
+//! (src/core/intentions.zig, doc/configuration.md §5.1) that whatever holds
+//! the focus resolves.
+//!
+//! The mode is STRUCTURAL by construction: it declares no commit command, so
+//! a key it leaves unbound stays unhandled and can never become text (§10.1).
+
+const weft = @import("weft");
+
+/// The one mode this grammar owns. A grammar-owned scope name, not a global.
+const mode = "gramtest";
+
+/// A key and the first-applicable intention list it resolves through
+/// (§10.2). The string form is a one-entry list — one representation.
+const Binding = struct { key: []const u8, intentions: []const []const u8 };
+
+const bindings = [_]Binding{
+    .{ .key = "Tab", .intentions = &.{"std.hierarchy.toggle-expanded"} },
+    .{ .key = "Return", .intentions = &.{ "std.target.activate", "std.editing.insert-line-break" } },
+    .{ .key = "q", .intentions = &.{"std.navigation.back"} },
+    .{ .key = "u", .intentions = &.{"std.history.undo"} },
+    .{ .key = "h", .intentions = &.{"std.navigation.left"} },
+    .{ .key = "j", .intentions = &.{"std.navigation.down"} },
+    .{ .key = "k", .intentions = &.{"std.navigation.up"} },
+    .{ .key = "l", .intentions = &.{"std.navigation.right"} },
+};
 
 export fn describe() void {}
 
-export fn init() void {}
+export fn init() void {
+    weft.restingMode(mode);
+    for (bindings) |b| weft.bindKeys(mode, b.key, b.intentions);
+    weft.setMode(mode);
+}
