@@ -59,7 +59,7 @@ pub const Buffer = [Intent.count]Item;
 pub fn derive(instance: *const view.Instance, focus: Focus, out: *Buffer) []const Item {
     var count: usize = 0;
     const leaf_id = focus.path.leaf() orelse return out[0..0];
-    _ = instance.node(leaf_id) orelse return out[0..0];
+    if (instance.node(leaf_id) == null) return out[0..0];
 
     // Expansion follows the deepest node on the path that ADVERTISES the
     // open/close route, the same walk that route itself makes. Shape cannot
