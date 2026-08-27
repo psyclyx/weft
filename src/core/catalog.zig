@@ -329,6 +329,7 @@ pub const ArmStatus = enum {
 
 /// Why one candidate is not the answer.
 pub const Verdict = enum {
+    /// The arm's strongest offer — what its `ArmStatus` then reports on.
     selected,
     outranked,
     /// Equal strongest to the selected candidate.
@@ -467,6 +468,9 @@ fn walk(snap: *const Snapshot, arms: []const IntentionId, rec: ?*Recorder) Resol
     var result: Resolution = .{ .unavailable = .no_offer };
     var decided = false;
     for (arms, 0..) |intention, i| {
+        // Only a trace needs the arms past the decision; the keystroke path
+        // stops walking the moment it has an answer.
+        if (decided and rec == null) break;
         const run = snap.offersFor(intention);
         if (decided) {
             if (rec) |r| r.record(intention, run, .not_reached, null);
@@ -563,7 +567,9 @@ pub const Catalog = struct {
     /// Bumped by every publish and retract. Starts at 1 so 0 is available as
     /// "no snapshot yet".
     epoch: u64 = 1,
-    /// Heap-allocated so a cached pointer survives later cache insertions.
+    /// Heap-allocated so a cached pointer survives later cache insertions. A
+    /// rebuild for the SAME key reuses its `Snapshot` in place, so resolve
+    /// against the pointer you just asked for rather than holding one.
     cache: std.AutoArrayHashMapUnmanaged(u64, *Snapshot) = .empty,
 
     pub fn init(gpa: Allocator) Catalog {
