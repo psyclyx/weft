@@ -34,6 +34,32 @@ pub fn hBindKey(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32, resu
     p.activeCtx().keymap.bind(gpa, mode, key, cmd, Keymap.prio_plugin, p.name) catch {};
 }
 
+/// wl_bind_keys(mode, key, framed list) — the same bind at the list arity
+/// (architecture §10.2): the grammar authors a first-applicable order and
+/// dispatch resolves it against the focus. A malformed or empty blob binds
+/// nothing rather than half a list.
+pub fn hBindKeys(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32, results: []i32) void {
+    _ = results;
+    const p: *WasmPlugin = @ptrCast(@alignCast(data.?));
+    const gpa = p.gpa;
+    const Keymap = @import("../Keymap.zig");
+    const mode = caller.readMemory(gpa, @intCast(args[0]), @intCast(args[1])) catch return;
+    defer gpa.free(mode);
+    const key = caller.readMemory(gpa, @intCast(args[2]), @intCast(args[3])) catch return;
+    defer gpa.free(key);
+    const blob = caller.readMemory(gpa, @intCast(args[4]), @intCast(args[5])) catch return;
+    defer gpa.free(blob);
+    var cmds: [Keymap.max_bind_commands][]const u8 = undefined;
+    var n: usize = 0;
+    var it = @import("../framed.zig").Records.init(blob) orelse return;
+    while (it.next()) |rec| : (n += 1) {
+        if (n == cmds.len) return;
+        cmds[n] = rec;
+    }
+    if (n == 0) return;
+    p.activeCtx().keymap.bindArms(gpa, mode, key, cmds[0..n], Keymap.prio_plugin, p.name) catch {};
+}
+
 /// wl_declare_action(name) — a plugin declares an abstract intent + its
 /// trampoline command, so a key can bind to `name` and dispatch by context.
 pub fn hDeclareAction(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32, results: []i32) void {

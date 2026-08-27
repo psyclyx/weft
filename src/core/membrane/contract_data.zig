@@ -205,6 +205,7 @@ pub const imports = [_]Entry{
 
     // ── keymap.zig — the local config plane: bindings/modes/providers ──
     .{ .name = "wl_bind_key", .params = &.{ .u32, .u32, .u32, .u32, .u32, .u32 }, .results = &.{}, .group = .keymap, .doc = "bind a key chord in mode `m` to command `c`" },
+    .{ .name = "wl_bind_keys", .params = &.{ .u32, .u32, .u32, .u32, .u32, .u32 }, .results = &.{}, .group = .keymap, .doc = "bind a key chord in mode `m` to a framed first-applicable intention list (architecture §10.2)" },
     .{ .name = "wl_set_mode", .params = &.{ .u32, .u32 }, .results = &.{}, .group = .keymap, .head_gated = true, .doc = "switch the active buffer's mode" },
     .{ .name = "wl_set_fallback", .params = &.{ .u32, .u32, .u32, .u32 }, .results = &.{}, .group = .keymap, .doc = "declare mode `m`'s fallback (parent) mode for unbound keys" },
     .{ .name = "wl_text_input", .params = &.{ .u32, .u32, .u32, .u32, .u32 }, .results = &.{}, .group = .keymap, .doc = "declare mode `m`'s text-input command (and whether it takes the typed char)" },
@@ -388,7 +389,7 @@ pub const imports = [_]Entry{
 /// half-finished edit — fails the build with a pointed message instead of
 /// silently drifting the two ~124-entry tables apart again (the exact class
 /// this table exists to kill).
-const expected_import_count = 179;
+const expected_import_count = 180;
 
 /// A host→guest EXPORT entrypoint (design doc/extensibility-native-surface.md, task
 /// W0a-D extension 2): every `instance.callVoid("name", args)` the host

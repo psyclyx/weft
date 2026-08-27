@@ -138,6 +138,7 @@ const handlers = [_]struct { name: []const u8, handler: HostFn }{
 
     // ── keymap.zig — the local config plane: bindings/modes/providers ──
     .{ .name = "wl_bind_key", .handler = keymap.hBindKey },
+    .{ .name = "wl_bind_keys", .handler = keymap.hBindKeys },
     .{ .name = "wl_set_mode", .handler = keymap.hSetMode },
     .{ .name = "wl_set_fallback", .handler = keymap.hSetFallback },
     .{ .name = "wl_text_input", .handler = keymap.hTextInput },

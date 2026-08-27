@@ -106,6 +106,7 @@ extern "weft" fn wl_set_result_int(n: i32) void;
 extern "weft" fn wl_set_result_str(ptr: u32, len: u32) void;
 // Config surface (the local plane — bindings/modes, as init.fnl did).
 extern "weft" fn wl_bind_key(m: u32, ml: u32, k: u32, kl: u32, c: u32, cl: u32) void;
+extern "weft" fn wl_bind_keys(m: u32, ml: u32, k: u32, kl: u32, list: u32, list_len: u32) void;
 extern "weft" fn wl_set_mode(ptr: u32, len: u32) void;
 extern "weft" fn wl_set_fallback(m: u32, ml: u32, par: u32, pl: u32) void;
 extern "weft" fn wl_text_input(m: u32, ml: u32, c: u32, cl: u32, has: u32) void;
@@ -658,6 +659,45 @@ pub fn setResultStr(s: []const u8) void {
 pub fn bindKey(mode: []const u8, key: []const u8, cmd: []const u8) void {
     wl_bind_key(p(mode.ptr), @intCast(mode.len), p(key.ptr), @intCast(key.len), p(cmd.ptr), @intCast(cmd.len));
 }
+/// Bind `key` in keymap `mode` to a FIRST-APPLICABLE list (architecture
+/// §10.2): `bindKeys("normal", "Return", &.{ "std.target.activate",
+/// "vim-open-focused" })` runs the activation intention where the focus
+/// offers one and the plugin's own command everywhere else. The grammar
+/// authors the order; resolution happens at the keypress, against the focus.
+/// Framed as the config surface frames `weft.bind`'s list — one wire shape
+/// for one meaning. A list too long for the frame buffer binds nothing.
+pub fn bindKeys(mode: []const u8, key: []const u8, cmds: []const []const u8) void {
+    var buf: [512]u8 = undefined;
+    const blob = frameList(&buf, cmds) orelse return;
+    wl_bind_keys(p(mode.ptr), @intCast(mode.len), p(key.ptr), @intCast(key.len), p(blob.ptr), @intCast(blob.len));
+}
+
+/// Frame `records` as uvarint(count) then count×(uvarint(len) ++ bytes) — the
+/// encoding `ConfigIter` reads. Null when `buf` cannot hold them.
+fn frameList(buf: []u8, records: []const []const u8) ?[]const u8 {
+    var n: usize = 0;
+    if (!putUv(buf, &n, records.len)) return null;
+    for (records) |rec| {
+        if (!putUv(buf, &n, rec.len)) return null;
+        if (n + rec.len > buf.len) return null;
+        @memcpy(buf[n..][0..rec.len], rec);
+        n += rec.len;
+    }
+    return buf[0..n];
+}
+
+fn putUv(buf: []u8, n: *usize, value: usize) bool {
+    var v = value;
+    while (true) {
+        if (n.* == buf.len) return false;
+        const byte: u8 = @intCast(v & 0x7f);
+        v >>= 7;
+        buf[n.*] = if (v == 0) byte else byte | 0x80;
+        n.* += 1;
+        if (v == 0) return true;
+    }
+}
+
 /// Switch the active keymap mode.
 pub fn setMode(mode: []const u8) void {
     wl_set_mode(p(mode.ptr), @intCast(mode.len));
