@@ -344,6 +344,11 @@ pub const Session = struct {
                 .name = "container",
             },
         };
+        if (std.mem.eql(u8, request.action, semantic.action.standard.toggle_expanded)) {
+            const row = dired.modelRowId(request.subject) catch return .declined;
+            try self.toggleExpanded(row);
+            return .handled;
+        }
         if (std.mem.eql(u8, request.action, semantic.action.standard.set_working_target)) {
             if (request.subject == dired.rootNodeId()) return .{ .set_working_target = .{
                 .target = self.target,
@@ -412,8 +417,58 @@ pub const Session = struct {
             listing.value,
         );
         defer staged.deinit();
+        try self.refreshExpanded(&staged);
         try self.publishDraft(&staged);
         self.apply_committed = false;
+    }
+
+    /// Rows folded open are part of what this view shows, so one refresh
+    /// re-reads every open scope. The open set is taken up front — a listing
+    /// only ever adds closed rows, so it cannot grow while being walked.
+    fn refreshExpanded(self: *Session, staged: *dired.Model) !void {
+        var open: std.ArrayList(dired.NodeId) = .empty;
+        defer open.deinit(self.plugin.gpa);
+        for (staged.rows.items) |row| {
+            if (row.expanded) try open.append(self.plugin.gpa, row.id);
+        }
+        for (open.items) |row| {
+            // A scope whose directory vanished went away with its parent's
+            // listing; one that can no longer be read folds shut rather than
+            // failing the whole refresh.
+            const current = staged.row(row) orelse continue;
+            if (!current.expanded) continue;
+            self.readChildren(staged, row) catch {
+                staged.setExpanded(row, false) catch {};
+            };
+        }
+    }
+
+    /// Fold a directory row open or closed. Collapsing keeps its rows in the
+    /// draft; opening re-reads the provider, so a fold is never a stale
+    /// replay of what the directory held last time.
+    fn toggleExpanded(self: *Session, row: dired.NodeId) !void {
+        var staged = try self.draft.duplicate();
+        defer staged.deinit();
+        const current = staged.row(row) orelse return error.UnknownSubject;
+        if (current.expanded)
+            try staged.setExpanded(row, false)
+        else
+            try self.readChildren(&staged, row);
+        try self.publishDraft(&staged);
+    }
+
+    /// Read one expanded row's directory through its own exact child target
+    /// and reconcile the result into that row's scope.
+    fn readChildren(self: *Session, staged: *dired.Model, row: dired.NodeId) !void {
+        const located = self.rowTarget(row) orelse return error.MissingTarget;
+        var descriptor = try weft.semanticTargetDescribe(located.target, self.plugin.gpa);
+        defer descriptor.deinit();
+        if (descriptor.value.revision != located.revision) return error.StaleTarget;
+        const directory = try dired.directoryFromDescriptor(descriptor.value);
+        var listing = try weft.semanticFsList(self.plugin.gpa, located.target, located.revision);
+        defer listing.deinit();
+        try dired.reconcileChildListing(self.plugin.gpa, directory, staged, row, listing.value);
+        try staged.setExpanded(row, true);
     }
 
     fn addPending(self: *Session, kind: contract.Kind) !semantic.scene.NodeId {
@@ -745,19 +800,13 @@ pub const Session = struct {
                 break;
             }
             if (retained) continue;
+            // A row inside an expanded directory is a child of THAT
+            // directory's exact target, never of the view's own. Rows precede
+            // their children, so the containing target is already published.
+            const parent = self.containingTarget(row) orelse continue;
             const located = switch (child.kind) {
-                .directory => weft.semanticFsPublishChildDirectory(
-                    self.plugin.gpa,
-                    .{ .target = self.target, .revision = self.target_revision },
-                    child.entry,
-                    child.revision,
-                ),
-                .regular => weft.semanticFsPublishChildFile(
-                    self.plugin.gpa,
-                    .{ .target = self.target, .revision = self.target_revision },
-                    child.entry,
-                    child.revision,
-                ),
+                .directory => weft.semanticFsPublishChildDirectory(self.plugin.gpa, parent, child.entry, child.revision),
+                .regular => weft.semanticFsPublishChildFile(self.plugin.gpa, parent, child.entry, child.revision),
                 .symlink, .other => unreachable,
             } catch continue;
             var owned = true;
@@ -820,6 +869,14 @@ pub const Session = struct {
         for (self.row_targets.items) |target|
             if (target.active and target.row == row) return target.located;
         return null;
+    }
+
+    /// The exact directory a row is listed in: the view's own target at the
+    /// top level, and the folded-open row's target below it.
+    fn containingTarget(self: *Session, row: dired.Row) ?semantic.target.Located {
+        const parent = row.parent orelse
+            return .{ .target = self.target, .revision = self.target_revision };
+        return self.rowTarget(parent);
     }
 
     fn project(self: *Session, draft: *const dired.Model) !dired.OwnedScene {

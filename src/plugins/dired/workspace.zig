@@ -35,9 +35,46 @@ pub fn reconcileListing(
     previous: ?*const model.Model,
     listing: contract.Listing,
 ) Error!model.Model {
+    const entries = try snapshotEntries(gpa, directory, listing);
+    defer gpa.free(entries);
+    var next = if (previous) |draft|
+        try draft.duplicate()
+    else
+        model.Model.initAt(gpa, directory.root, directory.node);
+    errdefer next.deinit();
+    next.reconcile(.{ .entries = entries, .revision = listing.revision.token }) catch |err| return switch (err) {
+        error.OutOfMemory => error.OutOfMemory,
+        else => error.InvalidListing,
+    };
+    return next;
+}
+
+/// Join an expanded row's own directory listing to the draft that shows it.
+/// The scope is that row, so drafts elsewhere — including under a sibling
+/// that is open at the same time — reconcile independently of this call.
+pub fn reconcileChildListing(
+    gpa: std.mem.Allocator,
+    directory: fs.target.Directory,
+    draft: *model.Model,
+    parent: model.NodeId,
+    listing: contract.Listing,
+) Error!void {
+    const entries = try snapshotEntries(gpa, directory, listing);
+    defer gpa.free(entries);
+    draft.reconcileChildren(parent, .{ .entries = entries, .revision = listing.revision.token }) catch |err| return switch (err) {
+        error.OutOfMemory => error.OutOfMemory,
+        else => error.InvalidListing,
+    };
+}
+
+fn snapshotEntries(
+    gpa: std.mem.Allocator,
+    directory: fs.target.Directory,
+    listing: contract.Listing,
+) Error![]model.SnapshotEntry {
     try validateListing(directory, listing);
     const entries = try gpa.alloc(model.SnapshotEntry, listing.entries.len);
-    defer gpa.free(entries);
+    errdefer gpa.free(entries);
     for (listing.entries, entries) |entry, *snapshot| {
         const identity = switch (entry.observation.node) {
             .root => return error.InvalidListing,
@@ -52,16 +89,7 @@ pub fn reconcileListing(
             .link_target = entry.observation.metadata.link_target orelse &.{},
         };
     }
-    var next = if (previous) |draft|
-        try draft.duplicate()
-    else
-        model.Model.initAt(gpa, directory.root, directory.node);
-    errdefer next.deinit();
-    next.reconcile(.{ .entries = entries, .revision = listing.revision.token }) catch |err| return switch (err) {
-        error.OutOfMemory => error.OutOfMemory,
-        else => error.InvalidListing,
-    };
-    return next;
+    return entries;
 }
 
 /// Return the guarded identity and kind of an observed openable child. The

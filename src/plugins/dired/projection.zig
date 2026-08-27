@@ -42,6 +42,9 @@ pub const metadata_column: u16 = 0;
 pub const mode_column: u16 = 4;
 pub const name_column: u16 = 11;
 pub const original_column: u16 = 48;
+/// Cells a row shifts right per level of nesting. Depth is layout, so an
+/// expanded subtree needs no node kind, no wrapper, and no second renderer.
+pub const indent_cells: u16 = 2;
 
 pub const OwnedScene = struct {
     arena: std.heap.ArenaAllocator,
@@ -72,10 +75,17 @@ pub fn projectWith(gpa: std.mem.Allocator, rows: []const model.Row, bindings: []
     var owned: OwnedScene = .{ .arena = .init(gpa), .value = undefined };
     errdefer owned.deinit();
     const arena = owned.arena.allocator();
-    const children = try arena.alloc(scene.Node, rows.len);
-    for (rows, children) |row, *child| {
+    // A collapsed directory keeps its children in the draft and off the
+    // surface, so a draft made below one survives being folded away.
+    var visible: usize = 0;
+    for (rows) |row| visible += @intFromBool(model.rowVisible(rows, row));
+    const children = try arena.alloc(scene.Node, visible);
+    var index: usize = 0;
+    for (rows) |row| {
+        if (!model.rowVisible(rows, row)) continue;
         const binding = findBinding(bindings, row.id).?;
-        child.* = try projectRow(arena, row, binding);
+        children[index] = try projectRow(arena, row, binding, model.rowDepth(rows, row));
+        index += 1;
     }
     owned.value = .{
         .id = root_id,
@@ -83,7 +93,7 @@ pub fn projectWith(gpa: std.mem.Allocator, rows: []const model.Row, bindings: []
         // The container itself is a focus stop only when there is no ordinary
         // name field to select. Root actions remain reachable through every
         // row's ancestor path in non-empty directories.
-        .focusable = rows.len == 0,
+        .focusable = visible == 0,
         .actions = try rootActions(arena, rows, options),
         .content = .{ .container = .{ .axis = .vertical, .children = children } },
     };
@@ -152,8 +162,9 @@ fn validateInputs(rows: []const model.Row, bindings: []const FieldBinding) !void
     for (rows) |row| if (findBinding(bindings, row.id) == null) return error.MissingBinding;
 }
 
-fn projectRow(arena: std.mem.Allocator, row: model.Row, binding: FieldBinding) !scene.Node {
+fn projectRow(arena: std.mem.Allocator, row: model.Row, binding: FieldBinding, depth: u16) !scene.Node {
     const original_visible = isOriginalVisible(row);
+    const indent = depth *| indent_cells;
     // Metadata, mode, and name are structural columns even when the provider
     // cannot edit modes. Rows therefore never shift horizontally as their
     // kind or capability changes.
@@ -163,14 +174,14 @@ fn projectRow(arena: std.mem.Allocator, row: model.Row, binding: FieldBinding) !
     children[0] = .{
         .id = try stableId(row.id, metadata_domain),
         .role = "files.metadata",
-        .layout = .{ .column = metadata_column },
+        .layout = .{ .column = metadata_column +| indent },
         .facts = leaf_facts,
-        .content = .{ .label = kindGlyph(row.draft.kind) },
+        .content = .{ .label = kindGlyph(row) },
     };
     children[1] = .{
         .id = try stableId(row.id, mode_domain),
         .role = "files.mode",
-        .layout = .{ .column = mode_column, .min_cells = 4 },
+        .layout = .{ .column = mode_column +| indent, .min_cells = 4 },
         .facts = leaf_facts,
         .content = if (binding.mode_field) |mode_field|
             .{ .field = .{ .ref = mode_field, .placeholder = "mode", .single_line = true } }
@@ -180,7 +191,7 @@ fn projectRow(arena: std.mem.Allocator, row: model.Row, binding: FieldBinding) !
     children[2] = .{
         .id = try stableId(row.id, field_domain),
         .role = "files.name",
-        .layout = .{ .column = name_column },
+        .layout = .{ .column = name_column +| indent },
         .facts = leaf_facts,
         .target = binding.target,
         .focusable = true,
@@ -191,7 +202,7 @@ fn projectRow(arena: std.mem.Allocator, row: model.Row, binding: FieldBinding) !
         children[3] = .{
             .id = try stableId(row.id, original_domain),
             .role = "files.original-name",
-            .layout = .{ .column = original_column },
+            .layout = .{ .column = original_column +| indent },
             .facts = leaf_facts,
             .content = .{ .label = try prefixedEscapedLabel(arena, "original: ", original) },
         };
@@ -233,10 +244,13 @@ fn rowFacts(arena: std.mem.Allocator, row: model.Row) ![]scene.Fact {
 
 fn rowActions(arena: std.mem.Allocator, row: model.Row, mode_editable: bool, has_target: bool) ![]scene.Action {
     const unavailable = row.pending == .deleted or row.conflict == .stale;
-    const can_set_working = row.draft.kind == .directory and has_target and !unavailable;
+    // An observed directory is the one row this view can both fold open in
+    // place and adopt as a working locus; a file, a draft, and a stale row
+    // are none of those things and say so by advertising neither.
+    const is_container = row.draft.kind == .directory and has_target and !unavailable;
     const actions = try arena.alloc(scene.Action, 9 +
         @as(usize, @intFromBool(mode_editable)) +
-        @as(usize, @intFromBool(can_set_working)));
+        @as(usize, @intFromBool(is_container)) * 2);
     actions[0] = .{ .id = standard.open, .label = "Open", .enabled = !unavailable and has_target };
     // Deletion is a reversible draft state, not the destruction of this row.
     // Keep its name editor advertised so any input policy can revive it; only
@@ -258,10 +272,13 @@ fn rowActions(arena: std.mem.Allocator, row: model.Row, mode_editable: bool, has
         };
         index += 1;
     }
-    if (can_set_working) actions[index] = .{
-        .id = standard.set_working_target,
-        .label = "Use as working target",
-    };
+    if (is_container) {
+        actions[index] = .{
+            .id = standard.toggle_expanded,
+            .label = if (row.expanded) "Collapse" else "Expand",
+        };
+        actions[index + 1] = .{ .id = standard.set_working_target, .label = "Use as working target" };
+    }
     return actions;
 }
 
@@ -344,10 +361,10 @@ fn kindName(kind: contract.Kind) []const u8 {
     };
 }
 
-fn kindGlyph(kind: contract.Kind) []const u8 {
-    return switch (kind) {
+fn kindGlyph(row: model.Row) []const u8 {
+    return switch (row.draft.kind) {
         .regular => "·",
-        .directory => "▸",
+        .directory => if (row.expanded) "▾" else "▸",
         .symlink => "↗",
         .other => "?",
     };
@@ -562,6 +579,53 @@ test "projection rejects duplicate missing and generation-zero bindings" {
         .mode_field = .{ .authority = .here, .slot = 14, .generation = 1 },
     }};
     try std.testing.expectError(error.DuplicateBinding, project(std.testing.allocator, dired.rows.items, &same_mode));
+}
+
+test "an expanded row splices its children in indented, a collapsed one hides them" {
+    var dired = model.Model.init(std.testing.allocator, .{ .authority = .here, .slot = 0, .generation = 1 });
+    defer dired.deinit();
+    try dired.reconcile(.{ .entries = &.{
+        .{ .identity = .{ .authority = .here, .slot = 60, .generation = 1 }, .name = "child", .revision = "1", .kind = .directory },
+        .{ .identity = .{ .authority = .here, .slot = 61, .generation = 1 }, .name = "top.txt", .revision = "1", .kind = .regular },
+    } });
+    const child = dired.rows.items[0].id;
+    try dired.reconcileChildren(child, .{ .entries = &.{
+        .{ .identity = .{ .authority = .here, .slot = 62, .generation = 1 }, .name = "inner.txt", .revision = "1", .kind = .regular },
+    } });
+    const inner = dired.rows.items[1].id;
+    const refs = [_]FieldBinding{
+        .{ .row = child, .field = .{ .authority = .here, .slot = 60, .generation = 1 }, .target = .{ .target = .{ .authority = .here, .slot = 1, .generation = 1 }, .revision = 1 } },
+        .{ .row = inner, .field = .{ .authority = .here, .slot = 61, .generation = 1 } },
+        .{ .row = dired.rows.items[2].id, .field = .{ .authority = .here, .slot = 62, .generation = 1 } },
+    };
+
+    // Folded shut: the child row is bound and drafted, and simply not on the
+    // surface. Only the directory advertises the route that opens it.
+    var closed = try project(std.testing.allocator, dired.rows.items, &refs);
+    defer closed.deinit();
+    const closed_rows = closed.value.content.container.children;
+    try std.testing.expectEqual(@as(usize, 2), closed_rows.len);
+    try std.testing.expectEqualStrings("▸", closed_rows[0].content.container.children[0].content.label);
+    try std.testing.expectEqualStrings(standard.toggle_expanded, closed_rows[0].actions[9].id);
+    try std.testing.expectEqualStrings("Expand", closed_rows[0].actions[9].label);
+    for (closed_rows[1].actions) |action|
+        try std.testing.expect(!std.mem.eql(u8, action.id, standard.toggle_expanded));
+
+    try dired.setExpanded(child, true);
+    var open = try project(std.testing.allocator, dired.rows.items, &refs);
+    defer open.deinit();
+    const open_rows = open.value.content.container.children;
+    try std.testing.expectEqual(@as(usize, 3), open_rows.len);
+    try std.testing.expectEqual(try rowNodeId(inner), open_rows[1].id);
+    try std.testing.expectEqualStrings("▾", open_rows[0].content.container.children[0].content.label);
+    try std.testing.expectEqualStrings("Collapse", open_rows[0].actions[9].label);
+    // Depth is one whole-row shift, so every column of a nested row moves
+    // together and the tree reads as one indentation.
+    const columns = open_rows[1].content.container.children;
+    try std.testing.expectEqual(metadata_column + indent_cells, columns[0].layout.column.?);
+    try std.testing.expectEqual(mode_column + indent_cells, columns[1].layout.column.?);
+    try std.testing.expectEqual(name_column + indent_cells, columns[2].layout.column.?);
+    try std.testing.expectEqual(name_column, open_rows[0].content.container.children[2].layout.column.?);
 }
 
 test "projection leaves unusual raw names in model provider data" {

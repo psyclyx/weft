@@ -298,6 +298,7 @@ test "e2e/config: the sample config boots; SPC g i is discoverable via which-key
     const structured_view_actions = [_][]const u8{
         semantic.action.standard.open,
         semantic.action.standard.open_container,
+        semantic.action.standard.toggle_expanded,
         semantic.action.standard.set_working_target,
         semantic.action.standard.edit,
         semantic.action.standard.copy,
@@ -351,6 +352,7 @@ test "e2e/config: the sample config boots; SPC g i is discoverable via which-key
     try t.expect(whichKeyShows(&ed, semantic.action.standard.paste_after));
     try t.expect(whichKeyShows(&ed, semantic.action.standard.open));
     try t.expect(whichKeyShows(&ed, semantic.action.standard.open_container));
+    try t.expect(whichKeyShows(&ed, semantic.action.standard.toggle_expanded));
     try t.expect(whichKeyShows(&ed, semantic.action.standard.set_working_target));
     try t.expect(whichKeyShows(&ed, semantic.action.standard.refresh));
     try t.expect(whichKeyShows(&ed, semantic.action.standard.revert));
@@ -372,6 +374,7 @@ test "e2e/config: the sample config boots; SPC g i is discoverable via which-key
         .{ .sequence = "space v k", .command = "cursor-up" },
         .{ .sequence = "space v o", .command = semantic.action.standard.open },
         .{ .sequence = "space v minus", .command = semantic.action.standard.open_container },
+        .{ .sequence = "space v Tab", .command = semantic.action.standard.toggle_expanded },
         .{ .sequence = "space v c", .command = semantic.action.standard.set_working_target },
         .{ .sequence = "space v e", .command = semantic.action.standard.edit },
         .{ .sequence = "space v y", .command = semantic.action.standard.copy },

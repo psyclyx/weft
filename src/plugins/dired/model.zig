@@ -88,6 +88,10 @@ pub const Row = struct {
     conflict: Conflict = .none,
     name_dirty: bool = false,
     mode_dirty: bool = false,
+    /// A directory row whose children this draft currently holds. Collapsing
+    /// hides them rather than discarding them, so a draft made below survives
+    /// the round trip; re-expanding reconciles the subtree afresh.
+    expanded: bool = false,
     copy_source: ?CopySource = null,
 };
 
@@ -159,28 +163,48 @@ pub const Model = struct {
         return null;
     }
 
+    /// The same lookup confined to one directory's own children, so a listing
+    /// can never adopt a row that belongs to another expanded scope.
+    fn rowForIdentityUnder(self: *const Model, parent: ?NodeId, identity: contract.EntryRef) ?NodeId {
+        for (self.rows.items) |candidate| {
+            if (!sameOptionalId(candidate.parent, parent)) continue;
+            if (candidate.current) |current| if (sameEntry(current.identity, identity)) return candidate.id;
+            if (candidate.base) |base| if (sameEntry(base.identity, identity)) return candidate.id;
+        }
+        return null;
+    }
+
     /// Reconcile by identity, never by listing position or visible name.
     /// Dirty rows remain present when their source disappears, marked stale.
     pub fn reconcile(self: *Model, snapshot: Snapshot) !void {
+        return self.reconcileChildren(null, snapshot);
+    }
+
+    /// Reconcile one directory's listing into the scope named by `parent`.
+    /// `null` is the model's own directory; a row id is an expanded child,
+    /// whose entries join this same draft as that row's children. Rows in
+    /// every other scope — including drafts — are untouched.
+    pub fn reconcileChildren(self: *Model, parent: ?NodeId, snapshot: Snapshot) !void {
         // Reconciliation is a value transaction: allocations and all
         // identity matching happen against a deep staged copy. The live
         // draft changes only after the complete snapshot succeeds.
         var staged = try self.duplicate();
         errdefer staged.deinit();
-        try staged.reconcileInPlace(snapshot);
+        try staged.reconcileInPlace(parent, snapshot);
         const previous = self.*;
         self.* = staged;
         staged = previous;
         staged.deinit();
     }
 
-    fn reconcileInPlace(self: *Model, snapshot: Snapshot) !void {
+    fn reconcileInPlace(self: *Model, parent: ?NodeId, snapshot: Snapshot) !void {
         try validateSnapshot(snapshot, self.root.authority);
+        if (parent) |id| try self.validateParent(id);
         const had_dirty_rows = self.hasPendingChanges();
         var seen = std.AutoHashMapUnmanaged(NodeId, void).empty;
         defer seen.deinit(self.gpa);
         for (snapshot.entries) |entry| {
-            if (self.rowForIdentity(entry.identity)) |id| {
+            if (self.rowForIdentityUnder(parent, entry.identity)) |id| {
                 const row_ptr = self.rowMutable(id).?;
                 try seen.put(self.gpa, id, {});
                 if (rowHasPendingChanges(row_ptr)) {
@@ -209,7 +233,7 @@ pub const Model = struct {
                     row_ptr.conflict = .none;
                 }
             } else {
-                const id = try self.appendObserved(null, entry);
+                const id = try self.appendObserved(parent, entry);
                 try seen.put(self.gpa, id, {});
             }
         }
@@ -218,14 +242,27 @@ pub const Model = struct {
         defer remove.deinit(self.gpa);
         for (self.rows.items) |*row_ptr| {
             if (seen.contains(row_ptr.id)) continue;
+            if (!sameOptionalId(row_ptr.parent, parent)) continue;
             if (rowHasPendingChanges(row_ptr)) {
                 self.freeObservation(&row_ptr.current);
                 row_ptr.current = null;
                 row_ptr.conflict = .stale;
             } else try remove.append(self.gpa, row_ptr.id);
         }
-        for (remove.items) |id| self.removeRow(id);
-        if (!had_dirty_rows) try self.replaceBaseRevision(snapshot.revision);
+        // A vanished directory takes the rows it was holding open with it.
+        for (remove.items) |id| self.removeSubtree(id);
+        // The namespace token belongs to this model's own directory; a child
+        // listing has its own and must not overwrite the apply guard.
+        if (parent == null and !had_dirty_rows) try self.replaceBaseRevision(snapshot.revision);
+    }
+
+    /// Open or close a directory row's children in place. Only the flag moves
+    /// here — the adapter that can read the provider supplies the rows.
+    pub fn setExpanded(self: *Model, id: NodeId, expanded: bool) !void {
+        const row_ptr = self.rowMutable(id) orelse return error.UnknownNode;
+        if (row_ptr.draft.kind != .directory) return error.NotDirectory;
+        if (row_ptr.pending == .deleted or row_ptr.conflict == .stale) return error.StaleParent;
+        row_ptr.expanded = expanded;
     }
 
     pub fn rename(self: *Model, id: NodeId, name: []const u8) !void {
@@ -401,6 +438,9 @@ pub const Model = struct {
         if (entry.name.len > max_transfer_name or entry.revision.len > max_transfer_revision or
             entry.contents.len > max_transfer_payload or entry.link_target.len > max_transfer_payload)
             return error.TransferTooLarge;
+        // An observed child joins its parent's subtree, so the flat row order
+        // is already the visible tree order.
+        const insertion_index = try self.parentInsertionIndex(parent);
         const base = try cloneObservation(self.gpa, entry);
         errdefer freeObservationWith(self.gpa, &base);
         const current = try cloneObservation(self.gpa, entry);
@@ -408,9 +448,14 @@ pub const Model = struct {
         const draft = try draftFrom(self.gpa, entry);
         errdefer freeDraftWith(self.gpa, &draft);
         const id = self.next_id;
-        self.next_id += 1;
-        try self.rows.append(self.gpa, .{ .id = id, .parent = parent, .base = base, .current = current, .draft = draft, .pending = .observed });
-        return id;
+        return self.insertOwnedRows(insertion_index, &.{.{
+            .id = id,
+            .parent = parent,
+            .base = base,
+            .current = current,
+            .draft = draft,
+            .pending = .observed,
+        }});
     }
 
     fn appendPending(self: *Model, parent: ?NodeId, name: []const u8, kind: contract.Kind, mode: ?u32, contents: []const u8, link_target: []const u8, pending: Pending) !NodeId {
@@ -549,6 +594,13 @@ pub const Model = struct {
         const index = self.indexOf(id) orelse return;
         self.freeRow(&self.rows.items[index]);
         _ = self.rows.orderedRemove(index);
+    }
+
+    fn removeSubtree(self: *Model, id: NodeId) void {
+        const index = self.indexOf(id) orelse return;
+        const end = self.subtreeEnd(index);
+        for (self.rows.items[index..end]) |*row_ptr| self.freeRow(row_ptr);
+        self.rows.replaceRangeAssumeCapacity(index, end - index, &.{});
     }
 
     fn freeRow(self: *Model, row_ptr: *Row) void {
@@ -912,6 +964,36 @@ pub fn rowHasPendingChanges(row_ptr: *const Row) bool {
     return row_ptr.pending != .observed or row_ptr.name_dirty or row_ptr.mode_dirty or row_ptr.conflict != .none;
 }
 
+/// How deep a row sits under the model's own directory. The row list is the
+/// tree, so a projection reads nesting from the value it is already given.
+pub fn rowDepth(rows: []const Row, row_value: Row) u16 {
+    var depth: u16 = 0;
+    var cursor = row_value.parent;
+    while (cursor) |id| : (depth +|= 1) {
+        if (depth == rows.len) return depth;
+        cursor = (findRow(rows, id) orelse return depth).parent;
+    }
+    return depth;
+}
+
+/// A row is on the surface when every directory above it is open.
+pub fn rowVisible(rows: []const Row, row_value: Row) bool {
+    var steps: usize = 0;
+    var cursor = row_value.parent;
+    while (cursor) |id| : (steps += 1) {
+        if (steps == rows.len) return false;
+        const parent_row = findRow(rows, id) orelse return false;
+        if (!parent_row.expanded) return false;
+        cursor = parent_row.parent;
+    }
+    return true;
+}
+
+fn findRow(rows: []const Row, id: NodeId) ?*const Row {
+    for (rows) |*candidate| if (candidate.id == id) return candidate;
+    return null;
+}
+
 fn isCopied(row_ptr: *const Row) bool {
     return row_ptr.pending == .copied or row_ptr.pending == .copied_renamed;
 }
@@ -982,6 +1064,7 @@ fn cloneRow(gpa: std.mem.Allocator, source: Row) !Row {
         .conflict = source.conflict,
         .name_dirty = source.name_dirty,
         .mode_dirty = source.mode_dirty,
+        .expanded = source.expanded,
     };
     errdefer {
         if (row_copy.base) |*observation| freeObservationWith(gpa, observation);
@@ -2035,4 +2118,105 @@ fn reconcileAllocationFailureCase(gpa: std.mem.Allocator) !void {
 
 test "reconcile is transactional under every allocation failure" {
     try std.testing.checkAllAllocationFailures(std.testing.allocator, reconcileAllocationFailureCase, .{});
+}
+
+test "an expanded scope reconciles independently of the rest of the draft" {
+    var dired = Model.init(std.testing.allocator, .{ .authority = .here, .slot = 0, .generation = 1 });
+    defer dired.deinit();
+    try dired.reconcile(.{ .revision = "root-one", .entries = &.{
+        .{ .identity = ref(90, 1), .name = "child", .revision = "child-one", .kind = .directory },
+        .{ .identity = ref(91, 1), .name = "top.txt", .revision = "top-one", .kind = .regular },
+    } });
+    const child = dired.rows.items[0].id;
+    const top = dired.rows.items[1].id;
+    try dired.rename(top, "draft.txt");
+
+    try dired.reconcileChildren(child, .{ .revision = "child-one", .entries = &.{
+        .{ .identity = ref(92, 1), .name = "inner.txt", .revision = "inner-one", .kind = .regular },
+    } });
+    try dired.setExpanded(child, true);
+
+    // The child's rows sit inside its subtree, so the flat order is already
+    // the visible tree order, and a listing scoped to it left the draft
+    // beside it exactly as it was.
+    const inner = dired.rows.items[1].id;
+    try std.testing.expectEqual(@as(usize, 3), dired.rows.items.len);
+    try std.testing.expectEqual(child, dired.row(inner).?.parent.?);
+    try std.testing.expectEqual(top, dired.rows.items[2].id);
+    try std.testing.expectEqualStrings("draft.txt", dired.row(top).?.draft.name);
+    try std.testing.expectEqual(@as(u16, 1), rowDepth(dired.rows.items, dired.row(inner).?.*));
+    // A child directory's namespace token is its own; the apply guard for
+    // this model's directory keeps the one its own listing supplied.
+    try std.testing.expectEqualStrings("root-one", dired.base_revision.?);
+
+    // The other direction holds too: the view's own listing never adopts or
+    // discards rows belonging to an open scope below it.
+    try dired.reconcile(.{ .revision = "root-two", .entries = &.{
+        .{ .identity = ref(90, 1), .name = "child", .revision = "child-one", .kind = .directory },
+    } });
+    try std.testing.expectEqual(@as(usize, 3), dired.rows.items.len);
+    try std.testing.expect(dired.row(inner) != null);
+    try std.testing.expectEqual(Conflict.stale, dired.row(top).?.conflict);
+
+    // A directory that vanishes takes the rows it was holding open with it.
+    try dired.reconcile(.{ .revision = "root-three", .entries = &.{} });
+    try std.testing.expect(dired.row(child) == null);
+    try std.testing.expect(dired.row(inner) == null);
+}
+
+test "collapsing hides a subtree without discarding the drafts inside it" {
+    var dired = Model.init(std.testing.allocator, .{ .authority = .here, .slot = 0, .generation = 1 });
+    defer dired.deinit();
+    try dired.reconcile(.{ .entries = &.{
+        .{ .identity = ref(95, 1), .name = "child", .revision = "child-one", .kind = .directory },
+    } });
+    const child = dired.rows.items[0].id;
+    try dired.reconcileChildren(child, .{ .entries = &.{
+        .{ .identity = ref(96, 1), .name = "inner.txt", .revision = "inner-one", .kind = .regular },
+    } });
+    try dired.setExpanded(child, true);
+    const inner = dired.rows.items[1].id;
+    try dired.rename(inner, "renamed.txt");
+
+    try dired.setExpanded(child, false);
+    try std.testing.expect(!rowVisible(dired.rows.items, dired.row(inner).?.*));
+    try std.testing.expect(rowVisible(dired.rows.items, dired.row(child).?.*));
+    try std.testing.expectEqualStrings("renamed.txt", dired.row(inner).?.draft.name);
+
+    // Re-opening reads the directory again: an external creation appears and
+    // the draft made before the fold reconciles rather than being replayed.
+    try dired.reconcileChildren(child, .{ .entries = &.{
+        .{ .identity = ref(96, 1), .name = "inner.txt", .revision = "inner-one", .kind = .regular },
+        .{ .identity = ref(97, 1), .name = "added.txt", .revision = "added-one", .kind = .regular },
+    } });
+    try dired.setExpanded(child, true);
+    try std.testing.expectEqual(@as(usize, 3), dired.rows.items.len);
+    try std.testing.expectEqualStrings("renamed.txt", dired.row(inner).?.draft.name);
+    try std.testing.expect(rowVisible(dired.rows.items, dired.rows.items[2]));
+
+    // Only a directory folds, and only while it is still there.
+    try std.testing.expectError(error.NotDirectory, dired.setExpanded(inner, true));
+    try dired.markDelete(child);
+    try std.testing.expectError(error.StaleParent, dired.setExpanded(child, false));
+}
+
+test "two drafts over one directory fold independently" {
+    const listing: Snapshot = .{ .entries = &.{
+        .{ .identity = ref(98, 1), .name = "child", .revision = "child-one", .kind = .directory },
+    } };
+    var left = Model.init(std.testing.allocator, .{ .authority = .here, .slot = 0, .generation = 1 });
+    defer left.deinit();
+    var right = Model.init(std.testing.allocator, .{ .authority = .here, .slot = 0, .generation = 1 });
+    defer right.deinit();
+    try left.reconcile(listing);
+    try right.reconcile(listing);
+
+    try left.reconcileChildren(left.rows.items[0].id, .{ .entries = &.{
+        .{ .identity = ref(99, 1), .name = "inner.txt", .revision = "inner-one", .kind = .regular },
+    } });
+    try left.setExpanded(left.rows.items[0].id, true);
+
+    try std.testing.expectEqual(@as(usize, 2), left.rows.items.len);
+    try std.testing.expectEqual(@as(usize, 1), right.rows.items.len);
+    try std.testing.expect(!right.rows.items[0].expanded);
 }

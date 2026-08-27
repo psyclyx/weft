@@ -262,6 +262,7 @@ weft.bind("normal", "SPC v k", "cursor-up");
 bindActionGroup("normal", "SPC v", [
   ["o", "target.open"],
   ["-", "target.open-container"],
+  ["TAB", "hierarchy.toggle-expanded"],
   ["c", "workspace.set-working-target"],
   ["e", "field.edit"],
   ["y", "selection.copy"],
