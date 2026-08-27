@@ -78,7 +78,7 @@ fn e(name: []const u8, comptime np: usize, comptime nr: usize, group: Group, doc
 /// `JsPlugin.load`) — the registration loops assert every entry got one.
 pub const imports = [_]Entry{
     // ── the config plane: real handlers on every linker ─────────────────
-    e("qjs_bind_key", 6, 0, .config, "bind a key chord in mode `m` to command `c` (config plane)"),
+    e("qjs_bind_key", 6, 0, .config, "weft.bind(scope, key, cmds): bind a key chord in scope `m` to a framed first-applicable intention list (doc/configuration.md §5.2)"),
     e("qjs_run", 4, 0, .config, "run a command by name with up to eight bounded string args (weft.run)"),
     e("qjs_echo", 2, 0, .config, "print a message to the echo area"),
     e("qjs_log", 2, 0, .config, "write a guest log line"),

@@ -124,7 +124,10 @@ pub const StatusSegBinder = struct {
 // ── Declaration types — one per `weft.*` call, in AUTHORED order. ──────────
 
 pub const PluginDecl = struct { name: []u8, path_form: bool };
-pub const BindDecl = struct { mode: []u8, key: []u8, command: []u8 };
+/// `weft.bind(scope, key, intention | [intentions])` (doc/configuration.md
+/// §5.2) — `commands` is the authored first-applicable fallback list; the
+/// string form is a one-entry list, so there is a single representation.
+pub const BindDecl = struct { mode: []u8, key: []u8, commands: []const []const u8 };
 pub const MenuDecl = struct { name: []u8 };
 pub const ActionDecl = struct { name: []u8 };
 pub const SemanticActionDecl = struct { name: []u8 };
@@ -132,6 +135,8 @@ pub const ProvideDecl = struct { action: []u8, mode: []u8, lang: []u8, command: 
 pub const ValueDecl = struct { owner: []u8, key: []u8, value: []u8 };
 pub const RunArg = struct { value: []u8 };
 pub const RunDecl = struct { command: []u8, args: []RunArg };
+/// Fallback-list ceiling, matching the shim's `WEFT_BIND_MAX_CMDS`.
+pub const maxBindCommands = 8;
 const maxRunArgs = 8;
 const maxRunArgBytes = 1024;
 const maxRunArgTotal = 4096;
@@ -343,7 +348,8 @@ pub const Manifest = struct {
         for (self.binds.items) |d| {
             gpa.free(d.mode);
             gpa.free(d.key);
-            gpa.free(d.command);
+            for (d.commands) |c| gpa.free(c);
+            gpa.free(d.commands);
         }
         self.binds.deinit(gpa);
         for (self.menus.items) |d| gpa.free(d.name);
@@ -399,8 +405,24 @@ pub const Manifest = struct {
     pub fn addPlugin(self: *Manifest, name: []const u8) !void {
         try self.plugins.append(self.gpa, .{ .name = try self.gpa.dupe(u8, name), .path_form = pluginTrust(name) == .path_form });
     }
-    pub fn addBind(self: *Manifest, mode: []const u8, key: []const u8, cmd: []const u8) !void {
-        try self.binds.append(self.gpa, .{ .mode = try self.gpa.dupe(u8, mode), .key = try self.gpa.dupe(u8, key), .command = try self.gpa.dupe(u8, cmd) });
+    /// `cmds` is the authored fallback list, in first-applicable order; the
+    /// `weft.bind` string form arrives as a one-entry slice.
+    pub fn addBind(self: *Manifest, mode: []const u8, key: []const u8, cmds: []const []const u8) !void {
+        if (cmds.len == 0) return error.BindListEmpty;
+        if (cmds.len > maxBindCommands) return error.BindListTooLong;
+        const mode_owned = try self.gpa.dupe(u8, mode);
+        errdefer self.gpa.free(mode_owned);
+        const key_owned = try self.gpa.dupe(u8, key);
+        errdefer self.gpa.free(key_owned);
+        const cmds_owned = try self.gpa.alloc([]const u8, cmds.len);
+        errdefer self.gpa.free(cmds_owned);
+        var copied: usize = 0;
+        errdefer for (cmds_owned[0..copied]) |c| self.gpa.free(c);
+        for (cmds, 0..) |c, i| {
+            cmds_owned[i] = try self.gpa.dupe(u8, c);
+            copied += 1;
+        }
+        try self.binds.append(self.gpa, .{ .mode = mode_owned, .key = key_owned, .commands = cmds_owned });
     }
     pub fn addMenu(self: *Manifest, name: []const u8) !void {
         try self.menus.append(self.gpa, .{ .name = try self.gpa.dupe(u8, name) });
@@ -512,7 +534,8 @@ pub const Manifest = struct {
         for (self.binds.items) |d| {
             hStr(h, d.mode);
             hStr(h, d.key);
-            hStr(h, d.command);
+            hLen(h, d.commands.len);
+            for (d.commands) |c| hStr(h, c);
         }
         hLen(h, self.menus.items.len);
         for (self.menus.items) |d| hStr(h, d.name);
@@ -684,7 +707,9 @@ pub const Manifest = struct {
         for (self.imports.items) |imp| try imp.applyDecls(gpa, actx, known);
 
         const prio = keymapPriorityForTier(self.tier);
-        for (self.binds.items) |d| actx.ctx.keymap.bind(gpa, d.mode, d.key, d.command, prio, self.owner) catch {};
+        // Fallback lists bind their FIRST entry; the rest ride inertly on the
+        // decl until the intention catalog resolves them.
+        for (self.binds.items) |d| actx.ctx.keymap.bind(gpa, d.mode, d.key, d.commands[0], prio, self.owner) catch {};
         for (self.menus.items) |d| applyMenu(actx.ctx, gpa, d.name, prio);
         for (self.actions.items) |d| command.registerAction(gpa, actx.ctx.commands, actx.ctx.actions, d.name, .pick) catch {};
         if (actx.ctx.semantic) |services| for (self.semantic_actions.items) |d|
@@ -1227,20 +1252,20 @@ test "manifest: staging + hash — two identical manifests hash identically" {
     const gpa = t.allocator;
     const a = try Manifest.create(gpa, "config", .config);
     defer a.destroy();
-    try a.addBind("normal", "j", "cursor-down");
+    try a.addBind("normal", "j", &.{"cursor-down"});
     try a.addValue("theme", "accent", "#8ec07c");
     try a.addPlugin("vim");
 
     const b = try Manifest.create(gpa, "config", .config);
     defer b.destroy();
-    try b.addBind("normal", "j", "cursor-down");
+    try b.addBind("normal", "j", &.{"cursor-down"});
     try b.addValue("theme", "accent", "#8ec07c");
     try b.addPlugin("vim");
 
     try t.expectEqual(a.hash(), b.hash());
 
     // A changed manifest hashes differently.
-    try b.addBind("normal", "k", "cursor-up");
+    try b.addBind("normal", "k", &.{"cursor-up"});
     try t.expect(a.hash() != b.hash());
 }
 
@@ -1303,11 +1328,11 @@ test "manifest: R3 — length-framed hash distinguishes a bare-concatenation col
     // collision the length-prefix framing (hStr/hLen) exists to break.
     const a = try Manifest.create(gpa, "config", .config);
     defer a.destroy();
-    try a.addBind("a", "b", "c");
+    try a.addBind("a", "b", &.{"c"});
 
     const b = try Manifest.create(gpa, "config", .config);
     defer b.destroy();
-    try b.addBind("ab", "", "c");
+    try b.addBind("ab", "", &.{"c"});
 
     try t.expect(a.hash() != b.hash());
 }
@@ -1453,4 +1478,50 @@ test "manifest: grantDiffSummary — a true no-op reload reports '(no change)'" 
 
 test {
     std.testing.refAllDecls(@This());
+}
+
+test "manifest: a bind fallback list is owned, hash-sensitive to content AND order (configuration.md §5.2)" {
+    const gpa = t.allocator;
+    const a = try Manifest.create(gpa, "config", .config);
+    defer a.destroy();
+    try a.addBind("normal", "Return", &.{ "target.activate", "editing.insert-line-break" });
+    try t.expectEqual(@as(usize, 2), a.binds.items[0].commands.len);
+
+    const b = try Manifest.create(gpa, "config", .config);
+    defer b.destroy();
+    try b.addBind("normal", "Return", &.{ "target.activate", "editing.insert-line-break" });
+    try t.expectEqual(a.hash(), b.hash());
+
+    // Fallback order is authored data, not a set.
+    const c = try Manifest.create(gpa, "config", .config);
+    defer c.destroy();
+    try c.addBind("normal", "Return", &.{ "editing.insert-line-break", "target.activate" });
+    try t.expect(a.hash() != c.hash());
+
+    // The string form is the same representation — a ONE-entry list, and a
+    // different decl than the two-entry one that starts with it.
+    const d = try Manifest.create(gpa, "config", .config);
+    defer d.destroy();
+    try d.addBind("normal", "Return", &.{"target.activate"});
+    try t.expectEqual(@as(usize, 1), d.binds.items[0].commands.len);
+    try t.expect(a.hash() != d.hash());
+
+    // Per-entry length framing: ["a","b"] never collides with ["ab"].
+    const e2 = try Manifest.create(gpa, "config", .config);
+    defer e2.destroy();
+    try e2.addBind("normal", "Return", &.{ "a", "b" });
+    const f = try Manifest.create(gpa, "config", .config);
+    defer f.destroy();
+    try f.addBind("normal", "Return", &.{"ab"});
+    try t.expect(e2.hash() != f.hash());
+}
+
+test "manifest: degenerate bind lists are rejected at the door, so apply always has a first entry" {
+    const gpa = t.allocator;
+    const m = try Manifest.create(gpa, "config", .config);
+    defer m.destroy();
+    try t.expectError(error.BindListEmpty, m.addBind("normal", "Return", &.{}));
+    const too_long = [_][]const u8{"x"} ** (maxBindCommands + 1);
+    try t.expectError(error.BindListTooLong, m.addBind("normal", "Return", &too_long));
+    try t.expectEqual(@as(usize, 0), m.binds.items.len);
 }

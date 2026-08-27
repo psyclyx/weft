@@ -1149,14 +1149,34 @@ fn cAgentWrite(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32, resul
     command.renderInto(gpa, doc, .agent, peer, &.{.{ .range = .{ .start = 0, .end = end }, .bytes = content }}) catch return;
 }
 
-/// Decode the first record of a framed config blob (uvarint count, then
-/// uvarint(len)++bytes). Core-local copy of the app-side decoder.
+/// Walk a framed blob (uvarint count, then uvarint(len)++bytes per record) —
+/// core-local copy of the app-side decoder. `next` yields null on a short or
+/// malformed buffer, so a truncated blob reads as fewer records, never as
+/// garbage bytes.
+const FramedRecords = struct {
+    cur: []const u8,
+    left: u64,
+
+    fn init(blob: []const u8) ?FramedRecords {
+        var cur = blob;
+        const count = framedUvarint(&cur) orelse return null;
+        return .{ .cur = cur, .left = count };
+    }
+    fn next(self: *FramedRecords) ?[]const u8 {
+        if (self.left == 0) return null;
+        const n = framedUvarint(&self.cur) orelse return null;
+        if (n > self.cur.len) return null;
+        const rec = self.cur[0..@intCast(n)];
+        self.cur = self.cur[@intCast(n)..];
+        self.left -= 1;
+        return rec;
+    }
+};
+
+/// The first record of a framed blob — a single-valued `weft.set`'s value.
 fn firstFramedRecord(blob: []const u8) ?[]const u8 {
-    var cur = blob;
-    _ = framedUvarint(&cur) orelse return null; // record count
-    const n = framedUvarint(&cur) orelse return null;
-    if (n > cur.len) return null;
-    return cur[0..@intCast(n)];
+    var it = FramedRecords.init(blob) orelse return null;
+    return it.next();
 }
 fn framedUvarint(cur: *[]const u8) ?u64 {
     var shift: u6 = 0;
@@ -1229,6 +1249,9 @@ fn readStr(br: *Bridge, caller: *wasm.Caller, ptr: i32, len: i32) ?[]u8 {
     return caller.readMemory(br.activeCtx().gpa, @intCast(ptr), @intCast(len)) catch null;
 }
 
+/// `weft.bind(scope, key, intention | [intentions])`: the third argument
+/// arrives as a framed list (the shim frames the string form as one entry),
+/// so both authored shapes reach the manifest as one representation.
 fn cBindKey(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32, results: []i32) void {
     _ = results;
     const br: *Bridge = @ptrCast(@alignCast(data.?));
@@ -1237,15 +1260,24 @@ fn cBindKey(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32, results:
     defer gpa.free(mode);
     const key = readStr(br, caller, args[2], args[3]) orelse return;
     defer gpa.free(key);
-    const cmd = readStr(br, caller, args[4], args[5]) orelse return;
-    defer gpa.free(cmd);
+    const blob = readStr(br, caller, args[4], args[5]) orelse return;
+    defer gpa.free(blob);
+    var cmds: [manifest_mod.maxBindCommands][]const u8 = undefined;
+    var n: usize = 0;
+    var it = FramedRecords.init(blob) orelse return;
+    while (it.next()) |rec| : (n += 1) {
+        if (n == cmds.len) return;
+        cmds[n] = rec;
+    }
+    if (n == 0) return;
     if (br.manifest) |m| {
-        m.addBind(mode, key, cmd) catch {};
+        m.addBind(mode, key, cmds[0..n]) catch {};
         return;
     }
     // LIVE mode (a resident JS plugin): user config shadows plugins and core
-    // defaults (highest tier) — unchanged from before manifest.zig existed.
-    br.activeCtx().keymap.bind(gpa, mode, key, cmd, @import("Keymap.zig").prio_config, "config") catch {};
+    // defaults (highest tier). Fallback lists bind their FIRST entry, as
+    // `applyDecls` does — no resolution is faked here either.
+    br.activeCtx().keymap.bind(gpa, mode, key, cmds[0], @import("Keymap.zig").prio_config, "config") catch {};
 }
 
 /// `weft.use(name)` backing: evaluate `<config_dir>/<name>.js` into ITS OWN
@@ -2805,7 +2837,7 @@ test "quickjs: weft.use produces a real imported sub-manifest at the imported ti
     try t.expectEqual(manifest_mod.Tier.imported, sub.tier);
     try t.expectEqualStrings("import:shared", sub.owner);
     try t.expectEqual(@as(usize, 1), sub.binds.items.len);
-    try t.expectEqualStrings("pick-next", sub.binds.items[0].command);
+    try t.expectEqualStrings("pick-next", sub.binds.items[0].commands[0]);
 }
 
 test "quickjs: reconcile — reapplying the identical config is a verified no-op" {
@@ -2927,4 +2959,81 @@ test "quickjs: W4 slice 4 — an UNCHANGED weft.grant survives a reload that cha
 
 test {
     std.testing.refAllDecls(@This());
+}
+
+test "quickjs: weft.bind takes an intention or a fallback list — one staged representation, order-sensitive hash (configuration.md §5.2)" {
+    const gpa = t.allocator;
+    var engine = try wasm.Engine.init(gpa);
+    defer engine.deinit();
+
+    const list_cfg =
+        \\weft.bind("normal", "Return", ["target.activate", "editing.insert-line-break"]);
+    ;
+    var env1: Env = undefined;
+    try Env.init(gpa, &env1);
+    defer env1.deinit(gpa);
+    const m1 = try evalToManifest(&engine, &env1.ctx, null, null, null, list_cfg, .config, "config");
+    defer m1.destroy();
+    try t.expectEqual(@as(usize, 1), m1.binds.items.len);
+    try t.expectEqual(@as(usize, 2), m1.binds.items[0].commands.len);
+    try t.expectEqualStrings("target.activate", m1.binds.items[0].commands[0]);
+    try t.expectEqualStrings("editing.insert-line-break", m1.binds.items[0].commands[1]);
+
+    // Sealed eval: the same source, a separate runtime, an identical hash.
+    var env2: Env = undefined;
+    try Env.init(gpa, &env2);
+    defer env2.deinit(gpa);
+    const m2 = try evalToManifest(&engine, &env2.ctx, null, null, null, list_cfg, .config, "config");
+    defer m2.destroy();
+    try t.expectEqual(m1.hash(), m2.hash());
+
+    // The STRING form stages the identical shape, one entry long.
+    var env3: Env = undefined;
+    try Env.init(gpa, &env3);
+    defer env3.deinit(gpa);
+    const m3 = try evalToManifest(&engine, &env3.ctx, null, null, null,
+        \\weft.bind("normal", "Return", "target.activate");
+    , .config, "config");
+    defer m3.destroy();
+    try t.expectEqual(@as(usize, 1), m3.binds.items[0].commands.len);
+    try t.expectEqualStrings("target.activate", m3.binds.items[0].commands[0]);
+    try t.expect(m1.hash() != m3.hash());
+
+    // Reordering the list is a content change the hash sees.
+    var env4: Env = undefined;
+    try Env.init(gpa, &env4);
+    defer env4.deinit(gpa);
+    const m4 = try evalToManifest(&engine, &env4.ctx, null, null, null,
+        \\weft.bind("normal", "Return", ["editing.insert-line-break", "target.activate"]);
+    , .config, "config");
+    defer m4.destroy();
+    try t.expect(m1.hash() != m4.hash());
+
+    // Applying a multi-entry list binds the FIRST entry (the catalog that
+    // resolves the rest lands later); the fallback rides on the decl.
+    var actx: manifest_mod.Manifest.ApplyCtx = .{ .ctx = &env1.ctx, .loader = null, .config = null };
+    try m1.apply(gpa, &actx);
+    try env1.head.setModeRaw(gpa, "normal");
+    try t.expectEqualStrings("target.activate", env1.keymap.lookup(env1.head.currentMode(), "Return").?);
+
+    // Reconciling the identical config is a no-op: still the first entry.
+    try manifest_mod.Manifest.reconcile(gpa, m1, m2, &actx);
+    try t.expectEqualStrings("target.activate", env1.keymap.lookup(env1.head.currentMode(), "Return").?);
+}
+
+test "quickjs: a degenerate weft.bind list fails the eval loudly — never a silently dropped binding" {
+    const gpa = t.allocator;
+    var engine = try wasm.Engine.init(gpa);
+    defer engine.deinit();
+
+    const bad = [_][]const u8{
+        "weft.bind(\"normal\", \"Return\", []);\n",
+        "weft.bind(\"normal\", \"Return\", [\"target.activate\", 7]);\n",
+    };
+    for (bad) |cfg| {
+        var env: Env = undefined;
+        try Env.init(gpa, &env);
+        defer env.deinit(gpa);
+        try t.expectError(error.ConfigException, evalToManifest(&engine, &env.ctx, null, null, null, cfg, .config, "config"));
+    }
 }

@@ -27,10 +27,14 @@ typedef struct {
     int len;
 } WeftRunArg;
 
+// weft.bind(scope, key, intention | [intentions]): the third argument crosses
+// as a FRAMED list (uvarint count, then uvarint(len)++bytes per entry — the
+// same encoding weft.set uses), so the string form is simply a one-entry list.
+#define WEFT_BIND_MAX_CMDS 8
 __attribute__((import_module("weft"), import_name("qjs_bind_key")))
 extern void host_bind_key(const char *mode, int mode_len,
                           const char *key, int key_len,
-                          const char *cmd, int cmd_len);
+                          const char *cmds, int cmds_len);
 __attribute__((import_module("weft"), import_name("qjs_run")))
 extern void host_run(const char *cmd, int cmd_len,
                      const WeftRunArg *args, int arg_count);
@@ -159,18 +163,74 @@ static JSValue weft_throw_denied(JSContext *ctx, const char *verb) {
 // zero arguments remains valid, while bounded string arguments are carried as
 // borrowed ptr/len records for the duration of the host call. ──
 
+// Record framing: uvarint(count) then count×(uvarint(len) ++ bytes) — the
+// LEB128 style kv/guest use, so a decoder can detect a short/truncated buffer
+// rather than silently dropping tail records. Shared by `weft.bind`'s
+// intention list and `weft.set`'s value records.
+static int put_uv(unsigned char *buf, size_t *used, size_t cap, unsigned long v) {
+    for (;;) {
+        if (*used >= cap) return 0;
+        unsigned char b = (unsigned char)(v & 0x7f);
+        v >>= 7;
+        if (v) { buf[(*used)++] = b | 0x80; } else { buf[(*used)++] = b; return 1; }
+    }
+}
+static int put_rec(unsigned char *buf, size_t *used, size_t cap, const char *s, size_t n) {
+    if (!put_uv(buf, used, cap, (unsigned long)n)) return 0;
+    if (*used + n > cap) return 0;
+    memcpy(buf + *used, s, n);
+    *used += n;
+    return 1;
+}
+
+// weft.bind(scope, key, intention | [intentions]) — the third argument is one
+// intention or an authored first-applicable fallback list (doc/configuration.md
+// §5.2). Both shapes cross as the same framed list; a string is a one-entry one.
 static JSValue js_bind_key(JSContext *ctx, JSValueConst this_val,
                            int argc, JSValueConst *argv) {
-    if (argc < 3) return JS_ThrowTypeError(ctx, "bind(mode, key, cmd)");
-    size_t ml, kl, cl;
+    if (argc < 3) return JS_ThrowTypeError(ctx, "bind(scope, key, cmd | [cmd, ...])");
+    size_t ml, kl;
     const char *m = JS_ToCStringLen(ctx, &ml, argv[0]);
     const char *k = JS_ToCStringLen(ctx, &kl, argv[1]);
-    const char *c = JS_ToCStringLen(ctx, &cl, argv[2]);
-    if (m && k && c) host_bind_key(m, (int)ml, k, (int)kl, c, (int)cl);
+    static unsigned char buf[4096];
+    size_t used = 0;
+    int ok = 1;
+    JSValue err = JS_UNDEFINED;
+    if (m && k) {
+        if (JS_IsArray(argv[2])) {
+            JSValue lenv = JS_GetPropertyStr(ctx, argv[2], "length");
+            uint32_t len = 0;
+            JS_ToUint32(ctx, &len, lenv);
+            JS_FreeValue(ctx, lenv);
+            if (len == 0 || len > WEFT_BIND_MAX_CMDS)
+                err = JS_ThrowRangeError(ctx, "bind fallback list holds 1 to %d intentions", WEFT_BIND_MAX_CMDS);
+            else
+                ok = put_uv(buf, &used, sizeof buf, len);
+            for (uint32_t i = 0; ok && !JS_IsException(err) && i < len; i++) {
+                JSValue ev = JS_GetPropertyUint32(ctx, argv[2], i);
+                if (!JS_IsString(ev)) {
+                    err = JS_ThrowTypeError(ctx, "bind fallback entries must be strings");
+                    JS_FreeValue(ctx, ev);
+                    break;
+                }
+                size_t el;
+                const char *es = JS_ToCStringLen(ctx, &el, ev);
+                if (es) ok = put_rec(buf, &used, sizeof buf, es, el);
+                JS_FreeCString(ctx, es);
+                JS_FreeValue(ctx, ev);
+            }
+        } else {
+            size_t cl;
+            const char *c = JS_ToCStringLen(ctx, &cl, argv[2]);
+            ok = c && put_uv(buf, &used, sizeof buf, 1) &&
+                 put_rec(buf, &used, sizeof buf, c, cl);
+            JS_FreeCString(ctx, c);
+        }
+        if (ok && !JS_IsException(err)) host_bind_key(m, (int)ml, k, (int)kl, (const char *)buf, (int)used);
+    }
     JS_FreeCString(ctx, m);
     JS_FreeCString(ctx, k);
-    JS_FreeCString(ctx, c);
-    return JS_UNDEFINED;
+    return err;
 }
 
 static JSValue js_run(JSContext *ctx, JSValueConst this_val,
@@ -266,28 +326,10 @@ static JSValue js_plugin(JSContext *ctx, JSValueConst this_val,
     return JS_UNDEFINED;
 }
 
-// ── Config-data framing. weft.set(plugin, key, value) hands a plugin a small
-// declarative table (its keymap, pairs, formatters, languages) that overrides
-// the plugin's shipped defaults. `value` is a string (one record) or an array
-// of strings (records). We frame it as uvarint(count) then count×(uvarint(len)
-// ++ bytes) — the same LEB128 style kv/guest use — so the guest decoder can
-// detect a short/truncated buffer rather than silently dropping tail records. ──
-
-static int put_uv(unsigned char *buf, size_t *used, size_t cap, unsigned long v) {
-    for (;;) {
-        if (*used >= cap) return 0;
-        unsigned char b = (unsigned char)(v & 0x7f);
-        v >>= 7;
-        if (v) { buf[(*used)++] = b | 0x80; } else { buf[(*used)++] = b; return 1; }
-    }
-}
-static int put_rec(unsigned char *buf, size_t *used, size_t cap, const char *s, size_t n) {
-    if (!put_uv(buf, used, cap, (unsigned long)n)) return 0;
-    if (*used + n > cap) return 0;
-    memcpy(buf + *used, s, n);
-    *used += n;
-    return 1;
-}
+// ── weft.set(plugin, key, value) hands a plugin a small declarative table
+// (its keymap, pairs, formatters, languages) that overrides the plugin's
+// shipped defaults. `value` is a string (one record) or an array of strings
+// (records), framed by put_uv/put_rec above. ──
 
 static JSValue js_set(JSContext *ctx, JSValueConst this_val,
                       int argc, JSValueConst *argv) {
