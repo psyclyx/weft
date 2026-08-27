@@ -370,9 +370,13 @@ fn cBufferReadOnly(ctx: *Context, args: struct { on: bool }) anyerror!Value {
 
 /// Close the active buffer; a dirty buffer refuses (save or use a
 /// force-close from config).
+///
+/// The ACTIVE entry, deliberately — not `ctx.buffer()`. Retiring an entry is a
+/// focus-scoped workspace verb, and a background delivery's bound entry names
+/// where that delivery WRITES, never what it may close.
 fn cBufferClose(ctx: *Context, args: struct {}) anyerror!Value {
     _ = args;
-    const b = ctx.buffer();
+    const b = ctx.buffers.active();
     if (b.hasUnsavedFile(ctx.gpa) catch true) return .{ .string = "dirty" };
     try ctx.buffers.close(ctx.gpa, b.id, ctx.head, ctx.keymap);
     return ok;

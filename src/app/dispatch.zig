@@ -23,7 +23,7 @@
 //! NOT migrated to PAIRED TRANSIENTS this pass (deliberately — see
 //! `ctx.zig`'s module doc): guest-initiated `weft.setMode` (every plugin's
 //! OWN direct menu entry — `git-push-menu`/`git-pull-menu`/`git-fetch-menu`
-//! (sticky), `git-reset-menu`, `git-confirm`/`git-confirm2`, vim's
+//! (sticky), `git-reset-menu`, vim's
 //! `op-pending`/`op-to`, helix's `helix-op`, dired's `dired-confirm`) stays
 //! on the legacy `Head.menu_return` table (not `Head.transient_stack`),
 //! which therefore CANNOT be deleted — it is still the only record for
@@ -41,8 +41,8 @@
 //! sticky re-enter, nested LIFO, a leaf's own buffer switch mid-menu, and
 //! the interaction-boundary leak tripwire below) and `project_test.zig`'s
 //! spine test for the real `git-commit-dispatch` → `git-commit` (buffer
-//! switch mid-menu) → `git-commit-menu` → `git-commit-finish` flow,
-//! unmodified by this migration.
+//! switch mid-menu) → an ordinary draft entry saved to commit, unmodified
+//! by this migration.
 
 const std = @import("std");
 const semantic = @import("weft_semantic");

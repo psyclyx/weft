@@ -1502,3 +1502,120 @@ test "e2e/output: build output navigates on its own mode, not run's" {
     try t.expect(std.mem.indexOf(u8, keys, "grep\x00Return\x00grep-visit\n") != null);
     try t.expect(ed.keymap.isRestingMode("build"));
 }
+
+/// Wait until no entry is named `name` any more — how a test observes a draft
+/// that the commit it authored retired.
+fn drainUntilGone(ed: *Editor, name: []const u8) bool {
+    const deadline = core.task.nowNs() + 10 * std.time.ns_per_s;
+    while (core.task.nowNs() < deadline) {
+        ed.settle(1);
+        if (ed.buffers.findByName(name) == null) return true;
+    }
+    return false;
+}
+
+// A commit message is not a mode: it is an ordinary text entry whose
+// `std.persistence.save` intention IS the commit (doc §14.3 — commit drafts may
+// be workspace entries; confirmations and option collection are interactions).
+// So a draft survives being left and returned to, the palette's save reaches it
+// exactly as `:w` does, and — because each draft records the repository it was
+// written for — a second repository's draft is a second entry that still
+// commits where it belongs, from anywhere.
+test "e2e/git: a commit draft round-trips focus, commits through the save intention, and stays its own repository's" {
+    const gpa = t.allocator;
+    var proj: Project = undefined;
+    try proj.init(gpa);
+    defer proj.deinit();
+
+    var ed: Editor = undefined;
+    try Editor.init(gpa, &ed);
+    defer ed.deinit();
+    try loadWorkspace(&ed);
+
+    // Two real repositories, one beside the other, each with something staged —
+    // set up as a person would, through the oracle, never the editor.
+    for ([_][]const u8{
+        "git init -q -b master",
+        "git config user.email e2e@weft.test",
+        "git config user.name weft-e2e",
+        "printf 'one\\n' > outer.txt && git add outer.txt",
+        "mkdir -p second",
+        "git -C second init -q -b master",
+        "git -C second config user.email e2e@weft.test",
+        "git -C second config user.name weft-e2e",
+        "printf 'two\\n' > second/inner.txt && git -C second add inner.txt",
+    }) |cmd| {
+        const out = try proj.oracle(cmd);
+        gpa.free(out);
+    }
+
+    // The outer repository's draft.
+    ed.run("git-status");
+    try t.expect(drainToolContains(&ed, "*git*", "outer.txt"));
+    ed.run("git-commit");
+    try t.expectEqualStrings("*git-commit*", ed.bufferName());
+    // Git owns no mode for it: the entry rests in the configuration's own
+    // editing modes, and text reaches it because it is ordinary text.
+    try t.expectEqualStrings("normal", ed.mode());
+    ed.press("i", "");
+    ed.typeText("outer through the draft");
+    ed.press("Escape", "");
+
+    // Leave and come back: the draft is an entry, so the message is still there.
+    try focusBuffer(&ed, "*git*");
+    try focusBuffer(&ed, "*git-commit*");
+    {
+        const msg = try ed.textAlloc();
+        defer gpa.free(msg);
+        try t.expectEqualStrings("outer through the draft", msg);
+    }
+
+    // The second repository, reached the only way this plugin knows one — the
+    // directory it runs in. Its draft is its OWN entry.
+    try h.chdirTo("second");
+    ed.run("git-status");
+    try t.expect(drainToolContains(&ed, "*git*", "inner.txt"));
+    ed.run("git-commit");
+    try t.expectEqualStrings("*git-commit:2*", ed.bufferName());
+    ed.press("i", "");
+    ed.typeText("inner through its own draft");
+    ed.press("Escape", "");
+
+    // Back out of that directory: the draft still commits where it was written,
+    // because it recorded its repository when it opened.
+    try h.chdirTo("..");
+
+    // The palette route: resolve `std.persistence.save` against this entry and
+    // invoke what wins — the same door a palette accepts an offer through, with
+    // no knowledge that git exists.
+    {
+        var why: [512]u8 = undefined;
+        const plane = ed.ctx.intent.?;
+        try t.expect(plane.invokeNamed(ed.ctx, "std.persistence.save", &why) == .invoked);
+    }
+    try t.expect(drainUntilOracle(&proj, &ed, "git -C second log --oneline", "inner through its own draft"));
+    // Accepted, so the entry it authored is spent and closes.
+    try t.expect(drainUntilGone(&ed, "*git-commit:2*"));
+    // …and it committed THERE, not here.
+    {
+        const outer_log = try proj.oracle("git log --oneline");
+        defer gpa.free(outer_log);
+        try t.expect(std.mem.indexOf(u8, outer_log, "inner through its own draft") == null);
+    }
+
+    // The first draft is untouched by all of it, and commits to its own
+    // repository through the same intention.
+    try focusBuffer(&ed, "*git-commit*");
+    {
+        const msg = try ed.textAlloc();
+        defer gpa.free(msg);
+        try t.expectEqualStrings("outer through the draft", msg);
+    }
+    {
+        var why: [512]u8 = undefined;
+        const plane = ed.ctx.intent.?;
+        try t.expect(plane.invokeNamed(ed.ctx, "std.persistence.save", &why) == .invoked);
+    }
+    try t.expect(drainUntilOracle(&proj, &ed, "git log --oneline", "outer through the draft"));
+    try t.expect(drainUntilGone(&ed, "*git-commit*"));
+}

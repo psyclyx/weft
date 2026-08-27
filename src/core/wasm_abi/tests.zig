@@ -1718,7 +1718,7 @@ test "wasm plugin: git-status runs git into a focused tool buffer (async)" {
     for ([_][]const u8{
         "git-amend",            "git-fixup",         "git-cherry-pick", "git-revert",
         "git-reset-hard",       "git-branch-create", "git-stash-pop",   "git-push-do",
-        "git-fetch-toggle-all", "git-rebase-finish", "git-confirm-yes",
+        "git-fetch-toggle-all", "git-rebase-save",   "git-commit-save",
     }) |name| try t.expect(env.commands.find(name) != null);
 
     _ = try command.run(&env.commands, &env.ctx, "git-status", &.{});

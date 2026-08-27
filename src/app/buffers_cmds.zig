@@ -178,7 +178,9 @@ pub fn closeBufferHandler(ctx: *core.command.Context, data: ?*anyopaque, args: [
     const command_context: *Context = @ptrCast(@alignCast(data.?));
     const deps = command_context.attachments;
     if (args.len != 0) return error.ArityMismatch;
-    const b = ctx.buffer();
+    // The ACTIVE entry, like core's: closing is focus-scoped, and a background
+    // delivery's bound entry is where it writes, not what it may retire.
+    const b = ctx.buffers.active();
     if (b.hasUnsavedFile(ctx.gpa) catch true) return .{ .string = "dirty" };
     // Order matters: shares reference the doc and its layers.
     if (deps.share) |sc| {

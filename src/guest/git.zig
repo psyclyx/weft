@@ -16,15 +16,18 @@
 //! (git's line algorithm: drop unselected `+`, turn unselected `-` into
 //! context) applied the same way. Every mutation chains a re-gather in ONE shell
 //! command so the buffer reflects the new index (the old `stageThenRefresh`
-//! discipline). `k`/discard is destructive, gated behind a y/n confirm mode.
+//! discipline). Discard is destructive, so it ASKS — through the pick membrane,
+//! like every other destructive verb here; git owns no confirmation mode.
 //!
 //! A COMMIT DRAFT is not part of that projection: it is an ordinary instanced
 //! text entry (`*git-commit*`, `*git-commit:2*`, …) with no mode and no keys of
 //! its own. It is tool-backed, so `save` in it resolves to `git-commit-save` —
 //! saving the draft IS the commit, aborting it is closing the entry, and
 //! amend/reword/fixup/squash are offers that re-seat the draft rather than
-//! commands with their own buffers. Each draft resolves its repository when it
-//! opens, so a second repository's draft is genuinely a second entry.
+//! commands with their own buffers. Each draft records the repository it was
+//! written for, so a second repository's draft is genuinely a second entry. A
+//! REBASE PLAN is the same shape: an instanced entry saved to run its rebase
+//! through git's own `GIT_SEQUENCE_EDITOR`.
 //!
 //! perms `{proc, timer, fs_write}` — fs_write drops each draft's message and the
 //! synthesized patch into temp files. grant_max edit (it authors its own buffer).
@@ -49,15 +52,14 @@ var body_out: [PATCH_CAP]u8 = undefined;
 /// Temp files, cwd-relative (the locus the shell command runs in). Removed by
 /// the same command that consumes them.
 const patch_tmp = ".weft-git.patch";
-const rebase_tmp = ".weft-rebase.todo";
 
 // ── Phase 2b/2c transient state (all bounded; see the caps note above) ──
 /// The commit hash under point, captured when a commit-scoped verb (show/fixup/
 /// squash/cherry-pick/revert/reset) fires — survives the mode hop into a submenu.
 var pending_hash: [64]u8 = undefined;
 var pending_hash_len: usize = 0;
-/// A full mutation staged behind the generic y/n confirm (branch delete, stash
-/// drop, reset --hard) — run verbatim by `git-confirm-yes`.
+/// A full mutation staged behind a confirmation (branch delete, stash drop,
+/// reset --hard) — run verbatim once the answer comes back `yes`.
 var confirm_cmd: [1 << 12]u8 = undefined;
 var confirm_len: usize = 0;
 /// Name typed into the `*git-input*` prompt (branch names, the rebase depth).
@@ -65,10 +67,7 @@ var input_name: [256]u8 = undefined;
 var input_name_len: usize = 0;
 const InputAction = enum(u8) { none, branch_checkout, branch_create, branch_new, branch_rename, branch_delete, rebase_start };
 var input_action: InputAction = .none;
-/// The rebase base ref (`HEAD~N`), used for both the todo listing and the finish.
-var rebase_base: [64]u8 = undefined;
-var rebase_base_len: usize = 0;
-/// Buffer for building `*git-rebase*` todo lines + the transient op command.
+/// Buffer for building a rebase plan's todo lines + the transient op command.
 var op_buf: [1 << 14]u8 = undefined;
 // Push/pull/fetch flags accumulated in the (persistent, surface-rendered)
 // transient modes; reset each time the transient is (re)opened.
@@ -213,8 +212,6 @@ const cmds = [_]Cmd{
     .{ .name = "git-stage-all", .handler = gitStageAll },
     .{ .name = "git-unstage-all", .handler = gitUnstageAll },
     .{ .name = "git-discard", .handler = gitDiscard },
-    .{ .name = "git-discard-do", .handler = gitDiscardDo },
-    .{ .name = "git-discard-cancel", .handler = gitDiscardCancel },
     .{ .name = "git-visit", .handler = gitVisit },
     .{ .name = "git-commit", .handler = gitCommit },
     // Saving a draft entry IS its commit; the settle runs on the fill's way back.
@@ -269,23 +266,13 @@ const cmds = [_]Cmd{
     .{ .name = "git-fetch-toggle-all", .handler = gitFetchToggleAll },
     .{ .name = "git-fetch-toggle-prune", .handler = gitFetchTogglePrune },
     .{ .name = "git-fetch-do", .handler = gitFetchDo },
-    // Interactive rebase (Phase 2c).
+    // Interactive rebase: the plan is an entry; saving it runs the rebase.
     .{ .name = "git-rebase-interactive", .handler = gitRebaseInteractive },
     .{ .name = "git-rebase-continue", .handler = gitRebaseContinue },
     .{ .name = "git-rebase-abort", .handler = gitRebaseAbort },
     .{ .name = "git-rebase-skip", .handler = gitRebaseSkip },
-    .{ .name = "git-rebase-pick", .handler = gitRebasePick },
-    .{ .name = "git-rebase-squash", .handler = gitRebaseSquash },
-    .{ .name = "git-rebase-edit", .handler = gitRebaseEdit },
-    .{ .name = "git-rebase-reword", .handler = gitRebaseReword },
-    .{ .name = "git-rebase-fixup", .handler = gitRebaseFixup },
-    .{ .name = "git-rebase-drop", .handler = gitRebaseDrop },
-    .{ .name = "git-rebase-finish", .handler = gitRebaseFinish },
-    .{ .name = "git-rebase-cancel", .handler = gitRebaseCancel },
-    .{ .name = "git-rebase-resume", .handler = gitRebaseResume },
-    // Generic y/n confirm + menu-leave helpers.
-    .{ .name = "git-confirm-yes", .handler = gitConfirmYes },
-    .{ .name = "git-confirm-no", .handler = gitConfirmNo },
+    .{ .name = "git-rebase-save", .handler = gitRebaseSave },
+    .{ .name = "git-rebase-settle", .handler = gitRebaseSettle },
     .{ .name = "git-menu-cancel", .handler = gitMenuCancel },
     .{ .name = "git-menu-cancel-surface", .handler = gitMenuCancelSurface },
     // Kept for the SPC-g leader menu: read-only views into their own buffers.
@@ -324,7 +311,7 @@ export fn init() void {
     weft.bindKey("git", "S", "git-stage-all");
     weft.bindKey("git", "U", "git-unstage-all");
     // Discard is destructive; `x` (not git's `k`, which we spend on vim-style
-    // up-motion) enters the y/n confirm before anything is thrown away.
+    // up-motion) asks before anything is thrown away.
     // `x` dispatches by node kind (file/hunk → discard; commit → reset menu).
     weft.bindKey("git", "x", "git-discard");
     // `c` opens the commit dispatch transient (which-key renders it).
@@ -344,20 +331,8 @@ export fn init() void {
     weft.bindKey("git", "Return", "git-visit");
     weft.bindKey("git", "q", "buffer-back");
 
-    // Discard confirm: a tiny menu mode — y does it, n/Escape backs out.
-    weft.menuMode("git-confirm");
-    weft.bindKey("git-confirm", "y", "git-discard-do");
-    weft.bindKey("git-confirm", "n", "git-discard-cancel");
-    weft.bindKey("git-confirm", "Escape", "git-discard-cancel");
-    weft.bindKey("git-confirm", "C-g", "git-discard-cancel");
-
-    // A GENERIC y/n confirm (branch delete, stash drop, reset --hard): y runs the
-    // staged `confirm_cmd`, n/Escape backs out. One menu, many destructive verbs.
-    weft.menuMode("git-confirm2");
-    weft.bindKey("git-confirm2", "y", "git-confirm-yes");
-    weft.bindKey("git-confirm2", "n", "git-confirm-no");
-    weft.bindKey("git-confirm2", "Escape", "git-confirm-no");
-    weft.bindKey("git-confirm2", "C-g", "git-confirm-no");
+    // Discard and the other destructive verbs ask through the pick membrane
+    // (`confirmPick`), so git owns no confirmation modes at all.
 
     // A commit draft owns NO mode and NO keys: it is an ordinary text entry in
     // the configuration's own editing modes. Its tool identity is what makes it
@@ -478,24 +453,10 @@ export fn init() void {
     weft.bindKey("git-fetch-menu", "C-g", "git-menu-cancel-surface");
     weft.bindKey("git-fetch-menu", "q", "git-menu-cancel-surface");
 
-    // The rebase-todo buffer is STRUCTURAL: the action letters set the todo
-    // verb on the current line, `default`'s editing keys reorder lines, and
-    // C-c finishes/aborts. It commits no typed text — a todo list is a list of
-    // verbs, not prose.
-    weft.setFallback("git-rebase", "default");
-    weft.bindKey("git-rebase", "p", "git-rebase-pick");
-    weft.bindKey("git-rebase", "s", "git-rebase-squash");
-    weft.bindKey("git-rebase", "e", "git-rebase-edit");
-    weft.bindKey("git-rebase", "r", "git-rebase-reword");
-    weft.bindKey("git-rebase", "f", "git-rebase-fixup");
-    weft.bindKey("git-rebase", "d", "git-rebase-drop");
-    weft.bindKey("git-rebase", "k", "git-rebase-drop");
-    weft.bindKey("git-rebase", "C-c", "git-rebase-cc");
-    weft.menuMode("git-rebase-cc");
-    weft.bindKey("git-rebase-cc", "C-c", "git-rebase-finish");
-    weft.bindKey("git-rebase-cc", "C-k", "git-rebase-cancel");
-    weft.bindKey("git-rebase-cc", "Escape", "git-rebase-resume");
-    weft.bindKey("git-rebase-cc", "C-g", "git-rebase-resume");
+    // A rebase plan is a list of verbs in an ordinary text entry: it is edited
+    // by typing, like the todo `git rebase -i` would have opened, and saving it
+    // hands it to git through the same sequence editor.
+    weft.provide("save", .{ .tool = todo_tool }, "git-rebase-save", 10);
 
     // A shared read-only view mode for the show/log/stash buffers (own their own
     // buffers, so git's mutating keys never fire against a stale model).
@@ -520,9 +481,10 @@ const Fill = enum(u32) {
     status, // the `*git*` projection: parse the raw output into the model
     diff, // a raw diff/show listing: color it
     log, // a `git log` listing: color it
-    rebase, // the rebase todo: rewrite into editable `pick …` lines
-    draft, // a commit draft's repository + seeded message
+    rebase, // a rebase plan: rewrite the listing into `pick …` lines
+    draft, // a commit draft's seeded message
     commit, // a commit's outcome, ahead of the status gather
+    sequence, // a rebase's outcome, ahead of the status gather
 };
 
 export fn on_fill_token(token: u32) void {
@@ -535,6 +497,7 @@ export fn on_fill_token(token: u32) void {
         .rebase => rebaseTodoFill(),
         .draft => draftFill(),
         .commit => commitFill(),
+        .sequence => sequenceFill(),
     }
 }
 
@@ -1172,14 +1135,8 @@ fn stageSection(sec: Section, stage: bool) void {
 fn gitDiscard() void {
     const n = nodeAt(weft.cursor());
     switch (n.kind) {
-        .file => {
-            weft.echo("discard changes to this file? y/n");
-            weft.setMode("git-confirm");
-        },
-        .hunk => {
-            weft.echo("discard this hunk? y/n");
-            weft.setMode("git-confirm");
-        },
+        .file => confirmPick(.discard, "discard changes to this file?"),
+        .hunk => confirmPick(.discard, "discard this hunk?"),
         .section => {
             // `x` on the Recent section → reset transient to the commit under
             // point; other sections → the whole-section discard confirm.
@@ -1192,18 +1149,13 @@ fn gitDiscard() void {
                 weft.setMode("git-reset-menu");
                 return;
             }
-            weft.echo("discard the whole section? y/n");
-            weft.setMode("git-confirm");
+            confirmPick(.discard, "discard the whole section?");
         },
         .none => {},
     }
 }
-fn gitDiscardCancel() void {
-    weft.setMode("git");
-    weft.echo("discard cancelled");
-}
 /// The confirmed destructive path. Re-resolves the node from the (unmoved)
-/// cursor/selection, so no state has to survive the mode hop.
+/// cursor/selection, so no state has to survive the question.
 fn gitDiscardDo() void {
     const n = nodeAt(weft.cursor());
     const sel = weft.selection();
@@ -1448,9 +1400,21 @@ const Draft = struct {
 const draft_tool = "git-commit";
 const Drafts = weft.Instances(Draft, 4);
 var drafts: Drafts = .{};
-/// The draft a landing commit fill answers for. One commit is in flight at a
-/// time; a fill that finds none simply has nothing left to tell.
+/// A rebase plan: an ordinary instanced entry too, saved to run its rebase.
+const Todo = struct {
+    base: [64]u8 = undefined, // the rebase base ref (`HEAD~N`)
+    base_len: usize = 0,
+    tmp: [64]u8 = undefined,
+    tmp_len: usize = 0,
+};
+const todo_tool = "git-rebase";
+const Todos = weft.Instances(Todo, 4);
+var todos: Todos = .{};
+
+/// The entries a landing fill answers for. One commit and one rebase are in
+/// flight at a time; a fill that finds none simply has nothing left to tell.
 var committing: ?*Drafts.Slot = null;
+var sequencing: ?*Todos.Slot = null;
 var commit_ok = false;
 /// What git said about the commit, kept for the failure echo.
 var commit_note: [512]u8 = undefined;
@@ -1465,7 +1429,7 @@ fn openDraft(flags: []const u8, prefill: []const u8) void {
     };
     slot.value = .{};
     setFlags(slot, flags);
-    setTmpPath(slot);
+    slot.value.tmp_len = tmpPathFor(slot.name(), &slot.value.tmp);
     slot.value.root_len = repo_root_len;
     @memcpy(slot.value.root[0..repo_root_len], repo_root[0..repo_root_len]);
     weft.toolBacking(draft_tool);
@@ -1479,21 +1443,22 @@ fn setFlags(slot: *Drafts.Slot, flags: []const u8) void {
     @memcpy(slot.value.flags[0..slot.value.flags_len], flags[0..slot.value.flags_len]);
 }
 
-fn setTmpPath(slot: *Drafts.Slot) void {
+/// A per-entry temp file named after the entry, so two live ones never write
+/// over each other. Returns its length in `tmp`.
+fn tmpPathFor(name: []const u8, tmp: []u8) usize {
     const prefix = ".weft-";
     var w: usize = prefix.len;
-    @memcpy(slot.value.tmp[0..w], prefix);
-    for (slot.name()) |c| {
-        if (w == slot.value.tmp.len) break;
-        const keep: u8 = switch (c) {
+    @memcpy(tmp[0..w], prefix);
+    for (name) |c| {
+        if (w == tmp.len) break;
+        tmp[w] = switch (c) {
             'a'...'z', '0'...'9' => c,
             '-', ':' => '-',
             else => continue,
         };
-        slot.value.tmp[w] = keep;
         w += 1;
     }
-    slot.value.tmp_len = w;
+    return w;
 }
 
 /// Seed a draft's message from `prefill`'s stdout (`git log -1 --format=%B` for
@@ -1548,26 +1513,31 @@ fn gitCommitSave() void {
     weft.procToBuffer(cmd, buf_name, @intFromEnum(Fill.commit));
 }
 
-/// The commit ran: git's output and exit status precede the status gather.
+/// The commit ran: git's own words and exit status precede the status gather.
 fn commitFill() void {
     loadRaw();
-    commit_ok = false;
-    if (std.mem.indexOf(u8, raw[0..raw_len], MARK_C)) |ci| {
-        commit_note_len = @min(ci, commit_note.len);
-        @memcpy(commit_note[0..commit_note_len], raw[0..commit_note_len]);
-        var i = ci + MARK_C.len;
-        var status: usize = 0;
-        while (i < raw_len and raw[i] >= '0' and raw[i] <= '9') : (i += 1) {
-            status = status * 10 + (raw[i] - '0');
-        }
-        commit_ok = status == 0;
-        // Hand `parse` the gather alone — the commit prologue is not status.
-        if (i < raw_len and raw[i] == '\n') i += 1;
-        std.mem.copyForwards(u8, raw[0 .. raw_len - i], raw[i..raw_len]);
-        raw_len -= i;
-    }
+    commit_ok = takeEffectOutcome();
     renderStatus();
     weft.run("git-commit-settle");
+}
+
+/// Split an "effect, then gather" fill: keep what the effect said, report
+/// whether it succeeded, and leave `raw` holding the gather alone — a command's
+/// prologue is not status.
+fn takeEffectOutcome() bool {
+    commit_note_len = 0;
+    const ci = std.mem.indexOf(u8, raw[0..raw_len], MARK_C) orelse return false;
+    commit_note_len = @min(ci, commit_note.len);
+    @memcpy(commit_note[0..commit_note_len], raw[0..commit_note_len]);
+    var i = ci + MARK_C.len;
+    var status: usize = 0;
+    while (i < raw_len and raw[i] >= '0' and raw[i] <= '9') : (i += 1) {
+        status = status * 10 + (raw[i] - '0');
+    }
+    if (i < raw_len and raw[i] == '\n') i += 1;
+    std.mem.copyForwards(u8, raw[0 .. raw_len - i], raw[i..raw_len]);
+    raw_len -= i;
+    return status == 0;
 }
 
 /// Deferred to a dispatching entry (like `git-note-drops-deliver`): a draft git
@@ -1580,6 +1550,7 @@ fn gitCommitSettle() void {
         weft.echo(firstLine(commit_note[0..commit_note_len]));
         return;
     }
+    // Retiring the entry is focus-scoped: land on it, then close it.
     if (focusBuffer(slot.name())) weft.run("buffer-close");
     drafts.close(slot);
     _ = focusBuffer(buf_name);
@@ -1984,20 +1955,46 @@ fn findIdentityOffset() ?usize {
     }
 }
 
-// ── Generic destructive confirm (branch delete / stash drop / reset --hard) ──
-/// Stage a full mutation behind the y/n `git-confirm2` menu.
+// ── Confirmation is an interaction, not a mode ─────────────────────────────
+// A destructive verb asks through the pick membrane: the question is the
+// prompt, the two candidates are the answer, and the pick id says which
+// question was answered. No mode of git's own stands between the two.
+
+/// Which question a pick answers.
+const Confirm = enum(u32) { discard = 1, staged = 2 };
+
+/// Ask, safe answer first, so accepting the leading candidate changes nothing.
+fn confirmPick(which: Confirm, prompt: []const u8) void {
+    weft.pickBegin(prompt, @intFromEnum(which));
+    weft.pickAdd("no", "leave it alone");
+    weft.pickAdd("yes", "go ahead");
+    weft.pickEnd();
+}
+
+/// Stage a full mutation behind that confirmation.
 fn confirmThen(cmd: []const u8, prompt: []const u8) void {
     confirm_len = @min(cmd.len, confirm_cmd.len);
     @memcpy(confirm_cmd[0..confirm_len], cmd[0..confirm_len]);
-    weft.echo(prompt);
-    weft.setMode("git-confirm2");
+    confirmPick(.staged, prompt);
 }
-fn gitConfirmYes() void {
-    gatherAfterSeq(confirm_cmd[0..confirm_len]);
-}
-fn gitConfirmNo() void {
-    weft.setMode("git");
-    weft.echo("cancelled");
+
+export fn on_pick_accept(pick_id: u32) void {
+    const question = std.enums.fromInt(Confirm, pick_id) orelse return;
+    var outcome = (weft.pickOutcome(weft.allocator) catch return) orelse return;
+    defer outcome.deinit(weft.allocator);
+    const answer = switch (outcome) {
+        .candidate => |c| c.text,
+        .input => |typed| typed,
+        .cancelled => "",
+    };
+    if (!std.mem.eql(u8, answer, "yes")) {
+        weft.echo("cancelled");
+        return;
+    }
+    switch (question) {
+        .discard => gitDiscardDo(),
+        .staged => gatherAfterSeq(confirm_cmd[0..confirm_len]),
+    }
 }
 
 // ── Show / cherry-pick / revert / reset on the commit under point ───────────
@@ -2036,7 +2033,7 @@ fn resetTo(kind: []const u8) void {
 }
 fn gitResetHard() void {
     const m = std.fmt.bufPrint(&op_buf, "git reset --hard {s}", .{pending_hash[0..pending_hash_len]}) catch return;
-    confirmThen(m, "reset --hard (loses changes)? y/n");
+    confirmThen(m, "reset --hard (loses changes)?");
 }
 
 // ── Branch transient (names come from the `*git-input*` prompt) ─────────────
@@ -2071,7 +2068,7 @@ fn gitStashList() void {
     weft.setMode("git-view");
 }
 fn gitStashDrop() void {
-    confirmThen("git stash drop", "drop stash@{0}? y/n");
+    confirmThen("git stash drop", "drop stash@{0}?");
 }
 
 // ── Log transient (the inline Recent section covers the common case) ────────
@@ -2120,7 +2117,7 @@ fn gitInputFinish() void {
         .branch_rename => gatherAfterSeq1("git branch -m '{s}'", name),
         .branch_delete => {
             const cmd = std.fmt.bufPrint(&op_buf, "git branch -d '{s}'", .{name}) catch return;
-            confirmThen(cmd, "delete branch? y/n");
+            confirmThen(cmd, "delete branch?");
         },
         .rebase_start => startRebase(name),
         .none => weft.setMode("git"),
@@ -2146,20 +2143,27 @@ fn gitRebaseInteractive() void {
     }
     openInput(.rebase_start, "interactive rebase last N commits: (C-c C-c)");
 }
-/// Kick off the todo: list `HEAD~N..HEAD` oldest-first into `*git-rebase*`;
-/// the `.rebase` fill rewrites those lines into an editable `pick …` todo.
+/// Kick off the todo: an ordinary instanced entry listing `HEAD~N..HEAD`
+/// oldest-first; the `.rebase` fill rewrites those lines into a `pick …` todo,
+/// which is then plain text — edited, reordered, and SAVED to run the rebase.
 fn startRebase(nstr: []const u8) void {
     for (nstr) |c| if (c < '0' or c > '9') {
         weft.echo("rebase: expected a number");
         weft.setMode("git");
         return;
     };
-    const base = std.fmt.bufPrint(&rebase_base, "HEAD~{s}", .{nstr}) catch return;
-    rebase_base_len = base.len;
+    const slot = todos.open(todo_tool) orelse {
+        weft.echo("git: too many rebase plans open");
+        return;
+    };
+    slot.value = .{};
+    const base = std.fmt.bufPrint(&slot.value.base, "HEAD~{s}", .{nstr}) catch return;
+    slot.value.base_len = base.len;
+    slot.value.tmp_len = tmpPathFor(slot.name(), &slot.value.tmp);
+    weft.toolBacking(todo_tool);
     const cmd = std.fmt.bufPrint(&cmd_buf, "git log --reverse --format='%h %s' {s}..HEAD 2>/dev/null", .{base}) catch return;
-    show(cmd, "*git-rebase*", .rebase);
-    weft.setMode("git-rebase");
-    weft.echo("rebase todo: p/s/e/r/f/d set verb, edit to reorder, C-c C-c to run");
+    weft.procToBuffer(cmd, slot.name(), @intFromEnum(Fill.rebase));
+    weft.echo("rebase plan: edit the verbs, save to run, close to abandon");
 }
 /// The `git log` listing landed → rewrite `<hash> <subject>` lines into
 /// `pick <hash> <subject>` in-place (git's todo, authored by us).
@@ -2179,64 +2183,55 @@ fn rebaseTodoFill() void {
     weft.edit(.{ .start = 0, .end = weft.byteLen() }, op_buf[0..w]);
     weft.jump(0);
 }
-fn gitRebasePick() void {
-    setRebaseAction("pick");
-}
-fn gitRebaseSquash() void {
-    setRebaseAction("squash");
-}
-fn gitRebaseEdit() void {
-    setRebaseAction("edit");
-}
-fn gitRebaseReword() void {
-    setRebaseAction("reword");
-}
-fn gitRebaseFixup() void {
-    setRebaseAction("fixup");
-}
-fn gitRebaseDrop() void {
-    setRebaseAction("drop");
-}
-/// Replace the first whitespace-delimited token (the verb) of the current todo
-/// line with `word`; keep the cursor on the line.
-fn setRebaseAction(word: []const u8) void {
-    const ln = weft.lineAt(weft.cursor());
-    const line = weft.slice(ln.start, ln.end);
-    var e: usize = 0;
-    while (e < line.len and line[e] != ' ') e += 1;
-    weft.edit(.{ .start = ln.start, .end = ln.start + e }, word);
-    weft.jump(ln.start);
-}
-fn gitRebaseResume() void {
-    weft.setMode("git-rebase");
-}
-fn gitRebaseCancel() void {
-    // Nothing was started (we only drafted the todo) — just return to git.
-    restore_cursor = false;
-    show(GATHER, buf_name, .status);
-    weft.setMode("git");
-}
-/// Finish: write the edited todo to a temp file and run the rebase with a
-/// sequence editor that `cp`s our todo over git's generated one. GIT_EDITOR=true
-/// keeps squash/fixup/reword non-interactive (no mid-session editor round-trip);
-/// an `edit` stop just leaves a rebase-in-progress the `r` menu then drives.
-fn gitRebaseFinish() void {
+/// `save` in a rebase plan: hand the edited todo to git through the same
+/// `GIT_SEQUENCE_EDITOR` mechanism, and let its exit status decide whether the
+/// plan entry is spent. `GIT_EDITOR=true` keeps squash/fixup/reword
+/// non-interactive; an `edit` stop just leaves a rebase the `r` menu drives.
+fn gitRebaseSave() void {
+    const slot = todos.current("rebase plan") orelse {
+        weft.echo("no rebase plan here");
+        return;
+    };
     const text = weft.slice(0, weft.byteLen());
     const n = @min(text.len, msg_buf.len);
     @memcpy(msg_buf[0..n], text[0..n]);
-    if (!weft.fsWrite(rebase_tmp, msg_buf[0..n])) {
-        weft.echo("rebase: could not write todo");
-        weft.setMode("git");
+    const v = &slot.value;
+    if (!weft.fsWrite(v.tmp[0..v.tmp_len], msg_buf[0..n])) {
+        weft.echo("rebase: could not write the plan");
         return;
     }
+    sequencing = slot;
     const cmd = std.fmt.bufPrint(
         &cmd_buf,
-        "GIT_SEQUENCE_EDITOR='cp {s}' GIT_EDITOR=true git rebase -i {s} >/dev/null 2>&1; rm -f {s}; " ++ GATHER,
-        .{ rebase_tmp, rebase_base[0..rebase_base_len], rebase_tmp },
+        "GIT_SEQUENCE_EDITOR='cp {s}' GIT_EDITOR=true git rebase -i {s} 2>&1; s=$?; rm -f {s}; " ++
+            "printf '\\036\\036C%d\\n' \"$s\"; " ++ GATHER,
+        .{ v.tmp[0..v.tmp_len], v.base[0..v.base_len], v.tmp[0..v.tmp_len] },
     ) catch return;
     restore_cursor = false;
-    show(cmd, buf_name, .status);
-    weft.setMode("git");
+    weft.procToBuffer(cmd, buf_name, @intFromEnum(Fill.sequence));
+}
+
+fn sequenceFill() void {
+    loadRaw();
+    commit_ok = takeEffectOutcome();
+    renderStatus();
+    weft.run("git-rebase-settle");
+}
+
+/// Deferred to a dispatching entry: a plan git ran is spent, and closes like
+/// any other entry; one it refused stays, with the refusal shown.
+fn gitRebaseSettle() void {
+    const slot = sequencing orelse return;
+    sequencing = null;
+    if (!commit_ok) {
+        weft.echo(firstLine(commit_note[0..commit_note_len]));
+        return;
+    }
+    // Retiring the entry is focus-scoped: land on it, then close it.
+    if (focusBuffer(slot.name())) weft.run("buffer-close");
+    todos.close(slot);
+    _ = focusBuffer(buf_name);
+    weft.echo("rebased");
 }
 fn gitRebaseContinue() void {
     gatherAfterSeq("GIT_EDITOR=true git rebase --continue");
