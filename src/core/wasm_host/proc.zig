@@ -26,7 +26,8 @@ const requirePerm = shared.requirePerm;
 ///
 /// Deferred jobs retain only the session-owned allocator/registry they need,
 /// never a head's dispatch `Context`. Context is ambient plumbing and its
-/// `document()` intentionally means "active now"; neither is a target token.
+/// `document()` intentionally means "whatever this call is about right now";
+/// neither is a target token.
 const ShellJob = struct {
     gpa: Allocator,
     buffers: *Buffers,
@@ -148,7 +149,7 @@ pub fn hShellInsert(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32, 
     var cmd_owned = true;
     defer if (cmd_owned) gpa.free(cmd);
     const active_ctx = p.activeCtx();
-    const buffer = active_ctx.buffers.active();
+    const buffer = active_ctx.entry() orelse return;
     const editor = buffer.textEditor() orelse return;
     const doc = &editor.doc;
     const target = doc.exportAnchor(gpa, editor.cursorOffset(), .before) catch return;
@@ -209,20 +210,24 @@ fn shellFree(ctx: ?*anyopaque) void {
     gpa.destroy(job);
 }
 
-/// A deferred proc-to-buffer: run a command off-thread and replace a named
-/// scratch buffer with its output. The buffer + author peer re-resolve by name
-/// at delivery (surviving anything that moved them). `styler` is an optional
-/// callback door: after the output lands and if the target is still the active
-/// buffer, we fire the issuing plugin's `on_fill` export so it can classify the
-/// fresh text into style spans. The plugin pointer is safe to hold — plugins
-/// are resident for the app's life (the same residency `notifyActivate` relies
-/// on); it is only ever called on the normal delivery path, never at teardown.
+/// A deferred proc-to-buffer: run a command off-thread and fill the entry
+/// CAPTURED AT SPAWN with its output. `entry` is a generation-checked
+/// `Buffers.Ref`, not a name: nothing that happens while the command runs — a
+/// focus change, a same-named buffer opened later, the entry being closed and
+/// its slot reused — can redirect the result. A ref that no longer resolves
+/// drops the output with a note; it is never delivered anywhere else.
+/// `styler` fires the issuing plugin's `on_fill_token` with `token` once the
+/// text has landed, so a guest learns WHICH of its fills completed. The plugin
+/// pointer is safe to hold — plugins are resident for the app's life (the same
+/// residency `notifyActivate` relies on); it is only ever called on the normal
+/// delivery path, never at teardown.
 const ProcJob = struct {
     gpa: Allocator,
     buffers: *Buffers,
-    styler: *WasmPlugin, // fires on_fill after delivery (resident)
+    styler: *WasmPlugin, // fires on_fill_token after delivery (resident)
     plugin: []u8, // authors the buffer content
-    buf: []u8, // target buffer name (found-or-created)
+    entry: Buffers.Ref, // the target captured at spawn
+    token: u32, // the guest's opaque fill tag
     cmd: []u8,
     append: bool = false, // append the output (a console) vs replace (a view)
 };
@@ -230,63 +235,62 @@ const ProcJob = struct {
 /// Perm-gated (proc + timer): run `<cmd>` off the frame thread and replace the
 /// scratch buffer named `<name>` with its stdout, authored as this plugin's
 /// peer — the "tool output → a buffer" pattern (git status, grep, compile).
+/// The name is resolved HERE, once; `args[4]` is the fill token echoed back.
 pub fn hProcToBuffer(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32, results: []i32) void {
     _ = results;
-    const p: *WasmPlugin = @ptrCast(@alignCast(data.?));
-    if (!requirePerm(p, caller, .proc)) return;
-    if (!requirePerm(p, caller, .timer)) return;
-    const loop = p.loop orelse return;
-    const gpa = p.gpa;
-    const cmd = caller.readMemory(gpa, @intCast(args[0]), @intCast(args[1])) catch return;
-    errdefer gpa.free(cmd);
-    const name = caller.readMemory(gpa, @intCast(args[2]), @intCast(args[3])) catch return;
-    errdefer gpa.free(name);
-    const job = gpa.create(ProcJob) catch return;
-    job.* = .{
-        .gpa = gpa,
-        .buffers = p.activeCtx().buffers,
-        .styler = p,
-        .plugin = gpa.dupe(u8, p.name) catch {
-            gpa.destroy(job);
-            gpa.free(cmd);
-            gpa.free(name);
-            return;
-        },
-        .buf = name,
-        .cmd = cmd,
-    };
-    _ = loop.spawn(procWork, job, .{ .ctx = job, .call = procDeliver, .deinit = procFree }) catch procFree(job);
+    spawnFill(@ptrCast(@alignCast(data.?)), caller, args, false);
 }
 
 /// Like `wl_proc_to_buffer` but APPENDS the output (a console/comint log) rather
 /// than replacing the buffer.
 pub fn hProcAppendBuffer(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32, results: []i32) void {
     _ = results;
-    const p: *WasmPlugin = @ptrCast(@alignCast(data.?));
+    spawnFill(@ptrCast(@alignCast(data.?)), caller, args, true);
+}
+
+/// The shared spawn for both fill doors: gate, resolve the target ONCE, and
+/// hand the job a ref plus the guest's token.
+fn spawnFill(p: *WasmPlugin, caller: *wasm.Caller, args: []const i32, append: bool) void {
     if (!requirePerm(p, caller, .proc)) return;
     if (!requirePerm(p, caller, .timer)) return;
     const loop = p.loop orelse return;
     const gpa = p.gpa;
     const cmd = caller.readMemory(gpa, @intCast(args[0]), @intCast(args[1])) catch return;
-    errdefer gpa.free(cmd);
+    var cmd_owned = true;
+    defer if (cmd_owned) gpa.free(cmd);
     const name = caller.readMemory(gpa, @intCast(args[2]), @intCast(args[3])) catch return;
-    errdefer gpa.free(name);
+    defer gpa.free(name);
+    const buffers = p.activeCtx().buffers;
+    const target = ensureFillTarget(gpa, buffers, name) orelse return;
+    const plugin = gpa.dupe(u8, p.name) catch return;
+    var plugin_owned = true;
+    defer if (plugin_owned) gpa.free(plugin);
     const job = gpa.create(ProcJob) catch return;
     job.* = .{
         .gpa = gpa,
-        .buffers = p.activeCtx().buffers,
+        .buffers = buffers,
         .styler = p,
-        .plugin = gpa.dupe(u8, p.name) catch {
-            gpa.destroy(job);
-            gpa.free(cmd);
-            gpa.free(name);
-            return;
-        },
-        .buf = name,
+        .plugin = plugin,
+        .entry = target,
+        .token = @bitCast(args[4]),
         .cmd = cmd,
-        .append = true,
+        .append = append,
     };
+    cmd_owned = false;
+    plugin_owned = false;
     _ = loop.spawn(procWork, job, .{ .ctx = job, .call = procDeliver, .deinit = procFree }) catch procFree(job);
+}
+
+/// Find-or-create the named entry and capture its identity. A buffer proc
+/// CREATES is a plain tool sink (grep/make output) → read-only. A PRE-created
+/// one keeps whatever the plugin declared (a projection marks itself read-only
+/// via weft.readOnly; an editable one like *git-commit* stays writable) — so
+/// create-branch marks, find-branch doesn't.
+fn ensureFillTarget(gpa: Allocator, bufs: *Buffers, name: []const u8) ?Buffers.Ref {
+    if (bufs.findByName(name)) |id| return (bufs.get(id) orelse return null).ref();
+    const nb = bufs.get(bufs.create(gpa, name) catch return null) orelse return null;
+    nb.read_only = true;
+    return nb.ref();
 }
 
 fn procWork(gpa: Allocator, ctx: ?*anyopaque) anyerror![]u8 {
@@ -296,23 +300,16 @@ fn procWork(gpa: Allocator, ctx: ?*anyopaque) anyerror![]u8 {
     return gpa.dupe(u8, std.mem.trimEnd(u8, res.stdout, "\n"));
 }
 
-/// Frame-thread delivery: find-or-create the named buffer and replace its whole
-/// content with the output, authored as the plugin peer (grade-gated).
+/// Frame-thread delivery: resolve the entry captured at spawn and fill it,
+/// authored as the plugin peer (grade-gated). What is active or focused never
+/// enters into it — an entry closed while the command ran drops its output.
 fn procDeliver(ctx: ?*anyopaque, result: ?[]const u8) void {
     const job: *ProcJob = @ptrCast(@alignCast(ctx.?));
     const out = result orelse return;
     const gpa = job.gpa;
-    const bufs = job.buffers;
-    // A buffer proc CREATES is a plain tool sink (grep/make output) → read-only.
-    // A PRE-created buffer keeps whatever the plugin declared (a projection
-    // marks itself read-only via weft.readOnly; an editable one like
-    // *git-commit* stays writable) — so create-branch marks, find-branch doesn't.
-    const b = if (bufs.findByName(job.buf)) |id|
-        (bufs.get(id) orelse return)
-    else blk: {
-        const nb = bufs.get(bufs.create(gpa, job.buf) catch return) orelse return;
-        nb.read_only = true;
-        break :blk nb;
+    const b = job.buffers.resolve(job.entry) orelse {
+        std.log.info("proc: '{s}' output dropped — its target entry closed while the command ran", .{job.plugin});
+        return;
     };
     const editor = b.textEditor() orelse return;
     const doc = &editor.doc;
@@ -331,22 +328,21 @@ fn procDeliver(ctx: ?*anyopaque, result: ?[]const u8) void {
         command.renderInto(gpa, doc, .plugin, job.plugin, &.{.{ .range = .{ .start = 0, .end = end }, .bytes = out }}) catch {};
     }
 
-    // The text has landed: give the issuing plugin a chance to classify it into
-    // style spans (git/grep coloring). The guest's `on_fill` reads + paints the
-    // ACTIVE buffer through the read/style membrane, so this only fires when the
-    // just-filled buffer is still the focused one (the common case — a tool verb
-    // focuses its buffer, then fills it). If focus moved on, we skip rather than
-    // let the guest paint the wrong buffer; it renders plain, exactly as before.
-    // A plugin without `on_fill` (grep-less builds, other tools) is a no-op.
-    if (bufs.active() == b)
-        contract.callOptionalExport("on_fill", &job.styler.instance, .{}) catch {}; // MissingExport → skip
+    // The text has landed: tell the issuing plugin WHICH fill it was, so it can
+    // parse/paint it (git's model, grep's coloring). The entry is BOUND for the
+    // call, so the guest's ambient read/edit/style doors mean this entry — the
+    // guest never asks what is active, and a focus change cannot misdirect it.
+    // A plugin without `on_fill_token` is a no-op.
+    const ctx_bound = job.styler.activeCtx();
+    const prev = ctx_bound.bindEntry(job.entry);
+    defer _ = ctx_bound.bindEntry(prev);
+    contract.callOptionalExport("on_fill_token", &job.styler.instance, .{@as(i32, @bitCast(job.token))}) catch {}; // MissingExport → skip
 }
 
 fn procFree(ctx: ?*anyopaque) void {
     const job: *ProcJob = @ptrCast(@alignCast(ctx.?));
     const gpa = job.gpa;
     gpa.free(job.plugin);
-    gpa.free(job.buf);
     gpa.free(job.cmd);
     gpa.destroy(job);
 }
@@ -384,7 +380,7 @@ pub fn hProcFilter(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32, r
     var cmd_owned = true;
     defer if (cmd_owned) gpa.free(cmd);
     const active_ctx = p.activeCtx();
-    const buffer = active_ctx.buffers.active();
+    const buffer = active_ctx.entry() orelse return;
     const editor = buffer.textEditor() orelse return;
     const rope = editor.text();
     const len = rope.byteLen();

@@ -241,8 +241,8 @@ extern "weft" fn wl_cwd(out: u32, cap: u32) i32;
 extern "weft" fn wl_net_connect(host: u32, host_len: u32, name: u32, name_len: u32, sni: u32, sni_len: u32) i32;
 extern "weft" fn wl_net_send(handle: u32, ptr: u32, len: u32) void;
 extern "weft" fn wl_net_close(handle: u32) void;
-extern "weft" fn wl_proc_to_buffer(cmd: u32, cmd_len: u32, name: u32, name_len: u32) void;
-extern "weft" fn wl_proc_append_buffer(cmd: u32, cmd_len: u32, name: u32, name_len: u32) void;
+extern "weft" fn wl_proc_to_buffer(cmd: u32, cmd_len: u32, name: u32, name_len: u32, token: u32) void;
+extern "weft" fn wl_proc_append_buffer(cmd: u32, cmd_len: u32, name: u32, name_len: u32, token: u32) void;
 extern "weft" fn wl_proc_filter(cmd: u32, cmd_len: u32, start: u32, end: u32) void;
 extern "weft" fn wl_fs_read(path: u32, path_len: u32, out_ptr: u32, out_cap: u32) i32;
 extern "weft" fn wl_fs_exists(path: u32, path_len: u32) i32;
@@ -1877,14 +1877,18 @@ pub fn netClose(handle: u32) void {
 }
 
 /// Run `cmd` off the frame thread and replace the scratch buffer named `name`
-/// (found or created) with its stdout — tool output → a buffer (git status,
-/// grep, compile). Perms: proc + timer (declared in `describe`).
-pub fn procToBuffer(cmd: []const u8, name: []const u8) void {
-    wl_proc_to_buffer(p(cmd.ptr), @intCast(cmd.len), p(name.ptr), @intCast(name.len));
+/// (found or created NOW, then held by identity) with its stdout — tool output
+/// → a buffer (git status, grep, compile). `token` is opaque to the host and
+/// comes back as `on_fill_token` when the output lands, so a plugin with
+/// several fills in flight knows which one finished; the entry is bound for
+/// that call, so reads/edits/styles mean it rather than whatever is focused.
+/// Pass 0 when nothing needs to run afterwards. Perms: proc + timer.
+pub fn procToBuffer(cmd: []const u8, name: []const u8, token: u32) void {
+    wl_proc_to_buffer(p(cmd.ptr), @intCast(cmd.len), p(name.ptr), @intCast(name.len), token);
 }
 /// Like `procToBuffer` but APPENDS the output — a console/comint log.
-pub fn procAppendBuffer(cmd: []const u8, name: []const u8) void {
-    wl_proc_append_buffer(p(cmd.ptr), @intCast(cmd.len), p(name.ptr), @intCast(name.len));
+pub fn procAppendBuffer(cmd: []const u8, name: []const u8, token: u32) void {
+    wl_proc_append_buffer(p(cmd.ptr), @intCast(cmd.len), p(name.ptr), @intCast(name.len), token);
 }
 
 /// Filter `[r.start, r.end)` through `cmd` (a `{}` placeholder gets a temp file

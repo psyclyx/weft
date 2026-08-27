@@ -350,8 +350,8 @@ pub const imports = [_]Entry{
     .{ .name = "wl_proc_read", .params = &.{ .u32, .u32, .u32 }, .results = &.{.i32}, .group = .proc, .doc = "drain buffered stdout from a spawned subprocess" },
     .{ .name = "wl_proc_close", .params = &.{.u32}, .results = &.{}, .group = .proc, .doc = "kill a spawned subprocess (slot stays for handle stability)" },
     .{ .name = "wl_cwd", .params = &.{ .u32, .u32 }, .results = &.{.i32}, .group = .proc, .doc = "the process working directory (for absolute `file://` uris)" },
-    .{ .name = "wl_proc_to_buffer", .params = &.{ .u32, .u32, .u32, .u32 }, .results = &.{}, .group = .proc, .perm = .proc_timer, .doc = "run `<cmd>` off-thread and replace a named scratch buffer with its stdout" },
-    .{ .name = "wl_proc_append_buffer", .params = &.{ .u32, .u32, .u32, .u32 }, .results = &.{}, .group = .proc, .perm = .proc_timer, .doc = "like `wl_proc_to_buffer` but appends (a console log) instead of replacing" },
+    .{ .name = "wl_proc_to_buffer", .params = &.{ .u32, .u32, .u32, .u32, .u32 }, .results = &.{}, .group = .proc, .perm = .proc_timer, .doc = "run `<cmd>` off-thread and replace the scratch buffer captured now with its stdout; the trailing fill token comes back as `on_fill_token`" },
+    .{ .name = "wl_proc_append_buffer", .params = &.{ .u32, .u32, .u32, .u32, .u32 }, .results = &.{}, .group = .proc, .perm = .proc_timer, .doc = "like `wl_proc_to_buffer` but appends (a console log) instead of replacing" },
     .{ .name = "wl_proc_filter", .params = &.{ .u32, .u32, .u32, .u32 }, .results = &.{}, .group = .proc, .perm = .proc_timer, .doc = "filter `[start,end)` through `<cmd>` in place (formatters)" },
 
     // ── sessions.zig — persistent streamed REPL + net sessions ─────────
@@ -449,7 +449,7 @@ pub const exports = [_]Export{
     .{ .name = "on_menu", .params = &.{.i32}, .results = &.{}, .required = false, .doc = "a menu mode this plugin owns was entered (1) or left (0)" },
     .{ .name = "on_activate", .params = &.{}, .results = &.{}, .required = false, .doc = "a buffer took focus (path readable via wl_activate_path during the call)" },
     .{ .name = "on_poll", .params = &.{}, .results = &.{}, .required = false, .doc = "readiness-driven: fired only when this plugin's raw proc stream has bytes pending" },
-    .{ .name = "on_fill", .params = &.{}, .results = &.{}, .required = false, .doc = "a proc-filled buffer landed and is still focused; a chance to paint style spans" },
+    .{ .name = "on_fill_token", .params = &.{.i32}, .results = &.{}, .required = false, .doc = "the fill with this token landed in the entry it captured at spawn; a chance to parse and paint it" },
     // D2's generic slot-fire dispatch (doc/d2-schema-payloads.md §3.2/§7):
     // the schema-directed sibling of `on_complete` — a schema-provider
     // guest answers `session` by calling `wl_payload_push` (during this

@@ -56,7 +56,7 @@ test "TestHead: its InProcClient reads the SAME hasPerm/canDispatch guards a Was
     try t.expect(wasm_host_plugin.hasPerm(&th.client, .fs_read));
 
     // Outside a press, this client is NOT dispatching — same as a wasm
-    // plugin's background entry (`on_poll`/`on_fill`/...).
+    // plugin's background entry (`on_poll`/`on_fill_token`/...).
     try t.expect(!wasm_host_plugin.canDispatch(&th.client));
 }
 

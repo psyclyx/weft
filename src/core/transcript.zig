@@ -608,7 +608,7 @@ pub fn install(gpa: Allocator, commands: *command.Commands, actions: *Actions, b
 
 /// Create a tool-backed buffer suitable for `fill`/`on_save` — the
 /// tool-buffer machinery `dired`/`magit` use (`Buffers.Buffer.setTool`),
-/// wired up host-side instead of from a wasm guest's `on_fill` (per
+/// wired up host-side instead of from a wasm guest's `on_fill_token` (per
 /// `graph.zig`'s "where the graph-side plugin code runs": this client's
 /// model AND its projection are host/in-process). NOT read-only: an
 /// `on_save` projection is, structurally, an editable buffer — `edit`

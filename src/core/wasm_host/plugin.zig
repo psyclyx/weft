@@ -234,7 +234,7 @@ pub fn requirePerm(p: *WasmPlugin, caller: *wasm.Caller, comptime perm: Perm) bo
 ///     `init()` — see that field's doc for why setting the STARTING mode
 ///     during load can't hijack a second head: there isn't one yet).
 /// Outside BOTH (every other BACKGROUND entry — `on_activate`/`on_poll`/
-/// `on_fill`/`on_complete`/`on_menu`, none of which carry a real dispatching
+/// `on_fill_token`/`on_complete`/`on_menu`, none of which carry a real dispatching
 /// head, AND none of which are the one-time load handshake) → traps the
 /// guest's call right here (`caller.trap`, same as `requirePerm`) and
 /// returns false, so `if (!requireDispatch(...)) return;` reads as the whole

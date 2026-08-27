@@ -92,7 +92,7 @@ pub const QueryCap = struct { name: []u8, start: usize, end: usize };
 gpa: Allocator,
 /// The LOAD-TIME ctx (set once by `construct`, always the ctx `loadPlugin`
 /// was called with — the system's primary head today). Background host→guest
-/// entries (init/describe, `on_poll`, `on_fill`, `on_complete` — see
+/// entries (init/describe, `on_poll`, `on_fill_token`, `on_complete` — see
 /// `wasm_host/commands.zig`'s classification doc) read through `activeCtx()`
 /// which falls back to this when no dispatch is in progress, so they always
 /// see the system default, never a stale "whichever head last dispatched".
@@ -147,7 +147,7 @@ in_dispatch: bool = false,
 /// guest's load), not a new hole it opens; a mid-chord stomp is unreachable
 /// (dispatching `config-reload` consumed the chord). The argument stops
 /// holding the instant load finishes — every
-/// LATER background entry (`on_poll`/`on_fill`/`on_activate`/`on_complete`/
+/// LATER background entry (`on_poll`/`on_fill_token`/`on_activate`/`on_complete`/
 /// `on_menu`) still traps, exactly as `in_dispatch` alone would enforce. Set
 /// true/false by `loadPlugin` bracketing `describe()`+`init()`; never true
 /// again after `loadPlugin` returns (no save/restore needed — load doesn't

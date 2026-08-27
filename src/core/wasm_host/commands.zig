@@ -35,9 +35,9 @@
 //!       world — see `Session`'s module doc).
 //!     - `on_poll`         (`activation.zig`) — async proc-stream readiness,
 //!       fired at the frame boundary.
-//!     - `on_fill`         (`proc.zig`) — post-delivery style classification
-//!       for a `proc_to_buffer`/`proc_append_buffer` job; fired off the async
-//!       loop, not a keystroke.
+//!     - `on_fill_token`   (`proc.zig`) — post-delivery parse/paint for a
+//!       `proc_to_buffer`/`proc_append_buffer` job, bound to the entry that
+//!       job captured; fired off the async loop, not a keystroke.
 //!     - `on_complete`     (`capability.zig`'s `wpCompletionProvider`) — the
 //!       caps trampoline signature (`data, caps, req`) carries no ctx at all;
 //!       a completion session isn't currently head-attributed upstream
