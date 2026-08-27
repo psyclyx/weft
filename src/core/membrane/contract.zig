@@ -184,6 +184,9 @@ const handlers = [_]struct { name: []const u8, handler: HostFn }{
     .{ .name = "wl_menu_binding_key", .handler = menu.hMenuBindingKey },
     .{ .name = "wl_menu_binding_cmd", .handler = menu.hMenuBindingCmd },
     .{ .name = "wl_menu_binding_is_group", .handler = menu.hMenuBindingIsGroup },
+    .{ .name = "wl_menu_binding_intent_status", .handler = menu.hMenuBindingIntentStatus },
+    .{ .name = "wl_menu_binding_intent", .handler = menu.hMenuBindingIntent },
+    .{ .name = "wl_menu_binding_intent_note", .handler = menu.hMenuBindingIntentNote },
 
     // ── surface.zig — the retained overlay (which-key/dired/magit) ─────
     .{ .name = "wl_surface_begin", .handler = surface.hSurfaceBegin },

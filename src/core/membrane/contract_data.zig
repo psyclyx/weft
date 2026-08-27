@@ -251,6 +251,9 @@ pub const imports = [_]Entry{
     .{ .name = "wl_menu_binding_key", .params = &.{ .u32, .u32, .u32 }, .results = &.{.i32}, .group = .menu, .doc = "the `i`-th menu binding's key chord, into guest memory" },
     .{ .name = "wl_menu_binding_cmd", .params = &.{ .u32, .u32, .u32 }, .results = &.{.i32}, .group = .menu, .doc = "the `i`-th menu binding's command name, into guest memory" },
     .{ .name = "wl_menu_binding_is_group", .params = &.{.u32}, .results = &.{.i32}, .group = .menu, .doc = "whether the `i`-th menu binding is a group (submenu), not a leaf" },
+    .{ .name = "wl_menu_binding_intent_status", .params = &.{.u32}, .results = &.{.i32}, .group = .menu, .doc = "what the `i`-th binding's intention arms would do here: 0 none, 1 ready, 2 unavailable" },
+    .{ .name = "wl_menu_binding_intent", .params = &.{ .u32, .u32, .u32 }, .results = &.{.i32}, .group = .menu, .doc = "the `i`-th binding's winning (or blocked) intention name, into guest memory" },
+    .{ .name = "wl_menu_binding_intent_note", .params = &.{ .u32, .u32, .u32 }, .results = &.{.i32}, .group = .menu, .doc = "the provider that would run the `i`-th binding, or the reason it cannot" },
 
     // ── surface.zig — the retained overlay (which-key/dired/magit) ─────
     .{ .name = "wl_surface_begin", .params = &.{.u32}, .results = &.{}, .group = .surface, .doc = "open a retained overlay surface at `placement`" },
@@ -389,7 +392,7 @@ pub const imports = [_]Entry{
 /// half-finished edit — fails the build with a pointed message instead of
 /// silently drifting the two ~124-entry tables apart again (the exact class
 /// this table exists to kill).
-const expected_import_count = 180;
+const expected_import_count = 183;
 
 /// A host→guest EXPORT entrypoint (design doc/extensibility-native-surface.md, task
 /// W0a-D extension 2): every `instance.callVoid("name", args)` the host

@@ -152,6 +152,9 @@ extern "weft" fn wl_menu_binding_count() i32;
 extern "weft" fn wl_menu_binding_key(i: u32, out: u32, cap: u32) i32;
 extern "weft" fn wl_menu_binding_cmd(i: u32, out: u32, cap: u32) i32;
 extern "weft" fn wl_menu_binding_is_group(i: u32) i32;
+extern "weft" fn wl_menu_binding_intent_status(i: u32) i32;
+extern "weft" fn wl_menu_binding_intent(i: u32, out: u32, cap: u32) i32;
+extern "weft" fn wl_menu_binding_intent_note(i: u32, out: u32, cap: u32) i32;
 extern "weft" fn wl_provide_completion() void;
 extern "weft" fn wl_completion_prefix(out_ptr: u32, out_cap: u32) u32;
 extern "weft" fn wl_caps_item(session: i32, t: u32, tl: u32, l: u32, ll: u32, d: u32, dl: u32, kind: i32, doc: u32, docl: u32, rank: i32) void;
@@ -926,6 +929,37 @@ pub fn menuBindingCmd(i: usize) []const u8 {
 /// Whether the `i`-th binding opens a submenu (a group) vs a leaf command.
 pub fn menuBindingIsGroup(i: usize) bool {
     return wl_menu_binding_is_group(@intCast(i)) != 0;
+}
+
+/// Their own scratch, so a hint row can hold key, command, intention and note
+/// at once.
+var intent_scratch: [128]u8 = undefined;
+var intent_note_scratch: [128]u8 = undefined;
+
+/// What a binding whose arms name INTENTIONS would actually do here, asked of
+/// the host's resolver. Describing only — reading this runs nothing.
+pub const MenuIntent = struct {
+    /// The dotted intention name of the arm that would win (or that reports
+    /// the obstacle).
+    name: []const u8,
+    /// The provider that would run it, or — when `!ready` — why it cannot.
+    note: []const u8,
+    ready: bool,
+};
+
+/// The `i`-th binding's intention explanation, or null when no intention arm
+/// explains it (a plain command binding, or nothing offers one).
+pub fn menuBindingIntent(i: usize) ?MenuIntent {
+    const status = wl_menu_binding_intent_status(@intCast(i));
+    if (status <= 0) return null;
+    const n = wl_menu_binding_intent(@intCast(i), p(&intent_scratch), intent_scratch.len);
+    if (n < 0) return null;
+    const m = wl_menu_binding_intent_note(@intCast(i), p(&intent_note_scratch), intent_note_scratch.len);
+    return .{
+        .name = intent_scratch[0..@intCast(n)],
+        .note = if (m < 0) "" else intent_note_scratch[0..@intCast(m)],
+        .ready = status == 1,
+    };
 }
 pub const PickMatch = struct { start: usize, span: usize };
 pub const PickCandidate = struct {

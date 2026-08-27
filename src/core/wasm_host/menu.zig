@@ -4,6 +4,7 @@
 
 const wasm = @import("../wasm.zig");
 const contract = @import("../membrane/contract.zig");
+const intent = @import("../intent.zig");
 
 const shared = @import("plugin.zig");
 const WasmPlugin = shared.WasmPlugin;
@@ -57,6 +58,65 @@ pub fn hMenuBindingIsGroup(data: ?*anyopaque, caller: *wasm.Caller, args: []cons
     _ = caller;
     const p: *WasmPlugin = @ptrCast(@alignCast(data.?));
     results[0] = if (p.activeCtx().head.resolvedIsGroup(@intCast(args[0]))) 1 else 0;
+}
+
+// ── Explaining an intention binding ──────────────────────────────────
+//
+// A binding whose arms name intentions has no useful command NAME to show:
+// what the key does is whatever the focused context offers. These three
+// reads answer that from the resolver itself (`intent.explain` — the same
+// context derivation and the same first-applicable walk dispatch runs), so a
+// hint cannot promise what the keypress would not deliver.
+//
+// They DESCRIBE only: no endpoint is invoked and no provider is asked to
+// republish. Explanation conveys no authority.
+
+fn explainAt(p: *WasmPlugin, i: usize) intent.Explanation {
+    const b = p.activeCtx().head.resolvedAt(i) orelse return .none;
+    if (b.arms.len == 0) return .none;
+    return intent.explain(p.activeCtx(), b.arms);
+}
+
+/// What the `i`-th binding would do: 0 = nothing an intention explains (the
+/// guest keeps showing the command name), 1 = an arm would run, 2 = the
+/// relevant arm is unavailable and says why.
+pub fn hMenuBindingIntentStatus(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32, results: []i32) void {
+    _ = caller;
+    const p: *WasmPlugin = @ptrCast(@alignCast(data.?));
+    results[0] = switch (explainAt(p, @intCast(args[0]))) {
+        .none => 0,
+        .ready => 1,
+        .blocked => 2,
+    };
+}
+
+/// The winning (or blocked) arm's intention name, into guest memory.
+pub fn hMenuBindingIntent(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32, results: []i32) void {
+    const p: *WasmPlugin = @ptrCast(@alignCast(data.?));
+    const name = switch (explainAt(p, @intCast(args[0]))) {
+        .none => {
+            results[0] = -1;
+            return;
+        },
+        .ready => |r| r.intention,
+        .blocked => |b| b.intention,
+    };
+    results[0] = @intCast(caller.writeMemory(@intCast(args[1]), @intCast(args[2]), name) catch 0);
+}
+
+/// The row's second term: the provider that WOULD run it, or — when the arm
+/// is unavailable — the reason it cannot.
+pub fn hMenuBindingIntentNote(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32, results: []i32) void {
+    const p: *WasmPlugin = @ptrCast(@alignCast(data.?));
+    const note = switch (explainAt(p, @intCast(args[0]))) {
+        .none => {
+            results[0] = -1;
+            return;
+        },
+        .ready => |r| r.provider,
+        .blocked => |b| b.reason,
+    };
+    results[0] = @intCast(caller.writeMemory(@intCast(args[1]), @intCast(args[2]), note) catch 0);
 }
 
 /// Fire a guest's `on_menu(open)` — a menu mode was entered (open=1) or left

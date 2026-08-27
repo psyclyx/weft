@@ -8,6 +8,13 @@
 //! so it pops from the plain command text. When there are more bindings than fit
 //! a page, it PAGINATES — `which-key-page-down`/`-up` (bound in `menu-nav`, which
 //! menus fall back to) scroll it, and a footer shows the position.
+//!
+//! A binding whose arms name INTENTIONS has no command name worth printing —
+//! what the key does is whatever the focused context offers. For those rows
+//! the hint asks the host's resolver the same question dispatch asks
+//! (`weft.menuBindingIntent`) and shows the answer: `Tab  hierarchy.toggle-
+//! expanded -> view` when it would run, the row dimmed with its reason when
+//! it would not. Asking is a READ — it runs no provider and invokes nothing.
 
 const std = @import("std");
 const weft = @import("weft");
@@ -57,6 +64,16 @@ export fn init() void {
     for (cmds) |c| _ = weft.register(c);
 }
 
+/// Drop the vocabulary prefix a hint row doesn't need: `std.hierarchy.toggle
+/// -expanded` reads as `hierarchy.toggle-expanded`, `core.view` as `view`. The
+/// full names stay the host's; this is presentation.
+fn shortName(name: []const u8) []const u8 {
+    for ([_][]const u8{ "std.", "core." }) |prefix| {
+        if (std.mem.startsWith(u8, name, prefix)) return name[prefix.len..];
+    }
+    return name;
+}
+
 /// Where the hint popup docks, from config: weft.set("which_key","placement",
 /// "corner"|"center"). Corner (top-right) by default.
 fn placement() weft.Placement {
@@ -104,8 +121,19 @@ fn render() void {
         if (shown >= PAGE) break;
         const group = weft.menuBindingIsGroup(i);
         weft.surfaceRow();
-        weft.surfaceSpan(key, .accent); // the key always stands out
-        weft.surfaceSpan(cmd, if (group) .group else .leaf); // group vs leaf color
+        if (weft.menuBindingIntent(i)) |it| {
+            // An intention binding has no command NAME worth showing: what the
+            // key does is whatever the focused context offers. Paint what the
+            // resolver answers — "intent -> provider" when it would run, the
+            // whole row dimmed with its reason when it would not.
+            weft.surfaceSpan(key, if (it.ready) .accent else .muted);
+            weft.surfaceSpan(shortName(it.name), if (it.ready) .leaf else .muted);
+            if (it.ready) weft.surfaceSpan("->", .muted);
+            if (it.note.len > 0) weft.surfaceSpan(shortName(it.note), .muted);
+        } else {
+            weft.surfaceSpan(key, .accent); // the key always stands out
+            weft.surfaceSpan(cmd, if (group) .group else .leaf); // group vs leaf color
+        }
         shown += 1;
     }
     // A position footer when it doesn't all fit — shows the range + that C-n/C-p
