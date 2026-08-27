@@ -2619,3 +2619,18 @@ test "wasm_host/plugin.zig: trap message taxonomy — each Reason gets a distinc
         try t.expect(std.mem.indexOf(u8, msg, "vault") != null);
     }
 }
+
+// The Files conformance-fixture skeleton (src/guest/gramtest.zig): declares
+// itself, binds nothing, and loads clean through the wasm membrane. The gate
+// that walks it against src/core/intentions.zig's std table lands later.
+test "wasm plugin: the conformance-fixture skeleton loads" {
+    const gpa = t.allocator;
+    var env: Env = undefined;
+    try Env.init(gpa, &env);
+    defer env.deinit(gpa);
+
+    var engine = try wasm.Engine.init(gpa);
+    defer engine.deinit();
+    const plugin = try loadPlugin(&engine, &env.ctx, "gramtest", @embedFile("guest_gramtest_wasm"), .{});
+    defer plugin.deinit();
+}
