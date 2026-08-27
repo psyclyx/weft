@@ -1,53 +1,24 @@
 //! net — raw network access (design §4 Group D `net.connect`), a `.wasm` plugin
 //! (perms `{net}`). `net-open`/`net-open-tls` dial a host, streaming the socket
-//! into a target buffer (default `*net*`, or an explicit trailing arg); a
-//! connection is addressed by that buffer name, so several can coexist —
-//! `net-send`/`net-close` take the same optional name. This is the TRANSPORT
-//! primitive — HTTP/nREPL/etc. framing is built in the guest over it (design:
-//! only TLS is native). Host-side sessions are already multi-instance
-//! (`net_session.zig`); this table is only the guest's own handle→name index.
+//! into a buffer; `net-send` writes bytes; `net-close` hangs up. This is the
+//! TRANSPORT primitive — HTTP/nREPL/etc. framing is built in the guest over it
+//! (design: only TLS is native).
+//!
+//! Connections are INSTANCES, like REPLs and consoles: every open takes a fresh
+//! buffer (`*net*`, `*net:2*`, …) and is addressed by it, so a second dial never
+//! hangs up the first. `net-send`/`net-close` act on the connection whose buffer
+//! is focused, else the most recent — echoing which. Host-side sessions were
+//! already multi-instance (`net_session.zig`); this table is the guest's own
+//! buffer→handle index.
 
-const std = @import("std");
 const weft = @import("weft");
 
-const default_buf = "*net*";
+/// Each live connection, keyed by the buffer its socket streams into; the
+/// value is its host session handle.
+var conns: weft.Instances(u32, 8) = .{};
+
 var host_buf: [512]u8 = undefined;
 var sni_buf: [256]u8 = undefined;
-
-const max_conns = 8;
-const Conn = struct { name_buf: [64]u8 = undefined, name_len: u8 = 0, handle: u32 = 0 };
-var conns: [max_conns]?Conn = .{null} ** max_conns;
-
-fn connName(c: *const Conn) []const u8 {
-    return c.name_buf[0..c.name_len];
-}
-fn find(name: []const u8) ?usize {
-    for (conns, 0..) |slot, i| {
-        if (slot) |c| if (std.mem.eql(u8, connName(&c), name)) return i;
-    }
-    return null;
-}
-/// Record `handle` under `name` (reusing its slot if already tracked, else
-/// the first free one). Past `max_conns` live names the connection still
-/// runs — it's just unaddressable by a later send/close.
-fn store(name: []const u8, handle: u32) void {
-    var c = Conn{ .handle = handle };
-    const n = @min(name.len, c.name_buf.len);
-    @memcpy(c.name_buf[0..n], name[0..n]);
-    c.name_len = @intCast(n);
-    const i = find(name) orelse blk: {
-        for (&conns, 0..) |*slot, i| if (slot.* == null) break :blk i;
-        return;
-    };
-    conns[i] = c;
-}
-fn take(name: []const u8) ?u32 {
-    const i = find(name) orelse return null;
-    return conns[i].?.handle;
-}
-fn drop(name: []const u8) void {
-    if (find(name)) |i| conns[i] = null;
-}
 
 const Cmd = struct { name: []const u8, handler: *const fn () void };
 const cmds = [_]Cmd{
@@ -68,36 +39,32 @@ export fn on_command(id: u32) void {
     if (id < cmds.len) cmds[id].handler();
 }
 
-/// arg0 = host:port, arg1 = the target buffer (default `*net*`).
+/// arg0 = host:port.
 fn open() void {
-    dial(weft.argStr(0) orelse return, "", weft.argStr(1) orelse default_buf);
+    dial(weft.argStr(0) orelse return, "");
 }
-/// TLS: arg0 = host:port, arg1 = the SNI/verification host name, arg2 = the
-/// target buffer (default `*net*`).
+/// TLS: arg0 = host:port, arg1 = the SNI/verification host name.
 fn openTls() void {
     const host = weft.argStr(0) orelse return;
     const n = @min(host.len, host_buf.len);
-    @memcpy(host_buf[0..n], host[0..n]); // copy — later argStr calls reuse the scratch
+    @memcpy(host_buf[0..n], host[0..n]); // copy — a second argStr reuses the scratch
     const sni = weft.argStr(1) orelse "";
     const sn = @min(sni.len, sni_buf.len);
     @memcpy(sni_buf[0..sn], sni[0..sn]);
-    dial(host_buf[0..n], sni_buf[0..sn], weft.argStr(2) orelse default_buf);
+    dial(host_buf[0..n], sni_buf[0..sn]);
 }
-fn dial(host: []const u8, sni: []const u8, name: []const u8) void {
-    if (take(name)) |h| weft.netClose(h); // reopening the same target replaces it
-    weft.runStr("buffer-create", name);
-    const h = weft.netConnect(host, name, sni) orelse return;
-    store(name, h);
+fn dial(host: []const u8, sni: []const u8) void {
+    const slot = conns.open("net") orelse return weft.echo("net: too many connections");
+    slot.value = weft.netConnect(host, slot.name(), sni) orelse return conns.close(slot);
 }
+/// Send arg0 to this entry's connection.
 fn send() void {
-    const name = weft.argStr(1) orelse default_buf;
-    const h = take(name) orelse return;
-    weft.netSend(h, weft.argStr(0) orelse return);
+    const slot = conns.current("net") orelse return;
+    weft.netSend(slot.value, weft.argStr(0) orelse return);
 }
+/// Hang up this entry's connection only; every other one stays live.
 fn close() void {
-    const name = weft.argStr(0) orelse default_buf;
-    if (take(name)) |h| {
-        weft.netClose(h);
-        drop(name);
-    }
+    const slot = conns.current("net") orelse return;
+    weft.netClose(slot.value);
+    conns.close(slot);
 }

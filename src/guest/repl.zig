@@ -10,24 +10,11 @@
 //! lifetime. A command acts on the session whose buffer is focused; run from
 //! anywhere else it targets the most recent one and echoes which.
 
-const std = @import("std");
 const weft = @import("weft");
 
-const max_sessions = 8;
-const name_cap = 32;
-
-const Session = struct {
-    handle: u32,
-    buf: [name_cap]u8,
-    buf_len: usize,
-
-    fn name(self: *const Session) []const u8 {
-        return self.buf[0..self.buf_len];
-    }
-};
-
-var sessions: [max_sessions]?Session = @splat(null);
-var recent: ?usize = null;
+/// Each live interpreter, keyed by the comint buffer it streams into; the
+/// value is its host session handle.
+var sessions: weft.Instances(u32, 8) = .{};
 
 const Cmd = struct { name: []const u8, handler: *const fn () void };
 const cmds = [_]Cmd{
@@ -48,69 +35,29 @@ export fn init() void {
 export fn on_command(id: u32) void {
     if (id < cmds.len) cmds[id].handler();
 }
-
 /// Start a REPL running arg0 (default `sh` — a shell REPL; pass e.g.
 /// "python3 -u", "node", "nix repl") in a buffer of its own. Note:
 /// pipe-buffered interpreters may need an unbuffered flag (python `-u`) to
 /// stream promptly.
 fn start() void {
-    const slot = freeSlot() orelse return weft.echo("repl: too many sessions");
-    var name_buf: [name_cap]u8 = undefined;
-    const ordinal = weft.instanceOrdinal("repl") orelse return;
-    const name = weft.instanceName("repl", ordinal, &name_buf) orelse return;
-    weft.runStr("buffer-create", name);
-    const handle = weft.replStart(weft.argStr(0) orelse "sh", name) orelse return;
-    var s: Session = .{ .handle = handle, .buf = undefined, .buf_len = name.len };
-    @memcpy(s.buf[0..name.len], name);
-    sessions[slot] = s;
-    recent = slot;
+    const slot = sessions.open("repl") orelse return weft.echo("repl: too many sessions");
+    slot.value = weft.replStart(weft.argStr(0) orelse "sh", slot.name()) orelse
+        return sessions.close(slot);
 }
 /// Send arg0 to this entry's REPL.
 fn send() void {
-    const slot = current() orelse return;
-    weft.replSend(sessions[slot].?.handle, weft.argStr(0) orelse return);
+    const slot = sessions.current("repl") orelse return;
+    weft.replSend(slot.value, weft.argStr(0) orelse return);
 }
 /// Send the current line to this entry's REPL.
 fn sendLine() void {
-    const slot = current() orelse return; // resolve first: reading the line reuses the scratch
+    const slot = sessions.current("repl") orelse return; // resolve first: reading the line reuses the scratch
     const l = weft.lineAt(weft.cursor());
-    weft.replSend(sessions[slot].?.handle, weft.slice(l.start, l.end));
+    weft.replSend(slot.value, weft.slice(l.start, l.end));
 }
 /// Quit this entry's REPL only; every other session stays live.
 fn quit() void {
-    const slot = current() orelse return;
-    weft.replQuit(sessions[slot].?.handle);
-    sessions[slot] = null;
-    if (recent == slot) recent = anyLive();
-}
-
-fn freeSlot() ?usize {
-    for (sessions, 0..) |s, i| if (s == null) return i;
-    return null;
-}
-
-fn anyLive() ?usize {
-    for (sessions, 0..) |s, i| if (s != null) return i;
-    return null;
-}
-
-/// The session a command acts on: the one owning the focused buffer, else the
-/// most recent — named on the status line, so a command run from a source file
-/// never silently drives an interpreter the user cannot see.
-fn current() ?usize {
-    var name_buf: [name_cap]u8 = undefined;
-    if (weft.activeBufferName(&name_buf)) |active| {
-        for (sessions, 0..) |maybe, i| {
-            const s = maybe orelse continue;
-            if (std.mem.eql(u8, s.name(), active)) {
-                recent = i;
-                return i;
-            }
-        }
-    }
-    const slot = recent orelse return null;
-    const s = sessions[slot] orelse return null;
-    var msg: [name_cap + 8]u8 = undefined;
-    weft.echo(std.fmt.bufPrint(&msg, "repl: {s}", .{s.name()}) catch return slot);
-    return slot;
+    const slot = sessions.current("repl") orelse return;
+    weft.replQuit(slot.value);
+    sessions.close(slot);
 }

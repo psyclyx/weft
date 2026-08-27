@@ -958,6 +958,110 @@ pub fn instanceOrdinal(base: []const u8) ?u32 {
 
 const max_instances = 64;
 
+/// A tool's live instances: `T` is what one instance must remember (a REPL
+/// handle, a socket, a log), `cap` bounds how many run at once. Every
+/// instantiable tool shares this table rather than growing its own, so
+/// "which instance is this command about" has one answer everywhere.
+pub fn Instances(comptime T: type, comptime cap: usize) type {
+    return struct {
+        const Self = @This();
+        const name_cap = 64;
+
+        pub const Slot = struct {
+            name_buf: [name_cap]u8,
+            name_len: usize,
+            opened: usize, // ordering, for `oldest`
+            value: T,
+
+            pub fn name(self: *const Slot) []const u8 {
+                return self.name_buf[0..self.name_len];
+            }
+        };
+
+        slots: [cap]?Slot = @splat(null),
+        recent: ?usize = null,
+        opens: usize = 0,
+
+        /// Mint the next instance of `base` (`*base*`, `*base:2*`, …) and open
+        /// its buffer. `value` is uninitialized: the caller fills it from
+        /// `slot.name()` (a session must be started against its own buffer),
+        /// and `close`s the slot if that fails. Null when the tool is
+        /// saturated.
+        pub fn open(self: *Self, base: []const u8) ?*Slot {
+            const i = self.free() orelse return null;
+            var name_buf: [name_cap]u8 = undefined;
+            const ordinal = instanceOrdinal(base) orelse return null;
+            const name = instanceName(base, ordinal, &name_buf) orelse return null;
+            runStr("buffer-create", name);
+            self.opens += 1;
+            self.slots[i] = .{
+                .name_buf = undefined,
+                .name_len = name.len,
+                .opened = self.opens,
+                .value = undefined,
+            };
+            const slot = &self.slots[i].?;
+            @memcpy(slot.name_buf[0..name.len], name);
+            self.recent = i;
+            return slot;
+        }
+
+        /// The instance opened longest ago — what a tool retires to make room
+        /// when its instances are one-shot (a request, not a session).
+        pub fn oldest(self: *Self) ?*Slot {
+            var found: ?*Slot = null;
+            for (&self.slots) |*maybe| {
+                const slot = if (maybe.*) |*s| s else continue;
+                if (found == null or slot.opened < found.?.opened) found = slot;
+            }
+            return found;
+        }
+
+        /// The instance this command is about: the one owning the focused
+        /// buffer, else the most recent — echoed as `label: *name*`, so a
+        /// command run from elsewhere never silently drives an instance the
+        /// user cannot see.
+        pub fn current(self: *Self, label: []const u8) ?*Slot {
+            var name_buf: [name_cap]u8 = undefined;
+            if (activeBufferName(&name_buf)) |active| {
+                for (&self.slots, 0..) |*maybe, i| {
+                    const slot = if (maybe.*) |*s| s else continue;
+                    if (std.mem.eql(u8, slot.name(), active)) {
+                        self.recent = i;
+                        return slot;
+                    }
+                }
+            }
+            const i = self.recent orelse return null;
+            const slot = if (self.slots[i]) |*s| s else return null;
+            var msg: [name_cap + 32]u8 = undefined;
+            echo(std.fmt.bufPrint(&msg, "{s}: {s}", .{ label, slot.name() }) catch return slot);
+            return slot;
+        }
+
+        /// Retire an instance. Its buffer outlives it — the log stays readable.
+        pub fn close(self: *Self, slot: *Slot) void {
+            for (&self.slots, 0..) |*maybe, i| {
+                const live = if (maybe.*) |*s| s else continue;
+                if (live != slot) continue;
+                maybe.* = null;
+                if (self.recent == i) self.recent = self.any();
+                return;
+            }
+        }
+
+        fn free(self: *const Self) ?usize {
+            for (self.slots, 0..) |s, i| if (s == null) return i;
+            return null;
+        }
+
+        fn any(self: *const Self) ?usize {
+            for (self.slots, 0..) |s, i| if (s != null) return i;
+            return null;
+        }
+    };
+}
+
 // ── Fuzzy pick (open one incrementally; accept → on_pick_accept) ──────
 /// Begin a pick with `prompt`; `pick_id` is the guest's tag for its accept
 /// logic (dispatched to `on_pick_accept`).

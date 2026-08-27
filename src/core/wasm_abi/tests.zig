@@ -2784,3 +2784,47 @@ test "wasm plugin: on_fill_token paints the entry its fill captured, off-focus" 
     }
     try t.expectEqual(@as(usize, 0), env.buffers.active().textEditor().?.text().byteLen());
 }
+
+// ── A tool's instances are addressed by buffer, never by a module global ───
+// doc/contextual-workspace-architecture.md §2.6: a second use of a stateful
+// tool must not evict the first. Without a pool no dial can succeed, so these
+// gate the guest-side ROUTING — which buffer each open takes — which is where
+// the singleton (`var conn: ?u32` behind one hardcoded name) actually lived.
+
+test "wasm plugin: a second net-open takes its own buffer, not the first's" {
+    const gpa = t.allocator;
+    var env: Env = undefined;
+    try Env.init(gpa, &env);
+    defer env.deinit(gpa);
+    try @import("../builtins.zig").install(gpa, &env.commands, &env.keymap, &env.head, &env.actions);
+
+    var engine = try wasm.Engine.init(gpa);
+    defer engine.deinit();
+    const plugin = try loadPlugin(&engine, &env.ctx, "net", @embedFile("guest_net_wasm"), .{});
+    defer plugin.deinit();
+
+    _ = try command.run(&env.commands, &env.ctx, "net-open", &.{.{ .string = "example.com:80" }});
+    _ = try command.run(&env.commands, &env.ctx, "net-open", &.{.{ .string = "example.org:80" }});
+
+    try t.expect(env.buffers.findByName("*net*") != null);
+    try t.expect(env.buffers.findByName("*net:2*") != null);
+}
+
+test "wasm plugin: a second http-get takes its own response buffer" {
+    const gpa = t.allocator;
+    var env: Env = undefined;
+    try Env.init(gpa, &env);
+    defer env.deinit(gpa);
+    try @import("../builtins.zig").install(gpa, &env.commands, &env.keymap, &env.head, &env.actions);
+
+    var engine = try wasm.Engine.init(gpa);
+    defer engine.deinit();
+    const plugin = try loadPlugin(&engine, &env.ctx, "http", @embedFile("guest_http_wasm"), .{});
+    defer plugin.deinit();
+
+    _ = try command.run(&env.commands, &env.ctx, "http-get", &.{.{ .string = "http://example.com/a" }});
+    _ = try command.run(&env.commands, &env.ctx, "http-get", &.{.{ .string = "http://example.org/b" }});
+
+    try t.expect(env.buffers.findByName("*http*") != null);
+    try t.expect(env.buffers.findByName("*http:2*") != null);
+}
