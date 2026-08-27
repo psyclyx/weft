@@ -1265,6 +1265,8 @@ fn cBindKey(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32, results:
     var cmds: [manifest_mod.maxBindCommands][]const u8 = undefined;
     var n: usize = 0;
     var it = FramedRecords.init(blob) orelse return;
+    // The shim already throws on a degenerate list; these drop a blob that
+    // reached here anyway rather than bind a truncated one.
     while (it.next()) |rec| : (n += 1) {
         if (n == cmds.len) return;
         cmds[n] = rec;
