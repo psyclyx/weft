@@ -37,9 +37,11 @@ export fn on_command(id: u32) void {
     if (id == id_palette or id == id_help) palette() else if (id == id_buffers) buffers() else if (id == id_status) status();
 }
 
-/// A fuzzy pick over the whole command registry; accept runs the choice.
+/// A fuzzy pick over what this context OFFERS and over the whole command
+/// registry; accept runs the choice.
 fn palette() void {
     weft.pickBegin("command", pick_commands);
+    offers();
     const n = weft.commandCount();
     var i: usize = 0;
     while (i < n) : (i += 1) {
@@ -47,6 +49,24 @@ fn palette() void {
         weft.pickAdd(name, weft.commandSummary(i) orelse "");
     }
     weft.pickEnd();
+}
+
+/// The focused context's live offers, listed ahead of the raw commands and
+/// told apart by their dotted intention names. A disabled offer is listed
+/// WITH its reason rather than hidden: absence already means nonapplicable,
+/// so hiding one would say something false about it.
+fn offers() void {
+    const n = weft.offerCount();
+    var i: usize = 0;
+    while (i < n) : (i += 1) {
+        const provider = weft.offerProvider(i) orelse continue;
+        const doc = if (weft.offerReason(i)) |why|
+            std.fmt.bufPrint(&label_buf, "offer · {s} · {s}", .{ provider, why }) catch continue
+        else
+            std.fmt.bufPrint(&label_buf, "offer · {s}", .{provider}) catch continue;
+        const name = weft.offerName(i) orelse continue;
+        weft.pickAdd(name, doc);
+    }
 }
 
 /// Pick over the open buffers ("id: name"); accept switches to that buffer.
@@ -90,7 +110,14 @@ export fn on_pick_accept(pick_id: u32) void {
         .cancelled => return,
     };
     if (pick_id == pick_commands) {
-        weft.run(choice);
+        // An offer row resolves AGAIN, here, for the context as it is now —
+        // the accepted row is a name, never a decision made when the list
+        // was built. A name no intention claims is a plain command.
+        switch (weft.invokeIntention(choice)) {
+            .invoked => {},
+            .refused => |why| weft.echo(why),
+            .unknown => weft.run(choice),
+        }
     } else if (pick_id == pick_buffers) {
         const colon = std.mem.indexOfScalar(u8, choice, ':') orelse return;
         const bid = std.fmt.parseInt(i32, choice[0..colon], 10) catch return;

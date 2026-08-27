@@ -960,3 +960,80 @@ test "e2e/config: weft.grant is a resident .js plugin's only authority — adopt
     try t.expect(!core.wasm_host.hasPerm(dap, .net));
     try t.expect(!core.wasm_host.hasPerm(dap, .timer));
 }
+
+// ── The palette over live offers (architecture §9.3, §14.2) ───────────
+
+/// The palette row whose matchable text is `text`, or null.
+fn pickRow(ed: *Editor, text: []const u8) ?usize {
+    for (ed.pick.items.items, 0..) |item, i| {
+        if (std.mem.eql(u8, item, text)) return i;
+    }
+    return null;
+}
+
+/// Open the palette, narrow to one row, and accept it.
+fn paletteAccept(ed: *Editor, text: []const u8) void {
+    ed.run("pick-commands");
+    ed.settle(2);
+    ed.typeText(text);
+    ed.settle(2);
+    ed.press("Return", "");
+    ed.settle(2);
+}
+
+test "e2e/config: the palette accepts a live offer through the effect door" {
+    const gpa = t.allocator;
+    var proj: Project = undefined;
+    try proj.init(gpa);
+    defer proj.deinit();
+    _ = try proj.oracle("printf alpha > alpha.txt");
+
+    var ed: Editor = undefined;
+    try Editor.init(gpa, &ed);
+    defer ed.deinit();
+    const config_dir = try std.fmt.allocPrint(gpa, "{s}/config", .{proj.prev_cwd});
+    defer gpa.free(config_dir);
+    var loader_state: ConfigLoader = .{ .ed = &ed };
+    defer loader_state.deinit();
+    try bootConfig(&ed, config_dir, &loader_state);
+
+    ed.runStr("open", "alpha.txt");
+    ed.runStr("insert-text", "x");
+    {
+        const edited = try ed.textAlloc();
+        defer gpa.free(edited);
+        try t.expectEqualStrings("xalpha", edited);
+    }
+
+    // The offer is LISTED, beside the raw commands, attributed to its provider.
+    ed.run("pick-commands");
+    ed.settle(2);
+    const row = pickRow(&ed, "std.history.undo") orelse return error.OfferNotListed;
+    try t.expectEqualStrings("offer · core.editing", ed.pick.docs.items[row]);
+    try t.expect(pickRow(&ed, "buffers") != null); // commands still there
+    ed.press("Escape", "");
+    ed.settle(2);
+
+    // Accepting it undoes exactly like the bound key would.
+    paletteAccept(&ed, "std.history.undo");
+    {
+        const undone = try ed.textAlloc();
+        defer gpa.free(undone);
+        try t.expectEqualStrings("alpha", undone);
+    }
+
+    // An entry that holds no text keeps the offer VISIBLE with its reason —
+    // absence would mean nonapplicable, and this is relevant-but-impossible.
+    const view = try ed.buffers.createView(gpa, "files: .", "files");
+    try ed.buffers.switchTo(gpa, view, ed.head, ed.keymap);
+    ed.run("pick-commands");
+    ed.settle(2);
+    const disabled = pickRow(&ed, "std.history.undo") orelse return error.OfferNotListed;
+    try t.expectEqualStrings("offer · core.editing · no-text", ed.pick.docs.items[disabled]);
+    ed.press("Escape", "");
+    ed.settle(2);
+
+    // Accepting it surfaces the refusal instead of silently doing nothing.
+    paletteAccept(&ed, "std.history.undo");
+    try t.expect(std.mem.indexOf(u8, ed.echoText(), "no-text") != null);
+}
