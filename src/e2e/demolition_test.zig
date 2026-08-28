@@ -8,12 +8,33 @@
 //! for by hand. Kept to plain substring/line scans (fast, no AST) — matching
 //! the treefmt-hook precedent of a lint gate that is cheap enough to run on
 //! every `zig build test`.
+//!
+//! Gated here, one bullet each: `semanticActive` branches; domain keymaps or
+//! locked tool modes (the `lockedMode` machinery); async routing by buffer
+//! name; unhandled keys becoming text (`Feed.text`); compulsory editor
+//! storage; cross-plugin private command dependencies; persisted
+//! `dired`/`magit` terminology.
+//!
+//! STANDING, with what each awaits: provider-authored literal keys and domain
+//! keymaps (git still binds its own `git` mode — awaits git's move to
+//! intentions and postures); core-owned Vim dot-repeat (`Head.DotRepeat` —
+//! awaits a grammar-owned recorder, since core dispatch is what sees the
+//! rest points it records); semantic-action-to-string-command trampolines
+//! (ten action names have no standard intention yet); read-only-as-type
+//! compensation (`Buffers.Buffer.read_only` survives as an operation
+//! distinction, not a type — awaits the posture work that would carry it);
+//! view-owner-exclusive dispatch, row-index identity, silent fixed caps,
+//! authority divergence, unselected presence/diagnostics, opaque tunnels, and
+//! provider-supplied grant labels — all BEHAVIOURAL, gated by their own e2e
+//! tests rather than by a source scan, and named here so the split is
+//! deliberate rather than forgotten.
 
 const std = @import("std");
 const t = std.testing;
 const demolition_options = @import("demolition_options");
 const h = @import("harness.zig");
 const Keymap = h.core.Keymap;
+const Buffers = h.core.Buffers;
 
 /// Whole-line, case-insensitive substrings that must never appear in `src/`
 /// (doc §19: "persisted `dired` or `magit` terminology" — the plugin rename
@@ -72,6 +93,32 @@ fn fnNameOf(line: []const u8) ?[]const u8 {
     return line[start..end];
 }
 
+/// The plugin id a source file may speak for: `src/guest/git.zig` is `git`,
+/// anything under `src/plugins/files/` is `files`. Null for host code, which
+/// is not a plugin and may name any of them.
+fn pluginIdOf(rel_path: []const u8) ?[]const u8 {
+    if (std.mem.startsWith(u8, rel_path, "src/plugins/")) {
+        const rest = rel_path["src/plugins/".len..];
+        const slash = std.mem.indexOfScalar(u8, rest, '/') orelse return null;
+        return rest[0..slash];
+    }
+    if (std.mem.startsWith(u8, rel_path, "src/guest/")) {
+        const rest = rel_path["src/guest/".len..];
+        return rest[0 .. std.mem.lastIndexOfScalar(u8, rest, '.') orelse return null];
+    }
+    return null;
+}
+
+/// The `plugin.<id>.` name a line depends on, if any — the §5.1 grammar's
+/// own marker for another provider's private surface.
+fn pluginNameIn(line: []const u8) ?[]const u8 {
+    const marker = "\"plugin.";
+    const at = std.mem.indexOf(u8, line, marker) orelse return null;
+    const rest = line[at + marker.len ..];
+    const dot = std.mem.indexOfScalar(u8, rest, '.') orelse return null;
+    return rest[0..dot];
+}
+
 fn scanFile(scan: *Scan, rel_path: []const u8, contents: []const u8) !void {
     var current_fn: []const u8 = "";
     var line_no: usize = 0;
@@ -99,6 +146,15 @@ fn scanFile(scan: *Scan, rel_path: []const u8, contents: []const u8) !void {
 
         if (std.mem.indexOf(u8, line, "findByName(") != null and containsIgnoreCase(current_fn, "deliver"))
             try scan.record(rel_path, line_no, "findByName on an async delivery path (resolve the captured ref instead)");
+
+        // Doc §19 "cross-plugin private command dependencies": a plugin may
+        // name its OWN `plugin.<id>.*` surface and no one else's.
+        if (pluginNameIn(line)) |named| {
+            if (pluginIdOf(rel_path)) |owner| {
+                if (!std.mem.eql(u8, named, owner))
+                    try scan.record(rel_path, line_no, "depends on another plugin's private command name (doc §19)");
+            }
+        }
     }
 }
 
@@ -158,5 +214,13 @@ test "demolition: §19 checklist absences hold over src/" {
     // absent from a switch someone could silently reintroduce.
     inline for (@typeInfo(Keymap.Feed).@"union".fields) |field| {
         try t.expect(!std.mem.eql(u8, field.name, "text"));
+    }
+
+    // Doc §19 "compulsory editor storage in workspace entries": an entry's
+    // editor is OPTIONAL at the type level, so an entry that holds no text
+    // cannot be made to carry a dummy one to satisfy the field.
+    inline for (@typeInfo(Buffers.Buffer).@"struct".fields) |field| {
+        if (std.mem.eql(u8, field.name, "editor"))
+            try t.expect(@typeInfo(field.type) == .optional);
     }
 }
