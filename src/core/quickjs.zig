@@ -2627,6 +2627,75 @@ test "quickjs: an ungranted JS plugin cannot fileWrite at all — possession, no
     try t.expect(env.buffers.findByPath("/tmp/weft-agent-ungranted.zig") == null);
 }
 
+test "quickjs: a refused agent write is ANSWERED, not swallowed — the rest of the batch still streams" {
+    const gpa = t.allocator;
+    var env: Env = undefined;
+    try Env.init(gpa, &env);
+    defer env.deinit(gpa);
+    var engine = try wasm.Engine.init(gpa);
+    defer engine.deinit();
+
+    // Gating `weft.fileWrite` made refusal REACHABLE from the shipped ACP
+    // reactor, which parses a whole `procRead` batch in one loop: a throw
+    // escaping `onMessage` would drop every line after it, and those lines
+    // are already out of the plugin's inbox — gone for good. So a narrowed
+    // `fs_write` grant could silently swallow whatever the agent said next,
+    // up to and including a permission request. The refusal has to be an
+    // ANSWER to that one request and nothing more.
+    var tmp = t.tmpDir(.{});
+    defer tmp.cleanup();
+    const dir = try std.fmt.allocPrint(gpa, ".zig-cache/tmp/{s}", .{tmp.sub_path});
+    defer gpa.free(dir);
+    const root = try std.fmt.allocPrint(gpa, "{s}/allowed", .{dir});
+    defer gpa.free(root);
+    const keep = try std.fmt.allocPrint(gpa, "{s}/keep.txt", .{root});
+    defer gpa.free(keep);
+    try @import("file.zig").writeBytesMakingDirs(gpa, root, keep, "");
+    const outside = try std.fmt.allocPrint(gpa, "{s}/secret.txt", .{dir});
+    defer gpa.free(outside);
+
+    // One batch: handshake, a write the grant cannot reach, then a message.
+    const mock_path = try std.fmt.allocPrint(gpa, "{s}/mock.sh", .{dir});
+    defer gpa.free(mock_path);
+    const mock = try std.fmt.allocPrint(gpa,
+        \\printf '{{"jsonrpc":"2.0","id":0,"result":{{"protocolVersion":1}}}}\n'
+        \\printf '{{"jsonrpc":"2.0","id":1,"result":{{"sessionId":"s1"}}}}\n'
+        \\printf '{{"jsonrpc":"2.0","id":8,"method":"fs/write_text_file","params":{{"path":"{s}","content":"escaped"}}}}\n'
+        \\printf '{{"jsonrpc":"2.0","method":"session/update","params":{{"update":{{"sessionUpdate":"agent_message_chunk","content":{{"type":"text","text":"after the refusal"}}}}}}}}\n'
+    , .{outside});
+    defer gpa.free(mock);
+    try @import("file.zig").writeBytes(gpa, mock_path, mock);
+
+    const acp = try @import("file.zig").readAlloc(gpa, "config/plugins/acp.js");
+    defer gpa.free(acp);
+    const src = try std.fmt.allocPrint(gpa, "{s}\nstartAgent(\"/bin/sh {s}\", \"hi\");\n", .{ acp, mock_path });
+    defer gpa.free(src);
+
+    try env.grant("test", "proc");
+    _ = try env.grants.grant(.{ .capability = "fs_write", .limit = .{ .fs_root = root } }, "test", null);
+    var plugin = try JsPlugin.load(gpa, &engine, &env.ctx, env.pool, .empty, "test", null, src);
+    defer plugin.deinit();
+
+    const deadline = task.nowNs() + 3 * std.time.ns_per_s;
+    var streamed = false;
+    while (!streamed and task.nowNs() < deadline) {
+        _ = plugin.tick();
+        var it = env.buffers.iterator();
+        while (it.next()) |b| {
+            if (!std.mem.eql(u8, b.name, "*agent*")) continue;
+            const txt = try b.textEditor().?.text().toOwnedSlice(gpa);
+            defer gpa.free(txt);
+            if (std.mem.indexOf(u8, txt, "after the refusal") != null) streamed = true;
+        }
+        std.atomic.spinLoopHint();
+    }
+    // The message AFTER the refused write arrived: one denial, one dropped
+    // request, and the stream carried on.
+    try t.expect(streamed);
+    // ...and the write really was refused — no buffer bound out of root.
+    try t.expect(env.buffers.findByPath(outside) == null);
+}
+
 test "quickjs: a config syntax error surfaces as ConfigException, not silent" {
     const gpa = t.allocator;
     var env: Env = undefined;
