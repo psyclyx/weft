@@ -152,7 +152,10 @@ Three buckets. The test is **can the locus vary?**
    git's `.weft-git.patch`, commit-message and rebase-plan files (placed via
    `inRepo()` precisely because "the plugin's cwd is the editor's, which is not
    where the repository is"); `llm`'s prompt file; `ShellFs`'s base64 heredoc
-   upload. These must exist wherever the effect runs.
+   upload. These must exist wherever the effect runs. The first two are now
+   **spooled by the host** (§4.2) — the guest never places them, so the bucket
+   shrinks to what genuinely must live inside the work tree, which turned out to
+   be none of git's three.
 3. **User content** — targets and designations.
 
 Review-time test for 1 vs 3: **provenance**. Bytes the program computed from
@@ -219,6 +222,28 @@ The model already ships: `wl_proc_filter` composes
 the command, never naming the path (`wasm_host/proc.zig:404-445`). Generalise
 that to a **place-scoped spool**: give me scratch at this place, hand the child
 its path, clean up after.
+
+**LANDED.** `wl_proc_spool(cmd, input, name, token)` is `wl_proc_to_buffer`
+plus an input payload: the host writes `input` to `/tmp/weft-spool-{pid}-{n}`,
+substitutes it for `{}` in `cmd`, runs the command in the dispatching entry's
+place, fills `<name>` with stdout, and deletes the temp on **every** terminal
+path — including a command that failed, which is precisely where the old
+in-plugin `rm -f` (appended to the very command that died) used to leak. Perms
+are `proc + timer`, the same as the sibling fill doors; not `fs_write`, because
+the guest supplies bytes and a command and never a path.
+
+`git.zig` migrated all four of its writes (the synthesized patch, twice; each
+draft's commit message; the rebase plan) and **dropped `fs_write`**;
+`llm.zig` migrated its prompt and dropped `fs_write` too, taking its
+launch-directory litter with it. Neither plugin names a path it writes, and
+neither cleans up after itself any more. The gate guest is `src/guest/spool.zig`
+— `{proc, timer}` and nothing else — so the trade is proven by a guest that
+genuinely holds no filesystem authority.
+
+The JS plane is deliberately NOT mirrored: it has no fill door and no filter
+door to mirror (only the raw `qjs_proc_spawn/send/read/close` stream surface),
+so there is no asymmetry to introduce. When JS gains fill doors, the spool
+belongs in the same batch.
 
 Two further primitives close the honest gaps:
 
@@ -306,11 +331,12 @@ file and line, with a STANDING list naming what every survivor awaits. Wave 6
 closes the standing list rather than starting the work.
 
 **Wave 0 — pre-flight.** Find every relative-write paired with a relative
-shell reference. `llm.zig:39-50` writes `weft-llm-prompt-N.txt` and then shells
+shell reference. `llm.zig:39-50` wrote `weft-llm-prompt-N.txt` and then shelled
 `llm < weft-llm-prompt-N.txt`, working only because the fsWrite cwd and the
-shell cwd are both the launch directory. Wave 2 breaks that coincidence. (It
-also never deletes the file, so it litters the launch directory today.) This
-wave must land before Wave 2 or the breakage is silent.
+shell cwd were both the launch directory. Wave 2 broke that coincidence. (It
+also never deleted the file, so it littered the launch directory.) **Closed by
+the spool** (§4.2): `llm` hands over bytes, the host owns the path, and there is
+no relative reference left to break.
 
 **Wave 1 — Place as a value.** The `Place` type; `Buffer.place` with
 inheritance at `insert`; the head pin via the existing `set-working-target`;
@@ -336,10 +362,17 @@ repl, ACP and dap converge on it. LSP gains a real `rootUri` per place; ACP's
 `session/new { cwd }` stops being `"."`. Gates: two projects, two servers; two
 REPLs, one project; a session survives a descriptor revision bump.
 
-**Wave 5 — Better primitives, fewer grants.** The place-scoped spool; the
-marker/ancestor query; kv persistence (P12). git drops to `{proc, timer}`; the
-five root detectors collapse to one provider. Gates: git declares no fs
-capability; recents survive a restart.
+**Wave 5 — Better primitives, fewer grants.** The place-scoped spool
+(**landed**, §4.2); the marker/ancestor query; kv persistence (P12). git drops
+to `{proc, timer}`; the five root detectors collapse to one provider. Gates:
+git declares no fs capability; recents survive a restart.
+
+Half of that gate is met: git declares no **`fs_write`**, asserted in
+`wasm_abi/tests.zig`'s git test so a regrant is loud. It still holds `fs_read`,
+and will until the marker/ancestor query exists — finding the repository root
+and detecting an in-progress rebase are the only two uses left, and both are
+exactly the path-shaped probe that query is for. The gate tightens to "no fs
+capability" when that lands, not before.
 
 **Wave 6 — Close the standing list.** ABI symmetry (an authority parameter on
 `fs_read`/`fs_write`/`fs_exists`, as `fs_list` already has); grants confined by
