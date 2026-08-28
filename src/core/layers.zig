@@ -29,6 +29,16 @@ const Document = @import("Document.zig");
 
 pub const Scope = enum { local, host, replicated };
 
+/// What a layer IS to a presentation. A `builtin` feed is one core's own
+/// render paths read by name (styles, folds, decorations, presence, …); an
+/// `annotation` feed is the third-party decoration package
+/// (doc/contextual-workspace-architecture.md §11.7) — published against an
+/// entry the provider does not own, revision-stamped, and composited
+/// generically by whatever presentation hosts the entry. A name never
+/// changes class: claiming one across the classes is refused, so a decorator
+/// cannot take over `styles` and paint through core's own path.
+pub const Feed = enum { builtin, annotation };
+
 /// How a span presents (plan 02 P8). `range` (default) is the classic
 /// anchored face painted over `[start, end)`. The rest are decorations
 /// anchored at `start`, drawn beside the text rather than over it, with
@@ -93,6 +103,12 @@ pub const Layer = struct {
     scope: Scope,
     provider: []u8,
     doc: *Document,
+    feed: Feed = .builtin,
+    /// The entry revision an ANNOTATION feed's spans were computed against
+    /// (`begin` stamps it; a builtin feed is unstamped). Once the entry moves
+    /// past it the spans no longer resolve, and `spanCount` reports none until
+    /// the provider republishes — dropped, never guessed (§11.7).
+    stamp: ?Document.Revision = null,
     spans: std.ArrayList(Span) = .empty,
     bulk: ?Bulk = null,
 
@@ -179,6 +195,22 @@ pub const Layer = struct {
         face: Face = .{},
     };
 
+    /// Open an annotation round: drop the previous set and stamp the entry
+    /// revision the incoming spans are computed against. Spans appended after
+    /// this paint only while the entry is still at that revision.
+    pub fn begin(self: *Layer, gpa: Allocator) void {
+        self.clearSpans(gpa);
+        self.stamp = self.doc.revision();
+    }
+
+    /// Whether this feed's spans still resolve against the entry revision they
+    /// were published for. An unstamped (builtin) feed always resolves — its
+    /// anchors ARE its truth.
+    pub fn resolves(self: *const Layer) bool {
+        const stamp = self.stamp orelse return true;
+        return stamp == self.doc.revision();
+    }
+
     /// Spans at the current head (anchors already shifted).
     pub fn resolvedSpan(self: *const Layer, i: usize) ResolvedSpan {
         const s = self.spans.items[i];
@@ -192,8 +224,11 @@ pub const Layer = struct {
         };
     }
 
+    /// Spans a CONSUMER may paint: none while the feed is stale, so every
+    /// consumer (view, gutter, status line, location list) drops a stale
+    /// annotation without each having to remember the rule.
     pub fn spanCount(self: *const Layer) usize {
-        return self.spans.items.len;
+        return if (self.resolves()) self.spans.items.len else 0;
     }
 };
 
@@ -217,10 +252,22 @@ pub const Layers = struct {
     /// Get-or-create the layer `(doc, name)` owned by `provider`.
     /// Re-claiming a name from a different provider replaces its
     /// content ownership (last registration wins, like the command
-    /// registry).
-    pub const ClaimError = Allocator.Error || error{Unimplemented};
+    /// registry) — but never across feed classes (`error.Reserved`).
+    pub const ClaimError = Allocator.Error || error{ Unimplemented, Reserved };
 
     pub fn claim(self: *Layers, gpa: Allocator, doc: *Document, name: []const u8, scope: Scope, provider: []const u8) ClaimError!*Layer {
+        return self.claimFeed(gpa, doc, name, scope, provider, .builtin);
+    }
+
+    /// Claim a THIRD-PARTY annotation feed on any entry the provider can
+    /// reference (§11.7). Local scope: an annotation is a view of the entry,
+    /// not content, so it neither commits nor replicates. Ownership is
+    /// per-name, as for every layer, and a builtin name is refused.
+    pub fn claimAnnotation(self: *Layers, gpa: Allocator, doc: *Document, name: []const u8, provider: []const u8) ClaimError!*Layer {
+        return self.claimFeed(gpa, doc, name, .local, provider, .annotation);
+    }
+
+    fn claimFeed(self: *Layers, gpa: Allocator, doc: *Document, name: []const u8, scope: Scope, provider: []const u8, feed: Feed) ClaimError!*Layer {
         // [FIX 10] Replicated state is not yet grant-keyed on the wire. Only
         // presence (whose relay is wired) may claim `replicated`; any other
         // replicated claim traps rather than silently degrading to a local
@@ -230,11 +277,13 @@ pub const Layers = struct {
             return error.Unimplemented;
         for (self.list.items) |l| {
             if (l.doc == doc and std.mem.eql(u8, l.name, name)) {
+                if (l.feed != feed) return error.Reserved;
                 if (!std.mem.eql(u8, l.provider, provider)) {
                     gpa.free(l.provider);
                     l.provider = try gpa.dupe(u8, provider);
                     l.clearSpans(gpa);
                     l.clearBulk(gpa);
+                    l.stamp = null;
                 }
                 return l;
             }
@@ -246,6 +295,7 @@ pub const Layers = struct {
             .scope = scope,
             .provider = try gpa.dupe(u8, provider),
             .doc = doc,
+            .feed = feed,
         };
         try self.list.append(gpa, l);
         return l;
@@ -256,6 +306,31 @@ pub const Layers = struct {
             if (l.doc == doc and std.mem.eql(u8, l.name, name)) return l;
         }
         return null;
+    }
+
+    /// The annotation feeds over `doc`, in claim order — what a presentation
+    /// composites on top of the entry's own paint. Caller owns the slice.
+    pub fn annotations(self: *const Layers, gpa: Allocator, doc: *const Document) Allocator.Error![]const *const Layer {
+        var out: std.ArrayList(*const Layer) = .empty;
+        errdefer out.deinit(gpa);
+        for (self.list.items) |l| {
+            if (l.doc == doc and l.feed == .annotation) try out.append(gpa, l);
+        }
+        return out.toOwnedSlice(gpa);
+    }
+
+    /// Drop one provider's layer — the decorator going away takes its paint
+    /// with it and touches nothing else. A name owned by somebody else (a
+    /// later claim won it) is left alone.
+    pub fn release(self: *Layers, gpa: Allocator, doc: *const Document, name: []const u8, provider: []const u8) void {
+        for (self.list.items, 0..) |l, i| {
+            if (l.doc != doc or !std.mem.eql(u8, l.name, name)) continue;
+            if (!std.mem.eql(u8, l.provider, provider)) return;
+            l.deinit(gpa);
+            gpa.destroy(l);
+            _ = self.list.swapRemove(i);
+            return;
+        }
     }
 
     /// Drop every layer of `doc` (buffer close).
@@ -321,4 +396,68 @@ test "layers: replicated scope traps except for presence (FIX 10)" {
     // Local and host scopes are unaffected.
     _ = try store.claim(gpa, &doc, "notes", .local, "plugin.x");
     _ = try store.claim(gpa, &doc, "diagnostics", .host, "lsp");
+}
+
+test "layers: an annotation feed is dropped after an edit and returns on republish" {
+    const gpa = std.testing.allocator;
+    var doc = try Document.init(gpa, "user");
+    defer doc.deinit(gpa);
+    try doc.insert(gpa, 0, "// TODO: ship it\n");
+    var store: Layers = .empty;
+    defer store.deinit(gpa);
+
+    // A third party decorates an entry it does not own.
+    const marks = try store.claimAnnotation(gpa, &doc, "marks", "marks");
+    marks.begin(gpa);
+    try marks.appendSpan(gpa, .{ .start = 3, .end = 7, .kind = 5, .message = "" });
+    try std.testing.expectEqual(@as(usize, 1), marks.spanCount());
+    try std.testing.expectEqual(@as(usize, 3), marks.resolvedSpan(0).start);
+
+    // The entry moves: the feed no longer resolves, so no consumer sees it —
+    // the anchors are still there, they are simply not published truth.
+    try doc.insert(gpa, 0, "\n");
+    try std.testing.expect(!marks.resolves());
+    try std.testing.expectEqual(@as(usize, 0), marks.spanCount());
+
+    // Republishing against the new revision brings the paint back.
+    marks.begin(gpa);
+    try marks.appendSpan(gpa, .{ .start = 4, .end = 8, .kind = 5, .message = "" });
+    try std.testing.expectEqual(@as(usize, 1), marks.spanCount());
+    try std.testing.expectEqual(@as(usize, 4), marks.resolvedSpan(0).start);
+}
+
+test "layers: feeds coexist per name, never cross classes, and release takes only their own" {
+    const gpa = std.testing.allocator;
+    var doc = try Document.init(gpa, "user");
+    defer doc.deinit(gpa);
+    try doc.insert(gpa, 0, "fn main() {}\n");
+    var store: Layers = .empty;
+    defer store.deinit(gpa);
+
+    // Two decorators over one entry, beside the entry's own builtin feed.
+    const diagnostics = try store.claim(gpa, &doc, "diagnostics", .host, "lsp");
+    try diagnostics.publishSpans(gpa, &.{.{ .start = 3, .end = 7, .kind = 1, .message = "unused" }});
+    const marks = try store.claimAnnotation(gpa, &doc, "marks", "marks");
+    marks.begin(gpa);
+    try marks.appendSpan(gpa, .{ .start = 0, .end = 2, .kind = 5, .message = "" });
+    const lens = try store.claimAnnotation(gpa, &doc, "lens", "codelens");
+    lens.begin(gpa);
+    try lens.appendSpan(gpa, .{ .start = 0, .end = 0, .kind = 6, .message = "2 refs", .placement = .eol });
+
+    const feeds = try store.annotations(gpa, &doc);
+    defer gpa.free(feeds);
+    try std.testing.expectEqual(@as(usize, 2), feeds.len);
+
+    // A name never changes class: neither side can take over the other's.
+    try std.testing.expectError(error.Reserved, store.claimAnnotation(gpa, &doc, "diagnostics", "marks"));
+    try std.testing.expectError(error.Reserved, store.claim(gpa, &doc, "marks", .local, "lsp"));
+
+    // Removing one decorator removes its paint and nothing else.
+    store.release(gpa, &doc, "marks", "marks");
+    try std.testing.expect(store.find(&doc, "marks") == null);
+    try std.testing.expectEqual(@as(usize, 1), store.find(&doc, "lens").?.spanCount());
+    try std.testing.expectEqual(@as(usize, 1), store.find(&doc, "diagnostics").?.spanCount());
+    // A name someone else owns is not the caller's to drop.
+    store.release(gpa, &doc, "lens", "marks");
+    try std.testing.expect(store.find(&doc, "lens") != null);
 }

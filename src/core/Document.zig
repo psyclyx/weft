@@ -596,6 +596,16 @@ pub fn commitCount(self: *const Document) usize {
     return self.log.items.len;
 }
 
+/// An opaque local edit revision: only EQUALITY is meaningful, so nothing
+/// downstream can do arithmetic on it and guess a mapping. Feeds that publish
+/// coordinates computed against a document stamp it and are dropped once it
+/// stops matching (doc/contextual-workspace-architecture.md §11.7).
+pub const Revision = enum(u64) { _ };
+
+pub fn revision(self: *const Document) Revision {
+    return @enumFromInt(self.log.items.len);
+}
+
 pub fn commitAt(self: *const Document, index: usize) *const Commit {
     return &self.log.items[index];
 }
