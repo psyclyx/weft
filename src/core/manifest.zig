@@ -326,9 +326,12 @@ pub fn keymapPriorityForTier(tier: Tier) i32 {
 /// forcing function surfaced was narrower than "kill 'editor'" — it was
 /// specifically that `which-key-delay-ms` belongs to the `which_key`
 /// PLUGIN, not core, and was squatting in the grab-bag namespace instead.
+/// `"collab"` is the third: sharing is an app-level service with no plugin
+/// to own its namespace, and `main.zig` reads `collab/share-presence` to
+/// pre-select cursor sharing.
 /// Grow this list, never widen the check to "assume unknown owners are
 /// fine".
-const core_value_namespaces = [_][]const u8{ "theme", "editor" };
+const core_value_namespaces = [_][]const u8{ "theme", "editor", "collab" };
 
 /// Config evaluation's output value (§2.3). Every `weft.*` call the config
 /// (or a `weft.use`-imported file) makes lands here as ONE entry in the
