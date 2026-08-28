@@ -482,6 +482,14 @@ pub fn build(b: *std.Build) void {
     compare_only_popup_opts.addOption(bool, "record_popup_layout", false);
     test_mod.addOptions("popup_layout_options", compare_only_popup_opts);
 
+    // §19's demolition checklist as an executable test (src/e2e/demolition_test.zig):
+    // it walks the SOURCE TREE by absolute path (the test binary's cwd is not
+    // guaranteed to be the repo root), so that path is threaded in here rather
+    // than assumed at runtime.
+    const demolition_opts = b.addOptions();
+    demolition_opts.addOption([]const u8, "repo_root", b.build_root.path orelse ".");
+    test_mod.addOptions("demolition_options", demolition_opts);
+
     // task #23 — READ THIS BEFORE treating `failed command: .../test
     // --listen=-` as a failure. It can print on a run where every test
     // PASSED (`Build Summary: ...; N/N tests passed`, exit 0) — it is not,

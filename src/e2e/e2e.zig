@@ -28,4 +28,5 @@ test {
     _ = @import("popup_layout_test.zig");
     _ = @import("language_test.zig");
     _ = @import("grammar_test.zig");
+    _ = @import("demolition_test.zig");
 }
