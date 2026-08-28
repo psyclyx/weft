@@ -72,7 +72,7 @@ pub const Session = struct {
         } else {
             s.conn = .{ .plain = net.Sock.connect(gpa, hostport) catch return error.ConnectFailed };
         }
-        s.reader = try pool.spawnResident(readLoop, .{s});
+        s.reader = try pool.spawnResident(residentOptions(s), readLoop, .{s});
         return s;
     }
 
@@ -81,7 +81,7 @@ pub const Session = struct {
         const s = try alloc(gpa, ctx, plugin, buf);
         errdefer free(s);
         s.conn = .{ .plain = net.Sock.fromFd(fd) };
-        s.reader = try pool.spawnResident(readLoop, .{s});
+        s.reader = try pool.spawnResident(residentOptions(s), readLoop, .{s});
         return s;
     }
 
@@ -104,6 +104,17 @@ pub const Session = struct {
         gpa.free(s.plugin);
         gpa.free(s.buf);
         gpa.destroy(s);
+    }
+
+    /// Shutdown's reach into this reader: the same SHUT_RDWR `deinit` uses,
+    /// so a pool torn down while a session is still live unblocks `recv`
+    /// rather than freeing state the reader is still holding.
+    fn residentOptions(s: *Session) task.ResidentOptions {
+        return .{ .name = "net_session reader", .stop = .of(s, shutdownConn) };
+    }
+
+    fn shutdownConn(s: *Session) void {
+        _ = std.os.linux.shutdown(s.conn.fd(), 2); // SHUT_RDWR — unblocks recv
     }
 
     fn readLoop(s: *Session) void {
@@ -148,7 +159,7 @@ pub const Session = struct {
 
     /// Shut the socket so the reader's recv returns EOF, JOIN it, then close.
     pub fn deinit(s: *Session) void {
-        _ = std.os.linux.shutdown(s.conn.fd(), 2); // SHUT_RDWR — unblocks recv
+        shutdownConn(s);
         while (s.reader.poll() == null) std.atomic.spinLoopHint(); // join
         s.conn.close();
         s.out_buf.deinit(s.gpa);

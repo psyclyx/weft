@@ -146,8 +146,23 @@ pub const ProcStream = struct {
             .reader = undefined,
         };
         errdefer s.io_threaded.deinit();
-        s.reader = pool.spawnResident(spawnAndRead, .{s}) catch return error.ProcessSpawnFailed;
+        s.reader = pool.spawnResident(
+            .{ .name = "proc_stream reader", .stop = .of(s, cancelAndKill) },
+            spawnAndRead,
+            .{s},
+        ) catch return error.ProcessSpawnFailed;
         return s;
+    }
+
+    /// Shutdown's reach into this reader: the same cancel+kill `deinit` uses,
+    /// so a pool torn down while a stream is still live unblocks the read
+    /// loop rather than freeing state it still holds.
+    fn cancelAndKill(s: *ProcStream) void {
+        s.canceled.store(true, .release);
+        s.spawn_mutex.lock();
+        const id_opt = if (s.spawned) s.child.id else null;
+        s.spawn_mutex.unlock();
+        if (id_opt) |id| std.posix.kill(id, std.posix.SIG.KILL) catch {};
     }
 
     /// Frame thread (or a test): whether the fork+exec has landed and `child`

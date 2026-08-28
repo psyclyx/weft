@@ -81,6 +81,9 @@ const Node = struct {
     pool: *Pool,
     runFn: *const fn (*Node) void,
     destroyFn: *const fn (*Node, Allocator) void,
+    /// Set for a resident task: its registry record, marked exited before
+    /// the completion below publishes (so observing `done` implies exited).
+    resident: ?*Resident = null,
     /// Completion/ownership handoff: whichever of {worker finishing,
     /// holder detaching} comes second frees the node; `poll` frees on
     /// consumption.
@@ -90,6 +93,49 @@ const Node = struct {
     const done: u8 = 1;
     const detached: u8 = 2;
 };
+
+/// One resident's registry record. The pool owns it; the resident thread
+/// touches only `exited`, so a record can never be freed under a running
+/// thread's feet.
+const Resident = struct {
+    /// Static — a stuck resident is reported by this name, long after the
+    /// caller's own memory may be gone.
+    name: []const u8,
+    stop: ?Stop,
+    exited: std.atomic.Value(bool) = .init(false),
+};
+
+/// How `Pool.deinit` asks a resident to leave: close its socket, kill its
+/// child, signal its wake fd — whatever unblocks the loop it is parked in.
+///
+/// `context` must stay valid until the resident exits. Every session in
+/// this tree joins its own reader before freeing itself, and a joined
+/// resident is already marked exited, so a freed session is never stopped.
+pub const Stop = struct {
+    context: *anyopaque,
+    call: *const fn (*anyopaque) void,
+
+    /// Type-safe constructor: `.of(session, Session.shutdownForStop)`.
+    pub fn of(context: anytype, comptime f: fn (@TypeOf(context)) void) Stop {
+        const Ctx = @TypeOf(context);
+        const shim = struct {
+            fn call(erased: *anyopaque) void {
+                f(@ptrCast(@alignCast(erased)));
+            }
+        };
+        comptime assert(@typeInfo(Ctx) == .pointer);
+        return .{ .context = context, .call = shim.call };
+    }
+};
+
+pub const ResidentOptions = struct {
+    /// Static, for the loud report when this one will not leave.
+    name: []const u8,
+    stop: ?Stop = null,
+};
+
+/// How long `deinit` waits for a signalled resident before giving up on it.
+const resident_join_deadline_ns = 2 * std.time.ns_per_s;
 
 pub const Pool = struct {
     gpa: Allocator,
@@ -110,6 +156,12 @@ pub const Pool = struct {
     /// to poll every handle to find out WHICH ones finished; this is only
     /// "go look").
     notify_fd: ?std.posix.fd_t = null,
+    /// Every resident spawned and not yet reaped. A resident outlives the
+    /// tasks a worker runs, so `deinit` cannot simply join threads: it has
+    /// to ASK each one to leave (`Stop`) and then find out whether it did.
+    residents: std.ArrayList(*Resident) = .empty,
+    residents_mutex: Mutex = .{},
+    join_deadline_ns: u64 = resident_join_deadline_ns,
 
     pub const Options = struct {
         /// 0 = a small editor-shaped default: enough for concurrent
@@ -146,17 +198,69 @@ pub const Pool = struct {
         futexWake(&self.wake, std.math.maxInt(i32));
     }
 
-    /// Blocks (joins workers) — shutdown only, never the hot path.
-    /// Remaining queued tasks are completed on this thread first, so
+    /// Blocks (joins workers AND residents) — shutdown only, never the hot
+    /// path. Remaining queued tasks are completed on this thread first, so
     /// every non-detached handle polls to completion before teardown.
+    ///
+    /// Residents are threads the pool does not schedule and cannot preempt:
+    /// each one is parked on a peer's fd for that peer's whole life. So they
+    /// are SIGNALLED (their `Stop`: kill the child, shut the socket) and then
+    /// joined with a BOUND — a peer that ignores SIGKILL (an unkillable
+    /// D-state read) must not buy an unbounded shutdown hang.
+    ///
+    /// If one will not leave, the only safe move is to LEAK the pool: the
+    /// resident still holds a `*Pool` (it signals `notify_fd` on completion),
+    /// so freeing it here would be the use-after-free this bound exists to
+    /// avoid. Loud (`log.warn`, by name — `proc_stream.deinit`'s precedent for
+    /// the same trade) because a leak that never surfaces is
+    /// worse than one that does.
     pub fn deinit(self: *Pool) void {
         assertMayBlock();
         self.stop();
         for (self.threads) |th| th.join();
         while (self.popAll()) |batch| runBatch(batch);
+        if (!self.joinResidents()) return; // deliberate leak — see above
         const gpa = self.gpa;
         gpa.free(self.threads);
+        self.residents.deinit(gpa);
         gpa.destroy(self);
+    }
+
+    /// Signal every live resident, wait out the bound, and free the records
+    /// of those that left. False = at least one is still running (named in
+    /// the log), so nothing the pool owns may be freed.
+    fn joinResidents(self: *Pool) bool {
+        self.residents_mutex.lock();
+        defer self.residents_mutex.unlock();
+        for (self.residents.items) |r| {
+            if (r.exited.load(.acquire)) continue;
+            if (r.stop) |s| s.call(s.context);
+        }
+        const deadline = nowNs() + self.join_deadline_ns;
+        var stuck: usize = 0;
+        for (self.residents.items) |r| {
+            while (!r.exited.load(.acquire)) {
+                if (nowNs() >= deadline) break;
+                std.atomic.spinLoopHint();
+            }
+            if (!r.exited.load(.acquire)) {
+                stuck += 1;
+                std.log.warn(
+                    "task: resident '{s}' did not exit within {d}ms — its peer is ignoring shutdown; leaking the pool rather than freeing state it still touches",
+                    .{ r.name, self.join_deadline_ns / std.time.ns_per_ms },
+                );
+            }
+        }
+        if (stuck > 0) return false;
+        for (self.residents.items) |r| self.gpa.destroy(r);
+        self.residents.clearRetainingCapacity();
+        return true;
+    }
+
+    /// Test-only: shrink the resident join bound so a test can prove it is
+    /// bounded without paying the production wait.
+    pub fn setJoinDeadlineForTesting(self: *Pool, ns: u64) void {
+        self.join_deadline_ns = ns;
     }
 
     /// Wire the pool's completion signal to a scheduler wake-fd (idempotent;
@@ -188,18 +292,58 @@ pub const Pool = struct {
     /// REPLs would starve every save and gather behind them, and the one
     /// past the last worker would never start at all. Residency makes the
     /// number of live sessions independent of the worker count.
+    /// `opts` is how shutdown reaches it: a static name for the report and
+    /// the signal that unblocks its loop (see `Stop`).
     pub fn spawnResident(
         self: *Pool,
+        opts: ResidentOptions,
         comptime f: anytype,
         args: std.meta.ArgsTuple(@TypeOf(f)),
     ) (Allocator.Error || std.Thread.SpawnError)!Handle(ReturnOf(f)) {
         const Container = TaskContainer(f);
         const c = try self.gpa.create(Container);
         errdefer self.gpa.destroy(c);
-        c.* = .{ .node = .{ .pool = self, .runFn = Container.run, .destroyFn = Container.destroy }, .args = args };
+        const record = try self.registerResident(opts);
+        errdefer self.forgetResident(record);
+        c.* = .{
+            .node = .{ .pool = self, .runFn = Container.run, .destroyFn = Container.destroy, .resident = record },
+            .args = args,
+        };
         const thread = try std.Thread.spawn(.{}, runResident, .{&c.node});
         thread.detach(); // the handle, not the join, is how a caller waits
         return .{ .pool = self, .node = &c.node, .result = &c.result };
+    }
+
+    /// Records live until shutdown or the next spawn: exited ones are reaped
+    /// here, so a session churn (open/close a hundred files) cannot grow the
+    /// registry without bound, and only this thread ever walks the list.
+    fn registerResident(self: *Pool, opts: ResidentOptions) Allocator.Error!*Resident {
+        const record = try self.gpa.create(Resident);
+        errdefer self.gpa.destroy(record);
+        record.* = .{ .name = opts.name, .stop = opts.stop };
+        self.residents_mutex.lock();
+        defer self.residents_mutex.unlock();
+        var i: usize = 0;
+        while (i < self.residents.items.len) {
+            const r = self.residents.items[i];
+            if (r.exited.load(.acquire)) {
+                _ = self.residents.swapRemove(i);
+                self.gpa.destroy(r);
+            } else i += 1;
+        }
+        try self.residents.append(self.gpa, record);
+        return record;
+    }
+
+    fn forgetResident(self: *Pool, record: *Resident) void {
+        self.residents_mutex.lock();
+        defer self.residents_mutex.unlock();
+        for (self.residents.items, 0..) |r, i| {
+            if (r != record) continue;
+            _ = self.residents.swapRemove(i);
+            break;
+        }
+        self.gpa.destroy(record);
     }
 
     fn push(self: *Pool, node: *Node) void {
@@ -266,7 +410,12 @@ fn TaskContainer(comptime f: anytype) type {
             // Captured before the node can possibly be freed below (a
             // detached handle's second-finisher destroys it immediately).
             const pool = node.pool;
+            const record = node.resident;
             self.result = @call(.auto, f, self.args);
+            // Exit is published BEFORE completion, so a caller that joined on
+            // the handle knows this resident will never be stopped again —
+            // the session it points at is free to go.
+            if (record) |r| r.exited.store(true, .release);
             // Publish, then hand off ownership if the holder detached.
             if (node.state.cmpxchgStrong(Node.pending, Node.done, .release, .acquire)) |actual| {
                 assert(actual == Node.detached);
@@ -386,6 +535,47 @@ test "hot-section fence flags" {
     endHotSection();
     try t.expect(!inHotSection());
     assertMayBlock();
+}
+
+/// A resident that parks until someone releases its gate — the test stand-in
+/// for a reader blocked on a peer's fd.
+const Parked = struct {
+    gate: std.atomic.Value(bool) = .init(false),
+
+    fn park(self: *Parked) void {
+        while (!self.gate.load(.acquire)) std.atomic.spinLoopHint();
+    }
+
+    fn release(self: *Parked) void {
+        self.gate.store(true, .release);
+    }
+};
+
+test "pool: deinit signals residents, joins them, and reaps their records" {
+    var pool = try Pool.init(t.allocator, .{ .threads = 1 });
+    var parked: Parked = .{};
+    var h = try pool.spawnResident(
+        .{ .name = "test parked", .stop = .of(&parked, Parked.release) },
+        Parked.park,
+        .{&parked},
+    );
+    h.detach();
+    // No release here: only `deinit`'s signal can end this resident. Leak
+    // checking is the assertion — the registry record must be gone too.
+    pool.deinit();
+}
+
+test "pool: a resident that ignores its signal is named, and the pool leaks instead of freeing under it" {
+    // Deliberately leaked (see `Pool.deinit`), so not the checking allocator.
+    const gpa = std.heap.page_allocator;
+    var pool = try Pool.init(gpa, .{ .threads = 1 });
+    pool.setJoinDeadlineForTesting(10 * std.time.ns_per_ms);
+    var parked: Parked = .{};
+    var h = try pool.spawnResident(.{ .name = "test unkillable" }, Parked.park, .{&parked});
+    h.detach();
+    pool.deinit(); // bounded: returns despite the resident still running
+    parked.release();
+    while (!pool.residents.items[0].exited.load(.acquire)) std.atomic.spinLoopHint();
 }
 
 /// Monotonic clock: a RAW syscall (`linux.clock_gettime` — no libc, so no

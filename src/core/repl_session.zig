@@ -58,8 +58,19 @@ pub const Session = struct {
             .stderr = .pipe,
             .cwd = if (cwd) |p| .{ .path = p } else .inherit,
         }) catch return error.ProcessSpawnFailed;
-        s.reader = try pool.spawnResident(readLoop, .{s});
+        s.reader = try pool.spawnResident(
+            .{ .name = "repl_session reader", .stop = .of(s, killChild) },
+            readLoop,
+            .{s},
+        );
         return s;
+    }
+
+    /// Shutdown's reach into this reader: killing the child is what makes its
+    /// blocking read return, so a pool torn down while a REPL is still live
+    /// unblocks the reader instead of freeing state it still holds.
+    fn killChild(s: *Session) void {
+        if (s.child.id) |id| std.posix.kill(id, std.posix.SIG.KILL) catch {};
     }
 
     /// Reader task: block on the child's stdout/stderr, appending each chunk to
@@ -120,7 +131,7 @@ pub const Session = struct {
     /// and free. The single owner of teardown.
     pub fn deinit(s: *Session) void {
         const gpa = s.gpa;
-        if (s.child.id) |id| std.posix.kill(id, std.posix.SIG.KILL) catch {};
+        killChild(s);
         while (s.reader.poll() == null) std.atomic.spinLoopHint(); // join the reader
         _ = s.child.wait(s.io_threaded.io()) catch {};
         s.out_buf.deinit(gpa);
