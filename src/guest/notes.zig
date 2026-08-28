@@ -26,6 +26,14 @@
 //! serializes, and degrades to its textual form plus a reason — the git
 //! plugin's commit surface is async proc output with no synchronous
 //! description door to ask, so notes states that rather than guessing.
+//!
+//! Two limits are the membrane's, not this plugin's, and are stated rather
+//! than worked around: a guest has no viewport door, so a round resolves the
+//! whole scanned note instead of only what is on screen (§11.6 windowing is
+//! the missing half of "lazily"); and a pushed offer table is scoped by
+//! ENTRY, not by cursor line, so `std.target.activate` is offered while a
+//! note holding embeds is focused and `notes-embed-activate` says so when the
+//! cursor is elsewhere in it.
 
 const std = @import("std");
 const weft = @import("weft");
@@ -154,12 +162,17 @@ fn embedActivate() void {
 /// nonapplicable, so a note without embeds leaves `Return` to whatever the
 /// grammar bound after it (§9.3).
 fn offerActivate(wanted: bool) void {
-    if (wanted == offering) return;
-    offering = wanted;
-    if (!wanted) return weft.offersRetract();
+    if (!wanted) {
+        if (offering) weft.offersRetract();
+        offering = false;
+        return;
+    }
+    // Republished per round, stamped with the round it describes: a decision
+    // resolved against a superseded scan dies at the effect door.
     weft.offersBegin("", round);
     weft.offer("std.target.activate", "notes-embed-activate", "");
     weft.offersCommit();
+    offering = true;
 }
 
 // ── Embeds: resolve, publish, degrade ───────────────────────────────
@@ -212,7 +225,7 @@ fn refresh(entry: u32) usize {
         at = nl + 1;
     }
     if (scanned < len)
-        mark(anno, if (scanned == 0) 0 else scanned - 1, "[embeds: the note is longer than one scan window] ");
+        mark(anno, scanned, "[embeds: the note is longer than one scan window] ");
     if (found == 0) release(held);
     return found;
 }
