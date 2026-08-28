@@ -593,7 +593,13 @@ pub fn build(b: *std.Build) void {
         .target = darwin_target,
         .optimize = optimize,
     });
+    const darwin_input = b.createModule(.{
+        .root_source_file = b.path("src/core/input.zig"),
+        .target = darwin_target,
+        .optimize = optimize,
+    });
     darwin_guest_sdk.addImport("membrane_contract_data", darwin_contract_data);
+    darwin_guest_sdk.addImport("weft_input", darwin_input);
     darwin_guest_sdk.addImport("weft_schema", darwin_architecture.schema);
     darwin_guest_sdk.addImport("weft_semantic", darwin_architecture.semantic);
     darwin_guest_sdk.addImport("weft_scene_codec", darwin_architecture.scene_codec);
@@ -894,7 +900,13 @@ fn buildGuest(b: *std.Build, guest_spec: Guest) *std.Build.Step.Compile {
         .target = wasm_target,
         .optimize = .ReleaseSmall,
     });
+    const input = b.createModule(.{
+        .root_source_file = b.path("src/core/input.zig"),
+        .target = wasm_target,
+        .optimize = .ReleaseSmall,
+    });
     guest_sdk.addImport("membrane_contract_data", contract_data);
+    guest_sdk.addImport("weft_input", input);
     guest_sdk.addImport("weft_schema", schema);
     const semantic = b.createModule(.{
         .root_source_file = b.path("src/semantic_model/root.zig"),

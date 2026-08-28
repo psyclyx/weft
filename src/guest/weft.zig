@@ -30,6 +30,12 @@ pub const allocator: std.mem.Allocator = std.heap.wasm_allocator;
 /// reference it.
 const contract_data = @import("membrane_contract_data");
 
+/// The input boundary's vocabulary (core/input.zig) — the SAME `Posture`
+/// enum the host resolves, imported as a named module for the same reason
+/// `contract_data` is: a guest-side copy of a wire enum is exactly the drift
+/// this membrane exists to prevent.
+pub const Posture = @import("weft_input").Posture;
+
 /// D2's schema language + marshaller (core/schema.zig), imported under the
 /// SAME name a guest's own code uses to reach it directly for a build-time-
 /// known slot's typed encode/decode (§3.3's build-time codegen arm is a
@@ -115,6 +121,9 @@ extern "weft" fn wl_text_input(m: u32, ml: u32, c: u32, cl: u32, has: u32) void;
 extern "weft" fn wl_menu_mode(ptr: u32, len: u32) void;
 extern "weft" fn wl_resting_mode(ptr: u32, len: u32) void;
 extern "weft" fn wl_exit_to_resting() void;
+extern "weft" fn wl_resting_posture(posture: u32, ptr: u32, len: u32) void;
+extern "weft" fn wl_posture() u32;
+extern "weft" fn wl_declare_posture(posture: u32) void;
 extern "weft" fn wl_declare_action(ptr: u32, len: u32) void;
 extern "weft" fn wl_provide(a: u32, al: u32, m: u32, ml: u32, l: u32, ll: u32, tl: u32, tll: u32, c: u32, cl: u32, prio: i32) void;
 extern "weft" fn wl_sticky_menu(ptr: u32, len: u32) void;
@@ -773,6 +782,29 @@ pub fn restingMode(mode: []const u8) void {
 /// instead of a hardcoded `setMode("normal")`, so a projection's keys stay live.
 pub fn exitToResting() void {
     wl_exit_to_resting();
+}
+/// DECLARE the mode THIS GRAMMAR rests in for `posture` (architecture §10.4).
+/// The grammar's half of the posture pair: an entry declares how it rests,
+/// the grammar declares what that posture means in its own vocabulary, and
+/// core stamps the pairing on entry switch. A grammar with one mode declares
+/// the same mode for both; a grammar whose text resting mode COMMITS text
+/// (emacs) must declare a separate structural one, or typing would leak into
+/// a projection. Implies `restingMode`.
+pub fn restingPosture(rests_in: Posture, mode: []const u8) void {
+    wl_resting_posture(@intFromEnum(rests_in), p(mode.ptr), @intCast(mode.len));
+}
+/// How the addressed entry RESTS under input (§10.4) — the one read a
+/// grammar needs. It asks the DECLARATION; no tool identity, mode name, or
+/// view liveness crosses this boundary.
+pub fn posture() Posture {
+    return Posture.fromWire(wl_posture()) orelse .text;
+}
+/// DECLARE the addressed entry's posture as its presentation owner,
+/// overriding the derivation. `capture` is paired: it stacks the declaration
+/// it displaced, and the grammar's always-retained break-out
+/// (`std.input.break-out`) restores it.
+pub fn declarePosture(declared: Posture) void {
+    wl_declare_posture(@intFromEnum(declared));
 }
 /// Declare `mode` a STICKY menu: stays open after a leaf key (flag-accumulating
 /// transients) instead of one-shot auto-popping. Implies `menuMode`.

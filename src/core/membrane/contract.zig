@@ -148,6 +148,9 @@ const handlers = [_]struct { name: []const u8, handler: HostFn }{
     .{ .name = "wl_menu_mode", .handler = keymap.hMenuMode },
     .{ .name = "wl_resting_mode", .handler = keymap.hRestingMode },
     .{ .name = "wl_exit_to_resting", .handler = keymap.hExitToResting },
+    .{ .name = "wl_resting_posture", .handler = keymap.hRestingPosture },
+    .{ .name = "wl_posture", .handler = keymap.hPosture },
+    .{ .name = "wl_declare_posture", .handler = keymap.hDeclarePosture },
     .{ .name = "wl_sticky_menu", .handler = keymap.hStickyMenu },
     .{ .name = "wl_declare_action", .handler = keymap.hDeclareAction },
     .{ .name = "wl_provide", .handler = keymap.hProvide },
@@ -518,6 +521,7 @@ test "membrane contract: table .perm metadata agrees with the handlers' actual r
 const head_gated_list = [_][]const u8{
     "wl_set_mode", // keymap.zig hSetMode
     "wl_exit_to_resting", // keymap.zig hExitToResting
+    "wl_declare_posture", // keymap.zig hDeclarePosture
     "wl_echo", // dispatch.zig hEcho
     "wl_pick_end", // pick.zig hPickEnd
     "wl_open_file_pick", // pick.zig hOpenFilePick

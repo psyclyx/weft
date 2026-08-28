@@ -6,6 +6,7 @@ const std = @import("std");
 const Allocator = std.mem.Allocator;
 const wasm = @import("../wasm.zig");
 const command_mod = @import("../command.zig");
+const input = @import("../input.zig");
 
 const shared = @import("plugin.zig");
 const WasmPlugin = shared.WasmPlugin;
@@ -177,11 +178,12 @@ pub fn hExitToResting(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32
     if (!requireDispatch(p, caller, "wl_exit_to_resting")) return;
     const ctx = p.activeCtx();
     const buf = ctx.buffers.active();
-    // The buffer's declared resting mode (its tool mode, or the config base it
-    // was stamped with on open) — no core-baked mode name; the config owns what
-    // "resting" means. `default_mode` is the last resort if a buffer never
-    // declared one.
-    const target = if (buf.mode.len > 0) buf.mode else ctx.buffers.default_mode;
+    // The buffer's declared resting mode (its tool mode, or the base it was
+    // stamped with on open) — no core-baked mode name; the config owns what
+    // "resting" means. An entry that never declared one rests where its
+    // POSTURE says (§10.4), so Escape in a structural entry cannot land in
+    // the text editing base.
+    const target = if (buf.mode.len > 0) buf.mode else ctx.buffers.restingModeFor(ctx.posture());
     if (target.len == 0) return;
     const owned = p.gpa.dupe(u8, target) catch return;
     defer p.gpa.free(owned);
@@ -231,6 +233,43 @@ pub fn hRestingMode(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32, 
     const mode = caller.readMemory(p.gpa, @intCast(args[0]), @intCast(args[1])) catch return;
     defer p.gpa.free(mode);
     p.activeCtx().keymap.markRestingMode(p.gpa, mode) catch {};
+}
+
+/// `resting_posture(posture, mode)`: the GRAMMAR's half of §10.4 — the mode
+/// it rests in for `posture`. System-scoped like the other mode-table
+/// declarations (no head state), so it is legal from `init`, which is where
+/// every grammar declares it.
+pub fn hRestingPosture(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32, results: []i32) void {
+    _ = results;
+    const p: *WasmPlugin = @ptrCast(@alignCast(data.?));
+    const posture = input.Posture.fromWire(@bitCast(args[0])) orelse return;
+    const mode = caller.readMemory(p.gpa, @intCast(args[1]), @intCast(args[2])) catch return;
+    defer p.gpa.free(mode);
+    const ctx = p.activeCtx();
+    ctx.buffers.setRestingFor(p.gpa, posture, mode) catch return;
+    ctx.keymap.markRestingMode(p.gpa, mode) catch {};
+}
+
+/// `posture()`: read how the addressed entry rests (§10.4). The ONE read a
+/// grammar needs — it asks the DECLARATION, never what tool it is looking at.
+pub fn hPosture(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32, results: []i32) void {
+    _ = caller;
+    _ = args;
+    const p: *WasmPlugin = @ptrCast(@alignCast(data.?));
+    results[0] = @bitCast(@intFromEnum(p.activeCtx().posture()));
+}
+
+/// `declare_posture(posture)`: the PRESENTATION OWNER's half of §10.4 —
+/// override the derivation on the entry this dispatch addresses. HEAD-GATED
+/// for the same reason `wl_set_mode` is (task #19 item 4): "background
+/// declares a posture for whatever entry happens to be active" is the
+/// founding mode-leak bug wearing a new hat.
+pub fn hDeclarePosture(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32, results: []i32) void {
+    _ = results;
+    const p: *WasmPlugin = @ptrCast(@alignCast(data.?));
+    if (!requireDispatch(p, caller, "wl_declare_posture")) return;
+    const posture = input.Posture.fromWire(@bitCast(args[0])) orelse return;
+    p.activeCtx().buffer().declarePosture(posture);
 }
 
 /// `sticky_menu(mode)`: mark a menu mode STICKY — it stays open after a leaf

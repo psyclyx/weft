@@ -217,6 +217,9 @@ pub const imports = [_]Entry{
     .{ .name = "wl_menu_mode", .params = &.{ .u32, .u32 }, .results = &.{}, .group = .keymap, .doc = "declare a mode a which-key-style menu" },
     .{ .name = "wl_resting_mode", .params = &.{ .u32, .u32 }, .results = &.{}, .group = .keymap, .doc = "declare a mode a buffer can rest in (`baseMode` stops there)" },
     .{ .name = "wl_exit_to_resting", .params = &.{}, .results = &.{}, .group = .keymap, .head_gated = true, .doc = "leave a transient mode back to the active buffer's resting mode" },
+    .{ .name = "wl_resting_posture", .params = &.{ .u32, .u32, .u32 }, .results = &.{}, .group = .keymap, .doc = "declare the mode this grammar rests in for an input posture (§10.4)" },
+    .{ .name = "wl_posture", .params = &.{}, .results = &.{.u32}, .group = .keymap, .doc = "how the addressed entry rests under input (§10.4: text/structural/field/capture)" },
+    .{ .name = "wl_declare_posture", .params = &.{.u32}, .results = &.{}, .group = .keymap, .head_gated = true, .doc = "declare the addressed entry's input posture, overriding the derivation" },
     .{ .name = "wl_sticky_menu", .params = &.{ .u32, .u32 }, .results = &.{}, .group = .keymap, .doc = "mark a menu mode sticky (stays open after a leaf key)" },
     .{ .name = "wl_declare_action", .params = &.{ .u32, .u32 }, .results = &.{}, .group = .keymap, .doc = "declare an abstract action + its trampoline command" },
     .{ .name = "wl_provide", .params = &.{ .u32, .u32, .u32, .u32, .u32, .u32, .u32, .u32, .u32, .u32, .i32 }, .results = &.{}, .group = .keymap, .doc = "register a provider for an action, scoped by mode/lang/tool + priority" },
@@ -409,7 +412,7 @@ pub const imports = [_]Entry{
 /// half-finished edit — fails the build with a pointed message instead of
 /// silently drifting the two ~124-entry tables apart again (the exact class
 /// this table exists to kill).
-const expected_import_count = 195;
+const expected_import_count = 198;
 
 /// A host→guest EXPORT entrypoint (design doc/extensibility-native-surface.md, task
 /// W0a-D extension 2): every `instance.callVoid("name", args)` the host
