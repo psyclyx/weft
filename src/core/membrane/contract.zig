@@ -122,7 +122,9 @@ const handlers = [_]struct { name: []const u8, handler: HostFn }{
     .{ .name = "wl_readonly_span", .handler = layers.hReadOnlySpan },
     .{ .name = "wl_decorate_clear", .handler = layers.hDecorateClear },
     .{ .name = "wl_decorate", .handler = layers.hDecorate },
-    .{ .name = "wl_breakpoint_publish", .handler = layers.hBreakpointPublish },
+    .{ .name = "wl_breakpoint_toggle", .handler = layers.hBreakpointToggle },
+    .{ .name = "wl_breakpoint_clear", .handler = layers.hBreakpointClear },
+    .{ .name = "wl_breakpoint_offsets", .handler = layers.hBreakpointOffsets },
 
     // ── config_kv.zig — runtime kv scratch + the distinct config store ──
     .{ .name = "wl_kv_get", .handler = config_kv.hKvGet },

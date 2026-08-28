@@ -81,7 +81,9 @@ extern "weft" fn wl_readonly_clear() void;
 extern "weft" fn wl_readonly_span(start: u32, end: u32) void;
 extern "weft" fn wl_decorate_clear() void;
 extern "weft" fn wl_decorate(anchor: u32, placement: u32, role: u32, ptr: u32, len: u32) void;
-extern "weft" fn wl_breakpoint_publish(path_ptr: u32, path_len: u32, csv_ptr: u32, csv_len: u32) void;
+extern "weft" fn wl_breakpoint_toggle(offset: u32) i32;
+extern "weft" fn wl_breakpoint_clear() void;
+extern "weft" fn wl_breakpoint_offsets(ptr: u32, cap: u32) i32;
 // Native `editor` surface + anchored ranges. A range crosses as an opaque u32
 // handle into a host-side table of document-owned anchors.
 extern "weft" fn wl_editor_step(from: u32, dir: u32, kind: u32) u32;
@@ -493,11 +495,31 @@ pub fn decorate(anchor: usize, placement: DecoPlacement, role: StyleClass, text:
     wl_decorate(@intCast(anchor), @intFromEnum(placement), @intFromEnum(role), p(text.ptr), @intCast(text.len));
 }
 
-/// Publish this buffer's breakpoint lines (a "l1,l2,…" CSV) to the shared
-/// registry, so the DAP client can send them in setBreakpoints. The `debug`
-/// plugin calls this whenever the set changes.
-pub fn publishBreakpoints(file: []const u8, line_csv: []const u8) void {
-    wl_breakpoint_publish(p(file.ptr), @intCast(file.len), p(line_csv.ptr), @intCast(line_csv.len));
+// ── Breakpoints (anchored on the document, not remembered here) ──────
+//
+// A breakpoint is a place, so the host holds it as an ANCHOR on the active
+// document: an edit above it carries it along, and the line the DAP client
+// re-arms at is derived from that anchor when it is needed. A guest that kept
+// its own offsets would hold the second, staler copy — hence read-back
+// (`breakpointOffsets`) rather than a guest-side table.
+
+/// Toggle a breakpoint at `offset` in the active document. True if one is now
+/// set there.
+pub fn breakpointToggle(offset: usize) bool {
+    return wl_breakpoint_toggle(@intCast(offset)) == 1;
+}
+
+/// Drop every breakpoint in the active document.
+pub fn breakpointClear() void {
+    wl_breakpoint_clear();
+}
+
+/// The active document's breakpoint offsets, as an "o1,o2,…" CSV at the
+/// current head. Borrows `scratch` — valid until the next read call.
+pub fn breakpointOffsets() []const u8 {
+    const n = wl_breakpoint_offsets(p(&scratch), scratch.len);
+    if (n <= 0) return "";
+    return scratch[0..@intCast(n)];
 }
 
 // ── Native editor surface + anchored ranges (motions/operators) ──────

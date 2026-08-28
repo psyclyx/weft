@@ -889,17 +889,24 @@ fn cConfig(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32, results: 
     results[0] = @intCast(caller.writeMemory(@intCast(args[2]), @intCast(args[3]), value) catch 0);
 }
 
-/// weft.breakpoints(path) → the file's breakpoint lines as a "l1,l2,…" CSV (set
-/// by the debug plugin via publishBreakpoints), or "" if none. The DAP client
-/// reads this to send setBreakpoints, so the session stops where you marked.
+/// weft.breakpoints(path) → the file's breakpoint lines as a "l1,l2,…" CSV, or
+/// "" if the file holds none (or isn't open). The DAP client reads this to send
+/// setBreakpoints, so the session stops where you marked.
+///
+/// DERIVED AT SEND TIME: the marks are anchors on that file's document, so the
+/// lines are computed HERE, from the current head — an edit above a breakpoint
+/// cannot leave the adapter re-arming on the line it used to be on.
 fn cBreakpoints(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32, results: []i32) void {
+    results[0] = 0;
     const self: *JsPlugin = @ptrCast(@alignCast(data.?));
-    const path = caller.readMemory(self.gpa, @intCast(args[0]), @intCast(args[1])) catch {
-        results[0] = 0;
-        return;
-    };
+    const path = caller.readMemory(self.gpa, @intCast(args[0]), @intCast(args[1])) catch return;
     defer self.gpa.free(path);
-    const csv = @import("breakpoints.zig").get(path);
+    const ctx = self.bridge.activeCtx();
+    const id = ctx.buffers.findByPath(path) orelse return;
+    const buffer = ctx.buffers.get(id) orelse return;
+    const doc = &(buffer.textEditor() orelse return).doc;
+    var buf: [1024]u8 = undefined;
+    const csv = @import("breakpoints.zig").lineCsv(&ctx.caps.layers, doc, &buf);
     results[0] = @intCast(caller.writeMemory(@intCast(args[2]), @intCast(args[3]), csv) catch 0);
 }
 

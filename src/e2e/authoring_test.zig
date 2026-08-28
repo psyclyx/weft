@@ -2441,3 +2441,60 @@ test "debug: two DAP sessions — own buffers, own programs, stopping one leaves
     ed.run("debug-continue");
     try t.expect(drainToolContains(ed, "*debug:2*", "terminated"));
 }
+
+// ── GATE: a breakpoint is a place, not a line number ──
+//
+// Mark a line, then insert a whole line ABOVE it. The mark belongs to the
+// text it was put on, so the session must arm on where that text is NOW.
+// Before anchoring, the plugin held a byte offset and had already published a
+// LINE, so this stopped one line too high — silently, on the wrong statement.
+test "debug: an edit above a breakpoint moves it — the session arms on the marked text" {
+    const gpa = t.allocator;
+    var app: App = undefined;
+    try app.init(gpa);
+    defer app.deinit();
+    const ed = &app.ed;
+
+    authorFile(ed, "prog.py",
+        \\def f(x):
+        \\    y = x + 1
+        \\    return y
+        \\
+    );
+    ed.press("k", ""); // onto `return y` — line 3
+    ed.chord("SPC d b");
+    try t.expect(std.mem.indexOf(u8, ed.echoText(), "breakpoint set") != null);
+
+    // A new first line: `return y` is line 4 now, and so is its breakpoint.
+    ed.press("g", "");
+    ed.press("g", "");
+    ed.press("O", "");
+    ed.typeText("import sys");
+    ed.press("Escape", "");
+
+    const mock = try std.fmt.allocPrint(gpa, "node {s}/assets/mock_dap.mjs", .{app.proj.prev_cwd});
+    defer gpa.free(mock);
+    try ed.setConfig("dap", "cmd", mock);
+    try ed.setConfig("dap", "program", "prog.py");
+    try ed.setConfig("dap", "line", "9"); // a fallback we never want to see
+
+    const dap_src = try std.fmt.allocPrint(gpa, "{s}/config/plugins/dap.js", .{app.proj.prev_cwd});
+    defer gpa.free(dap_src);
+    const src = try core.file.readAlloc(gpa, dap_src);
+    defer gpa.free(src);
+    try ed.grant("dap", "proc");
+    try ed.loadJs("dap", src);
+
+    // The mock stops on the first breakpoint line it is sent: 4, the line the
+    // marked text moved to — not 3 (where it was marked) or 9 (the fallback).
+    ed.run("debug-start");
+    try t.expect(drainToolContains(ed, "*debug*", "stopped: breakpoint"));
+    try t.expect(drainToolContains(ed, "*debug*", "program:4"));
+    {
+        const text = toolText(ed, "*debug*") orelse return error.NoDebugBuffer;
+        defer gpa.free(text);
+        try t.expect(std.mem.indexOf(u8, text, "program:3") == null);
+    }
+    ed.run("debug-continue");
+    try t.expect(drainToolContains(ed, "*debug*", "terminated"));
+}

@@ -1,30 +1,20 @@
 //! debug — breakpoints: the first slice of a debugger. Toggle a breakpoint on
 //! the cursor's line and a gutter marker (●) shows it. This establishes the
-//! `debug-*` command surface and the breakpoint MODEL a DAP adapter will consume
-//! next; "set a breakpoint" is real here — run / step / inspect are the follow-on
-//! increment (a debug-adapter subprocess, mirroring the ACP agent's shape).
+//! `debug-*` command surface and the breakpoint MODEL the DAP client consumes.
 //!
-//! Breakpoints are PER-BUFFER — keyed by the buffer path from `on_activate` — so
-//! switching files keeps each file's breakpoints. They are display-only gutter
-//! decorations (perms `{}`): never a document byte, so `yy` never yanks one and
-//! they take no commit. Stored as line-start offsets in fixed scratch (no
-//! allocator). Limitation (first slice): an edit ABOVE a breakpoint shifts its
-//! stored offset until the next re-render — a proper anchor comes with the
-//! adapter work.
+//! THE PLUGIN REMEMBERS NOTHING. A breakpoint is a place in a document, so the
+//! host holds it as an ANCHOR on that document's breakpoint layer (per buffer,
+//! dropped with it) — an edit above a mark carries it along, and the line the
+//! debug adapter re-arms at is derived from the anchor when the wire needs one.
+//! This plugin reads the set back (`breakpointOffsets`) every time it paints or
+//! counts, so there is no second copy of a position here to drift out of step
+//! with the text.
+//!
+//! The ● is a DECORATION republished from that set: display-only (perms `{}`),
+//! never a document byte, so `yy` never yanks one and it takes no commit.
 
 const std = @import("std");
 const weft = @import("weft");
-
-const MAX_BP = 128;
-const PATHLEN = 256;
-var bp_path: [MAX_BP][PATHLEN]u8 = undefined;
-var bp_plen: [MAX_BP]usize = undefined;
-var bp_off: [MAX_BP]usize = undefined; // line-start byte offset of the breakpoint
-var bp_n: usize = 0;
-
-// The focused buffer's path (from on_activate) — which file a toggle/render acts on.
-var cur_path: [PATHLEN]u8 = undefined;
-var cur_plen: usize = 0;
 
 const Cmd = struct { name: []const u8, handler: *const fn () void };
 const cmds = [_]Cmd{
@@ -43,119 +33,62 @@ export fn on_command(id: u32) void {
     if (id < cmds.len) cmds[id].handler();
 }
 
-/// The focused buffer changed: track its path and repaint ITS breakpoints (the
-/// decorations layer is per-buffer, so a switch would otherwise show nothing).
+/// The focused buffer changed: paint ITS breakpoints (the decorations layer is
+/// per-buffer, so a switch would otherwise show nothing).
 export fn on_activate() void {
-    const p = weft.activatePath();
-    cur_plen = @min(p.len, PATHLEN);
-    @memcpy(cur_path[0..cur_plen], p[0..cur_plen]);
     render();
-}
-
-fn samePath(i: usize) bool {
-    return bp_plen[i] == cur_plen and
-        std.mem.eql(u8, bp_path[i][0..bp_plen[i]], cur_path[0..cur_plen]);
-}
-
-fn findBp(off: usize) ?usize {
-    var i: usize = 0;
-    while (i < bp_n) : (i += 1) if (samePath(i) and bp_off[i] == off) return i;
-    return null;
-}
-
-fn removeAt(i: usize) void {
-    bp_n -= 1;
-    bp_path[i] = bp_path[bp_n];
-    bp_plen[i] = bp_plen[bp_n];
-    bp_off[i] = bp_off[bp_n];
 }
 
 /// Toggle a breakpoint on the cursor's line.
 fn toggle() void {
     const off = weft.lineAt(weft.cursor()).start;
-    if (findBp(off)) |i| {
-        removeAt(i);
-        weft.echo("debug: breakpoint cleared");
-    } else if (bp_n < MAX_BP) {
-        bp_plen[bp_n] = cur_plen;
-        @memcpy(bp_path[bp_n][0..cur_plen], cur_path[0..cur_plen]);
-        bp_off[bp_n] = off;
-        bp_n += 1;
-        weft.echo("debug: breakpoint set");
-    } else {
-        weft.echo("debug: too many breakpoints");
-    }
+    weft.echo(if (weft.breakpointToggle(off))
+        "debug: breakpoint set"
+    else
+        "debug: breakpoint cleared");
     render();
-    publish();
 }
 
 /// Clear every breakpoint in the focused buffer.
 fn clearAll() void {
-    var i: usize = 0;
-    while (i < bp_n) {
-        if (samePath(i)) removeAt(i) else i += 1;
-    }
+    weft.breakpointClear();
     weft.echo("debug: breakpoints cleared");
     render();
-    publish();
 }
 
 fn list() void {
     var n: usize = 0;
-    var i: usize = 0;
-    while (i < bp_n) : (i += 1) if (samePath(i)) {
-        n += 1;
-    };
+    var it = offsets();
+    while (it.next()) |_| n += 1;
     var buf: [48]u8 = undefined;
     const msg = std.fmt.bufPrint(&buf, "debug: {d} breakpoint(s)", .{n}) catch return;
     weft.echo(msg);
 }
 
-/// Repaint the focused buffer's breakpoints as gutter markers. `decorateClear`
-/// targets the active buffer's decorations layer (breakpoints are the only
-/// code-buffer decorator today — dired's live on *dired*).
+/// Repaint the focused buffer's breakpoints as gutter markers, from the
+/// anchored set. `decorateClear` targets the active buffer's decorations layer.
 fn render() void {
     weft.decorateClear();
-    var i: usize = 0;
-    while (i < bp_n) : (i += 1) if (samePath(i)) {
-        weft.decorate(bp_off[i], .gutter, .removed, "\u{25CF}"); // ● in red-ish (removed)
-    };
+    var it = offsets();
+    while (it.next()) |off| weft.decorate(off, .gutter, .removed, "\u{25CF}"); // ● in red-ish (removed)
 }
 
-/// The 1-based line number of byte `off` in the active document: count newlines
-/// in `[0, off)`, reading in scratch-sized chunks so a long file still counts.
-fn lineOf(off: usize) usize {
-    var line: usize = 1;
-    var pos: usize = 0;
-    while (pos < off) {
-        const s = weft.slice(pos, off);
-        if (s.len == 0) break;
-        for (s) |ch| {
-            if (ch == '\n') line += 1;
+/// The active document's breakpoint offsets, read back from the host. Borrows
+/// the read scratch, so the whole walk must finish before the next read call.
+fn offsets() Offsets {
+    return .{ .rest = weft.breakpointOffsets() };
+}
+
+const Offsets = struct {
+    rest: []const u8,
+
+    fn next(self: *Offsets) ?usize {
+        while (self.rest.len != 0) {
+            const cut = std.mem.indexOfScalar(u8, self.rest, ',') orelse self.rest.len;
+            const field = self.rest[0..cut];
+            self.rest = self.rest[@min(cut + 1, self.rest.len)..];
+            if (std.fmt.parseInt(usize, field, 10) catch null) |off| return off;
         }
-        pos += s.len;
+        return null;
     }
-    return line;
-}
-
-/// Publish the focused buffer's breakpoint LINES (a "l1,l2,…" CSV) to the shared
-/// registry, so the DAP client sends them in setBreakpoints. Called whenever the
-/// set changes — the visual gutter and the debugger stay one source of truth.
-fn publish() void {
-    var buf: [1024]u8 = undefined;
-    var w: usize = 0;
-    var i: usize = 0;
-    while (i < bp_n) : (i += 1) if (samePath(i)) {
-        var numbuf: [16]u8 = undefined;
-        const s = std.fmt.bufPrint(&numbuf, "{d}", .{lineOf(bp_off[i])}) catch continue;
-        if (w != 0 and w < buf.len) {
-            buf[w] = ',';
-            w += 1;
-        }
-        if (w + s.len <= buf.len) {
-            @memcpy(buf[w .. w + s.len], s);
-            w += s.len;
-        }
-    };
-    weft.publishBreakpoints(cur_path[0..cur_plen], buf[0..w]);
-}
+};

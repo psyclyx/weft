@@ -133,6 +133,16 @@ const DocLayers = struct {
     }
 };
 
+/// The gutter's breakpoint lines, DERIVED each frame from the document's
+/// anchored marks — no line number is stored anywhere, so a mark that the text
+/// moved is drawn where the text moved it. Arena-owned, frame-lived.
+fn bpLines(arena: std.mem.Allocator, caps: *core.Caps, editor: ?*core.Editor) []const u8 {
+    const ed = editor orelse return "";
+    var buf: [1024]u8 = undefined;
+    const csv = core.breakpoints.lineCsv(&caps.layers, &ed.doc, &buf);
+    return arena.dupe(u8, csv) catch "";
+}
+
 /// What a TEXT entry reports on the status line. An entry that holds no text
 /// has nothing to save, realize, or diagnose.
 const DocStatus = struct {
@@ -478,7 +488,7 @@ pub const FrameBuilder = struct {
         const gutter_frame: view_mod.ui_mesh.GutterFrame = .{
             .bindings = gutter_bindings,
             .diag_layer = diag_layer,
-            .bp_lines = core.breakpoints.get(file_name),
+            .bp_lines = bpLines(mesh_gpa, fx.caps, editor),
         };
 
         const hud: view_mod.Hud = .{
@@ -594,7 +604,7 @@ pub const FrameBuilder = struct {
             const other_gutter: view_mod.ui_mesh.GutterFrame = .{
                 .bindings = try view_mod.ui_mesh.gutterBindings(fx.ui_mesh, arena_state.allocator(), other_args.facts),
                 .diag_layer = other_diag,
-                .bp_lines = core.breakpoints.get(other_name),
+                .bp_lines = bpLines(arena_state.allocator(), fx.caps, oed),
             };
             const other_hud: view_mod.Hud = .{
                 .mode = fx.head.currentMode(),

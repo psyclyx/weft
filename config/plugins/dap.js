@@ -214,8 +214,10 @@ weft.command("debug-stop", () => {
     weft.echo("debug: no session");
     return;
   }
+  // A session is retired by the adapter's `terminated`, not by asking: until
+  // that arrives the stream is still ours, so its last words still land in its
+  // own transcript instead of being dropped as an unowned frame.
   send(s, "disconnect", { terminateDebuggee: true });
-  weft.status("○ " + s.buf + " · stopped");
-  weft.echo("debug: stopped " + s.buf);
-  retire(s);
+  weft.status("○ " + s.buf + " · stopping");
+  weft.echo("debug: stopping " + s.buf);
 });

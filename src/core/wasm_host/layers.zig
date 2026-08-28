@@ -119,18 +119,54 @@ pub fn hDecorate(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32, res
     }) catch {};
 }
 
-/// `breakpointPublish(path, line_csv)`: the debug plugin publishes a file's
-/// breakpoint lines to the process-global registry, so the DAP client (a JS
-/// plugin) can read them for setBreakpoints. Display-only bridge — no document
-/// bytes, no perm needed.
-pub fn hBreakpointPublish(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32, results: []i32) void {
+const breakpoints = @import("../breakpoints.zig");
+
+/// `breakpointToggle(offset)` → 1 if a breakpoint is now SET at `offset` in the
+/// active document, 0 if it was cleared. The mark is an ANCHOR on that
+/// document's breakpoint layer, so an edit above it carries it along; the
+/// guest keeps no copy to go stale. Display-only — no document bytes, no perm.
+pub fn hBreakpointToggle(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32, results: []i32) void {
+    _ = caller;
+    results[0] = 0;
+    const p: *WasmPlugin = @ptrCast(@alignCast(data.?));
+    const doc = p.activeCtx().document() orelse return;
+    const off: usize = @intCast(@as(u32, @bitCast(args[0])));
+    const set = breakpoints.toggle(p.gpa, &p.activeCtx().caps.layers, doc, off) catch return;
+    results[0] = if (set) 1 else 0;
+}
+
+/// `breakpointClear()`: drop every breakpoint in the active document.
+pub fn hBreakpointClear(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32, results: []i32) void {
+    _ = caller;
+    _ = args;
     _ = results;
     const p: *WasmPlugin = @ptrCast(@alignCast(data.?));
-    const path = caller.readMemory(p.gpa, @intCast(args[0]), @intCast(args[1])) catch return;
-    defer p.gpa.free(path);
-    const csv = caller.readMemory(p.gpa, @intCast(args[2]), @intCast(args[3])) catch return;
-    defer p.gpa.free(csv);
-    @import("../breakpoints.zig").publish(path, csv);
+    const doc = p.activeCtx().document() orelse return;
+    breakpoints.clear(p.gpa, &p.activeCtx().caps.layers, doc);
+}
+
+/// `breakpointOffsets(out)` → the active document's breakpoints as an offset
+/// CSV at the CURRENT head, so the guest paints its gutter markers from the
+/// anchored truth instead of remembering positions of its own.
+pub fn hBreakpointOffsets(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32, results: []i32) void {
+    results[0] = 0;
+    const p: *WasmPlugin = @ptrCast(@alignCast(data.?));
+    const doc = p.activeCtx().document() orelse return;
+    var offs: [breakpoints.max]usize = undefined;
+    const n = breakpoints.offsets(&p.activeCtx().caps.layers, doc, &offs);
+    var buf: [breakpoints.max * 12]u8 = undefined;
+    var w: usize = 0;
+    for (offs[0..n]) |o| {
+        var num: [16]u8 = undefined;
+        const s = std.fmt.bufPrint(&num, "{d}", .{o}) catch continue;
+        if (w != 0) {
+            buf[w] = ',';
+            w += 1;
+        }
+        @memcpy(buf[w .. w + s.len], s);
+        w += s.len;
+    }
+    results[0] = @intCast(caller.writeMemory(@intCast(args[0]), @intCast(args[1]), buf[0..w]) catch 0);
 }
 
 /// `readOnlyClear()`: (re)claim the ACTIVE buffer's read-only-span layer and

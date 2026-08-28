@@ -191,7 +191,9 @@ pub const imports = [_]Entry{
     .{ .name = "wl_readonly_span", .params = &.{ .u32, .u32 }, .results = &.{}, .group = .layers, .doc = "mark `[start,end)` read-only (edit-door defense in depth)" },
     .{ .name = "wl_decorate_clear", .params = &.{}, .results = &.{}, .group = .layers, .doc = "(re)claim the active buffer's decorations layer and empty it" },
     .{ .name = "wl_decorate", .params = &.{ .u32, .u32, .u32, .u32, .u32 }, .results = &.{}, .group = .layers, .doc = "place a display-only decoration (virtual text) anchored at `anchor`" },
-    .{ .name = "wl_breakpoint_publish", .params = &.{ .u32, .u32, .u32, .u32 }, .results = &.{}, .group = .layers, .doc = "publish a file's breakpoint lines to the process-global registry (for DAP)" },
+    .{ .name = "wl_breakpoint_toggle", .params = &.{.u32}, .results = &.{.i32}, .group = .layers, .doc = "toggle an ANCHORED breakpoint at `offset` in the active document; 1 if now set" },
+    .{ .name = "wl_breakpoint_clear", .params = &.{}, .results = &.{}, .group = .layers, .doc = "drop every breakpoint in the active document" },
+    .{ .name = "wl_breakpoint_offsets", .params = &.{ .u32, .u32 }, .results = &.{.i32}, .group = .layers, .doc = "the active document's breakpoints as an offset CSV, resolved at the current head" },
 
     // ── config_kv.zig — runtime kv scratch + the distinct config store ──
     .{ .name = "wl_kv_get", .params = &.{ .u32, .u32, .u32, .u32 }, .results = &.{.i32}, .group = .config_kv, .doc = "read this plugin's runtime kv scratch value for `key`" },
@@ -408,7 +410,7 @@ pub const imports = [_]Entry{
 /// half-finished edit — fails the build with a pointed message instead of
 /// silently drifting the two ~124-entry tables apart again (the exact class
 /// this table exists to kill).
-const expected_import_count = 194;
+const expected_import_count = 196;
 
 /// A host→guest EXPORT entrypoint (design doc/extensibility-native-surface.md, task
 /// W0a-D extension 2): every `instance.callVoid("name", args)` the host
