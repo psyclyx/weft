@@ -377,8 +377,8 @@ test "e2e/spine: write a file, init a repo, stage and commit — all through wef
     // The shared data-driven fixture supplies all six grammars and one
     // hermetic LSP command. The scenario itself remains the only narrative;
     // this is merely its language matrix.
-    const hermetic_lsp = try language_support.fakeServerCommand(gpa);
-    defer gpa.free(hermetic_lsp);
+    const hermetic_lsp = try language_support.Peer.init(gpa, "peer");
+    defer hermetic_lsp.deinit(gpa);
 
     // The scenario always has two named peers. Recording composes their live
     // collaborating views through one synchronized capture operation.
@@ -685,7 +685,8 @@ test "e2e/spine: write a file, init a repo, stage and commit — all through wef
     ed.press("C-SPC", "");
     ed.settle(40);
     try t.expect(ed.pick.active);
-    try t.expectEqualStrings("hermetic_completion", ed.pick.selection() orelse return error.CompletionHasNoVisibleCandidate);
+    var item_buf: [64]u8 = undefined;
+    try t.expectEqualStrings(hermetic_lsp.item(&item_buf), ed.pick.selection() orelse return error.CompletionHasNoVisibleCandidate);
     proj.capture(&ed, "spine-completion");
     ed.press("Escape", "");
 

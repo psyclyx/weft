@@ -45,77 +45,128 @@ pub fn authorAndCheckSyntax(ed: *h.Editor, c: Case) !void {
     try std.testing.expect(painted.len > 0);
 }
 
-/// The real wasm lsp plugin starts this peer through the proc membrane. Only
-/// the peer implementation is a test double; activation and Caps routing are
-/// production paths.
-pub fn fakeServerCommand(gpa: std.mem.Allocator) ![]u8 {
-    // JSON::PP is part of Perl's core distribution, not a language server or
-    // project tool. The peer parses Content-Length framing and answers the
-    // request's actual id, so this test cannot accidentally pass by consuming
-    // a response emitted before the request that needs it.
-    const script =
-        \\$|=1;
-        \\open(my $mark, ">>", ".lsp-started") or die;
-        \\print $mark "x";
-        \\close $mark;
-        \\while (1) {
-        \\    my $line = <STDIN>;
-        \\    last unless defined $line;
-        \\    my $n = 0;
-        \\    while ($line ne "\r\n" && $line ne "\n") {
-        \\        $n = $1 if $line =~ /Content-Length:\s*(\d+)/;
-        \\        $line = <STDIN>;
-        \\        last unless defined $line;
-        \\    }
-        \\    last if $n == 0;
-        \\    my $body = "";
-        \\    while (length($body) < $n) {
-        \\        my $got = read(STDIN, my $part, $n - length($body));
-        \\        last unless defined $got && $got > 0;
-        \\        $body .= $part;
-        \\    }
-        \\    last unless length($body) == $n;
-        \\    my $msg = decode_json($body);
-        \\    next unless defined $msg->{id};
-        \\    my $method = $msg->{method} // "";
-        \\    if ($method eq "initialize") { open(my $init, ">>", ".lsp-init") or die; print $init "x"; close $init; }
-        \\    if ($method eq "textDocument/completion") { open(my $comp, ">>", ".lsp-completion") or die; print $comp "x"; close $comp; }
-        \\    my $result = {};
-        \\    if ($method eq "initialize") {
-        \\        $result = { capabilities => { completionProvider => {} } };
-        \\    } elsif ($method eq "textDocument/completion") {
-        \\        $result = { items => [{ label => "hermetic_completion", insertText => "hermetic_completion" }] };
-        \\    }
-        \\    my $reply = encode_json({ jsonrpc => "2.0", id => $msg->{id}, result => $result });
-        \\    print "Content-Length: ", length($reply), "\r\n\r\n", $reply;
-        \\}
-    ;
-    return std.fmt.allocPrint(gpa, "perl -MJSON::PP -e '{s}'", .{script});
-}
+/// A hermetic language-server peer. The real wasm lsp plugin starts it through
+/// the proc membrane; only the peer implementation is a test double, activation
+/// and Caps routing are production paths. `tag` names this peer in its marker
+/// files, its pid file and the completion item it answers with, so two peers
+/// running at once are told apart by what they say rather than by hope.
+pub const Peer = struct {
+    tag: []const u8,
+    command: []u8,
 
-pub fn hasHermeticResult(ed: *h.Editor, id: u64) bool {
+    pub fn init(gpa: std.mem.Allocator, tag: []const u8) !Peer {
+        // JSON::PP is part of Perl's core distribution, not a language server
+        // or project tool. The peer parses Content-Length framing and answers
+        // the request's actual id, so a test cannot accidentally pass by
+        // consuming a response emitted before the request that needs it.
+        const script =
+            \\$|=1;
+            \\open(my $pid, ">", ".lsp-$tag-pid") or die;
+            \\print $pid $$;
+            \\close $pid;
+            \\open(my $mark, ">>", ".lsp-$tag-started") or die;
+            \\print $mark "x";
+            \\close $mark;
+            \\while (1) {
+            \\    my $line = <STDIN>;
+            \\    last unless defined $line;
+            \\    my $n = 0;
+            \\    while ($line ne "\r\n" && $line ne "\n") {
+            \\        $n = $1 if $line =~ /Content-Length:\s*(\d+)/;
+            \\        $line = <STDIN>;
+            \\        last unless defined $line;
+            \\    }
+            \\    last if $n == 0;
+            \\    my $body = "";
+            \\    while (length($body) < $n) {
+            \\        my $got = read(STDIN, my $part, $n - length($body));
+            \\        last unless defined $got && $got > 0;
+            \\        $body .= $part;
+            \\    }
+            \\    last unless length($body) == $n;
+            \\    my $msg = decode_json($body);
+            \\    next unless defined $msg->{id};
+            \\    my $method = $msg->{method} // "";
+            \\    if ($method eq "initialize") { open(my $init, ">>", ".lsp-$tag-init") or die; print $init "x"; close $init; }
+            \\    if ($method eq "textDocument/completion") { open(my $comp, ">>", ".lsp-$tag-completion") or die; print $comp "x"; close $comp; }
+            \\    my $result = {};
+            \\    if ($method eq "initialize") {
+            \\        $result = { capabilities => { completionProvider => {} } };
+            \\    } elsif ($method eq "textDocument/completion") {
+            \\        $result = { items => [{ label => "hermetic_${tag}_completion", insertText => "hermetic_${tag}_completion" }] };
+            \\    }
+            \\    my $reply = encode_json({ jsonrpc => "2.0", id => $msg->{id}, result => $result });
+            \\    print "Content-Length: ", length($reply), "\r\n\r\n", $reply;
+            \\}
+        ;
+        // Only the tag is interpolated by Zig; the script is verbatim perl,
+        // single-quoted so the shell expands none of its `$` variables.
+        return .{
+            .tag = tag,
+            .command = try std.fmt.allocPrint(gpa, "perl -MJSON::PP -e 'my $tag = \"{s}\";{s}'", .{ tag, script }),
+        };
+    }
+
+    pub fn deinit(self: Peer, gpa: std.mem.Allocator) void {
+        gpa.free(self.command);
+    }
+
+    /// This peer's `<leaf>` marker path (`started`, `init`, `completion`, `pid`).
+    pub fn marker(self: Peer, buf: []u8, leaf: []const u8) []const u8 {
+        return std.fmt.bufPrint(buf, ".lsp-{s}-{s}", .{ self.tag, leaf }) catch unreachable;
+    }
+
+    /// The completion item only THIS peer ever answers with.
+    pub fn item(self: Peer, buf: []u8) []const u8 {
+        return std.fmt.bufPrint(buf, "hermetic_{s}_completion", .{self.tag}) catch unreachable;
+    }
+};
+
+pub fn hasResultItem(ed: *h.Editor, id: u64, text: []const u8) bool {
     const session = ed.caps.session(id) orelse return false;
     for (session.results.items) |result| {
         if (std.mem.indexOf(u8, result.provider, "lsp") == null) continue;
         if (result.payload != .completion) continue;
-        for (result.payload.completion) |item| {
-            if (std.mem.eql(u8, item.text, "hermetic_completion")) return true;
+        for (result.payload.completion) |candidate| {
+            if (std.mem.eql(u8, candidate.text, text)) return true;
         }
     }
     return false;
 }
 
-pub fn assertLsp(proj: *h.Project, ed: *h.Editor, c: Case, command: []const u8) !void {
+/// Fire completion at the ACTIVE buffer and wait for `peer`'s own item, proving
+/// the answer came from the session serving this buffer's language.
+pub fn awaitPeerCompletion(ed: *h.Editor, peer: Peer) !void {
+    const editor = ed.buffers.active().textEditor().?;
+    const path = editor.backingPath() orelse "";
+    const id = (try ed.caps.fire(.completion, &editor.doc, path, .{})) orelse
+        return error.NoLspCapabilityProvider;
+    defer ed.caps.finish(id);
+    var buf: [64]u8 = undefined;
+    const want = peer.item(&buf);
+    const deadline = h.core.task.nowNs() + 5 * std.time.ns_per_s;
+    while (h.core.task.nowNs() < deadline) {
+        ed.settle(4);
+        if (hasResultItem(ed, id, want)) return;
+    }
+    return error.HermeticLspDidNotAnswer;
+}
+
+pub fn assertLsp(proj: *h.Project, ed: *h.Editor, c: Case, peer: Peer) !void {
     const dot = std.mem.lastIndexOfScalar(u8, c.path, '.') orelse unreachable;
-    try ed.setConfig("lsp", c.path[dot + 1 ..], command);
-    // A syntax authoring step may have activated this language before the
-    // hermetic command was installed.  Switch through a configured sentinel
-    // extension so the guest's normal language-routing path closes that old
-    // session before reopening the target with this command.
-    try ed.setConfig("lsp", "txt", command);
-    _ = try proj.oracle(": > .lsp-started; : > .lsp-init; : > .lsp-completion");
+    try ed.setConfig("lsp", c.path[dot + 1 ..], peer.command);
+    var mbuf: [64]u8 = undefined;
+    var cmd: [256]u8 = undefined;
+    const truncated = try proj.oracle(try std.fmt.bufPrint(&cmd, ": > {s}", .{peer.marker(&mbuf, "completion")}));
+    proj.gpa.free(truncated);
+    // An authoring step may have left this language's file already focused, and
+    // a re-open of the focused entry is not an activation. Pass through an
+    // unserved buffer first, so opening the target is a real focus change. A
+    // session is keyed by the command it was spawned for, so the open then
+    // mints one for the hermetic peer rather than reusing whatever served this
+    // language before the config above.
     ed.runStr("open", ".lsp-activation-switch.txt");
-    ed.settle(20);
+    ed.settle(2);
     ed.runStr("open", c.path);
     var saw_lsp = false;
     for (ed.caps.providers.items) |provider| {
@@ -123,22 +174,9 @@ pub fn assertLsp(proj: *h.Project, ed: *h.Editor, c: Case, command: []const u8) 
             std.mem.indexOf(u8, provider.id, "lsp") != null) saw_lsp = true;
     }
     try std.testing.expect(saw_lsp);
-    try std.testing.expect(h.drainUntilOracle(proj, ed, "test -s .lsp-started && echo yes", "yes"));
-    try std.testing.expect(h.drainUntilOracle(proj, ed, "test -s .lsp-init && echo yes", "yes"));
+    try std.testing.expect(h.drainUntilOracle(proj, ed, try std.fmt.bufPrint(&cmd, "test -s {s} && echo yes", .{peer.marker(&mbuf, "started")}), "yes"));
+    try std.testing.expect(h.drainUntilOracle(proj, ed, try std.fmt.bufPrint(&cmd, "test -s {s} && echo yes", .{peer.marker(&mbuf, "init")}), "yes"));
     ed.settle(100);
-    const path = ed.buffers.active().textEditor().?.backingPath() orelse c.path;
-    const id = (try ed.caps.fire(.completion, &ed.buffers.active().textEditor().?.doc, path, .{})) orelse
-        return error.NoLspCapabilityProvider;
-    defer ed.caps.finish(id);
-    try std.testing.expect(h.drainUntilOracle(proj, ed, "test -s .lsp-completion && echo yes", "yes"));
-    const deadline = h.core.task.nowNs() + 5 * std.time.ns_per_s;
-    while (h.core.task.nowNs() < deadline) {
-        ed.settle(4);
-        if (hasHermeticResult(ed, id)) {
-            const clean = try proj.oracle("rm -f .lsp-started .lsp-init .lsp-completion");
-            proj.gpa.free(clean);
-            return;
-        }
-    }
-    return error.HermeticLspDidNotAnswer;
+    try awaitPeerCompletion(ed, peer);
+    try std.testing.expect(h.drainUntilOracle(proj, ed, try std.fmt.bufPrint(&cmd, "test -s {s} && echo yes", .{peer.marker(&mbuf, "completion")}), "yes"));
 }
