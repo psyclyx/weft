@@ -210,6 +210,20 @@ pub fn main(init: std.process.Init) !void {
     // is currently attached to (agent-ux never gets its own).
     try session.system.initPlugins(pool);
     const plug = &session.system.plugins.?;
+    // Make `kv.zig`'s "state that outlives a run" literally true: restore the
+    // plugin store from disk now, and write it back on clean shutdown. `open`
+    // loads and `close` saves, so the two halves cannot be armed separately;
+    // the `defer` is registered AFTER `defer session.deinit(gpa)` above, so it
+    // runs BEFORE it — the store is still alive when it is written.
+    //
+    // ONLY `plug.kv` is persisted, never `session.system.config_kv`: config
+    // values come from the config script on every run and the config script is
+    // the source of truth, so a persisted blob could only ever shadow an edited
+    // config with a stale value. Plugin kv is the opposite — runtime state
+    // (project-recent, frecency, the kill/mark rings) that nothing else can
+    // reproduce, so losing it at exit loses information.
+    var plugin_kv_file = core.kv_file.Binding.open(gpa, &plug.kv);
+    defer plugin_kv_file.close();
     // Give plugin `proc` children the parent PATH (nix tools like rg/zig).
     core.wasm_host.setEnviron(init.minimal.environ);
     const plugin_dir = config_load.pluginDir(gpa);
