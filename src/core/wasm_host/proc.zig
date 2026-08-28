@@ -47,6 +47,9 @@ const ShellJob = struct {
     /// `.process` place: inherit the editor's own directory. Owned; freed with
     /// the rest of the job.
     cwd: ?[]u8 = null,
+    /// The environment the child runs with, captured at spawn. Null = the base
+    /// process environment (no overlay for this place). OWNED; freed with the job.
+    environ: ?std.process.Environ = null,
 };
 
 // ── Raw persistent proc (wl_proc_spawn/send/read/close) ──────────────
@@ -94,10 +97,19 @@ pub fn hProcSpawn(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32, re
             return;
         },
     };
-    const s = proc_stream.ProcStream.start(p.gpa, pool, cmd, cwd, shared.g_environ) catch {
+    const spawn_env = shared.resolveSpawnEnv(p, p.gpa);
+    var env_owned = true;
+    defer if (env_owned) if (spawn_env) |owned_env| owned_env.block.deinit(p.gpa);
+    const s = proc_stream.ProcStream.start(p.gpa, pool, cmd, cwd, spawn_env orelse shared.g_environ) catch {
         results[0] = -1;
         return;
     };
+    // A persistent child uses its environment for its whole life, so the stream
+    // takes the merged one over from us.
+    if (spawn_env != null) {
+        s.adoptEnviron();
+        env_owned = false;
+    }
     const h: i32 = @intCast(p.proc_streams.items.len);
     p.proc_streams.append(p.gpa, s) catch {
         s.deinit();
@@ -219,6 +231,10 @@ pub fn hShellInsert(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32, 
     };
     var cwd_owned = true;
     defer if (cwd_owned) if (cwd) |d| gpa.free(d);
+    // Same place, same door: WHERE the child runs and WITH WHAT.
+    const spawn_env = shared.resolveSpawnEnv(p, gpa);
+    var env_owned = true;
+    defer if (env_owned) if (spawn_env) |e| e.block.deinit(gpa);
     const job = gpa.create(ShellJob) catch {
         return;
     };
@@ -233,8 +249,10 @@ pub fn hShellInsert(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32, 
         .target = target,
         .cmd = cmd,
         .cwd = cwd,
+        .environ = spawn_env,
     };
     cwd_owned = false;
+    env_owned = false;
     cmd_owned = false;
     target_owned = false;
     job_owned = false;
@@ -248,7 +266,7 @@ pub fn hShellInsert(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32, 
 /// worker — proc.run synchronous there, no frame block.
 fn shellWork(gpa: Allocator, ctx: ?*anyopaque) anyerror![]u8 {
     const job: *ShellJob = @ptrCast(@alignCast(ctx.?));
-    var res = proc.run(gpa, &.{ "/bin/sh", "-c", job.cmd }, .{ .environ = shared.g_environ, .cwd = job.cwd }) catch return gpa.alloc(u8, 0);
+    var res = proc.run(gpa, &.{ "/bin/sh", "-c", job.cmd }, .{ .environ = job.environ orelse shared.g_environ, .cwd = job.cwd }) catch return gpa.alloc(u8, 0);
     defer res.deinit(gpa);
     return gpa.dupe(u8, std.mem.trimEnd(u8, res.stdout, "\n"));
 }
@@ -272,6 +290,7 @@ fn shellFree(ctx: ?*anyopaque) void {
     const gpa = job.gpa;
     gpa.free(job.name);
     if (job.cwd) |d| gpa.free(d);
+    if (job.environ) |e| e.block.deinit(gpa);
     gpa.free(job.target.agent);
     gpa.free(job.cmd);
     gpa.destroy(job);
@@ -307,6 +326,9 @@ const ProcJob = struct {
     /// it, and cannot keep it: `spoolWork` deletes it before returning, on
     /// every path. Null for the plain fill doors. Owned.
     tmp: ?[]u8 = null,
+    /// The environment the child runs with, captured at spawn. Null = the base
+    /// process environment (no overlay for this place). OWNED; freed with the job.
+    environ: ?std.process.Environ = null,
 };
 
 /// Which fill door a job came through. The three share one spawn body because
@@ -404,6 +426,10 @@ fn spawnFill(p: *WasmPlugin, caller: *wasm.Caller, args: []const i32, kind: Fill
     };
     var cwd_owned = true;
     defer if (cwd_owned) if (cwd) |d| gpa.free(d);
+    // Same place, same door: WHERE the child runs and WITH WHAT.
+    const spawn_env = shared.resolveSpawnEnv(p, gpa);
+    var env_owned = true;
+    defer if (env_owned) if (spawn_env) |e| e.block.deinit(gpa);
     const target = ensureFillTarget(gpa, buffers, name) orelse return;
     // Re-target a REUSED tool entry: running grep again from another project
     // makes `*grep*` about the new place from this moment on. A fresh entry
@@ -423,12 +449,14 @@ fn spawnFill(p: *WasmPlugin, caller: *wasm.Caller, args: []const i32, kind: Fill
         .cmd = cmd,
         .append = kind == .append,
         .cwd = cwd,
+        .environ = spawn_env,
         .input = input,
         .tmp = tmp,
     };
     cmd_owned = false;
     plugin_owned = false;
     cwd_owned = false;
+    env_owned = false;
     input_owned = false;
     tmp_owned = false;
     _ = loop.spawn(procWork, job, .{ .ctx = job, .call = procDeliver, .deinit = procFree }) catch procFree(job);
@@ -449,7 +477,7 @@ fn ensureFillTarget(gpa: Allocator, bufs: *Buffers, name: []const u8) ?Buffers.R
 fn procWork(gpa: Allocator, ctx: ?*anyopaque) anyerror![]u8 {
     const job: *ProcJob = @ptrCast(@alignCast(ctx.?));
     if (job.tmp) |tmp| return spoolWork(gpa, job, tmp);
-    return runCapture(gpa, job.cmd, job.cwd);
+    return runCapture(gpa, job.cmd, job.cwd, job.environ);
 }
 
 /// A spool's off-thread body: land the input in the host-composed temp, hand
@@ -463,14 +491,14 @@ fn spoolWork(gpa: Allocator, job: *ProcJob, tmp: []const u8) anyerror![]u8 {
     file.writeBytes(gpa, tmp, job.input orelse &.{}) catch return gpa.alloc(u8, 0);
     const cmd = std.mem.replaceOwned(u8, gpa, job.cmd, "{}", tmp) catch return gpa.alloc(u8, 0);
     defer gpa.free(cmd);
-    return runCapture(gpa, cmd, job.cwd);
+    return runCapture(gpa, cmd, job.cwd, job.environ);
 }
 
 /// Run `cmd` through the shell in `cwd` and return its stdout, trimmed of a
 /// trailing newline. A spawn failure yields empty rather than erroring — the
 /// fill lands as "the command said nothing", which is what a missing tool is.
-fn runCapture(gpa: Allocator, cmd: []const u8, cwd: ?[]const u8) anyerror![]u8 {
-    var res = proc.run(gpa, &.{ "/bin/sh", "-c", cmd }, .{ .environ = shared.g_environ, .cwd = cwd }) catch return gpa.alloc(u8, 0);
+fn runCapture(gpa: Allocator, cmd: []const u8, cwd: ?[]const u8, environ: ?std.process.Environ) anyerror![]u8 {
+    var res = proc.run(gpa, &.{ "/bin/sh", "-c", cmd }, .{ .environ = environ orelse shared.g_environ, .cwd = cwd }) catch return gpa.alloc(u8, 0);
     defer res.deinit(gpa);
     return gpa.dupe(u8, std.mem.trimEnd(u8, res.stdout, "\n"));
 }
@@ -519,6 +547,7 @@ fn procFree(ctx: ?*anyopaque) void {
     const gpa = job.gpa;
     gpa.free(job.plugin);
     if (job.cwd) |d| gpa.free(d);
+    if (job.environ) |e| e.block.deinit(gpa);
     if (job.input) |b| gpa.free(b);
     // The FILE is `spoolWork`'s to remove; this frees only the path string.
     // A job torn down before it ever ran never created the file at all.
@@ -545,6 +574,9 @@ const FilterJob = struct {
     /// up from its working directory, so a filter run in the wrong project is
     /// formatted by the wrong rules. Null = the `.process` place. Owned.
     cwd: ?[]u8 = null,
+    /// The environment the child runs with, captured at spawn. Null = the base
+    /// process environment (no overlay for this place). OWNED; freed with the job.
+    environ: ?std.process.Environ = null,
 };
 
 var filter_counter: usize = 0;
@@ -599,6 +631,10 @@ pub fn hProcFilter(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32, r
     };
     var cwd_owned = true;
     defer if (cwd_owned) if (cwd) |d| gpa.free(d);
+    // Same place, same door: WHERE the child runs and WITH WHAT.
+    const spawn_env = shared.resolveSpawnEnv(p, gpa);
+    var env_owned = true;
+    defer if (env_owned) if (spawn_env) |owned_env| owned_env.block.deinit(gpa);
     const job = gpa.create(FilterJob) catch return;
     var job_owned = true;
     defer if (job_owned) gpa.destroy(job);
@@ -614,8 +650,10 @@ pub fn hProcFilter(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32, r
         .content = content,
         .tmp = tmp,
         .cwd = cwd,
+        .environ = spawn_env,
     };
     cwd_owned = false;
+    env_owned = false;
     cmd_owned = false;
     content_owned = false;
     start_owned = false;
@@ -633,7 +671,7 @@ fn filterWork(gpa: Allocator, ctx: ?*anyopaque) anyerror![]u8 {
     file.writeBytes(gpa, job.tmp, job.content) catch return gpa.dupe(u8, job.content);
     const cmd = std.mem.replaceOwned(u8, gpa, job.cmd, "{}", job.tmp) catch return gpa.dupe(u8, job.content);
     defer gpa.free(cmd);
-    var res = proc.run(gpa, &.{ "/bin/sh", "-c", cmd }, .{ .environ = shared.g_environ, .cwd = job.cwd }) catch {
+    var res = proc.run(gpa, &.{ "/bin/sh", "-c", cmd }, .{ .environ = job.environ orelse shared.g_environ, .cwd = job.cwd }) catch {
         file.deleteFile(gpa, job.tmp);
         return gpa.dupe(u8, job.content);
     };
@@ -661,6 +699,7 @@ fn filterFree(ctx: ?*anyopaque) void {
     const gpa = job.gpa;
     gpa.free(job.plugin);
     if (job.cwd) |d| gpa.free(d);
+    if (job.environ) |e| e.block.deinit(gpa);
     gpa.free(job.start.agent);
     gpa.free(job.end.agent);
     gpa.free(job.cmd);

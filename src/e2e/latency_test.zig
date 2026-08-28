@@ -380,6 +380,22 @@ test "e2e/latency: dispatch keystroke latency vs baseline" {
             std.zon.parse.free(gpa, baseline);
             return error.SkipZigTest;
         }
+        // The same host, in a different STATE, is not the same measurement
+        // either — see `Baseline.calibration_ns`. A developer box shares cores
+        // with a browser; CI shares them with whatever else the runner packed
+        // on. Skip rather than report someone else's load as this code's
+        // regression, which is the failure that teaches people to ignore a gate.
+        if (baseline.calibration_ns != 0) {
+            const now = latency.calibrate();
+            if (now > baseline.calibration_ns * 3 / 2) {
+                log.warn(
+                    "this box is currently {d}% of the speed it was when the baseline was recorded ({d}ns vs {d}ns on a fixed CPU loop) — skipping; that is load, not a regression",
+                    .{ baseline.calibration_ns * 100 / @max(now, 1), baseline.calibration_ns, now },
+                );
+                std.zon.parse.free(gpa, baseline);
+                return error.SkipZigTest;
+            }
+        }
         loaded = baseline;
     }
 
@@ -452,6 +468,7 @@ test "e2e/latency: dispatch keystroke latency vs baseline" {
             .build_mode = latency.buildModeName(),
             .host = latency.hostName(&host_buf),
             .note = note,
+            .calibration_ns = latency.calibrate(),
             .categories = &categories,
         });
         log.info("recorded {s}", .{baseline_path});

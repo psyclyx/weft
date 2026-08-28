@@ -2048,3 +2048,42 @@ test "e2e/place: grep searches the focused file's project, not the launch direct
         try t.expect(std.mem.indexOf(u8, results, "alpha.js") == null);
     }
 }
+
+test "e2e/place: a project's environment reaches the children run in it" {
+    const gpa = t.allocator;
+    var proj: Project = undefined;
+    try proj.init(gpa);
+    defer proj.deinit();
+
+    var ed: Editor = undefined;
+    try Editor.init(gpa, &ed);
+    defer ed.deinit();
+    try loadWebIde(&ed);
+
+    for ([_][]const u8{
+        "mkdir -p env-a/.git env-b/.git",
+        "printf 'x\\n' > env-a/a.js",
+        "printf 'x\\n' > env-b/b.js",
+    }) |cmd| {
+        const out = try proj.oracle(cmd);
+        gpa.free(out);
+    }
+
+    // Give project A an environment and leave B without one. An overlay is
+    // published FOR a place, so it follows the project rather than the process.
+    ed.runStr("open", "env-a/a.js");
+    const place_a = ed.session.system.buffers.active().place;
+    try t.expect(!place_a.isProcess()); // the file was detected into its project
+    _ = try ed.session.system.environments.publish(place_a, "e2e", "WEFT_PLACE_MARK=from-a\x00");
+
+    // A child run in A sees it...
+    ed.runStr("run-command", "printf 'mark=%s' \"$WEFT_PLACE_MARK\"");
+    try t.expect(drainToolContains(&ed, "*output*", "mark=from-a"));
+
+    // ...and a child run in B does not: the overlay belongs to A's place, not
+    // to the editor. Without per-place environments this could only ever have
+    // been one global set at startup, which is why direnv could not work.
+    ed.runStr("open", "env-b/b.js");
+    ed.runStr("run-command", "printf 'mark=[%s]' \"$WEFT_PLACE_MARK\"");
+    try t.expect(drainToolContains(&ed, "*output*", "mark=[]"));
+}

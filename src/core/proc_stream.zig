@@ -57,6 +57,13 @@ pub const ProcStream = struct {
     argv_cmd: []u8, // owned copy: the caller's `cmd` may not outlive `start()`
     cwd_copy: ?[]u8,
     environ: std.process.Environ,
+    /// Whether `environ` is OURS to free. False for the shared process
+    /// environment (`g_environ`, borrowed); true once a caller hands us a
+    /// merged per-place environment via `adoptEnviron`. The stream uses its
+    /// environ for the child's whole lifetime, so a merged one cannot be a
+    /// borrow that dies with the spawning call -- the same reason `cwd_copy`
+    /// above is a copy.
+    environ_owned: bool = false,
     spawn_mutex: task.Mutex = .{},
     spawned: bool = false,
     spawn_failed: bool = false,
@@ -338,6 +345,13 @@ pub const ProcStream = struct {
     /// nothing after this point can race the still-running reader. Loud
     /// (`log.warn`) because a leak that never surfaces is worse than one that
     /// does.
+    /// Take ownership of the environment this stream was started with, so it
+    /// is freed when the stream is. Called only after a SUCCESSFUL `start`; if
+    /// the start failed the caller still holds it and frees it itself.
+    pub fn adoptEnviron(s: *ProcStream) void {
+        s.environ_owned = true;
+    }
+
     pub fn deinit(s: *ProcStream) void {
         const gpa = s.gpa;
         s.canceled.store(true, .release);
@@ -356,10 +370,15 @@ pub const ProcStream = struct {
             if (task.nowNs() >= deadline) {
                 std.log.warn("proc_stream: deinit gave up after {d}ms waiting for a saturated pool (no free worker ever ran this stream's spawn) — leaking it; it self-reaps its child once the pool finally schedules it", .{s.deinit_deadline_ns / std.time.ns_per_ms});
                 s.reader.detach();
+                // The environment is deliberately NOT freed here: the detached
+                // reader still holds this stream and uses it for the child it
+                // will eventually reap. Leaking it is the point of this branch.
                 return; // deliberate leak — see the doc above; nothing past here
             }
             std.Thread.yield() catch {};
         }
+        // The reader is gone, so nothing can touch the environment any more.
+        if (s.environ_owned) s.environ.block.deinit(gpa);
         _ = s.reader.poll(); // the reader is gone; reclaim its task node
         s.spawn_mutex.lock();
         const spawned = s.spawned;

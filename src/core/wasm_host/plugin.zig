@@ -326,6 +326,29 @@ pub fn resolveSpawnAt(p: *WasmPlugin, gpa: std.mem.Allocator) SpawnAt {
     return resolveSpawnAtCtx(p.activeCtx(), gpa);
 }
 
+/// The environment a spawn runs WITH: `g_environ` plus every overlay published
+/// for the dispatching place (`env.zig`). Returns an OWNED environment the
+/// caller must free, or null when no overlay applies — which is the ordinary
+/// case and stays allocation-free.
+///
+/// The sibling of `resolveSpawnAtCtx`, read at the same door from the same
+/// place, because "where does this run" and "with what" are one question. A
+/// failure to build the merged block degrades to the base environment rather
+/// than failing the spawn: losing a project's PATH is bad, refusing to run
+/// anything is worse, and the difference is visible in the log.
+pub fn resolveSpawnEnvCtx(ctx: *@import("../command.zig").Context, gpa: std.mem.Allocator) ?std.process.Environ {
+    const envs = ctx.environments orelse return null;
+    return envs.merged(gpa, g_environ, ctx.place()) catch |err| {
+        std.log.warn("env: could not build the environment for this place ({t}); using the base environment", .{err});
+        return null;
+    };
+}
+
+/// `resolveSpawnEnvCtx` for a wasm plugin's current dispatch.
+pub fn resolveSpawnEnv(p: *WasmPlugin, gpa: std.mem.Allocator) ?std.process.Environ {
+    return resolveSpawnEnvCtx(p.activeCtx(), gpa);
+}
+
 /// Surface a refusal the way a denied render already is: a host log line
 /// always, plus the status chip the status line renders, so a background
 /// refusal is visible without inventing a UI for it.

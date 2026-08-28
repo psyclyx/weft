@@ -776,10 +776,6 @@ pub fn build(b: *std.Build) void {
     });
     const latency_step = b.step("e2e-latency", "Run (or, with -Drecord-latency=true, record) the dispatch-latency baseline");
     latency_step.dependOn(&runInstrument(b, instrument_tests, "latency").step);
-    // The real gate: `zig build test` runs the instrument in its OWN process,
-    // where the baseline it compares against was recorded. The copy inside the
-    // big e2e binary measures but does not assert (see `compare_only_opts`).
-    test_step.dependOn(latency_step);
     const popup_layout_step = b.step("e2e-popup-layout", "Run (or, with -Drecord-popup-layout=true, record) the caret-popup layout goldens");
     popup_layout_step.dependOn(&runInstrument(b, instrument_tests, "popup-layout").step);
 
@@ -811,6 +807,19 @@ pub fn build(b: *std.Build) void {
 
     // LAST in `build()` so it sees every sibling `test_step` will ever have.
     runAlone(test_step, &run_tests.step);
+
+    // The real latency gate, ordered AFTER `runAlone` on purpose: the copy of
+    // the instrument inside the big e2e binary measures without asserting (see
+    // `compare_only_opts`), because by then that process has run ~159 other
+    // tests and is measuring its own accumulated allocator and cache state --
+    // the same code costs ~37us in a fresh process and ~176us there. The
+    // isolated binary is the one held to the baseline, and it runs dead last,
+    // after even `run_tests`, so it has the box to itself the way `runAlone`
+    // already gives `run_tests`. Adding this BEFORE `runAlone` would instead
+    // make `run_tests` wait on it, which is the wrong order and, once
+    // `latency_step` also depends on `run_tests`, a cycle.
+    latency_step.dependOn(&run_tests.step);
+    test_step.dependOn(latency_step);
 }
 
 /// Order `last` after every OTHER direct dependency of `step`, so it has the
