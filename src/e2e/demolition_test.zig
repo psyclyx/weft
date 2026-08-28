@@ -238,3 +238,58 @@ test "demolition: §19 checklist absences hold over src/" {
             try t.expect(@typeInfo(field.type) == .optional);
     }
 }
+
+// ── A JS plugin is not a different kind of plugin (doc/place.md §4.1a) ──
+
+// `quickjs.wasm` IS a wasm plugin, so a JS plugin is code running inside a
+// wasm guest and must not be able to do anything a wasm guest cannot. Today
+// that is not structural: `membrane/qjs_contract.zig` is a self-described
+// THIRD surface, its own imports bound onto quickjs.wasm's linker beside the
+// `wl_*` doors, with its own handlers and gates.
+//
+// Two hand-maintained membranes drift, and the drift is not hypothetical:
+// `qjs_proc_spawn` carried a `cwd` argument `wl_proc_spawn` never had, which
+// is exactly the local-first spelling `doc/place.md` exists to remove. This
+// gate is what would have caught it.
+//
+// The rule, and why it is scoped the way it is: a `qjs_*` door in the
+// **plugin** group that shares a name with a `wl_*` door is the SAME door
+// reached two ways, so it must have the same arity. The **config** group is
+// a genuinely different surface — the config DSL, a distinct role with its
+// own trust tier — and several of its names collide with `wl_*` doors while
+// meaning something else entirely (`qjs_semantic_action` DECLARES a command;
+// `wl_semantic_action` INVOKES one). Those are exempt, and the collisions are
+// recorded here rather than silently tolerated.
+test "demolition: plugin-plane JS doors match their wasm twins exactly" {
+    const qjs = h.core.membrane.qjs;
+    const wl = h.core.membrane.wl;
+
+    var twins_checked: usize = 0;
+    for (qjs.imports) |q| {
+        if (q.group != .plugin) continue;
+        // `qjs_foo` is the twin of `wl_foo`.
+        for (wl.imports) |w| {
+            if (!std.mem.eql(u8, w.name[3..], q.name[4..])) continue;
+            twins_checked += 1;
+            if (w.params.len != q.params.len or w.results.len != q.results.len) {
+                std.debug.print(
+                    "\nplugin-plane door '{s}' differs between the two membranes: " ++
+                        "wl_{s} takes {d}->{d}, qjs_{s} takes {d}->{d}.\n" ++
+                        "A JS plugin runs inside quickjs.wasm; it must not reach a door " ++
+                        "shaped differently from the one every other guest gets. " ++
+                        "Resolve toward the NARROWER door (doc/place.md §4.1a).\n",
+                    .{
+                        q.name,      w.name[3..],  w.params.len,  w.results.len,
+                        q.name[4..], q.params.len, q.results.len,
+                    },
+                );
+                return error.JsPlaneDivergedFromWasmPlane;
+            }
+            break;
+        }
+    }
+
+    // If this drops to zero the gate has stopped checking anything — a rename
+    // on either side would otherwise silently disable it.
+    try t.expect(twins_checked >= 5);
+}
