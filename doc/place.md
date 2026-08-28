@@ -371,8 +371,12 @@ the `grammar-add` gate, now a pinned property rather than an ABI accident (§8).
   argument, which is why P12 sits in Wave 5 rather than being assumed.
 - **`grammar-add` is not currently a guest escape.** It is ungated and does
   `std.DynLib.open`, but the guest command runners top out at two string
-  arguments and it takes three. It is held shut by an ABI arity accident rather
-  than by design, which is worth fixing deliberately.
+  arguments and it takes three. It was held shut by an ABI arity accident
+  rather than by design; the accident is now a pinned property
+  (`src/app/providers.zig`'s runner census), which fails the build the moment a
+  runner gains the arity to invoke it or `grammar-add` shrinks to a shape one
+  can already call. The gate is still arity, not permission — but it is now a
+  gate someone has to walk past deliberately, with the reason written down.
 - **JS guests cannot write to disk at all** — `cAgentWrite` writes into a
   buffer and adopts the path, so a later user save creates the file. That
   asymmetry is worth preserving, not levelling.
