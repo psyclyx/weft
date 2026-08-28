@@ -618,12 +618,25 @@ fn cProcSpawn(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32, result
         return;
     };
     defer gpa.free(cmd);
-    const cwd = caller.readMemory(gpa, @intCast(args[2]), @intCast(args[3])) catch {
-        results[0] = -1;
-        return;
+    // The SAME door the wasm plane has, resolved the SAME way: a JS plugin is
+    // not a different kind of plugin. The cwd argument this door used to take
+    // is gone — neither shipped caller passed one, and a raw directory string
+    // could only ever have named somewhere on this machine (`doc/place.md`).
+    const at = perm_gate.resolveSpawnAtCtx(self.bridge.activeCtx(), gpa);
+    defer switch (at) {
+        .at => |dir| gpa.free(dir),
+        else => {},
     };
-    defer gpa.free(cwd);
-    const s = proc_stream.ProcStream.start(gpa, self.pool, cmd, if (cwd.len > 0) cwd else null, self.environ) catch {
+    const where: ?[]const u8 = switch (at) {
+        .inherit => null,
+        .at => |dir| dir,
+        .refused => |why| {
+            perm_gate.noteSpawnRefusal(self.name, why);
+            results[0] = -1;
+            return;
+        },
+    };
+    const s = proc_stream.ProcStream.start(gpa, self.pool, cmd, where, self.environ) catch {
         results[0] = -1;
         return;
     };

@@ -96,7 +96,7 @@ pub const imports = [_]Entry{
 
     // ── the plugin plane: stubbed on the config linker, real on a JsPlugin's ─
     e("qjs_register", 2, 1, .plugin, "bind a command name to this JS plugin's on_command; returns its id"),
-    e("qjs_proc_spawn", 4, 1, .plugin, "spawn a persistent subprocess; returns a handle"),
+    e("qjs_proc_spawn", 2, 1, .plugin, "spawn a persistent subprocess; returns a handle"),
     e("qjs_proc_send", 3, 0, .plugin, "write to a spawned subprocess's stdin"),
     e("qjs_proc_read", 3, 1, .plugin, "drain buffered stdout from a spawned subprocess"),
     e("qjs_proc_close", 1, 0, .plugin, "kill a spawned subprocess"),

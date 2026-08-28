@@ -9,6 +9,8 @@ const std = @import("std");
 const Document = @import("../Document.zig");
 const wasm = @import("../wasm.zig");
 const grants_mod = @import("../grants.zig");
+const place_mod = @import("../place.zig");
+const status_feed = @import("../status_feed.zig");
 
 // The lifecycle side (wasm_abi) owns the plugin type; the handlers operate on
 // it. The two @import each other (Zig permits the file-level cycle) — routing
@@ -277,6 +279,60 @@ pub fn requireDispatch(p: *WasmPlugin, caller: *wasm.Caller, comptime verb: []co
 pub var g_environ: std.process.Environ = .empty;
 pub fn setEnviron(env: std.process.Environ) void {
     g_environ = env;
+}
+
+// ── Where a spawn runs (doc/place.md) ────────────────────────────────
+//
+// The sibling of `g_environ` above, and deliberately next to it: WHERE a child
+// runs and WITH WHAT it runs are the same question asked twice, read
+// host-side at the same five spawn sites, so that no guest passes either and
+// no guest can pass the wrong one. The difference is that an environment has a
+// sensible process-wide default and a working directory does not — which is
+// why this one is resolved per dispatch rather than set once at startup.
+
+/// Where a spawn must run.
+pub const SpawnAt = union(enum) {
+    /// The editor's own directory. Passing no cwd is not a fallback here — it
+    /// is exactly what the `.process` place means.
+    inherit,
+    /// An OWNED absolute directory the child is chdir'd into. The job that
+    /// takes it frees it.
+    at: []u8,
+    /// The place cannot host a local child. The spawn does NOT happen, and the
+    /// reason is shown rather than swallowed — because the alternative, running
+    /// in the launch directory and reporting success, is the bug this whole
+    /// mechanism exists to make unrepresentable.
+    refused: []const u8,
+};
+
+/// Resolve the dispatching entry's place into a working directory.
+///
+/// Takes the `Context` rather than a plugin so BOTH planes share one
+/// resolution — the wasm handlers below and the resident JS plane, which
+/// reaches it through its own `activeCtx`. One contract, two transports, the
+/// same rule `hasPerm` follows a few declarations up.
+pub fn resolveSpawnAtCtx(ctx: *@import("../command.zig").Context, gpa: std.mem.Allocator) SpawnAt {
+    return switch (place_mod.realize(ctx.place(), ctx.realizer)) {
+        .process => .inherit,
+        .path => |abs| .{ .at = gpa.dupe(u8, abs) catch
+            return .{ .refused = "out of memory resolving its working directory" } },
+        .elsewhere => .{ .refused = "that place is not on this machine" },
+        .unavailable => .{ .refused = "that place is no longer available" },
+    };
+}
+
+/// `resolveSpawnAtCtx` for a wasm plugin's current dispatch.
+pub fn resolveSpawnAt(p: *WasmPlugin, gpa: std.mem.Allocator) SpawnAt {
+    return resolveSpawnAtCtx(p.activeCtx(), gpa);
+}
+
+/// Surface a refusal the way a denied render already is: a host log line
+/// always, plus the status chip the status line renders, so a background
+/// refusal is visible without inventing a UI for it.
+pub fn noteSpawnRefusal(plugin: []const u8, why: []const u8) void {
+    std.log.warn("spawn refused: plugin '{s}' — {s}", .{ plugin, why });
+    var buf: [128]u8 = undefined;
+    status_feed.set(std.fmt.bufPrint(&buf, "{s}: {s}", .{ plugin, why }) catch "spawn refused");
 }
 
 pub fn resolvePeerWp(ctx: *anyopaque, doc: *Document) Document.AddPeerError!Document.PeerId {

@@ -65,7 +65,7 @@ extern int host_register(const char *name, int name_len);
 // Plugin proc-stream membrane: a persistent duplex child whose stdout the guest
 // reads (an ACP agent, an LSP-shaped tool). Config satisfies these with stubs.
 __attribute__((import_module("weft"), import_name("qjs_proc_spawn")))
-extern int host_proc_spawn(const char *cmd, int cmd_len, const char *cwd, int cwd_len);
+extern int host_proc_spawn(const char *cmd, int cmd_len);
 __attribute__((import_module("weft"), import_name("qjs_proc_send")))
 extern void host_proc_send(int handle, const char *ptr, int len);
 __attribute__((import_module("weft"), import_name("qjs_proc_read")))
@@ -670,20 +670,23 @@ static JSValue js_command(JSContext *ctx, JSValueConst this_val,
     return JS_UNDEFINED;
 }
 
-// weft.procSpawn(cmd[, cwd]) -> handle (or -1): a persistent duplex child.
+// weft.procSpawn(cmd) -> handle (or -1): a persistent duplex child, run in the
+// dispatching entry's PLACE (doc/place.md).
+//
+// There is deliberately no cwd argument. A JS plugin is not a different kind of
+// plugin, and the wasm door (wl_proc_spawn) has none either. A raw directory
+// string is also exactly the local-first spelling this design removes: it
+// cannot name a peer or a synthetic container, so it could only ever have meant
+// "somewhere on this machine", which is the assumption being retired.
 // Throws when the plugin holds no `proc` grant.
 static JSValue js_proc_spawn(JSContext *ctx, JSValueConst this_val,
                              int argc, JSValueConst *argv) {
-    if (argc < 1) return JS_ThrowTypeError(ctx, "procSpawn(cmd[, cwd])");
-    size_t cl, wl = 0;
+    if (argc < 1) return JS_ThrowTypeError(ctx, "procSpawn(cmd)");
+    size_t cl;
     const char *cmd = JS_ToCStringLen(ctx, &cl, argv[0]);
-    const char *cwd = NULL;
-    if (argc >= 2 && !JS_IsUndefined(argv[1]) && !JS_IsNull(argv[1]))
-        cwd = JS_ToCStringLen(ctx, &wl, argv[1]);
     int h = -1;
-    if (cmd) h = host_proc_spawn(cmd, (int)cl, cwd ? cwd : "", (int)wl);
+    if (cmd) h = host_proc_spawn(cmd, (int)cl);
     JS_FreeCString(ctx, cmd);
-    if (cwd) JS_FreeCString(ctx, cwd);
     if (h == WEFT_DENIED) return weft_throw_denied(ctx, "procSpawn");
     return JS_NewInt32(ctx, h);
 }
@@ -970,7 +973,7 @@ int weft_plugin_init(const char *src, int len) {
     JSValue global = JS_GetGlobalObject(g_ctx);
     JSValue weft = JS_GetPropertyStr(g_ctx, global, "weft");
     JS_SetPropertyStr(g_ctx, weft, "command", JS_NewCFunction(g_ctx, js_command, "command", 2));
-    JS_SetPropertyStr(g_ctx, weft, "procSpawn", JS_NewCFunction(g_ctx, js_proc_spawn, "procSpawn", 2));
+    JS_SetPropertyStr(g_ctx, weft, "procSpawn", JS_NewCFunction(g_ctx, js_proc_spawn, "procSpawn", 1));
     JS_SetPropertyStr(g_ctx, weft, "procSend", JS_NewCFunction(g_ctx, js_proc_send, "procSend", 2));
     JS_SetPropertyStr(g_ctx, weft, "procRead", JS_NewCFunction(g_ctx, js_proc_read, "procRead", 1));
     JS_SetPropertyStr(g_ctx, weft, "procClose", JS_NewCFunction(g_ctx, js_proc_close, "procClose", 1));

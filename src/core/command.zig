@@ -124,6 +124,12 @@ pub const Context = struct {
     /// System-scoped semantic identity and provider registries. Optional for
     /// small/headless embeddings that expose only the text command surface.
     semantic: ?*@import("semantic.zig").Services = null,
+    /// Turns a `Place` into an OS directory for a local effect
+    /// (`doc/place.md` §2.3). Installed by the shell, which owns the roots it
+    /// opened; `null` in headless embeddings, where only the degenerate
+    /// `.process` place resolves and every other place is honestly
+    /// unavailable rather than silently local.
+    realizer: ?@import("place.zig").Realizer = null,
     /// The system's intention plane (`intent.zig`): the offer catalog, the
     /// endpoint-token invoker registry, and core's own editing provider —
     /// one value, so a half-wired pair is unrepresentable. `null` in

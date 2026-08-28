@@ -35,6 +35,10 @@ const ShellJob = struct {
     name: []u8,
     target: Document.EventAnchor,
     cmd: []u8, // the shell command line
+    /// Where the child runs, captured at spawn (`doc/place.md`). Null is the
+    /// `.process` place: inherit the editor's own directory. Owned; freed with
+    /// the rest of the job.
+    cwd: ?[]u8 = null,
 };
 
 // ── Raw persistent proc (wl_proc_spawn/send/read/close) ──────────────
@@ -51,8 +55,10 @@ fn streamAt(p: *WasmPlugin, h: i32) ?*proc_stream.ProcStream {
 }
 
 /// `procSpawn(cmd) -> handle` (perm proc, trap on deny) (or -1 if unavailable).
-/// Spawns a persistent subprocess inheriting the host environ + cwd; its
-/// stdout is buffered for `wl_proc_read`.
+/// Spawns a persistent subprocess inheriting the host environ, in the
+/// dispatching entry's PLACE (`resolveSpawnAt`); its stdout is buffered for
+/// `wl_proc_read`. Returns -1 when the place cannot host a local child, rather
+/// than falling back to the editor's own directory.
 pub fn hProcSpawn(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32, results: []i32) void {
     const p: *WasmPlugin = @ptrCast(@alignCast(data.?));
     if (!requirePerm(p, caller, .proc)) return;
@@ -65,7 +71,22 @@ pub fn hProcSpawn(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32, re
         return;
     };
     defer p.gpa.free(cmd);
-    const s = proc_stream.ProcStream.start(p.gpa, pool, cmd, null, shared.g_environ) catch {
+    // `ProcStream.start` dups the cwd it is given, so this one is ours to free.
+    const at = shared.resolveSpawnAt(p, p.gpa);
+    defer switch (at) {
+        .at => |dir| p.gpa.free(dir),
+        else => {},
+    };
+    const cwd: ?[]const u8 = switch (at) {
+        .inherit => null,
+        .at => |dir| dir,
+        .refused => |why| {
+            shared.noteSpawnRefusal(p.name, why);
+            results[0] = -1;
+            return;
+        },
+    };
+    const s = proc_stream.ProcStream.start(p.gpa, pool, cmd, cwd, shared.g_environ) catch {
         results[0] = -1;
         return;
     };
@@ -155,6 +176,17 @@ pub fn hShellInsert(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32, 
     const target = doc.exportAnchor(gpa, editor.cursorOffset(), .before) catch return;
     var target_owned = true;
     defer if (target_owned) gpa.free(target.agent);
+    const at = shared.resolveSpawnAt(p, gpa);
+    const cwd: ?[]u8 = switch (at) {
+        .inherit => null,
+        .at => |dir| dir,
+        .refused => |why| {
+            shared.noteSpawnRefusal(p.name, why);
+            return;
+        },
+    };
+    var cwd_owned = true;
+    defer if (cwd_owned) if (cwd) |d| gpa.free(d);
     const job = gpa.create(ShellJob) catch {
         return;
     };
@@ -168,7 +200,9 @@ pub fn hShellInsert(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32, 
         .name = name,
         .target = target,
         .cmd = cmd,
+        .cwd = cwd,
     };
+    cwd_owned = false;
     cmd_owned = false;
     target_owned = false;
     job_owned = false;
@@ -182,7 +216,7 @@ pub fn hShellInsert(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32, 
 /// worker — proc.run synchronous there, no frame block.
 fn shellWork(gpa: Allocator, ctx: ?*anyopaque) anyerror![]u8 {
     const job: *ShellJob = @ptrCast(@alignCast(ctx.?));
-    var res = proc.run(gpa, &.{ "/bin/sh", "-c", job.cmd }, .{ .environ = shared.g_environ }) catch return gpa.alloc(u8, 0);
+    var res = proc.run(gpa, &.{ "/bin/sh", "-c", job.cmd }, .{ .environ = shared.g_environ, .cwd = job.cwd }) catch return gpa.alloc(u8, 0);
     defer res.deinit(gpa);
     return gpa.dupe(u8, std.mem.trimEnd(u8, res.stdout, "\n"));
 }
@@ -205,6 +239,7 @@ fn shellFree(ctx: ?*anyopaque) void {
     const job: *ShellJob = @ptrCast(@alignCast(ctx.?));
     const gpa = job.gpa;
     gpa.free(job.name);
+    if (job.cwd) |d| gpa.free(d);
     gpa.free(job.target.agent);
     gpa.free(job.cmd);
     gpa.destroy(job);
@@ -230,6 +265,9 @@ const ProcJob = struct {
     token: u32, // the guest's opaque fill tag
     cmd: []u8,
     append: bool = false, // append the output (a console) vs replace (a view)
+    /// Where the child runs, captured at spawn. Null = the `.process` place.
+    /// Owned; freed with the job.
+    cwd: ?[]u8 = null,
 };
 
 /// Perm-gated (proc + timer): run `<cmd>` off the frame thread and replace the
@@ -261,7 +299,27 @@ fn spawnFill(p: *WasmPlugin, caller: *wasm.Caller, args: []const i32, append: bo
     const name = caller.readMemory(gpa, @intCast(args[2]), @intCast(args[3])) catch return;
     defer gpa.free(name);
     const buffers = p.activeCtx().buffers;
+    // ONE reading of "where", used for two things that must not disagree: the
+    // directory the child runs in, and the place the output entry is ABOUT.
+    // Read before the target exists, so it is the DISPATCHING entry's place and
+    // not the tool entry's own inherited copy.
+    const spawn_place = p.activeCtx().place();
+    const at = shared.resolveSpawnAt(p, gpa);
+    const cwd: ?[]u8 = switch (at) {
+        .inherit => null,
+        .at => |dir| dir,
+        .refused => |why| {
+            shared.noteSpawnRefusal(p.name, why);
+            return;
+        },
+    };
+    var cwd_owned = true;
+    defer if (cwd_owned) if (cwd) |d| gpa.free(d);
     const target = ensureFillTarget(gpa, buffers, name) orelse return;
+    // Re-target a REUSED tool entry: running grep again from another project
+    // makes `*grep*` about the new place from this moment on. A fresh entry
+    // already inherited the same value; saying it explicitly covers both.
+    buffers.setPlace(target.id, spawn_place);
     const plugin = gpa.dupe(u8, p.name) catch return;
     var plugin_owned = true;
     defer if (plugin_owned) gpa.free(plugin);
@@ -275,9 +333,11 @@ fn spawnFill(p: *WasmPlugin, caller: *wasm.Caller, args: []const i32, append: bo
         .token = @bitCast(args[4]),
         .cmd = cmd,
         .append = append,
+        .cwd = cwd,
     };
     cmd_owned = false;
     plugin_owned = false;
+    cwd_owned = false;
     _ = loop.spawn(procWork, job, .{ .ctx = job, .call = procDeliver, .deinit = procFree }) catch procFree(job);
 }
 
@@ -295,7 +355,7 @@ fn ensureFillTarget(gpa: Allocator, bufs: *Buffers, name: []const u8) ?Buffers.R
 
 fn procWork(gpa: Allocator, ctx: ?*anyopaque) anyerror![]u8 {
     const job: *ProcJob = @ptrCast(@alignCast(ctx.?));
-    var res = proc.run(gpa, &.{ "/bin/sh", "-c", job.cmd }, .{ .environ = shared.g_environ }) catch return gpa.alloc(u8, 0);
+    var res = proc.run(gpa, &.{ "/bin/sh", "-c", job.cmd }, .{ .environ = shared.g_environ, .cwd = job.cwd }) catch return gpa.alloc(u8, 0);
     defer res.deinit(gpa);
     return gpa.dupe(u8, std.mem.trimEnd(u8, res.stdout, "\n"));
 }
@@ -343,6 +403,7 @@ fn procFree(ctx: ?*anyopaque) void {
     const job: *ProcJob = @ptrCast(@alignCast(ctx.?));
     const gpa = job.gpa;
     gpa.free(job.plugin);
+    if (job.cwd) |d| gpa.free(d);
     gpa.free(job.cmd);
     gpa.destroy(job);
 }
@@ -361,6 +422,10 @@ const FilterJob = struct {
     cmd: []u8, // contains "{}" → the temp path
     content: []u8, // the captured input (owned)
     tmp: []u8,
+    /// Where the filter command runs. A formatter finds its config by walking
+    /// up from its working directory, so a filter run in the wrong project is
+    /// formatted by the wrong rules. Null = the `.process` place. Owned.
+    cwd: ?[]u8 = null,
 };
 
 var filter_counter: usize = 0;
@@ -404,6 +469,17 @@ pub fn hProcFilter(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32, r
     const tmp = std.fmt.allocPrint(gpa, "/tmp/weft-filter-{d}-{d}", .{ filter_counter, s }) catch return;
     var tmp_owned = true;
     defer if (tmp_owned) gpa.free(tmp);
+    const at = shared.resolveSpawnAt(p, gpa);
+    const cwd: ?[]u8 = switch (at) {
+        .inherit => null,
+        .at => |dir| dir,
+        .refused => |why| {
+            shared.noteSpawnRefusal(p.name, why);
+            return;
+        },
+    };
+    var cwd_owned = true;
+    defer if (cwd_owned) if (cwd) |d| gpa.free(d);
     const job = gpa.create(FilterJob) catch return;
     var job_owned = true;
     defer if (job_owned) gpa.destroy(job);
@@ -418,7 +494,9 @@ pub fn hProcFilter(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32, r
         .cmd = cmd,
         .content = content,
         .tmp = tmp,
+        .cwd = cwd,
     };
+    cwd_owned = false;
     cmd_owned = false;
     content_owned = false;
     start_owned = false;
@@ -436,7 +514,7 @@ fn filterWork(gpa: Allocator, ctx: ?*anyopaque) anyerror![]u8 {
     file.writeBytes(gpa, job.tmp, job.content) catch return gpa.dupe(u8, job.content);
     const cmd = std.mem.replaceOwned(u8, gpa, job.cmd, "{}", job.tmp) catch return gpa.dupe(u8, job.content);
     defer gpa.free(cmd);
-    var res = proc.run(gpa, &.{ "/bin/sh", "-c", cmd }, .{ .environ = shared.g_environ }) catch {
+    var res = proc.run(gpa, &.{ "/bin/sh", "-c", cmd }, .{ .environ = shared.g_environ, .cwd = job.cwd }) catch {
         file.deleteFile(gpa, job.tmp);
         return gpa.dupe(u8, job.content);
     };
@@ -463,6 +541,7 @@ fn filterFree(ctx: ?*anyopaque) void {
     const job: *FilterJob = @ptrCast(@alignCast(ctx.?));
     const gpa = job.gpa;
     gpa.free(job.plugin);
+    if (job.cwd) |d| gpa.free(d);
     gpa.free(job.start.agent);
     gpa.free(job.end.agent);
     gpa.free(job.cmd);
