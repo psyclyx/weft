@@ -23,6 +23,7 @@ pub const app_session = @import("app/session.zig");
 pub const app_providers = @import("app/providers.zig");
 pub const app_buffers_cmds = @import("app/buffers_cmds.zig");
 pub const app_collab = @import("app/collab.zig");
+pub const app_collab_cmds = @import("app/collab_cmds.zig");
 pub const app_collab_presets = @import("app/collab_presets.zig");
 pub const app_application = @import("app/application.zig");
 pub const app_frame = @import("app/frame.zig");

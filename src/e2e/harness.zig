@@ -32,6 +32,7 @@ pub const dispatch = weft.dispatch;
 pub const app_session = weft.app_session;
 pub const app_providers = weft.app_providers;
 pub const app_collab = weft.app_collab;
+pub const app_collab_cmds = weft.app_collab_cmds;
 const app_application = weft.app_application;
 const app_render_memory = weft.app_render_memory;
 const app_headless_vulkan = weft.app_headless_vulkan;
@@ -153,6 +154,9 @@ pub const Editor = struct {
     win_actions: [window_cmds.cmd_count]window_cmds.WindowActionCtx = undefined,
     /// Stable composition data for provider-aware buffer and target opening.
     buffer_commands: app_buffers_cmds.Context = undefined,
+    /// Stable backing for the collaboration commands' data pointer, filled by
+    /// `enableCollabCommands` (opt-in — see there).
+    share_ctx: app_collab.ShareCtx = undefined,
     pub fn init(gpa: Allocator, self: *Editor) !void {
         return initNamed(gpa, self, "user");
     }
@@ -305,6 +309,25 @@ pub const Editor = struct {
     pub fn loadJs(self: *Editor, name: []const u8, src: []const u8) !void {
         const jp = try core.quickjs.JsPlugin.load(self.gpa, &self.engine, self.ctx, self.pool, parentEnviron(), name, &self.config_kv, src);
         try self.js_plugins.append(self.gpa, jp);
+    }
+
+    /// Register the app's collaboration commands (share/listen/peers/…) over
+    /// this editor's own connection state, exactly as main() does. Opt-in
+    /// rather than part of `init`, because only a test that names those
+    /// commands needs them — the plugin catalog and core builtins are the
+    /// default surface everywhere else.
+    pub fn enableCollabCommands(self: *Editor) !void {
+        self.share_ctx = .{
+            .gpa = self.gpa,
+            .buffers = self.buffers,
+            .conn = &self.frame_conn,
+            .hub = &self.frame_hub,
+            .caps = self.caps,
+            .partial = &self.frame_partial_state,
+            .session = &self.frame_collab_session,
+            .known = &self.frame_known_peers,
+        };
+        try app_collab_cmds.registerCommands(self.gpa, self.commands, &self.share_ctx, &self.frame_known_peers);
     }
 
     /// Set a plugin's config value (`weft.set("<plugin>", key, value)`), for
@@ -1811,8 +1834,16 @@ pub const ConfigLoader = struct {
         const self: *ConfigLoader = @ptrCast(@alignCast(ctx));
         const gpa = self.ed.gpa;
         self.requested.append(gpa, gpa.dupe(u8, name) catch return) catch {};
-        if (std.mem.eql(u8, name, "dap.js")) {
-            self.ed.loadJs("dap", weft.dap_js) catch {
+        // The shipped `.js` catalog (build.zig's `js_plugins`, installed
+        // beside the .wasm plugins): embedded here the same way, so a config
+        // that names one loads it as a resident quickjs plugin.
+        const js_catalog = [_]struct { name: []const u8, ns: []const u8, src: []const u8 }{
+            .{ .name = "dap.js", .ns = "dap", .src = weft.dap_js },
+            .{ .name = "acp.js", .ns = "acp", .src = weft.acp_js },
+        };
+        for (js_catalog) |entry| {
+            if (!std.mem.eql(u8, name, entry.name)) continue;
+            self.ed.loadJs(entry.ns, entry.src) catch {
                 self.failed.append(gpa, gpa.dupe(u8, name) catch return) catch {};
             };
             return;
