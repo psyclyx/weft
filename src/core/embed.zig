@@ -1,12 +1,14 @@
 //! Render-embeds — live regions at anchored extents inside a host entry
 //! (doc/contextual-workspace-architecture.md §11.8 depth i).
 //!
-//! An embed is a text span holding a durable, text-serializable designation
-//! (`weft://<authority>/<kind>/<ref>[?params]`, doc/substrate.md §7) plus view
-//! parameters. The text is the storage form AND the fallback form: an embed
-//! that cannot resolve stops overlaying and lets its own bytes show, with a
-//! short reason beside them. An embed never errors its host (§15.19), and
-//! embedding confers nothing — an ungranted designation degrades to text.
+//! An embed is a marked line holding a durable, text-serializable designation
+//! (`@embed weft://<authority>/<kind>/<ref>[?params]`, doc/substrate.md §7)
+//! plus view parameters, in the ONE grammar host and guest share
+//! (`semantic_model/durable.zig`). The text is the storage form AND the
+//! fallback form: an embed that cannot resolve stops overlaying and lets its
+//! own bytes show, with a short reason beside them. An embed never errors its
+//! host (§15.19), and embedding confers nothing — an ungranted designation
+//! degrades to text.
 //!
 //! **The presentation carve.** A resolved embed renders through the ANNOTATION
 //! seam (`layers.zig`): anchored, revision-stamped, display-only decorations
@@ -33,7 +35,12 @@ const Allocator = std.mem.Allocator;
 const Document = @import("Document.zig");
 const layers = @import("layers.zig");
 
-pub const scheme = "weft://";
+/// The grammar is the portable one (`semantic_model/durable.zig`): host and
+/// guest read one syntax out of the same bytes, so a note written by a plugin
+/// is an embed here and nowhere is there a second parser to keep in step.
+pub const durable = @import("weft_semantic").durable;
+pub const Designation = durable.Designation;
+pub const marker = durable.marker;
 
 /// Rows a window shows when the designation asks for no size, and the ceiling
 /// any request is clamped to. A view is bounded by construction (§11.6): no
@@ -43,71 +50,18 @@ pub const max_window = 64;
 
 pub const ParseError = error{Malformed};
 
-/// A durable designation: what the embed points at, plus how much of it to
-/// show. Identity is `authority/kind/ref`; view parameters are a request about
-/// presentation and never part of what is designated.
-pub const Designation = struct {
-    /// `here`, a peer fingerprint or alias, or `shell:<id>` (substrate §7).
-    authority: []const u8,
-    kind: []const u8,
-    ref: []const u8,
-    lines: u16 = default_window,
+/// How much of the designated resource this embed asked to see, clamped.
+pub fn windowOf(want: Designation) u16 {
+    const asked = want.count("lines", default_window);
+    return @intCast(std.math.clamp(asked, 1, max_window));
+}
 
-    pub fn parse(text: []const u8) ParseError!Designation {
-        if (!std.mem.startsWith(u8, text, scheme)) return error.Malformed;
-        var body = text[scheme.len..];
-        var lines: u16 = default_window;
-        if (std.mem.indexOfScalar(u8, body, '?')) |q| {
-            lines = try parseWindow(body[q + 1 ..]);
-            body = body[0..q];
-        }
-        const slash = std.mem.indexOfScalar(u8, body, '/') orelse return error.Malformed;
-        const tail = body[slash + 1 ..];
-        const next = std.mem.indexOfScalar(u8, tail, '/') orelse return error.Malformed;
-        const self: Designation = .{
-            .authority = body[0..slash],
-            .kind = tail[0..next],
-            .ref = tail[next + 1 ..],
-            .lines = lines,
-        };
-        if (self.authority.len == 0 or self.kind.len == 0 or self.ref.len == 0) return error.Malformed;
-        return self;
-    }
-
-    /// Write the storage form back out. Round-tripping is the point: what a
-    /// note holds, what a fallback shows, and what a resolver is asked for are
-    /// one string.
-    pub fn serialize(self: Designation, buf: []u8) error{NoSpaceLeft}![]const u8 {
-        if (self.lines == default_window)
-            return std.fmt.bufPrint(buf, scheme ++ "{s}/{s}/{s}", .{ self.authority, self.kind, self.ref });
-        return std.fmt.bufPrint(buf, scheme ++ "{s}/{s}/{s}?lines={d}", .{
-            self.authority, self.kind, self.ref, self.lines,
-        });
-    }
-
-    /// Same designated resource, whatever each embed asked to see of it.
-    pub fn designates(self: Designation, other: Designation) bool {
-        return std.mem.eql(u8, self.authority, other.authority) and
-            std.mem.eql(u8, self.kind, other.kind) and
-            std.mem.eql(u8, self.ref, other.ref);
-    }
-
-    /// View parameters are requests, not identity: an unknown one is ignored
-    /// rather than refused, so a note written by a newer presentation still
-    /// designates something this one can resolve.
-    fn parseWindow(params: []const u8) ParseError!u16 {
-        var it = std.mem.splitScalar(u8, params, '&');
-        var lines: u16 = default_window;
-        while (it.next()) |param| {
-            const eq = std.mem.indexOfScalar(u8, param, '=') orelse continue;
-            if (!std.mem.eql(u8, param[0..eq], "lines")) continue;
-            const n = std.fmt.parseInt(u16, param[eq + 1 ..], 10) catch return error.Malformed;
-            if (n == 0) return error.Malformed;
-            lines = @min(n, max_window);
-        }
-        return lines;
-    }
-};
+/// The designation a bound span holds: an embed line, or the bare designation
+/// a caller pinned itself. Both are text that designates; the marker is what
+/// makes a LINE one without anybody saying so.
+pub fn designationIn(text: []const u8) ParseError!Designation {
+    return durable.embedOf(text) orelse durable.parse(text) orelse error.Malformed;
+}
 
 /// Where an embed is in its lifecycle. `fallback` is not an error state — it
 /// is the storage form showing through, which every other state is an overlay
@@ -161,12 +115,16 @@ pub const Extent = struct {
     }
 };
 
-/// A generation-checked capture of one embed. A resolver holds this across an
-/// await; a slot that was deleted through, detached, or reused resolves to
-/// nothing, so a late answer cannot land on whatever now sits at the offset.
+/// A generation-checked capture of one embed AND of the request it answers. A
+/// resolver holds this across an await; a slot that was deleted through,
+/// detached, or reused resolves to nothing, so a late answer cannot land on
+/// whatever now sits at the offset — and a request the embed has already
+/// superseded answers nobody either, however alive its slot still is.
 pub const Ref = struct {
     id: u32,
     generation: u32,
+    /// 0 = names the embed only, which no answer may land in.
+    request: u32 = 0,
 };
 
 /// Who turns a designation into rows. `begin` must return promptly — it runs
@@ -206,9 +164,10 @@ const Embed = struct {
     lines: u16,
     state: State,
     reason: ?Reason = null,
-    /// A request is outstanding. An answer is applied only into the request
-    /// still waiting for it; anything else is superseded and dropped.
-    asked: bool = false,
+    /// The outstanding request's serial, 0 for none. An answer is applied only
+    /// into the request still waiting for it; anything else is superseded and
+    /// dropped, including an answer overtaken by an `invalidate` and a re-ask.
+    asked: u32 = 0,
     rows: std.ArrayList([]const u8) = .empty,
     partial: bool = false,
 
@@ -239,6 +198,9 @@ const Embed = struct {
 pub const Embeds = struct {
     resolver: Resolver,
     slots: std.ArrayList(Slot) = .empty,
+    /// The next request serial. Monotonic across every embed, so no two asks
+    /// ever share a name.
+    serial: u32 = 1,
 
     const Slot = struct {
         generation: u32 = 1,
@@ -261,7 +223,7 @@ pub const Embeds = struct {
     pub fn attach(self: *Embeds, gpa: Allocator, doc: *Document, start: usize, end: usize) (Allocator.Error || ParseError)!Ref {
         const text = try readSpan(gpa, doc, start, end);
         errdefer gpa.free(text);
-        const want = try Designation.parse(text);
+        const want = try designationIn(text);
         const a = try doc.addAnchor(gpa, start, .right);
         errdefer doc.removeAnchor(a);
         const b = try doc.addAnchor(gpa, @max(start, end), .left);
@@ -271,7 +233,7 @@ pub const Embeds = struct {
             .start = a,
             .end = b,
             .text = text,
-            .lines = want.lines,
+            .lines = windowOf(want),
             .state = .pending,
         };
         for (self.slots.items, 0..) |*slot, index| {
@@ -283,19 +245,24 @@ pub const Embeds = struct {
         return .{ .id = @intCast(self.slots.items.len - 1), .generation = 1 };
     }
 
-    /// Bind every designation in `doc` that is not bound already. The reader
-    /// of the storage form: a note is a note, and the embeds are found in it.
+    /// Bind every embed line in `doc` that is not bound already. The reader of
+    /// the storage form: a note is a note, and the embeds are found in it. A
+    /// line is an embed because it is MARKED one, so a sentence that mentions
+    /// a designation stays prose.
     pub fn scan(self: *Embeds, gpa: Allocator, doc: *Document) Allocator.Error!usize {
         const text = try readSpan(gpa, doc, 0, doc.text().byteLen());
         defer gpa.free(text);
         var found: usize = 0;
         var at: usize = 0;
-        while (std.mem.indexOfPos(u8, text, at, scheme)) |start| {
-            var end = start;
-            while (end < text.len and !isDelimiter(text[end])) end += 1;
-            at = end;
-            if (self.boundAt(doc, start)) continue;
-            _ = self.attach(gpa, doc, start, end) catch |err| switch (err) {
+        while (at < text.len) {
+            const nl = std.mem.indexOfScalarPos(u8, text, at, '\n') orelse text.len;
+            defer at = nl + 1;
+            const line = text[at..nl];
+            const lead = line.len - std.mem.trimStart(u8, line, " \t").len;
+            const body = std.mem.trimEnd(u8, line[lead..], " \t\r");
+            if (durable.embedOf(body) == null) continue;
+            if (self.boundAt(doc, at + lead)) continue;
+            _ = self.attach(gpa, doc, at + lead, at + lead + body.len) catch |err| switch (err) {
                 error.Malformed => continue,
                 else => |e| return e,
             };
@@ -335,7 +302,7 @@ pub const Embeds = struct {
 
     pub fn designation(self: *const Embeds, ref: Ref) ?Designation {
         const embed = self.embedOf(ref) orelse return null;
-        return Designation.parse(embed.text) catch null;
+        return designationIn(embed.text) catch null;
     }
 
     /// Collapse embeds whose designation the host entry no longer holds. The
@@ -347,7 +314,7 @@ pub const Embeds = struct {
             if (embed.state == .collapsed or !embed.extent().isEmpty()) continue;
             embed.clearRows(gpa);
             embed.state = .collapsed;
-            embed.asked = false;
+            embed.asked = 0;
         }
     }
 
@@ -358,17 +325,19 @@ pub const Embeds = struct {
         self.sweep(gpa);
         for (self.slots.items, 0..) |*slot, index| {
             const embed = if (slot.embed) |*live| live else continue;
-            if (embed.asked or (embed.state != .pending and embed.state != .stale)) continue;
+            if (embed.asked != 0 or (embed.state != .pending and embed.state != .stale)) continue;
             if (visible) |window| if (!embed.extent().overlaps(window)) continue;
-            const want = Designation.parse(embed.text) catch {
+            const want = designationIn(embed.text) catch {
                 embed.state = .fallback;
                 embed.reason = .unknown_target;
                 continue;
             };
-            embed.asked = true;
+            embed.asked = self.serial;
+            self.serial +%= 1;
+            if (self.serial == 0) self.serial = 1;
             self.resolver.begin(
                 self.resolver.ctx,
-                .{ .id = @intCast(index), .generation = slot.generation },
+                .{ .id = @intCast(index), .generation = slot.generation, .request = embed.asked },
                 want,
             );
         }
@@ -385,7 +354,7 @@ pub const Embeds = struct {
         embed.partial = rows.len > shown;
         embed.state = .resolved;
         embed.reason = null;
-        embed.asked = false;
+        embed.asked = 0;
     }
 
     /// The designation did not resolve. The embed keeps its text — that is the
@@ -395,7 +364,7 @@ pub const Embeds = struct {
         embed.clearRows(gpa);
         embed.state = .fallback;
         embed.reason = reason;
-        embed.asked = false;
+        embed.asked = 0;
     }
 
     /// The designated resource changed: every embed of it re-asks on the next
@@ -405,11 +374,11 @@ pub const Embeds = struct {
         for (self.slots.items) |*slot| {
             const embed = if (slot.embed) |*live| live else continue;
             if (embed.state == .collapsed) continue;
-            const want = Designation.parse(embed.text) catch continue;
+            const want = designationIn(embed.text) catch continue;
             if (!want.designates(changed)) continue;
             // An answer already in flight described the resource before this
             // change: drop it by clearing the request it would land in.
-            embed.asked = false;
+            embed.asked = 0;
             switch (embed.state) {
                 .resolved, .stale => embed.state = .stale,
                 else => {
@@ -489,11 +458,13 @@ pub const Embeds = struct {
     }
 
     /// The embed an answer may land in: live, still holding its extent, and
-    /// still waiting for the request being answered.
+    /// still waiting for THIS request. An answer overtaken by an invalidate
+    /// and its re-ask names a request nobody waits for any more.
     fn awaitingOf(self: *Embeds, ref: Ref) ?*Embed {
         const slot = self.slotOf(ref) orelse return null;
         const embed = &slot.embed.?;
-        if (!embed.asked or embed.state == .collapsed or embed.extent().isEmpty()) return null;
+        if (ref.request == 0 or embed.asked != ref.request) return null;
+        if (embed.state == .collapsed or embed.extent().isEmpty()) return null;
         return embed;
     }
 
@@ -505,13 +476,6 @@ pub const Embeds = struct {
         return false;
     }
 };
-
-fn isDelimiter(byte: u8) bool {
-    return switch (byte) {
-        ' ', '\t', '\n', '\r', '"', '\'', '<', '>', ')', ']', '}' => true,
-        else => false,
-    };
-}
 
 fn readSpan(gpa: Allocator, doc: *const Document, start: usize, end: usize) Allocator.Error![]u8 {
     const rope = doc.text();
@@ -580,30 +544,28 @@ fn firstMessage(layer: *const layers.Layer, role: Role) ?[]const u8 {
     return null;
 }
 
-test "embed: a designation round-trips through its own text form" {
-    var buf: [128]u8 = undefined;
-    const plain = try Designation.parse("weft://here/dir/src/core");
-    try t.expectEqualStrings("here", plain.authority);
-    try t.expectEqualStrings("dir", plain.kind);
+test "embed: the bound text is the portable grammar, and the window it asks for is bounded" {
+    // One grammar: what a guest writes into a note is what the host binds.
+    const plain = try designationIn("@embed weft://here/dir/src/core");
+    try t.expect(plain.authority == .here);
+    try t.expect(plain.kind == .directory);
     try t.expectEqualStrings("src/core", plain.ref);
-    try t.expectEqual(@as(u16, default_window), plain.lines);
-    try t.expectEqualStrings("weft://here/dir/src/core", try plain.serialize(&buf));
+    try t.expectEqual(@as(u16, default_window), windowOf(plain));
 
-    const windowed = try Designation.parse("weft://ab12cd/commit/9f3a?lines=3");
-    try t.expectEqualStrings("ab12cd", windowed.authority);
-    try t.expectEqual(@as(u16, 3), windowed.lines);
-    try t.expectEqualStrings("weft://ab12cd/commit/9f3a?lines=3", try windowed.serialize(&buf));
-
+    const windowed = try designationIn("@embed weft://ab12cd/commit/9f3a?lines=3");
+    try t.expect(windowed.authority.eql(.{ .peer = "ab12cd" }));
+    try t.expectEqual(@as(u16, 3), windowOf(windowed));
     // A view parameter is a request about presentation, never identity.
-    try t.expect(windowed.designates(try Designation.parse("weft://ab12cd/commit/9f3a?lines=9")));
-    try t.expect(!windowed.designates(try Designation.parse("weft://here/commit/9f3a")));
+    try t.expect(windowed.designates(try designationIn("weft://ab12cd/commit/9f3a?lines=9")));
+    try t.expect(!windowed.designates(try designationIn("weft://here/commit/9f3a")));
     // Unknown parameters are ignored; the designation still resolves.
-    try t.expectEqual(@as(u16, 2), (try Designation.parse("weft://here/file/a?as=table&lines=2")).lines);
-    // A window is bounded whatever the text asks for.
-    try t.expectEqual(@as(u16, max_window), (try Designation.parse("weft://here/file/a?lines=9000")).lines);
+    try t.expectEqual(@as(u16, 2), windowOf(try designationIn("weft://here/file/a?as=table&lines=2")));
+    // A window is bounded whatever the text asks for, both ways.
+    try t.expectEqual(@as(u16, max_window), windowOf(try designationIn("weft://here/file/a?lines=9000")));
+    try t.expectEqual(@as(u16, 1), windowOf(try designationIn("weft://here/file/a?lines=0")));
 
-    for ([_][]const u8{ "https://example/x", "weft://here", "weft://here/file/", "weft:///file/a", "weft://here/file/a?lines=0" }) |bad| {
-        try t.expectError(error.Malformed, Designation.parse(bad));
+    for ([_][]const u8{ "https://example/x", "weft://here", "weft://here/file/", "weft:///file/a", "@embed", "@embed weft://here/file/a and prose" }) |bad| {
+        try t.expectError(error.Malformed, designationIn(bad));
     }
 }
 
@@ -611,7 +573,7 @@ test "embed: placeholder, resolved window, live staleness, then fallback" {
     const gpa = t.allocator;
     var fixture: Fixture = .{};
     defer fixture.deinit();
-    var doc = try noteWith(gpa, "notes:\nweft://here/dir/src?lines=2\ntail\n");
+    var doc = try noteWith(gpa, "notes:\n@embed weft://here/dir/src?lines=2\ntail\n");
     defer doc.deinit(gpa);
     var store: layers.Layers = .empty;
     defer store.deinit(gpa);
@@ -647,7 +609,7 @@ test "embed: placeholder, resolved window, live staleness, then fallback" {
 
     // Live: the directory changed. The last window still shows, marked, and
     // the next pump re-asks.
-    embeds.invalidate(gpa, try Designation.parse("weft://here/dir/src"));
+    embeds.invalidate(gpa, try designationIn("weft://here/dir/src"));
     try t.expectEqual(State.stale, embeds.view(ref).?.state);
     try t.expectEqual(@as(usize, 2), embeds.view(ref).?.rows.len);
     try embeds.renderInto(gpa, &doc, layer);
@@ -660,7 +622,7 @@ test "embed: placeholder, resolved window, live staleness, then fallback" {
     const fallen = embeds.view(ref).?;
     try t.expectEqual(State.fallback, fallen.state);
     try t.expectEqual(@as(usize, 0), fallen.rows.len);
-    try t.expectEqualStrings("weft://here/dir/src?lines=2", fallen.designation);
+    try t.expectEqualStrings("@embed weft://here/dir/src?lines=2", fallen.designation);
     try embeds.renderInto(gpa, &doc, layer);
     try t.expectEqualStrings("gone", firstMessage(layer, .note).?);
     try t.expect(!layer.resolvedSpan(0).face.invisible);
@@ -668,14 +630,14 @@ test "embed: placeholder, resolved window, live staleness, then fallback" {
     // The host entry never lost a byte to any of it.
     const text = try doc.text().toOwnedSlice(gpa);
     defer gpa.free(text);
-    try t.expectEqualStrings("notes:\nweft://here/dir/src?lines=2\ntail\n", text);
+    try t.expectEqualStrings("notes:\n@embed weft://here/dir/src?lines=2\ntail\n", text);
 }
 
 test "embed: typing during a pending resolution neither blocks nor misplaces" {
     const gpa = t.allocator;
     var fixture: Fixture = .{};
     defer fixture.deinit();
-    var doc = try noteWith(gpa, "weft://here/file/README.md\n");
+    var doc = try noteWith(gpa, "@embed weft://here/file/README.md\n");
     defer doc.deinit(gpa);
     var store: layers.Layers = .empty;
     defer store.deinit(gpa);
@@ -683,9 +645,10 @@ test "embed: typing during a pending resolution neither blocks nor misplaces" {
 
     var embeds: Embeds = .init(fixture.resolver());
     defer embeds.deinit(gpa);
-    const ref = try embeds.attach(gpa, &doc, 0, 26);
+    const ref = try embeds.attach(gpa, &doc, 0, 33);
     embeds.pump(gpa, null);
     try t.expectEqual(@as(usize, 1), fixture.calls);
+    const asked = fixture.take();
 
     // Type around the pending embed: no resolver call, no state change, and
     // the extent rides the document's anchors.
@@ -693,21 +656,21 @@ test "embed: typing during a pending resolution neither blocks nor misplaces" {
     try doc.insert(gpa, doc.text().byteLen(), "and more\n");
     try t.expectEqual(@as(usize, 1), fixture.calls);
     try t.expectEqual(State.pending, embeds.view(ref).?.state);
-    try t.expectEqual(Extent{ .start = 19, .end = 45 }, embeds.view(ref).?.extent);
+    try t.expectEqual(Extent{ .start = 19, .end = 52 }, embeds.view(ref).?.extent);
 
     // The answer to the request made before all that typing still lands on
     // the designation's own bytes.
-    try embeds.fulfill(gpa, ref, &.{"# weft"});
+    try embeds.fulfill(gpa, asked, &.{"# weft"});
     try embeds.renderInto(gpa, &doc, layer);
     try t.expectEqual(@as(usize, 1), spanRoles(layer, .row));
-    try t.expectEqual(@as(usize, 45), layer.resolvedSpan(1).start);
+    try t.expectEqual(@as(usize, 52), layer.resolvedSpan(1).start);
 }
 
 test "embed: deleted through collapses to text, and late answers land nowhere" {
     const gpa = t.allocator;
     var fixture: Fixture = .{};
     defer fixture.deinit();
-    var doc = try noteWith(gpa, "a weft://here/dir/src b\n");
+    var doc = try noteWith(gpa, "@embed weft://here/dir/src\nprose about weft://here/dir/src\n");
     defer doc.deinit(gpa);
     var store: layers.Layers = .empty;
     defer store.deinit(gpa);
@@ -715,7 +678,8 @@ test "embed: deleted through collapses to text, and late answers land nowhere" {
 
     var embeds: Embeds = .init(fixture.resolver());
     defer embeds.deinit(gpa);
-    _ = try embeds.scan(gpa, &doc);
+    // The marked line is an embed; the sentence that mentions one is prose.
+    try t.expectEqual(@as(usize, 1), try embeds.scan(gpa, &doc));
     embeds.pump(gpa, null);
     const ref = fixture.take();
     try embeds.fulfill(gpa, ref, &.{"core.zig"});
@@ -724,7 +688,7 @@ test "embed: deleted through collapses to text, and late answers land nowhere" {
 
     // The reader deletes the designation. The embed was its text: with the
     // text gone there is nothing to render and nothing to ask about.
-    try doc.delete(gpa, .{ .start = 2, .end = 22 });
+    try doc.delete(gpa, .{ .start = 0, .end = 26 });
     embeds.pump(gpa, null);
     try t.expectEqual(State.collapsed, embeds.view(ref).?.state);
     try t.expectEqual(@as(usize, 1), fixture.calls);
@@ -744,7 +708,7 @@ test "embed: deleted through collapses to text, and late answers land nowhere" {
     try embeds.fulfill(gpa, ref, &.{"gone"});
 
     // Re-typing the designation binds a fresh embed with its own identity.
-    try doc.insert(gpa, 2, "weft://here/dir/src ");
+    try doc.insert(gpa, 0, "@embed weft://here/dir/src");
     try t.expectEqual(@as(usize, 1), try embeds.scan(gpa, &doc));
     embeds.pump(gpa, null);
     const again = fixture.take();
@@ -756,7 +720,7 @@ test "embed: an ungranted designation degrades to text and never errors its host
     const gpa = t.allocator;
     var fixture: Fixture = .{};
     defer fixture.deinit();
-    var doc = try noteWith(gpa, "weft://alice/file/secret.md\nweft://here/file/open.md\n");
+    var doc = try noteWith(gpa, "@embed weft://alice/file/secret.md\n@embed weft://here/file/open.md\n");
     defer doc.deinit(gpa);
     var store: layers.Layers = .empty;
     defer store.deinit(gpa);
@@ -776,14 +740,14 @@ test "embed: an ungranted designation degrades to text and never errors its host
     try embeds.renderInto(gpa, &doc, layer);
     try t.expectEqualStrings("no grant", firstMessage(layer, .note).?);
     try t.expectEqual(@as(usize, 1), spanRoles(layer, .row));
-    try t.expectEqualStrings("weft://alice/file/secret.md", embeds.view(secret).?.designation);
+    try t.expectEqualStrings("@embed weft://alice/file/secret.md", embeds.view(secret).?.designation);
 }
 
 test "embed: only the outstanding request is answered, and only what is visible is asked" {
     const gpa = t.allocator;
     var fixture: Fixture = .{};
     defer fixture.deinit();
-    var doc = try noteWith(gpa, "weft://here/dir/a\nweft://here/dir/b\n");
+    var doc = try noteWith(gpa, "@embed weft://here/dir/a\n@embed weft://here/dir/b\n");
     defer doc.deinit(gpa);
 
     var embeds: Embeds = .init(fixture.resolver());
@@ -791,33 +755,63 @@ test "embed: only the outstanding request is answered, and only what is visible 
     _ = try embeds.scan(gpa, &doc);
 
     // Windowed: an extent the reader has not reached is not resolved.
-    embeds.pump(gpa, .{ .start = 0, .end = 17 });
+    embeds.pump(gpa, .{ .start = 0, .end = 24 });
     try t.expectEqual(@as(usize, 1), fixture.calls);
     const first = fixture.take();
     try embeds.fulfill(gpa, first, &.{"a/"});
 
     // A change while an answer is in flight supersedes it: the stale answer
     // is dropped and the re-ask stands.
-    embeds.invalidate(gpa, try Designation.parse("weft://here/dir/a"));
-    embeds.pump(gpa, .{ .start = 0, .end = 17 });
+    embeds.invalidate(gpa, try designationIn("weft://here/dir/a"));
+    embeds.pump(gpa, .{ .start = 0, .end = 24 });
     try t.expectEqual(@as(usize, 2), fixture.calls);
     const reask = fixture.take();
-    embeds.invalidate(gpa, try Designation.parse("weft://here/dir/a"));
+    embeds.invalidate(gpa, try designationIn("weft://here/dir/a"));
     try embeds.fulfill(gpa, reask, &.{"superseded"});
     try t.expectEqual(State.stale, embeds.view(first).?.state);
     try t.expectEqualStrings("a/", embeds.view(first).?.rows[0]);
 
     // The second embed is asked once the window reaches it; the first one's
     // outstanding re-ask waits until the window comes back to it.
-    embeds.pump(gpa, .{ .start = 17, .end = 35 });
+    embeds.pump(gpa, .{ .start = 25, .end = 49 });
     try t.expectEqual(@as(usize, 3), fixture.calls);
     embeds.pump(gpa, null);
     try t.expectEqual(@as(usize, 4), fixture.calls);
 }
 
+test "embed: an answer overtaken by a re-ask loses to the answer that was re-asked for" {
+    const gpa = t.allocator;
+    var fixture: Fixture = .{};
+    defer fixture.deinit();
+    var doc = try noteWith(gpa, "@embed weft://here/dir/src\n");
+    defer doc.deinit(gpa);
+
+    var embeds: Embeds = .init(fixture.resolver());
+    defer embeds.deinit(gpa);
+    _ = try embeds.scan(gpa, &doc);
+    embeds.pump(gpa, null);
+    const in_flight = fixture.take();
+
+    // The resource changes while the first answer is still travelling, and
+    // the next pump re-asks — so two answers are now owed to one embed.
+    embeds.invalidate(gpa, try designationIn("weft://here/dir/src"));
+    embeds.pump(gpa, null);
+    const current = fixture.take();
+    try t.expect(in_flight.request != current.request);
+
+    // The overtaken answer describes the world before the change: it names a
+    // request nobody waits for, so it lands nowhere, and the answer that WAS
+    // asked for still lands after it.
+    try embeds.fulfill(gpa, in_flight, &.{"before the change"});
+    try t.expectEqual(State.pending, embeds.view(current).?.state);
+    try embeds.fulfill(gpa, current, &.{"after the change"});
+    try t.expectEqual(State.resolved, embeds.view(current).?.state);
+    try t.expectEqualStrings("after the change", embeds.view(current).?.rows[0]);
+}
+
 test "embed: a host with no resolver holds its placeholders" {
     const gpa = t.allocator;
-    var doc = try noteWith(gpa, "weft://here/dir/src\n");
+    var doc = try noteWith(gpa, "@embed weft://here/dir/src\n");
     defer doc.deinit(gpa);
     var store: layers.Layers = .empty;
     defer store.deinit(gpa);

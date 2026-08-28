@@ -68,6 +68,15 @@ pub const Designation = struct {
         return std.fmt.parseUnsigned(usize, raw, 10) catch fallback;
     }
 
+    /// The same designated thing, whatever each holder asked to see of it:
+    /// identity is authority/kind/ref, and view parameters are a request
+    /// about presentation that never changes what is designated.
+    pub fn designates(self: Designation, other: Designation) bool {
+        return self.authority.eql(other.authority) and
+            kindEql(self.kind, other.kind) and
+            std.mem.eql(u8, self.ref, other.ref);
+    }
+
     /// Write the designation back out. Serializing then parsing yields an
     /// equal value — that round trip is what makes the text form the
     /// fallback form.
@@ -98,6 +107,13 @@ pub fn kindName(kind: target.Kind) []const u8 {
         .file => file_kind,
         .directory => directory_kind,
         .synthetic => |name| name,
+    };
+}
+
+fn kindEql(self: target.Kind, other: target.Kind) bool {
+    return switch (self) {
+        .synthetic => |name| other == .synthetic and std.mem.eql(u8, name, other.synthetic),
+        else => std.meta.activeTag(self) == std.meta.activeTag(other),
     };
 }
 
@@ -201,6 +217,13 @@ test "authority and view parameters are read, not guessed" {
     try t.expect(d.param("sparkline") == null);
     try t.expectEqual(@as(usize, 5), d.count("rows", 2));
     try t.expectEqual(@as(usize, 2), d.count("cols", 2));
+
+    // View parameters are a request about presentation, never identity.
+    try t.expect(d.designates(parse("weft://here/dir/src?rows=99").?));
+    try t.expect(!d.designates(parse("weft://here/file/src").?));
+    try t.expect(!d.designates(parse("weft://alice/dir/src").?));
+    try t.expect(parse("weft://here/commit/abc").?.designates(parse("weft://here/commit/abc").?));
+    try t.expect(!parse("weft://here/commit/abc").?.designates(parse("weft://here/tag/abc").?));
 
     const peer = parse("weft://alice/file/a.zig").?;
     try t.expect(peer.authority.eql(.{ .peer = "alice" }));
