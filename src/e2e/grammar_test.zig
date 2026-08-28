@@ -12,6 +12,15 @@
 //! own children — the browser advertises the open/close route on a directory
 //! row and on nothing else — so the same key folds a directory open and stays
 //! silent on a file.
+//!
+//! Index — GATE 1: parity with the shipped grammars. GATE 2: Tab is bound,
+//! absent, or never text. GATE 3: an unbound key synthesizes nothing.
+//! GATE 4: a std-only transfer moves identity, it does not copy it. GATE 5:
+//! a structural entry rests structurally and a text entry's resting state
+//! comes back. Plus, unlabeled: binding explanation names intention and
+//! provider and runs nothing; capture/break-out round-trips a posture;
+//! a focused editable field reports `field`; an open interaction owns
+//! input first and the grammar sees exactly what it declines (§10.4).
 
 const std = @import("std");
 const t = std.testing;
