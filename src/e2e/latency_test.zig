@@ -345,6 +345,24 @@ test "e2e/latency: dispatch keystroke latency vs baseline" {
     var loaded: ?latency.Baseline = null;
     defer if (loaded) |b| std.zon.parse.free(gpa, b);
     if (!latency_options.record) {
+        // Same doctrine as the host and build-mode checks below: a measurement
+        // taken under conditions the baseline was not recorded under is not a
+        // regression, and reporting it as one trains everyone to ignore this
+        // gate.
+        //
+        // The `test` step runs this instrument in a process that has already
+        // executed ~159 other e2e tests; the baseline is recorded by the
+        // FILTERED `e2e-latency` binary, which runs this test and nothing else
+        // in a fresh process. That difference is not small and it is not
+        // scheduling noise: the same code measures ~37us of thread CPU alone
+        // and ~176us after the suite has run, because it is then measuring that
+        // process's accumulated allocator and cache state. `zig build test`
+        // depends on the isolated step, so the gate still runs on every `test`
+        // — it just runs where its numbers mean something.
+        if (!latency_options.isolated) {
+            log.info("measured, not gated: this binary ran the whole e2e suite first, and the baseline is recorded by the isolated `e2e-latency` binary — `zig build test` gates it there", .{});
+            return error.SkipZigTest;
+        }
         const baseline = latency.loadBaseline(gpa, baseline_path) catch |err| {
             log.warn("no baseline at {s} ({t}) — run `zig build e2e-latency -Drecord-latency=true` to record one", .{ baseline_path, err });
             return error.SkipZigTest;

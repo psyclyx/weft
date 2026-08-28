@@ -472,6 +472,17 @@ pub fn build(b: *std.Build) void {
     // `instrument_mod` below, a separate module the `test` step never builds.
     const compare_only_opts = b.addOptions();
     compare_only_opts.addOption(bool, "record", false);
+    // `test_mod` runs this instrument in a process that has already executed
+    // ~159 other e2e tests, so what it measures there is that process's
+    // accumulated allocator and cache state, not dispatch: the SAME code that
+    // measures ~37us in a fresh process measures ~176us of real CPU work after
+    // the suite has run. Comparing that against a baseline recorded by the
+    // FILTERED `e2e-latency` binary (fresh process, this test only) is a
+    // category error, and it is where this gate's intermittent failures came
+    // from. The measurement still runs here -- the code path stays exercised --
+    // but only the isolated binary may hold it to the baseline. `test_step`
+    // depends on `e2e-latency`, so `zig build test` still gates it, honestly.
+    compare_only_opts.addOption(bool, "isolated", false);
     test_mod.addOptions("latency_options", compare_only_opts);
 
     // The same record/compare doctrine for the popup-layout golden gate
@@ -741,6 +752,7 @@ pub fn build(b: *std.Build) void {
     configureTestModule(b, instrument_mod, stemma_dep, weft_mod);
     const latency_opts = b.addOptions();
     latency_opts.addOption(bool, "record", record_latency);
+    latency_opts.addOption(bool, "isolated", true);
     instrument_mod.addOptions("latency_options", latency_opts);
     const popup_layout_opts = b.addOptions();
     popup_layout_opts.addOption(bool, "record_popup_layout", record_popup_layout);
@@ -764,6 +776,10 @@ pub fn build(b: *std.Build) void {
     });
     const latency_step = b.step("e2e-latency", "Run (or, with -Drecord-latency=true, record) the dispatch-latency baseline");
     latency_step.dependOn(&runInstrument(b, instrument_tests, "latency").step);
+    // The real gate: `zig build test` runs the instrument in its OWN process,
+    // where the baseline it compares against was recorded. The copy inside the
+    // big e2e binary measures but does not assert (see `compare_only_opts`).
+    test_step.dependOn(latency_step);
     const popup_layout_step = b.step("e2e-popup-layout", "Run (or, with -Drecord-popup-layout=true, record) the caret-popup layout goldens");
     popup_layout_step.dependOn(&runInstrument(b, instrument_tests, "popup-layout").step);
 

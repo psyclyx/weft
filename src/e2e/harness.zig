@@ -389,12 +389,37 @@ pub const Editor = struct {
         return elapsed;
     }
 
+    /// This thread's CPU time — NOT the wall clock.
+    ///
+    /// The gate this feeds exists to catch dispatch that does more WORK:
+    /// "scales worse with provider count, allocates where it didn't, adds a
+    /// syscall" (see `latency_test.zig`'s header). Wall time answers a
+    /// different question — "was this box busy" — and answers it with whatever
+    /// else the machine was doing. `zig build` schedules test binaries across
+    /// every core, so a sibling binary is routinely running during these
+    /// samples; a p95 over wall time then reports the scheduler, not the code.
+    /// Measured that way, p95 intermittently tripled (91.9µs against a 28.4µs
+    /// baseline) with no change on the dispatch path at all — ~5% of samples
+    /// catching a deschedule is all it takes.
+    ///
+    /// Dispatch is synchronous and is fenced against blocking
+    /// (`task.assertMayBlock`), so thread CPU time and honest elapsed time are
+    /// the same quantity here whenever the box is idle — this narrows what is
+    /// measured, it does not soften it. Off-thread work is deliberately
+    /// excluded, exactly as it already was.
+    fn threadCpuNs() u64 {
+        var ts: std.os.linux.timespec = undefined;
+        const rc = std.os.linux.clock_gettime(.THREAD_CPUTIME_ID, &ts);
+        if (std.os.linux.errno(rc) != .SUCCESS) return core.task.nowNs();
+        return @as(u64, @intCast(ts.sec)) * std.time.ns_per_s + @as(u64, @intCast(ts.nsec));
+    }
+
     fn inputTimed(self: *Editor, spec_in: []const u8, commit: core.TextCommit) u64 {
         var kbuf: [256]u8 = undefined;
         const spec = core.Keymap.normalizeKey(&kbuf, spec_in);
-        const start = core.task.nowNs();
+        const start = threadCpuNs();
         self.application.input(spec, commit) catch {};
-        return core.task.nowNs() -| start;
+        return threadCpuNs() -| start;
     }
 
     /// Press each key of a space-separated chord in turn — the natural way to
