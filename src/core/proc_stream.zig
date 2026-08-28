@@ -13,20 +13,27 @@
 //! (`lsp`'s `on_activate`, fired inline on file open — see `wasm_host/proc.zig`'s
 //! `hProcSpawn`), which itself runs to completion on the frame thread — a wasm
 //! guest entry cannot yield mid-call. So the fork+exec (`std.process.spawn`)
-//! must NOT happen inline in `start()`: it moved onto the pool task that used
-//! to be just the reader, so `start()` only allocates and enqueues — the
-//! actual syscall (and any first-use page-fault/dynamic-link cost of a real
-//! server binary) happens off the frame thread. `spawn_mutex` guards the
-//! handoff: `send()` called before the child exists queues bytes into
-//! `pending_out`, flushed the instant the pool task publishes `child`.
+//! must NOT happen inline in `start()`: it moved onto the reader task, so
+//! `start()` only allocates and hands off — the actual syscall (and any
+//! first-use page-fault/dynamic-link cost of a real server binary) happens off
+//! the frame thread. `spawn_mutex` guards the handoff: `send()` called before
+//! the child exists queues bytes into `pending_out`, flushed the instant the
+//! reader task publishes `child`.
+//!
+//! RESIDENT, not pooled (`task.Pool.spawnResident`): the reader blocks for the
+//! child's whole lifetime, so a pooled worker would be pinned for the whole
+//! session. That made the number of concurrently-live peers a function of the
+//! worker count — two language servers plus an agent could starve every save
+//! behind them, and the next stream's fork+exec would never even start. A
+//! session's reader gets its own thread, so how many peers run is decided by
+//! the tools open, not by the pool's width.
 //!
 //! Teardown is the same UAF-safe discipline as `repl_session`, extended for a
-//! spawn that may still be in flight: `deinit` marks `canceled` (so a pool
-//! task that hasn't spawned yet reaps its own child immediately instead of
-//! entering the read loop), then spins — killing the child the moment it
-//! becomes visible — until the pool task (JOIN) finishes, then reaps. Every
-//! blocking step is off the hot path (`deinit` runs at shutdown / plugin
-//! unload).
+//! spawn that may still be in flight: `deinit` marks `canceled` (so a reader
+//! that hasn't spawned yet reaps its own child immediately instead of entering
+//! the read loop), then spins — killing the child the moment it becomes
+//! visible — until the reader finishes, then reaps. Every blocking step is off
+//! the hot path (`deinit` runs at shutdown / plugin unload).
 
 const std = @import("std");
 const Allocator = std.mem.Allocator;
@@ -34,20 +41,18 @@ const task = @import("task.zig");
 
 pub const SpawnError = error{ProcessSpawnFailed} || Allocator.Error;
 
-/// `deinit`'s bound on waiting for a saturated pool (see its doc): generous
-/// like `proc.zig`'s `toolAvailable` 5s bound (task #23) — something that
-/// should start near-instantly, loudly reported if it doesn't. Only
-/// approached when every pool worker is pinned in another stream's read
-/// loop for that child's whole lifetime (the pre-existing capacity property
-/// `spawnAndRead`'s doc names) — never in the common case.
+/// `deinit`'s bound on waiting for the reader to finish (see its doc):
+/// generous like `proc.zig`'s `toolAvailable` 5s bound (task #23) — a
+/// resident reader always starts, so this is the backstop for a child that
+/// refuses to die, loudly reported rather than spun on forever.
 const default_deinit_deadline_ns = 5 * std.time.ns_per_s;
 
 pub const ProcStream = struct {
     gpa: Allocator,
     io_threaded: std.Io.Threaded, // frame-thread io (stdin writes)
-    /// Valid only once `spawned` is true (guarded by `spawn_mutex`) — the pool
-    /// task that owns the fork+exec publishes it; nobody else may touch it
-    /// before that, and only the pool task touches it (read side) after.
+    /// Valid only once `spawned` is true (guarded by `spawn_mutex`) — the
+    /// reader task that owns the fork+exec publishes it; nobody else may touch it
+    /// before that, and only the reader task touches it (read side) after.
     child: std.process.Child = undefined,
     argv_cmd: []u8, // owned copy: the caller's `cmd` may not outlive `start()`
     cwd_copy: ?[]u8,
@@ -55,20 +60,20 @@ pub const ProcStream = struct {
     spawn_mutex: task.Mutex = .{},
     spawned: bool = false,
     spawn_failed: bool = false,
-    /// Set by `deinit` to tell the pool task, if the fork+exec hasn't landed
+    /// Set by `deinit` to tell the reader task, if the fork+exec hasn't landed
     /// yet, to reap its own child and return without entering the read loop —
     /// `deinit`'s kill-by-pid can't reach a child it never learned the pid of.
     canceled: std.atomic.Value(bool) = .init(false),
     /// Compiled into production (this is a real field, not `if (builtin.is_test)`
     /// cfg'd out) but only ever non-null via the test-only `startTesting` entry
     /// point below — production `start()` always passes `null`. Called on the
-    /// pool task immediately before `std.process.spawn` — lets a test hold the
+    /// reader task immediately before `std.process.spawn` — lets a test hold the
     /// fork+exec open deterministically (not via a wall-clock race) so it can
     /// prove `start()` already returned and `send()` already queued before the
     /// child exists.
     pre_spawn_hook: ?*const fn () void = null,
     /// Same shape as `pre_spawn_hook`, production-surface-but-test-only-set:
-    /// called on the pool task WHILE STILL HOLDING `spawn_mutex`, after the
+    /// called on the reader task WHILE STILL HOLDING `spawn_mutex`, after the
     /// queued flush's target (`s.child`) is set but before the flush write —
     /// lets a test prove a concurrent `send()` genuinely blocks on the mutex
     /// during the flush (mutual exclusion), not just that the bytes happen to
@@ -85,16 +90,16 @@ pub const ProcStream = struct {
     /// steady-state memory is one frame's worth of output, not the whole run.
     cursor: usize = 0,
     reader: task.Handle(void),
-    /// How long `deinit` waits for this stream's pool task to even START
-    /// (not finish — see `deinit`'s doc) before giving up. Per-instance so a
-    /// test can shrink it (`setDeinitDeadlineForTesting`) instead of paying
-    /// the real production bound; defaults to it otherwise.
+    /// How long `deinit` waits for this stream's reader to finish before
+    /// giving up (see `deinit`'s doc). Per-instance so a test can shrink it
+    /// (`setDeinitDeadlineForTesting`) instead of paying the real production
+    /// bound; defaults to it otherwise.
     deinit_deadline_ns: u64 = default_deinit_deadline_ns,
 
     /// Enqueue `cmd` (via `/bin/sh -c`, matching the other proc doors) to spawn
     /// as a persistent child with piped stdio, in `cwd` (null = weft's cwd).
     /// Returns immediately — allocation only. The fork+exec itself, and the
-    /// reader loop after it, run on the pool (see the file doc: a wasm guest
+    /// reader loop after it, run off the frame thread (see the file doc: a wasm guest
     /// export like `lsp`'s `on_activate` runs to completion on the frame
     /// thread, so it must never be the one blocking on a subprocess's exec).
     /// `environ` is the child's environment — pass weft's block so the child
@@ -104,7 +109,7 @@ pub const ProcStream = struct {
         return startImpl(gpa, pool, cmd, cwd, environ, null);
     }
 
-    /// Test-only: like `start`, but `hook` runs on the pool task right before
+    /// Test-only: like `start`, but `hook` runs on the reader task right before
     /// the fork+exec, so a test can gate it open/closed deterministically
     /// instead of racing a wall clock against a real subprocess spawn.
     pub fn startTesting(gpa: Allocator, pool: *task.Pool, cmd: []const u8, cwd: ?[]const u8, environ: std.process.Environ, hook: *const fn () void) SpawnError!*ProcStream {
@@ -112,13 +117,13 @@ pub const ProcStream = struct {
     }
 
     /// Test-only: install `mid_flush_hook` (see its doc). Only meaningful
-    /// while the pool task hasn't reached the flush yet — call this right
+    /// while the reader task hasn't reached the flush yet — call this right
     /// after `startTesting` with a still-closed `pre_spawn_hook` gate.
     pub fn setMidFlushHookForTesting(s: *ProcStream, hook: *const fn () void) void {
         s.mid_flush_hook = hook;
     }
 
-    /// Test-only: shrink `deinit`'s saturated-pool bound so a test can prove
+    /// Test-only: shrink `deinit`'s teardown bound so a test can prove
     /// it's bounded without paying the real (5s) production wait.
     pub fn setDeinitDeadlineForTesting(s: *ProcStream, ns: u64) void {
         s.deinit_deadline_ns = ns;
@@ -141,7 +146,7 @@ pub const ProcStream = struct {
             .reader = undefined,
         };
         errdefer s.io_threaded.deinit();
-        s.reader = pool.spawn(spawnAndRead, .{s}) catch return error.ProcessSpawnFailed;
+        s.reader = pool.spawnResident(spawnAndRead, .{s}) catch return error.ProcessSpawnFailed;
         return s;
     }
 
@@ -217,19 +222,13 @@ pub const ProcStream = struct {
         s.spawn_mutex.unlock();
         queued.deinit(s.gpa);
 
-        // STRUCTURAL NOTE (pre-existing, not introduced by the async-spawn
-        // change above): this blocks on the pool worker it's running on for
-        // the child's WHOLE LIFETIME — a persistent stream (LSP/ACP/REPL)
-        // monopolizes one worker from here until the child exits or is
-        // killed. `repl_session.zig` has the identical shape. N such live
-        // streams saturate a pool (default `min(4, cpus-1)`; the harness
-        // uses 2), so `start()`'s pool task for stream N+1 may never even
-        // begin — `deinit`'s bounded-wait fallback below exists because of
-        // this. The real fix is event/readiness-driven reads off
-        // `core/scheduler.zig`'s fd-wake machinery instead of a thread
-        // blocked in `fill`, so a live stream costs no dedicated worker —
-        // out of scope here (a scheduler-level rework, not this task's
-        // remit); named as a follow-up, not attempted.
+        // This blocks for the child's WHOLE LIFETIME, which is why the reader
+        // is RESIDENT (`task.Pool.spawnResident`) rather than a reader task: it
+        // costs a thread per live peer, never a share of the pool's width, so
+        // N language servers, agents and REPLs neither starve the pool nor
+        // each other. Readiness-driven reads off `core/scheduler.zig`'s
+        // fd-wake machinery would make a live stream cost no thread at all —
+        // a scheduler-level rework, named as a follow-up, not attempted.
         var mr_buf: std.Io.File.MultiReader.Buffer(2) = undefined;
         var mr: std.Io.File.MultiReader = undefined;
         mr.init(s.gpa, io, mr_buf.toStreams(), &.{ s.child.stdout.?, s.child.stderr.? });
@@ -276,7 +275,7 @@ pub const ProcStream = struct {
     /// Frame thread: write `bytes` to stdin verbatim (the caller frames its own
     /// protocol — for NDJSON it appends the newline). The spawn may still be
     /// in flight (fork+exec runs on the pool now) — in that case the bytes
-    /// queue in `pending_out` and the pool task flushes them the moment it
+    /// queue in `pending_out` and the reader task flushes them the moment it
     /// publishes `child`, so a request fired right after `start()` (the LSP
     /// guest's `initialize`, sent inline on `on_activate`) is never lost.
     pub fn send(s: *ProcStream, bytes: []const u8) void {
@@ -294,38 +293,29 @@ pub const ProcStream = struct {
 
     /// Kill the child, JOIN the reader (so it can't touch freed state), reap,
     /// and free. The single owner of teardown. The spawn may still be in
-    /// flight when this runs (e.g. a language switch away from a server that
-    /// hasn't finished forking yet): `canceled` tells the pool task to reap
-    /// its own child rather than enter the read loop, but there's a window
-    /// where the task publishes `child` right after we've already checked —
-    /// so this spins, re-checking and killing the instant `child` appears,
-    /// same as it would for a fully-spawned stream.
+    /// flight when this runs (e.g. closing a server that hasn't finished
+    /// forking yet): `canceled` tells the reader to reap its own child rather
+    /// than enter the read loop, but there's a window where it publishes
+    /// `child` right after we've already checked — so this spins, re-checking
+    /// and killing the instant `child` appears, same as it would for a
+    /// fully-spawned stream.
     ///
     /// BOUNDED, not unbounded (regression class 53aca18 closed elsewhere in
-    /// this codebase — `proc.zig`'s deadline-bounded drain — reopened here by
-    /// the async-spawn change unless guarded): `s.reader.poll()` only turns
-    /// non-null once the pool task RUNS TO COMPLETION, and a saturated pool
-    /// (every worker pinned in another live stream's `fill` loop — see
-    /// `spawnAndRead`'s structural note) may never even START it. With
-    /// nothing spawned there is no pid to kill, so the old unconditional
-    /// `while (poll() == null)` spun the FRAME THREAD forever — the exact
-    /// failure the old inline-fork code structurally could not have, since
-    /// an inline fork always eventually completes.
+    /// this codebase — `proc.zig`'s deadline-bounded drain): `s.reader.poll()`
+    /// only turns non-null once the reader RUNS TO COMPLETION, and a child
+    /// that ignores SIGKILL long enough (an unkillable D-state read) must not
+    /// buy an unbounded FRAME THREAD spin.
     ///
-    /// On deadline expiry: `canceled` is already set, so whenever the pool
-    /// finally does run this task, it self-reaps its own child and returns
-    /// without going near the read loop (the `canceled` branch above) — but
-    /// it still holds a live `*ProcStream` until then, so freeing `s` now
-    /// would be a use-after-free the moment the pool gets around to it. The
-    /// only safe move is `detach()` (abandon the result — whichever of the
-    /// pool / this call finishes second frees the task node) and LEAK `s`
-    /// itself: no further access, ever, from here, so nothing after this
-    /// point can race the eventually-running task. Loud (`log.warn`) because
-    /// a leak that never surfaces is worse than one that does. This should
-    /// never fire outside real pool exhaustion — see `spawnAndRead`'s
-    /// structural note for the actual fix (event-driven reads instead of a
-    /// worker blocked for a child's whole life); until that lands, this is
-    /// the backstop.
+    /// On deadline expiry: `canceled` is already set, so whenever the reader
+    /// does finish it self-reaps its own child and returns without going near
+    /// the read loop (the `canceled` branch above) — but it still holds a live
+    /// `*ProcStream` until then, so freeing `s` now would be a use-after-free
+    /// the moment it gets there. The only safe move is `detach()` (abandon the
+    /// result — whichever of the reader / this call finishes second frees the
+    /// task node) and LEAK `s` itself: no further access, ever, from here, so
+    /// nothing after this point can race the still-running reader. Loud
+    /// (`log.warn`) because a leak that never surfaces is worse than one that
+    /// does.
     pub fn deinit(s: *ProcStream) void {
         const gpa = s.gpa;
         s.canceled.store(true, .release);
@@ -404,7 +394,7 @@ test "proc_stream: start() defers the fork+exec — a seam, not a wall-clock rac
     // `procSpawn` and runs to completion on the frame thread — so the actual
     // fork+exec (and, for a real server, its binary's page-in/dynamic-link
     // cost) must not happen inside `start()`. `pre_spawn_hook` proves this
-    // WITHOUT racing a clock: it parks the pool task immediately before
+    // WITHOUT racing a clock: it parks the reader task immediately before
     // `std.process.spawn`, so `isSpawned()` is guaranteed false below no
     // matter how the OS schedules threads — there's a closed gate in the way,
     // not a hope that our check runs first.
@@ -455,7 +445,7 @@ test "proc_stream: canceled before the spawn lands reaps its own child — no ha
     // Mirrors what `deinit` actually does in production: it stamps
     // `canceled` as its very FIRST action, before it has any idea whether a
     // child exists yet (e.g. a language switch away from a server whose
-    // fork+exec is still in flight). The pool task must notice, kill+reap
+    // fork+exec is still in flight). The reader task must notice, kill+reap
     // the child ITSELF (deinit never learned its pid), and return without
     // ever publishing `child` — so `deinit`'s own cleanup, which gates every
     // touch of `s.child` behind `spawned`, never reads that (deliberately
@@ -471,7 +461,7 @@ test "proc_stream: canceled before the spawn lands reaps its own child — no ha
     s.canceled.store(true, .release); // what deinit() does first
     gate_cancel_race.store(true, .release); // let the (about-to-be-aborted) spawn proceed
 
-    // Must return promptly: a hang here means the pool task never noticed
+    // Must return promptly: a hang here means the reader task never noticed
     // `canceled` and is stuck in the read loop; a crash means it touched
     // `s.child` (or `deinit` did) despite `spawned` staying false.
     s.deinit();
@@ -572,77 +562,59 @@ test "proc_stream: the queued flush happens under spawn_mutex — a concurrent s
     try t.expectEqualStrings("AB", out[0..got]);
 }
 
-test "proc_stream: deinit on a saturated pool is bounded and leaves the pool sound (not an unbounded frame-thread spin)" {
-    // The regression this guards: `deinit`'s old `while (reader.poll() ==
-    // null) spin` had no deadline. `s.reader.poll()` only turns non-null
-    // once the pool WORKER actually runs `spawnAndRead` to completion — and
-    // `spawnAndRead` blocks on its worker for a live child's WHOLE lifetime
-    // (the `mr.fill` loop). So N persistent streams (LSP+ACP+REPL) can
-    // saturate a small pool, and the (N+1)th stream's `spawnAndRead` then
-    // never even STARTS: `spawned` stays false forever, so `deinit`'s
-    // kill-by-pid branch has nothing to kill, and the old code spun the
-    // FRAME THREAD forever. The old inline-fork code structurally couldn't
-    // have this failure (a fork always eventually completes) — this is a
-    // regression the async-spawn change introduced unless guarded.
-    //
-    // Uses `std.heap.page_allocator`, not `t.allocator`: the fix's only safe
-    // answer to "the pool task might still be running when the deadline
-    // hits" is to LEAK the timed-out stream (never free under a pending
-    // task — freeing here would itself be the use-after-free once that task
-    // finally runs). That leak is the intended, tested behavior, not a bug
-    // to report — `t.allocator`'s leak checker would fail the test for
-    // exercising exactly the safety property under test.
-    const gpa = std.heap.page_allocator;
-    var pool = try task.Pool.init(gpa, .{ .threads = 1 }); // one worker: trivial to saturate
+test "proc_stream: live peers outnumber the pool's workers — none starves, and the pool stays free for ordinary work" {
+    // The class this closes: the reader blocks for its child's WHOLE life, so
+    // while readers were pool TASKS, the number of concurrently-live peers was
+    // capped by the worker count. Past it, a stream's fork+exec never even
+    // STARTED (`spawned` false forever, nothing to kill, `deinit` reduced to a
+    // bounded-leak backstop) — which is exactly what a second language server
+    // plus an agent asks for. Residency (`task.Pool.spawnResident`) makes the
+    // cap disappear: here three persistent peers run on a ONE-worker pool, and
+    // that worker is still free for a bounded task afterwards.
+    const gpa = t.allocator;
+    var pool = try task.Pool.init(gpa, .{ .threads = 1 });
     defer pool.deinit();
 
-    // Stream 1 monopolizes the sole worker: `read x` (a sh builtin — no
-    // PATH needed under `.empty`) blocks forever with nothing sent to it and
-    // nothing closing its stdin, so `spawnAndRead`'s `fill` loop never sees
-    // output OR EOF — exactly the "pinned for the child's whole life" shape.
-    var hog = try ProcStream.start(gpa, pool, "read x", null, .empty);
-    {
-        const deadline = task.nowNs() + 5 * std.time.ns_per_s;
-        while (!hog.isSpawned() and task.nowNs() < deadline) std.atomic.spinLoopHint();
-        try t.expect(hog.isSpawned()); // the sole worker is now pinned here
+    // `read x; printf` (sh builtins — no PATH needed under `.empty`) parks each
+    // child on stdin: pinned for its whole life, the persistent-peer shape.
+    var peers: [3]*ProcStream = undefined;
+    for (&peers) |*p| p.* = try ProcStream.start(gpa, pool, "read x; printf '%s' \"$x\"", null, .empty);
+    defer for (peers) |p| p.deinit();
+
+    for (peers, 0..) |p, i| {
+        var line: [4]u8 = undefined;
+        p.send(std.fmt.bufPrint(&line, "p{d}\n", .{i}) catch unreachable);
+    }
+    // Every peer answers — including the ones past the worker count, which
+    // under the pooled reader could not have spawned at all.
+    for (peers, 0..) |p, i| {
+        var out: [8]u8 = undefined;
+        var got: usize = 0;
+        const answered = task.nowNs() + 5 * std.time.ns_per_s;
+        while (got < 2 and task.nowNs() < answered) {
+            got += p.read(out[got..]);
+            if (got < 2) std.atomic.spinLoopHint();
+        }
+        var want: [4]u8 = undefined;
+        try t.expectEqualStrings(std.fmt.bufPrint(&want, "p{d}", .{i}) catch unreachable, out[0..got]);
     }
 
-    // Stream 2's `spawnAndRead` is queued but can never be popped — the pool
-    // has no free worker, and won't until `hog` is torn down.
-    var starved = try ProcStream.start(gpa, pool, "read x", null, .empty);
-    starved.setDeinitDeadlineForTesting(200 * std.time.ns_per_ms); // don't pay the real 5s bound
-
-    const t0 = task.nowNs();
-    starved.deinit(); // must return near the shrunk deadline, never hang
-    const elapsed_ms = (task.nowNs() - t0) / std.time.ns_per_ms;
-    try t.expect(elapsed_ms < 2000); // generous bound above the 200ms deadline, not a perf gate
-    try t.expect(!starved.isSpawned()); // confirms it really did time out unspawned, not race to a real answer
-
-    // The pool itself is still sound afterward: freeing the hog frees the
-    // worker, and a THIRD stream started fresh spawns normally — proving the
-    // saturation was real (not e.g. a broken pool) and that leaking
-    // `starved` didn't wedge anything else.
-    hog.deinit();
-    var third = try ProcStream.start(gpa, pool, "read x; printf '%s' \"$x\"", null, .empty);
-    defer third.deinit();
-    third.send("ok\n");
-    var out: [8]u8 = undefined;
-    var got: usize = 0;
+    // The sole worker was never borrowed by any of them: ordinary bounded work
+    // still runs while all three peers are live.
+    var work = try pool.spawn(pooledSquare, .{7});
     const deadline = task.nowNs() + 5 * std.time.ns_per_s;
-    while (got < 2 and task.nowNs() < deadline) {
-        const n = third.read(out[got..]);
-        got += n;
-        if (n == 0) std.atomic.spinLoopHint();
+    while (task.nowNs() < deadline) {
+        if (work.poll()) |value| {
+            try t.expectEqual(@as(u64, 49), value);
+            return;
+        }
+        std.atomic.spinLoopHint();
     }
-    try t.expectEqualStrings("ok", out[0..got]);
+    return error.PoolNeverRanBoundedWork;
+}
 
-    // With one worker, `starved`'s (detached) task and `third`'s share the
-    // same FIFO queue: `starved`'s already ran to completion, self-reaping
-    // its own child via the `canceled` branch in `spawnAndRead` and never
-    // touching `starved` again, before `third`'s could even start — proven
-    // by `third` having answered above at all. `starved` itself is
-    // intentionally never freed (see `deinit`'s doc) — leaked on purpose, on
-    // `page_allocator`, not `t.allocator`.
+fn pooledSquare(x: u64) u64 {
+    return x * x;
 }
 
 test {

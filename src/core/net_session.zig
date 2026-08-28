@@ -72,7 +72,7 @@ pub const Session = struct {
         } else {
             s.conn = .{ .plain = net.Sock.connect(gpa, hostport) catch return error.ConnectFailed };
         }
-        s.reader = try pool.spawn(readLoop, .{s});
+        s.reader = try pool.spawnResident(readLoop, .{s});
         return s;
     }
 
@@ -81,7 +81,7 @@ pub const Session = struct {
         const s = try alloc(gpa, ctx, plugin, buf);
         errdefer free(s);
         s.conn = .{ .plain = net.Sock.fromFd(fd) };
-        s.reader = try pool.spawn(readLoop, .{s});
+        s.reader = try pool.spawnResident(readLoop, .{s});
         return s;
     }
 

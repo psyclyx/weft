@@ -166,7 +166,8 @@ pub const Pool = struct {
     }
 
     /// Submit `f(args...)` to the pool. Lock-free; safe on the hot path.
-    /// The returned handle is poll-only.
+    /// The returned handle is poll-only. For BOUNDED work — a save, a parse,
+    /// a directory walk — that finishes and gives its worker back.
     pub fn spawn(
         self: *Pool,
         comptime f: anytype,
@@ -176,6 +177,28 @@ pub const Pool = struct {
         const c = try self.gpa.create(Container);
         c.* = .{ .node = .{ .pool = self, .runFn = Container.run, .destroyFn = Container.destroy }, .args = args };
         self.push(&c.node);
+        return .{ .pool = self, .node = &c.node, .result = &c.result };
+    }
+
+    /// Run `f(args...)` on its OWN thread, with the same poll-only handle.
+    /// For a task that blocks for as long as its SUBJECT lives — a session's
+    /// reader loop, pinned on its peer's stdout until the peer exits. Such a
+    /// task is not work a pool can schedule around: each one holds a worker
+    /// for the whole session, so a handful of language servers, agents and
+    /// REPLs would starve every save and gather behind them, and the one
+    /// past the last worker would never start at all. Residency makes the
+    /// number of live sessions independent of the worker count.
+    pub fn spawnResident(
+        self: *Pool,
+        comptime f: anytype,
+        args: std.meta.ArgsTuple(@TypeOf(f)),
+    ) (Allocator.Error || std.Thread.SpawnError)!Handle(ReturnOf(f)) {
+        const Container = TaskContainer(f);
+        const c = try self.gpa.create(Container);
+        errdefer self.gpa.destroy(c);
+        c.* = .{ .node = .{ .pool = self, .runFn = Container.run, .destroyFn = Container.destroy }, .args = args };
+        const thread = try std.Thread.spawn(.{}, runResident, .{&c.node});
+        thread.detach(); // the handle, not the join, is how a caller waits
         return .{ .pool = self, .node = &c.node, .result = &c.result };
     }
 
@@ -224,6 +247,10 @@ pub const Pool = struct {
 
 fn ReturnOf(comptime f: anytype) type {
     return @typeInfo(@TypeOf(f)).@"fn".return_type.?;
+}
+
+fn runResident(node: *Node) void {
+    node.runFn(node);
 }
 
 fn TaskContainer(comptime f: anytype) type {

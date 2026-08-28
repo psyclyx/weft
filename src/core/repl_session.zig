@@ -58,7 +58,7 @@ pub const Session = struct {
             .stderr = .pipe,
             .cwd = if (cwd) |p| .{ .path = p } else .inherit,
         }) catch return error.ProcessSpawnFailed;
-        s.reader = try pool.spawn(readLoop, .{s});
+        s.reader = try pool.spawnResident(readLoop, .{s});
         return s;
     }
 
