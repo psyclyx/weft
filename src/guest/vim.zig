@@ -1013,7 +1013,7 @@ fn opCancel() void {
 fn opLine() void {
     // `yy`/`dd`/`cc` on a row that offers the transfer word: the capture is
     // the standard vocabulary's, while `dd`'s other half FLAGS the row for
-    // removal — dired's retained delete, not a removal of the register's
+    // removal — the files view's retained delete, not a removal of the register's
     // content — which is the view's own `selection-delete` route, reached by
     // the name a key would reach it by.
     if (op_copies and transferred(std_yank, semantic_action.copy)) {

@@ -154,11 +154,14 @@ pub fn hBreakpointOffsets(data: ?*anyopaque, caller: *wasm.Caller, args: []const
     const doc = p.activeCtx().document() orelse return;
     var offs: [breakpoints.max]usize = undefined;
     const n = breakpoints.offsets(&p.activeCtx().caps.layers, doc, &offs);
-    var buf: [breakpoints.max * 12]u8 = undefined;
+    // One decimal offset plus its separator per breakpoint; a document big
+    // enough to need wider ones stops at the buffer rather than past it.
+    var buf: [breakpoints.max * 21]u8 = undefined;
     var w: usize = 0;
     for (offs[0..n]) |o| {
-        var num: [16]u8 = undefined;
+        var num: [20]u8 = undefined;
         const s = std.fmt.bufPrint(&num, "{d}", .{o}) catch continue;
+        if (w + s.len + @intFromBool(w != 0) > buf.len) break;
         if (w != 0) {
             buf[w] = ',';
             w += 1;

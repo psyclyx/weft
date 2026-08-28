@@ -3158,6 +3158,17 @@ test "quickjs: two ACP conversations stream into their own transcripts, and a pe
             }
             return false;
         }
+        /// Tick until the head's picker opens. Bounded: a pick that never
+        /// arrives is a failure, never a hung run.
+        fn untilPick(p: *JsPlugin, e: *Env) bool {
+            const deadline = task.nowNs() + 5 * std.time.ns_per_s;
+            while (task.nowNs() < deadline) {
+                if (e.head.pick.active) return true;
+                _ = p.tick();
+                std.atomic.spinLoopHint();
+            }
+            return false;
+        }
         /// Tick for a bounded stretch, asserting `needle` never shows up.
         fn absent(p: *JsPlugin, e: *Env, gpa2: Allocator, name: []const u8, needle: []const u8) bool {
             const deadline = task.nowNs() + 300 * std.time.ns_per_ms;
@@ -3177,7 +3188,7 @@ test "quickjs: two ACP conversations stream into their own transcripts, and a pe
     // (from the BACKGROUND output handler, through the nested-run door).
     _ = try command.run(&env.commands, &env.ctx, "start-a", &.{});
     try t.expect(H.until(plugin, &env, gpa, "*agent*", "alpha one"));
-    while (!env.head.pick.active) _ = plugin.tick();
+    try t.expect(H.untilPick(plugin, &env));
 
     // Agent two: a SECOND instance — its own buffer, its own model. Its
     // permission request queues behind agent one's open pick.
