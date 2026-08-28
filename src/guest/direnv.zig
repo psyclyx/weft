@@ -28,10 +28,6 @@ const cmds = [_]Cmd{
 /// `status`, an `allow`) must not be read as an environment.
 const apply_token: u32 = 1;
 
-/// Scratch for the overlay, in the table's own wire shape: NUL-separated
-/// `KEY=VALUE`. Static — a wasm guest has no allocator and a small stack.
-var env_buf: [1 << 16]u8 = undefined;
-
 export fn describe() void {
     for (cmds) |c| weft.declareCommand(c.name);
     weft.requestPerm(.proc);
@@ -79,23 +75,33 @@ fn apply() void {
 /// the place the command was run in, not wherever focus has since moved.
 export fn on_fill_token(token: u32) void {
     if (token != apply_token) return;
-    var w: usize = 0;
     const total = weft.byteLen();
+    if (total == 0) return weft.echo("direnv: nothing to apply here");
+
+    // Sized to the environment, not to a guess about it. A fixed buffer here
+    // would silently truncate a large one — and half an environment is worse
+    // than none: the child gets some of the project's PATH and none of its
+    // toolchain, then fails somewhere unrelated. A guest has a real growable
+    // allocator (`weft.allocator`), so the limit has no reason to exist.
+    const vars = weft.allocator.alloc(u8, total) catch
+        return weft.echo("direnv: environment too large to apply");
+    defer weft.allocator.free(vars);
+
+    var w: usize = 0;
     var base: usize = 0;
-    while (base < total and w < env_buf.len) {
+    while (base < total) {
         const chunk = weft.slice(base, total);
         if (chunk.len == 0) break;
         for (chunk) |b| {
-            if (w >= env_buf.len) break;
             // Chunk boundaries are safe to ignore: this is a byte-for-byte
             // copy with one substitution, so a record split across two reads
             // rejoins itself.
-            env_buf[w] = if (b == '\n') 0 else b;
+            vars[w] = if (b == '\n') 0 else b;
             w += 1;
         }
         base += chunk.len;
     }
     if (w == 0) return weft.echo("direnv: nothing to apply here");
-    if (weft.envPublish(env_buf[0..w]) < 0) return weft.echo("direnv: could not apply");
+    if (weft.envPublish(vars[0..w]) < 0) return weft.echo("direnv: could not apply");
     weft.echo("direnv: applied to this project");
 }
