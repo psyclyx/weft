@@ -695,3 +695,25 @@ was fixed.
 
 **57 gates** were added, each one verified to fail without the change it
 guards. `git diff main..place-arc | grep '^+test "'` is the list.
+
+### 10.1 The authority asymmetry, resolved the other way round
+
+§4 opened with `wl_fs_list` taking an authority while `fs_read`/`fs_write`/
+`fs_exists` did not, and called that asymmetry "the disease in one file" — the
+generic spelling available and applied once. The obvious fix was to give the
+other doors an authority parameter too.
+
+Places made that the wrong fix. A grant's bounds now default to the dispatching
+place, and **a place carries its locus**, so the door already knows which
+authority it is acting under without being told. Adding a parameter would hand
+a guest the ability to *name* an authority it is not in — wider than what it
+has, and precisely the local-first spelling §4.1 removes.
+
+So the resolution inverts: `wl_fs_list`'s explicit `auth` is now the odd one
+out rather than the model. It predates places and is the only door that lets a
+guest ask about somewhere it is not. Whether it should lose the parameter is a
+real question and deliberately left open — it is the async remote-listing path,
+and answering it wants the peer-fs story, not this document.
+
+What did land here: those doors' contract docs said "cwd-relative", which
+confined-by-default made false. Corrected.
