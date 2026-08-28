@@ -168,13 +168,64 @@ Not a prohibition. A gradient:
 
 - The place/target form is the **default and cheapest** spelling.
 - Raw-path access stays available under an explicit grant, **confined by
-  default**. Today `.none` (fully unconfined, falling through to
-  `file.readAlloc`) is the default and `fs_root` is opt-in. That is backwards.
+  default**. `.none` (fully unconfined, falling through to `file.readAlloc`)
+  used to be the default and `fs_root` the opt-in. That was backwards.
 - Bucket 1 is carved out **unconditionally**: no grant, however broad, reaches
   the module cache or the keystores. The one place a denylist is right, because
   those paths are program-computed and finite.
 
-**LANDED (the carve-out only; "confined by default" above is still open).**
+**LANDED (confined by default).** The absent limit now means THE DISPATCHING
+PLACE, not the filesystem. `grants.Limit` gained a `.place` variant, and it is
+the only one that carries no value — deliberately. `.fs_root` bakes a path at
+grant time and says the same thing wherever the plugin runs; `.place` names
+nothing and is resolved AT THE DOOR from `Context.place()`, so one grant means
+"the project you are acting in" and follows the user from project to project
+with no config edit. `grants.defaultLimit` is the single decision point, read
+by BOTH minters — `mintGrantHandles` (the `describe()` boolean baseline) and
+`manifest.reconcileGrants` (a `weft.grant` with no `root`) — so config and the
+handshake cannot drift on what saying nothing means. A place with no local
+directory (a peer, a synthetic container) resolves to no root, and nothing is
+in bounds: a confinement that cannot name its root refuses rather than widening.
+
+Once resolved it is confined by the SAME two layers `.fs_root` already had —
+`rootRelative` then `RootedFs` — with one honest difference stated as a field
+(`Within.place_rooted`) rather than left implicit: a relative path under a
+`.fs_root` grant must be SPELLED inside the authored root, while under a place
+it simply IS place-relative (`weft-notes.md` means this project's notes file).
+In the degenerate `.process` place that is byte-identical to the old
+cwd-relative reading. The place's directory comes from `wasm_host/plugin.zig`'s
+`placeDirectory`, the same reading `wl_place_root`/`wl_place_has` answer with,
+so what a guest is TOLD about and what it is CONFINED to cannot disagree.
+
+**Unconfined is now a sentence someone wrote**: `weft.grant(who, cap, { root:
+"/" })`, which `grants.limitForRoot` normalizes to `Limit.none` — one
+representation of "everything", in the approval diff, unreachable by omission.
+Three consumers hold it in the shipped config, and each is genuine user
+content rather than an oversight:
+
+- **`files`** — the browser goes wherever you point it, including out of the
+  project. Its typed target doors need the unconfined form *specifically*:
+  they prove authority against a provider root rather than a path, so there is
+  nothing for a path-shaped limit to be checked against
+  (`semantic_fs.requireUnrestricted`). Narrow it and the browser refuses to
+  leave. Both `fs_read` and `fs_write`, in every shipped config that loads it.
+- **`notes` / `snippets`** — nothing at all. Their files are named relative to
+  the place (`weft-notes.md`, `weft-snippets.txt`, or an argument), so the
+  default confinement is exactly right and makes them per-project for free.
+  This is the case the "very likely `{root: <configured dir>}`" guess got
+  wrong in the good direction: there was no configured directory to root at.
+- **`acp`** (JS plane) — keeps its two bare `weft.grant` lines, which now mean
+  the agent reads and writes inside the conversation's project and not yours.
+
+Gates: `wasm_abi/tests.zig` drives the `fs_limit` guest through a real
+membrane — in-place relative and absolute both allowed, out-of-place absolute
+and both flavours of `..` climb trapped, then the same row widened to
+`{root: "/"}` reaching `/etc` while its `fs_write` sibling stays confined (one
+capability widened is not both). `e2e/project_test.zig` is the two-project
+half: the same plugin, the same grant, no config change — reads the project it
+is focused in and traps on its sibling, and the answers swap when focus does.
+
+**LANDED (the carve-out).**
 `core/machinery.zig` owns the four locations and asks each store's OWN
 resolver for them — `wasm.Engine.cacheDir`, `kv_file.stateDir`,
 `identity.configPath`, `known_peers.configPath` — so moving a store moves the
@@ -185,9 +236,11 @@ against both: neither a traversal nor a symlink walks in.
 
 Enforcement is `wasm_host/fs.zig`'s `gate`, which asks three questions in
 order — is this machinery (unconditional), is the capability possessed, how
-wide is it — and **returns the `Limit`**. That return is the structure: a
-body in that file has no other way to obtain a limit, so "an fs door that
-forgot the carve-out" is not a shape the file can express. All five doors
+wide is it HERE — and **returns the resolved bounds**. That return is the
+structure: a body in that file has no other way to obtain bounds, so "an fs
+door that forgot the carve-out" is not a shape the file can express. It is
+also why `.place` can never reach a body: the gate resolves it into a root
+first, so no body can forget to. All five doors
 (`fsRead`/`fsWrite`/`fsAppend`/`fsExists`/`fsList`) go through it, as does
 `pathAllowed`, the descriptor-free variant `quickjs.zig`'s `cFileRead`
 live-buffer half and `cAgentWrite` use — one gate, both planes, per §4.1a.
@@ -200,7 +253,9 @@ Two honest edges. It is a check-then-use, not the atomic `openat2` the
 plugin that can swap a symlink mid-call could in principle race it; such a
 plugin holds `proc`, which reads the cache without consulting this at all.
 And the carve-out is bucket 1 only: `~/.ssh` is content, and confining THAT is
-the "confined by default" change above, not this one.
+the "confined by default" change above — which has now landed, so `~/.ssh` is
+out of reach of every plugin that did not have `{root: "/"}` written down for
+it, by the ordinary limit rather than by this list.
 
 ### 4.1a A JS plugin must not be ABLE to be a different kind of plugin
 
@@ -514,6 +569,12 @@ restart.
 **Wave 6 — Close the standing list.** ABI symmetry (an authority parameter on
 `fs_read`/`fs_write`/`fs_exists`, as `fs_list` already has); grants confined by
 default; the unconditional machinery carve-out.
+
+*Landed:* the machinery carve-out (§4.1), and **grants confined by default**
+(§4.1's "LANDED (confined by default)") — an absent limit is `Limit.place`,
+resolved at the door, and unconfined is `{root: "/"}` written down. Still
+outstanding in this wave: the authority parameter on the three doors that
+lack one.
 
 *Pulled forward out of Wave 6:* the `fsExists` confinement hole is closed — its
 `.fs_root` branch now stats the confined descriptor (`RootedFs.kind`) instead of
