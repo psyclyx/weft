@@ -309,6 +309,20 @@ fn cSetMode(ctx: *Context, args: struct { mode: []const u8 }) anyerror!Value {
     return ok;
 }
 
+/// The BREAK-OUT half of `capture` (§10.4). A grammar binds a chord to this
+/// and keeps it bound in every state, which is what makes capture a state
+/// you can always leave: it drops the entry's capture declaration, restoring
+/// whatever the capture displaced, and rests the head where the restored
+/// posture says. On an entry that is not capturing it does nothing — the
+/// chord is pressed far more often than it applies.
+fn cPostureBreakOut(ctx: *Context, args: struct {}) anyerror!Value {
+    _ = args;
+    if (!ctx.buffer().breakOutOfCapture()) return ok;
+    const resting = ctx.buffers.restingModeFor(ctx.posture());
+    if (resting.len > 0) try ctx.capturedCtx().setMode(resting);
+    return ok;
+}
+
 fn cQuit(ctx: *Context, args: struct {}) anyerror!Value {
     _ = args;
     ctx.quit.* = true;
@@ -572,6 +586,7 @@ const table = [_]command.Command{
     command.define("clear-selection", "Drop the selection.", cClearSelection),
     command.define("undo-barrier", "Seal the undo unit; the next edit starts a new one.", cUndoBarrier),
     command.define("set-mode", "Switch the keymap mode.", cSetMode),
+    command.define("posture-break-out", "Leave a capture posture for the one it displaced.", cPostureBreakOut),
     command.define("quit", "Exit the editor.", cQuit),
     command.define("insert-newline", "Insert a line break at the cursor.", cInsertNewline),
     command.define("insert-tab", "Insert a tab at the cursor.", cInsertTab),

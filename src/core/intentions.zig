@@ -43,6 +43,10 @@ pub const std_intentions = [_]Intention{
     .{ .name = "std.history.undo", .doc = "Reverse the most recent reversible change." },
     .{ .name = "std.history.redo", .doc = "Reapply the most recently undone change." },
     .{ .name = "std.persistence.save", .doc = "Commit pending changes to durable storage." },
+    // The one intention a grammar must keep bound in EVERY state (§10.4): a
+    // `capture` presentation takes raw input, so the way back cannot be the
+    // presentation's to grant.
+    .{ .name = "std.input.break-out", .doc = "Leave a capture posture for the one it displaced." },
 
     // Abstract gesture roles (§10.2): input grammars may bind these directly
     // where no domain-specific intention applies.

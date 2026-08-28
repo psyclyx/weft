@@ -133,18 +133,26 @@ pub const Invokers = struct {
 /// table IS the provider: authority stays where it was, at the command door
 /// (`command.run` → `command.edit`), exactly as when the same builtin is
 /// bound by name.
-const CoreOffer = struct { intention: []const u8, command: []const u8 };
+const CoreOffer = struct {
+    intention: []const u8,
+    command: []const u8,
+    /// Whether the offer needs an editable text endpoint to mean anything.
+    /// The EDITING offers do; the break-out (§10.4) is about how the entry
+    /// takes input, so it stands exactly where text does not.
+    needs_text: bool = true,
+};
 
 const core_offers = [_]CoreOffer{
     .{ .intention = "std.history.undo", .command = "undo" },
     .{ .intention = "std.history.redo", .command = "redo" },
     .{ .intention = "std.persistence.save", .command = "save" },
     .{ .intention = "std.editing.insert-line-break", .command = "insert-newline" },
+    .{ .intention = "std.input.break-out", .command = "posture-break-out", .needs_text = false },
 };
 
-/// Every core offer needs an editable text endpoint. An editor-less entry
-/// gets `disabled` rather than absence, so a fallback list REPORTS the
-/// obstacle instead of quietly running its next arm (§9.3, §10.2).
+/// A text-needing core offer on an editor-less entry gets `disabled` rather
+/// than absence, so a fallback list REPORTS the obstacle instead of quietly
+/// running its next arm (§9.3, §10.2).
 const no_text: catalog_mod.Availability = .{ .disabled = .{
     .reason = "no-text",
     .message = "this entry holds no text",
@@ -218,7 +226,8 @@ pub const Plane = struct {
     }
 
     fn publishCore(self: *Plane) Allocator.Error!void {
-        for (&self.rows) |*row| row.availability = if (self.has_text) .enabled else no_text;
+        for (&self.rows, core_offers) |*row, offer|
+            row.availability = if (self.has_text or !offer.needs_text) .enabled else no_text;
         self.revision += 1;
         _ = try self.catalog.publish(.{
             .provider = self.provider,
