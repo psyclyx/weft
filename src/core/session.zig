@@ -14,7 +14,8 @@
 //! - `session/requests.zig`  — class-2 request ids with a deadline each
 //!                             (a namespace).
 //! - `session/remote_fs.zig` — `BlobServer`/`serveBase` (host serving),
-//!                             `RemoteFile`/`RemoteFs`, `BlobOp` (a namespace).
+//!                             `RemoteFile`/`RemoteFs`/`RemoteLsp`, `BlobOp`
+//!                             (a namespace).
 //! - `session/publication.zig` — the typed export set a quad publishes
 //!                             (replica + endpoint surfaces), its wire
 //!                             descriptor, and the frame→surface gate.
@@ -60,6 +61,7 @@ pub const BlobOp = remote_fs.BlobOp;
 pub const BlobServer = remote_fs.BlobServer;
 pub const RemoteFile = remote_fs.RemoteFile;
 pub const RemoteFs = remote_fs.RemoteFs;
+pub const RemoteLsp = remote_fs.RemoteLsp;
 
 pub const publication = @import("session/publication.zig");
 pub const Publication = publication.Publication;
