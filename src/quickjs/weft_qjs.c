@@ -109,8 +109,10 @@ __attribute__((import_module("weft"), import_name("qjs_file_read")))
 extern int host_file_read(const char *path, int path_len, char *out, int cap);
 // Write a file's content as an attributed AGENT peer edit to its buffer (opened
 // if needed) — the agent's fs/write_text_file, so the edit is gated + undoable.
+// Returns 0, or WEFT_DENIED when `fs_write` is unheld or the path falls
+// outside the grant's root — a refusal must never look like a write.
 __attribute__((import_module("weft"), import_name("qjs_file_write")))
-extern void host_file_write(const char *path, int path_len, const char *content, int content_len, const char *agent, int agent_len);
+extern int host_file_write(const char *path, int path_len, const char *content, int content_len, const char *agent, int agent_len);
 // The text of the active buffer's current line (at the cursor) — a prompt line.
 __attribute__((import_module("weft"), import_name("qjs_line_text")))
 extern int host_line_text(char *out, int cap);
@@ -854,10 +856,12 @@ static JSValue js_file_write(JSContext *ctx, JSValueConst this_val,
     const char *path = JS_ToCStringLen(ctx, &pl, argv[0]);
     const char *content = JS_ToCStringLen(ctx, &cl, argv[1]);
     const char *agent = (argc >= 3) ? JS_ToCStringLen(ctx, &al, argv[2]) : NULL;
-    if (path && content) host_file_write(path, (int)pl, content, (int)cl, agent ? agent : "", (int)al);
+    int n = 0;
+    if (path && content) n = host_file_write(path, (int)pl, content, (int)cl, agent ? agent : "", (int)al);
     JS_FreeCString(ctx, path);
     JS_FreeCString(ctx, content);
     if (agent) JS_FreeCString(ctx, agent);
+    if (n == WEFT_DENIED) return weft_throw_denied(ctx, "fileWrite");
     return JS_UNDEFINED;
 }
 

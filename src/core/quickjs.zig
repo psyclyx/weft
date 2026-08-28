@@ -1224,16 +1224,36 @@ const agent_peer = "agent";
 /// attributed, selectively-undoable edit (the harness payoff), not a raw disk
 /// write. Opens (binds) the path if it isn't already a buffer; the user saves.
 /// A whole-file write, so the buffer's whole content is replaced.
+///
+/// `cFileRead`'s WRITE twin, gated identically: possession first
+/// (`fs_write`), then `pathWithinLimit` — the lexical layer, because like
+/// `cFileRead`'s buffer half this door has no descriptor to root against
+/// (it never touches the filesystem; the user's later save does). Without
+/// both, `weft.grant("acp", "fs_write", {root: …})` confined NOTHING here:
+/// an agent could bind and fill a buffer at any absolute path outside its
+/// granted root. The `command.renderInto` call below is NOT that gate —
+/// its `gradeMin(doc.my_grant, .edit)` is a COLLAB authority check, and
+/// `Document.my_grant` defaults to `.own`, so it passes trivially for
+/// every local buffer.
 fn cAgentWrite(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32, results: []i32) void {
-    _ = results;
     const self: *JsPlugin = @ptrCast(@alignCast(data.?));
     const gpa = self.gpa;
+    results[0] = 0;
     const path = caller.readMemory(gpa, @intCast(args[0]), @intCast(args[1])) catch return;
     defer gpa.free(path);
     const content = caller.readMemory(gpa, @intCast(args[2]), @intCast(args[3])) catch return;
     defer gpa.free(content);
     const agent = caller.readMemory(gpa, @intCast(args[4]), @intCast(args[5])) catch return;
     defer gpa.free(agent);
+    if (!self.requirePerm(.fs_write)) {
+        results[0] = qjs_contract.denied;
+        return;
+    }
+    if (!fs_gate.pathWithinLimit(self, .fs_write, path)) {
+        self.denyOutOfLimit(.fs_write, path);
+        results[0] = qjs_contract.denied;
+        return;
+    }
     const peer = if (agent.len > 0) agent else agent_peer;
     const bufs = self.bridge.activeCtx().buffers;
     const id = bufs.findByPath(path) orelse blk: {
@@ -2507,6 +2527,10 @@ test "quickjs: a JS plugin writes a file as an attributed agent peer edit" {
     const src =
         \\weft.command("w", () => weft.fileWrite("/tmp/weft-agent-out.zig", "const x = 1;"));
     ;
+    // `fs_write`, declared: this door is possession-gated like every other
+    // effect door (it was not always — see the confinement test below), so
+    // the fixture has to hold the capability it exercises.
+    try env.grant("test", "fs_write");
     var plugin = try JsPlugin.load(gpa, &engine, &env.ctx, env.pool, .empty, "test", null, src);
     defer plugin.deinit();
     _ = try command.run(&env.commands, &env.ctx, "w", &.{});
@@ -2519,6 +2543,88 @@ test "quickjs: a JS plugin writes a file as an attributed agent peer edit" {
     // Authored by a non-user peer — the agent, not the user's undo history.
     const doc = &b.textEditor().?.doc;
     try t.expect(doc.commitAt(doc.commitCount() - 1).author != .user);
+}
+
+test "quickjs: an agent's fileWrite outside a narrowed fs_write root is refused — and binds no buffer" {
+    const gpa = t.allocator;
+    var env: Env = undefined;
+    try Env.init(gpa, &env);
+    defer env.deinit(gpa);
+    var engine = try wasm.Engine.init(gpa);
+    defer engine.deinit();
+
+    // `cFileRead`'s confinement, on the WRITE door. `command.renderInto`'s
+    // grade gate is not this check: it caps `.agent` at `gradeMin(doc.my_grant,
+    // .edit)`, and `Document.my_grant` defaults to `.own`, so it passes for
+    // every local buffer. Only `fs_write`'s own limit says where an agent may
+    // write.
+    var tmp = t.tmpDir(.{});
+    defer tmp.cleanup();
+    const dir = try std.fmt.allocPrint(gpa, ".zig-cache/tmp/{s}", .{tmp.sub_path});
+    defer gpa.free(dir);
+    const root = try std.fmt.allocPrint(gpa, "{s}/allowed", .{dir});
+    defer gpa.free(root);
+    const inside = try std.fmt.allocPrint(gpa, "{s}/note.txt", .{root});
+    defer gpa.free(inside);
+    const outside = try std.fmt.allocPrint(gpa, "{s}/secret.txt", .{dir});
+    defer gpa.free(outside);
+    try @import("file.zig").writeBytesMakingDirs(gpa, root, inside, "");
+
+    const src = try std.fmt.allocPrint(gpa,
+        \\function writer(name, path) {{
+        \\  weft.command(name, () => {{
+        \\    try {{ weft.fileWrite(path, "written", "a1"); weft.echo("wrote"); }}
+        \\    catch (e) {{ weft.echo("threw"); }}
+        \\  }});
+        \\}}
+        \\writer("in", "{s}");
+        \\writer("out", "{s}");
+        \\writer("abs", "/tmp/weft-agent-escape.zig");
+    , .{ inside, outside });
+    defer gpa.free(src);
+
+    _ = try env.grants.grant(.{ .capability = "fs_write", .limit = .{ .fs_root = root } }, "confined", null);
+    var plugin = try JsPlugin.load(gpa, &engine, &env.ctx, env.pool, .empty, "confined", null, src);
+    defer plugin.deinit();
+
+    // In root: the agent edit lands, exactly as before the gate.
+    _ = try command.run(&env.commands, &env.ctx, "in", &.{});
+    try t.expectEqualStrings("wrote", env.head.echo.items);
+    try t.expect(env.buffers.findByPath(inside) != null);
+
+    // Out of root, and an absolute path with nothing to do with the grant:
+    // both REFUSED — a thrown denial, never a write the agent thinks landed.
+    _ = try command.run(&env.commands, &env.ctx, "out", &.{});
+    try t.expectEqualStrings("threw", env.head.echo.items);
+    _ = try command.run(&env.commands, &env.ctx, "abs", &.{});
+    try t.expectEqualStrings("threw", env.head.echo.items);
+
+    // And refusal means NO buffer was bound to either path — the door's own
+    // side effect (create + adoptPath) must not run ahead of its gate.
+    try t.expect(env.buffers.findByPath(outside) == null);
+    try t.expect(env.buffers.findByPath("/tmp/weft-agent-escape.zig") == null);
+}
+
+test "quickjs: an ungranted JS plugin cannot fileWrite at all — possession, not just its limit" {
+    const gpa = t.allocator;
+    var env: Env = undefined;
+    try Env.init(gpa, &env);
+    defer env.deinit(gpa);
+    var engine = try wasm.Engine.init(gpa);
+    defer engine.deinit();
+
+    const src =
+        \\weft.command("w", () => {
+        \\  try { weft.fileWrite("/tmp/weft-agent-ungranted.zig", "x"); weft.echo("wrote"); }
+        \\  catch (e) { weft.echo("threw"); }
+        \\});
+    ;
+    var plugin = try JsPlugin.load(gpa, &engine, &env.ctx, env.pool, .empty, "ungranted", null, src);
+    defer plugin.deinit();
+
+    _ = try command.run(&env.commands, &env.ctx, "w", &.{});
+    try t.expectEqualStrings("threw", env.head.echo.items);
+    try t.expect(env.buffers.findByPath("/tmp/weft-agent-ungranted.zig") == null);
 }
 
 test "quickjs: a config syntax error surfaces as ConfigException, not silent" {
@@ -3219,6 +3325,10 @@ test "quickjs: two ACP conversations stream into their own transcripts, and a pe
     defer gpa.free(src);
 
     try env.grant("test", "proc");
+    // …and `fs_write`, which the mocks' `fs/write_text_file` step needs: the
+    // shared-file assertion below (both sub-peers authored it) is only
+    // reachable through that door, and the door is possession-gated.
+    try env.grant("test", "fs_write");
     // Two live agents pin two reader tasks (each mock BLOCKS on stdin waiting
     // for its own answer), so the shared fixture's single-thread pool would
     // starve the second spawn — concurrency here is the subject, not scenery.

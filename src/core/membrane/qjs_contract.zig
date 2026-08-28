@@ -108,7 +108,7 @@ pub const imports = [_]Entry{
     e("qjs_config", 4, 1, .plugin, "weft.config(key): this plugin's staged config value"),
     e("qjs_breakpoints", 4, 1, .plugin, "weft.breakpoints(path): the file's breakpoint lines as a CSV"),
     e("qjs_file_read", 4, 1, .plugin, "weft.fileRead(path): the file's live-buffer-or-disk content for an agent read"),
-    e("qjs_file_write", 6, 0, .plugin, "weft.fileWrite(path, content): replace the buffer for `path`, authored as the agent peer"),
+    e("qjs_file_write", 6, 1, .plugin, "weft.fileWrite(path, content): replace the buffer for `path`, authored as the agent peer (0 ok, `denied` refused)"),
     e("qjs_line_text", 2, 1, .plugin, "weft.lineText(): the active buffer's current line"),
     e("qjs_active_buffer", 2, 1, .plugin, "weft.activeBuffer(): the focused buffer's display name — how an instanced JS tool routes a command to the session you can see"),
     e("qjs_pick", 6, 0, .plugin, "weft.pick(prompt, options, token): open a pick bound to this JS plugin; onPick receives the candidate/input/cancelled outcome carrying `token` back — the continuation identity that answers ONE request, never \"the pending one\""),
