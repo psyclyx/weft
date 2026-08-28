@@ -10,6 +10,7 @@ const core = h.core;
 const session = h.session;
 const region = h.region;
 const window_layout = h.window_layout;
+const window_cmds = h.window_cmds;
 const harness = h.gfx_harness;
 const app_providers = h.app_providers;
 const app_session = h.app_session;
@@ -264,4 +265,92 @@ test "e2e/sidebar: a config fragment docks a files sidebar, and Return opens in 
         }.never,
     };
     try t.expect(!follower.follows(last));
+}
+
+// ── GATE: following is a consumer of two primitives, not a DSL ──
+//
+// doc/cwa-config-decisions.md D2: "primary-focus-change as a subscribable
+// feed, plus viewport retarget as a protocol op, plus a CONSUMER doing the
+// following". `Outline` below is that consumer written out in full — the
+// shipped helper (`core.focus_feed.Companion`) plus one call to the retarget
+// op (`window_cmds.presentIn`). It is short enough to live in a config file,
+// which is the point: no reactive binding grammar was needed to write it.
+//
+// The bug this kills structurally is the outline retargeting to ITSELF (and
+// to any other companion): the helper filters on the event's attributes
+// before the consumer runs, so a follower cannot see companion focus at all.
+
+const Outline = struct {
+    ed: *Editor,
+    subject: []const u8,
+    retargets: usize = 0,
+    companion: core.focus_feed.Companion = undefined,
+
+    fn follow(self: *Outline, viewport: u32) !void {
+        self.companion = .{ .viewport = viewport, .context = self, .retarget = onPrimaryFocus };
+        try self.companion.subscribe(self.ed.gpa, &self.ed.session.system.focus);
+    }
+
+    fn onPrimaryFocus(raw: ?*anyopaque, _: core.focus_feed.Event) void {
+        const self: *Outline = @ptrCast(@alignCast(raw.?));
+        self.retargets += 1;
+        window_cmds.presentIn(
+            self.ed.ctx,
+            self.ed.win_layout,
+            self.ed.buffers,
+            self.ed.gpa,
+            self.ed.head,
+            self.ed.keymap,
+            self.companion.viewport,
+            self.subject,
+        );
+    }
+};
+
+test "e2e/sidebar: a companion follows primary focus and never its own" {
+    const gpa = t.allocator;
+    var app: h.App = undefined;
+    try app.init(gpa);
+    defer app.deinit();
+    const ed = &app.ed;
+
+    try core.file.writeBytesMakingDirs(gpa, "sub", "sub/inner.txt", "INNER\n");
+    const config_dir = try std.fmt.allocPrint(gpa, "{s}/config", .{app.proj.prev_cwd});
+    defer gpa.free(config_dir);
+    try core.quickjs.evalConfig(&ed.engine, ed.ctx, null, &ed.config_kv, config_dir, "weft.use(\"sidebar\");");
+    ed.applyWindow();
+    const panel = ed.win_layout.dockedPanel(.left) orelse return error.NoSidebar;
+
+    var outline: Outline = .{ .ed = ed, .subject = "sub" };
+    try outline.follow(panel.pane().id);
+    defer ed.session.system.focus.unsubscribe(&outline.companion);
+    const root_listing = panel.pane().buffer_id;
+
+    // Split the editor pane and move between the halves: ordinary panes are
+    // focus sources, so each move is a primary-focus change the companion
+    // retargets on.
+    ed.run("window-vsplit");
+    ed.applyWindow();
+    ed.run("window-focus-right");
+    ed.applyWindow();
+    try t.expect(outline.retargets > 0);
+    const followed = outline.retargets;
+    // The retarget op actually presented: the panel shows `sub`, not the root
+    // listing it was materialized with, and the acting head never left the
+    // pane it was in.
+    try t.expect(panel.pane().buffer_id != root_listing);
+    try t.expectEqual(ed.buffers.active_id, window_layout.headFocus(ed.win_layout, ed.head).pane().buffer_id);
+
+    // Back to the left half — another ordinary pane, so another retarget.
+    ed.run("window-focus-left");
+    ed.applyWindow();
+    try t.expect(outline.retargets > followed);
+    const before_companion = outline.retargets;
+
+    // Now focus the COMPANION itself. That is not a primary-focus change, so
+    // the follower never runs — it cannot chase its own subject.
+    ed.run("window-focus-left");
+    ed.applyWindow();
+    try t.expectEqual(panel, window_layout.headFocus(ed.win_layout, ed.head));
+    try t.expectEqual(before_companion, outline.retargets);
 }
