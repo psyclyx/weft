@@ -29,4 +29,5 @@ test {
     _ = @import("language_test.zig");
     _ = @import("grammar_test.zig");
     _ = @import("demolition_test.zig");
+    _ = @import("notes_test.zig");
 }
