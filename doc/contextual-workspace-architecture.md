@@ -888,6 +888,14 @@ three depths:
    applied recursively plus posture scoping (§10.4), and nothing in depths
    1–2 forecloses it.
 
+Depth 1 composites through the annotation seam (§11.7) rather than through a
+nested renderer: an embed's placeholder, window rows, staleness mark, and
+fallback reason are anchored display-only decorations, so embedding inherits
+the existing rebase, revision-stamp, and drop rules instead of restating them
+against a second rendering path. The designation is the extent's own text,
+which is why an unresolvable embed has nothing to render but its reason — it
+stops covering bytes that were always there.
+
 Depth 2 is the write path through a projection: a Files rename edits the name
 field in place; a bulk edit over search results is fields plus a change
 proposal saga (§12); a console's prompt line is a field below an output feed;

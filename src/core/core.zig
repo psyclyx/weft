@@ -56,6 +56,7 @@ pub const markdown = @import("markdown.zig");
 // a caps provider over the streaming membrane. See [[lsp-plugin-migration]].
 pub const position = @import("position.zig");
 pub const layers = @import("layers.zig");
+pub const embed = @import("embed.zig");
 pub const breakpoints = @import("breakpoints.zig");
 pub const mode = @import("mode.zig");
 pub const facts = @import("facts.zig");
