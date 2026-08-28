@@ -452,3 +452,80 @@ test "e2e/grammar: explaining a binding names its intention and provider, and ru
     for (rows_before.items, rows_after.items) |b, a| try t.expectEqualStrings(b, a);
     try t.expectEqualStrings("", ed.echoText());
 }
+
+/// How many rows the focused view shows under `want`, and how many of those
+/// the projection placed at `column` (its depth in the tree, on the surface).
+fn countName(ed: *h.Editor, gpa: std.mem.Allocator, want: []const u8) !usize {
+    return countNameAt(ed, gpa, want, null);
+}
+
+fn countNameAt(ed: *h.Editor, gpa: std.mem.Allocator, want: []const u8, column: ?u16) !usize {
+    const view = focusedView(ed) orelse return error.TestExpectedEqual;
+    var n: usize = 0;
+    for (view.scene.content.container.children) |row| {
+        const name = nameNode(row) orelse continue;
+        const text = try fieldText(ed, gpa, name.content.field.ref);
+        defer gpa.free(text);
+        if (!std.mem.eql(u8, text, want)) continue;
+        if (column) |want_column| if (name.layout.column != want_column) continue;
+        n += 1;
+    }
+    return n;
+}
+
+test "e2e/grammar: GATE 4 — a std-only transfer moves a row's identity, it does not copy it" {
+    const gpa = t.allocator;
+    var app: GrammarApp = undefined;
+    try app.init(gpa);
+    defer app.deinit();
+    const ed = &app.ed;
+    try authorTree(ed);
+
+    ed.runStr("open", ".");
+    const view_ref = ed.head.semantic_focus.path().?.view;
+
+    // Open the directory in place, so one view holds both ends of the move.
+    try focusRowByName(ed, gpa, "child");
+    ed.press("Tab", "\t");
+    const nested = (try nameColumn(ed, gpa, "inner.txt")).?;
+
+    // `d` — std.transfer.delete-to-register — captures the row INTO the
+    // register. The row itself stays: what was captured is a deferred move,
+    // and the register is the only thing that spans the two loci.
+    try focusRowByName(ed, gpa, "top.txt");
+    ed.press("d", "d");
+    try t.expectEqual(@as(usize, 1), try countName(ed, gpa, "top.txt"));
+
+    // `p` — std.transfer.paste — places it beside a row inside the directory.
+    // The grammar names no plugin, no path, and no placement.
+    try focusRowByName(ed, gpa, "inner.txt");
+    ed.press("p", "p");
+    try t.expectEqual(view_ref, ed.head.semantic_focus.path().?.view);
+    try t.expectEqual(@as(usize, 2), try countName(ed, gpa, "top.txt"));
+    try t.expectEqual(@as(usize, 1), try countNameAt(ed, gpa, "top.txt", nested));
+
+    // Applying the draft is a MOVE, not a create: the destination is written
+    // from the captured entry's own identity, so the source ceases to exist
+    // without anyone staging its deletion. A paste that had ferried no
+    // identity could only have created a new file and left the old one.
+    ed.run("view-apply");
+    ed.press("y", "y");
+    try t.expect(h.drainUntilOracle(
+        &app.proj,
+        ed,
+        "test -f child/top.txt && test ! -e top.txt && printf ok",
+        "ok",
+    ));
+    const moved = try core.file.readAlloc(gpa, "child/top.txt");
+    defer gpa.free(moved);
+    try t.expectEqualStrings("top\n", moved);
+
+    // Through the reconcile the apply drives, the listing that held the source
+    // no longer shows it at ANY depth — nobody staged its removal, so its
+    // absence is the move itself...
+    ed.settle(4);
+    try t.expectEqual(@as(usize, 0), try countName(ed, gpa, "top.txt"));
+    // ...and the directory it was placed in holds it, once.
+    ed.runStr("open", "child");
+    try t.expectEqual(@as(usize, 1), try countName(ed, gpa, "top.txt"));
+}
