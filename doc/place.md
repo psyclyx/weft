@@ -343,10 +343,13 @@ capability; recents survive a restart.
 
 **Wave 6 — Close the standing list.** ABI symmetry (an authority parameter on
 `fs_read`/`fs_write`/`fs_exists`, as `fs_list` already has); grants confined by
-default; the unconditional machinery carve-out; the `fsExists` confinement hole
-(its `.fs_root` branch calls the unconfined `file.statKind`, and the gap is
-*total* for a `root = "."` grant — which is exactly what root detection uses);
-deliberate gating for `grammar-add`.
+default; the unconditional machinery carve-out.
+
+*Pulled forward out of Wave 6:* the `fsExists` confinement hole is closed — its
+`.fs_root` branch now stats the confined descriptor (`RootedFs.kind`) instead of
+calling `file.statKind` on the raw path, so a symlink inside the root leaks
+nothing and a `root = "."` grant confines it like the other four doors. So is
+the `grammar-add` gate, now a pinned property rather than an ABI accident (§8).
 
 ## 8. Named decisions and risks
 

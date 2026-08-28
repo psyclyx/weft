@@ -57,8 +57,9 @@
 //! they replace). `Limit.fs_root` ENFORCEMENT itself is no longer deferred:
 //! W4 slice 2 wires it — `wasm_host/fs.zig`'s five split semantic bodies now
 //! consult `limitFor` and confine a limited grant's paths (see that file's
-//! module doc for the exact policy, including the named v1 symlink-handling
-//! gap in `fsExists`).
+//! module doc for the exact policy; all five, `fsExists` included, route
+//! through the kernel gate, so no door merely DESCRIBES what the others
+//! refuse).
 //!
 //! **`weft.grant` (W4 slice 4, this table's last deferred consumer landed)**:
 //! `manifest.zig`'s `weft.grant(plugin, capability, opts)` verb stages a

@@ -64,28 +64,22 @@
 //!      "resolve symlinks then verify they land in-root," which still has
 //!      to trust userspace to get that verification right. v1 applies this
 //!      to BOTH reads and writes uniformly (exceeding the "at minimum for
-//!      write paths" bar): `fsRead`/`fsWrite`/`fsAppend`/`fsList`'s limited
-//!      branches all route their actual I/O through `RootedFs`, so a
-//!      symlink planted inside a limited root can leak or corrupt NOTHING
-//!      through those four.
-//! **The one named v1 gap**: `fsExists`'s limited branch stops at layer 1
-//! (the lexical gate) and answers with the plain, UNCONFINED `file.statKind`
-//! — it does not route through `RootedFs`. A symlink planted inside the
-//! root could therefore leak the *kind* (file/dir/other/absent) of a target
-//! outside it, though never its bytes (that's `fsRead`'s job, which IS
-//! confined). Closing this is a small follow-up (stat the already-open
-//! confined fd instead of the raw path) — named here rather than silently
-//! left, not implemented in this slice to avoid adding new raw-syscall
-//! surface (statx flag plumbing) under this task's scope. **The gap is
-//! TOTAL for a `root = "."` grant** (`rootRelative`'s whole-cwd case): layer
-//! 1 there is a no-op by construction (every cwd-relative path passes it —
-//! there is nothing to be lexically "outside" of cwd itself), so a
-//! `fs_root("."`)-limited `fsExists` is exactly as unconfined as the
-//! pre-W4, no-limit boolean grant was — zero confinement, not "mostly
-//! confined with a symlink-shaped hole." A grant author relying on `"."`
-//! specifically to restrict `fs_exists` should not: it restricts
-//! read/write/append/list (all four route through the kernel gate even at
-//! `root = "."`), but tells `fsExists` nothing.
+//!      write paths" bar): ALL FIVE limited branches route their actual
+//!      I/O through `RootedFs`, so a symlink planted inside a limited root
+//!      can leak or corrupt NOTHING through any of them.
+//! **`fsExists` is confined exactly as its four siblings are** (it was not
+//! always: through W4 its limited branch stopped at layer 1 and answered
+//! with the plain, UNCONFINED `file.statKind`, so a symlink planted inside
+//! the root leaked the *kind* of a target outside it, and a `root = "."`
+//! grant — `rootRelative`'s whole-cwd case, where layer 1 is a no-op by
+//! construction — confined it not at all, which is precisely what the
+//! `.git` climb in `guest/git.zig` and `guest/project.zig` runs on). It now
+//! stats the ALREADY-OPEN confined descriptor (`RootedFs.kind`: `O_PATH`
+//! under the same `openat2`, then `statx(AT_EMPTY_PATH)`) instead of the
+//! raw path, so "does this exist, and what is it" is answerable for
+//! exactly the set of paths `fsRead` would hand over bytes for — one
+//! confinement, five doors, no door that merely describes what the others
+//! refuse.
 
 const std = @import("std");
 const Allocator = std.mem.Allocator;
@@ -94,6 +88,7 @@ const command = @import("../command.zig");
 const Buffers = @import("../Buffers.zig");
 const rooted_fs = @import("../rooted_fs.zig");
 const file = @import("../file.zig");
+const grants_mod = @import("../grants.zig");
 
 const shared = @import("plugin.zig");
 const WasmPlugin = shared.WasmPlugin;
@@ -224,11 +219,26 @@ pub fn fsExists(gpa: Allocator, id: anytype, path: []const u8) PermError!file.Ki
     switch (shared.limitFor(id, .fs_read)) {
         .none => return file.statKind(gpa, path),
         .fs_root => |root| {
-            // Layer 1 (the lexical gate) only — see this file's module doc's
-            // named v1 gap: this stays UNCONFINED at layer 2, so a symlink
-            // inside `root` could leak a target's kind (never its bytes).
-            _ = rootRelative(root, path) orelse return error.OutOfLimit;
-            return file.statKind(gpa, path);
+            // BOTH layers, exactly like `fsRead` below it: the lexical gate,
+            // then the kernel one. A probe must not be able to describe what
+            // a read could not fetch — see this file's module doc.
+            const rel = rootRelative(root, path) orelse return error.OutOfLimit;
+            var rfs = openLimitedRoot(gpa, root) orelse return .none;
+            defer rfs.close();
+            const relz = gpa.dupeZ(u8, rel) catch return .none;
+            defer gpa.free(relz);
+            const k = rfs.kind(relz.ptr) catch |e| switch (e) {
+                error.Confined => return error.OutOfLimit,
+                // NotFound and mundane I/O are what "absent" already means
+                // here (`file.statKind` swallows both the same way) — the
+                // ONE thing that must stay distinguishable is refusal.
+                else => return .none,
+            };
+            return switch (k) {
+                .file => .file,
+                .dir => .dir,
+                .other => .other,
+            };
         },
         // `.graph_subtree` is GraphDoc-shaped, same fail-closed reasoning.
         .doc_region, .graph_subtree => return error.OutOfLimit, // see `fsRead`'s doc: fail closed on a mismatched limit shape
@@ -514,6 +524,95 @@ test "rootRelative: the lexical gate — in-root, out-of-root, boundary, and the
 
     // Whole-cwd root: nothing to strip, the kernel gate is the only check.
     try t.expectEqualStrings("etc/passwd", rootRelative(".", "etc/passwd").?);
+}
+
+/// The minimal principal `hasPerm`/`limitFor` accept — they duck-type over a
+/// FIELD shape, not a nominal type (see `plugin.zig`'s `hasPerm` doc), so a
+/// confinement test needs no wasm instance and no `command.Context` behind
+/// it, only a live grant table and the handle into it.
+const TestPrincipal = struct {
+    perms: [WasmPlugin.perm_count]bool = @splat(false),
+    grant_table: ?*grants_mod.HandleTable = null,
+    grant_handles: [WasmPlugin.perm_count]grants_mod.CapHandle = @splat(grants_mod.CapHandle.none),
+};
+
+/// `link_path` → `target`, best effort. Returns false if the platform
+/// refused (nothing in these tests depends on symlinks being creatable).
+fn makeSymlink(target: [*:0]const u8, link_path: [*:0]const u8) bool {
+    return std.os.linux.errno(std.os.linux.symlinkat(target, std.os.linux.AT.FDCWD, link_path)) == .SUCCESS;
+}
+
+test "fsExists: a symlink planted INSIDE the root cannot report on a target outside it" {
+    const gpa = t.allocator;
+
+    // <tmp>/root          — the granted root
+    // <tmp>/secret.txt    — outside it
+    // <tmp>/root/leak     — a symlink inside the root, pointing out of it
+    var tmp = t.tmpDir(.{});
+    defer tmp.cleanup();
+    const root = try std.fmt.allocPrint(gpa, ".zig-cache/tmp/{s}/root", .{tmp.sub_path});
+    defer gpa.free(root);
+    const inside = try std.fmt.allocPrint(gpa, "{s}/ok.txt", .{root});
+    defer gpa.free(inside);
+    const outside = try std.fmt.allocPrint(gpa, ".zig-cache/tmp/{s}/secret.txt", .{tmp.sub_path});
+    defer gpa.free(outside);
+    try file.writeBytesMakingDirs(gpa, root, inside, "in root");
+    try file.writeBytes(gpa, outside, "out of root");
+    const leak = try std.fmt.allocPrintSentinel(gpa, "{s}/leak", .{root}, 0);
+    defer gpa.free(leak);
+    if (!makeSymlink("../secret.txt", leak.ptr)) return error.SkipZigTest;
+
+    var table = grants_mod.HandleTable.init(gpa);
+    defer table.deinit();
+    var id: TestPrincipal = .{ .grant_table = &table };
+    id.grant_handles[shared.perm_fs_read] =
+        try table.grant(.{ .capability = "fs_read", .limit = .{ .fs_root = root } }, "confined", null);
+
+    // The symlink itself resolves (a plain stat would follow it straight to
+    // `<tmp>/secret.txt`) — but it leaves the root, so the probe is REFUSED,
+    // not answered. Before this was closed it returned `.file`: the kind of
+    // a file the grant has no business describing.
+    try t.expectError(error.OutOfLimit, fsExists(gpa, &id, leak));
+    // The read door already refused it. Both doors now agree, which is the
+    // whole point — an existence probe must not describe what a read cannot
+    // fetch.
+    try t.expectError(error.OutOfLimit, fsRead(gpa, &id, leak));
+
+    // ...and the fix is confinement, not blanket refusal: ordinary in-root
+    // probes still answer, including the absent one.
+    try t.expectEqual(file.Kind.file, try fsExists(gpa, &id, inside));
+    try t.expectEqual(file.Kind.dir, try fsExists(gpa, &id, root));
+    const missing = try std.fmt.allocPrint(gpa, "{s}/nope.txt", .{root});
+    defer gpa.free(missing);
+    try t.expectEqual(file.Kind.none, try fsExists(gpa, &id, missing));
+}
+
+test "fsExists: a `root = \".\"` grant confines it — the whole-cwd case is a kernel gate, not a no-op" {
+    const gpa = t.allocator;
+
+    // `rootRelative(".", path)` hands `path` back unchanged: layer 1 has
+    // nothing to say about a whole-cwd root. That made `.` a grant that
+    // confined `fs_read`/`fs_write`/`fs_append`/`fs_list` but told
+    // `fs_exists` NOTHING — and root detection (`guest/git.zig`,
+    // `guest/project.zig`) is built entirely out of `fsExists`.
+    var table = grants_mod.HandleTable.init(gpa);
+    defer table.deinit();
+    var id: TestPrincipal = .{ .grant_table = &table };
+    id.grant_handles[shared.perm_fs_read] =
+        try table.grant(.{ .capability = "fs_read", .limit = .{ .fs_root = "." } }, "cwd-only", null);
+
+    // Absolute: rejected in the kernel (RESOLVE_BENEATH → EXDEV), where it
+    // used to be answered `.dir`.
+    try t.expectError(error.OutOfLimit, fsExists(gpa, &id, "/etc"));
+    // Traversal out of cwd: same refusal.
+    try t.expectError(error.OutOfLimit, fsExists(gpa, &id, "../"));
+    try t.expectError(error.OutOfLimit, fsExists(gpa, &id, "../../etc"));
+
+    // Inside cwd, the grant still answers — `.` means "all of cwd", and it
+    // still does.
+    try t.expectEqual(file.Kind.file, try fsExists(gpa, &id, "build.zig"));
+    try t.expectEqual(file.Kind.dir, try fsExists(gpa, &id, "src"));
+    try t.expectEqual(file.Kind.none, try fsExists(gpa, &id, "definitely-not-here-xyzzy"));
 }
 
 test {
