@@ -181,7 +181,40 @@ pub const Context = struct {
     /// A closed bound entry yields the degenerate `.process` place rather than
     /// borrowing whoever is active now — an effect whose subject is gone must
     /// not silently retarget at someone else's project.
+    ///
+    /// Precedence, outermost first:
+    ///
+    ///  1. **A bound entry.** A background delivery is ABOUT the entry it
+    ///     captured at spawn, so that entry's place wins over anything the user
+    ///     has done since — including a pin. Without this, a fill landing after
+    ///     the user typed `cd` would resolve against the new pin and act on the
+    ///     wrong project.
+    ///  2. **The head's pin** (`workspace.set-working-target`, the
+    ///     target-oriented `cd`). Validated through `Services`, which clears a
+    ///     retired or republished pin lazily rather than reinterpreting it.
+    ///  3. **The focused entry's own place.**
     pub fn place(self: *Context) Buffers.Place {
+        if (self.bound_entry) |ref| {
+            const bound = self.buffers.resolve(ref) orelse return .process;
+            return bound.place;
+        }
+        if (self.semantic) |services| {
+            if (services.workingTarget(self.head)) |maybe_pin| {
+                if (maybe_pin) |pin| return .{
+                    .container = .{
+                        // `.here` until a remote-attach head carries a real locus
+                        // (`Ctx.locus`, W6). Named rather than assumed: when that
+                        // lands, this is the line that reads it.
+                        .locus = .here,
+                        .ref = pin.target,
+                        .revision = pin.revision,
+                    },
+                };
+            } else |_| {
+                // A stale pin has already been cleared by the validator; fall
+                // through to the entry rather than refusing the whole effect.
+            }
+        }
         const e = self.entry() orelse return .process;
         return e.place;
     }
@@ -1586,4 +1619,64 @@ test "command: a refused background render is observable (log + status chip)" {
     try t.expect(std.mem.indexOf(u8, chip, "ci-plugin") != null);
     try t.expect(std.mem.indexOf(u8, chip, "refused") != null);
     status_feed.set("");
+}
+
+// ── place: the ambient answer to "where does this run" (doc/place.md) ──
+
+test "command: place follows the entry, and a bound entry outranks the active one" {
+    const gpa = t.allocator;
+    var env = try DocRegionEnv.init(gpa);
+    defer env.deinit();
+    const ctx = &env.ctx;
+
+    const project_a: Buffers.Place = .{ .container = .{
+        .locus = .here,
+        .ref = .{ .authority = .here, .slot = 1, .generation = 1 },
+        .revision = 1,
+    } };
+    const project_b: Buffers.Place = .{ .container = .{
+        .locus = .here,
+        .ref = .{ .authority = .here, .slot = 2, .generation = 1 },
+        .revision = 1,
+    } };
+
+    // With nothing placed, the degenerate instance — not a null, not a branch.
+    try t.expect(ctx.place().isProcess());
+
+    ctx.buffers.setPlace(ctx.buffers.active_id, project_a);
+    try t.expect(ctx.place().eql(project_a));
+
+    // A background delivery is ABOUT the entry it captured at spawn. Binding
+    // that entry must retarget `place` too, or a fill landing while the user
+    // looks at another project would act on the wrong one.
+    const other = try ctx.buffers.create(gpa, "*grep*");
+    ctx.buffers.setPlace(other, project_b);
+    const prev = ctx.bindEntry(ctx.buffers.get(other).?.ref());
+    try t.expect(ctx.place().eql(project_b));
+    _ = ctx.bindEntry(prev);
+    try t.expect(ctx.place().eql(project_a));
+}
+
+test "command: a bound entry that has closed places nowhere, not on whoever is active" {
+    const gpa = t.allocator;
+    var env = try DocRegionEnv.init(gpa);
+    defer env.deinit();
+    const ctx = &env.ctx;
+
+    const project: Buffers.Place = .{ .container = .{
+        .locus = .here,
+        .ref = .{ .authority = .here, .slot = 1, .generation = 1 },
+        .revision = 1,
+    } };
+    ctx.buffers.setPlace(ctx.buffers.active_id, project);
+
+    const doomed = try ctx.buffers.create(gpa, "*doomed*");
+    const ref = ctx.buffers.get(doomed).?.ref();
+    try ctx.buffers.close(gpa, doomed, ctx.head, ctx.keymap);
+
+    _ = ctx.bindEntry(ref);
+    // NOT `project`: an effect whose subject is gone must refuse to act
+    // somewhere, rather than quietly adopting the focused project.
+    try t.expect(ctx.place().isProcess());
+    _ = ctx.bindEntry(null);
 }
