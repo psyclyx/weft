@@ -355,6 +355,10 @@ pub const JsPlugin = struct {
     /// Proc streams this plugin spawned, indexed by the handle the JS holds.
     /// A closed slot is left null so handles stay stable (never reused).
     streams: std.ArrayList(?*proc_stream.ProcStream) = .empty,
+    /// Handles whose child's exit has already been announced — an exit is an
+    /// EDGE, reported exactly once, never a level the plugin re-reads every
+    /// frame.
+    exits_reported: std.ArrayList(bool) = .empty,
     /// This plugin's live transcripts, one per projected buffer name (W6
     /// check-in producer seam, doc/contextual-workspace-architecture.md §12)
     /// — minted on the first `weft.transcriptEntry` naming that buffer. The
@@ -514,10 +518,25 @@ pub const JsPlugin = struct {
     /// whether anything was dispatched (the view may need a rebuild).
     pub fn tick(self: *JsPlugin) bool {
         var fired = false;
-        for (self.streams.items, 0..) |maybe, h| {
-            const s = maybe orelse continue;
-            if (s.pending() == 0) continue;
-            self.instance.callVoid("weft_on_output", &.{@intCast(h)}) catch {};
+        var h: usize = 0;
+        while (h < self.streams.items.len) : (h += 1) {
+            if (self.streams.items[h]) |s| {
+                if (s.pending() > 0) {
+                    self.instance.callVoid("weft_on_output", &.{@intCast(h)}) catch {};
+                    fired = true;
+                }
+            }
+            // Re-read the slot: the handler above may have closed this very
+            // stream (`weft.procClose`), which frees it and nulls the slot.
+            const s = self.streams.items[h] orelse continue;
+            // The child's exit, AFTER its last bytes: a peer that dies mid
+            // conversation is news the plugin must act on (answer what it left
+            // pending, free the slot), not a silence it has to poll for. Once
+            // per stream, so an exit is an edge and not a level.
+            if (!s.ended() or s.pending() > 0) continue;
+            if (h >= self.exits_reported.items.len or self.exits_reported.items[h]) continue;
+            self.exits_reported.items[h] = true;
+            self.instance.callVoid("weft_on_exit", &.{@intCast(h)}) catch {};
             fired = true;
         }
         return fired;
@@ -561,6 +580,7 @@ pub const JsPlugin = struct {
         gpa.free(self.name);
         for (self.streams.items) |maybe| if (maybe) |s| s.deinit();
         self.streams.deinit(gpa);
+        self.exits_reported.deinit(gpa);
         for (self.conversations.items) |c| c.deinit(gpa);
         self.conversations.deinit(gpa);
         for (self.cmds.items) |c| {
@@ -607,6 +627,12 @@ fn cProcSpawn(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32, result
     const h: i32 = @intCast(self.streams.items.len);
     self.streams.append(gpa, s) catch {
         s.deinit();
+        results[0] = -1;
+        return;
+    };
+    self.exits_reported.append(gpa, false) catch {
+        s.deinit();
+        self.streams.items[@intCast(h)] = null;
         results[0] = -1;
         return;
     };

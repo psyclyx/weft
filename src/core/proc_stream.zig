@@ -279,6 +279,13 @@ pub const ProcStream = struct {
         return n;
     }
 
+    /// Frame thread: whether the child is GONE — its reader ran to the end of
+    /// both pipes and left. Bytes may still be buffered; a consumer drains
+    /// first and treats this as "no more will come", not "nothing came".
+    pub fn ended(s: *ProcStream) bool {
+        return s.reader.residentExited();
+    }
+
     /// Bytes waiting to be read (frame thread) — the frame loop fires the
     /// guest's output hook only when this is non-zero.
     pub fn pending(s: *ProcStream) usize {
@@ -316,8 +323,8 @@ pub const ProcStream = struct {
     /// fully-spawned stream.
     ///
     /// BOUNDED, not unbounded (regression class 53aca18 closed elsewhere in
-    /// this codebase — `proc.zig`'s deadline-bounded drain): `s.reader.poll()`
-    /// only turns non-null once the reader RUNS TO COMPLETION, and a child
+    /// this codebase — `proc.zig`'s deadline-bounded drain): the reader only
+    /// reports exited once it RUNS TO COMPLETION, and a child
     /// that ignores SIGKILL long enough (an unkillable D-state read) must not
     /// buy an unbounded FRAME THREAD spin.
     ///
@@ -336,7 +343,7 @@ pub const ProcStream = struct {
         s.canceled.store(true, .release);
         var killed = false;
         const deadline = task.nowNs() + s.deinit_deadline_ns;
-        while (s.reader.poll() == null) {
+        while (!s.reader.residentExited()) {
             if (!killed) {
                 s.spawn_mutex.lock();
                 const id_opt = if (s.spawned) s.child.id else null;
@@ -353,6 +360,7 @@ pub const ProcStream = struct {
             }
             std.atomic.spinLoopHint();
         }
+        _ = s.reader.poll(); // the reader is gone; reclaim its task node
         s.spawn_mutex.lock();
         const spawned = s.spawned;
         s.spawn_mutex.unlock();

@@ -562,6 +562,7 @@ static JSContext *g_ctx = NULL;
 static JSValue g_cmds; // JS array: id -> handler fn
 static JSValue g_on_output; // handler (handle) => void for proc-stream output
 static JSValue g_on_pick; // handler (index) => void for a pick accept
+static JSValue g_on_exit; // handler (handle) => void for a proc-stream child exit
 
 // weft.command(name, fn): register a command and remember its handler by the
 // host-assigned id.
@@ -797,6 +798,16 @@ static JSValue js_on_output(JSContext *ctx, JSValueConst this_val,
     return JS_UNDEFINED;
 }
 
+// weft.onExit(fn): register the handler the host fires (with a stream handle)
+// when that stream's child is gone — announced once, after its last bytes.
+static JSValue js_on_exit(JSContext *ctx, JSValueConst this_val,
+                          int argc, JSValueConst *argv) {
+    if (argc < 1 || !JS_IsFunction(ctx, argv[0])) return JS_UNDEFINED;
+    JS_FreeValue(ctx, g_on_exit);
+    g_on_exit = JS_DupValue(ctx, argv[0]);
+    return JS_UNDEFINED;
+}
+
 // weft.pick(prompt, options, token): options is a newline-joined list. Empty
 // rows are retained, so the candidate index is the original line ordinal. The
 // handler receives one object describing candidate/input/cancelled acceptance,
@@ -864,6 +875,7 @@ int weft_plugin_init(const char *src, int len) {
     g_cmds = JS_NewArray(g_ctx);
     g_on_output = JS_UNDEFINED;
     g_on_pick = JS_UNDEFINED;
+    g_on_exit = JS_UNDEFINED;
     JSValue global = JS_GetGlobalObject(g_ctx);
     JSValue weft = JS_GetPropertyStr(g_ctx, global, "weft");
     JS_SetPropertyStr(g_ctx, weft, "command", JS_NewCFunction(g_ctx, js_command, "command", 2));
@@ -886,6 +898,7 @@ int weft_plugin_init(const char *src, int len) {
     JS_SetPropertyStr(g_ctx, weft, "onPick", JS_NewCFunction(g_ctx, js_on_pick, "onPick", 1));
     JS_SetPropertyStr(g_ctx, weft, "status", JS_NewCFunction(g_ctx, js_status, "status", 1));
     JS_SetPropertyStr(g_ctx, weft, "onOutput", JS_NewCFunction(g_ctx, js_on_output, "onOutput", 1));
+    JS_SetPropertyStr(g_ctx, weft, "onExit", JS_NewCFunction(g_ctx, js_on_exit, "onExit", 1));
     JS_FreeValue(g_ctx, weft);
     JS_FreeValue(g_ctx, global);
     JSValue val = JS_Eval(g_ctx, src, (size_t)len, "<plugin>", JS_EVAL_TYPE_GLOBAL);
@@ -904,6 +917,19 @@ void weft_on_output(int handle) {
     if (!g_ctx || !JS_IsFunction(g_ctx, g_on_output)) return;
     JSValue arg = JS_NewInt32(g_ctx, handle);
     JSValue r = JS_Call(g_ctx, g_on_output, JS_UNDEFINED, 1, &arg);
+    if (JS_IsException(r)) log_exception(g_ctx);
+    JS_FreeValue(g_ctx, r);
+    JS_FreeValue(g_ctx, arg);
+}
+
+// weft_on_exit(handle): dispatch the child's exit, once, after its last bytes.
+// BACKGROUND, exactly like weft_on_output: no dispatching head, so a handler
+// that needs one goes through a nested weft.run.
+__attribute__((export_name("weft_on_exit")))
+void weft_on_exit(int handle) {
+    if (!g_ctx || !JS_IsFunction(g_ctx, g_on_exit)) return;
+    JSValue arg = JS_NewInt32(g_ctx, handle);
+    JSValue r = JS_Call(g_ctx, g_on_exit, JS_UNDEFINED, 1, &arg);
     if (JS_IsException(r)) log_exception(g_ctx);
     JS_FreeValue(g_ctx, r);
     JS_FreeValue(g_ctx, arg);

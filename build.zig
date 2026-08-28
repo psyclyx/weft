@@ -434,6 +434,9 @@ pub fn build(b: *std.Build) void {
     weft_mod.addAnonymousImport("dap_js", .{
         .root_source_file = b.path("config/plugins/dap.js"),
     });
+    weft_mod.addAnonymousImport("acp_js", .{
+        .root_source_file = b.path("config/plugins/acp.js"),
+    });
     // The authoritative E2E renderer uses ordinary offscreen Vulkan images;
     // it deliberately has no WSI, compositor, or platform-input dependency.
     weft_mod.linkSystemLibrary("vulkan", .{});

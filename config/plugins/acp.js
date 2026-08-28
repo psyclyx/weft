@@ -175,6 +175,8 @@ function askPermission(c, msg) {
 
 // Open the next queued permission pick, if the head is free. Called from a
 // dispatching entry only (the trampoline command, or `onPick`).
+let openToken = null; // the token of the pick on screen, if any
+
 function openNextPick() {
   if (pickOpen) return;
   while (pickQueue.length) {
@@ -182,6 +184,7 @@ function openNextPick() {
     const p = pendingPerms.get(token);
     if (!p) continue; // withdrawn (its conversation ended)
     pickOpen = true;
+    openToken = token;
     weft.pick(p.prompt, p.opts, token);
     return;
   }
@@ -213,6 +216,7 @@ function acceptFocus(outcome) {
 weft.onPick((outcome) => {
   if (!outcome) return;
   pickOpen = false;
+  openToken = null;
   if (outcome.token === focus_token) {
     acceptFocus(outcome);
     openNextPick();
@@ -307,6 +311,50 @@ weft.onOutput((h) => {
     }
     onMessage(c, msg);
   }
+});
+
+// ── An agent that exits ENDS its conversation ────────────────────────────
+//
+// The process IS the conversation's lifetime. When it goes, everything it
+// left waiting is answered cancelled (agents.md's `session/cancel` outcome —
+// no answer is written back to a dead pipe; the answer that exists is the
+// local one), the transcript says so, and the ordinal returns to the pool.
+// Nothing here is global: a pending record names its own conversation, so a
+// second agent in flight keeps its queue, its pick and its slot.
+let dead_pick = false; // the pick on screen belonged to a conversation that died
+
+function endConversation(c, why) {
+  for (const [token, p] of [...pendingPerms]) {
+    if (p.conv !== c) continue;
+    pendingPerms.delete(token); // queued tokens drop themselves in openNextPick
+    if (openToken === token) dead_pick = true;
+  }
+  trOpen(c, "system", "agent exited (" + why + ")\n");
+  setStatus(c, "○", "exited");
+  convs.delete(c.ordinal);
+  if (focused === c) focused = convs.values().next().value || null;
+  weft.procClose(c.proc);
+  c.proc = null;
+  weft.run("acp-reap"); // the head-gated half; see below
+}
+
+// Internal: the deferred half of a conversation's end — closing the dead
+// pick needs a dispatching head, and a nested `weft.run` is one. Cancelling
+// resolves it through the ordinary `onPick` path, which then opens whatever
+// a LIVE conversation still has queued.
+weft.command("acp-reap", () => {
+  if (!dead_pick) {
+    openNextPick();
+    return;
+  }
+  dead_pick = false;
+  weft.run("pick-cancel");
+});
+
+weft.onExit((h) => {
+  const c = convByProc(h);
+  if (!c) return; // a stream no live conversation owns
+  endConversation(c, "process exited");
 });
 
 // Start a conversation: mint its instance identity, spawn `cmd` (config data

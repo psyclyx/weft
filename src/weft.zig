@@ -30,6 +30,7 @@ pub const app_frame_builder = @import("app/frame_builder.zig");
 pub const app_render_memory = @import("app/render_memory.zig");
 pub const app_headless_vulkan = @import("app/headless_vulkan.zig");
 pub const dap_js = @embedFile("dap_js");
+pub const acp_js = @embedFile("acp_js");
 
 // This module OWNS the core/gfx/app tree, so it also runs their display-free
 // unit tests (moved here from src/tests.zig — those files can only belong to one

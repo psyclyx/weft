@@ -1103,3 +1103,57 @@ test "e2e/config: the palette accepts a live offer through the effect door" {
     paletteAccept(&ed, "std.history.undo");
     try t.expect(std.mem.indexOf(u8, ed.echoText(), "no-text") != null);
 }
+
+// An agent process is its conversation's LIFETIME (doc/agents.md
+// `session/cancel`): when it dies, whatever it left pending is answered
+// cancelled, the transcript says so, and its instance slot returns to the
+// pool. This drives the SHIPPED reactor (`config/plugins/acp.js`) against
+// mock agents that are one `printf` and an exit — no handshake is faked,
+// because a permission request needs none.
+test "e2e/config: an exiting agent cancels its own pending permission and frees its slot" {
+    const gpa = t.allocator;
+    var ed: Editor = undefined;
+    try Editor.init(gpa, &ed);
+    defer ed.deinit();
+    try ed.grant("acp", "proc");
+    try ed.setConfig("acp", "name", "mock");
+    try ed.loadJs("acp", h.acp_js);
+
+    const perm_request =
+        \\{"jsonrpc":"2.0","id":7,"method":"session/request_permission","params":{"toolCall":{"toolCallId":"%s","title":"%s"},"options":[{"optionId":"yes","name":"Allow"}]}}
+    ;
+    // #1 asks for permission and DIES. #2 asks and stays (`exec`, so the pid
+    // weft holds is the live process).
+    try ed.setConfig("acp", "cmd", "printf '" ++ perm_request ++ "\\n' doomed 'doomed tool'");
+    ed.run("agent-start");
+    try ed.setConfig("acp", "cmd", "printf '" ++ perm_request ++ "\\n' alive 'surviving tool'; exec sleep 30");
+    ed.run("agent-start");
+
+    // Whichever order the two land in, the settled state is the same: #1's
+    // pick resolved cancelled with #1, and #2's took the screen.
+    var opened = false;
+    const deadline = core.task.nowNs() + 10 * std.time.ns_per_s;
+    while (core.task.nowNs() < deadline) {
+        ed.settle(1);
+        if (ed.pick.active and std.mem.indexOf(u8, ed.pick.prompt, "surviving tool") != null) {
+            opened = true;
+            break;
+        }
+    }
+    try t.expect(opened);
+    try t.expect(std.mem.indexOf(u8, ed.pick.prompt, "mock#2") != null);
+
+    // #1's transcript says what happened to it, in its own buffer.
+    try t.expect(drainToolContains(&ed, "*agent*", "agent exited"));
+
+    // The freed slot is REUSED: a third conversation takes ordinal 1 back and
+    // streams into `*agent*`, which only a released slot allows.
+    try ed.setConfig("acp", "cmd", "printf '{\"jsonrpc\":\"2.0\",\"method\":\"session/update\",\"params\":{\"update\":{\"sessionUpdate\":\"agent_message_chunk\",\"content\":{\"text\":\"third-turn\"}}}}\\n'");
+    ed.run("agent-start");
+    try t.expect(drainToolContains(&ed, "*agent*", "third-turn"));
+
+    // #2 is untouched throughout: its pick is still the one on screen, so its
+    // request is still answerable — a dead conversation took nothing with it.
+    try t.expect(ed.pick.active);
+    try t.expect(std.mem.indexOf(u8, ed.pick.prompt, "mock#2") != null);
+}

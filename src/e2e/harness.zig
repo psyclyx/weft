@@ -80,6 +80,10 @@ pub const pair_w: u32 = pair_canvas.width;
 pub const pair_h: u32 = pair_canvas.height;
 pub const app_em: f32 = 16;
 
+/// The shipped resident JS plugins, as the catalog installs them — a test
+/// drives the REAL reactor, never a paraphrase of it.
+pub const acp_js = weft.acp_js;
+
 /// A full editor, headless — built around the REAL app state. It owns an
 /// `app_session.Session` (the same struct `main()` holds: buffers, command/
 /// keymap/pick surfaces, caps, echo, quit, cmd_ctx, AND the capability-consumer
