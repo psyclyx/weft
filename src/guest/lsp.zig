@@ -152,7 +152,18 @@ const Session = struct {
     }
 };
 
-const MAX_SESSIONS = 8;
+/// A session is one `(server command, language, PLACE)`, and that third term is
+/// new: this cap used to bound "how many languages at once" and now bounds
+/// "how many language-and-project pairs at once". Eight was ample for the
+/// former and is not for the latter — three projects with three languages each
+/// already exceeds it, and an eviction costs a full handshake plus a re-index
+/// against a real server, not a cheap reconnect.
+///
+/// Sized as "a handful of projects, each with a handful of languages" at
+/// ~18 KB per session: 24 slots is ~450 KB of a wasm guest's linear memory,
+/// which is worth paying to not re-index a repository because the user opened
+/// a third one.
+const MAX_SESSIONS = 24;
 var sessions: [MAX_SESSIONS]Session = undefined;
 
 fn sessionIndex(s: *const Session) usize {
@@ -254,7 +265,22 @@ fn ensureActive() ?*Session {
     for (&sessions) |*s| {
         if (s.used and matches(s, &key)) return touch(s);
     }
-    const s = freeSession() orelse coldest();
+    const s = freeSession() orelse evict: {
+        // SAY SO. Shedding the coldest server is a real cost — the next ask
+        // against it pays a handshake and a re-index — and until now it
+        // happened in silence, so a slow answer looked like a slow server
+        // rather than a cap. `git` already refuses past its own session cap
+        // out loud; a language server dying quietly is worse, not better,
+        // because nothing about the editor looks different afterwards.
+        const cold = coldest();
+        var msg: [96]u8 = undefined;
+        weft.echo(std.fmt.bufPrint(
+            &msg,
+            "lsp: {d} sessions open — retiring the least recently used '{s}' server",
+            .{ MAX_SESSIONS, cold.lang() },
+        ) catch "lsp: retiring the least recently used server");
+        break :evict cold;
+    };
     closeSession(s);
     s.* = .{ .used = true };
     _ = touch(s);
