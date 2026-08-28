@@ -924,15 +924,15 @@ test "e2e/config: config.js and config.northstar.js reach the same manifest surf
     const req_b = try h.requestedPluginsSnapshot(gpa, &loader_b);
     defer gpa.free(req_b);
     try t.expectEqualStrings(req_a, req_b);
-    // config.js declares 38 `weft.plugin(...)` catalog entries (edit through
-    // dap.js) — pin the count so a silently truncated list still fails
-    // loudly even in the (impossible, given the equality above) case both
-    // sides truncated identically.
+    // config.js declares 39 `weft.plugin(...)` entries (37 catalog wasm
+    // plugins, plus dap.js and acp.js) — pin the count so a silently
+    // truncated list still fails loudly even in the (impossible, given the
+    // equality above) case both sides truncated identically.
     var req_count: usize = 0;
     for (req_a) |c| if (c == '\n') {
         req_count += 1;
     };
-    try t.expectEqual(@as(usize, 38), req_count);
+    try t.expectEqual(@as(usize, 39), req_count);
 
     // 6. The FULL config-store snapshot (namespace/key/value, every entry —
     //    not a hand-picked key), so e.g. `lsp/zig` agreeing is asserted too,
@@ -1156,4 +1156,278 @@ test "e2e/config: an exiting agent cancels its own pending permission and frees 
     // request is still answerable — a dead conversation took nothing with it.
     try t.expect(ed.pick.active);
     try t.expect(std.mem.indexOf(u8, ed.pick.prompt, "mock#2") != null);
+}
+
+// ── The showcase, section by section ─────────────────────────────────
+//
+// config/config.js is the reference configuration a person reads top to
+// bottom. The gates below hold each of its sections to its word: what it
+// advertises must exist, resolve, and — where it is observable — act.
+
+/// Boot a fresh editor from the real `config/config.js` in a throwaway
+/// project. `proj`/`ed`/`loader` stay the caller's, so it keeps teardown
+/// order (loader after editor).
+fn bootShowcase(gpa: std.mem.Allocator, proj: *Project, ed: *Editor, loader: *ConfigLoader) !void {
+    const config_dir = try std.fmt.allocPrint(gpa, "{s}/config", .{proj.prev_cwd});
+    defer gpa.free(config_dir);
+    try bootConfig(ed, config_dir, loader);
+    try t.expect(loader.missing.items.len == 0);
+    try t.expect(loader.failed.items.len == 0);
+}
+
+/// The resident JS plugin under `name` (its config namespace), or null.
+fn jsPluginNamed(ed: *Editor, name: []const u8) ?*core.quickjs.JsPlugin {
+    for (ed.js_plugins.items) |p| {
+        if (std.mem.eql(u8, p.name, name)) return p;
+    }
+    return null;
+}
+
+// The sidebar fragment (doc/cwa-config-decisions.md D1's acceptance gate) as
+// config.js documents it: one `weft.use("sidebar")` line — commented there,
+// because a docked companion is a workspace opinion the reference config
+// declines to hold — declaring viewport attributes plus one `present`, with
+// the workspace doing the rest. window_test drives the resulting sidebar's
+// BEHAVIOR; this gate is about CONFIG: the documented line composes on top of
+// the shipped config exactly as written, and it is pure manifest data until
+// the layout phase realizes it.
+test "e2e/config: the sidebar fragment the config documents declares and docks a files companion" {
+    const gpa = t.allocator;
+    var proj: Project = undefined;
+    try proj.init(gpa);
+    defer proj.deinit();
+    var ed: Editor = undefined;
+    try Editor.init(gpa, &ed);
+    defer ed.deinit();
+    var loader: ConfigLoader = .{ .ed = &ed };
+    defer loader.deinit();
+    try bootShowcase(gpa, &proj, &ed, &loader);
+
+    // The config's own line, uncommented — the ordinary import verb, sealed
+    // eval, no test-only door.
+    const config_dir = try std.fmt.allocPrint(gpa, "{s}/config", .{proj.prev_cwd});
+    defer gpa.free(config_dir);
+    try core.quickjs.evalConfig(&ed.engine, ed.ctx, null, &ed.config_kv, config_dir, "weft.use(\"sidebar\");");
+
+    // Config eval touched no workspace: the fragment landed as a declaration
+    // in the system's viewport registry, attributes already parsed.
+    const decl = ed.session.system.viewports.find("sidebar") orelse return error.NoSidebarDeclared;
+    try t.expectEqual(@as(?core.viewport.Edge, .left), decl.attrs.dock);
+    try t.expect(!decl.attrs.cycles); // out of focus-other's rotation
+    try t.expect(decl.attrs.persistent); // owns its entry
+    try t.expect(!decl.attrs.focus_source); // a companion cannot chase itself
+    try t.expectEqualStrings(".", decl.subject);
+    try t.expect(decl.pane == null); // nothing realized during eval
+
+    // The layout phase realizes it — an ordinary application wake, with no
+    // sidebar-specific path anywhere.
+    ed.applyWindow();
+    try t.expectEqual(@as(usize, 2), ed.paneCount());
+    const panel = ed.win_layout.dockedPanel(.left) orelse return error.NoSidebarPane;
+    const primary = ed.win_layout.primaryPane() orelse return error.NoPrimaryPane;
+    try t.expect(panel != primary);
+    try t.expect(decl.presented);
+
+    // Presenting the subject opened it through the ordinary `open`, into the
+    // panel, and left the focus (and the editor's own entry) alone.
+    const browser = ed.buffers.get(panel.pane().buffer_id) orelse return error.NoSidebarEntry;
+    try t.expect(std.mem.startsWith(u8, browser.name, "files: "));
+    try t.expectEqual(primary, window_layout.headFocus(ed.win_layout, ed.head));
+    try t.expect(primary.pane().buffer_id != panel.pane().buffer_id);
+}
+
+// The authority half of "plugin loading incl. grants": a `.js` plugin has no
+// describe() handshake, so the config's `weft.grant` lines ARE its authority.
+// Each plugin admits exactly what its config declares and nothing adjacent —
+// deleting a grant line must close that door, and this is what notices.
+test "e2e/config: the shipped config's .js plugins hold exactly the grants it declares" {
+    const gpa = t.allocator;
+    var proj: Project = undefined;
+    try proj.init(gpa);
+    defer proj.deinit();
+    var ed: Editor = undefined;
+    try Editor.init(gpa, &ed);
+    defer ed.deinit();
+    var loader: ConfigLoader = .{ .ed = &ed };
+    defer loader.deinit();
+    try bootShowcase(gpa, &proj, &ed, &loader);
+
+    // dap.js: `weft.grant("dap", "proc")`, and only that.
+    const dap = jsPluginNamed(&ed, "dap") orelse return error.DapNotLoaded;
+    try t.expect(core.wasm_host.hasPerm(dap, .proc));
+    try t.expect(!core.wasm_host.hasPerm(dap, .fs_read));
+    try t.expect(!core.wasm_host.hasPerm(dap, .fs_write));
+    try t.expect(!core.wasm_host.hasPerm(dap, .net));
+    try t.expect(!core.wasm_host.hasPerm(dap, .timer));
+
+    // acp.js: proc plus the two filesystem answers the harness owes an agent
+    // — never the network, which the agent reaches through its own process,
+    // not through weft's authority.
+    const acp = jsPluginNamed(&ed, "acp") orelse return error.AcpNotLoaded;
+    try t.expect(core.wasm_host.hasPerm(acp, .proc));
+    try t.expect(core.wasm_host.hasPerm(acp, .fs_read));
+    try t.expect(core.wasm_host.hasPerm(acp, .fs_write));
+    try t.expect(!core.wasm_host.hasPerm(acp, .net));
+    try t.expect(!core.wasm_host.hasPerm(acp, .timer));
+}
+
+// Every advertised section, held to its word: the key the file documents is
+// bound to the command it names, and that command is one something really
+// registered. A plugin renaming a command, or a section drifting into
+// fiction, fails here.
+test "e2e/config: every showcased binding names a command that exists" {
+    const gpa = t.allocator;
+    var proj: Project = undefined;
+    try proj.init(gpa);
+    defer proj.deinit();
+    var ed: Editor = undefined;
+    try Editor.init(gpa, &ed);
+    defer ed.deinit();
+    var loader: ConfigLoader = .{ .ed = &ed };
+    defer loader.deinit();
+    try bootShowcase(gpa, &proj, &ed, &loader);
+    // Collaboration is an app-level service, not a plugin: register its
+    // commands the way main() does, so the config's collab group is checked
+    // against the real registrations rather than assumed.
+    try ed.enableCollabCommands();
+
+    const showcased = [_]struct { sequence: []const u8, command: []const u8 }{
+        // Instanced sessions: lowercase starts one, uppercase talks to it.
+        .{ .sequence = "space o r", .command = "repl-start" },
+        .{ .sequence = "space o R", .command = "repl-send-line" },
+        .{ .sequence = "space o q", .command = "repl-quit" },
+        .{ .sequence = "space o c", .command = "console-open" },
+        .{ .sequence = "space o C", .command = "console-send" },
+        .{ .sequence = "space o a", .command = "llm-ask-line" },
+        .{ .sequence = "space o d", .command = "files" },
+        .{ .sequence = "space o e", .command = "direnv-status" },
+        // Coding agents (acp.js) — an instanced conversation apiece.
+        .{ .sequence = "space a a", .command = "agent-start" },
+        .{ .sequence = "space a s", .command = "agent-send" },
+        .{ .sequence = "space a f", .command = "agent-focus" },
+        // The debugger: breakpoints (wasm) and the DAP session (dap.js).
+        .{ .sequence = "space d b", .command = "debug-toggle-breakpoint" },
+        .{ .sequence = "space d d", .command = "debug-start" },
+        .{ .sequence = "space d o", .command = "debug-step-out" },
+        .{ .sequence = "F5", .command = "debug-continue" },
+        // Notes + embeds.
+        .{ .sequence = "space n n", .command = "notes-open" },
+        .{ .sequence = "space n c", .command = "notes-capture" },
+        .{ .sequence = "space n h", .command = "notes-capture-here" },
+        .{ .sequence = "space n e", .command = "notes-embeds" },
+        .{ .sequence = "space n E", .command = "notes-embeds-off" },
+        // Collaboration: the zero-argument verbs get keys; presets and export
+        // selections take an argument and ride the `:` line.
+        .{ .sequence = "space C s", .command = "share" },
+        .{ .sequence = "space C o", .command = "open-shared" },
+        .{ .sequence = "space C f", .command = "peer-files" },
+        .{ .sequence = "space C p", .command = "peers" },
+        .{ .sequence = "space C x", .command = "disconnect" },
+        // The palette, and the authority-inspection surface beside it.
+        .{ .sequence = "space h h", .command = "pick-commands" },
+        .{ .sequence = "space colon", .command = "pick-commands" }, // config writes `SPC :`
+    };
+    for (showcased) |row| {
+        try t.expectEqualStrings(row.command, ed.keymap.resolveExact("normal", row.sequence).?);
+        if (ed.commands.resolve(row.command) == null) {
+            std.debug.print("[e2e/config] bound but unregistered: {s} -> {s}\n", .{ row.sequence, row.command });
+            return error.BoundCommandMissing;
+        }
+    }
+    // `grants-show` is bound by the config and registered by main() against
+    // the live System (an embedder choice, not a builtin), so assert the
+    // BINDING here and leave the command to `core/System.zig`'s own gate.
+    try t.expectEqualStrings("grants-show", ed.keymap.resolveExact("normal", "space h g").?);
+}
+
+// The intention tier at the config level. Input grammars own most of it (vim
+// binds Return/Tab/`-`/u/C-r), and the config says so rather than duplicating
+// it; what config.js binds ITSELF is asserted here to resolve — not merely to
+// sit in the keymap, but to reach whatever answers it.
+test "e2e/config: the showcased intention binds resolve to what answers them" {
+    const gpa = t.allocator;
+    var app: h.App = undefined;
+    try app.init(gpa);
+    defer app.deinit();
+    const ed = &app.ed;
+
+    // Config tier: persistence asks the focused entry first and falls back to
+    // the plain command — the authored fallback list, carried whole.
+    const save_arms = ed.keymap.resolveExactArms("normal", "space f s").?;
+    try t.expectEqual(@as(usize, 2), save_arms.len);
+    try t.expectEqualStrings("std.persistence.save", save_arms[0]);
+    try t.expectEqualStrings("save", save_arms[1]);
+    const back_arms = ed.keymap.resolveExactArms("normal", "C-o").?;
+    try t.expectEqual(@as(usize, 2), back_arms.len);
+    try t.expectEqualStrings("std.navigation.back", back_arms[0]);
+    try t.expectEqualStrings("navigate-back", back_arms[1]);
+
+    // Grammar tier, observed through the booted config: the arms the config's
+    // comments send the reader to are really there.
+    const activate = ed.keymap.resolveExactArms("normal", "Return").?;
+    try t.expectEqualStrings("std.target.activate", activate[0]);
+    const expand = ed.keymap.resolveExactArms("normal", "Tab").?;
+    try t.expectEqual(@as(usize, 1), expand.len);
+    try t.expectEqualStrings("std.hierarchy.toggle-expanded", expand[0]);
+    const undo_arms = ed.keymap.resolveExactArms("normal", "u").?;
+    try t.expectEqualStrings("std.history.undo", undo_arms[0]);
+
+    // Now ACT. `SPC f s` on a text entry resolves the persistence intention
+    // through core's own offer table and writes the file.
+    authorFile(ed, "note.txt", "first line\n");
+    ed.chord("SPC f s");
+    ed.waitSave();
+    {
+        const disk = try core.file.readAlloc(gpa, "note.txt");
+        defer gpa.free(disk);
+        try t.expect(std.mem.indexOf(u8, disk, "first line") != null);
+    }
+
+    // `C-o` walks back to the entry we came from: no view offered the
+    // navigation intention here, so the second arm — the generic action —
+    // answers, which is exactly what a fallback list is for.
+    ed.runStr("open", "note.txt");
+    const first = try gpa.dupe(u8, ed.bufferName());
+    defer gpa.free(first);
+    authorFile(ed, "other.txt", "second\n");
+    try t.expect(!std.mem.eql(u8, first, ed.bufferName()));
+    ed.press("C-o", "");
+    try t.expectEqualStrings(first, ed.bufferName());
+}
+
+// The values half of the surface: `weft.set(owner, key, value)`, one OWNER
+// per key. The showcase sets values for a plugin, for core's own namespaces,
+// and for the app-level collaboration service — all of them must LAND, since
+// an unknown owner is refused rather than stored.
+test "e2e/config: the showcased weft.set values land under their owners" {
+    const gpa = t.allocator;
+    var proj: Project = undefined;
+    try proj.init(gpa);
+    defer proj.deinit();
+    var ed: Editor = undefined;
+    try Editor.init(gpa, &ed);
+    defer ed.deinit();
+    var loader: ConfigLoader = .{ .ed = &ed };
+    defer loader.deinit();
+    try bootShowcase(gpa, &proj, &ed, &loader);
+
+    const values = [_]struct { owner: []const u8, key: []const u8, value: []const u8 }{
+        .{ .owner = "lsp", .key = "zig", .value = "zls" }, // a plugin's namespace
+        .{ .owner = "which_key", .key = "delay-ms", .value = "200" },
+        .{ .owner = "which_key", .key = "placement", .value = "corner" },
+        .{ .owner = "editor", .key = "flash-ms", .value = "150" }, // core knobs
+        .{ .owner = "collab", .key = "share-presence", .value = "on" }, // the app service
+        .{ .owner = "theme", .key = "accent", .value = "#8ec07c" },
+    };
+    for (values) |v| {
+        const blob = ed.config_kv.get(v.owner, v.key) orelse {
+            std.debug.print("[e2e/config] value dropped: {s}/{s}\n", .{ v.owner, v.key });
+            return error.ConfigValueDropped;
+        };
+        try t.expect(std.mem.indexOf(u8, blob, v.value) != null);
+    }
+    // Presence defaults ON for the interactive editor and the config says so
+    // explicitly; `off` is the opt-out that same key spells.
+    try t.expect(app_collab.presenceDefault(null, "on"));
+    try t.expect(!app_collab.presenceDefault(null, "off"));
 }

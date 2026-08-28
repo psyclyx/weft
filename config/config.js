@@ -1,28 +1,43 @@
-// config.js — the sample user config, run in quickjs.wasm (plan 06B). This is
-// the local plane: the reborn init.fnl, now JavaScript. It reaches the editor
-// ONLY through the `weft.*` surface the sandbox grants — the same door a plugin
-// uses, no core privilege. weft ships modeless; this config brings up the
-// reference catalog itself, so the dev entry point needs no --plugin flags.
+// config.js — weft's reference configuration, and the showcase: read it top
+// to bottom to learn what the editor can do. Every claim below is held honest
+// by the e2e gates (src/e2e/config_test.zig) — a key that names a command
+// nobody registers, a plugin the catalog lost, a grant that admits more than
+// it declares, all fail the build.
 //
-// Available:
-//   weft.plugin(name)              — load a reference plugin (or a .wasm path)
-//   weft.bind(mode, keys, command) — bind a key or a key SEQUENCE ("SPC f f")
-//                                    in a mode; a multi-key sequence is a chord,
-//                                    its prefixes are which-key menus for free
+// It runs in quickjs.wasm and reaches the editor ONLY through the `weft.*`
+// surface — the same door a plugin uses, no core privilege. Evaluation is
+// SEALED: nothing here pokes a live editor. The file evaluates to a MANIFEST
+// the kernel applies as one value, so load ORDER below is for the reader, not
+// for the machine.
+//
+// Companion: config.northstar.js is this same surface re-narrated in
+// north-star terms (manifests, systems, trust roots). It is the argument that
+// the end-state model costs the degenerate case nothing; this file is the
+// daily driver. The M3/M4 parity gate compares the two as ONE surface, so a
+// line added here must land there too.
+//
+// The whole config plane:
+//   weft.plugin(name)              — load a reference plugin (or a .wasm/.js path)
+//   weft.use(name)                 — import a config fragment from this directory
+//   weft.grant(who, cap[, {root}]) — delegate an effect; without one, closed
+//   weft.bind(mode, keys, cmd)     — bind a key or a key SEQUENCE ("SPC f f");
+//                                    a LIST is an authored fallback, tried in order
 //   weft.action(name)              — declare an abstract intent a key can bind to
+//   weft.provide(name, when, cmd[, prio]) — a provider for one, chosen by
+//                                    {mode, lang} at fire time
 //   weft.semanticAction(name)      — declare an open focused-view action command
-//   weft.provide(name, when, cmd[, prio]) — a provider for an action, chosen by
-//                                    {mode, lang} at fire time (the synthetic bind)
-//   weft.set(plugin, key, value)   — hand a plugin config data (overrides defaults)
-//   weft.run(command, ...args)     — invoke a command now; up to eight bounded
-//                                    string args (e.g. grammar-add)
-//   weft.echo(message)             — a transient status-line message
-//   weft.log(message)              — a line to the editor log
+//   weft.viewport(name, attrs)     — compose the workspace: a pane's attributes
+//   weft.present(viewport, {subject}) — show a resource in one
+//   weft.set(owner, key, value)    — a value binding; every key has an OWNER
+//   weft.menu(name)                — declare a prefix-menu keymap mode
+//   weft.statusSegment(text, role, prio) — a static status-line segment
+//   weft.run(command, ...args)     — invoke a command now, up to eight string args
+//   weft.echo(message) / weft.log(message)
 
-// Bring up the catalog. Each runs sandboxed under wasmtime behind the perm
-// handshake; loading is synchronous, so the commands they register exist by
-// the time the binds below reference them. Order matters only where one
-// plugin's keymap layers over another's commands.
+// ── The catalog ──────────────────────────────────────────────────────
+// Reference plugins, each sandboxed under wasmtime behind the perm handshake.
+// weft ships modeless; this config brings up the catalog itself, so the dev
+// entry point needs no --plugin flags.
 weft.plugin("edit");        // line operators: duplicate-line, upcase-line, …
 weft.plugin("complete");    // buffer-word completion provider
 weft.plugin("project");     // recent files, project history
@@ -45,7 +60,7 @@ weft.plugin("git");         // git status/log/diff into tool buffers (proc)
 weft.plugin("grep");        // ripgrep the project into a tool buffer (proc)
 weft.plugin("run");         // run a shell command / the current line (proc)
 weft.plugin("make");        // zig build / test into tool buffers (proc)
-weft.plugin("notes");       // capture/open notes over fs read+write
+weft.plugin("notes");       // capture/open notes, and resolve their embeds (fs)
 weft.plugin("fmt");         // format-buffer (by extension) + filter (proc)
 weft.plugin("buffers");     // buf-pick (fuzzy buffer switch), buf-scratch
 weft.plugin("windows");     // win-split/vsplit/focus/close/center
@@ -59,44 +74,98 @@ weft.plugin("net");         // raw TCP/TLS transport (net.connect)
 weft.plugin("which_key");   // menu-hint overlay, as a plugin over the surface door
 weft.plugin("files");       // file browser; the target handler owns its semantic scene/actions
 weft.plugin("lsp");         // language server client (hover/def/… over jsonrpc)
-weft.set("lsp", "zig", "zls"); // server per language: weft.set("lsp","<lang>","<cmd>")
 weft.plugin("debug");       // breakpoints (gutter markers) — the debugger's first slice
-// A `.js` plugin declares nothing about itself, so `weft.grant` is its ONLY
-// door to an effect: with no grant it fails closed and every weft.procSpawn /
-// weft.fileRead call throws. The DAP client needs `proc` — it drives a debug
-// adapter over stdio. (Grants apply as their own pass before any plugin
-// loads, so this reads next to the load purely for the reader's sake.)
-weft.grant("dap", "proc");
-weft.plugin("dap.js");      // DAP client: run/step/inspect (set weft.set("dap","cmd",<adapter>))
 
-// Shared, editor-agnostic key bindings (the picker, and — below — which-key nav):
-// core ships the commands + modes; the BINDINGS are config data. Overridable by
-// anything bound after this line.
+// ── `.js` plugins and their GRANTS ───────────────────────────────────
+// A `.js` plugin has no describe() handshake to ask for anything, so
+// `weft.grant` is its ONLY door to an effect: with no grant it fails CLOSED
+// and every weft.procSpawn / weft.fileRead call throws at the call site.
+// Grants mint before any plugin loads, so each pair below reads as one
+// thought: what it may do, then what it is.
+//
+// A grant may also be NARROWED — `weft.grant("dap", "fs_read", {root:
+// "./src"})` confines the capability to a filesystem root.
+weft.grant("dap", "proc");  // drive a debug adapter over stdio
+weft.plugin("dap.js");      // DAP client: run/step/inspect (see weft.set("dap", …) below)
+
+// The ACP agent client. weft is the harness: the agent's file I/O and tool
+// approvals cross the ABI, so every agent edit is a gated, attributed peer
+// commit. These three lines ARE the agent's authority — delete one and that
+// door closes for good.
+weft.grant("acp", "proc");     // spawn + drive the agent over stdio
+weft.grant("acp", "fs_read");  // answer its fs/read_text_file
+weft.grant("acp", "fs_write"); // answer its fs/write_text_file
+weft.plugin("acp.js");         // conversations are instances: *agent*, *agent:2*, …
+
+// ── Fragments ────────────────────────────────────────────────────────
+// A fragment is an ordinary config file in this directory, imported as a
+// manifest. `defaults` holds the editor-agnostic picker/which-key bindings
+// core would otherwise have to carry as key policy; anything bound after it
+// wins.
 weft.use("defaults");
 
-// ── Doom-Emacs-style leader (SPC). A menu is a prefix KEY SEQUENCE, not a mode:
-// `space` is just the first key of chords like `space f f`. The keymap holds the
-// chord pending as you type it (which_key shows the next-key completions off the
-// pending prefix) and runs the leaf when the sequence completes. No `weft.menu`,
-// no mode to enter — `space g g` never touches a `leader-git` mode, it's one key
-// sequence bound in `normal`. `space C-w` is inert (a distinct chord), so the
-// global window prefix (`C-w …`) can't be reached through the leader.
+// `sidebar` docks a files browser at the left edge. "Sidebar" is not a kind
+// the workspace knows — it is a named bundle of viewport ATTRIBUTES (dock
+// edge, out of the cycling rotation, owns its entry, not a focus source) plus
+// one `weft.present` line. Read config/sidebar.js: there is no window
+// management code in it anywhere, and slotting in document symbols instead of
+// files would be a different `weft.present`, not a different plugin.
+// Left to you rather than made the default: a docked companion claims a
+// quarter of every frame, which is a workspace opinion the reference config
+// declines to hold for you.
+// weft.use("sidebar");
 
-// which-key: hold a prefix for this long before the hint pops (doom-style idle
-// delay). F1 forces it now (a peek at the top-level choices from normal).
-weft.set("which_key", "delay-ms", "200"); // owned by which_key, not the old "editor" grab-bag
-weft.bind("global", "F1", "which-key-now");
+// ── Values: weft.set(owner, key, value) ──────────────────────────────
+// Every value has an OWNER — the plugin (or core namespace) that reads it.
+// There is no grab-bag namespace; an unknown owner is refused, not stored.
+weft.set("lsp", "zig", "zls");            // a server per language: weft.set("lsp","<lang>","<cmd>")
+weft.set("which_key", "delay-ms", "200"); // hold a prefix this long before the hint pops
+weft.set("which_key", "placement", "corner"); // or "center"
+weft.set("editor", "flash-ms", "150");    // how long an operator flashes its range
+weft.set("collab", "share-presence", "on"); // "off" hides your caret from peers
+// Yours to fill in — weft assumes nothing about how any of these is installed:
+// weft.set("acp", "cmd", "codex-acp"); // or claude-agent-acp, gemini --experimental-acp, …
+// weft.set("acp", "prompt", "Summarize this project."); // the opening turn
+// weft.set("dap", "cmd", "lldb-dap");  // your debug adapter
+// weft.set("llm", "cmd", "llm");       // the CLI `SPC o a` asks
+// One more value-shaped verb, for when you want a fixed chip in the status
+// line (the UI mesh's `ui/statusline-seg` slot, at config priority):
+// weft.statusSegment("weft", "muted", 10);
+
+// ── Keys ─────────────────────────────────────────────────────────────
+//
+// Doom-Emacs-style leader (SPC). A menu is a prefix KEY SEQUENCE, not a mode:
+// `space` is just the first key of chords like `space f f`. The keymap holds
+// the chord pending as you type it (which_key shows the next-key completions
+// off the pending prefix) and runs the leaf when the sequence completes. No
+// `weft.menu`, no mode to enter — `space g g` never touches a `leader-git`
+// mode, it's one key sequence bound in `normal`. `space C-w` is inert (a
+// distinct chord), so the global window prefix (`C-w …`) can't be reached
+// through the leader.
+//
+// INTENTIONS vs COMMANDS. A key may name a `std.*` intention instead of a
+// command: the focused view's own vocabulary publishes the offer that answers
+// it, so one key means the right thing in a directory, a git buffer, and a
+// note. Input GRAMMARS own most of that — vim binds Return, Tab, `-`, `u`,
+// `C-r` and `q` to intentions with a text fallback, and rebinding them here
+// would be overriding the grammar, not configuring it. What belongs at THIS
+// tier is the small set below, where the intention is the config author's
+// choice: the structured-view group (SPC v), persistence, and going back.
+
+weft.bind("global", "F1", "which-key-now"); // force the hint now, mid-chord
 
 // Top-level leader: quick actions (the group prefixes below are implied by the
 // longer sequences — `space f …` makes `space f` a group automatically).
-weft.bind("normal", "SPC SPC", "find-file");     // SPC SPC — find file
+weft.bind("normal", "SPC SPC", "find-file");   // SPC SPC — find file
 weft.bind("normal", "SPC :", "pick-commands"); // SPC :   — M-x (run a command)
-weft.bind("normal", "SPC .", "find-file");    // SPC .   — find file
+weft.bind("normal", "SPC .", "find-file");     // SPC .   — find file
 weft.bind("normal", "SPC ,", "buf-pick");      // SPC ,   — switch buffer
 
-// SPC f — files
+// SPC f — files. `f s` asks for the persistence INTENTION and falls back to
+// the plain command: in a *git-commit* buffer that commits, in a note it
+// saves. `SPC b s` below is the same key without the question.
 weft.bind("normal", "SPC f f", "find-file");
-weft.bind("normal", "SPC f s", "save");
+weft.bind("normal", "SPC f s", ["std.persistence.save", "save"]);
 weft.bind("normal", "SPC f S", "save-as");
 weft.bind("normal", "SPC f r", "project-recent");
 weft.bind("normal", "SPC f d", "files");
@@ -112,7 +181,7 @@ weft.bind("normal", "SPC b N", "buf-scratch");
 // SPC g — git. `git-status` opens the *git* model buffer, which runs its own
 // `git` keymap: j/k move, TAB folds, s/u stage/unstage (file/hunk/region),
 // S/U stage-all, g refresh, RET visits a file (or shows a commit), q leaves.
-// The Phase-2b/2c transients (which-key renders each menu mode):
+// The transients (which-key renders each menu mode):
 //   c  commit dispatch  — c commit · a amend · e extend · w reword ·
 //                          f fixup · s squash (fixup/squash target the commit
 //                          under point; amend/reword reuse the *git-commit* buffer)
@@ -124,7 +193,7 @@ weft.bind("normal", "SPC b N", "buf-scratch");
 //   A/V  cherry-pick / revert the commit under point
 //   P/F/f  push/pull/fetch — flag transients (toggle -f/-u, --rebase, --all/--prune)
 weft.bind("normal", "SPC g g", "git-status");
-weft.bind("normal", "SPC g i", "git-init"); // start version control (git init) from the editor
+weft.bind("normal", "SPC g i", "git-init"); // start version control from the editor
 weft.bind("normal", "SPC g l", "git-log");
 weft.bind("normal", "SPC g d", "git-diff");
 weft.bind("normal", "SPC g D", "git-diff-staged");
@@ -136,9 +205,13 @@ weft.bind("normal", "SPC g b", "git-blame");
 weft.bind("normal", ".", "repeat-change");
 
 // `/` — search in this buffer (vim's search key). consult-line is a fuzzy
-// in-buffer jump: type a pattern, Return lands on the match. (A vim user reaches
-// for `/`; without this it did nothing — only SPC s s / SPC / were bound.)
+// in-buffer jump: type a pattern, Return lands on the match.
 weft.bind("normal", "/", "consult-line");
+
+// `C-o` — back where you came from, vim's jump-list key. The intention first:
+// a focused view that knows its own history answers it; otherwise the generic
+// buffer-back action does.
+weft.bind("normal", "C-o", ["std.navigation.back", "navigate-back"]);
 
 // SPC s — search
 weft.bind("normal", "SPC s s", "consult-line");
@@ -155,24 +228,20 @@ weft.bind("normal", "SPC p /", "grep");
 
 // SPC c — code
 weft.bind("normal", "SPC c c", "comment-line");
-weft.bind("normal", "SPC c f", "format"); // the format action (see above)
+weft.bind("normal", "SPC c f", "format"); // the format action (below)
 weft.bind("normal", "SPC c d", "goto-definition");
 weft.bind("normal", "SPC c h", "hover");
 weft.bind("normal", "SPC c s", "symbols");
 weft.bind("normal", "SPC c F", "lsp-format"); // format via the language server
 weft.bind("normal", "SPC c R", "references");
 weft.bind("normal", "g r", "references"); // vim-style
-weft.bind("normal", "g R", "rename"); // rename the symbol under the cursor
+weft.bind("normal", "g R", "rename");     // rename the symbol under the cursor
 weft.bind("normal", "SPC c k", "signature-help");
 weft.bind("normal", "SPC c i", "inlay-hints");
 weft.bind("normal", "SPC c a", "code-actions");
 weft.bind("normal", "] d", "next-diagnostic"); // vim-style diagnostic navigation
 weft.bind("normal", "[ d", "prev-diagnostic");
-
-// Completion — trigger the at-caret popup (buffer-word + LSP race + merge-rank).
-// C-SPC from insert (where you're typing) and normal (browse from rest).
-weft.bind("insert", "C-SPC", "complete");
-weft.bind("normal", "C-SPC", "complete");
+weft.bind("normal", "K", "hover");        // vim-style: K shows hover
 weft.bind("normal", "SPC c e", "ts-expand-selection");
 weft.bind("normal", "SPC c n", "ts-select-node");
 weft.bind("normal", "SPC c b", "make-build");
@@ -180,56 +249,60 @@ weft.bind("normal", "SPC c t", "make-test");
 weft.bind("normal", "SPC c r", "lang-run");
 weft.bind("normal", "SPC c x", "run-line");
 
-// ── Actions: abstract intents resolved by CONTEXT (the dispatch middle tier).
-// weft.action(name) declares an intent a key binds to; weft.provide(name, when,
-// cmd[, prio]) registers a provider chosen by {mode, lang} when it fires. Bind
-// the key ONCE — a .zig buffer and a shell script run different commands, and
-// any language plugin can weft.provide a new provider without touching this
-// keymap. `eval` unifies the old SPC-c r/x split (lang-run vs run-line) into one
-// language-aware key; a buffer with no provider echoes "no eval provider here".
+// Completion — trigger the at-caret popup (buffer-word + LSP race + merge-rank).
+// C-SPC from insert (where you're typing) and normal (browse from rest).
+weft.bind("insert", "C-SPC", "complete");
+weft.bind("normal", "C-SPC", "complete");
+
+// ── Actions: abstract intents resolved by CONTEXT ────────────────────
+// The dispatch middle tier. weft.action(name) declares an intent a key binds
+// to; weft.provide(name, when, cmd[, prio]) registers a provider chosen by
+// {mode, lang} when it fires. Bind the key ONCE — a .zig buffer and a shell
+// script run different commands, and any language plugin can weft.provide a
+// new provider without touching this keymap. `eval` unifies the SPC-c r/x
+// split (lang-run vs run-line) into one language-aware key; a buffer with no
+// provider echoes "no eval provider here". `:explain-binding eval` says which
+// provider wins here and why.
 weft.action("eval");
 weft.provide("eval", {}, "run-line");                 // default: run the current line
 weft.provide("eval", { lang: "zig" }, "make-build");  // a .zig buffer builds the project
 weft.provide("eval", { lang: "py" }, "lang-run");     // python: the language runner
-weft.bind("normal", "SPC e", "eval");               // SPC e — eval/run, by language
+weft.bind("normal", "SPC e", "eval");                 // SPC e — eval/run, by language
 
 // format is likewise an action: fmt handles most languages by extension, but a
-// language plugin can weft.provide("format", {lang:"…"}, "…") to override. The
-// SPC c f binding below targets this action instead of format-buffer directly.
+// language plugin can weft.provide("format", {lang:"…"}, "…") to override.
 weft.action("format");
 weft.provide("format", {}, "format-buffer");
 
-// vim-style: K shows hover, gd goes to definition, gs lists symbols
-weft.bind("normal", "K", "hover");
-
-// ── Coding agents (ACP). Uncomment + point at your agent adapter to enable.
-// weft is the harness: the agent's file I/O and tool approvals cross the ABI,
-// so each edit is a gated, attributed peer commit. The launch command is YOURS
-// (weft assumes nothing about how it's installed — NixOS-friendly):
-//   weft.set("acp", "cmd", "codex-acp");   // or claude-agent-acp / gemini --experimental-acp / …
-//   weft.set("acp", "prompt", "Summarize this project.");
-//   weft.grant("acp", "proc");             // spawn + drive the agent over stdio
-//   weft.grant("acp", "fs_read");          // answer the agent's fs/read_text_file
-//   weft.grant("acp", "fs_write");         // answer its fs/write_text_file
-//   weft.plugin("acp.js");                 // the ACP client (a JS plugin)
-//   weft.bind("normal", "SPC o A", "agent-start"); // SPC o A — start the agent
-//   weft.bind("normal", "SPC o s", "agent-send");  // SPC o s — send this line
-
-// SPC o — open / tools
+// ── SPC o — tools, and the INSTANCING surface ────────────────────────
+// A tool that holds state is instantiable: each start mints its own buffer
+// (`*repl*`, `*repl:2*`, …) and that NAME is the instance's identity, so two
+// instances never share a sink. A send routes to the instance whose buffer is
+// focused, else the most recent — never to "the current one". Lowercase
+// starts an instance here; uppercase talks to the focused one.
 weft.bind("normal", "SPC o d", "files");
-weft.bind("normal", "SPC o r", "repl-start");
-weft.bind("normal", "SPC o c", "console-open");
 weft.bind("normal", "SPC o e", "direnv-status");
-weft.bind("normal", "SPC o a", "llm-ask-line");
+weft.bind("normal", "SPC o r", "repl-start");
+weft.bind("normal", "SPC o R", "repl-send-line");
+weft.bind("normal", "SPC o q", "repl-quit");
+weft.bind("normal", "SPC o c", "console-open");
+weft.bind("normal", "SPC o C", "console-send");
+weft.bind("normal", "SPC o a", "llm-ask-line"); // one-shot: each ask is its own instance
 
-// SPC d — debug. Breakpoints today (gutter markers); run/step/inspect arrive
-// with the debug adapter. F9 toggles a breakpoint (the IDE convention).
+// SPC a — coding agents (ACP). Each `agent-start` is a fresh conversation:
+// its own subprocess, transcript buffer and CRDT sub-peer, so selective undo
+// separates one agent's edits from another's. Set weft.set("acp", "cmd", …)
+// above first; the launch command is yours, weft assumes nothing.
+weft.bind("normal", "SPC a a", "agent-start");
+weft.bind("normal", "SPC a s", "agent-send");  // send this line to the focused conversation
+weft.bind("normal", "SPC a f", "agent-focus"); // choose which conversation that is
+
+// SPC d — debug. Breakpoints are gutter markers the debug plugin owns;
+// run/step/inspect are the DAP session (dap.js) over the adapter you named.
+// F5/F9/F10/F11 are the IDE conventions; the SPC d leaves mirror them.
 weft.bind("normal", "SPC d b", "debug-toggle-breakpoint");
 weft.bind("normal", "SPC d c", "debug-clear-breakpoints");
 weft.bind("normal", "SPC d l", "debug-list-breakpoints");
-weft.bind("normal", "F9", "debug-toggle-breakpoint");
-// The DAP session (dap.js): start, continue, step, stop. F5/F10/F11 are the IDE
-// conventions; the SPC d leaf mirrors them.
 weft.bind("normal", "SPC d d", "debug-start");
 weft.bind("normal", "SPC d r", "debug-continue");
 weft.bind("normal", "SPC d n", "debug-step-over");
@@ -237,16 +310,53 @@ weft.bind("normal", "SPC d i", "debug-step-into");
 weft.bind("normal", "SPC d o", "debug-step-out");
 weft.bind("normal", "SPC d q", "debug-stop");
 weft.bind("normal", "F5", "debug-continue");
+weft.bind("normal", "F9", "debug-toggle-breakpoint");
 weft.bind("normal", "F10", "debug-step-over");
 weft.bind("normal", "F11", "debug-step-into");
 
-// SPC n — notes
+// ── SPC n — notes and EMBEDS ─────────────────────────────────────────
+// `notes-capture` appends the current line to the notes file; `notes-capture-
+// here` appends a link to where you are, as an embed line:
+//
+//     @embed weft://here/file/src/core/Head.zig?at=1024
+//
+// That text is both the storage form and the fallback form. `notes-embeds`
+// resolves every embed in the focused note and renders each live beside its
+// own bytes; one that cannot resolve (no grant, gone, no provider) shows its
+// reason instead and never errors the note. Return on an embed line opens
+// what it designates — the same `std.target.activate` as everywhere else.
 weft.bind("normal", "SPC n n", "notes-open");
 weft.bind("normal", "SPC n c", "notes-capture");
+weft.bind("normal", "SPC n h", "notes-capture-here");
+weft.bind("normal", "SPC n e", "notes-embeds");
+weft.bind("normal", "SPC n E", "notes-embeds-off");
+
+// ── SPC C — collaboration ────────────────────────────────────────────
+// `share` announces the active buffer to every peer. With a PRESET it also
+// selects the authority that goes with it — `:share look_together` (read
+// along), `:share pair` (edit together), `:share review` (comment) — and the
+// confirmation you read is rendered FROM the bundle, so the text approved and
+// the authority selected are the same value. Presets and export selections
+// take an argument, so they ride the `:` line:
+//
+//     :share pair              :share-presence off      :share-fs read
+//     :listen 7000 edit        :connect host:7000       :grant <fp> edit
+//
+// `share-fs` selects which surfaces of a `--share-root` peers hold
+// (hierarchy | bytes | write, or none/read/rw). Presence is separate from
+// sharing a document: it defaults on (see weft.set("collab", …) above) and
+// `off` retracts the caret peers are already rendering.
+weft.bind("normal", "SPC C s", "share");
+weft.bind("normal", "SPC C o", "open-shared"); // open a buffer a peer shared
+weft.bind("normal", "SPC C f", "peer-files");  // browse the peer's shared root
+weft.bind("normal", "SPC C p", "peers");       // fingerprints, SAS words, trust
+weft.bind("normal", "SPC C x", "disconnect");
 
 // SPC w — window. Split/close via the windows plugin; focus + move go
 // straight to the core window-layout commands (a real recursive split
-// tree), so h/j/k/l walk panes and H/J/K/L swap them, vim-style.
+// tree), so h/j/k/l walk panes and H/J/K/L swap them, vim-style. The sidebar
+// is out of the cycling rotation by declaration, so directional focus is how
+// you reach it.
 weft.bind("normal", "SPC w v", "win-vsplit");
 weft.bind("normal", "SPC w s", "win-split");
 weft.bind("normal", "SPC w w", "win-focus");
@@ -266,28 +376,33 @@ weft.bind("normal", "SPC w L", "window-move-right");
 // SPC q — quit
 weft.bind("normal", "SPC q q", "quit");
 
-// SPC h — help (execute/describe a command via the palette)
+// SPC h — help. The palette lists commands AND the live offers the focused
+// entry publishes, each attributed to its provider, so it doubles as "what
+// can I do here". `grants-show` lists every authority row this session ever
+// minted, alive or revoked.
 weft.bind("normal", "SPC h c", "pick-commands");
 weft.bind("normal", "SPC h h", "pick-commands");
+weft.bind("normal", "SPC h g", "grants-show");
 
 // SPC t — toggle
 weft.bind("normal", "SPC t w", "trim-trailing-buffer");
 weft.bind("normal", "SPC t c", "comment-line");
 
-// SPC v — generic structured-view controls. Movement remains an ordinary
-// input command; every operation below names the exact open semantic action
-// advertised by a directory view, picker, or any other plugin-owned scene.
-//
-// Keep the declaration data-shaped: adding another generic view action is one
-// entry here, and a plugin never needs to know which tool/config supplied the
-// binding. Dialog inputs intentionally do not belong in this group; an active
+// ── SPC v — structured views ─────────────────────────────────────────
+// One group that works in ANY plugin-owned scene — a directory, a picker, a
+// git model — because every operation below names either a standard intention
+// or the exact open action the scene advertises. Movement stays an ordinary
+// input command. Dialog inputs deliberately do NOT belong here: an active
 // interaction owns those locally and consumes them before global keymaps.
+//
+// Both groups are eval-time code building manifest data: adding another view
+// action is one row, and a plugin never needs to know which tool or config
+// supplied the binding.
 function bindActionGroup(mode, prefix, bindings) {
   for (var i = 0; i < bindings.length; i++) {
     var binding = bindings[i];
-    // Semantic action names are an open plugin/view protocol. Declaring the
-    // command here keeps this table data-shaped: a future structured view can
-    // add its own action without a core or Vim/file-browser special case.
+    // Semantic action names are an open plugin/view protocol; declaring the
+    // command here keeps the table data-shaped.
     weft.semanticAction(binding[1]);
     weft.bind(mode, prefix + " " + binding[0], binding[1]);
   }
@@ -313,7 +428,7 @@ bindIntentionGroup("normal", "SPC v", [
   ["p", "std.transfer.paste"],
 ]);
 // The residue: operations no standard intention names yet, still reached by
-// their open action name.
+// their open action name. This list shrinks as the vocabulary grows.
 bindActionGroup("normal", "SPC v", [
   ["c", "workspace.set-working-target"],
   ["e", "field.edit"],
@@ -343,10 +458,14 @@ weft.bind("insert", "parenright", "pair-close-paren");
 weft.bind("insert", "braceright", "pair-close-brace");
 weft.bind("insert", "bracketright", "pair-close-bracket");
 
-// Theme is data: override any Theme field by name with an sRGB hex. (A full
-// colorscheme is just a block of these; `set-color` does the same at runtime.)
+// ── Theme ────────────────────────────────────────────────────────────
+// Theme is data: override any Theme field by name with an sRGB hex. A whole
+// colorscheme is just a block of these — a fragment you weft.use(); the
+// runtime `set-color` command does the same thing live.
 weft.set("theme", "accent", "#8ec07c");
 weft.set("theme", "cursor", "#fabd2f");
 weft.set("theme", "selection", "#3c4a5e");
+weft.set("theme", "syn_comment", "#7c6f64");
+weft.set("theme", "diag_error", "#fb4934");
 
 weft.echo("weft: config.js loaded");
