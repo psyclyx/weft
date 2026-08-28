@@ -20,6 +20,7 @@ test {
     _ = @import("menu_test.zig");
     _ = @import("collab_test.zig");
     _ = @import("project_test.zig");
+    _ = @import("git_gates_test.zig");
     _ = @import("config_test.zig");
     _ = @import("authoring_test.zig");
     _ = @import("teardown_test.zig");
