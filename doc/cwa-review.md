@@ -422,3 +422,9 @@ than edited in place, so the review stays a record of what it saw.
    `configuration.md`, `contextual-workspace-architecture.md`,
    `extensibility-native-surface.md`, or `cwa-prior-docs-audit.md` where only
    the historical record holds the decision).
+6. **Wave H landed.** Viewport attributes, the placement policy, and input
+   postures (§7, §9.4, §10.4) are in, on `main` as of `fd8b032`
+   (2026-08-27).
+7. **Wave I landed.** The first two §11.8 embedding depths — render-embed
+   and editable field, compositing through the annotation seam — are in, on
+   `main` as of `fd8b032` (2026-08-27).
