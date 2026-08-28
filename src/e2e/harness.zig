@@ -297,12 +297,25 @@ pub const Editor = struct {
     }
 
     /// Mint what `weft.grant(plugin, capability)` mints from config — for a
-    /// test that loads a `.js` plugin DIRECTLY (`loadJs`) instead of through
-    /// a config manifest, which would mint these itself. Must precede
-    /// `loadJs`: that is when a plugin adopts its rows. `plugin`/`capability`
-    /// are borrowed by the table (string literals at every call site).
+    /// test that loads a plugin DIRECTLY (`load`/`loadJs`) instead of through
+    /// a config manifest, which would mint these itself. Must precede the
+    /// load: that is when a plugin adopts (or composes with) its rows.
+    /// `plugin`/`capability` are borrowed by the table (string literals at
+    /// every call site).
     pub fn grant(self: *Editor, plugin: []const u8, capability: []const u8) !void {
-        _ = try self.session.system.grants.grant(.{ .capability = capability }, plugin, null);
+        return self.grantRooted(plugin, capability, "");
+    }
+
+    /// `weft.grant(plugin, capability, { root })`, with the SAME limit rule
+    /// config applies (`grants.limitForRoot`) rather than a second one that
+    /// could drift: `""` means no `opts` at all — CONFINED to the dispatching
+    /// place for the fs capabilities (doc/place.md §4.1) — and `"/"` is the
+    /// written-down unconfined form.
+    pub fn grantRooted(self: *Editor, plugin: []const u8, capability: []const u8, root: []const u8) !void {
+        _ = try self.session.system.grants.grant(.{
+            .capability = capability,
+            .limit = core.grants.limitForRoot(capability, root),
+        }, plugin, null);
     }
 
     /// Load a resident JS plugin (a quickjs reactor — acp.js / dap.js), named so
@@ -1073,7 +1086,21 @@ const guest = struct {
     /// module doc: the minimal guest the two-head gate's guest-ABI tests
     /// (`two_head_test.zig`) drive.
     const headtest = @embedFile("guest_headtest_wasm");
+    /// Test fixture only — `src/guest/fs_limit.zig`: declares fs_read +
+    /// fs_write and exposes each path-taking door as a command reading its
+    /// path from the args, so a test controls exactly which path to try
+    /// against whichever grant is in force. The place gates
+    /// (`project_test.zig`) drive it across two projects.
+    const fs_limit = @embedFile("guest_fs_limit_wasm");
 };
+
+/// Load the fs-door probe fixture with NO config grant of any kind, so it
+/// holds exactly the confined-by-default baseline `describe()` earns it
+/// (doc/place.md §4.1). Deliberately not part of any bundle: a test that wants
+/// to probe filesystem reach should have said so.
+pub fn loadFsLimit(ed: *Editor) !void {
+    try ed.load("fs_limit", guest.fs_limit);
+}
 
 /// The base editing set under an EMACS keymap (modeless: printable keys self-
 /// insert). The coworker in the collab matrix who "uses emacs, but can edit".
@@ -1167,6 +1194,14 @@ pub fn loadSpine(ed: *Editor) !void {
 /// whole-app "web" e2e verticals.
 pub fn loadWebIde(ed: *Editor) !void {
     try loadWorkspace(ed);
+    // The two grant lines config.js carries for the browser, minted the same
+    // way here because this harness bypasses the config manifest. Without
+    // them the browser holds the confined-by-default `.place` grant, and its
+    // typed target doors refuse — they prove authority against a provider
+    // root, so there is no path for a path-shaped limit to be checked against
+    // (doc/place.md §4.1).
+    try ed.grantRooted("files", "fs_read", "/");
+    try ed.grantRooted("files", "fs_write", "/");
     try ed.load("files", guest.files);
     try ed.load("grep", guest.grep);
     try ed.load("run", guest.run);

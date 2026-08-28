@@ -2049,6 +2049,80 @@ test "e2e/place: grep searches the focused file's project, not the launch direct
     }
 }
 
+/// The dispatching place's local directory, read the way the fs doors read it
+/// (`core.place.realize` through the session's own realizer) rather than
+/// reconstructed from the test's own idea of where things are. Caller frees.
+fn placeDirOf(ed: *Editor, gpa: std.mem.Allocator) ![]u8 {
+    return switch (core.place.realize(ed.ctx.place(), ed.ctx.realizer)) {
+        .path => |abs| try gpa.dupe(u8, abs),
+        .process, .elsewhere, .unavailable => error.NoLocalPlaceHere,
+    };
+}
+
+test "e2e/place: an ungranted fs capability reads the project it is in and refuses the one next door (doc/place.md §4.1)" {
+    const gpa = t.allocator;
+    var proj: Project = undefined;
+    try proj.init(gpa);
+    defer proj.deinit();
+
+    var ed: Editor = undefined;
+    try Editor.init(gpa, &ed);
+    defer ed.deinit();
+    try loadWorkspace(&ed);
+    // The probe declares fs_read + fs_write in `describe()` and gets NO
+    // `weft.grant` line anywhere — the case the shipped config leaves alone,
+    // and the one that used to mean "the whole filesystem".
+    try h.loadFsLimit(&ed);
+
+    for ([_][]const u8{
+        "mkdir -p place-a/.git place-b/.git",
+        "printf 'alpha secret\\n' > place-a/a.txt",
+        "printf 'beta secret\\n' > place-b/b.txt",
+    }) |cmd| {
+        const out = try proj.oracle(cmd);
+        gpa.free(out);
+    }
+
+    // Open a file in each project once, to learn what each place resolves to.
+    ed.runStr("open", "place-a/a.txt");
+    const dir_a = try placeDirOf(&ed, gpa);
+    defer gpa.free(dir_a);
+    ed.runStr("open", "place-b/b.txt");
+    const dir_b = try placeDirOf(&ed, gpa);
+    defer gpa.free(dir_b);
+    try t.expect(!std.mem.eql(u8, dir_a, dir_b)); // two projects, two places
+
+    const a_file = try std.fmt.allocPrint(gpa, "{s}/a.txt", .{dir_a});
+    defer gpa.free(a_file);
+    const b_file = try std.fmt.allocPrint(gpa, "{s}/b.txt", .{dir_b});
+    defer gpa.free(b_file);
+
+    // ── Acting in B (where focus is). ──
+    const in_b = try core.command.run(ed.commands, ed.ctx, "try-read", &.{.{ .string = b_file }});
+    try t.expect(std.mem.indexOf(u8, in_b.string, "beta secret") != null);
+    // A place-relative name means "in this project" — which is what makes one
+    // grant follow the user instead of naming a directory forever.
+    const rel_b = try core.command.run(ed.commands, ed.ctx, "try-read", &.{.{ .string = "b.txt" }});
+    try t.expect(std.mem.indexOf(u8, rel_b.string, "beta secret") != null);
+    // THE GATE: the sibling project is refused. Nothing in config changed, and
+    // nothing in config could have — the confinement is the dispatch's place.
+    try t.expectError(error.Trap, core.command.run(ed.commands, ed.ctx, "try-read", &.{.{ .string = a_file }}));
+    try t.expectError(error.Trap, core.command.run(ed.commands, ed.ctx, "try-exists", &.{.{ .string = a_file }}));
+    try t.expectError(error.Trap, core.command.run(ed.commands, ed.ctx, "try-write", &.{ .{ .string = a_file }, .{ .string = "owned" } }));
+
+    // ── The same plugin, the same grant, focus moved to A: the answers swap. ──
+    ed.runStr("open", "place-a/a.txt");
+    const in_a = try core.command.run(ed.commands, ed.ctx, "try-read", &.{.{ .string = a_file }});
+    try t.expect(std.mem.indexOf(u8, in_a.string, "alpha secret") != null);
+    try t.expectError(error.Trap, core.command.run(ed.commands, ed.ctx, "try-read", &.{.{ .string = b_file }}));
+
+    // B's bytes are untouched: the refused write above was refused, not
+    // silently redirected somewhere harmless.
+    const disk = try core.file.readAlloc(gpa, "place-a/a.txt");
+    defer gpa.free(disk);
+    try t.expectEqualStrings("alpha secret\n", disk);
+}
+
 test "e2e/place: a project's environment reaches the children run in it" {
     const gpa = t.allocator;
     var proj: Project = undefined;

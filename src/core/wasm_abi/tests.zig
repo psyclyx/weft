@@ -2579,15 +2579,114 @@ test "wasm plugin: an fs_root-limited grant confines fs through a REAL guest —
     try t.expectError(error.Trap, command.run(&env.commands, &env.ctx, "try-write", &.{ .{ .string = esc_path }, .{ .string = "x" } }));
 }
 
+// ── doc/place.md §4.1: an ABSENT limit means the PLACE, not the machine ──
+// The last item of the place arc. A plugin that declares `fs_read` and is
+// granted it, with nothing in config narrowing it, used to reach every
+// absolute path on the machine. It now reaches the place its dispatch is in
+// — here the degenerate `.process` place, i.e. the repo the suite runs in —
+// and the reach it used to have is still available, spelled out.
+
+test "wasm plugin: a declared-but-ungranted fs capability is confined to the DISPATCHING PLACE (doc/place.md §4.1)" {
+    const gpa = t.allocator;
+    var env: Env = undefined;
+    try Env.init(gpa, &env);
+    defer env.deinit(gpa);
+
+    const grants_mod = @import("../grants.zig");
+    var table = grants_mod.HandleTable.init(gpa);
+    defer table.deinit();
+
+    var engine = try wasm.Engine.init(gpa);
+    defer engine.deinit();
+    // No `weft.grant` for this plugin anywhere — the whole point. `describe()`
+    // asks for fs_read + fs_write; `mintGrantHandles` answers with the
+    // confined-by-default baseline.
+    const plugin = try loadPlugin(&engine, &env.ctx, "fs_limit", @embedFile("guest_fs_limit_wasm"), .{ .grant_table = &table });
+    defer plugin.deinit();
+    try t.expectEqual(grants_mod.Limit.place, table.limitFor(plugin.grant_handles[wasm_host.perm_fs_read]));
+    try t.expectEqual(grants_mod.Limit.place, table.limitFor(plugin.grant_handles[wasm_host.perm_fs_write]));
+
+    // This Env has no pin and no bound entry, so the dispatching place is the
+    // degenerate one: the process directory. That is an ORDINARY place, not a
+    // bypass — the confinement below is the same code path a container place
+    // takes (see e2e/project_test.zig for the two-project half of this gate).
+    var cwd_buf: [4096]u8 = undefined;
+    const here = file.processDirectory(&cwd_buf).?;
+
+    var tmp = t.tmpDir(.{});
+    defer tmp.cleanup();
+    const rel = try std.fmt.allocPrint(gpa, ".zig-cache/tmp/{s}/in-place.txt", .{tmp.sub_path});
+    defer gpa.free(rel);
+    const abs = try std.fmt.allocPrint(gpa, "{s}/{s}", .{ here, rel });
+    defer gpa.free(abs);
+
+    // INSIDE the place, spelled relatively — the ordinary case, and
+    // byte-identical to what a cwd-relative path always meant.
+    try t.expectEqual(
+        command.Value{ .integer = 1 },
+        try command.run(&env.commands, &env.ctx, "try-write", &.{ .{ .string = rel }, .{ .string = "in place" } }),
+    );
+    const got = try command.run(&env.commands, &env.ctx, "try-read", &.{.{ .string = rel }});
+    try t.expectEqualStrings("in place", got.string);
+    try t.expectEqual(
+        command.Value{ .integer = @intFromEnum(file.Kind.file) },
+        try command.run(&env.commands, &env.ctx, "try-exists", &.{.{ .string = rel }}),
+    );
+
+    // INSIDE the place, spelled ABSOLUTELY — the same file, still allowed. A
+    // place confinement is about WHERE, not about how the guest spelled it.
+    const got_abs = try command.run(&env.commands, &env.ctx, "try-read", &.{.{ .string = abs }});
+    try t.expectEqualStrings("in place", got_abs.string);
+
+    // OUTSIDE the place: refused. Not a `<absent>` the guest could keep
+    // running past — a trap, the same discipline `.fs_root` already has.
+    try t.expectError(error.Trap, command.run(&env.commands, &env.ctx, "try-read", &.{.{ .string = "/etc/hostname" }}));
+    try t.expectError(error.Trap, command.run(&env.commands, &env.ctx, "try-exists", &.{.{ .string = "/etc" }}));
+    try t.expectError(error.Trap, command.run(&env.commands, &env.ctx, "try-write", &.{ .{ .string = "/tmp/weft-place-escape.txt" }, .{ .string = "x" } }));
+    // And a climb out of it, relative or absolute, is refused too.
+    try t.expectError(error.Trap, command.run(&env.commands, &env.ctx, "try-read", &.{.{ .string = "../etc/hostname" }}));
+    const climb = try std.fmt.allocPrint(gpa, "{s}/../../etc/hostname", .{here});
+    defer gpa.free(climb);
+    try t.expectError(error.Trap, command.run(&env.commands, &env.ctx, "try-read", &.{.{ .string = climb }}));
+
+    // THE ESCAPE HATCH, and it is a sentence someone had to write:
+    // `weft.grant("fs_limit", "fs_read", { root: "/" })`. Applied to the SAME
+    // row the plugin already possesses, exactly as a live re-grant would be.
+    table.rows.items[plugin.grant_handles[wasm_host.perm_fs_read].idx].limit =
+        grants_mod.limitForRoot("fs_read", grants_mod.unconfined_root);
+    try t.expectEqual(grants_mod.Limit.none, table.limitFor(plugin.grant_handles[wasm_host.perm_fs_read]));
+    try t.expectEqual(
+        command.Value{ .integer = @intFromEnum(file.Kind.dir) },
+        try command.run(&env.commands, &env.ctx, "try-exists", &.{.{ .string = "/etc" }}),
+    );
+    const outside = try command.run(&env.commands, &env.ctx, "try-read", &.{.{ .string = "/etc/hostname" }});
+    try t.expect(outside.string.len > 0 or std.mem.eql(u8, outside.string, "<absent>"));
+    // fs_WRITE was not widened, so it is still confined — the two capabilities
+    // are separate rows and a widening of one is not a widening of both.
+    try t.expectError(error.Trap, command.run(&env.commands, &env.ctx, "try-write", &.{ .{ .string = "/tmp/weft-place-escape.txt" }, .{ .string = "x" } }));
+}
+
 // ── doc/place.md §4.1: bucket 1 is carved out UNCONDITIONALLY ────────────
 // The editor's own state on disk — module cache, plugin kv store, identity
 // and known-peers keystores — is reachable by no grant, however broad. The
-// gate below holds the BROADEST grant the system can mint (the `.none` limit
-// `mintGrantHandles` produces from a plain `weft.grant("x", "fs_read")`,
-// which is exactly what the shipped config hands out) and is refused each
-// location BY NAME. Every path is asked of the module that OWNS the file, not
-// re-derived here: if `core/machinery.zig`'s list ever drifts from where a
-// store actually lives, this test is what notices.
+// gate below holds the BROADEST grant the system can mint — which since the
+// confined-by-default change is the WRITTEN-DOWN one, `weft.grant(who, cap,
+// { root: "/" })`, minted here the way `reconcileGrants` mints it — and is
+// refused each location BY NAME. Every path is asked of the module that OWNS
+// the file, not re-derived here: if `core/machinery.zig`'s list ever drifts
+// from where a store actually lives, this test is what notices.
+
+/// The config-authored unconfined grant, minted the way a real config apply
+/// mints it: through `grants.limitForRoot(cap, "/")`, and BEFORE the plugin
+/// loads, so `mintGrantHandles`'s composition rule adopts it instead of the
+/// confined-by-default `.place` baseline. This is the escape hatch §4.1
+/// deliberately keeps — reachable, but only by writing it down.
+fn grantUnconfined(table: *@import("../grants.zig").HandleTable, principal: []const u8) !void {
+    const grants_mod = @import("../grants.zig");
+    for ([_][]const u8{ "fs_read", "fs_write" }) |cap| {
+        _ = try table.grant(.{ .capability = cap, .limit = grants_mod.limitForRoot(cap, grants_mod.unconfined_root) }, principal, null);
+    }
+}
 
 test "wasm plugin: no grant, however broad, reaches the editor's own machinery (doc/place.md §4.1)" {
     const gpa = t.allocator;
@@ -2597,15 +2696,17 @@ test "wasm plugin: no grant, however broad, reaches the editor's own machinery (
 
     var table = @import("../grants.zig").HandleTable.init(gpa);
     defer table.deinit();
+    try grantUnconfined(&table, "fs_limit");
 
     var engine = try wasm.Engine.init(gpa);
     defer engine.deinit();
     const plugin = try loadPlugin(&engine, &env.ctx, "fs_limit", @embedFile("guest_fs_limit_wasm"), .{ .grant_table = &table });
     defer plugin.deinit();
 
-    // The grant is UNCONFINED — `.none`, untouched from what loadPlugin
-    // minted. Proven, not assumed: without this the refusals below would be
-    // indistinguishable from a narrow grant doing its ordinary job.
+    // The grant is UNCONFINED — `.none`, which `{ root: "/" }` normalizes to.
+    // Proven, not assumed: without this the refusals below would be
+    // indistinguishable from a narrow grant doing its ordinary job (and, since
+    // the default is now `.place`, indistinguishable from the baseline too).
     try t.expectEqual(@import("../grants.zig").Limit.none, table.limitFor(plugin.grant_handles[wasm_host.perm_fs_read]));
     try t.expectEqual(@import("../grants.zig").Limit.none, table.limitFor(plugin.grant_handles[wasm_host.perm_fs_write]));
 
@@ -2691,6 +2792,9 @@ test "wasm plugin: a symlink cannot walk into the machinery a plugin may not nam
 
     var table = @import("../grants.zig").HandleTable.init(gpa);
     defer table.deinit();
+    // Same written-down unconfined grant as the gate above: the symlink is
+    // what must be refused, not the absence of breadth.
+    try grantUnconfined(&table, "fs_limit");
 
     var engine = try wasm.Engine.init(gpa);
     defer engine.deinit();

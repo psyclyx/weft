@@ -10,6 +10,20 @@
 //! over (limit-gating, not perm-gating): a call that's out of the grant's
 //! root must TRAP, never hand back a fake result the guest could observe
 //! and keep running past.
+//!
+//! It backs three gates now, all with the same shape and none needing a
+//! change here — which is the point of taking the path from the args:
+//!   1. `.fs_root` confinement (the original, `wasm_abi/tests.zig`).
+//!   2. **The absent limit** (doc/place.md §4.1): this guest declares two fs
+//!      perms and is granted them with NOTHING in config narrowing either, so
+//!      what it holds is the confined-by-default `Limit.place` — the exact
+//!      case that used to reach every absolute path on the machine.
+//!   3. Two projects (`e2e/project_test.zig`): the same guest, the same
+//!      grant, reading the project it dispatches in and trapping on the one
+//!      next door — with the answers swapping when focus does.
+//! The machinery carve-out gates drive it too, holding the WRITTEN-DOWN
+//! unconfined grant, so "no grant, however broad" is proven against the
+//! broadest one that exists rather than against a default.
 
 const weft = @import("weft");
 
