@@ -15,13 +15,20 @@ const std = @import("std");
 const weft = @import("weft");
 
 const recent_key = "recent";
+
+/// How many files "recently visited" means. This one IS policy, and it is the
+/// only bound here: a recents list is a UI affordance — the handful of files a
+/// picker offers you back — not a resource table, and nothing is refused when
+/// it is reached. The fifty-first entry falls off the end, which is what a
+/// recents list means. Every OTHER limit this file used to carry was an
+/// artifact of believing a freestanding guest had no allocator; it has one
+/// (`weft.allocator`), and a path that did not fit was silently recorded
+/// TRUNCATED, naming a different file than the one you visited.
 const max_recent = 50;
 
-// Fixed guest buffers (no allocator in a freestanding guest): copy borrowed
-// reads out before the next call reuses the shim scratch.
-var path_buf: [4096]u8 = undefined;
-var existing_buf: [1 << 16]u8 = undefined;
-var list_buf: [1 << 16]u8 = undefined;
+/// The joined list being built. Growable, so `max_recent` alone decides how
+/// long a recents list is, rather than sharing that decision with a byte count.
+var list_buf: std.ArrayList(u8) = .empty;
 
 var id_remember: u32 = 0;
 var id_recent: u32 = 0;
@@ -61,16 +68,17 @@ export fn on_activate() void {
 /// Push the active buffer's path onto the recent list (front, deduped, capped).
 /// Returns the new count, or -1 when the buffer has no path (a tool buffer).
 fn recordActive() i32 {
-    const pth = weft.path() orelse return -1;
-    const pn = @min(pth.len, path_buf.len);
-    @memcpy(path_buf[0..pn], pth[0..pn]);
-    const path = path_buf[0..pn];
+    const alloc = weft.allocator;
+    // Copy both borrowed reads out before the next call reuses the shim
+    // scratch. Owned, not copied into a fixed field: a truncated path names a
+    // DIFFERENT file, and a recents list that quietly offers you one is worse
+    // than a recents list that is short.
+    const path = alloc.dupe(u8, weft.path() orelse return -1) catch return -1;
+    defer alloc.free(path);
+    const existing = alloc.dupe(u8, weft.kvGet(recent_key) orelse "") catch return -1;
+    defer alloc.free(existing);
 
-    const ex = weft.kvGet(recent_key) orelse "";
-    const en = @min(ex.len, existing_buf.len);
-    @memcpy(existing_buf[0..en], ex[0..en]);
-
-    const list = prepend(existing_buf[0..en], path);
+    const list = prepend(existing, path) orelse return -1;
     weft.kvPut(recent_key, list);
     return @intCast(countLines(list));
 }
@@ -108,24 +116,23 @@ fn projectRoot() void {
     weft.setResultStr(weft.placeRoot());
 }
 
-/// `path` newline-joined ahead of `list`, dropping any prior copy of `path`
-/// and capping at `max_recent`. Writes into `list_buf`.
-fn prepend(list: []const u8, path: []const u8) []const u8 {
-    @memcpy(list_buf[0..path.len], path);
-    var w: usize = path.len;
+/// `path` newline-joined ahead of `list`, dropping any prior copy of `path` and
+/// capping at `max_recent`. Builds into `list_buf`; null when the guest heap
+/// refuses, so the caller reports rather than writing back a half list.
+fn prepend(list: []const u8, path: []const u8) ?[]const u8 {
+    const alloc = weft.allocator;
+    list_buf.clearRetainingCapacity();
+    list_buf.appendSlice(alloc, path) catch return null;
     var kept: usize = 1;
     var it = std.mem.splitScalar(u8, list, '\n');
     while (it.next()) |line| {
         if (line.len == 0 or std.mem.eql(u8, line, path)) continue;
         if (kept >= max_recent) break;
-        if (w + 1 + line.len > list_buf.len) break;
-        list_buf[w] = '\n';
-        w += 1;
-        @memcpy(list_buf[w .. w + line.len], line);
-        w += line.len;
+        list_buf.append(alloc, '\n') catch return null;
+        list_buf.appendSlice(alloc, line) catch return null;
         kept += 1;
     }
-    return list_buf[0..w];
+    return list_buf.items;
 }
 
 fn countLines(list: []const u8) usize {
