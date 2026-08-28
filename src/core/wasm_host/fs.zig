@@ -80,6 +80,18 @@
 //! exactly the set of paths `fsRead` would hand over bytes for — one
 //! confinement, five doors, no door that merely describes what the others
 //! refuse.
+//!
+//! **The machinery carve-out (doc/place.md §4/§4.1), ahead of all of it.**
+//! The limit machinery above is about how WIDE a grant is. The editor's own
+//! state on disk — the module cache, the plugin kv store, the identity and
+//! known-peers keystores (`core/machinery.zig`) — is outside that question
+//! entirely: no grant reaches it, however broad, and narrowing a grant to an
+//! `fs_root` is not what makes it safe. `gate` below enforces that FIRST,
+//! before possession and before the limit, and it is the only way a body in
+//! this file can obtain a `Limit` at all — so "an fs door that forgot the
+//! carve-out" is not a shape this file can express. `error.Machinery` is a
+//! distinct third refusal, never a mundane miss, so `fsExists` cannot be
+//! used to probe for machinery it may not read.
 
 const std = @import("std");
 const Allocator = std.mem.Allocator;
@@ -89,6 +101,7 @@ const Buffers = @import("../Buffers.zig");
 const rooted_fs = @import("../rooted_fs.zig");
 const file = @import("../file.zig");
 const grants_mod = @import("../grants.zig");
+const machinery = @import("../machinery.zig");
 
 const shared = @import("plugin.zig");
 const WasmPlugin = shared.WasmPlugin;
@@ -97,14 +110,38 @@ const requirePerm = shared.requirePerm;
 /// The denial signals a semantic body below returns: `PermissionDenied` on a
 /// missing/revoked grant (the ORIGINAL, W0b-era signal), `OutOfLimit` on a
 /// possessed-but-out-of-bounds `.fs_root` path (task #8 / W4 slice 2 — see
-/// this file's module doc's "Limit enforcement" section). The wasm
-/// trampolines turn EITHER into a trap — `shared.trapPermDenied` for the
-/// former, `shared.trapOutOfLimit` for the latter, so the two stay
-/// distinguishable in the trap message; an in-process caller lets either
+/// this file's module doc's "Limit enforcement" section), `Machinery` on a
+/// path that is the editor's OWN state, which no grant reaches (doc/place.md
+/// §4.1 — see this file's module doc's carve-out paragraph). The wasm
+/// trampolines turn ANY of the three into a trap —
+/// `shared.trapPermDenied`/`trapOutOfLimit`/`trapMachinery` — so they stay
+/// distinguishable in the trap message; an in-process caller lets any of them
 /// propagate as an ordinary Zig error (C17: structure against MISTAKES on
 /// both transports, no sandbox to trap into off-wasm — see
 /// `InProcClient.zig`'s module doc).
-pub const PermError = error{ PermissionDenied, OutOfLimit };
+pub const PermError = error{ PermissionDenied, OutOfLimit, Machinery };
+
+/// The ONE gate every door in this file passes, in the order the three
+/// questions actually rank:
+///
+///   1. **Is this the editor's own machinery?** Unconditional. Asked before
+///      any grant is consulted, so a broader grant cannot widen it and a
+///      narrower one is not what makes it safe (doc/place.md §4.1: "Bucket 1
+///      is carved out unconditionally: no grant, however broad, reaches the
+///      module cache or the keystores").
+///   2. **Is the capability possessed?** `hasPerm`, exactly as before.
+///   3. **How wide is it?** The possessed `Limit`, handed back for the body
+///      to confine with.
+///
+/// Returning the limit is the point: a body has no other way to obtain one,
+/// so it cannot reach step 3 without having passed steps 1 and 2. That is
+/// what makes the carve-out structural rather than a convention five call
+/// sites have to remember.
+fn gate(id: anytype, comptime perm: shared.Perm, path: []const u8) PermError!grants_mod.Limit {
+    if (machinery.denies(path)) return error.Machinery;
+    if (!shared.hasPerm(id, perm)) return error.PermissionDenied;
+    return shared.limitFor(id, perm);
+}
 
 /// The LEXICAL half of `.fs_root` limit enforcement — see this file's
 /// module doc's "Limit enforcement" section for the full two-layer policy
@@ -126,16 +163,22 @@ fn rootRelative(root_in: []const u8, path: []const u8) ?[]const u8 {
     return path[root.len + 1 ..];
 }
 
-/// Layer 1 alone, for a reader that has NO file descriptor to root against
-/// — `quickjs.zig`'s `cFileRead` answering out of a LIVE buffer rather than
-/// off disk. Fails closed on a limit kind that isn't fs-path-shaped, exactly
-/// like the bodies below.
-pub fn pathWithinLimit(id: anytype, comptime perm: shared.Perm, path: []const u8) bool {
-    return switch (shared.limitFor(id, perm)) {
-        .none => true,
-        .fs_root => |root| rootRelative(root, path) != null,
-        .doc_region, .graph_subtree => false,
-    };
+/// The gate MINUS the kernel layer, for a caller that has NO file descriptor
+/// to root against — `quickjs.zig`'s `cFileRead` answering out of a LIVE
+/// buffer rather than off disk, and `cAgentWrite`, which never touches the
+/// filesystem at all. Same three questions in the same order as `gate`
+/// (machinery first, unconditionally), so the JS plane cannot end up with a
+/// different fs policy than the wasm plane: a JS plugin is not a different
+/// kind of plugin (doc/place.md §4.1a). Returns the REASON rather than a
+/// bool, so a caller physically cannot report a machinery refusal as "outside
+/// the granted root". Fails closed on a limit kind that isn't fs-path-shaped,
+/// exactly like the bodies below.
+pub fn pathAllowed(id: anytype, comptime perm: shared.Perm, path: []const u8) PermError!void {
+    switch (try gate(id, perm, path)) {
+        .none => {},
+        .fs_root => |root| if (rootRelative(root, path) == null) return error.OutOfLimit,
+        .doc_region, .graph_subtree => return error.OutOfLimit,
+    }
 }
 
 /// Open the confined root for a `.fs_root(root)` limit (layer 2 — see the
@@ -163,8 +206,7 @@ fn openLimitedRoot(gpa: Allocator, root: []const u8) ?rooted_fs.RootedFs {
 /// the caller, or `null` for a mundane failure (not found, read error) —
 /// `PermissionDenied` is the ONLY error, reserved for the guard.
 pub fn fsRead(gpa: Allocator, id: anytype, path: []const u8) PermError!?[]u8 {
-    if (!shared.hasPerm(id, .fs_read)) return error.PermissionDenied;
-    switch (shared.limitFor(id, .fs_read)) {
+    switch (try gate(id, .fs_read, path)) {
         .none => return file.readAlloc(gpa, path) catch null,
         .fs_root => |root| {
             const rel = rootRelative(root, path) orelse return error.OutOfLimit;
@@ -197,6 +239,7 @@ pub fn hFsRead(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32, resul
         switch (e) {
             error.PermissionDenied => shared.trapPermDenied(p, caller, .fs_read),
             error.OutOfLimit => shared.trapOutOfLimit(p, caller, .fs_read, path),
+            error.Machinery => shared.trapMachinery(p, caller, .fs_read, path),
         }
         return;
     } orelse {
@@ -215,8 +258,7 @@ pub fn hFsRead(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32, resul
 /// `Kind` enum ordinal). The clean primitive behind project-root detection
 /// (climb to the nearest `.git`).
 pub fn fsExists(gpa: Allocator, id: anytype, path: []const u8) PermError!file.Kind {
-    if (!shared.hasPerm(id, .fs_read)) return error.PermissionDenied;
-    switch (shared.limitFor(id, .fs_read)) {
+    switch (try gate(id, .fs_read, path)) {
         .none => return file.statKind(gpa, path),
         .fs_root => |root| {
             // BOTH layers, exactly like `fsRead` below it: the lexical gate,
@@ -256,6 +298,7 @@ pub fn hFsExists(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32, res
         switch (e) {
             error.PermissionDenied => shared.trapPermDenied(p, caller, .fs_read),
             error.OutOfLimit => shared.trapOutOfLimit(p, caller, .fs_read, path),
+            error.Machinery => shared.trapMachinery(p, caller, .fs_read, path),
         }
         return;
     };
@@ -265,8 +308,7 @@ pub fn hFsExists(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32, res
 /// `fs.write(path, bytes)` semantic body (perm fs_write): replace a file.
 /// `true` ok / `false` on a mundane failure.
 pub fn fsWrite(gpa: Allocator, id: anytype, path: []const u8, bytes: []const u8) PermError!bool {
-    if (!shared.hasPerm(id, .fs_write)) return error.PermissionDenied;
-    switch (shared.limitFor(id, .fs_write)) {
+    switch (try gate(id, .fs_write, path)) {
         .none => {
             file.writeBytes(gpa, path, bytes) catch return false;
             return true;
@@ -304,6 +346,7 @@ pub fn hFsWrite(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32, resu
         switch (e) {
             error.PermissionDenied => shared.trapPermDenied(p, caller, .fs_write),
             error.OutOfLimit => shared.trapOutOfLimit(p, caller, .fs_write, path),
+            error.Machinery => shared.trapMachinery(p, caller, .fs_write, path),
         }
         return;
     };
@@ -313,8 +356,7 @@ pub fn hFsWrite(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32, resu
 /// `fs.append(path, bytes)` semantic body (perm fs_write): append to a file
 /// (capture). `true` ok / `false` on a mundane failure.
 pub fn fsAppend(gpa: Allocator, id: anytype, path: []const u8, bytes: []const u8) PermError!bool {
-    if (!shared.hasPerm(id, .fs_write)) return error.PermissionDenied;
-    switch (shared.limitFor(id, .fs_write)) {
+    switch (try gate(id, .fs_write, path)) {
         .none => {
             file.appendBytes(gpa, path, bytes) catch return false;
             return true;
@@ -352,6 +394,7 @@ pub fn hFsAppend(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32, res
         switch (e) {
             error.PermissionDenied => shared.trapPermDenied(p, caller, .fs_write),
             error.OutOfLimit => shared.trapOutOfLimit(p, caller, .fs_write, path),
+            error.Machinery => shared.trapMachinery(p, caller, .fs_write, path),
         }
         return;
     };
@@ -366,9 +409,13 @@ pub fn hFsAppend(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32, res
 /// remote locus goes through the async door instead (see this file's module
 /// doc on why `list_async` stays unsplit).
 pub fn fsList(gpa: Allocator, id: anytype, authority: []const u8, path: []const u8) PermError!?[]u8 {
-    if (!shared.hasPerm(id, .fs_read)) return error.PermissionDenied;
+    // `gate` runs even for a non-`"here"` authority, so the carve-out stays
+    // the first thing every door in this file does. Nothing is lost: a
+    // remote authority answers `null` on the very next line regardless, and
+    // a refusal is a better answer than a miss either way.
+    const limit = try gate(id, .fs_read, path);
     if (!std.mem.eql(u8, authority, "here")) return null;
-    switch (shared.limitFor(id, .fs_read)) {
+    switch (limit) {
         .none => {
             const pz = gpa.dupeZ(u8, path) catch return null;
             defer gpa.free(pz);
@@ -408,6 +455,7 @@ pub fn hFsList(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32, resul
         switch (e) {
             error.PermissionDenied => shared.trapPermDenied(p, caller, .fs_read),
             error.OutOfLimit => shared.trapOutOfLimit(p, caller, .fs_read, path),
+            error.Machinery => shared.trapMachinery(p, caller, .fs_read, path),
         }
         return;
     } orelse {

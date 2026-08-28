@@ -211,6 +211,24 @@ pub fn trapOutOfLimit(p: *WasmPlugin, caller: *wasm.Caller, comptime perm: Perm,
     caller.trap("plugin '{s}' denied capability '{s}': path '{s}' is outside the granted root '{s}'", .{ p.name, perm.label(), path, root });
 }
 
+/// The membrane's FOURTH deny path (doc/place.md §4.1), and the only one that
+/// owes nothing to the grant table: `path` is the editor's OWN state — the
+/// module cache, the plugin kv store, or one of the two keystores
+/// (`core/machinery.zig`) — which no grant reaches, however broad. Fires from
+/// `fs.zig`'s `gate` BEFORE possession is even checked, so the message
+/// deliberately does not mention the grant: there is no grant that would have
+/// made this call work, and a plugin author sent to "declare the capability"
+/// would be sent somewhere with no answer at the end of it.
+///
+/// The path comes LAST, unlike `trapOutOfLimit`: `Caller.trap` formats into a
+/// fixed 160-byte buffer and truncates, and an absolute machinery path can eat
+/// all of it on its own. What the author needs — which store, and that no
+/// grant helps — is what survives the truncation this way.
+pub fn trapMachinery(p: *WasmPlugin, caller: *wasm.Caller, comptime perm: Perm, path: []const u8) void {
+    const what = if (@import("../machinery.zig").locationOf(path)) |loc| loc.label() else "the editor's own state";
+    caller.trap("plugin '{s}' denied capability '{s}': {s} is editor machinery — no grant reaches it (path '{s}')", .{ p.name, perm.label(), what, path });
+}
+
 /// The membrane's ONE deny path: every perm-gated host import NOT YET split
 /// into semantic-body-plus-trampoline (see `trapPermDenied`'s doc) calls this
 /// before doing anything else. Granted → returns true, the site proceeds.

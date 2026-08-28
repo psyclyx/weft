@@ -174,6 +174,34 @@ Not a prohibition. A gradient:
   the module cache or the keystores. The one place a denylist is right, because
   those paths are program-computed and finite.
 
+**LANDED (the carve-out only; "confined by default" above is still open).**
+`core/machinery.zig` owns the four locations and asks each store's OWN
+resolver for them — `wasm.Engine.cacheDir`, `kv_file.stateDir`,
+`identity.configPath`, `known_peers.configPath` — so moving a store moves the
+refusal in the same edit and the list cannot drift from the files. Each is
+kept in two forms, lexical (cwd-anchored, `..` folded) and kernel
+(`realpath(3)` over the longest existing prefix), and a candidate is compared
+against both: neither a traversal nor a symlink walks in.
+
+Enforcement is `wasm_host/fs.zig`'s `gate`, which asks three questions in
+order — is this machinery (unconditional), is the capability possessed, how
+wide is it — and **returns the `Limit`**. That return is the structure: a
+body in that file has no other way to obtain a limit, so "an fs door that
+forgot the carve-out" is not a shape the file can express. All five doors
+(`fsRead`/`fsWrite`/`fsAppend`/`fsExists`/`fsList`) go through it, as does
+`pathAllowed`, the descriptor-free variant `quickjs.zig`'s `cFileRead`
+live-buffer half and `cAgentWrite` use — one gate, both planes, per §4.1a.
+The refusal is a third error (`error.Machinery` → `trapMachinery`), never a
+mundane miss, so `fs.exists` cannot be used to probe for machinery it may not
+read.
+
+Two honest edges. It is a check-then-use, not the atomic `openat2` the
+`.fs_root` confinement gets — a denial has no root to hand the kernel — so a
+plugin that can swap a symlink mid-call could in principle race it; such a
+plugin holds `proc`, which reads the cache without consulting this at all.
+And the carve-out is bucket 1 only: `~/.ssh` is content, and confining THAT is
+the "confined by default" change above, not this one.
+
 ### 4.1a A JS plugin must not be ABLE to be a different kind of plugin
 
 Not a rule to follow — a property to make structural. `quickjs.wasm` **is** a

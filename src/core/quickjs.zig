@@ -578,6 +578,28 @@ pub const JsPlugin = struct {
         std.log.warn("js plugin '{s}': '{s}' path '{s}' is outside the granted root '{s}'", .{ self.name, perm.label(), path, root });
     }
 
+    /// The third: `path` is the editor's own machinery, which no grant
+    /// reaches (doc/place.md §4.1). The wasm plane's `trapMachinery`, in the
+    /// register this plane denies in — a log plus `qjs_contract.denied`, not
+    /// a trap, for the reason `requirePerm` gives above.
+    fn denyMachinery(self: *JsPlugin, comptime perm: Perm, path: []const u8) void {
+        const what = if (@import("machinery.zig").locationOf(path)) |loc| loc.label() else "the editor's own state";
+        std.log.warn("js plugin '{s}': '{s}' — {s} is editor machinery, no grant reaches it (path '{s}')", .{ self.name, perm.label(), what, path });
+    }
+
+    /// Report whichever of the three `fs_gate.pathAllowed` returned. One
+    /// dispatch, so neither `cFileRead` nor `cAgentWrite` can report a
+    /// machinery refusal as an out-of-root one — and adding a fourth reason
+    /// to `PermError` is a compile error here rather than a silent
+    /// mis-labelling.
+    fn denyPath(self: *JsPlugin, comptime perm: Perm, path: []const u8, e: fs_gate.PermError) void {
+        switch (e) {
+            error.PermissionDenied => self.denyPerm(perm),
+            error.OutOfLimit => self.denyOutOfLimit(perm, path),
+            error.Machinery => self.denyMachinery(perm, path),
+        }
+    }
+
     pub fn deinit(self: *JsPlugin) void {
         const gpa = self.gpa;
         gpa.free(self.name);
@@ -977,12 +999,13 @@ fn cBreakpoints(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32, resu
 /// receive buffer for now.
 ///
 /// ONE `fs_read` grant, two sources, the same confinement on both: the DISK
-/// half is `wasm_host/fs.zig`'s semantic body verbatim (possession,
-/// `.fs_root` root-relativity, and the rooted open that stops a symlink
-/// escape), so the JS plane never re-derives fs policy; the BUFFER half has
-/// no descriptor to root against, so it takes that file's lexical layer
-/// (`pathWithinLimit`) — otherwise merely OPENING a file would launder it
-/// past a narrowed grant.
+/// half is `wasm_host/fs.zig`'s semantic body verbatim (the machinery
+/// carve-out, possession, `.fs_root` root-relativity, and the rooted open
+/// that stops a symlink escape), so the JS plane never re-derives fs policy;
+/// the BUFFER half has no descriptor to root against, so it takes that file's
+/// descriptor-free gate (`pathAllowed` — the same carve-out and the same
+/// lexical layer) — otherwise merely OPENING a file would launder it past a
+/// narrowed grant, or past the carve-out.
 fn cFileRead(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32, results: []i32) void {
     const self: *JsPlugin = @ptrCast(@alignCast(data.?));
     const gpa = self.gpa;
@@ -998,11 +1021,11 @@ fn cFileRead(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32, results
             results[0] = qjs_contract.denied;
             return;
         }
-        if (!fs_gate.pathWithinLimit(self, .fs_read, path)) {
-            self.denyOutOfLimit(.fs_read, path);
+        fs_gate.pathAllowed(self, .fs_read, path) catch |e| {
+            self.denyPath(.fs_read, path, e);
             results[0] = qjs_contract.denied;
             return;
-        }
+        };
         const b = ctx.buffers.get(id) orelse break :open;
         const text = (b.textEditor() orelse break :open).text().toOwnedSlice(gpa) catch break :open;
         defer gpa.free(text);
@@ -1011,10 +1034,7 @@ fn cFileRead(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32, results
     }
 
     const bytes = fs_gate.fsRead(gpa, self, path) catch |e| {
-        switch (e) {
-            error.PermissionDenied => self.denyPerm(.fs_read),
-            error.OutOfLimit => self.denyOutOfLimit(.fs_read, path),
-        }
+        self.denyPath(.fs_read, path, e);
         results[0] = qjs_contract.denied;
         return;
     } orelse {
@@ -1226,10 +1246,10 @@ const agent_peer = "agent";
 /// A whole-file write, so the buffer's whole content is replaced.
 ///
 /// `cFileRead`'s WRITE twin, gated identically: possession first
-/// (`fs_write`), then `pathWithinLimit` — the lexical layer, because like
-/// `cFileRead`'s buffer half this door has no descriptor to root against
-/// (it never touches the filesystem; the user's later save does). Without
-/// both, `weft.grant("acp", "fs_write", {root: …})` confined NOTHING here:
+/// (`fs_write`), then `pathAllowed` — the carve-out plus the lexical layer,
+/// because like `cFileRead`'s buffer half this door has no descriptor to root
+/// against (it never touches the filesystem; the user's later save does).
+/// Without both, `weft.grant("acp", "fs_write", {root: …})` confined NOTHING here:
 /// an agent could bind and fill a buffer at any absolute path outside its
 /// granted root. The `command.renderInto` call below is NOT that gate —
 /// its `gradeMin(doc.my_grant, .edit)` is a COLLAB authority check, and
@@ -1249,11 +1269,11 @@ fn cAgentWrite(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32, resul
         results[0] = qjs_contract.denied;
         return;
     }
-    if (!fs_gate.pathWithinLimit(self, .fs_write, path)) {
-        self.denyOutOfLimit(.fs_write, path);
+    fs_gate.pathAllowed(self, .fs_write, path) catch |e| {
+        self.denyPath(.fs_write, path, e);
         results[0] = qjs_contract.denied;
         return;
-    }
+    };
     const peer = if (agent.len > 0) agent else agent_peer;
     const bufs = self.bridge.activeCtx().buffers;
     const id = bufs.findByPath(path) orelse blk: {
@@ -2473,6 +2493,153 @@ test "quickjs: an fs_read grant narrowed to a root confines a JS plugin (guest/f
     try t.expectEqualStrings("threw", env.head.echo.items);
     _ = try command.run(&env.commands, &env.ctx, "up", &.{});
     try t.expectEqualStrings("threw", env.head.echo.items);
+}
+
+// ── doc/place.md §4.1a: a JS plugin is not a different KIND of plugin ─────
+// The wasm-plane gate for this lives in `wasm_abi/tests.zig`. Its twin here
+// is the point: both planes go through `wasm_host/fs.zig`'s ONE gate, so the
+// carve-out cannot hold on one surface and not the other — which is exactly
+// how `cAgentWrite` came to have no perm check at all while `wl_fs_write`
+// had two.
+
+test "quickjs: no grant, however broad, reaches the editor's own machinery (guest gate's JS twin)" {
+    const gpa = t.allocator;
+    var env: Env = undefined;
+    try Env.init(gpa, &env);
+    defer env.deinit(gpa);
+    var engine = try wasm.Engine.init(gpa);
+    defer engine.deinit();
+
+    const machinery = @import("machinery.zig");
+    const cache = wasm.Engine.cacheDir(gpa).?;
+    defer gpa.free(cache);
+    const cached = try std.fmt.allocPrint(gpa, "{s}/deadbeef.cwasm", .{cache});
+    defer gpa.free(cached);
+    const kv_dir = @import("kv_file.zig").stateDir(gpa).?;
+    defer gpa.free(kv_dir);
+    const kv_blob = try std.fmt.allocPrint(gpa, "{s}/{s}", .{ kv_dir, @import("kv_file.zig").store_file });
+    defer gpa.free(kv_blob);
+    var ibuf: [512]u8 = undefined;
+    const id_path = @import("identity.zig").configPath(&ibuf, machinery.Posix{});
+    var kbuf: [512]u8 = undefined;
+    const peers_path = @import("known_peers.zig").configPath(&kbuf, machinery.Posix{});
+
+    // Ordinary content the unconfined grant DOES reach, so the refusals below
+    // are about the carve-out and not about a broken door.
+    var tmp = t.tmpDir(.{});
+    defer tmp.cleanup();
+    const dir = try std.fmt.allocPrint(gpa, ".zig-cache/tmp/{s}", .{tmp.sub_path});
+    defer gpa.free(dir);
+    const content = try std.fmt.allocPrint(gpa, "{s}/user-content.txt", .{dir});
+    defer gpa.free(content);
+    try @import("file.zig").writeBytesMakingDirs(gpa, dir, content, "ordinary");
+
+    const src = try std.fmt.allocPrint(gpa,
+        \\function reader(name, path) {{
+        \\  weft.command(name, () => {{
+        \\    try {{ weft.echo("read:" + weft.fileRead(path)); }}
+        \\    catch (e) {{ weft.echo("threw"); }}
+        \\  }});
+        \\}}
+        \\reader("content", "{s}");
+        \\reader("cache", "{s}");
+        \\reader("kv", "{s}");
+        \\reader("identity", "{s}");
+        \\reader("peers", "{s}");
+    , .{ content, cached, kv_blob, id_path orelse content, peers_path orelse content });
+    defer gpa.free(src);
+
+    // The BROADEST grant the config plane can spell: no root, no scope.
+    try env.grant("broad", "fs_read");
+    var plugin = try JsPlugin.load(gpa, &engine, &env.ctx, env.pool, .empty, "broad", null, src);
+    defer plugin.deinit();
+
+    _ = try command.run(&env.commands, &env.ctx, "content", &.{});
+    try t.expectEqualStrings("read:ordinary", env.head.echo.items);
+
+    _ = try command.run(&env.commands, &env.ctx, "cache", &.{});
+    try t.expectEqualStrings("threw", env.head.echo.items);
+    _ = try command.run(&env.commands, &env.ctx, "kv", &.{});
+    try t.expectEqualStrings("threw", env.head.echo.items);
+    if (id_path != null) {
+        _ = try command.run(&env.commands, &env.ctx, "identity", &.{});
+        try t.expectEqualStrings("threw", env.head.echo.items);
+    }
+    if (peers_path != null) {
+        _ = try command.run(&env.commands, &env.ctx, "peers", &.{});
+        try t.expectEqualStrings("threw", env.head.echo.items);
+    }
+}
+
+test "quickjs: an OPEN buffer doesn't launder the machinery carve-out either" {
+    const gpa = t.allocator;
+    var env: Env = undefined;
+    try Env.init(gpa, &env);
+    defer env.deinit(gpa);
+    var engine = try wasm.Engine.init(gpa);
+    defer engine.deinit();
+
+    // `cFileRead`'s LIVE-BUFFER half — the branch with no descriptor to root
+    // against, and the one that used to be gated only by the limit. Opening
+    // a machinery file (which the HOST may legitimately do) must not make it
+    // readable by a plugin holding an unconfined grant.
+    const cache = wasm.Engine.cacheDir(gpa).?;
+    defer gpa.free(cache);
+    const cached = try std.fmt.allocPrint(gpa, "{s}/opened.cwasm", .{cache});
+    defer gpa.free(cached);
+    try @import("file.zig").writeBytesMakingDirs(gpa, cache, cached, "compiled image bytes");
+    defer @import("file.zig").deleteFile(gpa, cached);
+
+    const bid = try env.buffers.create(gpa, "opened.cwasm");
+    try env.buffers.get(bid).?.textEditor().?.openFile(gpa, cached);
+
+    const src = try std.fmt.allocPrint(gpa,
+        \\weft.command("go", () => {{
+        \\  try {{ weft.echo("read:" + weft.fileRead("{s}")); }}
+        \\  catch (e) {{ weft.echo("threw"); }}
+        \\}});
+    , .{cached});
+    defer gpa.free(src);
+
+    try env.grant("broad", "fs_read");
+    var plugin = try JsPlugin.load(gpa, &engine, &env.ctx, env.pool, .empty, "broad", null, src);
+    defer plugin.deinit();
+
+    _ = try command.run(&env.commands, &env.ctx, "go", &.{});
+    try t.expectEqualStrings("threw", env.head.echo.items);
+}
+
+test "quickjs: an agent's fileWrite cannot bind a buffer onto the editor's machinery" {
+    const gpa = t.allocator;
+    var env: Env = undefined;
+    try Env.init(gpa, &env);
+    defer env.deinit(gpa);
+    var engine = try wasm.Engine.init(gpa);
+    defer engine.deinit();
+
+    // `cAgentWrite` never touches the filesystem — it binds a buffer the USER
+    // later saves. That is still a write to machinery, one save away, so the
+    // same carve-out has to hold here: refused, and NO buffer bound.
+    const kv_dir = @import("kv_file.zig").stateDir(gpa).?;
+    defer gpa.free(kv_dir);
+    const blob = try std.fmt.allocPrint(gpa, "{s}/{s}", .{ kv_dir, @import("kv_file.zig").store_file });
+    defer gpa.free(blob);
+
+    const src = try std.fmt.allocPrint(gpa,
+        \\weft.command("w", () => {{
+        \\  try {{ weft.fileWrite("{s}", "clobbered", "a1"); weft.echo("wrote"); }}
+        \\  catch (e) {{ weft.echo("threw"); }}
+        \\}});
+    , .{blob});
+    defer gpa.free(src);
+
+    try env.grant("broad", "fs_write");
+    var plugin = try JsPlugin.load(gpa, &engine, &env.ctx, env.pool, .empty, "broad", null, src);
+    defer plugin.deinit();
+
+    _ = try command.run(&env.commands, &env.ctx, "w", &.{});
+    try t.expectEqualStrings("threw", env.head.echo.items);
+    try t.expect(env.buffers.findByPath(blob) == null);
 }
 
 test "quickjs: an OPEN buffer doesn't launder a narrowed fs_read grant" {

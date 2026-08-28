@@ -161,7 +161,11 @@ pub const KnownPeers = struct {
     }
 };
 
-fn configPath(buf: []u8, environ: anytype) ?[:0]const u8 {
+/// Where the trust list lives. Public for the same reason
+/// `identity.configPath` is: `core/machinery.zig`'s carve-out asks the owner
+/// rather than re-deriving the XDG chain, so the refusal cannot drift from
+/// the file (doc/place.md §4.1).
+pub fn configPath(buf: []u8, environ: anytype) ?[:0]const u8 {
     if (environ.getPosix("XDG_CONFIG_HOME")) |x| {
         if (x.len > 0) return std.fmt.bufPrintZ(buf, "{s}/weft/known_peers", .{x}) catch null;
     }

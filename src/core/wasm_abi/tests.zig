@@ -2569,6 +2569,165 @@ test "wasm plugin: an fs_root-limited grant confines fs through a REAL guest —
     try t.expectError(error.Trap, command.run(&env.commands, &env.ctx, "try-write", &.{ .{ .string = esc_path }, .{ .string = "x" } }));
 }
 
+// ── doc/place.md §4.1: bucket 1 is carved out UNCONDITIONALLY ────────────
+// The editor's own state on disk — module cache, plugin kv store, identity
+// and known-peers keystores — is reachable by no grant, however broad. The
+// gate below holds the BROADEST grant the system can mint (the `.none` limit
+// `mintGrantHandles` produces from a plain `weft.grant("x", "fs_read")`,
+// which is exactly what the shipped config hands out) and is refused each
+// location BY NAME. Every path is asked of the module that OWNS the file, not
+// re-derived here: if `core/machinery.zig`'s list ever drifts from where a
+// store actually lives, this test is what notices.
+
+test "wasm plugin: no grant, however broad, reaches the editor's own machinery (doc/place.md §4.1)" {
+    const gpa = t.allocator;
+    var env: Env = undefined;
+    try Env.init(gpa, &env);
+    defer env.deinit(gpa);
+
+    var table = @import("../grants.zig").HandleTable.init(gpa);
+    defer table.deinit();
+
+    var engine = try wasm.Engine.init(gpa);
+    defer engine.deinit();
+    const plugin = try loadPlugin(&engine, &env.ctx, "fs_limit", @embedFile("guest_fs_limit_wasm"), .{ .grant_table = &table });
+    defer plugin.deinit();
+
+    // The grant is UNCONFINED — `.none`, untouched from what loadPlugin
+    // minted. Proven, not assumed: without this the refusals below would be
+    // indistinguishable from a narrow grant doing its ordinary job.
+    try t.expectEqual(@import("../grants.zig").Limit.none, table.limitFor(plugin.grant_handles[wasm_host.perm_fs_read]));
+    try t.expectEqual(@import("../grants.zig").Limit.none, table.limitFor(plugin.grant_handles[wasm_host.perm_fs_write]));
+
+    // ...and it really does reach ordinary content — a round trip through
+    // the write and read doors, plus a probe by ABSOLUTE path, which is the
+    // reach an unconfined grant is supposed to have. The carve-out is a
+    // carve-out, not a general denial.
+    var tmp = t.tmpDir(.{});
+    defer tmp.cleanup();
+    const content_path = try std.fmt.allocPrint(gpa, ".zig-cache/tmp/{s}/user-content.txt", .{tmp.sub_path});
+    defer gpa.free(content_path);
+    try t.expectEqual(
+        command.Value{ .integer = 1 },
+        try command.run(&env.commands, &env.ctx, "try-write", &.{ .{ .string = content_path }, .{ .string = "ordinary" } }),
+    );
+    const ord = try command.run(&env.commands, &env.ctx, "try-read", &.{.{ .string = content_path }});
+    try t.expectEqualStrings("ordinary", ord.string);
+    try t.expectEqual(
+        command.Value{ .integer = @intFromEnum(file.Kind.dir) },
+        try command.run(&env.commands, &env.ctx, "try-exists", &.{.{ .string = "/etc" }}),
+    );
+    // A mundane miss is a 0, NOT a trap — the answer every refusal below has
+    // to stay distinguishable from.
+    const absent = try command.run(&env.commands, &env.ctx, "try-exists", &.{.{ .string = "/definitely-not-here-xyzzy" }});
+    try t.expectEqual(command.Value{ .integer = @intFromEnum(file.Kind.none) }, absent);
+
+    // 1. The wasm module cache (`wasm.Engine.cacheDir`). Read, probe, and
+    //    WRITE all refuse: a plugin that could drop a `.cwasm` here would be
+    //    choosing the code every other plugin runs next launch.
+    {
+        const dir = wasm.Engine.cacheDir(gpa).?;
+        defer gpa.free(dir);
+        const inside = try std.fmt.allocPrint(gpa, "{s}/deadbeef.cwasm", .{dir});
+        defer gpa.free(inside);
+        try t.expectError(error.Trap, command.run(&env.commands, &env.ctx, "try-read", &.{.{ .string = dir }}));
+        try t.expectError(error.Trap, command.run(&env.commands, &env.ctx, "try-read", &.{.{ .string = inside }}));
+        try t.expectError(error.Trap, command.run(&env.commands, &env.ctx, "try-exists", &.{.{ .string = inside }}));
+        try t.expectError(error.Trap, command.run(&env.commands, &env.ctx, "try-write", &.{ .{ .string = inside }, .{ .string = "x" } }));
+        // The `..` spelling doesn't walk in either — the comparison is on the
+        // normalized path, not the string the guest typed.
+        const traversal = try std.fmt.allocPrint(gpa, "{s}/sub/../deadbeef.cwasm", .{dir});
+        defer gpa.free(traversal);
+        try t.expectError(error.Trap, command.run(&env.commands, &env.ctx, "try-read", &.{.{ .string = traversal }}));
+    }
+
+    // 2. The plugin kv store (`kv_file.stateDir`) — one plugin's private
+    //    state, which is every plugin's if this door opens.
+    {
+        const dir = @import("../kv_file.zig").stateDir(gpa).?;
+        defer gpa.free(dir);
+        const blob = try std.fmt.allocPrint(gpa, "{s}/{s}", .{ dir, @import("../kv_file.zig").store_file });
+        defer gpa.free(blob);
+        try t.expectError(error.Trap, command.run(&env.commands, &env.ctx, "try-read", &.{.{ .string = blob }}));
+        try t.expectError(error.Trap, command.run(&env.commands, &env.ctx, "try-exists", &.{.{ .string = blob }}));
+        try t.expectError(error.Trap, command.run(&env.commands, &env.ctx, "try-write", &.{ .{ .string = blob }, .{ .string = "x" } }));
+    }
+
+    // 3/4. The two keystores. READ and PROBE only, deliberately: unlike the
+    //      two above (build-baked under the project cache in a test build —
+    //      see build.zig's `addHostTestDirs`), these resolve to the
+    //      DEVELOPER'S REAL `$XDG_CONFIG_HOME/weft/…`, and a test that
+    //      exercised the write door here would destroy a real identity key
+    //      the day the carve-out regressed. Reading it is the whole attack
+    //      anyway: the key is the secret, and the peer list is the trust.
+    const machinery = @import("../machinery.zig");
+    var pbuf: [512]u8 = undefined;
+    if (@import("../identity.zig").configPath(&pbuf, machinery.Posix{})) |p| {
+        try t.expectError(error.Trap, command.run(&env.commands, &env.ctx, "try-read", &.{.{ .string = p }}));
+        try t.expectError(error.Trap, command.run(&env.commands, &env.ctx, "try-exists", &.{.{ .string = p }}));
+    }
+    var kbuf: [512]u8 = undefined;
+    if (@import("../known_peers.zig").configPath(&kbuf, machinery.Posix{})) |p| {
+        try t.expectError(error.Trap, command.run(&env.commands, &env.ctx, "try-read", &.{.{ .string = p }}));
+        try t.expectError(error.Trap, command.run(&env.commands, &env.ctx, "try-exists", &.{.{ .string = p }}));
+    }
+}
+
+test "wasm plugin: a symlink cannot walk into the machinery a plugin may not name" {
+    const gpa = t.allocator;
+    var env: Env = undefined;
+    try Env.init(gpa, &env);
+    defer env.deinit(gpa);
+
+    var table = @import("../grants.zig").HandleTable.init(gpa);
+    defer table.deinit();
+
+    var engine = try wasm.Engine.init(gpa);
+    defer engine.deinit();
+    const plugin = try loadPlugin(&engine, &env.ctx, "fs_limit", @embedFile("guest_fs_limit_wasm"), .{ .grant_table = &table });
+    defer plugin.deinit();
+
+    // A link the guest could plausibly arrange (via `proc`, or by a file it
+    // was handed) pointing straight at the module cache. Lexically it says
+    // nothing about the cache at all; the kernel form is what refuses it.
+    var tmp = t.tmpDir(.{});
+    defer tmp.cleanup();
+    const dir = try std.fmt.allocPrint(gpa, ".zig-cache/tmp/{s}", .{tmp.sub_path});
+    defer gpa.free(dir);
+    const cache = wasm.Engine.cacheDir(gpa).?;
+    defer gpa.free(cache);
+    // The cache dir must EXIST for a symlink to it to resolve — this test
+    // build has already compiled quickjs.wasm through it, but create it
+    // defensively so the gate never passes for the wrong reason.
+    {
+        const marker = try std.fmt.allocPrint(gpa, "{s}/.gate-marker", .{cache});
+        defer gpa.free(marker);
+        file.writeBytesMakingDirs(gpa, cache, marker, "") catch {};
+        defer file.deleteFile(gpa, marker);
+    }
+
+    const targetz = try gpa.dupeZ(u8, cache);
+    defer gpa.free(targetz);
+    const linkz = try std.fmt.allocPrintSentinel(gpa, "{s}/looks-innocent", .{dir}, 0);
+    defer gpa.free(linkz);
+    if (std.os.linux.errno(std.os.linux.symlinkat(targetz.ptr, std.os.linux.AT.FDCWD, linkz.ptr)) != .SUCCESS)
+        return error.SkipZigTest;
+
+    try t.expectError(error.Trap, command.run(&env.commands, &env.ctx, "try-read", &.{.{ .string = linkz }}));
+    try t.expectError(error.Trap, command.run(&env.commands, &env.ctx, "try-exists", &.{.{ .string = linkz }}));
+    const through = try std.fmt.allocPrint(gpa, "{s}/deadbeef.cwasm", .{linkz});
+    defer gpa.free(through);
+    try t.expectError(error.Trap, command.run(&env.commands, &env.ctx, "try-write", &.{ .{ .string = through }, .{ .string = "x" } }));
+
+    // The same tmp directory, NOT through the link, is ordinary content the
+    // unconfined grant still reaches — the symlink is what was refused, not
+    // the neighbourhood.
+    try t.expectEqual(
+        command.Value{ .integer = @intFromEnum(file.Kind.dir) },
+        try command.run(&env.commands, &env.ctx, "try-exists", &.{.{ .string = dir }}),
+    );
+}
+
 test "wasm_host/plugin.zig: trap message taxonomy — each Reason gets a distinct, correct message" {
     const gpa = t.allocator;
     var env: Env = undefined;
@@ -2635,6 +2794,28 @@ test "wasm_host/plugin.zig: trap message taxonomy — each Reason gets a distinc
         const msg = caller.trap_msg.?;
         try t.expect(std.mem.indexOf(u8, msg, "elsewhere/secret.txt") != null);
         try t.expect(std.mem.indexOf(u8, msg, "vault") != null);
+    }
+
+    // machinery: NAMES the location and says no grant reaches it — the one
+    // refusal that must not send an author off to add a capability, because
+    // there isn't one that would help (doc/place.md §4.1).
+    {
+        const cache = wasm.Engine.cacheDir(gpa).?;
+        defer gpa.free(cache);
+        const inside = try std.fmt.allocPrint(gpa, "{s}/x.cwasm", .{cache});
+        defer gpa.free(inside);
+        var caller: wasm.Caller = .{ .context = undefined, .caller = undefined };
+        plugin_mod.trapMachinery(plugin, &caller, .fs_read, inside);
+        const msg = caller.trap_msg.?;
+        try t.expect(std.mem.indexOf(u8, msg, "wasm module cache") != null);
+        try t.expect(std.mem.indexOf(u8, msg, "no grant reaches") != null);
+        try t.expect(std.mem.indexOf(u8, msg, "granted root") == null); // distinct from out_of_limit
+        // The path is last and `Caller.trap`'s buffer is 160 bytes, so an
+        // absolute machinery path may be cut off — whatever DID fit must be a
+        // prefix of the real one, and the diagnosis above must be intact.
+        const at = std.mem.indexOf(u8, msg, "(path '").? + "(path '".len;
+        try t.expect(std.mem.startsWith(u8, inside, msg[at..]));
+        try t.expect(msg.len > at); // some of it survived
     }
 }
 
