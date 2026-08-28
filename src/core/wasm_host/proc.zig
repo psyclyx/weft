@@ -284,19 +284,11 @@ pub fn hPlaceRoot(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32, re
     results[0] = @intCast(caller.writeMemory(@intCast(args[0]), @intCast(args[1]), dir) catch 0);
 }
 
-/// The dispatching place's local directory, or "" when it has none. Borrowed:
-/// `.path` points into the authority that opened the container, `.process`
-/// into `buf`. ONE reading, because `hPlaceRoot` and `hPlaceHas` must not be
-/// able to disagree about which directory the guest is asking about.
-fn placeDirectory(ctx: *command.Context, buf: []u8) []const u8 {
-    return switch (place_mod.realize(ctx.place(), ctx.realizer)) {
-        // Only the degenerate place asks the OS where this process is; every
-        // other place is named by the authority that opened it.
-        .process => file.processDirectory(buf) orelse "",
-        .path => |abs| abs,
-        .elsewhere, .unavailable => "",
-    };
-}
+/// The dispatching place's local directory — `shared.placeDirectory`, which
+/// lives in the shared leaf precisely because `hPlaceRoot`, `hPlaceHas` AND
+/// `wasm_host/fs.zig`'s `.place` confinement must not be able to disagree
+/// about which directory a guest is asking about versus being held inside.
+const placeDirectory = shared.placeDirectory;
 
 /// `placeHas(rel) -> kind`: what `<the dispatching place>/<rel>` IS — 0 absent,
 /// 1 file, 2 dir, 3 other, the same `file.Kind` ordinals `wl_fs_exists`

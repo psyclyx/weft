@@ -61,9 +61,18 @@
 //! through the kernel gate, so no door merely DESCRIBES what the others
 //! refuse).
 //!
+//! **Absent is CONFINED, not unconfined (doc/place.md §4.1)**. A declared
+//! capability nobody narrowed does NOT reach the whole filesystem: the
+//! describe()-boolean baseline mints `Limit.place` for the path-shaped
+//! capabilities (`defaultLimit`, below), so a plugin that asked for `fs_read`
+//! and got no config grant is confined to the place its dispatch is in.
+//! Unconfined is still reachable — it is just something you WRITE DOWN:
+//! `weft.grant(who, cap, { root: "/" })`, which normalizes to `.none` and
+//! shows up in the approval diff (`unconfined_root`/`limitForRoot`, below).
+//!
 //! **`weft.grant` (W4 slice 4, this table's last deferred consumer landed)**:
 //! `manifest.zig`'s `weft.grant(plugin, capability, opts)` verb stages a
-//! `ManifestGrantDecl` (opts.root → `Limit.fs_root`) that `reconcileGrants`
+//! `ManifestGrantDecl` (opts.root → `limitForRoot`) that `reconcileGrants`
 //! mints into THIS table (`Manifest.apply` calls it too, with `old = null` —
 //! there is no separate `applyGrants` function), strictly BEFORE the named
 //! plugin's `describe()` handshake runs (`Manifest.apply`/`.reconcile`'s
@@ -267,19 +276,69 @@ pub const GraphSubtree = struct {
 };
 
 /// A limit narrowing a grant (doc/contextual-workspace-architecture.md
-/// §13.5). `.none` = unrestricted within the capability; `.fs_root` =
-/// confined to a subtree; `.doc_region` = confined to an identity-anchored
-/// text span (`DocRegion`'s doc — §6 W4 slice 3, review B2's repair);
-/// `.graph_subtree` = confined to an identity-anchored graph subtree
+/// §13.5). `.none` = unrestricted within the capability; `.place` = confined
+/// to whatever place the dispatch is in (doc/place.md §4.1); `.fs_root` =
+/// confined to a literal subtree; `.doc_region` = confined to an
+/// identity-anchored text span (`DocRegion`'s doc — §6 W4 slice 3, review B2's
+/// repair); `.graph_subtree` = confined to an identity-anchored graph subtree
 /// (`GraphSubtree`'s doc — §6 W6). A tagged union, not a bare string, so a
 /// future limit kind (a net host) is a new variant, never a stringly-typed
 /// convention.
+///
+/// **`.place` is the only limit that carries no value, and that is the point**
+/// (doc/place.md §4.1, the "confined by default" change). `.fs_root` bakes a
+/// path at GRANT time, so it says the same thing wherever the plugin
+/// dispatches. `.place` names no path at all: it is resolved AT THE DOOR from
+/// `Context.place()`, so one grant means "the project you are acting in" and
+/// follows the user from one project to the next without a config edit. A
+/// place with no local directory (a peer or synthetic container) resolves to
+/// nothing, and nothing is in bounds — a confinement that cannot name its root
+/// refuses; it never widens.
 pub const Limit = union(enum) {
     none,
+    place,
     fs_root: []const u8,
     doc_region: DocRegion,
     graph_subtree: GraphSubtree,
 };
+
+/// The root spelling that means UNCONFINED, written down: `weft.grant(who,
+/// cap, { root: "/" })`.
+///
+/// doc/place.md §4.1 keeps raw-path access reachable — it only stops it being
+/// the thing you get by SAYING NOTHING. So "the whole filesystem" is spelled,
+/// lands in the approval diff like any other grant, and cannot be arrived at
+/// by omission. It normalizes to `Limit.none` rather than `.fs_root = "/"`
+/// so there is exactly ONE representation of unconfined in the table (and so
+/// the confinement path never has to special-case a root that is its own
+/// separator).
+pub const unconfined_root = "/";
+
+/// The limit a capability gets when nothing narrowed it — doc/place.md §4.1's
+/// "raw-path access stays available under an explicit grant, CONFINED BY
+/// DEFAULT". Path-shaped capabilities confine to the dispatching place;
+/// everything else has no path to confine, so `.none` is the honest answer for
+/// them (a `proc` grant is not made safer by pretending it has a root).
+///
+/// Keyed on the capability NAME because both callers hold a name and not the
+/// same enum: `wasm_host/plugin.zig`'s `mintGrantHandles` has a `Perm`, and
+/// `manifest.zig`'s `reconcileGrants` has whatever string the config wrote.
+/// One function, so "absent means confined" is decided in exactly one place.
+pub fn defaultLimit(capability: []const u8) Limit {
+    if (std.mem.eql(u8, capability, "fs_read")) return .place;
+    if (std.mem.eql(u8, capability, "fs_write")) return .place;
+    return .none;
+}
+
+/// A config-authored grant's limit, from the `root` its `opts` named (`""` =
+/// none named). The whole of the "absent vs written down" rule, in one
+/// expression: nothing named → `defaultLimit` (confined); `"/"` → unconfined,
+/// deliberately; anything else → that literal subtree.
+pub fn limitForRoot(capability: []const u8, root: []const u8) Limit {
+    if (root.len == 0) return defaultLimit(capability);
+    if (std.mem.eql(u8, root, unconfined_root)) return .none;
+    return .{ .fs_root = root };
+}
 
 /// A declared grant: what a principal MAY hold for `capability`, gated by
 /// `predicate` over the merged `Facts` a `Ctx` captures, narrowed by
@@ -961,7 +1020,7 @@ test "grants: limitFor reads a row's Limit; .none for an invalid handle" {
     try t.expectEqual(Limit.none, table.limitFor(unrestricted));
     switch (table.limitFor(limited)) {
         .fs_root => |root| try t.expectEqualStrings("notes-vault", root),
-        .none, .doc_region, .graph_subtree => return error.TestUnexpectedResult,
+        .none, .place, .doc_region, .graph_subtree => return error.TestUnexpectedResult,
     }
     try t.expectEqual(Limit.none, table.limitFor(.none)); // never-minted handle degrades safely
 }
@@ -986,7 +1045,7 @@ test "grants: .doc_region limit round-trips through the table (W4 slice 3)" {
             try t.expectEqual(AnchorSide.after, dr.start.side);
             try t.expectEqual(AnchorSide.before, dr.end.side);
         },
-        .none, .fs_root, .graph_subtree => return error.TestUnexpectedResult,
+        .none, .place, .fs_root, .graph_subtree => return error.TestUnexpectedResult,
     }
 }
 
@@ -1006,7 +1065,39 @@ test "grants: .graph_subtree limit round-trips through the table (W6 slice 2)" {
             try t.expectEqualStrings("notes-graph", gs.doc_id);
             try t.expect(gs.root.eql(root));
         },
-        .none, .fs_root, .doc_region => return error.TestUnexpectedResult,
+        .none, .place, .fs_root, .doc_region => return error.TestUnexpectedResult,
+    }
+}
+
+test "grants: absent means CONFINED; unconfined is a root someone wrote (doc/place.md §4.1)" {
+    // The whole of the default rule, in one place — which is the point of it
+    // living in one function: `mintGrantHandles` (the describe() baseline) and
+    // `manifest.reconcileGrants` (a config `weft.grant`) both read THIS, so
+    // saying nothing cannot come to mean two different things.
+    try t.expectEqual(Limit.place, defaultLimit("fs_read"));
+    try t.expectEqual(Limit.place, defaultLimit("fs_write"));
+    // A capability with no path to confine keeps `.none`: a `proc` grant is
+    // not made safer by pretending it has a root.
+    try t.expectEqual(Limit.none, defaultLimit("proc"));
+    try t.expectEqual(Limit.none, defaultLimit("net"));
+    try t.expectEqual(Limit.none, defaultLimit("timer"));
+    try t.expectEqual(Limit.none, defaultLimit("env"));
+
+    // No `opts` at the JS call site → `""` → the default.
+    try t.expectEqual(Limit.place, limitForRoot("fs_read", ""));
+    // `{ root: "/" }` is the ESCAPE HATCH, and it normalizes to `.none` so
+    // there is exactly one representation of "everything" in the table.
+    try t.expectEqual(Limit.none, limitForRoot("fs_read", unconfined_root));
+    // Anything else is the literal subtree it names.
+    switch (limitForRoot("fs_read", "notes")) {
+        .fs_root => |r| try t.expectEqualStrings("notes", r),
+        .none, .place, .doc_region, .graph_subtree => return error.TestUnexpectedResult,
+    }
+    // A root on a non-path capability is still recorded verbatim: this
+    // function normalizes the SPELLING, it does not judge the pairing.
+    switch (limitForRoot("proc", "notes")) {
+        .fs_root => |r| try t.expectEqualStrings("notes", r),
+        .none, .place, .doc_region, .graph_subtree => return error.TestUnexpectedResult,
     }
 }
 

@@ -36,10 +36,27 @@
 //! confinement, see `PeerFsBridge`), never `"here"` — a local `.fs_root`
 //! grant has nothing to say about it.
 //!
+//! **Absent means CONFINED (doc/place.md §4.1, the last item of the place
+//! arc).** A declared-but-unnarrowed `fs_read`/`fs_write` no longer reaches
+//! the whole machine. `grants.defaultLimit` mints `Limit.place` for both, and
+//! `gate` below resolves that AT THE DOOR against `Context.place()` — so the
+//! confinement follows the dispatch instead of being baked at grant time, and
+//! a plugin acting in project A cannot read project B with no config change at
+//! all. The place's directory comes from `shared.placeRootFor`, the SAME
+//! reading `wl_place_root`/`wl_place_has` answer with, so what a guest is told
+//! about and what it is confined to cannot disagree. Once resolved, a `.place`
+//! is confined by the identical two layers `.fs_root` gets (below) — there is
+//! no second path-comparison in this file.
+//!
+//! Unconfined survives, as something you WRITE DOWN: `weft.grant(who, cap,
+//! { root: "/" })` normalizes to `Limit.none` (`grants.limitForRoot`) and
+//! reaches everything the machinery carve-out does not. That is the escape
+//! hatch, and it is in the approval diff.
+//!
 //! **Limit enforcement (doc/contextual-workspace-architecture.md §13.5, task
 //! #8's item 1):** after the `hasPerm` possession check, each of the five
-//! split bodies below reads the checked handle's `Limit` (`shared.limitFor`)
-//! and, for `.fs_root(root)`, confines `path` to `root` before touching the
+//! split bodies below reads the checked handle's resolved bounds (`gate`) and,
+//! for a confined one, narrows `path` to its root before touching the
 //! filesystem. Two layers, deliberately different costs for a reason:
 //!   1. **`rootRelative` — a LEXICAL gate**, pure string comparison, no
 //!      syscalls: `path` must literally BE `root` or be prefixed by
@@ -122,6 +139,79 @@ const requirePerm = shared.requirePerm;
 /// `InProcClient.zig`'s module doc).
 pub const PermError = error{ PermissionDenied, OutOfLimit, Machinery };
 
+/// A path buffer for the ONE place a `.place` limit resolves against. Sized
+/// like `machinery.zig`'s, so no directory a door could actually open
+/// overflows it.
+const PathBuf = [std.fs.max_path_bytes]u8;
+
+/// What a body may act on, once `gate` has answered — the RESOLVED form of a
+/// `Limit`, which is why a body never sees a `Limit` at all.
+///
+/// `Limit.place` in particular can never reach a body: it names no root (it is
+/// "wherever this dispatch is"), so the gate resolves it into one before
+/// handing anything back. A body cannot forget to, because a body has no way
+/// to obtain the unresolved form.
+const Bounds = union(enum) {
+    /// The whole filesystem, minus the machinery carve-out. Reachable ONLY
+    /// from an explicit `weft.grant(who, cap, { root: "/" })` (`grants.zig`'s
+    /// `unconfined_root`) — never from saying nothing.
+    unconfined,
+    /// Confined beneath a root.
+    within: Within,
+    /// Nothing is in bounds. Two causes, both fail-closed: a limit that is not
+    /// fs-path-shaped riding an fs capability (a `.doc_region`/`.graph_subtree`
+    /// row — a malformed or mismatched limit denies rather than degrading to
+    /// unconfined), and a `.place` whose place has NO local directory (a peer
+    /// or synthetic container: the honest answer is a refusal, not a silent
+    /// run in the editor's launch directory).
+    closed,
+};
+
+/// A resolved confinement root, plus how a RELATIVE path is read against it.
+const Within = struct {
+    /// Borrowed for the call — cwd-relative for `.fs_root` (as authored),
+    /// absolute for a place (as the authority that opened it named it).
+    root: []const u8,
+    /// True when `root` came from the dispatching PLACE rather than from a
+    /// literal `.fs_root` string. The two read a relative path differently,
+    /// and the difference is the whole point of the variant:
+    ///   - `.fs_root("notes")` says a path must be SPELLED inside `notes/`,
+    ///     because that is the string the grant author wrote.
+    ///   - `.place` says a relative path IS place-relative — `weft-notes.md`
+    ///     means the notes file of the project you are in. In the degenerate
+    ///     `.process` place that is byte-identical to today's cwd-relative
+    ///     reading; in any other place it is what makes one grant follow the
+    ///     user from project to project.
+    place_rooted: bool,
+
+    /// `path`'s root-relative remainder to hand `RootedFs`, or `null` = out of
+    /// bounds. The LEXICAL layer only — see this file's module doc; the kernel
+    /// gate is what actually resolves it.
+    fn relative(self: Within, path: []const u8) ?[]const u8 {
+        if (!self.place_rooted) return rootRelative(self.root, path);
+        // A place root is absolute, so an ABSOLUTE path must name this place
+        // (ordinary prefix work), while a RELATIVE one is already inside it by
+        // construction and has nothing to strip.
+        const rel = if (path.len > 0 and path[0] == '/')
+            rootRelative(self.root, path) orelse return null
+        else
+            path;
+        // `..` never survives a place. The kernel gate refuses a climb that
+        // ESCAPES, but `pathAllowed` (the JS plane's descriptor-free variant)
+        // has no kernel to ask, and a place must mean the same thing at both
+        // doors. Conservative in the documented direction: this can only ever
+        // falsely DENY (a `sub/../file` that never actually leaves).
+        return if (climbs(rel)) null else rel;
+    }
+};
+
+/// Does `rel` contain a `..` component? See `Within.relative`.
+fn climbs(rel: []const u8) bool {
+    var it = std.mem.splitScalar(u8, rel, '/');
+    while (it.next()) |c| if (std.mem.eql(u8, c, "..")) return true;
+    return false;
+}
+
 /// The ONE gate every door in this file passes, in the order the three
 /// questions actually rank:
 ///
@@ -131,17 +221,30 @@ pub const PermError = error{ PermissionDenied, OutOfLimit, Machinery };
 ///      is carved out unconditionally: no grant, however broad, reaches the
 ///      module cache or the keystores").
 ///   2. **Is the capability possessed?** `hasPerm`, exactly as before.
-///   3. **How wide is it?** The possessed `Limit`, handed back for the body
-///      to confine with.
+///   3. **How wide is it, HERE?** The possessed `Limit`, resolved against
+///      this dispatch's place and handed back for the body to confine with.
 ///
-/// Returning the limit is the point: a body has no other way to obtain one,
+/// Returning the bounds is the point: a body has no other way to obtain them,
 /// so it cannot reach step 3 without having passed steps 1 and 2. That is
 /// what makes the carve-out structural rather than a convention five call
 /// sites have to remember.
-fn gate(id: anytype, comptime perm: shared.Perm, path: []const u8) PermError!grants_mod.Limit {
+///
+/// `scratch` backs the resolved place directory when the limit is `.place`;
+/// the returned `Within.root` may point into it, so it must outlive the call
+/// that uses the bounds.
+fn gate(id: anytype, comptime perm: shared.Perm, path: []const u8, scratch: []u8) PermError!Bounds {
     if (machinery.denies(path)) return error.Machinery;
     if (!shared.hasPerm(id, perm)) return error.PermissionDenied;
-    return shared.limitFor(id, perm);
+    return switch (shared.limitFor(id, perm)) {
+        .none => .unconfined,
+        .place => blk: {
+            const dir = shared.placeRootFor(id, scratch);
+            if (dir.len == 0) break :blk .closed;
+            break :blk .{ .within = .{ .root = dir, .place_rooted = true } };
+        },
+        .fs_root => |root| .{ .within = .{ .root = root, .place_rooted = false } },
+        .doc_region, .graph_subtree => .closed,
+    };
 }
 
 /// The LEXICAL half of `.fs_root` limit enforcement — see this file's
@@ -173,12 +276,19 @@ fn rootRelative(root_in: []const u8, path: []const u8) ?[]const u8 {
 /// kind of plugin (doc/place.md §4.1a). Returns the REASON rather than a
 /// bool, so a caller physically cannot report a machinery refusal as "outside
 /// the granted root". Fails closed on a limit kind that isn't fs-path-shaped,
-/// exactly like the bodies below.
+/// and on a `.place` with no local directory, exactly like the bodies below.
+///
+/// With no kernel layer, a `.place` confinement here is the lexical rule
+/// ALONE. That is why `Within.relative` refuses a `..` component outright
+/// rather than deferring it to `openat2` the way `.fs_root` does: a place must
+/// mean the same thing at both doors, and the door without a descriptor is the
+/// one that sets the bar.
 pub fn pathAllowed(id: anytype, comptime perm: shared.Perm, path: []const u8) PermError!void {
-    switch (try gate(id, perm, path)) {
-        .none => {},
-        .fs_root => |root| if (rootRelative(root, path) == null) return error.OutOfLimit,
-        .doc_region, .graph_subtree => return error.OutOfLimit,
+    var scratch: PathBuf = undefined;
+    switch (try gate(id, perm, path, &scratch)) {
+        .unconfined => {},
+        .within => |w| if (w.relative(path) == null) return error.OutOfLimit,
+        .closed => return error.OutOfLimit,
     }
 }
 
@@ -207,11 +317,12 @@ fn openLimitedRoot(gpa: Allocator, root: []const u8) ?rooted_fs.RootedFs {
 /// the caller, or `null` for a mundane failure (not found, read error) —
 /// `PermissionDenied` is the ONLY error, reserved for the guard.
 pub fn fsRead(gpa: Allocator, id: anytype, path: []const u8) PermError!?[]u8 {
-    switch (try gate(id, .fs_read, path)) {
-        .none => return file.readAlloc(gpa, path) catch null,
-        .fs_root => |root| {
-            const rel = rootRelative(root, path) orelse return error.OutOfLimit;
-            var rfs = openLimitedRoot(gpa, root) orelse return null;
+    var scratch: PathBuf = undefined;
+    switch (try gate(id, .fs_read, path, &scratch)) {
+        .unconfined => return file.readAlloc(gpa, path) catch null,
+        .within => |w| {
+            const rel = w.relative(path) orelse return error.OutOfLimit;
+            var rfs = openLimitedRoot(gpa, w.root) orelse return null;
             defer rfs.close();
             const relz = gpa.dupeZ(u8, rel) catch return null;
             defer gpa.free(relz);
@@ -221,11 +332,11 @@ pub fn fsRead(gpa: Allocator, id: anytype, path: []const u8) PermError!?[]u8 {
             };
         },
         // A `.doc_region` limit is a TEXT-EDIT-shaped narrowing (W4 slice 3)
-        // — it never legitimately rides an fs_read/fs_write grant. Fail
-        // CLOSED, not open: a malformed/mismatched limit denies rather than
-        // silently degrading to unconfined access.
-        // `.graph_subtree` is GraphDoc-shaped, same fail-closed reasoning.
-        .doc_region, .graph_subtree => return error.OutOfLimit,
+        // — it never legitimately rides an fs_read/fs_write grant, and a
+        // place with no local directory has no root to confine against. Both
+        // fail CLOSED, not open: a malformed/mismatched/unresolvable limit
+        // denies rather than silently degrading to unconfined access.
+        .closed => return error.OutOfLimit,
     }
 }
 
@@ -265,14 +376,15 @@ pub fn hFsRead(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32, resul
 /// place — so what remains here is genuine raw-path access, wanted by callers
 /// that really do name a path anywhere their grant reaches.
 pub fn fsExists(gpa: Allocator, id: anytype, path: []const u8) PermError!file.Kind {
-    switch (try gate(id, .fs_read, path)) {
-        .none => return file.statKind(gpa, path),
-        .fs_root => |root| {
+    var scratch: PathBuf = undefined;
+    switch (try gate(id, .fs_read, path, &scratch)) {
+        .unconfined => return file.statKind(gpa, path),
+        .within => |w| {
             // BOTH layers, exactly like `fsRead` below it: the lexical gate,
             // then the kernel one. A probe must not be able to describe what
             // a read could not fetch — see this file's module doc.
-            const rel = rootRelative(root, path) orelse return error.OutOfLimit;
-            var rfs = openLimitedRoot(gpa, root) orelse return .none;
+            const rel = w.relative(path) orelse return error.OutOfLimit;
+            var rfs = openLimitedRoot(gpa, w.root) orelse return .none;
             defer rfs.close();
             const relz = gpa.dupeZ(u8, rel) catch return .none;
             defer gpa.free(relz);
@@ -289,8 +401,7 @@ pub fn fsExists(gpa: Allocator, id: anytype, path: []const u8) PermError!file.Ki
                 .other => .other,
             };
         },
-        // `.graph_subtree` is GraphDoc-shaped, same fail-closed reasoning.
-        .doc_region, .graph_subtree => return error.OutOfLimit, // see `fsRead`'s doc: fail closed on a mismatched limit shape
+        .closed => return error.OutOfLimit, // see `fsRead`'s doc: fail closed on a mismatched or unresolvable limit
     }
 }
 
@@ -315,14 +426,15 @@ pub fn hFsExists(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32, res
 /// `fs.write(path, bytes)` semantic body (perm fs_write): replace a file.
 /// `true` ok / `false` on a mundane failure.
 pub fn fsWrite(gpa: Allocator, id: anytype, path: []const u8, bytes: []const u8) PermError!bool {
-    switch (try gate(id, .fs_write, path)) {
-        .none => {
+    var scratch: PathBuf = undefined;
+    switch (try gate(id, .fs_write, path, &scratch)) {
+        .unconfined => {
             file.writeBytes(gpa, path, bytes) catch return false;
             return true;
         },
-        .fs_root => |root| {
-            const rel = rootRelative(root, path) orelse return error.OutOfLimit;
-            var rfs = openLimitedRoot(gpa, root) orelse return false;
+        .within => |w| {
+            const rel = w.relative(path) orelse return error.OutOfLimit;
+            var rfs = openLimitedRoot(gpa, w.root) orelse return false;
             defer rfs.close();
             const relz = gpa.dupeZ(u8, rel) catch return false;
             defer gpa.free(relz);
@@ -332,8 +444,7 @@ pub fn fsWrite(gpa: Allocator, id: anytype, path: []const u8, bytes: []const u8)
             };
             return true;
         },
-        // `.graph_subtree` is GraphDoc-shaped, same fail-closed reasoning.
-        .doc_region, .graph_subtree => return error.OutOfLimit, // see `fsRead`'s doc: fail closed on a mismatched limit shape
+        .closed => return error.OutOfLimit, // see `fsRead`'s doc: fail closed on a mismatched or unresolvable limit
     }
 }
 
@@ -363,14 +474,15 @@ pub fn hFsWrite(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32, resu
 /// `fs.append(path, bytes)` semantic body (perm fs_write): append to a file
 /// (capture). `true` ok / `false` on a mundane failure.
 pub fn fsAppend(gpa: Allocator, id: anytype, path: []const u8, bytes: []const u8) PermError!bool {
-    switch (try gate(id, .fs_write, path)) {
-        .none => {
+    var scratch: PathBuf = undefined;
+    switch (try gate(id, .fs_write, path, &scratch)) {
+        .unconfined => {
             file.appendBytes(gpa, path, bytes) catch return false;
             return true;
         },
-        .fs_root => |root| {
-            const rel = rootRelative(root, path) orelse return error.OutOfLimit;
-            var rfs = openLimitedRoot(gpa, root) orelse return false;
+        .within => |w| {
+            const rel = w.relative(path) orelse return error.OutOfLimit;
+            var rfs = openLimitedRoot(gpa, w.root) orelse return false;
             defer rfs.close();
             const relz = gpa.dupeZ(u8, rel) catch return false;
             defer gpa.free(relz);
@@ -380,8 +492,7 @@ pub fn fsAppend(gpa: Allocator, id: anytype, path: []const u8, bytes: []const u8
             };
             return true;
         },
-        // `.graph_subtree` is GraphDoc-shaped, same fail-closed reasoning.
-        .doc_region, .graph_subtree => return error.OutOfLimit, // see `fsRead`'s doc: fail closed on a mismatched limit shape
+        .closed => return error.OutOfLimit, // see `fsRead`'s doc: fail closed on a mismatched or unresolvable limit
     }
 }
 
@@ -420,21 +531,21 @@ pub fn fsList(gpa: Allocator, id: anytype, authority: []const u8, path: []const 
     // the first thing every door in this file does. Nothing is lost: a
     // remote authority answers `null` on the very next line regardless, and
     // a refusal is a better answer than a miss either way.
-    const limit = try gate(id, .fs_read, path);
+    var scratch: PathBuf = undefined;
+    const bounds = try gate(id, .fs_read, path, &scratch);
     if (!std.mem.eql(u8, authority, "here")) return null;
-    switch (limit) {
-        .none => {
+    switch (bounds) {
+        .unconfined => {
             const pz = gpa.dupeZ(u8, path) catch return null;
             defer gpa.free(pz);
             var fs = rooted_fs.RootedFs.open(pz.ptr) catch return null;
             defer fs.close();
             return fs.list(gpa, ".") catch null;
         },
-        // `.graph_subtree` is GraphDoc-shaped, same fail-closed reasoning.
-        .doc_region, .graph_subtree => return error.OutOfLimit, // see `fsRead`'s doc: fail closed on a mismatched limit shape
-        .fs_root => |root| {
-            const rel = rootRelative(root, path) orelse return error.OutOfLimit;
-            var rfs = openLimitedRoot(gpa, root) orelse return null;
+        .closed => return error.OutOfLimit, // see `fsRead`'s doc: fail closed on a mismatched or unresolvable limit
+        .within => |w| {
+            const rel = w.relative(path) orelse return error.OutOfLimit;
+            var rfs = openLimitedRoot(gpa, w.root) orelse return null;
             defer rfs.close();
             const relz = gpa.dupeZ(u8, rel) catch return null;
             defer gpa.free(relz);
@@ -579,6 +690,39 @@ test "rootRelative: the lexical gate — in-root, out-of-root, boundary, and the
 
     // Whole-cwd root: nothing to strip, the kernel gate is the only check.
     try t.expectEqualStrings("etc/passwd", rootRelative(".", "etc/passwd").?);
+}
+
+test "Within.relative: a PLACE root reads a relative path as place-relative; an fs_root does not" {
+    const place: Within = .{ .root = "/home/u/proj", .place_rooted = true };
+    const literal: Within = .{ .root = "/home/u/proj", .place_rooted = false };
+
+    // The one behavioural difference between the two roots, and the reason
+    // `place_rooted` is a field rather than a comment: `weft-notes.md` means
+    // "this project's notes file" under a place, and means nothing at all
+    // under a root the author spelled out.
+    try t.expectEqualStrings("weft-notes.md", place.relative("weft-notes.md").?);
+    try t.expect(literal.relative("weft-notes.md") == null);
+
+    // An ABSOLUTE path must name the place either way — same prefix work.
+    try t.expectEqualStrings("a.txt", place.relative("/home/u/proj/a.txt").?);
+    try t.expectEqualStrings(".", place.relative("/home/u/proj").?);
+    try t.expect(place.relative("/home/u/other/a.txt") == null);
+    try t.expect(place.relative("/etc/passwd") == null);
+    // The boundary nit, inherited from `rootRelative`: a sibling whose name
+    // merely starts with the place's is not in the place.
+    try t.expect(place.relative("/home/u/proj-elsewhere/a.txt") == null);
+
+    // A climb is refused LEXICALLY under a place, in both spellings, because
+    // `pathAllowed` has no kernel to ask and the two doors must agree.
+    try t.expect(place.relative("../secret") == null);
+    try t.expect(place.relative("sub/../../secret") == null);
+    try t.expect(place.relative("/home/u/proj/../secret") == null);
+    // …and the same conservatism applies to a climb that never actually
+    // leaves. Denying it is the documented direction to be wrong in.
+    try t.expect(place.relative("sub/../a.txt") == null);
+    // An `.fs_root` grant's behaviour is UNCHANGED: it still hands a `..`
+    // remainder through for the kernel gate to decide.
+    try t.expectEqualStrings("../escape", rootRelative("notes", "notes/../escape").?);
 }
 
 /// The minimal principal `hasPerm`/`limitFor` accept — they duck-type over a

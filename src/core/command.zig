@@ -390,7 +390,10 @@ pub const Context = struct {
                 // comment: enforcement lives at `GraphCollab.admitRegions`
                 // instead). Same "not this chokepoint's business" skip as
                 // `.fs_root`.
-                .none, .fs_root, .graph_subtree => continue,
+                // `.place` is likewise fs-path-shaped (doc/place.md §4.1) —
+                // it confines WHERE a file door reaches, and has nothing to
+                // say about a text region.
+                .none, .place, .fs_root, .graph_subtree => continue,
             };
             if (!std.mem.eql(u8, region.doc_id, self.buffer().name)) continue;
             var out: [2]usize = undefined;

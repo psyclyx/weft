@@ -20,13 +20,13 @@
 //! line here.
 //!
 //! **Unconditional, and independent of any grant.** `wasm_host/fs.zig`'s
-//! `gate` consults this BEFORE it looks at possession or at a `.fs_root`
-//! limit, so:
-//!   - a broader grant cannot widen it (an unconfined `fs_read` — today's
-//!     default `.none` limit, which the shipped config hands out — reaches
-//!     every absolute path on the machine EXCEPT these), and
-//!   - narrowing a grant to an `fs_root` is not what makes it safe (the
-//!     carve-out already held before the limit was read).
+//! `gate` consults this BEFORE it looks at possession or at any limit, so:
+//!   - a broader grant cannot widen it (an explicitly unconfined `fs_read` —
+//!     `weft.grant(who, cap, { root: "/" })`, which is the only way to get one
+//!     since §4.1's confined-by-default change — reaches every absolute path
+//!     on the machine EXCEPT these), and
+//!   - narrowing a grant to a place or an `fs_root` is not what makes it safe
+//!     (the carve-out already held before the limit was read).
 //! Both planes route through that one gate, because a JS plugin is not a
 //! different kind of plugin (doc/place.md §4.1a).
 //!

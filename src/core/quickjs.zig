@@ -619,13 +619,25 @@ pub const JsPlugin = struct {
         std.log.warn("js plugin '{s}': denied capability '{s}' — declare it in your config with weft.grant(\"{s}\", \"{s}\")", .{ self.name, perm.label(), self.name, perm.label() });
     }
 
-    /// The other denial: the capability IS possessed, but its `.fs_root`
-    /// limit doesn't reach `path`. Names both, like the wasm plane's
-    /// `trapOutOfLimit`, so a narrowed grant is diagnosable.
+    /// The other denial: the capability IS possessed, but its limit doesn't
+    /// reach `path`. Names both, like the wasm plane's `trapOutOfLimit`, so a
+    /// narrowed grant is diagnosable — including the `.place` case, where the
+    /// confinement is the dispatching place and the fix is a config grant
+    /// rather than a root string nobody ever wrote (doc/place.md §4.1).
     fn denyOutOfLimit(self: *JsPlugin, comptime perm: Perm, path: []const u8) void {
+        if (perm_gate.limitFor(self, perm) == .place) {
+            var buf: [std.fs.max_path_bytes]u8 = undefined;
+            const dir = perm_gate.placeRootFor(self, &buf);
+            if (dir.len == 0) {
+                std.log.warn("js plugin '{s}': '{s}' — this place has no local directory, so path '{s}' is outside it", .{ self.name, perm.label(), path });
+            } else {
+                std.log.warn("js plugin '{s}': '{s}' path '{s}' is outside this dispatch's place '{s}' — widen it with weft.grant(\"{s}\", \"{s}\", {{ root: \"/\" }})", .{ self.name, perm.label(), path, dir, self.name, perm.label() });
+            }
+            return;
+        }
         const root: []const u8 = switch (perm_gate.limitFor(self, perm)) {
             .fs_root => |r| r,
-            .none, .doc_region, .graph_subtree => "?",
+            .none, .place, .doc_region, .graph_subtree => "?",
         };
         std.log.warn("js plugin '{s}': '{s}' path '{s}' is outside the granted root '{s}'", .{ self.name, perm.label(), path, root });
     }
@@ -3374,7 +3386,7 @@ test "quickjs: W4 slice 4 — reconcile round trip: a weft.grant removed leaves 
     try t.expect(env.grants.check(h));
     switch (env.grants.limitFor(h)) {
         .fs_root => |root| try t.expectEqualStrings("repo", root),
-        .none, .doc_region, .graph_subtree => return error.TestUnexpectedResult,
+        .none, .place, .doc_region, .graph_subtree => return error.TestUnexpectedResult,
     }
 
     // Reload WITHOUT the grant decl at all — reconcile tears it down.

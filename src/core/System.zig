@@ -644,6 +644,11 @@ pub fn registerRevokeCommand(gpa: Allocator, commands: *command.Commands, system
 fn formatLimit(buf: []u8, limit: grants_mod.Limit) []const u8 {
     return switch (limit) {
         .none => "none",
+        // Deliberately NOT rendered as a directory: the row does not hold one.
+        // `place` is resolved per dispatch, so printing today's answer beside
+        // a grant that means "wherever you are" would read as a promise the
+        // row never made (doc/place.md §4.1).
+        .place => "place",
         .fs_root => |root| std.fmt.bufPrint(buf, "fs_root({s})", .{root}) catch buf,
         .doc_region => |dr| std.fmt.bufPrint(buf, "doc_region({s})", .{dr.doc_id}) catch buf,
         .graph_subtree => |gs| std.fmt.bufPrint(buf, "graph_subtree({s})", .{gs.doc_id}) catch buf,

@@ -86,6 +86,7 @@ pub const secure = @import("secure.zig");
 pub const identity = @import("identity.zig");
 pub const known_peers = @import("known_peers.zig");
 pub const machinery = @import("machinery.zig");
+pub const grants = @import("grants.zig");
 pub const session = @import("session.zig");
 pub const hub = @import("hub.zig");
 pub const locus = @import("locus.zig");
