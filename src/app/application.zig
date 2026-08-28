@@ -96,6 +96,7 @@ pub const Application = struct {
                 .semantic = &args.session.system.semantic,
                 .placement = &args.session.system.placement,
                 .focus_feed = &args.session.system.focus,
+                .viewports = &args.session.system.viewports,
                 .cursor_cfg = &args.session.cursor_cfg,
                 .plugins = args.plugins,
                 .conn = args.conn,
@@ -195,7 +196,7 @@ pub const Application = struct {
     }
 
     pub fn applyWindowIntents(self: *Application) bool {
-        return self.driver.applyWindowIntents();
+        return self.driver.applyWindowIntents(&self.session.cmd_ctx);
     }
 
     pub fn observe(self: *Application, active: frame.Driver.Prepared) bool {

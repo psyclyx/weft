@@ -332,6 +332,17 @@ pub const Layout = struct {
         return findDock(self.root, edge);
     }
 
+    /// The live leaf a pane id names, or null once it is gone. The read-only
+    /// counterpart of the `headFocus` handle check, for callers that hold an
+    /// id but no generation (a materialized viewport, a feed event): a
+    /// retired id resolves to nothing rather than to whoever recycled it,
+    /// because `freeSlot` clears the node before offering the id back.
+    pub fn paneById(self: *Layout, id: PaneId) ?*Node {
+        if (id >= self.slots.items.len) return null;
+        const node = self.slots.items[id].node orelse return null;
+        return if (node.* == .leaf) node else null;
+    }
+
     /// Visit every pane (leaf order). Used to keep panes in sync with the
     /// buffer table: reassign closed buffers, mirror the active buffer.
     pub fn eachPane(self: *Layout, ctx: anytype, comptime visit: fn (@TypeOf(ctx), *Pane) void) void {

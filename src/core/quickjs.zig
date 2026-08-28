@@ -20,6 +20,7 @@ const Buffers = @import("Buffers.zig");
 const pick_mod = @import("pick.zig");
 const status_feed = @import("status_feed.zig");
 const manifest_mod = @import("manifest.zig");
+const viewport_mod = @import("viewport.zig");
 const TranscriptDoc = @import("transcript.zig");
 const GraphDoc = @import("graph.zig");
 const subbuffer = @import("subbuffer.zig");
@@ -199,6 +200,8 @@ const config_handlers = .{
     .{ .name = "qjs_provide", .handler = cProvide },
     .{ .name = "qjs_status_segment", .handler = cStatusSegment },
     .{ .name = "qjs_grant", .handler = cGrant },
+    .{ .name = "qjs_viewport", .handler = cViewport },
+    .{ .name = "qjs_present", .handler = cPresent },
 };
 
 /// The `.plugin`-group handlers a RESIDENT JS plugin's linker binds (real —
@@ -1594,6 +1597,61 @@ fn cGrant(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32, results: [
         return;
     }
     std.log.warn("weft.grant: config-plane only (not available to a resident plugin yet)", .{});
+}
+
+/// The attribute bits `weft_qjs.c`'s `WEFT_VP_*` sets. The two lists must
+/// agree; there is no third place they are spelled.
+const vp_cycles: i32 = 1 << 0;
+const vp_persistent: i32 = 1 << 1;
+const vp_focus_source: i32 = 1 << 2;
+
+/// `weft.viewport(name, opts)` — stage a viewport's attributes
+/// (doc/configuration.md §5.2). The edge arrives as a name and is PARSED
+/// here: the attribute set is closed, so a misspelled edge is a config
+/// mistake to report at the boundary, not an undocked viewport to puzzle
+/// over later.
+fn cViewport(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32, results: []i32) void {
+    _ = results;
+    const br: *Bridge = @ptrCast(@alignCast(data.?));
+    const gpa = br.activeCtx().gpa;
+    const name = readStr(br, caller, args[0], args[1]) orelse return;
+    defer gpa.free(name);
+    const edge_name = readStr(br, caller, args[2], args[3]) orelse return;
+    defer gpa.free(edge_name);
+    const edge = viewport_mod.parseEdge(edge_name);
+    if (edge == null and edge_name.len > 0) {
+        std.log.warn("weft.viewport(\"{s}\"): unknown edge '{s}' — expected left/right/top/bottom; declared undocked", .{ name, edge_name });
+    }
+    const flags = args[4];
+    const attrs: viewport_mod.Attrs = .{
+        .cycles = flags & vp_cycles != 0,
+        .persistent = flags & vp_persistent != 0,
+        .dock = edge,
+        .focus_source = flags & vp_focus_source != 0,
+    };
+    const extent: f32 = @as(f32, @floatFromInt(args[5])) / 1000.0;
+    if (br.manifest) |m| {
+        m.addViewport(name, attrs, extent) catch {};
+        return;
+    }
+    std.log.warn("weft.viewport: config-plane only (a viewport is manifest composition, not a runtime poke)", .{});
+}
+
+/// `weft.present(viewport, {subject})` — stage what a declared viewport
+/// shows (§7).
+fn cPresent(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32, results: []i32) void {
+    _ = results;
+    const br: *Bridge = @ptrCast(@alignCast(data.?));
+    const gpa = br.activeCtx().gpa;
+    const name = readStr(br, caller, args[0], args[1]) orelse return;
+    defer gpa.free(name);
+    const subject = readStr(br, caller, args[2], args[3]) orelse return;
+    defer gpa.free(subject);
+    if (br.manifest) |m| {
+        m.addPresent(name, subject) catch {};
+        return;
+    }
+    std.log.warn("weft.present: config-plane only (a viewport is manifest composition, not a runtime poke)", .{});
 }
 
 /// Surface a rejected `provide` to the plugin author through the echo line —

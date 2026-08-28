@@ -89,6 +89,7 @@ const semantic_mod = @import("semantic.zig");
 const intent_mod = @import("intent.zig");
 const placement_mod = @import("placement.zig");
 const focus_feed = @import("focus_feed.zig");
+const viewport_mod = @import("viewport.zig");
 const fs_runtime = @import("weft_fs_runtime");
 
 pub const System = @This();
@@ -201,6 +202,10 @@ placement: placement_mod.Policy = .empty,
 /// statuslines, titles, and presence alike; published by the workspace's
 /// layout phase, which is the only place focus actually moves.
 focus: focus_feed.Feed = .empty,
+/// The viewports this system's manifest declares (`weft.viewport` /
+/// `weft.present`). Declarations, plus the layout phase's note of which are
+/// realized — the workspace materializes them; nothing here draws.
+viewports: viewport_mod.Registry = .empty,
 
 /// Build a system from scratch: fresh buffers (one scratch buffer, per
 /// `Buffers.init`), empty commands/keymap, and the built-in command/keymap
@@ -264,6 +269,7 @@ pub fn destroy(self: *System) void {
     self.intent.deinit(gpa);
     self.placement.deinit(gpa);
     self.focus.deinit(gpa);
+    self.viewports.deinit(gpa);
     self.keymap.deinit(gpa);
     self.commands.deinit(gpa);
     self.buffers.deinit(gpa);
@@ -291,6 +297,7 @@ pub fn contextFor(self: *System, head: *Head) command.Context {
         .semantic = &self.semantic,
         .filesystems = &self.filesystems,
         .intent = &self.intent,
+        .viewports = &self.viewports,
     };
 }
 

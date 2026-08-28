@@ -91,6 +91,8 @@ pub const imports = [_]Entry{
     e("qjs_provide", 9, 0, .config, "weft.provide(action, mode, lang, cmd, prio): register a provider"),
     e("qjs_status_segment", 5, 0, .config, "weft.statusSegment(text, role, priority): stage a static ui/statusline-seg segment onto the manifest (doc/cwa-prior-docs-audit.md §5)"),
     e("qjs_grant", 6, 0, .config, "weft.grant(plugin, capability, root): stage a GrantDecl onto the manifest — root (\"\" = unrestricted) narrows to Limit.fs_root (doc/contextual-workspace-architecture.md §13.5)"),
+    e("qjs_viewport", 6, 0, .config, "weft.viewport(name, {edge, extent, cycles, persistent, followFocus}): stage a viewport's ATTRIBUTES onto the manifest — \"sidebar\" is a fragment setting these, not a kind (doc/cwa-config-decisions.md D1)"),
+    e("qjs_present", 4, 0, .config, "weft.present(viewport, {subject}): stage \"show this subject in that viewport\" (doc/contextual-workspace-architecture.md §7)"),
 
     // ── the plugin plane: stubbed on the config linker, real on a JsPlugin's ─
     e("qjs_register", 2, 1, .plugin, "bind a command name to this JS plugin's on_command; returns its id"),
@@ -118,7 +120,7 @@ pub const imports = [_]Entry{
 /// `qjs_*` import, so a merge conflict or half-finished edit fails the
 /// build instead of silently drifting quickjs.zig's three registration
 /// sites apart.
-const expected_count = 31;
+const expected_count = 33;
 
 comptime {
     @setEvalBranchQuota(10_000); // O(n²) duplicate scan, n=31
@@ -163,7 +165,7 @@ test "qjs membrane contract: every entry is well-formed, documented, and unique"
         }
     }
     try t.expectEqual(@as(usize, expected_count), imports.len);
-    try t.expectEqual(@as(usize, 13), config_count); // defineConfigFns' surface
+    try t.expectEqual(@as(usize, 15), config_count); // defineConfigFns' surface
     try t.expectEqual(@as(usize, 18), plugin_count); // the resident-plugin-only surface
 }
 

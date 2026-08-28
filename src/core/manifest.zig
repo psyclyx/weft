@@ -69,6 +69,7 @@ const Keymap = @import("Keymap.zig");
 const surface = @import("surface.zig");
 const grants_mod = @import("grants.zig");
 const schema_mod = @import("weft_schema");
+const viewport_mod = @import("viewport.zig");
 
 pub const Tier = container_mod.Tier;
 
@@ -224,6 +225,31 @@ pub const ManifestGrantDecl = struct {
 /// directly (`manifest.zig`'s own test discipline — see this file's
 /// "manifest: staging — weft.grant lands..." test for the precedent this
 /// type's tests follow).
+/// `weft.viewport(name, {edge, extent, cycles, persistent, followFocus})`
+/// (doc/configuration.md §5.2) — a workspace-composition declaration. The
+/// attributes are already PARSED here rather than kept as strings: they are
+/// a closed set of booleans plus an edge, so an unspellable one should fail
+/// at the config boundary, not at materialization time.
+///
+/// "Sidebar" never appears: it is a fragment that sets these four, which is
+/// the whole of D1's "attributes, not a role enum".
+pub const ViewportDecl = struct {
+    name: []u8,
+    attrs: viewport_mod.Attrs,
+    /// The panel's share of the frame (0..1); ignored when undocked.
+    extent: f32,
+};
+
+/// `weft.present(viewport, {subject})` (doc/configuration.md §5.2) — which
+/// resource a declared viewport shows. Separate from `ViewportDecl` because
+/// presenting is an ordinary operation on a live viewport (§7), not part of
+/// what the viewport IS: the same verb re-presents at runtime, and a
+/// follow-focus consumer calls exactly it.
+pub const PresentDecl = struct {
+    viewport: []u8,
+    subject: []u8,
+};
+
 pub const SlotDeclDecl = struct {
     name: []u8,
     shape: container_mod.Shape,
@@ -331,6 +357,8 @@ pub const Manifest = struct {
     status_segments: std.ArrayList(StatusSegmentDecl) = .empty,
     grants: std.ArrayList(ManifestGrantDecl) = .empty,
     slots: std.ArrayList(SlotDeclDecl) = .empty,
+    viewports: std.ArrayList(ViewportDecl) = .empty,
+    presents: std.ArrayList(PresentDecl) = .empty,
 
     pub fn create(gpa: Allocator, owner: []const u8, tier: Tier) !*Manifest {
         const self = try gpa.create(Manifest);
@@ -398,6 +426,13 @@ pub const Manifest = struct {
             gpa.free(d.root);
         }
         self.grants.deinit(gpa);
+        for (self.viewports.items) |d| gpa.free(d.name);
+        self.viewports.deinit(gpa);
+        for (self.presents.items) |d| {
+            gpa.free(d.viewport);
+            gpa.free(d.subject);
+        }
+        self.presents.deinit(gpa);
         gpa.destroy(self);
     }
 
@@ -505,6 +540,21 @@ pub const Manifest = struct {
             .root = try self.gpa.dupe(u8, root),
         });
     }
+    pub fn addViewport(self: *Manifest, name: []const u8, attrs: viewport_mod.Attrs, extent: f32) !void {
+        try self.viewports.append(self.gpa, .{
+            .name = try self.gpa.dupe(u8, name),
+            .attrs = attrs,
+            .extent = std.math.clamp(extent, 0.05, 0.95),
+        });
+    }
+    pub fn addPresent(self: *Manifest, name: []const u8, subject: []const u8) !void {
+        const owned = try self.gpa.dupe(u8, name);
+        errdefer self.gpa.free(owned);
+        try self.presents.append(self.gpa, .{
+            .viewport = owned,
+            .subject = try self.gpa.dupe(u8, subject),
+        });
+    }
     /// Attach a fully-evaluated sub-manifest (a `weft.use(name)` import).
     /// Takes ownership: `destroy` frees it recursively.
     pub fn addImport(self: *Manifest, sub: *Manifest) !void {
@@ -598,6 +648,25 @@ pub const Manifest = struct {
                 defer std.heap.page_allocator.free(blob);
                 hStr(h, blob);
             } else |_| {}
+        }
+        hLen(h, self.viewports.items.len);
+        for (self.viewports.items) |d| {
+            hStr(h, d.name);
+            // Field by field, never `asBytes` of the struct: `Attrs` has an
+            // optional enum in it, so its padding is not defined data and an
+            // approval hash must not depend on it.
+            h.update(&[_]u8{
+                @intFromBool(d.attrs.cycles),
+                @intFromBool(d.attrs.persistent),
+                @intFromBool(d.attrs.focus_source),
+                if (d.attrs.dock) |e| @as(u8, @intFromEnum(e)) + 1 else 0,
+            });
+            h.update(std.mem.asBytes(&d.extent));
+        }
+        hLen(h, self.presents.items.len);
+        for (self.presents.items) |d| {
+            hStr(h, d.viewport);
+            hStr(h, d.subject);
         }
         hLen(h, self.imports.items.len);
         for (self.imports.items) |imp| imp.hashInto(h);
@@ -761,6 +830,19 @@ pub const Manifest = struct {
                 .composition = d.composition,
                 .schema = d.schema,
             }) catch {};
+        }
+        // Viewport composition. Idempotent by name (`Registry.declare`), so
+        // unlike binds/provides these need no teardown pass in `reconcile`:
+        // re-applying an unchanged manifest re-declares the same viewport
+        // onto itself. A `present` for a viewport nobody declared is a
+        // reportable typo, never a silently ignored line.
+        if (actx.ctx.viewports) |registry| {
+            for (self.viewports.items) |d|
+                registry.declare(gpa, d.name, d.attrs, d.extent) catch {};
+            for (self.presents.items) |d| registry.present(gpa, d.viewport, d.subject) catch |e|
+                std.log.warn("config: weft.present(\"{s}\", ...) — {t}", .{ d.viewport, e });
+        } else if (self.viewports.items.len > 0 or self.presents.items.len > 0) {
+            std.log.warn("config: viewport declarations dropped — this embedding composes no workspace", .{});
         }
         for (self.status_segments.items) |*d| {
             if (actx.ui_bind) |binder| {

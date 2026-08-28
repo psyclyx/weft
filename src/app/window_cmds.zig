@@ -208,10 +208,13 @@ pub fn applyIntents(
     // with the direction read off an attribute rather than guessed.
     {
         const fp = window_layout.headFocus(win_layout, head).pane();
-        if (fp.attrs.persistent)
-            applyWindowFocus(win_layout, view, buffers, gpa, head, keymap)
-        else
-            fp.buffer_id = buffers.active_id;
+        if (!fp.attrs.persistent)
+            fp.buffer_id = buffers.active_id
+        else if (buffers.active_id != fp.buffer_id)
+            // Only when they actually disagree: `applyWindowFocus` also
+            // restores the pane's saved scroll, which would fight the live
+            // `view.top_row` if it ran on every quiet frame.
+            applyWindowFocus(win_layout, view, buffers, gpa, head, keymap);
     }
     {
         // A pane whose buffer was closed falls back to the active one so no
@@ -272,6 +275,74 @@ fn applyPlacement(
     // goes back to what the focused pane shows, which the persistent arm of
     // the mirror above does, the same way every focus move already does.
     return true;
+}
+
+/// Realize the viewports the manifest declares (`weft.viewport` /
+/// `weft.present`, doc/configuration.md §5.2) into the live pane tree.
+///
+/// Run in the layout phase because that is where the tree is owned; driven
+/// off the registry rather than off config apply because config evaluation is
+/// sealed and must not touch a workspace. Each declaration is materialized
+/// once — the registry remembers the pane — so this is a cheap scan on every
+/// later frame, and a config reload re-presenting a new subject picks it up
+/// without re-docking anything.
+///
+/// Only docked viewports are realized today: a tiled declaration has no
+/// stated position to place it at, which is the `ui/layout` slot's business,
+/// not this function's.
+pub fn materializeViewports(
+    ctx: *core.command.Context,
+    win_layout: *window_layout.Layout,
+    buffers: *core.Buffers,
+    gpa: std.mem.Allocator,
+    head: *core.Head,
+    keymap: *const core.Keymap,
+    registry: *core.viewport.Registry,
+) bool {
+    var dirty = false;
+    for (registry.list.items) |*decl| {
+        const edge = decl.attrs.dock orelse continue;
+        if (decl.pane == null or win_layout.paneById(decl.pane.?) == null) {
+            const panel = win_layout.dock(edge, decl.extent, buffers.active_id, decl.attrs) catch continue;
+            decl.pane = panel.leaf.id;
+            decl.presented = false;
+            dirty = true;
+        }
+        if (decl.presented or decl.subject.len == 0) continue;
+        decl.presented = true;
+        presentIn(ctx, win_layout, buffers, gpa, head, keymap, decl.pane.?, decl.subject);
+        dirty = true;
+    }
+    return dirty;
+}
+
+/// "Present resource R in viewport V" (§7) — an ordinary operation, not a
+/// special sidebar path. It opens `subject` through the very same `open`
+/// every other locus uses (no new authority, no viewport-specific loader),
+/// hands the resulting entry to `pane`, and puts the acting head back on the
+/// entry it was already looking at.
+///
+/// This is the retarget half of the follow-focus pair
+/// (`core/focus_feed.zig`'s `Companion` is the other): a companion that
+/// follows the focus feed calls exactly this, which is why following needs no
+/// binding language.
+pub fn presentIn(
+    ctx: *core.command.Context,
+    win_layout: *window_layout.Layout,
+    buffers: *core.Buffers,
+    gpa: std.mem.Allocator,
+    head: *core.Head,
+    keymap: *const core.Keymap,
+    pane: window_layout.PaneId,
+    subject: []const u8,
+) void {
+    const node = win_layout.paneById(pane) orelse return;
+    const restore = buffers.active_id;
+    _ = core.command.run(ctx.commands, ctx, "open", &.{.{ .string = subject }}) catch return;
+    node.pane().buffer_id = buffers.active_id;
+    node.pane().top_row = 0;
+    if (buffers.active_id != restore)
+        buffers.switchTo(gpa, restore, head, keymap) catch {};
 }
 
 /// Publish this head's focused viewport on the primary-focus feed (§7). The

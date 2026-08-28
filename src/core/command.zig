@@ -136,6 +136,11 @@ pub const Context = struct {
     filesystems: ?*@import("weft_fs_runtime").Router = null,
     /// The shell's workspace placement policy, when one is installed.
     entries: ?EntryOpener = null,
+    /// The system's declared viewports (`weft.viewport`/`weft.present`).
+    /// `null` in embeddings with no workspace composition; a viewport
+    /// declaration is then reported as dropped rather than silently staged
+    /// against nothing.
+    viewports: ?*@import("viewport.zig").Registry = null,
     /// The entry an ASYNC delivery captured at spawn, bound for the duration
     /// of its callback (`wasm_host/proc.zig`). While set, `buffer`/
     /// `textEditor`/`document` mean THAT entry rather than whatever is active,

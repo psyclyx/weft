@@ -74,7 +74,101 @@ pub const Attrs = struct {
     }
 };
 
+/// One declared viewport plus the workspace's note of whether it has been
+/// realized yet. The declaration half is manifest data (`weft.viewport` /
+/// `weft.present`); `pane`/`presented` are the layout phase's bookkeeping,
+/// kept beside it so "declared but not yet on screen" is one lookup rather
+/// than a second parallel table that can disagree with this one.
+pub const Declaration = struct {
+    name: []u8,
+    attrs: Attrs,
+    extent: f32,
+    /// The resource to present, or `""` for none.
+    subject: []u8,
+    /// The `window_layout` pane slot this was materialized into.
+    pane: ?u32 = null,
+    presented: bool = false,
+};
+
+/// The declared viewports of one system. Keyed by name, last declaration
+/// wins — so a config RELOAD re-declaring "sidebar" updates it in place
+/// instead of docking a second one, and re-applying an unchanged manifest is
+/// a genuine no-op (which is what lets `Manifest.reconcile` leave viewports
+/// out of its teardown pass).
+pub const Registry = struct {
+    list: std.ArrayList(Declaration) = .empty,
+
+    pub const empty: Registry = .{};
+
+    pub fn deinit(self: *Registry, gpa: std.mem.Allocator) void {
+        for (self.list.items) |d| {
+            gpa.free(d.name);
+            gpa.free(d.subject);
+        }
+        self.list.deinit(gpa);
+        self.* = undefined;
+    }
+
+    pub fn find(self: *Registry, name: []const u8) ?*Declaration {
+        for (self.list.items) |*d| {
+            if (std.mem.eql(u8, d.name, name)) return d;
+        }
+        return null;
+    }
+
+    pub fn declare(self: *Registry, gpa: std.mem.Allocator, name: []const u8, attrs: Attrs, extent: f32) !void {
+        if (self.find(name)) |d| {
+            d.attrs = attrs;
+            d.extent = extent;
+            return;
+        }
+        const owned = try gpa.dupe(u8, name);
+        errdefer gpa.free(owned);
+        const subject = try gpa.dupe(u8, "");
+        errdefer gpa.free(subject);
+        try self.list.append(gpa, .{ .name = owned, .attrs = attrs, .extent = extent, .subject = subject });
+    }
+
+    /// "Present resource R in viewport V" as a declaration. A NEW subject
+    /// clears `presented`, so the layout phase presents it; the same subject
+    /// again changes nothing.
+    pub fn present(self: *Registry, gpa: std.mem.Allocator, name: []const u8, subject: []const u8) !void {
+        const d = self.find(name) orelse return error.UnknownViewport;
+        if (std.mem.eql(u8, d.subject, subject)) return;
+        const owned = try gpa.dupe(u8, subject);
+        gpa.free(d.subject);
+        d.subject = owned;
+        d.presented = false;
+    }
+};
+
 const t = std.testing;
+
+test "viewport: a registry declaration is idempotent and re-presentable" {
+    const gpa = t.allocator;
+    var reg: Registry = .empty;
+    defer reg.deinit(gpa);
+
+    try reg.declare(gpa, "sidebar", .sidebar(.left), 0.25);
+    try reg.present(gpa, "sidebar", ".");
+    reg.find("sidebar").?.pane = 3;
+    reg.find("sidebar").?.presented = true;
+
+    // Re-applying the same manifest updates in place — no second sidebar,
+    // and nothing already realized is disturbed.
+    try reg.declare(gpa, "sidebar", .sidebar(.left), 0.25);
+    try reg.present(gpa, "sidebar", ".");
+    try t.expectEqual(@as(usize, 1), reg.list.items.len);
+    try t.expectEqual(@as(?u32, 3), reg.find("sidebar").?.pane);
+    try t.expect(reg.find("sidebar").?.presented);
+
+    // A new subject is a new presentation, and only that.
+    try reg.present(gpa, "sidebar", "src");
+    try t.expect(!reg.find("sidebar").?.presented);
+    try t.expectEqual(@as(?u32, 3), reg.find("sidebar").?.pane);
+
+    try t.expectError(error.UnknownViewport, reg.present(gpa, "nope", "."));
+}
 
 test "viewport: the sidebar bundle is attributes, not a kind" {
     const bar = Attrs.sidebar(.left);

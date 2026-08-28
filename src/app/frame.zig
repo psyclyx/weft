@@ -153,6 +153,9 @@ pub const FrameCtx = struct {
     /// pane tree they act on.
     placement: *core.placement.Policy,
     focus_feed: *core.focus_feed.Feed,
+    /// The viewports this system's manifest declares; the layout phase
+    /// realizes them into the pane tree.
+    viewports: *core.viewport.Registry,
 
     // ── Config read by the HUD ──
     cursor_cfg: *cursor_config.CursorConfig,
@@ -231,11 +234,25 @@ pub const Driver = struct {
         force_rebuild: bool = false,
     };
 
-    /// Apply the ordinary frame-loop window intents. Kept public because the
-    /// desktop loop must do pointer routing and collab work between prepare and
-    /// build; pull-based backends simply let `build` call it.
-    pub fn applyWindowIntents(self: *Driver) bool {
-        const changed = window_cmds.applyIntents(
+    /// Realize any declared-but-unbuilt viewports, then apply the ordinary
+    /// frame-loop window intents. `cmd_ctx` is the live dispatch context a
+    /// `weft.present` subject opens through — the same `open` every other
+    /// locus runs, so composing a workspace grants nothing new.
+    ///
+    /// Kept public because the desktop loop must do pointer routing and
+    /// collab work between prepare and build; pull-based backends simply let
+    /// `build` call it.
+    pub fn applyWindowIntents(self: *Driver, cmd_ctx: *core.command.Context) bool {
+        var changed = window_cmds.materializeViewports(
+            cmd_ctx,
+            self.layout,
+            self.ctx.buffers,
+            self.ctx.gpa,
+            self.ctx.head,
+            self.ctx.keymap,
+            self.ctx.viewports,
+        );
+        if (window_cmds.applyIntents(
             self.window_ctx,
             self.layout,
             self.view,
@@ -246,7 +263,7 @@ pub const Driver = struct {
             self.ctx.last_frame_rect.*,
             self.ctx.placement,
             self.ctx.focus_feed,
-        );
+        )) changed = true;
         if (changed) self.ctx.view_dirty.* = true;
         return changed;
     }

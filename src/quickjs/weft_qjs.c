@@ -151,6 +151,22 @@ __attribute__((import_module("weft"), import_name("qjs_grant")))
 extern void host_grant(const char *plugin, int plugin_len,
                        const char *capability, int capability_len,
                        const char *root, int root_len);
+// weft.viewport(name, opts): stage a viewport declaration
+// (doc/configuration.md §5.2). `flags` is the attribute bundle as bits (see
+// WEFT_VP_* below) and `extent` is per-mille of the frame, because the host
+// import ABI carries i32s only — the pair is decoded once, host-side.
+__attribute__((import_module("weft"), import_name("qjs_viewport")))
+extern void host_viewport(const char *name, int name_len,
+                          const char *edge, int edge_len,
+                          int flags, int extent_permille);
+// weft.present(viewport, opts): stage "show this subject in that viewport".
+__attribute__((import_module("weft"), import_name("qjs_present")))
+extern void host_present(const char *viewport, int viewport_len,
+                         const char *subject, int subject_len);
+
+#define WEFT_VP_CYCLES (1 << 0)
+#define WEFT_VP_PERSISTENT (1 << 1)
+#define WEFT_VP_FOCUS_SOURCE (1 << 2)
 
 // The result an i32-returning effect import answers when this plugin holds no
 // grant for the capability it needs (core/membrane/qjs_contract.zig's
@@ -531,6 +547,79 @@ static JSValue js_grant(JSContext *ctx, JSValueConst this_val,
     return JS_UNDEFINED;
 }
 
+// Read `opts.key` as a boolean, or `dflt` when absent. Config attributes are
+// a closed set with real defaults, so an omitted key is the default and a
+// present one is whatever it says — no third "unset" state to model.
+static int opt_bool(JSContext *ctx, JSValueConst opts, const char *key, int dflt) {
+    if (!JS_IsObject(opts)) return dflt;
+    JSValue v = JS_GetPropertyStr(ctx, opts, key);
+    int out = (JS_IsUndefined(v) || JS_IsNull(v)) ? dflt : JS_ToBool(ctx, v);
+    JS_FreeValue(ctx, v);
+    return out;
+}
+
+// weft.viewport(name, opts) — declare a viewport by its ATTRIBUTES
+// (doc/cwa-config-decisions.md D1). `opts.edge` docks it ("left"/"right"/
+// "top"/"bottom"; omitted means tiled), `opts.extent` is its share of the
+// frame, and cycles/persistent/followFocus are the remaining attributes.
+// "sidebar" is a fragment that sets these — never a kind this shim knows.
+static JSValue js_viewport(JSContext *ctx, JSValueConst this_val,
+                           int argc, JSValueConst *argv) {
+    if (argc < 1) return JS_ThrowTypeError(ctx, "viewport(name[, opts])");
+    size_t nl;
+    const char *name = JS_ToCStringLen(ctx, &nl, argv[0]);
+    if (!name) return JS_EXCEPTION;
+    JSValueConst opts = argc >= 2 ? argv[1] : JS_UNDEFINED;
+    const char *edge = NULL;
+    size_t el = 0;
+    double extent = 0.25;
+    JSValue jedge = JS_UNDEFINED, jextent = JS_UNDEFINED;
+    if (JS_IsObject(opts)) {
+        jedge = JS_GetPropertyStr(ctx, opts, "edge");
+        if (JS_IsString(jedge)) edge = JS_ToCStringLen(ctx, &el, jedge);
+        jextent = JS_GetPropertyStr(ctx, opts, "extent");
+        if (!JS_IsUndefined(jextent) && !JS_IsNull(jextent)) JS_ToFloat64(ctx, &extent, jextent);
+    }
+    int flags = 0;
+    if (opt_bool(ctx, opts, "cycles", 1)) flags |= WEFT_VP_CYCLES;
+    if (opt_bool(ctx, opts, "persistent", 0)) flags |= WEFT_VP_PERSISTENT;
+    if (opt_bool(ctx, opts, "followFocus", 1)) flags |= WEFT_VP_FOCUS_SOURCE;
+    host_viewport(name, (int)nl, edge ? edge : "", (int)el, flags, (int)(extent * 1000));
+    JS_FreeCString(ctx, name);
+    if (edge) JS_FreeCString(ctx, edge);
+    JS_FreeValue(ctx, jedge);
+    JS_FreeValue(ctx, jextent);
+    return JS_UNDEFINED;
+}
+
+// weft.present(viewport, opts) — "present resource R in viewport V" (§7) as
+// a declaration. Separate from `viewport` because presenting is an ordinary
+// operation on a live viewport, not part of what the viewport is.
+static JSValue js_present(JSContext *ctx, JSValueConst this_val,
+                          int argc, JSValueConst *argv) {
+    if (argc < 2) return JS_ThrowTypeError(ctx, "present(viewport, {subject})");
+    size_t vl, sl = 0;
+    const char *vp = JS_ToCStringLen(ctx, &vl, argv[0]);
+    if (!vp) return JS_EXCEPTION;
+    const char *subject = NULL;
+    JSValue jsubject = JS_UNDEFINED;
+    if (JS_IsObject(argv[1])) {
+        jsubject = JS_GetPropertyStr(ctx, argv[1], "subject");
+        if (JS_IsString(jsubject)) subject = JS_ToCStringLen(ctx, &sl, jsubject);
+    }
+    if (!subject) {
+        JSValue exc = JS_ThrowTypeError(ctx, "present(viewport, {subject}): subject must be a string naming what to show");
+        JS_FreeCString(ctx, vp);
+        JS_FreeValue(ctx, jsubject);
+        return exc;
+    }
+    host_present(vp, (int)vl, subject, (int)sl);
+    JS_FreeCString(ctx, vp);
+    JS_FreeCString(ctx, subject);
+    JS_FreeValue(ctx, jsubject);
+    return JS_UNDEFINED;
+}
+
 // Install the `weft` global: the config surface config.js calls.
 static void install_weft(JSContext *ctx) {
     JSValue global = JS_GetGlobalObject(ctx);
@@ -548,6 +637,8 @@ static void install_weft(JSContext *ctx) {
     JS_SetPropertyStr(ctx, weft, "provide", JS_NewCFunction(ctx, js_provide, "provide", 3));
     JS_SetPropertyStr(ctx, weft, "statusSegment", JS_NewCFunction(ctx, js_status_segment, "statusSegment", 2));
     JS_SetPropertyStr(ctx, weft, "grant", JS_NewCFunction(ctx, js_grant, "grant", 2));
+    JS_SetPropertyStr(ctx, weft, "viewport", JS_NewCFunction(ctx, js_viewport, "viewport", 2));
+    JS_SetPropertyStr(ctx, weft, "present", JS_NewCFunction(ctx, js_present, "present", 2));
     JS_SetPropertyStr(ctx, global, "weft", weft);
     JS_FreeValue(ctx, global);
 }
