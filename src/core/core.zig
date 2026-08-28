@@ -25,6 +25,7 @@ pub const task = @import("task.zig");
 pub const async_loop = @import("async.zig");
 pub const scheduler = @import("scheduler.zig");
 pub const kv = @import("kv.zig");
+pub const kv_file = @import("kv_file.zig");
 pub const proc = @import("proc.zig");
 pub const repl_session = @import("repl_session.zig");
 pub const net_session = @import("net_session.zig");

@@ -19,6 +19,13 @@
 //! which keeps kv trivially testable with no filesystem in sight, and
 //! keeps the "when do we write to disk" policy out of the mechanism.
 //!
+//! That host is `kv_file.zig`, and it is what makes "outlives a run"
+//! above a fact rather than an aspiration: it owns where the blob lives
+//! (XDG), when it is written (`main.zig` arms one `kv_file.Binding` over
+//! the plugin store: load at startup, save on clean shutdown), and how
+//! every failure degrades. Which store gets persisted — the plugin one,
+//! not `System.config_kv` — is decided there too, with the reason.
+//!
 //! Layout: a map of namespace → (map of key → value). Nesting rather
 //! than a composed `ns\x00key` key means enumerating a namespace and
 //! isolating it are structural, not a prefix-scan convention that a

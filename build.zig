@@ -1037,6 +1037,14 @@ fn addQuickjs(b: *std.Build, host_mod: *std.Build.Module) void {
 /// Wasmtime ships no pkg-config, so — like the grammar packages — we take
 /// the dev (headers) and lib (libwasmtime.so) store paths from the nix shell
 /// and wire them explicitly, then link the library.
+///
+/// Also the single place the two BUILD-BAKED HOST DIRECTORIES are wired
+/// (`addHostTestDirs` below). They live here, not at their own call sites,
+/// because this function is already called on exactly — and only — the
+/// module set that compiles `src/core/` (`exe_mod`, `weft_mod`, and
+/// `configureTestModule`'s `test_mod`/`instrument_mod`). One call site
+/// cannot drift out of sync with another the way three hand-copied ones
+/// eventually would.
 fn addWasm(b: *std.Build, mod: *std.Build.Module) void {
     const dev = b.graph.environ_map.get("WEFT_WASMTIME_DEV") orelse
         @panic("WEFT_WASMTIME_DEV not set — build inside the nix shell");
@@ -1045,12 +1053,33 @@ fn addWasm(b: *std.Build, mod: *std.Build.Module) void {
     mod.addIncludePath(.{ .cwd_relative = b.pathJoin(&.{ dev, "include" }) });
     mod.addLibraryPath(.{ .cwd_relative = b.pathJoin(&.{ lib, "lib" }) });
     mod.linkSystemLibrary("wasmtime", .{});
-    // Test artifacts cache compiled modules HERE, comptime-baked — they never
-    // consult the user environment (Engine.cacheDir prunes that branch).
-    const cache_path = b.cache_root.join(b.allocator, &.{"weft-cwasm"}) catch @panic("OOM");
-    const cache_opts = b.addOptions();
-    cache_opts.addOption([]const u8, "test_dir", if (std.fs.path.isAbsolute(cache_path)) cache_path else b.pathFromRoot(cache_path));
-    mod.addOptions("module_cache_options", cache_opts);
+    addHostTestDirs(b, mod);
+}
+
+/// The directories a TEST BUILD is allowed to touch, comptime-baked under the
+/// project cache root so a bare-run test binary provably cannot reach the
+/// user's real cache or state. Each consumer prunes its user-environment
+/// branch behind `if (builtin.is_test)`, so these options are the only paths
+/// a test artifact can resolve:
+///
+///   - `module_cache_options.test_dir` — compiled `.cwasm` images
+///     (`core/wasm.zig`'s `Engine.cacheDir`).
+///   - `kv_state_options.test_dir` — the persisted plugin kv store
+///     (`core/kv_file.zig`'s `stateDir`).
+///
+/// Both are made ABSOLUTE here: the e2e Project harness chdirs into a tmpdir
+/// mid-suite, so a cwd-relative path would scatter and vanish with it.
+fn addHostTestDirs(b: *std.Build, mod: *std.Build.Module) void {
+    const dirs = .{
+        .{ .import = "module_cache_options", .sub = "weft-cwasm" },
+        .{ .import = "kv_state_options", .sub = "weft-kv" },
+    };
+    inline for (dirs) |d| {
+        const path = b.cache_root.join(b.allocator, &.{d.sub}) catch @panic("OOM");
+        const opts = b.addOptions();
+        opts.addOption([]const u8, "test_dir", if (std.fs.path.isAbsolute(path)) path else b.pathFromRoot(path));
+        mod.addOptions(d.import, opts);
+    }
 }
 
 /// Skia (default renderer): compile the C++ shim (src/gfx/skia/shim.cpp) with
