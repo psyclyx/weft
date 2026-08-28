@@ -4,7 +4,8 @@
 //! `primary|dock|drawer` ontology bakes semantics into names whose vocabulary
 //! churns, and every sidebar-ish plugin then reinvents window management
 //! around it. "Sidebar" and "drawer" are named BUNDLES of these attributes in
-//! a config fragment (`sidebar` below is the bundle, not a kind).
+//! a config fragment (`config/sidebar.js`); no name for one appears here, so
+//! nothing downstream can come to depend on core knowing what a sidebar is.
 //!
 //! Each attribute earns its place by the rendering.md granularity rule —
 //! someone would swap just it:
@@ -54,13 +55,12 @@ pub const Attrs = struct {
     /// Focus landing here is a primary-focus change others may follow.
     focus_source: bool = true,
 
-    /// The ordinary tiled pane every split produces.
+    /// The ordinary tiled pane every split produces. Deliberately the only
+    /// named bundle in core: "sidebar" and "drawer" are bundles a CONFIG
+    /// FRAGMENT names (see `config/sidebar.js`), and a constructor for one
+    /// here would be the closed role ontology D1 rejected, reintroduced under
+    /// a different spelling.
     pub const tiled: Attrs = .{};
-
-    /// The "sidebar" bundle — the whole of what makes a sidebar, as data.
-    pub fn sidebar(edge: Edge) Attrs {
-        return .{ .cycles = false, .persistent = true, .dock = edge, .focus_source = false };
-    }
 
     /// Eligible to host an ordinary workspace entry: the panes placement
     /// treats as "primary". A docked companion is not one even if some other
@@ -144,19 +144,24 @@ pub const Registry = struct {
 
 const t = std.testing;
 
+/// What a config fragment calls a "sidebar", written out: four attributes and
+/// nothing else. Spelled here in the tests rather than exported, so no caller
+/// can start depending on core knowing the word.
+const companion: Attrs = .{ .cycles = false, .persistent = true, .dock = .left, .focus_source = false };
+
 test "viewport: a registry declaration is idempotent and re-presentable" {
     const gpa = t.allocator;
     var reg: Registry = .empty;
     defer reg.deinit(gpa);
 
-    try reg.declare(gpa, "sidebar", .sidebar(.left), 0.25);
+    try reg.declare(gpa, "sidebar", companion, 0.25);
     try reg.present(gpa, "sidebar", ".");
     reg.find("sidebar").?.pane = 3;
     reg.find("sidebar").?.presented = true;
 
     // Re-applying the same manifest updates in place — no second sidebar,
     // and nothing already realized is disturbed.
-    try reg.declare(gpa, "sidebar", .sidebar(.left), 0.25);
+    try reg.declare(gpa, "sidebar", companion, 0.25);
     try reg.present(gpa, "sidebar", ".");
     try t.expectEqual(@as(usize, 1), reg.list.items.len);
     try t.expectEqual(@as(?u32, 3), reg.find("sidebar").?.pane);
@@ -170,8 +175,8 @@ test "viewport: a registry declaration is idempotent and re-presentable" {
     try t.expectError(error.UnknownViewport, reg.present(gpa, "nope", "."));
 }
 
-test "viewport: the sidebar bundle is attributes, not a kind" {
-    const bar = Attrs.sidebar(.left);
+test "viewport: a sidebar is a bundle of attributes, not a kind" {
+    const bar = companion;
     try t.expectEqual(@as(?Edge, .left), bar.dock);
     try t.expect(!bar.cycles);
     try t.expect(bar.persistent);

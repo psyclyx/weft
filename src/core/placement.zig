@@ -156,8 +156,11 @@ pub const Policy = struct {
 
 const t = std.testing;
 
+/// A docked companion's attributes, spelled out — core names no role.
+const companion: viewport.Attrs = .{ .cycles = false, .persistent = true, .dock = .left, .focus_source = false };
+
 test "placement: the default table routes a companion's open to the primary pane" {
-    const bar = viewport.Attrs.sidebar(.left);
+    const bar = companion;
     // The one row that matters: same hint, different source, different answer.
     try t.expectEqual(Decision.primary, defaultPolicy(null, .{ .hint = .primary, .source = bar, .kind = .file }).?);
     try t.expectEqual(Decision.source, defaultPolicy(null, .{ .hint = .primary, .source = .tiled, .kind = .file }).?);

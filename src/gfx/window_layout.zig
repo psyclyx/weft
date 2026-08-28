@@ -719,6 +719,11 @@ fn collectRec(node: *Node, rect: Rect, frame: Rect, focused: *Node, out: []Slot,
 
 const t = std.testing;
 
+/// What a config fragment calls a "sidebar", written out. `dock` is left
+/// unset because `Layout.dock` stamps the edge it was asked for — the tree
+/// and the attributes cannot disagree.
+const companion: core.viewport.Attrs = .{ .cycles = false, .persistent = true, .focus_source = false };
+
 test "single leaf: one pane, no dividers, close is a no-op" {
     var l = try Layout.init(t.allocator, 7);
     defer l.deinit();
@@ -834,7 +839,7 @@ test "dock: an edge-anchored panel takes its extent and leaves the rest tiled" {
     var l = try Layout.init(t.allocator, 1);
     defer l.deinit();
     const editor = l.root;
-    const panel = try l.dock(.left, 0.25, 99, .sidebar(.left));
+    const panel = try l.dock(.left, 0.25, 99, companion);
     // Nothing relocated: the pre-existing pane kept its exact address, so
     // every head's focus handle still resolves.
     try t.expectEqual(editor, l.root.dock.rest);
@@ -861,7 +866,7 @@ test "dock: an edge-anchored panel takes its extent and leaves the rest tiled" {
 test "dock: a bottom panel anchors to the far edge" {
     var l = try Layout.init(t.allocator, 1);
     defer l.deinit();
-    const panel = try l.dock(.bottom, 0.2, 5, .sidebar(.bottom));
+    const panel = try l.dock(.bottom, 0.2, 5, companion);
     const frame: Rect = .{ .x = 0, .y = 0, .w = 200, .h = 100 };
     try t.expectEqual(Rect{ .x = 0, .y = 80, .w = 200, .h = 20 }, l.focusedRect(panel, frame));
     try t.expectEqual(panel, l.focusAt(frame, 100, 90).?);
@@ -871,7 +876,7 @@ test "dock: the workspace enforces the attributes the panel declares" {
     var l = try Layout.init(t.allocator, 1);
     defer l.deinit();
     const editor = l.root;
-    const panel = try l.dock(.left, 0.25, 99, .sidebar(.left));
+    const panel = try l.dock(.left, 0.25, 99, companion);
     const frame: Rect = .{ .x = 0, .y = 0, .w = 200, .h = 100 };
 
     // Cycling never lands IN the companion, but always lets you back OUT of
@@ -913,7 +918,7 @@ test "dock: closing the panel collapses the dock and recovery avoids companions"
     defer l.deinit();
     var head: core.Head = .empty;
     defer head.deinit(t.allocator);
-    const panel = try l.dock(.left, 0.25, 99, .sidebar(.left));
+    const panel = try l.dock(.left, 0.25, 99, companion);
 
     // A head parked in the sidebar whose handle goes stale recovers onto the
     // EDITING pane, never into a companion it never chose.

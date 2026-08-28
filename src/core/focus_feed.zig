@@ -119,6 +119,11 @@ pub const Companion = struct {
 
 const t = std.testing;
 
+/// A docked companion's attributes, spelled out — core names no role.
+fn companion(edge: viewport.Edge) viewport.Attrs {
+    return .{ .cycles = false, .persistent = true, .dock = edge, .focus_source = false };
+}
+
 const Recorder = struct {
     seen: std.ArrayList(Event) = .empty,
 
@@ -167,11 +172,11 @@ test "focus feed: a companion cannot follow itself or another companion" {
     // Focus landing on the outline ITSELF is not a primary-focus change: the
     // sidebar bundle is not a `focus_source`, so the retarget never runs and
     // the outline cannot chase its own subject.
-    feed.publish(.{ .viewport = 5, .entry = 42, .attrs = .sidebar(.right) });
+    feed.publish(.{ .viewport = 5, .entry = 42, .attrs = companion(.right) });
     try t.expectEqual(@as(usize, 1), rec.seen.items.len);
 
     // Nor does a DIFFERENT companion's focus retarget it.
-    feed.publish(.{ .viewport = 6, .entry = 43, .attrs = .sidebar(.left) });
+    feed.publish(.{ .viewport = 6, .entry = 43, .attrs = companion(.left) });
     try t.expectEqual(@as(usize, 1), rec.seen.items.len);
 
     // Back to an ordinary pane: following resumes.
