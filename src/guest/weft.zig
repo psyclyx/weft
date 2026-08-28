@@ -262,6 +262,7 @@ extern "weft" fn wl_proc_read(handle: u32, out: u32, cap: u32) i32;
 extern "weft" fn wl_proc_close(handle: u32) void;
 extern "weft" fn wl_place_root(out: u32, cap: u32) i32;
 extern "weft" fn wl_place_id() i32;
+extern "weft" fn wl_place_has(rel: u32, rel_len: u32) i32;
 extern "weft" fn wl_env_publish(ptr: u32, len: u32) i32;
 extern "weft" fn wl_env_retract() i32;
 extern "weft" fn wl_net_connect(host: u32, host_len: u32, name: u32, name_len: u32, sni: u32, sni_len: u32) i32;
@@ -2252,6 +2253,30 @@ pub fn placeRoot() []const u8 {
     return if (n <= 0) "" else scratch[0..@intCast(n)];
 }
 
+/// What `rel` IS *inside* this dispatch's place — the marker query
+/// (`doc/place.md` §4.2). Same four answers as `fsExists`, and NO permission:
+/// it reveals strictly less than `placeRoot`, which already hands you the
+/// directory, and it cannot escape the place (the host resolves it beneath the
+/// place root with `openat2(RESOLVE_BENEATH | RESOLVE_NO_SYMLINKS)`).
+///
+/// This is what "is this project a git repository", "is there an `.envrc`
+/// here", "is a rebase mid-flight" ask, and it is the reason neither `git` nor
+/// `project` holds `fs_read` any more: probing for machinery inside your own
+/// content never needed a grant over the whole filesystem.
+///
+/// An absolute `rel`, a `..` that leaves the place, a symlink pointing out of
+/// it, and a place with no local directory all answer `.none` — the door
+/// describes what the place contains, and nothing else. Touches no scratch, so
+/// a borrowed `path()`/`placeRoot()` slice stays valid across a call.
+pub fn placeHas(rel: []const u8) FsKind {
+    return switch (wl_place_has(p(rel.ptr), @intCast(rel.len))) {
+        1 => .file,
+        2 => .dir,
+        3 => .other,
+        else => .none,
+    };
+}
+
 /// A buffer path named absolutely within its place, into `out`.
 ///
 /// The two doors answer different spellings of the same file. `wl_path` gives
@@ -2352,8 +2377,12 @@ pub fn fsRead(fpath: []const u8) ?[]const u8 {
     if (n < 0) return null;
     return scratch[0..@intCast(n)];
 }
-/// What `fpath` is, without reading it. Perm: fs_read. Cheap enough to climb a
-/// directory chain probing for a marker (e.g. `.git`) — project-root detection.
+/// What `fpath` is, without reading it. Perm: fs_read.
+///
+/// NOT the door for "is there a `.git` here": that is `placeHas`, which needs
+/// no grant and cannot leave the place. This one takes a path anywhere the
+/// grant reaches, which is why the two plugins that used to climb with it
+/// (`git`, `project`) no longer hold `fs_read` at all (`doc/place.md` §4.2).
 pub const FsKind = enum(i32) { none = 0, file = 1, dir = 2, other = 3 };
 pub fn fsExists(fpath: []const u8) FsKind {
     const k = wl_fs_exists(p(fpath.ptr), @intCast(fpath.len));

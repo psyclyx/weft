@@ -377,6 +377,7 @@ pub const imports = [_]Entry{
     .{ .name = "wl_proc_close", .params = &.{.u32}, .results = &.{}, .group = .proc, .doc = "kill a spawned subprocess (slot stays for handle stability)" },
     .{ .name = "wl_place_root", .params = &.{ .u32, .u32 }, .results = &.{.i32}, .group = .proc, .doc = "the dispatching place's absolute directory, or 0 bytes when it has none locally" },
     .{ .name = "wl_place_id", .params = &.{}, .results = &.{.i32}, .group = .proc, .doc = "a dense opaque id for the dispatching place; compare it, never interpret it" },
+    .{ .name = "wl_place_has", .params = &.{ .u32, .u32 }, .results = &.{.i32}, .group = .proc, .doc = "what `<the dispatching place>/<rel>` is (absent/file/dir/other), resolved BENEATH the place root — a question about the place you are in, not filesystem access" },
     .{ .name = "wl_env_publish", .params = &.{ .u32, .u32 }, .results = &.{.i32}, .group = .proc, .perm = .env, .doc = "publish this plugin's environment overlay (NUL-separated KEY=VALUE) for the dispatching place" },
     .{ .name = "wl_env_retract", .params = &.{}, .results = &.{.i32}, .group = .proc, .perm = .env, .doc = "withdraw this plugin's environment overlay for the dispatching place" },
     .{ .name = "wl_proc_to_buffer", .params = &.{ .u32, .u32, .u32, .u32, .u32 }, .results = &.{}, .group = .proc, .perm = .proc_timer, .doc = "run `<cmd>` off-thread and replace the scratch buffer captured now with its stdout; the trailing fill token comes back as `on_fill_token`" },
@@ -432,7 +433,7 @@ pub const imports = [_]Entry{
 /// half-finished edit — fails the build with a pointed message instead of
 /// silently drifting the two ~124-entry tables apart again (the exact class
 /// this table exists to kill).
-const expected_import_count = 208;
+const expected_import_count = 209;
 
 /// A host→guest EXPORT entrypoint (design doc/extensibility-native-surface.md, task
 /// W0a-D extension 2): every `instance.callVoid("name", args)` the host
@@ -579,6 +580,23 @@ test "membrane contract data: exactly one door answers WHERE, and it is place-sh
         try t.expectEqual(@as(?Perm, null), entry.perm); // narrower than what it replaced; no new authority
     }
     try t.expect(saw_place_root);
+
+    // `wl_place_has` is the same door asked a NARROWER question — what is at
+    // one name inside that directory, rather than what the directory is — so
+    // it carries the same (absent) permission for the same reason. Gating it
+    // where `wl_place_root` is ungated would be theatre: a guest holding the
+    // root can hand the whole path to anything, and the answer here cannot
+    // leave the place at all (`wasm_host/proc.zig`'s `placeKind`). Pinned
+    // here so a later "tighten the fs doors" sweep cannot quietly attach
+    // `fs_read` to it and un-do the two grants it exists to remove.
+    var saw_place_has = false;
+    for (imports) |entry| {
+        if (!std.mem.eql(u8, entry.name, "wl_place_has")) continue;
+        saw_place_has = true;
+        try t.expectEqual(Group.proc, entry.group);
+        try t.expectEqual(@as(?Perm, null), entry.perm);
+    }
+    try t.expect(saw_place_has);
 }
 
 test "membrane contract data: every export entry is well-formed, documented, and unique" {

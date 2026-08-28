@@ -21,6 +21,8 @@ const Document = @import("../Document.zig");
 const file = @import("../file.zig");
 const contract = @import("../membrane/contract.zig");
 const place_mod = @import("../place.zig");
+const rooted_fs = @import("../rooted_fs.zig");
+const machinery = @import("../machinery.zig");
 
 const shared = @import("plugin.zig");
 const WasmPlugin = shared.WasmPlugin;
@@ -274,18 +276,99 @@ pub fn hPlaceRoot(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32, re
     const p: *WasmPlugin = @ptrCast(@alignCast(data.?));
     const ctx = p.activeCtx();
     var buf: [4096]u8 = undefined;
-    const dir: []const u8 = switch (place_mod.realize(ctx.place(), ctx.realizer)) {
-        // Only the degenerate place asks the OS where this process is; every
-        // other place is named by the authority that opened it.
-        .process => file.processDirectory(&buf) orelse "",
-        .path => |abs| abs,
-        .elsewhere, .unavailable => "",
-    };
+    const dir = placeDirectory(ctx, &buf);
     if (dir.len == 0) {
         results[0] = 0;
         return;
     }
     results[0] = @intCast(caller.writeMemory(@intCast(args[0]), @intCast(args[1]), dir) catch 0);
+}
+
+/// The dispatching place's local directory, or "" when it has none. Borrowed:
+/// `.path` points into the authority that opened the container, `.process`
+/// into `buf`. ONE reading, because `hPlaceRoot` and `hPlaceHas` must not be
+/// able to disagree about which directory the guest is asking about.
+fn placeDirectory(ctx: *command.Context, buf: []u8) []const u8 {
+    return switch (place_mod.realize(ctx.place(), ctx.realizer)) {
+        // Only the degenerate place asks the OS where this process is; every
+        // other place is named by the authority that opened it.
+        .process => file.processDirectory(buf) orelse "",
+        .path => |abs| abs,
+        .elsewhere, .unavailable => "",
+    };
+}
+
+/// `placeHas(rel) -> kind`: what `<the dispatching place>/<rel>` IS — 0 absent,
+/// 1 file, 2 dir, 3 other, the same `file.Kind` ordinals `wl_fs_exists`
+/// answers in (`doc/place.md` §4.2's "marker/ancestor query against a place").
+///
+/// **No permission, and the reason is containment rather than convenience.**
+/// Three things have to hold for an ungated door, and each is structural here:
+///
+///  1. **It reveals strictly less than `wl_place_root`, right beside it.**
+///     That door hands the guest the place's absolute directory outright. A
+///     guest holding a directory and a guest able to ask "is `.git` in it"
+///     are not different tiers of authority; the second is a projection of
+///     the first onto a single bit.
+///  2. **It reveals strictly less than `proc`.** Any holder of `proc` runs a
+///     child AT this place already (`shared.resolveSpawnAtCtx`, above) and can
+///     `test -e` anything it likes there. A door that answers one `statx`
+///     cannot be the line where that becomes reachable.
+///  3. **It cannot escape the place.** `placeKind` resolves through
+///     `RootedFs` — `openat2(RESOLVE_BENEATH | RESOLVE_NO_SYMLINKS)` — so an
+///     absolute `rel`, a `..` component, and a symlink planted inside the
+///     place all fail IN THE KERNEL, atomically. There is no lexical check to
+///     get wrong and no TOCTOU window to race.
+///
+/// So this is a question about the place a dispatch is already in, not
+/// filesystem access, and it is the primitive that let `git` and `project`
+/// hand back `fs_read` — a grant that reached the WHOLE filesystem so two
+/// plugins could probe for `.git` inside their own project.
+pub fn hPlaceHas(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32, results: []i32) void {
+    const p: *WasmPlugin = @ptrCast(@alignCast(data.?));
+    results[0] = @intFromEnum(file.Kind.none);
+    const rel = caller.readMemory(p.gpa, @intCast(args[0]), @intCast(args[1])) catch return;
+    defer p.gpa.free(rel);
+    const ctx = p.activeCtx();
+    var buf: [4096]u8 = undefined;
+    results[0] = @intFromEnum(placeKind(p.gpa, placeDirectory(ctx, &buf), rel));
+}
+
+/// What `<dir>/<rel>` is, resolved CONFINED beneath `dir`. The semantic body
+/// behind `hPlaceHas`, split out so the escape gates can be stated against it
+/// directly (no wasm instance, no live place).
+///
+/// Every refusal answers `.none` — absent. That is deliberate for a door with
+/// no permission behind it: `wl_fs_exists` distinguishes "refused" from
+/// "absent" so a GRANTED plugin gets a loud message instead of a confusing
+/// miss, but here there is no grant to diagnose, and a distinguishable refusal
+/// would itself be a signal ("something is there, you may not see it"). Absent
+/// is the answer that reveals nothing.
+///
+/// The machinery carve-out (`doc/place.md` §4.1) applies unconditionally, as
+/// it does at every fs door: a place CAN be an ancestor of the editor's own
+/// state — a version-controlled home directory is the case the design names —
+/// and no door, gated or not, may confirm that the module cache or a keystore
+/// is there.
+pub fn placeKind(gpa: Allocator, dir: []const u8, rel: []const u8) file.Kind {
+    // No local directory (a peer place, or a container that went away), or
+    // nothing named inside it: nothing to answer about.
+    if (dir.len == 0 or rel.len == 0) return .none;
+    const joined = std.fmt.allocPrint(gpa, "{s}/{s}", .{ dir, rel }) catch return .none;
+    defer gpa.free(joined);
+    if (machinery.denies(joined)) return .none;
+
+    const rootz = gpa.dupeZ(u8, dir) catch return .none;
+    defer gpa.free(rootz);
+    var rfs = rooted_fs.RootedFs.open(rootz.ptr) catch return .none;
+    defer rfs.close();
+    const relz = gpa.dupeZ(u8, rel) catch return .none;
+    defer gpa.free(relz);
+    return switch (rfs.kind(relz.ptr) catch return .none) {
+        .file => .file,
+        .dir => .dir,
+        .other => .other,
+    };
 }
 
 /// Perm-gated (proc + timer): run `<cmd>` off the frame thread and insert its
@@ -797,4 +880,92 @@ fn filterFree(ctx: ?*anyopaque) void {
     gpa.free(job.content);
     gpa.free(job.tmp);
     gpa.destroy(job);
+}
+
+// ── tests ───────────────────────────────────────────────────────────
+
+const t = std.testing;
+
+/// `link_path` → `target`, best effort. False if the platform refused (nothing
+/// here depends on symlinks being creatable).
+fn makeSymlink(target: [*:0]const u8, link_path: [*:0]const u8) bool {
+    return std.os.linux.errno(std.os.linux.symlinkat(target, std.os.linux.AT.FDCWD, link_path)) == .SUCCESS;
+}
+
+test "placeKind: a place-relative probe cannot escape the place" {
+    const gpa = t.allocator;
+
+    // <tmp>/place        — the place's directory
+    // <tmp>/secret.txt   — outside it
+    // <tmp>/place/leak   — a symlink inside the place, pointing out of it
+    var tmp = t.tmpDir(.{});
+    defer tmp.cleanup();
+    const place = try std.fmt.allocPrint(gpa, ".zig-cache/tmp/{s}/place", .{tmp.sub_path});
+    defer gpa.free(place);
+    const inside = try std.fmt.allocPrint(gpa, "{s}/ok.txt", .{place});
+    defer gpa.free(inside);
+    const outside = try std.fmt.allocPrint(gpa, ".zig-cache/tmp/{s}/secret.txt", .{tmp.sub_path});
+    defer gpa.free(outside);
+    try file.writeBytesMakingDirs(gpa, place, inside, "in place");
+    try file.writeBytes(gpa, outside, "out of place");
+    const marker = try std.fmt.allocPrint(gpa, "{s}/.git", .{place});
+    defer gpa.free(marker);
+    try file.writeBytes(gpa, marker, "gitdir: elsewhere\n"); // a worktree's `.git` is a FILE
+
+    // The shape both migrated plugins actually ask: a marker INSIDE the place.
+    // Any kind counts, which is why a worktree/submodule `.git` file answers.
+    try t.expectEqual(file.Kind.file, placeKind(gpa, place, ".git"));
+    try t.expectEqual(file.Kind.file, placeKind(gpa, place, "ok.txt"));
+    try t.expectEqual(file.Kind.dir, placeKind(gpa, place, "."));
+    try t.expectEqual(file.Kind.none, placeKind(gpa, place, "nope.txt"));
+    // git's rebase probe: a path with a separator in it still resolves, and
+    // still resolves only beneath the place.
+    try t.expectEqual(file.Kind.none, placeKind(gpa, place, ".git/rebase-merge"));
+
+    // ── The three escapes, each refused IN THE KERNEL (RESOLVE_BENEATH /
+    // RESOLVE_NO_SYMLINKS), and each answering `.none` rather than describing
+    // something the place does not contain. ──
+    // 1. An absolute `rel` is not a path out: it is EXDEV under BENEATH.
+    try t.expectEqual(file.Kind.none, placeKind(gpa, place, "/etc"));
+    try t.expectEqual(file.Kind.none, placeKind(gpa, place, "/etc/hostname"));
+    // 2. Traversal, at the front and buried mid-path.
+    try t.expectEqual(file.Kind.none, placeKind(gpa, place, ".."));
+    try t.expectEqual(file.Kind.none, placeKind(gpa, place, "../secret.txt"));
+    try t.expectEqual(file.Kind.none, placeKind(gpa, place, "../../etc"));
+    try t.expectEqual(file.Kind.none, placeKind(gpa, place, "sub/../../secret.txt"));
+    // 3. A symlink planted INSIDE the place, pointing out of it — the hole a
+    // realpath-then-compare check leaves open, and the one `fsExists` was
+    // recently fixed for. The target exists; the answer is still `.none`.
+    const leak = try std.fmt.allocPrintSentinel(gpa, "{s}/leak", .{place}, 0);
+    defer gpa.free(leak);
+    if (makeSymlink("../secret.txt", leak.ptr)) {
+        try t.expect(file.statKind(gpa, leak) == .file); // a plain stat FOLLOWS it out
+        try t.expectEqual(file.Kind.none, placeKind(gpa, place, "leak"));
+    }
+
+    // A place with no local directory answers about nothing at all — the
+    // `.elsewhere`/`.unavailable` arms of `placeDirectory` (and a `.process`
+    // place whose cwd was deleted) hand "" straight through.
+    try t.expectEqual(file.Kind.none, placeKind(gpa, "", ".git"));
+    try t.expectEqual(file.Kind.none, placeKind(gpa, place, ""));
+}
+
+test "placeKind: the machinery carve-out holds for an ungated door too" {
+    // A place CAN be an ancestor of the editor's own state (doc/place.md §4.1
+    // names the version-controlled home directory). `wl_place_has` carries no
+    // permission, so it is precisely the door a plugin with NO capabilities
+    // would reach for to confirm the module cache is there. It answers `.none`.
+    const gpa = t.allocator;
+    const cache = wasm.Engine.cacheDir(gpa) orelse return error.SkipZigTest;
+    defer gpa.free(cache);
+    if (file.statKind(gpa, cache) != .dir) return error.SkipZigTest;
+    const slash = std.mem.lastIndexOfScalar(u8, cache, '/') orelse return error.SkipZigTest;
+    if (slash == 0) return error.SkipZigTest;
+    const parent = cache[0..slash];
+    const leaf = cache[slash + 1 ..];
+    // Not vacuous: the parent is an ordinary directory, the cache really is
+    // inside it, and an unconfined stat says so.
+    try t.expectEqual(file.Kind.dir, file.statKind(gpa, cache));
+    try t.expect(machinery.denies(cache));
+    try t.expectEqual(file.Kind.none, placeKind(gpa, parent, leaf));
 }
