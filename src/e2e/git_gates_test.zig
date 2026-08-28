@@ -260,7 +260,11 @@ test "e2e/git-gates: G4 commit draft survives a buffer switch, commits on save, 
         gpa.free(out);
     }
     ed.run("git-status");
+    // `f.txt` is in the buffer from the FIRST status already, so the needle
+    // proves nothing about this one: wait for the refresh's own subprocess to
+    // land, or its arrival re-focuses the status buffer over the draft below.
     try t.expect(drainToolContains(&ed, "*git*", "f.txt"));
+    try t.expect(h.drainLoopIdle(&ed));
     ed.run("git-commit");
     try t.expectEqualStrings("*git-commit*", ed.bufferName());
     ed.press("i", "");
