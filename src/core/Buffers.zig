@@ -23,6 +23,7 @@ const assert = std.debug.assert;
 
 const semantic = @import("weft_semantic");
 const Editor = @import("Editor.zig");
+const Posture = @import("input.zig").Posture;
 const Keymap = @import("Keymap.zig");
 const Head = @import("Head.zig");
 const task = @import("task.zig");
@@ -46,6 +47,14 @@ prev_id: Id = 0,
 /// buffer's mode (files/git) leak into a file opened from it. Captured from
 /// the base — never from a buffer switch — so no tool mode can pollute it.
 default_mode: []u8 = &.{},
+/// The mode the loaded GRAMMAR rests in for each posture (§10.4), as the
+/// grammar itself declared it (`weft.restingPosture`). This is the whole
+/// answer to "what does a structural entry rest in": the entry declares its
+/// posture, the grammar declares what that posture means in its own
+/// vocabulary, and core pairs them — no core-baked mode name, no grammar
+/// asking what tool it is looking at. Empty = undeclared, which falls back
+/// through `restingModeFor`.
+posture_modes: std.EnumArray(Posture, []u8) = .initFill(&.{}),
 
 pub const Id = u32;
 
@@ -85,6 +94,13 @@ pub const Buffer = struct {
     semantic_focus: Head.SemanticFocus = .empty,
     /// The shell's per-buffer attachments (providers); opaque to core.
     frontend: ?*anyopaque = null,
+    /// The posture this entry's presentation owner DECLARED (§10.4), or null
+    /// to take the derivation. Set through `declarePosture`.
+    declared_posture: ?Posture = null,
+    /// The declaration a `capture` declaration displaced — what break-out
+    /// restores. Meaningless unless `declared_posture == .capture`, which is
+    /// why capture can never be a one-way door.
+    pre_capture: ?Posture = null,
 
     pub fn ref(self: *const Buffer) Ref {
         return .{ .id = self.id, .generation = self.generation };
@@ -104,6 +120,42 @@ pub const Buffer = struct {
         if (self.tool.len > 0) return false;
         const ed = self.textEditor() orelse return false;
         return ed.isDirty(gpa);
+    }
+
+    /// How this entry rests under input (`input.Posture`, §10.4). DERIVED
+    /// from what the entry can do — an entry that takes interactive text
+    /// edits is `text`, one that cannot (a semantic view, a produced
+    /// read-only projection) is `structural` — unless its presentation owner
+    /// declared otherwise. `field_focused` is the head's question (an
+    /// editable field owns the commits while it holds focus), so the entry
+    /// answers it per head rather than remembering a foreign cursor.
+    pub fn posture(self: *const Buffer, field_focused: bool) Posture {
+        const derived: Posture = if (self.editor != null and !self.read_only) .text else .structural;
+        const declared = self.declared_posture orelse derived;
+        return if (declared == .structural and field_focused) .field else declared;
+    }
+
+    /// DECLARE this entry's posture, overriding the derivation. Declaring
+    /// `capture` stacks the displaced declaration for `breakOutOfCapture`;
+    /// declaring anything else drops that stack (there is nothing to break
+    /// out of).
+    pub fn declarePosture(self: *Buffer, p: Posture) void {
+        if (p == .capture) {
+            if (self.declared_posture != .capture) self.pre_capture = self.declared_posture;
+        } else {
+            self.pre_capture = null;
+        }
+        self.declared_posture = p;
+    }
+
+    /// Leave `capture` for the declaration it displaced. Returns whether this
+    /// entry was capturing at all — the grammar's break-out chord is always
+    /// bound, so it is pressed far more often than it applies.
+    pub fn breakOutOfCapture(self: *Buffer) bool {
+        if (self.declared_posture != .capture) return false;
+        self.declared_posture = self.pre_capture;
+        self.pre_capture = null;
+        return true;
     }
 
     /// Name the projection this entry represents. Idempotent.
@@ -134,6 +186,7 @@ pub fn deinit(self: *Buffers, gpa: Allocator) void {
     self.slots.deinit(gpa);
     gpa.free(self.user_agent);
     gpa.free(self.default_mode);
+    for (&self.posture_modes.values) |mode| gpa.free(mode);
     self.* = undefined;
 }
 
@@ -144,6 +197,31 @@ pub fn setDefaultMode(self: *Buffers, gpa: Allocator, mode: []const u8) Error!vo
     const owned = try gpa.dupe(u8, mode);
     gpa.free(self.default_mode);
     self.default_mode = owned;
+}
+
+/// DECLARE the mode the loaded grammar rests in for `posture` (§10.4).
+/// Idempotent and order-independent: the last declaration for a posture is
+/// the grammar's answer, and no other posture is touched.
+pub fn setRestingFor(self: *Buffers, gpa: Allocator, posture: Posture, mode: []const u8) Error!void {
+    const owned = try gpa.dupe(u8, mode);
+    const slot = self.posture_modes.getPtr(posture);
+    gpa.free(slot.*);
+    slot.* = owned;
+}
+
+/// Where an entry of `posture` rests. `field` and `capture` rest exactly
+/// where `structural` does — a field scopes commits, it does not change what
+/// the entry rests in, and a capture break-out must land somewhere the
+/// grammar still answers keys. `text` falls back to `default_mode`, the base
+/// editing mode captured after config load.
+pub fn restingModeFor(self: *const Buffers, posture: Posture) []const u8 {
+    const declared = self.posture_modes.get(posture);
+    if (declared.len > 0) return declared;
+    if (posture != .text) {
+        const structural = self.posture_modes.get(.structural);
+        if (structural.len > 0) return structural;
+    }
+    return self.default_mode;
 }
 
 fn destroyBuffer(self: *Buffers, gpa: Allocator, b: *Buffer) void {
@@ -305,7 +383,17 @@ pub fn switchTo(self: *Buffers, gpa: Allocator, id: Id, head: *Head, keymap: *co
     // bookkeeping — it reuses the fallback declarations config already makes.
     const base = keymap.baseMode(head.currentMode());
     if (!keymap.isMenuMode(base)) {
-        const held = try gpa.dupe(u8, base);
+        // …and a chain that never REACHES a resting mode (vim's `insert`
+        // falls back to the modeless floor, not to `normal`) resolves through
+        // the posture pairing instead of stranding the entry in the floor
+        // mode — the mode-leak class pointed the other way. A keymap that
+        // declares no resting modes has no opinion here, so its base-mode
+        // answer stands unaltered.
+        const resting = if (!keymap.hasRestingModes() or keymap.isRestingMode(base))
+            base
+        else
+            self.restingModeFor(old.posture(old.semantic_focus.field != null));
+        const held = try gpa.dupe(u8, resting);
         gpa.free(old.mode);
         old.mode = held;
     }
@@ -329,12 +417,19 @@ pub fn switchTo(self: *Buffers, gpa: Allocator, id: Id, head: *Head, keymap: *co
     // (`Head.setModeRaw`), by design.
     if (target.mode.len > 0) {
         try head.setModeRaw(gpa, target.mode);
-    } else if (self.default_mode.len > 0) {
-        // A fresh buffer DECLARES its resting mode (the config's base editing
-        // mode) rather than leaving it empty — so exiting a transient sub-mode
-        // always has a mode to return to, with no core-baked "normal".
-        try head.setModeRaw(gpa, self.default_mode);
-        target.mode = try gpa.dupe(u8, self.default_mode);
+    } else {
+        // A fresh entry DECLARES its resting mode rather than leaving it
+        // empty — so exiting a transient sub-mode always has a mode to
+        // return to, with no core-baked "normal". WHICH mode is the posture
+        // pairing (§10.4): the entry declares how it rests, the grammar
+        // declared what that posture means, so a structural entry can never
+        // be stamped with the text editing base. This is the mode-leak
+        // class's remaining half — the founding bug's mirror image.
+        const resting = self.restingModeFor(target.posture(head.semantic_focus.field != null));
+        if (resting.len > 0) {
+            try head.setModeRaw(gpa, resting);
+            target.mode = try gpa.dupe(u8, resting);
+        }
     }
     self.active_id = id;
 }

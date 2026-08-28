@@ -165,6 +165,14 @@ pub const Context = struct {
         return self.entry() orelse self.buffers.active();
     }
 
+    /// How the entry this dispatch addresses RESTS under input (§10.4) — the
+    /// entry's declaration plus this head's field focus. The ONE place the
+    /// pair is read, so a grammar (`weft.posture()`), a builtin, and the
+    /// resting-mode restore all see the same answer.
+    pub fn posture(self: *Context) @import("input.zig").Posture {
+        return self.buffer().posture(self.head.semantic_focus.field != null);
+    }
+
     /// Reach the captured `Ctx` value (doc/cwa-prior-docs-audit.md §5) — the
     /// door this struct GAINS to the scope/principal/locus/grant snapshot,
     /// without `Context` itself becoming that value. `Context` stays the

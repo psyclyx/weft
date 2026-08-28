@@ -433,6 +433,13 @@ pub fn isRestingMode(self: *const Keymap, mode: []const u8) bool {
     return self.resting_modes.contains(mode);
 }
 
+/// Whether ANY mode was declared restable. A keymap with no such declaration
+/// has no opinion about where an entry rests, so a caller keeps its own
+/// answer rather than substituting one this table never made.
+pub fn hasRestingModes(self: *const Keymap) bool {
+    return self.resting_modes.count() > 0;
+}
+
 /// Append `mode`'s own bindings (key → command) to `out`, in bind order.
 /// For which-key: a leaf menu mode's whole table.
 pub fn ownBindings(self: *const Keymap, gpa: Allocator, mode: []const u8, out: *std.ArrayList(Binding)) Allocator.Error!void {
