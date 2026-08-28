@@ -262,6 +262,8 @@ extern "weft" fn wl_proc_read(handle: u32, out: u32, cap: u32) i32;
 extern "weft" fn wl_proc_close(handle: u32) void;
 extern "weft" fn wl_place_root(out: u32, cap: u32) i32;
 extern "weft" fn wl_place_id() i32;
+extern "weft" fn wl_env_publish(ptr: u32, len: u32) i32;
+extern "weft" fn wl_env_retract() i32;
 extern "weft" fn wl_net_connect(host: u32, host_len: u32, name: u32, name_len: u32, sni: u32, sni_len: u32) i32;
 extern "weft" fn wl_net_send(handle: u32, ptr: u32, len: u32) void;
 extern "weft" fn wl_net_close(handle: u32) void;
@@ -346,7 +348,7 @@ fn p(x: anytype) u32 {
 pub const Range = struct { start: usize, end: usize };
 pub const Level = enum(u32) { debug = 0, info = 1, warn = 2, err = 3 };
 /// Mirrors abi.Perm's order (fs_read, fs_write, net, proc, timer).
-pub const Perm = enum(u32) { fs_read = 0, fs_write = 1, net = 2, proc = 3, timer = 4 };
+pub const Perm = enum(u32) { fs_read = 0, fs_write = 1, net = 2, proc = 3, timer = 4, env = 5 };
 
 // ── Group A: core ────────────────────────────────────────────────────
 pub fn log(level: Level, msg: []const u8) void {
@@ -2230,6 +2232,19 @@ pub fn procClose(handle: u32) void {
 /// is stable for this run only).
 pub fn placeId() i32 {
     return wl_place_id();
+}
+
+/// Publish this plugin's environment overlay for the place this dispatch is
+/// in: NUL-separated `KEY=VALUE` records. Returns the new revision, or -1.
+/// Perm: env -- distinct from proc, because an overlay governs every
+/// subprocess ANY plugin runs at that place, not just your own.
+pub fn envPublish(vars: []const u8) i32 {
+    return wl_env_publish(p(vars.ptr), @intCast(vars.len));
+}
+
+/// Withdraw this plugin's overlay for this place. Owner-scoped.
+pub fn envRetract() bool {
+    return wl_env_retract() == 1;
 }
 
 pub fn placeRoot() []const u8 {

@@ -48,6 +48,7 @@ const annotate = @import("../wasm_host/annotate.zig");
 const menu = @import("../wasm_host/menu.zig");
 const pick = @import("../wasm_host/pick.zig");
 const proc = @import("../wasm_host/proc.zig");
+const env_host = @import("../wasm_host/env.zig");
 const register = @import("../wasm_host/register.zig");
 const semantic = @import("../wasm_host/semantic.zig");
 const semantic_action = @import("../wasm_host/semantic_action.zig");
@@ -301,6 +302,8 @@ const handlers = [_]struct { name: []const u8, handler: HostFn }{
     .{ .name = "wl_proc_close", .handler = proc.hProcClose },
     .{ .name = "wl_place_root", .handler = proc.hPlaceRoot },
     .{ .name = "wl_place_id", .handler = proc.hPlaceId },
+    .{ .name = "wl_env_publish", .handler = env_host.hEnvPublish },
+    .{ .name = "wl_env_retract", .handler = env_host.hEnvRetract },
     .{ .name = "wl_proc_to_buffer", .handler = proc.hProcToBuffer },
     .{ .name = "wl_proc_append_buffer", .handler = proc.hProcAppendBuffer },
     .{ .name = "wl_proc_spool", .handler = proc.hProcSpool },
@@ -490,6 +493,8 @@ const perm_gated = [_]struct { name: []const u8, perm: Perm }{
     .{ .name = "wl_semantic_fs_list", .perm = .fs_read }, // semantic_fs.zig hList: .fs_read
     .{ .name = "wl_semantic_fs_apply", .perm = .fs_write }, // semantic_fs.zig hApply: .fs_write
     .{ .name = "wl_semantic_transfer_capture", .perm = .fs_read }, // transfer_attachment.zig hCapture: .fs_read
+    .{ .name = "wl_env_publish", .perm = .env }, // env.zig hEnvPublish: .env
+    .{ .name = "wl_env_retract", .perm = .env }, // env.zig hEnvRetract: .env
 };
 
 test "membrane contract: table .perm metadata agrees with the handlers' actual requirePerm gates" {

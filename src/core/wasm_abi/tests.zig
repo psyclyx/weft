@@ -3065,3 +3065,34 @@ test "annotations: a decorator cannot take over a builtin feed, or outlive its e
     try t.expect(plugin.annotationDoc(handle) == null);
     try t.expect(plugin.annotationLayer(handle) == null);
 }
+
+test "wasm plugin: direnv holds the env capability, and nothing wider" {
+    const gpa = t.allocator;
+    var env: Env = undefined;
+    try Env.init(gpa, &env);
+    defer env.deinit(gpa);
+    var loop = async_loop.Loop.init(gpa, env.pool, @import("../task.zig").nowNs);
+    defer loop.deinit();
+
+    var engine = try wasm.Engine.init(gpa);
+    defer engine.deinit();
+    const plugin = try loadPlugin(&engine, &env.ctx, "direnv", @embedFile("guest_direnv_wasm"), .{ .loop = &loop });
+    defer plugin.deinit();
+
+    // Publishing an environment for a place governs every subprocess ANY
+    // plugin runs there, so it is its own capability rather than something
+    // `proc` implies. If this ever starts riding on `proc`, that escalation
+    // should be loud.
+    try t.expect(plugin.perms[wasm_host.perm_env]);
+    try t.expect(plugin.perms[wasm_host.perm_proc] and plugin.perms[wasm_host.perm_timer]);
+
+    // It reads no files and writes none: `direnv` itself does that, behind its
+    // own TOFU-shaped `allow`.
+    try t.expect(!plugin.perms[wasm_host.perm_fs_read]);
+    try t.expect(!plugin.perms[wasm_host.perm_fs_write]);
+    try t.expect(!plugin.perms[wasm_host.perm_net]);
+
+    for ([_][]const u8{ "direnv-status", "direnv-allow", "direnv-reload", "direnv-apply" }) |name| {
+        try t.expect(env.commands.find(name) != null);
+    }
+}

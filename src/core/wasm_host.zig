@@ -28,6 +28,7 @@ pub const perm_fs_write = plugin.perm_fs_write;
 pub const perm_net = plugin.perm_net;
 pub const perm_proc = plugin.perm_proc;
 pub const perm_timer = plugin.perm_timer;
+pub const perm_env = plugin.perm_env;
 pub const setEnviron = plugin.setEnviron;
 // The shared guard predicates (W0b, doc/extensibility-native-surface.md) — the ONE
 // grant/dispatch check both the wasm transport (`requirePerm`/

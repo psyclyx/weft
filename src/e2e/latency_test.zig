@@ -387,7 +387,11 @@ test "e2e/latency: dispatch keystroke latency vs baseline" {
         // regression, which is the failure that teaches people to ignore a gate.
         if (baseline.calibration_ns != 0) {
             const now = latency.calibrate();
-            if (now > baseline.calibration_ns * 3 / 2) {
+            log.warn("calibration: {d}ns now vs {d}ns at record time", .{ now, baseline.calibration_ns });
+            // 1.2x, not something looser: this gate errs toward SKIPPING. A skip
+            // says "not measured here" and costs nothing; a false failure costs
+            // the gate its credibility, which is the only thing it has.
+            if (now > baseline.calibration_ns * 6 / 5) {
                 log.warn(
                     "this box is currently {d}% of the speed it was when the baseline was recorded ({d}ns vs {d}ns on a fixed CPU loop) — skipping; that is load, not a regression",
                     .{ baseline.calibration_ns * 100 / @max(now, 1), baseline.calibration_ns, now },

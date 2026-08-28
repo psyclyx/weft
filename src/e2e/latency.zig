@@ -114,13 +114,32 @@ pub const Baseline = struct {
 /// a register: it has to measure how fast this box executes instructions right
 /// now, not how fast anything in weft is.
 pub fn calibrate() u64 {
+    // MEMORY-bound, not register-bound, and that distinction is the whole
+    // point. A pure-arithmetic loop runs at full speed on a machine whose
+    // caches and memory bus are saturated — it under-reports exactly the
+    // contention that perturbs dispatch, which is itself full of maps, trees,
+    // and allocations. Measured that way it happily reported a healthy box
+    // while the samples it was vouching for ran 3x slow.
+    //
+    // A dependent pointer chase over a working set well past L2 defeats the
+    // prefetcher, so each step waits on the previous one's load and the loop
+    // feels the same pressure the code under test does.
+    const n = chase.len;
+    if (chase[1] == 0) { // build once; index 1 is 0 only before the fill
+        for (&chase, 0..) |*slot, i| slot.* = @intCast((i + 65_521) % n);
+    }
     const start = threadCpuNs();
-    var acc: u64 = 0;
-    var i: u64 = 0;
-    while (i < 2_000_000) : (i += 1) acc = acc *% 6364136223846793005 +% i;
-    std.mem.doNotOptimizeAway(acc);
+    var cur: u32 = 0;
+    var i: usize = 0;
+    while (i < 400_000) : (i += 1) cur = chase[cur];
+    std.mem.doNotOptimizeAway(cur);
     return threadCpuNs() -| start;
 }
+
+/// 4 MiB — past any L2, so the chase above actually reaches memory. The stride
+/// is odd and the length a power of two, so successive steps are coprime and
+/// the walk is a single cycle covering every slot rather than a short orbit.
+var chase: [1 << 20]u32 = @splat(0);
 
 /// This thread's CPU time. Same clock the samples use, so the calibration and
 /// the measurement inflate together under load — which is exactly what makes

@@ -23,6 +23,7 @@ pub const perm_fs_write = 1;
 pub const perm_net = 2;
 pub const perm_proc = 3;
 pub const perm_timer = 4;
+pub const perm_env = 5;
 
 /// The membrane's one grant-gate vocabulary
 /// (doc/contextual-workspace-architecture.md §13.5), enum-closed so a
@@ -33,6 +34,12 @@ pub const Perm = enum(u32) {
     net = perm_net,
     proc = perm_proc,
     timer = perm_timer,
+    /// Publish an environment overlay for a place (`env.zig`). SEPARATE from
+    /// `proc` on purpose: spawning a child affects only your own children,
+    /// while setting PATH for a place owns every subprocess ANY plugin runs
+    /// there. That is an escalation `proc` does not imply, so it is its own
+    /// capability, config-visible in the approval diff.
+    env = perm_env,
 
     pub fn label(self: Perm) []const u8 {
         return switch (self) {
@@ -41,6 +48,7 @@ pub const Perm = enum(u32) {
             .net => "net",
             .proc => "proc",
             .timer => "timer",
+            .env => "env",
         };
     }
 };

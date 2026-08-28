@@ -100,7 +100,7 @@ pub const Group = enum {
 /// proc.zig and sessions.zig is paired with `perm_proc`, and `timer` never
 /// gates alone — modeled honestly as the pair it always is, rather than
 /// bolting on a multi-perm field for a case that doesn't otherwise exist.
-pub const Perm = enum { fs_read, fs_write, net, proc, proc_timer };
+pub const Perm = enum { fs_read, fs_write, net, proc, proc_timer, env };
 
 pub const Entry = struct {
     /// The `weft.<name>` import name — matches the guest's `extern "weft" fn
@@ -377,6 +377,8 @@ pub const imports = [_]Entry{
     .{ .name = "wl_proc_close", .params = &.{.u32}, .results = &.{}, .group = .proc, .doc = "kill a spawned subprocess (slot stays for handle stability)" },
     .{ .name = "wl_place_root", .params = &.{ .u32, .u32 }, .results = &.{.i32}, .group = .proc, .doc = "the dispatching place's absolute directory, or 0 bytes when it has none locally" },
     .{ .name = "wl_place_id", .params = &.{}, .results = &.{.i32}, .group = .proc, .doc = "a dense opaque id for the dispatching place; compare it, never interpret it" },
+    .{ .name = "wl_env_publish", .params = &.{ .u32, .u32 }, .results = &.{.i32}, .group = .proc, .perm = .env, .doc = "publish this plugin's environment overlay (NUL-separated KEY=VALUE) for the dispatching place" },
+    .{ .name = "wl_env_retract", .params = &.{}, .results = &.{.i32}, .group = .proc, .perm = .env, .doc = "withdraw this plugin's environment overlay for the dispatching place" },
     .{ .name = "wl_proc_to_buffer", .params = &.{ .u32, .u32, .u32, .u32, .u32 }, .results = &.{}, .group = .proc, .perm = .proc_timer, .doc = "run `<cmd>` off-thread and replace the scratch buffer captured now with its stdout; the trailing fill token comes back as `on_fill_token`" },
     .{ .name = "wl_proc_append_buffer", .params = &.{ .u32, .u32, .u32, .u32, .u32 }, .results = &.{}, .group = .proc, .perm = .proc_timer, .doc = "like `wl_proc_to_buffer` but appends (a console log) instead of replacing" },
     .{ .name = "wl_proc_spool", .params = &.{ .u32, .u32, .u32, .u32, .u32, .u32, .u32 }, .results = &.{}, .group = .proc, .perm = .proc_timer, .doc = "like `wl_proc_to_buffer`, but write `<input>` to a HOST-NAMED temp file, substitute it for `{}` in `<cmd>`, and delete it afterwards — a subprocess gets a real path without the guest holding fs_write" },
@@ -430,7 +432,7 @@ pub const imports = [_]Entry{
 /// half-finished edit — fails the build with a pointed message instead of
 /// silently drifting the two ~124-entry tables apart again (the exact class
 /// this table exists to kill).
-const expected_import_count = 206;
+const expected_import_count = 208;
 
 /// A host→guest EXPORT entrypoint (design doc/extensibility-native-surface.md, task
 /// W0a-D extension 2): every `instance.callVoid("name", args)` the host

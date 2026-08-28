@@ -55,7 +55,7 @@ pub const SyntaxResolver = *const fn (buf: *Buffers.Buffer) ?*syntax.Syntax;
 /// The guest-side `Perm` enum order (weft.zig): fs_read, fs_write, net, proc,
 /// timer. Kept in lockstep with abi.Perm so a wasm plugin's declaration means
 /// the same thing as an in-process one's.
-pub const perm_count = 5;
+pub const perm_count = 6;
 
 pub const WasmCmd = struct { plugin: *WasmPlugin, id: u32, name: []u8 };
 
