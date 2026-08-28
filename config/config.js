@@ -76,6 +76,27 @@ weft.plugin("files");       // file browser; the target handler owns its semanti
 weft.plugin("lsp");         // language server client (hover/def/… over jsonrpc)
 weft.plugin("debug");       // breakpoints (gutter markers) — the debugger's first slice
 
+// ── BREADTH, written down ────────────────────────────────────────────
+// A plugin that asks for `fs_read`/`fs_write` in describe() and gets no
+// grant here is confined to THE PLACE ITS DISPATCH IS IN — the project the
+// focused file belongs to, resolved per call, following you from one project
+// to the next. That is the default because the alternative default was "the
+// whole filesystem", which is not something anyone should get by omission.
+// `notes` and `snippets` run on exactly that: their files are named relative
+// to the place, so a notes file is per-project without a line here.
+//
+// `root: "/"` is how you say UNCONFINED. It is not forbidden — it is just
+// something you have to write, so it shows up in the approval diff.
+//
+// The file browser is the one reference plugin that genuinely means it: you
+// point it at a directory and it goes there, including out of the project
+// entirely. Its typed target doors need the unconfined form specifically —
+// they prove authority against a provider root rather than a path, so there
+// is nothing for a path-shaped confinement to compare against. Narrow these
+// to a `root:` and the browser refuses to leave it.
+weft.grant("files", "fs_read",  { root: "/" }); // browse anywhere you point it
+weft.grant("files", "fs_write", { root: "/" }); // …and act there: rename, delete, create
+
 // ── `.js` plugins and their GRANTS ───────────────────────────────────
 // A `.js` plugin has no describe() handshake to ask for anything, so
 // `weft.grant` is its ONLY door to an effect: with no grant it fails CLOSED
@@ -84,7 +105,8 @@ weft.plugin("debug");       // breakpoints (gutter markers) — the debugger's f
 // thought: what it may do, then what it is.
 //
 // A grant may also be NARROWED — `weft.grant("dap", "fs_read", {root:
-// "./src"})` confines the capability to a filesystem root.
+// "./src"})` confines the capability to a filesystem root — or widened to
+// the whole machine with `{root: "/"}`, above.
 weft.grant("dap", "proc");  // drive a debug adapter over stdio
 weft.plugin("dap.js");      // DAP client: run/step/inspect (see weft.set("dap", …) below)
 
@@ -92,6 +114,8 @@ weft.plugin("dap.js");      // DAP client: run/step/inspect (see weft.set("dap",
 // approvals cross the ABI, so every agent edit is a gated, attributed peer
 // commit. These three lines ARE the agent's authority — delete one and that
 // door closes for good.
+// The two fs grants carry no `root`, so the agent reads and writes inside
+// the place the conversation dispatches in — its project, and not yours.
 weft.grant("acp", "proc");     // spawn + drive the agent over stdio
 weft.grant("acp", "fs_read");  // answer its fs/read_text_file
 weft.grant("acp", "fs_write"); // answer its fs/write_text_file
