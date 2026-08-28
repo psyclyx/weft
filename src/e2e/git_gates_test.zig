@@ -94,6 +94,109 @@ test "e2e/git-gates: G1 two repos stay isolated and both stay open" {
     try t.expectEqualStrings("", staged_a);
 }
 
+// ── GATE G1b: the number of repositories is not a number anyone chose ──
+//
+// G1 proves two repositories stay isolated. The table they lived in held FOUR,
+// and a fifth was refused out loud with "too many repositories open" — a
+// sentence describing a fixed array, not a decision. Sessions are individually
+// allocated now, so this drives seven at once and asserts both halves of what
+// the pointer-list shape is FOR:
+//
+//   • past the old ceiling nothing is refused — all seven projections are live
+//     and each shows only its own repository, and
+//   • an identity handed out before the table grew still names the same session
+//     afterwards. The commit draft is that identity: it binds its repository
+//     when it opens, and here it opens against repository 1 and is saved only
+//     after six more sessions have been allocated behind it.
+test "e2e/git-gates: G1b seven repos are all live, and a draft opened against the first still commits to it" {
+    const gpa = t.allocator;
+    var proj: Project = undefined;
+    try proj.init(gpa);
+    defer proj.deinit();
+
+    var ed: Editor = undefined;
+    try Editor.init(gpa, &ed);
+    defer ed.deinit();
+    try loadWorkspace(&ed);
+
+    // Seven repositories, each with a tracked file only IT has, and each with a
+    // staged change waiting so its projection has something of its own to show.
+    const repos = 7;
+    for (1..repos + 1) |n| {
+        var cmd: [320]u8 = undefined;
+        const out = try proj.oracle(try std.fmt.bufPrint(
+            &cmd,
+            "mkdir -p r{d} && cd r{d} && git init -q -b main" ++
+                " && git config user.email e2e@weft.test && git config user.name weft-e2e" ++
+                " && printf 'base\\n' > f{d}.txt && git add f{d}.txt && git commit -q -m base{d}" ++
+                " && printf 'more\\n' >> f{d}.txt && git add f{d}.txt",
+            .{ n, n, n, n, n, n, n },
+        ));
+        gpa.free(out);
+    }
+
+    // Repository 1 first, and a commit draft opened against it — the identity
+    // that has to survive everything below.
+    {
+        const root = try proj.path("r1");
+        defer gpa.free(root);
+        try chdirTo(root);
+    }
+    ed.run("git-status");
+    try t.expect(drainToolContains(&ed, "*git*", "f1.txt"));
+    ed.run("git-commit");
+    try t.expectEqualStrings("*git-commit*", ed.bufferName());
+    ed.press("i", "");
+    ed.typeText("G1b: committed to the first repository");
+    ed.press("Escape", "");
+
+    // Six more repositories. Each one grows the session table under the draft's
+    // binding — the fifth is where the old cap refused outright.
+    for (2..repos + 1) |n| {
+        var leaf: [8]u8 = undefined;
+        const root = try proj.path(try std.fmt.bufPrint(&leaf, "r{d}", .{n}));
+        defer gpa.free(root);
+        try chdirTo(root);
+        ed.run("git-status");
+        var name: [16]u8 = undefined;
+        var needle: [16]u8 = undefined;
+        try t.expect(drainToolContains(
+            &ed,
+            try std.fmt.bufPrint(&name, "*git:{d}*", .{n}),
+            try std.fmt.bufPrint(&needle, "f{d}.txt", .{n}),
+        ));
+    }
+
+    // ALL SEVEN ARE LIVE AND EACH IS ITSELF: every projection still holds its
+    // own repository's file and no other's. A session that had been evicted,
+    // reused, or moved would show up here as a projection describing the wrong
+    // repository.
+    for (1..repos + 1) |n| {
+        var name_buf: [16]u8 = undefined;
+        const name = if (n == 1) "*git*" else try std.fmt.bufPrint(&name_buf, "*git:{d}*", .{n});
+        const text = h.toolText(&ed, name) orelse return error.MissingGitProjection;
+        defer gpa.free(text);
+        for (1..repos + 1) |other| {
+            var needle: [16]u8 = undefined;
+            const file = try std.fmt.bufPrint(&needle, "f{d}.txt", .{other});
+            const present = std.mem.indexOf(u8, text, file) != null;
+            try t.expectEqual(n == other, present);
+        }
+    }
+
+    // THE DRAFT STILL NAMES REPOSITORY 1. Saving it is the commit, and it lands
+    // in r1 — not in r7, which is where the process is standing and which every
+    // "most recent session wins" shortcut would have picked.
+    try h.focusBuffer(&ed, "*git-commit*");
+    ed.press("colon", "");
+    ed.typeText("w");
+    ed.press("Return", "");
+    try t.expect(drainUntilOracle(&proj, &ed, "cd r1 && git log --oneline", "G1b: committed to the first repository"));
+    const seventh = try proj.oracle("cd r7 && git log --oneline");
+    defer gpa.free(seventh);
+    try t.expect(std.mem.indexOf(u8, seventh, "G1b") == null);
+}
+
 // ── GATE G2: a stale rendered hunk never gets staged after a render shift ──
 //
 // doc §2.4/§18: "No rendered row, byte range, or parsed display string serves

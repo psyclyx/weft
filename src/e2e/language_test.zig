@@ -79,6 +79,143 @@ test "e2e/languages: two languages are two servers — both answer, and killing 
     try lang.awaitPeerCompletion(ed, beta);
 }
 
+// The session table used to hold a fixed number of servers — most recently 24,
+// with the coldest evicted (and a line echoed about it) when a 25th project
+// wanted one. Nobody decided 24: it was the height of a static array, and the
+// cost of getting it wrong is a full handshake plus a re-index against a real
+// server. Sessions are individually allocated now, so this drives 26 at once.
+//
+// Both halves of what the pointer-list shape is FOR are asserted: past the old
+// ceiling nothing is shed, and the session minted FIRST — whose `*Session`, and
+// whose per-kind pending slots, were handed out before 25 more allocations —
+// still answers for its own project at the end, when it is the coldest thing in
+// the table and would have been the first thing evicted.
+test "e2e/places: twenty-six projects, one language — every server stays up, and the first still answers last" {
+    const gpa = t.allocator;
+    const peer = try lang.Peer.initRooted(gpa, "zig");
+    defer peer.deinit(gpa);
+
+    var app: h.App = undefined;
+    try app.init(gpa);
+    defer app.deinit();
+    const ed = &app.ed;
+    try ed.setConfig("lsp", "zig", peer.command);
+
+    // 26 marked project roots side by side. Two-digit names throughout, so the
+    // directory each peer names itself by is unambiguous.
+    const projects = 26;
+    for (1..projects + 1) |n| {
+        var cmd: [128]u8 = undefined;
+        const out = try app.proj.oracle(try std.fmt.bufPrint(
+            &cmd,
+            "mkdir -p p{d:0>2}/.git && printf 'pub fn f() void {{}}\\n' > p{d:0>2}/main.zig",
+            .{ n, n },
+        ));
+        gpa.free(out);
+    }
+
+    // Opening a file in each project mints its session and spawns its server.
+    for (1..projects + 1) |n| {
+        var path: [32]u8 = undefined;
+        ed.runStr("open", try std.fmt.bufPrint(&path, "p{d:0>2}/main.zig", .{n}));
+    }
+
+    // ALL 26 HANDSHOOK. One oracle counts the markers rather than 26 — a shed
+    // session leaves its marker behind, so the count is over live SPAWNS; the
+    // per-project answers below are what prove each is still up.
+    var want: [8]u8 = undefined;
+    try t.expect(h.drainUntilOracle(
+        &app.proj,
+        ed,
+        "ls p[0-9][0-9]/.lsp-zig-init 2>/dev/null | wc -l",
+        try std.fmt.bufPrint(&want, "{d}", .{projects}),
+    ));
+
+    // EACH ANSWERS FOR ITS OWN PROJECT. The item names the directory the
+    // answering server runs in, so a reply carrying another project's name is
+    // one server serving two buffers.
+    var item: [128]u8 = undefined;
+    var dir: [8]u8 = undefined;
+    for (1..projects + 1) |n| {
+        var path: [32]u8 = undefined;
+        ed.runStr("open", try std.fmt.bufPrint(&path, "p{d:0>2}/main.zig", .{n}));
+        ed.settle(40);
+        try lang.awaitCompletionItem(ed, peer.itemIn(&item, try std.fmt.bufPrint(&dir, "p{d:0>2}", .{n})));
+    }
+
+    // AND THE FIRST ONE STILL DOES, LAST. It is now the least recently used
+    // session in the table — precisely what the old shedding rule retired to
+    // make room, and what a moved-out-from-under `*Session` would have lost.
+    ed.runStr("open", "p01/main.zig");
+    ed.settle(40);
+    try lang.awaitCompletionItem(ed, peer.itemIn(&item, "p01"));
+}
+
+// A workspace root is as long as the user's directories are. The session key
+// held it in a `[512]u8`, and `activeKey` correctly refused to build a key it
+// could not hold whole — but the consequence was that LSP did NOTHING for such
+// a project, with no echo and nothing to tell it apart from "no server
+// configured for this language". A capability that silently declines is the
+// worst answer available: the user debugs their config instead of their paths.
+test "e2e/places: a project root past the old 512-byte key limit starts a server like any other" {
+    const gpa = t.allocator;
+    const peer = try lang.Peer.initRooted(gpa, "zig");
+    defer peer.deinit(gpa);
+
+    var app: h.App = undefined;
+    try app.init(gpa);
+    defer app.deinit();
+    const ed = &app.ed;
+    try ed.setConfig("lsp", "zig", peer.command);
+
+    // Three 200-character components: the absolute root is past 600 bytes on
+    // its own, before the harness's own temporary prefix.
+    const seg = "d" ** 200;
+    const deep = seg ++ "/" ++ seg ++ "/" ++ seg;
+    {
+        var cmd: [2048]u8 = undefined;
+        const out = try app.proj.oracle(try std.fmt.bufPrint(
+            &cmd,
+            "mkdir -p {s}/.git && printf 'pub fn deep() void {{}}\\n' > {s}/main.zig",
+            .{ deep, deep },
+        ));
+        gpa.free(out);
+    }
+    {
+        // The root really is past the old limit — otherwise this gate would
+        // pass for the wrong reason.
+        var cmd: [2048]u8 = undefined;
+        const len = try app.proj.oracle(try std.fmt.bufPrint(&cmd, "cd {s} && pwd | tr -d '\\n' | wc -c", .{deep}));
+        defer gpa.free(len);
+        try t.expect(try std.fmt.parseInt(usize, len, 10) > 512);
+    }
+
+    var path: [1024]u8 = undefined;
+    ed.runStr("open", try std.fmt.bufPrint(&path, "{s}/main.zig", .{deep}));
+
+    // A server, started IN that project — the marker's LOCATION is the proof.
+    var cmd: [2048]u8 = undefined;
+    try t.expect(h.drainUntilOracle(
+        &app.proj,
+        ed,
+        try std.fmt.bufPrint(&cmd, "test -s {s}/.lsp-zig-init && echo yes", .{deep}),
+        "yes",
+    ));
+    {
+        // And it was told the whole root, not a prefix of it: a truncated key
+        // names a different workspace.
+        const root_uri = try app.proj.oracle(try std.fmt.bufPrint(&cmd, "cat {s}/.lsp-zig-init", .{deep}));
+        defer gpa.free(root_uri);
+        try t.expect(std.mem.endsWith(u8, root_uri, deep));
+    }
+
+    // And it answers for the buffer, through the ordinary capability path. The
+    // peer names itself by its own directory, which here is 200 characters.
+    ed.settle(40);
+    var item: [512]u8 = undefined;
+    try lang.awaitCompletionItem(ed, peer.itemIn(&item, seg));
+}
+
 test "e2e/places: two projects, ONE language — two servers, each rooted in and answering for its own project" {
     const gpa = t.allocator;
     // The two-language gate above separates its servers by CONFIGURATION: a

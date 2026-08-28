@@ -3218,6 +3218,71 @@ test "wasm plugin: a second http-get takes its own response buffer" {
     try t.expect(env.buffers.findByName("*http:2*") != null);
 }
 
+// ── The instance table has no ceiling, and it does not move its instances ──
+// `weft.Instances` used to be `slots: [cap]?Slot` — a fixed row of VALUES, so
+// eight was the answer to "how many interpreters may I run", and nobody ever
+// decided eight. It is a list of individually allocated slots now (the shape
+// `core/Buffers.zig` settled on, and its reason), which is worth having only if
+// BOTH halves hold: past the old ceiling nothing is refused, and a `*Slot`
+// handed out before the table grew still names its own instance afterwards.
+//
+// The second half is what needs a process to prove. Each REPL echoes a tag only
+// IT knows, and the slot's value is the host session handle the send routes
+// through — so a send to the first instance, made after eleven more were
+// allocated, can only come back tagged `r1` if that first slot survived the
+// growth intact.
+
+test "wasm plugin: twelve REPLs run at once, and the first one still answers for itself" {
+    const gpa = t.allocator;
+    var env: Env = undefined;
+    try Env.init(gpa, &env);
+    defer env.deinit(gpa);
+    try @import("../builtins.zig").install(gpa, &env.commands, &env.keymap, &env.head, &env.actions);
+
+    var loop = async_loop.Loop.init(gpa, env.pool, @import("../task.zig").nowNs);
+    defer loop.deinit();
+    var engine = try wasm.Engine.init(gpa);
+    defer engine.deinit();
+    const plugin = try loadPlugin(&engine, &env.ctx, "repl", @embedFile("guest_repl_wasm"), .{ .loop = &loop, .pool = env.pool });
+    defer plugin.deinit(); // kills every child + JOINS the readers
+
+    // Twelve is past the old cap of eight, and each interpreter answers with a
+    // tag only it was started with.
+    const count = 12;
+    for (1..count + 1) |n| {
+        var cmd_buf: [96]u8 = undefined;
+        const cmd = try std.fmt.bufPrint(&cmd_buf, "while read l; do echo \"r{d} $l\"; done", .{n});
+        _ = try command.run(&env.commands, &env.ctx, "repl-start", &.{.{ .string = cmd }});
+    }
+
+    // Every one of them is live at once, in its own buffer.
+    for (1..count + 1) |n| {
+        var name_buf: [32]u8 = undefined;
+        const name = if (n == 1) "*repl*" else try std.fmt.bufPrint(&name_buf, "*repl:{d}*", .{n});
+        try t.expect(env.buffers.findByName(name) != null);
+    }
+
+    // Address the FIRST instance — the one whose slot was allocated before the
+    // other eleven — by focusing its buffer, which is how a command names an
+    // instance at all.
+    const first = env.buffers.findByName("*repl*") orelse return error.TestExpectedEqual;
+    try env.buffers.switchTo(gpa, first, &env.head, &env.keymap);
+    _ = try command.run(&env.commands, &env.ctx, "repl-send", &.{.{ .string = "ping" }});
+
+    const buf = env.buffers.get(first) orelse return error.TestExpectedEqual;
+    var rounds: usize = 0;
+    while (rounds < 5_000_000 and buf.textEditor().?.text().byteLen() == 0) : (rounds += 1) {
+        _ = wasm_host.drainReplSessions(plugin);
+        std.Thread.yield() catch {};
+    }
+    const answer = try buf.textEditor().?.text().toOwnedSlice(gpa);
+    defer gpa.free(answer);
+    // `r1` and nothing else: a slot that had moved under the growth would route
+    // this send through a neighbour's session handle and answer with its tag.
+    try t.expect(std.mem.indexOf(u8, answer, "r1 ping") != null);
+    try t.expect(std.mem.indexOf(u8, answer, "r12 ") == null);
+}
+
 // ── A picker's accept names its target, never a row or a label ────────────
 // doc/contextual-workspace-architecture.md §2.6: a buffer closed while the
 // picker is open must be REFUSED, not confused with whatever took its slot —
