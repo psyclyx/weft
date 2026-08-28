@@ -574,3 +574,54 @@ the `grammar-add` gate, now a pinned property rather than an ABI accident (§8).
 - No `workspaceFolders` in Wave 4; `rootUri` first, the multi-root LSP protocol
   as its own decision.
 - No new fact axis, no new predicate vocabulary, no scoped `weft.set`.
+
+## 10. What this became
+
+Written after the build, so the document ends true rather than aspirational.
+Where §7's waves and this section disagree, this section is what happened.
+
+**The abstraction was already here.** Nothing in §2 is a new idea: `locus.zig`
+had the locality primitive and rule R1, `durable.zig` had the portable
+designation, `action.zig` already called `workspace.set-working-target` "the
+target-oriented analogue of `cd`", and `Facts.locality` had been declared for
+exactly this. Five placeholders, all empty. The work was connection, not
+invention, and the shape of the diff shows it: the effect doors got smaller,
+not larger.
+
+**The load-bearing decision was ambient-at-the-door.** Every spawn resolves
+where and with what from the dispatching place, host-side, beside `g_environ`.
+The six guest spawn shims are byte-for-byte what they were before this
+document existed. The alternative — a `cwd` parameter — would have touched
+fourteen call sites, eleven of which have no place to pass and would have
+answered by calling `weft.cwd()` and handing the result straight back: an
+ambient read laundered through the guest, spreading raw paths into eleven more
+plugins. Then `environment` would have wanted a second parameter at every one.
+
+**Better primitives beat bans, measurably.** The rule in §4.2 was not
+rhetorical. `llm` went from `{proc, timer, fs_write}` to `{proc, timer}`; `git`
+from `{proc, timer, fs_read, fs_write}` to `{proc, timer}`; `project` from
+`{fs_read}` to **declaring nothing at all**. Not one of those was forbidden
+anything. Each held a capability only because a primitive was missing — a
+place-scoped spool, a place-relative probe — and gave it up when the primitive
+arrived. The three plugins that still hold filesystem capability (`files`,
+`notes`, `snippets`) hold it for user content, which is the honest reason.
+
+**Two things caught by gates rather than by review.** A producer focusing its
+own output entry before spawning meant the first `*grep*` search was right by
+luck and the second searched the wrong project — the two-project gate failed
+and named it. And the collapse of the plugin-plane proc doors revealed that the
+JS plane had never applied a place's environment overlay at all, a gap the
+environment work itself would have shipped around.
+
+**The instrument was wrong before the code was.** `e2e/latency`'s intermittent
+failures were not contention: the gate compared a baseline recorded by the
+isolated binary against a measurement taken after ~159 other tests in the same
+process (~37µs versus ~176µs of real CPU work), it timed the wall clock so
+every sample absorbed descheduling, and three teardown drains plus a
+two-second production join were busy-waiting on `spinLoopHint`. It now measures
+work, in the process its baseline came from, and skips honestly when a
+calibration probe says the box is not in the state the baseline was recorded
+in.
+
+**57 gates** were added, each one verified to fail without the change it
+guards. `git diff main..place-arc | grep '^+test "'` is the list.
