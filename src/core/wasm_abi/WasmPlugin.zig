@@ -17,6 +17,8 @@ const register_mod = @import("../register.zig");
 const surface_mod = @import("../surface.zig");
 const async_loop = @import("../async.zig");
 const position = @import("../position.zig");
+const layers = @import("../layers.zig");
+const Document = @import("../Document.zig");
 const capability = @import("../capability.zig");
 const repl_session = @import("../repl_session.zig");
 const net_session = @import("../net_session.zig");
@@ -93,6 +95,15 @@ pub const RangeSlot = struct {
 pub const DocSnapshotSlot = struct {
     buffer: Buffers.Ref,
     frontier: []u8,
+};
+
+/// One annotation target: the ENTRY a decorator captured (generation-checked,
+/// like every captured ref) plus the layer name it claimed there. The guest
+/// holds only the handle — never a document, never a live offset — so an
+/// entry closed under it resolves to nothing instead of the active one.
+pub const AnnotationSlot = struct {
+    buffer: Buffers.Ref,
+    layer: []u8,
 };
 
 /// A materialized tree-sitter query capture the guest reads by index (design
@@ -255,6 +266,12 @@ ephemeral_range_handles: std.ArrayList(u32) = .empty,
 /// frontier.
 doc_snapshots: std.AutoHashMapUnmanaged(u32, DocSnapshotSlot) = .empty,
 next_doc_snapshot_handle: u32 = 0,
+
+/// Annotation targets this plugin holds open (§11.7): entries it decorates
+/// but does not own. Monotonic handles, never recycled. Teardown releases
+/// every layer they claimed — unloading a decorator removes its paint.
+annotations: std.AutoHashMapUnmanaged(u32, AnnotationSlot) = .empty,
+next_annotation_handle: u32 = 1,
 
 /// The captures from the guest's most recent `syntax.query`, read back by
 /// index. Reset at the start of each query; each entry owns its name.
@@ -436,6 +453,64 @@ pub fn docSnapshotIsCurrent(self: *WasmPlugin, handle: u32) bool {
 pub fn releaseDocSnapshot(self: *WasmPlugin, handle: u32) void {
     const removed = self.doc_snapshots.fetchRemove(handle) orelse return;
     self.gpa.free(removed.value.frontier);
+}
+
+/// Open an annotation target on the entry with compact id `entry_id`: capture
+/// its ref and claim `name` there as an annotation feed. Refused for an entry
+/// that holds no text, and for a name already held as a builtin feed — a
+/// decorator cannot take over `styles`/`folds` and paint through core's path.
+pub fn openAnnotation(self: *WasmPlugin, entry_id: Buffers.Id, name: []const u8) !u32 {
+    const buffer = self.activeCtx().buffers.get(entry_id) orelse return error.InvalidRange;
+    const editor = buffer.textEditor() orelse return error.InvalidRange;
+    _ = try self.activeCtx().caps.layers.claimAnnotation(self.gpa, &editor.doc, name, self.name);
+    const layer = try self.gpa.dupe(u8, name);
+    errdefer self.gpa.free(layer);
+    const handle = self.next_annotation_handle;
+    self.next_annotation_handle += 1;
+    try self.annotations.putNoClobber(self.gpa, handle, .{ .buffer = buffer.ref(), .layer = layer });
+    return handle;
+}
+
+/// The document an annotation handle names, or null once that entry is gone
+/// (a decorator's handle never falls through to whatever is active).
+pub fn annotationDoc(self: *WasmPlugin, handle: u32) ?*Document {
+    const slot = self.annotations.get(handle) orelse return null;
+    const buffer = self.activeCtx().buffers.resolve(slot.buffer) orelse return null;
+    const editor = buffer.textEditor() orelse return null;
+    return &editor.doc;
+}
+
+/// This plugin's live layer behind an annotation handle, re-claimed so a
+/// provider that lost the name to a later claim does not keep writing it.
+pub fn annotationLayer(self: *WasmPlugin, handle: u32) ?*layers.Layer {
+    const slot = self.annotations.get(handle) orelse return null;
+    const doc = self.annotationDoc(handle) orelse return null;
+    return self.activeCtx().caps.layers.claimAnnotation(self.gpa, doc, slot.layer, self.name) catch null;
+}
+
+/// Close one target: its paint goes, nothing else does. Repeated closes are
+/// harmless.
+pub fn closeAnnotation(self: *WasmPlugin, handle: u32) void {
+    const removed = self.annotations.fetchRemove(handle) orelse return;
+    if (self.annotationDocOf(removed.value)) |doc|
+        self.activeCtx().caps.layers.release(self.gpa, doc, removed.value.layer, self.name);
+    self.gpa.free(removed.value.layer);
+}
+
+fn annotationDocOf(self: *WasmPlugin, slot: AnnotationSlot) ?*Document {
+    const buffer = self.activeCtx().buffers.resolve(slot.buffer) orelse return null;
+    const editor = buffer.textEditor() orelse return null;
+    return &editor.doc;
+}
+
+pub fn clearAnnotations(self: *WasmPlugin) void {
+    var it = self.annotations.iterator();
+    while (it.next()) |e| {
+        if (self.annotationDocOf(e.value_ptr.*)) |doc|
+            self.activeCtx().caps.layers.release(self.gpa, doc, e.value_ptr.layer, self.name);
+        self.gpa.free(e.value_ptr.layer);
+    }
+    self.annotations.clearRetainingCapacity();
 }
 
 pub fn clearDocSnapshots(self: *WasmPlugin) void {
@@ -686,6 +761,8 @@ pub fn deinit(self: *WasmPlugin) void {
     self.ephemeral_range_handles.deinit(gpa);
     self.clearDocSnapshots();
     self.doc_snapshots.deinit(gpa);
+    self.clearAnnotations();
+    self.annotations.deinit(gpa);
     self.queryCapsClear();
     self.query_caps.deinit(gpa);
     self.clearRetiredResultBuffers();

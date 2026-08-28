@@ -44,6 +44,7 @@ const fs = @import("../wasm_host/fs.zig");
 const intent = @import("../wasm_host/intent.zig");
 const keymap = @import("../wasm_host/keymap.zig");
 const layers = @import("../wasm_host/layers.zig");
+const annotate = @import("../wasm_host/annotate.zig");
 const menu = @import("../wasm_host/menu.zig");
 const pick = @import("../wasm_host/pick.zig");
 const proc = @import("../wasm_host/proc.zig");
@@ -125,6 +126,14 @@ const handlers = [_]struct { name: []const u8, handler: HostFn }{
     .{ .name = "wl_breakpoint_toggle", .handler = layers.hBreakpointToggle },
     .{ .name = "wl_breakpoint_clear", .handler = layers.hBreakpointClear },
     .{ .name = "wl_breakpoint_offsets", .handler = layers.hBreakpointOffsets },
+
+    // ── annotate.zig — third-party decoration of a referenced entry ────
+    .{ .name = "wl_annotate_open", .handler = annotate.hOpen },
+    .{ .name = "wl_annotate_close", .handler = annotate.hClose },
+    .{ .name = "wl_annotate_len", .handler = annotate.hLen },
+    .{ .name = "wl_annotate_read", .handler = annotate.hRead },
+    .{ .name = "wl_annotate_begin", .handler = annotate.hBegin },
+    .{ .name = "wl_annotate_span", .handler = annotate.hSpan },
 
     // ── config_kv.zig — runtime kv scratch + the distinct config store ──
     .{ .name = "wl_kv_get", .handler = config_kv.hKvGet },

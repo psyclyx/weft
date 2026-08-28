@@ -90,6 +90,13 @@ extern "weft" fn wl_decorate(anchor: u32, placement: u32, role: u32, ptr: u32, l
 extern "weft" fn wl_breakpoint_toggle(offset: u32) i32;
 extern "weft" fn wl_breakpoint_clear() void;
 extern "weft" fn wl_breakpoint_offsets(ptr: u32, cap: u32) i32;
+// Annotation layers: decorate an entry this plugin does not own (§11.7).
+extern "weft" fn wl_annotate_open(entry: u32, ptr: u32, len: u32) i32;
+extern "weft" fn wl_annotate_close(handle: u32) void;
+extern "weft" fn wl_annotate_len(handle: u32) i32;
+extern "weft" fn wl_annotate_read(handle: u32, start: u32, end: u32, ptr: u32, cap: u32) i32;
+extern "weft" fn wl_annotate_begin(handle: u32) i32;
+extern "weft" fn wl_annotate_span(handle: u32, start: u32, end: u32, role: u32, placement: u32, ptr: u32, len: u32) void;
 // Native `editor` surface + anchored ranges. A range crosses as an opaque u32
 // handle into a host-side table of document-owned anchors.
 extern "weft" fn wl_editor_step(from: u32, dir: u32, kind: u32) u32;
@@ -529,6 +536,73 @@ pub fn breakpointOffsets() []const u8 {
     if (n <= 0) return "";
     return scratch[0..@intCast(n)];
 }
+
+// ── Annotation layers (the third-party decoration package, §11.7) ────
+//
+// `decorate` above paints the ACTIVE buffer, and only a projection's own
+// plugin ever wants that. This is the other half: a named layer on an entry
+// this plugin does NOT own, addressed by a captured reference rather than by
+// focus, so a decorator can never follow the user into someone else's buffer.
+// Every round is `begin` then a `span` per mark — the host stamps the entry
+// revision at `begin`, and the paint DROPS (never rebases into a guess) the
+// moment the entry is edited, until the next round. `close` takes this
+// plugin's paint away and nothing else.
+
+/// One entry's annotation layer, held open across calls.
+pub const Annotations = struct {
+    handle: u32,
+
+    /// How an annotation span presents. `range` is a face over `[start, end)`;
+    /// the rest are display-only decorations anchored at `start` (the same set
+    /// `DecoPlacement` names for the active buffer).
+    pub const Placement = enum(u32) { range = 0, virtual_before = 1, virtual_after = 2, eol = 3, gutter = 4 };
+
+    /// Claim layer `name` on the entry with compact id `entry` (from
+    /// `bufferId`). Null when the entry is unknown, holds no text, or `name`
+    /// is a builtin feed this door refuses to hand over.
+    pub fn open(entry: u32, name: []const u8) ?Annotations {
+        const h = wl_annotate_open(entry, p(name.ptr), @intCast(name.len));
+        return if (h < 0) null else .{ .handle = @intCast(h) };
+    }
+
+    /// Drop this layer: the paint goes, the entry is untouched.
+    pub fn close(self: Annotations) void {
+        wl_annotate_close(self.handle);
+    }
+
+    /// The decorated entry's byte length, or 0 once the entry is gone.
+    pub fn byteLen(self: Annotations) usize {
+        const n = wl_annotate_len(self.handle);
+        return if (n < 0) 0 else @intCast(n);
+    }
+
+    /// Read `[start, end)` of the decorated entry into `buf`.
+    pub fn read(self: Annotations, start: usize, end: usize, buf: []u8) []const u8 {
+        const n = wl_annotate_read(self.handle, @intCast(start), @intCast(end), p(buf.ptr), @intCast(buf.len));
+        return if (n <= 0) "" else buf[0..@intCast(n)];
+    }
+
+    /// Open a publish round against the entry's CURRENT revision, dropping
+    /// the previous set. False once the entry is gone.
+    pub fn begin(self: Annotations) bool {
+        return wl_annotate_begin(self.handle) == 1;
+    }
+
+    /// One span in the open round, colored by `role` (a styles-palette class).
+    /// `text` is the display string for a decoration placement, ignored by
+    /// `.range`.
+    pub fn span(self: Annotations, start: usize, end: usize, role: StyleClass, placement: Annotations.Placement, text: []const u8) void {
+        wl_annotate_span(
+            self.handle,
+            @intCast(start),
+            @intCast(end),
+            @intFromEnum(role),
+            @intFromEnum(placement),
+            p(text.ptr),
+            @intCast(text.len),
+        );
+    }
+};
 
 // ── Native editor surface + anchored ranges (motions/operators) ──────
 pub const Dir = enum(u32) { back = 0, fwd = 1 };

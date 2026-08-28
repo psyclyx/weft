@@ -51,6 +51,14 @@ pub const Group = enum {
     declare,
     edit,
     layers,
+    /// `wasm_host/annotate.zig` — the third-party decoration package
+    /// (doc/contextual-workspace-architecture.md §11.7): named annotation
+    /// feeds published onto a REFERENCED entry, stamped with the revision
+    /// they were computed against. Its own group, not folded into `.layers`:
+    /// that group is the ACTIVE-buffer builtin-feed surface (styles/folds/
+    /// decorations), which the standing rules deliberately keep a decorator
+    /// out of.
+    annotate,
     config_kv,
     dispatch,
     keymap,
@@ -194,6 +202,14 @@ pub const imports = [_]Entry{
     .{ .name = "wl_breakpoint_toggle", .params = &.{.u32}, .results = &.{.i32}, .group = .layers, .doc = "toggle an ANCHORED breakpoint at `offset` in the active document; 1 if now set" },
     .{ .name = "wl_breakpoint_clear", .params = &.{}, .results = &.{}, .group = .layers, .doc = "drop every breakpoint in the active document" },
     .{ .name = "wl_breakpoint_offsets", .params = &.{ .u32, .u32 }, .results = &.{.i32}, .group = .layers, .doc = "the active document's breakpoints as an offset CSV, resolved at the current head" },
+
+    // ── annotate.zig — third-party decoration of a REFERENCED entry (§11.7) ─
+    .{ .name = "wl_annotate_open", .params = &.{ .u32, .u32, .u32 }, .results = &.{.i32}, .group = .annotate, .doc = "claim annotation layer `name` on entry `id`; an opaque target handle, or -1" },
+    .{ .name = "wl_annotate_close", .params = &.{.u32}, .results = &.{}, .group = .annotate, .doc = "drop this provider's annotation layer on that entry (its paint, nothing else)" },
+    .{ .name = "wl_annotate_len", .params = &.{.u32}, .results = &.{.i32}, .group = .annotate, .doc = "the decorated entry's byte length at the current head, or -1 when it is gone" },
+    .{ .name = "wl_annotate_read", .params = &.{ .u32, .u32, .u32, .u32, .u32 }, .results = &.{.i32}, .group = .annotate, .doc = "read `[start,end)` of the decorated entry's text into guest memory" },
+    .{ .name = "wl_annotate_begin", .params = &.{.u32}, .results = &.{.i32}, .group = .annotate, .doc = "open a publish round: drop the old set and stamp the entry revision" },
+    .{ .name = "wl_annotate_span", .params = &.{ .u32, .u32, .u32, .u32, .u32, .u32, .u32 }, .results = &.{}, .group = .annotate, .doc = "publish one anchored span with a role and placement into the open round" },
 
     // ── config_kv.zig — runtime kv scratch + the distinct config store ──
     .{ .name = "wl_kv_get", .params = &.{ .u32, .u32, .u32, .u32 }, .results = &.{.i32}, .group = .config_kv, .doc = "read this plugin's runtime kv scratch value for `key`" },
@@ -412,7 +428,7 @@ pub const imports = [_]Entry{
 /// half-finished edit — fails the build with a pointed message instead of
 /// silently drifting the two ~124-entry tables apart again (the exact class
 /// this table exists to kill).
-const expected_import_count = 198;
+const expected_import_count = 204;
 
 /// A host→guest EXPORT entrypoint (design doc/extensibility-native-surface.md, task
 /// W0a-D extension 2): every `instance.callVoid("name", args)` the host
