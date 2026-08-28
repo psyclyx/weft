@@ -7,6 +7,7 @@
 const std = @import("std");
 const Allocator = std.mem.Allocator;
 
+const wire = @import("weft_wire");
 const task = @import("../task.zig");
 
 /// How long a request waits for its reply. Sized for a human-latency link
@@ -91,6 +92,112 @@ pub fn Inflight(comptime Ctx: type) type {
 
         pub fn count(self: *const Self) usize {
             return self.entries.count();
+        }
+    };
+}
+
+/// One whole requester: ids under deadlines (`Inflight`) plus the answers
+/// that landed and have not been taken. `call_kind` — which `RequestKind`
+/// its calls ride — is the ONLY thing that differs between the cycles on a
+/// quad's request channel (`.fs_call` for the `.peer` filesystem,
+/// `.lsp_call` for the typed language service), so it is the only parameter.
+/// Async by construction: nothing here blocks a frame thread.
+///
+/// `session` is duck-typed (`liveness()` + `post()`) so this file stays free
+/// of the transport it posts through.
+pub fn Requester(comptime call_kind: wire.RequestKind) type {
+    return struct {
+        const Self = @This();
+
+        gpa: Allocator,
+        inflight: Inflight(void) = .{},
+        /// Settled calls by id, until the caller takes them.
+        settled: std.AutoHashMapUnmanaged(u64, Outcome) = .empty,
+
+        /// What a call came back as: the peer's response bytes, or the peer
+        /// saying it could not serve it, and why.
+        const Outcome = union(enum) { reply: []u8, failed: wire.FailureReason };
+
+        pub fn init(gpa: Allocator) Self {
+            return .{ .gpa = gpa };
+        }
+
+        pub fn deinit(self: *Self) void {
+            var it = self.settled.valueIterator();
+            while (it.next()) |v| switch (v.*) {
+                .reply => |bytes| self.gpa.free(bytes),
+                .failed => {},
+            };
+            self.settled.deinit(self.gpa);
+            self.inflight.deinit(self.gpa);
+        }
+
+        /// How long a call waits for its reply before `take` fails it.
+        pub fn setTimeout(self: *Self, ns: u64) void {
+            self.inflight.timeout_ns = ns;
+        }
+
+        /// Post an encoded request on `base+3`; returns the call id the
+        /// reply will mirror.
+        ///
+        /// An offline peer refuses here, at once
+        /// (doc/contextual-workspace-architecture.md §13.7: "remote mutation
+        /// actions are never automatically queued"). Enqueuing would put a
+        /// mutation in a buffer whose only honest fates are a silent drop or
+        /// a replay the owner never authorized; the caller gets a reason it
+        /// can show instead of a deadline it must sit out.
+        pub fn request(self: *Self, session: anytype, base: u64, req: []const u8) !u64 {
+            if (session.liveness() == .offline) return error.PeerOffline;
+            const id = try self.inflight.issue(self.gpa, {});
+            var p: std.ArrayList(u8) = .empty;
+            defer p.deinit(self.gpa);
+            try wire.putUv(self.gpa, &p, id);
+            try p.appendSlice(self.gpa, req);
+            try session.post(.request, @intFromEnum(call_kind), base + 3, p.items);
+            return id;
+        }
+
+        /// A reply frame arrived (`uv id | response`): store it by id.
+        pub fn onReply(self: *Self, gpa: Allocator, payload: []const u8) !void {
+            var cur: []const u8 = payload;
+            const id = wire.getUv(&cur) catch return;
+            const owned = try gpa.dupe(u8, cur);
+            errdefer gpa.free(owned);
+            try self.put(gpa, id, .{ .reply = owned });
+        }
+
+        /// The peer cannot serve `id` (an `*_err` frame), for `reason`. The
+        /// caller takes the failure now rather than waiting out its deadline.
+        pub fn onFailure(self: *Self, gpa: Allocator, id: u64, reason: wire.FailureReason) void {
+            self.put(gpa, id, .{ .failed = reason }) catch {};
+        }
+
+        fn put(self: *Self, gpa: Allocator, id: u64, outcome: Outcome) !void {
+            const gop = try self.settled.getOrPut(gpa, id);
+            if (gop.found_existing) switch (gop.value_ptr.*) {
+                .reply => |bytes| gpa.free(bytes),
+                .failed => {},
+            };
+            gop.value_ptr.* = outcome;
+            _ = self.inflight.settle(id);
+        }
+
+        /// Take the completed response for `id` (owned; caller frees), or
+        /// null while it is still in flight. A peer that refused the call,
+        /// and a deadline that passed, are errors — never an endless wait. A
+        /// refusal the peer attributed to a missing grant surfaces as
+        /// `RequestDenied`, so a caller can say "not granted" rather than
+        /// "something failed".
+        pub fn take(self: *Self, id: u64) Error!?[]u8 {
+            if (self.settled.fetchRemove(id)) |kv| switch (kv.value) {
+                .reply => |bytes| return bytes,
+                .failed => |reason| return switch (reason) {
+                    .not_granted => error.RequestDenied,
+                    else => error.RequestFailed,
+                },
+            };
+            if (self.inflight.timedOut(id, task.nowNs())) return error.RequestTimeout;
+            return null;
         }
     };
 }

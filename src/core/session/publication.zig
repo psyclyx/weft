@@ -32,6 +32,9 @@ pub const Surface = enum(u8) {
     fs_hierarchy = 2,
     fs_bytes = 3,
     fs_mutate = 4,
+    /// The typed language service (§14.4, `peer_lsp.zig`) — completion,
+    /// hover, definition over the published documents.
+    lsp = 5,
 };
 
 pub const ReplicaKind = enum(u8) { text = 0, graph = 1 };
@@ -88,6 +91,10 @@ pub const ExportSpec = struct {
     fs_hierarchy: bool = true,
     fs_bytes: bool = true,
     fs_mutate: bool = true,
+    /// Off by default, unlike its siblings: a language service was never
+    /// part of the implicit bundle, so sharing a document must not start
+    /// answering questions about it. Exporting one is a choice.
+    lsp: bool = false,
 
     /// Everything the implicit per-buffer bundle carried before this layer
     /// existed. A quad published with it is indistinguishable from one with
@@ -244,12 +251,13 @@ pub fn fromSpec(gpa: Allocator, id: u64, resource: []const u8, owner: ?[24]u8, s
     };
     errdefer p.deinit(gpa);
     if (spec.replica) |r| try p.exports.append(gpa, .{ .replica = r });
-    const endpoints: [5]struct { bool, Surface } = .{
+    const endpoints: [6]struct { bool, Surface } = .{
         .{ spec.presence, .presence },
         .{ spec.diagnostics, .diagnostics },
         .{ spec.fs_hierarchy, .fs_hierarchy },
         .{ spec.fs_bytes, .fs_bytes },
         .{ spec.fs_mutate, .fs_mutate },
+        .{ spec.lsp, .lsp },
     };
     for (endpoints) |e| {
         if (e[0]) try p.exports.append(gpa, .{ .endpoint = .{ .surface = e[1] } });
@@ -313,7 +321,11 @@ fn requestAddress(kind: u8, payload: []const u8) Address {
         // One mapping for one fact: the descriptor names the surface
         // `peer_fs` will enforce on, never a second opinion about it.
         .fs_call => .{ .surface = fsSurface(@enumFromInt(cur[0])) },
-        .ok, .err, .fs_ok, .fs_err, .cancel => .unclassified,
+        // Every language question is the one `lsp` surface: the op inside
+        // picks completion/hover/definition, and `peer_lsp`'s own gate —
+        // not a second opinion here — decides what may be answered.
+        .lsp_call => .{ .surface = .lsp },
+        .ok, .err, .fs_ok, .fs_err, .lsp_ok, .lsp_err, .cancel => .unclassified,
     };
 }
 
@@ -434,4 +446,39 @@ test "publication: frames classify to the surface they actually address" {
     try t.expectEqual(Surface.fs_hierarchy, addressOf(3, .request, fk, fs_call.items).surface);
     // Replies are answers, never invocations.
     try t.expectEqual(Address.unclassified, addressOf(3, .request, @intFromEnum(wire.RequestKind.fs_ok), fs_call.items));
+}
+
+test "publication: the language service is an export a share must CHOOSE — never part of the legacy bundle" {
+    const gpa = t.allocator;
+
+    // The bundle every pre-publication share carried exports no language
+    // service: sharing a document must not start answering questions about
+    // it (§14.4 — "Project symbols, file reads, and workspace edits require
+    // explicit wider grants").
+    var legacy_pub = try fromSpec(gpa, 16, "parser.zig", null, .legacy);
+    defer legacy_pub.deinit(gpa);
+    try t.expect(legacy_pub.surfaceOps(.lsp) == null);
+    try t.expect(!legacy_pub.admits(.{ .surface = .lsp }, .request));
+
+    var p = try fromSpec(gpa, 16, "parser.zig", null, .{ .lsp = true });
+    defer p.deinit(gpa);
+    try t.expect(p.admits(.{ .surface = .lsp }, .request));
+
+    const bytes = try p.encode(gpa, 16);
+    defer gpa.free(bytes);
+    var got = try decode(gpa, bytes, null);
+    defer got.publication.deinit(gpa);
+    try t.expect(got.publication.surfaceOps(.lsp) != null);
+
+    // Every language question addresses the one `lsp` surface, whichever it
+    // asks; the reply kinds are answers to calls we made, never invocations.
+    var call: std.ArrayList(u8) = .empty;
+    defer call.deinit(gpa);
+    try wire.putUv(gpa, &call, 4);
+    try call.append(gpa, 2); // peer_lsp.Op.definition
+    const lk = @intFromEnum(wire.RequestKind.lsp_call);
+    try t.expectEqual(Surface.lsp, addressOf(3, .request, lk, call.items).surface);
+    call.items[call.items.len - 1] = 0; // completion
+    try t.expectEqual(Surface.lsp, addressOf(3, .request, lk, call.items).surface);
+    try t.expectEqual(Address.unclassified, addressOf(3, .request, @intFromEnum(wire.RequestKind.lsp_ok), call.items));
 }

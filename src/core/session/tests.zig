@@ -5207,3 +5207,211 @@ test "gate E (§18): revoking an export refuses the next batch and blocks the gr
     try t.expectEqual(GraphCollab.RefusalReason.authority, rig.gb.refusals.items[0].reason);
     try t.expect(rig.origin.ref(try rig.origin.resolve(rig.room1)).mapGet("after-revocation") == null);
 }
+
+// ── §14.4 gate: LSP as a granted publication export ─────────────────
+// Typed language service over the wire — never forwarded JSON-RPC. The
+// owner answers from its own language sessions through `peer_lsp.Service`;
+// the peer holds (or does not hold) the `lsp` export.
+
+const peer_lsp = @import("../peer_lsp.zig");
+const RemoteLsp = remote_fs.RemoteLsp;
+
+/// A hermetic owner-side language service: a fixed answer table, no server,
+/// no protocol. Stands in for the multi-session table `src/guest/lsp.zig`
+/// owns — this gate is about the EXPORT, not about zls.
+const FakeLanguageService = struct {
+    asked: usize = 0,
+    last: peer_lsp.Op = .completion,
+    completion: []const peer_lsp.Item = &.{},
+    definition: []const peer_lsp.Location = &.{},
+
+    pub fn answer(self: *FakeLanguageService, _: Allocator, req: peer_lsp.Request) Allocator.Error!?peer_lsp.Answer {
+        self.asked += 1;
+        self.last = req.op;
+        return switch (req.op) {
+            .completion => .{ .items = self.completion },
+            .definition => .{ .locations = self.definition },
+            else => null,
+        };
+    }
+};
+
+/// Two in-process sessions over a socketpair, the owner exporting a typed
+/// language service for one published document.
+const LspPair = struct {
+    fds: [2]i32,
+    la: FdLink,
+    lb: FdLink,
+    host: Document,
+    client: Document,
+    sa: *Session,
+    sb: *Session,
+    ch: Collab,
+    cc: Collab,
+    rl: RemoteLsp,
+
+    fn init(
+        gpa: Allocator,
+        self: *LspPair,
+        service: *FakeLanguageService,
+        grant: peer_lsp.Grant,
+        documents: []const []const u8,
+    ) !void {
+        self.fds = try socketPair();
+        self.la = .{ .fd = self.fds[0] };
+        self.lb = .{ .fd = self.fds[1] };
+        self.host = try Document.init(gpa, "host");
+        self.client = try Document.init(gpa, "client");
+        self.sa = try Session.create(gpa, self.la.link(), .server, "tok", .own, null);
+        self.sb = try Session.create(gpa, self.lb.link(), .client, "tok", .own, null);
+        self.ch = try Collab.init(gpa, self.sa, &self.host, "host");
+        self.cc = try Collab.init(gpa, self.sb, &self.client, "client");
+        self.rl = RemoteLsp.init(gpa);
+        self.ch.lsp_grant = grant;
+        self.ch.lsp_documents = .{ .names = documents };
+        self.ch.peer_lsp_service = peer_lsp.Service.init(service);
+        self.cc.remote_lsp = &self.rl;
+        var settle: usize = 0;
+        while (settle < 80) : (settle += 1) self.turn();
+    }
+
+    fn deinit(self: *LspPair, gpa: Allocator) void {
+        self.rl.deinit();
+        self.cc.deinit();
+        self.ch.deinit();
+        self.sb.destroy();
+        self.sa.destroy();
+        self.client.deinit(gpa);
+        self.host.deinit(gpa);
+    }
+
+    fn turn(self: *LspPair) void {
+        _ = self.ch.tick(0) catch {};
+        _ = self.cc.tick(0) catch {};
+        futexWaitTimed(&self.sb.out_wake, self.sb.out_wake.load(.acquire), std.time.ns_per_ms);
+    }
+
+    /// Ask one typed question and drive both ends until it settles.
+    fn ask(self: *LspPair, gpa: Allocator, req: peer_lsp.Request) requests.Error!?[]u8 {
+        const bytes = peer_lsp.encodeRequest(gpa, req) catch return null;
+        defer gpa.free(bytes);
+        const id = self.rl.request(self.sb, self.cc.base, bytes) catch return null;
+        const guard = task.nowNs() + 5 * std.time.ns_per_s;
+        while (task.nowNs() < guard) {
+            if (try self.rl.take(id)) |response| return response;
+            self.turn();
+        }
+        return null;
+    }
+};
+
+test "lsp export: a peer holding the grant gets a real completion answer over the wire, as typed items" {
+    const gpa = t.allocator;
+    var service: FakeLanguageService = .{ .completion = &.{
+        .{ .text = "parseHeader", .label = "parseHeader(bytes)", .detail = "fn", .kind = 3, .rank = 1 },
+        .{ .text = "parseBody", .kind = 3, .rank = 2 },
+    } };
+    var pair: LspPair = undefined;
+    try LspPair.init(gpa, &pair, &service, .all, &.{"parser.zig"});
+    defer pair.deinit(gpa);
+
+    const resp = (try pair.ask(gpa, .{
+        .op = .completion,
+        .document = "parser.zig",
+        .offset = 42,
+        .text = "pars",
+    })).?;
+    defer gpa.free(resp);
+
+    const reply = peer_lsp.decodeReply(resp).?;
+    try t.expectEqual(peer_lsp.Status.ok, reply.status);
+    var it = peer_lsp.items(reply.body);
+    const first = it.next().?;
+    try t.expectEqualStrings("parseHeader", first.text);
+    try t.expectEqualStrings("parseHeader(bytes)", first.label);
+    try t.expectEqual(@as(u8, 3), first.kind);
+    try t.expectEqualStrings("parseBody", it.next().?.text);
+    try t.expectEqual(@as(?peer_lsp.Item, null), it.next());
+
+    // The owner answered from ITS language sessions, and what crossed the
+    // wire is the typed vocabulary — no JSON-RPC in either direction.
+    try t.expectEqual(@as(usize, 1), service.asked);
+    try t.expectEqual(peer_lsp.Op.completion, service.last);
+    try t.expect(std.mem.indexOf(u8, resp, "jsonrpc") == null);
+    try t.expect(std.mem.indexOf(u8, resp, "textDocument/") == null);
+}
+
+test "lsp export: the same ask without the grant refuses TYPED, and the owner's language sessions are never reached" {
+    const gpa = t.allocator;
+    var service: FakeLanguageService = .{ .completion = &.{.{ .text = "parseHeader" }} };
+    var pair: LspPair = undefined;
+    try LspPair.init(gpa, &pair, &service, .none, &.{"parser.zig"});
+    defer pair.deinit(gpa);
+
+    // "You may not ask" settles now, by name — not a deadline the requester
+    // sits out, and never an empty answer that reads as "nothing found".
+    try t.expectError(error.RequestDenied, pair.ask(gpa, .{
+        .op = .completion,
+        .document = "parser.zig",
+        .offset = 42,
+        .text = "pars",
+    }));
+    try t.expectEqual(@as(usize, 0), service.asked);
+
+    // The refusal is the EXPORT, not a broken path: granting it answers the
+    // identical question over the identical wire.
+    pair.ch.lsp_grant = .all;
+    const resp = (try pair.ask(gpa, .{
+        .op = .completion,
+        .document = "parser.zig",
+        .offset = 42,
+        .text = "pars",
+    })).?;
+    defer gpa.free(resp);
+    try t.expectEqual(peer_lsp.Status.ok, peer_lsp.decodeReply(resp).?.status);
+    try t.expectEqual(@as(usize, 1), service.asked);
+}
+
+test "lsp export: a definition outside the granted document set is withheld owner-side (and logged); the in-set results still answer" {
+    const gpa = t.allocator;
+    var service: FakeLanguageService = .{ .definition = &.{
+        .{ .document = "parser.zig", .start = 10, .end = 21 },
+        .{ .document = "private.zig", .start = 0, .end = 4 },
+    } };
+    var pair: LspPair = undefined;
+    try LspPair.init(gpa, &pair, &service, .all, &.{"parser.zig"});
+    defer pair.deinit(gpa);
+
+    const resp = (try pair.ask(gpa, .{
+        .op = .definition,
+        .document = "parser.zig",
+        .offset = 12,
+        .text = "",
+    })).?;
+    defer gpa.free(resp);
+
+    const reply = peer_lsp.decodeReply(resp).?;
+    try t.expectEqual(peer_lsp.Status.ok, reply.status);
+    var it = peer_lsp.locations(reply.body);
+    const only = it.next().?;
+    try t.expectEqualStrings("parser.zig", only.document);
+    try t.expectEqual(@as(u64, 10), only.start);
+    try t.expectEqual(@as(?peer_lsp.Location, null), it.next());
+    // Withheld means the peer never learns the document EXISTS: its name is
+    // nowhere in the bytes that crossed (`peer_lsp.putLocations` writes the
+    // one line owner-side).
+    try t.expect(std.mem.indexOf(u8, resp, "private.zig") == null);
+
+    // A question ABOUT a document outside the set is refused on its own
+    // terms, without reaching the language sessions at all.
+    const before = service.asked;
+    const outside = (try pair.ask(gpa, .{
+        .op = .definition,
+        .document = "private.zig",
+        .offset = 0,
+        .text = "",
+    })).?;
+    defer gpa.free(outside);
+    try t.expectEqual(peer_lsp.Status.out_of_scope, peer_lsp.decodeReply(outside).?.status);
+    try t.expectEqual(before, service.asked);
+}

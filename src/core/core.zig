@@ -89,6 +89,7 @@ pub const hub = @import("hub.zig");
 pub const locus = @import("locus.zig");
 pub const rooted_fs = @import("rooted_fs.zig");
 pub const peer_fs = @import("peer_fs.zig");
+pub const peer_lsp = @import("peer_lsp.zig");
 pub const net = @import("net.zig");
 pub const Pick = pick.Pick;
 pub const file = @import("file.zig");

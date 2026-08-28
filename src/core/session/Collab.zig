@@ -22,7 +22,9 @@ const remote_fs_mod = @import("remote_fs.zig");
 const BlobOp = remote_fs_mod.BlobOp;
 const BlobServer = remote_fs_mod.BlobServer;
 const RemoteFs = remote_fs_mod.RemoteFs;
+const RemoteLsp = remote_fs_mod.RemoteLsp;
 const RemoteFile = remote_fs_mod.RemoteFile;
+const peer_lsp = @import("../peer_lsp.zig");
 const serveBase = remote_fs_mod.serveBase;
 
 const PartialDoc = @import("PartialDoc.zig");
@@ -100,6 +102,17 @@ blob_server: ?*BlobServer = null,
 peer_fs_root: ?*@import("../rooted_fs.zig").RootedFs = null,
 fs_grant: @import("../peer_fs.zig").Grant = .none,
 peer_fs_service: ?@import("../peer_fs.zig").Service = null,
+/// Host side: answer TYPED language questions (§14.4) about the published
+/// documents, gated per export by `lsp_grant` (default deny) — the same
+/// shape `fs_grant` gates the filesystem with, for the same reason: a
+/// language service is an export a peer holds, not a consequence of sharing
+/// a document. `lsp_documents` is the granted set the answers are confined
+/// to; `peer_lsp_service` is the owner's own language sessions.
+lsp_grant: peer_lsp.Grant = .none,
+lsp_documents: peer_lsp.DocumentSet = .{},
+peer_lsp_service: ?peer_lsp.Service = null,
+/// Client side: correlate typed language-service replies.
+remote_lsp: ?*RemoteLsp = null,
 /// Client side: correlate .peer fs replies (LIST/READ/WRITE).
 remote_fs: ?*RemoteFs = null,
 /// Client side: fold blob replies into the read-only viewer.
@@ -462,16 +475,37 @@ pub fn handleFrame(self: *Collab, frame: wire.Decoder.Decoded) !bool {
                     if (self.serveFsCall(cur)) |served| {
                         if (served) |bytes| {
                             defer gpa.free(bytes);
-                            var reply: std.ArrayList(u8) = .empty;
-                            defer reply.deinit(gpa);
-                            try wire.putUv(gpa, &reply, id);
-                            try reply.appendSlice(gpa, bytes);
-                            try self.session.post(.request, @intFromEnum(wire.RequestKind.fs_ok), self.base + 3, reply.items);
+                            try self.postAnswer(.fs_ok, id, bytes);
                         } else try self.postFailure(.fs_err, id, .unspecified);
                     } else |err| try self.postFailure(.fs_err, id, switch (err) {
                         error.NotGranted => .not_granted,
                         else => .unspecified,
                     });
+                },
+                // The typed language service: the same cycle, its own kinds.
+                // An export this peer does not hold refuses BY NAME, so the
+                // requester says "not granted" rather than sitting out a
+                // deadline for an answer that was never coming.
+                .lsp_call => {
+                    var cur: []const u8 = frame.payload;
+                    const id = wire.getUv(&cur) catch return changed;
+                    if (self.serveLspCall(cur)) |bytes| {
+                        defer gpa.free(bytes);
+                        try self.postAnswer(.lsp_ok, id, bytes);
+                    } else |err| try self.postFailure(.lsp_err, id, switch (err) {
+                        error.NotGranted => .not_granted,
+                        else => .unspecified,
+                    });
+                },
+                .lsp_ok => if (self.remote_lsp) |rl| {
+                    rl.onReply(gpa, frame.payload) catch {};
+                    changed = true;
+                },
+                .lsp_err => if (self.remote_lsp) |rl| {
+                    var cur: []const u8 = frame.payload;
+                    const id = wire.getUv(&cur) catch return changed;
+                    rl.onFailure(gpa, id, failureReason(cur));
+                    changed = true;
                 },
                 .fs_ok => if (self.remote_fs) |rf| {
                     rf.onReply(gpa, frame.payload) catch {};
@@ -506,6 +540,24 @@ fn serveFsCall(self: *Collab, req: []const u8) !?[]u8 {
     const peer_fs = @import("../peer_fs.zig");
     const root = self.peer_fs_root orelse return null;
     return try peer_fs.handleWithService(self.gpa, root, self.fs_grant, self.peer_fs_service, req);
+}
+
+/// Answer one typed language-service call from the owner's own language
+/// sessions, confined to the granted document set. `error.NotGranted` when
+/// the peer holds no `lsp` export on this publication; every other outcome
+/// (no service, a document outside the set, a malformed ask) is a TYPED
+/// status inside the reply, never a silence.
+fn serveLspCall(self: *Collab, req: []const u8) (Allocator.Error || peer_lsp.Refusal)![]u8 {
+    return peer_lsp.handle(self.gpa, self.lsp_grant, self.lsp_documents, self.peer_lsp_service, req);
+}
+
+/// Reply to a served call, mirroring its id (`uv id | response`).
+fn postAnswer(self: *Collab, kind: wire.RequestKind, id: u64, bytes: []const u8) !void {
+    var reply: std.ArrayList(u8) = .empty;
+    defer reply.deinit(self.gpa);
+    try wire.putUv(self.gpa, &reply, id);
+    try reply.appendSlice(self.gpa, bytes);
+    try self.session.post(.request, @intFromEnum(kind), self.base + 3, reply.items);
 }
 
 /// The reason trailing an `err`/`fs_err` payload past its id. Absent or

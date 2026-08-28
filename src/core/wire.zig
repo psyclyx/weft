@@ -55,7 +55,24 @@ pub const OpKind = enum(u8) { batch = 0, frontier = 1, share = 2, grant = 3, reg
 // instead of waiting out its deadline (see session/requests.zig). A peer built
 // before them ignores an unknown request kind, which degrades to exactly the
 // old behaviour — the deadline.
-pub const RequestKind = enum(u8) { call = 0, ok = 1, err = 2, cancel = 3, fs_call = 4, fs_ok = 5, fs_err = 6 };
+// lsp_call/lsp_ok/lsp_err are the TYPED language-service cycle (peer_lsp):
+// a third set of kinds for the same reason the fs set is a second one — a
+// language question never collides with an fs op-byte, and the two cycles
+// number their ids independently. A peer built before them ignores an
+// unknown request kind, so an owner that exports a language service to a
+// peer that cannot ask simply never hears from it.
+pub const RequestKind = enum(u8) {
+    call = 0,
+    ok = 1,
+    err = 2,
+    cancel = 3,
+    fs_call = 4,
+    fs_ok = 5,
+    fs_err = 6,
+    lsp_call = 7,
+    lsp_ok = 8,
+    lsp_err = 9,
+};
 /// Why a call was refused — the trailing byte of an `err`/`fs_err` payload,
 /// which was `uv id` alone before. Absent (an older responder, or a short
 /// payload) reads as `.unspecified`, the failure every requester already

@@ -9,7 +9,6 @@ const Allocator = std.mem.Allocator;
 const linux = std.os.linux;
 
 const wire = @import("weft_wire");
-const task = @import("../task.zig");
 const Document = @import("../Document.zig");
 const Session = @import("Session.zig");
 const requests = @import("requests.zig");
@@ -287,98 +286,14 @@ pub const RemoteFile = struct {
 /// over the collab request channel and collect the replies. Each reply is a
 /// `peer_fs` response (status + payload); the caller drains completed ones (a
 /// files-style plugin folds a listing into a buffer). Async by construction —
-/// no blocking round-trip on the frame thread (round-2 D1).
-pub const RemoteFs = struct {
-    gpa: Allocator,
-    /// Calls awaiting a reply, each under its deadline.
-    inflight: requests.Inflight(void) = .{},
-    /// Settled calls by id, until the caller takes them.
-    settled: std.AutoHashMapUnmanaged(u64, Outcome) = .empty,
+/// no blocking round-trip on the frame thread (round-2 D1). `req` is from
+/// `peer_fs.encodeList/Read/Write/Stat`.
+pub const RemoteFs = requests.Requester(.fs_call);
 
-    /// What a call came back as: the peer's response bytes, or the peer
-    /// saying it could not serve it, and why.
-    const Outcome = union(enum) { reply: []u8, failed: wire.FailureReason };
-
-    pub fn init(gpa: Allocator) RemoteFs {
-        return .{ .gpa = gpa };
-    }
-    pub fn deinit(self: *RemoteFs) void {
-        var it = self.settled.valueIterator();
-        while (it.next()) |v| switch (v.*) {
-            .reply => |bytes| self.gpa.free(bytes),
-            .failed => {},
-        };
-        self.settled.deinit(self.gpa);
-        self.inflight.deinit(self.gpa);
-    }
-
-    /// How long a call waits for its reply before `take` fails it.
-    pub fn setTimeout(self: *RemoteFs, ns: u64) void {
-        self.inflight.timeout_ns = ns;
-    }
-
-    /// Post a `peer_fs`-encoded request on `base+3`; returns the call id the
-    /// reply will mirror. `req` is from `peer_fs.encodeList/Read/Write/Stat`.
-    ///
-    /// An offline peer refuses here, at once
-    /// (doc/contextual-workspace-architecture.md §13.7: "remote mutation
-    /// actions are never automatically queued"). Enqueuing would put a
-    /// mutation in a buffer whose only honest fates are a silent drop or a
-    /// replay the owner never authorized; the caller gets a reason it can
-    /// show instead of a deadline it must sit out.
-    pub fn request(self: *RemoteFs, session: *Session, base: u64, req: []const u8) !u64 {
-        if (session.liveness() == .offline) return error.PeerOffline;
-        const id = try self.inflight.issue(self.gpa, {});
-        var p: std.ArrayList(u8) = .empty;
-        defer p.deinit(self.gpa);
-        try wire.putUv(self.gpa, &p, id);
-        try p.appendSlice(self.gpa, req);
-        try session.post(.request, @intFromEnum(wire.RequestKind.fs_call), base + 3, p.items);
-        return id;
-    }
-
-    /// A reply frame arrived (`uv id | response`): store the response by id.
-    pub fn onReply(self: *RemoteFs, gpa: Allocator, payload: []const u8) !void {
-        var cur: []const u8 = payload;
-        const id = wire.getUv(&cur) catch return;
-        const owned = try gpa.dupe(u8, cur);
-        errdefer gpa.free(owned);
-        try self.put(gpa, id, .{ .reply = owned });
-    }
-
-    /// The peer cannot serve `id` (an `fs_err` frame), for `reason`. The
-    /// caller takes the failure now rather than waiting out its deadline.
-    pub fn onFailure(self: *RemoteFs, gpa: Allocator, id: u64, reason: wire.FailureReason) void {
-        self.put(gpa, id, .{ .failed = reason }) catch {};
-    }
-
-    fn put(self: *RemoteFs, gpa: Allocator, id: u64, outcome: Outcome) !void {
-        const gop = try self.settled.getOrPut(gpa, id);
-        if (gop.found_existing) switch (gop.value_ptr.*) {
-            .reply => |bytes| gpa.free(bytes),
-            .failed => {},
-        };
-        gop.value_ptr.* = outcome;
-        _ = self.inflight.settle(id);
-    }
-
-    /// Take the completed response for `id` (owned; caller frees), or null
-    /// while it is still in flight. A peer that refused the call, or a
-    /// deadline that passed, is an error — never an endless wait. A refusal
-    /// the peer attributed to a missing grant surfaces as `RequestDenied`,
-    /// so a caller can say "not granted" rather than "something failed".
-    pub fn take(self: *RemoteFs, id: u64) requests.Error!?[]u8 {
-        if (self.settled.fetchRemove(id)) |kv| switch (kv.value) {
-            .reply => |bytes| return bytes,
-            .failed => |reason| return switch (reason) {
-                .not_granted => error.RequestDenied,
-                else => error.RequestFailed,
-            },
-        };
-        if (self.inflight.timedOut(id, task.nowNs())) return error.RequestTimeout;
-        return null;
-    }
-};
+/// Client-side typed language service (`peer_lsp`): the same requester, on
+/// the same channel, under its own request kind — a language question and a
+/// file op are separate cycles with separately numbered ids.
+pub const RemoteLsp = requests.Requester(.lsp_call);
 
 // ── Editable partial checkout (stemma hole-bases): host serving side ─
 // Host: a compacted document's base is immutable under edits; ops
