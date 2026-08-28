@@ -124,6 +124,10 @@ pub const Context = struct {
     /// System-scoped semantic identity and provider registries. Optional for
     /// small/headless embeddings that expose only the text command surface.
     semantic: ?*@import("semantic.zig").Services = null,
+    /// WHERE the outermost dispatch in flight was invoked from
+    /// (`doc/place.md`), or null between dispatches. Set and cleared by `run`.
+    /// Not a user-settable field: it is a bracket, like `principal`.
+    dispatch_place: ?@import("place.zig").Place = null,
     /// Turns a `Place` into an OS directory for a local effect
     /// (`doc/place.md` §2.3). Installed by the shell, which owns the roots it
     /// opened; `null` in headless embeddings, where only the degenerate
@@ -204,6 +208,16 @@ pub const Context = struct {
             const bound = self.buffers.resolve(ref) orelse return .process;
             return bound.place;
         }
+        // Set for the duration of a dispatch by `run`, so a producer that
+        // focuses its own output entry mid-command cannot move the ground under
+        // an effect the user asked for somewhere else.
+        if (self.dispatch_place) |pinned| return pinned;
+        return self.placeNow();
+    }
+
+    /// `place` without the dispatch pin — the live reading, which is what the
+    /// pin is taken FROM. Separate so `run` can take it exactly once.
+    fn placeNow(self: *Context) Buffers.Place {
         if (self.semantic) |services| {
             if (services.workingTarget(self.head)) |maybe_pin| {
                 if (maybe_pin) |pin| return .{
@@ -669,6 +683,17 @@ pub const RunError = error{UnknownCommand} || anyerror;
 /// runs.
 pub fn run(commands: *const Commands, ctx: *Context, name: []const u8, args: []const Value) RunError!Value {
     const cmd = commands.resolve(name) orelse return error.UnknownCommand;
+    // Pin WHERE this interaction came from for the whole nesting
+    // (`doc/place.md`). Only the OUTERMOST dispatch takes the reading: a
+    // producer routinely focuses its own output entry before spawning — the
+    // `*grep*` entry, say — and without this the spawn would inherit the place
+    // of the last thing that ran there instead of the place the user invoked it
+    // from. Nested `run` calls see it already set and leave it alone.
+    const outermost = ctx.dispatch_place == null;
+    if (outermost) ctx.dispatch_place = ctx.placeNow();
+    defer if (outermost) {
+        ctx.dispatch_place = null;
+    };
     return cmd.handler(ctx, cmd.data, args);
 }
 

@@ -239,6 +239,7 @@ pub const Editor = struct {
             .directories = .{
                 .context = &self.session,
                 .open = app_session.Session.openLocalDirectoryOpaque,
+                .place_for = app_session.Session.placeForFileOpaque,
             },
         };
         try app_buffers_cmds.registerCommands(gpa, self.commands, &self.buffer_commands);

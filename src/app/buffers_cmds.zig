@@ -16,6 +16,14 @@ const AttachDeps = providers.AttachDeps;
 pub const DirectoryOpener = struct {
     context: *anyopaque,
     open: *const fn (*anyopaque, *core.command.Context, []const u8) anyerror!bool,
+    /// WHERE a local file at this path belongs (`doc/place.md`) — its project
+    /// root, published as a container. Null when the file has no project, and
+    /// the entry keeps the degenerate place.
+    ///
+    /// On this seam rather than in core because only the session that opened a
+    /// root may say what it is: core inventing the walk would put it back in
+    /// the business of joining paths.
+    place_for: *const fn (*anyopaque, *core.command.Context, []const u8) ?core.Place,
 };
 
 pub const Context = struct {
@@ -77,6 +85,15 @@ pub fn openBufferHandler(ctx: *core.command.Context, data: ?*anyopaque, args: []
             error.FileNotFound => try editor.adoptPath(ctx.gpa, spec),
             else => |e| return e,
         };
+        // A file's place comes from its OWN path, never from whatever was
+        // focused when it was opened (`doc/place.md` §2.1). This is where the
+        // creation-time inheritance every entry starts with is replaced by the
+        // real answer — and why opening a file from project A's tool buffer
+        // still lands the file in project B if that is where it lives.
+        if (command_context.directories) |directories| {
+            if (directories.place_for(directories.context, ctx, spec)) |p|
+                ctx.buffers.setPlace(id, p);
+        }
     }
     try attachProviders(deps, buf);
     try ctx.buffers.switchTo(ctx.gpa, id, ctx.head, ctx.keymap);

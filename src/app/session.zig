@@ -153,6 +153,9 @@ pub const Session = struct {
         self.menu_overlay = .{};
         self.cmd_ctx = self.system.contextFor(&self.head);
         self.cmd_ctx.entries = .{ .context = self, .open = openWorkspaceEntryOpaque };
+        // This session opened the roots, so it is the only party entitled to
+        // say what they are called (`doc/place.md` §2.3).
+        self.cmd_ctx.realizer = self.realizer();
         try ui_mesh.declareSlots(&self.system.container);
         try ui_mesh.bindDefaultStatusline(&self.system.container);
         // Capability consumers — written against capability names only.
@@ -190,7 +193,16 @@ pub const Session = struct {
     /// resolver every other locus uses. `false` means the platform provider
     /// did not classify the path as a directory, so an app shell may continue
     /// with its ordinary file-opening behavior.
-    pub fn openLocalDirectory(self: *Session, ctx: *core.command.Context, path: []const u8) anyerror!bool {
+    /// Find-or-publish the directory container for `path`, optionally focusing
+    /// it. Returns null when `path` is not an openable directory.
+    ///
+    /// The `focus` parameter exists because a PLACE needs this container
+    /// without displaying it: opening a file has to resolve the project the
+    /// file sits in (`doc/place.md`) and must not steal the view to do it. The
+    /// publication transaction, including its rollback, is identical either
+    /// way — which is why this is a parameter rather than a second copy of the
+    /// dedupe logic that would be free to drift.
+    fn ensureLocalDirectory(self: *Session, ctx: *core.command.Context, path: []const u8, focus: bool) anyerror!?semantic.target.Located {
         const system = self.filesystem_system;
         if (ctx.semantic != &system.semantic or ctx.filesystems != &system.filesystems)
             return error.SemanticUnavailable;
@@ -202,7 +214,7 @@ pub const Session = struct {
         // Reusing an old publication before this check would mistake a
         // replacement at a renamed path for the originally pinned object.
         const root = self.filesystem_provider.acquireRoot(resolved_path) catch |err| return switch (err) {
-            error.NotFound, error.NotDirectory, error.Unsupported => false,
+            error.NotFound, error.NotDirectory, error.Unsupported => null,
             else => err,
         };
         var root_owned = true;
@@ -232,8 +244,14 @@ pub const Session = struct {
             };
             self.filesystem_provider.releaseRoot(root);
             root_owned = false;
-            try focusDirectoryTarget(ctx, existing.publication.ref);
-            return true;
+            // Read the identity out before focusing: `existing` points into a
+            // list focusing is entitled to append to.
+            const located: semantic.target.Located = .{
+                .target = existing.publication.ref,
+                .revision = existing.publication.revision,
+            };
+            if (focus) try focusDirectoryTarget(ctx, located.target);
+            return located;
         }
 
         try self.directory_targets.ensureUnusedCapacity(ctx.gpa, 1);
@@ -266,8 +284,103 @@ pub const Session = struct {
         // transaction back if handler admission or focus fails.
         errdefer while (self.directory_targets.items.len > first_new_target)
             self.closeDirectoryTarget(self.directory_targets.items.len - 1);
-        try focusDirectoryTarget(ctx, publication.ref);
-        return true;
+        if (focus) try focusDirectoryTarget(ctx, publication.ref);
+        return .{ .target = publication.ref, .revision = publication.revision };
+    }
+
+    /// Open (and focus) a local directory. The shape `DirectoryOpener` expects.
+    pub fn openLocalDirectory(self: *Session, ctx: *core.command.Context, path: []const u8) anyerror!bool {
+        return (try self.ensureLocalDirectory(ctx, path, true)) != null;
+    }
+
+    // ── Places (doc/place.md) ────────────────────────────────────────
+
+    /// Dominating markers that identify a project root — the VCS top. A
+    /// worktree or submodule makes `.git` a FILE rather than a directory, so
+    /// mere existence is the test, not "is a dir".
+    const project_markers = [_][]const u8{ ".git", ".jj", ".hg", ".svn", ".bzr" };
+
+    /// The nearest ancestor of `path` (a file) holding a project marker, as a
+    /// borrowed subslice of `path`. Null when no ancestor has one — an
+    /// unmarked file gets no project rather than a guessed one, because
+    /// guessing here would silently place an effect in a directory the user
+    /// never called a project.
+    ///
+    /// Blocking filesystem work, and deliberately so: this runs when a file is
+    /// OPENED, never on the dispatch path. `Ctx.capture` is provably
+    /// non-allocating and could not host this walk even if it wanted to.
+    fn projectRootOf(gpa: std.mem.Allocator, path: []const u8) ?[]const u8 {
+        var probe: [std.fs.max_path_bytes]u8 = undefined;
+        var end = std.mem.lastIndexOfScalar(u8, path, '/') orelse return null;
+        while (true) {
+            const dir = if (end == 0) "/" else path[0..end];
+            for (project_markers) |marker| {
+                const base = if (std.mem.eql(u8, dir, "/")) "" else dir;
+                const joined = std.fmt.bufPrint(&probe, "{s}/{s}", .{ base, marker }) catch continue;
+                if (core.file.statKind(gpa, joined) != .none) return dir;
+            }
+            if (end == 0) return null;
+            end = std.mem.lastIndexOfScalar(u8, path[0..end], '/') orelse 0;
+        }
+    }
+
+    /// The place a local file at `path` belongs to: its project root published
+    /// as a directory container. Null when the file has no project, leaving the
+    /// entry on the degenerate `.process` place.
+    pub fn placeForFile(self: *Session, ctx: *core.command.Context, path: []const u8) ?core.Place {
+        const resolved = std.fs.path.resolve(ctx.gpa, &.{path}) catch return null;
+        defer ctx.gpa.free(resolved);
+        const root = projectRootOf(ctx.gpa, resolved) orelse return null;
+        // Publish WITHOUT focus: resolving where a file lives must not move the
+        // user's view to the directory it lives in.
+        const located = (self.ensureLocalDirectory(ctx, root, false) catch return null) orelse return null;
+        return .{
+            .container = .{
+                // `.here` while every locus is local. When a remote-attach head
+                // carries a real one, this is the line that reads it.
+                .locus = .here,
+                .ref = located.target,
+                .revision = located.revision,
+            },
+        };
+    }
+
+    /// The OS directory a place names, or null when this session is not the
+    /// authority for it. The `place.Realizer` contract: bytes are BORROWED
+    /// (they belong to the `directory_targets` entry) and the caller must not
+    /// retain them.
+    ///
+    /// Validates the descriptor revision the same way every other consumer of
+    /// these publications does, so a republished directory is not silently
+    /// answered from a stale retained path.
+    pub fn realizePlace(self: *Session, p: core.Place) ?[]const u8 {
+        const container = switch (p) {
+            .process => return null, // answered by construction, never asked
+            .container => |c| c,
+        };
+        if (container.locus != .here) return null;
+        for (self.directory_targets.items) |entry| {
+            if (!entry.publication.ref.eql(container.ref)) continue;
+            const descriptor = self.filesystem_system.semantic.targets.get(entry.publication.ref) orelse return null;
+            if (descriptor.revision != entry.publication.revision) return null;
+            return entry.path;
+        }
+        return null;
+    }
+
+    fn realizePlaceOpaque(raw: *anyopaque, p: core.Place) ?[]const u8 {
+        const self: *Session = @ptrCast(@alignCast(raw));
+        return self.realizePlace(p);
+    }
+
+    /// This session as the authority that turns its own places into paths.
+    pub fn realizer(self: *Session) core.place.Realizer {
+        return .{ .ctx = self, .realizeFn = Session.realizePlaceOpaque };
+    }
+
+    pub fn placeForFileOpaque(raw: *anyopaque, ctx: *core.command.Context, path: []const u8) ?core.Place {
+        const self: *Session = @ptrCast(@alignCast(raw));
+        return self.placeForFile(ctx, path);
     }
 
     fn ensureDirectoryParent(self: *Session, index: usize) !?semantic.target.Located {

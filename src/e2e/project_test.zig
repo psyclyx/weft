@@ -1997,3 +1997,54 @@ test "e2e/git: no verb reads a rendered byte range to choose its target" {
     try t.expectEqual(@as(usize, 2), std.mem.count(u8, src, "nodeAt("));
     try t.expect(std.mem.indexOf(u8, src, "nodeAt(weft.cursor())") == null);
 }
+
+// ── Places: two projects open at once (doc/place.md) ──────────────────
+
+test "e2e/place: grep searches the focused file's project, not the launch directory" {
+    const gpa = t.allocator;
+    var proj: Project = undefined;
+    try proj.init(gpa);
+    defer proj.deinit();
+
+    var ed: Editor = undefined;
+    try Editor.init(gpa, &ed);
+    defer ed.deinit();
+    try loadWebIde(&ed);
+
+    // Two sibling projects, each marked by a VCS top, each containing the same
+    // token in a differently-named file. The editor's own working directory is
+    // their PARENT — the launch directory — so a search that ignores places
+    // finds both files, and one that honours them finds exactly one.
+    for ([_][]const u8{
+        "mkdir -p proj-a/.git proj-b/.git",
+        "printf 'const SHARED = 1;\\n' > proj-a/alpha.js",
+        "printf 'const SHARED = 2;\\n' > proj-b/beta.js",
+    }) |cmd| {
+        const out = try proj.oracle(cmd);
+        gpa.free(out);
+    }
+
+    // Open a file in A. Its place comes from its own path, not from focus.
+    ed.runStr("open", "proj-a/alpha.js");
+    ed.runStr("grep", "SHARED");
+    try t.expect(drainToolContains(&ed, "*grep*", "alpha.js"));
+    {
+        const results = h.toolText(&ed, "*grep*") orelse return error.NoGrepBuffer;
+        defer gpa.free(results);
+        // THE GATE: project B's file is not in project A's results, even though
+        // it is a sibling of the directory weft was launched in.
+        try t.expect(std.mem.indexOf(u8, results, "beta.js") == null);
+    }
+
+    // Open a file in B and search again. The SAME `*grep*` entry is re-targeted
+    // at the new place — a reused tool entry is about where it was last run,
+    // not where it was created.
+    ed.runStr("open", "proj-b/beta.js");
+    ed.runStr("grep", "SHARED");
+    try t.expect(drainToolContains(&ed, "*grep*", "beta.js"));
+    {
+        const results = h.toolText(&ed, "*grep*") orelse return error.NoGrepBuffer;
+        defer gpa.free(results);
+        try t.expect(std.mem.indexOf(u8, results, "alpha.js") == null);
+    }
+}

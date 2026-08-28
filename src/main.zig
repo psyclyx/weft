@@ -356,6 +356,7 @@ pub fn main(init: std.process.Init) !void {
         .directories = .{
             .context = &session,
             .open = Session.openLocalDirectoryOpaque,
+            .place_for = Session.placeForFileOpaque,
         },
     };
     try buffers_cmds.registerCommands(gpa, &session.system.commands, &buffer_command_context);
