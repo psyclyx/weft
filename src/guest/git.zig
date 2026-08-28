@@ -701,6 +701,17 @@ fn focusedSession() ?*RepoSession {
     return null;
 }
 
+/// The session already open for `root`, or null. The find half of
+/// `sessionFor`, without the mint -- so a caller can prefer "the session for
+/// where I am" without that preference itself opening a repository.
+fn openSessionFor(root: []const u8) ?*RepoSession {
+    if (root.len == 0) return null;
+    for (sessions[0..session_count]) |*s| {
+        if (std.mem.eql(u8, s.root(), root)) return s;
+    }
+    return null;
+}
+
 /// Find-or-mint the session for `root`, taking the next free instance name.
 /// Past the cap we echo and refuse rather than silently reusing a session that
 /// belongs to another repository.
@@ -759,6 +770,16 @@ fn route(kind: Route) ?*RepoSession {
     // into a second repository, and it must open one from a git buffer too.
     if (kind == .repo) return sessionFor(activeRoot());
     if (focusedSession()) |s| return s; // a git buffer names its own session
+    // Then a session for the place we are actually in, if one is already open.
+    // Falling straight through to `cur` meant the MOST RECENT session won, and
+    // "most recent" tracks the last thing you touched anywhere — so a git
+    // command run from a file in one repository routinely acted on another.
+    // Same rung, same reason, as `weft.Instances.current`'s place link.
+    //
+    // Deliberately a lookup and not `sessionFor`: this must not MINT a session
+    // where it previously did not, which would change when the cap is reached
+    // and when a second repository silently opens.
+    if (openSessionFor(activeRoot())) |s| return s;
     return if (session_count == 0) sessionFor(activeRoot()) else cur;
 }
 

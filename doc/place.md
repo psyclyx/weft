@@ -446,7 +446,7 @@ reports its creator's place, not the focused one.
 **Wave 2 — Realization and cwd.** The gated place→cwd resolver; the five spawn
 sites read the ambient place; job structs carry it, captured at spawn. Honest
 refusal for non-realizable places. Gates: grep, build and run act on project B
-while weft was launched in A; git's `cd '{s}'` string is deleted; a peer place
+while weft was launched in A; a peer place
 refuses with a message naming it.
 
 **Wave 3 — Environment.** The `env-for` provider slot, revision-stamped,
@@ -622,6 +622,15 @@ two-second production join were busy-waiting on `spinLoopHint`. It now measures
 work, in the process its baseline came from, and skips honestly when a
 calibration probe says the box is not in the state the baseline was recorded
 in.
+
+**One Wave-2 gate was not met, and is written down rather than quietly
+dropped.** git's `cd '<root>'` shell guard survives. With routing now
+preferring the session for the place you are in, it is belt-and-braces rather
+than the mechanism -- but it is still a SECOND answer to "where does this
+run", and `.carried` routes can still name a session that is not the
+dispatching place. Removing it wants a proof that every route agrees with the
+place, which is a smaller and more honest task than it looked before routing
+was fixed.
 
 **57 gates** were added, each one verified to fail without the change it
 guards. `git diff main..place-arc | grep '^+test "'` is the list.
