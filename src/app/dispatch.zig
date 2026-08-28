@@ -23,8 +23,8 @@
 //! NOT migrated to PAIRED TRANSIENTS this pass (deliberately — see
 //! `ctx.zig`'s module doc): guest-initiated `weft.setMode` (every plugin's
 //! OWN direct menu entry — `git-push-menu`/`git-pull-menu`/`git-fetch-menu`
-//! (sticky), `git-reset-menu`, vim's
-//! `op-pending`/`op-to`, helix's `helix-op`, dired's `dired-confirm`) stays
+//! (sticky), `git-reset-menu`, vim's `op-pending`/`op-to`, helix's
+//! `helix-op`, dired's `dired-confirm`) stays
 //! on the legacy `Head.menu_return` table (not `Head.transient_stack`),
 //! which therefore CANNOT be deleted — it is still the only record for
 //! those. Task #19 item 3 (the POLICY DOOR) is a separate axis from this:
