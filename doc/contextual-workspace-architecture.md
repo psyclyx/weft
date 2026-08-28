@@ -1604,14 +1604,23 @@ Resolved in revision 2 (arguments and receipts in `cwa-review.md`):
     the shrinking CI allowlist (§17); the e2e harness runs both profiles
     until each area's cutover.
 
+Landed since (waves H and I): the viewport attribute set (§7) and the
+placement-hint vocabulary with its default policy table (§9.4) — wave H;
+render-embed and editable-field, the first two depths of §11.8 embedding,
+compositing through the annotation seam rather than a nested renderer — wave
+I. Postures (§10.4) landed as the derived-from-entry-capability surface
+(`weft.posture()` / `weft.restingPosture`), with capture still awaiting a
+consumer beyond the round-trip gate.
+
 Remaining open, in rough order of urgency:
 
-1. The exact viewport attribute set (§7) and the posture negotiation details
-   between presenters and grammars (§10.4).
-2. The placement-hint vocabulary and the default policy table (§9.4).
-3. The sub-editor depth of embedding (§11.8): input-state scoping and
-   history composition for nested editable resources.
-4. The scene-stream export contract for thin heads (§13.4).
+1. The sub-editor depth of embedding (§11.8): input-state scoping and
+   history composition for nested editable resources — depths 1-2 landed,
+   this one is deferred and nothing above forecloses it.
+2. The scene-stream export contract for thin heads (§13.4).
+3. Query-as-resource: a reified query as a durable, designatable embed
+   target (§5.3, §11.8) — named, not yet exercised by a real embed.
+4. A terminal/PTY package (§5.3), unbuilt.
 
 The substrate and configuration companions exist (`substrate.md`,
 `configuration.md`); their own open questions are listed there.
