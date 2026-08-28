@@ -52,7 +52,7 @@ weft.bind("helix-normal", "SPC f s", "save");
 weft.bind("helix-normal", "SPC f r", "project-recent"); // recent files
 weft.bind("helix-normal", "SPC f d", "files");
 weft.bind("helix-normal", "SPC b b", "buf-pick");
-weft.bind("helix-normal", "SPC b d", "buffer-close");
+weft.bind("helix-normal", "SPC b d", "close");
 weft.bind("helix-normal", "SPC b n", "buffer-next");
 weft.bind("helix-normal", "SPC g g", "git-status");
 weft.bind("helix-normal", "SPC g i", "git-init"); // start version control (git init)

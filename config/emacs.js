@@ -39,7 +39,7 @@ weft.bind("emacs", "C-x C-c", "quit"); //        save-buffers-kill-terminal
 weft.bind("emacs", "C-x C-r", "project-recent"); // recentf
 weft.bind("emacs", "C-x b", "buf-pick"); //      switch-to-buffer
 weft.bind("emacs", "C-x C-b", "buf-pick"); //    list-buffers
-weft.bind("emacs", "C-x k", "buffer-close"); //  kill-buffer
+weft.bind("emacs", "C-x k", "close"); //  kill-buffer
 weft.bind("emacs", "C-x 2", "window-split"); //  split-window-below
 weft.bind("emacs", "C-x 3", "window-vsplit"); // split-window-right
 weft.bind("emacs", "C-x 0", "window-close"); //  delete-window

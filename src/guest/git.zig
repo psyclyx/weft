@@ -345,6 +345,7 @@ const cmds = [_]Cmd{
     .{ .name = "git-fixup", .handler = gitFixup },
     .{ .name = "git-squash", .handler = gitSquash },
     // The draft entry's own offers — they re-seat the draft under point.
+    .{ .name = "git-draft-close", .handler = gitDraftClose, .route = .carried },
     .{ .name = "git-draft-amend", .handler = gitDraftAmend, .route = .carried },
     .{ .name = "git-draft-reword", .handler = gitDraftReword, .route = .carried },
     .{ .name = "git-draft-fixup", .handler = gitDraftFixup, .route = .carried },
@@ -466,6 +467,9 @@ export fn init() void {
     // a draft, and `save` in it resolves here instead of to a file write — so
     // `:w`, `SPC f s`, and the palette's `std.persistence.save` all commit it.
     weft.provide("save", .{ .tool = draft_tool }, "git-commit-save", 10);
+    // A written draft has no file to recover it from, so closing it asks first
+    // — the same `close` action the workspace's own keys resolve.
+    weft.provide("close", .{ .tool = draft_tool }, "git-draft-close", 10);
     // What else a draft affords is PUBLISHED, like every other `plugin.git.*`
     // intention (see publishOffers) — one namespace, one plane.
 
@@ -581,6 +585,7 @@ export fn init() void {
     // by typing, like the todo `git rebase -i` would have opened, and saving it
     // hands it to git through the same sequence editor.
     weft.provide("save", .{ .tool = todo_tool }, "git-rebase-save", 10);
+    weft.provide("close", .{ .tool = todo_tool }, "git-draft-close", 10);
 
     // A shared read-only view mode for the show/log/stash buffers (own their own
     // buffers, so git's mutating keys never fire against a stale model). Like
@@ -734,9 +739,11 @@ fn nameTaken(name: []const u8) bool {
 /// Which session this command is about.
 fn route(kind: Route) ?*RepoSession {
     if (kind == .carried) return cur;
+    // `.repo` asks the LOCUS, never what is focused: that is the whole door
+    // into a second repository, and it must open one from a git buffer too.
+    if (kind == .repo) return sessionFor(activeRoot());
     if (focusedSession()) |s| return s; // a git buffer names its own session
-    if (kind == .repo or session_count == 0) return sessionFor(activeRoot());
-    return cur;
+    return if (session_count == 0) sessionFor(activeRoot()) else cur;
 }
 
 /// The repository root the FOCUSED buffer belongs to: the nearest ancestor
@@ -2501,7 +2508,7 @@ fn gatherAfterPatch(flags: []const u8, also_worktree: bool) void {
 // question was answered. No mode of git's own stands between the two.
 
 /// Which question a pick answers.
-const Confirm = enum(u32) { discard = 1, staged = 2 };
+const Confirm = enum(u32) { discard = 1, staged = 2, close = 3 };
 
 /// Ask, safe answer first, so accepting the leading candidate changes nothing.
 /// The id carries the session as well as the question, exactly as a fill token
@@ -2543,7 +2550,20 @@ export fn on_pick_accept(pick_id: u32) void {
         .discard => gitDiscardDo(),
         // The staged command is composed from refs and OIDs — durable.
         .staged => gatherAfterSeq(cur.confirm_cmd[0..cur.confirm_len]),
+        // The entry the question was asked in is still the active one.
+        .close => weft.run("buffer-close"),
     }
+}
+
+/// `close` in a draft or a rebase plan: its text is written work with no file
+/// behind it, so dropping it ASKS. An empty one has nothing to lose and goes.
+fn gitDraftClose() void {
+    const text = weft.slice(0, weft.byteLen());
+    if (std.mem.trim(u8, text, " \t\r\n").len == 0) {
+        weft.run("buffer-close");
+        return;
+    }
+    confirmPick(.close, "discard this draft?");
 }
 
 // ── Show / cherry-pick / revert / reset on the commit under point ───────────

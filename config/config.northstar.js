@@ -107,8 +107,8 @@ weft.bind("normal", "SPC f d", "files");
 
 // SPC b — buffers
 weft.bind("normal", "SPC b b", "buf-pick");
-weft.bind("normal", "SPC b d", "buffer-close");
-weft.bind("normal", "SPC b k", "buffer-close");
+weft.bind("normal", "SPC b d", "close");
+weft.bind("normal", "SPC b k", "close");
 weft.bind("normal", "SPC b n", "buffer-next");
 weft.bind("normal", "SPC b s", "save");
 weft.bind("normal", "SPC b N", "buf-scratch");

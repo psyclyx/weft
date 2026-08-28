@@ -48,7 +48,7 @@ function leaderMap(m) {
   weft.bind(m, "SPC f r", "project-recent"); // recent files
   weft.bind(m, "SPC f d", "files");
   weft.bind(m, "SPC b b", "buf-pick");
-  weft.bind(m, "SPC b d", "buffer-close");
+  weft.bind(m, "SPC b d", "close");
   weft.bind(m, "SPC b n", "buffer-next");
   weft.bind(m, "SPC g g", "git-status");
   weft.bind(m, "SPC g i", "git-init"); // start version control (git init)

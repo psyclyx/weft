@@ -585,6 +585,13 @@ pub fn install(gpa: std.mem.Allocator, commands: *command.Commands, keymap: *@im
     try command.registerAction(gpa, commands, actions, "save", .pick);
     try actions.provide(.{ .action = "save", .command = "save-file", .owner = "core" });
 
+    // Retiring an entry is an ACTION too, for the same reason `save` is: what a
+    // tool's entry is worth is the tool's question. The default provider drops
+    // it (refusing an unsaved file); a projection whose text is unrecoverable —
+    // a commit draft — provides its own and asks first.
+    try command.registerAction(gpa, commands, actions, "close", .pick);
+    try actions.provide(.{ .action = "close", .command = "buffer-close", .owner = "core" });
+
     // Input models express leaving a transient/tool locus as an intent. Vim's
     // `q` is one such mapping; another editor can choose another key, and a
     // more specific provider can override this buffer-history implementation.

@@ -3,13 +3,10 @@
 //! the real plugin through real keys/commands against real on-disk repos,
 //! the same way the git spine in project_test.zig does.
 //!
-//! HONESTY NOTE: this gate suite is written against the git rework's target
-//! shape, not today's shipped `src/guest/git.zig`. It REQUIRES four sibling
-//! branches (identity rework, per-repo session isolation, offer-based
-//! dispatch replacing locked modes, and the commit-draft-as-ordinary-entry
-//! rework) that have not landed on this branch. Each gate below states,
-//! at its failing assertion, exactly which sibling capability is missing.
-//! Once those land, these gates should go green with no further edits here.
+//! Each gate drives the capability the rework was for: per-repository session
+//! isolation (G1), identity-not-byte-range targeting (G2), no locked tool
+//! modes (G3), and the commit draft as an ordinary entry whose save commits
+//! and whose close asks (G4).
 
 const std = @import("std");
 const t = std.testing;
@@ -67,24 +64,29 @@ test "e2e/git-gates: G1 two repos stay isolated and both stay open" {
     ed.press("g", ""); // git-refresh
     try t.expect(drainToolContains(&ed, "*git*", "a.txt"));
 
-    // Open repo B's git view WITHOUT losing repo A's — the gate itself. Today
-    // `*git*` is a hardcoded module-global singleton buffer name
-    // (src/guest/git.zig `buf_name`), so opening repo B reuses/overwrites the
-    // SAME buffer: there is no second, independently addressable git view.
-    // The sibling rework (per-repo session isolation) must give repo B its
-    // own instanced buffer (e.g. `*git<2>*`) so both stay open side by side.
+    // Open repo B's git view WITHOUT losing repo A's — the gate itself. A
+    // repository is a SESSION with its own instanced buffer, so repo B lands
+    // in `*git:2*` and repo A's projection is still there, untouched.
     const root_b = try proj.path("repo-b");
     defer gpa.free(root_b);
     try chdirTo(root_b);
     ed.run("git-status");
-    try t.expect(drainToolContains(&ed, "*git*", "Branch:"));
+    try t.expect(drainToolContains(&ed, "*git:2*", "Branch:"));
+    try t.expect(ed.buffers.findByName("*git*") != null);
+    {
+        const first = h.toolText(&ed, "*git*") orelse return error.NoFirstGitBuffer;
+        defer gpa.free(first);
+        try t.expect(std.mem.indexOf(u8, first, "a.txt") != null); // repo A's own
+        try t.expect(std.mem.indexOf(u8, first, "b.txt") == null);
+    }
 
-    // PENDING (needs per-repo session isolation): repo A's view must still
-    // exist as its own buffer, distinct from the one now showing repo B.
-    try t.expect(ed.buffers.findByName("*git<2>*") != null);
-
-    // Staging in repo B must never touch repo A on disk, regardless of the
-    // buffer-identity gap above — this half of the gate already holds today.
+    // Staging in repo B must never touch repo A on disk.
+    {
+        const out = try proj.oracle("cd repo-b && printf 'beta2\\n' >> b.txt");
+        gpa.free(out);
+    }
+    ed.press("g", "");
+    try t.expect(drainToolContains(&ed, "*git:2*", "b.txt"));
     ed.press("S", ""); // git-stage-all in repo B
     try t.expect(drainUntilOracle(&proj, &ed, "cd repo-b && git diff --cached --name-only", "b.txt"));
     const staged_a = try proj.oracle("cd repo-a && git diff --cached --name-only");
@@ -92,18 +94,14 @@ test "e2e/git-gates: G1 two repos stay isolated and both stay open" {
     try t.expectEqualStrings("", staged_a);
 }
 
-// ── GATE G2: a stale rendered hunk never gets staged after an external
-// change ──
+// ── GATE G2: a stale rendered hunk never gets staged after a render shift ──
 //
-// doc §2.4/§18: "No rendered row, byte range, or parsed display string
-// serves as durable domain identity" and "Revision changes between
-// resolution and invocation produce no mutation." `src/guest/git.zig` today
-// tracks hunks by rendered byte range (`r_start`/`r_end`) with a heuristic
-// `captureIdentity`/`findIdentityOffset` restore — exactly the receipt kind
-// §2.4 calls disease. This drives point onto a real hunk, shifts the file
-// out from under it, refreshes, and stages — the result must be the
-// re-resolved hunk (or a visible refusal), never whatever now sits at the
-// stale byte range.
+// doc §2.4/§18: "No rendered row, byte range, or parsed display string serves
+// as durable domain identity" and "Revision changes between resolution and
+// invocation produce no mutation." Point is put on a real hunk, then a whole
+// SECTION appears above it, so every rendered offset in the projection moves.
+// After the refresh, staging must act on the hunk that was named — not on
+// whatever now occupies the byte range it used to sit at.
 test "e2e/git-gates: G2 stage-hunk after an external shift never stages the wrong lines" {
     const gpa = t.allocator;
     var proj: Project = undefined;
@@ -119,9 +117,9 @@ test "e2e/git-gates: G2 stage-hunk after an external shift never stages the wron
         "git init -q -b main",
         "git config user.email e2e@weft.test",
         "git config user.name weft-e2e",
-        "printf 'one\\ntwo\\nTHREE\\nfour\\nfive\\n' > f.txt && git add f.txt && git commit -q -m base",
-        // The one unstaged hunk: THREE -> THREE_CHANGED.
-        "sed -i 's/THREE/THREE_CHANGED/' f.txt",
+        "seq 1 40 | sed 's/^/line/' > f.txt && git add f.txt && git commit -q -m base",
+        // The one unstaged hunk: line30 -> THREE_CHANGED.
+        "sed -i 's/^line30$/THREE_CHANGED/' f.txt",
     }) |cmd| {
         const out = try proj.oracle(cmd);
         gpa.free(out);
@@ -131,8 +129,8 @@ test "e2e/git-gates: G2 stage-hunk after an external shift never stages the wron
     try t.expect(drainToolContains(&ed, "*git*", "f.txt"));
 
     // Navigate point onto the hunk header (the first `@@` line) in the FIRST
-    // rendering — before the external shift, exactly how a person points at
-    // the change they mean to stage.
+    // rendering — before the shift, exactly how a person points at the change
+    // they mean to stage.
     {
         const text = try ed.textAlloc();
         defer gpa.free(text);
@@ -142,26 +140,26 @@ test "e2e/git-gates: G2 stage-hunk after an external shift never stages the wron
         while (i < row) : (i += 1) ed.press("j", "");
     }
 
-    // External change, entirely unrelated to the hunk's own content, shifts
-    // every line number below it — the classic stale-identity trigger.
+    // An untracked file adds a whole SECTION above the change: every rendered
+    // offset below it moves, while the hunk itself is untouched.
     {
-        const out = try proj.oracle("sed -i '1i ZERO' f.txt");
+        const out = try proj.oracle("printf 'scratch\\n' > zz_new.txt");
         gpa.free(out);
     }
     ed.press("g", ""); // git-refresh: re-gather without the user re-navigating
+    try t.expect(drainToolContains(&ed, "*git*", "zz_new.txt"));
 
-    // Stage whatever the refreshed view now has point on. The only hunk that
-    // may ever land staged is the THREE -> THREE_CHANGED one — never a hunk
-    // built from stale byte offsets into the pre-shift rendering.
+    // Stage what point names. The hunk is at a different byte range now, so a
+    // stale-range implementation would build its patch from the wrong bytes.
     ed.press("s", "");
     try t.expect(drainLoopIdleOrDiff(&proj, &ed));
 
     const staged = try proj.oracle("git diff --cached");
     defer gpa.free(staged);
     try t.expect(std.mem.indexOf(u8, staged, "THREE_CHANGED") != null);
-    // The ZERO line was never part of the pointed-at hunk — a stale-range
-    // restage would otherwise happily include it.
-    try t.expect(std.mem.indexOf(u8, staged, "+ZERO") == null);
+    // The untracked file was never part of the pointed-at change.
+    try t.expect(std.mem.indexOf(u8, staged, "zz_new.txt") == null);
+    try t.expect(std.mem.indexOf(u8, staged, "scratch") == null);
 }
 
 fn drainLoopIdleOrDiff(proj: *Project, ed: *Editor) bool {
@@ -170,11 +168,11 @@ fn drainLoopIdleOrDiff(proj: *Project, ed: *Editor) bool {
 
 // ── GATE G3: no locked git modes ──
 //
-// doc §19: domain keymaps / locked tool modes are demolition targets for
-// git specifically. `src/guest/git.zig` still calls `weft.lockedMode` for
-// both "git" and "git-view" (task-only escape hatch, per §19's replacement:
-// offers + structural refusal, not a keymap prison). This is a pure
-// structural check, no repo needed — `isLockedMode` is the seam.
+// doc §19: domain keymaps / locked tool modes are demolition targets for git
+// specifically. Nothing pins git's keymap any more — the projections hold no
+// editor, so typing refuses structurally and `git` is simply where they rest.
+// Leaving a transient therefore lands back in git, not in a generic mode with
+// dead keys — which is what the lock was standing in for.
 test "e2e/git-gates: G3 no git mode is locked" {
     const gpa = t.allocator;
     var ed: Editor = undefined;
@@ -182,26 +180,27 @@ test "e2e/git-gates: G3 no git mode is locked" {
     defer ed.deinit();
     try loadWorkspace(&ed);
 
-    // PENDING (needs the offer-based-dispatch rework): both calls must be
-    // gone from src/guest/git.zig.
     try t.expect(!ed.keymap.isLockedMode("git"));
     try t.expect(!ed.keymap.isLockedMode("git-view"));
+    try t.expect(ed.keymap.isRestingMode("git"));
+    try t.expect(ed.keymap.isRestingMode("git-view"));
 
-    // Escape must never strand the buffer in a dead mode: from "git" it
-    // returns to ordinary navigation, not nowhere.
+    // Escape must never strand the projection in a dead mode: out of one of
+    // git's own transients it comes back to git's keys.
     ed.setMode("git");
+    ed.press("b", ""); // the branch transient
+    try t.expectEqualStrings("git-branch-menu", ed.mode());
     ed.press("Escape", "");
-    try t.expect(!std.mem.eql(u8, ed.mode(), "git"));
+    try t.expectEqualStrings("git", ed.mode());
 }
 
 // ── GATE G4: commit draft lifecycle as an ordinary entry ──
 //
 // doc §14.3: a commit message is a draft like any other — write it, switch
-// away, come back, and it is still there; finishing lands the real commit;
-// aborting CONFIRMS before it discards (no silent data loss). Today's
-// `gitCommitAbort` (src/guest/git.zig) discards unconditionally on the
-// first keypress — the confirm step is the sibling `uc/git-drafts` rework.
-test "e2e/git-gates: G4 commit draft survives a buffer switch, finishes, and abort confirms" {
+// away, come back, and it is still there and still EDITABLE with no resume
+// step; saving it lands the real commit; closing it asks before throwing the
+// text away (there is no file to recover it from).
+test "e2e/git-gates: G4 commit draft survives a buffer switch, commits on save, and asks before it is dropped" {
     const gpa = t.allocator;
     var proj: Project = undefined;
     try proj.init(gpa);
@@ -225,12 +224,16 @@ test "e2e/git-gates: G4 commit draft survives a buffer switch, finishes, and abo
     ed.run("git-status");
     try t.expect(drainToolContains(&ed, "*git*", "Branch:"));
     ed.press("c", ""); // git-commit-dispatch
-    ed.press("c", ""); // git-commit
-    try t.expectEqualStrings("git-commit", ed.mode());
+    ed.press("c", ""); // the commit offer → a draft ENTRY
+    try t.expectEqualStrings("*git-commit*", ed.bufferName());
+    // Git owns no mode for it: it rests in the configuration's own editing
+    // modes, and text reaches it because it is ordinary text.
+    try t.expectEqualStrings("normal", ed.mode());
+    ed.press("i", "");
     ed.typeText("draft: gate g4");
+    ed.press("Escape", "");
 
-    // Switch away to an ordinary buffer and back — a draft is just an entry:
-    // its TEXT survives a generic buffer switch today (real, passes below).
+    // Switch away to an ordinary buffer and back — a draft is just an entry.
     ed.runStr("buffer-create", "*scratch-g4*");
     try h.focusBuffer(&ed, "*git-commit*");
     {
@@ -238,40 +241,52 @@ test "e2e/git-gates: G4 commit draft survives a buffer switch, finishes, and abo
         defer gpa.free(msg);
         try t.expect(std.mem.indexOf(u8, msg, "draft: gate g4") != null);
     }
+    // …and still editable, with no resume step: the same keys as any entry.
+    try t.expectEqualStrings("normal", ed.mode());
+    ed.press("A", "");
+    ed.typeText("!");
+    ed.press("Escape", "");
 
-    // PENDING (needs uc/git-drafts): resuming a draft must resume EDITING
-    // it too. `Buffers.switchTo` deliberately remembers a buffer's own
-    // RESTING mode on the way out (its own doc: "not the transient mode
-    // itself"), so leaving `git-commit` stamps this buffer `default` — a
-    // generic buffer switch today drops the commit posture, landing back
-    // in `default` instead of `git-commit`. An ordinary-entry draft must
-    // not need a special resume step to keep editing.
-    try t.expectEqualStrings("git-commit", ed.mode());
+    // Saving IS the commit — the `save` action, reached the way any entry's is.
+    ed.press("colon", "");
+    ed.typeText("w");
+    ed.press("Return", "");
+    try t.expect(drainUntilOracle(&proj, &ed, "git log --oneline", "draft: gate g4!"));
 
-    // Finish: the real commit lands with the drafted message. (Resuming
-    // `git-commit` by hand here isolates THIS assertion from the pending
-    // one above — the finish mechanics themselves are not what G4 is
-    // about once resume is fixed.)
-    ed.setMode("git-commit");
-    ed.press("C-c", "");
-    ed.press("C-c", "");
-    try t.expect(drainUntilOracle(&proj, &ed, "git log --oneline", "draft: gate g4"));
-
-    // Abort path, second commit: draft text must require confirmation before
-    // it is thrown away.
+    // Abort path, second commit: the draft's text must survive a close that
+    // was not confirmed.
     {
         const out = try proj.oracle("printf 'y\\n' >> f.txt && git add f.txt");
         gpa.free(out);
     }
     ed.run("git-status");
-    ed.press("c", "");
-    ed.press("c", "");
-    try t.expectEqualStrings("git-commit", ed.mode());
+    try t.expect(drainToolContains(&ed, "*git*", "f.txt"));
+    ed.run("git-commit");
+    try t.expectEqualStrings("*git-commit*", ed.bufferName());
+    ed.press("i", "");
     ed.typeText("throwaway draft");
-    ed.press("C-c", "");
-    ed.press("C-k", ""); // git-commit-abort
+    ed.press("Escape", "");
 
-    // PENDING (needs uc/git-drafts): abort must ask before discarding —
-    // today it discards immediately and lands straight back in "git".
-    try t.expect(!std.mem.eql(u8, ed.mode(), "git"));
+    // `close` is an ACTION, so the draft's own provider answers it: it asks.
+    ed.run("close");
+    try t.expect(ed.pick.active);
+    try t.expectEqualStrings("*git-commit*", ed.bufferName());
+
+    // Answering "no" keeps the draft, text and all.
+    ed.press("Return", ""); // the safe answer leads
+    ed.settle(2);
+    try t.expect(ed.buffers.findByName("*git-commit*") != null);
+    {
+        const msg = try ed.textAlloc();
+        defer gpa.free(msg);
+        try t.expect(std.mem.indexOf(u8, msg, "throwaway draft") != null);
+    }
+
+    // Answering "yes" is what drops it.
+    ed.run("close");
+    try t.expect(ed.pick.active);
+    ed.run("pick-next");
+    ed.run("pick-accept");
+    ed.settle(2);
+    try t.expect(ed.buffers.findByName("*git-commit*") == null);
 }
