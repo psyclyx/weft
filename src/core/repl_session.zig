@@ -132,7 +132,8 @@ pub const Session = struct {
     pub fn deinit(s: *Session) void {
         const gpa = s.gpa;
         killChild(s);
-        while (s.reader.poll() == null) std.atomic.spinLoopHint(); // join the reader
+        while (!s.reader.residentExited()) std.atomic.spinLoopHint(); // join the reader
+        _ = s.reader.poll();
         _ = s.child.wait(s.io_threaded.io()) catch {};
         s.out_buf.deinit(gpa);
         s.io_threaded.deinit();

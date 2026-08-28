@@ -410,18 +410,20 @@ fn TaskContainer(comptime f: anytype) type {
             // Captured before the node can possibly be freed below (a
             // detached handle's second-finisher destroys it immediately).
             const pool = node.pool;
+            const gpa = pool.gpa;
             const record = node.resident;
             self.result = @call(.auto, f, self.args);
-            // Exit is published BEFORE completion, so a caller that joined on
-            // the handle knows this resident will never be stopped again —
-            // the session it points at is free to go.
-            if (record) |r| r.exited.store(true, .release);
             // Publish, then hand off ownership if the holder detached.
             if (node.state.cmpxchgStrong(Node.pending, Node.done, .release, .acquire)) |actual| {
                 assert(actual == Node.detached);
-                node.destroyFn(node, node.pool.gpa);
+                node.destroyFn(node, gpa);
             }
             if (pool.notify_fd) |fd| scheduler.signalWakeFd(fd);
+            // A resident's `exited` is its LAST WORD, after every touch of the
+            // pool and of its own node: teardown joins on it and frees both
+            // the moment it is true. The record itself stays the pool's, and
+            // the pool cannot go while this is false.
+            if (record) |r| r.exited.store(true, .release);
         }
 
         fn destroy(node: *Node, gpa: Allocator) void {
@@ -448,6 +450,18 @@ pub fn Handle(comptime T: type) type {
             self.node.destroyFn(self.node, self.pool.gpa);
             self.* = undefined;
             return value;
+        }
+
+        /// Non-blocking: whether a RESIDENT task's thread has run its last
+        /// instruction. This — not `poll` — is the join a session needs
+        /// before freeing itself: it is published after the resident's final
+        /// touch of anything, so teardown can no longer signal a freed
+        /// subject. A pooled task has no thread of its own; completion is
+        /// the same answer there.
+        pub fn residentExited(self: Self) bool {
+            const record = self.node.resident orelse
+                return self.node.state.load(.acquire) == Node.done;
+            return record.exited.load(.acquire);
         }
 
         /// Abandon the result; whoever finishes second frees the node.
