@@ -2316,8 +2316,9 @@ test "wasm plugin: notes capture appends via fs and open opens the real file, no
     defer engine.deinit();
     const plugin = try loadPlugin(&engine, &env.ctx, "notes", @embedFile("guest_notes_wasm"), .{});
     defer plugin.deinit();
-    // No fs_read: `open` is a host command, not an fs.read import.
-    try t.expect(!plugin.perms[wasm_host.perm_fs_read] and plugin.perms[wasm_host.perm_fs_write]);
+    // `open` is a host command, not an fs.read import; the read grant is what
+    // an embed's designation resolves through (§11.8).
+    try t.expect(plugin.perms[wasm_host.perm_fs_read] and plugin.perms[wasm_host.perm_fs_write]);
 
     // Two captures append to the file; open opens the note target itself.
     _ = try command.run(&env.commands, &env.ctx, "notes-capture", &.{ .{ .string = "todo x" }, .{ .string = tmp } });

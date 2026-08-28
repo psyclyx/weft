@@ -1444,6 +1444,12 @@ The architecture is not complete until all of these hold:
   root and focus.
 - A companion viewport following the primary-focus feed never observes its own
   focus, nor another companion's.
+- A note holding a directory embed and a file embed renders both, keeps them
+  current across a refresh, degrades each one on its own to its stored textual
+  designation plus a reason when its target is gone, and never charges the
+  note's typing path for any of it.
+- A capture writes where the reader was as a durable designation in note text,
+  and activating that line after everything is closed lands back there.
 
 ### Actions and UI
 

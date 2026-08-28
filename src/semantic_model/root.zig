@@ -8,6 +8,7 @@ pub const schema = @import("weft_schema");
 pub const handle = @import("handle.zig");
 pub const owner = @import("owner.zig");
 pub const target = @import("target.zig");
+pub const durable = @import("durable.zig");
 pub const scene = @import("scene.zig");
 pub const view = @import("view.zig");
 pub const selection = @import("selection.zig");
