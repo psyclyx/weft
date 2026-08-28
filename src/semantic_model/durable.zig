@@ -166,6 +166,12 @@ fn parseAuthority(text: []const u8) ?Authority {
 
 pub const marker = "@embed";
 
+/// How much of the designated thing to show. One spelling for every kind —
+/// a directory's entries and a file's lines are the same request, and a
+/// reader that had to guess which word this resource wants would be reading
+/// two grammars.
+pub const window_param = "lines";
+
 /// The designation on `line` if it is an embed line, else null. Leading
 /// whitespace is allowed (an embed indents inside a list); trailing text
 /// after the designation is not, so a sentence mentioning an embed is prose.
@@ -195,7 +201,7 @@ test "a designation round-trips through its text form" {
     var buf: [128]u8 = undefined;
     const cases = [_][]const u8{
         "weft://here/file/src/core/Head.zig",
-        "weft://here/dir/src?rows=5",
+        "weft://here/dir/src?lines=5",
         "weft://here/file/notes.md?at=1024&lines=3",
         "weft://here/commit/deadbeefcafe",
         "weft://deadbeef/dir/src",
@@ -208,18 +214,18 @@ test "a designation round-trips through its text form" {
 }
 
 test "authority and view parameters are read, not guessed" {
-    const d = parse("weft://here/dir/src?rows=5&label=source").?;
+    const d = parse("weft://here/dir/src?lines=5&label=source").?;
     try t.expect(d.authority == .here);
     try t.expect(d.kind == .directory);
     try t.expectEqualStrings("src", d.ref);
-    try t.expectEqualStrings("5", d.param("rows").?);
+    try t.expectEqualStrings("5", d.param("lines").?);
     try t.expectEqualStrings("source", d.param("label").?);
     try t.expect(d.param("sparkline") == null);
-    try t.expectEqual(@as(usize, 5), d.count("rows", 2));
+    try t.expectEqual(@as(usize, 5), d.count("lines", 2));
     try t.expectEqual(@as(usize, 2), d.count("cols", 2));
 
     // View parameters are a request about presentation, never identity.
-    try t.expect(d.designates(parse("weft://here/dir/src?rows=99").?));
+    try t.expect(d.designates(parse("weft://here/dir/src?lines=99").?));
     try t.expect(!d.designates(parse("weft://here/file/src").?));
     try t.expect(!d.designates(parse("weft://alice/dir/src").?));
     try t.expect(parse("weft://here/commit/abc").?.designates(parse("weft://here/commit/abc").?));
@@ -242,11 +248,11 @@ test "a malformed designation is not a designation" {
 
 test "an embed line is a marker plus one designation, and nothing else" {
     var buf: [128]u8 = undefined;
-    const embed = embedOf("  @embed weft://here/dir/src?rows=2").?;
+    const embed = embedOf("  @embed weft://here/dir/src?lines=2").?;
     try t.expect(embed.kind == .directory);
     try t.expectEqualStrings("src", embed.ref);
     try t.expectEqualStrings(
-        "@embed weft://here/dir/src?rows=2",
+        "@embed weft://here/dir/src?lines=2",
         try renderEmbed(embed, &buf),
     );
 

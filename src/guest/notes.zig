@@ -253,7 +253,7 @@ fn render(d: durable.Designation) []const u8 {
 
 fn renderDirectory(d: durable.Designation) []const u8 {
     const listing = weft.fsList("here", d.ref) orelse return reason("no such directory here");
-    const want = d.count("rows", 3);
+    const want = d.count(durable.window_param, 3);
     var w: usize = 0;
     w += write(w, "[");
     w += write(w, d.ref);
@@ -278,7 +278,7 @@ fn renderDirectory(d: durable.Designation) []const u8 {
 
 fn renderFile(d: durable.Designation) []const u8 {
     const bytes = weft.fsRead(d.ref) orelse return reason("no such file here");
-    const want = d.count("lines", 2);
+    const want = d.count(durable.window_param, 2);
     var w: usize = 0;
     w += write(w, "[");
     w += write(w, d.ref);

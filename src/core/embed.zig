@@ -52,7 +52,7 @@ pub const ParseError = error{Malformed};
 
 /// How much of the designated resource this embed asked to see, clamped.
 pub fn windowOf(want: Designation) u16 {
-    const asked = want.count("lines", default_window);
+    const asked = want.count(durable.window_param, default_window);
     return @intCast(std.math.clamp(asked, 1, max_window));
 }
 

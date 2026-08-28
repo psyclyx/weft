@@ -68,7 +68,7 @@ test "e2e/notes: a note's directory and file embeds render, and typing never pay
     defer ed.deinit();
     try loadWorkspace(&ed);
 
-    try seed(&proj, gpa, "printf '# journal\\n@embed weft://here/dir/tree?rows=3\\n@embed weft://here/file/readme.md?lines=2\\nend\\n' > journal.md");
+    try seed(&proj, gpa, "printf '# journal\\n@embed weft://here/dir/tree?lines=3\\n@embed weft://here/file/readme.md?lines=2\\nend\\n' > journal.md");
     gpa.free(try proj.oracle("printf 'plain note\\nno embeds here\\nend\\n' > plain.md"));
 
     // Opening the note is the whole interaction: activation drives the round,
@@ -137,7 +137,7 @@ test "e2e/notes: embeds stay current across a refresh and degrade to their line 
     defer ed.deinit();
     try loadWorkspace(&ed);
 
-    try seed(&proj, gpa, "printf '@embed weft://here/dir/tree?rows=4\\n@embed weft://here/file/readme.md\\n@embed weft://here/commit/deadbeefcafe\\n' > journal.md");
+    try seed(&proj, gpa, "printf '@embed weft://here/dir/tree?lines=4\\n@embed weft://here/file/readme.md\\n@embed weft://here/commit/deadbeefcafe\\n' > journal.md");
 
     ed.runStr("open", "journal.md");
     ed.settle(6);
@@ -168,7 +168,7 @@ test "e2e/notes: embeds stay current across a refresh and degrade to their line 
     // the note, untouched by anything the embed machinery did.
     const text = try ed.textAlloc();
     defer gpa.free(text);
-    try t.expect(has(text, "@embed weft://here/dir/tree?rows=4"));
+    try t.expect(has(text, "@embed weft://here/dir/tree?lines=4"));
     try t.expect(has(text, "@embed weft://here/file/readme.md"));
 }
 
