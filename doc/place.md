@@ -171,6 +171,47 @@ Not a prohibition. A gradient:
   the module cache or the keystores. The one place a denylist is right, because
   those paths are program-computed and finite.
 
+### 4.1a A JS plugin must not be ABLE to be a different kind of plugin
+
+Not a rule to follow — a property to make structural. `quickjs.wasm` **is** a
+wasm plugin: embedded, compiled through the same `Engine`, instantiated as a
+resident guest. A JS plugin is therefore code running inside a wasm guest, and
+nothing it does should be expressible outside what a wasm guest can do.
+
+Today that is false by construction. `membrane/qjs_contract.zig` describes
+itself as "the `weft.*` membrane's THIRD surface": 33 `qjs_*` imports bound onto
+quickjs.wasm's linker, with their own handlers, their own permission checks, and
+their own arity table, alongside the 204 `wl_*` doors. Two membranes, maintained
+by hand, expected to agree.
+
+They do not, and the divergences are not coincidences — they are what a second
+membrane produces:
+
+- `qjs_proc_spawn` grew a `cwd` argument `wl_proc_spawn` never had (removed).
+- `cAgentWrite` (`qjs_file_write`) has neither a `requirePerm` nor a path-limit
+  check, while its `wl_fs_write` counterpart has both.
+
+Of the 33, **eleven are exact name-twins** of a `wl_*` door — `bind_key`,
+`echo`, `log`, `proc_close`, `proc_read`, `proc_send`, `proc_spawn`, `provide`,
+`register`, `run`, `semantic_action`. Those are pure duplication: same name,
+same meaning, two implementations, two gates.
+
+The cut to make:
+
+- **Plugin-plane doors go through `wl_*`.** quickjs.wasm imports the same
+  membrane every other guest does. Then divergence is unrepresentable rather
+  than discouraged, and the eleven twins collapse to one each. `hasPerm` is
+  already duck-typed across both plane types ("one contract, two transports"),
+  which is the precedent the handlers follow.
+- **Config-plane doors may stay their own surface.** `config`, `grant`,
+  `plugin`, `use`, `set`, `viewport`, `present`, `menu` are the config DSL.
+  Config is a distinct *role* with a distinct trust tier — it already chooses
+  which plugins load — not a different *kind of plugin*. Keeping that surface
+  separate is a real distinction; keeping the plugin plane separate is not.
+
+Until the plugin plane is collapsed, every fix on one side must be applied to
+the other in the same change, and the sweep should assert the twins agree.
+
 ### 4.2 Better primitives beat bans
 
 The model already ships: `wl_proc_filter` composes
