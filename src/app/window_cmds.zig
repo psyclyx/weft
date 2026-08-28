@@ -116,8 +116,14 @@ pub fn windowActionHandler(ctx: *core.command.Context, data: ?*anyopaque, args: 
 /// loop, outside the input hot section). Each op saves the focused pane's
 /// scroll first, then mutates the tree; a focus/content change makes the
 /// active buffer follow the focused pane (applyWindowFocus). Geometry uses
-/// last render's frame. Returns whether the view was damaged. Always keeps
-/// the focused pane on the active buffer and prunes leaves whose buffer died.
+/// last render's frame. Returns whether the view was damaged. Always
+/// reconciles the focused pane with the active buffer and prunes leaves
+/// whose buffer died.
+///
+/// This is also where the workspace enforces the two viewport attributes the
+/// pane tree cannot (`core/viewport.zig`): `persistent` decides which way the
+/// focused-pane/active-entry mirror runs, and `focus_source` decides whether
+/// a focus change is published on `focus`.
 pub fn applyIntents(
     win_ctx: *WindowCtx,
     win_layout: *window_layout.Layout,
@@ -127,6 +133,8 @@ pub fn applyIntents(
     head: *core.Head,
     keymap: *const core.Keymap,
     last_frame_rect: region.Rect,
+    policy: *const core.placement.Policy,
+    focus: *core.focus_feed.Feed,
 ) bool {
     var dirty = false;
     if (win_ctx.split) |axis| {
@@ -190,11 +198,24 @@ pub fn applyIntents(
             }
         }
     }
-    // The focused pane always shows the active buffer (buffer switches
-    // via open/tabs/etc. land here); a pane whose buffer was closed
-    // falls back to the active one so no leaf dangles.
-    window_layout.headFocus(win_layout, head).pane().buffer_id = buffers.active_id;
+    if (applyPlacement(win_layout, buffers, gpa, head, keymap, policy)) dirty = true;
+    // Reconcile the focused pane with the active buffer. WHICH WAY depends on
+    // the viewport: an ordinary pane follows the active entry (buffer
+    // switches via open/tabs/etc. land here), but a `persistent` one OWNS its
+    // entry — an open that landed elsewhere must not drag the sidebar off its
+    // root, so there the active entry follows the pane instead. Same
+    // invariant ("the focused pane shows the active buffer"), stated once,
+    // with the direction read off an attribute rather than guessed.
     {
+        const fp = window_layout.headFocus(win_layout, head).pane();
+        if (fp.attrs.persistent)
+            applyWindowFocus(win_layout, view, buffers, gpa, head, keymap)
+        else
+            fp.buffer_id = buffers.active_id;
+    }
+    {
+        // A pane whose buffer was closed falls back to the active one so no
+        // leaf dangles.
         const PruneCtx = struct { active: core.Buffers.Id, bufs: *core.Buffers };
         win_layout.eachPane(PruneCtx{ .active = buffers.active_id, .bufs = buffers }, struct {
             fn visit(c: PruneCtx, p: *window_layout.Pane) void {
@@ -202,7 +223,65 @@ pub fn applyIntents(
             }
         }.visit);
     }
+    publishFocus(win_layout, head, focus);
     return dirty;
+}
+
+/// Consume `head`'s pending open placement (§9.4): ask the policy where the
+/// entry the open just made active belongs, and move it there.
+///
+/// The only case that does any work is a decision naming a pane OTHER than
+/// the acting one — which is exactly the sidebar case, and exactly the jank
+/// this kills ("the grep result opened inside my sidebar"). Everything else
+/// is already where it should be, because `open` made it active and the
+/// mirror above puts an active entry in the focused pane.
+fn applyPlacement(
+    win_layout: *window_layout.Layout,
+    buffers: *core.Buffers,
+    gpa: std.mem.Allocator,
+    head: *core.Head,
+    keymap: *const core.Keymap,
+    policy: *const core.placement.Policy,
+) bool {
+    const request = head.placement orelse return false;
+    head.placement = null;
+    const focused = window_layout.headFocus(win_layout, head);
+    const opened = buffers.active_id;
+    const decision = policy.resolve(.{
+        .hint = request.hint,
+        .kind = request.kind,
+        .source = focused.pane().attrs,
+    });
+    if (decision == .source) return false;
+    if (decision == .none) {
+        // Opened, but given no viewport: put the acting pane's own entry back
+        // in front so the mirror below does not show it anyway.
+        buffers.switchTo(gpa, focused.pane().buffer_id, head, keymap) catch {};
+        return true;
+    }
+    const primary = win_layout.primaryPane() orelse return false;
+    const target = if (decision == .split_primary)
+        win_layout.splitFocused(primary, .vertical) catch primary
+    else
+        primary;
+    if (target == focused) return false;
+    target.pane().buffer_id = opened;
+    target.pane().top_row = 0;
+    // Focus does not move: activating from a companion leaves you in the
+    // companion — that is its focus discipline. The active entry therefore
+    // goes back to what the focused pane shows, which the persistent arm of
+    // the mirror above does, the same way every focus move already does.
+    return true;
+}
+
+/// Publish this head's focused viewport on the primary-focus feed (§7). The
+/// feed is idempotent, so calling it every layout phase costs one comparison
+/// on a quiet frame; every event carries the source viewport's attributes, so
+/// a companion consumer can tell primary focus from companion focus without
+/// the workspace deciding for it.
+fn publishFocus(win_layout: *window_layout.Layout, head: *core.Head, focus: *core.focus_feed.Feed) void {
+    const pane = window_layout.headFocus(win_layout, head).pane();
+    focus.publish(.{ .viewport = pane.id, .entry = pane.buffer_id, .attrs = pane.attrs });
 }
 
 /// After a window op moved focus (or changed the focused pane's content),

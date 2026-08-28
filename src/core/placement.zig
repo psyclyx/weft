@@ -43,13 +43,35 @@ pub const Hint = enum {
     background,
 };
 
+/// The target kinds a placement decision distinguishes. Deliberately a plain
+/// enum rather than `semantic_model.target.Kind` itself: that union's
+/// `synthetic` arm carries a NAME borrowed from a provider's descriptor, and
+/// a placement request outlives the call that recorded it (it is consumed by
+/// the next layout phase). A policy that genuinely needs the synthetic name
+/// is exotic routing — it reads the live descriptor itself.
+pub const Kind = enum {
+    unknown,
+    file,
+    directory,
+    synthetic,
+
+    pub fn of(k: semantic_model.target.Kind) Kind {
+        return switch (k) {
+            .unknown => .unknown,
+            .file => .file,
+            .directory => .directory,
+            .synthetic => .synthetic,
+        };
+    }
+};
+
 /// What the policy is asked. `source` is the ACTING viewport's attributes —
 /// the input that lets one table say "activating from a companion goes
 /// elsewhere" once, instead of every opener remembering to.
 pub const Request = struct {
     hint: Hint = .primary,
     source: viewport.Attrs = .tiled,
-    kind: semantic_model.target.Kind = .unknown,
+    kind: Kind = .unknown,
 };
 
 /// A pane-relative answer. Deliberately not a pane id: the policy runs above

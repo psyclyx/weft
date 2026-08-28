@@ -148,6 +148,11 @@ pub const FrameCtx = struct {
     /// System-scoped semantic registries. Views and fields live with the
     /// system; only focus and interaction stacks live on the head above.
     semantic: *core.semantic.Services,
+    /// Where an "open a workspace entry" outcome lands (§9.4) and the feed
+    /// primary-focus changes are published on (§7). System-scoped, like the
+    /// pane tree they act on.
+    placement: *core.placement.Policy,
+    focus_feed: *core.focus_feed.Feed,
 
     // ── Config read by the HUD ──
     cursor_cfg: *cursor_config.CursorConfig,
@@ -239,6 +244,8 @@ pub const Driver = struct {
             self.ctx.head,
             self.ctx.keymap,
             self.ctx.last_frame_rect.*,
+            self.ctx.placement,
+            self.ctx.focus_feed,
         );
         if (changed) self.ctx.view_dirty.* = true;
         return changed;

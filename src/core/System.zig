@@ -87,6 +87,8 @@ const register_mod = @import("register.zig");
 const grants_mod = @import("grants.zig");
 const semantic_mod = @import("semantic.zig");
 const intent_mod = @import("intent.zig");
+const placement_mod = @import("placement.zig");
+const focus_feed = @import("focus_feed.zig");
 const fs_runtime = @import("weft_fs_runtime");
 
 pub const System = @This();
@@ -190,6 +192,15 @@ filesystems: fs_runtime.Router,
 /// not own it. Pinned (the published core table borrows a field of it),
 /// which `System`'s own no-relocation invariant already guarantees.
 intent: intent_mod.Plane = undefined,
+/// Where an "open a workspace entry" outcome lands (§9.4). System-scoped
+/// like the keymap tables and for the same reason: the pane tree is shared
+/// by every head attached here, so the rule deciding which pane an open
+/// reaches must be one rule, not one per head.
+placement: placement_mod.Policy = .empty,
+/// Primary-viewport focus changes (§7). Consumed by companion viewports,
+/// statuslines, titles, and presence alike; published by the workspace's
+/// layout phase, which is the only place focus actually moves.
+focus: focus_feed.Feed = .empty,
 
 /// Build a system from scratch: fresh buffers (one scratch buffer, per
 /// `Buffers.init`), empty commands/keymap, and the built-in command/keymap
@@ -251,6 +262,8 @@ pub fn destroy(self: *System) void {
     // `capability.zig`'s `deinit` docs for why the relative order is safe.
     self.container.deinit();
     self.intent.deinit(gpa);
+    self.placement.deinit(gpa);
+    self.focus.deinit(gpa);
     self.keymap.deinit(gpa);
     self.commands.deinit(gpa);
     self.buffers.deinit(gpa);

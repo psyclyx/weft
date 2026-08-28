@@ -103,6 +103,16 @@ dot: DotRepeat = .empty,
 focused_pane: u32 = 0,
 focused_pane_gen: u32 = 0,
 
+/// The placement HINT the open in flight carries (§9.4), consumed by the
+/// next layout phase. Per-head for the same reason `focused_pane` is: two
+/// heads activating a row at once must not read each other's intent. It is
+/// deliberately a REQUEST, not a pane — an opener states what it wants
+/// ("the primary pane"), the policy decides which pane that is, and the
+/// layout is the only thing that moves anything. `null` between opens; an
+/// open the shell declines clears it rather than leaving it to fire against
+/// whatever happens next.
+placement: ?@import("placement.zig").Request = null,
+
 /// This head's transient/menu stack — the DURABLE record `Ctx.
 /// pushTransient`/`TransientHandle.deinit` push and pop. Distinct from
 /// `menu_return` above (guest `enterModeRaw` bookkeeping, keyed by mode name,

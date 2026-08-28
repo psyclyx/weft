@@ -675,7 +675,18 @@ pub const SecondHead = struct {
     /// (doc/contextual-workspace-architecture.md §7) drives real split/close/focus
     /// sequences "as" each head through this.
     pub fn applyWindow(self: *SecondHead, ed: *Editor) void {
-        _ = window_cmds.applyIntents(&ed.win_ctx, ed.win_layout, &ed.render.fb.view, ed.buffers, ed.gpa, &self.head, ed.keymap, ed.application.last_frame_rect);
+        _ = window_cmds.applyIntents(
+            &ed.win_ctx,
+            ed.win_layout,
+            &ed.render.fb.view,
+            ed.buffers,
+            ed.gpa,
+            &self.head,
+            ed.keymap,
+            ed.application.last_frame_rect,
+            &ed.session.system.placement,
+            &ed.session.system.focus,
+        );
     }
 
     pub fn mode(self: *SecondHead) []const u8 {

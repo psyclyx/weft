@@ -14,6 +14,7 @@ const container_mod = @import("container.zig");
 const Actions = @import("action.zig");
 const target_open = @import("target_open.zig");
 const semantic_model = @import("weft_semantic");
+const placement = @import("placement.zig");
 
 const ok: Value = .nil;
 
@@ -117,9 +118,20 @@ fn cTargetOpenFocused(ctx: *Context, args: struct {}) anyerror!Value {
     // No handler renders this kind. The shell's placement policy may still
     // open it as an ordinary workspace entry (§9.4) — that is an open, not a
     // claim, so it runs only once every handler has declined.
+    //
+    // The outcome carries a HINT, not a pane: "the primary viewport" (§9.4,
+    // doc/cwa-config-decisions.md D3). From an ordinary pane the policy reads
+    // that as "here" and nothing jumps; from a docked companion it reads as
+    // "the editing pane", which is the whole of "Return in the sidebar opens
+    // in the editor" — stated once, in the policy, rather than by every
+    // opener guessing.
     if (result == .no_handler) {
-        if (ctx.entries) |entries|
+        if (ctx.entries) |entries| {
+            const kind: placement.Kind = if (services.targets.get(located.target)) |d| .of(d.kind) else .unknown;
+            ctx.head.placement = .{ .hint = .primary, .kind = kind };
             if (try entries.open(entries.context, ctx, located)) return ok;
+            ctx.head.placement = null; // declined: never fires against a later open
+        }
     }
     return targetOpenResult(result);
 }
