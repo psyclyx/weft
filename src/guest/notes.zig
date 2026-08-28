@@ -202,8 +202,10 @@ fn refresh(entry: u32) usize {
         held.* = .{ .entry = entry, .anno = anno };
     }
     const anno = held.*.?.anno;
+    // The entry went away under the round: give the layer back rather than
+    // dropping the handle and holding a slot nothing can use again.
     if (!anno.begin()) {
-        held.* = null;
+        release(held);
         return 0;
     }
     round +%= 1;
