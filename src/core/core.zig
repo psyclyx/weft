@@ -74,6 +74,9 @@ pub const Caps = capability.Caps;
 pub const Actions = @import("action.zig");
 pub const proc_stream = @import("proc_stream.zig");
 pub const status_feed = @import("status_feed.zig");
+pub const viewport = @import("viewport.zig");
+pub const focus_feed = @import("focus_feed.zig");
+pub const placement = @import("placement.zig");
 pub const complete_ui = @import("complete_ui.zig");
 // nav_ui (hover/definition/symbols consumers) removed — moved to the `lsp` plugin.
 pub const wire = @import("weft_wire");
