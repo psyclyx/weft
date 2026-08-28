@@ -229,6 +229,9 @@ const guests = [_]Guest{
     // D2's worked example (doc/d2-schema-payloads.md §6) — a third-party
     // slot the wasm-membrane suite proves end to end; never shipped.
     .{ .src = "src/guest/badge.zig", .import = "guest_badge_wasm", .install = false },
+    // §11.7's worked example — a third-party decorator of entries it does not
+    // own, proven end to end by the wasm-membrane suite; never shipped.
+    .{ .src = "src/guest/marks.zig", .import = "guest_marks_wasm", .install = false },
     .{ .src = "src/guest/semantic_fixture.zig", .import = "guest_semantic_wasm", .install = false },
     .{ .src = "src/guest/semantic_fs_fixture.zig", .import = "guest_semantic_fs_wasm", .install = false },
     .{ .src = "src/guest/files_semantic_fixture.zig", .import = "guest_files_semantic_wasm", .install = false, .libraries = .{ .files = true } },

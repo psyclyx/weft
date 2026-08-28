@@ -2870,3 +2870,108 @@ test "wasm plugins: buf-pick refuses a buffer closed mid-pick, slot reuse and al
     try t.expectEqual(before, env.buffers.active().id);
     try t.expect(!std.mem.eql(u8, env.buffers.active().name, "gamma"));
 }
+
+// ── Annotation layers: the third-party decoration package (§11.7) ─────────
+// `marks` (src/guest/marks.zig) is a plugin nothing else has heard of. It
+// decorates an entry it does not own, addressed by REFERENCE rather than by
+// focus, and its paint is composited by whatever presentation hosts that
+// entry — no text-side code, in core or in another plugin, knows it exists.
+
+test "annotations: a third-party guest decorates a REFERENCED entry it does not own" {
+    const gpa = t.allocator;
+    var env: Env = undefined;
+    try Env.init(gpa, &env);
+    defer env.deinit(gpa);
+
+    // The decorated entry is not the active one — a decorator addresses what
+    // it was told to decorate, never "wherever the user happens to be".
+    const target = try env.buffers.create(gpa, "todo.zig");
+    const ed = env.buffers.get(target).?.textEditor().?;
+    try ed.insertText(gpa, "// TODO: ship\nfn main() {}\n// FIXME: later\n");
+    try t.expect(env.buffers.active().id != target);
+    const commits_before = ed.doc.commitCount();
+
+    // The entry's OWN feed, published the way lsp publishes it — the second
+    // decorator this one has to coexist with.
+    const diag = try env.caps.layers.claim(gpa, &ed.doc, "diagnostics", .host, "lsp");
+    try diag.publishSpans(gpa, &.{.{ .start = 14, .end = 16, .kind = 1, .message = "unused" }});
+
+    var engine = try wasm.Engine.init(gpa);
+    defer engine.deinit();
+    const plugin = try loadPlugin(&engine, &env.ctx, "marks", @embedFile("guest_marks_wasm"), .{});
+    defer plugin.deinit();
+
+    _ = try command.run(&env.commands, &env.ctx, "marks-on", &.{.{ .string = "todo.zig" }});
+
+    // It painted: a named, provider-owned annotation feed over an entry the
+    // guest never opened, holding one span per keyword.
+    const marks = env.caps.layers.find(&ed.doc, "marks").?;
+    try t.expectEqual(@import("../layers.zig").Feed.annotation, marks.feed);
+    try t.expectEqualStrings("marks", marks.provider);
+    try t.expectEqual(@as(usize, 2), marks.spanCount());
+    try t.expectEqual(@as(usize, 3), marks.resolvedSpan(0).start); // TODO
+    try t.expectEqual(@as(usize, 7), marks.resolvedSpan(0).end);
+    try t.expectEqual(@as(usize, 30), marks.resolvedSpan(1).start); // FIXME
+
+    // Both decorators are live on the one entry, and the presentation finds
+    // the third-party ones by feed class, not by a name it was taught.
+    const feeds = try env.caps.layers.annotations(gpa, &ed.doc);
+    defer gpa.free(feeds);
+    try t.expectEqual(@as(usize, 1), feeds.len);
+    try t.expectEqual(@as(usize, 1), diag.spanCount());
+
+    // Annotations never grant: decorating committed nothing, changed no byte,
+    // and left the entry exactly as authoritative as it was.
+    try t.expectEqual(commits_before, ed.doc.commitCount());
+    const text = try ed.text().toOwnedSlice(gpa);
+    defer gpa.free(text);
+    try t.expectEqualStrings("// TODO: ship\nfn main() {}\n// FIXME: later\n", text);
+
+    // An edit moves the entry off the revision the marks were computed
+    // against: they are DROPPED, not rebased into a guess. The entry's own
+    // anchored feed is untouched — it publishes no stamp and claims none.
+    try ed.doc.insert(gpa, 0, "//! header\n");
+    try t.expectEqual(@as(usize, 0), marks.spanCount());
+    try t.expectEqual(@as(usize, 1), diag.spanCount());
+
+    // Republishing restamps against the new revision; the marks come back at
+    // the moved offsets.
+    _ = try command.run(&env.commands, &env.ctx, "marks-on", &.{.{ .string = "todo.zig" }});
+    try t.expectEqual(@as(usize, 2), marks.spanCount());
+    try t.expectEqual(@as(usize, 14), marks.resolvedSpan(0).start);
+
+    // Removing the decorator removes its paint and nothing else.
+    _ = try command.run(&env.commands, &env.ctx, "marks-off", &.{.{ .string = "todo.zig" }});
+    try t.expect(env.caps.layers.find(&ed.doc, "marks") == null);
+    try t.expectEqual(@as(usize, 1), env.caps.layers.find(&ed.doc, "diagnostics").?.spanCount());
+}
+
+test "annotations: a decorator cannot take over a builtin feed, or outlive its entry" {
+    const gpa = t.allocator;
+    var env: Env = undefined;
+    try Env.init(gpa, &env);
+    defer env.deinit(gpa);
+
+    const target = try env.buffers.create(gpa, "todo.zig");
+    const ed = env.buffers.get(target).?.textEditor().?;
+    try ed.insertText(gpa, "// TODO: ship\n");
+    // The entry's own styles feed, claimed by its projection first.
+    _ = try env.caps.layers.claim(gpa, &ed.doc, "styles", .local, "git");
+
+    var engine = try wasm.Engine.init(gpa);
+    defer engine.deinit();
+    const plugin = try loadPlugin(&engine, &env.ctx, "marks", @embedFile("guest_marks_wasm"), .{});
+    defer plugin.deinit();
+
+    // A builtin name is not for the taking: the door refuses rather than let a
+    // decorator paint through core's own feed.
+    try t.expectError(error.Reserved, plugin.openAnnotation(target, "styles"));
+
+    // A handle held over a closed entry resolves to nothing — never to
+    // whatever is active now.
+    const handle = try plugin.openAnnotation(target, "marks");
+    try t.expect(plugin.annotationDoc(handle) != null);
+    try env.buffers.close(gpa, target, &env.head, &env.keymap);
+    try t.expect(plugin.annotationDoc(handle) == null);
+    try t.expect(plugin.annotationLayer(handle) == null);
+}
