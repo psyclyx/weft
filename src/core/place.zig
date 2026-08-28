@@ -99,6 +99,63 @@ pub const Place = union(enum) {
     }
 };
 
+/// What a LOCAL effect gets when it asks a place to become bytes.
+///
+/// Four arms, because the honest answers are four. Collapsing `elsewhere` or
+/// `unavailable` into "no cwd" would be the whole bug this design exists to
+/// prevent: a child that cannot run where it was asked to must REFUSE, not
+/// quietly run in the editor's launch directory and report success.
+pub const Realized = union(enum) {
+    /// The editor process's own directory. A spawn passes no cwd — which is
+    /// not a fallback, it is precisely correct for this place.
+    process,
+    /// An absolute directory path, BORROWED for the duration of the call. The
+    /// authority that opened the root owns these bytes; nothing may retain
+    /// them past the call, and they never cross the guest membrane.
+    path: []const u8,
+    /// The place is real but is not on this machine (a peer or shell locus).
+    /// A local child cannot run there. Callers refuse.
+    elsewhere,
+    /// The container could not be resolved: retired, or no authority is wired
+    /// to answer for it. Callers refuse.
+    unavailable,
+};
+
+/// Turns a place into an OS directory, host-side.
+///
+/// A seam rather than a function because core must not invent path joining:
+/// the authority that opened a root is the only party entitled to say what it
+/// is called, exactly as `app/session.zig`'s activation gate already insists
+/// ("the path is reconstructed from a root this session itself opened, so a
+/// plugin's opaque target never becomes an arbitrary path").
+///
+/// Deliberately has no guest-facing door. Realization exists so the HOST can
+/// hand a child its working directory; a plugin that could call it would be
+/// holding a raw path again, which is the state this whole design removes.
+pub const Realizer = struct {
+    ctx: *anyopaque,
+    realizeFn: *const fn (ctx: *anyopaque, p: Place) ?[]const u8,
+
+    pub fn realize(self: Realizer, p: Place) ?[]const u8 {
+        return self.realizeFn(self.ctx, p);
+    }
+};
+
+/// Resolve `p` for a local effect. `realizer` may be null (headless, or before
+/// the shell has wired one), in which case only the degenerate place resolves
+/// — everything else is honestly `unavailable` rather than silently local.
+pub fn realize(p: Place, realizer: ?Realizer) Realized {
+    switch (p) {
+        .process => return .process,
+        .container => |c| {
+            if (c.locus != .here) return .elsewhere;
+            const r = realizer orelse return .unavailable;
+            const path = r.realize(p) orelse return .unavailable;
+            return .{ .path = path };
+        },
+    }
+}
+
 // ── tests ───────────────────────────────────────────────────────────
 
 const t = std.testing;
@@ -151,4 +208,60 @@ test "place: a non-here container reports it is not local" {
 
 test {
     std.testing.refAllDecls(@This());
+}
+
+// ── realization ─────────────────────────────────────────────────────
+
+const FakeAuthority = struct {
+    answer: ?[]const u8,
+    asked: usize = 0,
+
+    fn realize(ctx: *anyopaque, _: Place) ?[]const u8 {
+        const self: *FakeAuthority = @ptrCast(@alignCast(ctx));
+        self.asked += 1;
+        return self.answer;
+    }
+
+    fn realizer(self: *FakeAuthority) Realizer {
+        return .{ .ctx = self, .realizeFn = FakeAuthority.realize };
+    }
+};
+
+test "place: the degenerate place realizes to `process`, never asking an authority" {
+    var auth: FakeAuthority = .{ .answer = "/should/not/be/asked" };
+    const r = realize(.process, auth.realizer());
+    try t.expectEqual(Realized.process, r);
+    // The process place is answered by construction; consulting a target
+    // authority for it would be inventing a question it cannot have.
+    try t.expectEqual(@as(usize, 0), auth.asked);
+}
+
+test "place: a local container realizes through its authority" {
+    var auth: FakeAuthority = .{ .answer = "/home/u/proj" };
+    const p: Place = .{ .container = .{ .locus = .here, .ref = ref(1, 1), .revision = 1 } };
+    switch (realize(p, auth.realizer())) {
+        .path => |got| try t.expectEqualStrings("/home/u/proj", got),
+        else => return error.TestUnexpectedResult,
+    }
+    try t.expectEqual(@as(usize, 1), auth.asked);
+}
+
+test "place: a non-here container is `elsewhere` and is never asked locally" {
+    var auth: FakeAuthority = .{ .answer = "/home/u/proj" };
+    const elsewhere_locus: Locus = @enumFromInt(1);
+    const p: Place = .{ .container = .{ .locus = elsewhere_locus, .ref = ref(1, 1), .revision = 1 } };
+    try t.expectEqual(Realized.elsewhere, realize(p, auth.realizer()));
+    // Critically NOT `.process`: falling back to the editor's own directory is
+    // how a child ends up silently acting on the wrong machine's files.
+    try t.expectEqual(@as(usize, 0), auth.asked);
+}
+
+test "place: an unresolvable container is unavailable, with or without an authority" {
+    const p: Place = .{ .container = .{ .locus = .here, .ref = ref(1, 1), .revision = 1 } };
+    // No authority wired at all (headless, or pre-wiring).
+    try t.expectEqual(Realized.unavailable, realize(p, null));
+    // An authority that cannot answer for this container (retired).
+    var auth: FakeAuthority = .{ .answer = null };
+    try t.expectEqual(Realized.unavailable, realize(p, auth.realizer()));
+    try t.expectEqual(@as(usize, 1), auth.asked);
 }
