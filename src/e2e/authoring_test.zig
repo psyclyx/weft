@@ -2368,3 +2368,76 @@ test "authoring/dired: Vim Return on a file row opens it as an ordinary buffer" 
     try t.expect(ed.session.system.semantic.views.get(view_ref) != null);
     try t.expectEqualStrings("normal", ed.mode());
 }
+
+// ── GATE: two DAP sessions stay isolated ──
+//
+// doc/contextual-workspace-architecture.md §14.7/§18: "DAP sessions ... remain
+// isolated". A debug session is INSTANTIABLE — two programs, two adapters, two
+// buffers (`*debug*`, `*debug:2*`) — and a command routes to the session whose
+// buffer is focused, so stopping one leaves the other running.
+//
+// Driven against the MOCK adapter, not real lldb-dap: the real-adapter test
+// above already proves the wire, and a second lldb-dap (compile + launch +
+// symbolicate) would roughly double this file's slowest test for no additional
+// isolation evidence — isolation is a client-side identity property.
+test "debug: two DAP sessions — own buffers, own programs, stopping one leaves the other" {
+    const gpa = t.allocator;
+    var app: App = undefined;
+    try app.init(gpa);
+    defer app.deinit();
+    const ed = &app.ed;
+
+    const mock = try std.fmt.allocPrint(gpa, "node {s}/assets/mock_dap.mjs", .{app.proj.prev_cwd});
+    defer gpa.free(mock);
+    const dap_src = try std.fmt.allocPrint(gpa, "{s}/config/plugins/dap.js", .{app.proj.prev_cwd});
+    defer gpa.free(dap_src);
+    const src = try core.file.readAlloc(gpa, dap_src);
+    defer gpa.free(src);
+    try ed.grant("dap", "proc");
+    try ed.loadJs("dap", src);
+
+    // Session one: `alpha`, stopping on line 7. A session snapshots its target
+    // at START, so re-pointing the config afterwards cannot move it.
+    try ed.setConfig("dap", "cmd", mock);
+    try ed.setConfig("dap", "program", "alpha");
+    try ed.setConfig("dap", "line", "7");
+    ed.run("debug-start");
+    try t.expect(drainToolContains(ed, "*debug*", "stopped: breakpoint"));
+    try t.expect(drainToolContains(ed, "*debug*", ":7"));
+
+    // Session two: a DIFFERENT program on a different line, alongside the
+    // first — it lands in its own buffer and the first is still there.
+    try ed.setConfig("dap", "program", "beta");
+    try ed.setConfig("dap", "line", "11");
+    ed.run("debug-start");
+    try t.expect(drainToolContains(ed, "*debug:2*", "stopped: breakpoint"));
+    try t.expect(drainToolContains(ed, "*debug:2*", ":11"));
+    try t.expect(ed.buffers.findByName("*debug*") != null);
+
+    // Each transcript carries ONLY its own session's program and stop line.
+    {
+        const one = toolText(ed, "*debug*") orelse return error.NoFirstDebugBuffer;
+        defer gpa.free(one);
+        try t.expect(std.mem.indexOf(u8, one, "alpha") != null);
+        try t.expect(std.mem.indexOf(u8, one, "beta") == null);
+        try t.expect(std.mem.indexOf(u8, one, ":11") == null);
+        const two = toolText(ed, "*debug:2*") orelse return error.NoSecondDebugBuffer;
+        defer gpa.free(two);
+        try t.expect(std.mem.indexOf(u8, two, "beta") != null);
+        try t.expect(std.mem.indexOf(u8, two, "alpha") == null);
+        try t.expect(std.mem.indexOf(u8, two, ":7") == null);
+    }
+
+    // Stop the FOCUSED session (one) — routing is by the buffer you are
+    // looking at, not by "the last one started".
+    try h.focusBuffer(ed, "*debug*");
+    ed.run("debug-stop");
+    try t.expect(drainToolContains(ed, "*debug*", "terminated"));
+
+    // Session two is untouched: it still steps, and its own transcript grows.
+    try h.focusBuffer(ed, "*debug:2*");
+    ed.run("debug-step-over");
+    try t.expect(drainToolContains(ed, "*debug:2*", "stopped: step"));
+    ed.run("debug-continue");
+    try t.expect(drainToolContains(ed, "*debug:2*", "terminated"));
+}

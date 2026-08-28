@@ -219,6 +219,7 @@ const plugin_handlers = .{
     .{ .name = "qjs_file_read", .handler = cFileRead },
     .{ .name = "qjs_file_write", .handler = cAgentWrite },
     .{ .name = "qjs_line_text", .handler = cLineText },
+    .{ .name = "qjs_active_buffer", .handler = cActiveBuffer },
     .{ .name = "qjs_pick", .handler = cPick },
     .{ .name = "qjs_status", .handler = cStatus },
 };
@@ -1113,6 +1114,16 @@ fn cLineText(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32, results
         return;
     };
     results[0] = @intCast(caller.writeMemory(@intCast(args[0]), @intCast(args[1]), buf) catch 0);
+}
+
+/// weft.activeBuffer() → the focused buffer's display name. An instanced JS
+/// tool (two DAP sessions, each owning `*debug*` / `*debug:2*`) routes a
+/// command by it: the session whose buffer you are looking at is the one the
+/// command drives. The wasm plane's `weft.activeBufferName` in the same words.
+fn cActiveBuffer(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32, results: []i32) void {
+    const self: *JsPlugin = @ptrCast(@alignCast(data.?));
+    const name = self.bridge.activeCtx().buffers.active().name;
+    results[0] = @intCast(caller.writeMemory(@intCast(args[0]), @intCast(args[1]), name) catch 0);
 }
 
 /// The CRDT peer an agent's file writes author as (a single agent identity for

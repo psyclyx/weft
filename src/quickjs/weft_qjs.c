@@ -114,6 +114,10 @@ extern void host_file_write(const char *path, int path_len, const char *content,
 // The text of the active buffer's current line (at the cursor) — a prompt line.
 __attribute__((import_module("weft"), import_name("qjs_line_text")))
 extern int host_line_text(char *out, int cap);
+// The focused buffer's display name — how an instanced tool decides which of
+// its sessions a command is about.
+__attribute__((import_module("weft"), import_name("qjs_active_buffer")))
+extern int host_active_buffer(char *out, int cap);
 // Open a pick (prompt + newline-joined options); the structured acceptance
 // comes back via weft_on_pick. An async approve/deny for a permission request.
 __attribute__((import_module("weft"), import_name("qjs_pick")))
@@ -769,6 +773,17 @@ static JSValue js_line_text(JSContext *ctx, JSValueConst this_val,
     return JS_NewStringLen(ctx, g_config_buf, (size_t)n);
 }
 
+// weft.activeBuffer() -> string: the focused buffer's display name, "" if none.
+// An instanced tool routes a command to the session owning that buffer.
+static JSValue js_active_buffer(JSContext *ctx, JSValueConst this_val,
+                                int argc, JSValueConst *argv) {
+    (void)argc;
+    (void)argv;
+    int n = host_active_buffer(g_config_buf, (int)sizeof g_config_buf);
+    if (n <= 0) return JS_NewStringLen(ctx, "", 0);
+    return JS_NewStringLen(ctx, g_config_buf, (size_t)n);
+}
+
 // weft.onOutput(fn): register the handler the host fires (with a stream handle)
 // when that stream has new bytes to read.
 static JSValue js_on_output(JSContext *ctx, JSValueConst this_val,
@@ -859,6 +874,7 @@ int weft_plugin_init(const char *src, int len) {
     JS_SetPropertyStr(g_ctx, weft, "fileRead", JS_NewCFunction(g_ctx, js_file_read, "fileRead", 1));
     JS_SetPropertyStr(g_ctx, weft, "fileWrite", JS_NewCFunction(g_ctx, js_file_write, "fileWrite", 2));
     JS_SetPropertyStr(g_ctx, weft, "lineText", JS_NewCFunction(g_ctx, js_line_text, "lineText", 0));
+    JS_SetPropertyStr(g_ctx, weft, "activeBuffer", JS_NewCFunction(g_ctx, js_active_buffer, "activeBuffer", 0));
     JS_SetPropertyStr(g_ctx, weft, "pick", JS_NewCFunction(g_ctx, js_pick, "pick", 2));
     JS_SetPropertyStr(g_ctx, weft, "onPick", JS_NewCFunction(g_ctx, js_on_pick, "onPick", 1));
     JS_SetPropertyStr(g_ctx, weft, "status", JS_NewCFunction(g_ctx, js_status, "status", 1));

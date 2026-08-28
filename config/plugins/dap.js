@@ -4,105 +4,152 @@
 // subprocess — launch, hit a breakpoint, see the stack, step, continue.
 //
 // DAP is JSON over stdio with `Content-Length` framing (not NDJSON like ACP).
-// The transport (procSpawn/procSend/onOutput/procRead) and the *debug*
-// transcript (bufferAppend) + status chip are the weft.* membrane; the protocol
-// is plain JS. The adapter command is config data — weft.set("dap","cmd",…) —
-// never baked (NixOS-friendly). Breakpoints come from the `debug` plugin's
-// gutter markers via weft.breakpoints(source) — the lines you mark ARE where
-// the session stops — falling back to weft.config("line") if none are set.
+// The transport (procSpawn/procSend/onOutput/procRead) and the transcript
+// (bufferAppend) + status chip are the weft.* membrane; the protocol is plain
+// JS. The adapter command is config data — weft.set("dap","cmd",…) — never
+// baked (NixOS-friendly). Breakpoints come from the `debug` plugin's gutter
+// markers via weft.breakpoints(source) — the lines you mark ARE where the
+// session stops — falling back to weft.config("line") if none are set.
 // `source` is the file breakpoints live in; `program` is the executable to
 // launch (they differ for a compiled program, coincide for an interpreter).
+//
+// SESSIONS ARE INSTANCED. A debug session is a thing you have several of (two
+// programs, two adapters), so each one is a record — its own adapter handle,
+// sequence counter, stopped thread, frame accumulator, and program/source —
+// owning its own buffer: `*debug*`, `*debug:2*`, … The buffer name IS the
+// session's identity (the repl/console/llm and git-repo idiom, weft.zig's
+// `Instances`). A command routes to the session whose buffer is FOCUSED, else
+// the most recent, so `debug-stop` stops the one you are looking at and leaves
+// the other running. `program`/`source`/`line` are snapshotted from config at
+// START, never re-read: a session's target cannot change under it.
 
-const BUF = "*debug*";
+const BASE = "debug";
+const MAX_SESSIONS = 64;
 const ST = { normal: 0, location: 4, emphasis: 5, muted: 6 };
 
-let adapter = null; // proc-stream handle
-let seq = 1; // DAP sequence counter
-let curThread = 1; // the stopped thread, for step/continue
-let inbuf = ""; // Content-Length frame accumulator
+const sessions = []; // live sessions, most-recently-started last
+let recent = null; // the session a command falls back to
 
-function log(text, cls) {
-  weft.bufferAppend(BUF, text, cls || 0);
+function instanceName(n) {
+  return n <= 1 ? "*" + BASE + "*" : "*" + BASE + ":" + n + "*";
 }
-function setStatus(s) {
-  weft.status(s);
+
+// The lowest instance name no live session holds — a stopped session's buffer
+// stays readable, but its name is free again.
+function freeName() {
+  for (let n = 1; n <= MAX_SESSIONS; n++) {
+    const name = instanceName(n);
+    if (!sessions.some((s) => s.buf === name)) return name;
+  }
+  return null;
+}
+
+function log(s, text, cls) {
+  weft.bufferAppend(s.buf, text, cls || 0);
+}
+
+// The chip names the session, so two running debuggers are told apart.
+function setStatus(s, state) {
+  weft.status("● " + s.buf + " · " + state);
+}
+
+// The session this command is about: the one owning the focused buffer, else
+// the most recent.
+function current() {
+  const active = weft.activeBuffer();
+  const focused = sessions.find((s) => s.buf === active);
+  if (focused) {
+    recent = focused;
+    return focused;
+  }
+  return recent;
+}
+
+function byHandle(h) {
+  return sessions.find((s) => s.adapter === h) || null;
+}
+
+function retire(s) {
+  const i = sessions.indexOf(s);
+  if (i >= 0) sessions.splice(i, 1);
+  if (recent === s) recent = sessions.length ? sessions[sessions.length - 1] : null;
 }
 
 // Send a DAP request with Content-Length framing (bytes; ASCII bodies here).
-function send(command, args) {
-  const body = JSON.stringify({ seq: seq++, type: "request", command, arguments: args || {} });
-  weft.procSend(adapter, "Content-Length: " + body.length + "\r\n\r\n" + body);
+function send(s, command, args) {
+  const body = JSON.stringify({ seq: s.seq++, type: "request", command, arguments: args || {} });
+  weft.procSend(s.adapter, "Content-Length: " + body.length + "\r\n\r\n" + body);
 }
 
-function onMessage(msg) {
+function onMessage(s, msg) {
   if (msg.type === "event") {
     if (msg.event === "initialized") {
       // The adapter is ready for configuration: send breakpoints, then done. The
       // lines come from the `debug` plugin's gutter markers (weft.breakpoints,
       // published per SOURCE file) — the visual breakpoints ARE the session's.
-      // Fall back to config `line` if nothing's been marked yet. `source` is the
-      // file breakpoints live in (what the debug info names); it differs from
-      // `program`, the executable to launch — for an interpreter they coincide,
-      // for a compiled program they don't. Defaults to program when unset.
-      const source = weft.config("source") || weft.config("program") || "program";
-      const csv = weft.breakpoints(source);
+      // Fall back to config `line` if nothing's been marked yet.
+      const csv = weft.breakpoints(s.source);
       const lines = csv
-        ? csv.split(",").map(function (s) { return parseInt(s, 10); }).filter(function (n) { return n > 0; })
-        : [parseInt(weft.config("line") || "1", 10)];
-      send("setBreakpoints", {
-        source: { path: source, name: source },
+        ? csv.split(",").map(function (x) { return parseInt(x, 10); }).filter(function (n) { return n > 0; })
+        : [s.line];
+      send(s, "setBreakpoints", {
+        source: { path: s.source, name: s.source },
         breakpoints: lines.map(function (l) { return { line: l }; }),
       });
-      send("configurationDone", {});
+      send(s, "configurationDone", {});
     } else if (msg.event === "stopped") {
       const b = msg.body || {};
-      curThread = b.threadId || curThread;
-      setStatus("● debug · " + (b.reason || "stopped"));
-      log("\n■ stopped: " + (b.reason || "?") + "\n", ST.emphasis);
-      send("stackTrace", { threadId: curThread, startFrame: 0, levels: 1 });
+      s.thread = b.threadId || s.thread;
+      setStatus(s, b.reason || "stopped");
+      log(s, "\n■ stopped: " + (b.reason || "?") + "\n", ST.emphasis);
+      send(s, "stackTrace", { threadId: s.thread, startFrame: 0, levels: 1 });
     } else if (msg.event === "output") {
-      log((msg.body && msg.body.output) || "");
+      log(s, (msg.body && msg.body.output) || "");
     } else if (msg.event === "terminated" || msg.event === "exited") {
-      setStatus("○ debug · done");
-      log("\n□ program terminated\n", ST.muted);
+      weft.status("○ " + s.buf + " · done");
+      log(s, "\n□ program terminated\n", ST.muted);
+      retire(s);
     }
     return;
   }
   if (msg.type === "response") {
     if (!msg.success) {
-      log("\n! " + msg.command + " failed: " + (msg.message || "") + "\n", ST.muted);
+      log(s, "\n! " + msg.command + " failed: " + (msg.message || "") + "\n", ST.muted);
       return;
     }
     if (msg.command === "initialize") {
       // Capabilities in hand — launch the program (the `initialized` event that
       // follows drives breakpoints + configurationDone).
-      send("launch", { program: weft.config("program") || "program", stopOnEntry: false });
+      send(s, "launch", { program: s.program, stopOnEntry: false });
     } else if (msg.command === "stackTrace") {
       const f = (msg.body && msg.body.stackFrames && msg.body.stackFrames[0]) || null;
-      if (f) log("  → " + ((f.source && f.source.name) || "?") + ":" + f.line + "  " + (f.name || "") + "\n", ST.location);
+      if (f) log(s, "  → " + ((f.source && f.source.name) || "?") + ":" + f.line + "  " + (f.name || "") + "\n", ST.location);
     }
     return;
   }
 }
 
-// Deframe Content-Length messages from the adapter's stdout.
+// Deframe Content-Length messages from ONE adapter's stdout. The stream handle
+// names the session, so two adapters never share a frame accumulator.
 weft.onOutput((h) => {
-  inbuf += weft.procRead(h);
+  const s = byHandle(h);
+  if (!s) return;
+  s.inbuf += weft.procRead(h);
   while (true) {
-    const m = inbuf.match(/Content-Length: (\d+)\r?\n\r?\n/);
+    const m = s.inbuf.match(/Content-Length: (\d+)\r?\n\r?\n/);
     if (!m) break;
     const len = parseInt(m[1], 10);
     const start = m.index + m[0].length;
-    if (inbuf.length < start + len) break; // await the full body
-    const body = inbuf.slice(start, start + len);
-    inbuf = inbuf.slice(start + len);
+    if (s.inbuf.length < start + len) break; // await the full body
+    const body = s.inbuf.slice(start, start + len);
+    s.inbuf = s.inbuf.slice(start + len);
     let msg;
     try {
       msg = JSON.parse(body);
     } catch (e) {
       continue;
     }
-    onMessage(msg);
+    onMessage(s, msg);
   }
 });
 
@@ -113,12 +160,28 @@ weft.command("debug-start", () => {
     weft.echo('debug: set an adapter — weft.set("dap","cmd","…")');
     return;
   }
-  seq = 1;
-  inbuf = "";
-  log("debug: launching " + cmd + "\n", ST.muted);
-  setStatus("● debug · starting");
-  adapter = weft.procSpawn(cmd);
-  send("initialize", {
+  const buf = freeName();
+  if (!buf) {
+    weft.echo("debug: too many sessions");
+    return;
+  }
+  const program = weft.config("program") || "program";
+  const s = {
+    buf,
+    adapter: null,
+    seq: 1,
+    thread: 1,
+    inbuf: "",
+    program,
+    source: weft.config("source") || program,
+    line: parseInt(weft.config("line") || "1", 10),
+  };
+  sessions.push(s);
+  recent = s;
+  log(s, "debug: launching " + cmd + " → " + s.program + "\n", ST.muted);
+  setStatus(s, "starting");
+  s.adapter = weft.procSpawn(cmd);
+  send(s, "initialize", {
     clientID: "weft",
     adapterID: "weft",
     linesStartAt1: true,
@@ -126,16 +189,17 @@ weft.command("debug-start", () => {
     pathFormat: "path",
     supportsRunInTerminalRequest: false,
   });
-  weft.echo("debug: started " + cmd);
+  weft.echo("debug: started " + s.buf);
 });
 
 function stepCmd(name, command) {
   weft.command(name, () => {
-    if (adapter === null) {
+    const s = current();
+    if (!s) {
       weft.echo("debug: no session — debug-start first");
       return;
     }
-    send(command, { threadId: curThread });
+    send(s, command, { threadId: s.thread });
   });
 }
 stepCmd("debug-continue", "continue");
@@ -143,8 +207,15 @@ stepCmd("debug-step-over", "next");
 stepCmd("debug-step-into", "stepIn");
 stepCmd("debug-step-out", "stepOut");
 
+// Stop the FOCUSED session only — a second debugger keeps running.
 weft.command("debug-stop", () => {
-  if (adapter === null) return;
-  send("disconnect", { terminateDebuggee: true });
-  setStatus("○ debug · stopped");
+  const s = current();
+  if (!s) {
+    weft.echo("debug: no session");
+    return;
+  }
+  send(s, "disconnect", { terminateDebuggee: true });
+  weft.status("○ " + s.buf + " · stopped");
+  weft.echo("debug: stopped " + s.buf);
+  retire(s);
 });

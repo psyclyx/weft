@@ -108,6 +108,7 @@ pub const imports = [_]Entry{
     e("qjs_file_read", 4, 1, .plugin, "weft.fileRead(path): the file's live-buffer-or-disk content for an agent read"),
     e("qjs_file_write", 6, 0, .plugin, "weft.fileWrite(path, content): replace the buffer for `path`, authored as the agent peer"),
     e("qjs_line_text", 2, 1, .plugin, "weft.lineText(): the active buffer's current line"),
+    e("qjs_active_buffer", 2, 1, .plugin, "weft.activeBuffer(): the focused buffer's display name — how an instanced JS tool routes a command to the session you can see"),
     e("qjs_pick", 4, 0, .plugin, "weft.pick(prompt, options): open a pick bound to this JS plugin; onPick receives candidate/input/cancelled outcome"),
     e("qjs_status", 2, 0, .plugin, "weft.status(text): set the generic plugin status chip"),
 };
@@ -117,10 +118,10 @@ pub const imports = [_]Entry{
 /// `qjs_*` import, so a merge conflict or half-finished edit fails the
 /// build instead of silently drifting quickjs.zig's three registration
 /// sites apart.
-const expected_count = 30;
+const expected_count = 31;
 
 comptime {
-    @setEvalBranchQuota(10_000); // O(n²) duplicate scan, n=30
+    @setEvalBranchQuota(10_000); // O(n²) duplicate scan, n=31
     if (imports.len != expected_count) @compileError(std.fmt.comptimePrint(
         "core/membrane/qjs_contract.zig: imports table has {d} entries, expected {d}. " ++
             "If you added or removed a qjs_* import, update `expected_count` here and wire " ++
@@ -163,7 +164,7 @@ test "qjs membrane contract: every entry is well-formed, documented, and unique"
     }
     try t.expectEqual(@as(usize, expected_count), imports.len);
     try t.expectEqual(@as(usize, 13), config_count); // defineConfigFns' surface
-    try t.expectEqual(@as(usize, 17), plugin_count); // the resident-plugin-only surface
+    try t.expectEqual(@as(usize, 18), plugin_count); // the resident-plugin-only surface
 }
 
 // Sealed eval (doc/configuration.md §5 C11; manifest.zig's module doc):
