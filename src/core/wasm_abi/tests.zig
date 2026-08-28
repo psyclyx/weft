@@ -1716,6 +1716,14 @@ test "wasm plugin: git-status runs git into a focused tool buffer (async)" {
     const plugin = try loadPlugin(&engine, &env.ctx, "git", @embedFile("guest_git_wasm"), .{ .loop = &loop });
     defer plugin.deinit();
     try t.expect(plugin.perms[wasm_host.perm_proc] and plugin.perms[wasm_host.perm_timer]);
+    // git holds NO write authority (doc/place.md §4.2): the patch, each draft's
+    // message, and the rebase plan all go out through `wl_proc_spool`, which
+    // names and removes their temps host-side. Re-introducing `fs_write` — for
+    // any reason — must be a loud, deliberate change, not a quiet regrant.
+    // (fs_read stays: finding the repository root and detecting an in-progress
+    // rebase are ancestor/marker probes with no target-shaped equivalent yet.)
+    try t.expect(!plugin.perms[wasm_host.perm_fs_write]);
+    try t.expect(plugin.perms[wasm_host.perm_fs_read]);
 
     // Phase 2b/2c: the transient verbs are declared + registered (menu modes are
     // keymap state, but each terminal action is a real command).

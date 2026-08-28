@@ -57,8 +57,12 @@
 //! REBASE PLAN is the same shape: an instanced entry saved to run its rebase
 //! through git's own `GIT_SEQUENCE_EDITOR`.
 //!
-//! perms `{proc, timer, fs_write}` — fs_write drops each draft's message and the
-//! synthesized patch into temp files. grant_max edit (it authors its own buffer).
+//! perms `{proc, timer, fs_read}` — fs_read finds the repository root and
+//! detects an in-progress rebase. NOT fs_write: the three things git hands a
+//! subprocess on disk — a synthesized patch, a draft's message, a rebase plan —
+//! all go through `weft.procSpool`, which writes them to a temp the HOST names
+//! and removes. git names no path it writes and cleans up nothing
+//! (`doc/place.md` §4.2). grant_max edit (it authors its own buffer).
 
 const std = @import("std");
 const weft = @import("weft");
@@ -77,18 +81,13 @@ var patch_buf: [PATCH_CAP]u8 = undefined;
 /// small wasm stack).
 var body_out: [PATCH_CAP]u8 = undefined;
 
-/// A temp file, written INSIDE the session's repository (see `RepoSession.inRepo`)
-/// — the plugin's cwd is the editor's, which is not where the repository is.
-/// Removed by the same command that consumes it.
-const patch_tmp = ".weft-git.patch";
-
 const InputAction = enum(u8) { none, branch_checkout, branch_create, branch_new, branch_rename, branch_delete, rebase_start };
 
 /// Buffer for building a rebase plan's todo lines + the transient op command.
 var op_buf: [1 << 14]u8 = undefined;
 /// The command handed to `procToBuffer`: the session's `cd` guard + the body.
 var run_buf: [1 << 14]u8 = undefined;
-/// Scratch for an absolute temp-file path inside the session's repository.
+/// Scratch for an absolute path inside the session's repository (`inRepo`).
 var tmp_buf: [1024]u8 = undefined;
 /// Scratch for the path a repository root is detected from (`weft.path` and
 /// `weft.cwd` both borrow the shim's shared read scratch).
@@ -272,7 +271,7 @@ const RepoSession = struct {
         return self.name_buf[0..self.name_len];
     }
     /// A repository-relative path made absolute — the editor's own doors
-    /// (`fsWrite`, `open`) resolve against ITS working directory, which is not
+    /// (`open`, `fsList`) resolve against ITS working directory, which is not
     /// where this repository is.
     fn inRepo(self: *const RepoSession, leaf: []const u8) []const u8 {
         return std.fmt.bufPrint(&tmp_buf, "{s}/{s}", .{ self.root(), leaf }) catch leaf;
@@ -410,8 +409,9 @@ export fn describe() void {
     for (cmds) |c| weft.declareCommand(c.name);
     weft.requestPerm(.proc);
     weft.requestPerm(.timer);
-    weft.requestPerm(.fs_write);
-    // fs_read: find the repository root, detect an in-progress rebase.
+    // fs_read: find the repository root, detect an in-progress rebase. There is
+    // deliberately no fs_write — every file git hands a subprocess is spooled
+    // by the host (`weft.procSpool`), so this plugin can write nowhere.
     weft.requestPerm(.fs_read);
 }
 export fn init() void {
@@ -1839,11 +1839,7 @@ fn applyHunk(hi: usize, sel: ?Lines, reverse: bool) void {
         weft.echo("git: patch too large");
         return;
     };
-    if (!weft.fsWrite(cur.inRepo(patch_tmp), patch)) {
-        weft.echo("git: could not write patch");
-        return;
-    }
-    gatherAfterPatch(if (reverse) "--cached --reverse" else "--cached", false);
+    gatherAfterPatch(patch, if (reverse) "--cached --reverse" else "--cached", false);
 }
 
 /// Discard a hunk: reverse it out of the worktree; for a staged hunk, also drop
@@ -1854,14 +1850,10 @@ fn discardHunk(hi: usize, sel: ?Lines, staged: bool) void {
         weft.setMode("git");
         return;
     };
-    if (!weft.fsWrite(cur.inRepo(patch_tmp), patch)) {
-        weft.setMode("git");
-        return;
-    }
     // Unstaged hunk: reverse it out of the worktree. Staged hunk: reverse it out
     // of the index (`--cached --reverse`) AND the worktree (the trailing
     // `--reverse` gatherAfterPatch adds) — git discards the change entirely.
-    if (staged) gatherAfterPatch("--cached --reverse", true) else gatherAfterPatch("--reverse", false);
+    if (staged) gatherAfterPatch(patch, "--cached --reverse", true) else gatherAfterPatch(patch, "--reverse", false);
 }
 
 /// Build a one-file/one-hunk patch: the file's kept diff header + the hunk. With
@@ -1993,19 +1985,12 @@ const Draft = struct {
     session: usize = 0,
     flags: [64]u8 = undefined,
     flags_len: usize = 0,
-    /// This draft's message file, named after its entry so two live drafts
-    /// never write over each other.
-    tmp: [64]u8 = undefined,
-    tmp_len: usize = 0,
     /// The commit this draft was opened ONTO (fixup/squash) — a durable OID,
     /// and what a re-seat needs. `.none` for an ordinary commit.
     onto: Target = .{},
 
     fn flagsOf(self: *const Draft) []const u8 {
         return self.flags[0..self.flags_len];
-    }
-    fn tmpOf(self: *const Draft) []const u8 {
-        return self.tmp[0..self.tmp_len];
     }
 };
 /// The tool identity a draft entry carries — what scopes its `save` provider.
@@ -2017,8 +2002,6 @@ const Todo = struct {
     session: usize = 0,
     base: [64]u8 = undefined, // the rebase base ref (`HEAD~N`)
     base_len: usize = 0,
-    tmp: [64]u8 = undefined,
-    tmp_len: usize = 0,
 };
 const todo_tool = "git-rebase";
 const Todos = weft.Instances(Todo, 4);
@@ -2045,7 +2028,6 @@ fn openDraft(flags: []const u8, prefill: []const u8) ?*Drafts.Slot {
     };
     slot.value = .{ .session = sessionIndex(cur) };
     setFlags(slot, flags);
-    slot.value.tmp_len = tmpPathFor(slot.name(), &slot.value.tmp);
     weft.toolBacking(draft_tool);
     seedDraft(slot, prefill);
     weft.jump(0);
@@ -2059,24 +2041,6 @@ fn setFlags(slot: *Drafts.Slot, flags: []const u8) void {
     @memcpy(slot.value.flags[0..slot.value.flags_len], flags[0..slot.value.flags_len]);
     draft_ordinal +%= 1;
     publishOffers();
-}
-
-/// A per-entry temp file named after the entry, so two live ones never write
-/// over each other. Returns its length in `tmp`.
-fn tmpPathFor(name: []const u8, tmp: []u8) usize {
-    const prefix = ".weft-";
-    var w: usize = prefix.len;
-    @memcpy(tmp[0..w], prefix);
-    for (name) |c| {
-        if (w == tmp.len) break;
-        tmp[w] = switch (c) {
-            'a'...'z', '0'...'9' => c,
-            '-', ':' => '-',
-            else => continue,
-        };
-        w += 1;
-    }
-    return w;
 }
 
 /// Seed a draft's message from `prefill`'s stdout (`git log -1 --format=%B` for
@@ -2116,21 +2080,18 @@ fn gitCommitSave() void {
     const n = @min(text.len, msg_buf.len);
     @memcpy(msg_buf[0..n], text[0..n]);
     const d = &slot.value;
-    // The message file lives in the draft's own repository — `show` runs the
-    // command there, so it names the file relative to that root.
-    if (!weft.fsWrite(cur.inRepo(d.tmpOf()), msg_buf[0..n])) {
-        weft.echo("commit: could not write the message");
-        return;
-    }
     cur.committing = slot;
+    // `{}` is the SPOOLED message: the host writes it, `git commit -F` reads it
+    // (an absolute path outside the work tree is fine — git only opens it), and
+    // the host removes it whether or not the commit was accepted.
     const cmd = std.fmt.bufPrint(
         &cmd_buf,
-        "git commit {s} -F '{s}' 2>&1; s=$?; rm -f '{s}'; " ++
+        "git commit {s} -F '{{}}' 2>&1; s=$?; " ++
             "printf '\\036\\036C%d\\n' \"$s\"; " ++ GATHER,
-        .{ d.flagsOf(), d.tmpOf(), d.tmpOf() },
+        .{d.flagsOf()},
     ) catch return;
     cur.restore_cursor = false;
-    show(cmd, cur.name(), .commit);
+    showInput(cmd, msg_buf[0..n], cur.name(), .commit);
 }
 
 /// The commit ran: git's own words and exit status precede the status gather.
@@ -2433,6 +2394,16 @@ fn gitBlame() void {
 /// that has gone away aborts the command rather than letting it act on whatever
 /// repository the editor's working directory happens to be.
 fn show(cmd: []const u8, name: []const u8, fill: Fill) void {
+    showInput(cmd, null, name, fill);
+}
+
+/// `show`, plus bytes the command reads back off disk from `{}`. The bytes are
+/// SPOOLED: `weft.procSpool` writes them to a temp the HOST names, substitutes
+/// its path, and deletes it when the command is done — succeeded or failed.
+/// Every file git used to drop into the work tree (`.weft-git.patch`, a draft's
+/// message, a rebase plan) comes through here instead, which is why git holds
+/// no `fs_write` and no command of ours ends in `rm -f`.
+fn showInput(cmd: []const u8, input: ?[]const u8, name: []const u8, fill: Fill) void {
     const body = std.fmt.bufPrint(&run_buf, "cd '{s}' || exit 0\n{s}", .{ cur.root(), cmd }) catch return;
     if (!focusBuffer(name)) weft.runStr("buffer-create", name);
     if (gathers(fill)) {
@@ -2441,7 +2412,8 @@ fn show(cmd: []const u8, name: []const u8, fill: Fill) void {
         weft.toolBacking(tool);
         cur.gathering = true; // the projection is now provisional
     }
-    weft.procToBuffer(body, name, fillToken(fill, cur));
+    const token = fillToken(fill, cur);
+    if (input) |bytes| weft.procSpool(body, bytes, name, token) else weft.procToBuffer(body, name, token);
 }
 
 /// Re-gather this session's status into its own buffer.
@@ -2491,14 +2463,19 @@ fn gatherAfterSeq1(comptime fmt: []const u8, arg: []const u8) void {
 }
 
 /// `git apply <flags> <patch>` (optionally also reverse it from the worktree for
-/// a staged-hunk discard), rm the temp patch, then re-gather.
-fn gatherAfterPatch(flags: []const u8, also_worktree: bool) void {
+/// a staged-hunk discard), then re-gather. `{}` is the SPOOLED patch: the host
+/// writes it, hands `git apply` the path, and removes it — including when the
+/// apply fails, which is exactly when the old in-repo temp used to survive.
+/// `git apply` reads its patch file from anywhere, so it need not be in the
+/// work tree; only the paths INSIDE the patch are repo-relative, and those are
+/// resolved by the `cd` guard `showInput` prepends.
+fn gatherAfterPatch(patch: []const u8, flags: []const u8, also_worktree: bool) void {
     markRestore();
     const cmd = if (also_worktree)
-        std.fmt.bufPrint(&cmd_buf, "git apply {s} {s}; git apply --reverse {s}; rm -f {s}; " ++ GATHER, .{ flags, patch_tmp, patch_tmp, patch_tmp }) catch return
+        std.fmt.bufPrint(&cmd_buf, "git apply {s} {{}}; git apply --reverse {{}}; " ++ GATHER, .{flags}) catch return
     else
-        std.fmt.bufPrint(&cmd_buf, "git apply {s} {s}; rm -f {s}; " ++ GATHER, .{ flags, patch_tmp, patch_tmp }) catch return;
-    gather(cmd);
+        std.fmt.bufPrint(&cmd_buf, "git apply {s} {{}}; " ++ GATHER, .{flags}) catch return;
+    showInput(cmd, patch, cur.name(), .status);
     weft.setMode("git");
 }
 
@@ -2735,7 +2712,6 @@ fn startRebase(nstr: []const u8) void {
     slot.value = .{ .session = sessionIndex(cur) };
     const base = std.fmt.bufPrint(&slot.value.base, "HEAD~{s}", .{nstr}) catch return;
     slot.value.base_len = base.len;
-    slot.value.tmp_len = tmpPathFor(slot.name(), &slot.value.tmp);
     weft.toolBacking(todo_tool);
     const cmd = std.fmt.bufPrint(&cmd_buf, "git log --reverse --format='%h %s' {s}..HEAD 2>/dev/null", .{base}) catch return;
     show(cmd, slot.name(), .rebase); // listed from the plan's own repository
@@ -2773,19 +2749,19 @@ fn gitRebaseSave() void {
     const n = @min(text.len, msg_buf.len);
     @memcpy(msg_buf[0..n], text[0..n]);
     const v = &slot.value;
-    if (!weft.fsWrite(cur.inRepo(v.tmp[0..v.tmp_len]), msg_buf[0..n])) {
-        weft.echo("rebase: could not write the plan");
-        return;
-    }
     cur.sequencing = slot;
+    // `{}` is the SPOOLED plan. git runs `$GIT_SEQUENCE_EDITOR <todo>` while
+    // `git rebase -i` is still in flight, so the temp is alive exactly when the
+    // `cp` needs it and gone the moment the rebase returns — including a rebase
+    // that stopped on a conflict, where the old in-repo plan used to linger.
     const cmd = std.fmt.bufPrint(
         &cmd_buf,
-        "GIT_SEQUENCE_EDITOR='cp {s}' GIT_EDITOR=true git rebase -i {s} 2>&1; s=$?; rm -f {s}; " ++
+        "GIT_SEQUENCE_EDITOR='cp {{}}' GIT_EDITOR=true git rebase -i {s} 2>&1; s=$?; " ++
             "printf '\\036\\036C%d\\n' \"$s\"; " ++ GATHER,
-        .{ v.tmp[0..v.tmp_len], v.base[0..v.base_len], v.tmp[0..v.tmp_len] },
+        .{v.base[0..v.base_len]},
     ) catch return;
     cur.restore_cursor = false;
-    show(cmd, cur.name(), .sequence);
+    showInput(cmd, msg_buf[0..n], cur.name(), .sequence);
 }
 
 fn sequenceFill() void {
