@@ -204,10 +204,12 @@ pub const Layer = struct {
     }
 
     /// Whether this feed's spans still resolve against the entry revision they
-    /// were published for. An unstamped (builtin) feed always resolves — its
-    /// anchors ARE its truth.
+    /// were published for. A builtin feed always resolves — its anchors ARE
+    /// its truth. An ANNOTATION feed resolves only inside a round it stamped,
+    /// so skipping `begin` publishes nothing rather than publishing something
+    /// staleness can never catch up with.
     pub fn resolves(self: *const Layer) bool {
-        const stamp = self.stamp orelse return true;
+        const stamp = self.stamp orelse return self.feed == .builtin;
         return stamp == self.doc.revision();
     }
 
@@ -460,4 +462,11 @@ test "layers: feeds coexist per name, never cross classes, and release takes onl
     // A name someone else owns is not the caller's to drop.
     store.release(gpa, &doc, "lens", "marks");
     try std.testing.expect(store.find(&doc, "lens") != null);
+
+    // Staleness is not a decorator's to opt out of: spans published outside a
+    // stamped round paint nothing at all.
+    const unstamped = try store.claimAnnotation(gpa, &doc, "unstamped", "marks");
+    try unstamped.appendSpan(gpa, .{ .start = 0, .end = 2, .kind = 5, .message = "" });
+    try std.testing.expect(!unstamped.resolves());
+    try std.testing.expectEqual(@as(usize, 0), unstamped.spanCount());
 }
