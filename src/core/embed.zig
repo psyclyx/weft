@@ -620,6 +620,7 @@ test "embed: placeholder, resolved window, live staleness, then fallback" {
     var embeds: Embeds = .init(fixture.resolver());
     defer embeds.deinit(gpa);
     try t.expectEqual(@as(usize, 1), try embeds.scan(gpa, &doc));
+    try t.expectEqual(@as(usize, 0), try embeds.scan(gpa, &doc)); // already bound
     const ref = fixtureRef: {
         embeds.pump(gpa, null);
         break :fixtureRef fixture.take();
