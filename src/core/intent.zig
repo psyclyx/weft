@@ -336,10 +336,23 @@ fn refused(buf: []u8, comptime fmt: []const u8, args: anytype) Invocation {
 /// this prevents.
 pub fn catalogContext(ctx: *command.Context) catalog_mod.Context {
     const entry = ctx.buffers.active();
+    // WHERE this entry's bytes live (`facts.zig`'s `Locality`) — answerable
+    // only now that an entry has a place. A tool entry is `.tool` first: its
+    // content is a projection, so "are the files real here" is not a question
+    // about it.
+    const locality: @import("facts.zig").Locality =
+        if (entry.tool.len > 0) .tool else if (entry.place.isHere()) .local else .remote;
     const path = if (entry.textEditor()) |ed| ed.backingPath() else null;
     var h = std.hash.Wyhash.init(0);
     h.update(ctx.head.currentMode());
     h.update(entry.tool);
+    // Fold the locality too. The `.facts` literal below and this signature
+    // must always name the same fields: a fact the hash omits changes
+    // resolution without bumping the revision, so `cached()` keeps handing
+    // back a snapshot built for a different world. That is the one edit here
+    // with neither a compiler nor a test to catch it -- hence this comment
+    // sitting on the line it applies to.
+    h.update(&[_]u8{@intFromEnum(locality)});
     h.update(&[_]u8{@intFromBool(path != null)});
     if (ctx.head.semantic_focus.view) |view| {
         h.update(std.mem.asBytes(&view.slot));
@@ -360,6 +373,7 @@ pub fn catalogContext(ctx: *command.Context) catalog_mod.Context {
             .mode = ctx.head.currentMode(),
             .lang = Actions.langOfName(entry.name),
             .tool = entry.tool,
+            .locality = locality,
             .pane = ctx.head.focused_pane,
         },
     };
