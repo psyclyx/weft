@@ -89,6 +89,7 @@ pub const session = @import("session.zig");
 pub const hub = @import("hub.zig");
 pub const locus = @import("locus.zig");
 pub const place = @import("place.zig");
+pub const env = @import("env.zig");
 /// The membrane import tables, exported so a gate can compare the two
 /// surfaces as DATA rather than by scraping their source text.
 pub const membrane = struct {
