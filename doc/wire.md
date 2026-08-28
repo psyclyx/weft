@@ -62,11 +62,12 @@ Every frame belongs to exactly one class — ambiguity is a spec bug:
   default, settable per request): when it passes, the caller gets an
   explicit failure — never an unbounded wait for a reply that is not
   coming. A responder that cannot serve a call says so, with `err`
-  (blob/base) or `fs_err` (`.peer` filesystem), payload `uv id` and an
-  additive trailing reason byte (`0` unspecified, `1` not-granted — the
-  export surface the call asked for was never granted to this peer); the
-  two cycles number their ids independently, which is why the failure
-  kind is split exactly like `ok`/`fs_ok`. A peer that predates a failure
+  (blob/base), `fs_err` (`.peer` filesystem) or `lsp_err` (the typed
+  language service), payload `uv id` and an additive trailing reason byte
+  (`0` unspecified, `1` not-granted — the export surface the call asked
+  for was never granted to this peer); the three cycles number their ids
+  independently, which is why the failure kind is split exactly like
+  `ok`/`fs_ok`/`lsp_ok`. A peer that predates a failure
   kind ignores it and falls back to the deadline; one that predates the
   reason byte reads the id and stops, which is exactly the old plain
   refusal. Retrying is the caller's policy, never the transport's.
@@ -181,7 +182,11 @@ replace nothing — `share` still announces the quad.
   export-by-export rather than desynchronizing the payload. A body is
   `u8 tag=0 | u8 replica_kind | u8 admission` or `u8 tag=1 | u8 surface |
   u8 ops`. v1 surfaces are `presence | diagnostics | fs_hierarchy |
-  fs_bytes | fs_mutate` — exactly the traffic the quad already carries.
+  fs_bytes | fs_mutate | lsp`. All but the last name traffic the quad
+  already carried; `lsp` (the typed language service, architecture §14.4)
+  is the first surface a share must CHOOSE — it is deliberately absent
+  from the legacy bundle, so sharing a document never starts answering
+  questions about it.
 - **`unpublish` (kind 6)**: `uv base | uv epoch`. Exports are revoked,
   the epoch advances, the receiver marks the quad stale and invalidates
   everything it translated out of it (rendered peer cursors, imported
@@ -194,7 +199,8 @@ owner would be a spoof, not an authority.
 Routing is unchanged — by quad, `base = channel & ~3`. The descriptor
 only decides which surfaces are LIVE: an inbound frame for a surface the
 quad does not export is dropped with one line in the log, never a crash
-and never a silent acceptance. Replies (`ok`/`err`/`fs_ok`/`fs_err`) are
+and never a silent acceptance. Replies (`ok`/`err`, `fs_ok`/`fs_err`,
+`lsp_ok`/`lsp_err`) are
 never gated — an answer to a call we made is not an invocation, and
 settling it beats waiting out a deadline.
 
