@@ -326,22 +326,41 @@ belongs in the same batch.
 
 Two further primitives close the honest gaps:
 
-- **A marker/ancestor query against a place** — "the nearest ancestor holding
-  `.git`", "does `.envrc` exist here". Probing machinery *inside* user content
-  is path-shaped by nature and has no target equivalent today; both git and
-  `project` open-code it against `fsExists`.
+- **A marker query against a place** — "is this project a git repository", "is
+  a rebase mid-flight", "does `.envrc` exist here". Probing machinery *inside*
+  user content is path-shaped by nature and has no target equivalent today;
+  both git and `project` open-coded it against `fsExists`, on a grant that
+  reached the whole filesystem to answer a question about the directory the
+  dispatch was already in.
+
+  **LANDED.** `wl_place_has(rel) -> kind` answers what
+  `<the dispatching place>/<rel>` is, in `wl_fs_exists`'s vocabulary (0 none, 1
+  file, 2 dir, 3 other). It carries **no permission** and, crucially, no
+  *ancestor* half: the climb it was meant to serve turned out to be the thing
+  to delete, not the thing to grant, because the host already walks the marker
+  list when a file is opened and hands every entry the answer. What was left
+  was a question about ONE name inside a place you are already in, and that is
+  what the door is. `wasm_host/proc.zig`'s `placeKind` resolves it through
+  `RootedFs` — `openat2(RESOLVE_BENEATH | RESOLVE_NO_SYMLINKS)`, exactly as
+  `fsExists` was fixed to — so an absolute `rel`, a `..`, and a symlink planted
+  inside the place all fail in the kernel, atomically, with no lexical check to
+  get wrong. The §4.1 machinery carve-out applies unconditionally, because an
+  ungated door is precisely the one a capability-less plugin would use to
+  confirm the module cache is there.
 - **kv persistence** (`plans/02-native-surface.md:107`, P12). `kv.zig`'s header
   says state "outlives a run", but `serialize`/`load` have zero production
   callers and both stores die with the process — so `project-recent` silently
   empties on every restart. Until P12 lands, "use kv instead of files" is not
   an argument a plugin author can act on.
 
-The payoff is measurable. `git.zig` declares its grants with the reason
-attached: "fs_write drops each draft's message and the synthesized patch into
-temp files" and "fs_read: find the repository root, detect an in-progress
-rebase." Given a spool door and a marker query, **git drops to `{proc, timer}`**
-— the set `direnv` already has. Two capabilities leave the most privileged
-plugin in the tree, because the reason it needed them was removed.
+The payoff was measurable, and it was collected. `git.zig` used to declare its
+grants with the reason attached: "fs_write drops each draft's message and the
+synthesized patch into temp files" and "fs_read: find the repository root,
+detect an in-progress rebase." Given a spool door and a marker query, **git
+dropped to `{proc, timer}`** — the set `direnv` and `spool` already have — and
+`project` dropped to nothing at all. Three capabilities left the two plugins,
+one of them the most privileged in the tree, because the reason each was needed
+was removed rather than refused.
 
 ## 5. Sessions: identity plus links, not place-keyed tables
 
@@ -456,12 +475,41 @@ before and means "8 (language, project) pairs" now, at ~18 KB per session.
 to `{proc, timer}`; the five root detectors collapse to one provider. Gates:
 git declares no fs capability; recents survive a restart.
 
-Half of that gate is met: git declares no **`fs_write`**, asserted in
-`wasm_abi/tests.zig`'s git test so a regrant is loud. It still holds `fs_read`,
-and will until the marker/ancestor query exists — finding the repository root
-and detecting an in-progress rebase are the only two uses left, and both are
-exactly the path-shaped probe that query is for. The gate tightens to "no fs
-capability" when that lands, not before.
+**That gate is met.** `git` and `project` both declare **no filesystem
+capability at all** — asserted in `wasm_abi/tests.zig` for each, so a regrant
+of either `fs_read` or `fs_write` is loud. `fs_write` went with the spool
+(§4.2); `fs_read` went with `wl_place_has`, and the two plugins reached zero by
+losing their REASONS rather than by having a grant withheld:
+
+- git's repository-root climb is deleted outright. It was a second detector of
+  a fact `app/session.zig` already establishes over the same marker list when a
+  file is opened, so `activeRoot` is now `weft.placeRoot()` and nothing else —
+  which also makes the marker rule right by construction, since a plugin that
+  cannot climb cannot walk up out of a `.jj`-rooted project into an enclosing
+  `.git` checkout.
+- git's rebase probe is `placeHas(".git/rebase-merge")` /
+  `placeHas(".git/rebase-apply")` — two questions about the place the command
+  dispatches in, replacing an `fsList` of `<root>/.git` that grepped the names.
+- `project-root` is `weft.placeRoot()`. Its climb, its marker list, and the kv
+  cache that existed to answer for a path-less tool buffer all go: an entry
+  inherits the place of whatever produced it, and a user's pinned working
+  target overrides both, which no climb could have discovered.
+
+`wl_place_has(rel) -> kind` carries **no permission**, for three reasons that
+are each structural rather than argued: it reveals strictly less than
+`wl_place_root` beside it (which hands out the whole directory); strictly less
+than `proc` (whose holder runs children at that place and can `test -e` freely);
+and it cannot escape the place, because it resolves through `RootedFs` —
+`openat2(RESOLVE_BENEATH | RESOLVE_NO_SYMLINKS)` — so an absolute `rel`, a `..`,
+and a symlink planted inside the place all fail in the kernel. Every refusal
+answers `.none`: with no grant to diagnose, a *distinguishable* refusal would
+itself be a signal. The §4.1 machinery carve-out applies unconditionally here
+too — a place can be an ancestor of the editor's own state (the
+version-controlled home directory), and an ungated door is exactly the one a
+capability-less plugin would use to confirm the module cache is there.
+
+Remaining in this wave: kv persistence (P12), so `project-recent` survives a
+restart.
 
 **Wave 6 — Close the standing list.** ABI symmetry (an authority parameter on
 `fs_read`/`fs_write`/`fs_exists`, as `fs_list` already has); grants confined by

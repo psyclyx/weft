@@ -1305,6 +1305,13 @@ test "wasm plugin: project command args/result + kv cross the membrane" {
     const plugin = try loadPlugin(&engine, &env.ctx, "project", @embedFile("guest_project_wasm"), .{ .kv = &store });
     defer plugin.deinit();
 
+    // `project` declares NO filesystem capability. Its one use of `fs_read`
+    // was a VCS-marker climb duplicating the root the host already detects at
+    // open time; `project-root` reads that place instead (doc/place.md §4.2).
+    // Asserted here so a regrant of either fs capability is loud.
+    try t.expect(!plugin.perms[wasm_host.perm_fs_read]);
+    try t.expect(!plugin.perms[wasm_host.perm_fs_write]);
+
     // Seed the recent list host-side (namespaced to the plugin); the guest
     // reads it back through kv and returns it as a string result.
     try store.put(gpa, "project", "recent", "a.zig\nb.zig");
@@ -1716,14 +1723,17 @@ test "wasm plugin: git-status runs git into a focused tool buffer (async)" {
     const plugin = try loadPlugin(&engine, &env.ctx, "git", @embedFile("guest_git_wasm"), .{ .loop = &loop });
     defer plugin.deinit();
     try t.expect(plugin.perms[wasm_host.perm_proc] and plugin.perms[wasm_host.perm_timer]);
-    // git holds NO write authority (doc/place.md §4.2): the patch, each draft's
+    // git holds NO FILESYSTEM AUTHORITY AT ALL — the payoff doc/place.md §4.2
+    // predicted, landed. `fs_write` went first: the patch, each draft's
     // message, and the rebase plan all go out through `wl_proc_spool`, which
-    // names and removes their temps host-side. Re-introducing `fs_write` — for
-    // any reason — must be a loud, deliberate change, not a quiet regrant.
-    // (fs_read stays: finding the repository root and detecting an in-progress
-    // rebase are ancestor/marker probes with no target-shaped equivalent yet.)
+    // names and removes their temps host-side. `fs_read` followed it: finding
+    // the repository root is now reading the place the dispatch is already in
+    // (`wl_place_root`), and detecting an in-progress rebase is two
+    // `wl_place_has` probes that cannot leave that place. Each grant went away
+    // because its REASON was removed, so re-introducing either — for any
+    // reason — must be a loud, deliberate change, not a quiet regrant.
     try t.expect(!plugin.perms[wasm_host.perm_fs_write]);
-    try t.expect(plugin.perms[wasm_host.perm_fs_read]);
+    try t.expect(!plugin.perms[wasm_host.perm_fs_read]);
 
     // Phase 2b/2c: the transient verbs are declared + registered (menu modes are
     // keymap state, but each terminal action is a real command).

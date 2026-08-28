@@ -57,12 +57,16 @@
 //! REBASE PLAN is the same shape: an instanced entry saved to run its rebase
 //! through git's own `GIT_SEQUENCE_EDITOR`.
 //!
-//! perms `{proc, timer, fs_read}` — fs_read finds the repository root and
-//! detects an in-progress rebase. NOT fs_write: the three things git hands a
-//! subprocess on disk — a synthesized patch, a draft's message, a rebase plan —
-//! all go through `weft.procSpool`, which writes them to a temp the HOST names
-//! and removes. git names no path it writes and cleans up nothing
-//! (`doc/place.md` §4.2). grant_max edit (it authors its own buffer).
+//! perms `{proc, timer}` — NO filesystem capability at all, which for the most
+//! privileged plugin in the tree is the whole point of `doc/place.md` §4.2.
+//! The three things git hands a subprocess on disk — a synthesized patch, a
+//! draft's message, a rebase plan — go through `weft.procSpool`, which writes
+//! them to a temp the HOST names and removes; git names no path it writes and
+//! cleans up nothing. The two things it PROBES for — is this project a git
+//! repository, is a rebase mid-flight — go through `weft.placeHas`, which
+//! answers about the place this command already dispatches in and cannot
+//! escape it. Neither reason for a grant survived the primitive that replaced
+//! it. grant_max edit (it authors its own buffer).
 
 const std = @import("std");
 const weft = @import("weft");
@@ -89,9 +93,12 @@ var op_buf: [1 << 14]u8 = undefined;
 var run_buf: [1 << 14]u8 = undefined;
 /// Scratch for an absolute path inside the session's repository (`inRepo`).
 var tmp_buf: [1024]u8 = undefined;
-/// Scratch for the path a repository root is detected from (`weft.path` and
-/// `weft.placeRoot` both borrow the shim's shared read scratch).
+/// Scratch for the focused buffer's path made absolute (`activePathAbs`) —
+/// `weft.path` and `weft.placeRoot` both borrow the shim's shared read
+/// scratch, so the join needs a buffer neither of them owns.
 var probe_buf: [1024]u8 = undefined;
+/// Scratch for the dispatching place's directory (`placeDir`), copied off that
+/// same shared scratch.
 var base_buf: [1024]u8 = undefined;
 
 /// ONE gather command: porcelain status (+ branch), the unstaged diff, the
@@ -270,9 +277,8 @@ const RepoSession = struct {
     fn name(self: *const RepoSession) []const u8 {
         return self.name_buf[0..self.name_len];
     }
-    /// A repository-relative path made absolute — the editor's own doors
-    /// (`open`, `fsList`) resolve against ITS working directory, which is not
-    /// where this repository is.
+    /// A repository-relative path made absolute — `open` resolves against the
+    /// editor's own working directory, which is not where this repository is.
     fn inRepo(self: *const RepoSession, leaf: []const u8) []const u8 {
         return std.fmt.bufPrint(&tmp_buf, "{s}/{s}", .{ self.root(), leaf }) catch leaf;
     }
@@ -407,12 +413,14 @@ const cmds = [_]Cmd{
 
 export fn describe() void {
     for (cmds) |c| weft.declareCommand(c.name);
+    // `{proc, timer}` and nothing else — the set `direnv` and `spool` have.
+    // Every file git hands a subprocess is spooled by the host
+    // (`weft.procSpool`), and every path it used to PROBE is inside the place
+    // it already dispatches in (`weft.placeHas`), so there is no filesystem
+    // question left for a grant to answer. `wasm_abi/tests.zig` asserts the
+    // absence of both fs capabilities, so a regrant is loud.
     weft.requestPerm(.proc);
     weft.requestPerm(.timer);
-    // fs_read: find the repository root, detect an in-progress rebase. There is
-    // deliberately no fs_write — every file git hands a subprocess is spooled
-    // by the host (`weft.procSpool`), so this plugin can write nowhere.
-    weft.requestPerm(.fs_read);
 }
 export fn init() void {
     for (&sessions) |*s| s.* = .{};
@@ -754,19 +762,37 @@ fn route(kind: Route) ?*RepoSession {
     return if (session_count == 0) sessionFor(activeRoot()) else cur;
 }
 
-/// The repository root the FOCUSED buffer belongs to: the nearest ancestor
-/// holding `.git`, else this dispatch's own place (the locus a repo would be
-/// created in). Absolute, so the same repository always keys one session.
+/// The repository root this command is about: WHERE it runs (`doc/place.md`).
+/// Absolute, so the same repository always keys one session.
 ///
-/// The climb SURVIVES places rather than being replaced by one, because the
-/// two answer different questions at different times: a place is detected when
-/// a file is OPENED, over every VCS marker; `.git` can appear afterwards (an
-/// in-editor `git init`) and only git knows which marker counts. What the
-/// place supplies is the FLOOR — see `detectRoot`.
+/// **The climb is gone, and with it git's last filesystem grant.** The host
+/// detects a place when a file is opened by walking exactly the markers this
+/// plugin used to walk itself (`app/session.zig`'s `project_markers`) — up
+/// from the file, stopping at a floor, `.git` counting whatever kind it is —
+/// so climbing again here was a SECOND detector of one fact, running on a
+/// grant that reached the whole filesystem to answer a question about the
+/// user's own project. The focused buffer's path is not consulted either: an
+/// entry's place is derived from its path, so asking the place already asks
+/// about that file.
+///
+/// It also makes the marker rule right by construction rather than by care.
+/// The place is where the project's OWN marker is, and this plugin can no
+/// longer walk up out of it: a project rooted at a `.jj` or `.hg` top stays
+/// its own root instead of resolving to whatever enclosing `.git` checkout
+/// happens to contain it — the "must not claim a foreign repository" property,
+/// held by DELETING the climb rather than by adding a check to it.
+///
+/// Note what is deliberately NOT asked here: whether the place holds `.git`.
+/// That question has its own door (`weft.placeHas`) and a real caller
+/// (`rebaseInProgress`), but it cannot pick a root, because both answers pick
+/// the SAME directory. A place without a repository is where `git-init`
+/// creates one, and the gather renders the honest "Not a git repository."
+/// until it does — so a `.git` probe here would decide nothing.
+///
+/// Empty is the one refusal (a peer place, or a container that went away);
+/// `sessionFor` names it.
 fn activeRoot() []const u8 {
-    const here = placeDir();
-    const pth = weft.path() orelse return detectRoot(here, here) orelse here;
-    return detectRoot(absolute(pth, here), here) orelse here;
+    return placeDir();
 }
 
 /// The focused buffer's file, absolute, or null for a tool buffer (or for a
@@ -793,45 +819,6 @@ fn placeDir() []const u8 {
 /// it share components neither spelling admits to (see its doc).
 fn absolute(pth: []const u8, here: []const u8) []const u8 {
     return weft.placePath(here, pth, &probe_buf);
-}
-
-/// Climb from `path` to the nearest ancestor holding `.git` (a submodule or
-/// worktree makes it a FILE, so any kind counts). The climb STOPS at `floor`
-/// when `floor` contains `path`: `floor` is this dispatch's PLACE, so a
-/// repository above it — a version-controlled home directory, a `/tmp` someone
-/// made a repo — never captures a session that belongs to the project. A path
-/// outside `floor` climbs freely: it belongs to its own repository, wherever
-/// that is. Null when there is none.
-///
-/// The floor used to be the directory the editor was launched in, which meant
-/// two projects open at once shared one floor and the wrong one won. It is
-/// per-dispatch now, so the climb is a refinement WITHIN a project instead of
-/// a search across everything the launch directory happened to contain — and
-/// a path spelled relative to the launch directory still lands, because the
-/// climb terminates at the floor, which is already the right answer.
-fn detectRoot(path: []const u8, floor: []const u8) ?[]const u8 {
-    var end = path.len;
-    if (weft.fsExists(path) != .dir) end = std.mem.lastIndexOfScalar(u8, path, '/') orelse return null;
-    const stop = if (contains(floor, path)) floor.len else 0;
-    while (end >= stop) {
-        const dir = if (end == 0) "/" else path[0..end];
-        if (weft.fsExists(markerPath(dir)) != .none) return dir;
-        if (end == 0 or end == stop) return null;
-        end = std.mem.lastIndexOfScalar(u8, path[0..end], '/') orelse 0;
-    }
-    return null;
-}
-
-/// Whether `dir` is `path` or one of its ancestors.
-fn contains(dir: []const u8, path: []const u8) bool {
-    if (dir.len == 0 or !std.mem.startsWith(u8, path, dir)) return false;
-    return path.len == dir.len or path[dir.len] == '/';
-}
-
-/// `<dir>/.git`, in scratch that is NOT the buffer `path` borrows.
-fn markerPath(dir: []const u8) []const u8 {
-    const base = if (std.mem.eql(u8, dir, "/")) "" else dir;
-    return std.fmt.bufPrint(&tmp_buf, "{s}/.git", .{base}) catch ".git";
 }
 
 /// Pull the buffer's raw bytes into `raw` (paged in `slice`-sized windows, since
@@ -2700,11 +2687,20 @@ fn gitInputFinish() void {
 }
 
 // ── Interactive rebase (Phase 2c) ───────────────────────────────────────────
-/// A rebase is mid-flight iff `.git/rebase-merge` or `.git/rebase-apply` exists.
+/// A rebase is mid-flight iff `.git/rebase-merge` or `.git/rebase-apply`
+/// exists. Two questions about the place this command dispatches in — which is
+/// this session's repository, because that is where the session came from
+/// (`activeRoot`) and what its entry carries: a key pressed in `*git:2*` is
+/// dispatched at repo B's place, so the probe follows the buffer the user is
+/// looking at, exactly as `cur` does.
+///
+/// It used to LIST `<root>/.git` and grep the names, which needed `fs_read`
+/// over the whole filesystem to look at two entries inside the project the
+/// user is already in — and, being a list, would also have matched a
+/// `rebase-merge` that was merely a prefix of something else.
 fn rebaseInProgress() bool {
-    const entries = weft.fsList("here", cur.inRepo(".git")) orelse return false;
-    return std.mem.indexOf(u8, entries, "rebase-merge") != null or
-        std.mem.indexOf(u8, entries, "rebase-apply") != null;
+    return weft.placeHas(".git/rebase-merge") != .none or
+        weft.placeHas(".git/rebase-apply") != .none;
 }
 fn gitRebaseInteractive() void {
     if (rebaseInProgress()) {

@@ -73,7 +73,8 @@
 //! the root leaked the *kind* of a target outside it, and a `root = "."`
 //! grant — `rootRelative`'s whole-cwd case, where layer 1 is a no-op by
 //! construction — confined it not at all, which is precisely what the
-//! `.git` climb in `guest/git.zig` and `guest/project.zig` runs on). It now
+//! `.git` climb in `guest/git.zig` and `guest/project.zig` ran on before
+//! `wl_place_has` retired both climbs and both grants). It now
 //! stats the ALREADY-OPEN confined descriptor (`RootedFs.kind`: `O_PATH`
 //! under the same `openat2`, then `statx(AT_EMPTY_PATH)`) instead of the
 //! raw path, so "does this exist, and what is it" is answerable for
@@ -255,8 +256,14 @@ pub fn hFsRead(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32, resul
 
 /// `fs.exists(path)` semantic body (perm fs_read): what a cwd-relative path
 /// is without reading it — 0 absent, 1 file, 2 dir, 3 other (`file.statKind`'s
-/// `Kind` enum ordinal). The clean primitive behind project-root detection
-/// (climb to the nearest `.git`).
+/// `Kind` enum ordinal).
+///
+/// It used to be the primitive behind project-root detection, and that is what
+/// kept `fs_read` on `git` and `project`: a grant over the whole filesystem,
+/// to probe for `.git` inside the user's own project. Both now ask
+/// `wl_place_has` (`wasm_host/proc.zig`), which is ungated and confined to the
+/// place — so what remains here is genuine raw-path access, wanted by callers
+/// that really do name a path anywhere their grant reaches.
 pub fn fsExists(gpa: Allocator, id: anytype, path: []const u8) PermError!file.Kind {
     switch (try gate(id, .fs_read, path)) {
         .none => return file.statKind(gpa, path),
@@ -642,7 +649,9 @@ test "fsExists: a `root = \".\"` grant confines it — the whole-cwd case is a k
     // nothing to say about a whole-cwd root. That made `.` a grant that
     // confined `fs_read`/`fs_write`/`fs_append`/`fs_list` but told
     // `fs_exists` NOTHING — and root detection (`guest/git.zig`,
-    // `guest/project.zig`) is built entirely out of `fsExists`.
+    // `guest/project.zig`) was built entirely out of `fsExists` at the time.
+    // Those two now ask `wl_place_has` and hold no grant at all; the hole this
+    // closes is still real for every OTHER `fs_exists` caller.
     var table = grants_mod.HandleTable.init(gpa);
     defer table.deinit();
     var id: TestPrincipal = .{ .grant_table = &table };
