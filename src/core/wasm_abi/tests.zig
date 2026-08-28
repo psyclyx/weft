@@ -2790,6 +2790,87 @@ test "wasm plugin: on_fill_token paints the entry its fill captured, off-focus" 
     try t.expectEqual(@as(usize, 0), env.buffers.active().textEditor().?.text().byteLen());
 }
 
+// ── The spool: a real file for the child, no fs perm for the guest ─────────
+// doc/place.md §4.2. `wl_proc_spool` exists so "a subprocess needs a real
+// path" stops being a reason to grant fs_write. Two things must hold for that
+// trade to be honest: the child really does read the guest's bytes off disk,
+// and the guest cannot keep — or even usefully learn — where they were.
+
+/// The path the spool guest's command reported (`at=<path>`, last field).
+fn spooledPath(out: []const u8) ?[]const u8 {
+    const i = std.mem.indexOf(u8, out, "at=") orelse return null;
+    return out[i + 3 ..];
+}
+
+test "wasm plugin: wl_proc_spool feeds the child a host-named temp, with no fs perm at all" {
+    const gpa = t.allocator;
+    var env: Env = undefined;
+    try Env.init(gpa, &env);
+    defer env.deinit(gpa);
+    try @import("../builtins.zig").install(gpa, &env.commands, &env.keymap, &env.head, &env.actions);
+
+    var loop = async_loop.Loop.init(gpa, env.pool, @import("../task.zig").nowNs);
+    defer loop.deinit();
+    var engine = try wasm.Engine.init(gpa);
+    defer engine.deinit();
+    const plugin = try loadPlugin(&engine, &env.ctx, "spool", @embedFile("guest_spool_wasm"), .{ .loop = &loop });
+    defer plugin.deinit();
+
+    // The trade, stated as a declaration: proc+timer, and NO filesystem
+    // authority whatsoever. Everything below is done by a guest that could not
+    // open a file if it tried.
+    try t.expect(plugin.perms[wasm_host.perm_proc] and plugin.perms[wasm_host.perm_timer]);
+    try t.expect(!plugin.perms[wasm_host.perm_fs_write]);
+    try t.expect(!plugin.perms[wasm_host.perm_fs_read]);
+
+    _ = try command.run(&env.commands, &env.ctx, "spool-ok", &.{});
+    drainJobs(&loop);
+    const ok_buf = namedBuffer(&env.buffers, "*spool*") orelse return error.TestExpectedEqual;
+    const ok_out = try ok_buf.textEditor().?.text().toOwnedSlice(gpa);
+    defer gpa.free(ok_out);
+
+    // The child read the spooled bytes back off a real file.
+    try t.expect(std.mem.indexOf(u8, ok_out, "in=hello spool") != null);
+    // At a path the HOST chose. The guest passed a command and bytes — never a
+    // path, and never a directory to put one in.
+    const ok_at = spooledPath(ok_out) orelse return error.TestExpectedEqual;
+    try t.expect(std.mem.startsWith(u8, ok_at, "/tmp/weft-spool-"));
+    // And it is gone. The guest deliberately leaked the path through its own
+    // command's stdout — the strongest thing a guest can do to hold on to it —
+    // and the name it now has refers to nothing.
+    try t.expectEqual(file.Kind.none, file.statKind(gpa, ok_at));
+
+    // Same on the FAILURE path, which is where the old in-plugin temps used to
+    // survive: git's `rm -f` rode on the command it was appended to, so an
+    // apply or commit that died took the cleanup with it.
+    _ = try command.run(&env.commands, &env.ctx, "spool-fail", &.{});
+    drainJobs(&loop);
+    const fail_buf = namedBuffer(&env.buffers, "*spool-fail*") orelse return error.TestExpectedEqual;
+    const fail_out = try fail_buf.textEditor().?.text().toOwnedSlice(gpa);
+    defer gpa.free(fail_out);
+    try t.expect(std.mem.indexOf(u8, fail_out, "in=goodbye spool") != null);
+    const fail_at = spooledPath(fail_out) orelse return error.TestExpectedEqual;
+    try t.expect(std.mem.startsWith(u8, fail_at, "/tmp/weft-spool-"));
+    try t.expectEqual(file.Kind.none, file.statKind(gpa, fail_at));
+
+    // Two spools never share a path, so one in flight cannot eat another's
+    // input — the property git's per-draft message files used to hand-roll.
+    try t.expect(!std.mem.eql(u8, ok_at, fail_at));
+}
+
+test "membrane: wl_proc_spool returns nothing to the guest" {
+    // The other half of "a guest cannot name the temp": the door has no result
+    // and no out-pointer, so there is no channel on which the host could hand
+    // the path back. Read off the contract table rather than asserted about the
+    // handler, because the table is what the guest's extern is checked against.
+    const spool = for (contract.imports) |e| {
+        if (std.mem.eql(u8, e.name, "wl_proc_spool")) break e;
+    } else return error.TestExpectedEqual;
+    try t.expectEqual(@as(usize, 0), spool.results.len);
+    try t.expectEqual(@as(usize, 7), spool.params.len); // (cmd, input, name) pairs + token
+    try t.expectEqual(contract.Perm.proc_timer, spool.perm orelse return error.TestExpectedEqual);
+}
+
 // ── A tool's instances are addressed by buffer, never by a module global ───
 // doc/contextual-workspace-architecture.md §2.6: a second use of a stateful
 // tool must not evict the first. Without a pool no dial can succeed, so these

@@ -266,6 +266,7 @@ extern "weft" fn wl_net_send(handle: u32, ptr: u32, len: u32) void;
 extern "weft" fn wl_net_close(handle: u32) void;
 extern "weft" fn wl_proc_to_buffer(cmd: u32, cmd_len: u32, name: u32, name_len: u32, token: u32) void;
 extern "weft" fn wl_proc_append_buffer(cmd: u32, cmd_len: u32, name: u32, name_len: u32, token: u32) void;
+extern "weft" fn wl_proc_spool(cmd: u32, cmd_len: u32, input: u32, input_len: u32, name: u32, name_len: u32, token: u32) void;
 extern "weft" fn wl_proc_filter(cmd: u32, cmd_len: u32, start: u32, end: u32) void;
 extern "weft" fn wl_fs_read(path: u32, path_len: u32, out_ptr: u32, out_cap: u32) i32;
 extern "weft" fn wl_fs_exists(path: u32, path_len: u32) i32;
@@ -2225,6 +2226,23 @@ pub fn procToBuffer(cmd: []const u8, name: []const u8, token: u32) void {
 /// Like `procToBuffer` but APPENDS the output — a console/comint log.
 pub fn procAppendBuffer(cmd: []const u8, name: []const u8, token: u32) void {
     wl_proc_append_buffer(p(cmd.ptr), @intCast(cmd.len), p(name.ptr), @intCast(name.len), token);
+}
+
+/// `procToBuffer` for a command that needs its input as a FILE. The host
+/// writes `input` to a temp path IT chooses, substitutes that path for every
+/// `{}` in `cmd`, runs it, fills `name` with stdout (token → `on_fill_token`,
+/// exactly as `procToBuffer`), and deletes the temp whether the command
+/// succeeded or failed.
+///
+/// The path is never spelled here, so a plugin that only needs to hand a
+/// subprocess bytes on disk — `git apply {}`, `git commit -F '{}'`,
+/// `llm < {}` — needs NO `fs_write`: it cannot choose where the bytes land and
+/// cannot leave them there. Perms: proc + timer, the same as `procToBuffer`.
+///
+/// `cmd` is yours to compose, so keep `{}` reserved: any other `{}` in the
+/// string (a path with braces in it, say) is substituted too.
+pub fn procSpool(cmd: []const u8, input: []const u8, name: []const u8, token: u32) void {
+    wl_proc_spool(p(cmd.ptr), @intCast(cmd.len), p(input.ptr), @intCast(input.len), p(name.ptr), @intCast(name.len), token);
 }
 
 /// Filter `[r.start, r.end)` through `cmd` (a `{}` placeholder gets a temp file

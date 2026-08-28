@@ -1,8 +1,15 @@
 //! Perm-gated off-thread process effects (proc + timer): shell-insert at the
-//! cursor, proc-to/append-buffer (tool output → a scratch buffer), and the
-//! in-place range filter (formatters). Each schedules on the async loop and
+//! cursor, proc-to/append/spool-buffer (tool output → a scratch buffer), and
+//! the in-place range filter (formatters). Each schedules on the async loop and
 //! lands its result on the frame thread at CRDT identity anchors, authored as
 //! the plugin peer.
+//!
+//! Two of these doors hand a child bytes ON DISK without the guest ever naming
+//! a path: the filter (`{}` = a temp the range is written to and read back)
+//! and the SPOOL (`{}` = a temp the guest's input payload is written to). Both
+//! compose the path host-side and delete it on every terminal path, so
+//! "a subprocess needs a real file" stops being a reason to grant `fs_write`
+//! (`doc/place.md` §4.2).
 
 const std = @import("std");
 const Allocator = std.mem.Allocator;
@@ -268,6 +275,26 @@ const ProcJob = struct {
     /// Where the child runs, captured at spawn. Null = the `.process` place.
     /// Owned; freed with the job.
     cwd: ?[]u8 = null,
+    /// A spool's input payload — the bytes the child reads from `{}`. Null for
+    /// the plain fill doors, which hand the child nothing. Owned.
+    input: ?[]u8 = null,
+    /// A spool's host-composed temp path. The guest never sees it, cannot name
+    /// it, and cannot keep it: `spoolWork` deletes it before returning, on
+    /// every path. Null for the plain fill doors. Owned.
+    tmp: ?[]u8 = null,
+};
+
+/// Which fill door a job came through. The three share one spawn body because
+/// they differ only in what happens to the output (replace/append) and whether
+/// the child is handed an input file.
+const Fill = enum {
+    /// `wl_proc_to_buffer`: stdout replaces the entry.
+    replace,
+    /// `wl_proc_append_buffer`: stdout is appended (a console log).
+    append,
+    /// `wl_proc_spool`: an input payload is written to a host-composed temp,
+    /// substituted for `{}`, and deleted afterwards; stdout replaces the entry.
+    spool,
 };
 
 /// Perm-gated (proc + timer): run `<cmd>` off the frame thread and replace the
@@ -276,19 +303,39 @@ const ProcJob = struct {
 /// The name is resolved HERE, once; `args[4]` is the fill token echoed back.
 pub fn hProcToBuffer(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32, results: []i32) void {
     _ = results;
-    spawnFill(@ptrCast(@alignCast(data.?)), caller, args, false);
+    spawnFill(@ptrCast(@alignCast(data.?)), caller, args, .replace);
 }
 
 /// Like `wl_proc_to_buffer` but APPENDS the output (a console/comint log) rather
 /// than replacing the buffer.
 pub fn hProcAppendBuffer(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32, results: []i32) void {
     _ = results;
-    spawnFill(@ptrCast(@alignCast(data.?)), caller, args, true);
+    spawnFill(@ptrCast(@alignCast(data.?)), caller, args, .append);
 }
 
-/// The shared spawn for both fill doors: gate, resolve the target ONCE, and
-/// hand the job a ref plus the guest's token.
-fn spawnFill(p: *WasmPlugin, caller: *wasm.Caller, args: []const i32, append: bool) void {
+/// `wl_proc_spool(cmd, input, name, token)`: `wl_proc_to_buffer` plus an input
+/// payload. The host writes `input` to a temp file IT names, substitutes that
+/// path for `{}` in `cmd`, runs the command in the dispatching entry's place,
+/// fills `<name>` with stdout, and deletes the temp — whether the command
+/// succeeded or not.
+///
+/// This is the door a plugin uses when a subprocess needs its input as a real
+/// file (`git apply {}`, `git commit -F {}`, `llm < {}`). Perms are `proc +
+/// timer`, the same set the sibling fill doors take, and deliberately NOT
+/// `fs_write`: the guest supplies bytes and a command, never a path, so it
+/// gains no ability to write anywhere it chooses (`doc/place.md` §4.2).
+pub fn hProcSpool(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32, results: []i32) void {
+    _ = results;
+    spawnFill(@ptrCast(@alignCast(data.?)), caller, args, .spool);
+}
+
+/// A monotonic tag so two spools in flight never share a path; the pid keeps
+/// two editors on one machine apart.
+var spool_counter: usize = 0;
+
+/// The shared spawn for all three fill doors: gate, resolve the target ONCE,
+/// and hand the job a ref plus the guest's token.
+fn spawnFill(p: *WasmPlugin, caller: *wasm.Caller, args: []const i32, kind: Fill) void {
     if (!requirePerm(p, caller, .proc)) return;
     if (!requirePerm(p, caller, .timer)) return;
     const loop = p.loop orelse return;
@@ -296,8 +343,25 @@ fn spawnFill(p: *WasmPlugin, caller: *wasm.Caller, args: []const i32, append: bo
     const cmd = caller.readMemory(gpa, @intCast(args[0]), @intCast(args[1])) catch return;
     var cmd_owned = true;
     defer if (cmd_owned) gpa.free(cmd);
-    const name = caller.readMemory(gpa, @intCast(args[2]), @intCast(args[3])) catch return;
+    // A spool's input payload sits between the command and the buffer name, so
+    // the shared tail — `(name, name_len, token)` — starts one pair later.
+    const input: ?[]u8 = if (kind == .spool)
+        (caller.readMemory(gpa, @intCast(args[2]), @intCast(args[3])) catch return)
+    else
+        null;
+    var input_owned = true;
+    defer if (input_owned) if (input) |b| gpa.free(b);
+    const tail: usize = if (kind == .spool) 4 else 2;
+    const name = caller.readMemory(gpa, @intCast(args[tail]), @intCast(args[tail + 1])) catch return;
     defer gpa.free(name);
+    // The guest names the COMMAND; the host names the FILE. Composed here, on
+    // the frame thread, so the path exists nowhere the guest can reach it.
+    const tmp: ?[]u8 = if (kind == .spool) blk: {
+        spool_counter += 1;
+        break :blk std.fmt.allocPrint(gpa, "/tmp/weft-spool-{d}-{d}", .{ std.os.linux.getpid(), spool_counter }) catch return;
+    } else null;
+    var tmp_owned = true;
+    defer if (tmp_owned) if (tmp) |b| gpa.free(b);
     const buffers = p.activeCtx().buffers;
     // ONE reading of "where", used for two things that must not disagree: the
     // directory the child runs in, and the place the output entry is ABOUT.
@@ -330,14 +394,18 @@ fn spawnFill(p: *WasmPlugin, caller: *wasm.Caller, args: []const i32, append: bo
         .styler = p,
         .plugin = plugin,
         .entry = target,
-        .token = @bitCast(args[4]),
+        .token = @bitCast(args[tail + 2]),
         .cmd = cmd,
-        .append = append,
+        .append = kind == .append,
         .cwd = cwd,
+        .input = input,
+        .tmp = tmp,
     };
     cmd_owned = false;
     plugin_owned = false;
     cwd_owned = false;
+    input_owned = false;
+    tmp_owned = false;
     _ = loop.spawn(procWork, job, .{ .ctx = job, .call = procDeliver, .deinit = procFree }) catch procFree(job);
 }
 
@@ -355,7 +423,29 @@ fn ensureFillTarget(gpa: Allocator, bufs: *Buffers, name: []const u8) ?Buffers.R
 
 fn procWork(gpa: Allocator, ctx: ?*anyopaque) anyerror![]u8 {
     const job: *ProcJob = @ptrCast(@alignCast(ctx.?));
-    var res = proc.run(gpa, &.{ "/bin/sh", "-c", job.cmd }, .{ .environ = shared.g_environ, .cwd = job.cwd }) catch return gpa.alloc(u8, 0);
+    if (job.tmp) |tmp| return spoolWork(gpa, job, tmp);
+    return runCapture(gpa, job.cmd, job.cwd);
+}
+
+/// A spool's off-thread body: land the input in the host-composed temp, hand
+/// the child its path through `{}`, and DELETE IT ON EVERY WAY OUT — the write
+/// failing, the substitution failing, the spawn failing, the command exiting
+/// non-zero, and the ordinary success. The `defer` is the whole point: there is
+/// no early return that can leave the file behind, so a failed effect never
+/// litters and never leaves stale bytes for the next run to pick up.
+fn spoolWork(gpa: Allocator, job: *ProcJob, tmp: []const u8) anyerror![]u8 {
+    defer file.deleteFile(gpa, tmp);
+    file.writeBytes(gpa, tmp, job.input orelse &.{}) catch return gpa.alloc(u8, 0);
+    const cmd = std.mem.replaceOwned(u8, gpa, job.cmd, "{}", tmp) catch return gpa.alloc(u8, 0);
+    defer gpa.free(cmd);
+    return runCapture(gpa, cmd, job.cwd);
+}
+
+/// Run `cmd` through the shell in `cwd` and return its stdout, trimmed of a
+/// trailing newline. A spawn failure yields empty rather than erroring — the
+/// fill lands as "the command said nothing", which is what a missing tool is.
+fn runCapture(gpa: Allocator, cmd: []const u8, cwd: ?[]const u8) anyerror![]u8 {
+    var res = proc.run(gpa, &.{ "/bin/sh", "-c", cmd }, .{ .environ = shared.g_environ, .cwd = cwd }) catch return gpa.alloc(u8, 0);
     defer res.deinit(gpa);
     return gpa.dupe(u8, std.mem.trimEnd(u8, res.stdout, "\n"));
 }
@@ -404,6 +494,10 @@ fn procFree(ctx: ?*anyopaque) void {
     const gpa = job.gpa;
     gpa.free(job.plugin);
     if (job.cwd) |d| gpa.free(d);
+    if (job.input) |b| gpa.free(b);
+    // The FILE is `spoolWork`'s to remove; this frees only the path string.
+    // A job torn down before it ever ran never created the file at all.
+    if (job.tmp) |b| gpa.free(b);
     gpa.free(job.cmd);
     gpa.destroy(job);
 }
