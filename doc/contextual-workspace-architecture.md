@@ -1430,6 +1430,12 @@ The architecture is not complete until all of these hold:
   text merely because hierarchy handling was unavailable.
 - A synthetic third-party input grammar using only standard protocols gets the
   same Files behavior as Vim, Emacs, and Helix.
+- A docked files sidebar is a config fragment declaring viewport attributes and
+  one `present`, with no interposing behavior: standard intentions navigate it,
+  activating a row opens in the primary pane, and the sidebar keeps its own
+  root and focus.
+- A companion viewport following the primary-focus feed never observes its own
+  focus, nor another companion's.
 
 ### Actions and UI
 
