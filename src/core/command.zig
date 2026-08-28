@@ -128,6 +128,9 @@ pub const Context = struct {
     /// (`doc/place.md`), or null between dispatches. Set and cleared by `run`.
     /// Not a user-settable field: it is a bracket, like `principal`.
     dispatch_place: ?@import("place.zig").Place = null,
+    /// Per-place environment overlays (`env.zig`). Null in embeddings without
+    /// a `System`, where every place simply has the base environment.
+    environments: ?*@import("env.zig").Environments = null,
     /// Turns a `Place` into an OS directory for a local effect
     /// (`doc/place.md` §2.3). Installed by the shell, which owns the roots it
     /// opened; `null` in headless embeddings, where only the degenerate

@@ -74,6 +74,7 @@ const capability = @import("capability.zig");
 const Caps = capability.Caps;
 const Actions = @import("action.zig");
 const kv = @import("kv.zig");
+const env_mod = @import("env.zig");
 const builtins = @import("builtins.zig");
 const manifest = @import("manifest.zig");
 const task = @import("task.zig");
@@ -142,6 +143,10 @@ actions: Actions,
 /// versa (mirrors `main.zig`'s `config_kv`/`plugin_kv` split, one level
 /// up: per-SYSTEM now, not just per-store-kind).
 config_kv: kv.Store = .empty,
+/// Per-place environment overlays (`env.zig`) — the sibling of the working
+/// directory: WHERE an effect runs and WITH WHAT it runs are the same
+/// question asked twice, and both are resolved at the spawn door.
+environments: env_mod.Environments = undefined,
 /// This system's headless/background head: what `command.run` dispatches
 /// against when no OTHER head is specified, and (once plugins are wired
 /// per-system — see the module doc) what a background wasm entry
@@ -225,6 +230,7 @@ pub fn create(gpa: Allocator, pool: *task.Pool, name: []const u8, user: []const 
         .grants = grants_mod.HandleTable.init(gpa),
         .semantic = .init(.here),
         .filesystems = .init(gpa),
+        .environments = .init(gpa),
     };
     errdefer self.buffers.deinit(gpa);
     errdefer self.semantic.deinit(gpa);
@@ -273,6 +279,7 @@ pub fn destroy(self: *System) void {
     self.keymap.deinit(gpa);
     self.commands.deinit(gpa);
     self.buffers.deinit(gpa);
+    self.environments.deinit();
     self.config_kv.deinit(gpa);
     self.grants.deinit();
     gpa.free(self.name);
@@ -298,6 +305,7 @@ pub fn contextFor(self: *System, head: *Head) command.Context {
         .filesystems = &self.filesystems,
         .intent = &self.intent,
         .viewports = &self.viewports,
+        .environments = &self.environments,
     };
 }
 
