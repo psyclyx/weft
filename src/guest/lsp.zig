@@ -4,59 +4,34 @@
 //! which methods to send, what each result means, how it's presented through the
 //! editor membrane (echo / jump / pick).
 //!
-//! Async shape: a request is fired from a command; its response arrives later on
-//! `on_poll` (the host calls it when the server stream has bytes). State is a
-//! small machine: spawn → initialize → (initialized + didOpen) → serve requests.
-//! Each feature is a `Want` variant + a params builder + a response handler.
+//! SESSIONS: one `Session` per (server command, language, workspace root). A Zig
+//! buffer and a Nix buffer get their own server, handshake, document sync and
+//! diagnostics; nothing is shared, so one server dying leaves the other whole
+//! (doc/contextual-workspace-architecture.md §18).
+//!
+//! REQUEST IDENTITY: one slot per (session, kind), so completion, hover and
+//! definition are concurrently in flight under their own rpc ids. A second ask
+//! of the SAME kind supersedes the first: the server is told `$/cancelRequest`,
+//! the slot is given back, and the superseded reply — arriving under an id
+//! nothing claims — is dropped rather than misapplied.
+//!
+//! Async shape: an ask is armed by a command (or by the caps provider), sent
+//! once its session is ready, and answered on `on_poll`. Every delivery is gated
+//! on the opaque document witness captured at send: a handle naming the captured
+//! ENTRY as well as its causal frontier, so a reply can only ever land in the
+//! buffer that asked.
 
 const std = @import("std");
 const weft = @import("weft");
 const rpc = @import("jsonrpc.zig");
 
-// ── Connection state ─────────────────────────────────────────────────
-var conn: rpc.Conn = .{};
-var init_id: i64 = 0; // the `initialize` request id
-var ready: bool = false; // initialize answered + initialized/didOpen sent
-var opened: bool = false; // didOpen sent for the current document
-// Change tracking: the host owns an opaque witness for the exact causal
-// frontier last streamed to the server. The plugin can test equality, but it
-// cannot inspect or order the witness. `doc_version` is separate: an integer
-// required by the external LSP protocol and never used as a CRDT clock.
-var synced_snapshot: ?u32 = null;
-var doc_version: i64 = 1;
-
-fn releaseSyncedSnapshot() void {
-    if (synced_snapshot) |snapshot| weft.releaseDocSnapshot(snapshot);
-    synced_snapshot = null;
-}
-
-// The user request awaiting the server (one in flight).
-const Want = enum { none, hover, definition, references, symbols, format, rename, signature, inlay, codeaction };
-var want: Want = .none;
-var want_id: i64 = 0;
-
-// Rename: the new name typed into the prompt pick, sent once the server's ready.
-const pick_id_rename: u32 = 2;
-var rename_name: [256]u8 = undefined;
-var rename_nlen: usize = 0;
-
-// The open document's `file://` uri.
-var uri_buf: [1200]u8 = undefined;
-var uri_len: usize = 0;
-// The language the current connection serves (from the active file's extension).
-// A different-language file restarts the connection with that language's server.
-// (One active server at a time; concurrent multi-server is a refinement.)
-var cur_lang: [16]u8 = undefined;
-var cur_lang_len: usize = 0;
-
-// A location pick (references / symbols): retained CRDT targets index-aligned
-// to the entries. LSP byte positions are converted once when presented; edits
-// while the picker is open move the target anchors rather than redirecting a
-// stored raw offset.
-const pick_id_results: u32 = 1;
+// ── Captured document identities ─────────────────────────────────────
+// LSP byte positions are converted once, when they are presented; everything
+// held across a round-trip is a CRDT anchor, so edits move the target rather
+// than rotting a stored offset. A retained range resolves ONLY in the entry it
+// was captured in (`wl_range_ends` refuses elsewhere) — the seam that keeps a
+// background delivery off whatever buffer happens to be active.
 const PickTarget = struct { range: u32, at_end: bool };
-var pick_targets: [256]PickTarget = undefined;
-var pick_n: usize = 0;
 
 fn captureTarget(offset: usize) ?PickTarget {
     const len = weft.byteLen();
@@ -79,6 +54,13 @@ fn releaseTarget(target: PickTarget) void {
     weft.releaseRange(target.range);
 }
 
+// A location pick (references / symbols) and the rename prompt share the Head's
+// one picker, so their retained targets are one list.
+const pick_id_results: u32 = 1;
+const pick_id_rename: u32 = 2;
+var pick_targets: [256]PickTarget = undefined;
+var pick_n: usize = 0;
+
 fn releasePickTargets() void {
     for (pick_targets[0..pick_n]) |target| weft.releaseRange(target.range);
     pick_n = 0;
@@ -98,30 +80,409 @@ fn addPickTarget(offset: usize) bool {
     return true;
 }
 
-// One in-flight LSP request owns a cursor target plus an opaque snapshot
-// witness captured after didChange and immediately before request send. The
-// witness supports equality only: no version bytes, arithmetic, or ordering
-// cross the plugin boundary.
-var want_target: ?PickTarget = null;
-var want_snapshot: ?u32 = null;
+// ── Diagnostics ──────────────────────────────────────────────────────
+// Pushed by the server (publishDiagnostics): anchor + severity + packed
+// message, for gutter markers and `]d`/`[d` navigation. One set per session,
+// belonging to the document that session has open.
+const MAX_DIAG = 256;
+const DiagnosticProvenance = enum { versioned, legacy_unversioned };
 
-fn releaseWantSnapshot() void {
-    if (want_snapshot) |snapshot| weft.releaseDocSnapshot(snapshot);
-    want_snapshot = null;
+const Diags = struct {
+    targets: [MAX_DIAG]PickTarget = undefined,
+    sev: [MAX_DIAG]u8 = undefined,
+    moff: [MAX_DIAG]usize = undefined,
+    mlen: [MAX_DIAG]usize = undefined,
+    msgs: [1 << 13]u8 = undefined,
+    n: usize = 0,
+    snapshot: ?u32 = null,
+    provenance: DiagnosticProvenance = .legacy_unversioned,
+
+    fn message(self: *const Diags, i: usize) []const u8 {
+        return self.msgs[self.moff[i]..][0..self.mlen[i]];
+    }
+};
+
+// ── Sessions ─────────────────────────────────────────────────────────
+/// A live server and everything it is about. The key is the triple the server
+/// was spawned FOR, so a config change re-keys onto a new session rather than
+/// quietly repurposing the running one.
+const Session = struct {
+    used: bool = false,
+    conn: rpc.Conn = .{},
+
+    lang_buf: [16]u8 = undefined,
+    lang_len: usize = 0,
+    cmd_buf: [1 << 12]u8 = undefined,
+    cmd_len: usize = 0,
+    root_buf: [512]u8 = undefined,
+    root_len: usize = 0,
+
+    init_id: i64 = 0,
+    ready: bool = false, // initialize answered + initialized sent
+    opened: bool = false, // didOpen sent for `uri`
+    /// An integer the external protocol requires, never used as a CRDT clock.
+    doc_version: i64 = 1,
+    /// The host's opaque witness for the exact causal frontier last streamed to
+    /// this server. Equality only: no version bytes, arithmetic or ordering
+    /// cross the plugin boundary.
+    synced: ?u32 = null,
+    /// The `file://` uri this session currently has open (one document per
+    /// server; focusing another file of the same language re-opens under it).
+    uri_buf: [1200]u8 = undefined,
+    uri_len: usize = 0,
+
+    diag: Diags = .{},
+    /// The new name typed into the rename prompt, sent once the server is ready.
+    rename_buf: [256]u8 = undefined,
+    rename_len: usize = 0,
+    /// Last time this session was asked for — the retirement order.
+    touched: usize = 0,
+
+    fn lang(self: *const Session) []const u8 {
+        return self.lang_buf[0..self.lang_len];
+    }
+    fn cmd(self: *const Session) []const u8 {
+        return self.cmd_buf[0..self.cmd_len];
+    }
+    fn root(self: *const Session) []const u8 {
+        return self.root_buf[0..self.root_len];
+    }
+    fn uri(self: *const Session) []const u8 {
+        return self.uri_buf[0..self.uri_len];
+    }
+};
+
+const MAX_SESSIONS = 8;
+var sessions: [MAX_SESSIONS]Session = undefined;
+
+fn sessionIndex(s: *const Session) usize {
+    return (@intFromPtr(s) - @intFromPtr(&sessions[0])) / @sizeOf(Session);
 }
 
-fn cancelWant() void {
-    releaseWantSnapshot();
-    if (want_target) |target| releaseTarget(target);
-    want_target = null;
-    want = .none;
+/// The identity of the server the ACTIVE buffer needs. Every part is copied out
+/// of host scratch — `path`/`cwd` share one buffer and `config` another, so the
+/// three cannot be held at once.
+const Key = struct {
+    lang_buf: [16]u8 = undefined,
+    lang_len: usize = 0,
+    cmd_buf: [1 << 12]u8 = undefined,
+    cmd_len: usize = 0,
+    root_buf: [512]u8 = undefined,
+    root_len: usize = 0,
+
+    fn lang(self: *const Key) []const u8 {
+        return self.lang_buf[0..self.lang_len];
+    }
+    fn cmd(self: *const Key) []const u8 {
+        return self.cmd_buf[0..self.cmd_len];
+    }
+    fn root(self: *const Key) []const u8 {
+        return self.root_buf[0..self.root_len];
+    }
+};
+
+/// Copy `src` into a fixed field, reporting whether it fit whole. A key that
+/// was truncated is a DIFFERENT key, so the callers that build one refuse
+/// rather than route onto a neighbouring server.
+fn copyInto(out: []u8, len: *usize, src: []const u8) bool {
+    len.* = @min(src.len, out.len);
+    @memcpy(out[0..len.*], src[0..len.*]);
+    return len.* == src.len;
 }
 
-fn prepareWant(kind: Want) bool {
-    cancelWant();
-    want_target = captureTarget(weft.cursor()) orelse return false;
-    want = kind;
+/// The active file's language id (its extension), copied out of scratch.
+fn activeLang(out: *[16]u8) []const u8 {
+    const path = weft.path() orelse return "";
+    const dot = std.mem.lastIndexOfScalar(u8, path, '.') orelse return "";
+    const ext = path[dot + 1 ..];
+    const n = @min(ext.len, out.len);
+    @memcpy(out[0..n], ext[0..n]);
+    return out[0..n];
+}
+
+/// The server command for `lang`: config (`weft.set("lsp","<lang>","<cmd>")`), or
+/// a built-in default. "" ⇒ no server for this language.
+fn serverCmd(lang: []const u8) []const u8 {
+    const c = weft.config(lang);
+    if (c.len > 0) return c;
+    if (std.mem.eql(u8, lang, "zig")) return "zls";
+    return "";
+}
+
+/// The server identity the active buffer needs, or null when no server is
+/// configured for its language (the common no-op every plain file takes).
+fn activeKey(key: *Key) ?void {
+    key.lang_len = activeLang(&key.lang_buf).len; // written in place
+    if (key.lang_len == 0) return null;
+    const cmd = serverCmd(key.lang());
+    if (cmd.len == 0) return null;
+    if (!copyInto(&key.cmd_buf, &key.cmd_len, cmd)) return null;
+    if (!copyInto(&key.root_buf, &key.root_len, weft.cwd())) return null;
+    return {};
+}
+
+fn matches(s: *const Session, key: *const Key) bool {
+    return std.mem.eql(u8, s.lang(), key.lang()) and
+        std.mem.eql(u8, s.cmd(), key.cmd()) and
+        std.mem.eql(u8, s.root(), key.root());
+}
+
+/// The session serving the active buffer, WITHOUT starting one. The honest test
+/// for "does this server's document sit in front of us right now" — a poll-time
+/// delivery asks it before touching any coordinate, anchor or layer.
+fn lookupActive() ?*Session {
+    var key: Key = .{};
+    _ = activeKey(&key) orelse return null;
+    for (&sessions) |*s| {
+        if (s.used and matches(s, &key)) return touch(s);
+    }
+    return null;
+}
+
+/// The session serving the active buffer, started if this is the first file of
+/// its language. A slot whose spawn failed stays occupied and dead, so a missing
+/// server binary is reported once per language rather than once per keystroke.
+fn ensureActive() ?*Session {
+    var key: Key = .{};
+    _ = activeKey(&key) orelse return null;
+    for (&sessions) |*s| {
+        if (s.used and matches(s, &key)) return touch(s);
+    }
+    const s = freeSession() orelse coldest();
+    closeSession(s);
+    s.* = .{ .used = true };
+    _ = touch(s);
+    _ = copyInto(&s.lang_buf, &s.lang_len, key.lang());
+    _ = copyInto(&s.cmd_buf, &s.cmd_len, key.cmd());
+    _ = copyInto(&s.root_buf, &s.root_len, key.root());
+    if (!s.conn.start(s.cmd())) {
+        weft.echo("lsp: could not start server");
+        return s;
+    }
+    s.init_id = s.conn.request("initialize",
+        \\{"processId":null,"rootUri":null,"capabilities":{"textDocument":{"hover":{"contentFormat":["plaintext","markdown"]},"synchronization":{},"publishDiagnostics":{"versionSupport":true}}}}
+    );
+    return s;
+}
+
+fn freeSession() ?*Session {
+    for (&sessions) |*s| {
+        if (!s.used) return s;
+    }
+    return null;
+}
+
+/// Recency, so a saturated table sheds the server nobody is editing against
+/// rather than refusing the file in front of the user. A session owns no buffer
+/// the user can see, so retiring one costs a handshake, not state.
+var touches: usize = 0;
+
+fn touch(s: *Session) *Session {
+    touches += 1;
+    s.touched = touches;
+    return s;
+}
+
+fn coldest() *Session {
+    var found = &sessions[0];
+    for (&sessions) |*s| {
+        if (s.touched < found.touched) found = s;
+    }
+    return found;
+}
+
+/// Shut a session down: its server, its document witnesses, and every ask still
+/// outstanding against it (a completion among them declines, so no merge waits
+/// on a server that is gone).
+fn closeSession(s: *Session) void {
+    if (!s.used) return;
+    if (prompting == sessionIndex(s)) prompting = null;
+    for (&pending[sessionIndex(s)]) |*p| retire(s, p);
+    releaseDiagnostics(s);
+    releaseSynced(s);
+    s.conn.close();
+    s.used = false;
+}
+
+fn releaseDiagnostics(s: *Session) void {
+    for (s.diag.targets[0..s.diag.n]) |target| releaseTarget(target);
+    s.diag.n = 0;
+    if (s.diag.snapshot) |snapshot| weft.releaseDocSnapshot(snapshot);
+    s.diag.snapshot = null;
+}
+
+fn releaseSynced(s: *Session) void {
+    if (s.synced) |snapshot| weft.releaseDocSnapshot(snapshot);
+    s.synced = null;
+}
+
+// ── Request identities ───────────────────────────────────────────────
+const Kind = enum { hover, definition, references, symbols, format, rename, signature, inlay, codeaction, completion };
+const kind_count = std.meta.fields(Kind).len;
+
+/// One ask. `id` 0 means ARMED: built, but not yet on the wire (the handshake
+/// hasn't landed, or the rename prompt is still open); a positive id is in
+/// flight and is what a reply is matched against.
+const Pending = struct {
+    used: bool = false,
+    id: i64 = 0,
+    /// The cursor identity the ask is about, as a CRDT anchor.
+    target: ?PickTarget = null,
+    /// The document witness captured immediately before send — the entry and
+    /// frontier a coordinate-bearing reply may be interpreted against.
+    snapshot: ?u32 = null,
+    /// The caps session a completion must answer (0 for every other kind).
+    caps: u32 = 0,
+};
+
+/// One slot per (session, kind): concurrency between kinds is structural, and a
+/// second ask of one kind can only ever supersede its own predecessor.
+var pending: [MAX_SESSIONS][kind_count]Pending = @splat(@splat(.{}));
+
+fn slotOf(s: *const Session, kind: Kind) *Pending {
+    return &pending[sessionIndex(s)][@intFromEnum(kind)];
+}
+
+/// The ask `id` belongs to, if it is still ours to answer. A superseded or
+/// abandoned ask has already given its slot back, so its late reply finds
+/// nothing here and is dropped.
+fn findPending(s: *const Session, id: i64) ?struct { *Pending, Kind } {
+    for (&pending[sessionIndex(s)], 0..) |*p, k| {
+        if (p.used and p.id == id) return .{ p, @enumFromInt(k) };
+    }
+    return null;
+}
+
+fn cancelRequest(s: *Session, id: i64) void {
+    var buf: [48]u8 = undefined;
+    const params = std.fmt.bufPrint(&buf, "{{\"id\":{d}}}", .{id}) catch return;
+    s.conn.notify("$/cancelRequest", params);
+}
+
+/// Give a slot back: the server is asked to stop (where it honors
+/// `$/cancelRequest`), the captured witness and cursor identity are released,
+/// and a completion's caps session is declined so the merge is never left
+/// waiting on us.
+fn retire(s: *Session, p: *Pending) void {
+    if (!p.used) return;
+    if (p.id > 0) cancelRequest(s, p.id);
+    if (p.snapshot) |snapshot| weft.releaseDocSnapshot(snapshot);
+    if (p.target) |target| releaseTarget(target);
+    if (p.caps != 0) weft.capsDecline(p.caps);
+    p.* = .{};
+}
+
+/// Arm an ask of `kind` against the cursor, superseding this session's previous
+/// one of the same kind.
+fn arm(s: *Session, kind: Kind) ?*Pending {
+    const p = slotOf(s, kind);
+    retire(s, p);
+    p.target = captureTarget(weft.cursor()) orelse return null;
+    p.used = true;
+    return p;
+}
+
+/// Put an armed ask on the wire. The slot is given back (and the caps session
+/// declined) whenever the document it captured is no longer the one in front of
+/// us — a request whose answer could not be interpreted is not worth sending.
+fn send(s: *Session, p: *Pending, kind: Kind) bool {
+    if (!s.conn.live) {
+        retire(s, p);
+        return false;
+    }
+    if (!syncDoc(s)) {
+        if (kind != .completion) weft.echo("lsp: could not synchronize document");
+        retire(s, p);
+        return false;
+    }
+    const offset = targetOffset(p.target orelse {
+        retire(s, p);
+        return false;
+    }) orelse {
+        retire(s, p);
+        return false;
+    };
+    if (p.snapshot) |snapshot| {
+        weft.releaseDocSnapshot(snapshot);
+        p.snapshot = null;
+    }
+    p.snapshot = weft.docSnapshot() orelse {
+        retire(s, p);
+        return false;
+    };
+    const id = requestOf(s, kind, posOf(offset));
+    if (id < 0) {
+        if (kind != .completion) weft.echo("lsp: could not send request");
+        retire(s, p);
+        return false;
+    }
+    p.id = id;
     return true;
+}
+
+/// Send every ask this session has armed but not yet dispatched. Called when the
+/// handshake lands and when the session's document takes focus — the two moments
+/// a deferred ask becomes sendable.
+fn flushArmed(s: *Session) void {
+    for (&pending[sessionIndex(s)], 0..) |*p, k| {
+        if (!p.used or p.id != 0) continue;
+        const kind: Kind = @enumFromInt(k);
+        if (kind == .rename and s.rename_len == 0) continue; // still prompting
+        _ = send(s, p, kind);
+    }
+}
+
+/// Build and fire the wire request for `kind`. -1 when the parameters or the
+/// envelope don't fit.
+fn requestOf(s: *Session, kind: Kind, pos: Pos) i64 {
+    const uri = s.uri();
+    return switch (kind) {
+        .hover => posRequest(s, "textDocument/hover", pos, ""),
+        .definition => posRequest(s, "textDocument/definition", pos, ""),
+        .references => posRequest(s, "textDocument/references", pos, ",\"context\":{\"includeDeclaration\":true}"),
+        .signature => posRequest(s, "textDocument/signatureHelp", pos, ""),
+        .completion => posRequest(s, "textDocument/completion", pos, ""),
+        .symbols => s.conn.request("textDocument/documentSymbol", std.fmt.bufPrint(
+            &parambuf,
+            "{{\"textDocument\":{{\"uri\":\"{s}\"}}}}",
+            .{uri},
+        ) catch return -1),
+        .format => s.conn.request("textDocument/formatting", std.fmt.bufPrint(
+            &parambuf,
+            "{{\"textDocument\":{{\"uri\":\"{s}\"}},\"options\":{{\"tabSize\":4,\"insertSpaces\":true}}}}",
+            .{uri},
+        ) catch return -1),
+        .rename => s.conn.request("textDocument/rename", std.fmt.bufPrint(
+            &parambuf,
+            "{{\"textDocument\":{{\"uri\":\"{s}\"}},\"position\":{{\"line\":{d},\"character\":{d}}},\"newName\":\"{s}\"}}",
+            .{ uri, pos.line, pos.col, s.rename_buf[0..s.rename_len] },
+        ) catch return -1),
+        .inlay => blk: {
+            const last = posOf(weft.byteLen());
+            break :blk s.conn.request("textDocument/inlayHint", std.fmt.bufPrint(
+                &parambuf,
+                "{{\"textDocument\":{{\"uri\":\"{s}\"}},\"range\":{{\"start\":{{\"line\":0,\"character\":0}},\"end\":{{\"line\":{d},\"character\":0}}}}}}",
+                .{ uri, last.line + 1 },
+            ) catch return -1);
+        },
+        // Actions for the cursor's line, passing any diagnostics on it as
+        // context (so quick-fixes surface).
+        .codeaction => s.conn.request("textDocument/codeAction", std.fmt.bufPrint(
+            &parambuf,
+            "{{\"textDocument\":{{\"uri\":\"{s}\"}},\"range\":{{\"start\":{{\"line\":{d},\"character\":0}},\"end\":{{\"line\":{d},\"character\":0}}}},\"context\":{{\"diagnostics\":[]}}}}",
+            .{ uri, pos.line, pos.line + 1 },
+        ) catch return -1),
+    };
+}
+
+/// A position-based request: `{textDocument, position[, extra]}`.
+fn posRequest(s: *Session, method: []const u8, pos: Pos, extra: []const u8) i64 {
+    const params = std.fmt.bufPrint(
+        &parambuf,
+        "{{\"textDocument\":{{\"uri\":\"{s}\"}},\"position\":{{\"line\":{d},\"character\":{d}}}{s}}}",
+        .{ s.uri(), pos.line, pos.col, extra },
+    ) catch return -1;
+    return s.conn.request(method, params);
 }
 
 // Hover popup: capped row count (mirrors the view's `Hud.max_hover_rows` —
@@ -129,42 +490,9 @@ fn prepareWant(kind: Want) bool {
 // plain constant, not imported).
 const max_hover_rows = 16;
 
-// Diagnostics pushed by the server (publishDiagnostics): offset + severity +
-// packed message, for gutter markers and `]d`/`[d` navigation.
-const MAX_DIAG = 256;
-var diag_targets: [MAX_DIAG]PickTarget = undefined;
-var diag_sev: [MAX_DIAG]u8 = undefined;
-var diag_moff: [MAX_DIAG]usize = undefined;
-var diag_mlen: [MAX_DIAG]usize = undefined;
-var diag_msgs: [1 << 14]u8 = undefined;
-var diag_n: usize = 0;
-var diag_snapshot: ?u32 = null;
-const DiagnosticProvenance = enum { versioned, legacy_unversioned };
-var diag_provenance: DiagnosticProvenance = .legacy_unversioned;
-
-fn releaseDiagnostics() void {
-    for (diag_targets[0..diag_n]) |target| releaseTarget(target);
-    diag_n = 0;
-    if (diag_snapshot) |snapshot| weft.releaseDocSnapshot(snapshot);
-    diag_snapshot = null;
-}
-
-// Completion is an async caps PROVIDER, not a command — its own pending slot,
-// independent of `want`. `on_complete(session)` sends textDocument/completion and
-// defers; the response commits rich items into that session (see complete_ui).
-var comp_session: u32 = 0;
-var comp_id: i64 = 0;
-var comp_snapshot: ?u32 = null;
-
-fn cancelCompletion() void {
-    if (comp_snapshot) |snapshot| weft.releaseDocSnapshot(snapshot);
-    comp_snapshot = null;
-    if (comp_session != 0) weft.capsDecline(comp_session);
-    comp_session = 0;
-}
-
 var parambuf: [4096]u8 = undefined; // small position/range params (bounded)
 
+// ── Plugin surface ───────────────────────────────────────────────────
 const Cmd = struct { name: []const u8, handler: *const fn () void };
 const cmds = [_]Cmd{
     .{ .name = "hover", .handler = cmdHover },
@@ -191,49 +519,33 @@ export fn describe() void {
     weft.requestPerm(.timer);
 }
 export fn init() void {
+    for (&sessions) |*s| s.* = .{};
     for (cmds) |c| _ = weft.register(c.name);
     weft.provideCompletion();
 }
 
 /// Completion request (caps provider): send textDocument/completion for the
-/// cursor and DEFER — the response commits into `session` off a later poll. If
-/// there's no server for this buffer's language (or it isn't ready yet), decline
-/// so the merge isn't left waiting on us.
+/// cursor and DEFER — the response commits into `session` off a later poll. The
+/// provider registration is one; the predicate is per language, resolved here as
+/// "which session serves this buffer". No server for it (or not ready yet) ⇒
+/// decline, so the merge isn't left waiting on us.
 export fn on_complete(session: u32) void {
-    cancelCompletion();
-    ensureServer();
-    if (!ready) {
-        weft.capsDecline(session);
-        return;
-    }
-    if (!syncDoc()) {
-        weft.capsDecline(session);
-        return;
-    }
-    comp_snapshot = weft.docSnapshot() orelse {
+    const s = ensureActive() orelse {
         weft.capsDecline(session);
         return;
     };
-    const pos = posOf(weft.cursor());
-    const params = std.fmt.bufPrint(
-        &parambuf,
-        "{{\"textDocument\":{{\"uri\":\"{s}\"}},\"position\":{{\"line\":{d},\"character\":{d}}}}}",
-        .{ uri_buf[0..uri_len], pos.line, pos.col },
-    ) catch {
-        if (comp_snapshot) |snapshot| weft.releaseDocSnapshot(snapshot);
-        comp_snapshot = null;
-        weft.capsDecline(session);
-        return;
-    };
-    comp_id = conn.request("textDocument/completion", params);
-    if (comp_id < 0) {
-        if (comp_snapshot) |snapshot| weft.releaseDocSnapshot(snapshot);
-        comp_snapshot = null;
+    if (!s.conn.live or !s.ready) {
         weft.capsDecline(session);
         return;
     }
-    comp_session = session;
+    const p = arm(s, .completion) orelse {
+        weft.capsDecline(session);
+        return;
+    };
+    p.caps = session;
+    _ = send(s, p, .completion); // a refusal declines through `retire`
 }
+
 export fn on_command(id: u32) void {
     if (id < cmds.len) cmds[id].handler();
 }
@@ -246,40 +558,36 @@ export fn on_command(id: u32) void {
 /// IS a dispatching entry for its duration (`wasm_host/plugin.zig`'s
 /// `requireDispatch` doc — the sanctioned door), so `lspDeliverInternal`
 /// runs with a real one. `pending_msg` is valid synchronously across the
-/// nested call (nothing re-parses `conn`'s buffer until the NEXT loop
+/// nested call (nothing re-parses that session's buffer until the NEXT loop
 /// iteration's `conn.next()`).
 export fn on_poll() void {
-    while (conn.next()) |msg| {
-        pending_msg = msg;
-        weft.run("lsp-deliver-internal");
+    for (&sessions) |*s| {
+        while (s.used and s.conn.live) {
+            pending_msg = s.conn.next() orelse break;
+            pending_session = sessionIndex(s);
+            weft.run("lsp-deliver-internal");
+        }
     }
 }
 
 var pending_msg: rpc.Value = undefined;
+var pending_session: usize = 0;
 fn lspDeliverInternal() void {
-    dispatch(pending_msg);
+    dispatch(&sessions[pending_session], pending_msg);
 }
 
-/// A buffer took focus: if it's a zig file, ensure the server is up and the doc
-/// is opened, so diagnostics flow without waiting for a request. (Single-server,
-/// single-language for now — multi-server routing is a later phase.)
+/// A buffer took focus: ensure its language's server is up and its document is
+/// the one that server has open, so diagnostics flow without waiting for a
+/// request. Every OTHER session is left untouched — that is what makes two
+/// languages two independent servers.
 export fn on_activate() void {
-    var lb: [16]u8 = undefined;
-    const lang = activeLang(&lb);
-    cancelWant();
-    cancelCompletion();
-    releaseDiagnostics();
-    weft.decorateClear();
-    releaseSyncedSnapshot();
     if (pick_n > 0) resetPickTargets();
-    opened = false;
-    // Only files whose language has a configured server participate. Cleanup
-    // still happens above so retained state cannot leak across buffer loci.
-    if (serverCmd(lang).len == 0) return;
-    ensureServer();
-    // A different file → re-open under its uri.
-    buildUri();
-    if (ready) _ = syncDoc();
+    weft.decorateClear();
+    const s = ensureActive() orelse return;
+    if (!s.conn.live or !s.ready) return;
+    if (!syncDoc(s)) return;
+    flushArmed(s);
+    paintDiagnostics(s);
 }
 
 /// A pick entry was chosen: a location jump, or the rename name.
@@ -298,24 +606,30 @@ export fn on_pick_accept(pick_id: u32) void {
         }
         return;
     }
-    if (pick_id == pick_id_rename) {
-        const name = switch (outcome) {
-            .candidate => |candidate| candidate.text,
-            .input => |input| input,
-            .cancelled => {
-                cancelWant();
-                return;
-            },
-        }; // owned by `outcome` until this callback returns
-        if (name.len == 0) {
-            cancelWant();
+    if (pick_id != pick_id_rename) return;
+    const s = &sessions[prompting orelse return];
+    prompting = null;
+    const p = slotOf(s, .rename);
+    if (!p.used or p.id != 0) return;
+    const name = switch (outcome) {
+        .candidate => |candidate| candidate.text,
+        .input => |input| input,
+        .cancelled => {
+            retire(s, p);
             return;
-        }
-        rename_nlen = @min(name.len, rename_name.len);
-        @memcpy(rename_name[0..rename_nlen], name[0..rename_nlen]);
-        if (ready) sendWant();
+        },
+    }; // owned by `outcome` until this callback returns
+    if (name.len == 0) {
+        retire(s, p);
+        return;
     }
+    _ = copyInto(&s.rename_buf, &s.rename_len, name);
+    if (s.ready) _ = send(s, p, .rename);
 }
+
+/// The session whose rename prompt is open. The Head owns one picker, so at most
+/// one rename is ever being typed.
+var prompting: ?usize = null;
 
 // ── Commands ─────────────────────────────────────────────────────────
 fn cmdHover() void {
@@ -348,20 +662,30 @@ fn cmdInlay() void {
 fn cmdCodeActions() void {
     fire(.codeaction);
 }
+
+fn fire(kind: Kind) void {
+    const s = ensureActive() orelse return;
+    if (!s.conn.live) return;
+    const p = arm(s, kind) orelse return;
+    if (s.ready) _ = send(s, p, kind);
+}
+
 /// Rename the symbol under the cursor. With an arg, use it as the new name; else
 /// prompt (a free-text pick). On accept the request goes out (see on_pick_accept).
 fn cmdRename() void {
-    ensureServer();
-    if (!prepareWant(.rename)) return;
+    const s = ensureActive() orelse return;
+    if (!s.conn.live) return;
+    const p = arm(s, .rename) orelse return;
+    s.rename_len = 0;
     if (weft.argStr(0)) |name| {
         if (name.len > 0) {
-            rename_nlen = @min(name.len, rename_name.len);
-            @memcpy(rename_name[0..rename_nlen], name[0..rename_nlen]);
-            if (ready) sendWant();
+            _ = copyInto(&s.rename_buf, &s.rename_len, name);
+            if (s.ready) _ = send(s, p, .rename);
             return;
         }
     }
     resetPickTargets();
+    prompting = sessionIndex(s);
     weft.pickBegin("rename to", pick_id_rename);
     weft.pickEnd(); // no items — the typed query is the new name
 }
@@ -369,20 +693,20 @@ fn cmdRename() void {
 /// Jump to the next/previous stored diagnostic from the cursor (wrapping) and
 /// echo its severity + message.
 fn gotoDiag(fwd: bool) void {
-    if (diag_n == 0) {
+    const s = lookupActive() orelse {
+        weft.echo("lsp: no diagnostics");
+        return;
+    };
+    if (s.diag.n == 0) {
         weft.echo("lsp: no diagnostics");
         return;
     }
-    const snapshot = diag_snapshot orelse {
-        releaseDiagnostics();
-        weft.decorateClear();
-        weft.echo("lsp: diagnostics became stale");
+    const snapshot = s.diag.snapshot orelse {
+        staleDiagnostics(s);
         return;
     };
     if (!weft.docSnapshotIsCurrent(snapshot)) {
-        releaseDiagnostics();
-        weft.decorateClear();
-        weft.echo("lsp: diagnostics became stale");
+        staleDiagnostics(s);
         return;
     }
     const cur = weft.cursor();
@@ -390,8 +714,8 @@ fn gotoDiag(fwd: bool) void {
     var best: ?Located = null; // nearest strictly after/before
     var wrap: ?Located = null; // extreme for wrap-around
     var i: usize = 0;
-    while (i < diag_n) : (i += 1) {
-        const off = targetOffset(diag_targets[i]) orelse continue;
+    while (i < s.diag.n) : (i += 1) {
+        const off = targetOffset(s.diag.targets[i]) orelse continue;
         if (fwd) {
             if (off > cur and (best == null or off < best.?.offset)) best = .{ .index = i, .offset = off };
             if (wrap == null or off < wrap.?.offset) wrap = .{ .index = i, .offset = off };
@@ -404,178 +728,35 @@ fn gotoDiag(fwd: bool) void {
         weft.echo("lsp: diagnostics became stale");
         return;
     };
-    const idx = located.index;
     weft.jump(located.offset);
-    const label: []const u8 = switch (diag_sev[idx]) {
+    const label: []const u8 = switch (s.diag.sev[located.index]) {
         1 => "error",
         2 => "warning",
         3 => "info",
         else => "hint",
     };
     var buf: [1024]u8 = undefined;
-    const msg = diag_msgs[diag_moff[idx]..][0..diag_mlen[idx]];
-    const line = switch (diag_provenance) {
+    const msg = s.diag.message(located.index);
+    const line = switch (s.diag.provenance) {
         .versioned => std.fmt.bufPrint(&buf, "{s}: {s}", .{ label, msg }) catch label,
         .legacy_unversioned => std.fmt.bufPrint(&buf, "{s} (unverified server position): {s}", .{ label, msg }) catch label,
     };
     weft.echo(line);
 }
 
-fn fire(kind: Want) void {
-    ensureServer();
-    if (!prepareWant(kind)) return;
-    if (ready) sendWant();
-}
-
-// ── Lifecycle ────────────────────────────────────────────────────────
-/// The active file's language id (its extension), copied out of scratch.
-fn activeLang(out: *[16]u8) []const u8 {
-    const path = weft.path() orelse return "";
-    const dot = std.mem.lastIndexOfScalar(u8, path, '.') orelse return "";
-    const ext = path[dot + 1 ..];
-    const n = @min(ext.len, out.len);
-    @memcpy(out[0..n], ext[0..n]);
-    return out[0..n];
-}
-
-/// The server command for `lang`: config (`weft.set("lsp","<lang>","<cmd>")`), or
-/// a built-in default. "" ⇒ no server for this language.
-fn serverCmd(lang: []const u8) []const u8 {
-    const c = weft.config(lang);
-    if (c.len > 0) return c;
-    if (std.mem.eql(u8, lang, "zig")) return "zls";
-    return "";
-}
-
-/// Ensure a server is running for the ACTIVE file's language, starting (or
-/// switching) the connection as needed.
-fn ensureServer() void {
-    var lb: [16]u8 = undefined;
-    const lang = activeLang(&lb);
-    if (conn.live and std.mem.eql(u8, lang, cur_lang[0..cur_lang_len])) return;
-    if (conn.live) conn.close();
-    cancelWant();
-    cancelCompletion();
-    releaseSyncedSnapshot();
-    releaseDiagnostics();
+fn staleDiagnostics(s: *Session) void {
+    releaseDiagnostics(s);
     weft.decorateClear();
-    ready = false;
-    opened = false;
-    const cmd = serverCmd(lang);
-    if (cmd.len == 0) return; // no server configured for this language
-    if (!conn.start(cmd)) {
-        weft.echo("lsp: could not start server");
-        return;
-    }
-    cur_lang_len = @min(lang.len, cur_lang.len);
-    @memcpy(cur_lang[0..cur_lang_len], lang[0..cur_lang_len]);
-    init_id = conn.request("initialize",
-        \\{"processId":null,"rootUri":null,"capabilities":{"textDocument":{"hover":{"contentFormat":["plaintext","markdown"]},"synchronization":{},"publishDiagnostics":{"versionSupport":true}}}}
-    );
+    weft.echo("lsp: diagnostics became stale");
 }
 
-/// Send the pending request now that the server is ready.
-fn sendWant() void {
-    if (want == .none) return;
-    // Invalidate the prior request id before any fallible parameter build.
-    // A late response to the superseded request can then only be ignored.
-    want_id = -1;
-    if (!syncDoc()) {
-        weft.echo("lsp: could not synchronize document");
-        cancelWant();
-        return;
-    }
-    const target = want_target orelse {
-        cancelWant();
-        return;
-    };
-    const offset = targetOffset(target) orelse {
-        cancelWant();
-        return;
-    };
-    releaseWantSnapshot();
-    want_snapshot = weft.docSnapshot() orelse {
-        cancelWant();
-        return;
-    };
-    const pos = posOf(offset);
-    switch (want) {
-        .none => {},
-        .hover => want_id = posRequest("textDocument/hover", pos, ""),
-        .definition => want_id = posRequest("textDocument/definition", pos, ""),
-        .references => want_id = posRequest("textDocument/references", pos, ",\"context\":{\"includeDeclaration\":true}"),
-        .symbols => blk: {
-            const params = std.fmt.bufPrint(&parambuf, "{{\"textDocument\":{{\"uri\":\"{s}\"}}}}", .{uri_buf[0..uri_len]}) catch {
-                want_id = -1;
-                break :blk;
-            };
-            want_id = conn.request("textDocument/documentSymbol", params);
-        },
-        .format => blk: {
-            const params = std.fmt.bufPrint(&parambuf, "{{\"textDocument\":{{\"uri\":\"{s}\"}},\"options\":{{\"tabSize\":4,\"insertSpaces\":true}}}}", .{uri_buf[0..uri_len]}) catch {
-                want_id = -1;
-                break :blk;
-            };
-            want_id = conn.request("textDocument/formatting", params);
-        },
-        .rename => blk: {
-            const params = std.fmt.bufPrint(
-                &parambuf,
-                "{{\"textDocument\":{{\"uri\":\"{s}\"}},\"position\":{{\"line\":{d},\"character\":{d}}},\"newName\":\"{s}\"}}",
-                .{ uri_buf[0..uri_len], pos.line, pos.col, rename_name[0..rename_nlen] },
-            ) catch {
-                want_id = -1;
-                break :blk;
-            };
-            want_id = conn.request("textDocument/rename", params);
-        },
-        .signature => want_id = posRequest("textDocument/signatureHelp", pos, ""),
-        .inlay => blk: {
-            const last = posOf(weft.byteLen());
-            const params = std.fmt.bufPrint(
-                &parambuf,
-                "{{\"textDocument\":{{\"uri\":\"{s}\"}},\"range\":{{\"start\":{{\"line\":0,\"character\":0}},\"end\":{{\"line\":{d},\"character\":0}}}}}}",
-                .{ uri_buf[0..uri_len], last.line + 1 },
-            ) catch {
-                want_id = -1;
-                break :blk;
-            };
-            want_id = conn.request("textDocument/inlayHint", params);
-        },
-        .codeaction => blk: {
-            // Actions for the cursor's line, passing any diagnostics on it as
-            // context (so quick-fixes surface).
-            const params = std.fmt.bufPrint(
-                &parambuf,
-                "{{\"textDocument\":{{\"uri\":\"{s}\"}},\"range\":{{\"start\":{{\"line\":{d},\"character\":0}},\"end\":{{\"line\":{d},\"character\":0}}}},\"context\":{{\"diagnostics\":[]}}}}",
-                .{ uri_buf[0..uri_len], pos.line, pos.line + 1 },
-            ) catch {
-                want_id = -1;
-                break :blk;
-            };
-            want_id = conn.request("textDocument/codeAction", params);
-        },
-    }
-    if (want_id < 0) {
-        weft.echo("lsp: could not send request");
-        cancelWant();
-    }
-}
-
-/// A position-based request: `{textDocument, position[, extra]}`.
-fn posRequest(method: []const u8, pos: Pos, extra: []const u8) i64 {
-    const params = std.fmt.bufPrint(
-        &parambuf,
-        "{{\"textDocument\":{{\"uri\":\"{s}\"}},\"position\":{{\"line\":{d},\"character\":{d}}}{s}}}",
-        .{ uri_buf[0..uri_len], pos.line, pos.col, extra },
-    ) catch return -1;
-    return conn.request(method, params);
-}
-
-/// Keep the server's copy current: didOpen once, then didChange (full-text)
-/// whenever the last opaque causal-frontier witness no longer equals the live
-/// document. Called before every request, so coordinate-bearing responses can
-/// be accepted only against the exact text the server saw.
+// ── Document sync ────────────────────────────────────────────────────
+/// Keep `s`'s copy current: didOpen once per document, then didChange
+/// (full-text) whenever the last opaque causal-frontier witness no longer equals
+/// the live document. Called before every request, so coordinate-bearing
+/// responses can be accepted only against the exact text the server saw. Focusing
+/// a different file of the same language closes the old document first, so one
+/// server never holds two documents open under one version stream.
 ///
 /// STREAMED, never held whole: stemma docs can be multi-gig, and a wasm32 guest
 /// can't hold that in one allocation. We frame the JSON-RPC envelope with the
@@ -583,29 +764,29 @@ fn posRequest(method: []const u8, pos: Pos, extra: []const u8) i64 {
 /// document escaped chunk-by-chunk (each chunk read via `slice`, escaped on the
 /// growable heap, sent, freed), and the suffix. Two full reads of the doc — the
 /// price of not materializing it — bounded by the server's appetite, not us.
-fn syncDoc() bool {
-    if (opened) {
-        if (synced_snapshot) |snapshot| {
+fn syncDoc(s: *Session) bool {
+    if (!s.conn.live) return false;
+    retargetDoc(s);
+    if (s.opened) {
+        if (s.synced) |snapshot| {
             if (weft.docSnapshotIsCurrent(snapshot)) return true;
         }
     }
-    if (!conn.live) return false;
-    buildUri();
     const alloc = weft.allocator;
-    const uri = uri_buf[0..uri_len];
+    const uri = s.uri();
     const total = weft.byteLen();
 
     // The JSON-RPC envelope around the (streamed) document text. `params` is the
     // {textDocument…text:"} … "} object; the envelope wraps it.
-    const prefix = if (!opened) blk: {
-        doc_version = 1;
-        break :blk std.fmt.allocPrint(alloc, "{{\"jsonrpc\":\"2.0\",\"method\":\"textDocument/didOpen\",\"params\":{{\"textDocument\":{{\"uri\":\"{s}\",\"languageId\":\"{s}\",\"version\":1,\"text\":\"", .{ uri, cur_lang[0..cur_lang_len] }) catch return false;
+    const prefix = if (!s.opened) blk: {
+        s.doc_version = 1;
+        break :blk std.fmt.allocPrint(alloc, "{{\"jsonrpc\":\"2.0\",\"method\":\"textDocument/didOpen\",\"params\":{{\"textDocument\":{{\"uri\":\"{s}\",\"languageId\":\"{s}\",\"version\":1,\"text\":\"", .{ uri, s.lang() }) catch return false;
     } else blk: {
-        doc_version += 1;
-        break :blk std.fmt.allocPrint(alloc, "{{\"jsonrpc\":\"2.0\",\"method\":\"textDocument/didChange\",\"params\":{{\"textDocument\":{{\"uri\":\"{s}\",\"version\":{d}}},\"contentChanges\":[{{\"text\":\"", .{ uri, doc_version }) catch return false;
+        s.doc_version += 1;
+        break :blk std.fmt.allocPrint(alloc, "{{\"jsonrpc\":\"2.0\",\"method\":\"textDocument/didChange\",\"params\":{{\"textDocument\":{{\"uri\":\"{s}\",\"version\":{d}}},\"contentChanges\":[{{\"text\":\"", .{ uri, s.doc_version }) catch return false;
     };
     defer alloc.free(prefix);
-    const suffix: []const u8 = if (!opened) "\"}}}" else "\"}]}}";
+    const suffix: []const u8 = if (!s.opened) "\"}}}" else "\"}]}}";
 
     // Size pass: escaped byte count of the whole document (chunked, no hold).
     var esc_total: usize = 0;
@@ -620,8 +801,8 @@ fn syncDoc() bool {
     }
 
     // Frame + stream: header, prefix, escaped chunks, suffix.
-    conn.beginFrame(prefix.len + esc_total + suffix.len);
-    conn.writeChunk(prefix);
+    s.conn.beginFrame(prefix.len + esc_total + suffix.len);
+    s.conn.writeChunk(prefix);
     {
         var esc: std.ArrayListUnmanaged(u8) = .empty;
         defer esc.deinit(alloc);
@@ -631,116 +812,145 @@ fn syncDoc() bool {
             if (chunk.len == 0) break;
             esc.clearRetainingCapacity();
             escapeAppend(&esc, chunk) catch return false; // OOM mid-frame desyncs; rare, bounded
-            conn.writeChunk(esc.items);
+            s.conn.writeChunk(esc.items);
             pos += chunk.len;
         }
     }
-    conn.writeChunk(suffix);
+    s.conn.writeChunk(suffix);
 
-    if (!opened) opened = true;
-    releaseSyncedSnapshot();
-    synced_snapshot = weft.docSnapshot();
-    return synced_snapshot != null;
+    s.opened = true;
+    releaseSynced(s);
+    s.synced = weft.docSnapshot();
+    return s.synced != null;
 }
 
-fn buildUri() void {
+/// Point `s` at the active buffer's document, closing whatever it held before.
+/// Diagnostics belong to a uri, so the old set goes with the old document.
+fn retargetDoc(s: *Session) void {
+    var buf: [1200]u8 = undefined;
+    const uri = buildUri(&buf);
+    if (s.opened and std.mem.eql(u8, uri, s.uri())) return;
+    if (s.opened) {
+        var params: [1300]u8 = undefined;
+        if (std.fmt.bufPrint(&params, "{{\"textDocument\":{{\"uri\":\"{s}\"}}}}", .{s.uri()})) |body|
+            s.conn.notify("textDocument/didClose", body)
+        else |_| {}
+    }
+    releaseDiagnostics(s);
+    releaseSynced(s);
+    s.opened = false;
+    _ = copyInto(&s.uri_buf, &s.uri_len, uri);
+}
+
+/// The active buffer's `file://` uri, into `out`. Absolute paths pass through;
+/// relative ones get the cwd prefix, so the uri matches the absolute uris a
+/// server returns in its locations.
+fn buildUri(out: []u8) []const u8 {
     // Copy the (possibly scratch-backed) path out before calling cwd (also
-    // scratch). Absolute paths pass through; relative ones get the cwd prefix, so
-    // the uri matches the absolute uris a server returns in its locations.
+    // scratch).
     var pbuf: [1024]u8 = undefined;
     const path = weft.path() orelse "untitled";
     const pn = @min(path.len, pbuf.len);
     @memcpy(pbuf[0..pn], path[0..pn]);
     const pc = pbuf[0..pn];
     const s = if (pn > 0 and pc[0] == '/')
-        std.fmt.bufPrint(&uri_buf, "file://{s}", .{pc}) catch return
+        std.fmt.bufPrint(out, "file://{s}", .{pc}) catch return ""
     else
-        std.fmt.bufPrint(&uri_buf, "file://{s}/{s}", .{ weft.cwd(), pc }) catch return;
-    uri_len = s.len;
+        std.fmt.bufPrint(out, "file://{s}/{s}", .{ weft.cwd(), pc }) catch return "";
+    return s;
 }
 
 // ── Response dispatch ────────────────────────────────────────────────
-fn dispatch(msg: rpc.Value) void {
+fn dispatch(s: *Session, msg: rpc.Value) void {
     if (msg != .object) return;
     const obj = msg.object;
     if (obj.get("id")) |idv| {
         const id = asInt(idv) orelse return;
-        if (id == init_id and !ready) {
-            ready = true;
-            conn.notify("initialized", "{}");
-            _ = syncDoc(); // didOpen the active doc → diagnostics start flowing
-            if (want != .none) sendWant();
+        if (id == s.init_id and !s.ready) {
+            s.ready = true;
+            s.conn.notify("initialized", "{}");
+            // Only the session whose document is in front of us may open it —
+            // otherwise the handshake would didOpen someone else's buffer.
+            if (lookupActive() == s) {
+                _ = syncDoc(s); // didOpen the active doc → diagnostics start flowing
+                flushArmed(s);
+            }
             return;
         }
-        if (comp_session != 0 and id == comp_id) {
-            const snapshot = comp_snapshot orelse {
-                cancelCompletion();
-                return;
-            };
-            if (!weft.docSnapshotIsCurrent(snapshot)) {
-                cancelCompletion();
-                return;
-            }
-            weft.releaseDocSnapshot(snapshot);
-            comp_snapshot = null;
-            presentCompletion(obj.get("result") orelse rpc.Value{ .null = {} });
-            return;
-        }
-        if (id == want_id) {
-            const snapshot = want_snapshot orelse {
-                cancelWant();
-                return;
-            };
-            if (!weft.docSnapshotIsCurrent(snapshot)) {
-                // The server answered coordinates from an older document.
-                // Keep the request's CRDT target, sync, and ask again against
-                // a fresh opaque witness; never reinterpret stale positions.
-                releaseWantSnapshot();
-                if (want != .none) sendWant();
-                return;
-            }
-            releaseWantSnapshot();
-            const result = obj.get("result") orelse rpc.Value{ .null = {} };
-            switch (want) {
-                .hover => presentHover(result),
-                .definition => presentDefinition(result),
-                .references => presentLocations(result, "reference"),
-                .symbols => presentSymbols(result),
-                .format => weft.echo(if (applyEdits(result) > 0) "lsp: formatted" else "lsp: nothing to format"),
-                .rename => weft.echo(if (applyWorkspaceEdit(result) > 0) "lsp: renamed" else "lsp: rename made no change"),
-                .signature => presentSignature(result),
-                .inlay => presentInlay(result),
-                .codeaction => presentCodeActions(result),
-                .none => {},
-            }
-            cancelWant();
-        }
+        // A reply nothing claims is a superseded/cancelled ask's: drop it.
+        const found = findPending(s, id) orelse return;
+        const p, const kind = found;
+        deliver(s, p, kind, obj.get("result") orelse rpc.Value{ .null = {} });
         return;
     }
     // A notification: only publishDiagnostics matters to us.
     if (obj.get("method")) |m| {
         if (m == .string and std.mem.eql(u8, m.string, "textDocument/publishDiagnostics")) {
-            onDiagnostics(obj.get("params"));
+            onDiagnostics(s, obj.get("params"));
         }
     }
 }
 
-/// Store the server's diagnostics for the current doc and mark them in the
+/// Present one answer, but only against the exact document it was asked of. The
+/// witness names the captured entry as well as its frontier, so a reply that
+/// arrives over a different buffer — or over an edit — never lands.
+fn deliver(s: *Session, p: *Pending, kind: Kind, result: rpc.Value) void {
+    const snapshot = p.snapshot orelse {
+        retire(s, p);
+        return;
+    };
+    if (!weft.docSnapshotIsCurrent(snapshot)) {
+        weft.releaseDocSnapshot(snapshot);
+        p.snapshot = null;
+        p.id = 0; // answered under coordinates we refuse; nothing to cancel
+        // The document moved under a live ask. If its cursor identity still
+        // resolves, the entry is still ours: sync and ask again against a fresh
+        // witness. If it doesn't, we are looking at another buffer entirely and
+        // the ask dies here rather than being reinterpreted. A completion is not
+        // re-asked: its caps session is racing a deadline, and an answer that
+        // arrives after the merge closed is worse than none.
+        const resolvable = if (p.target) |target| targetOffset(target) != null else false;
+        if (kind != .completion and resolvable) {
+            _ = send(s, p, kind);
+        } else retire(s, p);
+        return;
+    }
+    weft.releaseDocSnapshot(snapshot);
+    p.snapshot = null;
+    p.id = 0; // answered
+    switch (kind) {
+        .hover => presentHover(p, result),
+        .definition => presentDefinition(s, result),
+        .references => presentLocations(s, result, "reference"),
+        .symbols => presentSymbols(result),
+        .format => weft.echo(if (applyEdits(result) > 0) "lsp: formatted" else "lsp: nothing to format"),
+        .rename => weft.echo(if (applyWorkspaceEdit(s, result) > 0) "lsp: renamed" else "lsp: rename made no change"),
+        .signature => presentSignature(result),
+        .inlay => presentInlay(result),
+        .codeaction => presentCodeActions(s, result),
+        .completion => presentCompletion(p, result),
+    }
+    retire(s, p);
+}
+
+/// Store the server's diagnostics for its open document and mark them in the
 /// gutter. Replaces the previous set (a publish is the whole list for the uri).
-fn onDiagnostics(params: ?rpc.Value) void {
+/// The versioned layer refuses when the session's document is not the entry in
+/// front of us: anchors can only be captured where they belong, so a publish for
+/// an unfocused buffer is dropped and re-requested by the didOpen that focusing
+/// it sends.
+fn onDiagnostics(s: *Session, params: ?rpc.Value) void {
     const p = params orelse return;
     if (p != .object) return;
     if (p.object.get("uri")) |u| {
-        if (u == .string and !sameUri(u.string)) return;
+        if (u == .string and !sameUri(s, u.string)) return;
     }
-    const synced = synced_snapshot orelse {
-        releaseDiagnostics();
-        weft.decorateClear();
+    const synced = s.synced orelse {
+        releaseDiagnostics(s);
         return;
     };
     if (!weft.docSnapshotIsCurrent(synced)) {
-        releaseDiagnostics();
-        weft.decorateClear();
+        releaseDiagnostics(s);
         return;
     }
     // Push diagnostics have no request id. A server-provided version proves
@@ -749,27 +959,27 @@ fn onDiagnostics(params: ?rpc.Value) void {
     // after versionSupport is advertised. Keep that case explicitly typed as
     // legacy/unverified: it may drive non-destructive presentation/navigation,
     // but must never become an edit precondition or feed a code action.
-    diag_provenance = if (p.object.get("version")) |version| blk: {
+    s.diag.provenance = if (p.object.get("version")) |version| blk: {
         const reported = asInt(version) orelse return;
-        if (reported != doc_version) return;
+        if (reported != s.doc_version) return;
         break :blk .versioned;
     } else .legacy_unversioned;
-    releaseDiagnostics();
-    diag_snapshot = weft.docSnapshot() orelse return;
+    releaseDiagnostics(s);
+    s.diag.snapshot = weft.docSnapshot() orelse return;
     var mw: usize = 0;
     var dropped = false;
     weft.decorateClear();
     const list = p.object.get("diagnostics") orelse {
-        releaseDiagnostics();
+        releaseDiagnostics(s);
         return;
     };
     if (list != .array) {
-        releaseDiagnostics();
+        releaseDiagnostics(s);
         return;
     }
     for (list.array.items) |d| {
         if (d != .object) continue;
-        if (diag_n >= MAX_DIAG) {
+        if (s.diag.n >= MAX_DIAG) {
             dropped = true;
             continue;
         }
@@ -777,26 +987,41 @@ fn onDiagnostics(params: ?rpc.Value) void {
         const pos = posInRange(rng) orelse continue;
         const off = offsetOf(pos.line, pos.col);
         const msg = if (d.object.get("message")) |mm| (if (mm == .string) mm.string else "") else "";
-        const sev: u8 = if (d.object.get("severity")) |s| (if (s == .integer) @intCast(@max(1, @min(4, s.integer))) else 1) else 1;
-        diag_targets[diag_n] = captureTarget(off) orelse continue;
-        diag_sev[diag_n] = sev;
-        const ml = @min(msg.len, diag_msgs.len - mw);
-        @memcpy(diag_msgs[mw..][0..ml], msg[0..ml]);
-        diag_moff[diag_n] = mw;
-        diag_mlen[diag_n] = ml;
+        const sev: u8 = if (d.object.get("severity")) |sv| (if (sv == .integer) @intCast(@max(1, @min(4, sv.integer))) else 1) else 1;
+        s.diag.targets[s.diag.n] = captureTarget(off) orelse continue;
+        s.diag.sev[s.diag.n] = sev;
+        const ml = @min(msg.len, s.diag.msgs.len - mw);
+        @memcpy(s.diag.msgs[mw..][0..ml], msg[0..ml]);
+        s.diag.moff[s.diag.n] = mw;
+        s.diag.mlen[s.diag.n] = ml;
         mw += ml;
-        diag_n += 1;
-        weft.decorate(weft.lineAt(off).start, .gutter, if (sev == 1) .removed else .emphasis, if (sev == 1) "\u{25CF}" else "\u{25B2}");
+        s.diag.n += 1;
     }
-    if (diag_n == 0) releaseDiagnostics();
+    if (s.diag.n == 0) releaseDiagnostics(s);
+    paintDiagnostics(s);
     if (dropped) weft.echo(std.fmt.comptimePrint("lsp: >{d} diagnostics — some omitted", .{MAX_DIAG}));
+}
+
+/// Mark `s`'s diagnostics in the gutter. Each anchor resolves only in the entry
+/// it was captured in, so a set belonging to another buffer paints nothing at
+/// all rather than the wrong lines.
+fn paintDiagnostics(s: *Session) void {
+    for (s.diag.targets[0..s.diag.n], s.diag.sev[0..s.diag.n]) |target, sev| {
+        const off = targetOffset(target) orelse continue;
+        weft.decorate(
+            weft.lineAt(off).start,
+            .gutter,
+            if (sev == 1) .removed else .emphasis,
+            if (sev == 1) "\u{25CF}" else "\u{25B2}",
+        );
+    }
 }
 
 /// Code actions for the line. Applies the first action that carries an inline
 /// `edit` (a quick-fix WorkspaceEdit) and echoes its title; a pick of titles is a
 /// refinement (holding N edits needs cross-poll storage). Command-only actions
 /// (needing a resolve/execute round-trip) just report their title.
-fn presentCodeActions(result: rpc.Value) void {
+fn presentCodeActions(s: *Session, result: rpc.Value) void {
     if (result != .array or result.array.items.len == 0) {
         weft.echo("lsp: no code actions");
         return;
@@ -805,7 +1030,7 @@ fn presentCodeActions(result: rpc.Value) void {
         if (a != .object) continue;
         const title = if (a.object.get("title")) |t| (if (t == .string) t.string else "action") else "action";
         if (a.object.get("edit")) |edit| {
-            if (applyWorkspaceEdit(edit) > 0) {
+            if (applyWorkspaceEdit(s, edit) > 0) {
                 var b: [256]u8 = undefined;
                 weft.echo(std.fmt.bufPrint(&b, "lsp: code action applied — '{s}'", .{title}) catch "lsp: code action applied");
                 return;
@@ -824,9 +1049,10 @@ fn presentCodeActions(result: rpc.Value) void {
 /// `CompletionList{items}`; carries label / insertText / detail / kind /
 /// documentation across to the merge + info popup. Capped so a huge list can't
 /// blow the frame. An empty result still commits (answers the session).
-fn presentCompletion(result: rpc.Value) void {
-    const session = comp_session;
-    comp_session = 0;
+fn presentCompletion(p: *Pending, result: rpc.Value) void {
+    const session = p.caps;
+    p.caps = 0; // answered: `retire` must not also decline it
+    if (session == 0) return;
     const items: []const rpc.Value = switch (result) {
         .array => |a| a.items,
         .object => |o| if (o.get("items")) |it| (if (it == .array) it.array.items else &.{}) else &.{},
@@ -859,13 +1085,13 @@ fn strOf(v: ?rpc.Value) []const u8 {
     return if (o == .string) o.string else "";
 }
 
-/// Rendering P2 (doc/rendering.md): a LIVE hover producer. `want_target` is
+/// Rendering P2 (doc/rendering.md): a LIVE hover producer. The ask's `target` is
 /// the CRDT identity captured when the request was fired, so hover shows as a
-/// caret popup at that identity — the same generic
-/// `drawCaretSurface` renderer the picker's own completion list uses,
-/// through the `wl_surface_caret` membrane call. Echo is now the fallback
-/// ONLY for the no-position case: an empty result, nothing to anchor.
-fn presentHover(result: rpc.Value) void {
+/// caret popup at that identity — the same generic `drawCaretSurface` renderer
+/// the picker's own completion list uses, through the `wl_surface_caret`
+/// membrane call. Echo is now the fallback ONLY for the no-position case: an
+/// empty result, nothing to anchor.
+fn presentHover(p: *Pending, result: rpc.Value) void {
     const text: []const u8 = switch (result) {
         .object => |o| if (o.get("contents")) |c| contentsText(c) else "",
         else => "",
@@ -875,7 +1101,7 @@ fn presentHover(result: rpc.Value) void {
         weft.echo("lsp: no hover");
         return;
     }
-    const offset = targetOffset(want_target orelse {
+    const offset = targetOffset(p.target orelse {
         weft.echo("lsp: hover target disappeared");
         return;
     }) orelse {
@@ -893,34 +1119,34 @@ fn presentHover(result: rpc.Value) void {
     weft.surfaceEnd(-1);
 }
 
-fn presentDefinition(result: rpc.Value) void {
+fn presentDefinition(s: *Session, result: rpc.Value) void {
     const loc = firstLocation(result) orelse {
         weft.echo("lsp: no definition");
         return;
     };
-    if (!sameUri(loc.uri)) {
+    if (!sameUri(s, loc.uri)) {
         weft.echo("lsp: definition in another file");
         return;
     }
     weft.jump(offsetOf(loc.line, loc.col));
 }
 
-fn presentLocations(result: rpc.Value, prompt: []const u8) void {
+fn presentLocations(s: *Session, result: rpc.Value, prompt: []const u8) void {
     resetPickTargets();
     var dropped = false;
     if (result == .array) {
         weft.pickBegin(prompt, pick_id_results);
         for (result.array.items) |item| {
             const loc = locationOf(item) orelse continue;
-            if (!sameUri(loc.uri)) continue; // cross-file later
+            if (!sameUri(s, loc.uri)) continue; // cross-file later
             if (pick_n >= pick_targets.len) {
                 dropped = true;
                 break;
             }
             if (!addPickTarget(offsetOf(loc.line, loc.col))) continue;
             var lbl: [32]u8 = undefined;
-            const s = std.fmt.bufPrint(&lbl, "line {d}", .{loc.line + 1}) catch "?";
-            weft.pickAdd(s, "");
+            const text = std.fmt.bufPrint(&lbl, "line {d}", .{loc.line + 1}) catch "?";
+            weft.pickAdd(text, "");
         }
         weft.pickEnd();
     }
@@ -988,16 +1214,17 @@ fn applyEdits(result: rpc.Value) usize {
     return applied;
 }
 
-/// Apply a WorkspaceEdit's edits for the CURRENT file (the `changes` map or
-/// `documentChanges` list — same-file rename for now; cross-file with multi-open).
-fn applyWorkspaceEdit(result: rpc.Value) usize {
+/// Apply a WorkspaceEdit's edits for the session's OPEN file (the `changes` map
+/// or `documentChanges` list — same-file rename for now; cross-file with
+/// multi-open).
+fn applyWorkspaceEdit(s: *Session, result: rpc.Value) usize {
     if (result != .object) return 0;
     const o = result.object;
     if (o.get("changes")) |ch| {
         if (ch == .object) {
             var it = ch.object.iterator();
             while (it.next()) |entry| {
-                if (sameUri(entry.key_ptr.*)) return applyEdits(entry.value_ptr.*);
+                if (sameUri(s, entry.key_ptr.*)) return applyEdits(entry.value_ptr.*);
             }
         }
     }
@@ -1008,7 +1235,7 @@ fn applyWorkspaceEdit(result: rpc.Value) usize {
                 const td = d.object.get("textDocument") orelse continue;
                 if (td != .object) continue;
                 const uri = td.object.get("uri") orelse continue;
-                if (uri == .string and sameUri(uri.string)) {
+                if (uri == .string and sameUri(s, uri.string)) {
                     return applyEdits(d.object.get("edits") orelse rpc.Value{ .null = {} });
                 }
             }
@@ -1052,8 +1279,8 @@ fn posInRange(rng: rpc.Value) ?Pos {
     return pointOf(rng.object.get("start"));
 }
 
-fn sameUri(uri: []const u8) bool {
-    return uri.len == 0 or std.mem.eql(u8, uri, uri_buf[0..uri_len]);
+fn sameUri(s: *const Session, uri: []const u8) bool {
+    return uri.len == 0 or std.mem.eql(u8, uri, s.uri());
 }
 
 fn presentSignature(result: rpc.Value) void {
