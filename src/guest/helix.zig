@@ -124,12 +124,20 @@ export fn init() void {
         .{ "Up", "cursor-up" },               .{ "Down", "cursor-down" },
         .{ "i", "hx-insert" },                .{ "a", "hx-append" },
         .{ "o", "hx-open-below" },            .{ "x", "delete-forward" },
-        .{ "d", "hx-delete-op" },             .{ "u", "std.history.undo" },
-        .{ "C-r", "std.history.redo" },       .{ "p", "paste" },
+        .{ "u", "std.history.undo" },         .{ "C-r", "std.history.redo" },
         .{ "colon", "helix-ex" },             .{ "Tab", "std.hierarchy.toggle-expanded" },
         .{ "Return", "std.target.activate" },
     };
     for (nb) |b| weft.bindKey("helix-normal", b[0], b[1]);
+
+    // Transfer, where helix's own keys already mean it: `y` captures, `p`
+    // places, and `d` takes the selection WITH it. Each leads with the
+    // standard word and keeps its text behaviour as the fallback arm.
+    weft.bindKeys("helix-normal", "y", &.{"std.transfer.yank"});
+    weft.bindKeys("helix-normal", "p", &.{ "std.transfer.paste", "paste" });
+    weft.bindKeys("helix-normal", "d", &.{ "std.transfer.delete-to-register", "hx-delete-op" });
+    // `-` has no helix meaning at all, so stepping out is its whole binding.
+    weft.bindKeys("helix-normal", "minus", &.{"std.hierarchy.step-out"});
     inline for (mtable) |m| weft.bindKey("helix-normal", m.key, "hx/n/" ++ m.motion);
 
     // helix `d` then a motion deletes over it (a tiny operator-pending mode).

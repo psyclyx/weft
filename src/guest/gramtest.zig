@@ -27,6 +27,10 @@ const bindings = [_]Binding{
     .{ .key = "j", .intentions = &.{"std.navigation.down"} },
     .{ .key = "k", .intentions = &.{"std.navigation.up"} },
     .{ .key = "l", .intentions = &.{"std.navigation.right"} },
+    .{ .key = "minus", .intentions = &.{"std.hierarchy.step-out"} },
+    .{ .key = "y", .intentions = &.{"std.transfer.yank"} },
+    .{ .key = "d", .intentions = &.{"std.transfer.delete-to-register"} },
+    .{ .key = "p", .intentions = &.{"std.transfer.paste"} },
 };
 
 export fn describe() void {}

@@ -154,6 +154,8 @@ export fn init() void {
     // likewise skipped: Tab already means indent for every keystroke in a
     // modeless buffer (shadowing it with std.hierarchy.toggle-expanded would
     // break ordinary typing), and bare `q` is a self-insert letter here too.
+    // std.hierarchy.step-out is skipped for the same reason: emacs spells it
+    // `^`, a printable this editor must keep as text.
     const binds = [_][2][]const u8{
         .{ "C-f", "cursor-right" },        .{ "C-b", "cursor-left" },
         .{ "C-n", "cursor-down" },         .{ "C-p", "cursor-up" },
@@ -162,11 +164,18 @@ export fn init() void {
         .{ "M-<", "beginning-of-buffer" }, .{ "M->", "end-of-buffer" },
         .{ "C-v", "scroll-page-down" },    .{ "M-v", "scroll-page-up" },
         .{ "C-d", "delete-forward" },      .{ "C-k", "kill-line" },
-        .{ "C-w", "kill-region" },         .{ "M-w", "copy-region" },
-        .{ "C-y", "yank" },                .{ "C-/", "std.history.undo" },
-        .{ "C-_", "std.history.undo" },    .{ "C-space", "set-mark" },
+        .{ "C-/", "std.history.undo" },    .{ "C-_", "std.history.undo" },
+        .{ "C-space", "set-mark" },
     };
     for (binds) |b| weft.bindKey("emacs", b[0], b[1]);
+
+    // Kill/copy/yank ARE the transfer words, so each leads with its standard
+    // name and keeps the region command as its fallback arm: the same three
+    // chords capture a structured row where one is focused and a region of
+    // text everywhere else.
+    weft.bindKeys("emacs", "M-w", &.{ "std.transfer.yank", "copy-region" });
+    weft.bindKeys("emacs", "C-w", &.{ "std.transfer.delete-to-register", "kill-region" });
+    weft.bindKeys("emacs", "C-y", &.{ "std.transfer.paste", "yank" });
 
     // A bar caret (you're always between cells in a modeless editor).
     weft.runStr2("set-cursor", "emacs", "bar");

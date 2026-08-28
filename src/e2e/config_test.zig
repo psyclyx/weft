@@ -472,7 +472,10 @@ test "e2e/config: the sample config boots; SPC g i is discoverable via which-key
     try t.expectEqual(@as(usize, 2), activate.len);
     try t.expectEqualStrings("std.target.activate", activate[0]);
     try t.expectEqualStrings("vim-open-focused", activate[1]);
-    try t.expectEqualStrings("vim-open-container", ed.keymap.resolveExact("normal", "minus").?);
+    const step_out = ed.keymap.resolveExactArms("normal", "minus").?;
+    try t.expectEqual(@as(usize, 2), step_out.len);
+    try t.expectEqualStrings("std.hierarchy.step-out", step_out[0]);
+    try t.expectEqualStrings("vim-open-container", step_out[1]);
 
     // Exercise that policy against the real row: Return opens the child target
     // through generic target resolution, and minus follows its generic

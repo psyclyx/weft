@@ -26,6 +26,11 @@ var paste_buf: [(1 << 16) + 1]u8 = undefined;
 // generic selection and providers never learn which editor chose it.
 var selected_register: u8 = 0;
 
+// The standard transfer words `Y`/`p`/`P`/`yy`/`dd` lead with. Placement is
+// the focused view's business, so one paste word serves `p` and `P`.
+const std_yank = "std.transfer.yank";
+const std_paste = "std.transfer.paste";
+
 // ── Pending-operator state (set on d/c/y/gc; consumed by the next motion) ─
 // `op_edit_cmd` is the range-arg operator to apply (null = pure yank); `op_copies`
 // is whether to first yank the range into the register (d/c/y do, gc doesn't);
@@ -513,19 +518,21 @@ export fn init() void {
 
     // Normal-mode non-motion keys (edit primitives + vim compounds).
     const nb = [_][2][]const u8{
-        .{ "i", "vim-insert" },             .{ "a", "vim-append" },
-        .{ "o", "vim-open-below" },         .{ "O", "vim-open-above" },
-        .{ "x", "delete-forward" },         .{ "X", "delete-backward" },
-        .{ "A", "vim-append-line" },        .{ "I", "vim-insert-line" },
-        .{ "D", "vim-delete-eol" },         .{ "C", "vim-change-eol" },
-        .{ "S", "vim-change-line" },        .{ "J", "join-lines" },
-        .{ "v", "vim-visual" },             .{ "Y", "yank-line" },
-        .{ "p", "paste" },                  .{ "P", "paste-before" },
-        .{ "minus", "vim-open-container" }, .{ "d", "enter-op-delete" },
-        .{ "c", "enter-op-change" },        .{ "y", "enter-op-yank" },
-        .{ "quotedbl", "enter-register" },
+        .{ "i", "vim-insert" },      .{ "a", "vim-append" },
+        .{ "o", "vim-open-below" },  .{ "O", "vim-open-above" },
+        .{ "x", "delete-forward" },  .{ "X", "delete-backward" },
+        .{ "A", "vim-append-line" }, .{ "I", "vim-insert-line" },
+        .{ "D", "vim-delete-eol" },  .{ "C", "vim-change-eol" },
+        .{ "S", "vim-change-line" }, .{ "J", "join-lines" },
+        .{ "v", "vim-visual" },      .{ "Y", "yank-line" },
+        .{ "p", "paste" },           .{ "P", "paste-before" },
+        .{ "d", "enter-op-delete" }, .{ "c", "enter-op-change" },
+        .{ "y", "enter-op-yank" },   .{ "quotedbl", "enter-register" },
     };
     for (nb) |b| weft.bindKey("normal", b[0], b[1]);
+    // `-` steps OUT of the focused container where something encloses it, and
+    // is vim's previous-line/first-non-blank everywhere else.
+    weft.bindKeys("normal", "minus", &.{ "std.hierarchy.step-out", "vim-open-container" });
 
     // One operator-pending mode; d/c/y set the pending operator + enter it.
     weft.menuMode("op-pending");
@@ -839,17 +846,30 @@ fn yankCurrent(start: usize, end: usize, linewise: bool) void {
     weft.yankRangeIn(slot, start, end, linewise);
 }
 
-/// The TRANSFER half (Y/p/P, and a doubled operator on a projection row) has
-/// no word in the standard vocabulary yet, so these four keys still ask
-/// whether a structured view is focused. They are the last such fork, and
-/// they go the way of the rest the moment `std.transfer.*` exists.
-fn semanticDid(action: []const u8) bool {
-    const register = consumeRegister();
+/// Ask the focused view for `action` in an EXPLICIT register slot. Only the
+/// `"x` prefix path needs this: the slot is part of the request, and a
+/// catalog route carries no arguments.
+fn semanticDid(action: []const u8, register: u8) bool {
     return switch (weft.semanticActionIn(action, register)) {
         .handled, .transfer_stored, .interaction_opened, .target_opened, .focus_changed, .relation_opened, .working_target_changed => true,
         .unavailable, .failed, _ => false,
     };
 }
+
+/// The transfer half of a compound key (`Y`, `p`, `P`, a doubled operator).
+/// It asks WHO OFFERS the standard word rather than what kind of buffer this
+/// is: nothing offers it over text, so the caller's own text path runs. A
+/// pending `"x` names its slot explicitly, which a catalog route cannot
+/// carry, so that one case goes straight to the focused view's action door —
+/// and the prefix survives a refusal, for the text path to spend on the same
+/// slot the user named.
+fn transferred(intention: []const u8, action: []const u8) bool {
+    if (selected_register == 0) return weft.invokeIntention(intention) == .invoked;
+    if (!semanticDid(action, selected_register)) return false;
+    selected_register = 0;
+    return true;
+}
+
 /// `Return`'s fallback: vim's ordinary `+` — next line, first non-blank. The
 /// activation half is the `std.target.activate` entry bound ahead of it.
 fn openFocused() void {
@@ -863,12 +883,9 @@ fn openFocused() void {
     weft.jump(if (first_range.end == after_down) first_range.start else first_range.end);
 }
 
-/// `-` — leave the focused container where the scene advertises that action,
-/// vim's previous-line/first-non-blank everywhere else. Leaving a container
-/// has no word in the standard vocabulary yet (`toggle-expanded` opens the
-/// focused one, it does not step out), so this fork stays until it does.
+/// `-`'s fallback: vim's previous line, first non-blank. Stepping out of a
+/// container is the `std.hierarchy.step-out` arm bound ahead of it.
 fn openContainer() void {
-    if (weft.semanticActive() and semanticDid(semantic_action.open_container)) return;
     const up = weft.runRange("motion.up") orelse return;
     const up_range = weft.rangeEnds(up) orelse return;
     const current = weft.cursor();
@@ -880,19 +897,13 @@ fn openContainer() void {
 }
 
 fn yankLine() void {
-    if (weft.semanticActive()) {
-        _ = semanticDid(semantic_action.copy);
-        return;
-    }
+    if (transferred(std_yank, semantic_action.copy)) return;
     const l = weft.lineAt(weft.cursor());
     yankCurrent(l.start, l.end, true);
     weft.flash(l.start, l.end); // vim-goggles
 }
 fn paste() void {
-    if (weft.semanticActive()) {
-        _ = semanticDid(semantic_action.paste_after);
-        return;
-    }
+    if (transferred(std_paste, semantic_action.paste_after)) return;
     const slot = consumeRegister();
     if (weft.registerLinewiseIn(slot)) {
         const l = weft.lineAt(weft.cursor());
@@ -911,10 +922,7 @@ fn paste() void {
     }
 }
 fn pasteBefore() void {
-    if (weft.semanticActive()) {
-        _ = semanticDid(semantic_action.paste_before);
-        return;
-    }
+    if (transferred(std_paste, semantic_action.paste_before)) return;
     const slot = consumeRegister();
     if (weft.registerLinewiseIn(slot)) {
         const l = weft.lineAt(weft.cursor());
@@ -1003,13 +1011,17 @@ fn opCancel() void {
 }
 /// dd / cc / yy — linewise. The operator char repeated (bound in op-pending).
 fn opLine() void {
-    if (weft.semanticActive()) {
-        if (op_copies) _ = semanticDid(semantic_action.copy);
+    // `yy`/`dd`/`cc` on a row that offers the transfer word: the capture is
+    // the standard vocabulary's, while `dd`'s other half FLAGS the row for
+    // removal — dired's retained delete, not a removal of the register's
+    // content — which is the view's own `selection-delete` route, reached by
+    // the name a key would reach it by.
+    if (op_copies and transferred(std_yank, semantic_action.copy)) {
         const semantic_edit = op_edit_cmd orelse {
             weft.setMode("normal");
             return;
         };
-        if (std.mem.eql(u8, semantic_edit, "op.delete")) _ = semanticDid(semantic_action.delete);
+        if (std.mem.eql(u8, semantic_edit, "op.delete")) weft.run("selection-delete");
         weft.setMode(op_after);
         return;
     }

@@ -863,7 +863,11 @@ test "emacs: a modeless editor loads; motion/kill chords, C-x is a chord not a m
     try t.expectEqualStrings("cursor-left", env.keymap.lookup(env.head.currentMode(), "C-b").?);
     try t.expectEqualStrings("beginning-of-line", env.keymap.lookup(env.head.currentMode(), "C-a").?);
     try t.expectEqualStrings("kill-line", env.keymap.lookup(env.head.currentMode(), "C-k").?);
-    try t.expectEqualStrings("yank", env.keymap.lookup(env.head.currentMode(), "C-y").?);
+    // Kill/copy/yank lead with the standard transfer words and keep the
+    // region commands as their fallback arms.
+    const yank_arms = env.keymap.resolveExactArms(env.head.currentMode(), "C-y").?;
+    try t.expectEqualStrings("std.transfer.paste", yank_arms[0]);
+    try t.expectEqualStrings("yank", yank_arms[1]);
     // Word motion drives the shared `motions` plugin (like vim/helix).
     try t.expectEqualStrings("forward-word", env.keymap.lookup(env.head.currentMode(), "M-f").?);
     // M-< normalized to M-less at bind time.
