@@ -342,6 +342,15 @@ test "e2e/latency: dispatch keystroke latency vs baseline" {
     // the measurement loop below — a build-mode mismatch fails regardless,
     // and a foreign-host baseline skips regardless, so there's nothing to
     // gate on either way.
+    // Taken HERE, before either branch and before any measurement, so record
+    // and compare probe the machine in the SAME state. Recording it after the
+    // measurement loops — which is where it naturally wanted to go, next to the
+    // numbers it ships with — read a box whose caches those loops had just
+    // dirtied: 2.16ms recorded against 1.10ms compared, on an idle machine, for
+    // no reason but call position. A yardstick measured differently in the two
+    // modes silently biases every comparison it is used for.
+    const calibration_ns = latency.calibrate();
+
     var loaded: ?latency.Baseline = null;
     defer if (loaded) |b| std.zon.parse.free(gpa, b);
     if (!latency_options.record) {
@@ -386,7 +395,7 @@ test "e2e/latency: dispatch keystroke latency vs baseline" {
         // on. Skip rather than report someone else's load as this code's
         // regression, which is the failure that teaches people to ignore a gate.
         if (baseline.calibration_ns != 0) {
-            const now = latency.calibrate();
+            const now = calibration_ns;
             log.warn("calibration: {d}ns now vs {d}ns at record time", .{ now, baseline.calibration_ns });
             // 1.2x, not something looser: this gate errs toward SKIPPING. A skip
             // says "not measured here" and costs nothing; a false failure costs
@@ -472,7 +481,7 @@ test "e2e/latency: dispatch keystroke latency vs baseline" {
             .build_mode = latency.buildModeName(),
             .host = latency.hostName(&host_buf),
             .note = note,
-            .calibration_ns = latency.calibrate(),
+            .calibration_ns = calibration_ns,
             .categories = &categories,
         });
         log.info("recorded {s}", .{baseline_path});
