@@ -146,11 +146,12 @@ weft.set("collab", "share-presence", "on"); // "off" hides your caret from peers
 // INTENTIONS vs COMMANDS. A key may name a `std.*` intention instead of a
 // command: the focused view's own vocabulary publishes the offer that answers
 // it, so one key means the right thing in a directory, a git buffer, and a
-// note. Input GRAMMARS own most of that — vim binds Return, Tab, `-`, `u`,
-// `C-r` and `q` to intentions with a text fallback, and rebinding them here
-// would be overriding the grammar, not configuring it. What belongs at THIS
-// tier is the small set below, where the intention is the config author's
-// choice: the structured-view group (SPC v), persistence, and going back.
+// note. Input GRAMMARS own most of that — vim binds Return, `-`, `u` and
+// `C-r` to intentions with a text fallback, and Tab and `q` to intentions
+// outright; rebinding any of them here would be overriding the grammar, not
+// configuring it. What belongs at THIS tier is the small set below, where the
+// intention is the config author's choice: the structured-view group (SPC v),
+// persistence, and going back.
 
 weft.bind("global", "F1", "which-key-now"); // force the hint now, mid-chord
 
