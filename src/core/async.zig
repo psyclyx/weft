@@ -83,7 +83,7 @@ pub const Loop = struct {
                     if (res) |bytes| self.gpa.free(bytes) else |_| {}
                     break;
                 }
-                std.atomic.spinLoopHint();
+                std.Thread.yield() catch {};
             }
             tk.sink.teardown();
         }

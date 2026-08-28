@@ -99,7 +99,7 @@ pub fn deinit(self: *Editor, gpa: Allocator) void {
                     if (result) |token| gpa.free(token) else |_| {}
                     break;
                 }
-                std.atomic.spinLoopHint();
+                std.Thread.yield() catch {};
             }
             gpa.free(s.version);
         },
@@ -118,7 +118,7 @@ pub fn deinit(self: *Editor, gpa: Allocator) void {
                     } else |_| {}
                     break;
                 }
-                std.atomic.spinLoopHint();
+                std.Thread.yield() catch {};
             }
         },
         else => {},

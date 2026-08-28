@@ -2154,7 +2154,7 @@ test "quickjs: a JS plugin drives a duplex subprocess and reads its output" {
     const deadline = task.nowNs() + 2 * std.time.ns_per_s;
     while (std.mem.indexOf(u8, env.head.echo.items, "ping") == null and task.nowNs() < deadline) {
         _ = plugin.tick();
-        std.atomic.spinLoopHint();
+        std.Thread.yield() catch {};
     }
     try t.expect(std.mem.indexOf(u8, env.head.echo.items, "ping") != null);
 }
@@ -2222,7 +2222,7 @@ test "quickjs: the ACP plugin drives a mock agent's message into the transcript"
             defer gpa.free(txt);
             if (std.mem.indexOf(u8, txt, "hello from agent") != null) found = true;
         }
-        std.atomic.spinLoopHint();
+        std.Thread.yield() catch {};
     }
     try t.expect(found);
 }
@@ -2687,7 +2687,7 @@ test "quickjs: a refused agent write is ANSWERED, not swallowed — the rest of 
             defer gpa.free(txt);
             if (std.mem.indexOf(u8, txt, "after the refusal") != null) streamed = true;
         }
-        std.atomic.spinLoopHint();
+        std.Thread.yield() catch {};
     }
     // The message AFTER the refused write arrived: one denial, one dropped
     // request, and the stream carried on.
@@ -3430,7 +3430,7 @@ test "quickjs: two ACP conversations stream into their own transcripts, and a pe
                     defer gpa2.free(txt);
                     if (std.mem.indexOf(u8, txt, needle) != null) return true;
                 }
-                std.atomic.spinLoopHint();
+                std.Thread.yield() catch {};
             }
             return false;
         }
@@ -3441,7 +3441,7 @@ test "quickjs: two ACP conversations stream into their own transcripts, and a pe
             while (task.nowNs() < deadline) {
                 if (e.head.pick.active) return true;
                 _ = p.tick();
-                std.atomic.spinLoopHint();
+                std.Thread.yield() catch {};
             }
             return false;
         }
@@ -3454,7 +3454,7 @@ test "quickjs: two ACP conversations stream into their own transcripts, and a pe
                     defer gpa2.free(txt);
                     if (std.mem.indexOf(u8, txt, needle) != null) return false;
                 }
-                std.atomic.spinLoopHint();
+                std.Thread.yield() catch {};
             }
             return true;
         }
