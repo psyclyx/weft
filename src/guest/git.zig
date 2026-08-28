@@ -4,11 +4,16 @@
 //! runs via `procToBuffer`, its raw output lands in the buffer that fill
 //! captured, the host fires `on_fill_token`, and we PARSE that output into a
 //! section→file→hunk tree then RE-RENDER the tree as pretty, foldable text over
-//! the same buffer (`edit` + `styleClear`/`style` + `foldClear`/`fold`). Because
-//! only we ever write the buffer, the parallel node table (each node's
-//! `[start,end)` byte range) is never stale — "the thing under point" is the
-//! node whose range contains
-//! `weft.cursor()`, the pattern `consult.zig` uses.
+//! the same buffer (`edit` + `styleClear`/`style` + `foldClear`/`fold`).
+//!
+//! The parallel node table (each node's rendered `[start,end)`) is DISPLAY and
+//! only display: it hit-tests the cursor to a row. What a verb acts on is the
+//! identity that row carries — a `Target` — resolved against the live model
+//! when the verb fires (design §14.3): a commit is a durable OID, a file is a
+//! revisioned name (section + path), a hunk and any line selection inside it
+//! are scoped to the render `snapshot` they were named in. A verb whose target
+//! the model no longer names refuses; it never falls back to whatever row a
+//! stale offset now covers.
 //!
 //! REPOSITORY SESSIONS (design §14.3). The model is per REPOSITORY, not per
 //! plugin: a `RepoSession` keyed by repository root owns the files/hunks/raw/
@@ -156,7 +161,6 @@ const Hunk = struct {
 /// Keyed by path only, so the same path partially staged in two sections shares
 /// fold state.
 const MAX_COLLAPSED = 64;
-const RestoreKind = enum { none, section, file, hunk, commit };
 
 /// One repository's whole world: its model, its projection, its buffer, its
 /// in-flight interaction. Nothing here is shared, so two repositories open at
@@ -207,34 +211,26 @@ const RepoSession = struct {
     collapsed_count: usize = 0,
 
     // Cursor restoration across a re-gather: a correlation HINT, never
-    // identity (§14.3). We remember what the node under point was — section +
-    // file path + hunk ordinal, or a recent commit's hash — and the status
-    // fill re-finds it in the NEW model, landing on its rendered start.
-    // `pending_cursor` is the fallback when the node is gone (e.g. the file was
-    // fully staged away). `home_off` is where a fresh open lands.
+    // authority (§14.3). We remember the target the node under point named and
+    // the status fill re-finds it in the NEW model, landing on its rendered
+    // start. `pending_cursor` is the fallback when the node is gone (e.g. the
+    // file was fully staged away). `home_off` is where a fresh open lands.
     restore_cursor: bool = false,
     pending_cursor: usize = 0,
     home_off: usize = 0,
-    restore_kind: RestoreKind = .none,
-    restore_section: Section = .untracked,
-    restore_path: [256]u8 = undefined,
-    restore_plen: usize = 0,
-    restore_hunk_ord: usize = 0, // the hunk's ordinal within its file
-    restore_hash: [64]u8 = undefined,
-    restore_hlen: usize = 0,
+    restore_target: Target = .{},
 
     dropped_files: bool = false,
     dropped_hunks: bool = false,
     truncated_raw: bool = false,
 
     /// Snapshot identity (§14.3). `snapshot` names the gathered status the
-    /// render (and therefore every path/hunk reference in it) belongs to;
+    /// render (and every path/hunk reference in it) belongs to — a `Target`
+    /// carries it, so what is snapshot-scoped cannot act across a re-gather.
     /// `gathering` says a newer one is already on its way, which makes the
-    /// visible projection provisional; `intent` is the snapshot an armed
-    /// interaction (a y/n confirm) was formed against.
+    /// visible projection provisional.
     snapshot: u32 = 0,
     gathering: bool = false,
-    intent: u32 = 0,
     /// The draft / rebase plan whose effect this repository has in flight —
     /// read by the settle the landing fill defers to.
     committing: ?*Drafts.Slot = null,
@@ -242,13 +238,12 @@ const RepoSession = struct {
 
     // ── Interaction state (per repository: two sessions can each have their
     // own half-finished commit, confirm or prompt) ──
-    /// The commit hash under point, captured when a commit-scoped verb (show/
-    /// fixup/squash/cherry-pick/revert/reset) fires — survives the mode hop
-    /// into a submenu. A commit OID is a DURABLE designation: no snapshot.
-    pending_hash: [64]u8 = undefined,
-    pending_hash_len: usize = 0,
-    /// A full mutation staged behind the generic y/n confirm (branch delete,
-    /// stash drop, reset --hard) — run verbatim by `git-confirm-yes`.
+    /// What a DEFERRED verb acts on — the destructive confirmations and the
+    /// reset transient, which fire after the question. Captured when the verb
+    /// is armed, re-resolved when it fires.
+    pending_target: Target = .{},
+    /// A full mutation staged behind a confirmation (branch delete, stash
+    /// drop, reset --hard) — run verbatim once the answer comes back `yes`.
     confirm_cmd: [1 << 12]u8 = undefined,
     confirm_len: usize = 0,
     /// Name typed into the `*git-input*` prompt (branch names, rebase depth).
@@ -311,10 +306,9 @@ const Route = enum { repo, focus, carried };
 /// What the command's arguments are designated by (§14.3).
 ///   `.durable`  — nothing snapshot-scoped (commit OIDs, refs, whole-tree verbs).
 ///   `.snapshot` — a working path or hunk resolved from the CURRENT render.
-///   `.arm`      — opens an interaction against the current snapshot.
-///   `.consume`  — completes an armed interaction; the snapshot must not have
-///                 moved since it was armed.
-const Scope = enum { durable, snapshot, arm, consume };
+///   `.arm`      — opens an interaction against the current snapshot. What the
+///                 answer may then do is the target it captured (see `resolve`).
+const Scope = enum { durable, snapshot, arm };
 
 const Cmd = struct {
     name: []const u8,
@@ -611,15 +605,7 @@ export fn on_command(id: u32) void {
     switch (c.scope) {
         .durable => {},
         .snapshot => if (!s.fresh()) return refuseStale(),
-        .arm => {
-            if (!s.fresh()) return refuseStale();
-            s.intent = s.snapshot;
-        },
-        .consume => if (!s.fresh() or s.intent != s.snapshot) {
-            refuseStale();
-            weft.setMode("git"); // the armed interaction is over, not pending
-            return;
-        },
+        .arm => if (!s.fresh()) return refuseStale(),
     }
     c.handler();
 }
@@ -837,6 +823,15 @@ fn loadRaw() void {
     if (total > RAW_CAP) cur.truncated_raw = true;
 }
 
+/// Re-render the model over this session's buffer. The projection is authored
+/// FIRST; styles and folds then index the new bytes.
+fn repaint() void {
+    render();
+    weft.edit(.{ .start = 0, .end = weft.byteLen() }, cur.render_buf[0..cur.out]);
+    publishStyles();
+    publishFolds();
+}
+
 fn parseAndRender() void {
     loadRaw();
     renderStatus();
@@ -845,21 +840,17 @@ fn parseAndRender() void {
 /// Model → projection, over whatever `raw` currently holds.
 fn renderStatus() void {
     parse();
-    render();
-    // The projection is authored FIRST; styles/folds then index the new bytes.
-    weft.edit(.{ .start = 0, .end = weft.byteLen() }, cur.render_buf[0..cur.out]);
-    publishStyles();
-    publishFolds();
-    // Land the cursor: re-find the captured node identity after a mutation (so
-    // point tracks the file/hunk/commit even when it moved), else the clamped
-    // offset, else home.
-    const target = if (cur.restore_cursor)
-        (findIdentityOffset() orelse @min(cur.pending_cursor, cur.out))
+    repaint();
+    // Land the cursor: re-find the captured target after a mutation (so point
+    // tracks the file/hunk/commit even when it moved), else the clamped offset,
+    // else home.
+    const landing = if (cur.restore_cursor)
+        (offsetOf(cur.restore_target) orelse @min(cur.pending_cursor, cur.out))
     else
         cur.home_off;
-    weft.jump(weft.lineAt(target).start);
+    weft.jump(weft.lineAt(landing).start);
     cur.restore_cursor = false;
-    cur.restore_kind = .none;
+    cur.restore_target = .{};
     // A new model is a new offer table: the previous one described rows that
     // no longer exist, and its ordinal is now stale at the door.
     publishOffers();
@@ -1275,8 +1266,10 @@ fn lineEnd(off: usize) usize {
     return e;
 }
 
-// ── Node resolution: cursor/offset → the innermost node it lands in ─────────
-const Kind = enum { none, section, file, hunk };
+// ── Display mapping: a rendered offset → the row it lands in ────────────────
+// The `r_start`/`r_end`/`sec_r*` tables are a DISPLAY table and nothing else:
+// they hit-test the cursor to a row. What that row NAMES is its `Target`.
+const Kind = enum { none, section, file, hunk, commit };
 const Node = struct { kind: Kind, idx: usize };
 
 fn nodeAt(off: usize) Node {
@@ -1288,6 +1281,8 @@ fn nodeAt(off: usize) Node {
     while (i < cur.file_count) : (i += 1) {
         if (off >= cur.files[i].r_start and off < cur.files[i].r_end) return .{ .kind = .file, .idx = i };
     }
+    const rec = @intFromEnum(Section.recent);
+    if (cur.sec_present[rec] and off >= cur.sec_body[rec] and off < cur.sec_rend[rec]) return .{ .kind = .commit, .idx = rec };
     for (render_order) |sec| {
         const idx = @intFromEnum(sec);
         if (cur.sec_present[idx] and off >= cur.sec_rstart[idx] and off < cur.sec_rend[idx]) return .{ .kind = .section, .idx = idx };
@@ -1295,44 +1290,231 @@ fn nodeAt(off: usize) Node {
     return .{ .kind = .none, .idx = 0 };
 }
 
-// ── Published offers: what the row under point affords ─────────────────────
-/// The section a node belongs to — the fact every staging verb turns on.
-fn sectionOf(n: Node) ?Section {
-    return switch (n.kind) {
-        .file => cur.files[n.idx].section,
-        .hunk => cur.files[cur.hunks[n.idx].file].section,
-        .section => @enumFromInt(n.idx),
-        .none => null,
+// ── Targeting: the identity a row carries (design §14.3) ────────────────────
+// A commit is a durable OID. A file is a revisioned name — section plus path,
+// re-resolved against whatever model is live. A hunk, and a line selection
+// inside one, are SNAPSHOT-SCOPED: they name nothing once a re-gather has
+// rebuilt the tree.
+
+/// A half-open range of BODY LINE ordinals inside one hunk.
+const Lines = struct { lo: usize, hi: usize };
+
+const Target = struct {
+    kind: Kind = .none,
+    snap: u32 = 0,
+    section: Section = .untracked,
+    path: [256]u8 = undefined,
+    plen: usize = 0,
+    ord: usize = 0, // the hunk's ordinal within its file
+    sel: ?Lines = null, // selected body lines of that hunk
+    hash: [64]u8 = undefined,
+    hlen: usize = 0,
+
+    fn path_(self: *const Target) []const u8 {
+        return self.path[0..self.plen];
+    }
+    fn hash_(self: *const Target) []const u8 {
+        return self.hash[0..self.hlen];
+    }
+};
+
+/// The ONE door into targeting: hit-test the cursor through the display table,
+/// then read the identity the row carries. Every verb goes through here; no
+/// verb ever sees a rendered offset.
+fn nodeAtCursor() Target {
+    const off = weft.cursor();
+    const n = nodeAt(off);
+    var t: Target = .{ .kind = n.kind, .snap = cur.snapshot };
+    switch (n.kind) {
+        .none => {},
+        .section => t.section = @enumFromInt(n.idx),
+        .file => nameFile(&t, n.idx),
+        .hunk => {
+            const h = &cur.hunks[n.idx];
+            nameFile(&t, h.file);
+            t.ord = n.idx - cur.files[h.file].first_hunk;
+            t.sel = selectedLines(n.idx);
+        },
+        .commit => t.hlen = hashTokenAt(off, &t.hash) orelse return .{ .snap = cur.snapshot },
+    }
+    return t;
+}
+
+fn nameFile(t: *Target, fi: usize) void {
+    const f = &cur.files[fi];
+    t.section = f.section;
+    t.plen = @min(f.plen, t.path.len);
+    @memcpy(t.path[0..t.plen], f.path[0..t.plen]);
+}
+
+/// A file target for `fi` in the CURRENT snapshot.
+fn fileTarget(fi: usize) Target {
+    var t: Target = .{ .kind = .file, .snap = cur.snapshot };
+    nameFile(&t, fi);
+    return t;
+}
+
+/// The body lines of hunk `hi` a selection covers, as ordinals. This is the
+/// last place a selection's rendered range is read — past here a partial hunk
+/// is named by line ordinals, which the snapshot check governs.
+fn selectedLines(hi: usize) ?Lines {
+    const sel = weft.selection() orelse return null;
+    const h = &cur.hunks[hi];
+    var lo: usize = 0;
+    var hi_ord: usize = 0;
+    var seen = false;
+    var ord: usize = 0;
+    var i = h.r_start;
+    while (i < h.r_end and cur.render_buf[i] != '\n') i += 1; // skip the `@@` line
+    i += 1;
+    while (i < h.r_end) : (ord += 1) {
+        var le = i;
+        while (le < h.r_end and cur.render_buf[le] != '\n') le += 1;
+        if (sel.start < le and sel.end > i) {
+            if (!seen) {
+                lo = ord;
+                seen = true;
+            }
+            hi_ord = ord + 1;
+        }
+        i = le + 1;
+    }
+    return if (seen) .{ .lo = lo, .hi = hi_ord } else null;
+}
+
+/// The commit-hash token on the rendered line at `off`, copied into `dst`.
+fn hashTokenAt(off: usize, dst: []u8) ?usize {
+    const ln = weft.lineAt(off);
+    var s = ln.start;
+    while (s < ln.end and s < cur.out and cur.render_buf[s] == ' ') s += 1;
+    var e = s;
+    while (e < ln.end and e < cur.out and cur.render_buf[e] != ' ') e += 1;
+    if (e == s) return null;
+    const n = @min(e - s, dst.len);
+    @memcpy(dst[0..n], cur.render_buf[s .. s + n]);
+    return n;
+}
+
+/// Where a target's row starts in the CURRENT render — cursor placement only,
+/// never authority, so it is lenient by design: a vanished hunk lands on its
+/// file's header.
+fn offsetOf(t: Target) ?usize {
+    switch (t.kind) {
+        .none => return null,
+        .section => {
+            const idx = @intFromEnum(t.section);
+            return if (cur.sec_present[idx]) cur.sec_rstart[idx] else null;
+        },
+        .file => {
+            const fi = findFile(t.section, t.path_()) orelse return null;
+            return cur.files[fi].r_start;
+        },
+        .hunk => {
+            const fi = findFile(t.section, t.path_()) orelse return null;
+            const f = &cur.files[fi];
+            if (f.n_hunks == 0) return f.r_start;
+            return cur.hunks[f.first_hunk + @min(t.ord, f.n_hunks - 1)].r_start;
+        },
+        .commit => return commitRow(t.hash_()),
+    }
+}
+
+/// The rendered start of the recent-commits line naming `want`.
+fn commitRow(want: []const u8) ?usize {
+    const idx = @intFromEnum(Section.recent);
+    if (!cur.sec_present[idx]) return null;
+    var i = cur.sec_body[idx];
+    const e = cur.sec_rend[idx];
+    while (i < e) {
+        var le = i;
+        while (le < e and cur.render_buf[le] != '\n') le += 1;
+        const hs = @min(i + 2, le); // skip the "  " indent
+        var he = hs;
+        while (he < le and cur.render_buf[he] != ' ') he += 1;
+        if (he > hs and std.mem.eql(u8, cur.render_buf[hs..he], want)) return i;
+        i = le + 1;
+    }
+    return null;
+}
+
+// ══ Below here nothing reads a rendered byte range ══════════════════════════
+// Every verb targets through `nodeAtCursor` and resolves through `resolve`; the
+// display tables and the projection buffer stay above this line. `e2e/project`
+// asserts it by construction, so keep new verbs below and new hit-testing above.
+
+/// A target → the live node it names, or null when it can no longer act.
+fn resolve(t: Target) ?Node {
+    switch (t.kind) {
+        .none => return null,
+        // A durable OID: valid whatever the working tree has since done.
+        .commit => return .{ .kind = .commit, .idx = 0 },
+        .section => {
+            const idx = @intFromEnum(t.section);
+            return if (cur.sec_present[idx]) .{ .kind = .section, .idx = idx } else null;
+        },
+        .file => {
+            const fi = findFile(t.section, t.path_()) orelse return null;
+            return .{ .kind = .file, .idx = fi };
+        },
+        .hunk => {
+            // Snapshot-scoped: an ordinal from a superseded model names nothing.
+            if (t.snap != cur.snapshot) return null;
+            const fi = findFile(t.section, t.path_()) orelse return null;
+            const f = &cur.files[fi];
+            if (t.ord >= f.n_hunks) return null;
+            return .{ .kind = .hunk, .idx = f.first_hunk + t.ord };
+        },
+    }
+}
+
+/// Resolve for a verb: silent on empty space, loud when the target went stale.
+fn liveNode(t: Target, verb: []const u8) ?Node {
+    if (t.kind == .none) return null;
+    return resolve(t) orelse {
+        var b: [64]u8 = undefined;
+        weft.echo(std.fmt.bufPrint(&b, "{s}: target moved — nothing done", .{verb}) catch verb);
+        return null;
     };
 }
 
-/// Is point on a commit line of the Recent section?
-fn onCommitLine() bool {
-    var scratch: [64]u8 = undefined;
-    return recentHashToken(&scratch) != null;
+/// The commit under point, or null when point isn't on one.
+fn commitAtCursor() ?Target {
+    const t = nodeAtCursor();
+    return if (t.kind == .commit) t else null;
 }
 
-fn stageReason(n: Node) []const u8 {
-    return switch (sectionOf(n) orelse return "no-row") {
+// ── Published offers: what the row under point affords ─────────────────────
+/// The section the target belongs to — the fact every staging verb turns on.
+fn sectionOf(t: Target) ?Section {
+    return switch (t.kind) {
+        .file, .hunk, .section => t.section,
+        .commit, .none => null,
+    };
+}
+
+fn stageReason(t: Target) []const u8 {
+    if (t.kind == .commit) return "not-a-change";
+    return switch (sectionOf(t) orelse return "no-row") {
         .untracked, .unstaged => "",
         .staged => "already-staged",
         .recent => "not-a-change",
     };
 }
 
-fn unstageReason(n: Node) []const u8 {
-    return if ((sectionOf(n) orelse return "no-row") == .staged) "" else "not-staged";
+fn unstageReason(t: Target) []const u8 {
+    if (t.kind == .commit) return "not-staged";
+    return if ((sectionOf(t) orelse return "no-row") == .staged) "" else "not-staged";
 }
 
-fn openReason(n: Node) []const u8 {
-    return switch (n.kind) {
-        .file, .hunk => "",
-        .section => if (@as(Section, @enumFromInt(n.idx)) == .recent and onCommitLine()) "" else "no-target",
+fn openReason(t: Target) []const u8 {
+    return switch (t.kind) {
+        .file, .hunk, .commit => "",
+        .section => "no-target",
         .none => "no-row",
     };
 }
 
-/// Publish what git affords RIGHT HERE: the row verbs, from the node under
+/// Publish what git affords RIGHT HERE: the row verbs, from the target under
 /// point, and the repository-level verbs, from being in a repo at all. Pushed
 /// on every event that can change either — a new model, a fold, a row move —
 /// so nothing has to probe git mid-resolution.
@@ -1352,11 +1534,11 @@ fn publishOffers() void {
         weft.offersRetract();
         return;
     }
-    const n = nodeAt(weft.cursor());
+    const t = nodeAtCursor();
     weft.offersBegin(tool, cur.snapshot);
-    weft.offer("plugin.git.stage", "git-stage", stageReason(n));
-    weft.offer("plugin.git.unstage", "git-unstage", unstageReason(n));
-    weft.offer("plugin.git.open-diff", "git-visit", openReason(n));
+    weft.offer("plugin.git.stage", "git-stage", stageReason(t));
+    weft.offer("plugin.git.unstage", "git-unstage", unstageReason(t));
+    weft.offer("plugin.git.open-diff", "git-visit", openReason(t));
     weft.offer("plugin.git.commit", "git-commit", "");
     weft.offer("plugin.git.refresh", "git-refresh", "");
     weft.offer("plugin.git.push", "git-push", "");
@@ -1379,11 +1561,10 @@ fn focusedDraft() ?*Drafts.Slot {
 }
 
 /// What a draft affords: the same `plugin.git.*` namespace, published through
-/// the same door — a re-seat needs a commit under point in the repository the
-/// draft was written for, and says so when there is none.
+/// the same door — a re-seat onto a commit needs the commit the draft was
+/// opened for, and says so when there is none.
 fn publishDraftOffers(slot: *Drafts.Slot) void {
-    const s = &sessions[slot.value.session];
-    const onto: []const u8 = if (s.pending_hash_len == 0) "no-commit-chosen" else "";
+    const onto: []const u8 = if (slot.value.onto.kind == .commit) "" else "no-commit-chosen";
     weft.offersBegin(draft_tool, draft_ordinal);
     weft.offer("plugin.git.amend", "git-draft-amend", "");
     weft.offer("plugin.git.reword", "git-draft-reword", "");
@@ -1431,54 +1612,56 @@ fn gitRefresh() void {
 /// TAB: flip the fold of the section/file under point, re-render (no re-gather —
 /// the model is intact), republish, and keep the cursor on the header.
 fn gitToggleFold() void {
-    const n = nodeAt(weft.cursor());
-    var head: usize = weft.cursor();
-    switch (n.kind) {
-        .section => {
+    const t = nodeAtCursor();
+    const n = resolve(t) orelse return;
+    // The head to keep point on, named by identity — it survives the re-render.
+    const head: Target = switch (n.kind) {
+        .section => blk: {
             cur.sec_folded[n.idx] = !cur.sec_folded[n.idx];
-            head = cur.sec_rstart[n.idx];
+            break :blk t;
         },
-        .file => {
-            cur.files[n.idx].folded = !cur.files[n.idx].folded;
-            setCollapsed(cur.files[n.idx].path_(), cur.files[n.idx].folded); // persist
-            head = cur.files[n.idx].r_start;
+        .file => blk: {
+            toggleFile(n.idx);
+            break :blk t;
         },
-        .hunk => {
-            // Fold the parent file (hunk-granularity folds are a later phase).
+        // Fold the parent file (hunk-granularity folds are a later phase).
+        .hunk => blk: {
             const fi = cur.hunks[n.idx].file;
-            cur.files[fi].folded = !cur.files[fi].folded;
-            setCollapsed(cur.files[fi].path_(), cur.files[fi].folded); // persist
-            head = cur.files[fi].r_start;
+            toggleFile(fi);
+            break :blk fileTarget(fi);
         },
-        .none => return,
-    }
-    rerender();
-    weft.jump(weft.lineAt(head).start);
+        else => return,
+    };
+    repaint();
+    weft.jump(weft.lineAt(offsetOf(head) orelse 0).start);
     publishOffers(); // every node moved; point landed on a header
 }
 
+fn toggleFile(fi: usize) void {
+    cur.files[fi].folded = !cur.files[fi].folded;
+    setCollapsed(cur.files[fi].path_(), cur.files[fi].folded); // persist
+}
+
 /// Repaint the buffer from the model in hand — no re-gather, the model is
-/// intact (a fold flip, or a refused stale action showing what IS current).
-/// Authoring the whole buffer moves point, so it lands back on its line.
+/// intact (a refused stale action showing what IS current). Authoring the whole
+/// buffer moves point, so it lands back on its line.
 fn rerender() void {
     const at = weft.cursor();
-    render();
-    weft.edit(.{ .start = 0, .end = weft.byteLen() }, cur.render_buf[0..cur.out]);
-    publishStyles();
-    publishFolds();
+    repaint();
     weft.jump(weft.lineAt(@min(at, cur.out)).start);
 }
 
 fn gitVisit() void {
-    const n = nodeAt(weft.cursor());
+    const t = nodeAtCursor();
+    const n = resolve(t) orelse return;
     const fi: usize = switch (n.kind) {
         .file => n.idx,
         .hunk => cur.hunks[n.idx].file,
         // RET on a recent commit → show it (a diff-colored read-only buffer).
-        .section => if (@as(Section, @enumFromInt(n.idx)) == .recent) {
-            gitShow();
+        .commit => {
+            showCommit(t);
             return;
-        } else return,
+        },
         else => return,
     };
     weft.runStr("open", cur.inRepo(cur.files[fi].path_()));
@@ -1486,16 +1669,15 @@ fn gitVisit() void {
 
 // ── Staging: file / hunk / region, resolved from the node under point ───────
 fn gitStage() void {
-    const n = nodeAt(weft.cursor());
-    const sel = weft.selection();
+    const t = nodeAtCursor();
+    const n = liveNode(t, "stage") orelse return;
     switch (n.kind) {
         .hunk => {
-            const h = &cur.hunks[n.idx];
-            if (cur.files[h.file].section != .unstaged) {
+            if (cur.files[cur.hunks[n.idx].file].section != .unstaged) {
                 weft.echo("stage: not an unstaged hunk");
                 return;
             }
-            applyHunk(h, sel, false);
+            applyHunk(n.idx, t.sel, false);
         },
         .file => {
             const f = &cur.files[n.idx];
@@ -1506,25 +1688,23 @@ fn gitStage() void {
             gatherAfter1("git add -- '{s}'", f.path_());
         },
         .section => {
-            const sec: Section = @enumFromInt(n.idx);
-            if (sec == .staged) return;
-            stageSection(sec, true);
+            if (t.section == .staged) return;
+            stageSection(t.section, true);
         },
-        .none => {},
+        else => {},
     }
 }
 
 fn gitUnstage() void {
-    const n = nodeAt(weft.cursor());
-    const sel = weft.selection();
+    const t = nodeAtCursor();
+    const n = liveNode(t, "unstage") orelse return;
     switch (n.kind) {
         .hunk => {
-            const h = &cur.hunks[n.idx];
-            if (cur.files[h.file].section != .staged) {
+            if (cur.files[cur.hunks[n.idx].file].section != .staged) {
                 weft.echo("unstage: not a staged hunk");
                 return;
             }
-            applyHunk(h, sel, true);
+            applyHunk(n.idx, t.sel, true);
         },
         .file => {
             const f = &cur.files[n.idx];
@@ -1535,11 +1715,10 @@ fn gitUnstage() void {
             gatherAfter1("git reset -q HEAD -- '{s}'", f.path_());
         },
         .section => {
-            const sec: Section = @enumFromInt(n.idx);
-            if (sec != .staged) return;
-            stageSection(sec, false);
+            if (t.section != .staged) return;
+            stageSection(t.section, false);
         },
-        .none => {},
+        else => {},
     }
 }
 
@@ -1568,40 +1747,40 @@ fn stageSection(sec: Section, stage: bool) void {
 }
 
 // ── Discard (destructive — always confirmed) ────────────────────────────────
+/// Arm a destructive verb: capture WHAT it targets now, ask, act later.
 fn gitDiscard() void {
-    const n = nodeAt(weft.cursor());
+    const t = nodeAtCursor();
+    const n = liveNode(t, "discard") orelse return;
+    cur.pending_target = t;
     switch (n.kind) {
         .file => confirmPick(.discard, "discard changes to this file?"),
         .hunk => confirmPick(.discard, "discard this hunk?"),
-        .section => {
-            // `x` on the Recent section → reset transient to the commit under
-            // point; other sections → the whole-section discard confirm.
-            if (@as(Section, @enumFromInt(n.idx)) == .recent) {
-                if (recentHashAt() == null) {
-                    weft.echo("no commit under point");
-                    return;
-                }
-                weft.echo("reset: s soft  m mixed  h hard");
-                weft.setMode("git-reset-menu");
-                return;
-            }
-            confirmPick(.discard, "discard the whole section?");
+        // `x` on a recent commit → the reset transient, scoped to that OID.
+        .commit => {
+            weft.echo("reset: s soft  m mixed  h hard");
+            weft.setMode("git-reset-menu");
         },
+        .section => confirmPick(.discard, "discard the whole section?"),
         .none => {},
     }
 }
-/// The confirmed destructive path. Re-resolves the node from the (unmoved)
-/// cursor/selection, so no state has to survive the question.
+/// The confirmed destructive path. It acts on the target captured when the
+/// question was asked, re-resolved against the live model — a target the model
+/// no longer names (a background re-gather landed under the prompt) destroys
+/// nothing.
 fn gitDiscardDo() void {
-    const n = nodeAt(weft.cursor());
-    const sel = weft.selection();
+    const t = cur.pending_target;
+    cur.pending_target = .{};
+    const n = resolve(t) orelse {
+        weft.echo("discard refused: the target moved since you asked");
+        return;
+    };
     switch (n.kind) {
         .hunk => {
-            const h = &cur.hunks[n.idx];
-            const staged = cur.files[h.file].section == .staged;
             // Reverse the worktree change; for a staged hunk, drop it from the
             // index too (git's discard reverts both sides).
-            discardHunk(h, sel, staged);
+            const staged = cur.files[cur.hunks[n.idx].file].section == .staged;
+            discardHunk(n.idx, t.sel, staged);
         },
         .file => {
             const f = &cur.files[n.idx];
@@ -1612,11 +1791,11 @@ fn gitDiscardDo() void {
                     const mut = std.fmt.bufPrint(&msg_buf, "git reset -q HEAD -- '{s}' && git checkout -- '{s}'", .{ f.path_(), f.path_() }) catch return;
                     gatherAfter(mut);
                 },
-                .recent => weft.setMode("git"),
+                .recent => {},
             }
         },
-        .section => discardSection(@enumFromInt(n.idx)),
-        .none => weft.setMode("git"),
+        .section => discardSection(t.section),
+        else => {},
     }
 }
 
@@ -1648,8 +1827,8 @@ fn discardSection(sec: Section) void {
 /// Stage (`reverse=false`) or unstage (`reverse=true`) a hunk against the index.
 /// With a selection overlapping the hunk, synthesize a PARTIAL patch; otherwise
 /// the whole hunk. Index-only — the worktree is never touched.
-fn applyHunk(h: *const Hunk, sel: ?weft.Range, reverse: bool) void {
-    const patch = buildPatch(h, sel) orelse {
+fn applyHunk(hi: usize, sel: ?Lines, reverse: bool) void {
+    const patch = buildPatch(hi, sel) orelse {
         weft.echo("git: patch too large");
         return;
     };
@@ -1662,8 +1841,8 @@ fn applyHunk(h: *const Hunk, sel: ?weft.Range, reverse: bool) void {
 
 /// Discard a hunk: reverse it out of the worktree; for a staged hunk, also drop
 /// it from the index. Two `git apply`s, chained before the re-gather.
-fn discardHunk(h: *const Hunk, sel: ?weft.Range, staged: bool) void {
-    const patch = buildPatch(h, sel) orelse {
+fn discardHunk(hi: usize, sel: ?Lines, staged: bool) void {
+    const patch = buildPatch(hi, sel) orelse {
         weft.echo("git: patch too large");
         weft.setMode("git");
         return;
@@ -1679,10 +1858,11 @@ fn discardHunk(h: *const Hunk, sel: ?weft.Range, staged: bool) void {
 }
 
 /// Build a one-file/one-hunk patch: the file's kept diff header + the hunk. With
-/// `sel`, transform the hunk to only the selected +/- lines (git's algorithm:
-/// unselected `+` dropped, unselected `-` demoted to context) and recompute the
-/// `@@` counts. Returns null if it won't fit.
-fn buildPatch(h: *const Hunk, sel: ?weft.Range) ?[]const u8 {
+/// `sel` (body-line ordinals), transform the hunk to only the selected +/- lines
+/// (git's algorithm: unselected `+` dropped, unselected `-` demoted to context)
+/// and recompute the `@@` counts. Returns null if it won't fit.
+fn buildPatch(hi: usize, sel: ?Lines) ?[]const u8 {
+    const h = &cur.hunks[hi];
     const f = &cur.files[h.file];
     if (f.header_len == 0) return null;
     var w: usize = 0;
@@ -1692,37 +1872,31 @@ fn buildPatch(h: *const Hunk, sel: ?weft.Range) ?[]const u8 {
     w = hdr.len;
 
     const hunk = cur.raw[h.at .. h.at + h.len];
-    if (sel == null or !overlaps(sel.?, h.r_start, h.r_end)) {
-        if (w + hunk.len > patch_buf.len) return null;
-        @memcpy(patch_buf[w .. w + hunk.len], hunk);
-        w += hunk.len;
-        return ensureNl(patch_buf[0..w]);
-    }
-    return buildPartial(f, h, hunk, sel.?, &w);
+    if (sel) |s| return buildPartial(hunk, s, &w);
+    if (w + hunk.len > patch_buf.len) return null;
+    @memcpy(patch_buf[w .. w + hunk.len], hunk);
+    w += hunk.len;
+    return ensureNl(patch_buf[0..w]);
 }
 
-fn buildPartial(f: *const File, h: *const Hunk, hunk: []const u8, sel: weft.Range, w: *usize) ?[]const u8 {
-    _ = f;
+fn buildPartial(hunk: []const u8, sel: Lines, w: *usize) ?[]const u8 {
     // Split the @@ header line from the body.
     var hl: usize = 0;
     while (hl < hunk.len and hunk[hl] != '\n') hl += 1;
     const starts = parseHunkStarts(hunk[0..hl]);
-    // First pass over the body: transform lines, counting old/new.
-    // The body begins at hunk[hl+1]; its render offset for a byte q is
-    // h.r_start + (h.at + <local> - h.at) = h.r_start + local.
+    // One pass over the body: transform lines, counting old/new. Body lines are
+    // numbered from 0; `sel` names them by ordinal, never by byte.
     var bw: usize = 0;
     var old_count: usize = 0;
     var new_count: usize = 0;
+    var ord: usize = 0;
     var i: usize = hl + 1;
-    while (i < hunk.len) {
+    while (i < hunk.len) : (ord += 1) {
         var le = i;
         while (le < hunk.len and hunk[le] != '\n') le += 1;
         const has_nl = le < hunk.len;
         const line = hunk[i..le];
-        // This body line's rendered span (verbatim shift by h.r_start - h.at).
-        const rstart = h.r_start + (h.at + i) - h.at; // = h.r_start + i
-        const rend = h.r_start + (h.at + le) - h.at;
-        const selected = overlaps(sel, rstart, rend);
+        const selected = ord >= sel.lo and ord < sel.hi;
         if (line.len == 0) {
             i = le + 1;
             continue;
@@ -1798,10 +1972,6 @@ fn ensureNl(patch: []const u8) []const u8 {
     return patch_buf[0 .. patch.len + 1];
 }
 
-fn overlaps(r: weft.Range, s: usize, e: usize) bool {
-    return r.start < e and r.end > s;
-}
-
 // ── The commit draft ───────────────────────────────────────────────────────
 // A draft is an ORDINARY text entry: no mode of its own, no owned keys. It is
 // tool-backed, so `std.persistence.save` resolves to `git-commit-save` in it —
@@ -1820,6 +1990,9 @@ const Draft = struct {
     /// never write over each other.
     tmp: [64]u8 = undefined,
     tmp_len: usize = 0,
+    /// The commit this draft was opened ONTO (fixup/squash) — a durable OID,
+    /// and what a re-seat needs. `.none` for an ordinary commit.
+    onto: Target = .{},
 
     fn flagsOf(self: *const Draft) []const u8 {
         return self.flags[0..self.flags_len];
@@ -1858,10 +2031,10 @@ var commit_note_len: usize = 0;
 
 /// Open a commit draft. `prefill` (or "") is a shell command whose stdout seeds
 /// the message — `git log -1 --format=%B` for amend/reword.
-fn openDraft(flags: []const u8, prefill: []const u8) void {
+fn openDraft(flags: []const u8, prefill: []const u8) ?*Drafts.Slot {
     const slot = drafts.open(draft_tool) orelse {
         weft.echo("git: too many commit drafts open");
-        return;
+        return null;
     };
     slot.value = .{ .session = sessionIndex(cur) };
     setFlags(slot, flags);
@@ -1870,6 +2043,7 @@ fn openDraft(flags: []const u8, prefill: []const u8) void {
     seedDraft(slot, prefill);
     weft.jump(0);
     weft.echo("commit draft: save to commit, close to abort");
+    return slot;
 }
 
 /// A draft's meaning is its flags: setting them is a new model to offer from.
@@ -2041,29 +2215,29 @@ fn gitDraftSquash() void {
 /// text from the named commit's subject — no flag, no separate command path.
 fn reseatOnto(kind: []const u8) void {
     const slot = currentDraft() orelse return;
-    if (cur.pending_hash_len == 0) {
+    if (slot.value.onto.kind != .commit) {
         weft.echo("no commit chosen to fix up");
         return;
     }
     const prefill = std.fmt.bufPrint(
         &op_buf,
         "git log -1 --format='{s}! %s' {s} 2>/dev/null",
-        .{ kind, cur.pending_hash[0..cur.pending_hash_len] },
+        .{ kind, slot.value.onto.hash_() },
     ) catch return;
     reseat(slot, "", prefill, kind);
 }
 
 // ── Opening a draft from the status buffer ─────────────────────────────────
 fn gitCommit() void {
-    openDraft("", "");
+    _ = openDraft("", "");
 }
 /// Amend: edit the current message (pre-filled), include staged changes.
 fn gitAmend() void {
-    openDraft("--amend", head_message);
+    _ = openDraft("--amend", head_message);
 }
 /// Reword: amend the MESSAGE ONLY (`--only`) — staged changes stay staged.
 fn gitReword() void {
-    openDraft("--amend --only", head_message);
+    _ = openDraft("--amend --only", head_message);
 }
 /// Extend: fold staged changes into HEAD, keep the message (no draft).
 fn gitExtend() void {
@@ -2075,17 +2249,20 @@ fn gitFixup() void {
 fn gitSquash() void {
     openOnto("squash");
 }
+/// `fixup!`/`squash!` is a MESSAGE, so a draft opened onto a commit is seeded
+/// from that commit's subject and REMEMBERS the OID it was opened onto.
 fn openOnto(kind: []const u8) void {
-    const h = recentHashAt() orelse {
+    const onto = commitAtCursor() orelse {
         weft.echo("no commit under point");
         return;
     };
     const prefill = std.fmt.bufPrint(
         &op_buf,
         "git log -1 --format='{s}! %s' {s} 2>/dev/null",
-        .{ kind, h },
+        .{ kind, onto.hash_() },
     ) catch return;
-    openDraft("", prefill);
+    const slot = openDraft("", prefill) orelse return;
+    slot.value.onto = onto;
 }
 
 fn focusBuffer(name: []const u8) bool {
@@ -2270,7 +2447,7 @@ fn gather(cmd: []const u8) void {
 fn markRestore() void {
     cur.restore_cursor = true;
     cur.pending_cursor = weft.cursor();
-    captureIdentity();
+    cur.restore_target = nodeAtCursor();
 }
 
 /// `mutation && GATHER` into *git* — the index reflects the mutation with no
@@ -2318,115 +2495,6 @@ fn gatherAfterPatch(flags: []const u8, also_worktree: bool) void {
     weft.setMode("git");
 }
 
-// ── Commit-node resolution: the hash on the rendered line under point ───────
-/// The commit hash of the recent-commits line the cursor is on, copied into
-/// `pending_hash` (so it survives a mode hop), or null when the cursor isn't on
-/// a commit line. `render_buf[0..out]` IS the buffer we authored, so buffer
-/// offsets index it directly (the `nodeAt` invariant).
-fn recentHashAt() ?[]const u8 {
-    cur.pending_hash_len = recentHashToken(&cur.pending_hash) orelse return null;
-    return cur.pending_hash[0..cur.pending_hash_len];
-}
-
-/// Copy the commit-hash token on the recent line under point into `dst`,
-/// returning its length, or null when the cursor isn't on a commit line. Shared
-/// by the commit verbs (`recentHashAt`) and identity capture.
-fn recentHashToken(dst: []u8) ?usize {
-    const idx = @intFromEnum(Section.recent);
-    if (!cur.sec_present[idx]) return null;
-    const at = weft.cursor();
-    if (at < cur.sec_body[idx] or at >= cur.sec_rend[idx]) return null;
-    const ln = weft.lineAt(at);
-    var s = ln.start;
-    while (s < ln.end and s < cur.out and cur.render_buf[s] == ' ') s += 1;
-    var e = s;
-    while (e < ln.end and e < cur.out and cur.render_buf[e] != ' ') e += 1;
-    if (e == s) return null;
-    const n = @min(e - s, dst.len);
-    @memcpy(dst[0..n], cur.render_buf[s .. s + n]);
-    return n;
-}
-
-// ── Node identity capture/lookup (survives a re-gather; see the restore block) ─
-/// Snapshot the identity of the node under point BEFORE a mutation, so the fill
-/// can re-find it in the freshly-gathered model.
-fn captureIdentity() void {
-    cur.restore_kind = .none;
-    const n = nodeAt(weft.cursor());
-    switch (n.kind) {
-        .none => {},
-        .file => {
-            const f = &cur.files[n.idx];
-            cur.restore_kind = .file;
-            cur.restore_section = f.section;
-            cur.restore_plen = @min(f.plen, cur.restore_path.len);
-            @memcpy(cur.restore_path[0..cur.restore_plen], f.path[0..cur.restore_plen]);
-        },
-        .hunk => {
-            const h = &cur.hunks[n.idx];
-            const f = &cur.files[h.file];
-            cur.restore_kind = .hunk;
-            cur.restore_section = f.section;
-            cur.restore_plen = @min(f.plen, cur.restore_path.len);
-            @memcpy(cur.restore_path[0..cur.restore_plen], f.path[0..cur.restore_plen]);
-            cur.restore_hunk_ord = n.idx - f.first_hunk;
-        },
-        .section => {
-            const sec: Section = @enumFromInt(n.idx);
-            // A recent-commit line is a section node — remember it by hash so it
-            // tracks even after commits above it churn.
-            if (sec == .recent) {
-                if (recentHashToken(&cur.restore_hash)) |hn| {
-                    cur.restore_kind = .commit;
-                    cur.restore_hlen = hn;
-                    return;
-                }
-            }
-            cur.restore_kind = .section;
-            cur.restore_section = sec;
-        },
-    }
-}
-
-/// Re-find the captured identity in the freshly-rendered model → its rendered
-/// start offset, or null when it's gone (caller falls back to the clamped offset).
-fn findIdentityOffset() ?usize {
-    switch (cur.restore_kind) {
-        .none => return null,
-        .section => {
-            const idx = @intFromEnum(cur.restore_section);
-            return if (cur.sec_present[idx]) cur.sec_rstart[idx] else null;
-        },
-        .file => {
-            const fi = findFile(cur.restore_section, cur.restore_path[0..cur.restore_plen]) orelse return null;
-            return cur.files[fi].r_start;
-        },
-        .hunk => {
-            const fi = findFile(cur.restore_section, cur.restore_path[0..cur.restore_plen]) orelse return null;
-            const f = &cur.files[fi];
-            if (f.n_hunks == 0) return f.r_start; // hunks gone → the file header
-            return cur.hunks[f.first_hunk + @min(cur.restore_hunk_ord, f.n_hunks - 1)].r_start;
-        },
-        .commit => {
-            const idx = @intFromEnum(Section.recent);
-            if (!cur.sec_present[idx]) return null;
-            const want = cur.restore_hash[0..cur.restore_hlen];
-            var i = cur.sec_body[idx];
-            const e = cur.sec_rend[idx];
-            while (i < e) {
-                var le = i;
-                while (le < e and cur.render_buf[le] != '\n') le += 1;
-                const hs = @min(i + 2, le); // skip the "  " indent
-                var he = hs;
-                while (he < le and cur.render_buf[he] != ' ') he += 1;
-                if (he > hs and std.mem.eql(u8, cur.render_buf[hs..he], want)) return i;
-                i = le + 1;
-            }
-            return null;
-        },
-    }
-}
-
 // ── Confirmation is an interaction, not a mode ─────────────────────────────
 // A destructive verb asks through the pick membrane: the question is the
 // prompt, the two candidates are the answer, and the pick id says which
@@ -2469,9 +2537,10 @@ export fn on_pick_accept(pick_id: u32) void {
         return;
     }
     switch (question) {
-        // A discard designates a working path or hunk: it may only run against
-        // the snapshot it was armed on (§14.3's `.consume`).
-        .discard => if (cur.fresh() and cur.intent == cur.snapshot) gitDiscardDo() else refuseStale(),
+        // A discard acts on the target it captured, resolved against the live
+        // model — `resolve` is the whole rule (a file re-resolves, a hunk is
+        // snapshot-scoped), so nothing coarser belongs here.
+        .discard => gitDiscardDo(),
         // The staged command is composed from refs and OIDs — durable.
         .staged => gatherAfterSeq(cur.confirm_cmd[0..cur.confirm_len]),
     }
@@ -2479,27 +2548,30 @@ export fn on_pick_accept(pick_id: u32) void {
 
 // ── Show / cherry-pick / revert / reset on the commit under point ───────────
 fn gitShow() void {
-    const h = recentHashAt() orelse {
+    const t = commitAtCursor() orelse {
         weft.echo("show: no commit under point");
         return;
     };
-    const cmd = std.fmt.bufPrint(&cmd_buf, "git show {s}", .{h}) catch return;
+    showCommit(t);
+}
+fn showCommit(t: Target) void {
+    const cmd = std.fmt.bufPrint(&cmd_buf, "git show {s}", .{t.hash_()}) catch return;
     show(cmd, "*git-show*", .diff);
     weft.setMode("git-view");
 }
 fn gitCherryPick() void {
-    const h = recentHashAt() orelse {
+    const t = commitAtCursor() orelse {
         weft.echo("cherry-pick: no commit under point");
         return;
     };
-    gatherAfterSeq1("git cherry-pick {s}", h);
+    gatherAfterSeq1("git cherry-pick {s}", t.hash_());
 }
 fn gitRevert() void {
-    const h = recentHashAt() orelse {
+    const t = commitAtCursor() orelse {
         weft.echo("revert: no commit under point");
         return;
     };
-    gatherAfterSeq1("git revert --no-edit {s}", h);
+    gatherAfterSeq1("git revert --no-edit {s}", t.hash_());
 }
 fn gitResetSoft() void {
     resetTo("--soft");
@@ -2507,12 +2579,16 @@ fn gitResetSoft() void {
 fn gitResetMixed() void {
     resetTo("--mixed");
 }
+/// The reset transient acts on the OID `x` armed it with — durable, so no
+/// re-resolution against the working tree is needed or wanted.
 fn resetTo(kind: []const u8) void {
-    const m = std.fmt.bufPrint(&op_buf, "git reset {s} {s}", .{ kind, cur.pending_hash[0..cur.pending_hash_len] }) catch return;
+    if (cur.pending_target.kind != .commit) return;
+    const m = std.fmt.bufPrint(&op_buf, "git reset {s} {s}", .{ kind, cur.pending_target.hash_() }) catch return;
     gatherAfterSeq(m);
 }
 fn gitResetHard() void {
-    const m = std.fmt.bufPrint(&op_buf, "git reset --hard {s}", .{cur.pending_hash[0..cur.pending_hash_len]}) catch return;
+    if (cur.pending_target.kind != .commit) return;
+    const m = std.fmt.bufPrint(&op_buf, "git reset --hard {s}", .{cur.pending_target.hash_()}) catch return;
     confirmThen(m, "reset --hard (loses changes)?");
 }
 
