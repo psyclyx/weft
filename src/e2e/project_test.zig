@@ -1661,10 +1661,8 @@ test "e2e/project: git's row verbs resolve through published offers, and the loc
     defer ed.deinit();
     try h.loadWorkspaceWithHints(&ed);
 
-    // The projections declare no lock: nothing pins the keymap, because
-    // nothing needs to (§19's demolition).
-    try t.expect(!ed.keymap.isLockedMode("git"));
-    try t.expect(!ed.keymap.isLockedMode("git-view"));
+    // The lock mechanism itself is gone (§19's demolition); resting-mode
+    // declarations are what keep the projections' keys alive after Escape.
     try t.expect(ed.keymap.isRestingMode("git"));
     try t.expect(ed.keymap.isRestingMode("git-view"));
 

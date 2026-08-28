@@ -1886,8 +1886,8 @@ pub fn modeStructureSnapshot(gpa: Allocator, km: *core.Keymap) ![]u8 {
     errdefer out.deinit(gpa);
     for (list) |mode| {
         const txt = km.commitCommand(mode) orelse "<none>";
-        const line = try std.fmt.allocPrint(gpa, "{s}|menu={}|sticky={}|locked={}|resting={}|text={s}\n", .{
-            mode, km.isMenuMode(mode), km.isStickyMenu(mode), km.isLockedMode(mode), km.isRestingMode(mode), txt,
+        const line = try std.fmt.allocPrint(gpa, "{s}|menu={}|sticky={}|resting={}|text={s}\n", .{
+            mode, km.isMenuMode(mode), km.isStickyMenu(mode), km.isRestingMode(mode), txt,
         });
         defer gpa.free(line);
         try out.appendSlice(gpa, line);

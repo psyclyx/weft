@@ -157,13 +157,13 @@ test "two heads: A in a menu mode does not move B out of normal" {
     defer ed.deinit();
     try ed.head.setModeRaw(gpa, "normal");
 
-    // A git-style special mode: locked (declares no commit command, so typing
+    // A git-style special mode: resting (declares no commit command, so typing
     // never self-inserts) AND reachable as a one-shot menu, the same shape
     // `dispatch.dispatchSpec` gives any bound command whose name NAMES a menu
     // mode (see its "legacy mode-menu path" comment) — the same mechanism a
     // real git-status keybinding uses.
     try ed.keymap.markMenuMode(gpa, "tool-mode");
-    try ed.keymap.markLockedMode(gpa, "tool-mode");
+    try ed.keymap.markRestingMode(gpa, "tool-mode");
     try ed.keymap.bind(gpa, "normal", "g", "tool-mode", core.Keymap.prio_config, "test");
 
     var b: SecondHead = undefined;
@@ -176,7 +176,7 @@ test "two heads: A in a menu mode does not move B out of normal" {
     // A enters the tool mode through a REAL keypress.
     ed.press("g", "");
     try t.expectEqualStrings("tool-mode", ed.mode());
-    try t.expect(ed.keymap.isLockedMode(ed.mode()));
+    try t.expect(ed.keymap.isRestingMode(ed.mode()));
     try t.expectEqualStrings("normal", ed.head.menuReturn("tool-mode").?);
 
     // B never moved — still plain "normal", and it never recorded a menu

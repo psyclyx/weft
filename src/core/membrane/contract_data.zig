@@ -107,7 +107,7 @@ pub const Entry = struct {
     /// pick session, echo line (dot-repeat and window focus have no `wl_*`
     /// door today). `false` — the overwhelming majority — for everything
     /// else, in particular:
-    ///   - mode/menu TABLE declarations (`wl_menu_mode`, `wl_locked_mode`,
+    ///   - mode/menu TABLE declarations (`wl_menu_mode`,
     ///     `wl_resting_mode`, `wl_sticky_menu`, `wl_set_fallback`,
     ///     `wl_bind_key`, `wl_text_input`, `wl_declare_action`, `wl_provide`)
     ///     — these declare what a mode/action IS, system-scoped (Keymap
@@ -215,7 +215,6 @@ pub const imports = [_]Entry{
     .{ .name = "wl_set_fallback", .params = &.{ .u32, .u32, .u32, .u32 }, .results = &.{}, .group = .keymap, .doc = "declare mode `m`'s fallback (parent) mode for unbound keys" },
     .{ .name = "wl_text_input", .params = &.{ .u32, .u32, .u32, .u32, .u32 }, .results = &.{}, .group = .keymap, .doc = "declare mode `m`'s text-input command (and whether it takes the typed char)" },
     .{ .name = "wl_menu_mode", .params = &.{ .u32, .u32 }, .results = &.{}, .group = .keymap, .doc = "declare a mode a which-key-style menu" },
-    .{ .name = "wl_locked_mode", .params = &.{ .u32, .u32 }, .results = &.{}, .group = .keymap, .doc = "mark a read-only projection mode pinned (can't leave for a generic editing mode)" },
     .{ .name = "wl_resting_mode", .params = &.{ .u32, .u32 }, .results = &.{}, .group = .keymap, .doc = "declare a mode a buffer can rest in (`baseMode` stops there)" },
     .{ .name = "wl_exit_to_resting", .params = &.{}, .results = &.{}, .group = .keymap, .head_gated = true, .doc = "leave a transient mode back to the active buffer's resting mode" },
     .{ .name = "wl_sticky_menu", .params = &.{ .u32, .u32 }, .results = &.{}, .group = .keymap, .doc = "mark a menu mode sticky (stays open after a leaf key)" },
@@ -410,7 +409,7 @@ pub const imports = [_]Entry{
 /// half-finished edit — fails the build with a pointed message instead of
 /// silently drifting the two ~124-entry tables apart again (the exact class
 /// this table exists to kill).
-const expected_import_count = 196;
+const expected_import_count = 195;
 
 /// A host→guest EXPORT entrypoint (design doc/extensibility-native-surface.md, task
 /// W0a-D extension 2): every `instance.callVoid("name", args)` the host

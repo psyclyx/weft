@@ -169,10 +169,12 @@ fn drainLoopIdleOrDiff(proj: *Project, ed: *Editor) bool {
 // ── GATE G3: no locked git modes ──
 //
 // doc §19: domain keymaps / locked tool modes are demolition targets for git
-// specifically. Nothing pins git's keymap any more — the projections hold no
-// editor, so typing refuses structurally and `git` is simply where they rest.
-// Leaving a transient therefore lands back in git, not in a generic mode with
-// dead keys — which is what the lock was standing in for.
+// specifically — the lock mechanism itself is gone (Keymap has no locked-mode
+// concept any more), so this is now structurally impossible, not just untrue.
+// The projections hold no editor, so typing refuses structurally and `git` is
+// simply where they rest. Leaving a transient therefore lands back in git,
+// not in a generic mode with dead keys — which is what the lock was standing
+// in for.
 test "e2e/git-gates: G3 no git mode is locked" {
     const gpa = t.allocator;
     var ed: Editor = undefined;
@@ -180,8 +182,6 @@ test "e2e/git-gates: G3 no git mode is locked" {
     defer ed.deinit();
     try loadWorkspace(&ed);
 
-    try t.expect(!ed.keymap.isLockedMode("git"));
-    try t.expect(!ed.keymap.isLockedMode("git-view"));
     try t.expect(ed.keymap.isRestingMode("git"));
     try t.expect(ed.keymap.isRestingMode("git-view"));
 

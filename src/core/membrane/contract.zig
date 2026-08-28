@@ -146,7 +146,6 @@ const handlers = [_]struct { name: []const u8, handler: HostFn }{
     .{ .name = "wl_set_fallback", .handler = keymap.hSetFallback },
     .{ .name = "wl_text_input", .handler = keymap.hTextInput },
     .{ .name = "wl_menu_mode", .handler = keymap.hMenuMode },
-    .{ .name = "wl_locked_mode", .handler = keymap.hLockedMode },
     .{ .name = "wl_resting_mode", .handler = keymap.hRestingMode },
     .{ .name = "wl_exit_to_resting", .handler = keymap.hExitToResting },
     .{ .name = "wl_sticky_menu", .handler = keymap.hStickyMenu },

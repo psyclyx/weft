@@ -127,7 +127,7 @@ pub const DispatchError = error{NotDispatching};
 /// HEAD-GATED per task #19 item 4 — W0b split, doc/extensibility-native-surface.md):
 /// the mode-leak class's founding bug ("background forces a mode") is
 /// `shared.canDispatch(id)` here — SAME check `requireDispatch`'s wasm trap
-/// uses, shared not reimplemented. Compare `hMenuMode`/`hLockedMode`/
+/// uses, shared not reimplemented. Compare `hMenuMode`/
 /// `hRestingMode`/`hStickyMenu` below, which DECLARE a mode's system-scoped
 /// TABLE properties and stay ungated (no split needed — they carry no head
 /// state). Routes through `Ctx.enterMode` (never raw `Head`) — the SAME
@@ -140,11 +140,6 @@ pub const DispatchError = error{NotDispatching};
 /// `ctx.gpa` names).
 pub fn setMode(gpa: Allocator, ctx: *command_mod.Context, id: anytype, mode: []const u8) DispatchError!void {
     if (!shared.canDispatch(id)) return error.NotDispatching;
-    // A locked projection mode (a git status/diff view) refuses to switch to a
-    // different editing mode — you can't land in `normal` inside a read-only projection.
-    // Business-rule no-op, not a guard denial — same silent-return shape the
-    // pre-split handler had, unaffected by the transport split.
-    if (!ctx.keymap.mayLeaveLocked(ctx.head.currentMode(), mode)) return;
     const c = ctx_mod.Ctx.capture(ctx);
     c.enterMode(ctx.keymap, mode) catch {};
     // Remember a RESTING mode as the active buffer's resting mode, so exiting a
@@ -226,17 +221,6 @@ pub fn hMenuMode(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32, res
     const mode = caller.readMemory(p.gpa, @intCast(args[0]), @intCast(args[1])) catch return;
     defer p.gpa.free(mode);
     p.activeCtx().keymap.markMenuMode(p.gpa, mode) catch {};
-}
-
-/// `locked_mode(mode)`: mark a read-only projection mode pinned (see
-/// Keymap.mayLeaveLocked) — a git status/diff view can't be left for a generic
-/// editing mode, only a menu or itself.
-pub fn hLockedMode(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32, results: []i32) void {
-    _ = results;
-    const p: *WasmPlugin = @ptrCast(@alignCast(data.?));
-    const mode = caller.readMemory(p.gpa, @intCast(args[0]), @intCast(args[1])) catch return;
-    defer p.gpa.free(mode);
-    p.activeCtx().keymap.markLockedMode(p.gpa, mode) catch {};
 }
 
 /// `resting_mode(mode)`: declare a mode a buffer can rest in, so `baseMode` stops
