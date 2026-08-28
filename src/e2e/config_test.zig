@@ -61,6 +61,26 @@ fn collectSceneActions(
     }
 }
 
+/// The standard intention a scene action is published under by the view
+/// adapter (`core/view_offers.zig` over `view_runtime/offers.zig`), or null
+/// when the vocabulary does not name it yet and config must still bind the
+/// action name itself.
+fn intentionFor(action: []const u8) ?[]const u8 {
+    const standard = semantic.action.standard;
+    const table = [_]struct { action: []const u8, intention: []const u8 }{
+        .{ .action = standard.open, .intention = "std.target.activate" },
+        .{ .action = standard.open_container, .intention = "std.hierarchy.step-out" },
+        .{ .action = standard.toggle_expanded, .intention = "std.hierarchy.toggle-expanded" },
+        .{ .action = standard.copy, .intention = "std.transfer.yank" },
+        .{ .action = standard.cut, .intention = "std.transfer.delete-to-register" },
+        .{ .action = standard.paste_after, .intention = "std.transfer.paste" },
+    };
+    for (table) |row| {
+        if (std.mem.eql(u8, row.action, action)) return row.intention;
+    }
+    return null;
+}
+
 fn sceneNodeWithRole(node: semantic.scene.Node, role: []const u8) ?semantic.scene.Node {
     if (std.mem.eql(u8, node.role, role)) return node;
     return switch (node.content) {
@@ -295,19 +315,17 @@ test "e2e/config: the sample config boots; SPC g i is discoverable via which-key
     // This keeps the config surface honest for any plugin-owned scene: a
     // provider can advertise the same protocol without adding a core command
     // or a tool-specific dispatch branch.
+    // Only the RESIDUE: operations no standard intention names yet. The rest
+    // of the group now binds its intention directly (asserted below), so its
+    // trampoline commands are gone — doc §19's "semantic-action-to-string-
+    // command trampolines", shrinking as the vocabulary grows.
     const structured_view_actions = [_][]const u8{
-        semantic.action.standard.open,
-        semantic.action.standard.open_container,
-        semantic.action.standard.toggle_expanded,
         semantic.action.standard.set_working_target,
         semantic.action.standard.edit,
-        semantic.action.standard.copy,
-        semantic.action.standard.cut,
         semantic.action.standard.delete,
         "fs.permissions.edit",
         "fs.entry.create-file",
         "fs.entry.create-directory",
-        semantic.action.standard.paste_after,
         semantic.action.standard.paste_before,
         semantic.action.standard.refresh,
         semantic.action.standard.revert,
@@ -345,14 +363,16 @@ test "e2e/config: the sample config boots; SPC g i is discoverable via which-key
     ed.press("v", "");
     try t.expectEqualStrings("space v", ed.head.pending);
     try t.expect(whichKeyShows(&ed, semantic.action.standard.edit));
-    try t.expect(whichKeyShows(&ed, semantic.action.standard.copy));
-    try t.expect(whichKeyShows(&ed, semantic.action.standard.cut));
+    try t.expect(whichKeyShows(&ed, "transfer.yank"));
+    try t.expect(whichKeyShows(&ed, "transfer.delete-to-register"));
     try t.expect(whichKeyShows(&ed, semantic.action.standard.delete));
     try t.expect(whichKeyShows(&ed, semantic.action.standard.paste_before));
-    try t.expect(whichKeyShows(&ed, semantic.action.standard.paste_after));
-    try t.expect(whichKeyShows(&ed, semantic.action.standard.open));
-    try t.expect(whichKeyShows(&ed, semantic.action.standard.open_container));
-    try t.expect(whichKeyShows(&ed, semantic.action.standard.toggle_expanded));
+    // The intention-bound half of the group reads as its intention: the hint
+    // names what is meant, and the focused view says who answers it.
+    try t.expect(whichKeyShows(&ed, "transfer.paste"));
+    try t.expect(whichKeyShows(&ed, "target.activate"));
+    try t.expect(whichKeyShows(&ed, "hierarchy.step-out"));
+    try t.expect(whichKeyShows(&ed, "hierarchy.toggle-expanded"));
     try t.expect(whichKeyShows(&ed, semantic.action.standard.set_working_target));
     try t.expect(whichKeyShows(&ed, semantic.action.standard.refresh));
     try t.expect(whichKeyShows(&ed, semantic.action.standard.revert));
@@ -372,18 +392,12 @@ test "e2e/config: the sample config boots; SPC g i is discoverable via which-key
     const structured_view_bindings = [_]struct { sequence: []const u8, command: []const u8 }{
         .{ .sequence = "space v j", .command = "cursor-down" },
         .{ .sequence = "space v k", .command = "cursor-up" },
-        .{ .sequence = "space v o", .command = semantic.action.standard.open },
-        .{ .sequence = "space v minus", .command = semantic.action.standard.open_container },
-        .{ .sequence = "space v Tab", .command = semantic.action.standard.toggle_expanded },
         .{ .sequence = "space v c", .command = semantic.action.standard.set_working_target },
         .{ .sequence = "space v e", .command = semantic.action.standard.edit },
-        .{ .sequence = "space v y", .command = semantic.action.standard.copy },
-        .{ .sequence = "space v x", .command = semantic.action.standard.cut },
         .{ .sequence = "space v d", .command = semantic.action.standard.delete },
         .{ .sequence = "space v m", .command = "fs.permissions.edit" },
         .{ .sequence = "space v n", .command = "fs.entry.create-file" },
         .{ .sequence = "space v N", .command = "fs.entry.create-directory" },
-        .{ .sequence = "space v p", .command = semantic.action.standard.paste_after },
         .{ .sequence = "space v P", .command = semantic.action.standard.paste_before },
         .{ .sequence = "space v r", .command = semantic.action.standard.refresh },
         .{ .sequence = "space v R", .command = semantic.action.standard.revert },
@@ -392,6 +406,25 @@ test "e2e/config: the sample config boots; SPC g i is discoverable via which-key
     for (structured_view_bindings) |binding| {
         try t.expectEqualStrings(binding.command, ed.keymap.resolveExact("normal", binding.sequence).?);
     }
+
+    // The migrated half of the group: the key IS the intention. No command by
+    // that action name exists any more — the focused view's own vocabulary
+    // publishes the offer that answers it.
+    const intention_bindings = [_]struct { sequence: []const u8, intention: []const u8 }{
+        .{ .sequence = "space v o", .intention = "std.target.activate" },
+        .{ .sequence = "space v minus", .intention = "std.hierarchy.step-out" },
+        .{ .sequence = "space v Tab", .intention = "std.hierarchy.toggle-expanded" },
+        .{ .sequence = "space v y", .intention = "std.transfer.yank" },
+        .{ .sequence = "space v x", .intention = "std.transfer.delete-to-register" },
+        .{ .sequence = "space v p", .intention = "std.transfer.paste" },
+    };
+    for (intention_bindings) |binding| {
+        const arms = ed.keymap.resolveExactArms("normal", binding.sequence).?;
+        try t.expectEqual(@as(usize, 1), arms.len);
+        try t.expectEqualStrings(binding.intention, arms[0]);
+    }
+    try t.expect(ed.commands.resolve(semantic.action.standard.open) == null);
+    try t.expect(ed.commands.resolve(semantic.action.standard.copy) == null);
 
     // Seed both capability-varying row kinds so the real files scene has
     // concrete rows whose advertised target/actions can be checked below.
@@ -432,6 +465,23 @@ test "e2e/config: the sample config boots; SPC g i is discoverable via which-key
     defer advertised_actions.deinit(gpa);
     try collectSceneActions(gpa, files_scene, &advertised_actions);
     for (advertised_actions.items) |action| {
+        // Reachable EITHER as its own command name, or — where the view
+        // adapter publishes the action under a standard intention — through
+        // the key that binds that intention. Both are config surface; only
+        // the second needs no trampoline command to exist.
+        if (intentionFor(action)) |intention| {
+            var sequence: ?[]const u8 = null;
+            for (intention_bindings) |binding| {
+                if (std.mem.eql(u8, binding.intention, intention)) {
+                    sequence = binding.sequence;
+                    break;
+                }
+            }
+            try t.expect(sequence != null);
+            try t.expect(ed.commands.resolve(action) == null); // no trampoline left
+            try t.expectEqualStrings(intention, ed.keymap.resolveExact("normal", sequence.?).?);
+            continue;
+        }
         var sequence: ?[]const u8 = null;
         for (structured_view_bindings) |binding| {
             if (std.mem.eql(u8, binding.command, action)) {
@@ -458,6 +508,19 @@ test "e2e/config: the sample config boots; SPC g i is discoverable via which-key
         try t.expect(found);
         try t.expect(ed.commands.resolve(binding.command) != null);
         try t.expectEqualStrings(binding.command, ed.keymap.resolveExact("normal", binding.sequence).?);
+    }
+    // Same check for the intention half: each bound intention must still be
+    // one the real scene advertises an action for, or the key means nothing.
+    for (intention_bindings) |binding| {
+        var found = false;
+        for (advertised_actions.items) |action| {
+            const intention = intentionFor(action) orelse continue;
+            if (std.mem.eql(u8, intention, binding.intention)) {
+                found = true;
+                break;
+            }
+        }
+        try t.expect(found);
     }
     try t.expect(sceneNodeWithFact(files_scene, "files.row", "kind", "regular") != null);
     const directory_row = sceneNodeWithFact(files_scene, "files.row", "kind", "directory") orelse return error.MissingDirectoryRow;

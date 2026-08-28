@@ -257,21 +257,32 @@ function bindActionGroup(mode, prefix, bindings) {
   }
 }
 
+// Covered by a standard intention: the key binds the intention, and the
+// focused view's own vocabulary publishes the offer that answers it.
+function bindIntentionGroup(mode, prefix, bindings) {
+  for (var i = 0; i < bindings.length; i++) {
+    weft.bind(mode, prefix + " " + bindings[i][0], [bindings[i][1]]);
+  }
+}
+
 weft.bind("normal", "SPC v j", "cursor-down");
 weft.bind("normal", "SPC v k", "cursor-up");
+bindIntentionGroup("normal", "SPC v", [
+  ["o", "std.target.activate"],
+  ["-", "std.hierarchy.step-out"],
+  ["TAB", "std.hierarchy.toggle-expanded"],
+  ["y", "std.transfer.yank"],
+  ["x", "std.transfer.delete-to-register"],
+  ["p", "std.transfer.paste"],
+]);
+// The residue: operations no standard intention names yet.
 bindActionGroup("normal", "SPC v", [
-  ["o", "target.open"],
-  ["-", "target.open-container"],
-  ["TAB", "hierarchy.toggle-expanded"],
   ["c", "workspace.set-working-target"],
   ["e", "field.edit"],
-  ["y", "selection.copy"],
-  ["x", "selection.cut"],
   ["d", "selection.delete"],
   ["m", "fs.permissions.edit"],
   ["n", "fs.entry.create-file"],
   ["N", "fs.entry.create-directory"],
-  ["p", "selection.paste-after"],
   ["P", "selection.paste-before"],
   ["r", "view.refresh"],
   ["R", "view.revert"],
