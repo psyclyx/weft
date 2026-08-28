@@ -217,7 +217,13 @@ fn activeKey(key: *Key) ?void {
     const cmd = serverCmd(key.lang());
     if (cmd.len == 0) return null;
     if (!copyInto(&key.cmd_buf, &key.cmd_len, cmd)) return null;
-    if (!copyInto(&key.root_buf, &key.root_len, weft.cwd())) return null;
+    // WHERE, not the process's launch directory (`doc/place.md`). This field
+    // has always been part of the key; filling it from a process-wide constant
+    // is what made every project share one server. An empty place has no local
+    // root to serve, so no session is minted for it at all.
+    const root = weft.placeRoot();
+    if (root.len == 0) return null;
+    if (!copyInto(&key.root_buf, &key.root_len, root)) return null;
     return {};
 }
 
@@ -259,11 +265,38 @@ fn ensureActive() ?*Session {
         weft.echo("lsp: could not start server");
         return s;
     }
-    s.init_id = s.conn.request("initialize",
-        \\{"processId":null,"rootUri":null,"capabilities":{"textDocument":{"hover":{"contentFormat":["plaintext","markdown"]},"synchronization":{},"publishDiagnostics":{"versionSupport":true}}}}
-    );
+    s.init_id = s.conn.request("initialize", initializeParams(s));
     return s;
 }
+
+/// `initialize`'s params, naming the workspace this server is FOR.
+///
+/// `rootUri` was the literal `null` while every session shared the process's
+/// launch directory — there was no honest answer to give. A session is keyed
+/// by its place now, so the root it was minted for is the root it serves, and
+/// a server that resolves configuration, indexes, or cross-file references
+/// against a workspace gets the right one.
+///
+/// `workspaceFolders` is deliberately NOT sent (`doc/place.md` §9): multi-root
+/// is its own protocol with its own lifecycle notification, and one honest
+/// root beats a half-implemented list of them.
+fn initializeParams(s: *const Session) []const u8 {
+    const caps =
+        \\"capabilities":{"textDocument":{"hover":{"contentFormat":["plaintext","markdown"]},"synchronization":{},"publishDiagnostics":{"versionSupport":true}}}
+    ;
+    const root = s.root();
+    if (root.len == 0 or root[0] != '/')
+        return "{\"processId\":null,\"rootUri\":null," ++ caps ++ "}";
+    return std.fmt.bufPrint(
+        &init_buf,
+        "{{\"processId\":null,\"rootUri\":\"file://{s}\",{s}}}",
+        .{ root, caps },
+    ) catch "{\"processId\":null,\"rootUri\":null," ++ caps ++ "}";
+}
+
+/// Scratch for `initialize`'s params — its own buffer, since the request is
+/// written while the session's own fields are borrowed.
+var init_buf: [1024]u8 = undefined;
 
 fn freeSession() ?*Session {
     for (&sessions) |*s| {
@@ -843,21 +876,23 @@ fn retargetDoc(s: *Session) void {
 }
 
 /// The active buffer's `file://` uri, into `out`. Absolute paths pass through;
-/// relative ones get the cwd prefix, so the uri matches the absolute uris a
-/// server returns in its locations.
+/// relative ones are resolved INSIDE the place they belong to, so the uri
+/// matches the absolute uris a server rooted at that place returns in its
+/// locations.
+///
+/// `weft.placePath` is what reconciles the two spellings — see its doc for why
+/// a naive `<root>/<path>` double-counts what they share.
 fn buildUri(out: []u8) []const u8 {
-    // Copy the (possibly scratch-backed) path out before calling cwd (also
-    // scratch).
+    // Copy the (possibly scratch-backed) path out before calling placeRoot
+    // (also scratch).
     var pbuf: [1024]u8 = undefined;
     const path = weft.path() orelse "untitled";
     const pn = @min(path.len, pbuf.len);
     @memcpy(pbuf[0..pn], path[0..pn]);
-    const pc = pbuf[0..pn];
-    const s = if (pn > 0 and pc[0] == '/')
-        std.fmt.bufPrint(out, "file://{s}", .{pc}) catch return ""
-    else
-        std.fmt.bufPrint(out, "file://{s}/{s}", .{ weft.cwd(), pc }) catch return "";
-    return s;
+    var abuf: [1024]u8 = undefined;
+    const abs = weft.placePath(weft.placeRoot(), pbuf[0..pn], &abuf);
+    if (abs.len == 0) return "";
+    return std.fmt.bufPrint(out, "file://{s}", .{abs}) catch "";
 }
 
 // ── Response dispatch ────────────────────────────────────────────────

@@ -260,7 +260,7 @@ extern "weft" fn wl_proc_spawn(cmd: u32, cmd_len: u32) i32;
 extern "weft" fn wl_proc_send(handle: u32, ptr: u32, len: u32) void;
 extern "weft" fn wl_proc_read(handle: u32, out: u32, cap: u32) i32;
 extern "weft" fn wl_proc_close(handle: u32) void;
-extern "weft" fn wl_cwd(out: u32, cap: u32) i32;
+extern "weft" fn wl_place_root(out: u32, cap: u32) i32;
 extern "weft" fn wl_net_connect(host: u32, host_len: u32, name: u32, name_len: u32, sni: u32, sni_len: u32) i32;
 extern "weft" fn wl_net_send(handle: u32, ptr: u32, len: u32) void;
 extern "weft" fn wl_net_close(handle: u32) void;
@@ -2190,11 +2190,51 @@ pub fn procRead(handle: u32, out: []u8) []u8 {
 pub fn procClose(handle: u32) void {
     wl_proc_close(handle);
 }
-/// The process working directory (for absolute `file://` uris). Uses the shared
-/// scratch — copy it before the next read call.
-pub fn cwd() []const u8 {
-    const n = wl_cwd(p(&scratch), scratch.len);
+/// WHERE this dispatch runs, as an absolute directory (`doc/place.md`) — the
+/// project a file belongs to, the pinned working target, or the editor's own
+/// directory when the dispatch is about nothing more specific.
+///
+/// **EMPTY means the place has no local directory** (a peer or a container that
+/// went away), and a caller that needs one must DECLINE rather than substitute
+/// the editor's launch directory: acting in the wrong project while reporting
+/// success is the bug the retired process-directory shim used to cause.
+///
+/// Uses the shared scratch — copy it before the next read call.
+pub fn placeRoot() []const u8 {
+    const n = wl_place_root(p(&scratch), scratch.len);
     return if (n <= 0) "" else scratch[0..@intCast(n)];
+}
+
+/// A buffer path named absolutely within its place, into `out`.
+///
+/// The two doors answer different spellings of the same file. `wl_path` gives
+/// the path AS SPELLED — absolute, or relative to the directory the editor was
+/// launched in — while `placeRoot` gives a directory the file is INSIDE. Join
+/// them naively and the components both spellings share get counted twice:
+/// `weft proj/x.zig`, launched above `proj`, is `<…>/proj` + `proj/x.zig`.
+///
+/// So the join drops the leading components of `spelled` that `root` already
+/// ends with, longest overlap first — the file is inside the root by
+/// construction, so the deepest shared spelling is the one the launch directory
+/// produced. Absolute paths pass through untouched; an empty `root` yields ""
+/// so a caller DECLINES rather than inventing a base.
+///
+/// Pure, and here rather than in each plugin: this shim is the one party that
+/// knows the contract of both doors, and two guests open-coding the same join
+/// is exactly how they drift apart.
+pub fn placePath(root: []const u8, spelled: []const u8, out: []u8) []const u8 {
+    if (spelled.len > 0 and spelled[0] == '/') return std.fmt.bufPrint(out, "{s}", .{spelled}) catch "";
+    if (root.len == 0) return "";
+    var start: usize = 0;
+    var cut: usize = 0;
+    while (std.mem.indexOfScalarPos(u8, spelled, start, '/')) |slash| {
+        const head = spelled[0..slash];
+        if (root.len > head.len and
+            root[root.len - head.len - 1] == '/' and
+            std.mem.eql(u8, root[root.len - head.len ..], head)) cut = slash + 1;
+        start = slash + 1;
+    }
+    return std.fmt.bufPrint(out, "{s}/{s}", .{ root, spelled[cut..] }) catch "";
 }
 
 // ── net.connect (TCP / TLS) — perm net ───────────────────────────────

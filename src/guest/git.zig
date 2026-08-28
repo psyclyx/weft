@@ -90,7 +90,7 @@ var run_buf: [1 << 14]u8 = undefined;
 /// Scratch for an absolute path inside the session's repository (`inRepo`).
 var tmp_buf: [1024]u8 = undefined;
 /// Scratch for the path a repository root is detected from (`weft.path` and
-/// `weft.cwd` both borrow the shim's shared read scratch).
+/// `weft.placeRoot` both borrow the shim's shared read scratch).
 var probe_buf: [1024]u8 = undefined;
 var base_buf: [1024]u8 = undefined;
 
@@ -697,6 +697,14 @@ fn focusedSession() ?*RepoSession {
 /// Past the cap we echo and refuse rather than silently reusing a session that
 /// belongs to another repository.
 fn sessionFor(root: []const u8) ?*RepoSession {
+    // No local directory to be a repository in (`doc/place.md`: a peer place,
+    // or a container that went away). Refuse by name rather than mint a
+    // session whose `cd` guard would fall through to wherever this process
+    // happens to be.
+    if (root.len == 0) {
+        weft.echo("git: this place has no local repository");
+        return null;
+    }
     for (sessions[0..session_count]) |*s| {
         if (std.mem.eql(u8, s.root(), root)) return s;
     }
@@ -747,46 +755,60 @@ fn route(kind: Route) ?*RepoSession {
 }
 
 /// The repository root the FOCUSED buffer belongs to: the nearest ancestor
-/// holding `.git`, else the editor's working directory (the locus a repo would
-/// be created in). Absolute, so the same repository always keys one session.
+/// holding `.git`, else this dispatch's own place (the locus a repo would be
+/// created in). Absolute, so the same repository always keys one session.
+///
+/// The climb SURVIVES places rather than being replaced by one, because the
+/// two answer different questions at different times: a place is detected when
+/// a file is OPENED, over every VCS marker; `.git` can appear afterwards (an
+/// in-editor `git init`) and only git knows which marker counts. What the
+/// place supplies is the FLOOR — see `detectRoot`.
 fn activeRoot() []const u8 {
-    const here = editorCwd();
+    const here = placeDir();
     const pth = weft.path() orelse return detectRoot(here, here) orelse here;
     return detectRoot(absolute(pth, here), here) orelse here;
 }
 
-/// The focused buffer's file, absolute, or null for a tool buffer.
+/// The focused buffer's file, absolute, or null for a tool buffer (or for a
+/// place with no local directory to name it against).
 fn activePathAbs() ?[]const u8 {
-    const here = editorCwd();
-    return absolute(weft.path() orelse return null, here);
+    const here = placeDir();
+    const abs = absolute(weft.path() orelse return null, here);
+    return if (abs.len == 0) null else abs;
 }
 
-/// The editor's working directory, copied off the shim's shared read scratch.
-fn editorCwd() []const u8 {
-    const cwd = weft.cwd();
-    const n = @min(cwd.len, base_buf.len);
-    @memcpy(base_buf[0..n], cwd[0..n]);
+/// WHERE this dispatch runs (`doc/place.md`), copied off the shim's shared read
+/// scratch. Empty when the place has no local directory at all, which every
+/// caller below treats as a refusal rather than as "here".
+fn placeDir() []const u8 {
+    const root = weft.placeRoot();
+    const n = @min(root.len, base_buf.len);
+    @memcpy(base_buf[0..n], root[0..n]);
     return base_buf[0..n];
 }
 
-/// `pth` made absolute against the editor's working directory — a buffer path
-/// may be relative, a repository root never is.
+/// `pth` made absolute against this dispatch's place — a buffer path may be
+/// relative, a repository root never is. `weft.placePath` owns the join,
+/// because a path spelled relative to the launch directory and a place below
+/// it share components neither spelling admits to (see its doc).
 fn absolute(pth: []const u8, here: []const u8) []const u8 {
-    if (pth.len > 0 and pth[0] == '/') {
-        const n = @min(pth.len, probe_buf.len);
-        @memcpy(probe_buf[0..n], pth[0..n]);
-        return probe_buf[0..n];
-    }
-    return std.fmt.bufPrint(&probe_buf, "{s}/{s}", .{ here, pth }) catch here;
+    return weft.placePath(here, pth, &probe_buf);
 }
 
 /// Climb from `path` to the nearest ancestor holding `.git` (a submodule or
 /// worktree makes it a FILE, so any kind counts). The climb STOPS at `floor`
-/// when `floor` contains `path`: the editor's working directory is the project
-/// locus, so a repository above it — a version-controlled home directory, a
-/// `/tmp` someone made a repo — never captures a session that belongs to the
-/// project. A path outside `floor` climbs freely: it belongs to its own
-/// repository, wherever that is. Null when there is none.
+/// when `floor` contains `path`: `floor` is this dispatch's PLACE, so a
+/// repository above it — a version-controlled home directory, a `/tmp` someone
+/// made a repo — never captures a session that belongs to the project. A path
+/// outside `floor` climbs freely: it belongs to its own repository, wherever
+/// that is. Null when there is none.
+///
+/// The floor used to be the directory the editor was launched in, which meant
+/// two projects open at once shared one floor and the wrong one won. It is
+/// per-dispatch now, so the climb is a refinement WITHIN a project instead of
+/// a search across everything the launch directory happened to contain — and
+/// a path spelled relative to the launch directory still lands, because the
+/// climb terminates at the floor, which is already the right answer.
 fn detectRoot(path: []const u8, floor: []const u8) ?[]const u8 {
     var end = path.len;
     if (weft.fsExists(path) != .dir) end = std.mem.lastIndexOfScalar(u8, path, '/') orelse return null;

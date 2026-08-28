@@ -20,6 +20,7 @@ const proc = @import("../proc.zig");
 const Document = @import("../Document.zig");
 const file = @import("../file.zig");
 const contract = @import("../membrane/contract.zig");
+const place_mod = @import("../place.zig");
 
 const shared = @import("plugin.zig");
 const WasmPlugin = shared.WasmPlugin;
@@ -133,19 +134,43 @@ pub fn hProcRead(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32, res
     results[0] = @intCast(caller.writeMemory(@intCast(args[1]), @intCast(cap), buf[0..n]) catch 0);
 }
 
-/// `cwd(out, cap) -> n`: the process working directory, for building absolute
-/// `file://` uris (a language server resolves relative uris to absolute, so a
-/// client must speak absolute to match returned locations).
-pub fn hCwd(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32, results: []i32) void {
-    _ = data;
+/// `placeRoot(out, cap) -> n`: the absolute directory of the DISPATCHING PLACE
+/// (`doc/place.md`), or ZERO BYTES when that place has no local directory.
+///
+/// The place-shaped replacement for the deleted process-directory door, and
+/// strictly NARROWER than it: that one revealed the editor's launch directory
+/// unconditionally, to every guest, regardless of what the dispatch was about.
+/// This reveals only where the dispatch already runs — the same value
+/// `resolveSpawnAt` chdir's this plugin's children into a few declarations
+/// above — so it needs no permission of its own: a guest that can spawn here
+/// already acts here.
+///
+/// The four answers are `place.Realized`'s four, unflattened:
+///  - `.process` — the editor's own directory. The DEGENERATE INSTANCE, not a
+///    fallback: that place IS the process's directory, so naming it is exactly
+///    right.
+///  - `.path` — the container's absolute directory, borrowed from the
+///    authority that opened it (never retained; it is copied into guest memory
+///    within this call).
+///  - `.elsewhere`/`.unavailable` — no local directory exists to name. Zero
+///    bytes, so a guest DECLINES rather than silently acting in the editor's
+///    launch directory, which is the whole bug this door exists to retire.
+pub fn hPlaceRoot(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32, results: []i32) void {
+    const p: *WasmPlugin = @ptrCast(@alignCast(data.?));
+    const ctx = p.activeCtx();
     var buf: [4096]u8 = undefined;
-    const rc = std.os.linux.getcwd(&buf, buf.len);
-    if (@as(isize, @bitCast(rc)) < 0) {
+    const dir: []const u8 = switch (place_mod.realize(ctx.place(), ctx.realizer)) {
+        // Only the degenerate place asks the OS where this process is; every
+        // other place is named by the authority that opened it.
+        .process => file.processDirectory(&buf) orelse "",
+        .path => |abs| abs,
+        .elsewhere, .unavailable => "",
+    };
+    if (dir.len == 0) {
         results[0] = 0;
         return;
     }
-    const path = std.mem.sliceTo(buf[0..rc], 0);
-    results[0] = @intCast(caller.writeMemory(@intCast(args[0]), @intCast(args[1]), path) catch 0);
+    results[0] = @intCast(caller.writeMemory(@intCast(args[0]), @intCast(args[1]), dir) catch 0);
 }
 
 /// `procClose(handle)`: kill the subprocess; the slot stays null for stability.

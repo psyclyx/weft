@@ -375,7 +375,7 @@ pub const imports = [_]Entry{
     .{ .name = "wl_proc_send", .params = &.{ .u32, .u32, .u32 }, .results = &.{}, .group = .proc, .doc = "write to a spawned subprocess's stdin" },
     .{ .name = "wl_proc_read", .params = &.{ .u32, .u32, .u32 }, .results = &.{.i32}, .group = .proc, .doc = "drain buffered stdout from a spawned subprocess" },
     .{ .name = "wl_proc_close", .params = &.{.u32}, .results = &.{}, .group = .proc, .doc = "kill a spawned subprocess (slot stays for handle stability)" },
-    .{ .name = "wl_cwd", .params = &.{ .u32, .u32 }, .results = &.{.i32}, .group = .proc, .doc = "the process working directory (for absolute `file://` uris)" },
+    .{ .name = "wl_place_root", .params = &.{ .u32, .u32 }, .results = &.{.i32}, .group = .proc, .doc = "the dispatching place's absolute directory, or 0 bytes when it has none locally" },
     .{ .name = "wl_proc_to_buffer", .params = &.{ .u32, .u32, .u32, .u32, .u32 }, .results = &.{}, .group = .proc, .perm = .proc_timer, .doc = "run `<cmd>` off-thread and replace the scratch buffer captured now with its stdout; the trailing fill token comes back as `on_fill_token`" },
     .{ .name = "wl_proc_append_buffer", .params = &.{ .u32, .u32, .u32, .u32, .u32 }, .results = &.{}, .group = .proc, .perm = .proc_timer, .doc = "like `wl_proc_to_buffer` but appends (a console log) instead of replacing" },
     .{ .name = "wl_proc_spool", .params = &.{ .u32, .u32, .u32, .u32, .u32, .u32, .u32 }, .results = &.{}, .group = .proc, .perm = .proc_timer, .doc = "like `wl_proc_to_buffer`, but write `<input>` to a HOST-NAMED temp file, substitute it for `{}` in `<cmd>`, and delete it afterwards — a subprocess gets a real path without the guest holding fs_write" },
@@ -550,6 +550,32 @@ test "membrane contract data: every import entry is well-formed, documented, and
         try t.expect(!gop.found_existing);
     }
     try t.expectEqual(@as(usize, expected_import_count), imports.len);
+}
+
+test "membrane contract data: exactly one door answers WHERE, and it is place-shaped" {
+    // The membrane used to answer "where does this run" with the process's
+    // launch directory — ONE value fixed at startup, handed to every guest that
+    // asked, with no relation to what the dispatch was about. Its four
+    // consumers each meant something narrower by it (a language server's
+    // workspace, a `.git` climb's floor, a file browser's root), and with two
+    // projects open at once the single answer was wrong for at least one of
+    // them. `wl_place_root` answers WHERE THIS DISPATCH IS instead, and answers
+    // nothing at all when that place has no local directory, so a guest
+    // declines rather than acting in the launch directory (`doc/place.md`).
+    //
+    // This is the positive half of the gate: the replacement is bound, in the
+    // proc group beside the spawn doors that read the same place host-side. The
+    // ABSENCE of the retired process-directory door — in this table, in the
+    // handler list, and in the guest shim — is gated over the real source tree
+    // by `e2e/demolition_test.zig`, which is the only file allowed to spell it.
+    var saw_place_root = false;
+    for (imports) |entry| {
+        if (!std.mem.eql(u8, entry.name, "wl_place_root")) continue;
+        saw_place_root = true;
+        try t.expectEqual(Group.proc, entry.group);
+        try t.expectEqual(@as(?Perm, null), entry.perm); // narrower than what it replaced; no new authority
+    }
+    try t.expect(saw_place_root);
 }
 
 test "membrane contract data: every export entry is well-formed, documented, and unique" {
