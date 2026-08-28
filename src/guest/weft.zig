@@ -261,6 +261,7 @@ extern "weft" fn wl_proc_send(handle: u32, ptr: u32, len: u32) void;
 extern "weft" fn wl_proc_read(handle: u32, out: u32, cap: u32) i32;
 extern "weft" fn wl_proc_close(handle: u32) void;
 extern "weft" fn wl_place_root(out: u32, cap: u32) i32;
+extern "weft" fn wl_place_id() i32;
 extern "weft" fn wl_net_connect(host: u32, host_len: u32, name: u32, name_len: u32, sni: u32, sni_len: u32) i32;
 extern "weft" fn wl_net_send(handle: u32, ptr: u32, len: u32) void;
 extern "weft" fn wl_net_close(handle: u32) void;
@@ -1135,6 +1136,11 @@ pub fn Instances(comptime T: type, comptime cap: usize) type {
             name_buf: [name_cap]u8,
             name_len: usize,
             opened: usize, // ordering, for `oldest`
+            /// The place this instance was opened in (`weft.placeId`). A session
+            /// is a NAMED thing LINKED to a place, not a thing keyed BY one --
+            /// so two interpreters can share a project and one server can
+            /// serve two. Compared, never interpreted.
+            place: i32,
             value: T,
 
             pub fn name(self: *const Slot) []const u8 {
@@ -1162,6 +1168,7 @@ pub fn Instances(comptime T: type, comptime cap: usize) type {
                 .name_buf = undefined,
                 .name_len = name.len,
                 .opened = self.opens,
+                .place = placeId(),
                 .value = undefined,
             };
             const slot = &self.slots[i].?;
@@ -1181,10 +1188,19 @@ pub fn Instances(comptime T: type, comptime cap: usize) type {
             return found;
         }
 
-        /// The instance this command is about: the one owning the focused
-        /// buffer, else the most recent — echoed as `label: *name*`, so a
-        /// command run from elsewhere never silently drives an instance the
-        /// user cannot see.
+        /// The instance this command is about, most-specific link first: the
+        /// one owning the focused buffer, else one opened in THIS PLACE, else
+        /// the most recent — echoed as `label: *name*`, so a command run from
+        /// elsewhere never silently drives an instance the user cannot see.
+        ///
+        /// The middle rung is what makes instances project-aware. Without it,
+        /// running a tool from a file in one project drove whichever instance
+        /// happened to be most recent — routinely another project's, since
+        /// "most recent" tracks the last thing you touched anywhere. With it, a
+        /// second project gets its own instance and keeps it, and neither
+        /// captures the other. Emacs learned this the same way: `sesman`
+        /// exists because CIDER and friends each grew a session table keyed the
+        /// wrong way first.
         pub fn current(self: *Self, label: []const u8) ?*Slot {
             var name_buf: [name_cap]u8 = undefined;
             if (activeBufferName(&name_buf)) |active| {
@@ -1195,6 +1211,15 @@ pub fn Instances(comptime T: type, comptime cap: usize) type {
                         return slot;
                     }
                 }
+            }
+            const here = placeId();
+            for (&self.slots, 0..) |*maybe, i| {
+                const slot = if (maybe.*) |*s| s else continue;
+                if (slot.place != here) continue;
+                self.recent = i;
+                var place_msg: [name_cap + 32]u8 = undefined;
+                echo(std.fmt.bufPrint(&place_msg, "{s}: {s}", .{ label, slot.name() }) catch return slot);
+                return slot;
             }
             const i = self.recent orelse return null;
             const slot = if (self.slots[i]) |*s| s else return null;
@@ -2200,6 +2225,13 @@ pub fn procClose(handle: u32) void {
 /// success is the bug the retired process-directory shim used to cause.
 ///
 /// Uses the shared scratch — copy it before the next read call.
+/// A dense opaque id for the place this dispatch is in. Compare it with
+/// another `placeId()`; never interpret the number, and never persist it (it
+/// is stable for this run only).
+pub fn placeId() i32 {
+    return wl_place_id();
+}
+
 pub fn placeRoot() []const u8 {
     const n = wl_place_root(p(&scratch), scratch.len);
     return if (n <= 0) "" else scratch[0..@intCast(n)];

@@ -2087,3 +2087,57 @@ test "e2e/place: a project's environment reaches the children run in it" {
     ed.runStr("run-command", "printf 'mark=[%s]' \"$WEFT_PLACE_MARK\"");
     try t.expect(drainToolContains(&ed, "*output*", "mark=[]"));
 }
+
+test "e2e/place: a second project gets its own REPL, and neither captures the other" {
+    const gpa = t.allocator;
+    var proj: Project = undefined;
+    try proj.init(gpa);
+    defer proj.deinit();
+
+    var ed: Editor = undefined;
+    try Editor.init(gpa, &ed);
+    defer ed.deinit();
+    try loadWebIde(&ed);
+    try loadSessions(&ed);
+
+    for ([_][]const u8{
+        "mkdir -p rp-a/.git rp-b/.git",
+        "printf 'x\\n' > rp-a/a.js",
+        "printf 'x\\n' > rp-b/b.js",
+    }) |cmd| {
+        const out = try proj.oracle(cmd);
+        gpa.free(out);
+    }
+
+    // A shell read-loop is a persistent echo REPL that flushes each line.
+    const echo_loop = "while read l; do echo \"$l\"; done";
+
+    // A REPL per project, started from a file in each.
+    ed.runStr("open", "rp-a/a.js");
+    ed.runStr("repl-start", echo_loop);
+    ed.runStr("open", "rp-b/b.js");
+    ed.runStr("repl-start", echo_loop);
+    try t.expect(ed.buffers.findByName("*repl*") != null);
+    try t.expect(ed.buffers.findByName("*repl:2*") != null);
+
+    // Back in project A, with B's REPL the MOST RECENT one. Before instances
+    // were linked to a place, "most recent" won and this line went to B.
+    ed.runStr("open", "rp-a/a.js");
+    ed.runStr("repl-send", "from-a\n");
+    try t.expect(drainToolContains(&ed, "*repl*", "from-a"));
+    {
+        const other = h.toolText(&ed, "*repl:2*") orelse return error.NoSecondRepl;
+        defer gpa.free(other);
+        try t.expect(std.mem.indexOf(u8, other, "from-a") == null);
+    }
+
+    // And project B still drives its own.
+    ed.runStr("open", "rp-b/b.js");
+    ed.runStr("repl-send", "from-b\n");
+    try t.expect(drainToolContains(&ed, "*repl:2*", "from-b"));
+    {
+        const first = h.toolText(&ed, "*repl*") orelse return error.NoFirstRepl;
+        defer gpa.free(first);
+        try t.expect(std.mem.indexOf(u8, first, "from-b") == null);
+    }
+}

@@ -131,6 +131,10 @@ pub const Context = struct {
     /// Per-place environment overlays (`env.zig`). Null in embeddings without
     /// a `System`, where every place simply has the base environment.
     environments: ?*@import("env.zig").Environments = null,
+    /// Dense opaque ids for places (`place.Ids`). Null in embeddings without a
+    /// `System`; every place then reads as the degenerate one, which is what an
+    /// embedding with no places should see.
+    place_ids: ?*@import("place.zig").Ids = null,
     /// Turns a `Place` into an OS directory for a local effect
     /// (`doc/place.md` §2.3). Installed by the shell, which owns the roots it
     /// opened; `null` in headless embeddings, where only the degenerate
@@ -216,6 +220,13 @@ pub const Context = struct {
         // an effect the user asked for somewhere else.
         if (self.dispatch_place) |pinned| return pinned;
         return self.placeNow();
+    }
+
+    /// A dense opaque id for WHERE this dispatch is (`place.Ids`) — what a
+    /// guest keys a session table on. Compare it; never interpret it.
+    pub fn placeId(self: *Context) u32 {
+        const ids = self.place_ids orelse return @import("place.zig").Ids.process_id;
+        return ids.idOf(self.place());
     }
 
     /// `place` without the dispatch pin — the live reading, which is what the

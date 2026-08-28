@@ -167,6 +167,20 @@ pub fn hProcRead(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32, res
 ///  - `.elsewhere`/`.unavailable` — no local directory exists to name. Zero
 ///    bytes, so a guest DECLINES rather than silently acting in the editor's
 ///    launch directory, which is the whole bug this door exists to retire.
+/// `placeId() -> id`: a dense opaque id for the dispatching place.
+///
+/// What a session table keys on. Deliberately NOT the place's directory: a
+/// plugin keeping sessions per project needs to tell two places apart, not to
+/// know where either one is, and a path could not name a peer or synthetic
+/// container anyway. Same contract `Locus` states for itself -- compare for
+/// equality, never interpret.
+pub fn hPlaceId(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32, results: []i32) void {
+    _ = caller;
+    _ = args;
+    const p: *WasmPlugin = @ptrCast(@alignCast(data.?));
+    results[0] = @intCast(p.activeCtx().placeId());
+}
+
 pub fn hPlaceRoot(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32, results: []i32) void {
     const p: *WasmPlugin = @ptrCast(@alignCast(data.?));
     const ctx = p.activeCtx();

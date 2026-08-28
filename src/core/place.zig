@@ -99,6 +99,52 @@ pub const Place = union(enum) {
     }
 };
 
+/// Dense, opaque ids for places, so a guest can tell two places apart without
+/// being handed either one.
+///
+/// A session table wants to answer "is this slot's place the place I am in?"
+/// and nothing more. Answering it with the place's DIRECTORY would put a raw
+/// path back in every plugin that keeps sessions — the exact spelling this
+/// design removes, and one that cannot name a peer or synthetic container
+/// anyway. So the guest gets an integer with the same contract `Locus` states
+/// for itself: compare for equality, never interpret.
+///
+/// Ids are stable for the life of a run and dense from zero, which is what
+/// makes them cheap to key a small fixed table on. They are NOT durable across
+/// runs — a place that must survive a restart is serialized as its `weft://`
+/// designation, not as one of these.
+pub const Ids = struct {
+    gpa: std.mem.Allocator,
+    /// Index IS the id. Entry 0 is always `.process`, so the degenerate place
+    /// needs no lookup and no special case at the membrane.
+    seen: std.ArrayList(Place) = .empty,
+
+    pub const process_id: u32 = 0;
+
+    pub fn init(gpa: std.mem.Allocator) !Ids {
+        var self: Ids = .{ .gpa = gpa };
+        try self.seen.append(gpa, .process);
+        return self;
+    }
+
+    pub fn deinit(self: *Ids) void {
+        self.seen.deinit(self.gpa);
+        self.* = undefined;
+    }
+
+    /// This place's id, minting one if it is new. Interning by `eql` — which
+    /// ignores the descriptor revision — is what makes an id survive a
+    /// republish: a session linked to a directory stays linked to it when its
+    /// publisher refreshes the descriptor underneath.
+    pub fn idOf(self: *Ids, p: Place) u32 {
+        for (self.seen.items, 0..) |known, i| {
+            if (known.eql(p)) return @intCast(i);
+        }
+        self.seen.append(self.gpa, p) catch return process_id; // degrade, never fail a dispatch
+        return @intCast(self.seen.items.len - 1);
+    }
+};
+
 /// What a LOCAL effect gets when it asks a place to become bytes.
 ///
 /// Four arms, because the honest answers are four. Collapsing `elsewhere` or
@@ -264,4 +310,40 @@ test "place: an unresolvable container is unavailable, with or without an author
     var auth: FakeAuthority = .{ .answer = null };
     try t.expectEqual(Realized.unavailable, realize(p, auth.realizer()));
     try t.expectEqual(@as(usize, 1), auth.asked);
+}
+
+// ── ids ─────────────────────────────────────────────────────────────
+
+test "place: the degenerate place is id 0, without a lookup" {
+    var ids = try Ids.init(t.allocator);
+    defer ids.deinit();
+    try t.expectEqual(Ids.process_id, ids.idOf(.process));
+    try t.expectEqual(@as(usize, 1), ids.seen.items.len); // nothing minted
+}
+
+test "place: ids are stable, dense, and distinct per place" {
+    var ids = try Ids.init(t.allocator);
+    defer ids.deinit();
+    const a: Place = .{ .container = .{ .locus = .here, .ref = ref(1, 1), .revision = 1 } };
+    const b: Place = .{ .container = .{ .locus = .here, .ref = ref(2, 1), .revision = 1 } };
+
+    const id_a = ids.idOf(a);
+    const id_b = ids.idOf(b);
+    try t.expect(id_a != id_b);
+    try t.expect(id_a != Ids.process_id and id_b != Ids.process_id);
+    // Stable: asking again is the same answer, not a new id.
+    try t.expectEqual(id_a, ids.idOf(a));
+    try t.expectEqual(id_b, ids.idOf(b));
+    try t.expectEqual(@as(usize, 3), ids.seen.items.len); // process + two
+}
+
+test "place: a republished descriptor keeps its id" {
+    var ids = try Ids.init(t.allocator);
+    defer ids.deinit();
+    const before: Place = .{ .container = .{ .locus = .here, .ref = ref(7, 1), .revision = 1 } };
+    const after: Place = .{ .container = .{ .locus = .here, .ref = ref(7, 1), .revision = 99 } };
+    // The load-bearing property for session links: a publisher refreshing its
+    // descriptor must not detach the sessions linked to that place.
+    try t.expectEqual(ids.idOf(before), ids.idOf(after));
+    try t.expectEqual(@as(usize, 2), ids.seen.items.len);
 }
