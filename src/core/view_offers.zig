@@ -44,7 +44,14 @@ pub const Binding = struct {
 
 pub const bindings = [_]Binding{
     .{ .intent = .toggle_expanded, .intention = "std.hierarchy.toggle-expanded", .route = "hierarchy-toggle-expanded" },
+    .{ .intent = .step_out, .intention = "std.hierarchy.step-out", .route = "hierarchy-step-out" },
     .{ .intent = .activate, .intention = "std.target.activate", .route = "target-open-focused" },
+    // Transfer rides the routes the register already owns: capture, place,
+    // and capture-as-a-move. The provider decides what a capture MEANS for
+    // its rows; the standard word only says which half of the ferry runs.
+    .{ .intent = .transfer_yank, .intention = "std.transfer.yank", .route = "selection-copy" },
+    .{ .intent = .transfer_paste, .intention = "std.transfer.paste", .route = "selection-paste-after" },
+    .{ .intent = .transfer_delete, .intention = "std.transfer.delete-to-register", .route = "selection-cut" },
     .{ .intent = .navigate_up, .intention = "std.navigation.up", .route = "cursor-up" },
     .{ .intent = .navigate_down, .intention = "std.navigation.down", .route = "cursor-down" },
     .{ .intent = .navigate_left, .intention = "std.navigation.left", .route = "cursor-left" },
@@ -192,6 +199,14 @@ const Fixture = struct {
     const refused_actions = [_]model.scene.Action{
         .{ .id = standard.open, .label = "Open", .enabled = false },
     };
+    const transfer_actions = [_]model.scene.Action{
+        .{ .id = standard.copy, .label = "Copy", .enabled = true },
+        .{ .id = standard.cut, .label = "Cut", .enabled = true },
+        .{ .id = standard.paste_after, .label = "Paste", .enabled = true },
+    };
+    const container_actions = [_]model.scene.Action{
+        .{ .id = standard.open_container, .label = "Open container", .enabled = true },
+    };
 
     /// `src/plugins/dired/projection.zig`'s shape: a vertical `files` root of
     /// horizontal `files.row` containers whose focusable `files.name` column
@@ -221,6 +236,15 @@ const Fixture = struct {
             .role = "files",
             .content = .{ .container = .{ .axis = .vertical, .children = &self.rows } },
         };
+    }
+
+    /// The same shape, with the designations a directory row carries: the row
+    /// can be captured and pasted onto, and the listing has a parent.
+    fn transferScene(self: *Fixture) model.scene.Node {
+        var root = self.scene(false);
+        self.rows[0].actions = &transfer_actions;
+        root.actions = &container_actions;
+        return root;
     }
 
     fn init(self: *Fixture) !void {
@@ -340,4 +364,31 @@ test "republication follows focus, scene revision, and the loss of a view" {
     try t.expect(try fixture.refresh());
     try t.expect(fixture.plane.catalog.published(fixture.plane.views.provider) == null);
     try t.expect(!try fixture.refresh());
+}
+
+test "a row's transfer designations resolve to the register's own routes" {
+    var fixture: Fixture = undefined;
+    try fixture.init();
+    defer fixture.deinit();
+
+    const view = try fixture.services.publishView(t.allocator, fixture.owner, null, 1, fixture.transferScene());
+    _ = try fixture.services.focusView(&fixture.head, t.allocator, view, @enumFromInt(12));
+    try t.expect(try fixture.refresh());
+
+    const words = [_][2][]const u8{
+        .{ "std.transfer.yank", "selection-copy" },
+        .{ "std.transfer.paste", "selection-paste-after" },
+        .{ "std.transfer.delete-to-register", "selection-cut" },
+        .{ "std.hierarchy.step-out", "hierarchy-step-out" },
+    };
+    for (words) |word| {
+        const resolution = try fixture.resolve(&.{word[0]});
+        try t.expectEqualStrings(word[1], fixture.routeOf(resolution.decision));
+    }
+
+    // The same keys over a scene that designates none of it reach nobody.
+    try fixture.services.replaceView(t.allocator, fixture.owner, view, 2, fixture.scene(false));
+    _ = try fixture.services.focusView(&fixture.head, t.allocator, view, @enumFromInt(12));
+    try t.expect(try fixture.refresh());
+    for (words) |word| try fixture.absent(word[0]);
 }

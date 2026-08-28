@@ -129,6 +129,11 @@ fn cHierarchyToggleExpanded(ctx: *Context, args: struct {}) anyerror!Value {
     return invokeSemanticAction(ctx, semantic_model.action.standard.toggle_expanded);
 }
 
+fn cHierarchyStepOut(ctx: *Context, args: struct {}) anyerror!Value {
+    _ = args;
+    return invokeSemanticAction(ctx, semantic_model.action.standard.open_container);
+}
+
 fn cFieldEdit(ctx: *Context, args: struct {}) anyerror!Value {
     _ = args;
     const services = ctx.semantic orelse return ok;
@@ -550,6 +555,7 @@ const table = [_]command.Command{
     command.define("selection-paste-after", "Invoke the focused semantic selection.paste-after action.", cSelectionPasteAfter),
     command.define("target-open-focused", "Invoke the focused semantic target.open action.", cTargetOpenFocused),
     command.define("hierarchy-toggle-expanded", "Invoke the focused semantic hierarchy.toggle-expanded action.", cHierarchyToggleExpanded),
+    command.define("hierarchy-step-out", "Invoke the focused semantic target.open-container action.", cHierarchyStepOut),
     command.define("field-edit", "Invoke the focused semantic field.edit action.", cFieldEdit),
     command.define("view-refresh", "Invoke the focused semantic view.refresh action.", cViewRefresh),
     command.define("view-revert", "Invoke the focused semantic view.revert action.", cViewRevert),

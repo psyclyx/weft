@@ -21,7 +21,17 @@ pub const Intention = struct {
 
 pub const std_intentions = [_]Intention{
     .{ .name = "std.hierarchy.toggle-expanded", .doc = "Open or close the target's children in place." },
+    // The other half of hierarchy movement: expansion splices children into
+    // the view that already shows the target; this LEAVES it for the locus
+    // that holds it. One package, so the pair cannot drift apart.
+    .{ .name = "std.hierarchy.step-out", .doc = "Leave the focused target for the container that holds it." },
     .{ .name = "std.target.activate", .doc = "Act on the target the way its kind defines as primary." },
+    // Transfer: capture into the shared register, and place what it holds.
+    // Placement (before/after/into) is the domain's, not the grammar's — one
+    // word, so a grammar cannot claim ordering a view may not have.
+    .{ .name = "std.transfer.yank", .doc = "Capture the target into the transfer register." },
+    .{ .name = "std.transfer.paste", .doc = "Place the transfer register's content at the target." },
+    .{ .name = "std.transfer.delete-to-register", .doc = "Capture the target into the transfer register and remove it." },
     .{ .name = "std.editing.insert-line-break", .doc = "Commit a line break at the editing point." },
     .{ .name = "std.navigation.back", .doc = "Return to the previous workspace location." },
     // Directional movement shares `navigation`'s package: one package per

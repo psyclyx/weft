@@ -27,7 +27,11 @@ const standard = semantic.action.standard;
 /// `std.*` intentions one layer up; this enum stays catalog-free.
 pub const Intent = enum {
     toggle_expanded,
+    step_out,
     activate,
+    transfer_yank,
+    transfer_paste,
+    transfer_delete,
     navigate_up,
     navigate_down,
     navigate_left,
@@ -67,13 +71,12 @@ pub fn derive(instance: *const view.Instance, focus: Focus, out: *Buffer) []cons
     // rows own children, and only their provider can splice them in. So a
     // path that names no such node is nonapplicable, never a disabled offer
     // whose route would reach nobody.
-    if (advertiser(instance, focus.path, standard.toggle_expanded)) |action| {
-        out[count] = .{
-            .intent = .toggle_expanded,
-            .disabled = if (action.enabled) null else provider_disabled,
-        };
-        count += 1;
-    }
+    count += pushAdvertised(instance, focus.path, out, count, .toggle_expanded, standard.toggle_expanded);
+    // Stepping out is the same question asked upward: the path advertises a
+    // container to leave for, exactly where a provider owns one. Shape cannot
+    // answer it either — every row sits inside the root container, yet only a
+    // provider knows whether anything encloses the LOCUS.
+    count += pushAdvertised(instance, focus.path, out, count, .step_out, standard.open_container);
     // Activation follows the same nearest-target walk the target-open route
     // performs, so an offer can never name a subject the route would not.
     if (nearestTarget(instance, focus.path) != null) {
@@ -83,6 +86,13 @@ pub fn derive(instance: *const view.Instance, focus: Focus, out: *Buffer) []cons
         };
         count += 1;
     }
+    // Transfer follows the designations the focus carries: a row that says it
+    // can be captured, or a locus that says something can be placed in it.
+    // The register itself is core's, so an empty one refuses at the door
+    // rather than making the offer disappear here.
+    count += pushAdvertised(instance, focus.path, out, count, .transfer_yank, standard.copy);
+    count += pushAdvertised(instance, focus.path, out, count, .transfer_paste, standard.paste_after);
+    count += pushAdvertised(instance, focus.path, out, count, .transfer_delete, standard.cut);
     const axes = pathAxes(instance, focus.path);
     if (axes.vertical) {
         out[count] = .{ .intent = .navigate_up };
@@ -100,6 +110,22 @@ pub fn derive(instance: *const view.Instance, focus: Focus, out: *Buffer) []cons
     out[count] = .{ .intent = .back };
     count += 1;
     return out[0..count];
+}
+
+/// Offer `intent` exactly when the path advertises `id`, disabled exactly
+/// when its advertiser refuses. Returns how many items were written, so a
+/// caller's cursor advances only on a real offer.
+fn pushAdvertised(
+    instance: *const view.Instance,
+    path: semantic.focus.Path,
+    out: *Buffer,
+    count: usize,
+    intent: Intent,
+    id: []const u8,
+) usize {
+    const action = advertiser(instance, path, id) orelse return 0;
+    out[count] = .{ .intent = intent, .disabled = if (action.enabled) null else provider_disabled };
+    return 1;
 }
 
 pub fn find(items: []const Item, intent: Intent) ?Item {
@@ -320,4 +346,53 @@ test "a row that refuses its own open/close route is disabled, not absent" {
     var single: Buffer = undefined;
     const alone = derive(only.instance(), try only.focus(@enumFromInt(33)), &single);
     try t.expect(find(alone, .navigate_up) == null);
+}
+
+test "transfer and step-out follow the designations the scene advertises" {
+    const row_actions = [_]semantic.scene.Action{
+        .{ .id = standard.copy, .label = "Copy", .enabled = true },
+        .{ .id = standard.cut, .label = "Cut", .enabled = true },
+        .{ .id = standard.paste_after, .label = "Paste", .enabled = false },
+    };
+    const rows = [_]semantic.scene.Node{
+        .{ .id = @enumFromInt(10), .role = "files.row", .focusable = true, .actions = &row_actions, .content = .{ .label = "a" } },
+        .{ .id = @enumFromInt(20), .role = "files.row", .focusable = true, .content = .{ .label = "b" } },
+    };
+    const root_actions = [_]semantic.scene.Action{
+        .{ .id = standard.open_container, .label = "Open container", .enabled = true },
+    };
+    var published = try Published.open(.{
+        .id = @enumFromInt(1),
+        .role = "files",
+        .actions = &root_actions,
+        .content = .{ .container = .{ .axis = .vertical, .children = &rows } },
+    });
+    defer published.deinit();
+
+    var buffer: Buffer = undefined;
+    const items = derive(published.instance(), try published.focus(@enumFromInt(10)), &buffer);
+    try t.expect(find(items, .transfer_yank).?.disabled == null);
+    try t.expect(find(items, .transfer_delete).?.disabled == null);
+    // Relevant but impossible: this row says a paste cannot land here, so the
+    // offer is published disabled rather than withheld (§9.3).
+    try t.expectEqualStrings(provider_disabled, find(items, .transfer_paste).?.disabled.?);
+    // Stepping out is the ROOT's claim, and every row's path runs through it.
+    try t.expect(find(items, .step_out).?.disabled == null);
+
+    // The row beside it designates nothing transferable: absence, not a
+    // disabled offer whose route would reach nobody.
+    var beside: Buffer = undefined;
+    const plain = derive(published.instance(), try published.focus(@enumFromInt(20)), &beside);
+    try t.expect(find(plain, .transfer_yank) == null);
+    try t.expect(find(plain, .transfer_paste) == null);
+    try t.expect(find(plain, .transfer_delete) == null);
+    try t.expect(find(plain, .step_out) != null);
+
+    // A scene that names no enclosing container offers no way out of one.
+    var rootless = try Published.open(filesScene(&rows));
+    defer rootless.deinit();
+    var enclosed: Buffer = undefined;
+    const inside = derive(rootless.instance(), try rootless.focus(@enumFromInt(10)), &enclosed);
+    try t.expect(find(inside, .step_out) == null);
+    try t.expect(find(inside, .transfer_yank) != null);
 }
