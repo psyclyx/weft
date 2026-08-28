@@ -7,7 +7,7 @@
 //! Every GET is an INSTANCE, like a REPL or a console: it takes a fresh buffer
 //! (`*http*`, `*http:2*`, …), so two requests in flight never overwrite each
 //! other's response. A GET is one-shot, though, and the host reaps a net session
-//! only on close — so a saturated table hangs up the oldest request rather than
+//! only on close — so this plugin hangs up the oldest request rather than
 //! leaking one connection per GET.
 
 const std = @import("std");
@@ -15,7 +15,15 @@ const weft = @import("weft");
 
 /// Each outstanding request, keyed by the buffer its response streams into;
 /// the value is its host session handle.
-var conns: weft.Instances(u32, 8) = .{};
+var conns: weft.Instances(u32) = .{};
+
+/// How many GETs may be outstanding at once. Unlike the instance tables this
+/// plugin's neighbours used to carry, this IS a policy, and it is not about the
+/// table: a GET is one-shot and nobody ever closes it, while the host reaps a
+/// net session only on close — so without a bound, `http-get` in a loop leaks
+/// one host connection per call. The bound therefore lives next to the resource
+/// it protects instead of riding on the height of a fixed array.
+const max_outstanding = 8;
 
 var url_buf: [1024]u8 = undefined;
 var hostport_buf: [512]u8 = undefined;
@@ -71,7 +79,9 @@ fn parse(raw: []const u8) ?Url {
 /// GET arg0 (a URL); the raw HTTP response streams into a buffer of its own.
 fn get() void {
     const u = parse(weft.argStr(0) orelse return) orelse return;
-    const slot = conns.open("http") orelse retire() orelse return;
+    if (conns.slots.items.len >= max_outstanding) retire();
+    const slot = conns.open("http") orelse
+        return weft.echo("http: out of memory — could not start another request");
     slot.value = weft.netConnect(u.hostport, slot.name(), if (u.tls) u.host else "") orelse
         return conns.close(slot);
     const req = std.fmt.bufPrint(&req_buf, "GET {s} HTTP/1.0\r\nHost: {s}\r\nUser-Agent: weft\r\nConnection: close\r\n\r\n", .{ u.path, u.host }) catch return;
@@ -79,9 +89,8 @@ fn get() void {
 }
 
 /// Hang up the longest-outstanding request to make room for a new one.
-fn retire() ?*@TypeOf(conns).Slot {
-    const old = conns.oldest() orelse return null;
+fn retire() void {
+    const old = conns.oldest() orelse return;
     weft.netClose(old.value);
     conns.close(old);
-    return conns.open("http");
 }

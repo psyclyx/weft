@@ -14,7 +14,7 @@ const weft = @import("weft");
 
 /// Each live interpreter, keyed by the comint buffer it streams into; the
 /// value is its host session handle.
-var sessions: weft.Instances(u32, 8) = .{};
+var sessions: weft.Instances(u32) = .{};
 
 const Cmd = struct { name: []const u8, handler: *const fn () void };
 const cmds = [_]Cmd{
@@ -40,7 +40,7 @@ export fn on_command(id: u32) void {
 /// pipe-buffered interpreters may need an unbuffered flag (python `-u`) to
 /// stream promptly.
 fn start() void {
-    const slot = sessions.open("repl") orelse return weft.echo("repl: too many sessions");
+    const slot = sessions.open("repl") orelse return weft.echo("repl: out of memory — could not open another interpreter");
     slot.value = weft.replStart(weft.argStr(0) orelse "sh", slot.name()) orelse
         return sessions.close(slot);
 }

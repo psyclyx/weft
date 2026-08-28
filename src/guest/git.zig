@@ -71,7 +71,12 @@
 const std = @import("std");
 const weft = @import("weft");
 
-// ── Caps (freestanding: no allocator, bounded static state; degrade loud) ──
+// ── Caps on ONE repository's working state (bounded, degrade loud) ──
+// These bound what a single gather can show — files, hunks, bytes of git
+// output — and every one of them says so when it is reached. What is NOT here
+// any more is a cap on how many repositories may be open: that was never about
+// a gather's size, only about the height of a static array, and a wasm guest
+// has a growable heap (`weft.allocator`) to hold sessions on instead.
 const MAX_FILES = 128;
 const MAX_HUNKS = 512;
 const RAW_CAP = 1 << 18; // 256 KiB of raw git output (paged in via `slice`)
@@ -173,10 +178,15 @@ const MAX_COLLAPSED = 64;
 /// once cannot read or stage each other's files (§18: "two repositories …
 /// remain isolated").
 const RepoSession = struct {
-    /// Absolute repository root — the session's key AND the directory every
-    /// one of its commands runs in.
-    root_buf: [1024]u8 = undefined,
-    root_len: usize = 0,
+    /// This session's identity, minted once and never reused. What a fill
+    /// token, a pick id and a draft carry — none of them may name a row of a
+    /// table, because the table moves.
+    id: u32,
+    /// Absolute repository root — the session's key AND the directory every one
+    /// of its commands runs in. OWNED: a root that did not fit used to be
+    /// truncated silently, which keys the session on a directory that is not
+    /// the repository and then `cd`s into it.
+    root: []u8,
     /// The instanced buffer this session projects into (`*git*`, `*git:2*`).
     name_buf: [64]u8 = undefined,
     name_len: usize = 0,
@@ -271,16 +281,13 @@ const RepoSession = struct {
     fetch_all: bool = false,
     fetch_prune: bool = false,
 
-    fn root(self: *const RepoSession) []const u8 {
-        return self.root_buf[0..self.root_len];
-    }
     fn name(self: *const RepoSession) []const u8 {
         return self.name_buf[0..self.name_len];
     }
     /// A repository-relative path made absolute — `open` resolves against the
     /// editor's own working directory, which is not where this repository is.
     fn inRepo(self: *const RepoSession, leaf: []const u8) []const u8 {
-        return std.fmt.bufPrint(&tmp_buf, "{s}/{s}", .{ self.root(), leaf }) catch leaf;
+        return std.fmt.bufPrint(&tmp_buf, "{s}/{s}", .{ self.root, leaf }) catch leaf;
     }
     /// The projection is provisional while a newer gather is in flight.
     fn fresh(self: *const RepoSession) bool {
@@ -288,15 +295,48 @@ const RepoSession = struct {
     }
 };
 
-/// Live sessions, in open order. A session is never retired: its buffer, and
-/// therefore its instance identity, outlives any single command.
-const MAX_SESSIONS = 4;
-var sessions: [MAX_SESSIONS]RepoSession = undefined;
-var session_count: usize = 0;
+/// Live sessions, in open order, each individually allocated so a
+/// `*RepoSession` handed out earlier survives the table growing —
+/// `core/Buffers.zig`'s shape, and its reason: a draft names the session it
+/// commits to, a fill token names the session it parses into, and both outlive
+/// the command that made them.
+///
+/// There is no cap. How many repositories you may have open at once was never a
+/// decision anybody made; the guest heap is the real bound, and it says so when
+/// it refuses. A session is still never retired: its buffer, and therefore its
+/// instance identity, outlives any single command.
+var sessions: std.ArrayList(*RepoSession) = .empty;
+
+/// The next session's identity. An ORDINAL, not an index: a fill token and a
+/// pick id carry it across an async round trip, and a draft carries it for as
+/// long as the draft lives, so it has to name a session rather than a row of a
+/// table that no longer exists in that shape.
+var next_session_id: u32 = 1;
+
 /// The session the running command is about — set by the command funnel (from
 /// the focused buffer or the buffer's repository) and by a landing fill (from
 /// the session its token carries). Never inferred inside a handler.
-var cur: *RepoSession = undefined;
+///
+/// Optional because "no repository is open yet" is a real state. It used to be
+/// spelled as a blank row of the fixed table — a session that is not one — and
+/// the only reader that could see it was `on_activate`'s offer publication.
+var routed: ?*RepoSession = null;
+
+/// The session this command is about. Every entry point routes before it hands
+/// control to a handler (`on_command`'s funnel, `on_fill_token`'s and
+/// `on_pick_accept`'s token, `currentDraft`'s draft), so a handler's `cur()` is
+/// always answered — the same dominated assertion `Buffers.active()` makes.
+fn cur() *RepoSession {
+    return routed.?;
+}
+
+/// The session `id` names, or null for an id we never issued.
+fn sessionById(id: u32) ?*RepoSession {
+    for (sessions.items) |s| {
+        if (s.id == id) return s;
+    }
+    return null;
+}
 
 // ── Commands ──────────────────────────────────────────────────────────────
 /// Which session a command is about. `.repo` opens (or reuses) the session of
@@ -423,8 +463,6 @@ export fn describe() void {
     weft.requestPerm(.timer);
 }
 export fn init() void {
-    for (&sessions) |*s| s.* = .{};
-    cur = &sessions[0];
     for (cmds) |c| _ = weft.register(c.name);
     // git mode: navigation plus the interactive verbs. It declares no text
     // commit, and the `*git*` entry holds no editor at all, so typing refuses
@@ -614,7 +652,7 @@ export fn on_command(id: u32) void {
     if (id >= cmds.len) return;
     const c = cmds[id];
     const s = route(c.route) orelse return;
-    cur = s;
+    routed = s;
     switch (c.scope) {
         .durable => {},
         .snapshot => if (!s.fresh()) return refuseStale(),
@@ -629,7 +667,7 @@ fn refuseStale() void {
     weft.echo("git: stale — refreshed");
     // A gather in flight repaints on its own; otherwise show what IS current,
     // and only in the session's own buffer (never author someone else's).
-    if (cur.fresh() and focusedSession() == cur) rerender();
+    if (cur().fresh() and focusedSession() == routed) rerender();
 }
 
 // ── on_fill_token: the async output landed → parse + render + publish ──────
@@ -648,22 +686,26 @@ const Fill = enum(u32) {
 };
 
 /// A fill token carries BOTH what landed and whose it is: the low byte is the
-/// `Fill`, the rest the session ordinal. Delivery therefore needs no guess
-/// about focus — the output of repository 2's gather can only ever parse into
+/// `Fill`, the rest the session's id. Delivery therefore needs no guess about
+/// focus — the output of repository 2's gather can only ever parse into
 /// repository 2's model.
+///
+/// The id gets 24 bits, and that is not a limit anyone can reach: a session is
+/// half a megabyte and a wasm32 guest's linear memory tops out at 4 GiB, so the
+/// heap refuses (out loud, in `sessionFor`) some four thousand ids before the
+/// field could ever run out.
 fn fillToken(fill: Fill, s: *const RepoSession) u32 {
-    return @intFromEnum(fill) | (@as(u32, @intCast(sessionIndex(s))) << 8);
+    return @intFromEnum(fill) | (s.id << 8);
 }
 
 export fn on_fill_token(token: u32) void {
     // A token we never issued routes nowhere.
-    const idx = token >> 8;
-    if (idx >= session_count) return;
+    const s = sessionById(token >> 8) orelse return;
     const fill = std.enums.fromInt(Fill, token & 0xff) orelse return;
-    cur = &sessions[idx];
+    routed = s;
     if (gathers(fill)) {
-        cur.gathering = false;
-        cur.snapshot +%= 1;
+        cur().gathering = false;
+        cur().snapshot +%= 1;
     }
     switch (fill) {
         .none => {},
@@ -681,21 +723,17 @@ export fn on_fill_token(token: u32) void {
 /// so it has to describe the repository the user is now looking at — this is
 /// the routing entry for focus, exactly as `on_fill_token` is for a delivery.
 export fn on_activate() void {
-    if (focusedSession()) |s| cur = s;
+    if (focusedSession()) |s| routed = s;
     publishOffers();
 }
 
 // ── Repository sessions: root detection, minting, routing ──────────────────
-fn sessionIndex(s: *const RepoSession) usize {
-    return (@intFromPtr(s) - @intFromPtr(&sessions[0])) / @sizeOf(RepoSession);
-}
-
 /// The session whose projection buffer is focused, if any — a command pressed
 /// in `*git:2*` is about repository 2, whatever ran before it.
 fn focusedSession() ?*RepoSession {
     var buf: [64]u8 = undefined;
     const active = weft.activeBufferName(&buf) orelse return null;
-    for (sessions[0..session_count]) |*s| {
+    for (sessions.items) |s| {
         if (std.mem.eql(u8, s.name(), active)) return s;
     }
     return null;
@@ -706,15 +744,13 @@ fn focusedSession() ?*RepoSession {
 /// where I am" without that preference itself opening a repository.
 fn openSessionFor(root: []const u8) ?*RepoSession {
     if (root.len == 0) return null;
-    for (sessions[0..session_count]) |*s| {
-        if (std.mem.eql(u8, s.root(), root)) return s;
+    for (sessions.items) |s| {
+        if (std.mem.eql(u8, s.root, root)) return s;
     }
     return null;
 }
 
 /// Find-or-mint the session for `root`, taking the next free instance name.
-/// Past the cap we echo and refuse rather than silently reusing a session that
-/// belongs to another repository.
 fn sessionFor(root: []const u8) ?*RepoSession {
     // No local directory to be a repository in (`doc/place.md`: a peer place,
     // or a container that went away). Refuse by name rather than mint a
@@ -724,40 +760,48 @@ fn sessionFor(root: []const u8) ?*RepoSession {
         weft.echo("git: this place has no local repository");
         return null;
     }
-    for (sessions[0..session_count]) |*s| {
-        if (std.mem.eql(u8, s.root(), root)) return s;
-    }
-    if (session_count >= MAX_SESSIONS) {
-        weft.echo("git: too many repositories open");
-        return null;
-    }
+    if (openSessionFor(root)) |s| return s;
     var name_buf: [64]u8 = undefined;
     const name = mintName(&name_buf) orelse return null;
-    const s = &sessions[session_count];
-    s.* = .{};
-    s.root_len = @min(root.len, s.root_buf.len);
-    @memcpy(s.root_buf[0..s.root_len], root[0..s.root_len]);
+    const alloc = weft.allocator;
+    sessions.ensureUnusedCapacity(alloc, 1) catch return refuseNoMemory();
+    const owned_root = alloc.dupe(u8, root) catch return refuseNoMemory();
+    const s = alloc.create(RepoSession) catch {
+        alloc.free(owned_root);
+        return refuseNoMemory();
+    };
+    s.* = .{ .id = next_session_id, .root = owned_root };
+    next_session_id += 1;
     s.name_len = @min(name.len, s.name_buf.len);
     @memcpy(s.name_buf[0..s.name_len], name[0..s.name_len]);
-    session_count += 1;
+    sessions.appendAssumeCapacity(s);
     return s;
 }
 
+/// The one refusal a mint has left. Where the old refusal named a cap nobody
+/// chose, this names the only thing that can actually stop us — and says so,
+/// rather than opening the wrong repository's session.
+fn refuseNoMemory() ?*RepoSession {
+    weft.echo("git: out of memory — could not open this repository");
+    return null;
+}
+
 /// The lowest instance name (`*git*`, `*git:2*`, …) neither a buffer nor a
-/// live session already answers to — a new session's identity.
+/// live session already answers to — a new session's identity. Needs no
+/// ceiling: an ordinal is held only by a buffer or a live session, both finite,
+/// so one of the first `buffers + sessions + 1` is always free.
 fn mintName(out: []u8) ?[]const u8 {
     var n: u32 = 1;
-    while (n <= MAX_SESSIONS) : (n += 1) {
+    while (true) : (n += 1) {
         const candidate = weft.instanceName(buf_base, n, out) orelse return null;
         if (weft.bufferNamed(candidate)) continue;
         if (nameTaken(candidate)) continue;
         return candidate;
     }
-    return null;
 }
 
 fn nameTaken(name: []const u8) bool {
-    for (sessions[0..session_count]) |*s| {
+    for (sessions.items) |s| {
         if (std.mem.eql(u8, s.name(), name)) return true;
     }
     return false;
@@ -765,7 +809,7 @@ fn nameTaken(name: []const u8) bool {
 
 /// Which session this command is about.
 fn route(kind: Route) ?*RepoSession {
-    if (kind == .carried) return cur;
+    if (kind == .carried) return routed;
     // `.repo` asks the LOCUS, never what is focused: that is the whole door
     // into a second repository, and it must open one from a git buffer too.
     if (kind == .repo) return sessionFor(activeRoot());
@@ -777,10 +821,10 @@ fn route(kind: Route) ?*RepoSession {
     // Same rung, same reason, as `weft.Instances.current`'s place link.
     //
     // Deliberately a lookup and not `sessionFor`: this must not MINT a session
-    // where it previously did not, which would change when the cap is reached
-    // and when a second repository silently opens.
+    // where it previously did not, which would change when a second repository
+    // silently opens.
     if (openSessionFor(activeRoot())) |s| return s;
-    return if (session_count == 0) sessionFor(activeRoot()) else cur;
+    return if (sessions.items.len == 0) sessionFor(activeRoot()) else routed;
 }
 
 /// The repository root this command is about: WHERE it runs (`doc/place.md`).
@@ -847,24 +891,24 @@ fn absolute(pth: []const u8, here: []const u8) []const u8 {
 /// no silent drop.
 fn loadRaw() void {
     const total = weft.byteLen();
-    cur.raw_len = 0;
-    cur.truncated_raw = false;
-    while (cur.raw_len < total and cur.raw_len < RAW_CAP) {
-        const chunk = weft.slice(cur.raw_len, total); // returns ≤ 64 KiB
+    cur().raw_len = 0;
+    cur().truncated_raw = false;
+    while (cur().raw_len < total and cur().raw_len < RAW_CAP) {
+        const chunk = weft.slice(cur().raw_len, total); // returns ≤ 64 KiB
         if (chunk.len == 0) break;
-        const n = @min(chunk.len, RAW_CAP - cur.raw_len);
-        @memcpy(cur.raw[cur.raw_len .. cur.raw_len + n], chunk[0..n]);
-        cur.raw_len += n;
+        const n = @min(chunk.len, RAW_CAP - cur().raw_len);
+        @memcpy(cur().raw[cur().raw_len .. cur().raw_len + n], chunk[0..n]);
+        cur().raw_len += n;
         if (n < chunk.len) break;
     }
-    if (total > RAW_CAP) cur.truncated_raw = true;
+    if (total > RAW_CAP) cur().truncated_raw = true;
 }
 
 /// Re-render the model over this session's buffer. The projection is authored
 /// FIRST; styles and folds then index the new bytes.
 fn repaint() void {
     render();
-    weft.edit(.{ .start = 0, .end = weft.byteLen() }, cur.render_buf[0..cur.out]);
+    weft.edit(.{ .start = 0, .end = weft.byteLen() }, cur().render_buf[0..cur().out]);
     publishStyles();
     publishFolds();
 }
@@ -881,13 +925,13 @@ fn renderStatus() void {
     // Land the cursor: re-find the captured target after a mutation (so point
     // tracks the file/hunk/commit even when it moved), else the clamped offset,
     // else home.
-    const landing = if (cur.restore_cursor)
-        (offsetOf(cur.restore_target) orelse @min(cur.pending_cursor, cur.out))
+    const landing = if (cur().restore_cursor)
+        (offsetOf(cur().restore_target) orelse @min(cur().pending_cursor, cur().out))
     else
-        cur.home_off;
+        cur().home_off;
     weft.jump(weft.lineAt(landing).start);
-    cur.restore_cursor = false;
-    cur.restore_target = .{};
+    cur().restore_cursor = false;
+    cur().restore_target = .{};
     // A new model is a new offer table: the previous one described rows that
     // no longer exist, and its ordinal is now stale at the door.
     publishOffers();
@@ -904,31 +948,31 @@ fn renderStatus() void {
 /// head. The session travels WITH the deferral (`.carried` routing) — a
 /// background note never asks what is focused.
 fn noteDrops() void {
-    if (!(cur.dropped_files or cur.dropped_hunks or cur.truncated_raw)) return;
+    if (!(cur().dropped_files or cur().dropped_hunks or cur().truncated_raw)) return;
     weft.run("git-note-drops-deliver");
 }
 
 fn gitNoteDropsDeliver() void {
-    if (cur.dropped_files) weft.echo("git: >128 files — some omitted");
-    if (cur.dropped_hunks) weft.echo("git: >512 hunks — some omitted");
-    if (cur.truncated_raw) weft.echo("git: output > 256 KiB — diff truncated");
+    if (cur().dropped_files) weft.echo("git: >128 files — some omitted");
+    if (cur().dropped_hunks) weft.echo("git: >512 hunks — some omitted");
+    if (cur().truncated_raw) weft.echo("git: output > 256 KiB — diff truncated");
 }
 
 // ── Parse ──────────────────────────────────────────────────────────────────
 fn parse() void {
-    cur.file_count = 0;
-    cur.hunk_count = 0;
-    cur.branch_len = 0;
-    cur.in_repo = false;
-    cur.recent_start = 0;
-    cur.recent_end = 0;
-    cur.dropped_files = false;
-    cur.dropped_hunks = false;
+    cur().file_count = 0;
+    cur().hunk_count = 0;
+    cur().branch_len = 0;
+    cur().in_repo = false;
+    cur().recent_start = 0;
+    cur().recent_end = 0;
+    cur().dropped_files = false;
+    cur().dropped_hunks = false;
     for (0..4) |i| {
-        cur.sec_present[i] = false;
-        cur.sec_count[i] = 0;
+        cur().sec_present[i] = false;
+        cur().sec_count[i] = 0;
     }
-    const data = cur.raw[0..cur.raw_len];
+    const data = cur().raw[0..cur().raw_len];
     // Split on the sentinels. A missing marker ⇒ the command failed; render
     // whatever prefix we have (usually just the branch header).
     const ui = std.mem.indexOf(u8, data, MARK_U) orelse data.len;
@@ -938,24 +982,24 @@ fn parse() void {
     if (ui < si) parseDiff(ui + MARK_U.len, si, .unstaged);
     if (si < ri) parseDiff(si + MARK_S.len, ri, .staged);
     if (ri < data.len) {
-        cur.recent_start = ri + MARK_R.len;
-        cur.recent_end = data.len;
+        cur().recent_start = ri + MARK_R.len;
+        cur().recent_end = data.len;
     }
     // Re-apply the remembered file-fold state (files rebuilt default-expanded).
-    for (cur.files[0..cur.file_count]) |*f| f.folded = isCollapsed(f.path_());
+    for (cur().files[0..cur().file_count]) |*f| f.folded = isCollapsed(f.path_());
     // Present iff non-empty (recent by commit lines).
     for (render_order) |sec| {
         const idx = @intFromEnum(sec);
         if (sec == .recent) {
-            cur.sec_count[idx] = countLines(cur.recent_start, cur.recent_end);
+            cur().sec_count[idx] = countLines(cur().recent_start, cur().recent_end);
         } else {
             var c: usize = 0;
-            for (cur.files[0..cur.file_count]) |f| if (f.section == sec) {
+            for (cur().files[0..cur().file_count]) |f| if (f.section == sec) {
                 c += 1;
             };
-            cur.sec_count[idx] = c;
+            cur().sec_count[idx] = c;
         }
-        cur.sec_present[idx] = cur.sec_count[idx] > 0;
+        cur().sec_present[idx] = cur().sec_count[idx] > 0;
     }
 }
 
@@ -964,15 +1008,15 @@ fn parsePorcelain(s: usize, e: usize) void {
     while (i < e) {
         const ls = i;
         var le = i;
-        while (le < e and cur.raw[le] != '\n') le += 1;
+        while (le < e and cur().raw[le] != '\n') le += 1;
         i = le + 1;
-        const line = cur.raw[ls..le];
+        const line = cur().raw[ls..le];
         if (line.len == 0) continue;
         if (std.mem.startsWith(u8, line, "## ")) {
-            cur.in_repo = true;
+            cur().in_repo = true;
             const b = std.mem.trim(u8, line[3..], " \t\r");
-            cur.branch_len = @min(b.len, cur.branch.len);
-            @memcpy(cur.branch[0..cur.branch_len], b[0..cur.branch_len]);
+            cur().branch_len = @min(b.len, cur().branch.len);
+            @memcpy(cur().branch[0..cur().branch_len], b[0..cur().branch_len]);
             continue;
         }
         if (line.len < 3) continue;
@@ -1000,15 +1044,15 @@ fn dequote(pth: []const u8) []const u8 {
 }
 
 fn addFile(section: Section, pth: []const u8, x: u8, y: u8) void {
-    if (cur.file_count >= MAX_FILES) {
-        cur.dropped_files = true;
+    if (cur().file_count >= MAX_FILES) {
+        cur().dropped_files = true;
         return;
     }
-    var f = &cur.files[cur.file_count];
+    var f = &cur().files[cur().file_count];
     f.* = .{ .section = section, .idx_ch = x, .wt_ch = y };
     f.plen = @min(pth.len, f.path.len);
     @memcpy(f.path[0..f.plen], pth[0..f.plen]);
-    cur.file_count += 1;
+    cur().file_count += 1;
 }
 
 fn parseDiff(ds: usize, de: usize, sec: Section) void {
@@ -1018,21 +1062,21 @@ fn parseDiff(ds: usize, de: usize, sec: Section) void {
     while (i < de) {
         const ls = i;
         var le = i;
-        while (le < de and cur.raw[le] != '\n') le += 1;
+        while (le < de and cur().raw[le] != '\n') le += 1;
         i = le + 1;
-        const line = cur.raw[ls..le];
+        const line = cur().raw[ls..le];
         if (std.mem.startsWith(u8, line, "diff --git ")) {
             closeHunk(&hstart, cur_file, ls);
             cur_file = findFile(sec, pathFromDiffGit(line));
             if (cur_file) |fi| {
-                cur.files[fi].header_off = ls;
-                cur.files[fi].header_len = 0; // set at the first @@
-                cur.files[fi].first_hunk = cur.hunk_count;
-                cur.files[fi].n_hunks = 0;
+                cur().files[fi].header_off = ls;
+                cur().files[fi].header_len = 0; // set at the first @@
+                cur().files[fi].first_hunk = cur().hunk_count;
+                cur().files[fi].n_hunks = 0;
             }
         } else if (std.mem.startsWith(u8, line, "@@")) {
             if (cur_file) |fi| {
-                if (cur.files[fi].header_len == 0) cur.files[fi].header_len = ls - cur.files[fi].header_off;
+                if (cur().files[fi].header_len == 0) cur().files[fi].header_len = ls - cur().files[fi].header_off;
             }
             closeHunk(&hstart, cur_file, ls);
             hstart = ls;
@@ -1045,13 +1089,13 @@ fn closeHunk(hstart: *?usize, file: ?usize, end: usize) void {
     const s = hstart.* orelse return;
     hstart.* = null;
     const fi = file orelse return;
-    if (cur.hunk_count >= MAX_HUNKS) {
-        cur.dropped_hunks = true;
+    if (cur().hunk_count >= MAX_HUNKS) {
+        cur().dropped_hunks = true;
         return;
     }
-    cur.hunks[cur.hunk_count] = .{ .file = fi, .at = s, .len = end - s };
-    cur.hunk_count += 1;
-    cur.files[fi].n_hunks += 1;
+    cur().hunks[cur().hunk_count] = .{ .file = fi, .at = s, .len = end - s };
+    cur().hunk_count += 1;
+    cur().files[fi].n_hunks += 1;
 }
 
 fn pathFromDiffGit(line: []const u8) []const u8 {
@@ -1062,8 +1106,8 @@ fn pathFromDiffGit(line: []const u8) []const u8 {
 // ── Persisted file-fold set (collapsed paths survive a re-gather) ───────────
 fn collapsedIndex(pth: []const u8) ?usize {
     var i: usize = 0;
-    while (i < cur.collapsed_count) : (i += 1) {
-        if (std.mem.eql(u8, cur.collapsed_paths[i][0..cur.collapsed_plen[i]], pth)) return i;
+    while (i < cur().collapsed_count) : (i += 1) {
+        if (std.mem.eql(u8, cur().collapsed_paths[i][0..cur().collapsed_plen[i]], pth)) return i;
     }
     return null;
 }
@@ -1075,27 +1119,27 @@ fn isCollapsed(pth: []const u8) bool {
 fn setCollapsed(pth: []const u8, on: bool) void {
     if (on) {
         if (collapsedIndex(pth) != null) return;
-        if (cur.collapsed_count >= MAX_COLLAPSED) {
+        if (cur().collapsed_count >= MAX_COLLAPSED) {
             weft.echo("git: >64 folded files — this fold won't persist");
             return;
         }
-        const n = @min(pth.len, cur.collapsed_paths[cur.collapsed_count].len);
-        @memcpy(cur.collapsed_paths[cur.collapsed_count][0..n], pth[0..n]);
-        cur.collapsed_plen[cur.collapsed_count] = n;
-        cur.collapsed_count += 1;
+        const n = @min(pth.len, cur().collapsed_paths[cur().collapsed_count].len);
+        @memcpy(cur().collapsed_paths[cur().collapsed_count][0..n], pth[0..n]);
+        cur().collapsed_plen[cur().collapsed_count] = n;
+        cur().collapsed_count += 1;
     } else if (collapsedIndex(pth)) |i| {
         // swap-remove (order doesn't matter).
-        cur.collapsed_count -= 1;
-        cur.collapsed_paths[i] = cur.collapsed_paths[cur.collapsed_count];
-        cur.collapsed_plen[i] = cur.collapsed_plen[cur.collapsed_count];
+        cur().collapsed_count -= 1;
+        cur().collapsed_paths[i] = cur().collapsed_paths[cur().collapsed_count];
+        cur().collapsed_plen[i] = cur().collapsed_plen[cur().collapsed_count];
     }
 }
 
 fn findFile(sec: Section, pth: []const u8) ?usize {
     if (pth.len == 0) return null;
     var i: usize = 0;
-    while (i < cur.file_count) : (i += 1) {
-        if (cur.files[i].section == sec and std.mem.eql(u8, cur.files[i].path_(), pth)) return i;
+    while (i < cur().file_count) : (i += 1) {
+        if (cur().files[i].section == sec and std.mem.eql(u8, cur().files[i].path_(), pth)) return i;
     }
     return null;
 }
@@ -1105,7 +1149,7 @@ fn countLines(s: usize, e: usize) usize {
     var i = s;
     while (i < e) {
         var le = i;
-        while (le < e and cur.raw[le] != '\n') le += 1;
+        while (le < e and cur().raw[le] != '\n') le += 1;
         if (le > i) n += 1;
         i = le + 1;
     }
@@ -1114,9 +1158,9 @@ fn countLines(s: usize, e: usize) usize {
 
 // ── Render: the model → pretty, foldable text (offsets recorded into nodes) ──
 fn put(bytes: []const u8) void {
-    const n = @min(bytes.len, cur.render_buf.len - cur.out);
-    @memcpy(cur.render_buf[cur.out .. cur.out + n], bytes[0..n]);
-    cur.out += n;
+    const n = @min(bytes.len, cur().render_buf.len - cur().out);
+    @memcpy(cur().render_buf[cur().out .. cur().out + n], bytes[0..n]);
+    cur().out += n;
 }
 fn putNum(n: usize) void {
     var b: [20]u8 = undefined;
@@ -1146,47 +1190,47 @@ fn statusLabel(f: *const File) []const u8 {
 }
 
 fn render() void {
-    cur.out = 0;
-    cur.home_off = 0;
+    cur().out = 0;
+    cur().home_off = 0;
     // Not in a repo: say so plainly rather than a fake `Branch: (no branch)`.
     // `SPC g i` (git-init) is the natural next move from here.
-    if (!cur.in_repo) {
+    if (!cur().in_repo) {
         put("Not a git repository.\n\nRun git-init (SPC g i) to start one.\n");
         return;
     }
     // Branch header.
     put("Branch: ");
-    if (cur.branch_len > 0) put(cur.branch[0..cur.branch_len]) else put("(no branch)");
+    if (cur().branch_len > 0) put(cur().branch[0..cur().branch_len]) else put("(no branch)");
     put("\n\n");
 
     for (render_order) |sec| {
         const idx = @intFromEnum(sec);
-        if (!cur.sec_present[idx]) continue;
-        cur.sec_rstart[idx] = cur.out;
-        put(if (cur.sec_folded[idx]) "\xe2\x96\xb8 " else "\xe2\x96\xbe "); // ▸ / ▾
+        if (!cur().sec_present[idx]) continue;
+        cur().sec_rstart[idx] = cur().out;
+        put(if (cur().sec_folded[idx]) "\xe2\x96\xb8 " else "\xe2\x96\xbe "); // ▸ / ▾
         put(secTitle(sec));
         put(" (");
-        putNum(cur.sec_count[idx]);
+        putNum(cur().sec_count[idx]);
         put(")\n");
-        cur.sec_body[idx] = cur.out; // fold start: header stays visible
+        cur().sec_body[idx] = cur().out; // fold start: header stays visible
         if (sec == .recent) {
             renderRecent();
         } else {
             var fi: usize = 0;
-            while (fi < cur.file_count) : (fi += 1) {
-                if (cur.files[fi].section != sec) continue;
+            while (fi < cur().file_count) : (fi += 1) {
+                if (cur().files[fi].section != sec) continue;
                 renderFile(fi);
-                if (cur.home_off == 0) cur.home_off = cur.files[fi].r_start;
+                if (cur().home_off == 0) cur().home_off = cur().files[fi].r_start;
             }
         }
-        cur.sec_rend[idx] = cur.out;
+        cur().sec_rend[idx] = cur().out;
         put("\n"); // separator, outside the fold
     }
-    if (cur.home_off == 0) {
+    if (cur().home_off == 0) {
         // No files: land on the first present section header, else the top.
         for (render_order) |sec| {
-            if (cur.sec_present[@intFromEnum(sec)]) {
-                cur.home_off = cur.sec_rstart[@intFromEnum(sec)];
+            if (cur().sec_present[@intFromEnum(sec)]) {
+                cur().home_off = cur().sec_rstart[@intFromEnum(sec)];
                 break;
             }
         }
@@ -1194,31 +1238,31 @@ fn render() void {
 }
 
 fn renderFile(fi: usize) void {
-    var f = &cur.files[fi];
-    f.r_start = cur.out;
+    var f = &cur().files[fi];
+    f.r_start = cur().out;
     put("  ");
     if (f.n_hunks > 0) put(if (f.folded) "\xe2\x96\xb8 " else "\xe2\x96\xbe ");
     put(statusLabel(f));
     put(f.path_());
     put("\n");
-    f.body = cur.out;
+    f.body = cur().out;
     var h = f.first_hunk;
     while (h < f.first_hunk + f.n_hunks) : (h += 1) {
-        cur.hunks[h].r_start = cur.out;
-        put(cur.raw[cur.hunks[h].at .. cur.hunks[h].at + cur.hunks[h].len]); // verbatim
-        cur.hunks[h].r_end = cur.out;
+        cur().hunks[h].r_start = cur().out;
+        put(cur().raw[cur().hunks[h].at .. cur().hunks[h].at + cur().hunks[h].len]); // verbatim
+        cur().hunks[h].r_end = cur().out;
     }
-    f.r_end = cur.out;
+    f.r_end = cur().out;
 }
 
 fn renderRecent() void {
-    var i = cur.recent_start;
-    while (i < cur.recent_end) {
+    var i = cur().recent_start;
+    while (i < cur().recent_end) {
         var le = i;
-        while (le < cur.recent_end and cur.raw[le] != '\n') le += 1;
+        while (le < cur().recent_end and cur().raw[le] != '\n') le += 1;
         if (le > i) {
             put("  ");
-            put(cur.raw[i..le]);
+            put(cur().raw[i..le]);
             put("\n");
         }
         i = le + 1;
@@ -1232,14 +1276,14 @@ fn publishStyles() void {
     weft.style(0, lineEnd(0), .header);
     for (render_order) |sec| {
         const idx = @intFromEnum(sec);
-        if (!cur.sec_present[idx]) continue;
-        weft.style(cur.sec_rstart[idx], lineEnd(cur.sec_rstart[idx]), .emphasis);
+        if (!cur().sec_present[idx]) continue;
+        weft.style(cur().sec_rstart[idx], lineEnd(cur().sec_rstart[idx]), .emphasis);
     }
     var fi: usize = 0;
-    while (fi < cur.file_count) : (fi += 1) {
-        weft.style(cur.files[fi].r_start, lineEnd(cur.files[fi].r_start), .location);
-        var h = cur.files[fi].first_hunk;
-        while (h < cur.files[fi].first_hunk + cur.files[fi].n_hunks) : (h += 1) styleHunk(h);
+    while (fi < cur().file_count) : (fi += 1) {
+        weft.style(cur().files[fi].r_start, lineEnd(cur().files[fi].r_start), .location);
+        var h = cur().files[fi].first_hunk;
+        while (h < cur().files[fi].first_hunk + cur().files[fi].n_hunks) : (h += 1) styleHunk(h);
     }
     styleRecent();
 }
@@ -1247,15 +1291,15 @@ fn publishStyles() void {
 /// Classify a hunk's rendered lines by their leading diff marker (rendered
 /// verbatim, so `render_buf[ls]` IS the diff column).
 fn styleHunk(h: usize) void {
-    var i = cur.hunks[h].r_start;
-    const e = cur.hunks[h].r_end;
+    var i = cur().hunks[h].r_start;
+    const e = cur().hunks[h].r_end;
     while (i < e) {
         var le = i;
-        while (le < e and cur.render_buf[le] != '\n') le += 1;
+        while (le < e and cur().render_buf[le] != '\n') le += 1;
         if (le > i) {
-            const cls: weft.StyleClass = if (std.mem.startsWith(u8, cur.render_buf[i..le], "@@"))
+            const cls: weft.StyleClass = if (std.mem.startsWith(u8, cur().render_buf[i..le], "@@"))
                 .muted
-            else switch (cur.render_buf[i]) {
+            else switch (cur().render_buf[i]) {
                 '+' => .added,
                 '-' => .removed,
                 else => .normal,
@@ -1268,16 +1312,16 @@ fn styleHunk(h: usize) void {
 
 fn styleRecent() void {
     const idx = @intFromEnum(Section.recent);
-    if (!cur.sec_present[idx]) return;
-    var i = cur.sec_body[idx];
-    const e = cur.sec_rend[idx];
+    if (!cur().sec_present[idx]) return;
+    var i = cur().sec_body[idx];
+    const e = cur().sec_rend[idx];
     while (i < e) {
         var le = i;
-        while (le < e and cur.render_buf[le] != '\n') le += 1;
+        while (le < e and cur().render_buf[le] != '\n') le += 1;
         // "  <hash> <subject>" — dim the whole line, hash as a location.
         const hs = i + 2;
         var he = hs;
-        while (he < le and cur.render_buf[he] != ' ') he += 1;
+        while (he < le and cur().render_buf[he] != ' ') he += 1;
         if (he > hs) weft.style(hs, he, .location);
         if (le > he) weft.style(he, le, .muted);
         i = le + 1;
@@ -1288,18 +1332,18 @@ fn publishFolds() void {
     weft.foldClear();
     for (render_order) |sec| {
         const idx = @intFromEnum(sec);
-        if (cur.sec_present[idx] and cur.sec_folded[idx]) weft.fold(cur.sec_body[idx], cur.sec_rend[idx]);
+        if (cur().sec_present[idx] and cur().sec_folded[idx]) weft.fold(cur().sec_body[idx], cur().sec_rend[idx]);
     }
     var fi: usize = 0;
-    while (fi < cur.file_count) : (fi += 1) {
-        const f = &cur.files[fi];
+    while (fi < cur().file_count) : (fi += 1) {
+        const f = &cur().files[fi];
         if (f.folded and f.n_hunks > 0) weft.fold(f.body, f.r_end);
     }
 }
 
 fn lineEnd(off: usize) usize {
     var e = off;
-    while (e < cur.out and cur.render_buf[e] != '\n') e += 1;
+    while (e < cur().out and cur().render_buf[e] != '\n') e += 1;
     return e;
 }
 
@@ -1311,18 +1355,18 @@ const Node = struct { kind: Kind, idx: usize };
 
 fn nodeAt(off: usize) Node {
     var i: usize = 0;
-    while (i < cur.hunk_count) : (i += 1) {
-        if (off >= cur.hunks[i].r_start and off < cur.hunks[i].r_end) return .{ .kind = .hunk, .idx = i };
+    while (i < cur().hunk_count) : (i += 1) {
+        if (off >= cur().hunks[i].r_start and off < cur().hunks[i].r_end) return .{ .kind = .hunk, .idx = i };
     }
     i = 0;
-    while (i < cur.file_count) : (i += 1) {
-        if (off >= cur.files[i].r_start and off < cur.files[i].r_end) return .{ .kind = .file, .idx = i };
+    while (i < cur().file_count) : (i += 1) {
+        if (off >= cur().files[i].r_start and off < cur().files[i].r_end) return .{ .kind = .file, .idx = i };
     }
     const rec = @intFromEnum(Section.recent);
-    if (cur.sec_present[rec] and off >= cur.sec_body[rec] and off < cur.sec_rend[rec]) return .{ .kind = .commit, .idx = rec };
+    if (cur().sec_present[rec] and off >= cur().sec_body[rec] and off < cur().sec_rend[rec]) return .{ .kind = .commit, .idx = rec };
     for (render_order) |sec| {
         const idx = @intFromEnum(sec);
-        if (cur.sec_present[idx] and off >= cur.sec_rstart[idx] and off < cur.sec_rend[idx]) return .{ .kind = .section, .idx = idx };
+        if (cur().sec_present[idx] and off >= cur().sec_rstart[idx] and off < cur().sec_rend[idx]) return .{ .kind = .section, .idx = idx };
     }
     return .{ .kind = .none, .idx = 0 };
 }
@@ -1361,24 +1405,24 @@ const Target = struct {
 fn nodeAtCursor() Target {
     const off = weft.cursor();
     const n = nodeAt(off);
-    var t: Target = .{ .kind = n.kind, .snap = cur.snapshot };
+    var t: Target = .{ .kind = n.kind, .snap = cur().snapshot };
     switch (n.kind) {
         .none => {},
         .section => t.section = @enumFromInt(n.idx),
         .file => nameFile(&t, n.idx),
         .hunk => {
-            const h = &cur.hunks[n.idx];
+            const h = &cur().hunks[n.idx];
             nameFile(&t, h.file);
-            t.ord = n.idx - cur.files[h.file].first_hunk;
+            t.ord = n.idx - cur().files[h.file].first_hunk;
             t.sel = selectedLines(n.idx);
         },
-        .commit => t.hlen = hashTokenAt(off, &t.hash) orelse return .{ .snap = cur.snapshot },
+        .commit => t.hlen = hashTokenAt(off, &t.hash) orelse return .{ .snap = cur().snapshot },
     }
     return t;
 }
 
 fn nameFile(t: *Target, fi: usize) void {
-    const f = &cur.files[fi];
+    const f = &cur().files[fi];
     t.section = f.section;
     t.plen = @min(f.plen, t.path.len);
     @memcpy(t.path[0..t.plen], f.path[0..t.plen]);
@@ -1386,7 +1430,7 @@ fn nameFile(t: *Target, fi: usize) void {
 
 /// A file target for `fi` in the CURRENT snapshot.
 fn fileTarget(fi: usize) Target {
-    var t: Target = .{ .kind = .file, .snap = cur.snapshot };
+    var t: Target = .{ .kind = .file, .snap = cur().snapshot };
     nameFile(&t, fi);
     return t;
 }
@@ -1396,17 +1440,17 @@ fn fileTarget(fi: usize) Target {
 /// is named by line ordinals, which the snapshot check governs.
 fn selectedLines(hi: usize) ?Lines {
     const sel = weft.selection() orelse return null;
-    const h = &cur.hunks[hi];
+    const h = &cur().hunks[hi];
     var lo: usize = 0;
     var hi_ord: usize = 0;
     var seen = false;
     var ord: usize = 0;
     var i = h.r_start;
-    while (i < h.r_end and cur.render_buf[i] != '\n') i += 1; // skip the `@@` line
+    while (i < h.r_end and cur().render_buf[i] != '\n') i += 1; // skip the `@@` line
     i += 1;
     while (i < h.r_end) : (ord += 1) {
         var le = i;
-        while (le < h.r_end and cur.render_buf[le] != '\n') le += 1;
+        while (le < h.r_end and cur().render_buf[le] != '\n') le += 1;
         if (sel.start < le and sel.end > i) {
             if (!seen) {
                 lo = ord;
@@ -1423,12 +1467,12 @@ fn selectedLines(hi: usize) ?Lines {
 fn hashTokenAt(off: usize, dst: []u8) ?usize {
     const ln = weft.lineAt(off);
     var s = ln.start;
-    while (s < ln.end and s < cur.out and cur.render_buf[s] == ' ') s += 1;
+    while (s < ln.end and s < cur().out and cur().render_buf[s] == ' ') s += 1;
     var e = s;
-    while (e < ln.end and e < cur.out and cur.render_buf[e] != ' ') e += 1;
+    while (e < ln.end and e < cur().out and cur().render_buf[e] != ' ') e += 1;
     if (e == s) return null;
     const n = @min(e - s, dst.len);
-    @memcpy(dst[0..n], cur.render_buf[s .. s + n]);
+    @memcpy(dst[0..n], cur().render_buf[s .. s + n]);
     return n;
 }
 
@@ -1440,17 +1484,17 @@ fn offsetOf(t: Target) ?usize {
         .none => return null,
         .section => {
             const idx = @intFromEnum(t.section);
-            return if (cur.sec_present[idx]) cur.sec_rstart[idx] else null;
+            return if (cur().sec_present[idx]) cur().sec_rstart[idx] else null;
         },
         .file => {
             const fi = findFile(t.section, t.path_()) orelse return null;
-            return cur.files[fi].r_start;
+            return cur().files[fi].r_start;
         },
         .hunk => {
             const fi = findFile(t.section, t.path_()) orelse return null;
-            const f = &cur.files[fi];
+            const f = &cur().files[fi];
             if (f.n_hunks == 0) return f.r_start;
-            return cur.hunks[f.first_hunk + @min(t.ord, f.n_hunks - 1)].r_start;
+            return cur().hunks[f.first_hunk + @min(t.ord, f.n_hunks - 1)].r_start;
         },
         .commit => return commitRow(t.hash_()),
     }
@@ -1459,16 +1503,16 @@ fn offsetOf(t: Target) ?usize {
 /// The rendered start of the recent-commits line naming `want`.
 fn commitRow(want: []const u8) ?usize {
     const idx = @intFromEnum(Section.recent);
-    if (!cur.sec_present[idx]) return null;
-    var i = cur.sec_body[idx];
-    const e = cur.sec_rend[idx];
+    if (!cur().sec_present[idx]) return null;
+    var i = cur().sec_body[idx];
+    const e = cur().sec_rend[idx];
     while (i < e) {
         var le = i;
-        while (le < e and cur.render_buf[le] != '\n') le += 1;
+        while (le < e and cur().render_buf[le] != '\n') le += 1;
         const hs = @min(i + 2, le); // skip the "  " indent
         var he = hs;
-        while (he < le and cur.render_buf[he] != ' ') he += 1;
-        if (he > hs and std.mem.eql(u8, cur.render_buf[hs..he], want)) return i;
+        while (he < le and cur().render_buf[he] != ' ') he += 1;
+        if (he > hs and std.mem.eql(u8, cur().render_buf[hs..he], want)) return i;
         i = le + 1;
     }
     return null;
@@ -1487,7 +1531,7 @@ fn resolve(t: Target) ?Node {
         .commit => return .{ .kind = .commit, .idx = 0 },
         .section => {
             const idx = @intFromEnum(t.section);
-            return if (cur.sec_present[idx]) .{ .kind = .section, .idx = idx } else null;
+            return if (cur().sec_present[idx]) .{ .kind = .section, .idx = idx } else null;
         },
         .file => {
             const fi = findFile(t.section, t.path_()) orelse return null;
@@ -1495,9 +1539,9 @@ fn resolve(t: Target) ?Node {
         },
         .hunk => {
             // Snapshot-scoped: an ordinal from a superseded model names nothing.
-            if (t.snap != cur.snapshot) return null;
+            if (t.snap != cur().snapshot) return null;
             const fi = findFile(t.section, t.path_()) orelse return null;
-            const f = &cur.files[fi];
+            const f = &cur().files[fi];
             if (t.ord >= f.n_hunks) return null;
             return .{ .kind = .hunk, .idx = f.first_hunk + t.ord };
         },
@@ -1566,13 +1610,17 @@ fn openReason(t: Target) []const u8 {
 /// `on_activate` republishes when focus moves.
 fn publishOffers() void {
     if (focusedDraft()) |slot| return publishDraftOffers(slot);
-    if (focusedSession() != cur) return;
-    if (!cur.in_repo) {
+    // Before the first repository is opened there is nothing to describe. This
+    // is the one reader that can run unrouted, which is why `routed` is the
+    // thing it tests rather than a blank session standing in for one.
+    if (routed == null) return weft.offersRetract();
+    if (focusedSession() != routed) return;
+    if (!cur().in_repo) {
         weft.offersRetract();
         return;
     }
     const t = nodeAtCursor();
-    weft.offersBegin(tool, cur.snapshot);
+    weft.offersBegin(tool, cur().snapshot);
     weft.offer("plugin.git.stage", "git-stage", stageReason(t));
     weft.offer("plugin.git.unstage", "git-unstage", unstageReason(t));
     weft.offer("plugin.git.open-diff", "git-visit", openReason(t));
@@ -1590,8 +1638,7 @@ fn publishOffers() void {
 fn focusedDraft() ?*Drafts.Slot {
     var buf: [64]u8 = undefined;
     const active = weft.activeBufferName(&buf) orelse return null;
-    for (&drafts.slots) |*maybe| {
-        const slot = if (maybe.*) |*s| s else continue;
+    for (drafts.slots.items) |slot| {
         if (std.mem.eql(u8, slot.name(), active)) return slot;
     }
     return null;
@@ -1625,7 +1672,7 @@ fn gitPrevRow() void {
 }
 
 fn gitStatus() void {
-    cur.restore_cursor = false;
+    cur().restore_cursor = false;
     gather(GATHER);
     weft.setMode("git");
 }
@@ -1637,7 +1684,7 @@ fn gitStatus() void {
 /// every other mutation (no git-init special-casing); after init, GATHER's
 /// `git status --branch` renders the fresh `Branch: main` header.
 fn gitInit() void {
-    cur.restore_cursor = false;
+    cur().restore_cursor = false;
     gatherAfterSeq("git init");
 }
 fn gitRefresh() void {
@@ -1654,7 +1701,7 @@ fn gitToggleFold() void {
     // The head to keep point on, named by identity — it survives the re-render.
     const head: Target = switch (n.kind) {
         .section => blk: {
-            cur.sec_folded[n.idx] = !cur.sec_folded[n.idx];
+            cur().sec_folded[n.idx] = !cur().sec_folded[n.idx];
             break :blk t;
         },
         .file => blk: {
@@ -1663,7 +1710,7 @@ fn gitToggleFold() void {
         },
         // Fold the parent file (hunk-granularity folds are a later phase).
         .hunk => blk: {
-            const fi = cur.hunks[n.idx].file;
+            const fi = cur().hunks[n.idx].file;
             toggleFile(fi);
             break :blk fileTarget(fi);
         },
@@ -1675,8 +1722,8 @@ fn gitToggleFold() void {
 }
 
 fn toggleFile(fi: usize) void {
-    cur.files[fi].folded = !cur.files[fi].folded;
-    setCollapsed(cur.files[fi].path_(), cur.files[fi].folded); // persist
+    cur().files[fi].folded = !cur().files[fi].folded;
+    setCollapsed(cur().files[fi].path_(), cur().files[fi].folded); // persist
 }
 
 /// Repaint the buffer from the model in hand — no re-gather, the model is
@@ -1685,7 +1732,7 @@ fn toggleFile(fi: usize) void {
 fn rerender() void {
     const at = weft.cursor();
     repaint();
-    weft.jump(weft.lineAt(@min(at, cur.out)).start);
+    weft.jump(weft.lineAt(@min(at, cur().out)).start);
 }
 
 fn gitVisit() void {
@@ -1693,7 +1740,7 @@ fn gitVisit() void {
     const n = resolve(t) orelse return;
     const fi: usize = switch (n.kind) {
         .file => n.idx,
-        .hunk => cur.hunks[n.idx].file,
+        .hunk => cur().hunks[n.idx].file,
         // RET on a recent commit → show it (a diff-colored read-only buffer).
         .commit => {
             showCommit(t);
@@ -1701,7 +1748,7 @@ fn gitVisit() void {
         },
         else => return,
     };
-    weft.runStr("open", cur.inRepo(cur.files[fi].path_()));
+    weft.runStr("open", cur().inRepo(cur().files[fi].path_()));
 }
 
 // ── Staging: file / hunk / region, resolved from the node under point ───────
@@ -1710,14 +1757,14 @@ fn gitStage() void {
     const n = liveNode(t, "stage") orelse return;
     switch (n.kind) {
         .hunk => {
-            if (cur.files[cur.hunks[n.idx].file].section != .unstaged) {
+            if (cur().files[cur().hunks[n.idx].file].section != .unstaged) {
                 weft.echo("stage: not an unstaged hunk");
                 return;
             }
             applyHunk(n.idx, t.sel, false);
         },
         .file => {
-            const f = &cur.files[n.idx];
+            const f = &cur().files[n.idx];
             if (f.section == .staged) {
                 weft.echo("stage: already staged");
                 return;
@@ -1737,14 +1784,14 @@ fn gitUnstage() void {
     const n = liveNode(t, "unstage") orelse return;
     switch (n.kind) {
         .hunk => {
-            if (cur.files[cur.hunks[n.idx].file].section != .staged) {
+            if (cur().files[cur().hunks[n.idx].file].section != .staged) {
                 weft.echo("unstage: not a staged hunk");
                 return;
             }
             applyHunk(n.idx, t.sel, true);
         },
         .file => {
-            const f = &cur.files[n.idx];
+            const f = &cur().files[n.idx];
             if (f.section != .staged) {
                 weft.echo("unstage: not staged");
                 return;
@@ -1773,9 +1820,9 @@ fn stageSection(sec: Section, stage: bool) void {
     w += (std.fmt.bufPrint(cmd_buf[w..], "{s}", .{verb}) catch return).len;
     var any = false;
     var fi: usize = 0;
-    while (fi < cur.file_count) : (fi += 1) {
-        if (cur.files[fi].section != sec) continue;
-        const seg = std.fmt.bufPrint(cmd_buf[w..], " '{s}'", .{cur.files[fi].path_()}) catch break;
+    while (fi < cur().file_count) : (fi += 1) {
+        if (cur().files[fi].section != sec) continue;
+        const seg = std.fmt.bufPrint(cmd_buf[w..], " '{s}'", .{cur().files[fi].path_()}) catch break;
         w += seg.len;
         any = true;
     }
@@ -1788,7 +1835,7 @@ fn stageSection(sec: Section, stage: bool) void {
 fn gitDiscard() void {
     const t = nodeAtCursor();
     const n = liveNode(t, "discard") orelse return;
-    cur.pending_target = t;
+    cur().pending_target = t;
     switch (n.kind) {
         .file => confirmPick(.discard, "discard changes to this file?"),
         .hunk => confirmPick(.discard, "discard this hunk?"),
@@ -1806,8 +1853,8 @@ fn gitDiscard() void {
 /// no longer names (a background re-gather landed under the prompt) destroys
 /// nothing.
 fn gitDiscardDo() void {
-    const t = cur.pending_target;
-    cur.pending_target = .{};
+    const t = cur().pending_target;
+    cur().pending_target = .{};
     const n = resolve(t) orelse {
         weft.echo("discard refused: the target moved since you asked");
         return;
@@ -1816,11 +1863,11 @@ fn gitDiscardDo() void {
         .hunk => {
             // Reverse the worktree change; for a staged hunk, drop it from the
             // index too (git's discard reverts both sides).
-            const staged = cur.files[cur.hunks[n.idx].file].section == .staged;
+            const staged = cur().files[cur().hunks[n.idx].file].section == .staged;
             discardHunk(n.idx, t.sel, staged);
         },
         .file => {
-            const f = &cur.files[n.idx];
+            const f = &cur().files[n.idx];
             switch (f.section) {
                 .untracked => gatherAfter1("rm -- '{s}'", f.path_()),
                 .unstaged => gatherAfter1("git checkout -- '{s}'", f.path_()),
@@ -1841,8 +1888,8 @@ fn discardSection(sec: Section) void {
     var w: usize = 0;
     var any = false;
     var fi: usize = 0;
-    while (fi < cur.file_count) : (fi += 1) {
-        const f = &cur.files[fi];
+    while (fi < cur().file_count) : (fi += 1) {
+        const f = &cur().files[fi];
         if (f.section != sec) continue;
         const seg = switch (sec) {
             .untracked => std.fmt.bufPrint(cmd_buf[w..], "rm -- '{s}'; ", .{f.path_()}),
@@ -1891,16 +1938,16 @@ fn discardHunk(hi: usize, sel: ?Lines, staged: bool) void {
 /// (git's algorithm: unselected `+` dropped, unselected `-` demoted to context)
 /// and recompute the `@@` counts. Returns null if it won't fit.
 fn buildPatch(hi: usize, sel: ?Lines) ?[]const u8 {
-    const h = &cur.hunks[hi];
-    const f = &cur.files[h.file];
+    const h = &cur().hunks[hi];
+    const f = &cur().files[h.file];
     if (f.header_len == 0) return null;
     var w: usize = 0;
-    const hdr = cur.raw[f.header_off .. f.header_off + f.header_len];
+    const hdr = cur().raw[f.header_off .. f.header_off + f.header_len];
     if (hdr.len > patch_buf.len) return null;
     @memcpy(patch_buf[0..hdr.len], hdr);
     w = hdr.len;
 
-    const hunk = cur.raw[h.at .. h.at + h.len];
+    const hunk = cur().raw[h.at .. h.at + h.len];
     if (sel) |s| return buildPartial(hunk, s, &w);
     if (w + hunk.len > patch_buf.len) return null;
     @memcpy(patch_buf[w .. w + hunk.len], hunk);
@@ -2010,9 +2057,10 @@ fn ensureNl(patch: []const u8) []const u8 {
 /// What a draft remembers besides its text: the repository SESSION it commits
 /// to (bound once, when the entry opens) and the flags amend/reword put on it.
 const Draft = struct {
-    /// The session this draft belongs to. A draft never asks what is focused —
-    /// it commits to the repository it was written for, forever.
-    session: usize = 0,
+    /// The session this draft belongs to, by ID. A draft never asks what is
+    /// focused — it commits to the repository it was written for, forever, and
+    /// an id outlives a table row.
+    session: u32 = 0,
     flags: [64]u8 = undefined,
     flags_len: usize = 0,
     /// The commit this draft was opened ONTO (fixup/squash) — a durable OID,
@@ -2025,16 +2073,16 @@ const Draft = struct {
 };
 /// The tool identity a draft entry carries — what scopes its `save` provider.
 const draft_tool = "git-commit";
-const Drafts = weft.Instances(Draft, 4);
+const Drafts = weft.Instances(Draft);
 var drafts: Drafts = .{};
 /// A rebase plan: an ordinary instanced entry too, saved to run its rebase.
 const Todo = struct {
-    session: usize = 0,
+    session: u32 = 0,
     base: [64]u8 = undefined, // the rebase base ref (`HEAD~N`)
     base_len: usize = 0,
 };
 const todo_tool = "git-rebase";
-const Todos = weft.Instances(Todo, 4);
+const Todos = weft.Instances(Todo);
 var todos: Todos = .{};
 
 /// The ordinal of what the drafts' published offers describe — bumped whenever
@@ -2053,10 +2101,10 @@ var commit_note_len: usize = 0;
 /// the message — `git log -1 --format=%B` for amend/reword.
 fn openDraft(flags: []const u8, prefill: []const u8) ?*Drafts.Slot {
     const slot = drafts.open(draft_tool) orelse {
-        weft.echo("git: too many commit drafts open");
+        weft.echo("git: out of memory — could not open another commit draft");
         return null;
     };
-    slot.value = .{ .session = sessionIndex(cur) };
+    slot.value = .{ .session = cur().id };
     setFlags(slot, flags);
     weft.toolBacking(draft_tool);
     seedDraft(slot, prefill);
@@ -2093,7 +2141,7 @@ fn currentDraft() ?*Drafts.Slot {
         weft.echo("no commit draft here");
         return null;
     };
-    cur = &sessions[slot.value.session];
+    routed = sessionById(slot.value.session) orelse return null;
     return slot;
 }
 
@@ -2110,7 +2158,7 @@ fn gitCommitSave() void {
     const n = @min(text.len, msg_buf.len);
     @memcpy(msg_buf[0..n], text[0..n]);
     const d = &slot.value;
-    cur.committing = slot;
+    cur().committing = slot;
     // `{}` is the SPOOLED message: the host writes it, `git commit -F` reads it
     // (an absolute path outside the work tree is fine — git only opens it), and
     // the host removes it whether or not the commit was accepted.
@@ -2120,8 +2168,8 @@ fn gitCommitSave() void {
             "printf '\\036\\036C%d\\n' \"$s\"; " ++ GATHER,
         .{d.flagsOf()},
     ) catch return;
-    cur.restore_cursor = false;
-    showInput(cmd, msg_buf[0..n], cur.name(), .commit);
+    cur().restore_cursor = false;
+    showInput(cmd, msg_buf[0..n], cur().name(), .commit);
 }
 
 /// The commit ran: git's own words and exit status precede the status gather.
@@ -2146,17 +2194,17 @@ fn gathers(fill: Fill) bool {
 /// prologue is not status.
 fn takeEffectOutcome() bool {
     commit_note_len = 0;
-    const ci = std.mem.indexOf(u8, cur.raw[0..cur.raw_len], MARK_C) orelse return false;
+    const ci = std.mem.indexOf(u8, cur().raw[0..cur().raw_len], MARK_C) orelse return false;
     commit_note_len = @min(ci, commit_note.len);
-    @memcpy(commit_note[0..commit_note_len], cur.raw[0..commit_note_len]);
+    @memcpy(commit_note[0..commit_note_len], cur().raw[0..commit_note_len]);
     var i = ci + MARK_C.len;
     var status: usize = 0;
-    while (i < cur.raw_len and cur.raw[i] >= '0' and cur.raw[i] <= '9') : (i += 1) {
-        status = status * 10 + (cur.raw[i] - '0');
+    while (i < cur().raw_len and cur().raw[i] >= '0' and cur().raw[i] <= '9') : (i += 1) {
+        status = status * 10 + (cur().raw[i] - '0');
     }
-    if (i < cur.raw_len and cur.raw[i] == '\n') i += 1;
-    std.mem.copyForwards(u8, cur.raw[0 .. cur.raw_len - i], cur.raw[i..cur.raw_len]);
-    cur.raw_len -= i;
+    if (i < cur().raw_len and cur().raw[i] == '\n') i += 1;
+    std.mem.copyForwards(u8, cur().raw[0 .. cur().raw_len - i], cur().raw[i..cur().raw_len]);
+    cur().raw_len -= i;
     return status == 0;
 }
 
@@ -2164,8 +2212,8 @@ fn takeEffectOutcome() bool {
 /// accepted is closed like any other entry; one it refused stays, with the
 /// refusal shown.
 fn gitCommitSettle() void {
-    const slot = cur.committing orelse return;
-    cur.committing = null;
+    const slot = cur().committing orelse return;
+    cur().committing = null;
     if (!commit_ok) {
         weft.echo(firstLine(commit_note[0..commit_note_len]));
         return;
@@ -2173,7 +2221,7 @@ fn gitCommitSettle() void {
     // Retiring the entry is focus-scoped: land on it, then close it.
     if (focusBuffer(slot.name())) weft.run("buffer-close");
     drafts.close(slot);
-    _ = focusBuffer(cur.name());
+    _ = focusBuffer(cur().name());
     weft.echo("committed");
 }
 
@@ -2303,8 +2351,8 @@ fn actRow(key: []const u8, label: []const u8) void {
 }
 
 fn gitPush() void {
-    cur.push_force = false;
-    cur.push_upstream = false;
+    cur().push_force = false;
+    cur().push_upstream = false;
     weft.setMode("git-push-menu");
     renderPushSurface();
 }
@@ -2312,31 +2360,31 @@ fn renderPushSurface() void {
     weft.surfaceBegin(.corner);
     weft.surfaceRow();
     weft.surfaceSpan("Push", .accent);
-    flagRow("f", "--force-with-lease", cur.push_force);
-    flagRow("u", "--set-upstream", cur.push_upstream);
+    flagRow("f", "--force-with-lease", cur().push_force);
+    flagRow("u", "--set-upstream", cur().push_upstream);
     actRow("p", "push");
     weft.surfaceEnd(-1);
 }
 fn gitPushToggleForce() void {
-    cur.push_force = !cur.push_force;
+    cur().push_force = !cur().push_force;
     renderPushSurface();
 }
 fn gitPushToggleUpstream() void {
-    cur.push_upstream = !cur.push_upstream;
+    cur().push_upstream = !cur().push_upstream;
     renderPushSurface();
 }
 fn gitPushDo() void {
     weft.surfaceClose();
     var w: usize = 0;
     w += (std.fmt.bufPrint(op_buf[w..], "git push", .{}) catch return).len;
-    if (cur.push_force) w += (std.fmt.bufPrint(op_buf[w..], " --force-with-lease", .{}) catch return).len;
-    if (cur.push_upstream) w += (std.fmt.bufPrint(op_buf[w..], " --set-upstream origin HEAD", .{}) catch return).len;
+    if (cur().push_force) w += (std.fmt.bufPrint(op_buf[w..], " --force-with-lease", .{}) catch return).len;
+    if (cur().push_upstream) w += (std.fmt.bufPrint(op_buf[w..], " --set-upstream origin HEAD", .{}) catch return).len;
     weft.echo("pushing…");
     gatherAfterSeq(op_buf[0..w]);
 }
 
 fn gitPull() void {
-    cur.pull_rebase = false;
+    cur().pull_rebase = false;
     weft.setMode("git-pull-menu");
     renderPullSurface();
 }
@@ -2344,23 +2392,23 @@ fn renderPullSurface() void {
     weft.surfaceBegin(.corner);
     weft.surfaceRow();
     weft.surfaceSpan("Pull", .accent);
-    flagRow("r", "--rebase", cur.pull_rebase);
+    flagRow("r", "--rebase", cur().pull_rebase);
     actRow("p", "pull");
     weft.surfaceEnd(-1);
 }
 fn gitPullToggleRebase() void {
-    cur.pull_rebase = !cur.pull_rebase;
+    cur().pull_rebase = !cur().pull_rebase;
     renderPullSurface();
 }
 fn gitPullDo() void {
     weft.surfaceClose();
     weft.echo("pulling…");
-    if (cur.pull_rebase) gatherAfterSeq("git pull --rebase") else gatherAfterSeq("git pull");
+    if (cur().pull_rebase) gatherAfterSeq("git pull --rebase") else gatherAfterSeq("git pull");
 }
 
 fn gitFetch() void {
-    cur.fetch_all = false;
-    cur.fetch_prune = false;
+    cur().fetch_all = false;
+    cur().fetch_prune = false;
     weft.setMode("git-fetch-menu");
     renderFetchSurface();
 }
@@ -2368,25 +2416,25 @@ fn renderFetchSurface() void {
     weft.surfaceBegin(.corner);
     weft.surfaceRow();
     weft.surfaceSpan("Fetch", .accent);
-    flagRow("a", "--all", cur.fetch_all);
-    flagRow("p", "--prune", cur.fetch_prune);
+    flagRow("a", "--all", cur().fetch_all);
+    flagRow("p", "--prune", cur().fetch_prune);
     actRow("f", "fetch");
     weft.surfaceEnd(-1);
 }
 fn gitFetchToggleAll() void {
-    cur.fetch_all = !cur.fetch_all;
+    cur().fetch_all = !cur().fetch_all;
     renderFetchSurface();
 }
 fn gitFetchTogglePrune() void {
-    cur.fetch_prune = !cur.fetch_prune;
+    cur().fetch_prune = !cur().fetch_prune;
     renderFetchSurface();
 }
 fn gitFetchDo() void {
     weft.surfaceClose();
     var w: usize = 0;
     w += (std.fmt.bufPrint(op_buf[w..], "git fetch", .{}) catch return).len;
-    if (cur.fetch_all) w += (std.fmt.bufPrint(op_buf[w..], " --all", .{}) catch return).len;
-    if (cur.fetch_prune) w += (std.fmt.bufPrint(op_buf[w..], " --prune", .{}) catch return).len;
+    if (cur().fetch_all) w += (std.fmt.bufPrint(op_buf[w..], " --all", .{}) catch return).len;
+    if (cur().fetch_prune) w += (std.fmt.bufPrint(op_buf[w..], " --prune", .{}) catch return).len;
     weft.echo("fetching…");
     gatherAfterSeq(op_buf[0..w]);
 }
@@ -2434,29 +2482,29 @@ fn show(cmd: []const u8, name: []const u8, fill: Fill) void {
 /// message, a rebase plan) comes through here instead, which is why git holds
 /// no `fs_write` and no command of ours ends in `rm -f`.
 fn showInput(cmd: []const u8, input: ?[]const u8, name: []const u8, fill: Fill) void {
-    const body = std.fmt.bufPrint(&run_buf, "cd '{s}' || exit 0\n{s}", .{ cur.root(), cmd }) catch return;
+    const body = std.fmt.bufPrint(&run_buf, "cd '{s}' || exit 0\n{s}", .{ cur().root, cmd }) catch return;
     if (!focusBuffer(name)) weft.runStr("buffer-create", name);
     if (gathers(fill)) {
         // A status entry carries git's tool identity: it is what the published
         // offers are ABOUT, and the fact the catalog matches them on.
         weft.toolBacking(tool);
-        cur.gathering = true; // the projection is now provisional
+        cur().gathering = true; // the projection is now provisional
     }
-    const token = fillToken(fill, cur);
+    const token = fillToken(fill, cur());
     if (input) |bytes| weft.procSpool(body, bytes, name, token) else weft.procToBuffer(body, name, token);
 }
 
 /// Re-gather this session's status into its own buffer.
 fn gather(cmd: []const u8) void {
-    show(cmd, cur.name(), .status);
+    show(cmd, cur().name(), .status);
 }
 
 /// Preserve the cursor spot across the coming re-render: capture the node
 /// identity (re-found in the new model) plus the raw offset as a fallback.
 fn markRestore() void {
-    cur.restore_cursor = true;
-    cur.pending_cursor = weft.cursor();
-    cur.restore_target = nodeAtCursor();
+    cur().restore_cursor = true;
+    cur().pending_cursor = weft.cursor();
+    cur().restore_target = nodeAtCursor();
 }
 
 /// `mutation && GATHER` into *git* — the index reflects the mutation with no
@@ -2505,7 +2553,7 @@ fn gatherAfterPatch(patch: []const u8, flags: []const u8, also_worktree: bool) v
         std.fmt.bufPrint(&cmd_buf, "git apply {s} {{}}; git apply --reverse {{}}; " ++ GATHER, .{flags}) catch return
     else
         std.fmt.bufPrint(&cmd_buf, "git apply {s} {{}}; " ++ GATHER, .{flags}) catch return;
-    showInput(cmd, patch, cur.name(), .status);
+    showInput(cmd, patch, cur().name(), .status);
     weft.setMode("git");
 }
 
@@ -2521,7 +2569,7 @@ const Confirm = enum(u32) { discard = 1, staged = 2, close = 3 };
 /// The id carries the session as well as the question, exactly as a fill token
 /// does: repository 2's answer can only ever act on repository 2.
 fn confirmPick(which: Confirm, prompt: []const u8) void {
-    weft.pickBegin(prompt, @intFromEnum(which) | (@as(u32, @intCast(sessionIndex(cur))) << 8));
+    weft.pickBegin(prompt, @intFromEnum(which) | (cur().id << 8));
     weft.pickAdd("no", "leave it alone");
     weft.pickAdd("yes", "go ahead");
     weft.pickEnd();
@@ -2529,16 +2577,16 @@ fn confirmPick(which: Confirm, prompt: []const u8) void {
 
 /// Stage a full mutation behind that confirmation.
 fn confirmThen(cmd: []const u8, prompt: []const u8) void {
-    cur.confirm_len = @min(cmd.len, cur.confirm_cmd.len);
-    @memcpy(cur.confirm_cmd[0..cur.confirm_len], cmd[0..cur.confirm_len]);
+    cur().confirm_len = @min(cmd.len, cur().confirm_cmd.len);
+    @memcpy(cur().confirm_cmd[0..cur().confirm_len], cmd[0..cur().confirm_len]);
     confirmPick(.staged, prompt);
 }
 
 export fn on_pick_accept(pick_id: u32) void {
-    const idx = pick_id >> 8;
-    if (idx >= session_count) return; // an id we never issued answers nothing
+    // An id we never issued answers nothing.
+    const s = sessionById(pick_id >> 8) orelse return;
     const question = std.enums.fromInt(Confirm, pick_id & 0xff) orelse return;
-    cur = &sessions[idx];
+    routed = s;
     var outcome = (weft.pickOutcome(weft.allocator) catch return) orelse return;
     defer outcome.deinit(weft.allocator);
     const answer = switch (outcome) {
@@ -2556,7 +2604,7 @@ export fn on_pick_accept(pick_id: u32) void {
         // snapshot-scoped), so nothing coarser belongs here.
         .discard => gitDiscardDo(),
         // The staged command is composed from refs and OIDs — durable.
-        .staged => gatherAfterSeq(cur.confirm_cmd[0..cur.confirm_len]),
+        .staged => gatherAfterSeq(cur().confirm_cmd[0..cur().confirm_len]),
         // The entry the question was asked in is still the active one.
         .close => weft.run("buffer-close"),
     }
@@ -2609,13 +2657,13 @@ fn gitResetMixed() void {
 /// The reset transient acts on the OID `x` armed it with — durable, so no
 /// re-resolution against the working tree is needed or wanted.
 fn resetTo(kind: []const u8) void {
-    if (cur.pending_target.kind != .commit) return;
-    const m = std.fmt.bufPrint(&op_buf, "git reset {s} {s}", .{ kind, cur.pending_target.hash_() }) catch return;
+    if (cur().pending_target.kind != .commit) return;
+    const m = std.fmt.bufPrint(&op_buf, "git reset {s} {s}", .{ kind, cur().pending_target.hash_() }) catch return;
     gatherAfterSeq(m);
 }
 fn gitResetHard() void {
-    if (cur.pending_target.kind != .commit) return;
-    const m = std.fmt.bufPrint(&op_buf, "git reset --hard {s}", .{cur.pending_target.hash_()}) catch return;
+    if (cur().pending_target.kind != .commit) return;
+    const m = std.fmt.bufPrint(&op_buf, "git reset --hard {s}", .{cur().pending_target.hash_()}) catch return;
     confirmThen(m, "reset --hard (loses changes)?");
 }
 
@@ -2662,7 +2710,7 @@ fn gitLogAll() void {
 
 // ── The `*git-input*` single-line prompt ────────────────────────────────────
 fn openInput(action: InputAction, prompt: []const u8) void {
-    cur.input_action = action;
+    cur().input_action = action;
     if (!focusBuffer("*git-input*")) weft.runStr("buffer-create", "*git-input*");
     weft.edit(.{ .start = 0, .end = weft.byteLen() }, "");
     weft.jump(0);
@@ -2670,7 +2718,7 @@ fn openInput(action: InputAction, prompt: []const u8) void {
     weft.echo(prompt);
 }
 fn gitInputAbort() void {
-    cur.input_action = .none;
+    cur().input_action = .none;
     weft.setMode("git");
     weft.echo("cancelled");
 }
@@ -2684,15 +2732,15 @@ fn gitInputFinish() void {
     var e: usize = 0;
     while (e < text.len and text[e] != '\n') e += 1;
     const line = std.mem.trim(u8, text[0..e], " \t\r");
-    cur.input_name_len = @min(line.len, cur.input_name.len);
-    @memcpy(cur.input_name[0..cur.input_name_len], line[0..cur.input_name_len]);
-    const name = cur.input_name[0..cur.input_name_len];
+    cur().input_name_len = @min(line.len, cur().input_name.len);
+    @memcpy(cur().input_name[0..cur().input_name_len], line[0..cur().input_name_len]);
+    const name = cur().input_name[0..cur().input_name_len];
     if (name.len == 0) {
         gitInputAbort();
         return;
     }
-    const act = cur.input_action;
-    cur.input_action = .none;
+    const act = cur().input_action;
+    cur().input_action = .none;
     switch (act) {
         .branch_checkout => gatherAfterSeq1("git checkout '{s}'", name),
         .branch_create => gatherAfterSeq1("git checkout -b '{s}'", name),
@@ -2745,10 +2793,10 @@ fn startRebase(nstr: []const u8) void {
         return;
     };
     const slot = todos.open(todo_tool) orelse {
-        weft.echo("git: too many rebase plans open");
+        weft.echo("git: out of memory — could not open another rebase plan");
         return;
     };
-    slot.value = .{ .session = sessionIndex(cur) };
+    slot.value = .{ .session = cur().id };
     const base = std.fmt.bufPrint(&slot.value.base, "HEAD~{s}", .{nstr}) catch return;
     slot.value.base_len = base.len;
     weft.toolBacking(todo_tool);
@@ -2783,12 +2831,12 @@ fn gitRebaseSave() void {
         weft.echo("no rebase plan here");
         return;
     };
-    cur = &sessions[slot.value.session]; // a plan names its own repository
+    routed = sessionById(slot.value.session) orelse return; // a plan names its own repository
     const text = weft.slice(0, weft.byteLen());
     const n = @min(text.len, msg_buf.len);
     @memcpy(msg_buf[0..n], text[0..n]);
     const v = &slot.value;
-    cur.sequencing = slot;
+    cur().sequencing = slot;
     // `{}` is the SPOOLED plan. git runs `$GIT_SEQUENCE_EDITOR <todo>` while
     // `git rebase -i` is still in flight, so the temp is alive exactly when the
     // `cp` needs it and gone the moment the rebase returns — including a rebase
@@ -2799,8 +2847,8 @@ fn gitRebaseSave() void {
             "printf '\\036\\036C%d\\n' \"$s\"; " ++ GATHER,
         .{v.base[0..v.base_len]},
     ) catch return;
-    cur.restore_cursor = false;
-    showInput(cmd, msg_buf[0..n], cur.name(), .sequence);
+    cur().restore_cursor = false;
+    showInput(cmd, msg_buf[0..n], cur().name(), .sequence);
 }
 
 fn sequenceFill() void {
@@ -2813,8 +2861,8 @@ fn sequenceFill() void {
 /// Deferred to a dispatching entry: a plan git ran is spent, and closes like
 /// any other entry; one it refused stays, with the refusal shown.
 fn gitRebaseSettle() void {
-    const slot = cur.sequencing orelse return;
-    cur.sequencing = null;
+    const slot = cur().sequencing orelse return;
+    cur().sequencing = null;
     if (!commit_ok) {
         weft.echo(firstLine(commit_note[0..commit_note_len]));
         return;
@@ -2822,7 +2870,7 @@ fn gitRebaseSettle() void {
     // Retiring the entry is focus-scoped: land on it, then close it.
     if (focusBuffer(slot.name())) weft.run("buffer-close");
     todos.close(slot);
-    _ = focusBuffer(cur.name());
+    _ = focusBuffer(cur().name());
     weft.echo("rebased");
 }
 fn gitRebaseContinue() void {

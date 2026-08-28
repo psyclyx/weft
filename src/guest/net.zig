@@ -15,7 +15,7 @@ const weft = @import("weft");
 
 /// Each live connection, keyed by the buffer its socket streams into; the
 /// value is its host session handle.
-var conns: weft.Instances(u32, 8) = .{};
+var conns: weft.Instances(u32) = .{};
 
 var host_buf: [512]u8 = undefined;
 var sni_buf: [256]u8 = undefined;
@@ -54,7 +54,7 @@ fn openTls() void {
     dial(host_buf[0..n], sni_buf[0..sn]);
 }
 fn dial(host: []const u8, sni: []const u8) void {
-    const slot = conns.open("net") orelse return weft.echo("net: too many connections");
+    const slot = conns.open("net") orelse return weft.echo("net: out of memory — could not open another connection");
     slot.value = weft.netConnect(host, slot.name(), sni) orelse return conns.close(slot);
 }
 /// Send arg0 to this entry's connection.

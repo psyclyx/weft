@@ -1113,24 +1113,34 @@ pub fn instanceName(base: []const u8, n: u32, out: []u8) ?[]const u8 {
 }
 
 /// The lowest instance ordinal of `base` no buffer holds — the identity a new
-/// instance takes. Null when the tool is saturated.
+/// instance takes. The scan needs no ceiling: an ordinal is occupied only by a
+/// buffer holding its name, buffers are finite, so by pigeonhole one of the
+/// first `bufferCount() + 1` ordinals is always free. Null only when the name
+/// itself does not fit, which is a property of `base`, not of how many
+/// instances are running.
 pub fn instanceOrdinal(base: []const u8) ?u32 {
     var name_buf: [128]u8 = undefined;
     var n: u32 = 1;
-    while (n <= max_instances) : (n += 1) {
+    while (true) : (n += 1) {
         const name = instanceName(base, n, &name_buf) orelse return null;
         if (!bufferNamed(name)) return n;
     }
-    return null;
 }
 
-const max_instances = 64;
-
 /// A tool's live instances: `T` is what one instance must remember (a REPL
-/// handle, a socket, a log), `cap` bounds how many run at once. Every
-/// instantiable tool shares this table rather than growing its own, so
-/// "which instance is this command about" has one answer everywhere.
-pub fn Instances(comptime T: type, comptime cap: usize) type {
+/// handle, a socket, a log). Every instantiable tool shares this table rather
+/// than growing its own, so "which instance is this command about" has one
+/// answer everywhere.
+///
+/// The table is a list of POINTERS with one heap allocation per instance, the
+/// shape `core/Buffers.zig` settled on for the same reason: callers hold a
+/// `*Slot` across calls (a draft names the entry it commits to, an http request
+/// its connection), so an instance must keep its address while the table around
+/// it grows. There is no cap — how many interpreters or repositories you may
+/// have open at once was never a decision anybody made, and the guest heap
+/// (`weft.allocator`, a real `@wasmMemoryGrow` heap) is what actually bounds it.
+/// `open` is null ONLY when that heap refuses, and every caller says so.
+pub fn Instances(comptime T: type) type {
     return struct {
         const Self = @This();
         const name_cap = 64;
@@ -1151,32 +1161,35 @@ pub fn Instances(comptime T: type, comptime cap: usize) type {
             }
         };
 
-        slots: [cap]?Slot = @splat(null),
-        recent: ?usize = null,
+        slots: std.ArrayList(*Slot) = .empty,
+        /// The instance a command falls back to — a POINTER, so it survives the
+        /// list growing under it, which an index would not.
+        recent: ?*Slot = null,
         opens: usize = 0,
 
         /// Mint the next instance of `base` (`*base*`, `*base:2*`, …) and open
         /// its buffer. `value` is uninitialized: the caller fills it from
         /// `slot.name()` (a session must be started against its own buffer),
-        /// and `close`s the slot if that fails. Null when the tool is
-        /// saturated.
+        /// and `close`s the slot if that fails. Null when the guest heap cannot
+        /// hold another instance, or when the instance name does not fit.
         pub fn open(self: *Self, base: []const u8) ?*Slot {
-            const i = self.free() orelse return null;
             var name_buf: [name_cap]u8 = undefined;
             const ordinal = instanceOrdinal(base) orelse return null;
             const name = instanceName(base, ordinal, &name_buf) orelse return null;
+            self.slots.ensureUnusedCapacity(allocator, 1) catch return null;
+            const slot = allocator.create(Slot) catch return null;
             runStr("buffer-create", name);
             self.opens += 1;
-            self.slots[i] = .{
+            slot.* = .{
                 .name_buf = undefined,
                 .name_len = name.len,
                 .opened = self.opens,
                 .place = placeId(),
                 .value = undefined,
             };
-            const slot = &self.slots[i].?;
             @memcpy(slot.name_buf[0..name.len], name);
-            self.recent = i;
+            self.slots.appendAssumeCapacity(slot);
+            self.recent = slot;
             return slot;
         }
 
@@ -1184,8 +1197,7 @@ pub fn Instances(comptime T: type, comptime cap: usize) type {
         /// when its instances are one-shot (a request, not a session).
         pub fn oldest(self: *Self) ?*Slot {
             var found: ?*Slot = null;
-            for (&self.slots) |*maybe| {
-                const slot = if (maybe.*) |*s| s else continue;
+            for (self.slots.items) |slot| {
                 if (found == null or slot.opened < found.?.opened) found = slot;
             }
             return found;
@@ -1207,25 +1219,22 @@ pub fn Instances(comptime T: type, comptime cap: usize) type {
         pub fn current(self: *Self, label: []const u8) ?*Slot {
             var name_buf: [name_cap]u8 = undefined;
             if (activeBufferName(&name_buf)) |active| {
-                for (&self.slots, 0..) |*maybe, i| {
-                    const slot = if (maybe.*) |*s| s else continue;
+                for (self.slots.items) |slot| {
                     if (std.mem.eql(u8, slot.name(), active)) {
-                        self.recent = i;
+                        self.recent = slot;
                         return slot;
                     }
                 }
             }
             const here = placeId();
-            for (&self.slots, 0..) |*maybe, i| {
-                const slot = if (maybe.*) |*s| s else continue;
+            for (self.slots.items) |slot| {
                 if (slot.place != here) continue;
-                self.recent = i;
+                self.recent = slot;
                 var place_msg: [name_cap + 32]u8 = undefined;
                 echo(std.fmt.bufPrint(&place_msg, "{s}: {s}", .{ label, slot.name() }) catch return slot);
                 return slot;
             }
-            const i = self.recent orelse return null;
-            const slot = if (self.slots[i]) |*s| s else return null;
+            const slot = self.recent orelse return null;
             var msg: [name_cap + 32]u8 = undefined;
             echo(std.fmt.bufPrint(&msg, "{s}: {s}", .{ label, slot.name() }) catch return slot);
             return slot;
@@ -1233,23 +1242,13 @@ pub fn Instances(comptime T: type, comptime cap: usize) type {
 
         /// Retire an instance. Its buffer outlives it — the log stays readable.
         pub fn close(self: *Self, slot: *Slot) void {
-            for (&self.slots, 0..) |*maybe, i| {
-                const live = if (maybe.*) |*s| s else continue;
+            for (self.slots.items, 0..) |live, i| {
                 if (live != slot) continue;
-                maybe.* = null;
-                if (self.recent == i) self.recent = self.any();
+                _ = self.slots.orderedRemove(i);
+                if (self.recent == slot) self.recent = if (self.slots.items.len > 0) self.slots.items[0] else null;
+                allocator.destroy(slot);
                 return;
             }
-        }
-
-        fn free(self: *const Self) ?usize {
-            for (self.slots, 0..) |s, i| if (s == null) return i;
-            return null;
-        }
-
-        fn any(self: *const Self) ?usize {
-            for (self.slots, 0..) |s, i| if (s != null) return i;
-            return null;
         }
     };
 }

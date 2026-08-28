@@ -521,9 +521,21 @@ the process directory, so filling it from the place made two projects two
 servers, and `initialize` now sends a real `rootUri` built from that root.
 Gated by `e2e/language_test.zig`'s two-PROJECT/one-LANGUAGE test, which reads
 the `rootUri` off the wire and tells the two servers apart by which project
-each is running in. Still outstanding here: `workspaceFolders` (§9, deliberate),
-the link model itself, and `MAX_SESSIONS` — a cap of 8 meant "8 languages"
-before and means "8 (language, project) pairs" now, at ~18 KB per session.
+each is running in. Still outstanding here: `workspaceFolders` (§9, deliberate)
+and the link model itself.
+
+*Also landed:* the session cap is gone, in LSP and in git alike. Making the
+place part of the key turned "how many languages at once" into "how many
+(language, project) pairs at once", and no number was ever right for that —
+both tables were fixed arrays of values, which is also why neither could grow.
+Sessions are individually allocated on the guest heap now (`core/Buffers.zig`'s
+shape: a list of POINTERS, so a `*Session` handed out earlier survives the table
+growing), and the only refusal left is the heap's own, echoed. LSP's LRU
+shedding and its eviction notice went with the cap, as did git's "too many
+repositories open". Gated by `e2e/language_test.zig` (26 projects, one language,
+all live, and the first still answering last) and `e2e/git_gates_test.zig` G1b
+(seven repositories, and a commit draft opened against the first still commits
+to it after six more sessions were allocated behind it).
 
 **Wave 5 — Better primitives, fewer grants.** The place-scoped spool
 (**landed**, §4.2); the marker/ancestor query; kv persistence (P12). git drops
