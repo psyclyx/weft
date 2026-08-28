@@ -226,7 +226,7 @@ fn cRedo(ctx: *Context, args: struct {}) anyerror!Value {
 }
 
 /// The default `save` provider: write the buffer to its file backing. `save` is
-/// an ACTION (not a bare command), so a projection (files/magit) registers its
+/// an ACTION (not a bare command), so a projection (files/git) registers its
 /// own `save` provider scoped to its tool identity — the action system picks it
 /// over this in the projection's buffer, by specificity. The core stays
 /// projection-agnostic: no `if (isTool)` branch lives here.
@@ -302,8 +302,8 @@ fn cUndoBarrier(ctx: *Context, args: struct {}) anyerror!Value {
 }
 
 fn cSetMode(ctx: *Context, args: struct { mode: []const u8 }) anyerror!Value {
-    // A locked projection mode (magit/git-view) refuses to switch to a different
-    // editing mode — the read-only-buffer mode pin (see Keymap.mayLeaveLocked).
+    // A locked projection mode (a git status/diff view) refuses to switch to a
+    // different editing mode — the read-only-buffer mode pin (see Keymap.mayLeaveLocked).
     if (!ctx.keymap.mayLeaveLocked(ctx.head.currentMode(), args.mode)) return ok;
     // THE POLICY DOOR (task #19 item 3): this is a bound command handler —
     // it HAS a live `*command.Context`, so it captures a `Ctx` and changes
@@ -586,7 +586,7 @@ pub fn install(gpa: std.mem.Allocator, commands: *command.Commands, keymap: *@im
     for (table) |cmd| _ = try commands.bind(gpa, cmd.name, cmd);
 
     // `save` is an ACTION: `C-s`/`:w`/palette all dispatch it, and a projection
-    // (files/magit) provides its own `save` scoped to its tool identity, which
+    // (files/git) provides its own `save` scoped to its tool identity, which
     // wins in its buffer. The default provider writes the file backing.
     try command.registerAction(gpa, commands, actions, "save", .pick);
     try actions.provide(.{ .action = "save", .command = "save-file", .owner = "core" });

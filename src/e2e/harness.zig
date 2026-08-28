@@ -2048,7 +2048,7 @@ pub fn authorFile(ed: *Editor, name: []const u8, body: []const u8) void {
     ed.waitSave();
 }
 
-/// The text of a named TOOL buffer (magit/files/echo projections) — these ARE
+/// The text of a named TOOL buffer (git/files/echo projections) — these ARE
 /// the rendered UI surface, so reading them to assert UI state is fair under
 /// the e2e's boundary (real FILE content is read from disk instead). Returns
 /// null if no such buffer exists. Caller frees.
@@ -2296,7 +2296,7 @@ pub fn drainLoopIdle(ed: *Editor) bool {
 }
 
 /// Drive the async loop until the DISK oracle `sh_cmd` reports `needle` (or a
-/// timeout). A magit mutation (stage/commit) shells out asynchronously — the
+/// timeout). A git mutation (stage/commit) shells out asynchronously — the
 /// keypress only SCHEDULES `git add`/`git commit`; application wakes deliver
 /// the pool result. Polling the on-disk oracle each round makes the
 /// assertion deterministic (disk truth), never a sleep-and-hope. git ops

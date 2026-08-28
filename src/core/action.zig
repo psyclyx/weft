@@ -101,7 +101,7 @@ pub const When = struct {
     /// (`zig`, `py`, `md`). Matched case-sensitively.
     lang: ?[]const u8 = null,
     /// The active buffer's tool-backing name (a plugin projection: `files`,
-    /// `magit`), or null = don't care. Unlike `mode` — which changes as you
+    /// `git`), or null = don't care. Unlike `mode` — which changes as you
     /// edit a projection (vim `i`/Escape → insert/normal) — the tool-backing is
     /// a stable per-BUFFER signal, so a projection scopes its `save` (and other
     /// context intents) to its own identity, in any mode.

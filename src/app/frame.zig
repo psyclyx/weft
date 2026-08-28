@@ -450,7 +450,7 @@ test "menu overlay: F1 peeks the CURRENT (non-menu) mode; no forced leader; togg
     defer plugins.deinit(gpa);
     // "normal" is NOT a menu mode; F1 must still reveal ITS keys — the old
     // behavior force-entered a hardcoded "leader" instead of showing the level
-    // you're at (the magit-style "wrong menu" jank).
+    // you're at (the git-style "wrong menu" jank).
     try head.setModeRaw(gpa, "normal");
 
     var mo: MenuOverlay = .{ .which_key_now = true }; // F1

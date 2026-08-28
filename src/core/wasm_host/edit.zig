@@ -217,7 +217,7 @@ pub fn hEditAs(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32, resul
 }
 
 /// `render(start, end, bytes)` (perm edit): produce derived/streamed content
-/// (a magit/files listing, a transcript) into a buffer — a DISTINCT operation
+/// (a git/files listing, a transcript) into a buffer — a DISTINCT operation
 /// from `edit`. Bypasses read-only (the text is output, not user-editable) and
 /// authors as the plugin's own peer (never the user's undo). Grade-gated.
 pub fn hRender(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32, results: []i32) void {

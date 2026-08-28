@@ -278,7 +278,7 @@ pub fn main(init: std.process.Init) !void {
     }
     // The config's editor plugin (vim/helix) has set the base editing mode by
     // now; capture it as the mode fresh buffers open in, so a tool buffer's
-    // mode (files/magit) can never leak into a file opened from it.
+    // mode (files/git) can never leak into a file opened from it.
     session.system.buffers.setDefaultMode(gpa, session.head.currentMode()) catch {};
 
     // ── A second hosted system: agent-ux (doc/cwa-prior-docs-audit.md §5)

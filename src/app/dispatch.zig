@@ -172,7 +172,7 @@ fn popOurTransient(ctx: *core.command.Context, depth: usize) void {
 /// `menu-escape` (Escape / C-g, bound in the GLOBAL layer so it works anywhere)
 /// — leave the current MENU back to its recorded return target. Outside a menu
 /// it is a NO-OP: Escape must never force a mode change, or it drops you into
-/// the editing base (`normal`) inside a read-only projection like magit/files —
+/// the editing base (`normal`) inside a read-only projection like git/files —
 /// the recurring "wrong mode in a tool buffer" jank. A projection's own mode is
 /// its resting mode; Escape leaves it alone. (An editing mode's own Escape —
 /// vim insert/visual → normal — is bound mode-locally and wins over this.)
@@ -206,7 +206,7 @@ pub fn menuEscapeHandler(ctx: *core.command.Context, data: ?*anyopaque, args: []
 /// `which-key-now` (F1) — toggle a which-key peek at the CURRENT mode's keys.
 /// It does NOT force-enter a hardcoded "leader": in normal you see the top-level
 /// bindings (the leader prefix among them), in a submenu you see that submenu,
-/// in magit the magit keys. The shell no longer assumes the root menu is named
+/// in the git status view its own keys. The shell no longer assumes the root menu is named
 /// "leader"; it just reveals wherever you are.
 pub fn whichKeyNowHandler(ctx: *core.command.Context, data: ?*anyopaque, args: []const core.command.Value) anyerror!core.command.Value {
     _ = args;
@@ -229,7 +229,7 @@ fn visualVertical(ed: *core.Editor, view: *view_mod.View, dir: i32) !void {
     ed.setGoalX(gx); // persists even at the doc edges, for the next step
     const pt = rope.offsetToPoint(cur);
     const rows = rope.lineCount();
-    // Skip folded rows (shared fold-aware successor — the magit status buffer's
+    // Skip folded rows (shared fold-aware successor — the git status buffer's
     // j/k bind to cursor-up/down, which land here).
     const target_row = ed.nextVisibleRow(pt.row, if (dir < 0) -1 else 1, rows) orelse return;
     const target = try view.xToOffsetOnRow(rope, target_row, gx);

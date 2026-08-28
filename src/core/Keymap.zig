@@ -78,12 +78,12 @@ commit_commands: std.StringArrayHashMapUnmanaged([]u8) = .empty,
 /// `Head.menu_return`.
 menu_modes: std.StringArrayHashMapUnmanaged(void) = .empty,
 /// Menu modes that STAY OPEN after a leaf key (the one-shot auto-pop is
-/// suppressed) — flag-accumulating transients (magit's push/fetch option
+/// suppressed) — flag-accumulating transients (git's push/fetch option
 /// popups): toggle keys mutate state and re-render while the menu persists;
 /// only an explicit mode change (execute, or Escape → the return target)
 /// leaves. A subset of `menu_modes`, so which-key still lists the keys.
 sticky_menus: std.StringArrayHashMapUnmanaged(void) = .empty,
-/// Modes a READ-ONLY projection pins itself to (magit, a git diff/log view): a
+/// Modes a READ-ONLY projection pins itself to (a git status, diff, or log view): a
 /// `setMode` out of a locked mode is refused unless it targets a MENU (transient)
 /// or the same mode — so you can never land in a generic editing mode (`normal`)
 /// inside a projection, its keys dead. Buffer-SWITCH mode changes bypass the gate
@@ -317,7 +317,7 @@ pub fn setFallback(self: *Keymap, gpa: Allocator, mode: []const u8, parent: []co
 
 /// The RESTING mode a buffer in `mode` should be remembered as: the root of the
 /// fallback chain (`visual`/`insert`/`op-pending` fall back to `normal`, so
-/// their base is `normal`; `magit`/`files` have no parent, so they are their own
+/// their base is `normal`; `git`/`files` have no parent, so they are their own
 /// base). This reuses the fallback declarations config already makes for key
 /// lookup — no separate "which modes are transient" bookkeeping. A menu mode has
 /// no parents, so it returns itself; callers skip menus explicitly.
@@ -331,7 +331,7 @@ pub fn baseMode(self: *const Keymap, mode: []const u8) []const u8 {
         // wrongly make a menu's base a non-menu and get captured.
         if (self.isMenuMode(cur)) return cur;
         // A RESTING mode is a buffer's base: `normal` and each tool projection
-        // (files/grep/output/magit). Stop here so a transient mode (visual/
+        // (files/grep/output/git). Stop here so a transient mode (visual/
         // insert) resolves to its editing base while a tool buffer keeps its own
         // mode — WITHOUT overshooting `normal`→`default` to the root, which would
         // strand a revisited file in the editing-less `default` mode.
@@ -429,8 +429,8 @@ pub fn isStickyMenu(self: *const Keymap, mode: []const u8) bool {
     return self.sticky_menus.contains(mode);
 }
 
-/// Declare `mode` a LOCKED projection mode (a read-only view: magit, a git diff/
-/// log). See `locked_modes` + `mayLeaveLocked`.
+/// Declare `mode` a LOCKED projection mode (a read-only view: a git status,
+/// diff, or log). See `locked_modes` + `mayLeaveLocked`.
 pub fn markLockedMode(self: *Keymap, gpa: Allocator, mode: []const u8) Allocator.Error!void {
     const gop = try self.locked_modes.getOrPut(gpa, mode);
     if (!gop.found_existing) gop.key_ptr.* = try gpa.dupe(u8, mode);
@@ -926,14 +926,14 @@ test "keymap: a locked projection mode refuses to leave for an editing mode" {
     try km.markMenuMode(gpa, "git-branch-menu");
 
     // From the locked projection you may NOT jump to a different editing mode
-    // (the "normal-in-magit" leak) — that's now inexpressible...
+    // (the "normal-in-git" leak) — that's now inexpressible...
     try t.expect(!km.mayLeaveLocked("git", "normal"));
     try t.expect(!km.mayLeaveLocked("git", "insert"));
     // ...but a menu (transient) and staying put are fine.
     try t.expect(km.mayLeaveLocked("git", "git-branch-menu"));
     try t.expect(km.mayLeaveLocked("git", "git"));
 
-    // From a menu (current mode not locked), returning to magit is allowed.
+    // From a menu (current mode not locked), returning to git is allowed.
     try t.expect(km.mayLeaveLocked("git-branch-menu", "git"));
     // A non-locked mode never gates (ordinary editing).
     try t.expect(km.mayLeaveLocked("normal", "insert"));

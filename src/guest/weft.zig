@@ -436,7 +436,7 @@ pub fn flash(start: usize, end: usize) void {
 // ── Styles (tool-buffer coloring): publish per-byte-range StyleClass spans over
 // the ACTIVE buffer, painted by the view through the theme (same door as
 // `edit` for which buffer it targets). `styleClear` first, then a `style` per
-// classified range — the classic magit/grep coloring pattern. Cleared with the
+// classified range — the classic git/grep coloring pattern. Cleared with the
 // buffer on close. Mirrors core.capability.StyleClass. ──
 pub const StyleClass = enum(u32) {
     normal = 0,
@@ -762,8 +762,8 @@ pub fn textInput(mode: []const u8, cmd: ?[]const u8) void {
 pub fn menuMode(mode: []const u8) void {
     wl_menu_mode(p(mode.ptr), @intCast(mode.len));
 }
-/// Declare `mode` a LOCKED projection mode: a read-only view (magit, a git diff/
-/// log) whose keymap is pinned — a `setMode` out of it is refused unless it
+/// Declare `mode` a LOCKED projection mode: a read-only view (a git status,
+/// diff, or log) whose keymap is pinned — a `setMode` out of it is refused unless it
 /// targets a menu or the same mode, so you can never end up in a generic editing
 /// mode (`normal`) inside the projection. The framework enforces it; the plugin
 /// just declares it (one line), never defensively handles the wrong-mode case.

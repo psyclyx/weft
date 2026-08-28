@@ -273,7 +273,7 @@ pub const imports = [_]Entry{
     .{ .name = "wl_menu_binding_intent", .params = &.{ .u32, .u32, .u32 }, .results = &.{.i32}, .group = .menu, .doc = "the `i`-th binding's winning (or blocked) intention name, into guest memory" },
     .{ .name = "wl_menu_binding_intent_note", .params = &.{ .u32, .u32, .u32 }, .results = &.{.i32}, .group = .menu, .doc = "the provider that would run the `i`-th binding, or the reason it cannot" },
 
-    // ── surface.zig — the retained overlay (which-key/files/magit) ─────
+    // ── surface.zig — the retained overlay (which-key/files/git) ─────
     .{ .name = "wl_surface_begin", .params = &.{.u32}, .results = &.{}, .group = .surface, .doc = "open a retained overlay surface at `placement`" },
     .{ .name = "wl_surface_caret", .params = &.{.u32}, .results = &.{}, .group = .surface, .doc = "open a retained overlay surface anchored at document offset `offset` (rendering P2)" },
     .{ .name = "wl_surface_row", .params = &.{}, .results = &.{}, .group = .surface, .doc = "start a new row in the open surface" },

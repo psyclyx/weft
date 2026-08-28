@@ -3,7 +3,7 @@
 //! the frame boundary when a menu/prefix mode is entered or left, and this guest
 //! reads that mode's AVAILABLE bindings (resolved through its fallback chain —
 //! see Keymap.resolveBindings) and paints them into a retained corner popup —
-//! the same door files/magit use. A colorscheme restyles it for free (spans
+//! the same door files/git use. A colorscheme restyles it for free (spans
 //! carry a semantic Role, not a color): the KEY reads in the group/accent color
 //! so it pops from the plain command text. When there are more bindings than fit
 //! a page, it PAGINATES — `which-key-page-down`/`-up` (bound in `menu-nav`, which

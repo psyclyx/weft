@@ -310,7 +310,7 @@ pub const Context = struct {
     /// direct user/tool text mutation. This is the door for typing, vim
     /// operators, autopair, comment — anything that edits text AS text. It is
     /// refused on a read-only span/buffer (§`render` is the door for producing
-    /// derived content there), so a projection like magit/files has NO
+    /// derived content there), so a projection like git/files has NO
     /// interactive-edit path at all — no mode, split, or plugin can corrupt it
     /// as text. Refusal leaves the replica untouched (no ghost commit).
     ///
@@ -397,7 +397,7 @@ pub const Context = struct {
         return false;
     }
 
-    /// CONTENT PRODUCTION: draw a derived/streamed projection (magit's status
+    /// CONTENT PRODUCTION: draw a derived/streamed projection (git's status
     /// tree, files's listing, an agent transcript) into a buffer. A DISTINCT
     /// operation from `edit` — it BYPASSES read-only (that's the point: the text
     /// is output, regenerated from a model, not user-editable), and it authors

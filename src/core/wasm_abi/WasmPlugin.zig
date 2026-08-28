@@ -292,7 +292,7 @@ cur_pick_outcome: ?pick.Outcome = null,
 /// and saved/restored by the same trampoline.
 cur_pick: ?*const WasmBoundPick = null,
 
-// ── Surface (retained overlay: which-key/files/magit render here) ──
+// ── Surface (retained overlay: which-key/files/git render here) ──
 /// This plugin's retained overlay, populated via the surface membrane and
 /// drawn every frame by the view while active. One per plugin.
 surface: surface_mod.Surface = .{},

@@ -140,8 +140,8 @@ pub const DispatchError = error{NotDispatching};
 /// `ctx.gpa` names).
 pub fn setMode(gpa: Allocator, ctx: *command_mod.Context, id: anytype, mode: []const u8) DispatchError!void {
     if (!shared.canDispatch(id)) return error.NotDispatching;
-    // A locked projection mode (magit/git-view) refuses to switch to a different
-    // editing mode — you can't land in `normal` inside a read-only projection.
+    // A locked projection mode (a git status/diff view) refuses to switch to a
+    // different editing mode — you can't land in `normal` inside a read-only projection.
     // Business-rule no-op, not a guard denial — same silent-return shape the
     // pre-split handler had, unaffected by the transport split.
     if (!ctx.keymap.mayLeaveLocked(ctx.head.currentMode(), mode)) return;
@@ -229,8 +229,8 @@ pub fn hMenuMode(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32, res
 }
 
 /// `locked_mode(mode)`: mark a read-only projection mode pinned (see
-/// Keymap.mayLeaveLocked) — magit/git-view can't be left for a generic editing
-/// mode, only a menu or itself.
+/// Keymap.mayLeaveLocked) — a git status/diff view can't be left for a generic
+/// editing mode, only a menu or itself.
 pub fn hLockedMode(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32, results: []i32) void {
     _ = results;
     const p: *WasmPlugin = @ptrCast(@alignCast(data.?));

@@ -118,7 +118,7 @@ pub const Hud = struct {
     /// Caret shape and blink phase (false = hidden this frame).
     cursor_style: CursorStyle = .block,
     cursor_on: bool = true,
-    /// Retained plugin overlays (which-key/files/magit) to draw this frame.
+    /// Retained plugin overlays (which-key/files/git) to draw this frame.
     /// corner/center placements overlay the body; bottom is reserved for the
     /// dock (the picker/which-key path).
     surfaces: []const *const core.surface.Surface = &.{},

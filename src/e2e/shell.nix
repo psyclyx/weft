@@ -26,6 +26,6 @@ pkgs.mkShell {
     pkgs.lldb # provides lldb-dap → a real Debug Adapter Protocol server
     pkgs.nodejs # run .js programs; the DAP/ACP JS plugins
     pkgs.ripgrep # the grep plugin's backend
-    pkgs.git # the git plugin / magit
+    pkgs.git # the git plugin's status/log projection
   ];
 }

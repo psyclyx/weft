@@ -1726,7 +1726,7 @@ test "wasm plugin: git-status runs git into a focused tool buffer (async)" {
     }) |name| try t.expect(env.commands.find(name) != null);
 
     _ = try command.run(&env.commands, &env.ctx, "git-status", &.{});
-    // The magit model buffer was created + focused synchronously (before output).
+    // The git model buffer was created + focused synchronously (before output).
     const buf = blk: {
         var it = env.buffers.iterator();
         while (it.next()) |b| if (std.mem.eql(u8, b.name, "*git*")) break :blk b;

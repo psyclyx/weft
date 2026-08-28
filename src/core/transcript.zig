@@ -1,7 +1,7 @@
 //! `transcript.zig` — the agent transcript: W5's REQUIRED first `graph.zig`
 //! client (doc/substrate.md "W5 ordering — transcript
 //! first, DECIDED"; review A7b: W6's check-in scenario needs a real graph
-//! document to attach to, not magit, which stays on the current
+//! document to attach to, not git, which stays on the current
 //! tool-buffer machinery). A transcript is a sequence of role-tagged
 //! entries (user/agent/tool turns), each entry's body a real text CRDT —
 //! collaboratively editable later, without redesign.
@@ -607,7 +607,7 @@ pub fn install(gpa: Allocator, commands: *command.Commands, actions: *Actions, b
 }
 
 /// Create a tool-backed buffer suitable for `fill`/`on_save` — the
-/// tool-buffer machinery `files`/`magit` use (`Buffers.Buffer.setTool`),
+/// tool-buffer machinery `files`/`git` use (`Buffers.Buffer.setTool`),
 /// wired up host-side instead of from a wasm guest's `on_fill_token` (per
 /// `graph.zig`'s "where the graph-side plugin code runs": this client's
 /// model AND its projection are host/in-process). NOT read-only: an
