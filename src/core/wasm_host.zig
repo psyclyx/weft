@@ -61,6 +61,16 @@ const activation = @import("wasm_host/activation.zig");
 pub const notifyActivate = activation.notifyActivate;
 pub const notifyPollIfReady = activation.notifyPollIfReady;
 
+/// The plugin-plane proc doors, whose bodies BOTH membranes run (doc/place.md
+/// §4.1a). Re-exported so the gate in `e2e/demolition_test.zig` — which only
+/// ever reaches core through this facade — can recompute each handler from
+/// the table and compare pointers.
+const proc = @import("wasm_host/proc.zig");
+pub const proc_doors = struct {
+    pub const doors = proc.doors;
+    pub const wasmDoor = proc.wasmDoor;
+};
+
 const sessions = @import("wasm_host/sessions.zig");
 pub const drainReplSessions = sessions.drainReplSessions;
 

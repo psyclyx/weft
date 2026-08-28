@@ -33,6 +33,11 @@ const perm_gate = @import("wasm_host/plugin.zig");
 /// The fs semantic bodies, shared with the wasm plane so `.fs_root`
 /// confinement has ONE implementation (`cFileRead`).
 const fs_gate = @import("wasm_host/fs.zig");
+/// The plugin-plane PROC bodies, shared with the wasm plane for the same
+/// reason one layer over: a JS plugin runs inside `quickjs.wasm`, so it must
+/// not be able to reach a proc door shaped differently from the one every
+/// other guest gets (doc/place.md §4.1a).
+const proc_doors = @import("wasm_host/proc.zig");
 const Perm = perm_gate.Perm;
 const perm_count = perm_gate.WasmPlugin.perm_count;
 
@@ -109,7 +114,7 @@ const Bridge = struct {
     /// (init'd to the load ctx): the null here MEANS something — config-eval
     /// mode never sets it, so `orelse ctx` doubles as the "not a live
     /// dispatch" marker. Same concept, two representations, both deliberate.
-    fn activeCtx(self: *Bridge) *command.Context {
+    pub fn activeCtx(self: *Bridge) *command.Context {
         return self.active_ctx orelse self.ctx;
     }
 
@@ -205,8 +210,10 @@ const config_handlers = .{
 };
 
 /// The `.plugin`-group handlers a RESIDENT JS plugin's linker binds (real —
-/// `defineStubs` above covers the config linker's stand-ins).
-const plugin_handlers = .{
+/// `defineStubs` above covers the config linker's stand-ins). Public so the
+/// §4.1a gate (`e2e/demolition_test.zig`) can read the handler this plane
+/// ACTUALLY binds for a door, not a const that merely exists beside it.
+pub const plugin_handlers = .{
     .{ .name = "qjs_register", .handler = cRegister },
     .{ .name = "qjs_proc_spawn", .handler = cProcSpawn },
     .{ .name = "qjs_proc_send", .handler = cProcSend },
@@ -360,7 +367,12 @@ pub const JsPlugin = struct {
     streams: std.ArrayList(?*proc_stream.ProcStream) = .empty,
     /// Handles whose child's exit has already been announced — an exit is an
     /// EDGE, reported exactly once, never a level the plugin re-reads every
-    /// frame.
+    /// frame. Grown by `tick`, not by the spawn door: spawning is
+    /// `wasm_host/proc.zig`'s shared body now (doc/place.md §4.1a), and a side
+    /// table only one plane keeps is exactly the kind of thing that makes one
+    /// plane's door different from the other's. A short list means "not yet
+    /// reported", which is the correct answer for a handle `tick` has not
+    /// reached.
     exits_reported: std.ArrayList(bool) = .empty,
     /// This plugin's live transcripts, one per projected buffer name (W6
     /// check-in producer seam, doc/contextual-workspace-architecture.md §12)
@@ -404,6 +416,38 @@ pub const JsPlugin = struct {
             gpa.destroy(self);
         }
     };
+
+    // ── The plugin-plane proc door's duck type (doc/place.md §4.1a) ──
+    //
+    // `wasm_host/proc.zig`'s four bodies ARE this plane's proc doors; these
+    // are the four names they reach a plugin's proc state by, declared here
+    // under exactly the names `WasmPlugin` declares them, so neither type has
+    // to be spelled into the other. Same contract as `hasPerm`'s duck type a
+    // few fields up — one implementation, two transports.
+
+    /// The DISPATCHING entry's context, where a spawned child's place and
+    /// environment are read from. The bridge's optional-with-fallback is the
+    /// JS plane's spelling of `WasmPlugin.active_ctx`.
+    pub fn activeCtx(self: *JsPlugin) *command.Context {
+        return self.bridge.activeCtx();
+    }
+
+    /// A JS plugin always has a pool (`load` takes one) — the optional is the
+    /// wasm plane's, whose bare test fixtures may have none.
+    pub fn procPool(self: *JsPlugin) ?*task.Pool {
+        return self.pool;
+    }
+
+    pub fn procStreams(self: *JsPlugin) *std.ArrayList(?*proc_stream.ProcStream) {
+        return &self.streams;
+    }
+
+    /// The environment a spawned child inherits absent a place overlay. Held
+    /// in a field here rather than read from `wasm_host`'s global, but it is
+    /// the same value: `config_load.zig` passes `wasm_host.hostEnviron()`.
+    pub fn baseEnviron(self: *JsPlugin) std.process.Environ {
+        return self.environ;
+    }
 
     /// The conversation projecting into `name`, or null if none was opened.
     pub fn conversation(self: *JsPlugin, name: []const u8) ?*Conversation {
@@ -537,6 +581,14 @@ pub const JsPlugin = struct {
             // pending, free the slot), not a silence it has to poll for. Once
             // per stream, so an exit is an edge and not a level.
             if (!s.ended() or s.pending() > 0) continue;
+            // Grown HERE, not at spawn: the spawn door is `wasm_host/proc.zig`'s
+            // shared body now (doc/place.md §4.1a), and a per-plane side table
+            // it would have to know about is exactly the kind of thing that
+            // makes one plane's door different from the other's. An
+            // unallocatable slot just defers the edge to the next tick.
+            while (self.exits_reported.items.len <= h) {
+                self.exits_reported.append(self.gpa, false) catch break;
+            }
             if (h >= self.exits_reported.items.len or self.exits_reported.items[h]) continue;
             self.exits_reported.items[h] = true;
             self.instance.callVoid("weft_on_exit", &.{@intCast(h)}) catch {};
@@ -621,111 +673,51 @@ pub const JsPlugin = struct {
 };
 
 // ── The proc-stream membrane (plugin plane): spawn/send/read/close a duplex
-// child, handles indexing the plugin's `streams`. Every one that reaches the
-// child is `proc`-gated: spawn is where the authority is MINTED into a
-// handle, send/read where it keeps being exercised — so a revoked `proc`
-// grant stops an already-running agent on its next call, not merely its next
-// spawn. `cProcClose` is deliberately ungated: it only RELEASES authority,
-// and denying it would strand a live subprocess with no way to reap it. ──
+// child, handles indexing the plugin's `streams`.
+//
+// There is no JS proc door any more — only the wasm one, reached from JS
+// (doc/place.md §4.1a). `wasm_host/proc.zig` holds the four bodies; `jsDoor`
+// below is the whole of what this plane adds: the `*JsPlugin` cast and a
+// denial that LOGS and answers `qjs_contract.denied` instead of trapping,
+// because this instance is RESIDENT and a trap would tear down a live QuickJS
+// runtime the next command still needs. A divergence like the `cwd` argument
+// this door once carried and `wl_proc_spawn` never had is now unrepresentable:
+// there is no second body to grow one in.
+//
+// Every door that reaches the child is `proc`-gated: spawn is where the
+// authority is MINTED into a handle, send/read where the JS plane keeps
+// exercising it — so a revoked `proc` grant stops an already-running agent on
+// its next call, not merely its next spawn. That last part is the ONE
+// remaining asymmetry with the wasm plane, recorded as data (not as a
+// difference in behaviour anyone has to read two bodies to find) in
+// `proc_doors.doors`'s `wl_gate`/`qjs_gate` — see its doc for the exact
+// two-file edit that closes it. `procClose` is ungated on both planes: it only
+// RELEASES authority.
 
-fn cProcSpawn(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32, results: []i32) void {
-    const self: *JsPlugin = @ptrCast(@alignCast(data.?));
-    if (!self.requirePerm(.proc)) {
-        results[0] = qjs_contract.denied;
-        return;
-    }
-    const gpa = self.gpa;
-    const cmd = caller.readMemory(gpa, @intCast(args[0]), @intCast(args[1])) catch {
-        results[0] = -1;
-        return;
-    };
-    defer gpa.free(cmd);
-    // The SAME door the wasm plane has, resolved the SAME way: a JS plugin is
-    // not a different kind of plugin. The cwd argument this door used to take
-    // is gone — neither shipped caller passed one, and a raw directory string
-    // could only ever have named somewhere on this machine (`doc/place.md`).
-    const at = perm_gate.resolveSpawnAtCtx(self.bridge.activeCtx(), gpa);
-    defer switch (at) {
-        .at => |dir| gpa.free(dir),
-        else => {},
-    };
-    const where: ?[]const u8 = switch (at) {
-        .inherit => null,
-        .at => |dir| dir,
-        .refused => |why| {
-            perm_gate.noteSpawnRefusal(self.name, why);
-            results[0] = -1;
-            return;
-        },
-    };
-    const s = proc_stream.ProcStream.start(gpa, self.pool, cmd, where, self.environ) catch {
-        results[0] = -1;
-        return;
-    };
-    const h: i32 = @intCast(self.streams.items.len);
-    self.streams.append(gpa, s) catch {
-        s.deinit();
-        results[0] = -1;
-        return;
-    };
-    self.exits_reported.append(gpa, false) catch {
-        s.deinit();
-        self.streams.items[@intCast(h)] = null;
-        results[0] = -1;
-        return;
-    };
-    results[0] = h;
+/// Bind one shared `wasm_host/proc.zig` body onto the resident JS membrane.
+/// `gate`'s possession check runs first when the door has one; denial is a
+/// host log plus `qjs_contract.denied` in the result (thrown as a JS exception
+/// by `weft_qjs.c`), never a success-shaped answer and never silence.
+pub fn jsDoor(comptime body: anytype, comptime gate: ?Perm) wasm.Linker.HostFn {
+    return struct {
+        fn f(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32, results: []i32) void {
+            const self: *JsPlugin = @ptrCast(@alignCast(data.?));
+            if (gate) |perm| {
+                if (!perm_gate.hasPerm(self, perm)) {
+                    self.denyPerm(perm);
+                    if (results.len > 0) results[0] = qjs_contract.denied;
+                    return;
+                }
+            }
+            body(self, caller, args, results);
+        }
+    }.f;
 }
 
-fn streamAt(self: *JsPlugin, h: i32) ?*proc_stream.ProcStream {
-    if (h < 0 or @as(usize, @intCast(h)) >= self.streams.items.len) return null;
-    return self.streams.items[@intCast(h)];
-}
-
-/// Denial here has no result channel to carry it (the import returns
-/// nothing), so the host log `requirePerm` writes is the whole signal — it
-/// is only reachable by REVOKING `proc` out from under a plugin that already
-/// spawned, never by an ungranted plugin, which can hold no handle at all.
-fn cProcSend(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32, results: []i32) void {
-    _ = results;
-    const self: *JsPlugin = @ptrCast(@alignCast(data.?));
-    if (!self.requirePerm(.proc)) return;
-    const s = streamAt(self, args[0]) orelse return;
-    const bytes = caller.readMemory(self.gpa, @intCast(args[1]), @intCast(args[2])) catch return;
-    defer self.gpa.free(bytes);
-    s.send(bytes);
-}
-
-fn cProcRead(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32, results: []i32) void {
-    const self: *JsPlugin = @ptrCast(@alignCast(data.?));
-    if (!self.requirePerm(.proc)) {
-        results[0] = qjs_contract.denied;
-        return;
-    }
-    const s = streamAt(self, args[0]) orelse {
-        results[0] = 0;
-        return;
-    };
-    const cap: usize = @intCast(args[2]);
-    const buf = self.gpa.alloc(u8, cap) catch {
-        results[0] = 0;
-        return;
-    };
-    defer self.gpa.free(buf);
-    const n = s.read(buf);
-    results[0] = @intCast(caller.writeMemory(@intCast(args[1]), @intCast(cap), buf[0..n]) catch 0);
-}
-
-fn cProcClose(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32, results: []i32) void {
-    _ = caller;
-    _ = results;
-    const self: *JsPlugin = @ptrCast(@alignCast(data.?));
-    const h = args[0];
-    if (streamAt(self, h)) |s| {
-        s.deinit();
-        self.streams.items[@intCast(h)] = null; // slot kept null so handles stay stable
-    }
-}
+const cProcSpawn = jsDoor(proc_doors.spawnBody, .proc);
+const cProcSend = jsDoor(proc_doors.sendBody, .proc);
+const cProcRead = jsDoor(proc_doors.readBody, .proc);
+const cProcClose = jsDoor(proc_doors.closeBody, null);
 
 /// The CRDT peer JS-plugin transcript/tool-buffer output authors as.
 const transcript_peer = "agent-ui";
@@ -1311,6 +1303,24 @@ fn jsCmdTramp(ctx: *command.Context, data: ?*anyopaque, args: []const command.Va
 /// qjs_register(name) for the plugin plane: bind a command whose handler
 /// dispatches to the JS plugin, and return its id (the array index the JS side
 /// keys its handler by, and the host passes to weft_on_command).
+///
+/// WHY THIS ONE DOES NOT COLLAPSE onto `wl_register` (doc/place.md §4.1a),
+/// stated so the next reader doesn't have to rediscover it: the two doors
+/// share a name and a shape, but almost nothing of a body. `hRegister` mints a
+/// `WasmCmd` into `WasmPlugin.commands` bound to `wpCmdTrampoline`; this mints
+/// a `JsPlugin.Cmd` into `JsPlugin.cmds` bound to `jsCmdTramp` — two id
+/// registries whose entries are the identity the host dispatches by, so there
+/// is no shared state for one body to operate on, and the ~6 lines that would
+/// be common (read a name, append, bind, answer the index) are smaller than
+/// the seam it would take to share them.
+///
+/// The REAL divergence here is not the body, and it is not fixable by sharing
+/// one: `hRegister` cross-checks `p.declaresCommand(cname)` — an undeclared
+/// command FAILS THE LOAD — and this door cannot, because a `.js` plugin has
+/// no `describe()` handshake to populate a declaration from. A JS plugin can
+/// therefore register any command name; a `.wasm` plugin only the ones it
+/// declared. Closing that means giving the JS plane a manifest of its own, not
+/// giving it this function.
 fn cRegister(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32, results: []i32) void {
     const self: *JsPlugin = @ptrCast(@alignCast(data.?));
     const gpa = self.gpa;

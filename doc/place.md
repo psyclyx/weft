@@ -209,39 +209,90 @@ wasm plugin: embedded, compiled through the same `Engine`, instantiated as a
 resident guest. A JS plugin is therefore code running inside a wasm guest, and
 nothing it does should be expressible outside what a wasm guest can do.
 
-Today that is false by construction. `membrane/qjs_contract.zig` describes
+It used to be false by construction. `membrane/qjs_contract.zig` described
 itself as "the `weft.*` membrane's THIRD surface": 33 `qjs_*` imports bound onto
 quickjs.wasm's linker, with their own handlers, their own permission checks, and
 their own arity table, alongside the 204 `wl_*` doors. Two membranes, maintained
 by hand, expected to agree.
 
-They do not, and the divergences are not coincidences — they are what a second
+They did not, and the divergences were not coincidences — they are what a second
 membrane produces:
 
 - `qjs_proc_spawn` grew a `cwd` argument `wl_proc_spawn` never had (removed).
-- `cAgentWrite` (`qjs_file_write`) has neither a `requirePerm` nor a path-limit
-  check, while its `wl_fs_write` counterpart has both.
+- `cAgentWrite` (`qjs_file_write`) had neither a `requirePerm` nor a path-limit
+  check, while its `wl_fs_write` counterpart had both (fixed).
 
 Of the 33, **eleven are exact name-twins** of a `wl_*` door — `bind_key`,
 `echo`, `log`, `proc_close`, `proc_read`, `proc_send`, `proc_spawn`, `provide`,
-`register`, `run`, `semantic_action`. Those are pure duplication: same name,
-same meaning, two implementations, two gates.
+`register`, `run`, `semantic_action`. Five of those are in the *plugin* group;
+the other six are the config DSL, where the collision is a naming problem, not a
+capability one (`qjs_semantic_action` DECLARES a command; `wl_semantic_action`
+INVOKES one).
 
-The cut to make:
+The cut:
 
-- **Plugin-plane doors go through `wl_*`.** quickjs.wasm imports the same
-  membrane every other guest does. Then divergence is unrepresentable rather
-  than discouraged, and the eleven twins collapse to one each. `hasPerm` is
-  already duck-typed across both plane types ("one contract, two transports"),
-  which is the precedent the handlers follow.
-- **Config-plane doors may stay their own surface.** `config`, `grant`,
-  `plugin`, `use`, `set`, `viewport`, `present`, `menu` are the config DSL.
-  Config is a distinct *role* with a distinct trust tier — it already chooses
-  which plugins load — not a different *kind of plugin*. Keeping that surface
-  separate is a real distinction; keeping the plugin plane separate is not.
+- **Plugin-plane doors go through the `wl_*` body.** Then divergence is
+  unrepresentable rather than discouraged. `hasPerm` is already duck-typed
+  across both plane types ("one contract, two transports"), and that is the
+  precedent the handlers follow.
+- **Config-plane doors stay their own surface.** `config`, `grant`, `plugin`,
+  `use`, `set`, `viewport`, `present`, `menu` are the config DSL. Config is a
+  distinct *role* with a distinct trust tier — it already chooses which plugins
+  load — not a different *kind of plugin*. Keeping that surface separate is a
+  real distinction; keeping the plugin plane separate is not.
 
-Until the plugin plane is collapsed, every fix on one side must be applied to
-the other in the same change, and the sweep should assert the twins agree.
+**LANDED, for the proc surface.** `wasm_host/proc.zig` holds ONE body per proc
+door (`spawnBody`/`sendBody`/`readBody`/`closeBody`), duck-typed over the plugin
+on six names both plane types declare — `gpa`, `name`, `activeCtx()`,
+`procPool()`, `procStreams()`, `baseEnviron()`. Both membranes are *generated*
+from that file's `doors` table: `wasmDoor` casts to `*WasmPlugin` and traps on
+denial, `quickjs.zig`'s `jsDoor` casts to `*JsPlugin` and answers
+`qjs_contract.denied` (a trap would tear down a resident QuickJS runtime the
+next command still needs). That is the whole of what each transport adds. A
+`cwd` argument on one side and not the other is no longer a discipline failure —
+there is no second body to put one in.
+
+`e2e/demolition_test.zig` gates it by FUNCTION POINTER against the tables each
+membrane actually binds from, not by arity and not by grep: the `wl_proc_*`
+handler must equal `wasmDoor(body, wl_gate)`, `contract.zig` must bind that
+exact pointer, and the `qjs_proc_*` handler must equal `jsDoor(body, qjs_gate)`
+for the same body. The collapse also *closed a live gap*: the JS plane never
+applied a place's environment overlay to a spawned child (it used a fixed
+load-time environ while the wasm plane merged per place) — it does now, because
+there is only one spawn.
+
+Two named remainders:
+
+- `qjs_proc_send`/`qjs_proc_read` re-check `proc` possession on every call, so
+  revoking the grant stops an already-running agent on its next call and not
+  merely its next spawn; their `wl_*` twins only gate at spawn. The asymmetry is
+  now DATA — `wl_gate`/`qjs_gate` in the `doors` table, with the demolition gate
+  refusing any *new* one — rather than a difference you find by reading two
+  bodies. Closing it is a four-line edit: `.perm = .proc` on two
+  `contract_data.zig` rows plus two entries in `contract.zig`'s `perm_gated`
+  list, done together or that file's own cross-check fails.
+- `qjs_register` does not collapse onto `wl_register`. The two mint into
+  different id registries bound to different trampolines, so there is no shared
+  state for one body to hold; and the real difference is not the body at all —
+  `wl_register` cross-checks the plugin's declared manifest (an undeclared
+  command fails the load) and the JS door cannot, because a `.js` plugin has no
+  `describe()` handshake. **A JS plugin can register any command name; a `.wasm`
+  plugin only the ones it declared.** Closing that means giving the JS plane a
+  manifest, not giving it this function.
+
+`qjs_file_read`/`qjs_file_write` already share `wasm_host/fs.zig`'s policy half
+(possession + `.fs_root` confinement) verbatim; their effect halves legitimately
+differ — those author an attributed buffer edit as the agent peer, `wl_fs_*`
+touch the disk. The remaining plugin-group names (`buffer_*`, `transcript_*`,
+`config`, `breakpoints`, `line_text`, `active_buffer`, `pick`, `status`) have no
+same-name `wl_*` door to collapse onto; several have a *related* door with
+different addressing (`wl_fold` and `wl_byte_len` act on the active document,
+`qjs_buffer_fold`/`qjs_buffer_len` name a buffer), which is a generalisation to
+make deliberately, not a duplicate to delete.
+
+Until a plugin-plane door with a `wl_*` twin is collapsed, every fix on one side
+must be applied to the other in the same change, and the sweep asserts the twins
+agree.
 
 ### 4.2 Better primitives beat bans
 

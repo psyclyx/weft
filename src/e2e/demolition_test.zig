@@ -314,3 +314,83 @@ test "demolition: plugin-plane JS doors match their wasm twins exactly" {
     // on either side would otherwise silently disable it.
     try t.expect(twins_checked >= 5);
 }
+
+// Matching arity is a tripwire, not the property. The property is that the two
+// planes reach ONE implementation, so a difference between them has nowhere to
+// live. For the proc surface — the door the `cwd` drift actually happened on —
+// that is now true by construction: `wasm_host/proc.zig` holds four bodies,
+// `contract.zig` binds them as `wl_proc_*` through `wasmDoor`, `quickjs.zig`
+// binds the SAME bodies as `qjs_proc_*` through `jsDoor`, and neither
+// trampoline generator does anything but cast `data` and spell a denial.
+//
+// This gate proves that by FUNCTION POINTER, against the tables each membrane
+// actually binds from — so replacing one plane's handler with a hand-written
+// body of the right shape fails here, which is exactly what a divergence looks
+// like on its first commit.
+test "demolition: the plugin-plane proc doors are ONE body reached two ways" {
+    const proc_doors = h.core.wasm_host.proc_doors;
+    const wl_bound = h.core.membrane.wl_bound;
+    const quickjs = h.core.quickjs;
+
+    inline for (proc_doors.doors) |d| {
+        const HostFn = @TypeOf(d.wl);
+
+        // 1. The `wl_*` handler is the trampoline generated from THIS door's
+        //    shared body and gate — nothing hand-written can sit here.
+        try t.expectEqual(proc_doors.wasmDoor(d.body, d.wl_gate), d.wl);
+
+        // 2. …and it is what the wasm membrane actually binds for `wl_<name>`.
+        var wl_handler: ?HostFn = null;
+        for (wl_bound.imports) |entry| {
+            if (std.mem.eql(u8, entry.name, "wl_" ++ d.name)) wl_handler = entry.handler;
+        }
+        try t.expectEqual(@as(?HostFn, d.wl), wl_handler);
+
+        // 3. The `qjs_*` handler the JS membrane binds runs the SAME body,
+        //    through the resident plane's own trampoline. If someone gives the
+        //    JS plane its own `proc_spawn` again — with a `cwd` argument, say —
+        //    this is the assertion that fails.
+        var qjs_handler: ?HostFn = null;
+        inline for (quickjs.plugin_handlers) |entry| {
+            if (comptime std.mem.eql(u8, entry.name, "qjs_" ++ d.name)) qjs_handler = entry.handler;
+        }
+        try t.expectEqual(@as(?HostFn, quickjs.jsDoor(d.body, d.qjs_gate)), qjs_handler);
+
+        // 4. The two transports' possession checks agree — except where the
+        //    table says otherwise, and it may only say otherwise for the two
+        //    doors whose remainder is named in `proc.zig`'s `doors` doc
+        //    (`qjs_proc_send`/`qjs_proc_read` re-check `proc` on every call;
+        //    their `wl_*` twins can't until `contract_data.zig`, which is under
+        //    concurrent edit, gets `.perm = .proc`). A NEW asymmetry has to
+        //    add itself to this list to compile past here.
+        const named_remainder = comptime std.mem.eql(u8, d.name, "proc_send") or
+            std.mem.eql(u8, d.name, "proc_read");
+        if (d.wl_gate != d.qjs_gate and !named_remainder) {
+            std.debug.print(
+                "\nplugin-plane door '{s}' is gated differently on the two planes " ++
+                    "(wl {s}, qjs {s}) and is not one of the two recorded remainders.\n" ++
+                    "A JS plugin runs inside quickjs.wasm; resolve toward the NARROWER " ++
+                    "gate, or record the blocker (doc/place.md §4.1a).\n",
+                .{
+                    d.name,
+                    if (d.wl_gate) |p| p.label() else "ungated",
+                    if (d.qjs_gate) |p| p.label() else "ungated",
+                },
+            );
+            return error.JsPlaneDivergedFromWasmPlane;
+        }
+        // …and the other direction, the way `contract.zig`'s `perm_gated` does
+        // it: a remainder that has been CLOSED must stop being excused here,
+        // or the next real divergence on that door slips through the
+        // exception someone forgot to delete.
+        if (named_remainder and d.wl_gate == d.qjs_gate) {
+            std.debug.print(
+                "\nplugin-plane door '{s}' is now gated identically on both planes — " ++
+                    "delete it from this test's `named_remainder` list and from the " ++
+                    "remainder note on `wasm_host/proc.zig`'s `doors` (doc/place.md §4.1a).\n",
+                .{d.name},
+            );
+            return error.StaleDivergenceException;
+        }
+    }
+}

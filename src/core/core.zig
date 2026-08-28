@@ -96,6 +96,10 @@ pub const env = @import("env.zig");
 pub const membrane = struct {
     pub const wl = @import("membrane/contract_data.zig");
     pub const qjs = @import("membrane/qjs_contract.zig");
+    /// `wl`'s data table zipped with the handlers it binds — the gate that
+    /// proves the two planes share a door needs the function POINTER, not just
+    /// the arity (doc/place.md §4.1a).
+    pub const wl_bound = @import("membrane/contract.zig");
 };
 pub const Place = place.Place;
 pub const rooted_fs = @import("rooted_fs.zig");
