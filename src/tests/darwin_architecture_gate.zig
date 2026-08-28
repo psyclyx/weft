@@ -16,9 +16,9 @@ const fs_runtime = @import("weft_fs_runtime");
 const view_runtime = @import("weft_view_runtime");
 const target_runtime = @import("weft_target_runtime");
 const plugin_semantic = @import("weft_plugin_semantic");
-const dired = @import("weft_dired");
-const dired_workspace = @import("weft_dired_workspace");
-const dired_guest = @import("weft_dired_guest");
+const files = @import("weft_files");
+const files_workspace = @import("weft_files_workspace");
+const files_guest = @import("weft_files_guest");
 
 comptime {
     std.testing.refAllDecls(wire);
@@ -31,9 +31,9 @@ comptime {
     std.testing.refAllDecls(view_runtime);
     std.testing.refAllDecls(target_runtime);
     std.testing.refAllDecls(plugin_semantic);
-    std.testing.refAllDecls(dired);
-    std.testing.refAllDecls(dired_workspace);
-    std.testing.refAllDecls(dired_guest);
+    std.testing.refAllDecls(files);
+    std.testing.refAllDecls(files_workspace);
+    std.testing.refAllDecls(files_guest);
 }
 
 pub fn darwinArchitectureGate() void {}

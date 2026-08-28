@@ -95,12 +95,12 @@ pub const Policy = enum {
 /// negation are a later addition, not a rewrite (a provider list already gives
 /// OR across providers, and priority gives override).
 pub const When = struct {
-    /// Keymap mode that must be active (`normal`, `insert`, `dired`, …).
+    /// Keymap mode that must be active (`normal`, `insert`, `files`, …).
     mode: ?[]const u8 = null,
     /// Buffer language — the active buffer name's extension without the dot
     /// (`zig`, `py`, `md`). Matched case-sensitively.
     lang: ?[]const u8 = null,
-    /// The active buffer's tool-backing name (a plugin projection: `dired`,
+    /// The active buffer's tool-backing name (a plugin projection: `files`,
     /// `magit`), or null = don't care. Unlike `mode` — which changes as you
     /// edit a projection (vim `i`/Escape → insert/normal) — the tool-backing is
     /// a stable per-BUFFER signal, so a projection scopes its `save` (and other

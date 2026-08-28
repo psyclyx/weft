@@ -313,7 +313,7 @@ pub const Router = struct {
         return provider.read(allocator, request);
     }
 
-    /// Capture before a dired/tool session loses its namespace address. The
+    /// Capture before a files/tool session loses its namespace address. The
     /// provider owns the durable bytes/descriptor behind the returned opaque
     /// lease; the router only validates the source authority and preserves it
     /// in the portable value.

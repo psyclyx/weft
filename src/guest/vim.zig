@@ -551,7 +551,7 @@ export fn init() void {
     weft.bindKey("op-to", "Escape", "op-cancel");
     inline for (otable) |o| weft.bindKey("op-to", o.key, "vim/to/" ++ o.obj);
 
-    // A register prefix is a generic input mode, not a dired/editor special
+    // A register prefix is a generic input mode, not a files/editor special
     // case. The selected slot is consumed by the next semantic action.
     weft.menuMode("register-pending");
     weft.setFallback("register-pending", "default");

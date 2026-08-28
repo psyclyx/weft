@@ -3,7 +3,7 @@
 //! Scheduling is deliberately outside this module. `Exchange` may wait on a
 //! worker-owned network transport, replay a recorded exchange, or answer
 //! in-process. The filesystem contract remains synchronous and contains no
-//! transport, editor, dired, or modal-editing policy.
+//! transport, editor, files, or modal-editing policy.
 
 const std = @import("std");
 const semantic = @import("weft_semantic");

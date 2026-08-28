@@ -93,12 +93,12 @@ fn assertShippedConfigLoaded(loader: *const ConfigLoader) !void {
 /// scenario uses this only to make directory enumeration order irrelevant;
 /// all edits and actions after the focus change still travel through the
 /// shipped Vim/config bindings.
-fn spineFocusDiredName(ed: *Editor, gpa: std.mem.Allocator, name: []const u8) !void {
-    const path = ed.head.semantic_focus.path() orelse return error.NoDiredFocus;
-    const view = ed.session.system.semantic.views.get(path.view) orelse return error.NoDiredView;
+fn spineFocusFilesName(ed: *Editor, gpa: std.mem.Allocator, name: []const u8) !void {
+    const path = ed.head.semantic_focus.path() orelse return error.NoFilesFocus;
+    const view = ed.session.system.semantic.views.get(path.view) orelse return error.NoFilesView;
     const rows = switch (view.scene.content) {
         .container => |container| container.children,
-        else => return error.DiredSceneNotContainer,
+        else => return error.FilesSceneNotContainer,
     };
     for (rows) |row| {
         if (row.content != .container) continue;
@@ -112,7 +112,7 @@ fn spineFocusDiredName(ed: *Editor, gpa: std.mem.Allocator, name: []const u8) !v
             return;
         }
     }
-    return error.DiredNameNotFound;
+    return error.FilesNameNotFound;
 }
 
 const SpineCollabClock = struct {
@@ -203,10 +203,10 @@ test "e2e/regression: switching from a semantic view edits the new text buffer" 
     try core.file.writeBytesMakingDirs(gpa, app.proj.root, "semantic.txt", "field draft\n");
     try core.file.writeBytesMakingDirs(gpa, app.proj.root, "plain.txt", "");
     ed.runStr("open", ".");
-    const dired_path = ed.head.semantic_focus.path() orelse return error.NoDiredFocus;
-    const dired_view = ed.session.system.semantic.views.get(dired_path.view) orelse return error.NoDiredView;
+    const files_path = ed.head.semantic_focus.path() orelse return error.NoFilesFocus;
+    const files_view = ed.session.system.semantic.views.get(files_path.view) orelse return error.NoFilesView;
     var old_field: ?semantic.scene.FieldRef = null;
-    for (dired_view.scene.content.container.children) |row| {
+    for (files_view.scene.content.container.children) |row| {
         if (row.content != .container) continue;
         const columns = row.content.container.children;
         if (columns.len < 3 or columns[2].content != .field) continue;
@@ -215,7 +215,7 @@ test "e2e/regression: switching from a semantic view edits the new text buffer" 
         defer snapshot.deinit();
         if (std.mem.eql(u8, snapshot.value.bytes, "semantic.txt")) old_field = ref;
     }
-    const retained = old_field orelse return error.DiredNameNotFound;
+    const retained = old_field orelse return error.FilesNameNotFound;
     ed.runStr("open", "plain.txt");
     ed.press("i", "");
     ed.typeText("typed through text buffer");
@@ -767,7 +767,7 @@ test "e2e/spine: write a file, init a repo, stage and commit — all through wef
 
     // A generic config action supplied by the editing plugin changes the
     // focused line; it is intentionally reached through SPC c c, not a
-    // dired/editor special case.
+    // files/editor special case.
     ed.chord("SPC c c");
     {
         const text = try ed.textAlloc();
@@ -776,7 +776,7 @@ test "e2e/spine: write a file, init a repo, stage and commit — all through wef
     }
 
     // Open the directory through the generic target handler. The scene is a
-    // retained structured view (not a dired text buffer), and ordinary j/k
+    // retained structured view (not a files text buffer), and ordinary j/k
     // navigation is supplied by the Vim plugin over the generic focus path.
     ed.runStr("open", ".");
     const directory_view = ed.head.semantic_focus.path().?.view;
@@ -784,7 +784,7 @@ test "e2e/spine: write a file, init a repo, stage and commit — all through wef
     try t.expectEqualStrings("files", directory_scene.role);
     const rows = switch (directory_scene.content) {
         .container => |container| container.children,
-        else => return error.DiredSceneNotContainer,
+        else => return error.FilesSceneNotContainer,
     };
     var saw_main = false;
     var saw_helper = false;
@@ -802,7 +802,7 @@ test "e2e/spine: write a file, init a repo, stage and commit — all through wef
     ed.chord("SPC v r"); // generic view.refresh, provider-owned
     try t.expectEqualStrings("files", ed.session.system.semantic.views.get(directory_view).?.scene.role);
 
-    // ── Structured dired workflow ────────────────────────────────────────
+    // ── Structured files workflow ────────────────────────────────────────
     // Keep each mutation fixture small and deterministic, while exercising the
     // same generic target/field/action vocabulary a larger project uses.
     _ = try proj.oracle("mkdir -p rename-dir");
@@ -835,7 +835,7 @@ test "e2e/spine: write a file, init a repo, stage and commit — all through wef
     ed.press("i", "");
     ed.typeText("new.txt");
     ed.press("Escape", "");
-    proj.capture(&ed, "spine-dired-rename-plan");
+    proj.capture(&ed, "spine-files-rename-plan");
     ed.chord("SPC v a");
     try t.expect(ed.head.interactions.active() != null);
     ed.press("n", "n"); // cancel leaves the retained plan and dialog closed
@@ -866,7 +866,7 @@ test "e2e/spine: write a file, init a repo, stage and commit — all through wef
     ed.press("i", "");
     ed.typeText("made-dir");
     ed.press("Escape", "");
-    proj.capture(&ed, "spine-dired-create-plan");
+    proj.capture(&ed, "spine-files-create-plan");
     ed.chord("SPC v a");
     ed.press("y", "y");
     try t.expectEqual(core.file.Kind.file, core.file.statKind(gpa, "create-dir/made.txt"));
@@ -882,7 +882,7 @@ test "e2e/spine: write a file, init a repo, stage and commit — all through wef
     try core.file.writeBytesMakingDirs(gpa, proj.root, "copy-destination/.seed", "");
     core.file.deleteFile(gpa, "copy-destination/.seed");
     ed.runStr("open", "copy-source");
-    try spineFocusDiredName(&ed, gpa, "source.txt");
+    try spineFocusFilesName(&ed, gpa, "source.txt");
     ed.press("quotedbl", "");
     ed.press("a", "");
     ed.press("y", "");
@@ -896,7 +896,7 @@ test "e2e/spine: write a file, init a repo, stage and commit — all through wef
             (std.mem.eql(u8, fact.name, "change") and std.mem.eql(u8, fact.value, "delete"));
     };
     try t.expect(saw_retained_delete);
-    proj.capture(&ed, "spine-dired-retained-delete");
+    proj.capture(&ed, "spine-files-retained-delete");
     ed.runStr("open", "copy-destination");
     ed.press("quotedbl", "");
     ed.press("a", "");
@@ -918,7 +918,7 @@ test "e2e/spine: write a file, init a repo, stage and commit — all through wef
     try core.file.writeBytesMakingDirs(gpa, proj.root, "refresh-dir/a-dirty.txt", "dirty\n");
     try core.file.writeBytesMakingDirs(gpa, proj.root, "refresh-dir/z-clean.txt", "clean\n");
     ed.runStr("open", "refresh-dir");
-    try spineFocusDiredName(&ed, gpa, "a-dirty.txt");
+    try spineFocusFilesName(&ed, gpa, "a-dirty.txt");
     const dirty_ref = ed.head.semantic_focus.path().?.field.?;
     var dirty_name = try ed.session.system.semantic.fields.get(dirty_ref).?.snapshot(gpa);
     defer dirty_name.deinit();
@@ -1298,7 +1298,7 @@ test "e2e/web: author js + html, grep across them, run it with node" {
     proj.shot(&ed, "web-2-run");
 
     // ── 4. Browse the project through the provider-aware `open` command. ──
-    // The app Session publishes a typed directory target and the composed dired
+    // The app Session publishes a typed directory target and the composed files
     // plugin claims it as an ordinary semantic view attached to a real tool
     // buffer. The input posture remains Vim's; the browser owns no keymap.
     const prior_buffer = ed.buffers.active().id;
@@ -1311,7 +1311,7 @@ test "e2e/web: author js + html, grep across them, run it with node" {
 
     const children = switch (scene.content) {
         .container => |container| container.children,
-        else => return error.DiredSceneNotContainer,
+        else => return error.FilesSceneNotContainer,
     };
     try t.expectEqual(@as(usize, 2), children.len);
     try t.expectEqualStrings("files.row", children[0].role);
@@ -1339,7 +1339,7 @@ test "e2e/web: author js + html, grep across them, run it with node" {
 
     // The same view can be refreshed through the generic action endpoint. It
     // remains retained and focused, rather than being reconstructed as a tool
-    // buffer or dropping the head back into a dired mode.
+    // buffer or dropping the head back into a files mode.
     ed.run("view-refresh");
     try t.expectEqual(view_ref, ed.head.semantic_focus.path().?.view);
     try t.expectEqualStrings("files", ed.session.system.semantic.views.get(view_ref).?.scene.role);

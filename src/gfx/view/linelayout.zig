@@ -38,7 +38,7 @@ pub const StyleInputs = struct {
     diag: ?[]const u8 = null,
     diag_base: usize = 0,
     /// Placed decorations (virtual text) for the visible range — drawn beside
-    /// the text, never in the document. dired's metadata/arrow/mark ride this,
+    /// the text, never in the document. files's metadata/arrow/mark ride this,
     /// so the buffer text is only the editable name (yy yanks the name alone).
     deco: ?*const core.layers.Layer = null,
     /// The `ui/gutter-segment` mesh's per-frame resolution
@@ -151,7 +151,7 @@ fn layoutMonoLine(
 
     var cells: std.ArrayList(text_engine.Cell) = .empty;
     var stops: std.ArrayList(layout.Stop) = .empty;
-    // Virtual-text prefix: decorations anchored on this row (dired's metadata/
+    // Virtual-text prefix: decorations anchored on this row (files's metadata/
     // arrow/mark) laid out as leading dimmed cells at the front of the shaped
     // buffer. They carry NO stop, so the caret (mapped through stops) sits after
     // them, and they're never in the document — `yy` yanks only the real line.
@@ -217,7 +217,7 @@ fn layoutMonoLine(
 /// line.end]` contributes its `message` (one mono cell per codepoint, colored
 /// by its `kind` via the styles palette); they carry NO caret stop, so the real
 /// text (and the caret) begin at the returned column. This is the one render
-/// path for placed decorations — dired's metadata rides it, and inlay hints /
+/// path for placed decorations — files's metadata rides it, and inlay hints /
 /// blame / breakpoint glyphs can too. Returns the first real-text column.
 fn layoutRowPrefix(
     v: *View,
@@ -541,14 +541,14 @@ test "decorations: a virtual_before decoration draws leading cells and shifts th
     var v = try View.init(gpa, font_provider.defaultMono(), 16);
     defer v.deinit();
 
-    // A dired-style row: the document text is ONLY the editable name; the
+    // A files-style row: the document text is ONLY the editable name; the
     // metadata is a virtual_before decoration anchored at the name start.
     var doc = try core.Document.init(gpa, "user");
     defer doc.deinit(gpa);
     try doc.insert(gpa, 0, "main.zig\n");
     var store: core.layers.Layers = .empty;
     defer store.deinit(gpa);
-    const layer = try store.claim(gpa, &doc, "decorations", .local, "dired");
+    const layer = try store.claim(gpa, &doc, "decorations", .local, "files");
     const meta = "-rw- "; // 5 display columns of chrome
     try layer.appendSpan(gpa, .{ .start = 0, .end = 0, .kind = @intFromEnum(StyleClass.muted), .message = meta, .placement = .virtual_before });
 

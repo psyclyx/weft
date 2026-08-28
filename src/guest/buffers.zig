@@ -69,7 +69,7 @@ fn bufPick() void {
 }
 
 /// Switch to the scratch buffer — reusing the existing one if present, else
-/// creating it. Tool buffers (dired/magit) bind `q` here to leave; without the
+/// creating it. Tool buffers (files/magit) bind `q` here to leave; without the
 /// reuse, `buffer-create` spawns a NEW `*scratch*` every time (duplicate names
 /// are allowed), so leaving a tool repeatedly piled up scratch buffers.
 fn bufScratch() void {

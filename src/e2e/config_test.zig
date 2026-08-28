@@ -338,7 +338,7 @@ test "e2e/config: the sample config boots; SPC g i is discoverable via which-key
     try t.expectEqualStrings("", ed.head.pending);
 
     // Structured views use the same generic semantic action commands from
-    // config: no dired-specific keymap or dispatch branch is needed. The
+    // config: no files-specific keymap or dispatch branch is needed. The
     // non-baseline names are visible through which-key. (The plugin
     // intentionally filters ordinary cursor movement from its hints.)
     ed.press("SPC", "");
@@ -393,10 +393,10 @@ test "e2e/config: the sample config boots; SPC g i is discoverable via which-key
         try t.expectEqualStrings(binding.command, ed.keymap.resolveExact("normal", binding.sequence).?);
     }
 
-    // Seed both capability-varying row kinds so the real dired scene has
+    // Seed both capability-varying row kinds so the real files scene has
     // concrete rows whose advertised target/actions can be checked below.
     // This remains a test-only observation of the plugin protocol; config and
-    // core do not inspect dired roles or dispatch dired commands.
+    // core do not inspect files roles or dispatch files commands.
     _ = try proj.oracle("printf x > plain-file; mkdir -- child-directory");
 
     // The sample's ordinary file-group binding reaches the shipped launcher,
@@ -421,16 +421,16 @@ test "e2e/config: the sample config boots; SPC g i is discoverable via which-key
     // The config surface must cover the actions the REAL directory scene
     // advertises, not merely a hand-built generic fixture. This is deliberately
     // a protocol-level gate: the scene owns action meaning, while config owns
-    // command declarations and key policy. Adding an action to dired without
+    // command declarations and key policy. Adding an action to files without
     // making it reachable from config is therefore an immediate test failure.
-    const dired_scene = ed.session.system.semantic.views.get(configured_directory_view).?.scene;
+    const files_scene = ed.session.system.semantic.views.get(configured_directory_view).?.scene;
 
     // First walk the actual scene and reject any newly advertised action that
     // lacks a config binding. This catches additions as well as removals; the
     // shared table above also makes the required public contract readable.
     var advertised_actions: std.ArrayList([]const u8) = .empty;
     defer advertised_actions.deinit(gpa);
-    try collectSceneActions(gpa, dired_scene, &advertised_actions);
+    try collectSceneActions(gpa, files_scene, &advertised_actions);
     for (advertised_actions.items) |action| {
         var sequence: ?[]const u8 = null;
         for (structured_view_bindings) |binding| {
@@ -459,11 +459,11 @@ test "e2e/config: the sample config boots; SPC g i is discoverable via which-key
         try t.expect(ed.commands.resolve(binding.command) != null);
         try t.expectEqualStrings(binding.command, ed.keymap.resolveExact("normal", binding.sequence).?);
     }
-    try t.expect(sceneNodeWithFact(dired_scene, "files.row", "kind", "regular") != null);
-    const directory_row = sceneNodeWithFact(dired_scene, "files.row", "kind", "directory") orelse return error.MissingDirectoryRow;
+    try t.expect(sceneNodeWithFact(files_scene, "files.row", "kind", "regular") != null);
+    const directory_row = sceneNodeWithFact(files_scene, "files.row", "kind", "directory") orelse return error.MissingDirectoryRow;
     try t.expectEqualStrings("cursor-down", ed.keymap.resolveExact("normal", "space v j").?);
     try t.expectEqualStrings("cursor-up", ed.keymap.resolveExact("normal", "space v k").?);
-    // Return/minus are generic Vim input policy, not dired bindings. Keep the
+    // Return/minus are generic Vim input policy, not files bindings. Keep the
     // two gates adjacent so config coverage includes the ordinary navigation
     // path into and out of a focused semantic target. Return leads with the
     // standard activation intention and keeps vim's `+` as its fallback
@@ -479,9 +479,9 @@ test "e2e/config: the sample config boots; SPC g i is discoverable via which-key
 
     // Exercise that policy against the real row: Return opens the child target
     // through generic target resolution, and minus follows its generic
-    // `container` relation back to this directory. No dired keymap is involved.
-    const dired_name = sceneNodeWithRole(directory_row, "files.name") orelse return error.MissingNameField;
-    _ = try ed.session.system.semantic.focusView(ed.head, gpa, configured_directory_view, dired_name.id);
+    // `container` relation back to this directory. No files keymap is involved.
+    const files_name = sceneNodeWithRole(directory_row, "files.name") orelse return error.MissingNameField;
+    _ = try ed.session.system.semantic.focusView(ed.head, gpa, configured_directory_view, files_name.id);
     ed.press("Return", "");
     const child_view = ed.head.semantic_focus.path().?.view;
     try t.expect(!child_view.eql(configured_directory_view));

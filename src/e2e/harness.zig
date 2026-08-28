@@ -989,7 +989,7 @@ const guest = struct {
     const comment = @embedFile("guest_comment_wasm");
     const indent = @embedFile("guest_indent_wasm");
     const lsp = @embedFile("guest_lsp_wasm");
-    const dired = @embedFile("guest_dired_wasm");
+    const files = @embedFile("guest_files_wasm");
     const buffers = @embedFile("guest_buffers_wasm");
     const modes = @embedFile("guest_modes_wasm");
     const notes = @embedFile("guest_notes_wasm");
@@ -1054,7 +1054,7 @@ pub fn loadHeadtest(ed: *Editor) !void {
 }
 
 /// Mirror main.zig: after the editor guest has set the base editing mode, capture
-/// it as `default_mode` so a file opened fresh (e.g. from *grep*/dired) lands in
+/// it as `default_mode` so a file opened fresh (e.g. from *grep*/files) lands in
 /// that mode, not stuck in the tool buffer's mode or an empty mode.
 fn setResting(ed: *Editor) !void {
     try ed.buffers.setDefaultMode(ed.gpa, ed.head.currentMode());
@@ -1094,7 +1094,7 @@ pub fn loadSpine(ed: *Editor) !void {
 /// whole-app "web" e2e verticals.
 pub fn loadWebIde(ed: *Editor) !void {
     try loadWorkspace(ed);
-    try ed.load("files", guest.dired);
+    try ed.load("files", guest.files);
     try ed.load("grep", guest.grep);
     try ed.load("run", guest.run);
     try ed.load("make", guest.make);
@@ -1750,7 +1750,7 @@ const plugin_catalog = std.StaticStringMap([]const u8).initComptime(.{
     .{ "net", @embedFile("guest_net_wasm") },
     .{ "http", @embedFile("guest_http_wasm") },
     .{ "which_key", @embedFile("guest_which_key_wasm") },
-    .{ "files", @embedFile("guest_dired_wasm") },
+    .{ "files", @embedFile("guest_files_wasm") },
     .{ "helix", @embedFile("guest_helix_wasm") },
     .{ "emacs", @embedFile("guest_emacs_wasm") },
     .{ "debug", @embedFile("guest_debug_wasm") },
@@ -2048,7 +2048,7 @@ pub fn authorFile(ed: *Editor, name: []const u8, body: []const u8) void {
     ed.waitSave();
 }
 
-/// The text of a named TOOL buffer (magit/dired/echo projections) — these ARE
+/// The text of a named TOOL buffer (magit/files/echo projections) — these ARE
 /// the rendered UI surface, so reading them to assert UI state is fair under
 /// the e2e's boundary (real FILE content is read from disk instead). Returns
 /// null if no such buffer exists. Caller frees.

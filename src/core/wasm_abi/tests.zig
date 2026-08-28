@@ -64,7 +64,7 @@ test "wasm plugin: canonical targets and scenes cross the semantic membrane" {
     // The same retained target is discoverable through the generic resolver,
     // and the selected guest handler opens only the view it owns.  This is the
     // end-to-end membrane path: descriptor -> guest probe -> selection ->
-    // located open -> typed view, with no dired- or Vim-specific coupling.
+    // located open -> typed view, with no files- or Vim-specific coupling.
     var resolution = try semantic.resolveTarget(gpa, target_ref);
     defer resolution.deinit();
     try t.expectEqual(@as(usize, 1), resolution.handlers.value.candidates.len);
@@ -311,26 +311,26 @@ test "wasm plugin: guarded child directories publish and revoke complete authori
     try t.expectError(error.TargetUnbound, router.authorizedDirectory(second_child.ref, second_child.revision));
 
     // The real sandbox adapter consumes only public target/fs/view/field/
-    // action contracts. Opening the same parent publishes a retained dired
-    // scene and a separately confined child target without native dired
+    // action contracts. Opening the same parent publishes a retained files
+    // scene and a separately confined child target without native files
     // composition in this environment.
-    const dired_plugin = try loadPlugin(
+    const files_plugin = try loadPlugin(
         &engine,
         &env.ctx,
-        "dired-semantic-fixture",
-        @embedFile("guest_dired_semantic_wasm"),
+        "files-semantic-fixture",
+        @embedFile("guest_files_semantic_wasm"),
         .{},
     );
-    var dired_live = true;
-    defer if (dired_live) dired_plugin.deinit();
-    const release_before_dired = provider.release_calls;
+    var files_live = true;
+    defer if (files_live) files_plugin.deinit();
+    const release_before_files = provider.release_calls;
     var resolution = try semantic.target_handlers.resolve(gpa, semantic.targets.get(parent.ref).?.*);
     defer resolution.deinit();
     const selected = resolution.value.decide().selected;
     const opened = try semantic.target_handlers.open(selected, parent.located());
     const view_ref = opened.view();
     try t.expect(semantic.target_handlers.settle(selected, opened, .accepted));
-    try t.expectEqual(@as(usize, 1), dired_plugin.semantic_directories.items.len);
+    try t.expectEqual(@as(usize, 1), files_plugin.semantic_directories.items.len);
     const initial_view = semantic.views.get(view_ref) orelse return error.TestUnexpectedResult;
     const initial_view_revision = initial_view.descriptor.revision;
     try t.expectEqualStrings("files", initial_view.scene.role);
@@ -367,7 +367,7 @@ test "wasm plugin: guarded child directories publish and revoke complete authori
         .view = view_ref,
         .subject = row_id,
     })) == .handled);
-    try t.expectEqual(@as(usize, 0), dired_plugin.semantic_directories.items.len);
+    try t.expectEqual(@as(usize, 0), files_plugin.semantic_directories.items.len);
     const deleted_view = semantic.views.get(view_ref) orelse return error.TestUnexpectedResult;
     const deleted_row = deleted_view.scene.content.container.children[0];
     try t.expectEqual(row_id, deleted_row.id);
@@ -377,7 +377,7 @@ test "wasm plugin: guarded child directories publish and revoke complete authori
         .view = view_ref,
         .subject = deleted_view.scene.id,
     })) == .handled);
-    try t.expectEqual(@as(usize, 1), dired_plugin.semantic_directories.items.len);
+    try t.expectEqual(@as(usize, 1), files_plugin.semantic_directories.items.len);
     const reverted = semantic.views.get(view_ref) orelse return error.TestUnexpectedResult;
     try t.expectEqual(row_id, reverted.scene.content.container.children[0].id);
     try t.expect(reverted.scene.content.container.children[0].content.container.children[2].target != null);
@@ -431,15 +431,15 @@ test "wasm plugin: guarded child directories publish and revoke complete authori
     const replaced_field = semantic.fields.get(replaced_field_ref) orelse return error.TestUnexpectedResult;
     var replaced_before = try replaced_field.snapshot(gpa);
     defer replaced_before.deinit();
-    const field_count = dired_plugin.semantic_fields.proxies.items.len;
-    try t.expect(semantic.closeView(gpa, dired_plugin.semantic_owner.?, replaced_view_ref));
-    const failed_action = try dired_plugin.semantic_actions.invoke(.{
+    const field_count = files_plugin.semantic_fields.proxies.items.len;
+    try t.expect(semantic.closeView(gpa, files_plugin.semantic_owner.?, replaced_view_ref));
+    const failed_action = try files_plugin.semantic_actions.invoke(.{
         .action = @import("weft_fs").action.entry_create_file,
         .view = replaced_view_ref,
         .subject = replaced_view.scene.id,
     });
     try t.expect(failed_action == .declined);
-    try t.expectEqual(field_count, dired_plugin.semantic_fields.proxies.items.len);
+    try t.expectEqual(field_count, files_plugin.semantic_fields.proxies.items.len);
     try t.expectError(error.Failed, replaced_field.edit(replaced_before.value.revision, .{
         .start = 0,
         .end = replaced_before.value.bytes.len,
@@ -455,14 +455,14 @@ test "wasm plugin: guarded child directories publish and revoke complete authori
     // Session/plugin retirement closes the retained child publication as well
     // as the generic semantic view. The provider root must not outlive the
     // sandbox instance that derived it.
-    const dired_child = dired_plugin.semantic_directories.items[0].registration;
-    dired_plugin.deinit();
-    dired_live = false;
+    const files_child = files_plugin.semantic_directories.items[0].registration;
+    files_plugin.deinit();
+    files_live = false;
     // Delete retires the first row target; revert derives a replacement, and
     // plugin teardown retires that replacement.
-    try t.expectEqual(release_before_dired + 2, provider.release_calls);
-    try t.expect(semantic.targets.get(dired_child.ref) == null);
-    try t.expectError(error.TargetUnbound, router.authorizedDirectory(dired_child.ref, dired_child.revision));
+    try t.expectEqual(release_before_files + 2, provider.release_calls);
+    try t.expect(semantic.targets.get(files_child.ref) == null);
+    try t.expectError(error.TargetUnbound, router.authorizedDirectory(files_child.ref, files_child.revision));
 }
 
 test "wasm plugin: semantic ownership is instance-specific and system-local" {
@@ -784,7 +784,7 @@ const OpenCommandProbe = struct {
     }
 };
 
-test "dired wasm launcher: delegates to the ordinary open command at cwd" {
+test "files wasm launcher: delegates to the ordinary open command at cwd" {
     const gpa = t.allocator;
     var env: Env = undefined;
     try Env.init(gpa, &env);
@@ -802,10 +802,10 @@ test "dired wasm launcher: delegates to the ordinary open command at cwd" {
 
     var engine = try wasm.Engine.init(gpa);
     defer engine.deinit();
-    // The shipped dired guest is a thin launcher. This ABI gate intentionally
-    // supplies only the ordinary command surface: dired owns no proc/fs
+    // The shipped files guest is a thin launcher. This ABI gate intentionally
+    // supplies only the ordinary command surface: files owns no proc/fs
     // authority, text buffer, mode, or filesystem implementation.
-    const plugin = try loadPlugin(&engine, &env.ctx, "files", @embedFile("guest_dired_wasm"), .{});
+    const plugin = try loadPlugin(&engine, &env.ctx, "files", @embedFile("guest_files_wasm"), .{});
     defer plugin.deinit();
     try t.expect(env.commands.resolve("files") != null);
 
@@ -1949,7 +1949,7 @@ test "wasm plugin: vim yank/paste ferries a subbuffer id through the register (d
 
     const ed = env.buffers.active().textEditor().?;
     try ed.insertText(gpa, "row-a");
-    // A projection row: its name carries a hidden id (exactly as dired claims).
+    // A projection row: its name carries a hidden id (exactly as files claims).
     const row = try subs.claim(gpa, &ed.doc, .{ .start = 0, .end = 5 });
     try row.putFact(gpa, "id", "42");
     ed.placeCursor(0);

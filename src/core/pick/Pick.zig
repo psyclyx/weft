@@ -13,7 +13,7 @@
 //! `Pick`'s fields directly. Pick is "the consumer" now — it knows its own
 //! shape; the render layer (`popup.zig`'s `drawCaretSurface`/
 //! `drawDockSurface`) only knows `core.surface.Surface`, the same generic
-//! scene which-key/dired/magit already draw through.
+//! scene which-key/files/magit already draw through.
 
 const std = @import("std");
 const Allocator = std.mem.Allocator;

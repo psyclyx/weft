@@ -2,7 +2,7 @@
 //!
 //! Core target dispatch remains unaware of filesystems. A filesystem target
 //! publisher places this canonical value in an ordinary target fact; a tool
-//! such as dired opts into the `weft_fs` vocabulary and decodes it. Local,
+//! such as files opts into the `weft_fs` vocabulary and decodes it. Local,
 //! remote, and synthetic providers all use the same opaque authority/handles.
 
 const std = @import("std");

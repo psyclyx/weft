@@ -402,7 +402,7 @@ pub fn build(
     }
 
     try statusline.buildHud(self, scratch, &runs, &rects, hud, status_rect, panel_rect, cols_visible);
-    // Floating surfaces (which-key popup, dired/magit, a guest's caret
+    // Floating surfaces (which-key popup, files/magit, a guest's caret
     // popup like the `lsp` plugin's hover) float within the BODY region —
     // never over the status/tab/panel rects, which are carved out. Hand the
     // caret's y so a corner surface can flip away from it, and the carved

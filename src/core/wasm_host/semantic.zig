@@ -1,7 +1,7 @@
 //! Generic semantic-view introspection and action dispatch for editor plugins.
 //!
 //! Input plugins see only whether the dispatching head has a semantic view and
-//! an open action name. They never learn a tool kind or call dired directly.
+//! an open action name. They never learn a tool kind or call files directly.
 
 const std = @import("std");
 const wasm = @import("../wasm.zig");

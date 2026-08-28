@@ -725,7 +725,7 @@ test "session: local directories become deduplicated semantic targets while file
 
     // Session publishes filesystem targets but owns no directory UI. Install
     // a tiny generic test handler to prove app composition is independent of
-    // whichever plugin (the shipped sandboxed dired, a remote browser, or a
+    // whichever plugin (the shipped sandboxed files, a remote browser, or a
     // synthetic tool) chooses to render them.
     const TestHandler = struct {
         gpa: std.mem.Allocator,

@@ -171,7 +171,7 @@ fn builtin(kw: []const u8, bang: bool, args: []const u8) bool {
             weft.runStr("open", args);
         } else if (weft.semanticActive()) {
             // Structured views own their revert semantics. This is the same
-            // open action protocol config binds; ex knows neither dired nor
+            // open action protocol config binds; ex knows neither files nor
             // how a provider reconstructs its draft.
             switch (weft.semanticAction(weft.semantic.action.standard.revert)) {
                 .handled, .transfer_stored, .interaction_opened, .target_opened, .focus_changed, .relation_opened, .working_target_changed => {},

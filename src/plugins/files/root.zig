@@ -1,16 +1,16 @@
-//! Portable plugin-facing dired facade.
+//! Portable plugin-facing files facade.
 //!
 //! This root deliberately contains only the host-independent model,
 //! projection, workspace, and action contracts. Runtime integration lives in
-//! the sandbox guest adapter, keeping it impossible for portable dired users
+//! the sandbox guest adapter, keeping it impossible for portable files users
 //! to acquire native registries accidentally.
 
 const std = @import("std");
 
-pub const model = @import("weft_dired_model");
-pub const workspace = @import("weft_dired_workspace");
-pub const projection = @import("weft_dired_projection");
-pub const actions = @import("weft_dired_actions");
+pub const model = @import("weft_files_model");
+pub const workspace = @import("weft_files_workspace");
+pub const projection = @import("weft_files_projection");
+pub const actions = @import("weft_files_actions");
 
 pub const Model = model.Model;
 pub const NodeId = model.NodeId;

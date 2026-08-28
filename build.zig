@@ -17,7 +17,7 @@ const Guest = struct {
     libraries: Libraries = .{},
 
     const Libraries = packed struct {
-        dired: bool = false,
+        files: bool = false,
     };
 };
 
@@ -139,7 +139,7 @@ fn createArchitectureModules(
 /// One plugin's module graph, composed strictly over public architecture
 /// contracts. Keeping this separate makes the build itself reject accidental
 /// plugin-to-app or plugin-to-provider reach-through.
-const DiredPortableModules = struct {
+const FilesPortableModules = struct {
     model: *std.Build.Module,
     workspace: *std.Build.Module,
     projection: *std.Build.Module,
@@ -147,35 +147,35 @@ const DiredPortableModules = struct {
     facade: *std.Build.Module,
 };
 
-fn createDiredPortableModules(
+fn createFilesPortableModules(
     b: *std.Build,
     target: std.Build.ResolvedTarget,
     optimize: std.builtin.OptimizeMode,
     semantic: *std.Build.Module,
     fs: *std.Build.Module,
-) DiredPortableModules {
+) FilesPortableModules {
     const model = b.createModule(.{
-        .root_source_file = b.path("src/plugins/dired/model.zig"),
+        .root_source_file = b.path("src/plugins/files/model.zig"),
         .target = target,
         .optimize = optimize,
     });
     const projection = b.createModule(.{
-        .root_source_file = b.path("src/plugins/dired/projection.zig"),
+        .root_source_file = b.path("src/plugins/files/projection.zig"),
         .target = target,
         .optimize = optimize,
     });
     const workspace = b.createModule(.{
-        .root_source_file = b.path("src/plugins/dired/workspace.zig"),
+        .root_source_file = b.path("src/plugins/files/workspace.zig"),
         .target = target,
         .optimize = optimize,
     });
     const actions = b.createModule(.{
-        .root_source_file = b.path("src/plugins/dired/actions.zig"),
+        .root_source_file = b.path("src/plugins/files/actions.zig"),
         .target = target,
         .optimize = optimize,
     });
     const facade = b.createModule(.{
-        .root_source_file = b.path("src/plugins/dired/root.zig"),
+        .root_source_file = b.path("src/plugins/files/root.zig"),
         .target = target,
         .optimize = optimize,
     });
@@ -183,14 +183,14 @@ fn createDiredPortableModules(
         module.addImport("weft_semantic", semantic);
         module.addImport("weft_fs", fs);
     }
-    workspace.addImport("weft_dired_model", model);
-    projection.addImport("weft_dired_model", model);
-    actions.addImport("weft_dired_model", model);
-    actions.addImport("weft_dired_projection", projection);
-    facade.addImport("weft_dired_model", model);
-    facade.addImport("weft_dired_workspace", workspace);
-    facade.addImport("weft_dired_projection", projection);
-    facade.addImport("weft_dired_actions", actions);
+    workspace.addImport("weft_files_model", model);
+    projection.addImport("weft_files_model", model);
+    actions.addImport("weft_files_model", model);
+    actions.addImport("weft_files_projection", projection);
+    facade.addImport("weft_files_model", model);
+    facade.addImport("weft_files_workspace", workspace);
+    facade.addImport("weft_files_projection", projection);
+    facade.addImport("weft_files_actions", actions);
     return .{
         .model = model,
         .workspace = workspace,
@@ -231,7 +231,7 @@ const guests = [_]Guest{
     .{ .src = "src/guest/badge.zig", .import = "guest_badge_wasm", .install = false },
     .{ .src = "src/guest/semantic_fixture.zig", .import = "guest_semantic_wasm", .install = false },
     .{ .src = "src/guest/semantic_fs_fixture.zig", .import = "guest_semantic_fs_wasm", .install = false },
-    .{ .src = "src/guest/dired_semantic_fixture.zig", .import = "guest_dired_semantic_wasm", .install = false, .libraries = .{ .dired = true } },
+    .{ .src = "src/guest/files_semantic_fixture.zig", .import = "guest_files_semantic_wasm", .install = false, .libraries = .{ .files = true } },
     .{ .src = "src/guest/edit.zig", .import = "guest_edit_wasm", .install = true },
     .{ .src = "src/guest/complete.zig", .import = "guest_complete_wasm", .install = true },
     .{ .src = "src/guest/project.zig", .import = "guest_project_wasm", .install = true },
@@ -268,7 +268,7 @@ const guests = [_]Guest{
     .{ .src = "src/guest/net.zig", .import = "guest_net_wasm", .install = true },
     .{ .src = "src/guest/http.zig", .import = "guest_http_wasm", .install = true },
     .{ .src = "src/guest/which_key.zig", .import = "guest_which_key_wasm", .install = true },
-    .{ .src = "src/guest/files.zig", .import = "guest_dired_wasm", .install = true, .libraries = .{ .dired = true } },
+    .{ .src = "src/guest/files.zig", .import = "guest_files_wasm", .install = true, .libraries = .{ .files = true } },
     .{ .src = "src/guest/helix.zig", .import = "guest_helix_wasm", .install = true },
     .{ .src = "src/guest/emacs.zig", .import = "guest_emacs_wasm", .install = true },
     .{ .src = "src/guest/debug.zig", .import = "guest_debug_wasm", .install = true },
@@ -336,7 +336,7 @@ pub fn build(b: *std.Build) void {
         .target = target,
         .optimize = optimize,
     });
-    const dired_modules = createDiredPortableModules(
+    const files_modules = createFilesPortableModules(
         b,
         target,
         optimize,
@@ -565,7 +565,7 @@ pub fn build(b: *std.Build) void {
     // the Linux provider is created only in the native `.linux` branch below.
     const darwin_target = b.resolveTargetQuery(.{ .cpu_arch = .aarch64, .os_tag = .macos });
     const darwin_architecture = createArchitectureModules(b, darwin_target, optimize);
-    const darwin_dired_modules = createDiredPortableModules(
+    const darwin_files_modules = createFilesPortableModules(
         b,
         darwin_target,
         optimize,
@@ -588,22 +588,22 @@ pub fn build(b: *std.Build) void {
     darwin_guest_sdk.addImport("weft_scene_codec", darwin_architecture.scene_codec);
     darwin_guest_sdk.addImport("weft_fs", darwin_architecture.fs);
     darwin_guest_sdk.addImport("weft_fs_codec", darwin_architecture.fs_codec);
-    const darwin_dired_guest = b.createModule(.{
-        .root_source_file = b.path("src/plugins/dired/guest.zig"),
+    const darwin_files_guest = b.createModule(.{
+        .root_source_file = b.path("src/plugins/files/guest.zig"),
         .target = darwin_target,
         .optimize = optimize,
     });
-    darwin_dired_guest.addImport("weft", darwin_guest_sdk);
-    darwin_dired_guest.addImport("weft_dired", darwin_dired_modules.facade);
+    darwin_files_guest.addImport("weft", darwin_guest_sdk);
+    darwin_files_guest.addImport("weft_files", darwin_files_modules.facade);
     const darwin_gate_mod = b.createModule(.{
         .root_source_file = b.path("src/tests/darwin_architecture_gate.zig"),
         .target = darwin_target,
         .optimize = optimize,
     });
     addArchitectureImports(darwin_gate_mod, darwin_architecture);
-    darwin_gate_mod.addImport("weft_dired", darwin_dired_modules.facade);
-    darwin_gate_mod.addImport("weft_dired_workspace", darwin_dired_modules.workspace);
-    darwin_gate_mod.addImport("weft_dired_guest", darwin_dired_guest);
+    darwin_gate_mod.addImport("weft_files", darwin_files_modules.facade);
+    darwin_gate_mod.addImport("weft_files_workspace", darwin_files_modules.workspace);
+    darwin_gate_mod.addImport("weft_files_guest", darwin_files_guest);
     const darwin_gate = b.addObject(.{
         .name = "weft-darwin-architecture",
         .root_module = darwin_gate_mod,
@@ -622,20 +622,20 @@ pub fn build(b: *std.Build) void {
     const run_fs_fake_tests = b.addRunArtifact(fs_fake_tests);
     contract_step.dependOn(&run_fs_fake_tests.step);
 
-    const dired_model_step = b.step("test-dired-model", "Run the pure dired model and semantic projection tests");
+    const files_model_step = b.step("test-files-model", "Run the pure files model and semantic projection tests");
     inline for (.{
-        dired_modules.facade,
-        dired_modules.model,
-        dired_modules.workspace,
-        dired_modules.projection,
-        dired_modules.actions,
-    }) |dired_module| {
-        dired_module.addImport("weft_semantic", architecture.semantic);
-        dired_module.addImport("weft_fs", architecture.fs);
-        const dired_tests = b.addTest(.{ .root_module = dired_module });
-        const run_dired_tests = b.addRunArtifact(dired_tests);
-        dired_model_step.dependOn(&run_dired_tests.step);
-        test_step.dependOn(&run_dired_tests.step);
+        files_modules.facade,
+        files_modules.model,
+        files_modules.workspace,
+        files_modules.projection,
+        files_modules.actions,
+    }) |files_module| {
+        files_module.addImport("weft_semantic", architecture.semantic);
+        files_module.addImport("weft_fs", architecture.fs);
+        const files_tests = b.addTest(.{ .root_module = files_module });
+        const run_files_tests = b.addRunArtifact(files_tests);
+        files_model_step.dependOn(&run_files_tests.step);
+        test_step.dependOn(&run_files_tests.step);
     }
 
     const fs_runtime_tests = b.addTest(.{ .root_module = architecture.fs_runtime });
@@ -916,17 +916,17 @@ fn buildGuest(b: *std.Build, guest_spec: Guest) *std.Build.Step.Compile {
     guest_sdk.addImport("weft_fs", fs);
     guest_sdk.addImport("weft_fs_codec", fs_codec);
     guest_mod.addImport("weft", guest_sdk);
-    if (guest_spec.libraries.dired) {
-        const dired = createDiredPortableModules(b, wasm_target, .ReleaseSmall, semantic, fs);
-        guest_mod.addImport("weft_dired", dired.facade);
-        const dired_guest = b.createModule(.{
-            .root_source_file = b.path("src/plugins/dired/guest.zig"),
+    if (guest_spec.libraries.files) {
+        const files = createFilesPortableModules(b, wasm_target, .ReleaseSmall, semantic, fs);
+        guest_mod.addImport("weft_files", files.facade);
+        const files_guest = b.createModule(.{
+            .root_source_file = b.path("src/plugins/files/guest.zig"),
             .target = wasm_target,
             .optimize = .ReleaseSmall,
         });
-        dired_guest.addImport("weft", guest_sdk);
-        dired_guest.addImport("weft_dired", dired.facade);
-        guest_mod.addImport("weft_dired_guest", dired_guest);
+        files_guest.addImport("weft", guest_sdk);
+        files_guest.addImport("weft_files", files.facade);
+        guest_mod.addImport("weft_files_guest", files_guest);
     }
     const guest = b.addExecutable(.{
         .name = std.fs.path.stem(src),

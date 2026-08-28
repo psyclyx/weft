@@ -29,7 +29,7 @@ pub const Args = struct {
     /// checkout (content follows the cursor; huge files open instantly).
     partial: bool = false,
     /// --share-root <dir>: opt in to serving a filesystem root to peers over
-    /// collab (dired-on-a-peer, remote fs). Null = don't serve any fs — the
+    /// collab (files-on-a-peer, remote fs). Null = don't serve any fs — the
     /// SAFE default (a peer gets nothing). fs access is separate from --access
     /// (that gates the document).
     share_root: ?[]const u8 = null,

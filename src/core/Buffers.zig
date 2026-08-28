@@ -43,7 +43,7 @@ prev_id: Id = 0,
 /// The mode a FRESH buffer (no saved mode) starts in — the config's base
 /// editing mode ("normal"/"helix-normal"), captured once after config load.
 /// A fresh buffer NEVER inherits the current keymap mode: that let a tool
-/// buffer's mode (dired/git) leak into a file opened from it. Captured from
+/// buffer's mode (files/git) leak into a file opened from it. Captured from
 /// the base — never from a buffer switch — so no tool mode can pollute it.
 default_mode: []u8 = &.{},
 
@@ -66,7 +66,7 @@ pub const Buffer = struct {
     editor: ?Editor,
     /// Display name (path basename, tool name, or "*scratch*").
     name: []u8,
-    /// The plugin projection this entry represents (`dired`, `files`), or
+    /// The plugin projection this entry represents (`files`, `files`), or
     /// empty. An ambient fact providers scope on — a projection registers its
     /// `save` under `When{ .tool = … }` so it wins in its own entry, in any
     /// mode — and independent of whether the entry stores text.
@@ -77,7 +77,7 @@ pub const Buffer = struct {
     /// Interactive text edits (`Context.edit` — typing, vim operators) are
     /// refused: the buffer is a projection whose text is PRODUCED (`Context.
     /// render`), not user-editable. Not a permission on an owner — a distinction
-    /// between operations. An editable projection (mini.files dired) is simply
+    /// between operations. An editable projection (mini.files files) is simply
     /// NOT read-only and takes `edit`.
     read_only: bool = false,
     /// The buffer-local semantic cursor, restored when the buffer is selected
@@ -283,7 +283,7 @@ pub fn resolveSink(self: *Buffers, gpa: Allocator, held: *?Ref, name: []const u8
 /// Focus `id`: the outgoing buffer saves `head`'s current keymap mode; the
 /// incoming buffer's mode is restored INTO `head` (its saved mode, or — when
 /// it's fresh — the base `default_mode`). A fresh buffer does NOT inherit the
-/// outgoing mode: that is what let a tool buffer's mode (dired/git) stick
+/// outgoing mode: that is what let a tool buffer's mode (files/git) stick
 /// when you opened a file from it. The mode a buffer shows is always
 /// determined by the buffer; WHICH head sees that mode is `head` — the saved
 /// mode itself stays a buffer property (system-scoped), only the active

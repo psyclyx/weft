@@ -74,7 +74,7 @@ pub const Hud = struct {
     /// The diagnostics feed layer (anchored spans, kind = severity).
     diag_layer: ?*const core.layers.Layer = null,
     /// Placed decorations (virtual_before text drawn beside the line, never in
-    /// the document): dired's metadata/arrow/mark, inlay hints, blame. Rendered
+    /// the document): files's metadata/arrow/mark, inlay hints, blame. Rendered
     /// as leading dimmed cells by the mono line layout.
     decorations_layer: ?*const core.layers.Layer = null,
     /// Message of a diagnostic at the cursor, for the status line.
@@ -118,7 +118,7 @@ pub const Hud = struct {
     /// Caret shape and blink phase (false = hidden this frame).
     cursor_style: CursorStyle = .block,
     cursor_on: bool = true,
-    /// Retained plugin overlays (which-key/dired/magit) to draw this frame.
+    /// Retained plugin overlays (which-key/files/magit) to draw this frame.
     /// corner/center placements overlay the body; bottom is reserved for the
     /// dock (the picker/which-key path).
     surfaces: []const *const core.surface.Surface = &.{},

@@ -47,7 +47,7 @@ pub const Facts = struct {
     first_line: []const u8 = "",
     tags: []const []const u8 = &.{},
     size: usize = 0,
-    /// Keymap mode ("normal", "insert", "dired", ...).
+    /// Keymap mode ("normal", "insert", "files", ...).
     mode: []const u8 = "",
     /// Buffer language: an extension sans dot, `action.langOfName`'s output.
     lang: []const u8 = "",

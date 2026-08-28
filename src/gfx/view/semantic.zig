@@ -3,7 +3,7 @@
 //! This is deliberately downstream of the semantic and view runtime: plugins
 //! publish stable nodes, facts, actions, and generic editable fields; this
 //! renderer chooses rows, colors, and popup geometry. A radically different
-//! presenter can consume the same scene without changing dired, vim, or core.
+//! presenter can consume the same scene without changing files, vim, or core.
 
 const std = @import("std");
 const Allocator = std.mem.Allocator;

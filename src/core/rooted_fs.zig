@@ -131,7 +131,7 @@ pub const RootedFs = struct {
     }
 
     /// List the directory at `rel` (confined), returning names newline-joined
-    /// (owned). Directories keep a trailing `/`, so a consumer (dired) can tell
+    /// (owned). Directories keep a trailing `/`, so a consumer (files) can tell
     /// them apart. Order is filesystem order.
     pub fn list(self: *const RootedFs, gpa: Allocator, rel: [*:0]const u8) Error![]u8 {
         const fd = try self.openBeneath(rel, .{ .ACCMODE = .RDONLY, .DIRECTORY = true, .CLOEXEC = true }, 0);

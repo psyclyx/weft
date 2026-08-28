@@ -1436,12 +1436,12 @@ test "interaction and target codecs round-trip defaults, handles, variants, and 
     try t.expectEqualStrings("ok", interaction_value.value.default_action.?);
     try t.expectEqualStrings("enter", interaction_value.value.bindings[0].input);
 
-    const target_definition: semantic.target.Definition = .{ .kind = .{ .synthetic = "dired" }, .display_name = "Files", .facts = &.{.{ .name = "scope", .value = "project" }} };
+    const target_definition: semantic.target.Definition = .{ .kind = .{ .synthetic = "files" }, .display_name = "Files", .facts = &.{.{ .name = "scope", .value = "project" }} };
     const target_bytes = try encodeTarget(t.allocator, target_definition);
     defer t.allocator.free(target_bytes);
     var target_value = try decodeTarget(t.allocator, target_bytes);
     defer target_value.deinit();
-    try t.expectEqualStrings("dired", target_value.value.kind.synthetic);
+    try t.expectEqualStrings("files", target_value.value.kind.synthetic);
     try t.expectEqualStrings("project", target_value.value.facts[0].value);
 }
 

@@ -244,7 +244,7 @@ test "authoring: `>`/`<` indent operators — line, text object, visual" {
     }
 }
 
-test "dired: semantic field editing keeps the view focused and returns to normal" {
+test "files: semantic field editing keeps the view focused and returns to normal" {
     const gpa = t.allocator;
     var app: App = undefined;
     try app.init(gpa);
@@ -252,8 +252,8 @@ test "dired: semantic field editing keeps the view focused and returns to normal
     const ed = &app.ed;
 
     // Open the current directory through the ordinary provider-aware `open`
-    // command. The sandboxed dired plugin claims it through the generic
-    // target-handler ABI; there is no dired buffer or dired mode involved.
+    // command. The sandboxed files plugin claims it through the generic
+    // target-handler ABI; there is no files buffer or files mode involved.
     authorFile(ed, "note.txt", "hello\n");
     ed.runStr("open", ".");
     const view_ref = ed.head.semantic_focus.path().?.view;
@@ -278,7 +278,7 @@ test "dired: semantic field editing keeps the view focused and returns to normal
     try t.expectEqualStrings("xnote.txt", after.value.bytes);
 }
 
-test "dired: Vim Return and minus follow generic target relations" {
+test "files: Vim Return and minus follow generic target relations" {
     const gpa = t.allocator;
     var app: App = undefined;
     try app.init(gpa);
@@ -306,13 +306,13 @@ test "dired: Vim Return and minus follow generic target relations" {
     try t.expectEqualStrings("files", ed.session.system.semantic.views.get(child_view).?.scene.role);
 
     // `-` likewise follows the open `container` relation. The child target's
-    // publisher supplies that edge; Vim and dired do not import one another.
+    // publisher supplies that edge; Vim and files do not import one another.
     ed.press("minus", "");
     try t.expectEqual(parent_view, ed.head.semantic_focus.path().?.view);
     try t.expectEqualStrings("normal", ed.mode());
 }
 
-test "dired: configured working-target action changes locus without opening a view" {
+test "files: configured working-target action changes locus without opening a view" {
     const gpa = t.allocator;
     var app: App = undefined;
     try app.init(gpa);
@@ -329,7 +329,7 @@ test "dired: configured working-target action changes locus without opening a vi
     const child_target = child.target orelse return error.TestExpectedEqual;
     try t.expect(ed.head.working_target == null);
 
-    // Config knows only the open semantic action name. The dired provider
+    // Config knows only the open semantic action name. The files provider
     // returns an exact target request, core validates it, and the dispatching
     // head records it without opening/focusing another tool view.
     ed.chord("SPC v c");
@@ -1463,7 +1463,7 @@ test "debug: set a breakpoint on a line — gutter marker, list, toggle off" {
     try t.expect(std.mem.indexOf(u8, ed.echoText(), "0 breakpoint") != null);
 }
 
-test "authoring/dired: rename a semantic field, apply its dialog, and verify disk" {
+test "authoring/files: rename a semantic field, apply its dialog, and verify disk" {
     const gpa = t.allocator;
     var app: App = undefined;
     try app.init(gpa);
@@ -1471,8 +1471,8 @@ test "authoring/dired: rename a semantic field, apply its dialog, and verify dis
     const ed = &app.ed;
 
     // A file on disk; open its containing directory through the generic
-    // provider-aware command. The semantic scene is the dired plugin's public
-    // surface, not a legacy `*dired*` text buffer.
+    // provider-aware command. The semantic scene is the files plugin's public
+    // surface, not a legacy `*files*` text buffer.
     authorFile(ed, "old.txt", "keep me\n");
     ed.runStr("open", ".");
     const view_ref = ed.head.semantic_focus.path().?.view;
@@ -1526,7 +1526,7 @@ test "authoring/dired: rename a semantic field, apply its dialog, and verify dis
     });
 
     // Apply is an advertised semantic action. Its provider opens a head-local
-    // interaction; the dialog owns `y`, rather than introducing a dired mode or
+    // interaction; the dialog owns `y`, rather than introducing a files mode or
     // polluting which-key/global bindings.
     ed.chord("SPC v a");
     try t.expectEqualStrings("which-key-like", ed.head.interactions.active().?.descriptor.presentation);
@@ -1545,7 +1545,7 @@ test "authoring/dired: rename a semantic field, apply its dialog, and verify dis
     try t.expect(std.mem.indexOf(u8, disk, "keep me") != null);
 }
 
-test "authoring/dired: refresh reconciles external churn without retargeting a dirty row" {
+test "authoring/files: refresh reconciles external churn without retargeting a dirty row" {
     const gpa = t.allocator;
     var app: App = undefined;
     try app.init(gpa);
@@ -1588,7 +1588,7 @@ test "authoring/dired: refresh reconciles external churn without retargeting a d
         .selection_after = .{ .anchor = 9, .caret = 9 },
     });
 
-    // Mutate the backing directory without going through the dired draft.
+    // Mutate the backing directory without going through the files draft.
     // Both renames preserve opaque identities; the dirty rename must not
     // retarget its draft, while the clean rename must refresh its child
     // target. The new file exercises external create, and removed.txt
@@ -1639,7 +1639,7 @@ test "authoring/dired: refresh reconciles external churn without retargeting a d
     try t.expect(saw_dirty_stale);
 }
 
-test "authoring/dired: refresh rollback restores retained fields after an interleaved removal" {
+test "authoring/files: refresh rollback restores retained fields after an interleaved removal" {
     const gpa = t.allocator;
     var app: App = undefined;
     try app.init(gpa);
@@ -1699,14 +1699,14 @@ test "authoring/dired: refresh rollback restores retained fields after an interl
     // the third row. The rollback must restore that mode to `before`; a
     // positional prefix would incorrectly restore the already-removed first
     // row's fields instead.
-    var dired_owner: ?semantic.owner.Id = null;
+    var files_owner: ?semantic.owner.Id = null;
     for (ed.plugins.items) |plugin| {
         if (std.mem.eql(u8, plugin.name, "files")) {
-            dired_owner = plugin.semantic_owner;
+            files_owner = plugin.semantic_owner;
             break;
         }
     }
-    const owner = dired_owner orelse return error.TestExpectedEqual;
+    const owner = files_owner orelse return error.TestExpectedEqual;
     try t.expect(ed.session.system.semantic.fields.remove(gpa, owner, tail_ref));
 
     ed.chord("SPC v r");
@@ -1716,7 +1716,7 @@ test "authoring/dired: refresh rollback restores retained fields after an interl
     try t.expectEqualStrings(before.value.bytes, restored.value.bytes);
 }
 
-test "authoring/dired: a durable raw-name copy survives rename, deletion, and a different directory view" {
+test "authoring/files: a durable raw-name copy survives rename, deletion, and a different directory view" {
     const gpa = t.allocator;
     var app: App = undefined;
     try app.init(gpa);
@@ -1786,7 +1786,7 @@ test "authoring/dired: a durable raw-name copy survives rename, deletion, and a 
     try t.expectEqual(core.file.Kind.none, core.file.statKind(gpa, source_path));
 }
 
-test "authoring/dired: symlink rows stay links through generic copy, delete, and paste" {
+test "authoring/files: symlink rows stay links through generic copy, delete, and paste" {
     const gpa = t.allocator;
     var app: App = undefined;
     try app.init(gpa);
@@ -1831,7 +1831,7 @@ test "authoring/dired: symlink rows stay links through generic copy, delete, and
     const link_leaf_id = link_leaf orelse return error.TestExpectedEqual;
 
     // Resolve focus only through the generic semantic focus protocol. This
-    // loop is deliberately independent of dired row ids or a dired mode.
+    // loop is deliberately independent of files row ids or a files mode.
     var focused_link = false;
     for (0..source_rows.len) |_| {
         const leaf = ed.head.semantic_focus.path().?.leaf().?;
@@ -1866,7 +1866,7 @@ test "authoring/dired: symlink rows stay links through generic copy, delete, and
     defer gpa.free(source_state);
     try t.expectEqualStrings("intact", source_state);
 
-    // Paste in an independent dired instance after the source link has been
+    // Paste in an independent files instance after the source link has been
     // removed. The retained transfer must recreate a symlink with identical
     // raw link text; the referent remains an ordinary untouched file.
     ed.runStr("open", "destination");
@@ -1902,7 +1902,7 @@ test "authoring/dired: symlink rows stay links through generic copy, delete, and
     try t.expectEqualStrings("referent survives\n", referent);
 }
 
-test "authoring/dired: Vim named semantic register crosses delete and another view" {
+test "authoring/files: Vim named semantic register crosses delete and another view" {
     const gpa = t.allocator;
     var app: App = undefined;
     try app.init(gpa);
@@ -1924,7 +1924,7 @@ test "authoring/dired: Vim named semantic register crosses delete and another vi
     ed.press("d", "");
 
     ed.runStr("open", "destination");
-    // `"ap` reads `a` in a fresh dired view, then apply through its dialog.
+    // `"ap` reads `a` in a fresh files view, then apply through its dialog.
     ed.press("quotedbl", "");
     ed.press("a", "");
     ed.press("p", "");
@@ -1936,7 +1936,7 @@ test "authoring/dired: Vim named semantic register crosses delete and another vi
     try t.expectEqualStrings("named transfer\n", disk);
 }
 
-test "authoring/dired: generic create and permissions actions apply from an empty directory" {
+test "authoring/files: generic create and permissions actions apply from an empty directory" {
     const gpa = t.allocator;
     var app: App = undefined;
     try app.init(gpa);
@@ -2287,7 +2287,7 @@ fn focusFilesRow(ed: *h.Editor, gpa: std.mem.Allocator, want: []const u8) !void 
     _ = try ed.session.system.semantic.focusView(ed.head, gpa, view, column.id);
 }
 
-test "authoring/dired: Vim Tab folds a directory open in place and back shut" {
+test "authoring/files: Vim Tab folds a directory open in place and back shut" {
     const gpa = t.allocator;
     var app: App = undefined;
     try app.init(gpa);
@@ -2341,7 +2341,7 @@ test "authoring/dired: Vim Tab folds a directory open in place and back shut" {
     try t.expectEqual(view_ref, ed.head.semantic_focus.path().?.view);
 }
 
-test "authoring/dired: Vim Return on a file row opens it as an ordinary buffer" {
+test "authoring/files: Vim Return on a file row opens it as an ordinary buffer" {
     const gpa = t.allocator;
     var app: App = undefined;
     try app.init(gpa);

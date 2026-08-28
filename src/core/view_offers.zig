@@ -4,7 +4,7 @@
 //! `view_runtime/offers.zig` derives WHAT a scene affords from its shape;
 //! this names those affordances in the standard vocabulary, points each at an
 //! existing host route, and pushes the result as one revision-stamped table.
-//! Files, dired, git, and any future view therefore answer Tab, Return, the
+//! Files, files, git, and any future view therefore answer Tab, Return, the
 //! motion keys, and `q` without binding a key or declaring an offer.
 //!
 //! Republication is a value comparison, not a callback: the head's focus, the
@@ -208,7 +208,7 @@ const Fixture = struct {
         .{ .id = standard.open_container, .label = "Open container", .enabled = true },
     };
 
-    /// `src/plugins/dired/projection.zig`'s shape: a vertical `files` root of
+    /// `src/plugins/files/projection.zig`'s shape: a vertical `files` root of
     /// horizontal `files.row` containers whose focusable `files.name` column
     /// carries the row's target.
     fn scene(self: *Fixture, refused: bool) model.scene.Node {

@@ -1,9 +1,9 @@
-//! Pure dired draft/reconcile model.
+//! Pure files draft/reconcile model.
 //!
 //! The model owns browser state only.  It observes filesystem identities and
 //! revisions, keeps editable drafts, and emits typed `weft_fs` plans.  It does
 //! not call a provider and it does not share mutable state with a guest or
-//! another dired instance.
+//! another files instance.
 
 const std = @import("std");
 const semantic = @import("weft_semantic");
@@ -113,14 +113,14 @@ pub const PlanPolicy = struct {
     remove: contract.RemovePolicy = .quarantine,
 };
 
-const entry_media = "application/x-weft-dired-entry";
-const entry_schema = "weft.dired.entry.v3";
-const entry_schema_v2 = "weft.dired.entry.v2";
-const tree_media = "application/x-weft-dired-tree";
-const tree_schema = "weft.dired.tree.v1";
-const entry_magic_v2 = "weft-dired-entry-v2\x00";
-const entry_magic = "weft-dired-entry-v3\x00";
-const tree_magic = "weft-dired-tree-v1\x00";
+const entry_media = "application/x-weft-files-entry";
+const entry_schema = "weft.files.entry.v3";
+const entry_schema_v2 = "weft.files.entry.v2";
+const tree_media = "application/x-weft-files-tree";
+const tree_schema = "weft.files.tree.v1";
+const entry_magic_v2 = "weft-files-entry-v2\x00";
+const entry_magic = "weft-files-entry-v3\x00";
+const tree_magic = "weft-files-tree-v1\x00";
 const no_parent = std.math.maxInt(u32);
 
 pub const Model = struct {
@@ -1684,39 +1684,39 @@ test "deleted pending subtree contributes no source operations after paste" {
 }
 
 test "empty names retain rows as deletions and typing revives their origin" {
-    var dired = Model.init(std.testing.allocator, .{ .authority = .here, .slot = 32, .generation = 1 });
-    defer dired.deinit();
-    try dired.reconcile(.{ .entries = &.{.{
+    var files = Model.init(std.testing.allocator, .{ .authority = .here, .slot = 32, .generation = 1 });
+    defer files.deinit();
+    try files.reconcile(.{ .entries = &.{.{
         .identity = ref(33, 1),
         .name = "observed",
         .revision = "r1",
         .kind = .regular,
     }} });
-    const observed = dired.rows.items[0].id;
+    const observed = files.rows.items[0].id;
 
-    try dired.rename(observed, "");
-    try std.testing.expectEqual(@as(usize, 1), dired.rows.items.len);
-    try std.testing.expectEqual(Pending.deleted, dired.row(observed).?.pending);
-    try std.testing.expectEqualStrings("", dired.row(observed).?.draft.name);
-    var removal = try dired.buildPlan();
+    try files.rename(observed, "");
+    try std.testing.expectEqual(@as(usize, 1), files.rows.items.len);
+    try std.testing.expectEqual(Pending.deleted, files.row(observed).?.pending);
+    try std.testing.expectEqualStrings("", files.row(observed).?.draft.name);
+    var removal = try files.buildPlan();
     defer removal.deinit();
     try std.testing.expectEqual(@as(usize, 1), removal.value.operations.len);
     try std.testing.expect(removal.value.operations[0].operation == .remove);
 
-    try dired.rename(observed, "renamed");
-    try std.testing.expectEqual(Pending.renamed, dired.row(observed).?.pending);
-    try std.testing.expectEqualStrings("renamed", dired.row(observed).?.draft.name);
-    try dired.rename(observed, "observed");
-    try std.testing.expectEqual(Pending.observed, dired.row(observed).?.pending);
-    try std.testing.expect(!dired.row(observed).?.name_dirty);
+    try files.rename(observed, "renamed");
+    try std.testing.expectEqual(Pending.renamed, files.row(observed).?.pending);
+    try std.testing.expectEqualStrings("renamed", files.row(observed).?.draft.name);
+    try files.rename(observed, "observed");
+    try std.testing.expectEqual(Pending.observed, files.row(observed).?.pending);
+    try std.testing.expect(!files.row(observed).?.name_dirty);
 
-    const added = try dired.addFile(null, "pending", &.{}, null);
-    try dired.rename(added, "");
-    var suppressed = try dired.buildPlan();
+    const added = try files.addFile(null, "pending", &.{}, null);
+    try files.rename(added, "");
+    var suppressed = try files.buildPlan();
     defer suppressed.deinit();
     try std.testing.expectEqual(@as(usize, 0), suppressed.value.operations.len);
-    try dired.rename(added, "restored");
-    try std.testing.expectEqual(Pending.added, dired.row(added).?.pending);
+    try files.rename(added, "restored");
+    try std.testing.expectEqual(Pending.added, files.row(added).?.pending);
 }
 
 test "planner captures before source rename independent of row order" {
@@ -2086,15 +2086,15 @@ test "build plan rejects missing parent, non-directory parent, and cycles" {
 }
 
 fn reconcileAllocationFailureCase(gpa: std.mem.Allocator) !void {
-    var dired = Model.init(gpa, .{ .authority = .here, .slot = 80, .generation = 1 });
-    defer dired.deinit();
-    try dired.reconcile(.{
+    var files = Model.init(gpa, .{ .authority = .here, .slot = 80, .generation = 1 });
+    defer files.deinit();
+    try files.reconcile(.{
         .revision = "base-one",
         .entries = &.{.{ .identity = ref(80, 1), .name = "kept", .revision = "entry-one", .kind = .regular }},
     });
-    const id = dired.rows.items[0].id;
-    try dired.rename(id, "draft-name");
-    dired.reconcile(.{
+    const id = files.rows.items[0].id;
+    try files.rename(id, "draft-name");
+    files.reconcile(.{
         .revision = "base-two",
         .entries = &.{
             .{ .identity = ref(80, 1), .name = "external-name", .revision = "entry-two", .kind = .regular },
@@ -2103,17 +2103,17 @@ fn reconcileAllocationFailureCase(gpa: std.mem.Allocator) !void {
     }) catch |err| {
         // Every failed staged reconciliation leaves the complete live draft
         // and its namespace guard untouched.
-        try std.testing.expectEqual(@as(usize, 1), dired.rows.items.len);
-        try std.testing.expectEqual(id, dired.rows.items[0].id);
-        try std.testing.expectEqualStrings("draft-name", dired.rows.items[0].draft.name);
-        try std.testing.expectEqualStrings("base-one", dired.base_revision.?);
+        try std.testing.expectEqual(@as(usize, 1), files.rows.items.len);
+        try std.testing.expectEqual(id, files.rows.items[0].id);
+        try std.testing.expectEqualStrings("draft-name", files.rows.items[0].draft.name);
+        try std.testing.expectEqualStrings("base-one", files.base_revision.?);
         return err;
     };
-    try std.testing.expectEqual(@as(usize, 2), dired.rows.items.len);
-    try std.testing.expectEqualStrings("draft-name", dired.row(id).?.draft.name);
-    try std.testing.expectEqual(Conflict.stale, dired.row(id).?.conflict);
+    try std.testing.expectEqual(@as(usize, 2), files.rows.items.len);
+    try std.testing.expectEqualStrings("draft-name", files.row(id).?.draft.name);
+    try std.testing.expectEqual(Conflict.stale, files.row(id).?.conflict);
     // A dirty refresh observes current state but retains the clean baseline.
-    try std.testing.expectEqualStrings("base-one", dired.base_revision.?);
+    try std.testing.expectEqualStrings("base-one", files.base_revision.?);
 }
 
 test "reconcile is transactional under every allocation failure" {
@@ -2121,83 +2121,83 @@ test "reconcile is transactional under every allocation failure" {
 }
 
 test "an expanded scope reconciles independently of the rest of the draft" {
-    var dired = Model.init(std.testing.allocator, .{ .authority = .here, .slot = 0, .generation = 1 });
-    defer dired.deinit();
-    try dired.reconcile(.{ .revision = "root-one", .entries = &.{
+    var files = Model.init(std.testing.allocator, .{ .authority = .here, .slot = 0, .generation = 1 });
+    defer files.deinit();
+    try files.reconcile(.{ .revision = "root-one", .entries = &.{
         .{ .identity = ref(90, 1), .name = "child", .revision = "child-one", .kind = .directory },
         .{ .identity = ref(91, 1), .name = "top.txt", .revision = "top-one", .kind = .regular },
     } });
-    const child = dired.rows.items[0].id;
-    const top = dired.rows.items[1].id;
-    try dired.rename(top, "draft.txt");
+    const child = files.rows.items[0].id;
+    const top = files.rows.items[1].id;
+    try files.rename(top, "draft.txt");
 
-    try dired.reconcileChildren(child, .{ .revision = "child-one", .entries = &.{
+    try files.reconcileChildren(child, .{ .revision = "child-one", .entries = &.{
         .{ .identity = ref(92, 1), .name = "inner.txt", .revision = "inner-one", .kind = .regular },
     } });
-    try dired.setExpanded(child, true);
+    try files.setExpanded(child, true);
 
     // The child's rows sit inside its subtree, so the flat order is already
     // the visible tree order, and a listing scoped to it left the draft
     // beside it exactly as it was.
-    const inner = dired.rows.items[1].id;
-    try std.testing.expectEqual(@as(usize, 3), dired.rows.items.len);
-    try std.testing.expectEqual(child, dired.row(inner).?.parent.?);
-    try std.testing.expectEqual(top, dired.rows.items[2].id);
-    try std.testing.expectEqualStrings("draft.txt", dired.row(top).?.draft.name);
-    try std.testing.expectEqual(@as(u16, 1), rowDepth(dired.rows.items, dired.row(inner).?.*));
+    const inner = files.rows.items[1].id;
+    try std.testing.expectEqual(@as(usize, 3), files.rows.items.len);
+    try std.testing.expectEqual(child, files.row(inner).?.parent.?);
+    try std.testing.expectEqual(top, files.rows.items[2].id);
+    try std.testing.expectEqualStrings("draft.txt", files.row(top).?.draft.name);
+    try std.testing.expectEqual(@as(u16, 1), rowDepth(files.rows.items, files.row(inner).?.*));
     // A child directory's namespace token is its own; the apply guard for
     // this model's directory keeps the one its own listing supplied.
-    try std.testing.expectEqualStrings("root-one", dired.base_revision.?);
+    try std.testing.expectEqualStrings("root-one", files.base_revision.?);
 
     // The other direction holds too: the view's own listing never adopts or
     // discards rows belonging to an open scope below it.
-    try dired.reconcile(.{ .revision = "root-two", .entries = &.{
+    try files.reconcile(.{ .revision = "root-two", .entries = &.{
         .{ .identity = ref(90, 1), .name = "child", .revision = "child-one", .kind = .directory },
     } });
-    try std.testing.expectEqual(@as(usize, 3), dired.rows.items.len);
-    try std.testing.expect(dired.row(inner) != null);
-    try std.testing.expectEqual(Conflict.stale, dired.row(top).?.conflict);
+    try std.testing.expectEqual(@as(usize, 3), files.rows.items.len);
+    try std.testing.expect(files.row(inner) != null);
+    try std.testing.expectEqual(Conflict.stale, files.row(top).?.conflict);
 
     // A directory that vanishes takes the rows it was holding open with it.
-    try dired.reconcile(.{ .revision = "root-three", .entries = &.{} });
-    try std.testing.expect(dired.row(child) == null);
-    try std.testing.expect(dired.row(inner) == null);
+    try files.reconcile(.{ .revision = "root-three", .entries = &.{} });
+    try std.testing.expect(files.row(child) == null);
+    try std.testing.expect(files.row(inner) == null);
 }
 
 test "collapsing hides a subtree without discarding the drafts inside it" {
-    var dired = Model.init(std.testing.allocator, .{ .authority = .here, .slot = 0, .generation = 1 });
-    defer dired.deinit();
-    try dired.reconcile(.{ .entries = &.{
+    var files = Model.init(std.testing.allocator, .{ .authority = .here, .slot = 0, .generation = 1 });
+    defer files.deinit();
+    try files.reconcile(.{ .entries = &.{
         .{ .identity = ref(95, 1), .name = "child", .revision = "child-one", .kind = .directory },
     } });
-    const child = dired.rows.items[0].id;
-    try dired.reconcileChildren(child, .{ .entries = &.{
+    const child = files.rows.items[0].id;
+    try files.reconcileChildren(child, .{ .entries = &.{
         .{ .identity = ref(96, 1), .name = "inner.txt", .revision = "inner-one", .kind = .regular },
     } });
-    try dired.setExpanded(child, true);
-    const inner = dired.rows.items[1].id;
-    try dired.rename(inner, "renamed.txt");
+    try files.setExpanded(child, true);
+    const inner = files.rows.items[1].id;
+    try files.rename(inner, "renamed.txt");
 
-    try dired.setExpanded(child, false);
-    try std.testing.expect(!rowVisible(dired.rows.items, dired.row(inner).?.*));
-    try std.testing.expect(rowVisible(dired.rows.items, dired.row(child).?.*));
-    try std.testing.expectEqualStrings("renamed.txt", dired.row(inner).?.draft.name);
+    try files.setExpanded(child, false);
+    try std.testing.expect(!rowVisible(files.rows.items, files.row(inner).?.*));
+    try std.testing.expect(rowVisible(files.rows.items, files.row(child).?.*));
+    try std.testing.expectEqualStrings("renamed.txt", files.row(inner).?.draft.name);
 
     // Re-opening reads the directory again: an external creation appears and
     // the draft made before the fold reconciles rather than being replayed.
-    try dired.reconcileChildren(child, .{ .entries = &.{
+    try files.reconcileChildren(child, .{ .entries = &.{
         .{ .identity = ref(96, 1), .name = "inner.txt", .revision = "inner-one", .kind = .regular },
         .{ .identity = ref(97, 1), .name = "added.txt", .revision = "added-one", .kind = .regular },
     } });
-    try dired.setExpanded(child, true);
-    try std.testing.expectEqual(@as(usize, 3), dired.rows.items.len);
-    try std.testing.expectEqualStrings("renamed.txt", dired.row(inner).?.draft.name);
-    try std.testing.expect(rowVisible(dired.rows.items, dired.rows.items[2]));
+    try files.setExpanded(child, true);
+    try std.testing.expectEqual(@as(usize, 3), files.rows.items.len);
+    try std.testing.expectEqualStrings("renamed.txt", files.row(inner).?.draft.name);
+    try std.testing.expect(rowVisible(files.rows.items, files.rows.items[2]));
 
     // Only a directory folds, and only while it is still there.
-    try std.testing.expectError(error.NotDirectory, dired.setExpanded(inner, true));
-    try dired.markDelete(child);
-    try std.testing.expectError(error.StaleParent, dired.setExpanded(child, false));
+    try std.testing.expectError(error.NotDirectory, files.setExpanded(inner, true));
+    try files.markDelete(child);
+    try std.testing.expectError(error.StaleParent, files.setExpanded(child, false));
 }
 
 test "two drafts over one directory fold independently" {

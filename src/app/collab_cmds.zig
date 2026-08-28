@@ -233,7 +233,7 @@ pub fn realizeAllHandler(ctx: *core.command.Context, data: ?*anyopaque, args: []
 }
 
 /// `peer-files` opens the peer's published shared-root target through ordinary
-/// target resolution. The command does not select dired or inspect a
+/// target resolution. The command does not select files or inspect a
 /// filesystem fact; whichever plugin claims the target owns the experience.
 pub fn peerFilesHandler(ctx: *core.command.Context, data: ?*anyopaque, args: []const core.command.Value) anyerror!core.command.Value {
     const sc: *ShareCtx = @ptrCast(@alignCast(data.?));

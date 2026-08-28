@@ -4,7 +4,7 @@
 //! "completion popup" or "hover box" is — those are CONSUMER concerns now
 //! (`core.pick.Pick.buildSurface` builds the picker's own scene; the `lsp`
 //! guest plugin emits its hover popup straight through the `wl_surface_*`
-//! membrane, same as which-key/dired/magit). What's left here is three
+//! membrane, same as which-key/files/magit). What's left here is three
 //! GENERIC renderers over `core.surface.Surface`, one per `Placement`:
 //! `drawSurfaces` (corner/center — floating panels), `drawCaretSurface`
 //! (caret — anchored at a document offset, flip/clamp/column-align), and

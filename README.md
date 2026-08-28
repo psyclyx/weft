@@ -189,7 +189,7 @@ zig build test     # display-free tests
 ### Iterating
 
 Run the narrowest step that covers what you are changing. Edit-to-verdict on
-this box: `test-fs-runtime` 0.6s, `test-dired-model` 0.8s, `test-contract`
+this box: `test-fs-runtime` 0.6s, `test-files-model` 0.8s, `test-contract`
 1.7s, `e2e-popup-layout` 3.3s — the last is the cheapest whole-app rebuild.
 `zig build --watch <step>` re-runs one on every save and is worth it for the
 ergonomics, not the clock: measured here it lands within a few percent of

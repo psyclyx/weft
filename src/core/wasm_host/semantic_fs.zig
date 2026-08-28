@@ -1,6 +1,6 @@
 //! Generic target-scoped filesystem transport for sandboxed plugins.
 //!
-//! This is deliberately not a dired door.  A plugin presents a semantic
+//! This is deliberately not a files door.  A plugin presents a semantic
 //! target and its descriptor revision; the host re-reads the live descriptor,
 //! extracts the ordinary `weft.fs.directory.v1` fact, and routes the typed
 //! operation through the platform-neutral filesystem router.  Root and entry

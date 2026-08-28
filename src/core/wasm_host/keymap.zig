@@ -149,7 +149,7 @@ pub fn setMode(gpa: Allocator, ctx: *command_mod.Context, id: anytype, mode: []c
     c.enterMode(ctx.keymap, mode) catch {};
     // Remember a RESTING mode as the active buffer's resting mode, so exiting a
     // transient sub-mode (insert/visual) returns HERE — this is what keeps a
-    // tool projection (dired) live after an in-place edit + Escape.
+    // tool projection (files) live after an in-place edit + Escape.
     if (ctx.keymap.isRestingMode(mode)) {
         const buf = ctx.buffers.active();
         const held = gpa.dupe(u8, mode) catch return;
@@ -169,7 +169,7 @@ pub fn hSetMode(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32, resu
 }
 
 /// `exitToResting()`: leave a transient mode (insert/visual) back to the active
-/// buffer's RESTING mode — its own tool mode (dired) if it has one, else the base
+/// buffer's RESTING mode — its own tool mode (files) if it has one, else the base
 /// editing mode. Replaces a guest's hardcoded `setMode("normal")` on Escape, so a
 /// projection's keys never sleep after an in-place edit.
 pub fn hExitToResting(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32, results: []i32) void {

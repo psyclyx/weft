@@ -1,6 +1,6 @@
 //! weft-fs-codec: bounded, platform-free wire values for filesystem tools.
 //!
-//! The codec is deliberately separate from both providers and dired.  It
+//! The codec is deliberately separate from both providers and files.  It
 //! carries observations and effect plans between plugin instances without
 //! making an OS descriptor, a filename encoding, or a modal editor part of
 //! the protocol.

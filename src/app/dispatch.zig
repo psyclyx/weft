@@ -24,7 +24,7 @@
 //! `ctx.zig`'s module doc): guest-initiated `weft.setMode` (every plugin's
 //! OWN direct menu entry — `git-push-menu`/`git-pull-menu`/`git-fetch-menu`
 //! (sticky), `git-reset-menu`, vim's `op-pending`/`op-to`, helix's
-//! `helix-op`, dired's `dired-confirm`) stays
+//! `helix-op`, files's `files-confirm`) stays
 //! on the legacy `Head.menu_return` table (not `Head.transient_stack`),
 //! which therefore CANNOT be deleted — it is still the only record for
 //! those. Task #19 item 3 (the POLICY DOOR) is a separate axis from this:
@@ -172,7 +172,7 @@ fn popOurTransient(ctx: *core.command.Context, depth: usize) void {
 /// `menu-escape` (Escape / C-g, bound in the GLOBAL layer so it works anywhere)
 /// — leave the current MENU back to its recorded return target. Outside a menu
 /// it is a NO-OP: Escape must never force a mode change, or it drops you into
-/// the editing base (`normal`) inside a read-only projection like magit/dired —
+/// the editing base (`normal`) inside a read-only projection like magit/files —
 /// the recurring "wrong mode in a tool buffer" jank. A projection's own mode is
 /// its resting mode; Escape leaves it alone. (An editing mode's own Escape —
 /// vim insert/visual → normal — is bound mode-locally and wins over this.)

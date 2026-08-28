@@ -1,12 +1,12 @@
-//! Test-only root for the real sandboxed dired adapter.
+//! Test-only root for the real sandboxed files adapter.
 //!
-//! All behavior lives in the named `weft_dired_guest` module. This file is
+//! All behavior lives in the named `weft_files_guest` module. This file is
 //! only the wasm callback table a third-party plugin root would provide.
 
 const weft = @import("weft");
-const dired_guest = @import("weft_dired_guest");
+const files_guest = @import("weft_files_guest");
 
-var plugin: dired_guest.Plugin = undefined;
+var plugin: files_guest.Plugin = undefined;
 
 export fn describe() void {
     weft.requestPerm(.fs_read);

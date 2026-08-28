@@ -1,4 +1,4 @@
-//! Generic semantic action controller for a dired model.
+//! Generic semantic action controller for a files model.
 //!
 //! This layer translates stable row-node requests into model operations. It
 //! owns no key policy, editor mode, confirmation UI, or filesystem provider;
@@ -7,8 +7,8 @@
 const std = @import("std");
 const semantic = @import("weft_semantic");
 const fs = @import("weft_fs");
-const model = @import("weft_dired_model");
-const projection = @import("weft_dired_projection");
+const model = @import("weft_files_model");
+const projection = @import("weft_files_projection");
 
 const action = semantic.action;
 const selection = semantic.selection;
@@ -34,8 +34,8 @@ pub const Controller = struct {
     view_ref: view.Ref,
     capture: ?transfer.OwnedItem = null,
 
-    pub fn init(gpa: std.mem.Allocator, dired: *model.Model, view_ref: view.Ref) Controller {
-        return .{ .gpa = gpa, .model = dired, .view_ref = view_ref };
+    pub fn init(gpa: std.mem.Allocator, files: *model.Model, view_ref: view.Ref) Controller {
+        return .{ .gpa = gpa, .model = files, .view_ref = view_ref };
     }
 
     pub fn deinit(self: *Controller) void {
@@ -178,16 +178,16 @@ fn rowNode(id: model.NodeId) semantic.scene.NodeId {
     return projection.rowNodeId(id) catch unreachable;
 }
 
-test "dired actions capture copy and cut, delete selected rows, and reject ambiguity" {
-    var dired = model.Model.init(std.testing.allocator, .{ .authority = .here, .slot = 1, .generation = 1 });
-    defer dired.deinit();
-    try dired.reconcile(.{ .entries = &.{
+test "files actions capture copy and cut, delete selected rows, and reject ambiguity" {
+    var files = model.Model.init(std.testing.allocator, .{ .authority = .here, .slot = 1, .generation = 1 });
+    defer files.deinit();
+    try files.reconcile(.{ .entries = &.{
         .{ .identity = ref(1, 1), .name = "one", .revision = "r1", .kind = .regular },
         .{ .identity = ref(2, 1), .name = "two", .revision = "r2", .kind = .regular },
     } });
-    const first = dired.rows.items[0].id;
-    const second = dired.rows.items[1].id;
-    var controller = Controller.init(std.testing.allocator, &dired, .{ .authority = .here, .slot = 4, .generation = 1 });
+    const first = files.rows.items[0].id;
+    const second = files.rows.items[1].id;
+    var controller = Controller.init(std.testing.allocator, &files, .{ .authority = .here, .slot = 4, .generation = 1 });
     defer controller.deinit();
 
     const copied = try controller.invoke(.{ .action = action.standard.copy, .view = controller.view_ref, .subject = rowNode(first) });
@@ -197,18 +197,18 @@ test "dired actions capture copy and cut, delete selected rows, and reject ambig
     try std.testing.expectEqual(transfer.Intent.cut, cut.transfer.intent);
     const selected = [_]semantic.scene.NodeId{rowNode(second)};
     _ = try controller.invoke(.{ .action = action.standard.delete, .view = controller.view_ref, .subject = rowNode(first), .selection = .{ .nodes = &selected } });
-    try std.testing.expectEqual(model.Pending.deleted, dired.row(second).?.pending);
+    try std.testing.expectEqual(model.Pending.deleted, files.row(second).?.pending);
     const ambiguous = [_]semantic.scene.NodeId{ rowNode(first), rowNode(second) };
     try std.testing.expectError(error.AmbiguousSubject, controller.invoke(.{ .action = action.standard.copy, .view = controller.view_ref, .subject = rowNode(first), .selection = .{ .nodes = &ambiguous } }));
-    try std.testing.expectEqual(model.Pending.observed, dired.row(first).?.pending);
+    try std.testing.expectEqual(model.Pending.observed, files.row(first).?.pending);
 }
 
-test "dired actions paste relative to a retained deleted row" {
-    var dired = model.Model.init(std.testing.allocator, .{ .authority = .here, .slot = 5, .generation = 1 });
-    defer dired.deinit();
-    try dired.reconcile(.{ .entries = &.{.{ .identity = ref(5, 1), .name = "kept", .revision = "r1", .kind = .regular }} });
-    const id = dired.rows.items[0].id;
-    var controller = Controller.init(std.testing.allocator, &dired, .{ .authority = .here, .slot = 5, .generation = 1 });
+test "files actions paste relative to a retained deleted row" {
+    var files = model.Model.init(std.testing.allocator, .{ .authority = .here, .slot = 5, .generation = 1 });
+    defer files.deinit();
+    try files.reconcile(.{ .entries = &.{.{ .identity = ref(5, 1), .name = "kept", .revision = "r1", .kind = .regular }} });
+    const id = files.rows.items[0].id;
+    var controller = Controller.init(std.testing.allocator, &files, .{ .authority = .here, .slot = 5, .generation = 1 });
     defer controller.deinit();
 
     const copied = try controller.invoke(.{ .action = action.standard.copy, .view = controller.view_ref, .subject = rowNode(id) });
@@ -220,13 +220,13 @@ test "dired actions paste relative to a retained deleted row" {
         .transfer = copied.transfer,
     });
 
-    try std.testing.expectEqual(@as(usize, 2), dired.rows.items.len);
-    try std.testing.expectEqual(model.Pending.deleted, dired.rows.items[0].pending);
-    try std.testing.expectEqual(model.Pending.copied, dired.rows.items[1].pending);
-    try std.testing.expectEqualStrings("kept", dired.rows.items[1].draft.name);
+    try std.testing.expectEqual(@as(usize, 2), files.rows.items.len);
+    try std.testing.expectEqual(model.Pending.deleted, files.rows.items[0].pending);
+    try std.testing.expectEqual(model.Pending.copied, files.rows.items[1].pending);
+    try std.testing.expectEqualStrings("kept", files.rows.items[1].draft.name);
 }
 
-test "dired actions paste before and after across model instances" {
+test "files actions paste before and after across model instances" {
     var source = model.Model.init(std.testing.allocator, .{ .authority = .here, .slot = 10, .generation = 1 });
     defer source.deinit();
     try source.reconcile(.{ .entries = &.{.{ .identity = ref(10, 1), .name = "captured", .revision = "r", .kind = .regular }} });
@@ -254,7 +254,7 @@ test "dired actions paste before and after across model instances" {
     try std.testing.expectEqualStrings("captured", destination.rows.items[1].draft.name);
 }
 
-test "dired actions paste into an empty root without a synthetic anchor" {
+test "files actions paste into an empty root without a synthetic anchor" {
     var source = model.Model.init(std.testing.allocator, .{ .authority = .here, .slot = 13, .generation = 1 });
     defer source.deinit();
     try source.reconcile(.{ .entries = &.{.{ .identity = ref(13, 1), .name = "captured", .revision = "r", .kind = .regular }} });
@@ -281,31 +281,31 @@ test "dired actions paste into an empty root without a synthetic anchor" {
     try std.testing.expectEqual(model.Pending.copied, destination.rows.items[0].pending);
 }
 
-test "dired actions reject unknown and stale subjects transactionally" {
-    var dired = model.Model.init(std.testing.allocator, .{ .authority = .here, .slot = 20, .generation = 1 });
-    defer dired.deinit();
-    try dired.reconcile(.{ .entries = &.{.{ .identity = ref(20, 1), .name = "stale", .revision = "r", .kind = .regular }} });
-    const id = dired.rows.items[0].id;
-    var controller = Controller.init(std.testing.allocator, &dired, .{ .authority = .here, .slot = 3, .generation = 1 });
+test "files actions reject unknown and stale subjects transactionally" {
+    var files = model.Model.init(std.testing.allocator, .{ .authority = .here, .slot = 20, .generation = 1 });
+    defer files.deinit();
+    try files.reconcile(.{ .entries = &.{.{ .identity = ref(20, 1), .name = "stale", .revision = "r", .kind = .regular }} });
+    const id = files.rows.items[0].id;
+    var controller = Controller.init(std.testing.allocator, &files, .{ .authority = .here, .slot = 3, .generation = 1 });
     defer controller.deinit();
     try std.testing.expectError(error.UnknownSubject, controller.invoke(.{ .action = action.standard.delete, .view = controller.view_ref, .subject = @enumFromInt(1) }));
-    try dired.rename(id, "draft");
-    try dired.reconcile(.{ .entries = &.{} });
+    try files.rename(id, "draft");
+    try files.reconcile(.{ .entries = &.{} });
     try std.testing.expectError(error.StaleSubject, controller.invoke(.{ .action = action.standard.delete, .view = controller.view_ref, .subject = rowNode(id) }));
-    try std.testing.expectEqual(model.Pending.renamed, dired.row(id).?.pending);
+    try std.testing.expectEqual(model.Pending.renamed, files.row(id).?.pending);
 }
 
 test "permissions action requests a secondary field focus without editing policy" {
-    var dired = model.Model.init(std.testing.allocator, .{ .authority = .here, .slot = 30, .generation = 1 });
-    defer dired.deinit();
-    try dired.reconcile(.{ .entries = &.{
+    var files = model.Model.init(std.testing.allocator, .{ .authority = .here, .slot = 30, .generation = 1 });
+    defer files.deinit();
+    try files.reconcile(.{ .entries = &.{
         .{ .identity = ref(30, 1), .name = "regular", .revision = "r", .kind = .regular, .mode = 0o644 },
         .{ .identity = ref(31, 1), .name = "link", .revision = "r", .kind = .symlink },
     } });
-    var controller = Controller.init(std.testing.allocator, &dired, .{ .authority = .here, .slot = 8, .generation = 1 });
+    var controller = Controller.init(std.testing.allocator, &files, .{ .authority = .here, .slot = 8, .generation = 1 });
     defer controller.deinit();
 
-    const regular = dired.rows.items[0].id;
+    const regular = files.rows.items[0].id;
     const outcome = try controller.invoke(.{
         .action = projection.permissions_edit_action,
         .view = controller.view_ref,
@@ -313,7 +313,7 @@ test "permissions action requests a secondary field focus without editing policy
     });
     try std.testing.expectEqual(try projection.modeNodeId(regular), outcome.focus);
 
-    const link = dired.rows.items[1].id;
+    const link = files.rows.items[1].id;
     try std.testing.expectError(error.InvalidSelection, controller.invoke(.{
         .action = projection.permissions_edit_action,
         .view = controller.view_ref,

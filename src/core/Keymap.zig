@@ -91,7 +91,7 @@ sticky_menus: std.StringArrayHashMapUnmanaged(void) = .empty,
 locked_modes: std.StringArrayHashMapUnmanaged(void) = .empty,
 
 /// Modes a buffer can REST in — the base editing mode (`normal`) and each tool
-/// projection (`dired`, `grep`, `output`, `emacs`, `helix-normal`). `baseMode`
+/// projection (`files`, `grep`, `output`, `emacs`, `helix-normal`). `baseMode`
 /// stops at the first of these in a mode's fallback chain, so leaving a buffer
 /// remembers its resting mode rather than overshooting to the root `default`
 /// (which would strand a revisited file in a mode with no editing keys). Locked
@@ -317,7 +317,7 @@ pub fn setFallback(self: *Keymap, gpa: Allocator, mode: []const u8, parent: []co
 
 /// The RESTING mode a buffer in `mode` should be remembered as: the root of the
 /// fallback chain (`visual`/`insert`/`op-pending` fall back to `normal`, so
-/// their base is `normal`; `magit`/`dired` have no parent, so they are their own
+/// their base is `normal`; `magit`/`files` have no parent, so they are their own
 /// base). This reuses the fallback declarations config already makes for key
 /// lookup — no separate "which modes are transient" bookkeeping. A menu mode has
 /// no parents, so it returns itself; callers skip menus explicitly.
@@ -331,7 +331,7 @@ pub fn baseMode(self: *const Keymap, mode: []const u8) []const u8 {
         // wrongly make a menu's base a non-menu and get captured.
         if (self.isMenuMode(cur)) return cur;
         // A RESTING mode is a buffer's base: `normal` and each tool projection
-        // (dired/grep/output/magit). Stop here so a transient mode (visual/
+        // (files/grep/output/magit). Stop here so a transient mode (visual/
         // insert) resolves to its editing base while a tool buffer keeps its own
         // mode — WITHOUT overshooting `normal`→`default` to the root, which would
         // strand a revisited file in the editing-less `default` mode.
@@ -491,7 +491,7 @@ pub fn bindingAt(self: *const Keymap, mode: []const u8, i: usize) ?Binding {
 /// `global` — the FIRST binding of a key wins (a nearer mode's local override),
 /// so each key appears once. This is "what can I press here", the same key set
 /// `lookup` would resolve — so which-key shows the whole reachable context
-/// (dired's nav keys AND the editing keys it inherits), not just one mode's own
+/// (files's nav keys AND the editing keys it inherits), not just one mode's own
 /// table. Read back with the head's `resolvedAt`; both are valid until the next
 /// keymap mutation (the guest enumerates synchronously during its `on_menu`).
 pub fn resolveBindingsInto(self: *const Keymap, gpa: Allocator, mode: []const u8, out: *std.ArrayList(Binding), out_group: *std.ArrayList(bool)) Allocator.Error!usize {

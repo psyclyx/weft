@@ -1,6 +1,6 @@
 //! Pure directory-workspace reconciliation.
 //!
-//! A workspace turns one provider listing into an independent dired draft.
+//! A workspace turns one provider listing into an independent files draft.
 //! It does not authorize targets, call a filesystem, publish views, or know
 //! which input plugin will edit the resulting fields. Native and sandboxed
 //! adapters use this same value boundary, so filesystem observations cannot
@@ -9,7 +9,7 @@
 const std = @import("std");
 const semantic = @import("weft_semantic");
 const fs = @import("weft_fs");
-const model = @import("weft_dired_model");
+const model = @import("weft_files_model");
 
 const contract = fs.contract;
 

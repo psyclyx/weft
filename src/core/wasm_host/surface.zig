@@ -1,6 +1,6 @@
 //! Surface membrane: a guest builds its retained overlay begin→row→span→end,
 //! then the view draws it every frame until close. Mirrors the pick membrane —
-//! which-key/dired/magit render through this.
+//! which-key/files/magit render through this.
 
 const wasm = @import("../wasm.zig");
 const surface_mod = @import("../surface.zig");

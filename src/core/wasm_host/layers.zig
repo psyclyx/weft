@@ -93,7 +93,7 @@ pub fn hDecorateClear(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32
 /// (a styles-palette class). `placement`: 1=virtual_before, 2=virtual_after,
 /// 3=eol, 4=gutter (0=range is ignored — decorations only). A no-op if the
 /// layer wasn't claimed this round. This is the metadata-is-decoration door:
-/// dired's perms/size/arrow/mark, an inlay hint, a blame chip.
+/// files's perms/size/arrow/mark, an inlay hint, a blame chip.
 pub fn hDecorate(data: ?*anyopaque, caller: *wasm.Caller, args: []const i32, results: []i32) void {
     _ = results;
     const p: *WasmPlugin = @ptrCast(@alignCast(data.?));

@@ -414,7 +414,7 @@ pub const FrameBuilder = struct {
         if (editor) |ed| expireStaleCaretSurfaces(fx.plugins.items, ed.text(), ed.cursorOffset());
 
         // Collect the plugins' live overlays for this frame (which-key,
-        // dired, magit … render through the retained surface door) plus the
+        // files, magit … render through the retained surface door) plus the
         // picker's own scene, built just above.
         var surface_buf: [65]*const core.surface.Surface = undefined;
         var surface_n: usize = 0;
@@ -501,7 +501,7 @@ pub const FrameBuilder = struct {
             // Rendering P2: hover is a LIVE producer now — the `lsp` guest
             // plugin emits its own `.caret` surface (`wl_surface_caret`)
             // straight into `hud.surfaces` above (via `fx.plugins`), same as
-            // which-key/dired/magit. This field is dead in production; see
+            // which-key/files/magit. This field is dead in production; see
             // `View.build`'s doc for why it stays as a legacy/test-only path.
             .hover = null,
             .tabs = if (tab_list.items.len > 1) tab_list.items else null,

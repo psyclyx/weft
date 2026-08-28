@@ -1,13 +1,13 @@
-//! Pure semantic projection from dired draft rows to a host-independent scene.
+//! Pure semantic projection from files draft rows to a host-independent scene.
 //!
 //! The host owns field providers and mints `scene.FieldRef` values.  This
 //! layer only carries those typed references into an arena-owned scene; it
-//! never imports view runtime or mutates the dired model.
+//! never imports view runtime or mutates the files model.
 
 const std = @import("std");
 const semantic = @import("weft_semantic");
 const fs = @import("weft_fs");
-const model = @import("weft_dired_model");
+const model = @import("weft_files_model");
 
 const scene = semantic.scene;
 const standard = semantic.action.standard;
@@ -425,17 +425,17 @@ fn sameField(left: scene.FieldRef, right: scene.FieldRef) bool {
 }
 
 test "projection keeps row ids and order stable across draft rename" {
-    var dired = model.Model.init(std.testing.allocator, .{ .authority = .here, .slot = 0, .generation = 1 });
-    defer dired.deinit();
-    try dired.reconcile(.{ .entries = &.{
+    var files = model.Model.init(std.testing.allocator, .{ .authority = .here, .slot = 0, .generation = 1 });
+    defer files.deinit();
+    try files.reconcile(.{ .entries = &.{
         .{ .identity = .{ .authority = .here, .slot = 1, .generation = 1 }, .name = "a", .revision = "1", .kind = .regular },
         .{ .identity = .{ .authority = .here, .slot = 2, .generation = 1 }, .name = "b", .revision = "1", .kind = .regular },
     } });
     const refs = [_]FieldBinding{
-        .{ .row = dired.rows.items[0].id, .field = .{ .authority = .here, .slot = 10, .generation = 1 } },
-        .{ .row = dired.rows.items[1].id, .field = .{ .authority = .here, .slot = 11, .generation = 1 } },
+        .{ .row = files.rows.items[0].id, .field = .{ .authority = .here, .slot = 10, .generation = 1 } },
+        .{ .row = files.rows.items[1].id, .field = .{ .authority = .here, .slot = 11, .generation = 1 } },
     };
-    var first = try project(std.testing.allocator, dired.rows.items, &refs);
+    var first = try project(std.testing.allocator, files.rows.items, &refs);
     defer first.deinit();
     try std.testing.expectEqualStrings(standard.refresh, first.value.actions[0].id);
     try std.testing.expect(first.value.actions[0].enabled);
@@ -443,14 +443,14 @@ test "projection keeps row ids and order stable across draft rename" {
     try std.testing.expect(first.value.actions[3].enabled);
     try std.testing.expect(!first.value.actions[5].enabled);
     try std.testing.expectEqualStrings(standard.set_working_target, first.value.actions[7].id);
-    var with_container = try projectWith(std.testing.allocator, dired.rows.items, &refs, .{ .has_container = true });
+    var with_container = try projectWith(std.testing.allocator, files.rows.items, &refs, .{ .has_container = true });
     defer with_container.deinit();
     try std.testing.expectEqualStrings(standard.open_container, with_container.value.actions[0].id);
     try std.testing.expectEqualStrings(standard.refresh, with_container.value.actions[1].id);
     try std.testing.expectEqualStrings(standard.set_working_target, with_container.value.actions[8].id);
     const first_ids = [_]scene.NodeId{ first.value.content.container.children[0].id, first.value.content.container.children[1].id };
-    try dired.rename(dired.rows.items[0].id, "renamed");
-    var second = try project(std.testing.allocator, dired.rows.items, &refs);
+    try files.rename(files.rows.items[0].id, "renamed");
+    var second = try project(std.testing.allocator, files.rows.items, &refs);
     defer second.deinit();
     try std.testing.expect(second.value.actions[5].enabled and second.value.actions[6].enabled);
     try std.testing.expectEqual(first_ids[0], second.value.content.container.children[0].id);
@@ -462,14 +462,14 @@ test "projection keeps row ids and order stable across draft rename" {
 }
 
 test "projection keeps deleted rows visible and labels original renamed name" {
-    var dired = model.Model.init(std.testing.allocator, .{ .authority = .here, .slot = 0, .generation = 1 });
-    defer dired.deinit();
-    try dired.reconcile(.{ .entries = &.{.{ .identity = .{ .authority = .here, .slot = 3, .generation = 1 }, .name = "old", .revision = "1", .kind = .regular }} });
-    const id = dired.rows.items[0].id;
-    try dired.rename(id, "new");
-    try dired.markDelete(id);
+    var files = model.Model.init(std.testing.allocator, .{ .authority = .here, .slot = 0, .generation = 1 });
+    defer files.deinit();
+    try files.reconcile(.{ .entries = &.{.{ .identity = .{ .authority = .here, .slot = 3, .generation = 1 }, .name = "old", .revision = "1", .kind = .regular }} });
+    const id = files.rows.items[0].id;
+    try files.rename(id, "new");
+    try files.markDelete(id);
     const refs = [_]FieldBinding{.{ .row = id, .field = .{ .authority = .here, .slot = 12, .generation = 1 } }};
-    var output = try project(std.testing.allocator, dired.rows.items, &refs);
+    var output = try project(std.testing.allocator, files.rows.items, &refs);
     defer output.deinit();
     const row = output.value.content.container.children[0];
     try std.testing.expectEqualStrings("delete", row.facts[0].value);
@@ -484,19 +484,19 @@ test "projection keeps deleted rows visible and labels original renamed name" {
 }
 
 test "projection reports add copy and stale facts with metadata" {
-    var dired = model.Model.init(std.testing.allocator, .{ .authority = .here, .slot = 0, .generation = 1 });
-    defer dired.deinit();
-    const added = try dired.addDirectory(null, "new", 0);
+    var files = model.Model.init(std.testing.allocator, .{ .authority = .here, .slot = 0, .generation = 1 });
+    defer files.deinit();
+    const added = try files.addDirectory(null, "new", 0);
     const refs = [_]FieldBinding{.{ .row = added, .field = .{ .authority = .here, .slot = 13, .generation = 1 } }};
-    var added_output = try project(std.testing.allocator, dired.rows.items, &refs);
+    var added_output = try project(std.testing.allocator, files.rows.items, &refs);
     defer added_output.deinit();
     try std.testing.expectEqualStrings("add", added_output.value.content.container.children[0].facts[0].value);
     const added_children = added_output.value.content.container.children[0].content.container.children;
     try std.testing.expectEqualStrings("▸", added_children[0].content.label);
     try std.testing.expectEqualStrings("0000", added_children[1].content.label);
 
-    try dired.markDelete(added);
-    var stale_output = try project(std.testing.allocator, dired.rows.items, &refs);
+    try files.markDelete(added);
+    var stale_output = try project(std.testing.allocator, files.rows.items, &refs);
     defer stale_output.deinit();
     try std.testing.expectEqualStrings("delete", stale_output.value.content.container.children[0].facts[0].value);
 
@@ -505,12 +505,12 @@ test "projection reports add copy and stale facts with metadata" {
     try source.reconcile(.{ .entries = &.{.{ .identity = .{ .authority = .here, .slot = 20, .generation = 1 }, .name = "source", .revision = "1", .kind = .regular }} });
     var item = try source.yank(source.rows.items[0].id, .copy);
     defer item.deinit();
-    const copied = try dired.paste(null, &item);
+    const copied = try files.paste(null, &item);
     const copy_refs = [_]FieldBinding{
         .{ .row = added, .field = .{ .authority = .here, .slot = 13, .generation = 1 } },
         .{ .row = copied, .field = .{ .authority = .here, .slot = 14, .generation = 1 } },
     };
-    var copy_output = try project(std.testing.allocator, dired.rows.items, &copy_refs);
+    var copy_output = try project(std.testing.allocator, files.rows.items, &copy_refs);
     defer copy_output.deinit();
     try std.testing.expectEqualStrings("copy", copy_output.value.content.container.children[1].facts[0].value);
 
@@ -527,17 +527,17 @@ test "projection reports add copy and stale facts with metadata" {
 }
 
 test "projection fixes metadata field columns and styles mode-only modifications" {
-    var dired = model.Model.init(std.testing.allocator, .{ .authority = .here, .slot = 0, .generation = 1 });
-    defer dired.deinit();
-    try dired.reconcile(.{ .entries = &.{.{ .identity = .{ .authority = .here, .slot = 30, .generation = 1 }, .name = "mode", .revision = "1", .kind = .regular, .mode = 0o644 }} });
-    const id = dired.rows.items[0].id;
-    try dired.setMode(id, 0);
+    var files = model.Model.init(std.testing.allocator, .{ .authority = .here, .slot = 0, .generation = 1 });
+    defer files.deinit();
+    try files.reconcile(.{ .entries = &.{.{ .identity = .{ .authority = .here, .slot = 30, .generation = 1 }, .name = "mode", .revision = "1", .kind = .regular, .mode = 0o644 }} });
+    const id = files.rows.items[0].id;
+    try files.setMode(id, 0);
     const refs = [_]FieldBinding{.{
         .row = id,
         .field = .{ .authority = .here, .slot = 17, .generation = 1 },
         .mode_field = .{ .authority = .here, .slot = 18, .generation = 1 },
     }};
-    var output = try project(std.testing.allocator, dired.rows.items, &refs);
+    var output = try project(std.testing.allocator, files.rows.items, &refs);
     defer output.deinit();
     const row = output.value.content.container.children[0];
     const children = row.content.container.children;
@@ -561,47 +561,47 @@ test "projection fixes metadata field columns and styles mode-only modifications
 }
 
 test "projection rejects duplicate missing and generation-zero bindings" {
-    var dired = model.Model.init(std.testing.allocator, .{ .authority = .here, .slot = 0, .generation = 1 });
-    defer dired.deinit();
-    try dired.reconcile(.{ .entries = &.{.{ .identity = .{ .authority = .here, .slot = 4, .generation = 1 }, .name = "x", .revision = "1", .kind = .regular }} });
-    const id = dired.rows.items[0].id;
-    try std.testing.expectError(error.MissingBinding, project(std.testing.allocator, dired.rows.items, &.{}));
+    var files = model.Model.init(std.testing.allocator, .{ .authority = .here, .slot = 0, .generation = 1 });
+    defer files.deinit();
+    try files.reconcile(.{ .entries = &.{.{ .identity = .{ .authority = .here, .slot = 4, .generation = 1 }, .name = "x", .revision = "1", .kind = .regular }} });
+    const id = files.rows.items[0].id;
+    try std.testing.expectError(error.MissingBinding, project(std.testing.allocator, files.rows.items, &.{}));
     const duplicate = [_]FieldBinding{
         .{ .row = id, .field = .{ .authority = .here, .slot = 14, .generation = 1 } },
         .{ .row = id, .field = .{ .authority = .here, .slot = 15, .generation = 1 } },
     };
-    try std.testing.expectError(error.DuplicateBinding, project(std.testing.allocator, dired.rows.items, &duplicate));
+    try std.testing.expectError(error.DuplicateBinding, project(std.testing.allocator, files.rows.items, &duplicate));
     const zero = [_]FieldBinding{.{ .row = id, .field = .{ .authority = .here, .slot = 14, .generation = 0 } }};
-    try std.testing.expectError(error.InvalidField, project(std.testing.allocator, dired.rows.items, &zero));
+    try std.testing.expectError(error.InvalidField, project(std.testing.allocator, files.rows.items, &zero));
     const same_mode = [_]FieldBinding{.{
         .row = id,
         .field = .{ .authority = .here, .slot = 14, .generation = 1 },
         .mode_field = .{ .authority = .here, .slot = 14, .generation = 1 },
     }};
-    try std.testing.expectError(error.DuplicateBinding, project(std.testing.allocator, dired.rows.items, &same_mode));
+    try std.testing.expectError(error.DuplicateBinding, project(std.testing.allocator, files.rows.items, &same_mode));
 }
 
 test "an expanded row splices its children in indented, a collapsed one hides them" {
-    var dired = model.Model.init(std.testing.allocator, .{ .authority = .here, .slot = 0, .generation = 1 });
-    defer dired.deinit();
-    try dired.reconcile(.{ .entries = &.{
+    var files = model.Model.init(std.testing.allocator, .{ .authority = .here, .slot = 0, .generation = 1 });
+    defer files.deinit();
+    try files.reconcile(.{ .entries = &.{
         .{ .identity = .{ .authority = .here, .slot = 60, .generation = 1 }, .name = "child", .revision = "1", .kind = .directory },
         .{ .identity = .{ .authority = .here, .slot = 61, .generation = 1 }, .name = "top.txt", .revision = "1", .kind = .regular },
     } });
-    const child = dired.rows.items[0].id;
-    try dired.reconcileChildren(child, .{ .entries = &.{
+    const child = files.rows.items[0].id;
+    try files.reconcileChildren(child, .{ .entries = &.{
         .{ .identity = .{ .authority = .here, .slot = 62, .generation = 1 }, .name = "inner.txt", .revision = "1", .kind = .regular },
     } });
-    const inner = dired.rows.items[1].id;
+    const inner = files.rows.items[1].id;
     const refs = [_]FieldBinding{
         .{ .row = child, .field = .{ .authority = .here, .slot = 60, .generation = 1 }, .target = .{ .target = .{ .authority = .here, .slot = 1, .generation = 1 }, .revision = 1 } },
         .{ .row = inner, .field = .{ .authority = .here, .slot = 61, .generation = 1 } },
-        .{ .row = dired.rows.items[2].id, .field = .{ .authority = .here, .slot = 62, .generation = 1 } },
+        .{ .row = files.rows.items[2].id, .field = .{ .authority = .here, .slot = 62, .generation = 1 } },
     };
 
     // Folded shut: the child row is bound and drafted, and simply not on the
     // surface. Only the directory advertises the route that opens it.
-    var closed = try project(std.testing.allocator, dired.rows.items, &refs);
+    var closed = try project(std.testing.allocator, files.rows.items, &refs);
     defer closed.deinit();
     const closed_rows = closed.value.content.container.children;
     try std.testing.expectEqual(@as(usize, 2), closed_rows.len);
@@ -611,8 +611,8 @@ test "an expanded row splices its children in indented, a collapsed one hides th
     for (closed_rows[1].actions) |action|
         try std.testing.expect(!std.mem.eql(u8, action.id, standard.toggle_expanded));
 
-    try dired.setExpanded(child, true);
-    var open = try project(std.testing.allocator, dired.rows.items, &refs);
+    try files.setExpanded(child, true);
+    var open = try project(std.testing.allocator, files.rows.items, &refs);
     defer open.deinit();
     const open_rows = open.value.content.container.children;
     try std.testing.expectEqual(@as(usize, 3), open_rows.len);
@@ -629,13 +629,13 @@ test "an expanded row splices its children in indented, a collapsed one hides th
 }
 
 test "projection leaves unusual raw names in model provider data" {
-    var dired = model.Model.init(std.testing.allocator, .{ .authority = .here, .slot = 0, .generation = 1 });
-    defer dired.deinit();
+    var files = model.Model.init(std.testing.allocator, .{ .authority = .here, .slot = 0, .generation = 1 });
+    defer files.deinit();
     const raw = "line\n-[]'\\";
-    try dired.reconcile(.{ .entries = &.{.{ .identity = .{ .authority = .here, .slot = 5, .generation = 1 }, .name = raw, .revision = "1", .kind = .regular }} });
-    const id = dired.rows.items[0].id;
+    try files.reconcile(.{ .entries = &.{.{ .identity = .{ .authority = .here, .slot = 5, .generation = 1 }, .name = raw, .revision = "1", .kind = .regular }} });
+    const id = files.rows.items[0].id;
     const refs = [_]FieldBinding{.{ .row = id, .field = .{ .authority = .here, .slot = 16, .generation = 1 } }};
-    var output = try project(std.testing.allocator, dired.rows.items, &refs);
+    var output = try project(std.testing.allocator, files.rows.items, &refs);
     defer output.deinit();
-    try std.testing.expectEqualStrings(raw, dired.rows.items[0].draft.name);
+    try std.testing.expectEqualStrings(raw, files.rows.items[0].draft.name);
 }

@@ -2,7 +2,7 @@
 //!
 //! Semantic transfer values know only the opaque retain/release callbacks.
 //! This adapter keeps the provider lease and its router association alive
-//! independently of any dired/session object. The Router must outlive every
+//! independently of any files/session object. The Router must outlive every
 //! Resource it creates; final release calls back through that Router.
 
 const std = @import("std");

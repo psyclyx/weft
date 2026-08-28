@@ -286,7 +286,7 @@ pub const RemoteFile = struct {
 /// Client-side `.peer` filesystem: post LIST/READ/WRITE/STAT requests to a host
 /// over the collab request channel and collect the replies. Each reply is a
 /// `peer_fs` response (status + payload); the caller drains completed ones (a
-/// dired-style plugin folds a listing into a buffer). Async by construction —
+/// files-style plugin folds a listing into a buffer). Async by construction —
 /// no blocking round-trip on the frame thread (round-2 D1).
 pub const RemoteFs = struct {
     gpa: Allocator,

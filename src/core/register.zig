@@ -9,7 +9,7 @@
 //! `AnchorSet`), so none of them travel with copied text. The ONLY thing that
 //! spans a cut-in-buffer-A → paste-in-buffer-B is the register. So the register
 //! must snapshot the id-payload on yank and re-stamp it on paste — which is
-//! exactly what makes a dired row's hidden identity survive `dd`→`p` (a MOVE)
+//! exactly what makes a files row's hidden identity survive `dd`→`p` (a MOVE)
 //! while a re-typed or raw-text-pasted line acquires none (a CREATE). Owned by
 //! core so every editor (vim/helix/modeless) shares ONE register and the
 //! identity-ferry is editor-agnostic (vim's private `reg_buf`, which helix
@@ -192,7 +192,7 @@ test "register: an id-span ferries across yank→restamp; plain text carries non
     var subs: subbuffer.SubBuffers = .empty;
     defer subs.deinit(gpa);
 
-    // A dired row: the name "foo.zig" (0..7) carries a hidden id.
+    // A files row: the name "foo.zig" (0..7) carries a hidden id.
     const row = try subs.claim(gpa, &doc, .{ .start = 0, .end = 7 });
     try row.putFact(gpa, "id", "7");
     try row.putFact(gpa, "kind", "file");

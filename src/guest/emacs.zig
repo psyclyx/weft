@@ -8,7 +8,7 @@
 //! `SPC f f` uses), not modes: `C-x` holds pending, which-key shows its
 //! completions, `C-x C-f` completes. The editor owns only intra-buffer
 //! motion/kill/yank here; the C-x/C-c tree that reaches other plugins
-//! (find-file, magit, dired) is config data (emacs.js).
+//! (find-file, magit, files) is config data (emacs.js).
 //! Delete this plugin and weft is still modeless — `default` is the floor.
 
 const std = @import("std");
@@ -141,7 +141,7 @@ export fn init() void {
     for (cmds) |c| _ = weft.register(c.name);
 
     // Intra-buffer keys. Movement, kill/yank — the everyday editing chords. The
-    // C-x/C-c prefix TREE (find-file, save, buffers, windows, magit, dired) is
+    // C-x/C-c prefix TREE (find-file, save, buffers, windows, magit, files) is
     // config data (emacs.js) since it reaches other plugins; these are the
     // editor's own. C-space (set-mark), C-g (keyboard-quit → clear-selection),
     // C-s (save), Backspace, and the arrows come from the `default` fallback —

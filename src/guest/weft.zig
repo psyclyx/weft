@@ -460,7 +460,7 @@ pub fn style(start: usize, end: usize, class: StyleClass) void {
 }
 
 // ── Folding: hide byte ranges of the active buffer (rows collapse; vertical
-// motion skips them). A general primitive — status/dired/grep/outline plugins
+// motion skips them). A general primitive — status/files/grep/outline plugins
 // fold sections. `foldClear` then a `fold` per hidden range; republish on every
 // re-render (offsets move). `start` should be just past a header line's newline
 // so the header stays visible. ──
@@ -490,7 +490,7 @@ pub fn decorateClear() void {
 /// Place a display-only decoration anchored at `anchor`: virtual text drawn
 /// beside the line, colored by `role` (a styles-palette class). It is NEVER a
 /// document byte — so `yy` never yanks it and it takes no commit. This is how a
-/// projection shows metadata (dired's perms/size/arrow/mark) off the text.
+/// projection shows metadata (files's perms/size/arrow/mark) off the text.
 pub fn decorate(anchor: usize, placement: DecoPlacement, role: StyleClass, text: []const u8) void {
     wl_decorate(@intCast(anchor), @intFromEnum(placement), @intFromEnum(role), p(text.ptr), @intCast(text.len));
 }
@@ -771,14 +771,14 @@ pub fn lockedMode(mode: []const u8) void {
     wl_locked_mode(p(mode.ptr), @intCast(mode.len));
 }
 /// Declare `mode` a RESTING mode — the base a buffer settles in: the editing base
-/// (`normal`) or a tool projection (`dired`, `output`, …). Leaving a buffer in a
+/// (`normal`) or a tool projection (`files`, `output`, …). Leaving a buffer in a
 /// transient sub-mode (visual/insert) remembers this instead of overshooting to
 /// the root, so switching back doesn't strand you in an editing-less mode.
 pub fn restingMode(mode: []const u8) void {
     wl_resting_mode(p(mode.ptr), @intCast(mode.len));
 }
 /// Leave a transient mode (insert/visual) back to the active buffer's RESTING
-/// mode — its tool mode (dired) if any, else the editing base. Use on Escape
+/// mode — its tool mode (files) if any, else the editing base. Use on Escape
 /// instead of a hardcoded `setMode("normal")`, so a projection's keys stay live.
 pub fn exitToResting() void {
     wl_exit_to_resting();
@@ -796,7 +796,7 @@ pub const When = struct {
     mode: ?[]const u8 = null,
     /// Buffer language — the active buffer name's extension (`zig`, `py`).
     lang: ?[]const u8 = null,
-    /// The active buffer's tool-backing name (a plugin projection: `dired`) —
+    /// The active buffer's tool-backing name (a plugin projection: `files`) —
     /// a stable per-buffer signal, unlike `mode`. A projection scopes its
     /// `save`/etc. providers by this so they win in its buffer in any mode.
     tool: ?[]const u8 = null,
@@ -1191,7 +1191,7 @@ pub fn surfaceSpan(text: []const u8, role: Role) void {
     wl_surface_span(p(text.ptr), @intCast(text.len), @intFromEnum(role));
 }
 /// Commit the built rows and show the surface. `selected` highlights a row
-/// (a picker/dired cursor), or -1 for none.
+/// (a picker/files cursor), or -1 for none.
 pub fn surfaceEnd(selected: i32) void {
     wl_surface_end(selected);
 }
@@ -1755,7 +1755,7 @@ pub const SemanticTargetHandlerError = SemanticPublishError;
 
 /// Register one stable handler token. `token` is returned to the callback
 /// export, while `id` is metadata used by host diagnostics and resolution.
-/// The returned reference is portable across heads and dired instances, but
+/// The returned reference is portable across heads and files instances, but
 /// only this plugin may close it.
 pub fn semanticTargetHandlerRegister(token: u32, id: []const u8) SemanticTargetHandlerError!SemanticTargetHandlerRef {
     if (id.len == 0) return error.InvalidData;
@@ -2313,7 +2313,7 @@ pub fn semanticFsCapabilities(
 
 /// List the exact directory attachment of a live target revision.  The
 /// response buffer grows only up to the codec's canonical payload limit, so
-/// callers do not need to expose a fixed-size dired scratch area.
+/// callers do not need to expose a fixed-size files scratch area.
 pub fn semanticFsList(gpa: std.mem.Allocator, target: semantic.target.Ref, revision: u64) SemanticFsError!fs_codec.OwnedListing {
     const wire = target.toWire();
     var capacity: usize = 4096;

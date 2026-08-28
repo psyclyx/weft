@@ -41,7 +41,7 @@
 //! below, by the "`on_save` reconciliation" section) is the other half —
 //! an edited projection buffer's `save` reconciles BACK into the graph
 //! doc, by NODE IDENTITY, never by row position. See that section's doc
-//! comment for the contract shape and how it relates to dired's own
+//! comment for the contract shape and how it relates to files's own
 //! (differently-shaped, but same-MECHANISM) `on_save`.
 
 const std = @import("std");
@@ -224,10 +224,10 @@ pub const node_fact = "node";
 /// `subs.at(doc, some_offset)` then answers "which graph node produced
 /// the byte under the caret" without any position-based guessing (exactly
 /// the id-span mechanism `subbuffer.zig`/doc/contextual-workspace-architecture.md §11.8
-/// already use for dired's rows).
+/// already use for files's rows).
 ///
 /// The claimed span covers the BODY ONLY — `"role: "` is decoration, not
-/// identity (the dired reframe's "name-is-content, metadata-is-decoration"
+/// identity (the files reframe's "name-is-content, metadata-is-decoration"
 /// generalizes here: `role` is an immutable field of the entry, never
 /// user-editable through this projection, so it must never be inside a
 /// span `reconcileOnSave` would treat as editable text). This is what
@@ -339,12 +339,12 @@ pub fn refillOnChange(gpa: Allocator, tr: *const TranscriptDoc, doc: *Document, 
 // sketched, not built: a generic union guessed from one case is exactly
 // the premature abstraction this plan refuses. What's built here is the
 // concrete `on_save` INSTANCE for transcript, now that a second real
-// on_save-shaped mechanism exists to check the shape against — dired's
+// on_save-shaped mechanism exists to check the shape against — files's
 // (doc/contextual-workspace-architecture.md §11.8, wired through the `save` ACTION scoped
 // to tool identity, `action.zig`'s `When{.tool=...}`). Transcript reuses
 // that SAME mechanism (a tool-scoped `save` provider — see `install`
 // below), not a parallel one: the two diverge only in what "reconcile"
-// MEANS for their model (dired infers rename/move/delete/create file ops
+// MEANS for their model (files infers rename/move/delete/create file ops
 // from a path snapshot; a transcript has no paths, no snapshot to keep —
 // every row's CURRENT model text is its own always-live "snapshot", read
 // fresh at save time). That divergence is real domain logic, not
@@ -355,14 +355,14 @@ pub fn refillOnChange(gpa: Allocator, tr: *const TranscriptDoc, doc: *Document, 
 //
 // Correcting an earlier note (the pre-slice-3 version of this file's `fill`
 // doc comment argued `on_save` was "wrong for a transcript" because the
-// graph doc has no EXTERNAL authority to reconcile against, unlike dired's
+// graph doc has no EXTERNAL authority to reconcile against, unlike files's
 // filesystem). That conflated two different things: `on_save` reconciles
 // a PROJECTED BUFFER's accumulated edits against ITS MODEL at a save
 // point — the model doesn't need to be external to the whole system, only
 // external to the buffer, which is always just a rendered copy, never
 // the source of truth. The graph doc "being the truth, live, always" is
 // not in tension with `on_save` at all; it's the reason `on_save` works
-// here without inventing anything dired's design didn't already need.
+// here without inventing anything files's design didn't already need.
 
 /// A parsed, still-anchored row of the SAVED buffer: `range` is the
 /// claim's CURRENT (rebased) byte span, `obj` is the LOCAL `ObjId` the
@@ -417,7 +417,7 @@ pub const SaveReport = struct {
     /// `save`). Refused INDIVIDUALLY: that row's edit (if it had one) is
     /// discarded and counted here, never guessed at and never allowed to
     /// block every OTHER row's legitimate edit from landing. A caller
-    /// that wants to surface this to the user (dired's pending-changes
+    /// that wants to surface this to the user (files's pending-changes
     /// confirm popup is the general affordance
     /// `doc/contextual-workspace-architecture.md` §11.8 names — not
     /// built for transcript this slice, see `install`'s doc comment)
@@ -535,7 +535,7 @@ pub fn reconcileOnSave(gpa: Allocator, tr: *TranscriptDoc, doc: *Document, subs:
 /// hangs `transcript-save` off (`command.Command.data`, "the command's
 /// closure payload", the exact mechanism `registerAction`'s own trampoline
 /// uses). Named deferral: this binds the `save` action to exactly ONE
-/// live `TranscriptDoc`/`SubBuffers` pair, matching dired's own single-
+/// live `TranscriptDoc`/`SubBuffers` pair, matching files's own single-
 /// active-instance assumption (its gather state is a guest module
 /// global) — multiplexing several simultaneously-open transcript buffers
 /// through one `save` dispatch needs a per-BUFFER model registry
@@ -558,7 +558,7 @@ fn cTranscriptSave(ctx: *command.Context, data: ?*anyopaque, args: []const comma
     const ed = ctx.textEditor() catch return .nil;
     const report = reconcileOnSave(gpa, bind.tr, &ed.doc, bind.subs) catch |err| {
         // Loud, never silent — the general pending-changes CONFIRM popup
-        // doc/contextual-workspace-architecture.md §11.8 step 4 envisions is dired's UI
+        // doc/contextual-workspace-architecture.md §11.8 step 4 envisions is files's UI
         // surface to build, not duplicated here; the honest floor for
         // this slice is an echoed refusal reason on the one channel every
         // command already reports through.
@@ -571,7 +571,7 @@ fn cTranscriptSave(ctx: *command.Context, data: ?*anyopaque, args: []const comma
     // Re-fill: the buffer now shows the model's own canonical text for
     // every row (normalizes anything `diffWindow`'s single-window
     // coarseness left imprecise, and drops the `stale` rows' now-inert
-    // claims) — the same "re-gather after apply" discipline dired's
+    // claims) — the same "re-gather after apply" discipline files's
     // `on_save_apply` follows.
     try fill(gpa, bind.tr, &(try ctx.textEditor()).doc, bind.subs);
     if (report.stale > 0) {
@@ -585,7 +585,7 @@ fn cTranscriptSave(ctx: *command.Context, data: ?*anyopaque, args: []const comma
 
 /// Wire `save` (`C-s`/`:w`/palette — every route, per `action.zig`'s
 /// module doc) to `reconcileOnSave` for `bind`'s buffer: the SAME
-/// mechanism dired's `save` provider uses (`actions.provide` scoped to
+/// mechanism files's `save` provider uses (`actions.provide` scoped to
 /// `When{.tool=projection_author}`, winning by priority over the core
 /// default file-save provider), extended here to its first HOST-NATIVE
 /// provider — until now only wasm guests registered a tool-scoped `save`.
@@ -607,7 +607,7 @@ pub fn install(gpa: Allocator, commands: *command.Commands, actions: *Actions, b
 }
 
 /// Create a tool-backed buffer suitable for `fill`/`on_save` — the
-/// tool-buffer machinery `dired`/`magit` use (`Buffers.Buffer.setTool`),
+/// tool-buffer machinery `files`/`magit` use (`Buffers.Buffer.setTool`),
 /// wired up host-side instead of from a wasm guest's `on_fill_token` (per
 /// `graph.zig`'s "where the graph-side plugin code runs": this client's
 /// model AND its projection are host/in-process). NOT read-only: an
@@ -936,7 +936,7 @@ test "reconcileOnSave: a structural edit (typing a whole new row) refuses the WH
     try t.expectEqualStrings("hi", b0);
 }
 
-test "install: `save` dispatches to transcript-save through the same tool-scoped action mechanism dired uses" {
+test "install: `save` dispatches to transcript-save through the same tool-scoped action mechanism files uses" {
     const gpa = t.allocator;
     const task = @import("task.zig");
     var pool = try task.Pool.init(gpa, .{ .threads = 1 });

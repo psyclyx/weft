@@ -204,7 +204,7 @@ const handlers = [_]struct { name: []const u8, handler: HostFn }{
     .{ .name = "wl_menu_binding_intent", .handler = menu.hMenuBindingIntent },
     .{ .name = "wl_menu_binding_intent_note", .handler = menu.hMenuBindingIntentNote },
 
-    // ── surface.zig — the retained overlay (which-key/dired/magit) ─────
+    // ── surface.zig — the retained overlay (which-key/files/magit) ─────
     .{ .name = "wl_surface_begin", .handler = surface.hSurfaceBegin },
     .{ .name = "wl_surface_caret", .handler = surface.hSurfaceCaret },
     .{ .name = "wl_surface_row", .handler = surface.hSurfaceRow },

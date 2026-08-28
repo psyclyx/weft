@@ -116,7 +116,7 @@
 //! interface) — so `ReconcileMode` itself stays unbuilt as a runtime
 //! type. What DID change (W5 slice 3): `on_save` itself — one arm of that
 //! sketched union — is now a real, concrete MECHANISM with two
-//! independent instances proving its shape instead of one: dired's
+//! independent instances proving its shape instead of one: files's
 //! (guest/wasm, doc/contextual-workspace-architecture.md §11.8, ordered rename/move/delete/
 //! create file ops inferred from a path snapshot) and `transcript.zig`'s
 //! (host/in-process, `reconcileOnSave`, a per-row text-CRDT diff

@@ -1,12 +1,12 @@
 //! surface — a retained, host-owned overlay a plugin populates (which-key, the
-//! picker, dired, magit …) through the `surfaceBegin/Row/Span/End` membrane.
+//! picker, files, magit …) through the `surfaceBegin/Row/Span/End` membrane.
 //!
 //! Guests are event-dispatched — there is no per-frame render export — so a
 //! guest cannot draw immediate-mode. Instead it pushes a surface DURING a guest
 //! call (an `on_menu`, an `on_command`); the host retains it and the view draws
 //! it every frame until the guest `close`s it. This is the same retained-mode
 //! shape the picker already uses, generalized so UI stops being baked per
-//! feature in core: which-key, dired, magit, transcript viewers are all plugins
+//! feature in core: which-key, files, magit, transcript viewers are all plugins
 //! over this one door.
 //!
 //! Spans carry a SEMANTIC color role (resolved against the Theme at draw time),
@@ -143,7 +143,7 @@ pub const Surface = struct {
     }
 
     /// Commit the built rows atomically and mark the surface active. `selected`
-    /// is the highlighted row index (e.g. a picker/dired cursor), or null.
+    /// is the highlighted row index (e.g. a picker/files cursor), or null.
     pub fn end(self: *Surface, gpa: Allocator, selected: ?usize) void {
         if (!self.building) return;
         freeRows(gpa, &self.rows);

@@ -1,16 +1,16 @@
 //! Sandboxed file-browser plugin.
 //!
-//! The internal `weft_dired_guest` library composes the portable draft model,
+//! The internal `weft_files_guest` library composes the portable draft model,
 //! semantic projection, and public target-scoped filesystem ABI. This root
 //! contributes only wasm callbacks plus the user-facing launcher. It owns no
 //! text projection, editor mode, keymap, shell command, syscall, or platform
 //! policy.
 
 const weft = @import("weft");
-const dired_guest = @import("weft_dired_guest");
+const files_guest = @import("weft_files_guest");
 
 const command_name = "files";
-var plugin: dired_guest.Plugin = undefined;
+var plugin: files_guest.Plugin = undefined;
 
 export fn describe() void {
     weft.requestPerm(.fs_read);

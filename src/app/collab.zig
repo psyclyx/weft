@@ -262,7 +262,7 @@ pub const Collab = struct {
             }
         }
         // Client side: correlate .peer fs replies, and the bridge the guest queues
-        // async LIST requests through (dired-on-a-peer).
+        // async LIST requests through (files-on-a-peer).
         self.remote_fs = core.session.RemoteFs.init(gpa);
         self.peer_fs_bridge = .{ .gpa = gpa };
         core.wasm_host.setPeerFsBridge(&self.peer_fs_bridge);

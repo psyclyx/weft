@@ -58,7 +58,7 @@ const GrammarApp = struct {
     }
 };
 
-/// The fixture tree the dired e2e drives: a directory with a file in it, plus
+/// The fixture tree the files e2e drives: a directory with a file in it, plus
 /// a file beside it. Written to disk directly — this grammar has no insert
 /// mode to author through.
 fn authorTree(ed: *h.Editor) !void {

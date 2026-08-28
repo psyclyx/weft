@@ -1,6 +1,6 @@
 //! Tool-backed buffers: a plugin marks a buffer as its projection
 //! (`weft.toolBacking(name)`), so its content is understood to be plugin-
-//! regenerated (magit/dired) rather than a file. This is purely the entry's
+//! regenerated (magit/files) rather than a file. This is purely the entry's
 //! IDENTITY — it does NOT special-case dispatch. `save` (and any other context
 //! intent) resolves through the ACTION system: the entry's tool name is an
 //! ambient fact (`action.Ctx.tool`, from `Buffers.Buffer.tool`), and a

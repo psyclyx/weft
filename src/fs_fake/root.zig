@@ -1,7 +1,7 @@
 //! Deterministic in-memory implementation of `weft_fs.service.Provider`.
 //!
 //! This is a real build module used for contract/convergence tests. It models
-//! external mutation explicitly and never imports host, platform, or dired
+//! external mutation explicitly and never imports host, platform, or files
 //! code, so portable semantics cannot quietly depend on Linux behavior.
 
 const std = @import("std");

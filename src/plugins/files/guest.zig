@@ -1,13 +1,13 @@
-//! Sandboxed dired adapter over the public guest SDK.
+//! Sandboxed files adapter over the public guest SDK.
 //!
-//! The portable dired library owns draft meaning and scene projection. This
+//! The portable files library owns draft meaning and scene projection. This
 //! module supplies only guest-host plumbing: exact target-scoped filesystem
 //! calls, retained view/field publication, and generic action callbacks. It
 //! has no path access, editor mode, keymap, renderer, syscall, or app import.
 
 const std = @import("std");
 const weft = @import("weft");
-const dired = @import("weft_dired");
+const files = @import("weft_files");
 
 const semantic = weft.semantic;
 const fs = weft.fs;
@@ -54,7 +54,7 @@ pub const Plugin = struct {
             return;
         };
         defer descriptor.deinit();
-        _ = dired.directoryFromDescriptor(descriptor.value) catch {
+        _ = files.directoryFromDescriptor(descriptor.value) catch {
             _ = weft.semanticTargetHandlerProbeNone();
             return;
         };
@@ -100,7 +100,7 @@ pub const Plugin = struct {
             _ = weft.semanticTargetHandlerOpenError(error.StaleTarget);
             return;
         }
-        const directory = dired.directoryFromDescriptor(descriptor.value) catch {
+        const directory = files.directoryFromDescriptor(descriptor.value) catch {
             _ = weft.semanticTargetHandlerOpenError(error.Rejected);
             return;
         };
@@ -218,7 +218,7 @@ pub const Plugin = struct {
 };
 
 const Field = struct {
-    row: dired.NodeId,
+    row: files.NodeId,
     kind: Kind,
     token: u32,
     ref: semantic.scene.FieldRef,
@@ -260,7 +260,7 @@ const Field = struct {
 };
 
 const RowTarget = struct {
-    row: dired.NodeId,
+    row: files.NodeId,
     // The target registry revision is not the filesystem entry revision.
     // Retaining by row id alone would leave a child target stale after an
     // external rename or metadata change.
@@ -278,11 +278,11 @@ pub const Session = struct {
     target_revision: u64,
     directory: fs.target.Directory,
     capabilities: contract.Capabilities = .{},
-    draft: dired.Model,
+    draft: files.Model,
     fields: std.ArrayList(Field) = .empty,
     row_targets: std.ArrayList(RowTarget) = .empty,
     view_ref: semantic.view.Ref = undefined,
-    controller: dired.ActionController = undefined,
+    controller: files.ActionController = undefined,
     loaded: bool = false,
     apply_committed: bool = false,
     scene_revision: u32 = 1,
@@ -301,7 +301,7 @@ pub const Session = struct {
         self.capabilities = try weft.semanticFsCapabilities(self.plugin.gpa, self.target, self.target_revision);
         var listing = try weft.semanticFsList(self.plugin.gpa, self.target, self.target_revision);
         defer listing.deinit();
-        var initial = try dired.reconcileListing(self.plugin.gpa, self.directory, null, listing.value);
+        var initial = try files.reconcileListing(self.plugin.gpa, self.directory, null, listing.value);
         defer initial.deinit();
         const previous = self.draft;
         self.draft = initial;
@@ -345,22 +345,22 @@ pub const Session = struct {
             },
         };
         if (std.mem.eql(u8, request.action, semantic.action.standard.toggle_expanded)) {
-            const row = dired.modelRowId(request.subject) catch return .declined;
+            const row = files.modelRowId(request.subject) catch return .declined;
             try self.toggleExpanded(row);
             return .handled;
         }
         if (std.mem.eql(u8, request.action, semantic.action.standard.set_working_target)) {
-            if (request.subject == dired.rootNodeId()) return .{ .set_working_target = .{
+            if (request.subject == files.rootNodeId()) return .{ .set_working_target = .{
                 .target = self.target,
                 .revision = self.target_revision,
             } };
-            const row = dired.modelRowId(request.subject) catch return .declined;
+            const row = files.modelRowId(request.subject) catch return .declined;
             const target = self.rowTarget(row) orelse return .declined;
             return .{ .set_working_target = target };
         }
-        if (std.mem.eql(u8, request.action, dired.create_file_action))
+        if (std.mem.eql(u8, request.action, files.create_file_action))
             return .{ .focus = try self.addPending(.regular) };
-        if (std.mem.eql(u8, request.action, dired.create_directory_action))
+        if (std.mem.eql(u8, request.action, files.create_directory_action))
             return .{ .focus = try self.addPending(.directory) };
         if (std.mem.eql(u8, request.action, semantic.action.standard.refresh)) {
             try self.refresh(false);
@@ -375,7 +375,7 @@ pub const Session = struct {
 
         var staged = try self.draft.duplicate();
         defer staged.deinit();
-        var staged_controller = dired.ActionController.init(self.plugin.gpa, &staged, self.view_ref);
+        var staged_controller = files.ActionController.init(self.plugin.gpa, &staged, self.view_ref);
         defer staged_controller.deinit();
         const outcome = try staged_controller.invoke(request);
         switch (outcome) {
@@ -388,8 +388,8 @@ pub const Session = struct {
                 self.controller.capture = captured;
                 return .{ .transfer = self.controller.captured().? };
             },
-            .focus => if (std.mem.eql(u8, request.action, dired.permissions_edit_action)) {
-                const row = dired.modelRowId(request.subject) catch return error.UnknownSubject;
+            .focus => if (std.mem.eql(u8, request.action, files.permissions_edit_action)) {
+                const row = files.modelRowId(request.subject) catch return error.UnknownSubject;
                 const field = self.fieldFor(row, .mode) orelse return error.MissingField;
                 field.selection = .{ .anchor = 0, .caret = field.mode_text_len };
                 try self.updateField(field, &self.draft, field.revision);
@@ -403,14 +403,14 @@ pub const Session = struct {
         var descriptor = try weft.semanticTargetDescribe(self.target, self.plugin.gpa);
         defer descriptor.deinit();
         if (descriptor.value.revision != self.target_revision) return error.StaleTarget;
-        const described = try dired.directoryFromDescriptor(descriptor.value);
-        if (!dired.sameDirectory(described, self.directory)) return error.StaleTarget;
+        const described = try files.directoryFromDescriptor(descriptor.value);
+        if (!files.sameDirectory(described, self.directory)) return error.StaleTarget;
     }
 
     fn refresh(self: *Session, discard: bool) !void {
         var listing = try weft.semanticFsList(self.plugin.gpa, self.target, self.target_revision);
         defer listing.deinit();
-        var staged = try dired.reconcileListing(
+        var staged = try files.reconcileListing(
             self.plugin.gpa,
             self.directory,
             if (discard or self.apply_committed) null else &self.draft,
@@ -425,8 +425,8 @@ pub const Session = struct {
     /// Rows folded open are part of what this view shows, so one refresh
     /// re-reads every open scope. The open set is taken up front — a listing
     /// only ever adds closed rows, so it cannot grow while being walked.
-    fn refreshExpanded(self: *Session, staged: *dired.Model) !void {
-        var open: std.ArrayList(dired.NodeId) = .empty;
+    fn refreshExpanded(self: *Session, staged: *files.Model) !void {
+        var open: std.ArrayList(files.NodeId) = .empty;
         defer open.deinit(self.plugin.gpa);
         for (staged.rows.items) |row| {
             if (row.expanded) try open.append(self.plugin.gpa, row.id);
@@ -446,7 +446,7 @@ pub const Session = struct {
     /// Fold a directory row open or closed. Collapsing keeps its rows in the
     /// draft; opening re-reads the provider, so a fold is never a stale
     /// replay of what the directory held last time.
-    fn toggleExpanded(self: *Session, row: dired.NodeId) !void {
+    fn toggleExpanded(self: *Session, row: files.NodeId) !void {
         var staged = try self.draft.duplicate();
         defer staged.deinit();
         const current = staged.row(row) orelse return error.UnknownSubject;
@@ -459,15 +459,15 @@ pub const Session = struct {
 
     /// Read one expanded row's directory through its own exact child target
     /// and reconcile the result into that row's scope.
-    fn readChildren(self: *Session, staged: *dired.Model, row: dired.NodeId) !void {
+    fn readChildren(self: *Session, staged: *files.Model, row: files.NodeId) !void {
         const located = self.rowTarget(row) orelse return error.MissingTarget;
         var descriptor = try weft.semanticTargetDescribe(located.target, self.plugin.gpa);
         defer descriptor.deinit();
         if (descriptor.value.revision != located.revision) return error.StaleTarget;
-        const directory = try dired.directoryFromDescriptor(descriptor.value);
+        const directory = try files.directoryFromDescriptor(descriptor.value);
         var listing = try weft.semanticFsList(self.plugin.gpa, located.target, located.revision);
         defer listing.deinit();
-        try dired.reconcileChildListing(self.plugin.gpa, directory, staged, row, listing.value);
+        try files.reconcileChildListing(self.plugin.gpa, directory, staged, row, listing.value);
         try staged.setExpanded(row, true);
     }
 
@@ -488,14 +488,14 @@ pub const Session = struct {
         const field = self.fieldFor(row, .name) orelse return error.MissingField;
         field.selection = .{ .anchor = 0, .caret = @intCast(name.len) };
         try self.updateField(field, &self.draft, field.revision);
-        return dired.nameNodeId(row);
+        return files.nameNodeId(row);
     }
 
     fn applyConfirmation(self: *const Session) semantic.interaction.Definition {
         return .{
             .role = .dialog,
             .view = self.view_ref,
-            .root = dired.rootNodeId(),
+            .root = files.rootNodeId(),
             .actions = &.{
                 .{ .id = semantic.action.standard.confirm, .label = "Apply", .disposition = .close_on_handled },
                 .{ .id = semantic.action.standard.cancel, .label = "Cancel", .disposition = .close_on_handled },
@@ -515,7 +515,7 @@ pub const Session = struct {
     fn applyConfirmed(self: *Session) !bool {
         // Quarantine is the conservative default for portable model clients,
         // but it is not universally available. The provider capability is the
-        // sole policy input at this boundary; dired does not inspect kinds or
+        // sole policy input at this boundary; files does not inspect kinds or
         // platforms and therefore keeps the same plan shape everywhere.
         const remove_policy: contract.RemovePolicy = if (self.capabilities.quarantine)
             .quarantine
@@ -539,9 +539,9 @@ pub const Session = struct {
 
     fn materializeCapture(self: *Session, captured: *semantic.transfer.OwnedItem) !void {
         if (captured.value.intent != .copy or self.capabilities.durable_lease == null) return;
-        const representation = captured.value.representation(dired.entry_media_type) orelse return;
+        const representation = captured.value.representation(files.entry_media_type) orelse return;
         const schema = representation.schema orelse return error.InvalidTransfer;
-        const decoded = try dired.decodeEntryTransferWithAttachment(
+        const decoded = try files.decodeEntryTransferWithAttachment(
             representation.payload,
             schema,
             representation.resource,
@@ -556,15 +556,15 @@ pub const Session = struct {
             .directory, .other => return,
         }
         const capture = try weft.semanticTransferCapture(self.target, self.target_revision, entry);
-        const payload = try dired.encodeEntryTransfer(self.plugin.gpa, .{ .lease = capture.source }, decoded.kind, decoded.mode);
+        const payload = try files.encodeEntryTransfer(self.plugin.gpa, .{ .lease = capture.source }, decoded.kind, decoded.mode);
         defer self.plugin.gpa.free(payload);
         const representations = try self.plugin.gpa.alloc(semantic.transfer.Representation, captured.value.representations.len);
         defer self.plugin.gpa.free(representations);
         var replaced = false;
         for (captured.value.representations, representations) |source, *destination| {
             destination.* = source;
-            if (!std.mem.eql(u8, source.media_type, dired.entry_media_type)) continue;
-            destination.schema = dired.entry_schema_current;
+            if (!std.mem.eql(u8, source.media_type, files.entry_media_type)) continue;
+            destination.schema = files.entry_schema_current;
             destination.payload = payload;
             destination.resource = null;
             destination.attachment = capture.attachment;
@@ -628,7 +628,7 @@ pub const Session = struct {
     /// Publish fields and scene from the staged value, then swap the model.
     /// New handles are rolled back if any publication fails; existing field
     /// snapshots are restored to the live value if scene replacement fails.
-    fn publishDraft(self: *Session, staged: *dired.Model) !void {
+    fn publishDraft(self: *Session, staged: *files.Model) !void {
         const old_fields_len = self.fields.items.len;
         try self.prepareRowTargets(staged);
         errdefer self.abortRowTargets();
@@ -676,14 +676,14 @@ pub const Session = struct {
         self.retireRowTargets();
     }
 
-    fn prepareFields(self: *Session, draft: *const dired.Model) !void {
+    fn prepareFields(self: *Session, draft: *const files.Model) !void {
         for (draft.rows.items) |row| {
             try self.ensureField(draft, row.id, .name);
             if (self.modeEditable(row)) try self.ensureField(draft, row.id, .mode);
         }
     }
 
-    fn ensureField(self: *Session, draft: *const dired.Model, row: dired.NodeId, kind: Field.Kind) !void {
+    fn ensureField(self: *Session, draft: *const files.Model, row: files.NodeId, kind: Field.Kind) !void {
         if (self.fieldFor(row, kind) != null) return;
         const token = try self.plugin.allocateFieldToken();
         var field: Field = .{
@@ -699,7 +699,7 @@ pub const Session = struct {
         try self.fields.append(self.plugin.gpa, field);
     }
 
-    fn registerField(self: *Session, field: Field, draft: *const dired.Model) !semantic.scene.FieldRef {
+    fn registerField(self: *Session, field: Field, draft: *const files.Model) !semantic.scene.FieldRef {
         const row = draft.row(field.row) orelse return error.Stale;
         var revision: [8]u8 = undefined;
         std.mem.writeInt(u64, &revision, field.revision, .little);
@@ -713,7 +713,7 @@ pub const Session = struct {
         });
     }
 
-    fn updateField(self: *Session, field: *Field, draft: *const dired.Model, revision_value: u64) !void {
+    fn updateField(self: *Session, field: *Field, draft: *const files.Model, revision_value: u64) !void {
         const row = draft.row(field.row) orelse return error.Stale;
         var revision: [8]u8 = undefined;
         std.mem.writeInt(u64, &revision, revision_value, .little);
@@ -729,7 +729,7 @@ pub const Session = struct {
         });
     }
 
-    fn fieldFor(self: *Session, row: dired.NodeId, kind: Field.Kind) ?*Field {
+    fn fieldFor(self: *Session, row: files.NodeId, kind: Field.Kind) ?*Field {
         for (self.fields.items) |*field| if (field.row == row and field.kind == kind) return field;
         return null;
     }
@@ -764,7 +764,7 @@ pub const Session = struct {
         self.fields.deinit(self.plugin.gpa);
     }
 
-    fn prepareRowTargets(self: *Session, draft: *const dired.Model) !void {
+    fn prepareRowTargets(self: *Session, draft: *const files.Model) !void {
         for (self.row_targets.items) |*target| target.active = false;
         const old_len = self.row_targets.items.len;
         errdefer {
@@ -776,7 +776,7 @@ pub const Session = struct {
             for (self.row_targets.items) |*target| target.active = true;
         }
         for (draft.rows.items) |row| {
-            const child = dired.observedChild(self.directory, row) orelse continue;
+            const child = files.observedChild(self.directory, row) orelse continue;
             var retained = false;
             var target_index: usize = 0;
             while (target_index < self.row_targets.items.len) : (target_index += 1) {
@@ -865,7 +865,7 @@ pub const Session = struct {
         self.row_targets.deinit(self.plugin.gpa);
     }
 
-    fn rowTarget(self: *Session, row: dired.NodeId) ?semantic.scene.TargetLink {
+    fn rowTarget(self: *Session, row: files.NodeId) ?semantic.scene.TargetLink {
         for (self.row_targets.items) |target|
             if (target.active and target.row == row) return target.located;
         return null;
@@ -873,14 +873,14 @@ pub const Session = struct {
 
     /// The exact directory a row is listed in: the view's own target at the
     /// top level, and the folded-open row's target below it.
-    fn containingTarget(self: *Session, row: dired.Row) ?semantic.target.Located {
+    fn containingTarget(self: *Session, row: files.Row) ?semantic.target.Located {
         const parent = row.parent orelse
             return .{ .target = self.target, .revision = self.target_revision };
         return self.rowTarget(parent);
     }
 
-    fn project(self: *Session, draft: *const dired.Model) !dired.OwnedScene {
-        const bindings = try self.plugin.gpa.alloc(dired.FieldBinding, draft.rows.items.len);
+    fn project(self: *Session, draft: *const files.Model) !files.OwnedScene {
+        const bindings = try self.plugin.gpa.alloc(files.FieldBinding, draft.rows.items.len);
         defer self.plugin.gpa.free(bindings);
         for (draft.rows.items, bindings) |row, *binding| binding.* = .{
             .row = row.id,
@@ -890,12 +890,12 @@ pub const Session = struct {
         };
         // A relation request is harmless when no provider answers it. Keeping
         // the action available lets an independent local/remote/synthetic
-        // target provider contribute containment without a dired-specific
+        // target provider contribute containment without a files-specific
         // query or config branch.
-        return dired.projectWith(self.plugin.gpa, draft.rows.items, bindings, .{ .has_container = true });
+        return files.projectWith(self.plugin.gpa, draft.rows.items, bindings, .{ .has_container = true });
     }
 
-    fn modeEditable(self: *const Session, row: dired.Row) bool {
+    fn modeEditable(self: *const Session, row: files.Row) bool {
         if (!self.capabilities.posix_mode) return false;
         return switch (row.draft.kind) {
             .regular, .directory => true,
@@ -904,14 +904,14 @@ pub const Session = struct {
     }
 };
 
-fn fieldBytes(row: dired.Row, field: *const Field) []const u8 {
+fn fieldBytes(row: files.Row, field: *const Field) []const u8 {
     return switch (field.kind) {
         .name => row.draft.name,
         .mode => field.modeText(),
     };
 }
 
-fn fieldReadOnly(session: *const Session, row: dired.Row, kind: Field.Kind) bool {
+fn fieldReadOnly(session: *const Session, row: files.Row, kind: Field.Kind) bool {
     return row.conflict == .stale or
         (kind == .mode and (row.pending == .deleted or !session.modeEditable(row)));
 }

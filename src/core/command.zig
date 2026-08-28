@@ -310,7 +310,7 @@ pub const Context = struct {
     /// direct user/tool text mutation. This is the door for typing, vim
     /// operators, autopair, comment — anything that edits text AS text. It is
     /// refused on a read-only span/buffer (§`render` is the door for producing
-    /// derived content there), so a projection like magit/dired has NO
+    /// derived content there), so a projection like magit/files has NO
     /// interactive-edit path at all — no mode, split, or plugin can corrupt it
     /// as text. Refusal leaves the replica untouched (no ghost commit).
     ///
@@ -398,13 +398,13 @@ pub const Context = struct {
     }
 
     /// CONTENT PRODUCTION: draw a derived/streamed projection (magit's status
-    /// tree, dired's listing, an agent transcript) into a buffer. A DISTINCT
+    /// tree, files's listing, an agent transcript) into a buffer. A DISTINCT
     /// operation from `edit` — it BYPASSES read-only (that's the point: the text
     /// is output, regenerated from a model, not user-editable), and it authors
     /// as the plugin's OWN peer (never the user's undo — a re-render isn't a
     /// user edit). Any plugin may render (no single owner); still grade-gated.
     /// A read-only buffer's content is thus editable only by re-rendering, while
-    /// an EDITABLE projection (mini.files dired) simply isn't marked read-only
+    /// an EDITABLE projection (mini.files files) simply isn't marked read-only
     /// and takes `edit`.
     pub fn render(self: *Context, r: Document.Range, bytes: []const u8) EditError!void {
         return self.applyEdit(r, bytes, false); // never joins user undo
