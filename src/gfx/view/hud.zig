@@ -77,6 +77,12 @@ pub const Hud = struct {
     /// the document): files's metadata/arrow/mark, inlay hints, blame. Rendered
     /// as leading dimmed cells by the mono line layout.
     decorations_layer: ?*const core.layers.Layer = null,
+    /// Third-party annotation feeds over this entry
+    /// (doc/contextual-workspace-architecture.md §11.7), composited on top of
+    /// the entry's own paint: `range` spans tint their bytes by role, placed
+    /// spans draw beside the line. The presentation knows only the feed
+    /// shape — never which plugin published one, or what it means.
+    annotations: []const *const core.layers.Layer = &.{},
     /// Message of a diagnostic at the cursor, for the status line.
     cursor_diag: ?[]const u8 = null,
     /// Remote peers' cursors (replicated feed layer).

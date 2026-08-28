@@ -41,6 +41,16 @@ pub const StyleInputs = struct {
     /// the text, never in the document. files's metadata/arrow/mark ride this,
     /// so the buffer text is only the editable name (yy yanks the name alone).
     deco: ?*const core.layers.Layer = null,
+    /// Third-party annotation roles over the visible range: `anno[i]` is the
+    /// StyleClass painted at byte `anno_base + i`, plus one (0 = unpainted, so
+    /// an unannotated byte costs nothing to check). Composited from every
+    /// annotation feed the entry hosts; a feed whose spans no longer resolve
+    /// against the entry revision contributes none (§11.7).
+    anno: ?[]const u8 = null,
+    anno_base: usize = 0,
+    /// The annotation feeds' placed decorations, drawn beside the line by the
+    /// same prefix path the `decorations` layer uses.
+    anno_layers: []const *const core.layers.Layer = &.{},
     /// The `ui/gutter-segment` mesh's per-frame resolution
     /// (doc/contextual-workspace-architecture.md §11), passed through
     /// from `Hud.gutter` unchanged — null (today's default) means no
@@ -105,6 +115,34 @@ pub fn resolveStyleInputs(
         s.diag_base = vis_start;
     }
     s.deco = hud.decorations_layer;
+    s.anno_layers = hud.annotations;
+    if (hud.annotations.len > 0 and rows_visible > 0 and v.top_row < total_rows) {
+        const last = @min(total_rows, v.top_row + rows_visible);
+        const vis_start = rope.lineRange(v.top_row).start;
+        const vis_end = rope.lineRange(last - 1).end;
+        const roles = try scratch.alloc(u8, vis_end - vis_start);
+        @memset(roles, 0);
+        var painted = false;
+        for (hud.annotations) |al| {
+            // `spanCount` is 0 while a feed is stale, so a decorator that has
+            // not republished since the last edit simply contributes nothing.
+            for (0..al.spanCount()) |i| {
+                const a = al.resolvedSpan(i);
+                if (a.placement != .range) continue;
+                const from = @max(a.start, vis_start);
+                const to = @min(a.end, vis_end);
+                if (from >= to) continue;
+                const raw: u8 = @truncate(a.kind);
+                const cls: u8 = if (raw <= @intFromEnum(StyleClass.muted)) raw else @intFromEnum(StyleClass.muted);
+                @memset(roles[from - vis_start .. to - vis_start], cls + 1);
+                painted = true;
+            }
+        }
+        if (painted) {
+            s.anno = roles;
+            s.anno_base = vis_start;
+        }
+    }
     s.gutter = hud.gutter;
     return s;
 }
@@ -159,6 +197,9 @@ fn layoutMonoLine(
     var col: usize = 0;
     if (styles.gutter) |gf| col = try layoutGutterPrefix(v, scratch, gf, line, row, cols_visible, &pfx_bytes, &cells);
     if (styles.deco) |dl| col = try layoutRowPrefix(v, scratch, dl, line, cols_visible, &pfx_bytes, &cells, col);
+    // Third-party feeds compose onto the same prefix, after the entry's own
+    // decorations: one more producer of leading cells, not a new mechanism.
+    for (styles.anno_layers) |al| col = try layoutRowPrefix(v, scratch, al, line, cols_visible, &pfx_bytes, &cells, col);
     const pfx_len = pfx_bytes.items.len;
 
     var it = (std.unicode.Utf8View.init(text) catch return error.InvalidUtf8).iterator();
@@ -321,11 +362,19 @@ fn layoutGutterPrefix(
     return col;
 }
 
-/// Per-byte non-caret, non-diagnostic color. Precedence: syntax highlight
-/// wins for code; the plugin styles feed paints tool buffers where there is
-/// no highlight. Tool buffers never have a grammar, so the two never overlap
+/// Per-byte non-caret, non-diagnostic color. Precedence: a third-party
+/// annotation role wins (it was published ABOUT this entry, so hiding it under
+/// the grammar would make the feed pointless); then syntax highlight for code;
+/// then the plugin styles feed paints tool buffers where there is no
+/// highlight. Tool buffers never have a grammar, so the last two never overlap
 /// in practice — the order just fixes a defined winner if they ever did.
 pub fn hlColor(v: *const View, styles: StyleInputs, abs: usize) [4]f32 {
+    if (styles.anno) |a| {
+        if (abs >= styles.anno_base and abs - styles.anno_base < a.len) {
+            const role = a[abs - styles.anno_base];
+            if (role != 0) return v.theme.styleColor(@enumFromInt(role - 1));
+        }
+    }
     if (styles.hl) |h| {
         if (abs >= styles.hl_base and abs - styles.hl_base < h.len)
             return v.theme.classColor(h[abs - styles.hl_base]);
@@ -618,4 +667,53 @@ test "gutter: a bound line-numbers provider draws leading cells through the real
     const s = try doc.text().toOwnedSlice(gpa);
     defer gpa.free(s);
     try testing.expectEqualStrings("main.zig\n", s);
+}
+
+test "annotations: the presentation composites third-party feeds it was never told about" {
+    const gpa = testing.allocator;
+    var v = try View.init(gpa, font_provider.defaultMono(), 16);
+    defer v.deinit();
+
+    var doc = try core.Document.init(gpa, "user");
+    defer doc.deinit(gpa);
+    try doc.insert(gpa, 0, "// TODO: ship\n");
+    var store: core.layers.Layers = .empty;
+    defer store.deinit(gpa);
+
+    // Two decorators over one entry, neither of them named anywhere in this
+    // file or in the view: a keyword highlighter (a face over its range) and
+    // a lens (virtual text beside the line).
+    const marks = try store.claimAnnotation(gpa, &doc, "marks", "marks");
+    marks.begin(gpa);
+    try marks.appendSpan(gpa, .{ .start = 3, .end = 7, .kind = @intFromEnum(StyleClass.emphasis), .message = "" });
+    const lens = try store.claimAnnotation(gpa, &doc, "lens", "codelens");
+    lens.begin(gpa);
+    try lens.appendSpan(gpa, .{ .start = 0, .end = 0, .kind = @intFromEnum(StyleClass.muted), .message = "2 refs ", .placement = .virtual_before });
+
+    var arena = std.heap.ArenaAllocator.init(gpa);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const feeds = try store.annotations(a, &doc);
+    const hud: Hud = .{ .mode = "normal", .annotations = feeds };
+    const si = try resolveStyleInputs(&v, a, hud, doc.text(), 1, 1);
+
+    // The range feed colors its bytes by role; everything else is untouched.
+    try testing.expectEqual(v.theme.styleColor(.emphasis), hlColor(&v, si, 3));
+    try testing.expectEqual(v.theme.foreground, hlColor(&v, si, 2));
+
+    // The placed feed draws leading cells, exactly like a projection's own
+    // decorations, and displaces the caret without entering the document.
+    var runs: std.ArrayList(Run) = .empty;
+    const vl = try layoutLine(&v, a, a, &runs, doc.text(), 0, 0, 40, null, si, null);
+    try testing.expectEqual(@as(usize, 0), vl.stops[0].off);
+    try testing.expectApproxEqAbs(v.origin_x + 7 * v.cell_w, vl.stops[0].x, 0.01);
+
+    // An edit moves the entry past both stamps: the paint drops until the
+    // decorators republish — a stale span is never guessed onto new text.
+    try doc.insert(gpa, 0, "\n");
+    const stale = try resolveStyleInputs(&v, a, hud, doc.text(), 2, 2);
+    try testing.expect(stale.anno == null);
+    var stale_runs: std.ArrayList(Run) = .empty;
+    const stale_line = try layoutLine(&v, a, a, &stale_runs, doc.text(), 1, 0, 40, null, stale, null);
+    try testing.expectApproxEqAbs(v.origin_x, stale_line.stops[0].x, 0.01);
 }

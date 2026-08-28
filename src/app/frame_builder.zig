@@ -120,8 +120,12 @@ const DocLayers = struct {
     diagnostics: ?*const core.layers.Layer = null,
     decorations: ?*const core.layers.Layer = null,
     presence: ?*const core.layers.Layer = null,
+    /// Whatever third parties published about this entry (§11.7) — found by
+    /// FEED CLASS, not by name, so a decorator the presentation has never
+    /// heard of paints without anything here learning about it. Frame-lived.
+    annotations: []const *const core.layers.Layer = &.{},
 
-    fn of(caps: *core.Caps, editor: ?*core.Editor) DocLayers {
+    fn of(arena: std.mem.Allocator, caps: *core.Caps, editor: ?*core.Editor) DocLayers {
         const ed = editor orelse return .{};
         return .{
             .highlight = caps.layers.find(&ed.doc, "highlight"),
@@ -129,6 +133,9 @@ const DocLayers = struct {
             .diagnostics = caps.layers.find(&ed.doc, "diagnostics"),
             .decorations = caps.layers.find(&ed.doc, "decorations"),
             .presence = caps.layers.find(&ed.doc, "presence"),
+            // Droppable by definition: a feed nobody could allocate a slot for
+            // this frame simply doesn't paint this frame.
+            .annotations = caps.layers.annotations(arena, &ed.doc) catch &.{},
         };
     }
 };
@@ -354,7 +361,7 @@ pub const FrameBuilder = struct {
         const mesh_gpa = md_arena.allocator();
         const file_name = if (editor) |ed| ed.backingPath() orelse abuf.name else abuf.name;
         const md_inline = if (editor) |ed| mdInlineFor(mesh_gpa, ed, file_name, self.view.top_row) else null;
-        const doc_layers = DocLayers.of(fx.caps, editor);
+        const doc_layers = DocLayers.of(mesh_gpa, fx.caps, editor);
         const doc_status = DocStatus.of(gpa, editor, doc_layers);
         const diag_layer = doc_layers.diagnostics;
 
@@ -527,6 +534,7 @@ pub const FrameBuilder = struct {
             .diag_layer = diag_layer,
             .decorations_layer = doc_layers.decorations,
             .presence_layer = doc_layers.presence,
+            .annotations = doc_layers.annotations,
             .trust = if (fx.collab_session.* != null) blk: {
                 const fp = fx.noted_host_fp.* orelse break :blk null;
                 break :blk collab.hostTrustChip(fx.known_peers.trust(fp));
@@ -588,7 +596,7 @@ pub const FrameBuilder = struct {
                     self.publishHighlight(gpa, e, syn, fx.caps, slot.pane.top_row) catch {};
             }
             const other_name = if (oed) |e| e.backingPath() orelse ob.name else ob.name;
-            const other_layers = DocLayers.of(fx.caps, oed);
+            const other_layers = DocLayers.of(arena_state.allocator(), fx.caps, oed);
             const other_diag = other_layers.diagnostics;
             // A peeked pane's own `ui/statusline-seg` fire: mode + file only
             // (no buffer position/link — matches today's peeked-pane
@@ -618,6 +626,7 @@ pub const FrameBuilder = struct {
                 .styles_layer = other_layers.styles,
                 .diag_layer = other_diag,
                 .decorations_layer = other_layers.decorations,
+                .annotations = other_layers.annotations,
             };
             const bo = try self.view.build(arena_state.allocator(), oed, other_hud, &slot.pane.top_row, slot.rect, .{}, world_to_pixel);
             try self.built_panes.append(gpa, bo);
