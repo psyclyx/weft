@@ -31,12 +31,21 @@ const bindings = [_]Binding{
     .{ .key = "y", .intentions = &.{"std.transfer.yank"} },
     .{ .key = "d", .intentions = &.{"std.transfer.delete-to-register"} },
     .{ .key = "p", .intentions = &.{"std.transfer.paste"} },
+    // The break-out a `capture` presentation can never take away (§10.4) —
+    // bound in this grammar's one mode, so it is retained everywhere.
+    .{ .key = "C-backslash", .intentions = &.{"std.input.break-out"} },
 };
 
 export fn describe() void {}
 
 export fn init() void {
-    weft.restingMode(mode);
+    // §10.4: this grammar has ONE state, and it commits nothing — so it is
+    // the honest answer for every posture (and a mode a buffer rests in).
+    // Declared rather than defaulted: core stamps the pairing on entry
+    // switch, and a grammar that never declared would silently inherit
+    // whatever the base editing mode was.
+    weft.restingPosture(.text, mode);
+    weft.restingPosture(.structural, mode);
     for (bindings) |b| weft.bindKeys(mode, b.key, b.intentions);
     weft.setMode(mode);
 }

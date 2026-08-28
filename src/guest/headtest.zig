@@ -49,6 +49,7 @@ const cmds = [_]Cmd{
     .{ .name = "head-poll-count", .handler = pollCount },
     .{ .name = "head-range-source", .handler = rangeSource },
     .{ .name = "head-range-relay", .handler = rangeRelay },
+    .{ .name = "head-capture", .handler = capture },
 };
 
 export fn describe() void {
@@ -84,6 +85,15 @@ fn poke() void {
 fn relay() void {
     weft.run("head-poke");
     weft.echo("after-relay");
+}
+
+/// A presentation owner declaring `capture` (§10.4) across the real
+/// membrane — head-gated like `weft.setMode`, so it lands on the entry the
+/// DISPATCHING head addresses. Nothing consumes capture in-tree yet; what
+/// this fixture supplies is the declaration half, so the grammar's
+/// always-retained break-out has something real to break out of.
+fn capture() void {
+    weft.declarePosture(.capture);
 }
 
 fn rangeSource() void {

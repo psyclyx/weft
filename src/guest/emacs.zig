@@ -136,7 +136,21 @@ export fn init() void {
     // declares that it commits typed text — a declaration, never inherited.
     weft.setFallback("emacs", "default");
     weft.textInput("emacs", "insert-text");
-    weft.restingMode("emacs"); // the base a file buffer rests in
+
+    // §10.4: a MODELESS grammar's resting mode commits text, so "the entry
+    // takes no text" cannot be a state emacs is already in — it needs a
+    // second one. `emacs-structural` inherits every emacs chord by fallback
+    // and declares NO commit command, so in a structural entry the letters
+    // are free for what holds the focus and can never leak into a projection.
+    // Nothing is inherited about committing (see `weft.textInput`), which is
+    // why this needs no opt-out.
+    weft.setFallback("emacs-structural", "emacs");
+    weft.restingPosture(.text, "emacs");
+    weft.restingPosture(.structural, "emacs-structural");
+    // The break-out capture can never take away — retained in both resting
+    // states (§10.4).
+    for ([_][]const u8{ "emacs", "emacs-structural" }) |m|
+        weft.bindKeys(m, "C-c C-backslash", &.{"std.input.break-out"});
 
     for (cmds) |c| _ = weft.register(c.name);
 

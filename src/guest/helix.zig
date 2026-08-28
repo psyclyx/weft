@@ -179,7 +179,15 @@ export fn init() void {
     weft.runStr2("set-cursor", "helix-op", "underline");
     weft.runStr2("cursor-blink", "helix-insert", "on");
 
-    weft.restingMode("helix-normal"); // the base a file buffer rests in
+    // §10.4: helix's answer for each posture (and, implicitly, that
+    // `helix-normal` is a mode a buffer rests in). Like vim's `normal`,
+    // `helix-normal` commits nothing, so it serves both; what a structural
+    // entry changes is that helix declines to ENTER `helix-insert` there
+    // (`enterInsert`), rather than resting somewhere its keys are dead.
+    weft.restingPosture(.text, "helix-normal");
+    weft.restingPosture(.structural, "helix-normal");
+    for ([_][]const u8{ "helix-normal", "helix-insert" }) |m|
+        weft.bindKeys(m, "C-backslash", &.{"std.input.break-out"});
     weft.setMode("helix-normal");
 }
 
@@ -190,15 +198,27 @@ export fn on_command(id: u32) void {
 fn enterHelix() void {
     weft.setMode("helix-normal");
 }
+/// Escape RETURNS to the entry's declared resting state (§10.4) — it never
+/// picks one, so a projection's own resting mode survives an edit + Escape.
 fn hxNormal() void {
-    weft.setMode("helix-normal");
+    weft.exitToResting();
+}
+
+/// The ONE door into helix's insert-like state. An entry that declared a
+/// non-`text` posture does not take it: the grammar declines instead of
+/// parking the user where every key would be refused (§10.4).
+fn enterInsert() void {
+    switch (weft.posture()) {
+        .text, .field => weft.setMode("helix-insert"),
+        .structural, .capture => weft.echo("this entry takes no text"),
+    }
 }
 fn hxInsert() void {
-    weft.setMode("helix-insert");
+    enterInsert();
 }
 fn hxAppend() void {
     weft.run("cursor-right");
-    weft.setMode("helix-insert");
+    enterInsert();
 }
 fn hxOpenBelow() void {
     // Jump to the end of the line (motion returns a range), then open a newline.
@@ -207,7 +227,7 @@ fn hxOpenBelow() void {
         if (weft.rangeEnds(hnd)) |r| weft.jump(if (r.end == cur) r.start else r.end);
     }
     weft.run("insert-newline");
-    weft.setMode("helix-insert");
+    enterInsert();
 }
 fn enterDeleteOp() void {
     weft.setMode("helix-op");

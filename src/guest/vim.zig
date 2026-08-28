@@ -222,7 +222,7 @@ fn applyOpRange(hnd: u32) void {
     if (op_edit_cmd) |cmd| {
         weft.runRangeArg(cmd, hnd);
         weft.jump(r.start);
-        weft.setMode(op_after);
+        enterAfterOp();
     } else {
         weft.flash(r.start, r.end); // vim-goggles: flash the yanked region
         weft.jump(r.start);
@@ -467,12 +467,25 @@ export fn on_pick_accept(pick_id: u32) void {
 
 export fn init() void {
     weft.setFallback("normal", "default");
-    weft.restingMode("normal"); // the base a file buffer rests in (not visual/insert)
     weft.setFallback("visual", "normal");
     weft.setFallback("insert", "default");
     // Only insert commits typed text. `normal`/`visual` need no opt-out:
     // a mode commits text ONLY where it says so (architecture §10.1).
     weft.textInput("insert", "insert-text");
+
+    // §10.4: what each POSTURE means in vim's own vocabulary (and, implicitly,
+    // that `normal` is a mode a buffer rests in — not visual/insert). Vim's
+    // answer to both is `normal`: it already commits nothing, so vim needs no
+    // second mode; what a structural entry changes is that vim declines to
+    // ENTER an insert-like state at all (`enterInsert`). Declared explicitly
+    // all the same — core reads the answer on entry switch, and a default
+    // nobody wrote down is one nobody can change.
+    weft.restingPosture(.text, "normal");
+    weft.restingPosture(.structural, "normal");
+    // The break-out chord capture can never take away (§10.4), retained in
+    // both the state vim rests in and the one it types in.
+    for ([_][]const u8{ "normal", "insert" }) |m|
+        weft.bindKeys(m, "C-backslash", &.{"std.input.break-out"});
 
     for (cmds) |c| _ = weft.register(c.name);
 
@@ -703,31 +716,50 @@ export fn init() void {
 }
 
 // ── Mode-entry compounds ─────────────────────────────────────────────
+/// Enter vim's insert-like state — the ONE door every `i`/`a`/`o`/`c`/`R`
+/// path takes. §10.4: the entry DECLARES how it rests, and an entry that is
+/// not `text` (or a `field`, which scopes commits to the field) does not take
+/// insert-like states at all. Vim declines here rather than parking the user
+/// in a mode whose every keystroke the edit door would refuse — the mode-leak
+/// class, read off the declaration instead of asked of a tool.
+fn enterInsert() void {
+    switch (weft.posture()) {
+        .text, .field => weft.setMode("insert"),
+        .structural, .capture => weft.echo("this entry takes no text"),
+    }
+}
+
+/// The after-mode a finished operator lands in (`c` → insert, everything else
+/// → normal), through the same posture door.
+fn enterAfterOp() void {
+    if (std.mem.eql(u8, op_after, "insert")) enterInsert() else weft.setMode(op_after);
+}
+
 fn insert() void {
-    weft.setMode("insert");
+    enterInsert();
 }
 fn append() void {
     weft.run("cursor-right");
-    weft.setMode("insert");
+    enterInsert();
 }
 fn openBelow() void {
     weft.jump(lineEndOff());
     weft.run("insert-newline");
-    weft.setMode("insert");
+    enterInsert();
 }
 fn openAbove() void {
     weft.jump(lineStartOff());
     weft.run("insert-newline");
     weft.run("cursor-up");
-    weft.setMode("insert");
+    enterInsert();
 }
 fn appendLine() void {
     weft.jump(lineEndOff());
-    weft.setMode("insert");
+    enterInsert();
 }
 fn insertLine() void {
     weft.jump(lineStartOff());
-    weft.setMode("insert");
+    enterInsert();
 }
 /// LINEWISE visual (`V`): the operators snap the selection to whole lines.
 var visual_linewise: bool = false;
@@ -785,7 +817,7 @@ fn visualChange() void {
     }
     weft.run("clear-selection");
     visual_linewise = false;
-    weft.setMode("insert");
+    enterInsert();
 }
 /// A visual-mode operator: run a range-arg `cmd` (op.comment, op.upcase, …) over
 /// the selection, then clear it and return to normal. `gc`/`U`/`u` in visual all
@@ -811,11 +843,11 @@ fn normal() void {
     // barrier; this covers the mode-change boundary a motion doesn't.)
     weft.run("undo-barrier");
     weft.run("clear-selection");
-    // A structured buffer has no provider-owned editor posture: Vim returns
-    // to its own normal mode. Text projections may still declare a specialized
-    // resting mode (git, comint, etc.), so retain the generic restoration path
-    // outside semantic views.
-    if (weft.semanticActive()) weft.setMode("normal") else weft.exitToResting();
+    // §10.4: Escape RETURNS to the entry's declared resting state — it never
+    // picks one. Where that is comes from the posture pairing (vim declared
+    // its answer for each posture in `init`), so this asks nothing about
+    // views, tools, or modes: one door, every entry.
+    weft.exitToResting();
 }
 fn deleteEol() void {
     const cur = weft.cursor();
@@ -825,14 +857,14 @@ fn deleteEol() void {
 }
 fn changeEol() void {
     deleteEol();
-    weft.setMode("insert");
+    enterInsert();
 }
 fn changeLine() void {
     const l = weft.lineAt(weft.cursor());
     yankCurrent(l.start, l.end, false);
     weft.edit(.{ .start = l.start, .end = l.end }, "");
     weft.jump(l.start);
-    weft.setMode("insert");
+    enterInsert();
 }
 
 // ── Register + paste ─────────────────────────────────────────────────
@@ -1022,7 +1054,7 @@ fn opLine() void {
             return;
         };
         if (std.mem.eql(u8, semantic_edit, "op.delete")) weft.run("selection-delete");
-        weft.setMode(op_after);
+        enterAfterOp();
         return;
     }
     const l = weft.lineAt(weft.cursor());
@@ -1035,14 +1067,14 @@ fn opLine() void {
     if (!std.mem.eql(u8, edit, "op.delete")) {
         if (weft.anchorRange(.{ .start = l.start, .end = l.end })) |h| weft.runRangeArg(edit, h);
         weft.jump(l.start);
-        weft.setMode(op_after);
+        enterAfterOp();
         return;
     }
     if (std.mem.eql(u8, op_after, "insert")) {
         // cc: clear the line's text, keep the line, enter insert at its start.
         if (weft.anchorRange(.{ .start = l.start, .end = l.end })) |h| weft.runRangeArg("op.delete", h);
         weft.jump(l.start);
-        weft.setMode("insert");
+        enterInsert();
     } else {
         // dd: delete the line and its trailing newline.
         const end = @min(l.end + 1, weft.byteLen());
