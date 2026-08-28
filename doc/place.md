@@ -362,6 +362,16 @@ repl, ACP and dap converge on it. LSP gains a real `rootUri` per place; ACP's
 `session/new { cwd }` stops being `"."`. Gates: two projects, two servers; two
 REPLs, one project; a session survives a descriptor revision bump.
 
+*Landed early, ahead of the sesman rework:* LSP's per-place half. Its session
+`Key` already carried a `root`; it was inert only because it was filled from
+the process directory, so filling it from the place made two projects two
+servers, and `initialize` now sends a real `rootUri` built from that root.
+Gated by `e2e/language_test.zig`'s two-PROJECT/one-LANGUAGE test, which reads
+the `rootUri` off the wire and tells the two servers apart by which project
+each is running in. Still outstanding here: `workspaceFolders` (§9, deliberate),
+the link model itself, and `MAX_SESSIONS` — a cap of 8 meant "8 languages"
+before and means "8 (language, project) pairs" now, at ~18 KB per session.
+
 **Wave 5 — Better primitives, fewer grants.** The place-scoped spool
 (**landed**, §4.2); the marker/ancestor query; kv persistence (P12). git drops
 to `{proc, timer}`; the five root detectors collapse to one provider. Gates:
@@ -397,9 +407,23 @@ the `grammar-add` gate, now a pinned property rather than an ABI accident (§8).
   and by a `FailingAllocator` test. A VCS marker walk there is not slow, it is
   inexpressible. The place must be pushed by a provider, never computed at
   capture.
-- **`wl_cwd` gets a sibling, not a redefinition.** Its three consumers have
-  genuinely different intents: LSP's session key, LSP's URI construction, and
-  git's climb floor. Moving them together is a silent-breakage risk.
+- **`wl_cwd` was REPLACED, not given a sibling** (landed). The plan called for
+  a sibling because its consumers have different intents — LSP's session key,
+  LSP's URI construction, git's climb floor, and (a fourth, missed here) the
+  file browser's root. Keeping both turned out to be the risk rather than the
+  hedge: a door that answers the launch directory unconditionally is wrong for
+  all four the moment two projects are open, so `wl_place_root` took its place
+  and the old one is gone, gated by an absence assertion in
+  `e2e/demolition_test.zig`.
+
+  What the four consumers really shared was not "the process directory" but
+  "somewhere to resolve a relative path against" — `wl_path` answers a path AS
+  SPELLED, which for a file opened as `proj/x.zig` is relative to the launch
+  directory. That join now lives once, in the guest shim (`weft.placePath`),
+  which drops the components the two spellings share. A buffer path is
+  deliberately NOT made absolute at `wl_path`: `notes` stores it as a durable
+  `weft://` designation, and a portable note must not carry one machine's
+  absolute path.
 - **kv persistence is a prerequisite** for the "plugins use kv, not files"
   argument, which is why P12 sits in Wave 5 rather than being assumed.
 - **`grammar-add` is not currently a guest escape.** It is ungated and does

@@ -42,6 +42,22 @@ const Buffers = h.core.Buffers;
 /// gate, not a one-time sweep).
 const banned_terms = [_][]const u8{ "dired", "magit" };
 
+/// Spellings of the retired process-directory door, with the reason each is
+/// gone (`doc/place.md`). `wl_cwd` answered `getcwd()` — one value fixed at
+/// launch, revealed unconditionally to every guest — so a plugin's effects
+/// landed where the EDITOR was started rather than where the interaction was.
+/// `wl_place_root` replaced it: the dispatching place's directory, and zero
+/// bytes when that place has none locally, so a guest declines instead of
+/// silently acting in the launch directory.
+///
+/// Both the door and its shim wrapper are named, because either one growing
+/// back would restore the whole class. `std.Io.Dir.cwd()` — a directory
+/// HANDLE, host-side — is untouched and deliberately not matched here.
+const retired_process_cwd = [_]struct { spelling: []const u8, reason: []const u8 }{
+    .{ .spelling = "wl_cwd", .reason = "the process-directory membrane door is retired — use wl_place_root (doc/place.md)" },
+    .{ .spelling = "weft.cwd(", .reason = "the process-directory guest shim is retired — use weft.placeRoot() (doc/place.md)" },
+};
+
 const Violation = struct {
     path: []const u8,
     line: usize,
@@ -131,6 +147,11 @@ fn scanFile(scan: *Scan, rel_path: []const u8, contents: []const u8) !void {
         for (banned_terms) |term| {
             if (containsIgnoreCase(line, term))
                 try scan.record(rel_path, line_no, "persisted dired/magit terminology (doc §19)");
+        }
+
+        for (retired_process_cwd) |gone| {
+            if (std.mem.indexOf(u8, line, gone.spelling) != null)
+                try scan.record(rel_path, line_no, gone.reason);
         }
 
         if (std.mem.indexOf(u8, line, "fn semanticActive") != null) {
