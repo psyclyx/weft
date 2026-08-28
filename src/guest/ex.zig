@@ -167,19 +167,18 @@ fn builtin(kw: []const u8, bang: bool, args: []const u8) bool {
         return true;
     }
     if (eqAny(kw, &.{ "e", "ed", "edit", "o", "op", "open" })) {
+        _ = bang;
         if (args.len > 0) {
             weft.runStr("open", args);
-        } else if (weft.semanticActive()) {
-            // Structured views own their revert semantics. This is the same
-            // open action protocol config binds; ex knows neither files nor
-            // how a provider reconstructs its draft.
-            switch (weft.semanticAction(weft.semantic.action.standard.revert)) {
-                .handled, .transfer_stored, .interaction_opened, .target_opened, .focus_changed, .relation_opened, .working_target_changed => {},
-                .unavailable, .failed, _ => weft.echo("e: structured view refused revert"),
-            }
-        } else {
-            _ = bang;
-            weft.echo("e: reload unsupported (no buffer revert command)");
+            return true;
+        }
+        // Revert is ASKED FOR, never tested for: whatever holds the focus
+        // owns its own revert semantics and answers `unavailable` when it
+        // has none, so ex needs no notion of entry kinds at all.
+        switch (weft.semanticAction(weft.semantic.action.standard.revert)) {
+            .handled, .transfer_stored, .interaction_opened, .target_opened, .focus_changed, .relation_opened, .working_target_changed => {},
+            .unavailable => weft.echo("e: nothing here reverts"),
+            .failed, _ => weft.echo("e: revert refused"),
         }
         return true;
     }
