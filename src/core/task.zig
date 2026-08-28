@@ -103,6 +103,11 @@ const Resident = struct {
     name: []const u8,
     stop: ?Stop,
     exited: std.atomic.Value(bool) = .init(false),
+    /// The handle is gone (polled to completion or detached), so no one will
+    /// ask this record anything again. Guarded by `residents_mutex`; a record
+    /// is reapable only once it is BOTH released and exited, so a spawn can
+    /// never free a record a live handle still reads.
+    released: bool = false,
 };
 
 /// How `Pool.deinit` asks a resident to leave: close its socket, kill its
@@ -314,9 +319,10 @@ pub const Pool = struct {
         return .{ .pool = self, .node = &c.node, .result = &c.result };
     }
 
-    /// Records live until shutdown or the next spawn: exited ones are reaped
-    /// here, so a session churn (open/close a hundred files) cannot grow the
-    /// registry without bound, and only this thread ever walks the list.
+    /// Records live until shutdown or the next spawn: released-and-exited
+    /// ones are reaped here, so a session churn (open/close a hundred files)
+    /// cannot grow the registry without bound, and only this thread ever
+    /// walks the list.
     fn registerResident(self: *Pool, opts: ResidentOptions) Allocator.Error!*Resident {
         const record = try self.gpa.create(Resident);
         errdefer self.gpa.destroy(record);
@@ -326,13 +332,21 @@ pub const Pool = struct {
         var i: usize = 0;
         while (i < self.residents.items.len) {
             const r = self.residents.items[i];
-            if (r.exited.load(.acquire)) {
+            if (r.released and r.exited.load(.acquire)) {
                 _ = self.residents.swapRemove(i);
                 self.gpa.destroy(r);
             } else i += 1;
         }
         try self.residents.append(self.gpa, record);
         return record;
+    }
+
+    /// The handle holder is done with this record: from here the next spawn
+    /// may reap it, once its thread has also left.
+    fn releaseResident(self: *Pool, record: *Resident) void {
+        self.residents_mutex.lock();
+        defer self.residents_mutex.unlock();
+        record.released = true;
     }
 
     fn forgetResident(self: *Pool, record: *Resident) void {
@@ -447,6 +461,7 @@ pub fn Handle(comptime T: type) type {
         pub fn poll(self: *Self) ?T {
             if (self.node.state.load(.acquire) != Node.done) return null;
             const value = self.result.*;
+            if (self.node.resident) |r| self.pool.releaseResident(r);
             self.node.destroyFn(self.node, self.pool.gpa);
             self.* = undefined;
             return value;
@@ -466,6 +481,7 @@ pub fn Handle(comptime T: type) type {
 
         /// Abandon the result; whoever finishes second frees the node.
         pub fn detach(self: *Self) void {
+            if (self.node.resident) |r| self.pool.releaseResident(r);
             if (self.node.state.cmpxchgStrong(Node.pending, Node.detached, .acq_rel, .acquire)) |actual| {
                 assert(actual == Node.done);
                 self.node.destroyFn(self.node, self.pool.gpa);
@@ -576,6 +592,38 @@ test "pool: deinit signals residents, joins them, and reaps their records" {
     h.detach();
     // No release here: only `deinit`'s signal can end this resident. Leak
     // checking is the assertion — the registry record must be gone too.
+    pool.deinit();
+}
+
+test "pool: a spawn reaps a record only once no handle can still read it" {
+    var pool = try Pool.init(t.allocator, .{ .threads = 1 });
+    var parked: Parked = .{};
+    var h = try pool.spawnResident(.{ .name = "test exited" }, Parked.park, .{&parked});
+    parked.release();
+    while (!h.residentExited()) std.atomic.spinLoopHint();
+
+    // Exited, but `h` still answers FROM the record, so a later spawn may not
+    // free it — the join a session runs at its own teardown reads it.
+    var live: Parked = .{};
+    var live_h = try pool.spawnResident(
+        .{ .name = "test live", .stop = .of(&live, Parked.release) },
+        Parked.park,
+        .{&live},
+    );
+    try t.expectEqual(@as(usize, 2), pool.residents.items.len);
+    try t.expect(h.residentExited());
+
+    _ = h.poll(); // the handle is gone; now it is reapable
+    var third: Parked = .{};
+    var third_h = try pool.spawnResident(
+        .{ .name = "test third", .stop = .of(&third, Parked.release) },
+        Parked.park,
+        .{&third},
+    );
+    try t.expectEqual(@as(usize, 2), pool.residents.items.len);
+
+    live_h.detach();
+    third_h.detach();
     pool.deinit();
 }
 
