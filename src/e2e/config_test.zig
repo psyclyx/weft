@@ -1175,6 +1175,16 @@ fn bootShowcase(gpa: std.mem.Allocator, proj: *Project, ed: *Editor, loader: *Co
     try t.expect(loader.failed.items.len == 0);
 }
 
+/// Commands only a WINDOWED embedder registers: `grants-show` wants the live
+/// System, and the scroll family wants the view that owns the focused pane's
+/// viewport (`app/scroll.zig`). A headless editor has neither, so a keymap
+/// sweep asserts their BINDING and leaves the command to main().
+fn embedderOwned(command: []const u8) bool {
+    return std.mem.eql(u8, command, "grants-show") or
+        std.mem.eql(u8, command, "center-line") or
+        std.mem.startsWith(u8, command, "scroll-");
+}
+
 /// The resident JS plugin under `name` (its config namespace), or null.
 fn jsPluginNamed(ed: *Editor, name: []const u8) ?*core.quickjs.JsPlugin {
     for (ed.js_plugins.items) |p| {
@@ -1338,6 +1348,26 @@ test "e2e/config: every showcased binding names a command that exists" {
     // the live System (an embedder choice, not a builtin), so assert the
     // BINDING here and leave the command to `core/System.zig`'s own gate.
     try t.expectEqualStrings("grants-show", ed.keymap.resolveExact("normal", "space h g").?);
+
+    // The rest of the file, swept — the header's promise holds for EVERY
+    // section, not just the ones named above, and for the grammars the config
+    // brings up alongside it. An arm is answerable exactly as `intent.zig`
+    // decides: an intention name (the focused view's offers answer it), a menu
+    // mode to enter, or a registered command. Anything else is a dead key.
+    var modes = ed.keymap.modes.iterator();
+    while (modes.next()) |mode| {
+        var keys = mode.value_ptr.iterator();
+        while (keys.next()) |key| {
+            for (key.value_ptr.commands) |arm| {
+                if (core.catalog.isIntentionName(arm) or ed.keymap.isMenuMode(arm)) continue;
+                if (embedderOwned(arm)) continue;
+                if (ed.commands.resolve(arm) == null) {
+                    std.debug.print("[e2e/config] bound but unanswerable: {s} {s} -> {s}\n", .{ mode.key_ptr.*, key.key_ptr.*, arm });
+                    return error.BoundCommandMissing;
+                }
+            }
+        }
+    }
 }
 
 // The intention tier at the config level. Input grammars own most of it (vim
