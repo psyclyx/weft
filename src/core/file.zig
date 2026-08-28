@@ -19,6 +19,20 @@ pub const WriteError = std.Io.Dir.WriteFileError || std.Io.Dir.RenameError || Al
 /// `<dir>/.git` exist, and is it a file or a dir — worktrees make it either).
 pub const Kind = enum(i32) { none = 0, file = 1, dir = 2, other = 3 };
 
+/// The editor process's own working directory, into `buf`. Null when the OS
+/// refuses to name it (a deleted cwd).
+///
+/// ONE implementation, because there are exactly two honest callers and they
+/// must agree: `place.Realized.process` — the degenerate place — is defined as
+/// this directory, and a relative path is only meaningful when joined onto it.
+/// Anything else asking "where am I" is the ambient-cwd bug `doc/place.md`
+/// exists to remove; ask for a place instead.
+pub fn processDirectory(buf: []u8) ?[]const u8 {
+    const rc = std.os.linux.getcwd(buf.ptr, buf.len);
+    if (@as(isize, @bitCast(rc)) < 0) return null;
+    return std.mem.sliceTo(buf[0..rc], 0);
+}
+
 pub fn statKind(gpa: Allocator, path: []const u8) Kind {
     var threaded: std.Io.Threaded = .init(gpa, .{});
     defer threaded.deinit();

@@ -309,28 +309,58 @@ pub const Session = struct {
     /// Blocking filesystem work, and deliberately so: this runs when a file is
     /// OPENED, never on the dispatch path. `Ctx.capture` is provably
     /// non-allocating and could not host this walk even if it wanted to.
-    fn projectRootOf(gpa: std.mem.Allocator, path: []const u8) ?[]const u8 {
+    ///
+    /// The climb STOPS at `floor` when `floor` contains `path` — the same rule
+    /// `guest/git.zig`'s own root climb states, for the same reason it states
+    /// it: "a repository above it — a version-controlled home directory, a
+    /// `/tmp` someone made a repo — never captures a session that belongs to
+    /// the project". Without the floor, one stray marker anywhere up to `/`
+    /// silently reassigns EVERY file below it to a project nobody named. A path
+    /// OUTSIDE the floor climbs freely: it belongs to its own project, wherever
+    /// that is.
+    fn projectRootOf(gpa: std.mem.Allocator, path: []const u8, floor: []const u8) ?[]const u8 {
         var probe: [std.fs.max_path_bytes]u8 = undefined;
         var end = std.mem.lastIndexOfScalar(u8, path, '/') orelse return null;
-        while (true) {
+        const stop = if (floorContains(floor, path)) floor.len else 0;
+        while (end >= stop) {
             const dir = if (end == 0) "/" else path[0..end];
             for (project_markers) |marker| {
                 const base = if (std.mem.eql(u8, dir, "/")) "" else dir;
                 const joined = std.fmt.bufPrint(&probe, "{s}/{s}", .{ base, marker }) catch continue;
                 if (core.file.statKind(gpa, joined) != .none) return dir;
             }
-            if (end == 0) return null;
+            if (end == 0 or end == stop) return null;
             end = std.mem.lastIndexOfScalar(u8, path[0..end], '/') orelse 0;
         }
+        return null;
+    }
+
+    /// Whether `dir` is `path` or one of its ancestors.
+    fn floorContains(dir: []const u8, path: []const u8) bool {
+        if (dir.len == 0 or !std.mem.startsWith(u8, path, dir)) return false;
+        return path.len == dir.len or path[dir.len] == '/';
     }
 
     /// The place a local file at `path` belongs to: its project root published
     /// as a directory container. Null when the file has no project, leaving the
     /// entry on the degenerate `.process` place.
     pub fn placeForFile(self: *Session, ctx: *core.command.Context, path: []const u8) ?core.Place {
-        const resolved = std.fs.path.resolve(ctx.gpa, &.{path}) catch return null;
+        // ABSOLUTE first. `std.fs.path.resolve` normalises `.`/`..` but is
+        // explicitly documented not to make a relative path absolute, and a
+        // buffer opened as `proj/x.zig` is relative — so the process directory
+        // is joined on here, at the one moment it is still the right base.
+        // `place.Realized.path` promises an absolute directory to everything
+        // downstream (a child's cwd, a language server's rootUri); a relative
+        // one only ever worked while every consumer happened to already be
+        // standing in the launch directory.
+        var cwd_buf: [std.fs.max_path_bytes]u8 = undefined;
+        const here = core.file.processDirectory(&cwd_buf) orelse return null;
+        const resolved = (if (std.fs.path.isAbsolute(path))
+            std.fs.path.resolve(ctx.gpa, &.{path})
+        else
+            std.fs.path.resolve(ctx.gpa, &.{ here, path })) catch return null;
         defer ctx.gpa.free(resolved);
-        const root = projectRootOf(ctx.gpa, resolved) orelse return null;
+        const root = projectRootOf(ctx.gpa, resolved, here) orelse return null;
         // Publish WITHOUT focus: resolving where a file lives must not move the
         // user's view to the directory it lives in.
         const located = (self.ensureLocalDirectory(ctx, root, false) catch return null) orelse return null;
