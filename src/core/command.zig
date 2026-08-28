@@ -170,6 +170,22 @@ pub const Context = struct {
         return self.entry() orelse self.buffers.active();
     }
 
+    /// WHERE this dispatch's effects run (`doc/place.md`).
+    ///
+    /// Read through `entry()`, which is the whole point: a background fill
+    /// delivered into an entry captured at spawn is about THAT entry's place,
+    /// not wherever focus has wandered since. The ambient-read-at-the-door
+    /// shape means no guest passes a place and no guest can pass the wrong
+    /// one.
+    ///
+    /// A closed bound entry yields the degenerate `.process` place rather than
+    /// borrowing whoever is active now — an effect whose subject is gone must
+    /// not silently retarget at someone else's project.
+    pub fn place(self: *Context) Buffers.Place {
+        const e = self.entry() orelse return .process;
+        return e.place;
+    }
+
     /// How the entry this dispatch addresses RESTS under input (§10.4) — the
     /// entry's declaration plus this head's field focus. The ONE place the
     /// pair is read, so a grammar (`weft.posture()`), a builtin, and the
